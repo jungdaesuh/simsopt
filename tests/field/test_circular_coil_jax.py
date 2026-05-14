@@ -3,7 +3,8 @@
 This module is the closeout test for Wave R1 item ``12-circularcoil``. It
 covers both the pure JAX kernels in
 :mod:`simsopt.jax_core.circular_coil` (``circular_coil_B`` /
-``circular_coil_dB`` with the ``CircularCoilSpec`` payload) and the
+``circular_coil_A`` / ``circular_coil_dB`` with the ``CircularCoilSpec``
+payload) and the
 ``MagneticField``-boundary wrapper
 :class:`simsopt.field.magneticfieldclasses_jax.CircularCoilJAX`.
 
@@ -38,10 +39,17 @@ import pytest
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt.field import CircularCoil
 from simsopt.field.magneticfieldclasses_jax import CircularCoilJAX
+from simsopt.jax_core import (
+    CircularCoilSpec as ExportedCircularCoilSpec,
+    circular_coil_A as exported_circular_coil_A,
+    circular_coil_B as exported_circular_coil_B,
+    circular_coil_dB as exported_circular_coil_dB,
+)
 from simsopt.jax_core.circular_coil import (
     CircularCoilSpec,
     _rotation_matrix,
     _rotation_matrix_inv,
+    circular_coil_A,
     circular_coil_B,
     circular_coil_dB,
 )
@@ -127,13 +135,42 @@ class TestKernelParity:
         cpu = CircularCoil()
         cpu.set_points_cart(points)
         B_cpu = np.asarray(cpu.B(), dtype=np.float64)
+        A_cpu = np.asarray(cpu.A(), dtype=np.float64)
         dB_cpu = np.asarray(cpu.dB_by_dX(), dtype=np.float64)
 
         B_jax = np.asarray(circular_coil_B(spec, points), dtype=np.float64)
+        A_jax = np.asarray(circular_coil_A(spec, points), dtype=np.float64)
         dB_jax = np.asarray(circular_coil_dB(spec, points), dtype=np.float64)
 
         np.testing.assert_allclose(B_jax, B_cpu, rtol=_RTOL, atol=_ATOL)
+        np.testing.assert_allclose(A_jax, A_cpu, rtol=_RTOL, atol=_ATOL)
         np.testing.assert_allclose(dB_jax, dB_cpu, rtol=_RTOL, atol=_ATOL)
+
+    def test_filament_singularity_matches_cpu_nan_contract(self):
+        """The coil-wire singularity propagates NaNs like the CPU oracle."""
+
+        points = np.array([[0.1, 0.0, 0.0]], dtype=np.float64)
+        spec = _make_spec(
+            r0=0.1,
+            center=(0.0, 0.0, 0.0),
+            current=5e5 / np.pi,
+            normal=(0.0, 0.0),
+        )
+        cpu = CircularCoil()
+        cpu.set_points_cart(points)
+
+        np.testing.assert_array_equal(
+            np.isnan(np.asarray(circular_coil_B(spec, points), dtype=np.float64)),
+            np.isnan(np.asarray(cpu.B(), dtype=np.float64)),
+        )
+        np.testing.assert_array_equal(
+            np.isnan(np.asarray(circular_coil_A(spec, points), dtype=np.float64)),
+            np.isnan(np.asarray(cpu.A(), dtype=np.float64)),
+        )
+        np.testing.assert_array_equal(
+            np.isnan(np.asarray(circular_coil_dB(spec, points), dtype=np.float64)),
+            np.isnan(np.asarray(cpu.dB_by_dX(), dtype=np.float64)),
+        )
 
     def test_tilted_spherical_normal(self):
         """Random ``(theta, phi)`` normal parity over 60 production points."""
@@ -150,12 +187,15 @@ class TestKernelParity:
         cpu = CircularCoil(r0=0.7, center=list(center), I=1.2e6, normal=list(normal))
         cpu.set_points_cart(points)
         B_cpu = np.asarray(cpu.B(), dtype=np.float64)
+        A_cpu = np.asarray(cpu.A(), dtype=np.float64)
         dB_cpu = np.asarray(cpu.dB_by_dX(), dtype=np.float64)
 
         B_jax = np.asarray(circular_coil_B(spec, points), dtype=np.float64)
+        A_jax = np.asarray(circular_coil_A(spec, points), dtype=np.float64)
         dB_jax = np.asarray(circular_coil_dB(spec, points), dtype=np.float64)
 
         np.testing.assert_allclose(B_jax, B_cpu, rtol=_RTOL, atol=_ATOL)
+        np.testing.assert_allclose(A_jax, A_cpu, rtol=_RTOL, atol=_ATOL)
         np.testing.assert_allclose(dB_jax, dB_cpu, rtol=_RTOL, atol=_ATOL)
 
     def test_tilted_cartesian_normal(self):
@@ -178,12 +218,15 @@ class TestKernelParity:
         cpu = CircularCoil(r0=0.55, center=list(center), I=8.0e5, normal=list(normal))
         cpu.set_points_cart(points)
         B_cpu = np.asarray(cpu.B(), dtype=np.float64)
+        A_cpu = np.asarray(cpu.A(), dtype=np.float64)
         dB_cpu = np.asarray(cpu.dB_by_dX(), dtype=np.float64)
 
         B_jax = np.asarray(circular_coil_B(spec, points), dtype=np.float64)
+        A_jax = np.asarray(circular_coil_A(spec, points), dtype=np.float64)
         dB_jax = np.asarray(circular_coil_dB(spec, points), dtype=np.float64)
 
         np.testing.assert_allclose(B_jax, B_cpu, rtol=_RTOL, atol=_ATOL)
+        np.testing.assert_allclose(A_jax, A_cpu, rtol=_RTOL, atol=_ATOL)
         np.testing.assert_allclose(dB_jax, dB_cpu, rtol=_RTOL, atol=_ATOL)
 
     def test_off_center_parity_large_point_cloud(self):
@@ -201,12 +244,15 @@ class TestKernelParity:
         cpu = CircularCoil(r0=0.4, center=list(center), I=3.3e5, normal=list(normal))
         cpu.set_points_cart(points)
         B_cpu = np.asarray(cpu.B(), dtype=np.float64)
+        A_cpu = np.asarray(cpu.A(), dtype=np.float64)
         dB_cpu = np.asarray(cpu.dB_by_dX(), dtype=np.float64)
 
         B_jax = np.asarray(circular_coil_B(spec, points), dtype=np.float64)
+        A_jax = np.asarray(circular_coil_A(spec, points), dtype=np.float64)
         dB_jax = np.asarray(circular_coil_dB(spec, points), dtype=np.float64)
 
         np.testing.assert_allclose(B_jax, B_cpu, rtol=_RTOL, atol=_ATOL)
+        np.testing.assert_allclose(A_jax, A_cpu, rtol=_RTOL, atol=_ATOL)
         np.testing.assert_allclose(dB_jax, dB_cpu, rtol=_RTOL, atol=_ATOL)
 
 
@@ -224,8 +270,8 @@ class TestWrapperParity:
             (0.2, 0.7, 0.68),
         ],
     )
-    def test_B_and_dB_match_cpu_oracle(self, normal):
-        """``set_points_cart -> B/dB_by_dX`` matches the CPU class.
+    def test_B_A_and_dB_match_cpu_oracle(self, normal):
+        """``set_points_cart -> B/A/dB_by_dX`` matches the CPU class.
 
         The fixture sweeps the default geometry and one tilted variant in
         each ``normal`` encoding.
@@ -247,6 +293,12 @@ class TestWrapperParity:
         np.testing.assert_allclose(
             np.asarray(jax_field.B(), dtype=np.float64),
             np.asarray(cpu.B(), dtype=np.float64),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_field.A(), dtype=np.float64),
+            np.asarray(cpu.A(), dtype=np.float64),
             rtol=_RTOL,
             atol=_ATOL,
         )
@@ -349,8 +401,10 @@ class TestTransferGuard:
 
         with jax.transfer_guard("disallow"):
             circular_coil_B(spec_spherical, points_dev).block_until_ready()
+            circular_coil_A(spec_spherical, points_dev).block_until_ready()
             circular_coil_dB(spec_spherical, points_dev).block_until_ready()
             circular_coil_B(spec_cartesian, points_dev).block_until_ready()
+            circular_coil_A(spec_cartesian, points_dev).block_until_ready()
             circular_coil_dB(spec_cartesian, points_dev).block_until_ready()
 
 
@@ -371,12 +425,18 @@ class TestJIT:
         points_dev.block_until_ready()
 
         jitted_B = jax.jit(lambda pts: circular_coil_B(spec, pts))
+        jitted_A = jax.jit(lambda pts: circular_coil_A(spec, pts))
         jitted_dB = jax.jit(lambda pts: circular_coil_dB(spec, pts))
 
         B_jit = np.asarray(jitted_B(points_dev), dtype=np.float64)
+        A_jit = np.asarray(jitted_A(points_dev), dtype=np.float64)
         dB_jit = np.asarray(jitted_dB(points_dev), dtype=np.float64)
         B_eager = np.asarray(
             circular_coil_B(spec, np.asarray(points_dev, dtype=np.float64)),
+            dtype=np.float64,
+        )
+        A_eager = np.asarray(
+            circular_coil_A(spec, np.asarray(points_dev, dtype=np.float64)),
             dtype=np.float64,
         )
         dB_eager = np.asarray(
@@ -385,6 +445,7 @@ class TestJIT:
         )
 
         np.testing.assert_allclose(B_jit, B_eager, rtol=_RTOL, atol=_ATOL)
+        np.testing.assert_allclose(A_jit, A_eager, rtol=_RTOL, atol=_ATOL)
         np.testing.assert_allclose(dB_jit, dB_eager, rtol=_RTOL, atol=_ATOL)
 
 
@@ -400,11 +461,27 @@ def test_kernel_output_shapes_and_dtypes():
         normal=(0.4, 1.1),
     )
     B = circular_coil_B(spec, points)
+    A = circular_coil_A(spec, points)
     dB = circular_coil_dB(spec, points)
     assert B.shape == (50, 3)
+    assert A.shape == (50, 3)
     assert dB.shape == (50, 3, 3)
     assert B.dtype == jnp.float64
+    assert A.dtype == jnp.float64
     assert dB.dtype == jnp.float64
+
+
+def test_package_export_exposes_circular_coil_kernels():
+    points = _production_points(seed=4_701, count=4)
+    spec = ExportedCircularCoilSpec(
+        r0=0.7,
+        center=(0.1, -0.2, 0.3),
+        Inorm=1.2e6 * 4e-7,
+        normal=(0.4, 1.1),
+    )
+    assert exported_circular_coil_B(spec, points).shape == (4, 3)
+    assert exported_circular_coil_A(spec, points).shape == (4, 3)
+    assert exported_circular_coil_dB(spec, points).shape == (4, 3, 3)
 
 
 def test_rejects_malformed_points():
@@ -418,5 +495,7 @@ def test_rejects_malformed_points():
     )
     with pytest.raises(ValueError):
         circular_coil_B(spec, np.zeros((5,)))
+    with pytest.raises(ValueError):
+        circular_coil_A(spec, np.zeros((5,)))
     with pytest.raises(ValueError):
         circular_coil_dB(spec, np.zeros((5, 2)))

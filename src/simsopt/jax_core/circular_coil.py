@@ -2,12 +2,14 @@
 
 This module is the single source of truth for the JAX kernels that
 reproduce the upstream cartesian closed-form ``B`` and ``dB/dX`` of
-``CircularCoil``. The kernels are exposed through three public symbols:
+``CircularCoil``. The kernels are exposed through public symbols:
 
 * :class:`CircularCoilSpec` -- frozen, hashable, JAX-tree-registered
   payload that mirrors the CPU constructor.
 * :func:`circular_coil_B` -- ``(N, 3) -> (N, 3)`` evaluation of the
   field at cartesian points.
+* :func:`circular_coil_A` -- ``(N, 3) -> (N, 3)`` evaluation of the
+  vector potential at cartesian points.
 * :func:`circular_coil_dB` -- ``(N, 3) -> (N, 3, 3)`` evaluation of the
   first derivative, in the same ``dB[p, j, l] = ∂_j B_l`` axis layout
   the CPU oracle uses.
@@ -61,6 +63,7 @@ from ._math_utils import as_jax_float64 as _as_jax_float64
 
 __all__ = [
     "CircularCoilSpec",
+    "circular_coil_A",
     "circular_coil_B",
     "circular_coil_dB",
 ]
@@ -239,6 +242,29 @@ def _B_local_pointwise(point: jax.Array, r0: jax.Array, Inorm: jax.Array) -> jax
     return jnp.stack((bx, by, bz))
 
 
+def _A_local_pointwise(point: jax.Array, r0: jax.Array, Inorm: jax.Array) -> jax.Array:
+    """A at one point in the coil-axis frame, mirroring ``CircularCoil._A_impl``."""
+
+    x = point[0]
+    y = point[1]
+    z = point[2]
+    rho = jnp.sqrt(x * x + y * y)
+    r_sq = x * x + y * y + z * z
+    r0_sq = r0 * r0
+    alpha = jnp.sqrt(r0_sq + r_sq - 2.0 * r0 * rho)
+    beta_arg = r0_sq + x * x + y * y + 2.0 * r0 * rho + z * z + 1.0e-31
+    beta_guarded = jnp.sqrt(beta_arg)
+    k_sq = 1.0 - (alpha * alpha) / (beta_guarded * beta_guarded)
+    ellipe_k_sq = ellipe(k_sq)
+    ellipk_k_sq = ellipk(k_sq)
+    num = 2.0 * r0 + rho * ellipe_k_sq + (r0_sq + r_sq) * (ellipe_k_sq - ellipk_k_sq)
+    denom = (x * x + y * y + 1.0e-31) * beta_guarded
+    factor = num / denom
+    zero = jnp.zeros_like(x)
+    local_a = factor * jnp.stack((-y, x, zero))
+    return -0.5 * Inorm * local_a
+
+
 def _dB_local_pointwise(point: jax.Array, r0: jax.Array, Inorm: jax.Array) -> jax.Array:
     """``dB[j, l]`` at one point in the coil-axis frame.
 
@@ -406,6 +432,19 @@ def _B_pointwise(
     return rot @ _B_local_pointwise(local_point, r0, Inorm)
 
 
+def _A_pointwise(
+    point: jax.Array,
+    r0: jax.Array,
+    center: jax.Array,
+    Inorm: jax.Array,
+    theta: jax.Array,
+    phi: jax.Array,
+) -> jax.Array:
+    rot = _rotation_matrix_from_angles(theta, phi)
+    local_point = rot.T @ (point - center)
+    return rot @ _A_local_pointwise(local_point, r0, Inorm)
+
+
 def _dB_pointwise(
     point: jax.Array,
     r0: jax.Array,
@@ -421,6 +460,7 @@ def _dB_pointwise(
 
 
 _B_vmap = jax.vmap(_B_pointwise, in_axes=(0, None, None, None, None, None))
+_A_vmap = jax.vmap(_A_pointwise, in_axes=(0, None, None, None, None, None))
 _dB_vmap = jax.vmap(_dB_pointwise, in_axes=(0, None, None, None, None, None))
 
 
@@ -434,6 +474,18 @@ def _B_jit(
     points: jax.Array,
 ) -> jax.Array:
     return _B_vmap(points, r0, center, Inorm, theta, phi)
+
+
+@jax.jit
+def _A_jit(
+    r0: jax.Array,
+    center: jax.Array,
+    Inorm: jax.Array,
+    theta: jax.Array,
+    phi: jax.Array,
+    points: jax.Array,
+) -> jax.Array:
+    return _A_vmap(points, r0, center, Inorm, theta, phi)
 
 
 @jax.jit
@@ -482,6 +534,17 @@ def circular_coil_B(spec: CircularCoilSpec, points: jax.Array) -> jax.Array:
 
     r0, center, Inorm, theta, phi = _scalars(spec)
     return _B_jit(r0, center, Inorm, theta, phi, _validate_points(points))
+
+
+def circular_coil_A(spec: CircularCoilSpec, points: jax.Array) -> jax.Array:
+    """``A(x)`` at cartesian ``points`` for a circular coil described by ``spec``.
+
+    The output has shape ``(N, 3)`` with ``A[p, l] = A_l(x_p)`` in the
+    world frame, matching :meth:`simsopt.field.CircularCoil._A_impl`.
+    """
+
+    r0, center, Inorm, theta, phi = _scalars(spec)
+    return _A_jit(r0, center, Inorm, theta, phi, _validate_points(points))
 
 
 def circular_coil_dB(spec: CircularCoilSpec, points: jax.Array) -> jax.Array:

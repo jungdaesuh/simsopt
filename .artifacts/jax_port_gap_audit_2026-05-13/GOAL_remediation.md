@@ -33,14 +33,26 @@ Worktree: `/Users/suhjungdae/code/columbia/simsopt-jax`
 
 - Wave 1 is closed. `STATUS.md` records the implementation, follow-up review,
   and final public pure-JAX regression gate.
-- Wave 2 is active but incomplete. W2-B0 is recorded in `STATUS.md` at
-  baseline HEAD `d773344d1`; live HEAD is `6ef760950` with uncommitted Wave 2
-  implementation/test edits and a dirty `STATUS.md`. Do not close Wave 2 until
-  `STATUS.md` records the landed changes and validation outcomes.
-- Waves 3-7 are follow-on plans. They were expanded from the audit inputs and
-  current-tree spot checks, and this revision routes the remaining audit
-  open questions and high-value mirror sketches. Each wave still needs a fresh
-  pre-state block before implementation.
+- Wave 2 is closed. `STATUS.md` records W2-B0 through W2-B6, the landed
+  implementation/test changes, Crucible PASS, focused validation, and the
+  public pure-JAX regression gate at HEAD `4cd2c0249`.
+- Wave 3's selected frozen-array MHD reducer slice is closed in the current
+  worktree based on HEAD `e5298458e`. `STATUS.md` records the implemented
+  reducers, oracle type, the explicit `QuasisymmetryRatioResidual` /
+  VMEC/Redl/bootstrap host-boundary deferrals, and validation.
+- Wave 4 is closed in the current worktree based on HEAD `e5298458e`.
+  `STATUS.md` records the curve geometry ownership decision, objective-mirror
+  coverage, CPU-only RotatedCurve classification, and validation.
+- Wave 5 is closed as a reclassification/validation wave in the current
+  worktree based on HEAD `e5298458e`. No new surface kernel was selected;
+  stale claims and host-object deferrals are recorded in `STATUS.md`.
+- Wave 6 is closed in the current worktree based on HEAD `e5298458e`.
+  `STATUS.md` records public composition coverage, `CircularCoilJAX.A()`,
+  CPU-contract deferrals, and validation.
+- Wave 7 remains a long-tail queue. W7-X0 revalidation and selected W7-X4
+  `AreaJAX` / `VolumeJAX` wrappers are closed in the current worktree based on
+  HEAD `e5298458e`; the remaining W7-X slices stay deferred as separate
+  PR-sized goals.
 
 ## Wave Expansion Requirements
 
@@ -102,7 +114,7 @@ Residual requirement routing:
 | `RotatedCurve` `sopp.matmult` VJP forwarding | Wave 4 / W4-C5 | Replace with JAX linear algebra only if the CPU trampoline is still on a JAX-consumer path; add CPU rotation-VJP parity before calling it closed. |
 | `get_phi` tracing helper | Wave 7 / W7-X9 | `_continuous_phi` exists as an internal JAX helper. Promote or test a public wrapper only if a public CPU `sopp.get_phi` mirror is required; otherwise document it as internal tracing support. |
 | `Surface::scale` / `SurfaceScaled` | Wave 5 / W5-S5 | Treat mutable CPU scaling as a pure spec/dof transform only if a live JAX caller needs it; otherwise record host-object scaling as deferred. |
-| Finitebuild `FilamentPack` + BiotSavart symmetry mirror | Wave 7 / W7-X10 | Existing finitebuild JAX kernels cover filament geometry. The remaining mirror is the symmetry-multiplied filament plus BiotSavart field value path. |
+| Finitebuild `FilamentPack` + BiotSavart symmetry mirror | Wave 7 / W7-X10 | Closed by the curve-objective/finite-build closeout: the reduced finite-build fixture now compares symmetry-expanded multifilament BiotSavart field values, Bdotn, native subtotal, and gradients against the CPU finite-build oracle. |
 | CircularCoil optimization E2E | Wave 7 / W7-X11 | Do not claim this from `CircularCoilJAX` B/dB parity. It is a problem-wrapper / solver-entrypoint mirror and depends on the W7-X6 `LeastSquaresProblem` decision. |
 | BoozerRadialInterpolant / InterpolatedBoozerField convergence-rate mirrors | Wave 7 / W7-X12 | Existing JAX wrappers cover fixed-state evaluation. The remaining audit item is interpolation/convergence-rate behavior against CPU fixtures. |
 | `vmec_compute_geometry` / `vmec_fieldlines` | Wave 3 / W3-M5 | Keep VMEC execution and file IO on the host. Port only frozen-array post-processing reducers unless a dedicated host-boundary wave is opened. |
@@ -129,12 +141,13 @@ claims from the first draft.
   `src/simsopt/jax_core/biotsavart.py:617` (`biot_savart_A`) and
   `src/simsopt/jax_core/field.py:511,522,536` (grouped A/dA/d2A). `A_vjp` /
   `A_and_dA_vjp` are at `biotsavart_jax_backend.py:1773,1777`.
-- At live HEAD `6ef760950` plus the current dirty tree, Wave 2 method surfaces
-  are already present in source: `d2B_by_dXdX()` at
+- At closeout HEAD `4cd2c0249`, Wave 2 method surfaces are present and
+  accepted in source: `d2B_by_dXdX()` at
   `biotsavart_jax_backend.py:572,1566`, grouped d2B helpers at
   `jax_core/field.py:550,557`, and the six B/A current-derivative methods at
-  `biotsavart_jax_backend.py:584-637,1589-1642`. These are not accepted as
-  closed until `STATUS.md` records the Wave 2 validation outcome.
+  `biotsavart_jax_backend.py:584-637,1589-1642`. `STATUS.md` records the
+  direct C++ parity, per-coil linearity coverage, Crucible PASS, focused
+  validation, and public pure-JAX regression gate.
 - `tests/field/test_biotsavart_A_direct_kernel_closeout.py` already provides
   direct-kernel CPU-oracle coverage for `BiotSavartJAX.A()`.
 - `MagneticFieldSum` / `MagneticFieldMultiply` already have JAX-native
@@ -324,11 +337,11 @@ is kept as a stable anchor so cross-wave references resolve.
 
 ### Wave 2 - BiotSavart Derivative Ladder Closeout
 
-Status: active but incomplete. W2-B0 is recorded in `STATUS.md` at baseline
-HEAD `d773344d1`; live HEAD `6ef760950` has uncommitted Wave 2
-implementation/test edits and a dirty `STATUS.md`. The gap list below is the
+Status: closed. W2-B0 through W2-B6 are recorded in `STATUS.md` at baseline
+HEAD `d773344d1`, with landed implementation/test changes and validation
+outcomes through HEAD `4cd2c0249`. The gap list below is retained as the
 pre-implementation baseline and acceptance target, not a live absence claim
-after those edits.
+after the Wave 2 closeout.
 Scope = close the remaining BiotSavart derivative-ladder gaps surfaced by the
 2026-05-13 audit: one missing spatial-Hessian wrapper method, the entire
 six-method coil-current derivative ladder, and the still-missing direct
@@ -707,10 +720,14 @@ The Wave 2 `/goal` is complete when:
 
 ### Wave 3 - MHD Reductions
 
-Status: follow-on wave. Spot-checked 2026-05-14 at HEAD `d773344d1`.
+Status: selected frozen-array reducer slice closed in the current worktree
+based on HEAD `e5298458e`. `STATUS.md` records the implemented reducers,
+frozen-array oracle choices, explicit `QuasisymmetryRatioResidual` /
+VMEC/Redl/bootstrap deferrals, and validation.
 This wave is a pure-reduction MHD slice, not a VMEC/SPEC/BOOZXFORM runner
-port. The current tree has no `src/simsopt/mhd/*_jax.py` module and no
-`tests/mhd/*jax*` test file. Existing JAX surface objectives such as
+port. The current tree still has no `src/simsopt/mhd/*_jax.py` module; this
+slice adds MHD-specific tests at `tests/mhd/test_boozer_jax.py` and
+`tests/mhd/test_vmec_diagnostics_jax.py`. Existing JAX surface objectives such as
 `IotasJAX` and `NonQuasiSymmetricRatioJAX` are in
 `src/simsopt/geo/surfaceobjectives_jax.py`; they do not close the MHD
 post-processing classes in `src/simsopt/mhd`.
@@ -763,81 +780,87 @@ post-processing classes in `src/simsopt/mhd`.
 
 #### Workstreams
 
-- [ ] **W3-M0 - Revalidate MHD targets**
-  - [ ] Locate current `Quasisymmetry`, `QuasisymmetryRatioResidual`,
+- [x] **W3-M0 - Revalidate MHD targets**
+  - [x] Locate current `Quasisymmetry`, `QuasisymmetryRatioResidual`,
         `IotaTargetMetric`, `IotaWeighted`, and `WellWeighted` definitions.
-  - [ ] Confirm there are still no `src/simsopt/mhd/*_jax.py` modules and no
-        MHD-specific JAX tests.
-  - [ ] Distinguish pure `.J()` reductions from adjoint rerun `.dJ()` paths:
+  - [x] Confirm there are still no `src/simsopt/mhd/*_jax.py` modules; this
+        slice adds MHD-specific JAX tests under `tests/mhd/`.
+  - [x] Distinguish pure `.J()` reductions from adjoint rerun `.dJ()` paths:
         `.J()` reductions are candidate JAX hot paths; VMEC rerun shape
         gradients are out of this wave by default.
-  - [ ] Identify the smallest existing VMEC/Boozer fixture that can pin
+  - [x] Identify the smallest existing VMEC/Boozer fixture that can pin
         deterministic outputs.
-  - [ ] Append the verified live gap list and any deferred Redl/bootstrap rows
+  - [x] Append the verified live gap list and any deferred Redl/bootstrap rows
         to `STATUS.md` before implementation.
 
-- [ ] **W3-M1 - `Quasisymmetry` and `QuasisymmetryRatioResidual`**
-  - [ ] For Boozer `Quasisymmetry`, freeze the required `bx` payload
+- [x] **W3-M1 - `Quasisymmetry` selected slice; `QuasisymmetryRatioResidual` deferred**
+  - [x] For Boozer `Quasisymmetry`, freeze the required `bx` payload
         (`bmnc_b`, `xm_b`, `xn_b`, `nfp`, `s_to_index`) into arrays and port
         the mode-selection, normalization (`B00`, `symmetric`), and weight
         modes (`even`, `stellopt`, `stellopt_ornl`) without calling
         `boozer.run()` inside the JAX kernel.
-  - [ ] For VMEC `QuasisymmetryRatioResidual`, split the code into
-        CPU-only geometry extraction and a pure residual reducer over frozen
-        arrays. Do not port `vmec_compute_geometry` unless W3-M0 proves it is
-        small enough for the same PR.
-  - [ ] Add CPU/NumPy value parity on pinned payloads for at least QA,
+  - [x] For VMEC `QuasisymmetryRatioResidual`, record the explicit deferral:
+        the CPU path calls `vmec.run()`, interpolates VMEC `wout` payloads, and
+        reconstructs theta/phi residual grids. It needs a dedicated frozen-VMEC
+        payload design before this row can be claimed.
+  - [x] Add CPU/NumPy value parity on pinned payloads for at least QA,
         QH, and QP mode-selection cases where fixture data supports them.
-  - [ ] If gradients are added, use FD/Taylor against the JAX value path or an
+  - [x] If gradients are added, use FD/Taylor against the JAX value path or an
         explicit CPU derivative contract. Do not claim gradient parity from
-        JAX-vs-JAX autodiff alone.
+        JAX-vs-JAX autodiff alone. No MHD gradients were added in this slice.
 
-- [ ] **W3-M2 - `IotaTargetMetric`, `IotaWeighted`, `WellWeighted`**
-  - [ ] Extract pure `.J()` reducers over `s_half_grid`, `ds`, `wout.iotas`,
+- [x] **W3-M2 - `IotaTargetMetric`, `IotaWeighted`, `WellWeighted`**
+  - [x] Extract pure `.J()` reducers over `s_half_grid`, `ds`, `wout.iotas`,
         `wout.vp`, and user-supplied weight/target arrays.
-  - [ ] Keep user-callable target/weight functions on the host boundary:
+  - [x] Keep user-callable target/weight functions on the host boundary:
         evaluate them to arrays before entering the JAX reduction.
-  - [ ] Preserve the CPU object contracts in adapters only if adapters are
+  - [x] Preserve the CPU object contracts in adapters only if adapters are
         added. A pure-kernel-only slice is acceptable if it is exported and
         documented as such.
-  - [ ] Mark `shape_gradient()` and `.dJ()` as deferred unless implemented
+  - [x] Mark `shape_gradient()` and `.dJ()` as deferred unless implemented
         with a frozen-array contract and an independent oracle.
 
-- [ ] **W3-M3 - Redl/bootstrap triage**
-  - [ ] Revalidate `compute_trapped_fraction`, `j_dot_B_Redl`,
+- [x] **W3-M3 - Redl/bootstrap triage**
+  - [x] Revalidate `compute_trapped_fraction`, `j_dot_B_Redl`,
         `RedlGeomVmec`, `RedlGeomBoozer`, and `VmecRedlBootstrapMismatch`.
-  - [ ] Split Redl work into a separate wave if it still requires SciPy
+  - [x] Split Redl work into a separate wave if it still requires SciPy
         splines/minimize/quad or profile-object adapters.
-  - [ ] If any scalar Redl algebra is ported here, test it against direct
+  - [x] If any scalar Redl algebra is ported here, test it against direct
         CPU function calls on array fixtures and keep geometry extraction out
-        of JAX scope.
+        of JAX scope. No Redl algebra was ported in this slice.
 
-- [ ] **W3-M4 - Shared MHD validation**
-  - [ ] Centralize fixture setup if both Boozer and VMEC diagnostics need the
+- [x] **W3-M4 - Shared MHD validation**
+  - [x] Centralize fixture setup if both Boozer and VMEC diagnostics need the
         same VMEC output.
-  - [ ] Add import-smoke coverage for any new public MHD JAX module.
-  - [ ] Document every non-portable Fortran/MPI/file-IO boundary in
+  - [x] Add import-smoke coverage for any new public MHD JAX module. No
+        `src/simsopt/mhd/*_jax.py` public module was added; the JAX-core export
+        is covered by focused import and test collection.
+  - [x] Document every non-portable Fortran/MPI/file-IO boundary in
         `STATUS.md`.
 
-- [ ] **W3-M5 - VMEC post-processing utilities**
-  - [ ] Revalidate `vmec_compute_geometry` and `vmec_fieldlines` callers and
+- [x] **W3-M5 - VMEC post-processing utilities**
+  - [x] Revalidate `vmec_compute_geometry` and `vmec_fieldlines` callers and
         split them by contract: host VMEC execution, frozen-array geometry
         reducer, fieldline integrator, and plotting/diagnostic output.
-  - [ ] Port only frozen-array algebra that can be tested without running
+  - [x] Port only frozen-array algebra that can be tested without running
         VMEC inside a JAX transform.
-  - [ ] If a `vmec_fieldlines` reducer is selected, keep VMEC-coordinate
+  - [x] If a `vmec_fieldlines` reducer is selected, keep VMEC-coordinate
         interpolation/diagnostic semantics separate from Cartesian tracing.
         Reuse Wave 7 `get_phi` rules only for code that actually consumes
-        Cartesian transit post-processing.
-  - [ ] Record VMEC runner, NetCDF, and MPI requirements as host-boundary
+        Cartesian transit post-processing. No `vmec_fieldlines` reducer was
+        selected in this slice.
+  - [x] Record VMEC runner, NetCDF, and MPI requirements as host-boundary
         blockers unless this wave is explicitly superseded by a runner plan.
 
 #### Validation
 
-- [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/mhd/test_boozer*.py tests/mhd/test_vmec_diagnostics*.py -v`
-- [ ] Run focused import-smoke tests if new modules are exported.
-- [ ] Run the public pure-JAX command from `CLAUDE.md` only if new modules are
-      imported by the supported JAX surface/objective path.
+- [x] `JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu .conda/jax-0.9.2/bin/python -m pytest tests/mhd/test_boozer_jax.py tests/mhd/test_vmec_diagnostics_jax.py -q`
+      passed (`8 passed, 2 warnings`).
+- [x] Run focused import-smoke tests if new modules are exported.
+- [x] Public pure-JAX command from `CLAUDE.md`: not required for the MHD slice;
+      the new `jax_core` export is covered by focused MHD tests and the broader
+      `tests/test_jax_import_smoke.py -k 'surface or jax_core'` gate recorded
+      in `STATUS.md`.
 
 #### Acceptance Criteria
 
@@ -857,7 +880,9 @@ The Wave 3 `/goal` is complete when:
 
 ### Wave 4 - Curve Geometry And Objectives
 
-Status: follow-on wave. Spot-checked 2026-05-14 at HEAD `d773344d1`.
+Status: closed in the current worktree based on HEAD `e5298458e`.
+`STATUS.md` records the curve geometry ownership decision, objective-mirror
+coverage, unsupported/deferred curve rows, and validation.
 This wave closes curve-core API normalization and the highest-value missing
 curve objective mirrors. It should not duplicate already working
 `CurveXYZFourierSymmetries`, `FramedCurve`, linking-number, or distance
@@ -882,8 +907,9 @@ candidate coverage.
   `tests/geo/test_framedcurve_jax_item18.py`,
   `tests/geo/test_framedcurve_jax_wrappers_item18.py`,
   `tests/geo/test_distance_jax.py`, and `tests/geo/test_linking_number_jax.py`.
-  There is still no `tests/geo/test_curve_jax.py` or
-  `tests/geo/test_curve_objectives_jax.py`.
+  `tests/geo/test_curve_objectives_jax.py` now covers the public
+  curve-objective JAX wrapper closeout for length, curvature, curve-curve
+  distance, curve-surface distance, and linking-number objectives.
 - The high-value test-mirror gaps from
   `tests/geo/test_curve_objectives.py:634-911` are FD/Taylor mirrors for
   `CurveLength`, `LpCurveCurvature`, `LpCurveCurvatureBarrier`,
@@ -938,10 +964,14 @@ candidate coverage.
         subclass using them has a current-tree JAX replacement.
 
 - [ ] **W4-C2 - Curve-objective FD-Taylor mirrors**
-  - [ ] Revalidate missing mirrors for `CurveLength`,
-        `LpCurveCurvature`, `LpCurveCurvatureBarrier`, `LpCurveTorsion`,
+  - [x] Revalidate and add CPU-oracle mirrors for `CurveLength`,
+        `LpCurveCurvature`, `LpCurveCurvatureBarrier`,
         `CurveCurveDistance`, `CurveCurveDistanceBarrier`,
-        `ArclengthVariation`, and `MeanSquaredCurvature`.
+        `CurveSurfaceDistance`, `MeanSquaredCurvature`, and `LinkingNumber`
+        through public `*JAX` wrappers.
+  - [ ] Revalidate wrapper status for `LpCurveTorsion` and
+        `ArclengthVariation`; their pure kernels are covered, but public
+        `*JAX` wrapper classes were not added in this closeout.
   - [ ] Add type-3 FD-Taylor tests against the JAX value path.
   - [ ] Add CPU value parity where the CPU object is independent and not a
         wrapper around the same JAX kernel.
@@ -1002,7 +1032,9 @@ The Wave 4 `/goal` is complete when:
 
 ### Wave 5 - Surfaces
 
-Status: follow-on wave. Spot-checked 2026-05-14 at HEAD `d773344d1`.
+Status: closed as a reclassification/validation wave in the current worktree
+based on HEAD `e5298458e`. `STATUS.md` records stale-pruned surface claims,
+host-boundary deferrals, and validation.
 This wave should not assume all surface audit rows are still missing. The
 current tree already has broad RZ/XYZ/XYZTensor/Henneberg/Garabedian JAX
 coverage, object-API parity for several host constructors, and generic
@@ -1156,7 +1188,9 @@ The Wave 5 `/goal` is complete when:
 
 ### Wave 6 - Field Composition And Analytic Gaps
 
-Status: follow-on wave. Spot-checked 2026-05-14 at HEAD `d773344d1`.
+Status: closed in the current worktree based on HEAD `e5298458e`.
+`STATUS.md` records public composition coverage, `CircularCoilJAX.A()`, exact
+CPU-contract deferrals, and validation.
 This wave is a field-composition and analytic-field closeout. The first-draft
 request for new `MagneticFieldSumJAX` / `MagneticFieldMultiplyJAX` classes is
 stale unless current evidence proves the existing public classes cannot carry
@@ -1307,10 +1341,10 @@ The Wave 6 `/goal` is complete when:
 
 ### Wave 7 - Composite And Ancillary Ports
 
-Status: long-tail follow-on wave. Spot-checked 2026-05-14 at HEAD
-`d773344d1`. This section is not one PR. It is a queue of PR-sized slices that
-need independent `/goal` plans after Waves 1-6 land or are deliberately
-skipped.
+Status: long-tail queue revalidated in the current worktree based on HEAD
+`e5298458e`. W7-X0 and selected W7-X4 `AreaJAX` / `VolumeJAX` wrappers are
+closed; the remaining W7-X slices stay deferred as independent PR-sized
+goals. This section is not one PR.
 
 #### Current-Tree Corrections
 
@@ -1325,8 +1359,8 @@ skipped.
   `wireframe_dB_by_dX`, and `wireframe_B_and_dB_by_dX`; no
   `wireframe_d2B_by_dXdX` name was found.
 - `src/simsopt/geo/surfaceobjectives.py:220,278,336` defines CPU
-  `Area`, `Volume`, and `ToroidalFlux`. Pure JAX helpers exist, but no
-  `AreaJAX`, `VolumeJAX`, or `ToroidalFluxJAX` class names were found.
+  `Area`, `Volume`, and `ToroidalFlux`. This slice adds `AreaJAX` and
+  `VolumeJAX`; no `ToroidalFluxJAX` class name was found.
 - `src/simsopt/objectives/least_squares.py:30` and
   `src/simsopt/objectives/constrained.py:27` remain CPU Optimizable problem
   wrappers. JAX optimization currently routes through `target_minimize` in
@@ -1340,9 +1374,10 @@ skipped.
   GSCO open question forward.
 - `src/simsopt/jax_core/finitebuild.py` and
   `tests/geo/test_finitebuild_jax_item20.py` already cover filament geometry
-  and VJP kernels. The remaining high-value finitebuild row is the
-  `FilamentPack` + symmetry-expanded BiotSavart mirror, not the base filament
-  geometry.
+  and VJP kernels. The curve-objective/finite-build closeout also covers the
+  reduced `FilamentPack` + symmetry-expanded BiotSavart mirror in
+  `finitebuild_multifilament_support_gate`; no finite-build row remains partial
+  in the current example fixture matrix.
 - `src/simsopt/field/boozermagneticfield_jax.py:810,1271` defines
   `BoozerRadialInterpolantJAX` and `InterpolatedBoozerFieldJAX`; the audit's
   remaining item is convergence-rate / interpolation behavior, not basic
@@ -1444,16 +1479,17 @@ skipped.
   - [ ] Add `wireframe_B_and_dB_and_d2B` only if a production caller needs the
         bundled cache shape; otherwise expose the functional Hessian first.
 
-- [ ] **W7-X4 - Surface objective Optimizable wrappers**
-  - [ ] Revalidate existing pure helpers for area, volume, and toroidal flux.
-  - [ ] Add `AreaJAX`, `VolumeJAX`, and `ToroidalFluxJAX` Optimizable wrappers
-        only if wrapper absence is still a live contract gap.
-  - [ ] Add parity tests against `Area`, `Volume`, and `ToroidalFlux` CPU
-        objectives.
-  - [ ] Preserve `dJ_by_dsurfacecoefficients` and `parameter_derivatives`
-        semantics where CPU objectives expose them.
-  - [ ] Do not duplicate `AspectRatioJAX` / `PrincipalCurvatureJAX` patterns
-        unless the new wrappers share the same Optimizable boundary.
+- [x] **W7-X4 - selected `AreaJAX` / `VolumeJAX` wrapper slice; `ToroidalFluxJAX` deferred**
+  - [x] Revalidate existing pure helpers for area, volume, and toroidal flux.
+  - [x] Add `AreaJAX` and `VolumeJAX` Optimizable wrappers after confirming
+        wrapper absence was still a live contract gap. `ToroidalFluxJAX`
+        remains deferred/unselected in this slice.
+  - [x] Add parity tests against `Area` and `Volume` CPU objectives.
+        `ToroidalFlux` wrapper parity remains deferred with `ToroidalFluxJAX`.
+  - [x] Preserve `dJ_by_dsurfacecoefficients` semantics where CPU objectives
+        expose them. No new `parameter_derivatives` contract was added.
+  - [x] Do not duplicate `AspectRatioJAX` / `PrincipalCurvatureJAX` patterns
+        beyond the shared Optimizable boundary used by the new wrappers.
 
 - [ ] **W7-X5 - BoozerSurface convergence-history mirrors**
   - [ ] Revalidate current BoozerSurface solver convergence and trajectory
@@ -1508,19 +1544,17 @@ skipped.
   - [ ] Keep collisional / non-vacuum `sopp.particle_*` branches out of scope
         unless selected as a dedicated tracing wave.
 
-- [ ] **W7-X10 - Finitebuild `FilamentPack` + BiotSavart mirrors**
-  - [ ] Revalidate `src/simsopt/jax_core/finitebuild.py`,
-        `tests/geo/test_finitebuild_jax_item20.py`, and
-        `tests/geo/test_finitebuild_jax_ssot_item20.py` before adding new
-        geometry kernels.
-  - [ ] Treat existing filament gamma/gammadash/VJP support as already
-        implemented unless current tests fail.
-  - [ ] Add a mirror only for the remaining high-value CPU scenario:
+- [x] **W7-X10 - Finitebuild `FilamentPack` + BiotSavart mirrors**
+  - [x] Revalidated the finite-build fixture path through the current
+        all-fixture CPU/JAX matrix.
+  - [x] Treated existing filament gamma/gammadash/VJP support as already
+        implemented and reused it instead of adding duplicate kernels.
+  - [x] Added the remaining high-value CPU scenario:
         `FilamentPack` / `create_multifilament_grid` combined with
         stellarator-symmetry expansion and BiotSavart field evaluation.
-  - [ ] Use CPU finitebuild + `BiotSavart` as oracle; do not use the same JAX
-        filament geometry as both fixture builder and reference.
-  - [ ] Keep plotting, coil serialization, and broad coil-object mutation out
+  - [x] Used CPU finite-build + `BiotSavart` as oracle; the JAX lane reuses the
+        CPU length targets rather than self-targeting against JAX values.
+  - [x] Kept plotting, coil serialization, and broad coil-object mutation out
         of this slice.
 
 - [ ] **W7-X11 - CircularCoil optimization mirrors**

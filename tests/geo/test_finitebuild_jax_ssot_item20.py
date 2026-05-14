@@ -22,6 +22,7 @@ import pytest
 
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.finitebuild import create_multifilament_grid
+from simsopt.field.biotsavart_jax_backend import _curve_dof_mode
 from simsopt.jax_core import (
     build_filament_gamma_and_dash,
     build_filament_gammas,
@@ -164,6 +165,26 @@ def test_compute_filament_offsets_matches_grid_construction():
         for filament, (dn, db) in zip(filaments, offsets, strict=True):
             assert filament.dn == pytest.approx(dn)
             assert filament.db == pytest.approx(db)
+
+
+def test_curve_filament_native_geometry_uses_full_graph_dofs():
+    """CurveFilament specs need parent-curve and rotation DOFs, not local DOFs."""
+    curve = _seed_curve()
+    filaments = create_multifilament_grid(
+        curve,
+        numfilaments_n=2,
+        numfilaments_b=2,
+        gapsize_n=_GAP_N,
+        gapsize_b=_GAP_B,
+        rotation_order=1,
+        frame="centroid",
+    )
+    filament = filaments[0]
+
+    assert filament.local_dof_size == 0
+    assert filament.dof_size > 0
+    assert _curve_dof_mode(filament) == "full"
+    assert filament.to_spec().dofs.shape == filament.full_x.shape
 
 
 def test_compiled_filament_builders_run_under_strict_transfer_guard():

@@ -8,6 +8,7 @@ import jax.numpy as jnp
 from .._core.json import GSONDecoder
 from ..jax_core.circular_coil import (
     CircularCoilSpec,
+    circular_coil_A,
     circular_coil_B,
     circular_coil_dB,
 )
@@ -20,7 +21,7 @@ __all__ = ["CircularCoilJAX"]
 
 class CircularCoilJAX(MagneticField):
     """JAX-backed circular-coil field, drop-in for
-    :class:`simsopt.field.CircularCoil` B and dB evaluation.
+    :class:`simsopt.field.CircularCoil` B, A, and dB evaluation.
 
     The CPU class remains the parity oracle. The JAX wrapper preserves
     the public constructor payload and current normalization while
@@ -56,6 +57,12 @@ class CircularCoilJAX(MagneticField):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
         B[:] = np.asarray(
             circular_coil_B(self._spec, _points_device(points)), dtype=np.float64
+        )
+
+    def _A_impl(self, A):
+        points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
+        A[:] = np.asarray(
+            circular_coil_A(self._spec, _points_device(points)), dtype=np.float64
         )
 
     def jax_B_at(self, point):

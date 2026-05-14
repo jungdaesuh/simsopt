@@ -15,6 +15,7 @@ from simsopt.jax_core import (
     make_curve_cwsfourier_rz_spec,
     make_curve_filament_spec,
     make_curve_helical_spec,
+    make_oriented_curve_xyzfourier_spec,
     make_curve_perturbed_spec,
     make_curve_planarfourier_spec,
     make_curve_rzfourier_spec,
@@ -121,6 +122,11 @@ def _make_curve_spec_kind_samples():
     )
     return {
         "xyz_fourier": base_curve,
+        "oriented_xyz_fourier": make_oriented_curve_xyzfourier_spec(
+            dofs=np.arange(12, dtype=np.float64),
+            quadpoints=quadpoints,
+            order=1,
+        ),
         "rz_fourier": make_curve_rzfourier_spec(
             dofs=np.arange(6, dtype=np.float64),
             quadpoints=quadpoints,
@@ -379,7 +385,9 @@ def test_single_stage_runtime_spec_is_a_real_jittable_pytree():
 
     @jax.jit
     def seed_scalar(spec):
-        return spec.seed.boozer_iota[0] + spec.seed.boozer_G[0] + spec.seed.surface.dofs[0]
+        return (
+            spec.seed.boozer_iota[0] + spec.seed.boozer_G[0] + spec.seed.surface.dofs[0]
+        )
 
     np.testing.assert_allclose(seed_scalar(runtime), np.array(5.623))
 

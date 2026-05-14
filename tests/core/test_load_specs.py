@@ -71,7 +71,9 @@ def test_load_specs_reads_legacy_json_without_losing_geometry_state(tmp_path):
     legacy_bs = load(biot_savart_path)
     assert len(legacy_bs.coils) == 4
     assert any(type(coil.curve).__name__ == "RotatedCurve" for coil in legacy_bs.coils)
-    assert any(type(coil.current).__name__ == "ScaledCurrent" for coil in legacy_bs.coils)
+    assert any(
+        type(coil.current).__name__ == "ScaledCurrent" for coil in legacy_bs.coils
+    )
     points = legacy_bs.get_points_cart()
     np.testing.assert_allclose(
         np.asarray(grouped_biot_savart_B_from_spec(points, coil_set_spec)),
@@ -133,6 +135,38 @@ def test_biot_savart_restart_spec_round_trips_with_dof_extraction(tmp_path):
         np.asarray(legacy_bs.B()),
         rtol=1e-12,
         atol=1e-12,
+    )
+
+
+def test_load_reconstructs_legacy_cws_curve_artifact():
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "examples"
+        / "3_Advanced"
+        / "optimization_cws_singlestage_nfp2_QA_ncoils3_axiTorus"
+        / "coils"
+        / "biot_savart_opt_maxmode3.json"
+    )
+    if not path.exists():
+        pytest.skip("legacy CWS example artifact is not present")
+
+    legacy_bs = load(path)
+
+    assert len(legacy_bs.coils) == 12
+    curve = legacy_bs.coils[0].curve
+    assert type(curve).__name__ == "CurveCWSFourier"
+    np.testing.assert_allclose(curve.surf.get_dofs(), np.asarray([1.0, 0.55, 0.55]))
+    np.testing.assert_allclose(
+        curve.get_dofs()[:5],
+        np.asarray(
+            [
+                1.0,
+                -0.08893490083714978,
+                0.026334506334377627,
+                0.05488038834701336,
+                -0.09845945463373941,
+            ]
+        ),
     )
 
 

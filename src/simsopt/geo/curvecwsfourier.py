@@ -16,7 +16,7 @@ from .jit import jit
 
 sopp = sopp_namespace("Curve")
 
-__all__ = ["CurveCWSFourierCPP"]
+__all__ = ["CurveCWSFourierCPP", "CurveCWSFourier"]
 
 
 def _as_jax_float64(value):
@@ -936,3 +936,31 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
 
     def drfactor_by_dcoeff_vjp(self, v):
         return Derivative({self: vjp_contraction_1d(self.drfactor_by_dcoeff(), v)})
+
+
+class CurveCWSFourier(CurveCWSFourierCPP):
+    @classmethod
+    def from_dict(cls, d, serial_objs_dict, recon_objs):
+        from .._core.json import GSONDecoder
+
+        decoder = GSONDecoder()
+        quadpoints = decoder.process_decoded(
+            d["quadpoints"], serial_objs_dict=serial_objs_dict, recon_objs=recon_objs
+        )
+        dofs = decoder.process_decoded(
+            d["dofs"], serial_objs_dict=serial_objs_dict, recon_objs=recon_objs
+        )
+        surface = SurfaceRZFourier(
+            nfp=int(d["nfp"]),
+            stellsym=bool(d["stellsym"]),
+            mpol=int(d["mpol"]),
+            ntor=int(d["ntor"]),
+        )
+        surface.set_dofs(np.asarray(d["idofs"], dtype=np.float64))
+        curve = cls(
+            quadpoints=np.asarray(quadpoints, dtype=np.float64),
+            order=int(d["order"]),
+            surf=surface,
+        )
+        curve.full_x = np.asarray(dofs.full_x, dtype=np.float64)
+        return curve

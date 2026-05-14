@@ -272,6 +272,7 @@ class GPMOBaselineResult:
     """Result from ``gpmo_baseline_solve`` in normalized coordinates."""
 
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_dipoles: jax.Array
@@ -283,6 +284,7 @@ jax.tree_util.register_dataclass(
     GPMOBaselineResult,
     data_fields=[
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
@@ -298,6 +300,7 @@ class GPMOArbVecResult:
     """Result from ``gpmo_arbvec_solve`` in normalized coordinates."""
 
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_dipoles: jax.Array
@@ -309,6 +312,7 @@ jax.tree_util.register_dataclass(
     GPMOArbVecResult,
     data_fields=[
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
@@ -324,6 +328,7 @@ class GPMOMultiResult:
     """Result from ``gpmo_multi_solve`` in normalized coordinates."""
 
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_seed_dipoles: jax.Array
@@ -336,6 +341,7 @@ jax.tree_util.register_dataclass(
     GPMOMultiResult,
     data_fields=[
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_seed_dipoles",
@@ -352,6 +358,7 @@ class GPMOBacktrackingResult:
     """Result from ``gpmo_backtracking_solve`` in normalized coordinates."""
 
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_dipoles: jax.Array
@@ -366,6 +373,7 @@ jax.tree_util.register_dataclass(
     GPMOBacktrackingResult,
     data_fields=[
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
@@ -392,6 +400,7 @@ class GPMOArbVecBacktrackingResult:
     """
 
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_dipoles: jax.Array
@@ -409,6 +418,7 @@ jax.tree_util.register_dataclass(
     GPMOArbVecBacktrackingResult,
     data_fields=[
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
@@ -635,6 +645,27 @@ def gpmo_baseline_step(
     )
 
 
+def _baseline_x_history(
+    selected_dipoles: jax.Array,
+    selected_components: jax.Array,
+    selected_signs: jax.Array,
+    *,
+    ndipoles: int,
+) -> jax.Array:
+    """Reconstruct post-step normalized states from the baseline trace."""
+    x0 = jnp.zeros((ndipoles, 3), dtype=selected_signs.dtype)
+
+    def _scan_body(x_state, trace_entry):
+        dipole, component, sign = trace_entry
+        x_new = x_state.at[dipole, component].set(sign)
+        return x_new, x_new
+
+    _, x_history = jax.lax.scan(
+        _scan_body, x0, (selected_dipoles, selected_components, selected_signs)
+    )
+    return x_history
+
+
 def gpmo_baseline_solve(
     spec: GPMOBaselineSpec,
     A_scaled: jax.Array,
@@ -661,8 +692,10 @@ def gpmo_baseline_solve(
     if K == 0:
         empty_int = jnp.zeros((0,), dtype=jnp.int64)
         empty_float = jnp.zeros((0,), dtype=A_arr.dtype)
+        empty_x_history = jnp.zeros((0, ndipoles, 3), dtype=A_arr.dtype)
         return GPMOBaselineResult(
             x=x0,
+            x_history=empty_x_history,
             residual=residual0,
             residual_history=empty_float,
             selected_dipoles=empty_int,
@@ -679,6 +712,12 @@ def gpmo_baseline_solve(
     selected_dipoles, selected_components, selected_signs, residual_history = trace
     return GPMOBaselineResult(
         x=final_state[0],
+        x_history=_baseline_x_history(
+            selected_dipoles,
+            selected_components,
+            selected_signs,
+            ndipoles=ndipoles,
+        ),
         residual=final_state[1],
         residual_history=residual_history,
         selected_dipoles=selected_dipoles,
@@ -775,6 +814,30 @@ def gpmo_arbvec_step(
     )
 
 
+def _arbvec_x_history(
+    selected_dipoles: jax.Array,
+    selected_vector_indices: jax.Array,
+    selected_signs: jax.Array,
+    *,
+    pol_vectors: jax.Array,
+) -> jax.Array:
+    """Reconstruct post-step normalized states from an ArbVec trace."""
+    x0 = jnp.zeros((pol_vectors.shape[0], 3), dtype=pol_vectors.dtype)
+
+    def _scan_body(x_state, trace_entry):
+        dipole, vector_index, sign = trace_entry
+        selected_vector = pol_vectors[dipole, vector_index, :]
+        x_new = x_state.at[dipole, :].set(sign * selected_vector)
+        return x_new, x_new
+
+    _, x_history = jax.lax.scan(
+        _scan_body,
+        x0,
+        (selected_dipoles, selected_vector_indices, selected_signs),
+    )
+    return x_history
+
+
 def gpmo_arbvec_solve(
     spec: GPMOArbVecSpec,
     A_scaled: jax.Array,
@@ -797,8 +860,10 @@ def gpmo_arbvec_solve(
     if K == 0:
         empty_int = jnp.zeros((0,), dtype=jnp.int64)
         empty_float = jnp.zeros((0,), dtype=A_arr.dtype)
+        empty_x_history = jnp.zeros((0, ndipoles, 3), dtype=A_arr.dtype)
         return GPMOArbVecResult(
             x=x0,
+            x_history=empty_x_history,
             residual=residual0,
             residual_history=empty_float,
             selected_dipoles=empty_int,
@@ -821,6 +886,12 @@ def gpmo_arbvec_solve(
     selected_dipoles, selected_vector_indices, selected_signs, residual_history = trace
     return GPMOArbVecResult(
         x=final_state[0],
+        x_history=_arbvec_x_history(
+            selected_dipoles,
+            selected_vector_indices,
+            selected_signs,
+            pol_vectors=pol_vectors,
+        ),
         residual=final_state[1],
         residual_history=residual_history,
         selected_dipoles=selected_dipoles,
@@ -1277,6 +1348,7 @@ def gpmo_arbvec_backtracking_step(
         jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), vector_index),
         jnp.where(done, jnp.asarray(0.0, dtype=residual.dtype), sign),
         jnp.where(done, jnp.sum(residual * residual), residual_sq),
+        next_state[0],
         jnp.where(
             done,
             jnp.sum((~available).astype(jnp.int64)),
@@ -1348,9 +1420,11 @@ def gpmo_arbvec_backtracking_solve(
     if K == 0:
         empty_int = jnp.zeros((0,), dtype=jnp.int64)
         empty_float = jnp.zeros((0,), dtype=A_arr.dtype)
+        empty_x_history = jnp.zeros((0, ndipoles, 3), dtype=A_arr.dtype)
         empty_bool = jnp.zeros((0,), dtype=bool)
         return GPMOArbVecBacktrackingResult(
             x=x0,
+            x_history=empty_x_history,
             residual=residual0,
             residual_history=empty_float,
             selected_dipoles=empty_int,
@@ -1413,12 +1487,14 @@ def gpmo_arbvec_backtracking_solve(
         selected_vector_indices,
         selected_signs,
         residual_history,
+        x_history,
         num_nonzeros_history,
         removed_pair_count_history,
         done_history,
     ) = trace
     return GPMOArbVecBacktrackingResult(
         x=final_state[0],
+        x_history=x_history,
         residual=final_state[1],
         residual_history=residual_history,
         selected_dipoles=selected_dipoles,
@@ -1575,6 +1651,30 @@ def gpmo_multi_step(
     )
 
 
+def _multi_x_history(
+    selected_groups: jax.Array,
+    selected_components: jax.Array,
+    selected_signs: jax.Array,
+    *,
+    ndipoles: int,
+) -> jax.Array:
+    """Reconstruct post-step normalized states from a multi-neighbour trace."""
+    x0 = jnp.zeros((ndipoles, 3), dtype=selected_signs.dtype)
+    dipole_ids = jnp.arange(ndipoles)
+
+    def _scan_body(x_state, trace_entry):
+        selected_group, component, sign = trace_entry
+        selected_mask = jnp.any(dipole_ids[:, None] == selected_group[None, :], axis=1)
+        x_updates = jnp.zeros_like(x_state).at[:, component].set(sign)
+        x_new = jnp.where(selected_mask[:, None], x_updates, x_state)
+        return x_new, x_new
+
+    _, x_history = jax.lax.scan(
+        _scan_body, x0, (selected_groups, selected_components, selected_signs)
+    )
+    return x_history
+
+
 def gpmo_multi_solve(
     spec: GPMOMultiSpec,
     A_scaled: jax.Array,
@@ -1596,9 +1696,11 @@ def gpmo_multi_solve(
     if K == 0:
         empty_int = jnp.zeros((0,), dtype=jnp.int64)
         empty_float = jnp.zeros((0,), dtype=A_arr.dtype)
+        empty_x_history = jnp.zeros((0, ndipoles, 3), dtype=A_arr.dtype)
         empty_groups = jnp.zeros((0, spec.Nadjacent), dtype=jnp.int64)
         return GPMOMultiResult(
             x=x0,
+            x_history=empty_x_history,
             residual=residual0,
             residual_history=empty_float,
             selected_seed_dipoles=empty_int,
@@ -1624,6 +1726,12 @@ def gpmo_multi_solve(
     ) = trace
     return GPMOMultiResult(
         x=final_state[0],
+        x_history=_multi_x_history(
+            selected_groups,
+            selected_components,
+            selected_signs,
+            ndipoles=ndipoles,
+        ),
         residual=final_state[1],
         residual_history=residual_history,
         selected_seed_dipoles=selected_seed_dipoles,
@@ -1876,6 +1984,7 @@ def gpmo_backtracking_step(
         jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), component),
         jnp.where(done, jnp.asarray(0.0, dtype=residual.dtype), sign),
         jnp.where(done, jnp.sum(residual * residual), residual_sq),
+        next_state[0],
         jnp.where(
             done, jnp.sum(jnp.any(~available, axis=1).astype(jnp.int64)), num_nonzeros
         ),
@@ -1923,9 +2032,11 @@ def gpmo_backtracking_solve(
     if K == 0:
         empty_int = jnp.zeros((0,), dtype=jnp.int64)
         empty_float = jnp.zeros((0,), dtype=A_arr.dtype)
+        empty_x_history = jnp.zeros((0, ndipoles, 3), dtype=A_arr.dtype)
         empty_bool = jnp.zeros((0,), dtype=bool)
         return GPMOBacktrackingResult(
             x=x0,
+            x_history=empty_x_history,
             residual=residual0,
             residual_history=empty_float,
             selected_dipoles=empty_int,
@@ -1972,12 +2083,14 @@ def gpmo_backtracking_solve(
         selected_components,
         selected_signs,
         residual_history,
+        x_history,
         num_nonzeros_history,
         removed_pair_count_history,
         done_history,
     ) = trace
     return GPMOBacktrackingResult(
         x=final_state[0],
+        x_history=x_history,
         residual=final_state[1],
         residual_history=residual_history,
         selected_dipoles=selected_dipoles,

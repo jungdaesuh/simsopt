@@ -52,6 +52,7 @@ from simsopt.jax_core.analytic_pure_fields import (
     toroidal_B,
     toroidal_dA,
     toroidal_dB,
+    toroidal_d2B,
 )
 from simsopt.jax_core.magneticfield_composition import (
     compose_A_scaled,
@@ -62,6 +63,10 @@ from simsopt.jax_core.magneticfield_composition import (
     compose_dA_sum,
     compose_dB_scaled,
     compose_dB_sum,
+    compose_d2A_scaled,
+    compose_d2A_sum,
+    compose_d2B_scaled,
+    compose_d2B_sum,
 )
 
 
@@ -103,6 +108,49 @@ def _production_points(seed: int, count: int = 60) -> np.ndarray:
     points[:, 1] = rng.uniform(0.4, 1.8, size=count)
     points[:, 2] = rng.uniform(-0.5, 0.5, size=count)
     return np.ascontiguousarray(points)
+
+
+class _D2AJAXTestField(ToroidalFieldJAX):
+    """JAX-native test field for the public d2A composition surface."""
+
+    def __init__(self, scale: float):
+        super().__init__(R0=1.0, B0=1.0)
+        self.scale = float(scale)
+
+    def _d2A_by_dXdX_impl(self, ddA):
+        points = self.get_points_cart_ref()
+        x = points[:, 0]
+        y = points[:, 1]
+        z = points[:, 2]
+        ddA[:] = self.scale * np.stack(
+            (
+                np.stack(
+                    (
+                        np.stack((x + y, x - y, z), axis=1),
+                        np.stack((2.0 * x, y + z, x * z), axis=1),
+                        np.stack((z - y, x + z, y * z), axis=1),
+                    ),
+                    axis=1,
+                ),
+                np.stack(
+                    (
+                        np.stack((x * y, y - z, x + 1.0), axis=1),
+                        np.stack((y + 2.0, z + 3.0, x - 4.0), axis=1),
+                        np.stack((x * x, y * y, z * z), axis=1),
+                    ),
+                    axis=1,
+                ),
+                np.stack(
+                    (
+                        np.stack((x - z, y + z, x + y + z), axis=1),
+                        np.stack((x * z, y * z, x * y), axis=1),
+                        np.stack((x + 5.0, y + 6.0, z + 7.0), axis=1),
+                    ),
+                    axis=1,
+                ),
+            ),
+            axis=1,
+        )
 
 
 # ── MagneticFieldSum parity ──────────────────────────────────────────
@@ -187,6 +235,23 @@ class TestMagneticFieldSumJAXParity:
         np.testing.assert_allclose(
             np.asarray(sum_jax.dA_by_dX()),
             np.asarray(sum_cpu.dA_by_dX()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+    def test_sum_two_jax_native_d2A_matches_child_sum(self):
+        """Public ``MagneticFieldSum.d2A_by_dXdX`` sums JAX-native children."""
+        points = _production_points(seed=907, count=60)
+        child1 = _D2AJAXTestField(scale=1.25)
+        child2 = _D2AJAXTestField(scale=-0.5)
+        sum_jax = MagneticFieldSum([child1, child2])
+        sum_jax.set_points_cart(points)
+        child1.set_points_cart(points)
+        child2.set_points_cart(points)
+        expected = child1.d2A_by_dXdX() + child2.d2A_by_dXdX()
+        np.testing.assert_allclose(
+            np.asarray(sum_jax.d2A_by_dXdX()),
+            np.asarray(expected),
             rtol=_RTOL,
             atol=_ATOL,
         )
@@ -284,6 +349,21 @@ class TestMagneticFieldMultiplyJAXParity:
         np.testing.assert_allclose(
             np.asarray(mul_jax.dA_by_dX()),
             np.asarray(mul_cpu.dA_by_dX()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+    def test_multiply_jax_native_d2A_matches_child_scaled(self):
+        """Public ``MagneticFieldMultiply.d2A_by_dXdX`` scales a JAX child."""
+        points = _production_points(seed=912, count=60)
+        child = _D2AJAXTestField(scale=1.25)
+        mul_jax = MagneticFieldMultiply(2.5, child)
+        mul_jax.set_points_cart(points)
+        child.set_points_cart(points)
+        expected = 2.5 * child.d2A_by_dXdX()
+        np.testing.assert_allclose(
+            np.asarray(mul_jax.d2A_by_dXdX()),
+            np.asarray(expected),
             rtol=_RTOL,
             atol=_ATOL,
         )
@@ -480,6 +560,28 @@ class TestPureJAXCompositionPrimitives:
             atol=_ATOL,
         )
 
+    def test_compose_d2B_sum_matches_cpu_oracle(self):
+        """``compose_d2B_sum`` matches the CPU ``MagneticFieldSum`` oracle."""
+        points_np = _production_points(seed=957, count=60)
+        points = jax.device_put(points_np)
+        spec1 = ToroidalFieldSpec(R0=1.3, B0=0.8)
+        spec2 = ToroidalFieldSpec(R0=1.5, B0=0.4)
+        children = (
+            lambda pts, s=spec1: toroidal_d2B(s, pts),
+            lambda pts, s=spec2: toroidal_d2B(s, pts),
+        )
+        composed = compose_d2B_sum(children, points)
+        sum_cpu = MagneticFieldSum(
+            [ToroidalField(R0=1.3, B0=0.8), ToroidalField(R0=1.5, B0=0.4)]
+        )
+        sum_cpu.set_points_cart(points_np)
+        np.testing.assert_allclose(
+            np.asarray(composed),
+            np.asarray(sum_cpu.d2B_by_dXdX()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
     def test_compose_A_and_dA_sum_match_cpu_oracle(self):
         """``compose_A_sum`` and ``compose_dA_sum`` match CPU."""
         points_np = _production_points(seed=953, count=60)
@@ -559,6 +661,53 @@ class TestPureJAXCompositionPrimitives:
         np.testing.assert_allclose(
             np.asarray(scaled_dA),
             np.asarray(mul_cpu.dA_by_dX()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+    def test_compose_d2B_scaled_matches_cpu_oracle(self):
+        """``compose_d2B_scaled`` matches the CPU ``MagneticFieldMultiply``."""
+        points_np = _production_points(seed=958, count=60)
+        points = jax.device_put(points_np)
+        spec = ToroidalFieldSpec(R0=1.3, B0=0.8)
+        child = lambda pts, s=spec: toroidal_d2B(s, pts)
+        scaled = compose_d2B_scaled(child, 2.5, points)
+        mul_cpu = MagneticFieldMultiply(2.5, ToroidalField(R0=1.3, B0=0.8))
+        mul_cpu.set_points_cart(points_np)
+        np.testing.assert_allclose(
+            np.asarray(scaled),
+            np.asarray(mul_cpu.d2B_by_dXdX()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+    def test_compose_d2A_sum_and_scaled_match_manual_device_result(self):
+        """``compose_d2A_*`` sum and scale opaque child d2A tensors."""
+        points = jax.device_put(_production_points(seed=959, count=60))
+
+        def child(scale: float):
+            return lambda pts: (
+                scale
+                * (
+                    pts[:, :, None, None]
+                    + 2.0 * pts[:, None, :, None]
+                    - pts[:, None, None, :]
+                )
+            )
+
+        child1 = child(1.25)
+        child2 = child(-0.5)
+        summed = compose_d2A_sum((child1, child2), points)
+        scaled = compose_d2A_scaled(child1, 2.5, points)
+        np.testing.assert_allclose(
+            np.asarray(summed),
+            np.asarray(child1(points) + child2(points)),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(scaled),
+            np.asarray(2.5 * child1(points)),
             rtol=_RTOL,
             atol=_ATOL,
         )

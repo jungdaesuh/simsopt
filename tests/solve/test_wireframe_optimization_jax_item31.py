@@ -620,6 +620,41 @@ def test_optimize_wireframe_jax_gsco_matches_public_cpu_and_iteration_helper() -
     )
 
 
+def test_optimize_wireframe_jax_gsco_accepts_present_none_initial_state() -> None:
+    cpu_wireframe, A, b = _public_optimize_problem(seed=3107)
+    jax_wireframe, _, _ = _public_optimize_problem(seed=3107)
+    params = {
+        "lambda_S": 0.1,
+        "max_iter": 2,
+        "print_interval": 1,
+        "default_current": 0.2,
+        "no_crossing": False,
+        "match_current": False,
+        "x_init": None,
+        "loop_count_init": None,
+    }
+
+    expected = optimize_wireframe(
+        cpu_wireframe,
+        "gsco",
+        params,
+        Amat=A,
+        bvec=b,
+        verbose=False,
+    )
+    actual = optimize_wireframe_jax(
+        jax_wireframe,
+        "gsco",
+        params,
+        Amat=A,
+        bvec=b,
+        verbose=False,
+    )
+
+    np.testing.assert_allclose(actual["x"], expected["x"], rtol=_RTOL, atol=_ATOL)
+    np.testing.assert_array_equal(actual["loop_count"], expected["loop_count"])
+
+
 def test_gsco_jax_jits_under_transfer_guard() -> None:
     A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
         _gsco_problem()

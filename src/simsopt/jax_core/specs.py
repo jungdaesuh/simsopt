@@ -39,6 +39,22 @@ jax.tree_util.register_dataclass(
 
 
 @dataclass(frozen=True)
+class OrientedCurveXYZFourierSpec:
+    """Immutable payload for pure JAX OrientedCurveXYZFourier geometry."""
+
+    dofs: jax.Array
+    quadpoints: jax.Array
+    order: int
+
+
+jax.tree_util.register_dataclass(
+    OrientedCurveXYZFourierSpec,
+    data_fields=["dofs", "quadpoints"],
+    meta_fields=["order"],
+)
+
+
+@dataclass(frozen=True)
 class CurveRZFourierSpec:
     """Immutable payload for pure JAX CurveRZFourier geometry."""
 
@@ -680,6 +696,7 @@ jax.tree_util.register_dataclass(
 
 CurveSpec = Union[
     CurveXYZFourierSpec,
+    OrientedCurveXYZFourierSpec,
     CurveRZFourierSpec,
     CurvePlanarFourierSpec,
     CurveHelicalSpec,
@@ -691,6 +708,7 @@ CurveSpec = Union[
 
 CurveSpecKind = Literal[
     "xyz_fourier",
+    "oriented_xyz_fourier",
     "rz_fourier",
     "planar_fourier",
     "helical",
@@ -705,6 +723,8 @@ def curve_spec_kind(spec: CurveSpec) -> CurveSpecKind:
     """Return the closed discriminant for a curve spec variant."""
     if isinstance(spec, CurveXYZFourierSpec):
         return "xyz_fourier"
+    if isinstance(spec, OrientedCurveXYZFourierSpec):
+        return "oriented_xyz_fourier"
     if isinstance(spec, CurveRZFourierSpec):
         return "rz_fourier"
     if isinstance(spec, CurvePlanarFourierSpec):
@@ -743,6 +763,19 @@ def make_curve_xyzfourier_spec(
     order: int,
 ) -> CurveXYZFourierSpec:
     return CurveXYZFourierSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
+        order=int(order),
+    )
+
+
+def make_oriented_curve_xyzfourier_spec(
+    *,
+    dofs: object,
+    quadpoints: object,
+    order: int,
+) -> OrientedCurveXYZFourierSpec:
+    return OrientedCurveXYZFourierSpec(
         dofs=_as_float64_array(dofs),
         quadpoints=_as_float64_array(quadpoints),
         order=int(order),

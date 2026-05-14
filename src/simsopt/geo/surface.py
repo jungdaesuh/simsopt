@@ -1,4 +1,7 @@
 import abc
+from dataclasses import dataclass
+from threading import RLock
+from weakref import WeakKeyDictionary
 
 import numpy as np
 from scipy import interpolate
@@ -30,6 +33,88 @@ from .plotting import fix_matplotlib_3d
 from .._core.json import GSONable
 
 __all__ = ['Surface', 'signed_distance_from_surface', 'SurfaceClassifier', 'SurfaceScaled', 'best_nphi_over_ntheta']
+
+
+@dataclass(frozen=True)
+class _SurfaceClassifierInterpolantMetadata:
+    rrange: tuple[float, float]
+    zrange: tuple[float, float]
+    nr: int
+    nphi: int
+    nz: int
+    p: int
+
+
+class _SurfaceClassifierInterpolantAdapter:
+    def __init__(self, dist, metadata: _SurfaceClassifierInterpolantMetadata):
+        self.dist = dist
+        self.rrange = metadata.rrange
+        self.zrange = metadata.zrange
+        self._nr = metadata.nr
+        self._nphi = metadata.nphi
+        self._nz = metadata.nz
+        self._p = metadata.p
+
+    def evaluate_rphiz(self, rphiz):
+        d = -np.ones((rphiz.shape[0], 1))
+        self.dist.evaluate_batch(rphiz, d)
+        return d
+
+    def to_jax_classifier_fn(self):
+        return _build_jax_classifier_fn(self)
+
+
+_SURFACE_CLASSIFIER_INTERPOLANT_METADATA = WeakKeyDictionary()
+_SURFACE_CLASSIFIER_INTERPOLANT_METADATA_LOCK = RLock()
+
+
+def _register_surface_classifier_interpolant(classifier):
+    metadata = _SurfaceClassifierInterpolantMetadata(
+        rrange=(float(classifier.rrange[0]), float(classifier.rrange[1])),
+        zrange=(float(classifier.zrange[0]), float(classifier.zrange[1])),
+        nr=int(classifier._nr),
+        nphi=int(classifier._nphi),
+        nz=int(classifier._nz),
+        p=int(classifier._p),
+    )
+    with _SURFACE_CLASSIFIER_INTERPOLANT_METADATA_LOCK:
+        _SURFACE_CLASSIFIER_INTERPOLANT_METADATA[classifier.dist] = metadata
+
+
+def _surface_classifier_from_interpolant(interpolant):
+    with _SURFACE_CLASSIFIER_INTERPOLANT_METADATA_LOCK:
+        metadata = _SURFACE_CLASSIFIER_INTERPOLANT_METADATA.get(interpolant)
+    if metadata is None:
+        return None
+    return _SurfaceClassifierInterpolantAdapter(interpolant, metadata)
+
+
+def _build_jax_classifier_fn(classifier):
+    """Return a JAX-traceable signed-distance classifier closure."""
+    from ..jax_core.regular_grid_interp import (
+        UniformInterpolationRule as JaxUniformInterpolationRule,
+        build_regular_grid_interpolant_3d,
+    )
+    from ..jax_core.surface_classifier import make_levelset_classifier
+
+    def fbatch_jax(rs, phis, zs):
+        rphiz = np.zeros((len(rs), 3), dtype=np.float64)
+        rphiz[:, 0] = np.asarray(rs, dtype=np.float64)
+        rphiz[:, 1] = np.asarray(phis, dtype=np.float64)
+        rphiz[:, 2] = np.asarray(zs, dtype=np.float64)
+        return np.asarray(classifier.evaluate_rphiz(rphiz), dtype=np.float64).ravel()
+
+    rule = JaxUniformInterpolationRule(classifier._p)
+    spec = build_regular_grid_interpolant_3d(
+        rule=rule,
+        xrange=(float(classifier.rrange[0]), float(classifier.rrange[1]), int(classifier._nr)),
+        yrange=(0.0, 2.0 * np.pi, int(classifier._nphi)),
+        zrange=(float(classifier.zrange[0]), float(classifier.zrange[1]), int(classifier._nz)),
+        value_size=1,
+        f=fbatch_jax,
+        out_of_bounds_ok=True,
+    )
+    return make_levelset_classifier(spec)
 
 
 class Surface(Optimizable):
@@ -977,6 +1062,7 @@ class SurfaceClassifier():
         self.dist = sopp.RegularGridInterpolant3D(
             rule, [rmin, rmax, nr], [0., 2*np.pi, nphi], [zmin, zmax, nz], 1, True)
         self.dist.interpolate_batch(fbatch)
+        _register_surface_classifier_interpolant(self)
 
     def evaluate_xyz(self, xyz):
         rphiz = np.zeros_like(xyz)
@@ -997,31 +1083,7 @@ class SurfaceClassifier():
         return d
 
     def to_jax_classifier_fn(self):
-        """Return a JAX-traceable signed-distance classifier closure."""
-        from ..jax_core.regular_grid_interp import (
-            UniformInterpolationRule as JaxUniformInterpolationRule,
-            build_regular_grid_interpolant_3d,
-        )
-        from ..jax_core.surface_classifier import make_levelset_classifier
-
-        def fbatch_jax(rs, phis, zs):
-            rphiz = np.zeros((len(rs), 3), dtype=np.float64)
-            rphiz[:, 0] = np.asarray(rs, dtype=np.float64)
-            rphiz[:, 1] = np.asarray(phis, dtype=np.float64)
-            rphiz[:, 2] = np.asarray(zs, dtype=np.float64)
-            return np.asarray(self.evaluate_rphiz(rphiz), dtype=np.float64).ravel()
-
-        rule = JaxUniformInterpolationRule(self._p)
-        spec = build_regular_grid_interpolant_3d(
-            rule=rule,
-            xrange=(float(self.rrange[0]), float(self.rrange[1]), int(self._nr)),
-            yrange=(0.0, 2.0 * np.pi, int(self._nphi)),
-            zrange=(float(self.zrange[0]), float(self.zrange[1]), int(self._nz)),
-            value_size=1,
-            f=fbatch_jax,
-            out_of_bounds_ok=True,
-        )
-        return make_levelset_classifier(spec)
+        return _build_jax_classifier_fn(self)
 
     @SimsoptRequires(gridToVTK is not None,
                      "to_vtk method requires pyevtk module")

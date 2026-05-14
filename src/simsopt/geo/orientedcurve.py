@@ -163,6 +163,16 @@ class OrientedCurveXYZFourier(JaxCurve):
                 dofs_name += [f"{c}s({j + 1})", f"{c}c({j + 1})"]
         return xyc_name + ypr_name + dofs_name
 
+    def to_spec(self):
+        """Return an immutable JAX spec for this oriented curve."""
+        from simsopt.jax_core.specs import make_oriented_curve_xyzfourier_spec
+
+        return make_oriented_curve_xyzfourier_spec(
+            dofs=self.get_dofs(),
+            quadpoints=self.quadpoints,
+            order=self.order,
+        )
+
     @classmethod
     def from_curvexyzfourier(cls, xyzcurve):
         oriented_curve = cls(xyzcurve.quadpoints, xyzcurve.order)

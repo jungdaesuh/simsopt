@@ -15,9 +15,13 @@ import jax
 import numpy as np
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt import field as field_mod
 from simsopt.field import (
+    B2Energy,
+    B2EnergyJAX,
     Current,
     LpCurveForce,
+    LpCurveForceJAX,
     coils_via_symmetries,
 )
 from simsopt.field.selffield import regularization_circ
@@ -61,6 +65,76 @@ def _build_lp_curve_force_objective() -> LpCurveForce:
         coils,
         p=2.5,
         threshold=1.0e-3,
+    )
+
+
+def _build_reduced_force_energy_terms(force_cls, energy_cls):
+    nfp = 2
+    ncoils = 3
+    current_amplitude = 1.0e5
+    numquadpoints = 16
+    base_curves = create_equally_spaced_curves(
+        ncoils,
+        nfp,
+        stellsym=True,
+        R0=1.0,
+        R1=0.5,
+        order=5,
+        numquadpoints=numquadpoints,
+        use_jax_curve=False,
+    )
+    base_currents = [Current(current_amplitude) for _ in range(ncoils)]
+    base_currents[0].fix_all()
+    coils = coils_via_symmetries(
+        base_curves,
+        base_currents,
+        nfp,
+        stellsym=True,
+        regularizations=[regularization_circ(0.05)] * ncoils,
+    )
+    return (
+        force_cls(coils[:ncoils], coils, p=4.0),
+        energy_cls(coils),
+    )
+
+
+def test_force_energy_jax_wrappers_are_public_lazy_exports():
+    assert field_mod.B2EnergyJAX is B2Energy
+    assert field_mod.LpCurveForceJAX is LpCurveForce
+    assert B2EnergyJAX is B2Energy
+    assert LpCurveForceJAX is LpCurveForce
+
+
+def test_reduced_force_energy_wrappers_match_independent_cpu_lane():
+    force_cpu, energy_cpu = _build_reduced_force_energy_terms(LpCurveForce, B2Energy)
+    force_jax, energy_jax = _build_reduced_force_energy_terms(
+        LpCurveForceJAX,
+        B2EnergyJAX,
+    )
+
+    force_weight = 1.0e-2
+    energy_weight = 1.0e-4
+    cpu_total = force_weight * float(force_cpu.J()) + energy_weight * float(
+        energy_cpu.J()
+    )
+    jax_total = force_weight * float(force_jax.J()) + energy_weight * float(
+        energy_jax.J()
+    )
+    np.testing.assert_allclose(jax_total, cpu_total, rtol=1.0e-10, atol=1.0e-12)
+
+    cpu_gradient = force_weight * np.asarray(
+        force_cpu.dJ(),
+        dtype=np.float64,
+    ) + energy_weight * np.asarray(energy_cpu.dJ(), dtype=np.float64)
+    jax_gradient = force_weight * np.asarray(
+        force_jax.dJ(),
+        dtype=np.float64,
+    ) + energy_weight * np.asarray(energy_jax.dJ(), dtype=np.float64)
+    np.testing.assert_allclose(
+        jax_gradient,
+        cpu_gradient,
+        rtol=1.0e-8,
+        atol=1.0e-10,
     )
 
 

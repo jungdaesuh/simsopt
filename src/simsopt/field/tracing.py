@@ -10,7 +10,7 @@ from ..backend.runtime import is_jax_backend
 from ..field.magneticfield import MagneticField
 from ..field.boozermagneticfield import BoozerMagneticField
 from ..field.sampling import draw_uniform_on_curve, draw_uniform_on_surface
-from ..geo.surface import SurfaceClassifier
+from ..geo.surface import SurfaceClassifier, _surface_classifier_from_interpolant
 from ..util.constants import (
     ALPHA_PARTICLE_MASS,
     ALPHA_PARTICLE_CHARGE,
@@ -90,13 +90,27 @@ def _require_jax_field_B_dB(
     field: MagneticField,
 ) -> Callable[[object], tuple[object, object]]:
     field_fn = getattr(field, "jax_B_dB_at", None)
-    if not callable(field_fn):
-        raise TypeError(
-            "JAX particle tracing requires a JAX-native MagneticField wrapper "
-            "exposing `jax_B_dB_at(point)`. Use a *JAX field class such as "
-            "ToroidalFieldJAX, or run this tracing call on the CPU backend."
-        )
-    return field_fn
+    if callable(field_fn):
+        return field_fn
+    grad_abs_fn = getattr(field, "jax_B_GradAbsB_at", None)
+    if callable(grad_abs_fn):
+        import jax.numpy as jnp
+
+        def _field_fn(point):
+            B_raw, grad_abs_raw = grad_abs_fn(point)
+            B = jnp.asarray(B_raw, dtype=jnp.float64).reshape((3,))
+            grad_abs_B = jnp.asarray(grad_abs_raw, dtype=jnp.float64).reshape((3,))
+            abs_B = jnp.linalg.norm(B)
+            dB_by_dX = grad_abs_B[:, None] * B[None, :] / abs_B
+            return B, dB_by_dX
+
+        return _field_fn
+    raise TypeError(
+        "JAX particle tracing requires a JAX-native MagneticField wrapper "
+        "exposing `jax_B_dB_at(point)` or `jax_B_GradAbsB_at(point)`. Use a "
+        "*JAX field class such as ToroidalFieldJAX or InterpolatedFieldJAX, "
+        "or run this tracing call on the CPU backend."
+    )
 
 
 def compute_gc_radius(m, vperp, q, absb):
@@ -354,12 +368,13 @@ def _trace_particles_boozer_jax(
 
     Rejected argument shapes (explicit :class:`NotImplementedError`):
 
-    - ``field`` not a :class:`BoozerRadialInterpolantJAX` instance —
-      the JAX path requires the frozen-state JAX wrapper to evaluate
-      ``modB``, ``modB_derivs``, ``K``, ``K_derivs``, ``iota``, ``G``,
-      ``I``, ``dGds``, ``dIds`` on-device. CPU
-      ``BoozerMagneticField`` instances are rejected under the JAX
-      backend instead of falling through to the C++ oracle.
+    - ``field`` not a :class:`BoozerRadialInterpolantJAX` or
+      :class:`InterpolatedBoozerFieldJAX` instance — the JAX path
+      requires a frozen-state JAX wrapper to evaluate ``modB``,
+      ``modB_derivs``, ``K``, ``K_derivs``, ``iota``, ``G``, ``I``,
+      ``dGds``, ``dIds`` on-device. CPU ``BoozerMagneticField``
+      instances are rejected under the JAX backend instead of falling
+      through to the C++ oracle.
     - ``stopping_criteria`` containing an unsupported criterion type
       — raises :class:`NotImplementedError` from
       :func:`_translate_stopping_criteria_to_jax`.
@@ -368,14 +383,19 @@ def _trace_particles_boozer_jax(
     particles; no compiled cross-rank collective is introduced.
     """
 
-    from .boozermagneticfield_jax import BoozerRadialInterpolantJAX
+    from .boozermagneticfield_jax import (
+        BoozerRadialInterpolantJAX,
+        InterpolatedBoozerFieldJAX,
+    )
 
-    if not isinstance(field, BoozerRadialInterpolantJAX):
+    if not isinstance(field, (BoozerRadialInterpolantJAX, InterpolatedBoozerFieldJAX)):
         raise NotImplementedError(
             "trace_particles_boozer JAX backend requires a "
-            "BoozerRadialInterpolantJAX field instance; got "
-            f"{type(field).__name__}. Wrap the upstream BoozerRadialInterpolant "
-            "via BoozerRadialInterpolantJAX(upstream) or switch to the CPU backend."
+            "BoozerRadialInterpolantJAX or InterpolatedBoozerFieldJAX field "
+            f"instance; got {type(field).__name__}. Wrap the upstream "
+            "BoozerRadialInterpolant via BoozerRadialInterpolantJAX(upstream), "
+            "wrap the upstream InterpolatedBoozerField via "
+            "InterpolatedBoozerFieldJAX(...), or switch to the CPU backend."
         )
     rhs_mode_map = {
         "gc_vac": "vacuum",
@@ -576,7 +596,8 @@ def trace_particles(
       item 14). Only ``mode='gc_vac'`` is implemented today; ``mode='gc'``
       (non-vacuum guiding-centre) raises explicit
       :class:`NotImplementedError`. The JAX route requires the field
-      object to expose ``jax_B_dB_at(point)``.
+      object to expose ``jax_B_dB_at(point)`` or
+      ``jax_B_GradAbsB_at(point)``.
     - ``mode='full'`` routes to
       :func:`_trace_particles_jax_fullorbit_vacuum` (the 6-state
       Cartesian full-orbit Lorentz driver). The JAX route requires the
@@ -1557,11 +1578,9 @@ def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
     translated = []
     for crit in stopping_criteria:
         if isinstance(crit, sopp.LevelsetStoppingCriterion):
-            # Levelset criteria are now wired through the JAX driver via
-            # ``SurfaceClassifier.to_jax_classifier_fn()``. Only the
-            # Python wrapper ``simsopt.field.tracing.LevelsetStoppingCriterion``
-            # carries the ``_classifier`` reference; raw
-            # ``sopp.LevelsetStoppingCriterion`` instances do not.
+            # Levelset criteria are wired through the JAX driver via
+            # ``SurfaceClassifier.to_jax_classifier_fn()`` or the metadata
+            # adapter registered for ``SurfaceClassifier.dist``.
             classifier_obj = getattr(crit, "_classifier", None)
             if classifier_obj is None:
                 raise NotImplementedError(
@@ -1571,9 +1590,10 @@ def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
                     "SurfaceClassifier(surface)) so the JAX-side interpolant "
                     "spec can be rebuilt from the classifier grid metadata."
                 )
-            if not isinstance(classifier_obj, SurfaceClassifier):
+            if not hasattr(classifier_obj, "to_jax_classifier_fn"):
                 raise NotImplementedError(
-                    "JAX tracing path requires a SurfaceClassifier instance "
+                    "JAX tracing path requires a SurfaceClassifier-derived "
+                    "interpolant "
                     "as the LevelsetStoppingCriterion argument; received "
                     f"{type(classifier_obj).__name__}. The raw "
                     "sopp.RegularGridInterpolant3D path does not carry the "
@@ -1768,12 +1788,16 @@ class LevelsetStoppingCriterion(sopp.LevelsetStoppingCriterion):
         )
         # Retain the Python-side classifier so the JAX tracing translator
         # can request a JAX-traceable closure via
-        # ``SurfaceClassifier.to_jax_classifier_fn()``. Raw
-        # ``sopp.RegularGridInterpolant3D`` instances are also stored, but
-        # the JAX path only supports the ``SurfaceClassifier`` route (the
-        # raw interpolant does not carry the grid metadata needed to
-        # rebuild a JAX-side interpolant spec).
-        self._classifier = classifier
+        # ``SurfaceClassifier.to_jax_classifier_fn()``. A raw
+        # ``SurfaceClassifier.dist`` interpolant is mapped back to a
+        # metadata adapter; unrelated raw interpolants remain CPU-only
+        # because they do not carry enough grid metadata for JAX rebuild.
+        if isinstance(classifier, sopp.RegularGridInterpolant3D):
+            self._classifier = _surface_classifier_from_interpolant(classifier)
+            if self._classifier is None:
+                self._classifier = classifier
+        else:
+            self._classifier = classifier
         if isinstance(classifier, SurfaceClassifier):
             sopp.LevelsetStoppingCriterion.__init__(self, classifier.dist)
         else:

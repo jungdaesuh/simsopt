@@ -33,6 +33,7 @@ sampling step is the documented CPU<->JAX boundary for this wrapper.
 from __future__ import annotations
 
 import numpy as np
+import jax.numpy as jnp
 
 from .._core.json import GSONDecoder
 from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
@@ -216,6 +217,17 @@ class InterpolatedFieldJAX(MagneticField):
             interpolated_field_B(self._spec, _points_device(points)),
             extrapolate=self.extrapolate,
             quantity="B",
+        )
+
+    def jax_B_at(self, point):
+        points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
+        return interpolated_field_B(self._spec, points)[0]
+
+    def jax_B_GradAbsB_at(self, point):
+        points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
+        return (
+            interpolated_field_B(self._spec, points)[0],
+            interpolated_field_GradAbsB(self._spec, points)[0],
         )
 
     def GradAbsB(self):

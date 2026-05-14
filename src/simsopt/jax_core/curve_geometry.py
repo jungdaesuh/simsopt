@@ -9,7 +9,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..geo.curve import gamma_curve_on_surface
+from ..geo.curve import (
+    gamma_curve_on_surface,
+    incremental_arclength_pure as _incremental_arclength_pure,
+    kappa_pure as _kappa_pure,
+    torsion_pure as _torsion_pure,
+)
 from ..geo.curvehelical import curve_helical_pure
 from ..geo.curveplanarfourier import curveplanarfourier_pure
 from ..geo.curverzfourier import curverzfourier_pure
@@ -32,6 +37,7 @@ from .specs import (
     CurveCWSFourierRZSpec,
     CurveFilamentSpec,
     CurveHelicalSpec,
+    OrientedCurveXYZFourierSpec,
     CurvePlanarFourierSpec,
     CurvePerturbedSpec,
     CurveRZFourierSpec,
@@ -138,6 +144,15 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
     if spec_kind == "xyz_fourier":
         spec = cast(CurveXYZFourierSpec, spec)
         return lambda quadpoints: jaxfouriercurve_pure(
+            curve_dofs,
+            quadpoints,
+            spec.order,
+        )
+    if spec_kind == "oriented_xyz_fourier":
+        from simsopt.geo.orientedcurve import centercurve_pure
+
+        spec = cast(OrientedCurveXYZFourierSpec, spec)
+        return lambda quadpoints: centercurve_pure(
             curve_dofs,
             quadpoints,
             spec.order,
@@ -813,6 +828,38 @@ def curve_geometry_from_dofs(spec: CurveSpec, dofs):
         tangents,
         order=2,
     )
+
+
+def curve_incremental_arclength_from_spec(spec: CurveSpec):
+    return curve_incremental_arclength_from_dofs(spec, spec.dofs)
+
+
+def curve_incremental_arclength_from_dofs(spec: CurveSpec, dofs):
+    """Return pure JAX incremental arclength from an immutable curve spec."""
+    _gamma, gammadash = curve_gamma_and_dash_from_dofs(spec, dofs)
+    return _incremental_arclength_pure(gammadash)
+
+
+def curve_kappa_from_spec(spec: CurveSpec):
+    return curve_kappa_from_dofs(spec, spec.dofs)
+
+
+def curve_kappa_from_dofs(spec: CurveSpec, dofs):
+    """Return pure JAX scalar curvature samples from an immutable curve spec."""
+    _gamma, gammadash, gammadashdash = curve_geometry_from_dofs(spec, dofs)
+    return _kappa_pure(gammadash, gammadashdash)
+
+
+def curve_torsion_from_spec(spec: CurveSpec):
+    return curve_torsion_from_dofs(spec, spec.dofs)
+
+
+def curve_torsion_from_dofs(spec: CurveSpec, dofs):
+    """Return pure JAX scalar torsion samples from an immutable curve spec."""
+    _gamma, gammadash, gammadashdash, gammadashdashdash = (
+        _curve_geometry_with_third_derivative_from_dofs(spec, dofs)
+    )
+    return _torsion_pure(gammadash, gammadashdash, gammadashdashdash)
 
 
 def _curve_cws_gamma_and_dash_from_parts(

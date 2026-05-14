@@ -114,7 +114,9 @@ class GPMOBaselineResult:
     """Immutable result from ``GPMO_baseline_jax``."""
 
     m: jax.Array
+    m_history: jax.Array
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_dipoles: jax.Array
@@ -126,7 +128,9 @@ jax.tree_util.register_dataclass(
     GPMOBaselineResult,
     data_fields=[
         "m",
+        "m_history",
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
@@ -142,7 +146,9 @@ class GPMOMultiResult:
     """Immutable result from ``GPMO_multi_jax``."""
 
     m: jax.Array
+    m_history: jax.Array
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_seed_dipoles: jax.Array
@@ -155,7 +161,9 @@ jax.tree_util.register_dataclass(
     GPMOMultiResult,
     data_fields=[
         "m",
+        "m_history",
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_seed_dipoles",
@@ -172,7 +180,9 @@ class GPMOBacktrackingResult:
     """Immutable result from ``GPMO_backtracking_jax``."""
 
     m: jax.Array
+    m_history: jax.Array
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_dipoles: jax.Array
@@ -187,7 +197,9 @@ jax.tree_util.register_dataclass(
     GPMOBacktrackingResult,
     data_fields=[
         "m",
+        "m_history",
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
@@ -206,7 +218,9 @@ class GPMOArbVecResult:
     """Immutable result from ``GPMO_ArbVec_jax``."""
 
     m: jax.Array
+    m_history: jax.Array
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_dipoles: jax.Array
@@ -218,7 +232,9 @@ jax.tree_util.register_dataclass(
     GPMOArbVecResult,
     data_fields=[
         "m",
+        "m_history",
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
@@ -234,7 +250,9 @@ class GPMOArbVecBacktrackingResult:
     """Immutable result from ``GPMO_ArbVec_backtracking_jax``."""
 
     m: jax.Array
+    m_history: jax.Array
     x: jax.Array
+    x_history: jax.Array
     residual: jax.Array
     residual_history: jax.Array
     selected_dipoles: jax.Array
@@ -252,7 +270,9 @@ jax.tree_util.register_dataclass(
     GPMOArbVecBacktrackingResult,
     data_fields=[
         "m",
+        "m_history",
         "x",
+        "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
@@ -359,9 +379,12 @@ def GPMO_baseline_jax(
         K=K,
     )
     m = core.x * grid.m_maxima[:, None]
+    m_history = core.x_history * grid.m_maxima[None, :, None]
     return GPMOBaselineResult(
         m=m,
+        m_history=m_history,
         x=core.x,
+        x_history=core.x_history,
         residual=core.residual,
         residual_history=core.residual_history,
         selected_dipoles=core.selected_dipoles,
@@ -401,9 +424,12 @@ def GPMO_multi_jax(
         K=K,
     )
     m = core.x * grid.m_maxima[:, None]
+    m_history = core.x_history * grid.m_maxima[None, :, None]
     return GPMOMultiResult(
         m=m,
+        m_history=m_history,
         x=core.x,
+        x_history=core.x_history,
         residual=core.residual,
         residual_history=core.residual_history,
         selected_seed_dipoles=core.selected_seed_dipoles,
@@ -447,9 +473,12 @@ def GPMO_backtracking_jax(
         K=K,
     )
     m = core.x * grid.m_maxima[:, None]
+    m_history = core.x_history * grid.m_maxima[None, :, None]
     return GPMOBacktrackingResult(
         m=m,
+        m_history=m_history,
         x=core.x,
+        x_history=core.x_history,
         residual=core.residual,
         residual_history=core.residual_history,
         selected_dipoles=core.selected_dipoles,
@@ -499,9 +528,12 @@ def GPMO_ArbVec_jax(
         K=K,
     )
     m = core.x * grid.m_maxima[:, None]
+    m_history = core.x_history * grid.m_maxima[None, :, None]
     return GPMOArbVecResult(
         m=m,
+        m_history=m_history,
         x=core.x,
+        x_history=core.x_history,
         residual=core.residual,
         residual_history=core.residual_history,
         selected_dipoles=core.selected_dipoles,
@@ -557,9 +589,12 @@ def GPMO_ArbVec_backtracking_jax(
         x_init=x_init_arr,
     )
     m = core.x * grid.m_maxima[:, None]
+    m_history = core.x_history * grid.m_maxima[None, :, None]
     return GPMOArbVecBacktrackingResult(
         m=m,
+        m_history=m_history,
         x=core.x,
+        x_history=core.x_history,
         residual=core.residual,
         residual_history=core.residual_history,
         selected_dipoles=core.selected_dipoles,
@@ -615,6 +650,26 @@ def _last_error(
     if max_iter == 0:
         return jnp.asarray(0.0, dtype=dtype)
     return residual_history[-1]
+
+
+def _relax_and_split_cost(
+    grid: PermanentMagnetGridJAX,
+    m: jax.Array,
+    m_proxy: jax.Array,
+    *,
+    nu: float,
+    reg_l2: float,
+) -> jax.Array:
+    m_flat = jnp.reshape(m, (-1,))
+    residual = grid.A_obj @ m_flat - grid.b_obj
+    r2 = 0.5 * jnp.sum(residual * residual)
+    n2 = (
+        0.5
+        * jnp.sum((m - m_proxy) * (m - m_proxy))
+        / jnp.asarray(np.float64(nu), dtype=m.dtype)
+    )
+    l2 = jnp.asarray(np.float64(reg_l2), dtype=m.dtype) * jnp.sum(m * m)
+    return r2 + n2 + l2
 
 
 def relax_and_split_jax(
@@ -685,17 +740,26 @@ def relax_and_split_jax(
     m_proxy_history = []
     residual_histories = []
     for _ in range(max_iter_RS):
+        m_proxy_current = m_proxy
         m, residual_history = _run_mwpgp(
             grid,
             m,
-            m_proxy,
+            m_proxy_current,
             alpha=alpha,
             nu=nu,
             reg_l2=reg_l2,
             max_iter=max_iter,
         )
         m_history.append(m)
-        errors.append(_last_error(residual_history, m.dtype, max_iter))
+        errors.append(
+            _relax_and_split_cost(
+                grid,
+                m,
+                m_proxy_current,
+                nu=nu,
+                reg_l2=reg_l2,
+            )
+        )
         m_proxy = _moments_as_matrix(
             "m_proxy", prox(m, grid.m_maxima, reg_rs, nu), grid.ndipoles
         )

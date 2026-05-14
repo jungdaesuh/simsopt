@@ -694,7 +694,7 @@ def _precomputed_wireframe_matrices(wframe, Amat: object, bvec: object):
 
 
 def _gsco_initial_state(wframe, params: dict):
-    if "x_init" in params:
+    if params.get("x_init") is not None:
         x_init = np.array(
             np.reshape(params["x_init"], (-1, 1)),
             dtype=np.float64,
@@ -710,7 +710,7 @@ def _gsco_initial_state(wframe, params: dict):
         )
 
     free_loops = wframe.get_free_cells(form="logical")
-    if "loop_count_init" in params:
+    if params.get("loop_count_init") is not None:
         loop_count_init = np.ascontiguousarray(params["loop_count_init"]).astype(
             np.int64
         )

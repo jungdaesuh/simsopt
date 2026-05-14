@@ -5319,7 +5319,14 @@ def _taylor_test_second_order(f, grad_fn, hess_fn, x, *, epsilons=None):
 class TestToroidalFluxJAXTaylor:
     @pytest.mark.parametrize("stellsym", [False, True])
     def test_toroidal_flux_surface_hessian_taylor(self, stellsym):
-        """Pure-JAX ToroidalFlux Hessian gate for surface DOFs."""
+        """Pure-JAX ToroidalFlux Hessian gate for surface DOFs.
+
+        Oracle: type 4 — second-order Taylor remainder
+        ``|J(x + eps*d) - J(x) - eps*grad·d - 0.5*eps^2*d·H·d| = O(eps^3)``
+        on a closed-form pure-JAX flux integrand; independent of any
+        code-path comparison.
+        Lane: smoke.
+        """
         surface_dofs, scatter_idx = _make_surface_dofs(stellsym)
         coil_gammas, coil_gammadashs, coil_currents = _make_tf_coils_from_dofs(
             _TF_COIL_DOFS
@@ -5343,7 +5350,13 @@ class TestToroidalFluxJAXTaylor:
 
     @pytest.mark.parametrize("stellsym", [False, True])
     def test_toroidal_flux_coil_dofs_taylor(self, stellsym):
-        """Pure-JAX ToroidalFlux gradient gate for a traceable TF coil family."""
+        """Pure-JAX ToroidalFlux gradient gate for a traceable TF coil family.
+
+        Oracle: type 4 — first-order Taylor remainder
+        ``|J(x + eps*d) - J(x) - eps*grad·d| = O(eps^2)`` on the same
+        pure-JAX flux integrand, varied over TF coil DOFs.
+        Lane: smoke.
+        """
         surface_dofs, scatter_idx = _make_surface_dofs(stellsym)
         points, gammadash2 = _surface_slice_from_dofs(
             surface_dofs, stellsym, scatter_idx
@@ -5367,6 +5380,14 @@ class TestAspectRatioJAXObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_aspect_ratio_value_parity_matrix(self, surfacetype, stellsym):
+        """Match CPU ``AspectRatio`` value against the JAX wrapper.
+
+        Oracle: type 1 — CPU ``AspectRatio.J()`` calls
+        ``Surface.aspect_ratio()`` (Python composition over C++
+        ``Surface::volume`` in ``src/simsoptpp/surface.cpp`` plus a Python
+        ``Surface.mean_cross_sectional_area`` quadrature).
+        Lane: parity, rtol=1e-12, atol=1e-12.
+        """
         aspect_cpu, aspect_jax = _make_aspect_ratio_pair(surfacetype, stellsym)
 
         np.testing.assert_allclose(
@@ -5383,6 +5404,14 @@ class TestAspectRatioJAXObjectParity:
         surfacetype,
         stellsym,
     ):
+        """Match CPU ``AspectRatio`` first derivatives against the JAX wrapper.
+
+        Oracle: type 1 — CPU ``AspectRatio.dJ_by_dsurfacecoefficients()`` calls
+        ``Surface.daspect_ratio_by_dcoeff()`` (Python chain rule over C++
+        ``Surface::dvolume_by_dcoeff`` and Python
+        ``Surface.dmean_cross_sectional_area_by_dcoeff``).
+        Lane: parity, rtol=1e-10, atol=1e-11.
+        """
         aspect_cpu, aspect_jax = _make_aspect_ratio_pair(surfacetype, stellsym)
 
         np.testing.assert_allclose(
@@ -5405,6 +5434,15 @@ class TestAspectRatioJAXObjectParity:
         surfacetype,
         stellsym,
     ):
+        """Match CPU ``AspectRatio`` Hessian against the JAX wrapper.
+
+        Oracle: type 1 — CPU
+        ``AspectRatio.d2J_by_dsurfacecoefficientsdsurfacecoefficients()``
+        calls ``Surface.d2aspect_ratio_by_dcoeff_dcoeff()`` (Python
+        chain rule over C++ ``Surface::d2volume_by_dcoeffdcoeff`` and
+        Python ``Surface.d2mean_cross_sectional_area_by_dcoeff_dcoeff``).
+        Lane: parity, rtol=1e-9, atol=1e-10.
+        """
         aspect_cpu, aspect_jax = _make_aspect_ratio_pair(surfacetype, stellsym)
 
         np.testing.assert_allclose(
@@ -5417,6 +5455,14 @@ class TestAspectRatioJAXObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_aspect_ratio_regridded_wrapper_parity(self, surfacetype, stellsym):
+        """Match CPU/JAX ``AspectRatio`` under a regridded surface view.
+
+        Oracle: type 1 — same CPU ``AspectRatio.J()`` and
+        ``AspectRatio.dJ_by_dsurfacecoefficients()`` oracle as above,
+        evaluated on a copied surface with ``nphi=9, ntheta=10`` to
+        exercise the wrapper's ``surface.copy(...)`` regrid path.
+        Lane: parity, rtol=1e-12 (value) / 1e-10 (gradient).
+        """
         aspect_cpu, aspect_jax = _make_aspect_ratio_pair(
             surfacetype,
             stellsym,
@@ -5438,6 +5484,14 @@ class TestAspectRatioJAXObjectParity:
         )
 
     def test_aspect_ratio_regridded_tensor_clamped_dims_remains_unsupported(self):
+        """Pin the unsupported-contract: clamped ``SurfaceXYZTensorFourier`` raises.
+
+        Lane: routing — guards that ``AspectRatioJAX.J()`` raises
+        ``NotImplementedError`` rather than silently returning NaN for
+        ``SurfaceXYZTensorFourier(clamped_dims=...)`` (see the
+        ``surface_mean_cross_sectional_area_jax_from_dofs`` guard in
+        ``src/simsopt/geo/surfaceobjectives_jax.py``); no parity assertion.
+        """
         from simsopt.geo import SurfaceXYZTensorFourier
 
         surface = SurfaceXYZTensorFourier(
@@ -5458,11 +5512,24 @@ class TestAspectRatioJAXObjectParity:
             aspect_jax.J()
 
     def test_aspect_ratio_lazy_package_export(self):
+        """Verify lazy ``simsopt.geo.__getattr__`` returns the canonical object.
+
+        Lane: routing — guards the lazy export table in
+        ``simsopt/geo/__init__.py`` against typos that would silently shadow
+        ``AspectRatioJAX``; no parity assertion.
+        """
         from simsopt.geo import AspectRatioJAX
 
         assert AspectRatioJAX is surfaceobjectives_jax_module.AspectRatioJAX
 
     def test_aspect_ratio_first_order_taylor(self):
+        """First-order Taylor remainder convergence for aspect-ratio gradient.
+
+        Oracle: type 4 — finite-difference Taylor remainder
+        ``|J(x + eps*d) - J(x) - eps*grad·d| = O(eps^2)`` over geometric eps
+        sweep; independent of any code-path comparison.
+        Lane: smoke, atol=1e-11.
+        """
         surface = _make_aspect_ratio_surface("SurfaceRZFourier", stellsym=False)
         spec = surface.surface_spec()
         dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
@@ -5482,6 +5549,13 @@ class TestAspectRatioJAXObjectParity:
         )
 
     def test_aspect_ratio_second_order_taylor(self):
+        """Second-order Taylor remainder convergence for aspect-ratio Hessian.
+
+        Oracle: type 4 — finite-difference Taylor remainder
+        ``|J(x + eps*d) - J(x) - eps*grad·d - 0.5*eps^2*d·H·d| = O(eps^3)``;
+        independent of any code-path comparison.
+        Lane: smoke.
+        """
         surface = _make_aspect_ratio_surface("SurfaceRZFourier", stellsym=False)
         spec = surface.surface_spec()
         dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
@@ -5511,6 +5585,13 @@ class TestAreaVolumeJAXObjectParity:
         surfacetype,
         stellsym,
     ):
+        """Match CPU ``Area``/``Volume`` value against the JAX wrapper.
+
+        Oracle: type 1 — CPU ``simsopt.geo.surfaceobjectives.Area`` /
+        ``Volume`` route through C++ ``Surface::area()`` /
+        ``Surface::volume()`` in ``src/simsoptpp/surface.cpp``.
+        Lane: parity, rtol=1e-12, atol=1e-12.
+        """
         cpu_obj, jax_obj = pair_factory(surfacetype, stellsym)
 
         np.testing.assert_allclose(
@@ -5529,6 +5610,14 @@ class TestAreaVolumeJAXObjectParity:
         surfacetype,
         stellsym,
     ):
+        """Match CPU ``Area``/``Volume`` first derivatives against the JAX wrapper.
+
+        Oracle: type 1 — CPU ``Area.dJ_by_dsurfacecoefficients()`` /
+        ``Volume.dJ_by_dsurfacecoefficients()`` route through C++
+        ``Surface::darea_by_dcoeff()`` / ``Surface::dvolume_by_dcoeff()``
+        in ``src/simsoptpp/surface.cpp``.
+        Lane: parity, rtol=1e-10, atol=1e-11.
+        """
         cpu_obj, jax_obj = pair_factory(surfacetype, stellsym)
 
         np.testing.assert_allclose(
@@ -5553,6 +5642,14 @@ class TestAreaVolumeJAXObjectParity:
         surfacetype,
         stellsym,
     ):
+        """Match CPU ``Area``/``Volume`` Hessian against the JAX wrapper.
+
+        Oracle: type 1 — CPU ``Area.d2J_by_dsurfacecoefficientsdsurfacecoefficients()``
+        / ``Volume.d2J_by_dsurfacecoefficientsdsurfacecoefficients()`` route through
+        C++ ``Surface::d2area_by_dcoeffdcoeff()`` /
+        ``Surface::d2volume_by_dcoeffdcoeff()`` in ``src/simsoptpp/surface.cpp``.
+        Lane: parity, rtol=1e-9, atol=1e-10.
+        """
         cpu_obj, jax_obj = pair_factory(surfacetype, stellsym)
 
         np.testing.assert_allclose(
@@ -5564,6 +5661,13 @@ class TestAreaVolumeJAXObjectParity:
 
     @pytest.mark.parametrize("pair_factory", (_make_area_pair, _make_volume_pair))
     def test_area_volume_regridded_wrapper_parity(self, pair_factory):
+        """Match CPU/JAX ``Area``/``Volume`` under a regridded surface view.
+
+        Oracle: type 1 — same C++ ``Surface::area()`` / ``Surface::volume()``
+        and their gradient counterparts, evaluated on a copied surface with
+        ``nphi=9, ntheta=10``.
+        Lane: parity, rtol=1e-12 (value) / 1e-10 (gradient).
+        """
         cpu_obj, jax_obj = pair_factory(
             "SurfaceRZFourier",
             stellsym=False,
@@ -5594,6 +5698,13 @@ class TestAreaVolumeJAXObjectParity:
         ),
     )
     def test_area_volume_lazy_package_exports(self, export_name):
+        """Verify lazy ``simsopt.geo.__getattr__`` returns the canonical module object.
+
+        Lane: routing — guards ``simsopt/geo/__init__.py``'s lazy export
+        table against typos in the registration of the four new
+        ``AreaJAX`` / ``VolumeJAX`` / ``surface_area_jax_from_dofs`` /
+        ``surface_volume_jax_from_dofs`` exports; no parity assertion.
+        """
         import simsopt.geo as geo_module
 
         assert getattr(geo_module, export_name) is getattr(
@@ -5623,6 +5734,17 @@ class TestSurfaceScalarMetricJAXHelpers:
         cpu_grad_name,
         cpu_hess_name,
     ):
+        """Match CPU surface-scalar gradient/Hessian methods against JAX helpers.
+
+        Oracle: type 1 — CPU
+        ``Surface.{dmean_cross_sectional_area,dminor_radius,dmajor_radius,daspect_ratio}_by_dcoeff()``
+        and their ``d2..._by_dcoeff_dcoeff()`` counterparts are Python chain
+        rules over C++ ``Surface::dvolume_by_dcoeff`` /
+        ``Surface::d2volume_by_dcoeffdcoeff`` plus Python
+        ``Surface.dmean_cross_sectional_area_by_dcoeff`` /
+        ``Surface.d2mean_cross_sectional_area_by_dcoeff_dcoeff`` primitives.
+        Lane: parity, rtol=1e-10 (grad) / 1e-9 (hess), atol=1e-11 / 1e-10.
+        """
         surface = _make_aspect_ratio_surface(surfacetype, stellsym=False)
         spec = surface.surface_spec()
         dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
@@ -5660,6 +5782,13 @@ class TestSurfaceScalarMetricJAXHelpers:
         ),
     )
     def test_surface_scalar_metric_helper_lazy_exports(self, export_name):
+        """Verify lazy ``simsopt.geo.__getattr__`` for scalar-metric helper exports.
+
+        Lane: routing — guards the lazy export table in
+        ``simsopt/geo/__init__.py`` against typos for the eight
+        ``surface_d*_jax_from_dofs`` and ``surface_d2*_jax_from_dofs``
+        helper names; no parity assertion.
+        """
         import simsopt.geo as geo_module
 
         assert getattr(geo_module, export_name) is getattr(
@@ -5672,6 +5801,12 @@ class TestPrincipalCurvatureJAXObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_surface_curvature_helper_value_parity_matrix(self, surfacetype, stellsym):
+        """Match CPU ``Surface.surface_curvatures()`` against the JAX helper.
+
+        Oracle: type 1 — direct C++ kernel ``Surface::surface_curvatures_impl``
+        in ``src/simsoptpp/surface.cpp``.
+        Lane: parity, rtol=1e-12, atol=1e-10.
+        """
         surface = _make_aspect_ratio_surface(surfacetype, stellsym)
         spec = surface.surface_spec()
         dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
@@ -5693,6 +5828,13 @@ class TestPrincipalCurvatureJAXObjectParity:
         surfacetype,
         stellsym,
     ):
+        """Match CPU ``Surface.dsurface_curvatures_by_dcoeff()`` against the JAX helper.
+
+        Oracle: type 1 — direct C++ kernel
+        ``Surface::dsurface_curvatures_by_dcoeff_impl`` in
+        ``src/simsoptpp/surface.cpp``.
+        Lane: parity, rtol=1e-10, atol=1e-9.
+        """
         surface = _make_aspect_ratio_surface(surfacetype, stellsym)
         spec = surface.surface_spec()
         dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
@@ -5710,6 +5852,13 @@ class TestPrincipalCurvatureJAXObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_principal_curvature_value_parity_matrix(self, surfacetype, stellsym):
+        """Match CPU ``PrincipalCurvature.J()`` against the JAX wrapper.
+
+        Oracle: type 1 — CPU ``PrincipalCurvature.J()`` is a Python penalty
+        composed over the direct C++ kernels ``Surface::surface_curvatures``
+        and ``Surface::normal``.
+        Lane: parity, rtol=1e-12, atol=1e-10.
+        """
         pc_cpu, pc_jax, _surface = _make_principal_curvature_pair(
             surfacetype,
             stellsym,
@@ -5725,6 +5874,14 @@ class TestPrincipalCurvatureJAXObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_principal_curvature_gradient_parity_matrix(self, surfacetype, stellsym):
+        """Match CPU ``PrincipalCurvature.dJ`` against the JAX wrapper gradient.
+
+        Oracle: type 1 — CPU ``PrincipalCurvature.dJ(partials=True)`` composes
+        the gradient over the direct C++ kernels
+        ``Surface::dsurface_curvatures_by_dcoeff`` and
+        ``Surface::dnormal_by_dcoeff``.
+        Lane: parity, rtol=1e-10, atol=1e-9.
+        """
         pc_cpu, pc_jax, surface = _make_principal_curvature_pair(
             surfacetype,
             stellsym,
@@ -5738,6 +5895,12 @@ class TestPrincipalCurvatureJAXObjectParity:
         )
 
     def test_principal_curvature_lazy_package_export(self):
+        """Verify lazy ``simsopt.geo.__getattr__`` returns the canonical object.
+
+        Lane: routing — guards the lazy export table in
+        ``simsopt/geo/__init__.py`` against typos that would silently shadow
+        ``PrincipalCurvatureJAX``; no parity assertion.
+        """
         from simsopt.geo import PrincipalCurvatureJAX
 
         assert (
@@ -5752,6 +5915,14 @@ class TestPrincipalCurvatureJAXObjectParity:
         ),
     )
     def test_surface_curvature_helper_lazy_exports(self, export_name):
+        """Verify lazy ``simsopt.geo.__getattr__`` for curvature-helper exports.
+
+        Lane: routing — guards the lazy export table in
+        ``simsopt/geo/__init__.py`` against typos for the
+        ``surface_curvatures_jax_from_dofs`` /
+        ``surface_dsurface_curvatures_jax_from_dofs`` helper names; no
+        parity assertion.
+        """
         import simsopt.geo as geo_module
 
         assert getattr(geo_module, export_name) is getattr(
@@ -5760,6 +5931,13 @@ class TestPrincipalCurvatureJAXObjectParity:
         )
 
     def test_principal_curvature_first_order_taylor(self):
+        """First-order Taylor remainder convergence for principal-curvature gradient.
+
+        Oracle: type 4 — finite-difference Taylor remainder
+        ``|J(x + eps*d) - J(x) - eps*grad·d| = O(eps^2)``; independent of any
+        code-path comparison.
+        Lane: smoke, atol=1e-9.
+        """
         surface = _make_aspect_ratio_surface("SurfaceRZFourier", stellsym=False)
         spec = surface.surface_spec()
         dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
@@ -5786,6 +5964,14 @@ class TestQfmResidualJAXObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_qfm_residual_value_parity_matrix(self, surfacetype, stellsym):
+        """Match CPU ``QfmResidual.J()`` against the JAX wrapper.
+
+        Oracle: type 1 — CPU ``QfmResidual.J()`` evaluates the ratio
+        ``sum((B·n̂)² * |N|) / sum(|B|² * |N|)`` (i.e.
+        ``∫(B·n̂)² dS / ∫B² dS``) over surface quadpoints using C++
+        ``BiotSavart::B`` and C++ ``Surface::normal`` / ``Surface::gamma``.
+        Lane: parity, rtol=1e-12, atol=1e-12.
+        """
         qfm_cpu, qfm_jax, _surface = _make_qfm_pair(surfacetype, stellsym)
 
         np.testing.assert_allclose(
@@ -5798,6 +5984,13 @@ class TestQfmResidualJAXObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_qfm_residual_gradient_parity_matrix(self, surfacetype, stellsym):
+        """Match CPU ``QfmResidual.dJ_by_dsurfacecoefficients`` vs JAX wrapper.
+
+        Oracle: type 1 — CPU
+        ``QfmResidual.dJ_by_dsurfacecoefficients()`` composes the gradient
+        from the same C++ ``BiotSavart`` and ``Surface`` derivative primitives.
+        Lane: parity, rtol=1e-10, atol=1e-10.
+        """
         qfm_cpu, qfm_jax, _surface = _make_qfm_pair(surfacetype, stellsym)
 
         np.testing.assert_allclose(
@@ -5808,11 +6001,24 @@ class TestQfmResidualJAXObjectParity:
         )
 
     def test_qfm_residual_lazy_package_export(self):
+        """Verify lazy ``simsopt.geo.__getattr__`` returns the canonical object.
+
+        Lane: routing — guards the lazy export table in
+        ``simsopt/geo/__init__.py`` against typos that would silently shadow
+        ``QfmResidualJAX``; no parity assertion.
+        """
         from simsopt.geo import QfmResidualJAX
 
         assert QfmResidualJAX is surfaceobjectives_jax_module.QfmResidualJAX
 
     def test_qfm_residual_first_order_taylor(self):
+        """First-order Taylor remainder convergence for QFM residual gradient.
+
+        Oracle: type 4 — finite-difference Taylor remainder
+        ``|J(x + eps*d) - J(x) - eps*grad·d| = O(eps^2)``; independent of any
+        code-path comparison.
+        Lane: smoke, atol=1e-10.
+        """
         _qfm_cpu, qfm_jax, surface = _make_qfm_pair(
             "SurfaceRZFourier",
             stellsym=False,
@@ -5839,6 +6045,14 @@ class TestQfmResidualJAXObjectParity:
         )
 
     def test_qfm_residual_surface_update_cache_parity(self):
+        """Match CPU/JAX after a surface DOF perturbation + cache invalidation.
+
+        Oracle: type 1 — same CPU ``QfmResidual.J`` /
+        ``dJ_by_dsurfacecoefficients`` oracle as above, evaluated after
+        ``surface.set_dofs(...)`` and ``invalidate_cache()`` on both wrappers,
+        with a witness check that the value actually moved by more than 1e-14.
+        Lane: parity, rtol=1e-12 (value) / 1e-10 (gradient).
+        """
         qfm_cpu, qfm_jax, surface = _make_qfm_pair(
             "SurfaceRZFourier",
             stellsym=False,
@@ -5869,6 +6083,15 @@ class TestQfmResidualJAXObjectParity:
 
 
 def test_major_radius_jax_value_and_native_adjoint_gradient():
+    """Match CPU ``MajorRadius`` value and adjoint gradient via fake BoozerSurface.
+
+    Oracle: type 1 — CPU ``MajorRadius.J()`` calls
+    ``Surface.major_radius()`` (Python composition over C++
+    ``Surface::volume`` and Python ``Surface.mean_cross_sectional_area``);
+    the ``dJ(partials=True).data`` projection is the adjoint contract that
+    the JAX wrapper's ``dJ_by_dcoil_dofs`` must satisfy.
+    Lane: parity, rtol=1e-12 (value) / 1e-10 (gradient).
+    """
     surface = _make_aspect_ratio_surface("SurfaceRZFourier", stellsym=False)
     sdofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
     expected_surface_gradient = (
@@ -6013,6 +6236,15 @@ def test_major_radius_jax_re_solve_directional_finite_difference(
     surfacetype,
     linearization_kind,
 ):
+    """Validate the JAX ``MajorRadiusJAX`` adjoint vs a central FD probe.
+
+    Oracle: type 4 — central finite-difference directional derivative
+    ``(J(c0 + eps*d) - J(c0 - eps*d)) / (2*eps)`` for an eps consistent with
+    the FD step / problem condition (eps=1e-5, rtol=1e-7); independent of any
+    code-path comparison and exercises the run-code re-solve hook on both
+    ``hessian`` (RZFourier) and ``exact_jacobian`` (XYZTensorFourier) lanes.
+    Lane: smoke, rtol=1e-7, atol=1e-10.
+    """
     surface = _make_aspect_ratio_surface(surfacetype, stellsym=False)
     base_sdofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
     surface_dof_map = np.zeros((base_sdofs.size, 2), dtype=np.float64)
@@ -6108,6 +6340,12 @@ def test_major_radius_jax_re_solve_directional_finite_difference(
 
 
 def test_major_radius_jax_lazy_package_export():
+    """Verify lazy ``simsopt.geo.__getattr__`` returns the canonical object.
+
+    Lane: routing — guards the lazy export table in
+    ``simsopt/geo/__init__.py`` against typos that would silently shadow
+    ``MajorRadiusJAX``; no parity assertion.
+    """
     from simsopt.geo import MajorRadiusJAX
 
     assert MajorRadiusJAX is surfaceobjectives_jax_module.MajorRadiusJAX
@@ -6121,10 +6359,27 @@ class TestToroidalFluxObjectParity:
             yield
 
     def test_reference_object_case_value_parity(self):
+        """Match CPU ``ToroidalFlux.J()`` against the JAX BiotSavart path.
+
+        Oracle: type 1 — CPU ``ToroidalFlux.J()`` integrates ``A · gammadash2``
+        over the ϕ=const boundary using C++ ``BiotSavart::A`` and C++
+        ``Surface::gammadash2``; the JAX variant routes through
+        ``BiotSavartJAX``.
+        Lane: parity, rtol/atol from ``parity_ladder_tolerances("derivative_heavy")``.
+        """
         tf_cpu, tf_jax = _make_reference_object_toroidal_flux_pair()
         _assert_toroidal_flux_value_parity(tf_jax.J(), tf_cpu.J())
 
     def test_toroidal_flux_is_constant(self):
+        """ToroidalFlux is invariant along ϕ on an equilibrium-like surface.
+
+        Oracle: type 1 — CPU ``ToroidalFlux.J`` (same oracle as above) for
+        each ϕ-slice, with a closed-form physical witness that the spread
+        across slices is bounded by a 1e-2 relative-deviation budget for
+        the NCSX equilibrium fixture (a physics modelling allowance, not a
+        numerical tolerance).
+        Lane: parity, rtol/atol from ``parity_ladder_tolerances("derivative_heavy")``.
+        """
         surface = get_exact_surface()
         bs_cpu, bs_jax = _make_ncsx_biotsavart_pair()
         num_phi = surface.gamma().shape[0]
@@ -6150,6 +6405,12 @@ class TestToroidalFluxObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_toroidal_flux_value_parity_matrix(self, surfacetype, stellsym):
+        """Match CPU ``ToroidalFlux.J()`` against the JAX wrapper across (surfacetype, stellsym).
+
+        Oracle: type 1 — same CPU ``ToroidalFlux.J()`` oracle as above,
+        parametrized over surface kind and stellarator symmetry.
+        Lane: parity, rtol/atol from ``parity_ladder_tolerances("derivative_heavy")``.
+        """
         _assert_toroidal_flux_pair_parity(
             surfacetype,
             stellsym,
@@ -6161,6 +6422,13 @@ class TestToroidalFluxObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_toroidal_flux_first_derivative(self, surfacetype, stellsym):
+        """Match CPU ``ToroidalFlux.dJ_by_dsurfacecoefficients`` vs JAX wrapper.
+
+        Oracle: type 1 — CPU
+        ``ToroidalFlux.dJ_by_dsurfacecoefficients()`` composes the gradient
+        from the same C++ ``BiotSavart`` and ``Surface`` derivative primitives.
+        Lane: parity, rtol=1e-9, atol=1e-11.
+        """
         _assert_toroidal_flux_pair_parity(
             surfacetype,
             stellsym,
@@ -6172,6 +6440,14 @@ class TestToroidalFluxObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_toroidal_flux_second_derivative(self, surfacetype, stellsym):
+        """Match CPU ``ToroidalFlux.d2J_..._dsurfacecoefficients`` vs JAX wrapper.
+
+        Oracle: type 1 — CPU
+        ``ToroidalFlux.d2J_by_dsurfacecoefficientsdsurfacecoefficients()``
+        composes the Hessian from the same C++ ``BiotSavart`` /
+        ``Surface`` second-derivative primitives.
+        Lane: parity, rtol=1e-8, atol=1e-10.
+        """
         _assert_toroidal_flux_pair_parity(
             surfacetype,
             stellsym,
@@ -6183,6 +6459,13 @@ class TestToroidalFluxObjectParity:
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_toroidal_flux_partial_derivatives_wrt_coils(self, surfacetype, stellsym):
+        """Match CPU ``ToroidalFlux.dJ_by_dcoils`` vs the JAX coil-derivative path.
+
+        Oracle: type 1 — CPU ``ToroidalFlux.dJ_by_dcoils()`` composes the
+        coil-derivative tensor over C++ ``BiotSavart`` coil-derivative
+        primitives.
+        Lane: parity, rtol=1e-9, atol=1e-7.
+        """
         _assert_toroidal_flux_pair_parity(
             surfacetype,
             stellsym,

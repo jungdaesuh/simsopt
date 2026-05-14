@@ -75,6 +75,17 @@ def test_ellipe_zero_endpoint_exact():
     assert abs(got - np.pi / 2) < _ATOL
 
 
+def test_ellipk_one_endpoint_diverges_like_scipy():
+    """``K(1)`` preserves the SciPy singular endpoint contract."""
+    assert np.isposinf(float(ellipk(jnp.array(1.0))))
+
+
+def test_ellipe_one_endpoint_exact():
+    """``E(1) = 1`` preserves the SciPy endpoint contract."""
+    got = float(ellipe(jnp.array(1.0)))
+    assert abs(got - 1.0) < _ATOL
+
+
 # -- vmap consistency ------------------------------------------------------
 
 

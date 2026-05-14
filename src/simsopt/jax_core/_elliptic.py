@@ -153,7 +153,11 @@ def ellipk(m: jax.Array) -> jax.Array:
     endpoint, just as the CPU ``CircularCoil`` oracle is singular on the coil
     wire. At ``m = 0`` the integral equals ``pi / 2``.
     """
-    return _ellipk_jit(jnp.asarray(m))
+    m_arr = jnp.asarray(m)
+    zero = m_arr - m_arr
+    one = (zero == zero).astype(m_arr.dtype)
+    inf = one / zero
+    return jnp.where(m_arr == one, inf, _ellipk_jit(m_arr))
 
 
 def ellipe(m: jax.Array) -> jax.Array:
@@ -163,4 +167,7 @@ def ellipe(m: jax.Array) -> jax.Array:
     ``E(m) = R_F(0, 1 - m, 1) - (m / 3) R_D(0, 1 - m, 1)``. At ``m = 0`` the
     integral equals ``pi / 2`` and at ``m = 1`` it equals ``1``.
     """
-    return _ellipe_jit(jnp.asarray(m))
+    m_arr = jnp.asarray(m)
+    zero = m_arr - m_arr
+    one = (zero == zero).astype(m_arr.dtype)
+    return jnp.where(m_arr == one, one, _ellipe_jit(m_arr))

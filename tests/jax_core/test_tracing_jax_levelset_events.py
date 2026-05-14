@@ -287,6 +287,34 @@ def test_compute_fieldlines_jax_accepts_levelset_stopping_criterion(monkeypatch)
     assert res_phi_hits[0].shape[1] == 5
 
 
+def test_compute_fieldlines_jax_accepts_surfaceclassifier_dist_levelset(monkeypatch):
+    """The example spelling ``LevelsetStoppingCriterion(sc.dist)`` runs on JAX.
+
+    ``SurfaceClassifier`` owns the grid metadata needed to rebuild the JAX
+    classifier. Passing the raw ``dist`` interpolant must therefore work when
+    that interpolant came from a live ``SurfaceClassifier`` instance, while the
+    generic raw ``sopp`` case below remains a hard error.
+    """
+
+    surf = _build_test_surface(R0=1.0, minor=0.2)
+    sc = SurfaceClassifier(surf, h=0.05, p=2)
+    classifier = LevelsetStoppingCriterion(sc.dist)
+
+    _force_jax_backend(monkeypatch)
+    res_tys, res_phi_hits = compute_fieldlines(
+        ToroidalFieldJAX(1.0, 0.8),
+        [1.5],
+        [0.0],
+        tmax=1.0,
+        tol=1e-9,
+        stopping_criteria=[classifier],
+    )
+    assert len(res_tys) == 1
+    np.testing.assert_allclose(res_tys[0], np.array([[0.0, 1.5, 0.0, 0.0]]))
+    levelset_rows = res_phi_hits[0][res_phi_hits[0][:, 1] < 0]
+    assert levelset_rows.shape[0] >= 1
+
+
 def test_compute_fieldlines_jax_levelset_fires_outside_volume(monkeypatch):
     """Levelset criterion fires through the public wrapper for an outside-start.
 

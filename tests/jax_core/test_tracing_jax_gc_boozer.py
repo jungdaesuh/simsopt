@@ -44,9 +44,14 @@ from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
 from simsopt.field import tracing as tracing_module
 from simsopt.field.boozermagneticfield import BoozerRadialInterpolant
-from simsopt.field.boozermagneticfield_jax import BoozerRadialInterpolantJAX
+from simsopt.field.boozermagneticfield import InterpolatedBoozerField
+from simsopt.field.boozermagneticfield_jax import (
+    BoozerRadialInterpolantJAX,
+    InterpolatedBoozerFieldJAX,
+)
 from simsopt.field.tracing import trace_particles_boozer
 from simsopt.jax_core.tracing import (
+    _BOOZER_RHS_EVAL_KEYS,
     GuidingCenterTracingSpec,
     guiding_center_vacuum_boozer_rhs,
     trace_guiding_center_boozer,
@@ -494,6 +499,79 @@ def test_trace_particles_boozer_jax_routes_when_field_is_jax_wrapper(
         "trace_particles_boozer JAX vs CPU endpoint parity failed: "
         f"jax={jax_endpoint}, cpu={cpu_endpoint}, "
         f"lane_rtol={state_rtol}, lane_atol={state_atol}"
+    )
+
+
+def test_trace_particles_boozer_jax_routes_when_field_is_interpolated_wrapper(
+    monkeypatch, vacuum_bri_and_jax, event_time_lane
+):
+    """``trace_particles_boozer`` routes through JAX for interpolated fields."""
+
+    state_rtol = float(event_time_lane["state_vector_rtol"])
+    state_atol = float(event_time_lane["state_vector_atol"])
+
+    bri, _radial_jax_field = vacuum_bri_and_jax
+    nfp = int(getattr(bri.booz.bx, "nfp", 1))
+    degree = 2
+    srange = (0.0, 1.0, 5)
+    thetarange = (0.0, np.pi, 5)
+    zetarange = (0.0, 2.0 * np.pi / nfp, 5)
+    cpu_field = InterpolatedBoozerField(
+        bri, degree, srange, thetarange, zetarange, True, nfp=nfp, stellsym=True
+    )
+    jax_field = InterpolatedBoozerFieldJAX(
+        bri,
+        degree,
+        srange,
+        thetarange,
+        zetarange,
+        True,
+        nfp=nfp,
+        stellsym=True,
+        scalars=_BOOZER_RHS_EVAL_KEYS,
+    )
+
+    mass = 1.0
+    charge = 1.0
+    Ekin, _speed_total, v_par = _short_orbit_inputs(modB_init=1.0, mass=mass)
+    stz_init = _make_initial_point()
+    tmax = 1.0e-4
+    tol = 1e-10
+
+    cpu_res, cpu_zeta_hits = trace_particles_boozer(
+        cpu_field,
+        stz_init.reshape((1, 3)),
+        [v_par],
+        tmax=tmax,
+        mass=mass,
+        charge=charge,
+        Ekin=Ekin,
+        tol=tol,
+        mode="gc_vac",
+    )
+    assert len(cpu_zeta_hits) == 1
+
+    _force_jax_backend(monkeypatch)
+    jax_res, jax_zeta_hits = trace_particles_boozer(
+        jax_field,
+        stz_init.reshape((1, 3)),
+        [v_par],
+        tmax=tmax,
+        mass=mass,
+        charge=charge,
+        Ekin=Ekin,
+        tol=tol,
+        mode="gc_vac",
+    )
+
+    assert len(jax_res) == 1
+    assert len(jax_zeta_hits) == 1
+    assert jax_zeta_hits[0].shape == (0, 6)
+    assert np.allclose(
+        jax_res[0][-1, 1:5],
+        cpu_res[0][-1, 1:5],
+        rtol=state_rtol,
+        atol=state_atol,
     )
 
 

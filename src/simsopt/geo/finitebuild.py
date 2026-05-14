@@ -54,9 +54,9 @@ class CurveFilament(FramedCurve):
         self.rotation = framedcurve.rotation
         self.framedcurve = framedcurve
         FramedCurve.__init__(self, self.curve, self.rotation)
+        self._jax_curve_dof_mode = "full"
 
         if self._supports_jax_finitebuild_geometry():
-            self._jax_curve_dof_mode = "full"
             self.gamma_jax = jit(self._gamma_jax_from_full_dofs)
             self.dgamma_by_dcoeff_vjp_jax = jit(
                 lambda dofs, cotangent: vjp(self.gamma_jax, dofs)[1](cotangent)[0]

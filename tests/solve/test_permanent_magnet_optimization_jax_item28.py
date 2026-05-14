@@ -385,10 +385,27 @@ def test_relax_and_split_jax_updates_l0_proxy_for_fixed_outer_steps():
         reg_l0=0.02,
     )
     expected_proxy = prox_l0_jax(result.m, grid.m_maxima, reg_l0=0.02, nu=5.0)
+    initial_proxy = prox_l0_jax(grid.m0, grid.m_maxima, reg_l0=0.02, nu=5.0)
+    proxies_used = jnp.concatenate(
+        [initial_proxy[None, :, :], result.m_proxy_history[:-1]], axis=0
+    )
+    expected_errors = []
+    for step in range(2):
+        m_step = result.m_history[step]
+        residual = grid.A_obj @ jnp.reshape(m_step, (-1,)) - grid.b_obj
+        r2 = 0.5 * jnp.sum(residual * residual)
+        n2 = 0.5 * jnp.sum((m_step - proxies_used[step]) ** 2) / 5.0
+        expected_errors.append(r2 + n2)
 
     assert result.errors.shape == (2,)
     assert result.m_history.shape == (2, grid.ndipoles, 3)
     assert result.m_proxy_history.shape == (2, grid.ndipoles, 3)
+    np.testing.assert_allclose(
+        np.asarray(result.errors),
+        np.asarray(expected_errors),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
     np.testing.assert_allclose(
         np.asarray(result.m_proxy),
         np.asarray(expected_proxy),
@@ -430,6 +447,20 @@ def test_gpmo_baseline_jax_matches_cpu_baseline_wrapper():
     )
     result = GPMO_baseline_jax(jax_grid, K=K, reg_l2=reg_l2, single_direction=-1)
 
+    assert result.m_history.shape == (K, jax_grid.ndipoles, 3)
+    assert result.x_history.shape == (K, jax_grid.ndipoles, 3)
+    np.testing.assert_allclose(
+        np.asarray(result.m_history),
+        np.asarray(result.x_history) * np.asarray(jax_grid.m_maxima)[None, :, None],
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.m_history[-1]).reshape(-1),
+        np.asarray(result.m).reshape(-1),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
     np.testing.assert_allclose(
         np.asarray(result.m).reshape(-1),
         cpu_grid.m,
@@ -731,6 +762,14 @@ def test_gpmo_arbvec_backtracking_jax_matches_cpu_arbvec_backtracking_wrapper():
         backtracking=backtracking,
         thresh_angle=thresh_angle,
         max_nMagnets=max_nMagnets,
+    )
+    assert result.m_history.shape == (K, jax_grid.ndipoles, 3)
+    assert result.x_history.shape == (K, jax_grid.ndipoles, 3)
+    np.testing.assert_allclose(
+        np.asarray(result.m_history),
+        np.asarray(result.x_history) * np.asarray(jax_grid.m_maxima)[None, :, None],
+        rtol=_RTOL,
+        atol=_ATOL,
     )
     np.testing.assert_allclose(
         np.asarray(result.m).reshape(-1),

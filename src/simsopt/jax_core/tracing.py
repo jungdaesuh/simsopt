@@ -78,6 +78,8 @@ import numpy as np
 
 from ..field.boozermagneticfield_jax import (
     BoozerRadialInterpolantFrozenState,
+    InterpolatedBoozerFieldFrozenState,
+    _INTERP_EVALUATORS,
     _eval_dGds as _radial_dGds,
     _eval_dIds as _radial_dIds,
     _eval_dKdtheta as _radial_dKdtheta,
@@ -1954,6 +1956,8 @@ def _boozer_field_evaluators(state) -> dict[str, Callable]:
     - :class:`simsopt.field.boozermagneticfield_jax.BoozerRadialInterpolantFrozenState`
       — spline + Fourier evaluators from
       :mod:`simsopt.field.boozermagneticfield_jax`.
+    - :class:`simsopt.field.boozermagneticfield_jax.InterpolatedBoozerFieldFrozenState`
+      — regular-grid Boozer scalar evaluators from the same module.
 
     Raises:
         TypeError: when the state type has no JAX evaluators registered.
@@ -1988,10 +1992,13 @@ def _boozer_field_evaluators(state) -> dict[str, Callable]:
             "dGds": _radial_dGds,
             "dIds": _radial_dIds,
         }
+    if isinstance(state, InterpolatedBoozerFieldFrozenState):
+        return {key: _INTERP_EVALUATORS[key] for key in _BOOZER_RHS_EVAL_KEYS}
     raise TypeError(
         f"No JAX RHS evaluators registered for frozen-state type "
         f"{type(state).__name__}. Supported types: "
-        f"BoozerAnalyticFrozenState, BoozerRadialInterpolantFrozenState."
+        f"BoozerAnalyticFrozenState, BoozerRadialInterpolantFrozenState, "
+        f"InterpolatedBoozerFieldFrozenState."
     )
 
 

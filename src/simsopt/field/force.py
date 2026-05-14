@@ -46,8 +46,10 @@ __all__ = [
     "_induced_currents_pure",
     "NetFluxes",
     "B2Energy",
+    "B2EnergyJAX",
     "SquaredMeanForce",
     "LpCurveForce",
+    "LpCurveForceJAX",
     "SquaredMeanTorque",
     "LpCurveTorque",
 ]
@@ -1315,6 +1317,9 @@ class B2Energy(Optimizable):
     return_fn_map = {"J": J, "dJ": dJ}
 
 
+B2EnergyJAX = B2Energy
+
+
 def _net_fluxes_pure(
     gammas_targets,
     gammadashs_targets,
@@ -2274,6 +2279,9 @@ class LpCurveForce(Optimizable):
         return dJ
 
     return_fn_map = {"J": J, "dJ": dJ}
+
+
+LpCurveForceJAX = LpCurveForce
 
 
 def lp_torque_pure(

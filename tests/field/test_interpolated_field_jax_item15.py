@@ -189,6 +189,37 @@ class TestInterpolatedFieldJAXParity:
             atol=_ATOL,
         )
 
+    def test_jax_B_at_matches_batched_B(self):
+        """Single-point tracing adapter matches the CPU ``B`` oracle."""
+        cpu, jax_ = _build_pair(nfp=2, stellsym=True)
+        point = _points_in_reduced_domain(nfp=2, stellsym=True, count=1, seed=13)[0]
+        cpu.set_points_cart(point.reshape((1, 3)))
+        np.testing.assert_allclose(
+            np.asarray(jax_.jax_B_at(point)),
+            np.asarray(cpu.B())[0],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+    def test_jax_B_GradAbsB_at_matches_batched_paths(self):
+        """Particle-tracing adapter matches CPU ``B`` / ``GradAbsB`` oracles."""
+        cpu, jax_ = _build_pair(nfp=2, stellsym=True)
+        point = _points_in_reduced_domain(nfp=2, stellsym=True, count=1, seed=14)[0]
+        cpu.set_points_cart(point.reshape((1, 3)))
+        B_at, grad_abs_at = jax_.jax_B_GradAbsB_at(jnp.asarray(point))
+        np.testing.assert_allclose(
+            np.asarray(B_at),
+            np.asarray(cpu.B())[0],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(grad_abs_at),
+            np.asarray(cpu.GradAbsB())[0],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
     @pytest.mark.parametrize(
         "nfp,stellsym",
         [(1, False), (2, False), (1, True), (3, True)],

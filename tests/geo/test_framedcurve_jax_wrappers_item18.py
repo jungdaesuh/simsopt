@@ -124,6 +124,24 @@ def _centroid_torsion_from_rotation_dofs(
     return jnp.sum((ndash / arc_length) * b, axis=1)
 
 
+def _centroid_binormal_curvature_from_rotation_dofs(
+    rotation_dofs: jax.Array,
+    quadpoints: jax.Array,
+    order: int,
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+) -> jax.Array:
+    alpha = rotation_alpha(rotation_dofs, quadpoints, order)
+    alphadash = rotation_alphadash(rotation_dofs, quadpoints, order)
+    _, _, b = rotated_centroid_frame(gamma, gammadash, alpha)
+    tdash, _, _ = rotated_centroid_frame_dash(
+        gamma, gammadash, gammadashdash, alpha, alphadash
+    )
+    arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
+    return jnp.sum((tdash / arc_length) * b, axis=1)
+
+
 def _scalar_objective(torsion: jax.Array) -> jax.Array:
     return jnp.sum(torsion * torsion)
 
@@ -200,3 +218,58 @@ def test_frame_rotation_jax_dofs_drive_wrapper_outputs_via_fd():
             "perturbations into the JAX kernel correctly."
         ),
     )
+
+
+def test_framed_curve_centroid_jax_vjp_drives_public_strain_penalties():
+    """Public strain penalties must differentiate through FramedCurveCentroidJAX."""
+    from simsopt.geo.strain_optimization import (
+        LPBinormalCurvatureStrainPenalty,
+        LPTorsionalStrainPenalty,
+    )
+
+    curve = _build_curve()
+    curve.fix_all()
+    quad = curve.quadpoints
+    rotation = FrameRotationJAX(quad, _ROTATION_ORDER)
+    rotation.x = _ROTATION_DOFS.copy()
+    wrapper = FramedCurveCentroidJAX(curve, rotation)
+
+    width = 1e-3
+    jtor = LPTorsionalStrainPenalty(wrapper, width=width, p=2, threshold=0.0)
+    jbin = LPBinormalCurvatureStrainPenalty(wrapper, width=width, p=2, threshold=0.0)
+    observed = np.asarray((jtor + jbin).dJ(), dtype=np.float64)
+
+    gamma = jnp.asarray(curve.gamma(), dtype=jnp.float64)
+    gammadash = jnp.asarray(curve.gammadash(), dtype=jnp.float64)
+    gammadashdash = jnp.asarray(curve.gammadashdash(), dtype=jnp.float64)
+    quad_jax = jnp.asarray(quad, dtype=jnp.float64)
+    gammadash_norm = jnp.linalg.norm(gammadash, axis=1)
+
+    def _strain_objective(rotation_dofs: jax.Array) -> jax.Array:
+        torsion = _centroid_torsion_from_rotation_dofs(
+            rotation_dofs,
+            quad_jax,
+            _ROTATION_ORDER,
+            gamma,
+            gammadash,
+            gammadashdash,
+        )
+        binormal_curvature = _centroid_binormal_curvature_from_rotation_dofs(
+            rotation_dofs,
+            quad_jax,
+            _ROTATION_ORDER,
+            gamma,
+            gammadash,
+            gammadashdash,
+        )
+        torsional_strain = torsion**2 * width**2 / 12.0
+        binormal_strain = (width / 2.0) * jnp.abs(binormal_curvature)
+        torsional_penalty = jnp.mean(torsional_strain**2 * gammadash_norm) / 2.0
+        binormal_penalty = jnp.mean(binormal_strain**2 * gammadash_norm) / 2.0
+        return torsional_penalty + binormal_penalty
+
+    expected = np.asarray(
+        jax.grad(_strain_objective)(jnp.asarray(_ROTATION_DOFS, dtype=jnp.float64)),
+        dtype=np.float64,
+    )
+    np.testing.assert_allclose(observed, expected, rtol=1e-10, atol=1e-12)
