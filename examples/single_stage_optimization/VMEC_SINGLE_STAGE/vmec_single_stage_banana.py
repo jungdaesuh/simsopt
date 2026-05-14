@@ -44,11 +44,18 @@ the step-clamp barrier, and the ``scipy.optimize.minimize`` call.
 
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from netCDF4 import Dataset
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+if EXAMPLE_ROOT not in sys.path:
+    sys.path.insert(0, EXAMPLE_ROOT)
 
 from simsopt._core.derivative import Derivative
 from simsopt._core.finite_difference import MPIFiniteDifference
@@ -65,6 +72,20 @@ from simsopt.geo import (
 from simsopt.mhd import QuasisymmetryRatioResidual, Vmec
 from simsopt.objectives import QuadraticPenalty, SquaredFlux
 from simsopt.util import MpiPartition
+
+from banana_opt.ellipse_width import ProjectedEllipseWidth
+from banana_opt.hardware_contracts import (
+    BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+    BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR,
+    BANANA_WIDTH_MAX_M,
+    BANANA_WIDTH_MIN_M,
+    BANANA_WINDING_MINOR_RADIUS_M,
+    BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+    POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+    VACUUM_VESSEL_MAJOR_RADIUS_M,
+)
+from banana_opt.poloidal_extent import max_poloidal_extent_rad
+from banana_opt.self_intersect import CurveSelfIntersect
 
 from .vmec_single_stage_config import (
     GRADIENT_NORM_FLOOR_BOUNDARY,
@@ -253,6 +274,8 @@ class _ObjectiveBundle:
     Jkappa: List[LpCurveCurvature]
     Jmsc: List[MeanSquaredCurvature]
     Jal: List[ArclengthVariation]
+    Jwidth: ProjectedEllipseWidth
+    Jself: CurveSelfIntersect
     JF: object  # composite J2 optimizable
     qs: QuasisymmetryRatioResidual
     base_curves: List[object]
@@ -542,6 +565,18 @@ def build_objective(
     ]
     Jmsc = [MeanSquaredCurvature(c) for c in base_curves]
     Jal = [ArclengthVariation(c) for c in base_curves]
+    Jwidth = ProjectedEllipseWidth(
+        base_curves[0],
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        BANANA_WINDING_MINOR_RADIUS_M,
+    )
+    Jself = CurveSelfIntersect(
+        base_curves[0],
+        BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+        neighbor_skip=int(
+            BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * base_curves[0].order
+        ),
+    )
 
     # ----- J1 building blocks -----
     qs = QuasisymmetryRatioResidual(
@@ -637,6 +672,8 @@ def build_objective(
         Jkappa=Jkappa,
         Jmsc=Jmsc,
         Jal=Jal,
+        Jwidth=Jwidth,
+        Jself=Jself,
         JF=JF,
         qs=qs,
         base_curves=base_curves,
@@ -788,6 +825,7 @@ def build_objective(
             if free_current_values
             else 0.0
         )
+        self_intersect_penalty = float(bundle.Jself.J())
         max_curvature = max(
             float(np.max(curve.kappa())) for curve in bundle.curves
         )
@@ -801,6 +839,16 @@ def build_objective(
             "CURVE_CURVE_DISTANCE_METRIC_KIND": "shortest_distance",
             "MAX_CURVATURE": max_curvature,
             "CURVATURE_THRESHOLD": float(cfg.kappa_max_threshold),
+            "COIL_WIDTH": float(bundle.Jwidth.J()),
+            "WIDTH_MIN_THRESHOLD": BANANA_WIDTH_MIN_M,
+            "WIDTH_MAX_THRESHOLD": BANANA_WIDTH_MAX_M,
+            "SELF_INTERSECT_PENALTY": self_intersect_penalty,
+            "SELF_INTERSECT_THRESHOLD": 0.0,
+            "POLOIDAL_EXTENT_RAD": max_poloidal_extent_rad(
+                bundle.base_curves[0],
+                VACUUM_VESSEL_MAJOR_RADIUS_M,
+            ),
+            "POLOIDAL_EXTENT_THRESHOLD_RAD": POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             "TF_CURRENT_A": float(cfg.tf_current_pin_A),
             "BANANA_CURRENTS_A": free_current_values,
             "BANANA_CURRENT_MAX_ABS_A": banana_current_max_abs,
