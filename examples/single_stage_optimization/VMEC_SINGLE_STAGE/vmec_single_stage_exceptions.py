@@ -60,7 +60,8 @@ class VmecCallFailure(Exception):
 class IotaSurfaceTargetMiss(VmecCallFailure):
     """Candidate ``wout`` violates the iota-at-promotion-surface tolerance.
 
-    Raised by ``J_scalar`` after a successful VMEC solve when
+    Raised by ``J_and_grad`` (and therefore the ``J_scalar`` /
+    ``compute_grad`` views) after a successful VMEC solve when
 
     .. code-block:: text
 

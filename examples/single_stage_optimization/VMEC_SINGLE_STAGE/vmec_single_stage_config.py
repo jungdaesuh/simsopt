@@ -2,8 +2,9 @@
 
 Pins every parameter that participates in run-identity hashing per plan
 section "Artifact Manifest". All weights, thresholds, FD-step values, and
-step-clamp values are first-class config keys, not magic numbers in the
-objective body.
+VMEC schedule values used by the objective are first-class config keys, not
+magic numbers in the objective body. Driver-owned step-clamp values are not
+part of this objective config.
 
 The values exposed here are *placeholders pending first-campaign calibration*
 unless explicitly marked hardware (e.g., ``TF_CURRENT_HARD_LIMIT_A``). The

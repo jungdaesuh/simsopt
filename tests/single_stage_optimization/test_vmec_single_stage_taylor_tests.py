@@ -198,11 +198,12 @@ def test_dof_schema_preserves_simsopt_coil_shape_name_format() -> None:
         pinned_current_value_A=-8.0e4,
         fixed_boundary_modes=["rc(0,0)"],
         coils_currents_dof_names=simsopt_style_names,
-        current_dof_names=["coil_2_current_A"],
+        current_dof_names=["Current2:x0"],
         boundary_dof_names=["zs(1,1)"],
     )
     recorded = schema["coils_currents"]["dof_names_in_order"]
     assert recorded == simsopt_style_names
+    assert schema["free_current_dof_names"] == ["Current2:x0"]
     # At least one coil-shape name must carry an ``[xyz][cs](`` token.
     mode_tokens = ("xc(", "xs(", "yc(", "ys(", "zc(", "zs(")
     coil_shape_names = recorded[: schema["coils_currents"]["coil_shape_count"]]

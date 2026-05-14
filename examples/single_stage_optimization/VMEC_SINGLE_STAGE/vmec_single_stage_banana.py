@@ -57,6 +57,7 @@ from simsopt.geo import (
     ArclengthVariation,
     CurveCurveDistance,
     CurveLength,
+    CurveSurfaceDistance,
     LpCurveCurvature,
     MeanSquaredCurvature,
     create_equally_spaced_curves,
@@ -94,6 +95,7 @@ class VmecSingleStageObjective:
     J_and_grad: Callable[[np.ndarray], Tuple[float, np.ndarray]]
     J_scalar: Callable[[np.ndarray], float]
     compute_grad: Callable[[np.ndarray], np.ndarray]
+    metrics_snapshot: Callable[[], Dict[str, object]]
     dof_schema: Dict[str, object]
     x0: np.ndarray
     n_coil_dofs: int
@@ -247,6 +249,7 @@ class _ObjectiveBundle:
     Jf: SquaredFlux
     Jls: List[CurveLength]
     Jcc: CurveCurveDistance
+    Jcs: CurveSurfaceDistance
     Jkappa: List[LpCurveCurvature]
     Jmsc: List[MeanSquaredCurvature]
     Jal: List[ArclengthVariation]
@@ -376,6 +379,14 @@ def _evaluate_dJ2_dxcoils(bundle: _ObjectiveBundle) -> np.ndarray:
     """
 
     return np.asarray(bundle.JF.dJ(), dtype=float)
+
+
+def _lcfs_radii(surface) -> Tuple[float, float]:
+    gamma = surface.gamma().reshape((-1, 3))
+    major_r = np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2)
+    r_min = float(np.min(major_r))
+    r_max = float(np.max(major_r))
+    return 0.5 * (r_max + r_min), 0.5 * (r_max - r_min)
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +536,7 @@ def build_objective(
     Jf = SquaredFlux(surf, bs, definition="local")
     Jls = [CurveLength(c) for c in base_curves]
     Jcc = CurveCurveDistance(curves, float(cfg.cc_threshold), num_basecurves=len(curves))
+    Jcs = CurveSurfaceDistance(curves, surf, float(cfg.cs_threshold))
     Jkappa = [
         LpCurveCurvature(c, 2, float(cfg.kappa_max_threshold)) for c in base_curves
     ]
@@ -580,6 +592,13 @@ def build_objective(
     coils_currents_dof_names = list(JF.dof_names)
     boundary_dof_names = list(surf.local_dof_names)
 
+    current_dof_names = [
+        name
+        for current in base_currents
+        if not current.is_fixed("x0")
+        for name in current.dof_names
+    ]
+
     dof_schema = assemble_dof_schema(
         coil_dof_count=n_coil_shape_dofs,
         current_dof_count=n_current_dofs_free,
@@ -588,11 +607,7 @@ def build_objective(
         pinned_current_value_A=float(cfg.tf_current_pin_A),
         fixed_boundary_modes=["rc(0,0)"],
         coils_currents_dof_names=coils_currents_dof_names,
-        current_dof_names=[
-            f"coil_{i}_current_A"
-            for i, c in enumerate(base_currents)
-            if not c.is_fixed("x0")
-        ],
+        current_dof_names=current_dof_names,
         boundary_dof_names=boundary_dof_names,
     )
 
@@ -618,6 +633,7 @@ def build_objective(
         Jf=Jf,
         Jls=Jls,
         Jcc=Jcc,
+        Jcs=Jcs,
         Jkappa=Jkappa,
         Jmsc=Jmsc,
         Jal=Jal,
@@ -751,10 +767,61 @@ def build_objective(
     def compute_grad(x: np.ndarray) -> np.ndarray:
         return J_and_grad(x)[1]
 
+    def metrics_snapshot() -> Dict[str, object]:
+        cfg = bundle.config
+        wout = bundle.vmec.wout
+        iota_promo = iota_at_promotion_surface(
+            wout, cfg.iota_promotion_surface_s
+        )
+        lcfs_major, lcfs_minor = _lcfs_radii(bundle.surf)
+        coil_lengths = [float(Jl.J()) for Jl in bundle.Jls]
+        base_current_values = [
+            float(current.get_value()) for current in bundle.base_currents
+        ]
+        free_current_values = [
+            value
+            for index, value in enumerate(base_current_values)
+            if index != int(cfg.pinned_current_coil_index)
+        ]
+        banana_current_max_abs = (
+            max(abs(value) for value in free_current_values)
+            if free_current_values
+            else 0.0
+        )
+        max_curvature = max(
+            float(np.max(curve.kappa())) for curve in bundle.curves
+        )
+        return {
+            "FIELD_ERROR": float(bundle.Jf.J()),
+            "COIL_LENGTH": max(coil_lengths),
+            "COIL_LENGTH_TARGET": float(cfg.length_target),
+            "LENGTH_MIN_TARGET": 0.5 * float(cfg.length_target),
+            "CURVE_CURVE_MIN_DIST": float(bundle.Jcc.shortest_distance()),
+            "CURVE_SURFACE_MIN_DIST": float(bundle.Jcs.shortest_distance()),
+            "CURVE_CURVE_DISTANCE_METRIC_KIND": "shortest_distance",
+            "MAX_CURVATURE": max_curvature,
+            "CURVATURE_THRESHOLD": float(cfg.kappa_max_threshold),
+            "TF_CURRENT_A": float(cfg.tf_current_pin_A),
+            "BANANA_CURRENTS_A": free_current_values,
+            "BANANA_CURRENT_MAX_ABS_A": banana_current_max_abs,
+            "FINAL_IOTA": iota_promo,
+            "FINAL_IOTA_EDGE": float(bundle.vmec.iota_edge()),
+            "FINAL_IOTA_AXIS": float(bundle.vmec.iota_axis()),
+            "IOTA_AT_PROMOTION_SURFACE": iota_promo,
+            "IOTA_TARGET": float(cfg.iota_target),
+            "IOTA_SURFACE_TOLERANCE": float(cfg.iota_tol),
+            "FINAL_VOLUME": float(bundle.vmec.volume()),
+            "VMEC_CONVERGED": int(wout.ier_flag) == 11,
+            "VMEC_IER_FLAG": int(wout.ier_flag),
+            "FINAL_LCFS_MAJOR_RADIUS_M": lcfs_major,
+            "FINAL_LCFS_MINOR_RADIUS_M": lcfs_minor,
+        }
+
     return VmecSingleStageObjective(
         J_and_grad=J_and_grad,
         J_scalar=J_scalar,
         compute_grad=compute_grad,
+        metrics_snapshot=metrics_snapshot,
         dof_schema=dof_schema,
         x0=x0,
         n_coil_dofs=int(n_coil_shape_dofs),
