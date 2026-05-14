@@ -33,11 +33,74 @@ Worktree: `/Users/suhjungdae/code/columbia/simsopt-jax`
 
 - Wave 1 is closed. `STATUS.md` records the implementation, follow-up review,
   and final public pure-JAX regression gate.
-- Wave 2 is the next concrete `/goal` candidate. W2-B0 pre-implementation
-  revalidation is recorded in `STATUS.md` at current HEAD `d773344d1`.
+- Wave 2 is active but incomplete. W2-B0 is recorded in `STATUS.md` at
+  baseline HEAD `d773344d1`; live HEAD is `c84cfd23f` with uncommitted Wave 2
+  implementation/test edits. Do not close Wave 2 until `STATUS.md` records the
+  landed changes and validation outcomes.
 - Waves 3-7 are follow-on plans. They were expanded from the audit inputs and
   current-tree spot checks, but each wave still needs a fresh pre-state block
   before implementation.
+
+## Wave Expansion Requirements
+
+Each follow-on wave must satisfy these requirements before it becomes a new
+`/goal`:
+
+- Start with a current-tree pre-state block in `STATUS.md`: HEAD, dirty-tree
+  note, exact file paths, grep evidence for missing/present symbols, and stale
+  audit rows pruned.
+- Separate rows by contract type: pure JAX kernel, public `Optimizable`
+  adapter, solver/trajectory behavior, test-only mirror, or host-boundary
+  IO/setup. Do not mix those into one PR unless the dependency is structural.
+- Name the oracle for every test: direct C++/CPU object, frozen-array NumPy
+  algebra, closed-form analytic expression, FD/Taylor, or self-consistency.
+  JAX-vs-JAX self-consistency never closes a parity row by itself.
+- Use `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES`
+  for every true parity lane. Inline tolerance literals are allowed only for a
+  documented non-parity invariant or existing stricter self-consistency floor.
+- Keep VMEC/SPEC/BOOZXFORM runs, NetCDF/file IO, VTK/plotting, MPI, and CUDA
+  runtime claims outside CPU/JAX fixed-state wave closure unless the wave is
+  explicitly scoped around that boundary.
+- Treat transfer-guard evidence as platform-specific. JAX's official transfer
+  guard docs allow CPU-buffer fetches regardless of guard level, so a CPU-only
+  `transfer_guard("disallow")` check is useful for accidental implicit-transfer
+  smoke coverage but is not a GPU transfer-proof or CUDA runtime proof.
+- Append outcome and validation evidence to `STATUS.md`; do not replace prior
+  wave history.
+
+| Requirement Source | Wave(s) | Required Treatment |
+|---|---|---|
+| C++ API inventory gaps in `cpp_port_gap.md` | Waves 2, 4, 5, 6, 7 | Close public API gaps only when the CPU contract is numeric and portable; classify cache fillers, mutable `_ref` views, pybind trampolines, file IO, and MPI as host-boundary/non-portable unless a selected wave proves otherwise. |
+| Python API inventory gaps in `python_port_gap.md` | Waves 3-7 | Split large object/solver gaps into PR-sized slices. Favor frozen-array reducers and pure kernels first; add public adapters only when downstream code needs the CPU boundary contract. |
+| JAX-vs-C++ parity gaps in `jax_cpp_parity_test_gaps.md` | Waves 1, 2, 5, 6, 7 | Add direct CPU/C++ oracle tests for production parity surfaces and cite the tolerance lane. Reclassify stale entries when the current tree already has direct parity. |
+| Python-test mirror gaps in `jax_python_test_mirror_gaps.md` | Waves 4, 5, 6, 7 | Mirror only scenarios whose underlying functionality is JAX-ported. Keep FD/Taylor mirrors, solver convergence mirrors, and host-object API mirrors distinct. |
+| Repo guardrails in `CLAUDE.md`, `tests/REVIEWER_ORACLE_LINT.md`, and AGENTS instructions | All waves | Preserve strict contracts: no dynamic imports, no defensive fallback layers, no source-module `simsoptpp` imports, no tolerance loosening, no GPU proof claims from CPU-only evidence. |
+
+Dependency rules:
+
+- Wave 2 should close before any Wave 7 CoilSet/QFM slice relies on complete
+  `BiotSavartJAX` derivative or current-derivative surfaces.
+- Wave 5 surface bootstrap/curvature decisions should be settled before Wave 4
+  claims surface-bound curve closure beyond already-supported RZ paths.
+- Wave 6 composition and analytic-wrapper decisions should be settled before a
+  Wave 7 `CoilSetJAX` or objective-adapter slice claims production field
+  composition readiness.
+- Wave 3 MHD reducers are independent of VMEC/SPEC execution. They may proceed
+  with frozen payloads, but they must not claim portable VMEC/SPEC runner
+  support.
+- Wave 7 is a queue, not a single implementation wave. Promote exactly one
+  W7-X slice at a time into its own `/goal` after fresh pre-state validation.
+
+## External Authority Review (2026-05-14)
+
+Primary sources checked for this doc review:
+
+| Source | Checked Contract | Plan Consequence |
+|---|---|---|
+| JAX official docs | `jacfwd` is forward-mode, column-by-column Jacobian evaluation; `shard_map` is rank-preserving block mapping assembled by `out_specs`; transfer guards distinguish explicit from implicit transfers and always allow CPU-buffer fetches. | Wave 2 tensor-axis and sharding requirements stand. CPU `transfer_guard("disallow")` tests are smoke coverage, not CUDA transfer proof. |
+| SIMSOPT official docs + local source | `BiotSavart` exposes the B/A current-derivative ladder; this fork's source remains authoritative for current branch shapes, wrappers, and exports. | Wave 2 should compare against the local CPU `BiotSavart` API, not only older readthedocs snapshots. |
+| SIMSOPT MHD docs | VMEC/SPEC are separately installed Fortran/f90wrap equilibrium-code interfaces; f90wrapped singleton classes cannot safely create multiple solver objects in the same kernel. | Wave 3 stays frozen-array/payload-only unless a dedicated host-boundary runner wave is opened. |
+| NVIDIA CUDA Programming Guide | IEEE-754 compliant CPU and GPU executions can still differ because of associativity, fused multiply-add, subnormal handling, NaN payload behavior, and dot-product reduction order. | CPU JAX/C++ fixed-state parity is not CUDA parity; CUDA claims need a separate GPU lane with deterministic-XLA/runtime provenance. |
 
 ## Current-Tree Corrections
 
@@ -45,11 +108,17 @@ These corrections are part of the goal contract. Do not reintroduce the stale
 claims from the first draft.
 
 - `BiotSavartJAX.A()`, `dA_by_dX()`, and `d2A_by_dXdX()` already exist in
-  `src/simsopt/field/biotsavart_jax_backend.py:517,523,529` (with subclass
-  overrides at `:1447,1451,1458`), backed by
-  `src/simsopt/jax_core/biotsavart.py:617` (`biot_savart_A`) and `:694`
-  (`grouped_biot_savart_A`). `A_vjp` / `A_and_dA_vjp` are at
-  `biotsavart_jax_backend.py:1616,1620`.
+  `src/simsopt/field/biotsavart_jax_backend.py:548,554,560` (with subclass
+  methods at `:1537,1541,1548`), backed by
+  `src/simsopt/jax_core/biotsavart.py:617` (`biot_savart_A`) and
+  `src/simsopt/jax_core/field.py:511,522,536` (grouped A/dA/d2A). `A_vjp` /
+  `A_and_dA_vjp` are at `biotsavart_jax_backend.py:1773,1777`.
+- At live HEAD `c84cfd23f` plus the current dirty tree, Wave 2 method surfaces
+  are already present in source: `d2B_by_dXdX()` at
+  `biotsavart_jax_backend.py:572,1566`, grouped d2B helpers at
+  `jax_core/field.py:550,557`, and the six B/A current-derivative methods at
+  `biotsavart_jax_backend.py:584-637,1589-1642`. These are not accepted as
+  closed until `STATUS.md` records the Wave 2 validation outcome.
 - `tests/field/test_biotsavart_A_direct_kernel_closeout.py` already provides
   direct-kernel CPU-oracle coverage for `BiotSavartJAX.A()`.
 - `MagneticFieldSum` / `MagneticFieldMultiply` already have JAX-native
@@ -221,13 +290,13 @@ The `/goal` is complete when:
 
 ## All Waves
 
-Wave 1 is retained as the historical closeout scope described above. Wave 2 is
-the next concrete `/goal` candidate. Waves 3-7 are written here as complete
-follow-on waves, but each later wave must be revalidated against the live tree
-before it becomes a new `/goal` or implementation PR. This is intentional: the
-first draft contained stale claims at `da44735ab`. Waves 3-7 were expanded on
+Wave 1 is retained as the historical closeout scope described above. Wave 2
+status is summarized in **Current Status** and detailed in its own section.
+Waves 3-7 are complete follow-on plans, but each later wave must be revalidated
+against the live tree before it becomes a new `/goal` or implementation PR. The
+first draft contained stale claims at `da44735ab`; Waves 3-7 were expanded on
 2026-05-14 from the four audit inputs plus current-tree spot checks at HEAD
-`d773344d1`; line numbers remain advisory.
+`d773344d1`. Line numbers remain advisory.
 
 ### Wave 1 - Tautology And Oracle Classification Fixes
 
@@ -238,9 +307,11 @@ is kept as a stable anchor so cross-wave references resolve.
 
 ### Wave 2 - BiotSavart Derivative Ladder Closeout
 
-Status: next concrete `/goal` candidate. W2-B0 pre-implementation revalidation
-is recorded in `STATUS.md` at HEAD `d773344d1`. Scope = close the remaining
-BiotSavart derivative-ladder gaps surfaced by the
+Status: active but incomplete. W2-B0 is recorded in `STATUS.md` at baseline
+HEAD `d773344d1`; live HEAD `c84cfd23f` has uncommitted Wave 2
+implementation/test edits. The gap list below is the pre-implementation
+baseline and acceptance target, not a live absence claim after those edits.
+Scope = close the remaining BiotSavart derivative-ladder gaps surfaced by the
 2026-05-13 audit: one missing spatial-Hessian wrapper method, the entire
 six-method coil-current derivative ladder, and the still-missing direct
 C++ parity assertions for `dA_by_dX`, `d2B_by_dXdX`, and `d2A_by_dXdX`.
@@ -259,7 +330,7 @@ the stale claims from the first draft.
   `B_vjp` (`:1539`), `A_vjp` (`:1616`), `A_and_dA_vjp` (`:1620`),
   `B_and_dB_vjp` (`:1628`), plus the native-pullback variants `*_pullback_native`
   / `*_cotangents`.
-- **Confirmed live gaps on `BiotSavartJAX`** (no method present at
+- **Pre-implementation gaps on `BiotSavartJAX` at `d773344d1`** (no method present at
   `biotsavart_jax_backend.py` 1439-1634 method block):
   - `d2B_by_dXdX()` — the unit kernel `biot_savart_d2B_by_dXdX` already
     exists at `src/simsopt/jax_core/biotsavart.py:585` (declared in
