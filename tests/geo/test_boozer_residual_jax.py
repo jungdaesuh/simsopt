@@ -7,7 +7,7 @@ Validates:
 2. Forward vector reduction against the same C++ scalar oracle via the
    ``0.5 * sum(r**2) / r.size`` scalarisation boundary; the public C++
    API exposes only the scalar residual, so per-component vector oracles
-   are not invented (cf. ``src/simsoptpp/boozerresidual_py.cpp:4``).
+   are not invented (cf. ``src/simsoptpp/boozerresidual_py.cpp``).
 3. Gradient via JAX autodiff against centred finite differences (oracle
    type 4 — FD of the JAX scalar). FD-only checks are kept FD-labelled
    and are not promoted to C++ parity claims.
@@ -73,11 +73,11 @@ def _cpp_boozer_residual_scalar(G, iota, B, xphi, xtheta, *, weight_inv_modB):
     ABI-tolerant dispatcher
     ``simsopt.geo.boozersurface._call_boozer_residual``. The C++ kernel
     accumulates ``0.5 * sum_ij(r_ij**2)`` without normalisation
-    (see ``src/simsoptpp/boozerresidual_impl.h:74``); dividing by
+    (see ``src/simsoptpp/boozerresidual_impl.h``); dividing by
     ``num_res = 3 * nphi * ntheta`` recovers the JAX
     ``boozer_residual_scalar`` convention. The same vector→scalar
-    boundary is used by the integration parity fixture at
-    ``tests/integration/test_single_stage_jax_cpu_reference.py:8232``.
+    boundary is used by the integration parity fixture in
+    ``tests/integration/test_single_stage_jax_cpu_reference.py``.
 
     Oracle: C++ reference symbol (acceptable oracle type 1; see
     ``tests/REVIEWER_ORACLE_LINT.md``). Caller must call
@@ -86,9 +86,9 @@ def _cpp_boozer_residual_scalar(G, iota, B, xphi, xtheta, *, weight_inv_modB):
     """
     from simsopt.geo.boozersurface import _call_boozer_residual
 
-    B_host = np.asarray(host_array(B), dtype=np.float64)
-    xphi_host = np.asarray(host_array(xphi), dtype=np.float64)
-    xtheta_host = np.asarray(host_array(xtheta), dtype=np.float64)
+    B_host = host_array(B, dtype=np.float64)
+    xphi_host = host_array(xphi, dtype=np.float64)
+    xtheta_host = host_array(xtheta, dtype=np.float64)
     val_raw = _call_boozer_residual(
         float(G),
         float(iota),
@@ -166,13 +166,16 @@ def _assert_lane_allclose(actual, reference, parity_lane, *, tier):
 class TestBoozerResidualScalar:
     """Test the forward scalar value."""
 
-    def test_scalar_matches_cpp_oracle_weighted(self, parity_lane):
-        """JAX weighted scalar matches the C++ ``sopp.boozer_residual`` oracle.
+    @pytest.mark.parametrize("weight_inv_modB", [True, False])
+    def test_scalar_matches_cpp_oracle(self, parity_lane, weight_inv_modB):
+        """JAX scalar matches the C++ ``sopp.boozer_residual`` oracle.
 
         Oracle: C++ reference symbol ``simsoptpp.boozer_residual``
         invoked through ``simsopt.geo.boozersurface._call_boozer_residual``
         (acceptable oracle type 1, see ``tests/REVIEWER_ORACLE_LINT.md``).
-        Lane: ``direct_kernel`` (rtol=1e-10, atol=1e-12).
+        Lane: ``direct_kernel`` (rtol=1e-10, atol=1e-12). Both the
+        ``weight_inv_modB=True`` and ``False`` branches of the JAX kernel
+        are anchored against the same C++ oracle.
         """
         pytest.importorskip("simsoptpp")
 
@@ -180,36 +183,12 @@ class TestBoozerResidualScalar:
         G, iota = 1.5, 0.3
 
         J_jax = host_scalar(
-            boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True)
+            boozer_residual_scalar(
+                G, iota, B, xphi, xtheta, weight_inv_modB=weight_inv_modB
+            )
         )
         J_cpp = _cpp_boozer_residual_scalar(
-            G, iota, B, xphi, xtheta, weight_inv_modB=True
-        )
-
-        np.testing.assert_allclose(
-            J_jax,
-            J_cpp,
-            rtol=_DIRECT_KERNEL_TOLS["rtol"],
-            atol=_DIRECT_KERNEL_TOLS["atol"],
-        )
-
-    def test_scalar_matches_cpp_oracle_unweighted(self, parity_lane):
-        """JAX unweighted scalar matches the C++ ``sopp.boozer_residual`` oracle.
-
-        Oracle: C++ reference symbol ``simsoptpp.boozer_residual`` with
-        ``weight_inv_modB=False`` (acceptable oracle type 1). Lane:
-        ``direct_kernel`` (rtol=1e-10, atol=1e-12).
-        """
-        pytest.importorskip("simsoptpp")
-
-        B, xphi, xtheta = _make_synthetic_data(nphi=8, ntheta=10)
-        G, iota = 1.5, 0.3
-
-        J_jax = host_scalar(
-            boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=False)
-        )
-        J_cpp = _cpp_boozer_residual_scalar(
-            G, iota, B, xphi, xtheta, weight_inv_modB=False
+            G, iota, B, xphi, xtheta, weight_inv_modB=weight_inv_modB
         )
 
         np.testing.assert_allclose(
@@ -408,12 +387,12 @@ class TestBoozerResidualParityStress:
 
         The public C++ API exposes only the scalar
         ``simsoptpp.boozer_residual`` (see
-        ``src/simsoptpp/boozerresidual_py.cpp:4``); there is no
+        ``src/simsoptpp/boozerresidual_py.cpp``); there is no
         per-component vector oracle for ``boozer_residual_vector``. We
         therefore compare the JAX vector via the documented
         vector→scalar boundary ``0.5 * sum(r**2) / r.size`` (the JAX
-        scalar definition; mirrored at
-        ``src/simsoptpp/boozerresidual_impl.h:74`` modulo the JAX
+        scalar definition; mirrored in
+        ``src/simsoptpp/boozerresidual_impl.h`` modulo the JAX
         ``/ num_res`` normalisation) against the C++ scalar oracle.
 
         Oracle: C++ reference symbol ``simsoptpp.boozer_residual``

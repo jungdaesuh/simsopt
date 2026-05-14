@@ -34,9 +34,18 @@ _SQUARED_FLUX_DEFINITIONS = (
 # Value parity (CPU C++ ``SquaredFlux.J()`` oracle vs ``SquaredFluxJAX.J()``)
 # uses the ``direct_kernel`` lane; gradient parity uses the first-derivative
 # row of the ``derivative_heavy`` lane.
-_FLUX_VALUE_TOLS = parity_ladder_tolerances("direct_kernel")
-_FLUX_GRADIENT_TOLS = parity_ladder_tolerances("derivative_heavy")
+_DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
+_DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative_heavy")
 _FD_GRADIENT_TOLS = parity_ladder_tolerances("fd-gradient")
+
+# Inline tolerances for chunked-vs-dense JAX self-consistency probes (Tier-4
+# per tests/REVIEWER_ORACLE_LINT.md). These intentionally sit *tighter* than
+# the parity-lane SSOT so chunking bugs cannot hide behind the cross-backend
+# parity floor — see test_squaredfluxjax_large_point_cloud_grouped_vjp_matches_dense.
+_CHUNKED_SELF_CONSISTENCY_VALUE_RTOL = 1e-12
+_CHUNKED_SELF_CONSISTENCY_VALUE_ATOL = 1e-15
+_CHUNKED_SELF_CONSISTENCY_GRADIENT_RTOL = 1e-11
+_CHUNKED_SELF_CONSISTENCY_GRADIENT_ATOL = 1e-14
 
 
 class _NonNativeFakeField(Optimizable):
@@ -44,6 +53,7 @@ class _NonNativeFakeField(Optimizable):
         self._uses_uniform_curve_xyz_fourier_fastpath = False
         self._points = None
         self._points_version = 0
+        self._dof_layout_version = 0
         super().__init__(x0=np.zeros(1, dtype=np.float64))
 
     def recompute_bell(self, parent=None):
@@ -251,8 +261,8 @@ def _assert_flux_value_parity(actual, reference):
     np.testing.assert_allclose(
         actual,
         reference,
-        rtol=_FLUX_VALUE_TOLS["rtol"],
-        atol=_FLUX_VALUE_TOLS["atol"],
+        rtol=_DIRECT_KERNEL_TOLS["rtol"],
+        atol=_DIRECT_KERNEL_TOLS["atol"],
     )
 
 
@@ -261,8 +271,8 @@ def _assert_flux_gradient_parity(actual, reference):
     np.testing.assert_allclose(
         actual,
         reference,
-        rtol=_FLUX_GRADIENT_TOLS["first_derivative_rtol"],
-        atol=_FLUX_GRADIENT_TOLS["first_derivative_atol"],
+        rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+        atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
     )
 
 
@@ -357,17 +367,12 @@ def test_squaredfluxjax_gradient_matches_directional_taylor_fd(definition):
 def test_squaredfluxjax_large_point_cloud_grouped_vjp_matches_dense(monkeypatch):
     """JAX chunked-vs-dense self-consistency on the flux integral.
 
-    This is a Tier-4 self-consistency check (JAX-vs-JAX through the same
-    kernel under different chunk parameters) per
-    ``tests/REVIEWER_ORACLE_LINT.md``, NOT a CPU/JAX parity test — so
-    the looser parity-lane SSOT is the wrong floor here. The tight
-    inline bounds match the historical ratcheted floor for the
-    chunked-vs-dense flux self-consistency contract (commit
-    ``7e8e8f622`` for value; gradient bound mirrors the comparable
-    BiotSavart chunked-self-consistency tests in
-    ``tests/field/test_biotsavart_jax.py`` that use ``atol=1e-14``
-    inline). Loosening to the parity lane would silently widen the
-    chunking-bug detection window for the flux path.
+    Tier-4 self-consistency check (JAX-vs-JAX through the same kernel
+    under different chunk parameters) per ``tests/REVIEWER_ORACLE_LINT.md``;
+    NOT a CPU/JAX parity test. Bound by
+    ``_CHUNKED_SELF_CONSISTENCY_*`` constants, which are intentionally
+    tighter than the parity-lane SSOT so chunking bugs cannot hide
+    behind the cross-backend parity floor.
     """
     try:
         dense_value, dense_gradient = _large_grouped_flux_value_and_gradient(
@@ -383,14 +388,19 @@ def test_squaredfluxjax_large_point_cloud_grouped_vjp_matches_dense(monkeypatch)
     finally:
         invalidate_backend_cache()
 
-    # Chunked-vs-dense JAX self-consistency: tight inline bounds, not the
-    # parity-lane SSOT. See test docstring for rationale.
-    np.testing.assert_allclose(chunked_value, dense_value, rtol=1e-12, atol=1e-15)
+    # Chunked-vs-dense JAX self-consistency: tighter than parity-lane SSOT
+    # on purpose so a chunking bug cannot hide behind the parity floor.
+    np.testing.assert_allclose(
+        chunked_value,
+        dense_value,
+        rtol=_CHUNKED_SELF_CONSISTENCY_VALUE_RTOL,
+        atol=_CHUNKED_SELF_CONSISTENCY_VALUE_ATOL,
+    )
     np.testing.assert_allclose(
         chunked_gradient,
         dense_gradient,
-        rtol=1e-11,
-        atol=1e-14,
+        rtol=_CHUNKED_SELF_CONSISTENCY_GRADIENT_RTOL,
+        atol=_CHUNKED_SELF_CONSISTENCY_GRADIENT_ATOL,
     )
 
 
