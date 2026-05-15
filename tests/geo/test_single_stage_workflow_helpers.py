@@ -2497,6 +2497,27 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         )
         self.assertIn("--flip-banana", command)
 
+    def test_build_single_stage_goal_mode_command_derives_equilibrium_path_from_absolute_surface(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.plasma_surf_filename = "/tmp/stage1/wout_new_stage1.nc"
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="target",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/target").resolve(),
+        )
+
+        self.assertEqual(
+            command[command.index("--plasma-surf-filename") + 1],
+            "wout_new_stage1.nc",
+        )
+        self.assertEqual(
+            command[command.index("--equilibrium-path") + 1],
+            str(Path("/tmp/stage1/wout_new_stage1.nc").resolve()),
+        )
+
     def test_build_single_stage_goal_mode_command_rejects_offcontract_values(self):
         module = load_goal_mode_comparison_module()
         args = self._make_args()

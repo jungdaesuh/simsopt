@@ -2157,6 +2157,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             original_stage2_results={
                 **_valid_stage2_contract_fields(),
                 "TF_CURRENT_A": -8.0e4,
+                "FINITE_CURRENT_MODE": "wataru_proxy_field",
             },
         )
 
@@ -2301,7 +2302,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     command[command.index("--finite-current-mode") + 1],
-                    "wataru_proxy_field",
+                    "boozer_surrogate",
                 )
                 repaired_bs_path.parent.mkdir(parents=True, exist_ok=True)
                 repaired_bs_path.write_text("{}", encoding="utf-8")

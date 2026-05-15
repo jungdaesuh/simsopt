@@ -28,10 +28,14 @@ from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
     resolve_stage2_finite_current_mode,
 )
 from workflow_runner_common import (  # noqa: E402
+    Stage2ArtifactConfig,
+    build_stage2_command,
     ensure_stage2_artifact_result,
     load_json,
     load_validated_stage2_seed_results,
+    resolve_stage2_artifact_path,
     resolved_optional_path,
+    resolved_handoff_equilibrium_path,
     resolved_path,
     resolve_single_stage_iota_target_arg,
     run_command,
@@ -42,7 +46,12 @@ from workflow_runner_common import (  # noqa: E402
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_to_single_stage"
 DEFAULT_SUMMARY_JSON = "stage2_to_single_stage_summary.json"
 DATABASE_EQUILIBRIA_DIR = SCRIPT_DIR.parents[1] / "DATABASE" / "EQUILIBRIA"
+RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM = "pre_boozer_stage2_alm"
 RECOVERY_STAGE_THRESHOLDED_PHYSICS_ALM = "thresholded_physics_alm"
+RECOVERY_STAGES = (
+    RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM,
+    RECOVERY_STAGE_THRESHOLDED_PHYSICS_ALM,
+)
 LANE_STAGE2_HARDWARE = "stage2_hardware"
 LANE_PRE_BOOZER_REPAIR = "pre_boozer_repair"
 LANE_BOOZER_ACTIVATION = "boozer_activation"
@@ -187,7 +196,7 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         dest="recovery_maxiter",
         type=int,
         default=80,
-        help="Maximum single-stage iterations allowed for the bounded recovery stage.",
+        help="Maximum optimizer iterations allowed for the bounded recovery stage.",
     )
     parser.add_argument(
         "--recovery-ftol",
@@ -209,8 +218,8 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         "--recovery-stage",
         "--repair-stage",
         dest="recovery_stage",
-        choices=[RECOVERY_STAGE_THRESHOLDED_PHYSICS_ALM],
-        default=RECOVERY_STAGE_THRESHOLDED_PHYSICS_ALM,
+        choices=RECOVERY_STAGES,
+        default=RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM,
         help="Bounded recovery strategy used between the probe and the full single-stage run.",
     )
     parser.add_argument(
@@ -219,13 +228,6 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         dest="skip_recovery",
         action="store_true",
         help="Skip the recovery stage even if the donor fails the probe.",
-    )
-    parser.add_argument(
-        "--force-full-single-stage-after-recovery-fail",
-        "--force-full-single-stage-after-repair-fail",
-        dest="force_full_single_stage_after_recovery_fail",
-        action="store_true",
-        help="Continue into the full single-stage run even if the recovery stage does not produce a bootable donor.",
     )
     return parser
 
@@ -249,14 +251,6 @@ def validate_handoff_cli_args(args: argparse.Namespace) -> None:
         raise ValueError("--bootability-iota-tolerance must be positive")
     if args.recovery_only and args.skip_recovery:
         raise ValueError("--recovery-only cannot be combined with --skip-recovery")
-    if (
-        args.recovery_only
-        and args.force_full_single_stage_after_recovery_fail
-    ):
-        raise ValueError(
-            "--force-full-single-stage-after-recovery-fail cannot be combined with "
-            "--recovery-only"
-        )
     if args.stage2_bs_path is not None and (
         args.stage2_profile is not None or args.stage2_spec_json is not None
     ):
@@ -477,7 +471,7 @@ def build_probe_status(
         stage2_artifact_results=stage2_results,
         plasma_surf_filename=Path(args.plasma_surf_filename).name,
         equilibria_dir=args.equilibria_dir,
-        equilibrium_path=args.equilibrium_path,
+        equilibrium_path=resolved_handoff_equilibrium_path(args),
         database_equilibria_dir=DATABASE_EQUILIBRIA_DIR,
         num_tf_coils=args.num_tf_coils,
         nphi=args.nphi,
@@ -494,12 +488,197 @@ def build_probe_status(
     )
 
 
+def _required_stage2_float(stage2_results: dict, key: str) -> float:
+    value = stage2_results.get(key)
+    if value is None:
+        raise ValueError(f"Stage 2 repair requires {key} in results.json.")
+    return float(value)
+
+
+def _required_stage2_int(stage2_results: dict, key: str) -> int:
+    value = stage2_results.get(key)
+    if value is None:
+        raise ValueError(f"Stage 2 repair requires {key} in results.json.")
+    return int(value)
+
+
+def _required_stage2_str(stage2_results: dict, key: str) -> str:
+    value = stage2_results.get(key)
+    if value is None or value == "":
+        raise ValueError(f"Stage 2 repair requires {key} in results.json.")
+    return str(value)
+
+
+def _stage2_float_override(
+    explicit_value: float | None,
+    stage2_results: dict,
+    key: str,
+) -> float:
+    if explicit_value is not None:
+        return float(explicit_value)
+    return _required_stage2_float(stage2_results, key)
+
+
+def _stage2_int_override(
+    explicit_value: int | None,
+    stage2_results: dict,
+    key: str,
+) -> int:
+    if explicit_value is not None:
+        return int(explicit_value)
+    return _required_stage2_int(stage2_results, key)
+
+
+def build_pre_boozer_stage2_repair_config(
+    args: argparse.Namespace,
+    *,
+    original_stage2_results: dict,
+    recovery_output_root: Path,
+) -> Stage2ArtifactConfig:
+    return Stage2ArtifactConfig(
+        plasma_surf_filename=Path(args.plasma_surf_filename).name,
+        output_root=recovery_output_root,
+        equilibria_dir=(
+            None
+            if args.equilibria_dir is None
+            else str(resolved_path(args.equilibria_dir))
+        ),
+        tf_current_A=_stage2_float_override(
+            args.stage2_tf_current_A,
+            original_stage2_results,
+            "TF_CURRENT_A",
+        ),
+        major_radius=_required_stage2_float(original_stage2_results, "MAJOR_RADIUS"),
+        toroidal_flux=_stage2_float_override(
+            args.stage2_toroidal_flux,
+            original_stage2_results,
+            "TOROIDAL_FLUX",
+        ),
+        length_weight=_required_stage2_float(original_stage2_results, "LENGTH_WEIGHT"),
+        cc_weight=_required_stage2_float(original_stage2_results, "CC_WEIGHT"),
+        cc_threshold=_stage2_float_override(
+            args.stage2_cc_threshold,
+            original_stage2_results,
+            "CC_THRESHOLD",
+        ),
+        curvature_weight=_required_stage2_float(
+            original_stage2_results,
+            "CURVATURE_WEIGHT",
+        ),
+        curvature_threshold=_stage2_float_override(
+            args.stage2_curvature_threshold,
+            original_stage2_results,
+            "CURVATURE_THRESHOLD",
+        ),
+        banana_surf_radius=_stage2_float_override(
+            args.banana_surf_radius,
+            original_stage2_results,
+            "banana_surf_radius",
+        ),
+        order=_stage2_int_override(args.stage2_order, original_stage2_results, "order"),
+        constraint_method="alm",
+        alm_max_outer_iters=args.alm_max_outer_iters,
+        alm_penalty_init=args.alm_penalty_init,
+        alm_penalty_scale=args.alm_penalty_scale,
+        alm_penalty_max=args.alm_penalty_max,
+        alm_feas_tol=args.alm_feas_tol,
+        alm_stationarity_tol=args.alm_stationarity_tol,
+        alm_trust_radius_init=args.alm_trust_radius_init,
+        alm_trust_radius_min=args.alm_trust_radius_min,
+        alm_trust_radius_shrink=args.alm_trust_radius_shrink,
+        alm_trust_radius_grow=args.alm_trust_radius_grow,
+        alm_max_inner_attempts=args.alm_max_inner_attempts,
+        alm_max_subproblem_continuations=args.alm_max_subproblem_continuations,
+        alm_distance_smoothing=args.alm_distance_smoothing,
+        alm_curvature_smoothing=args.alm_curvature_smoothing,
+        banana_init_current_A=_required_stage2_float(
+            original_stage2_results,
+            "BANANA_INIT_CURRENT_A",
+        ),
+        banana_current_max_A=_required_stage2_float(
+            original_stage2_results,
+            "BANANA_CURRENT_MAX_A",
+        ),
+        length_target=(
+            float(args.length_target)
+            if args.length_target is not None
+            else _required_stage2_float(original_stage2_results, "LENGTH_TARGET")
+        ),
+        finite_current_mode=_required_stage2_str(
+            original_stage2_results,
+            "FINITE_CURRENT_MODE",
+        ),
+        proxy_plasma_current_A=_required_stage2_float(
+            original_stage2_results,
+            "PROXY_PLASMA_CURRENT_A",
+        ),
+        vf_current_A=_required_stage2_float(original_stage2_results, "VF_CURRENT_A"),
+        vf_template_path=original_stage2_results.get("VF_TEMPLATE_PATH"),
+    )
+
+
+def build_pre_boozer_stage2_repair_command(
+    args: argparse.Namespace,
+    *,
+    stage2_bs_path: Path,
+    original_stage2_results: dict,
+    recovery_output_root: Path,
+) -> list[str]:
+    config = build_pre_boozer_stage2_repair_config(
+        args,
+        original_stage2_results=original_stage2_results,
+        recovery_output_root=recovery_output_root,
+    )
+    command = build_stage2_command(
+        config,
+        constraint_override_reason="pre_boozer_repair",
+        constraint_profile_label="pre_boozer_repair",
+        python_executable=args.python_executable,
+    )
+    command.extend(
+        [
+            "--stage2-bs-path",
+            str(stage2_bs_path),
+            "--maxiter",
+            str(args.recovery_maxiter),
+            "--maxcor",
+            str(args.maxcor),
+            "--ftol",
+            str(args.recovery_ftol),
+            "--gtol",
+            str(args.recovery_gtol),
+            "--nphi",
+            str(args.nphi),
+            "--ntheta",
+            str(args.ntheta),
+        ]
+    )
+    equilibrium_path = resolved_handoff_equilibrium_path(args)
+    if equilibrium_path is not None:
+        command.extend(["--equilibrium-path", str(equilibrium_path)])
+    if getattr(args, "seed_order_upgrade", None) is not None:
+        command.extend(["--seed-order-upgrade", str(args.seed_order_upgrade)])
+    return command
+
+
 def build_recovery_command(
     args: argparse.Namespace,
     *,
     stage2_bs_path: Path,
     recovery_output_root: Path,
+    original_stage2_results: dict | None = None,
 ) -> list[str]:
+    if args.recovery_stage == RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM:
+        if original_stage2_results is None:
+            raise ValueError(
+                "Pre-Boozer Stage 2 repair requires the original Stage 2 results.json."
+            )
+        return build_pre_boozer_stage2_repair_command(
+            args,
+            stage2_bs_path=stage2_bs_path,
+            original_stage2_results=original_stage2_results,
+            recovery_output_root=recovery_output_root,
+        )
     recovery_args = SimpleNamespace(
         python_executable=args.python_executable,
         stage2_bs_path=str(stage2_bs_path),
@@ -507,7 +686,7 @@ def build_recovery_command(
         output_root=str(recovery_output_root),
         allow_init_only_stage2_seed=args.allow_init_only_stage2_seed,
         equilibria_dir=args.equilibria_dir,
-        equilibrium_path=args.equilibrium_path,
+        equilibrium_path=resolved_handoff_equilibrium_path(args),
         stage2_seed_surf_path=getattr(args, "stage2_seed_surf_path", None),
         plasma_surf_filename=Path(args.plasma_surf_filename).name,
         nphi=args.nphi,
@@ -584,6 +763,7 @@ def run_recovery_stage(
     command = build_recovery_command(
         args,
         stage2_bs_path=original_stage2_bs_path,
+        original_stage2_results=original_stage2_results,
         recovery_output_root=recovery_output_root,
     )
     if args.dry_run:
@@ -593,6 +773,15 @@ def run_recovery_stage(
             "output_root": str(recovery_output_root),
             "recovery_termination_reason": "dry_run",
         }
+    if args.recovery_stage == RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM:
+        return run_pre_boozer_stage2_repair(
+            args,
+            command=command,
+            original_stage2_bs_path=original_stage2_bs_path,
+            original_stage2_results_path=original_stage2_results_path,
+            original_stage2_results=original_stage2_results,
+            recovery_output_root=recovery_output_root,
+        )
     try:
         result_source, results_path, results = run_single_stage_command_with_salvage(
             command,
@@ -644,17 +833,19 @@ def run_recovery_stage(
         warm_start_boozer_surface_path=artifact_bundle["outer_boozer_surface_path"],
     )
     recovery_iters = results.get("iterations")
+    recovery_iters_value = None if recovery_iters is None else int(recovery_iters)
     recovery_succeeded = bootability_passes(recovery_probe)
+    recovery_termination_reason = (
+        "bootable" if recovery_succeeded else "not_bootable_after_budget"
+    )
     handoff_payload = build_bootability_recovery_payload_fields(
         recovery_probe,
         stage2_bs_path=str(original_stage2_bs_path),
         stage2_results_path=str(original_stage2_results_path),
         recovery_attempted=True,
         recovery_succeeded=recovery_succeeded,
-        recovery_iters=None if recovery_iters is None else int(recovery_iters),
-        recovery_termination_reason=(
-            "bootable" if recovery_succeeded else "not_bootable_after_budget"
-        ),
+        recovery_iters=recovery_iters_value,
+        recovery_termination_reason=recovery_termination_reason,
     )
     handoff_payload["UNIFIED_SEED_SOURCE"] = SEED_SOURCE_RECOVERED_STAGE2_DONOR
     update_results_json(results_path, handoff_payload)
@@ -669,10 +860,98 @@ def run_recovery_stage(
         "warm_start_surface_stem": str(artifact_bundle["surface_stem"]),
         "recovery_probe": recovery_probe,
         "recovery_succeeded": recovery_succeeded,
-        "recovery_iters": None if recovery_iters is None else int(recovery_iters),
-        "recovery_termination_reason": (
-            "bootable" if recovery_succeeded else "not_bootable_after_budget"
-        ),
+        "recovery_iters": recovery_iters_value,
+        "recovery_termination_reason": recovery_termination_reason,
+    }
+
+
+def run_pre_boozer_stage2_repair(
+    args: argparse.Namespace,
+    *,
+    command: list[str],
+    original_stage2_bs_path: Path,
+    original_stage2_results_path: Path,
+    original_stage2_results: dict,
+    recovery_output_root: Path,
+) -> dict[str, object]:
+    try:
+        run_command(
+            command,
+            timeout_seconds=timeout_or_none(args.single_stage_timeout_seconds),
+            dry_run=False,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        return {
+            "status": "failed",
+            "command": command,
+            "output_root": str(recovery_output_root),
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "recovery_termination_reason": (
+                "timeout"
+                if isinstance(error, subprocess.TimeoutExpired)
+                else "subprocess_failed"
+            ),
+        }
+    recovered_bs_path = resolve_stage2_artifact_path(
+        build_pre_boozer_stage2_repair_config(
+            args,
+            original_stage2_results=original_stage2_results,
+            recovery_output_root=recovery_output_root,
+        )
+    )
+    results_path = recovered_bs_path.with_name("results.json")
+    if not recovered_bs_path.exists():
+        return {
+            "status": "failed",
+            "command": command,
+            "output_root": str(recovery_output_root),
+            "results_path": str(results_path),
+            "result_source": RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM,
+            "error_type": "FileNotFoundError",
+            "error_message": (
+                "Pre-Boozer repair did not materialize "
+                f"{recovered_bs_path.name}: {recovered_bs_path}"
+            ),
+            "recovery_termination_reason": "missing_recovery_artifact",
+        }
+    results = load_json(results_path)
+    recovery_probe = build_probe_status(
+        args,
+        stage2_bs_path=recovered_bs_path,
+        stage2_results=results,
+        stage=BOOTABILITY_STAGE_RECOVERY,
+    )
+    recovery_iters = results.get("iterations")
+    recovery_iters_value = None if recovery_iters is None else int(recovery_iters)
+    recovery_succeeded = bootability_passes(recovery_probe)
+    recovery_termination_reason = (
+        "bootable" if recovery_succeeded else "not_bootable_after_budget"
+    )
+    handoff_payload = build_bootability_recovery_payload_fields(
+        recovery_probe,
+        stage2_bs_path=str(original_stage2_bs_path),
+        stage2_results_path=str(original_stage2_results_path),
+        recovery_attempted=True,
+        recovery_succeeded=recovery_succeeded,
+        recovery_iters=recovery_iters_value,
+        recovery_termination_reason=recovery_termination_reason,
+    )
+    handoff_payload["UNIFIED_SEED_SOURCE"] = SEED_SOURCE_RECOVERED_STAGE2_DONOR
+    update_results_json(results_path, handoff_payload)
+    return {
+        "status": "completed",
+        "command": command,
+        "output_root": str(recovery_output_root),
+        "results_path": str(results_path),
+        "result_source": RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM,
+        "results": load_json(results_path),
+        "recovered_bs_path": str(recovered_bs_path),
+        "warm_start_surface_stem": None,
+        "recovery_probe": recovery_probe,
+        "recovery_succeeded": recovery_succeeded,
+        "recovery_iters": recovery_iters_value,
+        "recovery_termination_reason": recovery_termination_reason,
     }
 
 
@@ -875,16 +1154,52 @@ def main(argv: list[str] | None = None) -> int:
     seed_source = SEED_SOURCE_DIRECT_STAGE2_DONOR
 
     if not bootability_passes(initial_probe):
-        summary = build_summary(
+        if args.skip_recovery:
+            summary = build_summary(
+                args,
+                stage2_input=stage2_input,
+                initial_probe=initial_probe,
+                recovery_payload=None,
+                full_payload=None,
+                blocking_reason=BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED,
+            )
+            write_json(summary_path, summary)
+            return 0
+        recovery_payload = run_recovery_stage(
             args,
-            stage2_input=stage2_input,
-            initial_probe=initial_probe,
-            recovery_payload=None,
-            full_payload=None,
-            blocking_reason=BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED,
+            original_stage2_bs_path=original_stage2_bs_path,
+            original_stage2_results_path=original_stage2_results_path,
+            original_stage2_results=stage2_results,
+            recovery_output_root=resolve_output_root(
+                args.recovery_output_root,
+                default_root=output_root / "recovery",
+            ),
         )
-        write_json(summary_path, summary)
-        return 0
+        recovery_attempted = True
+        recovery_succeeded = bool(recovery_payload.get("recovery_succeeded"))
+        recovery_iters = recovery_payload.get("recovery_iters")
+        recovery_termination_reason = recovery_payload.get("recovery_termination_reason")
+        if recovery_succeeded:
+            handoff_bs_path = resolved_path(recovery_payload["recovered_bs_path"])
+            warm_start_surface_stem = recovery_payload.get("warm_start_surface_stem")
+            handoff_warm_start_surface_stem = (
+                None
+                if warm_start_surface_stem is None
+                else resolved_path(warm_start_surface_stem)
+            )
+            handoff_bootability = recovery_payload["recovery_probe"]
+            seed_source = SEED_SOURCE_RECOVERED_STAGE2_DONOR
+        else:
+            summary = build_summary(
+                args,
+                stage2_input=stage2_input,
+                initial_probe=initial_probe,
+                recovery_payload=recovery_payload,
+                full_payload=None,
+                blocking_reason=BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED,
+            )
+            write_json(summary_path, summary)
+            return 0
 
     if args.recovery_only:
         summary = build_summary(

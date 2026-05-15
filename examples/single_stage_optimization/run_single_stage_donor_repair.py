@@ -102,12 +102,6 @@ def validate_donor_repair_args(args: argparse.Namespace) -> None:
             "--probe-only is not supported by run_single_stage_donor_repair.py; "
             "use --skip-recovery to rank probe results without recovery."
         )
-    if args.force_full_single_stage_after_recovery_fail:
-        raise ValueError(
-            "--force-full-single-stage-after-recovery-fail is not supported by "
-            "run_single_stage_donor_repair.py because this entrypoint never runs "
-            "the full single-stage workflow."
-        )
 
 
 def _resolved_iota_targets(args: argparse.Namespace) -> list[float]:
@@ -217,13 +211,6 @@ def run_repair_case(
     original_stage2_bs_path = Path(stage2_input["stage2_bs_path"])
     original_stage2_results_path = Path(stage2_input["stage2_results_path"])
     if stage2_input["stage2_results"] is None:
-        recovery_command = None
-        if not case_args.skip_recovery:
-            recovery_command = unified_runner.build_recovery_command(
-                case_args,
-                stage2_bs_path=original_stage2_bs_path,
-                recovery_output_root=case_output_root / "recovery",
-            )
         case_payload.update(
             {
                 "status": "dry_run",
@@ -231,7 +218,7 @@ def run_repair_case(
                     "stage2_bs_path": str(original_stage2_bs_path),
                     "stage2_results_path": str(original_stage2_results_path),
                 },
-                "recovery_command": recovery_command,
+                "recovery_command": None,
             }
         )
         return case_payload
@@ -255,7 +242,27 @@ def run_repair_case(
     blocking_reason = None
 
     if not bootability_passes(initial_probe):
-        blocking_reason = unified_runner.BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED
+        if not case_args.skip_recovery:
+            recovery_payload = unified_runner.run_recovery_stage(
+                case_args,
+                original_stage2_bs_path=original_stage2_bs_path,
+                original_stage2_results_path=original_stage2_results_path,
+                original_stage2_results=stage2_results,
+                recovery_output_root=case_output_root / "recovery",
+            )
+            recovery_attempted = True
+            recovery_succeeded = bool(recovery_payload.get("recovery_succeeded"))
+            recovery_iters = recovery_payload.get("recovery_iters")
+            recovery_termination_reason = recovery_payload.get(
+                "recovery_termination_reason"
+            )
+            if recovery_succeeded:
+                handoff_status = recovery_payload["recovery_probe"]
+                selected_seed_source = unified_runner.SEED_SOURCE_RECOVERED_STAGE2_DONOR
+                selected_stage2_bs_path = Path(recovery_payload["recovered_bs_path"])
+                selected_results_path = Path(recovery_payload["results_path"])
+        if not recovery_succeeded:
+            blocking_reason = unified_runner.BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED
 
     handoff_bootable = bootability_passes(handoff_status)
     case_payload.update(

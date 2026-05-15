@@ -1292,8 +1292,21 @@ def add_stage2_warm_start_seed_arguments(parser) -> None:
     )
 
 
-def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
+def resolved_handoff_equilibrium_path(args: object) -> Path | None:
     equilibrium_path = resolved_optional_path(getattr(args, "equilibrium_path", None))
+    if equilibrium_path is not None:
+        return equilibrium_path
+    plasma_surf_filename = getattr(args, "plasma_surf_filename", None)
+    if plasma_surf_filename is None:
+        return None
+    plasma_surf_path = Path(plasma_surf_filename).expanduser()
+    if plasma_surf_path.is_absolute():
+        return plasma_surf_path.resolve()
+    return None
+
+
+def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
+    equilibrium_path = resolved_handoff_equilibrium_path(args)
     if equilibrium_path is not None:
         command.extend(["--equilibrium-path", str(equilibrium_path)])
     stage2_seed_surf_path = resolved_optional_path(

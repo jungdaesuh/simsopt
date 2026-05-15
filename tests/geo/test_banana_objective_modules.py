@@ -2334,6 +2334,192 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(runtime.stats.runtime_calls, 1)
         self.assertGreaterEqual(runtime.stats.runtime_seconds, 0.0)
 
+    def test_build_stage2_iota_runtime_keeps_failed_bootstrap_as_runtime_state(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 3908.0, 0.35)
+        fake_boozer_surface.res["success"] = False
+
+        runtime = self.module.build_stage2_iota_runtime(
+            equilibrium_file="demo.nc",
+            bs=SimpleNamespace(),
+            tf_coils=[object(), object()],
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            nphi=91,
+            ntheta=32,
+            mpol=8,
+            ntor=6,
+            vol_target=0.12,
+            iota_target=0.2,
+            iota_tolerance=5.0e-3,
+            constraint_weight=None,
+            num_tf_coils=2,
+            mode="soft",
+            weight=3.0,
+            build_surface_configs_fn=lambda *_args, **_kwargs: [
+                {
+                    "initial_surface": SimpleNamespace(nfp=5),
+                    "target_volume": 0.12,
+                }
+            ],
+            attempt_initialize_boozer_surface_fn=lambda *_args, **_kwargs: (
+                SimpleNamespace(
+                    success=False,
+                    boozer_surface=fake_boozer_surface,
+                    solve_success=False,
+                    self_intersecting=True,
+                    solved_iota=3908.0,
+                    solved_G=0.35,
+                    error_type=None,
+                    error_message=None,
+                )
+            ),
+            compute_tf_G0_fn=lambda _tf_coils: 0.35,
+            iotas_cls=lambda _surface: SimpleNamespace(J=lambda: 3908.0),
+            quadratic_penalty_cls=lambda term, target: SimpleNamespace(
+                J=lambda: 0.5 * (term.J() - target) ** 2,
+                dJ=lambda: np.array([0.2, -0.1], dtype=float),
+            ),
+        )
+
+        self.assertTrue(runtime.initial_state.solve_failed)
+        self.assertFalse(runtime.initial_state.feasible)
+        self.assertAlmostEqual(runtime.initial_state.iota, 3908.0)
+        self.assertTrue(runtime.guarded_boozer_evaluator.last_solve_failed)
+        self.assertEqual(
+            runtime.guarded_boozer_evaluator.last_failure_reason,
+            "self_intersecting",
+        )
+
+        state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertTrue(state.solve_failed)
+        self.assertAlmostEqual(state.iota, 3908.0)
+        self.assertEqual(runtime.stats.runtime_calls, 0)
+
+    def test_build_stage2_iota_runtime_activates_after_failed_bootstrap_recovers(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 3908.0, 0.35)
+        fake_boozer_surface.res["success"] = False
+        runtime = self.module.build_stage2_iota_runtime(
+            equilibrium_file="demo.nc",
+            bs=SimpleNamespace(),
+            tf_coils=[object(), object()],
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            nphi=91,
+            ntheta=32,
+            mpol=8,
+            ntor=6,
+            vol_target=0.12,
+            iota_target=0.2,
+            iota_tolerance=1.0e-2,
+            constraint_weight=None,
+            num_tf_coils=2,
+            mode="soft",
+            weight=3.0,
+            build_surface_configs_fn=lambda *_args, **_kwargs: [
+                {
+                    "initial_surface": SimpleNamespace(nfp=5),
+                    "target_volume": 0.12,
+                }
+            ],
+            attempt_initialize_boozer_surface_fn=lambda *_args, **_kwargs: (
+                SimpleNamespace(
+                    success=False,
+                    boozer_surface=fake_boozer_surface,
+                    solve_success=False,
+                    self_intersecting=False,
+                    solved_iota=3908.0,
+                    solved_G=0.35,
+                    error_type=None,
+                    error_message=None,
+                )
+            ),
+            compute_tf_G0_fn=lambda _tf_coils: 0.35,
+            iotas_cls=lambda surface: SimpleNamespace(
+                J=lambda: float(surface.res["iota"])
+            ),
+            quadratic_penalty_cls=lambda term, target: SimpleNamespace(
+                J=lambda: 0.5 * (term.J() - target) ** 2,
+                dJ=lambda: np.array([0.2, -0.1], dtype=float),
+            ),
+        )
+        fake_boozer_surface.queue_result(
+            surface_x=[1.0, -1.0],
+            iota=0.205,
+            G=0.36,
+            success=True,
+        )
+        fake_boozer_surface.need_to_run_code = True
+
+        state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertFalse(state.solve_failed)
+        self.assertTrue(state.feasible)
+        self.assertAlmostEqual(state.iota, 0.205)
+        self.assertFalse(runtime.guarded_boozer_evaluator.last_solve_failed)
+        self.assertIsNone(runtime.guarded_boozer_evaluator.last_failure_reason)
+        self.assertEqual(runtime.stats.runtime_calls, 1)
+        np.testing.assert_allclose(
+            runtime.guarded_boozer_evaluator.last_successful_state.surface_dofs,
+            [1.0, -1.0],
+        )
+
+    def test_failed_bootstrap_runtime_preserves_self_intersection_check_error(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 3908.0, 0.35)
+        fake_boozer_surface.res["success"] = False
+        runtime = self.module.build_stage2_iota_runtime(
+            equilibrium_file="demo.nc",
+            bs=SimpleNamespace(),
+            tf_coils=[object(), object()],
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            nphi=91,
+            ntheta=32,
+            mpol=8,
+            ntor=6,
+            vol_target=0.12,
+            iota_target=0.2,
+            iota_tolerance=1.0e-2,
+            constraint_weight=None,
+            num_tf_coils=2,
+            mode="soft",
+            weight=3.0,
+            build_surface_configs_fn=lambda *_args, **_kwargs: [
+                {
+                    "initial_surface": SimpleNamespace(nfp=5),
+                    "target_volume": 0.12,
+                }
+            ],
+            attempt_initialize_boozer_surface_fn=lambda *_args, **_kwargs: (
+                SimpleNamespace(
+                    success=False,
+                    boozer_surface=fake_boozer_surface,
+                    solve_success=False,
+                    self_intersecting=False,
+                    solved_iota=3908.0,
+                    solved_G=0.35,
+                    error_type=None,
+                    error_message=None,
+                )
+            ),
+            compute_tf_G0_fn=lambda _tf_coils: 0.35,
+            iotas_cls=lambda surface: SimpleNamespace(
+                J=lambda: float(surface.res["iota"])
+            ),
+            quadratic_penalty_cls=lambda term, target: SimpleNamespace(
+                J=lambda: 0.5 * (term.J() - target) ** 2,
+                dJ=lambda: np.array([0.2, -0.1], dtype=float),
+            ),
+        )
+        fake_boozer_surface.queue_result(iota=0.205, G=0.36, success=True)
+        fake_boozer_surface.surface.set_self_intersecting_raises(
+            RuntimeError("ground missing")
+        )
+        fake_boozer_surface.need_to_run_code = True
+
+        with self.assertRaisesRegex(RuntimeError, "ground missing"):
+            self.module.evaluate_stage2_iota_state(runtime)
+
     def test_evaluate_stage2_iota_state_guarded_path_does_not_require_penalty_gradient(
         self,
     ):

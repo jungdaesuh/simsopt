@@ -49,6 +49,7 @@ from banana_opt.smooth_distance_selection import (
     surface_points_tree_shape,
 )
 from banana_opt.stage2_single_stage_handoff import (
+    BOOZER_FAILURE_POLICY_REPORT_FAILURE,
     BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
     attempt_initialize_boozer_surface,
     compute_tf_G0,
@@ -67,6 +68,16 @@ _STAGE2_HOT_LOOP_SELF_INTERSECTION_ANGLE = 0.0
 _STAGE2_FAILURE_REASON_NONE = None
 _STAGE2_FAILURE_REASON_SOLVE = "solve_failed"
 _STAGE2_FAILURE_REASON_SELF_INTERSECTION = "self_intersecting"
+
+
+def _boozer_res_scalar(boozer_surface, key: str) -> float | None:
+    res = getattr(boozer_surface, "res", None)
+    if not isinstance(res, Mapping):
+        return None
+    value = res.get(key)
+    if value is None:
+        return None
+    return float(value)
 
 
 def _boozer_surface_is_self_intersecting(boozer_surface) -> bool:
@@ -111,11 +122,36 @@ class Stage2IotaEvaluation:
 
 
 class Stage2GuardedBoozerEvaluator:
-    def __init__(self, boozer_surface):
+    def __init__(
+        self,
+        boozer_surface,
+        *,
+        last_successful_state=None,
+        initial_failure_reason: str | None = None,
+        initial_iota_guess: float | None = None,
+        initial_G_guess: float | None = None,
+    ):
         self.boozer_surface = boozer_surface
-        self.last_successful_state = snapshot_boozer_solve_state(boozer_surface)
-        self.last_solve_failed = False
-        self.last_failure_reason: str | None = _STAGE2_FAILURE_REASON_NONE
+        self.last_successful_state = last_successful_state
+        self.last_solve_failed = last_successful_state is None
+        self.last_failure_reason: str | None = (
+            initial_failure_reason
+            if self.last_solve_failed
+            else _STAGE2_FAILURE_REASON_NONE
+        )
+        self.initial_iota_guess = (
+            None if initial_iota_guess is None else float(initial_iota_guess)
+        )
+        self.initial_G_guess = (
+            None if initial_G_guess is None else float(initial_G_guess)
+        )
+
+    @classmethod
+    def from_successful_surface(cls, boozer_surface):
+        return cls(
+            boozer_surface,
+            last_successful_state=snapshot_boozer_solve_state(boozer_surface),
+        )
 
     def _refresh_if_needed(self) -> None:
         if self.boozer_surface.need_to_run_code:
@@ -127,6 +163,18 @@ class Stage2GuardedBoozerEvaluator:
         target: float,
         tolerance: float,
     ) -> Stage2IotaState:
+        if self.last_successful_state is None:
+            iota = _boozer_res_scalar(self.boozer_surface, "iota")
+            if iota is None:
+                iota = self.initial_iota_guess
+            if iota is None:
+                raise ValueError("Stage 2 Boozer runtime has no failed iota state.")
+            return _build_stage2_iota_state_from_iota(
+                iota,
+                target=target,
+                tolerance=tolerance,
+                solve_failed=True,
+            )
         return _build_stage2_iota_state_from_iota(
             self.last_successful_state.iota,
             target=target,
@@ -135,12 +183,24 @@ class Stage2GuardedBoozerEvaluator:
         )
 
     def run_guarded(self):
-        res = self.boozer_surface.res
+        iota_guess = _boozer_res_scalar(self.boozer_surface, "iota")
+        if iota_guess is None:
+            iota_guess = self.initial_iota_guess
+        G_guess = _boozer_res_scalar(self.boozer_surface, "G")
+        if G_guess is None:
+            G_guess = self.initial_G_guess
+        if iota_guess is None:
+            raise ValueError("Stage 2 Boozer runtime has no iota solve seed.")
+        failure_policy = (
+            BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS
+            if self.last_successful_state is not None
+            else BOOZER_FAILURE_POLICY_REPORT_FAILURE
+        )
         solve_attempt = run_boozer_with_failure_policy(
             self.boozer_surface,
-            res["iota"],
-            res["G"],
-            failure_policy=BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
+            iota_guess,
+            G_guess,
+            failure_policy=failure_policy,
             last_successful_state=self.last_successful_state,
         )
         if not solve_attempt.solve_success:
@@ -154,16 +214,20 @@ class Stage2GuardedBoozerEvaluator:
             )
             self_intersection_check_completed = True
         finally:
-            if not self_intersection_check_completed:
+            if (
+                not self_intersection_check_completed
+                and self.last_successful_state is not None
+            ):
                 restore_boozer_solve_state(
                     self.boozer_surface,
                     self.last_successful_state,
                 )
         if self_intersecting:
-            restore_boozer_solve_state(
-                self.boozer_surface,
-                self.last_successful_state,
-            )
+            if self.last_successful_state is not None:
+                restore_boozer_solve_state(
+                    self.boozer_surface,
+                    self.last_successful_state,
+                )
             self.last_solve_failed = True
             self.last_failure_reason = _STAGE2_FAILURE_REASON_SELF_INTERSECTION
             return {"success": False, "reason": self.last_failure_reason}
@@ -485,7 +549,7 @@ def build_stage2_iota_runtime(
         nfp=outer_surface_config["initial_surface"].nfp,
     )
     bootstrap_seconds = time.perf_counter() - bootstrap_start
-    if not initialization.success or initialization.boozer_surface is None:
+    if initialization.boozer_surface is None:
         details = [
             f"solve_success={initialization.solve_success}",
             f"self_intersecting={initialization.self_intersecting}",
@@ -512,15 +576,42 @@ def build_stage2_iota_runtime(
             stats.runtime_seconds += time.perf_counter() - run_start
 
     boozer_surface.run_code = timed_run_code
-    guarded_boozer_evaluator = Stage2GuardedBoozerEvaluator(boozer_surface)
     iota_term = iotas_cls(boozer_surface)
     penalty_objective = quadratic_penalty_cls(iota_term, float(iota_target))
-    initial_state = _build_stage2_iota_state(
-        iota_term,
-        penalty_objective,
-        target=float(iota_target),
-        tolerance=float(iota_tolerance),
-    )
+    if initialization.success:
+        guarded_boozer_evaluator = Stage2GuardedBoozerEvaluator.from_successful_surface(
+            boozer_surface,
+        )
+        initial_state = _build_stage2_iota_state(
+            iota_term,
+            penalty_objective,
+            target=float(iota_target),
+            tolerance=float(iota_tolerance),
+        )
+    else:
+        failure_reason = (
+            _STAGE2_FAILURE_REASON_SELF_INTERSECTION
+            if initialization.self_intersecting
+            else _STAGE2_FAILURE_REASON_SOLVE
+        )
+        if initialization.solved_iota is None:
+            raise RuntimeError(
+                "Stage 2 Boozer/iota hot-loop initialization failed without a "
+                "solved_iota seed for retry."
+            )
+        failed_iota = float(initialization.solved_iota)
+        guarded_boozer_evaluator = Stage2GuardedBoozerEvaluator(
+            boozer_surface,
+            initial_failure_reason=failure_reason,
+            initial_iota_guess=failed_iota,
+            initial_G_guess=initialization.solved_G,
+        )
+        initial_state = _build_stage2_iota_state_from_iota(
+            failed_iota,
+            target=float(iota_target),
+            tolerance=float(iota_tolerance),
+            solve_failed=True,
+        )
     return Stage2IotaRuntime(
         mode=str(mode),
         boozer_surface=boozer_surface,

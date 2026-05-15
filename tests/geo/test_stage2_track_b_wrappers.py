@@ -63,10 +63,6 @@ class DonorRepairWrapperTests(unittest.TestCase):
                     "command": ["python", "run_stage2_alm.py"],
                     "config_source": "profile:standard_80ka",
                 },
-            ), patch.object(
-                module.unified_runner,
-                "build_recovery_command",
-                return_value=["python", "run_single_stage_thresholded_physics_alm.py"],
             ):
                 result = module.main(
                     [
@@ -91,10 +87,7 @@ class DonorRepairWrapperTests(unittest.TestCase):
             self.assertTrue(summary["dry_run"])
             self.assertEqual(summary["best_case_id"], None)
             self.assertEqual([case["status"] for case in summary["cases"]], ["dry_run", "dry_run"])
-            self.assertIn(
-                "run_single_stage_thresholded_physics_alm.py",
-                summary["cases"][0]["recovery_command"],
-            )
+            self.assertIsNone(summary["cases"][0]["recovery_command"])
             self.assertIn("case_id", summary_csv_path.read_text(encoding="utf-8"))
 
     def test_best_donor_manifest_prefers_bootable_case(self):
@@ -146,6 +139,12 @@ class DonorRepairWrapperTests(unittest.TestCase):
             ), patch.object(
                 module.unified_runner,
                 "run_recovery_stage",
+                return_value={
+                    "status": "completed",
+                    "recovery_succeeded": False,
+                    "recovery_iters": 4,
+                    "recovery_termination_reason": "not_bootable_after_budget",
+                },
             ) as recovery_mock:
                 result = module.main(
                     [
@@ -165,7 +164,7 @@ class DonorRepairWrapperTests(unittest.TestCase):
                 )
 
             self.assertEqual(result, 0)
-            recovery_mock.assert_not_called()
+            recovery_mock.assert_called_once()
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertEqual(summary["best_case_id"], "repair_iota_0p2")
             self.assertEqual(
