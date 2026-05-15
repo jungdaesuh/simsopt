@@ -12,13 +12,13 @@ on:
 
 jobs:
   gpu-parity:
-    name: GPU parity (CUDA, JAX 0.9.2)
+    name: GPU parity (CUDA, JAX)
     runs-on: [self-hosted, gpu]
     timeout-minutes: 45
 
     env:
-      BENCHMARK_ENV_NAME: jax-0.9.2
-      BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml
+      BENCHMARK_ENV_NAME: jax
+      BENCHMARK_ENV_FILE: envs/jax.yml
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
@@ -188,8 +188,8 @@ jobs:
     timeout-minutes: 240
 
     env:
-      BENCHMARK_ENV_NAME: jax-0.9.2
-      BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml
+      BENCHMARK_ENV_NAME: jax
+      BENCHMARK_ENV_FILE: envs/jax.yml
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow

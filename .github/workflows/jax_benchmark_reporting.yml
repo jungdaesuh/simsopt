@@ -10,8 +10,8 @@ jobs:
     name: Stable hardware Tier 5 benchmark report
     runs-on: [self-hosted, stable-benchmarks]
     env:
-      BENCHMARK_ENV_NAME: jax-0.9.2
-      BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml
+      BENCHMARK_ENV_NAME: jax
+      BENCHMARK_ENV_FILE: envs/jax.yml
       SIMSOPT_BACKEND_MODE: jax_gpu_fast
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: log

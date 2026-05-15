@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_NAME="${CONDA_ENV_NAME:-columbia-jax-0.9.2}"
+ENV_NAME="${CONDA_ENV_NAME:-jax}"
 ARTIFACT_DIR="${ROOT_DIR}/.artifacts/pytest"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_PATH="${ARTIFACT_DIR}/full_${TIMESTAMP}.log"

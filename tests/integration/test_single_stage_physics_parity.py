@@ -46,7 +46,7 @@ pytest.importorskip(
     "simsoptpp",
     reason=(
         "Single-stage integration tests require a simsoptpp-backed JAX runtime "
-        "(for example columbia-jax-0.9.2)."
+        "(for example the conda env `jax`)."
     ),
 )
 

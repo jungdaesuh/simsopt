@@ -5622,8 +5622,8 @@ def _workflow_job_section(
 def _assert_named_benchmark_env_bootstrap(
     workflow_text: str, *, verify_python: bool = False
 ) -> None:
-    assert "BENCHMARK_ENV_NAME: jax-0.9.2" in workflow_text
-    assert "BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml" in workflow_text
+    assert "BENCHMARK_ENV_NAME: jax" in workflow_text
+    assert "BENCHMARK_ENV_FILE: envs/jax.yml" in workflow_text
     assert 'grep -Fxq "$BENCHMARK_ENV_NAME"' in workflow_text
     assert (
         'conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"'

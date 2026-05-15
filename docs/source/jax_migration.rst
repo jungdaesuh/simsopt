@@ -7,8 +7,8 @@ JAX equivalents for callers migrating to the JAX code path.
 The JAX modules do **not** replace the CPU modules.  Both coexist.
 The CPU path remains the default and the correctness oracle.
 
-As of the JAX ``0.9.2`` runtime, the trusted least-squares backend remains
-the native CPU/reference lane with ``optimizer_backend="scipy"``.
+The trusted least-squares backend remains the native CPU/reference lane
+with ``optimizer_backend="scipy"``.
 High-level JAX backend flows now require ``optimizer_backend="ondevice"``,
 so Stage 2, single-stage, and Boozer LS execution no longer route through
 SciPy when ``backend="jax"`` is active. The remaining SciPy adapter is kept

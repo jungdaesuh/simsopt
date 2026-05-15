@@ -10,11 +10,11 @@ Current checkout branch: `gpu-purity-stage2-20260405`. Parent repo:
 
 Two environments are relevant:
 
-**Shared JAX runtime** (historical env name `jax-0.9.2`; current checked local
-env imports `jax==0.10.0`, `jaxlib==0.10.0`):
+**Shared JAX runtime** (env name `jax`; current checked local env imports
+`jax==0.10.0`, `jaxlib==0.10.0`):
 ```bash
-conda env create -f envs/jax-0.9.2.yml
-conda activate jax-0.9.2
+conda env create -f envs/jax.yml
+conda activate jax
 ```
 - Current checked local env: JAX 0.10.0, jaxlib 0.10.0, NumPy 2.x, Python
   3.11. Fresh env resolution follows `pyproject.toml`.
@@ -27,7 +27,7 @@ conda activate jax-0.9.2
 
 **Private optimizer lane** (`optimizer_backend="hybrid"` / `"ondevice"`):
 ```bash
-conda activate jax-0.9.2
+conda activate jax
 pip install -e .
 ```
 - same checked local JAX 0.10.0 / jaxlib 0.10.0 runtime, NumPy 2.x, Python
@@ -52,13 +52,13 @@ ruff check <changed-files>
 ruff format <changed-files>
 
 # Public pure-JAX unit tests (no simsoptpp)
-conda run -n jax-0.9.2 python -m pytest tests/test_jax_import_smoke.py tests/field/test_biotsavart_jax.py tests/geo/test_surface_fourier_jax.py tests/geo/test_boozer_residual_jax.py tests/objectives/test_integral_bdotn_jax.py tests/geo/test_boozer_derivatives_jax.py tests/geo/test_boozersurface_jax.py tests/integration/test_jax_native_path.py -m "not private_optimizer_runtime" -v
+conda run -n jax python -m pytest tests/test_jax_import_smoke.py tests/field/test_biotsavart_jax.py tests/geo/test_surface_fourier_jax.py tests/geo/test_boozer_residual_jax.py tests/objectives/test_integral_bdotn_jax.py tests/geo/test_boozer_derivatives_jax.py tests/geo/test_boozersurface_jax.py tests/integration/test_jax_native_path.py -m "not private_optimizer_runtime" -v
 
 # Private optimizer tests (same checked local 0.10.0 runtime, simsoptpp-backed install)
-conda run -n jax-0.9.2 python -m pytest tests/geo/test_boozersurface_jax.py tests/integration/test_single_stage_jax.py -m "private_optimizer_runtime" -v
+conda run -n jax python -m pytest tests/geo/test_boozersurface_jax.py tests/integration/test_single_stage_jax.py -m "private_optimizer_runtime" -v
 
 # Benchmark/runtime helper regressions
-conda run -n jax-0.9.2 python -m pytest tests/test_run_code_benchmark_common.py tests/test_benchmark_helpers.py -v
+conda run -n jax python -m pytest tests/test_run_code_benchmark_common.py tests/test_benchmark_helpers.py -v
 
 # M2+M5 integration tests (needs simsoptpp) — 37 pass
 /Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python -m pytest tests/integration/ -v

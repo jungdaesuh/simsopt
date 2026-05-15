@@ -28,8 +28,8 @@ Dependencies
 
 Base install (CPU development/testing)::
 
-    conda env create -f envs/jax-0.9.2.yml
-    conda activate jax-0.9.2
+    conda env create -f envs/jax.yml
+    conda activate jax
 
 The environment recipe already performs the editable CPU-side
 ``simsopt[JAX,dev]`` install, so no extra ``pip install`` step is needed for
@@ -43,8 +43,9 @@ GPU install (CUDA 12)::
     # or for a non-editable runtime:
     pip install "simsopt[JAX_GPU]"
 
-Both the public and private optimizer lanes are Python ``3.11+`` with JAX /
-jaxlib ``0.9.2``. The trusted reference backend remains
+Both the public and private optimizer lanes are Python ``3.11+`` with the
+``jax`` / ``jaxlib`` distributions resolved by ``pyproject.toml``. The trusted
+reference backend remains
 ``SIMSOPT_BACKEND_MODE=native_cpu`` with ``optimizer_backend="scipy"``.
 All JAX backend modes now require the on-device optimizer lane at the
 high-level Stage 2 / single-stage / Boozer contracts, so ``backend="jax"``
@@ -213,8 +214,8 @@ GPU Node Quick-Start
 
 2. **Create environment**::
 
-       conda env create -f envs/jax-0.9.2.yml
-       conda activate jax-0.9.2
+       conda env create -f envs/jax.yml
+       conda activate jax
 
 3. **Upgrade the editable install to the CUDA extra set**::
 
@@ -292,7 +293,7 @@ separate ship gates.
        docker push <registry>/simsopt-jax:cuda12-jax092
 
    The image bakes the heavy system and Python dependency stack, including
-   ``jax[cuda12]==0.9.2``. Runtime jobs still clone and build the exact target
+   the ``jax[cuda12]`` distribution. Runtime jobs still clone and build the exact target
    repo SHA so the proof remains commit-accurate. The remote proof requires
    the image-provided ``/opt/venv`` runtime and fails immediately if it is
    missing; it does not install system or Python dependencies inside the job.
@@ -421,8 +422,9 @@ Runpod Operational Notes
 ------------------------
 
 The following points were validated on **April 17, 2026** during real
-Runpod RTX 4090 proof runs with exact ``jax==0.9.2`` / ``jaxlib==0.9.2``.
-These are setup lessons, not theoretical guidance.
+Runpod RTX 4090 proof runs with the JAX 0.9.2 wheel stack baked into the
+production image at that time. These are setup lessons, not theoretical
+guidance.
 
 **Use a Linux-built environment on the pod**
   Do not copy a local macOS ``.conda`` or virtualenv into Runpod and try to
@@ -431,8 +433,9 @@ These are setup lessons, not theoretical guidance.
   Build the Python environment on the pod itself.
 
 **Exact JAX 0.9.2 on the stock CUDA 12.4 Runpod image needed CUDA toolkit 12.9**
-  On ``runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04``, the exact
-  ``jax[cuda12]==0.9.2`` wheel stack only became reliable after installing
+  On ``runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04``, the
+  pinned ``jax[cuda12]==0.9.2`` wheel stack used by that historical proof
+  only became reliable after installing
   ``cuda-toolkit-12-9`` and repointing ``/usr/local/cuda`` to
   ``/usr/local/cuda-12.9``.  Without that upgrade, prior proof attempts hit
   CUDA userspace/toolchain mismatches.
