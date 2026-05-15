@@ -495,6 +495,163 @@ def _cmprlb_reference(
     return r, wa, 0
 
 
+def _subsm_reference(
+    nsub,
+    ind,
+    l,
+    u,
+    nbd,
+    x,
+    d,
+    xp,
+    ws,
+    wy,
+    theta,
+    xx,
+    gg,
+    col,
+    head,
+    wv,
+    wn,
+):
+    ind = np.asarray(ind, dtype=np.int32)
+    l = np.asarray(l, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    nbd = np.asarray(nbd, dtype=np.int32)
+    x = np.asarray(x, dtype=np.float64).copy()
+    d = np.asarray(d, dtype=np.float64).copy()
+    xp = np.asarray(xp, dtype=np.float64).copy()
+    ws = np.asarray(ws, dtype=np.float64)
+    wy = np.asarray(wy, dtype=np.float64)
+    xx = np.asarray(xx, dtype=np.float64)
+    gg = np.asarray(gg, dtype=np.float64)
+    wv = np.asarray(wv, dtype=np.float64).copy()
+    wn = np.asarray(wn, dtype=np.float64)
+    m = ws.shape[0]
+    n = ws.shape[1]
+
+    if nsub <= 0:
+        return x, d, xp, 0, wv, 0
+
+    pointr = head
+    for i in range(col):
+        temp1 = 0.0
+        temp2 = 0.0
+        for j in range(nsub):
+            k = ind[j]
+            temp1 += wy[pointr, k] * d[j]
+            temp2 += ws[pointr, k] * d[j]
+        wv[i] = temp1
+        wv[col + i] = theta * temp2
+        pointr = (pointr + 1) % m
+
+    col2 = 2 * col
+    factor = np.triu(wn[:col2, :col2])
+    try:
+        wv[:col2] = scipy.linalg.solve_triangular(
+            factor,
+            wv[:col2],
+            trans="T",
+            lower=False,
+        )
+    except scipy.linalg.LinAlgError:
+        return x, d, xp, 0, wv, 1
+
+    wv[:col] = -wv[:col]
+
+    try:
+        wv[:col2] = scipy.linalg.solve_triangular(
+            factor,
+            wv[:col2],
+            trans="N",
+            lower=False,
+        )
+    except scipy.linalg.LinAlgError:
+        return x, d, xp, 0, wv, 1
+
+    pointr = head
+    for jy in range(col):
+        js = col + jy
+        for i in range(nsub):
+            k = ind[i]
+            d[i] += wy[pointr, k] * wv[jy] / theta + ws[pointr, k] * wv[js]
+        pointr = (pointr + 1) % m
+
+    d[:nsub] = d[:nsub] / theta
+    iword = 0
+    xp[:] = x
+
+    for i in range(nsub):
+        k = ind[i]
+        dk = d[i]
+        xk = x[k]
+        if nbd[k] == lbfgsb.NBD_LOWER:
+            x[k] = max(l[k], xk + dk)
+            if x[k] == l[k]:
+                iword = 1
+        elif nbd[k] == lbfgsb.NBD_BOTH:
+            xk = max(l[k], xk + dk)
+            x[k] = min(u[k], xk)
+            if x[k] == l[k] or x[k] == u[k]:
+                iword = 1
+        elif nbd[k] == lbfgsb.NBD_UPPER:
+            x[k] = min(u[k], xk + dk)
+            if x[k] == u[k]:
+                iword = 1
+        else:
+            x[k] = xk + dk
+
+    if iword == 0:
+        return x, d, xp, iword, wv, 0
+
+    dd_p = 0.0
+    for i in range(n):
+        dd_p += (x[i] - xx[i]) * gg[i]
+
+    if dd_p <= 0.0:
+        return x, d, xp, iword, wv, 0
+
+    x[:] = xp
+    alpha = 1.0
+    ibd = 0
+    for i in range(nsub):
+        k = ind[i]
+        dk = d[i]
+        temp1 = alpha
+        if nbd[k] != lbfgsb.NBD_UNBOUNDED:
+            if (dk < 0.0) and (nbd[k] <= lbfgsb.NBD_BOTH):
+                temp2 = l[k] - x[k]
+                if temp2 >= 0.0:
+                    temp1 = 0.0
+                elif dk * alpha < temp2:
+                    temp1 = temp2 / dk
+            elif (dk > 0.0) and (nbd[k] >= lbfgsb.NBD_BOTH):
+                temp2 = u[k] - x[k]
+                if temp2 <= 0.0:
+                    temp1 = 0.0
+                elif dk * alpha > temp2:
+                    temp1 = temp2 / dk
+            if temp1 < alpha:
+                alpha = temp1
+                ibd = i
+
+    if alpha < 1.0:
+        dk = d[ibd]
+        k = ind[ibd]
+        if dk > 0.0:
+            x[k] = u[k]
+            d[ibd] = 0.0
+        elif dk < 0.0:
+            x[k] = l[k]
+            d[ibd] = 0.0
+
+    for i in range(nsub):
+        k = ind[i]
+        x[k] = x[k] + alpha * d[i]
+
+    return x, d, xp, iword, wv, 0
+
+
 def _lnsrlb_args(
     x,
     g,
@@ -1628,6 +1785,133 @@ def test_lbfgsb_cmprlb_is_jittable_for_fixed_workspace_shapes():
     assert int(actual.info) == expected_info
     np.testing.assert_allclose(np.asarray(actual.r), expected_r)
     np.testing.assert_allclose(np.asarray(actual.wa), expected_wa)
+
+
+def _subsm_case(*, projected=False, positive_directional_derivative=False):
+    m = 2
+    n = 4
+    ind = np.array([0, 2, 3, 1], dtype=np.int32)
+    l = np.array([-1.0, -1.0, -0.5, -2.0], dtype=np.float64)
+    u = np.array([1.0, 1.0, 0.5, 2.0], dtype=np.float64)
+    nbd = np.array(
+        [
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_UNBOUNDED,
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_UPPER,
+        ],
+        dtype=np.int32,
+    )
+    x = np.array([0.1, -0.2, 0.0, 0.3], dtype=np.float64)
+    d = np.array([0.2, -0.1, 0.05, 0.0], dtype=np.float64)
+    if projected:
+        x = np.array([0.9, -0.2, 0.0, 0.3], dtype=np.float64)
+        d = np.array([0.5, -0.1, 0.05, 0.0], dtype=np.float64)
+    xp = np.full(n, 99.0, dtype=np.float64)
+    ws = np.array(
+        [[0.25, -0.1, 0.0, 0.2], [-0.15, 0.05, 0.3, -0.25]],
+        dtype=np.float64,
+    )
+    wy = np.array(
+        [[0.1, 0.2, -0.05, 0.0], [0.05, -0.1, 0.15, 0.2]],
+        dtype=np.float64,
+    )
+    theta = np.float64(2.0)
+    xx = np.array([0.0, -0.2, 0.0, 0.3], dtype=np.float64)
+    gg = np.array([-1.0, 0.0, 0.25, -0.5], dtype=np.float64)
+    if positive_directional_derivative:
+        gg = np.array([1.0, 0.0, 0.25, -0.5], dtype=np.float64)
+    wv = np.zeros(2 * m, dtype=np.float64)
+    wn = np.eye(2 * m, dtype=np.float64)
+    return ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn
+
+
+def test_lbfgsb_subsm_matches_c_reference_for_in_box_step():
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case()
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 2, 0, wv, wn
+    )
+    actual = lbfgsb.lbfgsb_subsm(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 2, 0, wv, wn
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.x), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.xp), expected[2])
+    assert int(actual.iword) == expected[3] == 0
+    np.testing.assert_allclose(np.asarray(actual.wv), expected[4])
+    assert int(actual.info) == expected[5] == 0
+
+
+def test_lbfgsb_subsm_matches_c_reference_for_projected_bound_step():
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case(
+        projected=True
+    )
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 0, 0, wv, wn
+    )
+    actual = lbfgsb.lbfgsb_subsm(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 0, 0, wv, wn
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.x), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.xp), expected[2])
+    assert int(actual.iword) == expected[3] == 1
+    np.testing.assert_allclose(np.asarray(actual.wv), expected[4])
+    assert int(actual.info) == expected[5] == 0
+
+
+def test_lbfgsb_subsm_matches_c_reference_for_positive_derivative_safeguard():
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case(
+        projected=True, positive_directional_derivative=True
+    )
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 0, 0, wv, wn
+    )
+    actual = lbfgsb.lbfgsb_subsm(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 0, 0, wv, wn
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.x), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.xp), expected[2])
+    assert int(actual.iword) == expected[3] == 1
+    np.testing.assert_allclose(np.asarray(actual.wv), expected[4])
+    assert int(actual.info) == expected[5] == 0
+
+
+def test_lbfgsb_subsm_reports_info_for_singular_factor():
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case()
+    wn[0, 0] = 0.0
+
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 1, 0, wv, wn
+    )
+    actual = lbfgsb.lbfgsb_subsm(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 1, 0, wv, wn
+    )
+
+    np.testing.assert_array_equal(np.asarray(actual.x), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.d), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.xp), expected[2])
+    assert int(actual.iword) == expected[3] == 0
+    np.testing.assert_allclose(np.asarray(actual.wv), expected[4])
+    assert int(actual.info) == expected[5] == 1
+
+
+def test_lbfgsb_subsm_is_jittable_for_fixed_workspace_shapes():
+    subsm_jit = jax.jit(lbfgsb.lbfgsb_subsm)
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case()
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 2, 0, wv, wn
+    )
+    actual = subsm_jit(3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 2, 0, wv, wn)
+
+    np.testing.assert_allclose(np.asarray(actual.x), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[1])
+    assert int(actual.iword) == expected[3] == 0
+    assert int(actual.info) == expected[5] == 0
 
 
 def test_lbfgsb_lnsrlb_initial_request_matches_scipy_wrapper_semantics():

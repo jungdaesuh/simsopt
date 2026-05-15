@@ -192,6 +192,15 @@ class LbfgsbCmprlbResult(NamedTuple):
     info: jax.Array
 
 
+class LbfgsbSubsmResult(NamedTuple):
+    x: jax.Array
+    d: jax.Array
+    xp: jax.Array
+    iword: jax.Array
+    wv: jax.Array
+    info: jax.Array
+
+
 class LbfgsbLnsrlbResult(NamedTuple):
     x: jax.Array
     fold: jax.Array
@@ -1449,6 +1458,235 @@ def lbfgsb_cmprlb(
 
     return jax.lax.cond(
         (~cnstnd) & (col > 0), unconstrained_branch, constrained_branch, None
+    )
+
+
+def lbfgsb_subsm(
+    nsub,
+    ind,
+    l,
+    u,
+    nbd,
+    x,
+    d,
+    xp,
+    ws,
+    wy,
+    theta,
+    xx,
+    gg,
+    col,
+    head,
+    wv,
+    wn,
+):
+    nsub = jnp.asarray(nsub, dtype=jnp.int32)
+    ind = jnp.asarray(ind, dtype=jnp.int32)
+    l = jnp.asarray(l, dtype=jnp.float64)
+    u = jnp.asarray(u, dtype=jnp.float64)
+    nbd = jnp.asarray(nbd, dtype=jnp.int32)
+    x = jnp.asarray(x, dtype=jnp.float64)
+    d = jnp.asarray(d, dtype=jnp.float64)
+    xp = jnp.asarray(xp, dtype=jnp.float64)
+    ws = jnp.asarray(ws, dtype=jnp.float64)
+    wy = jnp.asarray(wy, dtype=jnp.float64)
+    theta = jnp.asarray(theta, dtype=jnp.float64)
+    xx = jnp.asarray(xx, dtype=jnp.float64)
+    gg = jnp.asarray(gg, dtype=jnp.float64)
+    col = jnp.asarray(col, dtype=jnp.int32)
+    head = jnp.asarray(head, dtype=jnp.int32)
+    wv = jnp.asarray(wv, dtype=jnp.float64)
+    wn = jnp.asarray(wn, dtype=jnp.float64)
+    m = int(ws.shape[0])
+    n = int(ws.shape[1])
+    m2 = 2 * m
+    original_x = x
+    original_d = d
+    original_xp = xp
+
+    pointr = head
+    for i in range(m):
+        active_col = i < col
+        temp1 = jnp.asarray(0.0, dtype=jnp.float64)
+        temp2 = jnp.asarray(0.0, dtype=jnp.float64)
+        for j in range(n):
+            active_sub = j < nsub
+            k = ind[j]
+            temp1 = temp1 + jnp.where(
+                active_col & active_sub,
+                wy[pointr, k] * d[j],
+                0.0,
+            )
+            temp2 = temp2 + jnp.where(
+                active_col & active_sub,
+                ws[pointr, k] * d[j],
+                0.0,
+            )
+        wv = wv.at[i].set(jnp.where(active_col, temp1, wv[i]))
+        wv = wv.at[col + i].set(jnp.where(active_col, theta * temp2, wv[col + i]))
+        pointr = (pointr + 1) % m
+
+    active = jnp.arange(m2, dtype=jnp.int32) < (2 * col)
+    active_matrix = active[:, None] & active[None, :]
+    factor = jnp.where(active_matrix, jnp.triu(wn), jnp.eye(m2, dtype=jnp.float64))
+    rhs = jnp.where(active, wv, 0.0)
+    solved = jsp_linalg.solve_triangular(
+        factor,
+        rhs,
+        trans=1,
+        lower=False,
+        unit_diagonal=False,
+    )
+    first_finite = jnp.all(jnp.isfinite(jnp.where(active, solved, 0.0)))
+    wv_after_first = jnp.where(active & first_finite, solved, wv)
+
+    for i in range(m):
+        wv_after_first = wv_after_first.at[i].set(
+            jnp.where(
+                (i < col) & first_finite,
+                -wv_after_first[i],
+                wv_after_first[i],
+            )
+        )
+
+    rhs = jnp.where(active, wv_after_first, 0.0)
+    solved = jsp_linalg.solve_triangular(
+        factor,
+        rhs,
+        trans=0,
+        lower=False,
+        unit_diagonal=False,
+    )
+    second_finite = jnp.all(jnp.isfinite(jnp.where(active, solved, 0.0)))
+    valid = first_finite & second_finite
+    wv = jnp.where(active & valid, solved, wv_after_first)
+
+    pointr = head
+    for jy in range(m):
+        active_col = valid & (jy < col)
+        js = col + jy
+        for i in range(n):
+            active_sub = active_col & (i < nsub)
+            k = ind[i]
+            value = d[i] + wy[pointr, k] * wv[jy] / theta + ws[pointr, k] * wv[js]
+            d = d.at[i].set(jnp.where(active_sub, value, d[i]))
+        pointr = (pointr + 1) % m
+
+    for i in range(n):
+        d = d.at[i].set(jnp.where(valid & (i < nsub), d[i] / theta, d[i]))
+
+    iword = jnp.asarray(0, dtype=jnp.int32)
+    xp = jnp.where(valid, x, xp)
+    projected_x = x
+    for i in range(n):
+        active_sub = valid & (i < nsub)
+        k = ind[i]
+        dk = d[i]
+        xk = x[k]
+        lower_only = nbd[k] == NBD_LOWER
+        both = nbd[k] == NBD_BOTH
+        upper_only = nbd[k] == NBD_UPPER
+        lower_candidate = jnp.maximum(l[k], xk + dk)
+        both_candidate = jnp.minimum(u[k], jnp.maximum(l[k], xk + dk))
+        upper_candidate = jnp.minimum(u[k], xk + dk)
+        candidate = jnp.where(
+            lower_only,
+            lower_candidate,
+            jnp.where(
+                both, both_candidate, jnp.where(upper_only, upper_candidate, xk + dk)
+            ),
+        )
+        hit = (lower_only & (candidate == l[k])) | (
+            both & ((candidate == l[k]) | (candidate == u[k]))
+        )
+        hit = hit | (upper_only & (candidate == u[k]))
+        projected_x = projected_x.at[k].set(
+            jnp.where(active_sub, candidate, projected_x[k])
+        )
+        iword = jnp.where(active_sub & hit, jnp.asarray(1, dtype=jnp.int32), iword)
+
+    dd_p = jnp.sum((projected_x - xx) * gg)
+    safeguard = valid & (iword == 1) & (dd_p > 0.0)
+    safeguarded_x = xp
+    safeguarded_d = d
+    alpha = jnp.asarray(1.0, dtype=jnp.float64)
+    temp1 = jnp.asarray(1.0, dtype=jnp.float64)
+    ibd = jnp.asarray(0, dtype=jnp.int32)
+    for i in range(n):
+        active_sub = safeguard & (i < nsub)
+        k = ind[i]
+        dk = safeguarded_d[i]
+        next_temp1 = temp1
+        lower_step = l[k] - safeguarded_x[k]
+        upper_step = u[k] - safeguarded_x[k]
+        lower_limited = (dk < 0.0) & (nbd[k] <= NBD_BOTH) & (nbd[k] != NBD_UNBOUNDED)
+        upper_limited = (dk > 0.0) & (nbd[k] >= NBD_BOTH)
+        next_temp1 = jnp.where(
+            active_sub & lower_limited & (lower_step >= 0.0),
+            0.0,
+            jnp.where(
+                active_sub & lower_limited & (dk * alpha < lower_step),
+                lower_step / dk,
+                next_temp1,
+            ),
+        )
+        next_temp1 = jnp.where(
+            active_sub & upper_limited & (upper_step <= 0.0),
+            0.0,
+            jnp.where(
+                active_sub & upper_limited & (dk * alpha > upper_step),
+                upper_step / dk,
+                next_temp1,
+            ),
+        )
+        update_alpha = active_sub & (next_temp1 < alpha)
+        alpha = jnp.where(update_alpha, next_temp1, alpha)
+        ibd = jnp.where(update_alpha, jnp.asarray(i, dtype=jnp.int32), ibd)
+        temp1 = next_temp1
+
+    ibd_k = ind[ibd]
+    ibd_d = safeguarded_d[ibd]
+    alpha_hits_bound = safeguard & (alpha < 1.0)
+    safeguarded_x = safeguarded_x.at[ibd_k].set(
+        jnp.where(
+            alpha_hits_bound & (ibd_d > 0.0),
+            u[ibd_k],
+            jnp.where(
+                alpha_hits_bound & (ibd_d < 0.0),
+                l[ibd_k],
+                safeguarded_x[ibd_k],
+            ),
+        )
+    )
+    safeguarded_d = safeguarded_d.at[ibd].set(
+        jnp.where(alpha_hits_bound & (ibd_d != 0.0), 0.0, safeguarded_d[ibd])
+    )
+
+    for i in range(n):
+        active_sub = safeguard & (i < nsub)
+        k = ind[i]
+        safeguarded_x = safeguarded_x.at[k].set(
+            jnp.where(
+                active_sub,
+                safeguarded_x[k] + alpha * safeguarded_d[i],
+                safeguarded_x[k],
+            )
+        )
+
+    final_x = jnp.where(safeguard, safeguarded_x, projected_x)
+    final_d = jnp.where(safeguard, safeguarded_d, d)
+    final_x = jnp.where(valid, final_x, original_x)
+    final_d = jnp.where(valid, final_d, original_d)
+    final_xp = jnp.where(valid, xp, original_xp)
+    return LbfgsbSubsmResult(
+        x=final_x,
+        d=final_d,
+        xp=final_xp,
+        iword=jnp.where(valid, iword, jnp.asarray(0, dtype=jnp.int32)),
+        wv=wv,
+        info=jnp.where(
+            valid, jnp.asarray(0, dtype=jnp.int32), jnp.asarray(1, dtype=jnp.int32)
+        ),
     )
 
 

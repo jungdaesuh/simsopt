@@ -242,7 +242,7 @@ of the current `minimize_lbfgs_host_core(...)`.
 - [x] Port `hpsolb`, the heap helper used by `cauchy` breakpoint ordering.
 - [ ] Port `cauchy` with its breakpoint ordering and heap behavior.
 - [x] Port `freev` with exact active/free-set updates.
-- [ ] Port `subsm` with exact active/free-set updates.
+- [x] Port `subsm` with exact active/free-set updates.
 - [x] Port `dcsrch` and `dcstep` before wiring the full outer loop. Do not reuse
       the existing `_line_search.py` flow for SciPy-bitwise mode.
 - [x] Port the initial `lnsrlb` reverse-communication wrapper around `dcsrch`;
