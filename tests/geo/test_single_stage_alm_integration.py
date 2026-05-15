@@ -2682,7 +2682,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             ["load_stage2_seed_configuration"],
             {
                 "np": np,
-                "load": None,
+                "load_boozer_finite_i": None,
                 "curves_to_vtk": None,
                 "partition_loaded_stage2_coils": None,
             },
@@ -2739,7 +2739,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         fake_bs = FakeBiotSavart(coils)
         vtk_calls = {}
 
-        load_stage2_seed_configuration.__globals__["load"] = lambda path: fake_bs
+        load_stage2_seed_configuration.__globals__["load_boozer_finite_i"] = (
+            lambda path: fake_bs
+        )
         load_stage2_seed_configuration.__globals__["curves_to_vtk"] = (
             lambda curves, path, close=True: vtk_calls.update(
                 {"curves": curves, "path": path, "close": close}

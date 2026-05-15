@@ -9953,6 +9953,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 "--single-stage-resume-bs-path",
                 "archives/biot_savart_opt.json",
                 "--offspec-replay-debug-only",
+                "--accept-offspec-r0-seed",
             ],
         ):
             args = module.parse_args()
@@ -9962,6 +9963,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "archives/biot_savart_opt.json",
         )
         self.assertTrue(args.offspec_replay_debug_only)
+        self.assertTrue(args.accept_offspec_r0_seed)
 
     def test_single_stage_resume_seed_requires_debug_only_role(self):
         module = load_single_stage_example_module()
@@ -11011,6 +11013,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             stage2_seed_tf_current_A=None,
             stage2_seed_order=None,
             stage2_seed_banana_init_current_A=None,
+            accept_offspec_r0_seed=False,
         )
 
         module.apply_default_stage2_seed_args(args)
@@ -11038,6 +11041,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             stage2_seed_tf_current_A=-75000.0,
             stage2_seed_order=None,
             stage2_seed_banana_init_current_A=None,
+            accept_offspec_r0_seed=False,
         )
 
         module.apply_default_stage2_seed_args(args)
@@ -11061,10 +11065,52 @@ class CurrentBaselineContractTests(unittest.TestCase):
             stage2_seed_tf_current_A=None,
             stage2_seed_order=None,
             stage2_seed_banana_init_current_A=None,
+            accept_offspec_r0_seed=False,
         )
 
         with self.assertRaisesRegex(ValueError, "vacuum-vessel major radius"):
             module.apply_default_stage2_seed_args(args)
+
+    def test_apply_default_stage2_seed_args_accepts_explicit_offspec_replay_radius(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+            stage2_seed_major_radius=0.80,
+            stage2_seed_toroidal_flux=None,
+            stage2_seed_length_weight=None,
+            stage2_seed_cc_weight=None,
+            stage2_seed_curvature_weight=None,
+            stage2_seed_cc_threshold=None,
+            stage2_seed_curvature_threshold=None,
+            stage2_seed_banana_surf_radius=None,
+            stage2_seed_tf_current_A=None,
+            stage2_seed_order=None,
+            stage2_seed_banana_init_current_A=None,
+            accept_offspec_r0_seed=True,
+        )
+
+        module.apply_default_stage2_seed_args(args)
+
+        self.assertEqual(args.stage2_seed_major_radius, 0.80)
+
+    def test_single_stage_resume_contract_accepts_offspec_radius_only_when_explicit(self):
+        module = load_single_stage_example_module()
+        results = {
+            "MAJOR_RADIUS": 0.80,
+            "TOROIDAL_FLUX": 0.24,
+            "banana_surf_radius": 0.21,
+        }
+
+        with self.assertRaisesRegex(ValueError, "vacuum-vessel major radius"):
+            module.validate_single_stage_resume_seed_contract(
+                results,
+                accept_offspec_r0_seed=False,
+            )
+
+        module.validate_single_stage_resume_seed_contract(
+            results,
+            accept_offspec_r0_seed=True,
+        )
 
     def test_stage2_parse_args_accepts_banana_current_controls(self):
         module = load_stage2_module()

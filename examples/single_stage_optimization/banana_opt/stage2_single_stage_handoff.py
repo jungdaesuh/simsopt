@@ -11,6 +11,7 @@ from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import Volume
 
 from .boozer_finite_current import BoozerSurfaceFiniteI
+from .json_compat import load_boozer_finite_i
 
 from .coil_groups import (
     COIL_GROUP_ROLE_BANANA,
@@ -660,7 +661,7 @@ def resolve_warm_start_boozer_surface_path(
 def load_warm_start_boozer_seed(
     warm_start_boozer_surface_path: str | Path,
     *,
-    artifact_loader=load,
+    artifact_loader=load_boozer_finite_i,
 ) -> WarmStartBoozerSeed:
     source_path = Path(warm_start_boozer_surface_path)
     warm_start_artifact = artifact_loader(str(source_path))
@@ -1022,7 +1023,8 @@ def probe_stage2_seed_bootability(
     equilibrium_path: str | Path | None = None,
     database_equilibria_dir: str | Path | None = None,
     stage2_seed_surf_path: str | Path | None = None,
-    bs_loader=load,
+    bs_loader=load_boozer_finite_i,
+    warm_start_loader=load_boozer_finite_i,
 ) -> dict[str, object]:
     missing_metadata = _required_handoff_metadata_keys(stage2_artifact_results)
     if missing_metadata:
@@ -1062,7 +1064,7 @@ def probe_stage2_seed_bootability(
             iota_target=iota_target,
             tf_coils=tf_coils,
             stage2_seed_surf_path=stage2_seed_surf_path,
-            artifact_loader=bs_loader,
+            artifact_loader=warm_start_loader,
         )
         initialization = attempt_initialize_boozer_surface(
             initial_surface,

@@ -49,6 +49,7 @@ from workflow_runner_common import (
     load_stage2_artifact_results,
     write_json,
 )
+from banana_opt.json_compat import load_boozer_finite_i
 from banana_opt.artifact_contracts import (
     STAGE2_BS_SHA256_KEY,
     compute_stage2_bs_sha256,
@@ -1066,7 +1067,7 @@ def build_stage2_iota_report_payload(
         stage2_artifact_results=stage2_results_payload,
         plasma_surf_filename=os.path.basename(args.plasma_surf_filename),
         equilibria_dir=args.equilibria_dir,
-        equilibrium_path=args.equilibrium_path,
+        equilibrium_path=build_equilibrium_path(args),
         num_tf_coils=args.stage2_iota_num_tf_coils,
         nphi=args.stage2_iota_nphi,
         ntheta=args.stage2_iota_ntheta,
@@ -1329,7 +1330,7 @@ def load_stage2_seed_configuration(
     stage2_results,
     seed_order_upgrade=None,
 ):
-    bs = load(seed_bs_path)
+    bs = load_boozer_finite_i(seed_bs_path)
     if seed_order_upgrade is not None:
         loaded_coil_partitions = partition_loaded_stage2_coils(
             bs.coils,

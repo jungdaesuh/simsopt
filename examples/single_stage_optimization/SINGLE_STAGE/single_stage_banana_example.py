@@ -85,6 +85,7 @@ from banana_opt.artifact_contracts import (
     STAGE2_SEED_CONTRACT_HASH_KEY,
     upgrade_legacy_stage2_artifact_results,
 )
+from banana_opt.json_compat import load_boozer_finite_i
 from banana_opt.alm_adaptive_smoothing import (
     ALM_SMOOTHING_FLOOR_FRACTION as _ALM_SMOOTHING_FLOOR_FRACTION,
     adapt_alm_smoothing_from_history,
@@ -760,14 +761,30 @@ def resolve_single_stage_seed_artifact(args):
     return stage2_bs_path, stage2_results_path, stage2_results, SEED_ARTIFACT_ROLE_STAGE2
 
 
-def validate_single_stage_resume_seed_contract(resume_results):
+def validate_seed_major_radius(major_radius, *, accept_offspec_r0_seed: bool):
+    radius = float(major_radius)
+    if accept_offspec_r0_seed:
+        if radius <= 0.0:
+            raise ValueError("--accept-offspec-r0-seed requires a positive seed major radius.")
+        return radius
+    return validate_major_radius(radius)
+
+
+def validate_single_stage_resume_seed_contract(
+    resume_results,
+    *,
+    accept_offspec_r0_seed: bool,
+):
     for key in ("MAJOR_RADIUS", "TOROIDAL_FLUX"):
         if resume_results.get(key) is None:
             raise ValueError(
                 "Single-stage resume seed results.json is missing "
                 f"{key}; cannot initialize the replay surface."
             )
-    validate_major_radius(float(resume_results["MAJOR_RADIUS"]))
+    validate_seed_major_radius(
+        resume_results["MAJOR_RADIUS"],
+        accept_offspec_r0_seed=accept_offspec_r0_seed,
+    )
     resolve_single_stage_banana_surf_radius(resume_results, None)
 
 
@@ -851,7 +868,7 @@ def load_stage2_seed_biot_savart(
     num_tf_coils,
     seed_order_upgrade=None,
 ):
-    bs = load(stage2_bs_path)
+    bs = load_boozer_finite_i(stage2_bs_path)
     coil_partitions = partition_loaded_stage2_coils(
         bs.coils,
         stage2_results,
@@ -995,7 +1012,10 @@ def apply_default_stage2_seed_args(args):
     subject to CLI override.
     """
     if args.stage2_seed_major_radius is not None:
-        validate_major_radius(args.stage2_seed_major_radius)
+        validate_seed_major_radius(
+            args.stage2_seed_major_radius,
+            accept_offspec_r0_seed=args.accept_offspec_r0_seed,
+        )
 
     plasma_profile = DEFAULT_STAGE2_SEEDS_BY_PLASMA.get(
         args.plasma_surf_filename,
@@ -1797,6 +1817,14 @@ def parse_args():
         help=(
             "Mark the run as a non-promotable historical/off-contract replay. "
             "Only valid with --single-stage-resume-bs-path."
+        ),
+    )
+    parser.add_argument(
+        "--accept-offspec-r0-seed",
+        action="store_true",
+        help=(
+            "Allow an off-contract seed major radius only in the non-promotable "
+            "offspec replay lane."
         ),
     )
     parser.add_argument(
@@ -8310,6 +8338,10 @@ if __name__ == "__main__":
         raise ValueError(
             "--banana-current-fd-relative-step-fraction must be positive."
         )
+    if args.accept_offspec_r0_seed and not args.offspec_replay_debug_only:
+        raise ValueError(
+            "--accept-offspec-r0-seed requires --offspec-replay-debug-only."
+        )
     (
         stage2_bs_path,
         stage2_results_path,
@@ -8322,7 +8354,10 @@ if __name__ == "__main__":
         known_tf_current_A=args.stage2_seed_tf_current_A,
     )
     if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME:
-        validate_single_stage_resume_seed_contract(stage2_results)
+        validate_single_stage_resume_seed_contract(
+            stage2_results,
+            accept_offspec_r0_seed=args.accept_offspec_r0_seed,
+        )
     else:
         validate_stage2_seed_contract(stage2_results)
     if (
@@ -8330,7 +8365,10 @@ if __name__ == "__main__":
         and args.stage2_seed_role == "handoff"
     ):
         validate_stage2_seed_bootability_contract(stage2_results)
-    R0 = validate_major_radius(float(stage2_results["MAJOR_RADIUS"]))
+    R0 = validate_seed_major_radius(
+        stage2_results["MAJOR_RADIUS"],
+        accept_offspec_r0_seed=args.accept_offspec_r0_seed,
+    )
     s = float(stage2_results["TOROIDAL_FLUX"])
     order = int(stage2_results.get("order", args.stage2_seed_order))
 
@@ -9982,6 +10020,7 @@ if __name__ == "__main__":
         "PLASMA_SURF_PATH": file_loc,
         "SEED_ARTIFACT_ROLE": seed_artifact_role,
         "OFFSPEC_REPLAY_DEBUG_ONLY": bool(args.offspec_replay_debug_only),
+        "ACCEPT_OFFSPEC_R0_SEED": bool(args.accept_offspec_r0_seed),
         "SINGLE_STAGE_RESUME_BS_PATH": (
             str(stage2_bs_path)
             if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME
