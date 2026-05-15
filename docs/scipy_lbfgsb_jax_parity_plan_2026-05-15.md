@@ -240,14 +240,14 @@ of the current `minimize_lbfgs_host_core(...)`.
 - [x] Port compact-memory helpers:
       `bmv`, `formt`, `formk`, `cmprlb`, and `matupd`.
 - [x] Port `hpsolb`, the heap helper used by `cauchy` breakpoint ordering.
-- [ ] Port `cauchy` with its breakpoint ordering and heap behavior.
+- [x] Port `cauchy` with its breakpoint ordering and heap behavior.
 - [x] Port `freev` with exact active/free-set updates.
 - [x] Port `subsm` with exact active/free-set updates.
 - [x] Port `dcsrch` and `dcstep` before wiring the full outer loop. Do not reuse
       the existing `_line_search.py` flow for SciPy-bitwise mode.
 - [x] Port the initial `lnsrlb` reverse-communication wrapper around `dcsrch`;
       full integration remains blocked on `setulb/mainlb`.
-- [ ] For each function, add checked reference tests. SciPy's wheel exposes
+- [x] For each ported low-level function, add checked reference tests. SciPy's wheel exposes
       `_lbfgsb.setulb(...)`, but the lower-level C helpers are `static`; direct
       calls to `projgr`, `cauchy`, `subsm`, or `dcsrch` require either a
       checked-in reference translation or a tiny test-only build artifact.

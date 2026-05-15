@@ -186,6 +186,20 @@ class LbfgsbHpsolbResult(NamedTuple):
     iorder: jax.Array
 
 
+class LbfgsbCauchyResult(NamedTuple):
+    iorder: jax.Array
+    iwhere: jax.Array
+    t: jax.Array
+    d: jax.Array
+    xcp: jax.Array
+    p: jax.Array
+    c: jax.Array
+    wbp: jax.Array
+    v: jax.Array
+    nseg: jax.Array
+    info: jax.Array
+
+
 class LbfgsbCmprlbResult(NamedTuple):
     r: jax.Array
     wa: jax.Array
@@ -917,27 +931,52 @@ def lbfgsb_bmv(sy, wt, col, v):
     identity = jnp.eye(m, dtype=jnp.float64)
     active_matrix = active[:, None] & active[None, :]
     solve_matrix = jnp.where(active_matrix, upper, identity)
+    diagonal = jnp.diag(upper)
+    singular_index = jnp.min(
+        jnp.where(
+            active & (diagonal == 0.0),
+            jnp.arange(m, dtype=jnp.int32) + 1,
+            m + 1,
+        )
+    )
+    factor_info = jnp.where(singular_index <= m, singular_index, 0)
+    factor_ok = factor_info == 0
     rhs = jnp.where(active, first_rhs, 0.0)
-    p2 = jnp.linalg.solve(solve_matrix.T, rhs)
+    p2 = jsp_linalg.solve_triangular(
+        solve_matrix,
+        rhs,
+        trans=1,
+        lower=False,
+        unit_diagonal=False,
+    )
+    for i in range(m):
+        p = p.at[col + i].set(jnp.where(i < col, first_rhs[i], p[col + i]))
 
     diag_sy = jnp.diag(sy)
     p1 = jnp.where(active, v[:m] / jnp.sqrt(diag_sy), 0.0)
     for i in range(m):
-        p = p.at[i].set(jnp.where(i < col, p1[i], p[i]))
-        p = p.at[col + i].set(jnp.where(i < col, p2[i], p[col + i]))
+        update = factor_ok & (i < col)
+        p = p.at[i].set(jnp.where(update, p1[i], p[i]))
+        p = p.at[col + i].set(jnp.where(update, p2[i], p[col + i]))
 
     second_rhs = jnp.zeros((m,), dtype=jnp.float64)
     for i in range(m):
         second_rhs = second_rhs.at[i].set(jnp.where(i < col, p[col + i], 0.0))
-    p2 = jnp.linalg.solve(solve_matrix, second_rhs)
+    p2 = jsp_linalg.solve_triangular(
+        solve_matrix,
+        second_rhs,
+        trans=0,
+        lower=False,
+        unit_diagonal=False,
+    )
     for i in range(m):
-        p = p.at[col + i].set(jnp.where(i < col, p2[i], p[col + i]))
+        p = p.at[col + i].set(jnp.where(factor_ok & (i < col), p2[i], p[col + i]))
     p1 = jnp.where(active, -p[:m] / jnp.sqrt(diag_sy), 0.0)
     for i in range(m):
-        p = p.at[i].set(jnp.where(i < col, p1[i], p[i]))
+        p = p.at[i].set(jnp.where(factor_ok & (i < col), p1[i], p[i]))
 
     for i in range(m):
-        active_i = i < col
+        active_i = factor_ok & (i < col)
         ssum = jnp.asarray(0.0, dtype=jnp.float64)
         for k in range(i + 1, m):
             active_k = k < col
@@ -948,7 +987,7 @@ def lbfgsb_bmv(sy, wt, col, v):
             )
         p = p.at[i].set(jnp.where(active_i, p[i] + ssum, p[i]))
 
-    return LbfgsbBmvResult(p=p, info=jnp.asarray(0, dtype=jnp.int32))
+    return LbfgsbBmvResult(p=p, info=factor_info)
 
 
 def lbfgsb_formt(wt, sy, ss, col, theta):
@@ -1379,6 +1418,307 @@ def lbfgsb_hpsolb(last, t, iorder, iheap):
     t = t.at[last_slot].set(jnp.where(extract, out, t[last_slot]))
     iorder = iorder.at[last_slot].set(jnp.where(extract, indxout, iorder[last_slot]))
     return LbfgsbHpsolbResult(t=t, iorder=iorder)
+
+
+def lbfgsb_cauchy(
+    x,
+    l,
+    u,
+    nbd,
+    g,
+    iorder,
+    iwhere,
+    t,
+    d,
+    xcp,
+    wy,
+    ws,
+    sy,
+    wt,
+    theta,
+    col,
+    head,
+    p,
+    c,
+    wbp,
+    v,
+    sbgnrm,
+):
+    x = jnp.asarray(x, dtype=jnp.float64)
+    l = jnp.asarray(l, dtype=jnp.float64)
+    u = jnp.asarray(u, dtype=jnp.float64)
+    nbd = jnp.asarray(nbd, dtype=jnp.int32)
+    g = jnp.asarray(g, dtype=jnp.float64)
+    iorder = jnp.asarray(iorder, dtype=jnp.int32)
+    iwhere = jnp.asarray(iwhere, dtype=jnp.int32)
+    t = jnp.asarray(t, dtype=jnp.float64)
+    d = jnp.asarray(d, dtype=jnp.float64)
+    xcp = jnp.asarray(xcp, dtype=jnp.float64)
+    wy = jnp.asarray(wy, dtype=jnp.float64)
+    ws = jnp.asarray(ws, dtype=jnp.float64)
+    sy = jnp.asarray(sy, dtype=jnp.float64)
+    wt = jnp.asarray(wt, dtype=jnp.float64)
+    theta = jnp.asarray(theta, dtype=jnp.float64)
+    col = jnp.asarray(col, dtype=jnp.int32)
+    head = jnp.asarray(head, dtype=jnp.int32)
+    p = jnp.asarray(p, dtype=jnp.float64)
+    c = jnp.asarray(c, dtype=jnp.float64)
+    wbp = jnp.asarray(wbp, dtype=jnp.float64)
+    v = jnp.asarray(v, dtype=jnp.float64)
+    sbgnrm = jnp.asarray(sbgnrm, dtype=jnp.float64)
+    n = int(x.shape[0])
+    m = int(ws.shape[0])
+    col2 = 2 * col
+    has_gradient = sbgnrm > 0.0
+
+    f1 = jnp.asarray(0.0, dtype=jnp.float64)
+    nfree = jnp.asarray(n, dtype=jnp.int32)
+    nbreak = jnp.asarray(-1, dtype=jnp.int32)
+    ibkmin = jnp.asarray(0, dtype=jnp.int32)
+    bkmin = jnp.asarray(0.0, dtype=jnp.float64)
+    bnded = jnp.asarray(True, dtype=jnp.bool_)
+    for i in range(2 * m):
+        p = p.at[i].set(jnp.where((i < col2) & has_gradient, 0.0, p[i]))
+
+    for i in range(n):
+        active_gradient = has_gradient
+        neggi = -g[i]
+        can_reset = active_gradient & (iwhere[i] != 3) & (iwhere[i] != -1)
+        tl = jnp.where(nbd[i] <= NBD_BOTH, x[i] - l[i], 0.0)
+        tu = jnp.where(nbd[i] >= NBD_BOTH, u[i] - x[i], 0.0)
+        xlower = (nbd[i] <= NBD_BOTH) & (tl <= 0.0)
+        xupper = (nbd[i] >= NBD_BOTH) & (tu <= 0.0)
+        reset_iwhere = jnp.asarray(0, dtype=jnp.int32)
+        reset_iwhere = jnp.where(xlower & (neggi <= 0.0), 1, reset_iwhere)
+        reset_iwhere = jnp.where((~xlower) & xupper & (neggi >= 0.0), 2, reset_iwhere)
+        reset_iwhere = jnp.where(
+            (~xlower) & (~xupper) & (jnp.abs(neggi) <= 0.0),
+            -3,
+            reset_iwhere,
+        )
+        iwhere = iwhere.at[i].set(jnp.where(can_reset, reset_iwhere, iwhere[i]))
+
+        movable = active_gradient & ((iwhere[i] == 0) | (iwhere[i] == -1))
+        d = d.at[i].set(jnp.where(movable, neggi, 0.0))
+        f1 = f1 - jnp.where(movable, neggi * neggi, 0.0)
+        pointr = head
+        for j in range(m):
+            active_col = movable & (j < col)
+            p = p.at[j].set(jnp.where(active_col, p[j] + wy[pointr, i] * neggi, p[j]))
+            p = p.at[col + j].set(
+                jnp.where(
+                    active_col,
+                    p[col + j] + ws[pointr, i] * neggi,
+                    p[col + j],
+                )
+            )
+            pointr = (pointr + 1) % m
+
+        lower_break = (
+            movable & (nbd[i] <= NBD_BOTH) & (nbd[i] != NBD_UNBOUNDED) & (neggi < 0.0)
+        )
+        upper_break = movable & (nbd[i] >= NBD_BOTH) & (neggi > 0.0)
+        has_break = lower_break | upper_break
+        next_nbreak = nbreak + jnp.where(has_break, 1, 0)
+        breakpoint_value = jnp.where(lower_break, tl / (-neggi), tu / neggi)
+        breakpoint_slot = jnp.maximum(next_nbreak, 0)
+        t = t.at[breakpoint_slot].set(
+            jnp.where(has_break, breakpoint_value, t[breakpoint_slot])
+        )
+        iorder = iorder.at[breakpoint_slot].set(
+            jnp.where(has_break, i, iorder[breakpoint_slot])
+        )
+        new_minimum = has_break & ((nbreak == -1) | (breakpoint_value < bkmin))
+        bkmin = jnp.where(new_minimum, breakpoint_value, bkmin)
+        ibkmin = jnp.where(new_minimum, next_nbreak, ibkmin)
+        nbreak = next_nbreak
+
+        unbounded_move = movable & (~has_break)
+        next_nfree = nfree - jnp.where(unbounded_move, 1, 0)
+        free_slot = jnp.minimum(jnp.maximum(next_nfree, 0), n - 1)
+        iorder = iorder.at[free_slot].set(
+            jnp.where(unbounded_move, i, iorder[free_slot])
+        )
+        nfree = next_nfree
+        bnded = jnp.where(unbounded_move & (jnp.abs(neggi) > 0.0), False, bnded)
+
+    for i in range(m):
+        p = p.at[col + i].set(
+            jnp.where(
+                has_gradient & (theta != 1.0) & (i < col),
+                theta * p[col + i],
+                p[col + i],
+            )
+        )
+
+    xcp = x
+    no_nonzero_direction = (nbreak == -1) & (nfree == n)
+    for j in range(2 * m):
+        c = c.at[j].set(jnp.where(has_gradient & (j < col2), 0.0, c[j]))
+
+    f2 = -theta * f1
+    f2_org = f2
+    bmv_initial = lbfgsb_bmv(sy, wt, col, p)
+    initial_bmv_active = has_gradient & (col > 0) & (~no_nonzero_direction)
+    v = jnp.where(initial_bmv_active, bmv_initial.p, v)
+    initial_info = jnp.where(initial_bmv_active, bmv_initial.info, 0)
+    f2 = jnp.where(
+        initial_bmv_active,
+        f2 - jnp.sum(jnp.where(jnp.arange(2 * m, dtype=jnp.int32) < col2, v * p, 0.0)),
+        f2,
+    )
+    dtm = -f1 / f2
+    tsum = jnp.asarray(0.0, dtype=jnp.float64)
+    nseg = jnp.asarray(1, dtype=jnp.int32)
+    no_breakpoints = nbreak == -1
+    skip_loop = (
+        (~has_gradient) | no_nonzero_direction | (initial_info != 0) | no_breakpoints
+    )
+    nleft = nbreak
+    iteration = jnp.asarray(0, dtype=jnp.int32)
+    tj = jnp.asarray(0.0, dtype=jnp.float64)
+    done = skip_loop
+    info = initial_info
+
+    for _ in range(n):
+        active_loop = has_gradient & (~done) & (info == 0)
+        tj0 = tj
+        use_initial = iteration == 0
+        heap_t = t
+        heap_iorder = iorder
+        replace_minimum = active_loop & (iteration == 1) & (ibkmin != nbreak)
+        heap_t = heap_t.at[ibkmin].set(
+            jnp.where(replace_minimum, heap_t[nbreak], heap_t[ibkmin])
+        )
+        heap_iorder = heap_iorder.at[ibkmin].set(
+            jnp.where(replace_minimum, heap_iorder[nbreak], heap_iorder[ibkmin])
+        )
+        heap = lbfgsb_hpsolb(jnp.maximum(nleft, 0), heap_t, heap_iorder, iteration - 1)
+        use_heap = active_loop & (~use_initial)
+        t = jnp.where(use_heap, heap.t, t)
+        iorder = jnp.where(use_heap, heap.iorder, iorder)
+        safe_nleft = jnp.minimum(jnp.maximum(nleft, 0), n - 1)
+        tj_candidate = jnp.where(use_initial, bkmin, t[safe_nleft])
+        ibp = jnp.where(use_initial, iorder[ibkmin], iorder[safe_nleft])
+        tj = jnp.where(active_loop, tj_candidate, tj)
+        dt = tj_candidate - tj0
+        interval_minimum = active_loop & (dtm < dt)
+        fix_breakpoint = active_loop & (~interval_minimum)
+
+        next_tsum = tsum + jnp.where(fix_breakpoint, dt, 0.0)
+        next_nleft = nleft - jnp.where(fix_breakpoint, 1, 0)
+        next_iteration = iteration + jnp.where(fix_breakpoint, 1, 0)
+        dibp = d[ibp]
+        d = d.at[ibp].set(jnp.where(fix_breakpoint, 0.0, d[ibp]))
+        upper_hit = dibp > 0.0
+        zibp = jnp.where(upper_hit, u[ibp] - x[ibp], l[ibp] - x[ibp])
+        xcp = xcp.at[ibp].set(
+            jnp.where(
+                fix_breakpoint,
+                jnp.where(upper_hit, u[ibp], l[ibp]),
+                xcp[ibp],
+            )
+        )
+        iwhere = iwhere.at[ibp].set(
+            jnp.where(fix_breakpoint, jnp.where(upper_hit, 2, 1), iwhere[ibp])
+        )
+        all_fixed = fix_breakpoint & (next_nleft == -1) & (nbreak == n)
+
+        next_nseg = nseg + jnp.where(fix_breakpoint & (~all_fixed), 1, 0)
+        dibp2 = dibp * dibp
+        next_f1 = f1 + dt * f2 + dibp2 - theta * dibp * zibp
+        next_f2 = f2 - theta * dibp2
+        next_c = c
+        next_p = p
+        next_v = v
+        next_wbp = wbp
+        bmv_info = jnp.asarray(0, dtype=jnp.int32)
+
+        col_update = fix_breakpoint & (~all_fixed) & (col > 0)
+        for j in range(2 * m):
+            next_c = next_c.at[j].set(
+                jnp.where(col_update & (j < col2), next_c[j] + dt * p[j], next_c[j])
+            )
+        pointr = head
+        for j in range(m):
+            active_col = col_update & (j < col)
+            next_wbp = next_wbp.at[j].set(
+                jnp.where(active_col, wy[pointr, ibp], next_wbp[j])
+            )
+            next_wbp = next_wbp.at[col + j].set(
+                jnp.where(active_col, theta * ws[pointr, ibp], next_wbp[col + j])
+            )
+            pointr = (pointr + 1) % m
+        bmv_break = lbfgsb_bmv(sy, wt, col, next_wbp)
+        next_v = jnp.where(col_update, bmv_break.p, next_v)
+        bmv_info = jnp.where(col_update, bmv_break.info, 0)
+        active_2m = jnp.arange(2 * m, dtype=jnp.int32) < col2
+        wmc = jnp.sum(jnp.where(active_2m, next_c * next_v, 0.0))
+        wmp = jnp.sum(jnp.where(active_2m, p * next_v, 0.0))
+        wmw = jnp.sum(jnp.where(active_2m, next_wbp * next_v, 0.0))
+        for j in range(2 * m):
+            next_p = next_p.at[j].set(
+                jnp.where(
+                    col_update & (j < col2), next_p[j] - dibp * next_wbp[j], next_p[j]
+                )
+            )
+        next_f1 = jnp.where(col_update, next_f1 + dibp * wmc, next_f1)
+        next_f2 = jnp.where(
+            col_update,
+            next_f2 + dibp * 2.0 * wmp - dibp2 * wmw,
+            next_f2,
+        )
+        next_f2 = jnp.maximum(jnp.finfo(jnp.float64).eps * f2_org, next_f2)
+        next_dtm = jnp.where(
+            next_nleft >= 0,
+            -next_f1 / next_f2,
+            jnp.where(bnded, 0.0, -next_f1 / next_f2),
+        )
+        terminal_after_update = fix_breakpoint & (all_fixed | (next_nleft < 0))
+        dtm = jnp.where(
+            interval_minimum,
+            dtm,
+            jnp.where(all_fixed, dt, jnp.where(fix_breakpoint, next_dtm, dtm)),
+        )
+        f1 = jnp.where(fix_breakpoint & (~all_fixed), next_f1, f1)
+        f2 = jnp.where(fix_breakpoint & (~all_fixed), next_f2, f2)
+        c = jnp.where(col_update, next_c, c)
+        p = jnp.where(col_update, next_p, p)
+        v = jnp.where(col_update, next_v, v)
+        wbp = jnp.where(col_update, next_wbp, wbp)
+        nseg = jnp.where(fix_breakpoint, next_nseg, nseg)
+        tsum = jnp.where(fix_breakpoint, next_tsum, tsum)
+        nleft = jnp.where(fix_breakpoint, next_nleft, nleft)
+        iteration = jnp.where(fix_breakpoint, next_iteration, iteration)
+        info = jnp.where(col_update & (bmv_info != 0), bmv_info, info)
+        done = done | interval_minimum | terminal_after_update | (info != 0)
+
+    line_search_active = has_gradient & (~no_nonzero_direction) & (info == 0)
+    dtm = jnp.maximum(dtm, 0.0)
+    tsum = jnp.where(line_search_active, tsum + dtm, tsum)
+    xcp = jnp.where(line_search_active, xcp + tsum * d, xcp)
+    for j in range(2 * m):
+        c = c.at[j].set(
+            jnp.where(
+                line_search_active & (col > 0) & (j < col2), c[j] + dtm * p[j], c[j]
+            )
+        )
+
+    return LbfgsbCauchyResult(
+        iorder=iorder,
+        iwhere=iwhere,
+        t=t,
+        d=d,
+        xcp=xcp,
+        p=p,
+        c=c,
+        wbp=wbp,
+        v=v,
+        nseg=jnp.where(
+            (~has_gradient) | no_nonzero_direction | (initial_info != 0), 0, nseg
+        ),
+        info=info,
+    )
 
 
 def lbfgsb_cmprlb(

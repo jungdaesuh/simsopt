@@ -158,17 +158,28 @@ def _bmv_reference(sy, wt, col, v):
             ssum += sy[i, k] * v[k] / sy[k, k]
         p[col + i] = v[col + i] + ssum
 
-    p[col : 2 * col] = np.linalg.solve(
-        np.triu(wt[:col, :col]).T,
+    factor = np.triu(wt[:col, :col])
+    singular = np.flatnonzero(np.diag(factor) == 0.0)
+    if singular.size:
+        return p, int(singular[0] + 1)
+
+    p[col : 2 * col] = scipy.linalg.solve_triangular(
+        factor,
         p[col : 2 * col],
+        trans="T",
+        lower=False,
+        check_finite=False,
     )
 
     for i in range(col):
         p[i] = v[i] / np.sqrt(sy[i, i])
 
-    p[col : 2 * col] = np.linalg.solve(
-        np.triu(wt[:col, :col]),
+    p[col : 2 * col] = scipy.linalg.solve_triangular(
+        factor,
         p[col : 2 * col],
+        trans="N",
+        lower=False,
+        check_finite=False,
     )
 
     for i in range(col):
@@ -493,6 +504,214 @@ def _cmprlb_reference(
         pointr = (pointr + 1) % m
 
     return r, wa, 0
+
+
+def _cauchy_reference(
+    x,
+    l,
+    u,
+    nbd,
+    g,
+    iorder,
+    iwhere,
+    t,
+    d,
+    xcp,
+    wy,
+    ws,
+    sy,
+    wt,
+    theta,
+    col,
+    head,
+    p,
+    c,
+    wbp,
+    v,
+    sbgnrm,
+):
+    x = np.asarray(x, dtype=np.float64)
+    l = np.asarray(l, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    nbd = np.asarray(nbd, dtype=np.int32)
+    g = np.asarray(g, dtype=np.float64)
+    iorder = np.asarray(iorder, dtype=np.int32).copy()
+    iwhere = np.asarray(iwhere, dtype=np.int32).copy()
+    t = np.asarray(t, dtype=np.float64).copy()
+    d = np.asarray(d, dtype=np.float64).copy()
+    xcp = np.asarray(xcp, dtype=np.float64).copy()
+    wy = np.asarray(wy, dtype=np.float64)
+    ws = np.asarray(ws, dtype=np.float64)
+    p = np.asarray(p, dtype=np.float64).copy()
+    c = np.asarray(c, dtype=np.float64).copy()
+    wbp = np.asarray(wbp, dtype=np.float64).copy()
+    v = np.asarray(v, dtype=np.float64).copy()
+    n = len(x)
+    m = ws.shape[0]
+    col2 = 2 * col
+
+    if sbgnrm <= 0.0:
+        xcp[:] = x
+        return iorder, iwhere, t, d, xcp, p, c, wbp, v, 0, 0
+
+    f1 = 0.0
+    bnded = True
+    nfree = n
+    nbreak = -1
+    ibkmin = 0
+    bkmin = 0.0
+    p[:col2] = 0.0
+
+    for i in range(n):
+        neggi = -g[i]
+        if iwhere[i] != 3 and iwhere[i] != -1:
+            tl = x[i] - l[i] if nbd[i] <= lbfgsb.NBD_BOTH else 0.0
+            tu = u[i] - x[i] if nbd[i] >= lbfgsb.NBD_BOTH else 0.0
+            xlower = nbd[i] <= lbfgsb.NBD_BOTH and tl <= 0.0
+            xupper = nbd[i] >= lbfgsb.NBD_BOTH and tu <= 0.0
+            iwhere[i] = 0
+            if xlower:
+                if neggi <= 0.0:
+                    iwhere[i] = 1
+            elif xupper:
+                if neggi >= 0.0:
+                    iwhere[i] = 2
+            elif abs(neggi) <= 0.0:
+                iwhere[i] = -3
+        pointr = head
+        if iwhere[i] != 0 and iwhere[i] != -1:
+            d[i] = 0.0
+        else:
+            d[i] = neggi
+            f1 -= neggi * neggi
+            for j in range(col):
+                p[j] += wy[pointr, i] * neggi
+                p[col + j] += ws[pointr, i] * neggi
+                pointr = (pointr + 1) % m
+            if nbd[i] <= lbfgsb.NBD_BOTH and nbd[i] != 0 and neggi < 0.0:
+                nbreak += 1
+                iorder[nbreak] = i
+                t[nbreak] = tl / (-neggi)
+                if nbreak == 0 or t[nbreak] < bkmin:
+                    bkmin = t[nbreak]
+                    ibkmin = nbreak
+            elif nbd[i] >= lbfgsb.NBD_BOTH and neggi > 0.0:
+                nbreak += 1
+                iorder[nbreak] = i
+                t[nbreak] = tu / neggi
+                if nbreak == 0 or t[nbreak] < bkmin:
+                    bkmin = t[nbreak]
+                    ibkmin = nbreak
+            else:
+                nfree -= 1
+                iorder[nfree] = i
+                if abs(neggi) > 0.0:
+                    bnded = False
+
+    if theta != 1.0:
+        p[col:col2] *= theta
+
+    xcp[:] = x
+    if nbreak == -1 and nfree == n:
+        return iorder, iwhere, t, d, xcp, p, c, wbp, v, 0, 0
+
+    c[:col2] = 0.0
+    f2 = -theta * f1
+    f2_org = f2
+    if col > 0:
+        bmv = _bmv_reference(sy, wt, col, p)
+        v[:] = bmv[0]
+        if bmv[1] != 0:
+            return iorder, iwhere, t, d, xcp, p, c, wbp, v, 0, bmv[1]
+        f2 -= np.dot(v[:col2], p[:col2])
+
+    dtm = -f1 / f2
+    tsum = 0.0
+    nseg = 1
+    if nbreak == -1:
+        dtm = max(dtm, 0.0)
+        tsum += dtm
+        xcp += tsum * d
+        if col > 0:
+            c[:col2] += dtm * p[:col2]
+        return iorder, iwhere, t, d, xcp, p, c, wbp, v, nseg, 0
+
+    nleft = nbreak
+    iteration = 0
+    tj = 0.0
+    while True:
+        tj0 = tj
+        if iteration == 0:
+            tj = bkmin
+            ibp = iorder[ibkmin]
+        else:
+            if iteration == 1 and ibkmin != nbreak:
+                t[ibkmin] = t[nbreak]
+                iorder[ibkmin] = iorder[nbreak]
+            t, iorder = _hpsolb_reference(nleft, t, iorder, iteration - 1)
+            tj = t[nleft]
+            ibp = iorder[nleft]
+
+        dt = tj - tj0
+        if dtm < dt:
+            break
+
+        tsum += dt
+        nleft -= 1
+        iteration += 1
+        dibp = d[ibp]
+        d[ibp] = 0.0
+        if dibp > 0.0:
+            zibp = u[ibp] - x[ibp]
+            xcp[ibp] = u[ibp]
+            iwhere[ibp] = 2
+        else:
+            zibp = l[ibp] - x[ibp]
+            xcp[ibp] = l[ibp]
+            iwhere[ibp] = 1
+
+        if nleft == -1 and nbreak == n:
+            dtm = dt
+            break
+
+        nseg += 1
+        dibp2 = dibp**2
+        f1 = f1 + dt * f2 + dibp2 - theta * dibp * zibp
+        f2 = f2 - theta * dibp2
+        if col > 0:
+            c[:col2] += dt * p[:col2]
+            pointr = head
+            for j in range(col):
+                wbp[j] = wy[pointr, ibp]
+                wbp[col + j] = theta * ws[pointr, ibp]
+                pointr = (pointr + 1) % m
+            bmv = _bmv_reference(sy, wt, col, wbp)
+            v[:] = bmv[0]
+            if bmv[1] != 0:
+                return iorder, iwhere, t, d, xcp, p, c, wbp, v, nseg, bmv[1]
+            wmc = np.dot(c[:col2], v[:col2])
+            wmp = np.dot(p[:col2], v[:col2])
+            wmw = np.dot(wbp[:col2], v[:col2])
+            p[:col2] = p[:col2] - dibp * wbp[:col2]
+            f1 = f1 + dibp * wmc
+            f2 = f2 + dibp * 2.0 * wmp - dibp2 * wmw
+
+        f2 = max(np.finfo(np.float64).eps * f2_org, f2)
+        if nleft >= 0:
+            dtm = -f1 / f2
+        elif bnded:
+            dtm = 0.0
+            break
+        else:
+            dtm = -f1 / f2
+            break
+
+    dtm = max(dtm, 0.0)
+    tsum += dtm
+    xcp += tsum * d
+    if col > 0:
+        c[:col2] += dtm * p[:col2]
+    return iorder, iwhere, t, d, xcp, p, c, wbp, v, nseg, 0
 
 
 def _subsm_reference(
@@ -1163,6 +1382,33 @@ def test_lbfgsb_bmv_matches_c_reference_for_full_and_partial_col():
         )
 
 
+def test_lbfgsb_bmv_reports_info_for_singular_triangular_factor():
+    sy = np.array(
+        [
+            [4.0, 0.0, 0.0],
+            [1.0, 9.0, 0.0],
+            [2.0, 3.0, 16.0],
+        ],
+        dtype=np.float64,
+    )
+    wt = np.array(
+        [
+            [2.0, 0.25, -0.5],
+            [0.0, 0.0, 0.75],
+            [0.0, 0.0, 4.0],
+        ],
+        dtype=np.float64,
+    )
+    v = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+
+    expected_p, expected_info = _bmv_reference(sy, wt, 2, v)
+    actual = lbfgsb.lbfgsb_bmv(sy, wt, 2, v)
+
+    assert expected_info == 2
+    assert int(actual.info) == expected_info
+    np.testing.assert_allclose(np.asarray(actual.p[:4]), expected_p[:4])
+
+
 def test_lbfgsb_bmv_is_jittable_for_fixed_workspace_shapes():
     bmv_jit = jax.jit(lbfgsb.lbfgsb_bmv)
     sy = np.array(
@@ -1824,6 +2070,167 @@ def _subsm_case(*, projected=False, positive_directional_derivative=False):
     wv = np.zeros(2 * m, dtype=np.float64)
     wn = np.eye(2 * m, dtype=np.float64)
     return ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn
+
+
+def _cauchy_case(*, col=0, heap=False, unbounded=False, zero_gradient=False):
+    n = 4
+    m = 2
+    x = np.array([0.0, 0.2, -0.1, 0.3], dtype=np.float64)
+    l = np.array([-1.0, -0.5, -0.25, -1.0], dtype=np.float64)
+    u = np.array([1.0, 0.5, 0.25, 0.4], dtype=np.float64)
+    nbd = np.array(
+        [
+            lbfgsb.NBD_UNBOUNDED,
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_UPPER,
+        ],
+        dtype=np.int32,
+    )
+    g = np.array([0.4, -1.5, 0.75, -0.2], dtype=np.float64)
+    if unbounded:
+        nbd = np.zeros(n, dtype=np.int32)
+        iwhere = np.full(n, -1, dtype=np.int32)
+    else:
+        iwhere = np.array([-1, 0, 0, 0], dtype=np.int32)
+    if zero_gradient:
+        g = np.zeros(n, dtype=np.float64)
+    if heap:
+        x = np.array([0.0, 0.2, -0.1, 0.2], dtype=np.float64)
+        g = np.array([-2.0, -3.0, 2.0, -1.0], dtype=np.float64)
+        theta = np.float64(0.25)
+    else:
+        theta = np.float64(1.5 if col == 0 else 2.0)
+    iorder = np.full(n, -1, dtype=np.int32)
+    t = np.zeros(n, dtype=np.float64)
+    d = np.zeros(n, dtype=np.float64)
+    xcp = np.zeros(n, dtype=np.float64)
+    ws = np.array(
+        [[0.20, -0.10, 0.05, 0.00], [-0.05, 0.15, 0.00, 0.10]],
+        dtype=np.float64,
+    )
+    wy = np.array(
+        [[0.10, 0.00, 0.05, -0.10], [0.00, 0.20, -0.05, 0.05]],
+        dtype=np.float64,
+    )
+    sy = np.array([[4.0, 0.0], [0.25, 5.0]], dtype=np.float64)
+    wt = np.array([[2.0, 0.1], [0.0, 2.5]], dtype=np.float64)
+    p = np.zeros(2 * m, dtype=np.float64)
+    c = np.zeros(2 * m, dtype=np.float64)
+    wbp = np.zeros(2 * m, dtype=np.float64)
+    v = np.zeros(2 * m, dtype=np.float64)
+    sbgnrm = _projected_gradient_norm_reference(l, u, nbd, x, g)
+    return (
+        x,
+        l,
+        u,
+        nbd,
+        g,
+        iorder,
+        iwhere,
+        t,
+        d,
+        xcp,
+        wy,
+        ws,
+        sy,
+        wt,
+        theta,
+        col,
+        0,
+        p,
+        c,
+        wbp,
+        v,
+        sbgnrm,
+    )
+
+
+def test_lbfgsb_cauchy_matches_c_reference_for_zero_projected_gradient():
+    args = _cauchy_case(zero_gradient=True)
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    np.testing.assert_array_equal(np.asarray(actual.iorder), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.iwhere), expected[1])
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    assert int(actual.nseg) == expected[9] == 0
+    assert int(actual.info) == expected[10] == 0
+
+
+def test_lbfgsb_cauchy_matches_c_reference_without_breakpoints():
+    args = _cauchy_case(col=0, unbounded=True)
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    np.testing.assert_array_equal(np.asarray(actual.iorder), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.iwhere), expected[1])
+    np.testing.assert_allclose(np.asarray(actual.t), expected[2])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[3])
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    np.testing.assert_allclose(np.asarray(actual.p), expected[5])
+    np.testing.assert_allclose(np.asarray(actual.c), expected[6])
+    np.testing.assert_allclose(np.asarray(actual.wbp), expected[7])
+    np.testing.assert_allclose(np.asarray(actual.v), expected[8])
+    assert int(actual.nseg) == expected[9]
+    assert int(actual.info) == expected[10] == 0
+
+
+def test_lbfgsb_cauchy_matches_c_reference_with_heap_ordered_breakpoints():
+    args = _cauchy_case(col=0, heap=True)
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    np.testing.assert_array_equal(np.asarray(actual.iorder), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.iwhere), expected[1])
+    np.testing.assert_allclose(np.asarray(actual.t), expected[2])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[3])
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    assert int(actual.nseg) == expected[9]
+    assert int(actual.info) == expected[10] == 0
+
+
+def test_lbfgsb_cauchy_matches_c_reference_with_compact_memory():
+    args = _cauchy_case(col=1)
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    np.testing.assert_array_equal(np.asarray(actual.iorder), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.iwhere), expected[1])
+    np.testing.assert_allclose(np.asarray(actual.t), expected[2])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[3])
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    np.testing.assert_allclose(np.asarray(actual.p), expected[5])
+    np.testing.assert_allclose(np.asarray(actual.c), expected[6])
+    assert int(actual.nseg) == expected[9]
+    assert int(actual.info) == expected[10] == 0
+
+
+def test_lbfgsb_cauchy_reports_info_from_singular_bmv():
+    args = list(_cauchy_case(col=1))
+    wt = args[13].copy()
+    wt[0, 0] = 0.0
+    args[13] = wt
+
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    assert expected[10] == 1
+    assert int(actual.info) == expected[10]
+    assert int(actual.nseg) == expected[9] == 0
+    np.testing.assert_allclose(np.asarray(actual.v), expected[8])
+
+
+def test_lbfgsb_cauchy_is_jittable_for_fixed_workspace_shapes():
+    cauchy_jit = jax.jit(lbfgsb.lbfgsb_cauchy)
+    args = _cauchy_case(col=1)
+    expected = _cauchy_reference(*args)
+    actual = cauchy_jit(*args)
+
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    np.testing.assert_allclose(np.asarray(actual.c), expected[6])
+    assert int(actual.nseg) == expected[9]
+    assert int(actual.info) == expected[10] == 0
 
 
 def test_lbfgsb_subsm_matches_c_reference_for_in_box_step():
