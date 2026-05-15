@@ -126,6 +126,10 @@ of the current `minimize_lbfgs_host_core(...)`.
 - Keep all objective/gradient evaluation through the existing cached JAX
   value/grad kernel seam.
 - Implement optimizer-control state as JAX data structures with static shapes.
+- Match SciPy control flow around scalar reductions, while treating the
+  low-level reduction arithmetic itself as device-kernel arithmetic. SciPy calls
+  the BLAS linked into its wheel for `ddot_`/`dnrm2_`; the pure-JAX target must
+  use JAX kernels for those operations and must not add a host-BLAS fallback.
 - Treat unsupported dynamic behaviors as compile-time contract decisions, not
   try/except recovery paths.
 - Model SciPy reverse communication inside the JAX loop state. The target lane
@@ -153,24 +157,24 @@ of the current `minimize_lbfgs_host_core(...)`.
       that records the SciPy oracle version: `1.17.1`.
 - [x] Record exact upstream source URLs for `_lbfgsb_py.py`, `__lbfgsb.c`, and
       `__lbfgsb.h`.
-- [ ] Add a local probe that confirms installed SciPy still resolves
+- [x] Add a local probe that confirms installed SciPy still resolves
       `_lbfgsb_py.py` and `_lbfgsb` from the expected package.
-- [ ] Pin public-vs-internal status semantics:
+- [x] Pin public-vs-internal status semantics:
       internal `task[0]`/`task[1]` follows `_lbfgsb`; public
       `OptimizeResult.status` follows SciPy `_minimize_lbfgsb` wrapper behavior.
-- [ ] Decide whether to vendor translated constants/status tables into the repo
+- [x] Decide whether to vendor translated constants/status tables into the repo
       or generate them from a checked-in snapshot. Prefer checked-in, reviewed
       constants for deterministic review.
 
 ### Phase 1: Build A SciPy Replay Oracle
 
-- [ ] Add upstream-derived tests from SciPy 1.17.1 before porting kernels:
+- [x] Add upstream-derived tests from SciPy 1.17.1 before porting kernels:
       `test_setulb_floatround`,
       `test_gh_issue18730`,
       `test_1`,
       `test_2`,
       and `test_3` from SciPy's dedicated L-BFGS-B test files.
-- [ ] Create a direct reverse-communication SciPy driver around
+- [x] Create a direct reverse-communication SciPy driver around
       `_lbfgsb.setulb(...)` that records every requested `x`, `f`, and `g`.
       Do not rely on public `minimize(...)` callbacks for this; public callbacks
       do not expose SciPy's internal work arrays.
@@ -183,14 +187,14 @@ of the current `minimize_lbfgs_host_core(...)`.
       boxed case,
       fixed-variable case,
       finite-difference-disabled analytic-gradient case.
-- [ ] Preserve the exact SciPy `test_setulb_floatround` fixture as a required
+- [x] Preserve the exact SciPy `test_setulb_floatround` fixture as a required
       regression: seven `setulb` calls with all variables boxed in `[0, 1]`
       must never produce an out-of-bounds iterate.
-- [ ] Preserve the SciPy GH-18730 regression: objectives returning `float32`
+- [x] Preserve the SciPy GH-18730 regression: objectives returning `float32`
       gradients must not corrupt the L-BFGS-B solve. The parity implementation
       must match SciPy's explicit float64 upcast at the optimizer-control
       boundary.
-- [ ] Preserve SciPy inverse-Hessian checks: `hess_inv(vector)` must match
+- [x] Preserve SciPy inverse-Hessian checks: `hess_inv(vector)` must match
       `hess_inv.todense()` on the scalar quartic fixture, 2-D quadratic fixture,
       and old dense implementation equivalence fixture.
 - [ ] Capture SciPy internal task transitions, `x`, `f`, `g`, `wa`, `iwa`,
@@ -205,40 +209,43 @@ of the current `minimize_lbfgs_host_core(...)`.
 
 ### Phase 2: Define JAX State Types
 
-- [ ] Add typed JAX state containers for SciPy-equivalent state:
+- [x] Add typed JAX state containers for SciPy-equivalent state:
       `x`, `l`, `u`, `nbd`, `f`, `g`, `wa`, `iwa`, `task`, `ln_task`,
       `lsave`, `isave`, `dsave`.
-- [ ] Keep the SciPy work-array layout:
+- [x] Keep the SciPy work-array layout:
       `2*m*n + 5*n + 11*m*m + 8*m` for `wa` and `3*n` for `iwa`.
-- [ ] Keep SciPy's integer task/message encoding rather than inventing a new
+- [x] Keep SciPy's integer task/message encoding rather than inventing a new
       status enum.
 - [ ] Use fixed-size JAX arrays and static `n`, `m`, `maxls`, and max iteration
       limits suitable for `lax.while_loop`.
-- [ ] Use functional JAX array updates (`array.at[index].set(...)`) with static
+- [x] Use functional JAX array updates (`array.at[index].set(...)`) with static
       slice sizes; dynamic values may choose indices but not slice extents.
-- [ ] Require JAX x64 for bitwise control tests. A test configuration without
+- [x] Require JAX x64 for bitwise control tests. A test configuration without
       x64 is a failed parity setup, not a looser acceptance tier.
 - [ ] Add a memory budget check for planned `n`, `m`, and trace settings before
       enabling expensive parity runs; production execution must not allocate
       full optimizer traces unless explicitly requested for diagnostics.
-- [ ] Use `float64` for optimizer-control parity tests; treat `float32` as a
+- [x] Use `float64` for optimizer-control parity tests; treat `float32` as a
       separate later acceptance tier.
 
 ### Phase 3: Port Low-Level Kernels
 
-- [ ] Start each kernel port with a failing upstream-derived or replay-derived
+- [x] Start each kernel port with a failing upstream-derived or replay-derived
       test. Do not write production kernel code before the corresponding red
       test exists.
-- [ ] Port `projgr` first and test projected-gradient norm bitwise against
+- [x] Port `projgr` first and test projected-gradient norm bitwise against
       SciPy for all `nbd` cases.
-- [ ] Port `active` and verify initial projection, `iwhere`, `prjctd`,
+- [x] Port `active` and verify initial projection, `iwhere`, `prjctd`,
       `cnstnd`, and `boxed`.
 - [ ] Port compact-memory helpers:
       `bmv`, `formt`, `formk`, `cmprlb`, and `matupd`.
+- [x] Port `hpsolb`, the heap helper used by `cauchy` breakpoint ordering.
 - [ ] Port `cauchy` with its breakpoint ordering and heap behavior.
 - [ ] Port `freev` and `subsm` with exact active/free-set updates.
-- [ ] Port `dcsrch` and `dcstep` before wiring the full outer loop. Do not reuse
+- [x] Port `dcsrch` and `dcstep` before wiring the full outer loop. Do not reuse
       the existing `_line_search.py` flow for SciPy-bitwise mode.
+- [x] Port the initial `lnsrlb` reverse-communication wrapper around `dcsrch`;
+      full integration remains blocked on `setulb/mainlb`.
 - [ ] For each function, add checked reference tests. SciPy's wheel exposes
       `_lbfgsb.setulb(...)`, but the lower-level C helpers are `static`; direct
       calls to `projgr`, `cauchy`, `subsm`, or `dcsrch` require either a

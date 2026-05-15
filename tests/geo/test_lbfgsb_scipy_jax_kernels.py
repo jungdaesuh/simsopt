@@ -20,9 +20,7 @@ def _dcstep_reference(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin, stp
         q = ((gamma - dx) + gamma) + dp
         r = p / q
         stpc = stx + r * (stp - stx)
-        stpq = stx + ((dx / ((fx - fp) / (stp - stx) + dx)) / 2.0) * (
-            stp - stx
-        )
+        stpq = stx + ((dx / ((fx - fp) / (stp - stx) + dx)) / 2.0) * (stp - stx)
         if abs(stpc - stx) < abs(stpq - stx):
             stpf = stpc
         else:
@@ -47,7 +45,9 @@ def _dcstep_reference(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin, stp
     elif abs(dp) < abs(dx):
         theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp
         scale = max(abs(theta), abs(dx), abs(dp))
-        gamma = scale * np.sqrt(max(0.0, (theta / scale) ** 2 - (dx / scale) * (dp / scale)))
+        gamma = scale * np.sqrt(
+            max(0.0, (theta / scale) ** 2 - (dx / scale) * (dp / scale))
+        )
         if stp > stx:
             gamma = -gamma
         p = (gamma - dp) + theta
@@ -234,7 +234,171 @@ def _freev_reference(nfree, idx, idx2, iwhere, updatd, cnstnd, iteration):
             iact -= 1
             next_idx[iact] = i
 
-    return next_nfree, next_idx, nenter, ileave, idx2, ileave < n or nenter > 0 or updatd
+    return (
+        next_nfree,
+        next_idx,
+        nenter,
+        ileave,
+        idx2,
+        ileave < n or nenter > 0 or updatd,
+    )
+
+
+def _hpsolb_reference(last, t, iorder, iheap):
+    t = np.asarray(t, dtype=np.float64).copy()
+    iorder = np.asarray(iorder, dtype=np.int32).copy()
+
+    if iheap == 0:
+        for k in range(2, last + 2):
+            ddum = t[k - 1]
+            indxin = iorder[k - 1]
+            i = k
+            while i > 1:
+                j = i // 2
+                if ddum < t[j - 1]:
+                    t[i - 1] = t[j - 1]
+                    iorder[i - 1] = iorder[j - 1]
+                    i = j
+                else:
+                    break
+            t[i - 1] = ddum
+            iorder[i - 1] = indxin
+
+    if last > 0:
+        i = 1
+        out = t[0]
+        indxout = iorder[0]
+        ddum = t[last]
+        indxin = iorder[last]
+        while True:
+            j = i + i
+            if j <= last:
+                if t[j] < t[j - 1]:
+                    j += 1
+                if t[j - 1] < ddum:
+                    t[i - 1] = t[j - 1]
+                    iorder[i - 1] = iorder[j - 1]
+                    i = j
+                else:
+                    break
+            else:
+                break
+        t[i - 1] = ddum
+        iorder[i - 1] = indxin
+        t[last] = out
+        iorder[last] = indxout
+
+    return t, iorder
+
+
+def _cmprlb_reference(
+    x, g, ws, wy, sy, wt, z, r, wa, index, theta, col, head, nfree, cnstnd
+):
+    x = np.asarray(x, dtype=np.float64)
+    g = np.asarray(g, dtype=np.float64)
+    ws = np.asarray(ws, dtype=np.float64)
+    wy = np.asarray(wy, dtype=np.float64)
+    sy = np.asarray(sy, dtype=np.float64)
+    wt = np.asarray(wt, dtype=np.float64)
+    z = np.asarray(z, dtype=np.float64)
+    r = np.asarray(r, dtype=np.float64).copy()
+    wa = np.asarray(wa, dtype=np.float64).copy()
+    index = np.asarray(index, dtype=np.int32)
+    m = ws.shape[0]
+
+    if (not cnstnd) and (col > 0):
+        r[:] = -g
+        return r, wa, 0
+
+    for i in range(nfree):
+        k = index[i]
+        r[i] = -theta * (z[k] - x[k]) - g[k]
+
+    p, info = _bmv_reference(sy, wt, col, wa[2 * m : 4 * m])
+    if info != 0:
+        return r, wa, -8
+    wa[: 2 * m] = p
+
+    pointr = head
+    for j in range(col):
+        a1 = wa[j]
+        a2 = theta * wa[col + j]
+        for i in range(nfree):
+            k = index[i]
+            r[i] += wy[pointr, k] * a1 + ws[pointr, k] * a2
+        pointr = (pointr + 1) % m
+
+    return r, wa, 0
+
+
+def _lnsrlb_args(
+    x,
+    g,
+    d,
+    *,
+    l=None,
+    u=None,
+    nbd=None,
+    f=1.0,
+    fold=0.0,
+    gd=0.0,
+    gdold=0.0,
+    r=None,
+    t=None,
+    z=None,
+    stp=0.0,
+    dnorm=0.0,
+    dtd=0.0,
+    xstep=0.0,
+    stpmx=0.0,
+    iteration=0,
+    ifun=0,
+    iback=0,
+    nfgv=0,
+    info=0,
+    task=lbfgsb.START,
+    task_msg=lbfgsb.NO_MSG,
+    boxed=False,
+    cnstnd=False,
+    isave=None,
+    dsave=None,
+    temp_task=lbfgsb.START,
+    temp_task_msg=lbfgsb.NO_MSG,
+):
+    zeros = np.zeros_like(x)
+    return (
+        np.full_like(x, -10.0) if l is None else l,
+        np.full_like(x, 10.0) if u is None else u,
+        np.zeros(len(x), dtype=np.int32) if nbd is None else nbd,
+        x,
+        f,
+        fold,
+        gd,
+        gdold,
+        g,
+        d,
+        zeros if r is None else r,
+        zeros if t is None else t,
+        x + d if z is None else z,
+        stp,
+        dnorm,
+        dtd,
+        xstep,
+        stpmx,
+        iteration,
+        ifun,
+        iback,
+        nfgv,
+        info,
+        task,
+        task_msg,
+        boxed,
+        cnstnd,
+        np.zeros(2, dtype=np.int32) if isave is None else isave,
+        np.zeros(13, dtype=np.float64) if dsave is None else dsave,
+        temp_task,
+        temp_task_msg,
+    )
 
 
 def _projected_gradient_norm_reference(l, u, nbd, x, g):
@@ -673,7 +837,9 @@ def test_lbfgsb_bmv_matches_c_reference_for_full_and_partial_col():
         actual = lbfgsb.lbfgsb_bmv(sy, wt, col, v)
 
         assert int(actual.info) == expected_info
-        np.testing.assert_allclose(np.asarray(actual.p[: 2 * col]), expected_p[: 2 * col])
+        np.testing.assert_allclose(
+            np.asarray(actual.p[: 2 * col]), expected_p[: 2 * col]
+        )
 
 
 def test_lbfgsb_bmv_is_jittable_for_fixed_workspace_shapes():
@@ -839,3 +1005,362 @@ def test_lbfgsb_freev_is_jittable_for_fixed_index_shapes():
     np.testing.assert_array_equal(np.asarray(actual.ileave), expected[3])
     np.testing.assert_array_equal(np.asarray(actual.idx2), expected[4])
     assert bool(actual.wrk) is expected[5]
+
+
+def test_lbfgsb_hpsolb_matches_scipy_heap_reference_initial_build():
+    t = np.array([4.0, 1.5, 3.0, 1.5, 2.0, 0.75], dtype=np.float64)
+    iorder = np.array([40, 15, 30, 16, 20, 7], dtype=np.int32)
+
+    expected_t, expected_iorder = _hpsolb_reference(5, t, iorder, iheap=0)
+    actual_t, actual_iorder = lbfgsb.lbfgsb_hpsolb(5, t, iorder, 0)
+
+    np.testing.assert_array_equal(np.asarray(actual_t), expected_t)
+    np.testing.assert_array_equal(np.asarray(actual_iorder), expected_iorder)
+
+
+def test_lbfgsb_hpsolb_matches_scipy_heap_reference_repeated_extract():
+    t = np.array([4.0, 1.5, 3.0, 1.5, 2.0, 0.75], dtype=np.float64)
+    iorder = np.array([40, 15, 30, 16, 20, 7], dtype=np.int32)
+
+    expected_t, expected_iorder = _hpsolb_reference(5, t, iorder, iheap=0)
+    actual_t, actual_iorder = lbfgsb.lbfgsb_hpsolb(5, t, iorder, 0)
+    for last in range(4, 0, -1):
+        expected_t, expected_iorder = _hpsolb_reference(
+            last,
+            expected_t,
+            expected_iorder,
+            iheap=1,
+        )
+        actual_t, actual_iorder = lbfgsb.lbfgsb_hpsolb(
+            last,
+            actual_t,
+            actual_iorder,
+            1,
+        )
+
+    np.testing.assert_array_equal(np.asarray(actual_t), expected_t)
+    np.testing.assert_array_equal(np.asarray(actual_iorder), expected_iorder)
+
+
+def test_lbfgsb_hpsolb_is_jittable_with_dynamic_last_index():
+    hpsolb_jit = jax.jit(lbfgsb.lbfgsb_hpsolb)
+    t = np.array([2.0, 5.0, 1.0, 3.0], dtype=np.float64)
+    iorder = np.array([20, 50, 10, 30], dtype=np.int32)
+
+    actual_t, actual_iorder = hpsolb_jit(np.int32(3), t, iorder, np.int32(0))
+    expected_t, expected_iorder = _hpsolb_reference(3, t, iorder, iheap=0)
+
+    np.testing.assert_array_equal(np.asarray(actual_t), expected_t)
+    np.testing.assert_array_equal(np.asarray(actual_iorder), expected_iorder)
+
+
+def test_lbfgsb_cmprlb_matches_c_reference_for_constrained_free_subset():
+    m = 3
+    n = 5
+    x = np.array([0.5, -1.0, 0.25, 1.5, -0.75], dtype=np.float64)
+    g = np.array([1.25, -0.5, 2.0, -1.5, 0.75], dtype=np.float64)
+    ws = np.arange(m * n, dtype=np.float64).reshape(m, n) / 10.0 + 0.25
+    wy = np.arange(m * n, 2 * m * n, dtype=np.float64).reshape(m, n) / 20.0 - 0.3
+    sy = np.array(
+        [
+            [4.0, 0.0, 0.0],
+            [1.0, 9.0, 0.0],
+            [2.0, 3.0, 16.0],
+        ],
+        dtype=np.float64,
+    )
+    wt = np.array(
+        [
+            [2.0, 0.25, -0.5],
+            [0.0, 3.0, 0.75],
+            [0.0, 0.0, 4.0],
+        ],
+        dtype=np.float64,
+    )
+    z = np.array([0.25, -0.25, 0.75, 1.0, -1.25], dtype=np.float64)
+    r = np.full(n, 99.0, dtype=np.float64)
+    wa = np.arange(8 * m, dtype=np.float64) / 7.0 - 1.0
+    index = np.array([3, 0, 4, 1, 2], dtype=np.int32)
+
+    expected_r, expected_wa, expected_info = _cmprlb_reference(
+        x,
+        g,
+        ws,
+        wy,
+        sy,
+        wt,
+        z,
+        r,
+        wa,
+        index,
+        theta=2.5,
+        col=2,
+        head=1,
+        nfree=3,
+        cnstnd=True,
+    )
+    actual = lbfgsb.lbfgsb_cmprlb(
+        x,
+        g,
+        ws,
+        wy,
+        sy,
+        wt,
+        z,
+        r,
+        wa,
+        index,
+        theta=2.5,
+        col=2,
+        head=1,
+        nfree=3,
+        cnstnd=True,
+    )
+
+    assert int(actual.info) == expected_info
+    np.testing.assert_allclose(np.asarray(actual.r), expected_r)
+    np.testing.assert_allclose(np.asarray(actual.wa), expected_wa)
+
+
+def test_lbfgsb_cmprlb_matches_c_reference_for_unconstrained_path():
+    m = 2
+    x = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    g = np.array([3.0, -4.0, 5.0], dtype=np.float64)
+    zeros_mn = np.zeros((m, len(x)), dtype=np.float64)
+    zeros_mm = np.zeros((m, m), dtype=np.float64)
+    wa = np.arange(8 * m, dtype=np.float64)
+
+    expected_r, expected_wa, expected_info = _cmprlb_reference(
+        x,
+        g,
+        zeros_mn,
+        zeros_mn,
+        zeros_mm,
+        zeros_mm,
+        x,
+        np.zeros_like(x),
+        wa,
+        np.arange(len(x), dtype=np.int32),
+        theta=1.0,
+        col=1,
+        head=0,
+        nfree=len(x),
+        cnstnd=False,
+    )
+    actual = lbfgsb.lbfgsb_cmprlb(
+        x,
+        g,
+        zeros_mn,
+        zeros_mn,
+        zeros_mm,
+        zeros_mm,
+        x,
+        np.zeros_like(x),
+        wa,
+        np.arange(len(x), dtype=np.int32),
+        theta=1.0,
+        col=1,
+        head=0,
+        nfree=len(x),
+        cnstnd=False,
+    )
+
+    assert int(actual.info) == expected_info
+    np.testing.assert_array_equal(np.asarray(actual.r), expected_r)
+    np.testing.assert_array_equal(np.asarray(actual.wa), expected_wa)
+
+
+def test_lbfgsb_cmprlb_is_jittable_for_fixed_workspace_shapes():
+    cmprlb_jit = jax.jit(lbfgsb.lbfgsb_cmprlb)
+    m = 2
+    n = 3
+    x = np.array([0.5, -1.0, 0.25], dtype=np.float64)
+    g = np.array([1.25, -0.5, 2.0], dtype=np.float64)
+    ws = np.arange(m * n, dtype=np.float64).reshape(m, n) / 10.0 + 0.25
+    wy = np.arange(m * n, 2 * m * n, dtype=np.float64).reshape(m, n) / 20.0 - 0.3
+    sy = np.array([[4.0, 0.0], [1.0, 9.0]], dtype=np.float64)
+    wt = np.array([[2.0, 0.25], [0.0, 3.0]], dtype=np.float64)
+    z = np.array([0.25, -0.25, 0.75], dtype=np.float64)
+    r = np.full(n, 99.0, dtype=np.float64)
+    wa = np.arange(8 * m, dtype=np.float64) / 7.0 - 1.0
+    index = np.array([2, 0, 1], dtype=np.int32)
+
+    actual = cmprlb_jit(x, g, ws, wy, sy, wt, z, r, wa, index, 2.5, 2, 0, 2, True)
+    expected_r, expected_wa, expected_info = _cmprlb_reference(
+        x,
+        g,
+        ws,
+        wy,
+        sy,
+        wt,
+        z,
+        r,
+        wa,
+        index,
+        theta=2.5,
+        col=2,
+        head=0,
+        nfree=2,
+        cnstnd=True,
+    )
+
+    assert int(actual.info) == expected_info
+    np.testing.assert_allclose(np.asarray(actual.r), expected_r)
+    np.testing.assert_allclose(np.asarray(actual.wa), expected_wa)
+
+
+def test_lbfgsb_lnsrlb_initial_request_matches_scipy_wrapper_semantics():
+    x = np.array([0.25, -0.5], dtype=np.float64)
+    g = np.array([2.0, -1.0], dtype=np.float64)
+    d = np.array([-2.0, 1.0], dtype=np.float64)
+
+    actual = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(x, g, d, f=3.0),
+    )
+
+    expected_dnorm = np.linalg.norm(d)
+    expected_stp = 1.0 / expected_dnorm
+    np.testing.assert_allclose(np.asarray(actual.dnorm), expected_dnorm)
+    np.testing.assert_allclose(np.asarray(actual.dtd), expected_dnorm**2)
+    np.testing.assert_allclose(np.asarray(actual.stpmx), 1.0e10)
+    np.testing.assert_allclose(np.asarray(actual.stp), expected_stp)
+    np.testing.assert_allclose(np.asarray(actual.xstep), expected_stp * expected_dnorm)
+    np.testing.assert_allclose(np.asarray(actual.x), x + expected_stp * d)
+    np.testing.assert_array_equal(np.asarray(actual.t), x)
+    np.testing.assert_array_equal(np.asarray(actual.r), g)
+    np.testing.assert_allclose(np.asarray(actual.fold), 3.0)
+    np.testing.assert_allclose(np.asarray(actual.gd), np.dot(g, d))
+    np.testing.assert_allclose(np.asarray(actual.gdold), np.dot(g, d))
+    assert int(actual.ifun) == 1
+    assert int(actual.iback) == 0
+    assert int(actual.nfgv) == 1
+    assert int(actual.info) == 0
+    assert int(actual.task) == lbfgsb.FG
+    assert int(actual.task_msg) == lbfgsb.FG_LNSRCH
+    assert int(actual.temp_task) == lbfgsb.FG
+    assert int(actual.temp_task_msg) == lbfgsb.NO_MSG
+
+
+def test_lbfgsb_lnsrlb_continues_reverse_communication_state():
+    def phi(x):
+        return float((x[0] - 2.0) ** 2), np.array(
+            [2.0 * (x[0] - 2.0)], dtype=np.float64
+        )
+
+    l = np.array([-10.0], dtype=np.float64)
+    u = np.array([10.0], dtype=np.float64)
+    nbd = np.zeros(1, dtype=np.int32)
+    x = np.array([0.0], dtype=np.float64)
+    f, g = phi(x)
+    d = np.array([1.0], dtype=np.float64)
+
+    first = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(x, g, d, l=l, u=u, nbd=nbd, f=f),
+    )
+    f_next, g_next = phi(np.asarray(first.x))
+
+    second = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(
+            np.asarray(first.x),
+            g_next,
+            d,
+            l=l,
+            u=u,
+            nbd=nbd,
+            f=f_next,
+            fold=first.fold,
+            gd=first.gd,
+            gdold=first.gdold,
+            r=first.r,
+            t=first.t,
+            z=x + d,
+            stp=first.stp,
+            dnorm=first.dnorm,
+            dtd=first.dtd,
+            xstep=first.xstep,
+            stpmx=first.stpmx,
+            ifun=first.ifun,
+            iback=first.iback,
+            nfgv=first.nfgv,
+            info=first.info,
+            task=first.task,
+            task_msg=first.task_msg,
+            isave=first.isave,
+            dsave=first.dsave,
+            temp_task=first.temp_task,
+            temp_task_msg=first.temp_task_msg,
+        ),
+    )
+
+    np.testing.assert_array_equal(np.asarray(second.t), x)
+    np.testing.assert_array_equal(np.asarray(second.r), g)
+    np.testing.assert_allclose(np.asarray(second.fold), f)
+    np.testing.assert_allclose(np.asarray(second.gd), np.dot(g_next, d))
+    np.testing.assert_allclose(np.asarray(second.gdold), np.dot(g, d))
+    assert int(second.ifun) == 1
+    assert int(second.iback) == 0
+    assert int(second.nfgv) == 1
+    assert int(second.task) == lbfgsb.NEW_X
+    assert int(second.task_msg) == lbfgsb.NO_MSG
+    assert int(second.temp_task) == lbfgsb.CONVERGENCE
+
+
+def test_lbfgsb_lnsrlb_clamps_trial_step_to_bounds():
+    x = np.array([0.9, -0.9], dtype=np.float64)
+    g = np.array([-1.0, 1.0], dtype=np.float64)
+    d = np.array([2.0, -2.0], dtype=np.float64)
+    z = np.array([1.0, -1.0], dtype=np.float64)
+
+    actual = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(
+            x,
+            g,
+            d,
+            l=np.array([-1.0, -1.0], dtype=np.float64),
+            u=np.array([1.0, 1.0], dtype=np.float64),
+            nbd=np.full(2, lbfgsb.NBD_BOTH, dtype=np.int32),
+            z=z,
+            iteration=2,
+            boxed=True,
+            cnstnd=True,
+        ),
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.stpmx), 0.05)
+    np.testing.assert_allclose(np.asarray(actual.stp), 1.0)
+    np.testing.assert_array_equal(np.asarray(actual.x), z)
+
+
+def test_lbfgsb_lnsrlb_reports_non_descent_direction_like_scipy():
+    x = np.array([0.0, 0.0], dtype=np.float64)
+    g = np.array([1.0, 2.0], dtype=np.float64)
+    d = np.array([1.0, 0.0], dtype=np.float64)
+
+    actual = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(
+            x,
+            g,
+            d,
+            l=np.array([-1.0, -1.0], dtype=np.float64),
+            u=np.array([1.0, 1.0], dtype=np.float64),
+            z=np.zeros_like(x),
+        ),
+    )
+
+    assert int(actual.info) == -4
+    np.testing.assert_allclose(np.asarray(actual.gd), np.dot(g, d))
+    np.testing.assert_allclose(np.asarray(actual.gdold), np.dot(g, d))
+
+
+def test_lbfgsb_lnsrlb_is_jittable_for_fixed_workspace_shapes():
+    lnsrlb_jit = jax.jit(lbfgsb.lbfgsb_lnsrlb)
+    x = np.array([0.25, -0.5], dtype=np.float64)
+    g = np.array([2.0, -1.0], dtype=np.float64)
+    d = np.array([-2.0, 1.0], dtype=np.float64)
+
+    actual = lnsrlb_jit(
+        *_lnsrlb_args(x, g, d, f=3.0),
+    )
+
+    assert int(actual.task) == lbfgsb.FG
+    assert int(actual.task_msg) == lbfgsb.FG_LNSRCH

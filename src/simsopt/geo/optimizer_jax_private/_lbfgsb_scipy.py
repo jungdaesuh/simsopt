@@ -174,6 +174,42 @@ class LbfgsbFormtResult(NamedTuple):
     info: jax.Array
 
 
+class LbfgsbHpsolbResult(NamedTuple):
+    t: jax.Array
+    iorder: jax.Array
+
+
+class LbfgsbCmprlbResult(NamedTuple):
+    r: jax.Array
+    wa: jax.Array
+    info: jax.Array
+
+
+class LbfgsbLnsrlbResult(NamedTuple):
+    x: jax.Array
+    fold: jax.Array
+    gd: jax.Array
+    gdold: jax.Array
+    g: jax.Array
+    r: jax.Array
+    t: jax.Array
+    stp: jax.Array
+    dnorm: jax.Array
+    dtd: jax.Array
+    xstep: jax.Array
+    stpmx: jax.Array
+    ifun: jax.Array
+    iback: jax.Array
+    nfgv: jax.Array
+    info: jax.Array
+    task: jax.Array
+    task_msg: jax.Array
+    isave: jax.Array
+    dsave: jax.Array
+    temp_task: jax.Array
+    temp_task_msg: jax.Array
+
+
 class LbfgsbFreevResult(NamedTuple):
     nfree: jax.Array
     idx: jax.Array
@@ -242,7 +278,9 @@ def lbfgsb_task_message(task: np.ndarray | jax.Array) -> str:
     return STATUS_MESSAGES[int(task_host[0])] + ": " + TASK_MESSAGES[int(task_host[1])]
 
 
-def lbfgsb_public_status(task0: int, nfev: int, nit: int, maxfun: int, maxiter: int) -> int:
+def lbfgsb_public_status(
+    task0: int, nfev: int, nit: int, maxfun: int, maxiter: int
+) -> int:
     if int(task0) == CONVERGENCE:
         return 0
     if int(nfev) > int(maxfun) or int(nit) >= int(maxiter):
@@ -273,7 +311,9 @@ def lbfgsb_encode_bounds(bounds, n: int):
         elif has_upper:
             nbd[i] = NBD_UPPER
     if np.any(low_bnd[nbd == NBD_BOTH] > upper_bnd[nbd == NBD_BOTH]):
-        raise ValueError("LBFGSB - one of the lower bounds is greater than an upper bound.")
+        raise ValueError(
+            "LBFGSB - one of the lower bounds is greater than an upper bound."
+        )
     return low_bnd, upper_bnd, nbd
 
 
@@ -442,7 +482,9 @@ def lbfgsb_dcstep(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin, stpmax)
 
     sty_update = fp > fx
     opposite_derivative_update = (~sty_update) & (sgnd < 0.0)
-    next_sty = jnp.where(sty_update, stp, jnp.where(opposite_derivative_update, stx, sty))
+    next_sty = jnp.where(
+        sty_update, stp, jnp.where(opposite_derivative_update, stx, sty)
+    )
     next_fy = jnp.where(sty_update, fp, jnp.where(opposite_derivative_update, fx, fy))
     next_dy = jnp.where(sty_update, dp, jnp.where(opposite_derivative_update, dx, dy))
     update_best = ~sty_update
@@ -711,8 +753,12 @@ def lbfgsb_dcsrch(
             stp2 = jnp.where(bisect, stx2 + 0.5 * (sty2 - stx2), stp2)
             width1_2 = jnp.where(brackt2, width, width1)
             width2 = jnp.where(brackt2, jnp.abs(sty2 - stx2), width)
-            stmin2 = jnp.where(brackt2, jnp.minimum(stx2, sty2), stp2 + 1.1 * (stp2 - stx2))
-            stmax2 = jnp.where(brackt2, jnp.maximum(stx2, sty2), stp2 + 4.0 * (stp2 - stx2))
+            stmin2 = jnp.where(
+                brackt2, jnp.minimum(stx2, sty2), stp2 + 1.1 * (stp2 - stx2)
+            )
+            stmax2 = jnp.where(
+                brackt2, jnp.maximum(stx2, sty2), stp2 + 4.0 * (stp2 - stx2)
+            )
             stp2 = jnp.maximum(stpmin, jnp.minimum(stpmax, stp2))
             no_progress = brackt2 & (
                 (stp2 <= stmin2)
@@ -846,7 +892,9 @@ def lbfgsb_bmv(sy, wt, col, v):
                 sy[i, k] * v[k] / sy[k, k],
                 0.0,
             )
-        first_rhs = first_rhs.at[i].set(jnp.where(active_i, first_rhs[i] + ssum, first_rhs[i]))
+        first_rhs = first_rhs.at[i].set(
+            jnp.where(active_i, first_rhs[i] + ssum, first_rhs[i])
+        )
 
     active = jnp.arange(m, dtype=jnp.int32) < col
     upper = jnp.triu(wt)
@@ -926,8 +974,432 @@ def lbfgsb_formt(wt, sy, ss, col, theta):
     finite = jnp.all(jnp.isfinite(chol_upper))
     return LbfgsbFormtResult(
         wt=wt_next,
-        info=jnp.where(finite, jnp.asarray(0, dtype=jnp.int32), jnp.asarray(-3, dtype=jnp.int32)),
+        info=jnp.where(
+            finite, jnp.asarray(0, dtype=jnp.int32), jnp.asarray(-3, dtype=jnp.int32)
+        ),
     )
+
+
+def lbfgsb_hpsolb(last, t, iorder, iheap):
+    last = jnp.asarray(last, dtype=jnp.int32)
+    t = jnp.asarray(t, dtype=jnp.float64)
+    iorder = jnp.asarray(iorder, dtype=jnp.int32)
+    iheap = jnp.asarray(iheap, dtype=jnp.int32)
+    n_slots = int(t.shape[0])
+
+    build_heap = iheap == 0
+
+    def parent_slot_of(slot):
+        return jnp.maximum((slot + 1) // 2 - 1, 0)
+
+    def build_body(k, carry):
+        t, iorder = carry
+        active = build_heap & (k <= last + 1)
+        ddum = t[k - 1]
+        indxin = iorder[k - 1]
+        slot = jnp.asarray(k - 1, dtype=jnp.int32)
+
+        def bubble_cond(bubble_carry):
+            slot, t, _ = bubble_carry
+            parent_slot = parent_slot_of(slot)
+            return active & (slot > 0) & (ddum < t[parent_slot])
+
+        def bubble_body(bubble_carry):
+            slot, t, iorder = bubble_carry
+            parent_slot = parent_slot_of(slot)
+            t = t.at[slot].set(t[parent_slot])
+            iorder = iorder.at[slot].set(iorder[parent_slot])
+            return parent_slot, t, iorder
+
+        slot, t, iorder = jax.lax.while_loop(
+            bubble_cond, bubble_body, (slot, t, iorder)
+        )
+        t = t.at[slot].set(jnp.where(active, ddum, t[slot]))
+        iorder = iorder.at[slot].set(jnp.where(active, indxin, iorder[slot]))
+        return t, iorder
+
+    t, iorder = jax.lax.fori_loop(2, n_slots + 1, build_body, (t, iorder))
+
+    extract = last > 0
+    out = t[0]
+    indxout = iorder[0]
+    last_slot = jnp.minimum(last, n_slots - 1)
+    ddum = t[last_slot]
+    indxin = iorder[last_slot]
+    slot = jnp.asarray(0, dtype=jnp.int32)
+
+    def child_slot_of(slot, t):
+        left_child = 2 * (slot + 1) - 1
+        right_child = left_child + 1
+        has_child = extract & (left_child < last)
+        right_child = jnp.minimum(right_child, n_slots - 1)
+        left_child = jnp.minimum(left_child, n_slots - 1)
+        choose_right = has_child & (t[right_child] < t[left_child])
+        return has_child, jnp.where(choose_right, right_child, left_child)
+
+    def extract_cond(extract_carry):
+        slot, t, _ = extract_carry
+        has_child, child_slot = child_slot_of(slot, t)
+        return has_child & (t[child_slot] < ddum)
+
+    def extract_body(extract_carry):
+        slot, t, iorder = extract_carry
+        _, child_slot = child_slot_of(slot, t)
+        t = t.at[slot].set(t[child_slot])
+        iorder = iorder.at[slot].set(iorder[child_slot])
+        return child_slot, t, iorder
+
+    slot, t, iorder = jax.lax.while_loop(extract_cond, extract_body, (slot, t, iorder))
+
+    t = t.at[slot].set(jnp.where(extract, ddum, t[slot]))
+    iorder = iorder.at[slot].set(jnp.where(extract, indxin, iorder[slot]))
+    t = t.at[last_slot].set(jnp.where(extract, out, t[last_slot]))
+    iorder = iorder.at[last_slot].set(jnp.where(extract, indxout, iorder[last_slot]))
+    return LbfgsbHpsolbResult(t=t, iorder=iorder)
+
+
+def lbfgsb_cmprlb(
+    x,
+    g,
+    ws,
+    wy,
+    sy,
+    wt,
+    z,
+    r,
+    wa,
+    index,
+    theta,
+    col,
+    head,
+    nfree,
+    cnstnd,
+):
+    x = jnp.asarray(x, dtype=jnp.float64)
+    g = jnp.asarray(g, dtype=jnp.float64)
+    ws = jnp.asarray(ws, dtype=jnp.float64)
+    wy = jnp.asarray(wy, dtype=jnp.float64)
+    sy = jnp.asarray(sy, dtype=jnp.float64)
+    wt = jnp.asarray(wt, dtype=jnp.float64)
+    z = jnp.asarray(z, dtype=jnp.float64)
+    r = jnp.asarray(r, dtype=jnp.float64)
+    wa = jnp.asarray(wa, dtype=jnp.float64)
+    index = jnp.asarray(index, dtype=jnp.int32)
+    theta = jnp.asarray(theta, dtype=jnp.float64)
+    col = jnp.asarray(col, dtype=jnp.int32)
+    head = jnp.asarray(head, dtype=jnp.int32)
+    nfree = jnp.asarray(nfree, dtype=jnp.int32)
+    cnstnd = jnp.asarray(cnstnd, dtype=jnp.bool_)
+    m = int(ws.shape[0])
+    n = int(x.shape[0])
+    col2 = 2 * m
+
+    def unconstrained_branch(_):
+        return LbfgsbCmprlbResult(
+            r=-g,
+            wa=wa,
+            info=jnp.asarray(0, dtype=jnp.int32),
+        )
+
+    def constrained_branch(_):
+        next_r = r
+        for i in range(n):
+            active_i = i < nfree
+            k = index[i]
+            value = -theta * (z[k] - x[k]) - g[k]
+            next_r = next_r.at[i].set(jnp.where(active_i, value, next_r[i]))
+
+        bmv_result = lbfgsb_bmv(sy, wt, col, wa[2 * m : 4 * m])
+        next_wa = wa.at[:col2].set(bmv_result.p)
+        pointr = head
+        for j in range(m):
+            active_j = j < col
+            a1 = next_wa[j]
+            a2 = theta * next_wa[col + j]
+            for i in range(n):
+                active_i = active_j & (i < nfree)
+                k = index[i]
+                value = next_r[i] + wy[pointr, k] * a1 + ws[pointr, k] * a2
+                next_r = next_r.at[i].set(jnp.where(active_i, value, next_r[i]))
+            pointr = (pointr + 1) % m
+
+        return LbfgsbCmprlbResult(
+            r=next_r,
+            wa=next_wa,
+            info=jnp.where(
+                bmv_result.info != 0,
+                jnp.asarray(-8, dtype=jnp.int32),
+                jnp.asarray(0, dtype=jnp.int32),
+            ),
+        )
+
+    return jax.lax.cond(
+        (~cnstnd) & (col > 0), unconstrained_branch, constrained_branch, None
+    )
+
+
+def lbfgsb_lnsrlb(
+    l,
+    u,
+    nbd,
+    x,
+    f,
+    fold,
+    gd,
+    gdold,
+    g,
+    d,
+    r,
+    t,
+    z,
+    stp,
+    dnorm,
+    dtd,
+    xstep,
+    stpmx,
+    iteration,
+    ifun,
+    iback,
+    nfgv,
+    info,
+    task,
+    task_msg,
+    boxed,
+    cnstnd,
+    isave,
+    dsave,
+    temp_task,
+    temp_task_msg,
+):
+    l = jnp.asarray(l, dtype=jnp.float64)
+    u = jnp.asarray(u, dtype=jnp.float64)
+    nbd = jnp.asarray(nbd, dtype=jnp.int32)
+    x = jnp.asarray(x, dtype=jnp.float64)
+    f = jnp.asarray(f, dtype=jnp.float64)
+    fold = jnp.asarray(fold, dtype=jnp.float64)
+    gd = jnp.asarray(gd, dtype=jnp.float64)
+    gdold = jnp.asarray(gdold, dtype=jnp.float64)
+    g = jnp.asarray(g, dtype=jnp.float64)
+    d = jnp.asarray(d, dtype=jnp.float64)
+    r = jnp.asarray(r, dtype=jnp.float64)
+    t = jnp.asarray(t, dtype=jnp.float64)
+    z = jnp.asarray(z, dtype=jnp.float64)
+    stp = jnp.asarray(stp, dtype=jnp.float64)
+    dnorm = jnp.asarray(dnorm, dtype=jnp.float64)
+    dtd = jnp.asarray(dtd, dtype=jnp.float64)
+    xstep = jnp.asarray(xstep, dtype=jnp.float64)
+    stpmx = jnp.asarray(stpmx, dtype=jnp.float64)
+    iteration = jnp.asarray(iteration, dtype=jnp.int32)
+    ifun = jnp.asarray(ifun, dtype=jnp.int32)
+    iback = jnp.asarray(iback, dtype=jnp.int32)
+    nfgv = jnp.asarray(nfgv, dtype=jnp.int32)
+    info = jnp.asarray(info, dtype=jnp.int32)
+    task = jnp.asarray(task, dtype=jnp.int32)
+    task_msg = jnp.asarray(task_msg, dtype=jnp.int32)
+    boxed = jnp.asarray(boxed, dtype=jnp.bool_)
+    cnstnd = jnp.asarray(cnstnd, dtype=jnp.bool_)
+    isave = jnp.asarray(isave, dtype=jnp.int32)
+    dsave = jnp.asarray(dsave, dtype=jnp.float64)
+    temp_task = jnp.asarray(temp_task, dtype=jnp.int32)
+    temp_task_msg = jnp.asarray(temp_task_msg, dtype=jnp.int32)
+    n = int(x.shape[0])
+
+    def setup_branch(_):
+        next_dnorm = jnp.sqrt(jnp.sum(d * d))
+        next_dtd = next_dnorm * next_dnorm
+        next_stpmx = jnp.asarray(1.0e10, dtype=jnp.float64)
+
+        for i in range(n):
+            direction_i = d[i]
+            lower_step = l[i] - x[i]
+            upper_step = u[i] - x[i]
+            lower_active = (
+                cnstnd
+                & (iteration != 0)
+                & (nbd[i] != 0)
+                & (direction_i < 0.0)
+                & (nbd[i] <= NBD_BOTH)
+            )
+            upper_active = (
+                cnstnd
+                & (iteration != 0)
+                & (nbd[i] != 0)
+                & (direction_i > 0.0)
+                & (nbd[i] >= NBD_BOTH)
+            )
+            next_stpmx = jnp.where(
+                lower_active & (lower_step >= 0.0),
+                0.0,
+                jnp.where(
+                    lower_active & (direction_i * next_stpmx < lower_step),
+                    lower_step / direction_i,
+                    next_stpmx,
+                ),
+            )
+            next_stpmx = jnp.where(
+                upper_active & (upper_step <= 0.0),
+                0.0,
+                jnp.where(
+                    upper_active & (direction_i * next_stpmx > upper_step),
+                    upper_step / direction_i,
+                    next_stpmx,
+                ),
+            )
+
+        next_stpmx = jnp.where(cnstnd & (iteration == 0), 1.0, next_stpmx)
+        next_stp = jnp.where(
+            (iteration == 0) & (~boxed),
+            jnp.minimum(1.0 / next_dnorm, next_stpmx),
+            1.0,
+        )
+        return (
+            x,
+            f,
+            g,
+            x,
+            next_stp,
+            next_dnorm,
+            next_dtd,
+            jnp.asarray(0.0, dtype=jnp.float64),
+            next_stpmx,
+            jnp.asarray(0, dtype=jnp.int32),
+            jnp.asarray(0, dtype=jnp.int32),
+            jnp.asarray(START, dtype=jnp.int32),
+            jnp.asarray(NO_MSG, dtype=jnp.int32),
+        )
+
+    def continue_branch(_):
+        return (
+            x,
+            fold,
+            r,
+            t,
+            stp,
+            dnorm,
+            dtd,
+            xstep,
+            stpmx,
+            ifun,
+            iback,
+            temp_task,
+            temp_task_msg,
+        )
+
+    (
+        x,
+        fold,
+        r,
+        t,
+        stp,
+        dnorm,
+        dtd,
+        xstep,
+        stpmx,
+        ifun,
+        iback,
+        temp_task,
+        temp_task_msg,
+    ) = jax.lax.cond(task_msg == FG_LNSRCH, continue_branch, setup_branch, None)
+
+    next_gd = jnp.dot(g, d, precision=jax.lax.Precision.HIGHEST)
+    first_function_value = ifun == 0
+    next_gdold = jnp.where(first_function_value, next_gd, gdold)
+    non_descent = first_function_value & (next_gd >= 0.0)
+
+    def non_descent_branch(_):
+        return LbfgsbLnsrlbResult(
+            x=x,
+            fold=fold,
+            gd=next_gd,
+            gdold=next_gdold,
+            g=g,
+            r=r,
+            t=t,
+            stp=stp,
+            dnorm=dnorm,
+            dtd=dtd,
+            xstep=xstep,
+            stpmx=stpmx,
+            ifun=ifun,
+            iback=iback,
+            nfgv=nfgv,
+            info=jnp.asarray(-4, dtype=jnp.int32),
+            task=task,
+            task_msg=task_msg,
+            isave=isave,
+            dsave=dsave,
+            temp_task=temp_task,
+            temp_task_msg=temp_task_msg,
+        )
+
+    def line_search_branch(_):
+        search = lbfgsb_dcsrch(
+            f,
+            next_gd,
+            stp,
+            1.0e-3,
+            0.9,
+            0.1,
+            0.0,
+            stpmx,
+            temp_task,
+            temp_task_msg,
+            isave,
+            dsave,
+        )
+        next_xstep = search.stp * dnorm
+        line_search_done = (search.task == CONVERGENCE) | (search.task == WARNING)
+        next_ifun = jnp.where(line_search_done, ifun, ifun + 1)
+        next_nfgv = jnp.where(line_search_done, nfgv, nfgv + 1)
+        next_iback = jnp.where(line_search_done, iback, next_ifun - 1)
+        next_task = jnp.where(
+            line_search_done,
+            jnp.asarray(NEW_X, dtype=jnp.int32),
+            jnp.asarray(FG, dtype=jnp.int32),
+        )
+        next_task_msg = jnp.where(
+            line_search_done,
+            jnp.asarray(NO_MSG, dtype=jnp.int32),
+            jnp.asarray(FG_LNSRCH, dtype=jnp.int32),
+        )
+        trial_x = search.stp * d + t
+        trial_x = jnp.where(
+            (nbd == NBD_LOWER) | (nbd == NBD_BOTH), jnp.maximum(trial_x, l), trial_x
+        )
+        trial_x = jnp.where(
+            (nbd == NBD_BOTH) | (nbd == NBD_UPPER), jnp.minimum(trial_x, u), trial_x
+        )
+        next_x = jnp.where(
+            line_search_done,
+            x,
+            jnp.where(search.stp == 1.0, z, trial_x),
+        )
+        return LbfgsbLnsrlbResult(
+            x=next_x,
+            fold=fold,
+            gd=next_gd,
+            gdold=next_gdold,
+            g=g,
+            r=r,
+            t=t,
+            stp=search.stp,
+            dnorm=dnorm,
+            dtd=dtd,
+            xstep=next_xstep,
+            stpmx=stpmx,
+            ifun=next_ifun,
+            iback=next_iback,
+            nfgv=next_nfgv,
+            info=info,
+            task=next_task,
+            task_msg=next_task_msg,
+            isave=search.isave,
+            dsave=search.dsave,
+            temp_task=search.task,
+            temp_task_msg=search.task_msg,
+        )
+
+    return jax.lax.cond(non_descent, non_descent_branch, line_search_branch, None)
 
 
 def lbfgsb_freev(nfree, idx, idx2, iwhere, updatd, cnstnd, iteration):
@@ -968,8 +1440,12 @@ def lbfgsb_freev(nfree, idx, idx2, iwhere, updatd, cnstnd, iteration):
         is_free = iwhere[i] <= 0
         free_slot = jnp.minimum(next_nfree, n - 1)
         active_slot = iact - 1
-        next_idx = next_idx.at[free_slot].set(jnp.where(is_free, i, next_idx[free_slot]))
-        next_idx = next_idx.at[active_slot].set(jnp.where(is_free, next_idx[active_slot], i))
+        next_idx = next_idx.at[free_slot].set(
+            jnp.where(is_free, i, next_idx[free_slot])
+        )
+        next_idx = next_idx.at[active_slot].set(
+            jnp.where(is_free, next_idx[active_slot], i)
+        )
         next_nfree = next_nfree + jnp.where(is_free, 1, 0)
         iact = iact - jnp.where(is_free, 0, 1)
 
