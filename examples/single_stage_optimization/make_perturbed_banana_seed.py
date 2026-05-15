@@ -6,14 +6,14 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from simsopt._core.optimizable import load
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from banana_opt.stage2_single_stage_handoff import partition_loaded_stage2_coils  # noqa: E402
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results  # noqa: E402
+from banana_opt.json_compat import load_boozer_finite_i as load  # noqa: E402
+from banana_opt.stage2_single_stage_handoff import partition_loaded_stage2_coils  # noqa: E402
 from run_banana_current_scan import materialize_stage2_seed_variant_from_currents  # noqa: E402
 from workflow_runner_common import (  # noqa: E402
     load_stage2_artifact_results,

@@ -47,7 +47,6 @@ from simsopt.field import (
     BiotSavart,
 )
 from simsopt.objectives import QuadraticPenalty
-from simsopt._core.optimizable import load
 from simsopt._core.derivative import Derivative
 
 from alm_utils import (

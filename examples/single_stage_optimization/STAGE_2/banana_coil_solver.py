@@ -28,7 +28,6 @@ from simsopt.geo import (
     LpCurveCurvature,
 )
 from simsopt.geo.curveobjectives import CurveSurfaceDistance
-from simsopt._core.optimizable import load
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 
 from alm_utils import (

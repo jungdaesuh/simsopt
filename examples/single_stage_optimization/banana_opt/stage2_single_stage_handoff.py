@@ -6,7 +6,6 @@ from typing import Mapping
 
 import numpy as np
 
-from simsopt._core.optimizable import load
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import Volume
 
@@ -53,6 +52,8 @@ BOOTABILITY_STAGE_RECOVERY = "recovery"
 
 BOOZER_FAILURE_POLICY_REPORT_FAILURE = "report_failure"
 BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS = "restore_last_success"
+
+load = load_boozer_finite_i
 
 __all__ = [
     "BOOTABILITY_REASON_BOOZER_SOLVE_FAILED",

@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import Mapping
 
 import numpy as np
-from simsopt._core.optimizable import load
 from simsopt.field import BiotSavart
 from simsopt.field.coil import Coil, Current
 
@@ -18,6 +17,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import run_single_stage_goal_mode_comparison as goal_mode_runner  # noqa: E402
+from banana_opt.json_compat import load_boozer_finite_i as load  # noqa: E402
 from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
     build_equilibrium_path,
     partition_loaded_stage2_coils,

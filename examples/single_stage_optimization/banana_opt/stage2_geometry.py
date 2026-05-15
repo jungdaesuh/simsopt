@@ -16,7 +16,6 @@ except ModuleNotFoundError:
 
         return decorator
 
-from simsopt._core.optimizable import load
 from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import (
@@ -32,6 +31,7 @@ from banana_opt.hardware_contracts import (
     validate_target_lcfs_major_radius,
     validate_target_lcfs_minor_radius,
 )
+from banana_opt.json_compat import load_boozer_finite_i as load
 
 
 LOGGER = logging.getLogger(__name__)

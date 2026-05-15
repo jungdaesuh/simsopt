@@ -4,13 +4,13 @@ import os
 import sys
 
 # SIMSOPT imports
-from simsopt._core.optimizable import load
 from simsopt.field import compute_fieldlines
 import numpy as np
 from simsopt.geo import curves_to_vtk
 
 # Shared topology scorer — single source of truth for helpers and metrics
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from banana_opt.json_compat import load_boozer_finite_i as load
 from topology_scorer import (
     trace_metrics as _trace_metrics,
     extended_surface_seed_radii,

@@ -14,8 +14,7 @@ from import_provenance import configure_local_simsopt_imports
 
 EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
-from simsopt._core.optimizable import load
-
+from banana_opt.json_compat import load_boozer_finite_i as load
 from banana_opt.topology_fidelity_ladder import (
     DEFAULT_TOPOLOGY_TIER_SPECS,
     build_topology_fidelity_report,
