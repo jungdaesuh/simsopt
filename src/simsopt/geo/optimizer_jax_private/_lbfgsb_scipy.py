@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp_linalg
 import numpy as np
 
 
@@ -171,6 +172,12 @@ class LbfgsbBmvResult(NamedTuple):
 
 class LbfgsbFormtResult(NamedTuple):
     wt: jax.Array
+    info: jax.Array
+
+
+class LbfgsbFormkResult(NamedTuple):
+    wn: jax.Array
+    wn1: jax.Array
     info: jax.Array
 
 
@@ -976,6 +983,313 @@ def lbfgsb_formt(wt, sy, ss, col, theta):
         wt=wt_next,
         info=jnp.where(
             finite, jnp.asarray(0, dtype=jnp.int32), jnp.asarray(-3, dtype=jnp.int32)
+        ),
+    )
+
+
+def lbfgsb_formk(
+    nsub,
+    ind,
+    nenter,
+    ileave,
+    indx2,
+    iupdat,
+    updatd,
+    wn,
+    wn1,
+    ws,
+    wy,
+    sy,
+    theta,
+    col,
+    head,
+):
+    nsub = jnp.asarray(nsub, dtype=jnp.int32)
+    ind = jnp.asarray(ind, dtype=jnp.int32)
+    nenter = jnp.asarray(nenter, dtype=jnp.int32)
+    ileave = jnp.asarray(ileave, dtype=jnp.int32)
+    indx2 = jnp.asarray(indx2, dtype=jnp.int32)
+    iupdat = jnp.asarray(iupdat, dtype=jnp.int32)
+    updatd = jnp.asarray(updatd, dtype=jnp.bool_)
+    wn = jnp.asarray(wn, dtype=jnp.float64)
+    wn1 = jnp.asarray(wn1, dtype=jnp.float64)
+    ws = jnp.asarray(ws, dtype=jnp.float64)
+    wy = jnp.asarray(wy, dtype=jnp.float64)
+    sy = jnp.asarray(sy, dtype=jnp.float64)
+    theta = jnp.asarray(theta, dtype=jnp.float64)
+    col = jnp.asarray(col, dtype=jnp.int32)
+    head = jnp.asarray(head, dtype=jnp.int32)
+    m = int(ws.shape[0])
+    n = int(ws.shape[1])
+
+    shift = updatd & (iupdat > m)
+    for jy in range(m - 1):
+        js = m + jy
+        for offset in range(m - (jy + 1)):
+            wn1 = wn1.at[jy + offset, jy].set(
+                jnp.where(shift, wn1[jy + 1 + offset, jy + 1], wn1[jy + offset, jy])
+            )
+            wn1 = wn1.at[js + offset, js].set(
+                jnp.where(shift, wn1[js + 1 + offset, js + 1], wn1[js + offset, js])
+            )
+        for offset in range(m - 1):
+            wn1 = wn1.at[m + offset, jy].set(
+                jnp.where(shift, wn1[m + 1 + offset, jy + 1], wn1[m + offset, jy])
+            )
+
+    iy_new = col - 1
+    is_new = m + col - 1
+    ipntr = (head + col - 1) % m
+    jpntr = head
+    row_new = jnp.maximum(iy_new, 0)
+    block_row_new = jnp.maximum(is_new, 0)
+    for jy in range(m):
+        active_j = updatd & (jy < col)
+        temp1 = jnp.asarray(0.0, dtype=jnp.float64)
+        temp2 = jnp.asarray(0.0, dtype=jnp.float64)
+        temp3 = jnp.asarray(0.0, dtype=jnp.float64)
+        for k in range(n):
+            k1 = ind[k]
+            free = k < nsub
+            active = k >= nsub
+            temp1 = temp1 + jnp.where(
+                active_j & free,
+                wy[ipntr, k1] * wy[jpntr, k1],
+                0.0,
+            )
+            temp2 = temp2 + jnp.where(
+                active_j & active,
+                ws[ipntr, k1] * ws[jpntr, k1],
+                0.0,
+            )
+            temp3 = temp3 + jnp.where(
+                active_j & active,
+                ws[ipntr, k1] * wy[jpntr, k1],
+                0.0,
+            )
+        wn1 = wn1.at[row_new, jy].set(jnp.where(active_j, temp1, wn1[row_new, jy]))
+        wn1 = wn1.at[block_row_new, m + jy].set(
+            jnp.where(active_j, temp2, wn1[block_row_new, m + jy])
+        )
+        wn1 = wn1.at[block_row_new, jy].set(
+            jnp.where(active_j, temp3, wn1[block_row_new, jy])
+        )
+        jpntr = (jpntr + 1) % m
+
+    jy_new = jnp.maximum(col - 1, 0)
+    jpntr = (head + col - 1) % m
+    ipntr = head
+    for i in range(m):
+        active_i = updatd & (i < col)
+        is_i = m + i
+        temp3 = jnp.asarray(0.0, dtype=jnp.float64)
+        for k in range(n):
+            k1 = ind[k]
+            temp3 = temp3 + jnp.where(
+                active_i & (k < nsub),
+                ws[ipntr, k1] * wy[jpntr, k1],
+                0.0,
+            )
+        ipntr = (ipntr + 1) % m
+        wn1 = wn1.at[is_i, jy_new].set(jnp.where(active_i, temp3, wn1[is_i, jy_new]))
+
+    upcl = jnp.where(updatd, col - 1, col)
+    ipntr = head
+    for iy in range(m):
+        active_iy = iy < upcl
+        is_i = m + iy
+        jpntr = head
+        for jy in range(m):
+            pair_active = active_iy & (jy <= iy)
+            js = m + jy
+            temp1 = jnp.asarray(0.0, dtype=jnp.float64)
+            temp2 = jnp.asarray(0.0, dtype=jnp.float64)
+            temp3 = jnp.asarray(0.0, dtype=jnp.float64)
+            temp4 = jnp.asarray(0.0, dtype=jnp.float64)
+            for k in range(n):
+                k1 = indx2[k]
+                entering = pair_active & (k < nenter)
+                leaving = pair_active & (k >= ileave)
+                temp1 = temp1 + jnp.where(
+                    entering,
+                    wy[ipntr, k1] * wy[jpntr, k1],
+                    0.0,
+                )
+                temp2 = temp2 + jnp.where(
+                    entering,
+                    ws[ipntr, k1] * ws[jpntr, k1],
+                    0.0,
+                )
+                temp3 = temp3 + jnp.where(
+                    leaving,
+                    wy[ipntr, k1] * wy[jpntr, k1],
+                    0.0,
+                )
+                temp4 = temp4 + jnp.where(
+                    leaving,
+                    ws[ipntr, k1] * ws[jpntr, k1],
+                    0.0,
+                )
+            wn1 = wn1.at[iy, jy].set(
+                jnp.where(pair_active, wn1[iy, jy] + temp1 - temp3, wn1[iy, jy])
+            )
+            wn1 = wn1.at[is_i, js].set(
+                jnp.where(pair_active, wn1[is_i, js] - temp2 + temp4, wn1[is_i, js])
+            )
+            jpntr = (jpntr + 1) % m
+        ipntr = (ipntr + 1) % m
+
+    ipntr = head
+    for i in range(m):
+        is_i = m + i
+        active_is = i < upcl
+        jpntr = head
+        for jy in range(m):
+            pair_active = active_is & (jy < upcl)
+            temp1 = jnp.asarray(0.0, dtype=jnp.float64)
+            temp3 = jnp.asarray(0.0, dtype=jnp.float64)
+            for k in range(n):
+                k1 = indx2[k]
+                entering = pair_active & (k < nenter)
+                leaving = pair_active & (k >= ileave)
+                temp1 = temp1 + jnp.where(
+                    entering,
+                    ws[ipntr, k1] * wy[jpntr, k1],
+                    0.0,
+                )
+                temp3 = temp3 + jnp.where(
+                    leaving,
+                    ws[ipntr, k1] * wy[jpntr, k1],
+                    0.0,
+                )
+            delta = jnp.where(i <= jy, temp1 - temp3, -temp1 + temp3)
+            wn1 = wn1.at[is_i, jy].set(
+                jnp.where(pair_active, wn1[is_i, jy] + delta, wn1[is_i, jy])
+            )
+            jpntr = (jpntr + 1) % m
+        ipntr = (ipntr + 1) % m
+
+    for iy in range(m):
+        active_iy = iy < col
+        is_col = col + iy
+        is1 = m + iy
+        for jy in range(m):
+            active_j = active_iy & (jy <= iy) & (jy < col)
+            js_col = col + jy
+            js1 = m + jy
+            wn = wn.at[jy, iy].set(jnp.where(active_j, wn1[iy, jy] / theta, wn[jy, iy]))
+            wn = wn.at[js_col, is_col].set(
+                jnp.where(active_j, wn1[is1, js1] * theta, wn[js_col, is_col])
+            )
+        for jy in range(m):
+            active_j = active_iy & (jy < col)
+            value = jnp.where(jy < iy, -wn1[is1, jy], wn1[is1, jy])
+            wn = wn.at[jy, is_col].set(jnp.where(active_j, value, wn[jy, is_col]))
+        wn = wn.at[iy, iy].set(
+            jnp.where(active_iy, wn[iy, iy] + sy[iy, iy], wn[iy, iy])
+        )
+
+    active = jnp.arange(m, dtype=jnp.int32) < col
+    active_matrix = active[:, None] & active[None, :]
+    first_upper = jnp.triu(wn[:m, :m])
+    first_matrix = first_upper + jnp.triu(first_upper, k=1).T
+    first_matrix = jnp.where(active_matrix, first_matrix, jnp.eye(m, dtype=jnp.float64))
+    first_chol = jnp.linalg.cholesky(first_matrix).T
+    first_finite = jnp.all(jnp.isfinite(jnp.where(active_matrix, first_chol, 0.0)))
+    wn_first = jnp.where(jnp.triu(active_matrix) & first_finite, first_chol, wn[:m, :m])
+    wn = wn.at[:m, :m].set(wn_first)
+
+    rhs = jnp.zeros((m, m), dtype=jnp.float64)
+    for j in range(m):
+        source_col = col + j
+        active_j = j < col
+        for i in range(m):
+            active_i = i < col
+            rhs = rhs.at[i, j].set(
+                jnp.where(active_i & active_j, wn[i, source_col], rhs[i, j])
+            )
+    solved = jsp_linalg.solve_triangular(
+        first_chol,
+        rhs,
+        trans=1,
+        lower=False,
+        unit_diagonal=False,
+    )
+    for j in range(m):
+        target_col = col + j
+        active_j = j < col
+        for i in range(m):
+            active_i = i < col
+            wn = wn.at[i, target_col].set(
+                jnp.where(
+                    active_i & active_j & first_finite,
+                    solved[i, j],
+                    wn[i, target_col],
+                )
+            )
+
+    for i in range(m):
+        is_col = col + i
+        active_i = i < col
+        for j in range(m):
+            js_col = col + j
+            active_j = active_i & (j >= i) & (j < col)
+            dot = jnp.asarray(0.0, dtype=jnp.float64)
+            for k in range(m):
+                dot = dot + jnp.where(
+                    (k < col) & first_finite,
+                    wn[k, is_col] * wn[k, js_col],
+                    0.0,
+                )
+            wn = wn.at[is_col, js_col].set(
+                jnp.where(
+                    active_j & first_finite,
+                    wn[is_col, js_col] + dot,
+                    wn[is_col, js_col],
+                )
+            )
+
+    second_upper = jnp.zeros((m, m), dtype=jnp.float64)
+    for i in range(m):
+        source_row = col + i
+        active_i = i < col
+        for j in range(m):
+            source_col = col + j
+            active_j = active_i & (j >= i) & (j < col)
+            second_upper = second_upper.at[i, j].set(
+                jnp.where(active_j, wn[source_row, source_col], second_upper[i, j])
+            )
+    second_matrix = second_upper + jnp.triu(second_upper, k=1).T
+    second_matrix = jnp.where(
+        active_matrix, second_matrix, jnp.eye(m, dtype=jnp.float64)
+    )
+    second_chol = jnp.linalg.cholesky(second_matrix).T
+    second_finite = jnp.all(jnp.isfinite(jnp.where(active_matrix, second_chol, 0.0)))
+    for i in range(m):
+        target_row = col + i
+        active_i = i < col
+        for j in range(m):
+            target_col = col + j
+            active_j = active_i & (j >= i) & (j < col)
+            wn = wn.at[target_row, target_col].set(
+                jnp.where(
+                    active_j & first_finite & second_finite,
+                    second_chol[i, j],
+                    wn[target_row, target_col],
+                )
+            )
+
+    return LbfgsbFormkResult(
+        wn=wn,
+        wn1=wn1,
+        info=jnp.where(
+            first_finite,
+            jnp.where(
+                second_finite,
+                jnp.asarray(0, dtype=jnp.int32),
+                jnp.asarray(-2, dtype=jnp.int32),
+            ),
+            jnp.asarray(-1, dtype=jnp.int32),
         ),
     )
 

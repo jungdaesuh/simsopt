@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 import jax
+import scipy.linalg
 from scipy.optimize import _lbfgsb_py
 
 from simsopt.geo.optimizer_jax_private import _lbfgsb_scipy as lbfgsb
@@ -201,6 +202,169 @@ def _formt_reference(wt, sy, ss, col, theta):
     t = t + np.triu(t, k=1).T
     wt[:col, :col] = np.linalg.cholesky(t).T
     return wt, 0
+
+
+def _formk_reference(
+    nsub,
+    ind,
+    nenter,
+    ileave,
+    indx2,
+    iupdat,
+    updatd,
+    wn,
+    wn1,
+    ws,
+    wy,
+    sy,
+    theta,
+    col,
+    head,
+):
+    ind = np.asarray(ind, dtype=np.int32)
+    indx2 = np.asarray(indx2, dtype=np.int32)
+    wn = np.asarray(wn, dtype=np.float64).copy()
+    wn1 = np.asarray(wn1, dtype=np.float64).copy()
+    ws = np.asarray(ws, dtype=np.float64)
+    wy = np.asarray(wy, dtype=np.float64)
+    sy = np.asarray(sy, dtype=np.float64)
+    m = ws.shape[0]
+    n = ws.shape[1]
+
+    if updatd:
+        if iupdat > m:
+            for jy in range(m - 1):
+                js = m + jy
+                for offset in range(m - (jy + 1)):
+                    wn1[jy + offset, jy] = wn1[jy + 1 + offset, jy + 1]
+                    wn1[js + offset, js] = wn1[js + 1 + offset, js + 1]
+                for offset in range(m - 1):
+                    wn1[m + offset, jy] = wn1[m + 1 + offset, jy + 1]
+
+        pbegin = 0
+        pend = nsub
+        dbegin = nsub
+        dend = n
+        iy = col - 1
+        is_ = m + col - 1
+        ipntr = (head + col - 1) % m
+        jpntr = head
+
+        for jy in range(col):
+            js = m + jy
+            temp1 = 0.0
+            temp2 = 0.0
+            temp3 = 0.0
+            for k in range(pbegin, pend):
+                k1 = ind[k]
+                temp1 += wy[ipntr, k1] * wy[jpntr, k1]
+            for k in range(dbegin, dend):
+                k1 = ind[k]
+                temp2 += ws[ipntr, k1] * ws[jpntr, k1]
+                temp3 += ws[ipntr, k1] * wy[jpntr, k1]
+            wn1[iy, jy] = temp1
+            wn1[is_, js] = temp2
+            wn1[is_, jy] = temp3
+            jpntr = (jpntr + 1) % m
+
+        jy = col - 1
+        jpntr = (head + col - 1) % m
+        ipntr = head
+        for i in range(col):
+            is_ = m + i
+            temp3 = 0.0
+            for k in range(pbegin, pend):
+                k1 = ind[k]
+                temp3 += ws[ipntr, k1] * wy[jpntr, k1]
+            ipntr = (ipntr + 1) % m
+            wn1[is_, jy] = temp3
+
+        upcl = col - 1
+    else:
+        upcl = col
+
+    ipntr = head
+    for iy in range(upcl):
+        is_ = m + iy
+        jpntr = head
+        for jy in range(iy + 1):
+            js = m + jy
+            temp1 = 0.0
+            temp2 = 0.0
+            temp3 = 0.0
+            temp4 = 0.0
+            for k in range(nenter):
+                k1 = indx2[k]
+                temp1 += wy[ipntr, k1] * wy[jpntr, k1]
+                temp2 += ws[ipntr, k1] * ws[jpntr, k1]
+            for k in range(ileave, n):
+                k1 = indx2[k]
+                temp3 += wy[ipntr, k1] * wy[jpntr, k1]
+                temp4 += ws[ipntr, k1] * ws[jpntr, k1]
+            wn1[iy, jy] += temp1 - temp3
+            wn1[is_, js] += -temp2 + temp4
+            jpntr = (jpntr + 1) % m
+        ipntr = (ipntr + 1) % m
+
+    ipntr = head
+    for is_ in range(m, m + upcl):
+        jpntr = head
+        for jy in range(upcl):
+            temp1 = 0.0
+            temp3 = 0.0
+            for k in range(nenter):
+                k1 = indx2[k]
+                temp1 += ws[ipntr, k1] * wy[jpntr, k1]
+            for k in range(ileave, n):
+                k1 = indx2[k]
+                temp3 += ws[ipntr, k1] * wy[jpntr, k1]
+            if is_ <= jy + m:
+                wn1[is_, jy] += temp1 - temp3
+            else:
+                wn1[is_, jy] += -temp1 + temp3
+            jpntr = (jpntr + 1) % m
+        ipntr = (ipntr + 1) % m
+
+    for iy in range(col):
+        is_ = col + iy
+        is1 = m + iy
+        for jy in range(iy + 1):
+            js = col + jy
+            js1 = m + jy
+            wn[jy, iy] = wn1[iy, jy] / theta
+            wn[js, is_] = wn1[is1, js1] * theta
+        for jy in range(iy):
+            wn[jy, is_] = -wn1[is1, jy]
+        for jy in range(iy, col):
+            wn[jy, is_] = wn1[is1, jy]
+        wn[iy, iy] += sy[iy, iy]
+
+    first = np.triu(wn[:col, :col])
+    first = first + np.triu(first, k=1).T
+    try:
+        first_chol = np.linalg.cholesky(first).T
+    except np.linalg.LinAlgError:
+        return wn, wn1, -1
+    wn[:col, :col] = np.triu(first_chol)
+
+    wn[:col, col : 2 * col] = scipy.linalg.solve_triangular(
+        first_chol,
+        wn[:col, col : 2 * col],
+        trans="T",
+        lower=False,
+    )
+    for is_ in range(col, 2 * col):
+        for js in range(is_, 2 * col):
+            wn[is_, js] += np.dot(wn[:col, is_], wn[:col, js])
+
+    second = np.triu(wn[col : 2 * col, col : 2 * col])
+    second = second + np.triu(second, k=1).T
+    try:
+        second_chol = np.linalg.cholesky(second).T
+    except np.linalg.LinAlgError:
+        return wn, wn1, -2
+    wn[col : 2 * col, col : 2 * col] = np.triu(second_chol)
+    return wn, wn1, 0
 
 
 def _freev_reference(nfree, idx, idx2, iwhere, updatd, cnstnd, iteration):
@@ -924,6 +1088,263 @@ def test_lbfgsb_formt_is_jittable_for_fixed_workspace_shapes():
 
     np.testing.assert_allclose(np.asarray(actual.wt[:2, :2]), expected_wt[:2, :2])
     assert int(actual.info) == 0
+
+
+def _formk_case():
+    m = 3
+    ws = np.array(
+        [
+            [0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    wy = np.array(
+        [
+            [0.10, 0.00, 0.0, 0.0, 0.0],
+            [0.00, 0.20, 0.0, 0.0, 0.0],
+            [0.05, 0.10, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    sy = np.array(
+        [
+            [8.0, 0.0, 0.0],
+            [0.25, 9.0, 0.0],
+            [0.15, 0.35, 10.0],
+        ],
+        dtype=np.float64,
+    )
+    wn = np.zeros((2 * m, 2 * m), dtype=np.float64)
+    wn1 = np.zeros((2 * m, 2 * m), dtype=np.float64)
+    ind = np.array([0, 1, 2, 3, 4], dtype=np.int32)
+    indx2 = np.array([1, 0, 2, 3, 4], dtype=np.int32)
+    return wn, wn1, ws, wy, sy, ind, indx2
+
+
+def test_lbfgsb_formk_matches_c_reference_for_updated_single_correction():
+    wn, wn1, ws, wy, sy, ind, indx2 = _formk_case()
+
+    expected = _formk_reference(
+        nsub=2,
+        ind=ind,
+        nenter=0,
+        ileave=5,
+        indx2=indx2,
+        iupdat=1,
+        updatd=True,
+        wn=wn,
+        wn1=wn1,
+        ws=ws,
+        wy=wy,
+        sy=sy,
+        theta=2.5,
+        col=1,
+        head=1,
+    )
+    actual = lbfgsb.lbfgsb_formk(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        1,
+        True,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2] == 0
+
+
+def test_lbfgsb_formk_matches_c_reference_without_new_update():
+    wn, wn1, ws, wy, sy, ind, indx2 = _formk_case()
+    wn1[0, 0] = 0.01
+    wn1[3, 3] = 1.0
+
+    expected = _formk_reference(
+        nsub=2,
+        ind=ind,
+        nenter=0,
+        ileave=5,
+        indx2=indx2,
+        iupdat=1,
+        updatd=False,
+        wn=wn,
+        wn1=wn1,
+        ws=ws,
+        wy=wy,
+        sy=sy,
+        theta=2.5,
+        col=1,
+        head=1,
+    )
+    actual = lbfgsb.lbfgsb_formk(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        1,
+        False,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2] == 0
+
+
+def test_lbfgsb_formk_matches_c_reference_for_entering_and_leaving_sets():
+    wn, wn1, ws, wy, sy, ind, _ = _formk_case()
+    indx2 = np.array([1, 0, 2, 4, 3], dtype=np.int32)
+    wn1[0, 0] = 0.01
+    wn1[3, 3] = 1.0
+
+    expected = _formk_reference(
+        nsub=2,
+        ind=ind,
+        nenter=1,
+        ileave=4,
+        indx2=indx2,
+        iupdat=1,
+        updatd=False,
+        wn=wn,
+        wn1=wn1,
+        ws=ws,
+        wy=wy,
+        sy=sy,
+        theta=2.5,
+        col=1,
+        head=1,
+    )
+    actual = lbfgsb.lbfgsb_formk(
+        2,
+        ind,
+        1,
+        4,
+        indx2,
+        1,
+        False,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+
+    assert expected[1][0, 0] > wn1[0, 0]
+    assert expected[1][3, 3] > wn1[3, 3]
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2] == 0
+
+
+def test_lbfgsb_formk_matches_c_reference_after_memory_rollover():
+    wn, wn1, ws, wy, sy, ind, indx2 = _formk_case()
+    wn1 = np.tril(np.arange(36, dtype=np.float64).reshape(6, 6) / 200.0)
+
+    expected = _formk_reference(
+        nsub=2,
+        ind=ind,
+        nenter=0,
+        ileave=5,
+        indx2=indx2,
+        iupdat=4,
+        updatd=True,
+        wn=wn,
+        wn1=wn1,
+        ws=ws,
+        wy=wy,
+        sy=sy,
+        theta=2.5,
+        col=3,
+        head=1,
+    )
+    actual = lbfgsb.lbfgsb_formk(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        4,
+        True,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        3,
+        1,
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2]
+
+
+def test_lbfgsb_formk_is_jittable_for_fixed_workspace_shapes():
+    formk_jit = jax.jit(lbfgsb.lbfgsb_formk)
+    wn, wn1, ws, wy, sy, ind, indx2 = _formk_case()
+
+    actual = formk_jit(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        1,
+        True,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+    expected = _formk_reference(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        1,
+        True,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2] == 0
 
 
 def test_lbfgsb_freev_matches_c_reference_for_entering_and_leaving_sets():

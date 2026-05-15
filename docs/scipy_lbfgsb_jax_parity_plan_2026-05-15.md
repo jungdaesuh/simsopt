@@ -178,7 +178,7 @@ of the current `minimize_lbfgs_host_core(...)`.
       `_lbfgsb.setulb(...)` that records every requested `x`, `f`, and `g`.
       Do not rely on public `minimize(...)` callbacks for this; public callbacks
       do not expose SciPy's internal work arrays.
-- [ ] Build replay fixtures for:
+- [x] Build replay fixtures for:
       unconstrained quadratic,
       diagonal ill-conditioned quadratic,
       Rosenbrock,
@@ -197,14 +197,14 @@ of the current `minimize_lbfgs_host_core(...)`.
 - [x] Preserve SciPy inverse-Hessian checks: `hess_inv(vector)` must match
       `hess_inv.todense()` on the scalar quartic fixture, 2-D quadratic fixture,
       and old dense implementation equivalence fixture.
-- [ ] Capture SciPy internal task transitions, `x`, `f`, `g`, `wa`, `iwa`,
+- [x] Capture SciPy internal task transitions, `x`, `f`, `g`, `wa`, `iwa`,
       `task`, `ln_task`, `lsave`, `isave`, `dsave`, `nfev`, `njev`, `nit`,
       public final status, and public final message.
-- [ ] Add bitwise replay assertions for integer/control fields before any JAX
+- [x] Add bitwise replay assertions for integer/control fields before any JAX
       port changes are accepted. Numeric arrays should be bitwise only for
       pinned operation-order fixtures; otherwise assert a documented ULP or
       absolute/relative tolerance budget tied to the exact kernel.
-- [ ] Add negative tests for malformed bounds and `maxls <= 0` to preserve
+- [x] Add negative tests for malformed bounds and `maxls <= 0` to preserve
       SciPy error semantics at the public adapter boundary.
 
 ### Phase 2: Define JAX State Types
@@ -237,11 +237,12 @@ of the current `minimize_lbfgs_host_core(...)`.
       SciPy for all `nbd` cases.
 - [x] Port `active` and verify initial projection, `iwhere`, `prjctd`,
       `cnstnd`, and `boxed`.
-- [ ] Port compact-memory helpers:
+- [x] Port compact-memory helpers:
       `bmv`, `formt`, `formk`, `cmprlb`, and `matupd`.
 - [x] Port `hpsolb`, the heap helper used by `cauchy` breakpoint ordering.
 - [ ] Port `cauchy` with its breakpoint ordering and heap behavior.
-- [ ] Port `freev` and `subsm` with exact active/free-set updates.
+- [x] Port `freev` with exact active/free-set updates.
+- [ ] Port `subsm` with exact active/free-set updates.
 - [x] Port `dcsrch` and `dcstep` before wiring the full outer loop. Do not reuse
       the existing `_line_search.py` flow for SciPy-bitwise mode.
 - [x] Port the initial `lnsrlb` reverse-communication wrapper around `dcsrch`;

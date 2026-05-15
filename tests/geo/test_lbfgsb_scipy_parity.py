@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 from numpy.testing import assert_allclose
+import pytest
 import scipy
 import scipy.linalg
 from scipy import optimize
@@ -100,23 +101,81 @@ def _empty_setulb_workspace(n: int, m: int):
     }
 
 
-def _quadratic_value_and_grad(x):
-    scale = np.array([1.0, 10.0, 100.0], dtype=np.float64)
-    shifted = np.asarray(x, dtype=np.float64) - np.array([0.25, -0.5, 0.75])
+def _quadratic_value_and_grad(x, *, scale=None, target=None):
+    if scale is None:
+        scale = np.array([1.0, 10.0, 100.0], dtype=np.float64)
+    if target is None:
+        target = np.array([0.25, -0.5, 0.75], dtype=np.float64)
+    shifted = np.asarray(x, dtype=np.float64) - target
     return np.float64(0.5 * np.dot(scale * shifted, shifted)), scale * shifted
 
 
-def _run_scipy_setulb_trace(fun, x0, bounds, *, m=5, ftol=1e-12, gtol=1e-8, maxls=20):
+def _ill_conditioned_diagonal_value_and_grad(x):
+    return _quadratic_value_and_grad(
+        x,
+        scale=np.array([1.0e-3, 1.0, 1.0e3, 1.0e6], dtype=np.float64),
+        target=np.array([0.1, -0.2, 0.3, -0.4], dtype=np.float64),
+    )
+
+
+def _rosenbrock_value_and_grad(x):
+    return np.float64(optimize.rosen(x)), optimize.rosen_der(x).astype(np.float64)
+
+
+def _analytic_trigonometric_value_and_grad(x):
+    x = np.asarray(x, dtype=np.float64)
+    shifted = x - np.array([0.15, -0.35, 0.45], dtype=np.float64)
+    value = np.sum(0.25 * shifted**2 + 0.05 * np.sin(3.0 * x))
+    grad = 0.5 * shifted + 0.15 * np.cos(3.0 * x)
+    return np.float64(value), grad.astype(np.float64)
+
+
+def _encode_bounds_for_setulb(bounds, n):
+    low_bnd = np.zeros(n, dtype=np.float64)
+    upper_bnd = np.zeros(n, dtype=np.float64)
+    nbd = np.zeros(n, dtype=np.int32)
+    if bounds is None:
+        return low_bnd, upper_bnd, nbd
+
+    for index, (lower, upper) in enumerate(bounds):
+        has_lower = lower is not None and not np.isneginf(lower)
+        has_upper = upper is not None and not np.isposinf(upper)
+        if has_lower:
+            low_bnd[index] = np.float64(lower)
+        if has_upper:
+            upper_bnd[index] = np.float64(upper)
+        if has_lower and has_upper:
+            nbd[index] = 2
+        elif has_lower:
+            nbd[index] = 1
+        elif has_upper:
+            nbd[index] = 3
+    return low_bnd, upper_bnd, nbd
+
+
+def _run_scipy_setulb_trace(
+    fun,
+    x0,
+    bounds=None,
+    *,
+    m=5,
+    ftol=1e-12,
+    gtol=1e-8,
+    maxls=20,
+    maxfun=15000,
+    maxiter=15000,
+):
     x = np.asarray(x0, dtype=np.float64).copy()
     n = len(x)
-    low_bnd = np.asarray([bound[0] for bound in bounds], dtype=np.float64)
-    upper_bnd = np.asarray([bound[1] for bound in bounds], dtype=np.float64)
-    nbd = np.full(n, 2, dtype=np.int32)
+    low_bnd, upper_bnd, nbd = _encode_bounds_for_setulb(bounds, n)
     f = np.array(0.0, dtype=np.float64)
     g = np.zeros(n, dtype=np.float64)
     workspace = _empty_setulb_workspace(n, m)
     trace = []
     factr = ftol / np.finfo(float).eps
+    nfev = 0
+    njev = 0
+    nit = 0
 
     while True:
         g = g.astype(np.float64)
@@ -145,18 +204,147 @@ def _run_scipy_setulb_trace(fun, x0, bounds, *, m=5, ftol=1e-12, gtol=1e-8, maxl
             "x": x.copy(),
             "f": np.float64(f),
             "g": g.copy(),
+            "wa": workspace["wa"].copy(),
+            "iwa": workspace["iwa"].copy(),
+            "lsave": workspace["lsave"].copy(),
             "isave": workspace["isave"].copy(),
             "dsave": workspace["dsave"].copy(),
         }
         trace.append(event)
         if workspace["task"][0] == 3:
             f, g = fun(x)
+            nfev += 1
+            njev += 1
             event["requested_f"] = np.float64(f)
             event["requested_g"] = np.asarray(g, dtype=np.float64).copy()
-        elif workspace["task"][0] != 1:
+        elif workspace["task"][0] == 1:
+            nit += 1
+            if nit >= maxiter:
+                workspace["task"][0] = 5
+                workspace["task"][1] = 504
+            elif nfev > maxfun:
+                workspace["task"][0] = 5
+                workspace["task"][1] = 502
+            event["task"] = workspace["task"].copy()
+            if workspace["task"][0] != 1:
+                event["public_status"] = int(
+                    0
+                    if workspace["task"][0] == 4
+                    else 1
+                    if nfev > maxfun or nit >= maxiter
+                    else 2
+                )
+                event["public_message"] = (
+                    _lbfgsb_py.status_messages[int(workspace["task"][0])]
+                    + ": "
+                    + _lbfgsb_py.task_messages[int(workspace["task"][1])]
+                )
+                event["nfev"] = nfev
+                event["njev"] = njev
+                event["nit"] = nit
+                break
+        else:
+            event["public_status"] = int(
+                0
+                if workspace["task"][0] == 4
+                else 1
+                if nfev > maxfun or nit >= maxiter
+                else 2
+            )
+            event["public_message"] = (
+                _lbfgsb_py.status_messages[int(workspace["task"][0])]
+                + ": "
+                + _lbfgsb_py.task_messages[int(workspace["task"][1])]
+            )
+            event["nfev"] = nfev
+            event["njev"] = njev
+            event["nit"] = nit
             break
+        event["nfev"] = nfev
+        event["njev"] = njev
+        event["nit"] = nit
 
     return trace, workspace
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(
+            (
+                _quadratic_value_and_grad,
+                np.array([0.9, 0.2, -0.4], dtype=np.float64),
+                None,
+                5,
+            ),
+            id="unconstrained-quadratic",
+        ),
+        pytest.param(
+            (
+                _ill_conditioned_diagonal_value_and_grad,
+                np.array([0.8, -1.0, 2.0, -3.0], dtype=np.float64),
+                None,
+                7,
+            ),
+            id="ill-conditioned-diagonal",
+        ),
+        pytest.param(
+            (
+                _rosenbrock_value_and_grad,
+                np.array([-1.2, 1.0], dtype=np.float64),
+                None,
+                5,
+            ),
+            id="rosenbrock",
+        ),
+        pytest.param(
+            (
+                _quadratic_value_and_grad,
+                np.array([-0.7, 0.2, -1.5], dtype=np.float64),
+                [(0.0, None), (None, None), (-1.0, None)],
+                5,
+            ),
+            id="lower-bounds",
+        ),
+        pytest.param(
+            (
+                _quadratic_value_and_grad,
+                np.array([1.7, 1.4, -0.4], dtype=np.float64),
+                [(None, 1.0), (None, 0.5), (None, None)],
+                5,
+            ),
+            id="upper-bounds",
+        ),
+        pytest.param(
+            (
+                _quadratic_value_and_grad,
+                np.array([0.9, 0.2, -0.4], dtype=np.float64),
+                [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)],
+                5,
+            ),
+            id="both-bounds",
+        ),
+        pytest.param(
+            (
+                _quadratic_value_and_grad,
+                np.array([0.9, 0.2, -0.4], dtype=np.float64),
+                [(0.25, 0.25), (-1.0, 1.0), (-1.0, 1.0)],
+                5,
+            ),
+            id="fixed-variable",
+        ),
+        pytest.param(
+            (
+                _analytic_trigonometric_value_and_grad,
+                np.array([0.7, -0.8, 0.2], dtype=np.float64),
+                [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)],
+                5,
+            ),
+            id="analytic-gradient",
+        ),
+    ]
+)
+def scipy_replay_case(request):
+    return request.param
 
 
 def test_installed_scipy_lbfgsb_oracle_is_pinned_to_1171():
@@ -365,3 +553,116 @@ def test_scipy_setulb_reverse_communication_trace_records_replay_state():
     assert workspace["wa"].dtype == np.float64
     assert workspace["iwa"].dtype == np.int32
     assert workspace["isave"][30] > 0
+
+
+def test_scipy_setulb_replay_fixture_matrix_records_internal_state(
+    scipy_replay_case,
+):
+    fun, x0, bounds, m = scipy_replay_case
+    trace, workspace = _run_scipy_setulb_trace(fun, x0, bounds, m=m)
+    n = len(x0)
+    wa_size = 2 * m * n + 5 * n + 11 * m * m + 8 * m
+
+    assert tuple(trace[0]["task"]) == (3, 301)
+    assert trace[-1]["task"][0] == 4
+    assert all("wa" in event for event in trace)
+    assert all("iwa" in event for event in trace)
+    assert all("lsave" in event for event in trace)
+    assert all(event["wa"].shape == (wa_size,) for event in trace)
+    assert all(event["iwa"].shape == (3 * n,) for event in trace)
+    assert all(event["lsave"].shape == (4,) for event in trace)
+    assert all(event["isave"].shape == (44,) for event in trace)
+    assert all(event["dsave"].shape == (29,) for event in trace)
+    assert all(event["x"].dtype == np.float64 for event in trace)
+    assert all(event["g"].dtype == np.float64 for event in trace)
+    assert all(event["wa"].dtype == np.float64 for event in trace)
+    assert all(event["iwa"].dtype == np.int32 for event in trace)
+    assert all(event["lsave"].dtype == np.int32 for event in trace)
+    assert all(event["isave"].dtype == np.int32 for event in trace)
+    assert all(event["dsave"].dtype == np.float64 for event in trace)
+    assert all(event["nfev"] == event["njev"] for event in trace)
+    assert trace[-1]["nfev"] > 0
+    assert trace[-1]["nit"] > 0
+    assert trace[-1]["public_status"] == 0
+    assert trace[-1]["public_message"] == (
+        _lbfgsb_py.status_messages[int(trace[-1]["task"][0])]
+        + ": "
+        + _lbfgsb_py.task_messages[int(trace[-1]["task"][1])]
+    )
+
+    np.testing.assert_array_equal(trace[-1]["wa"], workspace["wa"])
+    np.testing.assert_array_equal(trace[-1]["iwa"], workspace["iwa"])
+    np.testing.assert_array_equal(trace[-1]["lsave"], workspace["lsave"])
+    np.testing.assert_array_equal(trace[-1]["isave"], workspace["isave"])
+    np.testing.assert_array_equal(trace[-1]["dsave"], workspace["dsave"])
+
+
+def test_scipy_setulb_replay_fixture_matrix_is_bitwise_repeatable(
+    scipy_replay_case,
+):
+    fun, x0, bounds, m = scipy_replay_case
+    first_trace, _ = _run_scipy_setulb_trace(fun, x0, bounds, m=m)
+    second_trace, _ = _run_scipy_setulb_trace(fun, x0, bounds, m=m)
+
+    assert len(first_trace) == len(second_trace)
+    for first_event, second_event in zip(first_trace, second_trace, strict=True):
+        for field in (
+            "task",
+            "ln_task",
+            "x",
+            "f",
+            "g",
+            "wa",
+            "iwa",
+            "lsave",
+            "isave",
+            "dsave",
+            "nfev",
+            "njev",
+            "nit",
+        ):
+            np.testing.assert_array_equal(first_event[field], second_event[field])
+        if "public_status" in first_event:
+            assert first_event["public_status"] == second_event["public_status"]
+            assert first_event["public_message"] == second_event["public_message"]
+        if "requested_f" in first_event:
+            np.testing.assert_array_equal(
+                first_event["requested_f"],
+                second_event["requested_f"],
+            )
+            np.testing.assert_array_equal(
+                first_event["requested_g"],
+                second_event["requested_g"],
+            )
+
+
+def test_scipy_setulb_replay_helper_mutates_task_for_iteration_limit():
+    trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        np.array([0.9, 0.2, -0.4], dtype=np.float64),
+        None,
+        maxiter=1,
+    )
+
+    assert tuple(trace[-1]["task"]) == (5, 504)
+    assert trace[-1]["nit"] == 1
+    assert trace[-1]["public_status"] == 1
+    assert trace[-1]["public_message"] == (
+        "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT"
+    )
+
+
+def test_scipy_setulb_replay_helper_mutates_task_for_function_limit():
+    trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        np.array([0.9, 0.2, -0.4], dtype=np.float64),
+        None,
+        maxfun=0,
+    )
+
+    assert tuple(trace[-1]["task"]) == (5, 502)
+    assert trace[-1]["nfev"] > 0
+    assert trace[-1]["public_status"] == 1
+    assert trace[-1]["public_message"] == (
+        "STOP: TOTAL NO. OF F,G EVALUATIONS EXCEEDS LIMIT"
+    )
