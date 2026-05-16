@@ -3,7 +3,7 @@
 **Source:** First-pass audit (12 rows) + corrigendum + deeper-pass audit (12 rows) + checklist-validation corrigendum (2026-05-16).
 **Date:** 2026-05-16
 **Branch:** `gpu-purity-stage2-20260405`
-**Total items:** 169 unchecked items across 11 sections (10 priority tiers P0-P8 + P5+ plus a "Pass-4 additions" recovery section) (163 actionable + 6 out-of-scope). Verified by `grep -c "^- \[ \]"`. The Pass-4 additions section recovers ~67 items present in the per-row reports that were consolidated or dropped during the original checklist build; each item is tagged with its natural priority tier in `[Px]` brackets.
+**Total items:** 167 unchecked + 2 pre-checked meta entries = 169 total, across 11 sections (10 priority tiers P0-P8 + P5+ plus a "Pass-4 additions" recovery section). 161 actionable + 6 out-of-scope + 2 meta-resolved. Verified by `grep -c "^- \[ \]"`. The Pass-4 additions section recovers ~67 items present in the per-row reports that were consolidated or dropped during the original checklist build; each item is tagged with its natural priority tier in `[Px]` brackets.
 
 Legend: severity prefix in description; `(LIVE)` means subagent reproduced the issue against the running env; effort estimates in parentheses.
 
@@ -13,7 +13,7 @@ Legend: severity prefix in description; `(LIVE)` means subagent reproduced the i
 
 A two-stage external validation against (a) live source and (b) official JAX/NVIDIA/SIMSOPT docs identified gaps in the first cut of this checklist. Corrections applied:
 
-- **Counts corrected:** header said "89 issues across 7 priority tiers"; actual is 101 unchecked items (95 actionable + 6 out-of-scope) across 10 priority tiers (P0-P8 plus P5+). Summary table at bottom also corrected.
+- **Counts corrected (historical, superseded by Pass-4):** original header said "89 issues across 7 priority tiers"; Pass-3 corrected to 101 unchecked items (95 actionable + 6 out-of-scope) across 10 priority tiers (P0-P8 plus P5+). **Current state (Pass-4): 169 unchecked items / 163 actionable** — see top of file. Summary table at bottom reflects current state.
 - **F1 expanded** from JAX core only to cover CPU `projection_L2_balls` (`permanent_magnet_optimization.py:82`) AND CPU+JAX `prox_l1` (`:63` and `permanent_magnet_optimization_jax.py:320`). Both divide by `m_maxima` without zero-guard. Live-verified: `m_maxima=[1,0,1]` with zero `m` row produces NaN in all three lanes.
 - **DH17 added** (P3 dipole non-cartesian on-axis silent C++↔JAX divergence — was in deeper synthesis but missed in checklist).
 - **DH25 added** (P3 wireframe `np.int32` narrowing at `wireframefield_jax.py:26` — was in deeper synthesis but missed in checklist).
@@ -21,7 +21,7 @@ A two-stage external validation against (a) live source and (b) official JAX/NVI
 - **Reachability finding added** to P0 F1 scope: `cell_vol = 0` for on-axis cylindrical cells at `permanent_magnet_grid.py:382` makes `m_maxima = 0` reachable in production; the zero-`m_maxima` NaN bug is NOT a corner case.
 - **F2 reclassified** from P0 to P7: it is a docstring correction, not a correctness blocker. Production scalar paths are already equivalent per the first synthesis corrigendum.
 - **Deeper-pass synthesis discrepancy noted:** the deeper synthesis text says "19 new HIGH" but its census table totals 26. The 26 figure is authoritative (per-row tally).
-- **F-DH8 narrowed:** the missing C++ dense back-fill matters for budget/exhaustion or abnormal non-stop exits, not every non-terminated trajectory. Most normal accepted JAX steps already clamp to `tmax`.
+- **F-DH8 scope (superseded by Pass-4):** initial Pass-3 narrowing claimed the missing back-fill only matters at budget exhaustion. Pass-4 re-broadened this — source report says normal-exit `loss_ctr` can be structurally biased on JAX even for cleanly-stopped trajectories. **F-DH8 stands at its original broad scope** (every non-terminated trajectory). See R04-A1 in Pass-4 additions for the regression test that exposes this.
 
 Official-doc check confirmed:
 - **F1**: JAX docs confirm `jnp.maximum` propagates NaN; `jnp.fmax` returns finite operand. Live-verified.
@@ -37,12 +37,14 @@ Official-doc check confirmed:
 ### Critical NaN / sentinel / validation bugs
 
 - [ ] **F1 / H7 (EXPANDED post-validation)** — Zero-`m_maxima` NaN propagation, full scope:
-    - (a) JAX `projection_l2_balls` at `src/simsopt/jax_core/pm_optimization.py:2122-2125`: replace `unit = m_maxima / m_maxima` with `jnp.ones_like(m_maxima)` AND replace `jnp.maximum` with `jnp.fmax`.
-    - (b) CPU `projection_L2_balls` at `src/simsopt/solve/permanent_magnet_optimization.py:82`: same hazard (`np.sqrt(...) / mmax` then `np.maximum(1, ...)` propagates NaN). Use `np.fmax` and guard `mmax > 0`.
-    - (c) CPU `prox_l1` at `src/simsopt/solve/permanent_magnet_optimization.py:63`: `np.abs(m) / mmax_vec` divides by zero. Add guard.
-    - (d) JAX `prox_l1_jax` at `src/simsopt/solve/permanent_magnet_optimization_jax.py:320`: identical pattern `jnp.abs(matrix) / m_maxima[:, None]`. Add guard.
-    - (e) **Reachability**: `cell_vol = 0` for on-axis cylindrical cells at `src/simsopt/geo/permanent_magnet_grid.py:382` produces `m_maxima = B_max·cell_vol/μ₀ = 0`. This is NOT a corner case — it's reachable in any cylindrical PM grid with cells at `R = 0`.
+    - (a) JAX `projection_l2_balls` at `src/simsopt/jax_core/pm_optimization.py:2122-2125`: replace `unit = m_maxima / m_maxima` with `jnp.ones_like(m_maxima)` AND replace `jnp.maximum` with `jnp.fmax`. **[Source: row-7 deeper report, audit-flagged HIGH H7]**
+    - (b) CPU `projection_L2_balls` at `src/simsopt/solve/permanent_magnet_optimization.py:82`: same hazard (`np.sqrt(...) / mmax` then `np.maximum(1, ...)` propagates NaN). Use `np.fmax` and guard `mmax > 0`. **[Source: external validation critique + my live Read of the source code (not in committed audit reports); see provenance note below.]**
+    - (c) CPU `prox_l1` at `src/simsopt/solve/permanent_magnet_optimization.py:63`: `np.abs(m) / mmax_vec` divides by zero. Add guard. **[Source: external validation + live source inspection; not in committed reports.]**
+    - (d) JAX `prox_l1_jax` at `src/simsopt/solve/permanent_magnet_optimization_jax.py:320`: identical pattern `jnp.abs(matrix) / m_maxima[:, None]`. Add guard. **[Source: external validation + live source inspection.]**
+    - (e) **Reachability**: `cell_vol = 0` for on-axis cylindrical cells at `src/simsopt/geo/permanent_magnet_grid.py:382` produces `m_maxima = B_max·cell_vol/μ₀ = 0`. **[Source: external validation + live source inspection.]**
     - Add regression tests covering all 4 entrypoints with `m_maxima = [1.0, 0.0, 1.0]` and zero-`m` rows. (3h total)
+
+    **Provenance note for (b)-(e):** items (a) is from the audit reports (row-7 deeper, finding D1/H7). Items (b)-(e) were added during the post-checklist validation pass via direct source-code inspection, not from a per-row audit report. All four are reproducible bugs (live-verified by reading the named files and tracing the data flow), but they did NOT pass through the parallel-subagent audit process. Treat with appropriate confidence: bugs are real, but coverage of the broader bug class is the validation reviewer's call, not the original audit's.
 
 - [ ] **F-DH2** — Replace `1e50` GPMO sentinel with `jnp.inf` at `pm_optimization.py:{609-611, 776-778, 1062-1065, 1597-1600}`. (LIVE-verified: collides with real costs at `‖b‖~1e26`; affects all 5 GPMO variants.) (30min)
 
@@ -207,7 +209,7 @@ For every JAX adapter exposing CPU-mutable attributes, choose ONE:
 
 - [ ] **F-DH13** — Delete duplicated G-from-currents formula at `boozer_residual_jax.py:554-556`; import SSOT `compute_G_from_currents` from `label_constraints_jax.py:49-61`. Three different inline spellings exist; algebraically identical today but no guard against drift. (30min)
 
-- [ ] **F-DH21** — `B·∇ζ = G(s)` Boozer identity test. Critical: tested in NEITHER item 32 nor item 33; both backends could agree on the same bug. Add to `tests/field/test_boozermagneticfield_jax_item33.py`. (2h)
+- [ ] **F-DH21 (HIGH severity, re-tagged per Pass-4)** — `B·∇ζ = G(s)` Boozer identity test. HIGH-severity coverage gap: tested in NEITHER item 32 nor item 33; both backends could agree on the same bug. Add to `tests/field/test_boozermagneticfield_jax_item33.py`. (2h)
 
 - [ ] **F-DH22** — `mn_factor` extrapolation test at `s < s_half_mn[0]`. Clarify docstring (`s^{-m/2}` not `s^{m/2}`). (1h)
 
@@ -275,7 +277,7 @@ For every JAX adapter exposing CPU-mutable attributes, choose ONE:
 
 ## Pass-4 additions — missing items recovered from row reports
 
-The first checklist consolidated heavily. The 4th validation pass identified ~40 items present in the per-row reports but not represented as discrete checkboxes. Adding them here grouped by row, each tagged with its natural priority tier.
+The first checklist consolidated heavily. The 4th validation pass identified ~67 items present in the per-row reports but not represented as discrete checkboxes. Adding them here grouped by row, each tagged with its natural priority tier.
 
 ### Row 02 (integral B·n) — missing
 
@@ -295,11 +297,11 @@ The first checklist consolidated heavily. The 4th validation pass identified ~40
 
 ### Row 04 (tracing) — missing
 
-- [ ] **R04-A1** [P6] — Fixed-seed `loss_ctr` parity test C++ vs JAX (relates to F-DH8; F-DH8 is narrowed but this test would expose the structural bias). (2h)
+- [ ] **R04-A1** [P6] — Fixed-seed `loss_ctr` parity test C++ vs JAX (gates F-DH8 at its broad scope; exposes the structural bias for cleanly-stopped trajectories). (2h)
 - [ ] **R04-A2** [P1] — `accepted_count == max_steps` hard-error/structured warning at orchestrator level (currently silent `logger.debug` only). (1h)
 - [ ] **R04-A3** [P6] — Levelset phi-wraparound CPU↔JAX boundary-parity tests (`[0, 2π)` reduction asymmetry between RHS-path `_continuous_phi` unwrap and classifier Cartesian sampling). (2h)
 - [ ] **R04-A4** [P6] — `_continuous_phi` / `get_phi` exact-edge tests at `phi = ±π` and `phi_init = π` with rounding probes. (1h)
-- [ ] **F-DH8 broadened** [P1] — Note: F-DH8 narrowing of "matters only on budget exhaustion" is too aggressive per source. Normal-exit `loss_ctr` can be structurally biased on JAX even for cleanly-stopped trajectories. Re-broaden F-DH8 scope. (re-scope) (—)
+- [x] **F-DH8 scope reconciled** [meta] — F-DH8 was originally listed with broad scope (P1, line 79); Pass-3 corrigendum narrowed it; Pass-4 re-broadened. **Current state: F-DH8 at line 79 stands at its original broad scope.** Corrigendum at line 24 reflects this. No separate action item — this entry pre-checked as a tracking note.
 
 ### Row 05 (regular-grid interp) — missing
 
@@ -365,7 +367,7 @@ The first checklist consolidated heavily. The 4th validation pass identified ~40
 
 ### Row 12 (Boozer radial) — missing
 
-- [ ] **R12-A1** [P6] — DH21 severity: critique flags as HIGH coverage gap, not CRITICAL. Re-tag in P6 list. (—)
+- [x] **R12-A1 (resolved in this pass)** [meta] — DH21 severity re-tagged from CRITICAL to HIGH at F-DH21 line 212. No further action.
 - [ ] **R12-A2** [P5] — F-DH (Row 12) stale-state scope expansion: add `enforce_qs`, `enforce_vacuum`, `N`, `no_K`, and mode-array mutation to the post-construction-mutability audit. (2h)
 - [ ] **R12-A3** [P6] — `num_modes == 1` edge case, empty arrays, mixed-precision regression, GPU deterministic-lane, JIT-without-host-roundtrip tests. (4h)
 - [ ] **R12-A4** [P7] — Positional-indexing maintenance hardening (current `kmns(im)` / `kmnc(im)` positional access is fragile to mode-table reorder). (1h)
@@ -400,7 +402,7 @@ The audit did NOT cover these areas; future work:
 | Tier | Count | Effort estimate |
 |------|------:|----------------|
 | P0 (correctness, must-ship — F1 now expanded across 4 entrypoints + reachability) | 5 | ~5-6 hours |
-| P1 (tracing) | 9 | ~3 days |
+| P1 (tracing) | 10 | ~3 days |
 | P2 (interp boundary) | 6 | ~2 days |
 | P3 (upstream coordinated, +DH17 +DH25) | 8 | ~2 days |
 | P4 (autodiff NaN cliffs) | 5 | ~1 day |
@@ -409,11 +411,13 @@ The audit did NOT cover these areas; future work:
 | P7 (docs/API, +F2 moved here +validation-contract) | 12 | ~7 hours |
 | P5+ (performance) | 8 | ~3 days |
 | P8 (out-of-scope) | 6 | — |
-| Pass-4 additions (recovered from row reports) | 67 | ~1.5 weeks |
-| **TOTAL ACTIONABLE** | **163** | **~5 weeks** |
-| **TOTAL UNCHECKED (incl P8)** | **169** | — |
+| Pass-4 additions (recovered from row reports) | 65 unchecked + 2 meta-resolved | ~1.5 weeks |
+| **TOTAL ACTIONABLE (unchecked)** | **161** | **~5 weeks** |
+| **TOTAL UNCHECKED (incl P8)** | **167** | — |
+| Pre-checked meta entries (scope-reconciliation tracking) | 2 | — |
+| **GRAND TOTAL (`- \[ \]` + `- \[x\]`)** | **169** | — |
 
-(P0-P8+P5+ per-tier counts verified via `sed -n '/^## TIER/,/^## NEXT/p' | grep -c "^- \[ \]"`. Pass-4 section recovered via `sed -n '/^## Pass-4/,/^## P8/p' | grep -c "^- \[ \]" = 67`. Grand total `grep -c "^- \[ \]"` = 169 ✓.)
+(Per-tier counts verified via `sed -n '/^## TIER/,/^## NEXT/p' | grep -c "^- \[ \]"`. Sum: 5+10+6+8+5+5+37+12+8+65+6 = 167 ✓ matches `grep -c "^- \[ \]"`. Adding 2 `[x]` meta entries = 169 grand total.)
 
 **MUST-SHIP path:** check off all 5 P0 items (~5-6 hours total — F1 now expanded to cover CPU `projection_L2_balls`, CPU+JAX `prox_l1`, plus PM-grid `cell_vol=0` reachability). The rest can be tiered into release planning.
 
