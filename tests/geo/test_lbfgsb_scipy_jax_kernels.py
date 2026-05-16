@@ -194,6 +194,29 @@ def _bmv_reference(sy, wt, col, v):
     return p, 0
 
 
+def _bmv_case(*, singular=False):
+    sy = np.array(
+        [
+            [4.0, 0.0, 0.0],
+            [1.0, 9.0, 0.0],
+            [2.0, 3.0, 16.0],
+        ],
+        dtype=np.float64,
+    )
+    wt = np.array(
+        [
+            [2.0, 0.25, -0.5],
+            [0.0, 3.0, 0.75],
+            [0.0, 0.0, 4.0],
+        ],
+        dtype=np.float64,
+    )
+    if singular:
+        wt[1, 1] = 0.0
+    v = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    return sy, wt, v
+
+
 def _formt_reference(wt, sy, ss, col, theta):
     wt = np.asarray(wt, dtype=np.float64).copy()
     sy = np.asarray(sy, dtype=np.float64)
@@ -674,7 +697,6 @@ def _cauchy_reference(
             dtm = dt
             break
 
-        nseg += 1
         dibp2 = dibp**2
         f1 = f1 + dt * f2 + dibp2 - theta * dibp * zibp
         f2 = f2 - theta * dibp2
@@ -1040,6 +1062,7 @@ def test_lbfgsb_initial_state_uses_fixed_scipy_workspace_shapes_and_dtypes():
     assert np.asarray(state.workspace.iwa).dtype == np.int32
     assert np.asarray(state.factr).dtype == np.float64
     np.testing.assert_array_equal(np.asarray(state.factr), 1e-12 / np.finfo(float).eps)
+    np.testing.assert_array_equal(np.asarray(state.pgtol), 1e-8)
 
 
 def test_lbfgsb_public_status_matches_scipy_wrapper_mapping():
@@ -1257,6 +1280,60 @@ def test_lbfgsb_dcsrch_runs_reverse_communication_on_quadratic():
     np.testing.assert_allclose(np.asarray(final.stp), np.array(2.0))
 
 
+def test_lbfgsb_dcsrch_reports_scipy_error_task_for_invalid_start():
+    result = lbfgsb.lbfgsb_dcsrch(
+        1.0,
+        -1.0,
+        1.0,
+        -1.0,
+        0.1,
+        1e-16,
+        0.0,
+        10.0,
+        lbfgsb.START,
+        lbfgsb.NO_MSG,
+        np.zeros(2, dtype=np.int32),
+        np.zeros(13, dtype=np.float64),
+    )
+
+    assert int(result.task) == lbfgsb.ERROR
+    assert int(result.task_msg) == lbfgsb.ERROR_FTOL
+
+
+def test_lbfgsb_dcsrch_reports_scipy_warning_task_at_step_max():
+    first = lbfgsb.lbfgsb_dcsrch(
+        1.0,
+        -1.0,
+        1.0,
+        1e-4,
+        0.1,
+        1e-16,
+        0.0,
+        1.0,
+        lbfgsb.START,
+        lbfgsb.NO_MSG,
+        np.zeros(2, dtype=np.int32),
+        np.zeros(13, dtype=np.float64),
+    )
+    result = lbfgsb.lbfgsb_dcsrch(
+        0.5,
+        -1.0,
+        first.stp,
+        1e-4,
+        0.1,
+        1e-16,
+        0.0,
+        1.0,
+        first.task,
+        first.task_msg,
+        first.isave,
+        first.dsave,
+    )
+
+    assert int(result.task) == lbfgsb.WARNING
+    assert int(result.task_msg) == lbfgsb.WARN_STPMAX
+
+
 def test_lbfgsb_dcsrch_is_jittable_for_initial_reverse_communication_request():
     dcsrch_jit = jax.jit(lbfgsb.lbfgsb_dcsrch)
     result = dcsrch_jit(
@@ -1354,23 +1431,7 @@ def test_lbfgsb_matupd_is_jittable_for_fixed_workspace_shapes():
 
 
 def test_lbfgsb_bmv_matches_c_reference_for_full_and_partial_col():
-    sy = np.array(
-        [
-            [4.0, 0.0, 0.0],
-            [1.0, 9.0, 0.0],
-            [2.0, 3.0, 16.0],
-        ],
-        dtype=np.float64,
-    )
-    wt = np.array(
-        [
-            [2.0, 0.25, -0.5],
-            [0.0, 3.0, 0.75],
-            [0.0, 0.0, 4.0],
-        ],
-        dtype=np.float64,
-    )
-    v = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    sy, wt, v = _bmv_case()
 
     for col in (1, 2, 3):
         expected_p, expected_info = _bmv_reference(sy, wt, col, v)
@@ -1383,23 +1444,7 @@ def test_lbfgsb_bmv_matches_c_reference_for_full_and_partial_col():
 
 
 def test_lbfgsb_bmv_reports_info_for_singular_triangular_factor():
-    sy = np.array(
-        [
-            [4.0, 0.0, 0.0],
-            [1.0, 9.0, 0.0],
-            [2.0, 3.0, 16.0],
-        ],
-        dtype=np.float64,
-    )
-    wt = np.array(
-        [
-            [2.0, 0.25, -0.5],
-            [0.0, 0.0, 0.75],
-            [0.0, 0.0, 4.0],
-        ],
-        dtype=np.float64,
-    )
-    v = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    sy, wt, v = _bmv_case(singular=True)
 
     expected_p, expected_info = _bmv_reference(sy, wt, 2, v)
     actual = lbfgsb.lbfgsb_bmv(sy, wt, 2, v)
@@ -1411,23 +1456,7 @@ def test_lbfgsb_bmv_reports_info_for_singular_triangular_factor():
 
 def test_lbfgsb_bmv_is_jittable_for_fixed_workspace_shapes():
     bmv_jit = jax.jit(lbfgsb.lbfgsb_bmv)
-    sy = np.array(
-        [
-            [4.0, 0.0, 0.0],
-            [1.0, 9.0, 0.0],
-            [2.0, 3.0, 16.0],
-        ],
-        dtype=np.float64,
-    )
-    wt = np.array(
-        [
-            [2.0, 0.25, -0.5],
-            [0.0, 3.0, 0.75],
-            [0.0, 0.0, 4.0],
-        ],
-        dtype=np.float64,
-    )
-    v = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    sy, wt, v = _bmv_case()
 
     actual = bmv_jit(sy, wt, 2, v)
     expected_p, _ = _bmv_reference(sy, wt, 2, v)

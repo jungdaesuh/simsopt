@@ -28,6 +28,7 @@ Builds on M3's composed derivative path:
 
 import hashlib
 import inspect
+import uuid
 from dataclasses import dataclass, field
 from functools import partial
 
@@ -3036,7 +3037,6 @@ _PRIVATE_OPTIMIZER_OPTIONS = frozenset(
     {
         "force_ondevice_limited_memory",
         "line_search_maxiter",
-        "maxgrad",
     }
 )
 
@@ -3254,6 +3254,10 @@ class BoozerSurfaceJAX(Optimizable):
         self.res = None
         self._solver_generation = 0
         self._traceable_runtime_entry_cache = None
+        # Object-lifetime token used by the traceable runtime cache to
+        # distinguish independently-constructed surfaces even when CPython
+        # recycles their id() after garbage collection.
+        self._cache_token = uuid.uuid4()
 
         # Determine solver type
         self.boozer_type = "ls" if constraint_weight is not None else "exact"
@@ -4690,7 +4694,6 @@ class BoozerSurfaceJAX(Optimizable):
                     maxcor=int(optimizer_options.get("maxcor", 200)),
                     ftol=float(optimizer_options.get("ftol", 0.0)),
                     maxfun=optimizer_options.get("maxfun"),
-                    maxgrad=optimizer_options.get("maxgrad"),
                     maxls=int(optimizer_options.get("maxls", 20)),
                 )
                 x_ls = ls_state.x_k
@@ -4952,7 +4955,6 @@ class BoozerSurfaceJAX(Optimizable):
                 "maxcor",
                 "ftol",
                 "maxfun",
-                "maxgrad",
                 "maxls",
             )
             if k in self.options

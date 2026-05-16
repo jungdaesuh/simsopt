@@ -1866,7 +1866,7 @@ class SingleStageExampleTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.outer_maxls, 4)
-        self.assertEqual(args.target_lane_outer_initial_step_size, 1.0e-4)
+        self.assertIsNone(args.target_lane_outer_initial_step_size)
         self.assertEqual(args.target_lane_boozer_bfgs_tol, 1e-6)
         self.assertEqual(args.target_lane_boozer_bfgs_maxiter, 64)
         self.assertIsNone(args.target_lane_boozer_newton_tol)
@@ -3781,58 +3781,6 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(repair_anchor["coil_dofs"], np.array([3.0]))
         self.assertEqual(repair_stage, "latest")
 
-    def test_resolve_single_stage_retry_initial_step_size_shrinks_failure_step(self):
-        module = self.load_module()
-        policy = module.SingleStageSearchPolicy(
-            donor_class="stage2_seed_only",
-            search_policy="repair_first",
-            adaptive_failure_penalty_weight=1.5,
-            invalid_step_retry_budget=2,
-            retry_step_shrink_factor=0.5,
-        )
-
-        retry_step_size = module.resolve_single_stage_retry_initial_step_size(
-            None,
-            [
-                {
-                    "step_scale": {"value": 0.0, "finite": True},
-                    "requested_initial_step": {"value": 0.2, "finite": True},
-                }
-            ],
-            single_stage_search_policy=policy,
-            retry_index=0,
-        )
-
-        self.assertEqual(retry_step_size, 0.1)
-
-    def test_resolve_single_stage_retry_initial_step_size_prefers_requested_step(
-        self,
-    ):
-        module = self.load_module()
-        policy = module.SingleStageSearchPolicy(
-            donor_class="stage2_seed_only",
-            search_policy="repair_first",
-            adaptive_failure_penalty_weight=1.5,
-            invalid_step_retry_budget=2,
-            retry_step_shrink_factor=0.5,
-        )
-
-        retry_step_size = module.resolve_single_stage_retry_initial_step_size(
-            None,
-            [
-                {
-                    "step_scale": {"value": 0.0, "finite": True},
-                    "requested_initial_step": {"value": 0.5, "finite": True},
-                    "first_tested_alpha": {"value": 0.5, "finite": True},
-                    "best_finite_alpha": {"value": 0.25, "finite": True},
-                }
-            ],
-            single_stage_search_policy=policy,
-            retry_index=0,
-        )
-
-        self.assertEqual(retry_step_size, 0.25)
-
     def test_build_single_stage_scaled_phase_retry_state_anchors_zero_step(self):
         module = self.load_module()
 
@@ -4697,7 +4645,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(args.diagnose_target_lane_gradient)
         self.assertFalse(args.profile_target_lane_only)
 
-    def test_parse_args_accepts_diagnose_target_lane_first_line_search(self):
+    def test_parse_args_parses_unsupported_target_lane_first_line_search(self):
         module = self.load_module()
 
         with patch.dict(os.environ, {}, clear=True), patch.object(
@@ -4713,6 +4661,24 @@ class SingleStageExampleTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertTrue(args.diagnose_target_lane_first_line_search)
+        self.assertFalse(args.profile_target_lane_only)
+
+    def test_parse_args_accepts_diagnose_target_lane_optax(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--diagnose-target-lane-optax",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.diagnose_target_lane_optax)
         self.assertFalse(args.profile_target_lane_only)
 
     def test_parse_args_accepts_diagnose_target_lane_scaled_phase1(self):
@@ -4766,7 +4732,7 @@ class SingleStageExampleTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertTrue(args.diagnostic_callbacks)
-        self.assertTrue(args.record_target_lane_invalid_state_events)
+        self.assertFalse(args.record_target_lane_invalid_state_events)
 
     def test_parse_args_accepts_minimal_artifacts(self):
         module = self.load_module()
@@ -4931,41 +4897,6 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(trace[0]["line_search_status"], 0)
         self.assertTrue(trace[0]["accepted"])
 
-    def test_build_target_lane_invalid_state_failure_callback_records_payload(self):
-        module = self.load_module()
-        events = []
-
-        callback = module.build_target_lane_invalid_state_failure_callback(
-            events,
-            phase="phase2",
-        )
-        callback(
-            3,
-            np.array([0.0, 1.0], dtype=np.float64),
-            np.nan,
-            np.array([1.0, np.nan], dtype=np.float64),
-            np.array([-1.0, 2.0], dtype=np.float64),
-            np.array([-0.5, 1.0], dtype=np.float64),
-            0.5,
-            False,
-            True,
-            False,
-            True,
-            False,
-            0,
-        )
-
-        self.assertEqual(len(events), 1)
-        event = events[0]
-        self.assertEqual(event["phase"], "phase2")
-        self.assertEqual(event["iteration"], 3)
-        self.assertEqual(event["step_scale"]["value"], 0.5)
-        self.assertEqual(event["trial_value"]["classification"], "nan")
-        self.assertFalse(event["trial_grad"]["all_finite"])
-        self.assertEqual(event["trial_grad"]["first_nonfinite_index"], 1)
-        self.assertEqual(event["search_direction"]["values"], [-1.0, 2.0])
-        self.assertEqual(event["step_vector"]["values"], [-0.5, 1.0])
-
     def test_record_target_lane_invalid_state_events_enabled_defaults_false(self):
         module = self.load_module()
 
@@ -4984,49 +4915,16 @@ class SingleStageExampleTests(unittest.TestCase):
             )
         )
 
-    def test_resolve_target_lane_invalid_state_failure_callback_requires_opt_in(self):
-        module = self.load_module()
-        events = []
-
-        callback = module.resolve_target_lane_invalid_state_failure_callback(
-            events,
-            phase="phase2",
-            use_target_lane=True,
-            args=types.SimpleNamespace(record_target_lane_invalid_state_events=False),
-        )
-
-        self.assertIsNone(callback)
-
-    def test_resolve_target_lane_invalid_state_failure_callback_builds_callback_when_enabled(
+    def test_record_target_lane_invalid_state_events_enabled_accepts_explicit_flag(
         self,
     ):
         module = self.load_module()
-        events = []
 
-        callback = module.resolve_target_lane_invalid_state_failure_callback(
-            events,
-            phase="phase2",
-            use_target_lane=True,
-            args=types.SimpleNamespace(record_target_lane_invalid_state_events=True),
+        self.assertTrue(
+            module.record_target_lane_invalid_state_events_enabled(
+                types.SimpleNamespace(record_target_lane_invalid_state_events=True)
+            )
         )
-
-        self.assertIsNotNone(callback)
-        callback(
-            1,
-            np.array([0.0], dtype=np.float64),
-            1.0,
-            np.array([0.5], dtype=np.float64),
-            np.array([-0.25], dtype=np.float64),
-            np.array([-0.25], dtype=np.float64),
-            0.5,
-            False,
-            False,
-            False,
-            True,
-            False,
-            0,
-        )
-        self.assertEqual(len(events), 1)
 
     def test_extend_target_lane_invalid_state_events_from_result_uses_structured_log(
         self,
@@ -5168,16 +5066,15 @@ class SingleStageExampleTests(unittest.TestCase):
             4,
         )
 
-    def test_resolve_target_lane_outer_initial_step_size_uses_benchmark_default(self):
+    def test_resolve_target_lane_outer_initial_step_size_omits_stale_default(self):
         module = self.load_module()
 
-        self.assertEqual(
+        self.assertIsNone(
             module.resolve_target_lane_outer_initial_step_size(
                 "jax",
                 "ondevice",
                 benchmark_mode=True,
-            ),
-            1.0e-4,
+            )
         )
         self.assertIsNone(
             module.resolve_target_lane_outer_initial_step_size(
@@ -5187,19 +5084,19 @@ class SingleStageExampleTests(unittest.TestCase):
             )
         )
 
-    def test_resolve_target_lane_outer_initial_step_size_rejects_nonpositive_override(
+    def test_resolve_target_lane_outer_initial_step_size_rejects_override(
         self,
     ):
         module = self.load_module()
 
         with self.assertRaisesRegex(
             ValueError,
-            "target_lane_outer_initial_step_size must be positive",
+            "target_lane_outer_initial_step_size is not supported",
         ):
             module.resolve_target_lane_outer_initial_step_size(
                 "jax",
                 "ondevice",
-                0.0,
+                1.0e-4,
             )
 
     def test_resolve_single_stage_outer_maxcor_rejects_nonpositive_budget(self):
@@ -6206,6 +6103,23 @@ class SingleStageExampleTests(unittest.TestCase):
         result.status = 99
         self.assertEqual(summary["status"], 2)
 
+    def test_summarize_single_stage_final_optimizer_result_preserves_unknown_counts(
+        self,
+    ):
+        module = self.load_module()
+        result = types.SimpleNamespace(status=1, ls_status=None)
+
+        summary = module.summarize_single_stage_final_optimizer_result(
+            result=result,
+            ran_optimizer=True,
+            iterations=7,
+            optimizer_success=False,
+            termination_message="candidate stopped",
+        )
+
+        self.assertIsNone(summary["nfev"])
+        self.assertIsNone(summary["njev"])
+
     def test_resolve_single_stage_final_banana_current_uses_target_snapshot(self):
         module = self.load_module()
 
@@ -6972,106 +6886,6 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(
             diagnostic_builder_calls,
             [("config-marker", success_filter_marker)],
-        )
-
-    def test_build_target_lane_first_line_search_diagnosis_traces_first_trial(self):
-        module = self.load_module()
-
-        def value_and_grad(x):
-            return 0.5 * jnp.dot(x, x), x
-
-        diagnosis = module.build_target_lane_first_line_search_diagnosis(
-            value_and_grad,
-            np.asarray([1.0], dtype=np.float64),
-            initial_value_and_grad=(
-                jnp.asarray(0.5, dtype=jnp.float64),
-                jnp.asarray([1.0], dtype=jnp.float64),
-            ),
-            initial_step_size=0.125,
-            maxls=4,
-            gtol=1.0e-12,
-        )
-
-        self.assertEqual(diagnosis["initial"]["directional_derivative"]["value"], -1.0)
-        self.assertTrue(diagnosis["optimizer_step"]["would_accept"])
-        self.assertFalse(diagnosis["optimizer_step"]["would_reject"])
-        self.assertEqual(diagnosis["line_search"]["nfev"], 1)
-        self.assertEqual(
-            diagnosis["line_search"]["requested_initial_step"]["value"],
-            0.125,
-        )
-        self.assertEqual(
-            diagnosis["line_search"]["first_tested_alpha"]["value"],
-            0.125,
-        )
-        self.assertEqual(
-            diagnosis["line_search"]["best_finite_alpha"]["value"],
-            0.125,
-        )
-        self.assertEqual(
-            diagnosis["line_search"]["returned_alpha"]["value"],
-            0.125,
-        )
-        self.assertEqual(diagnosis["line_search"]["failure_reason"], "accepted")
-        self.assertLessEqual(
-            diagnosis["line_search"]["armijo_margin"]["value"],
-            0.0,
-        )
-        self.assertLessEqual(
-            diagnosis["line_search"]["curvature_margin"]["value"],
-            0.0,
-        )
-        self.assertEqual(len(diagnosis["line_search"]["trace"]), 1)
-        self.assertEqual(
-            diagnosis["line_search"]["trace"][0]["alpha"]["value"],
-            0.125,
-        )
-        self.assertLessEqual(
-            diagnosis["line_search"]["trace"][0]["armijo_margin"]["value"],
-            0.0,
-        )
-        self.assertLessEqual(
-            diagnosis["line_search"]["trace"][0]["curvature_margin"]["value"],
-            0.0,
-        )
-        self.assertTrue(diagnosis["line_search"]["trace"][0]["armijo_satisfied"])
-        self.assertTrue(diagnosis["line_search"]["trace"][0]["curvature_satisfied"])
-
-    def test_build_target_lane_first_line_search_diagnosis_uses_lbfgs_seed_step(self):
-        module = self.load_module()
-
-        def value_and_grad(x):
-            return 0.5 * jnp.dot(x, x), x
-
-        diagnosis = module.build_target_lane_first_line_search_diagnosis(
-            value_and_grad,
-            np.asarray([100.0], dtype=np.float64),
-            initial_value_and_grad=(
-                jnp.asarray(5000.0, dtype=jnp.float64),
-                jnp.asarray([100.0], dtype=jnp.float64),
-            ),
-            initial_step_size=None,
-            maxls=4,
-            gtol=1.0e-12,
-        )
-
-        expected_old_old_fval = 5050.0
-        expected_alpha = 0.0101
-        self.assertAlmostEqual(
-            diagnosis["initial"]["old_old_fval"]["value"],
-            expected_old_old_fval,
-        )
-        self.assertAlmostEqual(
-            diagnosis["line_search"]["requested_initial_step"]["value"],
-            expected_alpha,
-        )
-        self.assertAlmostEqual(
-            diagnosis["line_search"]["first_tested_alpha"]["value"],
-            expected_alpha,
-        )
-        self.assertAlmostEqual(
-            diagnosis["line_search"]["trace"][0]["alpha"]["value"],
-            diagnosis["line_search"]["first_tested_alpha"]["value"],
         )
 
     def test_build_target_lane_scaled_phase1_diagnosis_threads_runtime_and_optimizer(
@@ -7989,51 +7803,16 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertEqual(result.message, "ok")
 
-    def test_run_single_stage_optimizer_threads_target_lane_failure_callback(self):
+    def test_run_single_stage_optimizer_rejects_target_lane_failure_callback(self):
         module = self.load_module()
-        captured = {}
         explicit_fun = lambda x: (
             jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
             jnp.asarray(2.0 * x, dtype=jnp.float64),
         )
 
-        def fake_require_target_backend_x64(_optimizer_backend):
-            return None
-
-        def fake_jax_minimize(
-            fun,
-            x0,
-            *,
-            method,
-            tol,
-            maxiter,
-            options,
-            value_and_grad,
-            callback,
-            progress_callback=None,
-            failure_callback=None,
-        ):
-            del (
-                fun,
-                x0,
-                method,
-                tol,
-                maxiter,
-                options,
-                value_and_grad,
-                callback,
-                progress_callback,
-            )
-            captured["failure_callback"] = failure_callback
-            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
-
-        with self.patch_optimizer_jax_module(
-            require_target_backend_x64=fake_require_target_backend_x64,
-            jax_minimize=fake_jax_minimize,
-        ):
-            failure_callback = object()
-            contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
-            result = module.run_single_stage_optimizer(
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        with self.assertRaisesRegex(ValueError, "does not support failure_callback"):
+            module.run_single_stage_optimizer(
                 explicit_fun,
                 np.array([0.0, 0.0]),
                 contract=contract,
@@ -8044,62 +7823,19 @@ class SingleStageExampleTests(unittest.TestCase):
                 outer_maxls=6,
                 callback=None,
                 scalar_fun=None,
-                failure_callback=failure_callback,
+                failure_callback=object(),
             )
 
-        self.assertIs(captured["failure_callback"], failure_callback)
-        self.assertEqual(result.message, "ok")
-
-    def test_run_single_stage_optimizer_scipy_jax_omits_private_diagnostics(self):
+    def test_run_single_stage_optimizer_scipy_jax_rejects_private_diagnostics(self):
         module = self.load_module()
-        captured = {}
         explicit_fun = lambda x: (
             jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
             jnp.asarray(2.0 * x, dtype=jnp.float64),
         )
 
-        def fake_require_target_backend_x64(optimizer_backend):
-            captured["x64_backend"] = optimizer_backend
-
-        def fake_jax_minimize(
-            fun,
-            x0,
-            *,
-            method,
-            tol,
-            maxiter,
-            options,
-            value_and_grad,
-            callback,
-            progress_callback=None,
-            failure_callback=None,
-            initial_value_and_grad=None,
-        ):
-            del (
-                fun,
-                x0,
-                tol,
-                maxiter,
-                options,
-                value_and_grad,
-                callback,
-                progress_callback,
-            )
-            captured["method"] = method
-            captured["failure_callback"] = failure_callback
-            captured["initial_value_and_grad"] = initial_value_and_grad
-            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
-
-        with self.patch_optimizer_jax_module(
-            require_target_backend_x64=fake_require_target_backend_x64,
-            jax_minimize=fake_jax_minimize,
-        ):
-            failure_callback = object()
-            optimizer_seed = object()
-            contract = module.resolve_single_stage_optimizer_contract(
-                "jax", "scipy-jax"
-            )
-            result = module.run_single_stage_optimizer(
+        contract = module.resolve_single_stage_optimizer_contract("jax", "scipy-jax")
+        with self.assertRaisesRegex(ValueError, "does not support failure_callback"):
+            module.run_single_stage_optimizer(
                 explicit_fun,
                 np.array([0.0, 0.0]),
                 contract=contract,
@@ -8110,15 +7846,25 @@ class SingleStageExampleTests(unittest.TestCase):
                 outer_maxls=6,
                 callback=None,
                 scalar_fun=None,
-                failure_callback=failure_callback,
-                optimizer_initial_value_and_grad=optimizer_seed,
+                failure_callback=object(),
             )
-
-        self.assertEqual(captured["x64_backend"], "scipy-jax")
-        self.assertEqual(captured["method"], "lbfgs-scipy-jax")
-        self.assertIsNone(captured["failure_callback"])
-        self.assertIsNone(captured["initial_value_and_grad"])
-        self.assertEqual(result.message, "ok")
+        with self.assertRaisesRegex(
+            ValueError,
+            "only supports optimizer_initial_value_and_grad for method='lbfgs-ondevice'",
+        ):
+            module.run_single_stage_optimizer(
+                explicit_fun,
+                np.array([0.0, 0.0]),
+                contract=contract,
+                maxiter=1,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                outer_maxls=6,
+                callback=None,
+                scalar_fun=None,
+                optimizer_initial_value_and_grad=object(),
+            )
 
     def test_run_single_stage_optimizer_fullgraph_uses_full_optimizer_vector(self):
         module = self.load_module()
@@ -8349,50 +8095,19 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIs(captured["initial_value_and_grad"], initial_value_and_grad)
         self.assertEqual(result.message, "ok")
 
-    def test_run_single_stage_optimizer_threads_target_lane_initial_step_size(self):
+    def test_run_single_stage_optimizer_rejects_target_lane_initial_step_size(self):
         module = self.load_module()
-        captured = {}
         explicit_fun = lambda x: (
             jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
             jnp.asarray(2.0 * x, dtype=jnp.float64),
         )
 
-        def fake_require_target_backend_x64(_optimizer_backend):
-            return None
-
-        def fake_jax_minimize(
-            fun,
-            x0,
-            *,
-            method,
-            tol,
-            maxiter,
-            options,
-            value_and_grad,
-            callback,
-            progress_callback=None,
-            failure_callback=None,
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not support target_lane_initial_step_size",
         ):
-            del (
-                fun,
-                x0,
-                method,
-                tol,
-                maxiter,
-                value_and_grad,
-                callback,
-                progress_callback,
-                failure_callback,
-            )
-            captured["options"] = dict(options)
-            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
-
-        with self.patch_optimizer_jax_module(
-            require_target_backend_x64=fake_require_target_backend_x64,
-            jax_minimize=fake_jax_minimize,
-        ):
-            contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
-            result = module.run_single_stage_optimizer(
+            module.run_single_stage_optimizer(
                 explicit_fun,
                 np.array([0.0, 0.0]),
                 contract=contract,
@@ -8405,9 +8120,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 scalar_fun=None,
                 target_lane_initial_step_size=1.0e-4,
             )
-
-        self.assertEqual(captured["options"]["initial_step_size"], 1.0e-4)
-        self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_threads_target_lane_initial_value_and_grad(
         self,
@@ -8612,11 +8324,6 @@ class SingleStageExampleTests(unittest.TestCase):
             del (
                 fun,
                 contract,
-                maxiter,
-                ftol,
-                gtol,
-                maxcor,
-                outer_maxls,
                 scalar_fun,
                 progress_callback,
             )
@@ -8624,6 +8331,11 @@ class SingleStageExampleTests(unittest.TestCase):
                 {
                     "dofs": np.asarray(dofs, dtype=float).copy(),
                     "callback": callback,
+                    "maxiter": maxiter,
+                    "ftol": ftol,
+                    "gtol": gtol,
+                    "maxcor": maxcor,
+                    "outer_maxls": outer_maxls,
                     "initial_step_size": target_lane_initial_step_size,
                 }
             )
@@ -8668,10 +8380,10 @@ class SingleStageExampleTests(unittest.TestCase):
                     result_state_sync=None,
                     contract=contract,
                     maxiter=5,
-                    ftol=0.0,
-                    gtol=1.0e-6,
-                    maxcor=5,
-                    outer_maxls=6,
+                    ftol=2.0e-13,
+                    gtol=3.0e-9,
+                    maxcor=17,
+                    outer_maxls=11,
                     scalar_fun=None,
                     target_lane_initial_step_size=None,
                     failure_callback=None,
@@ -8688,8 +8400,18 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(retry_summary["attempt_count"], 1)
         self.assertEqual(len(optimizer_calls), 2)
         np.testing.assert_allclose(optimizer_calls[1]["dofs"], np.array([1.0, 2.0]))
+        self.assertEqual(optimizer_calls[0]["maxiter"], 5)
+        self.assertEqual(optimizer_calls[1]["maxiter"], 5)
+        self.assertEqual(optimizer_calls[0]["ftol"], 2.0e-13)
+        self.assertEqual(optimizer_calls[1]["ftol"], 2.0e-13)
+        self.assertEqual(optimizer_calls[0]["gtol"], 3.0e-9)
+        self.assertEqual(optimizer_calls[1]["gtol"], 3.0e-9)
+        self.assertEqual(optimizer_calls[0]["maxcor"], 17)
+        self.assertEqual(optimizer_calls[1]["maxcor"], 17)
+        self.assertEqual(optimizer_calls[0]["outer_maxls"], 11)
+        self.assertEqual(optimizer_calls[1]["outer_maxls"], 11)
         self.assertIs(optimizer_calls[1]["callback"], retry_callback)
-        self.assertEqual(optimizer_calls[1]["initial_step_size"], 0.1)
+        self.assertIsNone(optimizer_calls[1]["initial_step_size"])
         self.assertEqual(
             [label for label, _ in progress_events],
             [
@@ -9681,7 +9403,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(retry_summary["attempt_count"], 1)
         self.assertEqual(len(optimizer_calls), 2)
         self.assertIs(optimizer_calls[1]["callback"], retry_callback)
-        self.assertEqual(optimizer_calls[1]["initial_step_size"], 0.1)
+        self.assertIsNone(optimizer_calls[1]["initial_step_size"])
         self.assertIsInstance(
             optimizer_calls[1]["dofs"],
             module.ScaledOuterPhaseOptimizerState,

@@ -15,6 +15,7 @@ import inspect
 import logging
 import sys
 import types
+import uuid
 from contextlib import contextmanager
 from functools import partial
 
@@ -592,8 +593,8 @@ def _assert_exact_ill_conditioned_operator_action_parity(case, exact_lane):
     Project both adjoints onto ``U_well`` (the columns of ``U`` whose
     singular values exceed ``σ_max * 1e-8``) and assert agreement
     *there* at one order looser than the well-conditioned lane —
-    ``adjoint_rtol = 1e-6`` per plan §W3.2 — plus a directional check on
-    a fixed deterministic basis.
+    ``adjoint_rtol = 1e-6`` from the parity-ladder SSOT — plus a
+    directional check on a fixed deterministic basis.
     """
     # The exact-lane residual gate must hold regardless of conditioning.
     assert case["residual_rel"] <= exact_lane["residual_rel_tol"], (
@@ -2401,6 +2402,19 @@ class TestBoozerSurfaceJAXClass:
         assert booz.label_type == "volume"
         assert booz.need_to_run_code is True
 
+    def test_instantiation_assigns_unique_cache_token(self):
+        """Each ``BoozerSurfaceJAX`` instance must get a UUID ``_cache_token``.
+
+        The traceable runtime cache key relies on this token to discriminate
+        independently-constructed adapters even when CPython recycles the
+        ``id()`` of a just-garbage-collected predecessor (W4.2 / E4).
+        """
+        booz_a = _make_mock_boozer_surface()
+        booz_b = _make_mock_boozer_surface()
+        assert isinstance(booz_a._cache_token, uuid.UUID)
+        assert isinstance(booz_b._cache_token, uuid.UUID)
+        assert booz_a._cache_token != booz_b._cache_token
+
     def test_instantiation_accepts_spec_only_biotsavart(self):
         """The grouped-coil spec path must not require a legacy ``_coils`` list."""
 
@@ -3516,7 +3530,6 @@ class TestBoozerSurfaceJAXClass:
                 "maxcor": 12,
                 "ftol": 1e-12,
                 "maxfun": 99,
-                "maxgrad": 101,
                 "maxls": 13,
             },
         )
@@ -3525,7 +3538,6 @@ class TestBoozerSurfaceJAXClass:
         assert booz.options["maxcor"] == 12
         assert booz.options["ftol"] == pytest.approx(1e-12)
         assert booz.options["maxfun"] == 99
-        assert booz.options["maxgrad"] == 101
         assert booz.options["maxls"] == 13
 
     @pytest.mark.parametrize(
@@ -3932,6 +3944,60 @@ class TestBoozerSurfaceJAXClass:
             atol=0.0,
             rtol=0.0,
         )
+
+    def test_ondevice_limited_memory_ls_forwards_lbfgsb_options(self, monkeypatch):
+        """BoozerSurfaceJAX LS must preserve explicit lbfgs-ondevice options."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = True
+        booz.options["maxcor"] = 17
+        booz.options["ftol"] = 2e-13
+        booz.options["maxfun"] = 19
+        booz.options["maxls"] = 11
+        captured = {}
+
+        def fake_target_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad=False,
+            progress_callback=None,
+        ):
+            del fun, progress_callback
+            captured["method"] = method
+            captured["tol"] = tol
+            captured["maxiter"] = maxiter
+            captured["options"] = dict(options)
+            captured["value_and_grad"] = value_and_grad
+            return _successful_minimize_result(x0)
+
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+
+        result = booz.minimize_boozer_penalty_constraints_LBFGS(
+            tol=3e-9,
+            maxiter=13,
+            constraint_weight=1.0,
+            iota=0.3,
+            G=0.05,
+            limited_memory=True,
+            weight_inv_modB=True,
+        )
+
+        assert captured["method"] == "lbfgs-ondevice"
+        assert captured["tol"] == pytest.approx(3e-9)
+        assert captured["maxiter"] == 13
+        assert captured["options"] == {
+            "maxcor": 17,
+            "ftol": 2e-13,
+            "maxfun": 19,
+            "maxls": 11,
+        }
+        assert captured["value_and_grad"] is False
+        assert result["optimizer_method"] == "lbfgs-ondevice"
 
     def test_run_code_ondevice_default_requests_byte_capped_dense_hessian(
         self,
@@ -5380,7 +5446,7 @@ class TestBoozerSurfaceJAXClass:
         adjoint and the dense PLU adjoint agree on the well-conditioned
         subspace ``U_well`` (singular values above ``σ_max * 1e-8``)
         even when raw-vector ``‖λ_op − λ_plu‖`` is dominated by the
-        near-null direction. See plan §W3.2 (C3).
+        near-null direction.
         """
         exact_lane = parity_ladder_tolerances("exact-ill-conditioned-adjoint")
         enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")

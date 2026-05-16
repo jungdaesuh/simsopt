@@ -9,6 +9,45 @@ import scipy
 import scipy.linalg
 from scipy import optimize
 from scipy.optimize import _lbfgsb, _lbfgsb_py, minimize
+import jax
+import jax.numpy as jnp
+
+from simsopt.geo.optimizer_jax_private import _lbfgsb_scipy as lbfgsb
+
+
+_SETULB_FTOL = 1.0e-12
+_SETULB_GTOL = 1.0e-8
+_SETULB_KERNEL_MAX_ULP = 16
+_SETULB_REPLAY_PREFIX_EVENTS = 9
+_SETULB_REPLAY_MAX_ULP = 512
+_SETULB_TRACE_MEMORY_BUDGET_BYTES = 64 * 1024 * 1024
+_SETULB_DEFAULT_LIMIT = 15000
+
+_BOX_BOUNDS = ((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))
+_LOWER_ONLY_BOUNDS = ((0.0, None), (None, None), (-1.0, None))
+_UPPER_ONLY_BOUNDS = ((None, 1.0), (None, 0.5), (None, None))
+_FIXED_VARIABLE_BOUNDS = ((0.25, 0.25), (-1.0, 1.0), (-1.0, 1.0))
+
+_SETULB_BASIC_BOUND_CASES = (
+    pytest.param(None, 5, id="unconstrained"),
+    pytest.param(_BOX_BOUNDS, 5, id="boxed"),
+    pytest.param(_FIXED_VARIABLE_BOUNDS, 5, id="fixed-variable"),
+)
+_SETULB_ALL_BOUND_CASES = (
+    pytest.param(None, 5, id="unconstrained"),
+    pytest.param(_BOX_BOUNDS, 5, id="boxed"),
+    pytest.param(_LOWER_ONLY_BOUNDS, 5, id="lower-only"),
+    pytest.param(_UPPER_ONLY_BOUNDS, 5, id="upper-only"),
+    pytest.param(_FIXED_VARIABLE_BOUNDS, 5, id="fixed-variable"),
+)
+_SETULB_HESS_INV_BOUND_CASES = (
+    pytest.param(None, id="unconstrained"),
+    pytest.param(_BOX_BOUNDS, id="boxed"),
+)
+
+
+def _quadratic_x0():
+    return np.array([0.9, 0.2, -0.4], dtype=np.float64)
 
 
 def _floatround_objective(x):
@@ -101,6 +140,24 @@ def _empty_setulb_workspace(n: int, m: int):
     }
 
 
+def _setulb_trace_event_nbytes(n: int, m: int) -> int:
+    float_items = lbfgsb.lbfgsb_workspace_size(n, m) + 3 * n + 31
+    int_items = lbfgsb.lbfgsb_iwa_size(n) + 52
+    return (
+        float_items * np.dtype(np.float64).itemsize
+        + int_items * np.dtype(np.int32).itemsize
+    )
+
+
+def _assert_setulb_trace_memory_budget(n: int, m: int, event_count: int) -> None:
+    estimated_bytes = _setulb_trace_event_nbytes(n, m) * event_count
+    if estimated_bytes > _SETULB_TRACE_MEMORY_BUDGET_BYTES:
+        raise MemoryError(
+            "SciPy setulb trace budget exceeded: "
+            f"n={n}, m={m}, events={event_count}, bytes={estimated_bytes}"
+        )
+
+
 def _quadratic_value_and_grad(x, *, scale=None, target=None):
     if scale is None:
         scale = np.array([1.0, 10.0, 100.0], dtype=np.float64)
@@ -108,6 +165,31 @@ def _quadratic_value_and_grad(x, *, scale=None, target=None):
         target = np.array([0.25, -0.5, 0.75], dtype=np.float64)
     shifted = np.asarray(x, dtype=np.float64) - target
     return np.float64(0.5 * np.dot(scale * shifted, shifted)), scale * shifted
+
+
+def _jax_quadratic_value_and_grad(x):
+    scale = jnp.asarray([1.0, 10.0, 100.0], dtype=jnp.float64)
+    target = jnp.asarray([0.25, -0.5, 0.75], dtype=jnp.float64)
+    shifted = x - target
+    return jnp.asarray(0.5, dtype=jnp.float64) * jnp.dot(
+        scale * shifted,
+        shifted,
+    ), scale * shifted
+
+
+def _jax_rosenbrock_value_and_grad(x):
+    x0 = x[0]
+    x1 = x[1]
+    residual = x1 - x0 * x0
+    value = 100.0 * residual * residual + (1.0 - x0) * (1.0 - x0)
+    grad = jnp.asarray(
+        (
+            -400.0 * x0 * residual - 2.0 * (1.0 - x0),
+            200.0 * residual,
+        ),
+        dtype=jnp.float64,
+    )
+    return jnp.asarray(value, dtype=jnp.float64), grad
 
 
 def _ill_conditioned_diagonal_value_and_grad(x):
@@ -120,6 +202,41 @@ def _ill_conditioned_diagonal_value_and_grad(x):
 
 def _rosenbrock_value_and_grad(x):
     return np.float64(optimize.rosen(x)), optimize.rosen_der(x).astype(np.float64)
+
+
+@pytest.mark.parametrize(
+    ("scipy_fun", "jax_fun", "x0"),
+    (
+        pytest.param(
+            _quadratic_value_and_grad,
+            _jax_quadratic_value_and_grad,
+            _quadratic_x0(),
+            id="quadratic",
+        ),
+        pytest.param(
+            _rosenbrock_value_and_grad,
+            _jax_rosenbrock_value_and_grad,
+            np.array([-1.2, 1.0], dtype=np.float64),
+            id="rosenbrock",
+        ),
+    ),
+)
+def test_jax_live_objective_matches_scipy_fixed_state(scipy_fun, jax_fun, x0):
+    expected_value, expected_gradient = scipy_fun(x0)
+    actual_value, actual_gradient = jax_fun(jnp.asarray(x0, dtype=jnp.float64))
+
+    np.testing.assert_allclose(
+        np.asarray(actual_value),
+        np.asarray(expected_value),
+        rtol=1e-15,
+        atol=1e-15,
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual_gradient),
+        np.asarray(expected_gradient),
+        rtol=1e-15,
+        atol=1e-15,
+    )
 
 
 def _analytic_trigonometric_value_and_grad(x):
@@ -162,8 +279,8 @@ def _run_scipy_setulb_trace(
     ftol=1e-12,
     gtol=1e-8,
     maxls=20,
-    maxfun=15000,
-    maxiter=15000,
+    maxfun=_SETULB_DEFAULT_LIMIT,
+    maxiter=_SETULB_DEFAULT_LIMIT,
 ):
     x = np.asarray(x0, dtype=np.float64).copy()
     n = len(x)
@@ -198,6 +315,7 @@ def _run_scipy_setulb_trace(
             maxls,
             workspace["ln_task"],
         )
+        _assert_setulb_trace_memory_budget(n, m, len(trace) + 1)
         event = {
             "task": workspace["task"].copy(),
             "ln_task": workspace["ln_task"].copy(),
@@ -540,8 +658,8 @@ def test_scipy_hess_inv_todense_matches_old_dense_implementation():
 def test_scipy_setulb_reverse_communication_trace_records_replay_state():
     trace, workspace = _run_scipy_setulb_trace(
         _quadratic_value_and_grad,
-        np.array([0.9, 0.2, -0.4], dtype=np.float64),
-        [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)],
+        _quadratic_x0(),
+        _BOX_BOUNDS,
     )
 
     task_pairs = [tuple(event["task"]) for event in trace]
@@ -553,6 +671,986 @@ def test_scipy_setulb_reverse_communication_trace_records_replay_state():
     assert workspace["wa"].dtype == np.float64
     assert workspace["iwa"].dtype == np.int32
     assert workspace["isave"][30] > 0
+
+
+def test_scipy_setulb_trace_memory_budget_rejects_expensive_trace_settings():
+    n = 128
+    m = 10
+    event_count = (
+        _SETULB_TRACE_MEMORY_BUDGET_BYTES // _setulb_trace_event_nbytes(n, m) + 1
+    )
+
+    with np.testing.assert_raises_regex(
+        MemoryError,
+        "SciPy setulb trace budget exceeded",
+    ):
+        _assert_setulb_trace_memory_budget(n, m, event_count)
+
+
+def _assert_float_array_matches(actual, expected, max_numeric_ulp):
+    actual = np.asarray(actual)
+    if max_numeric_ulp == 0:
+        np.testing.assert_array_equal(actual, expected)
+    else:
+        np.testing.assert_array_max_ulp(actual, expected, maxulp=max_numeric_ulp)
+
+
+def _assert_jax_setulb_state_matches_scipy_event(
+    actual,
+    expected,
+    *,
+    max_numeric_ulp=0,
+    max_x_ulp=None,
+    max_workspace_ulp=None,
+):
+    if max_x_ulp is None:
+        max_x_ulp = max_numeric_ulp
+    if max_workspace_ulp is None:
+        max_workspace_ulp = max_numeric_ulp
+
+    np.testing.assert_array_equal(np.asarray(actual.workspace.task), expected["task"])
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.ln_task),
+        expected["ln_task"],
+    )
+    _assert_float_array_matches(actual.x, expected["x"], max_x_ulp)
+    _assert_float_array_matches(actual.f, expected["f"], max_numeric_ulp)
+    _assert_float_array_matches(actual.g, expected["g"], max_numeric_ulp)
+    _assert_float_array_matches(actual.workspace.wa, expected["wa"], max_workspace_ulp)
+    np.testing.assert_array_equal(np.asarray(actual.workspace.iwa), expected["iwa"])
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.lsave),
+        expected["lsave"],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.isave),
+        expected["isave"],
+    )
+    _assert_float_array_matches(
+        actual.workspace.dsave, expected["dsave"], max_workspace_ulp
+    )
+
+
+def _assert_jax_setulb_control_matches_scipy_event(actual, expected):
+    np.testing.assert_array_equal(np.asarray(actual.workspace.task), expected["task"])
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.ln_task),
+        expected["ln_task"],
+    )
+    np.testing.assert_array_equal(np.asarray(actual.workspace.iwa), expected["iwa"])
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.lsave),
+        expected["lsave"],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.isave),
+        expected["isave"],
+    )
+
+
+def _assert_jax_mainlb_terminal_matches_scipy_event(actual, expected):
+    np.testing.assert_array_equal(np.asarray(actual.workspace.task), expected["task"])
+    assert int(actual.nfev) == expected["nfev"]
+    assert int(actual.njev) == expected["njev"]
+    assert int(actual.n_iterations) == expected["nit"]
+
+
+def _jax_setulb_initial_state(
+    x0,
+    bounds,
+    m,
+    *,
+    ftol=_SETULB_FTOL,
+    gtol=_SETULB_GTOL,
+    maxls=20,
+):
+    return lbfgsb.lbfgsb_initial_state(
+        x0,
+        m=m,
+        bounds=bounds,
+        ftol=ftol,
+        gtol=gtol,
+        maxls=maxls,
+    )
+
+
+def _jax_setulb_started_state(
+    x0,
+    bounds,
+    m,
+    *,
+    ftol=_SETULB_FTOL,
+    gtol=_SETULB_GTOL,
+):
+    return lbfgsb.lbfgsb_setulb(
+        _jax_setulb_initial_state(x0, bounds, m, ftol=ftol, gtol=gtol)
+    )
+
+
+def _jax_setulb_evaluated_state(state, fun, *, nfev=1, njev=1):
+    value, gradient = fun(np.asarray(state.x))
+    return state._replace(
+        f=jnp.asarray(value, dtype=jnp.float64),
+        g=jnp.asarray(gradient, dtype=jnp.float64),
+        nfev=jnp.asarray(nfev, dtype=jnp.int32),
+        njev=jnp.asarray(njev, dtype=jnp.int32),
+    )
+
+
+def _jax_setulb_replayed_evaluation_state(state, scipy_event, *, nfev, njev):
+    return state._replace(
+        f=jnp.asarray(scipy_event["requested_f"], dtype=jnp.float64),
+        g=jnp.asarray(scipy_event["requested_g"], dtype=jnp.float64),
+        nfev=jnp.asarray(nfev, dtype=jnp.int32),
+        njev=jnp.asarray(njev, dtype=jnp.int32),
+    )
+
+
+def _jax_state_with_scipy_workspace(state, workspace):
+    return state._replace(
+        workspace=lbfgsb.LbfgsbWorkspace(
+            wa=jnp.asarray(workspace["wa"], dtype=jnp.float64),
+            iwa=jnp.asarray(workspace["iwa"], dtype=jnp.int32),
+            task=jnp.asarray(workspace["task"], dtype=jnp.int32),
+            ln_task=jnp.asarray(workspace["ln_task"], dtype=jnp.int32),
+            lsave=jnp.asarray(workspace["lsave"], dtype=jnp.int32),
+            isave=jnp.asarray(workspace["isave"], dtype=jnp.int32),
+            dsave=jnp.asarray(workspace["dsave"], dtype=jnp.float64),
+        )
+    )
+
+
+def _jax_setulb_first_line_search_request(
+    x0,
+    bounds,
+    m,
+    fun=_quadratic_value_and_grad,
+    *,
+    ftol=_SETULB_FTOL,
+    gtol=_SETULB_GTOL,
+):
+    state = _jax_setulb_started_state(x0, bounds, m, ftol=ftol, gtol=gtol)
+    evaluated_state = _jax_setulb_evaluated_state(state, fun)
+    return lbfgsb.lbfgsb_setulb(evaluated_state)
+
+
+def _jax_setulb_new_x_state(
+    x0,
+    bounds,
+    m,
+    fun=_quadratic_value_and_grad,
+    *,
+    ftol=_SETULB_FTOL,
+    gtol=_SETULB_GTOL,
+):
+    state = _jax_setulb_first_line_search_request(
+        x0,
+        bounds,
+        m,
+        fun,
+        ftol=ftol,
+        gtol=gtol,
+    )
+    evaluated_state = _jax_setulb_evaluated_state(state, fun, nfev=2, njev=2)
+    return lbfgsb.lbfgsb_setulb(evaluated_state)
+
+
+def _jax_setulb_second_line_search_request(
+    x0,
+    bounds,
+    m,
+    fun=_quadratic_value_and_grad,
+    *,
+    ftol=_SETULB_FTOL,
+    gtol=_SETULB_GTOL,
+):
+    state = _jax_setulb_new_x_state(
+        x0,
+        bounds,
+        m,
+        fun,
+        ftol=ftol,
+        gtol=gtol,
+    )
+    return lbfgsb.lbfgsb_setulb(state)
+
+
+def _assert_jax_setulb_replays_scipy_prefix(fun, x0, bounds, m):
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        fun,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=5,
+    )
+    state = _jax_setulb_initial_state(x0, bounds, m)
+    nfev = 0
+    njev = 0
+    assert len(scipy_trace) >= _SETULB_REPLAY_PREFIX_EVENTS
+
+    for expected in scipy_trace[:_SETULB_REPLAY_PREFIX_EVENTS]:
+        actual = lbfgsb.lbfgsb_setulb(state)
+        _assert_jax_setulb_state_matches_scipy_event(
+            actual,
+            expected,
+            max_x_ulp=_SETULB_REPLAY_MAX_ULP,
+            max_workspace_ulp=_SETULB_REPLAY_MAX_ULP,
+        )
+
+        if int(actual.workspace.task[0]) == lbfgsb.FG:
+            nfev += 1
+            njev += 1
+            state = _jax_setulb_replayed_evaluation_state(
+                actual,
+                expected,
+                nfev=nfev,
+                njev=njev,
+            )
+            assert int(state.nfev) == expected["nfev"]
+            assert int(state.njev) == expected["njev"]
+            assert int(state.n_iterations) == expected["nit"]
+        else:
+            state = actual
+            assert int(actual.nfev) == expected["nfev"]
+            assert int(actual.njev) == expected["njev"]
+            assert int(actual.n_iterations) == expected["nit"]
+
+
+def _assert_jax_setulb_replays_scipy_control_trace(fun, x0, bounds, m):
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        fun,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+    )
+    state = _jax_setulb_initial_state(x0, bounds, m)
+    nfev = 0
+    njev = 0
+
+    for expected in scipy_trace:
+        actual = lbfgsb.lbfgsb_setulb(state)
+        _assert_jax_setulb_control_matches_scipy_event(actual, expected)
+
+        if int(actual.workspace.task[0]) == lbfgsb.FG:
+            nfev += 1
+            njev += 1
+            state = _jax_setulb_replayed_evaluation_state(
+                actual,
+                expected,
+                nfev=nfev,
+                njev=njev,
+            )
+            assert int(state.nfev) == expected["nfev"]
+            assert int(state.njev) == expected["njev"]
+            assert int(state.n_iterations) == expected["nit"]
+        else:
+            state = actual
+            assert int(actual.nfev) == expected["nfev"]
+            assert int(actual.njev) == expected["njev"]
+            assert int(actual.n_iterations) == expected["nit"]
+
+    np.testing.assert_array_equal(
+        np.asarray(state.workspace.task), scipy_trace[-1]["task"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("x0", "bounds", "m"),
+    [
+        pytest.param(
+            _quadratic_x0(),
+            None,
+            5,
+            id="unconstrained",
+        ),
+        pytest.param(
+            np.array([-0.7, 0.2, -1.5], dtype=np.float64),
+            _LOWER_ONLY_BOUNDS,
+            5,
+            id="project-lower",
+        ),
+        pytest.param(
+            np.array([1.7, 1.4, -0.4], dtype=np.float64),
+            _UPPER_ONLY_BOUNDS,
+            5,
+            id="project-upper",
+        ),
+        pytest.param(
+            _quadratic_x0(),
+            _FIXED_VARIABLE_BOUNDS,
+            7,
+            id="fixed-variable",
+        ),
+    ],
+)
+def test_jax_setulb_initial_start_transition_matches_scipy(x0, bounds, m):
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=1,
+    )
+    expected = scipy_trace[0]
+
+    state = _jax_setulb_initial_state(x0, bounds, m)
+    actual = lbfgsb.lbfgsb_setulb(state)
+
+    _assert_jax_setulb_state_matches_scipy_event(actual, expected)
+    assert int(actual.n_iterations) == 0
+    assert int(actual.nfev) == 0
+    assert int(actual.njev) == 0
+
+
+def test_jax_setulb_initial_start_transition_is_jittable_for_static_workspace():
+    x0 = _quadratic_x0()
+    bounds = _BOX_BOUNDS
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=5,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=1,
+    )
+
+    actual = jax.jit(lbfgsb.lbfgsb_setulb)(_jax_setulb_initial_state(x0, bounds, 5))
+
+    np.testing.assert_array_equal(np.asarray(actual.workspace.task), [3, 301])
+    np.testing.assert_array_equal(np.asarray(actual.x), scipy_trace[0]["x"])
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.isave),
+        scipy_trace[0]["isave"],
+    )
+
+
+def _lower_bound_projected_converged_value_and_grad(x):
+    x = np.asarray(x, dtype=np.float64)
+    shifted = x + np.array([1.0], dtype=np.float64)
+    return np.float64(0.5 * np.dot(shifted, shifted)), shifted
+
+
+@pytest.mark.parametrize(
+    ("fun", "x0", "bounds", "m"),
+    [
+        pytest.param(
+            _quadratic_value_and_grad,
+            np.array([0.25, -0.5, 0.75], dtype=np.float64),
+            None,
+            5,
+            id="unconstrained-zero-gradient",
+        ),
+        pytest.param(
+            _lower_bound_projected_converged_value_and_grad,
+            np.array([-2.0], dtype=np.float64),
+            [(0.0, None)],
+            3,
+            id="lower-bound-projected-gradient",
+        ),
+    ],
+)
+def test_jax_setulb_fg_start_reentry_convergence_matches_scipy(fun, x0, bounds, m):
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        fun,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+    )
+    expected = scipy_trace[1]
+
+    state = _jax_setulb_started_state(x0, bounds, m)
+    evaluated_state = _jax_setulb_evaluated_state(state, fun)
+    actual = lbfgsb.lbfgsb_setulb(evaluated_state)
+
+    _assert_jax_setulb_state_matches_scipy_event(actual, expected)
+    assert int(actual.n_iterations) == 0
+    assert int(actual.nfev) == 1
+    assert int(actual.njev) == 1
+
+
+def test_jax_setulb_fg_start_reentry_convergence_is_jittable():
+    x0 = np.array([0.25, -0.5, 0.75], dtype=np.float64)
+    state = _jax_setulb_started_state(x0, None, 5)
+    evaluated_state = state._replace(
+        f=jnp.asarray(0.0, dtype=jnp.float64),
+        g=jnp.zeros_like(state.x, dtype=jnp.float64),
+        nfev=jnp.asarray(1, dtype=jnp.int32),
+        njev=jnp.asarray(1, dtype=jnp.int32),
+    )
+
+    actual = jax.jit(lbfgsb.lbfgsb_setulb)(evaluated_state)
+
+    np.testing.assert_array_equal(np.asarray(actual.workspace.task), [4, 401])
+    assert int(actual.workspace.isave[33]) == 1
+    assert float(actual.workspace.dsave[12]) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("x0", "bounds", "m"),
+    [
+        pytest.param(
+            _quadratic_x0(),
+            None,
+            5,
+            id="unconstrained",
+        ),
+        pytest.param(
+            _quadratic_x0(),
+            _BOX_BOUNDS,
+            5,
+            id="boxed",
+        ),
+        pytest.param(
+            _quadratic_x0(),
+            _FIXED_VARIABLE_BOUNDS,
+            7,
+            id="fixed-variable",
+        ),
+    ],
+)
+def test_jax_setulb_fg_start_reentry_first_line_search_request_matches_scipy(
+    x0,
+    bounds,
+    m,
+):
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=1,
+    )
+    expected = scipy_trace[1]
+
+    state = _jax_setulb_started_state(x0, bounds, m)
+    evaluated_state = _jax_setulb_evaluated_state(state, _quadratic_value_and_grad)
+    actual = lbfgsb.lbfgsb_setulb(evaluated_state)
+
+    _assert_jax_setulb_state_matches_scipy_event(actual, expected)
+    assert int(actual.n_iterations) == 0
+    assert int(actual.nfev) == 1
+    assert int(actual.njev) == 1
+
+
+def test_jax_setulb_fg_start_reentry_first_line_search_request_is_jittable():
+    x0 = _quadratic_x0()
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        None,
+        m=5,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=1,
+    )
+    state = _jax_setulb_started_state(x0, None, 5)
+    evaluated_state = _jax_setulb_evaluated_state(state, _quadratic_value_and_grad)
+
+    actual = jax.jit(lbfgsb.lbfgsb_setulb)(evaluated_state)
+
+    np.testing.assert_array_equal(np.asarray(actual.workspace.task), [3, 302])
+    np.testing.assert_array_equal(np.asarray(actual.x), scipy_trace[1]["x"])
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.isave),
+        scipy_trace[1]["isave"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("x0", "bounds", "m"),
+    [
+        pytest.param(
+            _quadratic_x0(),
+            None,
+            5,
+            id="unconstrained",
+        ),
+        pytest.param(
+            _quadratic_x0(),
+            _BOX_BOUNDS,
+            5,
+            id="boxed",
+        ),
+        pytest.param(
+            _quadratic_x0(),
+            _FIXED_VARIABLE_BOUNDS,
+            7,
+            id="fixed-variable",
+        ),
+    ],
+)
+def test_jax_setulb_fg_lnsrch_reentry_new_x_matches_scipy(x0, bounds, m):
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=2,
+    )
+    expected = scipy_trace[2]
+    np.testing.assert_array_equal(expected["task"], [1, 0])
+
+    state = _jax_setulb_first_line_search_request(x0, bounds, m)
+    evaluated_state = _jax_setulb_evaluated_state(
+        state,
+        _quadratic_value_and_grad,
+        nfev=2,
+        njev=2,
+    )
+    actual = lbfgsb.lbfgsb_setulb(evaluated_state)
+
+    _assert_jax_setulb_state_matches_scipy_event(actual, expected)
+    assert int(actual.n_iterations) == 1
+    assert int(actual.nfev) == 2
+    assert int(actual.njev) == 2
+
+
+def test_jax_setulb_fg_lnsrch_reentry_new_x_is_jittable():
+    x0 = _quadratic_x0()
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        None,
+        m=5,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=2,
+    )
+    state = _jax_setulb_first_line_search_request(x0, None, 5)
+    evaluated_state = _jax_setulb_evaluated_state(
+        state,
+        _quadratic_value_and_grad,
+        nfev=2,
+        njev=2,
+    )
+
+    actual = jax.jit(lbfgsb.lbfgsb_setulb)(evaluated_state)
+
+    np.testing.assert_array_equal(np.asarray(actual.workspace.task), [1, 0])
+    np.testing.assert_array_equal(np.asarray(actual.x), scipy_trace[2]["x"])
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.isave),
+        scipy_trace[2]["isave"],
+    )
+    assert int(actual.n_iterations) == 1
+
+
+def _one_dimensional_quadratic_value_and_grad(x):
+    x = np.asarray(x, dtype=np.float64)
+    return np.float64(0.5 * np.dot(x, x)), x.copy()
+
+
+def test_jax_setulb_new_x_reentry_projected_gradient_convergence_matches_scipy():
+    x0 = np.array([1.0], dtype=np.float64)
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _one_dimensional_quadratic_value_and_grad,
+        x0,
+        None,
+        m=3,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+    )
+    expected = scipy_trace[3]
+    np.testing.assert_array_equal(expected["task"], [4, 401])
+
+    state = _jax_setulb_new_x_state(
+        x0,
+        None,
+        3,
+        _one_dimensional_quadratic_value_and_grad,
+    )
+    actual = lbfgsb.lbfgsb_setulb(state)
+
+    _assert_jax_setulb_state_matches_scipy_event(actual, expected)
+    assert int(actual.n_iterations) == 1
+    assert int(actual.nfev) == 2
+    assert int(actual.njev) == 2
+
+
+def test_jax_setulb_new_x_reentry_relative_reduction_convergence_matches_scipy():
+    x0 = _quadratic_x0()
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        None,
+        m=5,
+        ftol=1.0,
+        gtol=1.0e-12,
+    )
+    expected = scipy_trace[3]
+    np.testing.assert_array_equal(expected["task"], [4, 402])
+
+    state = _jax_setulb_new_x_state(
+        x0,
+        None,
+        5,
+        ftol=1.0,
+        gtol=1.0e-12,
+    )
+    actual = lbfgsb.lbfgsb_setulb(state)
+
+    _assert_jax_setulb_state_matches_scipy_event(actual, expected)
+    assert int(actual.n_iterations) == 1
+    assert int(actual.nfev) == 2
+    assert int(actual.njev) == 2
+
+
+@pytest.mark.parametrize(("bounds", "m"), _SETULB_ALL_BOUND_CASES)
+def test_jax_setulb_new_x_reentry_next_line_search_matches_scipy(bounds, m):
+    x0 = _quadratic_x0()
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=2,
+    )
+    expected = scipy_trace[3]
+    np.testing.assert_array_equal(expected["task"], [3, 302])
+
+    state = _jax_setulb_new_x_state(x0, bounds, m)
+    actual = lbfgsb.lbfgsb_setulb(state)
+
+    _assert_jax_setulb_state_matches_scipy_event(
+        actual,
+        expected,
+        max_numeric_ulp=_SETULB_KERNEL_MAX_ULP,
+    )
+    assert int(actual.n_iterations) == 1
+    assert int(actual.nfev) == 2
+    assert int(actual.njev) == 2
+
+
+def test_jax_setulb_new_x_reentry_next_line_search_is_jittable():
+    x0 = _quadratic_x0()
+    bounds = _BOX_BOUNDS
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=5,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=2,
+    )
+    state = _jax_setulb_new_x_state(x0, bounds, 5)
+
+    actual = jax.jit(lbfgsb.lbfgsb_setulb)(state)
+
+    np.testing.assert_array_equal(np.asarray(actual.workspace.task), [3, 302])
+    np.testing.assert_array_max_ulp(
+        np.asarray(actual.x),
+        scipy_trace[3]["x"],
+        maxulp=_SETULB_KERNEL_MAX_ULP,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.isave),
+        scipy_trace[3]["isave"],
+    )
+    assert int(actual.n_iterations) == 1
+
+
+@pytest.mark.parametrize(("bounds", "m"), _SETULB_BASIC_BOUND_CASES)
+def test_jax_setulb_second_line_search_accepts_new_x_matches_scipy(bounds, m):
+    x0 = _quadratic_x0()
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=3,
+    )
+    expected = scipy_trace[4]
+    np.testing.assert_array_equal(expected["task"], [1, 0])
+
+    state = _jax_setulb_second_line_search_request(x0, bounds, m)
+    evaluated_state = _jax_setulb_replayed_evaluation_state(
+        state,
+        scipy_trace[3],
+        nfev=3,
+        njev=3,
+    )
+    actual = lbfgsb.lbfgsb_setulb(evaluated_state)
+
+    _assert_jax_setulb_state_matches_scipy_event(
+        actual,
+        expected,
+        max_numeric_ulp=_SETULB_KERNEL_MAX_ULP,
+    )
+    assert int(actual.n_iterations) == 2
+    assert int(actual.nfev) == 3
+    assert int(actual.njev) == 3
+
+
+def test_jax_setulb_second_line_search_accepts_new_x_is_jittable():
+    x0 = _quadratic_x0()
+    bounds = _BOX_BOUNDS
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=5,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=3,
+    )
+    state = _jax_setulb_second_line_search_request(x0, bounds, 5)
+    evaluated_state = _jax_setulb_replayed_evaluation_state(
+        state,
+        scipy_trace[3],
+        nfev=3,
+        njev=3,
+    )
+
+    actual = jax.jit(lbfgsb.lbfgsb_setulb)(evaluated_state)
+
+    np.testing.assert_array_equal(np.asarray(actual.workspace.task), [1, 0])
+    np.testing.assert_array_max_ulp(
+        np.asarray(actual.x),
+        scipy_trace[4]["x"],
+        maxulp=_SETULB_KERNEL_MAX_ULP,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.isave),
+        scipy_trace[4]["isave"],
+    )
+
+
+@pytest.mark.parametrize(("bounds", "m"), _SETULB_ALL_BOUND_CASES)
+def test_jax_setulb_frozen_replay_prefix_matches_scipy(bounds, m):
+    _assert_jax_setulb_replays_scipy_prefix(
+        _quadratic_value_and_grad,
+        _quadratic_x0(),
+        bounds,
+        m,
+    )
+
+
+@pytest.mark.parametrize(("bounds", "m"), _SETULB_ALL_BOUND_CASES)
+def test_jax_setulb_frozen_control_trace_matches_scipy(bounds, m):
+    _assert_jax_setulb_replays_scipy_control_trace(
+        _quadratic_value_and_grad,
+        _quadratic_x0(),
+        bounds,
+        m,
+    )
+
+
+@pytest.mark.parametrize(("bounds", "m"), _SETULB_ALL_BOUND_CASES)
+def test_jax_mainlb_live_quadratic_terminal_control_matches_scipy(bounds, m):
+    x0 = _quadratic_x0()
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+    )
+
+    actual = lbfgsb.lbfgsb_mainlb(
+        _jax_quadratic_value_and_grad,
+        _jax_setulb_initial_state(x0, bounds, m),
+        maxiter=_SETULB_DEFAULT_LIMIT,
+        maxfun=_SETULB_DEFAULT_LIMIT,
+    )
+
+    _assert_jax_mainlb_terminal_matches_scipy_event(actual, scipy_trace[-1])
+
+
+@pytest.mark.parametrize(
+    ("maxiter", "maxfun"),
+    [
+        pytest.param(1, _SETULB_DEFAULT_LIMIT, id="iteration-limit"),
+        pytest.param(_SETULB_DEFAULT_LIMIT, 1, id="function-limit"),
+        pytest.param(1, 1, id="iteration-limit-precedes-function-limit"),
+    ],
+)
+def test_jax_mainlb_deferred_limits_match_scipy(maxiter, maxfun):
+    x0 = _quadratic_x0()
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        None,
+        m=5,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+        maxiter=maxiter,
+        maxfun=maxfun,
+    )
+
+    actual = lbfgsb.lbfgsb_mainlb(
+        _jax_quadratic_value_and_grad,
+        _jax_setulb_initial_state(x0, None, 5),
+        maxiter=maxiter,
+        maxfun=maxfun,
+    )
+
+    _assert_jax_mainlb_terminal_matches_scipy_event(actual, scipy_trace[-1])
+
+
+def test_jax_mainlb_maxls_one_abnormal_matches_scipy():
+    x0 = np.array([-1.2, 1.0], dtype=np.float64)
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _rosenbrock_value_and_grad,
+        x0,
+        None,
+        m=10,
+        maxls=1,
+        maxiter=_SETULB_DEFAULT_LIMIT,
+        maxfun=_SETULB_DEFAULT_LIMIT,
+    )
+
+    actual = lbfgsb.lbfgsb_mainlb(
+        _jax_rosenbrock_value_and_grad,
+        _jax_setulb_initial_state(x0, None, 10, maxls=1),
+        maxiter=_SETULB_DEFAULT_LIMIT,
+        maxfun=_SETULB_DEFAULT_LIMIT,
+    )
+
+    expected = scipy_trace[-1]
+    _assert_jax_setulb_control_matches_scipy_event(actual, expected)
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.task), [lbfgsb.ABNORMAL, 0]
+    )
+    _assert_float_array_matches(actual.x, expected["x"], _SETULB_REPLAY_MAX_ULP)
+    _assert_float_array_matches(actual.f, expected["f"], _SETULB_REPLAY_MAX_ULP)
+    _assert_float_array_matches(actual.g, expected["g"], _SETULB_REPLAY_MAX_ULP)
+    _assert_jax_mainlb_terminal_matches_scipy_event(actual, expected)
+
+
+def test_jax_mainlb_zero_iteration_limit_stops_like_scipy():
+    x0 = _quadratic_x0()
+    actual = jax.jit(
+        lambda state: lbfgsb.lbfgsb_mainlb(
+            _jax_quadratic_value_and_grad,
+            state,
+            maxiter=0,
+            maxfun=_SETULB_DEFAULT_LIMIT,
+        )
+    )(_jax_setulb_initial_state(x0, None, 5))
+
+    np.testing.assert_array_equal(
+        np.asarray(actual.workspace.task),
+        [lbfgsb.STOP, lbfgsb.STOP_ITERC],
+    )
+
+
+def test_jax_mainlb_live_quadratic_is_jittable():
+    x0 = _quadratic_x0()
+    bounds = _BOX_BOUNDS
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=5,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+    )
+
+    def run_mainlb(state):
+        return lbfgsb.lbfgsb_mainlb(
+            _jax_quadratic_value_and_grad,
+            state,
+            maxiter=_SETULB_DEFAULT_LIMIT,
+            maxfun=_SETULB_DEFAULT_LIMIT,
+        )
+
+    actual = jax.jit(run_mainlb)(_jax_setulb_initial_state(x0, bounds, 5))
+
+    _assert_jax_mainlb_terminal_matches_scipy_event(actual, scipy_trace[-1])
+
+
+@pytest.mark.parametrize("bounds", _SETULB_HESS_INV_BOUND_CASES)
+def test_jax_lbfgsb_inverse_hessian_history_matches_scipy_hess_inv(bounds):
+    x0 = _quadratic_x0()
+    m = 5
+    _, workspace = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        bounds,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+    )
+    scipy_result = minimize(
+        _quadratic_value_and_grad,
+        x0,
+        jac=True,
+        bounds=bounds,
+        method="L-BFGS-B",
+        options={
+            "maxcor": m,
+            "ftol": _SETULB_FTOL,
+            "gtol": _SETULB_GTOL,
+            "maxls": 20,
+            "maxiter": _SETULB_DEFAULT_LIMIT,
+            "maxfun": _SETULB_DEFAULT_LIMIT,
+        },
+    )
+    state = _jax_state_with_scipy_workspace(
+        _jax_setulb_initial_state(x0, bounds, m),
+        workspace,
+    )
+
+    history = lbfgsb.lbfgsb_inverse_hessian_history(state)
+    n_corrs = int(history.n_corrs)
+
+    assert n_corrs == scipy_result.hess_inv.n_corrs
+    np.testing.assert_array_equal(
+        np.asarray(history.s)[:n_corrs],
+        scipy_result.hess_inv.sk,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(history.y)[:n_corrs],
+        scipy_result.hess_inv.yk,
+    )
+
+
+def test_jax_lbfgsb_inverse_hessian_history_is_jittable():
+    x0 = _quadratic_x0()
+    m = 5
+    _, workspace = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        None,
+        m=m,
+        ftol=_SETULB_FTOL,
+        gtol=_SETULB_GTOL,
+    )
+    state = _jax_state_with_scipy_workspace(
+        _jax_setulb_initial_state(x0, None, m),
+        workspace,
+    )
+
+    history = jax.jit(lbfgsb.lbfgsb_inverse_hessian_history)(state)
+
+    assert int(history.n_corrs) == min(int(workspace["isave"][30]), m)
+    np.testing.assert_array_equal(
+        np.asarray(history.s),
+        workspace["wa"][: m * x0.size].reshape(m, x0.size),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(history.y),
+        workspace["wa"][m * x0.size : 2 * m * x0.size].reshape(m, x0.size),
+    )
 
 
 def test_scipy_setulb_replay_fixture_matrix_records_internal_state(
@@ -639,7 +1737,7 @@ def test_scipy_setulb_replay_fixture_matrix_is_bitwise_repeatable(
 def test_scipy_setulb_replay_helper_mutates_task_for_iteration_limit():
     trace, _ = _run_scipy_setulb_trace(
         _quadratic_value_and_grad,
-        np.array([0.9, 0.2, -0.4], dtype=np.float64),
+        _quadratic_x0(),
         None,
         maxiter=1,
     )
@@ -655,7 +1753,7 @@ def test_scipy_setulb_replay_helper_mutates_task_for_iteration_limit():
 def test_scipy_setulb_replay_helper_mutates_task_for_function_limit():
     trace, _ = _run_scipy_setulb_trace(
         _quadratic_value_and_grad,
-        np.array([0.9, 0.2, -0.4], dtype=np.float64),
+        _quadratic_x0(),
         None,
         maxfun=0,
     )

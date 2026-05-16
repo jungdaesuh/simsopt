@@ -3710,9 +3710,10 @@ class TestStage2OptimizerContract:
             ),
             np.asarray([1.0, -2.0], dtype=float),
             contract=target_contract,
-            maxiter=12,
-            ftol=1e-15,
-            gtol=1e-11,
+            maxiter=13,
+            ftol=2e-13,
+            gtol=3e-9,
+            maxcor=17,
             scalar_fun=lambda x: jax.numpy.dot(x, x),
         )
 
@@ -3721,9 +3722,9 @@ class TestStage2OptimizerContract:
             np.asarray([1.0, -2.0], dtype=float),
         )
         assert ondevice_captured["method"] == "lbfgs-ondevice"
-        assert ondevice_captured["tol"] == pytest.approx(1e-11)
-        assert ondevice_captured["maxiter"] == 12
-        assert ondevice_captured["options"] == {"maxcor": 300, "ftol": 1e-15}
+        assert ondevice_captured["tol"] == pytest.approx(3e-9)
+        assert ondevice_captured["maxiter"] == 13
+        assert ondevice_captured["options"] == {"maxcor": 17, "ftol": 2e-13}
         assert ondevice_captured["value_and_grad"] is True
         assert ondevice_captured["callback"] is None
         assert ondevice_captured["progress_callback"] is None
@@ -5719,7 +5720,7 @@ class TestStage2OptimizerContract:
             value_and_grad,
             callback,
             progress_callback,
-            failure_callback,
+            failure_callback=None,
         ):
             calls["callback"] = callback
             calls["progress_callback"] = progress_callback
@@ -5728,27 +5729,6 @@ class TestStage2OptimizerContract:
                 callback(x0)
             if progress_callback is not None:
                 progress_callback(3, 1.25, 0.5)
-            if failure_callback is not None:
-                flat_x = np.asarray(
-                    stage2_script.flatten_stage2_target_optimizer_state(x0),
-                    dtype=float,
-                )
-                zeros = np.zeros_like(flat_x)
-                failure_callback(
-                    3,
-                    flat_x,
-                    1.25,
-                    zeros,
-                    zeros,
-                    zeros,
-                    0.25,
-                    False,
-                    False,
-                    False,
-                    True,
-                    False,
-                    0,
-                )
             return types.SimpleNamespace(
                 x=x0,
                 nit=3,
@@ -5771,7 +5751,6 @@ class TestStage2OptimizerContract:
 
         callback_events = []
         progress_events = []
-        failure_events = []
 
         def callback(current_x):
             callback_events.append(
@@ -5783,9 +5762,6 @@ class TestStage2OptimizerContract:
 
         def progress_callback(iteration, fun_value, grad_norm):
             progress_events.append((iteration, fun_value, grad_norm))
-
-        def failure_callback(*args):
-            failure_events.append(args)
 
         stage2_script.run_stage2_optimizer(
             value_and_grad_fun=lambda x: (
@@ -5810,15 +5786,14 @@ class TestStage2OptimizerContract:
             gtol=1e-12,
             callback=callback,
             progress_callback=progress_callback,
-            failure_callback=failure_callback,
+            failure_callback=None,
         )
 
         assert calls["callback"] is callback
         assert calls["progress_callback"] is progress_callback
-        assert calls["failure_callback"] is failure_callback
+        assert calls["failure_callback"] is None
         np.testing.assert_allclose(callback_events[0], dofs)
         assert progress_events == [(3, 1.25, 0.5)]
-        assert len(failure_events) == 1
 
     def test_stage2_run_optimizer_threads_callbacks_to_reference_lane(
         self,

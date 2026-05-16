@@ -12,6 +12,38 @@ Least-squares methods:
   - ``method="lm-ondevice"``: trace-safe Levenberg-Marquardt for
     residual-vector objectives on the target lane.
 
+LM family note:
+  Neither ``"lm"`` nor ``"lm-ondevice"`` is a port of MINPACK ``lmder``
+  (the algorithm behind ``scipy.optimize.least_squares(method="lm")``).
+  Both methods route through ``levenberg_marquardt`` /
+  ``levenberg_marquardt_traceable`` (host-driven and trace-safe variants
+  of the same JAX LM loop). They are **algorithmically distinct** from
+  MINPACK along three load-bearing axes:
+
+  - **Inner solve.** MINPACK uses a pivoted-QR factorization of the
+    Jacobian; the JAX LM uses matrix-free GMRES against the Hessian
+    operator (no QR pivoting, no dense Jacobian factorization in the
+    inner step). See ``_lm_iteration`` and
+    ``_gmres_solve_least_squares_system``.
+  - **Termination.** MINPACK terminates on the conjunction of three
+    criteria (``ftol``, ``xtol``, ``gtol``); the JAX LM terminates on a
+    single criterion ``‖∇‖_∞ ≤ tol`` (see ``levenberg_marquardt`` and
+    ``levenberg_marquardt_traceable``).
+  - **Damping update.** MINPACK uses Marquardt's classic
+    expand/contract scaling; the JAX LM applies a symmetric trust-region
+    update with mild-shrink on intermediate ratios (see
+    ``_lm_iteration`` and ``_lm_defaults``).
+
+  Consequence: the JAX LM lanes are **tolerance-equivalent** to MINPACK
+  ``lmder`` on well-conditioned fixtures but **not byte-equivalent**;
+  ``"lm"`` (reference, host-driven) and ``"lm-ondevice"`` (target,
+  trace-safe) are each other's byte-equality oracle, not MINPACK.
+  Callers needing MINPACK byte-equality must invoke
+  ``scipy.optimize.least_squares(method="lm")`` directly. Use
+  ``optimizer_backend="ondevice"`` + ``least_squares_algorithm="lm"``
+  (doubly opt-in) on ``BoozerSurfaceJAX`` to engage the on-device LM
+  lane explicitly.
+
 Target private methods (minimum supported JAX floor 0.9.2):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
   - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
@@ -142,6 +174,8 @@ _TARGET_PUBLIC_METHODS = frozenset({"adam-ondevice"})
 _TARGET_METHODS = (
     _TARGET_PRIVATE_METHODS | _TARGET_PUBLIC_METHODS | _TARGET_SCIPY_CONTROL_METHODS
 )
+_TARGET_LBFGSB_METHODS = frozenset({"lbfgs-ondevice"}) | _TARGET_SCIPY_CONTROL_METHODS
+_UNSUPPORTED_TARGET_LBFGSB_OPTIONS = frozenset({"initial_step_size", "maxgrad"})
 _STRICT_REFERENCE_OPTIMIZER_DETAIL = "the host-side SciPy reference optimizer lane"
 _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL = "the host-side JAX reference optimizer lane"
 _STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
@@ -198,12 +232,12 @@ class _OptimizerPytreeAdapter:
     def wrap_fun(self, fun, *, value_and_grad: bool):
         if not value_and_grad:
 
-            def wrapped(flat_x):
+            def wrapped_fun(flat_x):
                 return fun(self.unravel(_optimizer_flat_vector(flat_x)))
 
-            return wrapped
+            return wrapped_fun
 
-        def wrapped(flat_x):
+        def wrapped_value_and_grad(flat_x):
             flat_x = _optimizer_flat_vector(flat_x)
             value, grad_tree = fun(self.unravel(flat_x))
             _, grad_tree_def = jax.tree_util.tree_flatten(grad_tree)
@@ -221,7 +255,7 @@ class _OptimizerPytreeAdapter:
                 )
             return _optimizer_scalar(value, dtype=flat_x.dtype), flat_grad
 
-        return wrapped
+        return wrapped_value_and_grad
 
     def wrap_callback(self, callback):
         if callback is None:
@@ -3384,10 +3418,12 @@ def target_minimize(
     initial_value_and_grad=None,
 ):
     """Explicit JAX target scalar optimizer entrypoint."""
-    if failure_callback is not None and method != "lbfgs-ondevice":
+    options = dict(options or {})
+    if failure_callback is not None:
         raise ValueError(
-            "target_minimize() only supports failure_callback for "
-            "method='lbfgs-ondevice'."
+            "target_minimize() does not support failure_callback. "
+            "Use reference_minimize(method='lbfgs-trace') for host-side "
+            "L-BFGS rejection diagnostics."
         )
     if initial_value_and_grad is not None and (
         method != "lbfgs-ondevice" or not value_and_grad
@@ -3396,6 +3432,13 @@ def target_minimize(
             "target_minimize() only supports initial_value_and_grad for "
             "explicit value-and-gradient objectives with method='lbfgs-ondevice'."
         )
+    if method in _TARGET_LBFGSB_METHODS:
+        unsupported_options = _UNSUPPORTED_TARGET_LBFGSB_OPTIONS.intersection(options)
+        if unsupported_options:
+            raise ValueError(
+                "target L-BFGS-B methods follow SciPy L-BFGS-B options and do "
+                f"not support {sorted(unsupported_options)}."
+            )
     if method in _TARGET_SCIPY_CONTROL_METHODS:
         if not value_and_grad:
             raise RuntimeError(
@@ -3408,7 +3451,6 @@ def target_minimize(
             value_and_grad=True,
             callback=callback,
         )
-        options = dict(options or {})
         if callback is not None:
             options["callback"] = callback
         if progress_callback is not None:
@@ -3454,13 +3496,10 @@ def target_minimize(
     def finalize(result):
         return _finalize_optimizer_result(result, pytree_adapter)
 
-    options = dict(options or {})
     if callback is not None:
         options["callback"] = callback
     if progress_callback is not None:
         options["progress_callback"] = progress_callback
-    if failure_callback is not None:
-        options["failure_callback"] = failure_callback
 
     require_target_backend_x64("ondevice")
 
@@ -3481,16 +3520,19 @@ def target_minimize(
             x0,
             maxiter=maxiter,
             gtol=tol,
-            maxcor=int(options.get("maxcor", 200)),
+            maxcor=int(options.get("maxcor", 10)),
             ftol=lbfgs_ftol,
             maxfun=options.get("maxfun"),
-            maxgrad=options.get("maxgrad"),
             maxls=int(options.get("maxls", 20)),
-            initial_step_size=options.get("initial_step_size"),
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
-            failure_callback=options.get("failure_callback"),
             initial_value_and_grad=initial_value_and_grad,
+            record_optimizer_state_trace=bool(
+                options.get("record_optimizer_state_trace", False)
+            ),
+            max_optimizer_state_trace_bytes=options.get(
+                "max_optimizer_state_trace_bytes"
+            ),
         )
         return finalize(_private_lbfgs_result_to_optimize_result(state))
 
@@ -3512,15 +3554,18 @@ def target_minimize(
             x0,
             maxiter=maxiter,
             gtol=tol,
-            maxcor=int(options.get("maxcor", 200)),
+            maxcor=int(options.get("maxcor", 10)),
             ftol=lbfgs_ftol,
             maxfun=options.get("maxfun"),
-            maxgrad=options.get("maxgrad"),
             maxls=int(options.get("maxls", 20)),
-            initial_step_size=options.get("initial_step_size"),
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
-            failure_callback=options.get("failure_callback"),
+            record_optimizer_state_trace=bool(
+                options.get("record_optimizer_state_trace", False)
+            ),
+            max_optimizer_state_trace_bytes=options.get(
+                "max_optimizer_state_trace_bytes"
+            ),
         )
         return finalize(_private_lbfgs_result_to_optimize_result(state))
     raise ValueError(f"Unknown target optimizer method {method!r}.")

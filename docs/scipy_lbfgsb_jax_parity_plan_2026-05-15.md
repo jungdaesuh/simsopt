@@ -39,10 +39,14 @@ Bitwise parity means:
 - Official JAX control-flow docs require `lax.while_loop` loop-carried values to
   keep a fixed shape and dtype across iterations. Official JAX array-update docs
   require functional `.at[...]` updates instead of in-place mutation.
+- Previous target lane:
+  `src/simsopt/geo/optimizer_jax_private/_lbfgs.py` cached a JAX value/grad
+  kernel, then called `minimize_lbfgs_host_core(...)`.
 - Current target lane:
   `src/simsopt/geo/optimizer_jax_private/_lbfgs.py` caches a JAX value/grad
-  kernel, then calls `minimize_lbfgs_host_core(...)`.
-- Current host core:
+  kernel, initializes the SciPy-compatible L-BFGS-B state, and runs the JAX
+  `setulb/mainlb` port from `_lbfgsb_scipy.py`.
+- Previous host core:
   `src/simsopt/geo/optimizer_host_lbfgs.py` is a custom unconstrained L-BFGS
   implementation with a strong-Wolfe line search and repo-specific retry/status
   behavior.
@@ -216,13 +220,13 @@ of the current `minimize_lbfgs_host_core(...)`.
       `2*m*n + 5*n + 11*m*m + 8*m` for `wa` and `3*n` for `iwa`.
 - [x] Keep SciPy's integer task/message encoding rather than inventing a new
       status enum.
-- [ ] Use fixed-size JAX arrays and static `n`, `m`, `maxls`, and max iteration
+- [x] Use fixed-size JAX arrays and static `n`, `m`, `maxls`, and max iteration
       limits suitable for `lax.while_loop`.
 - [x] Use functional JAX array updates (`array.at[index].set(...)`) with static
       slice sizes; dynamic values may choose indices but not slice extents.
 - [x] Require JAX x64 for bitwise control tests. A test configuration without
       x64 is a failed parity setup, not a looser acceptance tier.
-- [ ] Add a memory budget check for planned `n`, `m`, and trace settings before
+- [x] Add a memory budget check for planned `n`, `m`, and trace settings before
       enabling expensive parity runs; production execution must not allocate
       full optimizer traces unless explicitly requested for diagnostics.
 - [x] Use `float64` for optimizer-control parity tests; treat `float32` as a
@@ -254,74 +258,120 @@ of the current `minimize_lbfgs_host_core(...)`.
 
 ### Phase 4: Port `setulb/mainlb`
 
-- [ ] Implement a JAX `setulb` equivalent that accepts and returns the same
-      logical state as SciPy's `setulb`.
-- [ ] Implement `mainlb` as a `lax.while_loop`-driven state machine.
-- [ ] Preserve SciPy task transitions:
+- [x] Port the initial `setulb` reverse-communication entry:
+      `START` / `[0, 0]` to `FG` / `FG_START` / `[3, 301]`, including
+      SciPy work-array partition offsets, initial `active(...)` projection,
+      saved `mainlb` locals, and fixed-shape JIT coverage.
+- [x] Port the `FG_START` re-entry convergence return for
+      `NORM OF PROJECTED GRADIENT <= PGTOL`, including projected-gradient
+      bound semantics, saved `nfgv`/`sbgnrm`, and fixed-shape JIT coverage.
+- [x] Port the initial non-converged `FG_START` re-entry through
+      `cauchy`, `freev`, and `lnsrlb` to the first `FG_LNSRCH` request,
+      including SciPy's saved `nseg` behavior, fixed-variable bound replay
+      coverage, and fixed-shape JIT coverage.
+- [x] Port the first `FG_LNSRCH` re-entry that accepts the line-search point
+      and returns `NEW_X`, including saved line-search locals, projected
+      gradient refresh, iteration/nfgv counters, bound edge cases, and
+      fixed-shape JIT coverage.
+- [x] Port the first `NEW_X` re-entry slice for projected-gradient
+      convergence, relative-reduction convergence, and the nonterminal
+      next-iteration path through `matupd`, `formt`, constrained and
+      unconstrained `cauchy`/`freev`/`formk`/`cmprlb`/`subsm`, and the second
+      `FG_LNSRCH` request. Integer and task state is exact;
+      Cholesky/triangular-solve numeric work arrays use the documented kernel
+      ULP budget.
+- [x] Port the following `FG_LNSRCH` re-entry that accepts the second
+      line-search point and returns the second raw `NEW_X`, using frozen SciPy
+      reverse-communication `f,g` replay values to isolate optimizer-control
+      state from live objective-kernel drift.
+- [x] Add frozen SciPy `f,g` prefix replay coverage through nine
+      reverse-communication events for unbounded, boxed, lower-only,
+      upper-only, and fixed-variable bounds. Task, integer workspace, and
+      counters are exact; trajectory and accumulated numeric workspace arrays
+      use the documented 512-ULP multi-step replay budget while frozen replay
+      `f,g` values remain exact.
+- [x] Add full frozen SciPy `f,g` replay coverage for exact task,
+      integer-workspace, logical-flag, and counter state through termination on
+      unbounded, boxed, lower-only, upper-only, and fixed-variable quadratic
+      traces. Numeric trajectory/workspace equality remains covered by the
+      bounded prefix replay until operation-order parity is pinned further.
+- [x] Implement a JAX `setulb` equivalent that accepts and returns the same
+      logical state as SciPy's `setulb`; full frozen replay verifies task,
+      integer workspace, logical flags, and counters.
+- [x] Implement `mainlb` as a `lax.while_loop`-driven state machine.
+- [x] Preserve SciPy task transitions:
       `START`, `FG`, `NEW_X`, `CONVERGENCE`, `STOP`, `WARNING`, `ERROR`,
       `ABNORMAL`.
-- [ ] Preserve SciPy function/gradient request behavior internally: when the
+- [x] Preserve SciPy function/gradient request behavior internally: when the
       loop state enters `FG`, the compiled JAX body evaluates the cached
       value/grad function and continues the state machine without a Python
       re-entry loop.
-- [ ] Preserve SciPy `factr = ftol / eps` behavior and projected-gradient
+- [x] Preserve SciPy `factr = ftol / eps` behavior and projected-gradient
       `pgtol = gtol` behavior.
-- [ ] Preserve SciPy counter semantics, including deferred maxfun handling until
+- [x] Preserve SciPy counter semantics, including deferred maxfun handling until
       a minimization iteration completes.
-- [ ] Preserve SciPy final `hess_inv` history extraction semantics from `wa`
+- [x] Preserve SciPy final `hess_inv` history extraction semantics from `wa`
       (`ws`, `wy`, and `isave[30]`).
 
 ### Phase 5: Wire Into `lbfgs-ondevice`
 
-- [ ] Replace the current target-lane call from `_lbfgs.py` to
+- [x] Replace the current target-lane call from `_lbfgs.py` to
       `minimize_lbfgs_host_core(...)` with the SciPy-compatible JAX state
       machine.
-- [ ] Keep the cached JAX value/grad kernel seam in `_lbfgs.py`.
-- [ ] Keep `initial_value_and_grad` support only if it maps exactly to SciPy's
+- [x] Keep the cached JAX value/grad kernel seam in `_lbfgs.py`.
+- [x] Keep `initial_value_and_grad` support only if it maps exactly to SciPy's
       first `FG` request. Otherwise remove or rework it before claiming parity.
-- [ ] Map public `maxcor`, `ftol`, `gtol`, `maxfun`, `maxiter`, and `maxls` to
+- [x] Map public `maxcor`, `ftol`, `gtol`, `maxfun`, `maxiter`, and `maxls` to
       SciPy names. Audit current `lbfgs-ondevice` defaults before changing any
       default values; a default change is a downstream regression gate, not an
       incidental port detail.
-- [ ] Return `OptimizeResult` fields with SciPy-compatible `success`, `status`,
+- [x] Return `OptimizeResult` fields with SciPy-compatible `success`, `status`,
       `message`, `nit`, `nfev`, `njev`, `jac`, `fun`, `x`, and `hess_inv`
       behavior.
-- [ ] Re-evaluate `failure_callback`, `progress_callback`, and
+- [x] Re-evaluate `failure_callback`, `progress_callback`, and
       `optimizer_state_trace`: keep them as observability outputs only if they
       do not perturb SciPy control flow.
-- [ ] Keep `optimizer_state_trace` diagnostic-only and bounded. Do not make
+- [x] Remove stale target L-BFGS-B forwarding for non-SciPy controls:
+      `initial_step_size`, `maxgrad`, and target-lane `failure_callback` now
+      fail closed instead of being accepted and ignored across `lbfgs-ondevice`,
+      `lbfgs-scipy-jax`, and `lbfgs-scipy-jax-fullgraph`.
+- [x] Keep `optimizer_state_trace` diagnostic-only and bounded. Do not make
       full-trajectory materialization part of the default production result.
 
 ### Phase 6: Test Matrix
 
-- [ ] Run the adapted SciPy 1.17.1 L-BFGS-B tests first:
+- [x] Run the adapted SciPy 1.17.1 L-BFGS-B tests first:
       boxed-iterate float-rounding,
       float32-gradient regression,
       and inverse-Hessian matvec/dense equivalence.
-- [ ] Unit-test every ported kernel against checked references and full
+- [x] Unit-test every ported kernel against checked references and full
       `_lbfgsb.setulb(...)` trace snapshots.
-- [ ] Run full optimizer-control replay tests with frozen `f,g` sequences and
+- [x] Run full optimizer-control replay tests with frozen `f,g` sequences and
       assert exact integer/control state equality. Numeric arrays get exact
       equality only when operation order is intentionally pinned.
-- [ ] Run live objective tests on CPU JAX kernels and compare against SciPy with
+- [x] Add bounded frozen prefix replay tests before claiming full replay:
+      unbounded, boxed, lower-only, upper-only, and fixed-variable cases cover
+      the first nine reverse-communication events with exact task/counter and
+      integer-workspace equality.
+- [x] Run live objective tests on CPU JAX kernels and compare against SciPy with
       strict tolerances after verifying the replay path is bitwise.
 - [ ] Run GPU tests only after CPU control parity passes; GPU proof validates
       XLA/runtime behavior, not the SciPy source translation itself.
-- [ ] Add parity tests for bounds even if production banana paths mostly use
+- [x] Add parity tests for bounds even if production banana paths mostly use
       unconstrained or transformed coordinates.
-- [ ] Add regression tests proving `lbfgs-trace` is not used as the SciPy oracle.
-- [ ] Add tests that prove target lane does not silently call SciPy.
-- [ ] Add call-site regression tests for Stage 2 and single-stage wrappers so
+- [x] Add regression tests proving `lbfgs-trace` is not used as the SciPy oracle.
+- [x] Add tests that prove target lane does not silently call SciPy.
+- [x] Add call-site regression tests for Stage 2 and single-stage wrappers so
       existing explicit optimizer options keep flowing to `lbfgs-ondevice`.
 
 ### Phase 7: Scientific/Computation Acceptance
 
-- [ ] Fixed-state scalar objectives: SciPy CPU equals JAX CPU for value and
+- [x] Fixed-state scalar objectives: SciPy CPU equals JAX CPU for value and
       gradient before optimizer comparison.
-- [ ] Optimizer-control replay: JAX port equals SciPy bitwise for
+- [x] Optimizer-control replay: JAX port equals SciPy bitwise for
       integer/control state, with numeric-array equality governed by the pinned
       operation-order rule above.
-- [ ] JAX CPU live optimizer: same termination class and trajectory within the
+- [x] JAX CPU live optimizer: same termination class and trajectory within the
       kernel-arithmetic tolerance budget.
 - [ ] JAX GPU live optimizer: same termination class and trajectory within the
       GPU arithmetic tolerance budget.
@@ -341,26 +391,117 @@ of the current `minimize_lbfgs_host_core(...)`.
 
 ## Review Gates
 
-- [ ] No broad rewrite outside the optimizer target surface.
-- [ ] No SciPy runtime fallback in `lbfgs-ondevice`.
-- [ ] No tolerance loosening to hide optimizer-control drift.
-- [ ] No dynamic imports.
-- [ ] No defensive try/except wrapper around optimizer failure.
-- [ ] No change to upstream CPU/reference behavior unless a test proves the
+- [x] No broad rewrite outside the optimizer target surface.
+- [x] No SciPy runtime fallback in `lbfgs-ondevice`.
+- [x] No tolerance loosening to hide optimizer-control drift.
+- [x] No dynamic imports.
+- [x] No defensive try/except wrapper around optimizer failure.
+- [x] No change to upstream CPU/reference behavior unless a test proves the
       current reference adapter is already inconsistent with SciPy.
-- [ ] Every status/message mapping is traceable to SciPy 1.17.1 source.
-- [ ] No unbounded per-iteration Python tuple growth in production optimizer
+- [x] Every status/message mapping is traceable to SciPy 1.17.1 source.
+- [x] No unbounded per-iteration Python tuple growth in production optimizer
       state.
-- [ ] No shared mutable workspace across concurrent optimizer calls.
+- [x] No shared mutable workspace across concurrent optimizer calls.
 
 ## Required Decisions Before Implementation
 
-- [ ] Full bound semantics are required for SciPy L-BFGS-B parity. The
+- [x] Full bound semantics are required for SciPy L-BFGS-B parity. The
       implementation may land behind small fixtures first, but final acceptance
       must cover lower-only, upper-only, boxed, fixed, and unbounded variables.
-- [ ] Whether to keep the current custom host core as `lbfgs-trace` diagnostic
+- [x] Whether to keep the current custom host core as `lbfgs-trace` diagnostic
       only, delete it after parity lands, or rename it to make the non-SciPy
       semantics explicit.
-- [ ] Whether GPU acceptance should require exact trajectory equality on simple
+- [x] Whether GPU acceptance should require exact trajectory equality on simple
       quadratic kernels or only control-state equality under replay plus strict
-      live-kernel tolerances.
+      live-kernel tolerances. Decision: require exact integer/control-state
+      replay equality, then strict live-kernel trajectory tolerances on GPU.
+      Do not require bitwise live trajectory equality across XLA/CUDA kernels.
+
+## Completion Audit Snapshot: 2026-05-16
+
+### Delivered Evidence
+
+- [x] SciPy oracle and upstream source pinning:
+      `tests/geo/test_lbfgsb_scipy_parity.py` records direct `_lbfgsb.setulb`
+      replay traces and SciPy wrapper-derived public status/message behavior.
+- [x] JAX state-machine implementation:
+      `src/simsopt/geo/optimizer_jax_private/_lbfgsb_scipy.py` contains the
+      fixed-shape `setulb/mainlb` translation, SciPy task/message tables,
+      bounds encoding, compact-memory kernels, More-Thuente line search, and
+      inverse-Hessian history extraction.
+- [x] Public `lbfgs-ondevice` route:
+      `src/simsopt/geo/optimizer_jax_private/_lbfgs.py` now calls the
+      SciPy-compatible JAX state machine through the cached value/gradient seam
+      instead of `minimize_lbfgs_host_core(...)`.
+- [x] Public result conversion:
+      `src/simsopt/geo/optimizer_jax_private/_result_converters.py` maps
+      task-derived SciPy public `status`, `success`, `message`, counters,
+      arrays, and `LbfgsInvHessProduct` history.
+- [x] CPU validation run after the simplifier pass:
+      `ruff format`/`ruff check` on the touched files passed,
+      scoped source mypy on the touched optimizer modules passed,
+      `TestOptimizerAdapterPrivate` passed (`22 passed`),
+      `TestLBFGSMethodPrivate` passed after the seeded-FG parity test addition
+      (`16 passed`),
+      `tests/geo/test_lbfgsb_scipy_parity.py` plus
+      `tests/geo/test_lbfgsb_scipy_jax_kernels.py` passed (`135 passed`), and
+      Stage 2/single-stage/Boozer call-site regressions passed (`3 passed`).
+- [x] Reviewer cleanup validation after stale-contract removal:
+      target L-BFGS-B methods reject `initial_step_size`, `maxgrad`, and
+      `failure_callback`; single-stage and Stage 2 no longer forward target
+      failure callbacks; target-lane diagnostic callbacks now cover accepted-step
+      and progress hooks only; invalid-step diagnostics come from structured
+      `invalid_step_log` result entries. SciPy task-backed nonfinite public
+      results preserve SciPy `status`, `success`, and `message`. Validation:
+      focused contract/nonfinite/downstream tests passed (`18 passed`), the
+      full single-stage unit file passed (`320 passed, 20 subtests passed`),
+      Stage 2 focused callback tests passed (`4 passed`), and the SciPy
+      parity/kernel suite passed (`135 passed`). The full private L-BFGS method
+      class was rerun after these changes (`16 passed`). A final stale-surface
+      simplifier pass also passed `ruff`, focused source mypy, 17 focused
+      contract/CLI tests, and `git diff --check`.
+- [x] Current-tree audit refresh after the stale-surface fixes:
+      `JAX_ENABLE_X64=True pytest -q tests/geo/test_lbfgsb_scipy_parity.py
+      tests/geo/test_lbfgsb_scipy_jax_kernels.py` passed
+      (`135 passed in 268.71s`). GPU-proof launcher/manifest contract tests
+      passed locally (`67 passed, 1 skipped`), confirming the proof plumbing
+      remains checked even though this host cannot execute CUDA.
+
+### Still Open
+
+- [x] Add explicit JAX-vs-SciPy tests for `WARNING` and `ERROR` task
+      transitions in addition to the current `START`, `FG`, `NEW_X`,
+      `CONVERGENCE`, `STOP`, and `ABNORMAL` evidence.
+- [x] Complete the direct kernel audit for every ported helper against checked
+      references or full `_lbfgsb.setulb(...)` snapshots before claiming the
+      "every kernel" test-matrix item.
+- [ ] Commit and push the current-tree parity slice before remote GPU proof.
+      The current scoped slice is:
+      `docs/scipy_lbfgsb_jax_parity_plan_2026-05-15.md`,
+      `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`,
+      `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`,
+      `src/simsopt/geo/boozersurface_jax.py`,
+      `src/simsopt/geo/optimizer_jax.py`,
+      `src/simsopt/geo/optimizer_jax_private/_lbfgs.py`,
+      `src/simsopt/geo/optimizer_jax_private/_lbfgsb_scipy.py`,
+      `src/simsopt/geo/optimizer_jax_private/_result_converters.py`,
+      `src/simsopt/geo/optimizer_jax_private/_types.py`,
+      `tests/geo/test_boozersurface_jax.py`,
+      `tests/geo/test_boozersurface_jax_private.py`,
+      `tests/geo/test_lbfgsb_scipy_jax_kernels.py`,
+      `tests/geo/test_lbfgsb_scipy_parity.py`,
+      `tests/geo/test_single_stage_example.py`, and
+      `tests/integration/test_stage2_jax.py`. `git diff --check` passes on
+      this slice; unrelated dirty files must stay out of the parity commit.
+- [ ] Run GPU live optimizer proof and record the accepted trajectory/control
+      tolerance policy. Current local JAX devices are CPU-only:
+      `jax.devices() == [CpuDevice(id=0)]`, `jax.default_backend() == "cpu"`;
+      `nvidia-smi` is not installed. The no-cost Lightning launcher dry-run
+      for local HEAD `c874af565f36a5922771d5b7aa97915e29f69004` also fails
+      preflight because that SHA is not present on the remote proof branch
+      `gpu-purity-stage2-20260405`; a scoped commit and push are required before
+      any remote CUDA proof can validate the current tree.
+- [ ] Run the banana/Stage 2 scientific trust-chain proof:
+      SIMSOPT C++/SciPy -> JAX CPU -> JAX GPU -> JAX CPU/GPU agreement.
+- [x] Re-run the full `TestLBFGSMethodPrivate` class after the seeded-FG parity
+      test addition before final closeout.

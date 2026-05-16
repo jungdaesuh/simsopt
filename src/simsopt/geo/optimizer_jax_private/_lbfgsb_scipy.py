@@ -249,12 +249,110 @@ class LbfgsbFreevResult(NamedTuple):
     wrk: jax.Array
 
 
+class LbfgsbInverseHessianHistory(NamedTuple):
+    s: jax.Array
+    y: jax.Array
+    n_corrs: jax.Array
+
+
 def lbfgsb_workspace_size(n: int, m: int) -> int:
     return 2 * m * n + 5 * n + 11 * m * m + 8 * m
 
 
 def lbfgsb_iwa_size(n: int) -> int:
     return 3 * n
+
+
+def _lbfgsb_history_size_from_workspace(n: int, workspace_size: int) -> int:
+    n = int(n)
+    linear = 2 * n + 8
+    constant = 5 * n - int(workspace_size)
+    return int(round((-linear + np.sqrt(linear * linear - 44 * constant)) / 22))
+
+
+def _lbfgsb_workspace_offsets(n: int, m: int) -> tuple[int, ...]:
+    n = int(n)
+    m = int(m)
+    mn = m * n
+    mm = m * m
+    four_mm = 4 * mm
+    lws = 0
+    lwy = lws + mn
+    lsy = lwy + mn
+    lss = lsy + mm
+    lwt = lss + mm
+    lwn = lwt + mm
+    lsnd = lwn + four_mm
+    lz = lsnd + four_mm
+    lr = lz + n
+    ld = lr + n
+    lt = ld + n
+    lxp = lt + n
+    lwa = lxp + n
+    return lws, lwy, lsy, lss, lwt, lwn, lsnd, lz, lr, ld, lt, lxp, lwa
+
+
+def _lbfgsb_workspace_partition_isave(n: int, m: int) -> jax.Array:
+    n = int(n)
+    m = int(m)
+    mn = m * n
+    mm = m * m
+    return jnp.asarray(
+        (
+            mn,
+            mm,
+            4 * mm,
+            *_lbfgsb_workspace_offsets(n, m),
+        ),
+        dtype=jnp.int32,
+    )
+
+
+def _lbfgsb_fortran_square(values, size: int) -> jax.Array:
+    return values.reshape((size, size)).T
+
+
+def _lbfgsb_flatten_fortran_square(values) -> jax.Array:
+    return values.T.reshape((-1,))
+
+
+def _lbfgsb_task(task, task_msg) -> jax.Array:
+    return jnp.asarray((task, task_msg), dtype=jnp.int32)
+
+
+def _lbfgsb_lsave(prjctd, cnstnd, boxed, updatd) -> jax.Array:
+    return jnp.asarray((prjctd, cnstnd, boxed, updatd), dtype=jnp.int32)
+
+
+def _lbfgsb_lsave_flags(state: LbfgsbState):
+    lsave = state.workspace.lsave
+    return lsave[0] != 0, lsave[1] != 0, lsave[2] != 0, lsave[3] != 0
+
+
+def _lbfgsb_state_dimensions(state: LbfgsbState) -> tuple[int, int]:
+    n = int(state.x.shape[0])
+    return n, _lbfgsb_history_size_from_workspace(
+        n,
+        int(state.workspace.wa.shape[0]),
+    )
+
+
+def _lbfgsb_ddot(x, y) -> jax.Array:
+    total = jnp.asarray(0.0, dtype=jnp.float64)
+    for i in range(int(x.shape[0])):
+        product = x[i] * y[i]
+        # Adding exact zero is a no-op in SciPy's BLAS accumulation.
+        total = jax.lax.cond(
+            product != 0.0,
+            lambda value: value + product,
+            lambda value: value,
+            total,
+        )
+    return total
+
+
+def _lbfgsb_dnrm2(x) -> jax.Array:
+    return jnp.sqrt(_lbfgsb_ddot(x, x))
 
 
 def lbfgsb_empty_workspace(n: int, m: int) -> LbfgsbWorkspace:
@@ -278,6 +376,8 @@ def lbfgsb_initial_state(
     gtol: float = 1e-5,
     maxls: int = 20,
 ) -> LbfgsbState:
+    if int(maxls) <= 0:
+        raise ValueError("maxls must be positive.")
     x = jnp.asarray(x0, dtype=jnp.float64).reshape((-1,))
     n = int(x.shape[0])
     low_bnd, upper_bnd, nbd = lbfgsb_encode_bounds(bounds, n)
@@ -296,6 +396,958 @@ def lbfgsb_initial_state(
         n_iterations=jnp.asarray(0, dtype=jnp.int32),
         nfev=jnp.asarray(0, dtype=jnp.int32),
         njev=jnp.asarray(0, dtype=jnp.int32),
+    )
+
+
+def _lbfgsb_setulb_start(state: LbfgsbState) -> LbfgsbState:
+    n, m = _lbfgsb_state_dimensions(state)
+    active = lbfgsb_active(state.l, state.u, state.nbd, state.x)
+
+    iwa = state.workspace.iwa.at[n : 2 * n].set(active.iwhere)
+    lsave = _lbfgsb_lsave(active.prjctd, active.cnstnd, active.boxed, False)
+    isave = state.workspace.isave.at[:16].set(_lbfgsb_workspace_partition_isave(n, m))
+    isave = isave.at[37].set(jnp.asarray(n, dtype=jnp.int32))
+    dsave = state.workspace.dsave.at[0].set(jnp.asarray(1.0, dtype=jnp.float64))
+    dsave = dsave.at[2].set(
+        state.factr * jnp.asarray(np.finfo(float).eps, dtype=jnp.float64)
+    )
+
+    workspace = state.workspace._replace(
+        iwa=iwa,
+        task=_lbfgsb_task(FG, FG_START),
+        lsave=lsave,
+        isave=isave,
+        dsave=dsave,
+    )
+    return state._replace(x=active.x, workspace=workspace)
+
+
+def _lbfgsb_setulb_fg_start_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbState:
+    n, m = _lbfgsb_state_dimensions(state)
+    lws, lwy, lsy, lss, lwt, lwn, lsnd, lz, lr, ld, lt, lxp, lwa = (
+        _lbfgsb_workspace_offsets(n, m)
+    )
+    wa = state.workspace.wa
+    iwa = state.workspace.iwa
+    isave = state.workspace.isave
+    dsave = state.workspace.dsave
+
+    ws = wa[lws:lwy].reshape((m, n))
+    wy = wa[lwy:lsy].reshape((m, n))
+    sy = _lbfgsb_fortran_square(wa[lsy:lss], m)
+    wt = _lbfgsb_fortran_square(wa[lwt:lwn], m)
+    wn = _lbfgsb_fortran_square(wa[lwn:lsnd], 2 * m)
+    snd = _lbfgsb_fortran_square(wa[lsnd:lz], 2 * m)
+
+    index = iwa[:n]
+    iwhere = iwa[n : 2 * n]
+    indx2 = iwa[2 * n : 3 * n]
+    t = wa[lt:lxp]
+    d = wa[ld:lt]
+    z = wa[lz:lr]
+    scratch = wa[lwa:]
+    p = scratch[: 2 * m]
+    c = scratch[2 * m : 4 * m]
+    wbp = scratch[4 * m : 6 * m]
+    v = scratch[6 * m : 8 * m]
+
+    prjctd, cnstnd, boxed, updatd = _lbfgsb_lsave_flags(state)
+
+    nintol = isave[21]
+    iback = isave[24]
+    head = isave[26]
+    col = isave[27]
+    iteration = isave[29]
+    iupdat = isave[30]
+    nfree = isave[37]
+    theta = dsave[0]
+
+    cauchy = lbfgsb_cauchy(
+        state.x,
+        state.l,
+        state.u,
+        state.nbd,
+        state.g,
+        indx2,
+        iwhere,
+        t,
+        d,
+        z,
+        wy,
+        ws,
+        sy,
+        wt,
+        theta,
+        col,
+        head,
+        p,
+        c,
+        wbp,
+        v,
+        sbgnrm,
+    )
+    cauchy_scratch = scratch
+    cauchy_scratch = cauchy_scratch.at[: 2 * m].set(cauchy.p)
+    cauchy_scratch = cauchy_scratch.at[2 * m : 4 * m].set(cauchy.c)
+    cauchy_scratch = cauchy_scratch.at[4 * m : 6 * m].set(cauchy.wbp)
+    cauchy_scratch = cauchy_scratch.at[6 * m : 8 * m].set(cauchy.v)
+    nintol = nintol + cauchy.nseg
+    free = lbfgsb_freev(
+        nfree,
+        index,
+        cauchy.iorder,
+        cauchy.iwhere,
+        updatd,
+        cnstnd,
+        iteration,
+    )
+    nact = jnp.asarray(n, dtype=jnp.int32) - free.nfree
+    subspace_active = (free.nfree != 0) & (col != 0)
+
+    def subspace_branch(_):
+        formed = jax.lax.cond(
+            free.wrk,
+            lambda _: lbfgsb_formk(
+                free.nfree,
+                free.idx,
+                free.nenter,
+                free.ileave,
+                free.idx2,
+                iupdat,
+                updatd,
+                wn,
+                snd,
+                ws,
+                wy,
+                sy,
+                theta,
+                col,
+                head,
+            ),
+            lambda _: LbfgsbFormkResult(
+                wn=wn,
+                wn1=snd,
+                info=jnp.asarray(0, dtype=jnp.int32),
+            ),
+            None,
+        )
+        compressed = lbfgsb_cmprlb(
+            state.x,
+            state.g,
+            ws,
+            wy,
+            sy,
+            wt,
+            cauchy.xcp,
+            wa[lr:ld],
+            cauchy_scratch,
+            free.idx,
+            theta,
+            col,
+            head,
+            free.nfree,
+            cnstnd,
+        )
+        subspace = lbfgsb_subsm(
+            free.nfree,
+            free.idx,
+            state.l,
+            state.u,
+            state.nbd,
+            cauchy.xcp,
+            compressed.r,
+            wa[lxp:lwa],
+            ws,
+            wy,
+            theta,
+            state.x,
+            state.g,
+            col,
+            head,
+            cauchy_scratch[: 2 * m],
+            formed.wn,
+        )
+        return (
+            formed.wn,
+            formed.wn1,
+            subspace.x,
+            compressed.r,
+            subspace.xp,
+            subspace.wv,
+            subspace.iword,
+        )
+
+    def cauchy_branch(_):
+        return (
+            wn,
+            snd,
+            cauchy.xcp,
+            wa[lr:ld],
+            wa[lxp:lwa],
+            cauchy_scratch[: 2 * m],
+            jnp.asarray(-1, dtype=jnp.int32),
+        )
+
+    wn_next, snd_next, z_next, r_next, xp_next, wv_next, iword = jax.lax.cond(
+        subspace_active,
+        subspace_branch,
+        cauchy_branch,
+        None,
+    )
+    line_direction = z_next - state.x
+    line_search_nfgv = jnp.where(
+        (state.workspace.task[0] == FG) & (state.workspace.task[1] == FG_START),
+        jnp.asarray(1, dtype=jnp.int32),
+        isave[33],
+    )
+    search = lbfgsb_lnsrlb(
+        state.l,
+        state.u,
+        state.nbd,
+        state.x,
+        state.f,
+        dsave[1],
+        dsave[10],
+        dsave[14],
+        state.g,
+        line_direction,
+        r_next,
+        wa[lt:lxp],
+        z_next,
+        dsave[13],
+        dsave[3],
+        dsave[15],
+        jnp.asarray(0.0, dtype=jnp.float64),
+        dsave[11],
+        iteration,
+        isave[35],
+        iback,
+        line_search_nfgv,
+        isave[34],
+        state.workspace.task[0],
+        state.workspace.task[1],
+        boxed,
+        cnstnd,
+        isave[42:44],
+        dsave[16:29],
+        state.workspace.ln_task[0],
+        state.workspace.ln_task[1],
+    )
+
+    wa = wa.at[lwn:lsnd].set(_lbfgsb_flatten_fortran_square(wn_next))
+    wa = wa.at[lsnd:lz].set(_lbfgsb_flatten_fortran_square(snd_next))
+    wa = wa.at[lz:lr].set(z_next)
+    wa = wa.at[lr:ld].set(search.r)
+    wa = wa.at[ld:lt].set(line_direction)
+    wa = wa.at[lt:lxp].set(search.t)
+    wa = wa.at[lxp:lwa].set(xp_next)
+    wa = wa.at[lwa : lwa + 2 * m].set(wv_next)
+    wa = wa.at[lwa + 2 * m : lwa + 4 * m].set(cauchy_scratch[2 * m : 4 * m])
+    wa = wa.at[lwa + 4 * m : lwa + 6 * m].set(cauchy_scratch[4 * m : 6 * m])
+    wa = wa.at[lwa + 6 * m : lwa + 8 * m].set(cauchy_scratch[6 * m : 8 * m])
+
+    iwa = iwa.at[:n].set(free.idx)
+    iwa = iwa.at[n : 2 * n].set(cauchy.iwhere)
+    iwa = iwa.at[2 * n : 3 * n].set(free.idx2)
+
+    isave = isave.at[21].set(nintol)
+    isave = isave.at[24].set(search.iback)
+    isave = isave.at[32].set(cauchy.nseg)
+    isave = isave.at[33].set(search.nfgv)
+    isave = isave.at[34].set(search.info)
+    isave = isave.at[35].set(search.ifun)
+    isave = isave.at[36].set(iword)
+    isave = isave.at[37].set(free.nfree)
+    isave = isave.at[38].set(nact)
+    isave = isave.at[39].set(free.ileave)
+    isave = isave.at[40].set(free.nenter)
+    isave = isave.at[42:44].set(search.isave)
+
+    dsave = dsave.at[1].set(search.fold)
+    dsave = dsave.at[3].set(search.dnorm)
+    dsave = dsave.at[10].set(search.gd)
+    dsave = dsave.at[11].set(search.stpmx)
+    dsave = dsave.at[12].set(sbgnrm)
+    dsave = dsave.at[13].set(search.stp)
+    dsave = dsave.at[14].set(search.gdold)
+    dsave = dsave.at[15].set(search.dtd)
+    dsave = dsave.at[16:29].set(search.dsave)
+
+    workspace = state.workspace._replace(
+        wa=wa,
+        iwa=iwa,
+        task=_lbfgsb_task(search.task, search.task_msg),
+        ln_task=_lbfgsb_task(search.temp_task, search.temp_task_msg),
+        lsave=_lbfgsb_lsave(prjctd, cnstnd, boxed, updatd),
+        isave=isave,
+        dsave=dsave,
+    )
+    normal_state = state._replace(x=search.x, workspace=workspace)
+    return jax.lax.cond(
+        _lbfgsb_line_search_stops_iteration(search, state.maxls) & (col == 0),
+        lambda _: _lbfgsb_setulb_line_search_abnormal(
+            state,
+            wa,
+            isave,
+            dsave,
+            search,
+            lr=lr,
+            ld=ld,
+            lt=lt,
+            lxp=lxp,
+            sbgnrm=sbgnrm,
+        ),
+        lambda _: normal_state,
+        None,
+    )
+
+
+def _lbfgsb_setulb_subspace_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbState:
+    n, m = _lbfgsb_state_dimensions(state)
+    lws, lwy, lsy, lss, lwt, lwn, lsnd, lz, lr, ld, lt, lxp, lwa = (
+        _lbfgsb_workspace_offsets(n, m)
+    )
+    wa = state.workspace.wa
+    iwa = state.workspace.iwa
+    isave = state.workspace.isave
+    dsave = state.workspace.dsave
+
+    ws = wa[lws:lwy].reshape((m, n))
+    wy = wa[lwy:lsy].reshape((m, n))
+    sy = _lbfgsb_fortran_square(wa[lsy:lss], m)
+    wt = _lbfgsb_fortran_square(wa[lwt:lwn], m)
+    wn = _lbfgsb_fortran_square(wa[lwn:lsnd], 2 * m)
+    snd = _lbfgsb_fortran_square(wa[lsnd:lz], 2 * m)
+    z = state.x
+    r = wa[lr:ld]
+    xp = wa[lxp:lwa]
+    scratch = wa[lwa:]
+    wv = scratch[: 2 * m]
+
+    prjctd, cnstnd, boxed, updatd = _lbfgsb_lsave_flags(state)
+
+    index = iwa[:n]
+    indx2 = iwa[2 * n : 3 * n]
+    iback = isave[24]
+    head = isave[26]
+    col = isave[27]
+    iteration = isave[29]
+    iupdat = isave[30]
+    nseg = jnp.asarray(0, dtype=jnp.int32)
+    nfree = isave[37]
+    ileave = isave[39]
+    nenter = isave[40]
+    theta = dsave[0]
+
+    formed = lbfgsb_formk(
+        nfree,
+        index,
+        nenter,
+        ileave,
+        indx2,
+        iupdat,
+        updatd,
+        wn,
+        snd,
+        ws,
+        wy,
+        sy,
+        theta,
+        col,
+        head,
+    )
+    compressed = lbfgsb_cmprlb(
+        state.x,
+        state.g,
+        ws,
+        wy,
+        sy,
+        wt,
+        z,
+        r,
+        scratch,
+        index,
+        theta,
+        col,
+        head,
+        nfree,
+        cnstnd,
+    )
+    subspace = lbfgsb_subsm(
+        nfree,
+        index,
+        state.l,
+        state.u,
+        state.nbd,
+        z,
+        compressed.r,
+        xp,
+        ws,
+        wy,
+        theta,
+        state.x,
+        state.g,
+        col,
+        head,
+        wv,
+        formed.wn,
+    )
+    line_direction = subspace.x - state.x
+    search = lbfgsb_lnsrlb(
+        state.l,
+        state.u,
+        state.nbd,
+        state.x,
+        state.f,
+        dsave[1],
+        dsave[10],
+        dsave[14],
+        state.g,
+        line_direction,
+        compressed.r,
+        wa[lt:lxp],
+        subspace.x,
+        dsave[13],
+        dsave[3],
+        dsave[15],
+        jnp.asarray(0.0, dtype=jnp.float64),
+        dsave[11],
+        iteration,
+        isave[35],
+        iback,
+        isave[33],
+        isave[34],
+        state.workspace.task[0],
+        state.workspace.task[1],
+        boxed,
+        cnstnd,
+        isave[42:44],
+        dsave[16:29],
+        state.workspace.ln_task[0],
+        state.workspace.ln_task[1],
+    )
+
+    wa = wa.at[lwn:lsnd].set(_lbfgsb_flatten_fortran_square(formed.wn))
+    wa = wa.at[lsnd:lz].set(_lbfgsb_flatten_fortran_square(formed.wn1))
+    wa = wa.at[lz:lr].set(subspace.x)
+    wa = wa.at[lr:ld].set(search.r)
+    wa = wa.at[ld:lt].set(line_direction)
+    wa = wa.at[lt:lxp].set(search.t)
+    wa = wa.at[lxp:lwa].set(subspace.xp)
+    wa = wa.at[lwa : lwa + 2 * m].set(subspace.wv)
+
+    isave = isave.at[24].set(search.iback)
+    isave = isave.at[32].set(nseg)
+    isave = isave.at[33].set(search.nfgv)
+    isave = isave.at[34].set(search.info)
+    isave = isave.at[35].set(search.ifun)
+    isave = isave.at[36].set(subspace.iword)
+    isave = isave.at[42:44].set(search.isave)
+
+    dsave = dsave.at[1].set(search.fold)
+    dsave = dsave.at[3].set(search.dnorm)
+    dsave = dsave.at[10].set(search.gd)
+    dsave = dsave.at[11].set(search.stpmx)
+    dsave = dsave.at[12].set(sbgnrm)
+    dsave = dsave.at[13].set(search.stp)
+    dsave = dsave.at[14].set(search.gdold)
+    dsave = dsave.at[15].set(search.dtd)
+    dsave = dsave.at[16:29].set(search.dsave)
+
+    workspace = state.workspace._replace(
+        wa=wa,
+        task=_lbfgsb_task(search.task, search.task_msg),
+        ln_task=_lbfgsb_task(search.temp_task, search.temp_task_msg),
+        lsave=_lbfgsb_lsave(prjctd, cnstnd, boxed, updatd),
+        isave=isave,
+        dsave=dsave,
+    )
+    return state._replace(x=search.x, workspace=workspace)
+
+
+def _lbfgsb_setulb_line_search_continue(state: LbfgsbState) -> LbfgsbState:
+    n, m = _lbfgsb_state_dimensions(state)
+    _, _, _, _, _, _, _, lz, lr, ld, lt, lxp, _ = _lbfgsb_workspace_offsets(n, m)
+    wa = state.workspace.wa
+    isave = state.workspace.isave
+    dsave = state.workspace.dsave
+
+    prjctd, cnstnd, boxed, updatd = _lbfgsb_lsave_flags(state)
+
+    iback = isave[24]
+
+    search = lbfgsb_lnsrlb(
+        state.l,
+        state.u,
+        state.nbd,
+        state.x,
+        state.f,
+        dsave[1],
+        dsave[10],
+        dsave[14],
+        state.g,
+        wa[ld:lt],
+        wa[lr:ld],
+        wa[lt:lxp],
+        wa[lz:lr],
+        dsave[13],
+        dsave[3],
+        dsave[15],
+        jnp.asarray(0.0, dtype=jnp.float64),
+        dsave[11],
+        isave[29],
+        isave[35],
+        iback,
+        isave[33],
+        isave[34],
+        state.workspace.task[0],
+        state.workspace.task[1],
+        boxed,
+        cnstnd,
+        isave[42:44],
+        dsave[16:29],
+        state.workspace.ln_task[0],
+        state.workspace.ln_task[1],
+    )
+
+    accepted = search.task == NEW_X
+    iteration = jnp.where(accepted, isave[29] + 1, isave[29])
+    sbgnrm = jnp.where(
+        accepted,
+        lbfgsb_projected_gradient_norm(state.l, state.u, state.nbd, search.x, state.g),
+        dsave[12],
+    )
+
+    wa = wa.at[lr:ld].set(search.r)
+    wa = wa.at[lt:lxp].set(search.t)
+
+    isave = isave.at[24].set(search.iback)
+    isave = isave.at[29].set(iteration)
+    isave = isave.at[33].set(search.nfgv)
+    isave = isave.at[34].set(search.info)
+    isave = isave.at[35].set(search.ifun)
+    isave = isave.at[42:44].set(search.isave)
+
+    dsave = dsave.at[1].set(search.fold)
+    dsave = dsave.at[3].set(search.dnorm)
+    dsave = dsave.at[10].set(search.gd)
+    dsave = dsave.at[11].set(search.stpmx)
+    dsave = dsave.at[12].set(sbgnrm)
+    dsave = dsave.at[13].set(search.stp)
+    dsave = dsave.at[14].set(search.gdold)
+    dsave = dsave.at[15].set(search.dtd)
+    dsave = dsave.at[16:29].set(search.dsave)
+
+    workspace = state.workspace._replace(
+        wa=wa,
+        task=_lbfgsb_task(search.task, search.task_msg),
+        ln_task=_lbfgsb_task(search.temp_task, search.temp_task_msg),
+        lsave=_lbfgsb_lsave(prjctd, cnstnd, boxed, updatd),
+        isave=isave,
+        dsave=dsave,
+    )
+    normal_state = state._replace(
+        x=search.x,
+        workspace=workspace,
+        n_iterations=iteration,
+    )
+    return jax.lax.cond(
+        _lbfgsb_line_search_stops_iteration(search, state.maxls) & (isave[27] == 0),
+        lambda _: _lbfgsb_setulb_line_search_abnormal(
+            state,
+            wa,
+            isave,
+            dsave,
+            search,
+            lr=lr,
+            ld=ld,
+            lt=lt,
+            lxp=lxp,
+            sbgnrm=sbgnrm,
+        ),
+        lambda _: normal_state,
+        None,
+    )
+
+
+def _lbfgsb_line_search_stops_iteration(search: LbfgsbLnsrlbResult, maxls):
+    return (search.info != 0) | (search.iback >= maxls)
+
+
+def _lbfgsb_setulb_line_search_abnormal(
+    state: LbfgsbState,
+    wa,
+    isave,
+    dsave,
+    search: LbfgsbLnsrlbResult,
+    *,
+    lr: int,
+    ld: int,
+    lt: int,
+    lxp: int,
+    sbgnrm,
+) -> LbfgsbState:
+    prjctd, cnstnd, boxed, updatd = _lbfgsb_lsave_flags(state)
+    maxls_exhausted = search.info == 0
+    maxls_correction = jnp.where(
+        maxls_exhausted,
+        jnp.asarray(1, dtype=jnp.int32),
+        jnp.asarray(0, dtype=jnp.int32),
+    )
+    info = jnp.where(maxls_exhausted, jnp.asarray(-9, dtype=jnp.int32), search.info)
+    nfgv = search.nfgv - maxls_correction
+    ifun = search.ifun - maxls_correction
+    iback = search.iback - maxls_correction
+
+    wa = wa.at[lr:ld].set(search.r)
+    wa = wa.at[lt:lxp].set(search.t)
+
+    isave = isave.at[24].set(iback)
+    isave = isave.at[29].set(isave[29] + jnp.asarray(1, dtype=jnp.int32))
+    isave = isave.at[33].set(nfgv)
+    isave = isave.at[34].set(info)
+    isave = isave.at[35].set(ifun)
+    isave = isave.at[42:44].set(search.isave)
+
+    dsave = dsave.at[1].set(search.fold)
+    dsave = dsave.at[3].set(search.dnorm)
+    dsave = dsave.at[10].set(search.gd)
+    dsave = dsave.at[11].set(search.stpmx)
+    dsave = dsave.at[12].set(sbgnrm)
+    dsave = dsave.at[13].set(search.stp)
+    dsave = dsave.at[14].set(search.gdold)
+    dsave = dsave.at[15].set(search.dtd)
+    dsave = dsave.at[16:29].set(search.dsave)
+
+    workspace = state.workspace._replace(
+        wa=wa,
+        task=_lbfgsb_task(ABNORMAL, NO_MSG),
+        ln_task=_lbfgsb_task(search.temp_task, search.temp_task_msg),
+        lsave=_lbfgsb_lsave(prjctd, cnstnd, boxed, updatd),
+        isave=isave,
+        dsave=dsave,
+    )
+    return state._replace(
+        x=search.t,
+        f=state.f,
+        g=search.r,
+        workspace=workspace,
+    )
+
+
+def _lbfgsb_setulb_new_x_convergence(
+    state: LbfgsbState,
+    task_msg: jax.Array,
+    info: jax.Array,
+) -> LbfgsbState:
+    workspace = state.workspace._replace(
+        task=_lbfgsb_task(CONVERGENCE, task_msg),
+        isave=state.workspace.isave.at[34].set(info),
+    )
+    return state._replace(workspace=workspace)
+
+
+def _lbfgsb_setulb_new_x_next_iteration(
+    state: LbfgsbState,
+    sbgnrm: jax.Array,
+) -> LbfgsbState:
+    n, m = _lbfgsb_state_dimensions(state)
+    lws, lwy, lsy, lss, lwt, lwn, _, _, lr, ld, lt, _, _ = _lbfgsb_workspace_offsets(
+        n, m
+    )
+    wa = state.workspace.wa
+    isave = state.workspace.isave
+    dsave = state.workspace.dsave
+
+    ws = wa[lws:lwy].reshape((m, n))
+    wy = wa[lwy:lsy].reshape((m, n))
+    sy = _lbfgsb_fortran_square(wa[lsy:lss], m)
+    ss = _lbfgsb_fortran_square(wa[lss:lwt], m)
+    wt = _lbfgsb_fortran_square(wa[lwt:lwn], m)
+    old_gradient = wa[lr:ld]
+    line_direction = wa[ld:lt]
+
+    gradient_delta = state.g - old_gradient
+    rr_norm = _lbfgsb_dnrm2(gradient_delta)
+    rr = rr_norm * rr_norm
+    stp = dsave[13]
+    gd = dsave[10]
+    gdold = dsave[14]
+    dr = jnp.where(stp == 1.0, gd - gdold, (gd - gdold) * stp)
+    ddum = jnp.where(stp == 1.0, -gdold, -gdold * stp)
+    next_direction = jnp.where(stp == 1.0, line_direction, stp * line_direction)
+    skip_update = dr <= jnp.asarray(np.finfo(float).eps, dtype=jnp.float64) * ddum
+
+    def skip_update_branch(_):
+        workspace = state.workspace._replace(
+            wa=wa.at[lr:ld].set(gradient_delta).at[ld:lt].set(next_direction),
+            lsave=state.workspace.lsave.at[3].set(jnp.asarray(False, dtype=jnp.int32)),
+            isave=state.workspace.isave.at[25].set(isave[25] + 1),
+            dsave=state.workspace.dsave.at[12].set(sbgnrm),
+        )
+        return state._replace(workspace=workspace)
+
+    def update_branch(_):
+        iupdat = isave[30] + 1
+        update = lbfgsb_matupd(
+            ws,
+            wy,
+            sy,
+            ss,
+            next_direction,
+            gradient_delta,
+            isave[28],
+            iupdat,
+            isave[27],
+            isave[26],
+            rr,
+            dr,
+            stp,
+            dsave[15],
+        )
+        form = lbfgsb_formt(wt, update.sy, update.ss, update.col, update.theta)
+        refresh = form.info != 0
+        next_col = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), update.col)
+        next_head = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), update.head)
+        next_theta = jnp.where(refresh, 1.0, update.theta)
+        next_iupdat = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), iupdat)
+        next_updatd = ~refresh
+
+        next_wa = wa
+        next_wa = next_wa.at[lws:lwy].set(update.ws.reshape((-1,)))
+        next_wa = next_wa.at[lwy:lsy].set(update.wy.reshape((-1,)))
+        next_wa = next_wa.at[lsy:lss].set(_lbfgsb_flatten_fortran_square(update.sy))
+        next_wa = next_wa.at[lss:lwt].set(_lbfgsb_flatten_fortran_square(update.ss))
+        next_wa = next_wa.at[lwt:lwn].set(_lbfgsb_flatten_fortran_square(form.wt))
+        next_wa = next_wa.at[lr:ld].set(gradient_delta)
+        next_wa = next_wa.at[ld:lt].set(next_direction)
+
+        next_isave = isave
+        next_isave = next_isave.at[26].set(next_head)
+        next_isave = next_isave.at[27].set(next_col)
+        next_isave = next_isave.at[28].set(update.itail)
+        next_isave = next_isave.at[30].set(next_iupdat)
+        next_isave = next_isave.at[34].set(jnp.asarray(0, dtype=jnp.int32))
+
+        next_dsave = dsave.at[0].set(next_theta)
+        next_dsave = next_dsave.at[12].set(sbgnrm)
+
+        workspace = state.workspace._replace(
+            wa=next_wa,
+            lsave=state.workspace.lsave.at[3].set(next_updatd.astype(jnp.int32)),
+            isave=next_isave,
+            dsave=next_dsave,
+        )
+        return state._replace(workspace=workspace)
+
+    updated_state = jax.lax.cond(skip_update, skip_update_branch, update_branch, None)
+    use_subspace_path = (updated_state.workspace.lsave[1] == 0) & (
+        updated_state.workspace.isave[27] > 0
+    )
+    return jax.lax.cond(
+        use_subspace_path,
+        lambda state: _lbfgsb_setulb_subspace_line_search(state, sbgnrm),
+        lambda state: _lbfgsb_setulb_fg_start_line_search(state, sbgnrm),
+        updated_state,
+    )
+
+
+def _lbfgsb_setulb_new_x_reentry(state: LbfgsbState) -> LbfgsbState:
+    dsave = state.workspace.dsave
+    isave = state.workspace.isave
+    sbgnrm = dsave[12]
+    gradient_converged = sbgnrm <= state.pgtol
+    reduction_scale = jnp.maximum(jnp.maximum(jnp.abs(dsave[1]), jnp.abs(state.f)), 1.0)
+    reduction_converged = (dsave[1] - state.f) <= dsave[2] * reduction_scale
+    reduction_info = jnp.where(
+        isave[24] >= 10,
+        jnp.asarray(-5, dtype=jnp.int32),
+        isave[34],
+    )
+
+    return jax.lax.cond(
+        gradient_converged,
+        lambda _: _lbfgsb_setulb_new_x_convergence(
+            state,
+            jnp.asarray(CONV_GRAD, dtype=jnp.int32),
+            isave[34],
+        ),
+        lambda _: jax.lax.cond(
+            reduction_converged,
+            lambda _: _lbfgsb_setulb_new_x_convergence(
+                state,
+                jnp.asarray(CONV_F, dtype=jnp.int32),
+                reduction_info,
+            ),
+            lambda _: _lbfgsb_setulb_new_x_next_iteration(state, sbgnrm),
+            None,
+        ),
+        None,
+    )
+
+
+def _lbfgsb_setulb_fg_start_converged(
+    state: LbfgsbState, sbgnrm: jax.Array
+) -> LbfgsbState:
+    workspace = state.workspace._replace(
+        task=_lbfgsb_task(CONVERGENCE, CONV_GRAD),
+        isave=state.workspace.isave.at[33].set(jnp.asarray(1, dtype=jnp.int32)),
+        dsave=state.workspace.dsave.at[12].set(sbgnrm),
+    )
+    return state._replace(workspace=workspace)
+
+
+def _lbfgsb_setulb_fg_start_reentry(
+    state: LbfgsbState, sbgnrm: jax.Array
+) -> LbfgsbState:
+    task_is_fg_start = (state.workspace.task[0] == FG) & (
+        state.workspace.task[1] == FG_START
+    )
+    converged = task_is_fg_start & (sbgnrm <= state.pgtol)
+
+    return jax.lax.cond(
+        converged,
+        lambda _: _lbfgsb_setulb_fg_start_converged(state, sbgnrm),
+        lambda _: _lbfgsb_setulb_fg_start_line_search(state, sbgnrm),
+        None,
+    )
+
+
+def _lbfgsb_setulb_reentry(state: LbfgsbState) -> LbfgsbState:
+    sbgnrm = lbfgsb_projected_gradient_norm(
+        state.l, state.u, state.nbd, state.x, state.g
+    )
+    task_is_new_x = state.workspace.task[0] == NEW_X
+    task_is_fg_lnsrch = (state.workspace.task[0] == FG) & (
+        state.workspace.task[1] == FG_LNSRCH
+    )
+    return jax.lax.cond(
+        task_is_new_x,
+        _lbfgsb_setulb_new_x_reentry,
+        lambda state: jax.lax.cond(
+            task_is_fg_lnsrch,
+            _lbfgsb_setulb_line_search_continue,
+            lambda state: _lbfgsb_setulb_fg_start_reentry(state, sbgnrm),
+            state,
+        ),
+        state,
+    )
+
+
+def lbfgsb_setulb(state: LbfgsbState) -> LbfgsbState:
+    return jax.lax.cond(
+        state.workspace.task[0] == START,
+        _lbfgsb_setulb_start,
+        _lbfgsb_setulb_reentry,
+        state,
+    )
+
+
+def _lbfgsb_evaluate_value_and_grad(value_and_grad, state: LbfgsbState) -> LbfgsbState:
+    value, gradient = value_and_grad(state.x)
+    return state._replace(
+        f=jnp.asarray(value, dtype=jnp.float64),
+        g=jnp.asarray(gradient, dtype=jnp.float64),
+        nfev=state.nfev + jnp.asarray(1, dtype=jnp.int32),
+        njev=state.njev + jnp.asarray(1, dtype=jnp.int32),
+    )
+
+
+def _lbfgsb_stop_after_new_x_limits(
+    state: LbfgsbState,
+    maxiter: jax.Array,
+    maxfun: jax.Array,
+) -> LbfgsbState:
+    task = state.workspace.task
+    is_new_x = task[0] == NEW_X
+    iteration_limit = is_new_x & (state.n_iterations >= maxiter)
+    function_limit = is_new_x & (~iteration_limit) & (state.nfev > maxfun)
+    stopped = iteration_limit | function_limit
+    stop_msg = jnp.where(
+        iteration_limit,
+        jnp.asarray(STOP_ITERC, dtype=jnp.int32),
+        jnp.asarray(STOP_ITER, dtype=jnp.int32),
+    )
+    workspace = state.workspace._replace(
+        task=_lbfgsb_task(
+            jnp.where(stopped, jnp.asarray(STOP, dtype=jnp.int32), task[0]),
+            jnp.where(stopped, stop_msg, task[1]),
+        )
+    )
+    return state._replace(workspace=workspace)
+
+
+def lbfgsb_mainlb(
+    value_and_grad,
+    state: LbfgsbState,
+    *,
+    maxiter: int,
+    maxfun: int,
+    accepted_step_callback=None,
+) -> LbfgsbState:
+    maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
+    maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
+
+    def continue_condition(state: LbfgsbState) -> jax.Array:
+        return state.workspace.task[0] < CONVERGENCE
+
+    def body(state: LbfgsbState) -> LbfgsbState:
+        next_state = lbfgsb_setulb(state)
+        next_state = jax.lax.cond(
+            next_state.workspace.task[0] == FG,
+            lambda state: _lbfgsb_evaluate_value_and_grad(value_and_grad, state),
+            lambda state: state,
+            next_state,
+        )
+        if accepted_step_callback is not None:
+            next_state = jax.lax.cond(
+                next_state.workspace.task[0] == NEW_X,
+                lambda state: _lbfgsb_emit_accepted_step(
+                    state,
+                    accepted_step_callback,
+                ),
+                lambda state: state,
+                next_state,
+            )
+        return _lbfgsb_stop_after_new_x_limits(
+            next_state,
+            maxiter_array,
+            maxfun_array,
+        )
+
+    return jax.lax.while_loop(continue_condition, body, state)
+
+
+def _lbfgsb_emit_accepted_step(
+    state: LbfgsbState,
+    accepted_step_callback,
+) -> LbfgsbState:
+    jax.debug.callback(
+        accepted_step_callback,
+        state.n_iterations,
+        state.x,
+        state.f,
+        state.g,
+        state.nfev,
+        state.njev,
+    )
+    return state
+
+
+def lbfgsb_inverse_hessian_history(
+    state: LbfgsbState,
+) -> LbfgsbInverseHessianHistory:
+    n, m = _lbfgsb_state_dimensions(state)
+    lws, lwy, lsy, *_ = _lbfgsb_workspace_offsets(n, m)
+    s = state.workspace.wa[lws:lwy].reshape((m, n))
+    y = state.workspace.wa[lwy:lsy].reshape((m, n))
+    return LbfgsbInverseHessianHistory(
+        s=s,
+        y=y,
+        n_corrs=jnp.minimum(
+            state.workspace.isave[30],
+            jnp.asarray(m, dtype=jnp.int32),
+        ),
     )
 
 
@@ -318,10 +1370,10 @@ def lbfgsb_public_status(
     return 2
 
 
-def lbfgsb_encode_bounds(bounds, n: int):
-    low_bnd = np.zeros(n, dtype=np.float64)
-    upper_bnd = np.zeros(n, dtype=np.float64)
-    nbd = np.zeros(n, dtype=np.int32)
+def lbfgsb_encode_bounds(bounds, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    low_bnd: np.ndarray = np.zeros(n, dtype=np.float64)
+    upper_bnd: np.ndarray = np.zeros(n, dtype=np.float64)
+    nbd: np.ndarray = np.zeros(n, dtype=np.int32)
     if bounds is None:
         return low_bnd, upper_bnd, nbd
     if len(bounds) != n:
@@ -879,8 +1931,8 @@ def lbfgsb_matupd(
     row = next_col - 1
     for j in range(m - 1):
         active = j < (next_col - 1)
-        sy_value = jnp.dot(d, wy[pointr], precision=jax.lax.Precision.HIGHEST)
-        ss_value = jnp.dot(ws[pointr], d, precision=jax.lax.Precision.HIGHEST)
+        sy_value = _lbfgsb_ddot(d, wy[pointr])
+        ss_value = _lbfgsb_ddot(ws[pointr], d)
         sy = sy.at[row, j].set(jnp.where(active, sy_value, sy[row, j]))
         ss = ss.at[j, row].set(jnp.where(active, ss_value, ss[j, row]))
         pointr = (pointr + 1) % m
@@ -926,23 +1978,23 @@ def lbfgsb_bmv(sy, wt, col, v):
             jnp.where(active_i, first_rhs[i] + ssum, first_rhs[i])
         )
 
-    active = jnp.arange(m, dtype=jnp.int32) < col
+    memory_index = jnp.arange(m, dtype=jnp.int32)
+    active = memory_index < col
     upper = jnp.triu(wt)
-    identity = jnp.eye(m, dtype=jnp.float64)
     active_matrix = active[:, None] & active[None, :]
-    solve_matrix = jnp.where(active_matrix, upper, identity)
+    solve_matrix = jnp.where(active_matrix, upper, jnp.eye(m, dtype=jnp.float64))
     diagonal = jnp.diag(upper)
     singular_index = jnp.min(
         jnp.where(
             active & (diagonal == 0.0),
-            jnp.arange(m, dtype=jnp.int32) + 1,
+            memory_index + 1,
             m + 1,
         )
     )
     factor_info = jnp.where(singular_index <= m, singular_index, 0)
     factor_ok = factor_info == 0
     rhs = jnp.where(active, first_rhs, 0.0)
-    p2 = jsp_linalg.solve_triangular(
+    first_solve = jsp_linalg.solve_triangular(
         solve_matrix,
         rhs,
         trans=1,
@@ -953,16 +2005,16 @@ def lbfgsb_bmv(sy, wt, col, v):
         p = p.at[col + i].set(jnp.where(i < col, first_rhs[i], p[col + i]))
 
     diag_sy = jnp.diag(sy)
-    p1 = jnp.where(active, v[:m] / jnp.sqrt(diag_sy), 0.0)
+    scaled_v = jnp.where(active, v[:m] / jnp.sqrt(diag_sy), 0.0)
     for i in range(m):
         update = factor_ok & (i < col)
-        p = p.at[i].set(jnp.where(update, p1[i], p[i]))
-        p = p.at[col + i].set(jnp.where(update, p2[i], p[col + i]))
+        p = p.at[i].set(jnp.where(update, scaled_v[i], p[i]))
+        p = p.at[col + i].set(jnp.where(update, first_solve[i], p[col + i]))
 
     second_rhs = jnp.zeros((m,), dtype=jnp.float64)
     for i in range(m):
         second_rhs = second_rhs.at[i].set(jnp.where(i < col, p[col + i], 0.0))
-    p2 = jsp_linalg.solve_triangular(
+    second_solve = jsp_linalg.solve_triangular(
         solve_matrix,
         second_rhs,
         trans=0,
@@ -970,10 +2022,12 @@ def lbfgsb_bmv(sy, wt, col, v):
         unit_diagonal=False,
     )
     for i in range(m):
-        p = p.at[col + i].set(jnp.where(factor_ok & (i < col), p2[i], p[col + i]))
-    p1 = jnp.where(active, -p[:m] / jnp.sqrt(diag_sy), 0.0)
+        p = p.at[col + i].set(
+            jnp.where(factor_ok & (i < col), second_solve[i], p[col + i])
+        )
+    negative_scaled_p = jnp.where(active, -p[:m] / jnp.sqrt(diag_sy), 0.0)
     for i in range(m):
-        p = p.at[i].set(jnp.where(factor_ok & (i < col), p1[i], p[i]))
+        p = p.at[i].set(jnp.where(factor_ok & (i < col), negative_scaled_p[i], p[i]))
 
     for i in range(m):
         active_i = factor_ok & (i < col)
@@ -1469,6 +2523,7 @@ def lbfgsb_cauchy(
     n = int(x.shape[0])
     m = int(ws.shape[0])
     col2 = 2 * col
+    active_col2 = jnp.arange(2 * m, dtype=jnp.int32) < col2
     has_gradient = sbgnrm > 0.0
 
     f1 = jnp.asarray(0.0, dtype=jnp.float64)
@@ -1481,9 +2536,8 @@ def lbfgsb_cauchy(
         p = p.at[i].set(jnp.where((i < col2) & has_gradient, 0.0, p[i]))
 
     for i in range(n):
-        active_gradient = has_gradient
         neggi = -g[i]
-        can_reset = active_gradient & (iwhere[i] != 3) & (iwhere[i] != -1)
+        can_reset = has_gradient & (iwhere[i] != 3) & (iwhere[i] != -1)
         tl = jnp.where(nbd[i] <= NBD_BOTH, x[i] - l[i], 0.0)
         tu = jnp.where(nbd[i] >= NBD_BOTH, u[i] - x[i], 0.0)
         xlower = (nbd[i] <= NBD_BOTH) & (tl <= 0.0)
@@ -1498,7 +2552,7 @@ def lbfgsb_cauchy(
         )
         iwhere = iwhere.at[i].set(jnp.where(can_reset, reset_iwhere, iwhere[i]))
 
-        movable = active_gradient & ((iwhere[i] == 0) | (iwhere[i] == -1))
+        movable = has_gradient & ((iwhere[i] == 0) | (iwhere[i] == -1))
         d = d.at[i].set(jnp.where(movable, neggi, 0.0))
         f1 = f1 - jnp.where(movable, neggi * neggi, 0.0)
         pointr = head
@@ -1554,7 +2608,7 @@ def lbfgsb_cauchy(
     xcp = x
     no_nonzero_direction = (nbreak == -1) & (nfree == n)
     for j in range(2 * m):
-        c = c.at[j].set(jnp.where(has_gradient & (j < col2), 0.0, c[j]))
+        c = c.at[j].set(jnp.where(has_gradient & active_col2[j], 0.0, c[j]))
 
     f2 = -theta * f1
     f2_org = f2
@@ -1564,7 +2618,7 @@ def lbfgsb_cauchy(
     initial_info = jnp.where(initial_bmv_active, bmv_initial.info, 0)
     f2 = jnp.where(
         initial_bmv_active,
-        f2 - jnp.sum(jnp.where(jnp.arange(2 * m, dtype=jnp.int32) < col2, v * p, 0.0)),
+        f2 - jnp.sum(jnp.where(active_col2, v * p, 0.0)),
         f2,
     )
     dtm = -f1 / f2
@@ -1624,7 +2678,7 @@ def lbfgsb_cauchy(
         )
         all_fixed = fix_breakpoint & (next_nleft == -1) & (nbreak == n)
 
-        next_nseg = nseg + jnp.where(fix_breakpoint & (~all_fixed), 1, 0)
+        next_nseg = nseg
         dibp2 = dibp * dibp
         next_f1 = f1 + dt * f2 + dibp2 - theta * dibp * zibp
         next_f2 = f2 - theta * dibp2
@@ -1652,10 +2706,9 @@ def lbfgsb_cauchy(
         bmv_break = lbfgsb_bmv(sy, wt, col, next_wbp)
         next_v = jnp.where(col_update, bmv_break.p, next_v)
         bmv_info = jnp.where(col_update, bmv_break.info, 0)
-        active_2m = jnp.arange(2 * m, dtype=jnp.int32) < col2
-        wmc = jnp.sum(jnp.where(active_2m, next_c * next_v, 0.0))
-        wmp = jnp.sum(jnp.where(active_2m, p * next_v, 0.0))
-        wmw = jnp.sum(jnp.where(active_2m, next_wbp * next_v, 0.0))
+        wmc = jnp.sum(jnp.where(active_col2, next_c * next_v, 0.0))
+        wmp = jnp.sum(jnp.where(active_col2, p * next_v, 0.0))
+        wmw = jnp.sum(jnp.where(active_col2, next_wbp * next_v, 0.0))
         for j in range(2 * m):
             next_p = next_p.at[j].set(
                 jnp.where(
@@ -2097,7 +3150,7 @@ def lbfgsb_lnsrlb(
     n = int(x.shape[0])
 
     def setup_branch(_):
-        next_dnorm = jnp.sqrt(jnp.sum(d * d))
+        next_dnorm = _lbfgsb_dnrm2(d)
         next_dtd = next_dnorm * next_dnorm
         next_stpmx = jnp.asarray(1.0e10, dtype=jnp.float64)
 
@@ -2193,7 +3246,7 @@ def lbfgsb_lnsrlb(
         temp_task_msg,
     ) = jax.lax.cond(task_msg == FG_LNSRCH, continue_branch, setup_branch, None)
 
-    next_gd = jnp.dot(g, d, precision=jax.lax.Precision.HIGHEST)
+    next_gd = _lbfgsb_ddot(g, d)
     first_function_value = ifun == 0
     next_gdold = jnp.where(first_function_value, next_gd, gdold)
     non_descent = first_function_value & (next_gd >= 0.0)

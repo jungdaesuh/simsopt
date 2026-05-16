@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from scipy.optimize import OptimizeResult
+from scipy.optimize._lbfgsb_py import LbfgsInvHessProduct
 
 from ..._core.jax_host_boundary import (
     host_array as _as_host_numpy,
@@ -63,6 +64,34 @@ def _status_message_lbfgs(status, invalid_state):
     return _status_message(status, invalid_state, _LBFGS_STATUS_MESSAGES)
 
 
+def _lbfgsb_hess_inv_from_state(state):
+    hess_inv_s = getattr(state, "hess_inv_s", None)
+    hess_inv_y = getattr(state, "hess_inv_y", None)
+    hess_inv_n_corrs = getattr(state, "hess_inv_n_corrs", None)
+    if hess_inv_s is None or hess_inv_y is None or hess_inv_n_corrs is None:
+        return None
+    n_corrs = _host_int(hess_inv_n_corrs)
+    return LbfgsInvHessProduct(
+        _as_host_numpy(hess_inv_s)[:n_corrs],
+        _as_host_numpy(hess_inv_y)[:n_corrs],
+    )
+
+
+def _lbfgs_success(status, invalid_state, state):
+    if getattr(state, "task", None) is not None:
+        return status == 0
+    return (status in _LBFGS_SUCCESS_STATUSES) and not invalid_state
+
+
+def _lbfgs_message(status, invalid_state, state):
+    task = getattr(state, "task", None)
+    if task is not None:
+        from . import _lbfgsb_scipy as lbfgsb
+
+        return lbfgsb.lbfgsb_task_message(task)
+    return _status_message_lbfgs(status, invalid_state)
+
+
 def _private_lbfgs_invalid_step_log_to_host(invalid_step_log):
     count = _host_int(invalid_step_log.count)
     if count <= 0:
@@ -80,9 +109,7 @@ def _private_lbfgs_invalid_step_log_to_host(invalid_step_log):
     valid_curvature = _as_host_numpy(invalid_step_log.valid_curvature)
     trial_converged = _as_host_numpy(invalid_step_log.trial_converged)
     line_search_statuses = _as_host_numpy(invalid_step_log.ls_status)
-    requested_initial_steps = _as_host_numpy(
-        invalid_step_log.requested_initial_step
-    )
+    requested_initial_steps = _as_host_numpy(invalid_step_log.requested_initial_step)
     first_tested_alphas = _as_host_numpy(invalid_step_log.first_tested_alpha)
     best_finite_alphas = _as_host_numpy(invalid_step_log.best_finite_alpha)
     returned_alphas = _as_host_numpy(invalid_step_log.returned_alpha)
@@ -143,23 +170,27 @@ def _private_lbfgs_result_to_optimize_result(state):
     ls_status = _host_int(state.ls_status)
     invalid_step_log = _private_lbfgs_invalid_step_log_to_host(state.invalid_step_log)
     optimizer_state_trace = tuple(state.optimizer_state_trace)
-    return OptimizeResult(
-        x=_as_host_numpy(state.x_k),
-        fun=_host_float(state.f_k),
-        jac=_as_host_numpy(state.g_k),
-        nit=_host_int(state.k),
-        nfev=_host_int(state.nfev),
-        njev=_host_int(state.ngev),
-        success=(status in _LBFGS_SUCCESS_STATUSES) and not invalid_state,
-        status=status,
-        message=_status_message_lbfgs(status, invalid_state),
-        ls_status=ls_status,
-        line_search_final_status=ls_status,
-        maxiter_hit=status == 1,
-        rejected_step_count=len(invalid_step_log),
-        invalid_step_log=invalid_step_log,
-        optimizer_state_trace=optimizer_state_trace,
-    )
+    result_fields = {
+        "x": _as_host_numpy(state.x_k),
+        "fun": _host_float(state.f_k),
+        "jac": _as_host_numpy(state.g_k),
+        "nit": _host_int(state.k),
+        "nfev": _host_int(state.nfev),
+        "njev": _host_int(state.ngev),
+        "success": _lbfgs_success(status, invalid_state, state),
+        "status": status,
+        "message": _lbfgs_message(status, invalid_state, state),
+        "ls_status": ls_status,
+        "line_search_final_status": ls_status,
+        "maxiter_hit": status == 1,
+        "rejected_step_count": len(invalid_step_log),
+        "invalid_step_log": invalid_step_log,
+        "optimizer_state_trace": optimizer_state_trace,
+    }
+    hess_inv = _lbfgsb_hess_inv_from_state(state)
+    if hess_inv is not None:
+        result_fields["hess_inv"] = hess_inv
+    return OptimizeResult(**result_fields)
 
 
 def _scipy_result_is_continuable(result):

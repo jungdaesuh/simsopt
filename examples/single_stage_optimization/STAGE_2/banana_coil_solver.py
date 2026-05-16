@@ -767,7 +767,9 @@ def build_equilibrium_path(args):
     )
 
 
-def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir, *, backend):
+def load_stage2_seed_configuration(
+    seed_bs_path, surf, num_tf_coils, out_dir, *, backend
+):
     if backend == "jax":
         from simsopt._core.json import load_specs
         from simsopt.field.biotsavart_jax_backend import SpecBackedBiotSavartJAX
@@ -782,9 +784,7 @@ def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir, *,
     curves_to_vtk(curves, out_dir + "curves_init", close=True)
     unitn = surf.unitnormal()
     normal_field = host_array(bs.B().reshape(unitn.shape), dtype=np.float64)
-    point_data = {
-        "B_N": np.sum(normal_field * unitn, axis=2)[:, :, None]
-    }
+    point_data = {"B_N": np.sum(normal_field * unitn, axis=2)[:, :, None]}
     surf.to_vtk(out_dir + "surf_init", extra_data=point_data)
 
     banana_coils = coils[num_tf_coils:]
@@ -927,6 +927,7 @@ def time_stage2_callback(callback):
     start = time.perf_counter()
     _block_until_ready_tree(callback())
     return float(time.perf_counter() - start)
+
 
 def profile_stage2_named_callbacks(callbacks):
     return {
@@ -1212,9 +1213,7 @@ def build_stage2_target_reporting_snapshot(target_objective_bundle, dofs):
         "curvature": host_float(summary.curvature),
         "banana_current_A": host_float(summary.banana_current_A),
         "grad_norm": float(np.linalg.norm(host_array(grad))),
-        "distance_constraint_violated": host_bool(
-            summary.distance_constraint_violated
-        ),
+        "distance_constraint_violated": host_bool(summary.distance_constraint_violated),
         "self_intersecting": host_bool(summary.self_intersecting),
     }
     if terms is not None:
@@ -1533,9 +1532,9 @@ def should_restore_stage2_feasible_partial(
         return False
     if final_partial is None:
         return True
-    return _stage2_feasible_partial_sort_key(best_partial) < _stage2_feasible_partial_sort_key(
-        final_partial
-    )
+    return _stage2_feasible_partial_sort_key(
+        best_partial
+    ) < _stage2_feasible_partial_sort_key(final_partial)
 
 
 def evaluate_stage2_objective(
@@ -1747,8 +1746,7 @@ def smooth_min_distance_signed_constraint(
     smooth_min, flat_weights = _smoothmin_selected(flat_distances, temperature)
 
     point_gradients = [
-        np.zeros_like(np.asarray(curve.gamma(), dtype=float))
-        for curve in curves
+        np.zeros_like(np.asarray(curve.gamma(), dtype=float)) for curve in curves
     ]
     offset = 0
     for curve_index, other_index, rows, cols, diffs, distances in selected_entries:
@@ -1756,7 +1754,9 @@ def smooth_min_distance_signed_constraint(
         local_weights = flat_weights[offset : offset + count]
         offset += count
         directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
-        np.add.at(point_gradients[curve_index], rows, local_weights[:, None] * directions)
+        np.add.at(
+            point_gradients[curve_index], rows, local_weights[:, None] * directions
+        )
         np.add.at(
             point_gradients[other_index],
             cols,
@@ -1885,9 +1885,7 @@ def evaluate_stage2_alm_problem(
     )
 
     unitn = new_surf.unitnormal()
-    BdotN = np.mean(
-        np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2))
-    )
+    BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
     outstr = (
         f"ALM J={evaluation['total']:.1e}, Jflux={base_value:.1e}, "
         f"Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
@@ -2158,16 +2156,17 @@ def run_stage2_optimizer(
     )
 
     use_explicit_value_and_grad = value_and_grad_fun is not None
-    if isinstance(contract, TargetOptimizerContract) and contract.use_least_squares_objective:
+    if (
+        isinstance(contract, TargetOptimizerContract)
+        and contract.use_least_squares_objective
+    ):
         if residual_fun is None:
             raise RuntimeError(
                 "Stage 2 LM optimization requires an explicit residual-vector objective."
             )
         if failure_callback is not None:
             raise ValueError(
-                "Stage 2 target-lane LM optimization does not support "
-                "failure_callback; line-search failure diagnostics are only "
-                "available for the lbfgs-ondevice target lane."
+                "Stage 2 target-lane LM optimization does not support failure_callback."
             )
         return target_least_squares(
             residual_fun,
@@ -2200,8 +2199,11 @@ def run_stage2_optimizer(
             "callback": callback,
             "progress_callback": progress_callback,
         }
-        if failure_callback is not None and contract.method == "lbfgs-ondevice":
-            target_minimize_kwargs["failure_callback"] = failure_callback
+        if failure_callback is not None:
+            raise ValueError(
+                "Stage 2 target-lane optimization does not support "
+                "failure_callback with SciPy-compatible L-BFGS-B."
+            )
         return target_minimize(objective_fun, dofs, **target_minimize_kwargs)
     if not isinstance(contract, ReferenceOptimizerContract):
         raise RuntimeError(
@@ -2214,9 +2216,7 @@ def run_stage2_optimizer(
         )
     if failure_callback is not None:
         raise ValueError(
-            "Stage 2 reference-lane optimization does not support "
-            "failure_callback; use the target ondevice lane for "
-            "line-search failure diagnostics."
+            "Stage 2 reference-lane optimization does not support failure_callback."
         )
     return reference_minimize(
         value_and_grad_fun,
@@ -3384,13 +3384,15 @@ if __name__ == "__main__":
         if alm_inner_optimizer_contract is not None:
             assert target_objective_bundle is not None
             assert target_objective_bundle.alm_value_and_grad_builder is not None
-            alm_target_value_and_grad = target_objective_bundle.alm_value_and_grad_builder(
-                distance_smoothing=float(args.alm_distance_smoothing),
-                curvature_smoothing=float(args.alm_curvature_smoothing),
-                curve_surface_threshold=(
-                    float(CS_THRESHOLD) if Jcsdist is not None else None
-                ),
-                banana_current_threshold=float(args.banana_current_max_A),
+            alm_target_value_and_grad = (
+                target_objective_bundle.alm_value_and_grad_builder(
+                    distance_smoothing=float(args.alm_distance_smoothing),
+                    curvature_smoothing=float(args.alm_curvature_smoothing),
+                    curve_surface_threshold=(
+                        float(CS_THRESHOLD) if Jcsdist is not None else None
+                    ),
+                    banana_current_threshold=float(args.banana_current_max_A),
+                )
             )
         res, _ = run_stage2_alm_optimizer_timed(
             dofs,
@@ -3777,7 +3779,9 @@ if __name__ == "__main__":
         if final_surface_kind == "rz_fourier":
             save_surface_rz_fourier_spec(stage2_surface_output_path, final_surface_spec)
         elif final_surface_kind == "xyz_fourier":
-            save_surface_xyz_fourier_spec(stage2_surface_output_path, final_surface_spec)
+            save_surface_xyz_fourier_spec(
+                stage2_surface_output_path, final_surface_spec
+            )
         elif final_surface_kind == "xyz_tensor_fourier":
             save_surface_xyz_tensor_fourier_spec(
                 stage2_surface_output_path,

@@ -1,62 +1,39 @@
-"""Host-dispatched L-BFGS over cached JAX value-and-gradient kernels.
-
-The two-loop recursion follows Nocedal & Wright, *Numerical Optimization*,
-Algorithm 7.4; the step selection is the shared host strong-Wolfe line search.
-"""
+"""SciPy-compatible L-BFGS-B over cached JAX value-and-gradient kernels."""
 
 from __future__ import annotations
 
 import numpy as np
 
 import jax
+import jax.numpy as jnp
 
-from ..optimizer_host_lbfgs import (
-    line_search_failure_reason_to_code,
-    line_search_value_and_grad_host as _line_search_value_and_grad_host,
-    minimize_lbfgs_host_core,
-)
 from ..optimizer_jax import (
     _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
     _prepare_optimizer_callable_inputs,
 )
+from ..optimizer_host_lbfgs import (
+    LINE_SEARCH_FAILURE_REASON_FAILED,
+    line_search_failure_reason_to_code,
+)
 from ._common import (
     _as_jax_dtype,
-    _bool_scalar,
     _cached_private_solver,
-    _int_scalar,
+    _normalize_lbfgs_counter_limit,
     _require_private_optimizer_runtime,
-    _resolve_lbfgs_limits,
     _scalar_value_and_grad,
 )
+from . import _lbfgsb_scipy as lbfgsb
 from ._types import (
     _LBFGSInvalidStepLog,
     _LBFGSResults,
 )
 
 
-# Cap the on-device rejected-step ring buffer so capacity does not scale with
-# maxiter. The retry policy only reads the most recent event, so a small bound
-# is sufficient and keeps the buffer size independent of problem dimension.
-_INVALID_STEP_LOG_MAX_CAPACITY = 256
-
-
-def _as_host_array(value, *, dtype):
-    return np.asarray(jax.device_get(value), dtype=np.dtype(dtype))
-
-
-def _as_host_scalar(value, *, dtype):
-    return _as_host_array(value, dtype=dtype).reshape(()).item()
-
-
-def _as_device_array(value, *, dtype):
-    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
-
-
-def _as_device_scalar(value, *, dtype):
-    return _as_device_array(
-        np.asarray(value, dtype=np.dtype(dtype)).reshape(()),
-        dtype=dtype,
-    )
+_SCIPY_LBFGSB_DEFAULT_MAXITER = 15000
+_SCIPY_LBFGSB_DEFAULT_MAXFUN = 15000
+_DEFAULT_OPTIMIZER_STATE_TRACE_MAX_BYTES = 64 * 1024 * 1024
+_TRACE_ARRAYS_PER_ENTRY = 2
+_TRACE_SCALARS_PER_ENTRY = 5
 
 
 def _coerce_value_and_grad_result(fun, x):
@@ -69,94 +46,6 @@ def _coerce_value_and_grad_result(fun, x):
             f"gradient matching x.shape={x.shape}, got {grad.shape}."
         )
     return value, grad
-
-
-def _invalid_step_log_from_events(events, *, capacity, dtype):
-    capacity = max(int(capacity), 1)
-    recent = tuple(events)[-capacity:]
-    iteration = np.zeros((capacity,), dtype=np.int32)
-    step_scale = np.zeros((capacity,), dtype=np.dtype(dtype))
-    line_search_failed = np.zeros((capacity,), dtype=np.bool_)
-    nonfinite_step = np.zeros((capacity,), dtype=np.bool_)
-    stalled_step = np.zeros((capacity,), dtype=np.bool_)
-    valid_curvature = np.zeros((capacity,), dtype=np.bool_)
-    trial_converged = np.zeros((capacity,), dtype=np.bool_)
-    ls_status = np.zeros((capacity,), dtype=np.int32)
-    requested_initial_step = np.zeros((capacity,), dtype=np.dtype(dtype))
-    first_tested_alpha = np.zeros((capacity,), dtype=np.dtype(dtype))
-    best_finite_alpha = np.zeros((capacity,), dtype=np.dtype(dtype))
-    returned_alpha = np.zeros((capacity,), dtype=np.dtype(dtype))
-    failure_reason = np.zeros((capacity,), dtype=np.int32)
-    armijo_margin = np.full((capacity,), np.nan, dtype=np.dtype(dtype))
-    curvature_margin = np.full((capacity,), np.nan, dtype=np.dtype(dtype))
-
-    for index, event in enumerate(recent):
-        iteration[index] = event.iteration
-        step_scale[index] = event.step_scale
-        line_search_failed[index] = event.line_search_failed
-        nonfinite_step[index] = event.nonfinite_step
-        stalled_step[index] = event.stalled_step
-        valid_curvature[index] = event.valid_curvature
-        trial_converged[index] = event.trial_converged
-        ls_status[index] = event.ls_status
-        requested_initial_step[index] = event.requested_initial_step
-        first_tested_alpha[index] = event.first_tested_alpha
-        best_finite_alpha[index] = event.best_finite_alpha
-        returned_alpha[index] = event.returned_alpha
-        failure_reason[index] = line_search_failure_reason_to_code(event.failure_reason)
-        armijo_margin[index] = event.armijo_margin
-        curvature_margin[index] = event.curvature_margin
-
-    return _LBFGSInvalidStepLog(
-        count=_int_scalar(len(recent)),
-        write_index=_int_scalar(len(recent) % capacity),
-        iteration=_as_device_array(iteration, dtype=np.int32),
-        step_scale=_as_device_array(step_scale, dtype=dtype),
-        line_search_failed=_as_device_array(line_search_failed, dtype=np.bool_),
-        nonfinite_step=_as_device_array(nonfinite_step, dtype=np.bool_),
-        stalled_step=_as_device_array(stalled_step, dtype=np.bool_),
-        valid_curvature=_as_device_array(valid_curvature, dtype=np.bool_),
-        trial_converged=_as_device_array(trial_converged, dtype=np.bool_),
-        ls_status=_as_device_array(ls_status, dtype=np.int32),
-        requested_initial_step=_as_device_array(requested_initial_step, dtype=dtype),
-        first_tested_alpha=_as_device_array(first_tested_alpha, dtype=dtype),
-        best_finite_alpha=_as_device_array(best_finite_alpha, dtype=dtype),
-        returned_alpha=_as_device_array(returned_alpha, dtype=dtype),
-        failure_reason=_as_device_array(failure_reason, dtype=np.int32),
-        armijo_margin=_as_device_array(armijo_margin, dtype=dtype),
-        curvature_margin=_as_device_array(curvature_margin, dtype=dtype),
-    )
-
-
-def _host_state_to_lbfgs_results(
-    state,
-    *,
-    invalid_log_capacity,
-    dtype,
-    optimizer_state_trace=(),
-):
-    return _LBFGSResults(
-        converged=_bool_scalar(state.converged),
-        failed=_bool_scalar(state.failed),
-        k=_int_scalar(state.k),
-        nfev=_int_scalar(state.nfev),
-        ngev=_int_scalar(state.ngev),
-        x_k=_as_device_array(state.x_k, dtype=dtype),
-        f_k=_as_device_scalar(state.f_k, dtype=dtype),
-        g_k=_as_device_array(state.g_k, dtype=dtype),
-        s_history=_as_device_array(state.s_history, dtype=dtype),
-        y_history=_as_device_array(state.y_history, dtype=dtype),
-        rho_history=_as_device_array(state.rho_history, dtype=dtype),
-        gamma=_as_device_scalar(state.gamma, dtype=dtype),
-        status=_int_scalar(state.status),
-        ls_status=_int_scalar(state.ls_status),
-        invalid_step_log=_invalid_step_log_from_events(
-            state.invalid_step_events,
-            capacity=invalid_log_capacity,
-            dtype=dtype,
-        ),
-        optimizer_state_trace=tuple(optimizer_state_trace),
-    )
 
 
 def _cached_lbfgs_value_and_grad_kernel(
@@ -201,27 +90,239 @@ def _cached_lbfgs_value_and_grad_kernel(
     )
 
 
-def _eval_value_and_grad_host(kernel, x_host, *, dtype):
-    x_device = _as_device_array(x_host, dtype=dtype)
-    value_device, grad_device = kernel(x_device)
-    return (
-        float(_as_host_scalar(value_device, dtype=dtype)),
-        _as_host_array(grad_device, dtype=dtype),
+def _lbfgsb_initial_state_kernel(*, m: int, ftol: float, gtol: float, maxls: int):
+    def build(x0):
+        return lbfgsb.lbfgsb_initial_state(
+            x0,
+            m=m,
+            bounds=None,
+            ftol=ftol,
+            gtol=gtol,
+            maxls=maxls,
+        )
+
+    return jax.jit(build)
+
+
+def _lbfgsb_mainlb_kernel(
+    value_and_grad,
+    *,
+    maxiter: int,
+    maxfun: int,
+    accepted_step_callback=None,
+):
+    def run(state: lbfgsb.LbfgsbState):
+        final_state = lbfgsb.lbfgsb_mainlb(
+            value_and_grad,
+            state,
+            maxiter=maxiter,
+            maxfun=maxfun,
+            accepted_step_callback=accepted_step_callback,
+        )
+        history = lbfgsb.lbfgsb_inverse_hessian_history(final_state)
+        return _lbfgsb_state_to_lbfgs_results(
+            final_state,
+            history=history,
+            maxiter_limit=jnp.asarray(maxiter, dtype=jnp.int32),
+            maxfun_limit=jnp.asarray(maxfun, dtype=jnp.int32),
+        )
+
+    return jax.jit(run)
+
+
+def _resolve_scipy_lbfgsb_limits(maxiter, maxfun):
+    maxiter_limit = _normalize_lbfgs_counter_limit(
+        _SCIPY_LBFGSB_DEFAULT_MAXITER if maxiter is None else maxiter
+    )
+    maxfun_limit = _normalize_lbfgs_counter_limit(
+        _SCIPY_LBFGSB_DEFAULT_MAXFUN if maxfun is None else maxfun
+    )
+    return maxiter_limit, maxfun_limit
+
+
+def _check_lbfgsb_trace_budget(
+    d: int,
+    maxiter_limit,
+    *,
+    record_optimizer_state_trace: bool,
+    max_optimizer_state_trace_bytes,
+) -> None:
+    if not record_optimizer_state_trace:
+        return
+    iterations = max(1, int(maxiter_limit))
+    trace_bytes = iterations * (
+        (_TRACE_ARRAYS_PER_ENTRY * int(d) + _TRACE_SCALARS_PER_ENTRY)
+        * np.dtype(np.float64).itemsize
+    )
+    limit = (
+        _DEFAULT_OPTIMIZER_STATE_TRACE_MAX_BYTES
+        if max_optimizer_state_trace_bytes is None
+        else int(max_optimizer_state_trace_bytes)
+    )
+    if trace_bytes > limit:
+        raise ValueError(
+            "optimizer_state_trace would allocate "
+            f"{trace_bytes} bytes for d={int(d)} and iterations={iterations}, "
+            f"exceeding max_optimizer_state_trace_bytes={limit}."
+        )
+
+
+def _lbfgsb_public_status(state, *, maxiter_limit, maxfun_limit):
+    task0 = state.workspace.task[0]
+    limited = (state.nfev > maxfun_limit) | (state.n_iterations >= maxiter_limit)
+    zero = jnp.zeros_like(task0)
+    one = jnp.ones_like(task0)
+    return jnp.where(
+        task0 == lbfgsb.CONVERGENCE,
+        zero,
+        jnp.where(limited, one, one + one),
     )
 
 
-def _coerce_initial_value_and_grad_result_host(
-    initial_value_and_grad, x_shape, *, dtype
-):
+def _lbfgsb_rho_history(history: lbfgsb.LbfgsbInverseHessianHistory) -> jax.Array:
+    return jnp.zeros((history.s.shape[0],), dtype=history.s.dtype)
+
+
+def _lbfgsb_invalid_step_log(state: lbfgsb.LbfgsbState) -> _LBFGSInvalidStepLog:
+    int_zero = state.nfev - state.nfev
+    int_slot = jnp.zeros_like(state.workspace.isave[:1])
+    float_slot = jnp.zeros_like(state.workspace.dsave[:1])
+    abnormal = state.workspace.task[0] == lbfgsb.ABNORMAL
+    abnormal_slot = jnp.reshape(abnormal, (1,))
+    false_slot = jnp.zeros_like(int_slot, dtype=bool)
+    true_slot = jnp.ones_like(int_slot, dtype=bool)
+    failed_reason = jnp.asarray(
+        line_search_failure_reason_to_code(LINE_SEARCH_FAILURE_REASON_FAILED),
+        dtype=state.workspace.isave.dtype,
+    )
+    step = jnp.where(abnormal, state.workspace.dsave[13], state.workspace.dsave[13] * 0)
+    step_slot = jnp.reshape(step, (1,))
+    nonfinite = (~jnp.isfinite(state.f)) | jnp.any(~jnp.isfinite(state.g))
+    nonfinite_slot = jnp.reshape(abnormal & nonfinite, (1,))
+    failure_reason_slot = jnp.where(abnormal_slot, failed_reason, int_slot)
+    return _LBFGSInvalidStepLog(
+        count=jnp.where(abnormal, int_zero + 1, int_zero),
+        write_index=int_zero,
+        iteration=jnp.where(
+            abnormal_slot, jnp.reshape(state.n_iterations, (1,)), int_slot
+        ),
+        step_scale=step_slot,
+        line_search_failed=abnormal_slot,
+        nonfinite_step=nonfinite_slot,
+        stalled_step=false_slot,
+        valid_curvature=true_slot,
+        trial_converged=false_slot,
+        ls_status=jnp.where(abnormal_slot, state.workspace.isave[34:35], int_slot),
+        requested_initial_step=step_slot,
+        first_tested_alpha=step_slot,
+        best_finite_alpha=float_slot,
+        returned_alpha=float_slot,
+        failure_reason=failure_reason_slot,
+        armijo_margin=float_slot,
+        curvature_margin=float_slot,
+    )
+
+
+def _lbfgsb_state_with_initial_value_and_grad(
+    state: lbfgsb.LbfgsbState,
+    initial_value_and_grad,
+    *,
+    dtype,
+) -> lbfgsb.LbfgsbState:
+    started = lbfgsb.lbfgsb_setulb(state)
     value, grad = initial_value_and_grad
-    value = float(_as_host_scalar(value, dtype=dtype))
-    grad = _as_host_array(grad, dtype=dtype)
-    if grad.shape != tuple(x_shape):
+    grad = _as_jax_dtype(grad, dtype)
+    if grad.shape != started.x.shape:
         raise ValueError(
             "initial_value_and_grad must provide a gradient matching "
-            f"x.shape={tuple(x_shape)}, got {grad.shape}."
+            f"x.shape={started.x.shape}, got {grad.shape}."
         )
-    return value, grad
+    return started._replace(
+        f=_as_jax_dtype(value, dtype),
+        g=grad,
+        nfev=started.nfev + 1,
+        njev=started.njev + 1,
+    )
+
+
+def _lbfgsb_accepted_step_observer(
+    *,
+    callback,
+    progress_callback,
+    optimizer_state_trace,
+    record_optimizer_state_trace: bool,
+):
+    if (
+        callback is None
+        and progress_callback is None
+        and not record_optimizer_state_trace
+    ):
+        return None
+
+    def observe(iteration, x, f, g, nfev, njev):
+        x_host = np.asarray(x, dtype=float)
+        g_host = np.asarray(g, dtype=float)
+        f_host = float(np.asarray(f).reshape(()).item())
+        iteration_host = int(np.asarray(iteration).reshape(()).item())
+        if callback is not None:
+            callback(x_host)
+        if progress_callback is not None:
+            progress_callback(
+                iteration_host,
+                f_host,
+                float(np.linalg.norm(g_host, ord=np.inf)),
+            )
+        if record_optimizer_state_trace:
+            optimizer_state_trace.append(
+                {
+                    "iteration": iteration_host,
+                    "x": x_host,
+                    "fun": f_host,
+                    "jac": g_host,
+                    "jac_inf_norm": float(np.linalg.norm(g_host, ord=np.inf)),
+                    "nfev": int(np.asarray(nfev).reshape(()).item()),
+                    "njev": int(np.asarray(njev).reshape(()).item()),
+                }
+            )
+
+    return observe
+
+
+def _lbfgsb_state_to_lbfgs_results(
+    state: lbfgsb.LbfgsbState,
+    *,
+    history: lbfgsb.LbfgsbInverseHessianHistory,
+    maxiter_limit,
+    maxfun_limit,
+    optimizer_state_trace=(),
+) -> _LBFGSResults:
+    status = _lbfgsb_public_status(
+        state,
+        maxiter_limit=maxiter_limit,
+        maxfun_limit=maxfun_limit,
+    )
+    return _LBFGSResults(
+        converged=status == jnp.zeros_like(status),
+        failed=status != jnp.zeros_like(status),
+        k=state.n_iterations,
+        nfev=state.nfev,
+        ngev=state.njev,
+        x_k=state.x,
+        f_k=state.f,
+        g_k=state.g,
+        s_history=history.s,
+        y_history=history.y,
+        rho_history=_lbfgsb_rho_history(history),
+        gamma=state.workspace.dsave[0],
+        status=status,
+        ls_status=state.workspace.isave[34],
+        invalid_step_log=_lbfgsb_invalid_step_log(state),
+        optimizer_state_trace=tuple(optimizer_state_trace),
+        hess_inv_s=history.s,
+        hess_inv_y=history.y,
+        hess_inv_n_corrs=history.n_corrs,
+        task=state.workspace.task,
+    )
 
 
 def _minimize_lbfgs_private_impl(
@@ -231,18 +332,16 @@ def _minimize_lbfgs_private_impl(
     cache_owner=None,
     objective_mode,
     maxiter=None,
-    norm=np.inf,
-    maxcor=200,
+    maxcor=10,
     ftol=0.0,
     gtol=1e-5,
     maxfun=None,
-    maxgrad=None,
     maxls=20,
-    initial_step_size=None,
     callback=None,
     progress_callback=None,
-    failure_callback=None,
     initial_value_and_grad=None,
+    record_optimizer_state_trace=False,
+    max_optimizer_state_trace_bytes=None,
 ):
     value_and_grad_fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
         value_and_grad_fun,
@@ -251,18 +350,16 @@ def _minimize_lbfgs_private_impl(
         callback=callback,
     )
     x0 = _require_private_optimizer_runtime(x0)
-    d = len(x0)
     dtype = x0.dtype
-    x0_host = _as_host_array(x0, dtype=dtype)
-    maxiter_limit_value, _, _ = _resolve_lbfgs_limits(
-        d,
+    maxiter_limit_value, maxfun_limit_value = _resolve_scipy_lbfgsb_limits(
         maxiter,
         maxfun,
-        maxgrad,
     )
-    invalid_log_capacity = max(
-        1,
-        min(int(maxiter_limit_value), _INVALID_STEP_LOG_MAX_CAPACITY),
+    _check_lbfgsb_trace_budget(
+        int(x0.size),
+        maxiter_limit_value,
+        record_optimizer_state_trace=record_optimizer_state_trace,
+        max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
     )
 
     value_and_grad_kernel = _cached_lbfgs_value_and_grad_kernel(
@@ -274,42 +371,34 @@ def _minimize_lbfgs_private_impl(
         shape=x0.shape,
     )
 
-    def eval_value_and_grad_host(x_host):
-        return _eval_value_and_grad_host(value_and_grad_kernel, x_host, dtype=dtype)
-
-    initial_value_and_grad_host = (
-        None
-        if initial_value_and_grad is None
-        else _coerce_initial_value_and_grad_result_host(
-            initial_value_and_grad,
-            x0.shape,
-            dtype=dtype,
-        )
-    )
-    host_result = minimize_lbfgs_host_core(
-        eval_value_and_grad_host,
-        x0_host,
-        maxiter=maxiter,
-        norm=norm,
-        maxcor=maxcor,
+    state = _lbfgsb_initial_state_kernel(
+        m=maxcor,
         ftol=ftol,
         gtol=gtol,
-        maxfun=maxfun,
-        maxgrad=maxgrad,
         maxls=maxls,
-        initial_step_size=initial_step_size,
+    )(x0)
+    if initial_value_and_grad is not None:
+        state = _lbfgsb_state_with_initial_value_and_grad(
+            state,
+            initial_value_and_grad,
+            dtype=dtype,
+        )
+    optimizer_state_trace = []
+    accepted_step_callback = _lbfgsb_accepted_step_observer(
         callback=callback,
         progress_callback=progress_callback,
-        failure_callback=failure_callback,
-        initial_value_and_grad=initial_value_and_grad_host,
-        line_search_value_and_grad=_line_search_value_and_grad_host,
+        optimizer_state_trace=optimizer_state_trace,
+        record_optimizer_state_trace=record_optimizer_state_trace,
     )
-    return _host_state_to_lbfgs_results(
-        host_result,
-        invalid_log_capacity=invalid_log_capacity,
-        dtype=dtype,
-        optimizer_state_trace=host_result.optimizer_state_trace,
-    )
+    result = _lbfgsb_mainlb_kernel(
+        value_and_grad_kernel,
+        maxiter=int(maxiter_limit_value),
+        maxfun=int(maxfun_limit_value),
+        accepted_step_callback=accepted_step_callback,
+    )(state)
+    if accepted_step_callback is not None:
+        jax.effects_barrier()
+    return result._replace(optimizer_state_trace=tuple(optimizer_state_trace))
 
 
 def _minimize_lbfgs_private(
@@ -317,17 +406,15 @@ def _minimize_lbfgs_private(
     x0,
     *,
     maxiter=None,
-    norm=np.inf,
-    maxcor=200,
+    maxcor=10,
     ftol=0.0,
     gtol=1e-5,
     maxfun=None,
-    maxgrad=None,
     maxls=20,
-    initial_step_size=None,
     callback=None,
     progress_callback=None,
-    failure_callback=None,
+    record_optimizer_state_trace=False,
+    max_optimizer_state_trace_bytes=None,
 ):
     return _minimize_lbfgs_private_impl(
         _scalar_value_and_grad(fun),
@@ -335,17 +422,15 @@ def _minimize_lbfgs_private(
         cache_owner=fun,
         objective_mode="scalar",
         maxiter=maxiter,
-        norm=norm,
         maxcor=maxcor,
         ftol=ftol,
         gtol=gtol,
         maxfun=maxfun,
-        maxgrad=maxgrad,
         maxls=maxls,
-        initial_step_size=initial_step_size,
         callback=callback,
         progress_callback=progress_callback,
-        failure_callback=failure_callback,
+        record_optimizer_state_trace=record_optimizer_state_trace,
+        max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
     )
 
 
@@ -354,18 +439,16 @@ def _minimize_lbfgs_private_value_and_grad(
     x0,
     *,
     maxiter=None,
-    norm=np.inf,
-    maxcor=200,
+    maxcor=10,
     ftol=0.0,
     gtol=1e-5,
     maxfun=None,
-    maxgrad=None,
     maxls=20,
-    initial_step_size=None,
     callback=None,
     progress_callback=None,
-    failure_callback=None,
     initial_value_and_grad=None,
+    record_optimizer_state_trace=False,
+    max_optimizer_state_trace_bytes=None,
 ):
     return _minimize_lbfgs_private_impl(
         fun,
@@ -373,16 +456,14 @@ def _minimize_lbfgs_private_value_and_grad(
         cache_owner=fun,
         objective_mode="value_and_grad",
         maxiter=maxiter,
-        norm=norm,
         maxcor=maxcor,
         ftol=ftol,
         gtol=gtol,
         maxfun=maxfun,
-        maxgrad=maxgrad,
         maxls=maxls,
-        initial_step_size=initial_step_size,
         callback=callback,
         progress_callback=progress_callback,
-        failure_callback=failure_callback,
         initial_value_and_grad=initial_value_and_grad,
+        record_optimizer_state_trace=record_optimizer_state_trace,
+        max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
     )

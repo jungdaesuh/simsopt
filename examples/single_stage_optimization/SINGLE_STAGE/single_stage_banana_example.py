@@ -142,7 +142,7 @@ from hardware_constraints import (
     apply_hardware_constraint_verdict,
     sanitize_json_payload,
 )
-from jax_host_boundary import host_array, host_bool, host_float
+from jax_host_boundary import host_array, host_bool, host_float, host_int
 from plotting_utils import cross_section_plot, norm_field_plot, norm_field_summary
 from run_metadata import build_artifact_manifest, build_runtime_provenance
 
@@ -168,7 +168,6 @@ _JAX_ONDEVICE_BOOZER_OUTER_OPTIMIZER_BACKENDS = _JAX_TARGET_OUTER_OPTIMIZER_BACK
 _REFERENCE_OUTER_MAXLS_DEFAULT = 20
 _TARGET_OUTER_MAXLS_BENCHMARK_DEFAULT = 4
 _TARGET_OUTER_MAXLS_DEFAULT = 8
-_TARGET_OUTER_INITIAL_STEP_SIZE_BENCHMARK_DEFAULT = 1.0e-4
 _REFERENCE_OUTER_MAXCOR_DEFAULT = 300
 _TARGET_OUTER_MAXCOR_DEFAULT = 20
 _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT = 1e-6
@@ -663,77 +662,16 @@ def _build_target_lane_invalid_state_event(
     return event
 
 
-def build_target_lane_invalid_state_failure_callback(events, *, phase):
-    """Record rejected target-lane L-BFGS trial states for postmortem analysis."""
-
-    def _record(
-        iteration,
-        trial_x,
-        trial_f,
-        trial_g,
-        search_direction,
-        step_vector,
-        step_scale,
-        line_search_failed,
-        nonfinite_step,
-        stalled_step,
-        valid_curvature,
-        trial_converged,
-        ls_status,
-    ):
-        events.append(
-            _build_target_lane_invalid_state_event(
-                phase=phase,
-                iteration=iteration,
-                step_scale=step_scale,
-                line_search_failed=line_search_failed,
-                nonfinite_step=nonfinite_step,
-                stalled_step=stalled_step,
-                valid_curvature=valid_curvature,
-                trial_converged=trial_converged,
-                ls_status=ls_status,
-            )
-            | {
-                "trial_value": _summarize_host_scalar(trial_f),
-                "trial_x": _summarize_host_vector(trial_x),
-                "trial_grad": _summarize_host_vector(trial_g),
-                "search_direction": _summarize_host_vector(search_direction),
-                "step_vector": _summarize_host_vector(step_vector),
-            }
-        )
-
-    return _record
-
-
 def target_lane_diagnostic_callbacks_enabled(args) -> bool:
-    """Return whether detailed target-lane host callbacks are explicitly enabled."""
+    """Return whether target-lane accepted-step/progress callbacks are enabled."""
 
-    return bool(
-        getattr(args, "diagnostic_callbacks", False)
-        or getattr(args, "record_target_lane_invalid_state_events", False)
-    )
+    return bool(getattr(args, "diagnostic_callbacks", False))
 
 
 def record_target_lane_invalid_state_events_enabled(args) -> bool:
-    """Return whether detailed target-lane callback payloads are enabled."""
+    """Return whether target-lane result invalid-step logs are requested."""
 
-    return target_lane_diagnostic_callbacks_enabled(args)
-
-
-def resolve_target_lane_invalid_state_failure_callback(
-    events,
-    *,
-    phase,
-    use_target_lane: bool,
-    args,
-):
-    """Return the rejected-step diagnostic callback only when explicitly enabled."""
-
-    if (not use_target_lane) or (
-        not record_target_lane_invalid_state_events_enabled(args)
-    ):
-        return None
-    return build_target_lane_invalid_state_failure_callback(events, phase=phase)
+    return bool(getattr(args, "record_target_lane_invalid_state_events", False))
 
 
 def extend_target_lane_invalid_state_events_from_result(events, result, *, phase):
@@ -1051,6 +989,9 @@ def build_single_stage_problem_contract(
             "diagnose_target_lane_optimistix": bool(
                 getattr(args, "diagnose_target_lane_optimistix", False)
             ),
+            "diagnose_target_lane_optax": bool(
+                getattr(args, "diagnose_target_lane_optax", False)
+            ),
             "diagnose_target_lane_scaled_phase1": bool(
                 getattr(args, "diagnose_target_lane_scaled_phase1", False)
             ),
@@ -1219,12 +1160,12 @@ def build_single_stage_results_envelope(
     if getattr(args, "diagnose_target_lane_gradient", False):
         required_files.append("target_lane_gradient_diagnosis.json")
         planned_files.append("target_lane_gradient_diagnosis.json")
-    if getattr(args, "diagnose_target_lane_first_line_search", False):
-        required_files.append("target_lane_first_line_search_diagnosis.json")
-        planned_files.append("target_lane_first_line_search_diagnosis.json")
     if getattr(args, "diagnose_target_lane_optimistix", False):
         required_files.append("target_lane_optimistix_diagnosis.json")
         planned_files.append("target_lane_optimistix_diagnosis.json")
+    if getattr(args, "diagnose_target_lane_optax", False):
+        required_files.append("target_lane_optax_diagnosis.json")
+        planned_files.append("target_lane_optax_diagnosis.json")
     if getattr(args, "diagnose_target_lane_scaled_phase1", False):
         required_files.append("target_lane_scaled_phase1_diagnosis.json")
         planned_files.append("target_lane_scaled_phase1_diagnosis.json")
@@ -3071,41 +3012,6 @@ def single_stage_retry_triggered_by_invalid_state(events):
     )
 
 
-def _target_lane_invalid_state_event_scalar(event, key):
-    scalar = event[key]
-    if isinstance(scalar, dict):
-        scalar = scalar["value"]
-    return float(scalar)
-
-
-def _target_lane_retry_seed_step_size(failure_event):
-    return _target_lane_invalid_state_event_scalar(
-        failure_event,
-        "requested_initial_step",
-    )
-
-
-def resolve_single_stage_retry_initial_step_size(
-    previous_initial_step_size,
-    failure_events,
-    *,
-    single_stage_search_policy,
-    retry_index,
-):
-    """Shrink the next target-lane trial step after an invalid-state failure."""
-    del retry_index
-    base_step_size = previous_initial_step_size
-    if base_step_size is None and failure_events:
-        base_step_size = _target_lane_retry_seed_step_size(failure_events[-1])
-    if base_step_size is None or base_step_size <= 0.0:
-        base_step_size = 1.0
-    return max(
-        float(base_step_size)
-        * float(single_stage_search_policy.retry_step_shrink_factor),
-        1.0e-6,
-    )
-
-
 def resolve_single_stage_contract_policy_context(
     *,
     warm_start_state,
@@ -4193,10 +4099,8 @@ def parse_args():
         if "TARGET_LANE_OUTER_INITIAL_STEP_SIZE" in os.environ
         else None,
         help=(
-            "Optional initial strong-Wolfe trial step for the JAX/ondevice "
-            "outer L-BFGS line search. This is mainly useful for proof and "
-            "benchmark runs whose first accepted step requires a much smaller "
-            "trial scale than the optimizer's default start."
+            "Unsupported by the SciPy-compatible target L-BFGS-B lane; use "
+            "--initial-step-scale for the supported scaled initial phase."
         ),
     )
     parser.add_argument(
@@ -4491,10 +4395,8 @@ def parse_args():
         "--diagnose-target-lane-first-line-search",
         action="store_true",
         help=(
-            "Build the JAX/ondevice target-lane runtime bundle, run the first "
-            "host-dispatched L-BFGS Wolfe search from the seeded -grad direction, "
-            "and write the actual trial alpha/value/derivative trace instead of "
-            "running the full outer optimizer."
+            "Fail fast: the removed host-dispatched first-line-search diagnostic "
+            "is not supported by the SciPy-compatible target L-BFGS-B lane."
         ),
     )
     parser.add_argument(
@@ -4504,6 +4406,16 @@ def parse_args():
             "Build the JAX/ondevice target-lane runtime bundle, run Optimistix "
             "BFGS on the same scalar objective, and write comparable diagnostics "
             "instead of using the normal outer optimizer."
+        ),
+    )
+    parser.add_argument(
+        "--diagnose-target-lane-optax",
+        action="store_true",
+        help=(
+            "Build the JAX/ondevice target-lane runtime bundle, run Optax "
+            "L-BFGS with zoom line search on the same scalar objective, and "
+            "write comparable diagnostics instead of using the normal outer "
+            "optimizer."
         ),
     )
     parser.add_argument(
@@ -4519,9 +4431,9 @@ def parse_args():
         "--diagnostic-callbacks",
         action="store_true",
         help=(
-            "Opt in to target-lane host callbacks for detailed progress and "
-            "rejected-step payloads. On explicit CUDA-only runs this also "
-            "keeps a CPU lane available for JAX host callbacks."
+            "Opt in to target-lane accepted-step and progress host callbacks. "
+            "Rejected-step diagnostics come from optimizer result invalid-step "
+            "logs."
         ),
     )
     parser.add_argument(
@@ -4546,8 +4458,7 @@ def parse_args():
         "--record-target-lane-invalid-state-events",
         action="store_true",
         help=(
-            "Deprecated alias for --diagnostic-callbacks. Keeps detailed "
-            "target-lane rejected-step payload recording enabled."
+            "Record target-lane invalid-step diagnostics from the optimizer result log."
         ),
     )
     parser.add_argument(
@@ -4569,7 +4480,9 @@ def parse_args():
     raw_argv = list(sys.argv[1:])
     args = parser.parse_args()
     args.diagnostic_callbacks = target_lane_diagnostic_callbacks_enabled(args)
-    args.record_target_lane_invalid_state_events = bool(args.diagnostic_callbacks)
+    args.record_target_lane_invalid_state_events = (
+        record_target_lane_invalid_state_events_enabled(args)
+    )
     args.boozer_least_squares_algorithm_explicit = (
         args.boozer_least_squares_algorithm is not None
     )
@@ -4659,6 +4572,7 @@ def parse_args():
         or args.diagnose_target_lane_gradient
         or args.diagnose_target_lane_first_line_search
         or args.diagnose_target_lane_optimistix
+        or args.diagnose_target_lane_optax
         or args.diagnose_target_lane_scaled_phase1
     ):
         raise ValueError(
@@ -6955,180 +6869,6 @@ def build_target_lane_gradient_diagnosis(
     )
 
 
-def build_target_lane_first_line_search_diagnosis(
-    value_and_grad,
-    dofs,
-    *,
-    initial_value_and_grad,
-    initial_step_size=None,
-    maxls,
-    gtol,
-):
-    """Trace the first target-lane L-BFGS line search from the seed state."""
-    from simsopt.geo.optimizer_jax_private._lbfgs import (
-        _line_search_value_and_grad_host,
-    )
-
-    x0 = np.asarray(host_array(dofs), dtype=np.float64).reshape(-1)
-
-    def eval_target_value_and_grad(x):
-        return _hostify_traceable_value_and_grad(value_and_grad, x)
-
-    f0 = host_float(initial_value_and_grad[0])
-    g0 = np.asarray(host_array(initial_value_and_grad[1]), dtype=np.float64)
-    g0 = g0.reshape(x0.shape)
-
-    p0 = -g0
-    dphi0 = float(np.dot(g0, p0))
-    p0_norm_sq = float(np.dot(p0, p0))
-    old_old_fval = float(f0 + np.linalg.norm(g0) * 0.5)
-    c1 = 1.0e-4
-    c2 = 0.9
-    trial_records = []
-
-    def eval_trial(x):
-        trial_x = np.asarray(host_array(x), dtype=np.float64).reshape(x0.shape)
-        if p0_norm_sq == 0.0:
-            alpha = 0.0
-        else:
-            alpha = float(np.dot(trial_x - x0, p0) / p0_norm_sq)
-        value, grad = eval_target_value_and_grad(trial_x)
-        dphi = float(np.dot(grad, p0))
-        armijo_rhs = float(f0 + c1 * alpha * dphi0)
-        armijo_margin = float(value - armijo_rhs)
-        curvature_margin = float(abs(dphi) - (-c2 * dphi0))
-        trial_records.append(
-            {
-                "trial_index": int(len(trial_records)),
-                "alpha": _summarize_host_scalar(alpha),
-                "value": _summarize_host_scalar(value),
-                "objective_delta": _summarize_host_scalar(float(value - f0)),
-                "linearized_objective_delta": _summarize_host_scalar(
-                    float(alpha * dphi0)
-                ),
-                "directional_derivative": _summarize_host_scalar(dphi),
-                "armijo_rhs": _summarize_host_scalar(armijo_rhs),
-                "armijo_margin": _summarize_host_scalar(armijo_margin),
-                "curvature_margin": _summarize_host_scalar(curvature_margin),
-                "armijo_satisfied": bool(value <= armijo_rhs),
-                "curvature_satisfied": bool(abs(dphi) <= -c2 * dphi0),
-                "grad": _summarize_host_gradient(grad),
-            }
-        )
-        return value, grad
-
-    line_search_result = _line_search_value_and_grad_host(
-        eval_trial,
-        x0,
-        p0,
-        f0,
-        g0,
-        old_old_fval=old_old_fval,
-        initial_step_size=initial_step_size,
-        maxiter=maxls,
-    )
-    alpha_star = float(line_search_result.a_k)
-    f_star = float(line_search_result.f_k)
-    g_star = np.asarray(line_search_result.g_k, dtype=np.float64).reshape(x0.shape)
-    step = alpha_star * p0
-    y = g_star - g0
-    step_norm = float(np.linalg.norm(step))
-    y_norm = float(np.linalg.norm(y))
-    yts = float(np.dot(y, step))
-    yty = float(np.dot(y, y))
-    step_eps = float(np.sqrt(np.finfo(np.float64).eps))
-    step_tol = step_eps * max(1.0, float(np.linalg.norm(x0)))
-    function_change = abs(float(f0 - f_star))
-    objective_tol = step_eps * max(abs(float(f0)), abs(float(f_star)))
-    gradient_change = y_norm
-    gradient_tol = step_eps * max(
-        float(np.linalg.norm(g0)),
-        float(np.linalg.norm(g_star)),
-    )
-    converged = bool(np.max(np.abs(g_star)) < float(gtol))
-    stalled_step = bool(
-        (not converged)
-        and step_norm <= step_tol
-        and function_change <= objective_tol
-        and gradient_change <= gradient_tol
-    )
-    nonfinite_step = bool(
-        (not np.isfinite(f_star))
-        or (not np.all(np.isfinite(g_star)))
-        or (not np.all(np.isfinite(step)))
-        or (not np.all(np.isfinite(x0 + step)))
-        or (not np.all(np.isfinite(y)))
-    )
-    curvature_tol = step_eps * step_norm * y_norm
-    valid_curvature = bool(
-        np.isfinite(yts) and np.isfinite(yty) and yts > curvature_tol and yty > 0.0
-    )
-    rejected_step = bool(line_search_result.failed or nonfinite_step or stalled_step)
-    return {
-        "initial": {
-            "dofs": _summarize_host_vector(x0),
-            "value": _summarize_host_scalar(f0),
-            "grad": _summarize_host_gradient(g0),
-            "search_direction": _summarize_host_vector(p0),
-            "directional_derivative": _summarize_host_scalar(dphi0),
-            "old_old_fval": _summarize_host_scalar(old_old_fval),
-        },
-        "line_search": {
-            "initial_step_size": (
-                None if initial_step_size is None else float(initial_step_size)
-            ),
-            "maxls": int(maxls),
-            "failed": bool(line_search_result.failed),
-            "status": int(line_search_result.status),
-            "nit": int(line_search_result.nit),
-            "nfev": int(line_search_result.nfev),
-            "ngev": int(line_search_result.ngev),
-            "alpha": _summarize_host_scalar(alpha_star),
-            "value": _summarize_host_scalar(f_star),
-            "directional_derivative": _summarize_host_scalar(float(np.dot(g_star, p0))),
-            "requested_initial_step": _summarize_host_scalar(
-                line_search_result.requested_initial_step
-            ),
-            "first_tested_alpha": _summarize_host_scalar(
-                line_search_result.first_tested_alpha
-            ),
-            "best_finite_alpha": _summarize_host_scalar(
-                line_search_result.best_finite_alpha
-            ),
-            "returned_alpha": _summarize_host_scalar(line_search_result.returned_alpha),
-            "failure_reason": str(line_search_result.failure_reason),
-            "armijo_margin": _summarize_host_scalar(line_search_result.armijo_margin),
-            "curvature_margin": _summarize_host_scalar(
-                line_search_result.curvature_margin
-            ),
-            "trace": trial_records,
-        },
-        "optimizer_step": {
-            "would_accept": bool(not rejected_step),
-            "would_reject": rejected_step,
-            "line_search_failed": bool(line_search_result.failed),
-            "nonfinite_step": nonfinite_step,
-            "stalled_step": stalled_step,
-            "valid_curvature": valid_curvature,
-            "converged": converged,
-            "step": _summarize_host_vector(step),
-            "step_norm": _summarize_host_scalar(step_norm),
-            "step_tolerance": _summarize_host_scalar(step_tol),
-            "function_change": _summarize_host_scalar(function_change),
-            "objective_tolerance": _summarize_host_scalar(objective_tol),
-            "gradient_change": _summarize_host_scalar(gradient_change),
-            "gradient_tolerance": _summarize_host_scalar(gradient_tol),
-            "y_dot_s": _summarize_host_scalar(yts),
-            "y_dot_y": _summarize_host_scalar(yty),
-        },
-        "all_finite": bool(
-            np.isfinite(f0)
-            and np.all(np.isfinite(g0))
-            and all(record["value"]["finite"] for record in trial_records)
-        ),
-    }
-
-
 def build_target_lane_optimistix_diagnosis(
     scalar_fun,
     dofs,
@@ -7189,6 +6929,150 @@ def build_target_lane_optimistix_diagnosis(
             "grad": _summarize_host_gradient(g0),
         },
         "result": summarize_optimizer_result_for_progress(result),
+        "step": {
+            "delta": _summarize_host_vector(step),
+            "norm": _summarize_host_scalar(float(np.linalg.norm(step))),
+            "max_abs": _summarize_host_scalar(float(np.max(np.abs(step)))),
+        },
+        "objective_delta": _summarize_host_scalar(float(f_final - f0)),
+        "all_finite": bool(
+            np.isfinite(f0)
+            and np.all(np.isfinite(g0))
+            and np.isfinite(f_final)
+            and np.all(np.isfinite(g_final))
+            and np.all(np.isfinite(x_final))
+        ),
+    }, result
+
+
+def build_target_lane_optax_diagnosis(
+    scalar_fun,
+    dofs,
+    *,
+    initial_value_and_grad,
+    maxiter,
+    gtol,
+    max_linesearch_steps,
+):
+    """Run Optax L-BFGS on the target-lane scalar objective."""
+    import optax
+
+    x0 = np.asarray(host_array(dofs), dtype=np.float64).reshape(-1)
+    f0 = host_float(initial_value_and_grad[0])
+    g0 = np.asarray(host_array(initial_value_and_grad[1]), dtype=np.float64)
+    g0 = g0.reshape(x0.shape)
+
+    def value_fn(params):
+        return scalar_fun(params)
+
+    optimizer = optax.lbfgs(
+        memory_size=200,
+        scale_init_precond=True,
+        linesearch=optax.scale_by_zoom_linesearch(
+            max_linesearch_steps=int(max_linesearch_steps),
+            initial_guess_strategy="one",
+        ),
+    )
+
+    optimizer_start_s = _perf_counter_s()
+    x_current = jnp.asarray(x0, dtype=jnp.float64)
+    value_current, grad_current = jax.value_and_grad(value_fn)(x_current)
+    opt_state = optimizer.init(x_current)
+    iterations = 0
+    update_trace = []
+    success = bool(
+        np.max(np.abs(np.asarray(host_array(grad_current), dtype=np.float64)))
+        <= float(gtol)
+    )
+    for iteration in range(int(maxiter)):
+        if success:
+            break
+        updates, opt_state = optimizer.update(
+            grad_current,
+            opt_state,
+            x_current,
+            value=value_current,
+            grad=grad_current,
+            value_fn=value_fn,
+        )
+        updates_host = np.asarray(host_array(updates), dtype=np.float64).reshape(
+            x0.shape
+        )
+        x_current = optax.apply_updates(x_current, updates)
+        value_current, grad_current = jax.value_and_grad(value_fn)(x_current)
+        iterations = iteration + 1
+        grad_inf = float(
+            np.max(np.abs(np.asarray(host_array(grad_current), dtype=np.float64)))
+        )
+        lbfgs_state, _scale_state, line_search_state = opt_state
+        update_trace.append(
+            {
+                "iteration": int(iterations),
+                "update": _summarize_host_vector(updates_host),
+                "lbfgs_count": host_int(lbfgs_state.count),
+                "line_search": {
+                    "learning_rate": _summarize_host_scalar(
+                        host_float(line_search_state.learning_rate)
+                    ),
+                    "num_linesearch_steps": host_int(
+                        line_search_state.info.num_linesearch_steps
+                    ),
+                    "decrease_error": _summarize_host_scalar(
+                        host_float(line_search_state.info.decrease_error)
+                    ),
+                    "curvature_error": _summarize_host_scalar(
+                        host_float(line_search_state.info.curvature_error)
+                    ),
+                },
+            }
+        )
+        success = bool(grad_inf <= float(gtol))
+    optimizer_elapsed_s = float(_perf_counter_s() - optimizer_start_s)
+
+    x_final = np.asarray(host_array(x_current), dtype=np.float64).reshape(x0.shape)
+    g_final = np.asarray(host_array(grad_current), dtype=np.float64).reshape(x0.shape)
+    f_final = host_float(value_current)
+    step = x_final - x0
+    stalled_step = bool(
+        (not success) and iterations > 0 and float(np.max(np.abs(step))) == 0.0
+    )
+    outer_value_and_grad_calls = int(iterations + 1)
+    if success:
+        status = 0
+        message = "converged"
+    elif stalled_step:
+        status = 2
+        message = "returned zero step"
+    else:
+        status = 1
+        message = "reached maxiter"
+    result = types.SimpleNamespace(
+        x=x_final,
+        nit=int(iterations),
+        success=bool(success),
+        message=(f"optax.lbfgs(linesearch=scale_by_zoom_linesearch) {message}"),
+        status=status,
+        nfev=None,
+        njev=None,
+        fun=f_final,
+        jac=g_final,
+    )
+    return {
+        "optimizer": "optax.lbfgs",
+        "method": "LBFGS",
+        "tol": float(gtol),
+        "maxiter": int(maxiter),
+        "max_linesearch_steps": int(max_linesearch_steps),
+        "outer_value_and_grad_calls": outer_value_and_grad_calls,
+        "stalled_step": stalled_step,
+        "elapsed_s": optimizer_elapsed_s,
+        "initial": {
+            "dofs": _summarize_host_vector(x0),
+            "value": _summarize_host_scalar(f0),
+            "grad": _summarize_host_gradient(g0),
+        },
+        "result": summarize_optimizer_result_for_progress(result),
+        "update_trace": update_trace,
         "step": {
             "delta": _summarize_host_vector(step),
             "norm": _summarize_host_scalar(float(np.linalg.norm(step))),
@@ -7676,16 +7560,14 @@ def resolve_target_lane_outer_initial_step_size(
     *,
     benchmark_mode=False,
 ):
-    """Resolve the optional first-trial outer L-BFGS step size for target-lane runs."""
+    """Reject stale target-lane first-step overrides for SciPy L-BFGS-B."""
+    del field_backend, optimizer_backend, benchmark_mode
     if initial_step_size is not None:
-        resolved = float(initial_step_size)
-    elif benchmark_mode and field_backend == "jax" and optimizer_backend == "ondevice":
-        resolved = _TARGET_OUTER_INITIAL_STEP_SIZE_BENCHMARK_DEFAULT
-    else:
-        return None
-    if resolved <= 0.0:
-        raise ValueError("target_lane_outer_initial_step_size must be positive.")
-    return resolved
+        raise ValueError(
+            "target_lane_outer_initial_step_size is not supported by the "
+            "SciPy-compatible target L-BFGS-B lane."
+        )
+    return None
 
 
 def resolve_single_stage_outer_maxcor(
@@ -8711,6 +8593,24 @@ def run_single_stage_optimizer(
             "objective for the selected lane."
         )
     if is_target_lane:
+        if target_lane_initial_step_size is not None:
+            raise ValueError(
+                "Single-stage target-lane optimization does not support "
+                "target_lane_initial_step_size with SciPy-compatible L-BFGS-B."
+            )
+        if failure_callback is not None:
+            raise ValueError(
+                "Single-stage target-lane optimization does not support "
+                "failure_callback with SciPy-compatible L-BFGS-B."
+            )
+        if (
+            optimizer_initial_value_and_grad is not None
+            and contract.method != "lbfgs-ondevice"
+        ):
+            raise ValueError(
+                "Single-stage target-lane optimization only supports "
+                "optimizer_initial_value_and_grad for method='lbfgs-ondevice'."
+            )
         optimizer_dofs = _single_stage_target_optimizer_dofs(dofs)
         target_minimize_kwargs = {
             "method": contract.method,
@@ -8725,12 +8625,6 @@ def run_single_stage_optimizer(
             "callback": callback,
             "progress_callback": progress_callback,
         }
-        if target_lane_initial_step_size is not None:
-            target_minimize_kwargs["options"]["initial_step_size"] = float(
-                target_lane_initial_step_size
-            )
-        if failure_callback is not None and contract.method == "lbfgs-ondevice":
-            target_minimize_kwargs["failure_callback"] = failure_callback
         if (
             optimizer_initial_value_and_grad is not None
             and contract.method == "lbfgs-ondevice"
@@ -8869,7 +8763,16 @@ def run_single_stage_target_lane_optimizer_with_retries(
         )
         best_retry_anchor_stage = anchor_stage
 
-    initial_step_size = target_lane_initial_step_size
+    if target_lane_initial_step_size is not None:
+        raise ValueError(
+            "target_lane_initial_step_size is not supported by the "
+            "SciPy-compatible target L-BFGS-B retry path."
+        )
+    if failure_callback is not None:
+        raise ValueError(
+            "failure_callback is not supported by the SciPy-compatible target "
+            "L-BFGS-B retry path."
+        )
     event_start = len(invalid_state_events)
     optimizer_kwargs = {}
     if optimizer_initial_value_and_grad is not None:
@@ -8880,9 +8783,6 @@ def run_single_stage_target_lane_optimizer_with_retries(
         f"{phase}_attempt_0_started",
         attempt_index=0,
         maxiter=int(maxiter),
-        initial_step_size=None
-        if initial_step_size is None
-        else float(initial_step_size),
         optimizer_dofs=_summarize_host_vector(dofs),
     )
     result = run_single_stage_optimizer(
@@ -8897,8 +8797,8 @@ def run_single_stage_target_lane_optimizer_with_retries(
         outer_maxls=outer_maxls,
         scalar_fun=scalar_fun,
         progress_callback=progress_callback,
-        target_lane_initial_step_size=initial_step_size,
-        failure_callback=failure_callback,
+        target_lane_initial_step_size=None,
+        failure_callback=None,
         **optimizer_kwargs,
     )
     record_progress_event(
@@ -8935,19 +8835,12 @@ def run_single_stage_target_lane_optimizer_with_retries(
         if anchor_state is None:
             break
         restore_single_stage_local_incumbent_state(run_dict, anchor_state)
-        initial_step_size = resolve_single_stage_retry_initial_step_size(
-            initial_step_size,
-            new_events,
-            single_stage_search_policy=single_stage_search_policy,
-            retry_index=retry_index,
-        )
         retry_summary["attempt_count"] += 1
         retry_summary["attempts"].append(
             {
                 "retry_index": int(retry_index + 1),
                 "anchor_stage": single_stage_stage_label(anchor_stage),
                 "anchor_metric": float(anchor_state["J"]),
-                "initial_step_size": float(initial_step_size),
                 "triggered_by_invalid_state": True,
             }
         )
@@ -8956,7 +8849,6 @@ def run_single_stage_target_lane_optimizer_with_retries(
             attempt_index=int(retry_index + 1),
             anchor_stage=single_stage_stage_label(anchor_stage),
             anchor_metric=float(anchor_state["J"]),
-            initial_step_size=float(initial_step_size),
             remaining_maxiter=int(max(int(maxiter) - total_nit, 1)),
         )
         event_start = len(invalid_state_events)
@@ -8974,8 +8866,8 @@ def run_single_stage_target_lane_optimizer_with_retries(
             outer_maxls=outer_maxls,
             scalar_fun=scalar_fun,
             progress_callback=progress_callback,
-            target_lane_initial_step_size=initial_step_size,
-            failure_callback=failure_callback,
+            target_lane_initial_step_size=None,
+            failure_callback=None,
         )
         record_progress_event(
             f"{phase}_retry_{retry_index + 1}_returned",
@@ -10921,8 +10813,8 @@ def summarize_single_stage_final_optimizer_result(
         "success": bool(optimizer_success),
         "termination_message": termination_message,
         "status": int(getattr(result, "status", -1)),
-        "nfev": int(getattr(result, "nfev", 0)),
-        "njev": int(getattr(result, "njev", 0)),
+        "nfev": _optional_int(getattr(result, "nfev", None)),
+        "njev": _optional_int(getattr(result, "njev", None)),
         "ls_status": _optional_int(getattr(result, "ls_status", None)),
     }
 
@@ -11482,6 +11374,7 @@ if __name__ == "__main__":
         str(args.diagnose_target_lane_gradient),
         str(getattr(args, "diagnose_target_lane_first_line_search", False)),
         str(getattr(args, "diagnose_target_lane_optimistix", False)),
+        str(getattr(args, "diagnose_target_lane_optax", False)),
         str(args.minimal_artifacts),
         str(args.backend),
         str(optimizer_backend_record),
@@ -11953,11 +11846,10 @@ if __name__ == "__main__":
     phase1_success = None
     main_phase_iterations = None
     target_lane_gradient_diagnosis = None
-    target_lane_first_line_search_diagnosis = None
     target_lane_optimistix_diagnosis = None
+    target_lane_optax_diagnosis = None
     target_lane_scaled_phase1_diagnosis = None
     target_lane_invalid_state_events = []
-    target_lane_invalid_state_diagnostic_events = []
     phase1_retry_summary = {
         "attempt_count": 0,
         "attempts": [],
@@ -11989,60 +11881,6 @@ if __name__ == "__main__":
                 iteration=int(iteration),
                 fun_value=_summarize_host_scalar(fun_value),
                 grad_inf=_summarize_host_scalar(grad_inf),
-            )
-
-        return _record
-
-    def wrap_outer_optimizer_failure_callback(callback, *, phase):
-        if callback is None or outer_optimizer_progress is None:
-            return callback
-
-        def _record(
-            iteration,
-            trial_x,
-            trial_f,
-            trial_g,
-            search_direction,
-            step_vector,
-            step_scale,
-            line_search_failed,
-            nonfinite_step,
-            stalled_step,
-            valid_curvature,
-            trial_converged,
-            ls_status,
-        ):
-            callback(
-                iteration,
-                trial_x,
-                trial_f,
-                trial_g,
-                search_direction,
-                step_vector,
-                step_scale,
-                line_search_failed,
-                nonfinite_step,
-                stalled_step,
-                valid_curvature,
-                trial_converged,
-                ls_status,
-            )
-            record_outer_optimizer_event(
-                f"{phase}_failure_iter_{int(iteration)}",
-                phase=phase,
-                iteration=int(iteration),
-                line_search_failed=bool(line_search_failed),
-                nonfinite_step=bool(nonfinite_step),
-                stalled_step=bool(stalled_step),
-                valid_curvature=bool(valid_curvature),
-                trial_converged=bool(trial_converged),
-                ls_status=int(ls_status),
-                step_scale=_summarize_host_scalar(step_scale),
-                trial_value=_summarize_host_scalar(trial_f),
-                trial_grad=_summarize_host_vector(trial_g),
-                trial_x=_summarize_host_vector(trial_x),
-                search_direction=_summarize_host_vector(search_direction),
-                step_vector=_summarize_host_vector(step_vector),
             )
 
         return _record
@@ -12080,8 +11918,8 @@ if __name__ == "__main__":
     )
     if diagnostic_target_lane_callbacks:
         print(
-            "Enabling target-lane accepted-step, progress, and failure host "
-            "callbacks for diagnostic run."
+            "Enabling target-lane accepted-step and progress host callbacks "
+            "for diagnostic run."
         )
 
     if args.init_only:
@@ -12808,52 +12646,9 @@ if __name__ == "__main__":
                             f"first non-finite term is {first_nonfinite_term}."
                         )
                 elif args.diagnose_target_lane_first_line_search:
-                    if not use_target_lane:
-                        raise RuntimeError(
-                            "--diagnose-target-lane-first-line-search requires the "
-                            "JAX ondevice single-stage target lane."
-                        )
-                    if target_value_and_grad_objective is None:
-                        raise RuntimeError(
-                            "--diagnose-target-lane-first-line-search requires the "
-                            "target-lane value-and-gradient objective."
-                        )
-                    target_lane_first_line_search_diagnosis = (
-                        build_target_lane_first_line_search_diagnosis(
-                            target_value_and_grad_objective,
-                            dofs,
-                            initial_value_and_grad=(
-                                target_lane_optimizer_initial_value_and_grad
-                            ),
-                            initial_step_size=(
-                                args.target_lane_outer_initial_step_size
-                            ),
-                            maxls=args.outer_maxls,
-                            gtol=gtol,
-                        )
-                    )
-                    outer_optimizer_end_s = _perf_counter_s()
-                    _record_timing(
-                        timings,
-                        "target_lane_first_line_search_diagnosis_s",
-                        outer_optimizer_start_s,
-                        outer_optimizer_end_s,
-                    )
-                    res_nit = 0
-                    optimizer_success = bool(
-                        target_lane_first_line_search_diagnosis["optimizer_step"][
-                            "would_accept"
-                        ]
-                    )
-                    termination_message = "diagnose_target_lane_first_line_search"
-                    final_volume = initial_volume
-                    final_iota = initial_iota
-                    final_max_curvature = initial_max_curvature
-                    fieldError = initial_field_error
-                    print(
-                        "Skipping single-stage optimizer because "
-                        "--diagnose-target-lane-first-line-search was provided; "
-                        "wrote first L-BFGS line-search trace."
+                    raise RuntimeError(
+                        "--diagnose-target-lane-first-line-search is not supported "
+                        "by the SciPy-compatible target L-BFGS-B lane."
                     )
                 elif args.diagnose_target_lane_optimistix:
                     if not use_target_lane:
@@ -12928,6 +12723,79 @@ if __name__ == "__main__":
                         "Skipping the normal single-stage optimizer because "
                         "--diagnose-target-lane-optimistix was provided; "
                         "wrote Optimistix BFGS diagnostics."
+                    )
+                elif args.diagnose_target_lane_optax:
+                    if not use_target_lane:
+                        raise RuntimeError(
+                            "--diagnose-target-lane-optax requires the JAX "
+                            "ondevice single-stage target lane."
+                        )
+                    if target_scalar_objective is None:
+                        raise RuntimeError(
+                            "--diagnose-target-lane-optax requires the "
+                            "target-lane scalar objective."
+                        )
+                    target_lane_post_run_state_sync = (
+                        resolve_target_lane_post_run_state_sync(
+                            adapter,
+                            use_target_lane=use_target_lane,
+                            accepted_step_callback=None,
+                        )
+                    )
+                    (
+                        target_lane_optax_diagnosis,
+                        res,
+                    ) = build_target_lane_optax_diagnosis(
+                        target_scalar_objective,
+                        dofs,
+                        initial_value_and_grad=(
+                            target_lane_optimizer_initial_value_and_grad
+                        ),
+                        maxiter=MAXITER,
+                        gtol=gtol,
+                        max_linesearch_steps=args.outer_maxls,
+                    )
+                    outer_optimizer_end_s = _perf_counter_s()
+                    _record_timing(
+                        timings,
+                        "target_lane_optax_diagnosis_s",
+                        outer_optimizer_start_s,
+                        outer_optimizer_end_s,
+                    )
+                    res_nit = int(res.nit)
+                    optimizer_success = bool(res.success)
+                    termination_message = str(res.message)
+                    if (
+                        args.benchmark_mode
+                        and target_lane_post_run_state_sync is not None
+                        and target_lane_result_has_syncable_state(res)
+                    ):
+                        target_lane_sync_start_s = _perf_counter_s()
+                        record_outer_optimizer_event(
+                            "target_lane_optax_final_sync_started",
+                            phase="diagnostic",
+                            result=summarize_optimizer_result_for_progress(res),
+                        )
+                        target_lane_post_run_state_sync(res.x)
+                        _record_timing(
+                            timings,
+                            "target_lane_optax_final_sync_s",
+                            target_lane_sync_start_s,
+                            _perf_counter_s(),
+                        )
+                        record_outer_optimizer_event(
+                            "target_lane_optax_final_sync_returned",
+                            phase="diagnostic",
+                            elapsed_s=timings.get("target_lane_optax_final_sync_s"),
+                        )
+                    final_volume = initial_volume
+                    final_iota = initial_iota
+                    final_max_curvature = initial_max_curvature
+                    fieldError = initial_field_error
+                    print(
+                        "Skipping the normal single-stage optimizer because "
+                        "--diagnose-target-lane-optax was provided; wrote "
+                        "Optax L-BFGS diagnostics."
                     )
                 elif args.profile_target_lane_only:
                     if not use_target_lane:
@@ -13089,20 +12957,7 @@ if __name__ == "__main__":
                                 step_scale=float(effective_initial_step_scale),
                                 optimizer_dofs=_summarize_host_vector(phase1_dofs),
                             )
-                            phase1_failure_callback = (
-                                resolve_target_lane_invalid_state_failure_callback(
-                                    target_lane_invalid_state_diagnostic_events,
-                                    phase="phase1",
-                                    use_target_lane=use_target_lane,
-                                    args=args,
-                                )
-                            )
-                            phase1_failure_callback = (
-                                wrap_outer_optimizer_failure_callback(
-                                    phase1_failure_callback,
-                                    phase="phase1",
-                                )
-                            )
+                            phase1_failure_callback = None
                             phase1_progress_callback = (
                                 build_outer_optimizer_progress_callback("phase1")
                                 if diagnostic_target_lane_callbacks
@@ -13275,18 +13130,7 @@ if __name__ == "__main__":
                             optimizer_dofs=_summarize_host_vector(dofs),
                         )
                     if run_main_optimizer:
-                        main_failure_callback = (
-                            resolve_target_lane_invalid_state_failure_callback(
-                                target_lane_invalid_state_diagnostic_events,
-                                phase="phase2",
-                                use_target_lane=use_target_lane,
-                                args=args,
-                            )
-                        )
-                        main_failure_callback = wrap_outer_optimizer_failure_callback(
-                            main_failure_callback,
-                            phase="phase2",
-                        )
+                        main_failure_callback = None
                         main_progress_callback = (
                             build_outer_optimizer_progress_callback("phase2")
                             if diagnostic_target_lane_callbacks
@@ -13835,6 +13679,9 @@ if __name__ == "__main__":
         "diagnose_target_lane_optimistix": bool(
             getattr(args, "diagnose_target_lane_optimistix", False)
         ),
+        "diagnose_target_lane_optax": bool(
+            getattr(args, "diagnose_target_lane_optax", False)
+        ),
         "diagnose_target_lane_scaled_phase1": bool(
             args.diagnose_target_lane_scaled_phase1
         ),
@@ -14064,7 +13911,6 @@ if __name__ == "__main__":
                 "success": optimizer_success,
             },
             "events": target_lane_invalid_state_events,
-            "diagnostic_events": target_lane_invalid_state_diagnostic_events,
             "note": (
                 None
                 if target_lane_invalid_state_events
@@ -14080,12 +13926,10 @@ if __name__ == "__main__":
         results["JAX_COMPILE_DIAGNOSTICS"] = jax_compile_diagnostics
     if target_lane_gradient_diagnosis is not None:
         results["TARGET_LANE_GRADIENT_DIAGNOSIS"] = target_lane_gradient_diagnosis
-    if target_lane_first_line_search_diagnosis is not None:
-        results["TARGET_LANE_FIRST_LINE_SEARCH_DIAGNOSIS"] = (
-            target_lane_first_line_search_diagnosis
-        )
     if target_lane_optimistix_diagnosis is not None:
         results["TARGET_LANE_OPTIMISTIX_DIAGNOSIS"] = target_lane_optimistix_diagnosis
+    if target_lane_optax_diagnosis is not None:
+        results["TARGET_LANE_OPTAX_DIAGNOSIS"] = target_lane_optax_diagnosis
     if target_lane_scaled_phase1_diagnosis is not None:
         results["TARGET_LANE_SCALED_PHASE1_DIAGNOSIS"] = (
             target_lane_scaled_phase1_diagnosis
@@ -14099,15 +13943,15 @@ if __name__ == "__main__":
             os.path.join(OUT_DIR_ITER, "target_lane_gradient_diagnosis.json"),
             target_lane_gradient_diagnosis,
         )
-    if target_lane_first_line_search_diagnosis is not None:
-        write_json_file(
-            os.path.join(OUT_DIR_ITER, "target_lane_first_line_search_diagnosis.json"),
-            target_lane_first_line_search_diagnosis,
-        )
     if target_lane_optimistix_diagnosis is not None:
         write_json_file(
             os.path.join(OUT_DIR_ITER, "target_lane_optimistix_diagnosis.json"),
             target_lane_optimistix_diagnosis,
+        )
+    if target_lane_optax_diagnosis is not None:
+        write_json_file(
+            os.path.join(OUT_DIR_ITER, "target_lane_optax_diagnosis.json"),
+            target_lane_optax_diagnosis,
         )
     if target_lane_scaled_phase1_diagnosis is not None:
         write_json_file(
