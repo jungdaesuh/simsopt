@@ -186,6 +186,7 @@ def test_dry_run_emits_preflight_with_lightning_specific_fields(tmp_path):
     payload = json.loads(preflight_path.read_text(encoding="utf-8"))
     assert payload["launcher"] == "lightning"
     assert payload["machine"] == launcher.LIGHTNING_DEFAULT_MACHINE
+    assert payload["hardware"] == [launcher.LIGHTNING_DEFAULT_MACHINE]
     assert payload["cloud_provider"] == "NEBIUS"
     assert payload["cloud_account"] == "lightning-nebius-prod"
     assert payload["artifact_connection"] == launcher.LIGHTNING_DEFAULT_CONNECTION
@@ -451,4 +452,5 @@ def test_dry_run_writes_exactly_one_preflight_snapshot(tmp_path):
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(preflight_path.read_text(encoding="utf-8"))
     assert payload["machine"] == "H100"
+    assert payload["hardware"] == ["H100"]
     assert payload["job_name"].startswith("simsopt-jax-h100-proof-")

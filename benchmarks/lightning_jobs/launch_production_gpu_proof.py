@@ -232,6 +232,7 @@ def _build_lightning_preflight(
         {
             "launcher": "lightning",
             "job_name": job_name,
+            "hardware": [machine],
             "machine": machine,
             "cloud_provider": (args.cloud_provider or "").upper() or None,
             "cloud_account": cloud_account,
