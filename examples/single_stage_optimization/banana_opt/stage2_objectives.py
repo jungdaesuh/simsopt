@@ -51,7 +51,14 @@ from banana_opt.smooth_distance_selection import (
 from banana_opt.stage2_single_stage_handoff import (
     BOOZER_FAILURE_POLICY_REPORT_FAILURE,
     BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
+    BOOZER_TRUST_REASON_OK,
+    BOOZER_TRUST_REASON_SELF_INTERSECTING,
+    BOOZER_TRUST_REASON_SOLVE_FAILED,
+    BoozerTrustState,
     attempt_initialize_boozer_surface,
+    boozer_trust_artifact_fields,
+    boozer_trust_tolerance,
+    compute_boozer_trust_state,
     compute_tf_G0,
     restore_boozer_solve_state,
     run_boozer_with_failure_policy,
@@ -113,6 +120,14 @@ class Stage2IotaState:
     abs_error: float
     feasible: bool
     solve_failed: bool = False
+    # Phase 1 Boozer trust gate (Stage 2 / single-stage Boozer handoff plan).
+    # ``boozer_trusted=False`` means a numeric iota exists but the residual is
+    # too loose to be used as a gradient signal — the optimizer keeps the base
+    # flux/hardware objective at its natural value and skips the iota term.
+    boozer_trusted: bool = True
+    iota_objective_active: bool = True
+    constrained_residual_norm: float | None = None
+    trust_reason: str = BOOZER_TRUST_REASON_OK
 
 
 @dataclass(frozen=True)
@@ -130,6 +145,7 @@ class Stage2GuardedBoozerEvaluator:
         initial_failure_reason: str | None = None,
         initial_iota_guess: float | None = None,
         initial_G_guess: float | None = None,
+        initial_trust_state: BoozerTrustState | None = None,
     ):
         self.boozer_surface = boozer_surface
         self.last_successful_state = last_successful_state
@@ -145,12 +161,39 @@ class Stage2GuardedBoozerEvaluator:
         self.initial_G_guess = (
             None if initial_G_guess is None else float(initial_G_guess)
         )
+        if initial_trust_state is not None:
+            self.last_trust_state = initial_trust_state
+        elif self.last_solve_failed:
+            self.last_trust_state = BoozerTrustState(
+                solve_success=False,
+                self_intersecting=None,
+                constrained_residual_norm=None,
+                trust_tol=boozer_trust_tolerance(boozer_surface),
+                boozer_trusted=False,
+                iota_objective_active=False,
+                trust_reason=(
+                    BOOZER_TRUST_REASON_SELF_INTERSECTING
+                    if initial_failure_reason == _STAGE2_FAILURE_REASON_SELF_INTERSECTION
+                    else BOOZER_TRUST_REASON_SOLVE_FAILED
+                ),
+            )
+        else:
+            self.last_trust_state = compute_boozer_trust_state(
+                boozer_surface,
+                solve_success=True,
+                self_intersecting=False,
+            )
 
     @classmethod
     def from_successful_surface(cls, boozer_surface):
         return cls(
             boozer_surface,
             last_successful_state=snapshot_boozer_solve_state(boozer_surface),
+            initial_trust_state=compute_boozer_trust_state(
+                boozer_surface,
+                solve_success=True,
+                self_intersecting=False,
+            ),
         )
 
     def _refresh_if_needed(self) -> None:
@@ -163,6 +206,7 @@ class Stage2GuardedBoozerEvaluator:
         target: float,
         tolerance: float,
     ) -> Stage2IotaState:
+        trust_state = self.last_trust_state
         if self.last_successful_state is None:
             iota = _boozer_res_scalar(self.boozer_surface, "iota")
             if iota is None:
@@ -174,12 +218,29 @@ class Stage2GuardedBoozerEvaluator:
                 target=target,
                 tolerance=tolerance,
                 solve_failed=True,
+                trust_state=trust_state,
             )
         return _build_stage2_iota_state_from_iota(
             self.last_successful_state.iota,
             target=target,
             tolerance=tolerance,
             solve_failed=True,
+            trust_state=trust_state,
+        )
+
+    def _record_failure_trust_state(self, reason: str) -> None:
+        self.last_trust_state = BoozerTrustState(
+            solve_success=reason != _STAGE2_FAILURE_REASON_SOLVE,
+            self_intersecting=reason == _STAGE2_FAILURE_REASON_SELF_INTERSECTION,
+            constrained_residual_norm=None,
+            trust_tol=boozer_trust_tolerance(self.boozer_surface),
+            boozer_trusted=False,
+            iota_objective_active=False,
+            trust_reason=(
+                BOOZER_TRUST_REASON_SELF_INTERSECTING
+                if reason == _STAGE2_FAILURE_REASON_SELF_INTERSECTION
+                else BOOZER_TRUST_REASON_SOLVE_FAILED
+            ),
         )
 
     def run_guarded(self):
@@ -206,6 +267,7 @@ class Stage2GuardedBoozerEvaluator:
         if not solve_attempt.solve_success:
             self.last_solve_failed = True
             self.last_failure_reason = _STAGE2_FAILURE_REASON_SOLVE
+            self._record_failure_trust_state(_STAGE2_FAILURE_REASON_SOLVE)
             return {"success": False, "reason": self.last_failure_reason}
         self_intersection_check_completed = False
         try:
@@ -230,10 +292,16 @@ class Stage2GuardedBoozerEvaluator:
                 )
             self.last_solve_failed = True
             self.last_failure_reason = _STAGE2_FAILURE_REASON_SELF_INTERSECTION
+            self._record_failure_trust_state(_STAGE2_FAILURE_REASON_SELF_INTERSECTION)
             return {"success": False, "reason": self.last_failure_reason}
         self.last_solve_failed = False
         self.last_failure_reason = _STAGE2_FAILURE_REASON_NONE
         self.last_successful_state = snapshot_boozer_solve_state(self.boozer_surface)
+        self.last_trust_state = compute_boozer_trust_state(
+            self.boozer_surface,
+            solve_success=True,
+            self_intersecting=False,
+        )
         return {"success": True, "reason": None}
 
     def evaluate(
@@ -254,6 +322,7 @@ class Stage2GuardedBoozerEvaluator:
             penalty_objective,
             target=target,
             tolerance=tolerance,
+            trust_state=self.last_trust_state,
         )
 
     def evaluate_state(
@@ -272,6 +341,7 @@ class Stage2GuardedBoozerEvaluator:
             penalty_objective,
             target=target,
             tolerance=tolerance,
+            trust_state=self.last_trust_state,
         )
 
 
@@ -311,12 +381,54 @@ def _stage2_iota_penalty(iota: float, target: float) -> float:
     return 0.5 * delta * delta
 
 
+def _trust_kwargs(
+    trust_state: BoozerTrustState | None,
+    *,
+    solve_failed: bool,
+) -> dict[str, object]:
+    if trust_state is None:
+        # Conservative default: treat unknown trust as untrusted-but-evaluable
+        # only when the solve actually failed; otherwise preserve the legacy
+        # "trusted" assumption so non-iota code paths keep their behavior.
+        if solve_failed:
+            return {
+                "boozer_trusted": False,
+                "iota_objective_active": False,
+                "constrained_residual_norm": None,
+                "trust_reason": BOOZER_TRUST_REASON_SOLVE_FAILED,
+            }
+        return {
+            "boozer_trusted": True,
+            "iota_objective_active": True,
+            "constrained_residual_norm": None,
+            "trust_reason": BOOZER_TRUST_REASON_OK,
+        }
+    if solve_failed:
+        # A failed solve invalidates every trust field for THIS iteration.
+        # The trust_state was inherited from the last successful solve;
+        # surfacing it as "trusted" while the current iota is from a failed
+        # solve would mislead downstream consumers.
+        return {
+            "boozer_trusted": False,
+            "iota_objective_active": False,
+            "constrained_residual_norm": None,
+            "trust_reason": BOOZER_TRUST_REASON_SOLVE_FAILED,
+        }
+    return {
+        "boozer_trusted": bool(trust_state.boozer_trusted),
+        "iota_objective_active": bool(trust_state.iota_objective_active),
+        "constrained_residual_norm": trust_state.constrained_residual_norm,
+        "trust_reason": trust_state.trust_reason,
+    }
+
+
 def _build_stage2_iota_state_from_iota(
     iota: float,
     *,
     target: float,
     tolerance: float,
     solve_failed: bool = False,
+    trust_state: BoozerTrustState | None = None,
 ) -> Stage2IotaState:
     iota_value = float(iota)
     abs_error = abs(iota_value - float(target))
@@ -326,6 +438,7 @@ def _build_stage2_iota_state_from_iota(
         abs_error=abs_error,
         feasible=not solve_failed and abs_error <= float(tolerance),
         solve_failed=bool(solve_failed),
+        **_trust_kwargs(trust_state, solve_failed=bool(solve_failed)),
     )
 
 
@@ -369,6 +482,7 @@ def _build_stage2_iota_state(
     target: float,
     tolerance: float,
     solve_failed: bool = False,
+    trust_state: BoozerTrustState | None = None,
 ) -> Stage2IotaState:
     iota = float(iota_term.J())
     penalty = float(penalty_objective.J())
@@ -379,6 +493,7 @@ def _build_stage2_iota_state(
         abs_error=abs_error,
         feasible=not solve_failed and abs_error <= float(tolerance),
         solve_failed=bool(solve_failed),
+        **_trust_kwargs(trust_state, solve_failed=bool(solve_failed)),
     )
 
 
@@ -389,6 +504,7 @@ def _evaluate_stage2_iota_terms(
     target: float,
     tolerance: float,
     solve_failed: bool = False,
+    trust_state: BoozerTrustState | None = None,
 ) -> Stage2IotaEvaluation:
     state = _build_stage2_iota_state(
         iota_term,
@@ -396,6 +512,7 @@ def _evaluate_stage2_iota_terms(
         target=target,
         tolerance=tolerance,
         solve_failed=solve_failed,
+        trust_state=trust_state,
     )
     return Stage2IotaEvaluation(
         state=state,
@@ -587,6 +704,7 @@ def build_stage2_iota_runtime(
             penalty_objective,
             target=float(iota_target),
             tolerance=float(iota_tolerance),
+            trust_state=guarded_boozer_evaluator.last_trust_state,
         )
     else:
         failure_reason = (
@@ -611,6 +729,7 @@ def build_stage2_iota_runtime(
             target=float(iota_target),
             tolerance=float(iota_tolerance),
             solve_failed=True,
+            trust_state=guarded_boozer_evaluator.last_trust_state,
         )
     return Stage2IotaRuntime(
         mode=str(mode),
@@ -1334,15 +1453,21 @@ def make_stage2_fun(
     stage2_iota_runtime: Stage2IotaRuntime | None = None,
     *,
     emit_diagnostics=False,
+    s_hel_objective=None,
+    s_hel_weight: float = 0.0,
 ):
     soft_mode_enabled = (
         stage2_iota_runtime is not None and stage2_iota_runtime.mode == "soft"
     )
+    s_hel_enabled = s_hel_objective is not None and float(s_hel_weight) > 0.0
 
     def fun(dofs):
         JF.x = dofs
         J = float(JF.J())
         grad = np.asarray(JF.dJ(), dtype=float)
+        if s_hel_enabled:
+            # Drop the stale FFT/gradient cache; the coil DOFs just moved.
+            s_hel_objective.recompute_bell()
         iota_state = None
         iota_evaluation = None
         if soft_mode_enabled:
@@ -1350,10 +1475,34 @@ def make_stage2_fun(
             _reset_biot_savart_points_to_surface(new_bs, new_surf)
             iota_state = iota_evaluation.state
             if iota_state.solve_failed:
+                # True Boozer-domain failure: route through the soft-failure
+                # reject sentinel so the optimizer's line search backs off.
                 J, grad = _build_stage2_soft_failure_reject_value_and_grad(
                     J,
                     grad,
                 )
+            elif not iota_state.iota_objective_active:
+                # Numeric iota exists but the Boozer residual is too loose to
+                # be a trustworthy gradient signal. Per the Stage 2 / single-
+                # stage handoff plan (Phase 1, "boozer_trusted=False" rule)
+                # we leave the base flux/hardware objective and gradient at
+                # their natural values rather than doubling them through the
+                # reject sentinel, which would create a gradient discontinuity
+                # at the trust boundary.
+                #
+                # Phase 3, "S_HEL as a ramped Stage 2 objective term"
+                # (plan lines 280-284): the untrusted-but-evaluable lane is
+                # exactly where the helical-content push earns its keep —
+                # the iota signal is unreliable, so a non-Boozer topology
+                # force keeps the optimizer climbing toward helical |B|.
+                if s_hel_enabled:
+                    J += float(s_hel_weight) * float(s_hel_objective.J())
+                    grad = grad + (
+                        float(s_hel_weight)
+                        * np.asarray(
+                            s_hel_objective.dJ_by_dcoils(), dtype=float
+                        )
+                    )
             else:
                 effective_weight = _resolve_stage2_soft_effective_weight(
                     stage2_iota_runtime,
@@ -2081,6 +2230,20 @@ def evaluate_stage2_alm_problem(
                 _STAGE2_SOLVE_FAILURE_REJECT_VIOLATION,
             )
             iota_signed_value = iota_violation
+            iota_grad = zero_gradient_like(base_objective_optimizable.x)
+        elif not iota_state.iota_objective_active:
+            # Phase 1 trust gate: numeric iota exists but the Boozer residual
+            # is too loose to be a gradient signal. Per the plan ("When
+            # boozer_trusted=False, do not add iota penalty or iota gradient",
+            # lines 171-172), the ALM lane must also disable the iota term —
+            # not just the soft lane in ``make_stage2_fun``. Encode this as
+            # zero violation AND zero signed value so the dual-update step
+            # ``max(0, lambda + rho * signed_value)`` neither grows nor
+            # decays the iota multiplier across outer iterations: trust
+            # toggling between iterations must not produce dual-multiplier
+            # oscillation.
+            iota_violation = 0.0
+            iota_signed_value = 0.0
             iota_grad = zero_gradient_like(base_objective_optimizable.x)
         else:
             iota_violation = upper_bound_residual(

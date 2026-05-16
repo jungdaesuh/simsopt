@@ -113,6 +113,24 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
         "STAGE2_SECONDARY_ARTIFACT_SOURCE": None,
         "STAGE2_SECONDARY_BS_PATH": None,
         "STAGE2_SECONDARY_RESULTS_PATH": None,
+        # Phase 1 Boozer residual trust gate keys. Legacy artifacts predate
+        # the trust contract; default to ``None`` so downstream consumers can
+        # detect the absence rather than read a fabricated value.
+        "BOOZER_SOLVE_SUCCESS": None,
+        "BOOZER_SELF_INTERSECTING": None,
+        "BOOZER_CONSTRAINED_RESIDUAL_NORM": None,
+        "BOOZER_TRUSTED": None,
+        "IOTA_OBJECTIVE_ACTIVE": None,
+        "BOOZER_TRUST_REASON": None,
+        "BOOZER_TRUST_TOL": None,
+        # Phase 3 non-Boozer topology bridge diagnostics. Always emitted with
+        # ``None`` placeholders when not computed so the artifact schema is
+        # identical across lanes.
+        "FIELDLINE_IOTA_PROXY": None,
+        "FIELDLINE_IOTA_PROXY_VALID": None,
+        "HELICAL_FIELD_CONTENT": None,
+        "S_HEL_OBJECTIVE_WEIGHT": None,
+        "PRE_BOOZER_TOPOLOGY_SCORE": None,
     }
     for key, value in defaults.items():
         if upgraded_results.get(key) is None:

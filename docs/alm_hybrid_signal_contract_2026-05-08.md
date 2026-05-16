@@ -13,8 +13,8 @@ The inner-solve augmented Lagrangian uses **surrogate** (smoothed) signed constr
 Choke-point citations (paths relative to repo root):
 
 - Inner objective is fed the surrogate signal:
-  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:2177-2184` — `augmented_inequality_objective(...)` is called with `normalized_surrogate_signed_constraint_values` as the constraint argument that drives the augmented penalty term.
-  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:2185-2212` — both signal channels (`hard_signed_constraint_values`, `hard_violation_values`, `surrogate_signed_constraint_values`, `hard_dual_update_values`, plus their raw counterparts) are stored on the evaluation dict so downstream ALM control flow can pick the correct one without re-evaluating geometry.
+  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:2446-2453` — `augmented_inequality_objective(...)` is called with `normalized_surrogate_signed_constraint_values` as the constraint argument that drives the augmented penalty term.
+  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:2454-2482` — both signal channels (`hard_signed_constraint_values`, `hard_violation_values`, `surrogate_signed_constraint_values`, `hard_dual_update_values`, plus their raw counterparts) are stored on the evaluation dict so downstream ALM control flow can pick the correct one without re-evaluating geometry.
 - Dual update consumes the hard signal:
   - `examples/single_stage_optimization/alm_utils.py:2197-2249` — `_extract_stage2_constraint_signal_state` selects `hard_dual_update_values` as `preferred_dual_update_values` when explicit stage-2 signals are present, and surfaces both masks via `ALMConstraintSignalState`.
   - `examples/single_stage_optimization/alm_utils.py:3384-3402` — `_handle_alm_dual_update_transition` projects new multipliers using `routing_state.signal_state.preferred_dual_update_values` (the hard channel).
@@ -66,7 +66,7 @@ We accept this residual risk because:
 
 This contract is the single source of truth for the surrogate-vs-hard signal split in ALM mode. The following refactors are forbidden without first re-deriving the relevant theorem:
 
-- **Routing hard signals into the inner objective.** Any change that passes `hard_signed_constraint_values` (or the raw equivalents at `examples/single_stage_optimization/banana_opt/stage2_objectives.py:2199-2206`) to `augmented_inequality_objective` requires a fresh smoothness analysis showing that L-BFGS-B convergence still holds, including line-search behavior at activation boundaries.
+- **Routing hard signals into the inner objective.** Any change that passes `hard_signed_constraint_values` (or the raw equivalents at `examples/single_stage_optimization/banana_opt/stage2_objectives.py:2468-2476`) to `augmented_inequality_objective` requires a fresh smoothness analysis showing that L-BFGS-B convergence still holds, including line-search behavior at activation boundaries.
 
 - **Routing surrogate signals into the dual update.** Any change that passes `surrogate_signed_constraint_values` (or any non-hard channel) into `_project_nonnegative_multipliers_with_diagnostics` at `alm_utils.py:3384-3402` requires a fresh dual-convergence analysis showing that the multiplier sequence converges to a KKT point of the *hard* problem, not the smoothed problem.
 

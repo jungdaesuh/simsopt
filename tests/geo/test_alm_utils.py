@@ -43,13 +43,13 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
         doc_path = repo_root / "docs" / "alm_hybrid_signal_contract_2026-05-08.md"
         doc = doc_path.read_text(encoding="utf-8")
         citations = {
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2177-2184": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2446-2453": (
                 "augmented_inequality_objective("
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2185-2212": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2454-2482": (
                 '"hard_dual_update_values"'
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2199-2206": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2468-2476": (
                 '"raw_dual_update_values"'
             ),
             "examples/single_stage_optimization/alm_utils.py:2197-2249": (

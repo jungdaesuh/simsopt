@@ -53,6 +53,35 @@ BOOTABILITY_STAGE_RECOVERY = "recovery"
 BOOZER_FAILURE_POLICY_REPORT_FAILURE = "report_failure"
 BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS = "restore_last_success"
 
+# SSOT for the Boozer residual trust gate (Phase 1 of
+# docs/stage2_single_stage_boozer_handoff_impl_plan_2026-05-15.md).
+#
+# Newton convergence is enforced by the upstream BoozerSurface solver at
+# ``options['newton_tol']`` (1e-13 for the exact path, 1e-11 for the LS path).
+# A "trusted" solve is one whose reconstructed constrained-residual norm sits
+# inside a small multiple of that tolerance — the multiplier keeps the gate
+# above floating-point chatter while still rejecting damped/marginal solves
+# that report success but lack the residual quality needed for a gradient
+# signal.
+BOOZER_TRUST_TOL_MULTIPLIER = 10.0
+BOOZER_TRUST_DEFAULT_NEWTON_TOL_EXACT = 1.0e-13
+BOOZER_TRUST_DEFAULT_NEWTON_TOL_LS = 1.0e-11
+# HBT-EP campaign rotational transforms live in the 0.15 — 0.30 band and the
+# documented hardware envelope cannot support |iota| approaching 1. Anything
+# at or above this absolute bound is treated as clearly nonphysical and the
+# iota objective is disabled until the next trustworthy solve.
+BOOZER_TRUST_IOTA_ABS_BOUND = 1.0
+
+# Reasons the Boozer trust gate disables the iota term. Surfaced into the
+# artifact via ``BOOZER_TRUST_REASON`` so downstream reports can explain
+# exactly why iota was inactive without re-reading the residual norm.
+BOOZER_TRUST_REASON_OK = "trusted"
+BOOZER_TRUST_REASON_SOLVE_FAILED = "solve_failed"
+BOOZER_TRUST_REASON_SELF_INTERSECTING = "self_intersecting"
+BOOZER_TRUST_REASON_RESIDUAL_TOO_LARGE = "residual_too_large"
+BOOZER_TRUST_REASON_RESIDUAL_UNAVAILABLE = "residual_unavailable"
+BOOZER_TRUST_REASON_IOTA_NONPHYSICAL = "iota_nonphysical"
+
 load = load_boozer_finite_i
 
 __all__ = [
@@ -65,14 +94,30 @@ __all__ = [
     "BOOTABILITY_STAGE_RECOVERY",
     "BOOZER_FAILURE_POLICY_REPORT_FAILURE",
     "BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS",
+    "BOOZER_TRUST_DEFAULT_NEWTON_TOL_EXACT",
+    "BOOZER_TRUST_DEFAULT_NEWTON_TOL_LS",
+    "BOOZER_TRUST_IOTA_ABS_BOUND",
+    "BOOZER_TRUST_REASON_IOTA_NONPHYSICAL",
+    "BOOZER_TRUST_REASON_OK",
+    "BOOZER_TRUST_REASON_RESIDUAL_TOO_LARGE",
+    "BOOZER_TRUST_REASON_RESIDUAL_UNAVAILABLE",
+    "BOOZER_TRUST_REASON_SELF_INTERSECTING",
+    "BOOZER_TRUST_REASON_SOLVE_FAILED",
+    "BOOZER_TRUST_TOL_MULTIPLIER",
     "BoozerInitializationResult",
     "BoozerSolveAttempt",
     "BoozerSolveSnapshot",
+    "BoozerTrustState",
     "Stage2CoilPartitions",
     "WarmStartBoozerSeed",
+    "boozer_trust_artifact_fields",
+    "boozer_trust_state_from_initialization",
+    "boozer_trust_tolerance",
     "bootability_passes",
     "build_equilibrium_path",
     "classify_bootability_result",
+    "compute_boozer_constrained_residual_norm",
+    "compute_boozer_trust_state",
     "compute_tf_G0",
     "evaluate_stage2_seed_hardware_contract",
     "validate_stage2_seed_bootability_contract",
@@ -143,6 +188,26 @@ class BoozerInitializationResult:
     volume: float | None
     error_type: str | None = None
     error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class BoozerTrustState:
+    """Trust state for a single Boozer solve result.
+
+    A "trusted" Boozer surface is one whose iota and G scalars can drive a
+    gradient-based iota objective: the Newton residual converged inside the
+    trust tolerance, the surface is not self-intersecting, and the iota value
+    is physically plausible. Untrusted-but-evaluable solves disable the iota
+    term without disturbing the base flux/hardware objective.
+    """
+
+    solve_success: bool
+    self_intersecting: bool | None
+    constrained_residual_norm: float | None
+    trust_tol: float
+    boozer_trusted: bool
+    iota_objective_active: bool
+    trust_reason: str
 
 
 @dataclass(frozen=True)
@@ -476,6 +541,280 @@ def _attempt_from_current_boozer_state(
         error_type=None if error is None else type(error).__name__,
         error_message=None if error is None else str(error),
     )
+
+
+def _boozer_solve_kind(boozer_surface) -> str:
+    """Return ``"exact"`` or ``"ls"`` for the most recent Boozer solve.
+
+    Reads ``boozer_surface.res['type']`` when available, falling back to the
+    BoozerSurface ``boozer_type`` attribute. The kind drives both the default
+    Newton tolerance and the residual reconstruction shape.
+    """
+
+    res = _boozer_result_state(boozer_surface)
+    res_type = res.get("type")
+    if res_type in ("ls", "exact"):
+        return res_type
+    boozer_type = getattr(boozer_surface, "boozer_type", None)
+    if boozer_type in ("ls", "exact"):
+        return boozer_type
+    # Default to the more permissive LS tolerance — a missing type marker is
+    # itself a trust signal handled by the residual-norm gate.
+    return "ls"
+
+
+def _boozer_newton_tol(boozer_surface) -> float:
+    options = getattr(boozer_surface, "options", None) or {}
+    explicit = options.get("newton_tol")
+    if explicit is not None:
+        return float(explicit)
+    kind = _boozer_solve_kind(boozer_surface)
+    if kind == "exact":
+        return BOOZER_TRUST_DEFAULT_NEWTON_TOL_EXACT
+    return BOOZER_TRUST_DEFAULT_NEWTON_TOL_LS
+
+
+def boozer_trust_tolerance(boozer_surface) -> float:
+    """Return the constrained-residual-norm trust threshold for ``boozer_surface``.
+
+    Equal to ``BOOZER_TRUST_TOL_MULTIPLIER * options['newton_tol']`` where
+    ``newton_tol`` is the upstream BoozerSurface solver tolerance. Solves whose
+    reconstructed constrained-residual norm exceed this threshold are flagged
+    as untrusted and the iota term is disabled.
+    """
+
+    return BOOZER_TRUST_TOL_MULTIPLIER * _boozer_newton_tol(boozer_surface)
+
+
+def compute_boozer_constrained_residual_norm(boozer_surface) -> float | None:
+    """Reconstruct the Boozer Newton success-check norm.
+
+    The plan (Phase 1, "include the same components used by the Newton
+    success check") asks for the vector the upstream solver compares against
+    ``newton_tol``. The two upstream paths differ:
+
+    * Exact Newton (``solve_residual_equation_exactly_newton``):
+      ``norm = np.linalg.norm(b)`` where
+      ``b = concat(r[mask], [label residual], [z0 if not stellsym])``.
+      We reconstruct ``b`` from ``res['residual']`` (raw ``r``), ``res['mask']``,
+      ``label.J() - targetlabel`` and (optionally) ``surface.gamma()[0,0,2]``.
+
+    * LS Newton (``minimize_boozer_penalty_constraints_newton``):
+      ``norm = np.linalg.norm(dval)`` where ``dval`` is the gradient of the
+      scalarized least-squares objective. The 2-norm of ``res['residual']``
+      itself is *not* what the solver checks — at LS convergence the residual
+      sits at a non-zero minimum even while the gradient vanishes. We
+      therefore return ``||res['jacobian']||`` for the LS path, which is the
+      exact quantity the upstream success check measures.
+
+    Returns ``None`` when the relevant vector cannot be read so the trust
+    gate can fail closed.
+    """
+
+    res = _boozer_result_state(boozer_surface)
+    if not res:
+        return None
+    kind = _boozer_solve_kind(boozer_surface)
+    if kind == "ls":
+        # LS Newton success is ``||grad|| <= newton_tol``; ``res['jacobian']``
+        # is the gradient (set by ``minimize_boozer_penalty_constraints_newton``
+        # at simsopt-surrogate/src/simsopt/geo/boozersurface.py:635-653).
+        jacobian = res.get("jacobian")
+        if jacobian is None:
+            return None
+        return float(np.linalg.norm(np.asarray(jacobian, dtype=float).ravel()))
+    # Exact-Newton path: ``res['residual']`` holds the unmasked raw Boozer
+    # residual. Reconstruct the constrained ``b`` vector used by the success
+    # check (boozersurface.py:980-984).
+    raw_residual = res.get("residual")
+    if raw_residual is None:
+        return None
+    residual_array = np.asarray(raw_residual, dtype=float).ravel()
+    surface = getattr(boozer_surface, "surface", None)
+    if surface is None:
+        return None
+    mask = res.get("mask")
+    if mask is None:
+        return None
+    mask_array = np.asarray(mask, dtype=bool).ravel()
+    if mask_array.size != residual_array.size:
+        return None
+    masked = residual_array[mask_array]
+    label = getattr(boozer_surface, "label", None)
+    target_label = getattr(boozer_surface, "targetlabel", None)
+    if label is None or target_label is None:
+        return None
+    label_residual = float(label.J()) - float(target_label)
+    components = [masked, np.array([label_residual], dtype=float)]
+    if not getattr(surface, "stellsym", True):
+        components.append(
+            np.array([float(surface.gamma()[0, 0, 2])], dtype=float)
+        )
+    constrained = np.concatenate(components)
+    return float(np.linalg.norm(constrained))
+
+
+def _iota_is_physically_plausible(iota: float | None) -> bool:
+    if iota is None:
+        return False
+    if not np.isfinite(iota):
+        return False
+    return abs(float(iota)) < BOOZER_TRUST_IOTA_ABS_BOUND
+
+
+def compute_boozer_trust_state(
+    boozer_surface,
+    *,
+    solve_success: bool,
+    self_intersecting: bool | None,
+) -> BoozerTrustState:
+    """Compute the SSOT Boozer trust state for a single solve.
+
+    ``solve_success`` and ``self_intersecting`` come from the existing failure-
+    policy plumbing; the residual norm is reconstructed from ``boozer_surface``
+    so callers do not need to plumb it through the call stack.
+    """
+
+    trust_tol = boozer_trust_tolerance(boozer_surface)
+    if not bool(solve_success):
+        return BoozerTrustState(
+            solve_success=False,
+            self_intersecting=self_intersecting,
+            constrained_residual_norm=None,
+            trust_tol=trust_tol,
+            boozer_trusted=False,
+            iota_objective_active=False,
+            trust_reason=BOOZER_TRUST_REASON_SOLVE_FAILED,
+        )
+    if self_intersecting is True:
+        return BoozerTrustState(
+            solve_success=True,
+            self_intersecting=True,
+            constrained_residual_norm=None,
+            trust_tol=trust_tol,
+            boozer_trusted=False,
+            iota_objective_active=False,
+            trust_reason=BOOZER_TRUST_REASON_SELF_INTERSECTING,
+        )
+    residual_norm = compute_boozer_constrained_residual_norm(boozer_surface)
+    if residual_norm is None or not np.isfinite(residual_norm):
+        return BoozerTrustState(
+            solve_success=True,
+            self_intersecting=self_intersecting,
+            constrained_residual_norm=residual_norm,
+            trust_tol=trust_tol,
+            boozer_trusted=False,
+            iota_objective_active=False,
+            trust_reason=BOOZER_TRUST_REASON_RESIDUAL_UNAVAILABLE,
+        )
+    if residual_norm > trust_tol:
+        return BoozerTrustState(
+            solve_success=True,
+            self_intersecting=self_intersecting,
+            constrained_residual_norm=residual_norm,
+            trust_tol=trust_tol,
+            boozer_trusted=False,
+            iota_objective_active=False,
+            trust_reason=BOOZER_TRUST_REASON_RESIDUAL_TOO_LARGE,
+        )
+    solved_iota = _coerce_boozer_scalar(_boozer_result_state(boozer_surface).get("iota"))
+    if not _iota_is_physically_plausible(solved_iota):
+        return BoozerTrustState(
+            solve_success=True,
+            self_intersecting=self_intersecting,
+            constrained_residual_norm=residual_norm,
+            trust_tol=trust_tol,
+            boozer_trusted=False,
+            iota_objective_active=False,
+            trust_reason=BOOZER_TRUST_REASON_IOTA_NONPHYSICAL,
+        )
+    return BoozerTrustState(
+        solve_success=True,
+        self_intersecting=self_intersecting,
+        constrained_residual_norm=residual_norm,
+        trust_tol=trust_tol,
+        boozer_trusted=True,
+        iota_objective_active=True,
+        trust_reason=BOOZER_TRUST_REASON_OK,
+    )
+
+
+def boozer_trust_state_from_initialization(
+    initialization: BoozerInitializationResult,
+) -> BoozerTrustState:
+    """Compute the trust state for a one-shot Boozer initialization probe.
+
+    Used by ``classify_bootability_result()`` so the bootability sidecar can
+    report the same trust signal that the runtime evaluator uses.
+    """
+
+    boozer_surface = initialization.boozer_surface
+    if boozer_surface is None:
+        return BoozerTrustState(
+            solve_success=bool(initialization.solve_success),
+            self_intersecting=initialization.self_intersecting,
+            constrained_residual_norm=None,
+            trust_tol=float("nan"),
+            boozer_trusted=False,
+            iota_objective_active=False,
+            trust_reason=BOOZER_TRUST_REASON_SOLVE_FAILED,
+        )
+    return compute_boozer_trust_state(
+        boozer_surface,
+        solve_success=bool(initialization.solve_success),
+        self_intersecting=initialization.self_intersecting,
+    )
+
+
+def _trust_state_bool_field(value: bool | None) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
+
+
+def boozer_trust_artifact_fields(
+    trust_state: BoozerTrustState | None,
+) -> dict[str, object]:
+    """Build the artifact-key payload for a Boozer trust state.
+
+    Always returns the five top-level trust keys (with ``None`` placeholders
+    when no solve has been attempted), so the artifact contract is identical
+    across the off / soft / probe lanes and registry ingest never sees a
+    missing key.
+    """
+
+    if trust_state is None:
+        return {
+            "BOOZER_SOLVE_SUCCESS": None,
+            "BOOZER_SELF_INTERSECTING": None,
+            "BOOZER_CONSTRAINED_RESIDUAL_NORM": None,
+            "BOOZER_TRUSTED": None,
+            "IOTA_OBJECTIVE_ACTIVE": None,
+            "BOOZER_TRUST_REASON": None,
+            "BOOZER_TRUST_TOL": None,
+        }
+    residual_norm = trust_state.constrained_residual_norm
+    return {
+        "BOOZER_SOLVE_SUCCESS": _trust_state_bool_field(trust_state.solve_success),
+        "BOOZER_SELF_INTERSECTING": _trust_state_bool_field(
+            trust_state.self_intersecting
+        ),
+        "BOOZER_CONSTRAINED_RESIDUAL_NORM": (
+            None
+            if residual_norm is None or not np.isfinite(residual_norm)
+            else float(residual_norm)
+        ),
+        "BOOZER_TRUSTED": _trust_state_bool_field(trust_state.boozer_trusted),
+        "IOTA_OBJECTIVE_ACTIVE": _trust_state_bool_field(
+            trust_state.iota_objective_active
+        ),
+        "BOOZER_TRUST_REASON": trust_state.trust_reason,
+        "BOOZER_TRUST_TOL": (
+            None
+            if not np.isfinite(trust_state.trust_tol)
+            else float(trust_state.trust_tol)
+        ),
+    }
 
 
 def snapshot_boozer_solve_state(boozer_surface) -> BoozerSolveSnapshot:
@@ -854,11 +1193,12 @@ def _bootability_failure(
     solve_success: bool | None = None,
     error_type: str | None = None,
     error_message: str | None = None,
+    trust_state: BoozerTrustState | None = None,
 ) -> dict[str, object]:
     abs_iota_error = None
     if solved_iota is not None:
         abs_iota_error = abs(float(solved_iota) - float(target_iota))
-    return {
+    payload = {
         "BOOZER_BOOTABLE": False,
         "IOTA_NEAR_TARGET": False,
         "IOTA_FEASIBLE": False,
@@ -874,6 +1214,8 @@ def _bootability_failure(
         "BOOTABILITY_ERROR_TYPE": error_type,
         "BOOTABILITY_ERROR_MESSAGE": error_message,
     }
+    payload.update(boozer_trust_artifact_fields(trust_state))
+    return payload
 
 
 def classify_bootability_result(
@@ -883,6 +1225,7 @@ def classify_bootability_result(
     target_iota: float,
     iota_tolerance: float,
 ) -> dict[str, object]:
+    trust_state = boozer_trust_state_from_initialization(initialization)
     if initialization.error_type is not None or not initialization.solve_success:
         return _bootability_failure(
             stage=stage,
@@ -893,6 +1236,7 @@ def classify_bootability_result(
             solve_success=initialization.solve_success,
             error_type=initialization.error_type,
             error_message=initialization.error_message,
+            trust_state=trust_state,
         )
     if initialization.self_intersecting:
         return _bootability_failure(
@@ -902,6 +1246,7 @@ def classify_bootability_result(
             solved_iota=initialization.solved_iota,
             self_intersecting=True,
             solve_success=True,
+            trust_state=trust_state,
         )
     solved_iota = initialization.solved_iota
     if solved_iota is None:
@@ -910,6 +1255,7 @@ def classify_bootability_result(
             target_iota=target_iota,
             reason=BOOTABILITY_REASON_BOOZER_SOLVE_FAILED,
             solve_success=True,
+            trust_state=trust_state,
         )
     abs_iota_error = abs(float(solved_iota) - float(target_iota))
     iota_near_target = abs_iota_error <= float(iota_tolerance)
@@ -918,7 +1264,7 @@ def classify_bootability_result(
         if iota_near_target
         else BOOTABILITY_REASON_IOTA_MISMATCH
     )
-    return {
+    payload = {
         "BOOZER_BOOTABLE": True,
         "IOTA_NEAR_TARGET": iota_near_target,
         "IOTA_FEASIBLE": iota_near_target,
@@ -932,6 +1278,8 @@ def classify_bootability_result(
         "BOOTABILITY_ERROR_TYPE": None,
         "BOOTABILITY_ERROR_MESSAGE": None,
     }
+    payload.update(boozer_trust_artifact_fields(trust_state))
+    return payload
 
 
 def bootability_passes(bootability_status: Mapping[str, object]) -> bool:

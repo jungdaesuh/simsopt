@@ -120,8 +120,14 @@ from banana_opt.current_contracts import (
     resolve_finite_current_mode,
 )
 from banana_opt.stage2_single_stage_handoff import (
+    boozer_trust_artifact_fields,
     partition_loaded_stage2_coils,
     probe_stage2_seed_bootability,
+)
+from banana_opt.boozer_topology_bridge import (
+    boozer_topology_bridge_artifact_fields,
+    safe_compute_fieldline_iota_proxy,
+    safe_compute_helical_field_content_S_HEL,
 )
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
@@ -697,6 +703,35 @@ def parse_args():
         help="Boozer-surface ntor used by the Stage 2 Boozer/iota solve.",
     )
     parser.add_argument(
+        "--stage2-fieldline-iota-proxy",
+        action="store_true",
+        default=bool(int(os.environ.get("STAGE2_FIELDLINE_IOTA_PROXY", "0"))),
+        help=(
+            "Phase 3 diagnostic: compute the field-line iota proxy "
+            "(with convergence sub-study) at end-of-solve and persist it "
+            "as FIELDLINE_IOTA_PROXY / FIELDLINE_IOTA_PROXY_VALID. Off by "
+            "default — tracing adds ~5-30s per run. The plan forbids using "
+            "the proxy as a per-iteration objective (lines 270, 283)."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-fieldline-iota-proxy-n-lines",
+        type=int,
+        default=int(os.environ.get("STAGE2_FIELDLINE_IOTA_PROXY_N_LINES", "4")),
+        help="Number of midplane field lines to trace for the iota proxy.",
+    )
+    parser.add_argument(
+        "--stage2-fieldline-iota-proxy-tmax",
+        type=float,
+        default=float(
+            os.environ.get("STAGE2_FIELDLINE_IOTA_PROXY_TMAX", "100.0")
+        ),
+        help=(
+            "Hard cap on field-line trace time. The convergence sub-study "
+            "doubles this to verify |iota_FL(2N)-iota_FL(N)| < 0.005."
+        ),
+    )
+    parser.add_argument(
         "--length-weight",
         type=float,
         default=float(os.environ.get("LENGTH_WEIGHT", "0.0005")),
@@ -979,6 +1014,24 @@ def build_stage2_iota_hot_loop_payload(
         "STAGE2_IOTA_ABS_ERROR": None,
         "STAGE2_IOTA_FEASIBLE": None,
         "STAGE2_IOTA_PENALTY_THRESHOLD": None,
+        # Phase 1 Boozer residual trust gate (Stage 2 / single-stage handoff
+        # plan). Always emitted so the artifact contract is identical across
+        # the off / soft / probe lanes.
+        "BOOZER_SOLVE_SUCCESS": None,
+        "BOOZER_SELF_INTERSECTING": None,
+        "BOOZER_CONSTRAINED_RESIDUAL_NORM": None,
+        "BOOZER_TRUSTED": None,
+        "IOTA_OBJECTIVE_ACTIVE": None,
+        "BOOZER_TRUST_REASON": None,
+        "BOOZER_TRUST_TOL": None,
+        # Phase 3 non-Boozer topology bridge diagnostics. Populated post-solve
+        # via `update_results_json` when the bridge is invoked; left ``None``
+        # otherwise so the artifact schema is identical across lanes.
+        "FIELDLINE_IOTA_PROXY": None,
+        "FIELDLINE_IOTA_PROXY_VALID": None,
+        "HELICAL_FIELD_CONTENT": None,
+        "S_HEL_OBJECTIVE_WEIGHT": None,
+        "PRE_BOOZER_TOPOLOGY_SCORE": None,
     }
     if stage2_iota_runtime is None:
         return payload
@@ -1004,6 +1057,53 @@ def build_stage2_iota_hot_loop_payload(
             "STAGE2_IOTA_PENALTY_THRESHOLD": stage2_iota_runtime.penalty_threshold,
         }
     )
+    evaluator = getattr(stage2_iota_runtime, "guarded_boozer_evaluator", None)
+    trust_state = getattr(evaluator, "last_trust_state", None) if evaluator else None
+    payload.update(boozer_trust_artifact_fields(trust_state))
+    # Phase 3 topology bridge: compute S_HEL on the working surface using
+    # the same Boozer-surface + BiotSavart pair the iota runtime is sitting
+    # on. The field-line proxy is left None here because tracing is expensive
+    # and lives outside the hot-loop artifact; donor-side tools can populate
+    # FIELDLINE_IOTA_PROXY from the persisted Boozer artifact post-solve.
+    #
+    # The artifact path uses the safe wrapper because a degenerate ``|B|``
+    # grid (non-finite samples, zero non-DC spectral power) on a marginal
+    # Boozer surface is a documented diagnostic-unavailable case — the
+    # plan ("Failed diagnostics fail closed as unavailable metrics, not as
+    # fake zero-quality success", line 305) requires reporting ``None``
+    # rather than crashing the solver post-optimization.
+    boozer_surface = getattr(stage2_iota_runtime, "boozer_surface", None)
+    surface = getattr(boozer_surface, "surface", None) if boozer_surface else None
+    biotsavart = getattr(boozer_surface, "biotsavart", None) if boozer_surface else None
+    if surface is not None and biotsavart is not None:
+        s_hel_value = safe_compute_helical_field_content_S_HEL(biotsavart, surface)
+        fieldline_result = None
+        if bool(getattr(args, "stage2_fieldline_iota_proxy", False)):
+            # Opt-in post-solve diagnostic. Plan lines 270 + 283 forbid using
+            # the field-line proxy as a per-iteration objective; this single
+            # call at end-of-payload-build is the only invocation.
+            fieldline_result = safe_compute_fieldline_iota_proxy(
+                biotsavart,
+                surface,
+                n_lines=int(getattr(
+                    args,
+                    "stage2_fieldline_iota_proxy_n_lines",
+                    4,
+                )),
+                tmax=float(getattr(
+                    args,
+                    "stage2_fieldline_iota_proxy_tmax",
+                    100.0,
+                )),
+            )
+        payload.update(
+            boozer_topology_bridge_artifact_fields(
+                s_hel=s_hel_value,
+                fieldline_result=fieldline_result,
+                s_hel_objective_weight=None,
+                iota_target=stage2_iota_runtime.target,
+            )
+        )
     return payload
 
 
