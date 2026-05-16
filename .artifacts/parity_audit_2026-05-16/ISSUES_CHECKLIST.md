@@ -13,7 +13,7 @@ Legend: severity prefix in description; `(LIVE)` means subagent reproduced the i
 
 A two-stage external validation against (a) live source and (b) official JAX/NVIDIA/SIMSOPT docs identified gaps in the first cut of this checklist. Corrections applied:
 
-- **Counts corrected (historical, superseded by Pass-4):** original header said "89 issues across 7 priority tiers"; Pass-3 corrected to 101 unchecked items (95 actionable + 6 out-of-scope) across 10 priority tiers (P0-P8 plus P5+). **Current state (Pass-4): 169 unchecked items / 163 actionable** — see top of file. Summary table at bottom reflects current state.
+- **Counts corrected (historical pass-chain):** original header said "89 issues across 7 priority tiers"; Pass-3 corrected to 101 unchecked items (95 actionable + 6 OOS) across 10 priority tiers; Pass-4 expanded to 169 unchecked items / 163 actionable after recovering ~67 row-report items. **Current state (Pass-5, after meta-checking 2 reconciliation entries): 167 unchecked + 2 checked meta = 169 total; 161 actionable + 6 out-of-scope + 2 meta-resolved** — see top of file. Summary table at bottom reflects current state.
 - **F1 expanded** from JAX core only to cover CPU `projection_L2_balls` (`permanent_magnet_optimization.py:82`) AND CPU+JAX `prox_l1` (`:63` and `permanent_magnet_optimization_jax.py:320`). Both divide by `m_maxima` without zero-guard. Live-verified: `m_maxima=[1,0,1]` with zero `m` row produces NaN in all three lanes.
 - **DH17 added** (P3 dipole non-cartesian on-axis silent C++↔JAX divergence — was in deeper synthesis but missed in checklist).
 - **DH25 added** (P3 wireframe `np.int32` narrowing at `wireframefield_jax.py:26` — was in deeper synthesis but missed in checklist).
