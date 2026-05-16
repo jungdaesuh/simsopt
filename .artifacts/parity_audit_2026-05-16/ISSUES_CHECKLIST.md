@@ -1,0 +1,317 @@
+# JAX↔C++ Parity Audit — Consolidated Issues Checklist
+
+**Source:** First-pass audit (12 rows) + corrigendum + deeper-pass audit (12 rows) + checklist-validation corrigendum (2026-05-16).
+**Date:** 2026-05-16
+**Branch:** `gpu-purity-stage2-20260405`
+**Total items:** 101 unchecked items across 8 priority tiers (95 actionable + 6 out-of-scope). Verified by `grep -c "^- \[ \]"`.
+
+Legend: severity prefix in description; `(LIVE)` means subagent reproduced the issue against the running env; effort estimates in parentheses.
+
+---
+
+## CORRIGENDUM (2026-05-16, post-validation pass)
+
+A two-stage external validation against (a) live source and (b) official JAX/NVIDIA/SIMSOPT docs identified gaps in the first cut of this checklist. Corrections applied:
+
+- **Counts corrected:** header said "89 issues across 7 priority tiers"; actual is 101 unchecked items (95 actionable + 6 out-of-scope) across 8 priority tiers. Summary table at bottom also corrected.
+- **F1 expanded** from JAX core only to cover CPU `projection_L2_balls` (`permanent_magnet_optimization.py:82`) AND CPU+JAX `prox_l1` (`:63` and `permanent_magnet_optimization_jax.py:320`). Both divide by `m_maxima` without zero-guard. Live-verified: `m_maxima=[1,0,1]` with zero `m` row produces NaN in all three lanes.
+- **DH17 added** (P3 dipole non-cartesian on-axis silent C++↔JAX divergence — was in deeper synthesis but missed in checklist).
+- **DH25 added** (P3 wireframe `np.int32` narrowing at `wireframefield_jax.py:26` — was in deeper synthesis but missed in checklist).
+- **CPU validation-contract drift added** to P7 (JAX `dipole_field.py:439` raises on shape mismatch; C++ `dipole_field.cpp:310` silently reads OOB).
+- **Reachability finding added** to P0 F1 scope: `cell_vol = 0` for on-axis cylindrical cells at `permanent_magnet_grid.py:382` makes `m_maxima = 0` reachable in production; the zero-`m_maxima` NaN bug is NOT a corner case.
+- **F2 reclassified** from P0 to P7: it is a docstring correction, not a correctness blocker. Production scalar paths are already equivalent per the first synthesis corrigendum.
+- **Deeper-pass synthesis discrepancy noted:** the deeper synthesis text says "19 new HIGH" but its census table totals 26. The 26 figure is authoritative (per-row tally).
+- **F-DH8 narrowed:** the missing C++ dense back-fill matters for budget/exhaustion or abnormal non-stop exits, not every non-terminated trajectory. Most normal accepted JAX steps already clamp to `tmax`.
+
+Official-doc check confirmed:
+- **F1**: JAX docs confirm `jnp.maximum` propagates NaN; `jnp.fmax` returns finite operand. Live-verified.
+- **CT-D1 / P4**: JAX FAQ confirms `where`/NaN-gradient hazard.
+- **F-DH1**: JAX `lstsq` docs say `rcond=None` uses internal cutoff; does NOT prove SciPy parity. F-DH1 remains valid.
+- **P8 / F20**: NVIDIA CUDA docs confirm reduction/order/FMA flexibility. Reaffirms byte-identity hardening as performance work, not release-blocker.
+- **F2/F3/F4**: SIMSOPT public docs do NOT specify the JAX normalization or Boost `dtmax` internals. These are source-parity findings, not public-doc violations.
+
+---
+
+## P0 — Correctness fixes (must ship before next release)
+
+### Critical NaN / sentinel / validation bugs
+
+- [ ] **F1 / H7 (EXPANDED post-validation)** — Zero-`m_maxima` NaN propagation, full scope:
+    - (a) JAX `projection_l2_balls` at `src/simsopt/jax_core/pm_optimization.py:2122-2125`: replace `unit = m_maxima / m_maxima` with `jnp.ones_like(m_maxima)` AND replace `jnp.maximum` with `jnp.fmax`.
+    - (b) CPU `projection_L2_balls` at `src/simsopt/solve/permanent_magnet_optimization.py:82`: same hazard (`np.sqrt(...) / mmax` then `np.maximum(1, ...)` propagates NaN). Use `np.fmax` and guard `mmax > 0`.
+    - (c) CPU `prox_l1` at `src/simsopt/solve/permanent_magnet_optimization.py:63`: `np.abs(m) / mmax_vec` divides by zero. Add guard.
+    - (d) JAX `prox_l1_jax` at `src/simsopt/solve/permanent_magnet_optimization_jax.py:320`: identical pattern `jnp.abs(matrix) / m_maxima[:, None]`. Add guard.
+    - (e) **Reachability**: `cell_vol = 0` for on-axis cylindrical cells at `src/simsopt/geo/permanent_magnet_grid.py:382` produces `m_maxima = B_max·cell_vol/μ₀ = 0`. This is NOT a corner case — it's reachable in any cylindrical PM grid with cells at `R = 0`.
+    - Add regression tests covering all 4 entrypoints with `m_maxima = [1.0, 0.0, 1.0]` and zero-`m` rows. (3h total)
+
+- [ ] **F-DH2** — Replace `1e50` GPMO sentinel with `jnp.inf` at `pm_optimization.py:{609-611, 776-778, 1062-1065, 1597-1600}`. (LIVE-verified: collides with real costs at `‖b‖~1e26`; affects all 5 GPMO variants.) (30min)
+
+- [ ] **F-DH3** — Add `nu > 0` validator at PM optimization API ingress. Current code at `pm_optimization.py:{2271, 2464}` produces silent NaN through `1/(2·0)`. (LIVE-verified.) (15min)
+
+- [ ] **F-DH9** — Add shape assertion at `src/simsopt/objectives/integral_bdotn_jax.py:50` ingress. (LIVE-verified: `target.shape=(5,7)` silently broadcasts against `B.shape=(1,1,3)` and returns wrong `J=17.5`; CPU raises `RuntimeError`.) (30min)
+
+- [ ] **F-DH1** — Add explicit `rcond` to RCLS `jnp.linalg.lstsq` at `src/simsopt/solve/wireframe_optimization_jax.py:149`: `rcond = max(LHS.shape) * jnp.finfo(LHS.dtype).eps`. (LIVE-verified: `diff_max ≈ 1.56e14` vs scipy on rank-deficient LHS.) Add rank-deficient regression test. (1h)
+
+### (F2 moved to P7 — documentation-only correction, not a correctness blocker per post-validation review.)
+
+---
+
+## P1 — Tracing parity hardening (Row 4)
+
+- [ ] **F3 / H2** — Add `dtmax` step ceiling. Edit 5 inline clamp sites in `src/simsopt/jax_core/tracing.py:{952, 1487, 1781, 2422, 2947}`: replace `jnp.minimum(h, tmax - t)` with `jnp.minimum(jnp.minimum(h, tmax - t), dtmax)`. Compute `dtmax = r0 * 0.5 * π / v_total` for particles, `r0 * 0.5 * π / AbsB` for fieldlines. Threaded as constructor arg. (1d)
+
+- [ ] **F4 / H3** — Per-driver initial step heuristic. Replace `_INITIAL_STEP_FRACTION = 1/100` at `tracing.py:{218, 688-691}` with mode-specific recipe: `1e-3 * dtmax` for particle drivers, `1e-5 * dtmax` for fieldlines. Depends on F3. (4h)
+
+- [ ] **F5 / H4** — Pass non-zero `atol` to `bracket_root_jax` matching the localizer's bracket-width target at `tracing.py:{1015, 1547, 2479, 3006}`. (Performance only; saves ~30 dead RHS evals per event.) (2h)
+
+- [ ] **F-DH4** — Capture `phi_init` after first JAX integration step inside the criterion predicate at `tracing.py:{886, 1422, 2882}`. Current code captures from `y0` at construction time, diverging from C++ `iter==1` convention. (2h)
+
+- [ ] **F-DH5** — Add `assert(s > 0)` equivalent in JAX Boozer GC RHS. Surface to driver as `status=-2`. Currently Boozer particles can silently spiral past axis with NaN derivatives. (2h)
+
+- [ ] **F-DH6** — Add JAX-isolated mu/E conservation tests. Create `tests/jax_core/test_tracing_jax_conservation.py` with `|μ_t − μ_0| < 1e-10` and `|E_t − E_0| < 1e-10` over `t > T_bounce` for trapped orbits. Covers all Boozer GC modes (vacuum, no_k, full). (4h)
+
+- [ ] **F-DH7** — Fix `bracket_root_jax` NaN poisoning at `tracing.py:765`. Replace unconditional `b - fb * width / (fb - fa)` with `jnp.where(jnp.abs(fb-fa) > 1e-300, false_position, bisection_midpoint)`. (1h)
+
+- [ ] **F-DH8** — Add explicit `t = tmax` back-fill at end of trajectory for non-terminated particles. Currently `loss_ctr` over-counts JAX losses vs C++. Match `tracing.cpp:441-444` `dense.calc_state(tmax, y)`. (2h)
+
+- [ ] **F21 (Row 4 part)** — Fix stale docstring at `tracing.py:8-13` (falsely says fieldline RHS is `B/|B|`; actual code returns `B`). Remove stale "Boozer GC path deferred" comment at `tracing.py:386-388`. (15min)
+
+---
+
+## P2 — Interpolation boundary semantics (Row 5)
+
+- [ ] **F6 / H5** — Cell-locator: replace `jnp.floor(...).astype(jnp.int32)` with `jnp.trunc(...).astype(jnp.int32)` at `src/simsopt/jax_core/regular_grid_interp.py:510-512`. (Single-character change after corrigendum; the in-bounds gate already works.) Add regression test at `nx=2, x = xmin - 0.1*hx`. (30min)
+
+- [ ] **F7 / H6** — API decision required. Three options, pick one: (a) add optional `existing_result` argument to `evaluate_local` and use `jnp.where(in_kept_cell, result, existing)`; (b) accept JAX-only stricter contract, document, **remove the parity claim** from the ledger; (c) wrap at consumer side. Update `tests/jax_core/test_regular_grid_interp_item13.py:186-196` accordingly. (decision + 4h)
+
+- [ ] **F-DH14** — `_DeviceSpec` cache invalidation. Make cache key include numpy array id at `src/simsopt/jax_core/interpolated_field.py:346-381`, OR deep-copy on construction. Currently mutating underlying `spec.cell_table` silently produces stale results. (2h)
+
+- [ ] **F-DH15** — Promote int32 → int64 for flat cell-index arithmetic at `regular_grid_interp.py:{510-512, 525}` and `src/simsoptpp/regular_grid_interpolant_3d.h:124-127`. UB in C++ at `nx=ny=nz=1000, degree=4` (`6.4e10 > INT_MAX`). (2h)
+
+- [ ] **F-DH16** — Add `degree=4` cross-oracle test on polynomially-exact fixture (`nx·degree` knots interpolating degree-`(nx·degree-1)` polynomial → residual = 0 in exact arithmetic). Bare-kernel `test_cpp_cross_oracle` currently covers only `degree in [1,2,3]`. (2h)
+
+- [ ] **F-D5 (Row 5 deeper)** — Add silent-wrong-physics warning when `jax.grad` flows through `evaluate_batch`. JAX returns gradient of piecewise polynomial, NOT the `GradAbsB` interpolant value. Add either a docstring warning or a custom_vjp that raises. (decision + 1h)
+
+---
+
+## P3 — Upstream coordinated fixes (C++ + JAX in one PR)
+
+- [ ] **F9 / H9** — Wireframe GSCO operator precedence. Patch BOTH together: `src/simsoptpp/wireframe_optimization.cpp:270` change `(opt_ind + nLoops % (twoNLoops))` to `((opt_ind + nLoops) % twoNLoops)`; mirror at `src/simsopt/solve/wireframe_optimization_jax.py:406`. Add regression test exercising negative→positive undo direction. Survey downstream consumers (CIEMAS) before landing. (1d)
+
+- [ ] **F10 / CT-4** — Boozer radial OpenMP race. Apply correct fix at `src/simsoptpp/boozerradialinterpolant.cpp:{147-156, 165-175}` using scalar local accumulators:
+    ```cpp
+    for (int im = 1; im < num_modes; ++im) {
+        double sum = 0.0, norm = 0.0;
+        #pragma omp parallel for reduction(+:sum, norm)
+        for (int ip = 0; ip < num_points; ++ip) {
+            double s = sin(xm(im)*thetas(ip) - xn(im)*zetas(ip));
+            sum  += K(ip) * s;
+            norm += s * s;
+        }
+        kmns(im) = sum / norm;
+    }
+    ```
+    (NOT `reduction(+:kmns, norm)` — OpenMP doesn't accept xtensor array types.) Same pattern for `fourier_transform_even`. (2h)
+
+- [ ] **F-DH10b (Row 12 deeper)** — Add closed-form NumPy oracle test for forward `fourier_transform_*` that does NOT call simsoptpp (insulates JAX gate from future OMP regressions). (2h)
+
+- [ ] **F-DH23** — Replace non-ISO VLA at `src/simsoptpp/magneticfield_wireframe.cpp:39-40` with `std::vector<double*> halfPrd_ptr(nHalfPrds)` and `std::vector<double> seg_signs(nHalfPrds)`. Stack-overflow vector at pathological `nHalfPrds`. (1h)
+
+- [ ] **F-DH24** — Initialize `int opt_ind_prev = -1;` at `src/simsoptpp/wireframe_optimization.cpp:154`. Currently UB-protected only by synchronized `break` after `stop_none_eligible`. JAX already does this correctly. (15min)
+
+- [ ] **F-DH (Row 13)** — Move loop-body local variables INSIDE `#pragma omp parallel for` region at `src/simsoptpp/dommaschk.cpp:{475-476, 503-504}`. Textbook data-race pattern; explains any flakiness under `OMP_NUM_THREADS > 1`. (30min)
+
+- [ ] **F-DH17** — Dipole-on-axis with non-cartesian `coordinate_flag` silent C++↔JAX divergence. **(LIVE-verified.)** With a dipole at `(0,0,0)` and `coordinate_flag="cylindrical"` or `"toroidal"`, C++ returns `[NaN, NaN, finite-z]` while JAX returns finite values. Root cause: `xsimd::atan2(0, 0)` returns NaN at `src/simsoptpp/dipole_field.cpp:332-334` and propagates through rotation factors; `jnp.atan2(0, 0)` returns 0 (matches `std::atan2`) at `src/simsopt/jax_core/dipole_field.py:458`. JAX also silently treats unknown `coordinate_flag` typos (e.g., `"sphereical"`) as cartesian via the fall-through `else` at `:466-468`. Fix: guard `atan2(0, 0)` with sentinel in C++ to match JAX (recommended), or document that dipoles must not lie on axis for non-cartesian frames. Add typo regression test. (2h)
+
+- [ ] **F-DH25** — Wireframe unsafe int32 narrowing at JAX ingress. `wframe.segments` is int64 (`src/simsopt/geo/wireframe_toroidal.py:163`). Both `_snapshot_wireframe_arrays` at `src/simsopt/field/wireframefield_jax.py:26` and `_as_jax_int32` at `src/simsopt/jax_core/wireframe.py:115` cast to int32 with no overflow guard. Silent truncation if `n_segments > INT32_MAX`. Either promote to int64 throughout, or add an explicit overflow check that raises. (1h)
+
+---
+
+## P4 — Autodiff NaN cliffs (NEW priority tier, CT-D1)
+
+Apply the **double-where idiom** at each site:
+```python
+safe = jnp.where(cond, x, ones_like(x))
+result = jnp.where(cond, f(safe), fallback)
+```
+
+- [ ] **F-DH10** — `"local"` flux gradient guard at `src/simsopt/objectives/integral_bdotn_jax.py:65-78`. Currently primal returns `+inf` at `|B|=0` but gradient is finite-on-survivors (silent failure mode through bare kernel). (1h)
+
+- [ ] **F-DH19** — `_unitnormal` autodiff fix at `src/simsopt/geo/surface_fourier_jax.py:1114-1115` and `src/simsopt/jax_core/surface_rzfourier.py:680-683`. (LIVE-verified at `n=(1e-300, 0, 0)` returns `[inf, NaN, NaN]` forward and all-NaN Jacobian.) (2h)
+
+- [ ] **F-DH20** — Quaternion normalization at `src/simsopt/geo/curveplanarfourier.py:17-22`. Forward value at `q=0` is correct (identity rotation), but `jax.grad` w.r.t. quaternion DOFs returns NaN where C++ analytic returns 0. Add gradient parity test at `q=0`. (1h)
+
+- [ ] **F-DH (Row 3)** — `_inverse_modB` gradient at `|B|=0` in `src/simsopt/geo/boozer_residual_jax.py`. Currently returns `+inf` in primal AND gradient; document or guard. (1h)
+
+- [ ] **Lint rule** — Add project lint rule searching for `jnp.where(.*0.*, .*x/0.*, ...)` patterns; flag for double-where idiom review. (2h)
+
+---
+
+## P5 — Stale-state contracts (NEW priority tier, CT-D4)
+
+For every JAX adapter exposing CPU-mutable attributes, choose ONE:
+- Deep-copy at construction, ban mutation;
+- Re-snapshot on every entry;
+- Provide explicit `invalidate_cache()` documented in public API.
+
+- [ ] **F-DH (Row 5)** — `_DeviceSpec` cache (covered by F-DH14 above; cross-listed). (—)
+
+- [ ] **F-DH (Row 8)** — `dB_by_dcoilcurrents` invalidation on `set_points_*` at `src/simsopt/field/wireframefield_jax.py:{60-70, 116-119}`. Currently latent (always overwritten); harden before regression. (2h)
+
+- [ ] **F-DH (Row 12)** — `bri.psi0` mutability vs K-spline factor at construction (line 704). Post-construction `psi0` mutation desyncs JAX wrapper. Document as immutable or invalidate. (1h)
+
+- [ ] **F-DH (Row 13, D-5)** — `DommaschkJAX.coeffs` capture vs CPU re-read at `src/simsopt/field/dommaschk_jax.py:79`. CPU `Dommaschk` re-reads `self.coeffs` per call; JAX uses construction-time snapshot — silent divergence under mutation. (2h)
+
+- [ ] **F-DH (Row 7)** — `pm_optimization` shape-recompile cost. Every change in `N` or `P` triggers ~100ms JAX recompile; not shape-polymorphic. Add shape-polymorphism or document. (4h)
+
+---
+
+## P6 — Test oracle hardening
+
+### Coverage gaps from first-pass
+
+- [ ] **F11** — Add zero-`m_maxima` regression test (gates F1).
+- [ ] **F11b** — Add L0/L1 kernel-level parity assertions (currently only diagnostic-reporting parity for PM).
+- [ ] **F11c** — Add `single_direction` coverage for `GPMO_backtracking` JAX (Row 7 INFO).
+- [ ] **F12a** — Boozer T2: add direct unit-level oracle test for `boozer_residual_scalar_and_grad_cpu_ordered` against `sopp.boozer_residual_ds`.
+- [ ] **F12b** — Boozer T3: add `boozer_residual_jacobian_composed` C++ Jacobian oracle.
+- [ ] **F12c** — Boozer T4: add `jax.hessian(boozer_penalty_composed)` C++ Hessian oracle.
+- [ ] **F12d** — Boozer T5: add `boozer_residual_coil_vjp(weight_inv_modB=True)` path coverage.
+- [ ] **F13a** — Dipole autodiff w.r.t. moments (linear). FD-cross-validated.
+- [ ] **F13b** — Dipole autodiff w.r.t. positions (nonlinear).
+- [ ] **F13c** — Dipole autodiff w.r.t. evaluation points.
+- [ ] **F13d** — Dipole singularity-policy docstring warning in `dipole_field.py` and C++ header.
+- [ ] **F14a** — Wireframe RCLS test with rank-deficient `LHS` (covered by F-DH1; cross-listed).
+- [ ] **F14b** — Wireframe large-fixture GSCO parity at `nGrid=200, nLoops=50` (current `nGrid=5, nLoops=2` below realistic scale).
+- [ ] **F14c** — Wireframe `bnorm_obj_matrices_jax` with `ext_field` / `bnorm_target` branches.
+- [ ] **F15a** — Surface XYZ-Fourier `dgammadash1_by_dcoeff_impl` column-by-column C++ oracle.
+- [ ] **F15b** — Surface XYZ-Fourier `dgammadash2_by_dcoeff_impl` column-by-column C++ oracle.
+- [ ] **F15c** — Surface `dnormal_by_dcoeff_vjp` parity test.
+- [ ] **F16a** — Extend `tests/geo/test_curve_item05_closeout.py::test_curve_spec_pullback_production_scale_parity` to pin `gammadash` and `gammadashdash` for RZ Fourier and Planar Fourier.
+- [ ] **F16b** — Direct `pair_linking_number_pure` test against `simsoptpp.compute_linking_number` on dense fixture.
+- [ ] **F17a** — Closed-form NumPy oracle for `fourier_transform_odd/even` (covered by F-DH10b; cross-listed).
+- [ ] **F17b** — Direct `_compute_K_per_point` parity test (currently transitive).
+- [ ] **F18a** — Direct `div(B) = trace(dB) = 0` assertion on JAX Dommaschk output.
+- [ ] **F18b** — Central-FD Taylor test for `dommaschk_dB` (Reiman has one already).
+- [ ] **F18c** — Odd-`k` Reiman regression (existing test uses `k=6` even, masking arctan vs arctan2 divergence).
+- [ ] **F18d** — `jax.grad`-over-coefficients parity test (Dommaschk + Reiman).
+- [ ] **F18e** — Explicit `B_φ = -1` assertion for Reiman.
+
+### Coverage gaps from deeper-pass
+
+- [ ] **F-DH11** — Surface-DOF drift guard regression test. Construct `SquaredFluxJAX`, mutate underlying surface DOFs, assert `_raise_if_surface_dofs_drifted` at `fluxobjective_jax.py:378-386` fires. (1h)
+
+- [ ] **F-DH12** — `_split_decision_vector` bounds check. Add assertion `surface_size >= 0` at `boozer_residual_jax.py:73-82`. (15min)
+
+- [ ] **F-DH13** — Delete duplicated G-from-currents formula at `boozer_residual_jax.py:554-556`; import SSOT `compute_G_from_currents` from `label_constraints_jax.py:49-61`. Three different inline spellings exist; algebraically identical today but no guard against drift. (30min)
+
+- [ ] **F-DH21** — `B·∇ζ = G(s)` Boozer identity test. Critical: tested in NEITHER item 32 nor item 33; both backends could agree on the same bug. Add to `tests/field/test_boozermagneticfield_jax_item33.py`. (2h)
+
+- [ ] **F-DH22** — `mn_factor` extrapolation test at `s < s_half_mn[0]`. Clarify docstring (`s^{-m/2}` not `s^{m/2}`). (1h)
+
+- [ ] **F-DH (Row 12)** — `enforce_qs=True` and `enforce_vacuum=True` paths never tested; add coverage. (2h)
+
+- [ ] **F-DH (Row 5)** — `value_size != 1, 3` cross-oracle gap; test at `value_size in [5, 7, 8]` (SIMD-padded C++ path). (2h)
+
+- [ ] **F-DH (Row 10)** — High-resolution surface stress test at `mpol=ntor=10` for stellsym scatter, normal, area, volume. Current tests max at `mpol≤2, ntor≤2`. (2h)
+
+- [ ] **F-DH (Row 10)** — Non-stellsym `d2volume/d2area` Hessian validation at `mpol > 2` against C++ SIMD-vectorised oracle. (2h)
+
+- [ ] **F-DH (Row 11)** — Non-identity quaternion Planar curve production fixture (current `q ≈ (1, ε, ε, ε)` never exercises hard rotation). (1h)
+
+- [ ] **F-DH (Row 4)** — Lost-particle classification edge cases: exit on quadrature face, two stopping criteria fire same step, levelset returns exactly 0. (4h)
+
+---
+
+## P7 — Documentation / API surface cleanup
+
+- [ ] **F21a** — Tracing module docstring at `src/simsopt/jax_core/tracing.py:8-13` falsely says fieldline RHS is `B/|B|` (covered in P1; cross-listed). (—)
+
+- [ ] **F21b** — Dipole singularity-policy docstring (covered by F13d; cross-listed). (—)
+
+- [ ] **F22a** — `wireframe_segment_dB_by_dX_contributions` (Row 8 INFO): exported but no direct C++ parity test and no in-tree consumer. Either add test or remove export. (1h)
+
+- [ ] **F22b** — `residual_BdotN`, `signed_BdotN_flux` (Row 2): JAX-only public exports with no per-point oracle. Add closed-form NumPy per-point oracle. (2h)
+
+- [ ] **F-DH26** — Fix `_simsopt_jax_native_field = True` over-claim at `src/simsopt/field/wireframefield_jax.py:47`. No `B_vjp` implemented → `AttributeError` for `MagneticFieldSum([WireframeFieldJAX, BiotSavartJAX]).B_vjp(v)`. Either implement `B_vjp` or set flag to `False`. (decision + 2h)
+
+- [ ] **F-DH (Row 6)** — Fix SIMSOPT-wide `dA_by_dX` pybind docstring at `src/simsoptpp/python_magneticfield.cpp:45`. Claims `∂_j A_l` but actual storage is `dA[p, j, k] = ∂A_j/∂x_k` (transposed). Load-bearing for downstream `dA_by_dX` consumers. (1h)
+
+- [ ] **F2 (moved from P0, post-validation)** — Correct module docstring at `src/simsopt/geo/boozer_residual_jax.py:31-34`. Replace "matching the C++ normalization" with: "JAX normalizes by `1/(3·nphi·ntheta)`; raw C++ symbol `sopp.boozer_residual` does NOT carry this normalization; CPU production path normalizes inline at `boozersurface.py:601-602`." Documentation-only — production scalar paths are equivalent per first-pass corrigendum. (30min)
+
+- [ ] **F-DH (Row 6 validation contract)** — Asymmetric input-validation contracts. JAX `dipole_field.py:439` raises `ValueError` on `unitnormal.shape != points.shape`; C++ `dipole_field.cpp:310` silently reads `unitnormal(i+k, d)` with no shape check (OOB-read potential). Both backends also silently accept unknown `coordinate_flag` strings. Either align (recommended: C++ adds a shape assertion that raises) or document the asymmetry. (1h)
+
+- [ ] **F-DH (Row 3)** — Reconcile default `weight_inv_modB` across sibling APIs. `boozer_residual_coil_vjp` and `_boozer_residual_vector_composed` default `False`; `boozer_residual_scalar`/`vector`/`penalty_composed` default `True`. (30min)
+
+- [ ] **F-DH (Row 5)** — Document `_DeviceSpec` lifetime and memory pressure for production grids. (30min)
+
+- [ ] **F-DH (Row 8)** — Document `dB[p, k, m]` (component-first) layout convention divergence from CLAUDE.md abstract `[p, j, l]`. Matches C++ storage exactly; no numerical bug, but readers will trip. (15min)
+
+- [ ] **F-DH (Row 11)** — `RotatedCurve` not exposed to JAX `curve_geometry` dispatcher (`curve_spec_from_curve` raises `NotImplementedError`). Either add support or document the limitation. (decision + 1d if implementing)
+
+---
+
+## P5+ — Performance follow-ups
+
+- [ ] **F19 / H8 (corrigendum)** — `boozer_residual_jacobian_composed` duplicate forward pass at `src/simsopt/geo/boozer_residual_jax.py:738-739`. Switch to `jax.linearize` or `value_and_jacfwd`. ~2× speedup. (2h)
+
+- [ ] **F20a (CT-1, Row 2 M-1)** — `"normalized"` flux byte-identity tightening: replace per-point `BdotN·sqrt(weight)` with symmetric form `Σ BdotN²·|n| / Σ |B|²·|n|` for byte-identity with C++. (2h)
+
+- [ ] **F20b (CT-1, Row 5)** — `jnp.einsum` reduction tightening. XLA-chosen order vs C++ k-fastest hand-rolled FMA. Switch to `lax.scan`/`lax.fori_loop` if byte-identity becomes binding. (1d)
+
+- [ ] **F20c (CT-1, Row 8)** — `wireframe_segment_B_contributions` and `_dB_by_dX_contributions` use `jnp.sum(jax.vmap(...))` (tree reduction); switch to `lax.scan` to match C++ sequential `axpy_array`. (4h)
+
+- [ ] **F20d (CT-1, Row 13)** — `_accumulate_terms` intentional monomial merge breaks ULP at coefficients ≥ 1e10. Document the limit. (30min)
+
+- [ ] **F-DH (Row 10)** — `_scatter_matrix` dense allocation at `surface_rzfourier.py:327-337`. Replace with `lax.scatter` to match XYZ-tensor path at `surface_fourier_jax.py:1203-1234`. ~88MB allocation per call at `mpol=ntor=20`. (4h)
+
+- [ ] **F-DH (Row 10)** — `jax.hessian(surface_volume_from_dofs)` at `mpol=ntor=20, nphi=ntheta=32` produces 64GB tensor. Add memory guard. (1h)
+
+- [ ] **F-DH (Row 7)** — Make PM optimization shape-polymorphic to avoid recompile on `N`/`P` change (cross-listed in P5). (4h)
+
+---
+
+## P8 — Out-of-scope but flagged
+
+The audit did NOT cover these areas; future work:
+
+- [ ] **Integration-level testing**: Stage-1+Stage-2 composition; single-stage with all modules engaged.
+- [ ] **CUDA/GPU determinism**: reduction order, atomicAdd, FP determinism on device.
+- [ ] **Production-scale benchmarks**: `nphi≈64, ntheta≈64, mpol≈10, ntor≈10, ncoils≈50, npoints≈10^5`.
+- [ ] **Cross-platform parity**: macOS Apple Silicon vs Linux x86_64 vs GPU; LS path documented non-portable.
+- [ ] **Long-trajectory robustness**: tracing over `tmax ≈ 1 sec` (~10^9 RHS evaluations).
+- [ ] **Concurrent-call safety**: behavior under `multiprocessing` / `dask` parallelism.
+
+---
+
+## Summary (post-validation, corrected)
+
+| Tier | Count | Effort estimate |
+|------|------:|----------------|
+| P0 (correctness, must-ship — F1 now expanded across 4 entrypoints + reachability) | 5 | ~5-6 hours |
+| P1 (tracing) | 9 | ~3 days |
+| P2 (interp boundary) | 6 | ~2 days |
+| P3 (upstream coordinated, +DH17 +DH25) | 8 | ~2 days |
+| P4 (autodiff NaN cliffs) | 5 | ~1 day |
+| P5 (stale-state contracts) | 5 | ~2 days |
+| P6 (test oracles) | 37 | ~7 days |
+| P7 (docs/API, +F2 moved here +validation-contract) | 12 | ~7 hours |
+| P5+ (performance) | 8 | ~3 days |
+| P8 (out-of-scope) | 6 | — |
+| **TOTAL ACTIONABLE** | **95** | **~3 weeks** |
+| **TOTAL UNCHECKED (incl P8)** | **101** | — |
+
+(Per-tier counts verified via `sed -n '/^## TIER/,/^## NEXT/p' | grep -c "^- \[ \]"`. Sum: 5+9+6+8+5+5+37+12+8+6 = 101 ✓ matches `grep -c "^- \[ \]"` ground truth.)
+
+**MUST-SHIP path:** check off all 5 P0 items (~5-6 hours total — F1 now expanded to cover CPU `projection_L2_balls`, CPU+JAX `prox_l1`, plus PM-grid `cell_vol=0` reachability). The rest can be tiered into release planning.
+
+**Note on the deeper-pass synthesis count:** the deeper synthesis text says "19 new HIGH" but its per-row census table totals 26. The 26 figure is authoritative; the "19" in the prose is stale from an earlier draft.
+
+---
+
+## Source artifacts
+
+- First-pass synthesis: `.artifacts/parity_audit_2026-05-16/00_SYNTHESIS.md`
+- First-pass per-row reports: `.artifacts/parity_audit_2026-05-16/{02..13}_*.md`
+- Deeper-pass synthesis: `.artifacts/parity_audit_2026-05-16/deeper/00_SYNTHESIS_DEEPER.md`
+- Deeper-pass per-row reports: `.artifacts/parity_audit_2026-05-16/deeper/{02..13}_*_DEEPER.md`
