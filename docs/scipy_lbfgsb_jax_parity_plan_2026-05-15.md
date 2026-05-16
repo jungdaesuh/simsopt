@@ -504,12 +504,12 @@ of the current `minimize_lbfgs_host_core(...)`.
       tolerance policy. Current local JAX devices are CPU-only:
       `jax.devices() == [CpuDevice(id=0)]`, `jax.default_backend() == "cpu"`;
       `nvidia-smi` is not installed. The no-cost Lightning launcher dry-run
-      now resolves pushed HEAD
-      `fe0e692698401388c3aef896f302c8d8ede0b409` on
-      `gpu-purity-stage2-20260405`, emits `machine: "H200"` and
-      `hardware: ["H200"]`, and constructs the remote command against the same
-      SHA. This proves the launcher/preflight contract only; it is not a CUDA
-      execution proof.
+      against the pushed proof branch now emits `machine: "H200"` and
+      `hardware: ["H200"]`, and constructs the remote command against the
+      requested `--repo-sha`. This proves the launcher/preflight contract only;
+      it is not a CUDA execution proof. Re-run the dry-run with
+      `--repo-sha $(git rev-parse HEAD)` immediately before any paid GPU launch
+      so the preflight artifact names the exact branch tip that will execute.
 - [ ] Run the banana/Stage 2 scientific trust-chain proof:
       SIMSOPT C++/SciPy -> JAX CPU -> JAX GPU -> JAX CPU/GPU agreement.
 - [x] Re-run the full `TestLBFGSMethodPrivate` class after the seeded-FG parity
