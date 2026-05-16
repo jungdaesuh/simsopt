@@ -157,9 +157,9 @@ Estimated effort: **1–2 PRs, ~150 lines total including tests.** No design deb
 
 ### W1.4 · E3 — Deterministic `group_coil_data` ordering
 
-**Context.** `group_coil_data` in `jax_core/biotsavart.py:651-687` builds `by_nquad = {}` keyed on `gamma.shape[0]`, then iterates `by_nquad.values()`. In CPython 3.7+, dict iteration is insertion-order, which makes the current ordering deterministic *given the same coil-list order*, but tied to the dict implementation. C++ sums coil contributions in a fixed loop order.
+**Context.** `group_coil_data` in `jax_core/biotsavart.py:651-687` builds `by_nquad = {}` keyed on `gamma.shape[0]`, then must emit groups in the order each quadrature family first appears in the coil list. Python 3.7+ dictionaries preserve insertion order, but the parity contract should state the input-loop ordering directly rather than relying on dictionary iteration as the ordering mechanism. C++ sums coil contributions in a fixed input loop order.
 
-**Rationale.** Future Python-version migrations or refactors could subtly change iteration order, breaking byte-parity in the mixed-quadrature lane without an obvious cause. An explicit sort eliminates the implicit dependency at near-zero cost.
+**Rationale.** Future refactors could subtly change group emission order, breaking byte-parity in the mixed-quadrature lane without an obvious cause. An explicit first-input ordering eliminates the implicit dependency at near-zero cost while preserving the CPU loop's coarse summation order.
 
 **Acceptance.** Group iteration order is independent of `by_nquad` dict insertion ordering. Existing parity tests pass.
 

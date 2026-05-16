@@ -657,13 +657,12 @@ def group_coil_data(gammas_list, gammadashs_list, currents_list):
     gamma_entries = _coil_entry_sequence(gammas_list)
     gammadash_entries = _coil_entry_sequence(gammadashs_list)
     current_entries = _coil_entry_sequence(currents_list)
-    by_nquad = {}
+    indices_by_nquad = {}
     for i, gamma in enumerate(gamma_entries):
-        by_nquad.setdefault(gamma.shape[0], []).append(i)
+        indices_by_nquad.setdefault(gamma.shape[0], []).append(i)
 
     groups = []
-    for nquad in sorted(by_nquad.keys()):
-        indices = by_nquad[nquad]
+    for indices in sorted(indices_by_nquad.values(), key=lambda group: group[0]):
         groups.append(
             (
                 jnp.stack([_as_jax_float64(gamma_entries[i]) for i in indices]),

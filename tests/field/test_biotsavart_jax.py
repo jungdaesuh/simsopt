@@ -1304,11 +1304,11 @@ class TestBiotSavartJaxChunkedSelfConsistency:
 
 
 class TestGroupCoilDataOrdering:
-    """``group_coil_data`` must yield groups in a stable, dict-insertion-independent order.
+    """``group_coil_data`` must yield groups in stable first-input order.
 
-    Cross-group floating-point summation must be reproducible regardless of
-    dict iteration semantics (CPython 3.7+ insertion order is an
-    implementation detail, not a language guarantee for this purpose).
+    Cross-group floating-point summation must preserve the same coarse coil
+    order as the input-loop CPU reference without relying on dictionary
+    iteration as the ordering mechanism.
     """
 
     @staticmethod
@@ -1318,13 +1318,13 @@ class TestGroupCoilDataOrdering:
         gammadash = rng.standard_normal((nquad, 3))
         return gamma, gammadash, current
 
-    def test_groups_returned_in_qpoint_then_input_index_order(self):
+    def test_groups_returned_in_first_input_then_input_index_order(self):
         from simsopt.jax_core import group_coil_data
 
         # Mixed-quadrature input: positions [0, 3] use 128-point quadrature,
-        # [1, 2] use 15-point. Insertion order would yield groups in the
-        # order [128-points, 15-points]; the sort fix must invert this so the
-        # 15-point group always comes first regardless of dict semantics.
+        # [1, 2] use 15-point. Group order must follow each group's first
+        # occurrence in the input list so cross-group summation keeps the same
+        # coarse order as the CPU loop.
         coil_specs = [(128, 1.0), (15, 2.0), (15, 3.0), (128, 4.0)]
         gammas, gammadashs, currents = [], [], []
         for i, (nquad, current) in enumerate(coil_specs):
@@ -1339,21 +1339,15 @@ class TestGroupCoilDataOrdering:
         first_gammas, _, first_currents, first_indices = groups[0]
         second_gammas, _, second_currents, second_indices = groups[1]
 
-        assert first_gammas.shape[1] == 15, (
-            "First group must contain the smaller (15-point) coils"
-        )
-        assert second_gammas.shape[1] == 128
-        assert tuple(first_indices) == (1, 2), (
-            "Within the 15-point group, indices must be in input-list order"
-        )
-        assert tuple(second_indices) == (0, 3), (
-            "Within the 128-point group, indices must be in input-list order"
+        assert first_gammas.shape[1] == 128
+        assert second_gammas.shape[1] == 15
+        assert tuple(first_indices) == (0, 3)
+        assert tuple(second_indices) == (1, 2)
+        np.testing.assert_array_equal(
+            np.asarray(first_currents), np.asarray([1.0, 4.0])
         )
         np.testing.assert_array_equal(
-            np.asarray(first_currents), np.asarray([2.0, 3.0])
-        )
-        np.testing.assert_array_equal(
-            np.asarray(second_currents), np.asarray([1.0, 4.0])
+            np.asarray(second_currents), np.asarray([2.0, 3.0])
         )
 
 
