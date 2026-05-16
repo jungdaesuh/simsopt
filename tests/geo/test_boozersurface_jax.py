@@ -423,7 +423,7 @@ def _assert_exact_well_conditioned_operator_case(case, exact_lane):
 
 
 # ---------------------------------------------------------------------------
-# W3.2 (C3): action-level adjoint parity for ill-conditioned exact lane
+# Action-level adjoint parity for ill-conditioned exact lane
 # ---------------------------------------------------------------------------
 #
 # The ``exact_ill_conditioned_adjoint`` lane in
@@ -436,7 +436,7 @@ def _assert_exact_well_conditioned_operator_case(case, exact_lane):
 # defined even when raw vectors are not — it asserts that two adjoint
 # solvers agree on the components that *are* uniquely defined by ``A``,
 # while still tolerating disagreement in the genuinely ambiguous null
-# direction. See plan §W3.2 (C3) of the BoozerSurface LS deepdive.
+# direction.
 
 
 def _build_exact_ill_conditioned_operator_fixture(
@@ -8879,7 +8879,7 @@ class TestBuildBoozerSurfaceRuntimeState:
 
 
 # ---------------------------------------------------------------------------
-# W3.1 (C2): coil-VJP CPU oracle parity (BoozerSurface LS deepdive plan)
+# Coil-VJP CPU oracle parity
 # ---------------------------------------------------------------------------
 
 
@@ -8951,10 +8951,8 @@ def _project_jax_coil_cotangent_to_derivative(d_coil_arrays, coil_indices, coils
 class TestBoozerCoilVJPCpuOracle:
     """JAX coil VJPs match independent CPU-side oracles at derivative-heavy tols.
 
-    Issue W3.1 (C2) of the BoozerSurface LS deepdive plan
-    (``.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md``). There
-    are two distinct JAX coil-VJP entry points and each must be compared
-    to its own CPU oracle (the reviewer pass corrected an earlier mismatch):
+    There are two distinct JAX coil-VJP entry points and each must be
+    compared to its own CPU oracle:
 
     - ``boozer_residual_coil_vjp`` differentiates the **Boozer residual**
       w.r.t. coils at fixed surface; the CPU oracle is

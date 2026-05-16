@@ -1306,10 +1306,9 @@ class TestBiotSavartJaxChunkedSelfConsistency:
 class TestGroupCoilDataOrdering:
     """``group_coil_data`` must yield groups in a stable, dict-insertion-independent order.
 
-    Issue W1.4 (E3) of the BoozerSurface LS deepdive plan: the previous
-    implementation iterated ``by_nquad.values()`` which is insertion-order
-    in CPython 3.7+. The fix sorts on the quadrature-point count, removing
-    the implicit dependence on dict iteration semantics.
+    Cross-group floating-point summation must be reproducible regardless of
+    dict iteration semantics (CPython 3.7+ insertion order is an
+    implementation detail, not a language guarantee for this purpose).
     """
 
     @staticmethod

@@ -4645,10 +4645,9 @@ _RUN_CODE_LS_PARITY_PRODUCTION_GPU_IOTA_TOL = 1e-5
 
 # Cross-machine state-parity thresholds. Tolerances and conditioning ceilings
 # are owned by the ``ls_state_parity`` lane in
-# ``benchmarks/validation_ladder_contract.py`` (issue W2.1 / C1 of the
-# BoozerSurface LS deepdive plan); see the lane comment for the cross-machine
-# variance evidence and ``CLAUDE.md`` "Floating-point reproducibility across
-# machines" for the broader context.
+# ``benchmarks/validation_ladder_contract.py``; see the lane comment for the
+# cross-machine variance evidence and ``CLAUDE.md`` "Floating-point
+# reproducibility across machines" for the broader context.
 _LS_STATE_PARITY_TOLS = parity_ladder_tolerances("ls-state-parity")
 
 
@@ -4723,10 +4722,9 @@ def _assert_run_code_ls_state_parity(
 ) -> dict[str, object]:
     """Assert byte-comparable CPU↔JAX state parity after ``run_code()``.
 
-    Issue W2.1 / C1 of the BoozerSurface LS deepdive plan. The default LS
-    parity test (``_assert_run_code_ls_parity``) only gates on ``iota`` and
-    label error; this helper additionally pins the absolute disagreement on
-    the full state vector ``[surface_dofs, gamma, G, iota]``.
+    The default LS parity test (``_assert_run_code_ls_parity``) only gates on
+    ``iota`` and label error; this helper additionally pins the absolute
+    disagreement on the full state vector ``[surface_dofs, gamma, G, iota]``.
 
     The ``require_well_conditioned`` flag selects the conditioning policy:
 
@@ -4740,7 +4738,7 @@ def _assert_run_code_ls_state_parity(
     - ``False`` — defensive helper-reuse on unknown-conditioning fixtures.
       If either backend's ``cond(H)`` exceeds the ceiling the state parity
       assertions are skipped (state vector is no longer a meaningful target
-      under high κ; see deepdive § Empirical Evidence).
+      under high κ).
 
     Thresholds are absolute inf-norm gates (not ``rtol``) because the state
     vector contains both near-zero and unit-order entries; ``rtol``-only
@@ -4825,7 +4823,7 @@ class TestRunCodeLSParity:
         intentionally degenerate (``cond(H) ≈ 1e14-1e16``) so this gate
         does *not* assert byte-comparable state parity — that is the job
         of ``test_ls_solve_state_parity_production_scale`` on the
-        well-conditioned oversampled fixture (issue W2.1 / C1).
+        well-conditioned oversampled fixture.
         """
         _assert_run_code_ls_parity(build_ls_parity_problem())
 
@@ -4841,8 +4839,7 @@ class TestRunCodeLSParity:
     def test_ls_solve_state_parity_production_scale(self):
         """Byte-comparable CPU↔JAX state parity on the oversampled fixture.
 
-        Issue W2.1 / C1 of the BoozerSurface LS deepdive plan. The
-        oversampled fixture (``ncoils=4, nphi=16, ntheta=8``) reaches
+        The oversampled fixture (``ncoils=4, nphi=16, ntheta=8``) reaches
         ``cond(H) ≈ 5.3e+04`` on every measured machine and produces
         ``sdofs_inf`` between ``1.9e-14`` and ``3.6e-12`` across two
         macOS hardware platforms. The state-parity gate (``1e-11``)

@@ -9,8 +9,9 @@ WARNING: this module is a **harness-only diagnostic**. It is NOT a
 user-facing product API. Production single-stage code paths must not
 import these helpers. The harness exists to materialize a dense
 host-resident Newton trajectory for byte-comparable parity with the C++
-oracle at ``boozersurface.py:1129-1163`` (LS Newton polish) and
-``boozersurface.py:1640-1722`` (BoozerExact Newton).
+oracle in ``boozersurface.py`` (LS Newton polish in
+``minimize_boozer_penalty_constraints_newton`` and the BoozerExact Newton
+in ``solve_residual_equation_exactly_newton``).
 
 Two channels are exposed:
 
@@ -20,38 +21,33 @@ Two channels are exposed:
    contract that makes the LS skeleton byte-comparable to the C++
    oracle within LAPACK pivot tie-breaks (``optimizer_backend="scipy"``,
    ``materialize_dense_linearization=True`` so ``newton_polish``
-   receives ``dense_newton_steps=True`` at
-   ``boozersurface_jax.py:5016`` (``dense_newton_steps=materialize_hessian``); mirror-upper symmetrization is the
-   default in ``_materialize_dense_hessian`` (``optimizer_jax.py:1645``)
-   and is requested explicitly at ``optimizer_jax.py:2678``).
+   receives ``dense_newton_steps=materialize_hessian``; mirror-upper
+   symmetrization is the default in ``_materialize_dense_hessian``).
 
 2. :func:`cpp_compatible_exact_newton` — a NEW dense host-resident
    exact Newton solver that lives entirely in this harness. The
-   normalizer ``_normalize_solver_options``
-   (``boozersurface_jax.py:3122``; the strip itself is at
-   ``boozersurface_jax.py:3185-3186``) drops ``optimizer_backend`` from
-   the user-visible exact path; this harness **does not** modify that
-   normalizer and **does not** expose the dense path to the user
-   constructor. The harness reuses the
+   normalizer ``_normalize_solver_options`` in ``boozersurface_jax.py``
+   drops ``optimizer_backend`` from the user-visible exact path; this
+   harness **does not** modify that normalizer and **does not** expose
+   the dense path to the user constructor. The harness reuses the
    public residual closure ``BoozerSurfaceJAX._make_exact_residual``
    (which already returns the augmented residual ``b = [r[mask],
-   label.J() − target_label, …]``, matching ``boozersurface.py:1645
-   -1648``), materializes the Jacobian via
-   ``jax.jit(jax.jacobian(r))(x)`` to a host ``np.ndarray``, and runs
-   the C++-equivalent Newton iteration:
+   label.J() − target_label, …]``, matching the augmented residual the
+   C++ ``solve_residual_equation_exactly_newton`` assembles),
+   materializes the Jacobian via ``jax.jit(jax.jacobian(r))(x)`` to a
+   host ``np.ndarray``, and runs the C++-equivalent Newton iteration:
 
    - ``dx = np.linalg.solve(J, b)``
    - **unconditional** Wilkinson refinement
-     ``dx += np.linalg.solve(J, b − J @ dx)``  (matches
-     ``boozersurface.py:1669``)
-   - step ``x ← x − dx`` (matches ``boozersurface.py:1670``)
+     ``dx += np.linalg.solve(J, b − J @ dx)`` (matches the C++ oracle)
+   - step ``x ← x − dx`` (matches the C++ oracle)
    - **no** monotone-norm guard (matches C++ behavior; the JAX
      production exact path adds a guard, the harness intentionally does
      not)
 
    Convergence is checked on the augmented residual norm ``‖b‖``
-   exactly as ``boozersurface.py:1650-1652`` does, **not** on the raw
-   masked Boozer residual.
+   exactly as the C++ oracle does, **not** on the raw masked Boozer
+   residual.
 
    ``jnp.linalg.solve`` is **forbidden** in this path: device LAPACK
    does not match host LAPACK bytes, which is the entire reason this
@@ -93,9 +89,9 @@ import numpy as np
 # The harness-only LS skeleton pins these options when wrapping
 # ``BoozerSurfaceJAX.run_code()``. They reproduce the C++ Newton polish
 # byte semantics within LAPACK pivot tie-breaks. See
-# ``boozersurface_jax.py:4977`` (``_run_newton_polish_for_method``) for the dispatcher that consumes
-# these options and ``optimizer_jax.py:1747-1753`` (``_solve_dense_newton_step``) for the host
-# ``np.linalg.solve`` site.
+# ``_run_newton_polish_for_method`` in ``boozersurface_jax.py`` for the
+# dispatcher that consumes these options and ``_solve_dense_newton_step``
+# in ``optimizer_jax.py`` for the host ``np.linalg.solve`` site.
 _LS_HARNESS_REQUIRED_OPTIONS: Mapping[str, Any] = {
     "optimizer_backend": "scipy",
     "materialize_dense_linearization": True,
@@ -109,10 +105,9 @@ def _validate_ls_harness_options(boozer_surface) -> None:
     - ``optimizer_backend="scipy"`` so the SciPy-backed Newton polish
       path is selected (no ondevice routing);
     - ``materialize_dense_linearization=True`` so
-      ``_run_newton_polish_for_method`` (``boozersurface_jax.py:4977``)
-      passes ``dense_newton_steps=True`` to ``newton_polish``, which
-      forces the host ``np.linalg.solve`` site at
-      ``optimizer_jax.py:1747-1753`` (``_solve_dense_newton_step``).
+      ``_run_newton_polish_for_method`` passes ``dense_newton_steps=True``
+      to ``newton_polish``, which forces the host ``np.linalg.solve``
+      site in ``_solve_dense_newton_step``.
 
     The harness must not silently mutate ``boozer_surface.options``;
     callers are responsible for setting the contract before invoking
@@ -145,10 +140,10 @@ def cpp_compatible_ls_newton_polish(
     This is a thin wrapper that forwards to the existing
     ``optimizer_backend="scipy"`` LS pathway. It does NOT introduce a
     new dense code path -- the host ``np.linalg.solve`` Newton step
-    site at ``optimizer_jax.py:1747-1753`` (``_solve_dense_newton_step``) is already reached by the
+    site in ``_solve_dense_newton_step`` is already reached by the
     upstream dispatcher when ``dense_newton_steps=True`` is set, which
-    happens when ``materialize_dense_linearization=True`` per
-    ``boozersurface_jax.py:5016`` (``dense_newton_steps=materialize_hessian``).
+    happens when ``materialize_dense_linearization=True`` (the dispatcher
+    forwards it as ``dense_newton_steps=materialize_hessian``).
 
     The wrapper exists for two reasons:
 
@@ -172,10 +167,9 @@ def cpp_compatible_ls_newton_polish(
     Returns:
         The standard LS result dict from
         ``BoozerSurfaceJAX.run_code()``. Mirror-upper Hessian
-        symmetrization is the default in
-        ``_materialize_dense_hessian`` (``optimizer_jax.py:1645``;
-        explicitly invoked at ``optimizer_jax.py:2678`` with
-        ``symmetrize=True``), so the materialized ``hessian`` field is
+        symmetrization is the default in ``_materialize_dense_hessian``
+        and is requested explicitly with ``symmetrize=True`` at the
+        dense-newton call site, so the materialized ``hessian`` field is
         bit-symmetric.
     """
     if boozer_surface.boozer_type != "ls":
@@ -233,38 +227,34 @@ def cpp_compatible_exact_newton(
     Reference: ``docs/parity_scientific_equivalence_contract_2026-05-09.md``
     §5.1 "BoozerExact (NEW dense host-resident solver)".
 
-    THIS IS A HARNESS-ONLY DIAGNOSTIC. The production exact path at
-    ``boozersurface_jax.py:5316-5539`` uses operator-backed GMRES inside
-    ``newton_exact``; this harness intentionally bypasses that for
-    byte-comparable parity with the C++ oracle at
-    ``boozersurface.py:1640-1722``. Nothing in the production
-    single-stage pipeline calls this function.
+    THIS IS A HARNESS-ONLY DIAGNOSTIC. The production exact path uses
+    operator-backed GMRES inside ``newton_exact`` in
+    ``boozersurface_jax.py``; this harness intentionally bypasses that
+    for byte-comparable parity with the C++ oracle
+    ``solve_residual_equation_exactly_newton`` in ``boozersurface.py``.
+    Nothing in the production single-stage pipeline calls this function.
 
-    The exact normalizer ``_normalize_solver_options``
-    (``boozersurface_jax.py:3122``; strip at
-    ``boozersurface_jax.py:3185-3186``) drops ``optimizer_backend`` from
-    the user-visible exact path; this harness does NOT modify that
-    normalizer. Instead, the harness
-    builds the residual closure via the public
-    ``BoozerSurfaceJAX._make_exact_residual`` factory (which already
-    returns the augmented residual matching the C++
-    ``b = [r[mask], label.J() − target_label, ...]`` assembly at
-    ``boozersurface.py:1645-1648``), then runs the C++-equivalent
-    Newton iteration on host ``np.ndarray`` factors.
+    The exact normalizer ``_normalize_solver_options`` in
+    ``boozersurface_jax.py`` drops ``optimizer_backend`` from the
+    user-visible exact path; this harness does NOT modify that
+    normalizer. Instead, the harness builds the residual closure via the
+    public ``BoozerSurfaceJAX._make_exact_residual`` factory (which
+    already returns the augmented residual matching the C++
+    ``b = [r[mask], label.J() − target_label, ...]`` assembly), then
+    runs the C++-equivalent Newton iteration on host ``np.ndarray``
+    factors.
 
-    C++-equivalent Newton iteration (matches
-    ``boozersurface.py:1640-1672``):
+    C++-equivalent Newton iteration (matches the C++
+    ``solve_residual_equation_exactly_newton`` body):
 
     - augmented residual ``b = residual_fn(x)``  (already includes the
       label term and, for non-stellsym, the axis-z constraint)
     - ``dx = np.linalg.solve(J, b)``
     - **unconditional** Wilkinson refinement (one step):
-      ``dx += np.linalg.solve(J, b − J @ dx)``  (matches
-      ``boozersurface.py:1669``)
-    - step ``x ← x − dx``  (matches ``boozersurface.py:1670``)
+      ``dx += np.linalg.solve(J, b − J @ dx)``  (matches the C++ oracle)
+    - step ``x ← x − dx``  (matches the C++ oracle)
     - **no** monotone-norm guard
-    - convergence check: ``‖b‖_2 ≤ tol``  (matches
-      ``boozersurface.py:1650-1652``)
+    - convergence check: ``‖b‖_2 ≤ tol``  (matches the C++ oracle)
 
     ``jnp.linalg.solve`` is forbidden in this path. All factor work
     happens on host ``np.ndarray`` operands using ``np.linalg.solve``,
@@ -282,8 +272,8 @@ def cpp_compatible_exact_newton(
             recompute ``G`` from coil currents; the caller must
             supply the byte-equivalent value the C++ oracle uses.
         tol: ``‖b‖_2`` convergence tolerance. Default ``1e-13``
-            matches ``_DEFAULT_OPTIONS_EXACT["newton_tol"]`` at
-            ``boozersurface_jax.py:2862``.
+            matches ``_DEFAULT_OPTIONS_EXACT["newton_tol"]`` in
+            ``boozersurface_jax.py``.
         maxiter: Maximum Newton iterations. Default ``40`` matches
             ``_DEFAULT_OPTIONS_EXACT["newton_maxiter"]``.
 
@@ -328,8 +318,8 @@ def cpp_compatible_exact_newton(
     mask_indices = boozer_surface._compute_stellsym_mask_indices()
     residual_fn = boozer_surface._make_exact_residual(mask_indices)
 
-    # The decision vector x = [sdofs, iota, G] follows
-    # boozersurface_jax.py:5364-5365 exactly. The harness materializes
+    # The decision vector x = [sdofs, iota, G] follows the
+    # BoozerSurfaceJAX exact-mode layout exactly. The harness materializes
     # x as a host np.ndarray to keep all linear algebra on host.
     sdofs = np.asarray(boozer_surface._get_surface_dofs(), dtype=np.float64)
     x_host = np.concatenate(
@@ -357,8 +347,7 @@ def cpp_compatible_exact_newton(
         # roundtrips inside traced regions" rule.
         J_host = _materialize_jacobian_host(residual_fn, x_jax)
 
-        # Wilkinson refinement matches CPU oracle at
-        # boozersurface.py:1668-1669:
+        # Wilkinson refinement matches CPU oracle:
         #     dx = np.linalg.solve(J, b)
         #     dx += np.linalg.solve(J, b - J @ dx)
         # The refinement is UNCONDITIONAL: there is no `if norm > X`
@@ -373,15 +362,15 @@ def cpp_compatible_exact_newton(
         wilkinson_norm = float(np.linalg.norm(wilkinson_correction))
         b_norm_before = b_norm
 
-        # CPU step convention: x -= dx (boozersurface.py:1670). The
-        # harness intentionally does NOT apply a monotone-norm guard;
-        # the C++ oracle accepts the step unconditionally.
+        # CPU step convention: x -= dx. The harness intentionally does
+        # NOT apply a monotone-norm guard; the C++ oracle accepts the
+        # step unconditionally.
         x_host = x_host - dx_refined
         x_jax = jnp.asarray(x_host, dtype=jnp.float64)
 
         # Recompute b at the new iterate so the loop guard reflects
         # the current state. The convergence check uses ‖b‖, not
-        # ‖raw masked residual‖, matching boozersurface.py:1650.
+        # ‖raw masked residual‖, matching the C++ oracle.
         b_host = _evaluate_residual_host(residual_fn, x_jax)
         b_norm = float(np.linalg.norm(b_host))
 

@@ -1177,7 +1177,7 @@ class BoozerSurface(Optimizable):
         # linear system on both backends. With ``stab=0`` (the default) the
         # reported Hessian is unchanged.
         if stab:
-            d2val = d2val + stab * np.identity(d2val.shape[0])
+            np.fill_diagonal(d2val, d2val.diagonal() + stab)
 
         P, L, U = lu(d2val)
         hessian_shape = tuple(int(dim) for dim in d2val.shape)

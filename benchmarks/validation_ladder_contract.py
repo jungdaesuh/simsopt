@@ -110,8 +110,6 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_well_conditioned_jacobian": False,
         "operator_failure_allowed": True,
         "vector_parity_required": False,
-        # Issue W3.2 (C3) of the BoozerSurface LS deepdive plan
-        # (``.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md``).
         # Raw-vector parity is intentionally disabled because near-singular
         # Jacobians admit infinitely many adjoints that satisfy the residual
         # gate. Action-level (range-space) parity remains well-defined:
@@ -132,10 +130,8 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_branch_stable_state": True,
         "branch_divergence_downgrades_to_health_only": True,
     },
-    # Issue W2.1 / C1 of the BoozerSurface LS deepdive plan
-    # (``.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md``). Absolute
-    # cross-machine state-parity gate for the well-conditioned LS path,
-    # measured on the oversampled ``build_ls_parity_problem(ncoils=4,
+    # Absolute cross-machine state-parity gate for the well-conditioned LS
+    # path, measured on the oversampled ``build_ls_parity_problem(ncoils=4,
     # nphi=16, ntheta=8)`` fixture. ``sdofs_inf`` ranged from ``1.9e-14``
     # to ``3.6e-12`` across two macOS hardware platforms running the same
     # source tree; the ``1e-11`` ceiling provides ~2.7× headroom over the

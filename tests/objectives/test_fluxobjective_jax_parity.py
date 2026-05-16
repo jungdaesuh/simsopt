@@ -704,7 +704,7 @@ def test_squaredfluxjax_requires_native_field_contract():
 
 
 def test_squaredfluxjax_rejects_surface_dof_mutation_after_construction():
-    """Issue W1.3 / E1: ``SquaredFluxJAX`` captures the surface geometry
+    """``SquaredFluxJAX`` captures the surface geometry
     (``gamma``, ``normal``, ``target``) into a JIT closure at construction.
     Mutating the surface DOFs after construction would silently produce
     stale values; the fingerprint guard must raise instead.

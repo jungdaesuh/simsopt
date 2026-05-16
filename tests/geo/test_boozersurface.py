@@ -703,11 +703,8 @@ class BoozerSurfaceTests(unittest.TestCase):
     def test_run_code_passes_newton_stab(self):
         """run_code() must forward ``options["newton_stab"]`` into the Newton polish call.
 
-        Mirror of ``tests/geo/test_boozersurface_jax.py::test_run_code_passes_newton_stab``
-        ensuring the CPU and JAX backends honour the same regularization knob
-        (issue W1.1 / B1 of the BoozerSurface LS deepdive plan). Prior to the fix
-        the CPU ``BoozerSurface.run_code`` ignored ``newton_stab`` while the JAX
-        equivalent threaded it, leaving the parity testing surface asymmetric.
+        Mirrors ``tests/geo/test_boozersurface_jax.py::test_run_code_passes_newton_stab``
+        so CPU and JAX backends honour the same regularization knob.
         """
         bs, boozer_surface = get_boozer_surface(boozer_type="ls")
         boozer_surface.options["newton_stab"] = 0.125
@@ -735,7 +732,7 @@ class BoozerSurfaceTests(unittest.TestCase):
         """``newton_stab`` must shift the reported Hessian by ``stab * I`` on the
         CPU backend, matching ``simsopt.geo.optimizer_jax.newton_polish`` which
         applies ``_stabilize_dense_hessian(H, stab)`` to its final reported
-        Hessian (issue W1.1 / B1).
+        Hessian.
 
         Asserting the diagonal shift directly is fixture-independent: it catches
         both (a) an un-threaded ``stab`` argument and (b) a regression that
