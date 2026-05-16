@@ -56,7 +56,6 @@ from banana_opt.stage2_single_stage_handoff import (
     BOOZER_TRUST_REASON_SOLVE_FAILED,
     BoozerTrustState,
     attempt_initialize_boozer_surface,
-    boozer_trust_artifact_fields,
     boozer_trust_tolerance,
     compute_boozer_trust_state,
     compute_tf_G0,
@@ -1496,9 +1495,10 @@ def make_stage2_fun(
                 # the iota signal is unreliable, so a non-Boozer topology
                 # force keeps the optimizer climbing toward helical |B|.
                 if s_hel_enabled:
-                    J += float(s_hel_weight) * float(s_hel_objective.J())
+                    s_hel_value = float(s_hel_objective.J())
+                    J += float(s_hel_weight) * (1.0 - s_hel_value)
                     grad = grad + (
-                        float(s_hel_weight)
+                        -float(s_hel_weight)
                         * np.asarray(
                             s_hel_objective.dJ_by_dcoils(), dtype=float
                         )

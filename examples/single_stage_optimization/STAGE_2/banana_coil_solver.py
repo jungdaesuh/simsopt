@@ -125,6 +125,7 @@ from banana_opt.stage2_single_stage_handoff import (
     probe_stage2_seed_bootability,
 )
 from banana_opt.boozer_topology_bridge import (
+    HelicalFieldContentObjective,
     boozer_topology_bridge_artifact_fields,
     safe_compute_helical_field_content_S_HEL,
 )
@@ -263,8 +264,31 @@ def validate_stage2_iota_cli_args(args) -> None:
     )
 
 
+def validate_s_hel_objective_cli_args(args) -> None:
+    if not getattr(args, "enable_s_hel_objective", False):
+        return
+    if args.stage2_iota_mode != "soft":
+        raise ValueError("--enable-s-hel-objective requires --stage2-iota-mode soft.")
+    s_hel_objective_weight = float(args.s_hel_objective_weight)
+    if not np.isfinite(s_hel_objective_weight) or s_hel_objective_weight <= 0.0:
+        raise ValueError("--s-hel-objective-weight must be finite and positive.")
+
+
 def resolve_stage2_iota_constraint_weight(constraint_weight: float) -> float | None:
     return canonical_stage2_iota_constraint_weight(constraint_weight)
+
+
+def resolve_s_hel_objective_weight(args) -> float:
+    if not bool(getattr(args, "enable_s_hel_objective", False)):
+        return 0.0
+    return float(getattr(args, "s_hel_objective_weight"))
+
+
+def build_s_hel_objective(args, field, surface):
+    weight = resolve_s_hel_objective_weight(args)
+    if weight <= 0.0:
+        return None, weight
+    return HelicalFieldContentObjective(field, surface), weight
 
 
 def build_lbfgsb_bounds(optimizable):
@@ -724,12 +748,10 @@ def parse_args():
             "ranking, convergence studies, or topology audits "
             "(--enable-topology-bridge-diagnostics or set "
             "ENABLE_TOPOLOGY_BRIDGE_DIAGNOSTICS=1). When the gate is off "
-            "all six artifact keys remain None so downstream consumers can "
+            "the topology diagnostic artifact keys remain None so downstream consumers can "
             "distinguish 'diagnostic skipped' from 'diagnostic ran and "
-            "failed'. S_HEL_OBJECTIVE_WEIGHT defaults to 0.0 (deliberately "
-            "zero schedule step) only when the gate is on; the standalone "
-            "scripts/s_hel_gradient_validation.py harness validates the "
-            "analytic gradient before any future ramp."
+            "failed'. S_HEL_OBJECTIVE_WEIGHT is still persisted when the "
+            "live --enable-s-hel-objective schedule is active."
         ),
     )
     parser.add_argument(
@@ -740,10 +762,31 @@ def parse_args():
             "Force-disable Phase 3 diagnostic persistence even when "
             "ENABLE_TOPOLOGY_BRIDGE_DIAGNOSTICS=1 is set in the "
             "environment; HELICAL_FIELD_CONTENT, PRE_BOOZER_TOPOLOGY_SCORE, "
-            "S_HEL_OBJECTIVE_WEIGHT, FIELDLINE_IOTA_PROXY, "
-            "FIELDLINE_IOTA_PROXY_VALID, FIELDLINE_IOTA_PROXY_N_TRANSITS, "
-            "and FIELDLINE_IOTA_PROXY_REASON remain None in the persisted "
-            "artifact."
+            "FIELDLINE_IOTA_PROXY, FIELDLINE_IOTA_PROXY_VALID, "
+            "FIELDLINE_IOTA_PROXY_N_TRANSITS, and FIELDLINE_IOTA_PROXY_REASON "
+            "remain None in the persisted artifact. S_HEL_OBJECTIVE_WEIGHT "
+            "still records the live schedule when --enable-s-hel-objective is set."
+        ),
+    )
+    parser.add_argument(
+        "--enable-s-hel-objective",
+        action="store_true",
+        default=bool(int(os.environ.get("ENABLE_S_HEL_OBJECTIVE", "0"))),
+        help=(
+            "Enable the Phase 3b helical-content objective in the "
+            "untrusted-but-evaluable soft-iota lane. This is the explicit "
+            "post-gradient-validation schedule gate; use "
+            "--s-hel-objective-weight to set the current ramp value."
+        ),
+    )
+    parser.add_argument(
+        "--s-hel-objective-weight",
+        type=float,
+        default=float(os.environ.get("S_HEL_OBJECTIVE_WEIGHT", "1e-3")),
+        help=(
+            "Phase 3b helical-content objective weight used only when "
+            "--enable-s-hel-objective is set. The plan's first schedule rung "
+            "is 1e-3."
         ),
     )
     parser.add_argument(
@@ -935,6 +978,7 @@ def parse_args():
     try:
         validate_banana_current_cli_args(args)
         validate_stage2_iota_cli_args(args)
+        validate_s_hel_objective_cli_args(args)
     except ValueError as exc:
         parser.error(str(exc))
     return args
@@ -1141,12 +1185,13 @@ def build_stage2_iota_hot_loop_payload(
         "BOOZER_TRUST_REASON": None,
         "BOOZER_TRUST_TOL": None,
         # Phase 3 non-Boozer topology bridge diagnostics. Populated post-solve
-        # via `update_results_json` when the bridge is invoked; left ``None``
-        # otherwise so the artifact schema is identical across lanes.
+        # when the bridge is invoked; left ``None`` otherwise so the artifact
+        # schema is identical across lanes.
         # FIELDLINE_IOTA_PROXY{,_VALID,_N_TRANSITS,_REASON} are emitted by
         # Phase 3a (banana_opt.topology_bridge); HELICAL_FIELD_CONTENT,
-        # S_HEL_OBJECTIVE_WEIGHT, and PRE_BOOZER_TOPOLOGY_SCORE are emitted
-        # by Phase 3b (banana_opt.boozer_topology_bridge).
+        # and PRE_BOOZER_TOPOLOGY_SCORE are emitted by Phase 3b
+        # (banana_opt.boozer_topology_bridge). S_HEL_OBJECTIVE_WEIGHT is also
+        # set when the live S_HEL objective schedule is enabled.
         "FIELDLINE_IOTA_PROXY": None,
         "FIELDLINE_IOTA_PROXY_VALID": None,
         "FIELDLINE_IOTA_PROXY_N_TRANSITS": None,
@@ -1206,6 +1251,9 @@ def build_stage2_iota_hot_loop_payload(
     # ``getattr`` fallback applies only when an external caller invokes
     # this helper without going through argparse.
     bridge_enabled = bool(getattr(args, "enable_topology_bridge_diagnostics", False))
+    s_hel_objective_weight = resolve_s_hel_objective_weight(args)
+    if s_hel_objective_weight > 0.0:
+        payload["S_HEL_OBJECTIVE_WEIGHT"] = s_hel_objective_weight
     if bridge_enabled and surface is not None and biotsavart is not None:
         # Phase 3b S_HEL: evaluated directly on the raw BiotSavart field
         # (the S_HEL helper takes a single ``field.B()`` sample on a
@@ -1271,14 +1319,9 @@ def build_stage2_iota_hot_loop_payload(
         # PRE_BOOZER_TOPOLOGY_SCORE proximity term reflects the same iota
         # proxy that downstream consumers see in the artifact.
         payload.update(fieldline_iota_proxy_artifact_fields(phase3a_result))
-        # Phase 3b: S_HEL_OBJECTIVE_WEIGHT is reported as 0.0 (not None) when
-        # the bridge is enabled because the metric IS being tracked — the
-        # weight is a deliberately-zero schedule step until the gradient
-        # validation harness (autoresearch/scripts/s_hel_gradient_validation.py)
-        # accepts the analytic gradient (max_rel_error < 1e-2). Plan line 284:
-        # "reject implementation if the objective cannot provide a meaningful
-        # optimizer gradient" — a None here would conflate "weight schedule
-        # off" with "diagnostic not computed".
+        # Phase 3b: S_HEL_OBJECTIVE_WEIGHT reports the explicit schedule
+        # value when the live objective is enabled, otherwise 0.0 because
+        # the metric is being tracked but contributes no optimizer force.
         # ``safe_compute_phase3a_fieldline_iota_proxy`` is typed to always
         # return a ``Phase3aFieldlineIotaProxyResult`` (failure cases are
         # encoded inside the dataclass via ``valid=False`` /
@@ -1291,7 +1334,7 @@ def build_stage2_iota_hot_loop_payload(
                 s_hel=s_hel_value,
                 fieldline_iota_proxy_mean=fieldline_iota_mean,
                 fieldline_iota_proxy_valid=fieldline_iota_valid,
-                s_hel_objective_weight=0.0,
+                s_hel_objective_weight=s_hel_objective_weight,
                 iota_target=stage2_iota_runtime.target,
             )
         )
@@ -2339,6 +2382,7 @@ def main(parsed_args=None):
             seed_context="Loaded Stage 2 seed",
         )
         lbfgsb_bounds = build_lbfgsb_bounds(JF)
+    s_hel_objective, s_hel_weight = build_s_hel_objective(args, new_bs, new_surf)
     fun = make_stage2_fun(
         JF,
         new_bs,
@@ -2348,6 +2392,8 @@ def main(parsed_args=None):
         Jccdist,
         Jc,
         stage2_iota_runtime=stage2_iota_runtime,
+        s_hel_objective=s_hel_objective,
+        s_hel_weight=s_hel_weight,
     )
     alm_result = None
     if CONSTRAINT_METHOD == "alm":

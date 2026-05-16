@@ -6,8 +6,8 @@ Two diagnostics, both pure-function and Boozer-independent:
 - :func:`compute_helical_field_content_S_HEL`: spectral fraction of the
   on-surface ``|B|`` field that lives in helical (``n != 0``) modes. Scale-
   invariant; ``0`` for an axisymmetric field, ``1`` when all power is in
-  helical modes. Used as a ranking signal and (in future, gated on gradient
-  validation per plan line 308) as a ramped Stage 2 objective term.
+  helical modes. Used as a ranking signal and, when explicitly enabled after
+  gradient validation per plan line 308, as a ramped Stage 2 objective term.
 
 - :func:`compute_fieldline_iota_proxy`: rotational-transform proxy derived
   from field-line tracing, with a convergence sub-study that fails closed

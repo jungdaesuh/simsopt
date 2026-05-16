@@ -10812,6 +10812,90 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.maxcor, module.DEFAULT_LBFGSB_MAXCOR)
         self.assertEqual(args.maxcor, 40)
 
+    def _stage2_s_hel_argv(self, *extra_args: str) -> list[str]:
+        return [
+            "banana_coil_solver.py",
+            "--stage2-iota-mode",
+            "soft",
+            "--stage2-iota-target",
+            "0.16",
+            "--enable-s-hel-objective",
+            *extra_args,
+        ]
+
+    def test_stage2_parse_args_accepts_explicit_s_hel_objective_schedule(self):
+        module = load_stage2_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            self._stage2_s_hel_argv(),
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.enable_s_hel_objective)
+        self.assertEqual(args.s_hel_objective_weight, 1.0e-3)
+
+    def test_stage2_build_s_hel_objective_constructs_enabled_schedule(self):
+        module = load_stage2_module()
+        args = SimpleNamespace(
+            enable_s_hel_objective=True,
+            s_hel_objective_weight=2.0e-3,
+        )
+        field = object()
+        surface = object()
+        calls: list[tuple[object, object]] = []
+
+        class _FakeHelicalFieldContentObjective:
+            def __init__(self, received_field, received_surface):
+                calls.append((received_field, received_surface))
+
+        with patch.object(
+            module,
+            "HelicalFieldContentObjective",
+            _FakeHelicalFieldContentObjective,
+        ):
+            objective, weight = module.build_s_hel_objective(args, field, surface)
+
+        self.assertIsInstance(objective, _FakeHelicalFieldContentObjective)
+        self.assertEqual(weight, 2.0e-3)
+        self.assertEqual(calls, [(field, surface)])
+
+    def test_stage2_parse_args_rejects_s_hel_objective_without_soft_iota(self):
+        module = load_stage2_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            ["banana_coil_solver.py", "--enable-s-hel-objective"],
+        ):
+            with self.assertRaises(SystemExit):
+                module.parse_args()
+
+    def test_stage2_parse_args_rejects_nonpositive_s_hel_weight(self):
+        module = load_stage2_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            self._stage2_s_hel_argv("--s-hel-objective-weight", "0"),
+        ):
+            with self.assertRaises(SystemExit):
+                module.parse_args()
+
+    def test_stage2_parse_args_rejects_nonfinite_s_hel_weight(self):
+        module = load_stage2_module()
+
+        for value in ("nan", "inf"):
+            with self.subTest(value=value):
+                with patch.object(
+                    sys,
+                    "argv",
+                    self._stage2_s_hel_argv("--s-hel-objective-weight", value),
+                ):
+                    with self.assertRaises(SystemExit):
+                        module.parse_args()
+
     def test_single_stage_parse_args_preserve_wrapper_default_hardware_thresholds(self):
         module = load_single_stage_example_module()
 

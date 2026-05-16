@@ -10,7 +10,6 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -584,6 +583,103 @@ class TestStage2FunHonorsTrust:
         # no iota penalty injection).
         assert J == pytest.approx(base_J)
         np.testing.assert_allclose(grad, base_grad)
+
+    def test_untrusted_but_evaluable_adds_s_hel_objective_when_enabled(self):
+        objectives = load_stage2_objectives_module()
+
+        base_J = 0.4
+        base_grad = np.array([1.0, 2.0])
+        s_hel_weight = 1.0e-3
+        s_hel_value = 0.25
+        s_hel_grad = np.array([3.0, -4.0])
+
+        class _FixedJF:
+            def __init__(self):
+                self.x = np.array([0.0, 0.0])
+
+            def J(self):
+                return base_J
+
+            def dJ(self):
+                return base_grad.copy()
+
+        class _SHelObjective:
+            def __init__(self):
+                self.recompute_calls = 0
+
+            def recompute_bell(self):
+                self.recompute_calls += 1
+
+            def J(self):
+                return s_hel_value
+
+            def dJ_by_dcoils(self):
+                return s_hel_grad.copy()
+
+        runtime = SimpleNamespace(
+            mode="soft",
+            weight=1.0,
+            penalty_threshold=0.5,
+            effective_weight=None,
+            last_state=None,
+            stats=SimpleNamespace(),
+            iota_term=None,
+            penalty_objective=None,
+            target=0.2,
+            tolerance=0.01,
+            guarded_boozer_evaluator=None,
+        )
+        runtime.last_state = objectives.Stage2IotaState(
+            iota=0.2,
+            penalty=0.01,
+            abs_error=0.05,
+            feasible=False,
+            solve_failed=False,
+            boozer_trusted=False,
+            iota_objective_active=False,
+            trust_reason="residual_too_large",
+        )
+        penalty_grad = np.array([100.0, 200.0])
+
+        original_evaluate = objectives.evaluate_stage2_iota
+
+        def _fake_evaluate(rt):
+            return objectives.Stage2IotaEvaluation(
+                state=runtime.last_state,
+                penalty_grad=penalty_grad,
+            )
+
+        s_hel_objective = _SHelObjective()
+        objectives.evaluate_stage2_iota = _fake_evaluate
+        try:
+            fake_surface = SimpleNamespace(
+                unitnormal=lambda: np.zeros((1, 1, 3)),
+                gamma=lambda: np.zeros((1, 1, 3)),
+            )
+            fake_bs = SimpleNamespace(
+                set_points=lambda points: None,
+                clear_cached_properties=lambda: None,
+                B=lambda: np.zeros((1, 1, 3)),
+            )
+            fun = objectives.make_stage2_fun(
+                JF=_FixedJF(),
+                new_bs=fake_bs,
+                new_surf=fake_surface,
+                Jf=SimpleNamespace(J=lambda: 0.0),
+                Jls=SimpleNamespace(J=lambda: 0.0),
+                Jccdist=SimpleNamespace(shortest_distance=lambda: 0.0),
+                Jc=SimpleNamespace(J=lambda: 0.0),
+                stage2_iota_runtime=runtime,
+                s_hel_objective=s_hel_objective,
+                s_hel_weight=s_hel_weight,
+            )
+            J, grad = fun(np.array([0.0, 0.0]))
+        finally:
+            objectives.evaluate_stage2_iota = original_evaluate
+
+        assert J == pytest.approx(base_J + s_hel_weight * (1.0 - s_hel_value))
+        np.testing.assert_allclose(grad, base_grad - s_hel_weight * s_hel_grad)
+        assert s_hel_objective.recompute_calls == 1
 
 
 # ---------------------------------------------------------------------------
