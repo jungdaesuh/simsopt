@@ -700,6 +700,78 @@ class BoozerSurfaceTests(unittest.TestCase):
         # check that BoozerSurface.surface and label.surface are the same surfaces
         assert bs_regen.label.surface is bs_regen.surface
 
+    def test_run_code_passes_newton_stab(self):
+        """run_code() must forward ``options["newton_stab"]`` into the Newton polish call.
+
+        Mirror of ``tests/geo/test_boozersurface_jax.py::test_run_code_passes_newton_stab``
+        ensuring the CPU and JAX backends honour the same regularization knob
+        (issue W1.1 / B1 of the BoozerSurface LS deepdive plan). Prior to the fix
+        the CPU ``BoozerSurface.run_code`` ignored ``newton_stab`` while the JAX
+        equivalent threaded it, leaving the parity testing surface asymmetric.
+        """
+        bs, boozer_surface = get_boozer_surface(boozer_type="ls")
+        boozer_surface.options["newton_stab"] = 0.125
+        boozer_surface.need_to_run_code = True
+
+        captured: dict[str, float] = {}
+        original_method = BoozerSurface.minimize_boozer_penalty_constraints_newton
+
+        def capture_stab(self, *args, **kwargs):
+            captured["stab"] = kwargs.get("stab")
+            return original_method(self, *args, **kwargs)
+
+        with patch.object(
+            BoozerSurface,
+            "minimize_boozer_penalty_constraints_newton",
+            new=capture_stab,
+        ):
+            boozer_surface.run_code(
+                boozer_surface.res["iota"], G=boozer_surface.res["G"]
+            )
+
+        assert captured["stab"] == 0.125
+
+    def test_run_code_newton_stab_shifts_reported_hessian(self):
+        """``newton_stab`` must shift the reported Hessian by ``stab * I`` on the
+        CPU backend, matching ``simsopt.geo.optimizer_jax.newton_polish`` which
+        applies ``_stabilize_dense_hessian(H, stab)`` to its final reported
+        Hessian (issue W1.1 / B1).
+
+        Asserting the diagonal shift directly is fixture-independent: it catches
+        both (a) an un-threaded ``stab`` argument and (b) a regression that
+        forgets to apply ``stab * I`` to the reported Hessian (which would break
+        the JAX-side PLU factor-sharing contract).
+        """
+        bs, boozer_surface = get_boozer_surface(boozer_type="ls")
+
+        # Baseline: stab=0, unstabilized Hessian.
+        boozer_surface.options["newton_stab"] = 0.0
+        boozer_surface.need_to_run_code = True
+        boozer_surface.run_code(boozer_surface.res["iota"], G=boozer_surface.res["G"])
+        H_unstab = np.asarray(boozer_surface.res["hessian"]).copy()
+
+        # Apply non-trivial stab. The reported Hessian must equal H_unstab +
+        # stab * I to within floating-point noise (re-solving from convergence
+        # is a no-op since the gradient is already at tolerance).
+        stab = 1e-3
+        boozer_surface.options["newton_stab"] = stab
+        boozer_surface.need_to_run_code = True
+        boozer_surface.run_code(boozer_surface.res["iota"], G=boozer_surface.res["G"])
+        H_stab = np.asarray(boozer_surface.res["hessian"])
+
+        diff = H_stab - H_unstab
+        eye = stab * np.identity(H_stab.shape[0])
+        np.testing.assert_allclose(
+            diff,
+            eye,
+            atol=1e-10,
+            rtol=0.0,
+            err_msg=(
+                "Reported Hessian did not pick up stab * I. "
+                f"max|diff - stab*I| = {np.max(np.abs(diff - eye)):.3e}"
+            ),
+        )
+
     def test_run_code(self):
         """
         This unit test verifies that the run_code portion of the BoozerSurface class is working as expected

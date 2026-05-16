@@ -77,7 +77,7 @@ from benchmarks.validation_ladder_common import (
 
 sopp = pytest.importorskip(
     "simsoptpp",
-    reason="Single-stage integration tests require simsoptpp (use candidate-fixed env)",
+    reason="Single-stage integration tests require simsoptpp (use the in-tree .conda/jax env)",
 )
 
 from simsopt.field import (  # noqa: E402
@@ -4643,6 +4643,14 @@ _RUN_CODE_LS_PARITY_PRODUCTION_OPTIONS = {
 _RUN_CODE_LS_PARITY_DEFAULT_IOTA_TOL = 1e-6
 _RUN_CODE_LS_PARITY_PRODUCTION_GPU_IOTA_TOL = 1e-5
 
+# Cross-machine state-parity thresholds. Tolerances and conditioning ceilings
+# are owned by the ``ls_state_parity`` lane in
+# ``benchmarks/validation_ladder_contract.py`` (issue W2.1 / C1 of the
+# BoozerSurface LS deepdive plan); see the lane comment for the cross-machine
+# variance evidence and ``CLAUDE.md`` "Floating-point reproducibility across
+# machines" for the broader context.
+_LS_STATE_PARITY_TOLS = parity_ladder_tolerances("ls-state-parity")
+
 
 def _assert_run_code_ls_parity(
     problem,
@@ -4707,6 +4715,100 @@ def _assert_run_code_ls_parity(
     }
 
 
+def _assert_run_code_ls_state_parity(
+    problem,
+    *,
+    options=None,
+    require_well_conditioned: bool,
+) -> dict[str, object]:
+    """Assert byte-comparable CPU↔JAX state parity after ``run_code()``.
+
+    Issue W2.1 / C1 of the BoozerSurface LS deepdive plan. The default LS
+    parity test (``_assert_run_code_ls_parity``) only gates on ``iota`` and
+    label error; this helper additionally pins the absolute disagreement on
+    the full state vector ``[surface_dofs, gamma, G, iota]``.
+
+    The ``require_well_conditioned`` flag selects the conditioning policy:
+
+    - ``True`` — production-scale call site. The fixture is *supposed to be*
+      well-conditioned; a regression that pushes ``cond(H)`` above the
+      ``ls_state_parity`` lane's ``max_hessian_condition_number`` ceiling is
+      itself a real signal and the test must hard-fail on that condition
+      before evaluating state parity. Both CPU and JAX Hessians must satisfy
+      the gate (one-sided guard would let a regression silently degrade one
+      backend).
+    - ``False`` — defensive helper-reuse on unknown-conditioning fixtures.
+      If either backend's ``cond(H)`` exceeds the ceiling the state parity
+      assertions are skipped (state vector is no longer a meaningful target
+      under high κ; see deepdive § Empirical Evidence).
+
+    Thresholds are absolute inf-norm gates (not ``rtol``) because the state
+    vector contains both near-zero and unit-order entries; ``rtol``-only
+    would either over- or under-constrain the gate. See
+    ``CLAUDE.md`` "Floating-point reproducibility across machines" for the
+    cross-hardware variance that motivates the ``1e-11`` floor.
+    """
+    parity = _assert_run_code_ls_parity(
+        problem, options=options, max_iota_diff=_RUN_CODE_LS_PARITY_DEFAULT_IOTA_TOL
+    )
+    res_cpu = parity["res_cpu"]
+    res_jax = parity["res_jax"]
+    booz_cpu = parity["booz_cpu"]
+    booz_jax = parity["booz_jax"]
+
+    H_cpu = np.asarray(res_cpu["hessian"], dtype=np.float64)
+    H_jax = np.asarray(res_jax["hessian"], dtype=np.float64)
+    cond_cpu = float(np.linalg.cond(H_cpu))
+    cond_jax = float(np.linalg.cond(H_jax))
+
+    max_cond = float(_LS_STATE_PARITY_TOLS["max_hessian_condition_number"])
+    if require_well_conditioned:
+        assert cond_cpu < max_cond, (
+            f"CPU Hessian conditioning regressed: cond(H_cpu)={cond_cpu:.3e} "
+            f">= {max_cond:.0e}"
+        )
+        assert cond_jax < max_cond, (
+            f"JAX Hessian conditioning regressed: cond(H_jax)={cond_jax:.3e} "
+            f">= {max_cond:.0e}"
+        )
+    elif cond_cpu >= max_cond or cond_jax >= max_cond:
+        pytest.skip(
+            f"cond(H) too high for state parity to be meaningful: "
+            f"cond(H_cpu)={cond_cpu:.3e}, cond(H_jax)={cond_jax:.3e}"
+        )
+
+    sdofs_inf = float(np.max(np.abs(booz_cpu.surface.x - booz_jax.surface.x)))
+    gamma_inf = float(
+        np.max(np.abs(booz_cpu.surface.gamma() - booz_jax.surface.gamma()))
+    )
+    g_abs = abs(float(res_cpu.get("G", 0.0)) - float(res_jax.get("G", 0.0)))
+    iota_abs = abs(float(res_cpu["iota"]) - float(res_jax["iota"]))
+
+    sdofs_atol = float(_LS_STATE_PARITY_TOLS["sdofs_inf_atol"])
+    gamma_atol = float(_LS_STATE_PARITY_TOLS["gamma_inf_atol"])
+    g_atol = float(_LS_STATE_PARITY_TOLS["G_abs_atol"])
+    iota_atol = float(_LS_STATE_PARITY_TOLS["iota_abs_atol"])
+
+    assert sdofs_inf <= sdofs_atol, (
+        f"sdofs_inf disagreement {sdofs_inf:.3e} exceeds {sdofs_atol:.0e}"
+    )
+    assert gamma_inf <= gamma_atol, (
+        f"gamma_inf disagreement {gamma_inf:.3e} exceeds {gamma_atol:.0e}"
+    )
+    assert g_abs <= g_atol, f"|G_cpu - G_jax|={g_abs:.3e} exceeds {g_atol:.0e}"
+    assert iota_abs <= iota_atol, (
+        f"|iota_cpu - iota_jax|={iota_abs:.3e} exceeds {iota_atol:.0e}"
+    )
+
+    parity["cond_cpu"] = cond_cpu
+    parity["cond_jax"] = cond_jax
+    parity["sdofs_inf"] = sdofs_inf
+    parity["gamma_inf"] = gamma_inf
+    parity["g_abs"] = g_abs
+    parity["iota_abs"] = iota_abs
+    return parity
+
+
 class TestRunCodeLSParity:
     """Isolated parity: CPU and JAX run_code() from the same initial guess.
 
@@ -4716,7 +4818,15 @@ class TestRunCodeLSParity:
     """
 
     def test_ls_solve_parity(self):
-        """Both solvers converge; iota, label error, and residual match."""
+        """Both solvers converge; iota and label error match.
+
+        Loose physics smoke on the under-sampled default fixture
+        (``ncoils=2, nphi=5, ntheta=5, mpol=ntor=2``). Conditioning is
+        intentionally degenerate (``cond(H) ≈ 1e14-1e16``) so this gate
+        does *not* assert byte-comparable state parity — that is the job
+        of ``test_ls_solve_state_parity_production_scale`` on the
+        well-conditioned oversampled fixture (issue W2.1 / C1).
+        """
         _assert_run_code_ls_parity(build_ls_parity_problem())
 
     @pytest.mark.slow
@@ -4725,6 +4835,26 @@ class TestRunCodeLSParity:
         _assert_run_code_ls_parity(
             build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8),
             options=_RUN_CODE_LS_PARITY_PRODUCTION_OPTIONS,
+        )
+
+    @pytest.mark.slow
+    def test_ls_solve_state_parity_production_scale(self):
+        """Byte-comparable CPU↔JAX state parity on the oversampled fixture.
+
+        Issue W2.1 / C1 of the BoozerSurface LS deepdive plan. The
+        oversampled fixture (``ncoils=4, nphi=16, ntheta=8``) reaches
+        ``cond(H) ≈ 5.3e+04`` on every measured machine and produces
+        ``sdofs_inf`` between ``1.9e-14`` and ``3.6e-12`` across two
+        macOS hardware platforms. The state-parity gate (``1e-11``)
+        catches regressions while accommodating measured cross-machine
+        floating-point variance. Hessian conditioning is hard-asserted
+        below ``1e8`` because a regression that degrades κ on this
+        fixture is itself a real signal.
+        """
+        _assert_run_code_ls_state_parity(
+            build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8),
+            options=_RUN_CODE_LS_PARITY_PRODUCTION_OPTIONS,
+            require_well_conditioned=True,
         )
 
     @pytest.mark.slow

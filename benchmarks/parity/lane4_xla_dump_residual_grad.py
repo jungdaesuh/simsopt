@@ -22,7 +22,7 @@ compilation. Run via:
 DUMP_DIR=.artifacts/parity/20260508-residual-pinned-inputs/p4_4_xla_dump
 mkdir -p "$DUMP_DIR"
 XLA_FLAGS="--xla_dump_to=$DUMP_DIR" \\
-    .conda/jax-0.9.2/bin/python benchmarks/parity/lane4_xla_dump_residual_grad.py
+    .conda/jax/bin/python benchmarks/parity/lane4_xla_dump_residual_grad.py
 ```
 
 Plan reference: ``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md``

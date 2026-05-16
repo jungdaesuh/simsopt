@@ -21,15 +21,18 @@ Two channels are exposed:
    oracle within LAPACK pivot tie-breaks (``optimizer_backend="scipy"``,
    ``materialize_dense_linearization=True`` so ``newton_polish``
    receives ``dense_newton_steps=True`` at
-   ``boozersurface_jax.py:4736``; mirror-upper symmetrization is the
-   default at ``optimizer_jax.py:1632``).
+   ``boozersurface_jax.py:5016`` (``dense_newton_steps=materialize_hessian``); mirror-upper symmetrization is the
+   default in ``_materialize_dense_hessian`` (``optimizer_jax.py:1645``)
+   and is requested explicitly at ``optimizer_jax.py:2678``).
 
 2. :func:`cpp_compatible_exact_newton` — a NEW dense host-resident
    exact Newton solver that lives entirely in this harness. The
-   normalizer at ``boozersurface_jax.py:3097`` strips
-   ``optimizer_backend`` from the user-visible exact path; this
-   harness **does not** modify that normalizer and **does not** expose
-   the dense path to the user constructor. The harness reuses the
+   normalizer ``_normalize_solver_options``
+   (``boozersurface_jax.py:3122``; the strip itself is at
+   ``boozersurface_jax.py:3185-3186``) drops ``optimizer_backend`` from
+   the user-visible exact path; this harness **does not** modify that
+   normalizer and **does not** expose the dense path to the user
+   constructor. The harness reuses the
    public residual closure ``BoozerSurfaceJAX._make_exact_residual``
    (which already returns the augmented residual ``b = [r[mask],
    label.J() − target_label, …]``, matching ``boozersurface.py:1645
@@ -90,8 +93,8 @@ import numpy as np
 # The harness-only LS skeleton pins these options when wrapping
 # ``BoozerSurfaceJAX.run_code()``. They reproduce the C++ Newton polish
 # byte semantics within LAPACK pivot tie-breaks. See
-# ``boozersurface_jax.py:4728-4738`` for the dispatcher that consumes
-# these options and ``optimizer_jax.py:1730-1736`` for the host
+# ``boozersurface_jax.py:4977`` (``_run_newton_polish_for_method``) for the dispatcher that consumes
+# these options and ``optimizer_jax.py:1747-1753`` (``_solve_dense_newton_step``) for the host
 # ``np.linalg.solve`` site.
 _LS_HARNESS_REQUIRED_OPTIONS: Mapping[str, Any] = {
     "optimizer_backend": "scipy",
@@ -106,10 +109,10 @@ def _validate_ls_harness_options(boozer_surface) -> None:
     - ``optimizer_backend="scipy"`` so the SciPy-backed Newton polish
       path is selected (no ondevice routing);
     - ``materialize_dense_linearization=True`` so
-      ``_run_newton_polish_for_method`` (boozersurface_jax.py:4728-4738)
+      ``_run_newton_polish_for_method`` (``boozersurface_jax.py:4977``)
       passes ``dense_newton_steps=True`` to ``newton_polish``, which
       forces the host ``np.linalg.solve`` site at
-      ``optimizer_jax.py:1730-1736``.
+      ``optimizer_jax.py:1747-1753`` (``_solve_dense_newton_step``).
 
     The harness must not silently mutate ``boozer_surface.options``;
     callers are responsible for setting the contract before invoking
@@ -142,10 +145,10 @@ def cpp_compatible_ls_newton_polish(
     This is a thin wrapper that forwards to the existing
     ``optimizer_backend="scipy"`` LS pathway. It does NOT introduce a
     new dense code path -- the host ``np.linalg.solve`` Newton step
-    site at ``optimizer_jax.py:1730-1736`` is already reached by the
+    site at ``optimizer_jax.py:1747-1753`` (``_solve_dense_newton_step``) is already reached by the
     upstream dispatcher when ``dense_newton_steps=True`` is set, which
     happens when ``materialize_dense_linearization=True`` per
-    ``boozersurface_jax.py:4736``.
+    ``boozersurface_jax.py:5016`` (``dense_newton_steps=materialize_hessian``).
 
     The wrapper exists for two reasons:
 
@@ -169,9 +172,11 @@ def cpp_compatible_ls_newton_polish(
     Returns:
         The standard LS result dict from
         ``BoozerSurfaceJAX.run_code()``. Mirror-upper Hessian
-        symmetrization is already the default at
-        ``optimizer_jax.py:1632`` (``symmetrize=True``), so the
-        materialized ``hessian`` field is bit-symmetric.
+        symmetrization is the default in
+        ``_materialize_dense_hessian`` (``optimizer_jax.py:1645``;
+        explicitly invoked at ``optimizer_jax.py:2678`` with
+        ``symmetrize=True``), so the materialized ``hessian`` field is
+        bit-symmetric.
     """
     if boozer_surface.boozer_type != "ls":
         raise ValueError(
@@ -235,9 +240,11 @@ def cpp_compatible_exact_newton(
     ``boozersurface.py:1640-1722``. Nothing in the production
     single-stage pipeline calls this function.
 
-    The exact normalizer at ``boozersurface_jax.py:3097`` strips
-    ``optimizer_backend`` from the user-visible exact path; this
-    harness does NOT modify that normalizer. Instead, the harness
+    The exact normalizer ``_normalize_solver_options``
+    (``boozersurface_jax.py:3122``; strip at
+    ``boozersurface_jax.py:3185-3186``) drops ``optimizer_backend`` from
+    the user-visible exact path; this harness does NOT modify that
+    normalizer. Instead, the harness
     builds the residual closure via the public
     ``BoozerSurfaceJAX._make_exact_residual`` factory (which already
     returns the augmented residual matching the C++

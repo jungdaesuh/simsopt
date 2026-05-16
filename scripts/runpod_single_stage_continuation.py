@@ -21,7 +21,7 @@ DEFAULT_REMOTE_COLUMBIA_ROOT = PurePosixPath("/workspace/columbia")
 DEFAULT_REMOTE_OUTPUT_ROOT = PurePosixPath("/workspace/continuation-runs")
 DEFAULT_REMOTE_CACHE_DIR = PurePosixPath("/workspace/.jax-cache/single-stage-continuation")
 DEFAULT_REMOTE_CONDA_ROOT = PurePosixPath("/opt/conda")
-DEFAULT_ENV_NAME = "jax-0.9.2"
+DEFAULT_ENV_NAME = "jax"
 DEFAULT_SYSTEM_DEPS_MODE = "auto"
 EXACT_JAX_GPU_WHEEL_SPEC = "jax[cuda12]==0.9.2"
 REQUIRED_RUNPOD_CUDA_TOOLKIT_RELEASE = "12.9"
@@ -562,7 +562,7 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
             f"{shlex.quote(plan.pretend_version)}"
         ),
         'source "${CONDA_ROOT}/etc/profile.d/conda.sh"',
-        'ENV_SPEC_PATH="${REPO_ROOT}/envs/jax-0.9.2.yml"',
+        'ENV_SPEC_PATH="${REPO_ROOT}/envs/jax.yml"',
         'ENV_HASH_PATH="${CONDA_ROOT}/envs/${ENV_NAME}/.simsopt-jax-env.sha256"',
         'ENV_SPEC_HASH="$(sha256sum "${ENV_SPEC_PATH}" | awk \'{print $1}\')"',
         'if conda env list | awk \'{print $1}\' | grep -Fxq "${ENV_NAME}"; then',

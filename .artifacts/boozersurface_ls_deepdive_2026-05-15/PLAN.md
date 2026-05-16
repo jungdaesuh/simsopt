@@ -129,7 +129,7 @@ Estimated effort: **1–2 PRs, ~150 lines total including tests.** No design deb
   - Line 28: "Private optimizer lane (`optimizer_backend="hybrid"` / `"ondevice"`)" → drop `"hybrid"`
   - Line 198: "BFGS device residency: ... `optimizer_backend="hybrid"` still depend on private line-search internals" → drop `"hybrid"`
   - Line 221: "SciPy host loop in optimizer: ... on-device and hybrid backends are now supported and validated separately" → replace with "on-device backend is now supported and validated separately"
-- [ ] Update **all** stale `boozersurface_jax.py:3097` references → `boozersurface_jax.py:3185-3186` (the actual `_normalize_exact_options` stripping site):
+- [ ] Update **all** stale `boozersurface_jax.py:3097` references → `boozersurface_jax.py:3185-3186` (the actual `_normalize_solver_options` stripping site; function definition starts at `boozersurface_jax.py:3122`):
   - `CLAUDE.md:188` (in "Exact Boozer scaling-limit contract" section)
   - `benchmarks/_cpp_compatible_probe.py:29` (module docstring)
   - `benchmarks/_cpp_compatible_probe.py:238` (inline comment)

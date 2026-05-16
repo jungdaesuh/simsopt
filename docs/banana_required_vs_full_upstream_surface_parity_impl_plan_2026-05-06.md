@@ -3,7 +3,7 @@
 Status: local non-CUDA implementation and validation evidence committed; M7 image publication and real-image preflight are complete for validation tag `banana-surface-parity-m7-unitnormal-r1`, but the latest HF foreground status-check fix still needs a new validation tag before the next no-detach H200 launch. Real CUDA evidence remains open because the H200 launch is blocked by external GPU account credits.
 Date: 2026-05-06.
 Base commit: `0bb26bb0a`.
-Validation basis: committed implementation slice on 2026-05-06. Repo-local interpreter `.conda/jax-0.9.2/bin/python` reports JAX `0.10.0`, CPU backend only, with `JAX_ENABLE_X64=True` and `JAX_PLATFORMS=cpu` for local gates. Unrelated untracked artifact files were left unchanged.
+Validation basis: committed implementation slice on 2026-05-06. Repo-local interpreter `.conda/jax/bin/python` reports JAX `0.10.0`, CPU backend only, with `JAX_ENABLE_X64=True` and `JAX_PLATFORMS=cpu` for local gates. Unrelated untracked artifact files were left unchanged.
 
 ## Verdict
 
@@ -28,7 +28,7 @@ The larger "partial" labels mostly come from upstream surface API breadth: secon
 
 CPU-only evidence from the 2026-05-06 committed implementation slice:
 
-- Repo-local interpreter: `.conda/jax-0.9.2/bin/python`, JAX `0.10.0`, backend `cpu`, devices `[CpuDevice(id=0)]`.
+- Repo-local interpreter: `.conda/jax/bin/python`, JAX `0.10.0`, backend `cpu`, devices `[CpuDevice(id=0)]`.
 - Manifest/harness gate: `52 passed`.
 - Backend/smoke/native-path gate: `223 passed, 1 skipped`.
 - Banana CPU/JAX parity gate: `589 passed, 134 skipped`.
@@ -800,7 +800,7 @@ Use the repo-local interpreter when available:
 
 ```bash
 cd /Users/suhjungdae/code/columbia/simsopt-jax
-export PY=/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python
+export PY=/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax/bin/python
 export PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src
 export JAX_ENABLE_X64=True
 export JAX_PLATFORMS=cpu

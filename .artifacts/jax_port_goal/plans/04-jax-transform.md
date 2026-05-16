@@ -74,7 +74,8 @@ The principal compiled entrypoints are:
   metric helpers (`surfaceobjectives_jax.py:411-540`); also used by
   exact batched adjoints to flatten RHS columns. **No new `vmap` in this
   item; the exact lane batched adjoint solves one RHS at a time through
-  the operator seam (`boozersurface_jax.py:3097`).**
+  the operator seam (`_normalize_solver_options` at
+  `boozersurface_jax.py:3185-3186`).**
 - `scan` / `fori_loop`: used by the iterative solvers in
   `optimizer_jax.py` (operator GMRES, Newton outer loop). Not item-04
   owned by the API surface but consumed via

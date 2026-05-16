@@ -120,8 +120,9 @@ parity uses both branches.
     `surfaceobjectives_jax.py:3017-3055`).
   - Tolerance lane: `ls_wrapper_gradient` / `derivative_heavy` /
     `direct_kernel` per the kernel being compared.
-- **Exact lane** (`optimizer_backend` stripped from public API at
-  `boozersurface_jax.py:3097`): solves the exact-Newton system using the
+- **Exact lane** (`optimizer_backend` stripped from public API in
+  `_normalize_solver_options` at `boozersurface_jax.py:3185-3186`):
+  solves the exact-Newton system using the
   operator-backed GMRES seam in `optimizer_jax._run_operator_gmres`.
   - Dense PLU is **public/debug metadata only** (per CLAUDE.md).
   - `linear_solve_backend="operator"`,

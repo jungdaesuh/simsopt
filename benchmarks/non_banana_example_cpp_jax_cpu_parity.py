@@ -2105,7 +2105,7 @@ def build_run_metadata(
         "host_machine": platform.machine(),
         "executable": sys.executable,
         "version_probe_command": (
-            'conda run -n jax-0.9.2 python -c "import jax, jaxlib; '
+            'conda run -n jax python -c "import jax, jaxlib; '
             'print(jax.__version__, jaxlib.__version__)"'
         ),
         "lane_schema": {

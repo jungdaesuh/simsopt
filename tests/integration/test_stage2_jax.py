@@ -92,7 +92,7 @@ def _skip_if_missing_equilibrium_fixture():
 
 sopp = pytest.importorskip(
     "simsoptpp",
-    reason="Stage 2 integration tests require simsoptpp (use candidate-fixed env)",
+    reason="Stage 2 integration tests require simsoptpp (use the in-tree .conda/jax env)",
 )
 
 from simsopt.field import (  # noqa: E402

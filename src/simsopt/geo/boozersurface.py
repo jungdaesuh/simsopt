@@ -21,6 +21,7 @@ from ._simsoptpp_boozer_compat import (
     _call_with_abi_fallback,
 )
 from .._core.optimizable import Optimizable
+from ..backend import is_parity_mode
 from ..objectives.utilities import forward_backward
 from functools import partial
 
@@ -315,6 +316,10 @@ class BoozerSurface(Optimizable):
                 - `bfgs_maxiter` (int): maximum number of iterations for BFGS solver. Defaults to 1500.
                 - `limited_memory` (bool): True if L-BFGS solver is desired, False if the BFGS solver otherwise. Defaults to False.
                 - `weight_inv_modB` (float): for BoozerLS surfaces, weight the residual by modB so that it does not scale with coil currents.  Defaults to True.
+                - `newton_stab` (float): for BoozerLS surfaces, Tikhonov damping applied to the
+                  Newton-polish Hessian as ``(H + stab * I)``. Defaults to 0.0 (no damping).
+                  Mirrors the JAX-side default in :class:`BoozerSurfaceJAX` so both backends
+                  honour the same regularization knob.
                 - `record_scipy_callback_trace` (bool): for BoozerLS surfaces, record every SciPy objective callback evaluation. Defaults to False.
         """
         super().__init__(depends_on=[biotsavart])
@@ -358,8 +363,21 @@ class BoozerSurface(Optimizable):
                 options["limited_memory"] = False
             if "weight_inv_modB" not in options:
                 options["weight_inv_modB"] = True
+            if "newton_stab" not in options:
+                options["newton_stab"] = 0.0
             if "record_scipy_callback_trace" not in options:
                 options["record_scipy_callback_trace"] = False
+        # Mirror BoozerSurfaceJAX._normalize_solver_options: in parity mode
+        # the linear residual gate measures the *undamped* operator, so any
+        # non-zero ``newton_stab`` would silently shift the CPU answer
+        # relative to the JAX reference. Apply for all boozer_types so the
+        # gate stays symmetric across CPU/JAX even if the option is ignored
+        # for ``exact`` (matches BoozerSurfaceJAX which raises uniformly).
+        if is_parity_mode() and float(options.get("newton_stab", 0.0)) != 0.0:
+            raise ValueError(
+                "BoozerSurface parity mode requires newton_stab=0.0 so "
+                "linear residuals are checked against the undamped operator."
+            )
         self.options = options
 
     def recompute_bell(self, parent=None):
@@ -501,6 +519,7 @@ class BoozerSurface(Optimizable):
                 verbose=self.options["verbose"],
                 tol=self.options["newton_tol"],
                 maxiter=self.options["newton_maxiter"],
+                stab=self.options["newton_stab"],
                 weight_inv_modB=self.options["weight_inv_modB"],
             )
             res["optimizer_method"] = pre_newton["optimizer_method"]
@@ -1151,6 +1170,14 @@ class BoozerSurface(Optimizable):
             optimize_G=G is not None,
             weight_inv_modB=weight_inv_modB,
         )
+
+        # Match the JAX backend's contract (``optimizer_jax.newton_polish``):
+        # the reported Hessian and its PLU factors are the *stabilized*
+        # operator ``H + stab * I`` so adjoint/PLU consumers see the same
+        # linear system on both backends. With ``stab=0`` (the default) the
+        # reported Hessian is unchanged.
+        if stab:
+            d2val = d2val + stab * np.identity(d2val.shape[0])
 
         P, L, U = lu(d2val)
         hessian_shape = tuple(int(dim) for dim in d2val.shape)

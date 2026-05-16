@@ -16,8 +16,11 @@ Unsupported fields are rejected by the native contract;
 The fixed surface is captured from its immutable ``surface_spec()``
 once at construction time and kept on JAX arrays for the lifetime of
 the objective. This is correct for Stage 2 where the plasma surface is
-fixed.
+fixed; mutating the surface's free DOFs after construction raises a
+``RuntimeError`` because the cached geometry would be stale.
 """
+
+import hashlib
 
 import numpy as np
 import jax
@@ -79,6 +82,25 @@ def _strict_field_dof_layout_version(field) -> int:
             "_dof_layout_version for drift detection."
         )
     return layout_version
+
+
+def _surface_dofs_fingerprint(surface) -> bytes:
+    """Return a fixed-width content fingerprint of a surface's full DOF state.
+
+    Uses ``local_full_x`` (the surface's complete DOF vector including
+    fixed entries) rather than ``surface.x`` (free DOFs only). A surface
+    that is fully fixed at construction would otherwise hash an empty
+    array, and a downstream caller that mutates ``surface.local_full_x``
+    or rebinds the underlying values would not be detected.
+
+    blake2b over the contiguous float64 byte view is collision-resistant
+    and fast enough that the per-call overhead is negligible compared to
+    the JAX forward pass. Using bytes (not the array itself) keeps the
+    comparison in the host scope and avoids accidentally pulling JAX
+    device buffers across a transfer guard.
+    """
+    dofs = np.ascontiguousarray(surface.local_full_x, dtype=np.float64)
+    return hashlib.blake2b(dofs.tobytes(), digest_size=16).digest()
 
 
 def coil_current_fixed_geometry_flux_jax(
@@ -202,6 +224,12 @@ class SquaredFluxJAX(Optimizable):
         field.set_points_from_spec(field_eval_spec)
         self._field_points_version = field._points_version
         self._field_dof_layout_version = _strict_field_dof_layout_version(field)
+        # Surface DOFs are baked into ``_normal_jax`` / ``_target_jax`` and
+        # into the JIT-captured ``_flux_spec``. We capture a fingerprint here
+        # so that any post-construction mutation of ``surface.x`` is detected
+        # at the next ``J()`` / ``dJ()`` call instead of silently producing
+        # stale results.
+        self._surface_dofs_fingerprint = _surface_dofs_fingerprint(surface)
 
         self._clear_cached_results()
         self._init_native_program(field)
@@ -347,9 +375,20 @@ class SquaredFluxJAX(Optimizable):
             "new DOF layout."
         )
 
+    def _raise_if_surface_dofs_drifted(self):
+        if _surface_dofs_fingerprint(self.surface) == self._surface_dofs_fingerprint:
+            return
+        raise RuntimeError(
+            "SquaredFluxJAX captures fixed surface geometry at construction "
+            "(gamma, normal, target are baked into the JIT closure). The "
+            "surface free DOFs have changed since construction; rebuild the "
+            "objective for the new surface state."
+        )
+
     def _raise_if_field_contract_drifted(self):
         self._raise_if_field_points_drifted()
         self._raise_if_field_dof_layout_drifted()
+        self._raise_if_surface_dofs_drifted()
 
     def J(self):
         self._raise_if_field_contract_drifted()

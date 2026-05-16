@@ -39,9 +39,7 @@ _SQUARED_FLUX_DEFINITIONS = (
     "local",
 )
 _STAGE2_MINIMAL_INPUT = (
-    Path(__file__).resolve().parents[1]
-    / "test_files"
-    / "input.LandremanPaul2021_QA"
+    Path(__file__).resolve().parents[1] / "test_files" / "input.LandremanPaul2021_QA"
 )
 _STAGE2_MINIMAL_NCOILS = 4
 _STAGE2_MINIMAL_NPHI = 32
@@ -703,3 +701,30 @@ def test_squaredfluxjax_requires_native_field_contract():
             field,
             target=np.asarray([[0.0]], dtype=np.float64),
         )
+
+
+def test_squaredfluxjax_rejects_surface_dof_mutation_after_construction():
+    """Issue W1.3 / E1: ``SquaredFluxJAX`` captures the surface geometry
+    (``gamma``, ``normal``, ``target``) into a JIT closure at construction.
+    Mutating the surface DOFs after construction would silently produce
+    stale values; the fingerprint guard must raise instead.
+    """
+    coils, surface = _make_native_flux_parity_case()
+
+    bs_jax = BiotSavartJAX(coils)
+    objective = SquaredFluxJAX(surface, bs_jax)
+
+    # Sanity: the objective evaluates fine before mutation.
+    objective.J()
+    objective.dJ()
+
+    # Free at least one surface DOF and perturb it.
+    surface.unfix_all()
+    perturbed_dofs = surface.x.copy()
+    perturbed_dofs[0] += 1e-6
+    surface.x = perturbed_dofs
+
+    with pytest.raises(RuntimeError, match="surface free DOFs have changed"):
+        objective.J()
+    with pytest.raises(RuntimeError, match="surface free DOFs have changed"):
+        objective.dJ()

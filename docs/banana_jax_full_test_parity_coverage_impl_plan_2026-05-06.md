@@ -228,7 +228,7 @@ Acceptance:
 - [x] No broad new flux test matrix is added unless the reproducer exposes a
   real uncovered path.
 
-P1 implementation note 2026-05-06: repo-local `.conda/jax-0.9.2` simsoptpp
+P1 implementation note 2026-05-06: repo-local `.conda/jax` simsoptpp
 search covered 248 finite low-level cases across all three definitions and
 found zero CPU-`nan` reproducers. `tests/objectives/test_integral_bdotn_jax.py`
 now pins direct C++/JAX boundary contracts for zero-normal quadratic flux,
@@ -523,7 +523,7 @@ Acceptance:
 
 Current blocker audit, 2026-05-06:
 
-- Local `.conda/jax-0.9.2/bin/python` reports JAX 0.10.0 on CPU only;
+- Local `.conda/jax/bin/python` reports JAX 0.10.0 on CPU only;
   this cannot satisfy a CUDA gate.
 - `nvidia-smi` is not available on the local host.
 - `runpodctl pod list` returns no active pods.
@@ -571,7 +571,7 @@ does not complete successfully.
 
 ```bash
 SIMSOPT_HF_GPU_IMAGE=ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1 \
-.conda/jax-0.9.2/bin/python benchmarks/hf_jobs/launch_production_gpu_proof.py \
+.conda/jax/bin/python benchmarks/hf_jobs/launch_production_gpu_proof.py \
   --repo-url https://github.com/jungdaesuh/simsopt.git \
   --repo-ref banana-surface-parity-m7-image-r1 \
   --repo-sha c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c \
@@ -676,23 +676,23 @@ proof.
 Current local audit outputs, 2026-05-06:
 
 ```text
-.conda/jax-0.9.2/bin/python -m pytest -q \
+.conda/jax/bin/python -m pytest -q \
   tests/docs/test_banana_parity_coverage_manifest.py \
   tests/test_hf_production_gpu_proof.py
 48 passed in 18.19s
 
-.conda/jax-0.9.2/bin/python -m pytest -q \
+.conda/jax/bin/python -m pytest -q \
   tests/objectives/test_integral_bdotn_jax.py::TestIntegralBdotNCppParity \
   tests/geo/test_surface_objectives_jax.py::TestToroidalFluxObjectParity \
   tests/integration/test_stage2_target_lane_purity.py
 37 passed, 33 skipped in 33.18s
 
-.conda/jax-0.9.2/bin/python -m pytest -q \
+.conda/jax/bin/python -m pytest -q \
   tests/integration/test_stage2_jax.py \
   -k "target_reporting_summary or capture_stage2_trajectory_snapshot_uses_target_reporting or target_feasible_partial_candidate_skips_cpp_distance_culler or strict_mode_allows_target_scalar_objective_evaluation or target_scalar_objective_matches_stage2_composite_contract"
 7 passed, 166 deselected in 26.91s
 
-SIMSOPT_TARGET_LANE_STRICT=1 .conda/jax-0.9.2/bin/python \
+SIMSOPT_TARGET_LANE_STRICT=1 .conda/jax/bin/python \
   examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
   --backend jax --optimizer-backend ondevice --skip-postprocess \
   --nphi 31 --ntheta 16 --maxiter 2 \
@@ -701,7 +701,7 @@ SIMSOPT_TARGET_LANE_STRICT=1 .conda/jax-0.9.2/bin/python \
 rc=0
 trajectory_bytes=4438
 
-.conda/jax-0.9.2/bin/python -m ruff check \
+.conda/jax/bin/python -m ruff check \
   benchmarks/hf_jobs/cuda_pytest_probe.py \
   benchmarks/validation_ladder_common.py \
   benchmarks/stage2_e2e_comparison.py \
@@ -789,14 +789,14 @@ negative clientBalance
 runpodctl pod list
 []
 
-PYTHONPATH=src .conda/jax-0.9.2/bin/python -m pytest -q \
+PYTHONPATH=src .conda/jax/bin/python -m pytest -q \
   tests/docs/test_banana_parity_coverage_manifest.py
 2 passed in 0.02s
 
 git diff --check
 passed
 
-.conda/jax-0.9.2/bin/python -c '<jax runtime probe>'
+.conda/jax/bin/python -c '<jax runtime probe>'
 {"python": "3.11.15", "jax": "0.10.0", "backend": "cpu", "devices": ["cpu:0"], "x64": false}
 
 nvidia-smi

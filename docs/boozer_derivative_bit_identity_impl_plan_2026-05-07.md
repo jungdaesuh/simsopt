@@ -113,7 +113,7 @@ path keeps `einsum`/matmul/`jacfwd` for performance.
 ## 4. Pre-requisites
 
 - [ ] Confirm working tree clean of unrelated edits before starting Phase 0.
-- [ ] `.conda/jax-0.9.2/bin/python` available (env shows JAX 0.10.0; document
+- [ ] `.conda/jax/bin/python` available (env shows JAX 0.10.0; document
       version drift if relevant).
 - [ ] Existing artifact preserved:
       `.artifacts/parity/20260507-bfgs-prenewton-cpuordered-vg-m1/result.json`.
@@ -905,13 +905,12 @@ P4.6 / P4.7.
 > 0.10.0 capability snapshot but should NOT be read as Phase 4 entry
 > tasks. Phase 4 entry checklist is in §10 (revised) and §16 (revised).
 
-Recorded against the runtime resolved by `.conda/jax-0.9.2/bin/python`.
+Recorded against the runtime resolved by `.conda/jax/bin/python`.
 
 ### JAX runtime
 
-- JAX version: `0.10.0` (env name retains the `jax-0.9.2` label; CLAUDE.md
-  reference is stale on this point and should be updated when the version
-  decision is finalized).
+- JAX version: `0.10.0` (env name is now bare `jax`; the in-tree env path
+  is `.conda/jax`).
 - `jax.xla_computation`: absent (deleted; AOT APIs are the replacement).
 - `jax.jit(fn).lower(args).as_text("hlo")`: works.
 - `jax.jit(fn).lower(args).compiler_ir("hlo")`: works.
@@ -970,7 +969,7 @@ This section records the probes that retracted the original §10 levers
 (`optimization_barrier`, `reduce_precision`) and identified explicit
 grouping as the local candidate path. All probes ran on the local aarch64
 host (Apple Silicon)
-against the JAX 0.9.2 conda env at `.conda/jax-0.9.2/bin/python`. The
+against the JAX 0.9.2 conda env at `.conda/jax/bin/python`. The
 production target is RunPod x86_64 (A100/H100); per the Side Track in §5,
 those probes are pending and may pick a different fma shape — re-run before
 applying any restructuring conclusion to production.

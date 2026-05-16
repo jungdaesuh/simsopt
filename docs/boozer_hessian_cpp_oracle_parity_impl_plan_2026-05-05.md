@@ -263,13 +263,13 @@ Update:
 Focused Hessian gate:
 
 ```bash
-JAX_ENABLE_X64=True JAX_PLATFORMS=cpu ./.conda/jax-0.9.2/bin/python -m pytest -q tests/geo/test_boozersurface_jax.py -k 'penalty_hessian'
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu ./.conda/jax/bin/python -m pytest -q tests/geo/test_boozersurface_jax.py -k 'penalty_hessian'
 ```
 
 Derivative slice:
 
 ```bash
-JAX_ENABLE_X64=True JAX_PLATFORMS=cpu ./.conda/jax-0.9.2/bin/python -m pytest -q tests/geo/test_boozersurface_jax.py tests/geo/test_boozer_derivatives_jax.py -k 'hessian or derivative'
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu ./.conda/jax/bin/python -m pytest -q tests/geo/test_boozersurface_jax.py tests/geo/test_boozer_derivatives_jax.py -k 'hessian or derivative'
 ```
 
 Diff hygiene:

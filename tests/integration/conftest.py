@@ -3,7 +3,7 @@ Conftest for integration tests that need both simsoptpp (CPU reference)
 and our JAX modules.
 
 When running against a conda env that has simsopt installed as a
-scikit-build editable install (e.g. candidate-fixed), the
+scikit-build editable install (e.g. ``.conda/jax``), the
 ScikitBuildRedirectingFinder intercepts all ``simsopt.*`` imports.
 This conftest patches the finder to include our new JAX modules
 so they can be imported alongside the CPU reference.

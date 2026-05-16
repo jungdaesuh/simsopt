@@ -462,7 +462,7 @@ Acceptance gate:
 Command shape:
 
 ```bash
-.conda/jax-0.9.2/bin/python benchmarks/single_stage_init_parity.py \
+.conda/jax/bin/python benchmarks/single_stage_init_parity.py \
   --platform cpu \
   --optimizer-backend scipy-jax-fullgraph \
   --maxiter 5 \
@@ -520,9 +520,9 @@ Acceptance gate:
 Run focused checks after the implementation patch:
 
 ```bash
-.conda/jax-0.9.2/bin/python -m pytest tests/geo/test_boozersurface_jax.py -q
-.conda/jax-0.9.2/bin/python -m pytest tests/test_benchmark_helpers.py -q
-.conda/jax-0.9.2/bin/python -m pytest tests/geo/test_single_stage_example.py -q
+.conda/jax/bin/python -m pytest tests/geo/test_boozersurface_jax.py -q
+.conda/jax/bin/python -m pytest tests/test_benchmark_helpers.py -q
+.conda/jax/bin/python -m pytest tests/geo/test_single_stage_example.py -q
 python -m ruff check src/simsopt/geo/boozersurface_jax.py src/simsopt/geo/optimizer_jax.py src/simsopt/geo/optimizer_jax_reference.py benchmarks/single_stage_init_parity.py tests/geo/test_boozersurface_jax.py tests/test_benchmark_helpers.py
 git diff --check
 ```

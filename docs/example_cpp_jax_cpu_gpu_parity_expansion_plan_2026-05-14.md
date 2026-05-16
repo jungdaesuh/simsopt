@@ -330,7 +330,7 @@ Implementation checklist:
 - [x] Add a helper that marks a fixture `gpu_ready=false` until a real GPU lane
       artifact exists.
 - [x] Add version-probe guidance to every runnable command:
-      `conda run -n jax-0.9.2 python -c "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"`.
+      `conda run -n jax python -c "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"`.
 - [x] Add fail-closed lane-selection scaffolding before documenting an
       executable GPU artifact command:
   - [x] Add a `--lanes` CLI option or an equivalent explicit lane selector.
@@ -968,21 +968,21 @@ schema mistakes before PM, wireframe, and tracing add larger fixtures.
 CPU expanded fixture tests:
 
 ```bash
-conda run -n jax-0.9.2 python -c \
+conda run -n jax python -c \
     "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
-    conda run -n jax-0.9.2 python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py -v
+    conda run -n jax python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py -v
 ```
 
 CPU expanded artifact:
 
 ```bash
-conda run -n jax-0.9.2 python -c \
+conda run -n jax python -c \
     "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
-    conda run -n jax-0.9.2 python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
+    conda run -n jax python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
         --fixtures all \
         --lanes cpu_cpp,jax_cpu \
         --git-sha "$(git rev-parse HEAD)" \
@@ -1003,7 +1003,7 @@ SIMSOPT_JAX_PLATFORM=cuda \
 SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda \
 JAX_PLATFORMS=cuda \
 JAX_ENABLE_X64=1 \
-conda run -n jax-0.9.2 python -c \
+conda run -n jax python -c \
     "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"
 
 SIMSOPT_BACKEND_MODE=jax_gpu_parity \
@@ -1011,7 +1011,7 @@ SIMSOPT_JAX_PLATFORM=cuda \
 SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda \
 JAX_PLATFORMS=cuda \
 JAX_ENABLE_X64=1 \
-conda run -n jax-0.9.2 python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
+conda run -n jax python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
     --fixtures all-supported \
     --lanes cpu_cpp,jax_gpu \
     --baseline-json .artifacts/parity/20260514-example-expansion/all-supported-cpu.json \

@@ -422,6 +422,220 @@ def _assert_exact_well_conditioned_operator_case(case, exact_lane):
     )
 
 
+# ---------------------------------------------------------------------------
+# W3.2 (C3): action-level adjoint parity for ill-conditioned exact lane
+# ---------------------------------------------------------------------------
+#
+# The ``exact_ill_conditioned_adjoint`` lane in
+# ``benchmarks/validation_ladder_contract.py`` correctly disables raw vector
+# parity (``vector_parity_required=False``) because near-singular Jacobians
+# admit infinitely many adjoint vectors that all satisfy the residual gate.
+# But that leaves a real coverage gap: a regression that returns total
+# garbage in the well-conditioned subspace would only be caught if the
+# residual check itself blew up. Action-level (range-space) parity is well
+# defined even when raw vectors are not — it asserts that two adjoint
+# solvers agree on the components that *are* uniquely defined by ``A``,
+# while still tolerating disagreement in the genuinely ambiguous null
+# direction. See plan §W3.2 (C3) of the BoozerSurface LS deepdive.
+
+
+def _build_exact_ill_conditioned_operator_fixture(
+    monkeypatch,
+    *,
+    device,
+    cond_target=1e10,
+):
+    """Synthesize an ill-conditioned exact-Jacobian fixture.
+
+    Mirrors ``_build_exact_well_conditioned_operator_fixture`` but the
+    diagonal carries a near-singular smallest entry so ``cond(A) ≈
+    cond_target``. Used to exercise the ``exact_ill_conditioned_adjoint``
+    lane where vector parity is unstable but action-level parity (on the
+    well-conditioned subspace) remains strict.
+    """
+    metadata = _collect_exact_well_conditioned_runtime_metadata(device)
+    with jax.default_device(device):
+        booz = _make_mock_boozer_surface_exact(options={"newton_tol": 1e-12})
+        booz.need_to_run_code = False
+        solved_x = booz._pack_decision_vector(0.3, 0.05)
+        n = int(solved_x.size)
+
+        # Make the diagonal explicitly ill-conditioned: σ_max ≈ 2.5,
+        # σ_min ≈ 2.5 / cond_target. Off-diagonal couplings are kept tiny
+        # so the SVD spectrum stays close to the diagonal.
+        diagonal = np.linspace(2.0, 2.5, n)
+        diagonal[-1] = diagonal[0] / cond_target  # tiny last singular value
+        A_np = np.diag(diagonal)
+        A_np += 1e-6 * np.tril(np.ones((n, n)), k=-1)
+        A_np += 5e-7 * np.triu(np.ones((n, n)), k=1)
+        A = jnp.asarray(A_np, dtype=jnp.float64)
+
+        # SVD bookkeeping: ``A = U Σ Vᵀ``. The transposed adjoint system
+        # is ``Aᵀ λ = rhs``, so existence requires ``rhs ∈ range(Aᵀ) =
+        # span(V_well)`` (V columns where σ is well-conditioned). The
+        # adjoint vector ``λ`` lives in the *primal* coordinate system
+        # and is unique modulo ``null(Aᵀ) = span(U_null)``; well-defined
+        # components live in ``span(U_well)``. So we project the RHS
+        # through V_well and the adjoint through U_well — these are
+        # *different* subspaces in general (they coincide only for
+        # symmetric A, which the synthetic fixture happens to satisfy
+        # but the helper must not assume).
+        U_full, sigma_full, Vt_full = np.linalg.svd(A_np)
+        sigma_max = float(sigma_full[0])
+        well_mask = sigma_full > sigma_max * 1e-8
+        U_well = U_full[:, well_mask]
+        V_well = Vt_full[well_mask, :].T
+        rhs_full = np.linspace(-0.4, 0.6, n)
+        rhs_np = V_well @ (V_well.T @ rhs_full)
+        rhs = jnp.asarray(rhs_np, dtype=jnp.float64)
+
+        P_lu, L_lu, U_lu = scipy.linalg.lu(A_np)
+
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "exact_jacobian",
+            "PLU": tuple(
+                jnp.asarray(piece, dtype=jnp.float64) for piece in (P_lu, L_lu, U_lu)
+            ),
+            "dense_linear_solve_factors_available": True,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+    def matrix_residual(_self, _mask):
+        return lambda x: A @ x
+
+    monkeypatch.setattr(
+        _bsj.BoozerSurfaceJAX,
+        "_compute_stellsym_mask_indices",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        _bsj.BoozerSurfaceJAX,
+        "_make_exact_residual",
+        matrix_residual,
+    )
+
+    return {
+        "A": A,
+        "A_np": A_np,
+        "P_lu": P_lu,
+        "L_lu": L_lu,
+        "U_lu": U_lu,
+        "U_full": U_full,
+        "U_well": U_well,
+        "V_well": V_well,
+        "sigma_full": sigma_full,
+        "sigma_max": sigma_max,
+        "well_mask": well_mask,
+        "booz": booz,
+        "device": device,
+        "metadata": metadata,
+        "rhs": rhs,
+        "rhs_np": rhs_np,
+    }
+
+
+def _solve_exact_ill_conditioned_operator_case(
+    monkeypatch,
+    *,
+    device,
+    cond_target=1e10,
+):
+    case = _build_exact_ill_conditioned_operator_fixture(
+        monkeypatch,
+        device=device,
+        cond_target=cond_target,
+    )
+    with jax.default_device(device):
+        adjoint_state = case["booz"].get_adjoint_runtime_state()
+        operator_adj, success = adjoint_state.solve_transpose_with_status(case["rhs"])
+        operator_adj_np = np.asarray(jax.device_get(operator_adj), dtype=np.float64)
+        applied_np = np.asarray(
+            jax.device_get(adjoint_state.apply_transpose(operator_adj)),
+            dtype=np.float64,
+        )
+
+    plu_adj_np = forward_backward(
+        case["P_lu"],
+        case["L_lu"],
+        case["U_lu"],
+        case["rhs_np"],
+    )
+    residual_rel = np.linalg.norm(case["A_np"].T @ operator_adj_np - case["rhs_np"]) / (
+        1.0 + np.linalg.norm(case["rhs_np"])
+    )
+    apply_residual_rel = np.linalg.norm(applied_np - case["rhs_np"]) / (
+        1.0 + np.linalg.norm(case["rhs_np"])
+    )
+    return {
+        **case,
+        "adjoint_state": adjoint_state,
+        "operator_adj_np": operator_adj_np,
+        "plu_adj_np": plu_adj_np,
+        "residual_rel": residual_rel,
+        "apply_residual_rel": apply_residual_rel,
+        "success": bool(np.asarray(success)),
+    }
+
+
+def _assert_exact_ill_conditioned_operator_action_parity(case, exact_lane):
+    """Action-level (range-space) parity in the well-conditioned subspace.
+
+    Vector parity ``‖λ_a − λ_b‖`` is unstable when σ_min(A) ≈ 0 because
+    multiple adjoints satisfy ``A^T λ ≈ rhs`` to the residual budget.
+    Project both adjoints onto ``U_well`` (the columns of ``U`` whose
+    singular values exceed ``σ_max * 1e-8``) and assert agreement
+    *there* at one order looser than the well-conditioned lane —
+    ``adjoint_rtol = 1e-6`` per plan §W3.2 — plus a directional check on
+    a fixed deterministic basis.
+    """
+    # The exact-lane residual gate must hold regardless of conditioning.
+    assert case["residual_rel"] <= exact_lane["residual_rel_tol"], (
+        f"Adjoint residual {case['residual_rel']:.3e} exceeds "
+        f"{exact_lane['residual_rel_tol']:.0e}"
+    )
+    assert case["apply_residual_rel"] <= exact_lane["residual_rel_tol"]
+
+    # Action-level (well-conditioned-subspace) parity threshold from the
+    # parity-ladder lane SSOT.
+    action_rtol = float(exact_lane["action_level_rtol"])
+    P = case["U_well"] @ case["U_well"].T
+    operator_proj = P @ case["operator_adj_np"]
+    plu_proj = P @ case["plu_adj_np"]
+    proj_norm = np.linalg.norm(operator_proj)
+    proj_diff = np.linalg.norm(operator_proj - plu_proj)
+    assert proj_diff <= action_rtol * (1.0 + proj_norm), (
+        f"Range-space adjoint parity violated: ‖P(λ_op − λ_plu)‖={proj_diff:.3e}, "
+        f"‖P λ_op‖={proj_norm:.3e}, rtol={action_rtol:.0e}"
+    )
+
+    # Directional check on a deterministic basis. ``v_k @ U_well @ U_well.T @ λ``
+    # measures the well-conditioned-subspace component of λ along v_k; both
+    # solvers must agree there even when raw ``v_k @ λ`` would diverge.
+    rng = np.random.default_rng(seed=20260515)
+    n = case["operator_adj_np"].shape[0]
+    directions = rng.standard_normal((5, n))
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    op_dirs = directions @ operator_proj
+    plu_dirs = directions @ plu_proj
+    np.testing.assert_allclose(
+        op_dirs,
+        plu_dirs,
+        rtol=action_rtol,
+        atol=action_rtol * float(np.max(np.abs(operator_proj))),
+        err_msg=(
+            "Directional projection of operator vs PLU adjoint disagrees: "
+            f"op={op_dirs}, plu={plu_dirs}"
+        ),
+    )
+
+
 def _disk_flux_through_circle_z0(*, radius, nr, ntheta, gammas, gammadashs, currents):
     rs = (np.arange(nr) + 0.5) * (radius / nr)
     thetas = (np.arange(ntheta) + 0.5) * (2.0 * np.pi / ntheta)
@@ -5150,6 +5364,34 @@ class TestBoozerSurfaceJAXClass:
             atol=exact_lane["gradient_atol"],
         )
 
+    def test_exact_ill_conditioned_operator_adjoint_action_level_parity(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """W3.2 (C3): action-level (range-space) adjoint parity on the
+        ill-conditioned exact-Jacobian lane.
+
+        The ``exact_ill_conditioned_adjoint`` lane intentionally disables
+        raw-vector parity (``vector_parity_required=False``) because
+        near-singular Jacobians admit infinitely many adjoint vectors
+        that all satisfy the residual gate. This test fills the
+        remaining coverage gap by asserting that the operator-backed
+        adjoint and the dense PLU adjoint agree on the well-conditioned
+        subspace ``U_well`` (singular values above ``σ_max * 1e-8``)
+        even when raw-vector ``‖λ_op − λ_plu‖`` is dominated by the
+        near-null direction. See plan §W3.2 (C3).
+        """
+        exact_lane = parity_ladder_tolerances("exact-ill-conditioned-adjoint")
+        enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
+        case = _solve_exact_ill_conditioned_operator_case(
+            monkeypatch,
+            device=parity_device("cpu"),
+            cond_target=1e10,
+        )
+        assert case["success"] is True or exact_lane["operator_failure_allowed"]
+        _assert_exact_ill_conditioned_operator_action_parity(case, exact_lane)
+
     def test_exact_adjoint_dense_metadata_does_not_change_operator_runtime(
         self,
         monkeypatch,
@@ -8634,3 +8876,344 @@ class TestBuildBoozerSurfaceRuntimeState:
         np.testing.assert_allclose(recorded["adjoint"], np.asarray([5.0, -1.0]))
         np.testing.assert_allclose(recorded["iota"], 0.23)
         np.testing.assert_allclose(recorded["G"], 1.7)
+
+
+# ---------------------------------------------------------------------------
+# W3.1 (C2): coil-VJP CPU oracle parity (BoozerSurface LS deepdive plan)
+# ---------------------------------------------------------------------------
+
+
+def _coil_dof_cotangent_l2_per_coil(deriv, coils):
+    """Reduce a CPU ``Derivative`` to one ``ℓ₂(coil DOFs)`` value per coil.
+
+    Reads per-Optimizable raw cotangent blocks directly from
+    ``Derivative.data`` so that fully-fixed components (e.g. fixed
+    ``Current``) contribute their stored cotangent rather than being
+    discarded by the ``free_x`` filter. Each unique Optimizable
+    contributes its squared cotangent norm at most once; this is
+    important for symmetric fixtures (e.g. ``coils_via_symmetries``)
+    where multiple ``Coil`` objects share the same ``Current`` instance
+    and a naive per-coil sum would double-count the shared component.
+
+    The per-coil ``ℓ₂`` norm is independent of the curve's internal DOF
+    ordering and is a meaningful basis-free comparison surface for a
+    JAX cotangent that has been routed through the same ``Coil.vjp``
+    projector.
+    """
+    out = np.empty(len(coils), dtype=np.float64)
+    seen: set[int] = set()
+    for idx, coil in enumerate(coils):
+        squared_norm = 0.0
+        for component in (coil.curve, coil.current):
+            component_id = id(component)
+            if component_id in seen:
+                continue
+            seen.add(component_id)
+            block = deriv.data.get(component)
+            if block is None:
+                continue
+            block_np = np.asarray(block, dtype=np.float64)
+            squared_norm += float(np.sum(block_np * block_np))
+        out[idx] = float(np.sqrt(squared_norm))
+    return out
+
+
+def _project_jax_coil_cotangent_to_derivative(d_coil_arrays, coil_indices, coils):
+    """Project per-quadrature JAX cotangents onto coil DOFs via ``Coil.vjp``.
+
+    ``d_coil_arrays`` is the grouped ``[(d_g, d_gd, d_c), ...]`` pytree
+    returned by both ``boozer_residual_coil_vjp`` and
+    ``_boozer_ls_coil_vjp``; ``coil_indices`` maps each per-group slot back
+    to the original coil-list index. This rebuilds a CPU ``Derivative`` so
+    the JAX result lands in the same DOF basis as the CPU oracle and can be
+    compared element-wise.
+    """
+    accumulated = None
+    for group_idx, (d_g_group, d_gd_group, d_cur_group) in enumerate(d_coil_arrays):
+        group_coil_indices = coil_indices[group_idx]
+        d_g_group_np = np.asarray(d_g_group, dtype=np.float64)
+        d_gd_group_np = np.asarray(d_gd_group, dtype=np.float64)
+        d_cur_group_np = np.asarray(d_cur_group, dtype=np.float64)
+        for slot, coil_idx in enumerate(group_coil_indices):
+            coil = coils[int(coil_idx)]
+            contribution = coil.vjp(
+                d_g_group_np[slot],
+                d_gd_group_np[slot],
+                np.asarray([d_cur_group_np[slot]], dtype=np.float64),
+            )
+            accumulated = (
+                contribution if accumulated is None else accumulated + contribution
+            )
+    return accumulated
+
+
+@_skip_no_simsoptpp
+class TestBoozerCoilVJPCpuOracle:
+    """JAX coil VJPs match independent CPU-side oracles at derivative-heavy tols.
+
+    Issue W3.1 (C2) of the BoozerSurface LS deepdive plan
+    (``.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md``). There
+    are two distinct JAX coil-VJP entry points and each must be compared
+    to its own CPU oracle (the reviewer pass corrected an earlier mismatch):
+
+    - ``boozer_residual_coil_vjp`` differentiates the **Boozer residual**
+      w.r.t. coils at fixed surface; the CPU oracle is
+      ``boozer_surface_residual_dB`` followed by
+      ``BiotSavart.B_vjp``.
+    - ``_boozer_ls_coil_vjp`` differentiates the **LS penalty gradient**
+      w.r.t. coils (residual + label + z); the CPU oracle is
+      ``boozer_surface_dlsqgrad_dcoils_vjp``, which the JAX docstring
+      explicitly cites as its replacement.
+
+    Both tests evaluate at the same input state on a same-state fixture
+    (no re-solve) and assert per-coil ``ℓ₂(coil DOFs)`` parity at the
+    derivative-heavy lane (``rtol=1e-8, atol=1e-10``).
+    """
+
+    @staticmethod
+    def _build_matched_fixture(*, weight_inv_modB):
+        from simsopt.configs import get_data
+        from simsopt.field.biotsavart import BiotSavart
+        from simsopt.geo import Volume
+        from simsopt.geo.boozer_residual_jax import boozer_residual_coil_vjp
+        from simsopt.geo.boozersurface import BoozerSurface
+        from simsopt.geo.surfaceobjectives import (
+            boozer_surface_dlsqgrad_dcoils_vjp,
+            boozer_surface_residual_dB,
+        )
+
+        from .surface_test_helpers import get_surface
+
+        _, base_currents, ma, nfp, bs = get_data("ncsx")
+        surface = get_surface("SurfaceXYZTensorFourier", True, nfp=nfp)
+        surface.fit_to_curve(ma, 0.1)
+
+        biotsavart = BiotSavart(bs.coils)
+        biotsavart.set_points(surface.gamma().reshape((-1, 3)))
+
+        # Same-state fixture: pin iota / G at the upstream Boozer initial
+        # guess. We do not re-solve because both oracles only need
+        # *consistent* inputs to be comparable.
+        iota = -0.4
+        current_sum = nfp * sum(abs(c.get_value()) for c in base_currents)
+        G = 2.0 * np.pi * current_sum * (4 * np.pi * 1e-7) / (2 * np.pi)
+
+        # JAX side: extract raw arrays.
+        gamma_jax = jnp.asarray(surface.gamma(), dtype=jnp.float64)
+        xphi_jax = jnp.asarray(surface.gammadash1(), dtype=jnp.float64)
+        xtheta_jax = jnp.asarray(surface.gammadash2(), dtype=jnp.float64)
+        gammas_stack = jnp.asarray(
+            np.stack([c.curve.gamma() for c in bs.coils]), dtype=jnp.float64
+        )
+        gammadashs_stack = jnp.asarray(
+            np.stack([c.curve.gammadash() for c in bs.coils]), dtype=jnp.float64
+        )
+        currents_stack = jnp.asarray(
+            np.array([c.current.get_value() for c in bs.coils]), dtype=jnp.float64
+        )
+        coil_arrays = [(gammas_stack, gammadashs_stack, currents_stack)]
+        coil_indices = [list(range(len(bs.coils)))]
+
+        return {
+            "surface": surface,
+            "biotsavart": biotsavart,
+            "coils": bs.coils,
+            "iota": iota,
+            "G": G,
+            "weight_inv_modB": weight_inv_modB,
+            "gamma_jax": gamma_jax,
+            "xphi_jax": xphi_jax,
+            "xtheta_jax": xtheta_jax,
+            "coil_arrays": coil_arrays,
+            "coil_indices": coil_indices,
+            "BoozerSurface": BoozerSurface,
+            "Volume": Volume,
+            "boozer_surface_residual_dB": boozer_surface_residual_dB,
+            "boozer_surface_dlsqgrad_dcoils_vjp": boozer_surface_dlsqgrad_dcoils_vjp,
+            "boozer_residual_coil_vjp": boozer_residual_coil_vjp,
+        }
+
+    @pytest.mark.parametrize("weight_inv_modB", [False, True])
+    def test_residual_coil_vjp_matches_cpu_oracle(self, weight_inv_modB):
+        """Test A — ``boozer_residual_coil_vjp`` vs CPU residual + ``B_vjp``."""
+        fixture = self._build_matched_fixture(weight_inv_modB=weight_inv_modB)
+        nphi, ntheta = fixture["gamma_jax"].shape[:2]
+        rng = np.random.default_rng(seed=20260515 + int(weight_inv_modB))
+        adjoint = rng.standard_normal(nphi * ntheta * 3)
+        adjoint /= np.linalg.norm(adjoint)
+
+        # CPU oracle: residual + dr/dB followed by B_vjp.
+        _r_cpu, drtil_dB = fixture["boozer_surface_residual_dB"](
+            fixture["surface"],
+            fixture["iota"],
+            fixture["G"],
+            fixture["biotsavart"],
+            derivatives=0,
+            weight_inv_modB=weight_inv_modB,
+        )
+        # ``adjoint^T @ drtil_dB`` reduces over residual rows. Each
+        # quadrature point contributes 3 residual rows whose B-cotangents
+        # add into a single per-point 3-vector.
+        adjoint_per_point = adjoint.reshape(nphi * ntheta, 3)
+        drtil_dB_per_point = drtil_dB.reshape(nphi * ntheta, 3, 3)
+        cotangent_on_B = np.einsum(
+            "pr,prk->pk",
+            adjoint_per_point,
+            drtil_dB_per_point,
+        )
+        cpu_deriv = fixture["biotsavart"].B_vjp(cotangent_on_B)
+        cpu_per_coil = _coil_dof_cotangent_l2_per_coil(cpu_deriv, fixture["coils"])
+
+        # JAX side.
+        (d_coil_arrays,) = fixture["boozer_residual_coil_vjp"](
+            jnp.asarray(adjoint, dtype=jnp.float64),
+            gamma=fixture["gamma_jax"],
+            xphi=fixture["xphi_jax"],
+            xtheta=fixture["xtheta_jax"],
+            coil_arrays=fixture["coil_arrays"],
+            iota=fixture["iota"],
+            G=fixture["G"],
+            weight_inv_modB=weight_inv_modB,
+        )
+        jax_deriv = _project_jax_coil_cotangent_to_derivative(
+            d_coil_arrays,
+            fixture["coil_indices"],
+            fixture["coils"],
+        )
+        jax_per_coil = _coil_dof_cotangent_l2_per_coil(jax_deriv, fixture["coils"])
+
+        # Derivative-heavy lane tolerance from the parity ladder SSOT.
+        tols = parity_ladder_tolerances("derivative-heavy")
+        np.testing.assert_allclose(
+            jax_per_coil,
+            cpu_per_coil,
+            rtol=float(tols["first_derivative_rtol"]),
+            atol=float(tols["first_derivative_atol"]),
+            err_msg=(
+                f"Per-coil residual VJP norms disagree (weight_inv_modB="
+                f"{weight_inv_modB}). cpu={cpu_per_coil}, jax={jax_per_coil}"
+            ),
+        )
+
+    @pytest.mark.parametrize("weight_inv_modB", [True, False])
+    def test_ls_coil_vjp_matches_cpu_oracle(self, weight_inv_modB):
+        """Test B — ``_boozer_ls_coil_vjp`` vs ``boozer_surface_dlsqgrad_dcoils_vjp``.
+
+        Both oracles compute ``λᵀ d/d_coils [grad_x(½‖r‖²)]`` for the
+        Boozer-residual contribution to the LS penalty gradient. CPU's
+        ``boozer_surface_dlsqgrad_dcoils_vjp`` evaluates this analytically;
+        JAX's ``_boozer_ls_coil_vjp`` autodiffs the FULL LS penalty
+        ``½‖r‖² + ½ w_c (label − target)² + ½ w_c z_axis²``. For Volume
+        label + stellsym=True the label and z contributions to
+        ``d/d_coils`` vanish analytically (Volume depends only on surface
+        DOFs; ``z_axis = 0`` structurally under stellsym), so both
+        backends compute the same scalar.
+
+        Same-state setup: build the JAX side AT CPU's converged state by
+        cloning ``surf_cpu`` post-solve. We do NOT run a separate JAX
+        solve and then mutate ``surf_jax``: ``BoozerSurfaceJAX`` snapshots
+        ``surface.get_dofs()`` into ``self._surface_dofs`` at construction
+        and refreshes that cache only inside ``run_code()`` /
+        ``_set_surface_dofs()``. Mutating ``surf_jax.x`` post-solve leaves
+        the cache stale, so the VJP would silently evaluate at the
+        prior solver state. Constructing JAX at the synced state lets
+        ``BoozerSurfaceJAX.__init__`` populate the cache correctly.
+        """
+        from benchmarks.benchmark_problem import (
+            build_ls_parity_problem,
+            clone_tensor_surface,
+        )
+        from simsopt.field.biotsavart import BiotSavart
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+        from simsopt.geo import Volume
+        from simsopt.geo.boozersurface import BoozerSurface
+        from simsopt.geo.boozersurface_jax import (
+            BoozerSurfaceJAX,
+            _boozer_ls_coil_vjp,
+        )
+        from simsopt.geo.surfaceobjectives import boozer_surface_dlsqgrad_dcoils_vjp
+
+        problem = build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)
+        solver_options = {
+            "verbose": False,
+            "bfgs_maxiter": 1500,
+            "bfgs_tol": 1e-8,
+            "newton_maxiter": 40,
+            "newton_tol": 1e-9,
+            "weight_inv_modB": weight_inv_modB,
+        }
+
+        # CPU solve defines the reference converged state.
+        surf_cpu = clone_tensor_surface(problem.surface)
+        bs_cpu = BiotSavart(problem.coils)
+        vol_cpu = Volume(surf_cpu)
+        booz_cpu = BoozerSurface(
+            bs_cpu,
+            surf_cpu,
+            vol_cpu,
+            problem.vol_target,
+            constraint_weight=1.0,
+            options=dict(solver_options),
+        )
+        booz_cpu.run_code(problem.iota0, G=problem.G0)
+        assert booz_cpu.res.get("success", False), "CPU LS solve did not converge"
+
+        iota_at = float(booz_cpu.res["iota"])
+        G_at = float(booz_cpu.res["G"]) if booz_cpu.res.get("G") is not None else None
+        decision_size = booz_cpu.res["jacobian"].shape[0]
+
+        # Build JAX side at the converged state. ``clone_tensor_surface``
+        # copies ``surf_cpu`` (which is already at the converged state),
+        # so ``BoozerSurfaceJAX.__init__`` snapshots the converged DOFs
+        # into its internal cache. No JAX solve is needed and no manual
+        # cache refresh is required.
+        surf_jax = clone_tensor_surface(surf_cpu)
+        bs_jax = BiotSavartJAX(problem.coils)
+        vol_jax = Volume(surf_jax)
+        booz_jax = BoozerSurfaceJAX(
+            bs_jax,
+            surf_jax,
+            vol_jax,
+            problem.vol_target,
+            constraint_weight=1.0,
+            options={**solver_options, "optimizer_backend": "scipy"},
+        )
+
+        rng = np.random.default_rng(seed=20260515 + int(weight_inv_modB) + 100)
+        adjoint = rng.standard_normal(decision_size)
+        adjoint /= np.linalg.norm(adjoint)
+
+        cpu_deriv = boozer_surface_dlsqgrad_dcoils_vjp(
+            adjoint,
+            booz_cpu,
+            iota_at,
+            G_at,
+            weight_inv_modB=weight_inv_modB,
+        )
+        cpu_per_coil = _coil_dof_cotangent_l2_per_coil(cpu_deriv, problem.coils)
+
+        d_coil_arrays_jax, coil_indices_jax = _boozer_ls_coil_vjp(
+            jnp.asarray(adjoint, dtype=jnp.float64),
+            booz_jax,
+            iota_at,
+            G_at,
+            weight_inv_modB=weight_inv_modB,
+        )
+        jax_deriv = _project_jax_coil_cotangent_to_derivative(
+            d_coil_arrays_jax,
+            coil_indices_jax,
+            problem.coils,
+        )
+        jax_per_coil = _coil_dof_cotangent_l2_per_coil(jax_deriv, problem.coils)
+
+        tols = parity_ladder_tolerances("derivative-heavy")
+        np.testing.assert_allclose(
+            jax_per_coil,
+            cpu_per_coil,
+            rtol=float(tols["first_derivative_rtol"]),
+            atol=float(tols["first_derivative_atol"]),
+            err_msg=(
+                f"Per-coil LS VJP norms disagree (weight_inv_modB="
+                f"{weight_inv_modB}). cpu={cpu_per_coil}, jax={jax_per_coil}"
+            ),
+        )

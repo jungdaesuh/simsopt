@@ -1303,5 +1303,60 @@ class TestBiotSavartJaxChunkedSelfConsistency:
             )
 
 
+class TestGroupCoilDataOrdering:
+    """``group_coil_data`` must yield groups in a stable, dict-insertion-independent order.
+
+    Issue W1.4 (E3) of the BoozerSurface LS deepdive plan: the previous
+    implementation iterated ``by_nquad.values()`` which is insertion-order
+    in CPython 3.7+. The fix sorts on the quadrature-point count, removing
+    the implicit dependence on dict iteration semantics.
+    """
+
+    @staticmethod
+    def _build_uniform_coil(nquad: int, current: float, *, seed: int):
+        rng = np.random.default_rng(seed)
+        gamma = rng.standard_normal((nquad, 3))
+        gammadash = rng.standard_normal((nquad, 3))
+        return gamma, gammadash, current
+
+    def test_groups_returned_in_qpoint_then_input_index_order(self):
+        from simsopt.jax_core import group_coil_data
+
+        # Mixed-quadrature input: positions [0, 3] use 128-point quadrature,
+        # [1, 2] use 15-point. Insertion order would yield groups in the
+        # order [128-points, 15-points]; the sort fix must invert this so the
+        # 15-point group always comes first regardless of dict semantics.
+        coil_specs = [(128, 1.0), (15, 2.0), (15, 3.0), (128, 4.0)]
+        gammas, gammadashs, currents = [], [], []
+        for i, (nquad, current) in enumerate(coil_specs):
+            g, gd, c = self._build_uniform_coil(nquad, current, seed=i)
+            gammas.append(g)
+            gammadashs.append(gd)
+            currents.append(c)
+
+        groups = group_coil_data(gammas, gammadashs, currents)
+        assert len(groups) == 2
+
+        first_gammas, _, first_currents, first_indices = groups[0]
+        second_gammas, _, second_currents, second_indices = groups[1]
+
+        assert first_gammas.shape[1] == 15, (
+            "First group must contain the smaller (15-point) coils"
+        )
+        assert second_gammas.shape[1] == 128
+        assert tuple(first_indices) == (1, 2), (
+            "Within the 15-point group, indices must be in input-list order"
+        )
+        assert tuple(second_indices) == (0, 3), (
+            "Within the 128-point group, indices must be in input-list order"
+        )
+        np.testing.assert_array_equal(
+            np.asarray(first_currents), np.asarray([2.0, 3.0])
+        )
+        np.testing.assert_array_equal(
+            np.asarray(second_currents), np.asarray([1.0, 4.0])
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

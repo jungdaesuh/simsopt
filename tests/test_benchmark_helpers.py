@@ -3097,6 +3097,10 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
         "exact_solve_quality",
         "pm_mwpgp_fixed_step",
         "event_time_tracing",
+        # Issue W2.2 of the BoozerSurface LS deepdive plan
+        # (``.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md``):
+        # cross-machine state-parity gate for the well-conditioned LS path.
+        "ls_state_parity",
     }
     assert set(PARITY_LADDER_TOLERANCES) == expected_lanes
 
