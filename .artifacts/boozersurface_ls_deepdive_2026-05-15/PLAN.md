@@ -7,7 +7,11 @@
 | Tree at first probe | `cab64a15` (initial empirical measurements) |
 | Tree at third review | `7822c5e0302cde8cbff8a7bd04b2143161051ae1` (current HEAD; reviewer's rerun) |
 | Driver context | Deepdive on JAX BoozerSurface LS path; three independent review passes |
-| Status | Ready for execution — Wave 1 items have no design debate |
+| Status | Waves 1-3 implemented in `10e92ef24` / `db23b9acf`; Wave 4 remains conditional |
+
+Note: the checkbox lists below are the original execution checklist retained
+for provenance. The issue-inventory status table is the current completion
+summary.
 
 ---
 
@@ -80,19 +84,19 @@ Confirms `cond(H+λI) ≈ σ_max/λ`. JAX cond drops linearly; CPU cond unchange
 
 | # | Severity | Issue | Status |
 |---|---|---|---|
-| B1 | HIGH | CPU `run_code` doesn't thread `newton_stab` into Newton polish | open, Wave 1 |
-| C1 | HIGH | `test_ls_solve_parity` (& production-scale) gate asserts only `iota`/`label`, not `sdofs`/`G` | open, Wave 2 |
-| D1 | LOW | CLAUDE.md references removed `hybrid` backend | open, Wave 1 |
-| D2 | LOW | CLAUDE.md cites stale line `boozersurface_jax.py:3097` (actual: 3185-3186) | open, Wave 1 |
-| D3 | MEDIUM | `candidate-fixed` env at `/Users/suhjungdae/code/hbt-compare/envs/...` is not runnable | open, Wave 1 |
-| E1 | MEDIUM | `SquaredFluxJAX` does not detect surface-DOF mutation post-construction | open, Wave 1 |
-| E3 | LOW | `group_coil_data` iteration order is Python-dict-insertion-order dependent | open, Wave 1 |
-| C2 | MEDIUM | Coil-VJP test uses JAX-vs-JAX scalarization, not CPU oracle | open, Wave 3 |
-| C3 | MEDIUM | Ill-conditioned exact-adjoint lane lacks action-level parity check | open, Wave 3 |
+| B1 | HIGH | CPU `run_code` doesn't thread `newton_stab` into Newton polish | implemented, Wave 1 |
+| C1 | HIGH | `test_ls_solve_parity` (& production-scale) gate asserts only `iota`/`label`, not `sdofs`/`G` | implemented, Wave 2 |
+| D1 | LOW | CLAUDE.md references removed `hybrid` backend | implemented, Wave 1 |
+| D2 | LOW | CLAUDE.md cites stale line `boozersurface_jax.py:3097` (actual: 3185-3186) | implemented, Wave 1 |
+| D3 | MEDIUM | `candidate-fixed` env at `/Users/suhjungdae/code/hbt-compare/envs/...` is not runnable | implemented, Wave 1 |
+| E1 | MEDIUM | `SquaredFluxJAX` does not detect surface-DOF mutation post-construction | implemented, Wave 1 |
+| E3 | LOW | `group_coil_data` iteration order is Python-dict-insertion-order dependent | implemented, Wave 1 |
+| C2 | MEDIUM | Coil-VJP test uses JAX-vs-JAX scalarization, not CPU oracle | implemented, Wave 3 |
+| C3 | MEDIUM | Ill-conditioned exact-adjoint lane lacks action-level parity check | implemented, Wave 3 |
 | B2 | INFO | scipy uses `dense-plu` host path, ondevice uses `dense-plu-shared` device path | document only |
-| B3 | INFO | `optimizer_backend="ondevice"` + `least_squares_algorithm="lm"` is a different LM family than MINPACK | document only |
-| E2 | LOW | `_safe_radius_squared` clamp at 1e-60 vs C++ NaN/Inf on degenerate inputs | open, Wave 4 |
-| E4 | LOW | Traceable-bundle cache keys on `id(...)` (object-local, low practical risk) | open, Wave 4 |
+| B3 | INFO | `optimizer_backend="ondevice"` + `least_squares_algorithm="lm"` is a different LM family than MINPACK | implemented, Wave 4 (docs) |
+| E2 | LOW | `_safe_radius_squared` clamp at 1e-60 vs C++ NaN/Inf on degenerate inputs | implemented, Wave 4 (docs) |
+| E4 | LOW | Traceable-bundle cache keys on `id(...)` (object-local, low practical risk) | implemented, Wave 4 |
 | ~~A1~~ | ~~CRITICAL~~ | ~~γ_y(0,0) gauge pin to remove θ-rotation null direction~~ | **WITHDRAWN** (no-op under stellsym; oversampled fixture obviates) |
 
 ---
@@ -135,7 +139,7 @@ Estimated effort: **1–2 PRs, ~150 lines total including tests.** No design deb
   - `benchmarks/_cpp_compatible_probe.py:238` (inline comment)
 - [ ] Delete or rewrite the M2 integration-tests section that references `/Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python`. Either:
   - Rebuild the env from `envs/jax.yml` and update the path, OR
-  - Drop the section and consolidate on `.conda/jax-0.9.2/bin/python` (in-tree, currently functional)
+  - Drop the section and consolidate on `.conda/jax/bin/python` (in-tree, currently functional)
 - [ ] Add a new "Floating-point reproducibility across machines" paragraph documenting the **measured cross-machine variance** on the oversampled fixture (range `1.9e-14` ↔ `3.6e-12` on `sdofs_inf` across two hardware platforms running the same source tree) so future engineers don't expect bit-identical CPU↔CPU on hardware they didn't measure on
 - [ ] Verify no other line:number references across the repo are stale: `grep -rEn 'boozersurface(_jax)?\.py:[0-9]+|surfaceobjectives(_jax)?\.py:[0-9]+|optimizer_jax\.py:[0-9]+' CLAUDE.md docs/ benchmarks/` and spot-check each match resolves to the asserted symbol on current HEAD
 
@@ -236,7 +240,7 @@ The docstrings make the pairing explicit: `_boozer_ls_coil_vjp` says "Replaces C
 **Todos:**
 - [ ] **Test A — residual VJP**: in `tests/geo/test_boozer_derivatives_jax.py`, add `test_residual_coil_vjp_matches_cpu_oracle` calling `boozer_residual_coil_vjp` (JAX) and the CPU chain (residual ∂B + Biot-Savart VJP). Compare per-coil cotangents at `rtol=1e-8, atol=1e-10`. Both `weight_inv_modB=True` and `False`. Use the existing same-state fixture (do NOT re-solve; both should evaluate at identical input state).
 - [ ] **Test B — LS VJP**: in `tests/geo/test_boozersurface_jax.py` (or a new derivative test file under `tests/geo/`), add `test_ls_coil_vjp_matches_cpu_oracle` calling `_boozer_ls_coil_vjp(lm, booz_surf_jax, iota, G, weight_inv_modB)` and CPU `boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf_cpu, iota, G, weight_inv_modB)` at a **converged** LS state (because LS gradient is meaningful at the converged point). Compare at `rtol=1e-8, atol=1e-10`. Both `weight_inv_modB` settings.
-- [ ] Verify both CPU oracles are importable in the public env (`.conda/jax-0.9.2/`): `boozer_surface_dlsqgrad_dcoils_vjp` is in `simsopt.geo.surfaceobjectives` (pure Python), `boozer_surface_residual_dB` is also pure Python. Should both be available.
+- [ ] Verify both CPU oracles are importable in the public env (`.conda/jax/`): `boozer_surface_dlsqgrad_dcoils_vjp` is in `simsopt.geo.surfaceobjectives` (pure Python), `boozer_surface_residual_dB` is also pure Python. Should both be available.
 - [ ] If either test fails at `1e-8`, investigate: a real bug or a true machine-precision-bound case for that derivative path. Report and adjust threshold per the parity ladder, do not loosen silently.
 - [ ] Cross-reference: confirm `_boozer_ls_coil_vjp` is what the M5 IFT adjoint path actually invokes (the production gradient consumer), so the parity test bites where it matters most.
 
@@ -344,7 +348,11 @@ After Wave 3 lands:
 - [ ] `test_coil_vjp_matches_cpu_oracle` passes at `rtol=1e-8, atol=1e-10` (C2)
 - [ ] Ill-conditioned exact-adjoint lane has action-level parity assertion (C3)
 
-Wave 4 items are not part of the core acceptance.
+Wave 4 items are not part of the core acceptance. Informational completion record:
+
+- [x] `_safe_radius_squared` clamp divergence documented in `docs/source/jax_acceptance.rst` "Domain-edge behavior" + source comment (E2)
+- [x] `_cache_token = uuid.uuid4()` replaces `id(...)` in `_traceable_runtime_cache_key`, on `BoozerSurfaceJAX` / `BiotSavartJAX` / `SpecBackedBiotSavartJAX` constructors, eliminating CPython id-recycling aliasing (E4)
+- [x] On-device LM vs MINPACK `lmder` algorithmic divergence documented in `src/simsopt/geo/optimizer_jax.py` module docstring + `docs/source/jax_acceptance.rst` "Optimizer family equivalence" (B3)
 
 ---
 

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import sys
 import types
+import uuid
 
 import jax
 import jax.numpy as jnp
@@ -1737,6 +1738,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
         return {}
 
     booz = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
         _solver_generation=7,
         options={},
         _collect_optimizer_options=collect_optimizer_options,
@@ -1768,7 +1770,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
 
     surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
-        object(),
+        types.SimpleNamespace(_cache_token=uuid.uuid4()),
         state,
         success_filter=None,
     )
@@ -1848,10 +1850,12 @@ def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_sta
 
 def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
     booz = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
         _solver_generation=7,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
+    bs_jax = types.SimpleNamespace(_cache_token=uuid.uuid4())
     state = {
         "objective_kwargs": {
             "iota_target": 0.23,
@@ -1874,13 +1878,13 @@ def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
 
     key_a = surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
-        object(),
+        bs_jax,
         state,
         success_filter=success_filter_a,
     )
     key_b = surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
-        object(),
+        bs_jax,
         state,
         success_filter=success_filter_b,
     )
@@ -1888,13 +1892,84 @@ def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
     assert key_a == key_b
 
 
-def test_traceable_runtime_cache_key_tracks_biotsavart_dof_generation():
-    booz = types.SimpleNamespace(
+def test_traceable_runtime_cache_key_uses_per_instance_uuid_token():
+    """Distinct adapter instances must produce distinct cache keys even when
+    every other contract input is identical.
+
+    CPython is permitted to recycle the address (and therefore ``id()``) of a
+    just-garbage-collected wrapper, so a freshly constructed
+    ``BoozerSurfaceJAX``/``BiotSavartJAX`` could have aliased the prior
+    cache entry under the old ``id()``-based key. The per-instance
+    ``_cache_token`` UUID closes that hazard. This test pins
+    ``_solver_generation`` and ``_coil_dofs_generation`` so the only
+    difference between the fixtures is the token itself.
+    """
+    booz_a = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
         _solver_generation=7,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs_jax = types.SimpleNamespace(_coil_dofs_generation=11)
+    booz_b = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
+        _solver_generation=7,
+        options={},
+        _collect_optimizer_options=lambda *, method: {},
+    )
+    bs_jax_a = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
+        _coil_dofs_generation=11,
+    )
+    bs_jax_b = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
+        _coil_dofs_generation=11,
+    )
+    state = {
+        "objective_kwargs": {
+            "iota_target": 0.23,
+            "outer_objective_config": None,
+        },
+        "optimize_G": False,
+        "predictor_kind": "ls",
+        "objective_method": "bfgs-ondevice",
+    }
+
+    key_aa = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz_a,
+        bs_jax_a,
+        state,
+        success_filter=None,
+    )
+    key_ba = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz_b,
+        bs_jax_a,
+        state,
+        success_filter=None,
+    )
+    key_ab = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz_a,
+        bs_jax_b,
+        state,
+        success_filter=None,
+    )
+
+    assert key_aa != key_ba
+    assert key_aa != key_ab
+    assert booz_a._cache_token != booz_b._cache_token
+    assert bs_jax_a._cache_token != bs_jax_b._cache_token
+
+
+def test_traceable_runtime_cache_key_tracks_biotsavart_dof_generation():
+    booz = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
+        _solver_generation=7,
+        options={},
+        _collect_optimizer_options=lambda *, method: {},
+    )
+    bs_jax = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
+        _coil_dofs_generation=11,
+    )
     state = {
         "objective_kwargs": {
             "iota_target": 0.23,
@@ -1923,8 +1998,16 @@ def test_traceable_runtime_cache_key_tracks_biotsavart_dof_generation():
 
 
 def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
+    # Pin the per-instance UUID tokens so that the swap-one-input assertions
+    # below exercise the named field (solver_generation, bfgs_maxiter, …)
+    # rather than incidentally producing a key change because a fresh
+    # SimpleNamespace got a new _cache_token.
+    booz_token = uuid.uuid4()
+    bs_token = uuid.uuid4()
+
     def make_booz(*, solver_generation=7, bfgs_maxiter=5):
         return types.SimpleNamespace(
+            _cache_token=booz_token,
             _solver_generation=solver_generation,
             options={"bfgs_maxiter": bfgs_maxiter},
             _collect_optimizer_options=lambda *, method: {"maxls": 20},
@@ -1951,7 +2034,10 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
     success_filter_b._traceable_runtime_cache_signature = ("filter", "b")
 
     booz = make_booz()
-    bs_jax = types.SimpleNamespace(_coil_dofs_generation=11)
+    bs_jax = types.SimpleNamespace(
+        _cache_token=bs_token,
+        _coil_dofs_generation=11,
+    )
     state = make_state()
     base_key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
@@ -1990,7 +2076,10 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
     assert (
         surfaceobjectives_jax_module._traceable_runtime_cache_key(
             booz,
-            types.SimpleNamespace(_coil_dofs_generation=12),
+            types.SimpleNamespace(
+                _cache_token=bs_token,
+                _coil_dofs_generation=12,
+            ),
             state,
             success_filter=success_filter_a,
         )
@@ -2020,6 +2109,7 @@ def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
     monkeypatch.setattr(surfaceobjectives_jax_module.np, "asarray", guarded_asarray)
 
     booz = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
         _solver_generation=7,
         options={},
         _collect_optimizer_options=lambda *, method: {},
@@ -2039,7 +2129,7 @@ def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
 
     key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
-        object(),
+        types.SimpleNamespace(_cache_token=uuid.uuid4()),
         state,
         success_filter=None,
     )
@@ -2944,12 +3034,13 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_genera
     build_bundle_calls = []
 
     booz = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
         _solver_generation=11,
         _traceable_runtime_entry_cache=None,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs = object()
+    bs = types.SimpleNamespace(_cache_token=uuid.uuid4())
 
     def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         build_state_calls.append((iota_target, outer_objective_config))
@@ -3054,12 +3145,13 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
     build_bundle_calls = []
 
     booz = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
         _solver_generation=11,
         _traceable_runtime_entry_cache=None,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs = object()
+    bs = types.SimpleNamespace(_cache_token=uuid.uuid4())
 
     def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         del outer_objective_config
@@ -3168,12 +3260,13 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_cha
     build_bundle_calls = []
 
     booz = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
         _solver_generation=3,
         _traceable_runtime_entry_cache=None,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs = object()
+    bs = types.SimpleNamespace(_cache_token=uuid.uuid4())
 
     def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         del outer_objective_config
@@ -3267,12 +3360,13 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
     build_bundle_calls = []
 
     booz = types.SimpleNamespace(
+        _cache_token=uuid.uuid4(),
         _solver_generation=5,
         _traceable_runtime_entry_cache=None,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs = object()
+    bs = types.SimpleNamespace(_cache_token=uuid.uuid4())
 
     def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         del outer_objective_config
@@ -6186,15 +6280,13 @@ class TestQfmPenaltyJAX:
 
         @jax.jit
         def compiled(surface_dofs):
-            return (
-                surfaceobjectives_jax_module.surface_qfm_penalty_value_and_grad_jax_from_dofs(
-                    surface_spec,
-                    surface_dofs,
-                    coil_set_spec,
-                    label="area",
-                    targetlabel=targetlabel,
-                    constraint_weight=2.0,
-                )
+            return surfaceobjectives_jax_module.surface_qfm_penalty_value_and_grad_jax_from_dofs(
+                surface_spec,
+                surface_dofs,
+                coil_set_spec,
+                label="area",
+                targetlabel=targetlabel,
+                constraint_weight=2.0,
             )
 
         with jax.transfer_guard("disallow"):

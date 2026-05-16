@@ -129,6 +129,63 @@ When To Use Which Backend
 | Benchmarking         |     | Yes | Separate compile-time from steady-state |
 +---------------------+-----+-----+-----------------------------------------+
 
+Domain-edge behavior
+--------------------
+
+The JAX Biot-Savart kernel and the C++ Biot-Savart kernel diverge on
+inputs that land at the singular core ``r = ‖x − γ(s)‖ = 0`` (an
+evaluation point coincident with a coil quadrature point):
+
+- C++ ``simsoptpp`` returns ``NaN``/``Inf`` from the ``1/r^3`` and
+  ``1/r^5`` factors, surfacing the divergence to the caller.
+- JAX (``simsopt.jax_core.biotsavart._safe_radius_squared``) clamps
+  ``r²`` at ``1e-60`` so the ``1/r^{1.5}`` factor stays inside
+  float64 (using the float64 subnormal minimum ``~5e-324`` would
+  yield ``1/(5e-324)^{1.5} ~ 9e484``, ~177 orders of magnitude above
+  float64 max ``~1.8e308``). The clamp produces a finite-but-huge
+  numeric value rather than ``NaN``/``Inf``.
+
+This divergence is **documented and intentional** for the current
+target lane: no production research workflow lands on
+point-on-coil geometry, the JAX kernel must keep autodiff finite for
+trace stability, and matching the C++ behavior would require a
+separate validation cycle. Callers that need C++-equivalent
+``NaN``/``Inf`` behavior on degenerate inputs should use the C++
+backend explicitly.
+
+Optimizer family equivalence
+----------------------------
+
+Two JAX least-squares methods are exposed by
+``simsopt.geo.optimizer_jax``:
+
+- ``method="lm"`` (``reference_least_squares``) is a host-driven
+  Levenberg-Marquardt loop with JAX value/grad and a matrix-free
+  GMRES inner solve.
+- ``method="lm-ondevice"`` (``target_least_squares``) is the
+  trace-safe JAX-on-device version of the same algorithm.
+
+Neither method is a port of MINPACK ``lmder``. Both use:
+
+- A matrix-free GMRES inner solve against the regularized
+  Gauss-Newton operator ``J^T J + λI`` (no pivoted-QR
+  factorization, no dense Jacobian materialization in the inner
+  step).
+- A single-criterion termination on ``‖∇‖_∞ ≤ tol`` (no
+  ``ftol``/``xtol``/``gtol`` triple).
+- An asymmetric trust-region damping update — shrink ``× 0.5`` on
+  ``ratio > 0.75``, expand ``× 4.0`` on ``ratio < 0.25``,
+  mild-shrink ``× 0.8`` otherwise.
+
+The ``lm-ondevice`` backend is **doubly opt-in**: it requires both
+``optimizer_backend="ondevice"`` and ``least_squares_algorithm="lm"``
+on ``BoozerSurfaceJAX``. ``"lm"`` (host-driven) and ``"lm-ondevice"``
+(trace-safe) are each other's byte-equality oracle for the JAX LM
+family; callers needing MINPACK ``lmder`` byte-equality must invoke
+``scipy.optimize.least_squares(method="lm")`` directly. The JAX LM
+family delivers tolerance equivalence on the target lane, not MINPACK
+byte-equality.
+
 Validation Checklist
 --------------------
 

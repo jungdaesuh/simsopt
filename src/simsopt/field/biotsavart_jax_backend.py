@@ -11,6 +11,7 @@ M0 rewrite contract (adapter pattern, §5).
 
 from dataclasses import dataclass
 import time
+import uuid
 
 import jax
 import jax.numpy as jnp
@@ -454,6 +455,10 @@ class SpecBackedBiotSavartJAX(Optimizable):
         self._points_version = 0
         self._dof_layout_version = 0
         self._uses_uniform_curve_xyz_fourier_fastpath = False
+        # Object-lifetime token used by the traceable runtime cache to
+        # distinguish independently-constructed adapters even when CPython
+        # recycles their id() after garbage collection.
+        self._cache_token = uuid.uuid4()
         Optimizable.__init__(self, x0=host_array(self._x, dtype=np.float64))
         self._coils = self._coils_from_dofs(self._x)
 
@@ -1013,6 +1018,10 @@ class BiotSavartJAX(Optimizable):
         self._coil_dofs_generation = 0
         self._free_dof_layout_ready = False
         self._local_free_positions_by_opt = {}
+        # Object-lifetime token used by the traceable runtime cache to
+        # distinguish independently-constructed adapters even when CPython
+        # recycles their id() after garbage collection.
+        self._cache_token = uuid.uuid4()
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=self._coils)
 
         # Uniform CurveXYZFourier fast-path metadata (populated by _introspect_coils)

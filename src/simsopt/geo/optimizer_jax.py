@@ -21,17 +21,19 @@ LM family note:
   MINPACK along three load-bearing axes:
 
   - **Inner solve.** MINPACK uses a pivoted-QR factorization of the
-    Jacobian; the JAX LM uses matrix-free GMRES against the Hessian
-    operator (no QR pivoting, no dense Jacobian factorization in the
-    inner step). See ``_lm_iteration`` and
-    ``_gmres_solve_least_squares_system``.
+    Jacobian; the JAX LM uses matrix-free GMRES against the
+    regularized Gauss-Newton operator ``J^T J + λI`` (no QR pivoting,
+    no dense Jacobian factorization in the inner step). See
+    ``_lm_iteration`` and ``_gmres_solve_least_squares_system``.
   - **Termination.** MINPACK terminates on the conjunction of three
     criteria (``ftol``, ``xtol``, ``gtol``); the JAX LM terminates on a
     single criterion ``‖∇‖_∞ ≤ tol`` (see ``levenberg_marquardt`` and
     ``levenberg_marquardt_traceable``).
   - **Damping update.** MINPACK uses Marquardt's classic
-    expand/contract scaling; the JAX LM applies a symmetric trust-region
-    update with mild-shrink on intermediate ratios (see
+    expand/contract scaling; the JAX LM applies an asymmetric
+    trust-region update — shrink ``× 0.5`` on ``ratio > 0.75``,
+    expand ``× 4.0`` on ``ratio < 0.25``, mild-shrink ``× 0.8``
+    otherwise, with rejected steps expanding ``× 4.0`` (see
     ``_lm_iteration`` and ``_lm_defaults``).
 
   Consequence: the JAX LM lanes are **tolerance-equivalent** to MINPACK

@@ -1351,5 +1351,74 @@ class TestGroupCoilDataOrdering:
         )
 
 
+class TestBiotSavartJAXCacheToken:
+    """``BiotSavartJAX`` and ``SpecBackedBiotSavartJAX`` must produce a unique
+    UUID ``_cache_token`` per instance.
+
+    The traceable runtime cache key (``surfaceobjectives_jax``) relies on this
+    token to discriminate independently-constructed adapters even when CPython
+    recycles the ``id()`` of a just-garbage-collected predecessor (W4.2 / E4).
+    """
+
+    @staticmethod
+    def _make_two_basic_coils():
+        from simsopt.field.coil import Coil, Current
+        from simsopt.geo.curvexyzfourier import CurveXYZFourier
+
+        coils = []
+        for current_amp in (1.0e6, -1.0e6):
+            curve = CurveXYZFourier(quadpoints=16, order=1)
+            curve.x = np.array(
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+                dtype=np.float64,
+            )
+            coils.append(Coil(curve, Current(current_amp)))
+        return coils
+
+    def test_biotsavart_jax_assigns_unique_cache_token(self):
+        import uuid
+
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        coils = self._make_two_basic_coils()
+        bs_a = BiotSavartJAX(list(coils))
+        bs_b = BiotSavartJAX(list(coils))
+        assert isinstance(bs_a._cache_token, uuid.UUID)
+        assert isinstance(bs_b._cache_token, uuid.UUID)
+        assert bs_a._cache_token != bs_b._cache_token
+
+    def test_spec_backed_biotsavart_jax_assigns_unique_cache_token(self):
+        import uuid
+
+        from simsopt.field.biotsavart_jax_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+        )
+        from simsopt.jax_core.specs import make_biot_savart_spec
+
+        coils = self._make_two_basic_coils()
+        bs_jax = BiotSavartJAX(list(coils))
+        spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+
+        spec_backed_a = SpecBackedBiotSavartJAX(spec)
+        spec_backed_b = SpecBackedBiotSavartJAX(spec)
+        assert isinstance(spec_backed_a._cache_token, uuid.UUID)
+        assert isinstance(spec_backed_b._cache_token, uuid.UUID)
+        assert spec_backed_a._cache_token != spec_backed_b._cache_token
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

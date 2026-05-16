@@ -4125,15 +4125,20 @@ def _traceable_runtime_cache_key(booz_jax, bs_jax, state, *, success_filter=None
     lookup. This keeps repeated warm-start runtime-bundle construction from
     spending minutes in CPU-side array hashing before the target lane even
     starts compiling or running.
+
+    Object identity uses a per-instance UUID (``_cache_token``) populated at
+    construction time on ``BoozerSurfaceJAX`` / ``BiotSavartJAX`` /
+    ``SpecBackedBiotSavartJAX``. UUIDs avoid the CPython ``id()`` recycling
+    hazard where a freshly garbage-collected wrapper could allow a new
+    instance to alias the prior cache entry when memory addresses are reused.
+    Solved-state freshness is still tracked via the Boozer solve generation
+    and the Biot-Savart DOF generation; callers must rebuild the wrapper
+    instead of mutating ``booz_jax``/``bs_jax`` in place.
     """
     objective_kwargs = state["objective_kwargs"]
     return (
-        # Object identity is part of the contract: callers must rebuild the
-        # wrapper instead of mutating booz_jax/bs_jax in place; solved-state
-        # freshness is represented by the Boozer solve generation and the
-        # Biot-Savart DOF generation.
-        id(booz_jax),
-        id(bs_jax),
+        booz_jax._cache_token,
+        bs_jax._cache_token,
         getattr(booz_jax, "_solver_generation", None),
         getattr(bs_jax, "_coil_dofs_generation", None),
         state["optimize_G"],
