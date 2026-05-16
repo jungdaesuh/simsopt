@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import sys
 import types
-import uuid
 
 import jax
 import jax.numpy as jnp
@@ -1716,6 +1715,21 @@ def test_traceable_profile_suite_inner_solve_surfaces_exact_failure_state(
     np.testing.assert_allclose(np.asarray(solve_result["fun"]), np.asarray(1.0))
 
 
+def _traceable_cache_key_state(
+    state,
+    *,
+    solve_state_token=7,
+    coil_dof_state_token=11,
+    coil_layout_signature=("coil-layout", "default"),
+):
+    return {
+        **state,
+        "solve_state_token": solve_state_token,
+        "coil_dof_state_token": coil_dof_state_token,
+        "coil_layout_signature": coil_layout_signature,
+    }
+
+
 def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypatch):
     seen_trees = []
     optimizer_option_methods = []
@@ -1738,39 +1752,38 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
         return {}
 
     booz = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=7,
         options={},
         _collect_optimizer_options=collect_optimizer_options,
     )
-    state = {
-        "objective_kwargs": {
-            "iota_target": 0.23,
-            "outer_objective_config": {
-                "curve_curve_weight": 1.0,
-                "vessel_gamma": jnp.ones((8, 3), dtype=jnp.float64),
+    state = _traceable_cache_key_state(
+        {
+            "objective_kwargs": {
+                "iota_target": 0.23,
+                "outer_objective_config": {
+                    "curve_curve_weight": 1.0,
+                    "vessel_gamma": jnp.ones((8, 3), dtype=jnp.float64),
+                },
             },
-        },
-        "optimize_G": False,
-        "predictor_kind": "ls",
-        "objective_method": "bfgs-ondevice",
-        "coil_dof_extraction_spec": {"unused": True},
-        "baseline_x": jnp.arange(5, dtype=jnp.float64),
-        "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-        "baseline_linear_solve_factors": (
-            jnp.eye(3, dtype=jnp.float64),
-            jnp.eye(3, dtype=jnp.float64),
-            jnp.arange(3, dtype=jnp.int32),
-        ),
-        "baseline_coil_dofs": jnp.arange(4, dtype=jnp.float64),
-        "linearization_kind": "hessian",
-        "linear_solve_tol": 1.0e-10,
-        "linear_solve_stab": 0.0,
-    }
+            "optimize_G": False,
+            "predictor_kind": "ls",
+            "objective_method": "bfgs-ondevice",
+            "coil_dof_extraction_spec": {"unused": True},
+            "baseline_x": jnp.arange(5, dtype=jnp.float64),
+            "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+            "baseline_linear_solve_factors": (
+                jnp.eye(3, dtype=jnp.float64),
+                jnp.eye(3, dtype=jnp.float64),
+                jnp.arange(3, dtype=jnp.int32),
+            ),
+            "baseline_coil_dofs": jnp.arange(4, dtype=jnp.float64),
+            "linearization_kind": "hessian",
+            "linear_solve_tol": 1.0e-10,
+            "linear_solve_stab": 0.0,
+        }
+    )
 
     surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
-        types.SimpleNamespace(_cache_token=uuid.uuid4()),
         state,
         success_filter=None,
     )
@@ -1850,21 +1863,20 @@ def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_sta
 
 def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
     booz = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=7,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs_jax = types.SimpleNamespace(_cache_token=uuid.uuid4())
-    state = {
-        "objective_kwargs": {
-            "iota_target": 0.23,
-            "outer_objective_config": None,
-        },
-        "optimize_G": False,
-        "predictor_kind": "ls",
-        "objective_method": "bfgs-ondevice",
-    }
+    state = _traceable_cache_key_state(
+        {
+            "objective_kwargs": {
+                "iota_target": 0.23,
+                "outer_objective_config": None,
+            },
+            "optimize_G": False,
+            "predictor_kind": "ls",
+            "objective_method": "bfgs-ondevice",
+        }
+    )
 
     def success_filter_a(_coil_dofs, _solved_x):
         return jnp.asarray(True, dtype=bool)
@@ -1878,13 +1890,11 @@ def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
 
     key_a = surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
-        bs_jax,
         state,
         success_filter=success_filter_a,
     )
     key_b = surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
-        bs_jax,
         state,
         success_filter=success_filter_b,
     )
@@ -1892,137 +1902,137 @@ def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
     assert key_a == key_b
 
 
-def test_traceable_runtime_cache_key_uses_per_instance_uuid_token():
-    """Distinct adapter instances must produce distinct cache keys even when
-    every other contract input is identical.
-
-    CPython is permitted to recycle the address (and therefore ``id()``) of a
-    just-garbage-collected wrapper, so a freshly constructed
-    ``BoozerSurfaceJAX``/``BiotSavartJAX`` could have aliased the prior
-    cache entry under the old ``id()``-based key. The per-instance
-    ``_cache_token`` UUID closes that hazard. This test pins
-    ``_solver_generation`` and ``_coil_dofs_generation`` so the only
-    difference between the fixtures is the token itself.
-    """
-    booz_a = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=7,
-        options={},
-        _collect_optimizer_options=lambda *, method: {},
-    )
-    booz_b = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=7,
-        options={},
-        _collect_optimizer_options=lambda *, method: {},
-    )
-    bs_jax_a = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _coil_dofs_generation=11,
-    )
-    bs_jax_b = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _coil_dofs_generation=11,
-    )
-    state = {
-        "objective_kwargs": {
-            "iota_target": 0.23,
-            "outer_objective_config": None,
-        },
-        "optimize_G": False,
-        "predictor_kind": "ls",
-        "objective_method": "bfgs-ondevice",
-    }
-
-    key_aa = surfaceobjectives_jax_module._traceable_runtime_cache_key(
-        booz_a,
-        bs_jax_a,
-        state,
-        success_filter=None,
-    )
-    key_ba = surfaceobjectives_jax_module._traceable_runtime_cache_key(
-        booz_b,
-        bs_jax_a,
-        state,
-        success_filter=None,
-    )
-    key_ab = surfaceobjectives_jax_module._traceable_runtime_cache_key(
-        booz_a,
-        bs_jax_b,
-        state,
-        success_filter=None,
-    )
-
-    assert key_aa != key_ba
-    assert key_aa != key_ab
-    assert booz_a._cache_token != booz_b._cache_token
-    assert bs_jax_a._cache_token != bs_jax_b._cache_token
-
-
-def test_traceable_runtime_cache_key_tracks_biotsavart_dof_generation():
+def test_traceable_runtime_cache_key_uses_live_callable_success_filter_signature():
     booz = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=7,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs_jax = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _coil_dofs_generation=11,
-    )
-    state = {
-        "objective_kwargs": {
-            "iota_target": 0.23,
-            "outer_objective_config": None,
-        },
-        "optimize_G": False,
-        "predictor_kind": "ls",
-        "objective_method": "bfgs-ondevice",
-    }
-
-    key_before = surfaceobjectives_jax_module._traceable_runtime_cache_key(
-        booz,
-        bs_jax,
-        state,
-        success_filter=None,
-    )
-    bs_jax._coil_dofs_generation = 12
-    key_after = surfaceobjectives_jax_module._traceable_runtime_cache_key(
-        booz,
-        bs_jax,
-        state,
-        success_filter=None,
-    )
-
-    assert key_before != key_after
-
-
-def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
-    # Pin the per-instance UUID tokens so that the swap-one-input assertions
-    # below exercise the named field (solver_generation, bfgs_maxiter, …)
-    # rather than incidentally producing a key change because a fresh
-    # SimpleNamespace got a new _cache_token.
-    booz_token = uuid.uuid4()
-    bs_token = uuid.uuid4()
-
-    def make_booz(*, solver_generation=7, bfgs_maxiter=5):
-        return types.SimpleNamespace(
-            _cache_token=booz_token,
-            _solver_generation=solver_generation,
-            options={"bfgs_maxiter": bfgs_maxiter},
-            _collect_optimizer_options=lambda *, method: {"maxls": 20},
-        )
-
-    def make_state(*, iota_target=0.23):
-        return {
+    state = _traceable_cache_key_state(
+        {
             "objective_kwargs": {
-                "iota_target": iota_target,
+                "iota_target": 0.23,
                 "outer_objective_config": None,
             },
             "optimize_G": False,
             "predictor_kind": "ls",
             "objective_method": "bfgs-ondevice",
         }
+    )
+
+    def success_filter(_coil_dofs, _solved_x):
+        return jnp.asarray(True, dtype=bool)
+
+    key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        state,
+        success_filter=success_filter,
+    )
+
+    kind, signature = key.success_filter_signature
+    assert kind == "callable"
+    assert signature.callback is success_filter
+
+    class CallableWithCustomEq:
+        def __call__(self, _coil_dofs, _solved_x):
+            return jnp.asarray(True, dtype=bool)
+
+        def __eq__(self, other):
+            raise AssertionError("callable equality must not be used")
+
+    callable_a = CallableWithCustomEq()
+    callable_b = CallableWithCustomEq()
+    key_a = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        state,
+        success_filter=callable_a,
+    )
+    key_b = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        state,
+        success_filter=callable_b,
+    )
+
+    assert key_a != key_b
+
+
+def test_traceable_runtime_cache_key_uses_runtime_state_tokens_not_object_identity():
+    """Fresh solved/coil states must produce distinct keys without object ids."""
+    booz = types.SimpleNamespace(
+        options={},
+        _collect_optimizer_options=lambda *, method: {},
+    )
+    state = {
+        "objective_kwargs": {
+            "iota_target": 0.23,
+            "outer_objective_config": None,
+        },
+        "optimize_G": False,
+        "predictor_kind": "ls",
+        "objective_method": "bfgs-ondevice",
+    }
+
+    base_key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        _traceable_cache_key_state(state),
+        success_filter=None,
+    )
+    assert (
+        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+            booz,
+            _traceable_cache_key_state(state, solve_state_token=8),
+            success_filter=None,
+        )
+        != base_key
+    )
+    assert (
+        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+            booz,
+            _traceable_cache_key_state(state, coil_dof_state_token=12),
+            success_filter=None,
+        )
+        != base_key
+    )
+    assert (
+        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+            booz,
+            _traceable_cache_key_state(
+                state,
+                coil_layout_signature=("coil-layout", "changed"),
+            ),
+            success_filter=None,
+        )
+        != base_key
+    )
+
+
+def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
+    def make_booz(*, bfgs_maxiter=5):
+        return types.SimpleNamespace(
+            options={"bfgs_maxiter": bfgs_maxiter},
+            _collect_optimizer_options=lambda *, method: {"maxls": 20},
+        )
+
+    def make_state(
+        *,
+        iota_target=0.23,
+        solve_state_token=7,
+        coil_dof_state_token=11,
+        coil_layout_signature=("coil-layout", "default"),
+    ):
+        return _traceable_cache_key_state(
+            {
+                "objective_kwargs": {
+                    "iota_target": iota_target,
+                    "outer_objective_config": None,
+                },
+                "optimize_G": False,
+                "predictor_kind": "ls",
+                "objective_method": "bfgs-ondevice",
+            },
+            solve_state_token=solve_state_token,
+            coil_dof_state_token=coil_dof_state_token,
+            coil_layout_signature=coil_layout_signature,
+        )
 
     def success_filter_a(_coil_dofs, _solved_x):
         return jnp.asarray(True, dtype=bool)
@@ -2034,23 +2044,17 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
     success_filter_b._traceable_runtime_cache_signature = ("filter", "b")
 
     booz = make_booz()
-    bs_jax = types.SimpleNamespace(
-        _cache_token=bs_token,
-        _coil_dofs_generation=11,
-    )
     state = make_state()
     base_key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
-        bs_jax,
         state,
         success_filter=success_filter_a,
     )
 
     assert (
         surfaceobjectives_jax_module._traceable_runtime_cache_key(
-            make_booz(solver_generation=8),
-            bs_jax,
-            state,
+            booz,
+            make_state(solve_state_token=8),
             success_filter=success_filter_a,
         )
         != base_key
@@ -2058,7 +2062,6 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
     assert (
         surfaceobjectives_jax_module._traceable_runtime_cache_key(
             booz,
-            bs_jax,
             make_state(iota_target=0.24),
             success_filter=success_filter_a,
         )
@@ -2067,7 +2070,6 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
     assert (
         surfaceobjectives_jax_module._traceable_runtime_cache_key(
             booz,
-            bs_jax,
             state,
             success_filter=success_filter_b,
         )
@@ -2076,11 +2078,15 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
     assert (
         surfaceobjectives_jax_module._traceable_runtime_cache_key(
             booz,
-            types.SimpleNamespace(
-                _cache_token=bs_token,
-                _coil_dofs_generation=12,
-            ),
-            state,
+            make_state(coil_dof_state_token=12),
+            success_filter=success_filter_a,
+        )
+        != base_key
+    )
+    assert (
+        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+            booz,
+            make_state(coil_layout_signature=("coil-layout", "changed")),
             success_filter=success_filter_a,
         )
         != base_key
@@ -2088,7 +2094,6 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
     assert (
         surfaceobjectives_jax_module._traceable_runtime_cache_key(
             make_booz(bfgs_maxiter=6),
-            bs_jax,
             state,
             success_filter=success_filter_a,
         )
@@ -2109,32 +2114,31 @@ def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
     monkeypatch.setattr(surfaceobjectives_jax_module.np, "asarray", guarded_asarray)
 
     booz = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=7,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    state = {
-        "objective_kwargs": {
-            "iota_target": 0.23,
-            "outer_objective_config": {
-                "coil_surface_weight": 1.0,
-                "vessel_normal": jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64),
+    state = _traceable_cache_key_state(
+        {
+            "objective_kwargs": {
+                "iota_target": 0.23,
+                "outer_objective_config": {
+                    "coil_surface_weight": 1.0,
+                    "vessel_normal": jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64),
+                },
             },
-        },
-        "optimize_G": False,
-        "predictor_kind": "ls",
-        "objective_method": "bfgs-ondevice",
-    }
+            "optimize_G": False,
+            "predictor_kind": "ls",
+            "objective_method": "bfgs-ondevice",
+        }
+    )
 
     key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
         booz,
-        types.SimpleNamespace(_cache_token=uuid.uuid4()),
         state,
         success_filter=None,
     )
 
-    assert key[6][0] == "tree"
+    assert key.objective_contract_signature[0] == "tree"
 
 
 def test_traceable_runtime_hostify_tree_explicitly_materializes_jax_array_leaves():
@@ -3027,49 +3031,52 @@ def test_major_radius_gradient_uses_boozer_surface_biotsavart_fallback():
     assert captured["coil_group_indices"] == [(0,)]
 
 
-def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_generation(
+def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
     monkeypatch,
 ):
     build_state_calls = []
     build_bundle_calls = []
 
     booz = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=11,
+        _traceable_solve_state_token=11,
         _traceable_runtime_entry_cache=None,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs = types.SimpleNamespace(_cache_token=uuid.uuid4())
+    bs = types.SimpleNamespace(_coil_dof_state_token=13)
 
     def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         build_state_calls.append((iota_target, outer_objective_config))
-        return {
-            "objective_kwargs": {
-                "iota_target": float(iota_target),
-                "outer_objective_config": {
-                    "curve_curve_weight": 1.0,
-                    "vessel_gamma": np.ones((4, 3), dtype=np.float64),
-                }
-                if outer_objective_config is not None
-                else None,
+        return _traceable_cache_key_state(
+            {
+                "objective_kwargs": {
+                    "iota_target": float(iota_target),
+                    "outer_objective_config": {
+                        "curve_curve_weight": 1.0,
+                        "vessel_gamma": np.ones((4, 3), dtype=np.float64),
+                    }
+                    if outer_objective_config is not None
+                    else None,
+                },
+                "optimize_G": False,
+                "predictor_kind": "ls",
+                "objective_method": "bfgs-ondevice",
+                "coil_dof_extraction_spec": {"spec": "marker"},
+                "baseline_x": jnp.arange(4, dtype=jnp.float64),
+                "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+                "baseline_linear_solve_factors": (
+                    jnp.eye(2, dtype=jnp.float64),
+                    jnp.eye(2, dtype=jnp.float64),
+                    jnp.arange(2, dtype=jnp.int32),
+                ),
+                "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
+                "linearization_kind": "hessian",
+                "linear_solve_tol": 1.0e-10,
+                "linear_solve_stab": 0.0,
             },
-            "optimize_G": False,
-            "predictor_kind": "ls",
-            "objective_method": "bfgs-ondevice",
-            "coil_dof_extraction_spec": {"spec": "marker"},
-            "baseline_x": jnp.arange(4, dtype=jnp.float64),
-            "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_linear_solve_factors": (
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.arange(2, dtype=jnp.int32),
-            ),
-            "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
-            "linearization_kind": "hessian",
-            "linear_solve_tol": 1.0e-10,
-            "linear_solve_stab": 0.0,
-        }
+            solve_state_token=_booz._traceable_solve_state_token,
+            coil_dof_state_token=_bs._coil_dof_state_token,
+        )
 
     def build_bundle(_booz, state, *, success_filter=None):
         build_bundle_calls.append(
@@ -3145,37 +3152,40 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
     build_bundle_calls = []
 
     booz = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=11,
+        _traceable_solve_state_token=11,
         _traceable_runtime_entry_cache=None,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs = types.SimpleNamespace(_cache_token=uuid.uuid4())
+    bs = types.SimpleNamespace(_coil_dof_state_token=13)
 
     def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         del outer_objective_config
-        return {
-            "objective_kwargs": {
-                "iota_target": float(iota_target),
-                "outer_objective_config": None,
+        return _traceable_cache_key_state(
+            {
+                "objective_kwargs": {
+                    "iota_target": float(iota_target),
+                    "outer_objective_config": None,
+                },
+                "optimize_G": False,
+                "predictor_kind": "ls",
+                "objective_method": "bfgs-ondevice",
+                "coil_dof_extraction_spec": {"spec": "marker"},
+                "baseline_x": jnp.arange(4, dtype=jnp.float64),
+                "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+                "baseline_linear_solve_factors": (
+                    jnp.eye(2, dtype=jnp.float64),
+                    jnp.eye(2, dtype=jnp.float64),
+                    jnp.arange(2, dtype=jnp.int32),
+                ),
+                "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
+                "linearization_kind": "hessian",
+                "linear_solve_tol": 1.0e-10,
+                "linear_solve_stab": 0.0,
             },
-            "optimize_G": False,
-            "predictor_kind": "ls",
-            "objective_method": "bfgs-ondevice",
-            "coil_dof_extraction_spec": {"spec": "marker"},
-            "baseline_x": jnp.arange(4, dtype=jnp.float64),
-            "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_linear_solve_factors": (
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.arange(2, dtype=jnp.int32),
-            ),
-            "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
-            "linearization_kind": "hessian",
-            "linear_solve_tol": 1.0e-10,
-            "linear_solve_stab": 0.0,
-        }
+            solve_state_token=_booz._traceable_solve_state_token,
+            coil_dof_state_token=_bs._coil_dof_state_token,
+        )
 
     def build_bundle(_booz, state, *, success_filter=None):
         build_bundle_calls.append(
@@ -3254,43 +3264,46 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
     assert len(build_bundle_calls) == 1
 
 
-def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_change(
+def test_get_cached_traceable_runtime_entry_invalidates_on_solve_state_change(
     monkeypatch,
 ):
     build_bundle_calls = []
 
     booz = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=3,
+        _traceable_solve_state_token=3,
         _traceable_runtime_entry_cache=None,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs = types.SimpleNamespace(_cache_token=uuid.uuid4())
+    bs = types.SimpleNamespace(_coil_dof_state_token=13)
 
     def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         del outer_objective_config
-        return {
-            "objective_kwargs": {
-                "iota_target": float(iota_target),
-                "outer_objective_config": None,
+        return _traceable_cache_key_state(
+            {
+                "objective_kwargs": {
+                    "iota_target": float(iota_target),
+                    "outer_objective_config": None,
+                },
+                "optimize_G": False,
+                "predictor_kind": "ls",
+                "objective_method": "bfgs-ondevice",
+                "coil_dof_extraction_spec": {"spec": "marker"},
+                "baseline_x": jnp.arange(2, dtype=jnp.float64),
+                "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+                "baseline_linear_solve_factors": (
+                    jnp.eye(2, dtype=jnp.float64),
+                    jnp.eye(2, dtype=jnp.float64),
+                    jnp.arange(2, dtype=jnp.int32),
+                ),
+                "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
+                "linearization_kind": "hessian",
+                "linear_solve_tol": 1.0e-10,
+                "linear_solve_stab": 0.0,
             },
-            "optimize_G": False,
-            "predictor_kind": "ls",
-            "objective_method": "bfgs-ondevice",
-            "coil_dof_extraction_spec": {"spec": "marker"},
-            "baseline_x": jnp.arange(2, dtype=jnp.float64),
-            "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_linear_solve_factors": (
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.arange(2, dtype=jnp.int32),
-            ),
-            "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
-            "linearization_kind": "hessian",
-            "linear_solve_tol": 1.0e-10,
-            "linear_solve_stab": 0.0,
-        }
+            solve_state_token=_booz._traceable_solve_state_token,
+            coil_dof_state_token=_bs._coil_dof_state_token,
+        )
 
     def build_bundle(_booz, state, *, success_filter=None):
         del success_filter
@@ -3344,7 +3357,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_cha
         bs,
         0.23,
     )
-    booz._solver_generation += 1
+    booz._traceable_solve_state_token += 1
     surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
@@ -3360,37 +3373,40 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
     build_bundle_calls = []
 
     booz = types.SimpleNamespace(
-        _cache_token=uuid.uuid4(),
-        _solver_generation=5,
+        _traceable_solve_state_token=5,
         _traceable_runtime_entry_cache=None,
         options={},
         _collect_optimizer_options=lambda *, method: {},
     )
-    bs = types.SimpleNamespace(_cache_token=uuid.uuid4())
+    bs = types.SimpleNamespace(_coil_dof_state_token=13)
 
     def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         del outer_objective_config
-        return {
-            "objective_kwargs": {
-                "iota_target": jnp.asarray(iota_target, dtype=jnp.float64),
-                "outer_objective_config": None,
+        return _traceable_cache_key_state(
+            {
+                "objective_kwargs": {
+                    "iota_target": jnp.asarray(iota_target, dtype=jnp.float64),
+                    "outer_objective_config": None,
+                },
+                "optimize_G": False,
+                "predictor_kind": "ls",
+                "objective_method": "bfgs-ondevice",
+                "coil_dof_extraction_spec": {"spec": "marker"},
+                "baseline_x": jnp.arange(2, dtype=jnp.float64),
+                "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+                "baseline_linear_solve_factors": (
+                    jnp.eye(2, dtype=jnp.float64),
+                    jnp.eye(2, dtype=jnp.float64),
+                    jnp.arange(2, dtype=jnp.int32),
+                ),
+                "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
+                "linearization_kind": "hessian",
+                "linear_solve_tol": 1.0e-10,
+                "linear_solve_stab": 0.0,
             },
-            "optimize_G": False,
-            "predictor_kind": "ls",
-            "objective_method": "bfgs-ondevice",
-            "coil_dof_extraction_spec": {"spec": "marker"},
-            "baseline_x": jnp.arange(2, dtype=jnp.float64),
-            "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_linear_solve_factors": (
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.arange(2, dtype=jnp.int32),
-            ),
-            "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
-            "linearization_kind": "hessian",
-            "linear_solve_tol": 1.0e-10,
-            "linear_solve_stab": 0.0,
-        }
+            solve_state_token=_booz._traceable_solve_state_token,
+            coil_dof_state_token=_bs._coil_dof_state_token,
+        )
 
     def build_bundle(_booz, state, *, success_filter=None):
         del success_filter

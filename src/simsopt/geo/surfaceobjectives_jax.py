@@ -28,7 +28,7 @@ Architecture (implicit differentiation):
 import hashlib
 import logging
 import os
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 import numpy as np
 import jax
@@ -3862,6 +3862,7 @@ def _build_traceable_objective_state(
     coil_dof_extraction_spec = _traceable_runtime_hostify_tree(
         bs_jax.coil_dof_extraction_spec()
     )
+    coil_layout_signature = _traceable_contract_tree_signature(coil_dof_extraction_spec)
     coil_set_spec_from_dofs = lambda coil_dofs: coil_set_spec_from_dof_extraction_spec(
         coil_dof_extraction_spec,
         coil_dofs,
@@ -3947,6 +3948,9 @@ def _build_traceable_objective_state(
         "baseline_coil_dofs": _traceable_runtime_hostify_tree(baseline_coil_dofs),
         "coil_dof_extraction_spec": coil_dof_extraction_spec,
         "coil_set_spec_from_dofs": coil_set_spec_from_dofs,
+        "solve_state_token": booz_jax._traceable_solve_state_token,
+        "coil_dof_state_token": bs_jax._coil_dof_state_token,
+        "coil_layout_signature": coil_layout_signature,
         "optimize_G": optimize_G,
         "predictor_kind": predictor_kind,
         "objective_method": objective_method,
@@ -4106,6 +4110,20 @@ def _traceable_runtime_option_signature(booz_jax, state):
     return _traceable_cache_tree_signature(option_state)
 
 
+@dataclass(frozen=True)
+class _TraceableCallableSignature:
+    callback: object
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, _TraceableCallableSignature)
+            and self.callback is other.callback
+        )
+
+    def __hash__(self):
+        return object.__hash__(self.callback)
+
+
 def _traceable_success_filter_signature(success_filter):
     """Return the runtime-cache signature for one optional success filter."""
 
@@ -4114,38 +4132,42 @@ def _traceable_success_filter_signature(success_filter):
     signature = getattr(success_filter, "_traceable_runtime_cache_signature", None)
     if signature is not None:
         return ("structural", signature)
-    return ("callable", id(success_filter))
+    return ("callable", _TraceableCallableSignature(success_filter))
 
 
-def _traceable_runtime_cache_key(booz_jax, bs_jax, state, *, success_filter=None):
+@dataclass(frozen=True)
+class _TraceableRuntimeCacheKey:
+    solve_state_token: int
+    coil_dof_state_token: int
+    coil_layout_signature: object
+    optimize_G: bool
+    predictor_kind: str
+    objective_contract_signature: object
+    option_signature: object
+    success_filter_signature: object
+
+
+def _traceable_runtime_cache_key(booz_jax, state, *, success_filter=None):
     """Return a stable cache key for one compiled traceable runtime state.
 
-    The expensive solved baseline arrays are represented by the active Boozer
-    solve generation instead of value-hashing their full contents on every
-    lookup. This keeps repeated warm-start runtime-bundle construction from
-    spending minutes in CPU-side array hashing before the target lane even
-    starts compiling or running.
-
-    Object identity uses a per-instance UUID (``_cache_token``) populated at
-    construction time on ``BoozerSurfaceJAX`` / ``BiotSavartJAX`` /
-    ``SpecBackedBiotSavartJAX``. UUIDs avoid the CPython ``id()`` recycling
-    hazard where a freshly garbage-collected wrapper could allow a new
-    instance to alias the prior cache entry when memory addresses are reused.
-    Solved-state freshness is still tracked via the Boozer solve generation
-    and the Biot-Savart DOF generation; callers must rebuild the wrapper
-    instead of mutating ``booz_jax``/``bs_jax`` in place.
+    The key is derived from the immutable runtime state captured by
+    ``_build_traceable_objective_state``. Large solved baseline arrays are
+    represented by explicit solve/coil state tokens instead of value-hashing
+    their contents on every lookup; the coil reconstruction layout is signed
+    structurally because the compiled bundle closes over that layout.
     """
     objective_kwargs = state["objective_kwargs"]
-    return (
-        booz_jax._cache_token,
-        bs_jax._cache_token,
-        getattr(booz_jax, "_solver_generation", None),
-        getattr(bs_jax, "_coil_dofs_generation", None),
-        state["optimize_G"],
-        state["predictor_kind"],
-        _traceable_contract_tree_signature(objective_kwargs),
-        _traceable_runtime_option_signature(booz_jax, state),
-        _traceable_success_filter_signature(success_filter),
+    return _TraceableRuntimeCacheKey(
+        solve_state_token=state["solve_state_token"],
+        coil_dof_state_token=state["coil_dof_state_token"],
+        coil_layout_signature=state["coil_layout_signature"],
+        optimize_G=state["optimize_G"],
+        predictor_kind=state["predictor_kind"],
+        objective_contract_signature=_traceable_contract_tree_signature(
+            objective_kwargs
+        ),
+        option_signature=_traceable_runtime_option_signature(booz_jax, state),
+        success_filter_signature=_traceable_success_filter_signature(success_filter),
     )
 
 
@@ -4166,7 +4188,6 @@ def _get_cached_traceable_runtime_entry(
     )
     cache_key = _traceable_runtime_cache_key(
         booz_jax,
-        bs_jax,
         state,
         success_filter=success_filter,
     )

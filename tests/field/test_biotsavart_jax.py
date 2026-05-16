@@ -100,6 +100,7 @@ biot_savart_dB_by_dX = _bs.biot_savart_dB_by_dX
 biot_savart_B_and_dB = _bs.biot_savart_B_and_dB
 biot_savart_A = _bs.biot_savart_A
 biot_savart_dA_by_dX = _bs.biot_savart_dA_by_dX
+grouped_biot_savart_A = _bs.grouped_biot_savart_A
 
 MU0 = 4.0 * np.pi * 1e-7
 _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct-kernel")
@@ -425,7 +426,7 @@ class TestBiotSavartJaxAnalytical:
         np.testing.assert_allclose(np.array(div_B), 0.0, atol=divergence_abs_tol)
 
     def test_B_and_dB_consistency(self):
-        """biot_savart_B_and_dB returns same values as separate calls."""
+        """Tier-4 self-consistency: fused B/dB matches separate JAX calls."""
         R = 1.0
         I = 1e5
         gammas, gammadashs = _make_circular_coil(R=R, nquad=128)
@@ -494,6 +495,40 @@ class TestBiotSavartJaxAnalytical:
 
         np.testing.assert_allclose(np.array(B_total), np.array(B1 + B2), atol=1e-14)
 
+    def test_point_on_coil_field_is_finite(self):
+        """Documented r=0 clamp keeps point-on-coil B finite in JAX."""
+        gammas, gammadashs = _make_circular_coil(R=1.0, nquad=64)
+        currents = jnp.array([1e5])
+        points = gammas[0, :1, :]
+
+        B = biot_savart_B(points, gammas, gammadashs, currents)
+
+        assert bool(np.all(np.asarray(jnp.isfinite(B))))
+
+    def test_grouped_biot_savart_A_host_helper_matches_dense_kernel(self):
+        """Direct host-helper pin for grouped vector potential accumulation."""
+        points = jnp.array(
+            [
+                [0.2, 0.1, -0.3],
+                [-0.1, 0.35, 0.2],
+                [0.3, -0.25, 0.15],
+            ],
+            dtype=jnp.float64,
+        )
+        gammas, gammadashs, currents = _make_shifted_circular_coils(4, nquad=32)
+        coil_arrays = (
+            (gammas[:1], gammadashs[:1], currents[:1]),
+            (gammas[1:3], gammadashs[1:3], currents[1:3]),
+            (gammas[3:], gammadashs[3:], currents[3:]),
+        )
+
+        grouped_A = grouped_biot_savart_A(points, coil_arrays)
+        dense_A = biot_savart_A(points, gammas, gammadashs, currents)
+
+        np.testing.assert_allclose(
+            np.asarray(grouped_A), np.asarray(dense_A), atol=1e-14
+        )
+
 
 class TestBiotSavartJaxCppParity:
     """Compare against the C++ simsoptpp kernel (skipped if unavailable)."""
@@ -534,6 +569,33 @@ class TestBiotSavartJaxCppParity:
             atol=_DIRECT_KERNEL_TOLS["atol"],
         )
 
+    def test_A_parity_ncsx(self):
+        """``biot_savart_A`` matches ``BiotSavart.A()`` on the NCSX fixture.
+
+        Oracle: C++ reference symbol ``simsoptpp::BiotSavart::A`` accessed
+        through ``simsopt.field.biotsavart.BiotSavart.A`` (acceptable
+        oracle type 1, see ``tests/REVIEWER_ORACLE_LINT.md``). Lane:
+        ``direct-kernel`` value tolerances from the validation-ladder SSOT.
+        """
+        bs, points_np, gammas_np, gds_np, currents_np = (
+            _ncsx_biotsavart_parity_fixture()
+        )
+        A_ref = bs.A()
+
+        A_jax = biot_savart_A(
+            jnp.array(points_np),
+            jnp.array(gammas_np),
+            jnp.array(gds_np),
+            jnp.array(currents_np),
+        )
+
+        np.testing.assert_allclose(
+            np.array(A_jax),
+            A_ref,
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+
     def test_dB_by_dX_parity_ncsx(self):
         bs, points_np, gammas_np, gds_np, currents_np = (
             _ncsx_biotsavart_parity_fixture()
@@ -550,6 +612,27 @@ class TestBiotSavartJaxCppParity:
         np.testing.assert_allclose(
             np.array(dB_jax),
             dB_ref,
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+
+    def test_dA_by_dX_kernel_parity_ncsx(self):
+        """``biot_savart_dA_by_dX`` matches ``BiotSavart.dA_by_dX()``."""
+        bs, points_np, gammas_np, gds_np, currents_np = (
+            _ncsx_biotsavart_parity_fixture()
+        )
+        dA_ref = bs.dA_by_dX()
+
+        dA_jax = biot_savart_dA_by_dX(
+            jnp.array(points_np),
+            jnp.array(gammas_np),
+            jnp.array(gds_np),
+            jnp.array(currents_np),
+        )
+
+        np.testing.assert_allclose(
+            np.array(dA_jax),
+            dA_ref,
             rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
             atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
         )
@@ -1351,14 +1434,8 @@ class TestGroupCoilDataOrdering:
         )
 
 
-class TestBiotSavartJAXCacheToken:
-    """``BiotSavartJAX`` and ``SpecBackedBiotSavartJAX`` must produce a unique
-    UUID ``_cache_token`` per instance.
-
-    The traceable runtime cache key (``surfaceobjectives_jax``) relies on this
-    token to discriminate independently-constructed adapters even when CPython
-    recycles the ``id()`` of a just-garbage-collected predecessor (W4.2 / E4).
-    """
+class TestBiotSavartJAXCoilStateToken:
+    """Traceable runtime cache invalidation is keyed to coil DOF state."""
 
     @staticmethod
     def _make_two_basic_coils():
@@ -1385,21 +1462,39 @@ class TestBiotSavartJAXCacheToken:
             coils.append(Coil(curve, Current(current_amp)))
         return coils
 
-    def test_biotsavart_jax_assigns_unique_cache_token(self):
-        import uuid
-
+    def test_biotsavart_jax_advances_coil_dof_state_token_on_x_update(self):
         from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 
         coils = self._make_two_basic_coils()
-        bs_a = BiotSavartJAX(list(coils))
-        bs_b = BiotSavartJAX(list(coils))
-        assert isinstance(bs_a._cache_token, uuid.UUID)
-        assert isinstance(bs_b._cache_token, uuid.UUID)
-        assert bs_a._cache_token != bs_b._cache_token
+        bs_jax = BiotSavartJAX(list(coils))
+        initial_token = bs_jax._coil_dof_state_token
 
-    def test_spec_backed_biotsavart_jax_assigns_unique_cache_token(self):
-        import uuid
+        bs_jax.x = np.asarray(bs_jax.x, dtype=np.float64)
 
+        assert bs_jax._coil_dof_state_token != initial_token
+        assert bs_jax._coil_dofs_generation == 1
+
+        next_token = bs_jax._coil_dof_state_token
+        bs_jax.full_x = np.asarray(bs_jax.full_x, dtype=np.float64)
+
+        assert bs_jax._coil_dof_state_token != next_token
+        assert bs_jax._coil_dofs_generation == 2
+
+    def test_biotsavart_jax_advances_coil_dof_state_token_on_parent_update(self):
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        coils = self._make_two_basic_coils()
+        bs_jax = BiotSavartJAX(list(coils))
+        initial_token = bs_jax._coil_dof_state_token
+        curve_dofs = np.asarray(coils[0].curve.x, dtype=np.float64)
+        curve_dofs[0] += 1.0e-4
+
+        coils[0].curve.x = curve_dofs
+
+        assert bs_jax._coil_dof_state_token != initial_token
+        assert bs_jax._coil_dofs_generation == 1
+
+    def test_spec_backed_biotsavart_jax_advances_coil_dof_state_token_on_update(self):
         from simsopt.field.biotsavart_jax_backend import (
             BiotSavartJAX,
             SpecBackedBiotSavartJAX,
@@ -1414,10 +1509,12 @@ class TestBiotSavartJAXCacheToken:
         )
 
         spec_backed_a = SpecBackedBiotSavartJAX(spec)
-        spec_backed_b = SpecBackedBiotSavartJAX(spec)
-        assert isinstance(spec_backed_a._cache_token, uuid.UUID)
-        assert isinstance(spec_backed_b._cache_token, uuid.UUID)
-        assert spec_backed_a._cache_token != spec_backed_b._cache_token
+        initial_token = spec_backed_a._coil_dof_state_token
+
+        spec_backed_a.x = np.asarray(spec_backed_a.x, dtype=np.float64)
+
+        assert spec_backed_a._coil_dof_state_token != initial_token
+        assert spec_backed_a._coil_dofs_generation == 1
 
 
 if __name__ == "__main__":

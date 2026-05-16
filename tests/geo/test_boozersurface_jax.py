@@ -15,7 +15,6 @@ import inspect
 import logging
 import sys
 import types
-import uuid
 from contextlib import contextmanager
 from functools import partial
 
@@ -2402,18 +2401,15 @@ class TestBoozerSurfaceJAXClass:
         assert booz.label_type == "volume"
         assert booz.need_to_run_code is True
 
-    def test_instantiation_assigns_unique_cache_token(self):
-        """Each ``BoozerSurfaceJAX`` instance must get a UUID ``_cache_token``.
-
-        The traceable runtime cache key relies on this token to discriminate
-        independently-constructed adapters even when CPython recycles the
-        ``id()`` of a just-garbage-collected predecessor (W4.2 / E4).
-        """
+    def test_instantiation_assigns_traceable_solve_state_token(self):
+        """Traceable cache state starts from an explicit solve-state token."""
         booz_a = _make_mock_boozer_surface()
         booz_b = _make_mock_boozer_surface()
-        assert isinstance(booz_a._cache_token, uuid.UUID)
-        assert isinstance(booz_b._cache_token, uuid.UUID)
-        assert booz_a._cache_token != booz_b._cache_token
+        assert isinstance(booz_a._traceable_solve_state_token, int)
+        assert isinstance(booz_b._traceable_solve_state_token, int)
+        assert booz_a._traceable_solve_state_token != (
+            booz_b._traceable_solve_state_token
+        )
 
     def test_instantiation_accepts_spec_only_biotsavart(self):
         """The grouped-coil spec path must not require a legacy ``_coils`` list."""

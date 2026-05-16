@@ -10,8 +10,8 @@ M0 rewrite contract (adapter pattern, §5).
 """
 
 from dataclasses import dataclass
+from itertools import count
 import time
-import uuid
 
 import jax
 import jax.numpy as jnp
@@ -74,6 +74,8 @@ from ..jax_core.specs import (
 )
 from ._coil_graph import _unwrap_coil_curve_and_current_objects
 
+_COIL_DOF_STATE_TOKEN_COUNTER = count()
+
 __all__ = [
     "BiotSavartJAX",
     "BiotSavartBPullback",
@@ -84,6 +86,10 @@ __all__ = [
     "SpecBackedCurve",
     "SpecBackedCurrent",
 ]
+
+
+def _new_coil_dof_state_token() -> int:
+    return next(_COIL_DOF_STATE_TOKEN_COUNTER)
 
 
 def _time_call_result(callback):
@@ -451,14 +457,11 @@ class SpecBackedBiotSavartJAX(Optimizable):
         self._coil_dof_extraction_spec = biot_savart_spec.coil_dof_extraction
         self._x = _as_jax_float64(biot_savart_spec.coil_dofs)
         self._coil_dofs_generation = 0
+        self._coil_dof_state_token = _new_coil_dof_state_token()
         self._points_jax: jax.Array | None = None
         self._points_version = 0
         self._dof_layout_version = 0
         self._uses_uniform_curve_xyz_fourier_fastpath = False
-        # Object-lifetime token used by the traceable runtime cache to
-        # distinguish independently-constructed adapters even when CPython
-        # recycles their id() after garbage collection.
-        self._cache_token = uuid.uuid4()
         Optimizable.__init__(self, x0=host_array(self._x, dtype=np.float64))
         self._coils = self._coils_from_dofs(self._x)
 
@@ -493,6 +496,7 @@ class SpecBackedBiotSavartJAX(Optimizable):
     def _set_coil_dofs(self, coil_dofs: object) -> None:
         self._x = _as_jax_float64(coil_dofs)
         self._coil_dofs_generation += 1
+        self._coil_dof_state_token = _new_coil_dof_state_token()
 
     @x.setter
     def x(self, coil_dofs: object) -> None:
@@ -1016,12 +1020,10 @@ class BiotSavartJAX(Optimizable):
         self._points_version = 0
         self._dof_layout_version = 0
         self._coil_dofs_generation = 0
+        self._coil_dof_state_token = _new_coil_dof_state_token()
         self._free_dof_layout_ready = False
+        self._suppress_dependency_coil_dof_state = False
         self._local_free_positions_by_opt = {}
-        # Object-lifetime token used by the traceable runtime cache to
-        # distinguish independently-constructed adapters even when CPython
-        # recycles their id() after garbage collection.
-        self._cache_token = uuid.uuid4()
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=self._coils)
 
         # Uniform CurveXYZFourier fast-path metadata (populated by _introspect_coils)
@@ -1043,14 +1045,42 @@ class BiotSavartJAX(Optimizable):
             self._dof_layout_version += 1
             self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
 
+    def _advance_coil_dof_state(self) -> None:
+        self._coil_dofs_generation += 1
+        self._coil_dof_state_token = _new_coil_dof_state_token()
+
+    def set_recompute_flag(self, parent=None):
+        if (
+            parent is not None
+            and self._free_dof_layout_ready
+            and not self._suppress_dependency_coil_dof_state
+        ):
+            self._advance_coil_dof_state()
+        super().set_recompute_flag(parent=parent)
+
+    def _set_global_coil_dofs(self, optimizable_setter, coil_dofs):
+        self._advance_coil_dof_state()
+        self._suppress_dependency_coil_dof_state = True
+        try:
+            optimizable_setter(self, coil_dofs)
+        finally:
+            self._suppress_dependency_coil_dof_state = False
+
     @property
     def x(self):
         return Optimizable.x.fget(self)
 
     @x.setter
     def x(self, coil_dofs):
-        Optimizable.x.fset(self, coil_dofs)
-        self._coil_dofs_generation += 1
+        self._set_global_coil_dofs(Optimizable.x.fset, coil_dofs)
+
+    @property
+    def full_x(self):
+        return Optimizable.full_x.fget(self)
+
+    @full_x.setter
+    def full_x(self, coil_dofs):
+        self._set_global_coil_dofs(Optimizable.full_x.fset, coil_dofs)
 
     def _local_free_positions(self, opt):
         cached = self._local_free_positions_by_opt.get(opt)

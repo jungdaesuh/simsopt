@@ -277,16 +277,17 @@ These items are real but lower-priority. Execute only if specific signals justif
 - [ ] If removing: ensure no internal use of `_safe_radius_squared` relies on the floor; remove the clamp; update tests
 - [ ] If documenting: add a paragraph to `docs/source/jax_acceptance.rst` noting JAX silently clamps point-on-coil while C++ NaN/Infs
 
-### W4.2 · E4 — UUID-based traceable bundle cache key
+### W4.2 · E4 — state-keyed traceable bundle cache key
 
-**Context.** `_traceable_runtime_cache_key` (`surfaceobjectives_jax.py:4120-4144`) partly keys on `id(booz_jax)` and `id(bs_jax)`. The cache is stored on `booz_jax._traceable_runtime_entry_cache` (`:4168-4170`), so it's object-local, which makes `id()` aliasing largely theoretical (a newly-constructed object that happens to land at the same memory address as a freshly-GC'd previous one with matching generation values).
+**Original context.** `_traceable_runtime_cache_key` formerly keyed on `id(booz_jax)` and `id(bs_jax)`. The cache is stored on `booz_jax._traceable_runtime_entry_cache`, so the aliasing risk was object-local and largely theoretical, but object identity still conflated adapter lifetime with the solved/coil state that the compiled bundle actually captures.
 
 **Trigger to execute.** If any user reports stale cache behavior tied to object lifetime patterns. Currently no signal.
 
-**Todos (conditional):**
-- [ ] Add `self._cache_token = uuid.uuid4()` to `BoozerSurfaceJAX.__init__` and `BiotSavartJAX.__init__`
-- [ ] Replace `id(booz_jax)`, `id(bs_jax)` with `booz_jax._cache_token`, `bs_jax._cache_token` in `_traceable_runtime_cache_key`
-- [ ] Verify cache hit/miss behavior unchanged on the parity test suite
+**Todos (executed as root fix):**
+- [x] Add explicit solve-state and coil-DOF-state tokens to `BoozerSurfaceJAX`, `BiotSavartJAX`, and `SpecBackedBiotSavartJAX`
+- [x] Replace object identity in `_traceable_runtime_cache_key` with `solve_state_token`, `coil_dof_state_token`, a structural `coil_dof_extraction_spec` layout signature, and non-`id()` success-filter signatures
+- [x] Advance `BiotSavartJAX` coil-state tokens from SIMSOPT ancestor DOF invalidation, not only direct adapter `x` / `full_x` writes
+- [x] Verify cache hit/miss behavior is driven by runtime state, not adapter identity
 
 ### W4.3 · B3 — MINPACK-equivalent on-device LM
 
@@ -351,7 +352,7 @@ After Wave 3 lands:
 Wave 4 items are not part of the core acceptance. Informational completion record:
 
 - [x] `_safe_radius_squared` clamp divergence documented in `docs/source/jax_acceptance.rst` "Domain-edge behavior" + source comment (E2)
-- [x] `_cache_token = uuid.uuid4()` replaces `id(...)` in `_traceable_runtime_cache_key`, on `BoozerSurfaceJAX` / `BiotSavartJAX` / `SpecBackedBiotSavartJAX` constructors, eliminating CPython id-recycling aliasing (E4)
+- [x] Traceable runtime cache keys now use solved-state tokens, coil-DOF-state tokens, structural coil-layout signatures, and non-`id()` success-filter signatures instead of `id(...)` or adapter identity tokens (E4 root fix)
 - [x] On-device LM vs MINPACK `lmder` algorithmic divergence documented in `src/simsopt/geo/optimizer_jax.py` module docstring + `docs/source/jax_acceptance.rst` "Optimizer family equivalence" (B3)
 
 ---

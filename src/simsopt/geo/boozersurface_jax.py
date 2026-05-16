@@ -28,9 +28,9 @@ Builds on M3's composed derivative path:
 
 import hashlib
 import inspect
-import uuid
 from dataclasses import dataclass, field
 from functools import partial
+from itertools import count
 
 import numpy as np
 import jax
@@ -126,6 +126,13 @@ from .optimizer_jax import (
     target_least_squares,
     target_minimize,
 )
+
+_TRACEABLE_SOLVE_STATE_TOKEN_COUNTER = count()
+
+
+def _new_traceable_solve_state_token() -> int:
+    return next(_TRACEABLE_SOLVE_STATE_TOKEN_COUNTER)
+
 
 SOLVE_QUALITY_LS_FIELDS: tuple[str, ...] = (
     "ls_hessian_symmetry_rel",
@@ -711,6 +718,7 @@ def _guard_solver_callback_freshness(
 def _advance_solver_generation(booz_surf) -> int:
     solve_generation = booz_surf._solver_generation + 1
     booz_surf._solver_generation = solve_generation
+    booz_surf._traceable_solve_state_token = _new_traceable_solve_state_token()
     booz_surf._traceable_runtime_entry_cache = None
     return solve_generation
 
@@ -3253,11 +3261,8 @@ class BoozerSurfaceJAX(Optimizable):
         self.need_to_run_code = True
         self.res = None
         self._solver_generation = 0
+        self._traceable_solve_state_token = _new_traceable_solve_state_token()
         self._traceable_runtime_entry_cache = None
-        # Object-lifetime token used by the traceable runtime cache to
-        # distinguish independently-constructed surfaces even when CPython
-        # recycles their id() after garbage collection.
-        self._cache_token = uuid.uuid4()
 
         # Determine solver type
         self.boozer_type = "ls" if constraint_weight is not None else "exact"
