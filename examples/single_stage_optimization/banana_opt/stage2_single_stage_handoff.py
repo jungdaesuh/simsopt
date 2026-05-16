@@ -66,10 +66,14 @@ BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS = "restore_last_success"
 BOOZER_TRUST_TOL_MULTIPLIER = 10.0
 BOOZER_TRUST_DEFAULT_NEWTON_TOL_EXACT = 1.0e-13
 BOOZER_TRUST_DEFAULT_NEWTON_TOL_LS = 1.0e-11
-# HBT-EP campaign rotational transforms live in the 0.15 — 0.30 band and the
-# documented hardware envelope cannot support |iota| approaching 1. Anything
-# at or above this absolute bound is treated as clearly nonphysical and the
-# iota objective is disabled until the next trustworthy solve.
+# Loose non-physical-iota filter (NOT a campaign envelope). The HBT-EP
+# campaign rotational transforms live in the 0.15 — 0.30 band but the
+# trust gate must accept anything that could conceivably be a healthy
+# solve from a divergent equilibrium. ``|iota| < 1`` rejects only the
+# clearly broken regime where iota approaches integer resonance; tighter
+# filtering would mask early-iteration physics. Anything at or above this
+# bound is treated as nonphysical and the iota objective is disabled
+# until the next trustworthy solve.
 BOOZER_TRUST_IOTA_ABS_BOUND = 1.0
 
 # Reasons the Boozer trust gate disables the iota term. Surfaced into the
@@ -603,9 +607,13 @@ def compute_boozer_constrained_residual_norm(boozer_surface) -> float | None:
       ``norm = np.linalg.norm(dval)`` where ``dval`` is the gradient of the
       scalarized least-squares objective. The 2-norm of ``res['residual']``
       itself is *not* what the solver checks — at LS convergence the residual
-      sits at a non-zero minimum even while the gradient vanishes. We
-      therefore return ``||res['jacobian']||`` for the LS path, which is the
-      exact quantity the upstream success check measures.
+      sits at a non-zero minimum even while the gradient vanishes. The
+      Newton LS path persists the gradient under ``res['jacobian']``
+      (boozersurface.py:635-653); the LBFGS path persists it under
+      ``res['gradient']`` (boozersurface.py:565-570). Both are gradient
+      vectors of the scalarized LS objective — semantically equivalent for
+      the trust-gate norm. We resolve which key is populated for the
+      specific solve via explicit key presence (no silent fallback).
 
     Returns ``None`` when the relevant vector cannot be read so the trust
     gate can fail closed.
@@ -616,13 +624,26 @@ def compute_boozer_constrained_residual_norm(boozer_surface) -> float | None:
         return None
     kind = _boozer_solve_kind(boozer_surface)
     if kind == "ls":
-        # LS Newton success is ``||grad|| <= newton_tol``; ``res['jacobian']``
-        # is the gradient (set by ``minimize_boozer_penalty_constraints_newton``
-        # at simsopt-surrogate/src/simsopt/geo/boozersurface.py:635-653).
-        jacobian = res.get("jacobian")
-        if jacobian is None:
+        # LS-family success is ``||grad|| <= newton_tol``. Two upstream
+        # writers persist the gradient under different keys:
+        #   - LS Newton (``minimize_boozer_penalty_constraints_newton``):
+        #     ``res['jacobian'] = dval`` (boozersurface.py:653).
+        #   - LBFGS (``minimize_boozer_penalty_constraints_LBFGS``):
+        #     ``res['gradient'] = res.jac`` (boozersurface.py:570).
+        # No ``res.get(..., res.get(...))`` fallback: pick by key presence
+        # so a future writer that populates neither (or both) surfaces
+        # explicitly as ``None`` instead of silently degrading.
+        has_jacobian = "jacobian" in res and res.get("jacobian") is not None
+        has_gradient = "gradient" in res and res.get("gradient") is not None
+        if has_jacobian:
+            gradient_vector = res["jacobian"]
+        elif has_gradient:
+            gradient_vector = res["gradient"]
+        else:
             return None
-        return float(np.linalg.norm(np.asarray(jacobian, dtype=float).ravel()))
+        return float(
+            np.linalg.norm(np.asarray(gradient_vector, dtype=float).ravel())
+        )
     # Exact-Newton path: ``res['residual']`` holds the unmasked raw Boozer
     # residual. Reconstruct the constrained ``b`` vector used by the success
     # check (boozersurface.py:980-984).

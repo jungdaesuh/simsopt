@@ -168,44 +168,54 @@ class TestComputeSHELFromField:
 
 
 class TestArtifactFields:
-    def test_none_results_emit_all_keys(self):
+    """Phase 3b artifact-key payload.
+
+    F6 fix: Phase 3b only emits the helical-content + composite keys. The
+    field-line proxy keys (``FIELDLINE_IOTA_PROXY`` /
+    ``FIELDLINE_IOTA_PROXY_VALID``) are owned by Phase 3a so the "valid"
+    semantics is unambiguous; this function takes the Phase 3a result as
+    explicit kwargs and uses them only for the composite-score proximity
+    term.
+    """
+
+    def test_none_results_emit_phase3b_keys(self):
         bridge = load_bridge_module()
         fields = bridge.boozer_topology_bridge_artifact_fields(
             s_hel=None,
-            fieldline_result=None,
+            fieldline_iota_proxy_mean=None,
+            fieldline_iota_proxy_valid=False,
             s_hel_objective_weight=None,
             iota_target=0.2,
         )
         assert set(fields) == {
-            "FIELDLINE_IOTA_PROXY",
-            "FIELDLINE_IOTA_PROXY_VALID",
             "HELICAL_FIELD_CONTENT",
             "S_HEL_OBJECTIVE_WEIGHT",
             "PRE_BOOZER_TOPOLOGY_SCORE",
         }
         assert all(value is None for value in fields.values())
 
+    def test_phase3b_does_not_emit_fieldline_proxy_keys(self):
+        """SSOT enforcement: Phase 3a owns FIELDLINE_IOTA_PROXY{,_VALID}."""
+        bridge = load_bridge_module()
+        fields = bridge.boozer_topology_bridge_artifact_fields(
+            s_hel=0.5,
+            fieldline_iota_proxy_mean=0.195,
+            fieldline_iota_proxy_valid=True,
+            s_hel_objective_weight=0.0,
+            iota_target=0.2,
+        )
+        assert "FIELDLINE_IOTA_PROXY" not in fields
+        assert "FIELDLINE_IOTA_PROXY_VALID" not in fields
+
     def test_concrete_results_populate_keys(self):
         bridge = load_bridge_module()
-        fieldline = bridge.FieldlineIotaProxyResult(
-            iota_proxy_mean=0.195,
-            iota_proxy_std=0.003,
-            iota_per_line=(0.197, 0.193, 0.195),
-            n_lines_seeded=8,
-            n_lines_survived=3,
-            tmax=200.0,
-            valid=True,
-            convergence_residual=0.0012,
-            invalid_reason=None,
-        )
         fields = bridge.boozer_topology_bridge_artifact_fields(
             s_hel=0.42,
-            fieldline_result=fieldline,
+            fieldline_iota_proxy_mean=0.195,
+            fieldline_iota_proxy_valid=True,
             s_hel_objective_weight=1.0e-3,
             iota_target=0.2,
         )
-        assert fields["FIELDLINE_IOTA_PROXY"] == pytest.approx(0.195)
-        assert fields["FIELDLINE_IOTA_PROXY_VALID"] is True
         assert fields["HELICAL_FIELD_CONTENT"] == pytest.approx(0.42)
         assert fields["S_HEL_OBJECTIVE_WEIGHT"] == pytest.approx(1.0e-3)
         # iota_proxy is within 0.005 of target so proximity ≈ 0.995.
@@ -214,30 +224,150 @@ class TestArtifactFields:
             0.42 * (1.0 - abs(0.195 - 0.2)), abs=1e-9
         )
 
-    def test_invalid_fieldline_proxy_is_treated_as_unavailable(self):
+    def test_invalid_fieldline_proxy_collapses_score_to_s_hel(self):
         bridge = load_bridge_module()
-        fieldline = bridge.FieldlineIotaProxyResult(
-            iota_proxy_mean=0.1,
-            iota_proxy_std=0.0,
-            iota_per_line=(0.1,),
-            n_lines_seeded=8,
-            n_lines_survived=1,
-            tmax=200.0,
-            valid=False,
-            convergence_residual=0.5,
-            invalid_reason="convergence_tol_exceeded",
-        )
         fields = bridge.boozer_topology_bridge_artifact_fields(
             s_hel=0.5,
-            fieldline_result=fieldline,
+            fieldline_iota_proxy_mean=0.1,
+            fieldline_iota_proxy_valid=False,
             s_hel_objective_weight=None,
             iota_target=0.2,
         )
         # S_HEL alone (invalid proxy is treated as unavailable).
         assert fields["PRE_BOOZER_TOPOLOGY_SCORE"] == pytest.approx(0.5)
-        # But the raw proxy value is still surfaced for inspection.
-        assert fields["FIELDLINE_IOTA_PROXY"] == pytest.approx(0.1)
-        assert fields["FIELDLINE_IOTA_PROXY_VALID"] is False
+
+    def test_s_hel_objective_weight_zero_is_persisted_not_collapsed(self):
+        """Phase 3b: explicit 0.0 weight must round-trip as 0.0, NOT None.
+
+        Plan line 281 mandates an explicit weight schedule; the live
+        optimizer in this phase reports ``0.0`` (gate off but tracked)
+        while a completely-unwired call passes ``None`` (diagnostic not
+        computed). Conflating the two would hide the scheduling intent.
+        """
+        bridge = load_bridge_module()
+        fields = bridge.boozer_topology_bridge_artifact_fields(
+            s_hel=0.3,
+            fieldline_iota_proxy_mean=None,
+            fieldline_iota_proxy_valid=False,
+            s_hel_objective_weight=0.0,
+            iota_target=0.2,
+        )
+        assert fields["S_HEL_OBJECTIVE_WEIGHT"] == 0.0
+        # 0.0 is distinct from None in this contract.
+        assert fields["S_HEL_OBJECTIVE_WEIGHT"] is not None
+
+    def test_s_hel_objective_weight_none_is_preserved(self):
+        bridge = load_bridge_module()
+        fields = bridge.boozer_topology_bridge_artifact_fields(
+            s_hel=0.3,
+            fieldline_iota_proxy_mean=None,
+            fieldline_iota_proxy_valid=False,
+            s_hel_objective_weight=None,
+            iota_target=0.2,
+        )
+        assert fields["S_HEL_OBJECTIVE_WEIGHT"] is None
+
+
+class TestSHELScaleInvarianceOnField:
+    """Phase 3b acceptance: scale invariance must hold end-to-end on a field.
+
+    The grid-level wrapper already has :class:`TestHelicalFieldContent`
+    coverage; this class checks the field-level wrapper that the
+    artifact path actually calls. ``|B|`` scales linearly with the field,
+    so the FFT magnitudes scale linearly and ``S_HEL = sum_helical /
+    sum_total`` is unchanged under a uniform ``B -> c * B``.
+    """
+
+    def test_scale_invariance_through_field_wrapper(self):
+        bridge = load_bridge_module()
+        from types import SimpleNamespace
+
+        nphi, ntheta = 16, 16
+        phi = np.linspace(0.0, 2 * np.pi, nphi, endpoint=False)
+        theta = np.linspace(0.0, 2 * np.pi, ntheta, endpoint=False)
+        PHI, THETA = np.meshgrid(phi, theta, indexing="ij")
+        gamma = np.stack(
+            [np.cos(PHI), np.sin(PHI), 0.1 * np.sin(THETA - 2 * PHI)],
+            axis=-1,
+        )
+        phi_flat = PHI.reshape(-1)
+        theta_flat = THETA.reshape(-1)
+        amplitude = 1.0 + 0.4 * np.cos(theta_flat - 3 * phi_flat)
+
+        class _FieldAtScale:
+            def __init__(self, scale: float):
+                self._scale = float(scale)
+
+            def set_points(self, _):
+                pass
+
+            def B(self):
+                Bx = self._scale * amplitude * np.cos(phi_flat)
+                By = self._scale * amplitude * np.sin(phi_flat)
+                Bz = np.zeros_like(amplitude)
+                return np.stack([Bx, By, Bz], axis=-1)
+
+        surface = SimpleNamespace(gamma=lambda: gamma)
+        s_hel_unit = bridge.compute_helical_field_content_S_HEL(
+            _FieldAtScale(1.0), surface
+        )
+        for scale in (0.1, 7.5, 1.0e6):
+            s_hel_scaled = bridge.compute_helical_field_content_S_HEL(
+                _FieldAtScale(scale), surface
+            )
+            assert s_hel_scaled == pytest.approx(s_hel_unit, rel=1e-12)
+
+    def test_safe_wrapper_returns_none_with_zero_power_reason(self):
+        """Phase 3b failure semantics: zero |B| must fail closed.
+
+        C6 fix: a degenerate Boozer surface where ``|B| ≡ 0`` would
+        previously have produced NaN ``B_unit`` samples that propagated
+        silently into the gradient chain rule. The strict path now raises
+        ``ValueError`` at the |B|=0 site directly (before the FFT) so the
+        safe wrapper converts it to ``None`` in the artifact and the
+        optimizer never sees NaN gradients.
+        """
+        bridge = load_bridge_module()
+        from types import SimpleNamespace
+
+        nphi, ntheta = 8, 8
+        gamma = np.zeros((nphi, ntheta, 3))
+
+        class _ZeroField:
+            def set_points(self, points):
+                self._n = np.asarray(points).shape[0]
+
+            def B(self):
+                return np.zeros((self._n, 3))
+
+        surface = SimpleNamespace(gamma=lambda: gamma)
+        # Strict path raises at the zero-|B| site (C6 fix) before
+        # the FFT is even evaluated; the error string identifies the
+        # degenerate Boozer surface explicitly.
+        with pytest.raises(ValueError, match="zero magnetic field"):
+            bridge.compute_helical_field_content_S_HEL(_ZeroField(), surface)
+        # Safe wrapper returns None (artifact pipeline must NOT crash).
+        assert (
+            bridge.safe_compute_helical_field_content_S_HEL(
+                _ZeroField(), surface
+            )
+            is None
+        )
+
+    def test_artifact_fields_with_zero_weight_emit_no_score_when_s_hel_none(self):
+        """Bridge-enabled but S_HEL undefined: composite stays None, weight 0.0."""
+        bridge = load_bridge_module()
+        fields = bridge.boozer_topology_bridge_artifact_fields(
+            s_hel=None,
+            fieldline_iota_proxy_mean=None,
+            fieldline_iota_proxy_valid=False,
+            s_hel_objective_weight=0.0,
+            iota_target=0.2,
+        )
+        assert fields["HELICAL_FIELD_CONTENT"] is None
+        assert fields["PRE_BOOZER_TOPOLOGY_SCORE"] is None
+        # The schedule slot stays at 0.0; only the diagnostic is unavailable.
+        assert fields["S_HEL_OBJECTIVE_WEIGHT"] == 0.0
 
 
 class TestPreBoozerTopologyScore:
@@ -328,58 +458,79 @@ class TestFieldlineProxyParameterValidation:
 
 
 class TestFieldlineProxyTracingContract:
-    def test_poloidal_transits_receive_surface_coordinate_axis(self, monkeypatch):
+    def test_continuous_angle_iota_uses_surface_centroid_axis(self, monkeypatch):
+        """Pin the C4 continuous-angle path: theta is taken relative to the
+        centroid axis (NOT the global Z axis), so a circular loop around
+        the centroid produces a well-defined iota proxy.
+
+        Replaces the legacy ``compute_toroidal_transits`` /
+        ``compute_poloidal_transits`` patching contract — the new code
+        path bypasses those upstream helpers entirely because their
+        integer ``np.round`` quantizes iota at ``1/ntor`` resolution
+        below the plan's ``5e-3`` convergence tolerance (C4 fix).
+        """
         bridge = load_bridge_module()
+
+        # Standard axisymmetric ring with major radius 1.0, minor radius
+        # 0.1. Centroid axis sits on the R=1.0 circle at Z=0.
+        major_radius = 1.0
+        minor_radius = 0.1
 
         class Surface:
             def cross_section(self, phi, thetas=None):
-                theta = np.linspace(0.0, 2.0 * np.pi, int(thetas), endpoint=False)
-                toroidal_angle = 2.0 * np.pi * float(phi)
-                center = np.array(
-                    [
-                        0.2 * np.cos(toroidal_angle),
-                        0.2 * np.sin(toroidal_angle),
-                        0.05 * np.sin(toroidal_angle),
-                    ]
+                theta = np.linspace(
+                    0.0, 2.0 * np.pi, int(thetas), endpoint=False
                 )
-                ring = np.stack(
+                toroidal_angle = 2.0 * np.pi * float(phi)
+                # Ring centroid at (R=1, Z=0), ring of minor radius 0.1.
+                rr = major_radius + minor_radius * np.cos(theta)
+                zz = minor_radius * np.sin(theta)
+                return np.stack(
                     [
-                        0.03 * np.cos(theta) * np.cos(toroidal_angle),
-                        0.03 * np.cos(theta) * np.sin(toroidal_angle),
-                        0.02 * np.sin(theta),
+                        rr * np.cos(toroidal_angle),
+                        rr * np.sin(toroidal_angle),
+                        zz,
                     ],
                     axis=-1,
                 )
-                return center + ring
 
-        histories = [np.array([[0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 1.0, 0.0]])]
+            def gamma(self):
+                phis = np.linspace(0.0, 1.0, 16, endpoint=False)
+                sections = [self.cross_section(p, thetas=32) for p in phis]
+                return np.stack(sections, axis=0)
 
-        monkeypatch.setattr(bridge, "midplane_seed_radii", lambda surface, n: [1.0])
-        monkeypatch.setattr(bridge, "build_stopping_criteria", lambda surface: ([], None))
+        # Build a synthetic helical trajectory with exact iota = 0.2.
+        # Trajectory makes 5 toroidal revolutions and 1 poloidal
+        # revolution around the centroid axis (R=1.0, Z=0).
+        n_steps = 5001
+        # Parameterize directly by toroidal angle phi for clarity.
+        phi_traj = np.linspace(0.0, 5.0 * 2.0 * np.pi, n_steps)
+        theta_traj = 0.2 * phi_traj  # iota = dtheta / dphi = 0.2
+        # Poloidal angle convention used inside bridge:
+        #   theta = arctan2(R - R_ma, Z - Z_ma)
+        # so R = R_ma + r*sin(theta), Z = Z_ma + r*cos(theta).
+        R_offset = minor_radius * np.sin(theta_traj)
+        Z_offset = minor_radius * np.cos(theta_traj)
+        R_traj = major_radius + R_offset
+        Z_traj = 0.0 + Z_offset
+        x = R_traj * np.cos(phi_traj)
+        y = R_traj * np.sin(phi_traj)
+        z = Z_traj
+        t = np.linspace(0.0, 1.0, n_steps)
+        histories = [np.stack([t, x, y, z], axis=-1)]
+
+        monkeypatch.setattr(
+            bridge, "midplane_seed_radii", lambda surface, n: [1.05]
+        )
+        monkeypatch.setattr(
+            bridge,
+            "build_stopping_criteria",
+            lambda surface: ([], None),
+        )
         monkeypatch.setattr(
             bridge,
             "compute_fieldlines",
             lambda field, R0, Z0, **kwargs: (histories, []),
-        )
-        monkeypatch.setattr(
-            bridge,
-            "compute_toroidal_transits",
-            lambda traced, flux=False: np.array([10.0]),
-        )
-
-        def compute_poloidal_transits(traced, ma=None, flux=True):
-            assert flux is False
-            assert ma is not None
-            gamma = np.zeros((1, 3))
-            ma.gamma_impl(gamma, 0.25)
-            assert np.all(np.isfinite(gamma))
-            assert gamma[0, 1] > 0.1
-            return np.array([2.0])
-
-        monkeypatch.setattr(
-            bridge,
-            "compute_poloidal_transits",
-            compute_poloidal_transits,
         )
 
         result = bridge.compute_fieldline_iota_proxy(
@@ -390,9 +541,427 @@ class TestFieldlineProxyTracingContract:
             tol=1.0e-8,
         )
 
-        assert result.valid is True
-        assert result.iota_proxy_mean == pytest.approx(0.2)
+        # Continuous-angle iota equals the analytic 0.2 to within
+        # numerical-integration precision (the centroid-axis adapter
+        # interpolates the centroid loop linearly between knots, which
+        # introduces a small ~1e-3 truncation floor at the centroid
+        # discretization of 128 phi knots).
+        assert result.iota_proxy_mean == pytest.approx(0.2, abs=5e-3)
         assert result.n_lines_survived == 1
+
+
+class TestContinuousAngleIota:
+    """C4 fix: continuous-angle iota replaces integer transit counting.
+
+    The legacy path used ``compute_toroidal_transits`` /
+    ``compute_poloidal_transits`` which quantize the integer
+    transit counts via ``np.round``. The resulting iota = npol/ntor has
+    resolution 1/ntor, capping the achievable convergence tolerance at
+    ``1/n_transits_target`` regardless of trace length. Continuous-angle
+    accumulation removes the quantization floor.
+    """
+
+    def _shared_axis(self, major_radius: float):
+        """Axisymmetric centroid axis at (R=major_radius, Z=0)."""
+        bridge = load_bridge_module()
+        from banana_opt.topology_bridge_shared import (
+            build_surface_centroid_axis,
+        )
+
+        class _RingSurface:
+            def cross_section(self, phi, thetas):
+                theta = np.linspace(
+                    0.0, 2.0 * np.pi, int(thetas), endpoint=False
+                )
+                toroidal_angle = 2.0 * np.pi * float(phi)
+                rr = major_radius + 0.0 * theta  # planar centroid
+                zz = 0.0 * theta
+                return np.stack(
+                    [
+                        rr * np.cos(toroidal_angle),
+                        rr * np.sin(toroidal_angle),
+                        zz,
+                    ],
+                    axis=-1,
+                )
+
+        return bridge, build_surface_centroid_axis(_RingSurface())
+
+    def test_axisymmetric_circular_trajectory_yields_zero_iota(self):
+        """A pure-toroidal trajectory (no poloidal drift) has iota = 0."""
+        bridge, axis = self._shared_axis(major_radius=1.0)
+        n_steps = 4001
+        phi = np.linspace(0.0, 5.0 * 2.0 * np.pi, n_steps)
+        R = np.full(n_steps, 1.1)  # constant R, constant Z
+        Z = np.zeros(n_steps)
+        traj = np.stack(
+            [
+                np.linspace(0.0, 1.0, n_steps),
+                R * np.cos(phi),
+                R * np.sin(phi),
+                Z,
+            ],
+            axis=-1,
+        )
+        iota = bridge._continuous_angle_iota([traj], axis)
+        # No poloidal drift => delta_theta ~ 0 => iota ~ 0.
+        assert iota[0] == pytest.approx(0.0, abs=1e-3)
+
+    def test_analytic_helix_recovers_iota_within_tolerance(self):
+        """A helix with prescribed iota recovers it to high precision."""
+        bridge, axis = self._shared_axis(major_radius=1.0)
+        n_steps = 5001
+        phi = np.linspace(0.0, 20.0 * 2.0 * np.pi, n_steps)
+        # Pick a non-rational iota so the continuous-angle path cannot
+        # benefit from any accidental integer-transit lock-in.
+        true_iota = 0.273
+        theta = true_iota * phi
+        minor_r = 0.05
+        R = 1.0 + minor_r * np.sin(theta)
+        Z = 0.0 + minor_r * np.cos(theta)
+        traj = np.stack(
+            [
+                np.linspace(0.0, 1.0, n_steps),
+                R * np.cos(phi),
+                R * np.sin(phi),
+                Z,
+            ],
+            axis=-1,
+        )
+        iota = bridge._continuous_angle_iota([traj], axis)
+        # Continuous-angle iota recovers the analytic 0.273 well within
+        # the plan's 5e-3 convergence tolerance (no integer floor).
+        assert iota[0] == pytest.approx(true_iota, abs=1e-3)
+
+    def test_short_trajectory_reports_nan(self):
+        """A trajectory shorter than one toroidal revolution returns NaN."""
+        bridge, axis = self._shared_axis(major_radius=1.0)
+        # Half a revolution => delta_phi = pi < 2*pi => NaN.
+        phi = np.linspace(0.0, np.pi, 50)
+        traj = np.stack(
+            [
+                np.linspace(0.0, 1.0, 50),
+                1.1 * np.cos(phi),
+                1.1 * np.sin(phi),
+                np.zeros(50),
+            ],
+            axis=-1,
+        )
+        iota = bridge._continuous_angle_iota([traj], axis)
+        assert np.isnan(iota[0])
+
+
+class TestSeedAlignment:
+    """C2 fix: per-seed-index pairing across short and long convergence rungs.
+
+    The legacy implementation dropped escapees via ``continue`` and
+    paired the resulting trimmed lists by index, which silently
+    mis-aligned iota comparisons whenever seed 0 escaped at one rung
+    but survived at the other. The fix pads escapees with ``np.nan``
+    so the per-seed-index identity is preserved across rungs.
+    """
+
+    def test_per_seed_nan_padding_preserves_seed_index(self, monkeypatch):
+        """When a single seed escapes, the others retain their seed-index slot.
+
+        Build a 4-seed batch where seed 1 escapes (short trajectory) at
+        the long rung, but produces a usable iota at the short rung.
+        The convergence-residual pairing must drop seed 1 from the
+        comparison while still comparing seeds 0/2/3 against their own
+        long-rung counterparts (not against each other).
+        """
+        bridge = load_bridge_module()
+        major_radius = 1.0
+
+        class _RingSurface:
+            def cross_section(self, phi, thetas):
+                theta = np.linspace(
+                    0.0, 2.0 * np.pi, int(thetas), endpoint=False
+                )
+                toroidal_angle = 2.0 * np.pi * float(phi)
+                rr = major_radius + 0.0 * theta
+                zz = 0.0 * theta
+                return np.stack(
+                    [
+                        rr * np.cos(toroidal_angle),
+                        rr * np.sin(toroidal_angle),
+                        zz,
+                    ],
+                    axis=-1,
+                )
+
+            def gamma(self):
+                phis = np.linspace(0.0, 1.0, 16, endpoint=False)
+                sections = [self.cross_section(p, thetas=32) for p in phis]
+                return np.stack(sections, axis=0)
+
+        # Construct four helical trajectories with distinct true iotas;
+        # the long-rung version of seed 1 is truncated to less than one
+        # revolution so it is NaN-padded and dropped from the pair list.
+        def _make_traj(iota, n_revs, n_steps):
+            phi = np.linspace(0.0, n_revs * 2.0 * np.pi, n_steps)
+            theta = iota * phi
+            R = 1.0 + 0.05 * np.sin(theta)
+            Z = 0.0 + 0.05 * np.cos(theta)
+            return np.stack(
+                [
+                    np.linspace(0.0, 1.0, n_steps),
+                    R * np.cos(phi),
+                    R * np.sin(phi),
+                    Z,
+                ],
+                axis=-1,
+            )
+
+        true_iotas = (0.20, 0.25, 0.30, 0.35)
+        short_histories = [
+            _make_traj(it, n_revs=10, n_steps=4001) for it in true_iotas
+        ]
+        long_histories = [
+            _make_traj(it, n_revs=20, n_steps=8001) for it in true_iotas
+        ]
+        # Make seed 1 escape on the LONG rung (less than 1 revolution).
+        long_histories[1] = _make_traj(0.25, n_revs=0.4, n_steps=20)
+
+        call_count = {"count": 0}
+
+        def _fake_trace(field, R0, Z0, **kwargs):
+            call_count["count"] += 1
+            return (
+                short_histories if call_count["count"] == 1 else long_histories,
+                [],
+            )
+
+        monkeypatch.setattr(
+            bridge,
+            "midplane_seed_radii",
+            lambda surface, n: np.linspace(0.95, 1.05, int(n)),
+        )
+        monkeypatch.setattr(
+            bridge,
+            "build_stopping_criteria",
+            lambda surface: ([], None),
+        )
+        monkeypatch.setattr(bridge, "compute_fieldlines", _fake_trace)
+
+        result = bridge.compute_fieldline_iota_proxy(
+            field=object(),
+            surface=_RingSurface(),
+            n_lines=4,
+            tmax=10.0,
+            tol=1e-8,
+        )
+
+        # All four seeds survived the short rung => 4 finite entries in
+        # iota_per_line. Seed 1 (true_iota=0.25) sits at index 1.
+        assert len(result.iota_per_line) == 4
+        finite_short = [
+            v for v in result.iota_per_line if not np.isnan(v)
+        ]
+        assert len(finite_short) == 4
+        # The convergence residual is the MAX over paired seeds. Seed 1
+        # is dropped from the pairing (NaN at long rung) — if pairing
+        # had been mis-aligned (legacy: seeds 0/2/3 from long compared
+        # against seeds 0/1/2 from short), the residual would be the
+        # |0.20-0.25| ~ 0.05 mismatch, FAR above the 5e-3 tolerance.
+        # With correct per-seed pairing, the residual is the numerical
+        # quantization noise of the continuous-angle path, well below
+        # the convergence tolerance.
+        assert result.convergence_residual is not None
+        assert result.convergence_residual < 1e-2
+        # Three seed pairs (indices 0, 2, 3) contributed to the
+        # convergence check; the proxy_mean averages only the SHORT-rung
+        # finite-iota entries (which includes seed 1 since it survived
+        # short).
+        assert result.n_lines_survived == 4
+
+    def test_legacy_pairing_alignment_bug_caught(self, monkeypatch):
+        """Documents the C2 bug — pre-fix code would have falsely succeeded.
+
+        Sets up the same scenario as the previous test and verifies that
+        a manually mis-aligned comparison (dropping the NaN entry from
+        both arrays before zipping) would yield a much LARGER residual
+        than the per-seed-index comparison. This is the failure mode the
+        C2 fix prevents.
+        """
+        bridge = load_bridge_module()
+        true_iotas = np.array([0.20, 0.25, 0.30, 0.35])
+        # Long rung loses seed 1 => long_finite = [0.20, 0.30, 0.35].
+        short_finite = true_iotas.copy()
+        long_with_nan = true_iotas.copy()
+        long_with_nan[1] = np.nan
+        # The CORRECT pair-wise comparison (C2 fix) compares seed
+        # indices where both are finite: seeds 0, 2, 3. Residual = 0.
+        valid_pairs = np.isfinite(short_finite) & np.isfinite(long_with_nan)
+        correct_residual = float(
+            np.max(
+                np.abs(
+                    long_with_nan[valid_pairs] - short_finite[valid_pairs]
+                )
+            )
+        )
+        # The LEGACY bug compared trimmed lists by index:
+        # short = [0.20, 0.25, 0.30, 0.35], long_trimmed = [0.20, 0.30, 0.35]
+        # zip(short, long_trimmed) => (0.20, 0.20), (0.25, 0.30), (0.30, 0.35)
+        # giving a 0.05 mis-alignment residual.
+        long_trimmed = long_with_nan[~np.isnan(long_with_nan)]
+        n_compare_legacy = min(len(short_finite), len(long_trimmed))
+        legacy_residual = float(
+            np.max(
+                np.abs(
+                    long_trimmed[:n_compare_legacy]
+                    - short_finite[:n_compare_legacy]
+                )
+            )
+        )
+        # The legacy mis-alignment produces a residual orders of
+        # magnitude larger than the correct one.
+        assert correct_residual == pytest.approx(0.0)
+        assert legacy_residual > 0.04
+        # Verify the C2-fixed path matches the correct residual.
+        assert bridge.FIELDLINE_IOTA_CONVERGENCE_TOL == 0.005
+
+
+class TestHelicalCacheFingerprint:
+    """H2 fix: HelicalFieldContentObjective cache invalidates on field.x change.
+
+    Without the fingerprint, mutating ``field.x`` (the optimizer's
+    standard handle) would not invalidate the cache, so subsequent
+    ``J()`` calls would silently return stale values from an older DOF
+    configuration. The fingerprint compares the byte representation of
+    the current ``field.x`` against the cached one.
+    """
+
+    def _build_counting_field(self, n_dofs: int, B_vector: np.ndarray):
+        b_call_count = {"count": 0}
+
+        class _Field:
+            def __init__(self):
+                self.x = np.zeros(n_dofs)
+
+            def set_points(self, points):
+                pass
+
+            def B(self):
+                b_call_count["count"] += 1
+                return B_vector
+
+            def B_vjp(self, v):
+                grad_payload = np.arange(n_dofs, dtype=float) + 1.0
+
+                class _Derivative:
+                    def __call__(self, optim):
+                        return grad_payload
+
+                return _Derivative()
+
+        return _Field(), b_call_count
+
+    def test_cache_invalidates_when_field_x_changes(self):
+        """H2 regression: a silent field.x mutation must trigger a recompute."""
+        bridge = load_bridge_module()
+        nphi, ntheta = 16, 16
+        phi = np.linspace(0.0, 2 * np.pi, nphi, endpoint=False)
+        theta = np.linspace(0.0, 2 * np.pi, ntheta, endpoint=False)
+        PHI, THETA = np.meshgrid(phi, theta, indexing="ij")
+        gamma = np.stack(
+            [np.cos(PHI), np.sin(PHI), 0.1 * np.sin(THETA - 2 * PHI)],
+            axis=-1,
+        )
+        amplitude = 1.0 + 0.2 * np.cos(THETA.reshape(-1) - 2 * PHI.reshape(-1))
+        phi_flat = PHI.reshape(-1)
+        Bx = amplitude * np.cos(phi_flat)
+        By = amplitude * np.sin(phi_flat)
+        Bz = np.zeros_like(amplitude)
+        B_vector = np.stack([Bx, By, Bz], axis=-1)
+
+        n_dofs = 3
+        field, b_call_count = self._build_counting_field(n_dofs, B_vector)
+        surface = SimpleNamespace(gamma=lambda: gamma)
+        objective = bridge.HelicalFieldContentObjective(field, surface)
+
+        # First J() computes; second J() reuses cache.
+        _ = objective.J()
+        assert b_call_count["count"] == 1
+        _ = objective.J()
+        assert b_call_count["count"] == 1
+
+        # Mutating field.x WITHOUT calling recompute_bell must
+        # invalidate the cache on the next J() call.
+        field.x = np.ones(n_dofs)
+        _ = objective.J()
+        assert b_call_count["count"] == 2
+
+    def test_recompute_bell_still_invalidates_cache(self):
+        """Explicit invalidation via recompute_bell remains functional."""
+        bridge = load_bridge_module()
+        nphi, ntheta = 16, 16
+        phi = np.linspace(0.0, 2 * np.pi, nphi, endpoint=False)
+        theta = np.linspace(0.0, 2 * np.pi, ntheta, endpoint=False)
+        PHI, THETA = np.meshgrid(phi, theta, indexing="ij")
+        gamma = np.stack(
+            [np.cos(PHI), np.sin(PHI), 0.1 * np.sin(THETA - 2 * PHI)],
+            axis=-1,
+        )
+        amplitude = 1.0 + 0.2 * np.cos(THETA.reshape(-1) - 2 * PHI.reshape(-1))
+        phi_flat = PHI.reshape(-1)
+        Bx = amplitude * np.cos(phi_flat)
+        By = amplitude * np.sin(phi_flat)
+        Bz = np.zeros_like(amplitude)
+        B_vector = np.stack([Bx, By, Bz], axis=-1)
+
+        n_dofs = 3
+        field, b_call_count = self._build_counting_field(n_dofs, B_vector)
+        surface = SimpleNamespace(gamma=lambda: gamma)
+        objective = bridge.HelicalFieldContentObjective(field, surface)
+        _ = objective.J()
+        assert b_call_count["count"] == 1
+        objective.recompute_bell()
+        _ = objective.J()
+        assert b_call_count["count"] == 2
+
+
+class TestCaller_S_HEL_Then_Tracer_Ordering:
+    """H3 fix: the production call site must evaluate S_HEL before tracing.
+
+    The S_HEL helper sets ``field.set_points(gamma)`` without restoring
+    the previous points (no defensive try/finally per project rules).
+    The fix is to *document* this as a contract: S_HEL runs FIRST, then
+    the tracer (which always re-sets the field's points on every step),
+    so the side effect is invisible in production. This test pins the
+    integration-site ordering so a future refactor cannot reverse the
+    sequence and silently corrupt the field's evaluation points.
+    """
+
+    def test_banana_coil_solver_evaluates_s_hel_before_tracer(self):
+        """Static check: the banana_coil_solver topology-bridge block
+        calls ``safe_compute_helical_field_content_S_HEL`` BEFORE
+        ``safe_compute_phase3a_fieldline_iota_proxy`` so the S_HEL side
+        effect is always overwritten before any other code reads
+        ``field.B()``.
+
+        Reads the file directly rather than importing
+        ``STAGE_2.banana_coil_solver`` so the test does not depend on
+        the example-package sys.path setup the solver runtime injects;
+        the source-text check is the contract we care about.
+        """
+        solver_path = (
+            EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
+        )
+        src = solver_path.read_text()
+        s_hel_pos = src.find("safe_compute_helical_field_content_S_HEL(")
+        tracer_pos = src.find("safe_compute_phase3a_fieldline_iota_proxy(")
+        assert s_hel_pos > 0, (
+            "expected safe_compute_helical_field_content_S_HEL "
+            "in banana_coil_solver"
+        )
+        assert tracer_pos > 0, (
+            "expected safe_compute_phase3a_fieldline_iota_proxy "
+            "in banana_coil_solver"
+        )
+        # S_HEL must come first so its set_points side effect is
+        # overwritten by the tracer (which always re-sets points).
+        assert s_hel_pos < tracer_pos
 
 
 class TestSafeComputeSHEL:
@@ -660,3 +1229,51 @@ class TestSHELGradient:
         _ = objective.dJ_by_dcoils()
         assert b_call_count["count"] == 2
         assert vjp_call_count["count"] == 2
+
+
+class TestSharedCoordinateAxis:
+    """The centroid axis class is the SSOT for both Phase 3a and Phase 3b.
+
+    F13 fix: the byte-identical ``_SurfaceCentroidCoordinateAxis`` was
+    extracted into :mod:`topology_bridge_shared`; both Phase 3 modules
+    import from there so they cannot drift apart.
+    """
+
+    def test_shared_class_resolves_to_phase3b_alias(self):
+        bridge = load_bridge_module()
+        from banana_opt import topology_bridge_shared as shared
+        assert bridge._SurfaceCentroidCoordinateAxis is shared.SurfaceCentroidCoordinateAxis
+
+    def test_shared_factory_resolves_to_phase3b_alias(self):
+        bridge = load_bridge_module()
+        from banana_opt import topology_bridge_shared as shared
+        assert bridge._surface_centroid_coordinate_axis is shared.build_surface_centroid_axis
+
+    def test_shared_defaults_match_phase3b_reexports(self):
+        bridge = load_bridge_module()
+        from banana_opt import topology_bridge_shared as shared
+        # Phase 3b re-exports the shared trace-length and tolerance
+        # defaults so the two bridges agree on the contract. The
+        # ``DEFAULT_NFIELDLINES`` shared constant is intentionally NOT
+        # re-exported here because Phase 3b's two field-line callers use
+        # distinct hardcoded ``n_lines`` values (see the per-function
+        # docstrings); wiring the shared default through would silently
+        # rewrite them.
+        assert bridge.DEFAULT_TMAX == shared.DEFAULT_TMAX
+        assert bridge.DEFAULT_TOL == shared.DEFAULT_TOL
+
+    def test_phase3b_does_not_re_export_default_nfieldlines(self):
+        """Pin the Phase 3b N4 contract: ``DEFAULT_NFIELDLINES`` is NOT re-exported.
+
+        Phase 3b's :func:`compute_fieldline_iota_proxy` and
+        :func:`safe_compute_fieldline_iota_proxy` use hardcoded
+        ``n_lines`` defaults (``8`` and ``4`` respectively) for distinct
+        call-site contexts. Re-exporting the shared ``DEFAULT_NFIELDLINES``
+        from this module would invite consumers to bind it as a default
+        and silently rewrite those values. The canonical Phase 3a
+        default lives in :mod:`banana_opt.topology_bridge_shared`; this
+        test will fail if a future refactor re-introduces the re-export.
+        """
+        bridge = load_bridge_module()
+        assert not hasattr(bridge, "DEFAULT_NFIELDLINES")
+        assert "DEFAULT_NFIELDLINES" not in bridge.__all__

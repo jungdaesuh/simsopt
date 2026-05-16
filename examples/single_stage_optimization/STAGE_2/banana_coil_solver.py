@@ -126,9 +126,16 @@ from banana_opt.stage2_single_stage_handoff import (
 )
 from banana_opt.boozer_topology_bridge import (
     boozer_topology_bridge_artifact_fields,
-    safe_compute_fieldline_iota_proxy,
     safe_compute_helical_field_content_S_HEL,
 )
+from banana_opt.topology_bridge import (
+    DEFAULT_NFIELDLINES as TOPOLOGY_BRIDGE_DEFAULT_NFIELDLINES,
+    DEFAULT_TMAX as TOPOLOGY_BRIDGE_DEFAULT_TMAX,
+    DEFAULT_TOL as TOPOLOGY_BRIDGE_DEFAULT_TOL,
+    fieldline_iota_proxy_artifact_fields,
+    safe_compute_fieldline_iota_proxy as safe_compute_phase3a_fieldline_iota_proxy,
+)
+from topology_scorer import padded_bounds
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
     build_stage2_iota_runtime,
@@ -703,32 +710,97 @@ def parse_args():
         help="Boozer-surface ntor used by the Stage 2 Boozer/iota solve.",
     )
     parser.add_argument(
-        "--stage2-fieldline-iota-proxy",
+        "--enable-topology-bridge-diagnostics",
         action="store_true",
-        default=bool(int(os.environ.get("STAGE2_FIELDLINE_IOTA_PROXY", "0"))),
+        default=bool(int(
+            os.environ.get("ENABLE_TOPOLOGY_BRIDGE_DIAGNOSTICS", "0")
+        )),
         help=(
-            "Phase 3 diagnostic: compute the field-line iota proxy "
-            "(with convergence sub-study) at end-of-solve and persist it "
-            "as FIELDLINE_IOTA_PROXY / FIELDLINE_IOTA_PROXY_VALID. Off by "
-            "default — tracing adds ~5-30s per run. The plan forbids using "
-            "the proxy as a per-iteration objective (lines 270, 283)."
+            "Phase 3b gate: persist HELICAL_FIELD_CONTENT, "
+            "PRE_BOOZER_TOPOLOGY_SCORE, FIELDLINE_IOTA_PROXY, and the "
+            "FIELDLINE_IOTA_PROXY_{VALID,N_TRANSITS,REASON} diagnostics "
+            "post-solve. OFF by default - adds ~5-30s per Stage 2 run for "
+            "field-line tracing + helical content FFT. Enable for donor "
+            "ranking, convergence studies, or topology audits "
+            "(--enable-topology-bridge-diagnostics or set "
+            "ENABLE_TOPOLOGY_BRIDGE_DIAGNOSTICS=1). When the gate is off "
+            "all six artifact keys remain None so downstream consumers can "
+            "distinguish 'diagnostic skipped' from 'diagnostic ran and "
+            "failed'. S_HEL_OBJECTIVE_WEIGHT defaults to 0.0 (deliberately "
+            "zero schedule step) only when the gate is on; the standalone "
+            "scripts/s_hel_gradient_validation.py harness validates the "
+            "analytic gradient before any future ramp."
         ),
     )
     parser.add_argument(
-        "--stage2-fieldline-iota-proxy-n-lines",
+        "--no-enable-topology-bridge-diagnostics",
+        dest="enable_topology_bridge_diagnostics",
+        action="store_false",
+        help=(
+            "Force-disable Phase 3 diagnostic persistence even when "
+            "ENABLE_TOPOLOGY_BRIDGE_DIAGNOSTICS=1 is set in the "
+            "environment; HELICAL_FIELD_CONTENT, PRE_BOOZER_TOPOLOGY_SCORE, "
+            "S_HEL_OBJECTIVE_WEIGHT, FIELDLINE_IOTA_PROXY, "
+            "FIELDLINE_IOTA_PROXY_VALID, FIELDLINE_IOTA_PROXY_N_TRANSITS, "
+            "and FIELDLINE_IOTA_PROXY_REASON remain None in the persisted "
+            "artifact."
+        ),
+    )
+    parser.add_argument(
+        "--topology-bridge-nfieldlines",
         type=int,
-        default=int(os.environ.get("STAGE2_FIELDLINE_IOTA_PROXY_N_LINES", "4")),
-        help="Number of midplane field lines to trace for the iota proxy.",
+        default=int(os.environ.get(
+            "TOPOLOGY_BRIDGE_NFIELDLINES",
+            str(TOPOLOGY_BRIDGE_DEFAULT_NFIELDLINES),
+        )),
+        help=(
+            "Phase 3a diagnostic: number of midplane seed radii for the "
+            "post-solve field-line iota proxy in banana_opt.topology_bridge."
+        ),
     )
     parser.add_argument(
-        "--stage2-fieldline-iota-proxy-tmax",
+        "--topology-bridge-tmax",
         type=float,
-        default=float(
-            os.environ.get("STAGE2_FIELDLINE_IOTA_PROXY_TMAX", "100.0")
-        ),
+        default=float(os.environ.get(
+            "TOPOLOGY_BRIDGE_TMAX",
+            str(TOPOLOGY_BRIDGE_DEFAULT_TMAX),
+        )),
         help=(
-            "Hard cap on field-line trace time. The convergence sub-study "
-            "doubles this to verify |iota_FL(2N)-iota_FL(N)| < 0.005."
+            "Phase 3a diagnostic: hard tmax cap (plan line 271) for the "
+            "post-solve field-line tracer."
+        ),
+    )
+    parser.add_argument(
+        "--topology-bridge-tol",
+        type=float,
+        default=float(os.environ.get(
+            "TOPOLOGY_BRIDGE_TOL",
+            str(TOPOLOGY_BRIDGE_DEFAULT_TOL),
+        )),
+        help=(
+            "Phase 3a diagnostic: ODE tolerance (plan line 273 default 1e-8) "
+            "for the post-solve field-line tracer."
+        ),
+    )
+    parser.add_argument(
+        "--topology-bridge-n-transits-target",
+        type=int,
+        default=int(os.environ.get(
+            "TOPOLOGY_BRIDGE_N_TRANSITS_TARGET", "100"
+        )),
+        help=(
+            "Phase 3a diagnostic: minimum toroidal transits a line must "
+            "complete to contribute to the iota proxy mean (plan acceptance "
+            "rung default 100)."
+        ),
+    )
+    parser.add_argument(
+        "--topology-bridge-escape-radius",
+        type=float,
+        default=None,
+        help=(
+            "Phase 3a diagnostic: cylindrical R escape bound (plan line 272). "
+            "When omitted, defaults to 1.25 * max(R) of the Boozer surface."
         ),
     )
     parser.add_argument(
@@ -962,6 +1034,50 @@ def build_secondary_stage2_results_kwargs(
     }
 
 
+def _interpolated_field_for_topology_bridge(
+    biotsavart, surface, *, nfp: int
+):
+    """Wrap ``biotsavart`` in an ``InterpolatedField`` sized to the surface.
+
+    H1 fix: the legacy code path called the field-line tracer directly
+    with the raw ``BiotSavart`` field. Every integrator step re-evaluated
+    the full ``O(N_coils * quadpoints)`` Biot-Savart sum, which for a
+    typical 25-coil / 80-quadpoint configuration over ~5 seed lines x
+    tmax=3000 (~5000 timesteps each) cost millions of evaluations. The
+    InterpolatedField wrapper builds a cubic-spline lookup table once
+    (40 x 40 x 20 over the surface envelope, matching the recipe used
+    by ``scripts/fieldline_iota_proxy_convergence.py:83-103``); the
+    tracer then samples a constant-cost spline per step.
+
+    The grid is sized via :func:`topology_scorer.padded_bounds` so the
+    interpolant envelope strictly contains the working surface and the
+    escape cage; integrator excursions that leave the box are caught by
+    the escape-cage stopping criteria (set up by the Phase 3a path).
+    The interpolant is ``degree=3`` (cubic) and stellarator-symmetric
+    when the upstream surface is.
+    """
+    from simsopt.field import InterpolatedField
+
+    gamma = np.asarray(surface.gamma(), dtype=float)
+    R = np.sqrt(gamma[..., 0] ** 2 + gamma[..., 1] ** 2)
+    rmin = float(np.min(R))
+    rmax = float(np.max(R))
+    zmax = float(np.max(np.abs(gamma[..., 2])))
+    irmin, irmax, izmax = padded_bounds(rmin, rmax, zmax)
+    stellsym = bool(getattr(surface, "stellsym", True))
+    zrange = (0.0, izmax, 20) if stellsym else (-izmax, izmax, 20)
+    return InterpolatedField(
+        biotsavart,
+        3,
+        (irmin, irmax, 40),
+        (0.0, 2.0 * np.pi / int(max(nfp, 1)), 40),
+        zrange,
+        True,
+        nfp=int(max(nfp, 1)),
+        stellsym=stellsym,
+    )
+
+
 def build_stage2_iota_hot_loop_payload(
     *,
     args,
@@ -1027,8 +1143,14 @@ def build_stage2_iota_hot_loop_payload(
         # Phase 3 non-Boozer topology bridge diagnostics. Populated post-solve
         # via `update_results_json` when the bridge is invoked; left ``None``
         # otherwise so the artifact schema is identical across lanes.
+        # FIELDLINE_IOTA_PROXY{,_VALID,_N_TRANSITS,_REASON} are emitted by
+        # Phase 3a (banana_opt.topology_bridge); HELICAL_FIELD_CONTENT,
+        # S_HEL_OBJECTIVE_WEIGHT, and PRE_BOOZER_TOPOLOGY_SCORE are emitted
+        # by Phase 3b (banana_opt.boozer_topology_bridge).
         "FIELDLINE_IOTA_PROXY": None,
         "FIELDLINE_IOTA_PROXY_VALID": None,
+        "FIELDLINE_IOTA_PROXY_N_TRANSITS": None,
+        "FIELDLINE_IOTA_PROXY_REASON": None,
         "HELICAL_FIELD_CONTENT": None,
         "S_HEL_OBJECTIVE_WEIGHT": None,
         "PRE_BOOZER_TOPOLOGY_SCORE": None,
@@ -1075,32 +1197,101 @@ def build_stage2_iota_hot_loop_payload(
     boozer_surface = getattr(stage2_iota_runtime, "boozer_surface", None)
     surface = getattr(boozer_surface, "surface", None) if boozer_surface else None
     biotsavart = getattr(boozer_surface, "biotsavart", None) if boozer_surface else None
-    if surface is not None and biotsavart is not None:
+    # Plan line 286-291 + Phase 3b gating: persist HELICAL_FIELD_CONTENT /
+    # PRE_BOOZER_TOPOLOGY_SCORE only when the topology-bridge diagnostics
+    # are explicitly enabled. The artifact-schema defaults above keep the
+    # keys present as None when the gate is off so downstream consumers
+    # don't see a missing key. The opt-in default (False) matches the
+    # ``--enable-topology-bridge-diagnostics`` CLI flag default; the
+    # ``getattr`` fallback applies only when an external caller invokes
+    # this helper without going through argparse.
+    bridge_enabled = bool(getattr(args, "enable_topology_bridge_diagnostics", False))
+    if bridge_enabled and surface is not None and biotsavart is not None:
+        # Phase 3b S_HEL: evaluated directly on the raw BiotSavart field
+        # (the S_HEL helper takes a single ``field.B()`` sample on a
+        # static surface grid — no integrator loop, so InterpolatedField
+        # caching would not amortize). The integration-site ordering
+        # contract (H3) is: S_HEL runs FIRST so its ``set_points`` side
+        # effect is overwritten by the tracer's per-step ``set_points``
+        # below.
         s_hel_value = safe_compute_helical_field_content_S_HEL(biotsavart, surface)
-        fieldline_result = None
-        if bool(getattr(args, "stage2_fieldline_iota_proxy", False)):
-            # Opt-in post-solve diagnostic. Plan lines 270 + 283 forbid using
-            # the field-line proxy as a per-iteration objective; this single
-            # call at end-of-payload-build is the only invocation.
-            fieldline_result = safe_compute_fieldline_iota_proxy(
-                biotsavart,
-                surface,
-                n_lines=int(getattr(
-                    args,
-                    "stage2_fieldline_iota_proxy_n_lines",
-                    4,
-                )),
-                tmax=float(getattr(
-                    args,
-                    "stage2_fieldline_iota_proxy_tmax",
-                    100.0,
-                )),
-            )
+        # Phase 3a: canonical post-solve field-line iota proxy. Uses the
+        # banana_opt.topology_bridge module (escape-radius stopping
+        # criterion + n_transits_target gating + structured failure
+        # reasons). The safe wrapper is mandatory here per plan line 305:
+        # tracer-exception failure must be reported as a failure tag in
+        # the artifact, never as a solver crash. Plan lines 270/283: this
+        # is the only field-line-proxy invocation per run and runs
+        # post-solve, never per-iteration.
+        gamma = np.asarray(surface.gamma(), dtype=float)
+        rmax = float(np.max(np.sqrt(gamma[..., 0] ** 2 + gamma[..., 1] ** 2)))
+        topology_bridge_escape_radius = getattr(
+            args, "topology_bridge_escape_radius", None
+        )
+        if topology_bridge_escape_radius is None:
+            topology_bridge_escape_radius = 1.25 * rmax
+        # H1 fix: wrap the BiotSavart field in an InterpolatedField
+        # before tracing so the tracer's per-step field evaluation is a
+        # constant-cost cubic-spline sample rather than the full
+        # ``O(N_coils * quadpoints)`` Biot-Savart sum. Cost is amortized
+        # by the single grid build; the tracer call sees ~5 x tmax /
+        # dt_average evaluations, easily into the millions for tmax=3000.
+        nfp = int(getattr(surface, "nfp", 1) or 1)
+        tracer_field = _interpolated_field_for_topology_bridge(
+            biotsavart, surface, nfp=nfp
+        )
+        phase3a_result = safe_compute_phase3a_fieldline_iota_proxy(
+            tracer_field,
+            surface,
+            nfieldlines=int(getattr(
+                args,
+                "topology_bridge_nfieldlines",
+                TOPOLOGY_BRIDGE_DEFAULT_NFIELDLINES,
+            )),
+            tmax=float(getattr(
+                args,
+                "topology_bridge_tmax",
+                TOPOLOGY_BRIDGE_DEFAULT_TMAX,
+            )),
+            tol=float(getattr(
+                args,
+                "topology_bridge_tol",
+                TOPOLOGY_BRIDGE_DEFAULT_TOL,
+            )),
+            escape_radius=float(topology_bridge_escape_radius),
+            n_transits_target=int(getattr(
+                args,
+                "topology_bridge_n_transits_target",
+                100,
+            )),
+        )
+        # Phase 3a owns the FIELDLINE_IOTA_PROXY / FIELDLINE_IOTA_PROXY_VALID
+        # keys; Phase 3b emits only the helical-content + composite keys.
+        # The composite consumes the Phase 3a result so the
+        # PRE_BOOZER_TOPOLOGY_SCORE proximity term reflects the same iota
+        # proxy that downstream consumers see in the artifact.
+        payload.update(fieldline_iota_proxy_artifact_fields(phase3a_result))
+        # Phase 3b: S_HEL_OBJECTIVE_WEIGHT is reported as 0.0 (not None) when
+        # the bridge is enabled because the metric IS being tracked — the
+        # weight is a deliberately-zero schedule step until the gradient
+        # validation harness (autoresearch/scripts/s_hel_gradient_validation.py)
+        # accepts the analytic gradient (max_rel_error < 1e-2). Plan line 284:
+        # "reject implementation if the objective cannot provide a meaningful
+        # optimizer gradient" — a None here would conflate "weight schedule
+        # off" with "diagnostic not computed".
+        # ``safe_compute_phase3a_fieldline_iota_proxy`` is typed to always
+        # return a ``Phase3aFieldlineIotaProxyResult`` (failure cases are
+        # encoded inside the dataclass via ``valid=False`` /
+        # ``iota_proxy=None`` / ``reason=...``), so we trust the type
+        # signature and consume the fields directly.
+        fieldline_iota_mean = phase3a_result.iota_proxy
+        fieldline_iota_valid = bool(phase3a_result.valid)
         payload.update(
             boozer_topology_bridge_artifact_fields(
                 s_hel=s_hel_value,
-                fieldline_result=fieldline_result,
-                s_hel_objective_weight=None,
+                fieldline_iota_proxy_mean=fieldline_iota_mean,
+                fieldline_iota_proxy_valid=fieldline_iota_valid,
+                s_hel_objective_weight=0.0,
                 iota_target=stage2_iota_runtime.target,
             )
         )
