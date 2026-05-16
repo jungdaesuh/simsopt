@@ -56,7 +56,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from benchmarks.single_stage_smoke_fixture import build_real_single_stage_init_fixture
 import simsopt.config as simsopt_config  # type: ignore[import-untyped]
-from simsopt.field import Coil, Current, coils_via_symmetries  # type: ignore[import-untyped]
+from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries  # type: ignore[import-untyped]
 from simsopt.field.coil import ScaledCurrent  # type: ignore[import-untyped]
 from simsopt.field.biotsavart_jax_backend import (  # type: ignore[import-untyped]
     BiotSavartFieldPullback,
@@ -1324,16 +1324,34 @@ def _run_grouped_biot_savart_points_coils_collective_case() -> None:
 
     Asserts:
     - field result matches the dense reference,
+    - fused sharded ``B_and_dB`` matches the simsoptpp-backed CPU ``B`` and
+      ``dB_by_dX`` oracle,
     - sharding summary advertises the 2D mesh axes and active collective,
     - compiled HLO contains an ``all_reduce`` (reduction across coil axis),
     - non-divisible coil counts and mixed quadrature groups still match the
       dense reference.
     """
     with jax.transfer_guard("allow"):
+        points_np = np.linspace(0.1, 0.9, 24, dtype=np.float64).reshape(8, 3)
+        curve_coils = _build_collective_curve_coils()
+        bs_cpp = BiotSavart(curve_coils)
+        bs_cpp.set_points(points_np)
+        cpp_B = bs_cpp.B()
+        cpp_dB = bs_cpp.dB_by_dX()
         points = jax.device_put(
-            np.linspace(0.1, 0.9, 24, dtype=np.float64).reshape(8, 3)
+            points_np,
         )
-        gammas, gammadashs, currents = _build_collective_circular_coils()
+        gammas = [
+            jnp.asarray(coil.curve.gamma(), dtype=jnp.float64) for coil in curve_coils
+        ]
+        gammadashs = [
+            jnp.asarray(coil.curve.gammadash(), dtype=jnp.float64)
+            for coil in curve_coils
+        ]
+        currents = [
+            jnp.asarray(coil.current.get_value(), dtype=jnp.float64)
+            for coil in curve_coils
+        ]
         coil_spec = grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
         stacked_gammas = jnp.stack(gammas)
         stacked_gammadashs = jnp.stack(gammadashs)
@@ -1394,6 +1412,8 @@ def _run_grouped_biot_savart_points_coils_collective_case() -> None:
     collective_B, collective_dB = collective_B_and_dB
     _assert_allclose_to_reference(collective_B, dense_B)
     _assert_allclose_to_reference(collective_dB, dense_dB)
+    _assert_allclose_to_reference(collective_B, cpp_B)
+    _assert_allclose_to_reference(collective_dB, cpp_dB)
 
     assert summary["field_collective"] is True, summary
     assert summary["strategy"] == "points_coils", summary

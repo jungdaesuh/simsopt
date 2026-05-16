@@ -8,6 +8,8 @@ All functions accept and return JAX arrays and are fully traceable
 by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.
 """
 
+from __future__ import annotations
+
 from enum import Enum
 from functools import lru_cache
 
@@ -71,24 +73,39 @@ def _read_tuning_config() -> tuple:
 # ── Array slicing primitives ──────────────────────────────────────────
 
 
-def _slice_indices(start: int, size: int):
-    return _as_int32_scalar(start) + _index_range(size)
+def _slice_coil_chunk(array, start, chunk_size: int):
+    zero = _as_int32_scalar(0)
+    return lax.dynamic_slice(
+        array,
+        (_as_int32_scalar(start),) + (zero,) * (array.ndim - 1),
+        (chunk_size,) + tuple(array.shape[1:]),
+    )
 
 
-def _slice_coil_chunk(array, start: int, chunk_size: int):
-    return jnp.take(array, _slice_indices(start, chunk_size), axis=0)
+def _slice_quadrature_block(array, start, block_size: int):
+    zero = _as_int32_scalar(0)
+    return lax.dynamic_slice(
+        array,
+        (zero, _as_int32_scalar(start)) + (zero,) * (array.ndim - 2),
+        (array.shape[0], block_size) + tuple(array.shape[2:]),
+    )
 
 
-def _slice_quadrature_block(array, start: int, block_size: int):
-    return jnp.take(array, _slice_indices(start, block_size), axis=1)
-
-
-def _slice_point_chunk(points: object, start: int, chunk_size: int):
-    return jnp.take(points, _slice_indices(start, chunk_size), axis=0)
+def _slice_point_chunk(points, start, chunk_size: int):
+    zero = _as_int32_scalar(0)
+    return lax.dynamic_slice(
+        points,
+        (_as_int32_scalar(start),) + (zero,) * (points.ndim - 1),
+        (chunk_size,) + tuple(points.shape[1:]),
+    )
 
 
 def _slice_prefix(array, size: int):
-    return jnp.take(array, _index_range(size), axis=0)
+    return lax.dynamic_slice(
+        array,
+        (_as_int32_scalar(0),) * array.ndim,
+        (size,) + tuple(array.shape[1:]),
+    )
 
 
 def _float64_scalar(reference, value):
@@ -97,10 +114,6 @@ def _float64_scalar(reference, value):
 
 def _as_int32_scalar(value):
     return jnp.asarray(value, dtype=jnp.int32)
-
-
-def _index_range(size: int):
-    return jnp.arange(size, dtype=jnp.int32)
 
 
 def _safe_radius_squared(diff):
@@ -115,23 +128,16 @@ def _safe_radius_squared(diff):
     # require a separate validation cycle. See docs/source/jax_acceptance.rst
     # ("Domain-edge behavior") for the policy rationale.
     r2 = jnp.sum(diff * diff, axis=-1)
-    # Floor must be large enough that 1/safe_r2^{1.5} stays within float64:
-    # 1/(1e-60)^1.5 = 1e90, well below float64 max (~1.8e308).
-    # Using float64.tiny (~5e-324) overflows: 1/tiny^1.5 ~ 1e486.
-    return r2, jnp.maximum(r2, _float64_scalar(r2, 1e-60))
-
-
-def _vector_component(array, component_index: int):
-    return array[..., component_index]
+    return jnp.maximum(r2, _float64_scalar(r2, 1e-60))
 
 
 def _cross_product(left, right):
-    left_x = _vector_component(left, 0)
-    left_y = _vector_component(left, 1)
-    left_z = _vector_component(left, 2)
-    right_x = _vector_component(right, 0)
-    right_y = _vector_component(right, 1)
-    right_z = _vector_component(right, 2)
+    left_x = left[..., 0]
+    left_y = left[..., 1]
+    left_z = left[..., 2]
+    right_x = right[..., 0]
+    right_y = right[..., 1]
+    right_z = right[..., 2]
     return jnp.stack(
         (
             left_y * right_z - left_z * right_y,
@@ -262,6 +268,9 @@ def _quadrature_block_integral(
     integrand,
 ):
     quadrature_count = gammas.shape[1]
+    # The single-block, exact two-block, and padded >=3-block paths use
+    # different quadrature reduction-tree shapes. Keep parity tests pinned
+    # across block boundaries when changing this routine.
     if block_size <= 0 or quadrature_count <= block_size:
         values = integrand(x, gammas, gammadashs)
         return _pairwise_sum_axis(values, axis=1) * _scalar_like(
@@ -336,6 +345,8 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
     # price of a fixed-shape loop body. Tune chunk_size against peak memory and
     # compile time instead of adding a second dynamic-shape path.
     padded_points = _pad_axis(points, axis=0, padded_size=padded_point_count)
+    # Keep the default remat policy until CUDA profiling shows that saving dot
+    # residuals is a better memory/runtime tradeoff for this kernel.
     remat_chunk_kernel = jax.checkpoint(chunk_kernel)
     first_chunk_points = _slice_point_chunk(padded_points, 0, chunk_size)
     first_result = remat_chunk_kernel(first_chunk_points)
@@ -360,9 +371,7 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
 
 def _biot_savart_B_integrand(x, gammas, gammadashs):
     diff = gammas - x
-    # Exact point-on-coil evaluation is outside the physical domain; use a tiny
-    # branchless floor so traced audit lanes do not rely on select/where.
-    _, safe_r2 = _safe_radius_squared(diff)
+    safe_r2 = _safe_radius_squared(diff)
     r_inv = _explicit_rsqrt(safe_r2)
     r_inv3 = r_inv * _explicit_inv(safe_r2)
     cross = _cross_product(diff, gammadashs)
@@ -371,7 +380,7 @@ def _biot_savart_B_integrand(x, gammas, gammadashs):
 
 def _biot_savart_A_integrand(x, gammas, gammadashs):
     diff = gammas - x
-    _, safe_r2 = _safe_radius_squared(diff)
+    safe_r2 = _safe_radius_squared(diff)
     r_inv = _explicit_rsqrt(safe_r2)
     return gammadashs * r_inv[..., None]
 
@@ -423,6 +432,7 @@ def _make_kernel(
     quad_bs,
     point_cs,
     point_vma_axis_name,
+    platform,
 ):
     """Build and JIT-compile a Biot-Savart kernel for the given tuning config.
 
@@ -430,16 +440,14 @@ def _make_kernel(
     ``lru_cache`` ensures the same config returns the same compiled function.
 
     Cache keyed on ``(integrand_key, diff_mode, coil_cs, quad_bs, point_cs,
-    point_vma_axis_name)``.  A config change that produces different values
-    naturally creates a new cache entry.  Call ``_make_kernel.cache_clear()`` if
-    you need to force recompilation (e.g. after hot-patching an integrand
-    function in tests).
+    point_vma_axis_name, platform)``.  ``platform`` is the active JAX backend
+    string (``jax.default_backend()``); including it in the key keeps the
+    cached Python closure aligned with the device the next call will use
+    even when the backend mode itself did not change. The factory body does
+    not consume ``platform`` — it is a cache-discriminator only.
     """
-    integrand = _INTEGRANDS.get(integrand_key)
-    if integrand is None:
-        raise ValueError(
-            f"Unknown integrand_key: {integrand_key!r}. Expected one of {set(_INTEGRANDS)}"
-        )
+    del platform
+    integrand = _INTEGRANDS[integrand_key]
 
     def one_point(x, gammas, gammadashs, currents):
         return _coil_chunk_reduce(
@@ -495,9 +503,6 @@ def _make_kernel(
                 basis = lax.pcast(basis, point_vma_axis_name, to="varying")
             return primals, jax.vmap(tangents_fn, in_axes=(0,))(basis)
 
-    else:
-        raise ValueError(f"Unknown diff_mode: {diff_mode!r}")
-
     @jax.jit
     def kernel(points, gammas, gammadashs, currents):
         def chunk_fn(chunk_points):
@@ -521,17 +526,19 @@ def _get_kernel(integrand_key, diff_mode, *, point_vma_axis_name=None):
         quad_bs,
         point_cs,
         point_vma_axis_name,
+        jax.default_backend(),
     )
 
 
 @lru_cache(maxsize=16)
-def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
+def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs, platform):
     """Build the tuning-keyed compiled VJP kernel for ``biot_savart_B``.
 
     ``biot_savart_B_vjp`` differentiates through the forward field kernel, so it
     must be rebuilt when the backend tuning changes in the same process.  Keying
-    this factory on the same tuning tuple as the forward kernels keeps the
-    backend/performance contract consistent across both paths.
+    this factory on the same tuning tuple (plus active ``platform``) as the
+    forward kernels keeps the backend/performance contract consistent across
+    both paths.
     """
     forward_kernel = _make_kernel(
         _Integrand.B,
@@ -540,6 +547,7 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
         quad_bs,
         point_cs,
         None,
+        platform,
     )
 
     @jax.jit
@@ -561,7 +569,7 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
 def _get_B_vjp_kernel():
     """Read tuning config and return the cached JIT-compiled VJP kernel."""
     coil_cs, quad_bs, point_cs = _read_tuning_config()
-    return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs)
+    return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs, jax.default_backend())
 
 
 def invalidate_kernel_cache() -> None:
@@ -598,6 +606,9 @@ def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
     This is an opt-in diagnostics kernel: each point materializes three dense
     derivative planes per field component, so callers should prefer
     ``biot_savart_B_and_dB`` unless second point derivatives are required.
+    The pre-reduction integrand is large: for example, ``P_chunk=512``,
+    ``C=16``, ``Q=128`` materializes roughly 226 MB (216 MiB) of Hessian
+    intermediates before quadrature reduction.
     """
     return _get_kernel(_Integrand.B, _DiffMode.HESSIAN)(
         points, gammas, gammadashs, currents
@@ -644,6 +655,12 @@ def biot_savart_d2A_by_dXdX(points, gammas, gammadashs, currents):
 
 def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
     """VJP of ``biot_savart_B`` w.r.t. coil data.
+
+    Returns raw cotangents for ``(gammas, gammadashs, currents)``. The CPU
+    ``BiotSavart.B_vjp`` wrapper instead pushes geometry and current
+    cotangents through each ``Coil.vjp(...)`` and returns a ``Derivative``
+    over coil/current dofs, so downstream comparisons must combine the raw
+    JAX leaves through the same coil mapping.
 
     Uses a dedicated tuning-keyed kernel factory so backend mode and chunking
     changes rebuild the compiled closure in the same process, matching the

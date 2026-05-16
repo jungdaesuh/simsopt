@@ -12,11 +12,15 @@ Audited every `**/*_jax*.py` module under `src/simsopt/{field,geo,objectives,sol
 - **MISSING** (no C++ oracle parity test in the repo): ~12
 - **NO C++ COUNTERPART** (JAX-only orchestration; implicit-diff plumbing): ~15
 
-Top 5 HIGH-severity MISSING items:
+2026-05-16 refresh: the aggregate counts above are the original 2026-05-13
+snapshot counts, but the Biot-Savart rows below are refreshed against the
+current tree.
 
-1. **`biotsavart_jax.biot_savart_A` / `biot_savart_dA_by_dX`** — direct C++ oracle parity vs `simsopt.field.BiotSavart.A()` / `.dA_by_dX()` is NOT exercised in `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity` (only `B` and `dB/dX` are). Coverage exists only via dense-chunked self-consistency probes (`TestBiotSavartJaxChunkedParity`) which use the JAX dense kernel as the oracle — this is **tautological** under `REVIEWER_ORACLE_LINT.md`. HIGH severity for the `direct_kernel` lane.
-2. **`biotsavart_jax.biot_savart_d2B_by_dXdX` / `biot_savart_d2A_by_dXdX`** — no test imports both the JAX symbol and `BiotSavart.d2B_by_dXdX` / `.d2A_by_dXdX` from a `simsoptpp`-backed wrapper at the `derivative-heavy` lane. The acknowledged backlog note (`CLAUDE.md` "BiotSavartJAX missing d2B_by_dXdX/A/compute") is still not bridged at the kernel level.
-3. **`biotsavart_jax.biot_savart_B_vjp`** — no direct test compares the JAX VJP against the C++ `BiotSavart` VJP at the `derivative-heavy` lane. The only coverage in `test_biotsavart_jax.py::TestBiotSavartJaxChunkedParity::test_B_vjp_rebuilds_when_tuning_changes_in_process` (lines 548–599) uses `_dense_B_vjp(chunked_bs, …)` — i.e. the JAX dense path — as the reference. **Tautological** by `REVIEWER_ORACLE_LINT.md`.
+High-severity items with Biot-Savart refresh status:
+
+1. **RESOLVED: `biotsavart_jax.biot_savart_A` / `biot_savart_dA_by_dX`** — direct C++ oracle parity now lives in `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::{test_A_parity_ncsx,test_dA_by_dX_kernel_parity_ncsx}` against `simsopt.field.BiotSavart.A()` / `.dA_by_dX()`.
+2. **RESOLVED: `biotsavart_jax.biot_savart_d2B_by_dXdX` / `biot_savart_d2A_by_dXdX`** — C++ oracle parity now lives in `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::{test_d2B_by_dXdX_parity_ncsx,test_d2A_by_dXdX_parity_ncsx}` via the `BiotSavartJAX` wrapper against `simsopt.field.BiotSavart.{d2B_by_dXdX,d2A_by_dXdX}()`.
+3. **RESOLVED: `biotsavart_jax.biot_savart_B_vjp`** — C++ VJP parity now lives in `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_B_vjp_parity_ncsx` against `simsopt.field.BiotSavart.B_vjp(v)`.
 4. **`boozer_residual_jax.boozer_residual_scalar` / `_grad` / `_hessian` / `_vector`** — the docstring at `tests/geo/test_boozer_residual_jax.py:8` claims "C++ parity (when simsoptpp is available)" but no class in that file imports a `simsoptpp` Boozer residual symbol. The C++ oracle `simsoptpp.boozer_residual` (declared at `src/simsoptpp/boozerresidual_py.h`) is never co-imported with the JAX scalar/vector/grad/hessian helpers. Only the wrapper-level CPU oracle (`BoozerSurface.boozer_penalty_constraints_vectorized`) is compared in `test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix`. HIGH severity — this is the primary kernel claim.
 5. **`fluxobjective_jax.SquaredFluxJAX` gradient parity at the `direct-kernel` lane** — the explicit `TestObjectiveValueParity` (`test_stage2_jax.py:1026`) covers value parity but the gradient comparison (`TestGradientParity`, line 1091) is a tier-2 Stage-2 e2e comparison (`tier1_stage2_value_gradient`, rtol=1e-9), not a `direct-kernel` rtol=1e-10 contract; the only `direct-kernel` lane SquaredFlux gradient assertion lives at `test_fluxobjective_jax_parity.py::test_fluxobjective_gradient_parity`, which routes through the JAX kernel on both sides under a strict-JAX backend (the `_flux_kernel_value_and_grad` host helper at line 279 builds gradients by autodiffing the same kernel). Without a `BiotSavart.B_vjp`-mediated CPU gradient, this is a `direct_kernel` lane gap.
 
@@ -30,16 +34,17 @@ Artifact path: `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/jax_port_
 
 | Function | Status | Test path:line | Severity | Tolerance lane |
 |---|---|---|---|---|
-| `biot_savart_B` | COVERED | `tests/field/test_biotsavart_jax.py:480-503` (`TestBiotSavartJaxCppParity.test_B_parity_ncsx`) — `np.testing.assert_allclose(B_jax, bs.B(), rtol=1e-10)` | — | `direct_kernel` |
-| `biot_savart_dB_by_dX` | COVERED | `tests/field/test_biotsavart_jax.py:505-523` (`test_dB_by_dX_parity_ncsx`) | — | `derivative_heavy` (first_derivative_rtol/atol) |
-| `biot_savart_B_and_dB` | INDIRECT | `tests/field/test_biotsavart_jax.py:421-428` only checks against JAX `biot_savart_B` + `biot_savart_dB_by_dX`. Tautology by REVIEWER_ORACLE_LINT type "jax_path == host_path"; transitively covered by `test_B_parity_ncsx` + `test_dB_by_dX_parity_ncsx`. | LOW | — |
-| `biot_savart_A` | **MISSING** | No `BiotSavart.A()` co-import in any `TestBiotSavartJaxCppParity` test. Only self-consistency vs `_one_point_dense` dense JAX kernel in `TestBiotSavartJaxChunkedParity:601-651`. | **HIGH** | `direct_kernel` |
-| `biot_savart_dA_by_dX` | **MISSING** | Same as above. Dense self-consistency only. | **HIGH** | `derivative_heavy` |
-| `biot_savart_d2B_by_dXdX` | **MISSING** | No co-import with `BiotSavart.d2B_by_dXdX()` anywhere. Only `_assert_second_derivative_taylor_convergence` Taylor-FD check in `test_biotsavart_jax_parity.py:390`. | **HIGH** | `derivative_heavy` (second_derivative) |
-| `biot_savart_d2A_by_dXdX` | **MISSING** | No tests at all. | **HIGH** | `derivative_heavy` (second_derivative) |
-| `biot_savart_B_vjp` | **MISSING** | Only dense JAX self-consistency probes (`tests/field/test_biotsavart_jax.py:585-599`, where `_dense_B_vjp` is a JAX-only reference). No C++ VJP oracle. | **MED** | `derivative_heavy` |
+| `biot_savart_B` | COVERED | `tests/field/test_biotsavart_jax.py:543` (`TestBiotSavartJaxCppParity.test_B_parity_ncsx`) — `np.testing.assert_allclose(B_jax, bs.B(), rtol=1e-10)` | — | `direct_kernel` |
+| `biot_savart_dB_by_dX` | COVERED | `tests/field/test_biotsavart_jax.py:599` (`test_dB_by_dX_parity_ncsx`) | — | `derivative_heavy` (first_derivative_rtol/atol) |
+| `biot_savart_B_and_dB` | COVERED (component oracle) | `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxAnalytical::test_B_and_dB_consistency` pins the fused-vs-separate JAX contract; `tests/subprocess/jax_runtime_cases.py::_run_grouped_biot_savart_points_coils_collective_case` compares the sharded fused output against CPU `BiotSavart.B()` and `.dB_by_dX()`. | — | `direct_kernel` + sharded runtime |
+| `biot_savart_B_and_dB_with_point_axis` | COVERED | `tests/jax_core/test_points_coils_sharding.py::test_points_coils_forced_cpu_stablehlo_all_reduce[grouped-points-coils-collective]` executes the `points_coils` path and checks the fused result against CPU `BiotSavart.B()` / `.dB_by_dX()`. | — | sharded runtime |
+| `biot_savart_A` | COVERED | `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_A_parity_ncsx` compares against `BiotSavart.A()`. | — | `direct_kernel` |
+| `biot_savart_dA_by_dX` | COVERED | `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_dA_by_dX_kernel_parity_ncsx` compares against `BiotSavart.dA_by_dX()`. | — | `derivative_heavy` |
+| `biot_savart_d2B_by_dXdX` | COVERED | `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_d2B_by_dXdX_parity_ncsx` compares `BiotSavartJAX.d2B_by_dXdX()` against `BiotSavart.d2B_by_dXdX()`. | — | `derivative_heavy` (second_derivative) |
+| `biot_savart_d2A_by_dXdX` | COVERED | `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_d2A_by_dXdX_parity_ncsx` compares `BiotSavartJAX.d2A_by_dXdX()` against `BiotSavart.d2A_by_dXdX()`. | — | `derivative_heavy` (second_derivative) |
+| `biot_savart_B_vjp` | COVERED | `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_B_vjp_parity_ncsx` compares `BiotSavartJAX.B_vjp(v)` against `BiotSavart.B_vjp(v)` per coil. | — | `derivative_heavy` |
 | `grouped_biot_savart_B` | PARTIAL | Self-grouping consistency in `test_biotsavart_jax_parity.py::TestGroupedBiotSavartGradient`; FD gradient parity only. No C++ multi-coil oracle at `direct_kernel`. | MED | `fd_gradient` only |
-| `grouped_biot_savart_A` | **MISSING** | No tests. | MED | — |
+| `grouped_biot_savart_A` | COVERED (host helper) | `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxAnalytical::test_grouped_biot_savart_A_host_helper_matches_dense_kernel` directly exercises the host helper against dense JAX accumulation. | — | helper self-consistency |
 | `group_coil_data` | NO C++ COUNTERPART | Pure JAX pytree packing; no C++ analog. | — | — |
 | `invalidate_kernel_cache` | NO C++ COUNTERPART | Cache control only. | — | — |
 
@@ -47,8 +52,9 @@ Artifact path: `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/jax_port_
 
 | Function | Status | Test path:line | Severity | Tolerance lane |
 |---|---|---|---|---|
-| `BiotSavartJAX.B/dB_by_dX/A/dA_by_dX` | COVERED (`B`, `dB`); PARTIAL (`A`, `dA`) | `tests/integration/test_stage2_jax.py:1026-1100` (`TestObjectiveValueParity`, `TestGradientParity`) compares `BiotSavartJAX`-mediated `SquaredFluxJAX` against `SquaredFlux(BiotSavart)`. Direct symbol parity for `BiotSavartJAX.A()` is not exercised. | MED | `tier1_stage2_value_gradient` (e2e) |
-| `BiotSavartJAX.B_vjp` | INDIRECT | Only via Stage 2 e2e gradient parity above. No direct VJP-vs-C++ assertion. | MED | — |
+| `BiotSavartJAX.B/dB_by_dX/A/dA_by_dX` | COVERED | `tests/integration/test_stage2_jax.py::TestBiotSavartJAXParity::{test_b_parity,test_dB_by_dX_parity,test_A_parity}` compares wrapper outputs against `BiotSavart.{B,dB_by_dX,A}()`; `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_dA_by_dX_parity_ncsx` compares `BiotSavartJAX.dA_by_dX()` against `BiotSavart.dA_by_dX()`. | — | `direct_kernel` + `derivative_heavy` |
+| `BiotSavartJAX.d2B_by_dXdX/d2A_by_dXdX` | COVERED | `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::{test_d2B_by_dXdX_parity_ncsx,test_d2A_by_dXdX_parity_ncsx}` compares wrapper outputs against `BiotSavart.{d2B_by_dXdX,d2A_by_dXdX}()`. | — | `derivative_heavy` |
+| `BiotSavartJAX.B_vjp` | COVERED | `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_B_vjp_parity_ncsx` and `tests/integration/test_stage2_jax.py::TestBiotSavartJAXParity::test_b_vjp_parity` compare against `BiotSavart.B_vjp(v)` per coil. | — | `derivative_heavy` |
 
 ### `src/simsopt/field/_jax_common.py`
 
@@ -308,77 +314,25 @@ Artifact path: `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/jax_port_
 
 ---
 
-## MISSING HIGH-severity — Test Sketches
+## High-severity Test Sketches / Delivery Status
 
-### M-1. `biotsavart_jax.biot_savart_A` direct C++ parity
+### M-1. `biotsavart_jax.biot_savart_A` / `dA_by_dX` direct C++ parity — DELIVERED 2026-05-16
 
-**Sketch:**
-```python
-# tests/field/test_biotsavart_jax.py — extend TestBiotSavartJaxCppParity
-def test_A_parity_ncsx(self):
-    bs, points_np, gammas_np, gds_np, currents_np = _ncsx_biotsavart_parity_fixture()
-    A_ref = bs.A()  # C++ via simsopt.field.BiotSavart
-    A_jax = biot_savart_A(
-        jnp.array(points_np), jnp.array(gammas_np),
-        jnp.array(gds_np), jnp.array(currents_np),
-    )
-    np.testing.assert_allclose(np.array(A_jax), A_ref, rtol=1e-10, atol=1e-12)
-```
+- **Evidence**: `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::{test_A_parity_ncsx,test_dA_by_dX_kernel_parity_ncsx}`.
+- **Oracle**: type 1, `simsopt.field.BiotSavart.{A,dA_by_dX}` backed by simsoptpp.
+- **Lane**: `direct_kernel` for `A`, `derivative_heavy.first_derivative` for `dA_by_dX`.
 
-- **Fixture**: existing `_ncsx_biotsavart_parity_fixture` (line 324) already builds the simsoptpp-backed `BiotSavart`.
-- **Oracle**: type 1, `simsopt.field.BiotSavart` (C++ via `simsoptpp.BiotSavart`).
-- **Lane**: `direct_kernel` (`rtol=1e-10`, `atol=1e-12`).
-- **Add**: a mirror `test_dA_by_dX_parity_ncsx` against `bs.dA_by_dX()` at the `derivative_heavy.first_derivative` lane.
+### M-2. `biot_savart_d2B_by_dXdX` / `d2A_by_dXdX` direct C++ parity — DELIVERED 2026-05-16
 
-### M-2. `biot_savart_d2B_by_dXdX` / `d2A_by_dXdX` direct C++ parity
+- **Evidence**: `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::{test_d2B_by_dXdX_parity_ncsx,test_d2A_by_dXdX_parity_ncsx}`.
+- **Oracle**: type 1, `simsopt.field.BiotSavart.{d2B_by_dXdX,d2A_by_dXdX}` backed by simsoptpp.
+- **Lane**: `derivative_heavy.second_derivative`.
 
-**Sketch:**
-```python
-def test_d2B_by_dXdX_parity_ncsx(self):
-    bs, points_np, gammas_np, gds_np, currents_np = _ncsx_biotsavart_parity_fixture()
-    d2B_ref = bs.d2B_by_dXdX()  # add to BiotSavart if not surfaced; sopp exposes it
-    d2B_jax = biot_savart_d2B_by_dXdX(
-        jnp.array(points_np), jnp.array(gammas_np),
-        jnp.array(gds_np), jnp.array(currents_np),
-    )
-    np.testing.assert_allclose(
-        np.array(d2B_jax), d2B_ref,
-        rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
-        atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
-    )
-```
+### M-3. `biot_savart_B_vjp` direct C++ parity — DELIVERED 2026-05-16
 
-- **Oracle**: type 1, `simsoptpp.BiotSavart.d2B_by_dXdX()`. The C++ symbol exists at `src/simsoptpp/biot_savart_py.cpp` (BiotSavart class) but the Python `BiotSavart.d2B_by_dXdX()` wrapper must be confirmed live in `simsopt.field.biotsavart`.
-- **Lane**: `derivative_heavy.second_derivative` (`rtol=1e-6`, `atol=1e-8`).
-- **Risk** if absent: silent drift in 2nd-order field derivatives used by exact Boozer Newton refinement and Hessian probes.
-
-### M-3. `biot_savart_B_vjp` direct C++ parity
-
-**Sketch:**
-```python
-def test_B_vjp_parity_ncsx(self):
-    bs, points_np, gammas_np, gds_np, currents_np = _ncsx_biotsavart_parity_fixture()
-    rng = np.random.default_rng(20260513)
-    v = rng.standard_normal(points_np.shape)
-    # CPU oracle: contract B against v, autodiff via the C++ wrapper
-    bs.set_points(points_np)
-    B_cpu = bs.B()
-    cpu_grad_gammas, cpu_grad_gds, cpu_grad_I = bs.B_vjp(v)  # CPU C++ VJP
-    jax_grad_gammas, jax_grad_gds, jax_grad_I = biot_savart_B_vjp(
-        jnp.array(points_np), jnp.array(v),
-        jnp.array(gammas_np), jnp.array(gds_np), jnp.array(currents_np),
-    )
-    np.testing.assert_allclose(
-        np.array(jax_grad_gammas), cpu_grad_gammas,
-        rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
-        atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
-    )
-    # same for gds and I
-```
-
-- **Oracle**: type 1, `simsoptpp.BiotSavart.B_vjp(v)` (exposed via `simsoptpp` Python bindings; see `src/simsoptpp/biot_savart_vjp_py.h`).
+- **Evidence**: `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_B_vjp_parity_ncsx`.
+- **Oracle**: type 1, `simsopt.field.BiotSavart.B_vjp(v)` backed by simsoptpp.
 - **Lane**: `derivative_heavy.first_derivative`.
-- **Important**: today's chunked-self-consistency tests use the JAX dense kernel as the reference. Per `REVIEWER_ORACLE_LINT.md`, that is **tautological** — flag and replace.
 
 ### M-4. `boozer_residual_scalar/_vector/_grad/_hessian` direct C++ parity
 
@@ -444,8 +398,8 @@ def test_dJ_direct_kernel_lane_parity_ncsx(self):
 These tests claim parity but the "oracle" is the JAX kernel under another name or a NumPy reproduction of the same formula. Per the lint policy these must be replaced.
 
 1. **`tests/geo/test_boozer_residual_jax.py:89-97`** — `_numpy_boozer_residual_reference` is a literal NumPy reimplementation of the formula in `boozer_residual_scalar`/`boozer_residual_vector`. Every assertion in `TestBoozerResidualScalar` (lines 162-348), `TestBoozerResidualGradient`, and `TestBoozerResidualParityStress` (lines 387-450) compares JAX against this reproduction. Violation type: "NumPy reproduction of the JAX formula". Fix: replace with C++ `sopp.boozer_residual` co-import (sketch M-4).
-2. **`tests/field/test_biotsavart_jax.py:585-599`** (`test_B_vjp_rebuilds_when_tuning_changes_in_process`) — the `_dense_B_vjp(chunked_bs, …)` reference (helper at line 294) executes the same JAX `_one_point_dense` kernel inside `chunked_bs`. The assertion `assert_allclose(chunked_leaf, dense_leaf)` compares a JAX chunked path against a JAX dense path. Violation type: "jax_path(x) == host_path(x) where host_path routes through JAX". Fix: add `sopp.BiotSavart.B_vjp` co-import (sketch M-3).
-3. **`tests/field/test_biotsavart_jax.py:421-428`** (`test_B_and_dB_consistent`) — compares `biot_savart_B_and_dB` to `biot_savart_B` + `biot_savart_dB_by_dX` (same JAX kernel, different entry points). Tautology by construction. Acceptable as a "different entry point" smoke check, but should not be cited as a parity oracle.
+2. **`tests/field/test_biotsavart_jax.py::test_B_vjp_rebuilds_when_tuning_changes_in_process`** — the `_dense_B_vjp(chunked_bs, …)` reference executes the same JAX `_one_point_dense` kernel inside `chunked_bs`. This remains valid as chunking self-consistency only; the C++ VJP oracle is now `TestBiotSavartJaxCppParity::test_B_vjp_parity_ncsx` (M-3 delivered).
+3. **`tests/field/test_biotsavart_jax.py::test_B_and_dB_consistency`** — compares `biot_savart_B_and_dB` to `biot_savart_B` + `biot_savart_dB_by_dX` (same JAX kernel, different entry points). This is now explicitly labeled Tier-4 self-consistency; the sharded fused path's CPU oracle check lives in `tests/subprocess/jax_runtime_cases.py::_run_grouped_biot_savart_points_coils_collective_case`.
 4. **`tests/objectives/test_fluxobjective_jax_parity.py:279-308`** — `_flux_kernel_value_and_grad` helper builds its reference by autodiffing the same JAX flux kernel as the production path. Any `value`/`gradient` parity check that uses this helper as the oracle is tautological. Use a `BiotSavart`-backed `SquaredFlux` (C++ chain) as the reference instead.
 5. **`tests/field/test_biotsavart_jax.py:638-651`** (`test_two_chunk_coil_and_quadrature_paths_match_dense_reference`) — `dense_B = _dense_reference_fields(chunked_bs, …)` is itself a JAX call into `chunked_bs._one_point_dense`. This is "JAX vs JAX" chunking parity, not a C++ oracle parity. Acceptable as an internal consistency check; do not let it stand in for a `direct_kernel` lane C++ assertion.
 
