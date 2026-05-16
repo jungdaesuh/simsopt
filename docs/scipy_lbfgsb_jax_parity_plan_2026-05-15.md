@@ -475,8 +475,10 @@ of the current `minimize_lbfgs_host_core(...)`.
 - [x] Complete the direct kernel audit for every ported helper against checked
       references or full `_lbfgsb.setulb(...)` snapshots before claiming the
       "every kernel" test-matrix item.
-- [ ] Commit and push the current-tree parity slice before remote GPU proof.
-      The current scoped slice is:
+- [x] Commit and push the current-tree parity slice before remote GPU proof.
+      The scoped parity slice was committed as
+      `0a54646c1 implement scipy lbfgsb jax parity` and pushed to
+      `fork/gpu-purity-stage2-20260405`. That commit contains:
       `docs/scipy_lbfgsb_jax_parity_plan_2026-05-15.md`,
       `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`,
       `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`,
@@ -491,16 +493,23 @@ of the current `minimize_lbfgs_host_core(...)`.
       `tests/geo/test_lbfgsb_scipy_jax_kernels.py`,
       `tests/geo/test_lbfgsb_scipy_parity.py`,
       `tests/geo/test_single_stage_example.py`, and
-      `tests/integration/test_stage2_jax.py`. `git diff --check` passes on
-      this slice; unrelated dirty files must stay out of the parity commit.
+      `tests/integration/test_stage2_jax.py`. A follow-up launcher provenance
+      fix was committed as
+      `fe0e69269 fix lightning preflight hardware provenance` and pushed to
+      the same branch. The follow-up keeps Lightning preflight `hardware` as
+      `["H200"]` instead of the character list produced by threading the
+      scalar Lightning machine string through the HF Jobs hardware-list
+      preflight helper.
 - [ ] Run GPU live optimizer proof and record the accepted trajectory/control
       tolerance policy. Current local JAX devices are CPU-only:
       `jax.devices() == [CpuDevice(id=0)]`, `jax.default_backend() == "cpu"`;
       `nvidia-smi` is not installed. The no-cost Lightning launcher dry-run
-      for local HEAD `c874af565f36a5922771d5b7aa97915e29f69004` also fails
-      preflight because that SHA is not present on the remote proof branch
-      `gpu-purity-stage2-20260405`; a scoped commit and push are required before
-      any remote CUDA proof can validate the current tree.
+      now resolves pushed HEAD
+      `fe0e692698401388c3aef896f302c8d8ede0b409` on
+      `gpu-purity-stage2-20260405`, emits `machine: "H200"` and
+      `hardware: ["H200"]`, and constructs the remote command against the same
+      SHA. This proves the launcher/preflight contract only; it is not a CUDA
+      execution proof.
 - [ ] Run the banana/Stage 2 scientific trust-chain proof:
       SIMSOPT C++/SciPy -> JAX CPU -> JAX GPU -> JAX CPU/GPU agreement.
 - [x] Re-run the full `TestLBFGSMethodPrivate` class after the seeded-FG parity
