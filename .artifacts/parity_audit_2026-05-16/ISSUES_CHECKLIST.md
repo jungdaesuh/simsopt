@@ -3,7 +3,7 @@
 **Source:** First-pass audit (12 rows) + corrigendum + deeper-pass audit (12 rows) + checklist-validation corrigendum (2026-05-16).
 **Date:** 2026-05-16
 **Branch:** `gpu-purity-stage2-20260405`
-**Total items:** 101 unchecked items across 8 priority tiers (95 actionable + 6 out-of-scope). Verified by `grep -c "^- \[ \]"`.
+**Total items:** 169 unchecked items across 11 sections (10 priority tiers P0-P8 + P5+ plus a "Pass-4 additions" recovery section) (163 actionable + 6 out-of-scope). Verified by `grep -c "^- \[ \]"`. The Pass-4 additions section recovers ~67 items present in the per-row reports that were consolidated or dropped during the original checklist build; each item is tagged with its natural priority tier in `[Px]` brackets.
 
 Legend: severity prefix in description; `(LIVE)` means subagent reproduced the issue against the running env; effort estimates in parentheses.
 
@@ -13,7 +13,7 @@ Legend: severity prefix in description; `(LIVE)` means subagent reproduced the i
 
 A two-stage external validation against (a) live source and (b) official JAX/NVIDIA/SIMSOPT docs identified gaps in the first cut of this checklist. Corrections applied:
 
-- **Counts corrected:** header said "89 issues across 7 priority tiers"; actual is 101 unchecked items (95 actionable + 6 out-of-scope) across 8 priority tiers. Summary table at bottom also corrected.
+- **Counts corrected:** header said "89 issues across 7 priority tiers"; actual is 101 unchecked items (95 actionable + 6 out-of-scope) across 10 priority tiers (P0-P8 plus P5+). Summary table at bottom also corrected.
 - **F1 expanded** from JAX core only to cover CPU `projection_L2_balls` (`permanent_magnet_optimization.py:82`) AND CPU+JAX `prox_l1` (`:63` and `permanent_magnet_optimization_jax.py:320`). Both divide by `m_maxima` without zero-guard. Live-verified: `m_maxima=[1,0,1]` with zero `m` row produces NaN in all three lanes.
 - **DH17 added** (P3 dipole non-cartesian on-axis silent C++↔JAX divergence — was in deeper synthesis but missed in checklist).
 - **DH25 added** (P3 wireframe `np.int32` narrowing at `wireframefield_jax.py:26` — was in deeper synthesis but missed in checklist).
@@ -72,6 +72,8 @@ Official-doc check confirmed:
 
 - [ ] **F-DH7** — Fix `bracket_root_jax` NaN poisoning at `tracing.py:765`. Replace unconditional `b - fb * width / (fb - fa)` with `jnp.where(jnp.abs(fb-fa) > 1e-300, false_position, bisection_midpoint)`. (1h)
 
+- [ ] **F-H4-bracket** — Bracket-monotonicity enforcement at `tracing.py:711-712`. Docstring says `t_left <= t_right` is required but no internal check enforces it. All 4 internal callsites pass `(0.0, 1.0)` so unreachable today, but a future caller could trigger it. Add `t_left, t_right = jnp.minimum(...), jnp.maximum(...)` swap inside `bracket_root_jax`. (1h)
+
 - [ ] **F-DH8** — Add explicit `t = tmax` back-fill at end of trajectory for non-terminated particles. Currently `loss_ctr` over-counts JAX losses vs C++. Match `tracing.cpp:441-444` `dense.calc_state(tmax, y)`. (2h)
 
 - [ ] **F21 (Row 4 part)** — Fix stale docstring at `tracing.py:8-13` (falsely says fieldline RHS is `B/|B|`; actual code returns `B`). Remove stale "Boozer GC path deferred" comment at `tracing.py:386-388`. (15min)
@@ -84,7 +86,7 @@ Official-doc check confirmed:
 
 - [ ] **F7 / H6** — API decision required. Three options, pick one: (a) add optional `existing_result` argument to `evaluate_local` and use `jnp.where(in_kept_cell, result, existing)`; (b) accept JAX-only stricter contract, document, **remove the parity claim** from the ledger; (c) wrap at consumer side. Update `tests/jax_core/test_regular_grid_interp_item13.py:186-196` accordingly. (decision + 4h)
 
-- [ ] **F-DH14** — `_DeviceSpec` cache invalidation. Make cache key include numpy array id at `src/simsopt/jax_core/interpolated_field.py:346-381`, OR deep-copy on construction. Currently mutating underlying `spec.cell_table` silently produces stale results. (2h)
+- [ ] **F-DH14 (sharpened from critique)** — `_DeviceSpec` cache invalidation at `src/simsopt/jax_core/interpolated_field.py:346-381`. The `frozen=True` dataclass references mutable NumPy arrays; id-keying alone does NOT help because same-id mutation defeats it. Correct fix: deep-copy AND set `array.flags.writeable = False` on construction so in-place mutation raises. Currently mutating underlying `spec.cell_table` silently produces stale results across consumers. (3h)
 
 - [ ] **F-DH15** — Promote int32 → int64 for flat cell-index arithmetic at `regular_grid_interp.py:{510-512, 525}` and `src/simsoptpp/regular_grid_interpolant_3d.h:124-127`. UB in C++ at `nx=ny=nz=1000, degree=4` (`6.4e10 > INT_MAX`). (2h)
 
@@ -123,7 +125,7 @@ Official-doc check confirmed:
 
 - [ ] **F-DH17** — Dipole-on-axis with non-cartesian `coordinate_flag` silent C++↔JAX divergence. **(LIVE-verified.)** With a dipole at `(0,0,0)` and `coordinate_flag="cylindrical"` or `"toroidal"`, C++ returns `[NaN, NaN, finite-z]` while JAX returns finite values. Root cause: `xsimd::atan2(0, 0)` returns NaN at `src/simsoptpp/dipole_field.cpp:332-334` and propagates through rotation factors; `jnp.atan2(0, 0)` returns 0 (matches `std::atan2`) at `src/simsopt/jax_core/dipole_field.py:458`. JAX also silently treats unknown `coordinate_flag` typos (e.g., `"sphereical"`) as cartesian via the fall-through `else` at `:466-468`. Fix: guard `atan2(0, 0)` with sentinel in C++ to match JAX (recommended), or document that dipoles must not lie on axis for non-cartesian frames. Add typo regression test. (2h)
 
-- [ ] **F-DH25** — Wireframe unsafe int32 narrowing at JAX ingress. `wframe.segments` is int64 (`src/simsopt/geo/wireframe_toroidal.py:163`). Both `_snapshot_wireframe_arrays` at `src/simsopt/field/wireframefield_jax.py:26` and `_as_jax_int32` at `src/simsopt/jax_core/wireframe.py:115` cast to int32 with no overflow guard. Silent truncation if `n_segments > INT32_MAX`. Either promote to int64 throughout, or add an explicit overflow check that raises. (1h)
+- [ ] **F-DH25 (sharpened from critique)** — Wireframe unsafe int32 narrowing. The risk is not just `n_segments > INT32_MAX` (count) but also **segment index VALUES** exceeding int32 (a wireframe with many nodes where edge indices are >2³¹ even when count fits). Both fail. `wframe.segments` is int64 (`src/simsopt/geo/wireframe_toroidal.py:163`); narrowed at `wireframefield_jax.py:26` AND `wireframe.py:115` AND in any CPU wrapper that passes int64 arrays to pybind through similar boundaries. Audit all int32 casts of `segments`/`seg_signs`/`nodes`-derived arrays; either promote to int64 throughout, or check both `n_segments` AND `max(segments) > INT32_MAX` at the boundary. (2h)
 
 ---
 
@@ -255,7 +257,7 @@ For every JAX adapter exposing CPU-mutable attributes, choose ONE:
 
 - [ ] **F19 / H8 (corrigendum)** — `boozer_residual_jacobian_composed` duplicate forward pass at `src/simsopt/geo/boozer_residual_jax.py:738-739`. Switch to `jax.linearize` or `value_and_jacfwd`. ~2× speedup. (2h)
 
-- [ ] **F20a (CT-1, Row 2 M-1)** — `"normalized"` flux byte-identity tightening: replace per-point `BdotN·sqrt(weight)` with symmetric form `Σ BdotN²·|n| / Σ |B|²·|n|` for byte-identity with C++. (2h)
+- [ ] **F20a (CT-1, Row 2 M-1) — REPHRASED per critique** — `"normalized"` flux byte-identity is NOT byte-identical to C++ symmetric reduction, but the algebra is equivalent and the AD-uniform per-point form is load-bearing. Source report explicitly recommends: document in CLAUDE.md AND optionally add a strict-oracle path keyed off a `reduction_mode="strict_oracle"` kwarg, NOT replace the algebra by default. Land the docstring + CLAUDE.md note; the strict-oracle path is optional and only if a future byte-id gate demands it. (1h)
 
 - [ ] **F20b (CT-1, Row 5)** — `jnp.einsum` reduction tightening. XLA-chosen order vs C++ k-fastest hand-rolled FMA. Switch to `lax.scan`/`lax.fori_loop` if byte-identity becomes binding. (1d)
 
@@ -268,6 +270,115 @@ For every JAX adapter exposing CPU-mutable attributes, choose ONE:
 - [ ] **F-DH (Row 10)** — `jax.hessian(surface_volume_from_dofs)` at `mpol=ntor=20, nphi=ntheta=32` produces 64GB tensor. Add memory guard. (1h)
 
 - [ ] **F-DH (Row 7)** — Make PM optimization shape-polymorphic to avoid recompile on `N`/`P` change (cross-listed in P5). (4h)
+
+---
+
+## Pass-4 additions — missing items recovered from row reports
+
+The first checklist consolidated heavily. The 4th validation pass identified ~40 items present in the per-row reports but not represented as discrete checkboxes. Adding them here grouped by row, each tagged with its natural priority tier.
+
+### Row 02 (integral B·n) — missing
+
+- [ ] **R02-A1** [P6] — Add `coil_current_fixed_geometry_value_and_grad_jax` vs `SquaredFlux.dJ()` direct gradient parity test (currently FD-only). (2h)
+- [ ] **R02-A2** [P0/P1] — Empty-mesh parity divergence: CPU returns `nan` for `nphi=0`, JAX returns `0.0`. Decide canonical behavior, document, add regression. (1h)
+- [ ] **R02-A3** [P4] — `target=None` zero-target NaN-poison through `normal` arithmetic at `objectives_flux.py:38-42` (`jnp.sum(normal) - jnp.sum(normal)` produces NaN if any normal is NaN). Add explicit zero-target path. (1h)
+- [ ] **R02-A4** [P7] — Float32 / complex public-kernel contract tests + docstring. Currently silent dtype passthrough. (1h)
+- [ ] **R02-A5** [P6] — Production-scale (64×64) byte-identity test (closeout caps at 16×8). (1h)
+
+### Row 03 (Boozer residual) — missing
+
+- [ ] **R03-A1** [P3] — `optimize_G=False` fixed-G semantic gap: JAX has no path to pin user-supplied G and exclude from decision vector. Add or document refusal. (2h)
+- [ ] **R03-A2** [P5+] — Add `n_res < n_dofs ⇒ jacrev` heuristic to `boozer_residual_jacobian_composed` to complement F19's value+jacfwd refactor. (2h)
+- [ ] **R03-A3** [P0/P7] — Float64 input-contract assertion at `boozer_residual_scalar` and `_as_runtime_float64` (currently silently promotes/demotes). (1h)
+- [ ] **R03-A4** [P7] — C++ SIMD-load invariant comment at `boozerresidual_impl.h:205-208` (AlignedPaddedVec padding assumption); add CI probe for non-SIMD branch. (1h)
+- [ ] **R03-A5** [P7] — Boozer `dB_by_dX` 4D layout docstring (matches CLAUDE.md `[p, j, l]` abstract convention). (30min)
+
+### Row 04 (tracing) — missing
+
+- [ ] **R04-A1** [P6] — Fixed-seed `loss_ctr` parity test C++ vs JAX (relates to F-DH8; F-DH8 is narrowed but this test would expose the structural bias). (2h)
+- [ ] **R04-A2** [P1] — `accepted_count == max_steps` hard-error/structured warning at orchestrator level (currently silent `logger.debug` only). (1h)
+- [ ] **R04-A3** [P6] — Levelset phi-wraparound CPU↔JAX boundary-parity tests (`[0, 2π)` reduction asymmetry between RHS-path `_continuous_phi` unwrap and classifier Cartesian sampling). (2h)
+- [ ] **R04-A4** [P6] — `_continuous_phi` / `get_phi` exact-edge tests at `phi = ±π` and `phi_init = π` with rounding probes. (1h)
+- [ ] **F-DH8 broadened** [P1] — Note: F-DH8 narrowing of "matters only on budget exhaustion" is too aggressive per source. Normal-exit `loss_ctr` can be structurally biased on JAX even for cleanly-stopped trajectories. Re-broaden F-DH8 scope. (re-scope) (—)
+
+### Row 05 (regular-grid interp) — missing
+
+- [ ] **R05-A1** [P6] — Extend `degree=4` cross-oracle (F-DH16) to ALSO cover `degree=5` and add high-magnitude-cell stress fixture. (1h)
+- [ ] **R05-A2** [P6] — NaN-input parity contract test (turning-point banana orbit pumps NaN coordinates into interpolant; verify finite-or-NaN output is consistent). (1h)
+- [ ] **R05-A3** [P6] — Stellsym/nfp fold boundary test (per fold subtlety where roundoff drives phi negative). (2h)
+- [ ] **R05-A4** [P6] — Chebyshev-node cross-oracle test (currently only uniform). (1h)
+- [ ] **R05-A5** [P6] — `estimate_error` cross-oracle pinning (acknowledge RNG divergence; assert polynomial-exactness case agrees). (1h)
+- [ ] **R05-A6** [P6] — `value_size in [5, 7, 8]` SIMD-padded-tail invariant test. (1h)
+- [ ] **R05-A7** [P7] — Sparse-skip-cell-map sparse-vs-dense benchmark for JAX sentinel-row redirect vs C++ unordered_map. (4h)
+
+### Row 06 (dipole) — missing
+
+- [ ] **R06-A1** [P5+] — C++ Bn hoist redundant `mp_phi_new`/`sphi0`/`cphi0` computations from inner loop at `dipole_field.cpp:320-338`. ~10× speedup for stellsym=1,nfp=5. (2h)
+- [ ] **R06-A2** [P5+] — Replace `pow(-1, stell)` with branchless `(1 - 2*stell)` in C++ Bn loop. (15min)
+- [ ] **R06-A3** [P3] — Replace `1e5` grid-distance sentinel at `dipole_field.cpp:776-777` with `std::numeric_limits<double>::infinity()`. Breaks for device-distances > 316m. (15min)
+- [ ] **R06-A4** [P7] — Mixed-dtype upcast documentation (both backends silently upcast float32→float64). (15min)
+- [ ] **R06-A5** [P5+] — Tighten F-DH17 action: choose+document JAX↔C++ on-axis alignment (recommended: C++ guards `atan2(0,0)` to match JAX). Add `coordinate_flag` whitelist validation (reject typos) at JAX dispatcher. (1h)
+
+### Row 07 (PM optimization) — missing
+
+- [ ] **R07-A1** [P0] — `alpha > 0` validator at PM optimization API ingress (sister to F-DH3 `nu > 0`). (15min)
+- [ ] **R07-A2** [P6/P7] — Too-large-alpha oscillation regression: `alpha > 2/lambda_max(H)` causes wild oscillation, not divergence. Add diagnostic warning and test. (2h)
+- [ ] **R07-A3** [P0] — `jnp.isfinite` guard before all 5 GPMO `argmin` callsites (`pm_optimization.py:{625, 792, 1267, 1617, 1915}`). `argmin` treats NaN as smallest; one NaN leak corrupts greedy selection. (1h)
+- [ ] **R07-A4** [P6] — `mwpgp_step` expand-branch execution coverage test (currently only `cond` count is asserted). (2h)
+- [ ] **R07-A5** [P6] — Non-uniform `m_maxima` penalty regression (penalty index-quirk faithfully mirrored from C++; should be pinned). (1h)
+- [ ] **R07-A6** [P6] — End-to-end `relax_and_split_jax` vs CPU after multiple outer iterations. (4h)
+- [ ] **R07-A7** [P7] — Document MwPGP early-stop/history-trap: JAX runs fixed-step; downstream callers expecting `objective_history`/`m_history` from C++ get nothing. (30min)
+
+### Row 08 (wireframe field) — missing
+
+- [ ] **R08-A1** [P0/P7] — Public-API `points.ndim == 2 and shape[-1] == 3` validation at `wireframe.py:133, 188-195`. Currently silent mis-broadcast via `factor[:, None]`. (1h)
+- [ ] **R08-A2** [P7] — `dB_by_dsegmentcurrents(compute_derivatives)` semantic ambiguity: both CPU and JAX wrappers return B contributions regardless of argument; docstring promises something else. Existing parity test passes vacuously. (1h)
+- [ ] **R08-A3** [P6] — Singular-regime contract test: query on/near a wire segment. Currently no defensive floor; document expected NaN/inf behavior. (1h)
+- [ ] **R08-A4** [P5] — Snapshot `_n_segments` at construction (currently live access to `self.wireframe.n_segments` creates stale-snapshot divergence point). (1h)
+- [ ] **R08-A5** [P6] — Realistic-size slow-fixture wireframe test (`n_segments > 2^15` topology). (4h)
+- [ ] **R08-A6** [P6] — Autodiff-through-currents linearity invariant test. (1h)
+
+### Row 09 (wireframe optimization) — missing
+
+- [ ] **R09-A1** [P3] — Port QR NaN-retry safeguard from CPU `wireframe_optimization.py:824` to JAX `wireframe_optimization_jax.py:130`. (1h)
+- [ ] **R09-A2** [P6] — RCLS parity test via `ToroidalWireframe.set_poloidal_current` / `set_toroidal_current` / `set_segments_constrained`. (2h)
+- [ ] **R09-A3** [P7] — Document `default_current ≈ tol` edge-case behavior. (30min)
+- [ ] **R09-A4** [P6] — Explicit `stop_none_eligible` / undo-branch coverage gap (currently never exercised in tests). (1h)
+- [ ] **R09-A5** [P3] — Refactor C++ sticky stopping-flag hygiene at `wireframe_optimization.cpp` (`accept_current_loop`/`stop_none_eligible`/`stop_undone_loop` declared outside loop, never reset; latent bug masked by `break`). (1h)
+
+### Row 10 (surfaces) — missing
+
+- [ ] **R10-A1** [P7] — Document RZ-derivative-path `~1e-12` cross-machine reduction-order tolerance lane explicitly. (30min)
+- [ ] **R10-A2** [P6] — Non-tensor `SurfaceXYZFourier::dnormal_by_dcoeff` / `d2normal_by_dcoeffdcoeff` direct C++ oracle (currently no column-by-column parity). (4h)
+- [ ] **R10-A3** [P5+] — Tighten F-DH18 memory claim: 88MB is at extreme (`mpol=ntor=20`); source supports smaller values typical (~few MB). Rephrase as "scales unfavorably," not "88MB per call." (15min)
+- [ ] **R10-A4** [P6] — Near-zero-normal autodiff tests for `darea_by_dcoeff` / `dvolume_by_dcoeff` (sister to F-DH19). (1h)
+- [ ] **R10-A5** [P6] — High-resolution transfer-guard memory regression test (mpol=ntor≥10). (2h)
+- [ ] **R10-A6** [P5+] — `_block_mode_positions` dedupe (currently O(modes²) hot path). (4h)
+- [ ] **R10-A7** [P6] — Production-scale non-stellsym / extreme-nfp round-trip test. (2h)
+
+### Row 11 (curves) — missing
+
+- [ ] **R11-A1** [P3] — C++ off-by-one at `src/simsoptpp/curveplanarfourier.cpp:411`: `i < 2` should be `i < 3` (matches siblings at 281/543/696). Currently benign (zero-init), but typo for robustness. (15min)
+- [ ] **R11-A2** [P6] — Expand F16a: also pin `gammadashdashdash` and use a hard nontrivial quaternion fixture (current Planar fixture `q ≈ (1, ε, ε, ε)` is near-identity). (1h)
+- [ ] **R11-A3** [P7] — `pair_linking_number_pure` non-differentiability docstring (returns `int32` after `jnp.round`; not safe for `jax.grad`). (15min)
+- [ ] **R11-A4** [P7] — Curvature/torsion NaN-contract documentation at inflection points (`|γ'|=0` or `γ'×γ''=0`). (30min)
+
+### Row 12 (Boozer radial) — missing
+
+- [ ] **R12-A1** [P6] — DH21 severity: critique flags as HIGH coverage gap, not CRITICAL. Re-tag in P6 list. (—)
+- [ ] **R12-A2** [P5] — F-DH (Row 12) stale-state scope expansion: add `enforce_qs`, `enforce_vacuum`, `N`, `no_K`, and mode-array mutation to the post-construction-mutability audit. (2h)
+- [ ] **R12-A3** [P6] — `num_modes == 1` edge case, empty arrays, mixed-precision regression, GPU deterministic-lane, JIT-without-host-roundtrip tests. (4h)
+- [ ] **R12-A4** [P7] — Positional-indexing maintenance hardening (current `kmns(im)` / `kmnc(im)` positional access is fragile to mode-table reorder). (1h)
+- [ ] **F-DH10b mistiered** [P6] — Move from P3 (upstream) to P6 (test oracles): it's a JAX-side closed-form NumPy oracle test, not a coordinated C++/JAX fix. (—)
+
+### Row 13 (analytic fields) — missing
+
+- [ ] **R13-A1** [P6] — F20d under-specified: source asks for explicit guarded fixture/skip OR relaxed-kernel lane, not a 30min doc note. Bump effort and scope. (2h)
+- [ ] **R13-A2** [P4/P7] — `jax.grad(reiman_B)` NaN-at-axis-ring / arctan2 branch-cut documentation and tolerant test (gradient diverges as expected; pin tolerance). (1h)
+- [ ] **R13-A3** [P0/P3] — Reiman `k_theta >= 1` validation. `k=0` produces singular `rpow_m4 = rmin^{-4}`. (15min)
+- [ ] **R13-A4** [P7] — Dommaschk default-constructor / `n=0, Z=0` discrepancy: C++ `Nmn(m, -1)` and JAX `_nmn_terms(m, -1)` produce 0 via different paths; document. (30min)
+- [ ] **R13-A5** [P3] — Analytic-fields public-API point-shape validation (both backends silently accept wrong-shape `b` arrays). (1h)
+- [ ] **R13-A6** [P5+] — Bound/expose-clear action for unbounded `lru_cache` in JAX Dommaschk polynomial expansion. (1h)
 
 ---
 
@@ -298,10 +409,11 @@ The audit did NOT cover these areas; future work:
 | P7 (docs/API, +F2 moved here +validation-contract) | 12 | ~7 hours |
 | P5+ (performance) | 8 | ~3 days |
 | P8 (out-of-scope) | 6 | — |
-| **TOTAL ACTIONABLE** | **95** | **~3 weeks** |
-| **TOTAL UNCHECKED (incl P8)** | **101** | — |
+| Pass-4 additions (recovered from row reports) | 67 | ~1.5 weeks |
+| **TOTAL ACTIONABLE** | **163** | **~5 weeks** |
+| **TOTAL UNCHECKED (incl P8)** | **169** | — |
 
-(Per-tier counts verified via `sed -n '/^## TIER/,/^## NEXT/p' | grep -c "^- \[ \]"`. Sum: 5+9+6+8+5+5+37+12+8+6 = 101 ✓ matches `grep -c "^- \[ \]"` ground truth.)
+(P0-P8+P5+ per-tier counts verified via `sed -n '/^## TIER/,/^## NEXT/p' | grep -c "^- \[ \]"`. Pass-4 section recovered via `sed -n '/^## Pass-4/,/^## P8/p' | grep -c "^- \[ \]" = 67`. Grand total `grep -c "^- \[ \]"` = 169 ✓.)
 
 **MUST-SHIP path:** check off all 5 P0 items (~5-6 hours total — F1 now expanded to cover CPU `projection_L2_balls`, CPU+JAX `prox_l1`, plus PM-grid `cell_vol=0` reachability). The rest can be tiered into release planning.
 
