@@ -327,6 +327,74 @@ class TestFieldlineProxyParameterValidation:
             bridge.compute_helical_field_content_S_HEL(None, surface)
 
 
+class TestFieldlineProxyTracingContract:
+    def test_poloidal_transits_receive_surface_coordinate_axis(self, monkeypatch):
+        bridge = load_bridge_module()
+
+        class Surface:
+            def cross_section(self, phi, thetas=None):
+                theta = np.linspace(0.0, 2.0 * np.pi, int(thetas), endpoint=False)
+                toroidal_angle = 2.0 * np.pi * float(phi)
+                center = np.array(
+                    [
+                        0.2 * np.cos(toroidal_angle),
+                        0.2 * np.sin(toroidal_angle),
+                        0.05 * np.sin(toroidal_angle),
+                    ]
+                )
+                ring = np.stack(
+                    [
+                        0.03 * np.cos(theta) * np.cos(toroidal_angle),
+                        0.03 * np.cos(theta) * np.sin(toroidal_angle),
+                        0.02 * np.sin(theta),
+                    ],
+                    axis=-1,
+                )
+                return center + ring
+
+        histories = [np.array([[0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 1.0, 0.0]])]
+
+        monkeypatch.setattr(bridge, "midplane_seed_radii", lambda surface, n: [1.0])
+        monkeypatch.setattr(bridge, "build_stopping_criteria", lambda surface: ([], None))
+        monkeypatch.setattr(
+            bridge,
+            "compute_fieldlines",
+            lambda field, R0, Z0, **kwargs: (histories, []),
+        )
+        monkeypatch.setattr(
+            bridge,
+            "compute_toroidal_transits",
+            lambda traced, flux=False: np.array([10.0]),
+        )
+
+        def compute_poloidal_transits(traced, ma=None, flux=True):
+            assert flux is False
+            assert ma is not None
+            gamma = np.zeros((1, 3))
+            ma.gamma_impl(gamma, 0.25)
+            assert np.all(np.isfinite(gamma))
+            assert gamma[0, 1] > 0.1
+            return np.array([2.0])
+
+        monkeypatch.setattr(
+            bridge,
+            "compute_poloidal_transits",
+            compute_poloidal_transits,
+        )
+
+        result = bridge.compute_fieldline_iota_proxy(
+            field=object(),
+            surface=Surface(),
+            n_lines=1,
+            tmax=10.0,
+            tol=1.0e-8,
+        )
+
+        assert result.valid is True
+        assert result.iota_proxy_mean == pytest.approx(0.2)
+        assert result.n_lines_survived == 1
+
+
 class TestSafeComputeSHEL:
     """The artifact path must NOT crash the solver on degenerate B-fields."""
 

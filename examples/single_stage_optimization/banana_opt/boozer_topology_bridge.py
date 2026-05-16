@@ -57,6 +57,48 @@ __all__ = [
 FIELDLINE_IOTA_CONVERGENCE_TOL = 0.005
 
 
+class _SurfaceCentroidCoordinateAxis:
+    """Coordinate axis adapter required by SIMSOPT poloidal-transit counting."""
+
+    def __init__(self, centers: np.ndarray):
+        self._centers = centers
+        self._nphi = int(centers.shape[0])
+
+    def gamma_impl(self, gamma: np.ndarray, phi: float) -> None:
+        phase = float(phi) % 1.0
+        position = phase * self._nphi
+        index = int(np.floor(position)) % self._nphi
+        fraction = position - np.floor(position)
+        center = (
+            (1.0 - fraction) * self._centers[index]
+            + fraction * self._centers[(index + 1) % self._nphi]
+        )
+        gamma[0, :] = center
+
+
+def _surface_centroid_coordinate_axis(
+    surface,
+    *,
+    nphi: int = 128,
+    ntheta: int = 64,
+) -> _SurfaceCentroidCoordinateAxis:
+    phis = np.linspace(0.0, 1.0, int(nphi), endpoint=False)
+    centers = np.asarray(
+        [
+            np.mean(
+                np.asarray(
+                    surface.cross_section(float(phi), thetas=int(ntheta)),
+                    dtype=float,
+                ),
+                axis=0,
+            )
+            for phi in phis
+        ],
+        dtype=float,
+    )
+    return _SurfaceCentroidCoordinateAxis(centers)
+
+
 @dataclass(frozen=True)
 class FieldlineIotaProxyResult:
     """Diagnostic-only field-line iota proxy with convergence-gated trust.
@@ -179,6 +221,7 @@ def _trace_fieldlines_and_compute_iota(
     field,
     surface,
     *,
+    coordinate_axis: _SurfaceCentroidCoordinateAxis,
     n_lines: int,
     tmax: float,
     tol: float,
@@ -199,7 +242,7 @@ def _trace_fieldlines_and_compute_iota(
         stopping_criteria=stopping_criteria,
     )
     toroidal = compute_toroidal_transits(histories, flux=False)
-    poloidal = compute_poloidal_transits(histories, flux=False)
+    poloidal = compute_poloidal_transits(histories, coordinate_axis, flux=False)
     iota_per_line: list[float] = []
     survived = 0
     for ntor, npol in zip(toroidal, poloidal):
@@ -238,9 +281,11 @@ def compute_fieldline_iota_proxy(
         raise ValueError("tmax must be positive")
     if tol <= 0:
         raise ValueError("tol must be positive")
+    coordinate_axis = _surface_centroid_coordinate_axis(surface)
     iota_short, survived_short = _trace_fieldlines_and_compute_iota(
         field,
         surface,
+        coordinate_axis=coordinate_axis,
         n_lines=n_lines,
         tmax=tmax,
         tol=tol,
@@ -260,6 +305,7 @@ def compute_fieldline_iota_proxy(
     iota_long, _survived_long = _trace_fieldlines_and_compute_iota(
         field,
         surface,
+        coordinate_axis=coordinate_axis,
         n_lines=n_lines,
         tmax=2.0 * tmax,
         tol=tol,
