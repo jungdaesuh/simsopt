@@ -86,3 +86,14 @@ Implementation proceeds as an opt-in target lane:
 
 This route is dense pivoted-QR and MINPACK-style, but it does not claim
 MINPACK packed-QR byte identity.
+
+## Track 1 G5 Local CPU Compile Smoke -- 2026-05-17
+
+`TRACK1_G5_LOCAL_CPU_COMPILE_SMOKE.md` records the remaining revised Track 1
+local CPU compile smoke. On the local CPU JAX 0.10.0 / jaxlib 0.10.0 / Python
+3.11.15 runtime, the first timed
+`target_least_squares(..., method="lm-minpack-ondevice")` call on the current
+oversampled Boozer fixture (`residual_shape=(386,)`, `state_shape=(39,)`)
+completed in `3.6744802079629153` seconds with explicit
+`jax.block_until_ready(...)` result synchronization and succeeded. This is not
+the CUDA first-compile performance gate.

@@ -7,8 +7,8 @@
 | Parent plan | `.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md` (Wave 4 W4.3 conditional rollout) |
 | Driver | 5-agent max-effort research (Opus 4.7) + independent critic validation pass |
 | Author | Jung Dae Suh + Claude Opus 4.7 |
-| Status | EXECUTED REVISED (rev 5, 2026-05-17) — Track 2 implemented; original Track 1 byte-equality spike abandoned at Phase 0 G0; revised Track 1 tolerance-equivalent dense-QR lane implemented as `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`; revised Track 1 G3/G4 validation implemented; G5 compile timing pending; Track 3 deferred with priority weakened by revised Track 1 outcome |
-| Estimated effort | Track 2: implemented · revised Track 1 core route: implemented · revised Track 1 G3/G4 validation: implemented · **remaining revised Track 1 validation pending: ~0.25 engineer-days for G5 compile-timing measurement** · Track 3 (Optimistix): 1–2 weeks if reopened |
+| Status | EXECUTED REVISED (rev 6, 2026-05-17) — Track 2 implemented; original Track 1 byte-equality spike abandoned at Phase 0 G0; revised Track 1 tolerance-equivalent dense-QR lane implemented as `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`; revised Track 1 G3/G4 validation implemented; G5 local CPU compile timing passed; Track 3 CPU diagnostic lane implemented as optional `least_squares_algorithm="optimistix-lm"` -> `method="optimistix-lm-ondevice"`, with CUDA/GPU validation skipped per objective and production promotion blocked by CPU endpoint/robustness gates |
+| Estimated effort | Track 2: implemented · revised Track 1 core route: implemented · revised Track 1 G3/G4/G5 validation: implemented · Track 3 CPU diagnostic route: implemented and validated as experimental/not promoted · Track 3 CUDA/GPU gate: explicitly skipped |
 
 ---
 
@@ -33,6 +33,23 @@ MINPACK-style QR LM lane. The first route is
 solves the Marquardt augmented least-squares step with JAX column-pivoted QR.
 It does not claim MINPACK packed-QR byte identity.
 
+G5 is now measured as a local CPU cold compile smoke: the current oversampled
+Boozer fixture has residual shape `(386,)` and state shape `(39,)`; the first
+local CPU timed `lm-minpack-ondevice` call completed in
+`3.6744802079629153` seconds with explicit `jax.block_until_ready(...)` result
+synchronization. This is not the CUDA performance gate. See
+`TRACK1_G5_LOCAL_CPU_COMPILE_SMOKE.md`.
+
+Track 3 was reopened for CPU-only execution per the objective. The optional
+dependency policy is `simsopt[JAX_OPTIMISTIX]` on Python 3.11+, and the route
+is `least_squares_algorithm="optimistix-lm"` resolving to
+`method="optimistix-lm-ondevice"`. Focused CPU tests pass, but the lane remains
+diagnostic: on the oversampled Boozer fixture it matches objective and
+residual-norm scale but not endpoint state or residual vector at the
+`branch-stable-resolve` promotion gate; on the default near-rank-deficient
+fixture it does not improve over the matrix-free lane. CUDA/GPU Track 3
+validation is intentionally skipped.
+
 ## TL;DR
 
 Three-track strategy:
@@ -41,7 +58,7 @@ Three-track strategy:
 
 - **Track 1 revised** (CPU tolerance-equivalent QR lane): implement an opt-in dense pivoted-QR LM lane using `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`. This keeps the useful QR conditioning from MINPACK-style LM while accepting the Phase 0 evidence that packed-QR byte identity is not achievable on the tall production-proxy QR shape. Contract: strict raw final-state parity on identifiable direct fixtures, residual/cost/optimality classification on singular MGH fixtures, and branch-stable residual/objective parity on the current oversampled Boozer fixture.
 
-- **Track 3 deferred** (architectural shift, library swap): adopt Optimistix `LevenbergMarquardt` with Lineax `LSMR` inner solver as a parallel third lane. Adds ~400 LOC of adapter + 2 direct deps (Optimistix + Lineax, with Equinox floor handled by dependency policy). Better numerical conditioning on near-rank-deficient fixtures (`κ(J)` not `κ(J)²`) only relative to the matrix-free lane; revised Track 1 already supplies dense-QR `κ(J)` conditioning. Not byte-equal to MINPACK; tolerance-equivalent. Net LOC is **additive** while the existing matrix-free LM remains the default; the ~500-LOC simplification only materializes if/when a future cleanup retires the current `_lm_iteration`/`_gmres_solve_least_squares_system` path.
+- **Track 3 executed as CPU diagnostic, not promoted** (architectural shift, library swap): adopt Optimistix `LevenbergMarquardt` with Lineax `LSMR` inner solver as a parallel third lane. Added as an optional dependency route, not a required runtime dependency. The original robustness promotion hypothesis did not hold on the current default Boozer fixture, and the oversampled fixture does not meet endpoint-state parity, so this lane stays experimental/diagnostic. Net LOC is **additive** while the existing matrix-free LM remains the default; the ~500-LOC simplification only materializes if/when a future cleanup retires the current `_lm_iteration`/`_gmres_solve_least_squares_system` path.
 
 ---
 
@@ -49,9 +66,9 @@ Three-track strategy:
 
 ### Goals
 
-1. **Eliminate or precisely scope the W4.3 algorithmic divergence** between simsopt's CPU `BoozerSurface.minimize_boozer_penalty_constraints_ls(method="lm")` (→ MINPACK `lmder` via SciPy) and the JAX LM lanes. At rev 1, the matrix-free JAX LM was *algorithmically distinct* per its own module docstring (`optimizer_jax.py:14-45`). As of rev 5, the matrix-free lane has MINPACK-style termination bookkeeping and symmetric damping but still differs in the inner solve, while the opt-in `lm-minpack-ondevice` lane provides dense-QR parity with G3/G4 validation complete and G5 compile timing still pending.
+1. **Eliminate or precisely scope the W4.3 algorithmic divergence** between simsopt's CPU `BoozerSurface.minimize_boozer_penalty_constraints_ls(method="lm")` (→ MINPACK `lmder` via SciPy) and the JAX LM lanes. At rev 1, the matrix-free JAX LM was *algorithmically distinct* per its own module docstring (`optimizer_jax.py:19-66`). As of rev 6, the matrix-free lane has MINPACK-style termination bookkeeping and symmetric damping but still differs in the inner solve, while the opt-in `lm-minpack-ondevice` lane provides dense-QR parity with G3/G4 validation complete and G5 local CPU compile smoke complete. CUDA first-compile performance remains a separate GPU gate.
 2. **Improve numerical robustness on near-rank-deficient BoozerSurface fixtures.** The default fixture's `sdofs_inf ≈ 3.6e-5` parity drift documented in the deepdive plan is driven in part by the matrix-free GMRES inner solve seeing `κ(J^T J + λI) = κ(J)² ≈ 10¹⁴`. Both pivoted-QR (Track 1) and LSMR (Track 3) reduce the effective condition number to `κ(J)`.
-3. **Preserve current JAX/CUDA performance characteristics.** Tracks 2 and 3 must not regress the H100 wall-clock per LM iteration. Track 1 must not regress beyond the 60s first-compile gate in `docs/source/jax_acceptance.rst:101`.
+3. **Preserve current JAX/CUDA performance characteristics.** Tracks 2 and 3 must not regress the H100 wall-clock per LM iteration. Track 1 G5 records a local CPU cold compile smoke; CUDA first-compile performance remains governed by `docs/source/jax_acceptance.rst`.
 4. **Maintain validation discipline.** Every new piece lands with a SciPy/MINPACK oracle test at the appropriate `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES` lane.
 
 ### Non-goals
@@ -68,7 +85,7 @@ Three-track strategy:
 | Track 2 | Three-criterion termination bookkeeping + symmetric damping factors land; **convergence semantics improved** (the JAX LM can stop on ftol/xtol disjunction rather than single grad-norm); iteration count on `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)` is within 1.5× of CPU MINPACK iteration count; `ls_state_parity` lane continues to pass at `sdofs_inf ≤ 1e-11`; focused LM tests and the boozersurface regression slice are green. The downstream `tests/integration/test_single_stage_jax.py` run remains a separate full-validation gate and is not claimed by rev 5. **Exact `info` integer parity over the full 1-8 range is explicitly NOT a Track 2 gate** — MINPACK's `info=4` (`if (gnorm .le. gtol) info = 4`, `lmder.f:313`) and `info=8` (`if (gnorm .le. epsmch) info = 8`, `lmder.f:431`) both depend on `gnorm = max_l |J[:,l]^T·(q^T fvec)/r_diag[l]|`, which is a pivoted-QR-only quantity unavailable in the matrix-free GMRES inner solve. Track 2's info-code parity is restricted to the matrix-free-computable subset {1, 2, 3, 5, 6, 7}; the pivoted-QR-required pair {4, 8} belongs to Track 1 G5. |
 | Track 1 (per gate) | Revised Gate G0 accepts the measured `~1e-15` packed/`Q^T f` drift because it is below the active `1e-10` tolerance contract. Follow-on gates are final-state parity gates, not byte-identity gates: direct fixtures first, then MGH, then the oversampled BoozerSurface fixture. |
 | Track 1 (final) | `least_squares_algorithm="lm-minpack"` opt-in passes final-state parity against `scipy.optimize.least_squares(method="lm")` at `atol=rtol=1e-10` on direct least-squares fixtures, then the broader MGH suite and oversampled BoozerSurface fixture. Exact packed-QR bytes, exact per-iteration trace, and exact `niter`/`nfev` are explicitly outside the revised Track 1 contract. |
-| Track 3 | `least_squares_algorithm="optimistix-lm"` opt-in matches converged state of the current LM at `branch-stable-resolve` lane on the oversampled fixture; better numerical robustness on the default (near-rank-deficient) fixture measured in `sdofs_inf` drift. |
+| Track 3 | `least_squares_algorithm="optimistix-lm"` opt-in is implemented as a CPU diagnostic lane. It matches objective and residual-norm scale on the oversampled fixture, but endpoint/residual-vector parity and default-fixture robustness promotion gates fail; CUDA/GPU validation is skipped per objective. |
 
 ---
 
@@ -78,11 +95,11 @@ Three-track strategy:
 
 **Note:** the bullets below describe the simsopt JAX LM as it existed at the time the plan was first written (rev 1, 2026-05-16). Track 2 (rev 4) and revised Track 1 (rev 4) both touched this code; see §3 and §4 for the current state. Line numbers below are intentionally **historical** — they pin the rev-1 baseline so the plan-vs-implementation diff is reconstructible.
 
-- The simsopt JAX LM lived in `src/simsopt/geo/optimizer_jax.py:1209-1660` (rev 1 line range). Two callable methods: `levenberg_marquardt` (host-driven) and `levenberg_marquardt_traceable` (`lax.while_loop` traceable). Both shared `_lm_iteration` and `_lm_defaults`. (Current HEAD line numbers have drifted by +130 to +210 lines due to Track 2 + revised Track 1 additions.)
+- The simsopt JAX LM lived in `src/simsopt/geo/optimizer_jax.py:1209-1660` (rev 1 line range). Two callable methods: `levenberg_marquardt` (host-driven) and `levenberg_marquardt_traceable` (`lax.while_loop` traceable). Both shared `_lm_iteration` and `_lm_defaults`. In rev 6, the live symbols are `_matrix_free_lm_info` at `optimizer_jax.py:1521`, `_lm_iteration` at `:1603`, `levenberg_marquardt` at `:1763`, and `levenberg_marquardt_traceable` at `:1901`.
 - Inner solve: matrix-free GMRES against `J^T J + λI` via `_gmres_solve_least_squares_system`. **Still true post-Track-2** for the `lm` / `lm-ondevice` lanes; the revised Track 1 `lm-minpack-ondevice` lane uses dense pivoted QR instead.
 - Termination: single criterion `‖∇‖_∞ ≤ tol`. **Superseded by Track 2**, which added MINPACK-style three-criterion termination (`ftol`/`xtol`/`gtol`) surfacing `info` codes 1, 2, 3, 5, 6, 7 via `_matrix_free_lm_info()`.
 - Damping update: asymmetric trust-region with factors `expand=4.0`, `shrink=0.5`, `mild_shrink=0.8`. **Superseded by Track 2**, which replaced these with symmetric Marquardt `× 2 / × 0.5`.
-- W4.3 module docstring (`:14-45`) explicitly states this LM is **algorithmically distinct** from MINPACK `lmder` along three axes (inner solve, termination, damping update).
+- W4.3 module docstring (`:19-66`) explicitly states this LM is **algorithmically distinct** from MINPACK `lmder` along three axes (inner solve, termination, damping update).
 - Plan precedent: `.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md` lines 292-302 documents the MINPACK port as a conditional W4.3 follow-up, with trigger criteria "production default AND byte-equality requirement" both unmet at the time of writing.
 
 ### 1.2 Why this plan now
@@ -164,7 +181,7 @@ Track 2 closes the documented W4.3 algorithmic-divergence gap on the **convergen
 
 ### 3.1 Three-criterion termination
 
-MINPACK terminates on the disjunction of three independent criteria, each producing a distinct `info` code (1, 2, 3, 4) plus three "too small" variants (6, 7, 8) and one budget exhaustion (5). Reference: `optimizer_jax.py:14-45` module docstring and Agent A's spec §5.
+MINPACK terminates on the disjunction of three independent criteria, each producing a distinct `info` code (1, 2, 3, 4) plus three "too small" variants (6, 7, 8) and one budget exhaustion (5). Reference: `optimizer_jax.py:19-66` module docstring and Agent A's spec §5.
 
 ### 3.2 Symmetric Marquardt damping
 
@@ -172,17 +189,17 @@ Rev-1 scheme: `expand=4.0, shrink=0.5, mild_shrink=0.8` (asymmetric — `4.0 ≠
 
 ### 3.3 Todos (Track 2)
 
-- [x] Added `ftol`, `xtol`, `gtol` parameters to `levenberg_marquardt` (`optimizer_jax.py:1707`) and `levenberg_marquardt_traceable` (`:1842`). Default: `ftol=xtol=gtol=1e-8` matching `scipy.optimize.least_squares(method='lm')` (the legacy `scipy.optimize.leastsq` MINPACK-direct wrapper uses `1.49012e-8`, but `least_squares` overrides this).
-- [x] Added `info` code field to `_lm_iteration` carry state (`:1547`). Tracks an internal int32 alongside the existing `success` boolean (`success = legacy_success | info_success` where `info_success = info in {1, 2, 3}`). Codes 1, 2, 3, 5, 6, 7 are computed from ftol/xtol/maxfev bookkeeping alone (info=3 is the conjunction `info=1 AND info=2` per `lmder.f:421-422`); codes 4 and 8 both require `gnorm` (a pivoted-QR-only quantity, per `lmder.f:431` for info=8 and `:313` for info=4) and are reported as `info=0` in the matrix-free Track 2 lane.
-- [x] Implemented `_matrix_free_lm_info(...)` at `optimizer_jax.py:1480` for the matrix-free-computable subset (codes 1, 2, 3, 5, 6, 7). The full 8-code cascade (adding {4, 8}) is now in the Track 1 `lm-minpack-ondevice` lane.
-- [x] Replaced `_lm_defaults` damping factors (`:1437`) with symmetric Marquardt-style factors: `increase_factor=2.0`, `decrease_factor=0.5`. Old `expand=4.0` / `mild_shrink=0.8` asymmetry retired. Full MINPACK `lmpar` bracket search is not present in the matrix-free Track 2 lane.
+- [x] Added `ftol`, `xtol`, `gtol` parameters to `levenberg_marquardt` (`optimizer_jax.py:1763`) and `levenberg_marquardt_traceable` (`:1901`). Default: `ftol=xtol=gtol=1e-8` matching `scipy.optimize.least_squares(method='lm')` (the legacy `scipy.optimize.leastsq` MINPACK-direct wrapper uses `1.49012e-8`, but `least_squares` overrides this).
+- [x] Added `info` code field to the LM carry state (`optimizer_jax.py:1821`) and `_lm_iteration` result schema (`:1732`). Tracks an internal int32 alongside the existing `success` boolean (`success = legacy_success | info_success` where `info_success = info in {1, 2, 3}`). Codes 1, 2, 3, 5, 6, 7 are computed from ftol/xtol/maxfev bookkeeping alone (info=3 is the conjunction `info=1 AND info=2` per `lmder.f:421-422`); codes 4 and 8 both require `gnorm` (a pivoted-QR-only quantity, per `lmder.f:431` for info=8 and `:313` for info=4) and are reported as `info=0` in the matrix-free Track 2 lane.
+- [x] Implemented `_matrix_free_lm_info(...)` at `optimizer_jax.py:1521` for the matrix-free-computable subset (codes 1, 2, 3, 5, 6, 7). The full 8-code cascade (adding {4, 8}) is now in the Track 1 `lm-minpack-ondevice` lane.
+- [x] Replaced `_lm_defaults` damping factors (`:1459`) with symmetric Marquardt-style factors: `increase_factor=2.0`, `decrease_factor=0.5`. Old `expand=4.0` / `mild_shrink=0.8` asymmetry retired. Full MINPACK `lmpar` bracket search is not present in the matrix-free Track 2 lane.
 - [x] Replaced the asymmetric trust-region update in `_lm_iteration` with a symmetric Marquardt update (`damping × 0.5` on accept with high ratio; `damping × 2.0` on reject or low ratio).
 - [x] Updated `levenberg_marquardt` / `levenberg_marquardt_traceable` while-loop predicates to terminate when `info != 0` (matrix-free subset) OR `success` fires on the legacy `‖∇‖_∞ ≤ tol` criterion. Signature compatibility is preserved for callers passing only `tol`; termination behavior can now change by design because default `ftol=xtol=1e-8` may stop before the legacy gradient gate.
-- [x] Result schema in `_lm_iteration` (`:1678`) now surfaces `"info": info_next` alongside `"success": finite_candidate & (legacy_success | info_success)`. Range: `info ∈ {0, 1, 2, 3, 5, 6, 7}` in Track 2; `info ∈ {0, 1, 2, 3, 4, 5, 6, 7, 8}` in the Track 1 `lm-minpack-ondevice` lane.
+- [x] Result schema in `_lm_iteration` (`:1718-1734`) now surfaces `"info": info_next` alongside `"success": finite_candidate & (legacy_success | info_success)`. Range: `info ∈ {0, 1, 2, 3, 5, 6, 7}` in Track 2; `info ∈ {0, 1, 2, 3, 4, 5, 6, 7, 8}` in the Track 1 `lm-minpack-ondevice` lane.
 - [x] `tests/geo/test_lm_termination_parity.py` lands with 5 tests: matrix-free info subset ordering, rejected-uphill-tiny-reduction handling, ftol/xtol info surfacing, explicit-gtol gradient gate. **All 5 PASS.**
 - [x] `tests/geo/test_lm_damping_parity.py` lands with 5 tests: damping halves on good step, doubles on rejected step, MINPACK ratio threshold gating, iteration-count-within-1.5×-SciPy on Rosenbrock, iteration-count-within-1.5× on oversampled BoozerSurface fixture. **All 5 PASS.**
-- [x] `optimizer_jax.py:17-50` module docstring "LM family note" updated to state that the matrix-free lane surfaces `info` codes 1, 2, 3, 5, 6, 7 and that codes 4 and 8 remain pivoted-QR-only (Track 1 lane).
-- [x] `docs/source/jax_acceptance.rst:156-187` "Optimizer family equivalence" section updated with the matrix-free MINPACK-style termination + symmetric damping contract.
+- [x] `optimizer_jax.py:19-66` module docstring "LM family note" updated to state that the matrix-free lane surfaces `info` codes 1, 2, 3, 5, 6, 7 and that codes 4 and 8 remain pivoted-QR-only (Track 1 lane).
+- [x] `docs/source/jax_acceptance.rst:161-239` "Optimizer family equivalence" section updated with the matrix-free MINPACK-style termination + symmetric damping contract.
 - [x] Boozersurface regression validated: `tests/geo/test_boozersurface_jax.py -m "not private_optimizer_runtime"` reports 385/389 passed (4 skipped, **0 regressions**).
 - [x] `ls_state_parity` lane confirmed to still pass at `sdofs_inf ≤ 1e-11` on the oversampled fixture (part of the boozersurface regression run above).
 
@@ -237,8 +254,8 @@ through private JAX internals, and does not claim exact internal trace parity.
   fixture.
 - [x] **G3 (~0.5 day)** Run the broader MGH starter suite. `tests/geo/test_lm_minpack_qr_parity.py` now drives `method="lm-minpack-ondevice"` against `scipy.optimize.least_squares(method="lm")` on the canonical MGH-5 starter set. Rosenbrock, helical valley, Brown almost-linear, and Beale assert raw final-state + residual parity at `atol=rtol=1e-10`. Powell singular is explicitly classified as non-unique/flat and gates on residual, cost, and first-order optimality instead of raw `x` equality.
 - [x] **G4 (~0.5 day)** Run the BoozerSurface fixtures. `tests/geo/test_lm_minpack_qr_parity.py` now drives `method="lm-minpack-ondevice"` through `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)` and gates the independent endpoint through the `branch-stable-resolve` lane while keeping residual/objective agreement strict. The default under-sampled fixture is retained as a physics-health gate, not a raw-state parity gate.
-- [ ] **G5 (~0.25 day)** Measure first-trace compile time on the current oversampled Boozer fixture from `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)`, whose LM residual/vector shape is `(386,39)` in the live tree. Record value in `PHASE0_G0_REPORT.md` (or sibling file). Owner decision per §8 Q6 if measurement exceeds the 60s target documented in `docs/source/jax_acceptance.rst:101`.
-- [ ] **Remaining promotion gate**: run G5 compile timing on the current oversampled Boozer fixture. No owner sign-off is needed unless G5 measurement triggers Q6.
+- [x] **G5 (~0.25 day)** Measure first-trace compile time on the current oversampled Boozer fixture from `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)`, whose LM residual/vector shape is `(386,39)` in the live tree. `TRACK1_G5_LOCAL_CPU_COMPILE_SMOKE.md` records local CPU JAX 0.10.0 / jaxlib 0.10.0 timing: `3.6744802079629153s`, success, with explicit `jax.block_until_ready(...)` result synchronization. This is a local CPU smoke, not the CUDA first-compile gate.
+- [x] **Remaining compile-timing evidence**: G5 local CPU smoke passed; CUDA compile performance remains a separate GPU validation gate.
 
 ### 4.3 Superseded byte-identity spike phases
 
@@ -267,47 +284,47 @@ not active work unless the project later reopens a byte-identical MINPACK port.
 | G2 — direct final-state parity | 2 | focused SciPy LM / linear QR fixtures pass at `atol=rtol=1e-10` | block route |
 | G3 — MGH suite | 3 | regular MGH starter fixtures pass raw final-state/residual parity at `atol=rtol=1e-10`; Powell singular passes residual/cost/optimality classification without raw `x` equality | block release of Track 1; do not extend to MGH-18 without classifying singular/non-unique cases |
 | G4 — BoozerSurface fixture | 4 | oversampled BoozerSurface passes residual/objective strict checks and `branch-stable-resolve` endpoint drift; default under-sampled fixture remains physics-health only | block production promotion if residual/objective or branch-stable endpoint gates fail |
-| G5 — compile time | 5 | first-trace timing measured on the current `(386,39)` residual/vector fixture | owner decision if too slow |
+| G5 — compile time | 5 | local CPU first-trace timing measured on the current `(386,39)` residual/vector fixture | evidence only; CUDA compile performance remains a separate GPU gate |
 
 ---
 
-## 5. Track 3 — Optimistix + Lineax LSMR (DEFERRED, priority weakened post-rev-5)
+## 5. Track 3 — Optimistix + Lineax LSMR (CPU DIAGNOSTIC IMPLEMENTED, NOT PROMOTED)
 
 **Scope:** add a third opt-in `least_squares_algorithm="optimistix-lm"` routing to `optimistix.LevenbergMarquardt(linear_solver=lineax.LSMR(...))`. **Net LOC is additive in this plan** (~+400 LOC adapter + 2 direct deps; the existing matrix-free LM stays). The "~500 LOC simplification" only materializes if a separate future cleanup retires the current `_lm_iteration`/`_gmres_solve_least_squares_system` path after Optimistix is proven in production.
 
-**Priority status (rev 5):** When the plan was first written, Track 3's primary numerical-conditioning argument was "reduce `κ(J)²` to `κ(J)` on near-rank-deficient fixtures" — a strong argument because the matrix-free GMRES inner solve was the only available JAX LM and had the `κ(J)²` penalty. **As of rev 5 this argument is substantially weakened: revised Track 1 (`method="lm-minpack-ondevice"`) already provides the `κ(J)` conditioning via dense pivoted QR**, so Track 3 no longer carries the conditioning argument alone. Remaining Track 3 benefits are:
+**Priority status (rev 6):** When the plan was first written, Track 3's primary numerical-conditioning argument was "reduce `κ(J)²` to `κ(J)` on near-rank-deficient fixtures" — a strong argument because the matrix-free GMRES inner solve was the only available JAX LM and had the `κ(J)²` penalty. **As of rev 5 this argument was substantially weakened: revised Track 1 (`method="lm-minpack-ondevice"`) already provides the `κ(J)` conditioning via dense pivoted QR.** Rev 6 then executed the CPU Optimistix/Lineax route and confirmed that the remaining robustness hypothesis does not hold on the current default Boozer fixture. Remaining Track 3 benefits are diagnostic only:
 - GPU vmap-friendliness (Optimistix is Equinox-based, designed for vmap)
 - LSMR scalability for very-large `m` (matrix-free in `J`, no dense materialization)
 - Library-vs-custom maintenance burden tradeoff
 
-Recommend **keeping Track 3 deferred indefinitely** unless one of those three benefits becomes a concrete need. Formally retire if the project decides none of them will materialize.
+Recommend **keeping Track 3 experimental/diagnostic** unless one of those three benefits becomes a concrete need and a later validation artifact promotes the lane. Formally retire if the project decides none of them will materialize.
 
-**Estimated effort:** 1–2 weeks if reopened. Should not start until revised Track 1's G5 compile-timing gate lands and Track 3's priority is re-evaluated against the post-Track-1 state.
+**Executed scope:** CPU implementation, route tests, direct solver tests, oversampled Boozer objective/residual-norm check, and default-fixture experimental non-promotion check. CUDA/GPU lane skipped per objective.
 
 ### 5.1 Todos (Track 3)
 
-- [ ] Add `optimistix`, `lineax`, and any direct `equinox` floor to `pyproject.toml` **only as an optional extra unless the project first raises its Python floor.** Current docs report Optimistix requiring Python 3.11+ and Lineax requiring Python 3.10+ / JAX 0.4.38+ / Equinox 0.11.10+, while this repo still advertises `requires-python = ">=3.8"` with Python 3.8-3.11 classifiers. Making Track 3 required today would be a downstream packaging regression.
-- [ ] Add `lineax` under the same optional-extra dep-tier policy as `optimistix` per §8 Q4.
-- [ ] Implement `jax_least_squares_optimistix(residual_fn, x0, ...)` wrapper in `optimizer_jax.py` using the documented Optimistix call shape: `optimistix.least_squares(residual_fn, optimistix.LevenbergMarquardt(rtol=tol, atol=tol, linear_solver=lineax.LSMR(rtol=tol, atol=tol)), x0, ...)`.
-- [ ] Implement `_optimistix_solution_to_scipy_optimize_result(sol, ...)` adapter mapping `optx.Solution` → `scipy.optimize.OptimizeResult` so downstream code consuming `res["x"]`, `res["fun"]`, `res["nit"]`, `res["residual"]`, `res["residual_jacobian"]`, `res["hessian"]`, `res["PLU"]` still works.
-- [ ] Add `"optimistix-lm"` to `VALID_LEAST_SQUARES_ALGORITHMS`. Wire routing in `resolve_target_least_squares_optimizer_method`.
-- [ ] Update `BoozerSurfaceJAX` option validation to accept `least_squares_algorithm="optimistix-lm"`.
-- [ ] Add `tests/geo/test_lm_optimistix_parity.py`: converged-state parity at `branch-stable-resolve` lane on the oversampled BoozerSurface fixture against the current `lm` lane.
-- [ ] Add `tests/geo/test_lm_optimistix_robustness.py`: measure `sdofs_inf` drift on the default (near-rank-deficient) BoozerSurface fixture; expect LSMR's `κ(J)` (not `κ(J)²`) to reduce drift vs current matrix-free GMRES.
-- [ ] Add GPU lane test (skipif no CUDA): converged-state parity at `gpu-runtime` lane.
-- [ ] Update `optimizer_jax.py:14-45` module docstring with a fifth family entry: `optimistix-lm` (Optimistix LM with Lineax LSMR inner solver, tolerance-equivalent, vmap-friendly).
-- [ ] Update `docs/source/jax_acceptance.rst` "Optimizer family equivalence" section.
-- [ ] Update `CLAUDE.md` to add Optimistix as a runtime dep and document the LM family routing.
+- [x] Add `optimistix`, `lineax`, and direct `equinox` floor to `pyproject.toml` as optional extra `JAX_OPTIMISTIX` only. Current installed package metadata reports Optimistix/Lineax `Requires-Python ~=3.11`, while this repo still advertises `requires-python = ">=3.8"` with Python 3.8-3.11 classifiers. Making Track 3 required today would be a downstream packaging regression.
+- [x] Add `lineax` under the same optional-extra dep-tier policy as `optimistix` per §8 Q4.
+- [x] Implement `jax_least_squares_optimistix(residual_fn, x0, ...)` wrapper in `optimizer_jax.py` using the documented Optimistix call shape: `optimistix.least_squares(residual_fn, optimistix.LevenbergMarquardt(rtol=tol, atol=tol, linear_solver=lineax.LSMR(rtol=tol, atol=tol)), x0, ...)`.
+- [x] Map the internal target result dict from `optx.Solution` into `scipy.optimize.OptimizeResult` so downstream code consuming `x`, `fun`, `nit`, `residual`, `residual_jacobian`, and `hessian` still sees the existing target least-squares surface. `PLU` remains a Boozer post-LS/Newton-polish artifact, not a `target_least_squares` field.
+- [x] Add `"optimistix-lm"` to `VALID_LEAST_SQUARES_ALGORITHMS`. Wire routing in `resolve_target_least_squares_optimizer_method` to `method="optimistix-lm-ondevice"`.
+- [x] Update `BoozerSurfaceJAX` option validation to accept `least_squares_algorithm="optimistix-lm"`.
+- [x] Add `tests/geo/test_lm_optimistix_contract.py`: direct linear/Rosenbrock solver checks, failure-path checks, unsupported-option checks, and oversampled Boozer objective/residual-norm comparison against the current `lm` lane. Endpoint-state and residual-vector parity are explicitly not promoted because the live CPU evidence fails those gates.
+- [x] Add default near-rank-deficient Boozer fixture coverage in `tests/geo/test_lm_optimistix_contract.py`: the test records that Optimistix/LSMR remains finite/successful but does **not** reduce cost versus current matrix-free LM, so the robustness promotion hypothesis is rejected for this tree.
+- [x] Document GPU lane test as skipped per objective; no CUDA test added.
+- [x] Update `optimizer_jax.py:9-66` module docstring with the Optimistix family entry: `optimistix-lm` (Optimistix LM with Lineax LSMR inner solver, tolerance-equivalent, vmap-friendly).
+- [x] Update `docs/source/jax_acceptance.rst` "Optimizer family equivalence" section.
+- [x] Update `CLAUDE.md` to add Optimistix as an optional runtime dep and document the LM family routing.
 
 ### 5.2 Acceptance gates (Track 3)
 
 | Gate | Lane | Threshold |
 |---|---|---|
-| Converged-state parity vs current `lm` lane | `branch-stable-resolve` | `rtol=1e-6, atol=1e-7` on `x_final`, `cost_final` |
-| Numerical robustness on default fixture | new `optimistix_robustness` lane | `sdofs_inf` ≤ existing matrix-free LM result |
-| GPU lane | `gpu-runtime` | `rtol=1e-6` on converged state |
-| First-trace compile time | n/a | `< 60s` (target) |
-| No regression in `boozersurface_jax` or `single_stage_jax` tests | existing | all green |
+| Converged-state parity vs current `lm` lane | `branch-stable-resolve` | **FAIL / not promoted** — objective and residual-norm scale match on the oversampled fixture, but endpoint state and residual vector do not |
+| Numerical robustness on default fixture | artifact-local diagnostic check | **FAIL / not promoted** — finite successful solve, but cost is worse than the existing matrix-free LM result |
+| GPU lane | `gpu-runtime` | SKIPPED per objective |
+| First-trace compile time | n/a | not promoted as a production lane; direct CPU focused tests compile/run |
+| No regression in focused `boozersurface_jax` routing tests | existing | PASS — focused route tests green |
 
 ---
 
@@ -350,8 +367,8 @@ For guaranteed host trace dumps, use `jax.experimental.io_callback(callback, res
 | Track 1 direct QR/MGH/Boozer parity tests | current focused suite, 11 tests including slow Boozer fixtures | measured locally |
 | Track 1 G3 MGH-1981 starter suite | covered by regular-case final-state gates plus Powell singular classification | focused tests |
 | Track 1 G4 oversampled BoozerSurface fixture | covered by the current `(386,39)` residual/vector fixture | focused slow test |
-| Track 1 G5 first-trace timing | one measured cold compile on the current `(386,39)` residual/vector fixture | required before production promotion |
-| Track 3 Optimistix parity | deferred; not part of current CI budget | n/a |
+| Track 1 G5 first-trace timing | one measured local CPU cold compile smoke on the current `(386,39)` residual/vector fixture | CUDA gate remains separate |
+| Track 3 Optimistix contract | CPU diagnostic tests pass; production promotion gates fail | not in default CI budget |
 
 The old subroutine-oracle, per-iteration trace, and GPU Track 1 rows belonged to the abandoned byte-identical MINPACK port. They are inactive unless that project is explicitly reopened.
 
@@ -365,8 +382,8 @@ The old subroutine-oracle, per-iteration trace, and GPU Track 1 rows belonged to
 | `enorm` vectorized form differs from sequential MINPACK in last bit | INACTIVE | Byte-identical `enorm` is not part of the revised Track 1 route; if the byte port is reopened, require a scalar `lax.fori_loop` implementation and oracle test. |
 | `qrsolv` Givens chase order produces different bit-pattern than Fortran | INACTIVE | Byte-identical `qrsolv` is not part of the revised Track 1 route; if reopened, mirror Fortran column order and gate with an oracle test. |
 | `lmpar` Newton iteration count differs (off-by-one bracket update) | INACTIVE | Byte-identical `lmpar` is not part of the revised Track 1 route; current dense-QR lane uses final-state parity gates. |
-| First-trace compile exceeds 60s gate | MEDIUM | G5 measures the real value. If it exceeds 60s, §8 Q6 requires owner choice between optimization, explicit documented exception, or rejecting production promotion. |
-| Optimistix maintainer abandons project or dependency floors conflict with simsopt packaging | LOW | Track 3 is deferred and opt-in; pin only after §8 Q4 resolves the Python/JAX floor policy. |
+| Local CPU first-trace compile smoke regresses unexpectedly | MEDIUM | G5 records the local CPU value and metadata. CUDA first-compile performance is certified only by the GPU acceptance gate. |
+| Optimistix maintainer abandons project or dependency floors conflict with simsopt packaging | LOW | Track 3 is diagnostic and opt-in; keeping it behind `JAX_OPTIMISTIX` avoids changing the base Python/JAX floor. |
 | Packed-QR byte-equality not achievable | REALIZED | Revised Track 1 accepts tolerance-equivalent dense-QR final-state parity instead of byte identity |
 | GPU lane tie-break (MAGMA `geqp3` ≠ LAPACK `dgeqp3`) breaks L2/L3 cross-device | LOW | Documented in §0 Non-goals: GPU lane is L1-only by design |
 | CPU LAPACK linkage drift (different vendor's LAPACK on different machines) breaks L4 | LOW | Documented in §6.1: L4 is single-host single-build only |
@@ -377,16 +394,15 @@ The old subroutine-oracle, per-iteration trace, and GPU Track 1 rows belonged to
 
 These originally needed owner sign-off before starting work. Items Q1-Q3 and
 Q7-Q8 are resolved by the 2026-05-17 Track 1 contract change. Q5 was made moot
-by the rev-5 priority reframing. Q4 (Optimistix dep tier) and Q6 (compile-budget
-exception) remain open but with reduced urgency — Q4 only fires if Track 3 is
-reopened, Q6 is gated on the G5 compile-time measurement from §4.2.
+by the rev-5 priority reframing. Q4 is resolved by the rev-6 optional-extra
+implementation. Q6 is resolved by the G5 compile-time measurement.
 
-- [x] **Q1 — Track scope**: Track 2 plus revised Track 1 tolerance-equivalent QR lane; Track 3 remains deferred.
+- [x] **Q1 — Track scope**: Track 2 plus revised Track 1 tolerance-equivalent QR lane; Track 3 executed as a CPU diagnostic lane, with CUDA/GPU skipped per objective and production promotion rejected by CPU gates.
 - [x] **Q2 — Track ordering**: Track 2 first, then revised Track 1 route.
 - [x] **Q3 — Track 1 abandonment threshold**: byte-equality spike abandoned at G0; revised tolerance-equivalent route accepted.
-- [ ] **Q4 — Optimistix as required dep** *(low urgency; Track 3 deferred per §5 rev-5 priority note)*: Track 3 has no active import path. Current official Optimistix/Lineax docs make a required dependency incompatible with this repo's advertised Python 3.8-3.10 support, so the default is "optional extra only" unless the project separately raises its Python/JAX floors.
+- [x] **Q4 — Optimistix as required dep**: Track 3 uses an optional `JAX_OPTIMISTIX` extra only. Current Optimistix/Lineax package metadata makes a required dependency incompatible with this repo's advertised Python 3.8-3.10 support.
 - [x] **Q5 — Publication ambition** *(resolved moot by rev 5)*: The original Q5 framing ("first JAX MINPACK port") assumed the byte-identical Track 1 contract. **Revised Track 1 is a tolerance-equivalent dense-QR LM lane, not a MINPACK port** — the "first JAX MINPACK port" novelty claim no longer applies and Q5 is moot as originally written. If a publication is still desired, the new framing would need its own novelty assessment (e.g., "JAX-native dense-QR LM lane with κ(J) conditioning" — a much weaker novelty claim).
-- [ ] **Q6 — Compile-budget exception** *(pending G5 measurement)*: should Track 1 be exempted from the 60s first-compile gate in `docs/source/jax_acceptance.rst:101`? Decision should be made after G5 produces an actual measurement (§4.2). If G5 measures < 60s, Q6 is auto-resolved as "no exception needed". If G5 measures > 60s, owner decides whether to (a) carve out `lm-minpack` from the 60s gate in `jax_acceptance.rst`, (b) optimize the lane to fit, or (c) accept the regression with explicit owner sign-off.
+- [x] **Q6 — Compile-budget exception**: G5 measured `3.6744802079629153s` locally on CPU for `lm-minpack-ondevice` with explicit `jax.block_until_ready(...)` result synchronization. This is a local CPU smoke; no CUDA compile-budget exception is claimed.
 - [x] **Q7 — Cross-machine validation**: L4 byte-equality is no longer in the Track 1 contract.
 - [x] **Q8 — Phase 0 Path C scope and re-scope authority**: no Path C; no `m≈n` byte-identity re-scope; revised route is tolerance-equivalent dense QR.
 
@@ -515,9 +531,9 @@ Plus a third independent Crucible review pass (2026-05-16, 4 parallel discovery 
 ### Pre-work
 
 - [x] Owner decisions Q1-Q3, Q5, and Q7-Q8 resolved by rev 5.
-- [ ] Q4 remains open only if Track 3 is reopened; default is optional-extra only unless Python/JAX floors change.
-- [ ] Q6 remains open pending G5 compile-time measurement.
-- [ ] Allocate engineering time for G5 if revised Track 1 should be promoted to production-ready.
+- [x] Q4 resolved by optional-extra-only `JAX_OPTIMISTIX` dependency policy.
+- [x] Q6 resolved by G5 compile-time measurement.
+- [x] G5 local CPU smoke complete; CUDA compile performance remains a separate GPU gate.
 
 ### Track 2 — termination + damping retrofit
 
@@ -529,8 +545,8 @@ Plus a third independent Crucible review pass (2026-05-16, 4 parallel discovery 
 - [x] Phase 2.6: update result schema with `info` field (range `{0, 1, 2, 3, 5, 6, 7}`), preserve `success = legacy_success | info in {1, 2, 3}`
 - [x] Phase 2.7: `tests/geo/test_lm_termination_parity.py` — matrix-free info subset and gtol routing tests
 - [x] Phase 2.8: `tests/geo/test_lm_damping_parity.py` — damping and iteration-count tests
-- [x] Phase 2.9: update `optimizer_jax.py:14-45` module docstring
-- [x] Phase 2.10: update `docs/source/jax_acceptance.rst:156-187`
+- [x] Phase 2.9: update `optimizer_jax.py:19-66` module docstring
+- [x] Phase 2.10: update `docs/source/jax_acceptance.rst:161-239`
 - [x] Phase 2.11a: `tests/geo/test_boozersurface_jax.py -m "not private_optimizer_runtime"` regression run (385 passed, 4 skipped)
 - [ ] Phase 2.11b: downstream `tests/integration/test_single_stage_jax.py` full regression run remains unclaimed by rev 5
 - [x] Phase 2.12: `ls_state_parity` lane confirmation at `sdofs_inf ≤ 1e-11`
@@ -547,19 +563,19 @@ Plus a third independent Crucible review pass (2026-05-16, 4 parallel discovery 
 - [x] Update optimizer and acceptance docs
 - [x] Run broader Moré-Garbow-Hillstrom starter parity suite with singular-case classification
 - [x] Run oversampled BoozerSurface fixture with branch-stable residual/objective gates
-- [ ] Measure first-trace compile time on the current `(386,39)` residual/vector fixture
+- [x] Measure first-trace compile time on the current `(386,39)` residual/vector fixture
 
-### Track 3 — Optimistix + Lineax LSMR (deferred)
+### Track 3 — Optimistix + Lineax LSMR (CPU diagnostic implemented, not promoted)
 
-- [ ] Phase 3.1: add Optimistix/Lineax/Equinox dependency policy as an optional extra or raise project Python/JAX floors first
-- [ ] Phase 3.2: implement `jax_least_squares_optimistix` wrapper
-- [ ] Phase 3.3: implement `_optimistix_solution_to_scipy_optimize_result` adapter
-- [ ] Phase 3.4: add `"optimistix-lm"` to `VALID_LEAST_SQUARES_ALGORITHMS` + routing
-- [ ] Phase 3.5: `BoozerSurfaceJAX` option validation
-- [ ] Phase 3.6: `tests/geo/test_lm_optimistix_parity.py`
-- [ ] Phase 3.7: `tests/geo/test_lm_optimistix_robustness.py` — `sdofs_inf` reduction vs current LM on default fixture
-- [ ] Phase 3.8: GPU lane test
-- [ ] Phase 3.9: update LM family note + jax_acceptance.rst + CLAUDE.md
+- [x] Phase 3.1: add Optimistix/Lineax/Equinox dependency policy as an optional extra or raise project Python/JAX floors first
+- [x] Phase 3.2: implement `jax_least_squares_optimistix` wrapper
+- [x] Phase 3.3: map Optimistix target results into the existing target least-squares `OptimizeResult`
+- [x] Phase 3.4: add `"optimistix-lm"` to `VALID_LEAST_SQUARES_ALGORITHMS` + routing
+- [x] Phase 3.5: `BoozerSurfaceJAX` option validation
+- [x] Phase 3.6: `tests/geo/test_lm_optimistix_contract.py`
+- [x] Phase 3.7: default-fixture robustness coverage added; result rejects promotion because Optimistix/LSMR did not reduce cost vs current LM on this tree
+- [x] Phase 3.8: GPU lane test skipped per objective
+- [x] Phase 3.9: update LM family note + jax_acceptance.rst + CLAUDE.md
 
 ### Post-implementation
 

@@ -3210,6 +3210,7 @@ def _normalize_solver_options(raw_options, boozer_type):
                     "least_squares_algorithm='lm' for callback-instrumented "
                     "on-device LM runs."
                 )
+            # Missing keys use lane defaults so explicit default values pass.
             tuning_keys = _optimizer_jax._optimistix_lm_nondefault_tuning_options(
                 normalized_options.get(
                     "ftol",
