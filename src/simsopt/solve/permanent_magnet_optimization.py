@@ -10,6 +10,21 @@ from .._core.types import RealArray
 __all__ = ['relax_and_split', 'GPMO']
 
 
+def _component_mmax(mmax: RealArray):
+    return np.array([mmax, mmax, mmax]).T
+
+
+def _normalized_moment_magnitudes(m: RealArray, mmax_vec: RealArray):
+    abs_m = np.abs(m).reshape(len(m) // 3, 3)
+    normalized = np.divide(
+        abs_m,
+        mmax_vec,
+        out=np.zeros_like(abs_m),
+        where=mmax_vec > 0,
+    )
+    return normalized.reshape(len(m))
+
+
 def prox_l0(m: RealArray,
             mmax: RealArray,
             reg_l0: float,
@@ -32,9 +47,8 @@ def prox_l0(m: RealArray,
         nu: The strength of the "relaxing" term in the relax-and-split algorithm
             used for permanent magnet optimization.
     """
-    ndipoles = len(m) // 3
-    mmax_vec = np.array([mmax, mmax, mmax]).T
-    m_normalized = (np.abs(m).reshape(ndipoles, 3) / mmax_vec).reshape(ndipoles * 3)
+    mmax_vec = _component_mmax(mmax)
+    m_normalized = _normalized_moment_magnitudes(m, mmax_vec)
     # in principle, hard threshold should be sqrt(2 * reg_l0 * nu) but can always renormalize everything
     return m * (m_normalized > 2 * reg_l0 * nu)
 
@@ -58,15 +72,8 @@ def prox_l1(m, mmax, reg_l1, nu):
             The strength of the "relaxing" term in the relax-and-split algorithm
             used for permanent magnet optimization.
     """
-    ndipoles = len(m) // 3
-    mmax_vec = np.array([mmax, mmax, mmax]).T
-    abs_m = np.abs(m).reshape(ndipoles, 3)
-    m_normalized = np.divide(
-        abs_m,
-        mmax_vec,
-        out=np.zeros_like(abs_m),
-        where=mmax_vec > 0,
-    ).reshape(ndipoles * 3)
+    mmax_vec = _component_mmax(mmax)
+    m_normalized = _normalized_moment_magnitudes(m, mmax_vec)
     thresholded = np.maximum(np.abs(m_normalized) - reg_l1 * nu, 0)
     return np.sign(m) * thresholded * np.ravel(mmax_vec)
 

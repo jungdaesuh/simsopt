@@ -21,6 +21,7 @@ from simsopt.solve.permanent_magnet_optimization import (
     projection_L2_balls,
     prox_l0,
     prox_l1,
+    relax_and_split,
     setup_initial_condition,
 )
 from simsopt.solve.permanent_magnet_optimization_jax import (
@@ -103,6 +104,9 @@ class _GPMOCPUGrid:
     nphi: int
     ntheta: int
     ndipoles: int
+
+    def _print_initial_opt(self) -> None:
+        return None
 
 
 def _synthetic_grid(seed: int = 28) -> PermanentMagnetGridJAX:
@@ -204,7 +208,7 @@ def test_zero_mmax_helpers_match_cpu_without_nan():
     moments = np.array(
         [
             [0.2, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
             [2.0, 0.0, 0.0],
         ],
         dtype=np.float64,
@@ -212,12 +216,20 @@ def test_zero_mmax_helpers_match_cpu_without_nan():
     m_maxima = np.array([1.0, 0.0, 1.0], dtype=np.float64)
     expected_projection = projection_L2_balls(moments, m_maxima)
     actual_projection = np.asarray(projection_L2_balls_jax(moments, m_maxima))
+    expected_l0 = prox_l0(moments, m_maxima, reg_l0=0.1, nu=0.5)
+    actual_l0 = np.asarray(prox_l0_jax(moments, m_maxima, reg_l0=0.1, nu=0.5))
     expected_l1 = prox_l1(moments, m_maxima, reg_l1=0.1, nu=0.5)
     actual_l1 = np.asarray(prox_l1_jax(moments, m_maxima, reg_l1=0.1, nu=0.5))
 
     np.testing.assert_allclose(
         actual_projection,
         expected_projection,
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    np.testing.assert_allclose(
+        actual_l0,
+        expected_l0,
         rtol=_RTOL,
         atol=_ATOL,
     )
@@ -229,9 +241,12 @@ def test_zero_mmax_helpers_match_cpu_without_nan():
     )
     assert np.isfinite(expected_projection).all()
     assert np.isfinite(actual_projection).all()
+    assert np.isfinite(expected_l0).all()
+    assert np.isfinite(actual_l0).all()
     assert np.isfinite(expected_l1).all()
     assert np.isfinite(actual_l1).all()
     np.testing.assert_allclose(expected_projection[3:6], 0.0, atol=0.0)
+    np.testing.assert_allclose(expected_l0[3:6], 0.0, atol=0.0)
     np.testing.assert_allclose(expected_l1[3:6], 0.0, atol=0.0)
 
 
@@ -296,7 +311,7 @@ def test_setup_initial_condition_matches_cpu_projection_contract():
     )
 
 
-def test_setup_initial_condition_jax_explicit_m0_is_traceable_under_guard():
+def test_setup_initial_condition_jax_explicit_m0_validates_under_guard():
     grid = _synthetic_grid()
     m0 = jax.device_put(
         jnp.asarray(
@@ -326,22 +341,6 @@ def test_setup_initial_condition_jax_explicit_m0_is_traceable_under_guard():
         atol=_ATOL,
     )
 
-    @jax.jit
-    def _setup(grid_data: PermanentMagnetGridJAX, moments: jax.Array):
-        return setup_initial_condition_jax(grid_data, moments)
-
-    _setup(grid, m0).block_until_ready()
-    with jax.transfer_guard("disallow"):
-        projected = _setup(grid, m0)
-        projected.block_until_ready()
-
-    np.testing.assert_allclose(
-        np.asarray(projected).reshape(-1),
-        expected,
-        rtol=_RTOL,
-        atol=_ATOL,
-    )
-
 
 def test_setup_initial_condition_jax_rejects_infeasible_explicit_m0():
     grid = _synthetic_grid()
@@ -361,6 +360,18 @@ def test_setup_initial_condition_jax_rejects_infeasible_explicit_m0():
 
     with pytest.raises(ValueError, match="maximum bound constraints"):
         setup_initial_condition_jax(grid, m0)
+
+
+def test_setup_initial_condition_jax_rejects_traced_explicit_m0():
+    grid = _synthetic_grid()
+    m0 = jax.device_put(jnp.asarray(np.asarray(grid.m0) + 0.05))
+
+    @jax.jit
+    def _setup(grid_data: PermanentMagnetGridJAX, moments: jax.Array):
+        return setup_initial_condition_jax(grid_data, moments)
+
+    with pytest.raises(ValueError, match="eager host-boundary"):
+        _setup(grid, m0)
 
 
 def test_relax_and_split_jax_matches_direct_mwpgp_fixed_step():
@@ -397,6 +408,58 @@ def test_relax_and_split_jax_matches_direct_mwpgp_fixed_step():
     assert result.m_history.shape == (1, grid.ndipoles, 3)
     assert result.m_proxy_history.shape == (0, grid.ndipoles, 3)
 
+
+def test_relax_and_split_jax_default_alpha_includes_smooth_terms():
+    grid = _synthetic_grid(seed=2027)
+    n_steps = 4
+    nu = 5.0
+    reg_l2 = 0.125
+    hessian_scale = np.asarray(grid.ATA_scale) + 2.0 * reg_l2 + 1.0 / nu
+    alpha = 2.0 * (1.0 - 1.0e-5) / hessian_scale
+
+    result = relax_and_split_jax(
+        grid,
+        max_iter=n_steps,
+        nu=nu,
+        reg_l2=reg_l2,
+    )
+    expected, _ = mwpgp_solve(
+        PMOptimizationSpec(
+            m_maxima=grid.m_maxima,
+            m_proxy=grid.m0,
+            nu=jnp.asarray(nu, dtype=jnp.float64),
+            reg_l2=jnp.asarray(reg_l2, dtype=jnp.float64),
+            alpha=jnp.asarray(alpha, dtype=jnp.float64),
+        ),
+        grid.A_obj,
+        grid.ATb,
+        grid.m0,
+        n_steps=n_steps,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(result.m),
+        np.asarray(expected),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+
+
+def test_relax_and_split_jax_rejects_oversized_alpha():
+    grid = _synthetic_grid(seed=2029)
+    nu = 5.0
+    reg_l2 = 0.125
+    hessian_scale = np.asarray(grid.ATA_scale) + 2.0 * reg_l2 + 1.0 / nu
+    oversized_alpha = 2.01 / hessian_scale
+
+    with pytest.raises(ValueError, match="contraction"):
+        relax_and_split_jax(
+            grid,
+            alpha=oversized_alpha,
+            max_iter=2,
+            nu=nu,
+            reg_l2=reg_l2,
+        )
 
 def test_relax_and_split_jax_matches_cpp_mwpgp_oracle_one_convex_step():
     grid = _synthetic_grid(seed=2028)
@@ -469,17 +532,66 @@ def test_relax_and_split_jax_updates_l0_proxy_for_fixed_outer_steps():
     )
 
 
+def test_relax_and_split_jax_matches_cpu_after_multiple_outer_steps():
+    cpu_grid = _gpmo_cpu_grid(seed=2032)
+    jax_grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2032))
+    nu = 5.0
+    reg_l1 = 0.04 / nu
+    n_steps = 4
+    n_outer = 2
+    cpu_grid.ATA_scale += 1.0 / nu
+    alpha = 2.0 * (1.0 - 1.0e-5) / cpu_grid.ATA_scale
+
+    _errors, cpu_m_history, cpu_m_proxy_history = relax_and_split(
+        cpu_grid,
+        max_iter=n_steps,
+        max_iter_RS=n_outer,
+        epsilon=0.0,
+        epsilon_RS=0.0,
+        min_fb=0.0,
+        nu=nu,
+        reg_l1=reg_l1,
+        verbose=True,
+    )
+    result = relax_and_split_jax(
+        jax_grid,
+        alpha=alpha,
+        max_iter=n_steps,
+        max_iter_RS=n_outer,
+        nu=nu,
+        reg_l1=reg_l1,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(result.m).reshape(-1),
+        cpu_grid.m,
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.m_history),
+        np.asarray(cpu_m_history),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.m_proxy_history).reshape(n_outer, -1),
+        np.asarray(cpu_m_proxy_history),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+
+
 def test_relax_and_split_jax_jits_under_strict_transfer_guard():
     grid = _synthetic_grid(seed=2031)
-    m0 = jax.device_put(jnp.asarray(np.asarray(grid.m0) + 0.05))
 
     @jax.jit
-    def _run(grid_data: PermanentMagnetGridJAX, initial: jax.Array):
-        return relax_and_split_jax(grid_data, initial, max_iter=3).m
+    def _run(grid_data: PermanentMagnetGridJAX):
+        return relax_and_split_jax(grid_data, max_iter=3).m
 
-    _run(grid, m0).block_until_ready()
+    _run(grid).block_until_ready()
     with jax.transfer_guard("disallow"):
-        out = _run(grid, m0)
+        out = _run(grid)
         out.block_until_ready()
 
     assert out.shape == (grid.ndipoles, 3)

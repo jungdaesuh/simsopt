@@ -580,7 +580,10 @@ class DipoleField(MagneticField):
     where :math:`\mu_0=4\pi\times 10^{-7}\;N/A^2` is the permeability of free space
     and :math:`\mathbf{r_i} = \mathbf{x} - \mathbf{x}^{dipole}_i` is the
     vector between the field evaluation point and the dipole :math:`i`
-    position.
+    position. This is a raw point-dipole field: evaluating exactly at a dipole
+    location is singular and may return non-finite values. Callers should keep
+    evaluation points off dipole locations unless they are explicitly testing
+    that singular contract.
 
     Args:
         dipole_grid: 2D numpy array, shape (ndipoles, 3).

@@ -176,14 +176,21 @@ class DipoleFieldJAX(MagneticField):
 
     where :math:`\mathbf{r}_i = \mathbf{x} - \mathbf{x}^{dipole}_i`. The
     constructor argument layout and symmetry-expansion convention match
-    :class:`simsopt.field.DipoleField` exactly.
+    :class:`simsopt.field.DipoleField` exactly. Like the CPU wrapper, this is
+    a raw point-dipole field: evaluating exactly at a dipole location is
+    singular and may return non-finite values. Callers should keep evaluation
+    points off dipole locations unless they are explicitly testing that
+    singular contract.
 
     Args:
         dipole_grid: 2D numpy array, shape ``(ndipoles, 3)``. Dipole
             site coordinates for one half-period; the constructor
             expands this into the full toroidal/stellarator manifold.
+            Values are converted to float64, matching the double-precision
+            CPU backend.
         dipole_vectors: 2D numpy array, shape ``(ndipoles, 3)``. Dipole
             moment vectors for the same half-period sites.
+            Values are converted to float64.
         stellsym: Whether to apply stellarator symmetry expansion.
         nfp: Number of toroidal field periods.
         coordinate_flag: ``"cartesian"`` (default), ``"cylindrical"`` or

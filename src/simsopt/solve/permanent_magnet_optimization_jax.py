@@ -8,10 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..geo.permanent_magnet_grid_jax import (
-    PermanentMagnetGridJAX,
-    mwpgp_alpha_from_grid,
-)
+from ..geo.permanent_magnet_grid_jax import PermanentMagnetGridJAX
 from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ..jax_core.pm_optimization import (
     GPMOArbVecBacktrackingSpec,
@@ -62,25 +59,45 @@ def _flatten_like(reference: jax.Array, moments: jax.Array) -> jax.Array:
     return jnp.reshape(moments, reference.shape)
 
 
+def _normalized_moment_magnitudes(
+    matrix: jax.Array, m_maxima: jax.Array
+) -> jax.Array:
+    positive_mmax = m_maxima > 0.0
+    safe_mmax = jnp.where(positive_mmax, m_maxima, 1.0)
+    return jnp.where(
+        positive_mmax[:, None],
+        jnp.abs(matrix) / safe_mmax[:, None],
+        0.0,
+    )
+
+
 def _is_tracing(value: object) -> bool:
     return isinstance(value, jax.core.Tracer)
 
 
-def _device_to_host_transfer_disallowed() -> bool:
-    guard = jax.config.jax_transfer_guard_device_to_host
-    if guard is None:
-        guard = jax.config.jax_transfer_guard
-    return guard is not None and "disallow" in guard
+def _has_tracer_leaf(value: object) -> bool:
+    return any(
+        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
+    )
 
 
 def _raise_if_infeasible_initial_condition(
     moments: jax.Array, projected: jax.Array
 ) -> None:
-    if not np.allclose(np.asarray(moments), np.asarray(projected)):
+    moments_host = np.asarray(jax.device_get(moments))
+    projected_host = np.asarray(jax.device_get(projected))
+    if not np.allclose(moments_host, projected_host):
         raise ValueError(
             "Initial dipole guess must contain values that satisfy the "
             "maximum bound constraints."
         )
+
+
+def _host_scalar(name: str, value: jax.Array) -> float:
+    array = np.asarray(jax.device_get(value))
+    if array.shape != ():
+        raise ValueError(f"{name} must be scalar.")
+    return float(array)
 
 
 @dataclass(frozen=True)
@@ -306,7 +323,7 @@ def prox_l0_jax(m: object, mmax: object, reg_l0: float, nu: float) -> jax.Array:
     moments = _as_jax_float64(m)
     m_maxima = _as_jax_float64(mmax)
     matrix = jnp.reshape(moments, (m_maxima.shape[0], 3))
-    normalized = jnp.abs(matrix) / m_maxima[:, None]
+    normalized = _normalized_moment_magnitudes(matrix, m_maxima)
     thresholded = matrix * (normalized > (2.0 * reg_l0 * nu))
     return _flatten_like(moments, thresholded)
 
@@ -317,7 +334,7 @@ def prox_l1_jax(m: object, mmax: object, reg_l1: float, nu: float) -> jax.Array:
     moments = _as_jax_float64(m)
     m_maxima = _as_jax_float64(mmax)
     matrix = jnp.reshape(moments, (m_maxima.shape[0], 3))
-    normalized = jnp.abs(matrix) / m_maxima[:, None]
+    normalized = _normalized_moment_magnitudes(matrix, m_maxima)
     thresholded = (
         jnp.sign(matrix)
         * jnp.maximum(normalized - reg_l1 * nu, 0.0)
@@ -331,18 +348,23 @@ def setup_initial_condition_jax(
 ) -> jax.Array:
     """Return the initial moment matrix for a fixed JAX PM grid.
 
-    Eager host-boundary calls reject explicit infeasible ``m0`` values to match
-    the CPU setup contract. JIT or strict transfer-guard callers must provide a
-    feasible ``m0`` precondition; the value is returned unchanged.
+    Explicit ``m0`` is an eager host-boundary input so infeasible values are
+    rejected before a fixed-state solve starts. JIT callers should stage the
+    validated initial condition in ``PermanentMagnetGridJAX.m0`` and pass
+    ``m0=None``.
     """
 
     if m0 is None:
         return grid.m0
     moments = _moments_as_matrix("m0", m0, grid.ndipoles)
+    if _is_tracing(moments):
+        raise ValueError(
+            "Explicit m0 validation requires an eager host-boundary call; "
+            "stage the validated initial condition in PermanentMagnetGridJAX.m0 "
+            "before JIT compilation."
+        )
     projected = projection_l2_balls(moments, grid.m_maxima)
-    if not _is_tracing(moments):
-        if not _device_to_host_transfer_disallowed():
-            _raise_if_infeasible_initial_condition(moments, projected)
+    _raise_if_infeasible_initial_condition(moments, projected)
     return moments
 
 
@@ -617,10 +639,27 @@ def _mwpgp_spec(
     nu: float,
     reg_l2: float,
 ) -> PMOptimizationSpec:
+    hessian_scale = grid.ATA_scale + jnp.asarray(
+        np.float64(2.0 * reg_l2 + 1.0 / nu), dtype=grid.A_obj.dtype
+    )
     if alpha is None:
-        alpha_value = mwpgp_alpha_from_grid(grid)
+        alpha_value = (
+            jnp.asarray(2.0 * (1.0 - 1.0e-5), dtype=grid.A_obj.dtype)
+            / hessian_scale
+        )
     else:
         alpha_value = _as_jax_float64(alpha)
+        if _has_tracer_leaf((alpha_value, hessian_scale)):
+            raise ValueError(
+                "Explicit alpha validation requires an eager host-boundary call."
+            )
+        alpha_host = _host_scalar("alpha", alpha_value)
+        bound_host = _host_scalar("2/lambda_max(H)", 2.0 / hessian_scale)
+        if alpha_host > bound_host:
+            raise ValueError(
+                "alpha must be <= 2/lambda_max(H) for MwPGP fixed-step "
+                f"contraction; got {alpha_host} > {bound_host}."
+            )
     return PMOptimizationSpec(
         m_maxima=grid.m_maxima,
         m_proxy=m_proxy,

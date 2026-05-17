@@ -347,6 +347,8 @@ class PermanentMagnetGridTesting(unittest.TestCase):
         chopped_grid = np.array(
             [
                 [0.0, 0.0, 0.5],
+                [1.0e-12, 0.0, 0.25],
+                [1.0e-15, 0.0, -0.25],
                 [0.2, 0.0, 0.5],
                 [0.0, 0.0, 0.0],
                 [0.3, 0.4, -0.2],
@@ -381,10 +383,19 @@ class PermanentMagnetGridTesting(unittest.TestCase):
                     dr=0.15,
                 )
 
-        expected = np.array([[0.2, 0.0, 0.5], [0.3, 0.4, -0.2]])
+        expected = np.array(
+            [
+                [1.0e-12, 0.0, 0.25],
+                [1.0e-15, 0.0, -0.25],
+                [0.2, 0.0, 0.5],
+                [0.3, 0.4, -0.2],
+            ]
+        )
         np.testing.assert_allclose(pm_opt.dipole_grid_xyz, expected)
-        assert pm_opt.ndipoles == 2
+        assert pm_opt.ndipoles == 4
+        assert np.all(np.isfinite(pm_opt.m_maxima))
         assert np.all(pm_opt.m_maxima > 0.0)
+        assert pm_opt.m_maxima[0] > pm_opt.m_maxima[1] > 0.0
 
     def test_famus_functionality(self):
         """
