@@ -5,12 +5,8 @@ with a PI step controller and a bracketed Illinois false-position event
 localizer.
 The implemented scope covers:
 
-- the fieldline RHS ``dx/dtau = B(x) / |B|`` (a length-parametrised
-  version of ``dx/dtau = B(x)`` used in the upstream C++
-  ``FieldlineRHS``; the normalisation is a smooth re-parametrisation of
-  the same integral curve and is used throughout this module because
-  it gives a uniform step budget regardless of the local field
-  strength),
+- the fieldline RHS ``dx/dt = B(x)`` used in the upstream C++
+  ``FieldlineRHS``,
 - the 4-state Cartesian vacuum guiding-centre RHS shipped under the
   item-14 follow-up (state ``[x, y, z, v_par]``, drift terms following
   the upstream ``GuidingCenterVacuumRHS::operator()`` definition in
@@ -47,8 +43,8 @@ Architecture
 ============
 
 - ``FieldlineTracingSpec`` — frozen dataclass (registered as a JAX
-  pytree) carrying ``tmax``, ``rtol``, ``atol``, ``max_steps``
-  (static), and ``max_root_iters`` (static).
+  pytree) carrying ``tmax``, ``rtol``, ``atol``, per-lane ``dtmax``,
+  ``max_steps`` (static), and ``max_root_iters`` (static).
 - ``dopri5_step`` — single Dormand-Prince step returning the 5th-order
   state, the embedded error vector, and the trailing-stage derivative
   for FSAL reuse.
@@ -69,7 +65,7 @@ consistent and easy to validate against the same SciPy oracle.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import jax
@@ -134,9 +130,13 @@ __all__ = [
     "guiding_center_vacuum_boozer_rhs",
     "guiding_center_vacuum_rhs",
     "trace_fieldline",
+    "trace_fieldlines_batched",
     "trace_fullorbit",
+    "trace_fullorbits_batched",
     "trace_guiding_center",
     "trace_guiding_center_boozer",
+    "trace_guiding_centers_batched",
+    "trace_guiding_centers_boozer_batched",
 ]
 
 
@@ -215,7 +215,9 @@ _DOPRI5_EXP = 0.2
 _SAFETY = 0.9
 _MIN_FACTOR = 0.2
 _MAX_FACTOR = 5.0
-_INITIAL_STEP_FRACTION = 1.0 / 100.0
+_FIELDLINE_INITIAL_STEP_FRACTION = 1.0e-5
+_PARTICLE_INITIAL_STEP_FRACTION = 1.0e-3
+_BOOZER_AXIS_STATUS = -2
 
 
 def _append_event_row(
@@ -262,6 +264,9 @@ class FieldlineTracingSpec:
         iterations the JIT-compiled while-loop will execute. The
         trajectory carry has shape ``(max_steps + 1, 4)`` (the ``+1``
         captures the initial state).
+    dtmax
+        Maximum absolute step size. ``inf`` leaves the adaptive controller
+        unconstrained except for the final ``tmax - t`` clamp.
     max_root_iters
         Static iteration ceiling for the Illinois false-position event
         localizer.
@@ -278,13 +283,14 @@ class FieldlineTracingSpec:
     rtol: float
     atol: float
     max_steps: int
+    dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
 
 
 jax.tree_util.register_dataclass(
     FieldlineTracingSpec,
-    data_fields=["tmax", "rtol", "atol"],
+    data_fields=["tmax", "rtol", "atol", "dtmax"],
     meta_fields=["max_steps", "max_root_iters", "max_phi_hits"],
 )
 
@@ -383,8 +389,7 @@ class ToroidalTransitStoppingCriterion:
     The transit count is unwrapped from the continuous-branch ``phi``
     accumulator the driver maintains for the phi-plane crossing scan.
     Matches :class:`simsoptpp.ToroidalTransitStoppingCriterion` with
-    ``flux=False``; the flux-coordinate branch is not on the JAX path
-    yet (the Boozer guiding-centre RHS is deferred under item 14).
+    ``flux=False``.
     """
 
     max_transits: float
@@ -518,9 +523,23 @@ def _continuous_phi(
 
     two_pi = jnp.asarray(2.0 * np.pi, dtype=dtype)
     phi_raw = jnp.arctan2(y, x)
-    # Shift phi_raw by integer multiples of 2pi to fall closest to phi_near.
-    k = jnp.round((phi_near - phi_raw) / two_pi)
-    return phi_raw + k * two_pi
+    phi = jnp.where(phi_raw < jnp.asarray(0.0, dtype=dtype), phi_raw + two_pi, phi_raw)
+    nearest_multiple = (
+        jnp.sign(phi_near)
+        * jnp.floor(jnp.abs(phi_near / two_pi) + jnp.asarray(0.5, dtype=dtype))
+        * two_pi
+    )
+    opt1 = nearest_multiple - two_pi + phi
+    opt2 = nearest_multiple + phi
+    opt3 = nearest_multiple + two_pi + phi
+    dist1 = jnp.abs(opt1 - phi_near)
+    dist2 = jnp.abs(opt2 - phi_near)
+    dist3 = jnp.abs(opt3 - phi_near)
+    return jnp.where(
+        dist1 <= jnp.minimum(dist2, dist3),
+        opt1,
+        jnp.where(dist2 <= jnp.minimum(dist1, dist3), opt2, opt3),
+    )
 
 
 def _continuous_angle(
@@ -580,6 +599,12 @@ def _should_record_accepted_step(
     accepted: jax.Array, stop_after: jax.Array
 ) -> jax.Array:
     return jnp.logical_and(accepted, jnp.logical_not(stop_after))
+
+
+def _boozer_axis_invalid(y: jax.Array) -> jax.Array:
+    s = y[0]
+    zero = jnp.asarray(0.0, dtype=s.dtype)
+    return jnp.logical_or(s <= zero, jnp.logical_not(jnp.isfinite(s)))
 
 
 # ── Fieldline RHS ─────────────────────────────────────────────────────
@@ -685,10 +710,24 @@ def _error_norm(
     return jnp.sqrt(jnp.mean(jnp.square(y_err / sc)))
 
 
-def _initial_step_size(t0: jax.Array, t_end: jax.Array) -> jax.Array:
+def _initial_step_size(
+    t0: jax.Array, t_end: jax.Array, dtmax: jax.Array, fraction: float
+) -> jax.Array:
     span = jnp.abs(t_end - t0)
-    h0 = jnp.asarray(_INITIAL_STEP_FRACTION, dtype=span.dtype) * span
+    h0 = jnp.asarray(fraction, dtype=span.dtype) * dtmax
     return jnp.minimum(h0, span)
+
+
+def _clamp_step_to_domain(
+    h: jax.Array, t: jax.Array, tmax: jax.Array, dtmax: jax.Array
+) -> jax.Array:
+    return jnp.minimum(jnp.minimum(h, tmax - t), dtmax)
+
+
+def _accepted_step_time(
+    t: jax.Array, h_clamped: jax.Array, tmax: jax.Array
+) -> jax.Array:
+    return jnp.where(h_clamped >= tmax - t, tmax, t + h_clamped)
 
 
 # ── Bracketed Illinois event localizer ────────────────────────────────
@@ -710,8 +749,9 @@ def bracket_root_jax(
     f
         Scalar-valued JAX function.
     t_left, t_right
-        Initial bracket endpoints. Must satisfy ``t_left <= t_right``;
-        the bracket is **not** swapped internally even if not.
+        Initial bracket endpoints. They are normalized internally so
+        descending brackets follow the same update path as ascending
+        brackets.
     f_left, f_right
         ``f(t_left)`` and ``f(t_right)``. Supplied explicitly so the
         caller can reuse function values already computed during the
@@ -742,16 +782,21 @@ def bracket_root_jax(
     zero = jnp.asarray(0.0, dtype=dtype)
     half = jnp.asarray(0.5, dtype=dtype)
     atol_arr = jnp.asarray(atol, dtype=dtype)
-    bracketed_in = jnp.sign(f_left) * jnp.sign(f_right) < zero
-    left_better = jnp.abs(f_left) <= jnp.abs(f_right)
+    left_first = t_left <= t_right
+    t_left_ordered = jnp.where(left_first, t_left, t_right)
+    t_right_ordered = jnp.where(left_first, t_right, t_left)
+    f_left_ordered = jnp.where(left_first, f_left, f_right)
+    f_right_ordered = jnp.where(left_first, f_right, f_left)
+    bracketed_in = jnp.sign(f_left_ordered) * jnp.sign(f_right_ordered) < zero
+    left_better = jnp.abs(f_left_ordered) <= jnp.abs(f_right_ordered)
     init = (
         jnp.asarray(0, dtype=jnp.int32),
-        t_left,
-        t_right,
-        f_left,
-        f_right,
-        jnp.where(left_better, t_left, t_right),
-        jnp.where(left_better, f_left, f_right),
+        t_left_ordered,
+        t_right_ordered,
+        f_left_ordered,
+        f_right_ordered,
+        jnp.where(left_better, t_left_ordered, t_right_ordered),
+        jnp.where(left_better, f_left_ordered, f_right_ordered),
     )
 
     def cond(carry):
@@ -849,6 +894,7 @@ def trace_fieldline(
     tmax = jnp.asarray(spec.tmax, dtype=dtype)
     rtol = jnp.asarray(spec.rtol, dtype=dtype)
     atol = jnp.asarray(spec.atol, dtype=dtype)
+    dtmax = jnp.asarray(spec.dtmax, dtype=dtype)
     t0 = jnp.asarray(0.0, dtype=dtype)
     max_steps = int(spec.max_steps)
     if max_steps <= 0:
@@ -859,7 +905,7 @@ def trace_fieldline(
     max_root_iters = int(spec.max_root_iters)
 
     rhs = fieldline_rhs(magnetic_field_fn)
-    h0 = _initial_step_size(t0, tmax)
+    h0 = _initial_step_size(t0, tmax, dtmax, _FIELDLINE_INITIAL_STEP_FRACTION)
     k0 = rhs(t0, y0_arr)
     one = jnp.asarray(1.0, dtype=dtype)
 
@@ -899,6 +945,7 @@ def trace_fieldline(
         phi_hits_buf,
         phi_hits_count_init,
         phi_init,  # running phi_last
+        phi_init,  # transit criterion baseline, set on first accepted step
         jnp.asarray(0, dtype=jnp.int32),  # status_event (criterion idx)
         jnp.asarray(False),  # stop flag
     )
@@ -920,6 +967,7 @@ def trace_fieldline(
             _phi_hits,
             _phi_count,
             _phi_last,
+            _phi_init,
             _status_event,
             stop,
         ) = carry
@@ -945,11 +993,12 @@ def trace_fieldline(
             phi_hits_in,
             phi_hits_count_in,
             phi_last,
+            phi_init,
             status_event,
             _stop,
         ) = carry
-        # Clamp step to not overshoot tmax.
-        h_clamped = jnp.minimum(h, tmax - t)
+        # Clamp step to not overshoot tmax or the upstream quarter-turn ceiling.
+        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
         y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
         err = _error_norm(y_err, y, y_new, rtol, atol)
         err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
@@ -966,7 +1015,8 @@ def trace_fieldline(
             jnp.asarray(_MAX_FACTOR, dtype=dtype),
         )
         h_next = h_clamped * factor
-        t_next = jnp.where(accepted, t + h_clamped, t)
+        t_accepted = _accepted_step_time(t, h_clamped, tmax)
+        t_next = jnp.where(accepted, t_accepted, t)
         y_next = jnp.where(accepted, y_new, y)
         k_next = jnp.where(accepted, k7, k_first)
 
@@ -1012,7 +1062,7 @@ def trace_fieldline(
 
                 f_left = diff_at(jnp.asarray(0.0, dtype=dtype))
                 f_right = diff_at(jnp.asarray(1.0, dtype=dtype))
-                bracket_atol = jnp.asarray(0.0, dtype=dtype)
+                bracket_atol = jnp.asarray(1.0e-15, dtype=dtype)
                 s_root, _f_root, _bracketed = bracket_root_jax(
                     diff_at,
                     jnp.asarray(0.0, dtype=dtype),
@@ -1050,8 +1100,23 @@ def trace_fieldline(
         )
 
         # ── Stopping criteria check on accepted state ──
+        first_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
+        phi_init_for_criteria = jnp.where(
+            first_accepted_step,
+            phi_current,
+            phi_init,
+        )
+
         def apply_criteria(args):
-            hits_in, count_in, status_in, stop_in, iter_count_in, phi_curr_in = args
+            (
+                hits_in,
+                count_in,
+                status_in,
+                stop_in,
+                iter_count_in,
+                phi_curr_in,
+                phi_init_in,
+            ) = args
             for i, criterion in enumerate(stopping_criteria):
                 pred = _stopping_criterion_should_stop(
                     criterion,
@@ -1060,7 +1125,7 @@ def trace_fieldline(
                     y_next[2],
                     iter_count_in,
                     phi_curr_in,
-                    phi_init,
+                    phi_init_in,
                     dtype,
                 )
                 fires = jnp.logical_and(jnp.logical_not(stop_in), pred)
@@ -1103,11 +1168,17 @@ def trace_fieldline(
                 jnp.asarray(False),
                 iter_count_post,
                 phi_current,
+                phi_init_for_criteria,
             ),
         )
 
         # Update running phi_last only on accepted steps (matches C++).
         phi_last_next = jnp.where(accepted, phi_current, phi_last)
+        phi_init_next = jnp.where(
+            jnp.logical_and(accepted, first_accepted_step),
+            phi_current,
+            phi_init,
+        )
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
             mask,
@@ -1129,6 +1200,7 @@ def trace_fieldline(
             phi_hits_after,
             phi_count_after,
             phi_last_next,
+            phi_init_next,
             status_after,
             stop_after,
         )
@@ -1145,6 +1217,7 @@ def trace_fieldline(
         phi_hits_final,
         phi_hits_count_final,
         _phi_last_final,
+        _phi_init_final,
         status_event_final,
         stop_at_exit,
     ) = jax.lax.while_loop(cond, body, init_carry)
@@ -1191,6 +1264,37 @@ def trace_fieldline(
     )
 
 
+def trace_fieldlines_batched(
+    spec: FieldlineTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    magnetic_field_fn: Callable[[jax.Array], jax.Array],
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+) -> FieldlineTracingResult:
+    """Trace a batch of fieldlines with one vmapped JAX integration graph.
+
+    ``max_steps``, event-buffer sizes, tolerances, and stopping criteria
+    are shared across the batch. ``dtmaxs`` is per lane because the
+    upstream quarter-turn step cap depends on the initial radius and
+    field strength.
+    """
+
+    y0s_arr = jnp.asarray(y0s, dtype=jnp.float64).reshape((-1, 3))
+    dtmaxs_arr = jnp.asarray(dtmaxs, dtype=jnp.float64).reshape((-1,))
+
+    def trace_one(y0: jax.Array, dtmax: jax.Array) -> FieldlineTracingResult:
+        return trace_fieldline(
+            replace(spec, dtmax=dtmax),
+            y0,
+            magnetic_field_fn,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+
+    return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr)
+
+
 # ── Guiding-centre vacuum RHS (4-state Cartesian) ─────────────────────
 
 
@@ -1209,13 +1313,14 @@ class GuidingCenterTracingSpec:
     rtol: float
     atol: float
     max_steps: int
+    dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
 
 
 jax.tree_util.register_dataclass(
     GuidingCenterTracingSpec,
-    data_fields=["tmax", "rtol", "atol"],
+    data_fields=["tmax", "rtol", "atol", "dtmax"],
     meta_fields=["max_steps", "max_root_iters", "max_phi_hits"],
 )
 
@@ -1386,6 +1491,7 @@ def trace_guiding_center(
     tmax = jnp.asarray(spec.tmax, dtype=dtype)
     rtol = jnp.asarray(spec.rtol, dtype=dtype)
     atol = jnp.asarray(spec.atol, dtype=dtype)
+    dtmax = jnp.asarray(spec.dtmax, dtype=dtype)
     t0 = jnp.asarray(0.0, dtype=dtype)
     max_steps = int(spec.max_steps)
     if max_steps <= 0:
@@ -1396,7 +1502,7 @@ def trace_guiding_center(
     max_root_iters = int(spec.max_root_iters)
 
     rhs = guiding_center_vacuum_rhs(magnetic_field_fn, m, q, mu)
-    h0 = _initial_step_size(t0, tmax)
+    h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
     k0 = rhs(t0, y0_arr)
     one = jnp.asarray(1.0, dtype=dtype)
 
@@ -1435,6 +1541,7 @@ def trace_guiding_center(
         phi_hits_buf,
         phi_hits_count_init,
         phi_init,
+        phi_init,
         jnp.asarray(0, dtype=jnp.int32),  # status_event
         jnp.asarray(False),
     )
@@ -1456,6 +1563,7 @@ def trace_guiding_center(
             _phi_hits,
             _phi_count,
             _phi_last,
+            _phi_init,
             _status_event,
             stop,
         ) = carry
@@ -1481,10 +1589,11 @@ def trace_guiding_center(
             phi_hits_in,
             phi_hits_count_in,
             phi_last,
+            phi_init,
             status_event,
             _stop,
         ) = carry
-        h_clamped = jnp.minimum(h, tmax - t)
+        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
         y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
         err = _error_norm(y_err, y, y_new, rtol, atol)
         err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
@@ -1501,7 +1610,8 @@ def trace_guiding_center(
             jnp.asarray(_MAX_FACTOR, dtype=dtype),
         )
         h_next = h_clamped * factor
-        t_next = jnp.where(accepted, t + h_clamped, t)
+        t_accepted = _accepted_step_time(t, h_clamped, tmax)
+        t_next = jnp.where(accepted, t_accepted, t)
         y_next = jnp.where(accepted, y_new, y)
         k_next = jnp.where(accepted, k7, k_first)
 
@@ -1544,7 +1654,7 @@ def trace_guiding_center(
 
                 f_left = diff_at(jnp.asarray(0.0, dtype=dtype))
                 f_right = diff_at(jnp.asarray(1.0, dtype=dtype))
-                bracket_atol = jnp.asarray(0.0, dtype=dtype)
+                bracket_atol = jnp.asarray(1.0e-15, dtype=dtype)
                 s_root, _f_root, _bracketed = bracket_root_jax(
                     diff_at,
                     jnp.asarray(0.0, dtype=dtype),
@@ -1582,8 +1692,23 @@ def trace_guiding_center(
             operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
         )
 
+        first_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
+        phi_init_for_criteria = jnp.where(
+            first_accepted_step,
+            phi_current,
+            phi_init,
+        )
+
         def apply_criteria(args):
-            hits_in, count_in, status_in, stop_in, iter_count_in, phi_curr_in = args
+            (
+                hits_in,
+                count_in,
+                status_in,
+                stop_in,
+                iter_count_in,
+                phi_curr_in,
+                phi_init_in,
+            ) = args
             for i, criterion in enumerate(stopping_criteria):
                 pred = _stopping_criterion_should_stop(
                     criterion,
@@ -1592,7 +1717,7 @@ def trace_guiding_center(
                     y_next[2],
                     iter_count_in,
                     phi_curr_in,
-                    phi_init,
+                    phi_init_in,
                     dtype,
                 )
                 fires = jnp.logical_and(jnp.logical_not(stop_in), pred)
@@ -1636,10 +1761,16 @@ def trace_guiding_center(
                 jnp.asarray(False),
                 iter_count_post,
                 phi_current,
+                phi_init_for_criteria,
             ),
         )
 
         phi_last_next = jnp.where(accepted, phi_current, phi_last)
+        phi_init_next = jnp.where(
+            jnp.logical_and(accepted, first_accepted_step),
+            phi_current,
+            phi_init,
+        )
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
             mask,
@@ -1661,6 +1792,7 @@ def trace_guiding_center(
             phi_hits_after,
             phi_count_after,
             phi_last_next,
+            phi_init_next,
             status_after,
             stop_after,
         )
@@ -1677,6 +1809,7 @@ def trace_guiding_center(
         phi_hits_final,
         phi_hits_count_final,
         _phi_last_final,
+        _phi_init_final,
         status_event_final,
         stop_at_exit,
     ) = jax.lax.while_loop(cond, body, init_carry)
@@ -1718,6 +1851,40 @@ def trace_guiding_center(
     )
 
 
+def trace_guiding_centers_batched(
+    spec: GuidingCenterTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    mus: jax.Array,
+    magnetic_field_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    m: float,
+    q: float,
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+) -> GuidingCenterTracingResult:
+    """Trace Cartesian guiding-centre orbits with one vmapped JAX graph."""
+
+    y0s_arr = jnp.asarray(y0s, dtype=jnp.float64).reshape((-1, 4))
+    dtmaxs_arr = jnp.asarray(dtmaxs, dtype=jnp.float64).reshape((-1,))
+    mus_arr = jnp.asarray(mus, dtype=jnp.float64).reshape((-1,))
+
+    def trace_one(
+        y0: jax.Array, dtmax: jax.Array, mu: jax.Array
+    ) -> GuidingCenterTracingResult:
+        return trace_guiding_center(
+            replace(spec, dtmax=dtmax),
+            y0,
+            magnetic_field_fn,
+            m=m,
+            q=q,
+            mu=mu,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+
+    return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr, mus_arr)
+
+
 # ── Shared 4-state DOPRI5 adaptive driver ─────────────────────────────
 
 
@@ -1727,6 +1894,7 @@ def _run_dopri5_4state(
     tmax: jax.Array,
     rtol: jax.Array,
     atol: jax.Array,
+    dtmax: jax.Array,
     max_steps: int,
     max_phi_hits: int = 1,
 ) -> GuidingCenterTracingResult:
@@ -1746,8 +1914,14 @@ def _run_dopri5_4state(
 
     dtype = jnp.float64
     t0 = jnp.asarray(0.0, dtype=dtype)
-    h0 = _initial_step_size(t0, tmax)
-    k0 = rhs(t0, y0)
+    h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
+    initial_axis_invalid = _boozer_axis_invalid(y0)
+    k0 = jax.lax.cond(
+        initial_axis_invalid,
+        lambda _: jnp.zeros((4,), dtype=dtype),
+        lambda _: rhs(t0, y0),
+        operand=None,
+    )
     one = jnp.asarray(1.0, dtype=dtype)
 
     traj = jnp.zeros((max_steps + 1, 5), dtype=dtype)
@@ -1765,24 +1939,57 @@ def _run_dopri5_4state(
         k0,
         traj,
         mask,
+        jnp.where(
+            initial_axis_invalid,
+            jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
+            jnp.asarray(0, dtype=jnp.int32),
+        ),
+        initial_axis_invalid,
     )
 
     max_steps_i32 = jnp.asarray(max_steps, dtype=jnp.int32)
 
     def cond(carry):
-        step_count, accepted_count, t, _y, _h, _k, _traj, _mask = carry
+        (
+            step_count,
+            accepted_count,
+            t,
+            _y,
+            _h,
+            _k,
+            _traj,
+            _mask,
+            _status_event,
+            stop,
+        ) = carry
         not_done = t < tmax
         budget_ok = step_count < max_steps_i32
         accepted_ok = accepted_count < max_steps_i32
-        return jnp.logical_and(not_done, jnp.logical_and(budget_ok, accepted_ok))
+        not_stopped = jnp.logical_not(stop)
+        return jnp.logical_and(
+            not_done,
+            jnp.logical_and(jnp.logical_and(budget_ok, accepted_ok), not_stopped),
+        )
 
     def body(carry):
-        step_count, accepted_count, t, y, h, k_first, traj, mask = carry
-        h_clamped = jnp.minimum(h, tmax - t)
+        (
+            step_count,
+            accepted_count,
+            t,
+            y,
+            h,
+            k_first,
+            traj,
+            mask,
+            status_event,
+            _stop,
+        ) = carry
+        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
         y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
         err = _error_norm(y_err, y, y_new, rtol, atol)
         err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
         accepted = err_safe <= one
+        axis_invalid = jnp.logical_and(accepted, _boozer_axis_invalid(y_new))
         factor = jnp.where(
             err_safe > jnp.asarray(0.0, dtype=dtype),
             jnp.asarray(_SAFETY, dtype=dtype)
@@ -1795,7 +2002,8 @@ def _run_dopri5_4state(
             jnp.asarray(_MAX_FACTOR, dtype=dtype),
         )
         h_next = h_clamped * factor
-        t_next = jnp.where(accepted, t + h_clamped, t)
+        t_accepted = _accepted_step_time(t, h_clamped, tmax)
+        t_next = jnp.where(accepted, t_accepted, t)
         y_next = jnp.where(accepted, y_new, y)
         k_next = jnp.where(accepted, k7, k_first)
         traj_next, mask_next, accepted_next = _record_trajectory_row(
@@ -1804,7 +2012,12 @@ def _run_dopri5_4state(
             accepted_count,
             t_next,
             y_next,
-            accepted,
+            _should_record_accepted_step(accepted, axis_invalid),
+        )
+        status_next = jnp.where(
+            axis_invalid,
+            jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
+            status_event,
         )
         return (
             step_count + jnp.asarray(1, dtype=jnp.int32),
@@ -1815,6 +2028,8 @@ def _run_dopri5_4state(
             k_next,
             traj_next,
             mask_next,
+            status_next,
+            axis_invalid,
         )
 
     (
@@ -1826,6 +2041,8 @@ def _run_dopri5_4state(
         _k_final,
         traj_final,
         mask_final,
+        status_event_final,
+        stop_at_exit,
     ) = jax.lax.while_loop(cond, body, init_carry)
 
     last_row = jnp.concatenate(
@@ -1847,11 +2064,12 @@ def _run_dopri5_4state(
         jnp.abs(tmax), jnp.asarray(1.0, dtype=dtype)
     )
     reached = (tmax - t_final) <= eps_t
-    status = jnp.where(
+    status_normal = jnp.where(
         reached,
         jnp.asarray(0, dtype=jnp.int32),
         jnp.asarray(1, dtype=jnp.int32),
     )
+    status = jnp.where(stop_at_exit, status_event_final, status_normal)
 
     phi_hits_empty = jnp.zeros((max_phi_hits, 6), dtype=dtype)
     return GuidingCenterTracingResult(
@@ -1939,6 +2157,15 @@ _BOOZER_RHS_EVAL_KEYS: tuple[str, ...] = (
 )
 
 
+def _interpolated_boozer_evaluator(name: str) -> Callable:
+    eval_fn = _INTERP_EVALUATORS[name]
+
+    def _eval(state: InterpolatedBoozerFieldFrozenState, point: jax.Array) -> jax.Array:
+        return eval_fn(state, state.specs, point)
+
+    return _eval
+
+
 def _boozer_field_evaluators(state) -> dict[str, Callable]:
     """Return the set of evaluator callables matching the frozen-state type.
 
@@ -1993,7 +2220,9 @@ def _boozer_field_evaluators(state) -> dict[str, Callable]:
             "dIds": _radial_dIds,
         }
     if isinstance(state, InterpolatedBoozerFieldFrozenState):
-        return {key: _INTERP_EVALUATORS[key] for key in _BOOZER_RHS_EVAL_KEYS}
+        return {
+            key: _interpolated_boozer_evaluator(key) for key in _BOOZER_RHS_EVAL_KEYS
+        }
     raise TypeError(
         f"No JAX RHS evaluators registered for frozen-state type "
         f"{type(state).__name__}. Supported types: "
@@ -2296,6 +2525,7 @@ def trace_guiding_center_boozer(
     tmax = jnp.asarray(spec.tmax, dtype=dtype)
     rtol = jnp.asarray(spec.rtol, dtype=dtype)
     atol = jnp.asarray(spec.atol, dtype=dtype)
+    dtmax = jnp.asarray(spec.dtmax, dtype=dtype)
     t0 = jnp.asarray(0.0, dtype=dtype)
     max_steps = int(spec.max_steps)
     if max_steps <= 0:
@@ -2316,6 +2546,7 @@ def trace_guiding_center_boozer(
             "trace_guiding_center_boozer mode must be one of "
             f"{{'vacuum', 'no_k', 'full'}}; got mode={mode!r}."
         )
+    initial_axis_invalid = _boozer_axis_invalid(y0_arr)
 
     # Fast path: no events requested → reuse the lean shared driver to
     # preserve the prior compile profile on the no-events parity tests.
@@ -2328,12 +2559,18 @@ def trace_guiding_center_boozer(
             tmax,
             rtol,
             atol,
+            dtmax,
             max_steps,
             max_phi_hits=max_phi_hits,
         )
 
-    h0 = _initial_step_size(t0, tmax)
-    k0 = rhs(t0, y0_arr)
+    h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
+    k0 = jax.lax.cond(
+        initial_axis_invalid,
+        lambda _: jnp.zeros((4,), dtype=dtype),
+        lambda _: rhs(t0, y0_arr),
+        operand=None,
+    )
     one = jnp.asarray(1.0, dtype=dtype)
 
     traj = jnp.zeros((max_steps + 1, 5), dtype=dtype)
@@ -2370,8 +2607,13 @@ def trace_guiding_center_boozer(
         phi_hits_buf,
         phi_hits_count_init,
         zeta_init,  # running zeta_last
-        jnp.asarray(0, dtype=jnp.int32),  # status_event
-        jnp.asarray(False),  # stop flag
+        zeta_init,  # transit criterion baseline, set on first accepted step
+        jnp.where(
+            initial_axis_invalid,
+            jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
+            jnp.asarray(0, dtype=jnp.int32),
+        ),  # status_event
+        initial_axis_invalid,  # stop flag
     )
 
     max_steps_i32 = jnp.asarray(max_steps, dtype=jnp.int32)
@@ -2391,6 +2633,7 @@ def trace_guiding_center_boozer(
             _phi_hits,
             _phi_count,
             _zeta_last,
+            _zeta_init,
             _status_event,
             stop,
         ) = carry
@@ -2416,14 +2659,17 @@ def trace_guiding_center_boozer(
             phi_hits_in,
             phi_hits_count_in,
             zeta_last,
+            zeta_init,
             status_event,
             _stop,
         ) = carry
-        h_clamped = jnp.minimum(h, tmax - t)
+        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
         y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
         err = _error_norm(y_err, y, y_new, rtol, atol)
         err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
         accepted = err_safe <= one
+        axis_invalid = jnp.logical_and(accepted, _boozer_axis_invalid(y_new))
+        accepted_valid = jnp.logical_and(accepted, jnp.logical_not(axis_invalid))
         factor = jnp.where(
             err_safe > jnp.asarray(0.0, dtype=dtype),
             jnp.asarray(_SAFETY, dtype=dtype)
@@ -2436,7 +2682,8 @@ def trace_guiding_center_boozer(
             jnp.asarray(_MAX_FACTOR, dtype=dtype),
         )
         h_next = h_clamped * factor
-        t_next = jnp.where(accepted, t + h_clamped, t)
+        t_accepted = _accepted_step_time(t, h_clamped, tmax)
+        t_next = jnp.where(accepted, t_accepted, t)
         y_next = jnp.where(accepted, y_new, y)
         k_next = jnp.where(accepted, k7, k_first)
 
@@ -2476,7 +2723,7 @@ def trace_guiding_center_boozer(
 
                 f_left = diff_at(jnp.asarray(0.0, dtype=dtype))
                 f_right = diff_at(jnp.asarray(1.0, dtype=dtype))
-                bracket_atol = jnp.asarray(0.0, dtype=dtype)
+                bracket_atol = jnp.asarray(1.0e-15, dtype=dtype)
                 s_root, _f_root, _bracketed = bracket_root_jax(
                     diff_at,
                     jnp.asarray(0.0, dtype=dtype),
@@ -2508,15 +2755,30 @@ def trace_guiding_center_boozer(
             return hits_in, count_in
 
         phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
+            accepted_valid,
             scan_zetas,
             lambda args: (args[0], args[1]),
             operand=(phi_hits_in, phi_hits_count_in, zeta_last, zeta_current),
         )
 
         # ── Stopping criteria check on accepted state ──
+        first_valid_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
+        zeta_init_for_criteria = jnp.where(
+            first_valid_accepted_step,
+            zeta_current,
+            zeta_init,
+        )
+
         def apply_criteria(args):
-            hits_in, count_in, status_in, stop_in, iter_count_in, zeta_curr_in = args
+            (
+                hits_in,
+                count_in,
+                status_in,
+                stop_in,
+                iter_count_in,
+                zeta_curr_in,
+                zeta_init_in,
+            ) = args
             for i, criterion in enumerate(stopping_criteria):
                 pred = _stopping_criterion_should_stop(
                     criterion,
@@ -2525,7 +2787,7 @@ def trace_guiding_center_boozer(
                     y_next[2],
                     iter_count_in,
                     zeta_curr_in,
-                    zeta_init,
+                    zeta_init_in,
                     dtype,
                     is_boozer_state=True,
                 )
@@ -2560,7 +2822,7 @@ def trace_guiding_center_boozer(
             status_after,
             stop_after,
         ) = jax.lax.cond(
-            accepted,
+            accepted_valid,
             apply_criteria,
             lambda args: (args[0], args[1], args[2], args[3]),
             operand=(
@@ -2570,10 +2832,22 @@ def trace_guiding_center_boozer(
                 jnp.asarray(False),
                 iter_count_post,
                 zeta_current,
+                zeta_init_for_criteria,
             ),
         )
+        status_after = jnp.where(
+            axis_invalid,
+            jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
+            status_after,
+        )
+        stop_after = jnp.logical_or(stop_after, axis_invalid)
 
         zeta_last_next = jnp.where(accepted, zeta_current, zeta_last)
+        zeta_init_next = jnp.where(
+            jnp.logical_and(accepted_valid, first_valid_accepted_step),
+            zeta_current,
+            zeta_init,
+        )
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
             mask,
@@ -2595,6 +2869,7 @@ def trace_guiding_center_boozer(
             phi_hits_after,
             phi_count_after,
             zeta_last_next,
+            zeta_init_next,
             status_after,
             stop_after,
         )
@@ -2611,6 +2886,7 @@ def trace_guiding_center_boozer(
         phi_hits_final,
         phi_hits_count_final,
         _zeta_last_final,
+        _zeta_init_final,
         status_event_final,
         stop_at_exit,
     ) = jax.lax.while_loop(cond, body, init_carry)
@@ -2652,6 +2928,41 @@ def trace_guiding_center_boozer(
     )
 
 
+def trace_guiding_centers_boozer_batched(
+    spec: GuidingCenterTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    mus: jax.Array,
+    boozer_field,
+    m: float,
+    q: float,
+    mode: str = "vacuum",
+    zetas: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+) -> GuidingCenterTracingResult:
+    """Trace Boozer guiding-centre orbits with one device-side batch graph."""
+
+    y0s_arr = jnp.asarray(y0s, dtype=jnp.float64).reshape((-1, 4))
+    dtmaxs_arr = jnp.asarray(dtmaxs, dtype=jnp.float64).reshape((-1,))
+    mus_arr = jnp.asarray(mus, dtype=jnp.float64).reshape((-1,))
+
+    def trace_one(args) -> GuidingCenterTracingResult:
+        y0, dtmax, mu = args
+        return trace_guiding_center_boozer(
+            replace(spec, dtmax=dtmax),
+            y0,
+            boozer_field,
+            m=m,
+            q=q,
+            mu=mu,
+            mode=mode,
+            zetas=zetas,
+            stopping_criteria=stopping_criteria,
+        )
+
+    return jax.lax.map(trace_one, (y0s_arr, dtmaxs_arr, mus_arr))
+
+
 # ── Full-orbit Lorentz RHS (6-state Cartesian) ────────────────────────
 
 
@@ -2674,13 +2985,14 @@ class FullorbitTracingSpec:
     rtol: float
     atol: float
     max_steps: int
+    dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
 
 
 jax.tree_util.register_dataclass(
     FullorbitTracingSpec,
-    data_fields=["tmax", "rtol", "atol"],
+    data_fields=["tmax", "rtol", "atol", "dtmax"],
     meta_fields=["max_steps", "max_root_iters", "max_phi_hits"],
 )
 
@@ -2842,6 +3154,7 @@ def trace_fullorbit(
     tmax = jnp.asarray(spec.tmax, dtype=dtype)
     rtol = jnp.asarray(spec.rtol, dtype=dtype)
     atol = jnp.asarray(spec.atol, dtype=dtype)
+    dtmax = jnp.asarray(spec.dtmax, dtype=dtype)
     t0 = jnp.asarray(0.0, dtype=dtype)
     max_steps = int(spec.max_steps)
     if max_steps <= 0:
@@ -2852,7 +3165,7 @@ def trace_fullorbit(
     max_root_iters = int(spec.max_root_iters)
 
     rhs = fullorbit_vacuum_rhs(magnetic_field_fn, m, q)
-    h0 = _initial_step_size(t0, tmax)
+    h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
     k0 = rhs(t0, y0_arr)
     one = jnp.asarray(1.0, dtype=dtype)
 
@@ -2895,6 +3208,7 @@ def trace_fullorbit(
         phi_hits_buf,
         phi_hits_count_init,
         phi_init,  # running phi_last
+        phi_init,  # transit criterion baseline, set on first accepted step
         jnp.asarray(0, dtype=jnp.int32),  # status_event (criterion idx)
         jnp.asarray(False),  # stop flag
     )
@@ -2916,6 +3230,7 @@ def trace_fullorbit(
             _phi_hits,
             _phi_count,
             _phi_last,
+            _phi_init,
             _status_event,
             stop,
         ) = carry
@@ -2941,10 +3256,11 @@ def trace_fullorbit(
             phi_hits_in,
             phi_hits_count_in,
             phi_last,
+            phi_init,
             status_event,
             _stop,
         ) = carry
-        h_clamped = jnp.minimum(h, tmax - t)
+        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
         y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
         err = _error_norm(y_err, y, y_new, rtol, atol)
         err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
@@ -2961,7 +3277,8 @@ def trace_fullorbit(
             jnp.asarray(_MAX_FACTOR, dtype=dtype),
         )
         h_next = h_clamped * factor
-        t_next = jnp.where(accepted, t + h_clamped, t)
+        t_accepted = _accepted_step_time(t, h_clamped, tmax)
+        t_next = jnp.where(accepted, t_accepted, t)
         y_next = jnp.where(accepted, y_new, y)
         k_next = jnp.where(accepted, k7, k_first)
 
@@ -3003,7 +3320,7 @@ def trace_fullorbit(
 
                 f_left = diff_at(jnp.asarray(0.0, dtype=dtype))
                 f_right = diff_at(jnp.asarray(1.0, dtype=dtype))
-                bracket_atol = jnp.asarray(0.0, dtype=dtype)
+                bracket_atol = jnp.asarray(1.0e-15, dtype=dtype)
                 s_root, _f_root, _bracketed = bracket_root_jax(
                     diff_at,
                     jnp.asarray(0.0, dtype=dtype),
@@ -3044,8 +3361,23 @@ def trace_fullorbit(
         )
 
         # ── Stopping criteria check on accepted state ──
+        first_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
+        phi_init_for_criteria = jnp.where(
+            first_accepted_step,
+            phi_current,
+            phi_init,
+        )
+
         def apply_criteria(args):
-            hits_in, count_in, status_in, stop_in, iter_count_in, phi_curr_in = args
+            (
+                hits_in,
+                count_in,
+                status_in,
+                stop_in,
+                iter_count_in,
+                phi_curr_in,
+                phi_init_in,
+            ) = args
             for i, criterion in enumerate(stopping_criteria):
                 pred = _stopping_criterion_should_stop(
                     criterion,
@@ -3054,7 +3386,7 @@ def trace_fullorbit(
                     y_next[2],
                     iter_count_in,
                     phi_curr_in,
-                    phi_init,
+                    phi_init_in,
                     dtype,
                 )
                 fires = jnp.logical_and(jnp.logical_not(stop_in), pred)
@@ -3100,10 +3432,16 @@ def trace_fullorbit(
                 jnp.asarray(False),
                 iter_count_post,
                 phi_current,
+                phi_init_for_criteria,
             ),
         )
 
         phi_last_next = jnp.where(accepted, phi_current, phi_last)
+        phi_init_next = jnp.where(
+            jnp.logical_and(accepted, first_accepted_step),
+            phi_current,
+            phi_init,
+        )
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
             mask,
@@ -3125,6 +3463,7 @@ def trace_fullorbit(
             phi_hits_after,
             phi_count_after,
             phi_last_next,
+            phi_init_next,
             status_after,
             stop_after,
         )
@@ -3141,6 +3480,7 @@ def trace_fullorbit(
         phi_hits_final,
         phi_hits_count_final,
         _phi_last_final,
+        _phi_init_final,
         status_event_final,
         stop_at_exit,
     ) = jax.lax.while_loop(cond, body, init_carry)
@@ -3180,3 +3520,32 @@ def trace_fullorbit(
         phi_hits=phi_hits_final,
         phi_hits_count=phi_hits_count_final,
     )
+
+
+def trace_fullorbits_batched(
+    spec: FullorbitTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    magnetic_field_fn: Callable[[jax.Array], jax.Array],
+    m: float,
+    q: float,
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+) -> FullorbitTracingResult:
+    """Trace full-orbit Lorentz trajectories with one vmapped JAX graph."""
+
+    y0s_arr = jnp.asarray(y0s, dtype=jnp.float64).reshape((-1, 6))
+    dtmaxs_arr = jnp.asarray(dtmaxs, dtype=jnp.float64).reshape((-1,))
+
+    def trace_one(y0: jax.Array, dtmax: jax.Array) -> FullorbitTracingResult:
+        return trace_fullorbit(
+            replace(spec, dtmax=dtmax),
+            y0,
+            magnetic_field_fn,
+            m=m,
+            q=q,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+
+    return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr)

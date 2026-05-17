@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Callable
+from itertools import repeat
 from math import sqrt
 
 import numpy as np
@@ -22,6 +23,9 @@ from .._core.types import RealArray
 logger = logging.getLogger(__name__)
 
 
+_QUARTER_TURN = 0.5 * np.pi
+
+
 def _allgather_flat(comm, values):
     if comm is None:
         return values
@@ -38,6 +42,139 @@ def _event_hits_prefix(phi_hits, phi_hits_count, *, context: str) -> np.ndarray:
             "increase the JAX tracing event buffer before using these results."
         )
     return hits[:count]
+
+
+def _batched_jax_trace_payloads(
+    result,
+    *,
+    forget_exact_path: bool,
+    event_context: str,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    trajectories = np.asarray(result.trajectory, dtype=np.float64)
+    masks = np.asarray(result.mask, dtype=bool)
+    phi_hits = np.asarray(result.phi_hits, dtype=np.float64)
+    phi_hit_counts = np.asarray(result.phi_hits_count, dtype=np.int64).reshape(-1)
+
+    res_tys: list[np.ndarray] = []
+    res_phi_hits: list[np.ndarray] = []
+    for traj, mask, hits, hit_count in zip(
+        trajectories, masks, phi_hits, phi_hit_counts, strict=True
+    ):
+        live = traj[mask]
+        if forget_exact_path and live.shape[0] >= 2:
+            res_tys.append(np.stack([live[0], live[-1]], axis=0))
+        else:
+            res_tys.append(live)
+        res_phi_hits.append(_event_hits_prefix(hits, hit_count, context=event_context))
+    return res_tys, res_phi_hits
+
+
+def _jax_trace_lost(status: int, t_final: float, tmax: float) -> bool:
+    return status < 0 or t_final < float(tmax) - 1e-15
+
+
+def _batched_trace_status_arrays(result) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return (
+        np.asarray(result.status, dtype=np.int32).reshape(-1),
+        np.asarray(result.t_final, dtype=np.float64).reshape(-1),
+        np.asarray(result.steps_taken, dtype=np.int32).reshape(-1),
+    )
+
+
+def _log_batched_jax_trace_statuses(
+    result,
+    *,
+    first: int,
+    total: int,
+    tmax: float,
+    label: str,
+    live_trajectories: list[np.ndarray] | None = None,
+) -> int:
+    statuses, t_finals, steps_taken = _batched_trace_status_arrays(result)
+    loss_ctr = 0
+    live_items = (
+        repeat(None, statuses.shape[0])
+        if live_trajectories is None
+        else live_trajectories
+    )
+    status_items = zip(live_items, statuses, t_finals, steps_taken, strict=True)
+    for offset, (live, status, t_final, step_count) in enumerate(status_items):
+        i = first + offset
+        status_int = int(status)
+        t_final_float = float(t_final)
+        if status_int > 0:
+            logger.warning(
+                f"{i + 1:3d}/{total}, {label} status={status_int} "
+                f"t_final={t_final_float}, steps_taken={int(step_count)}"
+            )
+        elif status_int < 0:
+            logger.debug(
+                f"{i + 1:3d}/{total}, {label} stopped by criterion "
+                f"index {-1 - status_int}, t_final={t_final_float}"
+            )
+        elif live is not None and live.shape[0] > 0:
+            dtavg = live[-1, 0] / max(live.shape[0], 1)
+            logger.debug(
+                f"{i + 1:3d}/{total}, t_final={live[-1, 0]}, "
+                f"average timestep {dtavg:.10f}s (JAX backend)"
+            )
+        if _jax_trace_lost(status_int, t_final_float, tmax):
+            loss_ctr += 1
+    return loss_ctr
+
+
+def _cartesian_radius(xyz_init) -> float:
+    point = np.asarray(xyz_init, dtype=np.float64)
+    return sqrt(float(point[0] * point[0] + point[1] * point[1]))
+
+
+def _quarter_turn_dtmax(radius: float, denominator: float) -> float:
+    return float(_quarter_turn_dtmaxs(np.asarray([radius]), denominator)[0])
+
+
+def _quarter_turn_dtmaxs(radii, denominators) -> np.ndarray:
+    return (
+        np.asarray(radii, dtype=np.float64)
+        * _QUARTER_TURN
+        / np.asarray(denominators, dtype=np.float64)
+    )
+
+
+def _cartesian_radii(xyz_inits) -> np.ndarray:
+    points = np.asarray(xyz_inits, dtype=np.float64)
+    return np.sqrt(points[:, 0] * points[:, 0] + points[:, 1] * points[:, 1])
+
+
+def _cartesian_particle_dtmax(xyz_init, speed_total: float) -> float:
+    return _quarter_turn_dtmax(_cartesian_radius(xyz_init), speed_total)
+
+
+def _cartesian_particle_dtmaxs(xyz_inits, speed_total) -> np.ndarray:
+    return _quarter_turn_dtmaxs(_cartesian_radii(xyz_inits), speed_total)
+
+
+def _boozer_particle_dtmax(G0: float, modB: float, speed_total: float) -> float:
+    return _quarter_turn_dtmax(abs(float(G0)) / float(modB), speed_total)
+
+
+def _boozer_particle_dtmaxs(G0, modB, speed_total: float) -> np.ndarray:
+    return _quarter_turn_dtmaxs(
+        np.abs(G0) / np.asarray(modB, dtype=np.float64), speed_total
+    )
+
+
+def _fieldline_dtmax(xyz_init, abs_B: float) -> float:
+    return _quarter_turn_dtmax(_cartesian_radius(xyz_init), abs_B)
+
+
+def _fieldline_dtmaxs(xyz_inits, abs_B) -> np.ndarray:
+    return _quarter_turn_dtmaxs(_cartesian_radii(xyz_inits), abs_B)
+
+
+def _magnetic_moments(speed_total: float, speed_par, abs_B) -> np.ndarray:
+    parallel_speeds = np.asarray(speed_par, dtype=np.float64)
+    vperp2 = float(speed_total) * float(speed_total) - parallel_speeds * parallel_speeds
+    return vperp2 / (2.0 * np.asarray(abs_B, dtype=np.float64))
 
 
 __all__ = [
@@ -345,8 +482,8 @@ def _trace_particles_boozer_jax(
 ):
     """JAX backend for :func:`trace_particles_boozer` (4-state Boozer GC).
 
-    Routes each initial particle through
-    :func:`simsopt.jax_core.tracing.trace_guiding_center_boozer`. The
+    Routes local initial particles through
+    :func:`simsopt.jax_core.tracing.trace_guiding_centers_boozer_batched`. The
     driver switches between the upstream
     ``GuidingCenterVacuumBoozerRHS`` / ``GuidingCenterNoKBoozerRHS`` /
     ``GuidingCenterBoozerRHS`` equations via the ``mode`` argument and
@@ -414,7 +551,7 @@ def _trace_particles_boozer_jax(
 
     from ..jax_core.tracing import (
         GuidingCenterTracingSpec,
-        trace_guiding_center_boozer,
+        trace_guiding_centers_boozer_batched,
     )
 
     jax_stopping_criteria = _translate_stopping_criteria_to_jax(stopping_criteria)
@@ -431,12 +568,23 @@ def _trace_particles_boozer_jax(
     res_zeta_hits = []
     loss_ctr = 0
     first, last = parallel_loop_bounds(comm, nparticles)
-    for i in range(first, last):
-        point = np.asarray(stz_inits[i, :], dtype=np.float64).reshape((1, 3))
-        field.set_points(point)
-        abs_B_initial = float(np.asarray(field.modB(), dtype=np.float64).reshape(-1)[0])
-        vperp2 = max(speed_total * speed_total - speed_par[i] * speed_par[i], 0.0)
-        mu_i = vperp2 / (2.0 * abs_B_initial)
+    local_stz = np.asarray(stz_inits[first:last], dtype=np.float64)
+    local_speed_par = np.asarray(speed_par[first:last], dtype=np.float64)
+    if local_stz.shape[0] > 0:
+        abs_B_initial_values = []
+        G0_values = []
+        for point in local_stz:
+            field.set_points(point.reshape((1, 3)))
+            abs_B_initial_values.append(
+                float(np.asarray(field.modB(), dtype=np.float64).reshape(-1)[0])
+            )
+            G0_values.append(
+                float(np.asarray(field.G(), dtype=np.float64).reshape(-1)[0])
+            )
+        abs_B_initial = np.asarray(abs_B_initial_values, dtype=np.float64)
+        G0 = np.asarray(G0_values, dtype=np.float64)
+        mus = _magnetic_moments(float(speed_total), local_speed_par, abs_B_initial)
+        dtmaxs = _boozer_particle_dtmaxs(G0, abs_B_initial, float(speed_total))
         spec = GuidingCenterTracingSpec(
             tmax=float(tmax),
             rtol=float(tol),
@@ -444,55 +592,34 @@ def _trace_particles_boozer_jax(
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
         )
-        y0 = jnp.asarray(
-            [
-                float(stz_inits[i, 0]),
-                float(stz_inits[i, 1]),
-                float(stz_inits[i, 2]),
-                float(speed_par[i]),
-            ],
-            dtype=jnp.float64,
-        )
-        result = trace_guiding_center_boozer(
+        result = trace_guiding_centers_boozer_batched(
             spec,
-            y0,
+            jnp.asarray(
+                np.column_stack([local_stz, local_speed_par]), dtype=jnp.float64
+            ),
+            jnp.asarray(dtmaxs, dtype=jnp.float64),
+            jnp.asarray(mus, dtype=jnp.float64),
             field,
             m=float(mass),
             q=float(charge),
-            mu=float(mu_i),
             mode=rhs_mode,
             zetas=zetas_arr,
             stopping_criteria=jax_stopping_criteria,
         )
-        traj = np.asarray(result.trajectory, dtype=np.float64)
-        traj_mask = np.asarray(result.mask, dtype=bool)
-        live = traj[traj_mask]
-        if forget_exact_path and live.shape[0] >= 2:
-            res_tys.append(np.stack([live[0], live[-1]], axis=0))
-        else:
-            res_tys.append(live)
-        res_zeta_hits.append(
-            _event_hits_prefix(
-                result.phi_hits,
-                result.phi_hits_count,
-                context="JAX Boozer guiding-centre tracing",
-            )
+        local_res_tys, local_res_zeta_hits = _batched_jax_trace_payloads(
+            result,
+            forget_exact_path=forget_exact_path,
+            event_context="JAX Boozer guiding-centre tracing",
         )
-        status = int(result.status)
-        t_final = float(result.t_final)
-        if status > 0:
-            logger.debug(
-                f"{i + 1:3d}/{nparticles}, JAX Boozer guiding-centre "
-                f"status={status} t_final={t_final}, "
-                f"steps_taken={int(result.steps_taken)}"
-            )
-        elif status < 0:
-            logger.debug(
-                f"{i + 1:3d}/{nparticles}, JAX Boozer guiding-centre stopped by "
-                f"criterion index {-1 - status}, t_final={t_final}"
-            )
-        if t_final < float(tmax) - 1e-15:
-            loss_ctr += 1
+        res_tys.extend(local_res_tys)
+        res_zeta_hits.extend(local_res_zeta_hits)
+        loss_ctr += _log_batched_jax_trace_statuses(
+            result,
+            first=first,
+            total=nparticles,
+            tmax=tmax,
+            label="JAX Boozer guiding-centre",
+        )
     if comm is not None:
         loss_ctr = comm.allreduce(loss_ctr)
     res_tys = _allgather_flat(comm, res_tys)
@@ -766,11 +893,12 @@ def _trace_particles_jax_guiding_center_vacuum(
             "trace_particles wrapper. Drop the mode override or switch "
             "to the CPU backend."
         )
+    import jax
     import jax.numpy as jnp
 
     from ..jax_core.tracing import (
         GuidingCenterTracingSpec,
-        trace_guiding_center,
+        trace_guiding_centers_batched,
     )
 
     field_fn = _require_jax_field_B_dB(field)
@@ -781,12 +909,10 @@ def _trace_particles_jax_guiding_center_vacuum(
     else:
         phis_arr = None
 
-    # Compute mu (magnetic moment) per particle from the initial state.
-    # mu = v_perp^2 / (2 |B|) where v_perp^2 = v_total^2 - v_par^2 (the
-    # upstream definition; see particle_guiding_center_tracing in
-    # simsoptpp/tracing.cpp). |B| is evaluated at the initial position
-    # using the CPU field (no JAX needed: mu is a fixed parameter once
-    # the orbit starts).
+    # Compute mu (magnetic moment) per particle from the initial state:
+    # mu = v_perp^2 / (2 |B|), with v_perp^2 = v_total^2 - v_par^2.
+    # |B| is evaluated by the JAX field function once before integration;
+    # mu is then a fixed per-lane parameter for the orbit.
     nparticles = xyz_inits.shape[0]
     # Static step budget mirroring _compute_fieldlines_jax. The lane
     # bounds the JAX vs CPU accepted step count to within 25%, so 4000
@@ -798,11 +924,14 @@ def _trace_particles_jax_guiding_center_vacuum(
     res_phi_hits = []
     loss_ctr = 0
     first, last = parallel_loop_bounds(comm, nparticles)
-    for i in range(first, last):
-        B_initial, _ = field_fn(jnp.asarray(xyz_inits[i], dtype=jnp.float64))
-        abs_B_initial = np.linalg.norm(np.asarray(B_initial, dtype=np.float64))
-        vperp2 = max(speed_total * speed_total - speed_par[i] * speed_par[i], 0.0)
-        mu_i = vperp2 / (2.0 * float(abs_B_initial))
+    local_xyz = np.asarray(xyz_inits[first:last], dtype=np.float64)
+    local_speed_par = np.asarray(speed_par[first:last], dtype=np.float64)
+    if local_xyz.shape[0] > 0:
+        local_xyz_device = jnp.asarray(local_xyz, dtype=jnp.float64)
+        B_initial, _ = jax.vmap(field_fn)(local_xyz_device)
+        abs_B_initial = np.linalg.norm(np.asarray(B_initial, dtype=np.float64), axis=1)
+        mus = _magnetic_moments(float(speed_total), local_speed_par, abs_B_initial)
+        dtmaxs = _cartesian_particle_dtmaxs(local_xyz, float(speed_total))
         spec = GuidingCenterTracingSpec(
             tmax=float(tmax),
             rtol=float(tol),
@@ -810,53 +939,32 @@ def _trace_particles_jax_guiding_center_vacuum(
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
         )
-        y0 = jnp.asarray(
-            [
-                float(xyz_inits[i, 0]),
-                float(xyz_inits[i, 1]),
-                float(xyz_inits[i, 2]),
-                float(speed_par[i]),
-            ],
-            dtype=jnp.float64,
-        )
-        result = trace_guiding_center(
+        y0s = np.column_stack([local_xyz, local_speed_par])
+        result = trace_guiding_centers_batched(
             spec,
-            y0,
+            jnp.asarray(y0s, dtype=jnp.float64),
+            jnp.asarray(dtmaxs, dtype=jnp.float64),
+            jnp.asarray(mus, dtype=jnp.float64),
             field_fn,
             m=float(mass),
             q=float(charge),
-            mu=float(mu_i),
             phis=phis_arr,
             stopping_criteria=jax_stopping_criteria,
         )
-        traj = np.asarray(result.trajectory, dtype=np.float64)
-        mask = np.asarray(result.mask, dtype=bool)
-        live = traj[mask]
-        if forget_exact_path and live.shape[0] >= 2:
-            res_tys.append(np.stack([live[0], live[-1]], axis=0))
-        else:
-            res_tys.append(live)
-        res_phi_hits.append(
-            _event_hits_prefix(
-                result.phi_hits,
-                result.phi_hits_count,
-                context="JAX guiding-centre tracing",
-            )
+        local_res_tys, local_res_phi_hits = _batched_jax_trace_payloads(
+            result,
+            forget_exact_path=forget_exact_path,
+            event_context="JAX guiding-centre tracing",
         )
-        status = int(result.status)
-        t_final = float(result.t_final)
-        if status > 0:
-            logger.debug(
-                f"{i + 1:3d}/{nparticles}, JAX guiding-centre status={status} "
-                f"t_final={t_final}, steps_taken={int(result.steps_taken)}"
-            )
-        elif status < 0:
-            logger.debug(
-                f"{i + 1:3d}/{nparticles}, JAX guiding-centre stopped by "
-                f"criterion index {-1 - status}, t_final={t_final}"
-            )
-        if t_final < float(tmax) - 1e-15:
-            loss_ctr += 1
+        res_tys.extend(local_res_tys)
+        res_phi_hits.extend(local_res_phi_hits)
+        loss_ctr += _log_batched_jax_trace_statuses(
+            result,
+            first=first,
+            total=nparticles,
+            tmax=tmax,
+            label="JAX guiding-centre",
+        )
     if comm is not None:
         loss_ctr = comm.allreduce(loss_ctr)
     res_tys = _allgather_flat(comm, res_tys)
@@ -922,7 +1030,7 @@ def _trace_particles_jax_fullorbit_vacuum(
 
     from ..jax_core.tracing import (
         FullorbitTracingSpec,
-        trace_fullorbit,
+        trace_fullorbits_batched,
     )
 
     field_fn = _require_jax_field_B(field)
@@ -964,7 +1072,9 @@ def _trace_particles_jax_fullorbit_vacuum(
     res_tys = []
     res_phi_hits = []
     loss_ctr = 0
-    for local_i, i in enumerate(range(first, last)):
+    if xyz_inits_full.shape[0] > 0:
+        speeds = np.linalg.norm(v_inits, axis=1)
+        dtmaxs = _quarter_turn_dtmaxs(_cartesian_radii(xyz_inits_full), speeds)
         spec = FullorbitTracingSpec(
             tmax=float(tmax),
             rtol=float(tol),
@@ -972,54 +1082,30 @@ def _trace_particles_jax_fullorbit_vacuum(
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
         )
-        y0 = jnp.asarray(
-            [
-                float(xyz_inits_full[local_i, 0]),
-                float(xyz_inits_full[local_i, 1]),
-                float(xyz_inits_full[local_i, 2]),
-                float(v_inits[local_i, 0]),
-                float(v_inits[local_i, 1]),
-                float(v_inits[local_i, 2]),
-            ],
-            dtype=jnp.float64,
-        )
-        result = trace_fullorbit(
+        result = trace_fullorbits_batched(
             spec,
-            y0,
+            jnp.asarray(np.column_stack([xyz_inits_full, v_inits]), dtype=jnp.float64),
+            jnp.asarray(dtmaxs, dtype=jnp.float64),
             field_fn,
             m=float(mass),
             q=float(charge),
             phis=phis_arr,
             stopping_criteria=jax_stopping_criteria,
         )
-        traj = np.asarray(result.trajectory, dtype=np.float64)
-        mask = np.asarray(result.mask, dtype=bool)
-        live = traj[mask]
-        if forget_exact_path and live.shape[0] >= 2:
-            res_tys.append(np.stack([live[0], live[-1]], axis=0))
-        else:
-            res_tys.append(live)
-        res_phi_hits.append(
-            _event_hits_prefix(
-                result.phi_hits,
-                result.phi_hits_count,
-                context="JAX full-orbit tracing",
-            )
+        local_res_tys, local_res_phi_hits = _batched_jax_trace_payloads(
+            result,
+            forget_exact_path=forget_exact_path,
+            event_context="JAX full-orbit tracing",
         )
-        status = int(result.status)
-        t_final = float(result.t_final)
-        if status > 0:
-            logger.debug(
-                f"{i + 1:3d}/{nparticles}, JAX full-orbit status={status} "
-                f"t_final={t_final}, steps_taken={int(result.steps_taken)}"
-            )
-        elif status < 0:
-            logger.debug(
-                f"{i + 1:3d}/{nparticles}, JAX full-orbit stopped by "
-                f"criterion index {-1 - status}, t_final={t_final}"
-            )
-        if t_final < float(tmax) - 1e-15:
-            loss_ctr += 1
+        res_tys.extend(local_res_tys)
+        res_phi_hits.extend(local_res_phi_hits)
+        loss_ctr += _log_batched_jax_trace_statuses(
+            result,
+            first=first,
+            total=nparticles,
+            tmax=tmax,
+            label="JAX full-orbit",
+        )
     if comm is not None:
         loss_ctr = comm.allreduce(loss_ctr)
     res_tys = _allgather_flat(comm, res_tys)
@@ -1661,10 +1747,10 @@ def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
 def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, comm):
     """JAX backend for :func:`compute_fieldlines`.
 
-    Routes each initial point through
-    :func:`simsopt.jax_core.tracing.trace_fieldline`. The driver is
-    arc-length parametrised (the JAX RHS is ``B / |B|`` rather than the
-    upstream ``B``); the wrapper reproduces the upstream return shape
+    Routes local initial points through
+    :func:`simsopt.jax_core.tracing.trace_fieldlines_batched`. The driver uses
+    the upstream ``dx/dt = B(x)`` parameterisation; the wrapper
+    reproduces the upstream return shape
     ``(res_tys, res_phi_hits)`` so call sites are agnostic to the
     backend choice.
 
@@ -1678,9 +1764,10 @@ def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, c
     MPI ``comm`` uses the same host-level contiguous split/gather as
     the CPU wrapper. No compiled cross-rank collective is introduced.
     """
+    import jax
     import jax.numpy as jnp
 
-    from ..jax_core.tracing import FieldlineTracingSpec, trace_fieldline
+    from ..jax_core.tracing import FieldlineTracingSpec, trace_fieldlines_batched
 
     field_fn = _require_jax_field_B(field)
 
@@ -1707,7 +1794,19 @@ def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, c
     R0_arr = np.asarray(R0, dtype=np.float64)
     Z0_arr = np.asarray(Z0, dtype=np.float64)
     first, last = parallel_loop_bounds(comm, nlines)
-    for i in range(first, last):
+    local_y0 = np.stack(
+        [
+            R0_arr[first:last],
+            np.zeros(last - first, dtype=np.float64),
+            Z0_arr[first:last],
+        ],
+        axis=1,
+    )
+    if local_y0.shape[0] > 0:
+        local_y0_device = jnp.asarray(local_y0, dtype=jnp.float64)
+        B_initial = jax.vmap(field_fn)(local_y0_device)
+        abs_B_initial = np.linalg.norm(np.asarray(B_initial, dtype=np.float64), axis=1)
+        dtmaxs = _fieldline_dtmaxs(local_y0, abs_B_initial)
         spec = FieldlineTracingSpec(
             tmax=float(tmax),
             rtol=float(tol),
@@ -1715,43 +1814,29 @@ def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, c
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
         )
-        y0 = jnp.asarray([float(R0_arr[i]), 0.0, float(Z0_arr[i])], dtype=jnp.float64)
-        result = trace_fieldline(
+        result = trace_fieldlines_batched(
             spec,
-            y0,
+            local_y0_device,
+            jnp.asarray(dtmaxs, dtype=jnp.float64),
             field_fn,
             phis=phis_arr,
             stopping_criteria=jax_stopping_criteria,
         )
-        traj = np.asarray(result.trajectory, dtype=np.float64)
-        mask = np.asarray(result.mask, dtype=bool)
-        live = traj[mask]
-        res_tys.append(live)
-        res_phi_hits.append(
-            _event_hits_prefix(
-                result.phi_hits,
-                result.phi_hits_count,
-                context="JAX fieldline tracing",
-            )
+        local_res_tys, local_res_phi_hits = _batched_jax_trace_payloads(
+            result,
+            forget_exact_path=False,
+            event_context="JAX fieldline tracing",
         )
-        status = int(result.status)
-        if status > 0:
-            logger.debug(
-                f"{i + 1:3d}/{nlines}, JAX fieldline status={status} "
-                f"t_final={float(result.t_final)}, "
-                f"steps_taken={int(result.steps_taken)}"
-            )
-        elif status < 0:
-            logger.debug(
-                f"{i + 1:3d}/{nlines}, JAX fieldline stopped by criterion "
-                f"index {-1 - status}, t_final={float(result.t_final)}"
-            )
-        elif live.shape[0] > 0:
-            dtavg = live[-1, 0] / max(live.shape[0], 1)
-            logger.debug(
-                f"{i + 1:3d}/{nlines}, t_final={live[-1, 0]}, "
-                f"average timestep {dtavg:.10f}s (JAX backend)"
-            )
+        res_tys.extend(local_res_tys)
+        res_phi_hits.extend(local_res_phi_hits)
+        _log_batched_jax_trace_statuses(
+            result,
+            first=first,
+            total=nlines,
+            tmax=tmax,
+            label="JAX fieldline",
+            live_trajectories=local_res_tys,
+        )
     res_tys = _allgather_flat(comm, res_tys)
     res_phi_hits = _allgather_flat(comm, res_phi_hits)
     return res_tys, res_phi_hits

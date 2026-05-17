@@ -427,6 +427,23 @@ Keep the timing claims narrow and honest:
 - warm time:
   - use repeated or in-process reruns to measure steady-state timing
   - prefer the Tier 5 trusted-fixture report for workflow-level timing claims
+- tracing:
+  - fieldline, Cartesian guiding-centre, Boozer guiding-centre, and full-orbit
+    JAX routes use immutable specs and local device batches before converting
+    the fixed-shape result buffers back to SIMSOPT's list-of-arrays API
+  - fieldline, Cartesian guiding-centre, and full-orbit routes use `vmap`;
+    Boozer guiding-centre preserves the upstream singleton `modB/G` setup for
+    each initial point, then runs the orbit integration through a device-side
+    `lax.map` batch so the existing comm split/gather parity test remains
+    stable
+  - this removes the per-trajectory integration-result synchronization boundary
+    on each MPI rank for fieldline, Cartesian guiding-centre, and full-orbit
+    tracing; Boozer still has a per-particle host scalar setup boundary before
+    the device-side integration batch
+  - trajectory/event/status handling remains a parity and diagnostic surface
+    rather than a smooth optimizer objective
+  - any CUDA speedup claim for tracing still needs the normal GPU performance
+    gate on real A100/H100-class hardware
 - parity mode:
   - `jax_cpu_parity` and `jax_gpu_parity` favor x64 stability and explicit
     reporting over maximum throughput
@@ -476,13 +493,15 @@ Keep the timing claims narrow and honest:
     `SurfaceRZFourier`, `SurfaceXYZFourier`, unclamped
     `SurfaceXYZTensorFourier`, and curve specs for `CurveXYZFourier`,
     `CurveRZFourier`, `CurvePlanarFourier`, `CurveHelical`,
-    `CurveCWSFourierRZ`, `CurvePerturbed`, and `CurveFilament`
+    `CurveCWSFourierRZ`, `CurvePerturbed`, `CurveFilament`, and the fieldline,
+    Cartesian guiding-centre, Boozer guiding-centre, and full-orbit tracing
+    routes
   - remaining upstream-visible families such as `SurfaceGarabedian`,
     `SurfaceHenneberg`, `SurfaceRZPseudospectral`, clamped
     `SurfaceXYZTensorFourier`, analytic/interpolated magnetic fields,
-    wireframe/permanent-magnet fields, field tracing, and broad objective
-    wrappers remain native-CPU/reference territory unless a dedicated
-    immutable spec and parity test exists
+    wireframe/permanent-magnet fields, and broad objective wrappers remain
+    native-CPU/reference territory unless a dedicated immutable spec and parity
+    test exists
   - unsupported live-graph conversion is a strict JAX boundary; use
     `native_cpu` for those families until their spec contracts are implemented
 - Some broader workflow families remain planned rather than fully implemented.

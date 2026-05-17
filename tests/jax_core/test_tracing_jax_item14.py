@@ -36,6 +36,7 @@ import jax.numpy as jnp
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
+from simsopt.field import tracing as field_tracing_module
 from simsopt.jax_core.regular_grid_interp import (
     UniformInterpolationRule,
     build_regular_grid_interpolant_3d,
@@ -46,9 +47,22 @@ from simsopt.jax_core.surface_classifier import (
 )
 from simsopt.jax_core.tracing import (
     FieldlineTracingSpec,
+    FullorbitTracingSpec,
+    GuidingCenterTracingSpec,
+    IterStoppingCriterion,
+    LevelsetStoppingCriterion,
+    MaxRStoppingCriterion,
+    ToroidalTransitStoppingCriterion,
+    _continuous_phi,
+    _run_dopri5_4state,
     bracket_root_jax,
     dopri5_step,
     trace_fieldline,
+    trace_fieldlines_batched,
+    trace_fullorbit,
+    trace_fullorbits_batched,
+    trace_guiding_center,
+    trace_guiding_centers_batched,
 )
 
 
@@ -224,6 +238,323 @@ def test_trace_fieldline_uses_upstream_raw_B_parameterization():
     np.testing.assert_allclose(endpoint, np.array([0.0, 2.0, 0.0]), rtol=0, atol=1e-12)
 
 
+def _assert_accepted_steps_respect_dtmax(result, dtmax, initial_fraction):
+    live = np.asarray(result.trajectory)[np.asarray(result.mask)]
+    steps = np.diff(live[:, 0])
+
+    assert int(result.status) == 0
+    assert steps.size > 3
+    np.testing.assert_allclose(
+        steps[0],
+        initial_fraction * dtmax,
+        rtol=0.0,
+        atol=1.0e-14,
+    )
+    assert np.max(steps) <= dtmax + 1.0e-14
+    assert np.any(np.isclose(steps, dtmax, rtol=0.0, atol=1.0e-14))
+
+
+def test_toroidal_transit_baseline_is_first_accepted_state():
+    """Transit criteria anchor at the first post-step angle, matching C++."""
+
+    def rotating_field(point: jax.Array) -> jax.Array:
+        return jnp.asarray([-point[1], point[0], 0.0], dtype=jnp.float64)
+
+    spec = FieldlineTracingSpec(
+        tmax=1.0e-3,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=32,
+        max_phi_hits=4,
+        dtmax=1.0e-2,
+    )
+    result = trace_fieldline(
+        spec,
+        jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64),
+        rotating_field,
+        stopping_criteria=(ToroidalTransitStoppingCriterion(max_transits=1.0e-8),),
+    )
+
+    assert int(result.status) == -1
+    assert int(result.steps_taken) >= 1
+    assert int(result.phi_hits_count) == 1
+    first_recorded_step_t = float(result.trajectory[1, 0])
+    stop_event_t = float(result.phi_hits[0, 0])
+    assert stop_event_t > first_recorded_step_t
+
+
+def test_trace_fieldline_clean_exit_reports_exact_tmax():
+    """Terminal-clamped non-stopped trajectories report the exact requested tmax."""
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([0.0, 1.0, 0.0], dtype=jnp.float64)
+
+    spec = FieldlineTracingSpec(
+        tmax=float(np.nextafter(0.3, 1.0)),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=128,
+        dtmax=0.07,
+    )
+    result = trace_fieldline(
+        spec,
+        jnp.asarray([0.0, 0.0, 0.0], dtype=jnp.float64),
+        field_fn,
+    )
+
+    assert int(result.status) == 0
+    assert float(result.t_final) == spec.tmax
+    live = np.asarray(result.trajectory)[np.asarray(result.mask)]
+    assert live[-1, 0] == spec.tmax
+
+
+@pytest.mark.parametrize(
+    ("x", "y", "phi_near"),
+    [
+        (-1.0, 0.0, np.pi),
+        (-1.0, -0.0, np.pi),
+        (0.0, 1.0, -np.pi),
+        (0.0, -1.0, np.pi),
+        (1.0, 0.0, np.pi),
+        (1.0, -0.0, -np.pi),
+        (-1.0, np.nextafter(0.0, 1.0), np.pi),
+        (-1.0, np.nextafter(0.0, -1.0), -np.pi),
+    ],
+)
+def test_continuous_phi_matches_cpp_get_phi_edges(x, y, phi_near):
+    """JAX unwrap matches the C++ ``get_phi`` edge/tie convention."""
+    sopp = pytest.importorskip("simsoptpp")
+
+    actual = float(
+        _continuous_phi(
+            jnp.asarray(x, dtype=jnp.float64),
+            jnp.asarray(y, dtype=jnp.float64),
+            jnp.asarray(phi_near, dtype=jnp.float64),
+            jnp.float64,
+        )
+    )
+    expected = sopp.get_phi(float(x), float(y), float(phi_near))
+
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_public_tracing_wrappers_use_cpp_quarter_turn_dtmax_formulas():
+    """JAX wrapper ``dtmax`` formulas match ``simsoptpp/tracing.cpp``."""
+
+    xyz = np.asarray([3.0, 4.0, 2.0], dtype=np.float64)
+    speed_total = 2.5
+    abs_B = 0.8
+    G0 = -1.7
+    modB = 0.4
+
+    np.testing.assert_allclose(
+        field_tracing_module._cartesian_particle_dtmax(xyz, speed_total),
+        5.0 * 0.5 * np.pi / speed_total,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        field_tracing_module._fieldline_dtmax(xyz, abs_B),
+        5.0 * 0.5 * np.pi / abs_B,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        field_tracing_module._boozer_particle_dtmax(G0, modB, speed_total),
+        (abs(G0) / modB) * 0.5 * np.pi / speed_total,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        field_tracing_module._magnetic_moments(1.0, [2.0], [0.5]),
+        [-3.0],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_trace_fieldline_respects_dtmax_step_ceiling_and_initial_heuristic():
+    """Fieldline DOPRI5 uses ``1e-5 * dtmax`` and caps accepted steps."""
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+
+    dtmax = 0.125
+    spec = FieldlineTracingSpec(
+        tmax=0.45,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=64,
+        dtmax=dtmax,
+    )
+    y0 = jnp.asarray([0.0, 0.0, 0.0], dtype=jnp.float64)
+    result = trace_fieldline(spec, y0, field_fn)
+
+    _assert_accepted_steps_respect_dtmax(result, dtmax, initial_fraction=1.0e-5)
+
+
+def test_trace_guiding_center_respects_dtmax_step_ceiling_and_initial_heuristic():
+    """Cartesian guiding-centre DOPRI5 uses ``1e-3 * dtmax`` and caps steps."""
+
+    def magnetic_field_fn(_point: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return (
+            jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64),
+            jnp.zeros((3, 3), dtype=jnp.float64),
+        )
+
+    dtmax = 0.125
+    spec = GuidingCenterTracingSpec(
+        tmax=0.45,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=64,
+        dtmax=dtmax,
+    )
+    y0 = jnp.asarray([1.0, 0.0, 0.0, 1.0], dtype=jnp.float64)
+    result = trace_guiding_center(spec, y0, magnetic_field_fn, m=1.0, q=1.0, mu=0.0)
+
+    _assert_accepted_steps_respect_dtmax(result, dtmax, initial_fraction=1.0e-3)
+
+
+def test_trace_fullorbit_respects_dtmax_step_ceiling_and_initial_heuristic():
+    """Full-orbit DOPRI5 uses ``1e-3 * dtmax`` and caps accepted steps."""
+
+    def magnetic_field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([0.0, 0.0, 0.0], dtype=jnp.float64)
+
+    dtmax = 0.125
+    spec = FullorbitTracingSpec(
+        tmax=0.45,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=64,
+        dtmax=dtmax,
+    )
+    y0 = jnp.asarray([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=jnp.float64)
+    result = trace_fullorbit(spec, y0, magnetic_field_fn, m=1.0, q=1.0)
+
+    _assert_accepted_steps_respect_dtmax(result, dtmax, initial_fraction=1.0e-3)
+
+
+def test_trace_guiding_center_cartesian_accepts_nonpositive_x_initial_state():
+    """Cartesian GC must not apply the Boozer ``s > 0`` axis contract."""
+
+    def magnetic_field_fn(_point: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return (
+            jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64),
+            jnp.zeros((3, 3), dtype=jnp.float64),
+        )
+
+    dtmax = 0.01
+    spec = GuidingCenterTracingSpec(
+        tmax=0.1,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=64,
+        dtmax=dtmax,
+    )
+    y0 = jnp.asarray([-1.0, 0.0, 0.0, 1.0], dtype=jnp.float64)
+    result = trace_guiding_center(spec, y0, magnetic_field_fn, m=1.0, q=1.0, mu=0.0)
+    live = np.asarray(result.trajectory)[np.asarray(result.mask)]
+
+    assert int(result.status) == 0
+    np.testing.assert_allclose(live[1, 0], 1.0e-3 * dtmax, rtol=0.0, atol=1.0e-14)
+    np.testing.assert_allclose(live[-1], [0.1, -1.0, 0.0, 0.1, 1.0], atol=1.0e-12)
+
+
+def test_tracing_batch_helpers_match_single_trajectory_contracts():
+    """Vmapped tracing helpers preserve single-lane physics and result layout."""
+
+    def fieldline_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([0.0, 1.0, 0.0], dtype=jnp.float64)
+
+    def particle_field_fn(_point: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return (
+            jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64),
+            jnp.zeros((3, 3), dtype=jnp.float64),
+        )
+
+    def zero_B_fn(_point: jax.Array) -> jax.Array:
+        return jnp.zeros((3,), dtype=jnp.float64)
+
+    fieldline_spec = FieldlineTracingSpec(
+        tmax=0.1, rtol=1.0e-12, atol=1.0e-12, max_steps=64
+    )
+    fieldline_batch = trace_fieldlines_batched(
+        fieldline_spec,
+        jnp.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.5]], dtype=jnp.float64),
+        jnp.asarray([0.01, 0.02], dtype=jnp.float64),
+        fieldline_fn,
+    )
+    fieldline_traj = np.asarray(fieldline_batch.trajectory)
+    fieldline_mask = np.asarray(fieldline_batch.mask)
+    np.testing.assert_allclose(
+        fieldline_traj[0][fieldline_mask[0]][-1],
+        [0.1, 0.0, 0.1, 0.0],
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        fieldline_traj[1][fieldline_mask[1]][-1],
+        [0.1, 1.0, 0.1, 0.5],
+        atol=1.0e-12,
+    )
+
+    gc_spec = GuidingCenterTracingSpec(
+        tmax=0.1, rtol=1.0e-12, atol=1.0e-12, max_steps=64
+    )
+    gc_batch = trace_guiding_centers_batched(
+        gc_spec,
+        jnp.asarray([[1.0, 0.0, 0.0, 1.0], [-1.0, 0.0, 0.0, 1.0]], dtype=jnp.float64),
+        jnp.asarray([0.01, 0.01], dtype=jnp.float64),
+        jnp.asarray([0.0, 0.0], dtype=jnp.float64),
+        particle_field_fn,
+        m=1.0,
+        q=1.0,
+    )
+    gc_traj = np.asarray(gc_batch.trajectory)
+    gc_mask = np.asarray(gc_batch.mask)
+    np.testing.assert_allclose(
+        gc_traj[0][gc_mask[0]][-1],
+        [0.1, 1.0, 0.0, 0.1, 1.0],
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        gc_traj[1][gc_mask[1]][-1],
+        [0.1, -1.0, 0.0, 0.1, 1.0],
+        atol=1.0e-12,
+    )
+
+    fullorbit_spec = FullorbitTracingSpec(
+        tmax=0.1, rtol=1.0e-12, atol=1.0e-12, max_steps=64
+    )
+    fullorbit_batch = trace_fullorbits_batched(
+        fullorbit_spec,
+        jnp.asarray(
+            [
+                [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.5, 0.0, 2.0, 0.0],
+            ],
+            dtype=jnp.float64,
+        ),
+        jnp.asarray([0.01, 0.01], dtype=jnp.float64),
+        zero_B_fn,
+        m=1.0,
+        q=1.0,
+    )
+    fullorbit_traj = np.asarray(fullorbit_batch.trajectory)
+    fullorbit_mask = np.asarray(fullorbit_batch.mask)
+    np.testing.assert_allclose(
+        fullorbit_traj[0][fullorbit_mask[0]][-1],
+        [0.1, 0.1, 0.0, 0.0, 1.0, 0.0, 0.0],
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        fullorbit_traj[1][fullorbit_mask[1]][-1],
+        [0.1, 1.0, 0.2, 0.5, 0.0, 2.0, 0.0],
+        atol=1.0e-12,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. Bracketed root vs analytic zero
 # ---------------------------------------------------------------------------
@@ -286,6 +617,74 @@ def test_bracket_root_uses_false_position_candidate_for_linear_residual():
 
     assert bool(bracketed)
     np.testing.assert_allclose(float(t_star), 0.7, rtol=0.0, atol=1e-15)
+    np.testing.assert_allclose(float(f_star), 0.0, rtol=0.0, atol=1e-15)
+
+
+def test_bracket_root_uses_false_position_for_tiny_endpoint_residuals():
+    """Tiny endpoint residuals still follow the Illinois false-position update."""
+
+    def f(t):
+        del t
+        return jnp.asarray(0.0, dtype=jnp.float64)
+
+    t_left = jnp.asarray(0.0, dtype=jnp.float64)
+    t_right = jnp.asarray(1.0, dtype=jnp.float64)
+    t_star, f_star, bracketed = bracket_root_jax(
+        f,
+        t_left,
+        t_right,
+        jnp.asarray(-1.0e-301, dtype=jnp.float64),
+        jnp.asarray(8.0e-301, dtype=jnp.float64),
+        max_iters=1,
+        atol=jnp.asarray(0.0, dtype=jnp.float64),
+    )
+
+    assert bool(bracketed)
+    np.testing.assert_allclose(float(t_star), 1.0 / 9.0, rtol=0.0, atol=1.0e-15)
+    np.testing.assert_allclose(float(f_star), 0.0, rtol=0.0, atol=0.0)
+
+
+def test_boozer_axis_status_ignores_rejected_trial_steps():
+    """Rejected trial states must shrink; only accepted Boozer states can stop."""
+
+    def rhs(_t, y):
+        dsdt = jnp.where(y[0] > 5.0e-7, -1000.0, 1000.0)
+        return jnp.asarray([dsdt, 0.0, 0.0, 0.0], dtype=jnp.float64)
+
+    result = _run_dopri5_4state(
+        rhs,
+        jnp.asarray([1.0e-6, 0.0, 0.0, 0.0], dtype=jnp.float64),
+        jnp.asarray(1.0e-3, dtype=jnp.float64),
+        jnp.asarray(1.0e-12, dtype=jnp.float64),
+        jnp.asarray(1.0e-12, dtype=jnp.float64),
+        jnp.asarray(1.0, dtype=jnp.float64),
+        1000,
+    )
+
+    assert float(result.t_final) > 0.0
+    assert int(result.steps_taken) > 0
+
+
+def test_bracket_root_sorts_descending_input_bracket():
+    """Descending endpoints are normalized before the Illinois loop."""
+
+    def f(t):
+        return t - jnp.asarray(0.25, dtype=jnp.float64)
+
+    t_left = jnp.asarray(1.0, dtype=jnp.float64)
+    t_right = jnp.asarray(0.0, dtype=jnp.float64)
+    t_star, f_star, bracketed = bracket_root_jax(
+        f,
+        t_left,
+        t_right,
+        f(t_left),
+        f(t_right),
+        max_iters=60,
+        atol=jnp.asarray(0.0, dtype=jnp.float64),
+    )
+
+    assert bool(bracketed)
+    np.testing.assert_allclose(float(t_star), 0.25, rtol=0.0, atol=1e-15)
     np.testing.assert_allclose(float(f_star), 0.0, rtol=0.0, atol=1e-15)
 
 
@@ -393,6 +792,122 @@ def test_levelset_classifier_marks_axis_inside_and_far_point_outside():
     classify_direct = signed_distance_to_cartesian_classifier(interp_spec)
     assert float(classify_direct(inside_point)) == 1.0
     assert float(classify_direct(outside_point)) == -1.0
+
+
+def test_levelset_classifier_grid_faces_remain_classified():
+    """Points exactly on interpolation cuboid faces do not route to OOB."""
+
+    interp_spec = _build_signed_distance_torus_interpolant(R0=1.3, a=0.2)
+    classify = make_levelset_classifier(interp_spec)
+
+    rmax_face = jnp.asarray([interp_spec.xmax, 0.0, 0.0], dtype=jnp.float64)
+    rmin_face = jnp.asarray([interp_spec.xmin, 0.0, 0.0], dtype=jnp.float64)
+    zmax_face = jnp.asarray([1.3, 0.0, interp_spec.zmax], dtype=jnp.float64)
+
+    assert float(classify(rmax_face)) == -1.0
+    assert float(classify(rmin_face)) == -1.0
+    assert float(classify(zmax_face)) == -1.0
+
+
+def test_levelset_classifier_cpu_jax_phi_wraparound_boundary_parity():
+    """CPU and JAX classifiers agree near the ``0 == 2*pi`` phi boundary."""
+
+    from simsopt.geo.surface import SurfaceClassifier
+    from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+
+    surf = SurfaceRZFourier(
+        nfp=1,
+        mpol=1,
+        ntor=0,
+        stellsym=True,
+        quadpoints_phi=np.linspace(0.0, 1.0, 16, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 16, endpoint=False),
+    )
+    surf.set_rc(0, 0, 1.0)
+    surf.set_rc(1, 0, 0.2)
+    surf.set_zs(1, 0, 0.2)
+    classifier = SurfaceClassifier(surf, h=0.1, p=2)
+    classify_jax = classifier.to_jax_classifier_fn()
+
+    radius = 1.0
+    phis = np.asarray(
+        [
+            0.0,
+            np.nextafter(0.0, 1.0),
+            -np.nextafter(0.0, 1.0),
+            np.nextafter(2.0 * np.pi, 0.0),
+        ],
+        dtype=np.float64,
+    )
+    xyz = np.column_stack(
+        [
+            radius * np.cos(phis),
+            radius * np.sin(phis),
+            np.zeros_like(phis),
+        ]
+    )
+
+    cpu_sign = np.sign(classifier.evaluate_xyz(xyz).reshape(-1))
+    jax_sign = np.asarray(classify_jax(jnp.asarray(xyz, dtype=jnp.float64)))
+    np.testing.assert_array_equal(jax_sign, cpu_sign)
+
+
+def test_trace_fieldline_first_stopping_criterion_wins_same_step():
+    """If multiple criteria fire together, the first criterion index wins."""
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+
+    spec = FieldlineTracingSpec(
+        tmax=0.1,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=32,
+        max_phi_hits=4,
+        dtmax=1.0,
+    )
+    result = trace_fieldline(
+        spec,
+        jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64),
+        field_fn,
+        stopping_criteria=(
+            MaxRStoppingCriterion(crit_r=1.0),
+            IterStoppingCriterion(max_iter=0),
+        ),
+    )
+
+    assert int(result.status) == -1
+    assert int(result.phi_hits_count) == 1
+    np.testing.assert_allclose(float(result.phi_hits[0, 1]), -1.0, rtol=0.0, atol=0.0)
+
+
+def test_trace_fieldline_levelset_zero_does_not_stop():
+    """A levelset value of exactly zero matches the upstream ``f < 0`` predicate."""
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+
+    def zero_classifier(points: jax.Array) -> jax.Array:
+        return jnp.zeros((points.shape[0],), dtype=points.dtype)
+
+    spec = FieldlineTracingSpec(
+        tmax=0.1,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=32,
+        max_phi_hits=4,
+        dtmax=1.0,
+    )
+    result = trace_fieldline(
+        spec,
+        jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64),
+        field_fn,
+        stopping_criteria=(LevelsetStoppingCriterion(classifier_fn=zero_classifier),),
+    )
+
+    assert int(result.status) == 0
+    assert int(result.phi_hits_count) == 0
+    assert float(result.t_final) == spec.tmax
 
 
 def test_levelset_classifier_rejects_out_of_bounds_unsafe_spec():

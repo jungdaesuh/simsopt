@@ -1,10 +1,10 @@
 """Item 16 parity tests: ``compute_fieldlines`` JAX backend routing.
 
 These tests validate that :func:`simsopt.field.tracing.compute_fieldlines`
-routes to the in-repo JAX fieldline driver
-(:func:`simsopt.jax_core.tracing.trace_fieldline`) shipped under item 14
-when ``simsopt.backend.is_jax_backend()`` returns ``True``, and that the
-public wrapper raises explicit :class:`NotImplementedError` for argument
+routes to the in-repo batched JAX fieldline driver
+(:func:`simsopt.jax_core.tracing.trace_fieldlines_batched`) shipped under
+item 14 when ``simsopt.backend.is_jax_backend()`` returns ``True``, and that
+the public wrapper raises explicit :class:`NotImplementedError` for argument
 shapes outside the JAX path's current carve-outs.
 
 The routing carve-outs mirror the item 14 / item 16 scoped JAX surface:
@@ -26,8 +26,10 @@ All tests run under ``JAX_PLATFORMS=cpu`` with ``JAX_ENABLE_X64=True``.
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pytest
+import jax.numpy as jnp
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt.field.toroidal_field_jax import ToroidalFieldJAX
@@ -38,6 +40,7 @@ from simsopt.field.tracing import (
     MinRStoppingCriterion,
     compute_fieldlines,
 )
+from simsopt.jax_core.tracing import FieldlineTracingResult
 
 
 _EVENT_TIME_TOLERANCES = parity_ladder_tolerances("event_time_tracing")
@@ -70,6 +73,56 @@ def test_event_hits_prefix_rejects_overflowing_jax_result():
             3,
             context="JAX fieldline tracing",
         )
+
+
+def test_compute_fieldlines_jax_warns_on_step_budget_exhaustion(monkeypatch, caplog):
+    """The JAX fieldline orchestrator surfaces max-step exhaustion as warning."""
+
+    monkeypatch.setattr(
+        tracing_module,
+        "_require_jax_field_B",
+        lambda _field: lambda _point: jnp.asarray([0.0, 1.0, 0.0], dtype=jnp.float64),
+    )
+
+    import simsopt.jax_core.tracing as jax_tracing
+
+    def exhausted_trace_fieldlines(
+        _spec, _y0s, _dtmaxs, _field_fn, phis=None, stopping_criteria=()
+    ):
+        del phis, stopping_criteria
+        return FieldlineTracingResult(
+            trajectory=jnp.asarray(
+                [[[0.0, 1.0, 0.0, 0.0], [0.25, 1.0, 0.25, 0.0]]],
+                dtype=jnp.float64,
+            ),
+            mask=jnp.asarray([[True, True]]),
+            steps_taken=jnp.asarray([4000], dtype=jnp.int32),
+            status=jnp.asarray([1], dtype=jnp.int32),
+            t_final=jnp.asarray([0.25], dtype=jnp.float64),
+            phi_hits=jnp.zeros((1, 1, 5), dtype=jnp.float64),
+            phi_hits_count=jnp.asarray([0], dtype=jnp.int32),
+        )
+
+    monkeypatch.setattr(
+        jax_tracing, "trace_fieldlines_batched", exhausted_trace_fieldlines
+    )
+
+    with caplog.at_level(logging.WARNING, logger="simsopt.field.tracing"):
+        res_tys, res_phi_hits = tracing_module._compute_fieldlines_jax(
+            field=object(),
+            R0=[1.0],
+            Z0=[0.0],
+            tmax=1.0,
+            tol=1.0e-9,
+            phis=[],
+            stopping_criteria=[],
+            comm=None,
+        )
+
+    assert len(res_tys) == 1
+    assert len(res_phi_hits) == 1
+    assert "JAX fieldline status=1" in caplog.text
+    assert "steps_taken=4000" in caplog.text
 
 
 # ---------------------------------------------------------------------------
