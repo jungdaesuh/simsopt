@@ -1,4 +1,14 @@
-"""Pure JAX SurfaceRZFourier geometry built on immutable specs."""
+"""Pure JAX SurfaceRZFourier geometry built on immutable specs.
+
+The RZ derivative kernels use XLA reductions over Fourier modes and can
+therefore differ across machines at the reduction-order floor. Parity checks
+for this path should use the direct-kernel tolerance lane around 1e-12 rather
+than byte identity.
+
+The RZ Hessian helpers carry an explicit memory-work guard for extreme
+``mpol=ntor=20`` production-shape requests where reverse-over-forward
+autodiff would materialize an impractically large quadrature-by-dof tape.
+"""
 
 from __future__ import annotations
 
@@ -7,12 +17,25 @@ from math import comb
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import lax
 
 from ._device_scalars import device_one, float_scalar, two_pi
+from ._vector_norms import norm3 as _norm3
+from ._vector_norms import unit_vector3 as _unit_vector3
 from .specs import (
     SurfaceRZFourierSpec,
+    _surface_rz_fourier_block_mode_positions as _block_mode_positions,
     make_surface_rzfourier_spec,
     surface_rz_fourier_dofs_from_spec as _surface_rz_fourier_dofs_from_spec,
+)
+
+_HESSIAN_WORK_BYTES_LIMIT = 32 * 1024**3
+_SCATTER_SET_DIMS_1D = lax.ScatterDimensionNumbers(
+    update_window_dims=(),
+    inserted_window_dims=(0,),
+    scatter_dims_to_operand_dims=(0,),
+    operand_batching_dims=(),
+    scatter_indices_batching_dims=(),
 )
 
 
@@ -273,68 +296,47 @@ def _surface_rz_fourier_derivative_from_terms(
     )
 
 
-def _block_mode_indices(
+def _scatter_coefficients(
+    positions: np.ndarray,
+    dofs: jax.Array,
     *,
-    mpol: int,
-    ntor: int,
-    include_zero_mode: bool,
-) -> tuple[jax.Array, jax.Array]:
-    m_idx: list[int] = []
-    n_idx: list[int] = []
-
-    start_n = 0 if include_zero_mode else 1
-    for n in range(start_n, ntor + 1):
-        m_idx.append(0)
-        n_idx.append(n + ntor)
-
-    for m in range(1, mpol + 1):
-        for n in range(-ntor, ntor + 1):
-            m_idx.append(m)
-            n_idx.append(n + ntor)
-
-    return (
-        jax.device_put(np.asarray(m_idx, dtype=np.int32)),
-        jax.device_put(np.asarray(n_idx, dtype=np.int32)),
+    target_size: int,
+    source_offset: int,
+) -> jax.Array:
+    indices = jax.device_put(np.asarray(positions, dtype=np.int32)).reshape(-1, 1)
+    start = int(source_offset)
+    values = lax.slice_in_dim(dofs, start, start + int(positions.size), axis=0)
+    base = _as_jax_float64(np.zeros(int(target_size), dtype=np.float64))
+    return lax.scatter(
+        base,
+        indices,
+        values,
+        _SCATTER_SET_DIMS_1D,
+        indices_are_sorted=True,
+        unique_indices=True,
+        mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS,
     )
 
 
-def _block_mode_positions(
+def _surface_rz_hessian_work_bytes(spec: SurfaceRZFourierSpec, dofs: jax.Array) -> int:
+    n_dofs = int(dofs.size)
+    n_quad = int(spec.quadpoints_phi.size) * int(spec.quadpoints_theta.size)
+    return n_dofs * n_dofs * n_quad * np.dtype(np.float64).itemsize
+
+
+def _check_surface_rz_hessian_memory(
+    spec: SurfaceRZFourierSpec,
+    dofs: jax.Array,
     *,
-    mpol: int,
-    ntor: int,
-    include_zero_mode: bool,
-) -> np.ndarray:
-    width = 2 * ntor + 1
-    positions: list[int] = []
-
-    start_n = 0 if include_zero_mode else 1
-    for n in range(start_n, ntor + 1):
-        positions.append(n + ntor)
-
-    for m in range(1, mpol + 1):
-        for n in range(-ntor, ntor + 1):
-            positions.append(m * width + n + ntor)
-
-    return np.asarray(positions, dtype=np.int64)
-
-
-def _gather_matrix(positions: np.ndarray, source_size: int) -> jax.Array:
-    matrix = np.zeros((positions.size, source_size), dtype=np.float64)
-    matrix[np.arange(positions.size), positions] = 1.0
-    return _as_jax_float64(matrix)
-
-
-def _scatter_matrix(
-    positions: np.ndarray,
-    *,
-    target_size: int,
-    source_size: int,
-    source_offset: int,
-) -> jax.Array:
-    matrix = np.zeros((target_size, source_size), dtype=np.float64)
-    source_columns = np.arange(positions.size) + source_offset
-    matrix[positions, source_columns] = 1.0
-    return _as_jax_float64(matrix)
+    name: str,
+) -> None:
+    work_bytes = _surface_rz_hessian_work_bytes(spec, dofs)
+    if work_bytes > _HESSIAN_WORK_BYTES_LIMIT:
+        raise MemoryError(
+            f"{name} estimated RZ Hessian work is {work_bytes} bytes, exceeding "
+            f"the {_HESSIAN_WORK_BYTES_LIMIT} byte guard. Reduce Fourier modes "
+            "or quadrature before requesting the dense Hessian."
+        )
 
 
 def _coefficients_from_dofs(
@@ -360,68 +362,37 @@ def _coefficients_from_dofs(
     rc_count = int(include_positions.size)
     tail_count = int(exclude_positions.size)
     dofs = _as_jax_float64(dofs)
-    total_dofs = rc_count + tail_count if stellsym else 2 * rc_count + 2 * tail_count
-    zero_flat = _as_jax_float64(np.zeros(flat_size, dtype=np.float64))
 
-    rc = jnp.reshape(
-        _scatter_matrix(
-            include_positions,
-            target_size=flat_size,
-            source_size=total_dofs,
-            source_offset=0,
-        )
-        @ dofs,
-        coeff_shape,
-    )
-    if stellsym:
-        zs = jnp.reshape(
-            _scatter_matrix(
-                exclude_positions,
+    def scatter_block(positions: np.ndarray, source_offset: int) -> jax.Array:
+        return jnp.reshape(
+            _scatter_coefficients(
+                positions,
+                dofs,
                 target_size=flat_size,
-                source_size=total_dofs,
-                source_offset=rc_count,
-            )
-            @ dofs,
+                source_offset=source_offset,
+            ),
             coeff_shape,
         )
-        zero = jnp.reshape(zero_flat, coeff_shape)
+
+    rc = scatter_block(include_positions, 0)
+    if stellsym:
+        zs = scatter_block(exclude_positions, rc_count)
+        zero = jnp.reshape(
+            _as_jax_float64(np.zeros(flat_size, dtype=np.float64)),
+            coeff_shape,
+        )
         return rc, zero, zero, zs
 
     rs_start = rc_count
     zc_start = rs_start + tail_count
     zs_start = zc_start + rc_count
 
-    rs = jnp.reshape(
-        _scatter_matrix(
-            exclude_positions,
-            target_size=flat_size,
-            source_size=total_dofs,
-            source_offset=rs_start,
-        )
-        @ dofs,
-        coeff_shape,
+    return (
+        rc,
+        scatter_block(exclude_positions, rs_start),
+        scatter_block(include_positions, zc_start),
+        scatter_block(exclude_positions, zs_start),
     )
-    zc = jnp.reshape(
-        _scatter_matrix(
-            include_positions,
-            target_size=flat_size,
-            source_size=total_dofs,
-            source_offset=zc_start,
-        )
-        @ dofs,
-        coeff_shape,
-    )
-    zs = jnp.reshape(
-        _scatter_matrix(
-            exclude_positions,
-            target_size=flat_size,
-            source_size=total_dofs,
-            source_offset=zs_start,
-        )
-        @ dofs,
-        coeff_shape,
-    )
-    return rc, rs, zc, zs
 
 
 def surface_rz_fourier_dofs_from_spec(spec: SurfaceRZFourierSpec) -> jax.Array:
@@ -679,8 +650,11 @@ def surface_rz_fourier_normal_from_spec(spec: SurfaceRZFourierSpec):
 
 def surface_rz_fourier_unitnormal_from_spec(spec: SurfaceRZFourierSpec):
     normal = surface_rz_fourier_normal_from_spec(spec)
-    norm = jnp.linalg.norm(normal, axis=-1, keepdims=True)
-    return normal / norm
+    return _unit_vector3(normal)
+
+
+def _normal_norm(normal: jax.Array) -> jax.Array:
+    return _norm3(normal)
 
 
 def surface_rz_fourier_unitnormal_from_dofs(
@@ -692,7 +666,7 @@ def surface_rz_fourier_unitnormal_from_dofs(
 def surface_rz_fourier_area_from_spec(spec: SurfaceRZFourierSpec):
     normal = surface_rz_fourier_normal_from_spec(spec)
     nphi, ntheta = normal.shape[:2]
-    return jnp.sum(jnp.linalg.norm(normal, axis=-1)) / (nphi * ntheta)
+    return jnp.sum(_normal_norm(normal)[..., 0]) / (nphi * ntheta)
 
 
 def surface_rz_fourier_volume_from_spec(spec: SurfaceRZFourierSpec):
@@ -1000,16 +974,20 @@ def surface_rz_fourier_daspect_ratio_from_dofs(
 def surface_rz_fourier_d2area_from_dofs(
     spec: SurfaceRZFourierSpec, dofs: jax.Array
 ):
+    dofs = _as_jax_float64(dofs)
+    _check_surface_rz_hessian_memory(spec, dofs, name="surface_rz_fourier_d2area")
     return jax.hessian(lambda x: surface_rz_fourier_area_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
+        dofs
     )
 
 
 def surface_rz_fourier_d2volume_from_dofs(
     spec: SurfaceRZFourierSpec, dofs: jax.Array
 ):
+    dofs = _as_jax_float64(dofs)
+    _check_surface_rz_hessian_memory(spec, dofs, name="surface_rz_fourier_d2volume")
     return jax.hessian(lambda x: surface_rz_fourier_volume_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
+        dofs
     )
 
 
