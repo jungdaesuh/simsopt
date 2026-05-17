@@ -932,14 +932,16 @@ def _traceable_adjoint_fail_gradient_like(gradient):
 
 
 def _traceable_rejected_objective_value(value, reference_value):
-    reference_value = lax.stop_gradient(
-        _as_runtime_float64(reference_value, reference=value)
+    reference = lax.stop_gradient(
+        _as_runtime_float64(reference_value, reference=reference_value)
     )
+    candidate = lax.stop_gradient(_as_runtime_float64(value, reference=reference))
+    finite_candidate = jnp.where(jnp.isfinite(candidate), candidate, reference)
     penalty = jnp.maximum(
-        jnp.abs(reference_value),
-        _runtime_float64_scalar(1.0, reference=value),
+        jnp.abs(reference),
+        _runtime_float64_scalar(1.0, reference=reference),
     )
-    return reference_value + penalty
+    return jnp.maximum(finite_candidate, reference + penalty) + penalty
 
 
 def _runtime_float64_array(value, *, reference):
@@ -4075,11 +4077,12 @@ def _build_traceable_objective_compiled_bundle_from_state(
             )
 
         def _rejected_candidate_gradient(_):
-            return compiled_total_gradient_for(
+            grad, _ = compiled_total_gradient_for(
                 baseline_coil_dofs,
                 baseline_x,
                 baseline_linear_solve_factors,
             )
+            return grad, _runtime_bool(True)
 
         grad, linear_solve_success = lax.cond(
             result["success"],
@@ -4499,12 +4502,12 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
             return _traceable_adjoint_gradient_or_nan(grad, linear_solve_success)
 
         def _rejected_candidate_gradient(_):
-            grad, linear_solve_success = compiled_total_gradient_for(
+            grad, _ = compiled_total_gradient_for(
                 baseline_coil_dofs,
                 baseline_x,
                 baseline_linear_solve_factors,
             )
-            return _traceable_adjoint_gradient_or_nan(grad, linear_solve_success)
+            return grad
 
         grad = lax.cond(
             success,
@@ -5734,7 +5737,6 @@ def make_traceable_single_stage_alm_runtime_bundle(
     compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
     baseline_coil_dofs = state["baseline_coil_dofs"]
     baseline_x = state["baseline_x"]
-    baseline_linear_solve_factors = state["baseline_linear_solve_factors"]
     linearization_kind = state["linearization_kind"]
     linear_solve_tol = state["linear_solve_tol"]
     linear_solve_stab = state["linear_solve_stab"]
@@ -5858,6 +5860,22 @@ def make_traceable_single_stage_alm_runtime_bundle(
 
     compiled_total_gradient_for = jax.jit(_alm_total_gradient_for)
 
+    def _alm_failure_gradient_for(multipliers, penalty):
+        def _objective_of_coils(current_coil_dofs):
+            return _traceable_single_stage_alm_evaluation(
+                baseline_x,
+                current_coil_dofs,
+                coil_set_spec_from_dofs(current_coil_dofs),
+                objective_kwargs=objective_kwargs,
+                alm_config=normalized_alm_config,
+                multipliers=multipliers,
+                penalty=penalty,
+            )["total"]
+
+        return _strict_scalar_grad(_objective_of_coils, baseline_coil_dofs)
+
+    compiled_failure_gradient_for = jax.jit(_alm_failure_gradient_for)
+
     @jax.custom_vjp
     def _objective(coil_dofs, multipliers, penalty):
         return compiled_evaluation_for(coil_dofs, multipliers, penalty)["total"]
@@ -5900,14 +5918,7 @@ def make_traceable_single_stage_alm_runtime_bundle(
             return _traceable_adjoint_gradient_or_nan(grad, linear_solve_success)
 
         def _rejected_candidate_gradient(_):
-            grad, linear_solve_success = compiled_total_gradient_for(
-                baseline_coil_dofs,
-                baseline_x,
-                baseline_linear_solve_factors,
-                multipliers,
-                penalty,
-            )
-            return _traceable_adjoint_gradient_or_nan(grad, linear_solve_success)
+            return compiled_failure_gradient_for(multipliers, penalty)
 
         grad = lax.cond(
             success,

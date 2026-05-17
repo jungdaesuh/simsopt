@@ -22,7 +22,7 @@ Architectural notes (item 33):
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from typing import Callable
+from typing import Callable, Mapping
 
 import jax
 import jax.numpy as jnp
@@ -67,6 +67,7 @@ from ..jax_core.interpolated_boozer_field import (
     freeze_interpolated_boozer_field_state,
 )
 from ..jax_core.regular_grid_interp import (
+    RegularGridInterpolant3DSpec,
     UniformInterpolationRule as _jax_core_uniform_rule,
 )
 
@@ -1244,7 +1245,8 @@ class BoozerAnalyticJAX(Optimizable):
 
 
 def _eval_scalar_factory(scalar_name: str):
-    """Return a closed-over callable matching the ``(state, points)`` signature.
+    """Return a closed-over callable matching the ``(state, specs, points)``
+    signature.
 
     The wrapper's ``_cached`` helper expects a single function reference
     per cached entry. This factory turns the per-scalar dispatch into a
@@ -1252,16 +1254,26 @@ def _eval_scalar_factory(scalar_name: str):
     """
 
     def _eval(
-        state: InterpolatedBoozerFieldFrozenState, points: jax.Array
+        state: InterpolatedBoozerFieldFrozenState,
+        specs: Mapping[str, RegularGridInterpolant3DSpec],
+        points: jax.Array,
     ) -> jax.Array:
-        return _eval_interp_scalar(state, scalar_name, points)
+        return _eval_interp_scalar(state, specs, scalar_name, points)
 
     _eval.__name__ = f"_eval_interp_{scalar_name}"
     return _eval
 
 
 _INTERP_EVALUATORS: dict[
-    str, Callable[[InterpolatedBoozerFieldFrozenState, jax.Array], jax.Array]
+    str,
+    Callable[
+        [
+            InterpolatedBoozerFieldFrozenState,
+            Mapping[str, RegularGridInterpolant3DSpec],
+            jax.Array,
+        ],
+        jax.Array,
+    ],
 ] = {
     name: _eval_scalar_factory(name)
     for name in (*FLUX_FUNCTION_SCALARS, *tuple(SYMMETRY_EXPLOIT_SCALARS))
@@ -1327,7 +1339,7 @@ class InterpolatedBoozerFieldJAX(Optimizable):
         # tuple subset to match a base field that does not implement
         # every getter (e.g. ``BoozerAnalytic`` exposes only the 14
         # closed-form scalars).
-        self._frozen_state = freeze_interpolated_boozer_field_state(
+        state = freeze_interpolated_boozer_field_state(
             field,
             degree=degree,
             srange=srange,
@@ -1338,6 +1350,8 @@ class InterpolatedBoozerFieldJAX(Optimizable):
             stellsym=stellsym,
             scalars=scalars,
         )
+        self._frozen_state = state
+        self._lazy_specs: dict[str, RegularGridInterpolant3DSpec] = dict(state.specs)
         self._psi0_host = float(field.psi0)
         self._nfp = int(nfp)
         self._stellsym = bool(stellsym)
@@ -1360,13 +1374,14 @@ class InterpolatedBoozerFieldJAX(Optimizable):
         override is supplied. This keeps the metadata consistent with
         the underlying interpolant geometry. The resulting wrapper has
         no reference to a source ``field`` and therefore cannot build
-        additional specs on demand — any scalar method that was not
-        pre-fit at freeze time will raise ``KeyError``.
+        additional specs on demand — any scalar method absent from the
+        frozen state will raise ``KeyError``.
         """
         wrapper = cls.__new__(cls)
         Optimizable.__init__(wrapper, x0=np.asarray([]))
         wrapper._field = None
         wrapper._frozen_state = frozen_state
+        wrapper._lazy_specs = dict(frozen_state.specs)
         wrapper._psi0_host = float(psi0)
         wrapper._nfp = int(frozen_state.nfp if nfp is None else nfp)
         wrapper._stellsym = bool(frozen_state.stellsym)
@@ -1441,16 +1456,16 @@ class InterpolatedBoozerFieldJAX(Optimizable):
         :meth:`from_frozen_state` no base field reference is available,
         so unbuilt specs surface as ``KeyError``.
         """
-        if self._frozen_state.has(name):
+        if name in self._lazy_specs:
             return
         if self._field is None:
             raise KeyError(
                 f"spec for scalar {name!r} was not pre-fit and the wrapper "
                 f"has no base field to lazy-fit against (likely built via "
                 f"from_frozen_state). Available scalars: "
-                f"{sorted(self._frozen_state.specs)}"
+                f"{sorted(self._lazy_specs)}"
             )
-        spec = _interp_build_spec_for_scalar(
+        self._lazy_specs[name] = _interp_build_spec_for_scalar(
             self._field,
             scalar_name=name,
             rule=self._rule,
@@ -1459,16 +1474,14 @@ class InterpolatedBoozerFieldJAX(Optimizable):
             zeta_range=self._frozen_state.zeta_range,
             extrapolate=self._frozen_state.extrapolate,
         )
-        # The frozen state is a frozen dataclass; ``specs`` is a regular
-        # dict held inside it, and we mutate that dict in place so the
-        # add is observable through the public ``specs`` attribute.
-        self._frozen_state.specs[name] = spec
 
     def _cached(self, name: str) -> jax.Array:
         cached = self._cache.get(name)
         if cached is None:
             self._ensure_spec(name)
-            cached = _INTERP_EVALUATORS[name](self._frozen_state, self._points)
+            cached = _INTERP_EVALUATORS[name](
+                self._frozen_state, self._lazy_specs, self._points
+            )
             self._cache[name] = cached
         return cached
 

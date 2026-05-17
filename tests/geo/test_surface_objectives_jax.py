@@ -106,12 +106,18 @@ def _assert_primal_value_with_nonfinite_gradient(value, grad, expected_value):
     ],
 )
 def test_traceable_rejected_objective_value_uses_reference_value(candidate_value):
+    reference_value = jnp.asarray(1.25, dtype=jnp.float64)
     rejected_value = surfaceobjectives_jax_module._traceable_rejected_objective_value(
         candidate_value,
-        jnp.asarray(1.25, dtype=jnp.float64),
+        reference_value,
     )
 
-    np.testing.assert_allclose(np.asarray(rejected_value), np.asarray(2.5))
+    candidate_host = float(np.asarray(candidate_value))
+    reference_host = float(np.asarray(reference_value))
+    finite_candidate = candidate_host if np.isfinite(candidate_host) else reference_host
+    penalty = max(abs(reference_host), 1.0)
+    expected = max(finite_candidate, reference_host + penalty) + penalty
+    np.testing.assert_allclose(np.asarray(rejected_value), np.asarray(expected))
 
 
 def _reject_coil_dofs_gradient_to_derivative(*_args):

@@ -55,6 +55,8 @@ References:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Mapping
 
 import jax
 import jax.numpy as jnp
@@ -163,36 +165,12 @@ ALL_SCALARS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class InterpolatedBoozerFieldFrozenState:
-    """Container of pre-built ``RegularGridInterpolant3DSpec`` payloads.
+    """Immutable grid geometry and initially built scalar specs.
 
-    Each per-scalar spec is built by sampling the base
-    ``BoozerMagneticField`` on the regular grid (see
-    :func:`freeze_interpolated_boozer_field_state`). The C++ template
-    ``InterpolatedBoozerField`` builds its 34 interpolants **lazily** on
-    the first call to each ``modB()`` / ``K()`` / etc. method — many
-    base fields (e.g. ``BoozerAnalytic``) only implement a subset of the
-    34 scalars, so eager-building all of them would crash for those
-    bases. To mirror that semantic, this state only stores the specs
-    that have been requested.
-
-    **Mutability contract**: the dataclass attributes (``nfp``,
-    ``stellsym``, ``period``, ``s_range``, ``theta_range``,
-    ``zeta_range``, ``degree``, ``extrapolate``, and the ``specs``
-    binding) are frozen — they cannot be reassigned after construction.
-    However, the underlying ``specs`` dict object is **mutated in
-    place** by :meth:`InterpolatedBoozerFieldJAX._ensure_spec`
-    when a scalar is lazy-built after construction. This is the
-    intentional lazy-build semantic that mirrors the C++ template; the
-    grid geometry and per-spec ``RegularGridInterpolant3DSpec``
-    payloads themselves are never mutated, only inserted. Direct
-    consumers should treat the spec dict as append-only.
-
-    Lookup is by scalar name through :meth:`get`. Missing entries raise
-    ``KeyError`` (see :meth:`get`) — calling
-    ``InterpolatedBoozerFieldJAX.modB()`` for an unbuilt scalar with no
-    base field available (e.g. after :meth:`from_frozen_state`)
-    propagates that ``KeyError`` so the failure surfaces at the
-    explicit Python boundary rather than silently returning zeros.
+    Lazy-built scalars are owned by :class:`InterpolatedBoozerFieldJAX`
+    in its ``_lazy_specs`` dict. This state records only the specs
+    constructed by :func:`freeze_interpolated_boozer_field_state` so the
+    public frozen-state API remains immutable and round-trippable.
 
     Meta-fields ``nfp``, ``stellsym``, ``period`` and ``extrapolate`` are
     needed at evaluation time to drive the coordinate fold mirroring
@@ -201,16 +179,13 @@ class InterpolatedBoozerFieldFrozenState:
     let downstream code lazily build additional specs against the same
     grid.
 
-    This dataclass is NOT registered as a JAX pytree: each contained
-    spec already holds raw NumPy arrays that ``evaluate_batch`` converts
-    to ``jax.Array`` inside its JIT boundary. The wrapper class owns
-    Optimizable state and is not differentiated through.
+    This dataclass is NOT registered as a JAX pytree: each spec passed
+    alongside it already holds raw NumPy arrays that ``evaluate_batch``
+    converts to ``jax.Array`` inside its JIT boundary. The wrapper
+    class owns Optimizable state and is not differentiated through.
     """
 
-    # Append-only dict mutated in place by InterpolatedBoozerFieldJAX
-    # lazy-build (see class docstring "Mutability contract" section).
-    # Not registered as a JAX pytree — each spec already holds NumPy arrays.
-    specs: dict
+    specs: Mapping[str, RegularGridInterpolant3DSpec]
     nfp: int
     stellsym: bool
     extrapolate: bool
@@ -221,11 +196,11 @@ class InterpolatedBoozerFieldFrozenState:
     degree: int
 
     def has(self, scalar_name: str) -> bool:
-        """Return ``True`` iff the spec for ``scalar_name`` has been built."""
+        """Return ``True`` iff ``scalar_name`` was built into this state."""
         return scalar_name in self.specs
 
     def get(self, scalar_name: str) -> RegularGridInterpolant3DSpec:
-        """Return the spec for ``scalar_name`` or raise ``KeyError``."""
+        """Return the built spec for ``scalar_name`` or raise ``KeyError``."""
         spec = self.specs.get(scalar_name)
         if spec is None:
             raise KeyError(
@@ -484,7 +459,7 @@ def freeze_interpolated_boozer_field_state(
     stellsym: bool = True,
     scalars: tuple[str, ...] | None = None,
 ) -> InterpolatedBoozerFieldFrozenState:
-    """Build the per-scalar frozen payload by sampling ``field`` on the grid.
+    """Build the immutable grid state and initially requested scalar specs.
 
     Mirrors the construction sequence the C++
     ``InterpolatedBoozerField`` lazy-executes on its first
@@ -552,7 +527,7 @@ def freeze_interpolated_boozer_field_state(
     period = 2.0 * float(np.pi) / float(nfp_int)
 
     return InterpolatedBoozerFieldFrozenState(
-        specs=specs,
+        specs=MappingProxyType(dict(specs)),
         nfp=nfp_int,
         stellsym=bool(stellsym),
         extrapolate=bool(extrapolate),
@@ -656,23 +631,27 @@ def _apply_symmetry(
 
 def evaluate_scalar(
     state: InterpolatedBoozerFieldFrozenState,
+    specs: Mapping[str, RegularGridInterpolant3DSpec],
     scalar_name: str,
     points: jax.Array,
 ) -> jax.Array:
-    """Evaluate ``scalar_name`` at ``points`` using the frozen specs.
+    """Evaluate ``scalar_name`` at ``points`` using ``specs``.
 
     Dispatches flux-function vs symmetry-exploit based on the C++
     inventory in ``FLUX_FUNCTION_SCALARS`` / ``SYMMETRY_EXPLOIT_SCALARS``.
     Output shape ``(N, value_size)`` matches the C++ ``modB() / R() / etc.``
     return contract (``{npoints, value_size}``).
     """
+    spec = specs.get(scalar_name)
+    if spec is None:
+        raise KeyError(
+            f"interpolant for scalar {scalar_name!r} has not been built; "
+            f"available: {sorted(specs)}"
+        )
     if scalar_name in FLUX_FUNCTION_SCALARS:
-        spec = state.get(scalar_name)
         folded = _zeroed_flux_points(points)
-        raw = evaluate_batch(spec, folded)
-        return raw
+        return evaluate_batch(spec, folded)
     if scalar_name in SYMMETRY_EXPLOIT_SCALARS:
-        spec = state.get(scalar_name)
         rule = SYMMETRY_EXPLOIT_SCALARS[scalar_name]
         folded, flipped = fold_points_for_symmetry(
             points,
