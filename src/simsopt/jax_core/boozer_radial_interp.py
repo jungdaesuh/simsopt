@@ -70,6 +70,18 @@ def _build_angle_basis(
     return jnp.cos(angle), jnp.sin(angle)
 
 
+def _zero_dc_column(values: jax.Array) -> jax.Array:
+    return values * (jnp.arange(values.shape[1]) != 0)
+
+
+def _zero_dc_vector(values: jax.Array) -> jax.Array:
+    return values * (jnp.arange(values.shape[0]) != 0)
+
+
+def _zero_dc_row(values: jax.Array) -> jax.Array:
+    return values * (jnp.arange(values.shape[0]) != 0)[:, None]
+
+
 # ----------------------------------------------------------------------
 # compute_kmns / compute_kmnc_kmns
 # ----------------------------------------------------------------------
@@ -270,7 +282,7 @@ def compute_kmns(
         )
         # kmns[im] = sum_ip K[ip] * sin(angle[ip, im]) / (2 pi**2), im>=1
         # im=0 row is zeroed.
-        sin_only = sin_a.at[:, 0].set(0.0)
+        sin_only = _zero_dc_column(sin_a)
         return (K[None, :] @ sin_only).ravel() / (2.0 * jnp.pi * jnp.pi)
 
     # Loop over surfaces, stack into (num_surf, num_modes), then transpose.
@@ -354,7 +366,7 @@ def compute_kmnc_kmns(
         kmnc_isurf = cos_proj * scale
 
         # Sin coefficients: im=0 zeroed, im>=1 uses 1/(2 pi**2).
-        sin_only = sin_a.at[:, 0].set(0.0)
+        sin_only = _zero_dc_column(sin_a)
         kmns_isurf = (K[None, :] @ sin_only).ravel() / (2.0 * pi2)
 
         return kmnc_isurf, kmns_isurf
@@ -438,9 +450,7 @@ def inverse_fourier_transform_odd_1d(
     The ``im=0`` term is suppressed (matches the C++ ``for (im=1; ...)`` loop).
     """
     _, sin_a = _build_angle_basis(xm, xn, thetas, zetas)
-    # Zero the im=0 contribution to match C++ semantics.
-    kmns_no_dc = kmns.at[0].set(0.0)
-    return sin_a @ kmns_no_dc
+    return sin_a @ _zero_dc_vector(kmns)
 
 
 @partial(jax.jit, static_argnames=())
@@ -462,10 +472,7 @@ def inverse_fourier_transform_odd_2d(
     its own radial coefficient column.
     """
     _, sin_a = _build_angle_basis(xm, xn, thetas, zetas)
-    # Zero im=0 row to match C++ semantics.
-    kmns_no_dc = kmns.at[0, :].set(0.0)
-    # Pointwise: K[ip] = sum_im kmns[im, ip] * sin_a[ip, im]
-    return jnp.einsum("mp,pm->p", kmns_no_dc, sin_a)
+    return jnp.einsum("mp,pm->p", _zero_dc_row(kmns), sin_a)
 
 
 def inverse_fourier_transform_odd(

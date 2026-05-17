@@ -112,23 +112,15 @@ def _make_half_grid_fields(
     return bundle
 
 
-def _k_per_point_jaxpr_dot_count(
+def _jax_compute_K_per_point(
     *,
-    num_modes: int,
-    num_points: int,
-    modes_seed: int,
-    points_seed: int,
-    fields_seed: int,
+    xm: np.ndarray,
+    xn: np.ndarray,
+    thetas: np.ndarray,
+    zetas: np.ndarray,
+    bundle: dict[str, np.ndarray],
     stellsym: bool,
-) -> int:
-    xm, xn = _make_modes(num_modes, seed=modes_seed)
-    thetas, zetas = _make_quad_points(num_points, seed=points_seed)
-    bundle = _make_half_grid_fields(
-        num_modes=num_modes,
-        num_surf=1,
-        seed=fields_seed,
-        stellsym=stellsym,
-    )
+) -> jax.Array:
     cos_a, sin_a = _build_angle_basis(
         jnp.asarray(xm),
         jnp.asarray(xn),
@@ -162,8 +154,37 @@ def _k_per_point_jaxpr_dot_count(
             "dnumncds": jnp.asarray(bundle["dnumncds"][:, 0]),
             "bmns": jnp.asarray(bundle["bmns"][:, 0]),
         }
+    return _compute_K_per_point(**kwargs)
+
+
+def _k_per_point_jaxpr_dot_count(
+    *,
+    num_modes: int,
+    num_points: int,
+    modes_seed: int,
+    points_seed: int,
+    fields_seed: int,
+    stellsym: bool,
+) -> int:
+    xm, xn = _make_modes(num_modes, seed=modes_seed)
+    thetas, zetas = _make_quad_points(num_points, seed=points_seed)
+    bundle = _make_half_grid_fields(
+        num_modes=num_modes,
+        num_surf=1,
+        seed=fields_seed,
+        stellsym=stellsym,
+    )
     return count_jaxpr_primitives(
-        jax.make_jaxpr(lambda: _compute_K_per_point(**kwargs))(),
+        jax.make_jaxpr(
+            lambda: _jax_compute_K_per_point(
+                xm=xm,
+                xn=xn,
+                thetas=thetas,
+                zetas=zetas,
+                bundle=bundle,
+                stellsym=stellsym,
+            )
+        )(),
         "dot_general",
     )
 
@@ -432,6 +453,47 @@ def test_inverse_fourier_transform_even_2d_matches_cpp(
         inverse_fourier_transform_even_2d(kmnc, xm, xn, thetas, zetas)
     )
     np.testing.assert_allclose(actual_2d, expected, rtol=_RTOL, atol=_ATOL)
+
+
+def test_inverse_fourier_transform_empty_modes_match_cpp_noop() -> None:
+    num_points = 17
+    xm = np.empty((0,), dtype=np.float64)
+    xn = np.empty((0,), dtype=np.float64)
+    thetas, zetas = _make_quad_points(num_points, seed=47)
+
+    for coeffs, odd_variant, even_variant in (
+        (
+            np.empty((0,), dtype=np.float64),
+            inverse_fourier_transform_odd_1d,
+            inverse_fourier_transform_even_1d,
+        ),
+        (
+            np.empty((0, num_points), dtype=np.float64),
+            inverse_fourier_transform_odd_2d,
+            inverse_fourier_transform_even_2d,
+        ),
+    ):
+        expected_odd = np.zeros(num_points, dtype=np.float64)
+        sopp.inverse_fourier_transform_odd(expected_odd, coeffs, xm, xn, thetas, zetas)
+        actual_odd = np.asarray(
+            inverse_fourier_transform_odd(coeffs, xm, xn, thetas, zetas)
+        )
+        np.testing.assert_array_equal(actual_odd, expected_odd)
+        np.testing.assert_array_equal(
+            np.asarray(odd_variant(coeffs, xm, xn, thetas, zetas)), expected_odd
+        )
+
+        expected_even = np.zeros(num_points, dtype=np.float64)
+        sopp.inverse_fourier_transform_even(
+            expected_even, coeffs, xm, xn, thetas, zetas
+        )
+        actual_even = np.asarray(
+            inverse_fourier_transform_even(coeffs, xm, xn, thetas, zetas)
+        )
+        np.testing.assert_array_equal(actual_even, expected_even)
+        np.testing.assert_array_equal(
+            np.asarray(even_variant(coeffs, xm, xn, thetas, zetas)), expected_even
+        )
 
 
 # ----------------------------------------------------------------------
