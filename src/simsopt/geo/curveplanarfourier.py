@@ -18,8 +18,9 @@ def _normalized_quaternion(quaternion):
     norm_sq = jnp.sum(quaternion * quaternion)
     zero = _as_runtime_float64_ref(0.0, reference=norm_sq)
     one = _as_runtime_float64_ref(1.0, reference=norm_sq)
-    inv_norm = jnp.where(norm_sq > zero, one / jnp.sqrt(norm_sq), one)
-    return quaternion * inv_norm
+    safe_norm_sq = jnp.where(norm_sq > zero, norm_sq, one)
+    normalized = quaternion / jnp.sqrt(safe_norm_sq)
+    return jnp.where(norm_sq > zero, normalized, jnp.zeros_like(quaternion))
 
 
 def _quaternion_rotation_matrix(quaternion):
@@ -70,7 +71,9 @@ def curveplanarfourier_pure(dofs, quadpoints, order):
     sinphi = jnp.sin(phi)
     zero = _as_runtime_float64_ref(0.0, reference=phi)
 
-    radius = jnp.broadcast_to(jnp.sum(jax.lax.slice_in_dim(rc, 0, 1, axis=0)), phi.shape)
+    radius = jnp.broadcast_to(
+        jnp.sum(jax.lax.slice_in_dim(rc, 0, 1, axis=0)), phi.shape
+    )
     if order > 0:
         rc_tail = jax.lax.slice_in_dim(rc, 1, rc.shape[0], axis=0)
         modes = _as_runtime_float64_ref(

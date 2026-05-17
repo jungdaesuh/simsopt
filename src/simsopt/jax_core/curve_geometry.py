@@ -22,6 +22,7 @@ from ..geo.curvexyzfourier import (
     jaxfouriercurve_geometry_pure,
     jaxfouriercurve_pure,
 )
+from ..geo.curvexyzfouriersymmetries import jaxXYZFourierSymmetriescurve_pure
 from ._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
 )
@@ -33,6 +34,7 @@ from .framedcurve import (
     rotation_alpha as jaxrotation_pure,
     rotation_alphadash as jaxrotationdash_pure,
 )
+from .oriented_curve import centercurve_pure
 from .specs import (
     CurveCWSFourierRZSpec,
     CurveFilamentSpec,
@@ -104,9 +106,23 @@ def _update_1d_static(array: jax.Array, start: int, values: jax.Array) -> jax.Ar
 
 
 def curve_spec_from_curve(curve):
+    """Return an immutable JAX spec for supported direct curve objects.
+
+    ``RotatedCurve`` is intentionally not represented as a ``CurveSpec``:
+    rotation/reflection placement is a wrapper transform with no owned DOFs.
+    JAX coil paths should carry that placement through ``CoilSymmetrySpec``;
+    standalone rotated-curve geometry remains a documented CPU-only wrapper.
+    """
     to_spec = getattr(curve, "to_spec", None)
     if callable(to_spec):
         return to_spec()
+
+    if type(curve).__name__ == "RotatedCurve":
+        raise NotImplementedError(
+            "RotatedCurve is not an immutable JAX CurveSpec. Use the base "
+            "curve spec plus CoilSymmetrySpec for coil placement, or evaluate "
+            "standalone RotatedCurve geometry through the CPU wrapper."
+        )
 
     surface = getattr(curve, "surf", None)
     if surface is None:
@@ -149,8 +165,6 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.order,
         )
     if spec_kind == "oriented_xyz_fourier":
-        from simsopt.geo.orientedcurve import centercurve_pure
-
         spec = cast(OrientedCurveXYZFourierSpec, spec)
         return lambda quadpoints: centercurve_pure(
             curve_dofs,
@@ -185,10 +199,6 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.r,
         )
     if spec_kind == "xyz_fourier_symmetries":
-        from simsopt.geo.curvexyzfouriersymmetries import (
-            jaxXYZFourierSymmetriescurve_pure,
-        )
-
         spec = cast(CurveXYZFourierSymmetriesSpec, spec)
         return lambda quadpoints: jaxXYZFourierSymmetriescurve_pure(
             curve_dofs,
@@ -757,6 +767,10 @@ def pair_linking_number_pure(
     absolute Gauss integral divided by ``4 * pi`` and is a non-negative
     integer JAX scalar.
 
+    This is a topological count, not a differentiable objective kernel:
+    the final ``round`` and ``int32`` cast make the result piecewise
+    constant and unsuitable for ``jax.grad``.
+
     The kernel is pure and stateless; the host-side aggregator in
     ``LinkingNumber.J`` iterates curve pairs and sums the integer
     contributions.
@@ -845,7 +859,12 @@ def curve_kappa_from_spec(spec: CurveSpec):
 
 
 def curve_kappa_from_dofs(spec: CurveSpec, dofs):
-    """Return pure JAX scalar curvature samples from an immutable curve spec."""
+    """Return pure JAX scalar curvature samples from an immutable curve spec.
+
+    No regularization is applied to the raw formula. If ``|gammadash| == 0``,
+    the curvature denominator vanishes and non-finite values are the expected
+    contract.
+    """
     _gamma, gammadash, gammadashdash = curve_geometry_from_dofs(spec, dofs)
     return _kappa_pure(gammadash, gammadashdash)
 
@@ -855,7 +874,12 @@ def curve_torsion_from_spec(spec: CurveSpec):
 
 
 def curve_torsion_from_dofs(spec: CurveSpec, dofs):
-    """Return pure JAX scalar torsion samples from an immutable curve spec."""
+    """Return pure JAX scalar torsion samples from an immutable curve spec.
+
+    No regularization is applied to the raw formula. If
+    ``cross(gammadash, gammadashdash) == 0``, the torsion denominator vanishes
+    and non-finite values are the expected contract.
+    """
     _gamma, gammadash, gammadashdash, gammadashdashdash = (
         _curve_geometry_with_third_derivative_from_dofs(spec, dofs)
     )

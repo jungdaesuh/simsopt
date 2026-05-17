@@ -408,7 +408,7 @@ void CurvePlanarFourier<Array>::dgammadash_by_dcoeff_impl(Array& data) {
                             * inv_sqrt_s;
         counter++;
 
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < 3; ++i) {
             data(m, 0, counter) = 0;
             data(m, 1, counter) = 0;
             data(m, 2, counter) = 0;

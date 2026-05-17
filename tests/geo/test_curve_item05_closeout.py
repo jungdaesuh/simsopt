@@ -26,17 +26,23 @@ file.
 
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt.geo.curve import RotatedCurve
 from simsopt.geo.curvehelical import CurveHelical
-from simsopt.geo.curveplanarfourier import CurvePlanarFourier
+from simsopt.geo.curveplanarfourier import CurvePlanarFourier, curveplanarfourier_pure
 from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
 from simsopt.jax_core import curve_spec_from_curve
-from simsopt.jax_core.curve_geometry import curve_geometry_from_dofs
+from simsopt.jax_core.curve_geometry import (
+    _curve_geometry_with_third_derivative_from_dofs,
+    curve_geometry_from_dofs,
+)
 
 
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
@@ -49,6 +55,15 @@ _PRODUCTION_NQUADPOINTS = 64
 _PRODUCTION_ORDER = 2
 _PRODUCTION_RAND_SCALE = 0.01
 _PRODUCTION_RNG_SEED = 7
+
+
+def _planarfourier_num_dofs(order: int) -> int:
+    return (order + 1) + order + 4 + 3
+
+
+def _planarfourier_quaternion_slice(order: int) -> slice:
+    start = (order + 1) + order
+    return slice(start, start + 4)
 
 
 def _make_curve_xyzfourier(order: int, nquad: int, dofs: np.ndarray):
@@ -94,14 +109,87 @@ def _seed_dofs_rzfourier(order: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def _seed_dofs_planarfourier(order: int, rng: np.random.Generator) -> np.ndarray:
-    ndofs = (order + 1) + order + 4 + 3
+    ndofs = _planarfourier_num_dofs(order)
     dofs = np.zeros(ndofs, dtype=np.float64)
     dofs[0] = 1.0
     dofs[1] = 0.1
     dofs[order + 1] = 0.1
-    q_start = (order + 1) + order
-    dofs[q_start] = 1.0
-    return dofs + _PRODUCTION_RAND_SCALE * rng.random(ndofs)
+    dofs = dofs + _PRODUCTION_RAND_SCALE * rng.random(ndofs)
+    dofs[_planarfourier_quaternion_slice(order)] = np.asarray([0.5, 0.5, 0.5, 0.5])
+    return dofs
+
+
+def test_curve_planarfourier_zero_quaternion_gradient_matches_cpp():
+    """Zero quaternion has identity forward value and zero quaternion gradient."""
+
+    order = 1
+    nquad = 16
+    curve = CurvePlanarFourier(nquad, order)
+    dofs = np.asarray(curve.x, dtype=np.float64)
+    quaternion_slice = _planarfourier_quaternion_slice(order)
+    dofs[quaternion_slice] = 0.0
+    curve.x = dofs
+
+    quadpoints = jnp.asarray(curve.quadpoints, dtype=jnp.float64)
+    jax_jac = jax.jacfwd(
+        lambda local_dofs: curveplanarfourier_pure(local_dofs, quadpoints, order)
+    )(jnp.asarray(dofs, dtype=jnp.float64))
+    cpp_jac = curve.dgamma_by_dcoeff()
+
+    jax_quat = np.asarray(jax_jac[:, :, quaternion_slice])
+    cpp_quat = np.asarray(cpp_jac[:, :, quaternion_slice])
+    assert np.isfinite(jax_quat).all()
+    np.testing.assert_allclose(jax_quat, cpp_quat, rtol=_RTOL, atol=_ATOL)
+    np.testing.assert_allclose(
+        jax_quat, np.zeros_like(jax_quat), rtol=_RTOL, atol=_ATOL
+    )
+
+
+def test_curve_planarfourier_derivative_cache_tracks_quaternion_dof_updates():
+    """Planar Fourier derivative caches depend on the normalized quaternion."""
+
+    order = 2
+    nquad = 16
+    quaternion_slice = _planarfourier_quaternion_slice(order)
+
+    initial_dofs = np.zeros(_planarfourier_num_dofs(order), dtype=np.float64)
+    initial_dofs[0] = 1.0
+    initial_dofs[1] = 0.17
+    initial_dofs[order + 1] = 0.11
+    initial_dofs[quaternion_slice] = np.asarray([0.7, -0.2, 0.5, 0.3])
+    initial_dofs[-3:] = np.asarray([0.1, -0.2, 0.3])
+
+    updated_dofs = initial_dofs.copy()
+    updated_dofs[quaternion_slice] = np.asarray([0.2, 0.6, -0.4, 0.5])
+
+    curve = CurvePlanarFourier(nquad, order)
+    curve.x = initial_dofs
+    seeded_derivatives = {
+        method_name: np.asarray(getattr(curve, method_name)(), dtype=np.float64).copy()
+        for method_name in (
+            "dgamma_by_dcoeff",
+            "dgammadash_by_dcoeff",
+            "dgammadashdash_by_dcoeff",
+            "dgammadashdashdash_by_dcoeff",
+        )
+    }
+
+    curve.x = updated_dofs
+    fresh_curve = CurvePlanarFourier(nquad, order)
+    fresh_curve.x = updated_dofs
+
+    for method_name, seeded in seeded_derivatives.items():
+        updated = np.asarray(getattr(curve, method_name)(), dtype=np.float64)
+        fresh = np.asarray(getattr(fresh_curve, method_name)(), dtype=np.float64)
+
+        assert np.max(np.abs(fresh - seeded)) > _ATOL
+        np.testing.assert_allclose(
+            updated,
+            fresh,
+            rtol=_RTOL,
+            atol=_ATOL,
+            err_msg=f"{method_name} stayed stale after quaternion DOF update.",
+        )
 
 
 def _seed_dofs_helical(order: int, rng: np.random.Generator) -> np.ndarray:
@@ -147,10 +235,8 @@ def test_curve_spec_pullback_production_scale_parity(
 
         spec = curve_spec_from_curve(curve)
         gamma_cpu = np.asarray(curve.gamma(), dtype=np.float64)
-        gamma_jax = np.asarray(
-            curve_geometry_from_dofs(spec, spec.dofs)[0],
-            dtype=np.float64,
-        )
+        geometry_jax = curve_geometry_from_dofs(spec, spec.dofs)
+        gamma_jax = np.asarray(geometry_jax[0], dtype=np.float64)
 
         assert gamma_cpu.shape == (_PRODUCTION_NQUADPOINTS, 3), (
             f"{curve_name} coil {coil_index}: CPU gamma shape {gamma_cpu.shape}"
@@ -169,6 +255,32 @@ def test_curve_spec_pullback_production_scale_parity(
                 "scale (ncoils=4, nquadpoints=64)."
             ),
         )
+        if curve_name in {"CurveRZFourier", "CurvePlanarFourier"}:
+            derivative_oracles = (
+                ("gammadash", curve.gammadash(), geometry_jax[1]),
+                ("gammadashdash", curve.gammadashdash(), geometry_jax[2]),
+            )
+            for label, cpu_value, jax_value in derivative_oracles:
+                np.testing.assert_allclose(
+                    np.asarray(jax_value, dtype=np.float64),
+                    np.asarray(cpu_value, dtype=np.float64),
+                    rtol=_RTOL,
+                    atol=_ATOL,
+                    err_msg=f"{curve_name} coil {coil_index}: {label} parity failed.",
+                )
+
+            third_geometry = _curve_geometry_with_third_derivative_from_dofs(
+                spec, spec.dofs
+            )
+            np.testing.assert_allclose(
+                np.asarray(third_geometry[3], dtype=np.float64),
+                np.asarray(curve.gammadashdashdash(), dtype=np.float64),
+                rtol=_RTOL,
+                atol=_ATOL,
+                err_msg=(
+                    f"{curve_name} coil {coil_index}: gammadashdashdash parity failed."
+                ),
+            )
 
 
 def test_curvexyzfouriersymmetries_exposes_immutable_spec_with_geometry_parity():
@@ -217,3 +329,12 @@ def test_curvexyzfouriersymmetries_exposes_immutable_spec_with_geometry_parity()
             "oracle at production scale (nquadpoints=64)."
         ),
     )
+
+
+def test_rotated_curve_spec_dispatcher_documents_cpu_only_wrapper():
+    """``RotatedCurve`` placement is not a standalone JAX ``CurveSpec``."""
+    base = CurveXYZFourier(_PRODUCTION_NQUADPOINTS, _PRODUCTION_ORDER)
+    rotated = RotatedCurve(base, phi=0.37, flip=True)
+
+    with pytest.raises(NotImplementedError, match="CoilSymmetrySpec"):
+        curve_spec_from_curve(rotated)
