@@ -1536,6 +1536,110 @@ def test_jax_mainlb_maxls_one_abnormal_matches_scipy():
     _assert_jax_mainlb_terminal_matches_scipy_event(actual, expected)
 
 
+def test_jax_setulb_line_search_restart_with_history_matches_scipy():
+    x0 = _quadratic_x0()
+    m = 5
+    scipy_trace, _ = _run_scipy_setulb_trace(
+        _quadratic_value_and_grad,
+        x0,
+        None,
+        m=m,
+        maxiter=_SETULB_DEFAULT_LIMIT,
+        maxfun=_SETULB_DEFAULT_LIMIT,
+    )
+    event = next(
+        event
+        for event in scipy_trace
+        if tuple(event["task"]) == (lbfgsb.FG, lbfgsb.FG_LNSRCH)
+        and event["isave"][27] > 0
+    )
+    n = len(event["x"])
+    _, _, _, _, _, _, _, _, lr, ld, lt, lxp, _ = lbfgsb._lbfgsb_workspace_offsets(n, m)
+
+    scipy_workspace = {
+        "wa": event["wa"].copy(),
+        "iwa": event["iwa"].copy(),
+        "task": event["task"].copy(),
+        "ln_task": event["ln_task"].copy(),
+        "lsave": event["lsave"].copy(),
+        "isave": event["isave"].copy(),
+        "dsave": event["dsave"].copy(),
+    }
+    scipy_workspace["wa"][ld:lt] = event["requested_g"]
+    scipy_workspace["isave"][35] = 0
+    scipy_x = event["x"].copy()
+    scipy_f = np.array(event["requested_f"], dtype=np.float64)
+    scipy_g = event["requested_g"].copy()
+    _lbfgsb.setulb(
+        m,
+        scipy_x,
+        np.zeros(n, dtype=np.float64),
+        np.zeros(n, dtype=np.float64),
+        np.zeros(n, dtype=np.int32),
+        scipy_f,
+        scipy_g,
+        _SETULB_FTOL / np.finfo(float).eps,
+        _SETULB_GTOL,
+        scipy_workspace["wa"],
+        scipy_workspace["iwa"],
+        scipy_workspace["task"],
+        scipy_workspace["lsave"],
+        scipy_workspace["isave"],
+        scipy_workspace["dsave"],
+        20,
+        scipy_workspace["ln_task"],
+    )
+    expected = {
+        "task": scipy_workspace["task"],
+        "ln_task": scipy_workspace["ln_task"],
+        "x": scipy_x,
+        "f": scipy_f,
+        "g": scipy_g,
+        "wa": scipy_workspace["wa"],
+        "iwa": scipy_workspace["iwa"],
+        "lsave": scipy_workspace["lsave"],
+        "isave": scipy_workspace["isave"],
+        "dsave": scipy_workspace["dsave"],
+    }
+
+    jax_workspace = {
+        "wa": event["wa"].copy(),
+        "iwa": event["iwa"].copy(),
+        "task": event["task"].copy(),
+        "ln_task": event["ln_task"].copy(),
+        "lsave": event["lsave"].copy(),
+        "isave": event["isave"].copy(),
+        "dsave": event["dsave"].copy(),
+    }
+    jax_workspace["wa"][ld:lt] = event["requested_g"]
+    jax_workspace["isave"][35] = 0
+    state = _jax_state_with_scipy_workspace(
+        _jax_setulb_initial_state(x0, None, m),
+        jax_workspace,
+    )._replace(
+        x=jnp.asarray(event["x"], dtype=jnp.float64),
+        f=jnp.asarray(event["requested_f"], dtype=jnp.float64),
+        g=jnp.asarray(event["requested_g"], dtype=jnp.float64),
+        nfev=jnp.asarray(event["nfev"], dtype=jnp.int32),
+        njev=jnp.asarray(event["njev"], dtype=jnp.int32),
+        n_iterations=jnp.asarray(event["nit"], dtype=jnp.int32),
+    )
+
+    actual = lbfgsb.lbfgsb_setulb(state)
+
+    np.testing.assert_array_equal(expected["task"], [lbfgsb.FG, lbfgsb.FG_LNSRCH])
+    assert expected["isave"][27] == 0
+    assert expected["isave"][30] == 0
+    assert expected["dsave"][0] == 1.0
+    _assert_jax_setulb_state_matches_scipy_event(
+        actual,
+        expected,
+        max_numeric_ulp=_SETULB_REPLAY_MAX_ULP,
+        max_x_ulp=_SETULB_REPLAY_MAX_ULP,
+        max_workspace_ulp=_SETULB_REPLAY_MAX_ULP,
+    )
+
+
 def test_jax_mainlb_zero_iteration_limit_stops_like_scipy():
     x0 = _quadratic_x0()
     actual = jax.jit(
