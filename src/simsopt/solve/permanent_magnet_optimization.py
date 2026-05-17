@@ -60,8 +60,15 @@ def prox_l1(m, mmax, reg_l1, nu):
     """
     ndipoles = len(m) // 3
     mmax_vec = np.array([mmax, mmax, mmax]).T
-    m_normalized = (np.abs(m).reshape(ndipoles, 3) / mmax_vec).reshape(ndipoles * 3)
-    return np.sign(m) * np.maximum(np.abs(m_normalized) - reg_l1 * nu, 0) * np.ravel(mmax_vec)
+    abs_m = np.abs(m).reshape(ndipoles, 3)
+    m_normalized = np.divide(
+        abs_m,
+        mmax_vec,
+        out=np.zeros_like(abs_m),
+        where=mmax_vec > 0,
+    ).reshape(ndipoles * 3)
+    thresholded = np.maximum(np.abs(m_normalized) - reg_l1 * nu, 0)
+    return np.sign(m) * thresholded * np.ravel(mmax_vec)
 
 
 def projection_L2_balls(x, mmax):
@@ -79,9 +86,17 @@ def projection_L2_balls(x, mmax):
     """
     N = len(x) // 3
     x_shaped = x.reshape(N, 3)
-    denom_fac = np.sqrt(np.sum(x_shaped ** 2, axis=-1)) / mmax
-    denom = np.maximum(np.ones(len(denom_fac)), denom_fac)
-    return np.divide(x_shaped, np.array([denom, denom, denom]).T).reshape(3 * N)
+    norms = np.linalg.norm(x_shaped, axis=1)
+    mmax_arr = np.asarray(mmax, dtype=norms.dtype)
+    denom_fac = np.where(
+        norms == 0.0,
+        np.nan,
+        np.copysign(np.inf, mmax_arr),
+    )
+    nonzero_mmax = mmax_arr != 0
+    denom_fac[nonzero_mmax] = norms[nonzero_mmax] / mmax_arr[nonzero_mmax]
+    denom = np.fmax(1.0, denom_fac)
+    return (x_shaped / denom[:, None]).reshape(3 * N)
 
 
 def setup_initial_condition(pm_opt, m0=None):

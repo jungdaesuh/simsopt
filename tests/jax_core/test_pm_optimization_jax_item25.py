@@ -204,6 +204,36 @@ class TestPMKernelHelpers:
             atol=_PER_KERNEL_ATOL,
         )
 
+    def test_projection_zero_mmax_zero_row_is_finite(self):
+        m = jnp.asarray(
+            np.array(
+                [
+                    [0.2, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [0.4, -0.3, 0.0],
+                ]
+            )
+        )
+        m_maxima = jnp.asarray(np.array([1.0, 0.0, 1.0, np.nan]))
+
+        out = np.asarray(projection_l2_balls(m, m_maxima))
+
+        np.testing.assert_allclose(
+            out,
+            np.array(
+                [
+                    [0.2, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.4, -0.3, 0.0],
+                ]
+            ),
+            rtol=_PER_KERNEL_RTOL,
+            atol=_PER_KERNEL_ATOL,
+        )
+        assert np.isfinite(out).all()
+
     def test_phi_off_ball_returns_g(self):
         m = jnp.asarray(np.array([[0.0, 0.0, 0.0]]))
         g = jnp.asarray(np.array([[1.0, 2.0, 3.0]]))

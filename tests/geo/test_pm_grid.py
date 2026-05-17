@@ -1,5 +1,6 @@
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from monty.tempfile import ScratchDir
@@ -334,6 +335,56 @@ class PermanentMagnetGridTesting(unittest.TestCase):
             )
             assert (np.min(r_fit) > (r0 + 1 - match_tol))
             assert (np.max(r_fit) < (r0 + 2 + match_tol))
+
+    def test_cylindrical_grid_chopping_removes_axis_cells(self):
+        """
+        Cylindrical cells on the symmetry axis have zero physical volume and
+        must not survive into m_maxima.
+        """
+        nphi = 4
+        ntheta = nphi
+        Bn = np.zeros((nphi, ntheta))
+        chopped_grid = np.array(
+            [
+                [0.0, 0.0, 0.5],
+                [0.2, 0.0, 0.5],
+                [0.0, 0.0, 0.0],
+                [0.3, 0.4, -0.2],
+            ],
+            dtype=np.float64,
+        )
+
+        with ScratchDir("."):
+            s = SurfaceRZFourier.from_vmec_input(
+                filename, range="half period", nphi=nphi, ntheta=ntheta
+            )
+            s1 = SurfaceRZFourier.from_vmec_input(
+                filename, range="half period", nphi=nphi, ntheta=ntheta
+            )
+            s2 = SurfaceRZFourier.from_vmec_input(
+                filename, range="half period", nphi=nphi, ntheta=ntheta
+            )
+            s1.extend_via_projected_normal(0.1)
+            s2.extend_via_projected_normal(0.2)
+
+            with patch(
+                "simsopt.geo.permanent_magnet_grid.sopp."
+                "define_a_uniform_cartesian_grid_between_two_toroidal_surfaces",
+                return_value=chopped_grid,
+            ):
+                pm_opt = PermanentMagnetGrid.geo_setup_between_toroidal_surfaces(
+                    s,
+                    Bn,
+                    s1,
+                    s2,
+                    coordinate_flag="cylindrical",
+                    dr=0.15,
+                )
+
+        expected = np.array([[0.2, 0.0, 0.5], [0.3, 0.4, -0.2]])
+        np.testing.assert_allclose(pm_opt.dipole_grid_xyz, expected)
+        assert pm_opt.ndipoles == 2
+        assert np.all(pm_opt.m_maxima > 0.0)
 
     def test_famus_functionality(self):
         """

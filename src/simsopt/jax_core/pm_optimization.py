@@ -2120,8 +2120,8 @@ def projection_l2_balls(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
         Shape ``(N,)``.
     """
     norm = jnp.linalg.norm(m, axis=1)  # (N,)
-    unit = m_maxima / m_maxima
-    denom = jnp.maximum(unit, norm / m_maxima)
+    unit = jnp.ones_like(m_maxima)
+    denom = jnp.fmax(unit, norm / m_maxima)
     return m / denom[:, None]
 
 

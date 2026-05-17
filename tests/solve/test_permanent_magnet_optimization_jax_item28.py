@@ -200,6 +200,61 @@ def test_projection_and_prox_helpers_match_cpu_oracles():
     )
 
 
+def test_zero_mmax_helpers_match_cpu_without_nan():
+    moments = np.array(
+        [
+            [0.2, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    ).ravel()
+    m_maxima = np.array([1.0, 0.0, 1.0], dtype=np.float64)
+    expected_projection = projection_L2_balls(moments, m_maxima)
+    actual_projection = np.asarray(projection_L2_balls_jax(moments, m_maxima))
+    expected_l1 = prox_l1(moments, m_maxima, reg_l1=0.1, nu=0.5)
+    actual_l1 = np.asarray(prox_l1_jax(moments, m_maxima, reg_l1=0.1, nu=0.5))
+
+    np.testing.assert_allclose(
+        actual_projection,
+        expected_projection,
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    np.testing.assert_allclose(
+        actual_l1,
+        expected_l1,
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    assert np.isfinite(expected_projection).all()
+    assert np.isfinite(actual_projection).all()
+    assert np.isfinite(expected_l1).all()
+    assert np.isfinite(actual_l1).all()
+    np.testing.assert_allclose(expected_projection[3:6], 0.0, atol=0.0)
+    np.testing.assert_allclose(expected_l1[3:6], 0.0, atol=0.0)
+
+
+def test_projection_nan_mmax_matches_cpu_fmax_contract():
+    moments = np.array(
+        [
+            [0.2, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.4, -0.3, 0.0],
+        ],
+        dtype=np.float64,
+    ).ravel()
+    m_maxima = np.array([1.0, 0.0, 1.0, np.nan], dtype=np.float64)
+
+    expected = projection_L2_balls(moments, m_maxima)
+    actual = np.asarray(projection_L2_balls_jax(moments, m_maxima))
+
+    np.testing.assert_allclose(actual, expected, rtol=_RTOL, atol=_ATOL)
+    np.testing.assert_allclose(actual[9:12], moments[9:12], rtol=_RTOL, atol=_ATOL)
+    assert np.isfinite(actual).all()
+
+
 def test_setup_initial_condition_matches_cpu_projection_contract():
     m_maxima = np.array([0.5, 0.7], dtype=np.float64)
     m0 = np.array([0.2, 0.1, -0.3, 0.0, 0.6, 0.1], dtype=np.float64)

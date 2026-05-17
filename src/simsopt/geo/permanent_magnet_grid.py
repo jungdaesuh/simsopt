@@ -375,6 +375,9 @@ class PermanentMagnetGrid:
             contig(pm_grid.xyz_inner),
             contig(pm_grid.xyz_outer))
         inds = np.ravel(np.logical_not(np.all(pm_grid.dipole_grid_xyz == 0.0, axis=-1)))
+        if coordinate_flag == 'cylindrical':
+            radii = np.sqrt(pm_grid.dipole_grid_xyz[:, 0] ** 2 + pm_grid.dipole_grid_xyz[:, 1] ** 2)
+            inds = np.logical_and(inds, radii > 0.0)
         pm_grid.dipole_grid_xyz = pm_grid.dipole_grid_xyz[inds, :]
         pm_grid.ndipoles = pm_grid.dipole_grid_xyz.shape[0]
         pm_grid.pm_phi = np.arctan2(pm_grid.dipole_grid_xyz[:, 1], pm_grid.dipole_grid_xyz[:, 0])
