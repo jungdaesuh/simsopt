@@ -9,6 +9,7 @@ magnet optimization matrix convention in the C++ oracle.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -415,6 +416,44 @@ def _rotate_normal_matrix_to_toroidal_basis(
     )
 
 
+@partial(jax.jit, static_argnames=("nfp", "stellsym", "coordinate_flag"))
+def _dipole_field_Bn_jit(
+    points: jax.Array,
+    dipole_points: jax.Array,
+    unitnormal: jax.Array,
+    R0: jax.Array,
+    *,
+    nfp: int,
+    stellsym: int,
+    coordinate_flag: str,
+) -> jax.Array:
+    sphi, cphi, stheta, ctheta = _basis_angles(dipole_points, R0)
+    acc = jnp.zeros(
+        (points.shape[0], dipole_points.shape[0], 3),
+        dtype=points.dtype,
+    )
+    for stell in range(stellsym + 1):
+        stell_sign = jnp.asarray((-1.0) ** stell, dtype=points.dtype)
+        for fp in range(nfp):
+            phi0 = jnp.asarray(2.0 * np.pi * fp / nfp, dtype=points.dtype)
+            sym_points = _symmetry_location(dipole_points, phi0, stell_sign)
+            normal_matrix = _normal_field_matrix(points, sym_points, unitnormal)
+            if coordinate_flag == "cylindrical":
+                contribution = _rotate_normal_matrix_to_cylindrical_basis(
+                    normal_matrix, phi0, stell_sign, sphi, cphi
+                )
+            elif coordinate_flag == "toroidal":
+                contribution = _rotate_normal_matrix_to_toroidal_basis(
+                    normal_matrix, phi0, stell_sign, sphi, cphi, stheta, ctheta
+                )
+            else:
+                contribution = _rotate_normal_matrix_to_cartesian_basis(
+                    normal_matrix, phi0, stell_sign
+                )
+            acc = acc + contribution
+    return _scale(points) * acc
+
+
 def dipole_field_Bn(
     points: object,
     dipole_points: object,
@@ -444,31 +483,15 @@ def dipole_field_Bn(
 
     nfp_int = int(nfp)
     stellsym_int = int(stellsym)
-    sphi, cphi, stheta, ctheta = _basis_angles(dipole_points_arr, R0)
-    acc = jnp.zeros(
-        (points_arr.shape[0], dipole_points_arr.shape[0], 3),
-        dtype=points_arr.dtype,
+    return _dipole_field_Bn_jit(
+        points_arr,
+        dipole_points_arr,
+        unitnormal_arr,
+        jnp.asarray(np.float64(R0), dtype=points_arr.dtype),
+        nfp=nfp_int,
+        stellsym=stellsym_int,
+        coordinate_flag=coordinate_flag,
     )
-    for stell in range(stellsym_int + 1):
-        stell_sign = jnp.asarray((-1.0) ** stell, dtype=points_arr.dtype)
-        for fp in range(nfp_int):
-            phi0 = jnp.asarray(2.0 * np.pi * fp / nfp_int, dtype=points_arr.dtype)
-            sym_points = _symmetry_location(dipole_points_arr, phi0, stell_sign)
-            normal_matrix = _normal_field_matrix(points_arr, sym_points, unitnormal_arr)
-            if coordinate_flag == "cylindrical":
-                contribution = _rotate_normal_matrix_to_cylindrical_basis(
-                    normal_matrix, phi0, stell_sign, sphi, cphi
-                )
-            elif coordinate_flag == "toroidal":
-                contribution = _rotate_normal_matrix_to_toroidal_basis(
-                    normal_matrix, phi0, stell_sign, sphi, cphi, stheta, ctheta
-                )
-            else:
-                contribution = _rotate_normal_matrix_to_cartesian_basis(
-                    normal_matrix, phi0, stell_sign
-                )
-            acc = acc + contribution
-    return _scale(points_arr) * acc
 
 
 def _nearest_index_and_distance(surface_points: jax.Array, point: jax.Array):
@@ -509,6 +532,26 @@ def _filter_uniform_grid_point(
     return jnp.where(keep, point, jnp.zeros_like(point))
 
 
+@jax.jit
+def _filter_uniform_cartesian_grid_jit(
+    normal_inner: jax.Array,
+    normal_outer: jax.Array,
+    xyz_uniform: jax.Array,
+    xyz_inner: jax.Array,
+    xyz_outer: jax.Array,
+) -> jax.Array:
+    def filter_point(point: jax.Array) -> jax.Array:
+        return _filter_uniform_grid_point(
+            point,
+            normal_inner,
+            normal_outer,
+            xyz_inner,
+            xyz_outer,
+        )
+
+    return jax.lax.map(filter_point, xyz_uniform)
+
+
 def define_a_uniform_cartesian_grid_between_two_toroidal_surfaces(
     normal_inner: object,
     normal_outer: object,
@@ -527,7 +570,10 @@ def define_a_uniform_cartesian_grid_between_two_toroidal_surfaces(
     xyz_uniform_arr = _require_xyz_matrix("xyz_uniform", xyz_uniform)
     xyz_inner_arr = _require_xyz_matrix("xyz_inner", xyz_inner)
     xyz_outer_arr = _require_xyz_matrix("xyz_outer", xyz_outer)
-    return jax.vmap(
-        _filter_uniform_grid_point,
-        in_axes=(0, None, None, None, None),
-    )(xyz_uniform_arr, normal_inner_arr, normal_outer_arr, xyz_inner_arr, xyz_outer_arr)
+    return _filter_uniform_cartesian_grid_jit(
+        normal_inner_arr,
+        normal_outer_arr,
+        xyz_uniform_arr,
+        xyz_inner_arr,
+        xyz_outer_arr,
+    )

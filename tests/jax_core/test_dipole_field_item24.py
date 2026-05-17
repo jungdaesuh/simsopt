@@ -77,6 +77,20 @@ _UNITNORMAL = np.ascontiguousarray(
 _UNITNORMAL = np.ascontiguousarray(
     _UNITNORMAL / np.linalg.norm(_UNITNORMAL, axis=1)[:, None]
 )
+_BN_TARGET = np.ascontiguousarray(np.linspace(-0.2, 0.3, _POINTS.shape[0]))
+_GRID_NORMAL_INNER = np.ascontiguousarray(np.array([[1.0, 0.0, 0.0]]))
+_GRID_NORMAL_OUTER = np.ascontiguousarray(np.array([[1.0, 0.0, 0.0]]))
+_GRID_XYZ_INNER = np.ascontiguousarray(np.array([[1.0, 0.0, 0.0]]))
+_GRID_XYZ_OUTER = np.ascontiguousarray(np.array([[2.0, 0.0, 0.0]]))
+_GRID_XYZ_UNIFORM = np.ascontiguousarray(
+    np.array(
+        [
+            [0.5, 0.0, 0.0],
+            [1.5, 0.0, 0.0],
+            [2.5, 0.0, 0.0],
+        ]
+    )
+)
 
 
 def _assert_direct_kernel_close(actual: np.ndarray, expected: np.ndarray) -> None:
@@ -137,6 +151,36 @@ def test_total_field_kernels_stream_over_dipoles() -> None:
         assert count_jaxpr_primitives(jaxpr, "scan") == 1, kernel.__name__
 
 
+def test_dipole_field_Bn_stages_as_static_jit_kernel() -> None:
+    """The PM matrix path compiles once for fixed symmetry/basis metadata."""
+
+    points = jnp.asarray(_POINTS, dtype=jnp.float64)
+    dipole_points = jnp.asarray(_DIPOLE_POINTS, dtype=jnp.float64)
+    unitnormal = jnp.asarray(_UNITNORMAL, dtype=jnp.float64)
+    b_obj = jnp.asarray(_BN_TARGET, dtype=jnp.float64)
+
+    def Bn_kernel(
+        points_arg: jax.Array,
+        dipoles_arg: jax.Array,
+        normals_arg: jax.Array,
+        b_arg: jax.Array,
+    ) -> jax.Array:
+        return dipole_field_Bn(
+            points_arg,
+            dipoles_arg,
+            normals_arg,
+            3,
+            1,
+            b_arg,
+            "cartesian",
+            1.05,
+        )
+
+    jaxpr = jax.make_jaxpr(Bn_kernel)(points, dipole_points, unitnormal, b_obj)
+
+    assert count_jaxpr_primitives(jaxpr, "jit") == 1
+
+
 def test_immutable_spec_jits_without_host_oracle_dependency() -> None:
     """Spec-based entry points are traceable and reuse the raw kernel outputs."""
 
@@ -194,7 +238,6 @@ def test_dipole_field_Bn_cpp_parity_for_production_matrix(
 ) -> None:
     """``dipole_field_Bn`` matches the C++ PM optimization matrix kernel."""
 
-    b_obj = np.ascontiguousarray(np.linspace(-0.2, 0.3, _POINTS.shape[0]))
     expected = np.asarray(
         sopp.dipole_field_Bn(
             _POINTS,
@@ -202,7 +245,7 @@ def test_dipole_field_Bn_cpp_parity_for_production_matrix(
             _UNITNORMAL,
             3,
             1,
-            b_obj,
+            _BN_TARGET,
             coordinate_flag,
             1.05,
         )
@@ -214,7 +257,7 @@ def test_dipole_field_Bn_cpp_parity_for_production_matrix(
             _UNITNORMAL,
             3,
             1,
-            b_obj,
+            _BN_TARGET,
             coordinate_flag,
             1.05,
         )
@@ -229,37 +272,39 @@ def test_dipole_field_Bn_cpp_parity_for_production_matrix(
 def test_uniform_cartesian_grid_between_toroidal_surfaces_cpp_parity() -> None:
     """The production grid-filter helper matches the C++ zero-row contract."""
 
-    normal_inner = np.ascontiguousarray(np.array([[1.0, 0.0, 0.0]]))
-    normal_outer = np.ascontiguousarray(np.array([[1.0, 0.0, 0.0]]))
-    xyz_inner = np.ascontiguousarray(np.array([[1.0, 0.0, 0.0]]))
-    xyz_outer = np.ascontiguousarray(np.array([[2.0, 0.0, 0.0]]))
-    xyz_uniform = np.ascontiguousarray(
-        np.array(
-            [
-                [0.5, 0.0, 0.0],
-                [1.5, 0.0, 0.0],
-                [2.5, 0.0, 0.0],
-            ]
-        )
-    )
-
     expected = np.asarray(
         sopp.define_a_uniform_cartesian_grid_between_two_toroidal_surfaces(
-            normal_inner,
-            normal_outer,
-            xyz_uniform,
-            xyz_inner,
-            xyz_outer,
+            _GRID_NORMAL_INNER,
+            _GRID_NORMAL_OUTER,
+            _GRID_XYZ_UNIFORM,
+            _GRID_XYZ_INNER,
+            _GRID_XYZ_OUTER,
         )
     )
     actual = np.asarray(
         define_a_uniform_cartesian_grid_between_two_toroidal_surfaces(
-            normal_inner,
-            normal_outer,
-            xyz_uniform,
-            xyz_inner,
-            xyz_outer,
+            _GRID_NORMAL_INNER,
+            _GRID_NORMAL_OUTER,
+            _GRID_XYZ_UNIFORM,
+            _GRID_XYZ_INNER,
+            _GRID_XYZ_OUTER,
         )
     )
 
     _assert_direct_kernel_close(actual, expected)
+
+
+def test_uniform_cartesian_grid_filter_streams_candidate_points() -> None:
+    """The grid filter scans candidate points instead of vmapping ray batches."""
+
+    normal_inner = jnp.asarray(_GRID_NORMAL_INNER, dtype=jnp.float64)
+    normal_outer = jnp.asarray(_GRID_NORMAL_OUTER, dtype=jnp.float64)
+    xyz_uniform = jnp.asarray(_GRID_XYZ_UNIFORM, dtype=jnp.float64)
+    xyz_inner = jnp.asarray(_GRID_XYZ_INNER, dtype=jnp.float64)
+    xyz_outer = jnp.asarray(_GRID_XYZ_OUTER, dtype=jnp.float64)
+
+    jaxpr = jax.make_jaxpr(
+        define_a_uniform_cartesian_grid_between_two_toroidal_surfaces
+    )(normal_inner, normal_outer, xyz_uniform, xyz_inner, xyz_outer)
+
+    assert count_jaxpr_primitives(jaxpr, "scan") == 1
