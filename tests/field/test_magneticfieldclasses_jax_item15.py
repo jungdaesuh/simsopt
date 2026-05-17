@@ -295,6 +295,46 @@ class TestDommaschkJAX:
             atol=_ATOL,
         )
 
+    def test_mutated_coeffs_match_cpu_public_api(self):
+        """``DommaschkJAX`` re-reads public ``coeffs`` like the CPU wrapper."""
+        mn = [[3, 2], [6, 4]]
+        coeffs_cpu = [[1.4, 1.4], [0.5, 0.5]]
+        coeffs_jax = [[1.4, 1.4], [0.5, 0.5]]
+        points = _production_points(seed=404, count=8)
+        cpu = Dommaschk(mn=mn, coeffs=coeffs_cpu)
+        jax_ = DommaschkJAX(mn=mn, coeffs=coeffs_jax)
+        cpu.set_points_cart(points)
+        jax_.set_points_cart(points)
+
+        cpu.coeffs[0][0] = -0.25
+        jax_.coeffs[0][0] = -0.25
+
+        np.testing.assert_allclose(
+            np.asarray(jax_.B()),
+            np.asarray(cpu.B()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_.dB_by_dX()),
+            np.asarray(cpu.dB_by_dX()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        B_at, dB_at = jax_.jax_B_dB_at(points[0])
+        np.testing.assert_allclose(
+            np.asarray(B_at),
+            np.asarray(cpu.B()[0]),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(dB_at),
+            np.asarray(cpu.dB_by_dX()[0]),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
     def test_dB_is_symmetric(self):
         """Vacuum-field property: dB is symmetric in the spatial indices."""
         mn = [[5, 2], [5, 4], [5, 10]]
@@ -382,6 +422,51 @@ class TestReimanJAX:
             atol=_ATOL,
         )
 
+    def test_mutated_parameters_match_cpu_public_api(self):
+        """``ReimanJAX`` re-reads public parameters like the CPU wrapper."""
+        points = _away_from(_production_points(seed=504, count=32), R0=1.0, margin=0.1)
+        cpu = Reiman(iota0=0.15, iota1=0.38, k=[6], epsilonk=[0.01], m0=1)
+        jax_ = ReimanJAX(iota0=0.15, iota1=0.38, k=[6], epsilonk=[0.01], m0=1)
+        cpu.set_points_cart(points)
+        jax_.set_points_cart(points)
+
+        cpu.iota0 = 0.2
+        cpu.iota1 = 0.41
+        cpu.k = [4, 6]
+        cpu.epsilonk = [0.02, 0.01]
+        cpu.m0 = 3
+        jax_.iota0 = 0.2
+        jax_.iota1 = 0.41
+        jax_.k = [4, 6]
+        jax_.epsilonk = [0.02, 0.01]
+        jax_.m0 = 3
+
+        np.testing.assert_allclose(
+            np.asarray(jax_.B()),
+            np.asarray(cpu.B()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_.dB_by_dX()),
+            np.asarray(cpu.dB_by_dX()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        B_at, dB_at = jax_.jax_B_dB_at(points[0])
+        np.testing.assert_allclose(
+            np.asarray(B_at),
+            np.asarray(cpu.B()[0]),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(dB_at),
+            np.asarray(cpu.dB_by_dX()[0]),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
     def test_as_from_dict_roundtrip_preserves_class(self):
         points = _away_from(_production_points(seed=503, count=80), R0=1.0, margin=0.1)
         field = ReimanJAX(iota0=0.15, iota1=0.38, k=[6], epsilonk=[0.01], m0=1)
@@ -404,7 +489,7 @@ class TestTransferGuardDiscipline:
     """The new JAX wrappers stage spec scalars and host points via the
     strict-safe :func:`jax.device_put` path (see
     ``magneticfieldclasses_jax._points_device`` and the per-class
-    ``_build_spec`` methods). Calling the underlying JAX kernels with
+    spec caches). Calling the underlying JAX kernels with
     those device-resident specs and pre-staged points must not trigger
     an implicit host-to-device transfer under
     :func:`jax.transfer_guard("disallow")`.

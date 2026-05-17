@@ -18,6 +18,8 @@ from .magneticfield import MagneticField
 
 __all__ = ["ReimanJAX"]
 
+_ReimanSpecKey = tuple[float, float, tuple[int, ...], tuple[float, ...], int]
+
 
 class ReimanJAX(MagneticField):
     """JAX-backed Reiman island-model field, drop-in for
@@ -42,35 +44,55 @@ class ReimanJAX(MagneticField):
         self.k = list(k)
         self.epsilonk = list(epsilonk)
         self.m0 = int(m0)
-        self._spec = self._build_spec()
+        self._spec_key = self._spec_signature()
+        self._spec = self._build_spec_from_key(self._spec_key)
 
-    def _build_spec(self) -> ReimanSpec:
+    @staticmethod
+    def _build_spec_from_key(key: _ReimanSpecKey) -> ReimanSpec:
+        iota0, iota1, k_theta, epsilon, m0_symmetry = key
         return ReimanSpec(
-            iota0=_as_jax_float64(self.iota0),
-            iota1=_as_jax_float64(self.iota1),
-            k_theta=tuple(int(v) for v in self.k),
-            epsilon=_as_jax_float64(self.epsilonk),
-            m0_symmetry=int(self.m0),
+            iota0=_as_jax_float64(iota0),
+            iota1=_as_jax_float64(iota1),
+            k_theta=k_theta,
+            epsilon=_as_jax_float64(epsilon),
+            m0_symmetry=m0_symmetry,
         )
+
+    def _spec_signature(self) -> _ReimanSpecKey:
+        return (
+            float(self.iota0),
+            float(self.iota1),
+            tuple(int(v) for v in self.k),
+            tuple(float(v) for v in self.epsilonk),
+            int(self.m0),
+        )
+
+    def _current_spec(self) -> ReimanSpec:
+        key = self._spec_signature()
+        if key != self._spec_key:
+            self._spec_key = key
+            self._spec = self._build_spec_from_key(key)
+        return self._spec
 
     def _B_impl(self, B):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
         B[:] = np.asarray(
-            reiman_B(self._spec, _points_device(points)), dtype=np.float64
+            reiman_B(self._current_spec(), _points_device(points)), dtype=np.float64
         )
 
     def jax_B_at(self, point):
         points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
-        return reiman_B(self._spec, points)[0]
+        return reiman_B(self._current_spec(), points)[0]
 
     def jax_B_dB_at(self, point):
         points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
-        return reiman_B(self._spec, points)[0], reiman_dB(self._spec, points)[0]
+        spec = self._current_spec()
+        return reiman_B(spec, points)[0], reiman_dB(spec, points)[0]
 
     def _dB_by_dX_impl(self, dB):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
         dB[:] = np.asarray(
-            reiman_dB(self._spec, _points_device(points)), dtype=np.float64
+            reiman_dB(self._current_spec(), _points_device(points)), dtype=np.float64
         )
 
     def as_dict(self, serial_objs_dict) -> dict:

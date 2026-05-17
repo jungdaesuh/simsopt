@@ -472,22 +472,20 @@ Array DommaschkB(Array& mArray, Array& nArray, Array& coeffs, Array& points){
     int num_points = points.shape(0);
     int num_coeffs = coeffs.shape(0);
     Array B        = xt::zeros<double>({coeffs.shape(0), points.shape(0), points.shape(1)});
-    double x,y,z,R,phi,cosphi,sinphi,coeff1,coeff2;
-    int m,n;
     for (int j=0; j < num_coeffs; ++j) {
-        m      = mArray(j);
-        n      = nArray(j);
-        coeff1 = coeffs(j,0);
-        coeff2 = coeffs(j,1);
+        const int m = mArray(j);
+        const int n = nArray(j);
+        const double coeff1 = coeffs(j,0);
+        const double coeff2 = coeffs(j,1);
         #pragma omp parallel for
         for (int i = 0; i < num_points; ++i) {
-            x    = points(i, 0);
-            y    = points(i, 1);
-            z    = points(i, 2);
-            R    = sqrt(x*x+y*y);
-            phi  = atan2(y,x);
-            cosphi = x/R;
-            sinphi = y/R;
+            const double x = points(i, 0);
+            const double y = points(i, 1);
+            const double z = points(i, 2);
+            const double R = sqrt(x*x+y*y);
+            const double phi = atan2(y,x);
+            const double cosphi = x/R;
+            const double sinphi = y/R;
             B(j,i,0) = BR(m,n,R,z,phi,coeff1,coeff2)*cosphi-Bphi(m,n,R,z,phi,coeff1,coeff2)*sinphi;
             B(j,i,1) = BR(m,n,R,z,phi,coeff1,coeff2)*sinphi+Bphi(m,n,R,z,phi,coeff1,coeff2)*cosphi;
             B(j,i,2) = BZ(m,n,R,z,phi,coeff1,coeff2);
@@ -500,22 +498,20 @@ Array DommaschkdB(Array& mArray, Array& nArray, Array& coeffs, Array& points){
     int num_points = points.shape(0);
     int num_coeffs = coeffs.shape(0);
     Array dB       = xt::zeros<double>({coeffs.shape(0), points.shape(0), points.shape(1), points.shape(1)});
-    double x,y,z,R,phi,cosphi,sinphi,coeff1,coeff2;
-    int m,n;
     for (int j=0; j < num_coeffs; ++j) {
-        m      = mArray(j);
-        n      = nArray(j);
-        coeff1 = coeffs(j,0);
-        coeff2 = coeffs(j,1);
+        const int m = mArray(j);
+        const int n = nArray(j);
+        const double coeff1 = coeffs(j,0);
+        const double coeff2 = coeffs(j,1);
         #pragma omp parallel for
         for (int i = 0; i < num_points; ++i) {
-            x    = points(i, 0);
-            y    = points(i, 1);
-            z    = points(i, 2);
-            R    = sqrt(x*x+y*y);
-            phi  = atan2(y,x);
-            cosphi = x/R;
-            sinphi = y/R;
+            const double x = points(i, 0);
+            const double y = points(i, 1);
+            const double z = points(i, 2);
+            const double R = sqrt(x*x+y*y);
+            const double phi = atan2(y,x);
+            const double cosphi = x/R;
+            const double sinphi = y/R;
             dB(j,i,0,0) = dRBR(m,n,R,z,phi,coeff1,coeff2)*cosphi*cosphi-(dphiBR(m,n,R,z,phi,coeff1,coeff2)-Bphi(m,n,R,z,phi,coeff1,coeff2)+dRBphi(m,n,R,z,phi,coeff1,coeff2)*R)*cosphi*sinphi/R+sinphi*sinphi*(dphiBphi(m,n,R,z,phi,coeff1,coeff2)+BR(m,n,R,z,phi,coeff1,coeff2))/R;
             dB(j,i,0,1) = sinphi*cosphi*(dRBR(m,n,R,z,phi,coeff1,coeff2)*R-dphiBphi(m,n,R,z,phi,coeff1,coeff2)-BR(m,n,R,z,phi,coeff1,coeff2))/R+sinphi*sinphi*(Bphi(m,n,R,z,phi,coeff1,coeff2)-dphiBR(m,n,R,z,phi,coeff1,coeff2))/R+cosphi*cosphi*dRBphi(m,n,R,z,phi,coeff1,coeff2);
             dB(j,i,0,2) = dRBZ(m,n,R,z,phi,coeff1,coeff2)*cosphi-dphiBZ(m,n,R,z,phi,coeff1,coeff2)*sinphi/R;

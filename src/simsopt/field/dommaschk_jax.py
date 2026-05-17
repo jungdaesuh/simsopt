@@ -24,6 +24,12 @@ from .toroidal_field_jax import ToroidalFieldJAX
 
 __all__ = ["DommaschkJAX"]
 
+_DommaschkSpecKey = tuple[
+    tuple[int, ...],
+    tuple[int, ...],
+    tuple[tuple[float, float], ...],
+]
+
 
 def _toroidal_baseline_B_dB(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Cartesian ``ToroidalField(R0=1, B0=1)`` baseline B and dB.
@@ -76,15 +82,32 @@ class DommaschkJAX(MagneticField):
         self.m = mn_array[:, 0]
         self.n = mn_array[:, 1]
         self.coeffs = coeffs
-        self._spec = self._build_spec(mn_array, coeffs_array)
+        self._spec_key = self._spec_signature()
+        self._spec = self._build_spec_from_key(self._spec_key)
 
     @staticmethod
-    def _build_spec(mn_array: np.ndarray, coeffs_array: np.ndarray) -> DommaschkSpec:
+    def _build_spec_from_key(key: _DommaschkSpecKey) -> DommaschkSpec:
+        m_tuple, n_tuple, coeffs_tuple = key
         return DommaschkSpec(
-            m=tuple(int(v) for v in mn_array[:, 0]),
-            n=tuple(int(v) for v in mn_array[:, 1]),
-            coeffs=_as_jax_float64(coeffs_array),
+            m=m_tuple,
+            n=n_tuple,
+            coeffs=_as_jax_float64(coeffs_tuple),
         )
+
+    def _spec_signature(self) -> _DommaschkSpecKey:
+        coeffs_array = np.asarray(self.coeffs, dtype=np.float64)
+        return (
+            tuple(int(v) for v in self.m),
+            tuple(int(v) for v in self.n),
+            tuple((float(row[0]), float(row[1])) for row in coeffs_array),
+        )
+
+    def _current_spec(self) -> DommaschkSpec:
+        key = self._spec_signature()
+        if key != self._spec_key:
+            self._spec_key = key
+            self._spec = self._build_spec_from_key(key)
+        return self._spec
 
     @property
     def mn(self):
@@ -93,7 +116,7 @@ class DommaschkJAX(MagneticField):
     def _B_impl(self, B):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
         per_mode = np.asarray(
-            dommaschk_B(self._spec, _points_device(points)), dtype=np.float64
+            dommaschk_B(self._current_spec(), _points_device(points)), dtype=np.float64
         )
         baseline_B, _ = _toroidal_baseline_B_dB(points)
         B[:] = np.add.reduce(per_mode) + baseline_B
@@ -102,19 +125,20 @@ class DommaschkJAX(MagneticField):
         points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
         baseline_spec = ToroidalFieldSpec(R0=1.0, B0=1.0)
         return (
-            jnp.sum(dommaschk_B(self._spec, points), axis=0)[0]
+            jnp.sum(dommaschk_B(self._current_spec(), points), axis=0)[0]
             + toroidal_B(baseline_spec, points)[0]
         )
 
     def jax_B_dB_at(self, point):
         points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
         baseline_spec = ToroidalFieldSpec(R0=1.0, B0=1.0)
+        spec = self._current_spec()
         B = (
-            jnp.sum(dommaschk_B(self._spec, points), axis=0)[0]
+            jnp.sum(dommaschk_B(spec, points), axis=0)[0]
             + toroidal_B(baseline_spec, points)[0]
         )
         dB = (
-            jnp.sum(dommaschk_dB(self._spec, points), axis=0)[0]
+            jnp.sum(dommaschk_dB(spec, points), axis=0)[0]
             + toroidal_dB(baseline_spec, points)[0]
         )
         return B, dB
@@ -122,7 +146,7 @@ class DommaschkJAX(MagneticField):
     def _dB_by_dX_impl(self, dB):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
         per_mode = np.asarray(
-            dommaschk_dB(self._spec, _points_device(points)), dtype=np.float64
+            dommaschk_dB(self._current_spec(), _points_device(points)), dtype=np.float64
         )
         _, baseline_dB = _toroidal_baseline_B_dB(points)
         dB[:] = np.add.reduce(per_mode) + baseline_dB

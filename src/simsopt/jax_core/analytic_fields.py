@@ -29,8 +29,17 @@ Public surface
   with shape ``[N, 3]`` / ``[N, 3, 3]``.
 
 All kernels require ``R = sqrt(x^2 + y^2) > 0`` at every evaluation
-point. Mode indices ``m`` and ``n`` (Dommaschk) and ``k_theta`` (Reiman)
-must be Python integers; they are static metadata in the JIT cache key.
+point. The Reiman polar angle around the magnetic-axis ring,
+``theta = arctan2(Z, R - 1)``, has undefined derivatives at ``R=1, Z=0``:
+the forward field is finite there, but autodiff gradients are not part of
+the public contract. Mode indices ``m`` and ``n`` (Dommaschk) and
+``k_theta`` (Reiman) must be Python integers; they are static metadata in
+the JIT cache key.
+
+Dommaschk term generation intentionally merges equal monomials before JAX
+evaluation. For coefficient magnitudes near ``1e10`` and above, this can
+change the local summation order enough to miss the strict direct-kernel
+ULP lane while still matching the C++ oracle in the relaxed-kernel lane.
 """
 
 from __future__ import annotations
@@ -48,9 +57,15 @@ __all__ = [
     "ReimanSpec",
     "dommaschk_B",
     "dommaschk_dB",
+    "clear_dommaschk_caches",
+    "clear_reiman_caches",
     "reiman_B",
     "reiman_dB",
 ]
+
+_DOMMASCHK_TERM_CACHE_MAXSIZE = 256
+_DOMMASCHK_KERNEL_CACHE_MAXSIZE = 128
+_REIMAN_KERNEL_CACHE_MAXSIZE = 128
 
 
 # ── Dommaschk scalar helper tables (Python, static at trace time) ─────
@@ -156,7 +171,12 @@ def _dmn_terms(m: int, n: int) -> list[_DommaschkTerm]:
 
 
 def _nmn_terms(m: int, n: int) -> list[_DommaschkTerm]:
-    """Return polynomial expansion of ``Nmn(m, n, R, Z)`` from C++."""
+    """Return polynomial expansion of ``Nmn(m, n, R, Z)`` from C++.
+
+    The public Dommaschk ``n=0`` mode evaluates ``Nmn(m, -1)`` through this
+    helper. JAX returns an empty expansion immediately for ``n < 0``; the
+    C++ helper reaches the same zero value through its loop/gamma factors.
+    """
 
     if n < 0:
         return []
@@ -248,7 +268,7 @@ def _eval_terms_dense(
     return total
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=_DOMMASCHK_TERM_CACHE_MAXSIZE)
 def _dommaschk_term_bundle(m: int, n: int) -> dict[str, tuple[_DommaschkTerm, ...]]:
     """Cached polynomial expansions for all Dmn/Nmn derivatives at ``(m, n)``."""
 
@@ -525,7 +545,7 @@ def _cylindrical_to_cartesian_dB(
     return jnp.stack([row0, row1, row2], axis=-2)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=_DOMMASCHK_KERNEL_CACHE_MAXSIZE)
 def _dommaschk_B_multimode_kernel(m_tuple: tuple[int, ...], n_tuple: tuple[int, ...]):
     """Compiled multi-mode Dommaschk Cartesian-B kernel.
 
@@ -556,7 +576,7 @@ def _dommaschk_B_multimode_kernel(m_tuple: tuple[int, ...], n_tuple: tuple[int, 
     return jax.jit(kernel)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=_DOMMASCHK_KERNEL_CACHE_MAXSIZE)
 def _dommaschk_dB_multimode_kernel(m_tuple: tuple[int, ...], n_tuple: tuple[int, ...]):
     """Compiled multi-mode Dommaschk Cartesian-dB kernel.
 
@@ -627,6 +647,30 @@ def _validate_dommaschk_spec(spec: DommaschkSpec) -> None:
         raise ValueError("DommaschkSpec.coeffs length does not match mode-index length")
 
 
+def _validate_points(points: jax.Array) -> jax.Array:
+    points_arr = jnp.asarray(points, dtype=jnp.float64)
+    if points_arr.ndim != 2 or points_arr.shape[1] != 3:
+        raise ValueError(
+            f"points must have shape [N, 3]; got shape={tuple(points_arr.shape)!r}"
+        )
+    return points_arr
+
+
+def clear_dommaschk_caches() -> None:
+    """Clear bounded Dommaschk term and compiled-kernel caches."""
+
+    _dommaschk_term_bundle.cache_clear()
+    _dommaschk_B_multimode_kernel.cache_clear()
+    _dommaschk_dB_multimode_kernel.cache_clear()
+
+
+def clear_reiman_caches() -> None:
+    """Clear bounded Reiman compiled-kernel caches."""
+
+    _reiman_B_kernel.cache_clear()
+    _reiman_dB_kernel.cache_clear()
+
+
 def dommaschk_B(spec: DommaschkSpec, points: jax.Array) -> jax.Array:
     """Raw Dommaschk Cartesian magnetic field per (m, n) mode.
 
@@ -648,7 +692,7 @@ def dommaschk_B(spec: DommaschkSpec, points: jax.Array) -> jax.Array:
     """
 
     _validate_dommaschk_spec(spec)
-    points_arr = jnp.asarray(points, dtype=jnp.float64)
+    points_arr = _validate_points(points)
     coeffs = jnp.asarray(spec.coeffs, dtype=jnp.float64)
     m_tuple = tuple(int(v) for v in spec.m)
     n_tuple = tuple(int(v) for v in spec.n)
@@ -659,14 +703,20 @@ def dommaschk_B(spec: DommaschkSpec, points: jax.Array) -> jax.Array:
 def dommaschk_dB(spec: DommaschkSpec, points: jax.Array) -> jax.Array:
     """Raw Dommaschk Cartesian magnetic-field gradient per mode.
 
-    Returns a shape ``[K, N, 3, 3]`` array with the convention
-    ``dB[k, p, i, j] = d B_j(x_p) / d x_i`` for mode index ``k``,
-    mirroring ``sopp.DommaschkdB``. The ``ToroidalField(1, 1)`` baseline
+    Mirrors ``sopp.DommaschkdB``. The ``ToroidalField(1, 1)`` baseline
     is **not** included.
+
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_modes, n_points, 3, 3)``. Axis convention on the
+        trailing 3x3 block: ``dB[k, p, j, l] = ∂_j B_l(x_p)`` for mode
+        index ``k``. Axis 2 is the spatial derivative direction; axis 3
+        is the B-field component.
     """
 
     _validate_dommaschk_spec(spec)
-    points_arr = jnp.asarray(points, dtype=jnp.float64)
+    points_arr = _validate_points(points)
     coeffs = jnp.asarray(spec.coeffs, dtype=jnp.float64)
     m_tuple = tuple(int(v) for v in spec.m)
     n_tuple = tuple(int(v) for v in spec.n)
@@ -685,6 +735,8 @@ def _validate_reiman_spec(spec: ReimanSpec) -> None:
         raise ValueError("ReimanSpec.epsilon must be 1-D")
     if eps.shape[0] != len(spec.k_theta):
         raise ValueError("ReimanSpec.epsilon length does not match k_theta length")
+    if any(int(k_theta) < 1 for k_theta in spec.k_theta):
+        raise ValueError("ReimanSpec.k_theta entries must be >= 1")
 
 
 def _reiman_pure_B(
@@ -835,7 +887,7 @@ def _reiman_pure_dB(
     )
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=_REIMAN_KERNEL_CACHE_MAXSIZE)
 def _reiman_B_kernel(k_theta_tuple: tuple[int, ...], m0_symmetry: int):
     """Compiled Reiman B kernel keyed on (k_theta, m0_symmetry)."""
 
@@ -847,7 +899,7 @@ def _reiman_B_kernel(k_theta_tuple: tuple[int, ...], m0_symmetry: int):
     return jax.jit(kernel)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=_REIMAN_KERNEL_CACHE_MAXSIZE)
 def _reiman_dB_kernel(k_theta_tuple: tuple[int, ...], m0_symmetry: int):
     """Compiled Reiman dB kernel keyed on (k_theta, m0_symmetry)."""
 
@@ -862,10 +914,16 @@ def _reiman_dB_kernel(k_theta_tuple: tuple[int, ...], m0_symmetry: int):
 
 
 def reiman_B(spec: ReimanSpec, points: jax.Array) -> jax.Array:
-    """Cartesian Reiman island-model B(x) of shape ``[N, 3]``."""
+    """Cartesian Reiman island-model B(x) of shape ``[N, 3]``.
+
+    ``jax.grad`` through this function is undefined on the magnetic-axis
+    ring ``sqrt(x**2 + y**2) == 1`` and ``z == 0`` because the local polar
+    angle uses ``arctan2(0, 0)`` there. Evaluate gradients off that ring or
+    use :func:`reiman_dB` away from the singular point.
+    """
 
     _validate_reiman_spec(spec)
-    points_arr = jnp.asarray(points, dtype=jnp.float64)
+    points_arr = _validate_points(points)
     iota0 = jnp.asarray(spec.iota0, dtype=jnp.float64)
     iota1 = jnp.asarray(spec.iota1, dtype=jnp.float64)
     epsilon = jnp.asarray(spec.epsilon, dtype=jnp.float64)
@@ -876,17 +934,20 @@ def reiman_B(spec: ReimanSpec, points: jax.Array) -> jax.Array:
 
 
 def reiman_dB(spec: ReimanSpec, points: jax.Array) -> jax.Array:
-    """Cartesian Reiman island-model dB(x) of shape ``[N, 3, 3]``.
+    """Cartesian Reiman island-model first spatial gradient.
 
-    Index convention matches ``sopp.ReimandB``: ``dB[p, i, j]`` is the
-    partial derivative of the ``j``-th Cartesian B-component with
-    respect to the ``i``-th Cartesian coordinate. (The C++ source uses
-    ``dB(i, j, k)`` with ``j`` the derivative axis and ``k`` the field
-    axis.)
+    Mirrors ``sopp.ReimandB`` storage order.
+
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
+        direction; axis 2 is the B-field component.
     """
 
     _validate_reiman_spec(spec)
-    points_arr = jnp.asarray(points, dtype=jnp.float64)
+    points_arr = _validate_points(points)
     iota0 = jnp.asarray(spec.iota0, dtype=jnp.float64)
     iota1 = jnp.asarray(spec.iota1, dtype=jnp.float64)
     epsilon = jnp.asarray(spec.epsilon, dtype=jnp.float64)
