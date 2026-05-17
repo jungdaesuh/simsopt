@@ -61,21 +61,21 @@ Official-doc check confirmed:
 
 ## P1 — Tracing parity hardening (Row 4)
 
-- [x] **F3 / H2** — Add `dtmax` step ceiling. Edit 5 inline clamp sites in `src/simsopt/jax_core/tracing.py:{952, 1487, 1781, 2422, 2947}`: replace `jnp.minimum(h, tmax - t)` with `jnp.minimum(jnp.minimum(h, tmax - t), dtmax)`. Compute `dtmax = r0 * 0.5 * π / v_total` for particles, `r0 * 0.5 * π / AbsB` for fieldlines. Threaded as constructor arg. (1d)
+- [x] **F3 / H2** — Add `dtmax` step ceiling. Current code centralizes accepted-step clamping in `_clamp_step_to_domain` at `src/simsopt/jax_core/tracing.py:721-724`; fieldline, Cartesian guiding-centre, generic Boozer GC, Boozer-coordinate GC, and full-orbit drivers all consume that helper at their loop call sites. Public wrappers compute the C++ quarter-turn `dtmax` from `r0 * 0.5 * π / v_total` for particles and `r0 * 0.5 * π / AbsB` for fieldlines before vmapping the JAX specs. (1d)
 
-- [x] **F4 / H3** — Per-driver initial step heuristic. Replace `_INITIAL_STEP_FRACTION = 1/100` at `tracing.py:{218, 688-691}` with mode-specific recipe: `1e-3 * dtmax` for particle drivers, `1e-5 * dtmax` for fieldlines. Depends on F3. (4h)
+- [x] **F4 / H3** — Per-driver initial step heuristic. `_FIELDLINE_INITIAL_STEP_FRACTION = 1e-5` and `_PARTICLE_INITIAL_STEP_FRACTION = 1e-3` live at `src/simsopt/jax_core/tracing.py:218-219`; `_initial_step_size` at `tracing.py:713-718` applies those fractions to the per-lane `dtmax`. Depends on F3. (4h)
 
-- [x] **F5 / H4** — Pass non-zero `atol` to `bracket_root_jax` matching the localizer's bracket-width target at `tracing.py:{1015, 1547, 2479, 3006}`. (Performance only; saves ~30 dead RHS evals per event.) (2h)
+- [x] **F5 / H4** — Pass non-zero `atol` to `bracket_root_jax` matching the localizer's bracket-width target. Current event-localizer call sites set `bracket_atol = 1e-15` at `src/simsopt/jax_core/tracing.py:{1074, 1666, 2735, 3332}` before invoking the shared bracket helper. (Performance only; saves dead RHS evals per event.) (2h)
 
-- [x] **F-DH4** — Capture `phi_init` after first JAX integration step inside the criterion predicate at `tracing.py:{886, 1422, 2882}`. Current code captures from `y0` at construction time, diverging from C++ `iter==1` convention. (2h)
+- [x] **F-DH4** — Capture `phi_init` after the first accepted JAX integration step inside the criterion predicate. Current code computes `phi_init_for_criteria` before criterion dispatch at `src/simsopt/jax_core/tracing.py:{1113-1180, 1705-1773, 3374-3444}`, matching the C++ `iter==1` convention instead of freezing the construction-time `y0`. (2h)
 
 - [x] **F-DH5** — Add `assert(s > 0)` equivalent in JAX Boozer GC RHS. Surface to driver as `status=-2`. Currently Boozer particles can silently spiral past axis with NaN derivatives. (2h)
 
 - [x] **F-DH6** — Add JAX-isolated mu/E conservation tests. Create `tests/jax_core/test_tracing_jax_conservation.py` with `|μ_t − μ_0| < 1e-10` and `|E_t − E_0| < 1e-10` over `t > T_bounce` for trapped orbits. Covers all Boozer GC modes (vacuum, no_k, full). (4h)
 
-- [x] **F-DH7** — Fix `bracket_root_jax` NaN poisoning at `tracing.py:765`. Replace unconditional `b - fb * width / (fb - fa)` with `jnp.where(jnp.abs(fb-fa) > 1e-300, false_position, bisection_midpoint)`. (1h)
+- [x] **F-DH7** — Harden `bracket_root_jax` event-localizer edge cases. Current code normalizes endpoint order at `src/simsopt/jax_core/tracing.py:785-790`, gates localization on a real sign-changing bracket at `tracing.py:810-825`, and keeps finite false-position/bisection candidates before the Illinois update at `tracing.py:813-837`; tests cover linear residuals, tiny endpoint residuals, descending brackets, no-sign-change returns, and equal-residual no-bracket finite results in `tests/jax_core/test_tracing_jax_item14.py`. (1h)
 
-- [x] **F-H4-bracket** — Bracket-monotonicity enforcement at `tracing.py:711-712`. Docstring says `t_left <= t_right` is required but no internal check enforces it. All 4 internal callsites pass `(0.0, 1.0)` so unreachable today, but a future caller could trigger it. Add `t_left, t_right = jnp.minimum(...), jnp.maximum(...)` swap inside `bracket_root_jax`. (1h)
+- [x] **F-H4-bracket** — Bracket-monotonicity enforcement. The `bracket_root_jax` docstring now states that descending brackets are normalized internally at `src/simsopt/jax_core/tracing.py:751-754`, and the implementation orders `t_left/t_right` plus their endpoint residuals at `tracing.py:785-789`. (1h)
 
 - [x] **F-DH8** — Reconcile trajectory-end semantics. Normal accepted steps clamp to `tmax`; status=1 step-budget exhaustion remains a visible failure with wrapper warning rather than being back-filled to `tmax`. (2h)
 

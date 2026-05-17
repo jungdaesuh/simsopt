@@ -768,13 +768,13 @@ def bracket_root_jax(
     Returns
     -------
     t_star
-        Best false-position candidate or initial endpoint by absolute residual.
+        Best finite false-position candidate or initial endpoint by absolute residual.
     f_at_t_star
         ``f(t_star)`` evaluated at the returned ``t_star``.
     bracketed
         Bool scalar. ``True`` if ``sign(f_left) != sign(f_right)`` on
         entry, i.e. the input bracket genuinely contained a sign
-        change. ``False`` is propagated unchanged so the caller can
+        change. ``False`` leaves the loop state stationary so the caller can
         treat the result as "no event" rather than a numerical root.
     """
 
@@ -807,25 +807,34 @@ def bracket_root_jax(
         i, a, b, fa, fb, best_t, best_f = carry
         width = b - a
         converged = width <= atol_arr
-        candidate = b - fb * width / (fb - fa)
+        active = jnp.logical_and(bracketed_in, jnp.logical_not(converged))
+        midpoint = a + half * width
+        denominator = fb - fa
+        false_position = jax.lax.cond(
+            denominator == zero,
+            lambda _: midpoint,
+            lambda _: b - fb * width / denominator,
+            operand=None,
+        )
+        candidate = jnp.where(jnp.isfinite(false_position), false_position, midpoint)
         fc = jax.lax.cond(
-            converged,
-            lambda _: best_f,
+            active,
             lambda _: f(candidate),
+            lambda _: best_f,
             operand=None,
         )
         improves_best = jnp.logical_and(
-            jnp.logical_not(converged),
+            active,
             jnp.abs(fc) < jnp.abs(best_f),
         )
         best_t_next = jnp.where(improves_best, candidate, best_t)
         best_f_next = jnp.where(improves_best, fc, best_f)
 
         keep_left = jnp.sign(fa) * jnp.sign(fc) <= zero
-        new_a = jnp.where(converged, a, jnp.where(keep_left, a, candidate))
-        new_b = jnp.where(converged, b, jnp.where(keep_left, candidate, b))
-        new_fa = jnp.where(converged, fa, jnp.where(keep_left, half * fa, fc))
-        new_fb = jnp.where(converged, fb, jnp.where(keep_left, fc, half * fb))
+        new_a = jnp.where(active, jnp.where(keep_left, a, candidate), a)
+        new_b = jnp.where(active, jnp.where(keep_left, candidate, b), b)
+        new_fa = jnp.where(active, jnp.where(keep_left, half * fa, fc), fa)
+        new_fb = jnp.where(active, jnp.where(keep_left, fc, half * fb), fb)
         return (
             i + jnp.asarray(1, dtype=jnp.int32),
             new_a,

@@ -11,11 +11,14 @@ monodromy matrix M) from ``phi = 0`` to ``phi = 1/nfp`` with SciPy's
 This JAX port implements a self-contained Dormand-Prince RK4(5)
 adaptive integrator (cf. Hairer, Norsett & Wanner, *Solving Ordinary
 Differential Equations I*, Section II.5) inside
-``jax.lax.while_loop`` so the entire iota computation is JIT-able and
-differentiable through field DOFs as long as the user supplies a
-JAX-traceable field-evaluation callback. The integrator uses the
-classic PI(0.7, 0.4) error controller with a configurable safety
-factor and per-step accept/reject branch.
+``jax.lax.while_loop`` so the entire iota computation is JIT-able.
+The integrator uses the classic PI(0.7, 0.4) error controller with a
+configurable safety factor and per-step accept/reject branch.
+
+Forward-mode AD (``jax.jvp``, ``jax.jacfwd``) is supported through
+``jax.lax.while_loop``. Reverse-mode AD (``jax.grad``, ``jax.vjp``,
+``jax.jacrev``) is outside this kernel's contract because JAX does not
+define reverse-mode differentiation for ``lax.while_loop``.
 
 Public surface
 --------------
@@ -36,8 +39,10 @@ Contract notes
   is consulted. The axis is consumed as a
   :class:`simsopt.jax_core.specs.CurveRZFourierSpec`; the magnetic
   field enters through ``field_eval_fn`` which receives a JAX array
-  of shape ``[1, 3]`` and must return ``(B[1, 3], dB_by_dX[1, 3, 3])``
-  with the SIMSOPT convention ``dB_by_dX[p, j, l] = d_j B_l(x_p)``.
+  of shape ``[1, 3]`` and must return ``(B[1, 3], dB_by_dX[1, 3, 3])``.
+  The derivative matrix is consumed in the same index order as the
+  upstream CPU helper after ``magnetic_field.dB_by_dX().reshape((3, 3))``;
+  this module does not transpose field-specific derivative layouts.
 - The integrator is **fully unrolled inside JIT**: it pre-allocates a
   fixed-shape carry tuple, masks rejected steps, and terminates the
   ``while_loop`` once ``phi >= phi_end`` or ``step_count >= max_steps``.
@@ -223,10 +228,20 @@ def _tangent_map_A_matrix(
     """Return the 2x2 matrix ``A`` from Greene's tangent-map equation (13).
 
     Inputs are at a single axis evaluation point. ``axis_point`` is the
-    flat Cartesian xyz triple, ``B`` is the field 3-vector, and
-    ``dB_by_dX[j, l] = d_j B_l`` matches the SIMSOPT convention. The
-    expression mirrors the upstream NumPy implementation in
-    ``simsopt/field/magnetic_axis_helpers.py:: tangent_map`` exactly.
+    flat Cartesian xyz triple and ``B`` is the field 3-vector.
+
+    Parameters
+    ----------
+    dB_by_dX : jax.Array
+        Shape ``(3, 3)``. Consumed in the same index order as the
+        upstream CPU helper after ``magnetic_field.dB_by_dX().reshape((3, 3))``:
+        row 0 supplies ``dB1_dx``, ``dB1_dy``, ``dB1_dz``; row 1 supplies
+        ``dB2_dx``, ``dB2_dy``, ``dB2_dz``; row 2 supplies ``dB3_dx``,
+        ``dB3_dy``, ``dB3_dz``. No transpose or convention normalization is
+        applied here.
+
+    The expression mirrors the upstream NumPy implementation in
+    ``simsopt/field/magnetic_axis_helpers.py::tangent_map`` exactly.
     """
 
     B1 = B[0]
@@ -286,6 +301,13 @@ def tangent_map_rhs_from_field(
     y: jax.Array,
 ) -> jax.Array:
     """Compute ``dy/dphi`` for the 4-vector tangent-map state.
+
+    Parameters
+    ----------
+    dB_by_dX : jax.Array
+        Shape ``(3, 3)``. Consumed in the same index order as
+        ``_tangent_map_A_matrix`` and the upstream CPU helper; no transpose or
+        field-specific layout normalization is applied.
 
     The upstream CPU expression
     ``2 pi * concat([A @ y[:2], A @ y[2:]])`` is reproduced bit-faithfully
@@ -455,6 +477,7 @@ def _integrate_tangent_map(
     Returns ``(y_final, phi_final, steps_taken, succeeded)`` where
     ``succeeded`` is a JAX boolean scalar indicating ``phi_final >=
     phi_end`` within machine precision.
+
     """
 
     dtype = y0.dtype
@@ -571,6 +594,11 @@ def on_axis_iota_rk(
     independent eigenvalue ordering of NumPy / JAX LAPACK shims (both
     return the same first eigenvalue for a real 2x2 with conjugate
     eigenvalues at the precision of the integrator).
+
+    Forward-mode AD (``jax.jvp``, ``jax.jacfwd``) is supported through
+    ``jax.lax.while_loop``. Reverse-mode AD (``jax.grad``, ``jax.vjp``,
+    ``jax.jacrev``) is outside this kernel's contract because JAX does not
+    define reverse-mode differentiation for ``lax.while_loop``.
     """
 
     if not isinstance(axis_spec, CurveRZFourierSpec):

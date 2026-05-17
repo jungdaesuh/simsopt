@@ -7,9 +7,10 @@
 devices `[CpuDevice(id=0)]`)
 **Scope:** Re-check the incomplete/partial rows called out by the prior
 verification report, patch the remaining local gaps, and separate local CPU
-proof from external CUDA/platform signoff. A follow-up strict-contract review
+proof from external CUDA/platform signoff. Follow-up strict-contract reviews
 also covered stale code and silent fallback behavior in the touched
-permanent-magnet solve wrapper.
+permanent-magnet solve wrapper, the shared tracing event localizer, and the
+magnetic-axis helper documentation.
 
 ## Final Verdict
 
@@ -19,12 +20,14 @@ fixed already, fixed in this pass, or based on an incorrect physics/action
 statement.
 
 Local actionable rows from this report are now resolved or explicitly
-dispositioned. The follow-up review fixed three additional local issues:
+dispositioned. The follow-up review fixed additional local issues:
 CPU/JAX `prox_l0` now respects zero-capacity dipoles, explicit JAX `m0`
 validation no longer silently drops out under tracing/transfer guard, and
-oversized MwPGP `alpha` is rejected instead of warning-and-continuing. The P8
-gates remain external signoff gates and are not claimed complete from this
-CPU-only workstation.
+oversized MwPGP `alpha` is rejected instead of warning-and-continuing. A later
+tracing review also made `bracket_root_jax` inactive for non-brackets and
+removed stale `dB_by_dX`/reverse-mode wording from the magnetic-axis helper.
+The P8 gates remain external signoff gates and are not claimed complete from
+this CPU-only workstation.
 
 ## Official Documentation Checked
 
@@ -35,6 +38,9 @@ CPU-only workstation.
   host/device movement.
 - JAX gotchas docs: JIT-compatible code must keep array shapes static; dynamic
   result shapes require restructuring.
+- JAX `lax.while_loop` docs: loop-carried values have fixed shape/dtype, and
+  `while_loop` is not reverse-mode differentiable because XLA needs static
+  memory bounds.
 - SIMSOPT Boozer docs: Boozer fields expose both covariant
   `B = G grad zeta + I grad theta + K grad psi` and contravariant
   `B = (x_zeta + iota x_theta) / sqrt(g)` forms. The correct checked identity
@@ -64,10 +70,12 @@ CPU-only workstation.
 | F-DH21 Boozer identity | Resolved as physics correction | Prior `B dot grad zeta = G` wording was wrong; current test checks `B dot x_zeta = G`, the correct covariant toroidal component. |
 | F-DH6 conservation over bounce | Resolved in this pass | `tests/jax_core/test_tracing_jax_conservation.py` now uses trapped parameters and asserts at least one parallel-velocity sign change before checking mu/energy. |
 | F3/H2 `dtmax` formula | Resolved by public wrapper contract | Public wrappers compute the C++ quarter-turn `dtmax`; lower-level specs intentionally accept explicit `dtmax`. |
+| F-DH7 bracket localizer edge cases | Resolved in follow-up review | `src/simsopt/jax_core/tracing.py` now leaves non-brackets inactive and keeps the false-position candidate finite; `test_bracket_root_keeps_equal_residual_no_bracket_result_finite` covers the equal-residual no-bracket poison case. |
 | F-DH8 post-loop back-fill | Dispositioned: no budget-exhausted backfill | Accepted steps are clamped to `tmax` for normal exits. For status=1 step-budget exhaustion, back-filling to `tmax` would hide the failure; the wrapper warning/status is the correct contract. |
 | F-DH Row 3 `weight_inv_modB` partial | Dispositioned as intentional contract | Module docs state public scalar/vector helpers default to weighted residuals; internal composed/vector VJP paths default false for legacy least-squares call sites. Both branches have C++ oracle coverage. |
-| F-DH Row 4 lost-particle edge cases | Resolved before this pass | Item 14 tests cover interpolation-cuboid faces, multiple criteria firing on the same accepted step, and exact-zero levelset behavior. |
-| Checklist stale line numbers/closeout text | Resolved in this pass | `ISSUES_CHECKLIST.md` now records that local rows are closed by live verification plus this pass, while P8 remains external. |
+| F-DH Row 4 lost-particle edge cases | Resolved in follow-up review | Item 14 tests now cover both static interpolation-cuboid face classification and an active guiding-centre trace that exits through the classifier cuboid face mid-integration, plus multiple criteria firing on the same accepted step and exact-zero levelset behavior. |
+| Magnetic-axis helper stale convention wording | Resolved in follow-up review | `src/simsopt/jax_core/magnetic_axis_helpers.py` now states that the derivative matrix is consumed in upstream CPU-helper order without transposing field-specific layouts, and the reverse-mode AD text now mirrors official JAX `lax.while_loop` semantics rather than pinning an exception string. |
+| Checklist stale line numbers/closeout text | Resolved in follow-up review | `ISSUES_CHECKLIST.md` now records that local rows are closed by live verification plus this pass, while P8 remains external; the stale tracing references in the P1 block were rewritten against the current helper-based structure. |
 
 ## Validation Run
 
@@ -96,11 +104,12 @@ PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu \
   .conda/jax/bin/python -m pytest -q \
   tests/geo/test_boozer_residual_jax.py::TestBoozerResidualScalar::test_scalar_matches_cpp_oracle \
   tests/jax_core/test_tracing_jax_item14.py::test_levelset_classifier_grid_faces_remain_classified \
+  tests/jax_core/test_tracing_jax_item14.py::test_trace_guiding_center_stops_after_exiting_classifier_cuboid_face \
   tests/jax_core/test_tracing_jax_item14.py::test_trace_fieldline_first_stopping_criterion_wins_same_step \
   tests/jax_core/test_tracing_jax_item14.py::test_trace_fieldline_levelset_zero_does_not_stop
 ```
 
-Result: `5 passed, 2 skipped, 2 warnings in 4.34s`.
+Result: `6 passed, 2 skipped, 2 warnings in 5.82s`.
 
 Follow-up strict-contract verification:
 
@@ -136,6 +145,44 @@ PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu \
 ```
 
 Result: `3 passed in 4.46s`.
+
+Tracing/magnetic-axis follow-up review:
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu \
+  .conda/jax/bin/python -m pytest -q \
+  tests/jax_core/test_tracing_jax_item14.py
+```
+
+Result after simplifier pass: `35 passed, 2 warnings in 8.91s`.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu \
+  .conda/jax/bin/python -m pytest -q \
+  tests/field/test_magnetic_axis_helpers_jax_item21.py
+```
+
+Result after simplifier pass: `15 passed in 8.95s`.
+
+Diff hygiene:
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu \
+  .conda/jax/bin/python -m ruff check \
+  src/simsopt/jax_core/tracing.py \
+  src/simsopt/jax_core/magnetic_axis_helpers.py \
+  tests/jax_core/test_tracing_jax_item14.py \
+  tests/field/test_magnetic_axis_helpers_jax_item21.py
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu \
+  .conda/jax/bin/python -m ruff format --check \
+  src/simsopt/jax_core/tracing.py \
+  src/simsopt/jax_core/magnetic_axis_helpers.py \
+  tests/jax_core/test_tracing_jax_item14.py \
+  tests/field/test_magnetic_axis_helpers_jax_item21.py
+git diff --check
+```
+
+Result: `ruff check` passed; `ruff format --check` passed; `git diff --check` passed.
 
 ## Residual External Gates
 

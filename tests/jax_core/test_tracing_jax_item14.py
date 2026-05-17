@@ -720,6 +720,30 @@ def test_bracket_root_returns_false_when_no_sign_change(event_time_lane):
     )
 
 
+def test_bracket_root_keeps_equal_residual_no_bracket_result_finite():
+    """Equal endpoint residuals are not allowed to manufacture a nonfinite candidate."""
+
+    zero = jnp.asarray(0.0, dtype=jnp.float64)
+    one = jnp.asarray(1.0, dtype=jnp.float64)
+
+    def f(t):
+        return jnp.where(jnp.isfinite(t), one, zero)
+
+    t_star, f_star, bracketed = bracket_root_jax(
+        f,
+        zero,
+        one,
+        one,
+        one,
+        max_iters=10,
+        atol=zero,
+    )
+
+    assert not bool(bracketed)
+    assert np.isfinite(float(t_star))
+    np.testing.assert_allclose(float(f_star), 1.0, rtol=0.0, atol=0.0)
+
+
 # ---------------------------------------------------------------------------
 # 4. Surface classifier smoke test
 # ---------------------------------------------------------------------------
@@ -807,6 +831,64 @@ def test_levelset_classifier_grid_faces_remain_classified():
     assert float(classify(rmax_face)) == -1.0
     assert float(classify(rmin_face)) == -1.0
     assert float(classify(zmax_face)) == -1.0
+
+
+def test_trace_guiding_center_stops_after_exiting_classifier_cuboid_face():
+    """An active particle trace stops after crossing the interpolation cuboid face."""
+
+    def fbatch(rs, _phis, _zs):
+        return np.ones_like(np.asarray(rs, dtype=np.float64))
+
+    interp_spec = build_regular_grid_interpolant_3d(
+        rule=UniformInterpolationRule(2),
+        xrange=(1.0, 1.2, 8),
+        yrange=(0.0, 2.0 * np.pi, 8),
+        zrange=(-0.1, 0.1, 8),
+        value_size=1,
+        f=fbatch,
+        out_of_bounds_ok=True,
+    )
+    classify = make_levelset_classifier(interp_spec)
+
+    face_point = jnp.asarray([interp_spec.xmax, 0.0, 0.0], dtype=jnp.float64)
+    assert float(classify(face_point)) == 1.0
+
+    def field_fn(_point: jax.Array):
+        return (
+            jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64),
+            jnp.zeros((3, 3), dtype=jnp.float64),
+        )
+
+    spec = GuidingCenterTracingSpec(
+        tmax=0.3,
+        dtmax=0.02,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=64,
+        max_phi_hits=4,
+    )
+    initial_state = jnp.asarray([1.1, 0.0, 0.0, 1.0], dtype=jnp.float64)
+    result = trace_guiding_center(
+        spec,
+        initial_state,
+        field_fn,
+        m=1.0,
+        q=1.0,
+        mu=0.0,
+        stopping_criteria=(LevelsetStoppingCriterion(classifier_fn=classify),),
+    )
+
+    trajectory = np.asarray(result.trajectory)
+    live = trajectory[np.asarray(result.mask)]
+    hit_rows = np.asarray(result.phi_hits)[: int(result.phi_hits_count)]
+
+    assert int(result.status) == -1
+    assert float(result.t_final) < spec.tmax
+    assert hit_rows.shape == (1, 6)
+    assert int(hit_rows[0, 1]) == -1
+    assert live.shape[0] > 1
+    assert np.all(live[:, 1] <= interp_spec.xmax)
+    assert hit_rows[0, 2] > interp_spec.xmax
 
 
 def test_levelset_classifier_cpu_jax_phi_wraparound_boundary_parity():
