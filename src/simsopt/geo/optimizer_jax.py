@@ -25,16 +25,18 @@ LM family note:
     regularized Gauss-Newton operator ``J^T J + λI`` (no QR pivoting,
     no dense Jacobian factorization in the inner step). See
     ``_lm_iteration`` and ``_gmres_solve_least_squares_system``.
-  - **Termination.** MINPACK terminates on the conjunction of three
-    criteria (``ftol``, ``xtol``, ``gtol``); the JAX LM terminates on a
-    single criterion ``‖∇‖_∞ ≤ tol`` (see ``levenberg_marquardt`` and
-    ``levenberg_marquardt_traceable``).
+  - **Termination.** MINPACK terminates on independent ``ftol``, ``xtol``,
+    and ``gtol`` criteria. The JAX LM now surfaces the matrix-free-computable
+    subset as ``info`` codes 1, 2, 3, 5, 6, and 7. It also supports ``gtol``
+    as the matrix-free infinity-norm gradient gate when callers explicitly
+    provide it; otherwise the legacy ``tol`` gradient gate is preserved.
+    MINPACK ``info`` codes 4 and 8 both require the pivoted-QR scaled gradient
+    norm and remain outside this matrix-free lane.
   - **Damping update.** MINPACK uses Marquardt's classic
-    expand/contract scaling; the JAX LM applies an asymmetric
-    trust-region update — shrink ``× 0.5`` on ``ratio > 0.75``,
-    expand ``× 4.0`` on ``ratio < 0.25``, mild-shrink ``× 0.8``
-    otherwise, with rejected steps expanding ``× 4.0`` (see
-    ``_lm_iteration`` and ``_lm_defaults``).
+    expand/contract scaling; the JAX LM uses the same symmetric damping
+    factors for this matrix-free lane — decrease ``× 0.5`` on
+    ``ratio > 0.75`` and increase ``× 2.0`` on ``ratio < 0.25`` or rejected
+    steps (see ``_lm_iteration`` and ``_lm_defaults``).
 
   Consequence: the JAX LM lanes are **tolerance-equivalent** to MINPACK
   ``lmder`` on well-conditioned fixtures but **not byte-equivalent**;
@@ -900,6 +902,10 @@ def _tree_inf_norm(tree):
     return max_value
 
 
+def _tree_l2_norm(tree):
+    return jnp.sqrt(jnp.maximum(_tree_vdot_real(tree, tree), _device_scalar(0.0)))
+
+
 def _tree_all_finite(tree):
     leaves = jax.tree_util.tree_leaves(tree)
     finite = jnp.asarray(True)
@@ -1212,6 +1218,9 @@ def _make_traceable_levenberg_marquardt_runner(
     residual_fn,
     maxiter,
     tol,
+    ftol,
+    xtol,
+    gtol,
     materialize_dense_linearization,
     max_dense_linearization_bytes,
     callback,
@@ -1226,6 +1235,7 @@ def _make_traceable_levenberg_marquardt_runner(
             detail="Least-squares initial state must contain at least one leaf.",
         ).dtype
         tol_value = _device_scalar(tol, dtype=x_dtype)
+        gradient_tol = _lm_gradient_tol(tol, gtol, dtype=x_dtype)
         residual0, cost0, grad0, grad_norm_inf0, _ = _least_squares_gradient_state(
             residual_eval,
             x_init,
@@ -1237,15 +1247,20 @@ def _make_traceable_levenberg_marquardt_runner(
             "grad": grad0,
             "grad_norm_inf": grad_norm_inf0,
             "damping": _lm_defaults(x_dtype)["initial_damping"],
+            "delta": _lm_initial_delta(x_init, dtype=x_dtype),
             "nit": jnp.asarray(0, dtype=jnp.int32),
             "status": jnp.asarray(0, dtype=jnp.int32),
+            "info": jnp.asarray(0, dtype=jnp.int32),
             "accepted": jnp.asarray(False),
-            "success": grad_norm_inf0 <= tol_value,
+            "success": grad_norm_inf0 <= gradient_tol,
         }
 
         def cond_fun(state):
             return (
-                (state["nit"] < maxiter) & (~state["success"]) & (state["status"] != 2)
+                (state["nit"] < maxiter)
+                & (~state["success"])
+                & (state["status"] != 2)
+                & (state["info"] == 0)
             )
 
         def body_fun(state):
@@ -1253,6 +1268,10 @@ def _make_traceable_levenberg_marquardt_runner(
                 residual_eval,
                 state,
                 tol=tol_value,
+                gradient_tol=gradient_tol,
+                ftol=_device_scalar(ftol, dtype=x_dtype),
+                xtol=_device_scalar(xtol, dtype=x_dtype),
+                maxiter=maxiter,
             )
             if callback is not None:
                 lax.cond(
@@ -1323,6 +1342,7 @@ def _make_traceable_levenberg_marquardt_runner(
             "damping": state["damping"],
             "nit": state["nit"],
             "status": state["status"],
+            "info": state["info"],
             "success": state["success"],
             "dense_linearization_materialized": materialize_linearization,
             **dense_report,
@@ -1403,17 +1423,114 @@ def _clip_lm_damping(damping, *, dtype):
 def _lm_defaults(dtype):
     return {
         "initial_damping": _device_scalar(1.0e-3, dtype=dtype),
-        "accept_threshold": _device_scalar(0.0, dtype=dtype),
-        "expand_factor": _device_scalar(4.0, dtype=dtype),
-        "shrink_factor": _device_scalar(0.5, dtype=dtype),
-        "mild_shrink_factor": _device_scalar(0.8, dtype=dtype),
+        "initial_delta_factor": _device_scalar(100.0, dtype=dtype),
+        "accept_threshold": _device_scalar(1.0e-4, dtype=dtype),
+        "increase_factor": _device_scalar(2.0, dtype=dtype),
+        "decrease_factor": _device_scalar(0.5, dtype=dtype),
+        "minimum_delta_update": _device_scalar(0.1, dtype=dtype),
         "ratio_low": _device_scalar(0.25, dtype=dtype),
         "ratio_high": _device_scalar(0.75, dtype=dtype),
         "predicted_floor": _device_scalar(1.0e-18, dtype=dtype),
     }
 
 
-def _lm_iteration(flat_residual_fn, state, *, tol):
+def _lm_initial_delta(x, *, dtype):
+    x_norm = _tree_l2_norm(x)
+    return _lm_defaults(dtype)["initial_delta_factor"] * jnp.maximum(
+        x_norm,
+        _device_scalar(1.0, dtype=dtype),
+    )
+
+
+def _lm_gradient_tol(tol, gtol, *, dtype):
+    if gtol is None:
+        return _optimizer_scalar(tol, dtype=dtype)
+    return _optimizer_scalar(gtol, dtype=dtype)
+
+
+def _matrix_free_lm_info(
+    *,
+    actual_reduction,
+    predicted_reduction,
+    cost,
+    delta,
+    x_norm,
+    nit,
+    maxiter,
+    ftol,
+    xtol,
+    epsmch,
+):
+    """Return MINPACK-style info for the matrix-free-computable LM subset."""
+    one = jnp.asarray(1.0, dtype=cost.dtype)
+    half = jnp.asarray(0.5, dtype=cost.dtype)
+    cost_floor = jnp.maximum(cost, jnp.finfo(cost.dtype).tiny)
+    nonnegative_reduction = actual_reduction >= jnp.asarray(0.0, dtype=cost.dtype)
+    relative_actual = actual_reduction / cost_floor
+    relative_predicted = predicted_reduction / cost_floor
+    ratio = actual_reduction / jnp.maximum(predicted_reduction, cost_floor * epsmch)
+    ftol_met = (
+        nonnegative_reduction
+        & (relative_actual <= ftol)
+        & (relative_predicted <= ftol)
+        & (half * ratio <= one)
+    )
+    xtol_met = delta <= xtol * x_norm
+
+    info = jnp.asarray(0, dtype=jnp.int32)
+    info = jnp.where(ftol_met, jnp.asarray(1, dtype=jnp.int32), info)
+    info = jnp.where(xtol_met, jnp.asarray(2, dtype=jnp.int32), info)
+    info = jnp.where(
+        ftol_met & xtol_met,
+        jnp.asarray(3, dtype=jnp.int32),
+        info,
+    )
+    info = jnp.where(
+        (info == 0) & (nit >= maxiter),
+        jnp.asarray(5, dtype=jnp.int32),
+        info,
+    )
+    info = jnp.where(
+        (info == 0)
+        & nonnegative_reduction
+        & (relative_actual <= epsmch)
+        & (relative_predicted <= epsmch)
+        & (half * ratio <= one),
+        jnp.asarray(6, dtype=jnp.int32),
+        info,
+    )
+    info = jnp.where(
+        (info == 0) & (delta <= epsmch * x_norm),
+        jnp.asarray(7, dtype=jnp.int32),
+        info,
+    )
+    return info
+
+
+def _lm_delta_after_step(delta, step_norm, ratio, actual_reduction, *, defaults):
+    low_ratio_base = jnp.minimum(
+        delta,
+        step_norm / defaults["minimum_delta_update"],
+    )
+    low_ratio_scale = jnp.where(
+        actual_reduction >= jnp.asarray(0.0, dtype=delta.dtype),
+        defaults["decrease_factor"],
+        defaults["minimum_delta_update"],
+    )
+    low_ratio_delta = low_ratio_scale * low_ratio_base
+    updated_delta = jnp.where(
+        ratio >= defaults["ratio_high"],
+        step_norm / defaults["decrease_factor"],
+        delta,
+    )
+    return jnp.where(
+        ratio <= defaults["ratio_low"],
+        low_ratio_delta,
+        updated_delta,
+    )
+
+
+def _lm_iteration(flat_residual_fn, state, *, tol, gradient_tol, ftol, xtol, maxiter):
     state_dtype = _require_tree_first_leaf(
         state["x"],
         detail="Least-squares state x must contain at least one leaf.",
@@ -1465,15 +1582,23 @@ def _lm_iteration(flat_residual_fn, state, *, tol):
         & _tree_all_finite(grad_candidate)
         & _tree_all_finite(linear_residual)
     )
-    accepted = finite_candidate & (actual_reduction > defaults["accept_threshold"])
+    accepted = finite_candidate & (ratio >= defaults["accept_threshold"])
+    step_norm = _tree_l2_norm(step)
+    delta_after_step = _lm_delta_after_step(
+        state["delta"],
+        step_norm,
+        jnp.asarray(ratio, dtype=state["delta"].dtype),
+        jnp.asarray(actual_reduction, dtype=state["delta"].dtype),
+        defaults=defaults,
+    )
 
     damping_after_accept = lax.cond(
         ratio > defaults["ratio_high"],
-        lambda _: damping * defaults["shrink_factor"],
+        lambda _: damping * defaults["decrease_factor"],
         lambda _: lax.cond(
             ratio < defaults["ratio_low"],
-            lambda __: damping * defaults["expand_factor"],
-            lambda __: damping * defaults["mild_shrink_factor"],
+            lambda __: damping * defaults["increase_factor"],
+            lambda __: damping,
             operand=None,
         ),
         operand=None,
@@ -1482,36 +1607,78 @@ def _lm_iteration(flat_residual_fn, state, *, tol):
         accepted,
         lambda _: _clip_lm_damping(damping_after_accept, dtype=state_dtype),
         lambda _: _clip_lm_damping(
-            damping * defaults["expand_factor"],
+            damping * defaults["increase_factor"],
             dtype=state_dtype,
         ),
         operand=None,
     )
+    x_next = _tree_select(accepted, x_candidate, state["x"])
+    residual_next = lax.select(accepted, residual_candidate, state["residual"])
+    cost_next = lax.select(accepted, cost_candidate, state["cost"])
+    grad_next = _tree_select(accepted, grad_candidate, state["grad"])
+    grad_norm_next = lax.select(
+        accepted,
+        grad_norm_candidate,
+        state["grad_norm_inf"],
+    )
+    x_norm = _tree_l2_norm(x_next)
+    next_nit = state["nit"] + 1
+    info_candidate = _matrix_free_lm_info(
+        actual_reduction=actual_reduction,
+        predicted_reduction=predicted_reduction,
+        cost=state["cost"],
+        delta=delta_after_step,
+        x_norm=x_norm,
+        nit=next_nit,
+        maxiter=jnp.asarray(maxiter, dtype=jnp.int32),
+        ftol=jnp.asarray(ftol, dtype=state["cost"].dtype),
+        xtol=jnp.asarray(xtol, dtype=state["cost"].dtype),
+        epsmch=jnp.asarray(
+            jnp.finfo(state["cost"].dtype).eps, dtype=state["cost"].dtype
+        ),
+    )
+    info_next = lax.select(
+        finite_candidate,
+        info_candidate,
+        jnp.asarray(0, dtype=jnp.int32),
+    )
+    legacy_success = grad_norm_next <= gradient_tol
+    info_success = (info_next == 1) | (info_next == 2) | (info_next == 3)
 
     return {
-        "x": _tree_select(accepted, x_candidate, state["x"]),
-        "residual": lax.select(accepted, residual_candidate, state["residual"]),
-        "cost": lax.select(accepted, cost_candidate, state["cost"]),
-        "grad": _tree_select(accepted, grad_candidate, state["grad"]),
-        "grad_norm_inf": lax.select(
-            accepted,
-            grad_norm_candidate,
-            state["grad_norm_inf"],
-        ),
+        "x": x_next,
+        "residual": residual_next,
+        "cost": cost_next,
+        "grad": grad_next,
+        "grad_norm_inf": grad_norm_next,
         "damping": next_damping,
-        "nit": state["nit"] + 1,
+        "delta": delta_after_step,
+        "nit": next_nit,
         "status": lax.select(
             finite_candidate,
             jnp.asarray(1, dtype=jnp.int32),
             jnp.asarray(2, dtype=jnp.int32),
         ),
+        "info": info_next,
         "accepted": accepted,
-        "success": finite_candidate
-        & (lax.select(accepted, grad_norm_candidate, state["grad_norm_inf"]) <= tol),
+        "success": finite_candidate & (legacy_success | info_success),
     }
 
 
-def _least_squares_result_message(status, success):
+def _least_squares_result_message(status, success, info=0):
+    info_value = int(_host_scalar(info, dtype=np.int64))
+    if info_value == 1:
+        return "converged: ftol termination condition is satisfied"
+    if info_value == 2:
+        return "converged: xtol termination condition is satisfied"
+    if info_value == 3:
+        return "converged: both ftol and xtol termination conditions are satisfied"
+    if info_value == 5:
+        return "maximum iterations reached"
+    if info_value == 6:
+        return "ftol is too small; no further cost reduction is possible"
+    if info_value == 7:
+        return "xtol is too small; no further step reduction is possible"
     if _host_bool(success):
         return "converged"
     if int(_host_scalar(status, dtype=np.int64)) == 2:
@@ -1525,6 +1692,9 @@ def levenberg_marquardt(
     *,
     maxiter=1500,
     tol=1e-10,
+    ftol=1e-8,
+    xtol=1e-8,
+    gtol=None,
     materialize_dense_linearization=True,
     max_dense_linearization_bytes=None,
     callback=None,
@@ -1535,6 +1705,12 @@ def levenberg_marquardt(
     The LM loop is matrix-free: it uses ``jvp``/``vjp`` products inside GMRES
     and only rebuilds the dense residual Jacobian/Hessian once at the final
     iterate so existing Boozer adjoint consumers retain their contract.
+
+    ``ftol`` and ``xtol`` feed the matrix-free MINPACK-style ``info`` subset.
+    Explicit ``gtol`` values replace the legacy ``tol`` gradient gate with a
+    matrix-free infinity-norm gradient gate. MINPACK's QR-scaled ``gtol``
+    ``info`` code still requires pivoted-QR data and is therefore not emitted
+    by this matrix-free solver.
     """
     residual_eval = jax.jit(_flattened_residual_output(residual_fn))
 
@@ -1547,12 +1723,15 @@ def levenberg_marquardt(
         x,
         detail="Least-squares initial state must contain at least one leaf.",
     ).dtype
+    gradient_tol = _lm_gradient_tol(tol, gtol, dtype=x_dtype)
     damping = _lm_defaults(x_dtype)["initial_damping"]
+    delta = _lm_initial_delta(x, dtype=x_dtype)
     status = 1
-    success = bool(grad_norm_inf <= tol)
+    success = bool(grad_norm_inf <= gradient_tol)
+    info = 0
     nit = 0
 
-    while nit < maxiter and not success:
+    while nit < maxiter and not success and info == 0:
         step_state = _lm_iteration(
             residual_eval,
             {
@@ -1562,16 +1741,24 @@ def levenberg_marquardt(
                 "grad": grad,
                 "grad_norm_inf": grad_norm_inf,
                 "damping": damping,
+                "delta": delta,
                 "nit": jnp.asarray(nit, dtype=jnp.int32),
                 "status": jnp.asarray(status, dtype=jnp.int32),
+                "info": jnp.asarray(info, dtype=jnp.int32),
                 "accepted": jnp.asarray(False),
                 "success": jnp.asarray(False),
             },
             tol=_optimizer_scalar(tol, dtype=x_dtype),
+            gradient_tol=gradient_tol,
+            ftol=_optimizer_scalar(ftol, dtype=x_dtype),
+            xtol=_optimizer_scalar(xtol, dtype=x_dtype),
+            maxiter=int(maxiter),
         )
         nit = int(step_state["nit"])
         status = int(step_state["status"])
+        info = int(step_state["info"])
         damping = step_state["damping"]
+        delta = step_state["delta"]
         if bool(step_state["accepted"]):
             x = step_state["x"]
             residual = step_state["residual"]
@@ -1627,6 +1814,7 @@ def levenberg_marquardt(
         "damping": damping,
         "nit": nit,
         "status": status,
+        "info": info,
         "success": success,
         "dense_linearization_materialized": dense_linearization_materialized,
         **dense_report,
@@ -1639,17 +1827,29 @@ def levenberg_marquardt_traceable(
     *,
     maxiter=1500,
     tol=1e-10,
+    ftol=1e-8,
+    xtol=1e-8,
+    gtol=None,
     materialize_dense_linearization=True,
     max_dense_linearization_bytes=None,
     callback=None,
     progress_callback=None,
     args=(),
 ):
-    """Trace-safe Levenberg-Marquardt solver for least-squares residuals."""
+    """Trace-safe Levenberg-Marquardt solver for least-squares residuals.
+
+    ``ftol`` and ``xtol`` feed the matrix-free MINPACK-style ``info`` subset.
+    Explicit ``gtol`` values replace the legacy ``tol`` gradient gate with a
+    matrix-free infinity-norm gradient gate. QR-scaled ``gtol`` ``info`` codes
+    remain reserved for a future pivoted-QR MINPACK lane.
+    """
     runner = _make_traceable_levenberg_marquardt_runner(
         residual_fn,
         int(maxiter),
         float(tol),
+        float(ftol),
+        float(xtol),
+        None if gtol is None else float(gtol),
         bool(materialize_dense_linearization),
         max_dense_linearization_bytes,
         callback,
@@ -3255,6 +3455,9 @@ def target_least_squares(
         x0,
         maxiter=maxiter,
         tol=tol,
+        ftol=options.get("ftol", 1e-8),
+        xtol=options.get("xtol", 1e-8),
+        gtol=options.get("gtol"),
         materialize_dense_linearization=bool(
             options.get("materialize_dense_linearization", True)
         ),
@@ -3265,6 +3468,7 @@ def target_least_squares(
 
     nit = int(_host_scalar(result["nit"], dtype=np.int64))
     status = int(_host_scalar(result["status"], dtype=np.int64))
+    info = int(_host_scalar(result["info"], dtype=np.int64))
     success = _host_bool(result["success"])
     return OptimizeResult(
         x=result["x"],
@@ -3278,10 +3482,12 @@ def target_least_squares(
         nfev=nit + 1,
         njev=nit + 1,
         status=status,
+        info=info,
         success=success,
         message=_least_squares_result_message(
             status,
             success,
+            info=info,
         ),
         dense_linearization_materialized=result["dense_linearization_materialized"],
         dense_residual_jacobian_shape=result.get("dense_residual_jacobian_shape"),

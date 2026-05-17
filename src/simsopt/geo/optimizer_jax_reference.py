@@ -73,7 +73,9 @@ def _scipy_objective_trace_entry(x_np, value, gradient, *, dtype):
     return _scipy_initial_call_contract(x_np, value, gradient, dtype=dtype)
 
 
-def _scipy_result_contract(result, *, semantic_method, scipy_method, scipy_opts, callback):
+def _scipy_result_contract(
+    result, *, semantic_method, scipy_method, scipy_opts, callback
+):
     return {
         "semantic_method": str(semantic_method),
         "scipy_method": str(scipy_method),
@@ -368,6 +370,10 @@ def _trace_minimize_value_and_grad(
         progress_callback=options.get("progress_callback"),
         failure_callback=options.get("failure_callback"),
         initial_value_and_grad=initial_value_and_grad,
+        record_optimizer_state_trace=bool(
+            options.get("record_optimizer_state_trace", True)
+        ),
+        max_optimizer_state_trace_bytes=options.get("max_optimizer_state_trace_bytes"),
     )
     return _host_trace_result_to_optimize_result(result)
 
@@ -386,8 +392,7 @@ def reference_least_squares(
     """Run the CPU/reference least-squares lane."""
     if method != "lm":
         raise ValueError(
-            "reference_least_squares() only supports method='lm'. "
-            f"Got {method!r}."
+            f"reference_least_squares() only supports method='lm'. Got {method!r}."
         )
 
     options = dict(options or {})
@@ -411,12 +416,16 @@ def reference_least_squares(
         x0,
         maxiter=maxiter,
         tol=tol,
+        ftol=options.get("ftol", 1e-8),
+        xtol=options.get("xtol", 1e-8),
+        gtol=options.get("gtol"),
         callback=options.get("callback"),
         progress_callback=options.get("progress_callback"),
     )
 
     nit = int(_optimizer._host_scalar(result["nit"], dtype=np.int64))
     status = int(_optimizer._host_scalar(result["status"], dtype=np.int64))
+    info = int(_optimizer._host_scalar(result["info"], dtype=np.int64))
     success = _optimizer._host_bool(result["success"])
     return OptimizeResult(
         x=result["x"],
@@ -430,10 +439,12 @@ def reference_least_squares(
         nfev=nit + 1,
         njev=nit + 1,
         status=status,
+        info=info,
         success=success,
         message=_optimizer._least_squares_result_message(
             status,
             success,
+            info=info,
         ),
     )
 
@@ -458,7 +469,10 @@ def reference_minimize(
             "reference_minimize() requires value_and_grad=True for "
             "method='lbfgs-trace'."
         )
-    if method not in _optimizer._REFERENCE_METHODS | _optimizer._REFERENCE_TRACE_METHODS:
+    if (
+        method
+        not in _optimizer._REFERENCE_METHODS | _optimizer._REFERENCE_TRACE_METHODS
+    ):
         raise ValueError(
             "reference_minimize() only supports reference methods "
             f"{sorted(_optimizer._REFERENCE_METHODS | _optimizer._REFERENCE_TRACE_METHODS)}. "

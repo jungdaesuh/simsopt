@@ -3050,6 +3050,8 @@ _PRIVATE_OPTIMIZER_OPTIONS = frozenset(
 
 # Options shared by the public SciPy L-BFGS lane and the private L-BFGS lanes.
 _LBFGS_TUNING_OPTIONS = frozenset({"maxcor", "ftol", "maxfun", "maxls"})
+_LM_TUNING_OPTION_KEYS = ("ftol", "xtol", "gtol")
+_LM_TUNING_OPTIONS = frozenset(_LM_TUNING_OPTION_KEYS)
 _SCIPY_TRACE_OPTIONS = frozenset({"record_scipy_callback_trace"})
 
 # Callback options accepted by all backends.
@@ -3066,6 +3068,7 @@ _ALLOWED_OPTIONS_LS = (
     | _LS_DYNAMIC_OPTION_KEYS
     | _PRIVATE_OPTIMIZER_OPTIONS
     | _LBFGS_TUNING_OPTIONS
+    | _LM_TUNING_OPTIONS
     | _SCIPY_TRACE_OPTIONS
     | _CALLBACK_OPTIONS
 )
@@ -4655,16 +4658,20 @@ class BoozerSurfaceJAX(Optimizable):
                 optimize_G,
                 weight_inv_modB,
             )
+            least_squares_options = self._collect_least_squares_options()
             ls_state = levenberg_marquardt_traceable(
                 residual_fn,
                 x0,
                 maxiter=self.options["bfgs_maxiter"],
                 tol=self.options["bfgs_tol"],
+                ftol=least_squares_options.get("ftol", 1e-8),
+                xtol=least_squares_options.get("xtol", 1e-8),
+                gtol=least_squares_options.get("gtol"),
                 materialize_dense_linearization=bool(
-                    self.options["materialize_dense_linearization"]
+                    least_squares_options["materialize_dense_linearization"]
                     and materialize_dense_linearization
                 ),
-                max_dense_linearization_bytes=self.options[
+                max_dense_linearization_bytes=least_squares_options[
                     "max_dense_linearization_bytes"
                 ],
                 args=(coil_set_spec,),
@@ -4970,9 +4977,9 @@ class BoozerSurfaceJAX(Optimizable):
             )
         return optimizer_options
 
-    def _collect_least_squares_linearization_options(self):
-        """Gather target LM dense-linearization policy from self.options."""
-        return {
+    def _collect_least_squares_options(self):
+        """Gather matrix-free LM options from self.options."""
+        options = {
             "materialize_dense_linearization": bool(
                 self.options["materialize_dense_linearization"]
             ),
@@ -4980,6 +4987,10 @@ class BoozerSurfaceJAX(Optimizable):
                 "max_dense_linearization_bytes"
             ],
         }
+        options.update(
+            {k: self.options[k] for k in _LM_TUNING_OPTION_KEYS if k in self.options}
+        )
+        return options
 
     def _run_newton_polish_for_method(
         self,
@@ -5076,11 +5087,7 @@ class BoozerSurfaceJAX(Optimizable):
                 method=method,
                 tol=tol,
                 maxiter=maxiter,
-                options=(
-                    self._collect_least_squares_linearization_options()
-                    if method == "lm-ondevice"
-                    else None
-                ),
+                options=self._collect_least_squares_options(),
                 progress_callback=progress_callback,
             )
         else:
@@ -5509,7 +5516,7 @@ class BoozerSurfaceJAX(Optimizable):
                 method="lm-ondevice",
                 tol=tol,
                 maxiter=maxiter,
-                options=self._collect_least_squares_linearization_options(),
+                options=self._collect_least_squares_options(),
             )
             optimizer_method = "lm-ondevice"
         else:
@@ -5519,6 +5526,7 @@ class BoozerSurfaceJAX(Optimizable):
                 method="lm",
                 tol=tol,
                 maxiter=maxiter,
+                options=self._collect_least_squares_options(),
             )
             optimizer_method = "lm"
 

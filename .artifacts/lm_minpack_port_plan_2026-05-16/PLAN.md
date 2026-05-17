@@ -7,10 +7,25 @@
 | Parent plan | `.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md` (Wave 4 W4.3 conditional rollout) |
 | Driver | 5-agent max-effort research (Opus 4.7) + independent critic validation pass |
 | Author | Jung Dae Suh + Claude Opus 4.7 |
-| Status | DRAFT (rev 3, 2026-05-16) — corrections from 2026-05-16 critic pass + Crucible review pass applied; pending owner decision on §8 Q1–Q8 (notably Q8 Path C scope) |
+| Status | EXECUTED PARTIAL (2026-05-16) — Track 2 implemented; Track 1 abandoned at Phase 0 G0 for production scope after packed-QR/`qtb` bit-equality failure on `(384, 40)`; Track 3 remains deferred |
 | Estimated effort | Track 2: 2 days · Track 1 Phase 0 alone (cheapest abandon checkpoint): 1–3 days depending on implementer's `jax.lax.linalg` FFI familiarity · Track 1 spike through G5 cumulative: ~8.5 days (Phase 0: 1–3d, Phase 1: 1d, Phase 2: 1d, Phase 3: 2d, Phase 4: 1.5d, Phase 5: 2d) · full Track 1 through G8: ~10–12 days · Track 3 (Optimistix): 1–2 weeks. **All estimates are extrapolations from `_lbfgsb_scipy.py` (~3300 LOC), not measurements.** |
 
 ---
+
+## Execution Status — 2026-05-16
+
+Track 2 landed as the low-risk convergence-semantics retrofit: the matrix-free
+JAX LM now carries the computable MINPACK-style `info` subset, exposes
+`ftol`/`xtol`/explicit `gtol`, and uses symmetric damping factors in the
+existing matrix-free lane.
+
+Track 1 was executed through its mandatory Phase 0 gate and abandoned at
+production scope. The G0 probe in
+`PHASE0_G0_REPORT.md` compares JAX internal packed `geqp3` + `ormqr` against
+SciPy LAPACK `dgeqp3` + `qr_multiply`; all 100 production-shape `(384, 40)`
+seeds fail bit equality for packed factor and `Q^T f`. Per the G0 policy below,
+no `lm-minpack` implementation should proceed without explicit owner sign-off
+to re-scope the project.
 
 ## TL;DR
 

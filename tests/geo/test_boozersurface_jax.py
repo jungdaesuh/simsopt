@@ -924,6 +924,20 @@ _EXPLICIT_COIL_SPEC_REQUIRED_PATTERN = (
     r"BoozerSurfaceJAX requires a biotsavart object that provides "
     r"coil_set_spec\(\) for explicit immutable grouped-coil state"
 )
+_EXPLICIT_LM_OPTION_VALUES = (
+    ("ftol", 2.0e-11),
+    ("xtol", 3.0e-11),
+    ("gtol", 4.0e-11),
+)
+
+
+def _set_explicit_lm_options(booz):
+    booz.options.update(_EXPLICIT_LM_OPTION_VALUES)
+
+
+def _assert_explicit_lm_options_forwarded(captured_options, booz):
+    for key, _value in _EXPLICIT_LM_OPTION_VALUES:
+        assert captured_options[key] == booz.options[key]
 
 
 def _target_lane_rejection_pattern(
@@ -4100,6 +4114,7 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = "lm"
+        _set_explicit_lm_options(booz)
         if explicit_materialize is not None:
             booz.options["materialize_dense_linearization"] = explicit_materialize
 
@@ -4154,6 +4169,7 @@ class TestBoozerSurfaceJAXClass:
         res = booz.run_code(iota=0.3, G=0.05)
 
         assert captured["method"] == "lm-ondevice"
+        _assert_explicit_lm_options_forwarded(captured["options"], booz)
         assert (
             captured["options"]["materialize_dense_linearization"]
             is expected_materialize
@@ -4163,6 +4179,74 @@ class TestBoozerSurfaceJAXClass:
             == booz.options["max_dense_linearization_bytes"]
         )
         assert res["optimizer_method"] == "lm-ondevice"
+        assert res["success"] is True
+
+    def test_run_code_reference_lm_forwards_least_squares_options(self, monkeypatch):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        booz.options["least_squares_algorithm"] = "lm"
+        booz.options["limited_memory"] = False
+        _set_explicit_lm_options(booz)
+        captured = {}
+
+        def fake_reference_least_squares(
+            residual_fn,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options=None,
+            callback=None,
+            progress_callback=None,
+        ):
+            del residual_fn, tol, maxiter, callback, progress_callback
+            captured["method"] = method
+            captured["options"] = dict(options or {})
+            flat_x0, _ = ravel_pytree(x0)
+            return types.SimpleNamespace(
+                x=x0,
+                fun=0.0,
+                jac=jnp.zeros_like(flat_x0),
+                residual=jnp.zeros_like(flat_x0),
+                residual_jacobian=jnp.eye(flat_x0.size, dtype=flat_x0.dtype),
+                hessian=jnp.eye(flat_x0.size, dtype=flat_x0.dtype),
+                damping=jnp.asarray(1.0e-3, dtype=flat_x0.dtype),
+                nit=0,
+                nfev=1,
+                njev=1,
+                status=0,
+                info=0,
+                success=True,
+            )
+
+        def fake_newton_polish(
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
+        ):
+            del maxiter, tol, stab, progress_callback, objective_args
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(
+            _bsj, "reference_least_squares", fake_reference_least_squares
+        )
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert captured["method"] == "lm"
+        _assert_explicit_lm_options_forwarded(captured["options"], booz)
+        assert (
+            captured["options"]["materialize_dense_linearization"]
+            is booz.options["materialize_dense_linearization"]
+        )
+        assert res["optimizer_method"] == "lm"
         assert res["success"] is True
 
     def test_run_code_emits_actual_first_stage_method_for_lm(self, monkeypatch):
@@ -6440,6 +6524,7 @@ class TestBoozerSurfaceJAXExactPath:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = "lm"
+        _set_explicit_lm_options(booz)
         if explicit_materialize is not None:
             booz.options["materialize_dense_linearization"] = explicit_materialize
         coil_set_spec = booz.coil_set_spec
@@ -6457,6 +6542,9 @@ class TestBoozerSurfaceJAXExactPath:
             *,
             maxiter,
             tol,
+            ftol,
+            xtol,
+            gtol,
             materialize_dense_linearization=True,
             max_dense_linearization_bytes=None,
             callback=None,
@@ -6464,6 +6552,9 @@ class TestBoozerSurfaceJAXExactPath:
             args=(),
         ):
             del maxiter, tol, callback, progress_callback
+            captured["ftol"] = ftol
+            captured["xtol"] = xtol
+            captured["gtol"] = gtol
             captured["materialize_dense_linearization"] = (
                 materialize_dense_linearization
             )
@@ -6505,6 +6596,7 @@ class TestBoozerSurfaceJAXExactPath:
         _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
         assert result["optimizer_method"] == "lm-ondevice"
         assert bool(result["success"])
+        _assert_explicit_lm_options_forwarded(captured, booz)
         assert captured["materialize_dense_linearization"] is expected_materialize
         assert (
             captured["max_dense_linearization_bytes"]
@@ -6617,6 +6709,9 @@ class TestBoozerSurfaceJAXExactPath:
             *,
             maxiter,
             tol,
+            ftol=1e-8,
+            xtol=1e-8,
+            gtol=None,
             materialize_dense_linearization=True,
             max_dense_linearization_bytes=None,
             callback=None,
@@ -6626,6 +6721,9 @@ class TestBoozerSurfaceJAXExactPath:
             del (
                 maxiter,
                 tol,
+                ftol,
+                xtol,
+                gtol,
                 materialize_dense_linearization,
                 max_dense_linearization_bytes,
                 callback,
@@ -6704,6 +6802,9 @@ class TestBoozerSurfaceJAXExactPath:
             *,
             maxiter,
             tol,
+            ftol=1e-8,
+            xtol=1e-8,
+            gtol=None,
             materialize_dense_linearization=True,
             max_dense_linearization_bytes=None,
             callback=None,
@@ -6713,6 +6814,9 @@ class TestBoozerSurfaceJAXExactPath:
             del (
                 maxiter,
                 tol,
+                ftol,
+                xtol,
+                gtol,
                 materialize_dense_linearization,
                 max_dense_linearization_bytes,
                 callback,

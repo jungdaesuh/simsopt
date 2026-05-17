@@ -171,11 +171,17 @@ Neither method is a port of MINPACK ``lmder``. Both use:
   Gauss-Newton operator ``J^T J + λI`` (no pivoted-QR
   factorization, no dense Jacobian materialization in the inner
   step).
-- A single-criterion termination on ``‖∇‖_∞ ≤ tol`` (no
-  ``ftol``/``xtol``/``gtol`` triple).
-- An asymmetric trust-region damping update — shrink ``× 0.5`` on
-  ``ratio > 0.75``, expand ``× 4.0`` on ``ratio < 0.25``,
-  mild-shrink ``× 0.8`` otherwise.
+- Matrix-free MINPACK-style termination bookkeeping. The JAX LM
+  surfaces ``info`` codes 1, 2, 3, 5, 6, and 7 for the
+  ``ftol``/``xtol``/budget/stringent-tolerance subset that can be
+  computed without a pivoted-QR factorization. When callers provide
+  ``gtol``, the matrix-free infinity-norm gradient gate uses that
+  threshold; otherwise the legacy ``‖∇‖_∞ ≤ tol`` convergence gate is
+  preserved. MINPACK ``info`` codes 4 and 8 require the pivoted-QR
+  scaled-gradient norm and remain outside this lane.
+- A symmetric Marquardt damping update — decrease ``× 0.5`` on
+  ``ratio > 0.75`` and increase ``× 2.0`` on ``ratio < 0.25`` or
+  rejected steps.
 
 The ``lm-ondevice`` backend is **doubly opt-in**: it requires both
 ``optimizer_backend="ondevice"`` and ``least_squares_algorithm="lm"``
