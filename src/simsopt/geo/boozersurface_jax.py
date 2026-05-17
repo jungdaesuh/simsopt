@@ -1636,7 +1636,7 @@ def _penalty_from_geometry_and_field_terms(
         field_terms.B,
         geometry.xphi,
         geometry.xtheta,
-        params.weight_inv_modB,
+        weight_inv_modB=params.weight_inv_modB,
         reduction_mode=boozer_reduction_mode,
     )
     label_val = _label_from_geometry_and_field_terms(
@@ -1884,7 +1884,7 @@ def _boozer_penalty_residual_vector(
         B,
         xphi,
         xtheta,
-        weight_inv_modB,
+        weight_inv_modB=weight_inv_modB,
     )
     num_res = _as_jax_float64(3 * nphi * ntheta)
     r_boozer = r_boozer_raw / jnp.sqrt(num_res)
@@ -2053,7 +2053,14 @@ def _boozer_exact_residual_impl(
     )
     B = B.reshape(nphi, ntheta, 3)
 
-    r_flat = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
+    r_flat = boozer_residual_vector(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB=weight_inv_modB,
+    )
     r_masked = r_flat[mask_indices]
 
     label_val, gamma_axis_z = _compute_label_and_axis_z(
@@ -4250,7 +4257,14 @@ class BoozerSurfaceJAX(Optimizable):
                 coil_arrays=coil_arrays,
                 coil_set_spec=resolved_coil_set_spec,
             ).reshape(nphi, ntheta, 3)
-            residual = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
+            residual = boozer_residual_vector(
+                G,
+                iota,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=weight_inv_modB,
+            )
             return _as_jax_float64(0.5) * jnp.sum(jnp.square(residual))
 
         return objective_fn
@@ -4922,7 +4936,14 @@ class BoozerSurfaceJAX(Optimizable):
             coil_set_spec=coil_set_spec,
         ).reshape(nphi, ntheta, 3)
 
-        r_boozer_raw = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
+        r_boozer_raw = boozer_residual_vector(
+            G,
+            iota,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB=weight_inv_modB,
+        )
         num_res = _as_jax_float64(3 * nphi * ntheta)
         r_boozer = r_boozer_raw / jnp.sqrt(num_res)
 
@@ -5846,7 +5867,7 @@ class BoozerSurfaceJAX(Optimizable):
             B_final,
             xphi_final,
             xtheta_final,
-            self.options["weight_inv_modB"],
+            weight_inv_modB=self.options["weight_inv_modB"],
         )
 
         bool_mask = np.zeros(3 * nphi * ntheta, dtype=bool)

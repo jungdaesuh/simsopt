@@ -24,6 +24,16 @@ The residual at each grid point is
 
 with ``w = 1/|B|`` when *weight_inv_modB* is True, else ``w = 1``.
 
+Defaults follow upstream SIMSOPT convention
+(``simsopt/geo/surfaceobjectives.py`` and ``simsopt/geo/boozersurface.py``).
+Low-level residual primitives (``boozer_residual_scalar``, ``_grad``,
+``_hessian``, ``_vector``, ``_scalar_and_grad_cpu_ordered``) default to
+``weight_inv_modB=False`` -- bare algebraic residual, matching upstream
+``boozer_surface_residual`` / ``boozer_surface_residual_dB``. LS-context
+wrappers (``boozer_penalty_composed``, ``boozer_residual_coil_vjp``) default
+to ``True`` -- matching upstream ``boozer_penalty_constraints_vectorized`` and
+``boozer_surface_dlsqgrad_dcoils_vjp``.
+
 The scalar objective is
 
 .. math::
@@ -120,7 +130,7 @@ def boozer_residual_scalar(
     B,
     xphi,
     xtheta,
-    weight_inv_modB=True,
+    weight_inv_modB=False,
     reduction_mode="default",
 ):
     """Boozer residual scalar objective (forward pass).
@@ -193,7 +203,7 @@ def _boozer_objective_from_packed(
         B,
         xphi,
         xtheta,
-        weight_inv_modB,
+        weight_inv_modB=weight_inv_modB,
         reduction_mode=reduction_mode,
     )
 
@@ -205,7 +215,7 @@ def boozer_residual_grad(
     xphi,
     xtheta,
     nsurfdofs,
-    weight_inv_modB=True,
+    weight_inv_modB=False,
     reduction_mode="default",
 ):
     """Gradient of the Boozer residual w.r.t. [surface_dofs, iota, G].
@@ -250,7 +260,7 @@ def boozer_residual_hessian(
     xphi,
     xtheta,
     nsurfdofs,
-    weight_inv_modB=True,
+    weight_inv_modB=False,
     reduction_mode="default",
 ):
     """Hessian of the Boozer residual w.r.t. [surface_dofs, iota, G].
@@ -290,10 +300,10 @@ def boozer_residual_hessian(
 # ---------------------------------------------------------------------------
 
 
-def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=True):
+def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=False):
     """Boozer residual vector (not the scalar 0.5||r||²/N).
 
-    Returns the weighted residual at each grid point, flattened.
+    Returns the residual at each grid point, flattened.
 
     Args:
         G, iota: Boozer parameters.
@@ -329,7 +339,7 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
     dxtheta_ds,
     *,
     optimize_G,
-    weight_inv_modB=True,
+    weight_inv_modB=False,
 ):
     """CPU-ordered Boozer LS scalar and first derivative.
 
@@ -652,7 +662,7 @@ def boozer_penalty_composed(
         B,
         xphi,
         xtheta,
-        weight_inv_modB,
+        weight_inv_modB=weight_inv_modB,
         reduction_mode=reduction_mode,
     )
 
@@ -711,7 +721,14 @@ def _boozer_residual_vector_composed(
         scatter_indices=scatter_indices,
         optimize_G=optimize_G,
     )
-    return boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
+    return boozer_residual_vector(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB=weight_inv_modB,
+    )
 
 
 def boozer_residual_jacobian_composed(
@@ -749,7 +766,7 @@ def boozer_residual_coil_vjp(
     coil_arrays,
     iota,
     G,
-    weight_inv_modB=False,
+    weight_inv_modB=True,
 ):
     """VJP of Boozer residual w.r.t. coil parameters (public derivative helper).
 
@@ -796,7 +813,14 @@ def boozer_residual_coil_vjp(
         points = gamma.reshape(-1, 3)
         B = grouped_bs_B(points, ca)
         B = B.reshape(nphi, ntheta, 3)
-        return boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
+        return boozer_residual_vector(
+            G,
+            iota,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB=weight_inv_modB,
+        )
 
     _, vjp_fn = jax.vjp(residual_of_coils, coil_arrays)
     return vjp_fn(adjoint)

@@ -2216,7 +2216,7 @@ def _boozer_residual_J_of_x_inner(
         B,
         xphi,
         xtheta,
-        weight_inv_modB,
+        weight_inv_modB=weight_inv_modB,
     )
 
     label_gamma, label_xphi, label_xtheta = _surface_geometry_from_dofs(
