@@ -31,6 +31,11 @@ lane evidence.
   at ``rtol=1e-6``, ``atol=1e-7`` and derived NQS-style values at
   ``rtol=5e-5``, ``atol=1e-7``. Branch-divergent small-grid cases remain
   finite/residual health checks, not parity evidence.
+- Independent optimizer endpoints are not same-state kernel comparisons. For
+  LM validation, well-conditioned direct fixtures may assert raw final-state
+  parity at the solver-specific ``1e-10`` gate, but singular or flat fixtures
+  must gate on residual, cost, and first-order optimality rather than raw
+  parameter-vector equality.
 - Label constraints (Volume, Area, ToroidalFlux) match CPU within
   ``rel_err < 1e-12``.
 
@@ -199,8 +204,14 @@ both ``optimizer_backend="ondevice"`` and
 ``least_squares_algorithm="lm-minpack"`` on ``BoozerSurfaceJAX``. It
 is MINPACK-style at the solver level because it uses a dense
 column-pivoted QR step and emits the QR-scaled ``gtol`` ``info`` codes
-4 and 8. Its contract is tolerance-equivalent final-state parity
-against SciPy/MINPACK, not packed-QR or per-iteration byte identity.
+4 and 8. Its contract is classified tolerance equivalence against
+SciPy/MINPACK, not packed-QR or per-iteration byte identity:
+well-conditioned direct fixtures assert raw final-state parity at
+``rtol=atol=1e-10``; singular/flat fixtures assert residual, cost, and
+optimality instead of raw ``x`` equality; independent Boozer solves use the
+``branch-stable-resolve`` lane for endpoint drift while keeping residual and
+objective agreement strict. Hardware certification or CPU exact polish remains
+an explicit caller workflow, not automatic behavior in the JAX solver modules.
 Because the dense Jacobian is required by the solver itself,
 ``max_dense_linearization_bytes`` is a hard preflight cap for this lane,
 not a final-artifact reporting preference.

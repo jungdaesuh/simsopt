@@ -7,8 +7,8 @@
 | Parent plan | `.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md` (Wave 4 W4.3 conditional rollout) |
 | Driver | 5-agent max-effort research (Opus 4.7) + independent critic validation pass |
 | Author | Jung Dae Suh + Claude Opus 4.7 |
-| Status | EXECUTED REVISED (rev 5, 2026-05-17) — Track 2 implemented; original Track 1 byte-equality spike abandoned at Phase 0 G0; revised Track 1 tolerance-equivalent dense-QR lane implemented as `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`; revised Track 1 broad validation (G3/G4/G5) pending; Track 3 deferred with priority weakened by revised Track 1 outcome |
-| Estimated effort | Track 2: implemented · revised Track 1 core route: implemented · **revised Track 1 broad validation pending: ~1–1.5 engineer-days for G3+G4+G5 combined** (MGH suite ~0.5d, oversampled BoozerSurface fixture ~0.5d, compile-timing measurement ~0.25d; recommend bundling into a single PR) · Track 3 (Optimistix): 1–2 weeks if reopened |
+| Status | EXECUTED REVISED (rev 5, 2026-05-17) — Track 2 implemented; original Track 1 byte-equality spike abandoned at Phase 0 G0; revised Track 1 tolerance-equivalent dense-QR lane implemented as `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`; revised Track 1 G3/G4 validation implemented; G5 compile timing pending; Track 3 deferred with priority weakened by revised Track 1 outcome |
+| Estimated effort | Track 2: implemented · revised Track 1 core route: implemented · revised Track 1 G3/G4 validation: implemented · **remaining revised Track 1 validation pending: ~0.25 engineer-days for G5 compile-timing measurement** · Track 3 (Optimistix): 1–2 weeks if reopened |
 
 ---
 
@@ -39,7 +39,7 @@ Three-track strategy:
 
 - **Track 2 first** (low risk, high signal): retrofit the existing matrix-free JAX LM in `src/simsopt/geo/optimizer_jax.py` to use MINPACK-style `ftol`/`xtol` termination bookkeeping, explicit `gtol` routing, and symmetric Marquardt-style damping factors. Closes the documented W4.3 convergence-semantics sub-gap without touching the inner solve. ~100 LOC. No compile-budget impact.
 
-- **Track 1 revised** (CPU tolerance-equivalent QR lane): implement an opt-in dense pivoted-QR LM lane using `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`. This keeps the useful QR conditioning from MINPACK-style LM while accepting the Phase 0 evidence that packed-QR byte identity is not achievable on the production `(384,40)` shape. Contract: final-state parity at `atol=rtol=1e-10` on focused fixtures now; broader MGH/Boozer fixture proof remains pending.
+- **Track 1 revised** (CPU tolerance-equivalent QR lane): implement an opt-in dense pivoted-QR LM lane using `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`. This keeps the useful QR conditioning from MINPACK-style LM while accepting the Phase 0 evidence that packed-QR byte identity is not achievable on the tall production-proxy QR shape. Contract: strict raw final-state parity on identifiable direct fixtures, residual/cost/optimality classification on singular MGH fixtures, and branch-stable residual/objective parity on the current oversampled Boozer fixture.
 
 - **Track 3 deferred** (architectural shift, library swap): adopt Optimistix `LevenbergMarquardt` with Lineax `LSMR` inner solver as a parallel third lane. Adds ~400 LOC of adapter + 2 direct deps (Optimistix + Lineax, with Equinox floor handled by dependency policy). Better numerical conditioning on near-rank-deficient fixtures (`κ(J)` not `κ(J)²`) only relative to the matrix-free lane; revised Track 1 already supplies dense-QR `κ(J)` conditioning. Not byte-equal to MINPACK; tolerance-equivalent. Net LOC is **additive** while the existing matrix-free LM remains the default; the ~500-LOC simplification only materializes if/when a future cleanup retires the current `_lm_iteration`/`_gmres_solve_least_squares_system` path.
 
@@ -49,7 +49,7 @@ Three-track strategy:
 
 ### Goals
 
-1. **Eliminate or precisely scope the W4.3 algorithmic divergence** between simsopt's CPU `BoozerSurface.minimize_boozer_penalty_constraints_ls(method="lm")` (→ MINPACK `lmder` via SciPy) and the JAX LM lanes. At rev 1, the matrix-free JAX LM was *algorithmically distinct* per its own module docstring (`optimizer_jax.py:14-45`). As of rev 5, the matrix-free lane has MINPACK-style termination bookkeeping and symmetric damping but still differs in the inner solve, while the opt-in `lm-minpack-ondevice` lane provides dense-QR final-state parity pending G3/G4/G5 broad validation.
+1. **Eliminate or precisely scope the W4.3 algorithmic divergence** between simsopt's CPU `BoozerSurface.minimize_boozer_penalty_constraints_ls(method="lm")` (→ MINPACK `lmder` via SciPy) and the JAX LM lanes. At rev 1, the matrix-free JAX LM was *algorithmically distinct* per its own module docstring (`optimizer_jax.py:14-45`). As of rev 5, the matrix-free lane has MINPACK-style termination bookkeeping and symmetric damping but still differs in the inner solve, while the opt-in `lm-minpack-ondevice` lane provides dense-QR parity with G3/G4 validation complete and G5 compile timing still pending.
 2. **Improve numerical robustness on near-rank-deficient BoozerSurface fixtures.** The default fixture's `sdofs_inf ≈ 3.6e-5` parity drift documented in the deepdive plan is driven in part by the matrix-free GMRES inner solve seeing `κ(J^T J + λI) = κ(J)² ≈ 10¹⁴`. Both pivoted-QR (Track 1) and LSMR (Track 3) reduce the effective condition number to `κ(J)`.
 3. **Preserve current JAX/CUDA performance characteristics.** Tracks 2 and 3 must not regress the H100 wall-clock per LM iteration. Track 1 must not regress beyond the 60s first-compile gate in `docs/source/jax_acceptance.rst:101`.
 4. **Maintain validation discipline.** Every new piece lands with a SciPy/MINPACK oracle test at the appropriate `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES` lane.
@@ -99,12 +99,12 @@ shape (384,40) seed=0:   P=eq  R bit-equal  Q max diff = 4.163e-17  (NOT bit-equ
 shape (384,40) seed=1:   P=eq  R bit-equal  Q max diff = 4.163e-17  (NOT bit-equal)
 ```
 
-**Key result, not an unqualified win.** R and P are bit-equal to LAPACK on every shape probed. **Q is bit-equal on m≈n shapes but not on the production-sized `(384,40)` BoozerSurface shape.** Two reasons this is still gate-relevant for Track 1 but not a free pass:
+**Key result, not an unqualified win.** R and P are bit-equal to LAPACK on every shape probed. **Q is bit-equal on m≈n shapes but not on the tall `(384,40)` Phase-0 QR proxy.** Two reasons this is still gate-relevant for Track 1 but not a free pass:
 
 1. MINPACK `qrfac.f` does not return an explicit `Q`. It packs the Householder vectors into the strict lower triangle of `A` and returns `(fjac_packed, rdiag, acnorm, ipvt)`. JAX `jax.scipy.linalg.qr` returns explicit `(Q, R, P)`; `jax.lax.linalg` exposes `qr`, `householder_product`, `ormqr` but **no `geqrf` analog** that yields the packed form directly. The packed `fjac` representation that the rest of MINPACK consumes must be reconstructed from JAX outputs, and on `(384,40)` the reconstructed Householder vectors are not guaranteed bit-equal because the explicit Q itself drifts by ~4e-17 versus LAPACK.
 2. The downstream `qrsolv` and `lmpar` subroutines consume `(fjac_packed, ipvt, rdiag, qtb)`, where `qtb = Q^T·fvec`. With Q bit-drifted, `qtb` will bit-drift, and the rest of the byte-equality argument collapses on the `(384,40)` fixture.
 
-The remaining subroutines (`qrsolv` Givens elimination, `lmpar` univariate Newton, `enorm` 3-bucket scaling) all reduce to standard `lax.scan` / `lax.while_loop` / `lax.fori_loop` patterns already used in the existing `_lbfgsb_scipy.py` port — but feasibility of the **end-to-end byte-equal driver on the production fixture** depends on a Phase-0 feasibility gate (§4.2) that proves the MINPACK-packed `(fjac, rdiag, acnorm, ipvt)` tuple plus `qtb` can be made bit-equal to a SciPy/MINPACK oracle on `(384,40)`. **If Phase 0 fails (no two paths agree per §4.2 G0 / §8 Q8), Track 1 is abandoned at the production scope, full stop.** Any re-scope to `m ≈ n` shapes only is a project-charter renegotiation that requires owner sign-off per §8 Q8; it is not a default alternate path and the plan author may not unilaterally re-scope.
+The remaining subroutines (`qrsolv` Givens elimination, `lmpar` univariate Newton, `enorm` 3-bucket scaling) all reduce to standard `lax.scan` / `lax.while_loop` / `lax.fori_loop` patterns already used in the existing `_lbfgsb_scipy.py` port — but feasibility of the **end-to-end byte-equal driver on tall Boozer-class fixtures** depends on a Phase-0 feasibility gate (§4.2) that proves the MINPACK-packed `(fjac, rdiag, acnorm, ipvt)` tuple plus `qtb` can be made bit-equal to a SciPy/MINPACK oracle on a tall proxy such as `(384,40)`. **If Phase 0 fails (no two paths agree per §4.2 G0 / §8 Q8), Track 1 is abandoned at the production scope, full stop.** Any re-scope to `m ≈ n` shapes only is a project-charter renegotiation that requires owner sign-off per §8 Q8; it is not a default alternate path and the plan author may not unilaterally re-scope.
 
 ### 1.3 Prior art (verified by Agent E)
 
@@ -213,7 +213,7 @@ byte-identical port.
 ### 4.1 Why this is no longer a byte-equality spike
 
 Phase 0 proved that the original byte-identical packed-QR route fails on the
-production `(384,40)` shape. The failure magnitude is around `1e-15`, which is
+tall `(384,40)` QR proxy. The failure magnitude is around `1e-15`, which is
 far below the revised `1e-10` tolerance contract but enough to invalidate a
 byte-for-byte MINPACK driver.
 
@@ -235,10 +235,10 @@ through private JAX internals, and does not claim exact internal trace parity.
   resolved method is `lm-minpack-ondevice`.
 - [x] Add direct focused parity tests against SciPy LM and an overdetermined QR
   fixture.
-- [ ] **G3 (~0.5 day)** Run the broader MGH suite. Extend `tests/geo/test_lm_minpack_qr_parity.py` to drive `method="lm-minpack-ondevice"` against `scipy.optimize.least_squares(method="lm")` on the Moré-Garbow-Hillstrom problem set (start with the 5 canonical problems used elsewhere in this plan: Rosenbrock, Helical valley, Powell singular, Brown almost-linear, Beale; extend to the full 18 if all 5 pass). Assert final-state parity at `atol=rtol=1e-10`. Lane: `direct-kernel` extended.
-- [ ] **G4 (~0.5 day)** Run the oversampled BoozerSurface fixture. Drive `method="lm-minpack-ondevice"` through `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)` (the same 384×40 fixture that Phase 0 ran on), assert final-state parity vs CPU MINPACK at `atol=rtol=1e-10`. Lane: `branch-stable-resolve`.
-- [ ] **G5 (~0.25 day)** Measure first-trace compile time on the canonical `(384,40)` fixture. Record value in `PHASE0_G0_REPORT.md` (or sibling file). Owner decision per §8 Q6 if measurement exceeds the 60s target documented in `docs/source/jax_acceptance.rst:101`.
-- [ ] **Recommended bundling**: G3+G4+G5 as a single ~1.5-engineer-day PR that closes Track 1 revised entirely and promotes `lm-minpack-ondevice` from "implemented" to "production-ready". No mid-PR owner sign-off needed unless G5 measurement triggers Q6.
+- [x] **G3 (~0.5 day)** Run the broader MGH starter suite. `tests/geo/test_lm_minpack_qr_parity.py` now drives `method="lm-minpack-ondevice"` against `scipy.optimize.least_squares(method="lm")` on the canonical MGH-5 starter set. Rosenbrock, helical valley, Brown almost-linear, and Beale assert raw final-state + residual parity at `atol=rtol=1e-10`. Powell singular is explicitly classified as non-unique/flat and gates on residual, cost, and first-order optimality instead of raw `x` equality.
+- [x] **G4 (~0.5 day)** Run the BoozerSurface fixtures. `tests/geo/test_lm_minpack_qr_parity.py` now drives `method="lm-minpack-ondevice"` through `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)` and gates the independent endpoint through the `branch-stable-resolve` lane while keeping residual/objective agreement strict. The default under-sampled fixture is retained as a physics-health gate, not a raw-state parity gate.
+- [ ] **G5 (~0.25 day)** Measure first-trace compile time on the current oversampled Boozer fixture from `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)`, whose LM residual/vector shape is `(386,39)` in the live tree. Record value in `PHASE0_G0_REPORT.md` (or sibling file). Owner decision per §8 Q6 if measurement exceeds the 60s target documented in `docs/source/jax_acceptance.rst:101`.
+- [ ] **Remaining promotion gate**: run G5 compile timing on the current oversampled Boozer fixture. No owner sign-off is needed unless G5 measurement triggers Q6.
 
 ### 4.3 Superseded byte-identity spike phases
 
@@ -265,9 +265,9 @@ not active work unless the project later reopens a byte-identical MINPACK port.
 | G0 — tolerance gate | 0 | original byte gate fails, but drift `~1e-15 < 1e-10` | accepted under revised contract |
 | G1 — route executes | 1 | `least_squares_algorithm="lm-minpack"` resolves to `method="lm-minpack-ondevice"` | block route |
 | G2 — direct final-state parity | 2 | focused SciPy LM / linear QR fixtures pass at `atol=rtol=1e-10` | block route |
-| G3 — MGH suite | 3 | broader Moré-Garbow-Hillstrom final-state parity | block release of Track 1 |
-| G4 — BoozerSurface fixture | 4 | oversampled BoozerSurface final-state parity | block production promotion |
-| G5 — compile time | 5 | first-trace timing measured on canonical `(384,40)` fixture | owner decision if too slow |
+| G3 — MGH suite | 3 | regular MGH starter fixtures pass raw final-state/residual parity at `atol=rtol=1e-10`; Powell singular passes residual/cost/optimality classification without raw `x` equality | block release of Track 1; do not extend to MGH-18 without classifying singular/non-unique cases |
+| G4 — BoozerSurface fixture | 4 | oversampled BoozerSurface passes residual/objective strict checks and `branch-stable-resolve` endpoint drift; default under-sampled fixture remains physics-health only | block production promotion if residual/objective or branch-stable endpoint gates fail |
+| G5 — compile time | 5 | first-trace timing measured on the current `(386,39)` residual/vector fixture | owner decision if too slow |
 
 ---
 
@@ -282,7 +282,7 @@ not active work unless the project later reopens a byte-identical MINPACK port.
 
 Recommend **keeping Track 3 deferred indefinitely** unless one of those three benefits becomes a concrete need. Formally retire if the project decides none of them will materialize.
 
-**Estimated effort:** 1–2 weeks if reopened. Should not start until revised Track 1's G3+G4+G5 land and Track 3's priority is re-evaluated against the post-Track-1 state.
+**Estimated effort:** 1–2 weeks if reopened. Should not start until revised Track 1's G5 compile-timing gate lands and Track 3's priority is re-evaluated against the post-Track-1 state.
 
 ### 5.1 Todos (Track 3)
 
@@ -317,7 +317,7 @@ Recommend **keeping Track 3 deferred indefinitely** unless one of those three be
 
 | Level | Definition | Tolerance | Hardware caveat | simsopt lane |
 |---|---|---|---|---|
-| L1 — converged solution | `‖x_minpack - x_jax‖_∞ ≤ rtol·(‖x_minpack‖_∞ + 1)` | `rtol=1e-6, atol=1e-10` (well-cond), `rtol=1e-4, atol=1e-8` (ill-cond) | Portable CPU/GPU/cross-machine | `branch-stable-resolve` / `fd-gradient` |
+| L1 — converged solution | `‖x_minpack - x_jax‖_∞ ≤ rtol·(‖x_minpack‖_∞ + 1)` only when the minimizer is identifiable; otherwise compare residual/cost/optimality | `rtol=1e-6, atol=1e-10` (well-cond), residual/cost/optimality for singular/flat cases | Portable CPU/GPU/cross-machine; raw `x` is not meaningful on non-unique solution manifolds | `branch-stable-resolve` / singular-case classification |
 | L2 — path length + termination | `niter, info, nfev` exact match (nfev ±1 allowance) | exact int match | Same algorithm only; CPU↔GPU tie-breaks may fail | `branch-stable-resolve` audit field |
 | L3 — iteration trace within ε_mach | per-iter `(x, fnorm, delta, par, ratio, info)` agree | `rtol=1e-12, atol=1e-14` in double | Same machine only; CPU↔GPU fails by design | `direct-kernel` extended |
 | L4 — byte-equality | every fp64 bit matches | bitwise | Single host + same BLAS + same compile flags; impossible CPU↔GPU | `direct-kernel` state-parity sub-lane |
@@ -347,10 +347,10 @@ For guaranteed host trace dumps, use `jax.experimental.io_callback(callback, res
 | Suite | Cold compile | Warm |
 |---|---|---|
 | Track 2 termination + damping tests | already landed; keep in focused regression slice | +2s |
-| Track 1 direct QR parity tests | current focused suite, 4 tests | +5s |
-| Track 1 G3 MGH-1981 final-state suite | measure in G3; expected to dominate CPU validation | TBD |
-| Track 1 G4 oversampled BoozerSurface fixture | measure in G4; same production `(384,40)` shape as Phase 0 | TBD |
-| Track 1 G5 first-trace timing | one measured cold compile on canonical `(384,40)` fixture | required before production promotion |
+| Track 1 direct QR/MGH/Boozer parity tests | current focused suite, 11 tests including slow Boozer fixtures | measured locally |
+| Track 1 G3 MGH-1981 starter suite | covered by regular-case final-state gates plus Powell singular classification | focused tests |
+| Track 1 G4 oversampled BoozerSurface fixture | covered by the current `(386,39)` residual/vector fixture | focused slow test |
+| Track 1 G5 first-trace timing | one measured cold compile on the current `(386,39)` residual/vector fixture | required before production promotion |
 | Track 3 Optimistix parity | deferred; not part of current CI budget | n/a |
 
 The old subroutine-oracle, per-iteration trace, and GPU Track 1 rows belonged to the abandoned byte-identical MINPACK port. They are inactive unless that project is explicitly reopened.
@@ -475,7 +475,7 @@ Plus a third independent Crucible review pass (2026-05-16, 4 parallel discovery 
 - **MAJOR**: Front-matter "Track 1 spike through G5: 1–3 days cumulative" contradicted the §4.2 phase-duration sum (~8.5 days). Replaced with a per-phase breakdown.
 - **MAJOR**: §5.1 listed `optimistix` as a required dep, pre-empting §8 Q4 owner decision. Reframed as conditional on Q4 default-optional-until-decided.
 - **MAJOR**: `dgeqpf` was cited as a G0-fail alternate target; `dgeqpf` is the deprecated Level-2 BLAS predecessor of `dgeqp3`. SciPy and JAX both call `dgeqp3`, so `dgeqpf` would guarantee losing byte-equality. Corrected to `dgeqp3` and incorporated as Path C (XLA custom call) in Phase 0.
-- **MAJOR**: "Re-scope to m≈n only" was offered as a G0-fail default; m≈n shapes have no production payoff because the BoozerSurface fixture is 384×40 (m≫n). Removed the default; re-scope now requires owner sign-off via new §8 Q8.
+- **MAJOR**: "Re-scope to m≈n only" was offered as a G0-fail default; m≈n shapes have no production payoff because the BoozerSurface fixture is tall (`m≫n`; the current oversampled fixture is `(386,39)`). Removed the default; re-scope now requires owner sign-off via new §8 Q8.
 - **MAJOR**: Phase 0 omitted Path C (direct LAPACK `dgeqp3` FFI). Added as the strongest-bit-equality candidate path with build-system tradeoff documented.
 - **MAJOR**: L3 success criterion on (384,40) was hard-asserted in §0 but Phase 5 G6 allows L3 failure. Reconciled: L3 on (384,40) is now explicitly aspirational, L3 on MGH-5 m≈n subset is the targeted contract.
 - **MAJOR**: G0 acceptance was disjunctive (Path A OR B passes). Tightened to conjunctive (≥ 2 paths must agree) for downstream-risk reduction.
@@ -517,7 +517,7 @@ Plus a third independent Crucible review pass (2026-05-16, 4 parallel discovery 
 - [x] Owner decisions Q1-Q3, Q5, and Q7-Q8 resolved by rev 5.
 - [ ] Q4 remains open only if Track 3 is reopened; default is optional-extra only unless Python/JAX floors change.
 - [ ] Q6 remains open pending G5 compile-time measurement.
-- [ ] Allocate engineering time for G3+G4+G5 if revised Track 1 should be promoted to production-ready.
+- [ ] Allocate engineering time for G5 if revised Track 1 should be promoted to production-ready.
 
 ### Track 2 — termination + damping retrofit
 
@@ -545,9 +545,9 @@ Plus a third independent Crucible review pass (2026-05-16, 4 parallel discovery 
 - [x] Route BoozerSurfaceJAX LS paths through the new method
 - [x] Add focused direct SciPy/QR parity tests
 - [x] Update optimizer and acceptance docs
-- [ ] Run broader Moré-Garbow-Hillstrom final-state parity suite
-- [ ] Run oversampled BoozerSurface fixture
-- [ ] Measure first-trace compile time on `(384,40)`
+- [x] Run broader Moré-Garbow-Hillstrom starter parity suite with singular-case classification
+- [x] Run oversampled BoozerSurface fixture with branch-stable residual/objective gates
+- [ ] Measure first-trace compile time on the current `(386,39)` residual/vector fixture
 
 ### Track 3 — Optimistix + Lineax LSMR (deferred)
 

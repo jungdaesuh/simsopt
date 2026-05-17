@@ -3083,6 +3083,7 @@ def test_release_gate_markdown_report_includes_required_summary_tables():
 def test_parity_ladder_tolerances_capture_precision_lanes():
     expected_lanes = {
         "direct_kernel",
+        "relaxed_kernel",
         "ls_wrapper_gradient",
         "derivative_heavy",
         "direct_hessian_oracle",
@@ -3106,6 +3107,11 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert direct["rtol"] == pytest.approx(1e-10)
     assert direct["atol"] == pytest.approx(1e-12)
     assert direct["requires_direct_cpp_oracle"] is True
+
+    relaxed = parity_ladder_tolerances("relaxed-kernel")
+    assert relaxed["rtol"] == pytest.approx(1e-6)
+    assert relaxed["atol"] == pytest.approx(1e-8)
+    assert relaxed["documents_reduction_order_drift"] is True
 
     ls_wrapper = parity_ladder_tolerances("ls-wrapper-gradient")
     assert ls_wrapper["rtol"] == pytest.approx(1e-10)
