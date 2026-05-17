@@ -1,4 +1,6 @@
 #include "wireframe_optimization.h"
+#include <algorithm>
+#include <iterator>
 #include <limits> // std
 #include <vector>
 using std::vector;
@@ -151,7 +153,7 @@ std::tuple<Array,IntArray,IntArray,Array,IntArray,Array,Array,Array> GSCO(
 
     // Initial history values
     int hist_ind = 0;
-    int opt_ind_prev;
+    int opt_ind_prev = -1;
     double two_f_B_latest = 0.0;
     for (int i = 0; i < nGrid; ++i) {
         two_f_B_latest += Ax_minus_b(i,0) * Ax_minus_b(i,0);
@@ -175,15 +177,13 @@ std::tuple<Array,IntArray,IntArray,Array,IntArray,Array,Array,Array> GSCO(
     vector<int> eligible_inds(twoNLoops, 0);
     int* eligible_inds_ptr = &(eligible_inds[0]);
 
-    // Initialize flags for stopping conditions
-    bool accept_current_loop = true;
-    bool stop_now = false; 
-    bool stop_none_eligible = false; 
-    bool stop_undone_loop = false;
-    bool stop_last_iter = false;
-
     // Greedy iterations
     for (int i = 0; i < nIter; ++i) {
+        bool accept_current_loop = true;
+        bool stop_now = false;
+        bool stop_none_eligible = false;
+        bool stop_undone_loop = false;
+        bool stop_last_iter = false;
 
         // Determine which loops are eligible for optimization
         check_eligibility(nLoops, default_current, max_current, max_loop_count,
@@ -267,7 +267,7 @@ std::tuple<Array,IntArray,IntArray,Array,IntArray,Array,Array,Array> GSCO(
             stop_none_eligible = true;
             accept_current_loop = false;
         }
-        else if (i > 0 && (opt_ind + nLoops % (twoNLoops)) == opt_ind_prev) {
+        else if (i > 0 && ((opt_ind + nLoops) % twoNLoops) == opt_ind_prev) {
             stop_undone_loop = true;
             if (two_fs[opt_ind] > two_f_latest) {
                 accept_current_loop = false;
@@ -534,5 +534,3 @@ void check_eligibility(int nLoops, double default_current, double max_current,
     }
 
 }
-
-
