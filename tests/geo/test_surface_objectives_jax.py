@@ -96,6 +96,24 @@ def _assert_primal_value_with_nonfinite_gradient(value, grad, expected_value):
     _assert_nonfinite_gradient(grad)
 
 
+@pytest.mark.parametrize(
+    "candidate_value",
+    [
+        jnp.asarray(np.nan, dtype=jnp.float64),
+        jnp.asarray(np.inf, dtype=jnp.float64),
+        jnp.asarray(-np.inf, dtype=jnp.float64),
+        jnp.asarray(99.0, dtype=jnp.float64),
+    ],
+)
+def test_traceable_rejected_objective_value_uses_reference_value(candidate_value):
+    rejected_value = surfaceobjectives_jax_module._traceable_rejected_objective_value(
+        candidate_value,
+        jnp.asarray(1.25, dtype=jnp.float64),
+    )
+
+    np.testing.assert_allclose(np.asarray(rejected_value), np.asarray(2.5))
+
+
 def _reject_coil_dofs_gradient_to_derivative(*_args):
     raise AssertionError("native gradient should not project to Derivative")
 
@@ -1625,7 +1643,7 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
         "_evaluate_traceable_total_objective",
-        lambda *_args, **_kwargs: jnp.asarray(1.0, dtype=jnp.float64),
+        lambda *_args, **_kwargs: jnp.asarray(np.nan, dtype=jnp.float64),
     )
 
     booz = types.SimpleNamespace(
@@ -1648,6 +1666,7 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
         lambda coil_dofs: coil_dofs,
         coil_dofs=jnp.asarray([1.0, -2.0], dtype=jnp.float64),
         baseline_x=baseline_x,
+        baseline_value=jnp.asarray(10.0, dtype=jnp.float64),
         baseline_linear_solve_factors=None,
         linearization_kind="exact_jacobian",
         linear_solve_tol=1.0e-10,
@@ -1662,7 +1681,7 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
     assert bool(result["success"]) is False
     assert bool(result["primal_success"]) is False
     assert bool(result["adjoint_linear_solve_available"]) is False
-    np.testing.assert_allclose(np.asarray(result["value"]), np.asarray(2.0))
+    np.testing.assert_allclose(np.asarray(result["value"]), np.asarray(20.0))
     np.testing.assert_allclose(
         np.asarray(result["x"]),
         np.asarray(baseline_x + failed_dx),
@@ -1821,7 +1840,7 @@ def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_sta
             x[-1],
             None,
         ),
-        run_code_traceable=lambda coil_set_spec, warmstart_sdofs, warmstart_iota, warmstart_G: {
+        run_code_traceable=lambda coil_set_spec, warmstart_sdofs, warmstart_iota, warmstart_G, **_kwargs: {
             "x": jnp.concatenate(
                 (
                     warmstart_sdofs + 1.0,
@@ -2324,6 +2343,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         label_type = "iota"
         phi_idx = 0
         need_to_run_code = False
+        _traceable_solve_state_token = "solve-token"
 
         def _resolve_optimizer_method(self):
             return "lbfgs-ondevice"
@@ -2350,6 +2370,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
 
     class _FakeBS:
         x = np.asarray([0.2, -0.1], dtype=np.float64)
+        _coil_dof_state_token = "coil-dof-token"
 
         def coil_dof_extraction_spec(self):
             return {
@@ -2389,7 +2410,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         np.ndarray,
     )
     assert isinstance(state["baseline_x"], np.ndarray)
-    assert isinstance(state["baseline_linear_solve_factors"][0], np.ndarray)
+    assert state["baseline_linear_solve_factors"] is None
     assert isinstance(state["baseline_coil_dofs"], np.ndarray)
 
 
@@ -2453,6 +2474,7 @@ def test_build_traceable_objective_state_exact_carries_no_factors(monkeypatch):
         label_type = "iota"
         phi_idx = 0
         need_to_run_code = False
+        _traceable_solve_state_token = "solve-token"
 
         def _linear_solve_tolerance(self):
             return 1.0e-10
@@ -2476,6 +2498,7 @@ def test_build_traceable_objective_state_exact_carries_no_factors(monkeypatch):
 
     class _FakeBS:
         x = np.asarray([0.2, -0.1], dtype=np.float64)
+        _coil_dof_state_token = "coil-dof-token"
 
         def coil_dof_extraction_spec(self):
             return {
@@ -4129,6 +4152,68 @@ def test_traceable_compiled_bundle_general_only_forward_avoids_public_same_coils
     np.testing.assert_allclose(np.asarray(grad), np.ones(2, dtype=np.float64))
 
 
+@pytest.mark.parametrize("primal_success", [True, False])
+def test_traceable_value_and_grad_rejected_candidate_uses_baseline_gradient(
+    monkeypatch,
+    primal_success,
+):
+    baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+    state = {
+        "objective_kwargs": {},
+        "baseline_x": jnp.asarray([1.0, -1.0], dtype=jnp.float64),
+        "baseline_value": jnp.asarray(1.25, dtype=jnp.float64),
+        "baseline_linear_solve_factors": None,
+        "baseline_coil_dofs": baseline_coil_dofs,
+        "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
+        "optimize_G": False,
+        "predictor_kind": "none",
+        "linearization_kind": "hessian",
+        "linear_solve_tol": 1.0e-10,
+        "linear_solve_stab": 0.0,
+    }
+
+    def fake_forward_result(_booz_jax, _coil_set_spec_from_dofs, **_kwargs):
+        return {
+            "value": jnp.asarray(2.5, dtype=jnp.float64),
+            "x": jnp.asarray([4.0, -4.0], dtype=jnp.float64),
+            "sdofs": jnp.asarray([4.0], dtype=jnp.float64),
+            "iota": jnp.asarray(-4.0, dtype=jnp.float64),
+            "G": None,
+            "linear_solve_factors": None,
+            "success": jnp.asarray(False, dtype=bool),
+            "primal_success": jnp.asarray(primal_success, dtype=bool),
+            "adjoint_linear_solve_available": jnp.asarray(True, dtype=bool),
+        }
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_forward_result",
+        fake_forward_result,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_total_gradient_with_status",
+        lambda _booz_jax, _coil_set_spec_from_dofs, **kwargs: (
+            2.0 * kwargs["coil_dofs"],
+            jnp.asarray(True, dtype=bool),
+        ),
+    )
+
+    bundle = surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+        object(),
+        state,
+    )
+    value, grad = bundle["compiled_value_and_grad_for"](
+        jnp.asarray([9.0, -8.0], dtype=jnp.float64)
+    )
+
+    np.testing.assert_allclose(np.asarray(value), 2.5)
+    np.testing.assert_allclose(
+        np.asarray(grad),
+        2.0 * np.asarray(baseline_coil_dofs),
+    )
+
+
 def test_host_boundary_with_baseline_peel_falls_through_for_traced_inputs():
     baseline = np.asarray([1.0, 2.0], dtype=np.float64)
     wrapped = surfaceobjectives_jax_module._host_boundary_with_baseline_peel(
@@ -4345,6 +4430,11 @@ def test_traceable_custom_vjp_surfaces_adjoint_solve_failure_as_nan_gradient():
             failed_gradient,
             jnp.asarray(False, dtype=bool),
         ),
+        "state": {
+            "baseline_coil_dofs": jnp.asarray([0.5, -0.25], dtype=jnp.float64),
+            "baseline_x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            "baseline_linear_solve_factors": None,
+        },
     }
     objective = (
         surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
@@ -4354,6 +4444,40 @@ def test_traceable_custom_vjp_surfaces_adjoint_solve_failure_as_nan_gradient():
 
     grad = jax.grad(objective)(jnp.asarray([0.5, -0.25], dtype=jnp.float64))
     _assert_nonfinite_gradient(grad)
+
+
+def test_traceable_custom_vjp_rejected_candidate_uses_baseline_gradient():
+    baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+
+    def compiled_forward_result_for(coil_dofs):
+        return {
+            "value": jnp.asarray(2.5, dtype=jnp.float64),
+            "x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            "linear_solve_factors": None,
+            "success": jnp.asarray(False, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+        }
+
+    compiled_bundle = {
+        "compiled_forward_result_for": compiled_forward_result_for,
+        "compiled_total_gradient_for": lambda coil_dofs, *_args: (
+            2.0 * coil_dofs,
+            jnp.asarray(True, dtype=bool),
+        ),
+        "state": {
+            "baseline_coil_dofs": baseline_coil_dofs,
+            "baseline_x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            "baseline_linear_solve_factors": None,
+        },
+    }
+    objective = (
+        surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
+            compiled_bundle
+        )
+    )
+
+    grad = jax.grad(objective)(jnp.asarray([9.0, -8.0], dtype=jnp.float64))
+    np.testing.assert_allclose(np.asarray(grad), 2.0 * np.asarray(baseline_coil_dofs))
 
 
 def test_traceable_inner_stationarity_coil_jvp_matches_full_stationarity_jvp(

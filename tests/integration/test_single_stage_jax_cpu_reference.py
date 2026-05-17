@@ -7748,6 +7748,11 @@ class TestTraceableObjective:
                 success_filter=reject_all_success_filter,
             )
         )
+        baseline_value = runtime_bundle["objective"](
+            coil_dofs,
+            multipliers,
+            penalty,
+        )
         perturbed_coil_dofs = coil_dofs.at[0].set(jnp.nextafter(coil_dofs[0], jnp.inf))
         evaluation = runtime_bundle["evaluate"](
             perturbed_coil_dofs,
@@ -7759,9 +7764,18 @@ class TestTraceableObjective:
             multipliers,
             penalty,
         )
+        value_vg, grad = runtime_bundle["value_and_grad"](
+            perturbed_coil_dofs,
+            multipliers,
+            penalty,
+        )
 
         assert not bool(np.asarray(jax.device_get(evaluation["success"])))
-        assert np.isfinite(float(np.asarray(jax.device_get(value))))
+        assert float(np.asarray(jax.device_get(value))) > float(
+            np.asarray(jax.device_get(baseline_value))
+        )
+        assert np.isfinite(float(np.asarray(jax.device_get(value_vg))))
+        assert np.all(np.isfinite(np.asarray(jax.device_get(grad), dtype=float)))
 
     def test_traceable_single_stage_alm_runtime_bundle_reports_host_base_total(
         self,
