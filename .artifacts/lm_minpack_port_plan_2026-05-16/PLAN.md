@@ -301,6 +301,10 @@ Recommend **keeping Track 3 experimental/diagnostic** unless one of those three 
 
 **Executed scope:** CPU implementation, route tests, direct solver tests, oversampled Boozer objective/residual-norm check, and default-fixture experimental non-promotion check. CUDA/GPU lane skipped per objective.
 
+**Track 3 artifacts:** `TRACK3_CPU_DIAGNOSTIC.md` records the CPU diagnostic
+result, and `TRACK3_OPTIMISTIX_CONTRACT.md` records the accepted inputs,
+rejected inputs, result-field meanings, and diagnostic/non-promotion contract.
+
 ### 5.1 Todos (Track 3)
 
 - [x] Add `optimistix`, `lineax`, and direct `equinox` floor to `pyproject.toml` as optional extra `JAX_OPTIMISTIX` only. Current installed package metadata reports Optimistix/Lineax `Requires-Python ~=3.11`, while this repo still advertises `requires-python = ">=3.8"` with Python 3.8-3.11 classifiers. Making Track 3 required today would be a downstream packaging regression.
