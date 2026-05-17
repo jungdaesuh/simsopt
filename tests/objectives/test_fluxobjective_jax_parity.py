@@ -3,7 +3,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import NamedTuple
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+_TESTS_ROOT = _REPO_ROOT / "tests"
+if str(_TESTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TESTS_ROOT))
+
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(_REPO_ROOT / "src")
 
 import jax
 import jax.numpy as jnp
@@ -26,6 +38,7 @@ from simsopt.jax_core import (
     fixed_surface_flux_specs_from_surface,
     make_fixed_surface_flux_spec,
 )
+from simsopt.jax_core.objectives_flux import _fixed_surface_target_array
 from simsopt.objectives.fluxobjective import SquaredFlux
 from simsopt.objectives.fluxobjective_jax import (
     SquaredFluxJAX,
@@ -87,6 +100,9 @@ class _FixedGeometryCurrentFluxCase(NamedTuple):
     gammas: object
     gammadashs: object
     currents: object
+    base_currents: object
+    base_current_indices: object
+    current_scales: object
     flux_spec: object
     coils: object
     surface: SurfaceRZFourier
@@ -380,6 +396,27 @@ def test_fluxobjective_value_parity(definition):
     _assert_flux_value_parity(objective_jax.J(), objective_cpu.J())
 
 
+def test_fixed_surface_target_none_ignores_nan_normals():
+    normal = jnp.asarray(
+        [
+            [[jnp.nan, 0.0, 0.0], [1.0, 2.0, 3.0]],
+            [[-1.0, 0.5, 0.25], [jnp.nan, jnp.nan, jnp.nan]],
+        ],
+        dtype=jnp.float64,
+    )
+
+    with jax.transfer_guard("disallow"):
+        target = _fixed_surface_target_array(normal, None)
+
+    np.testing.assert_allclose(
+        np.asarray(target),
+        np.zeros(normal.shape[:-1], dtype=np.float64),
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert np.isfinite(np.asarray(target)).all()
+
+
 @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
 def test_fluxobjective_gradient_parity(definition):
     objective_cpu, objective_jax = _make_native_flux_objectives(definition)
@@ -422,6 +459,14 @@ def _fixed_geometry_current_flux_case():
     groups = bs_jax.grouped_coil_arrays_from_dofs(coil_dofs)
     assert len(groups) == 1
     gammas, gammadashs, currents = groups[0]
+    base_current_indices = np.asarray(
+        [desc[1] for desc in bs_jax._coil_descs],
+        dtype=np.int64,
+    )
+    current_scales = np.asarray(
+        [desc[3] for desc in bs_jax._coil_descs],
+        dtype=np.float64,
+    )
     field_eval_spec, flux_spec = fixed_surface_flux_specs_from_surface(
         surface,
         definition="quadratic flux",
@@ -431,10 +476,23 @@ def _fixed_geometry_current_flux_case():
         gammas=gammas,
         gammadashs=gammadashs,
         currents=currents,
+        base_currents=tuple(bs_jax._unique_base_currents),
+        base_current_indices=base_current_indices,
+        current_scales=current_scales,
         flux_spec=flux_spec,
         coils=coils,
         surface=surface,
     )
+
+
+def _symmetry_expanded_current_gradient_to_base(case, expanded_gradient):
+    base_gradient = np.zeros(len(case.base_currents), dtype=np.float64)
+    np.add.at(
+        base_gradient,
+        case.base_current_indices,
+        np.asarray(expanded_gradient, dtype=np.float64) * case.current_scales,
+    )
+    return base_gradient
 
 
 def test_coil_current_fixed_geometry_flux_matches_cpu_squaredflux_oracle():
@@ -508,6 +566,51 @@ def test_coil_current_fixed_geometry_value_and_grad_matches_finite_difference():
         np.asarray(finite_difference),
         rtol=_FD_GRADIENT_TOLS["directional_fd_rtol"],
         atol=_FD_GRADIENT_TOLS["directional_fd_atol"],
+    )
+
+
+def test_coil_current_fixed_geometry_value_and_grad_matches_cpu_squaredflux_current_dj():
+    """Current-gradient helper must match CPU ``SquaredFlux.dJ()`` directly.
+
+    Oracle: type 1 — CPU ``SquaredFlux.dJ(partials=True)`` uses the C++
+    ``BiotSavart.B_vjp`` reference after the hand-coded flux derivative.
+    The JAX helper differentiates expanded symmetry-current values, so its
+    gradient is pulled back through the same symmetry scales before comparing
+    against the four base ``Current`` derivative blocks.
+    Lane: parity, derivative-heavy first-derivative tolerance.
+    """
+    case = _fixed_geometry_current_flux_case()
+    actual_value, expanded_current_gradient = (
+        coil_current_fixed_geometry_value_and_grad_jax(
+            case.points,
+            case.gammas,
+            case.gammadashs,
+            case.currents,
+            case.flux_spec,
+        )
+    )
+    actual_base_current_gradient = _symmetry_expanded_current_gradient_to_base(
+        case,
+        expanded_current_gradient,
+    )
+
+    bs_cpu = BiotSavart(case.coils)
+    bs_cpu.set_points(case.surface.gamma().reshape((-1, 3)))
+    objective_cpu = SquaredFlux(case.surface, bs_cpu, definition="quadratic flux")
+    expected_value = objective_cpu.J()
+    expected_partials = objective_cpu.dJ(partials=True)
+    expected_base_current_gradient = np.asarray(
+        [
+            np.asarray(expected_partials.data[current], dtype=np.float64)[0]
+            for current in case.base_currents
+        ],
+        dtype=np.float64,
+    )
+
+    _assert_flux_value_parity(np.asarray(actual_value), np.asarray(expected_value))
+    _assert_flux_gradient_parity(
+        actual_base_current_gradient,
+        expected_base_current_gradient,
     )
 
 
@@ -644,7 +747,11 @@ def test_singular_zero_field_contract(definition):
     )
 
     assert np.isinf(value)
-    np.testing.assert_allclose(np.asarray(grad), np.zeros((1, 3)), atol=0.0)
+    grad_array = np.asarray(grad)
+    if definition == "local":
+        assert not np.isfinite(grad_array).any()
+    else:
+        np.testing.assert_allclose(grad_array, np.zeros((1, 3)), atol=0.0)
 
 
 @pytest.mark.parametrize("definition", ("normalized", "local"))

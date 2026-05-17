@@ -43,6 +43,24 @@ processors.
 
 The tests make use of data files in the :simsopt:`tests/test_files` directory.
 
+Source-tree validation
+**********************
+
+In mixed workspaces with sibling ``simsopt*`` repositories or older editable
+installs, ad hoc Python probes can import the wrong ``simsopt`` package or a
+foreign ``simsoptpp`` extension. Pin source-tree validation to this checkout
+before importing ``simsopt`` modules:
+
+.. code-block:: python
+
+    from repo_bootstrap import bootstrap_local_simsopt
+
+    bootstrap_local_simsopt("src")
+
+The pytest suite already performs this bootstrap in ``tests/conftest.py``.
+Use the same helper in standalone probes so validation results correspond to
+the working tree under review.
+
 Modular testing
 ***************
 

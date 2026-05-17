@@ -30,6 +30,7 @@ from .surface_rzfourier import (
     surface_rz_fourier_normal_from_spec,
 )
 from ..objectives.integral_bdotn_jax import (
+    _nan_safe_zero_grid,
     integral_BdotN as integral_BdotN_jax,
     residual_BdotN as residual_BdotN_jax,
 )
@@ -37,8 +38,7 @@ from ..objectives.integral_bdotn_jax import (
 
 def _fixed_surface_target_array(normal, target):
     if target is None:
-        zero_target = jnp.sum(normal, axis=-1)
-        return zero_target - zero_target
+        return _nan_safe_zero_grid(normal, normal.dtype)
     return _as_jax_float64(target)
 
 
@@ -92,8 +92,7 @@ def fixed_surface_geometry_from_surface(surface):
     if callable(surface_spec_fn):
         return fixed_surface_geometry_from_spec(surface_spec_fn())
     raise NotImplementedError(
-        "SquaredFluxJAX fixed-surface setup requires a surface exposing "
-        "surface_spec()."
+        "SquaredFluxJAX fixed-surface setup requires a surface exposing surface_spec()."
     )
 
 

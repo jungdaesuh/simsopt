@@ -11,9 +11,18 @@ import math
 from pathlib import Path
 import sys
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(_REPO_ROOT / "src")
+
 import pytest
 import numpy as np
 
+import jax
 import jax.numpy as jnp
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
@@ -30,9 +39,15 @@ from conftest import (
     parity_rng,
 )
 
-from simsopt.objectives.integral_bdotn_jax import integral_BdotN, signed_BdotN_flux
+from simsopt.objectives.integral_bdotn_jax import (
+    integral_BdotN,
+    residual_BdotN,
+    signed_BdotN_flux,
+)
 
 _FD_GRADIENT_TOLS = parity_ladder_tolerances("fd-gradient")
+_DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
+_DEFINITIONS = ("quadratic flux", "normalized", "local")
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +82,49 @@ def _numpy_integral_BdotN(B, target, normal, definition):
     elif definition == "local":
         B2 = np.sum(B**2, axis=-1)
         return 0.5 * np.sum(BdotN**2 / B2 * norm_n) / (nphi * ntheta)
+
+
+def _numpy_residual_BdotN(B, target, normal, definition):
+    """Closed-form NumPy per-point residual oracle."""
+    nphi, ntheta, _ = B.shape
+    norm_n = np.sqrt(np.sum(normal * normal, axis=-1))
+    has_normal = norm_n > 0.0
+    safe_norm_n = np.where(has_normal, norm_n, 1.0)
+    unit_n = np.where(has_normal[..., None], normal / safe_norm_n[..., None], 0.0)
+    BdotN = np.sum(B * unit_n, axis=-1) - target
+
+    if definition == "quadratic flux":
+        weight = np.where(has_normal, norm_n / (nphi * ntheta), 0.0)
+        residual = np.where(has_normal, BdotN * np.sqrt(weight), 0.0)
+    elif definition == "normalized":
+        B2 = np.sum(B * B, axis=-1)
+        denominator = np.sum(B2 * norm_n)
+        safe_denominator = denominator if denominator > 0.0 else 1.0
+        point_weight = np.where(has_normal, norm_n / safe_denominator, 0.0)
+        residual = np.where(
+            denominator > 0.0,
+            np.where(has_normal, BdotN * np.sqrt(point_weight), 0.0),
+            np.full_like(BdotN, np.inf),
+        )
+    elif definition == "local":
+        B2 = np.sum(B * B, axis=-1)
+        singular = has_normal & (B2 <= 0.0)
+        safe_B2 = np.where(B2 > 0.0, B2, 1.0)
+        weight = np.where(has_normal, norm_n / (safe_B2 * (nphi * ntheta)), 0.0)
+        invalid_residual = np.reciprocal(np.where(singular, B2, np.ones_like(B2)))
+        residual = np.where(
+            singular,
+            invalid_residual,
+            np.where(has_normal, BdotN * np.sqrt(weight), 0.0),
+        )
+    else:
+        raise ValueError(f"Unknown definition: {definition!r}")
+    return np.ravel(residual)
+
+
+def _numpy_signed_BdotN_flux(B, normal):
+    nphi, ntheta, _ = B.shape
+    return np.sum(np.sum(B * normal, axis=-1)) / (nphi * ntheta)
 
 
 def _normalized_reduction_stress_data():
@@ -110,14 +168,7 @@ def _closed_torus_normals(nphi=24, ntheta=32):
 class TestIntegralBdotN:
     """Test all three definitions against NumPy reference."""
 
-    @pytest.mark.parametrize(
-        "definition",
-        [
-            "quadratic flux",
-            "normalized",
-            "local",
-        ],
-    )
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
     def test_parity_with_target(self, definition):
         B, target, normal = _make_test_data()
         J_jax = host_scalar(integral_BdotN(B, target, normal, definition))
@@ -126,14 +177,7 @@ class TestIntegralBdotN:
         )
         np.testing.assert_allclose(J_jax, J_ref, rtol=1e-13)
 
-    @pytest.mark.parametrize(
-        "definition",
-        [
-            "quadratic flux",
-            "normalized",
-            "local",
-        ],
-    )
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
     def test_parity_zero_target(self, definition):
         B, _, normal = _make_test_data()
         target = jnp.zeros(B.shape[:2])
@@ -167,6 +211,21 @@ class TestIntegralBdotN:
         )
         assert magnitude_flux > 0.0
 
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
+    def test_residual_matches_closed_form_numpy_per_point_oracle(self, definition):
+        B, target, normal = _make_test_data(nphi=5, ntheta=7, seed=221)
+        actual = host_array(residual_BdotN(B, target, normal, definition))
+        expected = _numpy_residual_BdotN(
+            host_array(B), host_array(target), host_array(normal), definition
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-15)
+
+    def test_signed_flux_matches_closed_form_numpy_oracle(self):
+        B, _, normal = _make_test_data(nphi=5, ntheta=7, seed=223)
+        actual = host_scalar(signed_BdotN_flux(B, normal))
+        expected = _numpy_signed_BdotN_flux(host_array(B), host_array(normal))
+        np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-15)
+
     def test_zero_when_B_tangential(self):
         """If B is tangential to the surface (B·n = 0), flux should be zero."""
         nphi, ntheta = 8, 10
@@ -195,6 +254,130 @@ class TestIntegralBdotN:
         B, target, normal = _make_test_data()
         with pytest.raises(ValueError, match="Unknown definition"):
             integral_BdotN(B, target, normal, "invalid")
+
+    def test_target_shape_mismatch_raises(self):
+        B = jnp.ones((1, 1, 3), dtype=jnp.float64)
+        target = jnp.ones((5, 7), dtype=jnp.float64)
+        normal = jnp.ones((1, 1, 3), dtype=jnp.float64)
+
+        with pytest.raises(ValueError, match="target.shape must match"):
+            integral_BdotN(B, target, normal, "quadratic flux")
+
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
+    def test_empty_target_matches_zero_target_contract(self, definition):
+        B, _, normal = _make_test_data(nphi=5, ntheta=7, seed=281)
+        empty_target = jnp.asarray([], dtype=jnp.float64)
+        zero_target = jnp.zeros(B.shape[:2], dtype=jnp.float64)
+
+        with jax.transfer_guard("disallow"):
+            actual_device = integral_BdotN(B, empty_target, normal, definition)
+        actual = host_scalar(actual_device)
+        expected = host_scalar(integral_BdotN(B, zero_target, normal, definition))
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-15)
+
+    def test_bcoil_shape_mismatch_raises(self):
+        B = jnp.ones((2, 3, 1), dtype=jnp.float64)
+        target = jnp.zeros((2, 3), dtype=jnp.float64)
+        normal = jnp.ones((2, 3, 3), dtype=jnp.float64)
+
+        with pytest.raises(ValueError, match="Bcoil must have shape"):
+            residual_BdotN(B, target, normal, "quadratic flux")
+        with pytest.raises(ValueError, match="Bcoil must have shape"):
+            integral_BdotN(B, target, normal, "quadratic flux")
+        with pytest.raises(ValueError, match="Bcoil must have shape"):
+            signed_BdotN_flux(B, normal)
+
+    def test_normal_shape_mismatch_raises(self):
+        B = jnp.ones((2, 3, 3), dtype=jnp.float64)
+        target = jnp.zeros((2, 3), dtype=jnp.float64)
+        normal = jnp.ones((1, 1, 3), dtype=jnp.float64)
+
+        with pytest.raises(ValueError, match="normal.shape must match"):
+            residual_BdotN(B, target, normal, "quadratic flux")
+        with pytest.raises(ValueError, match="normal.shape must match"):
+            integral_BdotN(B, target, normal, "quadratic flux")
+        with pytest.raises(ValueError, match="normal.shape must match"):
+            signed_BdotN_flux(B, normal)
+
+    def test_float32_public_kernel_contract_preserves_dtype(self):
+        B = jnp.ones((2, 3, 3), dtype=jnp.float32)
+        target = jnp.zeros((2, 3), dtype=jnp.float32)
+        normal = jnp.ones((2, 3, 3), dtype=jnp.float32)
+
+        residual = residual_BdotN(B, target, normal, "quadratic flux")
+        objective = integral_BdotN(B, target, normal, "quadratic flux")
+        signed_flux = signed_BdotN_flux(B, normal)
+
+        assert residual.dtype == jnp.float32
+        assert objective.dtype == jnp.float32
+        assert signed_flux.dtype == jnp.float32
+
+    def test_complex_public_kernel_contract_raises(self):
+        B = jnp.ones((2, 3, 3), dtype=jnp.complex64)
+        target = jnp.zeros((2, 3), dtype=jnp.float32)
+        normal = jnp.ones((2, 3, 3), dtype=jnp.float32)
+
+        with pytest.raises(ValueError, match="Bcoil must be real-valued"):
+            residual_BdotN(B, target, normal, "quadratic flux")
+        with pytest.raises(ValueError, match="Bcoil must be real-valued"):
+            integral_BdotN(B, target, normal, "quadratic flux")
+        with pytest.raises(ValueError, match="Bcoil must be real-valued"):
+            signed_BdotN_flux(B, normal)
+
+    @pytest.mark.parametrize("shape", [(0, 3), (2, 0), (0, 0)])
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
+    def test_empty_mesh_scalar_objective_matches_cpp_boundary_contract(
+        self, shape, definition
+    ):
+        B = jnp.zeros((*shape, 3), dtype=jnp.float64)
+        target = jnp.zeros(shape, dtype=jnp.float64)
+        normal = jnp.zeros((*shape, 3), dtype=jnp.float64)
+
+        value = host_scalar(integral_BdotN(B, target, normal, definition))
+
+        if definition == "normalized":
+            assert np.isposinf(value)
+        else:
+            assert math.isnan(value)
+
+    def test_empty_mesh_invalid_definition_still_raises(self):
+        B = jnp.zeros((0, 3, 3), dtype=jnp.float64)
+        target = jnp.zeros((0, 3), dtype=jnp.float64)
+        normal = jnp.zeros((0, 3, 3), dtype=jnp.float64)
+
+        with pytest.raises(ValueError, match="Unknown definition"):
+            integral_BdotN(B, target, normal, "invalid")
+
+    def test_empty_mesh_invalid_reduction_mode_still_raises(self):
+        B = jnp.zeros((0, 3, 3), dtype=jnp.float64)
+        target = jnp.zeros((0, 3), dtype=jnp.float64)
+        normal = jnp.zeros((0, 3, 3), dtype=jnp.float64)
+
+        with pytest.raises(ValueError, match="Unknown reduction_mode"):
+            integral_BdotN(
+                B,
+                target,
+                normal,
+                "quadratic flux",
+                reduction_mode="bad-mode",
+            )
+
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
+    def test_empty_integer_mesh_returns_float_boundary_value(self, definition):
+        B = jnp.zeros((0, 3, 3), dtype=jnp.int32)
+        target = jnp.zeros((0, 3), dtype=jnp.int32)
+        normal = jnp.zeros((0, 3, 3), dtype=jnp.int32)
+
+        with jax.transfer_guard("disallow"):
+            value = integral_BdotN(B, target, normal, definition)
+
+        assert jnp.issubdtype(value.dtype, jnp.floating)
+        value_host = host_scalar(value)
+        if definition == "normalized":
+            assert np.isposinf(value_host)
+        else:
+            assert math.isnan(value_host)
 
     def test_zero_normal_quadratic_flux_returns_zero(self):
         B = jnp.zeros((2, 3, 3))
@@ -231,6 +414,20 @@ class TestIntegralBdotN:
         J = float(integral_BdotN(B, target, normal, "local"))
 
         assert np.isinf(J)
+
+    def test_zero_field_local_gradient_is_nonfinite(self):
+        B = jnp.zeros((2, 3, 3), dtype=jnp.float64)
+        target = jnp.zeros((2, 3), dtype=jnp.float64)
+        normal = jnp.ones((2, 3, 3), dtype=jnp.float64)
+
+        def objective(B_arg):
+            return integral_BdotN(B_arg, target, normal, "local")
+
+        J = float(objective(B))
+        grad = host_array(jax.grad(objective)(B))
+
+        assert np.isinf(J)
+        assert not np.all(np.isfinite(grad))
 
     def test_zero_normal_local_returns_zero(self):
         B = jnp.zeros((2, 3, 3))
@@ -307,14 +504,7 @@ class TestIntegralBdotNCppParity:
     def _require_simsoptpp(self):
         pytest.importorskip("simsoptpp")
 
-    @pytest.mark.parametrize(
-        "definition",
-        [
-            "quadratic flux",
-            "normalized",
-            "local",
-        ],
-    )
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
     def test_cpp_parity(self, definition):
         import simsoptpp as sopp
 
@@ -327,6 +517,72 @@ class TestIntegralBdotNCppParity:
         J_jax = host_scalar(integral_BdotN(B, target, normal, definition))
 
         np.testing.assert_allclose(J_jax, J_cpp, rtol=1e-13)
+
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
+    def test_cpp_parity_production_scale_64x64_direct_kernel_gate(self, definition):
+        """64x64 C++ parity gate for the production-scale flux reducer."""
+        import simsoptpp as sopp
+
+        B, target, normal = _make_test_data(nphi=64, ntheta=64, seed=11)
+        B_np = np.ascontiguousarray(host_array(B))
+        target_np = np.ascontiguousarray(host_array(target))
+        normal_np = np.ascontiguousarray(host_array(normal))
+
+        J_cpp = sopp.integral_BdotN(B_np, target_np, normal_np, definition)
+        J_jax = host_scalar(integral_BdotN(B, target, normal, definition))
+
+        np.testing.assert_allclose(
+            J_jax,
+            J_cpp,
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
+    def test_cpp_empty_target_contract_matches_jax(self, definition):
+        import simsoptpp as sopp
+
+        B, _, normal = _make_test_data(nphi=5, ntheta=7, seed=283)
+        B_np = np.ascontiguousarray(host_array(B))
+        target_np = np.ascontiguousarray(np.asarray([], dtype=np.float64))
+        normal_np = np.ascontiguousarray(host_array(normal))
+
+        J_cpp = sopp.integral_BdotN(B_np, target_np, normal_np, definition)
+        J_jax = host_scalar(
+            integral_BdotN(
+                B,
+                jnp.asarray(target_np),
+                normal,
+                definition,
+            )
+        )
+
+        np.testing.assert_allclose(J_jax, J_cpp, rtol=1e-13, atol=1e-15)
+
+    @pytest.mark.parametrize("shape", [(0, 3), (2, 0), (0, 0)])
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
+    def test_cpp_empty_mesh_boundary_contract_matches_jax(self, shape, definition):
+        import simsoptpp as sopp
+
+        B = np.ascontiguousarray(np.zeros((*shape, 3), dtype=np.float64))
+        target = np.ascontiguousarray(np.zeros(shape, dtype=np.float64))
+        normal = np.ascontiguousarray(np.zeros((*shape, 3), dtype=np.float64))
+
+        J_cpp = sopp.integral_BdotN(B, target, normal, definition)
+        J_jax = host_scalar(
+            integral_BdotN(
+                jnp.asarray(B),
+                jnp.asarray(target),
+                jnp.asarray(normal),
+                definition,
+            )
+        )
+
+        if np.isposinf(J_cpp):
+            assert np.isposinf(J_jax)
+        else:
+            assert math.isnan(J_cpp)
+            assert math.isnan(J_jax)
 
     @pytest.mark.parametrize(
         ("definition", "B", "target", "normal", "expected"),
@@ -361,7 +617,9 @@ class TestIntegralBdotNCppParity:
             ),
         ],
     )
-    def test_cpp_boundary_contract_matches_jax(self, definition, B, target, normal, expected):
+    def test_cpp_boundary_contract_matches_jax(
+        self, definition, B, target, normal, expected
+    ):
         import simsoptpp as sopp
 
         B = np.ascontiguousarray(B)
