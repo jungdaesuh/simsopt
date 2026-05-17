@@ -13,15 +13,26 @@ Two construction stages are exposed:
    Materialises the mesh, evaluates the user function on every retained
    degree-of-freedom, builds the per-cell local-value table, and assembles
    an immutable :class:`RegularGridInterpolant3DSpec`.
-2. ``evaluate_batch`` — JAX-compiled evaluation. Given a packed
+2. ``build_regular_grid_interpolant_3d_device_spec`` — stage the immutable
+   spec arrays once for a JAX device hot path.
+3. ``evaluate_batch`` — JAX-compiled evaluation. Given a packed
    ``xyz`` array of evaluation points, returns the interpolated values
-   ``fxyz`` of shape ``(N, value_size)``. Skipped cells route to zero.
-   Out-of-domain points either route to zero (``out_of_bounds_ok=True``)
-   or surface ``NaN`` (``out_of_bounds_ok=False``).
+   ``fxyz`` of shape ``(N, value_size)``. Skipped cells route to zero
+   from the zero-initialised output buffer. Out-of-domain points either
+   route to zero (``out_of_bounds_ok=True``) or surface ``NaN``
+   (``out_of_bounds_ok=False``).
 
-The public surface mirrors the C++ binding contract enough for parity
-testing while leaving the JAX evaluation loop fully traceable and
-``jit``-compatible.
+Autodiff through ``evaluate_batch`` differentiates this local interpolation
+polynomial with respect to the query coordinates. It is not the physical
+``GradAbsB`` table used by ``InterpolatedFieldJAX``; callers that need the
+magnetic-field gradient should use the wrapper's ``GradAbsB`` path instead.
+
+The public surface mirrors the C++ binding contract while leaving the JAX
+evaluation loop fully traceable and ``jit``-compatible. The
+``evaluate_batch_with_initial`` helper models the mutable C++
+``evaluate_batch(xyz, fxyz)`` contract in pure-functional form: retained
+cells overwrite the supplied output rows, while skipped or out-of-domain
+rows preserve them when ``out_of_bounds_ok=True``.
 """
 
 from __future__ import annotations
@@ -34,11 +45,37 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ._math_utils import as_jax_array
+
 
 # Epsilon used in the C++ kernel to softly clamp points that are within
 # floating-point noise of the domain boundary. Matches
 # ``regular_grid_interpolant_3d_impl.h:8`` (``_EPS_``).
 _BOUNDARY_EPSILON = 1e-13
+_CELL_INDEX_DTYPE = jnp.int64
+_INT64_MIN_FLOAT = float(np.iinfo(np.int64).min)
+_INT64_MAX_FLOAT = float(np.iinfo(np.int64).max)
+
+
+def _cell_index_array(value: object) -> jax.Array:
+    return jnp.asarray(value, dtype=_CELL_INDEX_DTYPE)
+
+
+def _flat_cell_index(
+    xidx: object,
+    yidx: object,
+    zidx: object,
+    *,
+    ny: object,
+    nz: object,
+) -> jax.Array:
+    """Return a row-major flat cell index using 64-bit arithmetic."""
+
+    return (
+        (_cell_index_array(xidx) * _cell_index_array(ny) + _cell_index_array(yidx))
+        * _cell_index_array(nz)
+        + _cell_index_array(zidx)
+    )
 
 
 @dataclass(frozen=True)
@@ -48,6 +85,19 @@ class InterpolationRule:
     nodes: np.ndarray
     scalings: np.ndarray
     degree: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "nodes",
+            _readonly_array_copy(self.nodes, dtype=np.float64),
+        )
+        object.__setattr__(
+            self,
+            "scalings",
+            _readonly_array_copy(self.scalings, dtype=np.float64),
+        )
+        object.__setattr__(self, "degree", int(self.degree))
 
 
 def _build_scalings(nodes: np.ndarray) -> np.ndarray:
@@ -119,16 +169,16 @@ class RegularGridInterpolant3DSpec:
     - ``xmesh``, ``ymesh``, ``zmesh``: ``nx+1`` / ``ny+1`` / ``nz+1`` mesh
       node positions used to recover the local fractional coordinate.
     - ``value_size``: output dimension of the interpolated function.
-    - ``out_of_bounds_ok``: matches the C++ flag. ``True`` routes
-      out-of-domain queries to zero; ``False`` routes them to ``NaN``
-      so the caller can detect the error post-hoc.
-    - ``cell_to_row``: ``(nx*ny*nz,)`` int32 lookup that maps a flat
+    - ``out_of_bounds_ok``: matches the C++ flag. ``True`` preserves
+      the initial output row for out-of-domain queries; ``False`` routes
+      them to ``NaN`` so the caller can detect the error post-hoc.
+    - ``cell_to_row``: ``(nx*ny*nz,)`` int64 lookup that maps a flat
       cell index to its row in ``cell_table``. Skipped cells (and the
       explicit out-of-domain sentinel) point at the last row, which is
       forced to zero.
     - ``cell_table``: ``(cells_to_keep + 1, degree+1, degree+1, degree+1,
       value_size)`` float64 array of per-cell DOF values, padded with a
-      zero sentinel row that absorbs skipped / OOB queries.
+      zero sentinel row used for safe skipped / OOB gathers.
     """
 
     rule: InterpolationRule
@@ -151,6 +201,135 @@ class RegularGridInterpolant3DSpec:
     out_of_bounds_ok: bool
     cell_to_row: np.ndarray
     cell_table: np.ndarray
+
+    def __post_init__(self) -> None:
+        rule = InterpolationRule(
+            nodes=self.rule.nodes,
+            scalings=self.rule.scalings,
+            degree=int(self.rule.degree),
+        )
+        object.__setattr__(self, "rule", rule)
+        object.__setattr__(self, "nx", int(self.nx))
+        object.__setattr__(self, "ny", int(self.ny))
+        object.__setattr__(self, "nz", int(self.nz))
+        object.__setattr__(self, "xmin", float(self.xmin))
+        object.__setattr__(self, "xmax", float(self.xmax))
+        object.__setattr__(self, "ymin", float(self.ymin))
+        object.__setattr__(self, "ymax", float(self.ymax))
+        object.__setattr__(self, "zmin", float(self.zmin))
+        object.__setattr__(self, "zmax", float(self.zmax))
+        object.__setattr__(self, "hx", float(self.hx))
+        object.__setattr__(self, "hy", float(self.hy))
+        object.__setattr__(self, "hz", float(self.hz))
+        object.__setattr__(
+            self,
+            "xmesh",
+            _readonly_array_copy(self.xmesh, dtype=np.float64),
+        )
+        object.__setattr__(
+            self,
+            "ymesh",
+            _readonly_array_copy(self.ymesh, dtype=np.float64),
+        )
+        object.__setattr__(
+            self,
+            "zmesh",
+            _readonly_array_copy(self.zmesh, dtype=np.float64),
+        )
+        object.__setattr__(self, "value_size", int(self.value_size))
+        object.__setattr__(self, "out_of_bounds_ok", bool(self.out_of_bounds_ok))
+        object.__setattr__(
+            self,
+            "cell_to_row",
+            _readonly_array_copy(self.cell_to_row, dtype=np.int64),
+        )
+        object.__setattr__(
+            self,
+            "cell_table",
+            _readonly_array_copy(self.cell_table, dtype=np.float64),
+        )
+
+
+@dataclass(frozen=True)
+class RegularGridInterpolant3DDeviceSpec:
+    """Device-resident bundle of spec arrays plus static metadata.
+
+    Built once per :class:`RegularGridInterpolant3DSpec` and reused by
+    hot JAX callsites. Staging the host arrays at construction time keeps
+    repeated evaluation clean under :func:`jax.transfer_guard("disallow")`
+    and avoids per-batch host-to-device traffic.
+    """
+
+    cell_table: jax.Array
+    cell_to_row: jax.Array
+    nodes: jax.Array
+    scalings: jax.Array
+    xmesh: jax.Array
+    ymesh: jax.Array
+    zmesh: jax.Array
+    xmin: jax.Array
+    xmax: jax.Array
+    ymin: jax.Array
+    ymax: jax.Array
+    zmin: jax.Array
+    zmax: jax.Array
+    hx: jax.Array
+    hy: jax.Array
+    hz: jax.Array
+    nx: jax.Array
+    ny: jax.Array
+    nz: jax.Array
+    sentinel_row: jax.Array
+    degree: int
+    value_size: int
+    out_of_bounds_ok: bool
+
+
+def build_regular_grid_interpolant_3d_device_spec(
+    spec: RegularGridInterpolant3DSpec,
+) -> RegularGridInterpolant3DDeviceSpec:
+    """Stage every regular-grid spec field to device arrays once."""
+
+    cell_table = _stage_float64(spec.cell_table)
+    return RegularGridInterpolant3DDeviceSpec(
+        cell_table=cell_table,
+        cell_to_row=_stage_cell_index(spec.cell_to_row),
+        nodes=_stage_float64(spec.rule.nodes),
+        scalings=_stage_float64(spec.rule.scalings),
+        xmesh=_stage_float64(spec.xmesh),
+        ymesh=_stage_float64(spec.ymesh),
+        zmesh=_stage_float64(spec.zmesh),
+        xmin=_stage_float64(spec.xmin),
+        xmax=_stage_float64(spec.xmax),
+        ymin=_stage_float64(spec.ymin),
+        ymax=_stage_float64(spec.ymax),
+        zmin=_stage_float64(spec.zmin),
+        zmax=_stage_float64(spec.zmax),
+        hx=_stage_float64(spec.hx),
+        hy=_stage_float64(spec.hy),
+        hz=_stage_float64(spec.hz),
+        nx=_stage_cell_index(spec.nx),
+        ny=_stage_cell_index(spec.ny),
+        nz=_stage_cell_index(spec.nz),
+        sentinel_row=_stage_cell_index(cell_table.shape[0] - 1),
+        degree=int(spec.rule.degree),
+        value_size=int(spec.value_size),
+        out_of_bounds_ok=bool(spec.out_of_bounds_ok),
+    )
+
+
+def _stage_float64(value: object) -> jax.Array:
+    return as_jax_array(value, dtype=jnp.float64)
+
+
+def _stage_cell_index(value: object) -> jax.Array:
+    return as_jax_array(value, dtype=_CELL_INDEX_DTYPE)
+
+
+def _readonly_array_copy(array: np.ndarray, *, dtype: np.dtype) -> np.ndarray:
+    result = np.array(array, dtype=dtype, copy=True)
+    result.flags.writeable = False
+    return result
 
 
 def _validate_range(label: str, axis_range: tuple) -> tuple[float, float, int]:
@@ -252,7 +431,7 @@ def _build_cell_table(
             (1, degree + 1, degree + 1, degree + 1, value_size),
             dtype=np.float64,
         )
-        cell_to_row = np.full((nx * ny * nz,), 0, dtype=np.int32)
+        cell_to_row = np.full((nx * ny * nz,), 0, dtype=np.int64)
         return cell_to_row, cell_table
 
     xdoftensor_full = np.broadcast_to(
@@ -295,7 +474,7 @@ def _build_cell_table(
         dtype=np.float64,
     )
 
-    cell_to_row = np.full((nx * ny * nz,), cells_to_keep, dtype=np.int32)
+    cell_to_row = np.full((nx * ny * nz,), cells_to_keep, dtype=np.int64)
     row_counter = 0
     for i in range(nx):
         for j in range(ny):
@@ -335,8 +514,10 @@ def build_regular_grid_interpolant_3d(
         value_size: output dimension of ``f``.
         f: function ``(xs, ys, zs) -> flat array of shape ``(N*value_size,)``
            matching the C++ ``interpolate_batch`` callback contract.
-        out_of_bounds_ok: ``True`` to return zero outside the domain;
-            ``False`` to surface ``NaN`` so the caller can detect the error.
+        out_of_bounds_ok: ``True`` preserves the caller/output-buffer value
+            for skipped or out-of-domain rows; the default zero-initialised
+            :func:`evaluate_batch` output therefore returns zero. ``False``
+            surfaces ``NaN`` so the caller can detect the error.
         skip: optional predicate. Cells whose 8 mesh corners all evaluate
             to ``True`` are skipped (matches upstream PR #227 contract).
     """
@@ -455,10 +636,31 @@ def _basis_values(
     return products * scalings
 
 
+def _cpu_ordered_tensor_contract(pkx, pky, pkz, local_vals):
+    """Contract one cell in C++ loop order: value channel outside, k fastest."""
+
+    degree_plus_one = int(pkx.shape[0])
+    zero = jnp.zeros((local_vals.shape[-1],), dtype=local_vals.dtype)
+
+    def i_body(i, i_acc):
+        def j_body(j, j_acc):
+            xy_weight = pkx[i] * pky[j]
+
+            def k_body(k, k_acc):
+                return k_acc + xy_weight * pkz[k] * local_vals[i, j, k]
+
+            return jax.lax.fori_loop(0, degree_plus_one, k_body, j_acc)
+
+        return jax.lax.fori_loop(0, degree_plus_one, j_body, i_acc)
+
+    return jax.lax.fori_loop(0, degree_plus_one, i_body, zero)
+
+
 @partial(jax.jit, static_argnames=("degree", "value_size", "out_of_bounds_ok"))
 def _evaluate_batch_jit(
     xyz: jax.Array,
     *,
+    initial_output: jax.Array,
     cell_table: jax.Array,
     cell_to_row: jax.Array,
     nodes: jax.Array,
@@ -485,7 +687,7 @@ def _evaluate_batch_jit(
 ) -> jax.Array:
     """JIT-compiled per-sample evaluation kernel."""
 
-    def evaluate_one(point: jax.Array) -> jax.Array:
+    def evaluate_one(point: jax.Array, initial_value: jax.Array) -> jax.Array:
         x = point[0]
         y = point[1]
         z = point[2]
@@ -506,14 +708,41 @@ def _evaluate_batch_jit(
             z_clamped <= zmin, z_clamped + _BOUNDARY_EPSILON, z_clamped
         )
 
-        # Cell index as in ``locate_unsafe``.
-        xidx_raw = jnp.floor(nx * (x_clamped - xmin) / (xmax - xmin)).astype(jnp.int32)
-        yidx_raw = jnp.floor(ny * (y_clamped - ymin) / (ymax - ymin)).astype(jnp.int32)
-        zidx_raw = jnp.floor(nz * (z_clamped - zmin) / (zmax - zmin)).astype(jnp.int32)
+        xscaled = nx * (x_clamped - xmin) / (xmax - xmin)
+        yscaled = ny * (y_clamped - ymin) / (ymax - ymin)
+        zscaled = nz * (z_clamped - zmin) / (zmax - zmin)
+        x_indexable = (
+            jnp.isfinite(xscaled)
+            & (xscaled >= _INT64_MIN_FLOAT)
+            & (xscaled < _INT64_MAX_FLOAT)
+        )
+        y_indexable = (
+            jnp.isfinite(yscaled)
+            & (yscaled >= _INT64_MIN_FLOAT)
+            & (yscaled < _INT64_MAX_FLOAT)
+        )
+        z_indexable = (
+            jnp.isfinite(zscaled)
+            & (zscaled >= _INT64_MIN_FLOAT)
+            & (zscaled < _INT64_MAX_FLOAT)
+        )
 
-        in_bounds_x = (xidx_raw >= 0) & (xidx_raw < nx)
-        in_bounds_y = (yidx_raw >= 0) & (yidx_raw < ny)
-        in_bounds_z = (zidx_raw >= 0) & (zidx_raw < nz)
+        # Cell index as in ``locate_unsafe``. Truncation is intentionally
+        # allowed before the bounds check so slightly negative coordinates
+        # in ``(-1, 0)`` still map to cell 0, matching C++ ``int64_t(...)``.
+        xidx_raw = jnp.trunc(jnp.where(x_indexable, xscaled, -1.0)).astype(
+            _CELL_INDEX_DTYPE
+        )
+        yidx_raw = jnp.trunc(jnp.where(y_indexable, yscaled, -1.0)).astype(
+            _CELL_INDEX_DTYPE
+        )
+        zidx_raw = jnp.trunc(jnp.where(z_indexable, zscaled, -1.0)).astype(
+            _CELL_INDEX_DTYPE
+        )
+
+        in_bounds_x = x_indexable & (xidx_raw >= 0) & (xidx_raw < nx)
+        in_bounds_y = y_indexable & (yidx_raw >= 0) & (yidx_raw < ny)
+        in_bounds_z = z_indexable & (zidx_raw >= 0) & (zidx_raw < nz)
         in_bounds = in_bounds_x & in_bounds_y & in_bounds_z
 
         # Clamp cell indices to a valid range so the gather is safe;
@@ -522,7 +751,7 @@ def _evaluate_batch_jit(
         yidx = jnp.clip(yidx_raw, 0, ny - 1)
         zidx = jnp.clip(zidx_raw, 0, nz - 1)
 
-        flat_cell_idx = (xidx * ny + yidx) * nz + zidx
+        flat_cell_idx = _flat_cell_index(xidx, yidx, zidx, ny=ny, nz=nz)
         candidate_row = cell_to_row[flat_cell_idx]
         is_kept_cell = candidate_row != sentinel_row
         row_idx = jnp.where(in_bounds, candidate_row, sentinel_row)
@@ -547,28 +776,183 @@ def _evaluate_batch_jit(
         )
 
         local_vals = cell_table[row_idx]  # (degree+1, degree+1, degree+1, value_size)
-        result = jnp.einsum(
-            "i,j,k,ijkl->l",
-            pkx,
-            pky,
-            pkz,
-            local_vals,
-            optimize=True,
-        )
-        # ``out_of_bounds_ok=False`` surfaces NaN to the host so the
-        # caller can detect the error post-hoc. The C++ binding raises
-        # in both the not-in-bounds and skipped-cell cases; raising
-        # from inside a jitted kernel would abandon JIT entirely, so
-        # we route both through NaN instead.
-        if not out_of_bounds_ok:
+        result = _cpu_ordered_tensor_contract(pkx, pky, pkz, local_vals)
+        if out_of_bounds_ok:
+            # Match the C++ mutable-output contract: skipped or out-of-domain
+            # rows leave the caller-supplied output row unchanged.
+            result = jnp.where(in_kept_cell, result, initial_value)
+        else:
+            # ``out_of_bounds_ok=False`` surfaces NaN to the host so the
+            # caller can detect the error post-hoc. The C++ binding raises
+            # in both the not-in-bounds and skipped-cell cases; raising
+            # from inside a jitted kernel would abandon JIT entirely, so
+            # we route both through NaN instead.
             result = jnp.where(in_kept_cell, result, jnp.nan)
         return result
 
-    return jax.vmap(evaluate_one)(xyz)
+    return jax.vmap(evaluate_one)(xyz, initial_output)
+
+
+@partial(jax.jit, static_argnames=("degree", "value_size", "out_of_bounds_ok"))
+def _evaluate_batch_zero_jit(
+    xyz: jax.Array,
+    *,
+    cell_table: jax.Array,
+    cell_to_row: jax.Array,
+    nodes: jax.Array,
+    scalings: jax.Array,
+    xmesh: jax.Array,
+    ymesh: jax.Array,
+    zmesh: jax.Array,
+    xmin: jax.Array,
+    xmax: jax.Array,
+    ymin: jax.Array,
+    ymax: jax.Array,
+    zmin: jax.Array,
+    zmax: jax.Array,
+    hx: jax.Array,
+    hy: jax.Array,
+    hz: jax.Array,
+    nx: jax.Array,
+    ny: jax.Array,
+    nz: jax.Array,
+    sentinel_row: jax.Array,
+    degree: int,
+    value_size: int,
+    out_of_bounds_ok: bool,
+) -> jax.Array:
+    return _evaluate_batch_jit(
+        xyz,
+        initial_output=jnp.zeros((xyz.shape[0], value_size), dtype=jnp.float64),
+        cell_table=cell_table,
+        cell_to_row=cell_to_row,
+        nodes=nodes,
+        scalings=scalings,
+        xmesh=xmesh,
+        ymesh=ymesh,
+        zmesh=zmesh,
+        xmin=xmin,
+        xmax=xmax,
+        ymin=ymin,
+        ymax=ymax,
+        zmin=zmin,
+        zmax=zmax,
+        hx=hx,
+        hy=hy,
+        hz=hz,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        sentinel_row=sentinel_row,
+        degree=degree,
+        value_size=value_size,
+        out_of_bounds_ok=out_of_bounds_ok,
+    )
+
+
+def _as_xyz_array(xyz: object) -> jax.Array:
+    xyz_array = _stage_float64(xyz)
+    if xyz_array.ndim != 2 or xyz_array.shape[1] != 3:
+        raise ValueError(f"xyz must have shape (N, 3); got {xyz_array.shape}")
+    return xyz_array
+
+
+def _as_initial_output_array(
+    initial_output: object,
+    *,
+    npoints: int,
+    value_size: int,
+) -> jax.Array:
+    initial_array = _stage_float64(initial_output)
+    expected_shape = (npoints, value_size)
+    if initial_array.shape != expected_shape:
+        raise ValueError(
+            f"initial_output must have shape {expected_shape}; got {initial_array.shape}"
+        )
+    return initial_array
+
+
+def evaluate_batch_device(
+    device_spec: RegularGridInterpolant3DDeviceSpec,
+    xyz: object,
+    *,
+    initial_output: object | None = None,
+) -> jax.Array:
+    """Evaluate with a pre-staged device spec.
+
+    ``initial_output`` is the pure-functional analogue of the C++
+    caller-provided ``fxyz`` buffer. When omitted, it is a zero buffer,
+    matching the common Python binding/oracle use.
+    """
+
+    xyz_array = _as_xyz_array(xyz)
+    if initial_output is None:
+        return _evaluate_batch_zero_jit(
+            xyz_array,
+            cell_table=device_spec.cell_table,
+            cell_to_row=device_spec.cell_to_row,
+            nodes=device_spec.nodes,
+            scalings=device_spec.scalings,
+            xmesh=device_spec.xmesh,
+            ymesh=device_spec.ymesh,
+            zmesh=device_spec.zmesh,
+            xmin=device_spec.xmin,
+            xmax=device_spec.xmax,
+            ymin=device_spec.ymin,
+            ymax=device_spec.ymax,
+            zmin=device_spec.zmin,
+            zmax=device_spec.zmax,
+            hx=device_spec.hx,
+            hy=device_spec.hy,
+            hz=device_spec.hz,
+            nx=device_spec.nx,
+            ny=device_spec.ny,
+            nz=device_spec.nz,
+            sentinel_row=device_spec.sentinel_row,
+            degree=int(device_spec.degree),
+            value_size=int(device_spec.value_size),
+            out_of_bounds_ok=bool(device_spec.out_of_bounds_ok),
+        )
+    initial_array = _as_initial_output_array(
+        initial_output,
+        npoints=xyz_array.shape[0],
+        value_size=int(device_spec.value_size),
+    )
+    return _evaluate_batch_jit(
+        xyz_array,
+        initial_output=initial_array,
+        cell_table=device_spec.cell_table,
+        cell_to_row=device_spec.cell_to_row,
+        nodes=device_spec.nodes,
+        scalings=device_spec.scalings,
+        xmesh=device_spec.xmesh,
+        ymesh=device_spec.ymesh,
+        zmesh=device_spec.zmesh,
+        xmin=device_spec.xmin,
+        xmax=device_spec.xmax,
+        ymin=device_spec.ymin,
+        ymax=device_spec.ymax,
+        zmin=device_spec.zmin,
+        zmax=device_spec.zmax,
+        hx=device_spec.hx,
+        hy=device_spec.hy,
+        hz=device_spec.hz,
+        nx=device_spec.nx,
+        ny=device_spec.ny,
+        nz=device_spec.nz,
+        sentinel_row=device_spec.sentinel_row,
+        degree=int(device_spec.degree),
+        value_size=int(device_spec.value_size),
+        out_of_bounds_ok=bool(device_spec.out_of_bounds_ok),
+    )
 
 
 def evaluate_batch(spec: RegularGridInterpolant3DSpec, xyz: object) -> jax.Array:
     """Evaluate the interpolant at every row of ``xyz``.
+
+    ``jax.grad`` / ``jax.jacrev`` applied to this function differentiates
+    the piecewise interpolation polynomial, not the physical ``GradAbsB``
+    interpolant maintained by ``InterpolatedFieldJAX``.
 
     Args:
         spec: spec returned by :func:`build_regular_grid_interpolant_3d`.
@@ -579,39 +963,24 @@ def evaluate_batch(spec: RegularGridInterpolant3DSpec, xyz: object) -> jax.Array
         cells produce zero; out-of-domain points produce zero or ``NaN``
         depending on ``spec.out_of_bounds_ok``.
     """
-    xyz_array = jnp.asarray(xyz, dtype=jnp.float64)
-    if xyz_array.ndim != 2 or xyz_array.shape[1] != 3:
-        raise ValueError(f"xyz must have shape (N, 3); got {xyz_array.shape}")
-    nodes = jnp.asarray(spec.rule.nodes, dtype=jnp.float64)
-    scalings = jnp.asarray(spec.rule.scalings, dtype=jnp.float64)
-    cell_table = jnp.asarray(spec.cell_table, dtype=jnp.float64)
-    cell_to_row = jnp.asarray(spec.cell_to_row, dtype=jnp.int32)
-    sentinel_row = jnp.asarray(cell_table.shape[0] - 1, dtype=jnp.int32)
-    return _evaluate_batch_jit(
-        xyz_array,
-        cell_table=cell_table,
-        cell_to_row=cell_to_row,
-        nodes=nodes,
-        scalings=scalings,
-        xmesh=jnp.asarray(spec.xmesh, dtype=jnp.float64),
-        ymesh=jnp.asarray(spec.ymesh, dtype=jnp.float64),
-        zmesh=jnp.asarray(spec.zmesh, dtype=jnp.float64),
-        xmin=jnp.asarray(spec.xmin, dtype=jnp.float64),
-        xmax=jnp.asarray(spec.xmax, dtype=jnp.float64),
-        ymin=jnp.asarray(spec.ymin, dtype=jnp.float64),
-        ymax=jnp.asarray(spec.ymax, dtype=jnp.float64),
-        zmin=jnp.asarray(spec.zmin, dtype=jnp.float64),
-        zmax=jnp.asarray(spec.zmax, dtype=jnp.float64),
-        hx=jnp.asarray(spec.hx, dtype=jnp.float64),
-        hy=jnp.asarray(spec.hy, dtype=jnp.float64),
-        hz=jnp.asarray(spec.hz, dtype=jnp.float64),
-        nx=jnp.asarray(spec.nx, dtype=jnp.int32),
-        ny=jnp.asarray(spec.ny, dtype=jnp.int32),
-        nz=jnp.asarray(spec.nz, dtype=jnp.int32),
-        sentinel_row=sentinel_row,
-        degree=int(spec.rule.degree),
-        value_size=int(spec.value_size),
-        out_of_bounds_ok=bool(spec.out_of_bounds_ok),
+
+    return evaluate_batch_device(
+        build_regular_grid_interpolant_3d_device_spec(spec),
+        xyz,
+    )
+
+
+def evaluate_batch_with_initial(
+    spec: RegularGridInterpolant3DSpec,
+    xyz: object,
+    initial_output: object,
+) -> jax.Array:
+    """Evaluate while preserving C++ caller-buffer semantics for skipped rows."""
+
+    return evaluate_batch_device(
+        build_regular_grid_interpolant_3d_device_spec(spec),
+        xyz,
+        initial_output=initial_output,
     )
 
 
@@ -652,9 +1021,13 @@ def estimate_error(
 __all__ = [
     "ChebyshevInterpolationRule",
     "InterpolationRule",
+    "RegularGridInterpolant3DDeviceSpec",
     "RegularGridInterpolant3DSpec",
     "UniformInterpolationRule",
     "build_regular_grid_interpolant_3d",
+    "build_regular_grid_interpolant_3d_device_spec",
     "estimate_error",
     "evaluate_batch",
+    "evaluate_batch_device",
+    "evaluate_batch_with_initial",
 ]

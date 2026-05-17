@@ -86,7 +86,7 @@ class RegularGridInterpolant3D {
         const int nx, ny, nz;  // number of cells in x, y, and z direction
         double hx, hy, hz; // gridsize in x, y, and z direction
         const double xmin, ymin, zmin; // lower bounds of the x, y, and z coordinates
-        const double xmax, ymax, zmax; // lower bounds of the x, y, and z coordinates
+        const double xmax, ymax, zmax; // upper bounds of the x, y, and z coordinates
         const int value_size; // number of output dimensions of the interpolant, i.e. space that is mapped into
         const InterpolationRule rule; // the interpolation rule to use on each cell in the grid
         const bool out_of_bounds_ok; // whether to do nothing or throw an error when the interpolant is queried at an out-of-bounds point
@@ -103,14 +103,14 @@ class RegularGridInterpolant3D {
         Vec xdoftensor_reduced, ydoftensor_reduced, zdoftensor_reduced;
 
         Vec vals; // contains the values of the function to be interpolated at the dofs, of size dofs_to_keep * value_size
-        std::unordered_map<int, AlignedPaddedVec> all_local_vals_map; // maps each cell to an array of size (degree+1)**3 * padded_value_size
+        std::unordered_map<int64_t, AlignedPaddedVec> all_local_vals_map; // maps each cell to an array of size (degree+1)**3 * padded_value_size
         std::vector<bool> skip_cell; // whether to skip each cell or not
         // since we are skipping some dofs, we need mappings into the list of
         // reduced dofs, e.g. if we skip dofs 3, then reduced to full would
         // look like [0, 1, 2, 4, 5, ...]
-        std::vector<uint32_t> reduced_to_full_map, full_to_reduced_map;
+        std::vector<int64_t> reduced_to_full_map, full_to_reduced_map;
 
-        uint32_t cells_to_skip, cells_to_keep, dofs_to_skip, dofs_to_keep; // which cells and dofs we skip and keep
+        int64_t cells_to_skip, cells_to_keep, dofs_to_skip, dofs_to_keep; // which cells and dofs we skip and keep
         int local_vals_size;
         Vec pkxs, pkys, pkzs;
 
@@ -121,17 +121,17 @@ class RegularGridInterpolant3D {
         #endif
         int padded_value_size; // smallest multiple of simdcount that is larger than value_size
 
-        inline int idx_dof(int i, int j, int k){
-            int degree = rule.degree;
-            return i*(ny*degree+1)*(nz*degree+1) + j*(nz*degree+1) + k;
+        inline int64_t idx_dof(int64_t i, int64_t j, int64_t k){
+            const int64_t degree = rule.degree;
+            return int64_t(i)*(int64_t(ny)*degree+1)*(int64_t(nz)*degree+1) + int64_t(j)*(int64_t(nz)*degree+1) + int64_t(k);
         }
 
-        inline int idx_cell(int i, int j, int k){
-            return i*ny*nz + j*nz + k;
+        inline int64_t idx_cell(int64_t i, int64_t j, int64_t k){
+            return int64_t(i)*int64_t(ny)*int64_t(nz) + int64_t(j)*int64_t(nz) + int64_t(k);
         }
 
-        inline int idx_mesh(int i, int j, int k){
-            return i*(ny+1)*(nz+1) + j*(nz+1) + k;
+        inline int64_t idx_mesh(int64_t i, int64_t j, int64_t k){
+            return int64_t(i)*(int64_t(ny)+1)*(int64_t(nz)+1) + int64_t(j)*(int64_t(nz)+1) + int64_t(k);
         }
 
         inline int idx_dof_local(int i, int j, int k){
@@ -139,9 +139,9 @@ class RegularGridInterpolant3D {
             return i*(degree+1)*(degree+1) + j*(degree+1) + k;
         }
 
-        int locate_unsafe(double x, double y, double z);
+        int64_t locate_unsafe(double x, double y, double z);
         void evaluate_inplace(double x, double y, double z, double* res);
-        void evaluate_local(double x, double y, double z, int cell_idx, double* res);
+        void evaluate_local(double x, double y, double z, int64_t cell_idx, double* res);
 
     public:
 
@@ -165,7 +165,7 @@ class RegularGridInterpolant3D {
             ymesh = linspace(ymin, ymax, ny+1, true);
             zmesh = linspace(zmin, zmax, nz+1, true);
 
-            int nmesh = (nx+1)*(ny+1)*(nz+1);
+            int64_t nmesh = (int64_t(nx)+1)*(int64_t(ny)+1)*(int64_t(nz)+1);
             Vec xmeshtensor(nmesh, 0.);
             Vec ymeshtensor(nmesh, 0.);
             Vec zmeshtensor(nmesh, 0.);
@@ -173,7 +173,7 @@ class RegularGridInterpolant3D {
             for (int i = 0; i <= nx; ++i) {
                 for (int j = 0; j <= ny; ++j) {
                     for (int k = 0; k <= nz; ++k) {
-                        int offset = idx_mesh(i, j, k);
+                        int64_t offset = idx_mesh(i, j, k);
                         xmeshtensor[offset] = xmesh[i];
                         ymeshtensor[offset] = ymesh[j];
                         zmeshtensor[offset] = zmesh[k];
@@ -185,7 +185,7 @@ class RegularGridInterpolant3D {
             std::vector<bool> skip_mesh = skip(xmeshtensor, ymeshtensor, zmeshtensor);
             // cells are entirely ignored if *all* of its eight corners are
             // outside the domain
-            skip_cell = std::vector<bool>(nx*ny*nz, false);
+            skip_cell = std::vector<bool>(int64_t(nx)*int64_t(ny)*int64_t(nz), false);
             cells_to_skip = 0;
             for (int i = 0; i < nx; ++i) {
                 for (int j = 0; j < ny; ++j) {
@@ -203,7 +203,7 @@ class RegularGridInterpolant3D {
                     }
                 }
             }
-            cells_to_keep = nx*ny*nz - cells_to_skip;
+            cells_to_keep = int64_t(nx)*int64_t(ny)*int64_t(nz) - cells_to_skip;
 
             // now build the interpolation points in 1d.
             xdof = Vec(nx*degree+1, 0.);
@@ -225,7 +225,7 @@ class RegularGridInterpolant3D {
                     zdof[i*degree+j] = zmesh[i] + rule.nodes[j]*hz;
                 }
             }
-            uint32_t n =  (nx*degree+1)*(ny*degree+1)*(nz*degree+1);
+            int64_t n =  (int64_t(nx)*degree+1)*(int64_t(ny)*degree+1)*(int64_t(nz)*degree+1);
             // turn these into a tensor product grid
             Vec xdoftensor(n, 0.);
             Vec ydoftensor(n, 0.);
@@ -233,7 +233,7 @@ class RegularGridInterpolant3D {
             for (int i = 0; i <= nx*degree; ++i) {
                 for (int j = 0; j <= ny*degree; ++j) {
                     for (int k = 0; k <= nz*degree; ++k) {
-                        uint32_t offset = idx_dof(i, j, k);
+                        int64_t offset = idx_dof(i, j, k);
                         xdoftensor[offset] = xdof[i];
                         ydoftensor[offset] = ydof[j];
                         zdoftensor[offset] = zdof[k];
@@ -262,16 +262,16 @@ class RegularGridInterpolant3D {
             }
             // Count how many dofs are skipped in total, and how many to keep
             dofs_to_skip = 0;
-            for (uint32_t i = 0; i < n; ++i) {
+            for (int64_t i = 0; i < n; ++i) {
                 dofs_to_skip += skip_dof[i];
             }
             dofs_to_keep = n - dofs_to_skip;
             // Build a map that maps indices from the reduced set of interpolation
             // points to the full set, and its inverse
-            reduced_to_full_map = std::vector<uint32_t>(dofs_to_keep, 0);
-            full_to_reduced_map = std::vector<uint32_t>(n, 0);
-            uint32_t ctr = 0;
-            for (uint32_t i = 0; i < n; ++i) {
+            reduced_to_full_map = std::vector<int64_t>(dofs_to_keep, 0);
+            full_to_reduced_map = std::vector<int64_t>(n, 0);
+            int64_t ctr = 0;
+            for (int64_t i = 0; i < n; ++i) {
                 full_to_reduced_map[i] = i - ctr;
                 if(skip_dof[i])
                     ctr++;
@@ -293,7 +293,7 @@ class RegularGridInterpolant3D {
 
             // round up value_size to nearest multiple of simdcount
             padded_value_size = (value_size % simdcount) ? (value_size + simdcount) - (value_size % simdcount) : value_size;
-            int nnodes = (nx*degree+1)*(ny*degree+1)*(nz*degree+1);
+            int64_t nnodes = (int64_t(nx)*degree+1)*(int64_t(ny)*degree+1)*(int64_t(nz)*degree+1);
             local_vals_size = (degree+1)*(degree+1)*(degree+1)*padded_value_size;
         }
         RegularGridInterpolant3D(InterpolationRule rule, RangeTriplet xrange, RangeTriplet yrange, RangeTriplet zrange, int value_size, bool out_of_bounds_ok) :
@@ -341,4 +341,3 @@ class ChebyshevInterpolationRule : public InterpolationRule {
             build_scalings();
         }
 };
-

@@ -18,13 +18,9 @@ Layered design
 - This module attaches the JAX-backed pipeline to the public
   :class:`simsopt.field.MagneticField` cache contract.
 
-The wrapper deliberately does NOT implement ``_dB_by_dX_impl``. The CPU
-:class:`InterpolatedField` does not implement it either (it raises a
-runtime error inside the C++ binding); the upstream class exposes
-``_GradAbsB_impl`` instead, computed from a separately-interpolated
-``\\nabla |B|`` table. The JAX wrapper preserves this semantic: a
-caller that needs Cartesian Jacobians of ``B`` should evaluate the
-underlying source field directly.
+The wrapper does NOT expose Cartesian Jacobians of ``B`` — see
+:meth:`InterpolatedFieldJAX.dB_by_dX` for the explicit Python error
+and the supported alternatives.
 
 The interpolated tables are constructed eagerly in ``__init__``; the
 sampling step is the documented CPU<->JAX boundary for this wrapper.
@@ -39,7 +35,9 @@ from .._core.json import GSONDecoder
 from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ..jax_core.interpolated_field import (
     interpolated_field_B,
+    interpolated_field_B_cyl_with_initial,
     interpolated_field_GradAbsB,
+    interpolated_field_GradAbsB_cyl_with_initial,
     make_interpolated_field_spec,
 )
 from ..jax_core.regular_grid_interp import (
@@ -74,6 +72,17 @@ def _cyl_to_cart_points(r: np.ndarray, phi: np.ndarray, z: np.ndarray) -> np.nda
     x = r * np.cos(phi)
     y = r * np.sin(phi)
     return np.ascontiguousarray(np.stack([x, y, z], axis=1), dtype=np.float64)
+
+
+def _cyl_vectors_to_cart(field_cyl: np.ndarray, points_cart: np.ndarray) -> np.ndarray:
+    phi = np.arctan2(points_cart[:, 1], points_cart[:, 0])
+    cos_phi = np.cos(phi)
+    sin_phi = np.sin(phi)
+    out = np.empty_like(field_cyl)
+    out[:, 0] = cos_phi * field_cyl[:, 0] - sin_phi * field_cyl[:, 1]
+    out[:, 1] = sin_phi * field_cyl[:, 0] + cos_phi * field_cyl[:, 1]
+    out[:, 2] = field_cyl[:, 2]
+    return out
 
 
 def _build_skip_callback(skip_callable):
@@ -180,6 +189,10 @@ class InterpolatedFieldJAX(MagneticField):
         self.nfp = int(nfp)
         self.stellsym = bool(stellsym)
         self._skip_callable = skip
+        self._B_cyl_cache = None
+        self._B_cyl_valid = False
+        self._GradAbsB_cyl_cache = None
+        self._GradAbsB_cyl_valid = False
 
         rule = UniformInterpolationRule(self.degree)
         skip_cb = _build_skip_callback(skip)
@@ -211,13 +224,70 @@ class InterpolatedFieldJAX(MagneticField):
             GradAbsB_spec=GradAbsB_spec,
         )
 
-    def _B_impl(self, B):
-        points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        B[:] = _checked_host_result(
-            interpolated_field_B(self._spec, _points_device(points)),
+    def _invalidate_jax_cyl_caches(self):
+        self._B_cyl_valid = False
+        self._GradAbsB_cyl_valid = False
+
+    def invalidate_cache(self):
+        result = super().clear_cached_properties()
+        self._invalidate_jax_cyl_caches()
+        return result
+
+    def set_points_cart(self, xyz):
+        result = super().set_points_cart(xyz)
+        self._invalidate_jax_cyl_caches()
+        return result
+
+    def set_points_cyl(self, rphiz):
+        result = super().set_points_cyl(rphiz)
+        self._invalidate_jax_cyl_caches()
+        return result
+
+    def clear_cached_properties(self):
+        return self.invalidate_cache()
+
+    def _initial_cyl_cache(self, cache: np.ndarray | None, npoints: int) -> np.ndarray:
+        if cache is None or cache.shape != (npoints, 3):
+            return np.zeros((npoints, 3), dtype=np.float64)
+        return cache
+
+    def _evaluate_B_cyl_cache(self, points: np.ndarray) -> np.ndarray:
+        if self._B_cyl_valid and self._B_cyl_cache is not None:
+            return self._B_cyl_cache
+        initial = self._initial_cyl_cache(self._B_cyl_cache, points.shape[0])
+        B_cyl = _checked_host_result(
+            interpolated_field_B_cyl_with_initial(
+                self._spec,
+                _points_device(points),
+                _points_device(initial),
+            ),
             extrapolate=self.extrapolate,
             quantity="B",
         )
+        self._B_cyl_cache = np.ascontiguousarray(B_cyl, dtype=np.float64)
+        self._B_cyl_valid = True
+        return self._B_cyl_cache
+
+    def _evaluate_GradAbsB_cyl_cache(self, points: np.ndarray) -> np.ndarray:
+        if self._GradAbsB_cyl_valid and self._GradAbsB_cyl_cache is not None:
+            return self._GradAbsB_cyl_cache
+        initial = self._initial_cyl_cache(self._GradAbsB_cyl_cache, points.shape[0])
+        GradAbsB_cyl = _checked_host_result(
+            interpolated_field_GradAbsB_cyl_with_initial(
+                self._spec,
+                _points_device(points),
+                _points_device(initial),
+            ),
+            extrapolate=self.extrapolate,
+            quantity="GradAbsB",
+        )
+        self._GradAbsB_cyl_cache = np.ascontiguousarray(GradAbsB_cyl, dtype=np.float64)
+        self._GradAbsB_cyl_valid = True
+        return self._GradAbsB_cyl_cache
+
+    def _B_impl(self, B):
+        points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
+        B[:] = _cyl_vectors_to_cart(self._evaluate_B_cyl_cache(points), points)
 
     def jax_B_at(self, point):
         points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
@@ -228,6 +298,13 @@ class InterpolatedFieldJAX(MagneticField):
         return (
             interpolated_field_B(self._spec, points)[0],
             interpolated_field_GradAbsB(self._spec, points)[0],
+        )
+
+    def dB_by_dX(self):
+        raise RuntimeError(
+            "InterpolatedFieldJAX does not expose dB_by_dX in Cartesian "
+            "coordinates. Use the source field directly, or call "
+            "GradAbsB() for the physical gradient table."
         )
 
     def GradAbsB(self):
@@ -244,16 +321,13 @@ class InterpolatedFieldJAX(MagneticField):
         cannot use the same C++ hook, so it shadows the bound
         ``GradAbsB`` method at the Python level and routes the call
         through the JAX kernel pipeline. The cache
-        invalidation behaviour of :meth:`set_points` is unchanged because
-        this path does not touch the C++ ``data_GradAbsB`` slot.
+        invalidation behaviour of :meth:`set_points` is mirrored by a
+        Python-level cylindrical cache because this path does not touch
+        the C++ ``data_GradAbsB`` slot.
         """
 
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        return _checked_host_result(
-            interpolated_field_GradAbsB(self._spec, _points_device(points)),
-            extrapolate=self.extrapolate,
-            quantity="GradAbsB",
-        )
+        return _cyl_vectors_to_cart(self._evaluate_GradAbsB_cyl_cache(points), points)
 
     def GradAbsB_cyl(self):
         """JAX-direct ``\\nabla |B|`` evaluation in cylindrical coordinates.
@@ -263,39 +337,20 @@ class InterpolatedFieldJAX(MagneticField):
         ``GradAbsB_cyl`` see the same JAX-backed table.
         """
 
-        cart = self.GradAbsB()
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        phi = np.arctan2(points[:, 1], points[:, 0])
-        cos_phi = np.cos(phi)
-        sin_phi = np.sin(phi)
-        out = np.empty_like(cart)
-        out[:, 0] = cos_phi * cart[:, 0] + sin_phi * cart[:, 1]
-        out[:, 1] = cos_phi * cart[:, 1] - sin_phi * cart[:, 0]
-        out[:, 2] = cart[:, 2]
-        return out
+        return self._evaluate_GradAbsB_cyl_cache(points).copy()
 
     def B_cyl(self):
         """JAX-direct ``B`` evaluation in cylindrical coordinates.
 
-        Mirrors :meth:`GradAbsB_cyl`. Bypasses the C++ ``data_Bcyl``
-        cache (which would otherwise be filled by the base-class
-        ``_B_cyl_impl`` from the Cartesian ``B``) so the result comes
-        directly from the JAX interpolant. The numerical result of the
-        two paths is the same up to FP rotation roundoff, but the
-        direct path keeps cylindrical output decoupled from any future
-        change to the Cartesian cache.
+        Mirrors :meth:`GradAbsB_cyl`. The Python-level cylindrical cache
+        preserves the same same-shape skipped/out-of-domain row contract
+        as native ``InterpolatedField`` while keeping evaluation in the
+        JAX interpolant.
         """
 
-        cart = np.asarray(self.B(), dtype=np.float64)
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        phi = np.arctan2(points[:, 1], points[:, 0])
-        cos_phi = np.cos(phi)
-        sin_phi = np.sin(phi)
-        out = np.empty_like(cart)
-        out[:, 0] = cos_phi * cart[:, 0] + sin_phi * cart[:, 1]
-        out[:, 1] = cos_phi * cart[:, 1] - sin_phi * cart[:, 0]
-        out[:, 2] = cart[:, 2]
-        return out
+        return self._evaluate_B_cyl_cache(points).copy()
 
     def as_dict(self, serial_objs_dict) -> dict:
         d = super().as_dict(serial_objs_dict=serial_objs_dict)

@@ -2,6 +2,8 @@
 #include <xtensor/xarray.hpp>
 #include "xtensor/xlayout.hpp"
 #define _USE_MATH_DEFINES
+#include <cmath>
+#include <limits>
 #include <math.h>
 
 
@@ -12,36 +14,36 @@ const int RegularGridInterpolant3D<Array>::simdcount;
 
 template<class Array>
 void RegularGridInterpolant3D<Array>::interpolate_batch(std::function<Vec(Vec, Vec, Vec)> &f) {
-    int BATCH_SIZE = 16384;
-    int NUM_BATCHES = dofs_to_keep/BATCH_SIZE + (dofs_to_keep % BATCH_SIZE != 0);
-    for (int i = 0; i < NUM_BATCHES; ++i) {
-        uint32_t first = i * BATCH_SIZE;
-        uint32_t last = std::min((uint32_t)((i+1) * BATCH_SIZE), dofs_to_keep);
+    int64_t BATCH_SIZE = 16384;
+    int64_t NUM_BATCHES = dofs_to_keep/BATCH_SIZE + (dofs_to_keep % BATCH_SIZE != 0);
+    for (int64_t i = 0; i < NUM_BATCHES; ++i) {
+        int64_t first = i * BATCH_SIZE;
+        int64_t last = std::min((i+1) * BATCH_SIZE, dofs_to_keep);
         Vec xsub(xdoftensor_reduced.begin() + first, xdoftensor_reduced.begin() + last);
         Vec ysub(ydoftensor_reduced.begin() + first, ydoftensor_reduced.begin() + last);
         Vec zsub(zdoftensor_reduced.begin() + first, zdoftensor_reduced.begin() + last);
         Vec fxyzsub  = f(xsub, ysub, zsub);
-        for (int j = 0; j < last-first; ++j) {
+        for (int64_t j = 0; j < last-first; ++j) {
             for (int l = 0; l < value_size; ++l) {
                 vals[first * value_size + j * value_size + l] = fxyzsub[j * value_size + l];
             }
         }
     }
     int degree = rule.degree;
-    all_local_vals_map = std::unordered_map<int, AlignedPaddedVec>();
+    all_local_vals_map = std::unordered_map<int64_t, AlignedPaddedVec>();
     all_local_vals_map.reserve(cells_to_keep);
 
     for (int xidx = 0; xidx < nx; ++xidx) {
         for (int yidx = 0; yidx < ny; ++yidx) {
             for (int zidx = 0; zidx < nz; ++zidx) {
-                int meshidx = idx_cell(xidx, yidx, zidx);
+                int64_t meshidx = idx_cell(xidx, yidx, zidx);
                 if(skip_cell[meshidx])
                     continue;
                 AlignedPaddedVec local_vals(local_vals_size, 0.);
                 for (int i = 0; i < degree+1; ++i) {
                     for (int j = 0; j < degree+1; ++j) {
                         for (int k = 0; k < degree+1; ++k) {
-                            int offset = value_size*full_to_reduced_map[idx_dof(xidx*degree+i, yidx*degree+j, zidx*degree+k)];
+                            int64_t offset = int64_t(value_size)*full_to_reduced_map[idx_dof(xidx*degree+i, yidx*degree+j, zidx*degree+k)];
                             int offset_local = padded_value_size * idx_dof_local(i, j, k);
                             for (int l = 0; l < value_size; ++l) {
                                 local_vals[offset_local + l] = vals[offset + l];
@@ -59,8 +61,8 @@ template<class Array>
 void RegularGridInterpolant3D<Array>::evaluate_batch(Array& xyz, Array& fxyz){
     if(fxyz.layout() != xt::layout_type::row_major)
           throw std::runtime_error("fxyz needs to be in row-major storage order");
-    int npoints = xyz.shape(0);
-    for (int i = 0; i < npoints; ++i) {
+    int64_t npoints = xyz.shape(0);
+    for (int64_t i = 0; i < npoints; ++i) {
         evaluate_inplace(xyz(i, 0), xyz(i, 1), xyz(i, 2), fxyz.data() + value_size*i);
     }
 }
@@ -74,10 +76,10 @@ Vec RegularGridInterpolant3D<Array>::evaluate(double x, double y, double z){
 }
 
 template<class Array>
-int RegularGridInterpolant3D<Array>::locate_unsafe(double x, double y, double z){
-    int xidx = int(nx*(x-xmin)/(xmax-xmin)); // find idx so that xmesh[xidx] <= x <= xs[xidx+1]
-    int yidx = int(ny*(y-ymin)/(ymax-ymin));
-    int zidx = int(nz*(z-zmin)/(zmax-zmin));
+int64_t RegularGridInterpolant3D<Array>::locate_unsafe(double x, double y, double z){
+    int64_t xidx = int64_t(nx*(x-xmin)/(xmax-xmin)); // find idx so that xmesh[xidx] <= x <= xs[xidx+1]
+    int64_t yidx = int64_t(ny*(y-ymin)/(ymax-ymin));
+    int64_t zidx = int64_t(nz*(z-zmin)/(zmax-zmin));
     return idx_cell(xidx, yidx, zidx);
 }
 
@@ -93,16 +95,44 @@ void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, doubl
     if(z >= zmax) z -= _EPS_;
     else if (z <= zmin) z += _EPS_;
 
-    int xidx = int(nx*(x-xmin)/(xmax-xmin)); // find idx so that xmesh[xidx] <= x <= xs[xidx+1]
-    int yidx = int(ny*(y-ymin)/(ymax-ymin));
-    int zidx = int(nz*(z-zmin)/(zmax-zmin));
-    if(!out_of_bounds_ok){
-        if(xidx < 0 || xidx >= nx)
-            throw std::runtime_error(fmt::format("xidxs={} not within [0, {}]", xidx, nx-1));
-        if(yidx < 0 || yidx >= ny)
-            throw std::runtime_error(fmt::format("yidxs={} not within [0, {}]", yidx, ny-1));
-        if(zidx < 0 || zidx >= nz)
-            throw std::runtime_error(fmt::format("zidxs={} not within [0, {}]", zidx, nz-1));
+    double xscaled = nx*(x-xmin)/(xmax-xmin);
+    double yscaled = ny*(y-ymin)/(ymax-ymin);
+    double zscaled = nz*(z-zmin)/(zmax-zmin);
+    double int64_min = static_cast<double>(std::numeric_limits<int64_t>::min());
+    double int64_max = static_cast<double>(std::numeric_limits<int64_t>::max());
+    if(!std::isfinite(xscaled) || xscaled < int64_min || xscaled >= int64_max) {
+        if(out_of_bounds_ok)
+            return;
+        throw std::runtime_error(fmt::format("xidx scale={} is not representable as int64_t", xscaled));
+    }
+    if(!std::isfinite(yscaled) || yscaled < int64_min || yscaled >= int64_max) {
+        if(out_of_bounds_ok)
+            return;
+        throw std::runtime_error(fmt::format("yidx scale={} is not representable as int64_t", yscaled));
+    }
+    if(!std::isfinite(zscaled) || zscaled < int64_min || zscaled >= int64_max) {
+        if(out_of_bounds_ok)
+            return;
+        throw std::runtime_error(fmt::format("zidx scale={} is not representable as int64_t", zscaled));
+    }
+
+    int64_t xidx = int64_t(xscaled); // find idx so that xmesh[xidx] <= x <= xs[xidx+1]
+    int64_t yidx = int64_t(yscaled);
+    int64_t zidx = int64_t(zscaled);
+    if(xidx < 0 || xidx >= nx) {
+        if(out_of_bounds_ok)
+            return;
+        throw std::runtime_error(fmt::format("xidxs={} not within [0, {}]", xidx, nx-1));
+    }
+    if(yidx < 0 || yidx >= ny) {
+        if(out_of_bounds_ok)
+            return;
+        throw std::runtime_error(fmt::format("yidxs={} not within [0, {}]", yidx, ny-1));
+    }
+    if(zidx < 0 || zidx >= nz) {
+        if(out_of_bounds_ok)
+            return;
+        throw std::runtime_error(fmt::format("zidxs={} not within [0, {}]", zidx, nz-1));
     }
     double xlocal = (x-xmesh[xidx])/hx;
     double ylocal = (y-ymesh[yidx])/hy;
@@ -111,7 +141,7 @@ void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, doubl
 }
 
 template<class Array>
-void RegularGridInterpolant3D<Array>::evaluate_local(double x, double y, double z, int cell_idx, double* res)
+void RegularGridInterpolant3D<Array>::evaluate_local(double x, double y, double z, int64_t cell_idx, double* res)
 {
     int degree = rule.degree;
     auto got = all_local_vals_map.find(cell_idx);

@@ -37,7 +37,14 @@ from simsopt.field.magneticfieldclasses import (
 )
 from simsopt.jax_core.interpolated_field import (
     interpolated_field_B,
+    interpolated_field_B_cyl_with_initial,
     interpolated_field_GradAbsB,
+    interpolated_field_GradAbsB_cyl_with_initial,
+    make_interpolated_field_spec,
+)
+from simsopt.jax_core.regular_grid_interp import (
+    UniformInterpolationRule,
+    build_regular_grid_interpolant_3d,
 )
 
 
@@ -315,6 +322,35 @@ class TestInterpolatedFieldJAXParity:
             atol=_ATOL,
         )
 
+    def test_negative_phi_roundoff_fold_boundary_matches_cpu(self):
+        """Tiny negative phi values fold through nfp/stellsym like CPU."""
+
+        nfp = 3
+        phi_range = (0.0, 2.0 * np.pi / nfp, 8)
+        cpu, jax_ = _build_pair(nfp=nfp, stellsym=True, phi_range=phi_range)
+        radii = np.asarray([1.18, 1.31], dtype=np.float64)
+        phis = np.asarray([-1.0e-15, -2.0e-14], dtype=np.float64)
+        zetas = np.asarray([0.08, -0.12], dtype=np.float64)
+        points = np.ascontiguousarray(
+            np.stack([radii * np.cos(phis), radii * np.sin(phis), zetas], axis=1),
+            dtype=np.float64,
+        )
+
+        cpu.set_points_cart(points)
+        jax_.set_points_cart(points)
+        np.testing.assert_allclose(
+            np.asarray(jax_.B()),
+            np.asarray(cpu.B()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_.GradAbsB()),
+            np.asarray(cpu.GradAbsB()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
 
 # ── Skip mask ────────────────────────────────────────────────────────
 
@@ -371,8 +407,8 @@ class TestInterpolatedFieldJAXOutOfDomain:
             jax_.B()
 
     def test_out_of_domain_extrapolates_when_flag_set(self):
-        """When ``extrapolate=True`` both backends extrapolate via the
-        nearest spline cell. The result is the same.
+        """When ``extrapolate=True`` both backends preserve the initialized
+        output rows for out-of-domain queries. The result is the same.
         """
 
         cpu, jax_ = _build_pair(nfp=1, stellsym=False, extrapolate=True)
@@ -385,6 +421,38 @@ class TestInterpolatedFieldJAXOutOfDomain:
         np.testing.assert_allclose(
             np.asarray(jax_.B()),
             np.asarray(cpu.B()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+    def test_same_shape_out_of_domain_preserves_native_cylindrical_cache(self):
+        """Same-size OOB calls preserve the previous cylindrical output buffer."""
+
+        cpu, jax_ = _build_pair(nfp=2, stellsym=True, extrapolate=True)
+        warm = _points_in_reduced_domain(nfp=2, stellsym=True, count=2, seed=45)
+        second = warm.copy()
+        r_oob = _R_RANGE[1] + 0.05
+        phi_oob = 0.37
+        second[1] = [r_oob * np.cos(phi_oob), r_oob * np.sin(phi_oob), -0.11]
+
+        cpu.set_points_cart(warm)
+        jax_.set_points_cart(warm)
+        np.asarray(cpu.B())
+        np.asarray(jax_.B())
+        np.asarray(cpu.GradAbsB())
+        np.asarray(jax_.GradAbsB())
+
+        cpu.set_points_cart(second)
+        jax_.set_points_cart(second)
+        np.testing.assert_allclose(
+            np.asarray(jax_.B()),
+            np.asarray(cpu.B()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_.GradAbsB()),
+            np.asarray(cpu.GradAbsB()),
             rtol=_RTOL,
             atol=_ATOL,
         )
@@ -442,6 +510,34 @@ class TestInterpolatedFieldJAXCacheInvariance:
             atol=_ATOL,
         )
 
+    def test_public_invalidate_cache_invalidates_cylindrical_caches(self):
+        cpu, jax_ = _build_pair(nfp=1, stellsym=False)
+        points = _points_in_reduced_domain(nfp=1, stellsym=False, count=20, seed=63)
+        cpu.set_points_cart(points)
+        jax_.set_points_cart(points)
+
+        np.asarray(jax_.B_cyl())
+        np.asarray(jax_.GradAbsB_cyl())
+        assert jax_._B_cyl_valid
+        assert jax_._GradAbsB_cyl_valid
+
+        jax_.invalidate_cache()
+
+        assert not jax_._B_cyl_valid
+        assert not jax_._GradAbsB_cyl_valid
+        np.testing.assert_allclose(
+            np.asarray(jax_.B_cyl()),
+            np.asarray(cpu.B_cyl()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_.GradAbsB_cyl()),
+            np.asarray(cpu.GradAbsB_cyl()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
 
 # ── Transfer-guard cleanliness ──────────────────────────────────────
 
@@ -467,13 +563,74 @@ class TestInterpolatedFieldJAXTransferGuard:
         del cpu  # only the JAX side is exercised under the guard
         points_host = _points_in_reduced_domain(nfp=2, stellsym=True, count=40, seed=71)
         device_points = jnp.asarray(points_host, dtype=jnp.float64)
+        device_initial = jnp.zeros((device_points.shape[0], 3), dtype=jnp.float64)
         device_points.block_until_ready()
+        device_initial.block_until_ready()
 
         # Trigger one untraced run so the JIT cache is populated before
         # the strict-guard region.
         interpolated_field_B(jax_._spec, device_points).block_until_ready()
         interpolated_field_GradAbsB(jax_._spec, device_points).block_until_ready()
+        interpolated_field_B_cyl_with_initial(
+            jax_._spec, device_points, device_initial
+        ).block_until_ready()
+        interpolated_field_GradAbsB_cyl_with_initial(
+            jax_._spec, device_points, device_initial
+        ).block_until_ready()
 
         with jax.transfer_guard("disallow"):
             interpolated_field_B(jax_._spec, device_points).block_until_ready()
             interpolated_field_GradAbsB(jax_._spec, device_points).block_until_ready()
+            interpolated_field_B_cyl_with_initial(
+                jax_._spec, device_points, device_initial
+            ).block_until_ready()
+            interpolated_field_GradAbsB_cyl_with_initial(
+                jax_._spec, device_points, device_initial
+            ).block_until_ready()
+
+
+class TestInterpolatedFieldJAXSpecImmutability:
+    def test_regular_grid_specs_are_readonly_snapshots(self):
+        """Device cache and host spec cannot silently diverge after construction."""
+
+        def field_values(xs, ys, zs):
+            return np.stack([xs + ys, ys + zs, zs + xs], axis=1).reshape(-1)
+
+        source_B = build_regular_grid_interpolant_3d(
+            rule=UniformInterpolationRule(1),
+            xrange=(1.0, 1.2, 1),
+            yrange=(0.0, 0.2, 1),
+            zrange=(-0.1, 0.1, 1),
+            value_size=3,
+            f=field_values,
+            out_of_bounds_ok=True,
+        )
+        source_GradAbsB = build_regular_grid_interpolant_3d(
+            rule=UniformInterpolationRule(1),
+            xrange=(1.0, 1.2, 1),
+            yrange=(0.0, 0.2, 1),
+            zrange=(-0.1, 0.1, 1),
+            value_size=3,
+            f=field_values,
+            out_of_bounds_ok=True,
+        )
+        spec = make_interpolated_field_spec(
+            nfp=1,
+            stellsym=False,
+            B_spec=source_B,
+            GradAbsB_spec=source_GradAbsB,
+        )
+
+        original_cell = float(spec.B_spec.cell_table[0, 0, 0, 0, 0])
+        with pytest.raises(ValueError, match="read-only"):
+            source_B.cell_table[0, 0, 0, 0, 0] = original_cell + 123.0
+
+        assert float(spec.B_spec.cell_table[0, 0, 0, 0, 0]) == original_cell
+        assert not spec.B_spec.cell_table.flags.writeable
+        assert not spec.B_spec.rule.nodes.flags.writeable
+        assert not spec.GradAbsB_spec.cell_to_row.flags.writeable
+
+        with pytest.raises(ValueError, match="read-only"):
+            spec.B_spec.cell_table[0, 0, 0, 0, 0] = original_cell + 1.0
+        with pytest.raises(ValueError, match="read-only"):
+            spec.B_spec.rule.nodes[0] = 0.25

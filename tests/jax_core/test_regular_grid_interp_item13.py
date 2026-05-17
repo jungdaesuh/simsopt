@@ -13,6 +13,7 @@ empty-oracle case for closed-form polynomial inputs.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 import jax
@@ -23,13 +24,22 @@ import pytest
 import simsoptpp as sopp
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from benchmarks.regular_grid_skip_cell_map_benchmark import (
+    run_skip_cell_map_benchmark,
+)
 
 from simsopt.jax_core.regular_grid_interp import (
     ChebyshevInterpolationRule,
+    InterpolationRule,
+    RegularGridInterpolant3DSpec,
     UniformInterpolationRule,
+    _flat_cell_index,
     build_regular_grid_interpolant_3d,
+    build_regular_grid_interpolant_3d_device_spec,
     estimate_error,
     evaluate_batch,
+    evaluate_batch_device,
+    evaluate_batch_with_initial,
 )
 
 
@@ -68,7 +78,7 @@ _DEFAULT_ZRANGE = (1.2, 3.8, 15)
 
 
 @pytest.mark.parametrize("dim", [1, 3, 6])
-@pytest.mark.parametrize("degree", [1, 2, 3, 4])
+@pytest.mark.parametrize("degree", [1, 2, 3, 4, 5])
 def test_polynomial_exactness(dim: int, degree: int) -> None:
     """A degree-``d`` polynomial is interpolated exactly by a degree-``d`` rule.
 
@@ -184,16 +194,82 @@ def test_oob_behavior_returns_nan_when_strict() -> None:
     )
 
     lax_result = np.asarray(evaluate_batch(spec_lax, xyz_oob))
-    # For ``out_of_bounds_ok=True`` the JAX semantic is to return zero
-    # (the C++ binding leaves the caller buffer unchanged, which is not
-    # representable in a pure-functional kernel). Zero is the unique
-    # fixed point that avoids leaking stale memory.
+    # ``evaluate_batch`` uses a zero initial output buffer, so preserving
+    # C++ caller-buffer semantics produces zeros for every OOB row here.
     np.testing.assert_allclose(
         lax_result,
         np.zeros_like(lax_result),
         rtol=_DIRECT_KERNEL["rtol"],
         atol=_DIRECT_KERNEL["atol"],
     )
+
+
+def test_locator_truncates_slightly_negative_cell_coordinate() -> None:
+    """Slightly negative local coordinates stay in cell 0 like C++."""
+
+    def linear_x(xs, ys, zs):
+        del ys, zs
+        return np.asarray(xs, dtype=np.float64)
+
+    xmin = 0.0
+    xmax = 2.0
+    nx = 2
+    hx = (xmax - xmin) / nx
+    query = np.asarray([[xmin - 0.1 * hx, 0.5, 0.5]], dtype=np.float64)
+    spec = build_regular_grid_interpolant_3d(
+        rule=UniformInterpolationRule(1),
+        xrange=(xmin, xmax, nx),
+        yrange=(0.0, 1.0, 1),
+        zrange=(0.0, 1.0, 1),
+        value_size=1,
+        f=linear_x,
+        out_of_bounds_ok=True,
+    )
+
+    actual = np.asarray(evaluate_batch(spec, query)).reshape(-1)
+    np.testing.assert_allclose(
+        actual,
+        np.asarray([query[0, 0]], dtype=np.float64),
+        rtol=_DIRECT_KERNEL["rtol"],
+        atol=_DIRECT_KERNEL["atol"],
+    )
+
+
+def test_flat_cell_index_uses_int64_for_large_grid_shape() -> None:
+    """Flat cell-index arithmetic must not overflow int32."""
+
+    @jax.jit
+    def compute_index(xidx, yidx, zidx):
+        return _flat_cell_index(xidx, yidx, zidx, ny=1_000_000, nz=1_000_000)
+
+    result = compute_index(
+        jnp.asarray(999, dtype=jnp.int64),
+        jnp.asarray(999_999, dtype=jnp.int64),
+        jnp.asarray(999_999, dtype=jnp.int64),
+    )
+
+    assert result.dtype == jnp.int64
+    assert int(result) == 999_999_999_999_999
+
+
+def test_cell_to_row_table_uses_int64_indices() -> None:
+    """The host lookup table preserves the 64-bit flat-index contract."""
+
+    def linear_x(xs, ys, zs):
+        del ys, zs
+        return np.asarray(xs, dtype=np.float64)
+
+    spec = build_regular_grid_interpolant_3d(
+        rule=UniformInterpolationRule(1),
+        xrange=(0.0, 1.0, 1),
+        yrange=(0.0, 1.0, 1),
+        zrange=(0.0, 1.0, 1),
+        value_size=1,
+        f=linear_x,
+        out_of_bounds_ok=True,
+    )
+
+    assert spec.cell_to_row.dtype == np.int64
 
 
 def test_skip_region_yields_zero_inside_skipped_cells() -> None:
@@ -272,21 +348,136 @@ def test_skip_region_yields_zero_inside_skipped_cells() -> None:
     )
 
 
-@pytest.mark.parametrize("dim", [1, 3, 4])
-@pytest.mark.parametrize("degree", [1, 2, 3])
-def test_cpp_cross_oracle(dim: int, degree: int) -> None:
+def test_skip_cell_map_benchmark_smoke() -> None:
+    """The sparse-vs-dense skip-cell benchmark runs and reports its contract."""
+
+    result = run_skip_cell_map_benchmark(
+        n_cells=8,
+        degree=2,
+        value_size=2,
+        n_samples=64,
+        repeats=1,
+        seed=1317,
+    )
+
+    assert result["benchmark"] == "regular_grid_skip_cell_map"
+    assert result["total_cells"] == 8**3
+    assert 0 < result["kept_cells"] < result["total_cells"]
+    assert result["skipped_cells"] == result["total_cells"] - result["kept_cells"]
+    assert (
+        result["jax_sentinel_cell_to_row_bytes"]
+        == 8**3 * np.dtype(np.int64).itemsize
+    )
+    assert result["jax_cell_table_bytes"] > 0
+    assert result["jax_median_seconds"] >= 0.0
+    assert result["cpp_unordered_map_median_seconds"] >= 0.0
+    assert result["max_abs_error"] <= _DIRECT_KERNEL["atol"]
+
+
+def test_build_spec_returns_deep_readonly_snapshot() -> None:
+    """The public regular-grid spec cannot diverge from staged device state."""
+
+    dim = 1
+    source_nodes = np.asarray([0.0, 1.0], dtype=np.float64)
+    source_scalings = np.asarray([-1.0, 1.0], dtype=np.float64)
+    source_rule = InterpolationRule(
+        nodes=source_nodes,
+        scalings=source_scalings,
+        degree=1,
+    )
+    poly = _polynomial_factory(dim=dim, degree=1, seed=17)
+    spec = build_regular_grid_interpolant_3d(
+        rule=source_rule,
+        xrange=_DEFAULT_XRANGE,
+        yrange=_DEFAULT_YRANGE,
+        zrange=_DEFAULT_ZRANGE,
+        value_size=dim,
+        f=poly,
+        out_of_bounds_ok=True,
+    )
+
+    for array in (
+        spec.rule.nodes,
+        spec.rule.scalings,
+        spec.xmesh,
+        spec.ymesh,
+        spec.zmesh,
+        spec.cell_to_row,
+        spec.cell_table,
+    ):
+        assert not array.flags.writeable
+
+    with pytest.raises(ValueError):
+        spec.cell_table[0, 0, 0, 0, 0] = 123.0
+
+    manual_spec = RegularGridInterpolant3DSpec(
+        rule=InterpolationRule(
+            nodes=np.asarray([0.0, 1.0], dtype=np.float64),
+            scalings=np.asarray([-1.0, 1.0], dtype=np.float64),
+            degree=1,
+        ),
+        nx=1,
+        ny=1,
+        nz=1,
+        xmin=0.0,
+        xmax=1.0,
+        ymin=0.0,
+        ymax=1.0,
+        zmin=0.0,
+        zmax=1.0,
+        hx=1.0,
+        hy=1.0,
+        hz=1.0,
+        xmesh=np.asarray([0.0, 1.0], dtype=np.float64),
+        ymesh=np.asarray([0.0, 1.0], dtype=np.float64),
+        zmesh=np.asarray([0.0, 1.0], dtype=np.float64),
+        value_size=1,
+        out_of_bounds_ok=True,
+        cell_to_row=np.asarray([0], dtype=np.int64),
+        cell_table=np.zeros((2, 2, 2, 2, 1), dtype=np.float64),
+    )
+    replaced_spec = replace(spec, cell_table=np.array(spec.cell_table, copy=True))
+    for constructed_spec in (manual_spec, replaced_spec):
+        assert not constructed_spec.rule.nodes.flags.writeable
+        assert not constructed_spec.cell_table.flags.writeable
+        with pytest.raises(ValueError):
+            constructed_spec.cell_table[0, 0, 0, 0, 0] = 456.0
+
+    query = np.asarray([[2.1, 2.0, 1.8]], dtype=np.float64)
+    expected = np.asarray(evaluate_batch(spec, query))
+    source_nodes[:] = [0.25, 0.75]
+    source_scalings[:] = [1.0, 1.0]
+    actual = np.asarray(evaluate_batch(spec, query))
+    np.testing.assert_allclose(
+        actual,
+        expected,
+        rtol=_DIRECT_KERNEL["rtol"],
+        atol=_DIRECT_KERNEL["atol"],
+    )
+
+
+@pytest.mark.parametrize("dim", [1, 3, 4, 5, 7, 8])
+@pytest.mark.parametrize("degree", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize(
+    "rule_factory_jax,rule_factory_sopp",
+    [
+        (UniformInterpolationRule, sopp.UniformInterpolationRule),
+        (ChebyshevInterpolationRule, sopp.ChebyshevInterpolationRule),
+    ],
+)
+def test_cpp_cross_oracle(dim: int, degree: int, rule_factory_jax, rule_factory_sopp) -> None:
     """Parity vs ``simsoptpp.RegularGridInterpolant3D`` at the
     ``direct_kernel`` lane (tolerances imported via
     ``parity_ladder_tolerances("direct_kernel")``).
 
     Both kernels consume the same separable polynomial and the same
-    evaluation points. The JAX kernel uses ``jnp.einsum`` for the
-    tensor contraction so it matches the C++ SIMD-FMA loop within
-    float64 ULP noise even at degree 3 with vector value size 4.
+    evaluation points. The JAX kernel uses a ``lax.fori_loop`` tensor
+    contraction in C++ loop order, matching the SIMD-FMA loop within
+    float64 ULP noise across degrees and vector value sizes.
     """
     poly = _polynomial_factory(dim=dim, degree=degree, seed=0)
-    rule_jax = UniformInterpolationRule(degree)
-    rule_sopp = sopp.UniformInterpolationRule(degree)
+    rule_jax = rule_factory_jax(degree)
+    rule_sopp = rule_factory_sopp(degree)
 
     spec = build_regular_grid_interpolant_3d(
         rule=rule_jax,
@@ -404,6 +595,177 @@ def test_cpp_cross_oracle_with_skip_mask() -> None:
     )
 
 
+def test_out_of_bounds_ok_preserves_initial_output_like_cpp_buffer() -> None:
+    """JAX can mirror the C++ ``evaluate_batch(xyz, fxyz)`` buffer contract."""
+
+    dim = 3
+    degree = 2
+    xran = _DEFAULT_XRANGE
+    yran = _DEFAULT_YRANGE
+    zran = _DEFAULT_ZRANGE
+    poly = _polynomial_factory(dim=dim, degree=degree, seed=19)
+
+    def skip(xs, _ys, _zs):
+        return (np.asarray(xs) < 2.0).tolist()
+
+    spec = build_regular_grid_interpolant_3d(
+        rule=UniformInterpolationRule(degree),
+        xrange=xran,
+        yrange=yran,
+        zrange=zran,
+        value_size=dim,
+        f=poly,
+        out_of_bounds_ok=True,
+        skip=skip,
+    )
+    cpp_interpolant = sopp.RegularGridInterpolant3D(
+        sopp.UniformInterpolationRule(degree),
+        xran,
+        yran,
+        zran,
+        dim,
+        True,
+        skip,
+    )
+    cpp_interpolant.interpolate_batch(poly)
+
+    xyz = np.asarray(
+        [
+            [2.4, 2.6, 2.8],
+            [1.3, 1.3, 1.3],
+            [xran[1] + 0.1, yran[1] + 0.1, zran[1] + 0.1],
+            [xran[1] + 1000.0, yran[0] - 1000.0, zran[1] + 1000.0],
+        ],
+        dtype=np.float64,
+    )
+    initial = np.arange(xyz.shape[0] * dim, dtype=np.float64).reshape(
+        xyz.shape[0], dim
+    )
+    initial += 10.0
+
+    jax_result = np.asarray(evaluate_batch_with_initial(spec, xyz, initial))
+    cpp_result = initial.copy()
+    cpp_interpolant.evaluate_batch(np.ascontiguousarray(xyz), cpp_result)
+
+    np.testing.assert_allclose(
+        jax_result,
+        cpp_result,
+        rtol=_DIRECT_KERNEL["rtol"],
+        atol=_DIRECT_KERNEL["atol"],
+    )
+    np.testing.assert_allclose(jax_result[1:], initial[1:])
+
+
+def test_cpp_cross_oracle_degree5_high_magnitude_cells() -> None:
+    """Degree-5 parity survives large coordinate offsets."""
+
+    dim = 5
+    degree = 5
+    xran = (1.0e8, 1.0e8 + 3.0, 3)
+    yran = (-2.0e8, -2.0e8 + 2.5, 3)
+    zran = (3.0e8, 3.0e8 + 4.0, 4)
+
+    def scaled_polynomial(xs, ys, zs):
+        x = (np.asarray(xs) - xran[0]) / (xran[1] - xran[0])
+        y = (np.asarray(ys) - yran[0]) / (yran[1] - yran[0])
+        z = (np.asarray(zs) - zran[0]) / (zran[1] - zran[0])
+        values = np.stack(
+            [
+                1.0 + x + y + z,
+                x**2 - 0.5 * y + z**3,
+                x**3 + y**2 - z,
+                x**4 - y**3 + 0.25 * z**2,
+                x**5 + y**4 - z**2,
+            ],
+            axis=1,
+        )
+        return np.ascontiguousarray(values).ravel()
+
+    rule_jax = UniformInterpolationRule(degree)
+    rule_sopp = sopp.UniformInterpolationRule(degree)
+    spec = build_regular_grid_interpolant_3d(
+        rule=rule_jax,
+        xrange=xran,
+        yrange=yran,
+        zrange=zran,
+        value_size=dim,
+        f=scaled_polynomial,
+        out_of_bounds_ok=True,
+    )
+    cpp_interpolant = sopp.RegularGridInterpolant3D(
+        rule_sopp,
+        xran,
+        yran,
+        zran,
+        dim,
+        True,
+    )
+    cpp_interpolant.interpolate_batch(scaled_polynomial)
+
+    rng = np.random.RandomState(31)
+    nsamples = 64
+    xyz = np.stack(
+        [
+            rng.uniform(xran[0], xran[1], size=nsamples),
+            rng.uniform(yran[0], yran[1], size=nsamples),
+            rng.uniform(zran[0], zran[1], size=nsamples),
+        ],
+        axis=1,
+    )
+    jax_result = np.asarray(evaluate_batch(spec, xyz))
+    cpp_result = np.zeros((nsamples, dim), dtype=np.float64)
+    cpp_interpolant.evaluate_batch(np.ascontiguousarray(xyz), cpp_result)
+
+    np.testing.assert_allclose(
+        jax_result,
+        cpp_result,
+        rtol=_DIRECT_KERNEL["rtol"],
+        atol=_DIRECT_KERNEL["atol"],
+    )
+
+
+def test_cpp_cross_oracle_nan_input_contract() -> None:
+    """NaN coordinates propagate consistently through JAX and C++ kernels."""
+
+    dim = 3
+    degree = 2
+    poly = _polynomial_factory(dim=dim, degree=degree, seed=5)
+    rule_jax = UniformInterpolationRule(degree)
+    rule_sopp = sopp.UniformInterpolationRule(degree)
+    spec = build_regular_grid_interpolant_3d(
+        rule=rule_jax,
+        xrange=_DEFAULT_XRANGE,
+        yrange=_DEFAULT_YRANGE,
+        zrange=_DEFAULT_ZRANGE,
+        value_size=dim,
+        f=poly,
+        out_of_bounds_ok=True,
+    )
+    cpp_interpolant = sopp.RegularGridInterpolant3D(
+        rule_sopp,
+        _DEFAULT_XRANGE,
+        _DEFAULT_YRANGE,
+        _DEFAULT_ZRANGE,
+        dim,
+        True,
+    )
+    cpp_interpolant.interpolate_batch(poly)
+
+    xyz = np.asarray(
+        [
+            [np.nan, 2.0, 2.0],
+            [2.0, np.nan, 2.0],
+            [2.0, 2.0, np.nan],
+        ],
+        dtype=np.float64,
+    )
+    jax_result = np.asarray(evaluate_batch(spec, xyz))
+    cpp_result = np.zeros((xyz.shape[0], dim), dtype=np.float64)
+    cpp_interpolant.evaluate_batch(np.ascontiguousarray(xyz), cpp_result)
+
+    np.testing.assert_array_equal(np.isnan(jax_result), np.isnan(cpp_result))
+
+
 def test_estimate_error_returns_bracket_for_polynomial() -> None:
     """For a polynomial of degree ``d``, a degree-``d`` rule returns a
     tight bracket around zero. This exercises the
@@ -422,9 +784,22 @@ def test_estimate_error_returns_bracket_for_polynomial() -> None:
         f=poly,
         out_of_bounds_ok=True,
     )
+    cpp_interpolant = sopp.RegularGridInterpolant3D(
+        sopp.UniformInterpolationRule(degree),
+        _DEFAULT_XRANGE,
+        _DEFAULT_YRANGE,
+        _DEFAULT_ZRANGE,
+        dim,
+        True,
+    )
+    cpp_interpolant.interpolate_batch(poly)
+
     low, high = estimate_error(spec, poly, samples=200, seed=2026)
+    cpp_low, cpp_high = cpp_interpolant.estimate_error(poly, 200)
     assert math.isfinite(low) and math.isfinite(high)
     assert low <= high
+    assert math.isfinite(cpp_low) and math.isfinite(cpp_high)
+    assert cpp_low <= cpp_high
     # Polynomial exactness; both ends sit near machine zero. The
     # ``derivative_heavy`` first-derivative atol is the closest published
     # parity floor and is a comfortable upper bound for the dimensionless
@@ -434,6 +809,14 @@ def test_estimate_error_returns_bracket_for_polynomial() -> None:
     ]
     assert abs(low) < _bracket_floor
     assert abs(high) < _bracket_floor
+    assert abs(cpp_low) < _bracket_floor
+    assert abs(cpp_high) < _bracket_floor
+    np.testing.assert_allclose(
+        np.asarray([low, high]),
+        np.asarray([cpp_low, cpp_high]),
+        rtol=_DIRECT_KERNEL["rtol"],
+        atol=_bracket_floor,
+    )
 
 
 def test_evaluate_batch_is_jit_traceable_and_returns_device_array() -> None:
@@ -473,6 +856,81 @@ def test_evaluate_batch_is_jit_traceable_and_returns_device_array() -> None:
     np.testing.assert_allclose(
         np.asarray(wrapped_result),
         np.asarray(result),
+        rtol=_DIRECT_KERNEL["rtol"],
+        atol=_DIRECT_KERNEL["atol"],
+    )
+
+
+def test_device_spec_evaluate_batch_runs_under_strict_transfer_guard() -> None:
+    """Pre-staged regular-grid specs keep the hot path free of host transfers."""
+
+    dim = 3
+    degree = 2
+    poly = _polynomial_factory(dim=dim, degree=degree, seed=23)
+    spec = build_regular_grid_interpolant_3d(
+        rule=UniformInterpolationRule(degree),
+        xrange=_DEFAULT_XRANGE,
+        yrange=_DEFAULT_YRANGE,
+        zrange=_DEFAULT_ZRANGE,
+        value_size=dim,
+        f=poly,
+        out_of_bounds_ok=True,
+    )
+    device_spec = build_regular_grid_interpolant_3d_device_spec(spec)
+    xyz = jnp.asarray(
+        [
+            [2.1, 2.0, 1.8],
+            [3.2, 3.0, 2.5],
+        ],
+        dtype=jnp.float64,
+    )
+    initial = jnp.zeros((xyz.shape[0], dim), dtype=jnp.float64)
+
+    expected = evaluate_batch_device(
+        device_spec,
+        xyz,
+        initial_output=initial,
+    )
+    expected_default = evaluate_batch_device(device_spec, xyz)
+    expected.block_until_ready()
+    expected_default.block_until_ready()
+
+    with jax.transfer_guard("disallow"):
+        actual = evaluate_batch_device(
+            device_spec,
+            xyz,
+            initial_output=initial,
+        )
+        actual_default = evaluate_batch_device(device_spec, xyz)
+        actual.block_until_ready()
+        actual_default.block_until_ready()
+
+    xyz_host = np.asarray(xyz)
+    initial_host = np.asarray(initial)
+    with jax.transfer_guard("disallow"):
+        guarded_device_spec = build_regular_grid_interpolant_3d_device_spec(spec)
+        actual_with_explicit_staging = evaluate_batch_device(
+            guarded_device_spec,
+            xyz_host,
+            initial_output=initial_host,
+        )
+        actual_with_explicit_staging.block_until_ready()
+
+    np.testing.assert_allclose(
+        np.asarray(actual),
+        np.asarray(expected),
+        rtol=_DIRECT_KERNEL["rtol"],
+        atol=_DIRECT_KERNEL["atol"],
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual_default),
+        np.asarray(expected_default),
+        rtol=_DIRECT_KERNEL["rtol"],
+        atol=_DIRECT_KERNEL["atol"],
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual_with_explicit_staging),
+        np.asarray(expected),
         rtol=_DIRECT_KERNEL["rtol"],
         atol=_DIRECT_KERNEL["atol"],
     )

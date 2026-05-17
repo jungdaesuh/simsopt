@@ -33,11 +33,12 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from .regular_grid_interp import (
+    RegularGridInterpolant3DDeviceSpec,
     RegularGridInterpolant3DSpec,
     _evaluate_batch_jit,
+    build_regular_grid_interpolant_3d_device_spec,
 )
 
 
@@ -57,19 +58,18 @@ class InterpolatedFieldSpec:
       reduced-symmetry mesh.
     - ``GradAbsB_spec``: same, for the cylindrical
       :math:`\\nabla |B|` triple.
-    - ``_device_B``, ``_device_GradAbsB``: device-resident array
-      bundles staged once at construction time so the JAX evaluation
-      path stays clean under
-      :func:`jax.transfer_guard("disallow")`. Built by
-      :func:`make_interpolated_field_spec`.
+    - ``_device_B``, ``_device_GradAbsB``:
+      :class:`RegularGridInterpolant3DDeviceSpec` bundles staged once at
+      construction time so the JAX evaluation path stays clean under
+      :func:`jax.transfer_guard("disallow")`.
     """
 
     nfp: int
     stellsym: bool
     B_spec: RegularGridInterpolant3DSpec
     GradAbsB_spec: RegularGridInterpolant3DSpec
-    _device_B: object  # _DeviceSpec; ordered before its definition.
-    _device_GradAbsB: object  # _DeviceSpec.
+    _device_B: RegularGridInterpolant3DDeviceSpec
+    _device_GradAbsB: RegularGridInterpolant3DDeviceSpec
 
 
 def make_interpolated_field_spec(
@@ -86,8 +86,8 @@ def make_interpolated_field_spec(
         stellsym=bool(stellsym),
         B_spec=B_spec,
         GradAbsB_spec=GradAbsB_spec,
-        _device_B=_build_device_spec(B_spec),
-        _device_GradAbsB=_build_device_spec(GradAbsB_spec),
+        _device_B=build_regular_grid_interpolant_3d_device_spec(B_spec),
+        _device_GradAbsB=build_regular_grid_interpolant_3d_device_spec(GradAbsB_spec),
     )
 
 
@@ -228,7 +228,179 @@ def _cyl_vector_to_cart(field_cyl: jax.Array, phi: jax.Array) -> jax.Array:
         "out_of_bounds_ok",
     ),
 )
+def _evaluate_cyl_field_jit(
+    points_cart: jax.Array,
+    initial_cyl: jax.Array,
+    *,
+    cell_table: jax.Array,
+    cell_to_row: jax.Array,
+    nodes: jax.Array,
+    scalings: jax.Array,
+    xmesh: jax.Array,
+    ymesh: jax.Array,
+    zmesh: jax.Array,
+    xmin: jax.Array,
+    xmax: jax.Array,
+    ymin: jax.Array,
+    ymax: jax.Array,
+    zmin: jax.Array,
+    zmax: jax.Array,
+    hx: jax.Array,
+    hy: jax.Array,
+    hz: jax.Array,
+    nx: jax.Array,
+    ny: jax.Array,
+    nz: jax.Array,
+    sentinel_row: jax.Array,
+    nfp: int,
+    stellsym: bool,
+    unfold_kind: int,
+    degree: int,
+    value_size: int,
+    out_of_bounds_ok: bool,
+) -> jax.Array:
+    """Symmetry-fold + rectangular kernel + cylindrical cache preservation.
+
+    The kernel is wrapped in a single ``jit`` boundary so the host-side
+    helper can pre-stage all device arrays once per call. The
+    ``unfold_kind`` selector is statically baked into the trace:
+
+    - ``unfold_kind == 0``: ``B`` semantics. ``sign_br`` flips
+      :math:`B_r` only.
+    - ``unfold_kind == 1``: ``\\nabla|B|`` semantics. ``sign_br`` flips
+      the ``\\phi`` and ``z`` components.
+    """
+
+    r, phi, z = _cart_to_cyl(points_cart)
+    r_fold, phi_fold, z_fold, sign_br = _fold_symmetry(
+        r, phi, z, nfp=nfp, stellsym=stellsym
+    )
+    query = jnp.stack([r_fold, phi_fold, z_fold], axis=1)
+    # Native InterpolatedField applies symmetry signs after evaluate_batch,
+    # so skipped/OOB rows preserve the old output buffer first and are then
+    # transformed by the current query's symmetry flags.
+    field_cyl_fold = _evaluate_batch_jit(
+        query,
+        initial_output=initial_cyl,
+        cell_table=cell_table,
+        cell_to_row=cell_to_row,
+        nodes=nodes,
+        scalings=scalings,
+        xmesh=xmesh,
+        ymesh=ymesh,
+        zmesh=zmesh,
+        xmin=xmin,
+        xmax=xmax,
+        ymin=ymin,
+        ymax=ymax,
+        zmin=zmin,
+        zmax=zmax,
+        hx=hx,
+        hy=hy,
+        hz=hz,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        sentinel_row=sentinel_row,
+        degree=degree,
+        value_size=value_size,
+        out_of_bounds_ok=out_of_bounds_ok,
+    )
+    if unfold_kind == 0:
+        return _unfold_B_cyl(field_cyl_fold, sign_br)
+    return _unfold_GradAbsB_cyl(field_cyl_fold, sign_br)
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "nfp",
+        "stellsym",
+        "unfold_kind",
+        "degree",
+        "value_size",
+        "out_of_bounds_ok",
+    ),
+)
 def _evaluate_cart_field_jit(
+    points_cart: jax.Array,
+    initial_cyl: jax.Array,
+    *,
+    cell_table: jax.Array,
+    cell_to_row: jax.Array,
+    nodes: jax.Array,
+    scalings: jax.Array,
+    xmesh: jax.Array,
+    ymesh: jax.Array,
+    zmesh: jax.Array,
+    xmin: jax.Array,
+    xmax: jax.Array,
+    ymin: jax.Array,
+    ymax: jax.Array,
+    zmin: jax.Array,
+    zmax: jax.Array,
+    hx: jax.Array,
+    hy: jax.Array,
+    hz: jax.Array,
+    nx: jax.Array,
+    ny: jax.Array,
+    nz: jax.Array,
+    sentinel_row: jax.Array,
+    nfp: int,
+    stellsym: bool,
+    unfold_kind: int,
+    degree: int,
+    value_size: int,
+    out_of_bounds_ok: bool,
+) -> jax.Array:
+    """Evaluate the cylindrical kernel and rotate the result to Cartesian."""
+
+    _, phi, _ = _cart_to_cyl(points_cart)
+    field_cyl = _evaluate_cyl_field_jit(
+        points_cart,
+        initial_cyl,
+        cell_table=cell_table,
+        cell_to_row=cell_to_row,
+        nodes=nodes,
+        scalings=scalings,
+        xmesh=xmesh,
+        ymesh=ymesh,
+        zmesh=zmesh,
+        xmin=xmin,
+        xmax=xmax,
+        ymin=ymin,
+        ymax=ymax,
+        zmin=zmin,
+        zmax=zmax,
+        hx=hx,
+        hy=hy,
+        hz=hz,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        sentinel_row=sentinel_row,
+        nfp=nfp,
+        stellsym=stellsym,
+        unfold_kind=unfold_kind,
+        degree=degree,
+        value_size=value_size,
+        out_of_bounds_ok=out_of_bounds_ok,
+    )
+    return _cyl_vector_to_cart(field_cyl, phi)
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "nfp",
+        "stellsym",
+        "unfold_kind",
+        "degree",
+        "value_size",
+        "out_of_bounds_ok",
+    ),
+)
+def _evaluate_cart_field_zero_jit(
     points_cart: jax.Array,
     *,
     cell_table: jax.Array,
@@ -258,25 +430,9 @@ def _evaluate_cart_field_jit(
     value_size: int,
     out_of_bounds_ok: bool,
 ) -> jax.Array:
-    """Symmetry-fold + rectangular kernel + cylindrical-to-Cartesian.
-
-    The kernel is wrapped in a single ``jit`` boundary so the host-side
-    helper can pre-stage all device arrays once per call. The
-    ``unfold_kind`` selector is statically baked into the trace:
-
-    - ``unfold_kind == 0``: ``B`` semantics. ``sign_br`` flips
-      :math:`B_r` only.
-    - ``unfold_kind == 1``: ``\\nabla|B|`` semantics. ``sign_br`` flips
-      the ``\\phi`` and ``z`` components.
-    """
-
-    r, phi, z = _cart_to_cyl(points_cart)
-    r_fold, phi_fold, z_fold, sign_br = _fold_symmetry(
-        r, phi, z, nfp=nfp, stellsym=stellsym
-    )
-    query = jnp.stack([r_fold, phi_fold, z_fold], axis=1)
-    field_cyl_fold = _evaluate_batch_jit(
-        query,
+    return _evaluate_cart_field_jit(
+        points_cart,
+        jnp.zeros((points_cart.shape[0], value_size), dtype=jnp.float64),
         cell_table=cell_table,
         cell_to_row=cell_to_row,
         nodes=nodes,
@@ -297,108 +453,66 @@ def _evaluate_cart_field_jit(
         ny=ny,
         nz=nz,
         sentinel_row=sentinel_row,
+        nfp=nfp,
+        stellsym=stellsym,
+        unfold_kind=unfold_kind,
         degree=degree,
         value_size=value_size,
         out_of_bounds_ok=out_of_bounds_ok,
     )
-    if unfold_kind == 0:
-        field_cyl = _unfold_B_cyl(field_cyl_fold, sign_br)
-    else:
-        field_cyl = _unfold_GradAbsB_cyl(field_cyl_fold, sign_br)
-    return _cyl_vector_to_cart(field_cyl, phi)
 
 
-@dataclass(frozen=True)
-class _DeviceSpec:
-    """Device-resident bundle of spec arrays plus static metadata.
-
-    Built once per :class:`InterpolatedFieldSpec` and cached on the
-    spec via :func:`_device_spec_for`. Pre-staging every spec entry to
-    device this way keeps the JAX evaluation path clean under
-    :func:`jax.transfer_guard("disallow")`.
-    """
-
-    cell_table: jax.Array
-    cell_to_row: jax.Array
-    nodes: jax.Array
-    scalings: jax.Array
-    xmesh: jax.Array
-    ymesh: jax.Array
-    zmesh: jax.Array
-    xmin: jax.Array
-    xmax: jax.Array
-    ymin: jax.Array
-    ymax: jax.Array
-    zmin: jax.Array
-    zmax: jax.Array
-    hx: jax.Array
-    hy: jax.Array
-    hz: jax.Array
-    nx: jax.Array
-    ny: jax.Array
-    nz: jax.Array
-    sentinel_row: jax.Array
-    degree: int
-    value_size: int
-    out_of_bounds_ok: bool
-
-
-def _build_device_spec(spec: RegularGridInterpolant3DSpec) -> _DeviceSpec:
-    """Stage every spec field to a device array up-front.
-
-    ``jnp.asarray(scalar)`` triggers a host-to-device transfer that the
-    strict transfer guard rejects, so the public entry points must not
-    call it inside the ``transfer_guard("disallow")`` scope. We
-    pre-stage everything here once and reuse the resulting bundle on
-    every kernel call.
-    """
-
-    cell_table = jnp.asarray(spec.cell_table, dtype=jnp.float64)
-    return _DeviceSpec(
-        cell_table=cell_table,
-        cell_to_row=jnp.asarray(spec.cell_to_row, dtype=jnp.int32),
-        nodes=jnp.asarray(spec.rule.nodes, dtype=jnp.float64),
-        scalings=jnp.asarray(spec.rule.scalings, dtype=jnp.float64),
-        xmesh=jnp.asarray(spec.xmesh, dtype=jnp.float64),
-        ymesh=jnp.asarray(spec.ymesh, dtype=jnp.float64),
-        zmesh=jnp.asarray(spec.zmesh, dtype=jnp.float64),
-        xmin=jnp.asarray(spec.xmin, dtype=jnp.float64),
-        xmax=jnp.asarray(spec.xmax, dtype=jnp.float64),
-        ymin=jnp.asarray(spec.ymin, dtype=jnp.float64),
-        ymax=jnp.asarray(spec.ymax, dtype=jnp.float64),
-        zmin=jnp.asarray(spec.zmin, dtype=jnp.float64),
-        zmax=jnp.asarray(spec.zmax, dtype=jnp.float64),
-        hx=jnp.asarray(spec.hx, dtype=jnp.float64),
-        hy=jnp.asarray(spec.hy, dtype=jnp.float64),
-        hz=jnp.asarray(spec.hz, dtype=jnp.float64),
-        nx=jnp.asarray(spec.nx, dtype=jnp.int32),
-        ny=jnp.asarray(spec.ny, dtype=jnp.int32),
-        nz=jnp.asarray(spec.nz, dtype=jnp.int32),
-        sentinel_row=jnp.asarray(cell_table.shape[0] - 1, dtype=jnp.int32),
-        degree=int(spec.rule.degree),
-        value_size=int(spec.value_size),
-        out_of_bounds_ok=bool(spec.out_of_bounds_ok),
-    )
-
-
-def _evaluate_cart_field(
+def _evaluate_cart_field_zero(
     points_cart: jax.Array,
     *,
-    device_spec: _DeviceSpec,
+    device_spec: RegularGridInterpolant3DDeviceSpec,
     nfp: int,
     stellsym: bool,
     unfold_kind: int,
 ) -> jax.Array:
-    """Dispatch the JIT kernel using the pre-staged device spec.
-
-    The ``RegularGridInterpolant3DSpec`` dataclass holds host-resident
-    NumPy arrays; staging them to device arrays once at construction
-    time (see :class:`_DeviceSpec`) lets every subsequent call avoid
-    the host-to-device transfer that the strict transfer guard rejects.
-    """
-
-    return _evaluate_cart_field_jit(
+    return _evaluate_cart_field_zero_jit(
         points_cart,
+        cell_table=device_spec.cell_table,
+        cell_to_row=device_spec.cell_to_row,
+        nodes=device_spec.nodes,
+        scalings=device_spec.scalings,
+        xmesh=device_spec.xmesh,
+        ymesh=device_spec.ymesh,
+        zmesh=device_spec.zmesh,
+        xmin=device_spec.xmin,
+        xmax=device_spec.xmax,
+        ymin=device_spec.ymin,
+        ymax=device_spec.ymax,
+        zmin=device_spec.zmin,
+        zmax=device_spec.zmax,
+        hx=device_spec.hx,
+        hy=device_spec.hy,
+        hz=device_spec.hz,
+        nx=device_spec.nx,
+        ny=device_spec.ny,
+        nz=device_spec.nz,
+        sentinel_row=device_spec.sentinel_row,
+        nfp=int(nfp),
+        stellsym=bool(stellsym),
+        unfold_kind=int(unfold_kind),
+        degree=device_spec.degree,
+        value_size=device_spec.value_size,
+        out_of_bounds_ok=device_spec.out_of_bounds_ok,
+    )
+
+
+def _evaluate_cyl_field(
+    points_cart: jax.Array,
+    *,
+    initial_cyl: jax.Array,
+    device_spec: RegularGridInterpolant3DDeviceSpec,
+    nfp: int,
+    stellsym: bool,
+    unfold_kind: int,
+) -> jax.Array:
+    return _evaluate_cyl_field_jit(
+        points_cart,
+        initial_cyl,
         cell_table=device_spec.cell_table,
         cell_to_row=device_spec.cell_to_row,
         nodes=device_spec.nodes,
@@ -444,7 +558,7 @@ def interpolated_field_B(
         ``(N, 3)`` Cartesian ``B`` vectors.
     """
 
-    return _evaluate_cart_field(
+    return _evaluate_cart_field_zero(
         points_cart,
         device_spec=spec._device_B,
         nfp=int(spec.nfp),
@@ -466,8 +580,44 @@ def interpolated_field_GradAbsB(
         ``(N, 3)`` Cartesian ``\\nabla |B|`` vectors.
     """
 
-    return _evaluate_cart_field(
+    return _evaluate_cart_field_zero(
         points_cart,
+        device_spec=spec._device_GradAbsB,
+        nfp=int(spec.nfp),
+        stellsym=bool(spec.stellsym),
+        unfold_kind=1,
+    )
+
+
+def interpolated_field_B_cyl_with_initial(
+    spec: InterpolatedFieldSpec, points_cart: jax.Array, initial_cyl: jax.Array
+) -> jax.Array:
+    """Evaluate cylindrical ``B`` while preserving supplied output rows.
+
+    ``initial_cyl`` is the previous cylindrical cache contents for the
+    same point-buffer shape. It matches the native
+    ``InterpolatedField::_B_cyl_impl`` contract: skipped or out-of-domain
+    rows are left untouched when ``extrapolate=True``.
+    """
+
+    return _evaluate_cyl_field(
+        points_cart,
+        initial_cyl=initial_cyl,
+        device_spec=spec._device_B,
+        nfp=int(spec.nfp),
+        stellsym=bool(spec.stellsym),
+        unfold_kind=0,
+    )
+
+
+def interpolated_field_GradAbsB_cyl_with_initial(
+    spec: InterpolatedFieldSpec, points_cart: jax.Array, initial_cyl: jax.Array
+) -> jax.Array:
+    """Evaluate cylindrical ``\\nabla|B|`` with native cache semantics."""
+
+    return _evaluate_cyl_field(
+        points_cart,
+        initial_cyl=initial_cyl,
         device_spec=spec._device_GradAbsB,
         nfp=int(spec.nfp),
         stellsym=bool(spec.stellsym),
@@ -478,34 +628,8 @@ def interpolated_field_GradAbsB(
 __all__ = [
     "InterpolatedFieldSpec",
     "interpolated_field_B",
+    "interpolated_field_B_cyl_with_initial",
     "interpolated_field_GradAbsB",
+    "interpolated_field_GradAbsB_cyl_with_initial",
     "make_interpolated_field_spec",
 ]
-
-
-# ── Internal exports for the field-class wrapper ─────────────────────
-
-
-def _fold_symmetry_numpy(
-    r: np.ndarray,
-    phi: np.ndarray,
-    z: np.ndarray,
-    *,
-    nfp: int,
-    stellsym: bool,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Host-side mirror of :func:`_fold_symmetry`.
-
-    The wrapper class calls this once at construction time to pre-shape
-    the mesh-sampling callbacks. Kept consistent with the JAX path so a
-    test can compare both fold paths if needed.
-    """
-
-    reflect = bool(stellsym) & (z < 0.0)
-    z_pre = np.where(reflect, -z, z)
-    phi_pre = np.where(reflect, 2.0 * np.pi - phi, phi)
-    sign_br = np.where(reflect, -1.0, 1.0)
-    period = 2.0 * np.pi / float(nfp)
-    phi_wrapped = np.where(phi_pre < 0.0, phi_pre + 2.0 * np.pi, phi_pre)
-    phi_folded = np.mod(phi_wrapped, period)
-    return r, phi_folded, z_pre, sign_br
