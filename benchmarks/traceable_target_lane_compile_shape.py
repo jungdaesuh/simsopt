@@ -145,8 +145,8 @@ def _profile_coil_dofs(bs) -> jax.Array:
     )
 
 
-def _build_seeded_value_and_grad(boozer_surface, bs, iota_target: float):
-    return single_stage_example.build_traceable_single_stage_seeded_value_and_grad(
+def _build_optimizer_value_and_grad(boozer_surface, bs, iota_target: float):
+    return single_stage_example.build_traceable_single_stage_value_and_grad(
         boozer_surface,
         bs,
         iota_target,
@@ -196,9 +196,7 @@ def _build_real_single_stage_fixture(args: argparse.Namespace, boozer_kind: str)
             "stage2_bs_path": fixture["stage2_bs_path"],
             "surface_shape": fixture["surface_shape"],
             "boozer_optimizer_backend": fixture["boozer_optimizer_backend"],
-            "boozer_least_squares_algorithm": fixture[
-                "boozer_least_squares_algorithm"
-            ],
+            "boozer_least_squares_algorithm": fixture["boozer_least_squares_algorithm"],
             "boozer_limited_memory": fixture["boozer_limited_memory"],
         },
     }
@@ -334,11 +332,15 @@ def _measure_kind(args: argparse.Namespace, boozer_kind: str) -> dict[str, objec
     iota_target = fixture["iota_target"]
     coil_dofs = _profile_coil_dofs(bs)
 
-    seeded = _build_seeded_value_and_grad(boozer_surface, bs, iota_target)
+    optimizer_value_and_grad = _build_optimizer_value_and_grad(
+        boozer_surface,
+        bs,
+        iota_target,
+    )
     measurements = [
         summarize_lowered_callable(
-            f"{boozer_kind}.seeded_value_and_grad",
-            seeded.value_and_grad,
+            f"{boozer_kind}.optimizer_value_and_grad",
+            optimizer_value_and_grad,
             coil_dofs,
         )
     ]

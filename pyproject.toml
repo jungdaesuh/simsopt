@@ -84,6 +84,12 @@ JAX = [
     "numpy>=2.0,<2.5",
     "scipy>=1.13",
 ]
+JAX_OPTIMISTIX = [
+    "simsopt[JAX]",
+    'optimistix>=0.1; python_version >= "3.11"',
+    'lineax>=0.1.1; python_version >= "3.11"',
+    'equinox>=0.11.11; python_version >= "3.11"',
+]
 JAX_GPU = [
     "jax[cuda12]",
     "numpy>=2.0,<2.5",

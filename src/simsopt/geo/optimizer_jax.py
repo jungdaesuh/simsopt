@@ -13,6 +13,8 @@ Least-squares methods:
     residual-vector objectives on the target lane.
   - ``method="lm-minpack-ondevice"``: trace-safe dense-QR
     Levenberg-Marquardt for residual-vector objectives on the target lane.
+  - ``method="optimistix-lm-ondevice"``: optional Optimistix
+    Levenberg-Marquardt lane with a Lineax LSMR inner solve.
 
 LM family note:
   Neither ``"lm"`` nor ``"lm-ondevice"`` is a port of MINPACK ``lmder``
@@ -44,6 +46,11 @@ LM family note:
   augmented-system step, so it matches MINPACK's QR conditioning model at
   tolerance level without claiming MINPACK's packed-QR byte identity.
 
+  The opt-in ``"optimistix-lm-ondevice"`` lane delegates the nonlinear
+  least-squares loop to Optimistix and the inner linear solves to Lineax LSMR.
+  It is tolerance-equivalent to the in-tree JAX LM family, not a MINPACK
+  parity lane, and requires the optional ``JAX_OPTIMISTIX`` dependency extra.
+
   Consequence: the JAX LM lanes are **tolerance-equivalent** to MINPACK
   ``lmder`` on well-conditioned fixtures but **not byte-equivalent**;
   ``"lm"`` (reference, host-driven) and ``"lm-ondevice"`` (target,
@@ -53,7 +60,10 @@ LM family note:
   ``optimizer_backend="ondevice"`` + ``least_squares_algorithm="lm"``
   to engage the matrix-free on-device LM lane, or
   ``optimizer_backend="ondevice"`` + ``least_squares_algorithm="lm-minpack"``
-  to engage the dense pivoted-QR LM lane.
+  to engage the dense pivoted-QR LM lane, or
+  ``optimizer_backend="ondevice"`` +
+  ``least_squares_algorithm="optimistix-lm"`` to engage the optional
+  Optimistix/Lineax LSMR lane.
 
 Target private methods (minimum supported JAX floor 0.9.2):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
@@ -121,6 +131,7 @@ __all__ = [
     "VALID_OUTER_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
     "jax_least_squares",
+    "jax_least_squares_optimistix",
     "jax_minimize",
     "levenberg_marquardt",
     "levenberg_marquardt_minpack_traceable",
@@ -162,7 +173,9 @@ OPTIMIZER_BACKEND_ROLE = {
 TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset(
     {"ondevice", "scipy-jax", "scipy-jax-fullgraph"}
 )
-VALID_LEAST_SQUARES_ALGORITHMS = frozenset({"quasi-newton", "lm", "lm-minpack"})
+VALID_LEAST_SQUARES_ALGORITHMS = frozenset(
+    {"quasi-newton", "lm", "lm-minpack", "optimistix-lm"}
+)
 _SUPPORTED_METHODS = {
     "adam",
     "adam-ondevice",
@@ -174,9 +187,16 @@ _SUPPORTED_METHODS = {
     "bfgs-ondevice",
     "lbfgs-ondevice",
 }
-_SUPPORTED_LEAST_SQUARES_METHODS = frozenset(
-    {"lm", "lm-ondevice", "lm-minpack-ondevice"}
+_TARGET_LEAST_SQUARES_METHODS = frozenset(
+    {"lm-ondevice", "lm-minpack-ondevice", "optimistix-lm-ondevice"}
 )
+_SUPPORTED_LEAST_SQUARES_METHODS = frozenset({"lm"}) | _TARGET_LEAST_SQUARES_METHODS
+_RESIDUAL_LEAST_SQUARES_ALGORITHMS = frozenset({"lm", "lm-minpack", "optimistix-lm"})
+_DEFAULT_LM_FTOL = 1e-8
+_DEFAULT_LM_XTOL = 1e-8
+_OPTIMISTIX_LM_DEFAULT_FTOL = _DEFAULT_LM_FTOL
+_OPTIMISTIX_LM_DEFAULT_XTOL = _DEFAULT_LM_XTOL
+_OPTIMISTIX_LM_DEFAULT_GTOL = None
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 _REFERENCE_TRACE_METHODS = frozenset({"lbfgs-trace"})
 _REFERENCE_JAX_METHODS = frozenset({"adam"})
@@ -662,6 +682,8 @@ def resolve_target_least_squares_optimizer_method(
         )
     if least_squares_algorithm == "lm-minpack":
         return "lm-minpack-ondevice"
+    if least_squares_algorithm == "optimistix-lm":
+        return "optimistix-lm-ondevice"
     return "lm-ondevice"
 
 
@@ -756,7 +778,7 @@ def resolve_target_optimizer_contract(
     )
     return TargetOptimizerContract(
         method=method,
-        use_least_squares_objective=method in {"lm-ondevice", "lm-minpack-ondevice"},
+        use_least_squares_objective=method in _TARGET_LEAST_SQUARES_METHODS,
     )
 
 
@@ -783,7 +805,7 @@ def resolve_target_outer_loop_optimizer_contract(
     least_squares_algorithm="quasi-newton",
 ):
     """Resolve the JAX target outer-loop contract."""
-    limited_memory = least_squares_algorithm not in {"lm", "lm-minpack"}
+    limited_memory = least_squares_algorithm not in _RESIDUAL_LEAST_SQUARES_ALGORITHMS
     return resolve_target_optimizer_contract(
         field_backend,
         optimizer_backend,
@@ -1462,6 +1484,40 @@ def _lm_gradient_tol(tol, gtol, *, dtype):
     return _optimizer_scalar(gtol, dtype=dtype)
 
 
+def _optimistix_lm_nondefault_tuning_options(ftol, xtol, gtol):
+    unsupported = []
+    if ftol is None or float(ftol) != _OPTIMISTIX_LM_DEFAULT_FTOL:
+        unsupported.append("ftol")
+    if xtol is None or float(xtol) != _OPTIMISTIX_LM_DEFAULT_XTOL:
+        unsupported.append("xtol")
+    if gtol is not None:
+        unsupported.append("gtol")
+    return tuple(unsupported)
+
+
+def _require_optimistix_lm_contract_options(
+    *,
+    ftol,
+    xtol,
+    gtol,
+    callback,
+    progress_callback,
+):
+    if callback is not None or progress_callback is not None:
+        raise ValueError(
+            "optimistix-lm-ondevice does not support solver callbacks. "
+            "Use method='lm-ondevice' for callback-instrumented LM runs."
+        )
+    unsupported = _optimistix_lm_nondefault_tuning_options(ftol, xtol, gtol)
+    if unsupported:
+        unsupported_options = ", ".join(unsupported)
+        raise ValueError(
+            "optimistix-lm-ondevice uses a single tol value for Optimistix "
+            "and Lineax convergence. Non-default LM tuning option(s) are not "
+            f"supported: {unsupported_options}."
+        )
+
+
 def _matrix_free_lm_info(
     *,
     actual_reduction,
@@ -1835,6 +1891,9 @@ def levenberg_marquardt(
         "info": info,
         "success": success,
         "dense_linearization_materialized": dense_linearization_materialized,
+        "dense_linearization_kind": (
+            "post_hoc" if dense_linearization_materialized else None
+        ),
         **dense_report,
     }
 
@@ -2249,6 +2308,154 @@ def levenberg_marquardt_minpack_traceable(
         "info": state["info"],
         "success": state["success"],
         "dense_linearization_materialized": True,
+        "dense_linearization_kind": "in_loop",
+        **dense_report,
+    }
+
+
+def jax_least_squares_optimistix(
+    residual_fn,
+    x0,
+    *,
+    maxiter=1500,
+    tol=1e-10,
+    ftol=_OPTIMISTIX_LM_DEFAULT_FTOL,
+    xtol=_OPTIMISTIX_LM_DEFAULT_XTOL,
+    gtol=_OPTIMISTIX_LM_DEFAULT_GTOL,
+    materialize_dense_linearization=True,
+    max_dense_linearization_bytes=None,
+    callback=None,
+    progress_callback=None,
+    args=(),
+):
+    """Optional Optimistix/Lineax LSMR least-squares target lane."""
+    _require_optimistix_lm_contract_options(
+        ftol=ftol,
+        xtol=xtol,
+        gtol=gtol,
+        callback=callback,
+        progress_callback=progress_callback,
+    )
+
+    try:
+        import lineax
+        import optimistix as optx
+    except ImportError as exc:
+        raise ImportError(
+            "method='optimistix-lm-ondevice' requires the optional "
+            "Optimistix/Lineax dependencies. Install with "
+            "simsopt[JAX_OPTIMISTIX] on Python 3.11+."
+        ) from exc
+
+    x = jax.tree_util.tree_map(jnp.asarray, x0)
+    normalized_args = _normalize_solver_args(args)
+    dtype = _require_tree_first_leaf(
+        x,
+        detail="Least-squares initial state must contain at least one leaf.",
+    ).dtype
+    tol_value = float(tol)
+
+    def residual_eval(x_current):
+        return jnp.ravel(jnp.asarray(residual_fn(x_current, *normalized_args)))
+
+    def optx_residual(x_current, fn_args):
+        return jnp.ravel(jnp.asarray(residual_fn(x_current, *fn_args)))
+
+    solver = optx.LevenbergMarquardt(
+        rtol=tol_value,
+        atol=tol_value,
+        linear_solver=lineax.LSMR(rtol=tol_value, atol=tol_value),
+    )
+    solution = optx.least_squares(
+        optx_residual,
+        solver,
+        x,
+        args=normalized_args,
+        max_steps=int(maxiter),
+        throw=False,
+    )
+
+    residual, cost, grad, grad_norm_inf, _ = _least_squares_gradient_state(
+        residual_eval,
+        solution.value,
+    )
+    linearization_rows = int(np.asarray(jnp.asarray(residual).size))
+    linearization_cols = sum(
+        int(np.asarray(jnp.asarray(leaf).size))
+        for leaf in jax.tree_util.tree_leaves(solution.value)
+    )
+    residual_jacobian = None
+    hessian = None
+    dense_linearization_materialized = bool(materialize_dense_linearization)
+    if dense_linearization_materialized:
+        dense_linearization_materialized, dense_report = (
+            _least_squares_dense_linearization_policy(
+                linearization_rows,
+                linearization_cols,
+                dtype,
+                max_dense_linearization_bytes,
+            )
+        )
+        if dense_linearization_materialized:
+            residual, residual_jacobian, _flat_grad, hessian = (
+                _materialize_dense_least_squares_linearization(
+                    residual_eval,
+                    solution.value,
+                )
+            )
+    else:
+        dense_report = _least_squares_dense_linearization_report(
+            linearization_rows,
+            linearization_cols,
+            dtype,
+            max_dense_linearization_bytes,
+        )
+        dense_report["failure_category"] = None
+        dense_report["failure_stage"] = None
+        dense_report["message"] = None
+
+    finite = (
+        _tree_all_finite(solution.value)
+        & jnp.all(jnp.isfinite(residual))
+        & _tree_all_finite(grad)
+        & jnp.isfinite(cost)
+    )
+    if hessian is not None:
+        finite = finite & jnp.all(jnp.isfinite(hessian))
+    solution_success = jnp.asarray(solution.result == optx.RESULTS.successful)
+    max_steps_reached = jnp.asarray(
+        (solution.result == optx.RESULTS.nonlinear_max_steps_reached)
+        | (solution.result == optx.RESULTS.max_steps_reached)
+    )
+    status = jnp.where(
+        finite,
+        jnp.asarray(1, dtype=jnp.int32),
+        jnp.asarray(2, dtype=jnp.int32),
+    )
+    info = jnp.where(
+        max_steps_reached,
+        jnp.asarray(5, dtype=jnp.int32),
+        jnp.asarray(0, dtype=jnp.int32),
+    )
+    return {
+        "x": solution.value,
+        "residual": residual,
+        "residual_jacobian": residual_jacobian,
+        "fun": cost,
+        "grad": grad,
+        "grad_norm_inf": grad_norm_inf,
+        "hessian": hessian,
+        "damping": None,
+        "nit": jnp.asarray(solution.stats["num_steps"], dtype=jnp.int32),
+        "status": status,
+        "info": info,
+        "success": solution_success & finite,
+        "dense_linearization_materialized": dense_linearization_materialized,
+        "dense_linearization_kind": (
+            "post_hoc" if dense_linearization_materialized else None
+        ),
+        "optimistix_result": str(solution.result),
+        "optimistix_result_message": optx.RESULTS[solution.result],
         **dense_report,
     }
 
@@ -3840,56 +4047,7 @@ def reference_least_squares(
     )
 
 
-def target_least_squares(
-    residual_fn,
-    x0,
-    *,
-    method="lm-ondevice",
-    tol=1e-10,
-    maxiter=1500,
-    options=None,
-    callback=None,
-    progress_callback=None,
-):
-    """Explicit JAX target least-squares entrypoint."""
-    if method not in {"lm-ondevice", "lm-minpack-ondevice"}:
-        raise ValueError(
-            "target_least_squares() only supports method='lm-ondevice' or "
-            "method='lm-minpack-ondevice'. "
-            f"Got {method!r}."
-        )
-
-    options = dict(options or {})
-    if callback is not None:
-        options["callback"] = callback
-    if progress_callback is not None:
-        options["progress_callback"] = progress_callback
-
-    require_target_backend_x64("ondevice")
-    solver = (
-        levenberg_marquardt_minpack_traceable
-        if method == "lm-minpack-ondevice"
-        else levenberg_marquardt_traceable
-    )
-    gtol = options.get("gtol")
-    if method == "lm-minpack-ondevice" and gtol is None:
-        gtol = 1e-8
-    result = solver(
-        residual_fn,
-        x0,
-        maxiter=maxiter,
-        tol=tol,
-        ftol=options.get("ftol", 1e-8),
-        xtol=options.get("xtol", 1e-8),
-        gtol=gtol,
-        materialize_dense_linearization=bool(
-            options.get("materialize_dense_linearization", True)
-        ),
-        max_dense_linearization_bytes=options.get("max_dense_linearization_bytes"),
-        callback=options.get("callback"),
-        progress_callback=options.get("progress_callback"),
-    )
-
+def _least_squares_state_to_optimize_result(result):
     nit = int(_host_scalar(result["nit"], dtype=np.int64))
     status = int(_host_scalar(result["status"], dtype=np.int64))
     info = int(_host_scalar(result["info"], dtype=np.int64))
@@ -3914,6 +4072,7 @@ def target_least_squares(
             info=info,
         ),
         dense_linearization_materialized=result["dense_linearization_materialized"],
+        dense_linearization_kind=result.get("dense_linearization_kind"),
         dense_residual_jacobian_shape=result.get("dense_residual_jacobian_shape"),
         dense_residual_jacobian_bytes=result.get("dense_residual_jacobian_bytes"),
         dense_hessian_shape=result.get("dense_hessian_shape"),
@@ -3922,7 +4081,84 @@ def target_least_squares(
         max_dense_linearization_bytes=result.get("max_dense_linearization_bytes"),
         failure_category=result.get("failure_category"),
         failure_stage=result.get("failure_stage"),
+        optimistix_result=result.get("optimistix_result"),
+        optimistix_result_message=result.get("optimistix_result_message"),
     )
+
+
+def target_least_squares(
+    residual_fn,
+    x0,
+    *,
+    method="lm-ondevice",
+    tol=1e-10,
+    maxiter=1500,
+    options=None,
+    callback=None,
+    progress_callback=None,
+):
+    """Explicit JAX target least-squares entrypoint."""
+    if method not in _TARGET_LEAST_SQUARES_METHODS:
+        raise ValueError(
+            "target_least_squares() only supports method='lm-ondevice', "
+            "method='lm-minpack-ondevice', or method='optimistix-lm-ondevice'. "
+            f"Got {method!r}."
+        )
+
+    options = dict(options or {})
+    if callback is not None:
+        options["callback"] = callback
+    if progress_callback is not None:
+        options["progress_callback"] = progress_callback
+
+    require_target_backend_x64("ondevice")
+    ftol = options.get("ftol", _DEFAULT_LM_FTOL)
+    xtol = options.get("xtol", _DEFAULT_LM_XTOL)
+    materialize_dense_linearization = bool(
+        options.get("materialize_dense_linearization", True)
+    )
+    max_dense_linearization_bytes = options.get("max_dense_linearization_bytes")
+    callback = options.get("callback")
+    progress_callback = options.get("progress_callback")
+    if method == "optimistix-lm-ondevice":
+        result = jax_least_squares_optimistix(
+            residual_fn,
+            x0,
+            maxiter=maxiter,
+            tol=tol,
+            ftol=ftol,
+            xtol=xtol,
+            gtol=options.get("gtol"),
+            materialize_dense_linearization=materialize_dense_linearization,
+            max_dense_linearization_bytes=max_dense_linearization_bytes,
+            callback=callback,
+            progress_callback=progress_callback,
+        )
+        return _least_squares_state_to_optimize_result(result)
+
+    solver = (
+        levenberg_marquardt_minpack_traceable
+        if method == "lm-minpack-ondevice"
+        else levenberg_marquardt_traceable
+    )
+    gtol = options.get("gtol")
+    if method == "lm-minpack-ondevice" and gtol is None:
+        gtol = 1e-8
+    result = solver(
+        residual_fn,
+        x0,
+        maxiter=maxiter,
+        tol=tol,
+        ftol=ftol,
+        xtol=xtol,
+        gtol=gtol,
+        materialize_dense_linearization=materialize_dense_linearization,
+        max_dense_linearization_bytes=max_dense_linearization_bytes,
+        callback=callback,
+        progress_callback=progress_callback,
+    )
+
+    return _least_squares_state_to_optimize_result(result)
 
 
 def jax_least_squares(

@@ -113,6 +113,7 @@ from . import optimizer_jax as _optimizer_jax
 from .optimizer_jax import (
     VALID_LEAST_SQUARES_ALGORITHMS,
     VALID_OPTIMIZER_BACKENDS,
+    jax_least_squares_optimistix,
     levenberg_marquardt_minpack_traceable,
     levenberg_marquardt_traceable,
     newton_exact,
@@ -3057,8 +3058,10 @@ _SCIPY_TRACE_OPTIONS = frozenset({"record_scipy_callback_trace"})
 
 # Callback options accepted by all backends.
 _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
-_ONDEVICE_OPTIMIZER_METHODS = frozenset(
-    {"bfgs-ondevice", "lbfgs-ondevice", "lm-ondevice", "lm-minpack-ondevice"}
+_ONDEVICE_LEAST_SQUARES_METHODS = _optimizer_jax._TARGET_LEAST_SQUARES_METHODS
+_LEAST_SQUARES_METHODS = frozenset({"lm"}) | _ONDEVICE_LEAST_SQUARES_METHODS
+_ONDEVICE_OPTIMIZER_METHODS = (
+    frozenset({"bfgs-ondevice", "lbfgs-ondevice"}) | _ONDEVICE_LEAST_SQUARES_METHODS
 )
 _LS_DYNAMIC_OPTION_KEYS = frozenset(
     {"least_squares_algorithm", "materialize_dense_linearization"}
@@ -3194,6 +3197,38 @@ def _normalize_solver_options(raw_options, boozer_type):
                     normalized_options["optimizer_backend"]
                 )
             )
+        if (
+            normalized_options["optimizer_backend"] == "ondevice"
+            and normalized_options["least_squares_algorithm"] == "optimistix-lm"
+        ):
+            callback_keys = sorted(set(normalized_options) & _CALLBACK_OPTIONS)
+            if callback_keys:
+                keys_str = ", ".join(repr(k) for k in callback_keys)
+                raise ValueError(
+                    f"BoozerSurfaceJAX option(s) {keys_str} are incompatible "
+                    "with least_squares_algorithm='optimistix-lm'. Use "
+                    "least_squares_algorithm='lm' for callback-instrumented "
+                    "on-device LM runs."
+                )
+            tuning_keys = _optimizer_jax._optimistix_lm_nondefault_tuning_options(
+                normalized_options.get(
+                    "ftol",
+                    _optimizer_jax._OPTIMISTIX_LM_DEFAULT_FTOL,
+                ),
+                normalized_options.get(
+                    "xtol",
+                    _optimizer_jax._OPTIMISTIX_LM_DEFAULT_XTOL,
+                ),
+                normalized_options.get("gtol"),
+            )
+            if tuning_keys:
+                keys_str = ", ".join(repr(k) for k in tuning_keys)
+                raise ValueError(
+                    f"BoozerSurfaceJAX option(s) {keys_str} are incompatible "
+                    "with least_squares_algorithm='optimistix-lm'. "
+                    "optimistix-lm uses the solver 'tol' as the single "
+                    "Optimistix/Lineax convergence tolerance."
+                )
     if boozer_type == "exact":
         normalized_options.pop("optimizer_backend", None)
     return normalized_options
@@ -4654,17 +4689,18 @@ class BoozerSurfaceJAX(Optimizable):
             )
 
         x0 = self._pack_decision_vector(iota, G, sdofs=_as_jax_float64(sdofs))
-        if method in {"lm-ondevice", "lm-minpack-ondevice"}:
+        if method in _ONDEVICE_LEAST_SQUARES_METHODS:
             residual_fn = self._get_traceable_penalty_residual(
                 optimize_G,
                 weight_inv_modB,
             )
             least_squares_options = self._collect_least_squares_options()
-            solver = (
-                levenberg_marquardt_minpack_traceable
-                if method == "lm-minpack-ondevice"
-                else levenberg_marquardt_traceable
-            )
+            if method == "lm-minpack-ondevice":
+                solver = levenberg_marquardt_minpack_traceable
+            elif method == "optimistix-lm-ondevice":
+                solver = jax_least_squares_optimistix
+            else:
+                solver = levenberg_marquardt_traceable
             gtol = least_squares_options.get("gtol")
             if method == "lm-minpack-ondevice" and gtol is None:
                 gtol = 1e-8
@@ -5079,7 +5115,7 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G=optimize_G,
         )
         progress_callback = self._make_solver_progress_callback(method)
-        if method in {"lm", "lm-ondevice", "lm-minpack-ondevice"}:
+        if method in _LEAST_SQUARES_METHODS:
             residual_fn = self._make_penalty_residual_with(
                 optimize_G,
                 weight_inv_modB,
@@ -5525,7 +5561,7 @@ class BoozerSurfaceJAX(Optimizable):
             )
             optimizer_method = (
                 resolved_method
-                if resolved_method in {"lm-ondevice", "lm-minpack-ondevice"}
+                if resolved_method in _ONDEVICE_LEAST_SQUARES_METHODS
                 else "lm-ondevice"
             )
             result = target_least_squares(
