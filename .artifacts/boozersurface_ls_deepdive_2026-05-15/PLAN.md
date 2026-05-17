@@ -94,7 +94,7 @@ Confirms `cond(H+λI) ≈ σ_max/λ`. JAX cond drops linearly; CPU cond unchange
 | C2 | MEDIUM | Coil-VJP test uses JAX-vs-JAX scalarization, not CPU oracle | implemented, Wave 3 |
 | C3 | MEDIUM | Ill-conditioned exact-adjoint lane lacks action-level parity check | implemented, Wave 3 |
 | B2 | INFO | scipy uses `dense-plu` host path, ondevice uses `dense-plu-shared` device path | document only |
-| B3 | INFO | `optimizer_backend="ondevice"` + `least_squares_algorithm="lm"` is a different LM family than MINPACK | implemented, Wave 4 (docs); MINPACK Track 1 abandoned at G0 on 2026-05-16 |
+| B3 | INFO | `optimizer_backend="ondevice"` + `least_squares_algorithm="lm"` is a different LM family than MINPACK | implemented, Wave 4 (docs); byte-identical MINPACK Track 1 abandoned at G0, revised dense-QR `lm-minpack-ondevice` lane implemented with G3/G4/G5 validation pending |
 | E2 | LOW | `_safe_radius_squared` clamp at 1e-60 vs C++ NaN/Inf on degenerate inputs | implemented, Wave 4 (docs) |
 | E4 | LOW | Traceable-bundle cache keys on `id(...)` (object-local, low practical risk) | implemented, Wave 4 |
 | ~~A1~~ | ~~CRITICAL~~ | ~~γ_y(0,0) gauge pin to remove θ-rotation null direction~~ | **WITHDRAWN** (no-op under stellsym; oversampled fixture obviates) |
@@ -291,24 +291,33 @@ These items are real but lower-priority. Execute only if specific signals justif
 
 ### W4.3 · B3 — MINPACK-equivalent on-device LM
 
-**Context.** `optimizer_backend="ondevice"` + `least_squares_algorithm="lm"` invokes a custom matrix-free LM with GMRES inner solve and `‖∇‖_∞`-only termination. It is NOT MINPACK `lmder`. Currently doubly opt-in.
+**Context.** `optimizer_backend="ondevice"` + `least_squares_algorithm="lm"` invokes a custom matrix-free LM with GMRES inner solve. After Track 2 it has MINPACK-style `ftol`/`xtol` termination bookkeeping and explicit `gtol` routing, but it is still NOT MINPACK `lmder` because the inner solve and QR-scaled `gtol`/`info` semantics remain different. Currently doubly opt-in.
 
-**2026-05-16 execution update.** Track 2 of
+**2026-05-17 execution update.** Track 2 of
 `.artifacts/lm_minpack_port_plan_2026-05-16/PLAN.md` landed the
 matrix-free-computable MINPACK-style termination subset and symmetric damping
-factors. Track 1, the CPU-byte-exact MINPACK `lmder` port, was executed through
-Phase 0 G0 and abandoned at production scope because JAX packed `geqp3` +
-`ormqr` does not bit-match SciPy LAPACK `dgeqp3` + `qr_multiply` on the
-production `(384, 40)` shape. See
-`.artifacts/lm_minpack_port_plan_2026-05-16/PHASE0_G0_REPORT.md`.
+factors. Track 1, the CPU-byte-exact MINPACK `lmder` port, was executed
+through Phase 0 G0 and abandoned at production scope because JAX packed
+`geqp3` + `ormqr` does not bit-match SciPy LAPACK `dgeqp3` + `qr_multiply`
+on the production `(384, 40)` shape. The owner then revised Track 1 to a
+tolerance-equivalent dense pivoted-QR lane exposed as
+`least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`.
+That core route is implemented, but broader MGH, oversampled BoozerSurface,
+and first-trace compile-time gates remain pending. See
+`.artifacts/lm_minpack_port_plan_2026-05-16/PHASE0_G0_REPORT.md` and
+`.artifacts/lm_minpack_port_plan_2026-05-16/PLAN.md`.
 
-**Trigger to execute.** If on-device LM becomes a production default, AND byte-equality (not tolerance equality) with CPU MINPACK lmder becomes a hard requirement. Currently neither.
+**Remaining trigger to promote.** If `lm-minpack-ondevice` is considered for
+production use, complete the plan's G3/G4/G5 gates first. If byte-equality
+(not tolerance equality) with CPU MINPACK `lmder` becomes a hard requirement,
+that is a separate reopened byte-port project because the production-shape
+G0 gate already failed.
 
 **Todos (conditional, scoped as a research project not a patch):**
-- [ ] Port MINPACK `lmder` algorithm to JAX-traceable code: pivoted QR factorization, trust-region radius management with scaling vector, three-criterion termination (`ftol`, `xtol`, `gtol`)
-- [ ] Validate byte-equality on well-conditioned fixtures
-- [ ] Document performance vs the existing custom-LM
-- [ ] Decide deprecation policy for the existing custom-LM
+- [ ] Run G3: broader Moré-Garbow-Hillstrom final-state parity for `lm-minpack-ondevice`
+- [ ] Run G4: oversampled BoozerSurface final-state parity for `lm-minpack-ondevice`
+- [ ] Run G5: first-trace compile-time measurement on the canonical `(384, 40)` fixture
+- [ ] Decide production-promotion and deprecation policy only after G3/G4/G5
 
 ---
 
