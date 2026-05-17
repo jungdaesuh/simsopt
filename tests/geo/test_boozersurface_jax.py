@@ -196,6 +196,12 @@ def _assert_dense_plu_adjoint_state(adjoint_state):
     assert adjoint_state.dense_linear_solve_factors_available is True
 
 
+def _assert_dense_plu_factors(plu):
+    assert isinstance(plu, tuple)
+    assert len(plu) == 3
+    assert all(piece is not None for piece in plu)
+
+
 def _collect_exact_well_conditioned_runtime_metadata(device):
     metadata = {
         "jax_version": str(jax.__version__),
@@ -3841,9 +3847,7 @@ class TestBoozerSurfaceJAXClass:
             assert callable(adjoint_state.solve_forward_with_status)
             assert callable(adjoint_state.solve_transpose_with_status)
         else:
-            assert isinstance(res["PLU"], tuple)
-            assert len(res["PLU"]) == 3
-            assert all(piece is not None for piece in res["PLU"])
+            _assert_dense_plu_factors(res["PLU"])
         assert callable(res["vjp"])
         assert "iota" in res
         assert booz.need_to_run_code is False
@@ -6026,14 +6030,20 @@ class TestBoozerSurfaceJAXExactPath:
         assert expected_keys <= set(res.keys())
         _assert_result_schema(res, _PUBLIC_EXACT_RESULT_SCHEMA)
         assert res["jacobian_materialized"] is True
-        assert isinstance(res["PLU"], tuple)
-        assert len(res["PLU"]) == 3
-        assert all(piece is not None for piece in res["PLU"])
+        _assert_dense_plu_factors(res["PLU"])
         assert res["linear_solve_backend"] == "operator"
         assert res["dense_linear_solve_factors_available"] is True
         assert res["exact_factorization_backend"] == _bsj.EXACT_FACTORIZATION_BACKEND
         assert res["vjp"] is _boozer_exact_coil_vjp
         assert callable(res["vjp"])
+
+    def test_exact_result_plu_is_independent_of_verbose(self):
+        """Exact-path dense factors are solver artifacts, not logging output."""
+        booz = _make_mock_boozer_surface_exact(options={"verbose": False})
+        res = _run_mock_exact_boozer_success(booz)
+
+        _assert_dense_plu_factors(res["PLU"])
+        assert res["dense_linear_solve_factors_available"] is True
 
     def test_resolved_coil_set_spec_uses_explicit_coil_arrays(self):
         """coil_arrays-only calls must build an explicit grouped spec."""
