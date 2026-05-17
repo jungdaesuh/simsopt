@@ -495,6 +495,10 @@ class SpecBackedBiotSavartJAX(Optimizable):
 
     def _set_coil_dofs(self, coil_dofs: object) -> None:
         self._x = _as_jax_float64(coil_dofs)
+        assert self._x.shape[0] == self.dof_size, (
+            f"BiotSavartSpec DOF count {self._x.shape[0]} != "
+            f"Optimizable.dof_size {self.dof_size}"
+        )
         self._coil_dofs_generation += 1
         self._coil_dof_state_token = _new_coil_dof_state_token()
 
@@ -1014,6 +1018,8 @@ class BiotSavartJAX(Optimizable):
         coils: list of :class:`simsopt.field.coil.Coil` objects.
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(self, coils):
         self._coils = list(coils)
         self._points_jax = None
@@ -1422,6 +1428,15 @@ class BiotSavartJAX(Optimizable):
             points if isinstance(points, jax.Array) else np.ascontiguousarray(points)
         )
         self._points_jax = _as_jax_float64(points_array)
+        self._points_version += 1
+
+    def get_points_cart_ref(self):
+        """Return the current JAX point buffer for point-preserving callers."""
+        return self._points_jax
+
+    def clear_points(self) -> None:
+        """Clear the mutable point buffer."""
+        self._points_jax = None
         self._points_version += 1
 
     def set_points_from_spec(self, field_eval_spec):

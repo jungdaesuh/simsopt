@@ -19,6 +19,9 @@ Coverage
 * ``test_multi_halfperiod_seg_signs_parity``: the C++ kernel folds in
   per-half-period symmetry weights via ``seg_signs``. This test mirrors
   that behaviour with an nfp=2 stellarator-symmetric configuration.
+* ``test_segment_dB_by_dX_contributions_match_cpp_one_segment_fields``:
+  per-segment unit-current ``dB_by_dX`` contributions match the C++ field
+  produced by exciting one segment at a time.
 * ``test_combined_B_and_dB_matches_separate``: ``wireframe_B_and_dB_by_dX``
   is consistent with the standalone ``wireframe_B`` / ``wireframe_dB_by_dX``.
 * ``test_wireframe_runs_under_strict_transfer_guard``: the kernels do
@@ -30,6 +33,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import simsoptpp as sopp
 
@@ -38,6 +42,10 @@ from simsopt.jax_core.wireframe import (
     wireframe_B,
     wireframe_B_and_dB_by_dX,
     wireframe_dB_by_dX,
+    wireframe_segment_B,
+    wireframe_segment_B_contributions,
+    wireframe_segment_dB_by_dX,
+    wireframe_segment_dB_by_dX_contributions,
 )
 from .jaxpr_utils import count_jaxpr_primitives
 
@@ -84,6 +92,15 @@ def _off_loop_eval_points(count: int = 64) -> np.ndarray:
     )
 
 
+def _wireframe_inputs():
+    return (
+        _closed_loop_nodes()[None, :, :],
+        _closed_loop_segments(),
+        np.ones((1,), dtype=np.float64),
+        np.linspace(0.1, 1.0, _closed_loop_segments().shape[0], dtype=np.float64),
+    )
+
+
 # ── Closed-form NumPy reference (single segment) ─────────────────────
 
 
@@ -117,6 +134,41 @@ def _finite_wire_B_numpy_closed_form(
     azimuthal = np.cross(dl, perp) / (L * rho)
     magnitude = mu0_over_4pi * current / rho * (cos1 - cos2)
     return magnitude * azimuthal
+
+
+def test_public_wireframe_rejects_bad_point_shapes():
+    nodes, segments, seg_signs, currents = _wireframe_inputs()
+    bad_point_sets = (
+        np.zeros((3,), dtype=np.float64),
+        np.zeros((2, 2), dtype=np.float64),
+        np.zeros((1, 2, 3), dtype=np.float64),
+    )
+
+    for bad_points in bad_point_sets:
+        with pytest.raises(ValueError, match="points must have shape"):
+            wireframe_B(bad_points, nodes, segments, seg_signs, currents)
+
+
+def test_public_wireframe_rejects_oversized_segment_indices():
+    nodes, _, seg_signs, _ = _wireframe_inputs()
+    oversized_index = int(np.iinfo(np.int32).max) + 1
+    segments = np.asarray([[0, oversized_index]], dtype=np.int64)
+    currents = np.ones((1,), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="segments indices"):
+        wireframe_B(_off_loop_eval_points(2), nodes, segments, seg_signs, currents)
+
+
+def test_segment_singularity_surfaces_nonfinite_contract():
+    point_on_segment = np.asarray([[0.0, 0.0, 0.5]], dtype=np.float64)
+    node0 = np.asarray([[0.0, 0.0, 0.0]], dtype=np.float64)
+    node1 = np.asarray([[0.0, 0.0, 1.0]], dtype=np.float64)
+
+    B = np.asarray(wireframe_segment_B(point_on_segment, node0, node1))
+    dB = np.asarray(wireframe_segment_dB_by_dX(point_on_segment, node0, node1))
+
+    assert not np.all(np.isfinite(B))
+    assert not np.all(np.isfinite(dB))
 
 
 # ── Tests ────────────────────────────────────────────────────────────
@@ -251,6 +303,40 @@ def test_multi_halfperiod_seg_signs_parity():
     np.testing.assert_allclose(dB_jax, dB_cpp, rtol=_RTOL, atol=_ATOL)
 
 
+def test_segment_dB_by_dX_contributions_match_cpp_one_segment_fields():
+    """Unit-current segment ``dB_by_dX`` contributions match C++ fields.
+
+    C++ exposes total ``dB_by_dX`` for a current vector, not a direct public
+    per-segment ``dB`` contribution cube. Exciting one segment at a time is
+    the exact oracle for the exported JAX contribution kernel.
+    """
+    nodes_hp = _closed_loop_nodes()
+    segments = _closed_loop_segments()
+    seg_signs = [1.0]
+    points = _off_loop_eval_points(count=11)
+
+    nodes = np.stack([nodes_hp], axis=0)
+    dB_jax = np.asarray(
+        wireframe_segment_dB_by_dX_contributions(points, nodes, segments, seg_signs),
+        dtype=np.float64,
+    )
+
+    dB_cpp_by_segment = []
+    for segment_index in range(segments.shape[0]):
+        currents = np.zeros(segments.shape[0], dtype=np.float64)
+        currents[segment_index] = 1.0
+        cpp = sopp.WireframeField([nodes_hp], segments, seg_signs, currents)
+        cpp.set_points(points)
+        dB_cpp_by_segment.append(np.asarray(cpp.dB_by_dX(), dtype=np.float64))
+
+    np.testing.assert_allclose(
+        dB_jax,
+        np.stack(dB_cpp_by_segment, axis=0),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+
+
 def test_combined_B_and_dB_matches_separate():
     """``wireframe_B_and_dB_by_dX`` agrees with the standalone entry points.
 
@@ -287,6 +373,29 @@ def test_combined_B_and_dB_matches_separate():
     )
 
 
+def test_autodiff_through_currents_matches_segment_contributions():
+    points = _off_loop_eval_points(8)
+    nodes, segments, seg_signs, currents = _wireframe_inputs()
+
+    def flattened_B(currents_arg):
+        return wireframe_B(points, nodes, segments, seg_signs, currents_arg).reshape(-1)
+
+    jac = np.asarray(jax.jacfwd(flattened_B)(jnp.asarray(currents))).reshape(
+        points.shape[0],
+        3,
+        segments.shape[0],
+    )
+    expected = np.moveaxis(
+        np.asarray(
+            wireframe_segment_B_contributions(points, nodes, segments, seg_signs)
+        ),
+        0,
+        -1,
+    )
+
+    np.testing.assert_allclose(jac, expected, rtol=_RTOL, atol=_ATOL)
+
+
 def test_total_field_kernels_stream_over_segments():
     """Total B/dB kernels scan over segments instead of staging contribution cubes."""
 
@@ -302,6 +411,27 @@ def test_total_field_kernels_stream_over_segments():
     for kernel in kernels:
         jaxpr = jax.make_jaxpr(kernel)(points, nodes, segments_jax, seg_signs, currents)
         assert count_jaxpr_primitives(jaxpr, "scan") == 2, kernel.__name__
+
+
+def test_contribution_kernels_scan_over_half_periods():
+    """Contribution kernels accumulate half-periods with sequential scans."""
+
+    nodes_hp = _closed_loop_nodes()
+    nodes_refl = nodes_hp.copy()
+    nodes_refl[:, 1] = -nodes_refl[:, 1]
+    nodes_refl[:, 2] = -nodes_refl[:, 2]
+    nodes = jnp.asarray(np.stack([nodes_hp, nodes_refl], axis=0), dtype=jnp.float64)
+    segments = jnp.asarray(_closed_loop_segments(), dtype=jnp.int32)
+    seg_signs = jnp.asarray([1.0, -1.0], dtype=jnp.float64)
+    points = jnp.asarray(_off_loop_eval_points(count=8), dtype=jnp.float64)
+
+    kernels = (
+        wireframe_segment_B_contributions,
+        wireframe_segment_dB_by_dX_contributions,
+    )
+    for kernel in kernels:
+        jaxpr = jax.make_jaxpr(kernel)(points, nodes, segments, seg_signs)
+        assert count_jaxpr_primitives(jaxpr, "scan") == 1, kernel.__name__
 
 
 def test_dB_layout_convention_via_finite_difference():

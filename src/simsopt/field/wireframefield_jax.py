@@ -6,6 +6,8 @@ import numpy as np
 
 import jax
 
+from simsopt._array_contracts import require_nonnegative_int32_indices
+
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
@@ -14,6 +16,7 @@ from ..jax_core.wireframe import (
     wireframe_B,
     wireframe_B_and_dB_by_dX,
     wireframe_segment_B_contributions,
+    wireframe_segment_dB_by_dX_contributions,
 )
 from ..geo.surfacerzfourier import SurfaceRZFourier
 from .magneticfield import MagneticField
@@ -23,7 +26,12 @@ __all__ = ["WireframeFieldJAX"]
 
 def _snapshot_wireframe_arrays(wframe):
     nodes = np.array(np.stack(wframe.nodes), dtype=np.float64, order="C", copy=True)
-    segments = np.array(wframe.segments, dtype=np.int32, order="C", copy=True)
+    segments = np.array(
+        require_nonnegative_int32_indices("wframe.segments", wframe.segments),
+        dtype=np.int32,
+        order="C",
+        copy=True,
+    )
     seg_signs = np.array(wframe.seg_signs, dtype=np.float64, order="C", copy=True)
     currents = np.array(wframe.currents, dtype=np.float64, order="C", copy=True)
     return nodes, segments, seg_signs, currents
@@ -32,6 +40,11 @@ def _snapshot_wireframe_arrays(wframe):
 @jax.jit
 def _wireframe_segment_B_contributions_jit(points, nodes, segments, seg_signs):
     return wireframe_segment_B_contributions(points, nodes, segments, seg_signs)
+
+
+@jax.jit
+def _wireframe_segment_dB_by_dX_contributions_jit(points, nodes, segments, seg_signs):
+    return wireframe_segment_dB_by_dX_contributions(points, nodes, segments, seg_signs)
 
 
 class WireframeFieldJAX(MagneticField):
@@ -44,7 +57,7 @@ class WireframeFieldJAX(MagneticField):
     ``simsoptpp.WireframeField``.
     """
 
-    _simsopt_jax_native_field = True
+    _simsopt_jax_native_field = False
 
     def __init__(self, wframe):
         MagneticField.__init__(self)
@@ -52,14 +65,17 @@ class WireframeFieldJAX(MagneticField):
         self.nodes, self.segments, self.seg_signs, self.currents = (
             _snapshot_wireframe_arrays(wframe)
         )
+        self._n_segments = int(self.segments.shape[0])
         self._nodes_device = _as_jax_float64(self.nodes)
         self._segments_device = _as_jax_int32(self.segments)
         self._seg_signs_device = _as_jax_float64(self.seg_signs)
         self._currents_device = _as_jax_float64(self.currents)
+        self._dB_by_dcoilcurrents = None
 
     def set_points_cart(self, xyz):
         result = super().set_points_cart(xyz)
         self._points_device = _as_jax_float64(np.asarray(xyz, dtype=np.float64))
+        self._dB_by_dcoilcurrents = None
         return result
 
     def set_points_cyl(self, rphiz):
@@ -67,6 +83,7 @@ class WireframeFieldJAX(MagneticField):
         self._points_device = _as_jax_float64(
             np.asarray(self.get_points_cart_ref(), dtype=np.float64)
         )
+        self._dB_by_dcoilcurrents = None
         return result
 
     def _B_impl(self, B):
@@ -94,9 +111,10 @@ class WireframeFieldJAX(MagneticField):
     def dB_by_dsegmentcurrents(self, compute_derivatives):
         """Return unit-current segment field contributions.
 
-        The CPU wrapper accepts ``compute_derivatives=1`` but still returns
-        the cached ``B_i`` segment-field arrays. Second spatial derivatives
-        are not implemented by the C++ oracle and are not claimed here.
+        ``compute_derivatives=0`` returns ``B_i`` arrays with shape
+        ``(n_points, 3)``. ``compute_derivatives=1`` returns ``dB_i`` arrays
+        with shape ``(n_points, 3, 3)``. Second spatial derivatives are not
+        implemented by the C++ oracle and are not claimed here.
         """
 
         assert compute_derivatives >= 0
@@ -104,8 +122,13 @@ class WireframeFieldJAX(MagneticField):
             raise NotImplementedError(
                 "Second spatial derivatives are not implemented for WireframeField."
             )
+        contribution_kernel = (
+            _wireframe_segment_B_contributions_jit
+            if compute_derivatives == 0
+            else _wireframe_segment_dB_by_dX_contributions_jit
+        )
         contributions = np.asarray(
-            _wireframe_segment_B_contributions_jit(
+            contribution_kernel(
                 self._points_device,
                 self._nodes_device,
                 self._segments_device,
@@ -114,8 +137,7 @@ class WireframeFieldJAX(MagneticField):
             dtype=np.float64,
         )
         self._dB_by_dcoilcurrents = [
-            np.ascontiguousarray(contributions[i])
-            for i in range(self.wireframe.n_segments)
+            np.ascontiguousarray(contributions[i]) for i in range(self._n_segments)
         ]
         return self._dB_by_dcoilcurrents
 
@@ -138,10 +160,10 @@ class WireframeFieldJAX(MagneticField):
             fac = np.ones(absn.shape)
 
         matrix = np.ascontiguousarray(
-            np.zeros((n_points, self.wireframe.n_segments), dtype=np.float64)
+            np.zeros((n_points, self._n_segments), dtype=np.float64)
         )
         dB_dsc = self.dB_by_dsegmentcurrents(0)
-        for i in range(self.wireframe.n_segments):
+        for i in range(self._n_segments):
             dB_dsc_i = dB_dsc[i].reshape(normal.shape)
             matrix[:, i] = (fac * np.sum(dB_dsc_i * unitn, axis=2)).reshape((-1))
         return matrix

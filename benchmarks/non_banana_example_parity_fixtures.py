@@ -2976,6 +2976,7 @@ def _build_wireframe_gsco_multistep_reduced_diagnostic():
     import time
 
     from simsopt.field import BiotSavart, Current, coils_via_symmetries
+    from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
     from simsopt.geo import (
         SurfaceRZFourier,
         ToroidalWireframe,
@@ -2997,7 +2998,7 @@ def _build_wireframe_gsco_multistep_reduced_diagnostic():
     max_iter = 5
     print_interval = max_iter + 1
 
-    def _build_state():
+    def _build_state(ext_field_cls):
         surf_plas = SurfaceRZFourier.from_vmec_input(
             filename_equil,
             nphi=plas_n,
@@ -3036,10 +3037,10 @@ def _build_wireframe_gsco_multistep_reduced_diagnostic():
             "default_current": abs(init_gsco_cur_frac * pol_cur),
             "max_current": 1.1 * abs(init_gsco_cur_frac * pol_cur),
         }
-        return surf_plas, wf, BiotSavart(tf_coils), params
+        return surf_plas, wf, ext_field_cls(tf_coils), params
 
     start_cpu = time.perf_counter()
-    surf_cpu, wf_cpu, mf_cpu, params_cpu = _build_state()
+    surf_cpu, wf_cpu, mf_cpu, params_cpu = _build_state(BiotSavart)
     res_cpu = optimize_wireframe(
         wf_cpu,
         "gsco",
@@ -3051,7 +3052,7 @@ def _build_wireframe_gsco_multistep_reduced_diagnostic():
     setup_cpu = time.perf_counter() - start_cpu
 
     start_jax = time.perf_counter()
-    surf_jax, wf_jax, mf_jax, params_jax = _build_state()
+    surf_jax, wf_jax, mf_jax, params_jax = _build_state(BiotSavartJAX)
     res_jax = optimize_wireframe_jax(
         wf_jax,
         "gsco",

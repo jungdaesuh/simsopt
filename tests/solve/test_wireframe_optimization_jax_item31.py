@@ -11,7 +11,14 @@ import pytest
 import simsoptpp as sopp
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
-from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
+from simsopt.field import BiotSavart, Current, ToroidalField, coils_via_symmetries
+from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+from simsopt.field.toroidal_field_jax import ToroidalFieldJAX
+from simsopt.geo import (
+    SurfaceRZFourier,
+    ToroidalWireframe,
+    create_equally_spaced_curves,
+)
 from simsopt.solve.wireframe_optimization import (
     bnorm_obj_matrices,
     get_gsco_iteration,
@@ -20,6 +27,7 @@ from simsopt.solve.wireframe_optimization import (
     regularized_constrained_least_squares,
 )
 from simsopt.solve.wireframe_optimization_jax import (
+    _gsco_opposite_candidate_index,
     bnorm_obj_matrices_jax,
     get_gsco_iteration_jax,
     greedy_stellarator_coil_optimization_jax,
@@ -114,6 +122,45 @@ def _gsco_problem():
     return A, b, loops, free_loops, segments, connections, x_init, loop_count_init
 
 
+def _synthetic_gsco_problem(
+    *,
+    n_grid: int,
+    n_loops: int,
+    seed: int,
+    n_segments: int | None = None,
+):
+    if n_segments is None:
+        n_segments = 4 * n_loops
+
+    loops = np.arange(4 * n_loops, dtype=np.int64).reshape(n_loops, 4)
+    if n_segments > 4 * n_loops:
+        loops[-1] = np.arange(n_segments - 4, n_segments, dtype=np.int64)
+    free_loops = np.ones((n_loops,), dtype=np.int64)
+
+    rng = np.random.default_rng(seed)
+    A = np.zeros((n_grid, n_segments), dtype=np.float64)
+    active_columns = np.unique(loops.reshape(-1))
+    A[:, active_columns] = rng.standard_normal(size=(n_grid, active_columns.size))
+    b = rng.standard_normal(size=(n_grid, 1))
+
+    nodes = np.arange(n_segments, dtype=np.int64)
+    segments = np.stack([nodes, np.roll(nodes, -1)], axis=1)
+    connections = np.zeros((n_segments, 4), dtype=np.int64)
+    connections[:, 0] = nodes
+    x_init = np.zeros((n_segments, 1), dtype=np.float64)
+    loop_count_init = np.zeros((n_loops,), dtype=np.int64)
+    return (
+        np.ascontiguousarray(A),
+        np.ascontiguousarray(b),
+        np.ascontiguousarray(loops),
+        np.ascontiguousarray(free_loops),
+        np.ascontiguousarray(segments),
+        np.ascontiguousarray(connections),
+        np.ascontiguousarray(x_init),
+        np.ascontiguousarray(loop_count_init),
+    )
+
+
 def _surf_torus(nfp: int, rmaj: float, rmin: float) -> SurfaceRZFourier:
     surface = SurfaceRZFourier(nfp=nfp, mpol=1, ntor=0)
     surface.set_rc(0, 0, rmaj)
@@ -124,6 +171,19 @@ def _surf_torus(nfp: int, rmaj: float, rmin: float) -> SurfaceRZFourier:
 
 def _public_wireframe() -> ToroidalWireframe:
     return ToroidalWireframe(_surf_torus(nfp=2, rmaj=2.0, rmin=0.7), 4, 6)
+
+
+def _equally_spaced_coils(surface: SurfaceRZFourier, *, ncoils: int, current: float):
+    curves = create_equally_spaced_curves(
+        ncoils,
+        surface.nfp,
+        stellsym=True,
+        R0=1.0,
+        R1=0.35,
+        order=3,
+    )
+    currents = [Current(current) for _ in range(ncoils)]
+    return coils_via_symmetries(curves, currents, surface.nfp, True)
 
 
 def _public_optimize_problem(seed: int = 3105):
@@ -288,6 +348,32 @@ def test_regularized_constrained_least_squares_handles_no_constraints() -> None:
     )
 
 
+def test_regularized_constrained_least_squares_rank_deficient_matches_cpu() -> None:
+    lhs = np.array(
+        [[0.52239503, 0.49949821], [0.49949821, 0.47760498]],
+        dtype=np.float64,
+    )
+    rhs = np.array([[0.90535587], [0.44637457]], dtype=np.float64)
+    eigvals, eigvecs = np.linalg.eigh(lhs)
+    A = np.ascontiguousarray(np.diag(np.sqrt(eigvals)) @ eigvecs.T)
+    b = np.ascontiguousarray(np.linalg.solve(A.T, rhs))
+    C = np.zeros((0, 2), dtype=np.float64)
+    d = np.zeros((0, 1), dtype=np.float64)
+    W = 0.0
+
+    expected = regularized_constrained_least_squares(A, b, W, C, d)
+    actual = regularized_constrained_least_squares_jax(A, b, W, C, d)
+
+    assert np.linalg.cond(lhs) > 1.0e8
+    assert np.max(np.abs(expected)) > 1.0e7
+    np.testing.assert_allclose(
+        np.asarray(actual),
+        expected,
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+
+
 @pytest.mark.parametrize(
     "reg_W",
     (
@@ -360,6 +446,79 @@ def test_bnorm_obj_matrices_jax_matches_cpu_public_surface_mode(area_weighted) -
     np.testing.assert_allclose(actual_b, expected_b, rtol=_RTOL, atol=_ATOL)
 
 
+def test_bnorm_obj_matrices_jax_matches_cpu_ext_field_and_target() -> None:
+    wireframe = _public_wireframe()
+    plasma_surface = _surf_torus(nfp=2, rmaj=1.85, rmin=0.45)
+    ext_field = ToroidalFieldJAX(1.0, 0.25)
+    normal = plasma_surface.normal()
+    unit_normal = normal / np.linalg.norm(normal, axis=2)[:, :, None]
+    bnorm_target = 0.07 * unit_normal[:, :, 2] + 0.02 * unit_normal[:, :, 0]
+
+    expected_A, expected_b = bnorm_obj_matrices(
+        wireframe,
+        plasma_surface,
+        ext_field=ext_field,
+        bnorm_target=bnorm_target,
+        area_weighted=False,
+        verbose=False,
+    )
+    actual_A, actual_b = bnorm_obj_matrices_jax(
+        wireframe,
+        plasma_surface,
+        ext_field=ext_field,
+        bnorm_target=bnorm_target,
+        area_weighted=False,
+        verbose=False,
+    )
+
+    np.testing.assert_allclose(actual_A, expected_A, rtol=_RTOL, atol=_ATOL)
+    np.testing.assert_allclose(actual_b, expected_b, rtol=_RTOL, atol=_ATOL)
+
+
+def test_bnorm_obj_matrices_jax_matches_cpu_biotsavart_ext_field() -> None:
+    wireframe = _public_wireframe()
+    plasma_surface = _surf_torus(nfp=2, rmaj=1.85, rmin=0.45)
+    current = 2.5e4
+    cpu_coils = _equally_spaced_coils(plasma_surface, ncoils=2, current=current)
+    jax_coils = _equally_spaced_coils(plasma_surface, ncoils=2, current=current)
+    ext_field_cpu = BiotSavart(cpu_coils)
+    ext_field_jax = BiotSavartJAX(jax_coils)
+
+    expected_A, expected_b = bnorm_obj_matrices(
+        wireframe,
+        plasma_surface,
+        ext_field=ext_field_cpu,
+        area_weighted=False,
+        verbose=False,
+    )
+    actual_A, actual_b = bnorm_obj_matrices_jax(
+        wireframe,
+        plasma_surface,
+        ext_field=ext_field_jax,
+        area_weighted=False,
+        verbose=False,
+    )
+
+    assert ext_field_jax.get_points_cart_ref() is None
+    np.testing.assert_allclose(actual_A, expected_A, rtol=_RTOL, atol=_ATOL)
+    np.testing.assert_allclose(actual_b, expected_b, rtol=_RTOL, atol=_ATOL)
+
+
+def test_bnorm_obj_matrices_jax_rejects_cpu_ext_field() -> None:
+    wireframe = _public_wireframe()
+    plasma_surface = _surf_torus(nfp=2, rmaj=1.85, rmin=0.45)
+    ext_field = ToroidalField(1.0, 0.25)
+
+    with pytest.raises(ValueError, match="JAX-native MagneticField"):
+        bnorm_obj_matrices_jax(
+            wireframe,
+            plasma_surface,
+            ext_field=ext_field,
+            area_weighted=False,
+            verbose=False,
+        )
+
+
 def test_optimize_wireframe_jax_rcls_matches_public_cpu_and_mutates() -> None:
     cpu_wireframe, A, b = _public_optimize_problem()
     jax_wireframe, _, _ = _public_optimize_problem()
@@ -386,6 +545,44 @@ def test_optimize_wireframe_jax_rcls_matches_public_cpu_and_mutates() -> None:
     np.testing.assert_allclose(actual["f_B"], expected["f_B"], rtol=_RTOL, atol=_ATOL)
     np.testing.assert_allclose(actual["f_R"], expected["f_R"], rtol=_RTOL, atol=_ATOL)
     np.testing.assert_allclose(actual["f"], expected["f"], rtol=_RTOL, atol=_ATOL)
+    np.testing.assert_allclose(
+        jax_wireframe.currents,
+        cpu_wireframe.currents,
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+
+
+def test_optimize_wireframe_jax_rcls_matches_cpu_with_public_constraints() -> None:
+    cpu_wireframe, A, b = _public_optimize_problem(seed=3110)
+    jax_wireframe, _, _ = _public_optimize_problem(seed=3110)
+    for wireframe in (cpu_wireframe, jax_wireframe):
+        wireframe.set_poloidal_current(0.05)
+        wireframe.set_toroidal_current(-0.03)
+        wireframe.set_segments_constrained(
+            [0, wireframe.n_tor_segments, wireframe.n_tor_segments + 1]
+        )
+    params = {"reg_W": 0.1, "assume_no_crossings": False}
+
+    expected = optimize_wireframe(
+        cpu_wireframe,
+        "rcls",
+        params,
+        Amat=A,
+        bvec=b,
+        verbose=False,
+    )
+    actual = optimize_wireframe_jax(
+        jax_wireframe,
+        "rcls",
+        params,
+        Amat=A,
+        bvec=b,
+        verbose=False,
+    )
+
+    for key in ("x", "f_B", "f_R", "f"):
+        np.testing.assert_allclose(actual[key], expected[key], rtol=_RTOL, atol=_ATOL)
     np.testing.assert_allclose(
         jax_wireframe.currents,
         cpu_wireframe.currents,
@@ -437,6 +634,224 @@ def test_gsco_jax_matches_cpp_fixed_state_baseline() -> None:
     )
 
     _compare_gsco_result(actual, expected)
+
+
+def test_gsco_jax_large_200_grid_50_loops_matches_cpp() -> None:
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _synthetic_gsco_problem(n_grid=200, n_loops=50, seed=3110)
+    )
+    expected = _run_cpp_gsco(
+        False,
+        False,
+        False,
+        A,
+        b,
+        0.2,
+        1.0,
+        3,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.05,
+        50,
+        x_init,
+        loop_count_init,
+    )
+
+    actual = greedy_stellarator_coil_optimization_jax(
+        False,
+        False,
+        False,
+        A,
+        b,
+        0.2,
+        1.0,
+        3,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.05,
+        50,
+        x_init,
+        loop_count_init,
+    )
+
+    assert A.shape == (200, 200)
+    assert loops.shape == (50, 4)
+    _compare_gsco_result(actual, expected)
+
+
+def test_gsco_jax_topology_with_more_than_int16_segments_matches_cpp() -> None:
+    n_segments = 2**15 + 8
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _synthetic_gsco_problem(
+            n_grid=8,
+            n_loops=2,
+            n_segments=n_segments,
+            seed=3111,
+        )
+    )
+    expected = _run_cpp_gsco(
+        False,
+        False,
+        False,
+        A,
+        b,
+        0.2,
+        1.0,
+        2,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.05,
+        2,
+        x_init,
+        loop_count_init,
+    )
+
+    actual = greedy_stellarator_coil_optimization_jax(
+        False,
+        False,
+        False,
+        A,
+        b,
+        0.2,
+        1.0,
+        2,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.05,
+        2,
+        x_init,
+        loop_count_init,
+    )
+
+    assert segments.shape[0] > 2**15
+    assert int(loops.max()) > 2**15
+    _compare_gsco_result(actual, expected)
+
+
+def test_gsco_opposite_candidate_index_wraps_negative_to_positive() -> None:
+    """Undo detection maps both current directions to the opposite candidate."""
+
+    n_loops = 3
+    candidates = jnp.arange(2 * n_loops, dtype=jnp.int32)
+    actual = jax.vmap(lambda opt_ind: _gsco_opposite_candidate_index(opt_ind, n_loops))(
+        candidates
+    )
+
+    np.testing.assert_array_equal(
+        np.asarray(jax.device_get(actual)),
+        np.array([3, 4, 5, 0, 1, 2], dtype=np.int32),
+    )
+
+
+def test_gsco_jax_stop_none_eligible_matches_cpp() -> None:
+    A = np.zeros((2, 4), dtype=np.float64)
+    b = np.ones((2, 1), dtype=np.float64)
+    loops = np.array([[0, 1, 2, 3]], dtype=np.int64)
+    free_loops = np.array([0], dtype=np.int64)
+    segments = np.array([[0, 1], [1, 2], [2, 3], [3, 0]], dtype=np.int64)
+    connections = np.zeros((4, 4), dtype=np.int64)
+    x_init = np.zeros((4, 1), dtype=np.float64)
+    loop_count_init = np.zeros(1, dtype=np.int64)
+
+    expected = _run_cpp_gsco(
+        False,
+        False,
+        False,
+        A,
+        b,
+        0.2,
+        np.inf,
+        0,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.1,
+        4,
+        x_init,
+        loop_count_init,
+    )
+    actual = greedy_stellarator_coil_optimization_jax(
+        False,
+        False,
+        False,
+        A,
+        b,
+        0.2,
+        np.inf,
+        0,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.1,
+        4,
+        x_init,
+        loop_count_init,
+    )
+
+    _compare_gsco_result(actual, expected)
+    assert int(np.asarray(actual.history_length)) == 1
+
+
+def test_gsco_jax_undo_branch_matches_cpp() -> None:
+    A = np.zeros((2, 4), dtype=np.float64)
+    b = np.zeros((2, 1), dtype=np.float64)
+    loops = np.array([[0, 1, 2, 3]], dtype=np.int64)
+    free_loops = np.array([1], dtype=np.int64)
+    segments = np.array([[0, 1], [1, 2], [2, 3], [3, 0]], dtype=np.int64)
+    connections = np.zeros((4, 4), dtype=np.int64)
+    x_init = np.zeros((4, 1), dtype=np.float64)
+    loop_count_init = np.zeros(1, dtype=np.int64)
+
+    expected = _run_cpp_gsco(
+        False,
+        False,
+        False,
+        A,
+        b,
+        0.2,
+        np.inf,
+        0,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.1,
+        4,
+        x_init,
+        loop_count_init,
+    )
+    actual = greedy_stellarator_coil_optimization_jax(
+        False,
+        False,
+        False,
+        A,
+        b,
+        0.2,
+        np.inf,
+        0,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.1,
+        4,
+        x_init,
+        loop_count_init,
+    )
+
+    _compare_gsco_result(actual, expected)
+    assert int(np.asarray(actual.history_length)) == 3
+    np.testing.assert_allclose(np.asarray(actual.x), x_init, rtol=_RTOL, atol=_ATOL)
 
 
 @pytest.mark.parametrize(

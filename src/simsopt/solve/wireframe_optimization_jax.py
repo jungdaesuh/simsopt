@@ -8,7 +8,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..field.magneticfield import MagneticField
+from ..field.biotsavart_jax_backend import BiotSavartJAX
+from ..field.magneticfield import MagneticField, _is_jax_native_field
 from ..field.wireframefield_jax import WireframeFieldJAX
 from ..geo.surface import Surface
 from ..geo.wireframe_toroidal import ToroidalWireframe
@@ -79,6 +80,31 @@ jax.tree_util.register_dataclass(
 )
 
 
+def _field_B_at_points(field, points):
+    orig_points = field.get_points_cart_ref()
+    field.set_points(points)
+    B_ext = field.B()
+    if orig_points is None and isinstance(field, BiotSavartJAX):
+        field.clear_points()
+    else:
+        field.set_points(orig_points)
+    return B_ext
+
+
+def _jax_native_ext_field_B(ext_field, points):
+    if isinstance(ext_field, MagneticField):
+        if not _is_jax_native_field(ext_field):
+            raise ValueError("Input `ext_field` must be a JAX-native MagneticField")
+        return _field_B_at_points(ext_field, points)
+
+    if isinstance(ext_field, BiotSavartJAX):
+        return _field_B_at_points(ext_field, points)
+
+    raise ValueError(
+        "Input `ext_field` must be a JAX-native MagneticField or BiotSavartJAX"
+    )
+
+
 def _regularization_matrix(W: object, n: int) -> jax.Array:
     W_arr = jnp.squeeze(_as_jax_float64(W))
     if W_arr.ndim == 0:
@@ -146,7 +172,8 @@ def regularized_constrained_least_squares_jax(
     AQ2bvec = AQ2mat.T @ bvec
     RHS = AQ2bvec - AQ2mat.T @ AQ1uvec - WQ2mat.T @ WQ1uvec
 
-    vvec = jnp.linalg.lstsq(LHS, RHS, rcond=None)[0]
+    rcond = max(LHS.shape) * jnp.finfo(LHS.dtype).eps
+    vvec = jnp.linalg.lstsq(LHS, RHS, rcond=rcond)[0]
     return Qfull @ jnp.concatenate((uvec, vvec), axis=0)
 
 
@@ -177,6 +204,10 @@ def _gsco_active_entries(x: jax.Array, tol: jax.Array) -> jax.Array:
 
 def _gsco_two_f_s(x: jax.Array, tol: jax.Array) -> jax.Array:
     return jnp.sum(_gsco_active_entries(x, tol))
+
+
+def _gsco_opposite_candidate_index(opt_ind: jax.Array, n_loops: int) -> jax.Array:
+    return (opt_ind + n_loops) % (2 * n_loops)
 
 
 def _gsco_candidate_currents(
@@ -316,6 +347,9 @@ def greedy_stellarator_coil_optimization_jax(
     The C++ implementation returns history arrays truncated to the accepted
     update count. This JAX kernel keeps fixed-size history arrays for JIT
     compatibility and returns ``history_length`` for slicing valid entries.
+    A segment is considered active when ``abs(current) > tol`` with
+    ``tol = 0.001 * abs(default_current)``. Thus ``default_current=0`` makes
+    the active-current threshold exactly zero, matching the CPU edge case.
     """
 
     A = _as_jax_float64(A_obj)
@@ -403,7 +437,8 @@ def greedy_stellarator_coil_optimization_jax(
 
         n_eligible = jnp.sum(candidate_currents != 0.0)
         stop_none_eligible = n_eligible < 1
-        stop_undone_loop = (iteration > 0) & (opt_ind + n_loops == opt_ind_prev)
+        opposite_opt_ind = _gsco_opposite_candidate_index(opt_ind, n_loops)
+        stop_undone_loop = (iteration > 0) & (opposite_opt_ind == opt_ind_prev)
         stop_last_iter = iteration + 1 == n_iter
         reject_undo = stop_undone_loop & (two_fs[opt_ind] > two_f_latest)
         accept_loop = (~done) & (~stop_none_eligible) & (~reject_undo)
@@ -657,14 +692,15 @@ def bnorm_obj_matrices_jax(
     )
 
     if ext_field is not None:
-        if not isinstance(ext_field, MagneticField):
-            raise ValueError("Input `ext_field` must be a MagneticField class instance")
-        orig_points = ext_field.get_points_cart_ref()
-        ext_field.set_points(surf_plas.gamma().reshape((-1, 3)))
-        B_ext = ext_field.B().reshape(normal.shape)
+        B_ext = np.asarray(
+            _jax_native_ext_field_B(
+                ext_field,
+                surf_plas.gamma().reshape((-1, 3)),
+            ),
+            dtype=np.float64,
+        ).reshape(normal.shape)
         bnorm_ext = np.sum(B_ext * unitn, axis=2)[:, :, None]
         bnorm_ext_weighted = bnorm_ext.reshape((-1, 1)) * area_weight
-        ext_field.set_points(orig_points)
     else:
         bnorm_ext_weighted = 0 * area_weight
 

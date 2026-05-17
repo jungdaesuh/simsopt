@@ -84,6 +84,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from simsopt._array_contracts import require_nonnegative_int32_indices
+
 from ._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
@@ -107,12 +109,33 @@ def _component(array: jax.Array, index: int) -> jax.Array:
     return array[..., index]
 
 
+def _as_points(points: object) -> jax.Array:
+    points_jax = _as_jax_float64(points)
+    if points_jax.ndim != 2 or points_jax.shape[-1] != 3:
+        raise ValueError(
+            f"points must have shape (n_points, 3); got {points_jax.shape}."
+        )
+    return points_jax
+
+
+def _as_segments(segments: object) -> jax.Array:
+    if isinstance(segments, jax.Array) or hasattr(segments, "aval"):
+        segments_jax = jnp.asarray(segments)
+        if segments_jax.dtype != jnp.int32:
+            raise TypeError(
+                "device-resident segments must already be int32; pass host "
+                "segments for range-checked staging."
+            )
+        return segments_jax
+    return _as_jax_int32(require_nonnegative_int32_indices("segments", segments))
+
+
 def _gather_segment_nodes(
     nodes: object,
     segments: object,
 ) -> tuple[jax.Array, jax.Array]:
     nodes_jax = _as_jax_float64(nodes)
-    segments_jax = _as_jax_int32(segments)
+    segments_jax = _as_segments(segments)
     node0 = jnp.take(nodes_jax, segments_jax[:, 0], axis=1)
     node1 = jnp.take(nodes_jax, segments_jax[:, 1], axis=1)
     return node0, node1
@@ -140,7 +163,7 @@ def wireframe_segment_B(
 ) -> jax.Array:
     """Magnetic field from one straight wire segment with unit current."""
     return _wireframe_segment_B_from_arrays(
-        _as_jax_float64(points),
+        _as_points(points),
         _as_jax_float64(node0),
         _as_jax_float64(node1),
     )
@@ -151,7 +174,17 @@ def wireframe_segment_dB_by_dX(
     node0: object,
     node1: object,
 ) -> jax.Array:
-    """First spatial derivative from one straight wire segment with unit current."""
+    """First spatial derivative from one straight wire segment with unit current.
+
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). Axis 1 is the B-field component;
+        axis 2 is the spatial derivative direction. See the module
+        head docstring for the C++ ``dB_by_dX(p, k, m)`` alignment.
+    """
     _, dB = wireframe_segment_B_and_dB_by_dX(points, node0, node1)
     return dB
 
@@ -161,9 +194,20 @@ def wireframe_segment_B_and_dB_by_dX(
     node0: object,
     node1: object,
 ) -> tuple[jax.Array, jax.Array]:
-    """Return ``(B, dB_by_dX)`` for one straight segment with unit current."""
+    """Return ``(B, dB_by_dX)`` for one straight segment with unit current.
+
+    Returns
+    -------
+    B : jax.Array
+        Shape ``(n_points, 3)``.
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). Axis 1 is the B-field component;
+        axis 2 is the spatial derivative direction.
+    """
     return _wireframe_segment_B_and_dB_by_dX_from_arrays(
-        _as_jax_float64(points),
+        _as_points(points),
         _as_jax_float64(node0),
         _as_jax_float64(node1),
     )
@@ -242,29 +286,13 @@ def wireframe_segment_B_contributions(
     seg_signs: object,
 ) -> jax.Array:
     """Return unit-current ``B`` contributions as ``(n_segments, n_points, 3)``."""
-    points_jax = _as_jax_float64(points)
+    points_jax = _as_points(points)
     seg_signs_jax = _as_jax_float64(seg_signs).reshape((-1,))
     node0, node1 = _gather_segment_nodes(nodes, segments)
 
-    def half_period_B(
-        node0_by_half: jax.Array,
-        node1_by_half: jax.Array,
-        seg_sign: jax.Array,
-    ) -> jax.Array:
-        return seg_sign * _wireframe_segment_B_from_arrays(
-            points_jax,
-            node0_by_half,
-            node1_by_half,
-        )
-
     def segment_B(node0_by_segment: jax.Array, node1_by_segment: jax.Array):
-        return jnp.sum(
-            jax.vmap(half_period_B)(
-                node0_by_segment,
-                node1_by_segment,
-                seg_signs_jax,
-            ),
-            axis=0,
+        return _segment_total_B(
+            points_jax, node0_by_segment, node1_by_segment, seg_signs_jax
         )
 
     return jax.vmap(segment_B, in_axes=(1, 1), out_axes=0)(node0, node1)
@@ -276,31 +304,24 @@ def wireframe_segment_dB_by_dX_contributions(
     segments: object,
     seg_signs: object,
 ) -> jax.Array:
-    """Return unit-current ``dB_by_dX`` as ``(n_segments, n_points, 3, 3)``."""
-    points_jax = _as_jax_float64(points)
+    """Return unit-current ``dB_by_dX`` per segment.
+
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_segments, n_points, 3, 3)``. Axis convention on the
+        trailing 3x3 block: ``dB[i, p, l, j] = ∂_j B_l(x_p)`` for
+        segment ``i`` (component-first; matches the simsoptpp C++
+        storage order). Axis 2 is the B-field component; axis 3 is
+        the spatial derivative direction.
+    """
+    points_jax = _as_points(points)
     seg_signs_jax = _as_jax_float64(seg_signs).reshape((-1,))
     node0, node1 = _gather_segment_nodes(nodes, segments)
 
-    def half_period_dB(
-        node0_by_half: jax.Array,
-        node1_by_half: jax.Array,
-        seg_sign: jax.Array,
-    ) -> jax.Array:
-        _B, dB = _wireframe_segment_B_and_dB_by_dX_from_arrays(
-            points_jax,
-            node0_by_half,
-            node1_by_half,
-        )
-        return seg_sign * dB
-
     def segment_dB(node0_by_segment: jax.Array, node1_by_segment: jax.Array):
-        return jnp.sum(
-            jax.vmap(half_period_dB)(
-                node0_by_segment,
-                node1_by_segment,
-                seg_signs_jax,
-            ),
-            axis=0,
+        return _segment_total_dB(
+            points_jax, node0_by_segment, node1_by_segment, seg_signs_jax
         )
 
     return jax.vmap(segment_dB, in_axes=(1, 1), out_axes=0)(node0, node1)
@@ -311,6 +332,10 @@ def _nodes_by_segment(
 ) -> tuple[jax.Array, jax.Array]:
     node0, node1 = _gather_segment_nodes(nodes, segments)
     return jnp.moveaxis(node0, 1, 0), jnp.moveaxis(node1, 1, 0)
+
+
+def _zero_dB_like(points: jax.Array) -> jax.Array:
+    return jnp.zeros(points.shape + (3,), dtype=points.dtype)
 
 
 def _segment_total_B(
@@ -350,7 +375,7 @@ def _segment_total_dB(
 
     dB, _ = jax.lax.scan(
         add_half_period,
-        jnp.zeros(points.shape + (3,), dtype=points.dtype),
+        _zero_dB_like(points),
         (node0_by_segment, node1_by_segment, seg_signs),
     )
     return dB
@@ -375,7 +400,7 @@ def _segment_total_B_and_dB(
         add_half_period,
         (
             jnp.zeros_like(points),
-            jnp.zeros(points.shape + (3,), dtype=points.dtype),
+            _zero_dB_like(points),
         ),
         (node0_by_segment, node1_by_segment, seg_signs),
     )[0]
@@ -417,7 +442,7 @@ def _wireframe_dB_jit(
 
     dB, _ = jax.lax.scan(
         add_segment,
-        jnp.zeros(points.shape + (3,), dtype=points.dtype),
+        _zero_dB_like(points),
         (node0, node1, currents),
     )
     return dB
@@ -448,7 +473,7 @@ def _wireframe_B_and_dB_jit(
         add_segment,
         (
             jnp.zeros_like(points),
-            jnp.zeros(points.shape + (3,), dtype=points.dtype),
+            _zero_dB_like(points),
         ),
         (node0, node1, currents),
     )[0]
@@ -462,9 +487,9 @@ def _coerce_inputs(
     currents: object,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     return (
-        _as_jax_float64(points),
+        _as_points(points),
         _as_jax_float64(nodes),
-        _as_jax_int32(segments),
+        _as_segments(segments),
         _as_jax_float64(seg_signs).reshape((-1,)),
         _as_jax_float64(currents).reshape((-1,)),
     )
@@ -490,7 +515,16 @@ def wireframe_dB_by_dX(
     seg_signs: object,
     currents: object,
 ) -> jax.Array:
-    """Return the total first spatial derivative of the wireframe field."""
+    """Return the total first spatial derivative of the wireframe field.
+
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). Axis 1 is the B-field component;
+        axis 2 is the spatial derivative direction.
+    """
     return _wireframe_dB_jit(
         *_coerce_inputs(points, nodes, segments, seg_signs, currents)
     )
@@ -503,7 +537,18 @@ def wireframe_B_and_dB_by_dX(
     seg_signs: object,
     currents: object,
 ) -> tuple[jax.Array, jax.Array]:
-    """Return ``(B, dB_by_dX)`` for the total wireframe field."""
+    """Return ``(B, dB_by_dX)`` for the total wireframe field.
+
+    Returns
+    -------
+    B : jax.Array
+        Shape ``(n_points, 3)``.
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). Axis 1 is the B-field component;
+        axis 2 is the spatial derivative direction.
+    """
     return _wireframe_B_and_dB_jit(
         *_coerce_inputs(points, nodes, segments, seg_signs, currents)
     )
