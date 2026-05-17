@@ -10,10 +10,13 @@ PYTHONDONTWRITEBYTECODE=1 .conda/jax/bin/python .artifacts/lm_minpack_port_plan_
 
 ## Result
 
-`G0_PASS=False`
+`BYTE_G0_PASS=False`
+`TOLERANCE_G0_PASS=True`
 
-The Track 1 CPU-byte-exact MINPACK spike fails at the Phase 0 gate on the
-production BoozerSurface shape `(384, 40)`.
+The original Track 1 CPU-byte-exact MINPACK spike fails at the Phase 0 gate on
+the production BoozerSurface shape `(384, 40)`. The observed drift is
+approximately `1e-15`, which is comfortably below the revised
+tolerance-equivalent acceptance floor of `1e-10`.
 
 ## Evidence
 
@@ -67,3 +70,19 @@ Per `PLAN.md` Phase 0, Track 1 is abandoned at production scope. Re-scoping to
 `m ~= n` only is not a default fallback and would require owner sign-off.
 
 Track 2 remains valid and is unaffected by this gate failure.
+
+## Revised Gate Decision -- 2026-05-17
+
+The owner changed Track 1 from CPU byte identity to a CPU
+tolerance-equivalent MINPACK-style QR LM lane. Under that revised contract,
+the G0 evidence is accepted because the worst observed packed/`Q^T f` drift is
+orders of magnitude below `1e-10`.
+
+Implementation proceeds as an opt-in target lane:
+
+- `optimizer_backend="ondevice"`
+- `least_squares_algorithm="lm-minpack"`
+- concrete solver method `method="lm-minpack-ondevice"`
+
+This route is dense pivoted-QR and MINPACK-style, but it does not claim
+MINPACK packed-QR byte identity.

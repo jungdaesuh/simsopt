@@ -113,6 +113,7 @@ from . import optimizer_jax as _optimizer_jax
 from .optimizer_jax import (
     VALID_LEAST_SQUARES_ALGORITHMS,
     VALID_OPTIMIZER_BACKENDS,
+    levenberg_marquardt_minpack_traceable,
     levenberg_marquardt_traceable,
     newton_exact,
     newton_exact_traceable,
@@ -3000,9 +3001,9 @@ def _ls_factor_once_dispatch_eligible(H, *, max_dense_jacobian_bytes) -> bool:
       and the Exact Jacobian materialization path. Operators that want
       to allow large LS Hessians but disable LS factor-once dispatch
       can set ``max_dense_jacobian_bytes`` below
-      ``max_dense_linearization_bytes`` and the runtime will fall back
-      to operator-only LS adjoints while still emitting the dense
-      Hessian for reporting. Both options default to 512 MB.
+      ``max_dense_linearization_bytes`` and the runtime uses
+      operator-only LS adjoints while still emitting the dense Hessian
+      for reporting. Both options default to 512 MB.
     """
     if H is None:
         return False
@@ -3057,7 +3058,7 @@ _SCIPY_TRACE_OPTIONS = frozenset({"record_scipy_callback_trace"})
 # Callback options accepted by all backends.
 _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
 _ONDEVICE_OPTIMIZER_METHODS = frozenset(
-    {"bfgs-ondevice", "lbfgs-ondevice", "lm-ondevice"}
+    {"bfgs-ondevice", "lbfgs-ondevice", "lm-ondevice", "lm-minpack-ondevice"}
 )
 _LS_DYNAMIC_OPTION_KEYS = frozenset(
     {"least_squares_algorithm", "materialize_dense_linearization"}
@@ -4653,20 +4654,28 @@ class BoozerSurfaceJAX(Optimizable):
             )
 
         x0 = self._pack_decision_vector(iota, G, sdofs=_as_jax_float64(sdofs))
-        if method == "lm-ondevice":
+        if method in {"lm-ondevice", "lm-minpack-ondevice"}:
             residual_fn = self._get_traceable_penalty_residual(
                 optimize_G,
                 weight_inv_modB,
             )
             least_squares_options = self._collect_least_squares_options()
-            ls_state = levenberg_marquardt_traceable(
+            solver = (
+                levenberg_marquardt_minpack_traceable
+                if method == "lm-minpack-ondevice"
+                else levenberg_marquardt_traceable
+            )
+            gtol = least_squares_options.get("gtol")
+            if method == "lm-minpack-ondevice" and gtol is None:
+                gtol = 1e-8
+            ls_state = solver(
                 residual_fn,
                 x0,
                 maxiter=self.options["bfgs_maxiter"],
                 tol=self.options["bfgs_tol"],
                 ftol=least_squares_options.get("ftol", 1e-8),
                 xtol=least_squares_options.get("xtol", 1e-8),
-                gtol=least_squares_options.get("gtol"),
+                gtol=gtol,
                 materialize_dense_linearization=bool(
                     least_squares_options["materialize_dense_linearization"]
                     and materialize_dense_linearization
@@ -4978,7 +4987,7 @@ class BoozerSurfaceJAX(Optimizable):
         return optimizer_options
 
     def _collect_least_squares_options(self):
-        """Gather matrix-free LM options from self.options."""
+        """Gather LM options from self.options."""
         options = {
             "materialize_dense_linearization": bool(
                 self.options["materialize_dense_linearization"]
@@ -5070,7 +5079,7 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G=optimize_G,
         )
         progress_callback = self._make_solver_progress_callback(method)
-        if method in {"lm", "lm-ondevice"}:
+        if method in {"lm", "lm-ondevice", "lm-minpack-ondevice"}:
             residual_fn = self._make_penalty_residual_with(
                 optimize_G,
                 weight_inv_modB,
@@ -5078,7 +5087,7 @@ class BoozerSurfaceJAX(Optimizable):
             )
             least_squares_runner = (
                 target_least_squares
-                if method == "lm-ondevice"
+                if method.endswith("-ondevice")
                 else reference_least_squares
             )
             result = least_squares_runner(
@@ -5510,15 +5519,23 @@ class BoozerSurfaceJAX(Optimizable):
             hostify_inputs=self.options["optimizer_backend"] != "ondevice",
         )
         if self.options["optimizer_backend"] == "ondevice":
+            resolved_method = self._resolve_optimizer_method(
+                limited_memory=False,
+                optimize_G=optimize_G,
+            )
+            optimizer_method = (
+                resolved_method
+                if resolved_method in {"lm-ondevice", "lm-minpack-ondevice"}
+                else "lm-ondevice"
+            )
             result = target_least_squares(
                 residual_fn,
                 x0,
-                method="lm-ondevice",
+                method=optimizer_method,
                 tol=tol,
                 maxiter=maxiter,
                 options=self._collect_least_squares_options(),
             )
-            optimizer_method = "lm-ondevice"
         else:
             result = reference_least_squares(
                 residual_fn,

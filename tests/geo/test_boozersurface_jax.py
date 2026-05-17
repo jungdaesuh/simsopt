@@ -3590,8 +3590,10 @@ class TestBoozerSurfaceJAXClass:
             ("scipy", True, "quasi-newton", "lbfgs"),
             ("ondevice", False, "quasi-newton", "bfgs-ondevice"),
             ("ondevice", False, "lm", "lm-ondevice"),
+            ("ondevice", False, "lm-minpack", "lm-minpack-ondevice"),
             ("scipy-jax", False, "quasi-newton", "lbfgs-scipy-jax"),
             ("scipy", False, "lm", "lm"),
+            ("scipy", False, "lm-minpack", "lm"),
         ],
     )
     def test_resolve_least_squares_optimizer_method_contract(
@@ -4105,15 +4107,24 @@ class TestBoozerSurfaceJAXClass:
             (True, True),
         ],
     )
+    @pytest.mark.parametrize(
+        ("least_squares_algorithm", "expected_method"),
+        [
+            ("lm", "lm-ondevice"),
+            ("lm-minpack", "lm-minpack-ondevice"),
+        ],
+    )
     def test_run_code_routes_lm_least_squares_contract(
         self,
         monkeypatch,
+        least_squares_algorithm,
+        expected_method,
         explicit_materialize,
         expected_materialize,
     ):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["least_squares_algorithm"] = "lm"
+        booz.options["least_squares_algorithm"] = least_squares_algorithm
         _set_explicit_lm_options(booz)
         if explicit_materialize is not None:
             booz.options["materialize_dense_linearization"] = explicit_materialize
@@ -4168,7 +4179,7 @@ class TestBoozerSurfaceJAXClass:
 
         res = booz.run_code(iota=0.3, G=0.05)
 
-        assert captured["method"] == "lm-ondevice"
+        assert captured["method"] == expected_method
         _assert_explicit_lm_options_forwarded(captured["options"], booz)
         assert (
             captured["options"]["materialize_dense_linearization"]
@@ -4178,7 +4189,7 @@ class TestBoozerSurfaceJAXClass:
             captured["options"]["max_dense_linearization_bytes"]
             == booz.options["max_dense_linearization_bytes"]
         )
-        assert res["optimizer_method"] == "lm-ondevice"
+        assert res["optimizer_method"] == expected_method
         assert res["success"] is True
 
     def test_run_code_reference_lm_forwards_least_squares_options(self, monkeypatch):
@@ -6515,15 +6526,29 @@ class TestBoozerSurfaceJAXExactPath:
             (True, True),
         ],
     )
+    @pytest.mark.parametrize(
+        ("least_squares_algorithm", "expected_method", "solver_attr"),
+        [
+            ("lm", "lm-ondevice", "levenberg_marquardt_traceable"),
+            (
+                "lm-minpack",
+                "lm-minpack-ondevice",
+                "levenberg_marquardt_minpack_traceable",
+            ),
+        ],
+    )
     def test_run_code_traceable_ls_routes_lm_ondevice(
         self,
         monkeypatch,
+        least_squares_algorithm,
+        expected_method,
+        solver_attr,
         explicit_materialize,
         expected_materialize,
     ):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["least_squares_algorithm"] = "lm"
+        booz.options["least_squares_algorithm"] = least_squares_algorithm
         _set_explicit_lm_options(booz)
         if explicit_materialize is not None:
             booz.options["materialize_dense_linearization"] = explicit_materialize
@@ -6588,13 +6613,13 @@ class TestBoozerSurfaceJAXExactPath:
 
         monkeypatch.setattr(_opt, "_minimize_bfgs_private", forbidden_private_minimize)
         monkeypatch.setattr(_opt, "_minimize_lbfgs_private", forbidden_private_minimize)
-        monkeypatch.setattr(_bsj, "levenberg_marquardt_traceable", fake_lm)
+        monkeypatch.setattr(_bsj, solver_attr, fake_lm)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
         _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
-        assert result["optimizer_method"] == "lm-ondevice"
+        assert result["optimizer_method"] == expected_method
         assert bool(result["success"])
         _assert_explicit_lm_options_forwarded(captured, booz)
         assert captured["materialize_dense_linearization"] is expected_materialize

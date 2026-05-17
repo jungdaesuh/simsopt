@@ -156,7 +156,7 @@ backend explicitly.
 Optimizer family equivalence
 ----------------------------
 
-Two JAX least-squares methods are exposed by
+Three JAX least-squares methods are exposed by
 ``simsopt.geo.optimizer_jax``:
 
 - ``method="lm"`` (``reference_least_squares``) is a host-driven
@@ -164,8 +164,13 @@ Two JAX least-squares methods are exposed by
   GMRES inner solve.
 - ``method="lm-ondevice"`` (``target_least_squares``) is the
   trace-safe JAX-on-device version of the same algorithm.
+- ``method="lm-minpack-ondevice"`` (``target_least_squares``) is an
+  opt-in trace-safe JAX-on-device dense-QR Levenberg-Marquardt lane.
+  It materializes the dense Jacobian and solves the Marquardt
+  augmented least-squares step with column-pivoted QR.
 
-Neither method is a port of MINPACK ``lmder``. Both use:
+Neither ``method="lm"`` nor ``method="lm-ondevice"`` is a port of
+MINPACK ``lmder``. Both use:
 
 - A matrix-free GMRES inner solve against the regularized
   Gauss-Newton operator ``J^T J + λI`` (no pivoted-QR
@@ -187,10 +192,20 @@ The ``lm-ondevice`` backend is **doubly opt-in**: it requires both
 ``optimizer_backend="ondevice"`` and ``least_squares_algorithm="lm"``
 on ``BoozerSurfaceJAX``. ``"lm"`` (host-driven) and ``"lm-ondevice"``
 (trace-safe) are each other's byte-equality oracle for the JAX LM
-family; callers needing MINPACK ``lmder`` byte-equality must invoke
-``scipy.optimize.least_squares(method="lm")`` directly. The JAX LM
-family delivers tolerance equivalence on the target lane, not MINPACK
-byte-equality.
+matrix-free family.
+
+The ``lm-minpack-ondevice`` backend is **doubly opt-in**: it requires
+both ``optimizer_backend="ondevice"`` and
+``least_squares_algorithm="lm-minpack"`` on ``BoozerSurfaceJAX``. It
+is MINPACK-style at the solver level because it uses a dense
+column-pivoted QR step and emits the QR-scaled ``gtol`` ``info`` codes
+4 and 8. Its contract is tolerance-equivalent final-state parity
+against SciPy/MINPACK, not packed-QR or per-iteration byte identity.
+Because the dense Jacobian is required by the solver itself,
+``max_dense_linearization_bytes`` is a hard preflight cap for this lane,
+not a final-artifact reporting preference.
+Callers needing MINPACK ``lmder`` byte-equality must invoke
+``scipy.optimize.least_squares(method="lm")`` directly.
 
 Validation Checklist
 --------------------

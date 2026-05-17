@@ -7,33 +7,39 @@
 | Parent plan | `.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md` (Wave 4 W4.3 conditional rollout) |
 | Driver | 5-agent max-effort research (Opus 4.7) + independent critic validation pass |
 | Author | Jung Dae Suh + Claude Opus 4.7 |
-| Status | EXECUTED PARTIAL (2026-05-16) — Track 2 implemented; Track 1 abandoned at Phase 0 G0 for production scope after packed-QR/`qtb` bit-equality failure on `(384, 40)`; Track 3 remains deferred |
-| Estimated effort | Track 2: 2 days · Track 1 Phase 0 alone (cheapest abandon checkpoint): 1–3 days depending on implementer's `jax.lax.linalg` FFI familiarity · Track 1 spike through G5 cumulative: ~8.5 days (Phase 0: 1–3d, Phase 1: 1d, Phase 2: 1d, Phase 3: 2d, Phase 4: 1.5d, Phase 5: 2d) · full Track 1 through G8: ~10–12 days · Track 3 (Optimistix): 1–2 weeks. **All estimates are extrapolations from `_lbfgsb_scipy.py` (~3300 LOC), not measurements.** |
+| Status | EXECUTED REVISED (2026-05-17) — Track 2 implemented; original Track 1 byte-equality spike abandoned at Phase 0 G0; revised Track 1 tolerance-equivalent dense-QR lane implemented as `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`; Track 3 remains deferred |
+| Estimated effort | Track 2: implemented · revised Track 1 core route: implemented · revised Track 1 broad validation (MGH + Boozer fixture + compile timing): pending · Track 3 (Optimistix): 1–2 weeks if reopened |
 
 ---
 
-## Execution Status — 2026-05-16
+## Execution Status — 2026-05-17
 
 Track 2 landed as the low-risk convergence-semantics retrofit: the matrix-free
 JAX LM now carries the computable MINPACK-style `info` subset, exposes
 `ftol`/`xtol`/explicit `gtol`, and uses symmetric damping factors in the
 existing matrix-free lane.
 
-Track 1 was executed through its mandatory Phase 0 gate and abandoned at
-production scope. The G0 probe in
-`PHASE0_G0_REPORT.md` compares JAX internal packed `geqp3` + `ormqr` against
-SciPy LAPACK `dgeqp3` + `qr_multiply`; all 100 production-shape `(384, 40)`
-seeds fail bit equality for packed factor and `Q^T f`. Per the G0 policy below,
-no `lm-minpack` implementation should proceed without explicit owner sign-off
-to re-scope the project.
+Track 1 was executed through its mandatory Phase 0 byte-identity gate and the
+original CPU byte-equal contract was abandoned at production scope. The G0
+probe in `PHASE0_G0_REPORT.md` compares JAX internal packed `geqp3` + `ormqr`
+against SciPy LAPACK `dgeqp3` + `qr_multiply`; all 100 production-shape
+`(384, 40)` seeds fail bit equality for packed factor and `Q^T f`, but the
+observed drift is approximately `1e-15`.
+
+The owner then changed the Track 1 contract to a CPU tolerance-equivalent
+MINPACK-style QR LM lane. The first route is
+`least_squares_algorithm="lm-minpack"`, resolving on the target backend to
+`method="lm-minpack-ondevice"`. This lane materializes the dense Jacobian and
+solves the Marquardt augmented least-squares step with JAX column-pivoted QR.
+It does not claim MINPACK packed-QR byte identity.
 
 ## TL;DR
 
-Two-track strategy:
+Three-track strategy:
 
 - **Track 2 first** (low risk, high signal): retrofit the existing matrix-free JAX LM in `src/simsopt/geo/optimizer_jax.py` to use MINPACK-style three-criterion termination (`ftol` / `xtol` / `gtol` OR'd) and symmetric Marquardt damping. Closes the documented W4.3 algorithmic-divergence gap on convergence behavior and termination semantics without touching the inner solve. ~100 LOC. No compile-budget impact.
 
-- **Track 1 as gated spike** (research-grade, novel): build a CPU-byte-exact JAX port of MINPACK `lmder` keyed off the empirically-verified `jax.scipy.linalg.qr(pivoting=True)` FFI to LAPACK `dgeqp3`. New module `_lmder.py`, new opt-in path `least_squares_algorithm="lm-minpack"`. Each subroutine validated against a SciPy/MINPACK oracle before integration. Commit-or-discard at the end of the spike. Estimated 600–800 LOC and 30–60s first-trace; both are **extrapolated estimates from the existing `_lbfgsb_scipy.py` port**, not measurements.
+- **Track 1 revised** (CPU tolerance-equivalent QR lane): implement an opt-in dense pivoted-QR LM lane using `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`. This keeps the useful QR conditioning from MINPACK-style LM while accepting the Phase 0 evidence that packed-QR byte identity is not achievable on the production `(384,40)` shape. Contract: final-state parity at `atol=rtol=1e-10` on focused fixtures now; broader MGH/Boozer fixture proof remains pending.
 
 - **Track 3 deferred** (architectural shift, library swap): adopt Optimistix `LevenbergMarquardt` with Lineax `LSMR` inner solver as a parallel third lane. Adds ~400 LOC of adapter + 2 deps. Better numerical conditioning on near-rank-deficient fixtures (`κ(J)` not `κ(J)²`). Not byte-equal to MINPACK; tolerance-equivalent. Net LOC is **additive** while the existing matrix-free LM remains the default; the ~500-LOC simplification only materializes if/when a future cleanup retires the current `_lm_iteration`/`_gmres_solve_least_squares_system` path.
 
@@ -60,8 +66,8 @@ Two-track strategy:
 | Track | Success condition |
 |---|---|
 | Track 2 | Three-criterion termination + symmetric damping land; **convergence semantics improved** (the JAX LM stops on ftol/xtol/gtol disjunction rather than single grad-norm); iteration count on `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)` is within 1.5× of CPU MINPACK iteration count; `ls_state_parity` lane continues to pass at `sdofs_inf ≤ 1e-11`; no regression in `tests/geo/test_boozersurface_jax.py` or `tests/integration/test_single_stage_jax.py`. **Exact `info` integer parity over the full 1-8 range is explicitly NOT a Track 2 gate** — MINPACK's `info=4` (`if (gnorm .le. gtol) info = 4`, `lmder.f:313`) and `info=8` (`if (gnorm .le. epsmch) info = 8`, `lmder.f:431`) both depend on `gnorm = max_l |J[:,l]^T·(q^T fvec)/r_diag[l]|`, which is a pivoted-QR-only quantity unavailable in the matrix-free GMRES inner solve. Track 2's info-code parity is restricted to the matrix-free-computable subset {1, 2, 3, 5, 6, 7}; the pivoted-QR-required pair {4, 8} belongs to Track 1 G5. |
-| Track 1 (per gate) | At each spike gate (Phase 0 feasibility, enorm, qrfac, qrsolv, lmpar, driver), the JAX kernel matches its SciPy/MINPACK oracle at the lane-appropriate tolerance. Gate failure → abandon spike. **Phase 0 (Gate G0) is the only existential gate**: G0 failure invalidates the byte-equal contract on production BoozerSurface shapes and ends the spike on day 1–3 with no project-charter re-scope by default (see §8 Q8). G1–G5 failures trigger per-gate retry-then-abandon, not project abandonment. |
-| Track 1 (final) | `least_squares_algorithm="lm-minpack"` opt-in passes L1 (converged-state, `rtol=1e-6, atol=1e-10` per §6.1) and L2 (exact `niter`, `info`, `nfev` match per §6.1) parity against `scipy.optimize.least_squares(method="lm")` on at least 5 canonical Moré-Garbow-Hillstrom problems plus the oversampled BoozerSurface fixture, **CPU same-machine only**. L3 (per-iteration trace at `rtol=1e-12, atol=1e-14`) is **target-only on the MGH-5 m≈n subset** and is **aspirational on the (384,40) BoozerSurface fixture** because the §1.2 (384,40) Q-drift may propagate through `qtb` to per-iteration `(x, fnorm, delta, par, ratio)` divergence even after G0 passes via Path B or C. Per Phase 5 Gate G6, L3 failure on (384,40) drops the contract to L1+L2 without abandoning the spike. |
+| Track 1 (per gate) | Revised Gate G0 accepts the measured `~1e-15` packed/`Q^T f` drift because it is below the active `1e-10` tolerance contract. Follow-on gates are final-state parity gates, not byte-identity gates: direct fixtures first, then MGH, then the oversampled BoozerSurface fixture. |
+| Track 1 (final) | `least_squares_algorithm="lm-minpack"` opt-in passes final-state parity against `scipy.optimize.least_squares(method="lm")` at `atol=rtol=1e-10` on direct least-squares fixtures, then the broader MGH suite and oversampled BoozerSurface fixture. Exact packed-QR bytes, exact per-iteration trace, and exact `niter`/`nfev` are explicitly outside the revised Track 1 contract. |
 | Track 3 | `least_squares_algorithm="optimistix-lm"` opt-in matches converged state of the current LM at `branch-stable-resolve` lane on the oversampled fixture; better numerical robustness on the default (near-rank-deficient) fixture measured in `sdofs_inf` drift. |
 
 ---
@@ -136,7 +142,7 @@ Optimistix is a viable medium-term path (Track 3 of this plan). The reasons to a
 - Optimistix is tolerance-equivalent to MINPACK, not byte-equal. Lose the reproducibility-oracle property.
 - Optimistix is a single-maintainer (Patrick Kidger) dependency. Track 1 has no new runtime deps beyond JAX 0.10.0.
 - Optimistix doesn't preserve the existing simsopt parity-ladder lane structure as cleanly; lane boundaries are designed around the *exact* algorithm contract.
-- The two tracks are not mutually exclusive: Track 1 gives a CPU validation oracle; Track 3 gives the GPU production lane. Together they replace the current single-algorithm story with a CPU-byte-exact / GPU-fast separation.
+- The two tracks are not mutually exclusive: revised Track 1 gives a dense-QR tolerance-equivalent CPU validation lane; Track 3 would give a separate LSMR-based production lane if reopened.
 
 ### Why Track 2 must come first
 
@@ -189,158 +195,72 @@ Current scheme: `expand=4.0, shrink=0.5, mild_shrink=0.8` (asymmetric — `4.0 �
 
 ---
 
-## 4. Track 1 — CPU byte-exact MINPACK port (GATED SPIKE)
+## 4. Track 1 — CPU tolerance-equivalent MINPACK-style QR LM lane
 
-**Scope:** new module `src/simsopt/geo/optimizer_jax_private/_lmder.py` implementing `levenberg_marquardt_minpack_traceable`. New opt-in path `least_squares_algorithm="lm-minpack"` on the `ondevice` backend. Each subroutine validated against a SciPy/MINPACK oracle before integration. Commit-or-discard at the end of the spike per gate outcomes.
+**Scope:** `src/simsopt/geo/optimizer_jax.py` implements
+`levenberg_marquardt_minpack_traceable`. The opt-in path is
+`least_squares_algorithm="lm-minpack"` on `optimizer_backend="ondevice"`,
+resolving to `method="lm-minpack-ondevice"`. The contract is final-state
+tolerance equivalence to SciPy/MINPACK, not a private `_lmder.py` packed-QR
+byte-identical port.
 
-**Estimated effort:** ~10–12 working days for full implementation through G8 (Phase 0 + Phases 1–6 + Phase 7 docs). Spike-only validation through G0 alone (cheapest abandon checkpoint): 1–3 days. Spike-only validation through G0+G1: 2–4 days. Spike-only validation through G0+G1+G2: 3–5 days. **All effort estimates are extrapolations from `_lbfgsb_scipy.py`'s ~3300 LOC, not measurements of unbuilt code; the 1-day lower bound for Phase 0 assumes the implementer is fluent in `jax.lax.linalg` low-level FFI primitives (`householder_product`, `ormqr`), else 3 days is realistic.**
+### 4.1 Why this is no longer a byte-equality spike
 
-### 4.1 Why this is a spike, not a commitment
+Phase 0 proved that the original byte-identical packed-QR route fails on the
+production `(384,40)` shape. The failure magnitude is around `1e-15`, which is
+far below the revised `1e-10` tolerance contract but enough to invalidate a
+byte-for-byte MINPACK driver.
 
-Per critic validation: QR byte-equality is necessary but not sufficient. The full driver byte-equality depends on 15 load-bearing choices (Agent A spec §8): pivot tie-breaks (`>` not `≥`), Householder sign convention, the `0.5/√(0.25+0.25x²)` Givens form, `prered = temp1² + temp2²/0.5` model evaluation, `enorm` 3-bucket scaling, `dpmpar` literal decimals (not `np.finfo`), and others. Each must be reproduced exactly. The spike validates each as a separately-passing gate before committing to the full driver.
+The revised implementation keeps the useful numerical property: it solves each
+Marquardt augmented least-squares step with a dense column-pivoted QR factor,
+so it avoids the matrix-free lane's normal-equation conditioning penalty. It
+does not reconstruct MINPACK's packed Householder storage, does not route
+through private JAX internals, and does not claim exact internal trace parity.
 
-Abandon criteria for the spike:
-- Any gate fails after 2 attempts to align with MINPACK behavior
-- Compile time at the integrated driver level exceeds 90s on the canonical fixture
-- A critical-path subroutine (`enorm`, `qrsolv`, `lmpar`) cannot be byte-aligned with the MINPACK Fortran reference
+### 4.2 Revised implementation order
 
-If abandoned, document the gate that failed and the empirical evidence; keep Track 2 work.
+- [x] Accept Phase 0 under the revised tolerance gate: worst observed drift
+  `~1e-15 < 1e-10`.
+- [x] Add `least_squares_algorithm="lm-minpack"` to optimizer routing.
+- [x] Add `method="lm-minpack-ondevice"` to the target least-squares entrypoint.
+- [x] Implement `levenberg_marquardt_minpack_traceable` with dense Jacobian
+  materialization and `jax.scipy.linalg.qr(..., pivoting=True)`.
+- [x] Route `BoozerSurfaceJAX` LS solve paths through the new solver when the
+  resolved method is `lm-minpack-ondevice`.
+- [x] Add direct focused parity tests against SciPy LM and an overdetermined QR
+  fixture.
+- [ ] Run the broader MGH suite.
+- [ ] Run the oversampled BoozerSurface fixture.
+- [ ] Measure first-trace compile time on the canonical `(384,40)` fixture.
 
-### 4.2 Implementation order (each item is a separately-gated commit)
+### 4.3 Superseded byte-identity spike phases
 
-**Phase 0: Packed-`fjac` + `qtb` feasibility gate (1–3 days, depending on `jax.lax.linalg` FFI fluency) — MUST PASS BEFORE PHASES 1-5**
+The original `enorm`/`qrfac`/`qrsolv`/`lmpar`/private-`_lmder.py` phase plan
+is superseded by the revised tolerance-equivalent route above. Those phases are
+not active work unless the project later reopens a byte-identical MINPACK port.
 
-This phase exists because the §1.2 empirical probe showed `Q` is bit-equal to LAPACK only on `m ≈ n` shapes (40×40, 75×39, 100×50). On the production-sized `(384,40)` BoozerSurface shape, `Q max diff = 4.163e-17` even though `R` and `P` remain bit-equal. MINPACK's downstream subroutines (`qrsolv`, `lmpar`) consume the **packed Householder form** of `A` and `qtb = Q^T·fvec`, not the explicit `Q`. Phase 0 proves whether we can produce those quantities byte-equal to LAPACK on the production shape, without which the byte-equality story collapses at the first outer LM iteration on a real fixture.
+### 4.4 Track 1 deliverable file map
 
-- [ ] Reconstruct (or directly capture) MINPACK-packed `fjac` and `qtb = Q^T·fvec` from the underlying LAPACK `dgeqp3` call. **Three candidate paths**, evaluated in increasing order of bit-equality strength:
-  - **A.** Extract Householder vectors directly from explicit `Q` (returned by `jax.scipy.linalg.qr(A, pivoting=True, mode='economic')`) via the standard reconstruction (Schreiber-Van Loan or block-Householder backward), then write them into the strict lower triangle of a packed array matching MINPACK's storage layout. Inherits any drift in JAX's post-processed `Q`; expected to fail on `(384,40)` since the §1.2 probe shows that `Q` itself is not bit-equal there.
-  - **B.** Use `jax.lax.linalg.householder_product` / `ormqr` to compute `Q^T·fvec` directly without materializing `Q`, sidestepping the explicit-`Q` reconstruction. Avoids the §1.2 `Q` drift but still depends on JAX's `householder_product`/`ormqr` kernels matching LAPACK's `ormqr`/`larf` bit-for-bit (not empirically verified anywhere).
-  - **C.** Direct FFI to LAPACK `dgeqp3` via an XLA custom call (or JAX's private `lapack_dgeqp3_ffi` primitive if accessible from outside JAX), returning the native packed `(A_packed, tau, jpvt)` form. **Bit-equal to LAPACK by construction — it IS the LAPACK call.** This is the strongest path; the only reason not to default to it is build-system cost: Path C either (i) depends on a JAX private API that may break across JAX upgrades (fragile), or (ii) adds a small C-extension XLA custom call (~50 LOC, well-supported pattern, but adds a build dep). Spike evaluates Path C unless explicitly out-of-scope per owner sign-off — see §8 Q8.
-- [ ] Build a `qtb_via_jax(A, fvec)` helper that returns `Q^T·fvec` using the chosen path and compare bit-by-bit against `scipy.linalg.qr_multiply(A, fvec, mode='left', pivoting=True)` (or equivalently `Q^T @ fvec` from SciPy's `(Q, R, P)`).
-- [ ] Run the comparison on the four canonical shapes (40×40, 75×39, 100×50, 384×40) plus a synthetic `(2000, 80)` shape that brackets above the production fixture. **Plus** at least 100 random seeds at the production `(384,40)` shape (the §1.2 probe established the drift is deterministic-per-shape, so seed-sweeping is for failure-mode-coverage on poorly-conditioned data, not for the headline drift number).
-- [ ] **Gate G0**: `qtb` AND packed `fjac` byte-equal to LAPACK/MINPACK reference on `(384,40)` at all 100 random seeds AND on the 4 canonical shapes. **Conjunctive across BOTH paths attempted (A+B, or A+C, or B+C) — at least two paths must agree, to reduce the risk that a single passing path fails at G3/G4 due to subtle downstream mismatches.**
-  - **G0 pass (≥2 paths agree)**: proceed to Phase 1 with the strongest agreeing path frozen as the spike's QR-frontend convention.
-  - **G0 fail (no two paths agree)**: **ABANDON Track 1 spike at this checkpoint, full stop.** Re-scoping to `m ≈ n` only or "MGH-test-suite-only" is **not** a default fallback — the production BoozerSurface fixture is exclusively `m ≫ n` (§6.2: `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)` is 384×40, `m=384`), so a Track 1 that works only on `m ≈ n` has no production payoff and re-scoping is a project-charter renegotiation, not an implementation decision. The plan author may not unilaterally re-scope without owner sign-off (see new §8 Q8). Track 2 work is unaffected and proceeds independently.
-- [ ] Test file: `tests/geo/test_lmder_phase0_feasibility.py`. Lane: `direct-kernel` byte-parity.
+| File | Status |
+|---|---|
+| `src/simsopt/geo/optimizer_jax.py` | revised route + dense-QR solver |
+| `src/simsopt/geo/boozersurface_jax.py` | revised method routing |
+| `tests/geo/test_lm_minpack_qr_parity.py` | focused direct parity tests |
+| `tests/geo/test_boozersurface_jax.py` | resolver and route coverage |
+| `docs/source/jax_acceptance.rst` | precision-contract docs |
+| `.artifacts/lm_minpack_port_plan_2026-05-16/PLAN.md` | revised status |
+| `.artifacts/lm_minpack_port_plan_2026-05-16/PHASE0_G0_REPORT.md` | revised gate decision |
 
-**Phase 1: `enorm` port (1 day)**
-
-- [ ] Implement `enorm(x)` per Agent C pseudocode §8: 3-bucket (small/intermediate/large) classification with `rdwarf = 3.834e-20`, `rgiant = 1.304e+19` literal constants. First pass: vectorized using `jnp.where` masks and `jnp.sum`. Verify byte-equality requirement on test fixtures.
-- [ ] If vectorized form fails strict byte-equality on stress fixtures (entries spanning >150 orders of magnitude), fall back to `lax.fori_loop` scalar accumulator preserving Fortran iteration order.
-- [ ] Oracle: ground-truth from `scipy.optimize._minpack._enorm` (if exposed) OR from a one-time compile of the netlib `enorm.f` source via f2py in a test-time fixture. Compare on:
-  - Random vectors with entries in `[-1, 1]` (intermediate bucket)
-  - Vectors with one entry near `1e-20` (small bucket boundary)
-  - Vectors with one entry near `1e+19` (large bucket boundary)
-  - Vectors with all three bucket ranges represented
-- [ ] **Gate**: `enorm(x) == enorm_ref(x)` bit-exact on at least 100 randomized vectors per bucket configuration. If fails: investigate accumulator order, retry once, then abandon spike.
-- [ ] Test file: `tests/geo/test_lmder_enorm_oracle.py`. Lane: `direct-kernel` extended for byte-parity.
-
-**Phase 2: `qrfac` wrapper (1 day)**
-
-- [ ] Wrap `jax.scipy.linalg.qr(A, pivoting=True, mode='economic')` in a `qrfac_byte_parity(A)` adapter that returns the MINPACK-style packed `(fjac, rdiag, acnorm, ipvt)` tuple.
-- [ ] Compute `acnorm` (initial column 2-norms) via the ported `enorm` from Phase 1.
-- [ ] Verify pivot tie-break: the MINPACK rule is strict `>` (`qrfac.f:109`). JAX's `jsl.qr(pivoting=True)` calls LAPACK `dgeqp3` which also uses strict `>` — verify empirically on fixtures with equal column norms.
-- [ ] Oracle: `scipy.linalg.qr(A, mode='economic', pivoting=True)` plus separate `enorm` calls for `acnorm`. Compare byte-exact on:
-  - 40×40 random float64 (BoozerSurface-scale)
-  - 384×40 (oversampled BoozerSurface)
-  - 10×10 well-conditioned
-  - Rank-deficient (Powell singular function pattern)
-- [ ] **Gate**: `(fjac, rdiag, acnorm, ipvt)` byte-equal to SciPy + ported `enorm` on all four fixtures. Already empirically verified for 40×40; extend to other shapes.
-- [ ] Test file: `tests/geo/test_lmder_qrfac_oracle.py`. Lane: `direct-kernel` byte-parity.
-
-**Phase 3: `qrsolv` Givens elimination (2 days)**
-
-- [ ] Implement `qrsolv(r, ipvt, diag, qtb)` per Agent C pseudocode §2.1. Two-level `lax.fori_loop` (outer over n columns, inner over n Givens-elimination rows). Mirror Fortran ordering and `0.5/√(0.25+0.25x²)` Givens form.
-- [ ] Return `(x, sdiag, S_lower)` as explicit outputs — break the Fortran aliasing convention (the strict lower triangle of `R` holds `S^T`) because JAX immutable arrays don't support it cleanly. Agent A spec §3.2 notes this is the only ergonomic concession and does not affect byte-equality of the numerical outputs.
-- [ ] Oracle: instrumented `scipy.optimize._minpack` call OR direct ctypes binding to `cminpack` / `fortran-lang/minpack` `qrsolv` function. Compare:
-  - Random R + random pivot + random diag + random qtb (~50 fixtures)
-  - Edge case: zero entries in `diag` (skip-branch in MINPACK line 105-115)
-  - Edge case: rank-deficient R (zero diagonal entries)
-- [ ] **Gate**: `x` and `sdiag` byte-equal to MINPACK reference on all fixtures. If fails on Givens order / sign / formulation, retry once with explicit sequential `lax.fori_loop` accumulator. Then abandon spike.
-- [ ] Test file: `tests/geo/test_lmder_qrsolv_oracle.py`. Lane: `direct-kernel` byte-parity.
-
-**Phase 4: `lmpar` univariate Newton (1.5 days)**
-
-- [ ] Implement `lmpar(r, rdiag, ipvt, diag, qtb, delta, par_init)` per Agent C pseudocode §2.2. Outer `lax.while_loop` with `LmparState` carry; capped at 10 iterations per `lmpar.f:222`.
-- [ ] Implement the zero-par Gauss-Newton accept branch (Agent C §2.2 step 1-2): if `||D·s_gn|| ≤ 1.1·delta`, return par=0 with the Gauss-Newton step.
-- [ ] Implement the bracket setup (`parl`, `paru`) per `lmpar.f:151-187`. Forward triangular solve for `parl`; permuted `R^T·qtb` for `paru`.
-- [ ] Implement the secondary-exit condition (`lmpar.f:220-222`, fused into the same compound `if` as the primary-exit `dabs(fp) <= p1*delta` test and the `iter == 10` cap): `parl == 0 AND fp <= prev_fp AND prev_fp < 0`. The `prev_fp` is captured at `lmpar.f:213` as `temp = fp`. Encode via state carrying `prev_fp` field.
-- [ ] Implement the Hebden/Reinsch Newton update `par ← max(parl, par + parc)` with bracket maintenance.
-- [ ] Oracle: same instrumented MINPACK / cminpack binding as Phase 3, exposing `lmpar` directly. Compare:
-  - Well-conditioned R, par_init=0 (should accept Gauss-Newton immediately)
-  - Ill-conditioned R requiring 3-5 Newton iterations
-  - Rank-deficient R (parl == 0 path)
-  - Pathological: par_init at the upper bound
-- [ ] **Gate**: final `par`, `x`, `sdiag` byte-equal to MINPACK reference; iteration count exact match. If fails: investigate Newton update formula and secondary-exit predicate ordering. Abandon if 2 attempts insufficient.
-- [ ] Test file: `tests/geo/test_lmder_lmpar_oracle.py`. Lane: `direct-kernel` byte-parity.
-
-**Phase 5: Driver integration + outer iteration logic (2 days)**
-
-- [ ] Implement `LmderState` NamedTuple per Agent C pseudocode §1.
-- [ ] Implement `phase_jacobian` and `phase_inner` body functions per Agent C pseudocode §6. Use `lax.switch(state.phase, [phase_jacobian, phase_inner], state)` for dispatch — avoid nested while_loops.
-- [ ] Implement scaling vector `D` update via `update_diag` per Agent C §3 (pure `jnp.where`).
-- [ ] Implement trust-region radius + damping update via `update_delta_par` per Agent C §4 (pure `jnp.where`).
-- [ ] Wire termination via `compute_info` per Agent C §5 — same logic as Track 2 but parameterized for the byte-exact lane.
-- [ ] Public entry point `levenberg_marquardt_minpack_traceable` with signature matching `levenberg_marquardt_traceable` per Agent C pseudocode §9.
-- [ ] Add `"lm-minpack"` to `VALID_LEAST_SQUARES_ALGORITHMS` (`optimizer_jax.py:155`). Wire routing in `resolve_target_least_squares_optimizer_method` (`:632+`).
-- [ ] Update `BoozerSurfaceJAX` option validation in `boozersurface_jax.py` to accept `least_squares_algorithm="lm-minpack"`.
-- [ ] **Gate**: end-to-end parity vs `scipy.optimize.least_squares(method='lm', ftol=..., xtol=..., gtol=...)` on the oversampled BoozerSurface fixture and at least 5 MGH problems. L1 + L2 must pass; L3 is desired but may fail on accumulated rounding through `enorm`-vectorized form.
-- [ ] If L3 fails: drop to `lax.fori_loop` scalar `enorm` accumulator (Phase 1 fallback), re-test. If still fails: keep `lm-minpack` at the **L1+L2 contract only** (converged-state parity per §6.1 tolerance ladder + exact `info`/`niter`/`nfev` match), document the L3 gap as a per-iteration-trace divergence that does not affect the final state. **Do not call this "L1-only-byte-equal"** — L1 in §6.1 is explicitly tolerance parity, not bit-equality; bit-equality is L4.
-- [ ] First-trace compile-time measurement: must be `< 90s` on n=40, m=384 to retain. `< 60s` is the target.
-- [ ] Test file: `tests/geo/test_lmder_scipy_parity.py`. Lane: `direct-kernel` state-parity sub-lane.
-
-**Phase 6: MGH-1981 regression suite (1 day)**
-
-- [ ] Implement (or vendor) the 18 canonical Moré-Garbow-Hillstrom test functions. Source: `fortran-lang/minpack/test` directory has reference implementations. Translate to JAX-traceable Python residual functions.
-- [ ] L1 parity: `‖x_final - x_minpack‖_∞ ≤ 1e-6` and `|cost_final - cost_minpack| ≤ 1e-10` on all 18 problems.
-- [ ] L2 parity: exact match on `info`, `niter`, `nfev` (nfev allowance ±1 for terminator).
-- [ ] L3 parity (subset of 5 canonical problems): per-iteration `(x, fnorm, delta, par, ratio)` within `rtol=1e-12`. Use `jax.experimental.io_callback(ordered=True)` to dump JAX trace; intercept SciPy via wrapped residual logging.
-- [ ] Test file: `tests/geo/test_lmder_mgh_parity.py`. Lane: `direct-kernel` extended.
-
-**Phase 7: Documentation + plan reconciliation (0.5 day)**
-
-- [ ] Update `optimizer_jax.py:14-45` "LM family note" to add a fourth family entry: `lm-minpack` (byte-equal CPU only, tolerance-equivalent on GPU).
-- [ ] Update `docs/source/jax_acceptance.rst` "Optimizer family equivalence" with the third option and its precision contract.
-- [ ] Update `CLAUDE.md` "BFGS device residency" entry or add a new "LM family routing" entry documenting the triply opt-in path (`optimizer_backend="ondevice"` + `least_squares_algorithm="lm-minpack"`) and its CPU-only byte-equality claim.
-- [ ] Update `.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md` W4.3 status: flip from "implemented, Wave 4 (docs)" to "implemented, Wave 4 (docs) + Wave 5 (port)" if Track 1 lands.
-
-### 4.3 Track 1 deliverable file map
-
-| File | Status | LOC estimate |
-|---|---|---|
-| `src/simsopt/geo/optimizer_jax_private/_lmder.py` | new | ~600 |
-| `src/simsopt/geo/optimizer_jax.py` | modify (route `"lm-minpack"`) | +30 |
-| `src/simsopt/geo/boozersurface_jax.py` | modify (option validation) | +5 |
-| `tests/geo/test_lmder_phase0_feasibility.py` | new (G0 gate) | ~120 |
-| `tests/geo/test_lmder_enorm_oracle.py` | new | ~100 |
-| `tests/geo/test_lmder_qrfac_oracle.py` | new | ~120 |
-| `tests/geo/test_lmder_qrsolv_oracle.py` | new | ~150 |
-| `tests/geo/test_lmder_lmpar_oracle.py` | new | ~150 |
-| `tests/geo/test_lmder_scipy_parity.py` | new | ~200 |
-| `tests/geo/test_lmder_mgh_parity.py` | new | ~250 |
-| `docs/source/jax_acceptance.rst` | modify | +30 |
-| `CLAUDE.md` | modify | +5 |
-| `.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md` | modify (status flip) | +3 |
-
-**Total LOC estimate (extrapolation, not measurement): ~1770 across 13 files.** Subject to halving or doubling based on Phase 4-5 complexity. **If G0 fails on day 1, only `tests/geo/test_lmder_phase0_feasibility.py` (~120 LOC) is written; the spike is then abandoned and Phases 1-7 are not funded.**
-
-### 4.4 Acceptance gates (Track 1, hierarchical)
+### 4.5 Acceptance gates (Track 1, revised)
 
 | Gate | Phase | Status check | Action on failure |
 |---|---|---|---|
-| G0 — Packed `fjac` + `qtb` byte-equal on (384,40) | 0 | `qtb` and reconstructed packed `fjac` bit-exact vs SciPy MINPACK reference on 100 random seeds at production shape, **conjunctive across ≥ 2 attempted paths** | **ABANDON spike immediately**; do not fund Phases 1-5. Re-scope to `m ≈ n` only requires owner sign-off per §8 Q8 — not a default fallback. |
-| G1 — `enorm` byte-equal | 1 | bit-exact on 100+ randomized vectors per bucket | retry with scalar accumulator (once); else abandon spike |
-| G2 — `qrfac` adapter byte-equal | 2 | bit-exact on the 4 canonical shapes **assuming G0 passed** | abandon (already empirically verified on m≈n; G0 covers production shape) |
-| G3 — `qrsolv` byte-equal | 3 | bit-exact vs MINPACK reference on ~50 fixtures | investigate Givens order; retry once; else abandon |
-| G4 — `lmpar` byte-equal | 4 | bit-exact final state on ~30 fixtures | investigate Newton update + secondary exit; retry once; else abandon |
-| G5 — Driver L1 + L2 parity | 5 | ≥ 5 fixtures pass | retry with corrections; if 2 attempts fail, abandon |
-| G6 — Driver L3 parity (CPU same-machine) | 5 | per-iter `(x, fnorm, delta, par, ratio)` at `rtol=1e-12` | acceptable to fail; drop to L1+L2 contract if fails |
-| G7 — Compile time | 5 | first-trace `< 90s` (target `< 60s`) | acceptable to fail at 90s threshold but keep "research" tag; abandon if `> 180s` |
-| G8 — MGH-1981 L1 on 18 problems | 6 | all 18 pass at `rtol=1e-6` | if subset fails, document failing problems; do not abandon |
-
-**Spike commit/discard decision: after G0 (fast fail) and after G5 (final commit).**
-- **G0 is a true gate**: G0 fail → spike abandoned at end of day 1, ~1 engineer-day spent, zero further work funded. This is the cheapest possible discard checkpoint.
-- **G1-G5 are the full spike**: if G0 passes and G1-G5 all pass, the spike succeeded — commit Phases 0-5 and continue Phases 6-7 in a separate PR. If any of G1-G5 fails twice, discard the spike branch and document the failing gate.
+| G0 — tolerance gate | 0 | original byte gate fails, but drift `~1e-15 < 1e-10` | accepted under revised contract |
+| G1 — route executes | 1 | `least_squares_algorithm="lm-minpack"` resolves to `method="lm-minpack-ondevice"` | block route |
+| G2 — direct final-state parity | 2 | focused SciPy LM / linear QR fixtures pass at `atol=rtol=1e-10` | block route |
+| G3 — MGH suite | 3 | broader Moré-Garbow-Hillstrom final-state parity | block release of Track 1 |
+| G4 — BoozerSurface fixture | 4 | oversampled BoozerSurface final-state parity | block production promotion |
+| G5 — compile time | 5 | first-trace timing measured on canonical `(384,40)` fixture | owner decision if too slow |
 
 ---
 
@@ -433,7 +353,7 @@ This phase exists because the §1.2 empirical probe showed `Q` is bit-equal to L
 | `lmpar` Newton iteration count differs (off-by-one bracket update) | MEDIUM | L2 test asserts iteration count match; debuggable via `io_callback` trace dump |
 | First-trace compile exceeds 60s gate | MEDIUM | G7 sets 90s soft limit; if breaks, document as "research lane" with explicit acceptance carve-out |
 | Optimistix maintainer abandons project | LOW | Optimistix v0.0.10+ is stable; pin tightly; Track 3 is opt-in not default |
-| Critic concerns prove valid mid-spike (byte-equality not achievable) | MEDIUM | Spike gate G5 is explicit commit/discard checkpoint; Track 2 work survives independently |
+| Packed-QR byte-equality not achievable | REALIZED | Revised Track 1 accepts tolerance-equivalent dense-QR final-state parity instead of byte identity |
 | GPU lane tie-break (MAGMA `geqp3` ≠ LAPACK `dgeqp3`) breaks L2/L3 cross-device | LOW | Documented in §0 Non-goals: GPU lane is L1-only by design |
 | CPU LAPACK linkage drift (different vendor's LAPACK on different machines) breaks L4 | LOW | Documented in §6.1: L4 is single-host single-build only |
 
@@ -441,16 +361,17 @@ This phase exists because the §1.2 empirical probe showed `Q` is bit-equal to L
 
 ## 8. Open decisions
 
-These need owner sign-off before starting work:
+These originally needed owner sign-off before starting work. Items Q1-Q3 and
+Q7-Q8 are now resolved by the 2026-05-17 Track 1 contract change.
 
-- [ ] **Q1 — Track scope**: pursue all three tracks, or only Track 2 + Track 3 (skip the byte-exact spike entirely)?
-- [ ] **Q2 — Track ordering**: Track 2 first (recommended) or parallel Track 1 spike + Track 2 production work?
-- [ ] **Q3 — Track 1 abandonment threshold**: at what gate failure are we OK discarding the spike branch? (Recommendation: any of G1, G3, G4, G5 failing twice triggers discard.)
+- [x] **Q1 — Track scope**: Track 2 plus revised Track 1 tolerance-equivalent QR lane; Track 3 remains deferred.
+- [x] **Q2 — Track ordering**: Track 2 first, then revised Track 1 route.
+- [x] **Q3 — Track 1 abandonment threshold**: byte-equality spike abandoned at G0; revised tolerance-equivalent route accepted.
 - [ ] **Q4 — Optimistix as required dep**: Track 3 currently has `optimistix` as an optional dep. Move to required for the JAX lane, or keep optional?
 - [ ] **Q5 — Publication ambition**: if Track 1 lands, write up as JOSS / workshop paper? Per Agent E this is potentially the first JAX MINPACK port. **This claim was not independently verified by a numerical-analysis literature review** — treat as a possible follow-up, not a guaranteed novelty.
 - [ ] **Q6 — Compile-budget exception**: should Track 1 be exempted from the 60s first-compile gate in `docs/source/jax_acceptance.rst:101`, given that it's an opt-in research lane? (Recommendation: yes, with explicit `lm-minpack` carve-out in the docs.)
-- [ ] **Q7 — Cross-machine validation**: should the Track 1 L4 byte-equality contract require validation on multiple machines (per the existing "Floating-point reproducibility across machines" caveat in CLAUDE.md), or single-machine only?
-- [ ] **Q8 — Phase 0 Path C scope and re-scope authority**: (a) is the Phase 0 spike permitted to evaluate Path C (XLA custom call FFI to LAPACK `dgeqp3`), or is the JAX-pure constraint hard? (b) if G0 fails (no two paths agree), the plan now treats "re-scope to m≈n only" as out-of-bounds without owner sign-off; confirm this discipline, OR explicitly authorize the re-scope as a default fallback. **Default if Q8 is unanswered: Path C in scope, re-scope NOT a default fallback.**
+- [x] **Q7 — Cross-machine validation**: L4 byte-equality is no longer in the Track 1 contract.
+- [x] **Q8 — Phase 0 Path C scope and re-scope authority**: no Path C; no `m≈n` byte-identity re-scope; revised route is tolerance-equivalent dense QR.
 
 ---
 
@@ -595,65 +516,18 @@ Plus a third independent Crucible review pass (2026-05-16, 4 parallel discovery 
 - [ ] Phase 2.12: `ls_state_parity` lane confirmation at `sdofs_inf ≤ 1e-11`
 - [ ] Phase 2.13: ruff check / format clean
 
-### Track 1 — CPU byte-exact MINPACK port (gated spike)
+### Track 1 — CPU tolerance-equivalent MINPACK-style QR LM lane
 
-- [ ] **GATE G0 — Phase 0**: packed `fjac` + `qtb` feasibility on production shape (384,40)
-  - [ ] Implement path A: reconstruct packed Householder from explicit Q
-  - [ ] Implement path B: `householder_product`/`ormqr` to compute `Q^T·fvec` directly
-  - [ ] Implement path C: direct FFI to LAPACK `dgeqp3` via XLA custom call (unless §8 Q8 owner sign-off marks Path C out-of-scope)
-  - [ ] Oracle test vs `scipy.linalg.qr_multiply(..., mode='left', pivoting=True)` on 100 random seeds at (384,40) + (40,40) + (75,39) + (100,50) + (2000,80)
-  - [ ] **Spike checkpoint G0**: bit-equal `qtb` and packed `fjac` on all shapes incl. (384,40), **conjunctive across ≥ 2 attempted paths**; on fail, **abandon spike immediately, full stop**. Re-scoping to `m ≈ n` only is **not a default fallback** — it is a project-charter renegotiation that requires owner sign-off per §4.2 Phase 0 G0-fail clause and §8 Q8. The plan author may not unilaterally re-scope.
-- [ ] **GATE G1 — Phase 1**: `enorm` byte-equal port
-  - [ ] Implement vectorized 3-bucket form
-  - [ ] Implement scalar `lax.fori_loop` fallback
-  - [ ] Oracle test against `_minpack._enorm` or f2py-built reference
-  - [ ] **Spike checkpoint G1**: 100+ vectors byte-equal per bucket; if fails, abandon
-- [ ] **GATE G2 — Phase 2**: `qrfac` wrapper around `jsl.qr(pivoting=True)`
-  - [ ] Adapter to MINPACK-style packed output
-  - [ ] Empirical pivot tie-break verification
-  - [ ] Oracle test on 4 canonical shapes
-  - [ ] **Spike checkpoint G2**: byte-equal on all shapes; low risk per empirical validation
-- [ ] **GATE G3 — Phase 3**: `qrsolv` Givens elimination
-  - [ ] Two-level `lax.fori_loop` per Agent C §2.1
-  - [ ] Explicit `(x, sdiag, S_lower)` return
-  - [ ] Oracle test via cminpack ctypes binding
-  - [ ] **Spike checkpoint G3**: byte-equal on ~50 fixtures; if fails 2×, abandon
-- [ ] **GATE G4 — Phase 4**: `lmpar` univariate Newton
-  - [ ] `LmparState` carry + `lax.while_loop`
-  - [ ] Zero-par GN accept branch
-  - [ ] Bracket setup + secondary-exit predicate
-  - [ ] Oracle test on 4 fixture types
-  - [ ] **Spike checkpoint G4**: byte-equal final state + iteration count; if fails 2×, abandon
-- [ ] **GATE G5 — Phase 5**: Driver integration
-  - [ ] `LmderState` NamedTuple
-  - [ ] `phase_jacobian` + `phase_inner` body
-  - [ ] `lax.switch` dispatch (no nested while-loops)
-  - [ ] Scaling-vector D, trust-region delta, par update
-  - [ ] `compute_info` wired
-  - [ ] `levenberg_marquardt_minpack_traceable` public entry
-  - [ ] `"lm-minpack"` in `VALID_LEAST_SQUARES_ALGORITHMS` + routing
-  - [ ] `BoozerSurfaceJAX` option validation
-  - [ ] **Spike checkpoint G5**: L1 + L2 byte-parity on 6 fixtures; commit-or-discard decision
-- [ ] **GATE G6 — Phase 5 (continued)**: L3 trace parity
-  - [ ] `io_callback`-based trace dump from `lax.while_loop` body
-  - [ ] SciPy-side per-call logging
-  - [ ] Trace comparison harness with structured diff dump
-  - [ ] **G6 result**: pass → L1+L2+L3 contract; fail → L1+L2-only contract with documented gap
-- [ ] **GATE G7 — Phase 5**: compile-time measurement
-  - [ ] First-trace timing on n=40, m=384
-  - [ ] First-trace timing on n=39, m=75 (default BoozerSurface)
-  - [ ] **G7 threshold**: `< 90s` retain, `< 60s` target hit, `> 180s` abandon
-- [ ] **Phase 6**: MGH-1981 suite
-  - [ ] Translate 18 problems to JAX-traceable residuals
-  - [ ] L1 parity tests (all 18)
-  - [ ] L2 parity tests (all 18)
-  - [ ] L3 parity tests (5 canonical subset)
-  - [ ] **GATE G8**: 18/18 L1 pass at `rtol=1e-6`
-- [ ] **Phase 7**: documentation
-  - [ ] Update `optimizer_jax.py:14-45` LM family note (add 4th entry: `lm-minpack`)
-  - [ ] Update `docs/source/jax_acceptance.rst` Optimizer family equivalence
-  - [ ] Update `CLAUDE.md` with `lm-minpack` routing + CPU-only byte-equality contract
-  - [ ] Update `.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md` W4.3 status
+- [x] Accept revised G0 tolerance gate (`~1e-15 < 1e-10`)
+- [x] Add `"lm-minpack"` to `VALID_LEAST_SQUARES_ALGORITHMS`
+- [x] Route target backend to `method="lm-minpack-ondevice"`
+- [x] Implement `levenberg_marquardt_minpack_traceable`
+- [x] Route BoozerSurfaceJAX LS paths through the new method
+- [x] Add focused direct SciPy/QR parity tests
+- [x] Update optimizer and acceptance docs
+- [ ] Run broader Moré-Garbow-Hillstrom final-state parity suite
+- [ ] Run oversampled BoozerSurface fixture
+- [ ] Measure first-trace compile time on `(384,40)`
 
 ### Track 3 — Optimistix + Lineax LSMR (deferred)
 
