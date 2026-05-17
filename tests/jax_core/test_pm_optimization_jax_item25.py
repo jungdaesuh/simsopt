@@ -24,6 +24,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import simsoptpp
 
@@ -35,14 +36,19 @@ from simsopt.jax_core.pm_optimization import (
     GPMOBaselineSpec,
     GPMOMultiSpec,
     PMOptimizationSpec,
+    _argmin_finite_cost,
+    _gpmo_arbvec_backtracking_candidate_costs,
     find_max_alphaf,
+    gpmo_arbvec_candidate_costs,
     gpmo_arbvec_backtracking_solve,
+    gpmo_arbvec_solve_bucketed,
     gpmo_connectivity_matrix,
     gpmo_arbvec_solve,
     gpmo_backtracking_solve,
     gpmo_baseline_candidate_costs,
     gpmo_baseline_solve,
     gpmo_baseline_step,
+    gpmo_multi_candidate_costs,
     gpmo_multi_solve,
     g_reduced_gradient,
     g_reduced_projected_gradient,
@@ -171,12 +177,36 @@ def _gpmo_pol_vectors(seed: int, N: int, P: int = 4):
     return np.ascontiguousarray(raw / norms[:, :, None])
 
 
+def _assert_only_candidate_indices_are_inf(
+    costs: np.ndarray, unavailable: list[int]
+) -> None:
+    assert np.isinf(costs[unavailable]).all()
+    assert np.isfinite(np.delete(costs, unavailable)).all()
+
+
 # ---------------------------------------------------------------------
 # Per-kernel parity (closed-form scalar checks vs C++ formula).
 # ---------------------------------------------------------------------
 
 
 class TestPMKernelHelpers:
+    def test_argmin_finite_cost_sorts_nan_after_finite_candidates(self):
+        costs = jnp.asarray([jnp.nan, 2.0, 1.0, jnp.inf], dtype=jnp.float64)
+        assert int(_argmin_finite_cost(costs)) == 2
+
+        row_costs = jnp.asarray(
+            [
+                [jnp.nan, 2.0, 1.0],
+                [jnp.inf, jnp.nan, 3.0],
+                [jnp.nan, jnp.inf, jnp.inf],
+            ],
+            dtype=jnp.float64,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(_argmin_finite_cost(row_costs, axis=1)),
+            np.array([2, 2, 0]),
+        )
+
     def test_projection_inside_ball_passes_through(self):
         m = jnp.asarray(np.array([[0.1, 0.2, -0.3], [0.0, 0.0, 0.0]]))
         m_maxima = jnp.asarray(np.array([1.0, 1.0]))
@@ -233,6 +263,40 @@ class TestPMKernelHelpers:
             atol=_PER_KERNEL_ATOL,
         )
         assert np.isfinite(out).all()
+
+    def test_projection_zero_mmax_uses_no_host_unit_transfer(self):
+        m = jax.device_put(
+            jnp.asarray(
+                np.array(
+                    [
+                        [0.2, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [2.0, 0.0, 0.0],
+                    ],
+                    dtype=np.float64,
+                )
+            )
+        )
+        m_maxima = jax.device_put(
+            jnp.asarray(np.array([1.0, 0.0, 1.0], dtype=np.float64))
+        )
+
+        with jax.transfer_guard("disallow"):
+            out = projection_l2_balls(m, m_maxima)
+            out.block_until_ready()
+
+        np.testing.assert_allclose(
+            np.asarray(out),
+            np.array(
+                [
+                    [0.2, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                ]
+            ),
+            rtol=_PER_KERNEL_RTOL,
+            atol=_PER_KERNEL_ATOL,
+        )
 
     def test_phi_off_ball_returns_g(self):
         m = jnp.asarray(np.array([[0.0, 0.0, 0.0]]))
@@ -334,6 +398,26 @@ class TestGPMOBaseline:
         np.testing.assert_allclose(
             costs, expected, rtol=_PER_KERNEL_RTOL, atol=_PER_KERNEL_ATOL
         )
+
+    def test_unavailable_candidate_costs_are_inf(self):
+        A_scaled, b, m_maxima, _ = _gpmo_problem(seed=2502, M=5, N=2)
+        residual = -b
+        available = np.ones((2, 3), dtype=bool)
+        unavailable_component = 1
+        available.reshape(-1)[unavailable_component] = False
+
+        costs = np.asarray(
+            gpmo_baseline_candidate_costs(
+                _gpmo_spec(m_maxima, reg_l2=0.0),
+                jnp.asarray(A_scaled),
+                jnp.asarray(residual),
+                jnp.asarray(available),
+            )
+        )
+
+        n_components = A_scaled.shape[1]
+        unavailable = [unavailable_component, n_components + unavailable_component]
+        _assert_only_candidate_indices_are_inf(costs, unavailable)
 
     def test_step_uses_cpp_min_element_tie_order(self):
         A_scaled = jnp.zeros((3, 6), dtype=jnp.float64)
@@ -465,6 +549,71 @@ class TestGPMOMulti:
         np.testing.assert_array_equal(
             np.asarray(gpmo_connectivity_matrix(jnp.asarray(dipoles))),
             expected,
+        )
+
+    def test_unavailable_candidate_costs_are_inf(self):
+        A_scaled, b, m_maxima, _, dipoles = _gpmo_spatial_problem(seed=2555, M=5, N=4)
+        residual = -b
+        available = np.ones((4, 3), dtype=bool)
+        unavailable_component = 5
+        available.reshape(-1)[unavailable_component] = False
+        connectivity = gpmo_connectivity_matrix(jnp.asarray(dipoles))
+
+        costs = np.asarray(
+            gpmo_multi_candidate_costs(
+                GPMOMultiSpec(
+                    m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+                    reg_l2=jnp.asarray(0.0, dtype=jnp.float64),
+                    dipole_grid_xyz=jnp.asarray(dipoles, dtype=jnp.float64),
+                    Nadjacent=1,
+                ),
+                jnp.asarray(A_scaled),
+                jnp.asarray(residual),
+                jnp.asarray(available),
+                connectivity,
+            )
+        )
+
+        n_components = A_scaled.shape[1]
+        unavailable = [unavailable_component, n_components + unavailable_component]
+        _assert_only_candidate_indices_are_inf(costs, unavailable)
+
+    def test_multi_nonuniform_mmax_pins_cpp_penalty_index_quirk(self):
+        m_maxima = np.array([0.5, 2.0, 3.0, 4.0], dtype=np.float64)
+        ndipoles = m_maxima.size
+        n_components = 3 * ndipoles
+        A_scaled = jnp.zeros((5, n_components), dtype=jnp.float64)
+        residual = jnp.zeros((5,), dtype=jnp.float64)
+        available = jnp.ones((ndipoles, 3), dtype=bool)
+        connectivity = jnp.asarray(
+            np.vstack([np.roll(np.arange(ndipoles), -idx) for idx in range(ndipoles)]),
+            dtype=jnp.int64,
+        )
+        reg_l2 = 0.75
+
+        costs = np.asarray(
+            gpmo_multi_candidate_costs(
+                GPMOMultiSpec(
+                    m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+                    reg_l2=jnp.asarray(reg_l2, dtype=jnp.float64),
+                    dipole_grid_xyz=jnp.zeros((ndipoles, 3), dtype=jnp.float64),
+                    Nadjacent=1,
+                ),
+                A_scaled,
+                residual,
+                available,
+                connectivity,
+            )
+        )
+
+        seed_dipoles = np.arange(n_components) // 3
+        component_mmax = np.repeat(m_maxima, 3)
+        expected = reg_l2 * component_mmax[seed_dipoles] ** 2
+        np.testing.assert_allclose(
+            costs,
+            np.concatenate([expected, expected]),
+            rtol=_PER_KERNEL_RTOL,
+            atol=_PER_KERNEL_ATOL,
         )
 
     def test_solver_matches_cpp_multi_for_single_direction_modes(self):
@@ -610,6 +759,52 @@ class TestGPMOMulti:
 
 
 class TestGPMOBacktracking:
+    def test_solver_matches_cpp_backtracking_for_single_direction_modes(self):
+        for single_direction in (-1, 0, 1, 2):
+            A_scaled, b, m_maxima, normal_norms, dipoles = _gpmo_spatial_problem(
+                seed=2750 + single_direction, M=10, N=6
+            )
+            K = 4
+            Nadjacent = 2
+            backtracking = 2
+            max_nMagnets = m_maxima.size
+            reg_l2 = 0.0
+            _, _, _, _, x_cpp = simsoptpp.GPMO_backtracking(
+                np.ascontiguousarray(A_scaled.T),
+                b,
+                np.sqrt(reg_l2) * np.repeat(m_maxima, 3),
+                normal_norms,
+                K=K,
+                verbose=False,
+                nhistory=K,
+                backtracking=backtracking,
+                dipole_grid_xyz=dipoles,
+                single_direction=single_direction,
+                Nadjacent=Nadjacent,
+                max_nMagnets=max_nMagnets,
+            )
+            result = gpmo_backtracking_solve(
+                GPMOBacktrackingSpec(
+                    m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+                    reg_l2=jnp.asarray(reg_l2, dtype=jnp.float64),
+                    dipole_grid_xyz=jnp.asarray(dipoles, dtype=jnp.float64),
+                    single_direction=single_direction,
+                    Nadjacent=Nadjacent,
+                    backtracking=backtracking,
+                    max_nMagnets=max_nMagnets,
+                ),
+                jnp.asarray(A_scaled),
+                jnp.asarray(b),
+                K=K,
+            )
+
+            np.testing.assert_allclose(
+                np.asarray(result.x),
+                x_cpp,
+                rtol=_STATE_TRACE_RTOL,
+                atol=_STATE_TRACE_ATOL,
+            )
+
     def test_solver_matches_cpp_backtracking_and_allows_reopened_sites(self):
         A_scaled, b, m_maxima, normal_norms, dipoles = _gpmo_spatial_problem(
             seed=100, M=10, N=6
@@ -728,6 +923,66 @@ class TestGPMOBacktracking:
 
 
 class TestGPMOArbVec:
+    def test_unavailable_candidate_costs_are_inf(self):
+        A_scaled, b, m_maxima, _ = _gpmo_problem(seed=2577, M=5, N=3)
+        residual = -b
+        pol_vectors = _gpmo_pol_vectors(seed=2578, N=m_maxima.size, P=2)
+        available = np.ones(m_maxima.size, dtype=bool)
+        unavailable_dipole = 1
+        available[unavailable_dipole] = False
+
+        costs = np.asarray(
+            gpmo_arbvec_candidate_costs(
+                GPMOArbVecSpec(
+                    m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+                    reg_l2=jnp.asarray(0.0, dtype=jnp.float64),
+                    pol_vectors=jnp.asarray(pol_vectors, dtype=jnp.float64),
+                ),
+                jnp.asarray(A_scaled),
+                jnp.asarray(residual),
+                jnp.asarray(available),
+            )
+        )
+
+        n_candidates = m_maxima.size * pol_vectors.shape[1]
+        start = unavailable_dipole * pol_vectors.shape[1]
+        unavailable = [
+            start,
+            start + 1,
+            n_candidates + start,
+            n_candidates + start + 1,
+        ]
+        _assert_only_candidate_indices_are_inf(costs, unavailable)
+
+    def test_arbvec_nonuniform_mmax_pins_cpp_penalty_index_quirk(self):
+        m_maxima = np.array([0.5, 2.0, 3.0, 4.0], dtype=np.float64)
+        ndipoles = m_maxima.size
+        reg_l2 = 0.75
+        pol_vectors = np.zeros((ndipoles, 1, 3), dtype=np.float64)
+        pol_vectors[:, 0, 0] = 1.0
+
+        costs = np.asarray(
+            gpmo_arbvec_candidate_costs(
+                GPMOArbVecSpec(
+                    m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+                    reg_l2=jnp.asarray(reg_l2, dtype=jnp.float64),
+                    pol_vectors=jnp.asarray(pol_vectors, dtype=jnp.float64),
+                ),
+                jnp.zeros((5, 3 * ndipoles), dtype=jnp.float64),
+                jnp.zeros((5,), dtype=jnp.float64),
+                jnp.ones((ndipoles,), dtype=bool),
+            )
+        )
+
+        component_prefix = np.repeat(m_maxima, 3)[:ndipoles]
+        expected = reg_l2 * component_prefix**2
+        np.testing.assert_allclose(
+            costs,
+            np.concatenate([expected, expected]),
+            rtol=_PER_KERNEL_RTOL,
+            atol=_PER_KERNEL_ATOL,
+        )
+
     def test_solver_matches_cpp_arbvec_with_l2_regularization(self):
         A_scaled, b, m_maxima, normal_norms = _gpmo_problem(seed=2570, M=12, N=6)
         pol_vectors = _gpmo_pol_vectors(seed=2571, N=m_maxima.size, P=4)
@@ -815,6 +1070,115 @@ class TestGPMOArbVec:
             atol=_PER_KERNEL_ATOL,
         )
 
+    def test_arbvec_bucketed_solver_reuses_compile_for_active_n_and_p(self):
+        M = 7
+        bucket_N = 5
+        bucket_P = 4
+        K = 3
+
+        def _bucket_case(seed: int, active_N: int, active_P: int):
+            A_active, b, m_maxima, _ = _gpmo_problem(seed=seed, M=M, N=active_N)
+            pol_vectors = _gpmo_pol_vectors(
+                seed=seed + 100,
+                N=active_N,
+                P=active_P,
+            )
+            reference = gpmo_arbvec_solve(
+                GPMOArbVecSpec(
+                    m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+                    reg_l2=jnp.asarray(0.0, dtype=jnp.float64),
+                    pol_vectors=jnp.asarray(pol_vectors, dtype=jnp.float64),
+                ),
+                jnp.asarray(A_active),
+                jnp.asarray(b),
+                K=K,
+            )
+
+            A_bucket = np.zeros((M, 3 * bucket_N), dtype=np.float64)
+            A_bucket[:, : 3 * active_N] = A_active
+            mmax_bucket = np.zeros((bucket_N,), dtype=np.float64)
+            mmax_bucket[:active_N] = m_maxima
+            pol_bucket = np.zeros((bucket_N, bucket_P, 3), dtype=np.float64)
+            pol_bucket[:active_N, :active_P, :] = pol_vectors
+            bucket_spec = GPMOArbVecSpec(
+                m_maxima=jnp.asarray(mmax_bucket, dtype=jnp.float64),
+                reg_l2=jnp.asarray(0.0, dtype=jnp.float64),
+                pol_vectors=jnp.asarray(pol_bucket, dtype=jnp.float64),
+            )
+            return bucket_spec, jnp.asarray(A_bucket), jnp.asarray(b), reference
+
+        first_spec, first_A, first_b, first_ref = _bucket_case(
+            seed=2580,
+            active_N=3,
+            active_P=2,
+        )
+        second_spec, second_A, second_b, second_ref = _bucket_case(
+            seed=2581,
+            active_N=4,
+            active_P=3,
+        )
+
+        trace_events = []
+
+        @jax.jit
+        def _run(
+            spec_data: GPMOArbVecSpec,
+            A_data: jax.Array,
+            b_data: jax.Array,
+            active_N: jax.Array,
+            active_P: jax.Array,
+        ):
+            trace_events.append(1)
+            return gpmo_arbvec_solve_bucketed(
+                spec_data,
+                A_data,
+                b_data,
+                K=K,
+                active_ndipoles=active_N,
+                active_nvectors=active_P,
+            ).x
+
+        first = _run(
+            first_spec,
+            first_A,
+            first_b,
+            jnp.asarray(3, dtype=jnp.int64),
+            jnp.asarray(2, dtype=jnp.int64),
+        )
+        first.block_until_ready()
+        second = _run(
+            second_spec,
+            second_A,
+            second_b,
+            jnp.asarray(4, dtype=jnp.int64),
+            jnp.asarray(3, dtype=jnp.int64),
+        )
+        second.block_until_ready()
+
+        assert len(trace_events) == 1
+        np.testing.assert_allclose(
+            np.asarray(first)[:3],
+            np.asarray(first_ref.x),
+            rtol=_STATE_TRACE_RTOL,
+            atol=_STATE_TRACE_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(first)[3:],
+            0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            np.asarray(second)[:4],
+            np.asarray(second_ref.x),
+            rtol=_STATE_TRACE_RTOL,
+            atol=_STATE_TRACE_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(second)[4:],
+            0.0,
+            atol=0.0,
+        )
+
     def test_arbvec_solver_jits_under_strict_transfer_guard(self):
         A_scaled, b, m_maxima, _ = _gpmo_problem(seed=2575, M=7, N=4)
         pol_vectors = _gpmo_pol_vectors(seed=2576, N=m_maxima.size, P=3)
@@ -840,6 +1204,35 @@ class TestGPMOArbVec:
 
 
 class TestGPMOArbVecBacktracking:
+    def test_unavailable_candidate_costs_are_inf(self):
+        A_scaled, b, m_maxima, _ = _gpmo_problem(seed=2603, M=5, N=3)
+        residual = -b
+        pol_vectors = _gpmo_pol_vectors(seed=2604, N=m_maxima.size, P=2)
+        available = np.ones(m_maxima.size, dtype=bool)
+        unavailable_dipole = 1
+        available[unavailable_dipole] = False
+
+        costs = np.asarray(
+            _gpmo_arbvec_backtracking_candidate_costs(
+                jnp.asarray(A_scaled),
+                jnp.asarray(residual),
+                jnp.asarray(available),
+                jnp.asarray(pol_vectors),
+                jnp.asarray(m_maxima),
+                jnp.asarray(0.0, dtype=jnp.float64),
+            )
+        )
+
+        n_candidates = m_maxima.size * pol_vectors.shape[1]
+        start = unavailable_dipole * pol_vectors.shape[1]
+        unavailable = [
+            start,
+            start + 1,
+            n_candidates + start,
+            n_candidates + start + 1,
+        ]
+        _assert_only_candidate_indices_are_inf(costs, unavailable)
+
     def test_initialize_gpmo_arbvec_matches_cpp_oracle(self):
         """``initialize_gpmo_arbvec`` selects the nearest signed pol vector.
 
@@ -1143,6 +1536,22 @@ class TestGPMOArbVecBacktracking:
 
 
 class TestMwPGPSolver:
+    def test_nonpositive_nu_rejected_at_spec_ingress(self):
+        m_maxima = np.ones(2, dtype=np.float64)
+        m_proxy = np.zeros((2, 3), dtype=np.float64)
+
+        for nu in (0.0, -1.0, np.nan):
+            with pytest.raises(ValueError, match="nu must be positive"):
+                _make_spec(m_maxima, m_proxy, alpha=0.1, reg_l2=0.0, nu=nu)
+
+    def test_nonpositive_alpha_rejected_at_spec_ingress(self):
+        m_maxima = np.ones(2, dtype=np.float64)
+        m_proxy = np.zeros((2, 3), dtype=np.float64)
+
+        for alpha in (0.0, -1.0, np.nan):
+            with pytest.raises(ValueError, match="alpha must be positive"):
+                _make_spec(m_maxima, m_proxy, alpha=alpha, reg_l2=0.0, nu=1.0)
+
     def test_cost_monotone_decreasing(self):
         """Cost is non-increasing iterate-to-iterate (modulo FP noise)."""
         A, b, m_maxima, m_proxy, m0 = _random_problem(
@@ -1523,3 +1932,36 @@ class TestMwPGPSingleStep:
 
         jaxpr = jax.make_jaxpr(lambda st: mwpgp_step(spec, st, A_jax, ATb_jax))(state)
         assert count_jaxpr_primitives(jaxpr, "cond") == 2
+
+    def test_step_executes_expand_branch(self):
+        m_maxima = np.array([0.25], dtype=np.float64)
+        m_proxy = np.zeros((1, 3), dtype=np.float64)
+        spec = _make_spec(m_maxima, m_proxy, alpha=0.1, reg_l2=0.0, nu=1.0)
+        A = jnp.zeros((3, 3), dtype=jnp.float64)
+        ATb = jnp.zeros((1, 3), dtype=jnp.float64)
+        state = (
+            jnp.zeros((1, 3), dtype=jnp.float64),
+            jnp.array([[1.0, 0.0, 0.0]], dtype=jnp.float64),
+            jnp.array([[1.0, 0.0, 0.0]], dtype=jnp.float64),
+        )
+
+        x_new, g_new, p_new = mwpgp_step(spec, state, A, ATb)
+
+        np.testing.assert_allclose(
+            np.asarray(x_new),
+            np.array([[-0.25, 0.0, 0.0]]),
+            rtol=_SINGLE_STEP_RTOL,
+            atol=_SINGLE_STEP_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(g_new),
+            np.array([[-0.25, 0.0, 0.0]]),
+            rtol=_SINGLE_STEP_RTOL,
+            atol=_SINGLE_STEP_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(p_new),
+            np.zeros((1, 3)),
+            rtol=_SINGLE_STEP_RTOL,
+            atol=_SINGLE_STEP_ATOL,
+        )

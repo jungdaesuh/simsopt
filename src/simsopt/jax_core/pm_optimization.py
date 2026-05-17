@@ -38,6 +38,21 @@ helpers, and the quadratic ``find_max_alphaf`` are implemented as pure
 batched ``jax.numpy`` operations so the entire solver is JIT-compatible
 (no Python-level branching on tracer values).
 
+Shape contract
+--------------
+
+The ordinary kernels are fixed-shape kernels: ``N`` (dipoles), ``M`` (surface
+quadrature points), and the arbitrary-vector count ``P`` are array dimensions,
+so changing them produces a separate JAX compilation. Batch callers should
+group ordinary runs by exact shape or keep a compiled callable per geometry.
+
+``gpmo_arbvec_solve_bucketed`` is the reusable-shape path for arbitrary-vector
+GPMO batches whose active ``N``/``P`` vary within a fixed bucket. Callers stage
+zero-padded arrays to the bucket dimensions and pass active counts as tensor
+inputs; inactive dipoles/vectors are masked inside the greedy candidate scan so
+the same compiled executable can serve smaller PM grids without changing array
+shapes.
+
 The Hessian action is the closed form
 ``H v = A^T A v + 2 (reg_l2 + 1/(2 nu)) v``
 matching ``permanent_magnet_optimization.cpp:187`` and ``:216``. ``A`` is
@@ -51,6 +66,7 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from ._math_utils import as_jax_float64 as _as_jax_float64
 
@@ -72,6 +88,7 @@ __all__ = [
     "gpmo_baseline_solve",
     "gpmo_baseline_step",
     "gpmo_arbvec_candidate_costs",
+    "gpmo_arbvec_solve_bucketed",
     "gpmo_arbvec_solve",
     "gpmo_arbvec_step",
     "gpmo_arbvec_backtracking_solve",
@@ -104,6 +121,37 @@ _FIND_MAX_ALPHAF_TOL: float = 1.0e-20
 # Sentinel value used in the C++ kernel for "no boundary hit". Matches
 # ``alphaf_plus = 1e100;`` in ``permanent_magnet_optimization.cpp:90``.
 _FIND_MAX_ALPHAF_SENTINEL: float = 1.0e100
+_UNAVAILABLE_CANDIDATE_COST: float = float("inf")
+
+
+def _argmin_finite_cost(costs: jax.Array, *, axis: int | None = None) -> jax.Array:
+    """Return the minimum finite candidate, sorting NaNs after valid costs."""
+    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=costs.dtype)
+    finite_costs = jnp.where(jnp.isfinite(costs), costs, sentinel)
+    return jnp.argmin(finite_costs, axis=axis)
+
+
+def _has_tracer_leaf(value) -> bool:
+    return any(
+        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
+    )
+
+
+def _host_scalar_for_validation(name: str, value, *, dtype=None):
+    if _has_tracer_leaf(value):
+        return None
+    host_value = np.asarray(jax.device_get(value), dtype=dtype)
+    if host_value.shape != ():
+        raise ValueError(f"{name} must be a scalar; got shape {host_value.shape}.")
+    return host_value
+
+
+def _validate_positive_scalar(name: str, value) -> None:
+    host_value = _host_scalar_for_validation(name, value, dtype=np.float64)
+    if host_value is None:
+        return
+    if not bool(host_value > 0.0):
+        raise ValueError(f"{name} must be positive; got {host_value.item()}.")
 
 
 @dataclass(frozen=True)
@@ -136,6 +184,10 @@ class PMOptimizationSpec:
     nu: jax.Array
     reg_l2: jax.Array
     alpha: jax.Array
+
+    def __post_init__(self) -> None:
+        _validate_positive_scalar("nu", self.nu)
+        _validate_positive_scalar("alpha", self.alpha)
 
 
 jax.tree_util.register_dataclass(
@@ -520,6 +572,19 @@ def _validate_gpmo_arbvec_static_args(
         raise ValueError("pol_vectors third dimension must be 3.")
 
 
+def _validate_gpmo_bucket_count(name: str, value, bucket_size: int) -> None:
+    host_value = _host_scalar_for_validation(name, value)
+    if host_value is None:
+        return
+    if host_value.dtype.kind not in ("i", "u"):
+        raise TypeError(f"{name} must be an integer scalar; got {host_value.dtype}.")
+    count = int(host_value.item())
+    if count < 0 or count > bucket_size:
+        raise ValueError(
+            f"{name} must satisfy 0 <= {name} <= {bucket_size}; got {count}."
+        )
+
+
 def _validate_gpmo_arbvec_backtracking_static_args(
     K: int,
     ndipoles: int,
@@ -606,7 +671,7 @@ def gpmo_baseline_candidate_costs(
     available_components = jnp.reshape(available, (n_components,))
     direction_mask = _single_direction_mask(n_components, spec.single_direction)
     allowed = available_components & direction_mask
-    sentinel = jnp.asarray(1.0e50, dtype=A_arr.dtype)
+    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=A_arr.dtype)
     plus = jnp.where(allowed, plus, sentinel)
     minus = jnp.where(allowed, minus, sentinel)
     return jnp.concatenate([plus, minus])
@@ -622,7 +687,7 @@ def gpmo_baseline_step(
     x, residual, available = state
     costs = gpmo_baseline_candidate_costs(spec, A_scaled, residual, available)
     n_components = A_scaled.shape[1]
-    choice = jnp.argmin(costs)
+    choice = _argmin_finite_cost(costs)
     is_minus = choice >= n_components
     component_index = jnp.where(is_minus, choice - n_components, choice)
     sign = jnp.where(is_minus, -1.0, 1.0).astype(residual.dtype)
@@ -742,20 +807,12 @@ def _gpmo_arbvec_contributions(
     return jnp.einsum("mnl,npl->mnp", A_by_dipole, pol_vectors)
 
 
-def gpmo_arbvec_candidate_costs(
+def _gpmo_arbvec_candidate_costs_for_allowed(
     spec: GPMOArbVecSpec,
     A_scaled: jax.Array,
     residual: jax.Array,
-    available: jax.Array,
+    allowed: jax.Array,
 ) -> jax.Array:
-    """Return arbitrary-vector GPMO plus/minus candidate costs.
-
-    Mirrors ``GPMO_ArbVec`` in
-    ``simsoptpp/permanent_magnet_optimization.cpp:1168-1195``. Candidate
-    order is dipole-major, polarization-vector-minor, with all plus candidates
-    followed by all minus candidates.
-    """
-
     A_arr = _as_jax_float64(A_scaled)
     residual_arr = _as_jax_float64(residual)
     m_maxima = _as_jax_float64(spec.m_maxima)
@@ -772,11 +829,48 @@ def gpmo_arbvec_candidate_costs(
     plus = plus + penalty[:, None]
     minus = minus + penalty[:, None]
 
-    allowed = available[:, None]
-    sentinel = jnp.asarray(1.0e50, dtype=A_arr.dtype)
+    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=A_arr.dtype)
     plus = jnp.where(allowed, plus, sentinel)
     minus = jnp.where(allowed, minus, sentinel)
     return jnp.concatenate([jnp.ravel(plus), jnp.ravel(minus)])
+
+
+def gpmo_arbvec_candidate_costs(
+    spec: GPMOArbVecSpec,
+    A_scaled: jax.Array,
+    residual: jax.Array,
+    available: jax.Array,
+) -> jax.Array:
+    """Return arbitrary-vector GPMO plus/minus candidate costs.
+
+    Mirrors ``GPMO_ArbVec`` in
+    ``simsoptpp/permanent_magnet_optimization.cpp:1168-1195``. Candidate
+    order is dipole-major, polarization-vector-minor, with all plus candidates
+    followed by all minus candidates.
+    """
+
+    return _gpmo_arbvec_candidate_costs_for_allowed(
+        spec,
+        A_scaled,
+        residual,
+        available[:, None],
+    )
+
+
+def _gpmo_arbvec_candidate_costs_masked(
+    spec: GPMOArbVecSpec,
+    A_scaled: jax.Array,
+    residual: jax.Array,
+    available: jax.Array,
+    vector_available: jax.Array,
+) -> jax.Array:
+    allowed = available[:, None] & vector_available[None, :]
+    return _gpmo_arbvec_candidate_costs_for_allowed(
+        spec,
+        A_scaled,
+        residual,
+        allowed,
+    )
 
 
 def gpmo_arbvec_step(
@@ -789,7 +883,7 @@ def gpmo_arbvec_step(
     x, residual, available = state
     costs = gpmo_arbvec_candidate_costs(spec, A_scaled, residual, available)
     n_candidates = spec.pol_vectors.shape[0] * spec.pol_vectors.shape[1]
-    choice = jnp.argmin(costs)
+    choice = _argmin_finite_cost(costs)
     is_minus = choice >= n_candidates
     candidate = jnp.where(is_minus, choice - n_candidates, choice)
     sign = jnp.where(is_minus, -1.0, 1.0).astype(residual.dtype)
@@ -900,6 +994,127 @@ def gpmo_arbvec_solve(
     )
 
 
+def gpmo_arbvec_solve_bucketed(
+    spec: GPMOArbVecSpec,
+    A_scaled: jax.Array,
+    b: jax.Array,
+    *,
+    K: int,
+    active_ndipoles: jax.Array,
+    active_nvectors: jax.Array,
+) -> GPMOArbVecResult:
+    """Run arbitrary-vector GPMO with fixed bucket shapes and active counts.
+
+    ``A_scaled``, ``m_maxima``, and ``pol_vectors`` are staged to bucket
+    dimensions ``(M, 3*N_bucket)``, ``(N_bucket,)``, and
+    ``(N_bucket, P_bucket, 3)``. ``active_ndipoles`` and ``active_nvectors``
+    are scalar tensor inputs that choose the active prefix of the bucket at
+    runtime. Inactive dipoles/vectors are masked before candidate selection,
+    so changing the active counts does not change the compiled array shapes.
+    """
+
+    A_arr = _as_jax_float64(A_scaled)
+    b_arr = _as_jax_float64(b)
+    m_maxima = _as_jax_float64(spec.m_maxima)
+    pol_vectors = _as_jax_float64(spec.pol_vectors)
+    ndipoles = int(m_maxima.shape[0])
+    _validate_gpmo_arbvec_static_args(K, ndipoles, pol_vectors)
+    _validate_gpmo_bucket_count("active_ndipoles", active_ndipoles, ndipoles)
+    _validate_gpmo_bucket_count(
+        "active_nvectors",
+        active_nvectors,
+        int(pol_vectors.shape[1]),
+    )
+
+    active_ndipoles_arr = jnp.asarray(active_ndipoles, dtype=jnp.int64)
+    active_nvectors_arr = jnp.asarray(active_nvectors, dtype=jnp.int64)
+    active_dipoles = jnp.arange(ndipoles, dtype=jnp.int64) < active_ndipoles_arr
+    active_vectors = (
+        jnp.arange(pol_vectors.shape[1], dtype=jnp.int64) < active_nvectors_arr
+    )
+
+    x0 = jnp.zeros((ndipoles, 3), dtype=A_arr.dtype)
+    residual0 = -b_arr
+    available0 = active_dipoles
+    done0 = (active_ndipoles_arr == 0) | (active_nvectors_arr == 0)
+    if K == 0:
+        empty_int = jnp.zeros((0,), dtype=jnp.int64)
+        empty_float = jnp.zeros((0,), dtype=A_arr.dtype)
+        empty_x_history = jnp.zeros((0, ndipoles, 3), dtype=A_arr.dtype)
+        return GPMOArbVecResult(
+            x=x0,
+            x_history=empty_x_history,
+            residual=residual0,
+            residual_history=empty_float,
+            selected_dipoles=empty_int,
+            selected_vector_indices=empty_int,
+            selected_signs=empty_float,
+        )
+
+    scan_spec = GPMOArbVecSpec(
+        m_maxima=m_maxima,
+        reg_l2=_as_jax_float64(spec.reg_l2),
+        pol_vectors=pol_vectors,
+    )
+    contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
+
+    def _scan_body(state, _):
+        x, residual, available, done = state
+        costs = _gpmo_arbvec_candidate_costs_masked(
+            scan_spec,
+            A_arr,
+            residual,
+            available,
+            active_vectors,
+        )
+        n_candidates = pol_vectors.shape[0] * pol_vectors.shape[1]
+        choice = _argmin_finite_cost(costs)
+        is_minus = choice >= n_candidates
+        candidate = jnp.where(is_minus, choice - n_candidates, choice)
+        sign = jnp.where(is_minus, -1.0, 1.0).astype(residual.dtype)
+        dipole = candidate // pol_vectors.shape[1]
+        vector_index = candidate % pol_vectors.shape[1]
+        selected_vector = pol_vectors[dipole, vector_index, :]
+
+        x_placed = x.at[dipole, :].set(sign * selected_vector)
+        residual_placed = residual + sign * contributions[:, dipole, vector_index]
+        available_placed = available.at[dipole].set(False)
+        placed_count = jnp.sum((active_dipoles & (~available_placed)).astype(jnp.int64))
+        done_new = done | (placed_count >= active_ndipoles_arr)
+        x_new = jnp.where(done, x, x_placed)
+        residual_new = jnp.where(done, residual, residual_placed)
+        available_new = jnp.where(done, available, available_placed)
+        residual_sq = jnp.sum(residual_new * residual_new)
+        trace = (
+            jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), dipole),
+            jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), vector_index),
+            jnp.where(done, jnp.asarray(0.0, dtype=residual.dtype), sign),
+            residual_sq,
+            x_new,
+        )
+        return (x_new, residual_new, available_new, done_new), trace
+
+    final_state, trace = jax.lax.scan(
+        _scan_body, (x0, residual0, available0, done0), xs=None, length=K
+    )
+    (
+        selected_dipoles,
+        selected_vector_indices,
+        selected_signs,
+        residual_history,
+        x_history,
+    ) = trace
+    return GPMOArbVecResult(
+        x=final_state[0],
+        x_history=x_history,
+        residual=final_state[1],
+        residual_history=residual_history,
+        selected_dipoles=selected_dipoles,
+        selected_vector_indices=selected_vector_indices,
+        selected_signs=selected_signs,
+    )
+
+
 # ── Arbitrary-vector backtracking GPMO (item 25 deferred sub-item) ─────
 
 
@@ -985,7 +1200,7 @@ def initialize_gpmo_arbvec(
     candidates = jnp.concatenate(
         [diff_pos, diff_neg, diff_null[:, None]], axis=1
     )  # (N, 2*n_vectors + 1)
-    choice = jnp.argmin(candidates, axis=1)  # (N,)
+    choice = _argmin_finite_cost(candidates, axis=1)  # (N,)
     chose_null = choice == 2 * n_vectors
     chose_minus = (choice >= n_vectors) & (~chose_null)
     vector_idx = jnp.where(
@@ -1060,7 +1275,7 @@ def _gpmo_arbvec_backtracking_candidate_costs(
     minus = minus + penalty
 
     allowed = available[:, None]
-    sentinel = jnp.asarray(1.0e50, dtype=A_scaled.dtype)
+    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=A_scaled.dtype)
     plus = jnp.where(allowed, plus, sentinel)
     minus = jnp.where(allowed, minus, sentinel)
     return jnp.concatenate([jnp.ravel(plus), jnp.ravel(minus)])
@@ -1264,7 +1479,7 @@ def gpmo_arbvec_backtracking_step(
         spec.reg_l2,
     )
     n_candidates = spec.pol_vectors.shape[0] * spec.pol_vectors.shape[1]
-    choice = jnp.argmin(costs)
+    choice = _argmin_finite_cost(costs)
     is_minus = choice >= n_candidates
     candidate = jnp.where(is_minus, choice - n_candidates, choice)
     sign = jnp.where(is_minus, -1.0, 1.0).astype(residual.dtype)
@@ -1595,7 +1810,7 @@ def gpmo_multi_candidate_costs(
 
     direction_mask = _single_direction_mask(n_components, spec.single_direction)
     allowed = jnp.reshape(available, (n_components,)) & direction_mask & has_enough
-    sentinel = jnp.asarray(1.0e50, dtype=A_arr.dtype)
+    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=A_arr.dtype)
     plus = jnp.where(allowed, plus, sentinel)
     minus = jnp.where(allowed, minus, sentinel)
     return jnp.concatenate([plus, minus])
@@ -1614,7 +1829,7 @@ def gpmo_multi_step(
         spec, A_scaled, residual, available, connectivity
     )
     n_components = A_scaled.shape[1]
-    choice = jnp.argmin(costs)
+    choice = _argmin_finite_cost(costs)
     is_minus = choice >= n_components
     component_index = jnp.where(is_minus, choice - n_components, choice)
     sign = jnp.where(is_minus, -1.0, 1.0).astype(residual.dtype)
@@ -1912,7 +2127,7 @@ def gpmo_backtracking_step(
     )
     costs = gpmo_baseline_candidate_costs(candidate_spec, A_scaled, residual, available)
     n_components = A_scaled.shape[1]
-    choice = jnp.argmin(costs)
+    choice = _argmin_finite_cost(costs)
     is_minus = choice >= n_components
     component_index = jnp.where(is_minus, choice - n_components, choice)
     sign = jnp.where(is_minus, -1.0, 1.0).astype(residual.dtype)
@@ -2120,7 +2335,7 @@ def projection_l2_balls(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
         Shape ``(N,)``.
     """
     norm = jnp.linalg.norm(m, axis=1)  # (N,)
-    unit = jnp.ones_like(m_maxima)
+    unit = m_maxima**0  # Device-local 1 for zero/NaN radii and transfer guards.
     denom = jnp.fmax(unit, norm / m_maxima)
     return m / denom[:, None]
 
@@ -2437,7 +2652,10 @@ def mwpgp_solve(
         Solution after ``n_steps`` iterations, shape ``(N, 3)``.
     R2_history
         Per-iteration ``||A m - b||^2`` traced under the scan, shape
-        ``(n_steps,)``. Useful for diagnostic monotonicity checks.
+        ``(n_steps,)``. Useful for diagnostic monotonicity checks. This is
+        a fixed-length JAX trace, not the upstream C++ ``objective_history``
+        / ``m_history`` buffer, and callers that need C++ early-stop history
+        must use the CPU implementation.
 
     Notes
     -----
