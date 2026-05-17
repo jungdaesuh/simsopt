@@ -9,6 +9,7 @@ import pytest
 import simsopt.geo.optimizer_jax_reference as _opt_ref
 import simsopt.geo.optimizer_jax_private._bfgs as _private_bfgs
 import simsopt.geo.optimizer_jax_private._common as _opt_common
+import simsopt.geo.optimizer_jax_private._lbfgs as _private_lbfgs
 import simsopt.geo.optimizer_host_lbfgs as _host_lbfgs
 from conftest import enable_non_strict_jax_backend
 from jax.flatten_util import ravel_pytree
@@ -1106,6 +1107,74 @@ class TestOptimizerAdapterPrivate:
         assert observed["called"] is False
         assert bool(state.converged) is True
         assert int(state.status) == 0
+
+    def test_lbfgsb_private_solver_wrappers_are_cached_without_observers(self):
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        cacheable_quad = _opt._mark_cacheable_jit_value_and_grad(quad)
+        cache_owner, cache_key_prefix = _private_lbfgs._lbfgsb_cache_context(
+            cacheable_quad,
+            None,
+            "value",
+            x0.dtype,
+            x0.shape,
+        )
+        assert cache_owner is cacheable_quad
+
+        initial_a = _private_lbfgs._lbfgsb_initial_state_kernel(
+            cache_owner=cache_owner,
+            cache_key_prefix=cache_key_prefix,
+            m=10,
+            ftol=0.0,
+            gtol=1e-5,
+            maxls=20,
+        )
+        initial_b = _private_lbfgs._lbfgsb_initial_state_kernel(
+            cache_owner=cache_owner,
+            cache_key_prefix=cache_key_prefix,
+            m=10,
+            ftol=0.0,
+            gtol=1e-5,
+            maxls=20,
+        )
+        assert initial_a is initial_b
+
+        value_and_grad = _private_lbfgs._cached_lbfgs_value_and_grad_kernel(
+            cacheable_quad,
+            cache_owner=cacheable_quad,
+            adapter=None,
+            objective_mode="value",
+            dtype=x0.dtype,
+            shape=x0.shape,
+        )
+        main_a = _private_lbfgs._lbfgsb_mainlb_kernel(
+            value_and_grad,
+            cache_owner=cache_owner,
+            cache_key_prefix=cache_key_prefix,
+            maxiter=5,
+            maxfun=5,
+            accepted_step_callback=None,
+        )
+        main_b = _private_lbfgs._lbfgsb_mainlb_kernel(
+            value_and_grad,
+            cache_owner=cache_owner,
+            cache_key_prefix=cache_key_prefix,
+            maxiter=5,
+            maxfun=5,
+            accepted_step_callback=None,
+        )
+        observed = _private_lbfgs._lbfgsb_mainlb_kernel(
+            value_and_grad,
+            cache_owner=cache_owner,
+            cache_key_prefix=cache_key_prefix,
+            maxiter=5,
+            maxfun=5,
+            accepted_step_callback=lambda *_args: None,
+        )
+        assert main_a is main_b
+        assert observed is not main_a
 
     def test_hybrid_method_is_removed_from_public_optimizer_surface(self):
         with pytest.raises(ValueError, match="Unknown method 'bfgs-hybrid'"):

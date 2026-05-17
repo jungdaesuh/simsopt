@@ -57,6 +57,29 @@ def _cached_lbfgs_value_and_grad_kernel(
     dtype,
     shape,
 ):
+    cache_owner, cache_key_prefix = _lbfgsb_cache_context(
+        cache_owner,
+        adapter,
+        objective_mode,
+        dtype,
+        shape,
+    )
+
+    def build_kernel():
+        def lbfgs_private_value_and_grad(x):
+            return _coerce_value_and_grad_result(value_and_grad_fun, x)
+
+        lbfgs_private_value_and_grad.__name__ = "lbfgs_private_value_and_grad"
+        return jax.jit(lbfgs_private_value_and_grad)
+
+    return _cached_private_solver(
+        cache_owner,
+        cache_key=("lbfgs-value-and-grad", *cache_key_prefix),
+        builder=build_kernel,
+    )
+
+
+def _lbfgsb_cache_context(cache_owner, adapter, objective_mode, dtype, shape):
     structured_solver_cache_token = None
     if adapter is not None and cache_owner is not None:
         structured_solver_cache_token = getattr(
@@ -68,29 +91,27 @@ def _cached_lbfgs_value_and_grad_kernel(
     can_cache_kernel = cache_owner is not None and (
         adapter is None or structured_solver_cache_token is not None
     )
-
-    def build_kernel():
-        def lbfgs_private_value_and_grad(x):
-            return _coerce_value_and_grad_result(value_and_grad_fun, x)
-
-        lbfgs_private_value_and_grad.__name__ = "lbfgs_private_value_and_grad"
-        return jax.jit(lbfgs_private_value_and_grad)
-
-    return _cached_private_solver(
+    return (
         cache_owner if can_cache_kernel else None,
-        cache_key=(
-            "lbfgs-value-and-grad",
+        (
             str(objective_mode),
             structured_solver_cache_token,
             adapter_cache_key,
             np.dtype(dtype).str,
             tuple(int(dim) for dim in shape),
         ),
-        builder=build_kernel,
     )
 
 
-def _lbfgsb_initial_state_kernel(*, m: int, ftol: float, gtol: float, maxls: int):
+def _lbfgsb_initial_state_kernel(
+    *,
+    cache_owner=None,
+    cache_key_prefix=(),
+    m: int,
+    ftol: float,
+    gtol: float,
+    maxls: int,
+):
     def build(x0):
         return lbfgsb.lbfgsb_initial_state(
             x0,
@@ -101,12 +122,25 @@ def _lbfgsb_initial_state_kernel(*, m: int, ftol: float, gtol: float, maxls: int
             maxls=maxls,
         )
 
-    return jax.jit(build)
+    return _cached_private_solver(
+        cache_owner,
+        cache_key=(
+            "lbfgsb-initial-state",
+            *cache_key_prefix,
+            int(m),
+            float(ftol),
+            float(gtol),
+            int(maxls),
+        ),
+        builder=lambda: jax.jit(build),
+    )
 
 
 def _lbfgsb_mainlb_kernel(
     value_and_grad,
     *,
+    cache_owner=None,
+    cache_key_prefix=(),
     maxiter: int,
     maxfun: int,
     accepted_step_callback=None,
@@ -127,7 +161,16 @@ def _lbfgsb_mainlb_kernel(
             maxfun_limit=jnp.asarray(maxfun, dtype=jnp.int32),
         )
 
-    return jax.jit(run)
+    return _cached_private_solver(
+        cache_owner if accepted_step_callback is None else None,
+        cache_key=(
+            "lbfgsb-mainlb",
+            *cache_key_prefix,
+            int(maxiter),
+            int(maxfun),
+        ),
+        builder=lambda: jax.jit(run),
+    )
 
 
 def _resolve_scipy_lbfgsb_limits(maxiter, maxfun):
@@ -370,8 +413,17 @@ def _minimize_lbfgs_private_impl(
         dtype=dtype,
         shape=x0.shape,
     )
+    solver_cache_owner, solver_cache_key_prefix = _lbfgsb_cache_context(
+        cache_owner,
+        adapter,
+        objective_mode,
+        dtype,
+        x0.shape,
+    )
 
     state = _lbfgsb_initial_state_kernel(
+        cache_owner=solver_cache_owner,
+        cache_key_prefix=solver_cache_key_prefix,
         m=maxcor,
         ftol=ftol,
         gtol=gtol,
@@ -392,6 +444,8 @@ def _minimize_lbfgs_private_impl(
     )
     result = _lbfgsb_mainlb_kernel(
         value_and_grad_kernel,
+        cache_owner=solver_cache_owner,
+        cache_key_prefix=solver_cache_key_prefix,
         maxiter=int(maxiter_limit_value),
         maxfun=int(maxfun_limit_value),
         accepted_step_callback=accepted_step_callback,

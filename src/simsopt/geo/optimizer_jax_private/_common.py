@@ -207,25 +207,17 @@ def _cached_private_solver(cache_owner, *, cache_key, builder):
         cache_owner, _CACHEABLE_VALUE_AND_GRAD_ATTR, False
     ):
         return builder()
-    cached = getattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, None)
-    if cached is not None:
-        compiled = cached.get(cache_key)
-        if compiled is not None:
-            return compiled
-    compiled = builder()
-    # Double-checked install under the cache lock. ``cache_owner`` has been
-    # marked via ``_mark_cacheable_jit_value_and_grad`` (the marker check
-    # above gated this branch), so ``setattr`` cannot raise.
     with _PRIVATE_SOLVER_CACHE_LOCK:
         cached = getattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, None)
         if cached is None:
             cached = {}
             setattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, cached)
         existing = cached.get(cache_key)
-        if existing is None:
-            cached[cache_key] = compiled
-            return compiled
-        return existing
+        if existing is not None:
+            return existing
+        compiled = builder()
+        cached[cache_key] = compiled
+        return compiled
 
 
 def _promote_dtypes_inexact(*args):

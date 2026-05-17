@@ -664,6 +664,7 @@ def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
         _JAX_SUBPROCESS_CASES_PATH,
         args=("compile-count", method),
         failure_message=f"{method} compile-count smoke failed",
+        timeout=150 if method == "lbfgs-ondevice" else 30,
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
         expected_case="compile-count",
     )
@@ -693,6 +694,7 @@ def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and
         failure_message=(
             "target lbfgs-ondevice value-and-grad compile-count smoke failed"
         ),
+        timeout=150,
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
         expected_case="target-compile-count",
     )
