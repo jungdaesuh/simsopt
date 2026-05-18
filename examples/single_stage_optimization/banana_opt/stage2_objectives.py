@@ -683,7 +683,7 @@ def build_stage2_iota_runtime(
     stats = Stage2IotaRuntimeStats(bootstrap_seconds=bootstrap_seconds)
     original_run_code = boozer_surface.run_code
 
-    def timed_run_code(iota, G=None):
+    def timed_run_code(iota, G):
         run_start = time.perf_counter()
         try:
             return original_run_code(iota, G)
@@ -1057,6 +1057,8 @@ def build_stage2_results(
     stage2_bs_path,
     tf_current_A,
     tf_current_sum_abs_A,
+    wout_convention,
+    wout_off_spec,
     num_tf_coils,
     num_banana_coils,
     num_proxy_coils,
@@ -1163,6 +1165,10 @@ def build_stage2_results(
         num_vf_coils=num_vf_coils,
         context="Stage 2 coil partition metadata",
     )
+    if wout_off_spec is not True and wout_off_spec is not False:
+        raise ValueError("WOUT_OFF_SPEC must be boolean.")
+    if wout_convention not in {"signed_cw", "positive_ccw"}:
+        raise ValueError("WOUT_CONVENTION must be signed_cw or positive_ccw.")
     coil_groups_manifest = build_contiguous_manifest(
         num_tf_coils=int(num_tf_coils),
         num_banana_coils=int(num_banana_coils),
@@ -1175,6 +1181,8 @@ def build_stage2_results(
         "STAGE2_BS_PATH": stage2_bs_path,
         "TF_CURRENT_A": float(tf_current_A),
         "TF_CURRENT_SUM_ABS_A": float(tf_current_sum_abs_A),
+        "WOUT_CONVENTION": str(wout_convention),
+        "WOUT_OFF_SPEC": wout_off_spec,
         "NUM_TF_COILS": int(num_tf_coils),
         "NUM_BANANA_COILS": int(num_banana_coils),
         "NUM_PROXY_COILS": int(num_proxy_coils),

@@ -136,6 +136,7 @@ from banana_opt.topology_bridge import (
     fieldline_iota_proxy_artifact_fields,
     safe_compute_fieldline_iota_proxy as safe_compute_phase3a_fieldline_iota_proxy,
 )
+from banana_opt.wout_convention import wout_convention_artifact_fields
 from topology_scorer import padded_bounds
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
@@ -2774,6 +2775,10 @@ def main(parsed_args=None):
     )
     stage2_bs_artifact_path = OUT_DIR_ITER + "biot_savart_opt.json"
     print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
+    wout_convention_fields = wout_convention_artifact_fields(
+        wout_path=file_loc,
+        tf_current_A=tf_current_A,
+    )
 
     stage2_results_kwargs = dict(
         args=args,
@@ -2782,6 +2787,8 @@ def main(parsed_args=None):
         stage2_bs_path=args.stage2_bs_path,
         tf_current_A=tf_current_A,
         tf_current_sum_abs_A=sum(abs(coil.current.get_value()) for coil in new_tf_coils),
+        wout_convention=wout_convention_fields["WOUT_CONVENTION"],
+        wout_off_spec=wout_convention_fields["WOUT_OFF_SPEC"],
         num_tf_coils=len(new_tf_coils),
         num_banana_coils=len(new_banana_coils),
         num_proxy_coils=len(new_proxy_coils),

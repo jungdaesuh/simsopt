@@ -363,6 +363,61 @@ class BoozerSurfaceTests(unittest.TestCase):
         self.assertEqual(boozer_surface.res["I"], 0.37)
         self.assertIn("vjp", boozer_surface.res)
 
+    def test_finite_current_requires_explicit_signed_G(self):
+        bs, _, boozer_surface = self._make_small_area_boozer_surface(current_I=0.37)
+        surface = boozer_surface.surface
+        iota = -0.3
+        explicit_iota_x = np.concatenate((surface.get_dofs(), [iota]))
+        explicit_iota_lm_x = np.concatenate((explicit_iota_x, [0.0, 0.0]))
+
+        with self.assertRaisesRegex(ValueError, "explicit signed G"):
+            boozer_surface_residual_finite_I(surface, iota, None, bs, I=0.37)
+
+        with self.assertRaisesRegex(ValueError, "explicit signed G"):
+            boozer_surface_residual_dB_finite_I(surface, iota, None, bs, I=0.37)
+
+        boozer_surface.need_to_run_code = True
+        with self.assertRaises(TypeError):
+            boozer_surface.run_code(iota)
+
+        cached_result = {"type": "ls", "success": True, "iota": iota, "G": 1.0}
+        boozer_surface.res = cached_result
+        boozer_surface.need_to_run_code = False
+        explicit_g_methods = (
+            boozer_surface.minimize_boozer_penalty_constraints_LBFGS,
+            boozer_surface.minimize_boozer_penalty_constraints_newton,
+            boozer_surface.minimize_boozer_penalty_constraints_ls,
+            boozer_surface.minimize_boozer_exact_constraints_newton,
+        )
+        for method in explicit_g_methods:
+            with self.subTest(method=method.__name__):
+                with self.assertRaises(TypeError):
+                    method(iota=iota)
+                with self.assertRaisesRegex(ValueError, "explicit signed G"):
+                    method(iota=iota, G=None)
+
+        with self.assertRaisesRegex(ValueError, "optimize_G=True"):
+            boozer_surface.boozer_penalty_constraints(
+                explicit_iota_x, optimize_G=False
+            )
+
+        with self.assertRaisesRegex(ValueError, "optimize_G=True"):
+            boozer_surface.boozer_penalty_constraints_vectorized(
+                explicit_iota_x, optimize_G=False
+            )
+
+        with self.assertRaisesRegex(ValueError, "optimize_G=True"):
+            boozer_surface.boozer_exact_constraints(
+                explicit_iota_lm_x, optimize_G=False
+            )
+
+        boozer_surface.need_to_run_code = False
+        with self.assertRaisesRegex(ValueError, "explicit signed G"):
+            boozer_surface.solve_residual_equation_exactly_newton(iota=iota, G=None)
+
+        with self.assertRaises(TypeError):
+            boozer_surface.solve_residual_equation_exactly_newton(iota=iota)
+
     def test_finite_current_exact_newton_accepts_full_residual_decrease_step(self):
         res, residual_iotas = self._run_synthetic_exact_newton_line_search(
             {0.0: 10.0, -1.0: 3.0}
@@ -928,6 +983,31 @@ class BoozerSurfaceTests(unittest.TestCase):
                                           ntor=ntor):
                             self.subtest_boozer_penalty_constraints_cpp_notcpp(surfacetype, stellsym, optimize_G, nphi, ntheta, weight_inv_modB, mpol, ntor)
 
+    def test_finite_current_boozer_penalty_constraints_cpp_notcpp(self):
+        """
+        Test to verify finite-current cpp and python BoozerLS implementations
+        return the same thing when the signed G contract is explicit.
+        """
+        for surfacetype in surfacetypes_list:
+            for stellsym in stellsym_list:
+                for weight_inv_modB in [False, True]:
+                    for (nphi, ntheta, mpol, ntor) in [
+                        (1, 1, 3, 3),
+                        (2, 2, 10, 3),
+                        (6, 9, 3, 3),
+                        (3, 3, 3, 3),
+                    ]:
+                        with self.subTest(surfacetype=surfacetype,
+                                          stellsym=stellsym,
+                                          optimize_G=True,
+                                          weight_inv_modB=weight_inv_modB,
+                                          mpol=mpol,
+                                          ntor=ntor):
+                            self.subtest_finite_current_boozer_penalty_constraints_cpp_notcpp(
+                                surfacetype, stellsym, nphi, ntheta,
+                                weight_inv_modB, mpol, ntor,
+                            )
+
     def test_boozer_penalty_constraints_derivatives2_weighted_unweighted_cpp_notcpp(self):
         for weight_inv_modB in [False, True]:
             with self.subTest(weight_inv_modB=weight_inv_modB):
@@ -990,15 +1070,52 @@ class BoozerSurfaceTests(unittest.TestCase):
         tf = ToroidalFlux(s, bs_tf, nphi=51, ntheta=51)
 
         tf_target = 0.1
+        boozer_surface = BoozerSurface(bs, s, tf, tf_target)
+
+        iota = -0.3
+        x = np.concatenate((s.get_dofs(), [iota]))
+        if optimize_G:
+            x = np.concatenate((x, [2.*np.pi*current_sum*(4*np.pi*10**(-7)/(2 * np.pi))]))
+        H0, H1 = self._assert_penalty_constraints_cpp_python_match(
+            boozer_surface, x, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB,
+        )
+
+        self._print_hessian_differences(H0, H1)
+
+    def subtest_finite_current_boozer_penalty_constraints_cpp_notcpp(self, surfacetype, stellsym, nphi, ntheta, weight_inv_modB, mpol, ntor):
+        np.random.seed(1)
+        curves, currents, ma = get_ncsx_data()
+        coils = coils_via_symmetries(curves, currents, 3, stellsym)
+        bs = BiotSavart(coils)
+        bs_tf = BiotSavart(coils)
+        current_sum = sum(abs(c.current.get_value()) for c in coils)
+
+        phis = None
+        thetas = None
+        if nphi == 1:
+            phis = [0.2234567989]
+        elif nphi == 2:
+            phis = [0.2234567989, 0.432123451]
+
+        if ntheta == 1:
+            thetas = [0.2432101234]
+        elif ntheta == 2:
+            thetas = [0.2432101234, 0.9832134]
+
+        s = get_surface(surfacetype, stellsym, nphi=nphi, ntheta=ntheta, thetas=thetas, phis=phis, mpol=mpol, ntor=ntor)
+        s.fit_to_curve(ma, 0.1)
+        s.x = s.x + np.random.rand(s.x.size)*1e-6
+
+        tf = ToroidalFlux(s, bs_tf, nphi=51, ntheta=51)
+        tf_target = 0.1
+        G = 2.*np.pi*current_sum*(4*np.pi*10**(-7)/(2 * np.pi))
+        iota = -0.3
+
         for current_I in [0.0, 0.37]:
             boozer_surface = BoozerSurfaceFiniteI(bs, s, tf, tf_target, I=current_I)
-
-            iota = -0.3
-            x = np.concatenate((s.get_dofs(), [iota]))
-            if optimize_G:
-                x = np.concatenate((x, [2.*np.pi*current_sum*(4*np.pi*10**(-7)/(2 * np.pi))]))
+            x = np.concatenate((s.get_dofs(), [iota, G]))
             H0, H1 = self._assert_penalty_constraints_cpp_python_match(
-                boozer_surface, x, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB,
+                boozer_surface, x, optimize_G=True, weight_inv_modB=weight_inv_modB,
             )
 
         self._print_hessian_differences(H0, H1)

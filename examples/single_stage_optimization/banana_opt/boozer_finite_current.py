@@ -79,20 +79,13 @@ __all__ = [
 ]
 
 
-_MU0_OVER_2PI = 4 * np.pi * 1e-7 / (2 * np.pi)
 _EXACT_NEWTON_BACKTRACKING_STEPS = tuple(0.5 ** i for i in range(8))
 
 
-def _default_G_from_coils(biotsavart):
-    """Upstream default: ``G = sum(|coil currents|) * mu_0``.  Used when the
-    caller does not pass an explicit ``G``.
-    """
-    return (
-        2.0
-        * np.pi
-        * np.sum(np.abs([c.current.get_value() for c in biotsavart.coils]))
-        * _MU0_OVER_2PI
-    )
+def _require_explicit_G(G):
+    if G is None:
+        raise ValueError("finite-current Boozer paths require an explicit signed G")
+    return G
 
 
 def _to_explicit_current_basis(I_value, tensor):
@@ -147,25 +140,20 @@ def boozer_surface_residual_finite_I(
     weight_inv_modB=False,
     I=0.0,
 ):
-    """Drop-in replacement for ``boozer_surface_residual`` that supports a
-    finite enclosed toroidal current ``I``.
+    """Finite-current ``boozer_surface_residual`` variant.
 
-    Parameters mirror the upstream signature.  When ``derivatives >= 1`` the
-    returned Jacobian is in the (surface_dofs, iota, [G]) basis with ``I`` as
-    an external parameter; this differs from the upstream alpha-fixed basis
-    by the elementary basis transform implemented in this module.
+    The finite-current path requires an explicit signed ``G``.  When
+    ``derivatives >= 1`` the returned Jacobian is in the
+    (surface_dofs, iota, [G]) basis with ``I`` as an external parameter; this
+    differs from the upstream alpha-fixed basis by the elementary basis
+    transform implemented in this module.
     """
 
-    user_provided_G = G is not None
-    if not user_provided_G:
-        G = _default_G_from_coils(biotsavart)
-
+    G = _require_explicit_G(G)
     G_effective = G + iota * I
 
     # Always pass G_effective (never None) so the upstream kernel populates
-    # the alpha-derivative column the basis transform needs.  When the outer
-    # caller passed G=None we drop that column from the returned tensors so
-    # the upstream public contract is preserved.
+    # the alpha-derivative column the basis transform needs.
     boozer = boozer_surface_residual(
         surface,
         iota,
@@ -181,16 +169,11 @@ def boozer_surface_residual_finite_I(
     if derivatives == 1:
         r, J = boozer
         J_new = _to_explicit_current_basis(I, J)
-        if not user_provided_G:
-            J_new = J_new[:, :-1]
         return r, J_new
 
     r, J, H = boozer
     J_new = _to_explicit_current_basis(I, J)
     H_new = _to_explicit_current_basis_hessian(I, H)
-    if not user_provided_G:
-        J_new = J_new[:, :-1]
-        H_new = H_new[:, :-1, :-1]
     return r, J_new, H_new
 
 
@@ -204,18 +187,16 @@ def boozer_surface_residual_dB_finite_I(
     I=0.0,
     include_mixed_derivatives=True,
 ):
-    """Drop-in replacement for ``boozer_surface_residual_dB``.
+    """Finite-current ``boozer_surface_residual_dB`` variant.
 
-    Only the ``dr/ds`` (Jacobian) output needs basis correction --- ``dr/dB``
-    and the higher-order mixed derivatives are partials with respect to the
-    field components alone, which depend on ``alpha`` only.  Substituting
-    ``alpha = G + iota * I`` upstream therefore captures those terms exactly.
+    Requires an explicit signed ``G``.  Only the ``dr/ds`` (Jacobian) output
+    needs basis correction --- ``dr/dB`` and the higher-order mixed derivatives
+    are partials with respect to the field components alone, which depend on
+    ``alpha`` only.  Substituting ``alpha = G + iota * I`` upstream therefore
+    captures those terms exactly.
     """
 
-    user_provided_G = G is not None
-    if not user_provided_G:
-        G = _default_G_from_coils(biotsavart)
-
+    G = _require_explicit_G(G)
     G_effective = G + iota * I
 
     out = boozer_surface_residual_dB(
@@ -236,16 +217,10 @@ def boozer_surface_residual_dB_finite_I(
         J_new = _to_explicit_current_basis(I, J)
         d2_dsdB_new = _to_explicit_current_basis(I, d2_dsdB)
         d2_dsdgradB_new = _to_explicit_current_basis(I, d2_dsdgradB)
-        if not user_provided_G:
-            J_new = J_new[:, :-1]
-            d2_dsdB_new = d2_dsdB_new[..., :-1]
-            d2_dsdgradB_new = d2_dsdgradB_new[..., :-1]
         return rtil, drtil_dB, J_new, d2_dsdB_new, d2_dsdgradB_new
 
     rtil, drtil_dB, J = out
     J_new = _to_explicit_current_basis(I, J)
-    if not user_provided_G:
-        J_new = J_new[:, :-1]
     return rtil, drtil_dB, J_new
 
 
@@ -325,10 +300,108 @@ class BoozerSurfaceFiniteI(BoozerSurface):
             )
         return payload
 
-    def run_code(self, iota, G=None):
+    def run_code(self, iota, G):
+        _require_explicit_G(G)
         result = super().run_code(iota, G=G)
+        return self._annotate_current_result(result)
+
+    def _annotate_current_result(self, result):
         self._annotate_current(self.res)
         return self._annotate_current(result)
+
+    def minimize_boozer_penalty_constraints_LBFGS(
+        self,
+        tol=1e-3,
+        maxiter=1000,
+        constraint_weight=1.0,
+        iota=0.0,
+        *,
+        G,
+        vectorize=True,
+        limited_memory=True,
+        weight_inv_modB=True,
+        verbose=False,
+    ):
+        G = _require_explicit_G(G)
+        result = super().minimize_boozer_penalty_constraints_LBFGS(
+            tol=tol,
+            maxiter=maxiter,
+            constraint_weight=constraint_weight,
+            iota=iota,
+            G=G,
+            vectorize=vectorize,
+            limited_memory=limited_memory,
+            weight_inv_modB=weight_inv_modB,
+            verbose=verbose,
+        )
+        return self._annotate_current_result(result)
+
+    def minimize_boozer_penalty_constraints_newton(
+        self,
+        tol=1e-12,
+        maxiter=10,
+        constraint_weight=1.0,
+        iota=0.0,
+        *,
+        G,
+        stab=0.0,
+        vectorize=True,
+        weight_inv_modB=True,
+        verbose=False,
+    ):
+        G = _require_explicit_G(G)
+        result = super().minimize_boozer_penalty_constraints_newton(
+            tol=tol,
+            maxiter=maxiter,
+            constraint_weight=constraint_weight,
+            iota=iota,
+            G=G,
+            stab=stab,
+            vectorize=vectorize,
+            weight_inv_modB=weight_inv_modB,
+            verbose=verbose,
+        )
+        return self._annotate_current_result(result)
+
+    def minimize_boozer_penalty_constraints_ls(
+        self,
+        tol=1e-12,
+        maxiter=10,
+        constraint_weight=1.0,
+        iota=0.0,
+        *,
+        G,
+        method="lm",
+    ):
+        G = _require_explicit_G(G)
+        result = super().minimize_boozer_penalty_constraints_ls(
+            tol=tol,
+            maxiter=maxiter,
+            constraint_weight=constraint_weight,
+            iota=iota,
+            G=G,
+            method=method,
+        )
+        return self._annotate_current_result(result)
+
+    def minimize_boozer_exact_constraints_newton(
+        self,
+        tol=1e-12,
+        maxiter=10,
+        iota=0.0,
+        *,
+        G,
+        lm=(0.0, 0.0),
+    ):
+        G = _require_explicit_G(G)
+        result = super().minimize_boozer_exact_constraints_newton(
+            tol=tol,
+            maxiter=maxiter,
+            iota=iota,
+            G=G,
+            lm=lm,
+        )
+        return self._annotate_current_result(result)
 
     def boozer_penalty_constraints(
         self,
@@ -336,26 +409,22 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         derivatives=0,
         constraint_weight=1.0,
         scalarize=True,
-        optimize_G=False,
+        optimize_G=True,
         weight_inv_modB=True,
     ):
         r"""Finite-I version of :meth:`BoozerSurface.boozer_penalty_constraints`.
 
-        Behavior matches upstream byte-for-byte except the residual call is
-        routed through :func:`boozer_surface_residual_finite_I` so the
-        gradient/Hessian come out in the (surface_dofs, iota, [G]) basis with
-        ``I`` external.
+        Finite-current Boozer paths require an explicit signed ``G``; this
+        method therefore supports only the ``optimize_G=True`` degree-of-freedom
+        layout ``(surface_dofs, iota, G)``.
         """
 
         assert derivatives in [0, 1, 2]
-        if optimize_G:
-            sdofs = x[:-2]
-            iota = x[-2]
-            G = x[-1]
-        else:
-            sdofs = x[:-1]
-            iota = x[-1]
-            G = None
+        if not optimize_G:
+            raise ValueError("finite-current Boozer paths require optimize_G=True")
+        sdofs = x[:-2]
+        iota = x[-2]
+        G = x[-1]
         nsurfdofs = sdofs.size
         s = self.surface
         num_res = 3 * s.quadpoints_phi.size * s.quadpoints_theta.size
@@ -442,10 +511,10 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         dofs,
         derivatives=0,
         constraint_weight=1.0,
-        optimize_G=False,
+        optimize_G=True,
         weight_inv_modB=True,
     ):
-        """Vectorized finite-I implementation matching upstream behavior.
+        """Vectorized finite-I implementation for explicit signed ``G``.
 
         Calls the upstream-only ``sopp.boozer_residual*`` kernels with
         ``alpha = G + iota * self.I``; the gradient/Hessian in the alpha-fixed
@@ -458,9 +527,7 @@ class BoozerSurfaceFiniteI(BoozerSurface):
             iota = dofs[-2]
             G = dofs[-1]
         else:
-            sdofs = dofs[:-1]
-            iota = dofs[-1]
-            G = _default_G_from_coils(self.biotsavart)
+            raise ValueError("finite-current Boozer paths require optimize_G=True")
 
         s = self.surface
         nphi = s.quadpoints_phi.size
@@ -586,9 +653,7 @@ class BoozerSurfaceFiniteI(BoozerSurface):
             iota = xl[-4]
             G = xl[-3]
         else:
-            sdofs = xl[:-3]
-            iota = xl[-3]
-            G = None
+            raise ValueError("finite-current Boozer paths require optimize_G=True")
         lm = xl[-2:]
         s = self.surface
         biotsavart = self.biotsavart
@@ -636,7 +701,7 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         return res, dres
 
     def solve_residual_equation_exactly_newton(
-        self, tol=1e-10, maxiter=10, iota=0.0, G=None, verbose=False
+        self, tol=1e-10, maxiter=10, iota=0.0, *, G, verbose=False
     ):
         """Finite-I version of
         :meth:`BoozerSurface.solve_residual_equation_exactly_newton`.
@@ -648,6 +713,7 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         to substitute ``G -> G + iota * I`` before invoking the upstream vjp.
         """
 
+        G = _require_explicit_G(G)
         if not self.need_to_run_code:
             return self.res
 
@@ -681,8 +747,6 @@ class BoozerSurfaceFiniteI(BoozerSurface):
             if not s.stellsym:
                 rows.append(np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0.0, 0.0])))
             return np.vstack(rows)
-        if G is None:
-            G = _default_G_from_coils(self.biotsavart)
         x = np.concatenate((s.get_dofs(), [iota, G]))
         i = 0
         r, J = boozer_surface_residual_finite_I(

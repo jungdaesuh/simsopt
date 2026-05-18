@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+from scipy.io import netcdf_file
 from simsopt._core import Optimizable
 from simsopt.field.coil import Current, ScaledCurrent
 
@@ -29,6 +31,7 @@ HARDWARE_CONSTRAINT_SCHEMA_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "hardware_constraint_schema.py"
 )
 HARDWARE_CONTRACTS_PATH = EXAMPLES_ROOT / "banana_opt" / "hardware_contracts.py"
+WOUT_CONVENTION_PATH = EXAMPLES_ROOT / "banana_opt" / "wout_convention.py"
 SINGLE_STAGE_SEARCH_POLICY_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "single_stage_search_policy.py"
 )
@@ -2880,6 +2883,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             stage2_bs_path="/tmp/seed.json",
             tf_current_A=-8.0e4,
             tf_current_sum_abs_A=1.6e5,
+            wout_convention="signed_cw",
+            wout_off_spec=False,
             num_tf_coils=2,
             num_banana_coils=4,
             num_proxy_coils=0,
@@ -3027,6 +3032,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["BANANA_INIT_CURRENT_A"], -1.2e4)
         self.assertEqual(result["BANANA_CURRENT_MAX_A"], 1.6e4)
         self.assertEqual(result["TF_CURRENT_LIMIT_A"], 8.0e4)
+        self.assertEqual(result["WOUT_CONVENTION"], "signed_cw")
+        self.assertIs(result["WOUT_OFF_SPEC"], False)
         self.assertAlmostEqual(result["BANANA_TO_TF_CURRENT_RATIO"], 0.11875)
         self.assertEqual(result["COIL_LENGTH"], 1.8)
         self.assertEqual(result["MAX_CURVATURE"], 41.0)
@@ -3103,6 +3110,74 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(signed_value, 0.05 - np.sqrt(0.02**2 + 0.04**2))
         self.assertAlmostEqual(hard_signed_value, 0.05 - np.sqrt(0.02**2 + 0.04**2))
         np.testing.assert_allclose(grad, [0.0, -0.04 / np.sqrt(0.02**2 + 0.04**2)])
+
+
+class WoutConventionModuleTests(_ModuleTestCase):
+    MODULE_PATH = WOUT_CONVENTION_PATH
+    MODULE_PREFIX = "banana_wout_convention"
+
+    @staticmethod
+    def _write_wout(path: Path, *, rbtor: float, phi_edge: float):
+        with netcdf_file(str(path), "w", mmap=False) as handle:
+            handle.createDimension("scalar", 1)
+            handle.createDimension("surf", 2)
+            rbtor_var = handle.createVariable("rbtor", "f8", ("scalar",))
+            rbtor_var[:] = [rbtor]
+            phi_var = handle.createVariable("phi", "f8", ("surf",))
+            phi_var[:] = [0.0, phi_edge]
+
+    @staticmethod
+    def _write_malformed_wout(path: Path):
+        with netcdf_file(str(path), "w", mmap=False) as handle:
+            handle.createDimension("scalar", 1)
+            handle.createDimension("row", 2)
+            handle.createDimension("col", 1)
+            rbtor_var = handle.createVariable("rbtor", "f8", ("scalar",))
+            rbtor_var[:] = [-0.32]
+            phi_var = handle.createVariable("phi", "f8", ("row", "col"))
+            phi_var[:] = [[0.0], [-0.005]]
+
+    def test_artifact_fields_match_signed_tf_lane(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wout_path = Path(tmpdir) / "wout_signed.nc"
+            self._write_wout(wout_path, rbtor=-0.32, phi_edge=-0.005)
+
+            fields = self.module.wout_convention_artifact_fields(
+                wout_path=wout_path,
+                tf_current_A=-8.0e4,
+            )
+
+        self.assertEqual(fields["WOUT_CONVENTION"], "signed_cw")
+        self.assertIs(fields["WOUT_OFF_SPEC"], False)
+
+    def test_artifact_fields_reject_malformed_phi_shape(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wout_path = Path(tmpdir) / "wout_malformed.nc"
+            self._write_malformed_wout(wout_path)
+
+            with self.assertRaisesRegex(ValueError, "phi is not 1-D"):
+                self.module.wout_convention_artifact_fields(
+                    wout_path=wout_path,
+                    tf_current_A=-8.0e4,
+                )
+
+    def test_artifact_validator_rejects_stale_wout_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            wout_path = root / "wout_signed.nc"
+            results_path = root / "results.json"
+            self._write_wout(wout_path, rbtor=-0.32, phi_edge=-0.005)
+
+            with self.assertRaisesRegex(ValueError, "WOUT_CONVENTION"):
+                self.module.validate_wout_convention_artifact_fields(
+                    stage2_results_path=results_path,
+                    stage2_artifact_results={
+                        "PLASMA_SURF_PATH": str(wout_path),
+                        "TF_CURRENT_A": -8.0e4,
+                        "WOUT_CONVENTION": "positive_ccw",
+                        "WOUT_OFF_SPEC": False,
+                    },
+                )
 
 
 class SingleStageObjectiveModuleTests(_ModuleTestCase):

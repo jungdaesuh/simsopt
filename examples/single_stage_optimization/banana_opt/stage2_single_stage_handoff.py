@@ -49,6 +49,8 @@ BOOTABILITY_REASON_IOTA_MISMATCH = "iota_mismatch"
 
 BOOTABILITY_STAGE_PROBE = "probe"
 BOOTABILITY_STAGE_RECOVERY = "recovery"
+_PROMOTABLE_STAGE2_IOTA_MODES = frozenset({"alm"})
+_PRODUCTION_HANDOFF_SEED_ROLE = "bootable_handoff"
 
 BOOZER_FAILURE_POLICY_REPORT_FAILURE = "report_failure"
 BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS = "restore_last_success"
@@ -118,6 +120,7 @@ __all__ = [
     "boozer_trust_state_from_initialization",
     "boozer_trust_tolerance",
     "bootability_passes",
+    "build_stage2_seed_production_handoff_fields",
     "build_equilibrium_path",
     "classify_bootability_result",
     "compute_boozer_constrained_residual_norm",
@@ -435,17 +438,53 @@ def evaluate_stage2_seed_hardware_contract(
 def validate_stage2_seed_bootability_contract(
     stage2_results: Mapping[str, object],
 ) -> None:
-    if bootability_passes(stage2_results):
+    if (
+        bootability_passes(stage2_results)
+        and stage2_results.get("STAGE2_IOTA_MODE") in _PROMOTABLE_STAGE2_IOTA_MODES
+        and stage2_results.get("BOOZER_TRUSTED") is True
+        and stage2_results.get("IOTA_NEAR_TARGET") is True
+        and stage2_results.get("WOUT_OFF_SPEC") is False
+        and stage2_results.get("SEED_ROLE") == _PRODUCTION_HANDOFF_SEED_ROLE
+        and stage2_results.get("DIAGNOSTIC_ONLY") is False
+        and stage2_results.get("PRODUCTION_HANDOFF_READY") is True
+        and "HANDOFF_BLOCKING_GATE" in stage2_results
+        and stage2_results.get("HANDOFF_BLOCKING_GATE") is None
+        and stage2_results.get("PROMOTION_READY") is True
+    ):
         return
     raise ValueError(
         "Stage 2 seed artifact is not single-stage bootable: "
+        f"SEED_ROLE={stage2_results.get('SEED_ROLE')!r}, "
+        f"DIAGNOSTIC_ONLY={stage2_results.get('DIAGNOSTIC_ONLY')!r}, "
+        f"PRODUCTION_HANDOFF_READY={stage2_results.get('PRODUCTION_HANDOFF_READY')!r}, "
+        f"HANDOFF_BLOCKING_GATE={stage2_results.get('HANDOFF_BLOCKING_GATE')!r}, "
+        f"PROMOTION_READY={stage2_results.get('PROMOTION_READY')!r}, "
+        f"STAGE2_IOTA_MODE={stage2_results.get('STAGE2_IOTA_MODE')!r}, "
+        f"WOUT_OFF_SPEC={stage2_results.get('WOUT_OFF_SPEC')!r}, "
         f"BOOZER_BOOTABLE={stage2_results.get('BOOZER_BOOTABLE')!r}, "
+        f"BOOZER_TRUSTED={stage2_results.get('BOOZER_TRUSTED')!r}, "
         f"IOTA_NEAR_TARGET={stage2_results.get('IOTA_NEAR_TARGET')!r}, "
         f"IOTA_FEASIBLE={stage2_results.get('IOTA_FEASIBLE')!r}, "
         f"BOOTABILITY_REASON={stage2_results.get('BOOTABILITY_REASON')!r}, "
         f"BOOTABILITY_SOLVED_IOTA={stage2_results.get('BOOTABILITY_SOLVED_IOTA')!r}, "
         f"BOOTABILITY_TARGET_IOTA={stage2_results.get('BOOTABILITY_TARGET_IOTA')!r}."
     )
+
+
+def build_stage2_seed_production_handoff_fields(
+    *,
+    wout_off_spec: bool,
+) -> dict[str, object]:
+    if wout_off_spec is not True and wout_off_spec is not False:
+        raise ValueError("Production handoff requires explicit boolean WOUT_OFF_SPEC.")
+    return {
+        "WOUT_OFF_SPEC": wout_off_spec,
+        "SEED_ROLE": _PRODUCTION_HANDOFF_SEED_ROLE,
+        "DIAGNOSTIC_ONLY": False,
+        "PRODUCTION_HANDOFF_READY": True,
+        "HANDOFF_BLOCKING_GATE": None,
+        "PROMOTION_READY": True,
+    }
 
 
 def validate_stage2_seed_contract(stage2_results):

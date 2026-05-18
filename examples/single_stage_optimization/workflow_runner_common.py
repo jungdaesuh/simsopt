@@ -1334,6 +1334,11 @@ def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
     append_optional_flag(command, "--num-tf-coils", getattr(args, "num_tf_coils", None))
     append_optional_flag(
         command,
+        "--stage2-seed-role",
+        getattr(args, "stage2_seed_role", None),
+    )
+    append_optional_flag(
+        command,
         "--stage2-seed-tf-current-A",
         getattr(args, "stage2_seed_tf_current_A", None),
     )

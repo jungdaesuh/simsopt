@@ -24,6 +24,7 @@ EXAMPLE_ROOT = (
 WRAPPER_PATH = EXAMPLE_ROOT / "run_stage2_to_single_stage.py"
 BANANA_SCAN_PATH = EXAMPLE_ROOT / "run_banana_current_scan.py"
 STAGE2_SOLVER_PATH = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
+STAGE2_ALM_PATH = EXAMPLE_ROOT / "run_stage2_alm.py"
 if str(EXAMPLE_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_ROOT))
 
@@ -47,6 +48,10 @@ def load_banana_scan_module():
 
 def load_stage2_solver_module():
     return load_module(STAGE2_SOLVER_PATH, "banana_coil_solver")
+
+
+def load_stage2_alm_module():
+    return load_module(STAGE2_ALM_PATH, "run_stage2_alm")
 
 
 def load_hardware_schema_module():
@@ -127,6 +132,20 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "BOOTABILITY_ABS_IOTA_ERROR": 0.0,
         "BOOTABILITY_ERROR_TYPE": None,
         "BOOTABILITY_ERROR_MESSAGE": None,
+        "STAGE2_IOTA_MODE": "alm",
+        "BOOZER_SOLVE_SUCCESS": True,
+        "BOOZER_SELF_INTERSECTING": False,
+        "BOOZER_CONSTRAINED_RESIDUAL_NORM": 1.0e-14,
+        "BOOZER_TRUSTED": True,
+        "IOTA_OBJECTIVE_ACTIVE": True,
+        "BOOZER_TRUST_REASON": "trusted",
+        "BOOZER_TRUST_TOL": 1.0e-11,
+        "WOUT_OFF_SPEC": False,
+        "SEED_ROLE": "bootable_handoff",
+        "DIAGNOSTIC_ONLY": False,
+        "PRODUCTION_HANDOFF_READY": True,
+        "HANDOFF_BLOCKING_GATE": None,
+        "PROMOTION_READY": True,
     }
 
 
@@ -265,10 +284,61 @@ def _bootability_status(
         "BOOTABILITY_ABS_IOTA_ERROR": abs_iota_error,
         "BOOTABILITY_ERROR_TYPE": None,
         "BOOTABILITY_ERROR_MESSAGE": None,
+        "BOOZER_SOLVE_SUCCESS": bootable,
+        "BOOZER_SELF_INTERSECTING": self_intersecting,
+        "BOOZER_CONSTRAINED_RESIDUAL_NORM": 1.0e-14 if bootable else None,
+        "BOOZER_TRUSTED": bootable and self_intersecting is not True,
+        "IOTA_OBJECTIVE_ACTIVE": bootable,
+        "BOOZER_TRUST_REASON": (
+            handoff_module.BOOZER_TRUST_REASON_OK
+            if bootable and self_intersecting is not True
+            else handoff_module.BOOZER_TRUST_REASON_SOLVE_FAILED
+        ),
+        "BOOZER_TRUST_TOL": 1.0e-11 if bootable else None,
     }
 
 
 class HandoffSchemaTests(unittest.TestCase):
+    def test_validate_stage2_seed_bootability_contract_accepts_alm_only(self):
+        module = load_handoff_module()
+        payload = {
+            **_valid_stage2_contract_fields(),
+            "STAGE2_IOTA_MODE": "alm",
+            "BOOZER_TRUSTED": True,
+        }
+
+        module.validate_stage2_seed_bootability_contract(payload)
+
+        soft_payload = dict(payload)
+        soft_payload["STAGE2_IOTA_MODE"] = "soft"
+        with self.assertRaisesRegex(ValueError, "STAGE2_IOTA_MODE='soft'"):
+            module.validate_stage2_seed_bootability_contract(soft_payload)
+
+        offspec_wout_payload = dict(payload)
+        offspec_wout_payload["WOUT_OFF_SPEC"] = True
+        with self.assertRaisesRegex(ValueError, "WOUT_OFF_SPEC=True"):
+            module.validate_stage2_seed_bootability_contract(offspec_wout_payload)
+
+        repair_payload = dict(payload)
+        repair_payload.update(
+            {
+                "SEED_ROLE": "hardware_repair",
+                "DIAGNOSTIC_ONLY": True,
+                "PRODUCTION_HANDOFF_READY": False,
+                "HANDOFF_BLOCKING_GATE": "ALM_CONVERGED",
+                "PROMOTION_READY": False,
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "SEED_ROLE='hardware_repair'"):
+            module.validate_stage2_seed_bootability_contract(repair_payload)
+
+        missing_blocking_gate_payload = dict(payload)
+        missing_blocking_gate_payload.pop("HANDOFF_BLOCKING_GATE")
+        with self.assertRaisesRegex(ValueError, "HANDOFF_BLOCKING_GATE=None"):
+            module.validate_stage2_seed_bootability_contract(
+                missing_blocking_gate_payload
+            )
+
     def test_build_bootability_recovery_payload_fields_shapes_all_expected_keys(self):
         module = load_hardware_schema_module()
 
@@ -286,6 +356,13 @@ class HandoffSchemaTests(unittest.TestCase):
                 "BOOTABILITY_ABS_IOTA_ERROR": 0.02,
                 "BOOTABILITY_ERROR_TYPE": None,
                 "BOOTABILITY_ERROR_MESSAGE": None,
+                "BOOZER_SOLVE_SUCCESS": True,
+                "BOOZER_SELF_INTERSECTING": False,
+                "BOOZER_CONSTRAINED_RESIDUAL_NORM": 1.0e-14,
+                "BOOZER_TRUSTED": True,
+                "IOTA_OBJECTIVE_ACTIVE": True,
+                "BOOZER_TRUST_REASON": "trusted",
+                "BOOZER_TRUST_TOL": 1.0e-11,
             },
             stage2_bs_path="/tmp/stage2/biot_savart_opt.json",
             stage2_results_path="/tmp/stage2/results.json",
@@ -310,6 +387,13 @@ class HandoffSchemaTests(unittest.TestCase):
                 "BOOTABILITY_ABS_IOTA_ERROR",
                 "BOOTABILITY_ERROR_TYPE",
                 "BOOTABILITY_ERROR_MESSAGE",
+                "BOOZER_SOLVE_SUCCESS",
+                "BOOZER_SELF_INTERSECTING",
+                "BOOZER_CONSTRAINED_RESIDUAL_NORM",
+                "BOOZER_TRUSTED",
+                "IOTA_OBJECTIVE_ACTIVE",
+                "BOOZER_TRUST_REASON",
+                "BOOZER_TRUST_TOL",
                 "STAGE2_BS_PATH",
                 "STAGE2_RESULTS_PATH",
                 "RECOVERY_ATTEMPTED",
@@ -323,6 +407,8 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertFalse(payload["IOTA_FEASIBLE"])
         self.assertEqual(payload["BOOTABILITY_REASON"], "iota_mismatch")
         self.assertAlmostEqual(payload["BOOTABILITY_ABS_IOTA_ERROR"], 0.02)
+        self.assertTrue(payload["BOOZER_TRUSTED"])
+        self.assertEqual(payload["BOOZER_TRUST_REASON"], "trusted")
         self.assertEqual(payload["RECOVERY_ITERS"], 7)
         self.assertEqual(
             payload["RECOVERY_TERMINATION_REASON"],
@@ -1845,6 +1931,50 @@ class UnifiedRunnerTests(unittest.TestCase):
         )
         return stage2_bs_path, stage2_results_path
 
+    def test_stage2_alm_artifact_reuse_requires_wout_metadata(self):
+        module = load_stage2_alm_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stage2_bs_path = root / "biot_savart_opt.json"
+            stage2_results_path = root / "results.json"
+            stage2_results = {
+                "CONTRACT_SCHEMA_VERSION": 0,
+                "CONTRACT_HASH": None,
+                "PLASMA_SURF_PATH": str(root / "wout.nc"),
+                "TF_CURRENT_A": -8.0e4,
+            }
+
+            with patch.object(
+                module,
+                "resolve_stage2_artifact_path",
+                return_value=stage2_bs_path,
+            ), patch.object(
+                module,
+                "load_stage2_artifact_results",
+                return_value=(stage2_results_path, stage2_results),
+            ), patch.object(
+                module,
+                "upgrade_legacy_stage2_artifact_results",
+                side_effect=lambda payload: payload,
+            ), patch.object(
+                module,
+                "_backfill_missing_stage2_alm_solver_metadata",
+                side_effect=lambda payload, _config: payload,
+            ), patch.object(
+                module,
+                "_expected_stage2_artifact_metadata",
+                return_value={},
+            ), patch.object(module, "validate_stage2_artifact_metadata"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "missing WOUT convention metadata",
+                ):
+                    module.load_validated_stage2_artifact(
+                        SimpleNamespace(),
+                        constraint_metadata={},
+                    )
+
     def test_parse_args_accepts_seed_order_upgrade(self):
         wrapper = load_wrapper_module()
 
@@ -1879,6 +2009,99 @@ class UnifiedRunnerTests(unittest.TestCase):
             args.stage2_seed_surf_path,
             "/tmp/stage2/surf_opt_boozer_surface.json",
         )
+
+    def test_generated_stage2_uses_alm_iota_for_promotable_handoff(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--iota-target",
+                "0.2",
+                "--vol-target",
+                "0.13",
+            ]
+        )
+        stage2_args = wrapper.build_stage2_generation_args(
+            args,
+            output_root=Path("/tmp/stage2"),
+        )
+
+        self.assertEqual(stage2_args.constraint_method, "alm")
+        self.assertEqual(stage2_args.stage2_iota_mode, "alm")
+        self.assertAlmostEqual(stage2_args.stage2_iota_target, 0.2)
+        self.assertAlmostEqual(stage2_args.stage2_iota_vol_target, 0.13)
+
+    def test_production_handoff_payload_requires_explicit_wout_status(self):
+        wrapper = load_wrapper_module()
+        handoff = load_handoff_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bootability_status = _bootability_status(
+                handoff,
+                stage=handoff.BOOTABILITY_STAGE_PROBE,
+                reason=handoff.BOOTABILITY_REASON_OK,
+                bootable=True,
+                iota_feasible=True,
+                solved_iota=0.2,
+                self_intersecting=False,
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing WOUT_OFF_SPEC"):
+                wrapper.stage2_production_handoff_payload(
+                    bootability_status,
+                    source_stage2_results={"STAGE2_IOTA_MODE": "alm"},
+                    original_stage2_bs_path=root / "biot_savart_opt.json",
+                    original_stage2_results_path=root / "results.json",
+                    recovery_attempted=False,
+                    recovery_succeeded=False,
+                    recovery_iters=None,
+                    recovery_termination_reason=None,
+                    seed_source=wrapper.SEED_SOURCE_DIRECT_STAGE2_DONOR,
+                )
+
+    def test_production_handoff_stamp_validates_before_writing_results(self):
+        wrapper = load_wrapper_module()
+        handoff = load_handoff_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            results_path = root / "results.json"
+            original_results = {"ORIGINAL_RESULTS": True}
+            _write_json(results_path, original_results)
+            bootability_status = _bootability_status(
+                handoff,
+                stage=handoff.BOOTABILITY_STAGE_PROBE,
+                reason=handoff.BOOTABILITY_REASON_OK,
+                bootable=True,
+                iota_feasible=True,
+                solved_iota=0.2,
+                self_intersecting=False,
+            )
+
+            with self.assertRaisesRegex(ValueError, "WOUT_OFF_SPEC=True"):
+                wrapper.stamp_and_validate_stage2_production_handoff(
+                    results_path,
+                    bootability_status,
+                    source_stage2_results={
+                        "STAGE2_IOTA_MODE": "alm",
+                        "WOUT_OFF_SPEC": True,
+                    },
+                    original_stage2_bs_path=root / "biot_savart_opt.json",
+                    original_stage2_results_path=results_path,
+                    recovery_attempted=False,
+                    recovery_succeeded=False,
+                    recovery_iters=None,
+                    recovery_termination_reason=None,
+                    seed_source=wrapper.SEED_SOURCE_DIRECT_STAGE2_DONOR,
+                )
+
+            self.assertEqual(
+                json.loads(results_path.read_text(encoding="utf-8")),
+                original_results,
+            )
 
     def test_probe_only_writes_summary_with_bootability_status(self):
         wrapper = load_wrapper_module()
@@ -2091,6 +2314,10 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "demo.nc",
                 "--stage2-bs-path",
                 "/tmp/stage2/biot_savart_opt.json",
+                "--iota-target",
+                "0.2",
+                "--vol-target",
+                "0.13",
             ]
         )
 
@@ -2147,6 +2374,10 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "demo.nc",
                 "--stage2-bs-path",
                 "/tmp/stage2/biot_savart_opt.json",
+                "--iota-target",
+                "0.2",
+                "--vol-target",
+                "0.13",
             ]
         )
 
@@ -2171,9 +2402,48 @@ class UnifiedRunnerTests(unittest.TestCase):
             "alm",
         )
         self.assertEqual(
+            command[command.index("--stage2-iota-mode") + 1],
+            "alm",
+        )
+        self.assertEqual(
+            command[command.index("--stage2-iota-target") + 1],
+            "0.2",
+        )
+        self.assertEqual(
+            command[command.index("--stage2-iota-vol-target") + 1],
+            "0.13",
+        )
+        self.assertEqual(
             command[command.index("--maxiter") + 1],
             str(args.recovery_maxiter),
         )
+
+    def test_pre_boozer_stage2_repair_rejects_unsupported_finite_current_mode(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "FINITE_CURRENT_MODE='wataru_proxy_field'",
+        ):
+            wrapper.build_recovery_command(
+                args,
+                stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+                recovery_output_root=Path("/tmp/recovery"),
+                original_stage2_results={
+                    **_valid_stage2_contract_fields(),
+                    "TF_CURRENT_A": -8.0e4,
+                    "FINITE_CURRENT_MODE": "boozer_surrogate",
+                },
+            )
 
     def test_thresholded_recovery_command_forwards_stage2_seed_surface_path(self):
         wrapper = load_wrapper_module()
@@ -2291,7 +2561,8 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "PLASMA_SURF_FILENAME": "demo.nc",
                 "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
-                "FINITE_CURRENT_MODE": "boozer_surrogate",
+                "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                "STAGE2_IOTA_MODE": "report",
             }
 
             def fake_run_command(command, *, timeout_seconds, dry_run):
@@ -2302,7 +2573,19 @@ class UnifiedRunnerTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     command[command.index("--finite-current-mode") + 1],
-                    "boozer_surrogate",
+                    "wataru_proxy_field",
+                )
+                self.assertEqual(
+                    command[command.index("--stage2-iota-mode") + 1],
+                    "alm",
+                )
+                self.assertEqual(
+                    command[command.index("--stage2-iota-target") + 1],
+                    "0.2",
+                )
+                self.assertEqual(
+                    command[command.index("--stage2-iota-vol-target") + 1],
+                    "0.13",
                 )
                 repaired_bs_path.parent.mkdir(parents=True, exist_ok=True)
                 repaired_bs_path.write_text("{}", encoding="utf-8")
@@ -2310,6 +2593,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                     repaired_results_path,
                     {
                         **original_stage2_results,
+                        "STAGE2_IOTA_MODE": "alm",
                         "iterations": 5,
                     },
                 )
@@ -2351,6 +2635,10 @@ class UnifiedRunnerTests(unittest.TestCase):
                     str(stage2_bs_path),
                     "--output-root",
                     str(root / "outputs"),
+                    "--iota-target",
+                    "0.2",
+                    "--vol-target",
+                    "0.13",
                 ]
             )
             repaired_bs_path = wrapper.resolve_stage2_artifact_path(
@@ -2384,6 +2672,18 @@ class UnifiedRunnerTests(unittest.TestCase):
             self.assertEqual(payload["result_source"], wrapper.RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM)
             self.assertEqual(payload["recovered_bs_path"], str(repaired_bs_path))
             self.assertIsNone(payload["warm_start_surface_stem"])
+            self.assertEqual(payload["results"]["SEED_ROLE"], "bootable_handoff")
+            self.assertEqual(payload["results"]["STAGE2_IOTA_MODE"], "alm")
+            self.assertFalse(payload["results"]["WOUT_OFF_SPEC"])
+            self.assertFalse(payload["results"]["DIAGNOSTIC_ONLY"])
+            self.assertTrue(payload["results"]["PRODUCTION_HANDOFF_READY"])
+            self.assertIsNone(payload["results"]["HANDOFF_BLOCKING_GATE"])
+            self.assertTrue(payload["results"]["PROMOTION_READY"])
+            self.assertEqual(
+                payload["results"]["UNIFIED_SEED_SOURCE"],
+                wrapper.SEED_SOURCE_RECOVERED_STAGE2_DONOR,
+            )
+            self.assertTrue(payload["results"]["RECOVERY_SUCCEEDED"])
             self.assertEqual(len(captured_probe_calls), 1)
             probe_call = captured_probe_calls[0]
             self.assertEqual(probe_call["stage"], handoff.BOOTABILITY_STAGE_RECOVERY)
@@ -2391,7 +2691,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             self.assertEqual(probe_call["stage2_results"]["iterations"], 5)
             self.assertIsNone(probe_call["warm_start_boozer_surface_path"])
 
-    def test_full_mode_accepts_bootable_iota_off_target_without_recovery(self):
+    def test_full_mode_rejects_bootable_iota_off_target_before_optimizer(self):
         wrapper = load_wrapper_module()
         handoff = load_handoff_module()
 
@@ -2454,44 +2754,20 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "run_full_single_stage",
                 side_effect=fake_full_run,
             ) as full_mock:
-                result = wrapper.main(
-                    [
-                        "--plasma-surf-filename",
-                        "demo.nc",
-                        "--stage2-bs-path",
-                        str(stage2_bs_path),
-                        "--output-root",
-                        str(output_root),
-                    ]
-                )
+                with self.assertRaisesRegex(ValueError, "IOTA_NEAR_TARGET=False"):
+                    wrapper.main(
+                        [
+                            "--plasma-surf-filename",
+                            "demo.nc",
+                            "--stage2-bs-path",
+                            str(stage2_bs_path),
+                            "--output-root",
+                            str(output_root),
+                        ]
+                    )
 
-            self.assertEqual(result, 0)
             recovery_mock.assert_not_called()
-            full_mock.assert_called_once()
-            final_results = json.loads(
-                (full_case_dir / "results.json").read_text(encoding="utf-8")
-            )
-            expected_stage2_bs_path = str(stage2_bs_path.resolve())
-            expected_stage2_results_path = str(stage2_results_path.resolve())
-            self.assertTrue(final_results["BOOZER_BOOTABLE"])
-            self.assertFalse(final_results["IOTA_NEAR_TARGET"])
-            self.assertFalse(final_results["IOTA_FEASIBLE"])
-            self.assertFalse(final_results["RECOVERY_ATTEMPTED"])
-            self.assertFalse(final_results["RECOVERY_SUCCEEDED"])
-            self.assertIsNone(final_results["RECOVERY_ITERS"])
-            self.assertIsNone(final_results["RECOVERY_TERMINATION_REASON"])
-            self.assertEqual(
-                final_results["STAGE2_BS_PATH"],
-                expected_stage2_bs_path,
-            )
-            self.assertEqual(
-                final_results["STAGE2_RESULTS_PATH"],
-                expected_stage2_results_path,
-            )
-            self.assertEqual(
-                final_results["UNIFIED_SEED_SOURCE"],
-                wrapper.SEED_SOURCE_DIRECT_STAGE2_DONOR,
-            )
+            full_mock.assert_not_called()
 
     def test_recovery_only_conflict_with_skip_recovery_is_rejected(self):
         wrapper = load_wrapper_module()

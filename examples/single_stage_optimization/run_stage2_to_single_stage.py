@@ -24,8 +24,10 @@ from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
     BOOTABILITY_STAGE_PROBE,
     BOOTABILITY_STAGE_RECOVERY,
     bootability_passes,
+    build_stage2_seed_production_handoff_fields,
     probe_stage2_seed_bootability,
     resolve_stage2_finite_current_mode,
+    validate_stage2_seed_bootability_contract,
 )
 from workflow_runner_common import (  # noqa: E402
     Stage2ArtifactConfig,
@@ -73,7 +75,7 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run the unified Stage 2 -> bootability probe -> recovery -> single-stage "
-            "workflow without merging Boozer solves into the Stage 2 hot loop."
+            "workflow with fail-closed production handoff checks."
         ),
         parents=[goal_mode_runner.build_parser(add_help=False)],
         add_help=add_help,
@@ -315,11 +317,11 @@ def build_stage2_generation_args(
         toroidal_flux=args.stage2_toroidal_flux,
         basin_seed=args.stage2_basin_seed,
         constraint_method="alm",
-        stage2_iota_mode="off",
-        stage2_iota_target=None,
+        stage2_iota_mode="alm",
+        stage2_iota_target=resolve_single_stage_iota_target_arg(args),
         stage2_iota_tolerance=5.0e-3,
         stage2_iota_weight=1.0,
-        stage2_iota_vol_target=0.10,
+        stage2_iota_vol_target=args.vol_target,
         stage2_iota_constraint_weight=1.0,
         stage2_iota_num_tf_coils=20,
         stage2_iota_nphi=91,
@@ -509,6 +511,16 @@ def _required_stage2_str(stage2_results: dict, key: str) -> str:
     return str(value)
 
 
+def _required_pre_boozer_stage2_finite_current_mode(stage2_results: dict) -> str:
+    finite_current_mode = _required_stage2_str(stage2_results, "FINITE_CURRENT_MODE")
+    if finite_current_mode != "wataru_proxy_field":
+        raise ValueError(
+            "Pre-Boozer Stage 2 repair requires "
+            "FINITE_CURRENT_MODE='wataru_proxy_field'."
+        )
+    return finite_current_mode
+
+
 def _stage2_float_override(
     explicit_value: float | None,
     stage2_results: dict,
@@ -604,9 +616,8 @@ def build_pre_boozer_stage2_repair_config(
             if args.length_target is not None
             else _required_stage2_float(original_stage2_results, "LENGTH_TARGET")
         ),
-        finite_current_mode=_required_stage2_str(
+        finite_current_mode=_required_pre_boozer_stage2_finite_current_mode(
             original_stage2_results,
-            "FINITE_CURRENT_MODE",
         ),
         proxy_plasma_current_A=_required_stage2_float(
             original_stage2_results,
@@ -614,6 +625,17 @@ def build_pre_boozer_stage2_repair_config(
         ),
         vf_current_A=_required_stage2_float(original_stage2_results, "VF_CURRENT_A"),
         vf_template_path=original_stage2_results.get("VF_TEMPLATE_PATH"),
+        stage2_iota_mode="alm",
+        stage2_iota_target=resolve_single_stage_iota_target_arg(args),
+        stage2_iota_tolerance=5.0e-3,
+        stage2_iota_weight=1.0,
+        stage2_iota_vol_target=args.vol_target,
+        stage2_iota_constraint_weight=1.0,
+        stage2_iota_num_tf_coils=20,
+        stage2_iota_nphi=91,
+        stage2_iota_ntheta=32,
+        stage2_iota_mpol=8,
+        stage2_iota_ntor=6,
     )
 
 
@@ -838,24 +860,38 @@ def run_recovery_stage(
     recovery_termination_reason = (
         "bootable" if recovery_succeeded else "not_bootable_after_budget"
     )
-    handoff_payload = build_bootability_recovery_payload_fields(
-        recovery_probe,
-        stage2_bs_path=str(original_stage2_bs_path),
-        stage2_results_path=str(original_stage2_results_path),
-        recovery_attempted=True,
-        recovery_succeeded=recovery_succeeded,
-        recovery_iters=recovery_iters_value,
-        recovery_termination_reason=recovery_termination_reason,
-    )
-    handoff_payload["UNIFIED_SEED_SOURCE"] = SEED_SOURCE_RECOVERED_STAGE2_DONOR
-    update_results_json(results_path, handoff_payload)
+    if recovery_succeeded:
+        results = stamp_and_validate_stage2_production_handoff(
+            results_path,
+            recovery_probe,
+            source_stage2_results=original_stage2_results,
+            original_stage2_bs_path=original_stage2_bs_path,
+            original_stage2_results_path=original_stage2_results_path,
+            recovery_attempted=True,
+            recovery_succeeded=True,
+            recovery_iters=recovery_iters_value,
+            recovery_termination_reason=recovery_termination_reason,
+            seed_source=SEED_SOURCE_RECOVERED_STAGE2_DONOR,
+        )
+    else:
+        handoff_payload = build_bootability_recovery_payload_fields(
+            recovery_probe,
+            stage2_bs_path=str(original_stage2_bs_path),
+            stage2_results_path=str(original_stage2_results_path),
+            recovery_attempted=True,
+            recovery_succeeded=False,
+            recovery_iters=recovery_iters_value,
+            recovery_termination_reason=recovery_termination_reason,
+        )
+        handoff_payload["UNIFIED_SEED_SOURCE"] = SEED_SOURCE_RECOVERED_STAGE2_DONOR
+        results = update_results_json(results_path, handoff_payload)
     return {
         "status": "completed",
         "command": command,
         "output_root": str(recovery_output_root),
         "results_path": str(results_path),
         "result_source": result_source,
-        "results": load_json(results_path),
+        "results": results,
         "recovered_bs_path": str(recovered_bs_path),
         "warm_start_surface_stem": str(artifact_bundle["surface_stem"]),
         "recovery_probe": recovery_probe,
@@ -928,24 +964,39 @@ def run_pre_boozer_stage2_repair(
     recovery_termination_reason = (
         "bootable" if recovery_succeeded else "not_bootable_after_budget"
     )
-    handoff_payload = build_bootability_recovery_payload_fields(
-        recovery_probe,
-        stage2_bs_path=str(original_stage2_bs_path),
-        stage2_results_path=str(original_stage2_results_path),
-        recovery_attempted=True,
-        recovery_succeeded=recovery_succeeded,
-        recovery_iters=recovery_iters_value,
-        recovery_termination_reason=recovery_termination_reason,
-    )
-    handoff_payload["UNIFIED_SEED_SOURCE"] = SEED_SOURCE_RECOVERED_STAGE2_DONOR
-    update_results_json(results_path, handoff_payload)
+    if recovery_succeeded:
+        results = stamp_and_validate_stage2_production_handoff(
+            results_path,
+            recovery_probe,
+            source_stage2_results=original_stage2_results,
+            iota_mode_stage2_results=results,
+            original_stage2_bs_path=original_stage2_bs_path,
+            original_stage2_results_path=original_stage2_results_path,
+            recovery_attempted=True,
+            recovery_succeeded=True,
+            recovery_iters=recovery_iters_value,
+            recovery_termination_reason=recovery_termination_reason,
+            seed_source=SEED_SOURCE_RECOVERED_STAGE2_DONOR,
+        )
+    else:
+        handoff_payload = build_bootability_recovery_payload_fields(
+            recovery_probe,
+            stage2_bs_path=str(original_stage2_bs_path),
+            stage2_results_path=str(original_stage2_results_path),
+            recovery_attempted=True,
+            recovery_succeeded=False,
+            recovery_iters=recovery_iters_value,
+            recovery_termination_reason=recovery_termination_reason,
+        )
+        handoff_payload["UNIFIED_SEED_SOURCE"] = SEED_SOURCE_RECOVERED_STAGE2_DONOR
+        results = update_results_json(results_path, handoff_payload)
     return {
         "status": "completed",
         "command": command,
         "output_root": str(recovery_output_root),
         "results_path": str(results_path),
         "result_source": RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM,
-        "results": load_json(results_path),
+        "results": results,
         "recovered_bs_path": str(recovered_bs_path),
         "warm_start_surface_stem": None,
         "recovery_probe": recovery_probe,
@@ -967,6 +1018,89 @@ def _with_warm_start_surface_stem(
     )
 
 
+def _with_stage2_seed_role(
+    args: argparse.Namespace,
+    stage2_seed_role: str,
+) -> argparse.Namespace:
+    return SimpleNamespace(**vars(args), stage2_seed_role=stage2_seed_role)
+
+
+def _wout_off_spec_for_handoff(stage2_results: dict) -> bool:
+    if "WOUT_OFF_SPEC" not in stage2_results:
+        raise ValueError("Source Stage 2 handoff results missing WOUT_OFF_SPEC.")
+    wout_off_spec = stage2_results["WOUT_OFF_SPEC"]
+    if wout_off_spec is not True and wout_off_spec is not False:
+        raise ValueError("Source Stage 2 handoff WOUT_OFF_SPEC must be boolean.")
+    return wout_off_spec
+
+
+def stage2_production_handoff_payload(
+    bootability_status: dict[str, object],
+    *,
+    source_stage2_results: dict,
+    iota_mode_stage2_results: dict | None = None,
+    original_stage2_bs_path: Path,
+    original_stage2_results_path: Path,
+    recovery_attempted: bool,
+    recovery_succeeded: bool,
+    recovery_iters: int | None,
+    recovery_termination_reason: str | None,
+    seed_source: str,
+) -> dict[str, object]:
+    payload = handoff_results_payload(
+        bootability_status,
+        original_stage2_bs_path=original_stage2_bs_path,
+        original_stage2_results_path=original_stage2_results_path,
+        recovery_attempted=recovery_attempted,
+        recovery_succeeded=recovery_succeeded,
+        recovery_iters=recovery_iters,
+        recovery_termination_reason=recovery_termination_reason,
+        seed_source=seed_source,
+    )
+    payload.update(
+        build_stage2_seed_production_handoff_fields(
+            wout_off_spec=_wout_off_spec_for_handoff(source_stage2_results),
+        )
+    )
+    stage2_iota_source = iota_mode_stage2_results or source_stage2_results
+    stage2_iota_mode = stage2_iota_source.get("STAGE2_IOTA_MODE")
+    if stage2_iota_mode is not None:
+        payload["STAGE2_IOTA_MODE"] = stage2_iota_mode
+    return payload
+
+
+def stamp_and_validate_stage2_production_handoff(
+    results_path: Path,
+    bootability_status: dict[str, object],
+    *,
+    source_stage2_results: dict,
+    iota_mode_stage2_results: dict | None = None,
+    original_stage2_bs_path: Path,
+    original_stage2_results_path: Path,
+    recovery_attempted: bool,
+    recovery_succeeded: bool,
+    recovery_iters: int | None,
+    recovery_termination_reason: str | None,
+    seed_source: str,
+) -> dict:
+    payload = stage2_production_handoff_payload(
+        bootability_status,
+        source_stage2_results=source_stage2_results,
+        iota_mode_stage2_results=iota_mode_stage2_results,
+        original_stage2_bs_path=original_stage2_bs_path,
+        original_stage2_results_path=original_stage2_results_path,
+        recovery_attempted=recovery_attempted,
+        recovery_succeeded=recovery_succeeded,
+        recovery_iters=recovery_iters,
+        recovery_termination_reason=recovery_termination_reason,
+        seed_source=seed_source,
+    )
+    results = {**load_json(results_path), **payload}
+    validate_stage2_seed_bootability_contract(results)
+    write_json(results_path, results)
+    return results
+
+
 def build_full_single_stage_command(
     args: argparse.Namespace,
     *,
@@ -974,7 +1108,11 @@ def build_full_single_stage_command(
     full_output_root: Path,
     warm_start_surface_stem: Path | None = None,
 ) -> list[str]:
-    goal_mode_args = _with_warm_start_surface_stem(args, warm_start_surface_stem)
+    goal_mode_args = _with_stage2_seed_role(args, "handoff")
+    goal_mode_args = _with_warm_start_surface_stem(
+        goal_mode_args,
+        warm_start_surface_stem,
+    )
     command = goal_mode_runner.build_single_stage_goal_mode_command(
         goal_mode_args,
         goal_mode=args.goal_mode,
@@ -1004,7 +1142,11 @@ def run_full_single_stage(
     if args.dry_run:
         return full_payload
     goal_mode_output_root = full_output_root
-    goal_mode_args = _with_warm_start_surface_stem(args, warm_start_surface_stem)
+    goal_mode_args = _with_stage2_seed_role(args, "handoff")
+    goal_mode_args = _with_warm_start_surface_stem(
+        goal_mode_args,
+        warm_start_surface_stem,
+    )
     result_payload = goal_mode_runner.run_goal_mode_case(
         goal_mode_args,
         goal_mode=args.goal_mode,
@@ -1212,6 +1354,30 @@ def main(argv: list[str] | None = None) -> int:
         )
         write_json(summary_path, summary)
         return 0
+
+    if not args.dry_run:
+        handoff_results_path = (
+            Path(recovery_payload["results_path"])
+            if recovery_succeeded and recovery_payload is not None
+            else original_stage2_results_path
+        )
+        handoff_source_results = (
+            recovery_payload["results"]
+            if recovery_succeeded and recovery_payload is not None
+            else stage2_results
+        )
+        stamp_and_validate_stage2_production_handoff(
+            handoff_results_path,
+            handoff_bootability,
+            source_stage2_results=handoff_source_results,
+            original_stage2_bs_path=original_stage2_bs_path,
+            original_stage2_results_path=original_stage2_results_path,
+            recovery_attempted=recovery_attempted,
+            recovery_succeeded=recovery_succeeded,
+            recovery_iters=recovery_iters,
+            recovery_termination_reason=recovery_termination_reason,
+            seed_source=seed_source,
+        )
 
     full_output_root = output_root / "full"
     full_output_root.mkdir(parents=True, exist_ok=True)

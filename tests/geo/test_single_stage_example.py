@@ -9425,6 +9425,12 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "FINAL_LCFS_MINOR_RADIUS_M": (
                 hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M
             ),
+            "WOUT_OFF_SPEC": False,
+            "SEED_ROLE": "bootable_handoff",
+            "DIAGNOSTIC_ONLY": False,
+            "PRODUCTION_HANDOFF_READY": True,
+            "HANDOFF_BLOCKING_GATE": None,
+            "PROMOTION_READY": True,
         }
         stage2_results.update(overrides)
         return module.upgrade_legacy_stage2_artifact_results(
@@ -9610,6 +9616,39 @@ class CurrentBaselineContractTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "not single-stage bootable"):
+            module.validate_stage2_seed_bootability_contract(stage2_results)
+
+    def test_validate_stage2_seed_bootability_contract_accepts_live_trusted_handoff(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            STAGE2_IOTA_MODE="alm",
+            BOOZER_BOOTABLE=True,
+            BOOZER_TRUSTED=True,
+            IOTA_NEAR_TARGET=True,
+            IOTA_FEASIBLE=True,
+            BOOTABILITY_REASON="ok",
+            BOOTABILITY_SOLVED_IOTA=0.16,
+            BOOTABILITY_TARGET_IOTA=0.16,
+        )
+
+        module.validate_stage2_seed_bootability_contract(stage2_results)
+
+    def test_validate_stage2_seed_bootability_contract_rejects_report_only_handoff(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            STAGE2_IOTA_MODE="report",
+            BOOZER_BOOTABLE=True,
+            BOOZER_TRUSTED=True,
+            IOTA_NEAR_TARGET=True,
+            IOTA_FEASIBLE=True,
+            BOOTABILITY_REASON="ok",
+            BOOTABILITY_SOLVED_IOTA=0.16,
+            BOOTABILITY_TARGET_IOTA=0.16,
+        )
+
+        with self.assertRaisesRegex(ValueError, "STAGE2_IOTA_MODE='report'"):
             module.validate_stage2_seed_bootability_contract(stage2_results)
 
     def test_resolve_single_stage_banana_surf_radius_defaults_to_loaded_artifact(self):

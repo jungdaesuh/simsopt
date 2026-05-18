@@ -52,6 +52,9 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     TF_CURRENT_CW_DEFAULT_A,
     validate_major_radius,
 )
+from banana_opt.wout_convention import (  # noqa: E402
+    validate_wout_convention_artifact_fields,
+)
 from banana_opt.constraint_contract import (  # noqa: E402
     build_constraint_metadata,
     resolve_constraint_contract_from_wire_names,
@@ -726,6 +729,10 @@ def load_validated_stage2_artifact(
         expected_metadata=_expected_stage2_artifact_metadata(config),
         owner_label="run_stage2_alm.py",
         experiment_family="generic Stage 2 ALM",
+    )
+    validate_wout_convention_artifact_fields(
+        stage2_results_path=stage2_results_path,
+        stage2_artifact_results=stage2_results,
     )
     if not _artifact_uses_legacy_constraint_metadata(stage2_results):
         validate_stage2_artifact_metadata(

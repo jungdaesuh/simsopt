@@ -39,6 +39,7 @@ f90wrap_*.f90
 modules/VMEC/vmec.py
 modules/VMEC/vmec_pkg/
 wout*
+!examples/single_stage_optimization/banana_opt/wout_convention.py
 mercier*
 jxbout*
 parvmecinfo.txt
