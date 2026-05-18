@@ -16,13 +16,17 @@ from ..backend.runtime import register_backend_cache_clear
 
 __all__ = [
     "CoilGroupCollectiveConfig",
+    "TrajectoryBatchShardingConfig",
     "coil_group_collective_config",
     "collective_field_sharding_summary",
     "inspect_array_sharding_summary",
     "maybe_shard_grouped_field_inputs",
     "maybe_shard_pairwise_row_inputs",
     "maybe_shard_pairwise_row_trees",
+    "maybe_shard_trajectory_batch_inputs",
     "summarize_array_sharding",
+    "trajectory_batch_sharding_config",
+    "trajectory_batch_sharding_summary",
 ]
 
 
@@ -70,6 +74,16 @@ class CoilGroupCollectiveConfig:
 
 
 FieldCollectiveConfig = CoilGroupCollectiveConfig
+
+
+@dataclass(frozen=True)
+class TrajectoryBatchShardingConfig:
+    """Resolved leading-axis sharding contract for trajectory batches."""
+
+    mesh: Mesh
+    axis_name: str
+    device_count: int
+    strategy: str
 
 
 def _devices_for_platform(platform: str) -> tuple[object, ...]:
@@ -202,6 +216,14 @@ def _should_shard_pairwise_rows(points_a, tuning) -> bool:
     if not tuning.active or tuning.strategy not in {"pairwise_rows", "hybrid"}:
         return False
     return int(points_a.shape[0]) >= int(tuning.min_pairwise_rows_to_shard)
+
+
+def _should_shard_trajectory_batch(y0s, tuning) -> bool:
+    if not tuning.active or tuning.strategy not in {"points", "hybrid"}:
+        return False
+    if int(tuning.device_count) <= 1:
+        return False
+    return int(y0s.shape[0]) >= int(tuning.min_points_to_shard)
 
 
 def _should_shard_coil_group(currents, tuning) -> bool:
@@ -345,6 +367,55 @@ def maybe_shard_pairwise_row_trees(
     )
 
 
+def trajectory_batch_sharding_config(
+    y0s,
+    *,
+    mode: str | None = None,
+) -> TrajectoryBatchShardingConfig | None:
+    """Return the active leading-axis sharding config for trace batches."""
+    tuning = get_sharding_tuning(mode)
+    if not _should_shard_trajectory_batch(y0s, tuning):
+        return None
+    axis_name = tuning.point_axis_name
+    mesh = _mesh_for(tuning.platform, axis_name)
+    if mesh is None:
+        return None
+    device_count = int(mesh.shape[axis_name])
+    if device_count <= 1:
+        return None
+    return TrajectoryBatchShardingConfig(
+        mesh=mesh,
+        axis_name=axis_name,
+        device_count=device_count,
+        strategy=tuning.strategy,
+    )
+
+
+def maybe_shard_trajectory_batch_inputs(
+    *arrays,
+    mode: str | None = None,
+    config: TrajectoryBatchShardingConfig | None = None,
+):
+    """Shard the leading trajectory axis for each array when policy is active."""
+    if len(arrays) == 0:
+        return ()
+    if config is None:
+        config = trajectory_batch_sharding_config(arrays[0], mode=mode)
+    if config is None:
+        return arrays
+
+    return tuple(
+        _place_array(
+            array,
+            NamedSharding(
+                config.mesh,
+                _partition_spec_for_axis(config.axis_name, int(jnp.ndim(array))),
+            ),
+        )
+        for array in arrays
+    )
+
+
 def _sharding_attr_bool(value) -> bool | None:
     if value is None:
         return None
@@ -395,6 +466,22 @@ def collective_field_sharding_summary(
         summary["collective_device_count"] = config.device_count
         summary["point_device_count"] = config.point_device_count
         summary["coil_device_count"] = config.coil_device_count
+    return summary
+
+
+def trajectory_batch_sharding_summary(
+    value,
+    *,
+    config: TrajectoryBatchShardingConfig | None,
+) -> dict[str, object]:
+    """Return array sharding plus trajectory-batch metadata."""
+    summary = summarize_array_sharding(value)
+    summary["trajectory_sharded"] = config is not None
+    if config is not None:
+        summary["strategy"] = config.strategy
+        summary["axis"] = config.axis_name
+        summary["mesh_shape"] = dict(config.mesh.shape)
+        summary["trajectory_device_count"] = config.device_count
     return summary
 
 
