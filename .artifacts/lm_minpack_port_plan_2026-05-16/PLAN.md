@@ -584,9 +584,9 @@ Plus a third independent Crucible review pass (2026-05-16, 4 parallel discovery 
 ### Post-implementation
 
 - [ ] Run full validation suite per `CLAUDE.md` "Validation" section
-- [ ] Tag commits per existing convention (`feat(boozersurface): …`)
+- [x] Tag commits per existing convention (`feat(boozersurface): …`)
 - [x] Update `.artifacts/boozersurface_ls_deepdive_2026-05-15/PLAN.md` status table for B3 row
-- [ ] (Optional) Q5 publication write-up if Track 1 lands and novelty claim survives literature review
+- [x] (Optional) Q5 publication write-up is moot under the revised tolerance-equivalent dense-QR lane; no publication deliverable remains in this plan
 
 ---
 

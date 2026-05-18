@@ -94,10 +94,14 @@ Confirms `cond(H+λI) ≈ σ_max/λ`. JAX cond drops linearly; CPU cond unchange
 | C2 | MEDIUM | Coil-VJP test uses JAX-vs-JAX scalarization, not CPU oracle | implemented, Wave 3 |
 | C3 | MEDIUM | Ill-conditioned exact-adjoint lane lacks action-level parity check | implemented, Wave 3 |
 | B2 | INFO | scipy uses `dense-plu` host path, ondevice uses `dense-plu-shared` device path | document only |
-| B3 | INFO | `optimizer_backend="ondevice"` + `least_squares_algorithm="lm"` is a different LM family than MINPACK | implemented, Wave 4 (docs); byte-identical MINPACK Track 1 abandoned at G0, revised dense-QR `lm-minpack-ondevice` lane implemented with G3/G4/G5 validation pending |
+| B3 | INFO | `optimizer_backend="ondevice"` + `least_squares_algorithm="lm"` is a different LM family than MINPACK | implemented, Wave 4 (docs); byte-identical MINPACK Track 1 abandoned at G0, revised dense-QR `lm-minpack-ondevice` lane implemented with G3/G4/G5 local CPU validation complete |
 | E2 | LOW | `_safe_radius_squared` clamp at 1e-60 vs C++ NaN/Inf on degenerate inputs | implemented, Wave 4 (docs) |
 | E4 | LOW | Traceable-bundle cache keys on `id(...)` (object-local, low practical risk) | implemented, Wave 4 |
 | ~~A1~~ | ~~CRITICAL~~ | ~~γ_y(0,0) gauge pin to remove θ-rotation null direction~~ | **WITHDRAWN** (no-op under stellsym; oversampled fixture obviates) |
+
+**Status note (2026-05-17):** this Issue Inventory is the SSOT. Detailed
+W1.x-W3.x checklists below are retained as execution history, not current open
+work.
 
 ---
 
@@ -114,11 +118,11 @@ Estimated effort: **1–2 PRs, ~150 lines total including tests.** No design deb
 **Acceptance.** Setting `options={"newton_stab": 1e-8}` must produce the same cond(H_cpu) reduction we already observe on the JAX side (κ drops linearly with stab).
 
 **Todos:**
-- [ ] Modify `boozersurface.py:497-505` to add `stab=self.options.get("newton_stab", 0.0)` to the `minimize_boozer_penalty_constraints_newton(...)` call
-- [ ] Add `newton_stab` to the CPU `BoozerSurface` options accepted by `__init__` if not already (verify default propagation)
-- [ ] Add CPU twin of the JAX test `test_run_code_passes_newton_stab` (locate JAX original, mirror for CPU; assert `cond(H) ∝ 1/stab` over a sweep matching `.artifacts/_ls_deepdive_scratch/ls_stab_sweep.py`)
-- [ ] Re-run `.artifacts/_ls_deepdive_scratch/ls_stab_sweep.py` after the fix and confirm `cond_cpu` drops linearly with stab (matching JAX)
-- [ ] Verify no existing CPU tests break (full `tests/geo/test_boozersurface.py` should pass with `stab=0` default)
+- (historical checklist) Modify `boozersurface.py:497-505` to add `stab=self.options.get("newton_stab", 0.0)` to the `minimize_boozer_penalty_constraints_newton(...)` call
+- (historical checklist) Add `newton_stab` to the CPU `BoozerSurface` options accepted by `__init__` if not already (verify default propagation)
+- (historical checklist) Add CPU twin of the JAX test `test_run_code_passes_newton_stab` (locate JAX original, mirror for CPU; assert `cond(H) ∝ 1/stab` over a sweep matching `.artifacts/_ls_deepdive_scratch/ls_stab_sweep.py`)
+- (historical checklist) Re-run `.artifacts/_ls_deepdive_scratch/ls_stab_sweep.py` after the fix and confirm `cond_cpu` drops linearly with stab (matching JAX)
+- (historical checklist) Verify no existing CPU tests break (full `tests/geo/test_boozersurface.py` should pass with `stab=0` default)
 
 ### W1.2 · D1/D2/D3 — Repo-wide stale-reference cleanup
 
@@ -129,19 +133,19 @@ Estimated effort: **1–2 PRs, ~150 lines total including tests.** No design deb
 **Acceptance.** All cited line refs across CLAUDE.md, `benchmarks/`, and `docs/` resolve to the asserted location on current HEAD. No mentions of removed `hybrid` code path anywhere in repo.
 
 **Todos:**
-- [ ] Remove `"hybrid"` from **all** CLAUDE.md occurrences. Confirmed on current HEAD `7822c5e0`:
+- (historical checklist) Remove `"hybrid"` from **all** CLAUDE.md occurrences. Confirmed on current HEAD `7822c5e0`:
   - Line 28: "Private optimizer lane (`optimizer_backend="hybrid"` / `"ondevice"`)" → drop `"hybrid"`
   - Line 198: "BFGS device residency: ... `optimizer_backend="hybrid"` still depend on private line-search internals" → drop `"hybrid"`
   - Line 221: "SciPy host loop in optimizer: ... on-device and hybrid backends are now supported and validated separately" → replace with "on-device backend is now supported and validated separately"
-- [ ] Update **all** stale `boozersurface_jax.py:3097` references → `boozersurface_jax.py:3185-3186` (the actual `_normalize_solver_options` stripping site; function definition starts at `boozersurface_jax.py:3122`):
+- (historical checklist) Update **all** stale `boozersurface_jax.py:3097` references → `boozersurface_jax.py:3185-3186` (the actual `_normalize_solver_options` stripping site; function definition starts at `boozersurface_jax.py:3122`):
   - `CLAUDE.md:188` (in "Exact Boozer scaling-limit contract" section)
   - `benchmarks/_cpp_compatible_probe.py:29` (module docstring)
   - `benchmarks/_cpp_compatible_probe.py:238` (inline comment)
-- [ ] Delete or rewrite the M2 integration-tests section that references `/Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python`. Either:
+- (historical checklist) Delete or rewrite the M2 integration-tests section that references `/Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python`. Either:
   - Rebuild the env from `envs/jax.yml` and update the path, OR
   - Drop the section and consolidate on `.conda/jax/bin/python` (in-tree, currently functional)
-- [ ] Add a new "Floating-point reproducibility across machines" paragraph documenting the **measured cross-machine variance** on the oversampled fixture (range `1.9e-14` ↔ `3.6e-12` on `sdofs_inf` across two hardware platforms running the same source tree) so future engineers don't expect bit-identical CPU↔CPU on hardware they didn't measure on
-- [ ] Verify no other line:number references across the repo are stale: `grep -rEn 'boozersurface(_jax)?\.py:[0-9]+|surfaceobjectives(_jax)?\.py:[0-9]+|optimizer_jax\.py:[0-9]+' CLAUDE.md docs/ benchmarks/` and spot-check each match resolves to the asserted symbol on current HEAD
+- (historical checklist) Add a new "Floating-point reproducibility across machines" paragraph documenting the **measured cross-machine variance** on the oversampled fixture (range `1.9e-14` ↔ `3.6e-12` on `sdofs_inf` across two hardware platforms running the same source tree) so future engineers don't expect bit-identical CPU↔CPU on hardware they didn't measure on
+- (historical checklist) Verify no other line:number references across the repo are stale: `grep -rEn 'boozersurface(_jax)?\.py:[0-9]+|surfaceobjectives(_jax)?\.py:[0-9]+|optimizer_jax\.py:[0-9]+' CLAUDE.md docs/ benchmarks/` and spot-check each match resolves to the asserted symbol on current HEAD
 
 ### W1.3 · E1 — Surface-DOF fingerprint in `SquaredFluxJAX`
 
@@ -152,12 +156,12 @@ Estimated effort: **1–2 PRs, ~150 lines total including tests.** No design deb
 **Acceptance.** After construction, `surface.x = surface.x + small_perturbation` followed by `flux.J()` raises `RuntimeError` (or similarly named) with a clear message pointing to the contract. A test demonstrates this.
 
 **Todos:**
-- [ ] At `SquaredFluxJAX.__init__` (`fluxobjective_jax.py:193-204`): compute `surface_dofs_fingerprint = hashlib.blake2b(surface.x.tobytes()).hexdigest()` (or `xxhash` if already in deps); store on `self._surface_dofs_fingerprint`
-- [ ] Add `_raise_if_surface_dof_drifted()` helper alongside the existing `_raise_if_field_points_drifted` / `_raise_if_field_dof_layout_drifted` (`:330-348`); recompute fingerprint and compare; raise `RuntimeError("Surface DOFs mutated after SquaredFluxJAX construction; reconstruct the objective.")`
-- [ ] Call the new helper at the top of `J()` (`fluxobjective_jax.py:354`) and `dJ()` (find the dJ entry point and wire it)
-- [ ] Add a regression test in `tests/objectives/test_fluxobjective_jax.py` (or wherever stage-2-jax tests live): construct objective, mutate surface DOFs, assert `J()` raises with the expected message
-- [ ] Verify no existing tests break (some tests may rely on the silent-staleness behavior; if so, they're incorrect and should be fixed)
-- [ ] Document the new fingerprint behavior alongside the existing "Do not call `field.set_points()` after constructing" caveat
+- (historical checklist) At `SquaredFluxJAX.__init__` (`fluxobjective_jax.py:193-204`): compute `surface_dofs_fingerprint = hashlib.blake2b(surface.x.tobytes()).hexdigest()` (or `xxhash` if already in deps); store on `self._surface_dofs_fingerprint`
+- (historical checklist) Add `_raise_if_surface_dof_drifted()` helper alongside the existing `_raise_if_field_points_drifted` / `_raise_if_field_dof_layout_drifted` (`:330-348`); recompute fingerprint and compare; raise `RuntimeError("Surface DOFs mutated after SquaredFluxJAX construction; reconstruct the objective.")`
+- (historical checklist) Call the new helper at the top of `J()` (`fluxobjective_jax.py:354`) and `dJ()` (find the dJ entry point and wire it)
+- (historical checklist) Add a regression test in `tests/objectives/test_fluxobjective_jax.py` (or wherever stage-2-jax tests live): construct objective, mutate surface DOFs, assert `J()` raises with the expected message
+- (historical checklist) Verify no existing tests break (some tests may rely on the silent-staleness behavior; if so, they're incorrect and should be fixed)
+- (historical checklist) Document the new fingerprint behavior alongside the existing "Do not call `field.set_points()` after constructing" caveat
 
 ### W1.4 · E3 — Deterministic `group_coil_data` ordering
 
@@ -168,11 +172,11 @@ Estimated effort: **1–2 PRs, ~150 lines total including tests.** No design deb
 **Acceptance.** Group iteration order is independent of `by_nquad` dict insertion ordering. Existing parity tests pass.
 
 **Todos:**
-- [ ] After building `by_nquad`, replace `for indices in by_nquad.values():` with `for nquad in sorted(by_nquad.keys()): indices = by_nquad[nquad]` (or equivalent sorted iteration)
-- [ ] Within each group, `indices` is already in coil-list order (insertion preserves it under append); leave the per-group order as-is
-- [ ] Add a unit test in `tests/test_jax_core_biotsavart.py` (or new file) that asserts **sorted iteration order** for a single fixed mixed-nquad input. Concretely: build a coil set with quad counts `[128, 15, 15, 128]` (mixed); call `group_coil_data`; assert the returned groups are in `(qpoint_count_ascending, first_coil_index_ascending)` order; assert the per-group `indices` are in original-list ascending order. **Do not assert permutation invariance of the output:** permuting input coils legitimately changes physical coil identity and float summation order, which is not what this fix is about
-- [ ] Numerical regression coverage: rely on existing field parity tests (mixed-quadrature lane already exercised by `tests/field/test_biotsavart_jax.py`) — the sort fix is structural, not numerical, so no new field-value asserts are needed
-- [ ] Run the full mixed-quadrature parity suite to confirm no regressions (TF + banana coils coexist with 15-pt + 128-pt quadratures)
+- (historical checklist) After building `by_nquad`, replace `for indices in by_nquad.values():` with `for nquad in sorted(by_nquad.keys()): indices = by_nquad[nquad]` (or equivalent sorted iteration)
+- (historical checklist) Within each group, `indices` is already in coil-list order (insertion preserves it under append); leave the per-group order as-is
+- (historical checklist) Add a unit test in `tests/test_jax_core_biotsavart.py` (or new file) that asserts **sorted iteration order** for a single fixed mixed-nquad input. Concretely: build a coil set with quad counts `[128, 15, 15, 128]` (mixed); call `group_coil_data`; assert the returned groups are in `(qpoint_count_ascending, first_coil_index_ascending)` order; assert the per-group `indices` are in original-list ascending order. **Do not assert permutation invariance of the output:** permuting input coils legitimately changes physical coil identity and float summation order, which is not what this fix is about
+- (historical checklist) Numerical regression coverage: rely on existing field parity tests (mixed-quadrature lane already exercised by `tests/field/test_biotsavart_jax.py`) — the sort fix is structural, not numerical, so no new field-value asserts are needed
+- (historical checklist) Run the full mixed-quadrature parity suite to confirm no regressions (TF + banana coils coexist with 15-pt + 128-pt quadratures)
 
 ---
 
@@ -191,7 +195,7 @@ Estimated effort: **1 PR, ~80 lines including tests.** Depends on Wave 1 only in
 **Threshold rationale.** Use **absolute** inf-norm gates (atol), not just `rtol`. `sdofs`, `G`, `iota`, and surface points all include near-zero or unit-order values where `rtol`-only would either over- or under-constrain. Measured cross-machine variance on current HEAD: `sdofs_inf ∈ [1.9e-14, 3.6e-12]` across two machines. `1e-11` provides ~2.7× headroom over the worst measured value. Tighter thresholds (`1e-12`) would be flaky across hardware; looser thresholds (`1e-10`) leave room for real regressions to slip through. `1e-11` is the cross-machine balance.
 
 **Todos:**
-- [ ] In `test_single_stage_jax_cpu_reference.py`, add a new helper `_assert_run_code_ls_state_parity(problem, ..., *, require_well_conditioned: bool)` next to `_assert_run_code_ls_parity` (`:4647`). New helper additionally asserts (all **absolute** inf-norm gates):
+- (historical checklist) In `test_single_stage_jax_cpu_reference.py`, add a new helper `_assert_run_code_ls_state_parity(problem, ..., *, require_well_conditioned: bool)` next to `_assert_run_code_ls_parity` (`:4647`). New helper additionally asserts (all **absolute** inf-norm gates):
   - `np.max(np.abs(surf_cpu.x - surf_jax.x)) <= 1e-11`        (sdofs absolute)
   - `np.max(np.abs(surf_cpu.gamma() - surf_jax.gamma())) <= 1e-11`  (gamma points absolute)
   - `abs(G_cpu - G_jax) <= 1e-12`                              (G absolute)
@@ -200,19 +204,19 @@ Estimated effort: **1 PR, ~80 lines including tests.** Depends on Wave 1 only in
     - `require_well_conditioned=True` (production-scale tests): **hard-assert** `np.linalg.cond(res_cpu["hessian"]) < 1e8` AND `np.linalg.cond(res_jax["hessian"]) < 1e8` *as test conditions, not gates*. Rationale: the oversampled fixture is *supposed to be* well-conditioned; a regression that degrades κ above 1e8 is itself a real signal and the test should fail loudly, not silently skip.
     - `require_well_conditioned=False` (defensive helper-reuse on other fixtures): skip the state assertions with a `pytest.skip("cond(H) too high; state parity not meaningful")` message if either cond ≥ 1e8.
   - **Both-sided cond check** (independent of mode): one-sided guard would let a regression on one side degrade κ while the other stays low, hiding the disagreement. Always check both.
-- [ ] Add a new test `test_ls_solve_state_parity_production_scale` that calls the helper on `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)` with production options and **`require_well_conditioned=True`**. The oversampled fixture must stay well-conditioned; if it ever doesn't, that's the regression we want to surface.
-- [ ] Keep the existing `test_ls_solve_parity` (default fixture, loose) as a physics smoke. Document its scope (iota+label only) with an inline comment so the next reader understands why the loose gate is intentional
-- [ ] Add a docstring to `_assert_run_code_ls_state_parity` explaining the `require_well_conditioned` mode toggle, the absolute-threshold choice, and the cross-machine variance finding (`1.9e-14 ↔ 3.6e-12`). Be explicit that production-scale tests use hard-assert mode because the fixture is *supposed* to be well-conditioned, while defensive-helper mode is for unknown-κ contexts.
-- [ ] Run the new test on the user's GPU (when available) under `SIMSOPT_JAX_PLATFORM=cuda` to confirm thresholds hold on hardware-2 as well; if GPU breaks 1e-11, loosen the gate to `gpu-runtime` lane's `1e-6` per `validation_ladder_contract.py`
-- [ ] If practical, run on a third machine (e.g., x86 Linux) to validate the 1e-11 floor with one more data point. Update threshold to worst measured × 3 if a third machine pushes it out further.
+- (historical checklist) Add a new test `test_ls_solve_state_parity_production_scale` that calls the helper on `build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)` with production options and **`require_well_conditioned=True`**. The oversampled fixture must stay well-conditioned; if it ever doesn't, that's the regression we want to surface.
+- (historical checklist) Keep the existing `test_ls_solve_parity` (default fixture, loose) as a physics smoke. Document its scope (iota+label only) with an inline comment so the next reader understands why the loose gate is intentional
+- (historical checklist) Add a docstring to `_assert_run_code_ls_state_parity` explaining the `require_well_conditioned` mode toggle, the absolute-threshold choice, and the cross-machine variance finding (`1.9e-14 ↔ 3.6e-12`). Be explicit that production-scale tests use hard-assert mode because the fixture is *supposed* to be well-conditioned, while defensive-helper mode is for unknown-κ contexts.
+- (historical checklist) Run the new test on the user's GPU (when available) under `SIMSOPT_JAX_PLATFORM=cuda` to confirm thresholds hold on hardware-2 as well; if GPU breaks 1e-11, loosen the gate to `gpu-runtime` lane's `1e-6` per `validation_ladder_contract.py`
+- (historical checklist) If practical, run on a third machine (e.g., x86 Linux) to validate the 1e-11 floor with one more data point. Update threshold to worst measured × 3 if a third machine pushes it out further.
 
 ### W2.2 · Optional: parity-ladder lane registration
 
 **Context.** The new state-parity check could be registered as a named lane in `validation_ladder_contract.py` for discoverability.
 
 **Todos:**
-- [ ] Decide if this warrants a new ladder lane (e.g., `ls_state_parity` with rtol=1e-11). If yes, add it next to `branch-stable-resolve` (`validation_ladder_contract.py:115-133`)
-- [ ] If not, just document the threshold inline in the test file
+- (historical checklist) Decide if this warrants a new ladder lane (e.g., `ls_state_parity` with rtol=1e-11). If yes, add it next to `branch-stable-resolve` (`validation_ladder_contract.py:115-133`)
+- (historical checklist) If not, just document the threshold inline in the test file
 
 ---
 
@@ -238,11 +242,11 @@ The docstrings make the pairing explicit: `_boozer_ls_coil_vjp` says "Replaces C
 - `test_ls_coil_vjp_matches_cpu_oracle`: JAX `_boozer_ls_coil_vjp` vs CPU `boozer_surface_dlsqgrad_dcoils_vjp` at the same lane.
 
 **Todos:**
-- [ ] **Test A — residual VJP**: in `tests/geo/test_boozer_derivatives_jax.py`, add `test_residual_coil_vjp_matches_cpu_oracle` calling `boozer_residual_coil_vjp` (JAX) and the CPU chain (residual ∂B + Biot-Savart VJP). Compare per-coil cotangents at `rtol=1e-8, atol=1e-10`. Both `weight_inv_modB=True` and `False`. Use the existing same-state fixture (do NOT re-solve; both should evaluate at identical input state).
-- [ ] **Test B — LS VJP**: in `tests/geo/test_boozersurface_jax.py` (or a new derivative test file under `tests/geo/`), add `test_ls_coil_vjp_matches_cpu_oracle` calling `_boozer_ls_coil_vjp(lm, booz_surf_jax, iota, G, weight_inv_modB)` and CPU `boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf_cpu, iota, G, weight_inv_modB)` at a **converged** LS state (because LS gradient is meaningful at the converged point). Compare at `rtol=1e-8, atol=1e-10`. Both `weight_inv_modB` settings.
-- [ ] Verify both CPU oracles are importable in the public env (`.conda/jax/`): `boozer_surface_dlsqgrad_dcoils_vjp` is in `simsopt.geo.surfaceobjectives` (pure Python), `boozer_surface_residual_dB` is also pure Python. Should both be available.
-- [ ] If either test fails at `1e-8`, investigate: a real bug or a true machine-precision-bound case for that derivative path. Report and adjust threshold per the parity ladder, do not loosen silently.
-- [ ] Cross-reference: confirm `_boozer_ls_coil_vjp` is what the M5 IFT adjoint path actually invokes (the production gradient consumer), so the parity test bites where it matters most.
+- (historical checklist) **Test A — residual VJP**: in `tests/geo/test_boozer_derivatives_jax.py`, add `test_residual_coil_vjp_matches_cpu_oracle` calling `boozer_residual_coil_vjp` (JAX) and the CPU chain (residual ∂B + Biot-Savart VJP). Compare per-coil cotangents at `rtol=1e-8, atol=1e-10`. Both `weight_inv_modB=True` and `False`. Use the existing same-state fixture (do NOT re-solve; both should evaluate at identical input state).
+- (historical checklist) **Test B — LS VJP**: in `tests/geo/test_boozersurface_jax.py` (or a new derivative test file under `tests/geo/`), add `test_ls_coil_vjp_matches_cpu_oracle` calling `_boozer_ls_coil_vjp(lm, booz_surf_jax, iota, G, weight_inv_modB)` and CPU `boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf_cpu, iota, G, weight_inv_modB)` at a **converged** LS state (because LS gradient is meaningful at the converged point). Compare at `rtol=1e-8, atol=1e-10`. Both `weight_inv_modB` settings.
+- (historical checklist) Verify both CPU oracles are importable in the public env (`.conda/jax/`): `boozer_surface_dlsqgrad_dcoils_vjp` is in `simsopt.geo.surfaceobjectives` (pure Python), `boozer_surface_residual_dB` is also pure Python. Should both be available.
+- (historical checklist) If either test fails at `1e-8`, investigate: a real bug or a true machine-precision-bound case for that derivative path. Report and adjust threshold per the parity ladder, do not loosen silently.
+- (historical checklist) Cross-reference: confirm `_boozer_ls_coil_vjp` is what the M5 IFT adjoint path actually invokes (the production gradient consumer), so the parity test bites where it matters most.
 
 ### W3.2 · C3 — Action-level adjoint parity for ill-conditioned exact lane
 
@@ -253,12 +257,12 @@ The docstrings make the pairing explicit: `_boozer_ls_coil_vjp` says "Replaces C
 **Acceptance.** New assertion in the `exact-ill-conditioned-adjoint` lane that verifies projected adjoint matches a CPU reference at well-conditioned-subspace tolerance.
 
 **Todos:**
-- [ ] Identify a fixture that lands in the `exact-ill-conditioned-adjoint` lane (likely an existing test marked with the lane name)
-- [ ] At the converged state, compute SVD of `H = A`. Identify the well-conditioned subspace as `U_well = U[:, σ > σ_max * 1e-8]`
-- [ ] Compute `λ_proj_cpu = U_well @ U_well.T @ λ_cpu` and `λ_proj_jax = U_well @ U_well.T @ λ_jax`
-- [ ] Assert `‖λ_proj_cpu − λ_proj_jax‖ <= adjoint_rtol * ‖λ_proj_cpu‖` with `adjoint_rtol = 1e-6` (one order looser than `exact-well-conditioned-adjoint`)
-- [ ] Add directional check: for a fixed set of deterministic test directions `v_k`, assert `|⟨v_k, λ_cpu⟩ − ⟨v_k, λ_jax⟩| <= rtol * |⟨v_k, λ_cpu⟩|`
-- [ ] Document the projection definition in the lane comment
+- (historical checklist) Identify a fixture that lands in the `exact-ill-conditioned-adjoint` lane (likely an existing test marked with the lane name)
+- (historical checklist) At the converged state, compute SVD of `H = A`. Identify the well-conditioned subspace as `U_well = U[:, σ > σ_max * 1e-8]`
+- (historical checklist) Compute `λ_proj_cpu = U_well @ U_well.T @ λ_cpu` and `λ_proj_jax = U_well @ U_well.T @ λ_jax`
+- (historical checklist) Assert `‖λ_proj_cpu − λ_proj_jax‖ <= adjoint_rtol * ‖λ_proj_cpu‖` with `adjoint_rtol = 1e-6` (one order looser than `exact-well-conditioned-adjoint`)
+- (historical checklist) Add directional check: for a fixed set of deterministic test directions `v_k`, assert `|⟨v_k, λ_cpu⟩ − ⟨v_k, λ_jax⟩| <= rtol * |⟨v_k, λ_cpu⟩|`
+- (historical checklist) Document the projection definition in the lane comment
 
 ---
 
@@ -273,9 +277,9 @@ These items are real but lower-priority. Execute only if specific signals justif
 **Trigger to execute.** If invalid-domain testing becomes a parity concern, or if any production workflow lands on a point-on-coil configuration. Currently neither.
 
 **Todos (conditional):**
-- [ ] Decide policy: match C++ (remove clamp, accept NaN propagation) OR document divergence (preferred). Removing the clamp matches reviewer's recommendation.
-- [ ] If removing: ensure no internal use of `_safe_radius_squared` relies on the floor; remove the clamp; update tests
-- [ ] If documenting: add a paragraph to `docs/source/jax_acceptance.rst` noting JAX silently clamps point-on-coil while C++ NaN/Infs
+- (historical checklist) Decide policy: match C++ (remove clamp, accept NaN propagation) OR document divergence (preferred). Removing the clamp matches reviewer's recommendation.
+- (historical checklist) If removing: ensure no internal use of `_safe_radius_squared` relies on the floor; remove the clamp; update tests
+- (historical checklist) If documenting: add a paragraph to `docs/source/jax_acceptance.rst` noting JAX silently clamps point-on-coil while C++ NaN/Infs
 
 ### W4.2 · E4 — state-keyed traceable bundle cache key
 
@@ -302,22 +306,23 @@ through Phase 0 G0 and abandoned at production scope because JAX packed
 on the production `(384, 40)` shape. The owner then revised Track 1 to a
 tolerance-equivalent dense pivoted-QR lane exposed as
 `least_squares_algorithm="lm-minpack"` -> `method="lm-minpack-ondevice"`.
-That core route is implemented, but broader MGH, oversampled BoozerSurface,
-and first-trace compile-time gates remain pending. See
+That core route is implemented. The later MINPACK plan revision completed the
+broader MGH, oversampled BoozerSurface, and local CPU first-trace compile-time
+gates. See
 `.artifacts/lm_minpack_port_plan_2026-05-16/PHASE0_G0_REPORT.md` and
 `.artifacts/lm_minpack_port_plan_2026-05-16/PLAN.md`.
 
-**Remaining trigger to promote.** If `lm-minpack-ondevice` is considered for
-production use, complete the plan's G3/G4/G5 gates first. If byte-equality
+**Remaining trigger to promote.** The local CPU G3/G4/G5 evidence is complete.
+CUDA first-compile performance remains a separate GPU gate. If byte-equality
 (not tolerance equality) with CPU MINPACK `lmder` becomes a hard requirement,
-that is a separate reopened byte-port project because the production-shape
-G0 gate already failed.
+that is a separate reopened byte-port project because the production-shape G0
+gate already failed.
 
 **Todos (conditional, scoped as a research project not a patch):**
-- [ ] Run G3: broader Moré-Garbow-Hillstrom final-state parity for `lm-minpack-ondevice`
-- [ ] Run G4: oversampled BoozerSurface final-state parity for `lm-minpack-ondevice`
-- [ ] Run G5: first-trace compile-time measurement on the canonical `(384, 40)` fixture
-- [ ] Decide production-promotion and deprecation policy only after G3/G4/G5
+- [x] Run G3: broader Moré-Garbow-Hillstrom final-state parity for `lm-minpack-ondevice`
+- [x] Run G4: oversampled BoozerSurface final-state parity for `lm-minpack-ondevice`
+- [x] Run G5: first-trace compile-time measurement on the current `(386, 39)` fixture
+- [x] Keep production-promotion scoped to the opt-in lane; CUDA first-compile performance remains a separate GPU gate
 
 ---
 
@@ -353,19 +358,19 @@ G0 gate already failed.
 
 After Wave 1 + Wave 2 land:
 
-- [ ] `cond_cpu` responds linearly to `newton_stab` (B1 fixed)
-- [ ] CLAUDE.md grep for `hybrid` returns no matches (D1)
-- [ ] CLAUDE.md cited line refs all resolve correctly on current tree (D2)
-- [ ] CLAUDE.md M2 integration section either points to a working env or is removed (D3)
-- [ ] `SquaredFluxJAX.J()` after surface mutation raises a clear error (E1)
-- [ ] `group_coil_data` iteration order is independent of dict insertion order (E3)
-- [ ] `test_ls_solve_state_parity_production_scale` passes with `sdofs_inf <= 1e-11` on at least two machines (C1)
-- [ ] Existing test suite passes with no new failures
+- [x] `cond_cpu` responds linearly to `newton_stab` (B1 fixed)
+- [x] CLAUDE.md grep for `hybrid` returns no matches (D1)
+- [x] CLAUDE.md cited line refs all resolve correctly on current tree (D2)
+- [x] CLAUDE.md M2 integration section either points to a working env or is removed (D3)
+- [x] `SquaredFluxJAX.J()` after surface mutation raises a clear error (E1)
+- [x] `group_coil_data` iteration order is independent of dict insertion order (E3)
+- [x] `test_ls_solve_state_parity_production_scale` passes with `sdofs_inf <= 1e-11` on at least two machines (C1)
+- [x] Existing targeted test suite passes with no new failures
 
 After Wave 3 lands:
 
-- [ ] `test_coil_vjp_matches_cpu_oracle` passes at `rtol=1e-8, atol=1e-10` (C2)
-- [ ] Ill-conditioned exact-adjoint lane has action-level parity assertion (C3)
+- [x] `test_coil_vjp_matches_cpu_oracle` passes at `rtol=1e-8, atol=1e-10` (C2)
+- [x] Ill-conditioned exact-adjoint lane has action-level parity assertion (C3)
 
 Wave 4 items are not part of the core acceptance. Informational completion record:
 

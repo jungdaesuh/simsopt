@@ -54,7 +54,6 @@ from .boozersurface_jax_test_helpers import (
     _MockCoil,
     _MockSurface,
     _PlumbingVolumeLabel,
-    _boozer_exact_coil_vjp,
     _bsj,
     _build_penalty_problem,
     _build_upstream_boozer_exact_constraints_case,
@@ -2411,6 +2410,19 @@ def _make_basic_mock_surface_and_label():
     return surface, _PlumbingVolumeLabel(surface)
 
 
+def _mutate_surface_dofs_for_drift(surface):
+    dofs = surface.get_dofs()
+    delta = np.linspace(1.0e-4, 2.0e-4, dofs.size, dtype=np.float64)
+    surface.set_dofs(dofs + delta)
+
+
+def _evaluate_vjp_result_callback(callback_name, callback, adjoint, booz, res):
+    result = callback(adjoint, booz, res["iota"], res["G"])
+    if callback_name == "vjp_groups":
+        return list(result)
+    return result
+
+
 class TestBoozerSurfaceJAXClass:
     """Test the adapter class instantiation and run_code orchestration."""
 
@@ -2456,17 +2468,24 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         expected_dofs = np.asarray(booz.surface.get_dofs(), dtype=np.float64)
 
-        def _unexpected_get_dofs():
-            raise AssertionError("live surface get_dofs() should not be queried")
-
-        booz.surface.get_dofs = _unexpected_get_dofs
-
+        np.testing.assert_allclose(
+            np.asarray(booz._surface_dofs, dtype=np.float64),
+            expected_dofs,
+        )
         np.testing.assert_allclose(
             np.asarray(booz._get_cached_surface_dofs(), dtype=np.float64),
             expected_dofs,
         )
         assert booz.surface_runtime_state.mpol == booz.surface.mpol
         assert booz.surface_runtime_state.ntor == booz.surface.ntor
+
+    def test_cached_surface_dofs_reject_live_surface_drift(self):
+        booz = _make_mock_boozer_surface()
+
+        _mutate_surface_dofs_for_drift(booz.surface)
+
+        with pytest.raises(RuntimeError, match="cached surface DOFs are stale"):
+            booz._get_cached_surface_dofs()
 
     @pytest.mark.parametrize(
         ("optimizer_backend", "expected_algorithm"),
@@ -4816,6 +4835,29 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-14,
         )
 
+    @pytest.mark.parametrize("callback_name", ["vjp", "vjp_groups"])
+    def test_ls_result_vjp_callbacks_reject_surface_dof_drift(self, callback_name):
+        booz = _make_mock_boozer_surface()
+        res = booz.run_code(iota=0.3, G=0.05)
+        callback = res[callback_name]
+        adjoint = jnp.zeros_like(jnp.asarray(res["jacobian"], dtype=jnp.float64))
+
+        _mutate_surface_dofs_for_drift(booz.surface)
+
+        with pytest.raises(RuntimeError, match="cached surface DOFs are stale"):
+            _evaluate_vjp_result_callback(callback_name, callback, adjoint, booz, res)
+
+    def test_ls_result_vjp_groups_reject_surface_dof_drift_after_stream_creation(self):
+        booz = _make_mock_boozer_surface()
+        res = booz.run_code(iota=0.3, G=0.05)
+        adjoint = jnp.zeros_like(jnp.asarray(res["jacobian"], dtype=jnp.float64))
+        stream = res["vjp_groups"](adjoint, booz, res["iota"], res["G"])
+
+        _mutate_surface_dofs_for_drift(booz.surface)
+
+        with pytest.raises(RuntimeError, match="cached surface DOFs are stale"):
+            list(stream)
+
     def test_run_code_sdofs_matches_implicit_path(self):
         """run_code(sdofs=surface_dofs) must produce the same result as run_code()."""
         booz_ref = _make_mock_boozer_surface()
@@ -6034,7 +6076,6 @@ class TestBoozerSurfaceJAXExactPath:
         assert res["linear_solve_backend"] == "operator"
         assert res["dense_linear_solve_factors_available"] is True
         assert res["exact_factorization_backend"] == _bsj.EXACT_FACTORIZATION_BACKEND
-        assert res["vjp"] is _boozer_exact_coil_vjp
         assert callable(res["vjp"])
 
     def test_exact_result_plu_is_independent_of_verbose(self):
@@ -6044,6 +6085,71 @@ class TestBoozerSurfaceJAXExactPath:
 
         _assert_dense_plu_factors(res["PLU"])
         assert res["dense_linear_solve_factors_available"] is True
+
+    @pytest.mark.parametrize("callback_name", ["vjp", "vjp_groups"])
+    def test_exact_result_vjp_callbacks_reject_surface_dof_drift(self, callback_name):
+        booz = _make_mock_boozer_surface_exact()
+        res = _run_mock_exact_boozer_success(booz)
+        callback = res[callback_name]
+        adjoint = jnp.zeros(res["jacobian"].shape[0], dtype=jnp.float64)
+
+        _mutate_surface_dofs_for_drift(booz.surface)
+
+        with pytest.raises(RuntimeError, match="cached surface DOFs are stale"):
+            _evaluate_vjp_result_callback(callback_name, callback, adjoint, booz, res)
+
+    def test_exact_result_vjp_groups_reject_surface_dof_drift_after_stream_creation(
+        self,
+    ):
+        booz = _make_mock_boozer_surface_exact()
+        res = _run_mock_exact_boozer_success(booz)
+        adjoint = jnp.zeros(res["jacobian"].shape[0], dtype=jnp.float64)
+        stream = res["vjp_groups"](adjoint, booz, res["iota"], res["G"])
+
+        _mutate_surface_dofs_for_drift(booz.surface)
+
+        with pytest.raises(RuntimeError, match="cached surface DOFs are stale"):
+            list(stream)
+
+    @pytest.mark.parametrize("callback_name", ["vjp", "vjp_groups"])
+    def test_exact_result_vjp_callbacks_reject_reuse_after_resolve(
+        self,
+        callback_name,
+    ):
+        booz = _make_mock_boozer_surface_exact()
+        first = _run_mock_exact_boozer_success(booz)
+        old_callback = first[callback_name]
+        adjoint = jnp.zeros(first["jacobian"].shape[0], dtype=jnp.float64)
+
+        _mutate_surface_dofs_for_drift(booz.surface)
+        booz.recompute_bell()
+        second = _run_mock_exact_boozer_success(booz, iota=0.35, G=0.07)
+
+        assert second["solve_generation"] == first["solve_generation"] + 1
+        with pytest.raises(RuntimeError, match="stale"):
+            _evaluate_vjp_result_callback(
+                callback_name,
+                old_callback,
+                adjoint,
+                booz,
+                first,
+            )
+
+    def test_exact_result_vjp_groups_reject_reuse_after_stream_creation_and_resolve(
+        self,
+    ):
+        booz = _make_mock_boozer_surface_exact()
+        first = _run_mock_exact_boozer_success(booz)
+        adjoint = jnp.zeros(first["jacobian"].shape[0], dtype=jnp.float64)
+        stream = first["vjp_groups"](adjoint, booz, first["iota"], first["G"])
+
+        _mutate_surface_dofs_for_drift(booz.surface)
+        booz.recompute_bell()
+        second = _run_mock_exact_boozer_success(booz, iota=0.35, G=0.07)
+
+        assert second["solve_generation"] == first["solve_generation"] + 1
+        with pytest.raises(RuntimeError, match="stale"):
+            list(stream)
 
     def test_resolved_coil_set_spec_uses_explicit_coil_arrays(self):
         """coil_arrays-only calls must build an explicit grouped spec."""

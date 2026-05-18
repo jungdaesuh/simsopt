@@ -679,6 +679,15 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
     )
 
 
+def _surface_dofs_fingerprint_from_dofs(dofs) -> tuple[str, tuple[int, ...], str]:
+    array = np.ascontiguousarray(np.asarray(jax.device_get(dofs), dtype=np.float64))
+    return (
+        str(array.dtype),
+        tuple(int(dim) for dim in array.shape),
+        hashlib.blake2b(array.tobytes(), digest_size=16).hexdigest(),
+    )
+
+
 def _require_boozer_vjp_callback_signature(callback, *, callback_name: str):
     """Fail fast when a result-dict VJP hook cannot accept the public contract."""
     if callback is None:
@@ -693,6 +702,28 @@ def _require_boozer_vjp_callback_signature(callback, *, callback_name: str):
     return callback
 
 
+def _guard_result_callback_with_check(callback, *, callback_name: str, check):
+    if callback is None:
+        return None
+
+    if callback_name != "vjp_groups":
+
+        def guarded(*args, **kwargs):
+            check()
+            return callback(*args, **kwargs)
+
+        return guarded
+
+    def guarded(*args, **kwargs):
+        def stream():
+            check()
+            yield from callback(*args, **kwargs)
+
+        return stream()
+
+    return guarded
+
+
 def _guard_solver_callback_freshness(
     callback,
     *,
@@ -701,10 +732,8 @@ def _guard_solver_callback_freshness(
     callback_name: str,
 ):
     """Reject stale result callbacks after the Boozer solve state changes."""
-    if callback is None:
-        return None
 
-    def guarded(*args, **kwargs):
+    def raise_if_stale():
         current_generation = getattr(booz_surf, "_solver_generation", None)
         if booz_surf.need_to_run_code or current_generation != solve_generation:
             raise RuntimeError(
@@ -712,9 +741,23 @@ def _guard_solver_callback_freshness(
                 f"(expected generation {solve_generation}, got {current_generation}). "
                 "Re-run boozer_surface.run_code(...) before requesting adjoints."
             )
-        return callback(*args, **kwargs)
 
-    return guarded
+    return _guard_result_callback_with_check(
+        callback,
+        callback_name=callback_name,
+        check=raise_if_stale,
+    )
+
+
+def _guard_result_callback_surface_dofs(callback, *, booz_surf, callback_name: str):
+    def raise_if_drifted():
+        booz_surf._raise_if_surface_dofs_drifted(callback_name=callback_name)
+
+    return _guard_result_callback_with_check(
+        callback,
+        callback_name=callback_name,
+        check=raise_if_drifted,
+    )
 
 
 def _advance_solver_generation(booz_surf) -> int:
@@ -743,6 +786,11 @@ def _prepare_result_callback(
     )
     callback = _require_boozer_vjp_callback_signature(
         callback,
+        callback_name=callback_name,
+    )
+    callback = _guard_result_callback_surface_dofs(
+        callback,
+        booz_surf=booz_surf,
         callback_name=callback_name,
     )
     if freshness_guard:
@@ -3366,7 +3414,7 @@ class BoozerSurfaceJAX(Optimizable):
         # --- Extract immutable surface metadata once; keep DOFs cached locally ---
         self._surface_runtime_state = runtime_state
         self._label_surface_runtime_state = label_runtime_state
-        self._surface_dofs = _as_jax_float64(surface.get_dofs())
+        self._store_surface_dofs(surface.get_dofs())
         self._exact_mask_indices = None
         self.mpol = runtime_state.mpol
         self.ntor = runtime_state.ntor
@@ -3902,18 +3950,43 @@ class BoozerSurfaceJAX(Optimizable):
             return None
         return self._make_newton_progress_callback()
 
-    def _get_surface_dofs(self):
-        """Get current surface DOFs as a JAX array and refresh the cache."""
-        self._surface_dofs = _as_jax_float64(self.surface.get_dofs())
+    def _store_surface_dofs(self, dofs):
+        self._surface_dofs = _as_jax_float64(dofs)
+        self._surface_dofs_fingerprint = _surface_dofs_fingerprint_from_dofs(
+            self._surface_dofs
+        )
         return self._surface_dofs
 
+    def _raise_if_surface_dofs_drifted(self, *, callback_name: str | None = None):
+        if (
+            _surface_dofs_fingerprint_from_dofs(self.surface.get_dofs())
+            == self._surface_dofs_fingerprint
+        ):
+            return
+        callback_text = (
+            ""
+            if callback_name is None
+            else f" before result callback {callback_name!r}"
+        )
+        raise RuntimeError(
+            "BoozerSurfaceJAX cached surface DOFs are stale"
+            f"{callback_text}: the live surface DOFs changed since the last "
+            "BoozerSurfaceJAX synchronization. Re-run run_code(...) or rebuild "
+            "the BoozerSurfaceJAX instance before requesting adjoints."
+        )
+
+    def _get_surface_dofs(self):
+        """Get current surface DOFs as a JAX array and refresh the cache."""
+        return self._store_surface_dofs(self.surface.get_dofs())
+
     def _get_cached_surface_dofs(self):
-        """Get the last synchronized surface DOFs without touching the host surface."""
+        """Get synchronized surface DOFs after validating the live host surface."""
+        self._raise_if_surface_dofs_drifted()
         return self._surface_dofs
 
     def _set_surface_dofs(self, dofs_jax):
         """Update cached DOFs and mirror them back to the live surface."""
-        self._surface_dofs = _as_jax_float64(dofs_jax)
+        self._store_surface_dofs(dofs_jax)
         self.surface.set_dofs(_host_numpy(self._surface_dofs))
 
     def _pack_decision_vector(self, iota, G, sdofs=None):
@@ -5879,7 +5952,7 @@ class BoozerSurfaceJAX(Optimizable):
             solve_generation=solve_generation,
             callback_name="vjp",
             G_provided=G_provided,
-            freshness_guard=False,
+            freshness_guard=True,
         )
         vjp_groups_callback = _prepare_result_callback(
             _build_exact_group_vjp_callback(
@@ -5891,7 +5964,7 @@ class BoozerSurfaceJAX(Optimizable):
             solve_generation=solve_generation,
             callback_name="vjp_groups",
             G_provided=G_provided,
-            freshness_guard=False,
+            freshness_guard=True,
         )
 
         res = {
