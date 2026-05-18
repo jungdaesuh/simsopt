@@ -119,6 +119,64 @@ def _block_until_ready(value):
             leaf.block_until_ready()
 
 
+def _cyl_points_to_cart(points_cyl):
+    points = _as_jax_float64(points_cyl)
+    r = points[:, 0]
+    phi = points[:, 1]
+    z = points[:, 2]
+    return jnp.stack((r * jnp.cos(phi), r * jnp.sin(phi), z), axis=1)
+
+
+def _canonical_set_points_cyl(points_cyl):
+    points = _as_jax_float64(points_cyl)
+    return points.at[:, 1].set(jnp.fmod(points[:, 1], 2.0 * jnp.pi))
+
+
+def _cart_points_to_cyl(points_cart):
+    points = _as_jax_float64(points_cart)
+    x = points[:, 0]
+    y = points[:, 1]
+    phi = jnp.arctan2(y, x)
+    phi = jnp.where(phi < 0.0, phi + 2.0 * jnp.pi, phi)
+    return jnp.stack(
+        (
+            jnp.sqrt(x * x + y * y),
+            phi,
+            points[:, 2],
+        ),
+        axis=1,
+    )
+
+
+def _points_cyl_for_basis(points_cart, points_cyl):
+    if points_cyl is not None:
+        return points_cyl
+    return _cart_points_to_cyl(points_cart)
+
+
+def _cart_vectors_to_cyl(vectors_cart, points_cyl):
+    vectors = _as_jax_float64(vectors_cart)
+    points = _as_jax_float64(points_cyl)
+    phi = points[:, 1]
+    cos_phi = jnp.cos(phi)
+    sin_phi = jnp.sin(phi)
+    return jnp.stack(
+        (
+            cos_phi * vectors[:, 0] + sin_phi * vectors[:, 1],
+            -sin_phi * vectors[:, 0] + cos_phi * vectors[:, 1],
+            vectors[:, 2],
+        ),
+        axis=1,
+    )
+
+
+def _grad_absB_from_B_and_dB(B, dB_by_dX):
+    B_jax = _as_jax_float64(B)
+    dB_jax = _as_jax_float64(dB_by_dX)
+    absB = jnp.linalg.norm(B_jax, axis=1)
+    return jnp.sum(dB_jax * B_jax[:, None, :], axis=2) / absB[:, None]
+
+
 def _per_coil_unit_field(points, coil_set_spec, kernel):
     """Per-coil unit-current field as a list of JAX arrays.
 
@@ -459,6 +517,7 @@ class SpecBackedBiotSavartJAX(Optimizable):
         self._coil_dofs_generation = 0
         self._coil_dof_state_token = _new_coil_dof_state_token()
         self._points_jax: jax.Array | None = None
+        self._points_cyl_jax: jax.Array | None = None
         self._points_version = 0
         self._dof_layout_version = 0
         self._uses_uniform_curve_xyz_fourier_fastpath = False
@@ -506,7 +565,7 @@ class SpecBackedBiotSavartJAX(Optimizable):
     def x(self, coil_dofs: object) -> None:
         self._set_coil_dofs(coil_dofs)
         if hasattr(self, "_dofs"):
-            self._dofs.full_x = host_array(self._x, dtype=np.float64)
+            self._dofs.free_x = host_array(self._x, dtype=np.float64)
 
     @property
     def local_x(self) -> np.ndarray:
@@ -548,13 +607,37 @@ class SpecBackedBiotSavartJAX(Optimizable):
     ) -> list[tuple[jax.Array, jax.Array, jax.Array]]:
         return list(self.coil_set_spec_from_dofs(coil_dofs).field_inputs())
 
-    def set_points(self, points: object) -> None:
+    def set_points(self, points: object):
         self._points_jax = _as_jax_float64(points)
+        self._points_cyl_jax = None
         self._points_version += 1
+        return self
 
-    def set_points_from_spec(self, field_eval_spec: FieldEvalSpec) -> None:
-        self._points_jax = _as_jax_float64(field_eval_spec.points)
+    def set_points_cart(self, points: object):
+        return self.set_points(points)
+
+    def set_points_cyl(self, points_cyl: object):
+        self._points_cyl_jax = _canonical_set_points_cyl(points_cyl)
+        self._points_jax = _cyl_points_to_cart(self._points_cyl_jax)
         self._points_version += 1
+        return self
+
+    def set_points_from_spec(self, field_eval_spec: FieldEvalSpec):
+        self._points_jax = _as_jax_float64(field_eval_spec.points)
+        self._points_cyl_jax = None
+        self._points_version += 1
+        return self
+
+    def get_points_cart_ref(self):
+        return self._points_jax
+
+    def get_points_cart(self):
+        return host_array(self._points_jax, dtype=np.float64)
+
+    def get_points_cyl(self):
+        if self._points_cyl_jax is not None:
+            return host_array(self._points_cyl_jax, dtype=np.float64)
+        return host_array(_cart_points_to_cyl(self._points_jax), dtype=np.float64)
 
     def field_eval_spec(self) -> FieldEvalSpec:
         return make_field_eval_spec(self._points_jax)
@@ -599,6 +682,30 @@ class SpecBackedBiotSavartJAX(Optimizable):
         return grouped_biot_savart_B_and_dB_from_spec(
             self._points_jax,
             self.coil_set_spec(),
+        )
+
+    def AbsB(self) -> jax.Array:
+        return jnp.linalg.norm(self.B(), axis=1)[:, None]
+
+    def GradAbsB(self) -> jax.Array:
+        return _grad_absB_from_B_and_dB(*self.B_and_dB())
+
+    def B_cyl(self) -> jax.Array:
+        return _cart_vectors_to_cyl(
+            self.B(),
+            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+        )
+
+    def A_cyl(self) -> jax.Array:
+        return _cart_vectors_to_cyl(
+            self.A(),
+            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+        )
+
+    def GradAbsB_cyl(self) -> jax.Array:
+        return _cart_vectors_to_cyl(
+            self.GradAbsB(),
+            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
         )
 
     def dB_by_dcoilcurrents(self, compute_derivatives=0) -> list[jax.Array]:
@@ -1023,6 +1130,7 @@ class BiotSavartJAX(Optimizable):
     def __init__(self, coils):
         self._coils = list(coils)
         self._points_jax = None
+        self._points_cyl_jax = None
         self._points_version = 0
         self._dof_layout_version = 0
         self._coil_dofs_generation = 0
@@ -1428,15 +1536,35 @@ class BiotSavartJAX(Optimizable):
             points if isinstance(points, jax.Array) else np.ascontiguousarray(points)
         )
         self._points_jax = _as_jax_float64(points_array)
+        self._points_cyl_jax = None
         self._points_version += 1
+        return self
+
+    def set_points_cart(self, points):
+        return self.set_points(points)
+
+    def set_points_cyl(self, points_cyl):
+        self._points_cyl_jax = _canonical_set_points_cyl(points_cyl)
+        self._points_jax = _cyl_points_to_cart(self._points_cyl_jax)
+        self._points_version += 1
+        return self
 
     def get_points_cart_ref(self):
         """Return the current JAX point buffer for point-preserving callers."""
         return self._points_jax
 
+    def get_points_cart(self):
+        return host_array(self._points_jax, dtype=np.float64)
+
+    def get_points_cyl(self):
+        if self._points_cyl_jax is not None:
+            return host_array(self._points_cyl_jax, dtype=np.float64)
+        return host_array(_cart_points_to_cyl(self._points_jax), dtype=np.float64)
+
     def clear_points(self) -> None:
         """Clear the mutable point buffer."""
         self._points_jax = None
+        self._points_cyl_jax = None
         self._points_version += 1
 
     def set_points_from_spec(self, field_eval_spec):
@@ -1445,7 +1573,9 @@ class BiotSavartJAX(Optimizable):
         This still mutates the receiving ``BiotSavartJAX`` instance.
         """
         self._points_jax = _as_jax_float64(field_eval_spec.points)
+        self._points_cyl_jax = None
         self._points_version += 1
+        return self
 
     def field_eval_spec(self):
         """Build the immutable field-evaluation spec for the current points."""
@@ -1645,6 +1775,35 @@ class BiotSavartJAX(Optimizable):
         return grouped_biot_savart_B_and_dB_from_spec(
             self._points_jax,
             self.coil_set_spec(),
+        )
+
+    def AbsB(self):
+        """Magnetic-field magnitude at the evaluation points."""
+        return jnp.linalg.norm(self.B(), axis=1)[:, None]
+
+    def GradAbsB(self):
+        """Cartesian gradient of ``|B|`` at the evaluation points."""
+        return _grad_absB_from_B_and_dB(*self.B_and_dB())
+
+    def B_cyl(self):
+        """Magnetic field components in the cylindrical basis."""
+        return _cart_vectors_to_cyl(
+            self.B(),
+            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+        )
+
+    def A_cyl(self):
+        """Vector potential components in the cylindrical basis."""
+        return _cart_vectors_to_cyl(
+            self.A(),
+            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+        )
+
+    def GradAbsB_cyl(self):
+        """``GradAbsB`` components in the cylindrical basis."""
+        return _cart_vectors_to_cyl(
+            self.GradAbsB(),
+            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
         )
 
     def dB_by_dcoilcurrents(self, compute_derivatives=0):

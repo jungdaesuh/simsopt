@@ -349,8 +349,8 @@ def _ncsx_biotsavart_parity_fixture():
     bs = BiotSavart(coils)
 
     npoints = 50
-    np.random.seed(42)
-    points_np = np.random.randn(npoints, 3) * 0.3
+    rng = np.random.default_rng(42)
+    points_np = rng.standard_normal((npoints, 3)) * 0.3
     points_np[:, 0] += 1.0  # shift near torus
 
     bs.set_points(points_np)
@@ -358,6 +358,52 @@ def _ncsx_biotsavart_parity_fixture():
     gds_np = np.array([coil.curve.gammadash() for coil in coils])
     currents_np = np.array([coil.current.get_value() for coil in coils])
     return bs, points_np, gammas_np, gds_np, currents_np
+
+
+def _cart_points_to_cyl(points):
+    return np.ascontiguousarray(
+        np.stack(
+            (
+                np.sqrt(points[:, 0] * points[:, 0] + points[:, 1] * points[:, 1]),
+                np.arctan2(points[:, 1], points[:, 0]),
+                points[:, 2],
+            ),
+            axis=1,
+        )
+    )
+
+
+def _assert_cylindrical_points_match_cpu(jax_field, cpu_field):
+    np.testing.assert_allclose(
+        np.asarray(jax_field.get_points_cyl()),
+        np.asarray(cpu_field.get_points_cyl()),
+        rtol=0.0,
+        atol=1.0e-15,
+    )
+
+
+def _assert_cylindrical_accessors_match_cpu(jax_field, cpu_field):
+    _assert_cylindrical_points_match_cpu(jax_field, cpu_field)
+    np.testing.assert_allclose(
+        np.asarray(jax_field.AbsB()),
+        np.asarray(cpu_field.AbsB()),
+        rtol=_DIRECT_KERNEL_TOLS["rtol"],
+        atol=_DIRECT_KERNEL_TOLS["atol"],
+    )
+    assert np.asarray(jax_field.AbsB()).shape == np.asarray(cpu_field.AbsB()).shape
+    for method_name in ("B_cyl", "A_cyl"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(jax_field, method_name)()),
+            np.asarray(getattr(cpu_field, method_name)()),
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+    np.testing.assert_allclose(
+        np.asarray(jax_field.GradAbsB_cyl()),
+        np.asarray(cpu_field.GradAbsB_cyl()),
+        rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+        atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+    )
 
 
 class TestBiotSavartJaxAnalytical:
@@ -637,6 +683,97 @@ class TestBiotSavartJaxCppParity:
             atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
         )
 
+    def test_cylindrical_public_accessors_parity_ncsx(self):
+        """``BiotSavartJAX`` owns cylindrical public accessors on its boundary."""
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        points_cyl = _cart_points_to_cyl(points_np)
+        points_cyl[:, 1] += 2.0 * np.pi
+        bs.set_points_cyl(points_cyl)
+
+        bs_jax = BiotSavartJAX(list(bs._coils))
+        assert bs_jax.set_points_cyl(points_cyl) is bs_jax
+        assert bs_jax.set_points_cart(points_np) is bs_jax
+        assert bs_jax.set_points_cyl(points_cyl) is bs_jax
+
+        _assert_cylindrical_accessors_match_cpu(bs_jax, bs)
+
+    def test_cylindrical_public_accessors_use_cached_phi_basis_ncsx(self):
+        """``B_cyl`` / ``A_cyl`` / ``GradAbsB_cyl`` use cached cylindrical phi."""
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs, _, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        points_cyl = np.ascontiguousarray(
+            np.array(
+                [
+                    [0.0, 1.234, 0.1],
+                    [0.0, -1.5, -0.2],
+                    [0.7, 2.0 * np.pi + 0.4, 0.3],
+                ],
+                dtype=np.float64,
+            )
+        )
+        bs.set_points_cyl(points_cyl)
+
+        bs_jax = BiotSavartJAX(list(bs._coils))
+        bs_jax.set_points_cyl(points_cyl)
+
+        _assert_cylindrical_accessors_match_cpu(bs_jax, bs)
+
+    def test_cartesian_public_accessors_normalize_cylindrical_phi_ncsx(self):
+        """Cartesian point conversion follows C++ ``get_points_cyl_impl``."""
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs, _, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        points_cart = np.ascontiguousarray(
+            np.array(
+                [
+                    [0.5, -0.5, 0.1],
+                    [-0.5, -0.25, -0.2],
+                    [0.0, 0.0, 0.3],
+                ],
+                dtype=np.float64,
+            )
+        )
+        bs.set_points_cart(points_cart)
+
+        bs_jax = BiotSavartJAX(list(bs._coils))
+        bs_jax.set_points_cart(points_cart)
+
+        _assert_cylindrical_points_match_cpu(bs_jax, bs)
+
+    def test_spec_backed_cylindrical_public_accessors_parity_ncsx(self):
+        """``SpecBackedBiotSavartJAX`` exposes the same cylindrical contract."""
+        from simsopt.field.biotsavart_jax_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+        )
+        from simsopt.jax_core.specs import make_biot_savart_spec
+
+        bs, _, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        points_cyl = np.ascontiguousarray(
+            np.array(
+                [
+                    [0.0, 1.234, 0.1],
+                    [0.5, 2.0 * np.pi + 0.4, -0.2],
+                    [0.7, -1.2, 0.3],
+                ],
+                dtype=np.float64,
+            )
+        )
+        bs.set_points_cyl(points_cyl)
+
+        bs_jax = BiotSavartJAX(list(bs._coils))
+        spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+        spec_backed = SpecBackedBiotSavartJAX(spec)
+        assert spec_backed.set_points_cyl(points_cyl) is spec_backed
+
+        _assert_cylindrical_accessors_match_cpu(spec_backed, bs)
+
     def test_B_vjp_parity_ncsx(self):
         """``BiotSavartJAX.B_vjp(v)`` matches ``BiotSavart.B_vjp(v)`` per coil.
 
@@ -809,6 +946,33 @@ class TestBiotSavartJaxCppCoilCurrentParity:
             rtol=_DIRECT_KERNEL_TOLS["rtol"],
             atol=_DIRECT_KERNEL_TOLS["atol"],
         )
+
+    def test_per_coil_unit_field_contract_under_coil_group_sharding(self, monkeypatch):
+        """Per-coil current derivatives stay list-shaped under sharding envs."""
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        bs.B()
+        cpu_list = bs.dB_by_dcoilcurrents()
+
+        monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "coil_groups")
+        invalidate_backend_cache()
+        try:
+            bs_jax = BiotSavartJAX(list(bs._coils))
+            bs_jax.set_points(points_np)
+            jax_list = bs_jax.dB_by_dcoilcurrents()
+        finally:
+            invalidate_backend_cache()
+
+        assert isinstance(jax_list, list)
+        assert len(jax_list) == len(cpu_list)
+        for j_entry, c_entry in zip(jax_list, cpu_list):
+            np.testing.assert_allclose(
+                np.asarray(j_entry),
+                np.asarray(c_entry),
+                rtol=_DIRECT_KERNEL_TOLS["rtol"],
+                atol=_DIRECT_KERNEL_TOLS["atol"],
+            )
 
     def test_dA_by_dcoilcurrents_parity_ncsx(self):
         """``BiotSavartJAX.dA_by_dcoilcurrents()`` matches CPU list per coil.
@@ -1515,6 +1679,50 @@ class TestBiotSavartJAXCoilStateToken:
 
         assert spec_backed_a._coil_dof_state_token != initial_token
         assert spec_backed_a._coil_dofs_generation == 1
+
+    def test_spec_backed_biotsavart_x_setter_writes_free_dofs(self):
+        from simsopt.field.biotsavart_jax_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+        )
+        from simsopt.jax_core.specs import make_biot_savart_spec
+
+        class RecordingDofs:
+            def __init__(self):
+                self.free_x_written = None
+                self.full_x_written = None
+
+            @property
+            def free_x(self):
+                return self.free_x_written
+
+            @free_x.setter
+            def free_x(self, values):
+                self.free_x_written = np.asarray(values, dtype=np.float64)
+
+            @property
+            def full_x(self):
+                return self.full_x_written
+
+            @full_x.setter
+            def full_x(self, values):
+                self.full_x_written = np.asarray(values, dtype=np.float64)
+
+        coils = self._make_two_basic_coils()
+        bs_jax = BiotSavartJAX(list(coils))
+        spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+        spec_backed = SpecBackedBiotSavartJAX(spec)
+        recorder = RecordingDofs()
+        spec_backed._dofs = recorder
+        updated = np.asarray(spec_backed.x, dtype=np.float64) + 1.0e-4
+
+        spec_backed.x = updated
+
+        np.testing.assert_allclose(recorder.free_x_written, updated)
+        assert recorder.full_x_written is None
 
 
 if __name__ == "__main__":
