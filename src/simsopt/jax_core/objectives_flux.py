@@ -29,7 +29,7 @@ from .surface_rzfourier import (
     surface_rz_fourier_gamma_from_spec,
     surface_rz_fourier_normal_from_spec,
 )
-from ..objectives.integral_bdotn_jax import (
+from .integral_bdotn import (
     _nan_safe_zero_grid,
     integral_BdotN as integral_BdotN_jax,
     residual_BdotN as residual_BdotN_jax,

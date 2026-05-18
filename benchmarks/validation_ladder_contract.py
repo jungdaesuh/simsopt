@@ -57,6 +57,13 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_direct_cpp_oracle": True,
         "vector_parity_required": True,
     },
+    "relaxed_kernel": {
+        "rtol": 1e-6,
+        "atol": 1e-8,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "documents_reduction_order_drift": True,
+    },
     "ls_wrapper_gradient": {
         "rtol": 1e-10,
         "atol": 1e-12,

@@ -1569,7 +1569,7 @@ def _surface_xyz_tensor_scatter_indices(
     if not stellsym:
         return _as_int32_array(np.zeros((0,), dtype=np.int32))
 
-    from ..geo.surface_fourier_jax import stellsym_scatter_indices
+    from .surface_fourier_indices import stellsym_scatter_indices
 
     return _as_int32_array(stellsym_scatter_indices(mpol, ntor))
 

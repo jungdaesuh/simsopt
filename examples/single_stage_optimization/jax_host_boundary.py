@@ -1,8 +1,9 @@
 import numpy as np
 
 from simsopt._core.jax_host_boundary import (
-    host_array,
-    host_bool,
+    host_array as host_array,
+    host_bool as host_bool,
+    host_int as host_int,
     host_scalar,
 )
 

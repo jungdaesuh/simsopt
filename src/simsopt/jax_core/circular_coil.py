@@ -548,11 +548,16 @@ def circular_coil_A(spec: CircularCoilSpec, points: jax.Array) -> jax.Array:
 
 
 def circular_coil_dB(spec: CircularCoilSpec, points: jax.Array) -> jax.Array:
-    """``dB[p, j, l] = ∂_j B_l(x_p)`` for a circular coil.
+    """First spatial gradient of the circular-coil field.
 
-    The output has shape ``(N, 3, 3)`` with axis 1 the derivative
-    direction and axis 2 the ``B`` component, matching the upstream
-    public layout in :meth:`simsopt.field.CircularCoil._dB_by_dX_impl`.
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
+        direction; axis 2 is the B-field component. Matches the upstream
+        public layout in
+        :meth:`simsopt.field.CircularCoil._dB_by_dX_impl`.
     """
 
     r0, center, Inorm, theta, phi = _scalars(spec)

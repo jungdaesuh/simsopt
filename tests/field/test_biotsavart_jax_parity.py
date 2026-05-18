@@ -294,12 +294,12 @@ class TestBiotSavartParitySuite:
 
         Matches ``test_biotsavart_dAdX_taylortest``.
         """
-        np.random.seed(42)
+        rng = np.random.RandomState(42)
         gammas, gammadashs = _make_fourier_coil(200)
         currents = _device_float64_array([_CURRENT])
 
         points = _device_float64_array(
-            _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
+            _BASE_POINTS + 0.001 * (rng.rand(*_BASE_POINTS.shape) - 0.5)
         )
         _assert_point_perturbation_taylor_convergence(
             biot_savart_A,
@@ -318,12 +318,12 @@ class TestBiotSavartParitySuite:
         Matches ``test_biotsavart_dBdX_taylortest`` from the upstream suite.
         This is the multi-epsilon convergence gate requested by review item P1.
         """
-        np.random.seed(42)
+        rng = np.random.RandomState(42)
         gammas, gammadashs = _make_fourier_coil(200)
         currents = _device_float64_array([_CURRENT])
 
         points = _device_float64_array(
-            _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
+            _BASE_POINTS + 0.001 * (rng.rand(*_BASE_POINTS.shape) - 0.5)
         )
         _assert_point_perturbation_taylor_convergence(
             biot_savart_B,
@@ -342,12 +342,12 @@ class TestBiotSavartParitySuite:
         Matches ``test_biotsavart_gradient_symmetric_and_divergence_free``.
         Existing JAX test only checked div=0; this adds the symmetry check.
         """
-        np.random.seed(42)
+        rng = np.random.RandomState(42)
         gammas, gammadashs = _make_fourier_coil(200)
         currents = _device_float64_array([_CURRENT])
 
         points = _device_float64_array(
-            _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
+            _BASE_POINTS + 0.001 * (rng.rand(*_BASE_POINTS.shape) - 0.5)
         )
         dB_idx = _host_array(
             biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
@@ -364,11 +364,11 @@ class TestBiotSavartParitySuite:
 
         Matches ``test_d2B_by_dXdX_is_symmetric`` from the upstream suite.
         """
-        np.random.seed(42)
+        rng = np.random.RandomState(42)
         gammas, gammadashs = _make_fourier_coil(200)
         currents = _device_float64_array([_CURRENT])
         points = _device_float64_array(
-            _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
+            _BASE_POINTS + 0.001 * (rng.rand(*_BASE_POINTS.shape) - 0.5)
         )
 
         d2B = _host_array(
@@ -416,12 +416,12 @@ class TestBiotSavartParitySuite:
         Validates each channel of biot_savart_B_vjp (gammas, gammadashs,
         currents) via forward FD convergence.
         """
-        np.random.seed(seed)
+        rng = np.random.RandomState(seed)
         gammas, gammadashs = _make_fourier_coil(200)
         currents = _device_float64_array([_CURRENT])
 
         points = _device_float64_array(
-            _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
+            _BASE_POINTS + 0.001 * (rng.rand(*_BASE_POINTS.shape) - 0.5)
         )
 
         inputs = [gammas, gammadashs, currents]
@@ -432,7 +432,7 @@ class TestBiotSavartParitySuite:
         grad = vjp_out[channel_idx]
 
         h = _device_float64_scalar(1e-2) * _device_float64_array(
-            np.random.rand(*inputs[channel_idx].shape)
+            rng.rand(*inputs[channel_idx].shape)
         )
         dJ_dh = 2.0 * _host_float(jnp.sum(grad * h))
 
@@ -832,10 +832,10 @@ _CURVE_SPEC_FACTORIES = {
 
 def _make_curve_type_fixture(curvetype, nquad=100):
     """Build a single-coil field fixture for the given curve type."""
-    np.random.seed(2)
+    rng = np.random.RandomState(2)
     quadpoints = np.linspace(0, 1, nquad, endpoint=False)
     spec = _CURVE_SPEC_FACTORIES[curvetype](
-        quadpoints, order=4, rand_scale=0.01, rng=np.random
+        quadpoints, order=4, rand_scale=0.01, rng=rng
     )
     gamma, gammadash = curve_gamma_and_dash_from_spec(spec)
     gammas = gamma[None, :, :]
@@ -915,9 +915,9 @@ class TestCurveTypeParametrization:
         currents = _device_float64_array([1e4])
         B_orig = biot_savart_B(points, gammas, gammadashs, currents)
 
-        np.random.seed(99)
+        rng = np.random.RandomState(99)
         perturbed_dofs = _device_float64_array(
-            _host_array(spec.dofs) + 0.05 * np.random.rand(len(spec.dofs))
+            _host_array(spec.dofs) + 0.05 * rng.rand(len(spec.dofs))
         )
         from simsopt.jax_core import curve_spec_with_dofs
 

@@ -303,7 +303,7 @@ def boozer_radial_fixed_state_to_host(
 ) -> dict[str, object]:
     """Return a host-array restart payload for the private fixed-state spec."""
 
-    leaves, treedef = jax.tree_util.tree_flatten(spec)
+    leaves, treedef = jax.tree.flatten(spec)
     host_leaves = [jax.device_get(leaf) for leaf in leaves]
     return {"treedef": treedef, "leaves": host_leaves}
 
@@ -313,7 +313,7 @@ def boozer_radial_fixed_state_from_host(
 ) -> BoozerRadialFixedState:
     """Rebuild a private fixed-state spec from ``boozer_radial_fixed_state_to_host``."""
 
-    return jax.tree_util.tree_unflatten(payload["treedef"], payload["leaves"])
+    return jax.tree.unflatten(payload["treedef"], payload["leaves"])
 
 
 __all__ = [

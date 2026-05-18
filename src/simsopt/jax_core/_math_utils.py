@@ -6,6 +6,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+_FLOAT64_DTYPE = np.dtype(np.float64)
+
 
 def _explicit_device_array(value, *, dtype) -> jax.Array:
     from simsopt.backend import maybe_initialize_distributed_jax
@@ -23,8 +25,27 @@ def _shape_tuple(shape) -> tuple[int, ...]:
 def _contains_jax_leaves(value) -> bool:
     return any(
         isinstance(leaf, jax.Array) or hasattr(leaf, "aval")
-        for leaf in jax.tree_util.tree_leaves(value)
+        for leaf in jax.tree.leaves(value)
     )
+
+
+def _array_like_dtype(value) -> np.dtype | None:
+    dtype = getattr(value, "dtype", None)
+    if dtype is not None:
+        return np.dtype(dtype)
+    if isinstance(value, (np.ndarray, np.generic)):
+        return np.asarray(value).dtype
+    if isinstance(value, (list, tuple)):
+        if _contains_jax_leaves(value):
+            return np.dtype(jnp.asarray(value).dtype)
+        return np.asarray(value).dtype
+    return None
+
+
+def require_float64_dtype(name: str, value) -> None:
+    dtype = _array_like_dtype(value)
+    if dtype is not None and dtype != _FLOAT64_DTYPE:
+        raise TypeError(f"{name} must have dtype float64; got {dtype}.")
 
 
 def as_jax_array(value, *, dtype) -> jax.Array:
@@ -66,6 +87,8 @@ def as_runtime_array(value, *, dtype, reference):
 
 
 def as_runtime_float64(value, *, reference):
+    require_float64_dtype("reference", reference)
+    require_float64_dtype("value", value)
     return as_runtime_array(value, dtype=jnp.float64, reference=reference)
 
 
@@ -73,13 +96,9 @@ def concat_jax_float64(*parts) -> jax.Array:
     return jnp.concatenate(tuple(as_jax_float64(part) for part in parts))
 
 
-def scalar_at_axis0(array, index: int) -> jax.Array:
-    selector = np.zeros(int(array.shape[0]), dtype=np.float64)
-    selector[int(index)] = 1.0
-    return jnp.dot(array, _explicit_device_array(selector, dtype=np.float64))
-
-
 def scalar_like(reference, value) -> jax.Array:
+    if isinstance(value, jax.Array) or hasattr(value, "aval"):
+        return jnp.asarray(value, dtype=reference.dtype)
     return _explicit_device_array(value, dtype=reference.dtype)
 
 

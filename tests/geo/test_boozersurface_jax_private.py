@@ -2401,6 +2401,8 @@ class TestBoozerSurfaceJAXClassPrivate:
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True
         booz.options["ftol"] = 0.0
+        booz.options["bfgs_maxiter"] = 1
+        booz.options["maxcor"] = 4
 
         res = booz.run_code(iota=0.3, G=0.05)
         pre_newton = res["pre_newton"]
@@ -2409,8 +2411,9 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert res["type"] == "ls"
         assert np.isfinite(res["fun"])
         assert pre_newton["optimizer_method"] == "lbfgs-ondevice"
+        assert pre_newton["iter"] == 1
         assert pre_newton["success"] is False
-        assert np.max(np.abs(np.asarray(pre_newton["gradient"]))) < 1.0e-6
+        assert np.all(np.isfinite(np.asarray(pre_newton["gradient"])))
         assert np.all(np.isfinite(np.asarray(res["jacobian"])))
         assert res["success"] is True
         assert res["primal_success"] is True

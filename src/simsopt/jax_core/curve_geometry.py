@@ -9,20 +9,20 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..geo.curve import (
-    gamma_curve_on_surface,
+from .curve_kernels import (
+    curve_cws_rz_gamma_from_dofs,
     incremental_arclength_pure as _incremental_arclength_pure,
     kappa_pure as _kappa_pure,
     torsion_pure as _torsion_pure,
 )
-from ..geo.curvehelical import curve_helical_pure
-from ..geo.curveplanarfourier import curveplanarfourier_pure
-from ..geo.curverzfourier import curverzfourier_pure
-from ..geo.curvexyzfourier import (
+from .curve_helical import curve_helical_pure
+from .curve_planar_fourier import curveplanarfourier_pure
+from .curve_rz_fourier import curverzfourier_pure
+from .curve_xyz_fourier import (
     jaxfouriercurve_geometry_pure,
     jaxfouriercurve_pure,
 )
-from ..geo.curvexyzfouriersymmetries import jaxXYZFourierSymmetriescurve_pure
+from .curve_xyz_fourier_symmetries import jaxXYZFourierSymmetriescurve_pure
 from ._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
 )
@@ -62,7 +62,7 @@ def _as_explicit_float64(value, *, reference=None) -> jax.Array:
     if isinstance(value, jax.Array) or hasattr(value, "aval"):
         return jnp.asarray(value, dtype=jnp.float64)
     if isinstance(value, (list, tuple)):
-        leaves = jax.tree_util.tree_leaves(value)
+        leaves = jax.tree.leaves(value)
         if any(isinstance(leaf, jax.Array) or hasattr(leaf, "aval") for leaf in leaves):
             return jnp.asarray(value, dtype=jnp.float64)
     raise TypeError(
@@ -211,14 +211,13 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
     if spec_kind == "cws_fourier_rz":
         spec = cast(CurveCWSFourierRZSpec, spec)
         surface_dofs = spec.surface_dofs()
-        return lambda quadpoints: gamma_curve_on_surface(
+        return lambda quadpoints: curve_cws_rz_gamma_from_dofs(
             curve_dofs,
             quadpoints,
             spec.order,
             spec.G,
             spec.H,
             surface_dofs,
-            _SURF_TYPE_RZ_FOURIER,
             spec.surface.mpol,
             spec.surface.ntor,
             spec.surface.nfp,
@@ -286,13 +285,6 @@ def _mapped_input_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
     if map_spec.input_mode == "full":
         return mapped_full
     return _slice_1d_static(mapped_full, map_spec.input_start, map_spec.input_end)
-
-
-def optimizable_full_dofs_from_map_spec(
-    map_spec: OptimizableDofMapSpec,
-    owner_dofs,
-):
-    return _mapped_full_dofs(map_spec, owner_dofs)
 
 
 def optimizable_input_dofs_from_map_spec(
@@ -886,6 +878,135 @@ def curve_torsion_from_dofs(spec: CurveSpec, dofs):
     return _torsion_pure(gammadash, gammadashdash, gammadashdashdash)
 
 
+def _curve_scalar_jacobian_from_dofs(spec: CurveSpec, dofs, value_fn):
+    curve_dofs = _as_runtime_float64(dofs, reference=spec.dofs)
+    return jax.jacfwd(lambda curve_x: value_fn(spec, curve_x))(curve_dofs)
+
+
+def _curve_scalar_vjp_from_dofs(spec: CurveSpec, dofs, cotangent, value_fn):
+    curve_dofs = _as_runtime_float64(dofs, reference=spec.dofs)
+    cotangent_jax = _as_runtime_float64(cotangent, reference=curve_dofs)
+    _, pullback = jax.vjp(lambda curve_x: value_fn(spec, curve_x), curve_dofs)
+    return pullback(cotangent_jax)[0]
+
+
+def curve_dincremental_arclength_by_dcoeff_from_dofs(spec: CurveSpec, dofs):
+    return _curve_scalar_jacobian_from_dofs(
+        spec,
+        dofs,
+        curve_incremental_arclength_from_dofs,
+    )
+
+
+def curve_dincremental_arclength_by_dcoeff_vjp_from_dofs(
+    spec: CurveSpec,
+    dofs,
+    cotangent,
+):
+    return _curve_scalar_vjp_from_dofs(
+        spec,
+        dofs,
+        cotangent,
+        curve_incremental_arclength_from_dofs,
+    )
+
+
+def curve_dkappa_by_dcoeff_from_dofs(spec: CurveSpec, dofs):
+    return _curve_scalar_jacobian_from_dofs(
+        spec,
+        dofs,
+        curve_kappa_from_dofs,
+    )
+
+
+def curve_dkappa_by_dcoeff_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    return _curve_scalar_vjp_from_dofs(
+        spec,
+        dofs,
+        cotangent,
+        curve_kappa_from_dofs,
+    )
+
+
+def curve_dtorsion_by_dcoeff_from_dofs(spec: CurveSpec, dofs):
+    return _curve_scalar_jacobian_from_dofs(
+        spec,
+        dofs,
+        curve_torsion_from_dofs,
+    )
+
+
+def curve_dtorsion_by_dcoeff_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    return _curve_scalar_vjp_from_dofs(
+        spec,
+        dofs,
+        cotangent,
+        curve_torsion_from_dofs,
+    )
+
+
+def _curve_geometry_term_from_dofs(spec: CurveSpec, dofs, term_index: int):
+    if term_index < 2:
+        return curve_gamma_and_dash_from_dofs(spec, dofs)[term_index]
+    if term_index == 2:
+        return curve_geometry_from_dofs(spec, dofs)[2]
+    return _curve_geometry_with_third_derivative_from_dofs(spec, dofs)[3]
+
+
+def _curve_geometry_term_vjp_from_dofs(
+    spec: CurveSpec,
+    dofs,
+    cotangent,
+    *,
+    term_index: int,
+):
+    curve_dofs = _as_runtime_float64(dofs, reference=spec.dofs)
+    cotangent_jax = _as_runtime_float64(cotangent, reference=curve_dofs)
+
+    def output(curve_x):
+        return _curve_geometry_term_from_dofs(spec, curve_x, term_index)
+
+    _, pullback = jax.vjp(output, curve_dofs)
+    (coeff_cotangent,) = pullback(cotangent_jax)
+    return coeff_cotangent
+
+
+def curve_gamma_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    return _curve_geometry_term_vjp_from_dofs(
+        spec,
+        dofs,
+        cotangent,
+        term_index=0,
+    )
+
+
+def curve_gammadash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    return _curve_geometry_term_vjp_from_dofs(
+        spec,
+        dofs,
+        cotangent,
+        term_index=1,
+    )
+
+
+def curve_gammadashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    return _curve_geometry_term_vjp_from_dofs(
+        spec,
+        dofs,
+        cotangent,
+        term_index=2,
+    )
+
+
+def curve_gammadashdashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    return _curve_geometry_term_vjp_from_dofs(
+        spec,
+        dofs,
+        cotangent,
+        term_index=3,
+    )
+
+
 def _curve_cws_gamma_and_dash_from_parts(
     spec: CurveCWSFourierRZSpec,
     curve_dofs,
@@ -894,14 +1015,13 @@ def _curve_cws_gamma_and_dash_from_parts(
     quadpoints, tangents = _curve_quadpoints(spec, reference=curve_dofs)
 
     def gamma_kernel(qp):
-        return gamma_curve_on_surface(
+        return curve_cws_rz_gamma_from_dofs(
             curve_dofs,
             qp,
             spec.order,
             spec.G,
             spec.H,
             surface_dofs,
-            _SURF_TYPE_RZ_FOURIER,
             spec.surface.mpol,
             spec.surface.ntor,
             spec.surface.nfp,

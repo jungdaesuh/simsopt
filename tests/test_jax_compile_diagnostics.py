@@ -2,88 +2,102 @@
 
 This file verifies the bookkeeping/parsing invariants of the
 ``JAX_COMPILE_DIAGNOSTICS`` recorder threaded through the single-stage
-example: that parsed compile-target and cache-miss-site counts sum to
-the event counts minus the recorded parse misses. It does **not** test
-physics parity — it tests that the diagnostic recorder/parser itself
-stays internally consistent across runtime changes.
-
-Moved here from ``tests/integration/test_single_stage_physics_parity.py``
-per audit finding #23 in
-``.artifacts/jax-test-audit-2026-05-13/TEST_QUALITY_TODOS.md``: a
-diagnostic/instrumentation test should not live in a file named
-``*_physics_parity.py`` (downstream agents read that file as physics
-evidence).
+example. It does not test physics parity and intentionally avoids running
+the full single-stage subprocess.
 """
 
 from __future__ import annotations
 
-import sys
+import logging
 from pathlib import Path
 
-import pytest
-
-# Reach the heavy subprocess driver that already lives in the integration
-# test file. Duplicating ~200 lines of subprocess plumbing here would
-# create a divergence risk against the integration suite's source of
-# truth; instead, add ``tests/`` to ``sys.path`` so the package-style
-# import ``integration.test_single_stage_physics_parity`` resolves to
-# the same module pytest collects directly.
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_TESTS_ROOT = _REPO_ROOT / "tests"
-if str(_TESTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TESTS_ROOT))
-
-from integration.test_single_stage_physics_parity import (  # noqa: E402
-    DEFAULT_STAGE2_BS_PATH,
-    _run_single_stage_script_results,
+from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+    _JaxCompileDiagnosticsRecorder,
+    maybe_record_jax_compile_diagnostics,
 )
 
 
-class TestJaxCompileDiagnosticParser:
-    """Audit #23: verifies parser invariants on JAX_COMPILE_DIAGNOSTICS.
+def _record(message: str) -> logging.LogRecord:
+    return logging.LogRecord(
+        name="jax",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=0,
+        msg=message,
+        args=(),
+        exc_info=None,
+    )
 
-    Each test runs the single-stage example with
-    ``--record-jax-compile-diagnostics`` and inspects the recorded
-    accounting structure. The invariant under test is that the parser
-    accounts for every recorded compile / cache-miss event exactly once:
-    the per-target / per-site bucket totals equal the global event count
-    minus the recorded parse-miss count.
-    """
 
-    @pytest.mark.slow
-    def test_cpu_target_lane_case_records_compile_diagnostic_accounting(self):
-        results = _run_single_stage_script_results(
-            backend="jax",
-            optimizer_backend="ondevice",
-            platform="cpu",
-            stage2_bs_path=DEFAULT_STAGE2_BS_PATH,
-            maxiter=2,
-            benchmark_mode=True,
-            record_jax_compile_diagnostics=True,
-            target_lane_accepted_step_sync="final-only",
+def test_compile_diagnostic_recorder_parser_accounting_invariants():
+    recorder = _JaxCompileDiagnosticsRecorder(sample_limit=1)
+
+    recorder.emit(_record("Compiling target_lane_value with global shapes and types"))
+    recorder.emit(_record("Compiling target_lane_value with global shapes and types"))
+    recorder.emit(_record("Compiling  with global shapes and types"))
+    recorder.emit(_record("TRACING CACHE MISS at foo.py:12 (tracing key mismatch)"))
+    recorder.emit(_record("TRACING CACHE MISS at foo.py:12 (tracing key mismatch)"))
+    recorder.emit(_record("TRACING CACHE MISS at  (tracing key mismatch)"))
+
+    diagnostics = recorder.summary()
+    compile_event_count = diagnostics["compile_event_count"]
+    cache_miss_count = diagnostics["cache_miss_count"]
+    compile_target_parse_miss_count = diagnostics["compile_target_parse_miss_count"]
+    cache_miss_site_parse_miss_count = diagnostics["cache_miss_site_parse_miss_count"]
+
+    assert diagnostics["compile_targets"] == {"target_lane_value": 2}
+    assert diagnostics["cache_miss_sites"] == {"foo.py:12": 2}
+    assert diagnostics["compile_messages"] == [
+        "Compiling target_lane_value with global shapes and types"
+    ]
+    assert diagnostics["cache_miss_messages"] == [
+        "TRACING CACHE MISS at foo.py:12 (tracing key mismatch)"
+    ]
+    assert sum(diagnostics["compile_targets"].values()) == (
+        compile_event_count - compile_target_parse_miss_count
+    )
+    assert sum(diagnostics["cache_miss_sites"].values()) == (
+        cache_miss_count - cache_miss_site_parse_miss_count
+    )
+
+
+def test_compile_diagnostic_recorder_ignores_unrelated_warnings():
+    recorder = _JaxCompileDiagnosticsRecorder()
+
+    recorder.emit(_record("unrelated warning"))
+
+    assert recorder.summary() == {
+        "compile_event_count": 0,
+        "cache_miss_count": 0,
+        "compile_target_parse_miss_count": 0,
+        "cache_miss_site_parse_miss_count": 0,
+        "compile_targets": {},
+        "cache_miss_sites": {},
+        "compile_messages": [],
+        "cache_miss_messages": [],
+    }
+
+
+def test_compile_diagnostic_context_manager_captures_jax_logger_messages():
+    with maybe_record_jax_compile_diagnostics(True) as recorder:
+        logging.getLogger("jax").warning(
+            "Compiling smoke_target with global shapes and types"
         )
 
-        diagnostics = results.get("JAX_COMPILE_DIAGNOSTICS")
-        assert isinstance(diagnostics, dict)
-        compile_targets = diagnostics.get("compile_targets")
-        cache_miss_sites = diagnostics.get("cache_miss_sites")
-        assert isinstance(compile_targets, dict)
-        assert isinstance(cache_miss_sites, dict)
-        compile_event_count = int(diagnostics.get("compile_event_count", -1))
-        cache_miss_count = int(diagnostics.get("cache_miss_count", -1))
-        compile_target_parse_miss_count = int(
-            diagnostics.get("compile_target_parse_miss_count", -1)
-        )
-        cache_miss_site_parse_miss_count = int(
-            diagnostics.get("cache_miss_site_parse_miss_count", -1)
-        )
-        assert compile_event_count >= 0
-        assert cache_miss_count >= 0
-        assert compile_target_parse_miss_count >= 0
-        assert cache_miss_site_parse_miss_count >= 0
-        assert sum(int(value) for value in compile_targets.values()) == (
-            compile_event_count - compile_target_parse_miss_count
-        )
-        assert sum(int(value) for value in cache_miss_sites.values()) == (
-            cache_miss_count - cache_miss_site_parse_miss_count
-        )
+    assert recorder is not None
+    assert recorder.summary()["compile_targets"] == {"smoke_target": 1}
+
+
+def test_single_stage_runtime_wires_compile_diagnostic_results():
+    repo_root = Path(__file__).resolve().parents[1]
+    source = (
+        repo_root
+        / "examples/single_stage_optimization/SINGLE_STAGE"
+        / "single_stage_banana_example.py"
+    ).read_text(encoding="utf-8")
+
+    assert "maybe_record_jax_compile_diagnostics(" in source
+    assert "args.record_jax_compile_diagnostics and use_target_lane" in source
+    assert "jax_compile_diagnostics_recorder.summary()" in source
+    assert 'results["JAX_COMPILE_DIAGNOSTICS"] = jax_compile_diagnostics' in source
+    assert '"jax_compile_diagnostics.json"' in source

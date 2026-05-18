@@ -329,8 +329,8 @@ def _rotation_alphadash_impl(
     return rotation
 
 
-rotation_alpha = jax.jit(_rotation_alpha_impl, static_argnums=(2,))
-rotation_alphadash = jax.jit(_rotation_alphadash_impl, static_argnums=(2,))
+rotation_alpha = jax.jit(_rotation_alpha_impl, static_argnames=("order",))
+rotation_alphadash = jax.jit(_rotation_alphadash_impl, static_argnames=("order",))
 
 
 def rotation_dcoeff(points: object, order: int) -> np.ndarray:

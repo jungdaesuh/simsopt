@@ -56,7 +56,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 
 import jax
 import jax.numpy as jnp
@@ -75,6 +75,7 @@ __all__ = [
     "FLUX_FUNCTION_SCALARS",
     "InterpolatedBoozerFieldFrozenState",
     "SYMMETRY_EXPLOIT_SCALARS",
+    "_INTERP_EVALUATORS",
     "build_flux_function_interpolant",
     "build_symmetry_exploit_interpolant",
     "build_spec_for_scalar",
@@ -664,3 +665,33 @@ def evaluate_scalar(
         f"unknown scalar {scalar_name!r}; not in flux-function or symmetry-exploit "
         f"inventory"
     )
+
+
+def _eval_scalar_factory(scalar_name: str):
+    """Return a stable callable for wrapper/interpreter scalar caches."""
+
+    def _eval(
+        state: InterpolatedBoozerFieldFrozenState,
+        specs: Mapping[str, RegularGridInterpolant3DSpec],
+        points: jax.Array,
+    ) -> jax.Array:
+        return evaluate_scalar(state, specs, scalar_name, points)
+
+    _eval.__name__ = f"_eval_interp_{scalar_name}"
+    return _eval
+
+
+_INTERP_EVALUATORS: dict[
+    str,
+    Callable[
+        [
+            InterpolatedBoozerFieldFrozenState,
+            Mapping[str, RegularGridInterpolant3DSpec],
+            jax.Array,
+        ],
+        jax.Array,
+    ],
+] = {
+    name: _eval_scalar_factory(name)
+    for name in (*FLUX_FUNCTION_SCALARS, *tuple(SYMMETRY_EXPLOIT_SCALARS))
+}

@@ -67,11 +67,11 @@ def _empty_grouped_field_result(points: object, kernel):
 
 
 def _tree_add(left, right):
-    return jax.tree_util.tree_map(lambda x, y: x + y, left, right)
+    return jax.tree.map(lambda x, y: x + y, left, right)
 
 
 def _tree_trim_axis0(tree, size: int):
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda leaf: lax.slice_in_dim(leaf, start_index=0, limit_index=size, axis=0),
         tree,
     )
@@ -214,7 +214,7 @@ def _collective_group_field(points, gammas, gammadashs, currents, kernel, config
         check_vma=True,
     )
     def _group_kernel(points_block, gammas_block, gammadashs_block, currents_block):
-        return jax.tree_util.tree_map(
+        return jax.tree.map(
             lambda value: lax.psum(value, config.reduced_axis_name),
             group_kernel(
                 points_block,

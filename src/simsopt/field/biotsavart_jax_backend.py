@@ -55,6 +55,7 @@ from ..jax_core.field import (
     grouped_biot_savart_dB_by_dX_from_inputs,
     grouped_biot_savart_dB_by_dX_from_spec,
     grouped_coil_set_spec_from_coil_specs,
+    grouped_coil_set_spec_from_lists,
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
 )
@@ -78,7 +79,6 @@ _COIL_DOF_STATE_TOKEN_COUNTER = count()
 
 __all__ = [
     "BiotSavartJAX",
-    "BiotSavartBPullback",
     "BiotSavartFieldPullback",
     "SingleStageRuntimeSpecBiotSavartJAX",
     "SpecBackedBiotSavartJAX",
@@ -114,7 +114,7 @@ def _block_until_ready(value):
         for item in value:
             _block_until_ready(item)
         return
-    for leaf in jax.tree_util.tree_leaves(value):
+    for leaf in jax.tree.leaves(value):
         if hasattr(leaf, "block_until_ready"):
             leaf.block_until_ready()
 
@@ -318,9 +318,6 @@ class BiotSavartFieldPullback:
     def tree_unflatten(cls, coil_indices, children):
         (d_coil_arrays,) = children
         return cls(d_coil_arrays=d_coil_arrays, coil_indices=coil_indices)
-
-
-BiotSavartBPullback = BiotSavartFieldPullback
 
 
 class SpecBackedCurrent:
@@ -1456,12 +1453,11 @@ class BiotSavartJAX(Optimizable):
         """
         if not self._uses_uniform_curve_xyz_fourier_fastpath:
             return self._coil_arrays_in_order_from_dofs_generic_jax(coil_dofs)
-        from ..geo.curvexyzfourier import jaxfouriercurve_pure
+        from ..jax_core.curve_xyz_fourier import jaxfouriercurve_geometry_pure
 
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
 
         quadpoints = self._curve_quadpoints_jax
-        ones = _ones_like_float64(quadpoints)
 
         curve_dofs = []
         for curve in self._unique_base_curves:
@@ -1480,20 +1476,13 @@ class BiotSavartJAX(Optimizable):
         base_gammas = []
         base_gammadashs = []
         for curve_x in curve_dofs:
-            base_gammas.append(
-                jaxfouriercurve_pure(curve_x, quadpoints, self._curve_order)
+            gamma, gammadash, _, _ = jaxfouriercurve_geometry_pure(
+                curve_x,
+                quadpoints,
+                self._curve_order,
             )
-            base_gammadashs.append(
-                jax.jvp(
-                    lambda qpts, cx=curve_x: jaxfouriercurve_pure(
-                        cx,
-                        qpts,
-                        self._curve_order,
-                    ),
-                    (quadpoints,),
-                    (ones,),
-                )[1]
-            )
+            base_gammas.append(gamma)
+            base_gammadashs.append(gammadash)
 
         coil_gammas = []
         coil_gammadashs = []
@@ -1675,7 +1664,11 @@ class BiotSavartJAX(Optimizable):
         return list(grouped_field_data_from_spec(self.coil_set_spec()))
 
     def _coil_set_spec_from_explicit_state(self):
-        return self._coil_set_spec_from_dofs_immutable_specs(_as_jax_float64(self.x))
+        if self._uses_uniform_curve_xyz_fourier_fastpath:
+            return grouped_coil_set_spec_from_lists(
+                *self._coil_arrays_in_order_from_dofs(_as_jax_float64(self.x))
+            )
+        return self.coil_set_spec_from_dofs(_as_jax_float64(self.x))
 
     def _free_coil_set_spec_from_explicit_state(self):
         groups = []

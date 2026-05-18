@@ -84,8 +84,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from simsopt._array_contracts import require_nonnegative_int32_indices
-
+from .._host_array_contracts import require_nonnegative_int32_indices
 from ._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,

@@ -33,9 +33,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..geo.surface_fourier_jax import surface_area, surface_volume
 from ._math_utils import as_jax_float64 as _as_float64_array
 from .specs import SurfaceHennebergSpec
+from .surface_integrals import surface_area, surface_volume
 
 
 # ---------------------------------------------------------------------------

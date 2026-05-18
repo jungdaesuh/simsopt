@@ -72,10 +72,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..field.boozermagneticfield_jax import (
+from .boozer_radial_field import (
     BoozerRadialInterpolantFrozenState,
-    InterpolatedBoozerFieldFrozenState,
-    _INTERP_EVALUATORS,
     _eval_dGds as _radial_dGds,
     _eval_dIds as _radial_dIds,
     _eval_dKdtheta as _radial_dKdtheta,
@@ -104,6 +102,10 @@ from .boozer_analytic import (
     _eval_K as _analytic_K,
     _eval_modB as _analytic_modB,
 )
+from .interpolated_boozer_field import (
+    InterpolatedBoozerFieldFrozenState,
+    _INTERP_EVALUATORS,
+)
 
 __all__ = [
     "FieldlineTracingSpec",
@@ -125,6 +127,7 @@ __all__ = [
     "dopri5_step",
     "fieldline_rhs",
     "fullorbit_vacuum_rhs",
+    "get_phi",
     "guiding_center_boozer_rhs",
     "guiding_center_no_k_boozer_rhs",
     "guiding_center_vacuum_boozer_rhs",
@@ -539,6 +542,18 @@ def _continuous_phi(
         dist1 <= jnp.minimum(dist2, dist3),
         opt1,
         jnp.where(dist2 <= jnp.minimum(dist1, dist3), opt2, opt3),
+    )
+
+
+def get_phi(x, y, phi_near) -> jax.Array:
+    """Public JAX wrapper for the C++ ``get_phi`` continuous branch helper."""
+
+    dtype = jnp.result_type(x, y, phi_near)
+    return _continuous_phi(
+        jnp.asarray(x, dtype=dtype),
+        jnp.asarray(y, dtype=dtype),
+        jnp.asarray(phi_near, dtype=dtype),
+        dtype,
     )
 
 

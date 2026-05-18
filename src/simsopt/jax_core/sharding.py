@@ -160,7 +160,7 @@ def _array_leaf_ndim(leaf) -> int | None:
 
 
 def _first_row_array_leaf(tree):
-    for leaf in jax.tree_util.tree_leaves(tree):
+    for leaf in jax.tree.leaves(tree):
         ndim = _array_leaf_ndim(leaf)
         if ndim is not None and ndim > 0:
             return leaf
@@ -189,7 +189,7 @@ def _place_tree(
             sharding = axis_sharding
         return _place_array(leaf, sharding)
 
-    return jax.tree_util.tree_map(_place_leaf, tree)
+    return jax.tree.map(_place_leaf, tree)
 
 
 def _should_shard_points(points, tuning) -> bool:

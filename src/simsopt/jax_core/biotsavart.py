@@ -152,7 +152,7 @@ def _cross_product(left, right):
 
 
 def _tree_dynamic_update(prefix_tree, chunk_tree, start_index: int):
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda acc, update: lax.dynamic_update_slice(
             acc,
             update,
@@ -164,17 +164,15 @@ def _tree_dynamic_update(prefix_tree, chunk_tree, start_index: int):
 
 
 def _tree_trim(prefix_tree, size: int):
-    return jax.tree_util.tree_map(lambda leaf: _slice_prefix(leaf, size), prefix_tree)
+    return jax.tree.map(lambda leaf: _slice_prefix(leaf, size), prefix_tree)
 
 
 def _tree_concatenate(left, right):
-    return jax.tree_util.tree_map(
-        lambda x, y: jnp.concatenate((x, y), axis=0), left, right
-    )
+    return jax.tree.map(lambda x, y: jnp.concatenate((x, y), axis=0), left, right)
 
 
 def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda leaf: _zeros(
             (prefix_size,) + tuple(leaf.shape[1:]),
             dtype=leaf.dtype,
@@ -432,7 +430,6 @@ def _make_kernel(
     quad_bs,
     point_cs,
     point_vma_axis_name,
-    platform,
 ):
     """Build and JIT-compile a Biot-Savart kernel for the given tuning config.
 
@@ -440,13 +437,9 @@ def _make_kernel(
     ``lru_cache`` ensures the same config returns the same compiled function.
 
     Cache keyed on ``(integrand_key, diff_mode, coil_cs, quad_bs, point_cs,
-    point_vma_axis_name, platform)``.  ``platform`` is the active JAX backend
-    string (``jax.default_backend()``); including it in the key keeps the
-    cached Python closure aligned with the device the next call will use
-    even when the backend mode itself did not change. The factory body does
-    not consume ``platform`` — it is a cache-discriminator only.
+    point_vma_axis_name)``.  JAX owns per-backend executable caching below the
+    Python closure, so backend identity is not part of this LRU key.
     """
-    del platform
     integrand = _INTEGRANDS[integrand_key]
 
     def one_point(x, gammas, gammadashs, currents):
@@ -526,19 +519,17 @@ def _get_kernel(integrand_key, diff_mode, *, point_vma_axis_name=None):
         quad_bs,
         point_cs,
         point_vma_axis_name,
-        jax.default_backend(),
     )
 
 
 @lru_cache(maxsize=16)
-def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs, platform):
+def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
     """Build the tuning-keyed compiled VJP kernel for ``biot_savart_B``.
 
     ``biot_savart_B_vjp`` differentiates through the forward field kernel, so it
-    must be rebuilt when the backend tuning changes in the same process.  Keying
-    this factory on the same tuning tuple (plus active ``platform``) as the
-    forward kernels keeps the backend/performance contract consistent across
-    both paths.
+    must be rebuilt when the backend tuning changes in the same process.
+    Keying this factory on the same tuning tuple as the forward kernels keeps
+    the backend/performance contract consistent across both paths.
     """
     forward_kernel = _make_kernel(
         _Integrand.B,
@@ -547,7 +538,6 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs, platform):
         quad_bs,
         point_cs,
         None,
-        platform,
     )
 
     @jax.jit
@@ -569,7 +559,7 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs, platform):
 def _get_B_vjp_kernel():
     """Read tuning config and return the cached JIT-compiled VJP kernel."""
     coil_cs, quad_bs, point_cs = _read_tuning_config()
-    return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs, jax.default_backend())
+    return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs)
 
 
 def invalidate_kernel_cache() -> None:
@@ -595,6 +585,15 @@ def biot_savart_B(points, gammas, gammadashs, currents):
 
 
 def biot_savart_dB_by_dX(points, gammas, gammadashs, currents):
+    """First spatial gradient of the Biot-Savart magnetic field.
+
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
+        direction; axis 2 is the B-field component.
+    """
     return _get_kernel(_Integrand.B, _DiffMode.JACOBIAN)(
         points, gammas, gammadashs, currents
     )
@@ -616,6 +615,17 @@ def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
 
 
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
+    """Return ``(B, dB_by_dX)`` for the Biot-Savart field.
+
+    Returns
+    -------
+    B : jax.Array
+        Shape ``(n_points, 3)``.
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
+        direction; axis 2 is the B-field component.
+    """
     return _get_kernel(_Integrand.B, _DiffMode.VALUE_AND_JACOBIAN)(
         points, gammas, gammadashs, currents
     )
@@ -628,6 +638,17 @@ def biot_savart_B_and_dB_with_point_axis(
     currents,
     point_axis_name: str,
 ):
+    """``biot_savart_B_and_dB`` with a named vmap axis over points.
+
+    Returns
+    -------
+    B : jax.Array
+        Shape ``(n_points, 3)``.
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
+        direction; axis 2 is the B-field component.
+    """
     return _get_kernel(
         _Integrand.B,
         _DiffMode.VALUE_AND_JACOBIAN,
@@ -642,6 +663,15 @@ def biot_savart_A(points, gammas, gammadashs, currents):
 
 
 def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
+    """First spatial gradient of the Biot-Savart vector potential.
+
+    Returns
+    -------
+    dA : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dA[p, j, l] = ∂_j A_l(x_p)``. Axis 1 is the spatial derivative
+        direction; axis 2 is the A-field component.
+    """
     return _get_kernel(_Integrand.A, _DiffMode.JACOBIAN)(
         points, gammas, gammadashs, currents
     )

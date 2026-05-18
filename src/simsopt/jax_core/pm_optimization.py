@@ -132,9 +132,7 @@ def _argmin_finite_cost(costs: jax.Array, *, axis: int | None = None) -> jax.Arr
 
 
 def _has_tracer_leaf(value) -> bool:
-    return any(
-        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
-    )
+    return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(value))
 
 
 def _host_scalar_for_validation(name: str, value, *, dtype=None):
@@ -2334,10 +2332,16 @@ def projection_l2_balls(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
     m_maxima
         Shape ``(N,)``.
     """
-    norm = jnp.linalg.norm(m, axis=1)  # (N,)
+    norm_sq = jnp.sum(m * m, axis=1)
+    norm = _row_norm_without_zero_sqrt_gradient(norm_sq)
     unit = m_maxima**0  # Device-local 1 for zero/NaN radii and transfer guards.
-    denom = jnp.fmax(unit, norm / m_maxima)
-    return m / denom[:, None]
+    zero_radius = unit - unit
+    nonzero_radius = m_maxima != zero_radius
+    safe_m_maxima = jnp.where(nonzero_radius, m_maxima, unit)
+    radius_ratio = norm / safe_m_maxima
+    denom = jnp.fmax(unit, radius_ratio)
+    projected = m / denom[:, None]
+    return jnp.where(nonzero_radius[:, None], projected, zero_radius[:, None] * m)
 
 
 def _on_ball(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
@@ -2352,6 +2356,14 @@ def _on_ball(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
     return jnp.abs(xmag2 - mmax2) < (
         _BALL_ACTIVE_ABS_TOL + _BALL_ACTIVE_REL_TOL * mmax2
     )
+
+
+def _row_norm_without_zero_sqrt_gradient(norm_sq: jax.Array) -> jax.Array:
+    one = norm_sq**0
+    zero = one - one
+    has_norm = norm_sq > zero
+    safe_norm_sq = jnp.where(has_norm, norm_sq, one)
+    return jnp.where(has_norm, jnp.sqrt(safe_norm_sq), zero)
 
 
 def phi_mwpgp(m: jax.Array, g: jax.Array, m_maxima: jax.Array) -> jax.Array:
@@ -2394,10 +2406,12 @@ def _beta_tilde(
       - on-ball and ``<m_i, g_i> <= 0`` -> ``g_reduced_gradient``.
     """
     on_ball = _on_ball(m, m_maxima)
-    # Avoid divide-by-zero when ||m|| ≈ 0. ``ng`` is only used when
-    # on_ball is True, and on_ball implies ||m|| ≈ m_maxima > 0.
-    norm = jnp.linalg.norm(m, axis=1)
-    safe_norm = jnp.where(norm > 0.0, norm, 1.0)
+    # Avoid divide-by-zero and sqrt-at-zero gradients when ||m|| ≈ 0.
+    norm_sq = jnp.sum(m * m, axis=1)
+    norm_unit = norm_sq**0
+    has_norm = norm_sq > (norm_unit - norm_unit)
+    norm = _row_norm_without_zero_sqrt_gradient(norm_sq)
+    safe_norm = jnp.where(has_norm, norm, norm_unit)
     mg = jnp.sum(m * g, axis=1)  # <m_i, g_i>
     ng = mg / safe_norm  # (N,)
     grg = g_reduced_gradient(m, g, alpha, m_maxima)  # (N, 3)
@@ -2451,11 +2465,13 @@ def find_max_alphaf(
     # not need this because dipoles strictly satisfy ``c <= 0``; in JAX
     # autodiff this can still hit ``sqrt(-0.0)`` which is fine but a
     # tracer-safe ``maximum`` is harmless.
-    sqrt_disc = jnp.sqrt(jnp.maximum(disc, 0.0))
-    safe_a = jnp.where(a > _FIND_MAX_ALPHAF_TOL, a, 1.0)
+    active = a > _FIND_MAX_ALPHAF_TOL
+    safe_disc = jnp.where(active, jnp.maximum(disc, 0.0), 1.0)
+    sqrt_disc = jnp.sqrt(safe_disc)
+    safe_a = jnp.where(active, a, 1.0)
     alphaf = (-b + sqrt_disc) / (2.0 * safe_a)
     return jnp.where(
-        a > _FIND_MAX_ALPHAF_TOL,
+        active,
         alphaf,
         jnp.asarray(_FIND_MAX_ALPHAF_SENTINEL, dtype=alphaf.dtype),
     )

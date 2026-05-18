@@ -438,6 +438,47 @@ class TestIntegralBdotN:
 
         np.testing.assert_allclose(J, 0.0, atol=0.0)
 
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
+    def test_zero_normal_gradient_stays_finite(self, definition):
+        B = jnp.ones((1, 2, 3), dtype=jnp.float64)
+        target = jnp.zeros((1, 2), dtype=jnp.float64)
+        normal = jnp.array(
+            [[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]],
+            dtype=jnp.float64,
+        )
+
+        def objective(normal_arg):
+            return integral_BdotN(B, target, normal_arg, definition)
+
+        grad = host_array(jax.grad(objective)(normal))
+
+        assert np.all(np.isfinite(grad))
+
+    @pytest.mark.parametrize("definition", _DEFINITIONS)
+    def test_zero_normal_masks_nonfinite_inactive_inputs(self, definition):
+        B = jnp.array(
+            [[[jnp.nan, jnp.nan, jnp.nan], [0.0, 0.0, 2.0]]],
+            dtype=jnp.float64,
+        )
+        target = jnp.array([[jnp.nan, 1.0]], dtype=jnp.float64)
+        normal = jnp.array(
+            [[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]],
+            dtype=jnp.float64,
+        )
+
+        def objective(B_arg, target_arg, normal_arg):
+            return integral_BdotN(B_arg, target_arg, normal_arg, definition)
+
+        value, grads = jax.value_and_grad(objective, argnums=(0, 1, 2))(
+            B,
+            target,
+            normal,
+        )
+
+        assert np.isfinite(host_scalar(value))
+        for grad in grads:
+            assert np.all(np.isfinite(host_array(grad)))
+
     def test_normalized_reduction_stress_stays_on_contract(self, parity_lane):
         B, target, normal = _normalized_reduction_stress_data()
         rtol, atol = parity_acceptance_tolerance(

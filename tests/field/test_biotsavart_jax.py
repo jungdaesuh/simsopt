@@ -8,6 +8,7 @@ Validates against:
 """
 
 import importlib.util
+import inspect
 from contextlib import contextmanager
 import os
 from pathlib import Path
@@ -1072,6 +1073,26 @@ class TestBiotSavartJaxChunkedSelfConsistency:
     ``TestBiotSavartJaxCppParity`` above.
     """
 
+    def test_kernel_factories_do_not_key_equivalent_kernels_by_platform(self):
+        from simsopt.jax_core import biotsavart as core_bs
+
+        make_kernel_params = tuple(
+            inspect.signature(core_bs._make_kernel.__wrapped__).parameters
+        )
+        make_b_vjp_kernel_params = tuple(
+            inspect.signature(core_bs._make_B_vjp_kernel.__wrapped__).parameters
+        )
+
+        assert make_kernel_params == (
+            "integrand_key",
+            "diff_mode",
+            "coil_cs",
+            "quad_bs",
+            "point_cs",
+            "point_vma_axis_name",
+        )
+        assert make_b_vjp_kernel_params == ("coil_cs", "quad_bs", "point_cs")
+
     def test_backend_cache_invalidation_clears_kernel_cache(self):
         with _kernel_tuning_env("jax_cpu_parity"):
             from simsopt.jax_core import biotsavart as core_bs
@@ -1625,6 +1646,49 @@ class TestBiotSavartJAXCoilStateToken:
             )
             coils.append(Coil(curve, Current(current_amp)))
         return coils
+
+    @staticmethod
+    def _coil_arrays_in_original_order(coil_set_spec):
+        coil_count = sum(len(group.coil_indices) for group in coil_set_spec.groups)
+        gammas = [None] * coil_count
+        gammadashs = [None] * coil_count
+        currents = [None] * coil_count
+        for group in coil_set_spec.groups:
+            for position, coil_index in enumerate(group.coil_indices):
+                gammas[coil_index] = group.gammas[position]
+                gammadashs[coil_index] = group.gammadashs[position]
+                currents[coil_index] = group.currents[position]
+        return gammas, gammadashs, currents
+
+    def test_coil_set_spec_uses_uniform_curve_xyz_fourier_fastpath(self, monkeypatch):
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs_jax = BiotSavartJAX(self._make_two_basic_coils())
+        assert bs_jax._uses_uniform_curve_xyz_fourier_fastpath
+
+        fast_gammas, fast_gammadashs, fast_currents = (
+            bs_jax._coil_arrays_in_order_from_dofs(bs_jax.x)
+        )
+
+        def raise_if_immutable_lane_used(_coil_dofs):
+            raise AssertionError("immutable-spec lane used")
+
+        monkeypatch.setattr(
+            bs_jax,
+            "_coil_set_spec_from_dofs_immutable_specs",
+            raise_if_immutable_lane_used,
+        )
+
+        spec_gammas, spec_gammadashs, spec_currents = (
+            self._coil_arrays_in_original_order(bs_jax.coil_set_spec())
+        )
+
+        for actual, expected in zip(spec_gammas, fast_gammas, strict=True):
+            np.testing.assert_allclose(actual, expected)
+        for actual, expected in zip(spec_gammadashs, fast_gammadashs, strict=True):
+            np.testing.assert_allclose(actual, expected)
+        for actual, expected in zip(spec_currents, fast_currents, strict=True):
+            np.testing.assert_allclose(actual, expected)
 
     def test_biotsavart_jax_advances_coil_dof_state_token_on_x_update(self):
         from simsopt.field.biotsavart_jax_backend import BiotSavartJAX

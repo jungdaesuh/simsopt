@@ -3,7 +3,16 @@
 The functions in this module mirror the raw C++ kernels exposed through
 ``simsoptpp``. Inputs are Cartesian arrays unless ``dipole_field_Bn`` is given
 ``coordinate_flag="cylindrical"`` or ``"toroidal"``, matching the permanent
-magnet optimization matrix convention in the C++ oracle.
+magnet optimization matrix convention in the C++ oracle. Numeric inputs are
+converted to float64 before evaluation, matching the double-precision C++
+backend; float32 inputs are widened rather than preserved.
+
+Point-dipole kernels are singular when an evaluation point coincides with a
+dipole location. The raw kernels intentionally do not regularize that case;
+callers should avoid coincident points unless they are explicitly testing the
+non-finite singular contract. Non-cartesian ``dipole_field_Bn`` rotations use
+the JAX/``std::atan2`` zero-angle convention for degenerate basis angles, so
+dipoles on the cylindrical axis follow the same finite branch in JAX and C++.
 """
 
 from __future__ import annotations
@@ -38,6 +47,9 @@ __all__ = [
 _MU0_OVER_4PI = np.float64(1e-7)
 _GRID_RAY_COUNT = 2000
 _GRID_RAY_LENGTH = np.float64(4.0)
+_DIPOLE_FIELD_BN_COORDINATE_FLAGS = frozenset(
+    ("cartesian", "cylindrical", "toroidal")
+)
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,15 @@ def _require_xyz_matrix(name: str, value: object) -> jax.Array:
     if array.ndim != 2 or array.shape[1] != 3:
         raise ValueError(f"{name} must have shape (N, 3); got {array.shape!r}.")
     return array
+
+
+def _require_dipole_field_bn_coordinate_flag(coordinate_flag: str) -> str:
+    if coordinate_flag not in _DIPOLE_FIELD_BN_COORDINATE_FLAGS:
+        allowed = ", ".join(sorted(_DIPOLE_FIELD_BN_COORDINATE_FLAGS))
+        raise ValueError(
+            f"coordinate_flag must be one of {allowed}; got {coordinate_flag!r}."
+        )
+    return coordinate_flag
 
 
 def _require_matching_dipoles(
@@ -237,8 +258,15 @@ def dipole_field_dB(
 ) -> jax.Array:
     """Cartesian gradient of ``dipole_field_B``.
 
-    The returned layout is ``dB[p, j, k] = d B_j(x_p) / d x_k``, matching the
-    C++ ``dipole_field_dB`` array assignments and ``DipoleField.dB_by_dX()``.
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). Axis 1 is the B-field component;
+        axis 2 is the spatial derivative direction. Mirrors the C++
+        ``dipole_field_dB`` array assignments and
+        ``DipoleField.dB_by_dX()``.
     """
 
     points_arr = _require_xyz_matrix("points", points)
@@ -249,6 +277,15 @@ def dipole_field_dB(
 
 
 def dipole_field_dB_from_spec(points: object, spec: DipoleFieldSpec) -> jax.Array:
+    """Convenience wrapper around :func:`dipole_field_dB`.
+
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). See :func:`dipole_field_dB`.
+    """
     return dipole_field_dB(points, spec.dipole_points, spec.dipole_moments)
 
 
@@ -293,8 +330,14 @@ def dipole_field_dA(
 ) -> jax.Array:
     """Cartesian gradient of ``dipole_field_A``.
 
-    The returned layout is ``dA[p, j, k] = d A_j(x_p) / d x_k``, matching the
-    C++ ``dipole_field_dA`` array assignments.
+    Returns
+    -------
+    dA : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dA[p, l, j] = ∂_j A_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). Axis 1 is the A-field component;
+        axis 2 is the spatial derivative direction. Mirrors the C++
+        ``dipole_field_dA`` array assignments.
     """
 
     points_arr = _require_xyz_matrix("points", points)
@@ -305,6 +348,15 @@ def dipole_field_dA(
 
 
 def dipole_field_dA_from_spec(points: object, spec: DipoleFieldSpec) -> jax.Array:
+    """Convenience wrapper around :func:`dipole_field_dA`.
+
+    Returns
+    -------
+    dA : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dA[p, l, j] = ∂_j A_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). See :func:`dipole_field_dA`.
+    """
     return dipole_field_dA(points, spec.dipole_points, spec.dipole_moments)
 
 
@@ -469,11 +521,16 @@ def dipole_field_Bn(
     ``b`` is accepted for signature parity with ``simsoptpp.dipole_field_Bn``;
     the C++ implementation checks its storage order but does not use its
     contents in the returned matrix.
+
+    Singularity policy matches the raw C++ kernel: coincident evaluation and
+    dipole points are not regularized, and non-cartesian basis rotations require
+    dipole locations with well-defined cylindrical/toroidal angles.
     """
 
     points_arr = _require_xyz_matrix("points", points)
     dipole_points_arr = _require_xyz_matrix("dipole_points", dipole_points)
     unitnormal_arr = _require_xyz_matrix("unitnormal", unitnormal)
+    coordinate_flag = _require_dipole_field_bn_coordinate_flag(coordinate_flag)
     _as_jax_float64(b)
     if unitnormal_arr.shape != points_arr.shape:
         raise ValueError(

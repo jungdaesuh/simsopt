@@ -56,11 +56,11 @@ Contract notes
   ``rtol = 1e-10``), not ``direct_kernel``.
 
 This module deliberately does **not** wrap the upstream eigenvalue
-extraction in a sign-stabilizing post-processor: the iota sign
-convention is determined entirely by ``np.arctan2(imag, real)`` of the
-first eigenvalue returned by ``jnp.linalg.eig``. JAX and NumPy use the
-same LAPACK eig path for 2x2 matrices, so the ordering matches the CPU
-oracle within numerical tolerance.
+extraction in a sign-stabilizing post-processor: the iota sign convention
+is determined entirely by ``arctan2(imag, real)`` of the closed-form first
+eigenvalue of the 2x2 tangent map. The closed form preserves the
+NumPy/JAX first-eigenvalue branch used by the CPU oracle without routing
+the hot path through a general eigensolver.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..geo.curverzfourier import curverzfourier_pure
+from .curve_rz_fourier import curverzfourier_pure
 from .specs import CurveRZFourierSpec
 
 __all__ = [
@@ -544,6 +544,21 @@ def _integrate_tangent_map(
     return y_final, phi_final, steps_taken, succeeded
 
 
+def _first_eigenvalue_angle_2x2(matrix: jax.Array) -> jax.Array:
+    a = matrix[0, 0]
+    b = matrix[0, 1]
+    c = matrix[1, 0]
+    d = matrix[1, 1]
+    trace = a + d
+    determinant = a * d - b * c
+    discriminant = trace * trace - 4.0 * determinant
+    real_if_complex = 0.5 * trace
+    real_if_real = 0.5 * (trace + jnp.sqrt(jnp.maximum(discriminant, 0.0)))
+    real_part = jnp.where(discriminant < 0.0, real_if_complex, real_if_real)
+    imag_part = 0.5 * jnp.sqrt(jnp.maximum(-discriminant, 0.0))
+    return jnp.arctan2(imag_part, real_part)
+
+
 def on_axis_iota_rk(
     axis_spec: CurveRZFourierSpec,
     field_eval_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
@@ -588,12 +603,10 @@ def on_axis_iota_rk(
     The tangent-map state ``y = [a, b, c, d]`` flattens the 2x2
     monodromy matrix in row-major order, matching the upstream
     ``y0 = [1, 0, 0, 1]`` initial condition. After integration to
-    ``phi = 1 / nfp``, ``iota`` is extracted as
-    ``arctan2(im(eig(M)_0), re(eig(M)_0)) * nfp / (2 pi)`` so that the
-    sign and branch agree with the SciPy oracle bit-for-bit modulo the
-    independent eigenvalue ordering of NumPy / JAX LAPACK shims (both
-    return the same first eigenvalue for a real 2x2 with conjugate
-    eigenvalues at the precision of the integrator).
+    ``phi = 1 / nfp``, ``iota`` is extracted from the closed-form first
+    eigenvalue angle of the real 2x2 monodromy matrix, matching the
+    NumPy/JAX ordering used by the SciPy oracle without routing through a
+    general eigensolver.
 
     Forward-mode AD (``jax.jvp``, ``jax.jacfwd``) is supported through
     ``jax.lax.while_loop``. Reverse-mode AD (``jax.grad``, ``jax.vjp``,
@@ -623,9 +636,8 @@ def on_axis_iota_rk(
         max_steps=int(max_steps),
     )
     M = y_final.reshape((2, 2))
-    evals, _ = jnp.linalg.eig(M)
-    eig0 = evals[0]
+    eig0_angle = _first_eigenvalue_angle_2x2(M)
     nfp_arr = jnp.asarray(nfp, dtype=jnp.float64)
     two_pi = jnp.asarray(2.0 * jnp.pi, dtype=jnp.float64)
-    iota = jnp.arctan2(jnp.imag(eig0), jnp.real(eig0)) * nfp_arr / two_pi
+    iota = eig0_angle * nfp_arr / two_pi
     return iota, steps_taken, succeeded

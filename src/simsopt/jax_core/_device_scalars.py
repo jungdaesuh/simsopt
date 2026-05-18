@@ -11,7 +11,7 @@ def device_one(reference: jax.Array) -> jax.Array:
 
 
 def two_pi(reference: jax.Array) -> jax.Array:
-    pi = jnp.arccos(-device_one(reference))
+    pi = jax.lax.stop_gradient(jnp.arccos(-device_one(reference)))
     return pi + pi
 
 

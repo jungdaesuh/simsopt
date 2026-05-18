@@ -43,8 +43,6 @@ kernel to ``direct_kernel`` tolerance (``rtol=1e-10``, ``atol=1e-12``).
 
 from __future__ import annotations
 
-from functools import partial
-
 import jax
 import jax.numpy as jnp
 
@@ -231,7 +229,7 @@ def _compute_K_per_point(
     return (gszeta + iota_isurf * gstheta) / sqrtg
 
 
-@partial(jax.jit, static_argnames=())
+@jax.jit
 def compute_kmns(
     rmnc: jax.Array,
     drmncds: jax.Array,
@@ -290,7 +288,7 @@ def compute_kmns(
     return kmns_T.T  # (num_modes, num_surf)
 
 
-@partial(jax.jit, static_argnames=())
+@jax.jit
 def compute_kmnc_kmns(
     rmnc: jax.Array,
     drmncds: jax.Array,
@@ -381,7 +379,7 @@ def compute_kmnc_kmns(
 # ----------------------------------------------------------------------
 
 
-@partial(jax.jit, static_argnames=())
+@jax.jit
 def fourier_transform_odd(
     K: jax.Array,
     xm: jax.Array,
@@ -408,7 +406,7 @@ def fourier_transform_odd(
     return jnp.where(jnp.arange(numer.shape[0]) == 0, 0.0, result)
 
 
-@partial(jax.jit, static_argnames=())
+@jax.jit
 def fourier_transform_even(
     K: jax.Array,
     xm: jax.Array,
@@ -434,7 +432,7 @@ def fourier_transform_even(
 # ----------------------------------------------------------------------
 
 
-@partial(jax.jit, static_argnames=())
+@jax.jit
 def inverse_fourier_transform_odd_1d(
     kmns: jax.Array,
     xm: jax.Array,
@@ -453,7 +451,7 @@ def inverse_fourier_transform_odd_1d(
     return sin_a @ _zero_dc_vector(kmns)
 
 
-@partial(jax.jit, static_argnames=())
+@jax.jit
 def inverse_fourier_transform_odd_2d(
     kmns: jax.Array,
     xm: jax.Array,
@@ -497,7 +495,7 @@ def inverse_fourier_transform_odd(
     )
 
 
-@partial(jax.jit, static_argnames=())
+@jax.jit
 def inverse_fourier_transform_even_1d(
     kmnc: jax.Array,
     xm: jax.Array,
@@ -514,7 +512,7 @@ def inverse_fourier_transform_even_1d(
     return cos_a @ kmnc
 
 
-@partial(jax.jit, static_argnames=())
+@jax.jit
 def inverse_fourier_transform_even_2d(
     kmnc: jax.Array,
     xm: jax.Array,

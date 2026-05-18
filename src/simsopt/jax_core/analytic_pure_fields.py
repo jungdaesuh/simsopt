@@ -329,15 +329,20 @@ def toroidal_B(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
 
 
 def toroidal_dB(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
-    """``dB[p, l, j] = ∂_j B_l(x_p)`` for a toroidal field.
+    """First spatial gradient of the toroidal field.
 
-    Layout note: axis 1 is the B component, axis 2 is the derivative
-    direction. This matches the CPU oracle's ``np.array([dBdx,
-    dBdy, dBdz]).T`` storage in ``ToroidalField._dB_by_dX_impl``
-    rather than the abstract simsopt-jax tensor convention
-    documented in ``CLAUDE.md``. The deviation is intentional so
-    that ``direct_kernel`` same-state parity vs the CPU oracle holds
-    bit-for-bit. See the module-level docstring.
+    The CPU oracle's ``np.array([dBdx, dBdy, dBdz]).T`` storage in
+    ``ToroidalField._dB_by_dX_impl`` is preserved bit-for-bit so that
+    ``direct_kernel`` same-state parity holds against the C++ reference.
+    See the module-level docstring.
+
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). Axis 1 is the B-field component;
+        axis 2 is the spatial derivative direction.
     """
     R0, B0 = _toroidal_scalars(spec)
     return _toroidal_dB_jit(R0, B0, _validate_points(points))
@@ -356,11 +361,16 @@ def toroidal_A(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
 
 
 def toroidal_dA(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
-    """``dA[p, l, j] = ∂_j A_l(x_p)`` for a toroidal field's vector
-    potential.
+    """First spatial gradient of the toroidal vector potential.
 
-    Layout note: axis 1 is the A component, axis 2 is the derivative
-    direction (CPU-oracle layout; see ``toroidal_dB`` docstring).
+    Returns
+    -------
+    dA : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dA[p, l, j] = ∂_j A_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). Axis 1 is the A-field component;
+        axis 2 is the spatial derivative direction. CPU-oracle layout;
+        see ``toroidal_dB`` for the parity rationale.
     """
     R0, B0 = _toroidal_scalars(spec)
     return _toroidal_dA_jit(R0, B0, _validate_points(points))
@@ -508,10 +518,16 @@ def poloidal_B(spec: PoloidalFieldSpec, points: jax.Array) -> jax.Array:
 
 
 def poloidal_dB(spec: PoloidalFieldSpec, points: jax.Array) -> jax.Array:
-    """``dB[p, l, j] = ∂_j B_l(x_p)`` for a poloidal field.
+    """First spatial gradient of the poloidal field.
 
-    Layout note: axis 1 is the B component, axis 2 is the derivative
-    direction (CPU-oracle layout; see ``toroidal_dB`` docstring).
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
+        simsoptpp C++ storage order). Axis 1 is the B-field component;
+        axis 2 is the spatial derivative direction. CPU-oracle layout;
+        see ``toroidal_dB`` for the parity rationale.
     """
     R0, B0, q = _poloidal_scalars(spec)
     return _poloidal_dB_jit(R0, B0, q, _validate_points(points))
@@ -642,6 +658,15 @@ def mirror_B(spec: MirrorModelSpec, points: jax.Array) -> jax.Array:
 
 
 def mirror_dB(spec: MirrorModelSpec, points: jax.Array) -> jax.Array:
-    """``dB/dX[p, j, l]`` for the WHAM mirror model, CPU oracle layout."""
+    """First spatial gradient of the WHAM double-Lorentzian mirror field.
+
+    Returns
+    -------
+    dB : jax.Array
+        Shape ``(n_points, 3, 3)``. Axis convention:
+        ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
+        direction; axis 2 is the B-field component. This matches the
+        CPU ``MirrorModel._dB_by_dX_impl`` row-major slab order.
+    """
     B0, gamma, Zm = _mirror_scalars(spec)
     return _mirror_dB_jit(B0, gamma, Zm, _validate_points(points))

@@ -42,7 +42,15 @@ del _apply_jax_runtime_config, _should_eagerly_configure_jax, _os, _sys
 # "from xyz import *".  If xyz[.py] contains __all__ = ['XYZ'], only XYZ is
 # imported
 
-from ._core import make_optimizable, load, save
+_CORE_EXPORTS = frozenset(("make_optimizable", "load", "save"))
+
+__all__ = [
+    "make_optimizable",
+    "load",
+    "save",
+    "__version__",
+    "__built_with_xsimd__",
+]
 
 # VERSION info
 try:
@@ -50,8 +58,22 @@ try:
 except ImportError:
     __version__ = "0+unknown"
 
-# Expose XSIMD dependency in simsoptpp (optional: absent in JAX-only envs)
-try:
-    from simsoptpp import using_xsimd as __built_with_xsimd__
-except (ImportError, AttributeError):
-    __built_with_xsimd__ = False
+def __getattr__(name):
+    if name in _CORE_EXPORTS:
+        from . import _core as _core_mod
+
+        value = getattr(_core_mod, name)
+        globals()[name] = value
+        return value
+    if name == "__built_with_xsimd__":
+        try:
+            from simsoptpp import using_xsimd as value
+        except (ImportError, AttributeError):
+            value = False
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

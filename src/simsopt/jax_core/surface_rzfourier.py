@@ -558,6 +558,101 @@ def surface_rz_fourier_gammadash2dash2_from_spec(spec: SurfaceRZFourierSpec):
     )
 
 
+def _surface_rz_fourier_derivative_lin_from_spec(
+    spec: SurfaceRZFourierSpec,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+    phi_order: int,
+    theta_order: int,
+) -> jax.Array:
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi).reshape(-1)
+    quadpoints_theta_jax = _as_jax_float64(quadpoints_theta).reshape(-1)
+
+    def evaluate_pair(phi: jax.Array, theta: jax.Array):
+        pair_spec = make_surface_rzfourier_spec(
+            rc=spec.rc,
+            rs=spec.rs,
+            zc=spec.zc,
+            zs=spec.zs,
+            quadpoints_phi=jnp.atleast_1d(phi),
+            quadpoints_theta=jnp.atleast_1d(theta),
+            nfp=spec.nfp,
+            stellsym=spec.stellsym,
+        )
+        phi_grid, m, n, cos_terms, sin_terms = _mode_terms(pair_spec)
+        cos_phi, sin_phi = _phi_frame(phi_grid)
+        return _surface_rz_fourier_derivative_from_terms(
+            pair_spec,
+            phi_order,
+            theta_order,
+            m,
+            n,
+            cos_terms,
+            sin_terms,
+            cos_phi,
+            sin_phi,
+            two_pi(pair_spec.quadpoints_theta),
+        )[0, 0]
+
+    return jax.vmap(evaluate_pair)(quadpoints_phi_jax, quadpoints_theta_jax)
+
+
+def surface_rz_fourier_gammadash1dash1dash1_lin_from_spec(
+    spec: SurfaceRZFourierSpec,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+) -> jax.Array:
+    return _surface_rz_fourier_derivative_lin_from_spec(
+        spec,
+        quadpoints_phi,
+        quadpoints_theta,
+        3,
+        0,
+    )
+
+
+def surface_rz_fourier_gammadash1dash1dash2_lin_from_spec(
+    spec: SurfaceRZFourierSpec,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+) -> jax.Array:
+    return _surface_rz_fourier_derivative_lin_from_spec(
+        spec,
+        quadpoints_phi,
+        quadpoints_theta,
+        2,
+        1,
+    )
+
+
+def surface_rz_fourier_gammadash1dash2dash2_lin_from_spec(
+    spec: SurfaceRZFourierSpec,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+) -> jax.Array:
+    return _surface_rz_fourier_derivative_lin_from_spec(
+        spec,
+        quadpoints_phi,
+        quadpoints_theta,
+        1,
+        2,
+    )
+
+
+def surface_rz_fourier_gammadash2dash2dash2_lin_from_spec(
+    spec: SurfaceRZFourierSpec,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+) -> jax.Array:
+    return _surface_rz_fourier_derivative_lin_from_spec(
+        spec,
+        quadpoints_phi,
+        quadpoints_theta,
+        0,
+        3,
+    )
+
+
 def surface_rz_fourier_first_fund_form_from_spec(spec: SurfaceRZFourierSpec):
     drd1 = surface_rz_fourier_gammadash1_from_spec(spec)
     drd2 = surface_rz_fourier_gammadash2_from_spec(spec)
@@ -771,6 +866,58 @@ def surface_rz_fourier_gammadash2dash2_from_dofs(
         surface_rz_fourier_gammadash2dash2_from_spec,
         spec,
         dofs,
+    )
+
+
+def surface_rz_fourier_gammadash1dash1dash1_lin_from_dofs(
+    spec: SurfaceRZFourierSpec,
+    dofs: jax.Array,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+) -> jax.Array:
+    return surface_rz_fourier_gammadash1dash1dash1_lin_from_spec(
+        _spec_from_dofs(spec, dofs),
+        quadpoints_phi,
+        quadpoints_theta,
+    )
+
+
+def surface_rz_fourier_gammadash1dash1dash2_lin_from_dofs(
+    spec: SurfaceRZFourierSpec,
+    dofs: jax.Array,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+) -> jax.Array:
+    return surface_rz_fourier_gammadash1dash1dash2_lin_from_spec(
+        _spec_from_dofs(spec, dofs),
+        quadpoints_phi,
+        quadpoints_theta,
+    )
+
+
+def surface_rz_fourier_gammadash1dash2dash2_lin_from_dofs(
+    spec: SurfaceRZFourierSpec,
+    dofs: jax.Array,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+) -> jax.Array:
+    return surface_rz_fourier_gammadash1dash2dash2_lin_from_spec(
+        _spec_from_dofs(spec, dofs),
+        quadpoints_phi,
+        quadpoints_theta,
+    )
+
+
+def surface_rz_fourier_gammadash2dash2dash2_lin_from_dofs(
+    spec: SurfaceRZFourierSpec,
+    dofs: jax.Array,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+) -> jax.Array:
+    return surface_rz_fourier_gammadash2dash2dash2_lin_from_spec(
+        _spec_from_dofs(spec, dofs),
+        quadpoints_phi,
+        quadpoints_theta,
     )
 
 

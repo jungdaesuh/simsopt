@@ -34,11 +34,25 @@ import pytest
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt.geo.curve import RotatedCurve
 from simsopt.geo.curvehelical import CurveHelical
-from simsopt.geo.curveplanarfourier import CurvePlanarFourier, curveplanarfourier_pure
+from simsopt.geo.curveperturbed import CurvePerturbed, GaussianSampler, PerturbationSample
+from simsopt.geo.curveplanarfourier import CurvePlanarFourier
 from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
-from simsopt.jax_core import curve_spec_from_curve
+from simsopt.jax_core import (
+    curve_dincremental_arclength_by_dcoeff_from_dofs,
+    curve_dincremental_arclength_by_dcoeff_vjp_from_dofs,
+    curve_dkappa_by_dcoeff_from_dofs,
+    curve_dkappa_by_dcoeff_vjp_from_dofs,
+    curve_dtorsion_by_dcoeff_from_dofs,
+    curve_dtorsion_by_dcoeff_vjp_from_dofs,
+    curve_gamma_vjp_from_dofs,
+    curve_gammadash_vjp_from_dofs,
+    curve_gammadashdash_vjp_from_dofs,
+    curve_gammadashdashdash_vjp_from_dofs,
+    curve_spec_from_curve,
+)
+from simsopt.jax_core.curve_planar_fourier import curveplanarfourier_pure
 from simsopt.jax_core.curve_geometry import (
     _curve_geometry_with_third_derivative_from_dofs,
     curve_geometry_from_dofs,
@@ -48,6 +62,9 @@ from simsopt.jax_core.curve_geometry import (
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
 _RTOL = _DIRECT_KERNEL["rtol"]
 _ATOL = _DIRECT_KERNEL["atol"]
+_DERIVATIVE_HEAVY = parity_ladder_tolerances("derivative_heavy")
+_DERIV_RTOL = _DERIVATIVE_HEAVY["first_derivative_rtol"]
+_DERIV_ATOL = _DERIVATIVE_HEAVY["first_derivative_atol"]
 
 
 _PRODUCTION_NCOILS = 4
@@ -206,6 +223,42 @@ _PRODUCTION_CURVE_FACTORIES = (
     ("CurveHelical", _make_curve_helical, _seed_dofs_helical),
 )
 
+_CURVE_VJP_CASES = (
+    ("gamma", curve_gamma_vjp_from_dofs, "dgamma_by_dcoeff"),
+    ("gammadash", curve_gammadash_vjp_from_dofs, "dgammadash_by_dcoeff"),
+    (
+        "gammadashdash",
+        curve_gammadashdash_vjp_from_dofs,
+        "dgammadashdash_by_dcoeff",
+    ),
+    (
+        "gammadashdashdash",
+        curve_gammadashdashdash_vjp_from_dofs,
+        "dgammadashdashdash_by_dcoeff",
+    ),
+)
+
+_CURVE_SCALAR_DERIVATIVE_CASES = (
+    (
+        "incremental_arclength",
+        curve_dincremental_arclength_by_dcoeff_from_dofs,
+        curve_dincremental_arclength_by_dcoeff_vjp_from_dofs,
+        "dincremental_arclength_by_dcoeff",
+    ),
+    (
+        "kappa",
+        curve_dkappa_by_dcoeff_from_dofs,
+        curve_dkappa_by_dcoeff_vjp_from_dofs,
+        "dkappa_by_dcoeff",
+    ),
+    (
+        "torsion",
+        curve_dtorsion_by_dcoeff_from_dofs,
+        curve_dtorsion_by_dcoeff_vjp_from_dofs,
+        "dtorsion_by_dcoeff",
+    ),
+)
+
 
 @pytest.mark.parametrize(
     ("curve_name", "curve_factory", "seed_factory"),
@@ -281,6 +334,197 @@ def test_curve_spec_pullback_production_scale_parity(
                     f"{curve_name} coil {coil_index}: gammadashdashdash parity failed."
                 ),
             )
+
+
+@pytest.mark.parametrize(
+    ("curve_name", "curve_factory", "seed_factory"),
+    _PRODUCTION_CURVE_FACTORIES,
+    ids=[name for name, _factory, _seed in _PRODUCTION_CURVE_FACTORIES],
+)
+def test_curve_least_squares_fit_cpu_boundary_materializes_jax_spec(
+    curve_name: str,
+    curve_factory,
+    seed_factory,
+):
+    """CPU curve fit mutation remains a valid JAX-spec materialization boundary."""
+
+    rng = np.random.default_rng(_PRODUCTION_RNG_SEED + 29)
+    source_dofs = seed_factory(_PRODUCTION_ORDER, rng)
+    target_dofs = seed_factory(_PRODUCTION_ORDER, rng)
+    source_curve = curve_factory(
+        _PRODUCTION_ORDER,
+        _PRODUCTION_NQUADPOINTS,
+        source_dofs,
+    )
+    target_curve = curve_factory(
+        _PRODUCTION_ORDER,
+        _PRODUCTION_NQUADPOINTS,
+        target_dofs,
+    )
+    target_gamma = np.asarray(target_curve.gamma(), dtype=np.float64)
+
+    source_curve.least_squares_fit(target_gamma.copy())
+    spec = curve_spec_from_curve(source_curve)
+    fitted_gamma_cpu = np.asarray(source_curve.gamma(), dtype=np.float64)
+    fitted_gamma_jax = np.asarray(
+        curve_geometry_from_dofs(spec, spec.dofs)[0],
+        dtype=np.float64,
+    )
+
+    np.testing.assert_allclose(
+        fitted_gamma_jax,
+        fitted_gamma_cpu,
+        rtol=_RTOL,
+        atol=_ATOL,
+        err_msg=(
+            f"{curve_name} CPU-fitted curve did not materialize into an equivalent "
+            "JAX CurveSpec."
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("curve_name", "curve_factory", "seed_factory"),
+    _PRODUCTION_CURVE_FACTORIES,
+    ids=[name for name, _factory, _seed in _PRODUCTION_CURVE_FACTORIES],
+)
+@pytest.mark.parametrize(
+    ("term_name", "vjp_fn", "derivative_method"),
+    _CURVE_VJP_CASES,
+    ids=[name for name, _fn, _method in _CURVE_VJP_CASES],
+)
+def test_curve_named_geometry_vjp_wrappers_match_cpu_derivatives(
+    curve_name: str,
+    curve_factory,
+    seed_factory,
+    term_name: str,
+    vjp_fn,
+    derivative_method: str,
+):
+    """Named JAX VJP wrappers match CPU derivative tensor contractions."""
+
+    rng = np.random.default_rng(_PRODUCTION_RNG_SEED + 31)
+    dofs = seed_factory(_PRODUCTION_ORDER, rng)
+    curve = curve_factory(_PRODUCTION_ORDER, _PRODUCTION_NQUADPOINTS, dofs)
+    spec = curve_spec_from_curve(curve)
+    derivative_cpu = np.asarray(
+        getattr(curve, derivative_method)(),
+        dtype=np.float64,
+    )
+    cotangent = rng.normal(size=derivative_cpu.shape[:2])
+
+    vjp_jax = np.asarray(
+        vjp_fn(spec, spec.dofs, jnp.asarray(cotangent, dtype=jnp.float64)),
+        dtype=np.float64,
+    )
+    vjp_cpu = np.einsum("ij,ijk->k", cotangent, derivative_cpu)
+
+    np.testing.assert_allclose(
+        vjp_jax,
+        vjp_cpu,
+        rtol=_DERIV_RTOL,
+        atol=_DERIV_ATOL,
+        err_msg=f"{curve_name} {term_name} named VJP diverges from CPU tensor contraction.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("curve_name", "curve_factory", "seed_factory"),
+    _PRODUCTION_CURVE_FACTORIES,
+    ids=[name for name, _factory, _seed in _PRODUCTION_CURVE_FACTORIES],
+)
+@pytest.mark.parametrize(
+    ("term_name", "derivative_fn", "vjp_fn", "derivative_method"),
+    _CURVE_SCALAR_DERIVATIVE_CASES,
+    ids=[name for name, _derivative_fn, _vjp_fn, _method in _CURVE_SCALAR_DERIVATIVE_CASES],
+)
+def test_curve_scalar_derivative_wrappers_match_cpu_derivatives(
+    curve_name: str,
+    curve_factory,
+    seed_factory,
+    term_name: str,
+    derivative_fn,
+    vjp_fn,
+    derivative_method: str,
+):
+    """Scalar geometry derivative wrappers match CPU Jacobians and pullbacks."""
+
+    rng = np.random.default_rng(_PRODUCTION_RNG_SEED + 37)
+    dofs = seed_factory(_PRODUCTION_ORDER, rng)
+    curve = curve_factory(_PRODUCTION_ORDER, _PRODUCTION_NQUADPOINTS, dofs)
+    spec = curve_spec_from_curve(curve)
+    derivative_cpu = np.asarray(
+        getattr(curve, derivative_method)(),
+        dtype=np.float64,
+    )
+    derivative_jax = np.asarray(
+        derivative_fn(spec, spec.dofs),
+        dtype=np.float64,
+    )
+
+    np.testing.assert_allclose(
+        derivative_jax,
+        derivative_cpu,
+        rtol=_DERIV_RTOL,
+        atol=_DERIV_ATOL,
+        err_msg=f"{curve_name} {term_name} derivative wrapper diverges from CPU.",
+    )
+
+    cotangent = rng.normal(size=derivative_cpu.shape[0])
+    vjp_jax = np.asarray(
+        vjp_fn(spec, spec.dofs, jnp.asarray(cotangent, dtype=jnp.float64)),
+        dtype=np.float64,
+    )
+    vjp_cpu = np.einsum("i,ik->k", cotangent, derivative_cpu)
+
+    np.testing.assert_allclose(
+        vjp_jax,
+        vjp_cpu,
+        rtol=_DERIV_RTOL,
+        atol=_DERIV_ATOL,
+        err_msg=f"{curve_name} {term_name} scalar VJP diverges from CPU.",
+    )
+
+
+def test_curve_perturbed_named_geometry_vjp_wrappers_match_base_cpu_derivatives():
+    """Perturbed specs route named VJPs through base curve DOFs."""
+
+    rng = np.random.default_rng(_PRODUCTION_RNG_SEED + 41)
+    dofs = _seed_dofs_xyzfourier(_PRODUCTION_ORDER, rng)
+    base_curve = _make_curve_xyzfourier(
+        _PRODUCTION_ORDER,
+        _PRODUCTION_NQUADPOINTS,
+        dofs,
+    )
+    sampler = GaussianSampler(
+        base_curve.quadpoints,
+        sigma=0.1,
+        length_scale=0.5,
+        n_derivs=3,
+    )
+    sample = PerturbationSample(sampler, randomgen=rng)
+    perturbed_curve = CurvePerturbed(base_curve, sample)
+    spec = curve_spec_from_curve(perturbed_curve)
+
+    for term_name, vjp_fn, derivative_method in _CURVE_VJP_CASES:
+        derivative_cpu = np.asarray(
+            getattr(base_curve, derivative_method)(),
+            dtype=np.float64,
+        )
+        cotangent = rng.normal(size=derivative_cpu.shape[:2])
+        vjp_jax = np.asarray(
+            vjp_fn(spec, spec.dofs, jnp.asarray(cotangent, dtype=jnp.float64)),
+            dtype=np.float64,
+        )
+        vjp_cpu = np.einsum("ij,ijk->k", cotangent, derivative_cpu)
+
+        np.testing.assert_allclose(
+            vjp_jax,
+            vjp_cpu,
+            rtol=_DERIV_RTOL,
+            atol=_DERIV_ATOL,
+            err_msg=f"CurvePerturbed {term_name} named VJP mismatch.",
+        )
 
 
 def test_curvexyzfouriersymmetries_exposes_immutable_spec_with_geometry_parity():

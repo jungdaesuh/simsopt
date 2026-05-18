@@ -10,6 +10,9 @@ import numpy as np
 LBFGS_STATUS_NONFINITE = 6
 _INT32_COUNTER_MAX = np.iinfo(np.int32).max
 _INVALID_STEP_LOG_MAX_CAPACITY = 256
+_DEFAULT_OPTIMIZER_STATE_TRACE_MAX_BYTES = 64 * 1024 * 1024
+_OPTIMIZER_STATE_TRACE_ARRAYS_PER_ENTRY = 6
+_OPTIMIZER_STATE_TRACE_SCALARS_PER_ENTRY = 24
 LINE_SEARCH_FAILURE_REASON_ACCEPTED = "accepted"
 LINE_SEARCH_FAILURE_REASON_NOT_DESCENT = "not_descent"
 LINE_SEARCH_FAILURE_REASON_FAILED = "line_search_failed"
@@ -271,9 +274,7 @@ def _quadmin(a, fa, fpa, b, fb):
 
 def _line_search_sample_valid(phi, dphi, grad):
     return (
-        np.isfinite(phi)
-        and np.isfinite(dphi)
-        and np.all(np.isfinite(np.asarray(grad)))
+        np.isfinite(phi) and np.isfinite(dphi) and np.all(np.isfinite(np.asarray(grad)))
     )
 
 
@@ -441,9 +442,7 @@ def _zoom(
                 best_g=g_j,
             )
 
-        hi_to_j = (not sample_valid) or wolfe_one(a_j, phi_j) or (
-            phi_j >= state.phi_lo
-        )
+        hi_to_j = (not sample_valid) or wolfe_one(a_j, phi_j) or (phi_j >= state.phi_lo)
         star_to_j = sample_valid and wolfe_two(dphi_j) and not hi_to_j
         hi_to_lo = (
             sample_valid
@@ -517,10 +516,9 @@ def _zoom(
         if state.j >= max_zoom_iter and not state.done:
             state = state._replace(failed=True)
 
-    best_is_acceptable = (
-        _line_search_sample_valid(state.best_phi, state.best_dphi, state.best_g)
-        and (state.best_phi < phi_0)
-    )
+    best_is_acceptable = _line_search_sample_valid(
+        state.best_phi, state.best_dphi, state.best_g
+    ) and (state.best_phi < phi_0)
     if state.failed and best_is_acceptable:
         state = state._replace(
             failed=False,
@@ -538,10 +536,9 @@ def _apply_zoom_branch_result(state, zoom, *, wolfe_one):
         nfev=state.nfev + zoom.nfev,
         ngev=state.ngev + zoom.ngev,
     )
-    improves_best = (
-        _line_search_sample_valid(zoom.best_phi, zoom.best_dphi, zoom.best_g)
-        and (zoom.best_phi < state.best_phi)
-    )
+    improves_best = _line_search_sample_valid(
+        zoom.best_phi, zoom.best_dphi, zoom.best_g
+    ) and (zoom.best_phi < state.best_phi)
     if improves_best:
         state = state._replace(
             best_a=zoom.best_a,
@@ -549,10 +546,9 @@ def _apply_zoom_branch_result(state, zoom, *, wolfe_one):
             best_dphi=zoom.best_dphi,
             best_g=zoom.best_g,
         )
-    improves_best_finite = (
-        _line_search_sample_valid(zoom.best_phi, zoom.best_dphi, zoom.best_g)
-        and (zoom.best_phi < state.best_finite_phi)
-    )
+    improves_best_finite = _line_search_sample_valid(
+        zoom.best_phi, zoom.best_dphi, zoom.best_g
+    ) and (zoom.best_phi < state.best_finite_phi)
     if improves_best_finite:
         state = state._replace(
             best_finite_a=zoom.best_a,
@@ -677,9 +673,7 @@ def _line_search_from_restricted_func_and_grad(
         phi_i = float(phi_i)
         dphi_i = float(dphi_i)
         g_i = np.asarray(g_i, dtype=dtype)
-        first_tested_alpha = (
-            float(a_i) if state.nfev == 0 else state.first_tested_alpha
-        )
+        first_tested_alpha = float(a_i) if state.nfev == 0 else state.first_tested_alpha
         state = state._replace(
             first_tested_alpha=first_tested_alpha,
             nfev=state.nfev + 1,
@@ -696,9 +690,7 @@ def _line_search_from_restricted_func_and_grad(
                 best_finite_g=g_i,
             )
         improves_best_i = (
-            sample_valid
-            and (not wolfe_one(a_i, phi_i))
-            and (phi_i < state.best_phi)
+            sample_valid and (not wolfe_one(a_i, phi_i)) and (phi_i < state.best_phi)
         )
         if improves_best_i:
             state = state._replace(
@@ -708,8 +700,10 @@ def _line_search_from_restricted_func_and_grad(
                 best_g=g_i,
             )
 
-        star_to_zoom1 = (not sample_valid) or wolfe_one(a_i, phi_i) or (
-            (phi_i >= state.phi_i1) and (state.i > 1)
+        star_to_zoom1 = (
+            (not sample_valid)
+            or wolfe_one(a_i, phi_i)
+            or ((phi_i >= state.phi_i1) and (state.i > 1))
         )
         star_to_i = sample_valid and wolfe_two(dphi_i) and not star_to_zoom1
         star_to_zoom2 = (
@@ -800,8 +794,10 @@ def _line_search_from_restricted_func_and_grad(
             g_star=state.best_finite_g,
         )
 
-    status = 0 if state.done and not state.failed else (
-        1 if state.failed else (3 if state.i > maxiter_value else 0)
+    status = (
+        0
+        if state.done and not state.failed
+        else (1 if state.failed else (3 if state.i > maxiter_value else 0))
     )
     line_search_failed = bool(state.failed or (not state.done))
     failure_reason = LINE_SEARCH_FAILURE_REASON_ACCEPTED
@@ -811,20 +807,10 @@ def _line_search_from_restricted_func_and_grad(
             if state.failed
             else LINE_SEARCH_FAILURE_REASON_MAXITER
         )
-    diagnostic_alpha = (
-        state.a_star
-        if not line_search_failed
-        else state.best_finite_a
-    )
-    diagnostic_phi = (
-        state.phi_star
-        if not line_search_failed
-        else state.best_finite_phi
-    )
+    diagnostic_alpha = state.a_star if not line_search_failed else state.best_finite_a
+    diagnostic_phi = state.phi_star if not line_search_failed else state.best_finite_phi
     diagnostic_dphi = (
-        state.dphi_star
-        if not line_search_failed
-        else state.best_finite_dphi
+        state.dphi_star if not line_search_failed else state.best_finite_dphi
     )
     armijo_margin, curvature_margin = _line_search_margins(
         phi_0=phi_0,
@@ -1109,6 +1095,40 @@ def optimizer_state_trace_entry(
     }
 
 
+def optimizer_state_trace_memory_bytes(d, iterations):
+    return int(iterations) * (
+        (
+            _OPTIMIZER_STATE_TRACE_ARRAYS_PER_ENTRY * int(d)
+            + _OPTIMIZER_STATE_TRACE_SCALARS_PER_ENTRY
+        )
+        * np.dtype(np.float64).itemsize
+    )
+
+
+def _check_optimizer_state_trace_budget(
+    d,
+    maxiter_limit,
+    *,
+    record_optimizer_state_trace,
+    max_optimizer_state_trace_bytes,
+):
+    if not record_optimizer_state_trace:
+        return
+    iterations = max(1, int(maxiter_limit))
+    trace_bytes = optimizer_state_trace_memory_bytes(d, iterations)
+    limit = (
+        _DEFAULT_OPTIMIZER_STATE_TRACE_MAX_BYTES
+        if max_optimizer_state_trace_bytes is None
+        else int(max_optimizer_state_trace_bytes)
+    )
+    if trace_bytes > limit:
+        raise ValueError(
+            "optimizer_state_trace would allocate "
+            f"{trace_bytes} bytes for d={int(d)} and iterations={iterations}, "
+            f"exceeding max_optimizer_state_trace_bytes={limit}."
+        )
+
+
 def _coerce_initial_value_and_grad(initial_value_and_grad, x_shape, *, dtype):
     value, grad = initial_value_and_grad
     value = float(np.asarray(value, dtype=np.dtype(dtype)).reshape(()).item())
@@ -1157,6 +1177,8 @@ def minimize_lbfgs_host_core(
     failure_callback=None,
     initial_value_and_grad=None,
     line_search_value_and_grad=line_search_value_and_grad_host,
+    record_optimizer_state_trace=False,
+    max_optimizer_state_trace_bytes=None,
 ):
     x0_host = np.asarray(x0_host)
     if x0_host.ndim != 1:
@@ -1166,8 +1188,14 @@ def minimize_lbfgs_host_core(
     d = len(x0_host)
     dtype = x0_host.dtype
     np_dtype = np.dtype(dtype)
-    maxiter_limit_value, maxfun_limit_value, maxgrad_limit_value = (
-        resolve_lbfgs_limits(d, maxiter, maxfun, maxgrad)
+    maxiter_limit_value, maxfun_limit_value, maxgrad_limit_value = resolve_lbfgs_limits(
+        d, maxiter, maxfun, maxgrad
+    )
+    _check_optimizer_state_trace_budget(
+        d,
+        maxiter_limit_value,
+        record_optimizer_state_trace=bool(record_optimizer_state_trace),
+        max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
     )
     history_size = resolve_lbfgs_history_size(
         maxcor,
@@ -1197,8 +1225,8 @@ def minimize_lbfgs_host_core(
             dtype=dtype,
         )
     initial_nonfinite = (not np.isfinite(f_0)) or (not np.all(np.isfinite(g_0)))
-    initial_converged = (
-        (not initial_nonfinite) and (host_norm(g_0, ord=norm) < gtol_value)
+    initial_converged = (not initial_nonfinite) and (
+        host_norm(g_0, ord=norm) < gtol_value
     )
 
     initial_status = _limit_status(
@@ -1420,32 +1448,33 @@ def minimize_lbfgs_host_core(
             next_history_count = state.history_count
             next_gamma = state.gamma
 
-        optimizer_state_trace = (
-            *optimizer_state_trace,
-            optimizer_state_trace_entry(
-                iteration=next_k,
-                x=state.x_k,
-                f=state.f_k,
-                g=state.g_k,
-                search_direction=p_k,
-                step_scale=ls_results.a_k,
-                step=s_k,
-                trial_x=x_kp1,
-                trial_f=f_kp1,
-                trial_g=g_kp1,
-                nfev=next_nfev,
-                njev=next_ngev,
-                line_search_status=ls_status,
-                line_search_failed=ls_results.failed,
-                valid_curvature=valid_curvature,
-                curvature_update_applied=update_curvature,
-                rho_inv=rho_k_inv,
-                gamma=next_gamma,
-                history_count_before=history_count_before,
-                history_count_after=next_history_count,
-                converged=converged,
-            ),
-        )
+        if record_optimizer_state_trace:
+            optimizer_state_trace = (
+                *optimizer_state_trace,
+                optimizer_state_trace_entry(
+                    iteration=next_k,
+                    x=state.x_k,
+                    f=state.f_k,
+                    g=state.g_k,
+                    search_direction=p_k,
+                    step_scale=ls_results.a_k,
+                    step=s_k,
+                    trial_x=x_kp1,
+                    trial_f=f_kp1,
+                    trial_g=g_kp1,
+                    nfev=next_nfev,
+                    njev=next_ngev,
+                    line_search_status=ls_status,
+                    line_search_failed=ls_results.failed,
+                    valid_curvature=valid_curvature,
+                    curvature_update_applied=update_curvature,
+                    rho_inv=rho_k_inv,
+                    gamma=next_gamma,
+                    history_count_before=history_count_before,
+                    history_count_after=next_history_count,
+                    converged=converged,
+                ),
+            )
 
         _emit_iteration_callbacks(
             callback,
@@ -1481,11 +1510,9 @@ def minimize_lbfgs_host_core(
     else:
         f_final, g_final = f_0, g_0
         final_eval_increment = 0
-    state_nonfinite = (not np.isfinite(f_final)) or (
-        not np.all(np.isfinite(g_final))
-    )
-    converged_final = (
-        (not state_nonfinite) and (host_norm(g_final, ord=norm) < gtol_value)
+    state_nonfinite = (not np.isfinite(f_final)) or (not np.all(np.isfinite(g_final)))
+    converged_final = (not state_nonfinite) and (
+        host_norm(g_final, ord=norm) < gtol_value
     )
     state = state._replace(
         converged=bool(converged_final),

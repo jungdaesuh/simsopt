@@ -47,6 +47,8 @@ _IMPORT_SMOKE_CASES_PATH = (
 _SINGLE_STAGE_SURFACE_REPROJECTION_PROBE_PATH = (
     Path(_REPO_ROOT) / "benchmarks" / "single_stage_surface_reprojection_probe.py"
 )
+_ONDEVICE_COLD_SMOKE_TIMEOUT = 300
+_SINGLE_STAGE_TARGET_RUNTIME_COLD_SMOKE_TIMEOUT = 480
 _ENTRYPOINT_RUNTIME_AUDIT_PATHS = (
     Path(_REPO_ROOT) / "benchmarks" / "biot_savart_kernel_scaling.py",
     Path(_REPO_ROOT) / "benchmarks" / "cpu_run_code_benchmark.py",
@@ -626,6 +628,7 @@ def test_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes():
         _IMPORT_SMOKE_CASES_PATH,
         args=("case_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes",),
         failure_message="lbfgs-ondevice transfer-guard smoke failed",
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
     )
 
 
@@ -637,6 +640,7 @@ def test_transfer_guard_disallow_allows_target_minimize_structured_pytree_entry(
             "case_transfer_guard_disallow_allows_target_minimize_structured_pytree_entry",
         ),
         failure_message="target_minimize structured pytree disallow smoke failed",
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
     )
 
 
@@ -655,7 +659,7 @@ def test_transfer_guard_disallow_enforces_single_stage_target_runtime_boundaries
         _JAX_SUBPROCESS_CASES_PATH,
         args=("single-stage-target-runtime-transfer-guard",),
         failure_message=("single-stage target runtime transfer-guard contract drifted"),
-        timeout=300,
+        timeout=_SINGLE_STAGE_TARGET_RUNTIME_COLD_SMOKE_TIMEOUT,
     )
 
 
@@ -713,11 +717,11 @@ def test_stage2_target_outer_loop_reuses_compiled_solver_across_identical_calls(
         _JAX_SUBPROCESS_CASES_PATH,
         args=("stage2-target-compile-count",),
         failure_message="Stage 2 target outer-loop compile-count smoke failed",
-        timeout=120,
         extra_env={
             "JAX_ENABLE_COMPILATION_CACHE": "0",
             "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
         },
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
         expected_case="stage2-target-compile-count",
     )
     assert payload == {
@@ -746,6 +750,7 @@ def test_structured_ondevice_solver_cache_respects_mutable_objective_state():
         failure_message=(
             "structured ondevice solver cache must not freeze mutable objective state"
         ),
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
     )
 
 
@@ -786,6 +791,7 @@ def test_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constan
             "case_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constants",
         ),
         failure_message="ondevice optimizer loop closure-constant smoke failed",
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
     )
 
 

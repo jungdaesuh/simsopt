@@ -757,7 +757,7 @@ def _target_lane_success_filter_cache_signature(payload) -> str:
 
 def _hostify_target_lane_constant_tree(value):
     """Materialize one constant tree on the host for target-lane cache keys."""
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda leaf: (
             host_array(leaf)
             if isinstance(leaf, jax.Array)
@@ -7572,6 +7572,14 @@ def resolve_boozer_optimizer_backend(
     """Resolve the inner Boozer LS backend for the active runtime contract."""
     if field_backend != "jax":
         return None
+    if optimizer_backend == "scipy":
+        raise ValueError(
+            "Single-stage JAX backend with optimizer_backend='scipy' is "
+            "CPU/reference-only; use optimizer_backend='ondevice', "
+            "optimizer_backend='scipy-jax', or "
+            "optimizer_backend='scipy-jax-fullgraph'. For the JAX target lane, "
+            "select boozer_optimizer_backend='ondevice'."
+        )
     if boozer_optimizer_backend is None:
         effective_backend = (
             "scipy"
@@ -8224,7 +8232,7 @@ def _scaled_outer_problem_runtime_reference(*values):
     """Return one runtime leaf when scaled-phase coordinates already touch JAX."""
     array_reference = None
     for value in values:
-        for leaf in jax.tree_util.tree_leaves(value):
+        for leaf in jax.tree.leaves(value):
             if isinstance(leaf, jax.core.Tracer):
                 return leaf
             if array_reference is None and isinstance(leaf, jax.Array):
@@ -8342,7 +8350,7 @@ def _block_tree_until_ready(tree):
     """Synchronize a pytree of possible JAX arrays before returning timing data."""
     import jax
 
-    for leaf in jax.tree_util.tree_leaves(tree):
+    for leaf in jax.tree.leaves(tree):
         block_until_ready = getattr(leaf, "block_until_ready", None)
         if block_until_ready is not None:
             block_until_ready()
