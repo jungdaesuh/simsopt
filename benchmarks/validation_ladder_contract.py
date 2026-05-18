@@ -331,6 +331,32 @@ GPU_PROOF_PARITY_CONTRACTS = {
 }
 
 
+# Schema for compile-timing evidence artifacts (e.g.
+# ``.artifacts/lm_minpack_port_plan_2026-05-16/track1_g5_local_cpu_compile_smoke.json``).
+# These JSON sidecars are evidence-class, not promotion-class: they document a
+# measured first-trace compile time without claiming a parity-ladder lane.
+# Each value declares which gate the measurement does and does not certify.
+EVIDENCE_ARTIFACT_COMPILE_SCOPES: dict[str, str] = {
+    "local_cpu_smoke_not_cuda_gate": (
+        "Local CPU cold-compile timing for a target-lane least-squares method. "
+        "Records elapsed seconds after ``jax.clear_caches()`` with explicit "
+        "result synchronization. Does NOT certify CUDA first-compile "
+        "performance — that gate is governed by ``docs/source/jax_acceptance.rst``."
+    ),
+}
+
+
+def evidence_artifact_compile_scope(scope: str) -> str:
+    """Return the documented meaning of a compile-timing evidence scope."""
+    scope_key = _normalize_contract_key(scope)
+    if scope_key not in EVIDENCE_ARTIFACT_COMPILE_SCOPES:
+        valid = ", ".join(sorted(EVIDENCE_ARTIFACT_COMPILE_SCOPES))
+        raise ValueError(
+            f"Unknown compile-scope marker {scope!r}. Expected one of: {valid}."
+        )
+    return EVIDENCE_ARTIFACT_COMPILE_SCOPES[scope_key]
+
+
 def _normalize_contract_key(value: str) -> str:
     return str(value).strip().lower().replace("-", "_")
 
