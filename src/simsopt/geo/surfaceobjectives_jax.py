@@ -29,12 +29,14 @@ import hashlib
 import logging
 import os
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import NamedTuple
 import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 from jax import lax
+from jax.sharding import PartitionSpec as P
 
 from .._core.derivative import Derivative, derivative_dec
 from .._core.jax_host_boundary import (
@@ -85,10 +87,15 @@ from ..jax_core.surface_rzfourier import (
     surface_rz_fourier_gammadash2dash2_from_dofs,
     surface_rz_fourier_volume_from_dofs,
 )
-from ..jax_core.sharding import inspect_array_sharding_summary
+from ..jax_core.sharding import (
+    inspect_array_sharding_summary,
+    maybe_shard_seed_batch_inputs,
+    seed_batch_sharding_config,
+)
 from .curve import incremental_arclength_pure, kappa_pure
 from ._pairwise_reductions import (
-    pairwise_min_distance_pure,
+    pairwise_min_distance_batched_pure,
+    pairwise_selected_smoothmin_distance_batched_pure,
     pairwise_selected_smoothmin_distance_pure,
 )
 from .curveobjectives import (
@@ -957,28 +964,162 @@ def _runtime_zeros_like(value):
     return jnp.broadcast_to(zero, value.shape)
 
 
-def _curve_curve_penalty_from_grouped_spec(coil_set_spec, minimum_distance):
-    total = _runtime_float64_scalar(0.0, reference=minimum_distance)
-    curve_terms = []
+def _static_upper_triangle_pair_indices(size: int) -> tuple[np.ndarray, np.ndarray]:
+    left, right = np.triu_indices(int(size), k=1)
+    return left.astype(np.int32), right.astype(np.int32)
+
+
+def _static_cross_pair_indices(
+    left_size: int,
+    right_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    left = np.repeat(np.arange(int(left_size), dtype=np.int32), int(right_size))
+    right = np.tile(np.arange(int(right_size), dtype=np.int32), int(left_size))
+    return left, right
+
+
+def _take_static_rows(array, indices: np.ndarray):
+    return jnp.take(array, jnp.asarray(indices, dtype=jnp.int32), axis=0)
+
+
+def _curve_geometry_stacks_from_grouped_spec(coil_set_spec):
+    stacks = []
     for group in coil_set_spec.groups:
         gammas = _as_jax_float64(group.gammas)
         gammadashs = _as_jax_float64(group.gammadashs)
-        for coil_index in range(int(gammas.shape[0])):
-            curve_terms.append(
+        stacks.append(
+            (
+                gammas.reshape((int(gammas.shape[0]), -1, 3)),
+                gammadashs.reshape((int(gammadashs.shape[0]), -1, 3)),
+            )
+        )
+    return tuple(stacks)
+
+
+def _curve_stacks_from_grouped_spec(coil_set_spec):
+    return tuple(
+        gammas
+        for gammas, _gammadashs in _curve_geometry_stacks_from_grouped_spec(
+            coil_set_spec
+        )
+    )
+
+
+def _curve_stacks_from_curve_tuple(coil_gammas):
+    grouped: dict[tuple[int, ...], list[jax.Array]] = {}
+    for gamma in coil_gammas:
+        gamma_arr = _as_jax_float64(gamma).reshape((-1, 3))
+        key = tuple(int(dim) for dim in gamma_arr.shape)
+        grouped.setdefault(key, []).append(gamma_arr)
+    return tuple(jnp.stack(gammas, axis=0) for gammas in grouped.values())
+
+
+def _curve_curve_point_pair_batches_from_stacks(curve_stacks):
+    batches = []
+    for stack_index, curve_stack in enumerate(curve_stacks):
+        curve_count = int(curve_stack.shape[0])
+        left_indices, right_indices = _static_upper_triangle_pair_indices(curve_count)
+        if left_indices.size > 0:
+            batches.append(
                 (
-                    _take_runtime_row(gammas, coil_index),
-                    _take_runtime_row(gammadashs, coil_index),
+                    _take_static_rows(curve_stack, left_indices),
+                    _take_static_rows(curve_stack, right_indices),
                 )
             )
-    for curve_index, (gamma_i, gammadash_i) in enumerate(curve_terms):
-        for gamma_j, gammadash_j in curve_terms[:curve_index]:
-            total = total + cc_distance_pure(
-                gamma_i,
-                gammadash_i,
-                gamma_j,
-                gammadash_j,
+        for previous_stack in curve_stacks[:stack_index]:
+            left_indices, right_indices = _static_cross_pair_indices(
+                curve_count,
+                int(previous_stack.shape[0]),
+            )
+            if left_indices.size > 0:
+                batches.append(
+                    (
+                        _take_static_rows(curve_stack, left_indices),
+                        _take_static_rows(previous_stack, right_indices),
+                    )
+                )
+    return tuple(batches)
+
+
+def _curve_surface_point_pair_batches_from_stacks(curve_stacks, surface_gamma):
+    flat_surface = _as_jax_float64(surface_gamma).reshape((-1, 3))
+    batches = []
+    for curve_stack in curve_stacks:
+        curve_count = int(curve_stack.shape[0])
+        if curve_count > 0:
+            batches.append((curve_stack, flat_surface))
+    return tuple(batches)
+
+
+def _curve_curve_distance_batch(
+    gammas_i,
+    gammadashs_i,
+    gammas_j,
+    gammadashs_j,
+    minimum_distance,
+):
+    if int(gammas_i.shape[0]) == 0:
+        return _runtime_float64_scalar(0.0, reference=minimum_distance)
+    distances = jax.vmap(
+        lambda gamma_i, gammadash_i, gamma_j, gammadash_j: cc_distance_pure(
+            gamma_i,
+            gammadash_i,
+            gamma_j,
+            gammadash_j,
+            minimum_distance,
+        )
+    )(gammas_i, gammadashs_i, gammas_j, gammadashs_j)
+    return jnp.sum(distances)
+
+
+def _curve_surface_distance_batch(
+    gammas,
+    gammadashs,
+    surface_gamma,
+    surface_normal,
+    minimum_distance,
+):
+    if int(gammas.shape[0]) == 0:
+        return _runtime_float64_scalar(0.0, reference=minimum_distance)
+    distances = jax.vmap(
+        lambda gamma, gammadash: cs_distance_pure(
+            gamma,
+            gammadash,
+            surface_gamma,
+            surface_normal,
+            minimum_distance,
+        )
+    )(gammas, gammadashs)
+    return jnp.sum(distances)
+
+
+def _curve_curve_penalty_from_grouped_spec(coil_set_spec, minimum_distance):
+    total = _runtime_float64_scalar(0.0, reference=minimum_distance)
+    curve_stacks = _curve_geometry_stacks_from_grouped_spec(coil_set_spec)
+    for stack_index, (gammas, gammadashs) in enumerate(curve_stacks):
+        curve_count = int(gammas.shape[0])
+        left_indices, right_indices = _static_upper_triangle_pair_indices(curve_count)
+        if left_indices.size > 0:
+            total = total + _curve_curve_distance_batch(
+                _take_static_rows(gammas, left_indices),
+                _take_static_rows(gammadashs, left_indices),
+                _take_static_rows(gammas, right_indices),
+                _take_static_rows(gammadashs, right_indices),
                 minimum_distance,
             )
+        for previous_gammas, previous_gammadashs in curve_stacks[:stack_index]:
+            left_indices, right_indices = _static_cross_pair_indices(
+                curve_count,
+                int(previous_gammas.shape[0]),
+            )
+            if left_indices.size > 0:
+                total = total + _curve_curve_distance_batch(
+                    _take_static_rows(gammas, left_indices),
+                    _take_static_rows(gammadashs, left_indices),
+                    _take_static_rows(previous_gammas, right_indices),
+                    _take_static_rows(previous_gammadashs, right_indices),
+                    minimum_distance,
+                )
     return total
 
 
@@ -991,17 +1132,16 @@ def _curve_surface_penalty_from_grouped_spec(
     total = _runtime_float64_scalar(0.0, reference=minimum_distance)
     surface_gamma = surface_gamma.reshape((-1, 3))
     surface_normal = surface_normal.reshape((-1, 3))
-    for group in coil_set_spec.groups:
-        gammas = _as_jax_float64(group.gammas)
-        gammadashs = _as_jax_float64(group.gammadashs)
-        for coil_index in range(int(gammas.shape[0])):
-            total = total + cs_distance_pure(
-                _take_runtime_row(gammas, coil_index),
-                _take_runtime_row(gammadashs, coil_index),
-                surface_gamma,
-                surface_normal,
-                minimum_distance,
-            )
+    for gammas, gammadashs in _curve_geometry_stacks_from_grouped_spec(
+        coil_set_spec
+    ):
+        total = total + _curve_surface_distance_batch(
+            gammas,
+            gammadashs,
+            surface_gamma,
+            surface_normal,
+            minimum_distance,
+        )
     return total
 
 
@@ -1282,14 +1422,12 @@ def _traceable_single_stage_curve_curve_signed_constraint(
     minimum_distance,
     distance_smoothing,
 ):
-    if len(coil_gammas) < 2:
+    curve_stacks = _curve_stacks_from_curve_tuple(coil_gammas)
+    point_pair_batches = _curve_curve_point_pair_batches_from_stacks(curve_stacks)
+    if len(point_pair_batches) == 0:
         return _runtime_float64_scalar(minimum_distance, reference=minimum_distance)
-    point_pairs = []
-    for curve_index, gamma_i in enumerate(coil_gammas):
-        for gamma_j in coil_gammas[:curve_index]:
-            point_pairs.append((gamma_i, gamma_j))
-    smooth_min = pairwise_selected_smoothmin_distance_pure(
-        tuple(point_pairs),
+    smooth_min = pairwise_selected_smoothmin_distance_batched_pure(
+        point_pair_batches,
         temperature=distance_smoothing,
     )
     return _runtime_float64_scalar(minimum_distance, reference=smooth_min) - smooth_min
@@ -1302,12 +1440,15 @@ def _traceable_single_stage_curve_surface_signed_constraint(
     minimum_distance,
     distance_smoothing,
 ):
-    if len(coil_gammas) == 0:
+    curve_stacks = _curve_stacks_from_curve_tuple(coil_gammas)
+    point_pair_batches = _curve_surface_point_pair_batches_from_stacks(
+        curve_stacks,
+        surface_gamma,
+    )
+    if len(point_pair_batches) == 0:
         return _runtime_float64_scalar(minimum_distance, reference=surface_gamma)
-    flat_surface = surface_gamma.reshape((-1, 3))
-    point_pairs = tuple((gamma, flat_surface) for gamma in coil_gammas)
-    smooth_min = pairwise_selected_smoothmin_distance_pure(
-        point_pairs,
+    smooth_min = pairwise_selected_smoothmin_distance_batched_pure(
+        point_pair_batches,
         temperature=distance_smoothing,
     )
     return _runtime_float64_scalar(minimum_distance, reference=smooth_min) - smooth_min
@@ -1883,7 +2024,7 @@ def _traceable_cache_leaf_signature(leaf):
 
 def _traceable_cache_tree_signature(tree):
     """Build a deterministic cache signature for a pytree-like runtime object."""
-    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    leaves, treedef = jax.tree.flatten(tree)
     return (
         "tree",
         repr(treedef),
@@ -1927,7 +2068,7 @@ def _traceable_contract_leaf_signature(leaf):
 
 def _traceable_contract_tree_signature(tree):
     """Build a cheap cache signature for immutable runtime contracts."""
-    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    leaves, treedef = jax.tree.flatten(tree)
     return (
         "tree",
         repr(treedef),
@@ -1953,7 +2094,7 @@ def _traceable_runtime_hostify_leaf(leaf):
 
 def _traceable_runtime_hostify_tree(tree):
     """Recursively hostify runtime constants used by traceable closures."""
-    return jax.tree_util.tree_map(_traceable_runtime_hostify_leaf, tree)
+    return jax.tree.map(_traceable_runtime_hostify_leaf, tree)
 
 
 def _traceable_runtime_deviceify_leaf(leaf):
@@ -1969,7 +2110,7 @@ def _traceable_runtime_deviceify_leaf(leaf):
 
 def _traceable_runtime_deviceify_tree(tree):
     """Recursively device-place cached runtime arrays for strict diagnostics."""
-    return jax.tree_util.tree_map(_traceable_runtime_deviceify_leaf, tree)
+    return jax.tree.map(_traceable_runtime_deviceify_leaf, tree)
 
 
 def _evaluate_scalar_or_value_and_grad(
@@ -3095,6 +3236,15 @@ def _traceable_solve_hessian_linearization(
             transpose=transpose,
         )
 
+    # `_traceable_result_linear_solve_factors` deliberately returns ``None`` on
+    # the LS runtime lane so adjoint solves stay matrix-free. The operator
+    # path below uses pure-JAX operator GMRES (`_hessian_linear_operator` +
+    # `_solve_square_array_system_operator_only`) and remains fully traceable
+    # under JIT — it does not call a live host solver. Removing this path
+    # would force every LS warm-start and adjoint solve to surface
+    # ``success=False`` and emit NaN gradients (verified by
+    # ``test_runtime_bundle_allows_strict_transfer_guard`` /
+    # ``test_runtime_bundle_host_wrappers_allow_host_inputs_under_strict_transfer_guard``).
     objective_fn = _make_boozer_penalty_objective_closure(
         coil_set_spec=coil_set_spec,
         **_traceable_inner_objective_kwargs(objective_kwargs),
@@ -3222,13 +3372,15 @@ def _traceable_solve_plu_linearization(
         matrix=matrix,
     )
     residual_rel = _optimizer_jax._relative_residual_1_norm(residual, rhs)
-    # ``_traceable_solve_plu_linearization`` is only reached for the LS
-    # lane (``linearization_kind == "hessian"``) where ``matrix`` is the
-    # symmetric Hessian and so ``κ_1(matrix) == κ_1(matrix.T)``. Hand the
+    # The Boozer LS Hessian is symmetric by construction (J^T J is symmetric
+    # for any J). Therefore κ_1(matrix) == κ_1(matrix.T) and we can estimate
+    # the condition number using either orientation without distinguishing
+    # forward and adjoint paths. Both the LS lane and the forward warm-start
+    # solve reach this function with the same symmetric matrix. Handing the
     # native ``matrix`` plus its ``(lu, piv)`` factors to the condition
-    # estimator regardless of ``transpose``: this lets Hager-Higham reuse
-    # the cached factors via ``jsp_linalg.lu_solve`` (10 × O(n²)) instead
-    # of refactorizing ``matrix`` 10 times (10 × O(n³)).
+    # estimator lets Hager-Higham reuse the cached factors via
+    # ``jsp_linalg.lu_solve`` (10 × O(n²)) instead of refactorizing
+    # ``matrix`` 10 times (10 × O(n³)).
     condition_estimate = _optimizer_jax._dense_matrix_condition_estimate(
         matrix,
         lu_piv=lu_piv,
@@ -3742,7 +3894,7 @@ def _traceable_objective_gradient_parts(
         # Some diagnostic terms depend only on the solved inner state, so
         # their explicit coil derivative is exactly zero. Avoid autodiff on
         # these constant-in-coils scalars under strict transfer guard because
-        # JAX 0.9.2 instantiates host scalar zeros for null tangent paths.
+        # null tangent paths instantiate host scalar zeros.
         direct_grad = _runtime_zeros_like(coil_dofs)
     else:
         direct_grad = _strict_scalar_grad(_evaluate_objective_of_coils, coil_dofs)
@@ -4095,7 +4247,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             linear_solve_success,
         )
 
-    jitted_value_and_grad_for = jax.jit(_value_and_grad_for)
+    jitted_value_and_grad_for = jax.jit(_value_and_grad_for, donate_argnums=(0,))
     compiled_forward_result_for = _make_traceable_runtime_jax_array_boundary(
         jitted_forward_result_for,
         "compiled_forward_result_for",
@@ -4238,6 +4390,8 @@ def _get_cached_traceable_runtime_entry(
         "host_value_and_grad": None,
         "host_reporting_metrics": None,
         "profile_suite": None,
+        "optimizer_compiled_bundle": None,
+        "optimizer_value_and_grad": None,
         "seeded_compiled_bundle": None,
         "seeded_value_and_grad": None,
         "alm_runtime_bundles": {},
@@ -4301,6 +4455,36 @@ def _ensure_traceable_runtime_public_boundaries(runtime_entry):
     return runtime_entry
 
 
+def _ensure_traceable_runtime_optimizer_compiled_bundle(runtime_entry, booz_jax):
+    optimizer_compiled_bundle = runtime_entry.get("optimizer_compiled_bundle")
+    if optimizer_compiled_bundle is None:
+        state = runtime_entry["compiled_bundle"]["state"]
+        optimizer_compiled_bundle = (
+            _build_traceable_objective_compiled_bundle_from_state(
+                booz_jax,
+                state,
+                success_filter=runtime_entry.get("success_filter"),
+                general_only_forward=True,
+            )
+        )
+        runtime_entry["optimizer_compiled_bundle"] = optimizer_compiled_bundle
+    return optimizer_compiled_bundle
+
+
+def _ensure_traceable_runtime_optimizer_value_and_grad(runtime_entry, booz_jax):
+    optimizer_value_and_grad = runtime_entry.get("optimizer_value_and_grad")
+    if optimizer_value_and_grad is None:
+        optimizer_compiled_bundle = _ensure_traceable_runtime_optimizer_compiled_bundle(
+            runtime_entry,
+            booz_jax,
+        )
+        optimizer_value_and_grad = _make_traceable_value_and_grad_boundary(
+            optimizer_compiled_bundle["compiled_value_and_grad_for"]
+        )
+        runtime_entry["optimizer_value_and_grad"] = optimizer_value_and_grad
+    return optimizer_value_and_grad
+
+
 def _ensure_traceable_runtime_seeded_value_and_grad(runtime_entry, booz_jax):
     """Materialize the seeded optimizer-only value/grad path on demand."""
     seeded_value_and_grad = runtime_entry.get("seeded_value_and_grad")
@@ -4308,11 +4492,9 @@ def _ensure_traceable_runtime_seeded_value_and_grad(runtime_entry, booz_jax):
         return seeded_value_and_grad
 
     state = runtime_entry["compiled_bundle"]["state"]
-    seeded_compiled_bundle = _build_traceable_objective_compiled_bundle_from_state(
+    seeded_compiled_bundle = _ensure_traceable_runtime_optimizer_compiled_bundle(
+        runtime_entry,
         booz_jax,
-        state,
-        success_filter=runtime_entry.get("success_filter"),
-        general_only_forward=True,
     )
     baseline_coil_dofs = _traceable_runtime_deviceify_tree(state["baseline_coil_dofs"])
     baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
@@ -4333,8 +4515,9 @@ def _ensure_traceable_runtime_seeded_value_and_grad(runtime_entry, booz_jax):
             baseline_linear_solve_success,
         )
     seeded_value_and_grad = TraceableObjectiveSeededValueAndGrad(
-        value_and_grad=_make_traceable_value_and_grad_boundary(
-            seeded_compiled_bundle["compiled_value_and_grad_for"]
+        value_and_grad=_ensure_traceable_runtime_optimizer_value_and_grad(
+            runtime_entry,
+            booz_jax,
         ),
         optimizer_initial_value_and_grad=(
             baseline_value,
@@ -4486,7 +4669,7 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
         return result["value"], (
             coil_dofs,
             lax.stop_gradient(result["x"]),
-            jax.tree_util.tree_map(lax.stop_gradient, result["linear_solve_factors"]),
+            jax.tree.map(lax.stop_gradient, result["linear_solve_factors"]),
             result["success"],
         )
 
@@ -4522,6 +4705,12 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
     # Keep the pure runtime entrypoint on a real JIT boundary so transfer_guard
     # rejects implicit host inputs consistently with the other runtime-bundle
     # callables. Explicit host materialization belongs on the host wrapper.
+    # NOTE: donate_argnums is intentionally omitted here. ``f`` returns a
+    # scalar, so XLA cannot reuse the ``coil_dofs`` buffer for the output;
+    # adding donation triggers "Some donated buffers were not usable"
+    # warnings without freeing memory. Buffer donation lives on
+    # ``_value_and_grad_for`` instead, whose ``grad`` output has the same
+    # shape as ``coil_dofs``.
     return jax.jit(f)
 
 
@@ -4616,10 +4805,14 @@ def _make_traceable_host_value_and_grad(
     baseline_coil_dofs=None,
     baseline_return=None,
 ):
-    """Build a host-normalized wrapper around the fused JAX value/grad callable."""
+    """Build a host-normalized wrapper around the fused JAX value/grad callable.
+
+    The underlying value/grad JIT donates argnum 0, so we materialize a fresh
+    JAX buffer before forwarding to keep the caller's input array intact.
+    """
 
     def host_value_and_grad(coil_dofs):
-        value, grad = compiled_value_and_grad_for(_as_jax_float64(coil_dofs))
+        value, grad = compiled_value_and_grad_for(_as_jax_float64(coil_dofs).copy())
         return (
             float(_host_scalar(value, dtype=np.float64)),
             _host_array(grad, dtype=np.float64),
@@ -4642,11 +4835,14 @@ def _make_traceable_value_and_grad_boundary(compiled_value_and_grad_for):
     Under JAX transfer-guard ``disallow``, explicit staging is allowed while
     implicit transfers are not, so keep this entrypoint aligned with the scalar
     objective and reporting-metrics boundaries.
+
+    The underlying value/grad JIT donates argnum 0, so we materialize a fresh
+    JAX buffer before forwarding to keep the caller's input array intact.
     """
     from .optimizer_jax import _mark_cacheable_jit_value_and_grad
 
     def value_and_grad(coil_dofs):
-        return compiled_value_and_grad_for(_as_jax_float64(coil_dofs))
+        return compiled_value_and_grad_for(_as_jax_float64(coil_dofs).copy())
 
     return _mark_cacheable_jit_value_and_grad(value_and_grad)
 
@@ -4727,22 +4923,22 @@ def _traceable_reporting_metrics_from_solution(
             reference=surface_gamma,
         ).reshape((-1, 3))
         surface_gamma_flat = surface_gamma.reshape((-1, 3))
-        coil_gammas = []
-        for group in coil_set_spec.groups:
-            gammas = _as_jax_float64(group.gammas)
-            for coil_index in range(int(gammas.shape[0])):
-                coil_gamma = _take_runtime_row(gammas, coil_index)
-                coil_gammas.append(coil_gamma)
-                curve_surface_min_dist = jnp.minimum(
-                    curve_surface_min_dist,
-                    pairwise_min_distance_pure(coil_gamma, surface_gamma_flat),
+        curve_stacks = _curve_stacks_from_grouped_spec(coil_set_spec)
+        curve_surface_min_dist = jnp.minimum(
+            curve_surface_min_dist,
+            pairwise_min_distance_batched_pure(
+                _curve_surface_point_pair_batches_from_stacks(
+                    curve_stacks,
+                    surface_gamma_flat,
                 )
-        for curve_index, gamma_i in enumerate(coil_gammas):
-            for gamma_j in coil_gammas[:curve_index]:
-                curve_curve_min_dist = jnp.minimum(
-                    curve_curve_min_dist,
-                    pairwise_min_distance_pure(gamma_i, gamma_j),
-                )
+            ),
+        )
+        curve_curve_min_dist = jnp.minimum(
+            curve_curve_min_dist,
+            pairwise_min_distance_batched_pure(
+                _curve_curve_point_pair_batches_from_stacks(curve_stacks)
+            ),
+        )
         surface_vessel_min_dist = surface_to_surface_shortest_distance_pure(
             surface_gamma,
             vessel_gamma,
@@ -4882,6 +5078,25 @@ def _make_traceable_batched_value_and_grad_pipeline(compiled_value_and_grad_for)
 
     def _batched_value_and_grad_for(coil_dofs_batch):
         coil_dofs_batch = _as_jax_float64(coil_dofs_batch)
+        config = seed_batch_sharding_config(coil_dofs_batch)
+        if config is not None:
+            (coil_dofs_batch,) = maybe_shard_seed_batch_inputs(
+                coil_dofs_batch,
+                config=config,
+            )
+
+            @partial(
+                jax.shard_map,
+                mesh=config.mesh,
+                in_specs=(P(config.axis_name, None),),
+                out_specs=(P(config.axis_name), P(config.axis_name, None)),
+                check_vma=True,
+            )
+            def score_seed_shard(coil_dofs_block):
+                return lax.map(compiled_value_and_grad_for, coil_dofs_block)
+
+            return score_seed_shard(coil_dofs_batch)
+
         return lax.map(compiled_value_and_grad_for, coil_dofs_batch)
 
     return _mark_cacheable_jit_value_and_grad(jax.jit(_batched_value_and_grad_for))
@@ -5318,7 +5533,7 @@ def make_traceable_objective(
 
 
 class TraceableObjectiveSeededValueAndGrad(NamedTuple):
-    """Optimizer-only seeded value/gradient contract for target-lane L-BFGS."""
+    """Explicit cached baseline seed plus the target-lane value/grad callable."""
 
     value_and_grad: callable
     optimizer_initial_value_and_grad: tuple[jax.Array, jax.Array]
@@ -5332,13 +5547,12 @@ def make_traceable_objective_seeded_value_and_grad(
     outer_objective_config=None,
     success_filter=None,
 ):
-    """Build the optimizer-only seeded value/gradient lane for ondevice L-BFGS.
+    """Build the explicit cached baseline value/gradient contract.
 
-    Unlike :func:`make_traceable_objective_runtime_bundle`, this helper keeps the
-    seeded optimizer contract separate from the public runtime-bundle dict so the
-    hot value/gradient path can lower through the general forward helper only,
-    while callers still reuse the cached baseline value/gradient seed for the
-    first optimizer evaluation.
+    The normal ondevice optimizer path should use
+    :func:`make_traceable_objective_value_and_grad` and let the optimizer evaluate
+    its own first ``(value, grad)`` at ``x0``. This helper is only for callers
+    that intentionally need the cached baseline seed as data.
     """
     runtime_entry = _get_cached_traceable_runtime_entry(
         booz_jax,
@@ -5361,22 +5575,22 @@ def make_traceable_objective_value_and_grad(
     """Build a pure-JAX function ``f(coil_dofs) -> (value, grad)`` for ondevice L-BFGS.
 
     This is the fused outer-optimizer objective contract for the single-stage
-    ondevice target lane. It shares the exact forward and implicit-gradient
-    implementation used by :func:`make_traceable_objective`, but returns both
-    outputs from one compiled entrypoint so the outer optimizer can avoid
-    rebuilding autodiff transforms around a scalar objective.
+    ondevice target lane. It uses the general forward path even at the baseline
+    DOFs so the first optimizer evaluation is produced by the same callable as
+    later trial points instead of by a cached baseline-gradient seed.
 
     For host-normalized outputs, use
     ``make_traceable_objective_runtime_bundle(include_host_wrappers=True)``
     and call ``runtime_bundle["host_value_and_grad"]``.
     """
-    return make_traceable_objective_runtime_bundle(
+    runtime_entry = _get_cached_traceable_runtime_entry(
         booz_jax,
         bs_jax,
         iota_target,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
-    )["value_and_grad"]
+    )
+    return _ensure_traceable_runtime_optimizer_value_and_grad(runtime_entry, booz_jax)
 
 
 def _make_traceable_forward_value_pipeline(compiled_forward_result_for):
@@ -5889,9 +6103,7 @@ def make_traceable_single_stage_alm_runtime_bundle(
         return evaluation["total"], (
             coil_dofs,
             lax.stop_gradient(evaluation["x"]),
-            jax.tree_util.tree_map(
-                lax.stop_gradient, evaluation["linear_solve_factors"]
-            ),
+            jax.tree.map(lax.stop_gradient, evaluation["linear_solve_factors"]),
             evaluation["success"],
             multipliers,
             penalty,

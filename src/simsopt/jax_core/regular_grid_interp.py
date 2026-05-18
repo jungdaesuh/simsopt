@@ -656,7 +656,16 @@ def _cpu_ordered_tensor_contract(pkx, pky, pkz, local_vals):
     return jax.lax.fori_loop(0, degree_plus_one, i_body, zero)
 
 
-@partial(jax.jit, static_argnames=("degree", "value_size", "out_of_bounds_ok"))
+def _fused_tensor_contract(pkx, pky, pkz, local_vals):
+    """Contract one cell with a fused tensor-product expression."""
+
+    return jnp.einsum("i,j,k,ijkv->v", pkx, pky, pkz, local_vals)
+
+
+@partial(
+    jax.jit,
+    static_argnames=("degree", "value_size", "out_of_bounds_ok", "strict_cell_order"),
+)
 def _evaluate_batch_jit(
     xyz: jax.Array,
     *,
@@ -684,6 +693,7 @@ def _evaluate_batch_jit(
     degree: int,
     value_size: int,
     out_of_bounds_ok: bool,
+    strict_cell_order: bool = True,
 ) -> jax.Array:
     """JIT-compiled per-sample evaluation kernel."""
 
@@ -776,7 +786,10 @@ def _evaluate_batch_jit(
         )
 
         local_vals = cell_table[row_idx]  # (degree+1, degree+1, degree+1, value_size)
-        result = _cpu_ordered_tensor_contract(pkx, pky, pkz, local_vals)
+        if strict_cell_order:
+            result = _cpu_ordered_tensor_contract(pkx, pky, pkz, local_vals)
+        else:
+            result = _fused_tensor_contract(pkx, pky, pkz, local_vals)
         if out_of_bounds_ok:
             # Match the C++ mutable-output contract: skipped or out-of-domain
             # rows leave the caller-supplied output row unchanged.
@@ -793,7 +806,10 @@ def _evaluate_batch_jit(
     return jax.vmap(evaluate_one)(xyz, initial_output)
 
 
-@partial(jax.jit, static_argnames=("degree", "value_size", "out_of_bounds_ok"))
+@partial(
+    jax.jit,
+    static_argnames=("degree", "value_size", "out_of_bounds_ok", "strict_cell_order"),
+)
 def _evaluate_batch_zero_jit(
     xyz: jax.Array,
     *,
@@ -820,6 +836,7 @@ def _evaluate_batch_zero_jit(
     degree: int,
     value_size: int,
     out_of_bounds_ok: bool,
+    strict_cell_order: bool = True,
 ) -> jax.Array:
     return _evaluate_batch_jit(
         xyz,
@@ -847,6 +864,7 @@ def _evaluate_batch_zero_jit(
         degree=degree,
         value_size=value_size,
         out_of_bounds_ok=out_of_bounds_ok,
+        strict_cell_order=strict_cell_order,
     )
 
 
@@ -877,6 +895,7 @@ def evaluate_batch_device(
     xyz: object,
     *,
     initial_output: object | None = None,
+    strict_cell_order: bool = True,
 ) -> jax.Array:
     """Evaluate with a pre-staged device spec.
 
@@ -912,6 +931,7 @@ def evaluate_batch_device(
             degree=int(device_spec.degree),
             value_size=int(device_spec.value_size),
             out_of_bounds_ok=bool(device_spec.out_of_bounds_ok),
+            strict_cell_order=bool(strict_cell_order),
         )
     initial_array = _as_initial_output_array(
         initial_output,
@@ -944,6 +964,7 @@ def evaluate_batch_device(
         degree=int(device_spec.degree),
         value_size=int(device_spec.value_size),
         out_of_bounds_ok=bool(device_spec.out_of_bounds_ok),
+        strict_cell_order=bool(strict_cell_order),
     )
 
 

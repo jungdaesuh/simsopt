@@ -16,6 +16,7 @@ from .boozer_radial_interp import (
 )
 
 __all__ = [
+    "BoozerRadialColumnBundle",
     "BoozerRadialInterpolantFrozenState",
     "_eval_G",
     "_eval_I",
@@ -39,6 +40,7 @@ __all__ = [
     "_eval_dnuds",
     "_eval_dnudtheta",
     "_eval_dnudzeta",
+    "_eval_radial_columns",
     "_eval_iota",
     "_eval_modB",
     "_eval_nu",
@@ -161,6 +163,39 @@ jax.tree_util.register_dataclass(
     ],
     meta_fields=["stellsym", "no_K"],
 )
+
+@dataclass(frozen=True)
+class BoozerRadialColumnBundle:
+    """Per-points radial profile evaluations shared by scalar siblings."""
+
+    psip: jax.Array
+    G: jax.Array
+    I: jax.Array
+    iota: jax.Array
+    dGds: jax.Array
+    dIds: jax.Array
+    diotads: jax.Array
+    bmnc: jax.Array
+    dbmncds: jax.Array
+    rmnc: jax.Array
+    drmncds: jax.Array
+    zmns: jax.Array
+    dzmnsds: jax.Array
+    numns: jax.Array
+    dnumnsds: jax.Array
+    bmns: jax.Array
+    dbmnsds: jax.Array
+    rmns: jax.Array
+    drmnsds: jax.Array
+    zmnc: jax.Array
+    dzmncds: jax.Array
+    numnc: jax.Array
+    dnumncds: jax.Array
+    mn_factor: jax.Array
+    d_mn_factor: jax.Array
+    kmns: jax.Array
+    kmnc: jax.Array
+
 
 _FROZEN_ARRAY_FIELDS = ("xm", "xn")
 _FROZEN_META_FIELDS = ("stellsym", "no_K")
@@ -364,6 +399,41 @@ def _scalar_at(s: jax.Array, profile: PiecewisePolynomial1D) -> jax.Array:
     return jnp.ravel(ppoly_eval(profile, s))
 
 
+def _eval_radial_columns(
+    state: BoozerRadialInterpolantFrozenState, s: jax.Array
+) -> BoozerRadialColumnBundle:
+    """Evaluate every radial profile once for one points/state cycle."""
+    return BoozerRadialColumnBundle(
+        psip=_scalar_at(s, state.psip),
+        G=_scalar_at(s, state.G),
+        I=_scalar_at(s, state.I),
+        iota=_scalar_at(s, state.iota),
+        dGds=_scalar_at(s, state.dGds),
+        dIds=_scalar_at(s, state.dIds),
+        diotads=_scalar_at(s, state.diotads),
+        bmnc=_column_at(s, state.bmnc),
+        dbmncds=_column_at(s, state.dbmncds),
+        rmnc=_column_at(s, state.rmnc),
+        drmncds=_column_at(s, state.drmncds),
+        zmns=_column_at(s, state.zmns),
+        dzmnsds=_column_at(s, state.dzmnsds),
+        numns=_column_at(s, state.numns),
+        dnumnsds=_column_at(s, state.dnumnsds),
+        bmns=_column_at(s, state.bmns),
+        dbmnsds=_column_at(s, state.dbmnsds),
+        rmns=_column_at(s, state.rmns),
+        drmnsds=_column_at(s, state.drmnsds),
+        zmnc=_column_at(s, state.zmnc),
+        dzmncds=_column_at(s, state.dzmncds),
+        numnc=_column_at(s, state.numnc),
+        dnumncds=_column_at(s, state.dnumncds),
+        mn_factor=_column_at(s, state.mn_factor),
+        d_mn_factor=_column_at(s, state.d_mn_factor),
+        kmns=_column_at(s, state.kmns),
+        kmnc=_column_at(s, state.kmnc),
+    )
+
+
 def _normalize(values: jax.Array, mn_factor: jax.Array) -> jax.Array:
     """Divide a mode-tabled spline column-stack by per-(mode, point) mn_factor."""
     return values / mn_factor
@@ -377,6 +447,361 @@ def _radial_normalized(
 ) -> jax.Array:
     """Apply the radial-derivative quotient used by ``_*ds_impl`` methods."""
     return (dspline_vals - spline_vals * d_mn_factor / mn_factor) / mn_factor
+
+
+def _eval_modB_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    bmnc = _normalize(columns.bmnc, columns.mn_factor)
+    result = inverse_fourier_transform_even(bmnc, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        bmns = _normalize(columns.bmns, columns.mn_factor)
+        result = result + inverse_fourier_transform_odd(
+            bmns, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dmodBdtheta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xm_col = state.xm[:, None]
+    bmnc = -xm_col * _normalize(columns.bmnc, columns.mn_factor)
+    result = inverse_fourier_transform_odd(bmnc, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        bmns = xm_col * _normalize(columns.bmns, columns.mn_factor)
+        result = result + inverse_fourier_transform_even(
+            bmns, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dmodBdzeta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xn_col = state.xn[:, None]
+    bmnc = xn_col * _normalize(columns.bmnc, columns.mn_factor)
+    result = inverse_fourier_transform_odd(bmnc, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        bmns = -xn_col * _normalize(columns.bmns, columns.mn_factor)
+        result = result + inverse_fourier_transform_even(
+            bmns, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dmodBds_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    bmnc = _radial_normalized(
+        columns.bmnc, columns.dbmncds, columns.mn_factor, columns.d_mn_factor
+    )
+    result = inverse_fourier_transform_even(bmnc, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        bmns = _radial_normalized(
+            columns.bmns, columns.dbmnsds, columns.mn_factor, columns.d_mn_factor
+        )
+        result = result + inverse_fourier_transform_odd(
+            bmns, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_R_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    rmnc = _normalize(columns.rmnc, columns.mn_factor)
+    result = inverse_fourier_transform_even(rmnc, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        rmns = _normalize(columns.rmns, columns.mn_factor)
+        result = result + inverse_fourier_transform_odd(
+            rmns, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dRdtheta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xm_col = state.xm[:, None]
+    rmnc = -xm_col * _normalize(columns.rmnc, columns.mn_factor)
+    result = inverse_fourier_transform_odd(rmnc, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        rmns = xm_col * _normalize(columns.rmns, columns.mn_factor)
+        result = result + inverse_fourier_transform_even(
+            rmns, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dRdzeta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xn_col = state.xn[:, None]
+    rmnc = xn_col * _normalize(columns.rmnc, columns.mn_factor)
+    result = inverse_fourier_transform_odd(rmnc, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        rmns = -xn_col * _normalize(columns.rmns, columns.mn_factor)
+        result = result + inverse_fourier_transform_even(
+            rmns, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dRds_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    rmnc = _radial_normalized(
+        columns.rmnc, columns.drmncds, columns.mn_factor, columns.d_mn_factor
+    )
+    result = inverse_fourier_transform_even(rmnc, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        rmns = _radial_normalized(
+            columns.rmns, columns.drmnsds, columns.mn_factor, columns.d_mn_factor
+        )
+        result = result + inverse_fourier_transform_odd(
+            rmns, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_Z_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    zmns = _normalize(columns.zmns, columns.mn_factor)
+    result = inverse_fourier_transform_odd(zmns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        zmnc = _normalize(columns.zmnc, columns.mn_factor)
+        result = result + inverse_fourier_transform_even(
+            zmnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dZdtheta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xm_col = state.xm[:, None]
+    zmns = xm_col * _normalize(columns.zmns, columns.mn_factor)
+    result = inverse_fourier_transform_even(zmns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        zmnc = -xm_col * _normalize(columns.zmnc, columns.mn_factor)
+        result = result + inverse_fourier_transform_odd(
+            zmnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dZdzeta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xn_col = state.xn[:, None]
+    zmns = -xn_col * _normalize(columns.zmns, columns.mn_factor)
+    result = inverse_fourier_transform_even(zmns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        zmnc = xn_col * _normalize(columns.zmnc, columns.mn_factor)
+        result = result + inverse_fourier_transform_odd(
+            zmnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dZds_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    zmns = _radial_normalized(
+        columns.zmns, columns.dzmnsds, columns.mn_factor, columns.d_mn_factor
+    )
+    result = inverse_fourier_transform_odd(zmns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        zmnc = _radial_normalized(
+            columns.zmnc, columns.dzmncds, columns.mn_factor, columns.d_mn_factor
+        )
+        result = result + inverse_fourier_transform_even(
+            zmnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_nu_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    numns = _normalize(columns.numns, columns.mn_factor)
+    result = inverse_fourier_transform_odd(numns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        numnc = _normalize(columns.numnc, columns.mn_factor)
+        result = result + inverse_fourier_transform_even(
+            numnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dnudtheta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xm_col = state.xm[:, None]
+    numns = xm_col * _normalize(columns.numns, columns.mn_factor)
+    result = inverse_fourier_transform_even(numns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        numnc = -xm_col * _normalize(columns.numnc, columns.mn_factor)
+        result = result + inverse_fourier_transform_odd(
+            numnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dnudzeta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xn_col = state.xn[:, None]
+    numns = -xn_col * _normalize(columns.numns, columns.mn_factor)
+    result = inverse_fourier_transform_even(numns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        numnc = xn_col * _normalize(columns.numnc, columns.mn_factor)
+        result = result + inverse_fourier_transform_odd(
+            numnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dnuds_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    numns = _radial_normalized(
+        columns.numns, columns.dnumnsds, columns.mn_factor, columns.d_mn_factor
+    )
+    result = inverse_fourier_transform_odd(numns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        numnc = _radial_normalized(
+            columns.numnc, columns.dnumncds, columns.mn_factor, columns.d_mn_factor
+        )
+        result = result + inverse_fourier_transform_even(
+            numnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_K_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    if state.no_K:
+        return jnp.zeros(points.shape[0], dtype=jnp.float64)
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    kmns = _normalize(columns.kmns, columns.mn_factor)
+    result = inverse_fourier_transform_odd(kmns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        kmnc = _normalize(columns.kmnc, columns.mn_factor)
+        result = result + inverse_fourier_transform_even(
+            kmnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dKdtheta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    if state.no_K:
+        return jnp.zeros(points.shape[0], dtype=jnp.float64)
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xm_col = state.xm[:, None]
+    kmns = xm_col * _normalize(columns.kmns, columns.mn_factor)
+    result = inverse_fourier_transform_even(kmns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        kmnc = -xm_col * _normalize(columns.kmnc, columns.mn_factor)
+        result = result + inverse_fourier_transform_odd(
+            kmnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
+
+
+def _eval_dKdzeta_from_columns(
+    state: BoozerRadialInterpolantFrozenState,
+    columns: BoozerRadialColumnBundle,
+    points: jax.Array,
+) -> jax.Array:
+    if state.no_K:
+        return jnp.zeros(points.shape[0], dtype=jnp.float64)
+    thetas = points[:, 1]
+    zetas = points[:, 2]
+    xn_col = state.xn[:, None]
+    kmns = -xn_col * _normalize(columns.kmns, columns.mn_factor)
+    result = inverse_fourier_transform_even(kmns, state.xm, state.xn, thetas, zetas)
+    if not state.stellsym:
+        kmnc = xn_col * _normalize(columns.kmnc, columns.mn_factor)
+        result = result + inverse_fourier_transform_odd(
+            kmnc, state.xm, state.xn, thetas, zetas
+        )
+    return result
 
 
 def _eval_modB(

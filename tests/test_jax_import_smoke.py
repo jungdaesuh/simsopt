@@ -584,6 +584,15 @@ def test_programmatic_backend_selection_configures_jax_runtime():
     )
 
 
+def test_programmatic_backend_persistent_cache_writes_small_kernel():
+    """Runtime cache thresholds should let even a tiny compiled kernel persist."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_programmatic_backend_persistent_cache_writes_small_kernel",),
+        failure_message="persistent cache write smoke failed",
+    )
+
+
 def test_parity_mode_defaults_transfer_guard_and_keeps_x64_enabled():
     """Parity modes should own x64 and transfer-guard defaults without extra flags."""
     _assert_python_script_passes(

@@ -41,12 +41,20 @@ from conftest import (
 )
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
+import simsopt.geo.boozer_residual_jax as _brj
 from simsopt.geo.boozer_residual_jax import (
+    _split_decision_vector,
+    _unpack_decision_vector,
+    boozer_penalty_hvp_composed,
+    boozer_residual_jacobian_composed,
+    boozer_residual_jvp_composed,
     boozer_residual_scalar,
     boozer_residual_grad,
     boozer_residual_hessian,
+    boozer_residual_vjp_composed,
     boozer_residual_vector,
 )
+from simsopt.geo.label_constraints_jax import compute_G_from_currents
 
 _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
 
@@ -99,6 +107,220 @@ def _cpp_boozer_residual_scalar(G, iota, B, xphi, xtheta, *, weight_inv_modB):
     )
     num_res = 3 * B_host.shape[0] * B_host.shape[1]
     return float(val_raw) / num_res
+
+
+def test_split_decision_vector_rejects_missing_tail_entries():
+    """Decision vectors must contain iota and, when optimized, G."""
+
+    with pytest.raises(ValueError, match="decision vector length 1 is too short"):
+        _split_decision_vector(jnp.asarray([0.3], dtype=jnp.float64), optimize_G=True)
+
+    with pytest.raises(ValueError, match="decision vector length 0 is too short"):
+        _split_decision_vector(jnp.asarray([], dtype=jnp.float64), optimize_G=False)
+
+
+def test_unpack_decision_vector_uses_current_ssot_when_G_not_optimized():
+    """The no-``G`` path uses ``compute_G_from_currents`` for all coils."""
+
+    sdofs = jnp.asarray([0.1, 0.2, 0.3], dtype=jnp.float64)
+    iota = jnp.asarray(0.4, dtype=jnp.float64)
+    x = jnp.concatenate([sdofs, jnp.asarray([iota], dtype=jnp.float64)])
+    currents_a = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    currents_b = jnp.asarray([-3.0], dtype=jnp.float64)
+    empty = jnp.zeros((0, 3), dtype=jnp.float64)
+
+    actual_sdofs, actual_iota, actual_G = _unpack_decision_vector(
+        x,
+        [(empty, empty, currents_a), (empty, empty, currents_b)],
+        optimize_G=False,
+    )
+    expected_G = compute_G_from_currents(jnp.concatenate([currents_a, currents_b]))
+
+    np.testing.assert_allclose(host_array(actual_sdofs), host_array(sdofs))
+    np.testing.assert_allclose(host_scalar(actual_iota), host_scalar(iota))
+    np.testing.assert_allclose(host_scalar(actual_G), host_scalar(expected_G))
+
+
+def test_composed_jacobian_uses_reverse_mode_when_residual_is_smaller(monkeypatch):
+    calls = {"linearize": 0, "vjp": 0}
+    original_linearize = _brj.jax.linearize
+    original_vjp = _brj.jax.vjp
+
+    def fake_residual(x, **kwargs):
+        del kwargs
+        return jnp.stack([x[0] + 2.0 * x[1], x[1] - x[2], jnp.sum(x)])
+
+    def recording_linearize(*args, **kwargs):
+        calls["linearize"] += 1
+        return original_linearize(*args, **kwargs)
+
+    def recording_vjp(*args, **kwargs):
+        calls["vjp"] += 1
+        return original_vjp(*args, **kwargs)
+
+    monkeypatch.setattr(_brj, "_boozer_residual_vector_composed", fake_residual)
+    monkeypatch.setattr(_brj.jax, "linearize", recording_linearize)
+    monkeypatch.setattr(_brj.jax, "vjp", recording_vjp)
+
+    x = jnp.arange(5.0, dtype=jnp.float64)
+    residual, jacobian = boozer_residual_jacobian_composed(
+        x,
+        quadpoints_phi=np.zeros(1, dtype=np.float64),
+        quadpoints_theta=np.zeros(1, dtype=np.float64),
+    )
+
+    expected_jacobian = np.asarray(
+        [
+            [1.0, 2.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, -1.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    np.testing.assert_allclose(host_array(residual), host_array(fake_residual(x)))
+    np.testing.assert_allclose(host_array(jacobian), expected_jacobian)
+    assert calls == {"linearize": 0, "vjp": 1}
+
+
+def test_composed_jacobian_uses_forward_mode_when_decision_vector_is_smaller(
+    monkeypatch,
+):
+    calls = {"linearize": 0, "vjp": 0}
+    original_linearize = _brj.jax.linearize
+    original_vjp = _brj.jax.vjp
+
+    def fake_residual(x, **kwargs):
+        del kwargs
+        return jnp.stack(
+            [
+                x[0],
+                x[1],
+                x[0] + x[1],
+                x[0] - x[1],
+                2.0 * x[0],
+                3.0 * x[1],
+            ]
+        )
+
+    def recording_linearize(*args, **kwargs):
+        calls["linearize"] += 1
+        return original_linearize(*args, **kwargs)
+
+    def recording_vjp(*args, **kwargs):
+        calls["vjp"] += 1
+        return original_vjp(*args, **kwargs)
+
+    monkeypatch.setattr(_brj, "_boozer_residual_vector_composed", fake_residual)
+    monkeypatch.setattr(_brj.jax, "linearize", recording_linearize)
+    monkeypatch.setattr(_brj.jax, "vjp", recording_vjp)
+
+    x = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+    residual, jacobian = boozer_residual_jacobian_composed(
+        x,
+        quadpoints_phi=np.zeros(1, dtype=np.float64),
+        quadpoints_theta=np.zeros(2, dtype=np.float64),
+    )
+
+    expected_jacobian = np.asarray(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [1.0, -1.0],
+            [2.0, 0.0],
+            [0.0, 3.0],
+        ],
+        dtype=np.float64,
+    )
+    np.testing.assert_allclose(host_array(residual), host_array(fake_residual(x)))
+    np.testing.assert_allclose(host_array(jacobian), expected_jacobian)
+    assert calls == {"linearize": 1, "vjp": 0}
+
+
+def test_composed_penalty_hvp_matches_dense_hessian_product(monkeypatch):
+    matrix = jnp.asarray(
+        [
+            [2.0, -0.5, 0.25],
+            [-0.5, 3.0, 0.75],
+            [0.25, 0.75, 1.5],
+        ],
+        dtype=jnp.float64,
+    )
+
+    def fake_penalty(x, *, scale, offset):
+        quadratic = 0.5 * x @ (matrix @ x)
+        return scale * (quadratic + jnp.sum(jnp.sin(x))) + offset
+
+    monkeypatch.setattr(_brj, "boozer_penalty_composed", fake_penalty)
+
+    x = jnp.asarray([0.2, -0.3, 0.5], dtype=jnp.float64)
+    v = jnp.asarray([1.25, -0.75, 0.4], dtype=jnp.float64)
+    scale = 1.7
+    offset = -0.2
+
+    actual = boozer_penalty_hvp_composed(x, v, scale=scale, offset=offset)
+    dense_hessian = _brj.jax.hessian(
+        lambda y: fake_penalty(y, scale=scale, offset=offset)
+    )(x)
+    expected = dense_hessian @ v
+
+    np.testing.assert_allclose(host_array(actual), host_array(expected))
+
+
+def test_composed_residual_jvp_vjp_match_jax_products(monkeypatch):
+    def fail_dense_jacobian(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("dense Jacobian should not be materialized")
+
+    def fake_residual(x, *, scale):
+        return scale * jnp.asarray(
+            [
+                x[0] + x[1] ** 2,
+                x[2] * jnp.sin(x[0]),
+                x[0] * x[1] * x[2],
+                jnp.sum(x**3),
+            ],
+            dtype=x.dtype,
+        )
+
+    monkeypatch.setattr(_brj, "boozer_residual_jacobian_composed", fail_dense_jacobian)
+    monkeypatch.setattr(_brj, "_boozer_residual_vector_composed", fake_residual)
+
+    x = jnp.asarray([0.3, -0.4, 0.8], dtype=jnp.float64)
+    tangent = jnp.asarray([1.1, -0.2, 0.5], dtype=jnp.float64)
+    cotangent = jnp.asarray([0.7, -1.2, 0.25, 0.9], dtype=jnp.float64)
+    scale = 2.3
+    residual_fn = lambda y: fake_residual(y, scale=scale)
+
+    actual_residual, actual_jvp = boozer_residual_jvp_composed(
+        x,
+        tangent,
+        scale=scale,
+    )
+    expected_residual, expected_jvp = _brj.jax.jvp(
+        residual_fn,
+        (x,),
+        (tangent,),
+    )
+
+    vjp_residual, actual_vjp = boozer_residual_vjp_composed(
+        x,
+        cotangent,
+        scale=scale,
+    )
+    expected_vjp_residual, expected_vjp_fn = _brj.jax.vjp(residual_fn, x)
+    (expected_vjp,) = expected_vjp_fn(cotangent)
+
+    np.testing.assert_allclose(
+        host_array(actual_residual),
+        host_array(expected_residual),
+    )
+    np.testing.assert_allclose(host_array(actual_jvp), host_array(expected_jvp))
+    np.testing.assert_allclose(
+        host_array(vjp_residual),
+        host_array(expected_vjp_residual),
+    )
+    np.testing.assert_allclose(host_array(actual_vjp), host_array(expected_vjp))
 
 
 def _numpy_cpu_ordered_boozer_scalar_reference(
@@ -229,6 +451,58 @@ class TestBoozerResidualScalar:
         )
 
         np.testing.assert_allclose(actual, reference, rtol=0.0, atol=0.0)
+
+    def test_weighted_zero_field_surfaces_nonfinite_contract(self):
+        nphi, ntheta = 2, 3
+        B = device_float64(np.zeros((nphi, ntheta, 3), dtype=np.float64))
+        xphi = device_float64(np.ones((nphi, ntheta, 3), dtype=np.float64))
+        xtheta = device_float64(np.ones((nphi, ntheta, 3), dtype=np.float64))
+
+        weighted = host_scalar(
+            boozer_residual_scalar(
+                1.0,
+                0.5,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=True,
+            )
+        )
+        unweighted = host_scalar(
+            boozer_residual_scalar(
+                1.0,
+                0.5,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=False,
+            )
+        )
+
+        assert math.isnan(weighted)
+        assert unweighted == pytest.approx(0.0, abs=0.0)
+
+    def test_float32_inputs_are_rejected(self):
+        B, xphi, xtheta = _make_synthetic_data(nphi=2, ntheta=3)
+        G, iota = 1.5, 0.3
+
+        with pytest.raises(TypeError, match="B must have dtype float64"):
+            boozer_residual_scalar(
+                G,
+                iota,
+                jnp.asarray(B, dtype=jnp.float32),
+                xphi,
+                xtheta,
+            )
+
+        with pytest.raises(TypeError, match="value must have dtype float64"):
+            boozer_residual_scalar(
+                np.float32(G),
+                iota,
+                B,
+                xphi,
+                xtheta,
+            )
 
     def test_zero_residual(self):
         """When B is consistent with Boozer, residual should be near zero."""

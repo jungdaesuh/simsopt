@@ -1182,6 +1182,28 @@ class TestOptimizerAdapterPrivate:
         assert main_a is main_b
         assert observed is not main_a
 
+    def test_lbfgsb_main_loop_donates_internal_state(self, monkeypatch):
+        observed = {}
+
+        def fake_jit(fn, *jit_args, **jit_kwargs):
+            del jit_args
+            observed["donate_argnums"] = jit_kwargs.get("donate_argnums")
+            return fn
+
+        monkeypatch.setattr(_private_lbfgs.jax, "jit", fake_jit)
+
+        kernel = _private_lbfgs._lbfgsb_mainlb_kernel(
+            lambda x: (jnp.asarray(0.0), jnp.zeros_like(x.x)),
+            cache_owner=None,
+            cache_key_prefix=(),
+            maxiter=1,
+            maxfun=1,
+            accepted_step_callback=None,
+        )
+
+        assert callable(kernel)
+        assert observed["donate_argnums"] == (0,)
+
     def test_hybrid_method_is_removed_from_public_optimizer_surface(self):
         with pytest.raises(ValueError, match="Unknown method 'bfgs-hybrid'"):
             jax_minimize(

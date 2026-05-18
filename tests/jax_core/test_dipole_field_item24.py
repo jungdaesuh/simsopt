@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -12,6 +14,7 @@ import simsoptpp as sopp
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt.field.magneticfieldclasses import DipoleField
 from simsopt.jax_core.dipole_field import (
+    _dipole_field_Bn_jit,
     define_a_uniform_cartesian_grid_between_two_toroidal_surfaces,
     dipole_field_A,
     dipole_field_A_from_spec,
@@ -29,6 +32,9 @@ from .jaxpr_utils import count_jaxpr_primitives
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
 _DIRECT_RTOL = _DIRECT_KERNEL["rtol"]
 _DIRECT_ATOL = _DIRECT_KERNEL["atol"]
+_FD_GRADIENT = parity_ladder_tolerances("fd_gradient")
+_FD_RTOL = _FD_GRADIENT["directional_fd_rtol"]
+_FD_ATOL = _FD_GRADIENT["directional_fd_atol"]
 
 _POINTS = np.ascontiguousarray(
     np.array(
@@ -102,6 +108,14 @@ def _assert_direct_kernel_close(actual: np.ndarray, expected: np.ndarray) -> Non
     )
 
 
+def _centered_directional_fd(
+    fun, base: np.ndarray, direction: np.ndarray, eps: float
+) -> np.ndarray:
+    return (fun(base + eps * direction) - fun(base - eps * direction)) / (
+        2.0 * eps
+    )
+
+
 def test_direct_cpp_parity_for_field_and_derivative_kernels() -> None:
     """Raw JAX kernels match the exposed ``simsoptpp`` dipole-field oracles."""
 
@@ -131,6 +145,92 @@ def test_direct_cpp_parity_for_field_and_derivative_kernels() -> None:
     _assert_direct_kernel_close(actual_A, expected_A)
     _assert_direct_kernel_close(actual_dB, expected_dB)
     _assert_direct_kernel_close(actual_dA, expected_dA)
+
+
+def test_autodiff_through_moments_matches_directional_fd() -> None:
+    """Linear moment derivatives from JAX AD match central differences."""
+
+    rng = np.random.default_rng(2401)
+    direction = rng.normal(size=_DIPOLE_MOMENTS.shape).astype(np.float64)
+    direction /= np.linalg.norm(direction)
+
+    def flat_B(moments: np.ndarray | jax.Array) -> jax.Array:
+        return dipole_field_B(_POINTS, _DIPOLE_POINTS, moments).reshape(-1)
+
+    ad_direction = np.asarray(
+        jax.jvp(flat_B, (jnp.asarray(_DIPOLE_MOMENTS),), (jnp.asarray(direction),))[1],
+        dtype=np.float64,
+    )
+    fd_direction = np.asarray(
+        _centered_directional_fd(
+            lambda moments: np.asarray(flat_B(moments), dtype=np.float64),
+            _DIPOLE_MOMENTS,
+            direction,
+            1.0e-6,
+        ),
+        dtype=np.float64,
+    )
+
+    np.testing.assert_allclose(
+        ad_direction,
+        fd_direction,
+        rtol=_FD_RTOL,
+        atol=_FD_ATOL,
+    )
+
+
+def test_autodiff_through_dipole_positions_matches_directional_fd() -> None:
+    """Nonlinear dipole-position derivatives from JAX AD match FD."""
+
+    rng = np.random.default_rng(2402)
+    direction = rng.normal(size=_DIPOLE_POINTS.shape).astype(np.float64)
+    direction /= np.linalg.norm(direction)
+
+    def flat_B(dipole_points: np.ndarray | jax.Array) -> jax.Array:
+        return dipole_field_B(_POINTS, dipole_points, _DIPOLE_MOMENTS).reshape(-1)
+
+    ad_direction = np.asarray(
+        jax.jvp(flat_B, (jnp.asarray(_DIPOLE_POINTS),), (jnp.asarray(direction),))[1],
+        dtype=np.float64,
+    )
+    fd_direction = np.asarray(
+        _centered_directional_fd(
+            lambda dipole_points: np.asarray(flat_B(dipole_points), dtype=np.float64),
+            _DIPOLE_POINTS,
+            direction,
+            1.0e-6,
+        ),
+        dtype=np.float64,
+    )
+
+    np.testing.assert_allclose(
+        ad_direction,
+        fd_direction,
+        rtol=_FD_RTOL,
+        atol=_FD_ATOL,
+    )
+
+
+def test_autodiff_through_evaluation_points_matches_dB_kernel() -> None:
+    """Point-coordinate AD of ``B`` matches the explicit ``dipole_field_dB``."""
+
+    def flat_B(points: jax.Array) -> jax.Array:
+        return dipole_field_B(points, _DIPOLE_POINTS, _DIPOLE_MOMENTS).reshape(-1)
+
+    jac = np.asarray(jax.jacfwd(flat_B)(jnp.asarray(_POINTS)), dtype=np.float64)
+    jac = jac.reshape(_POINTS.shape[0], 3, *_POINTS.shape)
+    expected_blocks = np.asarray(
+        dipole_field_dB(_POINTS, _DIPOLE_POINTS, _DIPOLE_MOMENTS),
+        dtype=np.float64,
+    )
+
+    for point_index in range(_POINTS.shape[0]):
+        _assert_direct_kernel_close(
+            jac[point_index, :, point_index, :],
+            expected_blocks[point_index],
+        )
+        off_point_blocks = np.delete(jac[point_index], point_index, axis=1)
+        np.testing.assert_array_equal(off_point_blocks, np.zeros_like(off_point_blocks))
 
 
 def test_total_field_kernels_stream_over_dipoles() -> None:
@@ -179,6 +279,44 @@ def test_dipole_field_Bn_stages_as_static_jit_kernel() -> None:
     jaxpr = jax.make_jaxpr(Bn_kernel)(points, dipole_points, unitnormal, b_obj)
 
     assert count_jaxpr_primitives(jaxpr, "jit") == 1
+
+
+def test_dipole_field_Bn_symmetry_axis_is_vectorized() -> None:
+    """The hot Bn helper batches symmetry copies instead of unrolling them."""
+
+    source = inspect.getsource(_dipole_field_Bn_jit)
+    assert "jax.vmap" in source
+    assert "for stell" not in source
+    assert "for fp" not in source
+    assert "range(stellsym" not in source
+    assert "range(nfp" not in source
+
+    points = jnp.asarray(_POINTS, dtype=jnp.float64)
+    dipole_points = jnp.asarray(_DIPOLE_POINTS, dtype=jnp.float64)
+    unitnormal = jnp.asarray(_UNITNORMAL, dtype=jnp.float64)
+    R0 = jnp.asarray(1.05, dtype=points.dtype)
+
+    hlo_nfp1 = _dipole_field_Bn_jit.lower(
+        points,
+        dipole_points,
+        unitnormal,
+        R0,
+        nfp=1,
+        stellsym=1,
+        coordinate_flag="cartesian",
+    ).as_text()
+    hlo_nfp5 = _dipole_field_Bn_jit.lower(
+        points,
+        dipole_points,
+        unitnormal,
+        R0,
+        nfp=5,
+        stellsym=1,
+        coordinate_flag="cartesian",
+    ).as_text()
+
+    assert hlo_nfp5.count("stablehlo.sine") == hlo_nfp1.count("stablehlo.sine")
+    assert hlo_nfp5.count("stablehlo.cosine") == hlo_nfp1.count("stablehlo.cosine")
 
 
 def test_immutable_spec_jits_without_host_oracle_dependency() -> None:
@@ -266,6 +404,142 @@ def test_dipole_field_Bn_cpp_parity_for_production_matrix(
     assert (
         actual.shape == expected.shape == (_POINTS.shape[0], _DIPOLE_POINTS.shape[0], 3)
     )
+    _assert_direct_kernel_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("nfp", "stellsym", "coordinate_flag"),
+    [
+        pytest.param(1, 0, "cartesian", id="nfp1-no-stellsym-cartesian"),
+        pytest.param(1, 1, "cylindrical", id="nfp1-stellsym-cylindrical"),
+        pytest.param(5, 1, "toroidal", id="nfp5-stellsym-toroidal"),
+    ],
+)
+def test_dipole_field_Bn_vectorized_symmetry_axis_cpp_parity(
+    nfp: int, stellsym: int, coordinate_flag: str
+) -> None:
+    """Vectorized symmetry copies preserve the C++ PM matrix contract."""
+
+    expected = np.asarray(
+        sopp.dipole_field_Bn(
+            _POINTS,
+            _DIPOLE_POINTS,
+            _UNITNORMAL,
+            nfp,
+            stellsym,
+            _BN_TARGET,
+            coordinate_flag,
+            1.05,
+        )
+    )
+    actual = np.asarray(
+        dipole_field_Bn(
+            _POINTS,
+            _DIPOLE_POINTS,
+            _UNITNORMAL,
+            nfp,
+            stellsym,
+            _BN_TARGET,
+            coordinate_flag,
+            1.05,
+        )
+    )
+
+    assert (
+        actual.shape == expected.shape == (_POINTS.shape[0], _DIPOLE_POINTS.shape[0], 3)
+    )
+    _assert_direct_kernel_close(actual, expected)
+
+
+def test_dipole_field_Bn_rejects_invalid_coordinate_flag() -> None:
+    """Raw JAX and C++ Bn kernels reject typos instead of using cartesian."""
+
+    with pytest.raises(ValueError, match="coordinate_flag"):
+        dipole_field_Bn(
+            _POINTS,
+            _DIPOLE_POINTS,
+            _UNITNORMAL,
+            3,
+            1,
+            _BN_TARGET,
+            "sphereical",
+            1.05,
+        )
+    with pytest.raises(RuntimeError, match="coordinate_flag"):
+        sopp.dipole_field_Bn(
+            _POINTS,
+            _DIPOLE_POINTS,
+            _UNITNORMAL,
+            3,
+            1,
+            _BN_TARGET,
+            "sphereical",
+            1.05,
+        )
+
+
+def test_dipole_field_Bn_rejects_unitnormal_shape_mismatch() -> None:
+    """C++ shape checks match the raw JAX Bn unitnormal contract."""
+
+    bad_unitnormal = np.ascontiguousarray(_UNITNORMAL[:-1])
+    with pytest.raises(ValueError, match="unitnormal"):
+        dipole_field_Bn(
+            _POINTS,
+            _DIPOLE_POINTS,
+            bad_unitnormal,
+            3,
+            1,
+            _BN_TARGET,
+            "cartesian",
+            1.05,
+        )
+    with pytest.raises(RuntimeError, match="unitnormal"):
+        sopp.dipole_field_Bn(
+            _POINTS,
+            _DIPOLE_POINTS,
+            bad_unitnormal,
+            3,
+            1,
+            _BN_TARGET,
+            "cartesian",
+            1.05,
+        )
+
+
+@pytest.mark.parametrize("coordinate_flag", ["cylindrical", "toroidal"])
+def test_dipole_field_Bn_on_axis_noncartesian_matches_cpp(
+    coordinate_flag: str,
+) -> None:
+    """C++ SIMD and JAX use the same finite zero-angle convention."""
+
+    dipole_points = np.ascontiguousarray(np.array([[0.0, 0.0, 0.0]]))
+    expected = np.asarray(
+        sopp.dipole_field_Bn(
+            _POINTS,
+            dipole_points,
+            _UNITNORMAL,
+            2,
+            1,
+            _BN_TARGET,
+            coordinate_flag,
+            0.0,
+        )
+    )
+    actual = np.asarray(
+        dipole_field_Bn(
+            _POINTS,
+            dipole_points,
+            _UNITNORMAL,
+            2,
+            1,
+            _BN_TARGET,
+            coordinate_flag,
+            0.0,
+        )
+    )
+
+    assert np.all(np.isfinite(expected))
+    assert np.all(np.isfinite(actual))
     _assert_direct_kernel_close(actual, expected)
 
 

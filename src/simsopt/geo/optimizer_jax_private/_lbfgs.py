@@ -169,7 +169,7 @@ def _lbfgsb_mainlb_kernel(
             int(maxiter),
             int(maxfun),
         ),
-        builder=lambda: jax.jit(run),
+        builder=lambda: jax.jit(run, donate_argnums=(0,)),
     )
 
 

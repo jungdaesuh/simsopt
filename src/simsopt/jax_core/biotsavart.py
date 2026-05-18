@@ -422,7 +422,7 @@ def _one_point_dense(
 # ── Kernel factory ────────────────────────────────────────────────────
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=256)
 def _make_kernel(
     integrand_key,
     diff_mode,
@@ -522,7 +522,7 @@ def _get_kernel(integrand_key, diff_mode, *, point_vma_axis_name=None):
     )
 
 
-@lru_cache(maxsize=16)
+@lru_cache(maxsize=64)
 def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
     """Build the tuning-keyed compiled VJP kernel for ``biot_savart_B``.
 

@@ -120,11 +120,11 @@ Out of scope:
 
 ### Wave 1: mechanical and low-risk runtime fixes
 
-- [ ] N1: persistent compilation-cache thresholds.
-- [ ] N13: LM matrix-free GMRES transfer-guard parity.
-- [ ] N14: LM matrix-free GMRES `solve_method="incremental"`.
-- [ ] N4: callback-stable solver-runner cache keys.
-- [ ] N3: donation after caller-reuse audit.
+- [x] N1: persistent compilation-cache thresholds.
+- [x] N13: LM matrix-free GMRES transfer-guard parity.
+- [x] N14: LM matrix-free GMRES `solve_method="incremental"`.
+- [x] N4: callback-stable solver-runner cache keys.
+- [x] N3: donation after caller-reuse audit.
 
 Coupled implementation notes:
 
@@ -135,26 +135,56 @@ Coupled implementation notes:
 
 ### Wave 2: hot-path refactors
 
-- [ ] N2: Boozer interpolant device-spec caching.
-- [ ] N5: GPMO ArbVec contribution hoist.
-- [ ] N6: GPMO scan-output history reduction.
-- [ ] N7: fused spline tensor contraction for non-parity mode.
-- [ ] N8: Boozer radial column reuse.
-- [ ] N10: composed penalty HVP.
-- [ ] N15: PM candidate-cost GEMV formulation.
-- [ ] N16: dipole-field symmetry vectorization.
+- [x] N2: Boozer interpolant device-spec caching.
+- [x] N5: GPMO ArbVec contribution hoist.
+- [x] N6: GPMO scan-output history reduction.
+- [x] N7: fused spline tensor contraction for non-parity mode.
+- [x] N8: Boozer radial column reuse.
+- [x] N10: composed penalty HVP.
+- [x] N15: PM candidate-cost GEMV formulation.
+- [x] N16: dipole-field symmetry vectorization.
 
 ### Wave 3: sharding research and multi-device proof
 
-- [ ] N11: surface-quadrature sharding.
-- [ ] N12: seed-batch sharding.
-- [ ] N17: dense Jacobian basis sharding and matrix-free helper API.
+- [x] N11: surface-quadrature sharding.
+- [x] N12: seed-batch sharding.
+- [x] N17: dense Jacobian basis sharding and matrix-free helper API.
 
 ### Wave 4: future and diagnostics
 
-- [ ] N18: Biot-Savart Pallas/Triton feasibility study.
-- [ ] N19: Biot-Savart kernel cache-size bump.
-- [ ] N20: wireframe diagnostic replay cleanup.
+- [x] N18: Biot-Savart Pallas/Triton feasibility study.
+- [x] N19: Biot-Savart kernel cache-size bump.
+- [x] N20: wireframe diagnostic replay cleanup.
+
+### Execution update: 2026-05-18
+
+The table below is the closeout record for this pass. The detailed per-item
+checklists below are retained as the original audit breakdown; any unchecked
+sub-bullet there is not a GPU payoff claim or rewrite commitment unless this
+closeout table restates it as validated.
+
+| Item | Result | Evidence boundary |
+| --- | --- | --- |
+| N1 | Complete | Runtime now sets both persistent-cache write thresholds; subprocess smoke proves a tiny JIT kernel writes a cache file. |
+| N2 | Complete | `InterpolatedBoozerFieldJAX` caches regular-grid device specs per frozen state. |
+| N3 | Complete for safe local donation | Donation is limited to internal L-BFGS-B main-loop state; no public caller-owned arrays are donated. |
+| N4 | Complete | Traceable LM/Newton runner cache keys depend on callback presence, with callback tokens resolved outside the cache key. |
+| N5 | Complete | ArbVec GPMO reuses precomputed contribution tensors. |
+| N6 | Complete | ArbVec scan traces compact selection data and reconstruct history afterward. |
+| N7 | Complete | Regular-grid non-parity mode uses fused tensor contraction while parity mode keeps the strict loop. |
+| N8 | Complete | Boozer radial wrapper caches one radial-column bundle per `set_points` cycle. |
+| N9 | Closed with no code change | Proposed checkpoint-policy change remains rejected; profiling is required before changing remat policy. |
+| N10 | Complete | Matrix-free composed penalty HVP helper matches dense Hessian products on a nonlinear fixture. |
+| N11 | Complete for CPU forced multi-device proof | Surface-quadrature sharding has forced-CPU multi-device equivalence and HLO collective proof; real GPU speedup is not claimed. |
+| N12 | Complete for CPU forced multi-device proof | Seed-batch value/gradient sharding has forced-CPU multi-device equivalence proof; real GPU speedup is not claimed. |
+| N13 | Complete | LM GMRES executes inside the narrow transfer-guard allowance. |
+| N14 | Complete | LM GMRES now passes `solve_method="incremental"`. |
+| N15 | Complete | PM candidate costs use residual dot/GEMV algebra instead of plus/minus residual tensors. |
+| N16 | Complete | Dipole symmetry copies are vectorized with flattened angle/sign arrays. |
+| N17 | Complete | Composed residual JVP/VJP helpers exist; dense Jacobian helper remains available. |
+| N18 | Complete as feasibility decision | Probe and decision record added; decision is no Pallas/Triton product rewrite without CUDA HBM profile plus parity/AD proof. |
+| N19 | Complete | Biot-Savart kernel LRU capacities increased and cache-info test covers mode-sweep capacity. |
+| N20 | Closed with no code change | Diagnostic replay stays unchanged because no concrete bottleneck was recorded. |
 
 ## TODO details
 
@@ -1052,14 +1082,15 @@ solver fixes.
 
 ## Validation checklist for any completed item
 
-- [ ] Code path matches the intended product lane.
-- [ ] Existing CPU/reference behavior remains unchanged or is used as oracle.
-- [ ] JAX CPU value/gradient behavior is covered where applicable.
-- [ ] JAX GPU behavior is covered before claiming GPU payoff.
-- [ ] Compile-time, memory, or wall-time payoff is measured for performance
+- [x] Code path matches the intended product lane.
+- [x] Existing CPU/reference behavior remains unchanged or is used as oracle.
+- [x] JAX CPU value/gradient behavior is covered where applicable.
+- [ ] JAX GPU behavior is covered before claiming GPU payoff. No GPU payoff is
+  claimed by this closeout.
+- [x] Compile-time, memory, or wall-time payoff is measured for performance
   claims.
-- [ ] No unrelated dirty files are staged with the fix.
-- [ ] The status summary in this document is updated when the item lands.
+- [x] No unrelated dirty files are staged with the fix.
+- [x] The status summary in this document is updated when the item lands.
 
 ## Official documentation references
 

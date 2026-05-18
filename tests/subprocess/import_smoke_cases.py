@@ -154,9 +154,12 @@ def _record_progress(points):
 
 
 def case_import_package_root() -> None:
+    block_simsoptpp_imports()
     import simsopt
 
     assert hasattr(simsopt, "__version__")
+    assert "simsopt._core" not in sys.modules
+    assert "simsoptpp" not in sys.modules
 
 
 def case_import_package_root_without_generated_version_file() -> None:
@@ -700,6 +703,35 @@ def case_programmatic_backend_selection_configures_jax_runtime() -> None:
     assert jax.config.jax_debug_nans is True
     assert jax.config.jax_transfer_guard == "log"
     assert jax.config.jax_compilation_cache_dir == "/tmp/simsopt-jax-cache"
+    assert jax.config.jax_persistent_cache_min_compile_time_secs == 0.0
+    assert jax.config.jax_persistent_cache_min_entry_size_bytes == -1
+
+
+def case_programmatic_backend_persistent_cache_writes_small_kernel() -> None:
+    import tempfile
+
+    import simsopt.config as simsopt_config
+
+    with tempfile.TemporaryDirectory(prefix="simsopt-jax-cache-smoke-") as cache_dir:
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            compilation_cache_dir=cache_dir,
+        )
+
+        import jax
+        import jax.numpy as jnp
+
+        @jax.jit
+        def small_kernel(x):
+            return jnp.sin(x).sum()
+
+        result = small_kernel(jnp.arange(16.0, dtype=jnp.float64))
+        jax.block_until_ready(result)
+        jax.effects_barrier()
+
+        cache_files = [path for path in Path(cache_dir).rglob("*") if path.is_file()]
+        assert cache_files, "small JAX kernel did not write a persistent-cache entry"
 
 
 def case_parity_mode_defaults_transfer_guard_and_keeps_x64_enabled() -> None:
@@ -1407,6 +1439,8 @@ def case_import_biotsavart_jax() -> None:
 
 
 def case_import_jax_core_specs() -> None:
+    block_simsoptpp_imports()
+
     from simsopt.jax_core import (
         CoilSpec,
         CoilGroupSpec,
@@ -1462,6 +1496,8 @@ def case_import_jax_core_specs() -> None:
     assert ZeroRotationSpec is not None
     assert curve_spec_kind is not None
     assert surface_spec_kind is not None
+    assert "simsopt._core" not in sys.modules
+    assert "simsoptpp" not in sys.modules
 
 
 def case_jax_core_specs_are_pytrees() -> None:
@@ -1714,30 +1750,30 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert surface_spec_kind(surface_xyz_spec) == "xyz_fourier"
     assert surface_spec_kind(surface_xyztensor_spec) == "xyz_tensor_fourier"
 
-    curve_xyz_leaves, _ = jax.tree_util.tree_flatten(curve_xyz_spec)
-    curve_rz_leaves, _ = jax.tree_util.tree_flatten(curve_rz_spec)
-    curve_planar_leaves, _ = jax.tree_util.tree_flatten(curve_planar_spec)
-    curve_helical_leaves, _ = jax.tree_util.tree_flatten(curve_helical_spec)
-    curve_cws_leaves, _ = jax.tree_util.tree_flatten(curve_cws_spec)
-    curve_perturbed_leaves, _ = jax.tree_util.tree_flatten(curve_perturbed_spec)
-    curve_filament_leaves, _ = jax.tree_util.tree_flatten(curve_filament_spec)
-    coil_symmetry_leaves, _ = jax.tree_util.tree_flatten(coil_symmetry_spec)
-    current_leaves, _ = jax.tree_util.tree_flatten(current_spec)
-    field_eval_leaves, _ = jax.tree_util.tree_flatten(field_eval_spec)
-    coil_value_leaves, _ = jax.tree_util.tree_flatten(coil_value_spec)
-    coil_leaves, _ = jax.tree_util.tree_flatten(coil_spec)
-    flux_leaves, _ = jax.tree_util.tree_flatten(flux_spec)
-    frame_rotation_leaves, _ = jax.tree_util.tree_flatten(frame_rotation_spec)
-    dof_map_leaves, _ = jax.tree_util.tree_flatten(identity_curve_map)
-    surface_leaves, _ = jax.tree_util.tree_flatten(surface_spec)
-    surface_xyz_leaves, _ = jax.tree_util.tree_flatten(surface_xyz_spec)
-    surface_xyztensor_leaves, _ = jax.tree_util.tree_flatten(surface_xyztensor_spec)
-    zero_rotation_leaves, _ = jax.tree_util.tree_flatten(zero_rotation_spec)
+    curve_xyz_leaves, _ = jax.tree.flatten(curve_xyz_spec)
+    curve_rz_leaves, _ = jax.tree.flatten(curve_rz_spec)
+    curve_planar_leaves, _ = jax.tree.flatten(curve_planar_spec)
+    curve_helical_leaves, _ = jax.tree.flatten(curve_helical_spec)
+    curve_cws_leaves, _ = jax.tree.flatten(curve_cws_spec)
+    curve_perturbed_leaves, _ = jax.tree.flatten(curve_perturbed_spec)
+    curve_filament_leaves, _ = jax.tree.flatten(curve_filament_spec)
+    coil_symmetry_leaves, _ = jax.tree.flatten(coil_symmetry_spec)
+    current_leaves, _ = jax.tree.flatten(current_spec)
+    field_eval_leaves, _ = jax.tree.flatten(field_eval_spec)
+    coil_value_leaves, _ = jax.tree.flatten(coil_value_spec)
+    coil_leaves, _ = jax.tree.flatten(coil_spec)
+    flux_leaves, _ = jax.tree.flatten(flux_spec)
+    frame_rotation_leaves, _ = jax.tree.flatten(frame_rotation_spec)
+    dof_map_leaves, _ = jax.tree.flatten(identity_curve_map)
+    surface_leaves, _ = jax.tree.flatten(surface_spec)
+    surface_xyz_leaves, _ = jax.tree.flatten(surface_xyz_spec)
+    surface_xyztensor_leaves, _ = jax.tree.flatten(surface_xyztensor_spec)
+    zero_rotation_leaves, _ = jax.tree.flatten(zero_rotation_spec)
 
     def assert_round_trip(spec):
-        leaves, treedef = jax.tree_util.tree_flatten(spec)
-        rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
-        rebuilt_leaves, rebuilt_treedef = jax.tree_util.tree_flatten(rebuilt)
+        leaves, treedef = jax.tree.flatten(spec)
+        rebuilt = jax.tree.unflatten(treedef, leaves)
+        rebuilt_leaves, rebuilt_treedef = jax.tree.flatten(rebuilt)
         assert rebuilt_treedef == treedef
         assert len(rebuilt_leaves) == len(leaves)
         for expected, actual in zip(leaves, rebuilt_leaves):

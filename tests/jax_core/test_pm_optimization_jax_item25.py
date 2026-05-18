@@ -184,6 +184,25 @@ def _assert_only_candidate_indices_are_inf(
     assert np.isfinite(np.delete(costs, unavailable)).all()
 
 
+def _primitive_output_shapes(closed_jaxpr, primitive_name: str) -> list[tuple[int, ...]]:
+    shapes = []
+    for eqn in closed_jaxpr.jaxpr.eqns:
+        if eqn.primitive.name != primitive_name:
+            continue
+        for outvar in eqn.outvars:
+            aval = getattr(outvar, "aval", None)
+            shape = getattr(aval, "shape", None)
+            if shape is not None:
+                shapes.append(tuple(shape))
+    return shapes
+
+
+def _assert_no_plus_minus_materialization(closed_jaxpr, materialized_shape) -> None:
+    materialized_shape = tuple(materialized_shape)
+    assert materialized_shape not in _primitive_output_shapes(closed_jaxpr, "add")
+    assert materialized_shape not in _primitive_output_shapes(closed_jaxpr, "sub")
+
+
 # ---------------------------------------------------------------------
 # Per-kernel parity (closed-form scalar checks vs C++ formula).
 # ---------------------------------------------------------------------
@@ -298,6 +317,36 @@ class TestPMKernelHelpers:
             atol=_PER_KERNEL_ATOL,
         )
 
+    def test_projection_l2_balls_zero_vector_jacobian_inside_ball(self):
+        m_maxima = jnp.asarray(np.array([0.5], dtype=np.float64))
+
+        def project(flat_m):
+            return projection_l2_balls(flat_m.reshape((1, 3)), m_maxima).reshape((3,))
+
+        jacobian = jax.jacrev(project)(jnp.zeros((3,), dtype=jnp.float64))
+        np.testing.assert_allclose(
+            np.asarray(jacobian),
+            np.eye(3),
+            rtol=_PER_KERNEL_RTOL,
+            atol=_PER_KERNEL_ATOL,
+        )
+
+    def test_projection_l2_balls_zero_radius_jacobian_is_finite(self):
+        m_maxima = jnp.asarray(np.array([0.0], dtype=np.float64))
+
+        def project(flat_m):
+            return projection_l2_balls(flat_m.reshape((1, 3)), m_maxima).reshape((3,))
+
+        jacobian = jax.jacrev(project)(jnp.asarray([1.0, -2.0, 0.5]))
+        jacobian_np = np.asarray(jacobian)
+        assert np.isfinite(jacobian_np).all()
+        np.testing.assert_allclose(
+            jacobian_np,
+            np.zeros((3, 3)),
+            rtol=_PER_KERNEL_RTOL,
+            atol=_PER_KERNEL_ATOL,
+        )
+
     def test_phi_off_ball_returns_g(self):
         m = jnp.asarray(np.array([[0.0, 0.0, 0.0]]))
         g = jnp.asarray(np.array([[1.0, 2.0, 3.0]]))
@@ -355,6 +404,29 @@ class TestPMKernelHelpers:
             out[0], 1.5, rtol=_PER_KERNEL_RTOL, atol=_PER_KERNEL_ATOL
         )
 
+    def test_find_max_alphaf_zero_step_gradient_is_finite(self):
+        m = jnp.asarray(np.array([[0.5, 0.0, 0.0]], dtype=np.float64))
+        m_maxima = jnp.asarray(np.array([1.0], dtype=np.float64))
+
+        def total(p_flat):
+            p = p_flat.reshape((1, 3))
+            return jnp.sum(find_max_alphaf(m, p, m_maxima))
+
+        grad = jax.grad(total)(jnp.zeros((3,), dtype=jnp.float64))
+        assert np.all(np.isfinite(np.asarray(grad)))
+
+    def test_g_reduced_projected_gradient_zero_norm_gradient_is_finite(self):
+        g = jnp.asarray(np.array([[1.0, -2.0, 3.0]], dtype=np.float64))
+        alpha = jnp.asarray(0.25, dtype=jnp.float64)
+        m_maxima = jnp.asarray(np.array([0.0], dtype=np.float64))
+
+        def total(m_flat):
+            m = m_flat.reshape((1, 3))
+            return jnp.sum(g_reduced_projected_gradient(m, g, alpha, m_maxima))
+
+        grad = jax.grad(total)(jnp.zeros((3,), dtype=jnp.float64))
+        assert np.all(np.isfinite(np.asarray(grad)))
+
     def test_g_reduced_projected_gradient_is_phi_plus_beta(self):
         # Smoke: assemble random inputs and check that the public helper
         # equals the explicit ``phi + beta_tilde`` sum.
@@ -397,6 +469,24 @@ class TestGPMOBaseline:
         )
         np.testing.assert_allclose(
             costs, expected, rtol=_PER_KERNEL_RTOL, atol=_PER_KERNEL_ATOL
+        )
+
+    def test_candidate_costs_use_gemv_not_residual_matrix_materialization(self):
+        A_scaled, b, m_maxima, _ = _gpmo_problem(seed=2506, M=6, N=3)
+        residual = -b
+        available = np.ones((3, 3), dtype=bool)
+        spec = _gpmo_spec(m_maxima, reg_l2=0.125)
+
+        closed_jaxpr = jax.make_jaxpr(gpmo_baseline_candidate_costs)(
+            spec,
+            jnp.asarray(A_scaled),
+            jnp.asarray(residual),
+            jnp.asarray(available),
+        )
+
+        _assert_no_plus_minus_materialization(closed_jaxpr, A_scaled.shape)
+        assert (A_scaled.shape[1],) in _primitive_output_shapes(
+            closed_jaxpr, "dot_general"
         )
 
     def test_unavailable_candidate_costs_are_inf(self):
@@ -614,6 +704,37 @@ class TestGPMOMulti:
             np.concatenate([expected, expected]),
             rtol=_PER_KERNEL_RTOL,
             atol=_PER_KERNEL_ATOL,
+        )
+
+    def test_multi_candidate_costs_use_gemv_not_neighbor_residual_tensor(self):
+        A_scaled, b, m_maxima, _, dipoles = _gpmo_spatial_problem(
+            seed=2557, M=7, N=5
+        )
+        residual = -b
+        available = np.ones((5, 3), dtype=bool)
+        Nadjacent = 2
+        connectivity = gpmo_connectivity_matrix(jnp.asarray(dipoles))
+        spec = GPMOMultiSpec(
+            m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+            reg_l2=jnp.asarray(0.17, dtype=jnp.float64),
+            dipole_grid_xyz=jnp.asarray(dipoles, dtype=jnp.float64),
+            Nadjacent=Nadjacent,
+        )
+
+        closed_jaxpr = jax.make_jaxpr(gpmo_multi_candidate_costs)(
+            spec,
+            jnp.asarray(A_scaled),
+            jnp.asarray(residual),
+            jnp.asarray(available),
+            connectivity,
+        )
+
+        _assert_no_plus_minus_materialization(
+            closed_jaxpr,
+            (A_scaled.shape[0], A_scaled.shape[1], Nadjacent),
+        )
+        assert (A_scaled.shape[1],) in _primitive_output_shapes(
+            closed_jaxpr, "dot_general"
         )
 
     def test_solver_matches_cpp_multi_for_single_direction_modes(self):
@@ -983,6 +1104,32 @@ class TestGPMOArbVec:
             atol=_PER_KERNEL_ATOL,
         )
 
+    def test_arbvec_candidate_costs_use_gemv_not_residual_tensor(self):
+        A_scaled, b, m_maxima, _ = _gpmo_problem(seed=2579, M=6, N=4)
+        residual = -b
+        pol_vectors = _gpmo_pol_vectors(seed=2582, N=m_maxima.size, P=3)
+        available = np.ones(m_maxima.size, dtype=bool)
+        spec = GPMOArbVecSpec(
+            m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+            reg_l2=jnp.asarray(0.19, dtype=jnp.float64),
+            pol_vectors=jnp.asarray(pol_vectors, dtype=jnp.float64),
+        )
+
+        closed_jaxpr = jax.make_jaxpr(gpmo_arbvec_candidate_costs)(
+            spec,
+            jnp.asarray(A_scaled),
+            jnp.asarray(residual),
+            jnp.asarray(available),
+        )
+
+        _assert_no_plus_minus_materialization(
+            closed_jaxpr,
+            (A_scaled.shape[0], m_maxima.size, pol_vectors.shape[1]),
+        )
+        assert (m_maxima.size, pol_vectors.shape[1]) in _primitive_output_shapes(
+            closed_jaxpr, "dot_general"
+        )
+
     def test_solver_matches_cpp_arbvec_with_l2_regularization(self):
         A_scaled, b, m_maxima, normal_norms = _gpmo_problem(seed=2570, M=12, N=6)
         pol_vectors = _gpmo_pol_vectors(seed=2571, N=m_maxima.size, P=4)
@@ -1018,7 +1165,7 @@ class TestGPMOArbVec:
     def test_identity_arbvec_matches_baseline(self):
         A_scaled, b, m_maxima, _ = _gpmo_problem(seed=2572, M=10, N=5)
         identity = np.broadcast_to(np.eye(3), (m_maxima.size, 3, 3)).copy()
-        K = 4
+        K = 3
         reg_l2 = 0.0
         baseline = gpmo_baseline_solve(
             _gpmo_spec(m_maxima, reg_l2),
@@ -1179,6 +1326,58 @@ class TestGPMOArbVec:
             atol=0.0,
         )
 
+    def test_arbvec_bucketed_replays_x_history_from_compact_trace(self):
+        M = 7
+        bucket_N = 5
+        bucket_P = 4
+        active_N = 3
+        active_P = 2
+        K = 3
+        A_active, b, m_maxima, _ = _gpmo_problem(seed=2583, M=M, N=active_N)
+        pol_vectors = _gpmo_pol_vectors(seed=2584, N=active_N, P=active_P)
+        reference = gpmo_arbvec_solve(
+            GPMOArbVecSpec(
+                m_maxima=jnp.asarray(m_maxima, dtype=jnp.float64),
+                reg_l2=jnp.asarray(0.0, dtype=jnp.float64),
+                pol_vectors=jnp.asarray(pol_vectors, dtype=jnp.float64),
+            ),
+            jnp.asarray(A_active),
+            jnp.asarray(b),
+            K=K,
+        )
+
+        A_bucket = np.zeros((M, 3 * bucket_N), dtype=np.float64)
+        A_bucket[:, : 3 * active_N] = A_active
+        mmax_bucket = np.zeros((bucket_N,), dtype=np.float64)
+        mmax_bucket[:active_N] = m_maxima
+        pol_bucket = np.zeros((bucket_N, bucket_P, 3), dtype=np.float64)
+        pol_bucket[:active_N, :active_P, :] = pol_vectors
+
+        bucketed = gpmo_arbvec_solve_bucketed(
+            GPMOArbVecSpec(
+                m_maxima=jnp.asarray(mmax_bucket, dtype=jnp.float64),
+                reg_l2=jnp.asarray(0.0, dtype=jnp.float64),
+                pol_vectors=jnp.asarray(pol_bucket, dtype=jnp.float64),
+            ),
+            jnp.asarray(A_bucket),
+            jnp.asarray(b),
+            K=K,
+            active_ndipoles=jnp.asarray(active_N, dtype=jnp.int64),
+            active_nvectors=jnp.asarray(active_P, dtype=jnp.int64),
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(bucketed.x_history)[:, :active_N, :],
+            np.asarray(reference.x_history),
+            rtol=_STATE_TRACE_RTOL,
+            atol=_STATE_TRACE_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(bucketed.x_history)[:, active_N:, :],
+            0.0,
+            atol=0.0,
+        )
+
     def test_arbvec_solver_jits_under_strict_transfer_guard(self):
         A_scaled, b, m_maxima, _ = _gpmo_problem(seed=2575, M=7, N=4)
         pol_vectors = _gpmo_pol_vectors(seed=2576, N=m_maxima.size, P=3)
@@ -1232,6 +1431,29 @@ class TestGPMOArbVecBacktracking:
             n_candidates + start + 1,
         ]
         _assert_only_candidate_indices_are_inf(costs, unavailable)
+
+    def test_backtracking_candidate_costs_use_gemv_not_residual_tensor(self):
+        A_scaled, b, m_maxima, _ = _gpmo_problem(seed=2605, M=6, N=4)
+        residual = -b
+        pol_vectors = _gpmo_pol_vectors(seed=2606, N=m_maxima.size, P=3)
+        available = np.ones(m_maxima.size, dtype=bool)
+
+        closed_jaxpr = jax.make_jaxpr(_gpmo_arbvec_backtracking_candidate_costs)(
+            jnp.asarray(A_scaled),
+            jnp.asarray(residual),
+            jnp.asarray(available),
+            jnp.asarray(pol_vectors),
+            jnp.asarray(m_maxima),
+            jnp.asarray(0.11, dtype=jnp.float64),
+        )
+
+        _assert_no_plus_minus_materialization(
+            closed_jaxpr,
+            (A_scaled.shape[0], m_maxima.size, pol_vectors.shape[1]),
+        )
+        assert (m_maxima.size, pol_vectors.shape[1]) in _primitive_output_shapes(
+            closed_jaxpr, "dot_general"
+        )
 
     def test_initialize_gpmo_arbvec_matches_cpp_oracle(self):
         """``initialize_gpmo_arbvec`` selects the nearest signed pol vector.

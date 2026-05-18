@@ -31,7 +31,7 @@ from .surface_rzfourier import (
 )
 from .integral_bdotn import (
     _nan_safe_zero_grid,
-    integral_BdotN as integral_BdotN_jax,
+    integral_BdotN_surface_sharded as integral_BdotN_jax,
     residual_BdotN as residual_BdotN_jax,
 )
 

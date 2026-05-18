@@ -11,9 +11,11 @@ branch is covered as a separate construction.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -24,6 +26,8 @@ from simsopt.field.boozermagneticfield_jax import (
     BoozerRadialInterpolantJAX,
     freeze_boozer_radial_state,
 )
+import simsopt.jax_core.boozer_radial_field as radial_field
+from simsopt.jax_core.boozer_fixed_state import PiecewisePolynomial1D, ppoly_eval
 from simsopt.mhd.vmec import Vmec
 
 
@@ -74,6 +78,60 @@ def _make_evaluation_points(nfp: int) -> np.ndarray:
     return np.stack([s, theta, zeta], axis=1)
 
 
+def _constant_scalar_profile(value: float) -> PiecewisePolynomial1D:
+    return PiecewisePolynomial1D(
+        breaks=jnp.array([0.0, 1.0], dtype=jnp.float64),
+        coeffs=jnp.array([[value]], dtype=jnp.float64),
+    )
+
+
+def _constant_mode_profile(values: list[float]) -> PiecewisePolynomial1D:
+    return PiecewisePolynomial1D(
+        breaks=jnp.array([0.0, 1.0], dtype=jnp.float64),
+        coeffs=jnp.asarray(values, dtype=jnp.float64)[:, None, None],
+    )
+
+
+def _synthetic_radial_wrapper() -> BoozerRadialInterpolantJAX:
+    def zero_modes() -> PiecewisePolynomial1D:
+        return _constant_mode_profile([0.0, 0.0])
+
+    state = BoozerRadialInterpolantFrozenState(
+        xm=jnp.array([0.0, 1.0], dtype=jnp.float64),
+        xn=jnp.array([0.0, 1.0], dtype=jnp.float64),
+        psip=_constant_scalar_profile(1.0),
+        G=_constant_scalar_profile(2.0),
+        I=_constant_scalar_profile(0.2),
+        iota=_constant_scalar_profile(0.4),
+        dGds=_constant_scalar_profile(0.03),
+        dIds=_constant_scalar_profile(0.04),
+        diotads=_constant_scalar_profile(0.05),
+        bmnc=_constant_mode_profile([1.1, 0.2]),
+        dbmncds=_constant_mode_profile([0.01, 0.02]),
+        rmnc=_constant_mode_profile([1.4, 0.05]),
+        drmncds=_constant_mode_profile([0.02, 0.01]),
+        zmns=_constant_mode_profile([0.0, 0.08]),
+        dzmnsds=_constant_mode_profile([0.0, 0.01]),
+        numns=_constant_mode_profile([0.0, 0.03]),
+        dnumnsds=_constant_mode_profile([0.0, 0.004]),
+        bmns=zero_modes(),
+        dbmnsds=zero_modes(),
+        rmns=zero_modes(),
+        drmnsds=zero_modes(),
+        zmnc=zero_modes(),
+        dzmncds=zero_modes(),
+        numnc=zero_modes(),
+        dnumncds=zero_modes(),
+        mn_factor=_constant_mode_profile([1.0, 1.0]),
+        d_mn_factor=zero_modes(),
+        kmns=_constant_mode_profile([0.0, 0.06]),
+        kmnc=zero_modes(),
+        stellsym=True,
+        no_K=False,
+    )
+    return BoozerRadialInterpolantJAX.from_frozen_state(state, psi0=1.0, nfp=1)
+
+
 @pytest.fixture(scope="module")
 def stellsym_bri_and_jax():
     vmec = Vmec(_WOUT_STELLSYM)
@@ -88,6 +146,24 @@ def stellsym_no_K_bri_and_jax():
     bri = BoozerRadialInterpolant(
         vmec, order=3, mpol=4, ntor=4, rescale=True, no_K=True
     )
+    wrapper = BoozerRadialInterpolantJAX(bri)
+    return bri, wrapper
+
+
+@pytest.fixture(scope="module")
+def stellsym_enforce_vacuum_bri_and_jax():
+    vmec = Vmec(_WOUT_STELLSYM)
+    bri = BoozerRadialInterpolant(
+        vmec, order=3, mpol=4, ntor=4, rescale=True, enforce_vacuum=True
+    )
+    wrapper = BoozerRadialInterpolantJAX(bri)
+    return bri, wrapper
+
+
+@pytest.fixture(scope="module")
+def stellsym_enforce_qs_bri_and_jax():
+    vmec = Vmec(_WOUT_STELLSYM)
+    bri = BoozerRadialInterpolant(vmec, order=3, mpol=4, ntor=4, rescale=False, N=0)
     wrapper = BoozerRadialInterpolantJAX(bri)
     return bri, wrapper
 
@@ -111,11 +187,52 @@ def _compare_all_methods(bri, wrapper, points, method_names):
         )
 
 
+def _toroidal_covariant_component(field, points):
+    field.set_points(points)
+    R = np.ravel(field.R())
+    dRdtheta = np.ravel(field.dRdtheta())
+    dRdzeta = np.ravel(field.dRdzeta())
+    dZdtheta = np.ravel(field.dZdtheta())
+    dZdzeta = np.ravel(field.dZdzeta())
+    nu = np.ravel(field.nu())
+    dnudtheta = np.ravel(field.dnudtheta())
+    dnudzeta = np.ravel(field.dnudzeta())
+    modB = np.ravel(field.modB())
+    G = np.ravel(field.G())
+    I = np.ravel(field.I())
+    iota = np.ravel(field.iota())
+
+    phi = points[:, 2] - nu
+    cos_phi = np.cos(phi)
+    sin_phi = np.sin(phi)
+    dphidtheta = -dnudtheta
+    dphidzeta = 1.0 - dnudzeta
+    x_theta = np.stack(
+        (
+            dRdtheta * cos_phi - R * sin_phi * dphidtheta,
+            dRdtheta * sin_phi + R * cos_phi * dphidtheta,
+            dZdtheta,
+        ),
+        axis=1,
+    )
+    x_zeta = np.stack(
+        (
+            dRdzeta * cos_phi - R * sin_phi * dphidzeta,
+            dRdzeta * sin_phi + R * cos_phi * dphidzeta,
+            dZdzeta,
+        ),
+        axis=1,
+    )
+    sqrtg = (G + iota * I) / (modB * modB)
+    B_contravariant = (x_zeta + iota[:, None] * x_theta) / sqrtg[:, None]
+    return np.einsum("ij,ij->i", B_contravariant, x_zeta), G
+
+
 def test_freeze_boozer_radial_state_returns_jax_pytree(stellsym_bri_and_jax):
     bri, _ = stellsym_bri_and_jax
     state = freeze_boozer_radial_state(bri)
     assert isinstance(state, BoozerRadialInterpolantFrozenState)
-    leaves, _ = jax.tree_util.tree_flatten(state)
+    leaves, _ = jax.tree.flatten(state)
     for leaf in leaves:
         assert isinstance(leaf, jax.Array), type(leaf)
 
@@ -126,6 +243,21 @@ def test_wrapper_exposes_metadata_matching_upstream(stellsym_bri_and_jax):
     assert wrapper.stellsym is True
     assert wrapper.nfp == int(bri.booz.bx.nfp)
     assert wrapper.no_K is False
+
+
+def test_mn_factor_extrapolation_below_first_retained_knot(stellsym_bri_and_jax):
+    """Frozen state preserves upstream inverse-power mn_factor extrapolation."""
+
+    bri, wrapper = stellsym_bri_and_jax
+    first_knot = float(bri.mn_factor_splines[0].get_knots()[0])
+    s_probe = np.asarray([0.5 * first_knot], dtype=np.float64)
+
+    expected = np.vstack([spline(s_probe) for spline in bri.mn_factor_splines])
+    actual = np.asarray(
+        ppoly_eval(wrapper._frozen_state.mn_factor, jnp.asarray(s_probe))
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=_RTOL, atol=_ATOL)
 
 
 def test_set_points_round_trips_through_get_points(stellsym_bri_and_jax):
@@ -181,6 +313,19 @@ def test_stellsym_no_K_public_api_matches_cpu(stellsym_no_K_bri_and_jax):
     np.testing.assert_array_equal(wrapper.dKdzeta(), np.zeros_like(wrapper.dKdzeta()))
 
 
+def test_enforce_vacuum_public_api_matches_cpu(stellsym_enforce_vacuum_bri_and_jax):
+    bri, wrapper = stellsym_enforce_vacuum_bri_and_jax
+    points = _make_evaluation_points(bri.booz.bx.nfp)
+    _compare_all_methods(bri, wrapper, points, _API_METHODS_STELLSYM)
+    assert wrapper.no_K is True
+
+
+def test_enforce_qs_public_api_matches_cpu(stellsym_enforce_qs_bri_and_jax):
+    bri, wrapper = stellsym_enforce_qs_bri_and_jax
+    points = _make_evaluation_points(bri.booz.bx.nfp)
+    _compare_all_methods(bri, wrapper, points, _API_METHODS_STELLSYM)
+
+
 def test_modB_derivs_bundle_matches_individual_methods(stellsym_bri_and_jax):
     bri, wrapper = stellsym_bri_and_jax
     points = _make_evaluation_points(bri.booz.bx.nfp)
@@ -209,11 +354,144 @@ def test_set_points_invalidates_cache(stellsym_bri_and_jax):
     assert val_a != val_b
 
 
+def test_radial_columns_cached_once_per_points_cycle(monkeypatch):
+    wrapper = _synthetic_radial_wrapper()
+    state = wrapper.frozen_state
+    points = _make_evaluation_points(wrapper.nfp)
+
+    column_calls: Counter[int] = Counter()
+    scalar_calls: Counter[int] = Counter()
+    original_column_at = radial_field._column_at
+    original_scalar_at = radial_field._scalar_at
+
+    def counting_column_at(s, profile):
+        column_calls[id(profile)] += 1
+        return original_column_at(s, profile)
+
+    def counting_scalar_at(s, profile):
+        scalar_calls[id(profile)] += 1
+        return original_scalar_at(s, profile)
+
+    monkeypatch.setattr(radial_field, "_column_at", counting_column_at)
+    monkeypatch.setattr(radial_field, "_scalar_at", counting_scalar_at)
+
+    wrapper.set_points(points)
+    wrapper.modB()
+    wrapper.dmodBdtheta()
+    wrapper.dmodBdzeta()
+    wrapper.dmodBds()
+    wrapper.G()
+    wrapper.I()
+    wrapper.iota()
+
+    assert column_calls[id(state.mn_factor)] == 1
+    assert column_calls[id(state.bmnc)] == 1
+    assert scalar_calls[id(state.G)] == 1
+    assert scalar_calls[id(state.I)] == 1
+    assert scalar_calls[id(state.iota)] == 1
+    assert max(column_calls.values()) == 1
+    assert max(scalar_calls.values()) == 1
+
+    cached_column_calls = column_calls.copy()
+    cached_scalar_calls = scalar_calls.copy()
+    wrapper.modB()
+    wrapper.G()
+    assert column_calls == cached_column_calls
+    assert scalar_calls == cached_scalar_calls
+
+    wrapper.set_points(points + np.array([0.01, 0.0, 0.0]))
+    wrapper.modB()
+    assert column_calls[id(state.mn_factor)] == 2
+    assert scalar_calls[id(state.G)] == 2
+
+
+def test_post_construction_psi0_mutation_does_not_change_wrapper(stellsym_bri_and_jax):
+    """The JAX wrapper is an immutable snapshot of psi0-scaled K splines."""
+
+    bri, wrapper = stellsym_bri_and_jax
+    original_psi0 = float(bri.psi0)
+    points = _make_evaluation_points(bri.booz.bx.nfp)
+    wrapper.set_points(points)
+    K_before = np.asarray(wrapper.K())
+    try:
+        bri.psi0 = original_psi0 * 1.25
+        assert wrapper.psi0 == pytest.approx(original_psi0)
+        np.testing.assert_array_equal(np.asarray(wrapper.K()), K_before)
+    finally:
+        bri.psi0 = original_psi0
+
+
+def test_post_construction_flag_and_mode_mutation_does_not_change_wrapper(
+    stellsym_bri_and_jax,
+):
+    """Frozen state ignores later CPU flag and mode-table mutation."""
+
+    bri, wrapper = stellsym_bri_and_jax
+    points = _make_evaluation_points(bri.booz.bx.nfp)
+    wrapper.set_points(points)
+    modB_before = np.asarray(wrapper.modB())
+    K_before = np.asarray(wrapper.K())
+    original = {
+        "enforce_qs": bri.enforce_qs,
+        "enforce_vacuum": bri.enforce_vacuum,
+        "N": getattr(bri, "N", None),
+        "no_K": bri.no_K,
+        "xm_b": bri.xm_b,
+        "xn_b": bri.xn_b,
+    }
+    try:
+        bri.enforce_qs = True
+        bri.enforce_vacuum = True
+        bri.N = 99
+        bri.no_K = True
+        bri.xm_b = np.asarray(bri.xm_b).copy()
+        bri.xn_b = np.asarray(bri.xn_b).copy()
+        bri.xm_b[0] = bri.xm_b[0] + 10
+        bri.xn_b[0] = bri.xn_b[0] + 10
+
+        assert wrapper.no_K is False
+        np.testing.assert_array_equal(np.asarray(wrapper.modB()), modB_before)
+        np.testing.assert_array_equal(np.asarray(wrapper.K()), K_before)
+    finally:
+        bri.enforce_qs = original["enforce_qs"]
+        bri.enforce_vacuum = original["enforce_vacuum"]
+        if original["N"] is None and hasattr(bri, "N"):
+            delattr(bri, "N")
+        elif original["N"] is not None:
+            bri.N = original["N"]
+        bri.no_K = original["no_K"]
+        bri.xm_b = original["xm_b"]
+        bri.xn_b = original["xn_b"]
+
+
 def test_asym_public_api_matches_cpu(asym_bri_and_jax):
     bri, wrapper = asym_bri_and_jax
     assert wrapper.stellsym is False
     points = _make_evaluation_points(bri.booz.bx.nfp)
     _compare_all_methods(bri, wrapper, points, _API_METHODS_STELLSYM)
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "max_relative_residual"),
+    [
+        ("stellsym_bri_and_jax", 1.5e-2),
+        ("asym_bri_and_jax", 3.5e-2),
+    ],
+)
+def test_covariant_toroidal_identity_matches_G(
+    request,
+    fixture_name,
+    max_relative_residual,
+):
+    """Low-res BOOZXFORM fixtures keep B·∂x/∂ζ close to covariant G(s)."""
+    bri, wrapper = request.getfixturevalue(fixture_name)
+    points = _make_evaluation_points(bri.booz.bx.nfp)
+    cpu_component, cpu_G = _toroidal_covariant_component(bri, points)
+    jax_component, jax_G = _toroidal_covariant_component(wrapper, points)
+
+    np.testing.assert_allclose(jax_component, cpu_component, rtol=_RTOL, atol=_ATOL)
+    np.testing.assert_allclose(jax_G, cpu_G, rtol=_RTOL, atol=_ATOL)
+    assert np.max(np.abs((cpu_component - cpu_G) / cpu_G)) <= max_relative_residual
 
 
 def test_wrapper_is_not_exported_via_field_namespace_lazy_init():

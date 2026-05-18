@@ -65,7 +65,8 @@ LM family note:
   ``least_squares_algorithm="optimistix-lm"`` to engage the optional
   Optimistix/Lineax LSMR lane.
 
-Target private methods (minimum supported JAX floor 0.9.2):
+Target private methods (ported from the pinned upstream JAX 0.9.2 optimizer
+sources and validated against the checked local JAX 0.10.0 runtime):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
   - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
 
@@ -79,12 +80,14 @@ Target public stochastic method:
   - ``method="adam-ondevice"``: trace-safe Adam for noisy/stochastic scalar
     objectives on the target lane.
 
-The private methods live in ``optimizer_jax_private/`` and intentionally mirror
-the JAX 0.9.2 optimizer semantics so the line-search and iteration behavior
-stay stable across this project. High-level JAX backend flows route through the
-target lane only; the host SciPy adapter lives in the separate
-``optimizer_jax_reference`` module. The reference source is the upstream
-``jax-v0.9.2`` tag (``a659757d768587a81d095a9fab5f0c36f8beb218``).
+The private methods live in ``optimizer_jax_private/`` and are derived from the
+upstream JAX optimizer implementation pinned by this port, so line-search and
+iteration behavior stay stable across runtime upgrades. High-level JAX backend
+flows route through the target lane only; the host SciPy adapter lives in the
+separate ``optimizer_jax_reference`` module. The provenance source is the
+upstream ``jax-v0.9.2`` tag (``a659757d768587a81d095a9fab5f0c36f8beb218``);
+the supported runtime documented by ``CLAUDE.md`` is the checked local
+JAX/JAXLIB 0.10.0 environment.
 
 This module contains zero ``jax._src`` imports. The private package now does as
 well; both paths use public JAX APIs.
@@ -94,6 +97,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache, wraps
+from itertools import count
 import re
 from threading import Lock
 from typing import Callable
@@ -227,6 +231,48 @@ _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
 _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
+_TRACEABLE_CALLBACK_LOCK = Lock()
+_TRACEABLE_CALLBACK_IDS = count(1)
+_TRACEABLE_CALLBACKS: dict[int, Callable[..., object]] = {}
+
+
+def _register_traceable_callback(callback: Callable[..., object] | None) -> int:
+    if callback is None:
+        return 0
+    with _TRACEABLE_CALLBACK_LOCK:
+        token = next(_TRACEABLE_CALLBACK_IDS)
+        _TRACEABLE_CALLBACKS[token] = callback
+    return token
+
+
+def _unregister_traceable_callback(token: int) -> None:
+    if token == 0:
+        return
+    with _TRACEABLE_CALLBACK_LOCK:
+        del _TRACEABLE_CALLBACKS[token]
+
+
+def _traceable_callback_token(token: int, *, dtype) -> jax.Array:
+    return jnp.asarray(token, dtype=dtype)
+
+
+def _lookup_traceable_callback(token, kind: str) -> Callable[..., object]:
+    token_value = int(np.asarray(token).reshape(()).item())
+    with _TRACEABLE_CALLBACK_LOCK:
+        callback = _TRACEABLE_CALLBACKS.get(token_value)
+    if callback is None:
+        raise RuntimeError(f"Missing active traceable {kind} callback token.")
+    return callback
+
+
+def _invoke_traceable_lm_callback(token, x) -> None:
+    callback = _lookup_traceable_callback(token, "LM step")
+    callback(_hostify_optimizer_tree(x))
+
+
+def _invoke_traceable_progress_callback(token, nit, fun, grad_norm) -> None:
+    callback = _lookup_traceable_callback(token, "progress")
+    callback(nit, fun, grad_norm)
 
 
 def _version_key(raw_version: str) -> tuple[int, ...]:
@@ -236,7 +282,7 @@ def _version_key(raw_version: str) -> tuple[int, ...]:
 
 
 def private_optimizer_runtime_is_supported(version: str) -> bool:
-    """Return True when the runtime meets the minimum supported JAX floor."""
+    """Return True when the runtime is newer than the pinned optimizer source."""
     return _version_key(version) >= _version_key(PRIVATE_OPTIMIZER_JAX_VERSION)
 
 
@@ -274,7 +320,7 @@ class _OptimizerPytreeAdapter:
         def wrapped_value_and_grad(flat_x):
             flat_x = _optimizer_flat_vector(flat_x)
             value, grad_tree = fun(self.unravel(flat_x))
-            _, grad_tree_def = jax.tree_util.tree_flatten(grad_tree)
+            _, grad_tree_def = jax.tree.flatten(grad_tree)
             if grad_tree_def != self.tree_def:
                 raise ValueError(
                     "Explicit value-and-gradient objectives must return a gradient "
@@ -429,7 +475,7 @@ def _hostify_optimizer_leaf(leaf):
 
 
 def _hostify_optimizer_tree(value):
-    return jax.tree_util.tree_map(_hostify_optimizer_leaf, value)
+    return jax.tree.map(_hostify_optimizer_leaf, value)
 
 
 _FLAT_OPTIMIZER_REJECTED_DTYPE_KINDS = frozenset("MmOSU")
@@ -459,7 +505,7 @@ def _is_flat_optimizer_vector(x0) -> bool:
 def _prepare_optimizer_pytree_adapter(x0):
     if _is_flat_optimizer_vector(x0):
         return None
-    leaves, tree_def = jax.tree_util.tree_flatten(x0)
+    leaves, tree_def = jax.tree.flatten(x0)
     flat_x0, unravel = ravel_pytree(x0)
     flat_dtype = np.dtype(_optimizer_dtype(flat_x0))
     leaf_signature = tuple(
@@ -841,7 +887,7 @@ def _least_squares_linearization_from_jacobian(residual, jacobian):
 
 
 def _tree_zeros_like(tree):
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda leaf: jnp.zeros_like(jnp.asarray(leaf)),
         tree,
     )
@@ -849,11 +895,11 @@ def _tree_zeros_like(tree):
 
 def _tree_scalar_mul(tree, scalar):
     scalar = jnp.asarray(scalar)
-    return jax.tree_util.tree_map(lambda leaf: scalar * jnp.asarray(leaf), tree)
+    return jax.tree.map(lambda leaf: scalar * jnp.asarray(leaf), tree)
 
 
 def _tree_add(lhs, rhs):
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda lhs_leaf, rhs_leaf: jnp.asarray(lhs_leaf) + jnp.asarray(rhs_leaf),
         lhs,
         rhs,
@@ -861,7 +907,7 @@ def _tree_add(lhs, rhs):
 
 
 def _tree_sub(lhs, rhs):
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda lhs_leaf, rhs_leaf: jnp.asarray(lhs_leaf) - jnp.asarray(rhs_leaf),
         lhs,
         rhs,
@@ -869,7 +915,7 @@ def _tree_sub(lhs, rhs):
 
 
 def _tree_square(tree):
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda leaf: jnp.square(jnp.asarray(leaf)),
         tree,
     )
@@ -877,7 +923,7 @@ def _tree_square(tree):
 
 def _tree_bias_correction(tree, correction):
     correction = jnp.asarray(correction)
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda leaf: jnp.asarray(leaf) / correction,
         tree,
     )
@@ -886,7 +932,7 @@ def _tree_bias_correction(tree, correction):
 def _tree_adam_step(mean, variance, *, step_size, eps):
     step_size = jnp.asarray(step_size)
     eps = jnp.asarray(eps)
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda mean_leaf, variance_leaf: (
             step_size
             * jnp.asarray(mean_leaf)
@@ -898,15 +944,15 @@ def _tree_adam_step(mean, variance, *, step_size, eps):
 
 
 def _require_tree_first_leaf(tree, *, detail):
-    leaves = jax.tree_util.tree_leaves(tree)
+    leaves = jax.tree.leaves(tree)
     if not leaves:
         raise ValueError(detail)
     return jnp.asarray(leaves[0])
 
 
 def _tree_vdot_real(lhs, rhs):
-    lhs_leaves, lhs_tree = jax.tree_util.tree_flatten(lhs)
-    rhs_leaves, rhs_tree = jax.tree_util.tree_flatten(rhs)
+    lhs_leaves, lhs_tree = jax.tree.flatten(lhs)
+    rhs_leaves, rhs_tree = jax.tree.flatten(rhs)
     if lhs_tree != rhs_tree:
         raise ValueError("Tree dot products require matching pytree structures.")
     if not lhs_leaves:
@@ -924,7 +970,7 @@ def _tree_vdot_real(lhs, rhs):
 
 
 def _tree_inf_norm(tree):
-    leaves = jax.tree_util.tree_leaves(tree)
+    leaves = jax.tree.leaves(tree)
     if not leaves:
         return _device_scalar(0.0)
     dtype = jnp.result_type(*[jnp.asarray(leaf).dtype for leaf in leaves])
@@ -943,7 +989,7 @@ def _tree_l2_norm(tree):
 
 
 def _tree_all_finite(tree):
-    leaves = jax.tree_util.tree_leaves(tree)
+    leaves = jax.tree.leaves(tree)
     finite = jnp.asarray(True)
     for leaf in leaves:
         finite = finite & jnp.all(jnp.isfinite(jnp.asarray(leaf)))
@@ -951,7 +997,7 @@ def _tree_all_finite(tree):
 
 
 def _tree_select(pred, candidate, current):
-    return jax.tree_util.tree_map(
+    return jax.tree.map(
         lambda cand, curr: lax.select(pred, jnp.asarray(cand), jnp.asarray(curr)),
         candidate,
         current,
@@ -974,17 +1020,17 @@ def _normalize_solver_args(args):
 
 
 def _wrap_value_and_grad_fun(fun, x0, *, host_inputs):
-    expected_tree = jax.tree_util.tree_structure(x0)
+    expected_tree = jax.tree.structure(x0)
 
     def wrapped(x):
         call_x = _hostify_optimizer_tree(x) if host_inputs else x
         value, grad = fun(call_x)
-        if jax.tree_util.tree_structure(grad) != expected_tree:
+        if jax.tree.structure(grad) != expected_tree:
             raise ValueError(
                 "Explicit value-and-gradient objectives must return a gradient "
                 "with the same pytree structure as x0."
             )
-        return jnp.asarray(value), jax.tree_util.tree_map(jnp.asarray, grad)
+        return jnp.asarray(value), jax.tree.map(jnp.asarray, grad)
 
     return wrapped
 
@@ -1112,7 +1158,7 @@ def adam_optimize(
     progress_callback=None,
 ):
     """Host-driven Adam optimizer for noisy/stochastic scalar objectives."""
-    x = jax.tree_util.tree_map(jnp.asarray, x0)
+    x = jax.tree.map(jnp.asarray, x0)
     x_dtype = _require_tree_first_leaf(
         x,
         detail="Adam initial state must contain at least one leaf.",
@@ -1184,7 +1230,7 @@ def adam_optimize_traceable(
     progress_callback=None,
 ):
     """Trace-safe Adam optimizer for noisy/stochastic scalar objectives."""
-    x = jax.tree_util.tree_map(jnp.asarray, x0)
+    x = jax.tree.map(jnp.asarray, x0)
     x_dtype = _require_tree_first_leaf(
         x,
         detail="Adam initial state must contain at least one leaf.",
@@ -1259,10 +1305,10 @@ def _make_traceable_levenberg_marquardt_runner(
     gtol,
     materialize_dense_linearization,
     max_dense_linearization_bytes,
-    callback,
-    progress_callback,
+    callback_enabled,
+    progress_callback_enabled,
 ):
-    def run_solver(x_init, fn_args):
+    def run_solver(x_init, fn_args, callback_token, progress_callback_token):
         def residual_eval(x):
             return jnp.ravel(jnp.asarray(residual_fn(x, *fn_args)))
 
@@ -1309,21 +1355,23 @@ def _make_traceable_levenberg_marquardt_runner(
                 xtol=_device_scalar(xtol, dtype=x_dtype),
                 maxiter=maxiter,
             )
-            if callback is not None:
+            if callback_enabled:
                 lax.cond(
                     next_state["accepted"],
                     lambda _: jax.debug.callback(
-                        lambda x: callback(_hostify_optimizer_tree(x)),
+                        _invoke_traceable_lm_callback,
+                        callback_token,
                         next_state["x"],
                     ),
                     lambda _: None,
                     operand=None,
                 )
-            if progress_callback is not None:
+            if progress_callback_enabled:
                 lax.cond(
                     next_state["accepted"],
                     lambda _: jax.debug.callback(
-                        progress_callback,
+                        _invoke_traceable_progress_callback,
+                        progress_callback_token,
                         next_state["nit"],
                         next_state["cost"],
                         next_state["grad_norm_inf"],
@@ -1338,7 +1386,7 @@ def _make_traceable_levenberg_marquardt_runner(
         linearization_rows = int(np.asarray(jnp.asarray(residual_final).size))
         linearization_cols = sum(
             int(np.asarray(jnp.asarray(leaf).size))
-            for leaf in jax.tree_util.tree_leaves(state["x"])
+            for leaf in jax.tree.leaves(state["x"])
         )
         materialize_linearization = bool(materialize_dense_linearization)
         dense_report = _least_squares_dense_linearization_report(
@@ -1402,7 +1450,7 @@ def _gmres_solve_least_squares_system(
     damping,
     tol,
 ):
-    grad_leaves = jax.tree_util.tree_leaves(grad)
+    grad_leaves = jax.tree.leaves(grad)
     first_grad_leaf = _require_tree_first_leaf(
         grad,
         detail="Least-squares gradients must contain at least one leaf.",
@@ -1415,21 +1463,23 @@ def _gmres_solve_least_squares_system(
 
     def matvec(v):
         jt_j_v = _least_squares_matvec(flat_residual_fn, x, pullback, v)
-        return jax.tree_util.tree_map(
+        return jax.tree.map(
             lambda jt_j_leaf, v_leaf: jt_j_leaf + damping_value * v_leaf,
             jt_j_v,
             v,
         )
 
-    step, _ = gmres(
-        matvec,
-        grad,
-        tol=tol,
-        atol=0.0,
-        restart=restart,
-        maxiter=maxiter,
-    )
-    residual = jax.tree_util.tree_map(
+    with jax.transfer_guard("allow"):
+        step, _ = gmres(
+            matvec,
+            grad,
+            tol=tol,
+            atol=0.0,
+            restart=restart,
+            maxiter=maxiter,
+            solve_method="incremental",
+        )
+    residual = jax.tree.map(
         lambda grad_leaf, matvec_leaf: grad_leaf - matvec_leaf,
         grad,
         matvec(step),
@@ -1624,7 +1674,7 @@ def _lm_iteration(flat_residual_fn, state, *, tol, gradient_tol, ftol, xtol, max
         damping=damping,
         tol=linear_tol,
     )
-    x_candidate = jax.tree_util.tree_map(
+    x_candidate = jax.tree.map(
         lambda x_leaf, step_leaf: x_leaf - step_leaf,
         state["x"],
         step,
@@ -1788,7 +1838,7 @@ def levenberg_marquardt(
     """
     residual_eval = jax.jit(_flattened_residual_output(residual_fn))
 
-    x = jax.tree_util.tree_map(jnp.asarray, x0)
+    x = jax.tree.map(jnp.asarray, x0)
     residual, cost, grad, grad_norm_inf, _ = _least_squares_gradient_state(
         residual_eval,
         x,
@@ -1850,7 +1900,7 @@ def levenberg_marquardt(
     residual = residual_eval(x)
     linearization_rows = int(np.asarray(jnp.asarray(residual).size))
     linearization_cols = sum(
-        int(np.asarray(jnp.asarray(leaf).size)) for leaf in jax.tree_util.tree_leaves(x)
+        int(np.asarray(jnp.asarray(leaf).size)) for leaf in jax.tree.leaves(x)
     )
     dense_report = _least_squares_dense_linearization_report(
         linearization_rows,
@@ -1929,10 +1979,24 @@ def levenberg_marquardt_traceable(
         None if gtol is None else float(gtol),
         bool(materialize_dense_linearization),
         max_dense_linearization_bytes,
-        callback,
-        progress_callback,
+        callback is not None,
+        progress_callback is not None,
     )
-    return runner(x0, _normalize_solver_args(args))
+    callback_token = _register_traceable_callback(callback)
+    progress_callback_token = _register_traceable_callback(progress_callback)
+    try:
+        result = runner(
+            x0,
+            _normalize_solver_args(args),
+            _traceable_callback_token(callback_token, dtype=jnp.int64),
+            _traceable_callback_token(progress_callback_token, dtype=jnp.int64),
+        )
+        if callback_token != 0 or progress_callback_token != 0:
+            jax.effects_barrier()
+        return result
+    finally:
+        _unregister_traceable_callback(callback_token)
+        _unregister_traceable_callback(progress_callback_token)
 
 
 def _qr_lm_dense_state(flat_residual_fn, flat_x):
@@ -2185,7 +2249,7 @@ def levenberg_marquardt_minpack_traceable(
     MINPACK-style and tolerance-equivalent; it does not claim MINPACK packed-QR
     byte identity.
     """
-    x = jax.tree_util.tree_map(jnp.asarray, x0)
+    x = jax.tree.map(jnp.asarray, x0)
     flat_x0, unravel = ravel_pytree(x)
     normalized_args = _normalize_solver_args(args)
     dtype = flat_x0.dtype
@@ -2366,7 +2430,7 @@ def jax_least_squares_optimistix(
             "simsopt[JAX_OPTIMISTIX] on Python 3.11+."
         ) from exc
 
-    x = jax.tree_util.tree_map(jnp.asarray, x0)
+    x = jax.tree.map(jnp.asarray, x0)
     normalized_args = _normalize_solver_args(args)
     dtype = _require_tree_first_leaf(
         x,
@@ -2401,7 +2465,7 @@ def jax_least_squares_optimistix(
     linearization_rows = int(np.asarray(jnp.asarray(residual).size))
     linearization_cols = sum(
         int(np.asarray(jnp.asarray(leaf).size))
-        for leaf in jax.tree_util.tree_leaves(solution.value)
+        for leaf in jax.tree.leaves(solution.value)
     )
     residual_jacobian = None
     hessian = None
@@ -3232,7 +3296,7 @@ def _least_squares_normal_operator(residual_fn, x):
     )
     dtype = first_leaf.dtype
     decision_size = sum(
-        int(np.asarray(jnp.asarray(leaf).size)) for leaf in jax.tree_util.tree_leaves(x)
+        int(np.asarray(jnp.asarray(leaf).size)) for leaf in jax.tree.leaves(x)
     )
 
     def matvec_column(v):
@@ -3586,11 +3650,11 @@ def _make_traceable_newton_polish_runner(
     stab,
     materialize_hessian,
     max_dense_hessian_bytes,
-    progress_callback,
+    progress_callback_enabled,
 ):
     requested_materialize_hessian = materialize_hessian
 
-    def run_solver(x_init, fn_args):
+    def run_solver(x_init, fn_args, progress_callback_token):
         def objective_eval(x):
             return objective_fn(x, *fn_args)
 
@@ -3647,11 +3711,12 @@ def _make_traceable_newton_polish_runner(
             )
             accepted = linear_success & candidate["accepted"]
             next_nit = state["nit"] + 1
-            if progress_callback is not None:
+            if progress_callback_enabled:
                 lax.cond(
                     accepted,
                     lambda _: jax.debug.callback(
-                        progress_callback,
+                        _invoke_traceable_progress_callback,
+                        progress_callback_token,
                         next_nit,
                         candidate["val"],
                         candidate["norm"],
@@ -3737,9 +3802,20 @@ def newton_polish_traceable(
         float(stab),
         bool(materialize_hessian),
         max_dense_hessian_bytes,
-        progress_callback,
+        progress_callback is not None,
     )
-    return runner(x0, _normalize_solver_args(args))
+    progress_callback_token = _register_traceable_callback(progress_callback)
+    try:
+        result = runner(
+            x0,
+            _normalize_solver_args(args),
+            _traceable_callback_token(progress_callback_token, dtype=jnp.int64),
+        )
+        if progress_callback_token != 0:
+            jax.effects_barrier()
+        return result
+    finally:
+        _unregister_traceable_callback(progress_callback_token)
 
 
 def newton_exact(

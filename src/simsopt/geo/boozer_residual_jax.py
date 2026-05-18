@@ -9,8 +9,10 @@ and differentiate only through (iota, G).  Surface DOF derivatives are
 zero because field data is treated as constant.
 
 **M3 composed pipeline** — ``boozer_penalty_composed``,
-``boozer_penalty_grad_composed``, ``boozer_residual_jacobian_composed``,
-``boozer_residual_coil_vjp`` trace through the full
+``boozer_penalty_grad_composed``, ``boozer_penalty_hvp_composed``,
+``boozer_residual_jvp_composed``, ``boozer_residual_vjp_composed``,
+``boozer_residual_jacobian_composed``, ``boozer_residual_coil_vjp`` trace
+through the full
 DOFs → surface geometry → Biot-Savart → residual chain via JAX autodiff,
 replacing the C++ kernels ``sopp.boozer_residual_ds``,
 ``sopp.boozer_residual_ds2``, and ``sopp.boozer_dresidual_dc``.
@@ -23,6 +25,8 @@ The residual at each grid point is
         - |\\mathbf B_{ij}|^2 (\\mathbf x_\\varphi + \\iota\\,\\mathbf x_\\theta)\\bigr]
 
 with ``w = 1/|B|`` when *weight_inv_modB* is True, else ``w = 1``.
+At exactly ``|B| = 0``, the weighted path intentionally exposes the
+upstream singularity as non-finite output; no floor is inserted.
 
 Defaults follow upstream SIMSOPT convention
 (``simsopt/geo/surfaceobjectives.py`` and ``simsopt/geo/boozersurface.py``).
@@ -40,7 +44,10 @@ The scalar objective is
 
     J = \\frac{1}{2 N}\\sum_{i,j} \\|\\tilde{r}_{ij}\\|^2
 
-where ``N = 3 · nphi · ntheta`` (matching the C++ normalization).
+where ``N = 3 · nphi · ntheta``. This is the JAX scalar normalization
+``1 / (3 · nphi · ntheta)``; the raw C++ symbol
+``sopp.boozer_residual`` does not carry this normalization. The CPU
+production path applies the same factor inline in ``boozersurface.py``.
 """
 
 import numpy as np
@@ -54,6 +61,7 @@ from ..jax_core._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
     concat_jax_float64 as _concat_jax_float64,
     explicit_rsqrt as _explicit_rsqrt,
+    require_float64_dtype as _require_float64_dtype,
 )
 from ..jax_core.surface_rzfourier import (
     surface_rz_fourier_geometry_from_spec,
@@ -64,6 +72,8 @@ from ..jax_core.reductions import (
     scalar_square_sum,
     validate_reduction_mode,
 )
+from ..field.biotsavart_jax import grouped_biot_savart_B
+from .label_constraints_jax import compute_G_from_currents
 
 _BOOZER_CPU_ORDERED_REDUCTION_MODE = "cpu_ordered"
 
@@ -75,6 +85,9 @@ __all__ = [
     "boozer_residual_vector",
     "boozer_penalty_composed",
     "boozer_penalty_grad_composed",
+    "boozer_penalty_hvp_composed",
+    "boozer_residual_jvp_composed",
+    "boozer_residual_vjp_composed",
     "boozer_residual_jacobian_composed",
     "boozer_residual_coil_vjp",
 ]
@@ -84,6 +97,11 @@ def _split_decision_vector(x, *, optimize_G):
     x_jax = _as_jax_float64(x)
     tail_size = 2 if optimize_G else 1
     surface_size = int(x_jax.shape[0]) - tail_size
+    if surface_size < 0:
+        raise ValueError(
+            f"decision vector length {int(x_jax.shape[0])} is too short for "
+            f"optimize_G={optimize_G}; expected at least {tail_size} entries."
+        )
     sdofs = jnp.take(x_jax, _as_jax_int32(np.arange(surface_size)), axis=0)
     iota = jnp.take(x_jax, _as_jax_int32(surface_size), axis=0)
     if optimize_G:
@@ -105,6 +123,13 @@ def _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB):
     if weight_inv_modB:
         residual = _inverse_modB(B2)[..., None] * residual
     return residual
+
+
+def _require_boozer_float64_inputs(B, xphi, xtheta):
+    _require_float64_dtype("B", B)
+    _require_float64_dtype("xphi", xphi)
+    _require_float64_dtype("xtheta", xtheta)
+    return jnp.asarray(B), jnp.asarray(xphi), jnp.asarray(xtheta)
 
 
 def _cpu_ordered_boozer_square_sum(rtil):
@@ -151,6 +176,7 @@ def boozer_residual_scalar(
     Returns:
         J: scalar objective value.
     """
+    B, xphi, xtheta = _require_boozer_float64_inputs(B, xphi, xtheta)
     G = _as_runtime_float64(G, reference=B)
     iota = _as_runtime_float64(iota, reference=B)
     nphi, ntheta, _ = B.shape
@@ -347,6 +373,11 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
     path: each ``(phi, theta)`` point contributes component triples in order,
     and the gradient is accumulated in the same point order before the final
     ``num_res`` normalization.
+
+    ``dB_dX`` has shape ``(nphi, ntheta, 3, 3)`` with
+    ``dB_dX[i, j, k, m] = ∂_k B_m(x[i, j])``. After flattening the Boozer grid,
+    this is the same derivative-direction-first convention documented as
+    ``dB_by_dX[p, j, l]`` in ``CLAUDE.md``.
     """
     G = _as_runtime_float64(G, reference=B)
     iota = _as_runtime_float64(iota, reference=B)
@@ -486,13 +517,6 @@ def _get_surface_xyzfourier_fns():
     )
 
 
-def _get_grouped_biot_savart():
-    """Lazily import grouped Biot-Savart (avoids simsopt top-level)."""
-    from simsopt.field.biotsavart_jax import grouped_biot_savart_B
-
-    return grouped_biot_savart_B
-
-
 def _surface_geometry_from_dofs(
     sdofs,
     quadpoints_phi,
@@ -562,8 +586,7 @@ def _unpack_decision_vector(x, coil_arrays, optimize_G):
     if optimize_G:
         return sdofs, iota, G
     all_currents = jnp.concatenate([c for _, _, c in coil_arrays])
-    mu0 = _as_runtime_float64(4.0e-7 * np.pi, reference=all_currents)
-    return sdofs, iota, mu0 * jnp.sum(jnp.abs(all_currents))
+    return sdofs, iota, compute_G_from_currents(all_currents)
 
 
 def _composed_pipeline(
@@ -599,8 +622,7 @@ def _composed_pipeline(
         scatter_indices,
     )
 
-    grouped_bs_B = _get_grouped_biot_savart()
-    B = grouped_bs_B(gamma.reshape(-1, 3), coil_arrays)
+    B = grouped_biot_savart_B(gamma.reshape(-1, 3), coil_arrays)
     B = B.reshape(gamma.shape)
 
     return sdofs, iota, G, gamma, xphi, xtheta, B
@@ -624,7 +646,10 @@ def boozer_penalty_composed(
     """Composed scalar penalty objective: DOFs → geometry → field → residual → scalar.
 
     The decision vector is ``x = [surface_dofs, iota]`` (optimize_G=False)
-    or ``x = [surface_dofs, iota, G]`` (optimize_G=True).
+    or ``x = [surface_dofs, iota, G]`` (optimize_G=True). In
+    ``optimize_G=False`` mode this function derives ``G`` from the supplied
+    coil currents with ``compute_G_from_currents``; pinning an unrelated
+    user-supplied fixed ``G`` is not part of this API.
 
     Args:
         x: (n,) flat decision vector.
@@ -683,6 +708,28 @@ def boozer_penalty_grad_composed(x, **kwargs):
     return jax.value_and_grad(boozer_penalty_composed)(x, **kwargs)
 
 
+def boozer_penalty_hvp_composed(x, v, **kwargs):
+    """Hessian-vector product of the composed penalty objective.
+
+    Computes ``H @ v`` for ``H = hessian(boozer_penalty_composed)(x)`` using
+    forward-over-reverse autodiff. This keeps callers on the scalar composed
+    objective and avoids materializing the dense Hessian when only a product is
+    needed.
+
+    Args:
+        x: (n,) flat decision vector.
+        v: (n,) tangent vector.
+        **kwargs: forwarded to :func:`boozer_penalty_composed`.
+
+    Returns:
+        (n,) Hessian-vector product.
+    """
+    x_jax = jnp.asarray(x)
+    v_jax = jnp.asarray(v)
+    grad_fn = jax.grad(lambda y: boozer_penalty_composed(y, **kwargs))
+    return jax.jvp(grad_fn, (x_jax,), (v_jax,))[1]
+
+
 def _boozer_residual_vector_composed(
     x,
     *,
@@ -701,7 +748,8 @@ def _boozer_residual_vector_composed(
 
     The decision vector is ``x = [surface_dofs, iota, G]`` (optimize_G=True,
     default for BoozerExact) or ``x = [surface_dofs, iota]``
-    (optimize_G=False).
+    (optimize_G=False). In ``optimize_G=False`` mode ``G`` is derived from
+    coil currents; a separate user-fixed ``G`` is intentionally unsupported.
 
     Args:
         coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
@@ -731,16 +779,63 @@ def _boozer_residual_vector_composed(
     )
 
 
+def boozer_residual_jvp_composed(x, v, **kwargs):
+    """JVP of the composed residual vector without building a dense Jacobian.
+
+    Computes ``J @ v`` where ``J = jacobian(residual)(x)`` and ``residual`` is
+    :func:`_boozer_residual_vector_composed`.
+
+    Args:
+        x: (n,) flat decision vector.
+        v: (n,) tangent vector.
+        **kwargs: forwarded to :func:`_boozer_residual_vector_composed`.
+
+    Returns:
+        (r, Jv): residual vector and Jacobian-vector product.
+    """
+    x_jax = jnp.asarray(x)
+    v_jax = jnp.asarray(v)
+    residual_fn = lambda x_value: _boozer_residual_vector_composed(x_value, **kwargs)
+    return jax.jvp(residual_fn, (x_jax,), (v_jax,))
+
+
+def boozer_residual_vjp_composed(x, cotangent, **kwargs):
+    """VJP of the composed residual vector without building a dense Jacobian.
+
+    Computes ``J.T @ cotangent`` where
+    ``J = jacobian(residual)(x)`` and ``residual`` is
+    :func:`_boozer_residual_vector_composed`.
+
+    Args:
+        x: (n,) flat decision vector.
+        cotangent: (n_res,) residual-space cotangent vector.
+        **kwargs: forwarded to :func:`_boozer_residual_vector_composed`.
+
+    Returns:
+        (r, J.T @ cotangent): residual vector and vector-Jacobian product.
+    """
+    x_jax = jnp.asarray(x)
+    cotangent_jax = jnp.asarray(cotangent)
+    residual_fn = lambda x_value: _boozer_residual_vector_composed(x_value, **kwargs)
+    r, vjp_fn = jax.vjp(residual_fn, x_jax)
+    (product,) = vjp_fn(cotangent_jax)
+    return r, product
+
+
 def boozer_residual_jacobian_composed(
     x,
     **kwargs,
 ):
     """Explicit Jacobian of the composed residual vector.
 
-    Uses ``jax.jacfwd`` to compute the full Jacobian matrix
-    ``J[i,k] = ∂r_i/∂x_k`` where ``r`` is the residual vector and
-    ``x = [surface_dofs, iota, G]`` (optimize_G=True) or
-    ``x = [surface_dofs, iota]`` (optimize_G=False).
+    Computes the full Jacobian matrix ``J[i,k] = ∂r_i/∂x_k`` where ``r`` is
+    the residual vector and ``x = [surface_dofs, iota, G]``
+    (optimize_G=True) or ``x = [surface_dofs, iota]`` (optimize_G=False).
+    The implementation uses reverse-mode ``jax.vjp`` when the residual vector
+    is smaller than the decision vector, otherwise it uses forward-mode
+    ``jax.linearize``; both paths are batched with ``jax.vmap``. When
+    ``optimize_G=False``, the composed residual derives ``G`` from coil
+    currents rather than accepting a pinned user-supplied ``G``.
 
     This replaces the hand-coded C++ chain:
     ``sopp.boozer_dresidual_dc`` + ``dgamma_by_dcoeff`` + ``dB_by_dX``.
@@ -752,9 +847,24 @@ def boozer_residual_jacobian_composed(
     Returns:
         (r, J): residual vector (n_res,) and Jacobian (n_res, n).
     """
-    r = _boozer_residual_vector_composed(x, **kwargs)
-    J = jax.jacfwd(_boozer_residual_vector_composed)(x, **kwargs)
-    return r, J
+    x_jax = jnp.asarray(x)
+    n_dofs = int(x_jax.shape[0])
+    n_res = (
+        3
+        * int(np.shape(kwargs["quadpoints_phi"])[0])
+        * int(np.shape(kwargs["quadpoints_theta"])[0])
+    )
+    residual_fn = lambda x_value: _boozer_residual_vector_composed(x_value, **kwargs)
+
+    if n_res < n_dofs:
+        r, vjp_fn = jax.vjp(residual_fn, x_jax)
+        cotangent_basis = jnp.eye(n_res, dtype=r.dtype)
+        (J,) = jax.vmap(vjp_fn)(cotangent_basis)
+        return r, J
+
+    r, jvp_fn = jax.linearize(residual_fn, x_jax)
+    tangent_basis = jnp.eye(n_dofs, dtype=x_jax.dtype)
+    return r, jnp.swapaxes(jax.vmap(jvp_fn)(tangent_basis), 0, 1)
 
 
 def boozer_residual_coil_vjp(
@@ -807,11 +917,10 @@ def boozer_residual_coil_vjp(
             f"adjoint shape {adjoint.shape} != expected ({expected},) "
             f"for nphi={nphi}, ntheta={ntheta}"
         )
-    grouped_bs_B = _get_grouped_biot_savart()
 
     def residual_of_coils(ca):
         points = gamma.reshape(-1, 3)
-        B = grouped_bs_B(points, ca)
+        B = grouped_biot_savart_B(points, ca)
         B = B.reshape(nphi, ntheta, 3)
         return boozer_residual_vector(
             G,

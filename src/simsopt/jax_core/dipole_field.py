@@ -468,6 +468,22 @@ def _rotate_normal_matrix_to_toroidal_basis(
     )
 
 
+def _symmetry_angles_and_signs(
+    reference: jax.Array, nfp: int, stellsym: int
+) -> tuple[jax.Array, jax.Array]:
+    field_periods = jnp.arange(nfp, dtype=reference.dtype)
+    stellarator_copies = jnp.arange(stellsym + 1, dtype=reference.dtype)
+    phi0 = 2.0 * jnp.pi * field_periods[None, :] / jnp.asarray(
+        nfp, dtype=reference.dtype
+    )
+    stell_sign = jnp.power(
+        jnp.asarray(-1.0, dtype=reference.dtype), stellarator_copies[:, None]
+    )
+    phi0 = jnp.broadcast_to(phi0, (stellsym + 1, nfp))
+    stell_sign = jnp.broadcast_to(stell_sign, (stellsym + 1, nfp))
+    return phi0.reshape(-1), stell_sign.reshape(-1)
+
+
 @partial(jax.jit, static_argnames=("nfp", "stellsym", "coordinate_flag"))
 def _dipole_field_Bn_jit(
     points: jax.Array,
@@ -480,30 +496,25 @@ def _dipole_field_Bn_jit(
     coordinate_flag: str,
 ) -> jax.Array:
     sphi, cphi, stheta, ctheta = _basis_angles(dipole_points, R0)
-    acc = jnp.zeros(
-        (points.shape[0], dipole_points.shape[0], 3),
-        dtype=points.dtype,
-    )
-    for stell in range(stellsym + 1):
-        stell_sign = jnp.asarray((-1.0) ** stell, dtype=points.dtype)
-        for fp in range(nfp):
-            phi0 = jnp.asarray(2.0 * np.pi * fp / nfp, dtype=points.dtype)
-            sym_points = _symmetry_location(dipole_points, phi0, stell_sign)
-            normal_matrix = _normal_field_matrix(points, sym_points, unitnormal)
-            if coordinate_flag == "cylindrical":
-                contribution = _rotate_normal_matrix_to_cylindrical_basis(
-                    normal_matrix, phi0, stell_sign, sphi, cphi
-                )
-            elif coordinate_flag == "toroidal":
-                contribution = _rotate_normal_matrix_to_toroidal_basis(
-                    normal_matrix, phi0, stell_sign, sphi, cphi, stheta, ctheta
-                )
-            else:
-                contribution = _rotate_normal_matrix_to_cartesian_basis(
-                    normal_matrix, phi0, stell_sign
-                )
-            acc = acc + contribution
-    return _scale(points) * acc
+    phi0_values, stell_sign_values = _symmetry_angles_and_signs(points, nfp, stellsym)
+
+    def per_symmetry(phi0: jax.Array, stell_sign: jax.Array) -> jax.Array:
+        sym_points = _symmetry_location(dipole_points, phi0, stell_sign)
+        normal_matrix = _normal_field_matrix(points, sym_points, unitnormal)
+        if coordinate_flag == "cylindrical":
+            return _rotate_normal_matrix_to_cylindrical_basis(
+                normal_matrix, phi0, stell_sign, sphi, cphi
+            )
+        if coordinate_flag == "toroidal":
+            return _rotate_normal_matrix_to_toroidal_basis(
+                normal_matrix, phi0, stell_sign, sphi, cphi, stheta, ctheta
+            )
+        return _rotate_normal_matrix_to_cartesian_basis(
+            normal_matrix, phi0, stell_sign
+        )
+
+    contributions = jax.vmap(per_symmetry)(phi0_values, stell_sign_values)
+    return _scale(points) * jnp.sum(contributions, axis=0)
 
 
 def dipole_field_Bn(

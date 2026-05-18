@@ -133,6 +133,15 @@ from simsopt.jax_core.specs import (  # type: ignore[import-untyped]
     GroupedCoilSetSpec,
     make_coil_symmetry_spec,
 )
+from simsopt.objectives.integral_bdotn_jax import (  # type: ignore[import-untyped]
+    integral_BdotN,
+    integral_BdotN_surface_sharded,
+    integral_BdotN_sharding_summary,
+)
+from simsopt.jax_core.sharding import (  # type: ignore[import-untyped]
+    seed_batch_sharding_config,
+    seed_batch_sharding_summary,
+)
 from simsopt.objectives.stage2_target_objective_jax import (  # type: ignore[import-untyped]
     Stage2PenaltyConfig,
     build_stage2_target_objective,
@@ -835,7 +844,7 @@ def _assert_allclose_to_reference(value, reference) -> None:
 
 
 def _block_until_ready_tree(tree) -> None:
-    leaves = jax.tree_util.tree_leaves(tree)
+    leaves = jax.tree.leaves(tree)
     for leaf in leaves:
         if hasattr(leaf, "block_until_ready"):
             leaf.block_until_ready()
@@ -1476,6 +1485,101 @@ def _run_pairwise_penalty_explicit_row_sharding_case() -> None:
 
     assert np.isfinite(float(value))
     assert float(value) >= 0.0
+
+
+def _run_surface_quadrature_sharding_case() -> None:
+    nphi = 8
+    ntheta = 5
+    Bcoil = jnp.asarray(
+        np.linspace(0.2, 1.4, nphi * ntheta * 3, dtype=np.float64).reshape(
+            nphi, ntheta, 3
+        )
+    )
+    target = jnp.asarray(
+        np.linspace(-0.01, 0.02, nphi * ntheta, dtype=np.float64).reshape(
+            nphi, ntheta
+        )
+    )
+    normal = jnp.asarray(
+        np.linspace(0.3, 1.7, nphi * ntheta * 3, dtype=np.float64).reshape(
+            nphi, ntheta, 3
+        )
+    )
+
+    for definition in ("quadratic flux", "normalized", "local"):
+        sharded_value = integral_BdotN_surface_sharded(
+            Bcoil,
+            target,
+            normal,
+            definition,
+        )
+        reference_value = integral_BdotN(Bcoil, target, normal, definition)
+        np.testing.assert_allclose(
+            np.asarray(sharded_value),
+            np.asarray(reference_value),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    summary = integral_BdotN_sharding_summary(
+        Bcoil,
+        target,
+        normal,
+        "quadratic flux",
+    )
+    assert summary["surface_quadrature_sharded"] is True, summary
+    assert summary["kind"] == "NamedSharding", summary
+    assert summary["surface_quadrature_device_count"] == 4, summary
+
+    lowered = (
+        jax.jit(integral_BdotN_surface_sharded, static_argnames=("definition",))
+        .lower(Bcoil, target, normal, "quadratic flux")
+        .as_text()
+    )
+    assert "all_reduce" in lowered.lower(), lowered[:2000]
+
+
+def _run_seed_batch_value_grad_sharding_case() -> None:
+    from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
+
+    compiled_value_and_grad_for = jax.jit(
+        lambda coil_dofs: (
+            jnp.sum(coil_dofs * coil_dofs),
+            2.0 * coil_dofs,
+        )
+    )
+    batched_value_and_grad = (
+        surfaceobjectives_jax_module._make_traceable_batched_value_and_grad_pipeline(
+            compiled_value_and_grad_for
+        )
+    )
+    coil_dofs_batch = jnp.asarray(
+        np.linspace(-1.0, 1.0, 8 * 3, dtype=np.float64).reshape(8, 3),
+        dtype=jnp.float64,
+    )
+
+    values, grads = batched_value_and_grad(coil_dofs_batch)
+    reference_values, reference_grads = jax.vmap(compiled_value_and_grad_for)(
+        coil_dofs_batch
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(values),
+        np.asarray(reference_values),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(grads),
+        np.asarray(reference_grads),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    config = seed_batch_sharding_config(coil_dofs_batch)
+    summary = seed_batch_sharding_summary(values, config=config)
+    assert summary["seed_batch_sharded"] is True, summary
+    assert summary["kind"] == "NamedSharding", summary
+    assert summary["seed_batch_device_count"] == 4, summary
 
 
 def _run_shifted_grid_axis_sample_case() -> None:
@@ -2346,6 +2450,12 @@ def _dispatch_case(args: argparse.Namespace) -> None:
     if args.case == "pairwise-penalty-explicit-row-sharding":
         _run_pairwise_penalty_explicit_row_sharding_case()
         return
+    if args.case == "surface-quadrature-sharding":
+        _run_surface_quadrature_sharding_case()
+        return
+    if args.case == "seed-batch-value-grad-sharding":
+        _run_seed_batch_value_grad_sharding_case()
+        return
     if args.case == "shifted-grid-axis-sample":
         _run_shifted_grid_axis_sample_case()
         return
@@ -2444,6 +2554,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("grouped-points-coils-collective")
     subparsers.add_parser("grouped-points-coils-non-divisible")
     subparsers.add_parser("pairwise-penalty-explicit-row-sharding")
+    subparsers.add_parser("surface-quadrature-sharding")
+    subparsers.add_parser("seed-batch-value-grad-sharding")
     subparsers.add_parser("shifted-grid-axis-sample")
     subparsers.add_parser("gamma-2d-eager-host-constants")
     subparsers.add_parser("closed-curve-self-intersection-summary")

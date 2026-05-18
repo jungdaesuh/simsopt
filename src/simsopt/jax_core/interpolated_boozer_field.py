@@ -37,12 +37,10 @@ and ``exploit_fluxfunction_points`` (header lines 724-784) plus the
   3-vector outputs for flipped samples (C++ lines 799-807). Applies to
   ``R_derivs`` and ``modB_derivs``.
 
-The ``InterpolatedBoozerFieldFrozenState`` dataclass is a plain
-immutable container of 33 ``RegularGridInterpolant3DSpec`` instances
-plus the small set of meta-fields (nfp, stellsym, ranges, extrapolate)
-needed to drive the coordinate fold. It is NOT registered as a JAX
-pytree because each contained spec already holds NumPy arrays — the
-JIT seam is downstream at ``regular_grid_interp.evaluate_batch``.
+The ``InterpolatedBoozerFieldFrozenState`` dataclass stores immutable
+host specs plus the small set of meta-fields (nfp, stellsym, ranges,
+extrapolate) needed to drive the coordinate fold. Device specs are cached
+execution artifacts; the host specs remain the source of truth.
 
 References:
 
@@ -63,10 +61,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from .regular_grid_interp import (
+    RegularGridInterpolant3DDeviceSpec,
     RegularGridInterpolant3DSpec,
     UniformInterpolationRule,
+    build_regular_grid_interpolant_3d_device_spec,
     build_regular_grid_interpolant_3d,
-    evaluate_batch,
+    evaluate_batch_device,
 )
 
 
@@ -168,10 +168,11 @@ ALL_SCALARS: tuple[str, ...] = (
 class InterpolatedBoozerFieldFrozenState:
     """Immutable grid geometry and initially built scalar specs.
 
-    Lazy-built scalars are owned by :class:`InterpolatedBoozerFieldJAX`
-    in its ``_lazy_specs`` dict. This state records only the specs
-    constructed by :func:`freeze_interpolated_boozer_field_state` so the
-    public frozen-state API remains immutable and round-trippable.
+    Lazy-built host scalars are owned by :class:`InterpolatedBoozerFieldJAX`
+    in its ``_lazy_specs`` dict. This state records only the host specs
+    constructed by :func:`freeze_interpolated_boozer_field_state`; its
+    ``device_specs`` cache holds staged device mirrors for eager specs and
+    for lazy specs after their first evaluation.
 
     Meta-fields ``nfp``, ``stellsym``, ``period`` and ``extrapolate`` are
     needed at evaluation time to drive the coordinate fold mirroring
@@ -180,13 +181,12 @@ class InterpolatedBoozerFieldFrozenState:
     let downstream code lazily build additional specs against the same
     grid.
 
-    This dataclass is NOT registered as a JAX pytree: each spec passed
-    alongside it already holds raw NumPy arrays that ``evaluate_batch``
-    converts to ``jax.Array`` inside its JIT boundary. The wrapper
-    class owns Optimizable state and is not differentiated through.
+    This dataclass is NOT registered as a JAX pytree. The wrapper class
+    owns Optimizable state and is not differentiated through.
     """
 
     specs: Mapping[str, RegularGridInterpolant3DSpec]
+    device_specs: dict[str, RegularGridInterpolant3DDeviceSpec]
     nfp: int
     stellsym: bool
     extrapolate: bool
@@ -207,8 +207,28 @@ class InterpolatedBoozerFieldFrozenState:
             raise KeyError(
                 f"interpolant for scalar {scalar_name!r} has not been built; "
                 f"available: {sorted(self.specs)}"
-            )
+        )
         return spec
+
+    def get_device(
+        self,
+        scalar_name: str,
+        specs: Mapping[str, RegularGridInterpolant3DSpec],
+    ) -> RegularGridInterpolant3DDeviceSpec:
+        """Return the staged device spec for ``scalar_name``."""
+
+        device_spec = self.device_specs.get(scalar_name)
+        if device_spec is not None:
+            return device_spec
+        spec = specs.get(scalar_name)
+        if spec is None:
+            raise KeyError(
+                f"interpolant for scalar {scalar_name!r} has not been built; "
+                f"available: {sorted(specs)}"
+            )
+        device_spec = build_regular_grid_interpolant_3d_device_spec(spec)
+        self.device_specs[scalar_name] = device_spec
+        return device_spec
 
 
 # ---------------------------------------------------------------------------
@@ -526,9 +546,14 @@ def freeze_interpolated_boozer_field_state(
         )
 
     period = 2.0 * float(np.pi) / float(nfp_int)
+    device_specs = {
+        name: build_regular_grid_interpolant_3d_device_spec(spec)
+        for name, spec in specs.items()
+    }
 
     return InterpolatedBoozerFieldFrozenState(
         specs=MappingProxyType(dict(specs)),
+        device_specs=device_specs,
         nfp=nfp_int,
         stellsym=bool(stellsym),
         extrapolate=bool(extrapolate),
@@ -651,7 +676,11 @@ def evaluate_scalar(
         )
     if scalar_name in FLUX_FUNCTION_SCALARS:
         folded = _zeroed_flux_points(points)
-        return evaluate_batch(spec, folded)
+        return evaluate_batch_device(
+            state.get_device(scalar_name, specs),
+            folded,
+            strict_cell_order=False,
+        )
     if scalar_name in SYMMETRY_EXPLOIT_SCALARS:
         rule = SYMMETRY_EXPLOIT_SCALARS[scalar_name]
         folded, flipped = fold_points_for_symmetry(
@@ -659,7 +688,11 @@ def evaluate_scalar(
             period=jnp.asarray(state.period, dtype=jnp.float64),
             stellsym=state.stellsym,
         )
-        raw = evaluate_batch(spec, folded)
+        raw = evaluate_batch_device(
+            state.get_device(scalar_name, specs),
+            folded,
+            strict_cell_order=False,
+        )
         return _apply_symmetry(raw, flipped=flipped, rule=rule)
     raise ValueError(
         f"unknown scalar {scalar_name!r}; not in flux-function or symmetry-exploit "

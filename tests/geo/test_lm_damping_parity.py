@@ -97,6 +97,154 @@ def test_lm_rejects_positive_step_below_minpack_ratio_threshold(monkeypatch):
     np.testing.assert_allclose(next_state["damping"], 2.0e-3)
 
 
+def test_lm_gmres_uses_incremental_method_inside_narrow_transfer_guard(monkeypatch):
+    observed = {}
+
+    def fake_gmres(matvec, rhs, **kwargs):
+        observed["transfer_guard"] = jax.config.jax_transfer_guard
+        observed["kwargs"] = dict(kwargs)
+        return rhs, None
+
+    monkeypatch.setattr(_opt, "gmres", fake_gmres)
+    A = jnp.asarray([[2.0, 0.0], [0.0, 3.0]], dtype=jnp.float64)
+
+    def residual_fn(x):
+        return A @ x
+
+    x = jnp.asarray([1.0, -1.0], dtype=jnp.float64)
+    residual, pullback = jax.vjp(residual_fn, x)
+    grad = pullback(residual)[0]
+    damping = jnp.asarray(1.0e-3, dtype=x.dtype)
+    tol = jnp.asarray(1.0e-8, dtype=x.dtype)
+
+    with jax.transfer_guard("disallow"):
+        _opt._gmres_solve_least_squares_system(
+            residual_fn,
+            x,
+            grad,
+            pullback,
+            damping=damping,
+            tol=tol,
+        )
+
+    assert observed["transfer_guard"] == "allow"
+    assert observed["kwargs"]["solve_method"] == "incremental"
+
+
+def test_traceable_lm_runner_cache_key_uses_callback_presence_not_identity():
+    _opt._make_traceable_levenberg_marquardt_runner.cache_clear()
+
+    def residual_fn(x):
+        return x
+
+    first = _opt._make_traceable_levenberg_marquardt_runner(
+        residual_fn,
+        4,
+        1.0e-8,
+        1.0e-8,
+        1.0e-8,
+        None,
+        False,
+        None,
+        True,
+        True,
+    )
+    second = _opt._make_traceable_levenberg_marquardt_runner(
+        residual_fn,
+        4,
+        1.0e-8,
+        1.0e-8,
+        1.0e-8,
+        None,
+        False,
+        None,
+        True,
+        True,
+    )
+    disabled = _opt._make_traceable_levenberg_marquardt_runner(
+        residual_fn,
+        4,
+        1.0e-8,
+        1.0e-8,
+        1.0e-8,
+        None,
+        False,
+        None,
+        False,
+        False,
+    )
+
+    assert first is second
+    assert disabled is not first
+    info = _opt._make_traceable_levenberg_marquardt_runner.cache_info()
+    assert info.hits == 1
+    assert info.misses == 2
+
+
+def test_traceable_lm_callbacks_remain_active_with_cached_runner():
+    callback_points = []
+    progress_points = []
+
+    def residual_fn(x):
+        return x - jnp.asarray([1.0], dtype=jnp.float64)
+
+    result = _opt.levenberg_marquardt_traceable(
+        residual_fn,
+        jnp.asarray([0.0], dtype=jnp.float64),
+        maxiter=5,
+        tol=0.0,
+        ftol=1.0e-8,
+        xtol=1.0e-8,
+        callback=lambda x: callback_points.append(np.asarray(x, dtype=float)),
+        progress_callback=lambda nit, fun, grad_norm: progress_points.append(
+            (int(np.asarray(nit)), float(np.asarray(fun)), float(np.asarray(grad_norm)))
+        ),
+    )
+
+    assert result["success"]
+    assert callback_points
+    assert progress_points
+    np.testing.assert_allclose(callback_points[-1], np.asarray([1.0]), atol=1.0e-8)
+
+
+def test_traceable_newton_polish_runner_cache_key_uses_progress_presence():
+    _opt._make_traceable_newton_polish_runner.cache_clear()
+
+    def objective_fn(x):
+        return 0.5 * jnp.dot(x, x)
+
+    first = _opt._make_traceable_newton_polish_runner(
+        objective_fn,
+        4,
+        1.0e-8,
+        0.0,
+        False,
+        None,
+        True,
+    )
+    second = _opt._make_traceable_newton_polish_runner(
+        objective_fn,
+        4,
+        1.0e-8,
+        0.0,
+        False,
+        None,
+        True,
+    )
+    disabled = _opt._make_traceable_newton_polish_runner(
+        objective_fn,
+        4,
+        1.0e-8,
+        0.0,
+        False,
+        None,
+        False,
+    )
+
+    assert first is second
+    assert disabled is not first
+
+
 def test_matrix_free_lm_iteration_count_stays_close_to_scipy_lm():
     A_np = np.asarray([[3.0, 1.0], [1.0, 4.0], [2.0, -1.0]], dtype=float)
     b_np = np.asarray([5.0, 7.0, 0.5], dtype=float)

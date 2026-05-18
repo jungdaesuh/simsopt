@@ -1732,6 +1732,8 @@ def apply_jax_runtime_config() -> None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     if config.compilation_cache_dir is not None:
         jax.config.update("jax_compilation_cache_dir", config.compilation_cache_dir)
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+        jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
     _validate_initialized_jax_runtime(jax, config)
 
 

@@ -1592,6 +1592,8 @@ def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
         "jax_compilation_cache_dir",
         str(fake_home / ".cache" / "simsopt-jax-xla"),
     ) in calls
+    assert ("jax_persistent_cache_min_compile_time_secs", 0.0) in calls
+    assert ("jax_persistent_cache_min_entry_size_bytes", -1) in calls
 
 
 def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
@@ -1619,6 +1621,8 @@ def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
         "jax_compilation_cache_dir",
         str(fake_home / ".cache" / "simsopt-jax-xla"),
     ) in calls
+    assert ("jax_persistent_cache_min_compile_time_secs", 0.0) in calls
+    assert ("jax_persistent_cache_min_entry_size_bytes", -1) in calls
 
 
 def test_apply_jax_runtime_config_raises_without_cuda_determinism_flag(

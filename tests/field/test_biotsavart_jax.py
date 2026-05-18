@@ -1093,6 +1093,12 @@ class TestBiotSavartJaxChunkedSelfConsistency:
         )
         assert make_b_vjp_kernel_params == ("coil_cs", "quad_bs", "point_cs")
 
+    def test_kernel_factory_lru_capacities_cover_mode_sweeps(self):
+        from simsopt.jax_core import biotsavart as core_bs
+
+        assert core_bs._make_kernel.cache_info().maxsize == 256
+        assert core_bs._make_B_vjp_kernel.cache_info().maxsize == 64
+
     def test_backend_cache_invalidation_clears_kernel_cache(self):
         with _kernel_tuning_env("jax_cpu_parity"):
             from simsopt.jax_core import biotsavart as core_bs
