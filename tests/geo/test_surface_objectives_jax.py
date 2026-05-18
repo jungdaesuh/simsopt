@@ -96,6 +96,30 @@ def _assert_primal_value_with_nonfinite_gradient(value, grad, expected_value):
     _assert_nonfinite_gradient(grad)
 
 
+def _minimal_traceable_objective_state():
+    return {
+        "objective_kwargs": {},
+        "baseline_x": jnp.asarray([0.0], dtype=jnp.float64),
+        "baseline_value": jnp.asarray(0.0, dtype=jnp.float64),
+        "baseline_linear_solve_factors": None,
+        "baseline_coil_dofs": jnp.asarray([0.0], dtype=jnp.float64),
+        "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
+        "optimize_G": False,
+        "predictor_kind": "none",
+        "linearization_kind": "hessian",
+        "linear_solve_tol": 1.0e-10,
+        "linear_solve_stab": 0.0,
+    }
+
+
+def _sum_value_and_grad(coil_dofs):
+    return jnp.sum(coil_dofs), 2.0 * coil_dofs
+
+
+def _donating_sum_value_and_grad():
+    return jax.jit(_sum_value_and_grad, donate_argnums=(0,))
+
+
 @pytest.mark.parametrize(
     "candidate_value",
     [
@@ -878,6 +902,30 @@ def test_surface_to_surface_distance_production_shape_dense_parity(monkeypatch):
     )
 
 
+def test_traceable_objective_bundle_donates_value_and_grad_input(monkeypatch):
+    observed_jit_kwargs: dict[str, dict[str, object]] = {}
+
+    def recording_jit(fun=None, **kwargs):
+        def wrapped(inner):
+            observed_jit_kwargs[inner.__name__] = dict(kwargs)
+            return inner
+
+        if fun is None:
+            return wrapped
+        return wrapped(fun)
+
+    monkeypatch.setattr(surfaceobjectives_jax_module.jax, "jit", recording_jit)
+
+    surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+        object(),
+        _minimal_traceable_objective_state(),
+    )
+
+    assert observed_jit_kwargs["_forward_result_for"] == {}
+    assert observed_jit_kwargs["_total_gradient_for"] == {}
+    assert observed_jit_kwargs["_value_and_grad_for"] == {"donate_argnums": (0,)}
+
+
 def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
     marked: dict[str, object] = {}
     original_mark = optimizer_jax_module._mark_cacheable_jit_value_and_grad
@@ -893,23 +941,9 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
         counting_mark,
     )
 
-    state = {
-        "objective_kwargs": {},
-        "baseline_x": jnp.asarray([0.0], dtype=jnp.float64),
-        "baseline_value": jnp.asarray(0.0, dtype=jnp.float64),
-        "baseline_linear_solve_factors": None,
-        "baseline_coil_dofs": jnp.asarray([0.0], dtype=jnp.float64),
-        "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
-        "optimize_G": False,
-        "predictor_kind": "none",
-        "linearization_kind": "hessian",
-        "linear_solve_tol": 1.0e-10,
-        "linear_solve_stab": 0.0,
-    }
-
     bundle = surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
         object(),
-        state,
+        _minimal_traceable_objective_state(),
     )
 
     assert marked["calls"] == 1
@@ -922,6 +956,49 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
         )
         is True
     )
+
+
+def test_traceable_value_and_grad_boundary_preserves_caller_jax_buffer() -> None:
+    value_and_grad = surfaceobjectives_jax_module._make_traceable_value_and_grad_boundary(
+        _donating_sum_value_and_grad()
+    )
+    coil_dofs = jnp.ones((4,), dtype=jnp.float64)
+
+    value, grad = value_and_grad(coil_dofs)
+    np.testing.assert_allclose(np.asarray(value), 4.0)
+    np.testing.assert_allclose(np.asarray(grad), 2.0 * np.ones(4, dtype=np.float64))
+    np.testing.assert_allclose(np.asarray(jnp.sum(coil_dofs)), 4.0)
+
+
+def test_traceable_host_value_and_grad_preserves_caller_jax_buffer() -> None:
+    host_value_and_grad = surfaceobjectives_jax_module._make_traceable_host_value_and_grad(
+        _donating_sum_value_and_grad()
+    )
+    coil_dofs = jnp.ones((4,), dtype=jnp.float64)
+
+    value, grad = host_value_and_grad(coil_dofs)
+    assert value == pytest.approx(4.0)
+    np.testing.assert_allclose(grad, 2.0 * np.ones(4, dtype=np.float64))
+    np.testing.assert_allclose(np.asarray(jnp.sum(coil_dofs)), 4.0)
+
+
+def test_traceable_batched_value_and_grad_preserves_caller_jax_buffer() -> None:
+    batched_pipeline = (
+        surfaceobjectives_jax_module._make_traceable_batched_value_and_grad_pipeline(
+            _donating_sum_value_and_grad()
+        )
+    )
+    batched_value_and_grad = (
+        surfaceobjectives_jax_module._make_traceable_batched_value_and_grad_boundary(
+            batched_pipeline
+        )
+    )
+    coil_dofs_batch = jnp.ones((3, 4), dtype=jnp.float64)
+
+    values, grads = batched_value_and_grad(coil_dofs_batch)
+    np.testing.assert_allclose(np.asarray(values), np.full(3, 4.0, dtype=np.float64))
+    np.testing.assert_allclose(grads, 2.0 * np.ones((3, 4), dtype=np.float64))
+    np.testing.assert_allclose(np.asarray(jnp.sum(coil_dofs_batch)), 12.0)
 
 
 @pytest.mark.parametrize("linearization_kind", ["exact_jacobian", "hessian"])

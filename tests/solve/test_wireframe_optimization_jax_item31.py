@@ -348,6 +348,41 @@ def test_regularized_constrained_least_squares_handles_no_constraints() -> None:
     )
 
 
+def test_regularized_constrained_least_squares_exact_rank_deficient_matches_cpu() -> None:
+    A = np.ascontiguousarray(
+        np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 1.0],
+                [0.0, 2.0, 2.0],
+                [0.0, 3.0, 3.0],
+            ],
+            dtype=np.float64,
+        )
+    )
+    b = np.ascontiguousarray(np.array([[1.0], [1.0], [2.0], [3.0]]))
+    C = np.zeros((0, 3), dtype=np.float64)
+    d = np.zeros((0, 1), dtype=np.float64)
+    W = 0.0
+
+    expected = regularized_constrained_least_squares(A, b, W, C, d)
+    actual = regularized_constrained_least_squares_jax(A, b, W, C, d)
+
+    assert np.linalg.matrix_rank(A.T @ A) < A.shape[1]
+    np.testing.assert_allclose(
+        expected,
+        np.array([[1.0], [0.5], [0.5]], dtype=np.float64),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual),
+        expected,
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+
+
 def test_regularized_constrained_least_squares_rank_deficient_matches_cpu() -> None:
     lhs = np.array(
         [[0.52239503, 0.49949821], [0.49949821, 0.47760498]],
