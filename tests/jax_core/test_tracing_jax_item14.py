@@ -28,11 +28,14 @@ All tests run under ``JAX_PLATFORMS=cpu`` with ``JAX_ENABLE_X64=True``.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
@@ -45,6 +48,8 @@ from simsopt.jax_core.surface_classifier import (
     make_levelset_classifier,
     signed_distance_to_cartesian_classifier,
 )
+from simsopt.jax_core.boozer_analytic import freeze_boozer_analytic_state
+import simsopt.jax_core.tracing as tracing_jax_module
 from simsopt.jax_core.tracing import (
     FieldlineTracingSpec,
     FullorbitTracingSpec,
@@ -53,16 +58,23 @@ from simsopt.jax_core.tracing import (
     LevelsetStoppingCriterion,
     MaxRStoppingCriterion,
     ToroidalTransitStoppingCriterion,
-    _continuous_phi,
     _run_dopri5_4state,
     bracket_root_jax,
     dopri5_step,
+    get_phi,
     trace_fieldline,
     trace_fieldlines_batched,
     trace_fullorbit,
     trace_fullorbits_batched,
     trace_guiding_center,
+    trace_guiding_center_boozer,
     trace_guiding_centers_batched,
+    trace_guiding_centers_boozer_batched,
+)
+from simsopt.jax_core.sharding import (
+    TrajectoryBatchShardingConfig,
+    maybe_shard_trajectory_batch_inputs,
+    trajectory_batch_sharding_summary,
 )
 
 
@@ -156,6 +168,20 @@ def _toroidal_field_jax(R0: float, B0: float):
         return jnp.stack([-coeff * y, coeff * x, jnp.asarray(0.0, dtype=jnp.float64)])
 
     return field_fn
+
+
+def _analytic_boozer_field_for_batch_tests():
+    return (
+        freeze_boozer_analytic_state(
+            etabar=0.0,
+            B0=1.0,
+            N=0,
+            G0=1.5,
+            psi0=0.3,
+            iota0=0.4,
+        ),
+        0.3,
+    )
 
 
 def test_trace_fieldline_matches_upstream_compute_fieldlines_toroidal_axis(
@@ -321,16 +347,15 @@ def test_trace_fieldline_clean_exit_reports_exact_tmax():
         (-1.0, np.nextafter(0.0, -1.0), -np.pi),
     ],
 )
-def test_continuous_phi_matches_cpp_get_phi_edges(x, y, phi_near):
+def test_get_phi_matches_cpp_get_phi_edges(x, y, phi_near):
     """JAX unwrap matches the C++ ``get_phi`` edge/tie convention."""
     sopp = pytest.importorskip("simsoptpp")
 
     actual = float(
-        _continuous_phi(
+        get_phi(
             jnp.asarray(x, dtype=jnp.float64),
             jnp.asarray(y, dtype=jnp.float64),
             jnp.asarray(phi_near, dtype=jnp.float64),
-            jnp.float64,
         )
     )
     expected = sopp.get_phi(float(x), float(y), float(phi_near))
@@ -553,6 +578,442 @@ def test_tracing_batch_helpers_match_single_trajectory_contracts():
         [0.1, 1.0, 0.2, 0.5, 0.0, 2.0, 0.0],
         atol=1.0e-12,
     )
+
+
+def test_trace_guiding_centers_boozer_batched_unpacks_lax_map_inputs():
+    """Boozer analytic batch tracing preserves the single-lane map contract."""
+
+    boozer_field = _analytic_boozer_field_for_batch_tests()
+    spec = GuidingCenterTracingSpec(
+        tmax=0.02,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        max_steps=16,
+        dtmax=0.005,
+    )
+    y0s = jnp.asarray(
+        [
+            [0.12, 0.1, 0.2, 0.8],
+            [0.18, -0.2, 0.3, 0.6],
+        ],
+        dtype=jnp.float64,
+    )
+    dtmaxs = jnp.asarray([0.005, 0.004], dtype=jnp.float64)
+    mus = jnp.zeros((2,), dtype=jnp.float64)
+
+    batched = trace_guiding_centers_boozer_batched(
+        spec,
+        y0s,
+        dtmaxs,
+        mus,
+        boozer_field,
+        m=1.0,
+        q=1.0,
+        mode="vacuum",
+    )
+    reference = [
+        trace_guiding_center_boozer(
+            replace(spec, dtmax=float(dtmaxs[i])),
+            y0s[i],
+            boozer_field,
+            m=1.0,
+            q=1.0,
+            mu=float(mus[i]),
+            mode="vacuum",
+        )
+        for i in range(2)
+    ]
+    np.testing.assert_allclose(
+        np.asarray(batched.trajectory),
+        np.stack([np.asarray(result.trajectory) for result in reference]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(batched.status),
+        np.asarray([np.asarray(result.status) for result in reference]),
+    )
+
+
+def _top_level_primitives(jaxpr) -> set[str]:
+    return {equation.primitive.name for equation in jaxpr.jaxpr.eqns}
+
+
+def _run_trace_batch_with_config(monkeypatch, config, trace_fn):
+    monkeypatch.setattr(
+        tracing_jax_module,
+        "trajectory_batch_sharding_config",
+        lambda _y0s: config,
+    )
+    return trace_fn()
+
+
+def _assert_trace_batches_match(
+    sharded,
+    reference,
+    *,
+    check_mask: bool = False,
+    check_phi_hits_count: bool = False,
+):
+    np.testing.assert_allclose(
+        np.asarray(sharded.trajectory),
+        np.asarray(reference.trajectory),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    if check_mask:
+        np.testing.assert_array_equal(
+            np.asarray(sharded.mask),
+            np.asarray(reference.mask),
+        )
+    np.testing.assert_array_equal(
+        np.asarray(sharded.status),
+        np.asarray(reference.status),
+    )
+    if check_phi_hits_count:
+        np.testing.assert_array_equal(
+            np.asarray(sharded.phi_hits_count),
+            np.asarray(reference.phi_hits_count),
+        )
+
+
+def test_trace_fieldline_jaxpr_uses_scan_and_supports_reverse_mode_ad():
+    """The adaptive fieldline driver lowers to scan and remains differentiable."""
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([0.0, 1.0, 0.0], dtype=jnp.float64)
+
+    spec = FieldlineTracingSpec(
+        tmax=0.05,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        max_steps=16,
+        dtmax=0.01,
+    )
+
+    def objective(y0):
+        result = trace_fieldline(spec, y0, field_fn)
+        endpoint = result.trajectory[-1, 1:4]
+        return jnp.sum(endpoint * endpoint)
+
+    y0 = jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+    jaxpr = jax.make_jaxpr(objective)(y0)
+    primitives = _top_level_primitives(jaxpr)
+    assert "scan" in primitives
+    assert "while" not in primitives
+
+    grad = jax.grad(objective)(y0)
+    assert grad.shape == y0.shape
+    assert np.all(np.isfinite(np.asarray(grad)))
+
+
+def test_trace_fieldline_field_parameter_grad_matches_finite_difference():
+    """Reverse-mode AD through trace_fieldline matches a field-parameter FD oracle."""
+
+    spec = FieldlineTracingSpec(
+        tmax=0.04,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        max_steps=32,
+        dtmax=0.005,
+    )
+    y0 = jnp.asarray([0.7, -0.2, 0.1], dtype=jnp.float64)
+
+    def build_field(field_params):
+        def field_fn(point: jax.Array) -> jax.Array:
+            return jnp.stack(
+                [
+                    field_params[0] + 0.05 * point[1],
+                    0.3 + field_params[1] * point[0],
+                    0.1 * field_params[2],
+                ]
+            )
+
+        return field_fn
+
+    def loss(field_params):
+        result = trace_fieldline(spec, y0, build_field(field_params))
+        return result.trajectory[-1, 1]
+
+    field_params = jnp.asarray([0.2, -0.15, 0.4], dtype=jnp.float64)
+    autodiff_grad = jax.grad(loss)(field_params)
+
+    eps = jnp.asarray(1.0e-5, dtype=jnp.float64)
+    basis = jnp.eye(field_params.size, dtype=jnp.float64)
+    fd_grad = jnp.asarray(
+        [
+            (loss(field_params + eps * direction) - loss(field_params - eps * direction))
+            / (2.0 * eps)
+            for direction in basis
+        ],
+        dtype=jnp.float64,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(autodiff_grad),
+        np.asarray(fd_grad),
+        rtol=1.0e-5,
+        atol=1.0e-7,
+    )
+
+
+def test_trace_guiding_center_and_fullorbit_jaxprs_use_scan():
+    """Particle tracing drivers also expose a scan rather than a top-level while."""
+
+    def particle_field_fn(_point: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return (
+            jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64),
+            jnp.zeros((3, 3), dtype=jnp.float64),
+        )
+
+    def zero_B_fn(_point: jax.Array) -> jax.Array:
+        return jnp.zeros((3,), dtype=jnp.float64)
+
+    gc_spec = GuidingCenterTracingSpec(
+        tmax=0.05,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        max_steps=16,
+        dtmax=0.01,
+    )
+    fullorbit_spec = FullorbitTracingSpec(
+        tmax=0.05,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        max_steps=16,
+        dtmax=0.01,
+    )
+
+    gc_jaxpr = jax.make_jaxpr(
+        lambda y0: trace_guiding_center(
+            gc_spec,
+            y0,
+            particle_field_fn,
+            m=1.0,
+            q=1.0,
+            mu=0.0,
+        ).t_final
+    )(jnp.asarray([1.0, 0.0, 0.0, 1.0], dtype=jnp.float64))
+    fullorbit_jaxpr = jax.make_jaxpr(
+        lambda y0: trace_fullorbit(
+            fullorbit_spec,
+            y0,
+            zero_B_fn,
+            m=1.0,
+            q=1.0,
+        ).t_final
+    )(jnp.asarray([0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=jnp.float64))
+
+    gc_primitives = _top_level_primitives(gc_jaxpr)
+    fullorbit_primitives = _top_level_primitives(fullorbit_jaxpr)
+    assert "scan" in gc_primitives
+    assert "while" not in gc_primitives
+    assert "scan" in fullorbit_primitives
+    assert "while" not in fullorbit_primitives
+
+
+def test_trajectory_batch_sharding_summary_surfaces_axis_contract():
+    """Trace-batch sharding metadata is inspectable without multi-GPU hardware."""
+
+    y0s = jnp.zeros((2, 3), dtype=jnp.float64)
+    unsharded_summary = trajectory_batch_sharding_summary(y0s, config=None)
+    assert unsharded_summary["trajectory_sharded"] is False
+
+    mesh = Mesh(np.asarray(jax.devices()[:1], dtype=object), ("traj",))
+    config = TrajectoryBatchShardingConfig(
+        mesh=mesh,
+        axis_name="traj",
+        device_count=1,
+        strategy="hybrid",
+    )
+    (placed_y0s,) = maybe_shard_trajectory_batch_inputs(y0s, config=config)
+    sharded_summary = trajectory_batch_sharding_summary(placed_y0s, config=config)
+    assert sharded_summary["trajectory_sharded"] is True
+    assert sharded_summary["axis"] == "traj"
+    assert sharded_summary["trajectory_device_count"] == 1
+    assert "traj" in str(sharded_summary["spec"])
+
+
+def test_trace_fieldline_batch_shard_map_matches_single_device_vmap(monkeypatch):
+    """The trace-batch shard_map route preserves the unsharded vmap contract."""
+
+    devices = jax.devices("cpu")
+    if len(devices) < 2:
+        pytest.skip("requires at least two CPU devices")
+
+    field_fn = _toroidal_field_jax(R0=1.0, B0=0.7)
+    spec = FieldlineTracingSpec(
+        tmax=0.05,
+        rtol=1e-8,
+        atol=1e-10,
+        dtmax=0.01,
+        max_steps=16,
+        max_phi_hits=2,
+    )
+    y0s = jnp.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [1.1, 0.0, 0.0],
+            [1.2, 0.0, 0.0],
+            [1.3, 0.0, 0.0],
+        ],
+        dtype=jnp.float64,
+    )
+    dtmaxs = jnp.full((4,), 0.01, dtype=jnp.float64)
+
+    mesh = Mesh(np.asarray(devices[:2], dtype=object), ("traj",))
+    config = TrajectoryBatchShardingConfig(
+        mesh=mesh,
+        axis_name="traj",
+        device_count=2,
+        strategy="points",
+    )
+
+    def run_fieldlines():
+        return trace_fieldlines_batched(
+            spec,
+            y0s,
+            dtmaxs,
+            field_fn,
+            phis=(0.0,),
+        )
+
+    sharded = _run_trace_batch_with_config(monkeypatch, config, run_fieldlines)
+    reference = _run_trace_batch_with_config(monkeypatch, None, run_fieldlines)
+    _assert_trace_batches_match(
+        sharded,
+        reference,
+        check_mask=True,
+        check_phi_hits_count=True,
+    )
+
+    def particle_field_fn(_point: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return (
+            jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64),
+            jnp.zeros((3, 3), dtype=jnp.float64),
+        )
+
+    gc_spec = GuidingCenterTracingSpec(
+        tmax=0.05,
+        rtol=1e-8,
+        atol=1e-10,
+        dtmax=0.01,
+        max_steps=16,
+        max_phi_hits=2,
+    )
+    gc_y0s = jnp.asarray(
+        [
+            [1.0, 0.0, 0.0, 1.0],
+            [1.1, 0.0, 0.0, 1.0],
+            [1.2, 0.0, 0.0, 1.0],
+            [1.3, 0.0, 0.0, 1.0],
+        ],
+        dtype=jnp.float64,
+    )
+    mus = jnp.zeros((4,), dtype=jnp.float64)
+
+    def run_guiding_centers():
+        return trace_guiding_centers_batched(
+            gc_spec,
+            gc_y0s,
+            dtmaxs,
+            mus,
+            particle_field_fn,
+            m=1.0,
+            q=1.0,
+            phis=(0.0,),
+        )
+
+    sharded_gc = _run_trace_batch_with_config(
+        monkeypatch,
+        config,
+        run_guiding_centers,
+    )
+    reference_gc = _run_trace_batch_with_config(
+        monkeypatch,
+        None,
+        run_guiding_centers,
+    )
+    _assert_trace_batches_match(sharded_gc, reference_gc)
+
+    def zero_B_fn(_point: jax.Array) -> jax.Array:
+        return jnp.zeros((3,), dtype=jnp.float64)
+
+    fullorbit_spec = FullorbitTracingSpec(
+        tmax=0.05,
+        rtol=1e-8,
+        atol=1e-10,
+        dtmax=0.01,
+        max_steps=16,
+        max_phi_hits=2,
+    )
+    fullorbit_y0s = jnp.asarray(
+        [
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0, 1.0, 1.0, 0.0],
+        ],
+        dtype=jnp.float64,
+    )
+
+    def run_fullorbits():
+        return trace_fullorbits_batched(
+            fullorbit_spec,
+            fullorbit_y0s,
+            dtmaxs,
+            zero_B_fn,
+            m=1.0,
+            q=1.0,
+            phis=(0.0,),
+        )
+
+    sharded_fullorbit = _run_trace_batch_with_config(
+        monkeypatch,
+        config,
+        run_fullorbits,
+    )
+    reference_fullorbit = _run_trace_batch_with_config(
+        monkeypatch,
+        None,
+        run_fullorbits,
+    )
+    _assert_trace_batches_match(sharded_fullorbit, reference_fullorbit)
+
+    boozer_field = _analytic_boozer_field_for_batch_tests()
+    boozer_y0s = jnp.asarray(
+        [
+            [0.12, 0.1, 0.2, 0.8],
+            [0.18, -0.2, 0.3, 0.6],
+            [0.16, 0.2, -0.1, 0.7],
+            [0.14, -0.1, -0.2, 0.9],
+        ],
+        dtype=jnp.float64,
+    )
+
+    def run_boozer_guiding_centers():
+        return trace_guiding_centers_boozer_batched(
+            gc_spec,
+            boozer_y0s,
+            dtmaxs,
+            mus,
+            boozer_field,
+            m=1.0,
+            q=1.0,
+            mode="vacuum",
+        )
+
+    sharded_boozer = _run_trace_batch_with_config(
+        monkeypatch,
+        config,
+        run_boozer_guiding_centers,
+    )
+    reference_boozer = _run_trace_batch_with_config(
+        monkeypatch,
+        None,
+        run_boozer_guiding_centers,
+    )
+    _assert_trace_batches_match(sharded_boozer, reference_boozer)
 
 
 # ---------------------------------------------------------------------------
