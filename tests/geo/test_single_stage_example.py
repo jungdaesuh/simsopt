@@ -330,6 +330,23 @@ class SingleStageExampleTests(unittest.TestCase):
         return _seeded_builder
 
     @staticmethod
+    def _make_value_and_grad_builder(*, value_and_grad, captured=None):
+        def _value_and_grad_builder(
+            boozer_surface,
+            bs,
+            iota_target,
+            *,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            del boozer_surface, bs, iota_target
+            if captured is not None:
+                captured.append((outer_objective_config, success_filter))
+            return value_and_grad
+
+        return _value_and_grad_builder
+
+    @staticmethod
     def _make_fake_target_lane_accepted_step_summary():
         return {
             "objective_value": 1.25,
@@ -2537,7 +2554,19 @@ class SingleStageExampleTests(unittest.TestCase):
             )
         )
         self.assertTrue(
+            module.single_stage_optimizer_contract_uses_full_state_target_lane(
+                TargetOptimizerContract(method="lbfgs-ondevice"),
+                constraint_method="penalty",
+            )
+        )
+        self.assertTrue(
             module.single_stage_optimizer_contract_uses_array_native_target_lane(
+                TargetOptimizerContract(method="lbfgs-scipy-jax"),
+                constraint_method="penalty",
+            )
+        )
+        self.assertFalse(
+            module.single_stage_optimizer_contract_uses_full_state_target_lane(
                 TargetOptimizerContract(method="lbfgs-scipy-jax"),
                 constraint_method="penalty",
             )
@@ -2578,16 +2607,22 @@ class SingleStageExampleTests(unittest.TestCase):
             unique_dof_lineage=(coil_block, plasma_surface, vessel_surface),
         )
         boozer_surface = types.SimpleNamespace(surface=plasma_surface)
+        bs = types.SimpleNamespace(unique_dof_lineage=(coil_block,))
 
         dof_map = module.build_single_stage_full_graph_jax_cpu_order_dof_map(
             jf,
             boozer_surface,
             vessel_surface,
+            bs=bs,
         )
 
         np.testing.assert_array_equal(
             dof_map.optimizer_to_native_indices,
             np.array([0, 1, 5, 2, 3, 4], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            dof_map.coil_optimizer_indices,
+            np.array([0, 1], dtype=np.int64),
         )
         native_dofs = np.array([10.0, 11.0, 20.0, 21.0, 22.0, 30.0])
         optimizer_dofs = np.array([10.0, 11.0, 30.0, 20.0, 21.0, 22.0])
@@ -2603,6 +2638,58 @@ class SingleStageExampleTests(unittest.TestCase):
             dof_map.optimizer_from_native_gradient(native_dofs),
             optimizer_dofs,
         )
+        np.testing.assert_array_equal(
+            dof_map.coil_dofs_from_optimizer_dofs(optimizer_dofs),
+            np.array([10.0, 11.0]),
+        )
+
+    def test_full_state_target_lane_value_and_grad_lifts_compact_gradient(self):
+        module = self.load_module()
+        dof_map = module.SingleStageFullGraphOptimizerDofMap(
+            optimizer_to_native_indices=np.arange(6, dtype=np.int64),
+            coil_optimizer_indices=np.array([0, 2, 5], dtype=np.int64),
+        )
+
+        def compact_value_and_grad(coil_dofs):
+            return jnp.sum(coil_dofs**2), 2.0 * coil_dofs
+
+        full_state_value_and_grad = module.build_target_lane_full_state_value_and_grad(
+            compact_value_and_grad,
+            dof_map,
+        )
+
+        value, gradient = full_state_value_and_grad(
+            jnp.array([1.0, 10.0, 2.0, 20.0, 30.0, 3.0], dtype=jnp.float64)
+        )
+
+        self.assertEqual(float(value), 14.0)
+        np.testing.assert_array_equal(
+            np.asarray(gradient),
+            np.array([2.0, 0.0, 4.0, 0.0, 0.0, 6.0]),
+        )
+
+    def test_full_graph_host_callback_value_and_grad_is_cacheable(self):
+        module = self.load_module()
+        from simsopt.geo.optimizer_jax import _CACHEABLE_VALUE_AND_GRAD_ATTR
+
+        def host_value_and_grad(x):
+            x = np.asarray(x, dtype=np.float64)
+            return np.asarray(np.sum(x), dtype=np.float64), np.ones_like(x)
+
+        value_and_grad = (
+            module.build_single_stage_full_graph_host_callback_value_and_grad(
+                host_value_and_grad,
+                np.array([1.0, 2.0], dtype=np.float64),
+            )
+        )
+
+        self.assertTrue(getattr(value_and_grad, _CACHEABLE_VALUE_AND_GRAD_ATTR))
+        value, gradient = jax.jit(value_and_grad)(
+            jnp.array([1.0, 2.0], dtype=jnp.float64)
+        )
+
+        self.assertEqual(float(value), 3.0)
+        np.testing.assert_array_equal(np.asarray(gradient), np.array([1.0, 1.0]))
 
     def test_full_graph_jax_adapter_maps_native_full_gradient_once(self):
         module = self.load_module()
@@ -4500,9 +4587,7 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         def contains_jax_array(value):
-            return any(
-                isinstance(leaf, jax.Array) for leaf in jax.tree_util.tree_leaves(value)
-            )
+            return any(isinstance(leaf, jax.Array) for leaf in jax.tree.leaves(value))
 
         captured_values = [
             cell.cell_contents for cell in (success_filter.__closure__ or ())
@@ -5301,13 +5386,9 @@ class SingleStageExampleTests(unittest.TestCase):
 
         with patch.object(
             module,
-            "get_traceable_single_stage_seeded_value_and_grad_builder",
-            return_value=self._make_seeded_value_and_grad_builder(
+            "get_traceable_single_stage_value_and_grad_builder",
+            return_value=self._make_value_and_grad_builder(
                 value_and_grad=value_and_grad_marker,
-                optimizer_initial_value_and_grad=(
-                    jnp.asarray(1.5, dtype=jnp.float64),
-                    jnp.asarray([0.2, -0.4], dtype=jnp.float64),
-                ),
             ),
         ), patch.object(
             module,
@@ -5331,7 +5412,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNotNone(scalar_fun)
         self.assertIs(value_and_grad_fun, value_and_grad_marker)
         self.assertIsNone(target_lane_profile)
-        self.assertIsNotNone(optimizer_initial_value_and_grad)
+        self.assertIsNone(optimizer_initial_value_and_grad)
         self.assertEqual(runtime_calls, [(False, False, None, None)])
 
     def test_build_target_lane_outer_objectives_threads_runtime_bundle_options(
@@ -6462,13 +6543,9 @@ class SingleStageExampleTests(unittest.TestCase):
             return_value=_runtime_builder,
         ), patch.object(
             module,
-            "get_traceable_single_stage_seeded_value_and_grad_builder",
-            return_value=self._make_seeded_value_and_grad_builder(
+            "get_traceable_single_stage_value_and_grad_builder",
+            return_value=self._make_value_and_grad_builder(
                 value_and_grad=lambda x: x,
-                optimizer_initial_value_and_grad=(
-                    jnp.asarray(2.0, dtype=jnp.float64),
-                    jnp.asarray([0.1, -0.2], dtype=jnp.float64),
-                ),
             ),
         ), patch.object(
             module,
@@ -6487,7 +6564,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 )
             )
 
-        self.assertIsNotNone(optimizer_initial_value_and_grad)
+        self.assertIsNone(optimizer_initial_value_and_grad)
         self.assertEqual(target_lane_profile["ok"], True)
         self.assertEqual(len(profiled_calls), 1)
         self.assertEqual(profiled_calls[0][0], "profile-suite-marker")
@@ -6631,13 +6708,9 @@ class SingleStageExampleTests(unittest.TestCase):
             return_value=_runtime_builder,
         ), patch.object(
             module,
-            "get_traceable_single_stage_seeded_value_and_grad_builder",
-            return_value=self._make_seeded_value_and_grad_builder(
+            "get_traceable_single_stage_value_and_grad_builder",
+            return_value=self._make_value_and_grad_builder(
                 value_and_grad=lambda x: x,
-                optimizer_initial_value_and_grad=(
-                    jnp.asarray(2.0, dtype=jnp.float64),
-                    jnp.asarray([0.1, -0.2], dtype=jnp.float64),
-                ),
             ),
         ), patch.object(
             module,
@@ -6660,7 +6733,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 )
             )
 
-        self.assertIsNotNone(optimizer_initial_value_and_grad)
+        self.assertIsNone(optimizer_initial_value_and_grad)
         self.assertEqual(target_lane_profile["batched_seed_profile"]["batch_ok"], True)
         self.assertEqual(
             target_lane_profile["batched_seed_profile"]["profile_point_kind"],
@@ -6741,6 +6814,8 @@ class SingleStageExampleTests(unittest.TestCase):
             profile_batch_size=3,
             outer_objective_config="config-marker",
             success_filter=None,
+            full_state_optimizer_dof_map=None,
+            profile_optimizer_dofs=None,
         )
 
     def test_prepare_target_lane_outer_objectives_uses_smooth_penalties_without_hard_filter(
@@ -6771,7 +6846,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 None,
                 value_and_grad_marker,
                 None,
-                ("seed-value", "seed-grad"),
+                None,
             ),
         ) as build_objectives:
             (
@@ -6809,10 +6884,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNotNone(scalar_fun)
         self.assertIsNot(scalar_fun, value_and_grad_marker)
         self.assertIs(value_and_grad_fun, value_and_grad_marker)
-        self.assertEqual(
-            optimizer_initial_value_and_grad,
-            ("seed-value", "seed-grad"),
-        )
+        self.assertIsNone(optimizer_initial_value_and_grad)
         self.assertIsNone(target_lane_profile)
         self.assertIsNone(success_filter)
         self.assertEqual(scalar_fun("trial-state"), "objective-value")
@@ -6829,6 +6901,8 @@ class SingleStageExampleTests(unittest.TestCase):
             profile_batch_size=1,
             outer_objective_config="config-marker",
             success_filter=None,
+            full_state_optimizer_dof_map=None,
+            profile_optimizer_dofs=None,
         )
 
     def test_build_target_lane_gradient_diagnosis_threads_config_and_filter(self):
@@ -6894,12 +6968,8 @@ class SingleStageExampleTests(unittest.TestCase):
         module = self.load_module()
         success_filter_marker = object()
         runtime_builder_calls = []
-        seeded_builder_calls = []
+        value_and_grad_builder_calls = []
         optimizer_calls = []
-        optimizer_seed = (
-            jnp.asarray(3.5, dtype=jnp.float64),
-            jnp.asarray([4.0, -6.0], dtype=jnp.float64),
-        )
 
         def _runtime_builder(
             *args,
@@ -6920,7 +6990,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "value_and_grad": _value_and_grad,
             }
 
-        def _seeded_builder(
+        def _value_and_grad_builder(
             boozer_surface,
             bs,
             iota_target,
@@ -6929,11 +6999,10 @@ class SingleStageExampleTests(unittest.TestCase):
             success_filter=None,
         ):
             del boozer_surface, bs, iota_target
-            seeded_builder_calls.append((outer_objective_config, success_filter))
-            return types.SimpleNamespace(
-                value_and_grad=lambda x: ("seeded-value", x),
-                optimizer_initial_value_and_grad=optimizer_seed,
+            value_and_grad_builder_calls.append(
+                (outer_objective_config, success_filter)
             )
+            return lambda x: ("target-value-and-grad", x)
 
         def _run_single_stage_optimizer(
             fun,
@@ -6947,7 +7016,7 @@ class SingleStageExampleTests(unittest.TestCase):
             outer_maxls,
             callback,
             scalar_fun,
-            optimizer_initial_value_and_grad,
+            optimizer_initial_value_and_grad=None,
         ):
             recorded_dofs = getattr(dofs, "step_dofs", dofs)
             optimizer_calls.append(
@@ -6988,8 +7057,8 @@ class SingleStageExampleTests(unittest.TestCase):
             return_value=_runtime_builder,
         ), patch.object(
             module,
-            "get_traceable_single_stage_seeded_value_and_grad_builder",
-            return_value=_seeded_builder,
+            "get_traceable_single_stage_value_and_grad_builder",
+            return_value=_value_and_grad_builder,
         ), patch.object(
             module,
             "build_scaled_outer_problem",
@@ -7036,7 +7105,7 @@ class SingleStageExampleTests(unittest.TestCase):
             [(False, "config-marker", success_filter_marker)],
         )
         self.assertEqual(
-            seeded_builder_calls,
+            value_and_grad_builder_calls,
             [("config-marker", success_filter_marker)],
         )
         self.assertEqual(len(optimizer_calls), 1)
@@ -7045,21 +7114,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(optimizer_calls[0]["maxiter"], 4)
         self.assertEqual(optimizer_calls[0]["callback"], "scaled-callback")
         self.assertIsNone(optimizer_calls[0]["scalar_fun"])
-        optimizer_seed_value, optimizer_seed_grad = optimizer_calls[0][
-            "optimizer_initial_value_and_grad"
-        ]
-        self.assertEqual(float(optimizer_seed_value), 3.5)
-        self.assertIsInstance(
-            optimizer_seed_grad, module.ScaledOuterPhaseOptimizerState
-        )
-        np.testing.assert_allclose(
-            np.asarray(optimizer_seed_grad.step_dofs, dtype=np.float64),
-            np.array([1.0, -1.5], dtype=np.float64),
-        )
-        np.testing.assert_allclose(
-            np.asarray(optimizer_seed_grad.anchor_dofs, dtype=np.float64),
-            np.zeros(2, dtype=np.float64),
-        )
+        self.assertIsNone(optimizer_calls[0]["optimizer_initial_value_and_grad"])
         self.assertEqual(diagnosis["contract_method"], "lbfgs-ondevice")
         self.assertTrue(diagnosis["all_finite"])
         self.assertIsNone(diagnosis["first_nonfinite_stage"])
@@ -7085,11 +7140,6 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_build_target_lane_scaled_phase1_diagnosis_is_transfer_safe(self):
         module = self.load_module()
         value_and_grad_calls = []
-        seeded_value_and_grad_calls = []
-        optimizer_seed = (
-            jax.device_put(np.asarray(5.0, dtype=np.float64)),
-            jax.device_put(np.asarray([4.0, -6.0], dtype=np.float64)),
-        )
 
         def _runtime_builder(
             *args,
@@ -7110,7 +7160,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "value_and_grad": _value_and_grad,
             }
 
-        def _seeded_builder(
+        def _value_and_grad_builder(
             boozer_surface,
             bs,
             iota_target,
@@ -7126,16 +7176,12 @@ class SingleStageExampleTests(unittest.TestCase):
                 success_filter,
             )
 
-            def _seeded_value_and_grad(x):
-                seeded_value_and_grad_calls.append(x)
+            def _target_value_and_grad(x):
                 self.assertIsInstance(x, jax.Array)
                 x_host = np.asarray(jax.device_get(x), dtype=np.float64)
                 return np.dot(x_host, x_host), 2.0 * x_host
 
-            return types.SimpleNamespace(
-                value_and_grad=_seeded_value_and_grad,
-                optimizer_initial_value_and_grad=optimizer_seed,
-            )
+            return _target_value_and_grad
 
         def _run_single_stage_optimizer(
             fun,
@@ -7149,7 +7195,7 @@ class SingleStageExampleTests(unittest.TestCase):
             outer_maxls,
             callback,
             scalar_fun,
-            optimizer_initial_value_and_grad,
+            optimizer_initial_value_and_grad=None,
         ):
             del (
                 fun,
@@ -7185,8 +7231,8 @@ class SingleStageExampleTests(unittest.TestCase):
             return_value=_runtime_builder,
         ), patch.object(
             module,
-            "get_traceable_single_stage_seeded_value_and_grad_builder",
-            return_value=_seeded_builder,
+            "get_traceable_single_stage_value_and_grad_builder",
+            return_value=_value_and_grad_builder,
         ), patch.object(
             module,
             "build_scaled_outer_problem",
@@ -7230,17 +7276,137 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertTrue(diagnosis["all_finite"])
         self.assertGreaterEqual(len(value_and_grad_calls), 4)
-        self.assertEqual(seeded_value_and_grad_calls, [])
+
+    def test_scaled_phase1_diagnosis_omits_optimizer_seed_for_all_contracts(self):
+        module = self.load_module()
+        observed_optimizer_seeds = []
+
+        def _runtime_builder(
+            *args,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            del args, outer_objective_config, success_filter
+            self.assertFalse(include_host_wrappers)
+
+            def _value_and_grad(x):
+                x = np.asarray(x, dtype=np.float64)
+                return np.dot(x, x), 2.0 * x
+
+            return {"value_and_grad": _value_and_grad}
+
+        def _value_and_grad_builder(
+            boozer_surface,
+            bs,
+            iota_target,
+            *,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            del boozer_surface, bs, iota_target, outer_objective_config, success_filter
+            return lambda x: ("target-value-and-grad", x)
+
+        def _run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            callback,
+            scalar_fun,
+            optimizer_initial_value_and_grad=None,
+        ):
+            del (
+                fun,
+                dofs,
+                contract,
+                maxiter,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                callback,
+                scalar_fun,
+            )
+            observed_optimizer_seeds.append(optimizer_initial_value_and_grad)
+            return types.SimpleNamespace(
+                x=np.array([0.2, -0.4], dtype=np.float64),
+                nit=1,
+                success=True,
+                message="ok",
+                status=0,
+                nfev=1,
+                njev=1,
+                ls_status=0,
+            )
+
+        with patch.object(
+            module,
+            "build_target_lane_outer_objective_config",
+            return_value="config-marker",
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_value_and_grad_builder",
+            return_value=_value_and_grad_builder,
+        ), patch.object(
+            module,
+            "build_scaled_outer_problem",
+            return_value=("scaled-fun", None),
+        ), patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=_run_single_stage_optimizer,
+        ):
+            for method in ("lbfgs-ondevice", "lbfgs-scipy-jax"):
+                with self.subTest(method=method):
+                    diagnosis = module.build_target_lane_scaled_phase1_diagnosis(
+                        object(),
+                        object(),
+                        object(),
+                        object(),
+                        object(),
+                        anchor_dofs=np.array([1.0, -2.0], dtype=np.float64),
+                        contract=types.SimpleNamespace(method=method),
+                        phase1_maxiter=4,
+                        step_scale=0.25,
+                        ftol=1e-8,
+                        gtol=1e-6,
+                        maxcor=9,
+                        outer_maxls=7,
+                        callback=None,
+                        success_filter=None,
+                        non_qs_weight=1.0,
+                        residual_weight=10.0,
+                        iota_weight=20.0,
+                        length_weight=30.0,
+                        length_target=4.0,
+                        cc_dist=0.05,
+                        cc_weight=40.0,
+                        cs_dist=0.01,
+                        cs_weight=50.0,
+                        ss_dist=0.02,
+                        surf_dist_weight=60.0,
+                        curvature_threshold=40.0,
+                        curvature_weight=70.0,
+                    )
+                    self.assertEqual(diagnosis["contract_method"], method)
+
+        self.assertEqual(observed_optimizer_seeds, [None, None])
 
     def test_build_target_lane_scaled_phase1_diagnosis_writes_incremental_checkpoints(
         self,
     ):
         module = self.load_module()
         checkpoint_payloads = []
-        optimizer_seed = (
-            jnp.asarray(4.0, dtype=jnp.float64),
-            jnp.asarray([2.0, -8.0], dtype=jnp.float64),
-        )
 
         def _runtime_builder(
             *args,
@@ -7259,7 +7425,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "value_and_grad": _value_and_grad,
             }
 
-        def _seeded_builder(
+        def _value_and_grad_builder(
             boozer_surface,
             bs,
             iota_target,
@@ -7268,10 +7434,7 @@ class SingleStageExampleTests(unittest.TestCase):
             success_filter=None,
         ):
             del boozer_surface, bs, iota_target, outer_objective_config, success_filter
-            return types.SimpleNamespace(
-                value_and_grad=lambda x: ("seeded-value", x),
-                optimizer_initial_value_and_grad=optimizer_seed,
-            )
+            return lambda x: ("target-value-and-grad", x)
 
         def _run_single_stage_optimizer(
             fun,
@@ -7285,7 +7448,7 @@ class SingleStageExampleTests(unittest.TestCase):
             outer_maxls,
             callback,
             scalar_fun,
-            optimizer_initial_value_and_grad,
+            optimizer_initial_value_and_grad=None,
         ):
             del (
                 fun,
@@ -7299,13 +7462,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 callback,
                 scalar_fun,
             )
-            seed_value, seed_grad = optimizer_initial_value_and_grad
-            self.assertEqual(float(seed_value), 4.0)
-            self.assertIsInstance(seed_grad, module.ScaledOuterPhaseOptimizerState)
-            np.testing.assert_allclose(
-                np.asarray(seed_grad.step_dofs, dtype=np.float64),
-                np.array([0.5, -2.0], dtype=np.float64),
-            )
+            self.assertIsNone(optimizer_initial_value_and_grad)
             return types.SimpleNamespace(
                 x=np.array([0.2, -0.4], dtype=np.float64),
                 nit=1,
@@ -7335,8 +7492,8 @@ class SingleStageExampleTests(unittest.TestCase):
             return_value=_runtime_builder,
         ), patch.object(
             module,
-            "get_traceable_single_stage_seeded_value_and_grad_builder",
-            return_value=_seeded_builder,
+            "get_traceable_single_stage_value_and_grad_builder",
+            return_value=_value_and_grad_builder,
         ), patch.object(
             module,
             "build_scaled_outer_problem",

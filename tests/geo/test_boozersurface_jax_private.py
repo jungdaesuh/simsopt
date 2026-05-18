@@ -77,6 +77,12 @@ def _record_progress(points):
     return callback
 
 
+def test_private_lbfgs_history_size_preserves_maxcor_above_dimension():
+    assert _private_lbfgs._resolve_lbfgs_history_size(200, maxiter_limit=1500) == 200
+    assert _private_lbfgs._resolve_lbfgs_history_size(8, maxiter_limit=1500) == 8
+    assert _private_lbfgs._resolve_lbfgs_history_size(8, maxiter_limit=3) == 3
+
+
 def test_matrix_rhs_linear_operators_apply_columns():
     x = jnp.asarray([0.2, -0.1, 0.3], dtype=jnp.float64)
     rhs = jnp.asarray(

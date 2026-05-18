@@ -210,6 +210,10 @@ def _check_lbfgsb_trace_budget(
         )
 
 
+def _resolve_lbfgs_history_size(maxcor, *, maxiter_limit) -> int:
+    return max(1, min(int(maxcor), int(maxiter_limit)))
+
+
 def _lbfgsb_public_status(state, *, maxiter_limit, maxfun_limit):
     task0 = state.workspace.task[0]
     limited = (state.nfev > maxfun_limit) | (state.n_iterations >= maxiter_limit)
@@ -398,6 +402,10 @@ def _minimize_lbfgs_private_impl(
         maxiter,
         maxfun,
     )
+    history_size = _resolve_lbfgs_history_size(
+        maxcor,
+        maxiter_limit=maxiter_limit_value,
+    )
     _check_lbfgsb_trace_budget(
         int(x0.size),
         maxiter_limit_value,
@@ -424,7 +432,7 @@ def _minimize_lbfgs_private_impl(
     state = _lbfgsb_initial_state_kernel(
         cache_owner=solver_cache_owner,
         cache_key_prefix=solver_cache_key_prefix,
-        m=maxcor,
+        m=history_size,
         ftol=ftol,
         gtol=gtol,
         maxls=maxls,

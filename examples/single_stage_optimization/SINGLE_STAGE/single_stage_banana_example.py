@@ -38,6 +38,7 @@ configure_entrypoint_jax_runtime(
 )
 
 import jax
+from jax.experimental import io_callback
 import jax.numpy as jnp
 import jaxlib
 import numpy as np
@@ -533,6 +534,15 @@ def _summarize_host_array(array):
     summary = _summarize_host_vector(host.reshape(-1))
     summary["shape"] = [int(size) for size in host.shape]
     return summary
+
+
+def _summarize_full_graph_host_callback_initial_profile(elapsed_s, value, grad):
+    return {
+        "profile_point_kind": "full_graph_host_callback_initial",
+        "value_and_grad_first_s": float(elapsed_s),
+        "objective_value": _summarize_host_scalar(value),
+        "objective_grad": _summarize_host_vector(grad),
+    }
 
 
 def _summarize_optimizer_state_trace(trace):
@@ -1591,6 +1601,36 @@ def _hostify_traceable_value_and_grad(value_and_grad, x):
         host_float(value),
         np.asarray(host_array(grad), dtype=np.float64).reshape(-1),
     )
+
+
+def build_single_stage_full_graph_host_callback_value_and_grad(
+    value_and_grad,
+    optimizer_dofs,
+):
+    """Bridge full-graph ``JF.x`` value/grad into the jitted L-BFGS-B driver."""
+    from simsopt.geo.optimizer_jax import _mark_cacheable_jit_value_and_grad
+
+    host_template = _single_stage_optimizer_dofs_array(optimizer_dofs).reshape(-1)
+    host_dtype = host_template.dtype
+    value_spec = jax.ShapeDtypeStruct((), jnp.dtype(host_dtype))
+    grad_spec = jax.ShapeDtypeStruct(host_template.shape, jnp.dtype(host_dtype))
+
+    def host_value_and_grad(x):
+        value, grad = value_and_grad(np.asarray(x, dtype=host_dtype).reshape(-1))
+        return (
+            np.asarray(value, dtype=host_dtype),
+            np.asarray(grad, dtype=host_dtype).reshape(host_template.shape),
+        )
+
+    def wrapped(optimizer_x):
+        return io_callback(
+            host_value_and_grad,
+            (value_spec, grad_spec),
+            optimizer_x,
+            ordered=True,
+        )
+
+    return _mark_cacheable_jit_value_and_grad(wrapped)
 
 
 def uses_per_accept_target_lane_sync(sync_policy: str) -> bool:
@@ -5964,16 +6004,16 @@ def get_traceable_single_stage_runtime_bundle_builder():
     return make_traceable_objective_runtime_bundle
 
 
-def get_traceable_single_stage_seeded_value_and_grad_builder():
-    """Load the optimizer-only seeded target-lane value/gradient helper."""
+def get_traceable_single_stage_value_and_grad_builder():
+    """Load the target-lane optimizer value/gradient helper."""
     from simsopt.geo.surfaceobjectives_jax import (
-        make_traceable_objective_seeded_value_and_grad,
+        make_traceable_objective_value_and_grad,
     )
 
-    return make_traceable_objective_seeded_value_and_grad
+    return make_traceable_objective_value_and_grad
 
 
-def build_traceable_single_stage_seeded_value_and_grad(
+def build_traceable_single_stage_value_and_grad(
     boozer_surface,
     bs,
     iota_target,
@@ -5981,8 +6021,8 @@ def build_traceable_single_stage_seeded_value_and_grad(
     outer_objective_config,
     success_filter,
 ):
-    """Build the optimizer-seeded target-lane fused objective."""
-    return get_traceable_single_stage_seeded_value_and_grad_builder()(
+    """Build the lane-native target-lane fused objective."""
+    return get_traceable_single_stage_value_and_grad_builder()(
         boozer_surface,
         bs,
         iota_target,
@@ -6615,6 +6655,59 @@ def build_single_stage_target_lane_hardware_success_filter(
     return success_filter
 
 
+def build_single_stage_target_lane_success_filter(
+    boozer_surface,
+    bs,
+    banana_curve,
+    vessel_surface,
+    *,
+    cc_dist,
+    cs_dist,
+    ss_dist,
+    curvature_threshold,
+):
+    """Build the pure-JAX success predicate for CPU-parity target evaluation."""
+    hardware_success_filter = build_single_stage_target_lane_hardware_success_filter(
+        boozer_surface,
+        bs,
+        banana_curve,
+        vessel_surface,
+        cc_dist=cc_dist,
+        cs_dist=cs_dist,
+        ss_dist=ss_dist,
+        curvature_threshold=curvature_threshold,
+    )
+    self_intersection_success_filter = (
+        build_single_stage_target_lane_self_intersection_success_filter(
+            boozer_surface,
+            bs,
+        )
+    )
+    if self_intersection_success_filter is None:
+        return hardware_success_filter
+
+    def success_filter(coil_dofs, solved_x):
+        return jnp.logical_and(
+            hardware_success_filter(coil_dofs, solved_x),
+            self_intersection_success_filter(coil_dofs, solved_x),
+        )
+
+    success_filter._traceable_runtime_cache_signature = (
+        "single-stage-target-lane-combined-success-filter",
+        getattr(
+            hardware_success_filter,
+            "_traceable_runtime_cache_signature",
+            None,
+        ),
+        getattr(
+            self_intersection_success_filter,
+            "_traceable_runtime_cache_signature",
+            None,
+        ),
+    )
+    return success_filter
+
+
 def build_target_lane_outer_objectives(
     boozer_surface,
     bs,
@@ -6626,6 +6719,8 @@ def build_target_lane_outer_objectives(
     profile_batch_size: int = 1,
     outer_objective_config=None,
     success_filter=None,
+    full_state_optimizer_dof_map=None,
+    profile_optimizer_dofs=None,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
     target_scalar_objective = None
@@ -6648,23 +6743,37 @@ def build_target_lane_outer_objectives(
 
     target_scalar_objective = runtime_bundle["objective"]
     if use_value_and_grad:
-        seeded_value_and_grad = build_traceable_single_stage_seeded_value_and_grad(
+        target_value_and_grad_objective = build_traceable_single_stage_value_and_grad(
             boozer_surface,
             bs,
             iota_target,
             outer_objective_config=outer_objective_config,
             success_filter=success_filter,
         )
-        target_value_and_grad_objective = seeded_value_and_grad.value_and_grad
-        target_optimizer_initial_value_and_grad = (
-            seeded_value_and_grad.optimizer_initial_value_and_grad
+    if full_state_optimizer_dof_map is not None:
+        target_scalar_objective = build_target_lane_full_state_scalar_objective(
+            target_scalar_objective,
+            full_state_optimizer_dof_map,
+        )
+        target_value_and_grad_objective = build_target_lane_full_state_value_and_grad(
+            target_value_and_grad_objective,
+            full_state_optimizer_dof_map,
         )
 
     if profile_target_lane:
-        profile_coil_dofs = build_target_lane_profile_coil_dofs(bs.x.copy())
+        profile_seed_dofs = (
+            profile_optimizer_dofs
+            if full_state_optimizer_dof_map is not None
+            else bs.x.copy()
+        )
+        profile_coil_dofs = build_target_lane_profile_coil_dofs(profile_seed_dofs)
         target_lane_profile = profile_traceable_target_lane_objective(
             runtime_bundle["profile_suite"],
-            profile_coil_dofs,
+            full_state_optimizer_dof_map.coil_dofs_from_optimizer_dofs(
+                profile_coil_dofs
+            )
+            if full_state_optimizer_dof_map is not None
+            else profile_coil_dofs,
             include_memory_analysis=profile_target_lane_memory_analysis,
         )
         target_lane_profile["profile_point_kind"] = "baseline_perturbed"
@@ -6679,6 +6788,11 @@ def build_target_lane_outer_objectives(
                 )
             )
         if profile_batch_size > 1:
+            if full_state_optimizer_dof_map is not None:
+                raise ValueError(
+                    "Full-state target-lane profiling does not support batched "
+                    "compact seed profiling."
+                )
             target_lane_profile["batched_seed_profile"] = (
                 profile_traceable_target_lane_seed_batch(
                     runtime_bundle["profile_suite"],
@@ -6873,7 +6987,6 @@ def build_target_lane_optimistix_diagnosis(
     scalar_fun,
     dofs,
     *,
-    initial_value_and_grad,
     maxiter,
     gtol,
 ):
@@ -6881,8 +6994,11 @@ def build_target_lane_optimistix_diagnosis(
     import optimistix.compat as optimistix_compat
 
     x0 = np.asarray(host_array(dofs), dtype=np.float64).reshape(-1)
-    f0 = host_float(initial_value_and_grad[0])
-    g0 = np.asarray(host_array(initial_value_and_grad[1]), dtype=np.float64)
+    initial_value, initial_grad = jax.value_and_grad(scalar_fun)(
+        jnp.asarray(x0, dtype=jnp.float64)
+    )
+    f0 = host_float(initial_value)
+    g0 = np.asarray(host_array(initial_grad), dtype=np.float64)
     g0 = g0.reshape(x0.shape)
 
     optimizer_start_s = _perf_counter_s()
@@ -6949,7 +7065,6 @@ def build_target_lane_optax_diagnosis(
     scalar_fun,
     dofs,
     *,
-    initial_value_and_grad,
     maxiter,
     gtol,
     max_linesearch_steps,
@@ -6958,9 +7073,6 @@ def build_target_lane_optax_diagnosis(
     import optax
 
     x0 = np.asarray(host_array(dofs), dtype=np.float64).reshape(-1)
-    f0 = host_float(initial_value_and_grad[0])
-    g0 = np.asarray(host_array(initial_value_and_grad[1]), dtype=np.float64)
-    g0 = g0.reshape(x0.shape)
 
     def value_fn(params):
         return scalar_fun(params)
@@ -6977,6 +7089,8 @@ def build_target_lane_optax_diagnosis(
     optimizer_start_s = _perf_counter_s()
     x_current = jnp.asarray(x0, dtype=jnp.float64)
     value_current, grad_current = jax.value_and_grad(value_fn)(x_current)
+    f0 = host_float(value_current)
+    g0 = np.asarray(host_array(grad_current), dtype=np.float64).reshape(x0.shape)
     opt_state = optimizer.init(x_current)
     iterations = 0
     update_trace = []
@@ -7210,7 +7324,7 @@ def build_target_lane_scaled_phase1_diagnosis(
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
-    seeded_value_and_grad = build_traceable_single_stage_seeded_value_and_grad(
+    target_value_and_grad = build_traceable_single_stage_value_and_grad(
         boozer_surface,
         bs,
         iota_target,
@@ -7219,19 +7333,11 @@ def build_target_lane_scaled_phase1_diagnosis(
     )
     _persist_payload("runtime_bundle_ready", diagnosis_complete=False)
     phase1_fun, phase1_callback = build_scaled_outer_problem(
-        seeded_value_and_grad.value_and_grad,
+        target_value_and_grad,
         callback,
         anchor_dofs,
         step_scale,
         anchor_in_state=True,
-    )
-    phase1_optimizer_initial_value_and_grad = (
-        build_scaled_outer_problem_initial_value_and_grad(
-            seeded_value_and_grad.optimizer_initial_value_and_grad,
-            anchor_dofs,
-            step_scale,
-            anchor_in_state=True,
-        )
     )
     anchor_host_dofs = np.asarray(host_array(anchor_dofs), dtype=np.float64).reshape(-1)
 
@@ -7291,7 +7397,6 @@ def build_target_lane_scaled_phase1_diagnosis(
         maxcor=maxcor,
         outer_maxls=outer_maxls,
         scalar_fun=None,
-        optimizer_initial_value_and_grad=phase1_optimizer_initial_value_and_grad,
     )
     optimizer_payload = {
         "success": bool(phase1_res.success),
@@ -7344,6 +7449,9 @@ def prepare_target_lane_outer_objectives(
     *,
     use_target_lane: bool,
     use_value_and_grad: bool,
+    use_full_state_optimizer: bool = False,
+    full_state_optimizer_dof_map=None,
+    profile_optimizer_dofs=None,
     profile_target_lane: bool,
     profile_target_lane_memory_analysis: bool = False,
     profile_batch_size: int,
@@ -7363,7 +7471,6 @@ def prepare_target_lane_outer_objectives(
     curvature_weight,
 ):
     """Build target-lane outer objectives with smooth penalty terms only."""
-    del disable_success_filter
     target_scalar_objective = None
     target_value_and_grad_objective = None
     target_optimizer_initial_value_and_grad = None
@@ -7399,6 +7506,17 @@ def prepare_target_lane_outer_objectives(
         curvature_weight=curvature_weight,
         curvature_threshold=curvature_threshold,
     )
+    if use_full_state_optimizer and not disable_success_filter:
+        target_lane_success_filter = build_single_stage_target_lane_success_filter(
+            boozer_surface,
+            bs,
+            banana_curve,
+            VV,
+            cc_dist=cc_dist,
+            cs_dist=cs_dist,
+            ss_dist=ss_dist,
+            curvature_threshold=curvature_threshold,
+        )
 
     (
         target_scalar_objective,
@@ -7415,6 +7533,8 @@ def prepare_target_lane_outer_objectives(
         profile_batch_size=profile_batch_size,
         outer_objective_config=target_lane_outer_objective_config,
         success_filter=target_lane_success_filter,
+        full_state_optimizer_dof_map=full_state_optimizer_dof_map,
+        profile_optimizer_dofs=profile_optimizer_dofs,
     )
     if target_scalar_objective is None:
         target_scalar_objective = _scalar_objective_from_value_and_grad(
@@ -7748,6 +7868,21 @@ def single_stage_optimizer_contract_uses_full_graph_jax_scipy(contract):
     )
 
 
+def single_stage_optimizer_contract_uses_full_state_target_lane(
+    contract,
+    *,
+    constraint_method,
+):
+    """Return whether the pure target lane should consume CPU-order ``JF.x``."""
+    from simsopt.geo.optimizer_jax import TargetOptimizerContract
+
+    return bool(
+        constraint_method == "penalty"
+        and isinstance(contract, TargetOptimizerContract)
+        and contract.method == "lbfgs-ondevice"
+    )
+
+
 def resolve_single_stage_alm_inner_optimizer_contract(
     constraint_method,
     outer_contract,
@@ -7783,6 +7918,7 @@ class SingleStageFullGraphOptimizerDofMap:
     """Map native JAX Optimizable order to the CPU/SciPy single-stage order."""
 
     optimizer_to_native_indices: np.ndarray
+    coil_optimizer_indices: np.ndarray | None = None
 
     def optimizer_from_native_dofs(self, native_dofs):
         native = _single_stage_optimizer_dofs_array(native_dofs).reshape(-1)
@@ -7798,11 +7934,38 @@ class SingleStageFullGraphOptimizerDofMap:
         native = _single_stage_optimizer_dofs_array(native_gradient).reshape(-1)
         return native[self.optimizer_to_native_indices].copy()
 
+    def coil_dofs_from_optimizer_dofs(self, optimizer_dofs):
+        optimizer = _single_stage_optimizer_dofs_array(optimizer_dofs).reshape(-1)
+        if self.coil_optimizer_indices is None:
+            return optimizer.copy()
+        return optimizer[self.coil_optimizer_indices].copy()
+
+    def jax_coil_dofs_from_optimizer_dofs(self, optimizer_dofs):
+        optimizer = _as_jax_float64(optimizer_dofs).reshape((-1,))
+        if self.coil_optimizer_indices is None:
+            return optimizer
+        return jnp.take(
+            optimizer,
+            _as_jax_int32(self.coil_optimizer_indices),
+            axis=0,
+        )
+
+    def jax_full_gradient_from_coil_gradient(self, optimizer_dofs, coil_gradient):
+        optimizer = _as_jax_float64(optimizer_dofs).reshape((-1,))
+        if self.coil_optimizer_indices is None:
+            return _as_jax_float64(coil_gradient).reshape(optimizer.shape)
+        return (
+            jnp.zeros_like(optimizer)
+            .at[_as_jax_int32(self.coil_optimizer_indices)]
+            .set(_as_jax_float64(coil_gradient).reshape((-1,)))
+        )
+
 
 def build_single_stage_full_graph_jax_cpu_order_dof_map(
     JF,
     boozer_surface,
     vessel_surface,
+    bs=None,
 ):
     """Return the full-graph JAX optimizer map matching CPU/SciPy ``JF.x`` order."""
     native_lineages = tuple(JF.unique_dof_lineage)
@@ -7829,8 +7992,21 @@ def build_single_stage_full_graph_jax_cpu_order_dof_map(
         raise ValueError(
             "Full-graph JAX CPU-order optimizer map size does not match JF.x."
         )
+    coil_optimizer_indices = None
+    if bs is not None:
+        coil_lineages = set(bs.unique_dof_lineage)
+        optimizer_ranges = {}
+        start = 0
+        for opt in ordered_lineages:
+            stop = start + int(opt.local_dof_size)
+            optimizer_ranges[opt] = np.arange(start, stop, dtype=np.int64)
+            start = stop
+        coil_optimizer_indices = np.concatenate(
+            [optimizer_ranges[opt] for opt in ordered_lineages if opt in coil_lineages]
+        )
     return SingleStageFullGraphOptimizerDofMap(
         optimizer_to_native_indices=optimizer_to_native_indices,
+        coil_optimizer_indices=coil_optimizer_indices,
     )
 
 
@@ -7852,6 +8028,10 @@ def _single_stage_target_optimizer_dofs(x):
     return _as_jax_float64(_single_stage_optimizer_dofs_array(x))
 
 
+def target_lane_contract_supports_optimizer_seed(contract):
+    return contract.method == "lbfgs-ondevice"
+
+
 def single_stage_target_coil_dof_size(bs):
     """Return the active target-lane coil block size."""
     return int(_single_stage_optimizer_dofs_array(bs.x.copy()).size)
@@ -7860,6 +8040,40 @@ def single_stage_target_coil_dof_size(bs):
 def target_coil_dofs_from_optimizer_dofs(x):
     """Return target-lane coil DOFs from the active optimizer vector contract."""
     return _single_stage_optimizer_dofs_array(x)
+
+
+def build_target_lane_full_state_scalar_objective(
+    scalar_objective,
+    optimizer_dof_map,
+):
+    """Lift the compact target objective to the CPU-order full-state vector."""
+    if scalar_objective is None:
+        return None
+
+    def full_state_scalar_objective(optimizer_dofs):
+        coil_dofs = optimizer_dof_map.jax_coil_dofs_from_optimizer_dofs(optimizer_dofs)
+        return scalar_objective(coil_dofs)
+
+    return full_state_scalar_objective
+
+
+def build_target_lane_full_state_value_and_grad(
+    value_and_grad_objective,
+    optimizer_dof_map,
+):
+    """Lift compact target value/grad to a CPU-order full-state value/grad."""
+    if value_and_grad_objective is None:
+        return None
+
+    def full_state_value_and_grad(optimizer_dofs):
+        coil_dofs = optimizer_dof_map.jax_coil_dofs_from_optimizer_dofs(optimizer_dofs)
+        value, coil_gradient = value_and_grad_objective(coil_dofs)
+        return value, optimizer_dof_map.jax_full_gradient_from_coil_gradient(
+            optimizer_dofs,
+            coil_gradient,
+        )
+
+    return full_state_value_and_grad
 
 
 def build_target_lane_scaled_outer_phase_state(anchor_dofs, step_dofs):
@@ -8078,34 +8292,6 @@ def build_scaled_outer_problem(
         base_callback(x)
 
     return scaled_fun, scaled_callback
-
-
-def build_scaled_outer_problem_initial_value_and_grad(
-    initial_value_and_grad,
-    anchor_x,
-    step_scale,
-    *,
-    anchor_in_state=False,
-):
-    """Map one fused target-lane seed into scaled optimizer coordinates."""
-    if initial_value_and_grad is None:
-        return None
-    value, grad = initial_value_and_grad
-    if anchor_in_state:
-        zero_step_dofs = build_scaled_outer_phase_initial_dofs(
-            anchor_x,
-            use_target_lane=True,
-        )
-        seed_state = build_target_lane_scaled_outer_phase_state(
-            anchor_x,
-            zero_step_dofs,
-        )
-    else:
-        seed_state = build_scaled_outer_phase_initial_dofs(
-            anchor_x,
-            use_target_lane=True,
-        )
-    return value, _scaled_outer_problem_gradient(seed_state, grad, step_scale)
 
 
 def build_scaled_outer_scalar_problem(
@@ -8593,6 +8779,9 @@ def run_single_stage_optimizer(
             "objective for the selected lane."
         )
     if is_target_lane:
+        target_lane_supports_optimizer_seed = (
+            target_lane_contract_supports_optimizer_seed(contract)
+        )
         if target_lane_initial_step_size is not None:
             raise ValueError(
                 "Single-stage target-lane optimization does not support "
@@ -8605,7 +8794,7 @@ def run_single_stage_optimizer(
             )
         if (
             optimizer_initial_value_and_grad is not None
-            and contract.method != "lbfgs-ondevice"
+            and not target_lane_supports_optimizer_seed
         ):
             raise ValueError(
                 "Single-stage target-lane optimization only supports "
@@ -8627,7 +8816,7 @@ def run_single_stage_optimizer(
         }
         if (
             optimizer_initial_value_and_grad is not None
-            and contract.method == "lbfgs-ondevice"
+            and target_lane_supports_optimizer_seed
         ):
             target_minimize_kwargs["initial_value_and_grad"] = (
                 optimizer_initial_value_and_grad
@@ -11411,7 +11600,18 @@ if __name__ == "__main__":
     use_full_graph_jax_scipy = (
         single_stage_optimizer_contract_uses_full_graph_jax_scipy(outer_contract)
     )
-    use_coil_optimizer_dofs = bool(use_target_lane)
+    use_target_lane_full_state_optimizer = (
+        single_stage_optimizer_contract_uses_full_state_target_lane(
+            outer_contract,
+            constraint_method=CONSTRAINT_METHOD,
+        )
+    )
+    use_target_lane_full_graph_host_callback = bool(
+        use_target_lane_full_state_optimizer
+    )
+    use_coil_optimizer_dofs = bool(
+        use_target_lane and not use_target_lane_full_state_optimizer
+    )
     target_lane_coil_dof_size = single_stage_target_coil_dof_size(bs)
     require_single_stage_jax_target_lane(
         use_jax=use_jax,
@@ -11448,6 +11648,7 @@ if __name__ == "__main__":
     record_outer_optimizer_event(
         "pre_optimizer_startup_ready",
         use_target_lane=bool(use_target_lane),
+        target_lane_full_state_optimizer=bool(use_target_lane_full_state_optimizer),
         output_dir=OUT_DIR_ITER,
         optimizer_method=getattr(outer_contract, "method", None),
     )
@@ -11667,8 +11868,9 @@ if __name__ == "__main__":
             JF,
             boozer_surface,
             VV,
+            bs=bs if use_target_lane_full_state_optimizer else None,
         )
-        if use_full_graph_jax_scipy
+        if (use_full_graph_jax_scipy or use_target_lane_full_state_optimizer)
         else None
     )
     _record_timing(
@@ -11699,6 +11901,17 @@ if __name__ == "__main__":
         use_coil_optimizer_dofs=use_coil_optimizer_dofs,
         full_graph_optimizer_dof_map=full_graph_optimizer_dof_map,
     )
+
+    def target_lane_optimizer_to_coil_dofs(x):
+        if use_target_lane_full_state_optimizer:
+            return full_graph_optimizer_dof_map.coil_dofs_from_optimizer_dofs(x)
+        return target_coil_dofs_from_optimizer_dofs(x)
+
+    def target_lane_objective_input_dofs(x):
+        if use_target_lane_full_state_optimizer:
+            return _single_stage_optimizer_dofs_array(x)
+        return target_coil_dofs_from_optimizer_dofs(x)
+
     snapshot_start_s = _perf_counter_s()
     record_outer_optimizer_event(
         "snapshot_started",
@@ -11811,7 +12024,7 @@ if __name__ == "__main__":
         objective_weights=objective_weights,
         diagnostics=diagnostics_refs,
         log_path=OUT_DIR_ITER + "/log.txt",
-        reevaluate_before_accept=False,
+        reevaluate_before_accept=use_target_lane_full_graph_host_callback,
         apply_coil_dofs=dof_setter,
         benchmark_mode=args.benchmark_mode,
         accepted_step_state_sync=None,
@@ -11820,7 +12033,7 @@ if __name__ == "__main__":
             if use_target_lane
             else None
         ),
-        optimizer_to_coil_dofs=(lambda x: target_coil_dofs_from_optimizer_dofs(x))
+        optimizer_to_coil_dofs=target_lane_optimizer_to_coil_dofs
         if use_target_lane
         else None,
         optimizer_gradient_transform=(
@@ -12262,6 +12475,8 @@ if __name__ == "__main__":
                 method=outer_contract.method,
                 maxiter=int(MAXITER),
                 use_value_and_grad=bool(use_target_lane_vg),
+                full_state_optimizer=bool(use_target_lane_full_state_optimizer),
+                full_graph_host_callback=bool(use_target_lane_full_graph_host_callback),
                 profile_target_lane=bool(args.profile_target_lane),
                 profile_target_lane_memory_analysis=bool(
                     args.profile_target_lane_memory_analysis
@@ -12282,70 +12497,105 @@ if __name__ == "__main__":
                     "single_stage.target_lane_bundle_setup",
                     enabled=jax_profile_enabled and use_target_lane,
                 ):
-                    (
-                        target_scalar_objective,
-                        target_value_and_grad_objective,
-                        target_lane_optimizer_initial_value_and_grad,
-                        target_lane_profile,
-                        target_lane_success_filter,
-                    ) = prepare_target_lane_outer_objectives(
+                    if use_target_lane_full_graph_host_callback:
+                        if args.profile_target_lane_memory_analysis:
+                            raise RuntimeError(
+                                "--profile-target-lane-memory-analysis requires the "
+                                "traceable target-lane objective; "
+                                "method='lbfgs-ondevice' evaluates the full JF.x "
+                                "objective through a host callback."
+                            )
+                        target_scalar_objective = None
+                        target_value_and_grad_objective = (
+                            build_single_stage_full_graph_host_callback_value_and_grad(
+                                adapter,
+                                dofs,
+                            )
+                        )
+                        target_lane_optimizer_initial_value_and_grad = None
+                        target_lane_profile = None
+                        target_lane_success_filter = None
+                    else:
+                        (
+                            target_scalar_objective,
+                            target_value_and_grad_objective,
+                            target_lane_optimizer_initial_value_and_grad,
+                            target_lane_profile,
+                            target_lane_success_filter,
+                        ) = prepare_target_lane_outer_objectives(
+                            boozer_surface,
+                            bs,
+                            banana_curve,
+                            VV,
+                            iota_target,
+                            use_target_lane=use_target_lane,
+                            use_value_and_grad=use_target_lane_vg,
+                            use_full_state_optimizer=(
+                                use_target_lane_full_state_optimizer
+                            ),
+                            full_state_optimizer_dof_map=(
+                                full_graph_optimizer_dof_map
+                                if use_target_lane_full_state_optimizer
+                                else None
+                            ),
+                            profile_optimizer_dofs=dofs
+                            if use_target_lane_full_state_optimizer
+                            else None,
+                            profile_target_lane=args.profile_target_lane,
+                            profile_target_lane_memory_analysis=(
+                                args.profile_target_lane_memory_analysis
+                            ),
+                            profile_batch_size=args.profile_target_lane_batch_size,
+                            disable_success_filter=(
+                                args.disable_target_lane_success_filter
+                            ),
+                            non_qs_weight=1.0,
+                            residual_weight=RES_WEIGHT,
+                            iota_weight=IOTAS_WEIGHT,
+                            length_weight=LENGTH_WEIGHT,
+                            length_target=length_target,
+                            cc_dist=CC_DIST,
+                            cc_weight=CC_WEIGHT,
+                            cs_dist=CS_DIST,
+                            cs_weight=CS_WEIGHT,
+                            ss_dist=SS_DIST,
+                            surf_dist_weight=SURF_DIST_WEIGHT,
+                            curvature_threshold=CURVATURE_THRESHOLD,
+                            curvature_weight=CURVATURE_WEIGHT,
+                        )
+                if use_target_lane_full_graph_host_callback:
+                    target_lane_outer_objective_config = None
+                else:
+                    target_lane_outer_objective_config = (
+                        build_target_lane_outer_objective_config(
+                            boozer_surface,
+                            bs,
+                            banana_curve,
+                            VV,
+                            non_qs_weight=1.0,
+                            residual_weight=RES_WEIGHT,
+                            iota_weight=IOTAS_WEIGHT,
+                            length_weight=LENGTH_WEIGHT,
+                            length_target=length_target,
+                            curve_curve_threshold=CC_DIST,
+                            curve_curve_weight=CC_WEIGHT,
+                            curve_surface_threshold=CS_DIST,
+                            curve_surface_weight=CS_WEIGHT,
+                            surface_vessel_threshold=SS_DIST,
+                            surface_vessel_weight=SURF_DIST_WEIGHT,
+                            curvature_threshold=CURVATURE_THRESHOLD,
+                            curvature_weight=CURVATURE_WEIGHT,
+                        )
+                    )
+                    configure_single_stage_target_lane_accepted_step_sync(
+                        adapter,
                         boozer_surface,
                         bs,
-                        banana_curve,
-                        VV,
                         iota_target,
                         use_target_lane=use_target_lane,
-                        use_value_and_grad=use_target_lane_vg,
-                        profile_target_lane=args.profile_target_lane,
-                        profile_target_lane_memory_analysis=(
-                            args.profile_target_lane_memory_analysis
-                        ),
-                        profile_batch_size=args.profile_target_lane_batch_size,
-                        disable_success_filter=args.disable_target_lane_success_filter,
-                        non_qs_weight=1.0,
-                        residual_weight=RES_WEIGHT,
-                        iota_weight=IOTAS_WEIGHT,
-                        length_weight=LENGTH_WEIGHT,
-                        length_target=length_target,
-                        cc_dist=CC_DIST,
-                        cc_weight=CC_WEIGHT,
-                        cs_dist=CS_DIST,
-                        cs_weight=CS_WEIGHT,
-                        ss_dist=SS_DIST,
-                        surf_dist_weight=SURF_DIST_WEIGHT,
-                        curvature_threshold=CURVATURE_THRESHOLD,
-                        curvature_weight=CURVATURE_WEIGHT,
+                        outer_objective_config=target_lane_outer_objective_config,
+                        success_filter=target_lane_success_filter,
                     )
-                target_lane_outer_objective_config = (
-                    build_target_lane_outer_objective_config(
-                        boozer_surface,
-                        bs,
-                        banana_curve,
-                        VV,
-                        non_qs_weight=1.0,
-                        residual_weight=RES_WEIGHT,
-                        iota_weight=IOTAS_WEIGHT,
-                        length_weight=LENGTH_WEIGHT,
-                        length_target=length_target,
-                        curve_curve_threshold=CC_DIST,
-                        curve_curve_weight=CC_WEIGHT,
-                        curve_surface_threshold=CS_DIST,
-                        curve_surface_weight=CS_WEIGHT,
-                        surface_vessel_threshold=SS_DIST,
-                        surface_vessel_weight=SURF_DIST_WEIGHT,
-                        curvature_threshold=CURVATURE_THRESHOLD,
-                        curvature_weight=CURVATURE_WEIGHT,
-                    )
-                )
-                configure_single_stage_target_lane_accepted_step_sync(
-                    adapter,
-                    boozer_surface,
-                    bs,
-                    iota_target,
-                    use_target_lane=use_target_lane,
-                    outer_objective_config=target_lane_outer_objective_config,
-                    success_filter=target_lane_success_filter,
-                )
                 if use_target_lane:
                     _record_timing(
                         timings,
@@ -12367,25 +12617,50 @@ if __name__ == "__main__":
                         optimizer_initial_value_and_grad_available=(
                             target_lane_optimizer_initial_value_and_grad is not None
                         ),
+                        full_state_optimizer=bool(use_target_lane_full_state_optimizer),
+                        full_graph_host_callback=bool(
+                            use_target_lane_full_graph_host_callback
+                        ),
                     )
-                    cache_single_stage_target_lane_reporting_snapshot(
-                        adapter,
-                        run_dict,
-                        target_coil_dofs_from_optimizer_dofs(dofs),
-                        benchmark_mode=bool(args.benchmark_mode),
-                    )
+                    if not use_target_lane_full_graph_host_callback:
+                        cache_single_stage_target_lane_reporting_snapshot(
+                            adapter,
+                            run_dict,
+                            target_lane_optimizer_to_coil_dofs(dofs),
+                            benchmark_mode=bool(args.benchmark_mode),
+                        )
                     if bool(run_dict.get("initial_objective_pending", False)):
-                        if target_lane_optimizer_initial_value_and_grad is None:
+                        if target_value_and_grad_objective is None:
                             raise RuntimeError(
-                                "Target-lane startup skipped the legacy initial "
-                                "objective/gradient snapshot, but the fused "
-                                "target-lane initial value/gradient was not "
-                                "available to seed the retry state."
+                                "Target-lane startup requires the fused target-lane "
+                                "value/gradient objective to evaluate the initial "
+                                "optimizer state."
                             )
+                        initial_target_eval_start_s = _perf_counter_s()
                         (
                             initial_target_value,
                             initial_target_grad,
-                        ) = target_lane_optimizer_initial_value_and_grad
+                        ) = target_value_and_grad_objective(
+                            target_lane_objective_input_dofs(dofs)
+                        )
+                        initial_target_eval_elapsed_s = (
+                            _perf_counter_s() - initial_target_eval_start_s
+                        )
+                        if (
+                            use_target_lane_full_graph_host_callback
+                            and args.profile_target_lane
+                        ):
+                            target_lane_profile = (
+                                _summarize_full_graph_host_callback_initial_profile(
+                                    initial_target_eval_elapsed_s,
+                                    initial_target_value,
+                                    initial_target_grad,
+                                )
+                            )
+                        target_lane_optimizer_initial_value_and_grad = (
+                            initial_target_value,
+                            initial_target_grad,
+                        )
                         seed_single_stage_initial_objective_from_values(
                             run_dict,
                             objective_value=initial_target_value,
@@ -12396,7 +12671,7 @@ if __name__ == "__main__":
                             stage="initial",
                         )
                         record_outer_optimizer_event(
-                            "target_lane_initial_objective_seeded",
+                            "target_lane_initial_objective_evaluated",
                             objective_value=_summarize_host_scalar(
                                 initial_target_value
                             ),
@@ -12674,9 +12949,6 @@ if __name__ == "__main__":
                     ) = build_target_lane_optimistix_diagnosis(
                         target_scalar_objective,
                         dofs,
-                        initial_value_and_grad=(
-                            target_lane_optimizer_initial_value_and_grad
-                        ),
                         maxiter=MAXITER,
                         gtol=gtol,
                     )
@@ -12748,9 +13020,6 @@ if __name__ == "__main__":
                     ) = build_target_lane_optax_diagnosis(
                         target_scalar_objective,
                         dofs,
-                        initial_value_and_grad=(
-                            target_lane_optimizer_initial_value_and_grad
-                        ),
                         maxiter=MAXITER,
                         gtol=gtol,
                         max_linesearch_steps=args.outer_maxls,
@@ -12851,10 +13120,6 @@ if __name__ == "__main__":
                     phase1_retry_callback = phase1_callback
                     phase1_post_run_state_sync = None
                     phase1_final_dofs = None
-                    phase1_optimizer_initial_value_and_grad = None
-                    main_optimizer_initial_value_and_grad = (
-                        target_lane_optimizer_initial_value_and_grad
-                    )
                     remaining_maxiter = MAXITER
                     if (
                         effective_initial_step_maxiter > 0
@@ -12877,12 +13142,6 @@ if __name__ == "__main__":
                                             effective_initial_step_scale,
                                         )
                                     )
-                                    phase1_optimizer_initial_value_and_grad = build_scaled_outer_problem_initial_value_and_grad(
-                                        target_lane_optimizer_initial_value_and_grad,
-                                        phase1_anchor_dofs,
-                                        effective_initial_step_scale,
-                                    )
-                                    main_optimizer_initial_value_and_grad = None
                                     phase1_scalar_fun = None
                                 else:
                                     (
@@ -12987,9 +13246,6 @@ if __name__ == "__main__":
                                             progress_callback=phase1_progress_callback,
                                             target_lane_initial_step_size=None,
                                             failure_callback=phase1_failure_callback,
-                                            optimizer_initial_value_and_grad=(
-                                                phase1_optimizer_initial_value_and_grad
-                                            ),
                                             invalid_state_events=(
                                                 target_lane_invalid_state_events
                                             ),
@@ -13163,7 +13419,12 @@ if __name__ == "__main__":
                                         ),
                                         failure_callback=main_failure_callback,
                                         optimizer_initial_value_and_grad=(
-                                            main_optimizer_initial_value_and_grad
+                                            target_lane_optimizer_initial_value_and_grad
+                                            if target_lane_contract_supports_optimizer_seed(
+                                                outer_contract
+                                            )
+                                            and (phase1_iterations or 0) == 0
+                                            else None
                                         ),
                                         invalid_state_events=target_lane_invalid_state_events,
                                         run_dict=run_dict,
@@ -13334,7 +13595,7 @@ if __name__ == "__main__":
             vessel_surface=VV,
             iota_target=iota_target,
             run_dict=run_dict,
-            coil_dofs=target_coil_dofs_from_optimizer_dofs(dofs),
+            coil_dofs=target_lane_optimizer_to_coil_dofs(dofs),
             benchmark_mode=bool(args.benchmark_mode),
             disable_success_filter=bool(args.disable_target_lane_success_filter),
             length_target=length_target,
@@ -13365,13 +13626,16 @@ if __name__ == "__main__":
         final_optimizer_dofs = dofs if use_target_lane else bs.x.copy()
     else:
         final_optimizer_dofs = res.x
+    use_target_lane_reporting = bool(
+        use_target_lane and not use_target_lane_full_graph_host_callback
+    )
     final_reporting_coil_dofs = (
-        target_coil_dofs_from_optimizer_dofs(final_optimizer_dofs)
+        target_lane_optimizer_to_coil_dofs(final_optimizer_dofs)
         if use_target_lane
         else (bs.x.copy() if use_full_graph_jax_scipy else final_optimizer_dofs)
     )
     final_penalty_metrics = resolve_single_stage_final_penalty_metrics(
-        use_target_lane=use_target_lane,
+        use_target_lane=use_target_lane_reporting,
         benchmark_mode=bool(args.benchmark_mode),
         skip_outer_optimizer=skip_outer_optimizer,
         boozer_surface=boozer_surface,
@@ -13403,7 +13667,7 @@ if __name__ == "__main__":
     final_max_curvature = float(final_penalty_metrics["max_curvature"])
     fieldError = final_penalty_metrics["field_error"]
     final_banana_current_A = resolve_single_stage_final_banana_current_A(
-        use_target_lane=use_target_lane,
+        use_target_lane=use_target_lane_reporting,
         final_metrics=final_penalty_metrics,
         banana_current=banana_coils[0].current,
     )
@@ -13647,7 +13911,10 @@ if __name__ == "__main__":
         "target_lane_coil_dof_size": int(target_lane_coil_dof_size)
         if use_target_lane
         else None,
-        "target_lane_full_state_optimizer": False,
+        "target_lane_full_state_optimizer": bool(use_target_lane_full_state_optimizer),
+        "target_lane_full_graph_host_callback": bool(
+            use_target_lane_full_graph_host_callback
+        ),
         "jax_full_graph_scipy_optimizer": bool(use_full_graph_jax_scipy),
         "target_lane_accepted_step_sync": target_lane_sync_record,
         "experimental_target_lane_value_and_grad": requested_experimental_target_lane_vg,
