@@ -2328,7 +2328,26 @@ def jax_least_squares_optimistix(
     progress_callback=None,
     args=(),
 ):
-    """Optional Optimistix/Lineax LSMR least-squares target lane."""
+    """Optional Optimistix/Lineax LSMR least-squares target lane.
+
+    Uses ``lineax.LSMR`` rather than the Optimistix default ``lineax.QR()`` so
+    the inner solve stays matrix-free on oversampled fixtures rather than
+    materializing a dense Jacobian factorization per LM step.
+
+    ``tol`` drives both the outer LM and inner LSMR (``rtol=atol=tol``).
+    ``ftol``/``xtol``/``gtol``, ``callback``, and ``progress_callback`` raise
+    ``ValueError``; use ``method="lm-ondevice"`` for MINPACK-style
+    three-criterion termination or callback-instrumented runs.
+
+    ``max_dense_linearization_bytes`` gates only the post-hoc Jacobian/Hessian
+    materialization at the converged ``x``; LSMR is matrix-free, so it does
+    not affect inner-solve memory. ``materialize_dense_linearization=False``
+    skips the post-hoc step and returns ``residual_jacobian`` and ``hessian``
+    as ``None``.
+
+    Raises ``ImportError`` if the ``JAX_OPTIMISTIX`` extra is not installed
+    (requires Python 3.11+).
+    """
     _require_optimistix_lm_contract_options(
         ftol=ftol,
         xtol=xtol,

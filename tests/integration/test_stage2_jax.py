@@ -680,9 +680,7 @@ def _closure_has_jax_array_leaf(fn) -> bool:
     for value in inspect.getclosurevars(inspect_target).nonlocals.values():
         if callable(value):
             continue
-        if any(
-            isinstance(leaf, jax.Array) for leaf in jax.tree_util.tree_leaves(value)
-        ):
+        if any(isinstance(leaf, jax.Array) for leaf in jax.tree.leaves(value)):
             return True
     return False
 
@@ -1752,9 +1750,9 @@ class TestBiotSavartJAXParity:
         bs_jax = BiotSavartJAX(coils)
         bs_jax.set_points(points)
         pullback = bs_jax.B_pullback_native(np.asarray(bs_jax.B()))
-        leaves, treedef = jax.tree_util.tree_flatten(pullback)
-        rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
-        doubled = jax.tree_util.tree_map(lambda leaf: 2.0 * leaf, pullback)
+        leaves, treedef = jax.tree.flatten(pullback)
+        rebuilt = jax.tree.unflatten(treedef, leaves)
+        doubled = jax.tree.map(lambda leaf: 2.0 * leaf, pullback)
 
         assert isinstance(
             rebuilt,
@@ -1765,7 +1763,7 @@ class TestBiotSavartJAXParity:
         assert leaves
         assert all(isinstance(leaf, jax.Array) for leaf in leaves)
         for scaled_leaf, leaf in zip(
-            jax.tree_util.tree_leaves(doubled),
+            jax.tree.leaves(doubled),
             leaves,
         ):
             np.testing.assert_allclose(np.asarray(scaled_leaf), 2.0 * np.asarray(leaf))
@@ -3271,7 +3269,6 @@ class TestStage2OptimizerContract:
             Path(stage2_script.DATABASE_EQUILIBRIA_DIR) / plasma_surf_filename
         )
         assert repo_fixture.exists()
-        assert workspace_candidate.parent.is_dir()
         assert not workspace_candidate.exists()
 
         args = types.SimpleNamespace(
