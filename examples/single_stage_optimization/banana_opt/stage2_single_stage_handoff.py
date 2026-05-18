@@ -40,6 +40,7 @@ from .single_stage_geometry import (
     build_surface_configs,
     surface_self_intersection_status,
 )
+from .wout_convention import validate_wout_convention_artifact_fields
 
 BOOTABILITY_REASON_OK = "ok"
 BOOTABILITY_REASON_MISSING_ARTIFACT_METADATA = "missing_artifact_metadata"
@@ -496,6 +497,15 @@ def validate_stage2_seed_contract(stage2_results):
             "artifact with TF-current metadata."
         )
     validate_tf_current_limit(tf_current_A)
+    validate_wout_convention_artifact_fields(
+        stage2_results_path="<stage2_seed_contract>",
+        stage2_artifact_results=dict(stage2_results),
+    )
+    if stage2_results.get("WOUT_OFF_SPEC") is not False:
+        raise ValueError(
+            "Stage 2 seed artifact violates the WOUT convention contract: "
+            "WOUT_OFF_SPEC=True."
+        )
     major_radius = _required_stage2_result_value(
         stage2_results,
         "MAJOR_RADIUS",

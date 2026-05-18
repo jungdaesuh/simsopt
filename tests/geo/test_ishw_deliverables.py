@@ -31,6 +31,9 @@ PERTURBED_SEED_PATH = EXAMPLE_ROOT / "make_perturbed_banana_seed.py"
 PLOT_PATH = EXAMPLE_ROOT / "plot_ishw_tradeoffs.py"
 WORKFLOW_COMMON_PATH = EXAMPLE_ROOT / "workflow_runner_common.py"
 STAGE2_ENTRYPOINT_PATH = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
+SIGNED_CW_WOUT_PATH = (
+    Path(__file__).resolve().parents[1] / "test_files" / "wout_10x10.nc"
+)
 
 
 def load_module(path: Path, stem: str):
@@ -639,6 +642,9 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             "BANANA_CURRENT_A": abs(float(banana_init_current_A)),
             "FINAL_LCFS_MAJOR_RADIUS_M": 0.92,
             "FINAL_LCFS_MINOR_RADIUS_M": 0.15,
+            "PLASMA_SURF_PATH": str(SIGNED_CW_WOUT_PATH),
+            "WOUT_CONVENTION": "signed_cw",
+            "WOUT_OFF_SPEC": False,
         }
         return bs, stage2_results, handoff, load_optimizable
 

@@ -30,6 +30,9 @@ EXAMPLE_MODULE_PATH = (
     / "SINGLE_STAGE"
     / "single_stage_banana_example.py"
 )
+SIGNED_CW_WOUT_PATH = (
+    Path(__file__).resolve().parents[1] / "test_files" / "wout_10x10.nc"
+)
 BOOZER_SURFACE_PATH = (
     Path(__file__).resolve().parents[2]
     / "src"
@@ -9425,6 +9428,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "FINAL_LCFS_MINOR_RADIUS_M": (
                 hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M
             ),
+            "PLASMA_SURF_PATH": str(SIGNED_CW_WOUT_PATH),
+            "WOUT_CONVENTION": "signed_cw",
             "WOUT_OFF_SPEC": False,
             "SEED_ROLE": "bootable_handoff",
             "DIAGNOSTIC_ONLY": False,

@@ -25,6 +25,14 @@ WRAPPER_PATH = EXAMPLE_ROOT / "run_stage2_to_single_stage.py"
 BANANA_SCAN_PATH = EXAMPLE_ROOT / "run_banana_current_scan.py"
 STAGE2_SOLVER_PATH = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
 STAGE2_ALM_PATH = EXAMPLE_ROOT / "run_stage2_alm.py"
+SIGNED_CW_WOUT_PATH = (
+    Path(__file__).resolve().parents[1] / "test_files" / "wout_10x10.nc"
+)
+POSITIVE_CCW_WOUT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "test_files"
+    / "wout_LandremanPaul2021_QA_lowres.nc"
+)
 if str(EXAMPLE_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_ROOT))
 
@@ -140,6 +148,8 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "IOTA_OBJECTIVE_ACTIVE": True,
         "BOOZER_TRUST_REASON": "trusted",
         "BOOZER_TRUST_TOL": 1.0e-11,
+        "PLASMA_SURF_PATH": str(SIGNED_CW_WOUT_PATH),
+        "WOUT_CONVENTION": "signed_cw",
         "WOUT_OFF_SPEC": False,
         "SEED_ROLE": "bootable_handoff",
         "DIAGNOSTIC_ONLY": False,
@@ -534,6 +544,30 @@ class HandoffModuleTests(unittest.TestCase):
         }
 
         module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_stale_wout_convention_stamp(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "TF_CURRENT_A": -8.0e4,
+            "WOUT_CONVENTION": "positive_ccw",
+        }
+
+        with self.assertRaisesRegex(ValueError, "WOUT_CONVENTION=.*does not match"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_offspec_wout_convention(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "PLASMA_SURF_PATH": str(POSITIVE_CCW_WOUT_PATH),
+            "TF_CURRENT_A": -8.0e4,
+            "WOUT_CONVENTION": "positive_ccw",
+            "WOUT_OFF_SPEC": True,
+        }
+
+        with self.assertRaisesRegex(ValueError, "WOUT_OFF_SPEC=True"):
+            module.validate_stage2_seed_contract(stage2_results)
 
     def test_validate_stage2_seed_handoff_contract_rejects_nonbootable_artifact(self):
         module = load_handoff_module()
