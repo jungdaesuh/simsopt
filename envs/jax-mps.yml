@@ -1,0 +1,24 @@
+# Parallel conda env for the jax_mps_smoke lane (Apple Silicon GPU via MLX).
+#
+# This env exists *only* to drive the Mac-GPU smoke lane backed by the
+# `tillahoffmann/jax-mps` PJRT plugin. It is JAX-only: no simsoptpp
+# editable install, no integration suite, no parity claim. Use the main
+# `envs/jax.yml` env for everything else.
+#
+# Python 3.13 is mandated by jax-mps. MLX is float32-only, so any code
+# path that requires float64 (the production-parity lanes) cannot run
+# in this env.
+name: jax-mps
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pip
+  - cmake
+  - ninja
+  - pybind11<3
+  - pip:
+      - jax==0.10.*
+      - jaxlib==0.10.*
+      - jax-mps
+      - -e "..[JAX,JAX_MPS,dev]"

@@ -10,7 +10,7 @@ from pathlib import Path
 
 _BOOTSTRAP_VERSION = "0.0.dev0+source"
 _BOOTSTRAP_VERSION_TUPLE = (0, 0, "dev0", "source")
-_ENTRYPOINT_PLATFORM_CHOICES = ("auto", "cpu", "cuda")
+_ENTRYPOINT_PLATFORM_CHOICES = ("auto", "cpu", "cuda", "mps")
 _ENTRYPOINT_PLATFORM_ENV_VARS = (
     "JAX_PLATFORMS",
     "SIMSOPT_JAX_PLATFORM",

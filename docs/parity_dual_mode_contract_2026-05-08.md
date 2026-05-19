@@ -150,7 +150,7 @@ VALID_BACKEND_MODES = (
     "jax_cpu_parity",
     "jax_gpu_parity",
     "jax_gpu_fast",
-    "jax_metal_smoke",
+    "jax_mps_smoke",
 )
 ```
 
@@ -163,7 +163,7 @@ VALID_BACKEND_MODES = (
     "jax_cpu_parity",     # verification CPU, byte-identity goal
     "jax_gpu_fast",       # speed-opt-out GPU (existing)
     "jax_gpu_parity",     # verification GPU, byte-identity within build
-    "jax_metal_smoke",
+    "jax_mps_smoke",
 )
 ```
 

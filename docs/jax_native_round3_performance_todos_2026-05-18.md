@@ -720,7 +720,7 @@ jax_cpu_parity   -> "none"
 jax_cpu_fast     -> "none"
 jax_gpu_parity   -> "none"   # ← parity GPU is single-device by default
 jax_gpu_fast     -> "hybrid"
-jax_metal_smoke  -> "none"
+jax_mps_smoke    -> "none"
 ```
 
 This is intentional: the strict byte-identity gate cannot tolerate
