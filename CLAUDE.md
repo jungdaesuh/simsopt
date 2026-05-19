@@ -153,9 +153,10 @@ SIMSOPT_BACKEND_MODE=jax_mps_smoke     # Apple Silicon GPU smoke lane (jax-mps)
 The legacy `jax_metal_smoke` mode and `metal` platform value were removed
 because Apple's `jax-metal` plugin is unmaintained (last release 2024-10) and
 incompatible with jaxlib 0.10. The Mac-GPU smoke lane is now backed by
-`tillahoffmann/jax-mps`; use `envs/jax-mps.yml` (python=3.13) to install it.
+`tillahoffmann/jax-mps`; install with `pip install '.[JAX_MPS]'`
+(python>=3.13 on darwin), or use `envs/jax-mps.yml` for a complete env recipe.
 Inbound `SIMSOPT_BACKEND_MODE=jax_metal_smoke` or `SIMSOPT_JAX_PLATFORM=metal`
-raises `ValueError` with a pointer to `jax_mps_smoke`.
+raises `ValueError` pointing at `jax_mps_smoke` with the same install hint.
 
 The legacy backend/platform pair remains accepted for compatibility:
 

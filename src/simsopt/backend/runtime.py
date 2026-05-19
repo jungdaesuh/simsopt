@@ -914,9 +914,11 @@ def _strategy_reduced_axis_name(strategy: str, *, coil_axis_name: str) -> str | 
 
 
 def _runtime_jax_platform_value(platform: str) -> str:
-    # Identity seam: callers (env lowering, transfer-guard expected-platforms
-    # map, set_backend sync) read the JAX_PLATFORMS value through this helper
-    # so future platform-specific case mapping has a single edit site.
+    # Single canonical helper for lowering ``BackendConfig.jax_platform`` to the
+    # value JAX expects in ``JAX_PLATFORMS`` / ``jax.config["jax_platforms"]``.
+    # Currently identity (cpu/cuda/mps already match upstream casing); kept as
+    # a single edit site so a future platform whose JAX name diverges from the
+    # simsopt mode token can be remapped here without touching call sites.
     return platform
 
 
