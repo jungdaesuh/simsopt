@@ -12,7 +12,7 @@ from .._core.jax_host_boundary import host_array as _host_array
 from ..backend.runtime import is_jax_backend, raise_if_target_lane_bypass
 from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
 from ..jax_core._math_utils import as_jax_int32 as _runtime_as_jax_int32
-from ..jax_core._math_utils import as_runtime_float64 as _runtime_as_runtime_float64
+from ..jax_core._math_utils import scalar_like as _runtime_scalar_like
 from ._pairwise_reductions import (
     _chunk_rows,
     _chunk_rows_with_valid_weights,
@@ -73,7 +73,7 @@ def _as_jax_int32(value):
 
 
 def _scalar_like(reference, value):
-    return _runtime_as_runtime_float64(value, reference=reference)
+    return _runtime_scalar_like(reference, value)
 
 
 def _as_numpy_float64(value):

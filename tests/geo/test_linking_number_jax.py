@@ -193,6 +193,17 @@ def test_pair_linking_number_matches_cpp_for_reversed_orientation():
     assert jax_value == cpp_value
 
 
+def test_pair_linking_number_matches_cpp_for_dense_fixture():
+    """Dense direct pair oracle against ``sopp.compute_linking_number``."""
+    g1, g1d, g2, g2d, dphi = _two_orthogonally_linked_circles(256)
+    cpp_value = _cpp_pair_linking_number(g1, g1d, g2, g2d, dphi)
+    g1_d, g1d_d, g2_d, g2d_d, dphi_d = _stage_pair(g1, g1d, g2, g2d, dphi)
+    jax_value = int(pair_linking_number_pure(g1_d, g1d_d, g2_d, g2d_d, dphi_d, dphi_d))
+
+    assert cpp_value == 1
+    assert jax_value == cpp_value
+
+
 def test_pair_linking_number_returns_integer_jax_array():
     g1, g1d, g2, g2d, dphi = _two_orthogonally_linked_circles()
     g1_d, g1d_d, g2_d, g2d_d, dphi_d = _stage_pair(g1, g1d, g2, g2d, dphi)

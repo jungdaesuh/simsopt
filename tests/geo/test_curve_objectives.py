@@ -545,7 +545,7 @@ class Testing(unittest.TestCase):
     _BARRIER_TAYLOR_FLOOR = 5e-12
 
     def create_curve(self, curvetype, rotated):
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         rand_scale = 0.01
         order = 4
         nquadpoints = 200
@@ -586,10 +586,15 @@ class Testing(unittest.TestCase):
         else:
             assert False
 
-        coil.x = dofs + rand_scale * np.random.rand(len(dofs)).reshape(dofs.shape)
+        coil.x = dofs + rand_scale * rng.rand(len(dofs)).reshape(dofs.shape)
         if rotated:
             coil = RotatedCurve(coil, 0.5, flip=False)
         return coil
+
+    def curve_init_continuation_rng(self, curve_dofs):
+        rng = np.random.RandomState(1)
+        rng.rand(len(curve_dofs))
+        return rng
 
     def _assert_barrier_taylor_progress(self, err, err_new):
         if err > 10.0 * self._BARRIER_TAYLOR_FLOOR:
@@ -614,7 +619,8 @@ class Testing(unittest.TestCase):
         J = CurveLength(curve)
         J0 = J.J()
         curve_dofs = curve.x
-        h = 1e-3 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        rng = self.curve_init_continuation_rng(curve_dofs)
+        h = 1e-3 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
         dJ = J.dJ()
         deriv = np.sum(dJ * h)
         err = 1e6
@@ -642,7 +648,8 @@ class Testing(unittest.TestCase):
         J = LpCurveCurvature(curve, p=2)
         J0 = J.J()
         curve_dofs = curve.x
-        h = 1e-2 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        rng = self.curve_init_continuation_rng(curve_dofs)
+        h = 1e-2 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
         dJ = J.dJ()
         deriv = np.sum(dJ * h)
         assert np.abs(deriv) > 1e-10
@@ -677,7 +684,8 @@ class Testing(unittest.TestCase):
 
         J0 = J.J()
         curve_dofs = curve.x
-        h = 1e-2 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        rng = self.curve_init_continuation_rng(curve_dofs)
+        h = 1e-2 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
         dJ = J.dJ()
         deriv = np.sum(dJ * h)
         assert np.abs(deriv) > 1e-10
@@ -702,7 +710,8 @@ class Testing(unittest.TestCase):
         J = LpCurveTorsion(curve, p=2)
         J0 = J.J()
         curve_dofs = curve.x
-        h = 1e-3 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        rng = self.curve_init_continuation_rng(curve_dofs)
+        h = 1e-3 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
         dJ = J.dJ()
         deriv = np.sum(dJ * h)
         assert np.abs(deriv) > 1e-10
@@ -804,9 +813,10 @@ class Testing(unittest.TestCase):
         Jviol = CurveCurveDistanceBarrier(curves, mindist + 1e-3)
         assert np.isposinf(Jviol.J())
 
+        rng = self.curve_init_continuation_rng(curves[-1].x)
         for k in range(ncurves):
             curve_dofs = curves[k].x
-            h = 1e-4 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+            h = 1e-4 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
             J0 = J.J()
             dJ = J.dJ(partials=True)(
                 curves[k].curve if isinstance(curves[k], RotatedCurve) else curves[k]
@@ -839,7 +849,8 @@ class Testing(unittest.TestCase):
             J = ArclengthVariation(curve, nintervals=2)
 
         curve_dofs = curve.x
-        h = 1e-1 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        rng = self.curve_init_continuation_rng(curve_dofs)
+        h = 1e-1 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
         dJ = J.dJ()
         deriv = np.sum(dJ * h)
         assert np.abs(deriv) > 1e-10
@@ -888,7 +899,8 @@ class Testing(unittest.TestCase):
     def subtest_curve_meansquaredcurvature_taylor_test(self, curve):
         J = MeanSquaredCurvature(curve)
         curve_dofs = curve.x
-        h = 1e-1 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        rng = self.curve_init_continuation_rng(curve_dofs)
+        h = 1e-1 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
         dJ = J.dJ()
         deriv = np.sum(dJ * h)
         assert np.abs(deriv) > 1e-10
@@ -916,10 +928,10 @@ class Testing(unittest.TestCase):
                     self.subtest_curve_meansquaredcurvature_taylor_test(curve)
 
     def test_minimum_distance_candidates_one_collection(self):
-        np.random.seed(0)
+        rng = np.random.RandomState(0)
         n_clouds = 4
         pointClouds = [
-            np.random.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)
+            rng.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)
         ]
         true_min_dists = {}
         from scipy.spatial.distance import cdist
@@ -941,13 +953,13 @@ class Testing(unittest.TestCase):
         assert len(candidates) == 1
 
     def test_minimum_distance_candidates_two_collections(self):
-        np.random.seed(0)
+        rng = np.random.RandomState(0)
         n_clouds = 4
         pointCloudsA = [
-            np.random.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)
+            rng.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)
         ]
         pointCloudsB = [
-            np.random.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)
+            rng.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)
         ]
         true_min_dists = {}
         from scipy.spatial.distance import cdist
@@ -1007,7 +1019,7 @@ class Testing(unittest.TestCase):
             )
 
     def test_curve_surface_distance(self):
-        np.random.seed(0)
+        rng = np.random.RandomState(0)
         base_curves, base_currents, _, _, _ = get_data("ncsx", coil_order=10)
         curves = [
             c.curve for c in coils_via_symmetries(base_curves, base_currents, 3, True)
@@ -1036,7 +1048,7 @@ class Testing(unittest.TestCase):
         J = CurveSurfaceDistance(curves, surface, threshold)
 
         curve_dofs = J.x
-        h = 1e-1 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        h = 1e-1 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
         dJ = J.dJ()
         deriv = np.sum(dJ * h)
         assert np.abs(deriv) > 1e-10

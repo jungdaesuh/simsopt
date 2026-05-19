@@ -272,6 +272,120 @@ def pairwise_min_distance_pure(points_a, points_b, *, chunk_size=None):
     return pair_min
 
 
+def _normalize_stacked_point_pair_batches(stacked_point_pair_batches):
+    normalized_batches = []
+    for points_a_stack, points_b_stack in stacked_point_pair_batches:
+        points_a_stack = _as_jax_float64(points_a_stack)
+        points_b_stack = _as_jax_float64(points_b_stack)
+        pair_count = int(points_a_stack.shape[0])
+        points_a_stack = points_a_stack.reshape((pair_count, -1, 3))
+        right_is_shared = int(points_b_stack.ndim) == 2
+        if right_is_shared:
+            points_b_stack = points_b_stack.reshape((-1, 3))
+            right_count = int(points_b_stack.shape[0])
+        else:
+            points_b_stack = points_b_stack.reshape((pair_count, -1, 3))
+            right_count = int(points_b_stack.shape[1])
+        if (
+            pair_count > 0
+            and int(points_a_stack.shape[1]) > 0
+            and right_count > 0
+        ):
+            normalized_batches.append(
+                (points_a_stack, points_b_stack, right_is_shared)
+            )
+    return tuple(normalized_batches)
+
+
+def pairwise_min_distance_batched_pure(
+    stacked_point_pair_batches,
+    *,
+    chunk_size=None,
+):
+    """Return the global sampled minimum over stacked point-cloud pairs.
+
+    Each batch entry is a pair of arrays with shapes
+    ``(pair_count, n_left, 3)`` and either ``(pair_count, n_right, 3)`` or a
+    shared ``(n_right, 3)`` right-hand point cloud. Different batch entries may
+    use different point counts; the pair axis is vmapped.
+    """
+    normalized_batches = _normalize_stacked_point_pair_batches(
+        stacked_point_pair_batches
+    )
+    if len(normalized_batches) == 0:
+        return _as_jax_float64(np.inf)
+
+    reference = normalized_batches[0][0]
+    chunk_size = _resolve_pairwise_penalty_chunk_size(chunk_size)
+    current_min = _scalar_like(reference, np.inf)
+    for points_a_stack, points_b_stack, right_is_shared in normalized_batches:
+        pair_mins = _batched_pair_min_distances(
+            points_a_stack,
+            points_b_stack,
+            right_is_shared,
+            chunk_size=chunk_size,
+        )
+        current_min = jnp.minimum(current_min, jnp.min(pair_mins))
+    return current_min
+
+
+def _batched_pair_min_distances(
+    points_a_stack,
+    points_b_stack,
+    right_is_shared,
+    *,
+    chunk_size,
+):
+    if right_is_shared:
+        return jax.vmap(
+            lambda points_a: pairwise_min_distance_pure(
+                points_a,
+                points_b_stack,
+                chunk_size=chunk_size,
+            )
+        )(points_a_stack)
+    return jax.vmap(
+        lambda points_a, points_b: pairwise_min_distance_pure(
+            points_a,
+            points_b,
+            chunk_size=chunk_size,
+        )
+    )(points_a_stack, points_b_stack)
+
+
+def _batched_selected_pair_exp_sums(
+    points_a_stack,
+    points_b_stack,
+    right_is_shared,
+    hard_min,
+    temperature_jax,
+    cutoff,
+    *,
+    chunk_size,
+):
+    if right_is_shared:
+        return jax.vmap(
+            lambda points_a: _selected_pair_exp_sum(
+                points_a,
+                points_b_stack,
+                hard_min,
+                temperature_jax,
+                cutoff,
+                chunk_size=chunk_size,
+            )
+        )(points_a_stack)
+    return jax.vmap(
+        lambda points_a, points_b: _selected_pair_exp_sum(
+            points_a,
+            points_b,
+            hard_min,
+            temperature_jax,
+            cutoff,
+            chunk_size=chunk_size,
+        )
+    )(points_a_stack, points_b_stack)
+
+
 def pairwise_thresholded_mean_square_distance_pure(
     points_a,
     points_b,
@@ -433,6 +547,33 @@ def _chunked_selected_exp_sum(
     return total
 
 
+def _selected_pair_exp_sum(
+    points_a,
+    points_b,
+    hard_min,
+    temperature_jax,
+    cutoff,
+    *,
+    chunk_size,
+):
+    zero = hard_min - hard_min
+    row_count = int(points_a.shape[0])
+    col_count = int(points_b.shape[0])
+    if _use_dense_pairwise_path(row_count, col_count, chunk_size):
+        dists = _pairwise_distances(points_a, points_b)
+        selected = dists <= cutoff
+        shifted = -(dists - hard_min) / temperature_jax
+        return jnp.sum(jnp.where(selected, jnp.exp(shifted), zero))
+    return _chunked_selected_exp_sum(
+        points_a,
+        points_b,
+        hard_min,
+        temperature_jax,
+        cutoff,
+        chunk_size=chunk_size,
+    )
+
+
 def pairwise_selected_smoothmin_distance_pure(
     point_pairs,
     temperature,
@@ -474,26 +615,64 @@ def pairwise_selected_smoothmin_distance_pure(
     cutoff = hard_min + _scalar_like(reference, 4.0) * temperature_jax
     cutoff = lax.stop_gradient(cutoff)
 
-    def _dense_pair_exp_sum(points_a, points_b):
-        dists = _pairwise_distances(points_a, points_b)
-        selected = dists <= cutoff
-        shifted = -(dists - hard_min) / temperature_jax
-        return jnp.sum(jnp.where(selected, jnp.exp(shifted), zero))
-
     sum_exp = zero
     for points_a, points_b in normalized_pairs:
-        row_count = int(points_a.shape[0])
-        col_count = int(points_b.shape[0])
-        if _use_dense_pairwise_path(row_count, col_count, chunk_size):
-            pair_sum = _dense_pair_exp_sum(points_a, points_b)
-        else:
-            pair_sum = _chunked_selected_exp_sum(
-                points_a,
-                points_b,
-                hard_min,
-                temperature_jax,
-                cutoff,
-                chunk_size=chunk_size,
-            )
+        pair_sum = _selected_pair_exp_sum(
+            points_a,
+            points_b,
+            hard_min,
+            temperature_jax,
+            cutoff,
+            chunk_size=chunk_size,
+        )
         sum_exp = sum_exp + pair_sum
+    return hard_min - temperature_jax * jnp.log(sum_exp)
+
+
+def pairwise_selected_smoothmin_distance_batched_pure(
+    stacked_point_pair_batches,
+    temperature,
+    *,
+    chunk_size=None,
+):
+    """Return selected smooth-min distance over stacked point-cloud pairs."""
+    normalized_batches = _normalize_stacked_point_pair_batches(
+        stacked_point_pair_batches
+    )
+    if len(normalized_batches) == 0:
+        return _as_jax_float64(np.inf)
+
+    reference = normalized_batches[0][0]
+    zero = _scalar_like(reference, 0.0)
+    temperature_jax = _scalar_like(reference, temperature)
+    min_temperature = _scalar_like(reference, np.finfo(np.float64).eps)
+    temperature_jax = jnp.maximum(temperature_jax, min_temperature)
+    chunk_size = _resolve_pairwise_penalty_chunk_size(chunk_size)
+
+    hard_min = _scalar_like(reference, np.inf)
+    for points_a_stack, points_b_stack, right_is_shared in normalized_batches:
+        pair_mins = _batched_pair_min_distances(
+            points_a_stack,
+            points_b_stack,
+            right_is_shared,
+            chunk_size=chunk_size,
+        )
+        hard_min = jnp.minimum(hard_min, jnp.min(pair_mins))
+
+    hard_min = lax.stop_gradient(hard_min)
+    cutoff = hard_min + _scalar_like(reference, 4.0) * temperature_jax
+    cutoff = lax.stop_gradient(cutoff)
+
+    sum_exp = zero
+    for points_a_stack, points_b_stack, right_is_shared in normalized_batches:
+        pair_sums = _batched_selected_pair_exp_sums(
+            points_a_stack,
+            points_b_stack,
+            right_is_shared,
+            hard_min,
+            temperature_jax,
+            cutoff,
+            chunk_size=chunk_size,
+        )
+        sum_exp = sum_exp + jnp.sum(pair_sums)
     return hard_min - temperature_jax * jnp.log(sum_exp)

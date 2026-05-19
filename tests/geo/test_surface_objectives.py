@@ -12,10 +12,10 @@ stellsym_list = [True, False]
 
 
 def taylor_test1(f, df, x, epsilons=None, direction=None, atol=1e-9):
-    np.random.seed(1)
+    rng = np.random.RandomState(1)
     f(x)
     if direction is None:
-        direction = np.random.rand(*(x.shape))-0.5
+        direction = rng.rand(*(x.shape))-0.5
     dfx = df(x)@direction
     if epsilons is None:
         epsilons = np.power(2., -np.asarray(range(10, 20)))
@@ -35,11 +35,11 @@ def taylor_test1(f, df, x, epsilons=None, direction=None, atol=1e-9):
 
 
 def taylor_test2(f, df, d2f, x, epsilons=None, direction1=None, direction2=None):
-    np.random.seed(1)
+    rng = np.random.RandomState(1)
     if direction1 is None:
-        direction1 = np.random.rand(*(x.shape))-0.5
+        direction1 = rng.rand(*(x.shape))-0.5
     if direction2 is None:
-        direction2 = np.random.rand(*(x.shape))-0.5
+        direction2 = rng.rand(*(x.shape))-0.5
 
     f(x)
     df0 = df(x) @ direction1
@@ -300,8 +300,6 @@ class IotasTests(unittest.TestCase):
         """
         Taylor test for derivative of surface rotational transform wrt coil parameters
         """
-        np.random.seed(1)  # Fixed seed for reproducibility across platforms
-
         bs, boozer_surface = get_boozer_surface(label=label, boozer_type=boozer_type, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
         coeffs = bs.x
         io = Iotas(boozer_surface)
