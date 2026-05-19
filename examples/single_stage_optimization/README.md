@@ -45,19 +45,66 @@ The optimization process consists of two sequential stages:
 
 ## Prerequisites
 
-- Python 3.x
-- SIMSOPT library
-- NumPy
-- SciPy
-- Matplotlib
-- Shapely
-- Numba
-- Bentley_Ottmann (Version 8.0.0)
+- Python 3.11 is the recommended release-validation interpreter for the JAX
+  lanes.
+- CPU/JAX development install from the repository root:
 
-Install dependencies:
 ```bash
-pip install numpy scipy matplotlib shapely numba bentley_ottmann==8.0.0
+python -m pip install -e ".[deploy]"
 ```
+
+- CUDA install from the repository root:
+
+```bash
+python -m pip install -e ".[deploy_gpu]"
+```
+
+The `deploy` and `deploy_gpu` extras are the repository SSOT for this workflow.
+As of 2026-05-19, `deploy_gpu` routes through the repo `JAX_GPU` extra, which
+uses the official JAX `jax[cuda12]` CUDA wheel family. Current JAX docs also
+publish `jax[cuda13]`; use a different CUDA wheel only as an explicit
+environment-lane decision.
+
+Runtime environment recipes:
+
+```bash
+# CPU reference oracle.
+export SIMSOPT_BACKEND_MODE=native_cpu
+export JAX_ENABLE_X64=1
+export JAX_PLATFORMS=cpu
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+```
+
+```bash
+# JAX CPU parity.
+export SIMSOPT_BACKEND_MODE=jax_cpu_parity
+export JAX_ENABLE_X64=1
+export JAX_PLATFORMS=cpu
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+```
+
+```bash
+# JAX GPU parity. Requires a CUDA-capable JAX install and NVIDIA GPU node.
+export SIMSOPT_BACKEND_MODE=jax_gpu_parity
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
+export SIMSOPT_JAX_PLATFORM=cuda
+export JAX_ENABLE_X64=1
+export JAX_PLATFORMS=cuda,cpu
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+unset LD_LIBRARY_PATH
+```
+
+Official JAX policy that matters for this workflow:
+
+- CUDA pip wheels are installed with extras such as `jax[cuda12]` or
+  `jax[cuda13]`.
+- `JAX_PLATFORMS` is ordered. Every listed platform must initialize, and the
+  first listed platform becomes the default.
+- JAX preallocates GPU memory by default; proof jobs set
+  `XLA_PYTHON_CLIENT_PREALLOCATE=false` explicitly so memory usage is visible
+  and reproducible.
+- For pip-installed CUDA wheels, do not let `LD_LIBRARY_PATH` override the
+  bundled NVIDIA libraries.
 
 ## Workflow Instructions
 
@@ -84,40 +131,170 @@ wout_nfp22ginsburg_000_014417_iota15.nc
 - `--ftol` / `FTOL`: L-BFGS-B function change tolerance (default: `1e-15`, effectively lets `maxiter` control termination)
 - `--gtol` / `GTOL`: L-BFGS-B projected gradient tolerance (default: `1e-15`)
 
-**Run**:
+**CPU reference run** from the repository root:
 ```bash
-cd STAGE_2
-python banana_coil_solver.py \
+SIMSOPT_BACKEND_MODE=native_cpu \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
+  --backend cpu \
+  --optimizer-backend scipy \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
   --major-radius 0.915 \
   --toroidal-flux 0.24 \
-  --banana-surf-radius 0.22
+  --banana-surf-radius 0.22 \
+  --skip-postprocess
+```
+
+**JAX CPU parity run** from the repository root:
+```bash
+SIMSOPT_BACKEND_MODE=jax_cpu_parity \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
+  --backend jax \
+  --optimizer-backend ondevice \
+  --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
+  --major-radius 0.915 \
+  --toroidal-flux 0.24 \
+  --banana-surf-radius 0.22 \
+  --skip-postprocess
 ```
 
 **Outputs** (in `STAGE_2/outputs-[plasma_filename]/R0=X-s=Y-.../`):
 - `biot_savart_opt.json` - **Required input for Single Stage**
-- `curves_opt.vtu` - Optimized coil geometries (VTK format)
-- `surf_opt.vtu` - Optimized plasma surface (VTK format)
+- `surf_opt.json` - **Required restart surface for production handoff**
+- `results.json` - **Required optimization summary and provenance**
+- `curves_opt.vtu` - Optimized coil geometries (VTK format, when post-processing is enabled)
+- `surf_opt.vtu` - Optimized plasma surface (VTK format, when post-processing is enabled)
 - `CrossSectionPlot.png` - Diagnostic plot
-- `results.json` - Optimization summary
 
-**Note the output directory path** - you'll need it for the next step.
+**Note the output directory path** - it is the Stage 2 seed handoff directory.
 
 ### Step 3: Select the Stage 2 Seed
 
 You no longer need to hand-edit `single_stage_banana_example.py`.
 
-The script can resolve the seed either from the local Stage 2 outputs or from the archive database:
+The normal external handoff path is an explicit Stage 2 artifact path:
 
-- `--stage2-source database` uses `DATABASE/COIL_OPTIMIZATION/outputs/...`
-- `--stage2-source local` uses `STAGE_2/outputs-[plasma]/...`
-- `--stage2-bs-path /full/path/to/biot_savart_opt.json` overrides both
+```bash
+export STAGE2_BS_PATH=/path/to/stage2/run/biot_savart_opt.json
+```
+
+A production Stage 2 handoff directory must contain:
+
+- `results.json`
+- `biot_savart_opt.json`
+- `surf_opt.json`
+
+Rank candidate Stage 2 directories before using them downstream:
+
+```bash
+python examples/single_stage_optimization/STAGE_2/stage2_seed_report.py \
+  --scan-root examples/single_stage_optimization/STAGE_2 \
+  --output-json .artifacts/stage2_seed_catalog.json \
+  --require-pass
+```
+
+`--stage2-bs-path /path/to/biot_savart_opt.json` overrides all derived seed
+resolution. `--stage2-source local` remains useful for scanning local
+`STAGE_2/outputs-[plasma]/...` runs. `--stage2-source database` is an
+internal/archive option for historical Columbia paths, not the external default.
+
+The checked-in reduced fixture
+`benchmarks/fixtures/single_stage_seed_iota15/` is the canonical small
+copy-paste fixture for startup/proof commands. It contains `results.json`,
+`biot_savart_opt.json`, and `single_stage_jax_runtime_spec.json`; it is not a
+complete Stage 2 seed-catalog candidate because it intentionally does not carry
+`surf_opt.json`.
 
 ### Step 4: Run Single Stage - Quasi-Symmetry Optimization
 
-**Purpose**: Optimize for quasi-symmetry and proper Boozer coordinates using the coils from Stage 2.
+**Purpose**: Optimize for quasi-symmetry and proper Boozer coordinates using
+the coils from Stage 2.
 
 **Location**: `SINGLE_STAGE/single_stage_banana_example.py`
+
+**CPU reference init proof**:
+
+```bash
+SIMSOPT_BACKEND_MODE=native_cpu \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --backend cpu \
+  --optimizer-backend scipy \
+  --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
+  --iota-target 0.17 \
+  --vol-target 0.10 \
+  --cc-dist 0.07 \
+  --mpol 15 \
+  --ntor 6 \
+  --init-only \
+  --minimal-artifacts \
+  --output-root .artifacts/single_stage_cpu_init
+```
+
+Production JAX startup uses immutable runtime seed specs on the target lane.
+Compile a spec from a warm-start run first:
+
+```bash
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --warm-start-run-dir /path/to/single_stage/warm_start_run \
+  --compile-jax-runtime-seed-spec \
+  --jax-runtime-seed-spec /path/to/single_stage_jax_runtime_spec.json
+```
+
+For the checked-in fixture, use the precompiled spec directly:
+
+```bash
+SIMSOPT_BACKEND_MODE=jax_cpu_parity \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --backend jax \
+  --optimizer-backend ondevice \
+  --boozer-optimizer-backend ondevice \
+  --jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json \
+  --iota-target 0.17 \
+  --vol-target 0.10 \
+  --cc-dist 0.07 \
+  --mpol 15 \
+  --ntor 6 \
+  --init-only \
+  --minimal-artifacts \
+  --output-root .artifacts/single_stage_jax_cpu_init
+```
+
+For GPU parity, keep the same runtime seed spec and change only the execution
+lane:
+
+```bash
+SIMSOPT_BACKEND_MODE=jax_gpu_parity \
+SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled \
+SIMSOPT_JAX_PLATFORM=cuda \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cuda,cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+env -u LD_LIBRARY_PATH \
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --backend jax \
+  --optimizer-backend ondevice \
+  --boozer-optimizer-backend ondevice \
+  --jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json \
+  --iota-target 0.17 \
+  --vol-target 0.10 \
+  --cc-dist 0.07 \
+  --mpol 15 \
+  --ntor 6 \
+  --init-only \
+  --minimal-artifacts \
+  --output-root .artifacts/single_stage_jax_gpu_init
+```
 
 **Key Parameters** (CLI flags or environment variables):
 - `--mpol` / `MPOL`
@@ -130,41 +307,14 @@ The script can resolve the seed either from the local Stage 2 outputs or from th
 - `--stage2-seed-toroidal-flux` / `STAGE2_SEED_TOROIDAL_FLUX`
 - `--stage2-seed-banana-surf-radius` / `STAGE2_SEED_BANANA_SURF_RADIUS`
 - `--stage2-bs-path` / `STAGE2_BS_PATH`
+- `--jax-runtime-seed-spec` / `JAX_RUNTIME_SEED_SPEC`
+- `--compile-jax-runtime-seed-spec`
 - `--maxiter` / `MAXITER`
-
-**Run**:
-```bash
-cd SINGLE_STAGE
-python single_stage_banana_example.py \
-  --stage2-source database \
-  --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
-  --stage2-seed-major-radius 0.915 \
-  --stage2-seed-toroidal-flux 0.24 \
-  --stage2-seed-banana-surf-radius 0.22 \
-  --iota-target 0.17 \
-  --vol-target 0.10 \
-  --cc-dist 0.07 \
-  --mpol 15 \
-  --ntor 6 \
-  --output-root ./outputs/CC_convergence-CC7-iota17-vol10
-```
-
-For the hard-iota seed A/B test, change only the Stage 2 seed and plasma file:
-
-```bash
-python single_stage_banana_example.py \
-  --stage2-source database \
-  --plasma-surf-filename wout_nfp22ginsburg_000_002084_iota20.nc \
-  --stage2-seed-major-radius 0.975 \
-  --stage2-seed-toroidal-flux 0.24 \
-  --stage2-seed-banana-surf-radius 0.22 \
-  --iota-target 0.20 \
-  --vol-target 0.10
-```
 
 **Outputs** (in `outputs/mpol=X-ntor=Y-<hash>/`, where `<hash>` is a deterministic fingerprint of the run config):
 - `biot_savart_opt.json` - Final optimized magnetic field
 - `surf_opt.json` - Final optimized surface
+- `single_stage_jax_runtime_spec.json` - Immutable JAX restart/startup spec
 - `curves_opt.vtu` - Final coil configurations
 - `surf_init.vtu`, `surf_opt.vtu` - Initial and optimized surfaces
 - `NormPlotInitial.png`, `NormPlotOptimized.png` - Field error diagnostics

@@ -237,6 +237,9 @@ cd /Users/suhjungdae/code/columbia/simsopt-jax
 
 ```bash
 SIMSOPT_BACKEND_MODE=native_cpu \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
   --backend cpu \
   --optimizer-backend scipy \
@@ -255,6 +258,9 @@ Use this first when you want:
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_cpu_parity \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
   --backend jax \
   --optimizer-backend ondevice \
@@ -279,11 +285,13 @@ Stage 2 live constraint-method note:
 
 ```bash
 SIMSOPT_BACKEND_MODE=native_cpu \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend cpu \
   --optimizer-backend scipy \
-  --stage2-source local \
-  --stage2-bs-path examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/biot_savart_opt.json \
+  --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
   --init-only
 ```
 
@@ -293,12 +301,14 @@ This is the safest single-stage initialization proof lane.
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_cpu_parity \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax \
   --optimizer-backend ondevice \
   --boozer-optimizer-backend ondevice \
-  --stage2-source local \
-  --stage2-bs-path examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/biot_savart_opt.json \
+  --jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json \
   --init-only
 ```
 
@@ -307,17 +317,59 @@ replacement for the public CPU/reference `scipy` oracle lane:
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_gpu_parity \
+SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled \
+SIMSOPT_JAX_PLATFORM=cuda \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cuda,cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+env -u LD_LIBRARY_PATH \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax \
   --optimizer-backend ondevice \
   --boozer-optimizer-backend ondevice \
-  --stage2-source local \
-  --stage2-bs-path examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/biot_savart_opt.json \
+  --jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json \
   --init-only
 ```
 
 Do not treat the last command as the first proof lane. Keep `native_cpu` and
 `jax_cpu_parity` ahead of it.
+
+### Single-stage JAX runtime seed spec
+
+`single_stage_jax_runtime_spec.json` is the first-class startup artifact for
+production JAX single-stage runs. It freezes the seed surface, coil spec,
+coil dofs, Boozer initialization scalars, hardware constants, and Stage 2 seed
+metadata into an immutable JSON payload consumed on the target lane.
+
+Compile a new spec from a warm-start run:
+
+```bash
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --warm-start-run-dir /path/to/single_stage/warm_start_run \
+  --compile-jax-runtime-seed-spec \
+  --jax-runtime-seed-spec /path/to/single_stage_jax_runtime_spec.json
+```
+
+Use the compiled spec on JAX CPU or JAX GPU:
+
+```bash
+SIMSOPT_BACKEND_MODE=jax_cpu_parity \
+JAX_ENABLE_X64=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --backend jax \
+  --optimizer-backend ondevice \
+  --boozer-optimizer-backend ondevice \
+  --jax-runtime-seed-spec /path/to/single_stage_jax_runtime_spec.json \
+  --init-only
+```
+
+For small copy-paste checks, the checked-in fixture is:
+
+```text
+benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json
+```
 
 ## Recommended usage pattern
 

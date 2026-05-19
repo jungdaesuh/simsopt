@@ -54,6 +54,7 @@ spec*.sp.h5
 # examples
 examples/VMEC/
 examples/*.log
+examples/single_stage_optimization/**/outputs*/
 
 # Sphinx related files
 docs/build/
