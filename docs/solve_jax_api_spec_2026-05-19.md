@@ -1,6 +1,6 @@
 # `simsopt.solve.jax` API specification
 
-**Status:** Draft v0.2. Bindings are not final; resolved decisions and corrected review findings are listed in §14. Sign off on each before any code lands against this spec.
+**Status:** Draft v0.3. Bindings are not final; resolved decisions and corrected review findings are listed in §14. Sign off on each before any code lands against this spec.
 
 **Owner:** simsopt-jax port maintainers.
 
@@ -27,7 +27,7 @@ This document is the **public-API contract** for the JAX-lane optimizer surface,
 
 **Out of scope:**
 - Validation results for the supersedability claims that motivate this design (`OPTAX_LBFGS` vs `SIMSOPT_LBFGSB`, `OPTAX_ADAM` vs `SIMSOPT_ADAM*`, `OPTIMISTIX_LM` vs `SIMSOPT_LM_*`). Those live in a separate validation artifact and gate the **removal** of bridge drivers, not the introduction of new ones.
-- The caller-inventory grep artifact (§8 references it).
+- The caller-inventory grep artifact (§8 references it; published as `docs/solve_jax_api_caller_inventory_2026-05-19.md`).
 - Per-PR sequencing of the migration. This spec is the *contract*; the PR plan is downstream.
 - Constraint handling (bounds, equality, inequality). The contract is unconstrained.
 - Raising the project-wide SIMSOPT Python floor. The new `simsopt.solve.jax` subpackage may require Python 3.11+, but `simsopt.solve.__init__` must not import it while upstream SIMSOPT remains `requires-python >=3.8`.
@@ -539,7 +539,7 @@ def my_callback(event: OptimizerCallbackEvent) -> None:
 
 ## 8. Old API → new API mapping
 
-Built against the live inventory in `src/simsopt/geo/optimizer_jax.py` (`_SUPPORTED_METHODS`, `_SUPPORTED_LEAST_SQUARES_METHODS`, and optimizer-backend sets). The full caller inventory artifact is referenced separately; this table is the migration cookbook.
+Built against the live inventory in `src/simsopt/geo/optimizer_jax.py` (`_SUPPORTED_METHODS`, `_SUPPORTED_LEAST_SQUARES_METHODS`, and optimizer-backend sets). The full caller inventory — every external `file:line` for every old method string, plus hot-spot ranking and recommended PR sequencing — lives in [`docs/solve_jax_api_caller_inventory_2026-05-19.md`](./solve_jax_api_caller_inventory_2026-05-19.md). This table is the migration cookbook; the inventory is the migration target list.
 
 Rows that mention `optimizer_backend` describe wrapper-resolved selector tuples from `resolve_optimizer_backend_method(...)`, not direct `jax_minimize(...)` kwargs. Current direct `jax_minimize(...)` and `jax_least_squares(...)` call sites select lanes with `method=` only.
 
@@ -603,7 +603,7 @@ def jax_minimize(fn, x0, *, method="bfgs", **kwargs):
 
 ## 10. Migration path
 
-Categorized by caller class (caller inventory artifact gives the actual file/line list).
+Categorized by caller class. Concrete file/line lists, hot-spot ranking, and the 15-PR sequence live in [`docs/solve_jax_api_caller_inventory_2026-05-19.md`](./solve_jax_api_caller_inventory_2026-05-19.md) (§§2, 8, 10). Headline scale from that audit: **~129 external call sites** across 13 old method strings; **fewer than 10** in production `src/`; the rest are tests, benchmarks, and one large example.
 
 ### Category A: Direct callers of `jax_minimize` / `jax_least_squares`
 
@@ -614,7 +614,7 @@ Categorized by caller class (caller inventory artifact gives the actual file/lin
 ### Category B: solver-owning wrapper constructor args
 
 - `BoozerSurfaceJAX` accepts solver policy through its LS options: `optimizer_backend=` and `least_squares_algorithm=`.
-- `QfmSurfaceJAX` and `BiotSavartJAX` do not currently expose these constructor kwargs; they are not part of this migration unless a future caller-inventory artifact finds solver-string plumbing in their call paths.
+- `QfmSurfaceJAX` and `BiotSavartJAX` do not currently expose these constructor kwargs; the [caller inventory](./solve_jax_api_caller_inventory_2026-05-19.md) §6 confirmed no solver-string plumbing in their call paths. They are not part of this migration.
 - Migration: add `outer_driver` and `inner_driver` kwargs to `BoozerSurfaceJAX`'s solver-option surface; deprecate the old string kwargs.
 - Tier 3 (changes `BoozerSurfaceJAX` public API).
 
@@ -775,3 +775,4 @@ Old file (`src/simsopt/geo/optimizer_jax.py`) retained as the compat shim entry 
   - Fixed callback support: SciPy LM and Optimistix LM reject callbacks in the initial API.
   - Fixed `OptimizerResult` status/fingerprint contracts and required JAX result blocking before timing.
   - Corrected Python-floor wording so upstream SIMSOPT's project-wide `>=3.8` install contract is not silently broken.
+- 2026-05-19 v0.3 — cross-referenced the published caller inventory at `docs/solve_jax_api_caller_inventory_2026-05-19.md` from §1, §8, §10, and §10's wrapper note. Confirmed QfmSurfaceJAX/BiotSavartJAX exclusion from the inventory.
