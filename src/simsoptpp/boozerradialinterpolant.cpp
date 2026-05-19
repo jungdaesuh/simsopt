@@ -143,15 +143,16 @@ Array fourier_transform_odd(Array& K, Array& xm, Array& xn, Array& thetas, Array
     int num_points = thetas.shape(0);
     Array kmns = xt::zeros<double>({num_modes});
 
-    double norm;
     for (int im=1; im < num_modes; ++im) {
-      norm = 0.;
-      #pragma omp parallel for
+      double sum = 0.;
+      double norm = 0.;
+      #pragma omp parallel for reduction(+:sum, norm)
       for (int ip=0; ip < num_points; ++ip) {
-        kmns(im) += K(ip)*sin(xm(im)*thetas(ip)-xn(im)*zetas(ip));
-        norm += pow(sin(xm(im)*thetas(ip)-xn(im)*zetas(ip)),2.);
+        double s = sin(xm(im)*thetas(ip)-xn(im)*zetas(ip));
+        sum += K(ip)*s;
+        norm += s*s;
       }
-      kmns(im) = kmns(im)/norm;
+      kmns(im) = sum/norm;
     }
     return kmns;
 }
@@ -162,15 +163,16 @@ Array fourier_transform_even(Array& K, Array& xm, Array& xn, Array& thetas, Arra
     int num_points = thetas.shape(0);
     Array kmns = xt::zeros<double>({num_modes});
 
-    double norm;
     for (int im=0; im < num_modes; ++im) {
-      norm = 0.;
-      #pragma omp parallel for
+      double sum = 0.;
+      double norm = 0.;
+      #pragma omp parallel for reduction(+:sum, norm)
       for (int ip=0; ip < num_points; ++ip) {
-        kmns(im) += K(ip)*cos(xm(im)*thetas(ip)-xn(im)*zetas(ip));
-        norm += pow(cos(xm(im)*thetas(ip)-xn(im)*zetas(ip)),2.);
+        double c = cos(xm(im)*thetas(ip)-xn(im)*zetas(ip));
+        sum += K(ip)*c;
+        norm += c*c;
       }
-      kmns(im) = kmns(im)/norm;
+      kmns(im) = sum/norm;
     }
     return kmns;
 }

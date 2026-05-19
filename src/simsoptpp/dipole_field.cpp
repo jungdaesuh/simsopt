@@ -3,6 +3,45 @@
 #include "vec3dsimd.h"
 #include <cmath>
 #include <Eigen/Dense>
+#include <limits>
+#include <vector>
+
+namespace {
+
+constexpr const char* kCartesianFlag = "cartesian";
+constexpr const char* kCylindricalFlag = "cylindrical";
+constexpr const char* kToroidalFlag = "toroidal";
+
+void validate_xyz_matrix(const Array& array, const std::string& name) {
+    if (array.dimension() != 2 || array.shape(1) != 3) {
+        throw std::runtime_error(name + " must have shape (N, 3)");
+    }
+}
+
+void validate_dipole_field_bn_inputs(
+    const Array& points,
+    const Array& m_points,
+    const Array& unitnormal,
+    const std::string& coordinate_flag
+) {
+    validate_xyz_matrix(points, "points");
+    validate_xyz_matrix(m_points, "m_points");
+    validate_xyz_matrix(unitnormal, "unitnormal");
+    if (unitnormal.shape(0) != points.shape(0)) {
+        throw std::runtime_error("unitnormal must have the same shape as points");
+    }
+    if (
+        coordinate_flag != kCartesianFlag
+        && coordinate_flag != kCylindricalFlag
+        && coordinate_flag != kToroidalFlag
+    ) {
+        throw std::runtime_error(
+            "coordinate_flag must be one of cartesian, cylindrical, toroidal"
+        );
+    }
+}
+
+} // namespace
 
 #if defined(USE_XSIMD)
 // Calculate the B field at a set of evaluation points from N dipoles:
@@ -285,14 +324,22 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
           throw std::runtime_error("unit normal needs to be in row-major storage order");
     if(b.layout() != xt::layout_type::row_major)
           throw std::runtime_error("b needs to be in row-major storage order");
+    validate_dipole_field_bn_inputs(points, m_points, unitnormal, coordinate_flag);
 
     int num_points = points.shape(0);
     int num_dipoles = m_points.shape(0);
     constexpr int simd_size = xsimd::simd_type<double>::size;
     Array A = xt::zeros<double>({num_points, num_dipoles, 3});
 
-    std::string cylindrical_str = "cylindrical";
-    std::string toroidal_str = "toroidal";
+    std::string cylindrical_str = kCylindricalFlag;
+    std::string toroidal_str = kToroidalFlag;
+    std::vector<double> sphi0_values(nfp);
+    std::vector<double> cphi0_values(nfp);
+    for (int fp = 0; fp < nfp; ++fp) {
+        double phi0 = (2 * M_PI / static_cast<double>(nfp)) * fp;
+        sphi0_values[fp] = std::sin(phi0);
+        cphi0_values[fp] = std::cos(phi0);
+    }
 
     // initialize pointer to the beginning of the dipole grid
     double* m_points_ptr = &(m_points(0, 0));
@@ -314,28 +361,30 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
         }
         // Loop through all the dipoles, using all the symmetries
         for (int j = 0; j < num_dipoles; ++j) {
-            Vec3dSimd mp_j = Vec3dSimd(m_points_ptr[3 * j + 0], m_points_ptr[3 * j + 1], m_points_ptr[3 * j + 2]);
+            double mp_x = m_points_ptr[3 * j + 0];
+            double mp_y = m_points_ptr[3 * j + 1];
+            double mp_z = m_points_ptr[3 * j + 2];
+            double mp_radius = std::sqrt(mp_x * mp_x + mp_y * mp_y);
+            double mp_phi = std::atan2(mp_y, mp_x);
+            double mp_theta = std::atan2(mp_z, mp_radius - R0);
+            simd_t sphi_new = simd_t(std::sin(mp_phi));
+            simd_t stheta_new = simd_t(std::sin(mp_theta));
+            simd_t cphi_new = simd_t(std::cos(mp_phi));
+            simd_t ctheta_new = simd_t(std::cos(mp_theta));
+            Vec3dSimd mp_j = Vec3dSimd(mp_x, mp_y, mp_z);
             for (int stell = 0; stell < (stellsym + 1); ++stell) {
+                const double stell_sign = 1.0 - 2.0 * stell;
                 for(int fp = 0; fp < nfp; ++fp) {
-                    simd_t phi0 = (2 * M_PI / ((simd_t) nfp)) * fp;
-                    simd_t sphi0 = xsimd::sin(phi0);
-                    simd_t cphi0 = xsimd::cos(phi0);
+                    simd_t sphi0 = simd_t(sphi0_values[fp]);
+                    simd_t cphi0 = simd_t(cphi0_values[fp]);
                     auto G_i = Vec3dSimd();
 
                     // Calculate new dipole location after accounting for the symmetries
                     // reflect the y and z-components and then rotate by phi0
-                    simd_t mp_x_new = mp_j.x * cphi0 - mp_j.y * sphi0 * pow(-1, stell);
-                    simd_t mp_y_new = mp_j.x * sphi0 + mp_j.y * cphi0 * pow(-1, stell);
-                    simd_t mp_z_new = mp_j.z * pow(-1, stell);
+                    simd_t mp_x_new = mp_j.x * cphi0 - mp_j.y * sphi0 * stell_sign;
+                    simd_t mp_y_new = mp_j.x * sphi0 + mp_j.y * cphi0 * stell_sign;
+                    simd_t mp_z_new = mp_j.z * stell_sign;
                     Vec3dSimd mp_j_new = Vec3dSimd(mp_x_new, mp_y_new, mp_z_new);
-
-                    // Calculate new phi location if switching to cylindrical coordinates
-                    simd_t mp_phi_new = xsimd::atan2(mp_j.y, mp_j.x);
-                    simd_t mp_theta_new = xsimd::atan2(mp_j.z, sqrt(mp_j.x * mp_j.x + mp_j.y * mp_j.y) - R0);
-                    simd_t sphi_new = xsimd::sin(mp_phi_new);
-                    simd_t stheta_new = xsimd::sin(mp_theta_new);
-                    simd_t cphi_new = xsimd::cos(mp_phi_new);
-                    simd_t ctheta_new = xsimd::cos(mp_theta_new);
 
                     // Compute the unsymmetrized inductance matrix
                     Vec3dSimd r = point_i - mp_j_new;
@@ -349,7 +398,7 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
                     G_i.z = 3.0 * rdotn * r.z * rmag_inv_5 - n_i.z * rmag_inv_3;
                     for(int k = 0; k < klimit; k++){
                         if (coordinate_flag == cylindrical_str) {
-                            double Ax_temp = (G_i.x[k] * cphi0[k] + G_i.y[k] * sphi0[k]) * pow(-1, stell);
+                            double Ax_temp = (G_i.x[k] * cphi0[k] + G_i.y[k] * sphi0[k]) * stell_sign;
                             double Ay_temp = (- G_i.x[k] * sphi0[k] + G_i.y[k] * cphi0[k]);
                             A(i + k, j, 0) += fak * (Ax_temp * cphi_new[k] + Ay_temp * sphi_new[k]);
                             A(i + k, j, 1) += fak * ( - Ax_temp * sphi_new[k] + Ay_temp * cphi_new[k]);
@@ -357,7 +406,7 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
                         }
                         else if (coordinate_flag == toroidal_str) {
 
-                            double Ax_temp = (G_i.x[k] * cphi0[k] + G_i.y[k] * sphi0[k]) * pow(-1, stell);
+                            double Ax_temp = (G_i.x[k] * cphi0[k] + G_i.y[k] * sphi0[k]) * stell_sign;
                             double Ay_temp = (- G_i.x[k] * sphi0[k] + G_i.y[k] * cphi0[k]);
                             double Az_temp = G_i.z[k];
                             A(i + k, j, 0) += fak * (Ax_temp * cphi_new[k] * ctheta_new[k] + Ay_temp * sphi_new[k] * ctheta_new[k] + Az_temp * stheta_new[k]);
@@ -369,7 +418,7 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
                             // This should be the reverse of what is done to the m vector and the dipole grid
                             // because A * m = A * R^T * R * m and R is an orthogonal matrix both
                             // for a reflection and a rotation.
-                            A(i + k, j, 0) += fak * (G_i.x[k] * cphi0[k] + G_i.y[k] * sphi0[k]) * pow(-1, stell);
+                            A(i + k, j, 0) += fak * (G_i.x[k] * cphi0[k] + G_i.y[k] * sphi0[k]) * stell_sign;
                             A(i + k, j, 1) += fak * (- G_i.x[k] * sphi0[k] + G_i.y[k] * cphi0[k]);
                             A(i + k, j, 2) += fak * G_i.z[k];
                         }
@@ -637,13 +686,21 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
           throw std::runtime_error("unit normal needs to be in row-major storage order");
     if(b.layout() != xt::layout_type::row_major)
           throw std::runtime_error("b needs to be in row-major storage order");
+    validate_dipole_field_bn_inputs(points, m_points, unitnormal, coordinate_flag);
     
     int num_points = points.shape(0);
     int num_dipoles = m_points.shape(0);
     Array A = xt::zeros<double>({num_points, num_dipoles, 3});
   
-    std::string cylindrical_str = "cylindrical"; 
-    std::string toroidal_str = "toroidal"; 
+    std::string cylindrical_str = kCylindricalFlag;
+    std::string toroidal_str = kToroidalFlag;
+    std::vector<double> sphi0_values(nfp);
+    std::vector<double> cphi0_values(nfp);
+    for (int fp = 0; fp < nfp; ++fp) {
+        double phi0 = (2 * M_PI / static_cast<double>(nfp)) * fp;
+        sphi0_values[fp] = std::sin(phi0);
+        cphi0_values[fp] = std::cos(phi0);
+    }
     
     // initialize pointer to the beginning of the dipole grid
     double* m_points_ptr = &(m_points(0, 0));
@@ -661,28 +718,30 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
         }
 	// Loop through all the dipoles, using all the symmetries
         for (int j = 0; j < num_dipoles; ++j) {
-            auto mp_j = Vec3dStd(m_points_ptr[3 * j + 0], m_points_ptr[3 * j + 1], m_points_ptr[3 * j + 2]);
+            double mp_x = m_points_ptr[3 * j + 0];
+            double mp_y = m_points_ptr[3 * j + 1];
+            double mp_z = m_points_ptr[3 * j + 2];
+            double mp_radius = std::sqrt(mp_x * mp_x + mp_y * mp_y);
+            double mp_phi = std::atan2(mp_y, mp_x);
+            double mp_theta = std::atan2(mp_z, mp_radius - R0);
+            auto sphi_new = std::sin(mp_phi);
+            auto stheta_new = std::sin(mp_theta);
+            auto cphi_new = std::cos(mp_phi);
+            auto ctheta_new = std::cos(mp_theta);
+            auto mp_j = Vec3dStd(mp_x, mp_y, mp_z);
             for (int stell = 0; stell < (stellsym + 1); ++stell) {
+                const double stell_sign = 1.0 - 2.0 * stell;
                 for(int fp = 0; fp < nfp; ++fp) {
-                    auto phi0 = (2 * M_PI / ((double) nfp)) * fp;
-                    auto sphi0 = std::sin(phi0);
-                    auto cphi0 = std::cos(phi0);
+                    auto sphi0 = sphi0_values[fp];
+                    auto cphi0 = cphi0_values[fp];
                     auto G_i = Vec3dStd();
 
                     // Calculate new dipole location after accounting for the symmetries
                     // reflect the y and z-components and then rotate by phi0
-                    auto mp_x_new = mp_j.x * cphi0 - mp_j.y * sphi0 * pow(-1, stell);
-                    auto mp_y_new = mp_j.x * sphi0 + mp_j.y * cphi0 * pow(-1, stell);
-                    auto mp_z_new = mp_j.z * pow(-1, stell);
+                    auto mp_x_new = mp_j.x * cphi0 - mp_j.y * sphi0 * stell_sign;
+                    auto mp_y_new = mp_j.x * sphi0 + mp_j.y * cphi0 * stell_sign;
+                    auto mp_z_new = mp_j.z * stell_sign;
                     auto mp_j_new = Vec3dStd(mp_x_new, mp_y_new, mp_z_new);
-
-                    // Calculate new phi location if switching to cylindrical coordinates
-                    auto mp_phi_new = std::atan2(mp_j.y, mp_j.x);
-                    auto mp_theta_new = std::atan2(mp_j.z, sqrt(mp_j.x * mp_j.x + mp_j.y * mp_j.y) - R0);
-                    auto sphi_new = std::sin(mp_phi_new);
-                    auto stheta_new = std::sin(mp_theta_new);
-                    auto cphi_new = std::cos(mp_phi_new);
-                    auto ctheta_new = std::cos(mp_theta_new);
 
                     // Compute the unsymmetrized inductance matrix
                     auto r = point_i - mp_j_new;
@@ -696,7 +755,7 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
                     G_i.z = 3.0 * rdotn * r.z * rmag_inv_5 - n_i.z * rmag_inv_3;
 
                     if (coordinate_flag == cylindrical_str) {
-                        auto Ax_temp = (G_i.x * cphi0 + G_i.y * sphi0) * pow(-1, stell);
+                        auto Ax_temp = (G_i.x * cphi0 + G_i.y * sphi0) * stell_sign;
                         auto Ay_temp = (- G_i.x * sphi0 + G_i.y * cphi0);
                         A(i, j, 0) += fak * (Ax_temp * cphi_new + Ay_temp * sphi_new);
                         A(i, j, 1) += fak * (-Ax_temp * sphi_new + Ay_temp * cphi_new);
@@ -704,7 +763,7 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
                     }
                     else if (coordinate_flag == toroidal_str) {
 
-                        auto Ax_temp = (G_i.x * cphi0 + G_i.y * sphi0) * pow(-1, stell);
+                        auto Ax_temp = (G_i.x * cphi0 + G_i.y * sphi0) * stell_sign;
                         auto Ay_temp = (- G_i.x * sphi0 + G_i.y * cphi0);
                         auto Az_temp = G_i.z;
                         A(i, j, 0) += fak * (Ax_temp * cphi_new * ctheta_new + Ay_temp * sphi_new * ctheta_new + Az_temp * stheta_new);
@@ -716,7 +775,7 @@ Array dipole_field_Bn(Array& points, Array& m_points, Array& unitnormal, int nfp
                         // This should be the reverse of what is done to the m vector and the dipole grid
                         // because A * m = A * R^T * R * m and R is an orthogonal matrix both
                         // for a reflection and a rotation.
-                        A(i, j, 0) += fak * (G_i.x * cphi0 + G_i.y * sphi0) * pow(-1, stell);
+                        A(i, j, 0) += fak * (G_i.x * cphi0 + G_i.y * sphi0) * stell_sign;
                         A(i, j, 1) += fak * (-G_i.x * sphi0 + G_i.y * cphi0);
                         A(i, j, 2) += fak * G_i.z;
                     }
@@ -773,8 +832,8 @@ Array define_a_uniform_cartesian_grid_between_two_toroidal_surfaces(Array& norma
         double Z = xyz_uniform(i, 2);
 
         // find nearest point on inner/outer toroidal surface
-        double min_dist_inner = 1e5;
-        double min_dist_outer = 1e5;
+        double min_dist_inner = std::numeric_limits<double>::infinity();
+        double min_dist_outer = std::numeric_limits<double>::infinity();
         int inner_loc = 0;
         int outer_loc = 0;
         for (int k = 0; k < num_inner; k++) {
@@ -819,8 +878,8 @@ Array define_a_uniform_cartesian_grid_between_two_toroidal_surfaces(Array& norma
         // Compute all the rays and find the location of minimum ray-surface distance
         double dist_inner_ray = 0.0;
         double dist_outer_ray = 0.0;
-        double min_dist_inner_ray = 1e5;
-        double min_dist_outer_ray = 1e5;
+        double min_dist_inner_ray = std::numeric_limits<double>::infinity();
+        double min_dist_outer_ray = std::numeric_limits<double>::infinity();
         int nearest_loc_inner = 0;
         int nearest_loc_outer = 0;
         double ray_equation_x = 0.0;

@@ -189,6 +189,81 @@ def _k_per_point_jaxpr_dot_count(
     )
 
 
+def _numpy_compute_K_per_point(
+    *,
+    xm: np.ndarray,
+    xn: np.ndarray,
+    thetas: np.ndarray,
+    zetas: np.ndarray,
+    rmnc: np.ndarray,
+    drmncds: np.ndarray,
+    zmns: np.ndarray,
+    dzmnsds: np.ndarray,
+    numns: np.ndarray,
+    dnumnsds: np.ndarray,
+    bmnc: np.ndarray,
+    iota_isurf: float,
+    G_isurf: float,
+    I_isurf: float,
+    rmns: np.ndarray | None = None,
+    drmnsds: np.ndarray | None = None,
+    zmnc: np.ndarray | None = None,
+    dzmncds: np.ndarray | None = None,
+    numnc: np.ndarray | None = None,
+    dnumncds: np.ndarray | None = None,
+    bmns: np.ndarray | None = None,
+) -> np.ndarray:
+    angles = thetas[:, None] * xm[None, :] - zetas[:, None] * xn[None, :]
+    cos_a = np.cos(angles)
+    sin_a = np.sin(angles)
+
+    if rmns is None:
+        B = cos_a @ bmnc
+        R = cos_a @ rmnc
+        dRdtheta = sin_a @ (-xm * rmnc)
+        dRdzeta = sin_a @ (xn * rmnc)
+        dRds = cos_a @ drmncds
+        dZdtheta = cos_a @ (xm * zmns)
+        dZdzeta = cos_a @ (-xn * zmns)
+        dZds = sin_a @ dzmnsds
+        nu = sin_a @ numns
+        dnuds = sin_a @ dnumnsds
+        dnudtheta = cos_a @ (xm * numns)
+        dnudzeta = cos_a @ (-xn * numns)
+    else:
+        B = cos_a @ bmnc + sin_a @ bmns
+        R = cos_a @ rmnc + sin_a @ rmns
+        dRdtheta = sin_a @ (-xm * rmnc) + cos_a @ (xm * rmns)
+        dRdzeta = sin_a @ (xn * rmnc) + cos_a @ (-xn * rmns)
+        dRds = cos_a @ drmncds + sin_a @ drmnsds
+        dZdtheta = cos_a @ (xm * zmns) + sin_a @ (-xm * zmnc)
+        dZdzeta = cos_a @ (-xn * zmns) + sin_a @ (xn * zmnc)
+        dZds = sin_a @ dzmnsds + cos_a @ dzmncds
+        nu = sin_a @ numns + cos_a @ numnc
+        dnuds = sin_a @ dnumnsds + cos_a @ dnumncds
+        dnudtheta = cos_a @ (xm * numns) + sin_a @ (-xm * numnc)
+        dnudzeta = cos_a @ (-xn * numns) + sin_a @ (xn * numnc)
+
+    phi = zetas - nu
+    dphids = -dnuds
+    dphidtheta = -dnudtheta
+    dphidzeta = 1.0 - dnudzeta
+    cos_phi = np.cos(phi)
+    sin_phi = np.sin(phi)
+
+    dXdtheta = dRdtheta * cos_phi - R * sin_phi * dphidtheta
+    dYdtheta = dRdtheta * sin_phi + R * cos_phi * dphidtheta
+    dXds = dRds * cos_phi - R * sin_phi * dphids
+    dYds = dRds * sin_phi + R * cos_phi * dphids
+    dXdzeta = dRdzeta * cos_phi - R * sin_phi * dphidzeta
+    dYdzeta = dRdzeta * sin_phi + R * cos_phi * dphidzeta
+
+    gstheta = dXdtheta * dXds + dYdtheta * dYds + dZdtheta * dZds
+    gszeta = dXdzeta * dXds + dYdzeta * dYds + dZdzeta * dZds
+    sqrtg = (G_isurf + iota_isurf * I_isurf) / (B * B)
+    return (gszeta + iota_isurf * gstheta) / sqrtg
+
+
 def test_compute_K_per_point_batches_stellsym_fourier_sums() -> None:
     num_modes = 8
     num_points = 16
@@ -219,6 +294,97 @@ def test_compute_K_per_point_batches_asym_fourier_sums() -> None:
         )
         == 2
     )
+
+
+def test_compute_K_per_point_matches_closed_form_numpy_stellsym() -> None:
+    num_modes = 9
+    num_points = 21
+    xm, xn = _make_modes(num_modes, seed=3221)
+    thetas, zetas = _make_quad_points(num_points, seed=3222)
+    bundle = _make_half_grid_fields(
+        num_modes=num_modes,
+        num_surf=1,
+        seed=3223,
+        stellsym=True,
+    )
+
+    actual = np.asarray(
+        _jax_compute_K_per_point(
+            xm=xm,
+            xn=xn,
+            thetas=thetas,
+            zetas=zetas,
+            bundle=bundle,
+            stellsym=True,
+        )
+    )
+    expected = _numpy_compute_K_per_point(
+        xm=xm,
+        xn=xn,
+        thetas=thetas,
+        zetas=zetas,
+        rmnc=bundle["rmnc"][:, 0],
+        drmncds=bundle["drmncds"][:, 0],
+        zmns=bundle["zmns"][:, 0],
+        dzmnsds=bundle["dzmnsds"][:, 0],
+        numns=bundle["numns"][:, 0],
+        dnumnsds=bundle["dnumnsds"][:, 0],
+        bmnc=bundle["bmnc"][:, 0],
+        iota_isurf=bundle["iota"][0],
+        G_isurf=bundle["G"][0],
+        I_isurf=bundle["I"][0],
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=_RTOL, atol=_ATOL)
+
+
+def test_compute_K_per_point_matches_closed_form_numpy_asym() -> None:
+    num_modes = 9
+    num_points = 21
+    xm, xn = _make_modes(num_modes, seed=3231)
+    thetas, zetas = _make_quad_points(num_points, seed=3232)
+    bundle = _make_half_grid_fields(
+        num_modes=num_modes,
+        num_surf=1,
+        seed=3233,
+        stellsym=False,
+    )
+
+    actual = np.asarray(
+        _jax_compute_K_per_point(
+            xm=xm,
+            xn=xn,
+            thetas=thetas,
+            zetas=zetas,
+            bundle=bundle,
+            stellsym=False,
+        )
+    )
+    expected = _numpy_compute_K_per_point(
+        xm=xm,
+        xn=xn,
+        thetas=thetas,
+        zetas=zetas,
+        rmnc=bundle["rmnc"][:, 0],
+        drmncds=bundle["drmncds"][:, 0],
+        zmns=bundle["zmns"][:, 0],
+        dzmnsds=bundle["dzmnsds"][:, 0],
+        numns=bundle["numns"][:, 0],
+        dnumnsds=bundle["dnumnsds"][:, 0],
+        bmnc=bundle["bmnc"][:, 0],
+        iota_isurf=bundle["iota"][0],
+        G_isurf=bundle["G"][0],
+        I_isurf=bundle["I"][0],
+        rmns=bundle["rmns"][:, 0],
+        drmnsds=bundle["drmnsds"][:, 0],
+        zmnc=bundle["zmnc"][:, 0],
+        dzmncds=bundle["dzmncds"][:, 0],
+        numnc=bundle["numnc"][:, 0],
+        dnumncds=bundle["dnumncds"][:, 0],
+        bmns=bundle["bmns"][:, 0],
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=_RTOL, atol=_ATOL)
 
 
 # ----------------------------------------------------------------------
@@ -354,6 +520,46 @@ def test_fourier_transform_even_matches_cpp(num_modes: int, num_points: int) -> 
     actual = np.asarray(fourier_transform_even(K, xm, xn, thetas, zetas))
 
     assert actual.shape == (num_modes,)
+    np.testing.assert_allclose(actual, expected, rtol=_RTOL, atol=_ATOL)
+
+
+def _numpy_fourier_transform_odd(K, xm, xn, thetas, zetas):
+    angle = thetas[:, None] * xm[None, :] - zetas[:, None] * xn[None, :]
+    basis = np.sin(angle)
+    numer = basis.T @ K
+    denom = np.sum(basis * basis, axis=0)
+    out = np.divide(numer, denom, out=np.zeros_like(numer), where=denom != 0.0)
+    out[0] = 0.0
+    return out
+
+
+def _numpy_fourier_transform_even(K, xm, xn, thetas, zetas):
+    angle = thetas[:, None] * xm[None, :] - zetas[:, None] * xn[None, :]
+    basis = np.cos(angle)
+    return (basis.T @ K) / np.sum(basis * basis, axis=0)
+
+
+def test_fourier_transform_odd_matches_closed_form_numpy_oracle() -> None:
+    xm, xn = _make_modes(10, seed=109)
+    thetas, zetas = _make_quad_points(113, seed=111)
+    rng = np.random.RandomState(113)
+    K = rng.randn(thetas.size)
+
+    actual = np.asarray(fourier_transform_odd(K, xm, xn, thetas, zetas))
+    expected = _numpy_fourier_transform_odd(K, xm, xn, thetas, zetas)
+
+    np.testing.assert_allclose(actual, expected, rtol=_RTOL, atol=_ATOL)
+
+
+def test_fourier_transform_even_matches_closed_form_numpy_oracle() -> None:
+    xm, xn = _make_modes(10, seed=115)
+    thetas, zetas = _make_quad_points(117, seed=117)
+    rng = np.random.RandomState(119)
+    K = rng.randn(thetas.size)
+
+    actual = np.asarray(fourier_transform_even(K, xm, xn, thetas, zetas))
+    expected = _numpy_fourier_transform_even(K, xm, xn, thetas, zetas)
+
     np.testing.assert_allclose(actual, expected, rtol=_RTOL, atol=_ATOL)
 
 
@@ -613,6 +819,187 @@ def test_compute_kmnc_kmns_zero_dc_sin_row() -> None:
         )
     )
     np.testing.assert_array_equal(actual[1, 0, :], np.zeros(3))
+
+
+def test_compute_kernels_cover_single_mode_and_empty_axes() -> None:
+    """Edge shapes stay aligned with the C++ projection kernels."""
+    xm, xn = _make_modes(1, seed=3241)
+    thetas, zetas = _make_quad_points(19, seed=3242)
+    bundle = _make_half_grid_fields(num_modes=1, num_surf=2, seed=3243, stellsym=True)
+    args = (
+        bundle["rmnc"],
+        bundle["drmncds"],
+        bundle["zmns"],
+        bundle["dzmnsds"],
+        bundle["numns"],
+        bundle["dnumnsds"],
+        bundle["bmnc"],
+        bundle["iota"],
+        bundle["G"],
+        bundle["I"],
+        xm,
+        xn,
+        thetas,
+        zetas,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(compute_kmns(*args)),
+        sopp.compute_kmns(*args),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+
+    empty_modes = (np.empty((0, 2), dtype=np.float64),) * 7
+    empty_mode_args = (
+        *empty_modes,
+        bundle["iota"],
+        bundle["G"],
+        bundle["I"],
+        np.empty((0,), dtype=np.float64),
+        np.empty((0,), dtype=np.float64),
+        thetas,
+        zetas,
+    )
+    assert compute_kmns(*empty_mode_args).shape == (0, 2)
+
+    empty_points = (np.empty((0,), dtype=np.float64),) * 2
+    actual_empty_points = np.asarray(compute_kmns(*args[:-2], *empty_points))
+    expected_empty_points = sopp.compute_kmns(*args[:-2], *empty_points)
+    np.testing.assert_array_equal(actual_empty_points, expected_empty_points)
+
+
+def test_mixed_precision_matches_float64_reference() -> None:
+    """Mixed-precision calls stay finite and close to the float64 lane."""
+    xm, xn = _make_modes(7, seed=3251)
+    thetas, zetas = _make_quad_points(31, seed=3252)
+    bundle = _make_half_grid_fields(num_modes=7, num_surf=3, seed=3253, stellsym=True)
+    float64_args = (
+        bundle["rmnc"],
+        bundle["drmncds"],
+        bundle["zmns"],
+        bundle["dzmnsds"],
+        bundle["numns"],
+        bundle["dnumnsds"],
+        bundle["bmnc"],
+        bundle["iota"],
+        bundle["G"],
+        bundle["I"],
+        xm,
+        xn,
+        thetas,
+        zetas,
+    )
+    float32_args = tuple(np.asarray(arg, dtype=np.float32) for arg in float64_args)
+
+    expected = np.asarray(compute_kmns(*float64_args), dtype=np.float64)
+    actual = np.asarray(compute_kmns(*float32_args), dtype=np.float64)
+
+    assert np.all(np.isfinite(actual))
+    np.testing.assert_allclose(actual, expected, rtol=2.0e-5, atol=2.0e-6)
+
+
+def test_mode_table_permutation_preserves_positional_pairing() -> None:
+    """Mode numbers and coefficients must be permuted together."""
+    xm, xn = _make_modes(9, seed=3261)
+    thetas, zetas = _make_quad_points(37, seed=3262)
+    rng = np.random.RandomState(3263)
+    K = rng.randn(thetas.size)
+    kmns = rng.randn(xm.size)
+    permutation = np.array([0, 3, 7, 2, 8, 1, 4, 6, 5])
+
+    odd_original = np.asarray(fourier_transform_odd(K, xm, xn, thetas, zetas))
+    odd_permuted = np.asarray(
+        fourier_transform_odd(K, xm[permutation], xn[permutation], thetas, zetas)
+    )
+    np.testing.assert_allclose(
+        odd_permuted,
+        odd_original[permutation],
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+
+    inverse_original = np.asarray(
+        inverse_fourier_transform_odd_1d(kmns, xm, xn, thetas, zetas)
+    )
+    inverse_permuted = np.asarray(
+        inverse_fourier_transform_odd_1d(
+            kmns[permutation], xm[permutation], xn[permutation], thetas, zetas
+        )
+    )
+    np.testing.assert_allclose(
+        inverse_permuted,
+        inverse_original,
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+
+
+def test_jitted_kernels_run_without_host_roundtrip() -> None:
+    """Device-resident inputs execute under strict transfer guard."""
+    xm, xn = _make_modes(5, seed=3271)
+    thetas, zetas = _make_quad_points(29, seed=3272)
+    bundle = _make_half_grid_fields(num_modes=5, num_surf=2, seed=3273, stellsym=True)
+    arrays = tuple(
+        jax.device_put(np.asarray(arg, dtype=np.float64))
+        for arg in (
+            bundle["rmnc"],
+            bundle["drmncds"],
+            bundle["zmns"],
+            bundle["dzmnsds"],
+            bundle["numns"],
+            bundle["dnumnsds"],
+            bundle["bmnc"],
+            bundle["iota"],
+            bundle["G"],
+            bundle["I"],
+            xm,
+            xn,
+            thetas,
+            zetas,
+        )
+    )
+    for array in arrays:
+        array.block_until_ready()
+
+    with jax.transfer_guard("disallow"):
+        result = jax.jit(compute_kmns)(*arrays)
+        result.block_until_ready()
+
+
+@pytest.mark.skipif(
+    not any(device.platform == "gpu" for device in jax.devices()),
+    reason="GPU deterministic lane requires a local GPU backend.",
+)
+def test_gpu_deterministic_lane_repeats_same_state() -> None:
+    """Same-state GPU execution is deterministic for the Boozer-radial kernel."""
+    gpu = next(device for device in jax.devices() if device.platform == "gpu")
+    xm, xn = _make_modes(6, seed=3281)
+    thetas, zetas = _make_quad_points(41, seed=3282)
+    bundle = _make_half_grid_fields(num_modes=6, num_surf=2, seed=3283, stellsym=True)
+    arrays = tuple(
+        jax.device_put(np.asarray(arg, dtype=np.float64), device=gpu)
+        for arg in (
+            bundle["rmnc"],
+            bundle["drmncds"],
+            bundle["zmns"],
+            bundle["dzmnsds"],
+            bundle["numns"],
+            bundle["dnumnsds"],
+            bundle["bmnc"],
+            bundle["iota"],
+            bundle["G"],
+            bundle["I"],
+            xm,
+            xn,
+            thetas,
+            zetas,
+        )
+    )
+
+    result_a = np.asarray(compute_kmns(*arrays))
+    result_b = np.asarray(compute_kmns(*arrays))
+    np.testing.assert_array_equal(result_b, result_a)
 
 
 # ----------------------------------------------------------------------

@@ -202,6 +202,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
                 
                 MYIF(deriv > 1) {
                     // outer product d_rij0_dm (x) d_rij0_dm
+                    // AlignedPaddedVec pads these work arrays to simd_size,
+                    // so the final load_aligned call stays in-bounds even
+                    // when ndofs + 2 is not divisible by the SIMD lane width.
                     for(int m = 0; m < ndofs + 2; m+=simd_size){
                         simd_t drtilij0_dm  = xs::load_aligned(&drtilij0[m]);
                         simd_t drtilij1_dm  = xs::load_aligned(&drtilij1[m]);

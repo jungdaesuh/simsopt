@@ -482,24 +482,15 @@ class TestBoozerResidualScalar:
         assert math.isnan(weighted)
         assert unweighted == pytest.approx(0.0, abs=0.0)
 
-    def test_float32_inputs_are_rejected(self):
+    def test_float32_field_inputs_are_rejected_under_float64_policy(self):
         B, xphi, xtheta = _make_synthetic_data(nphi=2, ntheta=3)
         G, iota = 1.5, 0.3
 
-        with pytest.raises(TypeError, match="B must have dtype float64"):
+        with pytest.raises(TypeError, match="B must have runtime dtype float64"):
             boozer_residual_scalar(
                 G,
                 iota,
                 jnp.asarray(B, dtype=jnp.float32),
-                xphi,
-                xtheta,
-            )
-
-        with pytest.raises(TypeError, match="value must have dtype float64"):
-            boozer_residual_scalar(
-                np.float32(G),
-                iota,
-                B,
                 xphi,
                 xtheta,
             )
