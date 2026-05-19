@@ -90,8 +90,7 @@ The corrected port analysis concludes items 1 and 2 (distance culling, CWS VJP) 
 The prerequisite reporting surface for "no legacy graph anywhere on the JAX
 target lane" is implemented for snapshots and accepted-step feasible-partial
 capture. The reduced strict full-run proof and restart-artifact spec
-rehydration checks are tracked in
-`docs/banana_jax_full_test_parity_coverage_impl_plan_2026-05-06.md`; CUDA proof
+rehydration checks are tracked in `docs/jax_parity_manifest.md`; CUDA proof
 remains separate.
 
 ### Validation

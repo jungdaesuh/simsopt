@@ -16,7 +16,7 @@ compilation & memory pressure / backend ergonomics) followed by three
 external cross-validation passes against HEAD `6b5867e04`. Items that
 round-2 already closed are explicitly excluded from this round. The
 third cross-validation tightened wording on N26 (VJP fan-out counts),
-N30 (Runpod toolchain citation), N31 (allocator env vars and proposed
+	N30 (CUDA toolchain citation), N31 (allocator env vars and proposed
 API surface), and N34 (no transparent in-process platform retargeting).
 
 ## Purpose
@@ -149,11 +149,9 @@ This round-3 doc is the synthesis of:
   - N26 VJP counts (file has 44 total `jax.vjp` calls; 26 in the
     lines 84-338 cluster) and softened the prescription from
     "`jax.linearize` only" to allow composed multi-arg `jax.vjp`.
-  - N30 Runpod toolchain citation: the canonical wording lives at
-    `docs/source/jax_gpu_setup.rst:421-466` ("Exact JAX 0.9.2 on the
-    stock CUDA 12.4 Runpod image needed CUDA toolkit 12.9", "CUDA
-    userspace/toolchain mismatches"). Project memory was internal,
-    not repo-canonical.
+  - N30 CUDA toolchain citation: the canonical wording lives in
+    `docs/source/jax_gpu_setup.rst`. Project memory was internal, not
+    repo-canonical.
   - N31 allocator semantics: `XLA_PYTHON_CLIENT_ALLOCATOR` accepts
     `platform` / `vmm` (BFC when unset); `vmm` uses
     `XLA_CLIENT_MEM_FRACTION`; `cudaMallocAsync` is selected via the
@@ -764,12 +762,9 @@ with CPU-forced multi-device equivalence and HLO collective proof.
 Round-2 N12 closed seed-batch sharding the same way. Both closeouts
 explicitly do **not** claim real-GPU speedup.
 
-The current Runpod block is documented in
-`docs/source/jax_gpu_setup.rst:421-466` ("Runpod Operational
-Notes"). Canonical wording: "Exact JAX 0.9.2 on the stock CUDA 12.4
-Runpod image needed CUDA toolkit 12.9 ... CUDA userspace/toolchain
-mismatches." That section is the authoritative repo source for the
-blocker; resolve from there.
+The current CUDA runtime compatibility block is documented in
+`docs/source/jax_gpu_setup.rst`. That section is the authoritative repo
+source for CUDA userspace/toolchain mismatches; resolve from there.
 
 ### Rationale
 
@@ -781,10 +776,9 @@ unfulfilled.
 
 ### Implementation
 
-1. Resolve the Runpod CUDA toolchain mismatch documented at
-   `docs/source/jax_gpu_setup.rst:421-466`: rebuild `jaxlib` against
-   the host CUDA, or pin a known-good jaxlib for the target H100
-   configuration. Land any in-flight launcher patches.
+1. Resolve CUDA toolchain mismatches documented in
+   `docs/source/jax_gpu_setup.rst`: rebuild `jaxlib` against the host
+   CUDA, or pin a known-good jaxlib for the target H100 configuration.
 2. Run a 1-vs-2-vs-4-GPU sweep for `integral_BdotN_surface_sharded`
    (`src/simsopt/jax_core/integral_bdotn.py:240`). Measure
    wall-time, HBM peak, HLO collective bytes.
@@ -847,13 +841,10 @@ The following env vars are not set or asserted by
   var that selects CUDA's asynchronous allocator. It is NOT a value
   of `XLA_PYTHON_CLIENT_ALLOCATOR`.
 
-Current production practice: scripts hand-export
-`XLA_PYTHON_CLIENT_PREALLOCATE=false`
-(`benchmarks/hf_jobs/run_production_gpu_proof.sh`,
-`.github/workflows/jax_smoke.yml:346,411`,
-`scripts/runpod_single_stage_continuation.py`, and
-`repo_bootstrap.py:287` for CUDA entrypoints only). Users who skip
-this hand-setting inherit JAX's default 75% preallocation.
+Current production practice: CUDA entrypoints hand-export
+`XLA_PYTHON_CLIENT_PREALLOCATE=false` in `.github/workflows/jax_smoke.yml`
+and `repo_bootstrap.py`. Users who skip this hand-setting inherit JAX's
+default 75% preallocation.
 
 ### Rationale
 
@@ -1142,7 +1133,7 @@ Additional 2026-05-19 review validation:
 - `python -m pytest tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_get_adjoint_runtime_state_status_stays_jax_scalar_until_public_boundary tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_linearization_residency_dual_instance_gradient_path_matches tests/test_backend.py::test_with_cpu_device_for_construction_uses_real_jax_cpu_default_device -q` -> 3 passed.
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/field/test_biotsavart_jax.py::TestBiotSavartJaxAnalytical::test_grouped_biot_savart_A_host_helper_matches_dense_kernel tests/field/test_biotsavart_jax.py::TestBiotSavartJaxAnalytical::test_grouped_biot_savart_B_jit_handles_mixed_quadrature_groups -q` -> 2 passed.
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/field/test_biotsavart_jax_parity.py::TestGroupedBiotSavartGradient::test_mixed_quad_gradient_fd -q` -> 1 passed.
-- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/integration/test_single_stage_physics_parity.py::test_single_stage_subprocess_env_preserves_existing_xla_flags tests/test_benchmark_helpers.py::test_repo_pythonpath_env_bundled_cuda_clears_local_toolchain_overrides tests/test_benchmark_helpers.py::test_repo_pythonpath_env_replaces_stale_cuda_determinism_flag tests/test_benchmark_helpers.py::test_build_provenance_includes_compilation_cache_metadata tests/test_benchmark_helpers.py::test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env tests/test_benchmark_helpers.py::test_gpu_parity_workflow_enforces_strict_transfer_guard_contract tests/test_benchmark_helpers.py::test_gpu_parity_workflow_adds_full_suite_disallow_lane tests/test_benchmark_helpers.py::test_smoke_workflow_adds_cuda_e2e_target_lane_gate tests/test_benchmark_helpers.py::test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane tests/test_hf_production_gpu_proof.py::test_run_production_gpu_proof_preserves_ld_library_path tests/test_hf_production_gpu_proof.py::test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override tests/test_lightning_production_gpu_proof.py::test_dry_run_emits_command_with_setuptools_scm_and_bash_safeguards -q` -> 12 passed.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/integration/test_single_stage_physics_parity.py::test_single_stage_subprocess_env_preserves_existing_xla_flags tests/test_benchmark_helpers.py::test_repo_pythonpath_env_bundled_cuda_clears_local_toolchain_overrides tests/test_benchmark_helpers.py::test_repo_pythonpath_env_replaces_stale_cuda_determinism_flag tests/test_benchmark_helpers.py::test_build_provenance_includes_compilation_cache_metadata tests/test_benchmark_helpers.py::test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env tests/test_benchmark_helpers.py::test_gpu_parity_workflow_enforces_strict_transfer_guard_contract tests/test_benchmark_helpers.py::test_gpu_parity_workflow_adds_full_suite_disallow_lane tests/test_benchmark_helpers.py::test_smoke_workflow_adds_cuda_e2e_target_lane_gate tests/test_benchmark_helpers.py::test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane -q` -> 9 passed.
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/geo/test_framedcurve_jax_wrappers_item18.py -q` -> 5 passed.
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/geo/test_curvexyzfouriersymmetries_spec_jax.py -q` -> 23 passed.
 - `.conda/jax/bin/python -m py_compile src/simsopt/backend/runtime.py src/simsopt/geo/boozersurface_jax.py src/simsopt/geo/surfaceobjectives_jax.py src/simsopt/jax_core/biotsavart.py benchmarks/validation_ladder_common.py tests/conftest.py tests/test_backend.py tests/test_benchmark_helpers.py tests/geo/test_boozersurface_jax.py tests/geo/test_surface_objectives_jax.py tests/field/test_biotsavart_jax.py` -> passed.

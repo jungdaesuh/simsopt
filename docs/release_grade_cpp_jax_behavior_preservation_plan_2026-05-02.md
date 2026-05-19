@@ -22,7 +22,6 @@ that still fails the release contract.
 This plan extends the existing trajectory-specific plan:
 
 - `docs/cpu_cpp_jax_cpu_full_trajectory_parity_plan_2026-04-28.md`
-- `docs/single_stage_parity_revalidation_2026-04-28.md`
 
 Validated current-tree facts:
 

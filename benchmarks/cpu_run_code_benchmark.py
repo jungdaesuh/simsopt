@@ -1,8 +1,8 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "jax==0.9.2",
-#     "jaxlib==0.9.2",
+#     "jax==0.10.0",
+#     "jaxlib==0.10.0",
 #     "numpy>=2.0",
 #     "scipy>=1.13",
 # ]
@@ -11,7 +11,7 @@
 End-to-end ``BoozerSurfaceJAX.run_code()`` CPU benchmark.
 
 Usage:
-    PYTHONPATH=src hf jobs uv run benchmarks/cpu_run_code_benchmark.py --flavor cpu-xl --timeout 15m
+    PYTHONPATH=src python benchmarks/cpu_run_code_benchmark.py
 
 This benchmark requires a full repo environment with ``simsoptpp`` available.
 It defaults to ``optimizer_backend="ondevice"`` so the benchmark measures the

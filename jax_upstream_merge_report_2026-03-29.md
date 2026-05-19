@@ -98,10 +98,6 @@ regressions surfaced in the merged branch and were fixed afterward.
   - Reworked negative-path tests so they actually hit the QUASR downloader
     branches instead of failing early on bad call signatures.
 
-- `tests/test_hf_production_gpu_proof.py`
-  - Fixed dry-run launcher tests so they do not assume the current local branch
-    already exists on GitHub.
-
 - `tests/geo/test_boozersurface_jax_private.py`
   - Narrowed a brittle private-optimizer test to its real contract: verifying
     ondevice routing, not convergence success on a mock problem.
@@ -127,7 +123,7 @@ The following post-merge validation work passed during the merge session:
   - `tests/geo/test_surface_rzfourier.py`
   - `tests/util/test_coil_optimization_helper_functions.py`
 
-- Benchmark / HF lane:
+- Benchmark / GPU lane:
   - green
 
 - Private optimizer lane:

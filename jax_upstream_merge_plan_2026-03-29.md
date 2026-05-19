@@ -216,7 +216,7 @@
     - Public JAX tests (no simsoptpp): `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/ -m "not private_optimizer_runtime" -v`
     - Private optimizer tests: `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/ -m "private_optimizer_runtime" -v`
     - M2 integration: `/Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/integration/ -v`
-    - Benchmark regressions: `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/test_benchmark_helpers.py /Users/suhjungdae/code/columbia/simsopt-jax/tests/test_hf_production_gpu_proof.py -v`
+    - Benchmark regressions: `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/test_benchmark_helpers.py -v`
 
 - [ ] **Verify upstream's new tests pass**
   - `/Users/suhjungdae/code/columbia/simsopt-jax/tests/geo/test_boozersurface.py` — upstream added 5 new tests (manual ls, need_to_run_code, G=None exact, non-stellsym exact)

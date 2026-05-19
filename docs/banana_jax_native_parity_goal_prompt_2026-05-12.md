@@ -65,7 +65,6 @@ Required investigation loop:
 
 1. Read the current docs and treat them as hypotheses, not proof:
    - docs/jax_parity_manifest.md
-   - docs/banana_jax_full_test_parity_coverage_impl_plan_2026-05-06.md
    - docs/banana_jax_native_port_todos_2026-05-05.md
    - docs/banana_cpp_cpu_dependency_manifest_2026-05-05.md
    - docs/single_stage_banana_jax_gpu_dependency_trace_2026-04-13.md
@@ -131,8 +130,8 @@ Required investigation loop:
    - Upstream: the CPU/C++/SciPy lane remains compatible with public SIMSOPT
      semantics and is not forced through JAX target internals.
    - Downstream: immutable specs, restart artifacts, parity matrix/report
-     consumers, docs manifest checks, HF/Runpod proof launchers, and JSON
-     schema readers still consume the emitted artifacts.
+     consumers, docs manifest checks, GPU proof entrypoints, and JSON schema
+     readers still consume the emitted artifacts.
    - E2E: Stage 2 strict reduced/full run -> saved spec/restart/output
      artifacts -> single-stage init/continuation -> parity matrix/proof report.
    - Report regressions as bugs even when isolated fixed-state checks still
@@ -141,7 +140,6 @@ Required investigation loop:
 8. Run or extend the existing proof surfaces:
    - tests/docs/test_banana_parity_coverage_manifest.py
    - tests/test_state_artifact_merge_logic.py
-   - tests/test_hf_production_gpu_proof.py
    - tests/integration/test_stage2_jax.py
    - tests/integration/test_stage2_target_lane_purity.py
    - tests/integration/test_single_stage_jax_cpu_reference.py

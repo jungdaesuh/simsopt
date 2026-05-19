@@ -86,6 +86,7 @@ set -euo pipefail
 : "${REPO_URL:?set REPO_URL}"
 : "${REPO_REF:?set REPO_REF}"
 : "${SCRATCH_ROOT:?set SCRATCH_ROOT}"
+JAX_GPU_WHEEL_SPEC="${JAX_GPU_WHEEL_SPEC:-jax[cuda12]==0.10.0}"
 
 mkdir -p "${SCRATCH_ROOT}"
 cd "${SCRATCH_ROOT}"
@@ -102,10 +103,19 @@ git submodule update --init --recursive
 python3 -m venv "${SCRATCH_ROOT}/venv"
 . "${SCRATCH_ROOT}/venv/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
-# Match the repo's current production GPU proof image line for the first proof.
-python -m pip install "jax[cuda12]==0.9.2"
-python -m pip install -e ".[deploy_gpu]"
+python -m pip install --upgrade "${JAX_GPU_WHEEL_SPEC}"
+python -m pip install -e ".[test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
 ```
+
+The virtualenv above is the pip-wheel GPU proof runtime. It is not GPU signoff
+by itself until the Slurm GPU smoke records a CUDA/GPU backend. The current
+candidate is `jax[cuda12]==0.10.0`; a 2026-05-19 dry-run resolved that exact
+wheel set for Linux `manylinux_2_27_x86_64` / Python 3.11. Record a fresh
+dry-run before launch, or use the NERSC-recommended NVIDIA JAX container lane.
+Do not launch the legacy `jax[cuda12]==0.9.2` lane; its required
+`jax-cuda12-plugin==0.9.2` wheel was not available for the target. Do not reuse
+a CPU-only `jax` / `jaxlib` virtualenv for the canary, shared smoke, or proof
+jobs below.
 
 Verify the local extension resolves from this checkout:
 
@@ -157,8 +167,11 @@ srun -n 1 -c 32 --gpus-per-task=1 bash -lc '
   python - <<PY
 import jax
 import jaxlib
+import importlib.metadata as metadata
 print("jax", jax.__version__)
 print("jaxlib", jaxlib.__version__)
+print("jax-cuda12-plugin", metadata.version("jax-cuda12-plugin"))
+print("jax-cuda12-pjrt", metadata.version("jax-cuda12-pjrt"))
 print("backend", jax.default_backend())
 print("devices", jax.devices())
 print("x64", jax.config.read("jax_enable_x64"))
@@ -217,6 +230,7 @@ srun -n 1 -c 32 --gpus-per-task=1 bash -lc '
   nvidia-smi | tee "'"${RESULTS_DIR}"'/nvidia-smi.txt"
   python - <<PY | tee "'"${RESULTS_DIR}"'/jax_smoke.txt"
 import json
+import importlib.metadata as metadata
 import jax
 import jaxlib
 from repo_bootstrap import bootstrap_local_simsopt
@@ -229,6 +243,8 @@ payload = {
     "slurm_job_id": "'"${SLURM_JOB_ID}"'",
     "jax": jax.__version__,
     "jaxlib": jaxlib.__version__,
+    "jax_cuda12_plugin": metadata.version("jax-cuda12-plugin"),
+    "jax_cuda12_pjrt": metadata.version("jax-cuda12-pjrt"),
     "backend": jax.default_backend(),
     "devices": [str(device) for device in jax.devices()],
     "x64": bool(jax.config.read("jax_enable_x64")),
@@ -323,25 +339,29 @@ Use the existing repo proof body instead of inventing a separate contract:
 ```bash
 python -m pip install -v -e .
 
-bash benchmarks/hf_jobs/run_production_gpu_proof.sh \
-  --results-dir "${RESULTS_DIR}/production_gpu_proof" \
-  --equilibria-dir examples/single_stage_optimization/equilibria \
+python benchmarks/stage2_e2e_comparison.py \
+  --results-dir "${RESULTS_DIR}/stage2" \
   --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
-  --stage2-platform cuda \
-  --single-stage-platform cuda \
-  --single-stage-warm-start-run-dir "${SINGLE_STAGE_WARM_START_RUN_DIR}"
+  --stage2-platform cuda
+
+python benchmarks/single_stage_outer_loop_probe.py \
+  --results-dir "${RESULTS_DIR}/single_stage" \
+  --platform cuda \
+  --warm-start-run-dir "${SINGLE_STAGE_WARM_START_RUN_DIR}"
 ```
 
 If using a runtime seed spec instead of a warm-start run directory:
 
 ```bash
-bash benchmarks/hf_jobs/run_production_gpu_proof.sh \
-  --results-dir "${RESULTS_DIR}/production_gpu_proof" \
-  --equilibria-dir examples/single_stage_optimization/equilibria \
+python benchmarks/stage2_e2e_comparison.py \
+  --results-dir "${RESULTS_DIR}/stage2" \
   --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
-  --stage2-platform cuda \
-  --single-stage-platform cuda \
-  --single-stage-jax-runtime-seed-spec "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC}"
+  --stage2-platform cuda
+
+python benchmarks/single_stage_outer_loop_probe.py \
+  --results-dir "${RESULTS_DIR}/single_stage" \
+  --platform cuda \
+  --jax-runtime-seed-spec "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC}"
 ```
 
 ## Acceptance Criteria
@@ -354,6 +374,7 @@ A GPU artifact is valid only if it records:
 - `nvidia-smi` output
 - NVIDIA driver and CUDA runtime visible to the job
 - `jax` and `jaxlib` versions
+- `jax-cuda12-plugin` and `jax-cuda12-pjrt` versions for pip-wheel GPU runs
 - `jax.default_backend()` as CUDA/GPU
 - `jax.devices()`
 - `JAX_ENABLE_X64=1` and JAX x64 enabled

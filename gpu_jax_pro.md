@@ -416,9 +416,9 @@ This is the biggest process gap I see.
 
 You have a very impressive validation ladder, including:
 
-* tiered tolerances in `validation_ladder_contract.py`, 
-* stage-2 parity probes, single-stage init parity, production-grid Boozer diagnostics, adjoint FD validation, and grouped-adjoint memory probes,    
-* and external GPU-proof tooling / HF job scripts. 
+* tiered tolerances in `validation_ladder_contract.py`,
+* stage-2 parity probes, single-stage init parity, production-grid Boozer diagnostics, adjoint FD validation, and grouped-adjoint memory probes,
+* and external GPU-proof tooling.
 
 But the routine GitHub JAX workflow shown in `jax_smoke.yml` is still **CPU-only**. It installs `jax==0.9.2` / `jaxlib==0.9.2`, runs public-lane CPU tests, integration tests, and lint, but not a real GPU parity lane. 
 
@@ -500,7 +500,7 @@ fully to:
 
 ### 4. Add a real automated GPU parity lane
 
-Keep HF jobs and production GPU proof, but do not let them be the only GPU correctness signal. `jax_smoke.yml` is already a good scaffold; it just needs one true GPU lane. 
+Keep production GPU proof, but do not let it be the only GPU correctness signal. `jax_smoke.yml` is already a good scaffold; it just needs one true GPU lane.
 
 ### 5. Keep SciPy as the trusted solver oracle longer than you may want
 

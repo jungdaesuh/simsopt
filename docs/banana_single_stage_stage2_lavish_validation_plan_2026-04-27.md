@@ -198,8 +198,7 @@ forensics:
 
 ### P4: GPU CI and Runtime Budgets
 
-- [ ] Add a real CUDA validation lane through self-hosted GPU CI or a Runpod
-  CI job.
+- [ ] Add a real CUDA validation lane through self-hosted GPU CI.
 - [ ] Require these CUDA lanes before release sign-off:
   - Stage 2 value/gradient CUDA parity.
   - Stage 2 short e2e CUDA parity.
@@ -305,7 +304,7 @@ python -m pytest -q tests/validation/test_banana_validation_manifest.py
   divergence.
 - Do not claim direct C++ second-derivative parity until there is a real
   second-derivative oracle.
-- Do not treat Runpod artifacts as equivalent to local pytest unless they are
+- Do not treat remote artifacts as equivalent to local pytest unless they are
   wired into an explicit pass/fail validation lane.
 
 ## Recommended First Patch

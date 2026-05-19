@@ -124,7 +124,7 @@ path keeps `einsum`/matmul/`jacfwd` for performance.
 
 Lane 4 and Lane 5 reproducers were lost from `/tmp` and their FMA-fusion claims
 were derived on aarch64 (local macOS) only. Phase 6 strategy depends on what
-fusion shape XLA picks on x86_64 production (RunPod A100/H200).
+fusion shape XLA picks on x86_64 CUDA production hosts.
 
 - [ ] Recreate `lane4_repro.py` for the 9-pattern FMA fusion sweep on x86_64.
   - File target: `benchmarks/parity/lane4_fma_fusion_repro_x86.py`.
@@ -764,7 +764,7 @@ that are necessary to close the gate.
 | Risk | Mitigation |
 |---|---|
 | ~~`jax.lax.optimization_barrier` behavior under autodiff transforms~~ — RETRACTED 2026-05-08 (see §19.2, §21). The HLO `optimization_barrier` is erased by `OptimizationBarrierExpander` before LLVM IR is emitted; the autodiff-rule question is moot at the LLVM-fusion layer. | Risk closed. Phase 4 investigates explicit grouping as a local candidate lever (see §19.5) rather than `optimization_barrier`; production acceptance still requires x86_64 float64 object-code proof. |
-| Cross-machine byte identity breaks (laptop dev vs RunPod prod) | Out of scope; document explicitly. Each host has its own per-build oracle. |
+| Cross-machine byte identity breaks (laptop dev vs production GPU host) | Out of scope; document explicitly. Each host has its own per-build oracle. |
 | Adding `reduction(+:val)` to C++ surface kernels in future would break per-build determinism | Add CI lint that blocks new OMP reductions in `surfacexyztensorfourier.h`, `biot_savart_impl.h`, `boozerresidual_impl.h`. |
 | `jax.jacfwd` over `*_cpu_ordered` may still choose derivative arithmetic/batching order that differs from C++ analytic derivative routines | Default to analytic dgamma_by_dcoeff kernels; do not rely on jacfwd for parity twins. |
 | M5 IFT adjoint and exact-Newton paths still drift | Out of scope here; track in `iota_penalty.adjoint` and exact-Newton parity ladder lanes separately. Phase 4 only addresses LS pre-Newton path. |
@@ -970,7 +970,7 @@ This section records the probes that retracted the original §10 levers
 grouping as the local candidate path. All probes ran on the local aarch64
 host (Apple Silicon)
 against the JAX 0.9.2 conda env at `.conda/jax/bin/python`. The
-production target is RunPod x86_64 (A100/H100); per the Side Track in §5,
+production target is x86_64 CUDA; per the Side Track in §5,
 those probes are pending and may pick a different fma shape — re-run before
 applying any restructuring conclusion to production.
 

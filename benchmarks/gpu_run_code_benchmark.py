@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "jax[cuda12]==0.9.2",
+#     "jax[cuda12]==0.10.0",
 #     "numpy>=2.0",
 #     "scipy>=1.13",
 # ]
@@ -10,7 +10,7 @@
 End-to-end ``BoozerSurfaceJAX.run_code()`` GPU benchmark.
 
 Usage:
-    PYTHONPATH=src hf jobs uv run benchmarks/gpu_run_code_benchmark.py --flavor a100-large --timeout 15m
+    PYTHONPATH=src python benchmarks/gpu_run_code_benchmark.py
 
 This benchmark requires a full repo environment with ``simsoptpp`` available.
 It defaults to ``optimizer_backend="ondevice"`` so the benchmark measures the

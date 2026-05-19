@@ -407,7 +407,7 @@ Goal: avoid permanent dual implementations.
 - [x] Worker B: single-stage retry/status audit.
 - [x] Worker C: Optimistix and Optax candidate harness.
 - [x] Worker D: bakeoff fixture runner and JSON schema.
-- [ ] Worker E: CUDA/Runpod validation once CPU tests are green.
+- [ ] Worker E: CUDA validation once CPU tests are green.
 
 Dependencies:
 

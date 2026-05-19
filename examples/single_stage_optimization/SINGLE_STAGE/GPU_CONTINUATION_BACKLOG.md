@@ -84,8 +84,8 @@ profiling and continuation-policy work is done.
 19. Keep the current parity and strict-transfer-guard tests as guardrails.
     Use them to catch regressions while changing throughput and continuation behavior.
 
-20. Keep Runpod and HF remote execution reproducible.
-    Reuse the checked-in launcher and preserve provenance.
+20. Keep remote execution reproducible.
+    Reuse checked-in GPU entrypoints and preserve provenance.
 
 21. Tune hardware and runtime only after the structural work is done.
     That is when A100 choice, XLA flags, PGLE, and related tuning become worth doing.

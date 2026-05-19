@@ -20,10 +20,8 @@ debugging, but it is not CPU/SciPy behavior.
 
 ## Pre-Implementation State
 
-JAX CPU vs H100 full production trajectory parity is proven for the matched
-target-lane contract in:
-
-- `docs/single_stage_matched_trajectory_findings_2026-04-28.md`
+JAX CPU vs H100 full production trajectory parity was tracked through the
+matched target-lane contract.
 
 CPU/C++ vs JAX CPU full production trajectory parity is not proven yet.
 

@@ -139,9 +139,10 @@ git submodule update --init --recursive
 module load python
 conda create -y -p "${ENV_ROOT}" python=3.11 pip numpy scipy
 conda activate "${ENV_ROOT}"
+JAX_GPU_WHEEL_SPEC="${JAX_GPU_WHEEL_SPEC:-jax[cuda12]==0.10.0}"
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install --upgrade "jax==0.10.0" "jaxlib==0.10.0"
+python -m pip install --upgrade "${JAX_GPU_WHEEL_SPEC}"
 python -m pip install -e ".[test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
 
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
@@ -167,8 +168,9 @@ PY
 
 Environment lane decision:
 
-- [ ] The conda environment above is the CPU/reference environment and a source
-  validation environment. It is not GPU signoff by itself.
+- [ ] The conda environment above is the pip-wheel GPU proof runtime and can
+  also run the CPU/reference waves. It is not GPU signoff by itself until Wave
+  2 records a CUDA/GPU backend from a Slurm GPU job.
 - [ ] Preferred Perlmutter GPU lane: run the proof inside a NERSC-supported
   NVIDIA JAX container through Shifter or Podman-HPC, then install the repo and
   non-JAX proof dependencies into that runtime without replacing the container's
@@ -176,6 +178,8 @@ Environment lane decision:
 - [ ] Proven pip-wheel candidate: `python -m pip install "jax[cuda12]==0.10.0"`
   resolves for Linux `manylinux_2_27_x86_64` / Python 3.11 in a 2026-05-19
   dry-run. Record a fresh dry-run in the proof bundle before launch.
+- [ ] Do not reuse a CPU-only `jax` / `jaxlib` environment for the Wave 2+
+  GPU preflight or proof waves.
 - [ ] Blocked legacy pip-wheel lane: do not launch a proof with
   `python -m pip install "jax[cuda12]==0.9.2"` or an unpinned `deploy_gpu`
   install that resolves to 0.9.2; that dry-run failed because the required
@@ -204,6 +208,7 @@ Record setup provenance:
 - [ ] `python --version`
 - [ ] `python -m pip freeze`
 - [ ] `python -c 'import jax, jaxlib; print(jax.__version__, jaxlib.__version__)'`
+- [ ] `python -c 'import importlib.metadata as m; print(m.version("jax-cuda12-plugin"), m.version("jax-cuda12-pjrt"))'`
 - [ ] `python -c 'import simsopt, simsoptpp; print(simsopt.__version__, simsoptpp.__file__)'`
 
 ### Common Slurm Job Prologue
@@ -418,6 +423,7 @@ srun -n 1 -c 32 --cpu-bind=cores --gpus-per-task=1 bash -lc '
   nvidia-smi | tee "'"${RESULTS_ROOT}"'/wave2_gpu_preflight/nvidia-smi.txt"
   python - <<PY | tee "'"${RESULTS_ROOT}"'/wave2_gpu_preflight/jax_gpu_preflight.json"
 import json
+import importlib.metadata as metadata
 import jax
 import jaxlib
 from repo_bootstrap import bootstrap_local_simsopt
@@ -430,6 +436,8 @@ payload = {
     "slurm_job_id": "'"${SLURM_JOB_ID}"'",
     "jax": jax.__version__,
     "jaxlib": jaxlib.__version__,
+    "jax_cuda12_plugin": metadata.version("jax-cuda12-plugin"),
+    "jax_cuda12_pjrt": metadata.version("jax-cuda12-pjrt"),
     "backend": jax.default_backend(),
     "devices": [str(device) for device in jax.devices()],
     "jax_platforms": "'"${JAX_PLATFORMS}"'",
@@ -619,29 +627,33 @@ export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-bash benchmarks/hf_jobs/run_production_gpu_proof.sh \
-  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/production_gpu_proof" \
-  --equilibria-dir examples/single_stage_optimization/equilibria \
+python benchmarks/stage2_e2e_comparison.py \
+  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/stage2" \
   --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
   --stage2-platform cuda \
   --stage2-maxiter "${STAGE2_GEOMETRY_REPRO_MAXITER}" \
-  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}" \
-  --single-stage-platform cuda \
-  --single-stage-warm-start-run-dir "${SINGLE_STAGE_WARM_START_RUN_DIR}"
+  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}"
+
+python benchmarks/single_stage_outer_loop_probe.py \
+  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/single_stage" \
+  --platform cuda \
+  --warm-start-run-dir "${SINGLE_STAGE_WARM_START_RUN_DIR}"
 ```
 
 Command with runtime seed spec:
 
 ```bash
-bash benchmarks/hf_jobs/run_production_gpu_proof.sh \
-  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/production_gpu_proof" \
-  --equilibria-dir examples/single_stage_optimization/equilibria \
+python benchmarks/stage2_e2e_comparison.py \
+  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/stage2" \
   --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
   --stage2-platform cuda \
   --stage2-maxiter "${STAGE2_GEOMETRY_REPRO_MAXITER}" \
-  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}" \
-  --single-stage-platform cuda \
-  --single-stage-jax-runtime-seed-spec "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC}"
+  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}"
+
+python benchmarks/single_stage_outer_loop_probe.py \
+  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/single_stage" \
+  --platform cuda \
+  --jax-runtime-seed-spec "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC}"
 ```
 
 Acceptance:
@@ -909,6 +921,7 @@ Every structured proof artifact must include or be accompanied by:
 - [ ] NVIDIA driver version
 - [ ] CUDA runtime visible to JAX
 - [ ] `jax` and `jaxlib` versions
+- [ ] `jax-cuda12-plugin` and `jax-cuda12-pjrt` versions for pip-wheel GPU runs
 - [ ] JAX default backend
 - [ ] JAX devices
 - [ ] x64 enabled
@@ -951,7 +964,6 @@ Every structured proof artifact must include or be accompanied by:
 
 - `docs/perlmutter_gpu_test_plan_2026-05-19.md`
 - `docs/jax_parity_manifest.md`
-- `docs/banana_jax_full_test_parity_coverage_impl_plan_2026-05-06.md`
 - `benchmarks/non_banana_example_cpp_jax_cpu_parity.py`
 - `benchmarks/stage2_e2e_comparison.py`
 - `benchmarks/single_stage_init_parity.py`
@@ -959,6 +971,5 @@ Every structured proof artifact must include or be accompanied by:
 - `benchmarks/tier5_performance_characterization.py`
 - `benchmarks/cpu_run_code_benchmark.py`
 - `benchmarks/gpu_run_code_benchmark.py`
-- `benchmarks/hf_jobs/run_production_gpu_proof.sh`
 - `benchmarks/fixtures/single_stage_seed_iota15/`
 - `scripts/run_gpu_parity.sh`

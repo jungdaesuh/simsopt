@@ -5629,10 +5629,6 @@ def _gpu_parity_workflow_path() -> Path:
     return _workflow_path("jax_gpu_parity.yml")
 
 
-def _h200_production_proof_workflow_path() -> Path:
-    return _workflow_path("jax_h200_production_proof.yml")
-
-
 def _workflow_job_section(
     workflow_text: str,
     job_name: str,
@@ -6521,7 +6517,6 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
         "benchmarks/manifests/stable_hardware_weekly_tier5.json",
         ".github/workflows/jax_gpu_parity.yml",
         ".github/workflows/jax_benchmark_reporting.yml",
-        ".github/workflows/jax_h200_production_proof.yml",
     )
 
     _assert_named_benchmark_env_bootstrap(workflow_text)
@@ -6593,29 +6588,6 @@ def test_smoke_workflow_runs_accessibility_with_simsoptpp_lane():
         in private_optimizer
     )
     assert "tests/geo/test_accessibility.py \\" not in public_unit
-
-
-def test_h200_production_proof_workflow_launches_real_h200_hf_job():
-    workflow_text = _h200_production_proof_workflow_path().read_text(encoding="utf-8")
-
-    assert "workflow_dispatch:" in workflow_text
-    assert "image:" in workflow_text
-    assert "HF_TOKEN: ${{ secrets.HF_TOKEN }}" in workflow_text
-    assert 'python -m pip install --upgrade "huggingface_hub>=1.12.0"' in workflow_text
-    assert "hf jobs hardware | tee hf_jobs_hardware.txt" in workflow_text
-    assert "grep -E '^h200[[:space:]]' hf_jobs_hardware.txt" in workflow_text
-    assert "benchmarks/hf_jobs/launch_production_gpu_proof.py" in workflow_text
-    assert "--hardware h200" in workflow_text
-    assert "--platform cuda" in workflow_text
-    assert "--no-detach" in workflow_text
-    assert (
-        '--repo-url "https://github.com/${{ github.repository }}.git"' in workflow_text
-    )
-    assert '--repo-ref "${{ github.ref_name }}"' in workflow_text
-    assert '--repo-sha "${{ github.sha }}"' in workflow_text
-    assert "--single-stage-warm-start-run-dir" in workflow_text
-    assert "--single-stage-jax-runtime-seed-spec" in workflow_text
-    assert "Set exactly one single-stage seed input." in workflow_text
 
 
 def test_smoke_workflow_pins_jax_ci_contract_ratchet_gate():
@@ -6837,7 +6809,8 @@ def test_canonicalize_traceable_exact_quadrature_preserves_non_stellsym_grid():
     np.testing.assert_allclose(np.asarray(quadpoints_theta), booz.quadpoints_theta)
     assert mask_indices.ndim == 1
     assert (
-        mask_indices.size == np.asarray(booz.quadpoints_phi).size
+        mask_indices.size
+        == np.asarray(booz.quadpoints_phi).size
         * np.asarray(booz.quadpoints_theta).size
         * 3
     )

@@ -493,21 +493,12 @@ of the current `minimize_lbfgs_host_core(...)`.
       `tests/geo/test_lbfgsb_scipy_jax_kernels.py`,
       `tests/geo/test_lbfgsb_scipy_parity.py`,
       `tests/geo/test_single_stage_example.py`, and
-      `tests/integration/test_stage2_jax.py`. A follow-up launcher provenance
-      fix was committed as
-      `fe0e69269 fix lightning preflight hardware provenance` and pushed to
-      the same branch. The follow-up keeps Lightning preflight `hardware` as
-      `["H200"]` instead of the character list produced by threading the
-      scalar Lightning machine string through the HF Jobs hardware-list
-      preflight helper.
+      `tests/integration/test_stage2_jax.py`.
 - [ ] Run GPU live optimizer proof and record the accepted trajectory/control
       tolerance policy. Current local JAX devices are CPU-only:
       `jax.devices() == [CpuDevice(id=0)]`, `jax.default_backend() == "cpu"`;
-      `nvidia-smi` is not installed. The no-cost Lightning launcher dry-run
-      against the pushed proof branch now emits `machine: "H200"` and
-      `hardware: ["H200"]`, and constructs the remote command against the
-      requested `--repo-sha`. This proves the launcher/preflight contract only;
-      it is not a CUDA execution proof. Re-run the dry-run with
+      `nvidia-smi` is not installed. Remote launcher dry-runs prove launcher
+      contracts only; they are not CUDA execution proof. Re-run GPU proof with
       `--repo-sha $(git rev-parse HEAD)` immediately before any paid GPU launch
       so the preflight artifact names the exact branch tip that will execute.
 - [ ] Run the banana/Stage 2 scientific trust-chain proof:

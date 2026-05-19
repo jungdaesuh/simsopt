@@ -27,7 +27,7 @@ port delivered.
   - Planning: `docs/perlmutter_gpu_test_plan_2026-05-19.md`,
     `docs/full_repo_banana_e2e_cpu_gpu_test_plan_2026-05-19.md`.
   - Prerequisites:
-    - [x] Resolve Runpod CUDA toolchain mismatch by running on Perlmutter
+    - [x] Resolve CUDA toolchain mismatch by running on Perlmutter
       with JAX/JAXLIB `0.10.0`.
     - [x] Multi-GPU hardware (≥ 4 devices in one box).
   - Action:

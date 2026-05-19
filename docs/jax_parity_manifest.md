@@ -6,34 +6,11 @@ Boozer rows refreshed on 2026-05-05 after the CPU closure in
 [`boozer_full_parity_plan_2026-05-04.md`](boozer_full_parity_plan_2026-05-04.md).
 This refresh does not claim CUDA hardware parity.
 
-Banana Stage 2 and single-stage JAX closure is tracked in
-[`banana_jax_full_test_parity_coverage_impl_plan_2026-05-06.md`](banana_jax_full_test_parity_coverage_impl_plan_2026-05-06.md).
-That file is a closure plan and progress ledger, not a full parity completion
-record; rows with CUDA status `open under P5` remain incomplete until real CUDA
-artifacts from the current repo state are captured.
-
-The banana-required versus full-upstream surface/objective parity boundary is
-tracked in
-[`banana_required_vs_full_upstream_surface_parity_impl_plan_2026-05-06.md`](banana_required_vs_full_upstream_surface_parity_impl_plan_2026-05-06.md).
-Use that Set A / Set B split when deciding whether a partial surface-family row
-is a banana blocker or a full-upstream parity backlog item.
-Local non-CUDA surface/objective implementation evidence from 2026-05-06 is
-summarized in the linked plan and in the documentary section below. That
-evidence closes CPU/JAX rows only; it does not close any CUDA status.
-M7 image publication and real-image H200 dry-run preflight are complete for the
-last pushed runtime validation tag `banana-surface-parity-m7-unitnormal-r1`
-(`0b6293b075342acc5cf996160ecf4bd87f709610`) using the published image
-`banana-surface-parity-m7-image-r1`, but the real CUDA rows remain open because
-the H200 launch is blocked by external GPU account credits. Two checked-in
-launchers now satisfy the same proof contract (same image, same `run_proof`
-argv, same `bootstrap_runtime.sh`): `benchmarks/hf_jobs/launch_production_gpu_proof.py`
-(Hugging Face Jobs, blocked on `402 Payment Required` at the latest attempt)
-and `benchmarks/lightning_jobs/launch_production_gpu_proof.py` (Lightning AI,
-defaults to lit-h200x-1 on Nebius, runs under `bash -lc` with
-`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT` exported and mounts the
-`simsopt-jax-parity-proofs` data connection at `/proof`). The latest local HF
-launcher fix pins `hf jobs inspect --format json` for no-detach status checks;
-include both launchers in the next validation tag before retrying real H200.
+Banana Stage 2 and single-stage JAX closure remains split between local CPU/JAX
+evidence and CUDA evidence. Local non-CUDA surface/objective implementation
+evidence closes CPU/JAX rows only; it does not close any CUDA status. CUDA rows
+remain incomplete until current-tree GPU artifacts are captured by checked-in
+local or CI proof entrypoints.
 
 Exact parity means the mirrored JAX test runs with:
 

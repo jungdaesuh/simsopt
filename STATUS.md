@@ -610,9 +610,7 @@ from simsopt.backend import get_backend, get_jax_platform, is_jax_backend
 | Doc | Topic |
 |---|---|
 | `docs/scipy_lbfgsb_jax_parity_plan_2026-05-15.md` | L-BFGS-B port plan |
-| `docs/banana_jax_full_test_parity_coverage_impl_plan_2026-05-06.md` | Banana test parity |
 | `docs/non_banana_example_cpp_jax_cpu_parity_plan_2026-05-12.md` | Non-banana CPU/JAX parity |
-| `docs/banana_required_vs_full_upstream_surface_parity_impl_plan_2026-05-06.md` | Surface parity scope |
 | `docs/boozer_hessian_cpp_oracle_parity_impl_plan_2026-05-05.md` | Boozer Hessian parity |
 | `docs/example_cpp_jax_cpu_gpu_parity_expansion_plan_2026-05-14.md` | GPU parity expansion |
 | `docs/release_grade_cpp_jax_behavior_preservation_plan_2026-05-02.md` | Release-grade behavior preservation |

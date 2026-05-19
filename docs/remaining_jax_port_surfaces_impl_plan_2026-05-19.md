@@ -811,7 +811,7 @@ single explicit JAX loop, with host I/O only at documented boundaries.
 | Augmented Lagrangian inner loop fails to converge on stiff equality constraint | medium | medium | expose `rho_max` and `beta` knobs and return a failed solver status for the selected JAX method |
 | `shard_map` per-device Jacobian column block requires padding when `dof_size % n_devices != 0` | high | low | pad with no-op columns and discard at the rank-0 assembly step |
 | `optimistix.LevenbergMarquardt` does not converge for ill-conditioned QFM problems | low | medium | allow the caller to select `optimistix.BFGS` or the JAX BFGS penalty path explicitly; do not auto-switch solvers |
-| CUDA toolchain mismatch for new kernels on Runpod | medium | medium | already tracked under `project_runpod_cuda_block`; reuse the launcher patches landed in `scripts/runpod_single_stage_continuation.py` |
+| CUDA toolchain mismatch for new kernels | medium | medium | validate on Perlmutter or the current GPU CI lane with the pinned CUDA/JAX runtime |
 | ProfileSpline off-knot drift between SciPy fit and JAX evaluation | low | medium | reuse SciPy fit coefficients; assert at-knot `rtol=1e-12` and bound off-knot via SciPy's own truncation budget |
 | MPI workers idle while JAX kernels saturate a single GPU | medium | low | document the recommended one-rank-per-GPU layout in `docs/source/jax_gpu_setup.rst`; do not change the MPI worker contract |
 
