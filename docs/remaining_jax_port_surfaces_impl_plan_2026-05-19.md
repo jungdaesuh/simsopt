@@ -516,19 +516,21 @@ Two production-grade options are viable; this plan picks both and lets
 the user choose by mode:
 
 - **Penalty path on-device:** keep the same penalty objective but
-  drive it with either `jax.scipy.optimize.minimize(method="BFGS")`
-  for forward solves or `optimistix.BFGS` /
-  `optimistix.LevenbergMarquardt` in the optional
-  `simsopt[JAX_OPTIMISTIX]` lane. Official JAX docs state that
-  `jax.scipy.optimize.minimize` is BFGS-only and not differentiable, so
-  derivative-through-solve claims belong only to the explicit
-  Optimistix / implicit-adjoint route.
+  drive it with an in-repo fixed-iteration BFGS loop for forward
+  solves. Official JAX docs/source state that
+  `jax.scipy.optimize.minimize` is BFGS-only and not differentiable
+  through the solve, and live strict-transfer probes showed that it
+  stages an internal identity matrix under `transfer_guard("disallow")`;
+  the QFM solver therefore cannot use it as the production strict-lane
+  core. Derivative-through-solve claims remain reserved for a future
+  explicit Optimistix / implicit-adjoint route.
 - **Equality-constrained path:** wrap the QFM kernel in an
   augmented-Lagrangian outer loop. JAX has no SLSQP, and optimistix
   does not ship a primal-dual SQP. Augmented Lagrangian is the
-  canonical drop-in for equality-constrained problems on JAX, gives
-  bit-stable convergence, and is differentiable end-to-end via the
-  inner-solve adjoint pattern from §2.3.
+  canonical drop-in for equality-constrained problems on JAX. The
+  current implementation is a forward-solve route only; convergence
+  comparison against host SLSQP and derivative-through-solve support
+  remain open acceptance gates.
 
 The host SLSQP path stays as the `native_cpu` reference behavior only.
 If a JAX QFM method is selected, missing optional dependencies or
@@ -538,35 +540,68 @@ to host SLSQP.
 ### 7.2 Detailed implementation plan
 
 - [ ] **N5.1 — `simsopt.jax_core/qfm_solver.py`**
-  - [ ] Pure functions
-    `qfm_penalty_solve_jax(spec, coil_set_spec, target_label, constraint_weight, init_dofs, *, max_iter, tol, optimizer)`
-    returning `(final_dofs, info_pytree)` where `optimizer` is one of
-    `"bfgs"` (`jax.scipy.optimize`, forward solve only) or `"lm"` /
-    `"optimistix-bfgs"` (optional Optimistix lane). Uses the existing
-    `surface_qfm_penalty_value_and_grad_jax_from_dofs`.
-  - [ ] `qfm_augmented_lagrangian_solve_jax(spec, coil_set_spec, target_label, init_dofs, *, max_outer, inner_max_iter, tol)`
+  - [x] Pure functions
+    `qfm_penalty_solve_jax(spec, coil_set_spec, label, targetlabel,
+    constraint_weight, init_dofs, *, max_iter, tol, optimizer)`
+    returning `(final_dofs, info_pytree)` are implemented for
+    `optimizer="bfgs"` via an in-repo fixed-iteration BFGS loop whose
+    line-search and inverse-Hessian state stay in staged JAX arrays.
+    The existing
+    `surface_qfm_*_jax_from_dofs` functions now delegate to
+    `simsopt.jax_core.qfm_solver` as the SSOT. Optional `"lm"` /
+    `"optimistix-bfgs"` routes remain unwired and fail closed instead
+    of falling back.
+  - [x] `qfm_augmented_lagrangian_solve_jax(spec, coil_set_spec,
+    label, targetlabel, init_dofs, *, max_outer, inner_max_iter, tol)`
     implementing the Hestenes–Powell augmented Lagrangian with
     multiplier update rule
     $\lambda_{k+1} = \lambda_k + \rho_k (L(x_k) - \text{target})$,
-    $\rho_{k+1} = \min(\rho_{\max}, \beta \rho_k)$. Inner step uses
-    the same `optimistix` minimiser as the penalty path.
-- [ ] **N5.2 — `simsopt.geo/qfmsurface_jax.py`**
-  - [ ] `QfmSurfaceJAX` adapter mirroring `QfmSurface`. Constructor
-    accepts the JAX field/surface specs and the (frozen) coil set.
-  - [ ] `.minimize_qfm_penalty_jax(tol, maxiter, constraint_weight)`
+    $\rho_{k+1} = \min(\rho_{\max}, \beta \rho_k)$. Current inner
+    step uses the same transfer-guard-clean in-repo BFGS route as the
+    penalty path; optional Optimistix inner solves remain open.
+- [x] **N5.2 — `simsopt.geo/qfmsurface_jax.py`**
+  - [x] `QfmSurfaceJAX` adapter mirroring `QfmSurface`. Constructor
+    accepts the JAX field/surface pair; the immutable coil set spec is
+    materialised from explicit JAX coil DOFs at the solve boundary so
+    current coil DOFs are not snapshotted at construction.
+  - [x] `.minimize_qfm_penalty_jax(tol, maxiter, constraint_weight)`
     drives `qfm_penalty_solve_jax`.
-  - [ ] `.minimize_qfm_exact_jax(tol, maxiter)` drives
+  - [x] `.minimize_qfm_exact_jax(tol, maxiter)` drives
     `qfm_augmented_lagrangian_solve_jax`.
-  - [ ] `.minimize_qfm(...)` dispatches on `method ∈ {"BFGS", "LM",
+  - [x] `.minimize_qfm(...)` dispatches on `method ∈ {"BFGS", "LM",
     "AL"}` and forwards to the JAX paths only when
     `simsopt.backend.is_jax_backend()` returns true. In `native_cpu`,
-    the existing `QfmSurface` implementation remains the reference
-    path. A requested JAX method must not auto-retry with host SLSQP.
-  - [ ] Surface DOF write-back at the end of each call uses the same
+    `BFGS` and `AL` route to the existing `QfmSurface` reference
+    methods. The unwired JAX-only `LM` route fails closed instead of
+    auto-retrying with host SLSQP.
+  - [x] Surface DOF write-back at the end of each call uses the same
     `s.x = device_get(final_dofs)` pattern we already use for the
     LS / exact Boozer paths.
 - [ ] **N5.3 — Tests**
   - [ ] `tests/geo/test_qfmsurface_jax.py`:
+    - [x] Public JAX BFGS penalty solve reduces the fixed-state
+      QFM penalty on a low-resolution NCSX fixture.
+    - [x] `QfmSurfaceJAX.qfm_penalty_constraints(..., derivatives=1)`
+      matches the pure value/gradient helper without mutating
+      `surface.x`.
+    - [x] The in-repo BFGS solver core runs under
+      `jax.transfer_guard("disallow")` on the low-resolution NCSX
+      fixture.
+    - [x] The augmented-Lagrangian wrapper keeps scalar multiplier /
+      penalty-weight updates and the inner BFGS call clean under
+      `jax.transfer_guard("disallow")` for a one-outer-step smoke.
+    - [x] The augmented-Lagrangian result schema pairs public
+      `fun=QFM residual` with the QFM objective gradient rather than
+      the augmented-objective gradient.
+    - [x] The augmented-Lagrangian diagnostics report
+      `augmented_value`, `multiplier`, and `penalty_weight` for the
+      final inner objective actually minimized, not the next outer-loop
+      state.
+    - [x] Strict JAX backend dispatch writes final DOFs only after the
+      pure solve and does not enter native SLSQP for `method="AL"`.
+    - [x] Native dispatch rejects the unwired JAX-only `method="LM"`
+      instead of silently routing it to host SLSQP.
+    - [x] `simsopt.geo` lazy-exports `QfmSurfaceJAX`.
     - [ ] Penalty path produces residual ≤ host-SciPy LBFGS-B path on
       the existing `tests/geo/test_qfmsurface.py` fixture
       (`ls_wrapper_gradient` lane).
@@ -576,10 +611,31 @@ to host SLSQP.
     - [ ] `derivative_heavy` lane: fixed-state penalty objective
       gradients match FD. For converged-solve sensitivities, test only
       the Optimistix / implicit-adjoint route; do not claim
-      differentiation through `jax.scipy.optimize.minimize`.
+      differentiation through the current forward BFGS solve.
 - [ ] **N5.4 — Acceptance**
-  - [ ] Test lane passes on CPU; smoke on CUDA.
-  - [ ] No `surface.x = x` mutations inside the inner solve.
+  - [x] Focused CPU evidence: `JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu
+    pytest -q -p no:cacheprovider tests/geo/test_qfmsurface_jax.py`
+    passed on 2026-05-19 (`10 passed`).
+  - [x] Existing QFM penalty kernel evidence stayed green:
+    `JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu pytest -q -p
+    no:cacheprovider tests/geo/test_surface_objectives_jax.py::TestQfmPenaltyJAX
+    tests/geo/test_qfm.py::QfmSurfaceTests::test_qfm_penalty_constraints_gradient`
+    passed on 2026-05-19 (`5 passed, 8 subtests passed`).
+  - [x] Local quality evidence: `ruff check --no-cache`,
+    `ruff format --check --no-cache`, isolated
+    `mypy --cache-dir=/dev/null --follow-imports=skip --ignore-missing-imports`,
+    and `git diff --check` passed on the N5 touched files on 2026-05-19.
+  - [x] No `surface.x = x` mutations inside the inner solve for the
+    implemented BFGS/AL adapter seam; tests assert the surface is
+    unchanged while the pure solver is running and only receives final
+    device DOFs after the solver returns.
+  - [x] Strict transfer-guard evidence: the implemented BFGS solver
+    and AL wrapper paths are covered by
+    `tests/geo/test_qfmsurface_jax.py::test_qfm_penalty_solve_jax_transfer_guard_clean`
+    and
+    `tests/geo/test_qfmsurface_jax.py::test_qfm_augmented_lagrangian_solve_jax_transfer_guard_clean`.
+  - [ ] Full host-SciPy LBFGS-B / host SLSQP convergence comparison
+    and CUDA smoke remain open.
 
 ---
 

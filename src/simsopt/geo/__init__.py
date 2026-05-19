@@ -56,6 +56,7 @@ _JAX_GEO_MODULES = ("boozersurface_jax",)
 _SIMSOPT_JAX_GEO_MODULES = (
     "curveobjectives_jax",
     "surfaceobjectives_jax",
+    "qfmsurface_jax",
     "permanent_magnet_grid_jax",
 )
 _DYNAMIC_JAX_EXPORTS = {
