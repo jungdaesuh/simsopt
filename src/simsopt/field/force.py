@@ -46,10 +46,8 @@ __all__ = [
     "_induced_currents_pure",
     "NetFluxes",
     "B2Energy",
-    "B2EnergyJAX",
     "SquaredMeanForce",
     "LpCurveForce",
-    "LpCurveForceJAX",
     "SquaredMeanTorque",
     "LpCurveTorque",
 ]
@@ -952,29 +950,35 @@ def _net_ext_flux_eval(gammadash, A_ext, downsample):
     return net_ext_fluxes_pure(gammadash, A_ext, downsample)
 
 
-_B2ENERGY_JAX = jit(_b2energy_eval, static_argnums=(3,))
-_B2ENERGY_GRAD = jit(grad(_b2energy_eval, argnums=(0, 1, 2)), static_argnums=(3,))
-_NET_EXT_FLUX_JAX = jit(_net_ext_flux_eval, static_argnums=(2,))
-_NET_EXT_FLUX_GRAD = jit(grad(_net_ext_flux_eval, argnums=(0, 1)), static_argnums=(2,))
-_SQUARED_MEAN_FORCE_JAX = jit(_squared_mean_force_eval, static_argnums=(9,))
+_B2ENERGY_JAX = jit(_b2energy_eval, static_argnames=("downsample",))
+_B2ENERGY_GRAD = jit(
+    grad(_b2energy_eval, argnums=(0, 1, 2)), static_argnames=("downsample",)
+)
+_NET_EXT_FLUX_JAX = jit(_net_ext_flux_eval, static_argnames=("downsample",))
+_NET_EXT_FLUX_GRAD = jit(
+    grad(_net_ext_flux_eval, argnums=(0, 1)), static_argnames=("downsample",)
+)
+_SQUARED_MEAN_FORCE_JAX = jit(_squared_mean_force_eval, static_argnames=("downsample",))
 _SQUARED_MEAN_FORCE_GRAD = jit(
     grad(_squared_mean_force_eval, argnums=tuple(range(9))),
-    static_argnums=(9,),
+    static_argnames=("downsample",),
 )
-_LP_FORCE_JAX = jit(_lp_force_eval, static_argnums=(14,))
+_LP_FORCE_JAX = jit(_lp_force_eval, static_argnames=("downsample",))
 _LP_FORCE_GRAD = jit(
     grad(_lp_force_eval, argnums=tuple(range(10))),
-    static_argnums=(14,),
+    static_argnames=("downsample",),
 )
-_LP_TORQUE_JAX = jit(_lp_torque_eval, static_argnums=(14,))
+_LP_TORQUE_JAX = jit(_lp_torque_eval, static_argnames=("downsample",))
 _LP_TORQUE_GRAD = jit(
     grad(_lp_torque_eval, argnums=tuple(range(10))),
-    static_argnums=(14,),
+    static_argnames=("downsample",),
 )
-_SQUARED_MEAN_TORQUE_JAX = jit(_squared_mean_torque_eval, static_argnums=(9,))
+_SQUARED_MEAN_TORQUE_JAX = jit(
+    _squared_mean_torque_eval, static_argnames=("downsample",)
+)
 _SQUARED_MEAN_TORQUE_GRAD = jit(
     grad(_squared_mean_torque_eval, argnums=tuple(range(9))),
-    static_argnums=(9,),
+    static_argnames=("downsample",),
 )
 
 
@@ -1061,6 +1065,14 @@ def _coil_coil_inductances_pure(
     return 1e-7 * Lij
 
 
+def _solve_triangular_columns(matrix, rhs_matrix, *, lower):
+    return vmap(
+        lambda rhs: jscp.linalg.solve_triangular(matrix, rhs, lower=lower),
+        in_axes=1,
+        out_axes=1,
+    )(rhs_matrix)
+
+
 def _coil_coil_inductances_inv_pure(gammas, gammadashs, downsample, regularizations):
     """
     Pure function for computing the inverse of the coil inductance matrix L. This matrix
@@ -1119,8 +1131,9 @@ def _coil_coil_inductances_inv_pure(gammas, gammadashs, downsample, regularizati
     C = jnp.linalg.cholesky(
         _coil_coil_inductances_pure(gammas, gammadashs, downsample, regularizations)
     )
-    inv_C = jscp.linalg.solve_triangular(C, jnp.eye(C.shape[0]), lower=True)
-    inv_L = jscp.linalg.solve_triangular(C.T, inv_C, lower=False)
+    eye = jnp.eye(C.shape[0], dtype=C.dtype)
+    inv_C = _solve_triangular_columns(C, eye, lower=True)
+    inv_L = _solve_triangular_columns(C.T, inv_C, lower=False)
     return inv_L
 
 
@@ -1315,9 +1328,6 @@ class B2Energy(Optimizable):
         )
 
     return_fn_map = {"J": J, "dJ": dJ}
-
-
-B2EnergyJAX = B2Energy
 
 
 def _net_fluxes_pure(
@@ -2279,9 +2289,6 @@ class LpCurveForce(Optimizable):
         return dJ
 
     return_fn_map = {"J": J, "dJ": dJ}
-
-
-LpCurveForceJAX = LpCurveForce
 
 
 def lp_torque_pure(

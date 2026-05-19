@@ -46,6 +46,7 @@ from simsopt.jax_core.analytic_pure_fields import (
     toroidal_dB,
 )
 from simsopt.jax_core.magnetic_axis_helpers import (
+    _first_eigenvalue_angle_2x2,
     axis_position,
     axis_position_and_tangent,
     on_axis_iota_rk,
@@ -94,6 +95,40 @@ class TestTangentMapStateConvention:
     def test_y0_is_identity_flattened(self):
         y0 = np.asarray(tangent_map_y0())
         np.testing.assert_array_equal(y0, np.array([1.0, 0.0, 0.0, 1.0]))
+
+    @pytest.mark.parametrize(
+        "matrix",
+        [
+            np.array([[0.25, -1.5], [0.75, 0.25]], dtype=np.float64),
+            np.array([[0.8, 0.2], [-0.4, 0.8]], dtype=np.float64),
+            np.array([[2.0, 0.25], [0.0, 0.5]], dtype=np.float64),
+        ],
+    )
+    def test_first_eigenvalue_angle_2x2_matches_jax_eig(self, matrix):
+        matrix_jax = jnp.asarray(matrix, dtype=jnp.float64)
+        evals, _ = jnp.linalg.eig(matrix_jax)
+        expected = jnp.arctan2(jnp.imag(evals[0]), jnp.real(evals[0]))
+
+        actual = _first_eigenvalue_angle_2x2(matrix_jax)
+
+        np.testing.assert_allclose(
+            np.asarray(actual),
+            np.asarray(expected),
+            rtol=_DIRECT_RTOL,
+            atol=_DIRECT_ATOL,
+        )
+
+    def test_first_eigenvalue_angle_2x2_uses_closed_form_primitives(self):
+        matrix = jnp.asarray(
+            [[0.25, -1.5], [0.75, 0.25]],
+            dtype=jnp.float64,
+        )
+
+        jaxpr = jax.make_jaxpr(_first_eigenvalue_angle_2x2)(matrix).jaxpr
+
+        primitive_names = {eqn.primitive.name for eqn in jaxpr.eqns}
+        assert "eig" not in primitive_names
+        assert "atan2" in primitive_names
 
 
 # ── axis_position parity against CurveRZFourier.gamma ─────────────────

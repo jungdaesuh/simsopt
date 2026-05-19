@@ -40,7 +40,7 @@ def get_curve(curvetype, rotated, x=np.asarray([0.5])):
     Returns:
         Curve: The generated curve object.
     """
-    np.random.seed(2)
+    rng = np.random.RandomState(2)
     rand_scale = 0.01
     order = 4
 
@@ -76,7 +76,7 @@ def get_curve(curvetype, rotated, x=np.asarray([0.5])):
     else:
         assert False
 
-    curve.x = dofs + rand_scale * np.random.rand(len(dofs)).reshape(dofs.shape)
+    curve.x = dofs + rand_scale * rng.rand(len(dofs)).reshape(dofs.shape)
     if rotated:
         curve = RotatedCurve(curve, 0.5, flip=False)
     return curve
@@ -237,13 +237,12 @@ class CoilFormatConvertTesting(unittest.TestCase):
             )
             np.testing.assert_allclose(base_curves[j_coil].x, loaded_coils[j_coil].curve.x)
 
-        np.random.seed(1)
-
         bs = BiotSavart(coils)
         loaded_bs = BiotSavart(loaded_coils)
 
         points = np.asarray(17 * [[0.9, 0.4, -0.85]])
-        points += 0.01 * (np.random.rand(*points.shape) - 0.5)
+        rng = np.random.RandomState(1)
+        points += 0.01 * (rng.rand(*points.shape) - 0.5)
         bs.set_points(points)
         loaded_bs.set_points(points)
 
@@ -391,8 +390,8 @@ class CoilFormatConvertTesting(unittest.TestCase):
             dofs[1] = 1.0
             dofs[2 * order + 3] = 1.0
             dofs[4 * order + 3] = 1.0
-            np.random.seed(42)
-            curve.x = dofs + 0.01 * np.random.randn(curve.dof_size)
+            rng = np.random.RandomState(42)
+            curve.x = dofs + 0.01 * rng.randn(curve.dof_size)
             return curve
 
         n1, n2 = 8, 24

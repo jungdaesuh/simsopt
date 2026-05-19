@@ -108,7 +108,7 @@ class ParticleTracingTesting(unittest.TestCase):
         m = PROTON_MASS
         q = ELEMENTARY_CHARGE
         Ekin = 1000*ONE_EV
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         umin = 0.25
         umax = 0.75
         tmax = 2e-5
@@ -137,7 +137,7 @@ class ParticleTracingTesting(unittest.TestCase):
         for i in range(nparticles):
             gc_ty = gc_tys[i]
             fo_ty = fo_tys[i]
-            idxs = np.random.randint(0, gc_ty.shape[0], size=(N, ))
+            idxs = rng.randint(0, gc_ty.shape[0], size=(N, ))
             ts = gc_ty[idxs, 0]
             gc_xyzs = gc_ty[idxs, 1:4]
             bsh.set_points(gc_xyzs)
@@ -175,7 +175,6 @@ class ParticleTracingTesting(unittest.TestCase):
         # check that the axis is classified as inside the domain
         assert sc.evaluate_xyz(ma.gamma()[:1, :]) > 0
         assert sc.evaluate_xyz(2*ma.gamma()[:1, :]) < 0
-        np.random.seed(1)
         gc_tys, gc_phi_hits = trace_particles_starting_on_curve(
             ma, bsh, nparticles, tmax=1e-4, seed=1, mass=m, charge=q,
             Ekin=Ekin, umin=-0.1, umax=+0.1, phis=phis, mode='gc_vac',
@@ -195,8 +194,8 @@ class ParticleTracingTesting(unittest.TestCase):
         Ekin = 9000*ONE_EV
         vtotal = np.sqrt(2*Ekin/m)  # Ekin = 0.5 * m * v^2 <=> v = sqrt(2*Ekin/m)
         xyz_gc = ma.gamma()[:10, :]
-        np.random.seed(1)
-        vtangs = np.random.uniform(size=(xyz_gc.shape[0], )) * vtotal
+        rng = np.random.RandomState(1)
+        vtangs = rng.uniform(size=(xyz_gc.shape[0], )) * vtotal
         xyz, vxyz, _ = gc_to_fullorbit_initial_guesses(bsh, xyz_gc, vtangs, vtotal, m, q, eta=etas[0])
         for eta in etas[1:]:
             tmp = gc_to_fullorbit_initial_guesses(bsh, xyz_gc, vtangs, vtotal, m, q, eta=eta)
@@ -225,7 +224,7 @@ class ParticleTracingTesting(unittest.TestCase):
         q = ELEMENTARY_CHARGE
         tmax = 1e-5
         Ekin = 100*ONE_EV
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
 
         gc_tys, gc_phi_hits = trace_particles_starting_on_curve(
             ma, bsh, nparticles, tmax=tmax, seed=1, mass=m, charge=q,
@@ -251,7 +250,7 @@ class ParticleTracingTesting(unittest.TestCase):
         for i in range(nparticles):
             fo_ty = fo_tys[i]
             gc_ty = gc_tys[i]
-            idxs = np.random.randint(0, gc_ty.shape[0], size=(N, ))
+            idxs = rng.randint(0, gc_ty.shape[0], size=(N, ))
             gc_xyzs = gc_ty[idxs, 1:4]
             fo_xyzs = fo_ty[idxs, 1:4]
             bsh.set_points(gc_xyzs)
@@ -308,7 +307,7 @@ class ParticleTracingTesting(unittest.TestCase):
         q = ELEMENTARY_CHARGE
         tmax = 1e-4
         Ekin = 100*ONE_EV
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
 
         gc_tys, gc_phi_hits = trace_particles_starting_on_curve(
             ma, bsh, nparticles, tmax=tmax, seed=1, mass=m, charge=q,
@@ -325,7 +324,7 @@ class ParticleTracingTesting(unittest.TestCase):
         max_pphi_gc_error = np.array([])
         for i in range(nparticles):
             gc_ty = gc_tys[i]
-            idxs = np.random.randint(0, gc_ty.shape[0], size=(N, ))
+            idxs = rng.randint(0, gc_ty.shape[0], size=(N, ))
             gc_xyzs = gc_ty[idxs, 1:4]
             bsh.set_points(gc_xyzs)
             AbsBs = bsh.AbsB()
@@ -360,8 +359,6 @@ class ParticleTracingTesting(unittest.TestCase):
         q = ELEMENTARY_CHARGE
         tmax = 1e-3
         Ekin = 9000*ONE_EV
-        np.random.seed(1)
-
         gc_tys, gc_phi_hits = trace_particles_starting_on_curve(
             ma, bsh, nparticles, tmax=tmax, seed=1, mass=m, charge=q,
             Ekin=Ekin, umin=-0.80, umax=-0.70,
@@ -397,8 +394,6 @@ class ParticleTracingTesting(unittest.TestCase):
         q = ELEMENTARY_CHARGE
         tmax = 1e-3
         Ekin = 9000*ONE_EV
-        np.random.seed(1)
-
         ntor = 1
         mpol = 1
         stellsym = True
@@ -439,9 +434,9 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         Ekin = 100.*ONE_EV
         vpar = np.sqrt(2*Ekin/m)
 
-        np.random.seed(1)
-        stz_inits = np.random.uniform(size=(nparticles, 3))
-        vpar_inits = vpar*np.random.uniform(size=(nparticles,))
+        rng = np.random.RandomState(1)
+        stz_inits = rng.uniform(size=(nparticles, 3))
+        vpar_inits = vpar*rng.uniform(size=(nparticles,))
         smin = 0.2
         smax = 0.6
         thetamin = 0
@@ -474,7 +469,7 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         np.seterr(divide='ignore')
         for i in range(nparticles):
             gc_ty = gc_tys[i]
-            idxs = np.random.randint(0, gc_ty.shape[0], size=(N, ))
+            idxs = rng.randint(0, gc_ty.shape[0], size=(N, ))
             gc_xyzs = gc_ty[idxs, 1:4]
             bsh.set_points(gc_xyzs)
             AbsBs_gc = np.squeeze(bsh.modB())
@@ -508,8 +503,8 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         bsh.set_I1(0.1)
         bsh.set_I0(0.5)
 
-        stz_inits = np.random.uniform(size=(nparticles, 3))
-        vpar_inits = vpar*np.random.uniform(size=(nparticles,))
+        stz_inits = rng.uniform(size=(nparticles, 3))
+        vpar_inits = vpar*rng.uniform(size=(nparticles,))
         stz_inits[:, 0] = stz_inits[:, 0]*(smax-smin) + smin
         stz_inits[:, 1] = stz_inits[:, 1]*(thetamax-thetamin) + thetamin
         stz_inits[:, 2] = stz_inits[:, 2]*(zetamax-zetamin) + zetamin
@@ -533,7 +528,7 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         max_p_gc_error = np.array([])
         for i in range(nparticles):
             gc_ty = gc_tys[i]
-            idxs = np.random.randint(0, gc_ty.shape[0], size=(N, ))
+            idxs = rng.randint(0, gc_ty.shape[0], size=(N, ))
             gc_xyzs = gc_ty[idxs, 1:4]
             bsh.set_points(gc_xyzs)
             AbsBs_gc = np.squeeze(bsh.modB())
@@ -585,7 +580,7 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         max_p_gc_error = np.array([])
         for i in range(nparticles):
             gc_ty = gc_tys[i]
-            idxs = np.random.randint(0, gc_ty.shape[0], size=(N, ))
+            idxs = rng.randint(0, gc_ty.shape[0], size=(N, ))
             gc_xyzs = gc_ty[idxs, 1:4]
             bsh.set_points(gc_xyzs)
             AbsBs_gc = np.squeeze(bsh.modB())
@@ -647,8 +642,8 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         Ekin = 100.*ONE_EV
         vpar = np.sqrt(2*Ekin/m)
 
-        np.random.seed(1)
-        stz_inits = np.random.uniform(size=(1, 3))
+        rng = np.random.RandomState(1)
+        stz_inits = rng.uniform(size=(1, 3))
         vpar_inits = vpar*np.ones(1)
         smin = 0.2
         smax = 0.6
@@ -685,7 +680,7 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         x0[0] = R0
         ma.set_dofs(x0)
 
-        xyz_inits = np.random.uniform(size=(1, 3))
+        xyz_inits = rng.uniform(size=(1, 3))
         xyz_inits[:, 0] = xyz_inits[:, 0]+R0
         xyz_inits[:, 1] = 0.
         xyz_inits[:, 2] = 0.
@@ -721,9 +716,9 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         vpar = np.sqrt(2*Ekin/m)
 
         Nparticles = 100
-        np.random.seed(1)
-        stz_inits = np.random.uniform(size=(Nparticles, 3))
-        vpar_inits = vpar*np.random.uniform(size=(Nparticles,))
+        rng = np.random.RandomState(1)
+        stz_inits = rng.uniform(size=(Nparticles, 3))
+        vpar_inits = vpar*rng.uniform(size=(Nparticles,))
         smin = 0.4
         smax = 0.6
         thetamin = 0
@@ -765,8 +760,8 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         vpar = np.sqrt(2*Ekin/m)
 
         Nparticles = 10
-        np.random.seed(1)
-        stz_inits = np.random.uniform(size=(Nparticles, 3))
+        rng = np.random.RandomState(1)
+        stz_inits = rng.uniform(size=(Nparticles, 3))
         vpar_inits = vpar*np.ones(Nparticles)
         smin = 0.1
         smax = 0.2
@@ -803,7 +798,7 @@ class BoozerGuidingCenterTracingTesting(unittest.TestCase):
         x0[0] = R0
         ma.set_dofs(x0)
 
-        xyz_inits = np.random.uniform(size=(Nparticles, 3))
+        xyz_inits = rng.uniform(size=(Nparticles, 3))
         xyz_inits[:, 0] = 0.01*xyz_inits[:, 0]+R0
         xyz_inits[:, 1] = 0.
         xyz_inits[:, 2] = 0.

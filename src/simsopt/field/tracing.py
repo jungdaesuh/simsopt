@@ -1174,10 +1174,12 @@ def trace_particles_starting_on_curve(
     """
     m = mass
     speed_total = sqrt(2 * Ekin / m)  # Ekin = 0.5 * m * v^2 <=> v = sqrt(2*Ekin/m)
-    np.random.seed(seed)
-    us = np.random.uniform(low=umin, high=umax, size=(nparticles,))
+    randomgen = np.random.RandomState(seed)
+    us = randomgen.uniform(low=umin, high=umax, size=(nparticles,))
     speed_par = us * speed_total
-    xyz, _ = draw_uniform_on_curve(curve, nparticles, safetyfactor=10)
+    xyz, _ = draw_uniform_on_curve(
+        curve, nparticles, safetyfactor=10, randomgen=randomgen
+    )
     return trace_particles(
         field,
         xyz,
@@ -1254,10 +1256,12 @@ def trace_particles_starting_on_surface(
     """
     m = mass
     speed_total = sqrt(2 * Ekin / m)  # Ekin = 0.5 * m * v^2 <=> v = sqrt(2*Ekin/m)
-    np.random.seed(seed)
-    us = np.random.uniform(low=umin, high=umax, size=(nparticles,))
+    randomgen = np.random.RandomState(seed)
+    us = randomgen.uniform(low=umin, high=umax, size=(nparticles,))
     speed_par = us * speed_total
-    xyz, _ = draw_uniform_on_surface(surface, nparticles, safetyfactor=10)
+    xyz, _ = draw_uniform_on_surface(
+        surface, nparticles, safetyfactor=10, randomgen=randomgen
+    )
     return trace_particles(
         field,
         xyz,

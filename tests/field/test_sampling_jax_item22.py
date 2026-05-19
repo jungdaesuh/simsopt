@@ -25,10 +25,10 @@ Closes the jax-port plan item 22 (Wave R4). The JAX kernels in
    tolerance derived from the multinomial sample-size confidence
    interval (see docstring of the test for the closed-form bound).
 
-4. ``test_sample_weighted_indices_jax_does_not_read_numpy_global_seed``
-   — re-seeding ``numpy.random`` between two JAX-key-pinned
-   invocations does not perturb the JAX output. Establishes the
-   "no hidden global RNG state" contract from the item 22 prompt.
+4. ``test_sample_weighted_indices_jax_does_not_read_numpy_random``
+   — disabling the NumPy module RNG does not perturb JAX-key-pinned
+   invocations. Establishes the "no hidden global RNG state" contract
+   from the item 22 prompt without mutating the process-global NumPy RNG.
 
 5. ``test_draw_uniform_on_curve_jax_matches_upstream_rejection_sampling_moments``
    / ``test_draw_uniform_on_surface_jax_matches_upstream_rejection_sampling_moments``
@@ -81,6 +81,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import simsopt.field.tracing as tracing_module
 from simsopt.field.sampling import (
     draw_uniform_on_curve,
     draw_uniform_on_surface,
@@ -124,6 +125,34 @@ class SurfaceFixture:
         return self._normal
 
 
+class UniformCurveFixture:
+    """Curve stand-in that accepts every rejection-sampler proposal."""
+
+    def __init__(self) -> None:
+        self._arclength = np.ones(4)
+        self._gamma = np.arange(12.0).reshape((4, 3))
+
+    def incremental_arclength(self) -> np.ndarray:
+        return self._arclength
+
+    def gamma(self) -> np.ndarray:
+        return self._gamma
+
+
+class UniformSurfaceFixture:
+    """Surface stand-in that accepts every rejection-sampler proposal."""
+
+    def __init__(self) -> None:
+        self._gamma = np.arange(18.0).reshape((2, 3, 3))
+        self._normal = np.ones((2, 3, 3))
+
+    def gamma(self) -> np.ndarray:
+        return self._gamma
+
+    def normal(self) -> np.ndarray:
+        return self._normal
+
+
 # --- Statistical-tolerance derivation, single source of truth ----------------
 
 # Documented in the module docstring. The factor of 8 is the
@@ -150,6 +179,20 @@ def _moment_tolerance_for_index_range(nquadpoints: int, nsamples: int) -> float:
         * (nquadpoints - 1)
         * math.sqrt(1.0 / (4.0 * nsamples))
     )
+
+
+def _patch_numpy_sampler_rng(monkeypatch, seed: int) -> None:
+    """Route upstream rejection-sampler draws through a local deterministic RNG."""
+    rng = np.random.default_rng(seed)
+
+    monkeypatch.setattr(np.random, "randint", rng.integers)
+    monkeypatch.setattr(np.random, "uniform", rng.uniform)
+
+
+def _assert_numpy_random_state_equal(left, right) -> None:
+    assert left[0] == right[0]
+    np.testing.assert_array_equal(left[1], right[1])
+    assert left[2:] == right[2:]
 
 
 # --- Tests --------------------------------------------------------------------
@@ -188,6 +231,95 @@ def test_draw_uniform_on_surface_jax_maps_flat_weighted_indices_to_gamma() -> No
     np.testing.assert_allclose(
         np.asarray(xyz), np.repeat(surface.gamma()[1:2, 2, :], 7, axis=0)
     )
+
+
+def test_draw_uniform_on_curve_accepts_local_random_state_without_global_state_mutation() -> (
+    None
+):
+    """Upstream curve sampler can be deterministic without touching ``np.random``."""
+    before = np.random.get_state()
+    rng = np.random.RandomState(31)
+
+    xyz, idxs = draw_uniform_on_curve(UniformCurveFixture(), 5, randomgen=rng)
+
+    _assert_numpy_random_state_equal(before, np.random.get_state())
+    assert idxs.shape == (5,)
+    assert xyz.shape == (5, 3)
+
+
+def test_draw_uniform_on_surface_accepts_local_random_state_without_global_state_mutation() -> (
+    None
+):
+    """Upstream surface sampler can be deterministic without touching ``np.random``."""
+    before = np.random.get_state()
+    rng = np.random.RandomState(37)
+
+    xyz, idxs = draw_uniform_on_surface(UniformSurfaceFixture(), 5, randomgen=rng)
+
+    _assert_numpy_random_state_equal(before, np.random.get_state())
+    assert idxs[0].shape == (5,)
+    assert idxs[1].shape == (5,)
+    assert xyz.shape == (5, 3)
+
+
+def test_trace_particles_starting_on_curve_uses_local_random_state(monkeypatch) -> None:
+    """Tracing curve spawn path preserves process-global NumPy RNG state."""
+    captured = {}
+
+    def fake_trace_particles(field, xyz, speed_par, **kwargs):
+        captured["field"] = field
+        captured["xyz"] = np.asarray(xyz)
+        captured["speed_par"] = np.asarray(speed_par)
+        captured["kwargs"] = kwargs
+        return "tys", "phi_hits"
+
+    monkeypatch.setattr(tracing_module, "trace_particles", fake_trace_particles)
+
+    field = object()
+    before = np.random.get_state()
+    result = tracing_module.trace_particles_starting_on_curve(
+        UniformCurveFixture(),
+        field,
+        5,
+        seed=41,
+    )
+
+    assert result == ("tys", "phi_hits")
+    assert captured["field"] is field
+    assert captured["xyz"].shape == (5, 3)
+    assert captured["speed_par"].shape == (5,)
+    _assert_numpy_random_state_equal(before, np.random.get_state())
+
+
+def test_trace_particles_starting_on_surface_uses_local_random_state(
+    monkeypatch,
+) -> None:
+    """Tracing surface spawn path preserves process-global NumPy RNG state."""
+    captured = {}
+
+    def fake_trace_particles(field, xyz, speed_par, **kwargs):
+        captured["field"] = field
+        captured["xyz"] = np.asarray(xyz)
+        captured["speed_par"] = np.asarray(speed_par)
+        captured["kwargs"] = kwargs
+        return "tys", "phi_hits"
+
+    monkeypatch.setattr(tracing_module, "trace_particles", fake_trace_particles)
+
+    field = object()
+    before = np.random.get_state()
+    result = tracing_module.trace_particles_starting_on_surface(
+        UniformSurfaceFixture(),
+        field,
+        5,
+        seed=43,
+    )
+
+    assert result == ("tys", "phi_hits")
+    assert captured["field"] is field
+    assert captured["xyz"].shape == (5, 3)
+    assert captured["speed_par"].shape == (5,)
+    _assert_numpy_random_state_equal(before, np.random.get_state())
 
 
 def test_sample_weighted_indices_jax_reproducibility() -> None:
@@ -234,23 +366,24 @@ def test_sample_weighted_indices_jax_statistical_moments_match_target_distributi
     np.testing.assert_allclose(empirical, expected, atol=_STATISTICAL_FREQUENCY_ATOL)
 
 
-def test_sample_weighted_indices_jax_does_not_read_numpy_global_seed() -> None:
-    """Re-seeding ``numpy.random`` does not perturb the JAX-key-pinned output.
+def test_sample_weighted_indices_jax_does_not_read_numpy_random(monkeypatch) -> None:
+    """Disabling ``numpy.random`` does not perturb the JAX-key-pinned output.
 
     The JAX sampler must own its randomness via the explicit
-    ``key`` argument. Mutating the NumPy global RNG state between
-    two calls with the same JAX key must not affect the output.
+    ``key`` argument. Replacing the NumPy module RNG entry points
+    between two calls with the same JAX key must not affect the output.
     """
     weights = jnp.array([0.2, 0.3, 0.1, 0.4])
     key = jax.random.PRNGKey(7)
     nsamples = 1024
 
-    np.random.seed(0)
     out_a = np.asarray(sample_weighted_indices_jax(key, weights, nsamples))
-    # Mutate the global numpy RNG aggressively between calls.
-    for seed in (1, 2, 3, 4, 5):
-        np.random.seed(seed)
-        np.random.uniform(size=(2048,))
+
+    def fail_numpy_random(*_args, **_kwargs):
+        raise AssertionError("JAX sampler read numpy.random")
+
+    monkeypatch.setattr(np.random, "randint", fail_numpy_random)
+    monkeypatch.setattr(np.random, "uniform", fail_numpy_random)
     out_b = np.asarray(sample_weighted_indices_jax(key, weights, nsamples))
 
     np.testing.assert_array_equal(out_a, out_b)
@@ -295,9 +428,9 @@ def _build_real_surface():
     return surface
 
 
-def test_draw_uniform_on_curve_jax_matches_upstream_rejection_sampling_moments() -> (
-    None
-):
+def test_draw_uniform_on_curve_jax_matches_upstream_rejection_sampling_moments(
+    monkeypatch,
+) -> None:
     """JAX inverse-CDF and upstream rejection sampling agree on index-distribution moments.
 
     Both samplers target the same discrete distribution
@@ -308,7 +441,7 @@ def test_draw_uniform_on_curve_jax_matches_upstream_rejection_sampling_moments()
     """
     curve = _build_real_curve()
     nsamples = _STATISTICAL_NSAMPLES
-    np.random.seed(1)
+    _patch_numpy_sampler_rng(monkeypatch, seed=1)
     _, idxs_cpu = draw_uniform_on_curve(curve, nsamples, safetyfactor=10)
     _, idxs_jax = draw_uniform_on_curve_jax(jax.random.PRNGKey(909), curve, nsamples)
 
@@ -324,9 +457,9 @@ def test_draw_uniform_on_curve_jax_matches_upstream_rejection_sampling_moments()
     assert abs((idxs_cpu**2).mean() - (idxs_jax**2).mean()) < second_moment_tol
 
 
-def test_draw_uniform_on_surface_jax_matches_upstream_rejection_sampling_moments() -> (
-    None
-):
+def test_draw_uniform_on_surface_jax_matches_upstream_rejection_sampling_moments(
+    monkeypatch,
+) -> None:
     """JAX inverse-CDF and upstream rejection sampling agree on flat-index moments.
 
     Compares the flattened ``(phi, theta)`` indices to keep the
@@ -335,7 +468,7 @@ def test_draw_uniform_on_surface_jax_matches_upstream_rejection_sampling_moments
     """
     surface = _build_real_surface()
     nsamples = _STATISTICAL_NSAMPLES
-    np.random.seed(2)
+    _patch_numpy_sampler_rng(monkeypatch, seed=2)
     _, idxs_cpu = draw_uniform_on_surface(surface, nsamples, safetyfactor=10)
     _, idxs_jax = draw_uniform_on_surface_jax(
         jax.random.PRNGKey(7373), surface, nsamples

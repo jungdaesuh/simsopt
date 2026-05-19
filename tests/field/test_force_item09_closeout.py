@@ -12,18 +12,19 @@ with ``numquadpoints=64`` per coil.
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt import field as field_mod
 from simsopt.field import (
     B2Energy,
-    B2EnergyJAX,
     Current,
     LpCurveForce,
-    LpCurveForceJAX,
     coils_via_symmetries,
 )
+import simsopt.field.force as force_mod
+from simsopt.field.force import _solve_triangular_columns
 from simsopt.field.selffield import regularization_circ
 from simsopt.geo.curve import create_equally_spaced_curves
 
@@ -98,19 +99,32 @@ def _build_reduced_force_energy_terms(force_cls, energy_cls):
     )
 
 
-def test_force_energy_jax_wrappers_are_public_lazy_exports():
-    assert field_mod.B2EnergyJAX is B2Energy
-    assert field_mod.LpCurveForceJAX is LpCurveForce
-    assert B2EnergyJAX is B2Energy
-    assert LpCurveForceJAX is LpCurveForce
+def test_force_energy_alias_only_jax_names_are_not_public_exports():
+    assert "B2EnergyJAX" not in field_mod.__all__
+    assert "LpCurveForceJAX" not in field_mod.__all__
+    assert not hasattr(field_mod, "B2EnergyJAX")
+    assert not hasattr(field_mod, "LpCurveForceJAX")
+    assert not hasattr(force_mod, "B2EnergyJAX")
+    assert not hasattr(force_mod, "LpCurveForceJAX")
+
+
+def test_triangular_column_solve_matches_matrix_rhs_solution():
+    lower = jnp.asarray([[2.0, 0.0], [0.5, 3.0]], dtype=jnp.float64)
+    rhs = jnp.asarray([[1.0, 4.0], [2.0, -1.0]], dtype=jnp.float64)
+
+    solved = _solve_triangular_columns(lower, rhs, lower=True)
+
+    np.testing.assert_allclose(
+        np.asarray(solved),
+        np.linalg.solve(np.asarray(lower), np.asarray(rhs)),
+        rtol=1e-14,
+        atol=1e-14,
+    )
 
 
 def test_reduced_force_energy_wrappers_match_independent_cpu_lane():
     force_cpu, energy_cpu = _build_reduced_force_energy_terms(LpCurveForce, B2Energy)
-    force_jax, energy_jax = _build_reduced_force_energy_terms(
-        LpCurveForceJAX,
-        B2EnergyJAX,
-    )
+    force_jax, energy_jax = _build_reduced_force_energy_terms(LpCurveForce, B2Energy)
 
     force_weight = 1.0e-2
     energy_weight = 1.0e-4

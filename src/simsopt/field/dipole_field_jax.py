@@ -36,7 +36,6 @@ JAX integration policy
 
 from __future__ import annotations
 
-import jax
 import numpy as np
 
 from .._core.json import GSONDecoder
@@ -47,21 +46,11 @@ from ..jax_core.dipole_field import (
     dipole_field_dA,
     dipole_field_dB,
 )
+from ._jax_common import points_device as _points_device
 from .magneticfield import MagneticField
 
 
 __all__ = ["DipoleFieldJAX"]
-
-
-def _points_device(points: np.ndarray) -> jax.Array:
-    """Stage host points to a JAX float64 device array via ``device_put``.
-
-    The CPU ``MagneticField`` cache hands us a contiguous NumPy array.
-    Routing through :func:`as_jax_float64` uses :func:`jax.device_put`,
-    which is explicit and allowed under ``transfer_guard("disallow")``.
-    """
-
-    return _as_jax_float64(points)
 
 
 def _expand_symmetries(

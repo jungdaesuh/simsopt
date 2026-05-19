@@ -29,6 +29,7 @@ All tests run under ``JAX_PLATFORMS=cpu`` with ``JAX_ENABLE_X64=True``.
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pytest
 
@@ -505,6 +506,66 @@ def test_trace_particles_jax_stopping_event_not_live_trajectory(monkeypatch):
     hits = res_phi_hits[0]
     assert hits.shape[0] == 1
     assert int(hits[0, 1]) == -1
+
+
+def test_trace_particles_loss_counter_matches_cpu_for_fixed_seed(monkeypatch, caplog):
+    """CPU and JAX routes count the same stopped particles for a fixed seed."""
+
+    R0 = 1.3
+    B0 = 0.8
+    xyz_init = np.array(
+        [
+            [1.4, 0.0, 0.0],
+            [1.2, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    speed_par = [0.2, 0.2]
+    mass = 1.0
+    charge = 1.0
+    Ekin = 0.5 * mass
+    tmax = 1.0e-3
+    tol = 1.0e-9
+    stopping_criteria = [MaxRStoppingCriterion(1.3)]
+
+    with caplog.at_level(logging.DEBUG, logger="simsopt.field.tracing"):
+        cpu_tys, cpu_hits = trace_particles(
+            ToroidalField(R0, B0),
+            xyz_init,
+            speed_par,
+            tmax=tmax,
+            mass=mass,
+            charge=charge,
+            Ekin=Ekin,
+            tol=tol,
+            mode="gc_vac",
+            stopping_criteria=stopping_criteria,
+        )
+    cpu_log = caplog.text
+    caplog.clear()
+
+    _force_jax_backend(monkeypatch)
+    with caplog.at_level(logging.DEBUG, logger="simsopt.field.tracing"):
+        jax_tys, jax_hits = trace_particles(
+            ToroidalFieldJAX(R0, B0),
+            xyz_init,
+            speed_par,
+            tmax=tmax,
+            mass=mass,
+            charge=charge,
+            Ekin=Ekin,
+            tol=tol,
+            mode="gc_vac",
+            stopping_criteria=stopping_criteria,
+        )
+    jax_log = caplog.text
+
+    assert "Particles lost 1/2=50%" in cpu_log
+    assert "Particles lost 1/2=50% (JAX backend)" in jax_log
+    assert sum(traj[-1, 0] < tmax - 1.0e-15 for traj in cpu_tys) == 1
+    assert sum(traj[-1, 0] < tmax - 1.0e-15 for traj in jax_tys) == 1
+    assert sum(hits.size > 0 and hits[-1, 1] < 0 for hits in cpu_hits) == 1
+    assert sum(hits.size > 0 and hits[-1, 1] < 0 for hits in jax_hits) == 1
 
 
 def test_trace_particles_jax_comm_matches_single_process(

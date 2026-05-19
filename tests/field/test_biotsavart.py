@@ -15,8 +15,9 @@ def get_curve(num_quadrature_points=200, perturb=False):
     coeffs[2][2] = 0.5
     coil.set_dofs(np.concatenate(coeffs))
     if perturb:
+        rng = np.random.RandomState(1)
         d = coil.get_dofs()
-        coil.set_dofs(d + np.random.uniform(size=d.shape))
+        coil.set_dofs(d + rng.uniform(size=d.shape))
     return coil
 
 
@@ -51,12 +52,12 @@ class Testing(unittest.TestCase):
         assert np.linalg.norm(dbtrue-dbfine) < 1e-4 * np.linalg.norm(dbcoarse-dbfine)
 
     def test_dB_by_dcoilcoeff_reverse_taylortest(self):
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         curve = get_curve()
         coil = Coil(curve, Current(1e4))
         bs = BiotSavart([coil])
         points = np.asarray(17 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
-        points += 0.001 * (np.random.rand(*points.shape)-0.5)
+        points += 0.001 * (rng.rand(*points.shape)-0.5)
 
         bs.set_points(points)
         curve_dofs = curve.x
@@ -64,7 +65,7 @@ class Testing(unittest.TestCase):
         J0 = np.sum(B**2)
         dJ = bs.B_vjp(B)(curve)
 
-        h = 1e-2 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        h = 1e-2 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
         dJ_dh = 2*np.sum(dJ * h)
         err = 1e6
         for i in range(5, 10):
@@ -78,12 +79,12 @@ class Testing(unittest.TestCase):
             err = err_new
 
     def test_dBdX_by_dcoilcoeff_reverse_taylortest(self):
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         curve = get_curve()
         coil = Coil(curve, Current(1e4))
         bs = BiotSavart([coil])
         points = np.asarray(17 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
-        points += 0.001 * (np.random.rand(*points.shape)-0.5)
+        points += 0.001 * (rng.rand(*points.shape)-0.5)
 
         bs.set_points(points)
         curve_dofs = curve.x
@@ -92,7 +93,7 @@ class Testing(unittest.TestCase):
         J0 = np.sum(dBdX**2)
         dJ = bs.B_and_dB_vjp(B, dBdX)[1](curve)
 
-        h = 1e-2 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        h = 1e-2 * rng.rand(len(curve_dofs)).reshape(curve_dofs.shape)
         dJ_dh = 2*np.sum(dJ * h)
         err = 1e6
         for i in range(5, 10):
@@ -303,12 +304,12 @@ class Testing(unittest.TestCase):
         assert np.linalg.norm(dH[0]-dH_approx) < 1e-15
 
     def test_dA_by_dcoilcoeff_reverse_taylortest(self):
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         curve = get_curve()
         coil = Coil(curve, ScaledCurrent(Current(1), 1e4))
         bs = BiotSavart([coil])
         points = np.asarray(17 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
-        points += 0.001 * (np.random.rand(*points.shape)-0.5)
+        points += 0.001 * (rng.rand(*points.shape)-0.5)
 
         bs.set_points(points)
         coil_dofs = coil.x
@@ -316,7 +317,7 @@ class Testing(unittest.TestCase):
         J0 = np.sum(A**2)
         dJ = bs.A_vjp(A)(coil)
 
-        h = 1e-2 * np.random.rand(len(coil_dofs)).reshape(coil_dofs.shape)
+        h = 1e-2 * rng.rand(len(coil_dofs)).reshape(coil_dofs.shape)
         dJ_dh = 2*np.sum(dJ * h)
         err = 1e6
         for i in range(5, 10):
@@ -330,12 +331,12 @@ class Testing(unittest.TestCase):
             err = err_new
 
     def test_dAdX_by_dcoilcoeff_reverse_taylortest(self):
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         curve = get_curve()
         coil = Coil(curve, ScaledCurrent(Current(1), 1e4))
         bs = BiotSavart([coil])
         points = np.asarray(17 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
-        points += 0.001 * (np.random.rand(*points.shape)-0.5)
+        points += 0.001 * (rng.rand(*points.shape)-0.5)
 
         bs.set_points(points)
         coil_dofs = coil.x
@@ -344,7 +345,7 @@ class Testing(unittest.TestCase):
         J0 = np.sum(dAdX**2)
         dJ = bs.A_and_dA_vjp(A, dAdX)[1](coil)
 
-        h = 1e-2 * np.random.rand(len(coil_dofs)).reshape(coil_dofs.shape)
+        h = 1e-2 * rng.rand(len(coil_dofs)).reshape(coil_dofs.shape)
         dJ_dh = 2*np.sum(dJ * h)
         err = 1e6
         for i in range(5, 10):
@@ -360,7 +361,6 @@ class Testing(unittest.TestCase):
     def test_flux_through_disk(self):
         # this test makes sure that the toroidal flux through a disk (D)
         # given by \int_D B \cdot n dB = \int_{\partial D} A \cdot dl
-        np.random.seed(1)
 
         from scipy.spatial.transform import Rotation as R
         rot = R.from_euler('zyx', [21.234, 8.431, -4.86392], degrees=True).as_matrix()

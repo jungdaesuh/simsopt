@@ -483,8 +483,8 @@ class TestingVmec(unittest.TestCase):
 
         # Compute points outside of interpolation range
         N = 10
-        np.random.seed(2)
-        points = np.random.uniform(size=(N, 3))
+        rng = np.random.RandomState(2)
+        points = rng.uniform(size=(N, 3))
         thetamin = -np.pi
         thetamax = 2*np.pi
         zetamin = -2*np.pi/nfp
@@ -630,8 +630,8 @@ class TestingVmec(unittest.TestCase):
 
         # Compute points outside of interpolation range
         N = 10
-        np.random.seed(2)
-        points = np.random.uniform(size=(N, 3))
+        rng = np.random.RandomState(2)
+        points = rng.uniform(size=(N, 3))
         thetamin = -2*np.pi
         thetamax = 4*np.pi
         zetamin = -2*np.pi

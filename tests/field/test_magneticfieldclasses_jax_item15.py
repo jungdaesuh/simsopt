@@ -7,8 +7,9 @@ of the new JAX wrappers in
 ``DommaschkJAX``, ``ReimanJAX``) reproduce the upstream CPU classes
 ``ToroidalField`` / ``PoloidalField`` / ``MirrorModel`` /
 ``Dommaschk`` / ``Reiman`` at the ``direct_kernel`` parity-ladder
-lane on production-scale fixtures. ``CircularCoil`` and
-``InterpolatedField`` remain blocked sub-scopes of item 15.
+lane on production-scale fixtures. ``CircularCoil`` has the same
+per-class wrapper coverage; ``InterpolatedField`` has dedicated
+interpolant tests because it owns Python-level cylindrical caches.
 
 The tests deliberately go through the public
 ``set_points_cart`` -> ``B`` / ``dB_by_dX`` / ``A`` / ``dA_by_dX``
@@ -33,6 +34,7 @@ import pytest
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 from simsopt.field import (
+    CircularCoil,
     Dommaschk,
     MirrorModel,
     PoloidalField,
@@ -40,6 +42,7 @@ from simsopt.field import (
     ToroidalField,
 )
 from simsopt.field.magneticfieldclasses_jax import (
+    CircularCoilJAX,
     DommaschkJAX,
     MirrorModelJAX,
     PoloidalFieldJAX,
@@ -72,6 +75,92 @@ def _away_from(points: np.ndarray, R0: float, margin: float) -> np.ndarray:
     R_xy = np.sqrt(points[:, 0] ** 2 + points[:, 1] ** 2)
     mask = np.abs(R_xy - R0) > margin
     return np.ascontiguousarray(points[mask], dtype=np.float64)
+
+
+def _cylindrical_points() -> np.ndarray:
+    return np.ascontiguousarray(
+        np.array(
+            [
+                [1.2, 0.3, 0.1],
+                [1.5, 1.1, -0.2],
+                [0.9, 2.0, 0.4],
+                [1.7, -0.8, 0.25],
+            ],
+            dtype=np.float64,
+        )
+    )
+
+
+def _assert_cylindrical_accessors_match_cpu(cpu_field, jax_field, method_names):
+    points_cyl = _cylindrical_points()
+    cpu_field.set_points_cyl(points_cyl)
+    jax_field.set_points_cyl(points_cyl)
+    np.testing.assert_allclose(
+        np.asarray(jax_field.get_points_cyl()),
+        np.asarray(cpu_field.get_points_cyl()),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(jax_field.get_points_cart()),
+        np.asarray(cpu_field.get_points_cart()),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    for method_name in method_names:
+        np.testing.assert_allclose(
+            np.asarray(getattr(jax_field, method_name)()),
+            np.asarray(getattr(cpu_field, method_name)()),
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+
+@pytest.mark.parametrize(
+    "cpu_field,jax_field,method_names",
+    [
+        pytest.param(
+            ToroidalField(R0=1.3, B0=0.8),
+            ToroidalFieldJAX(R0=1.3, B0=0.8),
+            ("B_cyl", "A_cyl", "GradAbsB_cyl"),
+            id="toroidal",
+        ),
+        pytest.param(
+            PoloidalField(R0=1.0, B0=1.1, q=1.3),
+            PoloidalFieldJAX(R0=1.0, B0=1.1, q=1.3),
+            ("B_cyl", "GradAbsB_cyl"),
+            id="poloidal",
+        ),
+        pytest.param(
+            MirrorModel(B0=6.51292, gamma=0.124904, Z_m=0.98),
+            MirrorModelJAX(B0=6.51292, gamma=0.124904, Z_m=0.98),
+            ("B_cyl", "GradAbsB_cyl"),
+            id="mirror",
+        ),
+        pytest.param(
+            Reiman(iota0=0.15, iota1=0.38, k=[6], epsilonk=[0.01], m0=1),
+            ReimanJAX(iota0=0.15, iota1=0.38, k=[6], epsilonk=[0.01], m0=1),
+            ("B_cyl", "GradAbsB_cyl"),
+            id="reiman",
+        ),
+        pytest.param(
+            Dommaschk(mn=[[10, 2], [15, 3]], coeffs=[[-2.18, -2.18], [25.8, -25.8]]),
+            DommaschkJAX(mn=[[10, 2], [15, 3]], coeffs=[[-2.18, -2.18], [25.8, -25.8]]),
+            ("B_cyl", "GradAbsB_cyl"),
+            id="dommaschk",
+        ),
+        pytest.param(
+            CircularCoil(),
+            CircularCoilJAX(),
+            ("B_cyl", "A_cyl", "GradAbsB_cyl"),
+            id="circular-coil",
+        ),
+    ],
+)
+def test_inherited_cylindrical_accessors_match_cpu(cpu_field, jax_field, method_names):
+    """Inherited cylindrical ``MagneticField`` accessors stay CPU/JAX-parity."""
+
+    _assert_cylindrical_accessors_match_cpu(cpu_field, jax_field, method_names)
 
 
 # ── ToroidalField wrapper parity ─────────────────────────────────────

@@ -43,10 +43,9 @@ class TestCoilSet(unittest.TestCase):
             self.coilset.to_makegrid_file("coils.file_to_load")
             loaded_coilset = CoilSet.from_makegrid_file("coils.file_to_load", self.coilset.surface, order=order, ppp=ppp)
 
-        np.random.seed(1)
-
         points = np.asarray(17 * [[0.9, 0.4, -0.85]])
-        points += 0.01 * (np.random.rand(*points.shape) - 0.5)
+        rng = np.random.default_rng(1)
+        points += 0.01 * (rng.random(points.shape) - 0.5)
         self.coilset.bs.set_points(points)
         loaded_coilset.bs.set_points(points)
 

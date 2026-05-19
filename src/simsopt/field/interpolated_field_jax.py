@@ -32,7 +32,6 @@ import numpy as np
 import jax.numpy as jnp
 
 from .._core.json import GSONDecoder
-from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ..jax_core.interpolated_field import (
     interpolated_field_B,
     interpolated_field_B_cyl_with_initial,
@@ -44,19 +43,11 @@ from ..jax_core.regular_grid_interp import (
     UniformInterpolationRule,
     build_regular_grid_interpolant_3d,
 )
+from ._jax_common import points_device as _points_device
 from .magneticfield import MagneticField
 
 
 __all__ = ["InterpolatedFieldJAX"]
-
-
-def _points_device(points: np.ndarray):
-    """Stage host points to a JAX float64 device array via the strict-safe
-    ``jax.device_put`` path. Mirrors the helper in
-    :mod:`simsopt.field.magneticfieldclasses_jax`.
-    """
-
-    return _as_jax_float64(points)
 
 
 def _cyl_to_cart_points(r: np.ndarray, phi: np.ndarray, z: np.ndarray) -> np.ndarray:

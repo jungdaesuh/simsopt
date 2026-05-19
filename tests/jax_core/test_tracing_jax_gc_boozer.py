@@ -46,6 +46,7 @@ from simsopt.field import tracing as tracing_module
 from simsopt.field.boozermagneticfield import BoozerRadialInterpolant
 from simsopt.field.boozermagneticfield import InterpolatedBoozerField
 from simsopt.field.boozermagneticfield_jax import (
+    BoozerAnalyticJAX,
     BoozerRadialInterpolantJAX,
     InterpolatedBoozerFieldJAX,
 )
@@ -98,6 +99,37 @@ def _force_jax_backend(monkeypatch):
     so the routing predicate flips without mutating the global backend.
     """
     monkeypatch.setattr(tracing_module, "is_jax_backend", lambda: True)
+
+
+def test_trace_guiding_center_boozer_reports_axis_violation_status():
+    field = BoozerAnalyticJAX(
+        etabar=0.1,
+        B0=1.0,
+        N=1,
+        G0=1.0,
+        psi0=1.0,
+        iota0=0.4,
+    )
+    spec = GuidingCenterTracingSpec(
+        tmax=1.0e-4,
+        rtol=1.0e-9,
+        atol=1.0e-11,
+        max_steps=8,
+        dtmax=1.0e-5,
+    )
+
+    result = trace_guiding_center_boozer(
+        spec,
+        jnp.asarray([0.0, 0.1, 0.2, 1.0], dtype=jnp.float64),
+        field,
+        m=1.0,
+        q=1.0,
+        mu=0.0,
+        mode="vacuum",
+    )
+
+    assert int(result.status) == -2
+    assert int(result.steps_taken) == 0
 
 
 # ---------------------------------------------------------------------------
