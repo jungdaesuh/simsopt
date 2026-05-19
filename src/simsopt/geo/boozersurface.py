@@ -343,6 +343,8 @@ class BoozerSurface(Optimizable):
         # set the default options now
         if "verbose" not in options:
             options["verbose"] = True
+        if "record_scipy_callback_trace" not in options:
+            options["record_scipy_callback_trace"] = False
 
         # default solver options for the BoozerExact and BoozerLS solvers
         if self.boozer_type == "exact":
@@ -365,8 +367,6 @@ class BoozerSurface(Optimizable):
                 options["weight_inv_modB"] = True
             if "newton_stab" not in options:
                 options["newton_stab"] = 0.0
-            if "record_scipy_callback_trace" not in options:
-                options["record_scipy_callback_trace"] = False
         # Mirror BoozerSurfaceJAX._normalize_solver_options: in parity mode
         # the linear residual gate measures the *undamped* operator, so any
         # non-zero ``newton_stab`` would silently shift the CPU answer

@@ -8,7 +8,7 @@ Prerequisites:
     pip install optimistix==0.1.0   # benchmark-only, not in [JAX] extras
 
 Usage:
-    conda run -n jax python benchmarks/optimistix_eval.py
+    PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python benchmarks/optimistix_eval.py
 """
 
 from __future__ import annotations

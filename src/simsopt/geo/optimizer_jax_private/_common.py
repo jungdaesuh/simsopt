@@ -149,10 +149,10 @@ def _line_search_sample_valid_host(phi, dphi, grad):
 def _emit_debug_callback(callback, *args):
     """Dispatch private-optimizer callbacks without ordered-effect tokens.
 
-    JAX 0.9.2 lowers ``ordered=True`` debug callbacks through a host token that
-    strict ``transfer_guard='disallow'`` rejects as a ``bool[0]`` host-to-device
-    transfer. Keep the private optimizer callback path unordered so strict
-    on-device optimizer lanes remain executable.
+    ``ordered=True`` debug callbacks lower through a host token that strict
+    ``transfer_guard='disallow'`` rejects as a host-to-device transfer. Keep the
+    private optimizer callback path unordered so strict on-device optimizer
+    lanes remain executable.
     """
     jax.debug.callback(callback, *args, ordered=False)
 
@@ -177,7 +177,7 @@ def _norm(x, *, ord=None):
 
 
 def _pytree_inexact_dtype(tree):
-    leaves = jax.tree_util.tree_leaves(tree)
+    leaves = jax.tree.leaves(tree)
     if not leaves:
         return jnp.float32
     dtype = jnp.result_type(*[jnp.asarray(leaf) for leaf in leaves])
@@ -193,7 +193,7 @@ def _scalar_value_and_grad(fun):
         value = jnp.asarray(value, dtype=dtype)
         cotangent = _as_jax_dtype(1.0, value.dtype)
         (grad,) = pullback(cotangent)
-        grad = jax.tree_util.tree_map(
+        grad = jax.tree.map(
             lambda leaf: jnp.asarray(leaf, dtype=dtype),
             grad,
         )

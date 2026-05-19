@@ -2584,7 +2584,10 @@ class TestBoozerSurfaceJAXClass:
         ("backend_mode", "expected_optimizer_backend", "expected_algorithm"),
         [
             (None, "scipy", "quasi-newton"),
+            ("jax_cpu_fast", "ondevice", "quasi-newton"),
             ("jax_cpu_parity", "ondevice", "quasi-newton"),
+            ("jax_gpu_fast", "ondevice", "quasi-newton"),
+            ("jax_gpu_parity", "ondevice", "quasi-newton"),
         ],
     )
     def test_instantiation_defaults_optimizer_backend_from_runtime_contract(
@@ -2749,6 +2752,53 @@ class TestBoozerSurfaceJAXClass:
 
         with pytest.raises(ValueError, match="fixed coil currents when G=None"):
             booz.run_code(iota=0.2, G=None)
+
+    @pytest.mark.parametrize("callback_option", ["stage_callback", "progress_callback"])
+    def test_optimistix_lm_rejects_callbacks_at_option_normalization(
+        self,
+        callback_option,
+    ):
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        with pytest.raises(ValueError, match="incompatible"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+                options={
+                    "optimizer_backend": "ondevice",
+                    "least_squares_algorithm": "optimistix-lm",
+                    callback_option: lambda *_args, **_kwargs: None,
+                },
+            )
+
+    @pytest.mark.parametrize(
+        "tuning_option",
+        [{"ftol": 1e-6}, {"xtol": 1e-6}, {"gtol": 1e-8}],
+    )
+    def test_optimistix_lm_rejects_nondefault_tuning_at_option_normalization(
+        self,
+        tuning_option,
+    ):
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        with pytest.raises(ValueError, match="single Optimistix/Lineax"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+                options={
+                    "optimizer_backend": "ondevice",
+                    "least_squares_algorithm": "optimistix-lm",
+                    **tuning_option,
+                },
+            )
 
     def test_none_G_coil_gradient_callback_rejects_free_currents(self):
         callback = lambda *_args, **_kwargs: None
@@ -3149,6 +3199,30 @@ class TestBoozerSurfaceJAXClass:
         assert result["nit"] > 1
         assert abs(abs(float(np.asarray(result["x"])[0])) - 1.0) < 1e-6
 
+    def test_public_manual_ls_loop_runs_under_strict_transfer_guard(self):
+        booz = _make_mock_boozer_surface()
+        matrix = jnp.asarray([[2.0, -1.0], [0.5, 3.0]], dtype=jnp.float64)
+        rhs = jnp.asarray([0.25, -0.75], dtype=jnp.float64)
+        x0 = jnp.asarray([0.0, 0.0], dtype=jnp.float64)
+        tol = jnp.asarray(1e-12, dtype=jnp.float64)
+        maxiter = jnp.asarray(40, dtype=jnp.int32)
+
+        with jax.transfer_guard("disallow"):
+            result = booz._run_manual_penalty_least_squares(
+                lambda x: matrix @ x - rhs,
+                x0,
+                tol=tol,
+                maxiter=maxiter,
+            )
+
+        assert result["success"] is True
+        np.testing.assert_allclose(
+            np.asarray(result["x"]),
+            np.linalg.solve(np.asarray(matrix), np.asarray(rhs)),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+
     def test_public_manual_ls_api_matches_legacy_manual_linear_contract(self):
         """JAX manual LS must match the legacy damped Gauss-Newton linear contract."""
 
@@ -3215,20 +3289,20 @@ class TestBoozerSurfaceJAXClass:
                     np.asarray([cpu_result["iota"], cpu_result["G"]], dtype=float),
                 ]
             ),
-            rtol=1e-10,
-            atol=1e-10,
+            rtol=1e-12,
+            atol=1e-12,
         )
         np.testing.assert_allclose(
             np.asarray(jax_result["residual"]),
             np.asarray(cpu_result["residual"], dtype=float),
-            rtol=1e-10,
-            atol=1e-10,
+            rtol=1e-12,
+            atol=1e-12,
         )
         np.testing.assert_allclose(
             np.asarray(jax_result["gradient"]),
             np.asarray(cpu_result["gradient"], dtype=float),
-            rtol=1e-10,
-            atol=1e-10,
+            rtol=1e-12,
+            atol=1e-12,
         )
 
     @pytest.mark.parametrize("stellsym", [True, False])
@@ -3616,9 +3690,11 @@ class TestBoozerSurfaceJAXClass:
             ("ondevice", False, "quasi-newton", "bfgs-ondevice"),
             ("ondevice", False, "lm", "lm-ondevice"),
             ("ondevice", False, "lm-minpack", "lm-minpack-ondevice"),
+            ("ondevice", False, "optimistix-lm", "optimistix-lm-ondevice"),
             ("scipy-jax", False, "quasi-newton", "lbfgs-scipy-jax"),
             ("scipy", False, "lm", "lm"),
             ("scipy", False, "lm-minpack", "lm"),
+            ("scipy", False, "optimistix-lm", "lm"),
         ],
     )
     def test_resolve_least_squares_optimizer_method_contract(
@@ -4034,6 +4110,45 @@ class TestBoozerSurfaceJAXClass:
         assert captured["value_and_grad"] is False
         assert result["optimizer_method"] == "lbfgs-ondevice"
 
+    def test_ondevice_limited_memory_ls_uses_boozer_maxcor_default(self, monkeypatch):
+        """BoozerSurfaceJAX L-BFGS keeps the CPU Boozer history-size contract."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = True
+        captured = {}
+
+        def fake_target_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad=False,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, progress_callback
+            captured["method"] = method
+            captured["options"] = dict(options)
+            captured["value_and_grad"] = value_and_grad
+            return _successful_minimize_result(x0)
+
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+
+        result = booz.minimize_boozer_penalty_constraints_LBFGS(
+            constraint_weight=1.0,
+            iota=0.3,
+            G=0.05,
+            limited_memory=True,
+            weight_inv_modB=True,
+        )
+
+        assert captured["method"] == "lbfgs-ondevice"
+        assert captured["options"]["maxcor"] == 200
+        assert captured["value_and_grad"] is False
+        assert result["optimizer_method"] == "lbfgs-ondevice"
+
     def test_run_code_ondevice_default_requests_byte_capped_dense_hessian(
         self,
         monkeypatch,
@@ -4135,6 +4250,7 @@ class TestBoozerSurfaceJAXClass:
         [
             ("lm", "lm-ondevice"),
             ("lm-minpack", "lm-minpack-ondevice"),
+            ("optimistix-lm", "optimistix-lm-ondevice"),
         ],
     )
     def test_run_code_routes_lm_least_squares_contract(
@@ -4148,7 +4264,9 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = least_squares_algorithm
-        _set_explicit_lm_options(booz)
+        explicit_lm_options = least_squares_algorithm != "optimistix-lm"
+        if explicit_lm_options:
+            _set_explicit_lm_options(booz)
         if explicit_materialize is not None:
             booz.options["materialize_dense_linearization"] = explicit_materialize
 
@@ -4203,7 +4321,11 @@ class TestBoozerSurfaceJAXClass:
         res = booz.run_code(iota=0.3, G=0.05)
 
         assert captured["method"] == expected_method
-        _assert_explicit_lm_options_forwarded(captured["options"], booz)
+        if explicit_lm_options:
+            _assert_explicit_lm_options_forwarded(captured["options"], booz)
+        else:
+            for key, _value in _EXPLICIT_LM_OPTION_VALUES:
+                assert key not in captured["options"]
         assert (
             captured["options"]["materialize_dense_linearization"]
             is expected_materialize
@@ -4359,7 +4481,7 @@ class TestBoozerSurfaceJAXClass:
         assert not any(
             isinstance(leaf, jax.Array)
             for value in closure_nonlocals.values()
-            for leaf in jax.tree_util.tree_leaves(value)
+            for leaf in jax.tree.leaves(value)
         )
 
     def test_run_code_uses_quasi_newton_for_fixed_G_ondevice_lm_option(
@@ -5345,6 +5467,18 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-12,
         )
 
+    def test_linearization_residency_host_places_dense_factors_on_cpu(self):
+        factors = (
+            jnp.ones((2, 2), dtype=jnp.float64),
+            jnp.tril(jnp.ones((2, 2), dtype=jnp.float64)),
+            jnp.triu(jnp.ones((2, 2), dtype=jnp.float64)),
+        )
+
+        hosted = _bsj._place_linearization_factors_for_residency(factors, "host")
+
+        assert all(factor.device.platform == "cpu" for factor in hosted)
+        np.testing.assert_allclose(np.asarray(hosted[0]), np.ones((2, 2)))
+
     def test_get_adjoint_runtime_state_ls_normal_uses_host_tolerance_boundary(
         self, monkeypatch
     ):
@@ -6067,6 +6201,7 @@ class TestBoozerSurfaceJAXExactPath:
             "jacobian_materialized",
             "linear_solve_backend",
             "dense_linear_solve_factors_available",
+            "linearization_residency",
             "exact_factorization_backend",
         }
         assert expected_keys <= set(res.keys())
@@ -6074,17 +6209,84 @@ class TestBoozerSurfaceJAXExactPath:
         assert res["jacobian_materialized"] is True
         _assert_dense_plu_factors(res["PLU"])
         assert res["linear_solve_backend"] == "operator"
+        assert res["linearization_residency"] == "device"
         assert res["dense_linear_solve_factors_available"] is True
         assert res["exact_factorization_backend"] == _bsj.EXACT_FACTORIZATION_BACKEND
         assert callable(res["vjp"])
 
-    def test_exact_result_plu_is_independent_of_verbose(self):
-        """Exact-path dense factors are solver artifacts, not logging output."""
+    def test_exact_result_materializes_dense_plu_when_not_verbose(self):
+        """Quiet exact solves keep CPU-contract dense PLU artifacts."""
         booz = _make_mock_boozer_surface_exact(options={"verbose": False})
         res = _run_mock_exact_boozer_success(booz)
 
         _assert_dense_plu_factors(res["PLU"])
         assert res["dense_linear_solve_factors_available"] is True
+        assert res["exact_condition_estimate"] is None
+
+    def test_exact_linearization_residency_host_places_dense_factors_on_cpu(self):
+        booz = _make_mock_boozer_surface_exact(
+            options={"linearization_residency": "host"}
+        )
+        res = _run_mock_exact_boozer_success(booz)
+
+        assert res["linearization_residency"] == "host"
+        _assert_dense_plu_factors(res["PLU"])
+        assert all(piece.device.platform == "cpu" for piece in res["PLU"])
+
+    def test_exact_linearization_residency_dual_instance_gradient_path_matches(self):
+        from simsopt.backend import with_cpu_device_for_construction
+
+        device_booz = _make_mock_boozer_surface_exact(
+            options={"linearization_residency": "device"}
+        )
+        _run_mock_exact_boozer_success(device_booz)
+        with with_cpu_device_for_construction() as cpu_device:
+            host_booz = _make_mock_boozer_surface_exact(
+                options={"linearization_residency": "host"}
+            )
+            _run_mock_exact_boozer_success(host_booz)
+        device_state = device_booz.get_adjoint_runtime_state()
+        host_state = host_booz.get_adjoint_runtime_state()
+        rhs = jnp.linspace(
+            0.1,
+            0.9,
+            device_state.decision_size,
+            dtype=jnp.float64,
+        )
+
+        device_solved, device_success = device_state.solve_transpose_with_status(rhs)
+        host_solved, host_success = host_state.solve_transpose_with_status(rhs)
+        device_group_vjps = list(device_state.stream_group_vjps(rhs))
+        host_group_vjps = list(host_state.stream_group_vjps(rhs))
+
+        assert bool(np.asarray(device_success))
+        assert bool(np.asarray(host_success))
+        assert cpu_device.platform == "cpu"
+        assert host_state.linearization_residency == "host"
+        np.testing.assert_allclose(
+            np.asarray(host_solved),
+            np.asarray(device_solved),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        assert len(host_group_vjps) == len(device_group_vjps)
+        for (device_group, device_indices), (host_group, host_indices) in zip(
+            device_group_vjps,
+            host_group_vjps,
+            strict=True,
+        ):
+            assert host_indices == device_indices
+            for host_leaf, device_leaf in zip(
+                jax.tree.leaves(host_group),
+                jax.tree.leaves(device_group),
+                strict=True,
+            ):
+                np.testing.assert_allclose(
+                    np.asarray(host_leaf),
+                    np.asarray(device_leaf),
+                    rtol=1e-12,
+                    atol=1e-12,
+                )
 
     @pytest.mark.parametrize("callback_name", ["vjp", "vjp_groups"])
     def test_exact_result_vjp_callbacks_reject_surface_dof_drift(self, callback_name):
@@ -6213,11 +6415,9 @@ class TestBoozerSurfaceJAXExactPath:
         finally:
             monkeypatch.setattr(_bsj, "newton_exact", original_newton_exact)
 
-        assert (
-            captured["max_dense_jacobian_bytes"]
-            == _bsj._DEFAULT_MAX_DENSE_JACOBIAN_BYTES
-        )
-        assert res["max_dense_jacobian_bytes"] == _bsj._DEFAULT_MAX_DENSE_JACOBIAN_BYTES
+        expected_default = _bsj._dense_jacobian_default_for_backend()
+        assert captured["max_dense_jacobian_bytes"] == expected_default
+        assert res["max_dense_jacobian_bytes"] == expected_default
 
     def test_run_code_exact_reports_scaling_limit_failure_without_fake_success(
         self, monkeypatch
@@ -6651,6 +6851,11 @@ class TestBoozerSurfaceJAXExactPath:
                 "lm-minpack-ondevice",
                 "levenberg_marquardt_minpack_traceable",
             ),
+            (
+                "optimistix-lm",
+                "optimistix-lm-ondevice",
+                "jax_least_squares_optimistix",
+            ),
         ],
     )
     def test_run_code_traceable_ls_routes_lm_ondevice(
@@ -6665,7 +6870,9 @@ class TestBoozerSurfaceJAXExactPath:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = least_squares_algorithm
-        _set_explicit_lm_options(booz)
+        explicit_lm_options = least_squares_algorithm != "optimistix-lm"
+        if explicit_lm_options:
+            _set_explicit_lm_options(booz)
         if explicit_materialize is not None:
             booz.options["materialize_dense_linearization"] = explicit_materialize
         coil_set_spec = booz.coil_set_spec
@@ -6737,7 +6944,12 @@ class TestBoozerSurfaceJAXExactPath:
         _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
         assert result["optimizer_method"] == expected_method
         assert bool(result["success"])
-        _assert_explicit_lm_options_forwarded(captured, booz)
+        if explicit_lm_options:
+            _assert_explicit_lm_options_forwarded(captured, booz)
+        else:
+            assert captured["ftol"] == pytest.approx(1e-8)
+            assert captured["xtol"] == pytest.approx(1e-8)
+            assert captured["gtol"] is None
         assert captured["materialize_dense_linearization"] is expected_materialize
         assert (
             captured["max_dense_linearization_bytes"]
@@ -7979,10 +8191,10 @@ class TestBoozerExactConstraintsJacobianTaylor:
         Returns the final error so callers can assert it shrank
         monotonically.
         """
-        np.random.seed(1)
+        rng = np.random.default_rng(1)
         r0 = res_fn(x)
         J = jax.jacfwd(res_fn)(x)
-        h = jnp.array(np.random.uniform(size=x.shape) - 0.5)
+        h = jnp.asarray(rng.uniform(size=x.shape) - 0.5, dtype=x.dtype)
         dr_exact = J @ h
 
         err_old = 1e9
@@ -8032,10 +8244,10 @@ _OPTIMIZE_G_LIST = [True, False]
 
 def _assert_gradient_taylor_convergence(obj, x, *, label="", ratio_bound=0.55):
     """Multi-epsilon forward-FD Taylor test for ``jax.grad(obj)``."""
-    np.random.seed(1)
+    rng = np.random.default_rng(1)
     f0 = float(obj(x))
     grad = jax.grad(obj)(x)
-    h = jnp.array(np.random.uniform(size=x.shape) - 0.5)
+    h = jnp.asarray(rng.uniform(size=x.shape) - 0.5, dtype=x.dtype)
     Jex = float(jnp.dot(grad, h))
 
     err_old = 1e9
@@ -8869,8 +9081,8 @@ class TestBuildBoozerSurfaceRuntimeState:
 
     @staticmethod
     def _round_trip_pytree(value):
-        leaves, treedef = jax.tree_util.tree_flatten(value)
-        return jax.tree_util.tree_unflatten(treedef, leaves)
+        leaves, treedef = jax.tree.flatten(value)
+        return jax.tree.unflatten(treedef, leaves)
 
     @staticmethod
     def _assert_coil_set_specs_match(left, right):

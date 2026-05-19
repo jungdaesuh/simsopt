@@ -9,6 +9,38 @@ from scipy.optimize import _lbfgsb_py
 from simsopt.geo.optimizer_jax_private import _lbfgsb_scipy as lbfgsb
 
 
+def _masked_vector_dot(x, y):
+    products = x * y
+    return np.sum(np.where(products != 0.0, products, 0.0))
+
+
+def test_lbfgsb_ddot_matches_vectorized_masked_dot():
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=1000).astype(np.float64)
+    y = rng.normal(size=1000).astype(np.float64)
+    x[::3] *= 1.0e16
+    x[1::3] *= 1.0e-16
+    x[::97] = 0.0
+    expected = _masked_vector_dot(x, y)
+
+    actual = lbfgsb._lbfgsb_ddot(jax.device_put(x), jax.device_put(y))
+
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=1.0e-15, atol=0.0)
+
+
+def test_lbfgsb_ddot_has_no_elementwise_loop_or_cond_primitive():
+    x = jax.device_put(np.arange(8, dtype=np.float64))
+    y = jax.device_put(np.linspace(-1.0, 1.0, 8, dtype=np.float64))
+
+    jaxpr = jax.make_jaxpr(lbfgsb._lbfgsb_ddot)(x, y).jaxpr
+
+    primitive_names = {eqn.primitive.name for eqn in jaxpr.eqns}
+    assert "scan" not in primitive_names
+    assert "while" not in primitive_names
+    assert "cond" not in primitive_names
+    assert "reduce_sum" in primitive_names
+
+
 def _dcstep_reference(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin, stpmax):
     sgnd = dp * (dx / abs(dx))
     if fp > fx:

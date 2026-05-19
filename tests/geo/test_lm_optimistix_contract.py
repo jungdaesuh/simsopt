@@ -36,7 +36,7 @@ def _linear_least_squares_problem():
 def _run_optimistix_lm(residual_fn, x0, *, maxiter=200, materialize=True):
     return _opt.target_least_squares(
         residual_fn,
-        jax.tree_util.tree_map(lambda leaf: jnp.asarray(leaf, dtype=jnp.float64), x0),
+        jax.tree.map(lambda leaf: jnp.asarray(leaf, dtype=jnp.float64), x0),
         method="optimistix-lm-ondevice",
         tol=_OPTIMISTIX_SOLVER_TOL,
         maxiter=maxiter,

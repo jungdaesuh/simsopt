@@ -18,6 +18,15 @@ from jax.test_util import check_grads
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
+from simsopt.geo.boozer_residual_jax import (
+    _boozer_residual_vector_composed,
+    boozer_penalty_composed,
+    boozer_penalty_grad_composed,
+    boozer_residual_scalar_and_grad_cpu_ordered,
+    boozer_residual_coil_vjp,
+    boozer_residual_jacobian_composed,
+    boozer_residual_vector,
+)
 from simsopt.geo.surface_fourier_jax import (
     surface_gamma_from_dofs,
     surface_gammadash1_from_dofs,
@@ -26,15 +35,6 @@ from simsopt.geo.surface_fourier_jax import (
     dgammadash1_by_dcoeff,
     dgammadash2_by_dcoeff,
     stellsym_scatter_indices,
-)
-from simsopt.field.biotsavart_jax import biot_savart_B
-from simsopt.geo.boozer_residual_jax import (
-    _boozer_residual_vector_composed,
-    boozer_penalty_composed,
-    boozer_penalty_grad_composed,
-    boozer_residual_coil_vjp,
-    boozer_residual_jacobian_composed,
-    boozer_residual_vector,
 )
 
 
@@ -113,9 +113,205 @@ def _make_adjoint(seed, size, dtype):
     return jax.random.normal(jax.random.key(seed), (size,), dtype=dtype)
 
 
+def _host(value):
+    return np.asarray(jax.device_get(value), dtype=np.float64)
+
+
 def _paired_seeds(seed):
     """Return two deterministic seeds for matrix-valued directional contracts."""
     return (seed, seed + 1000)
+
+
+def _cpp_boozer_wrappers():
+    pytest.importorskip("simsoptpp")
+    from simsopt.geo.boozersurface import (
+        _call_boozer_residual_ds,
+        _call_boozer_residual_ds2,
+    )
+    from simsopt.geo.surfaceobjectives import _call_boozer_dresidual_dc
+
+    return _call_boozer_residual_ds, _call_boozer_residual_ds2, _call_boozer_dresidual_dc
+
+
+def _biot_savart_fns():
+    from simsopt.field.biotsavart_jax import (
+        biot_savart_B,
+        biot_savart_dB_by_dX,
+        biot_savart_d2B_by_dXdX,
+        grouped_biot_savart_B,
+    )
+
+    return (
+        biot_savart_B,
+        biot_savart_dB_by_dX,
+        biot_savart_d2B_by_dXdX,
+        grouped_biot_savart_B,
+    )
+
+
+def _field_derivatives(points, coil_arrays):
+    _, biot_savart_dB_by_dX, biot_savart_d2B_by_dXdX, _ = _biot_savart_fns()
+    gammas, gammadashs, currents = coil_arrays[0]
+    dB_dX = biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
+    d2B_dXdX = biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents)
+    return dB_dX, d2B_dXdX
+
+
+def _composed_cpp_oracle_inputs(
+    x,
+    *,
+    coil_arrays,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+):
+    sdofs = x[:-2]
+    iota = x[-2]
+    G = x[-1]
+    gamma = surface_gamma_from_dofs(
+        sdofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+    )
+    xphi = surface_gammadash1_from_dofs(
+        sdofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+    )
+    xtheta = surface_gammadash2_from_dofs(
+        sdofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+    )
+    dx_ds = dgamma_by_dcoeff(
+        sdofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+    )
+    dxphi_ds = dgammadash1_by_dcoeff(
+        sdofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+    )
+    dxtheta_ds = dgammadash2_by_dcoeff(
+        sdofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+    )
+    nphi, ntheta = len(quadpoints_phi), len(quadpoints_theta)
+    points = gamma.reshape((-1, 3))
+    _, _, _, grouped_biot_savart_B = _biot_savart_fns()
+    B = grouped_biot_savart_B(points, coil_arrays).reshape((nphi, ntheta, 3))
+    dB_dX, d2B_dXdX = _field_derivatives(points, coil_arrays)
+    return {
+        "G": float(_host(G)),
+        "iota": float(_host(iota)),
+        "B": _host(B),
+        "dB_dX": _host(dB_dX.reshape((nphi, ntheta, 3, 3))),
+        "d2B_dXdX": _host(d2B_dXdX.reshape((nphi, ntheta, 3, 3, 3))),
+        "xphi": _host(xphi),
+        "xtheta": _host(xtheta),
+        "dx_ds": _host(dx_ds),
+        "dxphi_ds": _host(dxphi_ds),
+        "dxtheta_ds": _host(dxtheta_ds),
+    }
+
+
+def _direct_cpp_ds_fixture():
+    rng = np.random.default_rng(20260516)
+    nphi, ntheta, ndofs = 3, 4, 5
+    B = rng.normal(size=(nphi, ntheta, 3)) + np.array([0.1, -0.2, 1.7])
+    return {
+        "G": 1.25,
+        "iota": -0.37,
+        "B": B,
+        "dB_dX": rng.normal(scale=0.3, size=(nphi, ntheta, 3, 3)),
+        "xphi": rng.normal(scale=0.4, size=(nphi, ntheta, 3)),
+        "xtheta": rng.normal(scale=0.4, size=(nphi, ntheta, 3)),
+        "dx_ds": rng.normal(scale=0.2, size=(nphi, ntheta, 3, ndofs)),
+        "dxphi_ds": rng.normal(scale=0.2, size=(nphi, ntheta, 3, ndofs)),
+        "dxtheta_ds": rng.normal(scale=0.2, size=(nphi, ntheta, 3, ndofs)),
+    }
+
+
+def _surface_residual_jacobian_from_cpp(inputs, *, weight_inv_modB):
+    _, _, call_boozer_dresidual_dc = _cpp_boozer_wrappers()
+    B = inputs["B"]
+    xphi = inputs["xphi"]
+    xtheta = inputs["xtheta"]
+    iota = inputs["iota"]
+    tang = xphi + iota * xtheta
+    B2 = np.sum(B * B, axis=2)
+    dB_dc = np.einsum("ijxc,ijxd->ijcd", inputs["dB_dX"], inputs["dx_ds"])
+    dresidual_dc = call_boozer_dresidual_dc(
+        inputs["G"],
+        dB_dc,
+        B,
+        tang,
+        B2,
+        inputs["dxphi_ds"],
+        iota,
+        inputs["dxtheta_ds"],
+    )
+    dresidual_diota = -B2[..., None] * xtheta
+    dresidual_dG = B
+    if weight_inv_modB:
+        weight = 1.0 / np.sqrt(B2)
+        residual = inputs["G"] * B - B2[..., None] * tang
+        dB2_dc = 2.0 * np.einsum("ijc,ijcd->ijd", B, dB_dc)
+        dw_dc = -0.5 * dB2_dc / np.power(B2[..., None], 1.5)
+        drtil_dc = residual[..., None] * dw_dc[:, :, None, :] + (
+            weight[:, :, None, None] * dresidual_dc
+        )
+        drtil_diota = weight[:, :, None] * dresidual_diota
+        drtil_dG = weight[:, :, None] * dresidual_dG
+    else:
+        drtil_dc = dresidual_dc
+        drtil_diota = dresidual_diota
+        drtil_dG = dresidual_dG
+    nphi, ntheta = B.shape[:2]
+    return np.concatenate(
+        [
+            drtil_dc.reshape((nphi * ntheta * 3, -1)),
+            drtil_diota.reshape((nphi * ntheta * 3, 1)),
+            drtil_dG.reshape((nphi * ntheta * 3, 1)),
+        ],
+        axis=1,
+    )
 
 
 def _l2_norm(value):
@@ -385,6 +581,7 @@ def _coil_residual_scalar_objective(
     G,
     adjoint,
     grad_idx,
+    weight_inv_modB,
 ):
     """Build adjoint @ residual as a scalar objective of one coil input block."""
     nphi, ntheta = gamma.shape[:2]
@@ -393,6 +590,7 @@ def _coil_residual_scalar_objective(
         points = gamma.reshape(-1, 3)
         args = list(coil_inputs)
         args[grad_idx] = x
+        biot_savart_B, _, _, _ = _biot_savart_fns()
         B = biot_savart_B(points, *args).reshape(nphi, ntheta, 3)
         residual = boozer_residual_vector(
             G,
@@ -400,7 +598,7 @@ def _coil_residual_scalar_objective(
             B,
             xphi,
             xtheta,
-            weight_inv_modB=False,
+            weight_inv_modB=weight_inv_modB,
         )
         return jnp.vdot(adjoint, residual)
 
@@ -425,6 +623,55 @@ def _assert_surface_jacobian_contract(
         linearization_tol=linearization_tol,
         fd_tol=fd_tol,
     )
+
+
+# ---------------------------------------------------------------------------
+# Test: Direct simsoptpp Boozer derivative oracles
+# ---------------------------------------------------------------------------
+
+
+class TestBoozerDirectCppOracles:
+    """Compare JAX Boozer derivative helpers against simsoptpp kernels."""
+
+    def test_cpu_ordered_scalar_and_grad_matches_boozer_residual_ds(self):
+        """JAX CPU-ordered scalar/gradient matches the C++ ds oracle."""
+        call_boozer_residual_ds, _, _ = _cpp_boozer_wrappers()
+        inputs = _direct_cpp_ds_fixture()
+        num_res = 3 * inputs["B"].shape[0] * inputs["B"].shape[1]
+
+        value_cpp, grad_cpp = call_boozer_residual_ds(
+            inputs["G"],
+            inputs["iota"],
+            inputs["B"],
+            inputs["dB_dX"],
+            inputs["xphi"],
+            inputs["xtheta"],
+            inputs["dx_ds"],
+            inputs["dxphi_ds"],
+            inputs["dxtheta_ds"],
+            True,
+        )
+        value_jax, grad_jax = boozer_residual_scalar_and_grad_cpu_ordered(
+            jnp.asarray(inputs["G"], dtype=jnp.float64),
+            jnp.asarray(inputs["iota"], dtype=jnp.float64),
+            jnp.asarray(inputs["B"], dtype=jnp.float64),
+            jnp.asarray(inputs["dB_dX"], dtype=jnp.float64),
+            jnp.asarray(inputs["xphi"], dtype=jnp.float64),
+            jnp.asarray(inputs["xtheta"], dtype=jnp.float64),
+            jnp.asarray(inputs["dx_ds"], dtype=jnp.float64),
+            jnp.asarray(inputs["dxphi_ds"], dtype=jnp.float64),
+            jnp.asarray(inputs["dxtheta_ds"], dtype=jnp.float64),
+            optimize_G=True,
+            weight_inv_modB=True,
+        )
+
+        np.testing.assert_allclose(_host(value_jax), value_cpp / num_res, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(
+            _host(grad_jax),
+            np.asarray(grad_cpp, dtype=np.float64) / num_res,
+            rtol=2e-12,
+            atol=2e-12,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +919,32 @@ class TestBoozerResidualJacobianComposed:
             seed=21,
         )
 
+    def test_jacobian_matches_cpp_dresidual_dc_oracle(self):
+        """Composed residual Jacobian matches the C++ residual derivative kernel."""
+        _, jacobian_jax = boozer_residual_jacobian_composed(self.x, **self.kwargs)
+        cpp_inputs = _composed_cpp_oracle_inputs(
+            self.x,
+            coil_arrays=self.coil_arrays,
+            quadpoints_phi=self.phis,
+            quadpoints_theta=self.thetas,
+            mpol=self.mpol,
+            ntor=self.ntor,
+            nfp=self.nfp,
+            stellsym=False,
+            scatter_indices=None,
+        )
+        jacobian_cpp = _surface_residual_jacobian_from_cpp(
+            cpp_inputs,
+            weight_inv_modB=False,
+        )
+
+        np.testing.assert_allclose(
+            _host(jacobian_jax),
+            jacobian_cpp,
+            rtol=2e-11,
+            atol=2e-11,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Test: Composed Hessian
@@ -747,6 +1020,44 @@ class TestBoozerHessianComposed:
             min_observed_order=2.0,
         )
 
+    def test_hessian_matches_cpp_boozer_residual_ds2_oracle(self):
+        """Composed penalty Hessian matches the C++ ds2 scalar Hessian."""
+        _, call_boozer_residual_ds2, _ = _cpp_boozer_wrappers()
+        cpp_inputs = _composed_cpp_oracle_inputs(
+            self.x,
+            coil_arrays=self.coil_arrays,
+            quadpoints_phi=self.phis,
+            quadpoints_theta=self.thetas,
+            mpol=self.mpol,
+            ntor=self.ntor,
+            nfp=self.nfp,
+            stellsym=False,
+            scatter_indices=None,
+        )
+        num_res = 3 * self.nphi * self.ntheta
+
+        _, _, hessian_cpp = call_boozer_residual_ds2(
+            cpp_inputs["G"],
+            cpp_inputs["iota"],
+            cpp_inputs["B"],
+            cpp_inputs["dB_dX"],
+            cpp_inputs["d2B_dXdX"],
+            cpp_inputs["xphi"],
+            cpp_inputs["xtheta"],
+            cpp_inputs["dx_ds"],
+            cpp_inputs["dxphi_ds"],
+            cpp_inputs["dxtheta_ds"],
+            False,
+        )
+        hessian_jax = jax.hessian(boozer_penalty_composed)(self.x, **self.kwargs)
+
+        np.testing.assert_allclose(
+            _host(hessian_jax),
+            np.asarray(hessian_cpp, dtype=np.float64) / num_res,
+            rtol=2e-9,
+            atol=2e-9,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Test: Outer coil VJP
@@ -800,7 +1111,14 @@ class TestBoozerResidualCoilVJP:
             stellsym=False,
         )
 
-    def _assert_coil_vjp_scalar_contract(self, grad_idx, *, adjoint_seed, check_seed):
+    def _assert_coil_vjp_scalar_contract(
+        self,
+        grad_idx,
+        *,
+        adjoint_seed,
+        check_seed,
+        weight_inv_modB=False,
+    ):
         """Check one coil-input VJP block against a scalarized JAX objective."""
         n_res = 3 * self.nphi * self.ntheta
         adjoint = _make_adjoint(adjoint_seed, n_res, self.gamma.dtype)
@@ -813,7 +1131,7 @@ class TestBoozerResidualCoilVJP:
             coil_arrays=self.coil_arrays,
             iota=self.iota,
             G=self.G,
-            weight_inv_modB=False,
+            weight_inv_modB=weight_inv_modB,
         )
         coil_inputs = [self.coil_gammas, self.coil_gammadashs, self.coil_currents]
         target = coil_inputs[grad_idx]
@@ -828,6 +1146,7 @@ class TestBoozerResidualCoilVJP:
             G=self.G,
             adjoint=adjoint,
             grad_idx=grad_idx,
+            weight_inv_modB=weight_inv_modB,
         )
 
         _assert_scalar_grad_matches(
@@ -842,6 +1161,15 @@ class TestBoozerResidualCoilVJP:
     def test_coil_vjp_currents_fd(self):
         """VJP w.r.t. coil currents matches JAX-native scalarization."""
         self._assert_coil_vjp_scalar_contract(2, adjoint_seed=99, check_seed=1099)
+
+    def test_coil_vjp_weight_inv_modB_currents_fd(self):
+        """VJP covers the public 1/|B|-weighted residual path."""
+        self._assert_coil_vjp_scalar_contract(
+            2,
+            adjoint_seed=199,
+            check_seed=1199,
+            weight_inv_modB=True,
+        )
 
     def test_coil_vjp_shapes(self):
         """VJP outputs have correct shapes."""

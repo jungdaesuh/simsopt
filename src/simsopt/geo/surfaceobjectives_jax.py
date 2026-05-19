@@ -1891,22 +1891,19 @@ def _checked_boozer_linear_solve(adjoint_state, rhs, *, transpose):
         f"solve_{direction}_with_status",
         None,
     )
-    if callable(solve_with_status):
-        solution, success = solve_with_status(rhs)
-        if not _host_bool(success):
-            raise RuntimeError(
-                "Boozer adjoint linear solve failed on the operator-backed runtime "
-                f"path ({adjoint_state.linearization_kind}, {direction})."
-            )
-        return solution
-    solver = getattr(adjoint_state, f"solve_{direction}", None)
-    if not callable(solver):
+    if not callable(solve_with_status):
         raise RuntimeError(
             "Boozer adjoint state exposes no "
-            f"solve_{direction}_with_status or solve_{direction}; "
+            f"solve_{direction}_with_status; "
             "cannot solve the inner linearization."
         )
-    return solver(rhs)
+    solution, success = solve_with_status(rhs)
+    if not _host_bool(success):
+        raise RuntimeError(
+            "Boozer adjoint linear solve failed on the JAX runtime-state path "
+            f"({adjoint_state.linearization_kind})."
+        )
+    return solution
 
 
 def _solve_boozer_adjoint_batch(adjoint_state, rhs_batch):
@@ -1984,6 +1981,10 @@ def _project_native_dJ_by_dcoil_dofs(surface_objective):
         surface_objective.biotsavart,
         surface_objective._dJ_by_dcoil_dofs,
     )
+
+
+def _public_scalar_value(value):
+    return float(_host_scalar(value, dtype=np.float64))
 
 
 def _public_dJ_from_native_cache(surface_objective):
@@ -2097,20 +2098,24 @@ def _traceable_runtime_hostify_tree(tree):
     return jax.tree.map(_traceable_runtime_hostify_leaf, tree)
 
 
-def _traceable_runtime_deviceify_leaf(leaf):
+def _traceable_runtime_deviceify_leaf(leaf, device):
     """Explicitly place cached runtime arrays back onto the active device."""
     if isinstance(leaf, jax.Array):
-        return leaf
+        return jax.device_put(leaf, device=device)
     if isinstance(leaf, float):
-        return jax.device_put(np.asarray(leaf, dtype=np.float64))
+        return jax.device_put(np.asarray(leaf, dtype=np.float64), device=device)
     if isinstance(leaf, (np.ndarray, np.generic)):
-        return jax.device_put(np.asarray(leaf))
+        return jax.device_put(np.asarray(leaf), device=device)
     return leaf
 
 
 def _traceable_runtime_deviceify_tree(tree):
     """Recursively device-place cached runtime arrays for strict diagnostics."""
-    return jax.tree.map(_traceable_runtime_deviceify_leaf, tree)
+    device = jax.devices()[0]
+    return jax.tree.map(
+        lambda leaf: _traceable_runtime_deviceify_leaf(leaf, device),
+        tree,
+    )
 
 
 def _evaluate_scalar_or_value_and_grad(
@@ -2134,7 +2139,7 @@ def _evaluate_direct_coil_objective_value(
     *objective_args,
 ):
     """Evaluate a direct coil objective value without building its gradient."""
-    return _host_scalar(objective(coil_dofs, *objective_args))
+    return objective(coil_dofs, *objective_args)
 
 
 def _current_coil_dofs_and_spec(biotsavart):
@@ -2158,7 +2163,7 @@ def _value_and_direct_coil_gradient(
         coil_dofs,
         *objective_args,
     )
-    return _host_scalar(objective_value), coil_dofs_gradient
+    return objective_value, coil_dofs_gradient
 
 
 def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
@@ -2167,6 +2172,14 @@ def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
         sdofs,
         biotsavart.coil_set_spec_from_dofs(coil_dofs),
         **qs_kwargs,
+    )
+
+
+def _booz_solve_observer_active(result):
+    return (
+        not bool(result.get("success", False))
+        or logger.isEnabledFor(logging.DEBUG)
+        or os.environ.get("SIMSOPT_BOOZER_OBSERVABILITY") == "1"
     )
 
 
@@ -2186,6 +2199,8 @@ def _boozer_solve_observability_payload(result):
 def _log_boozer_solve_state(booz_surf):
     if booz_surf.res is None:
         logger.warning("BoozerSurfaceJAX solve state unavailable: res=None")
+        return
+    if not _booz_solve_observer_active(booz_surf.res):
         return
     payload = _boozer_solve_observability_payload(booz_surf.res)
     log_fn = logger.debug if payload["success"] else logger.warning
@@ -2426,19 +2441,23 @@ class _BoozerObjectiveBase(Optimizable):
         """Return the native flat free-coil-DOF gradient as a JAX array."""
         if self._dJ_by_dcoil_dofs is None:
             solved_state = _resolved_boozer_solved_runtime_state(self.boozer_surface)
-            self._J, self._dJ_by_dcoil_dofs = (
+            value, self._dJ_by_dcoil_dofs = (
                 self._value_and_dJ_by_dcoil_dofs_from_solved_state(solved_state)
             )
+            self._J = _public_scalar_value(value)
         return self._dJ_by_dcoil_dofs
 
     def compute(self, *, compute_gradient=True):
         solved_state = _resolved_boozer_solved_runtime_state(self.boozer_surface)
         if not compute_gradient:
-            self._J = self._compute_value_from_solved_state(solved_state)
+            self._J = _public_scalar_value(
+                self._compute_value_from_solved_state(solved_state)
+            )
             return
-        self._J, self._dJ_by_dcoil_dofs = (
+        value, self._dJ_by_dcoil_dofs = (
             self._value_and_dJ_by_dcoil_dofs_from_solved_state(solved_state)
         )
+        self._J = _public_scalar_value(value)
         self._dJ = _project_native_dJ_by_dcoil_dofs(self)
 
 
@@ -2664,9 +2683,7 @@ class MajorRadiusJAX(_BoozerObjectiveBase):
         return self.surface.surface_spec()
 
     def _compute_value(self, sdofs):
-        return _host_scalar(
-            surface_major_radius_jax_from_dofs(self._surface_spec(), sdofs)
-        )
+        return surface_major_radius_jax_from_dofs(self._surface_spec(), sdofs)
 
     def _compute_dJ_ds(self, sdofs, decision_size, dtype):
         dJ_ds_surface = _surface_dmajor_radius_jax_from_dofs(
@@ -2756,11 +2773,7 @@ class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):
         )
 
     def _compute_value(self, sdofs, coil_set_spec):
-        return float(
-            _host_scalar(
-                _qs_ratio_pure(sdofs, coil_set_spec, **self._qs_objective_kwargs())
-            )
-        )
+        return _qs_ratio_pure(sdofs, coil_set_spec, **self._qs_objective_kwargs())
 
     def _direct_coil_gradient(self, current_coil_dofs, sdofs):
         qs_kwargs = self._qs_objective_kwargs()
@@ -4209,7 +4222,9 @@ def _build_traceable_objective_compiled_bundle_from_state(
             coil_set_spec_from_dofs,
             coil_dofs=coil_dofs,
             solved_x=solved_x,
-            solved_linear_solve_factors=solved_linear_solve_factors,
+            solved_linear_solve_factors=_traceable_runtime_deviceify_tree(
+                solved_linear_solve_factors
+            ),
             linearization_kind=linearization_kind,
             linear_solve_tol=linear_solve_tol,
             linear_solve_stab=linear_solve_stab,
@@ -4652,7 +4667,9 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
     state = compiled_bundle["state"]
     baseline_coil_dofs = state["baseline_coil_dofs"]
     baseline_x = state["baseline_x"]
-    baseline_linear_solve_factors = state["baseline_linear_solve_factors"]
+    baseline_linear_solve_factors = _traceable_runtime_deviceify_tree(
+        state["baseline_linear_solve_factors"]
+    )
 
     @jax.custom_vjp
     def f(coil_dofs):
@@ -4675,6 +4692,9 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
 
     def f_bwd(saved_state, cotangent):
         coil_dofs, solved_x, solved_linear_solve_factors, success = saved_state
+        solved_linear_solve_factors = _traceable_runtime_deviceify_tree(
+            solved_linear_solve_factors
+        )
 
         def _accepted_candidate_gradient(_):
             grad, linear_solve_success = compiled_total_gradient_for(
@@ -6064,7 +6084,9 @@ def make_traceable_single_stage_alm_runtime_bundle(
             coil_set_spec_from_dofs,
             coil_dofs=coil_dofs,
             solved_x=solved_x,
-            solved_linear_solve_factors=solved_linear_solve_factors,
+            solved_linear_solve_factors=_traceable_runtime_deviceify_tree(
+                solved_linear_solve_factors
+            ),
             linearization_kind=linearization_kind,
             linear_solve_tol=linear_solve_tol,
             linear_solve_stab=linear_solve_stab,
@@ -6118,6 +6140,9 @@ def make_traceable_single_stage_alm_runtime_bundle(
             multipliers,
             penalty,
         ) = saved_state
+        solved_linear_solve_factors = _traceable_runtime_deviceify_tree(
+            solved_linear_solve_factors
+        )
 
         def _accepted_candidate_gradient(_):
             grad, linear_solve_success = compiled_total_gradient_for(

@@ -1,7 +1,7 @@
 """Strong Wolfe line search for on-device BFGS / L-BFGS.
 
-Derived from the JAX 0.9.2 strong-Wolfe flow, with repo-specific changes for
-the explicit old_fval/gfk contract and cached zoom-sample reuse.
+Derived from the upstream ``jax-v0.9.2`` strong-Wolfe flow, with repo-specific
+changes for the explicit old_fval/gfk contract and cached zoom-sample reuse.
 The bracketing/zoom contract follows Nocedal & Wright, *Numerical
 Optimization*, Section 3.5.
 """
@@ -48,11 +48,11 @@ def _emit_line_search_runtime_debug(
     """Emit runtime diagnostics when SIMSOPT_LBFGS_DEBUG is enabled.
 
     The callback routes through ``_emit_debug_callback`` (``ordered=False``) so
-    strict ``transfer_guard='disallow'`` lanes do not trip on the JAX 0.9.2
-    ``bool[0]`` host token associated with ``ordered=True``. One consequence is
-    that debug prints from the line search may interleave with other unordered
-    callbacks (e.g. the L-BFGS body debug). Use SIMSOPT_LBFGS_DEBUG only for
-    ad-hoc tracing; do not rely on print ordering across stages.
+    strict ``transfer_guard='disallow'`` lanes do not trip on the host token
+    associated with ``ordered=True``. One consequence is that debug prints from
+    the line search may interleave with other unordered callbacks (e.g. the
+    L-BFGS body debug). Use SIMSOPT_LBFGS_DEBUG only for ad-hoc tracing; do not
+    rely on print ordering across stages.
     """
     if not _LINE_SEARCH_DEBUG_ENABLED:
         return

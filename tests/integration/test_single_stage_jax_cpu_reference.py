@@ -4296,6 +4296,21 @@ class TestCompositeObjective:
                 atol=1e-6,
             )
 
+    def test_public_wrapper_dj_boundaries_allow_strict_transfer_guard_real_fixture(
+        self,
+        boozer_setup,
+    ):
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        wrappers = _make_jax_standard_wrapper_triplet(booz_jax, bs_jax)
+
+        with jax.transfer_guard("disallow"):
+            derivatives = [wrapper.dJ() for wrapper in wrappers]
+
+        for derivative in derivatives:
+            gradient = np.asarray(derivative, dtype=float)
+            assert gradient.size > 0
+            assert np.all(np.isfinite(gradient))
+
     def test_batched_standard_wrapper_gradients_allow_strict_transfer_guard_on_gpu(
         self,
         monkeypatch,
@@ -8310,7 +8325,7 @@ class TestBoozerResidualCPUParity:
         Returns arrays that both CPU and JAX kernels can consume, ensuring
         the comparison is at exactly the same numerical state.
         """
-        np.random.seed(seed)
+        rng = np.random.RandomState(seed)
 
         ncoils, nfp = 2, 2
         stellsym = True
@@ -8351,7 +8366,7 @@ class TestBoozerResidualCPUParity:
 
         # Add a small random perturbation so the residual is non-trivial
         dofs = surf.get_dofs()
-        dofs += np.random.randn(len(dofs)) * 1e-4
+        dofs += rng.randn(len(dofs)) * 1e-4
         surf.set_dofs(dofs)
 
         mu0 = 4 * np.pi * 1e-7

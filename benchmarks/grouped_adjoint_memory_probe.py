@@ -242,19 +242,13 @@ def print_memory_snapshot(snapshot: dict[str, float | str | None]) -> None:
     grad_inf = snapshot.get("grad_inf")
     method = snapshot.get("method")
     group_suffix = (
-        f", groups={int(group_count)}"
-        if isinstance(group_count, (int, float))
-        else ""
+        f", groups={int(group_count)}" if isinstance(group_count, (int, float)) else ""
     )
     progress_suffix = (
-        f", iter={int(iteration)}"
-        if isinstance(iteration, (int, float))
-        else ""
+        f", iter={int(iteration)}" if isinstance(iteration, (int, float)) else ""
     )
     objective_suffix = (
-        f", fun={float(objective):.6e}"
-        if isinstance(objective, (int, float))
-        else ""
+        f", fun={float(objective):.6e}" if isinstance(objective, (int, float)) else ""
     )
     grad_suffix = (
         f", ||grad||_inf={float(grad_inf):.3e}"
@@ -262,9 +256,7 @@ def print_memory_snapshot(snapshot: dict[str, float | str | None]) -> None:
         else ""
     )
     method_suffix = f", method={method}" if isinstance(method, str) else ""
-    gpu_suffix = (
-        f"{float(gpu_memory):.2f} MB" if gpu_memory is not None else "n/a"
-    )
+    gpu_suffix = f"{float(gpu_memory):.2f} MB" if gpu_memory is not None else "n/a"
     print(
         "[snapshot] "
         f"{snapshot['label']}: "
@@ -276,10 +268,7 @@ def print_memory_snapshot(snapshot: dict[str, float | str | None]) -> None:
         flush=False,
     )
     print(
-        f"{progress_suffix}"
-        f"{objective_suffix}"
-        f"{grad_suffix}"
-        f"{method_suffix}",
+        f"{progress_suffix}{objective_suffix}{grad_suffix}{method_suffix}",
         flush=True,
     )
 
@@ -301,7 +290,7 @@ def _median_or_none(values: list[float]) -> float | None:
 
 
 def _block_until_ready(value: object) -> None:
-    for leaf in jax.tree_util.tree_leaves(value):
+    for leaf in jax.tree.leaves(value):
         block_until_ready = getattr(leaf, "block_until_ready", None)
         if callable(block_until_ready):
             block_until_ready()
@@ -335,9 +324,7 @@ class _GroupedVJPTimingRecorder:
                 "group_count": int(len(group_times_s)),
                 "total_s": total_s,
                 "group_times_s": group_times_s,
-                "first_group_s": (
-                    float(group_times_s[0]) if group_times_s else None
-                ),
+                "first_group_s": (float(group_times_s[0]) if group_times_s else None),
                 "steady_state_group_median_s": _median_or_none(group_times_s[1:]),
             }
         )
@@ -378,9 +365,7 @@ class _GroupedVJPTimingRecorder:
             ),
             "warm_stream_times_s": warm_stream_times_s,
             "steady_state_grouped_vjp_time_s": steady_state_grouped_vjp_time_s,
-            "steady_state_grouped_vjp_per_group_s": _median_or_none(
-                warm_group_times_s
-            ),
+            "steady_state_grouped_vjp_per_group_s": _median_or_none(warm_group_times_s),
             "total_representative_run_wall_s": total_wall_s,
             "steady_state_grouped_vjp_wall_fraction": wall_fraction,
             "passes": self.passes,
@@ -558,9 +543,7 @@ def _build_grouped_adjoint_baseline_comparison(
         speedup_fraction >= _GROUPED_VJP_MIN_STEADY_STATE_SPEEDUP_FRACTION
     )
 
-    current_peak_device_memory_mb = _peak_device_memory_mb_from_metrics(
-        current_metrics
-    )
+    current_peak_device_memory_mb = _peak_device_memory_mb_from_metrics(current_metrics)
     baseline_peak_device_memory_mb = baseline_payload["memory"].get(
         "peak_gpu_memory_mb"
     )
@@ -628,9 +611,7 @@ def _build_grouped_adjoint_payload(
             "boozer_optimizer_backend": fixture["boozer_optimizer_backend"],
             "optimizer_method": base_result.get("optimizer_method"),
             "boozer_limited_memory": bool(boozer_limited_memory),
-            "boozer_limited_memory_requested": bool(
-                boozer_limited_memory_requested
-            ),
+            "boozer_limited_memory_requested": bool(boozer_limited_memory_requested),
         },
         "grouped_adjoint": {
             "adjoint_residual_rel": metrics["adjoint_residual_rel"],
@@ -757,16 +738,24 @@ def evaluate_grouped_adjoint_memory_probe(
             + ", ".join(missing_labels)
         )
     if not bool(metrics.get("adjoint_finite", False)):
-        failures.append("Grouped-adjoint memory probe produced a non-finite adjoint state.")
+        failures.append(
+            "Grouped-adjoint memory probe produced a non-finite adjoint state."
+        )
     if not bool(metrics.get("implicit_gradient_finite", False)):
-        failures.append("Grouped-adjoint memory probe produced a non-finite implicit gradient.")
+        failures.append(
+            "Grouped-adjoint memory probe produced a non-finite implicit gradient."
+        )
     if float(metrics.get("implicit_gradient_norm", 0.0)) <= 0.0:
-        failures.append("Grouped-adjoint memory probe produced a zero implicit gradient.")
+        failures.append(
+            "Grouped-adjoint memory probe produced a zero implicit gradient."
+        )
     if not np.isfinite(float(metrics.get("adjoint_residual_rel", np.inf))):
         failures.append("Grouped-adjoint memory probe adjoint residual is not finite.")
     timings = metrics.get("grouped_vjp_timings")
     if not isinstance(timings, dict):
-        failures.append("Grouped-adjoint memory probe did not record grouped-VJP timings.")
+        failures.append(
+            "Grouped-adjoint memory probe did not record grouped-VJP timings."
+        )
     else:
         required_timing_keys = {
             "first_compile_time_s",
@@ -896,7 +885,9 @@ def main() -> None:
 
     base_result = fixture["boozer_surface"].res
     if base_result is None or not base_result.get("success", False):
-        raise RuntimeError("Baseline Boozer solve failed; cannot probe grouped-adjoint memory.")
+        raise RuntimeError(
+            "Baseline Boozer solve failed; cannot probe grouped-adjoint memory."
+        )
 
     from simsopt.geo.surfaceobjectives_jax import BoozerResidualJAX
 

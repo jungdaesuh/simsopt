@@ -338,17 +338,8 @@ def _lbfgsb_state_dimensions(state: LbfgsbState) -> tuple[int, int]:
 
 
 def _lbfgsb_ddot(x, y) -> jax.Array:
-    total = jnp.asarray(0.0, dtype=jnp.float64)
-    for i in range(int(x.shape[0])):
-        product = x[i] * y[i]
-        # Adding exact zero is a no-op in SciPy's BLAS accumulation.
-        total = jax.lax.cond(
-            product != 0.0,
-            lambda value: value + product,
-            lambda value: value,
-            total,
-        )
-    return total
+    products = x * y
+    return jnp.sum(jnp.where(products != 0.0, products, 0.0))
 
 
 def _lbfgsb_dnrm2(x) -> jax.Array:
@@ -1403,6 +1394,23 @@ def _lbfgsb_setulb_new_x_next_iteration(
         next_theta = jnp.where(refresh, 1.0, update.theta)
         next_iupdat = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), iupdat)
         next_updatd = ~refresh
+        # SciPy 1.17.1 __lbfgsb.c:1030-1041 refreshes the L-BFGS memory and
+        # writes ``*task = RESTART; *task_msg = NO_MSG;`` before re-entering
+        # LINE222 when ``formt`` reports non-positive-definite Cholesky.
+        # Mirror that explicit task write so the post-refresh re-entry sees
+        # the same task signal that SciPy uses for case 5 (lnsrlb fail with
+        # ``col != 0``), which already routes through the same RESTART
+        # boundary in ``_lbfgsb_setulb_refreshed_memory_state``.
+        next_task_code = jnp.where(
+            refresh,
+            jnp.asarray(RESTART, dtype=jnp.int32),
+            state.workspace.task[0],
+        )
+        next_task_msg = jnp.where(
+            refresh,
+            jnp.asarray(NO_MSG, dtype=jnp.int32),
+            state.workspace.task[1],
+        )
 
         next_wa = wa
         next_wa = next_wa.at[lws:lwy].set(update.ws.reshape((-1,)))
@@ -1425,6 +1433,7 @@ def _lbfgsb_setulb_new_x_next_iteration(
 
         workspace = state.workspace._replace(
             wa=next_wa,
+            task=_lbfgsb_task(next_task_code, next_task_msg),
             lsave=state.workspace.lsave.at[3].set(next_updatd.astype(jnp.int32)),
             isave=next_isave,
             dsave=next_dsave,
