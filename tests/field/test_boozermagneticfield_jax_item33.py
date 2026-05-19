@@ -28,8 +28,14 @@ from simsopt.field.boozermagneticfield_jax import (
 )
 import simsopt.jax_core.boozer_radial_field as radial_field
 from simsopt.jax_core.boozer_fixed_state import PiecewisePolynomial1D, ppoly_eval
+from simsopt.mhd import boozer as boozer_module
 from simsopt.mhd.vmec import Vmec
 
+
+pytestmark = pytest.mark.skipif(
+    boozer_module.booz_xform is None,
+    reason="booz_xform python package not found",
+)
 
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
 _RTOL = float(_DIRECT_KERNEL["rtol"])

@@ -252,10 +252,6 @@ def _unregister_traceable_callback(token: int) -> None:
         del _TRACEABLE_CALLBACKS[token]
 
 
-def _traceable_callback_token(token: int, *, dtype) -> jax.Array:
-    return jnp.asarray(token, dtype=dtype)
-
-
 def _lookup_traceable_callback(token, kind: str) -> Callable[..., object]:
     token_value = int(np.asarray(token).reshape(()).item())
     with _TRACEABLE_CALLBACK_LOCK:
@@ -1433,7 +1429,13 @@ def _make_traceable_levenberg_marquardt_runner(
         }
 
     run_solver.__name__ = "traceable_levenberg_marquardt_run_solver"
-    return jax.jit(run_solver)
+    if not callback_enabled and not progress_callback_enabled:
+        def run_solver_without_callbacks(x_init, fn_args):
+            return run_solver(x_init, fn_args, 0, 0)
+
+        run_solver_without_callbacks.__name__ = run_solver.__name__
+        return jax.jit(run_solver_without_callbacks)
+    return jax.jit(run_solver, static_argnums=(2, 3))
 
 
 def _least_squares_matvec(flat_residual_fn, x, pullback, tangent):
@@ -1984,13 +1986,17 @@ def levenberg_marquardt_traceable(
     )
     callback_token = _register_traceable_callback(callback)
     progress_callback_token = _register_traceable_callback(progress_callback)
+    normalized_args = _normalize_solver_args(args)
     try:
-        result = runner(
-            x0,
-            _normalize_solver_args(args),
-            _traceable_callback_token(callback_token, dtype=jnp.int64),
-            _traceable_callback_token(progress_callback_token, dtype=jnp.int64),
-        )
+        if callback_token == 0 and progress_callback_token == 0:
+            result = runner(x0, normalized_args)
+        else:
+            result = runner(
+                x0,
+                normalized_args,
+                callback_token,
+                progress_callback_token,
+            )
         if callback_token != 0 or progress_callback_token != 0:
             jax.effects_barrier()
         return result
@@ -3773,7 +3779,13 @@ def _make_traceable_newton_polish_runner(
         }
 
     run_solver.__name__ = "traceable_newton_polish_run_solver"
-    return jax.jit(run_solver)
+    if not progress_callback_enabled:
+        def run_solver_without_callback(x_init, fn_args):
+            return run_solver(x_init, fn_args, 0)
+
+        run_solver_without_callback.__name__ = run_solver.__name__
+        return jax.jit(run_solver_without_callback)
+    return jax.jit(run_solver, static_argnums=(2,))
 
 
 def newton_polish_traceable(
@@ -3805,12 +3817,16 @@ def newton_polish_traceable(
         progress_callback is not None,
     )
     progress_callback_token = _register_traceable_callback(progress_callback)
+    normalized_args = _normalize_solver_args(args)
     try:
-        result = runner(
-            x0,
-            _normalize_solver_args(args),
-            _traceable_callback_token(progress_callback_token, dtype=jnp.int64),
-        )
+        if progress_callback_token == 0:
+            result = runner(x0, normalized_args)
+        else:
+            result = runner(
+                x0,
+                normalized_args,
+                progress_callback_token,
+            )
         if progress_callback_token != 0:
             jax.effects_barrier()
         return result
