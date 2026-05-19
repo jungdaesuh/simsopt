@@ -2257,7 +2257,10 @@ def _probe_mps_plugin() -> None:
     Uses ``find_spec`` rather than ``import`` so the plugin registers normally
     during the subsequent ``import jax`` call with ``JAX_PLATFORMS=mps`` set.
     """
-    if importlib.util.find_spec("jax_plugins.mps") is None:
+    if (
+        importlib.util.find_spec("jax_plugins") is None
+        or importlib.util.find_spec("jax_plugins.mps") is None
+    ):
         raise RuntimeError(_MPS_NOT_AVAILABLE_HINT)
 
 

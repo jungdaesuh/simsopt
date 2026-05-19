@@ -3626,6 +3626,34 @@ class TestBoozerSurfaceJAXClass:
                 },
             )
 
+    @pytest.mark.parametrize("optimizer_backend", ["scipy-jax", "scipy-jax-fullgraph"])
+    def test_ls_constructor_rejects_outer_only_optimizer_backend(
+        self, optimizer_backend
+    ):
+        """LS construction keeps outer-loop-only target backends out of LS options."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf = _MockSurface(
+            np.zeros(27),
+            1,
+            1,
+            1,
+            False,
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+        )
+        label = _PlumbingVolumeLabel(surf)
+        with pytest.raises(ValueError, match="optimizer_backend must be one of"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+                options={
+                    "optimizer_backend": optimizer_backend,
+                },
+            )
+
     def test_optimizer_tuning_options_are_accepted(self):
         """Private optimizer tuning knobs accepted with non-scipy backend."""
         bs = _MockBiotSavart(_make_mock_coils())
@@ -3670,6 +3698,8 @@ class TestBoozerSurfaceJAXClass:
             ("ondevice", True, "lbfgs-ondevice"),
             ("scipy-jax", False, "lbfgs-scipy-jax"),
             ("scipy-jax", True, "lbfgs-scipy-jax"),
+            ("scipy-jax-fullgraph", False, "lbfgs-scipy-jax-fullgraph"),
+            ("scipy-jax-fullgraph", True, "lbfgs-scipy-jax-fullgraph"),
         ],
     )
     def test_resolve_ls_optimizer_method_contract(
@@ -3704,6 +3734,12 @@ class TestBoozerSurfaceJAXClass:
             ("ondevice", False, "lm-minpack", "lm-minpack-ondevice"),
             ("ondevice", False, "optimistix-lm", "optimistix-lm-ondevice"),
             ("scipy-jax", False, "quasi-newton", "lbfgs-scipy-jax"),
+            (
+                "scipy-jax-fullgraph",
+                False,
+                "quasi-newton",
+                "lbfgs-scipy-jax-fullgraph",
+            ),
             ("scipy", False, "lm", "lm"),
             ("scipy", False, "lm-minpack", "lm"),
             ("scipy", False, "optimistix-lm", "lm"),
@@ -3747,7 +3783,37 @@ class TestBoozerSurfaceJAXClass:
                 least_squares_algorithm="lm",
             )
 
-    @pytest.mark.parametrize("optimizer_backend", ["ondevice", "scipy-jax"])
+    @pytest.mark.parametrize(
+        ("optimizer_backend", "least_squares_algorithm"),
+        [
+            ("scipy-jax", "lm"),
+            ("scipy-jax", "lm-minpack"),
+            ("scipy-jax", "optimistix-lm"),
+            ("scipy-jax-fullgraph", "lm"),
+            ("scipy-jax-fullgraph", "lm-minpack"),
+            ("scipy-jax-fullgraph", "optimistix-lm"),
+        ],
+    )
+    def test_resolve_least_squares_optimizer_method_rejects_scipy_control_lm(
+        self, optimizer_backend, least_squares_algorithm
+    ):
+        with pytest.raises(
+            ValueError,
+            match=(
+                rf"optimizer_backend='{optimizer_backend}'.*only supports "
+                "least_squares_algorithm='quasi-newton'"
+            ),
+        ):
+            resolve_least_squares_optimizer_method(
+                optimizer_backend,
+                limited_memory=False,
+                least_squares_algorithm=least_squares_algorithm,
+            )
+
+    @pytest.mark.parametrize(
+        "optimizer_backend",
+        ["ondevice", "scipy-jax", "scipy-jax-fullgraph"],
+    )
     def test_require_target_backend_x64_rejects_disabled_float64(
         self, monkeypatch, optimizer_backend
     ):

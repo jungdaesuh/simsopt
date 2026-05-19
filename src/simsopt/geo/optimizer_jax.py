@@ -166,10 +166,24 @@ __all__ = [
 
 
 PRIVATE_OPTIMIZER_JAX_VERSION = "0.9.2"
-VALID_OPTIMIZER_BACKENDS = frozenset({"auto", "scipy", "ondevice"})
 CONCRETE_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
-VALID_OUTER_OPTIMIZER_BACKENDS = frozenset(
-    {"scipy", "ondevice", "scipy-jax", "scipy-jax-fullgraph"}
+TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS = frozenset(
+    {"scipy-jax", "scipy-jax-fullgraph"}
+)
+TARGET_OUTER_OPTIMIZER_BACKENDS = (
+    frozenset({"ondevice"}) | TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS
+)
+VALID_OPTIMIZER_BACKENDS = frozenset({"auto"}) | CONCRETE_OPTIMIZER_BACKENDS
+VALID_OUTER_OPTIMIZER_BACKENDS = (
+    TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS | CONCRETE_OPTIMIZER_BACKENDS
+)
+_OUTER_OPTIMIZER_BACKEND_MESSAGE = (
+    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
+    "scipy-jax-fullgraph."
+)
+_RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE = (
+    "optimizer_backend must be one of: auto, scipy, ondevice, scipy-jax, "
+    "scipy-jax-fullgraph."
 )
 OPTIMIZER_BACKEND_ROLE = {
     "scipy": "reference",
@@ -177,9 +191,7 @@ OPTIMIZER_BACKEND_ROLE = {
     "scipy-jax": "target-scipy-control",
     "scipy-jax-fullgraph": "target-scipy-control-fullgraph",
 }
-TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset(
-    {"ondevice", "scipy-jax", "scipy-jax-fullgraph"}
-)
+TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = TARGET_OUTER_OPTIMIZER_BACKENDS
 VALID_LEAST_SQUARES_ALGORITHMS = frozenset(
     {"quasi-newton", "lm", "lm-minpack", "optimistix-lm"}
 )
@@ -242,8 +254,8 @@ _TRACEABLE_CALLBACKS: dict[int, Callable[..., object]] = {}
 def resolve_optimizer_backend(optimizer_backend: str | None) -> str:
     if optimizer_backend is None or optimizer_backend == "auto":
         return get_backend_policy().default_optimizer_backend
-    if optimizer_backend not in CONCRETE_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
+    if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
+        raise ValueError(_RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE)
     return optimizer_backend
 
 
@@ -649,10 +661,7 @@ def resolve_optimizer_backend_method(optimizer_backend, *, limited_memory):
     if optimizer_backend is None or optimizer_backend == "auto":
         optimizer_backend = resolve_optimizer_backend(optimizer_backend)
     if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
-        raise ValueError(
-            "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
-            "scipy-jax-fullgraph."
-        )
+        raise ValueError(_OUTER_OPTIMIZER_BACKEND_MESSAGE)
     if optimizer_backend == "scipy":
         return resolve_reference_optimizer_method(limited_memory=limited_memory)
     if optimizer_backend == "scipy-jax":
@@ -672,6 +681,13 @@ def resolve_target_optimizer_method(*, limited_memory):
     return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
 
 
+def _scipy_control_least_squares_algorithm_message(optimizer_backend):
+    return (
+        f"optimizer_backend={optimizer_backend!r} only supports "
+        "least_squares_algorithm='quasi-newton'."
+    )
+
+
 def resolve_least_squares_optimizer_method(
     optimizer_backend,
     *,
@@ -687,6 +703,10 @@ def resolve_least_squares_optimizer_method(
         return resolve_optimizer_backend_method(
             optimizer_backend,
             limited_memory=limited_memory,
+        )
+    if optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS:
+        raise ValueError(
+            _scipy_control_least_squares_algorithm_message(optimizer_backend)
         )
     if optimizer_backend == "scipy":
         return resolve_reference_least_squares_optimizer_method(
@@ -764,10 +784,7 @@ def resolve_reference_optimizer_contract(
 ):
     """Resolve the explicit CPU/reference optimizer contract."""
     if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
-        raise ValueError(
-            "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
-            "scipy-jax-fullgraph."
-        )
+        raise ValueError(_OUTER_OPTIMIZER_BACKEND_MESSAGE)
     if field_backend == "jax":
         raise ValueError(
             f"{component_label} with backend='jax' requires "
@@ -797,15 +814,11 @@ def resolve_target_optimizer_contract(
 ):
     """Resolve the explicit JAX target optimizer contract."""
     if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
-        raise ValueError(
-            "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
-            "scipy-jax-fullgraph."
-        )
-    if field_backend != "jax" or optimizer_backend not in {
-        "ondevice",
-        "scipy-jax",
-        "scipy-jax-fullgraph",
-    }:
+        raise ValueError(_OUTER_OPTIMIZER_BACKEND_MESSAGE)
+    if (
+        field_backend != "jax"
+        or optimizer_backend not in TARGET_OUTER_OPTIMIZER_BACKENDS
+    ):
         raise ValueError(
             f"{component_label} with backend='jax' requires "
             "optimizer_backend='ondevice', optimizer_backend='scipy-jax', or "
@@ -813,11 +826,10 @@ def resolve_target_optimizer_contract(
             "The SciPy/reference optimizer lane is CPU/reference-only."
         )
     require_target_backend_x64(optimizer_backend)
-    if optimizer_backend in {"scipy-jax", "scipy-jax-fullgraph"}:
+    if optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS:
         if least_squares_algorithm != "quasi-newton":
             raise ValueError(
-                f"optimizer_backend={optimizer_backend!r} only supports "
-                "least_squares_algorithm='quasi-newton'."
+                _scipy_control_least_squares_algorithm_message(optimizer_backend)
             )
         method = resolve_optimizer_backend_method(
             optimizer_backend,

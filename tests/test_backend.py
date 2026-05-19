@@ -1734,23 +1734,51 @@ def test_apply_jax_runtime_config_applies_mps_smoke_mode(monkeypatch):
     assert ("jax_persistent_cache_min_entry_size_bytes", -1) in calls
 
 
-def test_probe_mps_plugin_raises_install_hint_when_missing(monkeypatch):
+def test_probe_mps_plugin_raises_install_hint_when_child_missing(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
     runtime_module = sys.modules["simsopt.backend.runtime"]
     original_find_spec = runtime_module.importlib.util.find_spec
 
-    def _absent_mps_find_spec(name, *args, **kwargs):
+    def _missing_mps_child_find_spec(name, *args, **kwargs):
+        if name == "jax_plugins":
+            return importlib.machinery.ModuleSpec(
+                name,
+                loader=None,
+                is_package=True,
+            )
         if name == "jax_plugins.mps":
             return None
         return original_find_spec(name, *args, **kwargs)
 
     monkeypatch.setattr(
-        runtime_module.importlib.util, "find_spec", _absent_mps_find_spec
+        runtime_module.importlib.util, "find_spec", _missing_mps_child_find_spec
     )
     with pytest.raises(RuntimeError, match="envs/jax-mps.yml"):
         runtime_module._probe_mps_plugin()
     # Smoke: backend must remain usable for non-mps lanes through the same probe site.
+    assert backend.get_backend_config().mode == "native_cpu"
+
+
+def test_probe_mps_plugin_raises_install_hint_when_parent_missing(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    checked_specs: list[str] = []
+
+    def _missing_parent_find_spec(name, *args, **kwargs):
+        del args, kwargs
+        checked_specs.append(name)
+        if name == "jax_plugins":
+            return None
+        raise AssertionError(f"unexpected spec probe for {name!r}")
+
+    monkeypatch.setattr(
+        runtime_module.importlib.util, "find_spec", _missing_parent_find_spec
+    )
+    with pytest.raises(RuntimeError, match="envs/jax-mps.yml"):
+        runtime_module._probe_mps_plugin()
+    assert checked_specs == ["jax_plugins"]
     assert backend.get_backend_config().mode == "native_cpu"
 
 
