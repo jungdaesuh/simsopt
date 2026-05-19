@@ -1,6 +1,19 @@
 """Pure JAX kernel-layer specs and helpers."""
 
-from importlib import import_module
+from . import biotsavart as _biotsavart
+from . import circular_coil as _circular_coil
+from . import curve_geometry as _curve_geometry
+from . import field as _field
+from . import finitebuild as _finitebuild
+from . import framedcurve as _framedcurve
+from . import interpolated_boozer_field as _interpolated_boozer_field
+from . import mhd_reductions as _mhd_reductions
+from . import objectives_flux as _objectives_flux
+from . import reductions as _reductions
+from . import specs as _specs
+from . import surface_fourier as _surface_fourier
+from . import surface_henneberg as _surface_henneberg
+from . import surface_rzfourier as _surface_rzfourier
 
 __all__ = [
     "BiotSavartSpec",
@@ -636,11 +649,28 @@ _EXPORT_MODULES = {
     "make_surface_xyz_tensor_fourier_spec": "specs",
 }
 
+_EXPORT_MODULE_OBJECTS = {
+    "biotsavart": _biotsavart,
+    "circular_coil": _circular_coil,
+    "curve_geometry": _curve_geometry,
+    "field": _field,
+    "finitebuild": _finitebuild,
+    "framedcurve": _framedcurve,
+    "interpolated_boozer_field": _interpolated_boozer_field,
+    "mhd_reductions": _mhd_reductions,
+    "objectives_flux": _objectives_flux,
+    "reductions": _reductions,
+    "specs": _specs,
+    "surface_fourier": _surface_fourier,
+    "surface_henneberg": _surface_henneberg,
+    "surface_rzfourier": _surface_rzfourier,
+}
+
 
 def __getattr__(name):
     module_name = _EXPORT_MODULES.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(f".{module_name}", __name__), name)
+    value = getattr(_EXPORT_MODULE_OBJECTS[module_name], name)
     globals()[name] = value
     return value

@@ -201,6 +201,18 @@ def _assert_dense_plu_factors(plu):
     assert all(piece is not None for piece in plu)
 
 
+def _patch_boozer_asarray_rejecting_jax_arrays(monkeypatch, message):
+    original_asarray = _bsj.np.asarray
+
+    def reject_jax_array_asarray(value, *args, **kwargs):
+        if isinstance(value, jax.Array):
+            raise AssertionError(message)
+        return original_asarray(value, *args, **kwargs)
+
+    monkeypatch.setattr(_bsj.np, "asarray", reject_jax_array_asarray)
+    return original_asarray
+
+
 def _collect_exact_well_conditioned_runtime_metadata(device):
     metadata = {
         "jax_version": str(jax.__version__),
@@ -5401,10 +5413,10 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-12,
         )
 
-    def test_get_adjoint_runtime_state_status_uses_explicit_host_bool_boundary(
+    def test_get_adjoint_runtime_state_status_stays_jax_scalar_until_public_boundary(
         self, monkeypatch
     ):
-        """Status conversion must not coerce device bools through module np.asarray."""
+        """Runtime solve status stays on-device until the public objective boundary."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
         booz.options["newton_stab"] = 0.0
@@ -5446,20 +5458,17 @@ class TestBoozerSurfaceJAXClass:
             fake_solve_hessian_system_with_status,
         )
 
-        original_asarray = _bsj.np.asarray
-
-        def reject_jax_array_asarray(value, *args, **kwargs):
-            if isinstance(value, jax.Array):
-                raise AssertionError("unexpected implicit device bool materialization")
-            return original_asarray(value, *args, **kwargs)
-
-        monkeypatch.setattr(_bsj.np, "asarray", reject_jax_array_asarray)
+        original_asarray = _patch_boozer_asarray_rejecting_jax_arrays(
+            monkeypatch,
+            "unexpected implicit device bool materialization",
+        )
 
         adjoint_state = booz.get_adjoint_runtime_state()
         rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         solved, success = adjoint_state.solve_transpose_with_status(rhs)
 
-        assert bool(np.asarray(success)) is True
+        assert isinstance(success, jax.Array)
+        assert bool(original_asarray(success)) is True
         np.testing.assert_allclose(
             original_asarray(adjoint_state.apply_transpose(solved)),
             original_asarray(rhs),
@@ -5526,22 +5535,16 @@ class TestBoozerSurfaceJAXClass:
             fake_solve_least_squares_normal_system_with_status,
         )
 
-        original_asarray = _bsj.np.asarray
-
-        def reject_jax_array_asarray(value, *args, **kwargs):
-            if isinstance(value, jax.Array):
-                raise AssertionError(
-                    "unexpected implicit device scalar materialization"
-                )
-            return original_asarray(value, *args, **kwargs)
-
-        monkeypatch.setattr(_bsj.np, "asarray", reject_jax_array_asarray)
+        original_asarray = _patch_boozer_asarray_rejecting_jax_arrays(
+            monkeypatch,
+            "unexpected implicit device scalar materialization",
+        )
 
         adjoint_state = booz.get_adjoint_runtime_state()
         rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         solved, success = adjoint_state.solve_transpose_with_status(rhs)
 
-        assert bool(np.asarray(success)) is True
+        assert bool(original_asarray(success)) is True
         np.testing.assert_allclose(original_asarray(solved), original_asarray(rhs))
         np.testing.assert_allclose(
             original_asarray(adjoint_state.apply_transpose(solved)),
@@ -5610,16 +5613,10 @@ class TestBoozerSurfaceJAXClass:
             fake_solve_jacobian_system_with_status,
         )
 
-        original_asarray = _bsj.np.asarray
-
-        def reject_jax_array_asarray(value, *args, **kwargs):
-            if isinstance(value, jax.Array):
-                raise AssertionError(
-                    "unexpected implicit device scalar materialization"
-                )
-            return original_asarray(value, *args, **kwargs)
-
-        monkeypatch.setattr(_bsj.np, "asarray", reject_jax_array_asarray)
+        original_asarray = _patch_boozer_asarray_rejecting_jax_arrays(
+            monkeypatch,
+            "unexpected implicit device scalar materialization",
+        )
 
         adjoint_state = booz.get_adjoint_runtime_state()
         rhs = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
@@ -5629,7 +5626,7 @@ class TestBoozerSurfaceJAXClass:
             adjoint_state,
             dense_factors_available=True,
         )
-        assert bool(np.asarray(success)) is True
+        assert bool(original_asarray(success)) is True
         np.testing.assert_allclose(
             original_asarray(solved),
             original_asarray(rhs),
@@ -6263,6 +6260,26 @@ class TestBoozerSurfaceJAXExactPath:
         assert bool(np.asarray(host_success))
         assert cpu_device.platform == "cpu"
         assert host_state.linearization_residency == "host"
+
+        @jax.jit
+        def apply_plu_projection(permutation, vector):
+            return permutation @ vector
+
+        host_permutation = host_booz.res["PLU"][0]
+        device_permutation = device_booz.res["PLU"][0]
+        assert apply_plu_projection._cache_size() == 0
+        with with_cpu_device_for_construction():
+            host_projected = apply_plu_projection(host_permutation, rhs)
+        assert apply_plu_projection._cache_size() == 1
+        device_projected = apply_plu_projection(device_permutation, rhs)
+        jax.block_until_ready((host_projected, device_projected))
+        assert apply_plu_projection._cache_size() == 2
+        np.testing.assert_allclose(
+            np.asarray(host_projected),
+            np.asarray(device_projected),
+            rtol=1e-12,
+            atol=1e-12,
+        )
         np.testing.assert_allclose(
             np.asarray(host_solved),
             np.asarray(device_solved),
