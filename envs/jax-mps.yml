@@ -18,7 +18,4 @@ dependencies:
   - ninja
   - pybind11<3
   - pip:
-      - jax==0.10.*
-      - jaxlib==0.10.*
-      - jax-mps
       - -e "..[JAX,JAX_MPS,dev]"

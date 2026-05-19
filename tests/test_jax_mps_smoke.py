@@ -18,24 +18,21 @@ pytest.importorskip("jax_plugins.mps")
 
 pytestmark = pytest.mark.mps
 
-_MU_0 = 4.0e-7 * np.pi
-_SMOKE_RTOL = 1e-2  # float32 MLX quadrature drift; smoke tier, not parity.
+MU0 = 4.0 * np.pi * 1e-7
+_SMOKE_RTOL = 1e-2
 
 
 def test_biot_savart_b_smoke_runs_on_mps():
     """``biot_savart_B`` runs on the mps lane and matches the closed-form B-field
     of a circular loop on its axis to within smoke tolerance."""
+    import jax
+
+    if not any(device.platform.lower() == "mps" for device in jax.devices()):
+        pytest.skip("jax_plugins.mps importable but no MPS device available")
+
     import simsopt.backend as backend
 
     backend.set_backend("jax_mps_smoke")
-
-    import jax
-
-    mps_devices = tuple(
-        device for device in jax.devices() if device.platform.lower() == "mps"
-    )
-    if not mps_devices:
-        pytest.skip("jax_plugins.mps importable but no MPS device available")
 
     import jax.numpy as jnp
 
@@ -70,9 +67,7 @@ def test_biot_savart_b_smoke_runs_on_mps():
     assert b.shape == (points.shape[0], 3)
     assert np.all(np.isfinite(b))
 
-    expected_bz_center = _MU_0 * current / (2 * radius)
-    expected_bz_offaxis = (
-        _MU_0 * current * radius**2 / (2 * (radius**2 + 0.5**2) ** 1.5)
-    )
+    expected_bz_center = MU0 * current / (2 * radius)
+    expected_bz_offaxis = MU0 * current * radius**2 / (2 * (radius**2 + 0.5**2) ** 1.5)
     assert b[0, 2] == pytest.approx(expected_bz_center, rel=_SMOKE_RTOL)
     assert b[1, 2] == pytest.approx(expected_bz_offaxis, rel=_SMOKE_RTOL)
