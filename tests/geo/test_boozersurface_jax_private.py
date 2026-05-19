@@ -1182,7 +1182,7 @@ class TestOptimizerAdapterPrivate:
         assert main_a is main_b
         assert observed is not main_a
 
-    def test_lbfgsb_main_loop_donates_internal_state(self, monkeypatch):
+    def test_lbfgsb_main_loop_omits_partial_state_donation(self, monkeypatch):
         observed = {}
 
         def fake_jit(fn, *jit_args, **jit_kwargs):
@@ -1202,7 +1202,7 @@ class TestOptimizerAdapterPrivate:
         )
 
         assert callable(kernel)
-        assert observed["donate_argnums"] == (0,)
+        assert observed["donate_argnums"] is None
 
     def test_hybrid_method_is_removed_from_public_optimizer_surface(self):
         with pytest.raises(ValueError, match="Unknown method 'bfgs-hybrid'"):

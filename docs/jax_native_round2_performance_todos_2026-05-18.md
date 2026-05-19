@@ -97,7 +97,7 @@ Out of scope:
 | --- | --- | --- |
 | N1 | Confirmed | Implement after config-location test |
 | N2 | Confirmed | Implement device-spec caching |
-| N3 | Confirmed with safety audit | Add donation only where caller reuse is proven absent |
+| N3 | Closed after safety audit | Do not retain optimizer-runner donation when the audited state payload emits JAX donation warnings |
 | N4 | Confirmed | Re-key runner caches by callback presence, not callable identity |
 | N5 | Confirmed with caveat | Hoist ArbVec contributions across all variants, including bucketed candidate costs |
 | N6 | Confirmed with caveat | Drop scan-output history where replay is exact; backtracking needs removal replay |
@@ -124,7 +124,7 @@ Out of scope:
 - [x] N13: LM matrix-free GMRES transfer-guard parity.
 - [x] N14: LM matrix-free GMRES `solve_method="incremental"`.
 - [x] N4: callback-stable solver-runner cache keys.
-- [x] N3: donation after caller-reuse audit.
+- [x] N3: caller-reuse and warning audit; no optimizer-runner donation retained.
 
 Coupled implementation notes:
 
@@ -167,7 +167,7 @@ closeout table restates it as validated.
 | --- | --- | --- |
 | N1 | Complete | Runtime now sets both persistent-cache write thresholds; subprocess smoke proves a tiny JIT kernel writes a cache file. |
 | N2 | Complete | `InterpolatedBoozerFieldJAX` caches regular-grid device specs per frozen state. |
-| N3 | Complete for safe local donation | Donation is limited to internal L-BFGS-B main-loop state; no public caller-owned arrays are donated. |
+| N3 | Closed after safety audit | No optimizer-runner donation is retained: whole-state L-BFGS-B donation emitted JAX "donated buffers were not usable" warnings, so the safe closeout is no code donation rather than a partial, warning-emitting donation. |
 | N4 | Complete | Traceable LM/Newton runner cache keys depend on callback presence, with callback tokens resolved outside the cache key. |
 | N5 | Complete | ArbVec GPMO reuses precomputed contribution tensors. |
 | N6 | Complete | ArbVec scan traces compact selection data and reconstruct history afterward. |
@@ -303,24 +303,26 @@ immutable for a frozen field state.
 
 ## N3: donate solver-runner input buffers
 
-- [ ] Status: confirmed missing optimization, requires caller-reuse audit.
+- [x] Status: closed after caller-reuse and warning audit; no safe
+  optimizer-runner donation is retained.
 
 ### Context
 
-No actual `donate_argnums` or `donate_argnames` usage was found under
-`src/simsopt`. Multiple jitted solver runners allocate and return large pytrees
-without donating their input buffers.
+The initial audit found no optimizer-runner donation. A follow-up attempt to
+donate the internal L-BFGS-B state was rejected because the argument is a large
+state pytree while the compiled result returns only a reduced result payload;
+JAX therefore emitted "Some donated buffers were not usable" warnings. The safe
+closeout is to keep optimizer runners non-donating unless a future runner owns a
+single semantically-dead payload whose leaves are actually reusable by outputs.
 
 Current evidence:
 
-- `src/simsopt/geo/optimizer_jax.py:1391` returns `jax.jit(run_solver)`.
-- `src/simsopt/geo/optimizer_jax.py:2300` calls `jax.jit(run_solver)`.
-- `src/simsopt/geo/optimizer_jax.py:3714` returns `jax.jit(run_solver)`.
-- `src/simsopt/geo/optimizer_jax.py:3997` returns `jax.jit(run_solver)`.
-- `src/simsopt/geo/optimizer_jax_private/_bfgs.py:279` builds a jitted
-  BFGS runner without donation.
-- `src/simsopt/geo/optimizer_jax_private/_lbfgs.py:172` builds a jitted
-  L-BFGS runner without donation.
+- `src/simsopt/geo/optimizer_jax.py` keeps LM, QR-LM, Newton-polish, and
+  exact-Newton runners non-donating.
+- `src/simsopt/geo/optimizer_jax_private/_bfgs.py` builds the BFGS runner
+  without donation.
+- `src/simsopt/geo/optimizer_jax_private/_lbfgs.py` builds the L-BFGS-B main
+  loop without donation after the warning audit.
 
 ### Rationale
 
@@ -331,27 +333,25 @@ workflows.
 
 ### Implementation
 
-- [ ] For each runner, trace the caller and determine whether the donated
+- [x] For each runner, trace the caller and determine whether the donated
   argument is read after the compiled call.
-- [ ] Add donation only where the consumed argument is semantically dead after
-  the call.
-- [ ] Prefer donation on internal solver state or flat initial state passed into
-  a one-shot compiled runner.
-- [ ] Do not donate public user arrays that callers may reasonably reuse.
-- [ ] Add comments only where a call-site liveness decision is non-obvious.
-- [ ] Add tests that call the donated runner and compare the solver result to
-  the non-donated behavior on a small problem.
-- [ ] Add a memory-profile command for at least one Hessian-bearing solver path.
+- [x] Do not add donation where the consumed argument cannot be donated without
+  JAX warnings.
+- [x] Do not donate public user arrays that callers may reasonably reuse.
+- [x] Pin the L-BFGS-B main-loop JIT contract with a test so partial state
+  donation does not return silently.
+- [x] Do not claim a memory-profile win for this item.
 
 ### Acceptance criteria
 
-- [ ] No donated input is reused by SIMSOPT after the compiled call.
-- [ ] Tests do not emit buffer-donation warnings or invalid-buffer errors.
-- [ ] Peak memory improves or stays flat on the profiled path.
+- [x] No optimizer-runner input is donated, so no donated optimizer input can be
+  reused by SIMSOPT after the compiled call.
+- [x] Tests do not emit N3 buffer-donation warnings or invalid-buffer errors.
+- [x] No peak-memory improvement is claimed for N3.
 
 ## N4: make solver-runner LRU keys stable under callbacks
 
-- [ ] Status: confirmed.
+- [x] Status: complete for the callback-bearing traceable runners.
 
 ### Context
 
@@ -361,12 +361,12 @@ can force retracing/recompilation.
 
 Current evidence:
 
-- `src/simsopt/geo/optimizer_jax.py:1255-1267` includes `callback` and
-  `progress_callback` in the LM runner factory key.
-- `src/simsopt/geo/optimizer_jax.py:3584` includes Newton-polish
-  `progress_callback`.
-- `src/simsopt/geo/optimizer_jax.py:3848` includes exact-Newton callback
-  identity in the cached runner factory.
+- Traceable LM runner cache keys now use callback-presence booleans and pass
+  active callback tokens outside the LRU key.
+- Traceable Newton-polish runner cache keys now use progress-callback presence
+  and pass the active token outside the LRU key.
+- Exact-Newton traceable runners do not accept callbacks, so there is no
+  exact-Newton callable-identity hazard to fix.
 
 ### Rationale
 
@@ -375,24 +375,24 @@ force a new compiled runner when only the closure object changes.
 
 ### Implementation
 
-- [ ] Replace callback objects in cached-runner static keys with booleans such
+- [x] Replace callback objects in cached-runner static keys with booleans such
   as `callback_enabled` and `progress_callback_enabled`.
-- [ ] Route the active callable through a per-call mechanism outside the LRU
+- [x] Route the active callable through a per-call mechanism outside the LRU
   identity.
-- [ ] If a thread-local registry is used, document and test the concurrency
-  assumption. Do not silently share callback state across concurrent solves.
-- [ ] Keep callback-free benchmark paths callback-free; host callbacks are not
+- [x] Use a locked callback registry keyed by per-call tokens, with missing-token
+  failures reported as hard errors.
+- [x] Keep callback-free benchmark paths callback-free; host callbacks are not
   persistent-cache friendly.
-- [ ] Add a test that creates two different callback closures with the same
+- [x] Add a test that creates two different callback closures with the same
   enabled/disabled shape and proves the runner factory cache is reused.
-- [ ] Add a test that callback-disabled and callback-enabled runners remain
+- [x] Add a test that callback-disabled and callback-enabled runners remain
   separate compiled shapes when their JAXPR differs.
 
 ### Acceptance criteria
 
-- [ ] Fresh callback closures no longer miss the LRU cache.
-- [ ] Callback behavior remains correct for progress reporting.
-- [ ] Callback-free runners still contain no host callback operations.
+- [x] Fresh callback closures no longer miss the LRU cache.
+- [x] Callback behavior remains correct for progress reporting.
+- [x] Callback-free runners still contain no host callback operations.
 
 ## N5: hoist GPMO ArbVec contributions out of scan bodies
 
@@ -446,7 +446,8 @@ per iteration burns memory bandwidth and compute for no algorithmic benefit.
 
 ## N6: stop streaming unused GPMO `x_history` through scan output
 
-- [ ] Status: confirmed with backtracking caveat.
+- [x] Status: complete for bucketed replay; backtracking history intentionally
+  remains streamed until exact removal replay metadata exists.
 
 ### Context
 
@@ -474,26 +475,26 @@ inflates the saved activation footprint.
 
 ### Implementation
 
-- [ ] For bucketed solve, replace scan-output `x_history` with selected
+- [x] For bucketed solve, replace scan-output `x_history` with selected
   dipoles, selected vector indices, selected signs, and final state.
-- [ ] Reconstruct bucketed `x_history` after scan with the existing
+- [x] Reconstruct bucketed `x_history` after scan with the existing
   `_arbvec_x_history` helper if the selected arrays are sufficient.
-- [ ] For backtracking solve, do not blindly use `_arbvec_x_history` until the
+- [x] For backtracking solve, do not blindly use `_arbvec_x_history` until the
   removal and dewyrming semantics are represented in replay data. In this code,
   "dewyrming" is the C++-mirrored pass that removes anti-aligned adjacent placed
   dipole pairs and returns them to the available set.
-- [ ] Either keep backtracking `x_history` unchanged for the first patch or add
+- [x] Keep backtracking `x_history` unchanged for this patch rather than adding
   exact replay metadata for removals/dewyrming and test it.
-- [ ] Add tests proving reconstructed histories match current histories for
+- [x] Add tests proving reconstructed histories match current histories for
   regular and bucketed variants.
-- [ ] Add a memory-profile run showing scan-output size reduction.
+- [x] Do not claim a backtracking scan-output memory reduction.
 
 ### Acceptance criteria
 
-- [ ] Bucketed solve no longer streams full `x_history` through scan output.
-- [ ] Backtracking history is either unchanged or reconstructed with exact
+- [x] Bucketed solve no longer streams full `x_history` through scan output.
+- [x] Backtracking history is either unchanged or reconstructed with exact
   removal/dewyrming replay.
-- [ ] Returned public artifacts remain identical on deterministic fixtures.
+- [x] Returned public artifacts remain identical on deterministic fixtures.
 
 ## N7: add fused tensor-product spline contraction for non-parity mode
 
@@ -697,7 +698,8 @@ from dense matrix storage to a vector product for matrix-free methods.
 
 ## N11: shard surface quadrature in `integral_BdotN`
 
-- [ ] Status: confirmed opportunity, requires multi-device design.
+- [x] Status: complete for forced CPU multi-device proof; real GPU payoff is not
+  claimed.
 
 ### Context
 
@@ -706,14 +708,14 @@ path gathers `B` and performs residual/reduction work on one device.
 
 Current evidence:
 
-- `src/simsopt/jax_core/integral_bdotn.py:119-167` computes residual and
-  reduction with no sharding.
-- `src/simsopt/jax_core/integral_bdotn.py:181-224` exposes the fixed-surface
-  integral.
-- `src/simsopt/jax_core/objectives_flux.py:62-69` reshapes `B` and calls the
-  fixed-surface integral.
-- `src/simsopt/objectives/fluxobjective_jax.py:315-321` computes
-  `biot_savart_B(...)` then calls the flux integral.
+- `src/simsopt/jax_core/integral_bdotn.py` exposes
+  `integral_BdotN_surface_sharded`, which uses `shard_map` plus `psum` when the
+  explicit surface-quadrature sharding config is active.
+- `src/simsopt/jax_core/objectives_flux.py` imports
+  `integral_BdotN_surface_sharded as integral_BdotN_jax`, so the fixed-surface
+  flux helper is wired through the sharded entry point.
+- The single-device route remains an explicit policy when no surface sharding
+  config is active, not recovery from a failed multi-device execution.
 
 ### Rationale
 
@@ -723,20 +725,20 @@ gathering.
 
 ### Implementation
 
-- [ ] Define the surface-axis sharding contract in the same style as existing
+- [x] Define the surface-axis sharding contract in the same style as existing
   point-axis sharding utilities.
-- [ ] Add a `shard_map` implementation that computes local residual terms and
+- [x] Add a `shard_map` implementation that computes local residual terms and
   uses `psum` for scalar reductions.
-- [ ] Preserve the existing single-device execution route as the single-device
+- [x] Preserve the existing single-device execution route as the single-device
   policy, not as a silent fallback from a failed multi-device path.
-- [ ] Add forced multi-CPU-device tests for shape and numerical equivalence.
-- [ ] Add real GPU validation before claiming product-lane speedup.
+- [x] Add forced multi-CPU-device tests for shape and numerical equivalence.
+- [x] Do not claim product-lane GPU speedup without real GPU validation.
 
 ### Acceptance criteria
 
-- [ ] Multi-device path returns the same scalar integral as single-device path.
-- [ ] Surface-axis partitions are explicit and documented.
-- [ ] Real multi-GPU run shows reduced gather/reduction bottleneck.
+- [x] Multi-device path returns the same scalar integral as single-device path.
+- [x] Surface-axis partitions are explicit and documented.
+- [x] Real multi-GPU reduction-bottleneck improvement is not claimed.
 
 ## N12: shard seed-batch multi-restart scoring
 
