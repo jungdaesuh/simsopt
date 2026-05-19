@@ -176,7 +176,8 @@ def case_import_package_root_without_generated_version_file() -> None:
         (package_root / "__init__.py").write_text(src_init, encoding="utf-8")
         (package_root / "backend" / "__init__.py").write_text(
             "def apply_jax_runtime_config():\n    return None\n\n"
-            "def should_eagerly_configure_jax():\n    return False\n",
+            "def should_eagerly_configure_jax():\n    return False\n\n"
+            "def validate_cuda_determinism_environment():\n    return None\n",
             encoding="utf-8",
         )
         (package_root / "_core" / "__init__.py").write_text(
@@ -487,7 +488,7 @@ def case_import_package_root_native_cpu_does_not_require_jax_runtime() -> None:
     import simsopt
 
     assert hasattr(simsopt, "__version__")
-    assert os.environ["JAX_ENABLE_X64"] == "True"
+    assert "JAX_ENABLE_X64" not in os.environ
 
 
 def case_package_root_jax_selector_propagates_missing_jax() -> None:
@@ -1420,7 +1421,7 @@ def case_native_cpu_backend_selection_does_not_require_jax_runtime() -> None:
     assert cfg.backend == "cpu"
 
 
-def case_native_cpu_policy_matches_import_time_x64_contract() -> None:
+def case_native_cpu_policy_does_not_configure_jax_without_selector() -> None:
     import simsopt.config as simsopt_config
     import jax
 
@@ -1428,8 +1429,8 @@ def case_native_cpu_policy_matches_import_time_x64_contract() -> None:
 
     assert policy.mode == "native_cpu"
     assert policy.requires_x64 is True
-    assert jax.config.jax_enable_x64 is True
-    assert jax.numpy.zeros(1).dtype == jax.numpy.float64
+    assert jax.config.jax_enable_x64 is False
+    assert jax.numpy.zeros(1).dtype == jax.numpy.float32
 
 
 def case_import_biotsavart_jax() -> None:

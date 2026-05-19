@@ -77,6 +77,12 @@ _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_JAX_DEBUG_NANS",
     "SIMSOPT_JAX_TRANSFER_GUARD",
     "SIMSOPT_JAX_COMPILATION_CACHE_DIR",
+    "SIMSOPT_JAX_GPU_PREALLOCATE",
+    "SIMSOPT_JAX_GPU_MEM_FRACTION",
+    "SIMSOPT_JAX_GPU_ALLOCATOR",
+    "SIMSOPT_TF_GPU_ALLOCATOR",
+    "SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_CPU",
+    "SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU",
     "SIMSOPT_BACKEND",
     "STAGE2_BACKEND",
     "SIMSOPT_JAX_PLATFORM",
@@ -89,6 +95,11 @@ _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_JAX_MIN_COILS_TO_SHARD",
     "JAX_PLATFORMS",
     "JAX_ENABLE_X64",
+    "XLA_PYTHON_CLIENT_PREALLOCATE",
+    "XLA_PYTHON_CLIENT_MEM_FRACTION",
+    "XLA_PYTHON_CLIENT_ALLOCATOR",
+    "XLA_CLIENT_MEM_FRACTION",
+    "TF_GPU_ALLOCATOR",
 )
 
 LegacyCurveObjectiveValueCase = Literal[
@@ -1221,11 +1232,11 @@ def test_native_cpu_backend_selection_does_not_require_jax_runtime():
     )
 
 
-def test_native_cpu_policy_matches_import_time_x64_contract():
-    """The default/native policy should match the package's import-time x64 state."""
+def test_native_cpu_policy_does_not_configure_jax_without_selector():
+    """Default/native policy does not mutate JAX x64 without a selector."""
     _assert_import_smoke_case_passes(
-        "case_native_cpu_policy_matches_import_time_x64_contract",
-        "native_cpu x64 policy mismatch",
+        "case_native_cpu_policy_does_not_configure_jax_without_selector",
+        "native_cpu import unexpectedly configured JAX x64",
     )
 
 

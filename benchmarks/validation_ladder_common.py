@@ -49,7 +49,8 @@ _SIMSOPT_BACKEND_STRICT_ENV_VAR = "SIMSOPT_BACKEND_STRICT"
 _SIMSOPT_TRANSFER_GUARD_ENV_VAR = "SIMSOPT_JAX_TRANSFER_GUARD"
 _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR = "TARGET_LANE_ACCEPTED_STEP_SYNC"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
-_XLA_GPU_DETERMINISTIC_OPS_FLAG = "--xla_gpu_deterministic_ops=true"
+_XLA_GPU_DETERMINISTIC_OPS_FLAG = "--xla_gpu_exclude_nondeterministic_ops=true"
+_STALE_XLA_GPU_DETERMINISTIC_OPS_FLAGS = ("--xla_gpu_deterministic_ops",)
 _CUDA_PROOF_ENV_VARS = (
     "CUDA_FORCE_PTX_JIT",
     "CUDA_DISABLE_PTX_JIT",
@@ -257,7 +258,15 @@ def _append_xla_flag(env: dict[str, str], flag: str) -> None:
         return
     tokens = current_flags.split()
     flag_prefix = flag.split("=", 1)[0] + "="
-    rewritten = [token for token in tokens if not token.startswith(flag_prefix)]
+    rewritten = [
+        token
+        for token in tokens
+        if not token.startswith(flag_prefix)
+        and not any(
+            token == stale_flag or token.startswith(f"{stale_flag}=")
+            for stale_flag in _STALE_XLA_GPU_DETERMINISTIC_OPS_FLAGS
+        )
+    ]
     if flag not in rewritten:
         rewritten.append(flag)
     env["XLA_FLAGS"] = " ".join(rewritten)

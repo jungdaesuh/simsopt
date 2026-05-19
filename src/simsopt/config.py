@@ -39,6 +39,8 @@ from .backend import (
     should_shard_pairwise_rows,
     requires_x64,
     set_backend,
+    validate_cuda_determinism_environment,
+    with_cpu_device_for_construction,
 )
 
 __all__ = [
@@ -78,4 +80,6 @@ __all__ = [
     "should_shard_pairwise_rows",
     "requires_x64",
     "set_backend",
+    "validate_cuda_determinism_environment",
+    "with_cpu_device_for_construction",
 ]

@@ -55,13 +55,11 @@ def host_tree(value, *, dtype=None):
         if isinstance(leaf, np.ndarray):
             leaf_dtype = leaf.dtype if dtype is None else dtype
             return np.asarray(leaf, dtype=leaf_dtype)
-        if dtype is not None and (
-            isinstance(leaf, np.generic) or np.isscalar(leaf)
-        ):
+        if dtype is not None and (isinstance(leaf, np.generic) or np.isscalar(leaf)):
             return np.asarray(leaf, dtype=dtype)
         return leaf
 
-    return jax.tree_util.tree_map(_hostify_leaf, value)
+    return jax.tree.map(_hostify_leaf, value)
 
 
 def scalar_pullback_seed(value):

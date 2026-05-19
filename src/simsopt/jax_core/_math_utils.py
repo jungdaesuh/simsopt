@@ -6,7 +6,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-_FLOAT64_DTYPE = np.dtype(np.float64)
+_DTYPE_BY_NAME = {
+    "float64": jnp.float64,
+    "float32": jnp.float32,
+}
+_HOST_DTYPE_BY_NAME = {
+    "float64": np.dtype(np.float64),
+    "float32": np.dtype(np.float32),
+}
 
 
 def _explicit_device_array(value, *, dtype) -> jax.Array:
@@ -42,10 +49,75 @@ def _array_like_dtype(value) -> np.dtype | None:
     return None
 
 
-def require_float64_dtype(name: str, value) -> None:
+def _dtype_name(dtype, *, source: str) -> str:
+    if isinstance(dtype, str):
+        name = dtype
+    else:
+        name = np.dtype(dtype).name
+    if name not in _DTYPE_BY_NAME:
+        accepted = tuple(_DTYPE_BY_NAME)
+        raise TypeError(f"{source} must be one of {accepted}; got {name!r}.")
+    return name
+
+
+def _jnp_dtype_from_name(name: str, *, source: str):
+    if name not in _DTYPE_BY_NAME:
+        accepted = tuple(_DTYPE_BY_NAME)
+        raise TypeError(f"{source} must be one of {accepted}; got {name!r}.")
+    return _DTYPE_BY_NAME[name]
+
+
+def _np_dtype_from_name(name: str, *, source: str) -> np.dtype:
+    if name not in _HOST_DTYPE_BY_NAME:
+        accepted = tuple(_HOST_DTYPE_BY_NAME)
+        raise TypeError(f"{source} must be one of {accepted}; got {name!r}.")
+    return _HOST_DTYPE_BY_NAME[name]
+
+
+def _resolve_jnp_dtype(dtype, *, source: str):
+    if dtype is None:
+        return runtime_jnp_dtype()
+    return _jnp_dtype_from_name(_dtype_name(dtype, source=source), source=source)
+
+
+def _resolve_np_dtype(dtype, *, source: str) -> np.dtype:
+    if dtype is None:
+        return runtime_np_dtype()
+    return _np_dtype_from_name(_dtype_name(dtype, source=source), source=source)
+
+
+def runtime_jnp_dtype():
+    from simsopt.backend import get_backend_policy
+
+    dtype_name = get_backend_policy().runtime_dtype
+    return _jnp_dtype_from_name(dtype_name, source="BackendPolicy.runtime_dtype")
+
+
+def runtime_np_dtype() -> np.dtype:
+    from simsopt.backend import get_backend_policy
+
+    dtype_name = get_backend_policy().runtime_dtype
+    return _np_dtype_from_name(dtype_name, source="BackendPolicy.runtime_dtype")
+
+
+def runtime_host_dtype() -> np.dtype:
+    from simsopt.backend import get_backend_policy
+
+    dtype_name = get_backend_policy().host_dtype
+    return _np_dtype_from_name(dtype_name, source="BackendPolicy.host_dtype")
+
+
+def require_runtime_dtype(name: str, value, *, dtype=None) -> None:
+    expected_dtype = _resolve_np_dtype(dtype, source="dtype")
     dtype = _array_like_dtype(value)
-    if dtype is not None and dtype != _FLOAT64_DTYPE:
-        raise TypeError(f"{name} must have dtype float64; got {dtype}.")
+    if dtype is not None and dtype != expected_dtype:
+        raise TypeError(
+            f"{name} must have runtime dtype {expected_dtype.name}; got {dtype}."
+        )
+
+
+def require_float64_dtype(name: str, value) -> None:
+    require_runtime_dtype(name, value, dtype="float64")
 
 
 def as_jax_array(value, *, dtype) -> jax.Array:
@@ -86,9 +158,16 @@ def as_runtime_array(value, *, dtype, reference):
     return as_jax_array(value, dtype=dtype)
 
 
+def as_runtime_value(value, *, reference, dtype=None):
+    require_runtime_dtype("reference", reference, dtype=dtype)
+    return as_runtime_array(
+        value,
+        dtype=_resolve_jnp_dtype(dtype, source="dtype"),
+        reference=reference,
+    )
+
+
 def as_runtime_float64(value, *, reference):
-    require_float64_dtype("reference", reference)
-    require_float64_dtype("value", value)
     return as_runtime_array(value, dtype=jnp.float64, reference=reference)
 
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HEARTBEAT_INTERVAL_S="${HEARTBEAT_INTERVAL_S:-60}"
-GPU_DETERMINISM_XLA_FLAG="--xla_gpu_deterministic_ops=true"
+GPU_DETERMINISM_XLA_FLAG="--xla_gpu_exclude_nondeterministic_ops=true"
 
 RESULTS_DIR=""
 EQUILIBRIA_DIR=""

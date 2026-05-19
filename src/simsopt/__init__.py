@@ -6,35 +6,33 @@
 
 # JAX runtime config.
 #
-# We keep the global x64 toggle at package import time so existing scientific
-# code paths and optimizer smoke tests continue to see the expected float64
-# runtime. Platform pinning still routes through the backend selector.
+# Package import validates pre-existing CUDA determinism settings, then applies
+# JAX runtime policy only when an explicit backend selector asks for a JAX lane.
+# Unconfigured imports do not mutate JAX x64; callers that need runtime
+# configuration should set a backend selector or call ``simsopt.config`` helpers.
 #
 # Important: this import hook is recovery-oriented, not the primary launcher
 # contract. Scripts that import ``jax`` directly must set platform/backend env
 # vars before their first ``import jax`` so JAX initializes on the intended
 # runtime. Importing ``simsopt`` can eagerly validate an explicit selector, but
 # it cannot retroactively fix a backend that was already initialized too early.
-import os as _os
-import sys as _sys
 
 from .backend import (
     apply_jax_runtime_config as _apply_jax_runtime_config,
     should_eagerly_configure_jax as _should_eagerly_configure_jax,
+    validate_cuda_determinism_environment as _validate_cuda_determinism_environment,
 )
 
-if "jax" in _sys.modules:
-    import jax as _jax
-
-    _jax.config.update("jax_enable_x64", True)
-    del _jax
-else:
-    _os.environ.setdefault("JAX_ENABLE_X64", "True")
+_validate_cuda_determinism_environment()
 
 if _should_eagerly_configure_jax():
     _apply_jax_runtime_config()
 
-del _apply_jax_runtime_config, _should_eagerly_configure_jax, _os, _sys
+del (
+    _apply_jax_runtime_config,
+    _should_eagerly_configure_jax,
+    _validate_cuda_determinism_environment,
+)
 
 # Two ways of achieving the above-mentioned objective
 # Use "from xyz import XYZ" style

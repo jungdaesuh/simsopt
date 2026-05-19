@@ -33,6 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _VALID_BACKENDS = ("cpu", "jax")
 _VALID_PLATFORMS = ("cpu", "cuda", "metal")
+_VALID_POLICY_DTYPES = ("float32", "float64")
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
 _BACKEND_ENV = "SIMSOPT_BACKEND"
@@ -165,6 +166,8 @@ _MODE_POLICY_DEFAULTS = {
     "native_cpu": {
         "parity_mode": False,
         "requires_x64": True,
+        "runtime_dtype": "float64",
+        "host_dtype": "float64",
         "chunk_policy": "host_reference",
         "tolerance_tier": "cpu_reference",
         "compilation_cache_policy": "not_applicable",
@@ -177,6 +180,8 @@ _MODE_POLICY_DEFAULTS = {
     "jax_cpu_fast": {
         "parity_mode": False,
         "requires_x64": True,
+        "runtime_dtype": "float64",
+        "host_dtype": "float64",
         "chunk_policy": "performance_tuned",
         "tolerance_tier": "fast",
         "compilation_cache_policy": "optional_persistent",
@@ -189,6 +194,8 @@ _MODE_POLICY_DEFAULTS = {
     "jax_cpu_parity": {
         "parity_mode": True,
         "requires_x64": True,
+        "runtime_dtype": "float64",
+        "host_dtype": "float64",
         "chunk_policy": "stable_default",
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
@@ -201,6 +208,8 @@ _MODE_POLICY_DEFAULTS = {
     "jax_gpu_parity": {
         "parity_mode": True,
         "requires_x64": True,
+        "runtime_dtype": "float64",
+        "host_dtype": "float64",
         "chunk_policy": "stable_default",
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
@@ -217,6 +226,8 @@ _MODE_POLICY_DEFAULTS = {
     "jax_gpu_fast": {
         "parity_mode": False,
         "requires_x64": True,
+        "runtime_dtype": "float64",
+        "host_dtype": "float64",
         "chunk_policy": "performance_tuned",
         "tolerance_tier": "fast",
         "compilation_cache_policy": "optional_persistent",
@@ -229,6 +240,8 @@ _MODE_POLICY_DEFAULTS = {
     "jax_metal_smoke": {
         "parity_mode": False,
         "requires_x64": False,
+        "runtime_dtype": "float32",
+        "host_dtype": "float32",
         "chunk_policy": "stable_default",
         "tolerance_tier": "smoke",
         "compilation_cache_policy": "optional_persistent",
@@ -469,6 +482,8 @@ class BackendPolicy:
     strict: bool
     parity_mode: bool
     requires_x64: bool
+    runtime_dtype: str
+    host_dtype: str
     chunk_policy: str
     tolerance_tier: str
     compilation_cache_policy: str
@@ -1361,6 +1376,16 @@ def _resolve_policy_max_dense_jacobian_bytes(
     return None if default is None else int(default)
 
 
+def _validate_policy_dtype(value: object, *, mode: str, field: str) -> str:
+    dtype_name = str(value)
+    if dtype_name not in _VALID_POLICY_DTYPES:
+        raise ValueError(
+            f"Backend mode {mode!r} has unsupported {field}={dtype_name!r}. "
+            f"Accepted: {_VALID_POLICY_DTYPES}."
+        )
+    return dtype_name
+
+
 def _policy_from_config(config: BackendConfig) -> BackendPolicy:
     defaults = _get_mode_policy_defaults(config.mode)
     return BackendPolicy(
@@ -1370,6 +1395,16 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         strict=config.strict,
         parity_mode=bool(defaults["parity_mode"]),
         requires_x64=bool(defaults["requires_x64"]),
+        runtime_dtype=_validate_policy_dtype(
+            defaults["runtime_dtype"],
+            mode=config.mode,
+            field="runtime_dtype",
+        ),
+        host_dtype=_validate_policy_dtype(
+            defaults["host_dtype"],
+            mode=config.mode,
+            field="host_dtype",
+        ),
         chunk_policy=str(defaults["chunk_policy"]),
         tolerance_tier=str(defaults["tolerance_tier"]),
         compilation_cache_policy=str(defaults["compilation_cache_policy"]),
@@ -2095,7 +2130,8 @@ def apply_jax_runtime_config() -> None:
     config = get_backend_config()
     if config.backend != "jax":
         return
-    _validate_cuda_parity_determinism_env(config, get_backend_policy(config.mode))
+    policy = get_backend_policy(config.mode)
+    _validate_cuda_parity_determinism_env(config, policy)
     _apply_jax_gpu_memory_env(config)
 
     import jax
@@ -2104,11 +2140,8 @@ def apply_jax_runtime_config() -> None:
         "jax_platforms",
         _runtime_jax_platforms_value(config.jax_platform),
     )
-    jax.config.update("jax_enable_x64", requires_x64(config.mode))
-    jax.config.update(
-        "jax_default_matmul_precision",
-        get_backend_policy(config.mode).matmul_precision,
-    )
+    jax.config.update("jax_enable_x64", policy.requires_x64)
+    jax.config.update("jax_default_matmul_precision", policy.matmul_precision)
     jax.config.update("jax_debug_nans", config.debug_nans)
     if config.transfer_guard is not None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
@@ -2129,8 +2162,10 @@ class _CpuDeviceConstructionContext:
         cpu_devices = jax.devices("cpu")
         if not cpu_devices:
             raise RuntimeError("JAX did not report an addressable CPU device.")
-        self._context = jax.default_device(cpu_devices[0])
-        return self._context.__enter__()
+        cpu_device = cpu_devices[0]
+        self._context = jax.default_device(cpu_device)
+        self._context.__enter__()
+        return cpu_device
 
     def __exit__(self, exc_type, exc, traceback):
         if self._context is None:

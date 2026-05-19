@@ -1,6 +1,5 @@
 """Stable public backend facade that forwards to the backend package home."""
 
-import os
 from pathlib import Path
 
 _BACKEND_PACKAGE_DIR = Path(__file__).with_suffix("")
@@ -51,7 +50,9 @@ from simsopt.backend.runtime import (  # noqa: E402
     requires_x64,
     set_backend,
     should_eagerly_configure_jax,
+    validate_cuda_determinism_environment,
     warn_if_jax_fallback,
+    with_cpu_device_for_construction,
 )
 
 __all__ = (
@@ -98,7 +99,7 @@ __all__ = (
     "requires_x64",
     "set_backend",
     "should_eagerly_configure_jax",
+    "validate_cuda_determinism_environment",
     "warn_if_jax_fallback",
-    # Keep ``os`` available on the facade for existing tests/helpers.
-    "os",
+    "with_cpu_device_for_construction",
 )

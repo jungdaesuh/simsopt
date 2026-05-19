@@ -340,7 +340,7 @@ jobs:
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
-      XLA_FLAGS: --xla_gpu_deterministic_ops=true
+      XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
       XLA_PYTHON_CLIENT_PREALLOCATE: "false"
@@ -405,7 +405,7 @@ jobs:
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
-      XLA_FLAGS: --xla_gpu_deterministic_ops=true
+      XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
       XLA_PYTHON_CLIENT_PREALLOCATE: "false"
@@ -516,6 +516,26 @@ jobs:
       - name: Ruff check JAX modules
         run: |
           ruff check \
+            src/simsopt/backend.py \
+            src/simsopt/backend/__init__.py \
+            src/simsopt/backend/runtime.py \
+            src/simsopt/field/biotsavart_jax.py \
+            src/simsopt/field/biotsavart_jax_backend.py \
+            src/simsopt/jax_core/__init__.py \
+            src/simsopt/jax_core/biotsavart.py \
+            src/simsopt/jax_core/field.py \
+            src/simsopt/geo/surface_fourier_jax.py \
+            src/simsopt/geo/boozer_residual_jax.py \
+            src/simsopt/geo/boozersurface_jax.py \
+            src/simsopt/geo/surfaceobjectives_jax.py \
+            src/simsopt/geo/label_constraints_jax.py \
+            src/simsopt/geo/optimizer_jax.py \
+            src/simsopt/objectives/fluxobjective_jax.py \
+            src/simsopt/objectives/integral_bdotn_jax.py
+
+      - name: Check JAX where-division guards
+        run: |
+          python scripts/jax_where_division_lint.py \
             src/simsopt/backend.py \
             src/simsopt/backend/__init__.py \
             src/simsopt/backend/runtime.py \

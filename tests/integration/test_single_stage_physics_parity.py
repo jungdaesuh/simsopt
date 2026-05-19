@@ -295,7 +295,7 @@ def test_single_stage_subprocess_env_preserves_existing_xla_flags(monkeypatch):
     assert env["XLA_FLAGS"].split() == [
         "--xla_gpu_cuda_data_dir=/tmp/cuda",
         "--other-flag=1",
-        "--xla_gpu_deterministic_ops=true",
+        "--xla_gpu_exclude_nondeterministic_ops=true",
     ]
 
 

@@ -153,7 +153,7 @@ def _build_lightning_job_command(
         "export PYTHONUNBUFFERED=1",
         "export HF_HUB_DISABLE_TELEMETRY=1",
         "export XLA_PYTHON_CLIENT_PREALLOCATE=false",
-        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true"',
+        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"',
         f'export SIMSOPT_HF_JOB_EXPECTED_JAX_VERSION="{DEFAULT_EXPECTED_JAX_VERSION}"',
         'export SIMSOPT_JAX_CUDA_LIBRARY_MODE="bundled"',
         f'export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="{pretend_version}"',

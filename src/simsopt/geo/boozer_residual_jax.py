@@ -56,12 +56,11 @@ import jax.numpy as jnp
 from jax import lax
 
 from ..jax_core._math_utils import (
-    as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
-    concat_jax_float64 as _concat_jax_float64,
+    as_runtime_value as _as_runtime_value,
     explicit_rsqrt as _explicit_rsqrt,
-    require_float64_dtype as _require_float64_dtype,
+    require_runtime_dtype as _require_runtime_dtype,
 )
 from ..jax_core.surface_rzfourier import (
     surface_rz_fourier_geometry_from_spec,
@@ -94,7 +93,7 @@ __all__ = [
 
 
 def _split_decision_vector(x, *, optimize_G):
-    x_jax = _as_jax_float64(x)
+    x_jax = _as_runtime_value(x, reference=x)
     tail_size = 2 if optimize_G else 1
     surface_size = int(x_jax.shape[0]) - tail_size
     if surface_size < 0:
@@ -125,10 +124,10 @@ def _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB):
     return residual
 
 
-def _require_boozer_float64_inputs(B, xphi, xtheta):
-    _require_float64_dtype("B", B)
-    _require_float64_dtype("xphi", xphi)
-    _require_float64_dtype("xtheta", xtheta)
+def _require_boozer_runtime_inputs(B, xphi, xtheta):
+    _require_runtime_dtype("B", B)
+    _require_runtime_dtype("xphi", xphi)
+    _require_runtime_dtype("xtheta", xtheta)
     return jnp.asarray(B), jnp.asarray(xphi), jnp.asarray(xtheta)
 
 
@@ -176,11 +175,11 @@ def boozer_residual_scalar(
     Returns:
         J: scalar objective value.
     """
-    B, xphi, xtheta = _require_boozer_float64_inputs(B, xphi, xtheta)
-    G = _as_runtime_float64(G, reference=B)
-    iota = _as_runtime_float64(iota, reference=B)
+    B, xphi, xtheta = _require_boozer_runtime_inputs(B, xphi, xtheta)
+    G = _as_runtime_value(G, reference=B)
+    iota = _as_runtime_value(iota, reference=B)
     nphi, ntheta, _ = B.shape
-    num_res = _as_runtime_float64(3 * nphi * ntheta, reference=B)
+    num_res = _as_runtime_value(3 * nphi * ntheta, reference=B)
     rtil = _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB)
     if reduction_mode == _BOOZER_CPU_ORDERED_REDUCTION_MODE:
         square_sum = _cpu_ordered_boozer_square_sum(rtil)
@@ -191,7 +190,7 @@ def boozer_residual_scalar(
             reduction_mode=reduction_mode,
             default="pairwise",
         )
-    return _as_runtime_float64(0.5, reference=rtil) * square_sum / num_res
+    return _as_runtime_value(0.5, reference=rtil) * square_sum / num_res
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +202,13 @@ def boozer_residual_scalar(
 
 def _pack(surface_dofs, iota, G):
     """Pack (surface_dofs, iota, G) into a single vector for autodiff."""
-    return _concat_jax_float64(surface_dofs, [iota, G])
+    return jnp.concatenate(
+        (
+            jnp.ravel(jnp.asarray(surface_dofs)),
+            jnp.ravel(jnp.asarray(iota)),
+            jnp.ravel(jnp.asarray(G)),
+        )
+    )
 
 
 def _unpack(x, nsurfdofs):
@@ -256,14 +261,15 @@ def boozer_residual_grad(
     Returns:
         grad: (nsurfdofs + 2,) gradient vector.
     """
-    zero_surface_dofs = _as_runtime_float64(
+    B, xphi, xtheta = _require_boozer_runtime_inputs(B, xphi, xtheta)
+    zero_surface_dofs = _as_runtime_value(
         np.zeros(nsurfdofs, dtype=np.float64),
         reference=B,
     )
     x0 = _pack(
         zero_surface_dofs,
-        _as_runtime_float64(iota, reference=B),
-        _as_runtime_float64(G, reference=B),
+        _as_runtime_value(iota, reference=B),
+        _as_runtime_value(G, reference=B),
     )
     grad_fn = jax.grad(
         lambda x: _boozer_objective_from_packed(
@@ -298,14 +304,15 @@ def boozer_residual_hessian(
     Returns:
         H: (nsurfdofs + 2, nsurfdofs + 2) Hessian matrix.
     """
-    zero_surface_dofs = _as_runtime_float64(
+    B, xphi, xtheta = _require_boozer_runtime_inputs(B, xphi, xtheta)
+    zero_surface_dofs = _as_runtime_value(
         np.zeros(nsurfdofs, dtype=np.float64),
         reference=B,
     )
     x0 = _pack(
         zero_surface_dofs,
-        _as_runtime_float64(iota, reference=B),
-        _as_runtime_float64(G, reference=B),
+        _as_runtime_value(iota, reference=B),
+        _as_runtime_value(G, reference=B),
     )
     hess_fn = jax.hessian(
         lambda x: _boozer_objective_from_packed(
@@ -341,8 +348,9 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=False):
     Returns:
         (nphi*ntheta*3,) flattened residual vector.
     """
-    G = _as_runtime_float64(G, reference=B)
-    iota = _as_runtime_float64(iota, reference=B)
+    B, xphi, xtheta = _require_boozer_runtime_inputs(B, xphi, xtheta)
+    G = _as_runtime_value(G, reference=B)
+    iota = _as_runtime_value(iota, reference=B)
     return _boozer_weighted_residual(
         G,
         iota,

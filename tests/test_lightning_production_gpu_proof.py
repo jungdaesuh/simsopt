@@ -229,7 +229,7 @@ def test_dry_run_emits_command_with_setuptools_scm_and_bash_safeguards(tmp_path)
     assert 'export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="0.0.0+proof.' in stdout
     assert "export XLA_PYTHON_CLIENT_PREALLOCATE=false" in stdout
     assert (
-        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true"' in stdout
+        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"' in stdout
     )
     assert ". benchmarks/hf_jobs/bootstrap_runtime.sh" in stdout
     assert "python -m pip install -v -e ." in stdout

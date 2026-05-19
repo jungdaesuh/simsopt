@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 from pathlib import Path
 import sys
@@ -165,6 +166,8 @@ def _assert_backend_policy(
     tolerance_tier: str,
     compilation_cache_policy: str,
     provenance_label: str,
+    runtime_dtype: str = "float64",
+    host_dtype: str = "float64",
 ) -> None:
     assert policy.mode == mode
     assert policy.backend == backend_name
@@ -172,6 +175,8 @@ def _assert_backend_policy(
     assert policy.strict is strict
     assert policy.parity_mode is parity_mode
     assert policy.requires_x64 is requires_x64
+    assert policy.runtime_dtype == runtime_dtype
+    assert policy.host_dtype == host_dtype
     assert policy.chunk_policy == chunk_policy
     assert policy.tolerance_tier == tolerance_tier
     assert policy.compilation_cache_policy == compilation_cache_policy
@@ -266,6 +271,8 @@ def test_backend_resolves_explicit_metal_legacy_env_pair(monkeypatch):
         strict=False,
         parity_mode=False,
         requires_x64=False,
+        runtime_dtype="float32",
+        host_dtype="float32",
         chunk_policy="stable_default",
         tolerance_tier="smoke",
         compilation_cache_policy="optional_persistent",
@@ -479,6 +486,44 @@ def test_gpu_parity_mode_exposes_ci_contract_defaults(monkeypatch):
     assert policy.gpu_reproducibility_seed == 1729
     assert policy.gpu_reproducibility_sample_size == 1000
     assert policy.tolerance_ratchet_factor == pytest.approx(10.0)
+    assert policy.matmul_precision == "highest"
+    assert policy.max_dense_jacobian_bytes == 256 * 1024 * 1024
+    assert policy.xla_gpu_preallocate is False
+
+
+@pytest.mark.parametrize(
+    ("mode", "precision", "dense_bytes"),
+    (
+        ("native_cpu", "highest", 4 * 1024 * 1024 * 1024),
+        ("jax_cpu_fast", "default", 4 * 1024 * 1024 * 1024),
+        ("jax_cpu_parity", "highest", 4 * 1024 * 1024 * 1024),
+        ("jax_gpu_fast", "default", 256 * 1024 * 1024),
+        ("jax_gpu_parity", "highest", 256 * 1024 * 1024),
+    ),
+)
+def test_policy_defaults_pin_precision_and_dense_budget(
+    monkeypatch,
+    mode,
+    precision,
+    dense_bytes,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    policy = backend.get_backend_policy(mode)
+
+    assert policy.matmul_precision == precision
+    assert policy.max_dense_jacobian_bytes == dense_bytes
+
+
+def test_dense_jacobian_env_overrides_follow_platform(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_CPU", "123")
+    monkeypatch.setenv("SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU", "456")
+    backend = _fresh_backend()
+
+    assert backend.get_backend_policy("jax_cpu_parity").max_dense_jacobian_bytes == 123
+    assert backend.get_backend_policy("jax_gpu_parity").max_dense_jacobian_bytes == 456
 
 
 def test_backend_cache_clear_callbacks_replace_reloaded_registrations(monkeypatch):
@@ -996,18 +1041,20 @@ def test_sharding_tuning_defaults_fast_mode_to_hybrid_strategy(monkeypatch):
     assert backend.should_shard_coil_groups() is False
 
 
-def test_sharding_tuning_defaults_parity_modes_to_none(monkeypatch):
+def test_sharding_tuning_defaults_parity_modes_to_none(monkeypatch, caplog):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_parity")
     backend = _fresh_backend()
     runtime = sys.modules["simsopt.backend.runtime"]
     monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 8)
 
+    caplog.set_level(logging.INFO, logger="simsopt.backend.runtime")
     tuning = backend.get_sharding_tuning()
 
     assert tuning.strategy == "none"
     assert tuning.active is False
     assert backend.should_shard_points() is False
+    assert "jax_gpu_parity defaults to single-device execution" in caplog.text
 
 
 def test_sharding_tuning_respects_env_overrides(monkeypatch):
@@ -1586,6 +1633,7 @@ def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
 
     assert ("jax_platforms", "cuda,cpu") in calls
     assert ("jax_enable_x64", True) in calls
+    assert ("jax_default_matmul_precision", "default") in calls
     assert ("jax_debug_nans", False) in calls
     assert ("jax_transfer_guard", "log") in calls
     assert (
@@ -1615,6 +1663,7 @@ def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
 
     assert ("jax_platforms", "METAL") in calls
     assert ("jax_enable_x64", False) in calls
+    assert ("jax_default_matmul_precision", "default") in calls
     assert ("jax_debug_nans", False) in calls
     assert ("jax_transfer_guard", "log") in calls
     assert (
@@ -1644,13 +1693,11 @@ def test_apply_jax_runtime_config_raises_without_cuda_determinism_flag(
 @pytest.mark.parametrize(
     "xla_flag",
     (
-        "--xla_gpu_deterministic_ops",
-        "--xla_gpu_deterministic_ops=true",
         "--xla_gpu_exclude_nondeterministic_ops",
         "--xla_gpu_exclude_nondeterministic_ops=true",
     ),
 )
-def test_apply_jax_runtime_config_accepts_supported_cuda_determinism_flags(
+def test_apply_jax_runtime_config_accepts_official_cuda_determinism_flag(
     monkeypatch,
     xla_flag,
 ):
@@ -1664,6 +1711,133 @@ def test_apply_jax_runtime_config_accepts_supported_cuda_determinism_flags(
     backend.apply_jax_runtime_config()
 
     assert ("jax_platforms", "cuda,cpu") in calls
+    assert os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+
+
+def test_apply_jax_runtime_config_rejects_stale_cuda_determinism_flag(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_deterministic_ops=true")
+    _install_fake_jax(monkeypatch)
+
+    backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    with pytest.raises(RuntimeError, match="stale CUDA determinism flag"):
+        backend.apply_jax_runtime_config()
+
+
+def test_apply_jax_runtime_config_rejects_stale_cuda_flag_even_with_official_flag(
+    monkeypatch,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.setenv(
+        "XLA_FLAGS",
+        "--xla_gpu_deterministic_ops=true "
+        "--xla_gpu_exclude_nondeterministic_ops=true",
+    )
+    _install_fake_jax(monkeypatch)
+
+    backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    with pytest.raises(RuntimeError, match="stale CUDA determinism flag"):
+        backend.apply_jax_runtime_config()
+
+
+def test_apply_jax_runtime_config_applies_gpu_memory_policy(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_exclude_nondeterministic_ops=true")
+    calls: list[tuple[str, object]] = []
+    _install_fake_jax(monkeypatch, calls=calls)
+
+    backend.set_backend(
+        "jax_gpu_fast",
+        xla_gpu_preallocate=True,
+        xla_gpu_mem_fraction=0.5,
+        xla_gpu_allocator="vmm",
+        tf_gpu_allocator="cuda_malloc_async",
+        configure_runtime=False,
+    )
+    backend.apply_jax_runtime_config()
+
+    assert os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] == "true"
+    assert os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] == "vmm"
+    assert "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ
+    assert os.environ["XLA_CLIENT_MEM_FRACTION"] == "0.5"
+    assert os.environ["TF_GPU_ALLOCATOR"] == "cuda_malloc_async"
+    assert ("jax_default_matmul_precision", "default") in calls
+
+
+def test_gpu_memory_env_overrides_mode_defaults(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_JAX_GPU_PREALLOCATE", "true")
+    monkeypatch.setenv("SIMSOPT_JAX_GPU_MEM_FRACTION", "0.25")
+    monkeypatch.setenv("SIMSOPT_JAX_GPU_ALLOCATOR", "platform")
+    backend = _fresh_backend()
+
+    policy = backend.get_backend_policy()
+
+    assert policy.xla_gpu_preallocate is True
+    assert policy.xla_gpu_mem_fraction == pytest.approx(0.25)
+    assert policy.xla_gpu_allocator == "platform"
+
+
+def test_validate_cuda_determinism_warns_for_direct_jax_platforms(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    monkeypatch.delenv("XLA_FLAGS", raising=False)
+    backend = _fresh_backend()
+
+    with pytest.warns(RuntimeWarning, match="JAX_PLATFORMS=cuda"):
+        backend.validate_cuda_determinism_environment()
+
+
+def test_validate_cuda_determinism_raises_for_direct_jax_platforms_strict(
+    monkeypatch,
+):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    monkeypatch.delenv("XLA_FLAGS", raising=False)
+    backend = _fresh_backend()
+
+    with pytest.raises(RuntimeError, match="JAX_PLATFORMS=cuda"):
+        backend.validate_cuda_determinism_environment()
+
+
+def test_with_cpu_device_for_construction_uses_real_jax_cpu_default_device(
+    monkeypatch,
+    tmp_path,
+):
+    _clear_backend_env(monkeypatch)
+    jax = _require_jax()
+    jnp = pytest.importorskip("jax.numpy")
+    backend = _fresh_backend()
+    cache_dir = tmp_path / "jax-cache"
+    backend.set_backend(
+        "jax_cpu_parity",
+        compilation_cache_dir=str(cache_dir),
+        configure_runtime=True,
+    )
+
+    @jax.jit
+    def add_one(value):
+        return value + 1.0
+
+    with backend.with_cpu_device_for_construction() as active_device:
+        constructed = jnp.asarray([1.0], dtype=jnp.float64)
+        compiled = add_one(constructed)
+
+    outside = jnp.asarray([2.0], dtype=jnp.float64)
+    outside_compiled = add_one(outside)
+    jax.block_until_ready((compiled, outside_compiled))
+
+    assert backend.get_compilation_cache_dir() == str(cache_dir)
+    assert active_device.platform == "cpu"
+    assert constructed.device.platform == "cpu"
+    assert compiled.device.platform == "cpu"
+    np.testing.assert_allclose(np.asarray(compiled), np.asarray([2.0]))
+    np.testing.assert_allclose(np.asarray(outside_compiled), np.asarray([3.0]))
 
 
 def test_apply_jax_runtime_config_warns_on_initialized_backend_mismatch(monkeypatch):
@@ -1694,7 +1868,7 @@ def test_apply_jax_runtime_config_raises_on_parity_backend_mismatch(monkeypatch)
     runtime_module = sys.modules["simsopt.backend.runtime"]
     fake_home = Path("/tmp/simsopt-jax-cache-home")
     monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
-    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_deterministic_ops=true")
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_exclude_nondeterministic_ops=true")
     calls: list[tuple[str, object]] = []
     fake_jax = types.SimpleNamespace(
         config=types.SimpleNamespace(
@@ -1717,7 +1891,7 @@ def test_apply_jax_runtime_config_propagates_backend_initialization_error(monkey
     runtime_module = sys.modules["simsopt.backend.runtime"]
     fake_home = Path("/tmp/simsopt-jax-cache-home")
     monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
-    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_deterministic_ops=true")
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_exclude_nondeterministic_ops=true")
     calls: list[tuple[str, object]] = []
 
     def _raise_backend_error():
@@ -1771,6 +1945,7 @@ def test_apply_jax_runtime_config_raises_on_initialized_backend_mismatch_in_stri
     runtime_module = sys.modules["simsopt.backend.runtime"]
     fake_home = Path("/tmp/simsopt-jax-cache-home")
     monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_exclude_nondeterministic_ops=true")
     fake_jax = types.SimpleNamespace(
         config=types.SimpleNamespace(update=lambda name, value: None),
         default_backend=lambda: "cpu",
@@ -1802,7 +1977,7 @@ def test_apply_jax_runtime_config_rejects_last_override_to_disabled_flag(
     backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
     monkeypatch.setenv(
         "XLA_FLAGS",
-        "--xla_gpu_deterministic_ops=true --xla_gpu_deterministic_ops=false",
+        "--xla_gpu_exclude_nondeterministic_ops=true --xla_gpu_exclude_nondeterministic_ops=false",
     )
     _install_fake_jax(monkeypatch)
 
@@ -1818,7 +1993,7 @@ def test_apply_jax_runtime_config_accepts_last_override_to_enabled_flag(
     backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
     monkeypatch.setenv(
         "XLA_FLAGS",
-        "--xla_gpu_deterministic_ops=false --xla_gpu_deterministic_ops=true",
+        "--xla_gpu_exclude_nondeterministic_ops=false --xla_gpu_exclude_nondeterministic_ops=true",
     )
     calls: list[tuple[str, object]] = []
     _install_fake_jax(monkeypatch, calls=calls)
@@ -1839,20 +2014,20 @@ def test_ensure_gpu_determinism_xla_flag_preserves_unrelated_xla_flags():
     assert env["XLA_FLAGS"].split() == [
         "--xla_gpu_cuda_data_dir=/tmp/cuda",
         "--other-flag=1",
-        "--xla_gpu_deterministic_ops=true",
+        "--xla_gpu_exclude_nondeterministic_ops=true",
     ]
 
 
 def test_ensure_gpu_determinism_xla_flag_replaces_disabled_value():
     env = {
-        "XLA_FLAGS": "--xla_gpu_deterministic_ops=false --xla_gpu_cuda_data_dir=/tmp/cuda",
+        "XLA_FLAGS": "--xla_gpu_exclude_nondeterministic_ops=false --xla_gpu_cuda_data_dir=/tmp/cuda",
     }
 
     ensure_gpu_determinism_xla_flag(env)
 
     assert env["XLA_FLAGS"].split() == [
         "--xla_gpu_cuda_data_dir=/tmp/cuda",
-        "--xla_gpu_deterministic_ops=true",
+        "--xla_gpu_exclude_nondeterministic_ops=true",
     ]
 
 
@@ -1864,21 +2039,37 @@ def test_ensure_gpu_determinism_xla_flag_preserves_enabled_official_flag():
     ensure_gpu_determinism_xla_flag(env)
 
     assert env["XLA_FLAGS"].split() == [
-        "--xla_gpu_exclude_nondeterministic_ops=true",
         "--other-flag=1",
+        "--xla_gpu_exclude_nondeterministic_ops=true",
     ]
 
 
-def test_ensure_gpu_determinism_xla_flag_rewrites_disabled_last_override():
+def test_ensure_gpu_determinism_xla_flag_strips_stale_flag_with_official_flag():
     env = {
-        "XLA_FLAGS": "--xla_gpu_deterministic_ops=true --xla_gpu_deterministic_ops=false --other-flag=1",
+        "XLA_FLAGS": (
+            "--xla_gpu_deterministic_ops=true "
+            "--xla_gpu_exclude_nondeterministic_ops=true --other-flag=1"
+        ),
     }
 
     ensure_gpu_determinism_xla_flag(env)
 
     assert env["XLA_FLAGS"].split() == [
         "--other-flag=1",
-        "--xla_gpu_deterministic_ops=true",
+        "--xla_gpu_exclude_nondeterministic_ops=true",
+    ]
+
+
+def test_ensure_gpu_determinism_xla_flag_rewrites_disabled_last_override():
+    env = {
+        "XLA_FLAGS": "--xla_gpu_exclude_nondeterministic_ops=true --xla_gpu_exclude_nondeterministic_ops=false --other-flag=1",
+    }
+
+    ensure_gpu_determinism_xla_flag(env)
+
+    assert env["XLA_FLAGS"].split() == [
+        "--other-flag=1",
+        "--xla_gpu_exclude_nondeterministic_ops=true",
     ]
 
 

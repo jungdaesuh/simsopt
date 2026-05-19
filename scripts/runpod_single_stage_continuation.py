@@ -615,7 +615,7 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
         "export SIMSOPT_JAX_PLATFORM=cuda",
         "# Keep JAX from reserving most VRAM before continuation kernels allocate.",
         "export XLA_PYTHON_CLIENT_PREALLOCATE=false",
-        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true --xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_enable_llvm_module_compilation_parallelism=false"',
+        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true --xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_enable_llvm_module_compilation_parallelism=false"',
         f"export JAX_COMPILATION_CACHE_DIR={shlex.quote(plan.remote_cache_dir)}",
         "export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0",
         "export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=-1",

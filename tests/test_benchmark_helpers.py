@@ -1877,6 +1877,23 @@ def test_repo_pythonpath_env_keeps_cpu_visible_for_cuda_callbacks(monkeypatch):
     assert env["SIMSOPT_JAX_BACKEND"] == "cuda"
 
 
+def test_repo_pythonpath_env_replaces_stale_cuda_determinism_flag(monkeypatch):
+    monkeypatch.setenv(
+        "XLA_FLAGS",
+        "--xla_gpu_deterministic_ops=true --xla_gpu_cuda_data_dir=/tmp/cuda",
+    )
+
+    env = repo_pythonpath_env(
+        platform="cuda",
+        deterministic_gpu_reductions=True,
+    )
+
+    assert env["XLA_FLAGS"].split() == [
+        "--xla_gpu_cuda_data_dir=/tmp/cuda",
+        "--xla_gpu_exclude_nondeterministic_ops=true",
+    ]
+
+
 def _assert_benchmark_module_import_bootstraps_local_simsopt(module_name: str) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     completed = subprocess.run(
@@ -2127,14 +2144,14 @@ def test_repo_pythonpath_env_bundled_cuda_clears_local_toolchain_overrides(
     monkeypatch.setenv("LD_LIBRARY_PATH", "/cuda/lib:/driver/lib")
     monkeypatch.setenv(
         "XLA_FLAGS",
-        "--xla_gpu_cuda_data_dir=/tmp/fake-cuda --xla_gpu_deterministic_ops=true",
+        "--xla_gpu_cuda_data_dir=/tmp/fake-cuda --xla_gpu_exclude_nondeterministic_ops=true",
     )
 
     env = repo_pythonpath_env(platform="cuda")
 
     assert env["PATH"] == "/usr/bin"
     assert "LD_LIBRARY_PATH" not in env
-    assert env["XLA_FLAGS"] == "--xla_gpu_deterministic_ops=true"
+    assert env["XLA_FLAGS"] == "--xla_gpu_exclude_nondeterministic_ops=true"
     assert env["JAX_PLATFORMS"] == "cuda,cpu"
     assert env["SIMSOPT_JAX_PLATFORM"] == "cuda"
     assert env["SIMSOPT_JAX_BACKEND"] == "cuda"
@@ -2495,7 +2512,7 @@ def _release_gate_lane(*, backend, gpu_memory_mb=None, include_gpu_facts=True):
         "cuda_driver_version": _FAKE_CUDA_DRIVER_VERSION if is_gpu_backend else None,
         "nvcc_version": _FAKE_NVCC_VERSION if is_gpu_backend else None,
         "peak_rss_mb": 128.0,
-        "xla_flags": "--xla_gpu_deterministic_ops=true",
+        "xla_flags": "--xla_gpu_exclude_nondeterministic_ops=true",
         "compilation_cache_policy": "disabled",
     }
     if is_gpu_backend:
@@ -3659,7 +3676,7 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
     monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
     monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
-    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_deterministic_ops=true")
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_exclude_nondeterministic_ops=true")
     monkeypatch.setenv("CUDA_FORCE_PTX_JIT", "1")
     monkeypatch.setenv("CUDA_DISABLE_PTX_JIT", "0")
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
@@ -3740,7 +3757,7 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     assert provenance["backend_mode"] == "jax_gpu_fast"
     assert provenance["backend_strict"] is True
     assert provenance["transfer_guard"] == "disallow"
-    assert provenance["xla_flags"] == "--xla_gpu_deterministic_ops=true"
+    assert provenance["xla_flags"] == "--xla_gpu_exclude_nondeterministic_ops=true"
     assert provenance["cuda_force_ptx_jit"] == "1"
     assert provenance["cuda_disable_ptx_jit"] == "0"
     assert provenance["cuda_env"] == {
@@ -4543,7 +4560,7 @@ def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
     assert "--diagnostic-callbacks" in command
     assert "--record-target-lane-invalid-state-events" not in command
     assert "--record-jax-compile-diagnostics" not in command
-    assert "--xla_gpu_deterministic_ops=true" in env["XLA_FLAGS"].split()
+    assert "--xla_gpu_exclude_nondeterministic_ops=true" in env["XLA_FLAGS"].split()
 
 
 def test_single_stage_init_case_threads_compile_diagnostics_without_host_callbacks(
@@ -6458,7 +6475,7 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_parity" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
-    assert "XLA_FLAGS: --xla_gpu_deterministic_ops=true" in workflow_text
+    assert "XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true" in workflow_text
     assert "setuptools_scm" not in workflow_text
     assert "benchmarks/stage2_value_gradient_parity.py" in workflow_text
     assert "--fixture real" in workflow_text
@@ -6482,7 +6499,7 @@ def test_gpu_parity_workflow_adds_full_suite_disallow_lane():
     assert "runs-on: [self-hosted, gpu]" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
-    assert "XLA_FLAGS: --xla_gpu_deterministic_ops=true" in workflow_text
+    assert "XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true" in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
     assert 'PYTHONUNBUFFERED: "1"' in workflow_text
     assert 'XLA_PYTHON_CLIENT_PREALLOCATE: "false"' in workflow_text
@@ -6513,7 +6530,7 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     assert "runs-on: [self-hosted, gpu]" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
-    assert "XLA_FLAGS: --xla_gpu_deterministic_ops=true" in workflow_text
+    assert "XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true" in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
     gpu_e2e = _workflow_job_section(
         workflow_text,
@@ -6541,7 +6558,7 @@ def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
     assert "runs-on: [self-hosted, gpu]" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
-    assert "XLA_FLAGS: --xla_gpu_deterministic_ops=true" in workflow_text
+    assert "XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true" in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
     strict_purity = _workflow_job_section(workflow_text, "jax-gpu-strict-purity")
     assert 'XLA_PYTHON_CLIENT_PREALLOCATE: "false"' in strict_purity

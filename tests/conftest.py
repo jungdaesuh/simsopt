@@ -46,6 +46,12 @@ _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE",
     "SIMSOPT_JAX_CHUNK_AUTOTUNE",
     "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB",
+    "SIMSOPT_JAX_GPU_PREALLOCATE",
+    "SIMSOPT_JAX_GPU_MEM_FRACTION",
+    "SIMSOPT_JAX_GPU_ALLOCATOR",
+    "SIMSOPT_TF_GPU_ALLOCATOR",
+    "SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_CPU",
+    "SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU",
     "SIMSOPT_JAX_SHARDING",
     "SIMSOPT_JAX_SHARDING_AXIS",
     "SIMSOPT_JAX_COIL_SHARDING_AXIS",
@@ -63,6 +69,11 @@ _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_JAX_BACKEND",
     "JAX_PLATFORMS",
     "XLA_FLAGS",
+    "XLA_PYTHON_CLIENT_PREALLOCATE",
+    "XLA_PYTHON_CLIENT_MEM_FRACTION",
+    "XLA_PYTHON_CLIENT_ALLOCATOR",
+    "XLA_CLIENT_MEM_FRACTION",
+    "TF_GPU_ALLOCATOR",
     "CUDA_VISIBLE_DEVICES",
 )
 _JAX_RUNTIME_CONFIG_DEFAULTS = {
@@ -104,12 +115,9 @@ _REDUCTION_ACCEPTANCE_TIERS = {
         "gpu": (1e-10, 1e-14),
     },
 }
-_GPU_DETERMINISM_XLA_FLAGS = (
-    "--xla_gpu_deterministic_ops",
-    "--xla_gpu_exclude_nondeterministic_ops",
-)
-_DEFAULT_GPU_DETERMINISM_XLA_FLAG = "--xla_gpu_deterministic_ops=true"
-_TRUTHY_XLA_FLAG_VALUES = frozenset({"1", "true", "yes", "on"})
+_GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_exclude_nondeterministic_ops",)
+_STALE_GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_deterministic_ops",)
+_DEFAULT_GPU_DETERMINISM_XLA_FLAG = "--xla_gpu_exclude_nondeterministic_ops=true"
 
 
 def _require_jax():
@@ -193,8 +201,7 @@ def _snapshot_loaded_jax_runtime_config() -> dict[str, object]:
     if jax_module is None:
         return dict(_JAX_RUNTIME_CONFIG_DEFAULTS)
     return {
-        name: getattr(jax_module.config, name)
-        for name in _JAX_RUNTIME_CONFIG_DEFAULTS
+        name: getattr(jax_module.config, name) for name in _JAX_RUNTIME_CONFIG_DEFAULTS
     }
 
 
@@ -214,19 +221,6 @@ def _restore_backend_runtime_env(snapshot: dict[str, str | None]) -> None:
             os.environ[name] = value
 
 
-def _determinism_xla_flag_state(token: str) -> tuple[str, bool] | None:
-    for flag_name in _GPU_DETERMINISM_XLA_FLAGS:
-        if token == flag_name:
-            return (flag_name, True)
-        if not token.startswith(f"{flag_name}="):
-            continue
-        return (
-            flag_name,
-            token.split("=", 1)[1].strip().lower() in _TRUTHY_XLA_FLAG_VALUES,
-        )
-    return None
-
-
 def _split_xla_flag_tokens(xla_flags: str | None) -> tuple[str, ...]:
     if not xla_flags:
         return ()
@@ -236,34 +230,20 @@ def _split_xla_flag_tokens(xla_flags: str | None) -> tuple[str, ...]:
         return tuple(xla_flags.split())
 
 
-def _effective_determinism_xla_flag_states(
-    tokens: tuple[str, ...],
-) -> dict[str, bool]:
-    effective_states: dict[str, bool] = {}
-    for token in tokens:
-        resolved = _determinism_xla_flag_state(token)
-        if resolved is None:
-            continue
-        flag_name, enabled = resolved
-        effective_states[flag_name] = enabled
-    return effective_states
-
-
 def ensure_gpu_determinism_xla_flag(
     env: dict[str, str],
     *,
     deterministic_flag: str = _DEFAULT_GPU_DETERMINISM_XLA_FLAG,
 ) -> None:
     tokens = _split_xla_flag_tokens(env.get("XLA_FLAGS"))
-    effective_states = _effective_determinism_xla_flag_states(tokens)
-    if any(effective_states.values()):
-        return
     rewritten = [
         token
         for token in tokens
         if not any(
             token == flag_name or token.startswith(f"{flag_name}=")
-            for flag_name in _GPU_DETERMINISM_XLA_FLAGS
+            for flag_name in (
+                _GPU_DETERMINISM_XLA_FLAGS + _STALE_GPU_DETERMINISM_XLA_FLAGS
+            )
         )
     ]
     rewritten.append(deterministic_flag)
@@ -272,9 +252,7 @@ def ensure_gpu_determinism_xla_flag(
 
 @pytest.fixture(autouse=True)
 def _guard_backend_runtime_state():
-    env_snapshot = {
-        name: os.environ.get(name) for name in _BACKEND_RUNTIME_ENV_VARS
-    }
+    env_snapshot = {name: os.environ.get(name) for name in _BACKEND_RUNTIME_ENV_VARS}
     jax_config_snapshot = _snapshot_loaded_jax_runtime_config()
     _invalidate_loaded_backend_state()
     try:
@@ -287,7 +265,11 @@ def _guard_backend_runtime_state():
 
 def _activate_backend_mode(monkeypatch, request, *, mode, strict):
     _require_jax()
-    from simsopt.backend import get_backend_config, invalidate_backend_cache, set_backend
+    from simsopt.backend import (
+        get_backend_config,
+        invalidate_backend_cache,
+        set_backend,
+    )
 
     invalidate_backend_cache()
     previous = get_backend_config()
@@ -399,10 +381,10 @@ def parity_default_device(lane: str):
 
 
 def _block_until_ready(value, *, jax_module):
-    return jax_module.tree_util.tree_map(
-        lambda leaf: leaf.block_until_ready()
-        if isinstance(leaf, jax_module.Array)
-        else leaf,
+    return jax_module.tree.map(
+        lambda leaf: (
+            leaf.block_until_ready() if isinstance(leaf, jax_module.Array) else leaf
+        ),
         value,
     )
 
@@ -462,9 +444,7 @@ def _parity_lane_key(lane_or_mode: str) -> str:
         raise ValueError(f"Unknown parity lane or mode {lane_or_mode!r}") from exc
 
 
-def parity_acceptance_tolerance(
-    tier: str, lane_or_mode: str
-) -> tuple[float, float]:
+def parity_acceptance_tolerance(tier: str, lane_or_mode: str) -> tuple[float, float]:
     try:
         tolerances = _REDUCTION_ACCEPTANCE_TIERS[tier]
     except KeyError as exc:
@@ -478,9 +458,7 @@ def parity_acceptance_tolerance(
 def parity_acceptance_modes(
     tier: str, *modes: str
 ) -> tuple[tuple[str, float, float], ...]:
-    return tuple(
-        (mode, *parity_acceptance_tolerance(tier, mode)) for mode in modes
-    )
+    return tuple((mode, *parity_acceptance_tolerance(tier, mode)) for mode in modes)
 
 
 def pytest_collection_modifyitems(config, items):

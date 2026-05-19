@@ -163,33 +163,93 @@ appear in provenance and validation output.
 
    * - Mode
      - X64
+     - Matmul precision
      - Chunk policy
+     - Sharding default
      - Tolerance tier
      - Compilation cache policy
    * - ``native_cpu``
      - required by the current import-time scientific runtime contract
+     - ``highest``
      - ``host_reference``
+     - ``none``
      - ``cpu_reference``
      - ``not_applicable``
    * - ``jax_cpu_parity``
      - required
+     - ``highest``
      - ``stable_default``
+     - ``none``
      - ``parity``
      - ``optional_persistent``
    * - ``jax_gpu_parity``
      - required
+     - ``highest``
      - ``stable_default``
+     - ``none``
      - ``parity``
      - ``optional_persistent``
    * - ``jax_gpu_fast``
      - currently still required
+     - JAX default
      - ``performance_tuned``
+     - ``hybrid``
      - ``fast``
      - ``optional_persistent``
 
 These labels do not mean every kernel already implements the final chunked
 parity/fast architecture. They define the runtime contract and provenance
 surface while the remaining kernel work is still in progress.
+
+Sharding defaults
+-----------------
+
+``jax_gpu_parity`` intentionally stays single-device by default even on
+multi-GPU hosts. Sharding changes reduction order and therefore needs a real
+GPU parity proof before it can become the parity default. Users can opt into
+``SIMSOPT_JAX_SHARDING=hybrid`` for experiments, but those runs do not carry
+round-3 parity signoff until the multi-GPU proof artifact is recorded.
+``jax_gpu_fast`` defaults to ``hybrid`` because it is a speed lane rather than a
+byte-identity lane.
+
+GPU memory policy
+-----------------
+
+The runtime owns the common JAX/XLA GPU allocator environment variables and
+sets them before importing JAX when a CUDA backend mode is selected. JAX's
+allocator variables are consumed before the first JAX GPU operation; SIMSOPT
+keeps a stricter pre-import setup rule so backend mode, allocator env, platform
+selection, transfer guard, precision, and provenance are resolved from one
+process contract instead of depending on whether a previous import touched a
+device.
+
+- ``XLA_PYTHON_CLIENT_PREALLOCATE`` defaults to ``false`` for
+  ``jax_gpu_*`` modes.
+- ``SIMSOPT_JAX_GPU_MEM_FRACTION`` maps to
+  ``XLA_PYTHON_CLIENT_MEM_FRACTION`` for the default allocator and to
+  ``XLA_CLIENT_MEM_FRACTION`` when
+  ``SIMSOPT_JAX_GPU_ALLOCATOR=vmm``.
+- ``SIMSOPT_JAX_GPU_ALLOCATOR`` accepts ``platform`` or ``vmm``. Leaving it
+  unset keeps JAX's default BFC allocator.
+- ``SIMSOPT_TF_GPU_ALLOCATOR=cuda_malloc_async`` maps to
+  ``TF_GPU_ALLOCATOR=cuda_malloc_async``.
+
+Programmatic callers may pass the same knobs explicitly to
+``simsopt.config.set_backend(...)`` using
+``xla_gpu_preallocate``, ``xla_gpu_mem_fraction``, ``xla_gpu_allocator``, and
+``tf_gpu_allocator``. Explicit keyword arguments override ``SIMSOPT_*`` env
+vars, and ``SIMSOPT_*`` env vars override mode defaults.
+
+CUDA determinism policy
+-----------------------
+
+CUDA backend modes require the current OpenXLA execution-determinism flag in
+``XLA_FLAGS`` before JAX backend initialization::
+
+    export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
+
+The older ``--xla_gpu_deterministic_ops`` spelling is not accepted by the
+SIMSOPT runtime gate, even if it appears alongside the current flag.
 
 Chunk autotuning
 ----------------
@@ -397,8 +457,28 @@ Troubleshooting
 
 **Out of memory**
   Large Jacobian/Hessian objects can exhaust GPU memory.  Reduce grid
-  resolution (``mpol``, ``ntor``) or use ``XLA_PYTHON_CLIENT_PREALLOCATE=false``
-  to disable JAX's default 75% memory pre-allocation.
+  resolution (``mpol``, ``ntor``). CUDA backend modes already set
+  ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` before JAX GPU initialization unless
+  an explicit override changes that policy; SIMSOPT's supported entrypoint
+  still resolves that policy before importing JAX.
+
+OOM Recovery
+------------
+
+JAX platform selection and compiled executables are process-scoped. A GPU
+compiled JIT cannot be transparently retargeted to CPU after an OOM. Use an
+explicit checkpoint/restart workflow instead:
+
+1. Save the current SIMSOPT artifact state, including ``biot_savart_opt.json``
+   and adjacent run metadata for Stage 2 / single-stage workflows.
+2. Restart Python with ``SIMSOPT_BACKEND_MODE=jax_cpu_fast`` or
+   ``SIMSOPT_BACKEND_MODE=jax_cpu_parity``.
+3. Load the saved artifact through the normal SIMSOPT load path and resume.
+
+For new CPU-resident construction inside an already-running process, use
+``simsopt.backend.with_cpu_device_for_construction()``. It wraps
+``jax.default_device(jax.devices("cpu")[0])`` for fresh arrays and fresh
+compiles only; it does not retarget existing GPU-compiled functions.
 
 **Wrong repo or wrong ``simsoptpp`` binary loaded**
   If ``simsopt`` or ``simsoptpp`` resolves to ``site-packages`` or a sibling

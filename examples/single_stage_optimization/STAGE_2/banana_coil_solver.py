@@ -918,7 +918,7 @@ def resolve_stage2_field_bs(new_bs, bs_jax):
 
 
 def _block_until_ready_tree(value):
-    for leaf in jax.tree_util.tree_leaves(value):
+    for leaf in jax.tree.leaves(value):
         if hasattr(leaf, "block_until_ready"):
             leaf.block_until_ready()
 

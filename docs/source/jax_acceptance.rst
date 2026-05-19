@@ -161,7 +161,7 @@ backend explicitly.
 Optimizer family equivalence
 ----------------------------
 
-Three JAX least-squares methods are exposed by
+Four JAX least-squares methods are exposed by
 ``simsopt.geo.optimizer_jax``:
 
 - ``method="lm"`` (``reference_least_squares``) is a host-driven
@@ -173,6 +173,11 @@ Three JAX least-squares methods are exposed by
   opt-in trace-safe JAX-on-device dense-QR Levenberg-Marquardt lane.
   It materializes the dense Jacobian and solves the Marquardt
   augmented least-squares step with column-pivoted QR.
+- ``method="optimistix-lm-ondevice"`` (``target_least_squares``) is an
+  optional Optimistix Levenberg-Marquardt lane with Lineax LSMR inner
+  solves. It is exposed by
+  ``least_squares_algorithm="optimistix-lm"`` and requires the
+  ``JAX_OPTIMISTIX`` dependency extra on Python 3.11+.
 
 Neither ``method="lm"`` nor ``method="lm-ondevice"`` is a port of
 MINPACK ``lmder``. Both use:
@@ -217,6 +222,21 @@ Because the dense Jacobian is required by the solver itself,
 not a final-artifact reporting preference.
 Callers needing MINPACK ``lmder`` byte-equality must invoke
 ``scipy.optimize.least_squares(method="lm")`` directly.
+
+The ``optimistix-lm-ondevice`` backend is **doubly opt-in** and remains
+experimental: it requires both ``optimizer_backend="ondevice"`` and
+``least_squares_algorithm="optimistix-lm"`` on ``BoozerSurfaceJAX``.
+It is useful as a library-backed LSMR comparison lane. It uses a single
+``tol`` value as Optimistix ``rtol``/``atol`` and Lineax LSMR
+``rtol``/``atol``; non-default ``ftol``/``xtol``/``gtol`` and solver
+callbacks are rejected rather than silently reinterpreted. Its optional dense
+linearization artifacts are post-hoc compatibility artifacts, not the in-loop
+dense QR factors used by ``lm-minpack-ondevice``. On the current oversampled
+Boozer fixture it matches the in-tree JAX LM objective and residual-norm scale
+to tolerance, but it does not match the endpoint state or the residual vector at
+the ``branch-stable-resolve`` gate; on the default near-rank-deficient fixture
+it does not improve over the matrix-free lane. Treat it as a diagnostic lane
+unless a later validation artifact promotes it.
 
 Validation Checklist
 --------------------

@@ -517,7 +517,7 @@ def test_run_production_gpu_proof_preserves_ld_library_path(tmp_path):
     } == {ld_library_path}
     assert {record["cuda_library_mode"] for record in call_records} == {"bundled"}
     assert all(
-        "--xla_gpu_deterministic_ops=true" in str(record["xla_flags"]).split()
+        "--xla_gpu_exclude_nondeterministic_ops=true" in str(record["xla_flags"]).split()
         for record in call_records
     )
 
@@ -818,7 +818,7 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
     assert "--geometry-rel-tol" not in completed.stdout
     assert "--single-stage-boozer-optimizer-backend" not in completed.stdout
     assert "unset LD_LIBRARY_PATH" not in completed.stdout
-    assert 'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true"' in completed.stdout
+    assert 'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"' in completed.stdout
     assert (
         'export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-'
         '${PWD}/.artifacts/jax_compilation_cache/hf-production-proof}"'
