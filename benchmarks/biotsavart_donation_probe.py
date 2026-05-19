@@ -170,7 +170,7 @@ def _fresh_points(host_points: np.ndarray) -> jax.Array:
 
 def _estimate_tree_bytes(tree: object) -> int:
     total = 0
-    for leaf in jax.tree_util.tree_leaves(tree):
+    for leaf in jax.tree.leaves(tree):
         nbytes = getattr(leaf, "nbytes", None)
         if nbytes is not None:
             total += int(nbytes)

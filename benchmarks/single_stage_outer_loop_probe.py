@@ -258,7 +258,7 @@ def parse_args() -> argparse.Namespace:
         "--deterministic-gpu-reductions",
         action="store_true",
         help=(
-            "Append --xla_gpu_deterministic_ops=true for the CUDA subprocess as "
+            "Append --xla_gpu_exclude_nondeterministic_ops=true for the CUDA subprocess as "
             "a phase-1 A/B experiment."
         ),
     )

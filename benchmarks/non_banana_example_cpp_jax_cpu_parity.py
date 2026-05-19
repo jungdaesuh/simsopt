@@ -35,6 +35,7 @@ import importlib
 import json
 import os
 import platform
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, replace
@@ -775,25 +776,25 @@ def _coil_force_energy_comparisons(
     return [
         _compare_scalar(
             cpu_value=cpu.components["LpCurveForce"],
-            jax_value=jax_lane.components["LpCurveForceJAX"],
+            jax_value=jax_lane.components["LpCurveForce"],
             quantity="LpCurveForce",
             component="force_objective",
         ),
         _compare_scalar(
             cpu_value=cpu.components["LpCurveForce_independent_oracle"],
-            jax_value=jax_lane.components["LpCurveForceJAX"],
+            jax_value=jax_lane.components["LpCurveForce"],
             quantity="LpCurveForce_independent_oracle",
             component="force_objective",
         ),
         _compare_scalar(
             cpu_value=cpu.components["B2Energy"],
-            jax_value=jax_lane.components["B2EnergyJAX"],
+            jax_value=jax_lane.components["B2Energy"],
             quantity="B2Energy",
             component="energy_objective",
         ),
         _compare_scalar(
             cpu_value=cpu.components["B2Energy_independent_oracle"],
-            jax_value=jax_lane.components["B2EnergyJAX"],
+            jax_value=jax_lane.components["B2Energy"],
             quantity="B2Energy_independent_oracle",
             component="energy_objective",
         ),
@@ -2105,8 +2106,8 @@ def build_run_metadata(
         "host_machine": platform.machine(),
         "executable": sys.executable,
         "version_probe_command": (
-            'conda run -n jax python -c "import jax, jaxlib; '
-            'print(jax.__version__, jaxlib.__version__)"'
+            f"{shlex.quote(sys.executable)} -c "
+            "'import jax, jaxlib; print(jax.__version__, jaxlib.__version__)'"
         ),
         "lane_schema": {
             "cpu_cpp": {"required": True, "artifact_kind": "cpu_oracle"},

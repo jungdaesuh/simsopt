@@ -55,9 +55,7 @@ import jaxlib
 
 maybe_initialize_distributed_runtime()
 jax.config.update("jax_enable_x64", True)
-require_x64_runtime(
-    jax, context="Single-stage SurfaceRZFourier reprojection probe"
-)
+require_x64_runtime(jax, context="Single-stage SurfaceRZFourier reprojection probe")
 
 from examples.single_stage_optimization.SINGLE_STAGE import (
     single_stage_banana_example as single_stage_example,
@@ -161,7 +159,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _block_tree(value: object) -> None:
-    for leaf in jax.tree_util.tree_leaves(value):
+    for leaf in jax.tree.leaves(value):
         if isinstance(leaf, jax.Array):
             jax.block_until_ready(leaf)
 
@@ -181,7 +179,10 @@ def _surface_details(surface: SurfaceRZFourier) -> dict[str, Any]:
 
 def _array_details(array: object) -> dict[str, Any]:
     if isinstance(array, jax.Array):
-        return {"shape": tuple(int(dim) for dim in array.shape), "dtype": str(array.dtype)}
+        return {
+            "shape": tuple(int(dim) for dim in array.shape),
+            "dtype": str(array.dtype),
+        }
     array_np = np.asarray(array)
     return {
         "shape": tuple(int(dim) for dim in array_np.shape),
@@ -202,7 +203,7 @@ def _spec_details(spec: Any) -> dict[str, Any]:
 
 
 def _source_bundle_details(
-    item: tuple[SurfaceRZFourier, dict[str, Any]]
+    item: tuple[SurfaceRZFourier, dict[str, Any]],
 ) -> dict[str, Any]:
     surface, context = item
     return {**context, **_surface_details(surface)}
@@ -249,7 +250,9 @@ def _should_stop_after(args: argparse.Namespace, stage_name: str) -> bool:
     return str(args.stop_after_stage) == stage_name
 
 
-def _build_source_surface(args: argparse.Namespace) -> tuple[SurfaceRZFourier, dict[str, Any]]:
+def _build_source_surface(
+    args: argparse.Namespace,
+) -> tuple[SurfaceRZFourier, dict[str, Any]]:
     stage2_results_path, stage2_results = single_stage_example.load_stage2_results(
         args.stage2_bs_path
     )

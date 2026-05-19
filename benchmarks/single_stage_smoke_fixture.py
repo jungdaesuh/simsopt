@@ -9,8 +9,6 @@ import numpy as np
 from benchmarks.single_stage_smoke_defaults import (
     DEFAULT_PLASMA_SURF_FILENAME,
     DEFAULT_STAGE2_BS_PATH,
-    DEFAULT_STAGE2_BS_REL_PATH,
-    DEFAULT_STAGE2_SEED_DIR,
 )
 from examples.single_stage_optimization.equilibria_paths import (
     DEFAULT_EQUILIBRIA_DIR,
@@ -220,9 +218,7 @@ def build_real_single_stage_init_fixture(
         bfgs_maxiter_override=resolved_boozer_init_base_overrides[
             "bfgs_maxiter_override"
         ],
-        newton_tol_override=resolved_boozer_init_base_overrides[
-            "newton_tol_override"
-        ],
+        newton_tol_override=resolved_boozer_init_base_overrides["newton_tol_override"],
         newton_maxiter_override=resolved_boozer_init_base_overrides[
             "newton_maxiter_override"
         ],

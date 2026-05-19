@@ -133,7 +133,7 @@ def _hlo_stats(text: str) -> dict[str, int]:
 
 
 def _block_until_ready(tree) -> None:
-    jax.tree_util.tree_map(lambda value: value.block_until_ready(), tree)
+    jax.tree.map(lambda value: value.block_until_ready(), tree)
 
 
 def _compile_and_measure(
@@ -260,12 +260,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, object]:
                 fused["optimized_hlo"]["line_count"]
                 < composed["optimized_hlo"]["line_count"]
             ),
-            "fused_lowered_trig_reduce_counts_lower": (
-                fused_lowered_counts_lower
-            ),
-            "fused_trig_reduce_counts_not_higher": (
-                fused_optimized_counts_not_higher
-            ),
+            "fused_lowered_trig_reduce_counts_lower": (fused_lowered_counts_lower),
+            "fused_trig_reduce_counts_not_higher": (fused_optimized_counts_not_higher),
             "fused_optimized_trig_reduce_counts_not_higher": (
                 fused_optimized_counts_not_higher
             ),
@@ -307,8 +303,7 @@ def _build_scalar_api_guard(
             gamma_derivative_single_output_passed
         ),
         "passed": (
-            gamma_single_output_passed
-            and gamma_derivative_single_output_passed
+            gamma_single_output_passed and gamma_derivative_single_output_passed
         ),
     }
 
@@ -326,8 +321,7 @@ def main() -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
     comparison = payload["comparison"]
     if args.fail_on_regression and not (
-        comparison["hlo_gate_passed"]
-        and comparison["scalar_api_hlo_guard_passed"]
+        comparison["hlo_gate_passed"] and comparison["scalar_api_hlo_guard_passed"]
     ):
         raise SystemExit(1)
 

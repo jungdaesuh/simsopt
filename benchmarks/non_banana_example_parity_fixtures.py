@@ -4338,9 +4338,7 @@ def _build_boozer_qa_wrappers():
             axis=0,
         )
     )
-    length_sum_jax_value = float(
-        sum(CurveLengthJAX(c).J() for c in base_curves_jax)
-    )
+    length_sum_jax_value = float(sum(CurveLengthJAX(c).J() for c in base_curves_jax))
 
     setup_seconds_jax = time.perf_counter() - start_jax_setup
 
@@ -6061,9 +6059,7 @@ def _build_coil_force_energy_fixed_state():
     field_mod, _objectives_mod, geo_mod = _cpu_imports()
     Current = field_mod.Current
     B2Energy = field_mod.B2Energy
-    B2EnergyJAX = field_mod.B2EnergyJAX
     LpCurveForce = field_mod.LpCurveForce
-    LpCurveForceJAX = field_mod.LpCurveForceJAX
     coils_via_symmetries = field_mod.coils_via_symmetries
     create_equally_spaced_curves = geo_mod.create_equally_spaced_curves
 
@@ -6127,7 +6123,9 @@ def _build_coil_force_energy_fixed_state():
             [coil.curve.gammadash() for coil in coils],
             dtype=np.float64,
         )
-        currents = np.asarray([coil.current.get_value() for coil in coils], dtype=np.float64)
+        currents = np.asarray(
+            [coil.current.get_value() for coil in coils], dtype=np.float64
+        )
         regularizations = np.asarray(
             [coil.regularization for coil in coils],
             dtype=np.float64,
@@ -6146,7 +6144,9 @@ def _build_coil_force_energy_fixed_state():
                     axis=-1,
                 )
                 inductance[i, j] = 1e-7 * np.sum(tangent_dot / distance) / nquad**2
-        return float(0.5 * np.sum(currents[:, None] * currents[None, :] * inductance) / 1e6)
+        return float(
+            0.5 * np.sum(currents[:, None] * currents[None, :] * inductance) / 1e6
+        )
 
     def _evaluate(force_obj, energy_obj):
         start_exec = time.perf_counter()
@@ -6171,8 +6171,8 @@ def _build_coil_force_energy_fixed_state():
         B2Energy,
     )
     force_jax, energy_jax, coils_jax, jax_setup_seconds = _build_terms(
-        LpCurveForceJAX,
-        B2EnergyJAX,
+        LpCurveForce,
+        B2Energy,
     )
     cpu_eval = _evaluate(force_cpu, energy_cpu)
     jax_eval = _evaluate(force_jax, energy_jax)
@@ -6217,8 +6217,8 @@ def _build_coil_force_energy_fixed_state():
         lane="jax_cpu",
         objective_total=jax_eval["total"],
         components={
-            "LpCurveForceJAX": jax_eval["force_value"],
-            "B2EnergyJAX": jax_eval["energy_value"],
+            "LpCurveForce": jax_eval["force_value"],
+            "B2Energy": jax_eval["energy_value"],
             "FORCE_WEIGHT": force_weight,
             "B2Energy_WEIGHT": energy_weight,
         },
@@ -7395,9 +7395,8 @@ COIL_FORCES_SUPPORT_GATE_SPEC = FixtureSpec(
     classification=SUPPORTED,
     classification_reason=(
         "Reduced fixed-state coil force/energy fixture is supported as a "
-        "pass public-wrapper parity row. LpCurveForceJAX and B2EnergyJAX "
-        "are explicit public aliases for the existing JAX-kernel-backed "
-        "wrappers. This row compares independent object graphs and also gates "
+        "pass public-wrapper parity row. LpCurveForce and B2Energy are the "
+        "public JAX-kernel-backed wrappers. This row compares independent object graphs and also gates "
         "the JAX public values against independent CPU oracles: "
         "RegularizedCoil.force integration for LpCurveForce and a NumPy "
         "inductance-matrix loop for B2Energy."
@@ -7408,8 +7407,7 @@ COIL_FORCES_SUPPORT_GATE_SPEC = FixtureSpec(
         "penalties."
     ),
     acceptance_criteria=(
-        "Public LpCurveForceJAX and B2EnergyJAX names resolve through the field "
-        "lazy exports.",
+        "Public LpCurveForce and B2Energy resolve through the field lazy exports.",
         "Independent CPU and JAX coil trees compare LpCurveForce and B2Energy values.",
         "JAX public force and energy values match independent CPU oracle values.",
         "Per-component and weighted native-subtotal gradients compare in the "

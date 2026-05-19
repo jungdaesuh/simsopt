@@ -1236,7 +1236,7 @@ def _performance_memory_bucket(
                     f"{', '.join(missing_cuda_provenance)}"
                 )
             xla_flags = str(provenance.get("xla_flags") or "")
-            if "--xla_gpu_deterministic_ops=true" not in xla_flags.split():
+            if "--xla_gpu_exclude_nondeterministic_ops=true" not in xla_flags.split():
                 blocked.append(f"{lane}: deterministic GPU XLA flag is missing")
             if _lane_memory_metrics(provenance)["peak_gpu_memory_mb"] is None:
                 blocked.append(f"{lane}: GPU memory high-water is missing")

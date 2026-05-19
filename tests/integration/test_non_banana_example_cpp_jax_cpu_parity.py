@@ -11,8 +11,9 @@ Covers:
 
 Tests require simsoptpp for the CPU oracle.  Run with::
 
-    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 conda run -n jax \\
-        python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py -v
+    PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \\
+        .conda/jax/bin/python -m pytest \\
+        tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py -v
 """
 
 from __future__ import annotations
