@@ -11,7 +11,7 @@ by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.
 from __future__ import annotations
 
 from enum import Enum
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import jax
 from jax import lax
@@ -731,17 +731,28 @@ def group_coil_data(gammas_list, gammadashs_list, currents_list):
     return groups
 
 
-def _grouped_field(field_fn, points, coil_arrays):
+@partial(jax.jit, static_argnames=("field_fn", "group_count"))
+def _grouped_field(field_fn, points, coil_arrays, *, group_count: int):
     g0, gd0, c0 = coil_arrays[0]
     result = field_fn(points, g0, gd0, c0)
-    for gammas, gammadashs, currents in coil_arrays[1:]:
+    for gammas, gammadashs, currents in coil_arrays[1:group_count]:
         result = result + field_fn(points, gammas, gammadashs, currents)
     return result
 
 
 def grouped_biot_savart_B(points, coil_arrays):
-    return _grouped_field(biot_savart_B, points, coil_arrays)
+    return _grouped_field(
+        biot_savart_B,
+        points,
+        coil_arrays,
+        group_count=len(coil_arrays),
+    )
 
 
 def grouped_biot_savart_A(points, coil_arrays):
-    return _grouped_field(biot_savart_A, points, coil_arrays)
+    return _grouped_field(
+        biot_savart_A,
+        points,
+        coil_arrays,
+        group_count=len(coil_arrays),
+    )

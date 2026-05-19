@@ -40,6 +40,7 @@ from simsopt.jax_core.field import (
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_lists,
 )
+from simsopt.jax_core.specs import CoilGroupSpec, GroupedCoilSetSpec
 from simsopt.jax_core import sharding as sharding_core
 
 # Load JAX module directly (avoids simsopt/__init__.py → simsoptpp dep)
@@ -102,6 +103,7 @@ biot_savart_B_and_dB = _bs.biot_savart_B_and_dB
 biot_savart_A = _bs.biot_savart_A
 biot_savart_dA_by_dX = _bs.biot_savart_dA_by_dX
 grouped_biot_savart_A = _bs.grouped_biot_savart_A
+grouped_biot_savart_B = _bs.grouped_biot_savart_B
 
 MU0 = 4.0 * np.pi * 1e-7
 _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct-kernel")
@@ -576,6 +578,60 @@ class TestBiotSavartJaxAnalytical:
             np.asarray(grouped_A), np.asarray(dense_A), atol=1e-14
         )
 
+    def test_grouped_biot_savart_B_jit_handles_mixed_quadrature_groups(self):
+        """Mixed-quadrature grouped field keeps group count static under JIT."""
+        points = jnp.array(
+            [
+                [0.2, 0.1, -0.3],
+                [-0.1, 0.35, 0.2],
+                [0.3, -0.25, 0.15],
+            ],
+            dtype=jnp.float64,
+        )
+        gammas_16, gammadashs_16, currents_16 = _make_shifted_circular_coils(
+            2,
+            nquad=16,
+        )
+        gammas_32, gammadashs_32, currents_32 = _make_shifted_circular_coils(
+            1,
+            R=1.2,
+            nquad=32,
+        )
+        coil_arrays = (
+            (gammas_16, gammadashs_16, currents_16),
+            (gammas_32, gammadashs_32, currents_32),
+        )
+
+        grouped_B = grouped_biot_savart_B(points, coil_arrays)
+        expected_B = biot_savart_B(
+            points,
+            gammas_16,
+            gammadashs_16,
+            currents_16,
+        ) + biot_savart_B(
+            points,
+            gammas_32,
+            gammadashs_32,
+            currents_32,
+        )
+        outer_jit_B = jax.jit(
+            lambda eval_points, groups: grouped_biot_savart_B(
+                eval_points,
+                groups,
+            )
+        )(points, coil_arrays)
+
+        np.testing.assert_allclose(
+            np.asarray(grouped_B),
+            np.asarray(expected_B),
+            atol=1e-14,
+        )
+        np.testing.assert_allclose(
+            np.asarray(outer_jit_B),
+            np.asarray(expected_B),
+            atol=1e-14,
+        )
+
 
 class TestBiotSavartJaxCppParity:
     """Compare against the C++ simsoptpp kernel (skipped if unavailable)."""
@@ -974,6 +1030,70 @@ class TestBiotSavartJaxCppCoilCurrentParity:
                 rtol=_DIRECT_KERNEL_TOLS["rtol"],
                 atol=_DIRECT_KERNEL_TOLS["atol"],
             )
+
+    def test_per_coil_unit_field_vectorizes_within_quadrature_group(self):
+        from simsopt.field.biotsavart_jax_backend import _per_coil_unit_field
+
+        points = jnp.asarray([[0.0, 0.0, 0.0], [0.25, -0.5, 1.0]], dtype=jnp.float64)
+        group0_gammas = jnp.arange(18, dtype=jnp.float64).reshape(2, 3, 3)
+        group0_gammadashs = group0_gammas + 0.5
+        group1_gammas = jnp.arange(9, dtype=jnp.float64).reshape(1, 3, 3) - 2.0
+        group1_gammadashs = group1_gammas - 0.25
+        coil_set_spec = GroupedCoilSetSpec(
+            groups=(
+                CoilGroupSpec(
+                    gammas=group0_gammas,
+                    gammadashs=group0_gammadashs,
+                    currents=jnp.asarray([3.0, 4.0], dtype=jnp.float64),
+                    coil_indices=(2, 0),
+                ),
+                CoilGroupSpec(
+                    gammas=group1_gammas,
+                    gammadashs=group1_gammadashs,
+                    currents=jnp.asarray([5.0], dtype=jnp.float64),
+                    coil_indices=(1,),
+                ),
+            )
+        )
+        calls = []
+
+        def kernel(kernel_points, gammas, gammadashs, currents):
+            calls.append(gammas.shape)
+            value = jnp.sum(gammas) + jnp.sum(gammadashs) + jnp.sum(currents)
+            return jnp.broadcast_to(value, kernel_points.shape)
+
+        results = _per_coil_unit_field(points, coil_set_spec, kernel)
+
+        assert len(calls) == 2
+        assert calls == [(1, 3, 3), (1, 3, 3)]
+        assert len(results) == 3
+        np.testing.assert_allclose(
+            np.asarray(results[0]),
+            np.broadcast_to(
+                np.sum(np.asarray(group0_gammas[1]))
+                + np.sum(np.asarray(group0_gammadashs[1]))
+                + 1.0,
+                points.shape,
+            ),
+        )
+        np.testing.assert_allclose(
+            np.asarray(results[1]),
+            np.broadcast_to(
+                np.sum(np.asarray(group1_gammas[0]))
+                + np.sum(np.asarray(group1_gammadashs[0]))
+                + 1.0,
+                points.shape,
+            ),
+        )
+        np.testing.assert_allclose(
+            np.asarray(results[2]),
+            np.broadcast_to(
+                np.sum(np.asarray(group0_gammas[0]))
+                + np.sum(np.asarray(group0_gammadashs[0]))
+                + 1.0,
+                points.shape,
+            ),
+        )
 
     def test_dA_by_dcoilcurrents_parity_ncsx(self):
         """``BiotSavartJAX.dA_by_dcoilcurrents()`` matches CPU list per coil.

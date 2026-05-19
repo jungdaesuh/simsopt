@@ -193,18 +193,21 @@ def _per_coil_unit_field(points, coil_set_spec, kernel):
     within a quadrature group.
     """
     ncoils = sum(len(group.coil_indices) for group in coil_set_spec.groups)
-    unit_current = jnp.ones((1,), dtype=jnp.float64)
     result_by_index: dict[int, jax.Array] = {}
     for group in coil_set_spec.groups:
-        for position, coil_index in enumerate(group.coil_indices):
-            single_gamma = group.gammas[position : position + 1]
-            single_gammadash = group.gammadashs[position : position + 1]
-            result_by_index[int(coil_index)] = kernel(
+        unit_current = jnp.ones((1,), dtype=group.currents.dtype)
+
+        def evaluate_single(gamma, gammadash):
+            return kernel(
                 points,
-                single_gamma,
-                single_gammadash,
+                gamma[jnp.newaxis, ...],
+                gammadash[jnp.newaxis, ...],
                 unit_current,
             )
+
+        group_results = jax.vmap(evaluate_single)(group.gammas, group.gammadashs)
+        for position, coil_index in enumerate(group.coil_indices):
+            result_by_index[int(coil_index)] = group_results[position]
     return [result_by_index[index] for index in range(ncoils)]
 
 

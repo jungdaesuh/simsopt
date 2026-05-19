@@ -1,22 +1,10 @@
 """Compatibility shim for the pure JAX Biot-Savart kernels.
 
 The implementation lives in ``simsopt.jax_core.biotsavart``.
-This file preserves the historical import and direct-path loader contract.
+This file preserves the historical import contract.
 """
 
-from pathlib import Path
-import sys
-
-
-def _ensure_src_root_on_path() -> None:
-    src_root = str(Path(__file__).resolve().parents[2])
-    if src_root not in sys.path:
-        sys.path.insert(0, src_root)
-
-
-_ensure_src_root_on_path()
-
-from simsopt.jax_core.biotsavart import (  # noqa: E402
+from simsopt.jax_core.biotsavart import (
     _biot_savart_A_integrand,
     _biot_savart_B_integrand,
     _one_point_dense,
