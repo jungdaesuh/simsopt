@@ -334,7 +334,7 @@ JAX GPU evaluator todos:
 - [ ] Require `jax_enable_x64`.
 - [ ] Enable deterministic GPU reductions for proof runs by passing
   `deterministic_gpu_reductions=True` through the subprocess environment builder.
-- [ ] Assert provenance includes `--xla_gpu_deterministic_ops=true` in
+- [ ] Assert provenance includes `--xla_gpu_exclude_nondeterministic_ops=true` in
   `XLA_FLAGS`; missing deterministic flags fail the GPU proof.
 - [ ] Record compile time separately from execution time.
 - [ ] Record GPU memory high-water.
@@ -581,7 +581,7 @@ Runtime requirements:
 - [ ] Device kind must be recorded.
 - [ ] NVIDIA driver and total memory must be recorded for CUDA lanes.
 - [ ] XLA flags must be recorded.
-- [ ] CUDA proof subprocesses must set `--xla_gpu_deterministic_ops=true` through
+- [ ] CUDA proof subprocesses must set `--xla_gpu_exclude_nondeterministic_ops=true` through
   the shared environment builder.
 - [ ] CUDA proof provenance must prove the deterministic flag was present during
   execution.

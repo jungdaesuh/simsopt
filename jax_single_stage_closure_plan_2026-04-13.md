@@ -39,7 +39,7 @@ This file was assembled from the current repo state, the checked-in GPU proof ha
    - Non-goal: blanket-patching `_line_search.py` directional derivatives that are already hardened.
 
 4. [ ] Run a diagnostic A/B with deterministic GPU reductions if the trace still points at reduction-order sensitivity.
-   - Scope: treat `XLA_FLAGS=--xla_gpu_deterministic_ops=true` as an experiment, not as the planned production fix.
+   - Scope: treat `XLA_FLAGS=--xla_gpu_exclude_nondeterministic_ops=true` as an experiment, not as the planned production fix.
    - Exit criteria: record whether it changes the failure mode, compile behavior, or acceptance pattern.
 
 ### Phase 2: Recompilation and Stability Guards

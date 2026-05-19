@@ -51,6 +51,10 @@ production-loosening claim**:
   **speed-opt-out runtime modes** for experimental work that
   explicitly accepts non-byte-identical output. They do not introduce
   a production tolerance contract.
+- `*_parity` runtime modes pin `jax_default_matmul_precision="highest"`
+  before JAX initialization. `*_fast` runtime modes leave JAX's default
+  matmul precision in place so CUDA TF32-style speedups remain available
+  only on lanes that make no byte-identity claim.
 - Phase 4 plan §2's "Do not loosen tolerances" rule is **untouched**.
 
 The dual mode is therefore **mode-of-execution dual** (production runs

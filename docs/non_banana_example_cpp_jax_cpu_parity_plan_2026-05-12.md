@@ -421,7 +421,8 @@ Stale-code checks:
 
 Test runtime environment:
 
-- [ ] Primary implementation/testing environment is `conda run -n jax`
+- [ ] Primary implementation/testing environment is
+      `PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python`
       with a simsoptpp-backed editable install when CPU/C++ parity is required.
 - [ ] `tests/integration/conftest.py` must either patch the scikit-build finder
       in candidate-fixed-style environments or report that no finder was
@@ -730,13 +731,15 @@ export JAX_DEBUG_NANS=1
 Initial CPU-only command set, to be refined during implementation:
 
 ```bash
-conda run -n jax python -m pytest -q \
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  .conda/jax/bin/python -m pytest -q \
   -m "not private_optimizer_runtime" \
   tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py
 ```
 
 ```bash
-conda run -n jax python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  .conda/jax/bin/python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
   --fixtures minimal_stage2_flux_length_gap,cws_saved_local_flux \
   --git-sha "$(git rev-parse HEAD)" \
   --dirty-policy record \
@@ -746,7 +749,8 @@ conda run -n jax python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
 Extended local command set:
 
 ```bash
-conda run -n jax python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  .conda/jax/bin/python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
   --fixtures all-supported \
   --git-sha "$(git rev-parse HEAD)" \
   --dirty-policy record \

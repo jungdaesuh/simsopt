@@ -264,7 +264,7 @@ gets Context, Rationale, Implementation, and Acceptance criteria, with
 a top-line status checkbox. Items move from `- [ ]` to `- [x]` only
 when the acceptance criteria are met and a closeout note is added.
 
-## N21: replace `_with_host_status` adjoint sync with on-device NaN sentinel
+## N21: replace `_with_host_status` adjoint sync while preserving public failure errors
 
 - [ ] Status: confirmed.
 
@@ -283,36 +283,30 @@ through `_checked_boozer_linear_solve` at
 ### Rationale
 
 The host bool exists solely to choose between returning the solution
-and surfacing a failure. JAX supports the same dispatch via
-`jax.lax.cond` on a device-resident success indicator, or by
-returning NaN-filled output on failure and detecting with
-`jnp.isfinite(...).all()` at the next boundary. The downstream
-consumer that actually needs the host scalar is the public
-`J()` / `dJ()` boundary or the failure-reporting path, not the
-inner adjoint loop. Per CLAUDE.md "Adjoint / warm-start operator
-solves" rule: "A successful traceable forward solve with a failed
-adjoint solve must surface a non-finite gradient, not a finite
-direct-gradient or failure-penalty fallback." The NaN-sentinel
-approach is consistent with that rule.
+and surfacing a failure. The runtime callback contract can keep the
+success indicator as a JAX scalar instead of converting it immediately
+inside `BoozerSurfaceJAX`. The public `J()` / `dJ()` boundary is the
+place where a failed adjoint solve must become a host-visible error,
+matching the CPU Boozer objective contract. A review pass rejected
+caching NaN gradients at that public boundary because it can silently
+persist non-physical gradients in user-facing objects.
 
 ### Implementation
 
-1. Introduce `_solve_with_nan_on_failure(solver, *args)` that calls
-   `solver` and uses `jax.lax.cond` on the device-resident success
-   scalar to return either the solved value or
-   `jax.tree.map(lambda leaf: jnp.full_like(leaf, jnp.nan), solution)`.
-   Place near other private helpers in
-   `boozersurface_jax.py`.
+1. Keep runtime solve callbacks returning `(masked_solution,
+   success_jax_scalar)` without calling `_host_bool` inside
+   `BoozerSurfaceJAX`; the masked value is for device consumers and is
+   not a public-gradient fallback.
 2. In `pack_callbacks` (line 3522), stop calling `_host_bool`. Return
    `(masked_solution, success_jax_scalar)`. Downstream consumers that
-   need the device bool keep it as a JAX scalar; consumers that need
-   a Python bool materialize it once at the outermost boundary.
+   need the device bool keep it as a JAX scalar; consumers that need a
+   Python bool materialize it once at the outermost boundary.
 3. In `_checked_boozer_linear_solve` at `surfaceobjectives_jax.py:1887`,
-   replace `if not _host_bool(success): ...` with a `jnp.isfinite`
-   check carried in the IFT adjoint state.
+   materialize the status at the public boundary and raise
+   `RuntimeError` on failed status instead of caching NaN gradients.
 4. Update `BoozerResidualJAX.dJ`, `IotasJAX.dJ`,
-   `NonQuasiSymmetricRatioJAX.dJ` to materialize success only at the
-   public boundary, where it feeds into failure reporting.
+   `MajorRadiusJAX.dJ`, and `NonQuasiSymmetricRatioJAX.dJ` to consume
+   the checked public-boundary helper.
 5. Audit `_solver_diagnostics_payload` at `boozersurface_jax.py:3897`
    for downstream impact: it currently consumes `success` as a host
    bool to format failure metadata; gate behind a host-cached flag.
@@ -323,9 +317,9 @@ approach is consistent with that rule.
   `BoozerResidualJAX.dJ`, `IotasJAX.dJ`, `NonQuasiSymmetricRatioJAX.dJ`
   under `with jax.transfer_guard("disallow"):` on a real fixture; the
   adjoint inner region triggers zero host transfers.
-- Failure-injection test: forced singular LS at a known iterate
-  surfaces non-finite gradient (the CLAUDE.md rule), with
-  `failure_category` reporting still correct at the public boundary.
+- Failure-injection test: forced failed solve status raises at the
+  public Boozer objective gradient boundary, with `failure_category`
+  reporting still correct at the public boundary.
 - `benchmarks/grouped_adjoint_memory_probe.py` shows steady-state
   cache stability unchanged.
 - Single-stage smoke fixture parity holds on `jax_cpu_parity`.
@@ -485,7 +479,7 @@ vmapping within each group.
 
 ## N25: audit `_grouped_field` Python loop; pad-and-stack where homogeneous
 
-- [ ] Status: confirmed opportunity.
+- [x] Status: implemented for the heterogeneous production fixture regime.
 
 ### Context
 
@@ -1096,6 +1090,41 @@ per-call retargeting of compiled JITs.
   helper or option are unaffected.
 - Explicit doc paragraph stating that transparent OOM-to-CPU retry
   is out of scope and why.
+
+## Execution update (2026-05-18 local implementation pass)
+
+| Item | Implementation state | Evidence boundary |
+| --- | --- | --- |
+| N21 | Source implemented: runtime solve callbacks now keep success as a JAX scalar; public Boozer objective gradients raise on failed solve status rather than caching NaN gradients. | Local unit proof only: `tests/geo/test_surface_objectives_jax.py::test_checked_boozer_linear_solve_uses_public_status_boundary`, `::test_checked_boozer_linear_solve_raises_on_failed_status`. Real M5 fixture transfer-guard sweep still not recorded. |
+| N22 | Source implemented: manual LS compatibility loop now uses `jax.lax.while_loop` with device-resident cost, norm, finite, damping, and accept/reject state. | Local proof: `tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_public_manual_ls_api_increases_damping_after_worsening_trial`, `::test_public_manual_ls_loop_runs_under_strict_transfer_guard`. Benchmark improvement not recorded. |
+| N23 | Source implemented: direct-coil value helpers return JAX scalars; public wrapper boundaries materialize scalar values once; cached-solve observability skips norm host reads unless debug/env/failure logging is active. | Local proof: `tests/geo/test_surface_objectives_jax.py::test_direct_coil_value_helpers_keep_value_as_jax_scalar`. Transfer-count counter and real wrapper sweep still not recorded. |
+| N24 | Source implemented: `_per_coil_unit_field` now vmaps over coils inside each quadrature group and only loops over groups/order reconstruction. | Local proof: `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppCoilCurrentParity::test_per_coil_unit_field_vectorizes_within_quadrature_group`. Scaling benchmark/HLO report not recorded. |
+| N25 | Source/docs implemented: the production fixture probe found two heterogeneous groups, `(20, 15, 3)` and `(10, 128, 3)`, so `_grouped_field` keeps per-group accumulation and now uses a JIT boundary keyed by static field function and group count instead of padding groups. | Local proof: `docs/grouped_field_distribution_probe_2026-05-18.md` is intent-to-add tracked in this slice and records the fixture distribution plus local CPU timing. `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxAnalytical::test_grouped_biot_savart_B_jit_handles_mixed_quadrature_groups` covers the mixed-quadrature JIT path. Probe measured 1.259x manual-loop time over JIT-keyed helper time on local CPU. |
+| N26 | Source implemented: `src/simsopt/geo/framedcurve_jax.py` now uses composed multi-arg VJPs; `rg "jax\\.vjp" src/simsopt/geo/framedcurve_jax.py \| wc -l` reports 9 sites, below the <22 target. | Local proof: `tests/geo/test_framedcurve_jax_wrappers_item18.py -q`, `tests/geo/test_curvexyzfouriersymmetries_spec_jax.py -q`. Dedicated wall-time benchmark not recorded. |
+| N27 | Source implemented: `BackendPolicy.matmul_precision` pins `highest` for parity modes and `apply_jax_runtime_config()` applies it. | Local proof: `tests/test_backend.py -q` and an interactive `jax_cpu_parity` config probe. CUDA TF32 speedup comparison not recorded. |
+| N28 | Source implemented: CUDA determinism validation now runs for direct CUDA environment selection and warns/raises by strictness. | Local proof: `tests/test_backend.py -q`. CUDA pre-import subprocess matrix partially covered by import-smoke; real CUDA run not recorded. |
+| N29 | Source/docs implemented: setup docs and `CLAUDE.md` document single-device `jax_gpu_parity`; runtime emits an info log for multi-device parity default. | Local proof: `tests/test_backend.py -q`. Real multi-GPU parity proof remains N30. |
+| N30 | Not closed; hardware-gated. | No 1/2/4-GPU sweep, HBM report, or `docs/jax_multi_gpu_proof_*.md` artifact exists in this pass. |
+| N31 | Source/docs implemented: runtime owns JAX/XLA GPU memory env policy, `SIMSOPT_*` overrides, and explicit `set_backend()` kwargs. | Local proof: `tests/test_backend.py -q`; `tests/test_jax_import_smoke.py::test_import_package_root_without_generated_version_file -q` after updating the raw-source stub. Real allocator log/memory-limit proof not recorded. |
+| N32 | Source/docs implemented: dense-Jacobian defaults are resolved through `BackendPolicy` with CPU/GPU env overrides and constructor-level explicit option precedence. | Local proof: `tests/test_backend.py -q`, `tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_ls_surface_exact_newton_has_default_dense_jacobian_ceiling`. Large-N scaling-limit fixture not recorded. |
+| N33 | Partially implemented: `linearization_residency={"device","host"}` is accepted and dense LS factors can be stored on CPU and restaged for runtime solve callbacks. | Local proof: `tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_linearization_residency_host_places_dense_factors_on_cpu`. Equal-gradient two-solver proof and memory probe are still missing. |
+| N34 | Partially implemented: `with_cpu_device_for_construction()` helper exported; GPU OOM docs prescribe checkpoint/restart and explicitly reject transparent compiled-JIT retargeting. | Local proof: `tests/test_backend.py -q`. Worked command-level restart example and CPU-pinned plus GPU-routed two-instance compile-cache proof are still missing, so N34 is not closed. |
+
+Validation commands run in this pass:
+
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/test_backend.py -q` -> 106 passed, 2 expected CUDA-determinism warnings.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/test_jax_import_smoke.py -q` -> 110 passed, 11 skipped on this CPU-only host.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/geo/test_surface_objectives_jax.py::test_checked_boozer_linear_solve_uses_public_status_boundary tests/geo/test_surface_objectives_jax.py::test_checked_boozer_linear_solve_raises_on_failed_status tests/geo/test_surface_objectives_jax.py::test_checked_boozer_linear_solve_rejects_statusless_solver tests/geo/test_surface_objectives_jax.py::test_direct_coil_value_helpers_keep_value_as_jax_scalar -q` -> 4 passed.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_public_manual_ls_api_increases_damping_after_worsening_trial tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_public_manual_ls_loop_runs_under_strict_transfer_guard tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_linearization_residency_host_places_dense_factors_on_cpu tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_ls_surface_exact_newton_has_default_dense_jacobian_ceiling -q` -> 4 passed.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_result_dict_keys tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_result_materializes_dense_plu_when_not_verbose tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_linearization_residency_host_places_dense_factors_on_cpu -q` -> 3 passed.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppCoilCurrentParity::test_per_coil_unit_field_vectorizes_within_quadrature_group -q` -> 1 passed.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/field/test_biotsavart_jax.py::TestBiotSavartJaxAnalytical::test_grouped_biot_savart_A_host_helper_matches_dense_kernel tests/field/test_biotsavart_jax.py::TestBiotSavartJaxAnalytical::test_grouped_biot_savart_B_jit_handles_mixed_quadrature_groups -q` -> 2 passed.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/field/test_biotsavart_jax_parity.py::TestGroupedBiotSavartGradient::test_mixed_quad_gradient_fd -q` -> 1 passed.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/integration/test_single_stage_physics_parity.py::test_single_stage_subprocess_env_preserves_existing_xla_flags tests/test_benchmark_helpers.py::test_repo_pythonpath_env_bundled_cuda_clears_local_toolchain_overrides tests/test_benchmark_helpers.py::test_repo_pythonpath_env_replaces_stale_cuda_determinism_flag tests/test_benchmark_helpers.py::test_build_provenance_includes_compilation_cache_metadata tests/test_benchmark_helpers.py::test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env tests/test_benchmark_helpers.py::test_gpu_parity_workflow_enforces_strict_transfer_guard_contract tests/test_benchmark_helpers.py::test_gpu_parity_workflow_adds_full_suite_disallow_lane tests/test_benchmark_helpers.py::test_smoke_workflow_adds_cuda_e2e_target_lane_gate tests/test_benchmark_helpers.py::test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane tests/test_hf_production_gpu_proof.py::test_run_production_gpu_proof_preserves_ld_library_path tests/test_hf_production_gpu_proof.py::test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override tests/test_lightning_production_gpu_proof.py::test_dry_run_emits_command_with_setuptools_scm_and_bash_safeguards -q` -> 12 passed.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/geo/test_framedcurve_jax_wrappers_item18.py -q` -> 5 passed.
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/geo/test_curvexyzfouriersymmetries_spec_jax.py -q` -> 23 passed.
+- `.conda/jax/bin/python -m py_compile src/simsopt/backend/runtime.py src/simsopt/geo/boozersurface_jax.py src/simsopt/geo/surfaceobjectives_jax.py src/simsopt/jax_core/biotsavart.py benchmarks/validation_ladder_common.py tests/conftest.py tests/test_backend.py tests/test_benchmark_helpers.py tests/geo/test_boozersurface_jax.py tests/geo/test_surface_objectives_jax.py tests/field/test_biotsavart_jax.py` -> passed.
+- `git diff --check -- <review-touched runtime/Boozer/Biot-Savart/docs files>` -> passed.
 
 ## Reporting and closeout
 

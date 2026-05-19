@@ -61,6 +61,9 @@ artifact or blocks the next wave with a concrete failure.
 ## Required Inputs
 
 - [x] Perlmutter GPU account: `m4680_g`
+  - `m4680_g` is the GPU allocation account reported by NERSC. The `_g`
+    suffix is part of the GPU project/account name, not an arbitrary local
+    convention.
 - [ ] Exact repo SHA to test: `<repo_sha>`
 - [ ] Source mode:
   - [ ] clean committed SHA pushed to `fork/gpu-purity-stage2-20260405`
@@ -139,6 +142,19 @@ print(simsoptpp.__file__)
 PY
 ```
 
+The first GPU proof intentionally pins `jax[cuda12]==0.9.2` even though local
+CPU development environments may move faster. The repo's production GPU proof
+image and `SIMSOPT_BENCHMARK_JAX_VERSION` performance contract currently use
+0.9.2, so this plan pins the hardware proof to that known runtime before
+comparing or benchmarking.
+
+Optional container alternative: NERSC's Python/JAX guidance recommends NVIDIA
+JAX containers through Shifter or Podman-HPC as the most reliable GPU setup on
+Perlmutter. The venv path above is acceptable for the repo's pinned
+`jax[cuda12]` wheel proof because JAX carries its CUDA userspace libraries, but
+if wheel/runtime compatibility fails, rebuild this same source snapshot inside a
+container and keep the proof commands and artifact contract unchanged.
+
 Record setup provenance:
 
 - [ ] `git rev-parse HEAD`
@@ -152,6 +168,32 @@ Record setup provenance:
 
 Purpose: establish that the repo passes its full CPU-side suite before GPU
 hardware is involved.
+
+Run Wave 0 on a CPU compute node, not a login node. NERSC login nodes are
+resource-limited and are not intended for significant full-suite pytest runs.
+Use an interactive CPU allocation for manual debugging or a batch script for the
+actual baseline.
+
+Example CPU allocation:
+
+```bash
+salloc -A <cpu_account_from_iris> -C cpu -q interactive -t 02:00:00 -N 1
+```
+
+Example CPU batch header:
+
+```bash
+#SBATCH -A <cpu_account_from_iris>
+#SBATCH -C cpu
+#SBATCH -q regular
+#SBATCH -t 02:00:00
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -c 32
+```
+
+Use the CPU project account reported by `iris`; do not assume the GPU account
+`m4680_g` is accepted for CPU-only jobs.
 
 Environment:
 
@@ -286,18 +328,18 @@ Preflight body:
 cd "${SCRATCH_ROOT}/repo"
 . "${SCRATCH_ROOT}/venv/bin/activate"
 
-export SLURM_CPU_BIND="cores"
 export PYTHONPATH="$PWD:$PWD/src"
 export JAX_ENABLE_X64=1
 export JAX_PLATFORMS=cuda
 export SIMSOPT_JAX_PLATFORM=cuda
 export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 mkdir -p "${RESULTS_ROOT}/wave2_gpu_preflight"
 
-srun -n 1 -c 32 --gpus-per-task=1 bash -lc '
+srun -n 1 -c 32 --cpu-bind=cores --gpus-per-task=1 bash -lc '
   set -euo pipefail
   nvidia-smi | tee "'"${RESULTS_ROOT}"'/wave2_gpu_preflight/nvidia-smi.txt"
   python - <<PY | tee "'"${RESULTS_ROOT}"'/wave2_gpu_preflight/jax_gpu_preflight.json"
@@ -349,6 +391,7 @@ export JAX_PLATFORMS=cuda
 export SIMSOPT_JAX_PLATFORM=cuda
 export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 ```
 
@@ -404,6 +447,7 @@ export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_JAX_PLATFORM=cuda
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export JAX_PLATFORMS=cuda
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
@@ -499,6 +543,9 @@ Run GPU phase in a GPU job:
 ```bash
 mkdir -p "${RESULTS_ROOT}/wave6_performance"
 
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
 python benchmarks/tier5_performance_characterization.py \
   --platform cuda \
   --phase gpu \
@@ -549,6 +596,7 @@ Run GPU:
 export JAX_PLATFORMS=cuda
 export SIMSOPT_JAX_PLATFORM=cuda
 export SIMSOPT_BENCHMARK_JAX_VERSION=0.9.2
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 python benchmarks/gpu_run_code_benchmark.py \
@@ -610,9 +658,10 @@ Create:
 ## Slurm Execution Policy
 
 - [ ] CPU setup and environment build happen on login nodes.
-- [ ] CPU full tests can run on CPU compute nodes if they are too expensive for
-  login policy.
+- [ ] CPU full tests run on CPU compute nodes, not login nodes.
 - [ ] GPU preflight/proofs run under `shared` QOS with `--gpus-per-task=1`.
+- [ ] GPU `srun` commands use `--cpu-bind=cores` instead of relying on
+  `SLURM_CPU_BIND`.
 - [ ] Use `interactive` only for manual diagnosis.
 - [ ] Use `debug` only for tiny canaries.
 - [ ] Record all Slurm job ids in the final report.

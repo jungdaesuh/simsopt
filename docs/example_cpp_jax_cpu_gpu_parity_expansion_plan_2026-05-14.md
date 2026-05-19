@@ -107,7 +107,7 @@ Implemented in the current expansion pass:
       this row now reaches CPU/C++-vs-JAX CPU `pass`.
 - [x] Wave 6 `coil_forces_support_gate`: reduced fixed-state force/energy
       subproblem for `coil_forces.py` now reaches public-wrapper vs
-      explicit `LpCurveForceJAX` / `B2EnergyJAX` lane parity for force and
+      explicit `LpCurveForce` / `B2Energy` lane parity for force and
       magnetic-energy values, per-component gradients, and the weighted native
       subtotal. It also compares the public JAX force/energy values against
       independent CPU oracles.
@@ -330,7 +330,7 @@ Implementation checklist:
 - [x] Add a helper that marks a fixture `gpu_ready=false` until a real GPU lane
       artifact exists.
 - [x] Add version-probe guidance to every runnable command:
-      `conda run -n jax python -c "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"`.
+      `.conda/jax/bin/python -c "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"`.
 - [x] Add fail-closed lane-selection scaffolding before documenting an
       executable GPU artifact command:
   - [x] Add a `--lanes` CLI option or an equivalent explicit lane selector.
@@ -856,7 +856,7 @@ Context:
 Implementation checklist:
 
 - [x] Identify the native JAX force/energy support surface first:
-      `LpCurveForceJAX` and `B2EnergyJAX` now resolve through the public
+      `LpCurveForce` and `B2Energy` now resolve through the public
       `simsopt.field` lazy exports as explicit aliases for the existing
       JAX-kernel-backed wrappers.
 - [x] Add CPU-only regression artifact if useful:
@@ -968,21 +968,21 @@ schema mistakes before PM, wireframe, and tracing add larger fixtures.
 CPU expanded fixture tests:
 
 ```bash
-conda run -n jax python -c \
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -c \
     "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"
 
-JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
-    conda run -n jax python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py -v
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+    .conda/jax/bin/python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py -v
 ```
 
 CPU expanded artifact:
 
 ```bash
-conda run -n jax python -c \
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -c \
     "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"
 
-JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
-    conda run -n jax python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+    .conda/jax/bin/python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
         --fixtures all \
         --lanes cpu_cpp,jax_cpu \
         --git-sha "$(git rev-parse HEAD)" \
@@ -1003,7 +1003,7 @@ SIMSOPT_JAX_PLATFORM=cuda \
 SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda \
 JAX_PLATFORMS=cuda \
 JAX_ENABLE_X64=1 \
-conda run -n jax python -c \
+.conda/jax/bin/python -c \
     "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"
 
 SIMSOPT_BACKEND_MODE=jax_gpu_parity \
@@ -1011,7 +1011,7 @@ SIMSOPT_JAX_PLATFORM=cuda \
 SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda \
 JAX_PLATFORMS=cuda \
 JAX_ENABLE_X64=1 \
-conda run -n jax python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
+.conda/jax/bin/python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
     --fixtures all-supported \
     --lanes cpu_cpp,jax_gpu \
     --baseline-json .artifacts/parity/20260514-example-expansion/all-supported-cpu.json \
