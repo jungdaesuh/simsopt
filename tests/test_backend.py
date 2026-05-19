@@ -460,6 +460,8 @@ def test_metal_smoke_mode_policy_helpers(monkeypatch):
         strict=False,
         parity_mode=False,
         requires_x64=False,
+        runtime_dtype="float32",
+        host_dtype="float32",
         chunk_policy="stable_default",
         tolerance_tier="smoke",
         compilation_cache_policy="optional_persistent",
