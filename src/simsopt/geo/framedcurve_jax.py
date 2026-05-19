@@ -61,6 +61,37 @@ def _inner(a: jax.Array, b: jax.Array) -> jax.Array:
     return jnp.sum(a * b, axis=1)
 
 
+def _frame_twist(
+    gammadash: jax.Array,
+    t: jax.Array,
+    n: jax.Array,
+    ndash: jax.Array,
+) -> jax.Array:
+    arc_length = jnp.linalg.norm(gammadash, axis=1)
+    triple_product = _inner(n, jnp.cross(ndash, t))
+    return triple_product / (2.0 * jnp.pi * arc_length)
+
+
+def _frame_twist_vjps(
+    gammadash: jax.Array,
+    t: jax.Array,
+    n: jax.Array,
+    ndash: jax.Array,
+    v: object,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    cotangent = _as_jax_float64(v)
+    _, pullback = jax.vjp(_frame_twist, gammadash, t, n, ndash)
+    return pullback(cotangent)
+
+
+def _cotangent3(v0: object, v1: object, v2: object) -> tuple[jax.Array, ...]:
+    return (
+        _as_jax_float64(v0),
+        _as_jax_float64(v1),
+        _as_jax_float64(v2),
+    )
+
+
 def _torsion_centroid(
     gamma: jax.Array,
     gammadash: jax.Array,
@@ -142,28 +173,15 @@ def _centroid_torsion_vjps(
     v: object,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     cotangent = _as_jax_float64(v)
-    return (
-        jax.vjp(
-            lambda g: _torsion_centroid(g, gammadash, gammadashdash, alpha, alphadash),
-            gamma,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _torsion_centroid(gamma, g, gammadashdash, alpha, alphadash),
-            gammadash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _torsion_centroid(gamma, gammadash, g, alpha, alphadash),
-            gammadashdash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _torsion_centroid(gamma, gammadash, gammadashdash, g, alphadash),
-            alpha,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _torsion_centroid(gamma, gammadash, gammadashdash, alpha, g),
-            alphadash,
-        )[1](cotangent)[0],
+    _, pullback = jax.vjp(
+        _torsion_centroid,
+        gamma,
+        gammadash,
+        gammadashdash,
+        alpha,
+        alphadash,
     )
+    return pullback(cotangent)
 
 
 def _centroid_binormal_curvature_vjps(
@@ -175,38 +193,15 @@ def _centroid_binormal_curvature_vjps(
     v: object,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     cotangent = _as_jax_float64(v)
-    return (
-        jax.vjp(
-            lambda g: _binormal_curvature_centroid(
-                g, gammadash, gammadashdash, alpha, alphadash
-            ),
-            gamma,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _binormal_curvature_centroid(
-                gamma, g, gammadashdash, alpha, alphadash
-            ),
-            gammadash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _binormal_curvature_centroid(
-                gamma, gammadash, g, alpha, alphadash
-            ),
-            gammadashdash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _binormal_curvature_centroid(
-                gamma, gammadash, gammadashdash, g, alphadash
-            ),
-            alpha,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _binormal_curvature_centroid(
-                gamma, gammadash, gammadashdash, alpha, g
-            ),
-            alphadash,
-        )[1](cotangent)[0],
+    _, pullback = jax.vjp(
+        _binormal_curvature_centroid,
+        gamma,
+        gammadash,
+        gammadashdash,
+        alpha,
+        alphadash,
     )
+    return pullback(cotangent)
 
 
 def _frenet_torsion_vjps(
@@ -219,44 +214,16 @@ def _frenet_torsion_vjps(
     v: object,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     cotangent = _as_jax_float64(v)
-    return (
-        jax.vjp(
-            lambda g: _torsion_frenet(
-                g, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash
-            ),
-            gamma,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _torsion_frenet(
-                gamma, g, gammadashdash, gammadashdashdash, alpha, alphadash
-            ),
-            gammadash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _torsion_frenet(
-                gamma, gammadash, g, gammadashdashdash, alpha, alphadash
-            ),
-            gammadashdash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _torsion_frenet(
-                gamma, gammadash, gammadashdash, g, alpha, alphadash
-            ),
-            gammadashdashdash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _torsion_frenet(
-                gamma, gammadash, gammadashdash, gammadashdashdash, g, alphadash
-            ),
-            alpha,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _torsion_frenet(
-                gamma, gammadash, gammadashdash, gammadashdashdash, alpha, g
-            ),
-            alphadash,
-        )[1](cotangent)[0],
+    _, pullback = jax.vjp(
+        _torsion_frenet,
+        gamma,
+        gammadash,
+        gammadashdash,
+        gammadashdashdash,
+        alpha,
+        alphadash,
     )
+    return pullback(cotangent)
 
 
 def _frenet_binormal_curvature_vjps(
@@ -269,44 +236,16 @@ def _frenet_binormal_curvature_vjps(
     v: object,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     cotangent = _as_jax_float64(v)
-    return (
-        jax.vjp(
-            lambda g: _binormal_curvature_frenet(
-                g, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash
-            ),
-            gamma,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _binormal_curvature_frenet(
-                gamma, g, gammadashdash, gammadashdashdash, alpha, alphadash
-            ),
-            gammadash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _binormal_curvature_frenet(
-                gamma, gammadash, g, gammadashdashdash, alpha, alphadash
-            ),
-            gammadashdash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _binormal_curvature_frenet(
-                gamma, gammadash, gammadashdash, g, alpha, alphadash
-            ),
-            gammadashdashdash,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _binormal_curvature_frenet(
-                gamma, gammadash, gammadashdash, gammadashdashdash, g, alphadash
-            ),
-            alpha,
-        )[1](cotangent)[0],
-        jax.vjp(
-            lambda g: _binormal_curvature_frenet(
-                gamma, gammadash, gammadashdash, gammadashdashdash, alpha, g
-            ),
-            alphadash,
-        )[1](cotangent)[0],
+    _, pullback = jax.vjp(
+        _binormal_curvature_frenet,
+        gamma,
+        gammadash,
+        gammadashdash,
+        gammadashdashdash,
+        alpha,
+        alphadash,
     )
+    return pullback(cotangent)
 
 
 class FrameRotationJAX(Optimizable):
@@ -434,6 +373,25 @@ class _FramedCurveJAXBase(Optimizable):
     def _alphadash(self) -> jax.Array:
         return _as_jax_float64(self.rotation.alphadash(self.curve.quadpoints))
 
+    def _frame_twist_inputs(self):
+        gammadash = _as_jax_float64(self.curve.gammadash())
+        t, n, _b = self.rotated_frame()
+        _tdash, ndash, _bdash = self.rotated_frame_dash()
+        return gammadash, t, n, ndash
+
+    def frame_twist(self) -> jax.Array:
+        return _frame_twist(*self._frame_twist_inputs())
+
+    def dframe_twist_by_dcoeff_vjp(self, v: object) -> Derivative:
+        gammadash, t, n, ndash = self._frame_twist_inputs()
+        grad0, grad1, grad2, grad3 = _frame_twist_vjps(gammadash, t, n, ndash, v)
+        zeros = jnp.zeros_like(grad0)
+        return (
+            self.curve.dgammadash_by_dcoeff_vjp(grad0)
+            + self.rotated_frame_dcoeff_vjp(grad1, grad2, zeros)
+            + self.rotated_frame_dash_dcoeff_vjp(zeros, grad3, zeros)
+        )
+
 
 class FramedCurveFrenetJAX(_FramedCurveJAXBase):
     """JAX-backed Frenet frame wrapper.
@@ -523,6 +481,56 @@ class FramedCurveFrenetJAX(_FramedCurveJAXBase):
             + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
         )
 
+    def rotated_frame_dcoeff_vjp(
+        self,
+        v0: object,
+        v1: object,
+        v2: object,
+    ) -> Derivative:
+        gamma, gammadash, gammadashdash, _gammadashdashdash, alpha, _alphadash = (
+            self._scalar_inputs()
+        )
+        grad0, grad1, grad2, grad3 = jax.vjp(
+            rotated_frenet_frame,
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+        )[1](_cotangent3(v0, v1, v2))
+        return (
+            self.curve.dgamma_by_dcoeff_vjp(grad0)
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1)
+            + self.curve.dgammadashdash_by_dcoeff_vjp(grad2)
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad3)
+        )
+
+    def rotated_frame_dash_dcoeff_vjp(
+        self,
+        v0: object,
+        v1: object,
+        v2: object,
+    ) -> Derivative:
+        gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash = (
+            self._scalar_inputs()
+        )
+        grad0, grad1, grad2, grad3, grad4, grad5 = jax.vjp(
+            rotated_frenet_frame_dash,
+            gamma,
+            gammadash,
+            gammadashdash,
+            gammadashdashdash,
+            alpha,
+            alphadash,
+        )[1](_cotangent3(v0, v1, v2))
+        return (
+            self.curve.dgamma_by_dcoeff_vjp(grad0)
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1)
+            + self.curve.dgammadashdash_by_dcoeff_vjp(grad2)
+            + self.curve.dgammadashdashdash_by_dcoeff_vjp(grad3)
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad4)
+            + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
+        )
+
 
 class FramedCurveCentroidJAX(_FramedCurveJAXBase):
     """JAX-backed centroid frame wrapper.
@@ -590,6 +598,48 @@ class FramedCurveCentroidJAX(_FramedCurveJAXBase):
             alphadash,
             v,
         )
+        return (
+            self.curve.dgamma_by_dcoeff_vjp(grad0)
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1)
+            + self.curve.dgammadashdash_by_dcoeff_vjp(grad2)
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad4)
+            + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
+        )
+
+    def rotated_frame_dcoeff_vjp(
+        self,
+        v0: object,
+        v1: object,
+        v2: object,
+    ) -> Derivative:
+        gamma, gammadash, _gammadashdash, alpha, _alphadash = self._scalar_inputs()
+        grad0, grad1, grad2 = jax.vjp(
+            rotated_centroid_frame,
+            gamma,
+            gammadash,
+            alpha,
+        )[1](_cotangent3(v0, v1, v2))
+        return (
+            self.curve.dgamma_by_dcoeff_vjp(grad0)
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1)
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad2)
+        )
+
+    def rotated_frame_dash_dcoeff_vjp(
+        self,
+        v0: object,
+        v1: object,
+        v2: object,
+    ) -> Derivative:
+        gamma, gammadash, gammadashdash, alpha, alphadash = self._scalar_inputs()
+        grad0, grad1, grad2, grad4, grad5 = jax.vjp(
+            rotated_centroid_frame_dash,
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+            alphadash,
+        )[1](_cotangent3(v0, v1, v2))
         return (
             self.curve.dgamma_by_dcoeff_vjp(grad0)
             + self.curve.dgammadash_by_dcoeff_vjp(grad1)

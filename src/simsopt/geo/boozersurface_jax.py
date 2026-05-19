@@ -40,13 +40,13 @@ import scipy.linalg
 
 from ..backend import (
     get_backend_config,
+    get_backend_policy,
     is_parity_mode,
     raise_if_strict_jax_fallback,
     warn_if_jax_fallback,
 )
 from .._core.jax_host_boundary import (
     host_all_finite as _host_all_finite,
-    host_bool as _host_bool,
     host_array as _host_numpy,
     host_inf_norm as _host_inf_norm,
     host_scalar as _host_scalar,
@@ -193,6 +193,7 @@ _BOOZER_LINEARIZED_RESULT_KEYS = frozenset(
         "linearization_kind",
         "linear_solve_backend",
         "dense_linear_solve_factors_available",
+        "linearization_residency",
     }
 )
 _BOOZER_HESSIAN_REPORTING_RESULT_KEYS = frozenset(
@@ -619,6 +620,7 @@ class _BoozerAdjointRuntimeState:
     linear_solve_backend: str = "operator"
     dense_linear_solve_factors_available: bool = False
     linear_solve_factors: tuple[jax.Array, jax.Array, jax.Array] | None = None
+    linearization_residency: str = "device"
 
     @property
     def plu(self):
@@ -863,7 +865,7 @@ def _runtime_cache_leaf_signature(leaf):
 
 
 def _runtime_cache_tree_signature(tree):
-    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    leaves, treedef = jax.tree.flatten(tree)
     return (
         "tree",
         repr(treedef),
@@ -3097,6 +3099,46 @@ _DEFAULT_OPTIONS_EXACT = {
     "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES,
 }
 
+
+def _dense_jacobian_default_for_backend():
+    return get_backend_policy().max_dense_jacobian_bytes
+
+
+def _nan_tree_like(tree):
+    return jax.tree.map(lambda leaf: jnp.full_like(leaf, jnp.nan), tree)
+
+
+def _solve_with_nan_on_failure(solution, success):
+    return jax.lax.cond(
+        jnp.asarray(success, dtype=jnp.bool_),
+        lambda value: value,
+        _nan_tree_like,
+        solution,
+    )
+
+
+def _host_linearization_device():
+    return jax.devices("cpu")[0]
+
+
+def _place_linearization_factors_for_residency(factors, residency):
+    if factors is None or residency == "device":
+        return factors
+    device = _host_linearization_device()
+    return jax.tree.map(lambda factor: jax.device_put(factor, device=device), factors)
+
+
+def _solver_option_defaults(boozer_type, user_options):
+    defaults = dict(
+        _DEFAULT_OPTIONS_LS if boozer_type == "ls" else _DEFAULT_OPTIONS_EXACT
+    )
+    dense_default = _dense_jacobian_default_for_backend()
+    if "max_dense_jacobian_bytes" not in user_options:
+        defaults["max_dense_jacobian_bytes"] = dense_default
+    if boozer_type == "ls" and "max_dense_linearization_bytes" not in user_options:
+        defaults["max_dense_linearization_bytes"] = dense_default
+    return defaults
+
 # Options only meaningful for the target/private optimizer backend.
 _PRIVATE_OPTIMIZER_OPTIONS = frozenset(
     {
@@ -3113,6 +3155,7 @@ _SCIPY_TRACE_OPTIONS = frozenset({"record_scipy_callback_trace"})
 
 # Callback options accepted by all backends.
 _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
+_LINEARIZATION_RESIDENCY_VALUES = frozenset({"device", "host"})
 _ONDEVICE_LEAST_SQUARES_METHODS = _optimizer_jax._TARGET_LEAST_SQUARES_METHODS
 _LEAST_SQUARES_METHODS = frozenset({"lm"}) | _ONDEVICE_LEAST_SQUARES_METHODS
 _ONDEVICE_OPTIMIZER_METHODS = (
@@ -3124,6 +3167,7 @@ _LS_DYNAMIC_OPTION_KEYS = frozenset(
 
 _ALLOWED_OPTIONS_LS = (
     frozenset(_DEFAULT_OPTIONS_LS)
+    | {"linearization_residency"}
     | _LS_DYNAMIC_OPTION_KEYS
     | _PRIVATE_OPTIMIZER_OPTIONS
     | _LBFGS_TUNING_OPTIONS
@@ -3133,6 +3177,7 @@ _ALLOWED_OPTIONS_LS = (
 )
 _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {
     "optimizer_backend",
+    "linearization_residency",
     "stage_callback",
 }
 
@@ -3211,6 +3256,10 @@ def _normalize_solver_options(raw_options, boozer_type):
         and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
     ):
         raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
+    linearization_residency = raw_options.get("linearization_residency", "device")
+    if linearization_residency not in _LINEARIZATION_RESIDENCY_VALUES:
+        allowed = ", ".join(sorted(_LINEARIZATION_RESIDENCY_VALUES))
+        raise ValueError(f"linearization_residency must be one of: {allowed}.")
     least_squares_algorithm = raw_options.get("least_squares_algorithm")
     if (
         least_squares_algorithm is not None
@@ -3287,6 +3336,7 @@ def _normalize_solver_options(raw_options, boozer_type):
                 )
     if boozer_type == "exact":
         normalized_options.pop("optimizer_backend", None)
+    normalized_options.setdefault("linearization_residency", "device")
     return normalized_options
 
 
@@ -3386,9 +3436,7 @@ class BoozerSurfaceJAX(Optimizable):
             user_options,
             self.boozer_type,
         )
-        defaults = (
-            _DEFAULT_OPTIONS_LS if self.boozer_type == "ls" else _DEFAULT_OPTIONS_EXACT
-        )
+        defaults = _solver_option_defaults(self.boozer_type, user_options)
         self.options = _BoozerSolverOptions(
             {**defaults, **raw_options},
             materialize_dense_linearization_explicit=(
@@ -3508,6 +3556,15 @@ class BoozerSurfaceJAX(Optimizable):
         )
         tol = self._linear_solve_tolerance()
         tol_host = float(tol)
+        compute_device = x.device
+
+        def stage_linearization_factor(factor, *, dtype=None):
+            array = (
+                jnp.asarray(factor)
+                if dtype is None
+                else jnp.asarray(factor, dtype=dtype)
+            )
+            return jax.device_put(array, device=compute_device)
 
         def pack_callbacks(
             apply_forward,
@@ -3519,10 +3576,10 @@ class BoozerSurfaceJAX(Optimizable):
             linear_solve_backend="operator",
             linear_solve_factors=None,
         ):
-            def _with_host_status(solver):
+            def _with_nan_status(solver):
                 def wrapped(rhs):
                     solution, success = solver(rhs)
-                    return solution, _host_bool(success)
+                    return _solve_with_nan_on_failure(solution, success), success
 
                 return wrapped
 
@@ -3530,8 +3587,13 @@ class BoozerSurfaceJAX(Optimizable):
                 solve_transpose = solve_forward
             if solve_transpose_with_status is None:
                 solve_transpose_with_status = solve_forward_with_status
-            solve_forward_with_status = _with_host_status(solve_forward_with_status)
-            solve_transpose_with_status = _with_host_status(solve_transpose_with_status)
+            solve_forward_with_status = _with_nan_status(solve_forward_with_status)
+            solve_transpose_with_status = _with_nan_status(solve_transpose_with_status)
+            if linear_solve_factors is not None:
+                linear_solve_factors = jax.tree.map(
+                    lambda factor: stage_linearization_factor(factor, dtype=x.dtype),
+                    linear_solve_factors,
+                )
             return (
                 linearization_kind,
                 x.shape[0],
@@ -3566,9 +3628,9 @@ class BoozerSurfaceJAX(Optimizable):
             # device-resident Hessian directly so the JAX/CUDA LS lane
             # never crosses host on the runtime callback path.
             lu_piv = self.res["LU_PIV"]
-            lu_device = jnp.asarray(lu_piv[0], dtype=x.dtype)
-            piv_device = jnp.asarray(lu_piv[1], dtype=jnp.int32)
-            H_dev = jnp.asarray(self.res["hessian"], dtype=x.dtype)
+            lu_device = stage_linearization_factor(lu_piv[0], dtype=x.dtype)
+            piv_device = stage_linearization_factor(lu_piv[1], dtype=jnp.int32)
+            H_dev = stage_linearization_factor(self.res["hessian"], dtype=x.dtype)
 
             def apply_forward(rhs):
                 return H_dev @ jnp.asarray(rhs, dtype=x.dtype)
@@ -3851,6 +3913,9 @@ class BoozerSurfaceJAX(Optimizable):
                 self.res["dense_linear_solve_factors_available"]
             ),
             linear_solve_factors=linear_solve_factors,
+            linearization_residency=str(
+                self.res.get("linearization_residency", "device")
+            ),
         )
 
     @property
@@ -4463,16 +4528,56 @@ class BoozerSurfaceJAX(Optimizable):
             lambda x: (residual_fn(x), jax.jacobian(residual_fn)(x))
         )
 
-        x = _as_jax_float64(x0)
-        lam = _as_runtime_float64(1.0, reference=x)
-        residual, jacobian = residual_and_jacobian(x)
+        x_initial = _as_jax_float64(x0)
+        always_true = jnp.all(jnp.equal(x_initial, x_initial))
+        scalar_one = always_true.astype(x_initial.dtype)
+        half = scalar_one / (scalar_one + scalar_one)
+        damping_factor = scalar_one + scalar_one + scalar_one
+        lam_initial = scalar_one
+        residual, jacobian = residual_and_jacobian(x_initial)
         gradient = jacobian.T @ residual
         normal_matrix = jacobian.T @ jacobian
         norm = jnp.linalg.norm(gradient)
-        cost = _as_jax_float64(0.5) * jnp.sum(jnp.square(residual))
-        nit = 0
+        cost = half * jnp.sum(jnp.square(residual))
+        int_one = always_true.astype(jnp.int32)
+        nit = int_one - int_one
+        all_finite = (
+            jnp.all(jnp.isfinite(x_initial))
+            & jnp.all(jnp.isfinite(residual))
+            & jnp.all(jnp.isfinite(gradient))
+            & jnp.all(jnp.isfinite(normal_matrix))
+        )
+        tol_value = scalar_one * tol
+        maxiter_value = nit + maxiter
 
-        while nit < maxiter and float(_host_scalar(norm)) > tol:
+        def cond_fn(state):
+            (
+                _x,
+                _residual,
+                _jacobian,
+                _gradient,
+                _normal_matrix,
+                state_norm,
+                _cost,
+                _lam,
+                state_nit,
+                _all_finite,
+            ) = state
+            return (state_nit < maxiter_value) & (state_norm > tol_value)
+
+        def body_fn(state):
+            (
+                x,
+                residual,
+                jacobian,
+                gradient,
+                normal_matrix,
+                norm,
+                cost,
+                lam,
+                nit,
+                all_finite,
+            ) = state
             damping = lam * jnp.diag(jnp.diag(normal_matrix))
             dx = jnp.linalg.solve(normal_matrix + damping, gradient)
             candidate_x = x - dx
@@ -4480,38 +4585,62 @@ class BoozerSurfaceJAX(Optimizable):
             candidate_gradient = candidate_jacobian.T @ candidate_residual
             candidate_normal_matrix = candidate_jacobian.T @ candidate_jacobian
             candidate_norm = jnp.linalg.norm(candidate_gradient)
-            candidate_cost = _as_jax_float64(0.5) * jnp.sum(
-                jnp.square(candidate_residual)
+            candidate_cost = half * jnp.sum(jnp.square(candidate_residual))
+            candidate_is_finite = (
+                jnp.all(jnp.isfinite(candidate_x))
+                & jnp.all(jnp.isfinite(candidate_residual))
+                & jnp.all(jnp.isfinite(candidate_gradient))
+                & jnp.all(jnp.isfinite(candidate_normal_matrix))
             )
-            current_cost = float(_host_scalar(cost))
-            candidate_cost_value = float(_host_scalar(candidate_cost))
-            candidate_is_finite = bool(
-                _host_all_finite(candidate_x)
-                and _host_all_finite(candidate_residual)
-                and _host_all_finite(candidate_gradient)
-                and _host_all_finite(candidate_normal_matrix)
+            accepted = candidate_is_finite & (candidate_cost < cost)
+            return (
+                jnp.where(accepted, candidate_x, x),
+                jnp.where(accepted, candidate_residual, residual),
+                jnp.where(accepted, candidate_jacobian, jacobian),
+                jnp.where(accepted, candidate_gradient, gradient),
+                jnp.where(accepted, candidate_normal_matrix, normal_matrix),
+                jnp.where(accepted, candidate_norm, norm),
+                jnp.where(accepted, candidate_cost, cost),
+                jnp.where(accepted, lam / damping_factor, lam * damping_factor),
+                nit + int_one,
+                all_finite & candidate_is_finite,
             )
-            accepted = candidate_is_finite and candidate_cost_value < current_cost
-            if accepted:
-                x = candidate_x
-                residual = candidate_residual
-                jacobian = candidate_jacobian
-                gradient = candidate_gradient
-                normal_matrix = candidate_normal_matrix
-                norm = candidate_norm
-                cost = candidate_cost
-                lam = lam / _as_runtime_float64(3.0, reference=lam)
-            else:
-                lam = lam * _as_runtime_float64(3.0, reference=lam)
-            nit += 1
+
+        (
+            x,
+            residual,
+            jacobian,
+            gradient,
+            normal_matrix,
+            norm,
+            _cost,
+            _lam,
+            nit,
+            all_finite,
+        ) = jax.lax.while_loop(
+            cond_fn,
+            body_fn,
+            (
+                x_initial,
+                residual,
+                jacobian,
+                gradient,
+                normal_matrix,
+                norm,
+                cost,
+                lam_initial,
+                nit,
+                all_finite,
+            ),
+        )
 
         return {
             "x": x,
             "residual": residual,
             "gradient": gradient,
             "jacobian": normal_matrix,
-            "nit": nit,
-            "success": bool(float(_host_scalar(norm)) <= tol),
+            "nit": int(_host_scalar(nit, dtype=np.int64)),
+            "success": bool(_host_scalar((norm <= tol_value) & all_finite)),
         }
 
     def _traceable_surface_signature(self):
@@ -5111,6 +5240,8 @@ class BoozerSurfaceJAX(Optimizable):
             )
             if k in self.options
         }
+        if method in {"lbfgs", "lbfgs-ondevice"} and "maxcor" not in optimizer_options:
+            optimizer_options["maxcor"] = 200
         if method not in _ONDEVICE_OPTIMIZER_METHODS:
             optimizer_options.update(
                 {k: self.options[k] for k in _SCIPY_TRACE_OPTIONS if k in self.options}
@@ -5452,6 +5583,15 @@ class BoozerSurfaceJAX(Optimizable):
         else:
             lu_piv = None
             plu = None
+        linearization_residency = self.options["linearization_residency"]
+        lu_piv = _place_linearization_factors_for_residency(
+            lu_piv,
+            linearization_residency,
+        )
+        plu = _place_linearization_factors_for_residency(
+            plu,
+            linearization_residency,
+        )
         shared_lu_piv_dispatch = _ls_shared_lu_piv_dispatch(
             self.options["optimizer_backend"],
             lu_piv,
@@ -5527,6 +5667,7 @@ class BoozerSurfaceJAX(Optimizable):
                 shared_lu_piv_dispatch=shared_lu_piv_dispatch,
             ),
             "dense_linear_solve_factors_available": plu is not None,
+            "linearization_residency": linearization_residency,
             "solve_generation": solve_generation,
             "weight_inv_modB": weight_inv_modB,
             "fun": float(_host_scalar(result["fun"])),
@@ -5896,6 +6037,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "linearization_kind": "exact_jacobian",
                 "linear_solve_backend": "operator",
                 "dense_linear_solve_factors_available": False,
+                "linearization_residency": self.options["linearization_residency"],
                 **exact_reporting,
                 **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
                 "exact_factorization_backend": EXACT_FACTORIZATION_BACKEND,
@@ -5910,10 +6052,15 @@ class BoozerSurfaceJAX(Optimizable):
         J = jacobian
         if jacobian_available:
             P, L, U = jax.scipy.linalg.lu(J)
-            plu = (P, L, U)
+            plu = _place_linearization_factors_for_residency(
+                (P, L, U),
+                self.options["linearization_residency"],
+            )
         else:
             plu = None
-        exact_condition_estimate = _dense_condition_estimate_or_none(J)
+        exact_condition_estimate = (
+            _dense_condition_estimate_or_none(J) if verbose else None
+        )
 
         nphi = len(self.quadpoints_phi)
         ntheta = len(self.quadpoints_theta)
@@ -5987,6 +6134,7 @@ class BoozerSurfaceJAX(Optimizable):
             "linearization_kind": "exact_jacobian",
             "linear_solve_backend": "operator",
             "dense_linear_solve_factors_available": plu is not None,
+            "linearization_residency": self.options["linearization_residency"],
             "solve_generation": solve_generation,
             "weight_inv_modB": self.options["weight_inv_modB"],
             **exact_reporting,

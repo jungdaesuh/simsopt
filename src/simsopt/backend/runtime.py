@@ -19,14 +19,17 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import shlex
 import subprocess
 import sys
 import threading
-from typing import Callable
+from typing import Callable, Literal
 import warnings
+
+_LOGGER = logging.getLogger(__name__)
 
 _VALID_BACKENDS = ("cpu", "jax")
 _VALID_PLATFORMS = ("cpu", "cuda", "metal")
@@ -48,6 +51,12 @@ _POINT_CHUNK_SIZE_ENV = "SIMSOPT_JAX_POINT_CHUNK_SIZE"
 _PAIRWISE_PENALTY_CHUNK_SIZE_ENV = "SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE"
 _CHUNK_AUTOTUNE_ENV = "SIMSOPT_JAX_CHUNK_AUTOTUNE"
 _GPU_MEMORY_TOTAL_MB_ENV = "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB"
+_GPU_PREALLOCATE_ENV = "SIMSOPT_JAX_GPU_PREALLOCATE"
+_GPU_MEM_FRACTION_ENV = "SIMSOPT_JAX_GPU_MEM_FRACTION"
+_GPU_ALLOCATOR_ENV = "SIMSOPT_JAX_GPU_ALLOCATOR"
+_TF_GPU_ALLOCATOR_OVERRIDE_ENV = "SIMSOPT_TF_GPU_ALLOCATOR"
+_MAX_DENSE_JACOBIAN_BYTES_CPU_ENV = "SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_CPU"
+_MAX_DENSE_JACOBIAN_BYTES_GPU_ENV = "SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU"
 _SHARDING_STRATEGY_ENV = "SIMSOPT_JAX_SHARDING"
 _SHARDING_AXIS_ENV = "SIMSOPT_JAX_SHARDING_AXIS"
 _SHARDING_COIL_AXIS_ENV = "SIMSOPT_JAX_COIL_SHARDING_AXIS"
@@ -61,7 +70,14 @@ _DISTRIBUTED_PROCESS_ID_ENV = "SIMSOPT_JAX_PROCESS_ID"
 _DISTRIBUTED_LOCAL_DEVICE_IDS_ENV = "SIMSOPT_JAX_LOCAL_DEVICE_IDS"
 _JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
 _XLA_FLAGS_ENV = "XLA_FLAGS"
+_XLA_PYTHON_CLIENT_PREALLOCATE_ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
+_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV = "XLA_PYTHON_CLIENT_MEM_FRACTION"
+_XLA_PYTHON_CLIENT_ALLOCATOR_ENV = "XLA_PYTHON_CLIENT_ALLOCATOR"
+_XLA_CLIENT_MEM_FRACTION_ENV = "XLA_CLIENT_MEM_FRACTION"
+_TF_GPU_ALLOCATOR_ENV = "TF_GPU_ALLOCATOR"
 _VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
+_VALID_GPU_ALLOCATORS = ("platform", "vmm")
+_VALID_TF_GPU_ALLOCATORS = ("cuda_malloc_async",)
 _VALID_SHARDING_STRATEGIES = (
     "none",
     "points",
@@ -92,16 +108,18 @@ _SYNCED_RUNTIME_ENV_VALUES = (
     (_DEBUG_NANS_ENV, "debug_nans"),
     (_TRANSFER_GUARD_ENV, "transfer_guard"),
     (_COMPILATION_CACHE_DIR_ENV, "compilation_cache_dir"),
+    (_GPU_PREALLOCATE_ENV, "xla_gpu_preallocate"),
+    (_GPU_MEM_FRACTION_ENV, "xla_gpu_mem_fraction"),
+    (_GPU_ALLOCATOR_ENV, "xla_gpu_allocator"),
+    (_TF_GPU_ALLOCATOR_OVERRIDE_ENV, "tf_gpu_allocator"),
     (_BACKEND_ENV, "backend"),
     (_BACKEND_LEGACY_ENV, "backend"),
     (_PLATFORM_ENV, "jax_platform"),
     (_PLATFORM_LEGACY_ENV, "jax_platform"),
     (_JAX_PLATFORMS_ENV, "jax_platforms"),
 )
-_GPU_DETERMINISM_XLA_FLAGS = (
-    "--xla_gpu_deterministic_ops",
-    "--xla_gpu_exclude_nondeterministic_ops",
-)
+_GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_exclude_nondeterministic_ops",)
+_STALE_GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_deterministic_ops",)
 
 VALID_BACKEND_MODES = (
     "native_cpu",
@@ -128,6 +146,20 @@ _NO_CI_REPRODUCIBILITY_DEFAULTS = {
     "gpu_reproducibility_sample_size": None,
     "tolerance_ratchet_factor": None,
 }
+_NO_GPU_MEMORY_DEFAULTS = {
+    "xla_gpu_preallocate": None,
+    "xla_gpu_mem_fraction": None,
+    "xla_gpu_allocator": None,
+    "tf_gpu_allocator": None,
+}
+_GPU_MEMORY_MODE_DEFAULTS = {
+    "xla_gpu_preallocate": False,
+    "xla_gpu_mem_fraction": None,
+    "xla_gpu_allocator": None,
+    "tf_gpu_allocator": None,
+}
+_DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU = 4 * 1024 * 1024 * 1024
+_DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU = 256 * 1024 * 1024
 
 _MODE_POLICY_DEFAULTS = {
     "native_cpu": {
@@ -136,7 +168,10 @@ _MODE_POLICY_DEFAULTS = {
         "chunk_policy": "host_reference",
         "tolerance_tier": "cpu_reference",
         "compilation_cache_policy": "not_applicable",
+        "matmul_precision": "highest",
+        "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU,
         "provenance_label": "native_cpu",
+        **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
     "jax_cpu_fast": {
@@ -145,7 +180,10 @@ _MODE_POLICY_DEFAULTS = {
         "chunk_policy": "performance_tuned",
         "tolerance_tier": "fast",
         "compilation_cache_policy": "optional_persistent",
+        "matmul_precision": "default",
+        "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU,
         "provenance_label": "jax_cpu_fast",
+        **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
     "jax_cpu_parity": {
@@ -154,7 +192,10 @@ _MODE_POLICY_DEFAULTS = {
         "chunk_policy": "stable_default",
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
+        "matmul_precision": "highest",
+        "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU,
         "provenance_label": "jax_cpu_parity",
+        **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
     "jax_gpu_parity": {
@@ -163,7 +204,10 @@ _MODE_POLICY_DEFAULTS = {
         "chunk_policy": "stable_default",
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
+        "matmul_precision": "highest",
+        "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
         "provenance_label": "jax_gpu_parity",
+        **_GPU_MEMORY_MODE_DEFAULTS,
         "gpu_reduction_order_max_ulp": 10,
         "gpu_reduction_order_rel_tol": 1e-12,
         "gpu_reproducibility_seed": 1729,
@@ -176,7 +220,10 @@ _MODE_POLICY_DEFAULTS = {
         "chunk_policy": "performance_tuned",
         "tolerance_tier": "fast",
         "compilation_cache_policy": "optional_persistent",
+        "matmul_precision": "default",
+        "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
         "provenance_label": "jax_gpu_fast",
+        **_GPU_MEMORY_MODE_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
     "jax_metal_smoke": {
@@ -185,7 +232,10 @@ _MODE_POLICY_DEFAULTS = {
         "chunk_policy": "stable_default",
         "tolerance_tier": "smoke",
         "compilation_cache_policy": "optional_persistent",
+        "matmul_precision": "default",
+        "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
         "provenance_label": "jax_metal_smoke",
+        **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
 }
@@ -338,6 +388,10 @@ class BackendConfig:
     debug_nans: bool = False
     transfer_guard: str | None = None
     compilation_cache_dir: str | None = None
+    xla_gpu_preallocate: bool | None = None
+    xla_gpu_mem_fraction: float | None = None
+    xla_gpu_allocator: Literal["platform", "vmm"] | None = None
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None
 
 
 def _xla_flag_value(token: str, flag_name: str) -> bool | None:
@@ -373,6 +427,31 @@ def _xla_flags_enable_gpu_determinism(xla_flags: str | None) -> bool:
     return any(effective_values.values())
 
 
+def _xla_flags_include_stale_gpu_determinism(xla_flags: str | None) -> bool:
+    for token in _split_xla_flag_tokens(xla_flags):
+        if any(
+            token == flag_name or token.startswith(f"{flag_name}=")
+            for flag_name in _STALE_GPU_DETERMINISM_XLA_FLAGS
+        ):
+            return True
+    return False
+
+
+def _stale_cuda_determinism_message() -> str:
+    stale_flags = " or ".join(_STALE_GPU_DETERMINISM_XLA_FLAGS)
+    return (
+        f"{_XLA_FLAGS_ENV} contains stale CUDA determinism flag {stale_flags}. "
+        f"Use {_enabled_gpu_determinism_flags_text()} before importing or "
+        "touching JAX devices."
+    )
+
+
+def _enabled_gpu_determinism_flags_text() -> str:
+    return " or ".join(
+        f"{flag_name}=true" for flag_name in _GPU_DETERMINISM_XLA_FLAGS
+    )
+
+
 @dataclass(frozen=True)
 class BackendPolicy:
     """Numerical-policy contract for one resolved backend mode.
@@ -393,7 +472,13 @@ class BackendPolicy:
     chunk_policy: str
     tolerance_tier: str
     compilation_cache_policy: str
+    matmul_precision: str
+    max_dense_jacobian_bytes: int | None
     provenance_label: str
+    xla_gpu_preallocate: bool | None
+    xla_gpu_mem_fraction: float | None
+    xla_gpu_allocator: Literal["platform", "vmm"] | None
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None
     gpu_reduction_order_max_ulp: int | None
     gpu_reduction_order_rel_tol: float | None
     gpu_reproducibility_seed: int | None
@@ -476,6 +561,62 @@ def _with_distributed_initialized(
 def _env_bool(name: str) -> bool:
     raw = os.environ.get(name, "")
     return raw.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _parse_bool_value(raw_value: str, *, source: str) -> bool:
+    value = raw_value.strip().lower()
+    if value in _TRUTHY_ENV_VALUES:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{source}={raw_value!r} must be a boolean value")
+
+
+def _optional_bool_env(name: str) -> bool | None:
+    raw_value = _optional_env_value(name)
+    if raw_value is None:
+        return None
+    return _parse_bool_value(raw_value, source=name)
+
+
+def _optional_fraction_env(name: str) -> float | None:
+    raw_value = _optional_env_value(name)
+    if raw_value is None:
+        return None
+    value = float(raw_value)
+    if not 0.0 < value <= 1.0:
+        raise ValueError(f"{name}={raw_value!r} must be in (0, 1]")
+    return value
+
+
+def _validate_gpu_allocator(
+    value: str | None,
+    *,
+    source: str,
+) -> Literal["platform", "vmm"] | None:
+    if value in (None, ""):
+        return None
+    if value == "platform":
+        return "platform"
+    if value == "vmm":
+        return "vmm"
+    raise ValueError(
+        f"{source}={value!r} is not valid. Accepted: {_VALID_GPU_ALLOCATORS}"
+    )
+
+
+def _validate_tf_gpu_allocator(
+    value: str | None,
+    *,
+    source: str,
+) -> Literal["cuda_malloc_async"] | None:
+    if value in (None, ""):
+        return None
+    if value == "cuda_malloc_async":
+        return "cuda_malloc_async"
+    raise ValueError(
+        f"{source}={value!r} is not valid. Accepted: {_VALID_TF_GPU_ALLOCATORS}"
+    )
 
 
 def target_lane_purity_requested() -> bool:
@@ -988,6 +1129,19 @@ def _build_sharding_tuning(
             if distributed.initialized
             else local_device_count
         )
+    if (
+        mode == "jax_gpu_parity"
+        and strategy == "none"
+        and local_device_count > 1
+        and (mode, local_device_count) not in _logged_sharding_notices
+    ):
+        _logged_sharding_notices.add((mode, local_device_count))
+        _LOGGER.info(
+            "jax_gpu_parity defaults to single-device execution on %s local "
+            "devices; set SIMSOPT_JAX_SHARDING=hybrid to opt in before the "
+            "round-3 multi-GPU parity proof is available.",
+            local_device_count,
+        )
     point_axis_name = _resolve_sharding_axis_name()
     coil_axis_name = _resolve_coil_sharding_axis_name()
     point_device_count, coil_device_count = _strategy_device_counts(
@@ -1064,6 +1218,85 @@ def _resolve_compilation_cache_dir(
     return _default_compilation_cache_dir(mode)
 
 
+def _resolve_xla_gpu_preallocate(
+    mode: str,
+    xla_gpu_preallocate: bool | None,
+) -> bool | None:
+    if xla_gpu_preallocate is not None:
+        return bool(xla_gpu_preallocate)
+    env_value = _optional_bool_env(_GPU_PREALLOCATE_ENV)
+    if env_value is not None:
+        return env_value
+    defaults = _get_mode_policy_defaults(mode)
+    default = defaults["xla_gpu_preallocate"]
+    return None if default is None else bool(default)
+
+
+def _validate_mem_fraction_value(value: float, *, source: str) -> float:
+    fraction = float(value)
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(f"{source}={value!r} must be in (0, 1]")
+    return fraction
+
+
+def _resolve_xla_gpu_mem_fraction(
+    mode: str,
+    xla_gpu_mem_fraction: float | None,
+) -> float | None:
+    if xla_gpu_mem_fraction is not None:
+        return _validate_mem_fraction_value(
+            xla_gpu_mem_fraction,
+            source="xla_gpu_mem_fraction",
+        )
+    env_value = _optional_fraction_env(_GPU_MEM_FRACTION_ENV)
+    if env_value is not None:
+        return env_value
+    defaults = _get_mode_policy_defaults(mode)
+    default = defaults["xla_gpu_mem_fraction"]
+    return None if default is None else float(default)
+
+
+def _resolve_xla_gpu_allocator(
+    mode: str,
+    xla_gpu_allocator: Literal["platform", "vmm"] | None,
+) -> Literal["platform", "vmm"] | None:
+    if xla_gpu_allocator is not None:
+        return _validate_gpu_allocator(
+            xla_gpu_allocator,
+            source="xla_gpu_allocator",
+        )
+    env_value = _optional_env_value(_GPU_ALLOCATOR_ENV)
+    if env_value is not None:
+        return _validate_gpu_allocator(env_value, source=_GPU_ALLOCATOR_ENV)
+    defaults = _get_mode_policy_defaults(mode)
+    return _validate_gpu_allocator(
+        defaults["xla_gpu_allocator"],
+        source=f"{mode}.xla_gpu_allocator",
+    )
+
+
+def _resolve_tf_gpu_allocator(
+    mode: str,
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None,
+) -> Literal["cuda_malloc_async"] | None:
+    if tf_gpu_allocator is not None:
+        return _validate_tf_gpu_allocator(
+            tf_gpu_allocator,
+            source="tf_gpu_allocator",
+        )
+    env_value = _optional_env_value(_TF_GPU_ALLOCATOR_OVERRIDE_ENV)
+    if env_value is not None:
+        return _validate_tf_gpu_allocator(
+            env_value,
+            source=_TF_GPU_ALLOCATOR_OVERRIDE_ENV,
+        )
+    defaults = _get_mode_policy_defaults(mode)
+    return _validate_tf_gpu_allocator(
+        defaults["tf_gpu_allocator"],
+        source=f"{mode}.tf_gpu_allocator",
+    )
+
+
 def _config_from_mode(
     mode: str,
     *,
@@ -1071,6 +1304,10 @@ def _config_from_mode(
     debug_nans: bool | None = None,
     transfer_guard: str | None = None,
     compilation_cache_dir: str | None = None,
+    xla_gpu_preallocate: bool | None = None,
+    xla_gpu_mem_fraction: float | None = None,
+    xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
 ) -> BackendConfig:
     mode = _validate_mode(mode)
     backend, jax_platform = _MODE_TO_RUNTIME[mode]
@@ -1085,6 +1322,16 @@ def _config_from_mode(
             mode,
             compilation_cache_dir,
         ),
+        xla_gpu_preallocate=_resolve_xla_gpu_preallocate(
+            mode,
+            xla_gpu_preallocate,
+        ),
+        xla_gpu_mem_fraction=_resolve_xla_gpu_mem_fraction(
+            mode,
+            xla_gpu_mem_fraction,
+        ),
+        xla_gpu_allocator=_resolve_xla_gpu_allocator(mode, xla_gpu_allocator),
+        tf_gpu_allocator=_resolve_tf_gpu_allocator(mode, tf_gpu_allocator),
     )
 
 
@@ -1096,6 +1343,22 @@ def _resolve_mode(mode: str | None = None) -> str:
 
 def _get_mode_policy_defaults(mode: str) -> dict[str, object]:
     return _MODE_POLICY_DEFAULTS[_validate_mode(mode)]
+
+
+def _resolve_policy_max_dense_jacobian_bytes(
+    config: BackendConfig,
+    defaults: dict[str, object],
+) -> int | None:
+    env_name = (
+        _MAX_DENSE_JACOBIAN_BYTES_CPU_ENV
+        if config.jax_platform == "cpu"
+        else _MAX_DENSE_JACOBIAN_BYTES_GPU_ENV
+    )
+    env_value = _optional_nonneg_int_env(env_name)
+    if env_value is not None:
+        return env_value
+    default = defaults["max_dense_jacobian_bytes"]
+    return None if default is None else int(default)
 
 
 def _policy_from_config(config: BackendConfig) -> BackendPolicy:
@@ -1110,7 +1373,16 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         chunk_policy=str(defaults["chunk_policy"]),
         tolerance_tier=str(defaults["tolerance_tier"]),
         compilation_cache_policy=str(defaults["compilation_cache_policy"]),
+        matmul_precision=str(defaults["matmul_precision"]),
+        max_dense_jacobian_bytes=_resolve_policy_max_dense_jacobian_bytes(
+            config,
+            defaults,
+        ),
         provenance_label=str(defaults["provenance_label"]),
+        xla_gpu_preallocate=config.xla_gpu_preallocate,
+        xla_gpu_mem_fraction=config.xla_gpu_mem_fraction,
+        xla_gpu_allocator=config.xla_gpu_allocator,
+        tf_gpu_allocator=config.tf_gpu_allocator,
         gpu_reduction_order_max_ulp=defaults["gpu_reduction_order_max_ulp"],
         gpu_reduction_order_rel_tol=defaults["gpu_reduction_order_rel_tol"],
         gpu_reproducibility_seed=defaults["gpu_reproducibility_seed"],
@@ -1123,10 +1395,10 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
 
 
 def _runtime_env_value(attribute_name: str, value: object) -> str:
-    if attribute_name in {"strict", "debug_nans"}:
-        return "1" if bool(value) else "0"
     if value is None:
         return ""
+    if attribute_name in {"strict", "debug_nans", "xla_gpu_preallocate"}:
+        return "1" if bool(value) else "0"
     if attribute_name == "jax_platforms":
         return _runtime_jax_platforms_value(str(value))
     if attribute_name == "jax_platform":
@@ -1136,6 +1408,7 @@ def _runtime_env_value(attribute_name: str, value: object) -> str:
 
 _cached_backend_policy: BackendPolicy | None = None
 _warned_jax_fallbacks: set[tuple[str, str, str]] = set()
+_logged_sharding_notices: set[tuple[str, int]] = set()
 
 
 def get_backend_policy(mode: str | None = None) -> BackendPolicy:
@@ -1663,6 +1936,58 @@ def should_eagerly_configure_jax() -> bool:
     return explicit_selector_present and is_jax_backend()
 
 
+def _env_platforms_request_cuda() -> bool:
+    platforms = _optional_env_value(_JAX_PLATFORMS_ENV)
+    if platforms is None:
+        return False
+    return any(part.strip().lower() == "cuda" for part in platforms.split(","))
+
+
+def _imported_jax_reports_cuda() -> bool:
+    jax_module = sys.modules.get("jax")
+    if jax_module is None:
+        return False
+    default_backend = getattr(jax_module, "default_backend", None)
+    if not callable(default_backend):
+        return False
+    active_backend = str(default_backend())
+    return active_backend in _expected_runtime_backend_names("cuda")
+
+
+def _raise_or_warn_runtime_issue(config: BackendConfig, message: str) -> None:
+    if config.mode == "jax_gpu_parity" or config.strict:
+        raise RuntimeError(message)
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+
+
+def validate_cuda_determinism_environment() -> None:
+    """Validate direct CUDA platform selection before JAX initializes.
+
+    This covers users who set ``JAX_PLATFORMS=cuda`` directly instead of going
+    through ``SIMSOPT_BACKEND_MODE=jax_gpu_*``. Runtime mode configuration has a
+    stricter policy-aware check in ``apply_jax_runtime_config``.
+    """
+    if not (_env_platforms_request_cuda() or _imported_jax_reports_cuda()):
+        return
+    xla_flags = os.environ.get(_XLA_FLAGS_ENV)
+    if _xla_flags_include_stale_gpu_determinism(xla_flags):
+        message = _stale_cuda_determinism_message()
+        config = get_backend_config()
+        _raise_or_warn_runtime_issue(config, message)
+        return
+    if _xla_flags_enable_gpu_determinism(xla_flags):
+        return
+    message = (
+        f"{_JAX_PLATFORMS_ENV}=cuda selects CUDA execution, but {_XLA_FLAGS_ENV} "
+        f"does not enable {_enabled_gpu_determinism_flags_text()}. Set "
+        f"{_XLA_FLAGS_ENV} before "
+        "importing or touching JAX devices, because changing XLA flags after "
+        "JAX backend initialization has no effect."
+    )
+    config = get_backend_config()
+    _raise_or_warn_runtime_issue(config, message)
+
+
 def _expected_runtime_backend_names(jax_platform: str) -> frozenset[str]:
     if jax_platform == "cuda":
         return frozenset({"cuda", "gpu"})
@@ -1685,32 +2010,84 @@ def _validate_initialized_jax_runtime(jax_module, config: BackendConfig) -> None
         f"{active_backend!r}. Set backend environment variables before "
         "importing or touching JAX devices."
     )
-    if config.mode == "jax_gpu_parity" or config.strict:
-        raise RuntimeError(message)
-    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    _raise_or_warn_runtime_issue(config, message)
 
 
 def _validate_cuda_parity_determinism_env(
     config: BackendConfig,
     policy: BackendPolicy,
 ) -> None:
-    if config.jax_platform != "cuda" or policy.gpu_reproducibility_seed is None:
+    if config.jax_platform != "cuda":
         return
-    if _xla_flags_enable_gpu_determinism(os.environ.get(_XLA_FLAGS_ENV)):
+    xla_flags = os.environ.get(_XLA_FLAGS_ENV)
+    if _xla_flags_include_stale_gpu_determinism(xla_flags):
+        message = _stale_cuda_determinism_message()
+        _raise_or_warn_runtime_issue(config, message)
         return
-    expected_flags = " or ".join(
-        f"{flag_name}=true" for flag_name in _GPU_DETERMINISM_XLA_FLAGS
-    )
+    if _xla_flags_enable_gpu_determinism(xla_flags):
+        return
     message = (
-        f"Backend mode {config.mode!r} expects GPU-deterministic XLA execution "
-        f"for parity/reproducibility lanes, but {_XLA_FLAGS_ENV} does not enable "
-        f"{expected_flags}. Set {_XLA_FLAGS_ENV} before importing or touching JAX "
-        "devices, because changing XLA flags after JAX backend initialization has "
-        "no effect."
+        f"Backend mode {config.mode!r} selects CUDA execution, but "
+        f"{_XLA_FLAGS_ENV} does not enable "
+        f"{_enabled_gpu_determinism_flags_text()}. Set {_XLA_FLAGS_ENV} before "
+        "importing or touching JAX devices, because changing XLA flags after JAX "
+        "backend initialization has no effect."
     )
-    if config.mode == "jax_gpu_parity" or config.strict:
-        raise RuntimeError(message)
-    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    _raise_or_warn_runtime_issue(config, message)
+
+
+def _set_runtime_env(name: str, value: str | None) -> None:
+    if value is None:
+        os.environ.pop(name, None)
+        return
+    os.environ[name] = value
+
+
+def _assert_jax_not_imported_for_gpu_memory_config(config: BackendConfig) -> None:
+    jax_module = sys.modules.get("jax")
+    if (
+        config.jax_platform != "cuda"
+        or jax_module is None
+        or getattr(jax_module, "__name__", None) != "jax"
+        or "jax._src" not in sys.modules
+    ):
+        return
+    raise RuntimeError(
+        "JAX GPU memory environment variables must be resolved before "
+        "importing jax. Call simsopt.config.set_backend(...) or set "
+        "SIMSOPT_BACKEND_MODE before importing or touching JAX devices."
+    )
+
+
+def _apply_jax_gpu_memory_env(config: BackendConfig) -> None:
+    if config.jax_platform != "cuda":
+        return
+    _assert_jax_not_imported_for_gpu_memory_config(config)
+    if config.xla_gpu_preallocate is not None:
+        _set_runtime_env(
+            _XLA_PYTHON_CLIENT_PREALLOCATE_ENV,
+            "true" if config.xla_gpu_preallocate else "false",
+        )
+    if config.xla_gpu_allocator is None:
+        _set_runtime_env(_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, None)
+    else:
+        _set_runtime_env(_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, config.xla_gpu_allocator)
+    if config.xla_gpu_mem_fraction is None:
+        _set_runtime_env(_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None)
+        _set_runtime_env(_XLA_CLIENT_MEM_FRACTION_ENV, None)
+    elif config.xla_gpu_allocator == "vmm":
+        _set_runtime_env(_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None)
+        _set_runtime_env(
+            _XLA_CLIENT_MEM_FRACTION_ENV,
+            str(config.xla_gpu_mem_fraction),
+        )
+    else:
+        _set_runtime_env(
+            _XLA_PYTHON_CLIENT_MEM_FRACTION_ENV,
+            str(config.xla_gpu_mem_fraction),
+        )
+        _set_runtime_env(_XLA_CLIENT_MEM_FRACTION_ENV, None)
+    _set_runtime_env(_TF_GPU_ALLOCATOR_ENV, config.tf_gpu_allocator)
 
 
 def apply_jax_runtime_config() -> None:
@@ -1719,6 +2096,7 @@ def apply_jax_runtime_config() -> None:
     if config.backend != "jax":
         return
     _validate_cuda_parity_determinism_env(config, get_backend_policy(config.mode))
+    _apply_jax_gpu_memory_env(config)
 
     import jax
 
@@ -1727,6 +2105,10 @@ def apply_jax_runtime_config() -> None:
         _runtime_jax_platforms_value(config.jax_platform),
     )
     jax.config.update("jax_enable_x64", requires_x64(config.mode))
+    jax.config.update(
+        "jax_default_matmul_precision",
+        get_backend_policy(config.mode).matmul_precision,
+    )
     jax.config.update("jax_debug_nans", config.debug_nans)
     if config.transfer_guard is not None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
@@ -1737,6 +2119,30 @@ def apply_jax_runtime_config() -> None:
     _validate_initialized_jax_runtime(jax, config)
 
 
+class _CpuDeviceConstructionContext:
+    def __init__(self):
+        self._context = None
+
+    def __enter__(self):
+        import jax
+
+        cpu_devices = jax.devices("cpu")
+        if not cpu_devices:
+            raise RuntimeError("JAX did not report an addressable CPU device.")
+        self._context = jax.default_device(cpu_devices[0])
+        return self._context.__enter__()
+
+    def __exit__(self, exc_type, exc, traceback):
+        if self._context is None:
+            return False
+        return self._context.__exit__(exc_type, exc, traceback)
+
+
+def with_cpu_device_for_construction():
+    """Return a context manager that defaults fresh JAX arrays to CPU."""
+    return _CpuDeviceConstructionContext()
+
+
 def set_backend(
     mode: str,
     *,
@@ -1744,12 +2150,18 @@ def set_backend(
     debug_nans: bool | None = None,
     transfer_guard: str | None = None,
     compilation_cache_dir: str | None = None,
+    xla_gpu_preallocate: bool | None = None,
+    xla_gpu_mem_fraction: float | None = None,
+    xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
     configure_runtime: bool = True,
 ) -> BackendConfig:
     """Set the active backend mode for the current process.
 
     This keeps the legacy env vars in sync so existing scripts and subprocess
-    helpers continue to work unchanged.  Also updates the config cache so
+    helpers continue to work unchanged. GPU memory keywords resolve the
+    pre-import JAX/XLA allocator env vars explicitly; env overrides still sit
+    between mode defaults and these arguments. Also updates the config cache so
     subsequent ``get_backend_config()`` calls are free.
     """
     global _cached_backend_config
@@ -1759,6 +2171,10 @@ def set_backend(
         debug_nans=debug_nans,
         transfer_guard=transfer_guard,
         compilation_cache_dir=compilation_cache_dir,
+        xla_gpu_preallocate=xla_gpu_preallocate,
+        xla_gpu_mem_fraction=xla_gpu_mem_fraction,
+        xla_gpu_allocator=xla_gpu_allocator,
+        tf_gpu_allocator=tf_gpu_allocator,
     )
     with _backend_runtime_lock:
         _cached_backend_config = config
