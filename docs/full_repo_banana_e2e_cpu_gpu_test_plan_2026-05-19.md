@@ -813,6 +813,7 @@ Correctness and fix-validation results:
 | PM QA reduced fixed-state fixture | Slurm `53165165` | PASS | 0:13.18 wall; 934088 KB MaxRSS |
 | GPU runtime smoke and grouped lowering | Slurm `53164465` first two packets | PASS | runtime smoke 3:04.11 / 3317048 KB; grouped lowering 0:38.15 / 1072004 KB |
 | GPU M5 public wrapper rerun after transfer-clean CWS pullback fix | Slurm `53164835` | PASS | 1:53.04 wall; 3033300 KB MaxRSS; `3 passed in 99.81s` |
+| 4-GPU single-stage init parity after active replicated-placement fixes | Slurm `53170493` | PASS | Slurm elapsed 7:34; `/usr/bin/time` wall 7:27.85; `/usr/bin/time` MaxRSS 6285132 KB; Slurm batch MaxRSS 7905296K; 4x A100 before/after memory 0 MiB |
 
 Performance and memory-pressure results:
 
@@ -823,6 +824,8 @@ Performance and memory-pressure results:
 | CPU run-code benchmark, isolated Full-HBT only | `53165744` | PASS | 36:36.59 wall; 6939428 KB MaxRSS; Slurm batch MaxRSS 7453984K | Full-HBT repeat median 403451.6 ms; first call 499.291 s; LS 8204.9 ms; Newton 378095.5 ms. |
 | GPU Tier 5 high-memory retry | `53164760` | TIMEOUT | Slurm timeout at 2:00:16; step MaxRSS 76182456K under `--mem-per-gpu=80G`; sampled GPU memory peak 2347 MiB | Passed Stage 2 CPU-vs-JAX value/gradient parity (`J` rel_err `3.95e-16`, grad L2 rel_err `1.56e-14`) but did not complete performance characterization before walltime. |
 | GPU Tier 5 original 57 GB run | `53164210` | FAIL / OOM | 50:05.20 wall; 58045712 KB MaxRSS; exit 1 | Establishes that the pressure is host memory, not GPU VRAM. |
+| Multi-GPU sharding proof, pre-sharded steady state | `53168132` regular; corroborated by `53168131` debug | PASS | `53168132` batch MaxRSS 2860224K; `53168131` batch MaxRSS 2962280K; per-probe GPU memory recorded in `docs/jax_multi_gpu_proof_2026-05-19.md` | `integral_BdotN_surface_sharded`: 2.03x at 2 GPUs, 3.87x at 4 GPUs with `NamedSharding` and all-reduce. Seed-batch scoring: 1.93x at 2 GPUs, 3.78x at 4 GPUs. |
+| Single-stage init parity with active point sharding, post-review exact bytes | `53170493` debug | PASS | Slurm elapsed 7:34; `/usr/bin/time` wall 7:27.85; MaxRSS 6285132 KB; Slurm batch MaxRSS 7905296K; early stdout peak RSS 1077.7 MB; early GPU memory 435.0 MB; before/after GPU memory 0 MiB on all four A100s | `single_stage_cuda_init.json` has `passed: true`; JAX/JAXLIB 0.10.0; backend `gpu`; devices `cuda:0..3`; `SIMSOPT_JAX_SHARDING=points`; CPU vs JAX field-error rel diff `2.51e-16`; iota and volume diffs `0.00e+00`. |
 
 Current verdict for this run:
 
@@ -831,6 +834,11 @@ Current verdict for this run:
 - [x] GPU M5 public-wrapper transfer-clean test packet passed on real CUDA.
 - [x] CPU performance data collected for Tier 5 and run-code Full-HBT.
 - [x] GPU memory-pressure data collected.
+- [x] Multi-GPU sharding performance and memory data collected.
+- [x] Multi-GPU sharding proof passed for the pre-sharded steady-state
+  contract.
+- [x] 4-GPU single-stage init parity passed after active replicated-placement
+  fixes for the private optimizer and Boozer penalty geometry.
 - [ ] GPU performance characterization completed.
 - [ ] Release-grade GPU performance claim accepted.
 
@@ -844,6 +852,17 @@ Blocking interpretation:
   pressure to fail. The isolated Full-HBT rerun completed, so the Full-HBT
   timing itself is available and the failure is a benchmark-process memory
   pressure issue rather than a solver correctness failure.
+- The N30 multi-GPU sharding proof passed only after the timed inputs were
+  pre-placed on the JAX mesh. Earlier non-pre-sharded debug probes showed active
+  sharding but failed the speedup gate because repeated input placement
+  dominated the surface-integral timing. This matches the official JAX
+  `device_put` + `NamedSharding` model and is recorded in
+  `docs/jax_multi_gpu_proof_2026-05-19.md`.
+- The first 4-GPU single-stage init retry reached `SINGLE-STAGE INIT PARITY
+  PASSED` but exceeded the 10-minute debug walltime by 33.41 s (`53169133`).
+  The post-review rerun with transfer guard `allow` completed cleanly as
+  `53170493`, proving the exact current active replicated-placement bytes
+  within the 20-minute debug allocation.
 
 ## Slurm Execution Policy
 

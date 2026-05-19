@@ -97,6 +97,7 @@ from ..jax_core.biotsavart import (
     biot_savart_dA_by_dX,
 )
 from ..jax_core.specs import GroupedCoilSetSpec
+from ..jax_core.sharding import place_active_replicated
 from .boozer_residual_jax import (
     _split_decision_vector as _split_boozer_decision_vector,
     boozer_residual_scalar_and_grad_cpu_ordered,
@@ -500,6 +501,16 @@ class _BoozerPenaltyGeometry:
     gamma: jax.Array
     xphi: jax.Array
     xtheta: jax.Array
+
+
+def _place_active_replicated_geometry(
+    geometry: _BoozerPenaltyGeometry,
+) -> _BoozerPenaltyGeometry:
+    return _BoozerPenaltyGeometry(
+        gamma=place_active_replicated(geometry.gamma),
+        xphi=place_active_replicated(geometry.xphi),
+        xtheta=place_active_replicated(geometry.xtheta),
+    )
 
 
 @jax.tree_util.register_dataclass
@@ -1089,7 +1100,9 @@ def _geometry_from_surface_dofs(
             stellsym,
             scatter_indices=scatter_indices,
         )
-        return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
+        return _place_active_replicated_geometry(
+            _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
+        )
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         surface_dofs,
         quadpoints_phi,
@@ -1101,7 +1114,9 @@ def _geometry_from_surface_dofs(
         scatter_indices,
         surface_kind=surface_kind,
     )
-    return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
+    return _place_active_replicated_geometry(
+        _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
+    )
 
 
 def _penalty_params(
@@ -1335,8 +1350,12 @@ def _surface_geometry_and_derivatives_from_dofs(
     gamma, xphi, xtheta = geometry_arrays(surface_dofs)
     dgamma, dxphi, dxtheta = jax.jacfwd(geometry_arrays)(surface_dofs)
     return (
-        _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
-        _BoozerPenaltyGeometry(gamma=dgamma, xphi=dxphi, xtheta=dxtheta),
+        _place_active_replicated_geometry(
+            _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
+        ),
+        _place_active_replicated_geometry(
+            _BoozerPenaltyGeometry(gamma=dgamma, xphi=dxphi, xtheta=dxtheta)
+        ),
     )
 
 
@@ -1424,8 +1443,12 @@ def _surface_geometry_and_derivatives_cpu_ordered(
         stellsym=stellsym,
     )
     return (
-        _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
-        _BoozerPenaltyGeometry(gamma=dgamma, xphi=dxphi, xtheta=dxtheta),
+        _place_active_replicated_geometry(
+            _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
+        ),
+        _place_active_replicated_geometry(
+            _BoozerPenaltyGeometry(gamma=dgamma, xphi=dxphi, xtheta=dxtheta)
+        ),
     )
 
 
@@ -1899,17 +1922,20 @@ def _boozer_penalty_residual_vector(
             _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
         )
     )
-    gamma, xphi, xtheta = _surface_geometry_from_dofs(
+    geometry = _geometry_from_surface_dofs(
         optimizer_state.surface_dofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
         surface_kind=surface_kind,
     )
+    gamma = geometry.gamma
+    xphi = geometry.xphi
+    xtheta = geometry.xtheta
     label_geometry = _geometry_from_surface_dofs(
         optimizer_state.surface_dofs,
         quadpoints_phi=label_quadpoints_phi,
@@ -1943,7 +1969,7 @@ def _boozer_penalty_residual_vector(
     constraint_weight = constraint_weight if constraint_weight is not None else 1.0
     constraint_weight = _as_jax_float64(constraint_weight)
     label_value, gamma_axis_z = _compute_label_and_axis_z(
-        geometry=_BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
+        geometry=geometry,
         label_geometry=label_geometry,
         label_points=_field_points_from_geometry(label_geometry),
         label_type=label_type,
@@ -2072,17 +2098,20 @@ def _boozer_exact_residual_impl(
     """
     sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=True)
 
-    gamma, xphi, xtheta = _surface_geometry_from_dofs(
+    geometry = _geometry_from_surface_dofs(
         sdofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
         surface_kind=surface_kind,
     )
+    gamma = geometry.gamma
+    xphi = geometry.xphi
+    xtheta = geometry.xtheta
     label_geometry = _geometry_from_surface_dofs(
         sdofs,
         quadpoints_phi=label_quadpoints_phi,
@@ -2115,7 +2144,7 @@ def _boozer_exact_residual_impl(
     r_masked = r_flat[mask_indices]
 
     label_val, gamma_axis_z = _compute_label_and_axis_z(
-        geometry=_BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
+        geometry=geometry,
         label_geometry=label_geometry,
         label_points=_field_points_from_geometry(label_geometry),
         label_type=label_type,
@@ -2580,18 +2609,17 @@ def _geometry_tangent_from_decision_tangent(
     tangent_state,
 ):
     def geometry_of_surface_dofs(surface_dofs):
-        gamma, xphi, xtheta = _surface_geometry_from_dofs(
+        return _geometry_from_surface_dofs(
             surface_dofs,
-            snapshot.quadpoints_phi,
-            snapshot.quadpoints_theta,
-            snapshot.mpol,
-            snapshot.ntor,
-            snapshot.nfp,
-            snapshot.stellsym,
-            snapshot.scatter_indices,
+            quadpoints_phi=snapshot.quadpoints_phi,
+            quadpoints_theta=snapshot.quadpoints_theta,
+            mpol=snapshot.mpol,
+            ntor=snapshot.ntor,
+            nfp=snapshot.nfp,
+            stellsym=snapshot.stellsym,
+            scatter_indices=snapshot.scatter_indices,
             surface_kind=snapshot.surface_kind,
         )
-        return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
 
     _, geometry_tangent = jax.jvp(
         geometry_of_surface_dofs,
@@ -2606,18 +2634,17 @@ def _label_geometry_tangent_from_decision_tangent(
     tangent_state,
 ):
     def geometry_of_surface_dofs(surface_dofs):
-        gamma, xphi, xtheta = _surface_geometry_from_dofs(
+        return _geometry_from_surface_dofs(
             surface_dofs,
-            snapshot.label_quadpoints_phi,
-            snapshot.label_quadpoints_theta,
-            snapshot.label_mpol,
-            snapshot.label_ntor,
-            snapshot.label_nfp,
-            snapshot.label_stellsym,
-            snapshot.label_scatter_indices,
+            quadpoints_phi=snapshot.label_quadpoints_phi,
+            quadpoints_theta=snapshot.label_quadpoints_theta,
+            mpol=snapshot.label_mpol,
+            ntor=snapshot.label_ntor,
+            nfp=snapshot.label_nfp,
+            stellsym=snapshot.label_stellsym,
+            scatter_indices=snapshot.label_scatter_indices,
             surface_kind=snapshot.label_surface_kind,
         )
-        return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
 
     _, geometry_tangent = jax.jvp(
         geometry_of_surface_dofs,
@@ -3128,7 +3155,9 @@ def _place_linearization_factors_for_residency(factors, residency):
     if factors is None or residency == "device":
         return factors
     device = _host_linearization_device()
-    return jax.tree.map(lambda factor: runtime_device_put(factor, device=device), factors)
+    return jax.tree.map(
+        lambda factor: runtime_device_put(factor, device=device), factors
+    )
 
 
 def _solver_option_defaults(boozer_type, user_options):
@@ -3253,7 +3282,10 @@ def _normalize_solver_options(raw_options, boozer_type):
         raise ValueError(f"Unknown BoozerSurfaceJAX option(s): {unknown_keys}.")
 
     optimizer_backend = raw_options.get("optimizer_backend")
-    if optimizer_backend is not None and optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
+    if (
+        optimizer_backend is not None
+        and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
+    ):
         raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
     effective_optimizer_backend = _optimizer_jax.resolve_optimizer_backend(
         optimizer_backend
@@ -3445,7 +3477,9 @@ class BoozerSurfaceJAX(Optimizable):
         )
         if self.boozer_type == "ls":
             if self.options["optimizer_backend"] not in VALID_OPTIMIZER_BACKENDS:
-                raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
+                raise ValueError(
+                    "optimizer_backend must be one of: auto, scipy, ondevice."
+                )
 
         runtime_state = (
             surface_runtime_state

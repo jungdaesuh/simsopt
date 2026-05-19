@@ -69,7 +69,10 @@ from simsopt.geo import (  # type: ignore[import-untyped]
     SurfaceXYZTensorFourier,
     create_equally_spaced_curves,
 )
-from simsopt.geo.boozersurface_jax import _surface_sample_z  # type: ignore[import-untyped]
+from simsopt.geo.boozersurface_jax import (  # type: ignore[import-untyped]
+    _boozer_penalty_objective,
+    _surface_sample_z,
+)
 from simsopt.geo.curve import gamma_2d  # type: ignore[import-untyped]
 from simsopt.geo.curveperturbed import (  # type: ignore[import-untyped]
     CurvePerturbed,
@@ -1496,9 +1499,7 @@ def _run_surface_quadrature_sharding_case() -> None:
         )
     )
     target = jnp.asarray(
-        np.linspace(-0.01, 0.02, nphi * ntheta, dtype=np.float64).reshape(
-            nphi, ntheta
-        )
+        np.linspace(-0.01, 0.02, nphi * ntheta, dtype=np.float64).reshape(nphi, ntheta)
     )
     normal = jnp.asarray(
         np.linspace(0.3, 1.7, nphi * ntheta * 3, dtype=np.float64).reshape(
@@ -1580,6 +1581,122 @@ def _run_seed_batch_value_grad_sharding_case() -> None:
     assert summary["seed_batch_sharded"] is True, summary
     assert summary["kind"] == "NamedSharding", summary
     assert summary["seed_batch_device_count"] == 4, summary
+
+
+def _run_target_minimize_replicated_sharding_vjp_case() -> None:
+    if not _configure_strict_cpu_parity_backend():
+        _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
+        return
+
+    mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
+    replicated = NamedSharding(mesh, P())
+    with jax.transfer_guard("allow"):
+        matrix = jax.device_put(np.eye(2, dtype=np.float64), replicated)
+        target = jax.device_put(
+            np.asarray([0.25, -0.75], dtype=np.float64),
+            replicated,
+        )
+        x0 = jax.device_put(
+            np.asarray([2.0, -1.0], dtype=np.float64),
+            jax.devices()[0],
+        )
+
+    def objective(x):
+        sharded_residual = matrix @ x - target
+        local_residual = x
+        return jnp.sum(sharded_residual * sharded_residual) + jnp.sum(
+            local_residual * local_residual
+        )
+
+    result = target_minimize(
+        objective,
+        x0,
+        method="bfgs-ondevice",
+        maxiter=4,
+    )
+
+    assert result.success is True
+    np.testing.assert_allclose(np.asarray(result.x), [0.125, -0.375], atol=1e-8)
+
+
+def _run_boozer_penalty_replicated_sharding_vjp_case() -> None:
+    if not _configure_strict_cpu_parity_backend():
+        _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
+        return
+
+    mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
+    replicated = NamedSharding(mesh, P())
+    mpol = 1
+    ntor = 1
+    nfp = 1
+    shape = (2 * mpol + 1, 2 * ntor + 1)
+    xc = np.zeros(shape, dtype=np.float64)
+    yc = np.zeros(shape, dtype=np.float64)
+    zc = np.zeros(shape, dtype=np.float64)
+    xc[0, 0] = 1.0
+    xc[1, 0] = 0.1
+    zc[mpol + 1, 0] = 0.1
+    surface_dofs = np.concatenate((xc.ravel(), yc.ravel(), zc.ravel()))
+    with jax.transfer_guard("allow"):
+        qphi = jnp.linspace(0.0, 1.0, 4, endpoint=False)
+        qtheta = jnp.linspace(0.0, 1.0, 4, endpoint=False)
+
+    phi = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
+    coil_gamma = np.stack(
+        (np.cos(phi), np.sin(phi), 0.3 * np.ones_like(phi)),
+        axis=-1,
+    )
+    coil_gammadash = np.stack(
+        (-2.0 * np.pi * np.sin(phi), 2.0 * np.pi * np.cos(phi), np.zeros_like(phi)),
+        axis=-1,
+    )
+    with jax.transfer_guard("allow"):
+        x0 = jax.device_put(
+            np.concatenate((surface_dofs, np.asarray([0.3, 1.0]))),
+            replicated,
+        )
+        coil_arrays = [
+            (
+                jax.device_put(coil_gamma[None, :, :], replicated),
+                jax.device_put(coil_gammadash[None, :, :], replicated),
+                jax.device_put(np.asarray([1.0e5], dtype=np.float64), replicated),
+            )
+        ]
+
+    def objective(x):
+        return _boozer_penalty_objective(
+            x,
+            coil_arrays=coil_arrays,
+            quadpoints_phi=qphi,
+            quadpoints_theta=qtheta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=False,
+            scatter_indices=None,
+            surface_kind="generic",
+            label_quadpoints_phi=qphi,
+            label_quadpoints_theta=qtheta,
+            label_mpol=mpol,
+            label_ntor=ntor,
+            label_nfp=nfp,
+            label_stellsym=False,
+            label_scatter_indices=None,
+            label_surface_kind="generic",
+            targetlabel=2.0 * np.pi**2 * 0.1**2,
+            constraint_weight=1.0,
+            label_type="volume",
+            phi_idx=0,
+            optimize_G=True,
+            weight_inv_modB=True,
+        )
+
+    value, gradient = jax.jit(jax.value_and_grad(objective))(x0)
+    with jax.transfer_guard("allow"):
+        assert bool(jnp.isfinite(value))
+        assert bool(jnp.all(jnp.isfinite(gradient)))
+    assert getattr(gradient, "sharding").spec == P()
+    assert len(getattr(gradient, "sharding").device_set) == 4
 
 
 def _run_shifted_grid_axis_sample_case() -> None:
@@ -2456,6 +2573,12 @@ def _dispatch_case(args: argparse.Namespace) -> None:
     if args.case == "seed-batch-value-grad-sharding":
         _run_seed_batch_value_grad_sharding_case()
         return
+    if args.case == "target-minimize-replicated-sharding-vjp":
+        _run_target_minimize_replicated_sharding_vjp_case()
+        return
+    if args.case == "boozer-penalty-replicated-sharding-vjp":
+        _run_boozer_penalty_replicated_sharding_vjp_case()
+        return
     if args.case == "shifted-grid-axis-sample":
         _run_shifted_grid_axis_sample_case()
         return
@@ -2556,6 +2679,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("pairwise-penalty-explicit-row-sharding")
     subparsers.add_parser("surface-quadrature-sharding")
     subparsers.add_parser("seed-batch-value-grad-sharding")
+    subparsers.add_parser("target-minimize-replicated-sharding-vjp")
+    subparsers.add_parser("boozer-penalty-replicated-sharding-vjp")
     subparsers.add_parser("shifted-grid-axis-sample")
     subparsers.add_parser("gamma-2d-eager-host-constants")
     subparsers.add_parser("closed-curve-self-intersection-summary")

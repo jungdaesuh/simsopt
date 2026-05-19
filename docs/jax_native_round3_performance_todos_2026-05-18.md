@@ -191,7 +191,7 @@ External references used:
 | N27 | 2 | Confirmed | Pin `jax_default_matmul_precision` for `*_parity` modes |
 | N28 | 2 | Confirmed | Make CUDA-determinism enforcement unconditional under CUDA |
 | N29 | 2 | Confirmed (doc-only) | Document `jax_gpu_parity` single-device default; reconsider after N30 |
-| N30 | 2 | Hardware-gated | Earn real-GPU speedup proof on N11 surface sharding + N12 seed batching |
+| N30 | 2 | Complete for pre-sharded steady state | Earn real-GPU speedup proof on N11 surface sharding + N12 seed batching |
 | N31 | 3 | Confirmed | Plumb JAX GPU memory env vars through `apply_jax_runtime_config`; add explicit `set_backend()` override keywords |
 | N32 | 3 | Confirmed | Split `max_dense_jacobian_bytes` into CPU and GPU defaults |
 | N33 | 3 | Confirmed | Add selective CPU-residency option for large warm-start factors |
@@ -253,9 +253,8 @@ compiled JITs cannot be retargeted across platforms.
 
 ### Wave 5: multi-GPU GPU-speedup proof
 
-- N30: hardware-gated. Drops in once the Runpod CUDA toolchain
-  mismatch documented at `docs/source/jax_gpu_setup.rst:421-466` is
-  resolved.
+- N30: closed on Perlmutter via
+  `docs/jax_multi_gpu_proof_2026-05-19.md`.
 
 ## TODO details
 
@@ -756,7 +755,7 @@ multi-GPU parity proof. Until then, document only.
 
 ## N30: earn real-GPU speedup proof on N11 and N12 sharding
 
-- [ ] Status: hardware-gated.
+- [x] Status: complete for the pre-sharded steady-state contract.
 
 ### Context
 
@@ -792,7 +791,7 @@ unfulfilled.
 3. Run the same sweep for seed-batch scoring
    (`src/simsopt/geo/surfaceobjectives_jax.py:5088`) at
    production-relevant seed counts.
-4. Write `docs/jax_multi_gpu_proof_2026-XX-XX.md` recording the
+4. Write `docs/jax_multi_gpu_proof_2026-05-19.md` recording the
    results.
 5. If acceptable speedups are demonstrated, reconsider the
    `jax_gpu_parity` sharding default (N29 caveat); otherwise document
@@ -806,6 +805,24 @@ unfulfilled.
 - Parity preserved (no regression on
   `benchmarks/single_stage_init_parity.py` under the proven sharding
   config).
+
+### Closeout
+
+Perlmutter jobs `53168131` (`debug`) and `53168132` (`regular`) passed the
+1 / 2 / 4-GPU pre-sharded steady-state proof. The regular job measured
+`integral_BdotN_surface_sharded` at 2.03x on 2 GPUs and 3.87x on 4 GPUs, with
+`NamedSharding`, mesh-axis `d`, and one all-reduce in the lowered HLO for the
+multi-GPU rows. Seed-batch scoring measured 1.93x on 2 GPUs and 3.78x on 4
+GPUs. Peak GPU memory per visible device and baseline-subtracted deltas are
+recorded in `docs/jax_multi_gpu_proof_2026-05-19.md`.
+
+Follow-up job `53170493` (`debug`, four A100 GPUs) passed
+`benchmarks/single_stage_init_parity.py` with active point sharding after the
+private optimizer and Boozer penalty geometry active-replicated-placement fixes.
+It wrote `single_stage_cuda_init.json` with `"passed": true`, reported
+`|iota diff|=0.00e+00`, volume relative difference `0.00e+00`, field-error
+relative difference `2.51e-16`, and completed in 7:34 Slurm elapsed
+(`7:27.85` by `/usr/bin/time`) with Slurm batch MaxRSS `7905296K`.
 
 ## N31: plumb JAX GPU memory env vars through `apply_jax_runtime_config`
 
@@ -1095,7 +1112,7 @@ per-call retargeting of compiled JITs.
 
 | Item | Implementation state | Evidence boundary |
 | --- | --- | --- |
-| N21 | Source implemented: runtime solve callbacks now keep success as a JAX scalar; public Boozer objective gradients raise on failed solve status rather than caching NaN gradients. | Local unit proof only: `tests/geo/test_surface_objectives_jax.py::test_checked_boozer_linear_solve_uses_public_status_boundary`, `::test_checked_boozer_linear_solve_raises_on_failed_status`. Real M5 fixture transfer-guard sweep still not recorded. |
+| N21 | Source implemented: runtime solve callbacks keep success as a JAX scalar; public Boozer objective gradients raise on failed solve status rather than caching NaN gradients. | Local unit proof: `tests/geo/test_surface_objectives_jax.py::test_checked_boozer_linear_solve_uses_public_status_boundary`, `::test_checked_boozer_linear_solve_raises_on_failed_status`. Real-fixture strict-transfer proof: `tests/integration/test_single_stage_jax_cpu_reference.py::TestCompositeObjective::test_public_wrapper_dj_boundaries_allow_strict_transfer_guard_real_fixture`. |
 | N22 | Source implemented: manual LS compatibility loop now uses `jax.lax.while_loop` with device-resident cost, norm, finite, damping, and accept/reject state. | Local proof: `tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_public_manual_ls_api_increases_damping_after_worsening_trial`, `::test_public_manual_ls_loop_runs_under_strict_transfer_guard`. Benchmark improvement not recorded. |
 | N23 | Source implemented: direct-coil value helpers return JAX scalars; public wrapper boundaries materialize scalar values once; cached-solve observability skips norm host reads unless debug/env/failure logging is active. | Local proof: `tests/geo/test_surface_objectives_jax.py::test_direct_coil_value_helpers_keep_value_as_jax_scalar`. Transfer-count counter and real wrapper sweep still not recorded. |
 | N24 | Source implemented: `_per_coil_unit_field` now vmaps over coils inside each quadrature group and only loops over groups/order reconstruction. | Local proof: `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppCoilCurrentParity::test_per_coil_unit_field_vectorizes_within_quadrature_group`. Scaling benchmark/HLO report not recorded. |
@@ -1103,12 +1120,12 @@ per-call retargeting of compiled JITs.
 | N26 | Source implemented: `src/simsopt/geo/framedcurve_jax.py` now uses composed multi-arg VJPs; `rg "jax\\.vjp" src/simsopt/geo/framedcurve_jax.py \| wc -l` reports 9 sites, below the <22 target. | Local proof: `tests/geo/test_framedcurve_jax_wrappers_item18.py -q`, `tests/geo/test_curvexyzfouriersymmetries_spec_jax.py -q`. Dedicated wall-time benchmark not recorded. |
 | N27 | Source implemented: `BackendPolicy.matmul_precision` pins `highest` for parity modes and `apply_jax_runtime_config()` applies it. | Local proof: `tests/test_backend.py -q` and an interactive `jax_cpu_parity` config probe. CUDA TF32 speedup comparison not recorded. |
 | N28 | Source implemented: CUDA determinism validation now runs for direct CUDA environment selection and warns/raises by strictness. | Local proof: `tests/test_backend.py -q`. CUDA pre-import subprocess matrix partially covered by import-smoke; real CUDA run not recorded. |
-| N29 | Source/docs implemented: setup docs and `CLAUDE.md` document single-device `jax_gpu_parity`; runtime emits an info log for multi-device parity default. | Local proof: `tests/test_backend.py -q`. Real multi-GPU parity proof remains N30. |
-| N30 | Not closed; hardware-gated. | No 1/2/4-GPU sweep, HBM report, or `docs/jax_multi_gpu_proof_*.md` artifact exists in this pass. |
+| N29 | Source/docs implemented: setup docs and `CLAUDE.md` document single-device `jax_gpu_parity`; runtime emits an info log for multi-device parity default. | Local proof: `tests/test_backend.py -q`. Real multi-GPU proof is now recorded under N30. |
+| N30 | Closed for the pre-sharded steady-state contract. | Perlmutter jobs `53168131` and `53168132`; `docs/jax_multi_gpu_proof_2026-05-19.md` records 1 / 2 / 4-GPU wall time, peak GPU memory, active `NamedSharding`, and HLO collective evidence for `integral_BdotN_surface_sharded` plus seed-batch scoring. |
 | N31 | Source/docs implemented: runtime owns JAX/XLA GPU memory env policy, `SIMSOPT_*` overrides, and explicit `set_backend()` kwargs. | Local proof: `tests/test_backend.py -q`; `tests/test_jax_import_smoke.py::test_import_package_root_without_generated_version_file -q` after updating the raw-source stub. Real allocator log/memory-limit proof not recorded. |
 | N32 | Source/docs implemented: dense-Jacobian defaults are resolved through `BackendPolicy` with CPU/GPU env overrides and constructor-level explicit option precedence. | Local proof: `tests/test_backend.py -q`, `tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_ls_surface_exact_newton_has_default_dense_jacobian_ceiling`. Large-N scaling-limit fixture not recorded. |
-| N33 | Partially implemented: `linearization_residency={"device","host"}` is accepted and dense LS factors can be stored on CPU and restaged for runtime solve callbacks. | Local proof: `tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_linearization_residency_host_places_dense_factors_on_cpu`. Equal-gradient two-solver proof and memory probe are still missing. |
-| N34 | Partially implemented: `with_cpu_device_for_construction()` helper exported; GPU OOM docs prescribe checkpoint/restart and explicitly reject transparent compiled-JIT retargeting. | Local proof: `tests/test_backend.py -q`. Worked command-level restart example and CPU-pinned plus GPU-routed two-instance compile-cache proof are still missing, so N34 is not closed. |
+| N33 | Partially implemented: `linearization_residency={"device","host"}` is accepted and dense factors can be stored on CPU and restaged for runtime solve callbacks. | Local proof: `tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_linearization_residency_host_places_dense_factors_on_cpu`; dual-instance solve/VJP parity: `tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_linearization_residency_dual_instance_gradient_path_matches`. Production memory probe is still missing. |
+| N34 | Partially implemented: `with_cpu_device_for_construction()` helper exported; GPU OOM docs prescribe checkpoint/restart and explicitly reject transparent compiled-JIT retargeting. | Local proof: `tests/test_backend.py::test_with_cpu_device_for_construction_uses_real_jax_cpu_default_device`; dual-instance cache observation: `tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_linearization_residency_dual_instance_gradient_path_matches`. Worked command-level restart example and real GPU hardware proof remain open. |
 
 Validation commands run in this pass:
 
@@ -1118,6 +1135,11 @@ Validation commands run in this pass:
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_public_manual_ls_api_increases_damping_after_worsening_trial tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_public_manual_ls_loop_runs_under_strict_transfer_guard tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_linearization_residency_host_places_dense_factors_on_cpu tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_ls_surface_exact_newton_has_default_dense_jacobian_ceiling -q` -> 4 passed.
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_result_dict_keys tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_result_materializes_dense_plu_when_not_verbose tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_linearization_residency_host_places_dense_factors_on_cpu -q` -> 3 passed.
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppCoilCurrentParity::test_per_coil_unit_field_vectorizes_within_quadrature_group -q` -> 1 passed.
+
+Additional 2026-05-19 review validation:
+
+- `python -m pytest tests/integration/test_single_stage_jax_cpu_reference.py::TestCompositeObjective::test_public_wrapper_dj_boundaries_allow_strict_transfer_guard_real_fixture tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_linearization_residency_dual_instance_gradient_path_matches tests/test_backend.py::test_with_cpu_device_for_construction_uses_real_jax_cpu_default_device -q` -> 3 passed.
+- `python -m pytest tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_get_adjoint_runtime_state_status_stays_jax_scalar_until_public_boundary tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_linearization_residency_dual_instance_gradient_path_matches tests/test_backend.py::test_with_cpu_device_for_construction_uses_real_jax_cpu_default_device -q` -> 3 passed.
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/field/test_biotsavart_jax.py::TestBiotSavartJaxAnalytical::test_grouped_biot_savart_A_host_helper_matches_dense_kernel tests/field/test_biotsavart_jax.py::TestBiotSavartJaxAnalytical::test_grouped_biot_savart_B_jit_handles_mixed_quadrature_groups -q` -> 2 passed.
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/field/test_biotsavart_jax_parity.py::TestGroupedBiotSavartGradient::test_mixed_quad_gradient_fd -q` -> 1 passed.
 - `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src .conda/jax/bin/python -m pytest tests/integration/test_single_stage_physics_parity.py::test_single_stage_subprocess_env_preserves_existing_xla_flags tests/test_benchmark_helpers.py::test_repo_pythonpath_env_bundled_cuda_clears_local_toolchain_overrides tests/test_benchmark_helpers.py::test_repo_pythonpath_env_replaces_stale_cuda_determinism_flag tests/test_benchmark_helpers.py::test_build_provenance_includes_compilation_cache_metadata tests/test_benchmark_helpers.py::test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env tests/test_benchmark_helpers.py::test_gpu_parity_workflow_enforces_strict_transfer_guard_contract tests/test_benchmark_helpers.py::test_gpu_parity_workflow_adds_full_suite_disallow_lane tests/test_benchmark_helpers.py::test_smoke_workflow_adds_cuda_e2e_target_lane_gate tests/test_benchmark_helpers.py::test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane tests/test_hf_production_gpu_proof.py::test_run_production_gpu_proof_preserves_ld_library_path tests/test_hf_production_gpu_proof.py::test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override tests/test_lightning_production_gpu_proof.py::test_dry_run_emits_command_with_setuptools_scm_and_bash_safeguards -q` -> 12 passed.

@@ -20,6 +20,7 @@ __all__ = [
     "SeedBatchShardingConfig",
     "SurfaceQuadratureShardingConfig",
     "TrajectoryBatchShardingConfig",
+    "active_replicated_sharding",
     "coil_group_collective_config",
     "collective_field_sharding_summary",
     "inspect_array_sharding_summary",
@@ -29,6 +30,7 @@ __all__ = [
     "maybe_shard_seed_batch_inputs",
     "maybe_shard_surface_quadrature_inputs",
     "maybe_shard_trajectory_batch_inputs",
+    "place_active_replicated",
     "seed_batch_sharding_config",
     "seed_batch_sharding_summary",
     "surface_quadrature_sharding_config",
@@ -190,10 +192,41 @@ def _replicated_sharding_for(platform: str, axis_name: str) -> NamedSharding | N
     return NamedSharding(mesh, P())
 
 
-def _place_array(array, sharding):
-    if isinstance(array, (np.ndarray, jax.Array)):
-        return runtime_device_put(array, target=sharding)
-    return lax.with_sharding_constraint(jnp.asarray(array), sharding)
+def active_replicated_sharding(*, mode: str | None = None) -> NamedSharding | None:
+    """Return the replicated mesh placement for active point-axis sharding."""
+    tuning = get_sharding_tuning(mode)
+    if not tuning.active:
+        return None
+    if tuning.mesh_axes == (tuning.point_axis_name,):
+        return _replicated_sharding_for(tuning.platform, tuning.point_axis_name)
+    if tuning.mesh_axes == (tuning.point_axis_name, tuning.coil_axis_name):
+        mesh = _mesh_2d_for(
+            tuning.platform,
+            tuning.point_axis_name,
+            tuning.coil_axis_name,
+            int(tuning.point_device_count),
+            int(tuning.coil_device_count),
+        )
+        if mesh is None:
+            return None
+        return NamedSharding(mesh, P())
+    return None
+
+
+def _place_array(array, sharding, *, dtype=None):
+    if not isinstance(array, jax.Array) and hasattr(array, "aval"):
+        return lax.with_sharding_constraint(jnp.asarray(array, dtype=dtype), sharding)
+    return runtime_device_put(array, dtype=dtype, target=sharding)
+
+
+def place_active_replicated(value, *, dtype=None, mode: str | None = None):
+    """Place an array leaf on the active replicated point-axis mesh."""
+    sharding = active_replicated_sharding(mode=mode)
+    if sharding is None:
+        if dtype is None:
+            return value
+        return runtime_device_put(value, dtype=dtype)
+    return _place_array(value, sharding, dtype=dtype)
 
 
 def _place_leading_axis_arrays(arrays, *, mesh: Mesh, axis_name: str):

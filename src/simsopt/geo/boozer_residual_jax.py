@@ -56,7 +56,6 @@ import jax.numpy as jnp
 from jax import lax
 
 from ..jax_core._math_utils import (
-    as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
     as_runtime_value as _as_runtime_value,
     explicit_rsqrt as _explicit_rsqrt,
@@ -101,10 +100,10 @@ def _split_decision_vector(x, *, optimize_G):
             f"decision vector length {int(x_jax.shape[0])} is too short for "
             f"optimize_G={optimize_G}; expected at least {tail_size} entries."
         )
-    sdofs = jnp.take(x_jax, _as_jax_int32(np.arange(surface_size)), axis=0)
-    iota = jnp.take(x_jax, _as_jax_int32(surface_size), axis=0)
+    sdofs = x_jax[:surface_size]
+    iota = x_jax[surface_size]
     if optimize_G:
-        G = jnp.take(x_jax, _as_jax_int32(surface_size + 1), axis=0)
+        G = x_jax[surface_size + 1]
         return sdofs, iota, G
     return sdofs, iota, None
 

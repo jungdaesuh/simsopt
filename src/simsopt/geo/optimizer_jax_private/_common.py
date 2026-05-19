@@ -15,10 +15,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from simsopt.backend.dtypes import runtime_device_put
 from jax import lax
 
 from ..._core.jax_host_boundary import host_array as _callback_host_array
+from ...jax_core.sharding import place_active_replicated
 from ..optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     _CACHEABLE_VALUE_AND_GRAD_ATTR,
@@ -33,11 +33,17 @@ _PRIVATE_SOLVER_CACHE_LOCK = Lock()
 _PRIVATE_SOLVER_CACHE_ATTR = "_simsopt_cached_private_solver"
 
 
+def _private_optimizer_device_put(value, *, dtype):
+    return place_active_replicated(value, dtype=dtype)
+
+
 def _as_jax_dtype(value, dtype):
     if isinstance(value, jax.Array):
+        return _private_optimizer_device_put(value, dtype=dtype)
+    if hasattr(value, "aval"):
         return jnp.asarray(value, dtype=dtype)
     if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
-        return runtime_device_put(value, dtype=dtype)
+        return _private_optimizer_device_put(value, dtype=dtype)
     return jnp.asarray(value, dtype=dtype)
 
 
@@ -46,7 +52,10 @@ def _as_numpy_dtype(value, dtype):
 
 
 def _eye(n, dtype):
-    return runtime_device_put(np.eye(int(n), dtype=np.dtype(dtype)), dtype=dtype)
+    return _private_optimizer_device_put(
+        np.eye(int(n), dtype=np.dtype(dtype)),
+        dtype=dtype,
+    )
 
 
 def _zeros(shape, dtype):
@@ -54,7 +63,10 @@ def _zeros(shape, dtype):
         shape = (int(shape),)
     else:
         shape = tuple(int(dim) for dim in shape)
-    return runtime_device_put(np.zeros(shape, dtype=np.dtype(dtype)), dtype=dtype)
+    return _private_optimizer_device_put(
+        np.zeros(shape, dtype=np.dtype(dtype)),
+        dtype=dtype,
+    )
 
 
 def _int_scalar(value):
