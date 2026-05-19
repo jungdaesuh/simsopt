@@ -506,9 +506,9 @@ class SurfaceRZFourierTests(unittest.TestCase):
         np.testing.assert_allclose(full_torus.rc, full_period.rc)
         np.testing.assert_allclose(full_torus.zs, full_period.zs)
 
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         # non stell sym for code coverage
-        qsc = Qsc(ma.rc, np.insert(ma.zs, 0, 0), rs=np.random.rand(5)*1e-7, zc=np.random.rand(5)*1e-7, nfp=nfp, etabar=-0.408)
+        qsc = Qsc(ma.rc, np.insert(ma.zs, 0, 0), rs=rng.rand(5)*1e-7, zc=rng.rand(5)*1e-7, nfp=nfp, etabar=-0.408)
         phis = np.linspace(0, 1/qsc.nfp, 2*ntor+1, endpoint=False)
         thetas = np.linspace(0, 1, 2*mpol+1, endpoint=False)
         full_torus = SurfaceRZFourier.from_pyQSC(qsc, r=0.1, ntheta=100, mpol=6, ntor=6)

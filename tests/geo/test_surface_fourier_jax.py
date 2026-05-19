@@ -19,6 +19,20 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt.jax_core import (
+    surface_xyz_fourier_dfirst_fund_form_from_dofs,
+    surface_xyz_fourier_dsecond_fund_form_from_dofs,
+    surface_xyz_fourier_dsurface_curvatures_from_dofs,
+    surface_xyz_fourier_first_fund_form_from_spec,
+    surface_xyz_fourier_second_fund_form_from_spec,
+    surface_xyz_fourier_surface_curvatures_from_spec,
+    surface_xyz_tensor_fourier_dfirst_fund_form_from_dofs,
+    surface_xyz_tensor_fourier_dsecond_fund_form_from_dofs,
+    surface_xyz_tensor_fourier_dsurface_curvatures_from_dofs,
+    surface_xyz_tensor_fourier_first_fund_form_from_spec,
+    surface_xyz_tensor_fourier_second_fund_form_from_spec,
+    surface_xyz_tensor_fourier_surface_curvatures_from_spec,
+)
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
 
@@ -114,6 +128,7 @@ surface_xyzfourier_dgammadash2dash2_by_dcoeff = (
 )
 stellsym_scatter_indices = _sf.stellsym_scatter_indices
 _DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
+_DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
 
 
 def _make_simple_torus_coeffs(R=1.0, r=0.1, mpol=1, ntor=0, nfp=1):
@@ -272,6 +287,23 @@ class TestSurfaceFourierJaxSimpleTorus:
             rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
             atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
         )
+
+    def test_tiny_unitnormal_and_area_autodiff_are_finite(self):
+        """Tiny nonzero normals should not underflow into NaN autodiff."""
+
+        normal = jnp.asarray([[[1.0e-300, 0.0, 0.0]]], dtype=jnp.float64)
+        unitnormal = _sf._unitnormal(normal)
+        unitnormal_jac = jax.jacfwd(lambda n: _sf._unitnormal(n).reshape(-1))(normal)
+        area_grad = jax.grad(surface_area)(normal)
+
+        np.testing.assert_allclose(
+            np.asarray(unitnormal),
+            np.asarray([[[1.0, 0.0, 0.0]]], dtype=np.float64),
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert np.isfinite(np.asarray(unitnormal_jac)).all()
+        assert np.isfinite(np.asarray(area_grad)).all()
 
 
 class TestSurfaceFourierJaxHigherOrder:
@@ -605,6 +637,275 @@ class TestSurfaceXYZFourierJaxCppParity:
             atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
         )
 
+    @pytest.mark.parametrize(
+        ("jax_fn", "cpp_method"),
+        [
+            (surface_xyzfourier_dgammadash1_by_dcoeff, "dgammadash1_by_dcoeff"),
+            (surface_xyzfourier_dgammadash2_by_dcoeff, "dgammadash2_by_dcoeff"),
+        ],
+    )
+    @pytest.mark.parametrize("stellsym", [True, False])
+    def test_tangent_derivative_columns_match_cpp(self, jax_fn, cpp_method, stellsym):
+        """Exercise each SurfaceXYZFourier tangent-derivative DOF column."""
+        from simsopt.geo import SurfaceXYZFourier
+
+        nfp = 4
+        surface = SurfaceXYZFourier(
+            mpol=3,
+            ntor=2,
+            nfp=nfp,
+            stellsym=stellsym,
+            quadpoints_phi=np.linspace(0.011, (1.0 / nfp) - 0.007, 7),
+            quadpoints_theta=np.linspace(0.019, 0.981, 6),
+        )
+        rng = np.random.default_rng(151 + int(stellsym))
+        dofs = surface.get_dofs().copy()
+        dofs += rng.normal(scale=0.025, size=dofs.shape)
+        surface.set_dofs(dofs)
+        spec = surface.surface_spec()
+
+        derivative_jax = np.asarray(
+            jax_fn(
+                jnp.asarray(dofs),
+                jnp.asarray(surface.quadpoints_phi),
+                jnp.asarray(surface.quadpoints_theta),
+                surface.mpol,
+                surface.ntor,
+                surface.nfp,
+                surface.stellsym,
+                spec.scatter_indices,
+                spec.coeff_template,
+            )
+        )
+        derivative_cpp = getattr(surface, cpp_method)()
+
+        for column in range(dofs.size):
+            np.testing.assert_allclose(
+                derivative_jax[..., column],
+                derivative_cpp[..., column],
+                rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+                atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+            )
+
+    @pytest.mark.parametrize("stellsym", [True, False])
+    def test_normal_derivative_columns_match_cpp(self, stellsym):
+        """Exercise SurfaceXYZFourier normal and normal-Hessian DOF columns."""
+        from simsopt.geo import SurfaceXYZFourier
+
+        nfp = 3
+        surface = SurfaceXYZFourier(
+            mpol=2,
+            ntor=1,
+            nfp=nfp,
+            stellsym=stellsym,
+            quadpoints_phi=np.linspace(0.013, (1.0 / nfp) - 0.011, 5),
+            quadpoints_theta=np.linspace(0.017, 0.983, 4),
+        )
+        rng = np.random.default_rng(171 + int(stellsym))
+        dofs = surface.get_dofs().copy()
+        dofs += rng.normal(scale=0.03, size=dofs.shape)
+        surface.set_dofs(dofs)
+        spec = surface.surface_spec()
+        args = (
+            jnp.asarray(dofs),
+            jnp.asarray(surface.quadpoints_phi),
+            jnp.asarray(surface.quadpoints_theta),
+            surface.mpol,
+            surface.ntor,
+            surface.nfp,
+            surface.stellsym,
+            spec.scatter_indices,
+            spec.coeff_template,
+        )
+
+        dnormal_jax = np.asarray(surface_xyzfourier_dnormal_by_dcoeff(*args))
+        dnormal_cpp = surface.dnormal_by_dcoeff()
+        d2normal_jax = np.asarray(surface_xyzfourier_d2normal_by_dcoeffdcoeff(*args))
+        d2normal_cpp = surface.d2normal_by_dcoeffdcoeff()
+
+        for column in range(dofs.size):
+            np.testing.assert_allclose(
+                dnormal_jax[..., column],
+                dnormal_cpp[..., column],
+                rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+                atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+            )
+            for other_column in range(dofs.size):
+                np.testing.assert_allclose(
+                    d2normal_jax[..., column, other_column],
+                    d2normal_cpp[..., column, other_column],
+                    rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+                    atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+                )
+
+    @pytest.mark.parametrize("stellsym", [True, False])
+    def test_dnormal_by_dcoeff_vjp_matches_cpp(self, stellsym):
+        """SurfaceXYZFourier normal VJP matches the CPU Surface VJP helper."""
+        from simsopt.geo import SurfaceXYZFourier
+
+        nfp = 3
+        surface = SurfaceXYZFourier(
+            mpol=2,
+            ntor=1,
+            nfp=nfp,
+            stellsym=stellsym,
+            quadpoints_phi=np.linspace(0.021, (1.0 / nfp) - 0.013, 5),
+            quadpoints_theta=np.linspace(0.029, 0.971, 4),
+        )
+        rng = np.random.default_rng(191 + int(stellsym))
+        dofs = surface.get_dofs().copy()
+        dofs += rng.normal(scale=0.02, size=dofs.shape)
+        surface.set_dofs(dofs)
+        cotangent = rng.normal(size=surface.normal().shape)
+        spec = surface.surface_spec()
+        args_tail = (
+            jnp.asarray(surface.quadpoints_phi),
+            jnp.asarray(surface.quadpoints_theta),
+            surface.mpol,
+            surface.ntor,
+            surface.nfp,
+            surface.stellsym,
+            spec.scatter_indices,
+            spec.coeff_template,
+        )
+
+        _, vjp_fn = jax.vjp(
+            lambda dofs_arg: surface_xyzfourier_normal_from_dofs(dofs_arg, *args_tail),
+            jnp.asarray(dofs),
+        )
+        (vjp_jax,) = vjp_fn(jnp.asarray(cotangent))
+
+        np.testing.assert_allclose(
+            np.asarray(vjp_jax),
+            surface.dnormal_by_dcoeff_vjp(cotangent),
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+
+
+_NON_RZ_FORM_FUNCTIONS = {
+    "SurfaceXYZFourier": (
+        surface_xyz_fourier_first_fund_form_from_spec,
+        surface_xyz_fourier_second_fund_form_from_spec,
+        surface_xyz_fourier_surface_curvatures_from_spec,
+        surface_xyz_fourier_dfirst_fund_form_from_dofs,
+        surface_xyz_fourier_dsecond_fund_form_from_dofs,
+        surface_xyz_fourier_dsurface_curvatures_from_dofs,
+    ),
+    "SurfaceXYZTensorFourier": (
+        surface_xyz_tensor_fourier_first_fund_form_from_spec,
+        surface_xyz_tensor_fourier_second_fund_form_from_spec,
+        surface_xyz_tensor_fourier_surface_curvatures_from_spec,
+        surface_xyz_tensor_fourier_dfirst_fund_form_from_dofs,
+        surface_xyz_tensor_fourier_dsecond_fund_form_from_dofs,
+        surface_xyz_tensor_fourier_dsurface_curvatures_from_dofs,
+    ),
+}
+
+
+@pytest.mark.parametrize("surface_cls_name", [
+    "SurfaceXYZFourier",
+    "SurfaceXYZTensorFourier",
+])
+@pytest.mark.parametrize("stellsym", [True, False])
+def test_non_rz_fundamental_forms_and_curvatures_match_cpp(
+    surface_cls_name,
+    stellsym,
+):
+    """Spec-level non-RZ form helpers match CPU ``Surface`` methods."""
+
+    from simsopt import geo
+
+    surface_cls = getattr(geo, surface_cls_name)
+    nfp = 3
+    surface = surface_cls(
+        mpol=2,
+        ntor=1,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=np.linspace(0.013, (1.0 / nfp) - 0.011, 5),
+        quadpoints_theta=np.linspace(0.017, 0.983, 4),
+    )
+    rng = np.random.default_rng(211 + 10 * int(stellsym) + len(surface_cls_name))
+    dofs = surface.get_dofs().copy()
+    dofs += rng.normal(scale=0.02, size=dofs.shape)
+    surface.set_dofs(dofs)
+    spec = surface.surface_spec()
+    first_fn, second_fn, curvature_fn, _dfirst_fn, _dsecond_fn, _dcurvature_fn = (
+        _NON_RZ_FORM_FUNCTIONS[surface_cls_name]
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(first_fn(spec)),
+        surface.first_fund_form(),
+        rtol=_DIRECT_KERNEL_TOLS["rtol"],
+        atol=_DIRECT_KERNEL_TOLS["atol"],
+    )
+    np.testing.assert_allclose(
+        np.asarray(second_fn(spec)),
+        surface.second_fund_form(),
+        rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+        atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+    )
+    np.testing.assert_allclose(
+        np.asarray(curvature_fn(spec)),
+        surface.surface_curvatures(),
+        rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+        atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+    )
+
+
+@pytest.mark.parametrize("surface_cls_name", [
+    "SurfaceXYZFourier",
+    "SurfaceXYZTensorFourier",
+])
+@pytest.mark.parametrize("stellsym", [True, False])
+def test_non_rz_fundamental_form_derivatives_match_cpp(
+    surface_cls_name,
+    stellsym,
+):
+    """Dof-Jacobian non-RZ form helpers match CPU ``*_by_dcoeff`` methods."""
+
+    from simsopt import geo
+
+    surface_cls = getattr(geo, surface_cls_name)
+    nfp = 2
+    surface = surface_cls(
+        mpol=1,
+        ntor=1,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=np.linspace(0.019, (1.0 / nfp) - 0.023, 4),
+        quadpoints_theta=np.linspace(0.031, 0.969, 3),
+    )
+    rng = np.random.default_rng(251 + 10 * int(stellsym) + len(surface_cls_name))
+    dofs = surface.get_dofs().copy()
+    dofs += rng.normal(scale=0.015, size=dofs.shape)
+    surface.set_dofs(dofs)
+    spec = surface.surface_spec()
+    _first_fn, _second_fn, _curvature_fn, dfirst_fn, dsecond_fn, dcurvature_fn = (
+        _NON_RZ_FORM_FUNCTIONS[surface_cls_name]
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(dfirst_fn(spec, spec.dofs)),
+        surface.dfirst_fund_form_by_dcoeff(),
+        rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+        atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+    )
+    np.testing.assert_allclose(
+        np.asarray(dsecond_fn(spec, spec.dofs)),
+        surface.dsecond_fund_form_by_dcoeff(),
+        rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+        atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+    )
+    np.testing.assert_allclose(
+        np.asarray(dcurvature_fn(spec, spec.dofs)),
+        surface.dsurface_curvatures_by_dcoeff(),
+        rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+        atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+    )
+
 
 class TestSurfaceFourierSecondNormalDerivativeParity:
     """Compare explicit heavy normal Hessian APIs against the CPU oracle."""
@@ -761,6 +1062,162 @@ class TestSurfaceFourierPairedPointParity:
                 atol=1e-12,
             )
 
+    @pytest.mark.parametrize("surface_cls_name", [
+        "SurfaceXYZFourier",
+        "SurfaceXYZTensorFourier",
+    ])
+    @pytest.mark.parametrize("stellsym", [True, False])
+    def test_higher_paired_lin_wrappers_match_cpp(self, surface_cls_name, stellsym):
+        from simsopt import geo
+        from simsopt.jax_core import (
+            surface_xyz_fourier_gammadash1dash1_lin_from_dofs,
+            surface_xyz_fourier_gammadash1dash1_lin_from_spec,
+            surface_xyz_fourier_gammadash1dash1dash1_lin_from_dofs,
+            surface_xyz_fourier_gammadash1dash1dash1_lin_from_spec,
+            surface_xyz_fourier_gammadash1dash1dash2_lin_from_dofs,
+            surface_xyz_fourier_gammadash1dash1dash2_lin_from_spec,
+            surface_xyz_fourier_gammadash1dash2_lin_from_dofs,
+            surface_xyz_fourier_gammadash1dash2_lin_from_spec,
+            surface_xyz_fourier_gammadash1dash2dash2_lin_from_dofs,
+            surface_xyz_fourier_gammadash1dash2dash2_lin_from_spec,
+            surface_xyz_fourier_gammadash2dash2_lin_from_dofs,
+            surface_xyz_fourier_gammadash2dash2_lin_from_spec,
+            surface_xyz_fourier_gammadash2dash2dash2_lin_from_dofs,
+            surface_xyz_fourier_gammadash2dash2dash2_lin_from_spec,
+            surface_xyz_tensor_fourier_gammadash1dash1_lin_from_dofs,
+            surface_xyz_tensor_fourier_gammadash1dash1_lin_from_spec,
+            surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_dofs,
+            surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_spec,
+            surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_dofs,
+            surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_spec,
+            surface_xyz_tensor_fourier_gammadash1dash2_lin_from_dofs,
+            surface_xyz_tensor_fourier_gammadash1dash2_lin_from_spec,
+            surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_dofs,
+            surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_spec,
+            surface_xyz_tensor_fourier_gammadash2dash2_lin_from_dofs,
+            surface_xyz_tensor_fourier_gammadash2dash2_lin_from_spec,
+            surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_dofs,
+            surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_spec,
+        )
+
+        case_by_class = {
+            "SurfaceXYZFourier": (
+                geo.SurfaceXYZFourier,
+                (
+                    (
+                        "gammadash1dash1_lin",
+                        surface_xyz_fourier_gammadash1dash1_lin_from_spec,
+                        surface_xyz_fourier_gammadash1dash1_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash1dash2_lin",
+                        surface_xyz_fourier_gammadash1dash2_lin_from_spec,
+                        surface_xyz_fourier_gammadash1dash2_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash2dash2_lin",
+                        surface_xyz_fourier_gammadash2dash2_lin_from_spec,
+                        surface_xyz_fourier_gammadash2dash2_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash1dash1dash1_lin",
+                        surface_xyz_fourier_gammadash1dash1dash1_lin_from_spec,
+                        surface_xyz_fourier_gammadash1dash1dash1_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash1dash1dash2_lin",
+                        surface_xyz_fourier_gammadash1dash1dash2_lin_from_spec,
+                        surface_xyz_fourier_gammadash1dash1dash2_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash1dash2dash2_lin",
+                        surface_xyz_fourier_gammadash1dash2dash2_lin_from_spec,
+                        surface_xyz_fourier_gammadash1dash2dash2_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash2dash2dash2_lin",
+                        surface_xyz_fourier_gammadash2dash2dash2_lin_from_spec,
+                        surface_xyz_fourier_gammadash2dash2dash2_lin_from_dofs,
+                    ),
+                ),
+                131,
+            ),
+            "SurfaceXYZTensorFourier": (
+                geo.SurfaceXYZTensorFourier,
+                (
+                    (
+                        "gammadash1dash1_lin",
+                        surface_xyz_tensor_fourier_gammadash1dash1_lin_from_spec,
+                        surface_xyz_tensor_fourier_gammadash1dash1_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash1dash2_lin",
+                        surface_xyz_tensor_fourier_gammadash1dash2_lin_from_spec,
+                        surface_xyz_tensor_fourier_gammadash1dash2_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash2dash2_lin",
+                        surface_xyz_tensor_fourier_gammadash2dash2_lin_from_spec,
+                        surface_xyz_tensor_fourier_gammadash2dash2_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash1dash1dash1_lin",
+                        surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_spec,
+                        surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash1dash1dash2_lin",
+                        surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_spec,
+                        surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash1dash2dash2_lin",
+                        surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_spec,
+                        surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_dofs,
+                    ),
+                    (
+                        "gammadash2dash2dash2_lin",
+                        surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_spec,
+                        surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_dofs,
+                    ),
+                ),
+                141,
+            ),
+        }
+        surface_cls, cases, seed_base = case_by_class[surface_cls_name]
+        nfp = 5
+        surface = surface_cls(
+            mpol=3,
+            ntor=2,
+            nfp=nfp,
+            stellsym=stellsym,
+            quadpoints_phi=np.linspace(0.0, 1.0 / nfp, 8, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 7, endpoint=False),
+        )
+        rng = np.random.default_rng(seed_base + int(stellsym))
+        dofs = surface.get_dofs().copy()
+        dofs += rng.normal(scale=0.02, size=dofs.shape)
+        surface.set_dofs(dofs)
+        spec = surface.surface_spec()
+        phis = np.linspace(0.006, (1.0 / nfp) - 0.004, 9)
+        thetas = np.linspace(0.021, 0.979, 9)
+
+        for cpp_method, spec_fn, dofs_fn in cases:
+            expected = np.zeros((phis.size, 3))
+            getattr(surface, cpp_method)(expected, phis, thetas)
+            np.testing.assert_allclose(
+                np.asarray(spec_fn(spec, phis, thetas)),
+                expected,
+                rtol=1e-11,
+                atol=1e-10,
+            )
+            np.testing.assert_allclose(
+                np.asarray(dofs_fn(spec, dofs, phis, thetas)),
+                expected,
+                rtol=1e-11,
+                atol=1e-10,
+            )
+
 
 class TestSurfaceFourierSpecCppParity:
     """Compare immutable non-RZ surface specs against CPU surface geometry."""
@@ -884,6 +1341,90 @@ class TestSurfaceFourierSpecCppParity:
             rtol=_DERIVATIVE_HEAVY_TOLS["scalar_value_rtol"],
             atol=_DERIVATIVE_HEAVY_TOLS["scalar_value_atol"],
         )
+
+    @pytest.mark.parametrize("surface_cls_name", [
+        "SurfaceXYZFourier",
+        "SurfaceXYZTensorFourier",
+    ])
+    def test_high_order_spec_geometry_is_finite_and_matches_cpp(self, surface_cls_name):
+        from simsopt import geo
+        from simsopt.jax_core import (
+            surface_xyz_fourier_area_from_spec,
+            surface_xyz_fourier_gamma_from_spec,
+            surface_xyz_fourier_normal_from_spec,
+            surface_xyz_fourier_unitnormal_from_spec,
+            surface_xyz_fourier_volume_from_spec,
+            surface_xyz_tensor_fourier_area_from_spec,
+            surface_xyz_tensor_fourier_gamma_from_spec,
+            surface_xyz_tensor_fourier_normal_from_spec,
+            surface_xyz_tensor_fourier_unitnormal_from_spec,
+            surface_xyz_tensor_fourier_volume_from_spec,
+        )
+
+        case_by_class = {
+            "SurfaceXYZFourier": (
+                geo.SurfaceXYZFourier,
+                surface_xyz_fourier_gamma_from_spec,
+                surface_xyz_fourier_normal_from_spec,
+                surface_xyz_fourier_unitnormal_from_spec,
+                surface_xyz_fourier_area_from_spec,
+                surface_xyz_fourier_volume_from_spec,
+                111,
+            ),
+            "SurfaceXYZTensorFourier": (
+                geo.SurfaceXYZTensorFourier,
+                surface_xyz_tensor_fourier_gamma_from_spec,
+                surface_xyz_tensor_fourier_normal_from_spec,
+                surface_xyz_tensor_fourier_unitnormal_from_spec,
+                surface_xyz_tensor_fourier_area_from_spec,
+                surface_xyz_tensor_fourier_volume_from_spec,
+                121,
+            ),
+        }
+        (
+            surface_cls,
+            gamma_from_spec,
+            normal_from_spec,
+            unitnormal_from_spec,
+            area_from_spec,
+            volume_from_spec,
+            seed,
+        ) = case_by_class[surface_cls_name]
+        rng = np.random.default_rng(seed)
+        surface = surface_cls(
+            mpol=10,
+            ntor=10,
+            nfp=3,
+            stellsym=False,
+            quadpoints_phi=np.linspace(0.003, (1.0 / 3.0) - 0.005, 7),
+            quadpoints_theta=np.linspace(0.007, 0.991, 6),
+        )
+        dofs = surface.get_dofs().copy()
+        dofs += rng.normal(scale=1e-3, size=dofs.shape)
+        surface.set_dofs(dofs)
+        spec = surface.surface_spec()
+
+        for jax_fn, expected in (
+            (gamma_from_spec, surface.gamma()),
+            (normal_from_spec, surface.normal()),
+            (unitnormal_from_spec, surface.unitnormal()),
+        ):
+            actual = np.asarray(jax.jit(jax_fn)(spec))
+            assert np.isfinite(actual).all()
+            np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
+
+        for jax_fn, expected in (
+            (area_from_spec, surface.area()),
+            (volume_from_spec, surface.volume()),
+        ):
+            actual = float(jax.jit(jax_fn)(spec))
+            assert np.isfinite(actual)
+            np.testing.assert_allclose(
+                actual,
+                expected,
+                rtol=_DERIVATIVE_HEAVY_TOLS["scalar_value_rtol"],
+                atol=_DERIVATIVE_HEAVY_TOLS["scalar_value_atol"],
+            )
 
     @pytest.mark.parametrize("surface_cls_name", [
         "SurfaceXYZFourier",
@@ -1055,6 +1596,82 @@ class TestSurfaceFourierSpecCppParity:
         )
         np.testing.assert_allclose(
             np.asarray(hessian_fn(*args)),
+            getattr(surface, f"d2{scalar_name}_by_dcoeffdcoeff")(),
+            rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+        )
+
+    @pytest.mark.parametrize("surface_cls_name", [
+        "SurfaceXYZFourier",
+        "SurfaceXYZTensorFourier",
+    ])
+    @pytest.mark.parametrize("scalar_name", ["area", "volume"])
+    def test_nonstellsym_area_volume_hessian_mpol_gt_2_matches_cpp(
+        self,
+        surface_cls_name,
+        scalar_name,
+    ):
+        from simsopt import geo
+
+        case_by_class = {
+            "SurfaceXYZFourier": (
+                geo.SurfaceXYZFourier,
+                {
+                    "area": surface_xyzfourier_d2area_by_dcoeffdcoeff,
+                    "volume": surface_xyzfourier_d2volume_by_dcoeffdcoeff,
+                },
+                131,
+            ),
+            "SurfaceXYZTensorFourier": (
+                geo.SurfaceXYZTensorFourier,
+                {
+                    "area": d2area_by_dcoeffdcoeff,
+                    "volume": d2volume_by_dcoeffdcoeff,
+                },
+                141,
+            ),
+        }
+        surface_cls, hessian_by_scalar, seed_base = case_by_class[surface_cls_name]
+        surface = surface_cls(
+            mpol=3,
+            ntor=2,
+            nfp=3,
+            stellsym=False,
+            quadpoints_phi=np.linspace(0.011, (1.0 / 3.0) - 0.013, 6),
+            quadpoints_theta=np.linspace(0.017, 0.983, 5),
+        )
+        rng = np.random.default_rng(seed_base)
+        dofs = surface.get_dofs().copy()
+        dofs += rng.normal(scale=0.015, size=dofs.shape)
+        surface.set_dofs(dofs)
+        spec = surface.surface_spec()
+
+        if surface_cls_name == "SurfaceXYZFourier":
+            args = (
+                jnp.asarray(dofs),
+                jnp.asarray(surface.quadpoints_phi),
+                jnp.asarray(surface.quadpoints_theta),
+                surface.mpol,
+                surface.ntor,
+                surface.nfp,
+                surface.stellsym,
+                spec.scatter_indices,
+                spec.coeff_template,
+            )
+        else:
+            args = (
+                jnp.asarray(dofs),
+                jnp.asarray(surface.quadpoints_phi),
+                jnp.asarray(surface.quadpoints_theta),
+                surface.mpol,
+                surface.ntor,
+                surface.nfp,
+                surface.stellsym,
+                None,
+            )
+
+        np.testing.assert_allclose(
+            np.asarray(hessian_by_scalar[scalar_name](*args)),
             getattr(surface, f"d2{scalar_name}_by_dcoeffdcoeff")(),
             rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
             atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],

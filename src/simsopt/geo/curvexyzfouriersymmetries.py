@@ -1,62 +1,16 @@
 import numpy as np
-from .curve import JaxCurve, _as_runtime_float64_ref as _as_runtime_float64, jnp
+from .curve import JaxCurve
 from math import gcd
 
 __all__ = ["CurveXYZFourierSymmetries"]
 
-_TWO_PI = 2.0 * np.pi
 
-
-def jaxXYZFourierSymmetriescurve_pure(dofs, quadpoints, order, nfp, stellsym, ntor):
-    # Build mode-number / scalar tensors on-device so the kernel stays clean
-    # under ``JAX_TRANSFER_GUARD=disallow``. Python literal multiplications
-    # like ``2 * jnp.pi * nfp`` would otherwise trigger implicit host-to-device
-    # transfers of the materialised scalar.
-    two_pi = _as_runtime_float64(_TWO_PI, reference=quadpoints)
-    nfp_scalar = _as_runtime_float64(float(nfp), reference=quadpoints)
-    ntor_scalar = _as_runtime_float64(float(ntor), reference=quadpoints)
-    modes = _as_runtime_float64(
-        np.arange(order + 1, dtype=np.float64), reference=quadpoints
+def _jaxXYZFourierSymmetriescurve_pure(dofs, points, order, nfp, stellsym, ntor):
+    from ..jax_core.curve_xyz_fourier_symmetries import (
+        jaxXYZFourierSymmetriescurve_pure,
     )
 
-    theta = jnp.expand_dims(quadpoints, axis=1)  # (N, 1)
-    m_row = jnp.expand_dims(modes, axis=0)  # (1, order+1)
-    angle_full = two_pi * nfp_scalar * m_row * theta
-    cos_full = jnp.cos(angle_full)
-    sin_tail = jnp.sin(angle_full[:, 1:])
-
-    if stellsym:
-        xc = dofs[: order + 1]
-        ys = dofs[order + 1 : 2 * order + 1]
-        zs = dofs[2 * order + 1 :]
-
-        xhat = jnp.sum(xc[None, :] * cos_full, axis=1)
-        yhat = jnp.sum(ys[None, :] * sin_tail, axis=1)
-        z = jnp.sum(zs[None, :] * sin_tail, axis=1)
-    else:
-        xc = dofs[0 : order + 1]
-        xs = dofs[order + 1 : 2 * order + 1]
-        yc = dofs[2 * order + 1 : 3 * order + 2]
-        ys = dofs[3 * order + 2 : 4 * order + 2]
-        zc = dofs[4 * order + 2 : 5 * order + 3]
-        zs = dofs[5 * order + 3 :]
-
-        xhat = jnp.sum(xc[None, :] * cos_full, axis=1) + jnp.sum(
-            xs[None, :] * sin_tail, axis=1
-        )
-        yhat = jnp.sum(yc[None, :] * cos_full, axis=1) + jnp.sum(
-            ys[None, :] * sin_tail, axis=1
-        )
-        z = jnp.sum(zc[None, :] * cos_full, axis=1) + jnp.sum(
-            zs[None, :] * sin_tail, axis=1
-        )
-
-    angle = two_pi * quadpoints * ntor_scalar
-    cos_angle = jnp.cos(angle)
-    sin_angle = jnp.sin(angle)
-    x = cos_angle * xhat - sin_angle * yhat
-    y = sin_angle * xhat + cos_angle * yhat
-    return jnp.stack((x, y, z), axis=1)
+    return jaxXYZFourierSymmetriescurve_pure(dofs, points, order, nfp, stellsym, ntor)
 
 
 class CurveXYZFourierSymmetries(JaxCurve):
@@ -106,7 +60,7 @@ class CurveXYZFourierSymmetries(JaxCurve):
             quadpoints = np.linspace(0, 1, quadpoints, endpoint=False)
 
         def pure(dofs, points):
-            return jaxXYZFourierSymmetriescurve_pure(
+            return _jaxXYZFourierSymmetriescurve_pure(
                 dofs, points, order, nfp, stellsym, ntor
             )
 

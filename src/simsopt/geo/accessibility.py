@@ -647,7 +647,7 @@ def _curve_in_port_penalty_zphi_grads(
     )
 
 
-@partial(jit, static_argnums=(5, 6))
+@partial(jit, static_argnames=("left_argnum", "right_argnum"))
 def _curve_in_port_penalty_xy_hessian(
     gamma_port,
     gammadash_port,
@@ -663,7 +663,7 @@ def _curve_in_port_penalty_xy_hessian(
     )(gamma_port, gammadash_port, gamma_curve, gammadash_curve, threshold)
 
 
-@partial(jit, static_argnums=(5, 6))
+@partial(jit, static_argnames=("left_argnum", "right_argnum"))
 def _curve_in_port_penalty_zphi_hessian(
     gamma_port,
     gammadash_port,
@@ -1117,7 +1117,7 @@ def _projected_cc_distance_zphi_grads(gamma1, l1, gamma2s, l2s, minimum_distance
     )(gamma1, l1, gamma2s, l2s, minimum_distance)
 
 
-@partial(jit, static_argnums=(5, 6))
+@partial(jit, static_argnames=("left_argnum", "right_argnum"))
 def _projected_cc_distance_xy_hessian(
     gamma1, l1, gamma2, l2, minimum_distance, left_argnum, right_argnum
 ):
@@ -1127,7 +1127,7 @@ def _projected_cc_distance_xy_hessian(
     )(gamma1, l1, gamma2, l2, minimum_distance)
 
 
-@partial(jit, static_argnums=(5, 6))
+@partial(jit, static_argnames=("left_argnum", "right_argnum"))
 def _projected_cc_distance_zphi_hessian(
     gamma1, l1, gamma2, l2, minimum_distance, left_argnum, right_argnum
 ):
@@ -1137,7 +1137,7 @@ def _projected_cc_distance_zphi_hessian(
     )(gamma1, l1, gamma2, l2, minimum_distance)
 
 
-@partial(jit, static_argnums=(5, 6))
+@partial(jit, static_argnames=("left_argnum", "right_argnum"))
 def _projected_cc_distance_xy_hessians(
     gamma1, l1, gamma2s, l2s, minimum_distance, left_argnum, right_argnum
 ):
@@ -1147,7 +1147,7 @@ def _projected_cc_distance_xy_hessians(
     )(gamma1, l1, gamma2s, l2s, minimum_distance, left_argnum, right_argnum)
 
 
-@partial(jit, static_argnums=(5, 6))
+@partial(jit, static_argnames=("left_argnum", "right_argnum"))
 def _projected_cc_distance_zphi_hessians(
     gamma1, l1, gamma2s, l2s, minimum_distance, left_argnum, right_argnum
 ):
@@ -1641,7 +1641,7 @@ def _projected_curve_convexity_zphi_grad(quadpoints, gamma, gammadash, gammadash
     )
 
 
-@partial(jit, static_argnums=(4,))
+@partial(jit, static_argnames=("argnum",))
 def _projected_curve_convexity_xy_hessian(
     quadpoints, gamma, gammadash, gammadashdash, argnum
 ):
@@ -1650,7 +1650,7 @@ def _projected_curve_convexity_xy_hessian(
     )
 
 
-@partial(jit, static_argnums=(4,))
+@partial(jit, static_argnames=("argnum",))
 def _projected_curve_convexity_zphi_hessian(
     quadpoints, gamma, gammadash, gammadashdash, argnum
 ):

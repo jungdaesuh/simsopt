@@ -425,7 +425,7 @@ def test_spec_register_dataclass_keys_match_host_class() -> None:
     """
     surface = SurfaceHenneberg(nfp=2, alpha_fac=1, mmax=1, nmax=1)
     spec = surface.to_spec()
-    leaves, treedef = jax.tree_util.tree_flatten(spec)
+    leaves, treedef = jax.tree.flatten(spec)
     # The data_fields list is:
     #   R0nH, Z0nH, bn, rhomn, quadpoints_phi, quadpoints_theta -> 6 leaves
     assert len(leaves) == 6
@@ -541,7 +541,7 @@ def test_kernels_run_under_strict_transfer_guard() -> None:
 
 
 def test_spec_can_be_jitted_through_pytree_registration() -> None:
-    """The spec round-trips through ``jax.tree_util.tree_map``.
+    """The spec round-trips through ``jax.tree.map``.
 
     Oracle: ``jax.tree_util.register_dataclass`` contract — every
     data_field leaf must survive a tree-map, and the meta_fields must
@@ -554,7 +554,7 @@ def test_spec_can_be_jitted_through_pytree_registration() -> None:
         # On-device only: no Python scalar promotion, no host->device transfer.
         return -(-x)
 
-    mapped = jax.tree_util.tree_map(negate_then_negate, spec)
+    mapped = jax.tree.map(negate_then_negate, spec)
     assert isinstance(mapped, SurfaceHennebergSpec)
     assert mapped.nfp == spec.nfp
     assert mapped.alpha_fac == spec.alpha_fac

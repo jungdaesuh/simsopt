@@ -35,8 +35,8 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         s = get_surface(surfacetype, stellsym)
         sRZ = s.to_RZFourier()
 
-        np.random.seed(0)
-        angle = np.random.random()*1000
+        rng = np.random.RandomState(0)
+        angle = rng.random()*1000
         scs = s.cross_section(angle/(2*np.pi), thetas=100)
         sRZcs = sRZ.cross_section(angle/(2*np.pi), thetas=100)
 
@@ -124,8 +124,8 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         s = get_exact_surface()
         sRZ = s.to_RZFourier()
 
-        np.random.seed(0)
-        angle = np.random.random()*1000
+        rng = np.random.RandomState(0)
+        angle = rng.random()*1000
         scs = s.cross_section(angle/(2*np.pi))
         sRZcs = sRZ.cross_section(angle/(2*np.pi))
 
@@ -163,7 +163,7 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         phis = np.linspace(0, 1, 31, endpoint=False)
         thetas = np.linspace(0, 1, 31, endpoint=False)
 
-        np.random.seed(0)
+        rng = np.random.RandomState(0)
 
         stellsym = False
         s = SurfaceXYZFourier(mpol=mpol, ntor=ntor, nfp=nfp, stellsym=stellsym,
@@ -174,8 +174,8 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         s.yc = s.yc * 0
         s.zs = s.zs * 0
         s.zc = s.zc * 0
-        r1 = np.random.random_sample() + 0.1
-        r2 = np.random.random_sample() + 0.1
+        r1 = rng.random_sample() + 0.1
+        r2 = rng.random_sample() + 0.1
         major_R = np.max([r1, r2])
         minor_R = np.min([r1, r2])
         s.xc[0, ntor] = major_R
@@ -254,9 +254,9 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         s.yc = s.yc * 0
         s.zs = s.zs * 0
         s.zc = s.zc * 0
-        np.random.seed(0)
-        r1 = np.random.random_sample() + 0.1
-        r2 = np.random.random_sample() + 0.1
+        rng = np.random.RandomState(0)
+        r1 = rng.random_sample() + 0.1
+        r2 = rng.random_sample() + 0.1
         major_R = np.max([r1, r2])
         minor_R = np.min([r1, r2])
         s.xc[0, ntor] = major_R
@@ -318,7 +318,7 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         phis = np.linspace(0, 1, 31, endpoint=False)
         thetas = np.linspace(0, 1, 31, endpoint=False)
 
-        np.random.seed(0)
+        rng = np.random.RandomState(0)
 
         stellsym = False
         s = SurfaceXYZFourier(mpol=mpol, ntor=ntor, nfp=nfp, stellsym=stellsym,
@@ -329,8 +329,8 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         s.yc = s.yc * 0
         s.zs = s.zs * 0
         s.zc = s.zc * 0
-        r1 = np.random.random_sample() + 0.1
-        r2 = np.random.random_sample() + 0.1
+        r1 = rng.random_sample() + 0.1
+        r2 = rng.random_sample() + 0.1
         major_R = np.max([r1, r2])
         minor_R = np.min([r1, r2])
         s.xc[0, ntor] = major_R
@@ -355,7 +355,7 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         phis = np.linspace(0, 1, 31, endpoint=False)
         thetas = np.linspace(0, 1, 31, endpoint=False)
 
-        np.random.seed(0)
+        rng = np.random.RandomState(0)
 
         stellsym = False
         s = SurfaceXYZFourier(mpol=mpol, ntor=ntor, nfp=nfp, stellsym=stellsym,
@@ -366,8 +366,8 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         s.yc = s.yc * 0
         s.zs = s.zs * 0
         s.zc = s.zc * 0
-        r1 = np.random.random_sample() + 0.1
-        r2 = np.random.random_sample() + 0.1
+        r1 = rng.random_sample() + 0.1
+        r2 = rng.random_sample() + 0.1
         major_R = np.max([r1, r2])
         minor_R = np.min([r1, r2])
         s.xc[0, ntor] = major_R

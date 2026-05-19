@@ -273,3 +273,37 @@ def test_framed_curve_centroid_jax_vjp_drives_public_strain_penalties():
         dtype=np.float64,
     )
     np.testing.assert_allclose(observed, expected, rtol=1e-10, atol=1e-12)
+
+
+def test_framed_curve_jax_frame_twist_vjp_matches_curve_fd():
+    curve = _build_curve()
+    rotation = FrameRotationJAX(curve.quadpoints, _ROTATION_ORDER)
+    rotation.x = _ROTATION_DOFS.copy()
+    rotation.fix_all()
+    wrapper = FramedCurveCentroidJAX(curve, rotation)
+    curve_dofs = np.asarray(curve.x, dtype=np.float64).copy()
+
+    twist = wrapper.frame_twist()
+    cotangent = np.ones(twist.shape, dtype=np.float64)
+    derivative = wrapper.dframe_twist_by_dcoeff_vjp(cotangent)
+    observed = derivative(curve)
+
+    fd = np.empty_like(curve_dofs)
+    for index in range(curve_dofs.size):
+        plus = curve_dofs.copy()
+        plus[index] += _FD_STEP
+        curve.x = plus
+        plus_value = float(jnp.sum(wrapper.frame_twist()))
+
+        minus = curve_dofs.copy()
+        minus[index] -= _FD_STEP
+        curve.x = minus
+        minus_value = float(jnp.sum(wrapper.frame_twist()))
+
+        fd[index] = (plus_value - minus_value) / (2.0 * _FD_STEP)
+
+    curve.x = curve_dofs
+
+    assert np.asarray(twist).shape == (_NQUADPOINTS,)
+    assert np.isfinite(np.asarray(twist)).all()
+    np.testing.assert_allclose(observed, fd, rtol=1.0e-5, atol=1.0e-7)

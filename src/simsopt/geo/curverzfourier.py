@@ -5,56 +5,16 @@ from ._simsoptpp import sopp_namespace
 sopp = sopp_namespace("CurveRZFourier")
 from .curve import (
     Curve,
-    _as_runtime_float64_ref,
     _install_curve_jax_contract,
-    _two_pi_like,
-    jax,
-    jnp,
 )
 
 __all__ = ["CurveRZFourier"]
 
 
-def curverzfourier_pure(dofs, quadpoints, order, nfp, stellsym):
-    quadpoints = _as_runtime_float64_ref(quadpoints, reference=dofs)
-    phi = _two_pi_like(quadpoints) * quadpoints
-    cosphi = jnp.cos(phi)
-    sinphi = jnp.sin(phi)
+def _curverzfourier_pure(dofs, quadpoints, order, nfp, stellsym):
+    from ..jax_core.curve_rz_fourier import curverzfourier_pure
 
-    rc = jax.lax.slice_in_dim(dofs, 0, order + 1, axis=0)
-    if stellsym:
-        rs = None
-        zc = None
-        zs = jax.lax.slice_in_dim(dofs, order + 1, dofs.shape[0], axis=0)
-    else:
-        rs = jax.lax.slice_in_dim(dofs, order + 1, 2 * order + 1, axis=0)
-        zc = jax.lax.slice_in_dim(dofs, 2 * order + 1, 3 * order + 2, axis=0)
-        zs = jax.lax.slice_in_dim(dofs, 3 * order + 2, dofs.shape[0], axis=0)
-
-    cos_modes = _as_runtime_float64_ref(
-        np.arange(order + 1, dtype=np.float64),
-        reference=phi,
-    )
-    nfp_scale = _as_runtime_float64_ref(float(nfp), reference=phi)
-    cos_phase = phi[:, None] * (nfp_scale * cos_modes)[None, :]
-    radius = jnp.sum(rc[None, :] * jnp.cos(cos_phase), axis=1)
-
-    sin_modes = _as_runtime_float64_ref(
-        np.arange(1, order + 1, dtype=np.float64),
-        reference=phi,
-    )
-    if order > 0:
-        sin_phase = phi[:, None] * (nfp_scale * sin_modes)[None, :]
-        z = jnp.sum(zs[None, :] * jnp.sin(sin_phase), axis=1)
-        if not stellsym:
-            radius = radius + jnp.sum(rs[None, :] * jnp.sin(sin_phase), axis=1)
-    else:
-        z = jnp.zeros_like(phi)
-
-    if not stellsym:
-        z = z + jnp.sum(zc[None, :] * jnp.cos(cos_phase), axis=1)
-
-    return jnp.column_stack((radius * cosphi, radius * sinphi, z))
+    return curverzfourier_pure(dofs, quadpoints, order, nfp, stellsym)
 
 
 class CurveRZFourier(sopp.CurveRZFourier, Curve):
@@ -98,7 +58,7 @@ class CurveRZFourier(sopp.CurveRZFourier, Curve):
             )
         _install_curve_jax_contract(
             self,
-            lambda dofs, points: curverzfourier_pure(
+            lambda dofs, points: _curverzfourier_pure(
                 dofs,
                 points,
                 order,

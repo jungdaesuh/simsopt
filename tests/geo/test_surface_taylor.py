@@ -11,9 +11,9 @@ setUpModule, tearDownModule = make_module_jit_hooks(parameters, value=False)
 
 
 def taylor_test(f, df, x, epsilons=None, direction=None, order=2):
-    np.random.seed(1)
+    rng = np.random.RandomState(1)
     if direction is None:
-        direction = np.random.rand(*(x.shape))-0.5
+        direction = rng.rand(*(x.shape))-0.5
     dfx = df(x)@direction
     if epsilons is None:
         epsilons = np.power(2., -np.asarray(range(8, 20)))
@@ -47,7 +47,7 @@ def taylor_test(f, df, x, epsilons=None, direction=None, order=2):
 
 
 def get_surface(surfacetype, stellsym, phis=None, thetas=None):
-    np.random.seed(2)
+    rng = np.random.RandomState(2)
     mpol = 4
     ntor = 3
     nfp = 2
@@ -82,19 +82,18 @@ def get_surface(surfacetype, stellsym, phis=None, thetas=None):
         assert False
 
     dofs = s.get_dofs()
-    np.random.seed(2)
     rand_scale = 0.01
-    s.x = dofs + rand_scale * np.random.rand(len(dofs))  # .reshape(dofs.shape)
+    s.x = dofs + rand_scale * rng.rand(len(dofs))  # .reshape(dofs.shape)
     return s
 
 
 def taylor_test2(f, df, d2f, x, epsilons=None, direction1=None,
                  direction2=None):
-    np.random.seed(1)
+    rng = np.random.RandomState(1)
     if direction1 is None:
-        direction1 = np.random.rand(*(x.shape))-0.5
+        direction1 = rng.rand(*(x.shape))-0.5
     if direction2 is None:
-        direction2 = np.random.rand(*(x.shape))-0.5
+        direction2 = rng.rand(*(x.shape))-0.5
 
     df0 = df(x) @ direction1
     d2fval = direction2.T @ d2f(x) @ direction1
@@ -384,9 +383,9 @@ class SurfaceTaylorTests(unittest.TestCase):
             from .surface_test_helpers import get_surface as get_surface_ext
             s = get_surface_ext(surfacetype, stellsym, mpol=mpol, ntor=ntor, nphi=nphi, ntheta=ntheta)
             dofs = s.get_dofs()
-            np.random.seed(2)
+            rng = np.random.RandomState(2)
             rand_scale = 0.01
-            s.x = dofs + rand_scale * np.random.rand(len(dofs))
+            s.x = dofs + rand_scale * rng.rand(len(dofs))
             print(surfacetype, stellsym, mpol, ntor, nphi, ntheta)
             return s
 

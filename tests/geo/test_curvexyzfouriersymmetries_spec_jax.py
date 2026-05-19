@@ -37,6 +37,10 @@ from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
 from simsopt.jax_core import (
     CurveXYZFourierSymmetriesSpec,
+    curve_gamma_vjp_from_dofs,
+    curve_gammadash_vjp_from_dofs,
+    curve_gammadashdash_vjp_from_dofs,
+    curve_gammadashdashdash_vjp_from_dofs,
     curve_spec_from_curve,
 )
 from simsopt.jax_core.curve_geometry import (
@@ -62,6 +66,21 @@ _NQUADPOINTS = 64
 _ORDER = 3
 _RAND_SCALE = 1e-2
 _RNG_SEED = 1729
+
+_CURVE_VJP_CASES = (
+    ("gamma", curve_gamma_vjp_from_dofs, "dgamma_by_dcoeff"),
+    ("gammadash", curve_gammadash_vjp_from_dofs, "dgammadash_by_dcoeff"),
+    (
+        "gammadashdash",
+        curve_gammadashdash_vjp_from_dofs,
+        "dgammadashdash_by_dcoeff",
+    ),
+    (
+        "gammadashdashdash",
+        curve_gammadashdashdash_vjp_from_dofs,
+        "dgammadashdashdash_by_dcoeff",
+    ),
+)
 
 
 def _stellsym_num_dofs(order: int) -> int:
@@ -361,6 +380,52 @@ def test_curve_pullback_shape(stellsym: bool) -> None:
     coeff_np = np.asarray(coeff_cotangent, dtype=np.float64)
     assert np.all(np.isfinite(coeff_np))
     assert np.linalg.norm(coeff_np) > 0.0
+
+
+@pytest.mark.parametrize(
+    "stellsym", [True, False], ids=["stellsym=True", "stellsym=False"]
+)
+@pytest.mark.parametrize(
+    ("term_name", "vjp_fn", "derivative_method"),
+    _CURVE_VJP_CASES,
+    ids=[name for name, _fn, _method in _CURVE_VJP_CASES],
+)
+def test_named_geometry_vjp_wrappers_match_cpu_derivatives(
+    stellsym: bool,
+    term_name: str,
+    vjp_fn,
+    derivative_method: str,
+) -> None:
+    """Named geometry VJP wrappers match CPU derivative tensor contractions."""
+
+    rng = np.random.default_rng(_RNG_SEED + 5 + int(stellsym))
+    curve = _build_curve(
+        order=_ORDER,
+        nfp=3,
+        stellsym=stellsym,
+        ntor=2,
+        rng=rng,
+    )
+    spec = curve.to_spec()
+    derivative_cpu = np.asarray(
+        getattr(curve, derivative_method)(),
+        dtype=np.float64,
+    )
+    cotangent = rng.normal(size=derivative_cpu.shape[:2])
+
+    vjp_jax = np.asarray(
+        vjp_fn(spec, spec.dofs, jnp.asarray(cotangent, dtype=jnp.float64)),
+        dtype=np.float64,
+    )
+    vjp_cpu = np.einsum("ij,ijk->k", cotangent, derivative_cpu)
+
+    np.testing.assert_allclose(
+        vjp_jax,
+        vjp_cpu,
+        rtol=_DERIV_RTOL,
+        atol=_DERIV_ATOL,
+        err_msg=f"CurveXYZFourierSymmetries {term_name} named VJP mismatch.",
+    )
 
 
 def test_spec_geometry_runs_under_strict_transfer_guard() -> None:

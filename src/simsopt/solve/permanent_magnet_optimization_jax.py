@@ -59,9 +59,7 @@ def _flatten_like(reference: jax.Array, moments: jax.Array) -> jax.Array:
     return jnp.reshape(moments, reference.shape)
 
 
-def _normalized_moment_magnitudes(
-    matrix: jax.Array, m_maxima: jax.Array
-) -> jax.Array:
+def _normalized_moment_magnitudes(matrix: jax.Array, m_maxima: jax.Array) -> jax.Array:
     positive_mmax = m_maxima > 0.0
     safe_mmax = jnp.where(positive_mmax, m_maxima, 1.0)
     return jnp.where(
@@ -76,9 +74,7 @@ def _is_tracing(value: object) -> bool:
 
 
 def _has_tracer_leaf(value: object) -> bool:
-    return any(
-        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(value)
-    )
+    return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(value))
 
 
 def _raise_if_infeasible_initial_condition(
@@ -644,8 +640,7 @@ def _mwpgp_spec(
     )
     if alpha is None:
         alpha_value = (
-            jnp.asarray(2.0 * (1.0 - 1.0e-5), dtype=grid.A_obj.dtype)
-            / hessian_scale
+            jnp.asarray(2.0 * (1.0 - 1.0e-5), dtype=grid.A_obj.dtype) / hessian_scale
         )
     else:
         alpha_value = _as_jax_float64(alpha)

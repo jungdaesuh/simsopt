@@ -43,14 +43,22 @@ from simsopt.jax_core import (
     surface_rz_fourier_gamma_from_spec,
     surface_rz_fourier_gammadash1dash1_from_dofs,
     surface_rz_fourier_gammadash1dash1_from_spec,
+    surface_rz_fourier_gammadash1dash1dash1_lin_from_dofs,
+    surface_rz_fourier_gammadash1dash1dash1_lin_from_spec,
     surface_rz_fourier_gammadash1dash1_vjp_from_dofs,
     surface_rz_fourier_gammadash1dash2_from_dofs,
     surface_rz_fourier_gammadash1dash2_from_spec,
+    surface_rz_fourier_gammadash1dash1dash2_lin_from_dofs,
+    surface_rz_fourier_gammadash1dash1dash2_lin_from_spec,
+    surface_rz_fourier_gammadash1dash2dash2_lin_from_dofs,
+    surface_rz_fourier_gammadash1dash2dash2_lin_from_spec,
     surface_rz_fourier_gammadash1dash2_vjp_from_dofs,
     surface_rz_fourier_gammadash1_from_dofs,
     surface_rz_fourier_gammadash1_from_spec,
     surface_rz_fourier_gammadash2dash2_from_dofs,
     surface_rz_fourier_gammadash2dash2_from_spec,
+    surface_rz_fourier_gammadash2dash2dash2_lin_from_dofs,
+    surface_rz_fourier_gammadash2dash2dash2_lin_from_spec,
     surface_rz_fourier_gammadash2dash2_vjp_from_dofs,
     surface_rz_fourier_gammadash2_from_dofs,
     surface_rz_fourier_gammadash2_from_spec,
@@ -75,7 +83,10 @@ from simsopt.jax_core import (
     surface_rz_fourier_minor_radius_from_dofs,
     surface_rz_fourier_minor_radius_from_spec,
 )
-from simsopt.jax_core.surface_rzfourier import surface_rz_fourier_geometry_from_spec
+from simsopt.jax_core.surface_rzfourier import (
+    _scatter_coefficients,
+    surface_rz_fourier_geometry_from_spec,
+)
 
 TEST_DIR = Path(__file__).parent / ".." / "test_files"
 SURFACE_RZFOURIER_VOLUME_ATOL = 1e-8
@@ -180,6 +191,42 @@ def _make_hlo_probe_surface() -> SurfaceRZFourier:
     surface.rc[0, surface.ntor] = 1.2
     surface.rc[1, surface.ntor] += 0.15
     surface.zs[1, surface.ntor] += 0.08
+    surface.local_full_x = surface.get_dofs()
+    return surface
+
+
+def _make_rz_surface(
+    *,
+    stellsym: bool,
+    mpol: int,
+    ntor: int,
+    nfp: int,
+    nphi: int,
+    ntheta: int,
+    seed: int,
+) -> SurfaceRZFourier:
+    rng = parity_rng(seed)
+    surface = SurfaceRZFourier.from_nphi_ntheta(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=mpol,
+        ntor=ntor,
+        nphi=nphi,
+        ntheta=ntheta,
+        range="field period",
+    )
+    surface.rc[:, :] = rng.normal(scale=0.005, size=surface.rc.shape)
+    surface.zs[:, :] = rng.normal(scale=0.005, size=surface.zs.shape)
+    surface.rc[0, surface.ntor] = 1.35
+    surface.rc[1, surface.ntor] += 0.22
+    surface.zs[1, surface.ntor] += 0.2
+    surface.rc[0, : surface.ntor] = 0.0
+    surface.zs[0, : surface.ntor + 1] = 0.0
+    if not stellsym:
+        surface.rs[:, :] = rng.normal(scale=0.003, size=surface.rs.shape)
+        surface.zc[:, :] = rng.normal(scale=0.003, size=surface.zc.shape)
+        surface.rs[0, : surface.ntor + 1] = 0.0
+        surface.zc[0, : surface.ntor] = 0.0
     surface.local_full_x = surface.get_dofs()
     return surface
 
@@ -566,6 +613,52 @@ def test_surface_rzfourier_jax_parity_non_stellsym():
 
 
 @pytest.mark.parametrize("stellsym", [True, False])
+def test_surface_rzfourier_third_paired_lin_helpers_match_cpu(stellsym):
+    surface = _make_surface(stellsym=stellsym)
+    spec = surface.surface_spec()
+    dofs = surface.get_dofs()
+    phis = np.linspace(0.007, 0.492 / surface.nfp, 6)
+    thetas = np.linspace(0.019, 0.947, 6)
+    cases = (
+        (
+            "gammadash1dash1dash1_lin",
+            surface_rz_fourier_gammadash1dash1dash1_lin_from_spec,
+            surface_rz_fourier_gammadash1dash1dash1_lin_from_dofs,
+        ),
+        (
+            "gammadash1dash1dash2_lin",
+            surface_rz_fourier_gammadash1dash1dash2_lin_from_spec,
+            surface_rz_fourier_gammadash1dash1dash2_lin_from_dofs,
+        ),
+        (
+            "gammadash1dash2dash2_lin",
+            surface_rz_fourier_gammadash1dash2dash2_lin_from_spec,
+            surface_rz_fourier_gammadash1dash2dash2_lin_from_dofs,
+        ),
+        (
+            "gammadash2dash2dash2_lin",
+            surface_rz_fourier_gammadash2dash2dash2_lin_from_spec,
+            surface_rz_fourier_gammadash2dash2dash2_lin_from_dofs,
+        ),
+    )
+    for method_name, spec_fn, dofs_fn in cases:
+        expected = np.zeros((phis.size, 3))
+        getattr(surface, method_name)(expected, phis, thetas)
+        np.testing.assert_allclose(
+            host_array(spec_fn(spec, phis, thetas)),
+            expected,
+            rtol=1e-11,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            host_array(dofs_fn(spec, dofs, phis, thetas)),
+            expected,
+            rtol=1e-11,
+            atol=1e-10,
+        )
+
+
+@pytest.mark.parametrize("stellsym", [True, False])
 def test_surface_rzfourier_second_geometry_jacobians_match_cpu(stellsym):
     surface = _make_surface(stellsym=stellsym)
     spec = surface.surface_spec()
@@ -911,6 +1004,55 @@ def test_surface_rzfourier_geometry_allows_strict_transfer_guard():
         xtheta.block_until_ready()
 
 
+def test_surface_rzfourier_high_resolution_stellsym_transfer_guard_and_parity():
+    surface = _make_rz_surface(
+        stellsym=True,
+        mpol=10,
+        ntor=10,
+        nfp=3,
+        nphi=32,
+        ntheta=32,
+        seed=2031,
+    )
+    spec = surface.surface_spec()
+
+    @jax.jit
+    def geometry_and_metrics(surface_spec):
+        return (
+            surface_rz_fourier_gamma_from_spec(surface_spec),
+            surface_rz_fourier_normal_from_spec(surface_spec),
+            surface_rz_fourier_area_from_spec(surface_spec),
+            surface_rz_fourier_volume_from_spec(surface_spec),
+        )
+
+    with jax.transfer_guard("disallow"):
+        gamma, normal, area, volume = geometry_and_metrics(spec)
+        gamma.block_until_ready()
+        normal.block_until_ready()
+        area.block_until_ready()
+        volume.block_until_ready()
+
+    np.testing.assert_allclose(host_array(gamma), surface.gamma(), rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(
+        host_array(normal),
+        surface.normal(),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        host_scalar(area),
+        surface.area(),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        host_scalar(volume),
+        surface.volume(),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_surface_rzfourier_fused_geometry_reduces_hlo_work():
     surface = _make_hlo_probe_surface()
     dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
@@ -1057,6 +1199,36 @@ def test_surface_rzfourier_unitnormal_degenerate_surface_matches_cpu_singularity
     cpu_unitnormal = np.asarray(surface.unitnormal())
     jax_unitnormal = host_array(surface_rz_fourier_unitnormal_from_spec(spec))
     np.testing.assert_array_equal(np.isnan(jax_unitnormal), np.isnan(cpu_unitnormal))
+
+
+def test_surface_rzfourier_tiny_normal_autodiff_is_finite():
+    surface = SurfaceRZFourier.from_nphi_ntheta(
+        nfp=1,
+        stellsym=True,
+        mpol=1,
+        ntor=0,
+        nphi=4,
+        ntheta=5,
+        range="field period",
+    )
+    surface.rc[:, :] = 0.0
+    surface.zs[:, :] = 0.0
+    surface.rc[0, 0] = 1.0e-150
+    surface.rc[1, 0] = 1.0e-150
+    surface.zs[1, 0] = 1.0e-150
+    surface.local_full_x = surface.get_dofs()
+
+    spec = surface.surface_spec()
+    dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+    unitnormal = surface_rz_fourier_unitnormal_from_spec(spec)
+    dunitnormal = surface_rz_fourier_dunitnormal_from_dofs(spec, dofs)
+    area_grad = surface_rz_fourier_darea_from_dofs(spec, dofs)
+    volume_grad = surface_rz_fourier_dvolume_from_dofs(spec, dofs)
+
+    assert np.isfinite(np.asarray(host_array(unitnormal))).all()
+    assert np.isfinite(np.asarray(host_array(dunitnormal))).all()
+    assert np.isfinite(np.asarray(host_array(area_grad))).all()
+    assert np.isfinite(np.asarray(host_array(volume_grad))).all()
 
 
 def test_surface_rzfourier_geometry_from_dofs_matches_boozer_hot_path():
@@ -1255,6 +1427,110 @@ def test_surface_rzfourier_scalar_metric_parity_stellsym():
 
 def test_surface_rzfourier_scalar_metric_parity_non_stellsym():
     _assert_surface_scalar_metric_parity(_make_surface(stellsym=False))
+
+
+def test_surface_rzfourier_nonstellsym_area_volume_hessians_high_modes_match_cpu():
+    surface = _make_rz_surface(
+        stellsym=False,
+        mpol=3,
+        ntor=2,
+        nfp=4,
+        nphi=12,
+        ntheta=13,
+        seed=2047,
+    )
+    spec = surface.surface_spec()
+    dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+
+    np.testing.assert_allclose(
+        host_array(surface_rz_fourier_d2area_from_dofs(spec, dofs)),
+        np.asarray(surface.d2area_by_dcoeffdcoeff()),
+        rtol=1e-8,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        host_array(surface_rz_fourier_d2volume_from_dofs(spec, dofs)),
+        np.asarray(surface.d2volume_by_dcoeffdcoeff()),
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
+def test_surface_rzfourier_scatter_coefficients_matches_dense_reference():
+    positions = np.asarray([0, 3, 8, 11], dtype=np.int32)
+    dofs = jnp.arange(10, dtype=jnp.float64)
+    actual = host_array(
+        _scatter_coefficients(
+            positions,
+            dofs,
+            target_size=12,
+            source_offset=2,
+        )
+    )
+    expected = np.zeros(12, dtype=np.float64)
+    expected[positions] = np.arange(2, 6, dtype=np.float64)
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_surface_rzfourier_extreme_hessian_request_hits_memory_guard():
+    surface = SurfaceRZFourier.from_nphi_ntheta(
+        nfp=1,
+        stellsym=False,
+        mpol=20,
+        ntor=20,
+        nphi=32,
+        ntheta=32,
+        range="field period",
+    )
+    surface.rc[0, surface.ntor] = 1.0
+    surface.rc[1, surface.ntor] = 0.1
+    surface.zs[1, surface.ntor] = 0.1
+    spec = surface.surface_spec()
+    dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+
+    with pytest.raises(MemoryError, match="surface_rz_fourier_d2area"):
+        surface_rz_fourier_d2area_from_dofs(spec, dofs)
+    with pytest.raises(MemoryError, match="surface_rz_fourier_d2volume"):
+        surface_rz_fourier_d2volume_from_dofs(spec, dofs)
+
+
+def test_surface_rzfourier_nonstellsym_extreme_nfp_round_trip():
+    surface = _make_rz_surface(
+        stellsym=False,
+        mpol=4,
+        ntor=3,
+        nfp=17,
+        nphi=18,
+        ntheta=19,
+        seed=2053,
+    )
+    spec = _surface_spec_from_surface(surface)
+
+    _assert_dofs_round_trip(surface)
+    np.testing.assert_allclose(
+        host_array(surface_rz_fourier_gamma_from_spec(spec)),
+        surface.gamma(),
+        rtol=1e-11,
+        atol=1e-11,
+    )
+    np.testing.assert_allclose(
+        host_array(surface_rz_fourier_normal_from_spec(spec)),
+        surface.normal(),
+        rtol=1e-11,
+        atol=1e-11,
+    )
+    np.testing.assert_allclose(
+        host_scalar(surface_rz_fourier_area_from_spec(spec)),
+        surface.area(),
+        rtol=1e-11,
+        atol=1e-11,
+    )
+    np.testing.assert_allclose(
+        host_scalar(surface_rz_fourier_volume_from_spec(spec)),
+        surface.volume(),
+        rtol=1e-11,
+        atol=1e-11,
+    )
 
 
 @pytest.mark.parametrize("stellsym", [True, False])
