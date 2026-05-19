@@ -8,7 +8,7 @@ Make dtype selection a backend-policy-owned runtime contract instead of a
 collection of hard-coded `float64` assumptions spread across import hooks and
 JAX helper modules.
 
-The immediate problem is that the `jax_metal_smoke` backend declares
+The immediate problem is that the `jax_mps_smoke` backend declares
 `requires_x64=False`, but the current kernel-helper boundary still rejects
 actual `float32` inputs through hard-coded `float64` guards. The broader
 problem is ownership: `simsopt.__init__`, `BackendPolicy`,
@@ -18,25 +18,25 @@ runtime behavior. This plan restores one source of truth.
 ## Goals
 
 - [ ] `BackendPolicy` owns runtime dtype and host dtype.
-- [ ] `jax_metal_smoke` uses `float32` policy dtype without importing JAX from
+- [ ] `jax_mps_smoke` uses `float32` policy dtype without importing JAX from
   `simsopt.backend.runtime` at module scope.
 - [ ] `jax_cpu_*`, `jax_gpu_*`, and `native_cpu` keep `float64` policy dtype.
 - [ ] `_math_utils.py` accepts policy dtype when converting or validating runtime
   arrays.
-- [ ] The Metal float32 path becomes reachable by construction.
+- [ ] The MPS float32 path becomes reachable by construction.
 - [ ] Import-time x64 behavior has one explicit owner and one documented
   contract.
 - [ ] Cross-platform CI can test the policy mapping without requiring
-  `jax-metal`.
-- [ ] A separate opt-in Metal smoke can prove the real backend path on a host
-  with `jax-metal` installed.
+  `jax-mps`.
+- [ ] A separate opt-in MPS smoke can prove the real backend path on a host
+  with `jax-mps` installed.
 
 ## Non-Goals
 
-- [ ] Do not prove full Metal numerical parity in the isolated PR.
+- [ ] Do not prove full MPS numerical parity in the isolated PR.
 - [ ] Do not collapse all remaining `_as_jax_float64` duplicates in the same PR.
 - [ ] Do not add dynamic imports.
-- [ ] Do not add fallback behavior that silently reroutes Metal or target lanes
+- [ ] Do not add fallback behavior that silently reroutes MPS or target lanes
   to CPU/reference paths.
 - [ ] Do not import `jax` or `jax.numpy` at module scope in
   `src/simsopt/backend/runtime.py`.
@@ -66,9 +66,9 @@ runtime behavior. This plan restores one source of truth.
   `B`, `xphi`, and `xtheta`.
 - `set_backend(..., configure_runtime=False)` exists and can exercise policy
   resolution without touching `jax.config`.
-- `SIMSOPT_BACKEND_MODE=jax_metal_smoke` import is not a cross-platform test:
-  runtime config writes `jax_platforms=METAL` and validation fails on hosts
-  without the Metal backend.
+- `SIMSOPT_BACKEND_MODE=jax_mps_smoke` import is not a cross-platform test:
+  runtime config writes `jax_platforms=mps` and validation fails on hosts
+  without the jax-mps PJRT plugin installed.
 
 ## Design Principles
 
@@ -80,8 +80,8 @@ runtime behavior. This plan restores one source of truth.
 - [ ] Keep strict contracts: unsupported dtype or backend states should fail
   clearly.
 - [ ] Separate reachability from real hardware proof. A policy unit test can
-  prove that the float32 lane is selectable; only a Metal smoke can prove that
-  `jax-metal` executes the path.
+  prove that the float32 lane is selectable; only a MPS smoke can prove that
+  `jax-mps` executes the path.
 
 ## Open Contract Decision
 
@@ -117,7 +117,7 @@ that would stop implicit imports from configuring JAX x64 at all.
 
 ## Immediate Isolated PR Scope
 
-This is the smallest PR that makes the Metal float32 lane reachable without
+This is the smallest PR that makes the MPS float32 lane reachable without
 taking on the full runtime-policy cleanup.
 
 ### 1. Import-Time x64 Ownership
@@ -152,21 +152,21 @@ File: `src/simsopt/backend/runtime.py`
   - [ ] `jax_cpu_parity`: `runtime_dtype="float64"`, `host_dtype="float64"`.
   - [ ] `jax_gpu_fast`: `runtime_dtype="float64"`, `host_dtype="float64"`.
   - [ ] `jax_gpu_parity`: `runtime_dtype="float64"`, `host_dtype="float64"`.
-  - [ ] `jax_metal_smoke`: `runtime_dtype="float32"`, `host_dtype="float32"`.
+  - [ ] `jax_mps_smoke`: `runtime_dtype="float32"`, `host_dtype="float32"`.
 - [ ] Thread the two fields through `_policy_from_config(...)`.
 - [ ] Add validation for allowed dtype strings if there is an existing policy
   validation point.
 - [ ] Do not import `jax` or `jax.numpy` at module scope.
-- [ ] Decide whether `host_dtype` should be `float32` for Metal immediately or
+- [ ] Decide whether `host_dtype` should be `float32` for MPS immediately or
   kept `float64` for host-side oracle construction. If kept `float64`, document
   why. The default recommendation for the isolated reachability PR is
-  `float32` for both runtime and host dtype in `jax_metal_smoke`.
+  `float32` for both runtime and host dtype in `jax_mps_smoke`.
 
 Acceptance:
 
-- [ ] `get_backend_policy("jax_metal_smoke").runtime_dtype == "float32"`.
-- [ ] `get_backend_policy("jax_metal_smoke").host_dtype == "float32"`.
-- [ ] All non-Metal modes report `float64` for both fields.
+- [ ] `get_backend_policy("jax_mps_smoke").runtime_dtype == "float32"`.
+- [ ] `get_backend_policy("jax_mps_smoke").host_dtype == "float32"`.
+- [ ] All non-MPS modes report `float64` for both fields.
 - [ ] `rg -n "^import jax|^from jax" src/simsopt/backend/runtime.py` stays empty.
 
 ### 3. Runtime dtype helpers
@@ -199,7 +199,7 @@ File: `src/simsopt/jax_core/_math_utils.py`
 Acceptance:
 
 - [ ] `require_runtime_dtype("x", jnp.asarray(..., dtype=jnp.float32))` passes
-  under a `jax_metal_smoke` policy.
+  under a `jax_mps_smoke` policy.
 - [ ] The same check fails under a float64 policy unless `dtype` is overridden.
 - [ ] Existing float64 CPU/GPU parity callers still get float64 arrays.
 - [ ] There is no hard-coded `_FLOAT64_DTYPE` gate in the policy-aware helper.
@@ -240,15 +240,15 @@ Acceptance:
 - [ ] Boozer residual kernels no longer hard-gate fp32 inputs indirectly through
   `_as_runtime_float64(...)` on the general runtime path.
 - [ ] Parity-mode tests still enforce float64 where required.
-- [ ] Metal policy tests can route through the helper boundary without dtype
+- [ ] MPS policy tests can route through the helper boundary without dtype
   rejection.
 
 ### 5. Cross-platform policy tests
 
 File: `tests/test_runtime_dtype_policy.py`
 
-- [ ] Add `test_jax_metal_smoke_policy_runtime_dtype`.
-- [ ] Use `set_backend("jax_metal_smoke", configure_runtime=False)`.
+- [ ] Add `test_jax_mps_smoke_policy_runtime_dtype`.
+- [ ] Use `set_backend("jax_mps_smoke", configure_runtime=False)`.
 - [ ] Assert `get_backend_policy().runtime_dtype == "float32"`.
 - [ ] Assert `get_backend_policy().host_dtype == "float32"` if that is the
   selected contract.
@@ -259,18 +259,18 @@ File: `tests/test_runtime_dtype_policy.py`
   when the test lives under the normal pytest tree; if writing a local fixture,
   snapshot and restore the same `SIMSOPT_*`, `JAX_PLATFORMS`, XLA, CUDA, and
   allocator environment keys, then call `invalidate_backend_cache()`.
-- [ ] Add non-Metal mode assertions for `float64`.
-- [ ] Add `_math_utils` round-trip tests that do not require real Metal hardware.
+- [ ] Add non-MPS mode assertions for `float64`.
+- [ ] Add `_math_utils` round-trip tests that do not require real MPS hardware.
 
 Example shape:
 
 ```python
-def test_jax_metal_smoke_policy_runtime_dtype():
+def test_jax_mps_smoke_policy_runtime_dtype():
     from simsopt.backend import get_backend_config, get_backend_policy, set_backend
 
     previous = get_backend_config()
 
-    set_backend("jax_metal_smoke", configure_runtime=False)
+    set_backend("jax_mps_smoke", configure_runtime=False)
     try:
         policy = get_backend_policy()
         assert policy.runtime_dtype == "float32"
@@ -293,25 +293,25 @@ def test_jax_metal_smoke_policy_runtime_dtype():
 Acceptance:
 
 - [ ] The test passes on CPU-only hosts.
-- [ ] The test does not set `SIMSOPT_BACKEND_MODE=jax_metal_smoke` before
+- [ ] The test does not set `SIMSOPT_BACKEND_MODE=jax_mps_smoke` before
   importing `simsopt`.
-- [ ] The test does not require `jax-metal`.
+- [ ] The test does not require `jax-mps`.
 
-### 6. Optional real Metal smoke
+### 6. Optional real MPS smoke
 
-File: `tests/test_metal_smoke_dtype.py`
+File: `tests/test_mps_smoke_dtype.py`
 
 - [ ] Add only if there is already an accepted marker pattern for hardware tests.
-- [ ] Mark with `@pytest.mark.metal` or the repo's equivalent opt-in marker.
-- [ ] Skip unless `jax-metal` / Metal backend is available.
+- [ ] Mark with `@pytest.mark.mps` or the repo's equivalent opt-in marker.
+- [ ] Skip unless `jax-mps` / MPS backend is available.
 - [ ] Run a minimal import/config/one-array round trip under
-  `SIMSOPT_BACKEND_MODE=jax_metal_smoke`.
+  `SIMSOPT_BACKEND_MODE=jax_mps_smoke`.
 - [ ] Assert backend policy dtype and resulting array dtype are float32.
 
 Acceptance:
 
 - [ ] The test is not part of default CPU/Linux CI.
-- [ ] The test proves actual Metal execution only on hosts that advertise Metal.
+- [ ] The test proves actual MPS execution only on hosts that advertise MPS.
 
 ## Follow-Up Policy TODOs
 
@@ -322,10 +322,10 @@ dependency.
 
 File: `src/simsopt/backend/runtime.py`
 
-- [ ] Add `default_residency: str` to `BackendPolicy`.
-- [ ] Define allowed values, for example `"device"` and `"host"`.
-- [ ] Set the default per mode.
-- [ ] Use the field only at runtime boundary helpers, not ad hoc in kernels.
+- [x] Add `default_residency: str` to `BackendPolicy`.
+- [x] Define allowed values, for example `"device"` and `"host"`.
+- [x] Set the default per mode.
+- [x] Use the field only at runtime boundary helpers, not ad hoc in kernels.
 
 ### 8. Default optimizer backend policy
 
@@ -338,14 +338,14 @@ Files:
 
 TODOs:
 
-- [ ] Add `default_optimizer_backend: str` to `BackendPolicy`.
-- [ ] Decide per-mode default:
-  - [ ] CPU/reference modes: `"scipy"`.
-  - [ ] JAX target modes: `"ondevice"` unless a mode-specific exception exists.
-- [ ] Add `"auto"` to the public optimizer-backend validation layer.
-- [ ] Resolve `"auto"` through `get_backend_policy().default_optimizer_backend`.
-- [ ] Preserve explicit caller overrides.
-- [ ] Keep SciPy/reference lanes separate from target lanes.
+- [x] Add `default_optimizer_backend: str` to `BackendPolicy`.
+- [x] Decide per-mode default:
+  - [x] CPU/reference modes: `"scipy"`.
+  - [x] JAX target modes: `"ondevice"` unless a mode-specific exception exists.
+- [x] Add `"auto"` to the public optimizer-backend validation layer.
+- [x] Resolve `"auto"` through `get_backend_policy().default_optimizer_backend`.
+- [x] Preserve explicit caller overrides.
+- [x] Keep SciPy/reference lanes separate from target lanes.
 
 ### 9. Debug overlay and disable_jit
 
@@ -356,15 +356,15 @@ Files:
 
 TODOs:
 
-- [ ] Add `disable_jit: bool` to `BackendPolicy` or `BackendConfig`.
-- [ ] Add `use_runtime(mode=..., debug=...)` if this becomes public API.
-- [ ] Define `SIMSOPT_DEBUG=1` overlay semantics:
-  - [ ] `debug_nans=True`;
-  - [ ] `transfer_guard="disallow"`;
-  - [ ] `disable_jit=True`;
-  - [ ] `strict=True`.
-- [ ] Apply the overlay through the same runtime config path.
-- [ ] Do not add try/except recovery around failed runtime configuration.
+- [x] Add `disable_jit: bool` to `BackendPolicy` or `BackendConfig`.
+- [x] Add `use_runtime(mode=..., debug=...)` if this becomes public API.
+- [x] Define `SIMSOPT_DEBUG=1` overlay semantics:
+  - [x] `debug_nans=True`;
+  - [x] `transfer_guard="disallow"`;
+  - [x] `disable_jit=True`;
+  - [x] `strict=True`.
+- [x] Apply the overlay through the same runtime config path.
+- [x] Do not add try/except recovery around failed runtime configuration.
 
 ### 10. Central dtype module
 
@@ -372,33 +372,33 @@ File: `src/simsopt/backend/dtypes.py`
 
 TODOs:
 
-- [ ] Create only after the immediate `_math_utils.py` policy helper is stable.
-- [ ] Expose `runtime_dtype()`.
-- [ ] Expose `host_dtype()`.
-- [ ] Expose `as_runtime_array(...)`.
-- [ ] Expose `runtime_zeros(...)`.
-- [ ] Expose `runtime_eye(...)`.
-- [ ] Keep the implementation as the SSOT for dtype helper functions.
-- [ ] Re-export from existing helper modules instead of duplicating conversion
+- [x] Create only after the immediate `_math_utils.py` policy helper is stable.
+- [x] Expose `runtime_dtype()`.
+- [x] Expose `host_dtype()`.
+- [x] Expose `as_runtime_array(...)`.
+- [x] Expose `runtime_zeros(...)`.
+- [x] Expose `runtime_eye(...)`.
+- [x] Keep the implementation as the SSOT for dtype helper functions.
+- [x] Re-export from existing helper modules instead of duplicating conversion
   logic.
 
 ### 11. Collapse remaining local `_as_jax_float64` duplicates
 
 Current duplicate definitions to collapse:
 
-- [ ] `src/simsopt/geo/curve.py`
-- [ ] `src/simsopt/geo/_pairwise_reductions.py`
-- [ ] `src/simsopt/geo/framedcurve.py`
-- [ ] `src/simsopt/geo/curveobjectives.py`
-- [ ] `src/simsopt/geo/curvecwsfourier.py`
-- [ ] `src/simsopt/jax_core/surface_rzfourier.py`
-- [ ] `src/simsopt/objectives/stage2_target_objective_jax.py`
+- [x] `src/simsopt/geo/curve.py`
+- [x] `src/simsopt/geo/_pairwise_reductions.py`
+- [x] `src/simsopt/geo/framedcurve.py`
+- [x] `src/simsopt/geo/curveobjectives.py`
+- [x] `src/simsopt/geo/curvecwsfourier.py`
+- [x] `src/simsopt/jax_core/surface_rzfourier.py`
+- [x] `src/simsopt/objectives/stage2_target_objective_jax.py`
 
 TODOs:
 
-- [ ] Replace local definitions with imports/re-exports from the central helper.
-- [ ] Preserve explicit fp64 helpers only where a lane really requires fp64.
-- [ ] Add focused tests before broad replacement if a file feeds parity-critical
+- [x] Replace local definitions with imports/re-exports from the central helper.
+- [x] Preserve explicit fp64 helpers only where a lane really requires fp64.
+- [x] Add focused tests before broad replacement if a file feeds parity-critical
   math.
 
 ### 12. Repo-wide `as_runtime_float64` migration
@@ -411,15 +411,19 @@ Files:
 
 TODOs:
 
-- [ ] Inventory all `as_runtime_float64` and `_as_runtime_float64` call sites.
-- [ ] Split call sites into true explicit-fp64 parity contracts and general
+- [x] Inventory all `as_runtime_float64` and `_as_runtime_float64` call sites.
+- [x] Split call sites into true explicit-fp64 parity contracts and general
   runtime-dtype conversions.
-- [ ] Move general runtime conversions to the policy-aware helper.
-- [ ] Preserve explicit fp64 gates with
+- [x] Move general runtime conversions to the policy-aware helper.
+- [x] Preserve explicit fp64 gates with
   `require_runtime_dtype(..., dtype="float64")` or an explicit-fp64 conversion
   helper.
-- [ ] Keep this migration out of the isolated PR unless a call site is required
+- [x] Keep this migration out of the isolated PR unless a call site is required
   for the Boozer-path reachability target.
+
+Status note: compatibility aliases named `as_runtime_float64` and
+`as_jax_float64` remain, but they now route through the runtime-policy dtype
+helper instead of hard-coding fp64.
 
 ### 13. Runtime device placement helper
 
@@ -430,10 +434,10 @@ Files:
 
 TODOs:
 
-- [ ] Add `runtime_device_put(...)` with explicit policy-owned dtype and
+- [x] Add `runtime_device_put(...)` with explicit policy-owned dtype and
   residency semantics.
-- [ ] Use it only in hot paths that currently duplicate device placement.
-- [ ] Avoid broad mechanical churn until dtype policy tests are stable.
+- [x] Use it only in hot paths that currently duplicate device placement.
+- [x] Avoid broad mechanical churn until dtype policy tests are stable.
 
 ## Detailed Implementation Order
 
@@ -442,7 +446,7 @@ TODOs:
 - [ ] Decide Option A, Option B1, or Option B2 for import-time config ownership.
 - [ ] Add policy unit tests for dtype mapping.
 - [ ] Add helper unit tests that show current hard float64 behavior fails for
-  Metal-policy float32 inputs.
+  MPS-policy float32 inputs.
 - [ ] Run the new tests and confirm they fail for the expected reason.
 
 ### Phase 1: Policy fields
@@ -481,7 +485,7 @@ TODOs:
 - [ ] Run the new `tests/test_runtime_dtype_policy.py`.
 - [ ] Run focused Boozer residual tests.
 - [ ] Run import smoke tests that cover `jax_enable_x64` behavior.
-- [ ] If Metal hardware exists, run the opt-in Metal smoke.
+- [ ] If MPS hardware exists, run the opt-in MPS smoke.
 
 ## Suggested Commands
 
@@ -505,18 +509,18 @@ PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src python -m pytest test
 
 - [ ] `rg -n "jax_enable_x64.*True|JAX_ENABLE_X64.*True" src/simsopt/__init__.py`
   finds no direct setter.
-- [ ] `get_backend_policy("jax_metal_smoke").runtime_dtype == "float32"`.
-- [ ] `get_backend_policy("jax_metal_smoke").host_dtype == "float32"` or a
+- [ ] `get_backend_policy("jax_mps_smoke").runtime_dtype == "float32"`.
+- [ ] `get_backend_policy("jax_mps_smoke").host_dtype == "float32"` or a
   documented alternative.
-- [ ] Non-Metal modes keep `float64` policy dtype.
+- [ ] Non-MPS modes keep `float64` policy dtype.
 - [ ] `_math_utils.require_runtime_dtype(...)` accepts `float32` arrays under
-  Metal policy.
+  MPS policy.
 - [ ] `_math_utils.require_runtime_dtype(...)` rejects `float32` arrays under
   float64 policy.
 - [ ] `boozer_residual_jax.py` no longer imports `require_float64_dtype`.
 - [ ] Boozer residual runtime conversions no longer block fp32 through
   `_as_runtime_float64(...)` on the general runtime path.
-- [ ] Cross-platform dtype policy tests do not require `jax-metal`.
+- [ ] Cross-platform dtype policy tests do not require `jax-mps`.
 - [ ] No module-scope JAX import is added to `src/simsopt/backend/runtime.py`.
 - [ ] Existing CPU/GPU parity tests remain strict about float64 where required.
 
@@ -525,14 +529,14 @@ PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src python -m pytest test
 Use this boundary in the isolated PR description:
 
 ```text
-This PR makes the float32 Metal policy reachable through the Boozer residual
+This PR makes the float32 MPS policy reachable through the Boozer residual
 path and establishes the runtime dtype policy surface. Other JAX kernels still
 contain explicit or helper-mediated float64 conversions and will be migrated in
 follow-up PRs. The cross-platform test proves policy reachability, not real
-Metal correctness.
+MPS correctness.
 ```
 
-Do not describe the isolated PR as repo-wide fp32 support or as Metal hardware
+Do not describe the isolated PR as repo-wide fp32 support or as MPS hardware
 signoff.
 
 ## Risks And Mitigations
@@ -548,14 +552,14 @@ signoff.
   - Mitigation: state the Boozer-path-only reachability boundary in the PR
     description and keep repo-wide `as_runtime_float64` migration as a follow-up
     TODO.
-- Risk: Metal policy tests accidentally initialize the real Metal backend.
+- Risk: MPS policy tests accidentally initialize the real MPS backend.
   - Mitigation: use `set_backend(..., configure_runtime=False)` for
     cross-platform tests.
 - Risk: dtype strings drift from helper mappings.
   - Mitigation: centralize allowed dtype names and add policy validation.
-- Risk: float32 reachability is mistaken for Metal correctness.
-  - Mitigation: keep a separate hardware-marked Metal smoke and do not call the
-    isolated PR a real Metal signoff.
+- Risk: float32 reachability is mistaken for MPS correctness.
+  - Mitigation: keep a separate hardware-marked MPS smoke and do not call the
+    isolated PR a real MPS signoff.
 
 ## Done Definition
 
@@ -570,7 +574,7 @@ The isolated PR is done when:
   on the general runtime path;
 - [ ] `simsopt.__init__` no longer owns direct x64 mutation;
 - [ ] the import-time runtime ownership contract is documented and tested;
-- [ ] cross-platform tests prove Metal policy selects float32 without requiring
-  Metal hardware;
+- [ ] cross-platform tests prove MPS policy selects float32 without requiring
+  MPS hardware;
 - [ ] no module-scope JAX import is introduced in `runtime.py`;
 - [ ] focused tests pass.

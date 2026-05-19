@@ -51,6 +51,7 @@ from .._core.optimizable import Optimizable
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_runtime_float64 as _as_runtime_float64,
+    runtime_device_put,
     zeros as _zeros,
 )
 from ..jax_core.curve_geometry import curve_geometry_from_spec
@@ -896,7 +897,7 @@ class QfmResidualJAX(Optimizable):
 
 
 def _explicit_index_array(indices):
-    return jax.device_put(np.asarray(indices, dtype=np.int32))
+    return runtime_device_put(indices, dtype=np.int32)
 
 
 def _take_runtime_entries(array, indices):
@@ -2101,11 +2102,11 @@ def _traceable_runtime_hostify_tree(tree):
 def _traceable_runtime_deviceify_leaf(leaf, device):
     """Explicitly place cached runtime arrays back onto the active device."""
     if isinstance(leaf, jax.Array):
-        return jax.device_put(leaf, device=device)
+        return runtime_device_put(leaf, device=device)
     if isinstance(leaf, float):
-        return jax.device_put(np.asarray(leaf, dtype=np.float64), device=device)
+        return runtime_device_put(leaf, dtype=np.float64, device=device)
     if isinstance(leaf, (np.ndarray, np.generic)):
-        return jax.device_put(np.asarray(leaf), device=device)
+        return runtime_device_put(leaf, device=device)
     return leaf
 
 

@@ -115,13 +115,14 @@ from scipy.optimize import OptimizeResult
 
 from ..backend import (
     get_backend_config,
+    get_backend_policy,
     raise_if_strict_jax_fallback,
     strict_target_lane_purity,
     target_lane_purity_requested,
 )
 from .._core.jax_host_boundary import host_bool as _host_bool
 from .._core.jax_host_boundary import host_scalar as _host_scalar
-from ..jax_core._math_utils import _explicit_device_array
+from ..jax_core._math_utils import _explicit_device_array, runtime_device_put
 
 __all__ = [
     "PRIVATE_OPTIMIZER_JAX_VERSION",
@@ -147,6 +148,7 @@ __all__ = [
     "reference_least_squares",
     "reference_minimize",
     "require_target_backend_x64",
+    "resolve_optimizer_backend",
     "resolve_least_squares_optimizer_method",
     "resolve_reference_least_squares_optimizer_method",
     "resolve_reference_optimizer_contract",
@@ -164,7 +166,8 @@ __all__ = [
 
 
 PRIVATE_OPTIMIZER_JAX_VERSION = "0.9.2"
-VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
+VALID_OPTIMIZER_BACKENDS = frozenset({"auto", "scipy", "ondevice"})
+CONCRETE_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
 VALID_OUTER_OPTIMIZER_BACKENDS = frozenset(
     {"scipy", "ondevice", "scipy-jax", "scipy-jax-fullgraph"}
 )
@@ -234,6 +237,14 @@ _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
 _TRACEABLE_CALLBACK_LOCK = Lock()
 _TRACEABLE_CALLBACK_IDS = count(1)
 _TRACEABLE_CALLBACKS: dict[int, Callable[..., object]] = {}
+
+
+def resolve_optimizer_backend(optimizer_backend: str | None) -> str:
+    if optimizer_backend is None or optimizer_backend == "auto":
+        return get_backend_policy().default_optimizer_backend
+    if optimizer_backend not in CONCRETE_OPTIMIZER_BACKENDS:
+        raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
+    return optimizer_backend
 
 
 def _register_traceable_callback(callback: Callable[..., object] | None) -> int:
@@ -423,7 +434,7 @@ def _x64_enabled():
 
 
 def _device_scalar(value, *, dtype=jnp.float64):
-    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+    return runtime_device_put(value, dtype=dtype)
 
 
 def _optimizer_flat_vector(value, *, dtype=None) -> jax.Array:
@@ -635,6 +646,8 @@ def __getattr__(name):
 
 def resolve_optimizer_backend_method(optimizer_backend, *, limited_memory):
     """Map the public backend contract to the concrete optimizer method."""
+    if optimizer_backend is None or optimizer_backend == "auto":
+        optimizer_backend = resolve_optimizer_backend(optimizer_backend)
     if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
         raise ValueError(
             "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
@@ -666,6 +679,7 @@ def resolve_least_squares_optimizer_method(
     least_squares_algorithm,
 ):
     """Map the LS backend contract to the concrete least-squares method."""
+    optimizer_backend = resolve_optimizer_backend(optimizer_backend)
     if least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS:
         allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
         raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
@@ -674,8 +688,6 @@ def resolve_least_squares_optimizer_method(
             optimizer_backend,
             limited_memory=limited_memory,
         )
-    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
     if optimizer_backend == "scipy":
         return resolve_reference_least_squares_optimizer_method(
             limited_memory=limited_memory,
@@ -731,6 +743,7 @@ def resolve_target_least_squares_optimizer_method(
 
 def require_target_backend_x64(optimizer_backend):
     """Fail fast when a target-lane backend is requested without float64."""
+    optimizer_backend = resolve_optimizer_backend(optimizer_backend)
     if optimizer_backend not in TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS:
         return
     if _x64_enabled():

@@ -14,6 +14,8 @@ from threading import Lock
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from simsopt.backend.dtypes import runtime_device_put
 from jax import lax
 
 from ..._core.jax_host_boundary import host_array as _callback_host_array
@@ -35,7 +37,7 @@ def _as_jax_dtype(value, dtype):
     if isinstance(value, jax.Array):
         return jnp.asarray(value, dtype=dtype)
     if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
-        return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+        return runtime_device_put(value, dtype=dtype)
     return jnp.asarray(value, dtype=dtype)
 
 
@@ -44,7 +46,7 @@ def _as_numpy_dtype(value, dtype):
 
 
 def _eye(n, dtype):
-    return jax.device_put(np.eye(int(n), dtype=np.dtype(dtype)))
+    return runtime_device_put(np.eye(int(n), dtype=np.dtype(dtype)), dtype=dtype)
 
 
 def _zeros(shape, dtype):
@@ -52,7 +54,7 @@ def _zeros(shape, dtype):
         shape = (int(shape),)
     else:
         shape = tuple(int(dim) for dim in shape)
-    return jax.device_put(np.zeros(shape, dtype=np.dtype(dtype)))
+    return runtime_device_put(np.zeros(shape, dtype=np.dtype(dtype)), dtype=dtype)
 
 
 def _int_scalar(value):

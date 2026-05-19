@@ -1214,9 +1214,7 @@ class Iotas(Optimizable):
 
 
 if _HAS_JAX:
-
-    def _as_jax_float64(value):
-        return _runtime_as_jax_float64(value)
+    _as_jax_float64 = _runtime_as_jax_float64
 
     def _scalar_like(reference, value):
         return _runtime_as_runtime_float64(value, reference=reference)

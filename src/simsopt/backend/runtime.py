@@ -9,7 +9,7 @@ an explicit mode-based public API for the new runtime surface:
 - ``jax_cpu_parity``
 - ``jax_gpu_fast``
 - ``jax_gpu_parity``
-- ``jax_metal_smoke``
+- ``jax_mps_smoke``
 
 The mode API is the SSOT. The older ``SIMSOPT_BACKEND`` /
 ``SIMSOPT_JAX_PLATFORM`` pair is still read and written for compatibility.
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+import importlib.util
 import logging
 import os
 from pathlib import Path
@@ -32,9 +33,23 @@ import warnings
 _LOGGER = logging.getLogger(__name__)
 
 _VALID_BACKENDS = ("cpu", "jax")
-_VALID_PLATFORMS = ("cpu", "cuda", "metal")
+_VALID_PLATFORMS = ("cpu", "cuda", "mps")
 _VALID_POLICY_DTYPES = ("float32", "float64")
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+# Deprecated selectors removed in favour of the jax-mps Apple Silicon lane.
+# jax-metal (last release 2024-10) is unmaintained and incompatible with
+# jaxlib 0.10; selecting it must hard-fail with a pointer to jax_mps_smoke.
+_DEPRECATED_PLATFORMS = {"metal": "mps"}
+_DEPRECATED_MODES = {"jax_metal_smoke": "jax_mps_smoke"}
+_MPS_NOT_AVAILABLE_HINT = (
+    "jax-mps is not importable. Install with envs/jax-mps.yml (python=3.13) "
+    "or pick a cpu/cuda mode."
+)
+_DEPRECATION_HINT_FMT = (
+    "{name}={value!r} was removed (jax-metal is unmaintained upstream and "
+    "incompatible with jaxlib 0.10). Use {replacement!r} with envs/jax-mps.yml."
+)
 
 _BACKEND_ENV = "SIMSOPT_BACKEND"
 _BACKEND_LEGACY_ENV = "STAGE2_BACKEND"
@@ -43,7 +58,9 @@ _PLATFORM_LEGACY_ENV = "SIMSOPT_JAX_BACKEND"
 _MODE_ENV = "SIMSOPT_BACKEND_MODE"
 _STRICT_ENV = "SIMSOPT_BACKEND_STRICT"
 _TARGET_LANE_STRICT_ENV = "SIMSOPT_TARGET_LANE_STRICT"
+_DEBUG_ENV = "SIMSOPT_DEBUG"
 _DEBUG_NANS_ENV = "SIMSOPT_JAX_DEBUG_NANS"
+_DISABLE_JIT_ENV = "SIMSOPT_JAX_DISABLE_JIT"
 _TRANSFER_GUARD_ENV = "SIMSOPT_JAX_TRANSFER_GUARD"
 _COMPILATION_CACHE_DIR_ENV = "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
 _COIL_CHUNK_SIZE_ENV = "SIMSOPT_JAX_COIL_CHUNK_SIZE"
@@ -77,6 +94,8 @@ _XLA_PYTHON_CLIENT_ALLOCATOR_ENV = "XLA_PYTHON_CLIENT_ALLOCATOR"
 _XLA_CLIENT_MEM_FRACTION_ENV = "XLA_CLIENT_MEM_FRACTION"
 _TF_GPU_ALLOCATOR_ENV = "TF_GPU_ALLOCATOR"
 _VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
+_VALID_DEFAULT_RESIDENCIES = ("device", "host")
+_VALID_DEFAULT_OPTIMIZER_BACKENDS = ("scipy", "ondevice")
 _VALID_GPU_ALLOCATORS = ("platform", "vmm")
 _VALID_TF_GPU_ALLOCATORS = ("cuda_malloc_async",)
 _VALID_SHARDING_STRATEGIES = (
@@ -107,6 +126,7 @@ _SYNCED_RUNTIME_ENV_VALUES = (
     (_MODE_ENV, "mode"),
     (_STRICT_ENV, "strict"),
     (_DEBUG_NANS_ENV, "debug_nans"),
+    (_DISABLE_JIT_ENV, "disable_jit"),
     (_TRANSFER_GUARD_ENV, "transfer_guard"),
     (_COMPILATION_CACHE_DIR_ENV, "compilation_cache_dir"),
     (_GPU_PREALLOCATE_ENV, "xla_gpu_preallocate"),
@@ -128,7 +148,7 @@ VALID_BACKEND_MODES = (
     "jax_cpu_parity",
     "jax_gpu_fast",
     "jax_gpu_parity",
-    "jax_metal_smoke",
+    "jax_mps_smoke",
 )
 
 _MODE_TO_RUNTIME = {
@@ -137,7 +157,7 @@ _MODE_TO_RUNTIME = {
     "jax_cpu_parity": ("jax", "cpu"),
     "jax_gpu_parity": ("jax", "cuda"),
     "jax_gpu_fast": ("jax", "cuda"),
-    "jax_metal_smoke": ("jax", "metal"),
+    "jax_mps_smoke": ("jax", "mps"),
 }
 
 _NO_CI_REPRODUCIBILITY_DEFAULTS = {
@@ -168,6 +188,8 @@ _MODE_POLICY_DEFAULTS = {
         "requires_x64": True,
         "runtime_dtype": "float64",
         "host_dtype": "float64",
+        "default_residency": "host",
+        "default_optimizer_backend": "scipy",
         "chunk_policy": "host_reference",
         "tolerance_tier": "cpu_reference",
         "compilation_cache_policy": "not_applicable",
@@ -182,6 +204,8 @@ _MODE_POLICY_DEFAULTS = {
         "requires_x64": True,
         "runtime_dtype": "float64",
         "host_dtype": "float64",
+        "default_residency": "device",
+        "default_optimizer_backend": "ondevice",
         "chunk_policy": "performance_tuned",
         "tolerance_tier": "fast",
         "compilation_cache_policy": "optional_persistent",
@@ -196,6 +220,8 @@ _MODE_POLICY_DEFAULTS = {
         "requires_x64": True,
         "runtime_dtype": "float64",
         "host_dtype": "float64",
+        "default_residency": "device",
+        "default_optimizer_backend": "ondevice",
         "chunk_policy": "stable_default",
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
@@ -210,6 +236,8 @@ _MODE_POLICY_DEFAULTS = {
         "requires_x64": True,
         "runtime_dtype": "float64",
         "host_dtype": "float64",
+        "default_residency": "device",
+        "default_optimizer_backend": "ondevice",
         "chunk_policy": "stable_default",
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
@@ -228,6 +256,8 @@ _MODE_POLICY_DEFAULTS = {
         "requires_x64": True,
         "runtime_dtype": "float64",
         "host_dtype": "float64",
+        "default_residency": "device",
+        "default_optimizer_backend": "ondevice",
         "chunk_policy": "performance_tuned",
         "tolerance_tier": "fast",
         "compilation_cache_policy": "optional_persistent",
@@ -237,17 +267,19 @@ _MODE_POLICY_DEFAULTS = {
         **_GPU_MEMORY_MODE_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
-    "jax_metal_smoke": {
+    "jax_mps_smoke": {
         "parity_mode": False,
         "requires_x64": False,
         "runtime_dtype": "float32",
         "host_dtype": "float32",
+        "default_residency": "device",
+        "default_optimizer_backend": "ondevice",
         "chunk_policy": "stable_default",
         "tolerance_tier": "smoke",
         "compilation_cache_policy": "optional_persistent",
         "matmul_precision": "default",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
-        "provenance_label": "jax_metal_smoke",
+        "provenance_label": "jax_mps_smoke",
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
@@ -259,7 +291,7 @@ _FIELD_KERNEL_DEFAULTS = {
     "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
-    "jax_metal_smoke": {"coil_chunk_size": 16, "quadrature_block_size": 0},
+    "jax_mps_smoke": {"coil_chunk_size": 16, "quadrature_block_size": 0},
 }
 _POINT_CHUNK_SIZE_BY_POLICY = {
     "host_reference": 0,
@@ -273,7 +305,7 @@ _MODE_SHARDING_DEFAULTS = {
     "jax_cpu_parity": "none",
     "jax_gpu_parity": "none",
     "jax_gpu_fast": "hybrid",
-    "jax_metal_smoke": "none",
+    "jax_mps_smoke": "none",
 }
 _DEFAULT_SHARDING_AXIS_NAME = "d"
 _DEFAULT_COIL_SHARDING_AXIS_NAME = "coil"
@@ -382,7 +414,7 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "jax_cpu_parity": "log",
     "jax_gpu_parity": "log",
     "jax_gpu_fast": "log",
-    "jax_metal_smoke": "log",
+    "jax_mps_smoke": "log",
 }
 _BackendCacheClearCallbackKey = tuple[str, str]
 _backend_runtime_lock = threading.RLock()
@@ -399,6 +431,7 @@ class BackendConfig:
     jax_platform: str
     strict: bool = False
     debug_nans: bool = False
+    disable_jit: bool = False
     transfer_guard: str | None = None
     compilation_cache_dir: str | None = None
     xla_gpu_preallocate: bool | None = None
@@ -484,6 +517,8 @@ class BackendPolicy:
     requires_x64: bool
     runtime_dtype: str
     host_dtype: str
+    default_residency: str
+    default_optimizer_backend: str
     chunk_policy: str
     tolerance_tier: str
     compilation_cache_policy: str
@@ -500,6 +535,7 @@ class BackendPolicy:
     gpu_reproducibility_sample_size: int | None
     tolerance_ratchet_factor: float | None
     debug_nans: bool
+    disable_jit: bool
     transfer_guard: str | None
     compilation_cache_dir: str | None
 
@@ -673,8 +709,17 @@ def _validate_backend(value: str, *, source: str) -> str:
     return value
 
 
+def _raise_deprecated_selector(name: str, value: str, replacement: str) -> None:
+    raise ValueError(
+        _DEPRECATION_HINT_FMT.format(name=name, value=value, replacement=replacement)
+    )
+
+
 def _validate_platform(value: str, *, source: str) -> str:
     value = value.lower()
+    replacement = _DEPRECATED_PLATFORMS.get(value)
+    if replacement is not None:
+        _raise_deprecated_selector(source, value, replacement)
     if value not in _VALID_PLATFORMS:
         raise ValueError(
             f"{source}={value!r} is not valid. Accepted: {_VALID_PLATFORMS}"
@@ -683,6 +728,9 @@ def _validate_platform(value: str, *, source: str) -> str:
 
 
 def _validate_mode(mode: str) -> str:
+    replacement = _DEPRECATED_MODES.get(mode)
+    if replacement is not None:
+        _raise_deprecated_selector("Backend mode", mode, replacement)
     if mode not in VALID_BACKEND_MODES:
         raise ValueError(
             f"Backend mode {mode!r} is not valid. Accepted: {VALID_BACKEND_MODES}"
@@ -698,6 +746,27 @@ def _validate_transfer_guard(value: str | None, *, source: str) -> str | None:
             f"{source}={value!r} is not valid. Accepted: {_VALID_TRANSFER_GUARDS}"
         )
     return value
+
+
+def _validate_default_residency(value: object, *, mode: str) -> str:
+    residency = str(value)
+    if residency not in _VALID_DEFAULT_RESIDENCIES:
+        raise ValueError(
+            f"Backend mode {mode!r} has unsupported default_residency={residency!r}. "
+            f"Accepted: {_VALID_DEFAULT_RESIDENCIES}."
+        )
+    return residency
+
+
+def _validate_default_optimizer_backend(value: object, *, mode: str) -> str:
+    optimizer_backend = str(value)
+    if optimizer_backend not in _VALID_DEFAULT_OPTIMIZER_BACKENDS:
+        raise ValueError(
+            f"Backend mode {mode!r} has unsupported "
+            f"default_optimizer_backend={optimizer_backend!r}. "
+            f"Accepted: {_VALID_DEFAULT_OPTIMIZER_BACKENDS}."
+        )
+    return optimizer_backend
 
 
 def _validate_sharding_strategy(value: str, *, source: str) -> str:
@@ -845,8 +914,9 @@ def _strategy_reduced_axis_name(strategy: str, *, coil_axis_name: str) -> str | 
 
 
 def _runtime_jax_platform_value(platform: str) -> str:
-    if platform == "metal":
-        return "METAL"
+    # Identity seam: callers (env lowering, transfer-guard expected-platforms
+    # map, set_backend sync) read the JAX_PLATFORMS value through this helper
+    # so future platform-specific case mapping has a single edit site.
     return platform
 
 
@@ -1202,6 +1272,17 @@ def _resolve_debug_nans(debug_nans: bool | None) -> bool:
     return bool(debug_nans)
 
 
+def _debug_overlay_enabled() -> bool:
+    return bool(_optional_bool_env(_DEBUG_ENV))
+
+
+def _resolve_disable_jit(disable_jit: bool | None) -> bool:
+    if disable_jit is None:
+        env_value = _optional_bool_env(_DISABLE_JIT_ENV)
+        return False if env_value is None else env_value
+    return bool(disable_jit)
+
+
 def _default_transfer_guard(mode: str) -> str | None:
     return _DEFAULT_TRANSFER_GUARD_BY_MODE[_validate_mode(mode)]
 
@@ -1317,6 +1398,7 @@ def _config_from_mode(
     *,
     strict: bool,
     debug_nans: bool | None = None,
+    disable_jit: bool | None = None,
     transfer_guard: str | None = None,
     compilation_cache_dir: str | None = None,
     xla_gpu_preallocate: bool | None = None,
@@ -1326,13 +1408,19 @@ def _config_from_mode(
 ) -> BackendConfig:
     mode = _validate_mode(mode)
     backend, jax_platform = _MODE_TO_RUNTIME[mode]
+    debug_overlay = _debug_overlay_enabled()
     return BackendConfig(
         mode=mode,
         backend=backend,
         jax_platform=jax_platform,
-        strict=bool(strict),
-        debug_nans=_resolve_debug_nans(debug_nans),
-        transfer_guard=_resolve_transfer_guard(mode, transfer_guard),
+        strict=bool(strict) or debug_overlay,
+        debug_nans=True if debug_overlay else _resolve_debug_nans(debug_nans),
+        disable_jit=True if debug_overlay else _resolve_disable_jit(disable_jit),
+        transfer_guard=(
+            "disallow"
+            if debug_overlay
+            else _resolve_transfer_guard(mode, transfer_guard)
+        ),
         compilation_cache_dir=_resolve_compilation_cache_dir(
             mode,
             compilation_cache_dir,
@@ -1405,6 +1493,14 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
             mode=config.mode,
             field="host_dtype",
         ),
+        default_residency=_validate_default_residency(
+            defaults["default_residency"],
+            mode=config.mode,
+        ),
+        default_optimizer_backend=_validate_default_optimizer_backend(
+            defaults["default_optimizer_backend"],
+            mode=config.mode,
+        ),
         chunk_policy=str(defaults["chunk_policy"]),
         tolerance_tier=str(defaults["tolerance_tier"]),
         compilation_cache_policy=str(defaults["compilation_cache_policy"]),
@@ -1424,6 +1520,7 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         gpu_reproducibility_sample_size=defaults["gpu_reproducibility_sample_size"],
         tolerance_ratchet_factor=defaults["tolerance_ratchet_factor"],
         debug_nans=config.debug_nans,
+        disable_jit=config.disable_jit,
         transfer_guard=config.transfer_guard,
         compilation_cache_dir=config.compilation_cache_dir,
     )
@@ -1432,7 +1529,12 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
 def _runtime_env_value(attribute_name: str, value: object) -> str:
     if value is None:
         return ""
-    if attribute_name in {"strict", "debug_nans", "xla_gpu_preallocate"}:
+    if attribute_name in {
+        "strict",
+        "debug_nans",
+        "disable_jit",
+        "xla_gpu_preallocate",
+    }:
         return "1" if bool(value) else "0"
     if attribute_name == "jax_platforms":
         return _runtime_jax_platforms_value(str(value))
@@ -1498,8 +1600,8 @@ def _mode_from_legacy_env(backend: str, platform: str) -> str:
         return "native_cpu"
     if platform == "cpu":
         return "jax_cpu_parity"
-    if platform == "metal":
-        return "jax_metal_smoke"
+    if platform == "mps":
+        return "jax_mps_smoke"
     return "jax_gpu_parity"
 
 
@@ -1761,6 +1863,11 @@ def should_shard_coil_groups(mode: str | None = None) -> bool:
 def get_debug_nans(mode: str | None = None) -> bool:
     """Return the debug-NaN runtime guardrail state for the resolved mode."""
     return get_backend_policy(mode).debug_nans
+
+
+def get_disable_jit(mode: str | None = None) -> bool:
+    """Return the active JAX disable-JIT debug policy for the resolved mode."""
+    return get_backend_policy(mode).disable_jit
 
 
 def get_transfer_guard(mode: str | None = None) -> str | None:
@@ -2026,8 +2133,6 @@ def validate_cuda_determinism_environment() -> None:
 def _expected_runtime_backend_names(jax_platform: str) -> frozenset[str]:
     if jax_platform == "cuda":
         return frozenset({"cuda", "gpu"})
-    if jax_platform == "metal":
-        return frozenset({"metal", "METAL"})
     return frozenset({jax_platform})
 
 
@@ -2078,6 +2183,48 @@ def _set_runtime_env(name: str, value: str | None) -> None:
     os.environ[name] = value
 
 
+def _gpu_memory_runtime_env(config: BackendConfig) -> tuple[tuple[str, str | None], ...]:
+    if config.xla_gpu_preallocate is None:
+        preallocate = None
+    else:
+        preallocate = "true" if config.xla_gpu_preallocate else "false"
+
+    if config.xla_gpu_allocator == "vmm":
+        python_mem_fraction = None
+        client_mem_fraction = (
+            None
+            if config.xla_gpu_mem_fraction is None
+            else str(config.xla_gpu_mem_fraction)
+        )
+    else:
+        python_mem_fraction = (
+            None
+            if config.xla_gpu_mem_fraction is None
+            else str(config.xla_gpu_mem_fraction)
+        )
+        client_mem_fraction = None
+
+    return (
+        (_XLA_PYTHON_CLIENT_PREALLOCATE_ENV, preallocate),
+        (_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, config.xla_gpu_allocator),
+        (_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, python_mem_fraction),
+        (_XLA_CLIENT_MEM_FRACTION_ENV, client_mem_fraction),
+        (_TF_GPU_ALLOCATOR_ENV, config.tf_gpu_allocator),
+    )
+
+
+def _gpu_memory_runtime_env_matches(config: BackendConfig) -> bool:
+    for name, expected in _gpu_memory_runtime_env(config):
+        actual = os.environ.get(name)
+        if expected is None:
+            if actual is not None:
+                return False
+            continue
+        if actual != expected:
+            return False
+    return True
+
+
 def _assert_jax_not_imported_for_gpu_memory_config(config: BackendConfig) -> None:
     jax_module = sys.modules.get("jax")
     if (
@@ -2086,6 +2233,8 @@ def _assert_jax_not_imported_for_gpu_memory_config(config: BackendConfig) -> Non
         or getattr(jax_module, "__name__", None) != "jax"
         or "jax._src" not in sys.modules
     ):
+        return
+    if _gpu_memory_runtime_env_matches(config):
         return
     raise RuntimeError(
         "JAX GPU memory environment variables must be resolved before "
@@ -2098,31 +2247,18 @@ def _apply_jax_gpu_memory_env(config: BackendConfig) -> None:
     if config.jax_platform != "cuda":
         return
     _assert_jax_not_imported_for_gpu_memory_config(config)
-    if config.xla_gpu_preallocate is not None:
-        _set_runtime_env(
-            _XLA_PYTHON_CLIENT_PREALLOCATE_ENV,
-            "true" if config.xla_gpu_preallocate else "false",
-        )
-    if config.xla_gpu_allocator is None:
-        _set_runtime_env(_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, None)
-    else:
-        _set_runtime_env(_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, config.xla_gpu_allocator)
-    if config.xla_gpu_mem_fraction is None:
-        _set_runtime_env(_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None)
-        _set_runtime_env(_XLA_CLIENT_MEM_FRACTION_ENV, None)
-    elif config.xla_gpu_allocator == "vmm":
-        _set_runtime_env(_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None)
-        _set_runtime_env(
-            _XLA_CLIENT_MEM_FRACTION_ENV,
-            str(config.xla_gpu_mem_fraction),
-        )
-    else:
-        _set_runtime_env(
-            _XLA_PYTHON_CLIENT_MEM_FRACTION_ENV,
-            str(config.xla_gpu_mem_fraction),
-        )
-        _set_runtime_env(_XLA_CLIENT_MEM_FRACTION_ENV, None)
-    _set_runtime_env(_TF_GPU_ALLOCATOR_ENV, config.tf_gpu_allocator)
+    for name, value in _gpu_memory_runtime_env(config):
+        _set_runtime_env(name, value)
+
+
+def _probe_mps_plugin() -> None:
+    """Fail closed when the jax-mps PJRT plugin is not importable.
+
+    Uses ``find_spec`` rather than ``import`` so the plugin registers normally
+    during the subsequent ``import jax`` call with ``JAX_PLATFORMS=mps`` set.
+    """
+    if importlib.util.find_spec("jax_plugins.mps") is None:
+        raise RuntimeError(_MPS_NOT_AVAILABLE_HINT)
 
 
 def apply_jax_runtime_config() -> None:
@@ -2133,6 +2269,8 @@ def apply_jax_runtime_config() -> None:
     policy = get_backend_policy(config.mode)
     _validate_cuda_parity_determinism_env(config, policy)
     _apply_jax_gpu_memory_env(config)
+    if config.jax_platform == "mps":
+        _probe_mps_plugin()
 
     import jax
 
@@ -2143,6 +2281,7 @@ def apply_jax_runtime_config() -> None:
     jax.config.update("jax_enable_x64", policy.requires_x64)
     jax.config.update("jax_default_matmul_precision", policy.matmul_precision)
     jax.config.update("jax_debug_nans", config.debug_nans)
+    jax.config.update("jax_disable_jit", config.disable_jit)
     if config.transfer_guard is not None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     if config.compilation_cache_dir is not None:
@@ -2183,6 +2322,7 @@ def set_backend(
     *,
     strict: bool = False,
     debug_nans: bool | None = None,
+    disable_jit: bool | None = None,
     transfer_guard: str | None = None,
     compilation_cache_dir: str | None = None,
     xla_gpu_preallocate: bool | None = None,
@@ -2204,6 +2344,7 @@ def set_backend(
         mode,
         strict=bool(strict),
         debug_nans=debug_nans,
+        disable_jit=disable_jit,
         transfer_guard=transfer_guard,
         compilation_cache_dir=compilation_cache_dir,
         xla_gpu_preallocate=xla_gpu_preallocate,
@@ -2225,3 +2366,34 @@ def set_backend(
     if configure_runtime:
         apply_jax_runtime_config()
     return config
+
+
+def use_runtime(
+    mode: str,
+    *,
+    debug: bool = False,
+    strict: bool = False,
+    debug_nans: bool | None = None,
+    disable_jit: bool | None = None,
+    transfer_guard: str | None = None,
+    compilation_cache_dir: str | None = None,
+    xla_gpu_preallocate: bool | None = None,
+    xla_gpu_mem_fraction: float | None = None,
+    xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
+    configure_runtime: bool = True,
+) -> BackendConfig:
+    """Set runtime mode with the strict debug overlay when requested."""
+    return set_backend(
+        mode,
+        strict=bool(strict) or bool(debug),
+        debug_nans=True if debug else debug_nans,
+        disable_jit=True if debug else disable_jit,
+        transfer_guard="disallow" if debug else transfer_guard,
+        compilation_cache_dir=compilation_cache_dir,
+        xla_gpu_preallocate=xla_gpu_preallocate,
+        xla_gpu_mem_fraction=xla_gpu_mem_fraction,
+        xla_gpu_allocator=xla_gpu_allocator,
+        tf_gpu_allocator=tf_gpu_allocator,
+        configure_runtime=configure_runtime,
+    )

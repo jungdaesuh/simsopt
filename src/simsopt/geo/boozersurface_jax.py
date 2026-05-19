@@ -57,6 +57,7 @@ from ..jax_core._math_utils import (
     as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
     concat_jax_float64 as _concat_jax_float64,
+    runtime_device_put,
 )
 from .._core.optimizable import Optimizable
 from .surfacerzfourier import SurfaceRZFourier
@@ -3125,7 +3126,7 @@ def _place_linearization_factors_for_residency(factors, residency):
     if factors is None or residency == "device":
         return factors
     device = _host_linearization_device()
-    return jax.tree.map(lambda factor: jax.device_put(factor, device=device), factors)
+    return jax.tree.map(lambda factor: runtime_device_put(factor, device=device), factors)
 
 
 def _solver_option_defaults(boozer_type, user_options):
@@ -3138,6 +3139,7 @@ def _solver_option_defaults(boozer_type, user_options):
     if boozer_type == "ls" and "max_dense_linearization_bytes" not in user_options:
         defaults["max_dense_linearization_bytes"] = dense_default
     return defaults
+
 
 # Options only meaningful for the target/private optimizer backend.
 _PRIVATE_OPTIMIZER_OPTIONS = frozenset(
@@ -3229,9 +3231,7 @@ class _BoozerSolverOptions(dict):
 
 
 def _default_ls_optimizer_backend() -> str:
-    if get_backend_config().backend == "jax":
-        return "ondevice"
-    return "scipy"
+    return get_backend_policy().default_optimizer_backend
 
 
 def _normalize_solver_options(raw_options, boozer_type):
@@ -3239,7 +3239,7 @@ def _normalize_solver_options(raw_options, boozer_type):
     if "bfgs_method" in raw_options:
         raise ValueError(
             "BoozerSurfaceJAX option 'bfgs_method' was removed. "
-            "Use 'optimizer_backend' with one of: scipy, ondevice."
+            "Use 'optimizer_backend' with one of: auto, scipy, ondevice."
         )
 
     allowed_option_keys = (
@@ -3251,12 +3251,15 @@ def _normalize_solver_options(raw_options, boozer_type):
         raise ValueError(f"Unknown BoozerSurfaceJAX option(s): {unknown_keys}.")
 
     optimizer_backend = raw_options.get("optimizer_backend")
-    if (
-        optimizer_backend is not None
-        and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
-    ):
-        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
-    linearization_residency = raw_options.get("linearization_residency", "device")
+    if optimizer_backend is not None and optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
+        raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
+    effective_optimizer_backend = _optimizer_jax.resolve_optimizer_backend(
+        optimizer_backend
+    )
+    linearization_residency = raw_options.get(
+        "linearization_residency",
+        get_backend_policy().default_residency,
+    )
     if linearization_residency not in _LINEARIZATION_RESIDENCY_VALUES:
         allowed = ", ".join(sorted(_LINEARIZATION_RESIDENCY_VALUES))
         raise ValueError(f"linearization_residency must be one of: {allowed}.")
@@ -3274,11 +3277,8 @@ def _normalize_solver_options(raw_options, boozer_type):
         )
 
     if boozer_type == "ls":
-        effective_backend = raw_options.get(
-            "optimizer_backend", _default_ls_optimizer_backend()
-        )
         private_keys = sorted(set(raw_options) & _PRIVATE_OPTIMIZER_OPTIONS)
-        if private_keys and effective_backend == "scipy":
+        if private_keys and effective_optimizer_backend == "scipy":
             keys_str = ", ".join(repr(k) for k in private_keys)
             raise ValueError(
                 f"Private optimizer option(s) {keys_str} require "
@@ -3287,8 +3287,7 @@ def _normalize_solver_options(raw_options, boozer_type):
 
     normalized_options = dict(raw_options)
     if boozer_type == "ls":
-        if "optimizer_backend" not in normalized_options:
-            normalized_options["optimizer_backend"] = _default_ls_optimizer_backend()
+        normalized_options["optimizer_backend"] = effective_optimizer_backend
         if "least_squares_algorithm" not in normalized_options:
             normalized_options["least_squares_algorithm"] = (
                 default_least_squares_algorithm_for_backend(
@@ -3336,7 +3335,7 @@ def _normalize_solver_options(raw_options, boozer_type):
                 )
     if boozer_type == "exact":
         normalized_options.pop("optimizer_backend", None)
-    normalized_options.setdefault("linearization_residency", "device")
+    normalized_options.setdefault("linearization_residency", linearization_residency)
     return normalized_options
 
 
@@ -3445,7 +3444,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         if self.boozer_type == "ls":
             if self.options["optimizer_backend"] not in VALID_OPTIMIZER_BACKENDS:
-                raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
+                raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
 
         runtime_state = (
             surface_runtime_state
@@ -3564,7 +3563,7 @@ class BoozerSurfaceJAX(Optimizable):
                 if dtype is None
                 else jnp.asarray(factor, dtype=dtype)
             )
-            return jax.device_put(array, device=compute_device)
+            return runtime_device_put(array, device=compute_device)
 
         def pack_callbacks(
             apply_forward,
@@ -5171,9 +5170,11 @@ class BoozerSurfaceJAX(Optimizable):
 
     def _resolve_optimizer_method(self, limited_memory=None, *, optimize_G=True):
         """Resolve optimizer method string from options."""
-        optimizer_backend = self.options["optimizer_backend"]
+        optimizer_backend = _optimizer_jax.resolve_optimizer_backend(
+            self.options["optimizer_backend"]
+        )
         if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-            raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
+            raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
         require_target_backend_x64(optimizer_backend)
         if optimizer_backend != "ondevice":
             backend_config = get_backend_config()

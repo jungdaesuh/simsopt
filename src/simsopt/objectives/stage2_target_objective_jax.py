@@ -17,6 +17,7 @@ from ..geo.curve import incremental_arclength_pure, kappa_pure
 from ..jax_core._math_utils import (
     as_jax_float64 as _math_as_jax_float64,
     as_runtime_float64 as _as_runtime_float64,
+    runtime_device_put,
 )
 from ..jax_core.field import (
     coil_set_spec_from_dof_extraction_spec,
@@ -149,12 +150,11 @@ class Stage2TargetObjectiveBundle(NamedTuple):
     reporting_summary: Stage2ReportingFn | None = None
 
 
-def _as_jax_float64(value) -> jax.Array:
-    return _math_as_jax_float64(value)
+_as_jax_float64 = _math_as_jax_float64
 
 
 def _device_float64_array(value) -> jax.Array:
-    return jax.device_put(np.asarray(value, dtype=np.float64))
+    return runtime_device_put(value, dtype=np.float64)
 
 
 def _runtime_float64_array(value, *, reference) -> jax.Array:

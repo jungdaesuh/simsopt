@@ -92,7 +92,8 @@ def strict_scalar_value_and_grad(fun, arg, *args):
 
 
 def explicit_cotangent_basis(length: int, index: int, *, dtype):
-    jax = _require_jax()
+    from simsopt.backend.dtypes import runtime_device_put
+
     basis = np.zeros(int(length), dtype=np.dtype(dtype))
     basis[int(index)] = 1.0
-    return jax.device_put(basis)
+    return runtime_device_put(basis, dtype=dtype)

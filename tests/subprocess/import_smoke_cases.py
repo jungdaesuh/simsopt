@@ -1133,24 +1133,24 @@ def case_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants()
         transfer_guard="disallow",
     )
 
-    captured = np.arange(9, dtype=np.float64)
-    x0 = jax.device_put(np.ones(9, dtype=np.float64), device=gpu)
+    captured = np.asarray([1.0, -1.0], dtype=np.float64)
+    x0 = jax.device_put(np.asarray([-1.2, 1.0], dtype=np.float64), device=gpu)
 
     def closure_quad(x):
         x = jnp.asarray(x, dtype=jnp.float64)
         target = jax.device_put(captured, device=gpu)
         diff = x - target
-        half = jax.device_put(np.asarray(0.5, dtype=np.float64), device=gpu)
-        return half * jnp.dot(diff, diff)
+        squared = diff * diff
+        return jnp.dot(squared + diff, squared + diff)
 
     baseline = float(jax.device_get(closure_quad(x0)))
-    bfgs = jax_minimize(closure_quad, x0, method="bfgs-ondevice", maxiter=5)
-    lbfgs = jax_minimize(closure_quad, x0, method="lbfgs-ondevice", maxiter=5)
+    bfgs = jax_minimize(closure_quad, x0, method="bfgs-ondevice", maxiter=2)
+    lbfgs = jax_minimize(closure_quad, x0, method="lbfgs-ondevice", maxiter=2)
 
     assert float(bfgs.fun) < baseline
     assert float(lbfgs.fun) < baseline
-    assert int(bfgs.nit) > 0
-    assert int(lbfgs.nit) > 0
+    assert int(bfgs.nit) >= 2
+    assert int(lbfgs.nit) >= 2
 
 
 def case_transfer_guard_disallow_allows_traceable_newton_with_host_closure_constants() -> (
@@ -2025,7 +2025,7 @@ def case_optimizer_jax_reference_methods_reject_all_jax_backend_modes() -> None:
         "jax_cpu_parity",
         "jax_gpu_parity",
         "jax_gpu_fast",
-        "jax_metal_smoke",
+        "jax_mps_smoke",
     )
     REFERENCE_MINIMIZE_METHODS = ("adam", "bfgs", "lbfgs")
     target = jnp.asarray([1.0, -2.0])
@@ -2075,6 +2075,9 @@ def case_optimizer_jax_reference_methods_reject_all_jax_backend_modes() -> None:
 
 
 def case_optimizer_jax_private_methods_require_private_package_when_blocked() -> None:
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
 
     block_private_optimizer_imports()
@@ -2102,6 +2105,9 @@ def case_optimizer_jax_private_methods_require_private_package_when_blocked() ->
 
 
 def case_optimizer_jax_private_nested_import_errors_propagate() -> None:
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
 
     block_private_optimizer_submodule_import(

@@ -95,6 +95,9 @@ JAX_GPU = [
     "numpy>=2.0,<2.5",
     "scipy>=1.13",
 ]
+JAX_MPS = [
+    'jax-mps; python_version >= "3.13" and sys_platform == "darwin"',
+]
 ALGS = ["ground>=8.2,<9", "bentley_ottmann>=7.3,<8", "qsc"]
 test = [
     "pytest>=7.0",
@@ -169,4 +172,5 @@ markers = [
     "boozer: BoozerSurface and Boozer optimizer tests",
     "parity_census: derivative-input bit-identity census tests",
     "jax_contract: pins external (JAX) library behaviour rather than simsopt code",
+    "mps: opt-in tests that require a real JAX MPS device",
 ]

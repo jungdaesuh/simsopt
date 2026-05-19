@@ -30,12 +30,14 @@ __all__ = [
 ]
 
 
-def _as_jax_float64_array(values):
-    return _as_runtime_jax_float64(values)
+_as_jax_float64_array = _as_runtime_jax_float64
 
 
-def _as_jax_float64_arrays(*values):
+def _jax_float64_tuple(*values):
     return tuple(_as_jax_float64_array(value) for value in values)
+
+
+_as_jax_float64_arrays = _jax_float64_tuple
 
 
 class FramedCurve(sopp.Curve, Curve):

@@ -10,7 +10,7 @@ from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from .._core.jax_host_boundary import host_array as _host_array
 from ..backend.runtime import is_jax_backend, raise_if_target_lane_bypass
-from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
+from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ..jax_core._math_utils import as_jax_int32 as _runtime_as_jax_int32
 from ..jax_core._math_utils import scalar_like as _runtime_scalar_like
 from ._pairwise_reductions import (
@@ -62,10 +62,6 @@ def curve_length_pure(l):
 @jit
 def _curve_length_grad(l):
     return grad(curve_length_pure)(l)
-
-
-def _as_jax_float64(value):
-    return _runtime_as_jax_float64(value)
 
 
 def _as_jax_int32(value):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import numpy as np
 import pytest
 
@@ -14,6 +16,7 @@ def _restore_backend_config(config) -> None:
         config.mode,
         strict=config.strict,
         debug_nans=config.debug_nans,
+        disable_jit=config.disable_jit,
         transfer_guard=config.transfer_guard,
         compilation_cache_dir=config.compilation_cache_dir,
         xla_gpu_preallocate=config.xla_gpu_preallocate,
@@ -24,22 +27,29 @@ def _restore_backend_config(config) -> None:
     )
 
 
-def test_jax_metal_smoke_policy_runtime_dtype():
-    from simsopt.backend import get_backend_config, get_backend_policy, set_backend
+@contextmanager
+def _temporary_backend(mode: str):
+    from simsopt.backend import get_backend_config, set_backend
 
     previous = get_backend_config()
     try:
-        set_backend("jax_metal_smoke", configure_runtime=False)
-
-        policy = get_backend_policy()
-
-        assert policy.runtime_dtype == "float32"
-        assert policy.host_dtype == "float32"
+        set_backend(mode, configure_runtime=False)
+        yield
     finally:
         _restore_backend_config(previous)
 
 
-def test_non_metal_modes_keep_float64_policy_dtype():
+def test_jax_mps_smoke_policy_runtime_dtype():
+    from simsopt.backend import get_backend_policy
+
+    with _temporary_backend("jax_mps_smoke"):
+        policy = get_backend_policy()
+
+        assert policy.runtime_dtype == "float32"
+        assert policy.host_dtype == "float32"
+
+
+def test_non_mps_modes_keep_float64_policy_dtype():
     from simsopt.backend import get_backend_policy
 
     for mode in (
@@ -56,12 +66,10 @@ def test_non_metal_modes_keep_float64_policy_dtype():
 
 
 def test_require_runtime_dtype_follows_backend_policy():
-    from simsopt.backend import get_backend_config, set_backend
+    from simsopt.backend import set_backend
     from simsopt.jax_core._math_utils import require_runtime_dtype
 
-    previous = get_backend_config()
-    try:
-        set_backend("jax_metal_smoke", configure_runtime=False)
+    with _temporary_backend("jax_mps_smoke"):
         require_runtime_dtype("x", jnp.asarray([1.0], dtype=jnp.float32))
         with pytest.raises(TypeError, match="x must have runtime dtype float32"):
             require_runtime_dtype("x", jnp.asarray([1.0], dtype=jnp.float64))
@@ -70,17 +78,13 @@ def test_require_runtime_dtype_follows_backend_policy():
         require_runtime_dtype("x", jnp.asarray([1.0], dtype=jnp.float64))
         with pytest.raises(TypeError, match="x must have runtime dtype float64"):
             require_runtime_dtype("x", jnp.asarray([1.0], dtype=jnp.float32))
-    finally:
-        _restore_backend_config(previous)
 
 
 def test_as_runtime_value_uses_policy_dtype_for_host_values():
-    from simsopt.backend import get_backend_config, set_backend
+    from simsopt.backend import set_backend
     from simsopt.jax_core._math_utils import as_runtime_value
 
-    previous = get_backend_config()
-    try:
-        set_backend("jax_metal_smoke", configure_runtime=False)
+    with _temporary_backend("jax_mps_smoke"):
         reference32 = jnp.asarray([0.0], dtype=jnp.float32)
         value32 = as_runtime_value(
             np.asarray([1.0, 2.0], dtype=np.float64),
@@ -95,20 +99,109 @@ def test_as_runtime_value_uses_policy_dtype_for_host_values():
             reference=reference64,
         )
         assert value64.dtype == jnp.float64
-    finally:
-        _restore_backend_config(previous)
 
 
-def test_boozer_residual_accepts_float32_under_metal_policy():
-    from simsopt.backend import get_backend_config, set_backend
+def test_axis0_entries_preserves_empty_axis0_tuple():
+    from simsopt.jax_core._math_utils import axis0_entries
+
+    assert axis0_entries(jnp.zeros((0, 3))) == ()
+
+
+def test_as_runtime_float64_uses_runtime_policy_dtype_for_host_values():
+    from simsopt.backend.dtypes import as_runtime_float64
+
+    with _temporary_backend("jax_mps_smoke"):
+        reference32 = jnp.asarray([0.0], dtype=jnp.float32)
+
+        value32 = as_runtime_float64(
+            np.asarray([1.0, 2.0], dtype=np.float64),
+            reference=reference32,
+        )
+
+        assert value32.dtype == jnp.float32
+
+
+def test_as_runtime_float64_alias_does_not_gate_on_host_reference_dtype():
+    from simsopt.backend.dtypes import as_runtime_float64
+
+    with _temporary_backend("jax_mps_smoke"):
+        host64 = np.asarray([1.0, 2.0], dtype=np.float64)
+
+        value32 = as_runtime_float64(host64, reference=host64)
+
+        assert value32.dtype == jnp.float32
+
+
+def test_as_jax_float64_compat_alias_uses_runtime_policy_dtype():
+    from simsopt.backend.dtypes import as_jax_float64
+
+    with _temporary_backend("jax_mps_smoke"):
+        value = as_jax_float64(np.asarray([1.0, 2.0], dtype=np.float64))
+
+        assert value.dtype == jnp.float32
+
+
+def test_runtime_device_put_uses_policy_dtype_for_float_hosts():
+    from simsopt.backend.dtypes import runtime_device_put
+
+    with _temporary_backend("jax_mps_smoke"):
+        value = runtime_device_put(np.asarray([1.0, 2.0], dtype=np.float64))
+        indices = runtime_device_put([0, 1], dtype=np.int32)
+
+        assert value.dtype == jnp.float32
+        assert indices.dtype == jnp.int32
+
+
+def test_runtime_device_put_resolves_explicit_float_dtype_through_policy():
+    from simsopt.backend.dtypes import runtime_device_put
+
+    with _temporary_backend("jax_mps_smoke"):
+        value = runtime_device_put([1.0, 2.0], dtype=np.float64)
+
+        assert value.dtype == jnp.float32
+
+
+def test_boozer_optimizer_backend_auto_uses_policy_default():
+    from simsopt.backend import set_backend
+    from simsopt.geo import boozersurface_jax
+
+    with _temporary_backend("native_cpu"):
+        native_options = boozersurface_jax._normalize_solver_options(
+            {"optimizer_backend": "auto"},
+            "ls",
+        )
+
+        set_backend("jax_cpu_fast", configure_runtime=False)
+        jax_options = boozersurface_jax._normalize_solver_options(
+            {"optimizer_backend": "auto"},
+            "ls",
+        )
+
+        assert native_options["optimizer_backend"] == "scipy"
+        assert jax_options["optimizer_backend"] == "ondevice"
+
+
+def test_boozer_linearization_residency_uses_policy_default():
+    from simsopt.backend import set_backend
+    from simsopt.geo import boozersurface_jax
+
+    with _temporary_backend("native_cpu"):
+        native_options = boozersurface_jax._normalize_solver_options({}, "ls")
+
+        set_backend("jax_cpu_fast", configure_runtime=False)
+        jax_options = boozersurface_jax._normalize_solver_options({}, "ls")
+
+        assert native_options["linearization_residency"] == "host"
+        assert jax_options["linearization_residency"] == "device"
+
+
+def test_boozer_residual_accepts_float32_under_mps_policy():
     from simsopt.geo.boozer_residual_jax import (
         boozer_residual_scalar,
         boozer_residual_vector,
     )
 
-    previous = get_backend_config()
-    try:
-        set_backend("jax_metal_smoke", configure_runtime=False)
+    with _temporary_backend("jax_mps_smoke"):
         B = jnp.ones((2, 3, 3), dtype=jnp.float32)
         xphi = jnp.full((2, 3, 3), 2.0, dtype=jnp.float32)
         xtheta = jnp.full((2, 3, 3), -0.5, dtype=jnp.float32)
@@ -134,5 +227,3 @@ def test_boozer_residual_accepts_float32_under_metal_policy():
         assert vector_value.dtype == jnp.float32
         assert bool(jnp.isfinite(scalar_value))
         assert bool(jnp.all(jnp.isfinite(vector_value)))
-    finally:
-        _restore_backend_config(previous)

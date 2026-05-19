@@ -20,6 +20,7 @@ import numpy as np
 from .._core.derivative import Derivative
 from .._core.jax_host_boundary import host_array, host_float
 from .._core.optimizable import Optimizable
+from ..backend.dtypes import runtime_device_put
 from ..jax_core import (
     coil_set_spec_from_dof_extraction_spec,
     coil_specs_from_dof_extraction_spec,
@@ -917,13 +918,13 @@ def _add_update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array
 
 
 def _take_positions_1d(array: jax.Array, positions) -> jax.Array:
-    indexer = jax.device_put(np.asarray(positions, dtype=np.int32))
+    indexer = runtime_device_put(positions, dtype=np.int32)
     return jnp.take(_as_jax_float64(array), indexer, axis=0)
 
 
 def _ones_like_float64(array: jax.Array) -> jax.Array:
     return jnp.broadcast_to(
-        jax.device_put(np.array(1.0, dtype=np.float64)),
+        runtime_device_put(1.0, dtype=np.float64),
         array.shape,
     )
 
@@ -934,14 +935,14 @@ def _scatter_free_values(template: jax.Array, free_positions, free_values: jax.A
         return free_values
     mask = np.ones(int(template.shape[0]), dtype=np.float64)
     mask[free_positions] = 0.0
-    indexer = jax.device_put(free_positions.astype(np.int32)[:, None])
+    indexer = runtime_device_put(free_positions[:, None], dtype=np.int32)
     dnums = jax.lax.ScatterDimensionNumbers(
         update_window_dims=(),
         inserted_window_dims=(0,),
         scatter_dims_to_operand_dims=(0,),
     )
     return jax.lax.scatter(
-        template * jax.device_put(mask),
+        template * runtime_device_put(mask, dtype=np.float64),
         indexer,
         free_values,
         dnums,

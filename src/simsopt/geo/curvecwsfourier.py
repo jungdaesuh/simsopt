@@ -1,9 +1,10 @@
 import numpy as np
 import jax
-from jax import device_put, jacfwd, jvp, vjp
+from jax import jacfwd, jvp, vjp
 import jax.numpy as jnp
 
 from .._core.derivative import Derivative
+from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ._simsoptpp import sopp_namespace
 from .curve import (
     Curve,
@@ -17,12 +18,6 @@ from .jit import jit
 sopp = sopp_namespace("Curve")
 
 __all__ = ["CurveCWSFourierCPP", "CurveCWSFourier"]
-
-
-def _as_jax_float64(value):
-    if hasattr(value, "devices"):
-        return jnp.asarray(value, dtype=jnp.float64)
-    return device_put(np.asarray(value, dtype=np.float64))
 
 
 def _as_numpy_float64(value):

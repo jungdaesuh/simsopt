@@ -5,13 +5,9 @@ import jax.numpy as jnp
 from jax import lax
 
 from ..backend import get_pairwise_penalty_chunk_size
-from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
+from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ..jax_core._math_utils import as_runtime_float64 as _runtime_as_runtime_float64
 from ..jax_core.sharding import maybe_shard_pairwise_row_inputs
-
-
-def _as_jax_float64(value):
-    return _runtime_as_jax_float64(value)
 
 
 def _scalar_like(reference, value):

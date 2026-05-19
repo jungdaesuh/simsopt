@@ -1,143 +1,69 @@
-"""Shared strict-safe JAX math and array helpers for kernel code."""
+"""Compatibility facade for backend-owned JAX dtype helpers."""
 
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from simsopt.backend.dtypes import (
+    _shape_tuple,
+    as_jax_array,
+    as_jax_float64,
+    as_jax_int32,
+    as_runtime_array,
+    as_runtime_float64,
+    as_runtime_value,
+    explicit_device_array as _explicit_device_array,
+    host_dtype,
+    require_float64_dtype,
+    require_runtime_dtype,
+    runtime_device_put,
+    runtime_dtype,
+    runtime_eye,
+    runtime_host_dtype,
+    runtime_jnp_dtype,
+    runtime_np_dtype,
+    runtime_zeros,
+)
 
-_DTYPE_BY_NAME = {
-    "float64": jnp.float64,
-    "float32": jnp.float32,
-}
-_HOST_DTYPE_BY_NAME = {
-    "float64": np.dtype(np.float64),
-    "float32": np.dtype(np.float32),
-}
-
-
-def _explicit_device_array(value, *, dtype) -> jax.Array:
-    from simsopt.backend import maybe_initialize_distributed_jax
-
-    maybe_initialize_distributed_jax()
-    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
-
-
-def _shape_tuple(shape) -> tuple[int, ...]:
-    if np.isscalar(shape):
-        return (int(shape),)
-    return tuple(int(dim) for dim in shape)
-
-
-def _contains_jax_leaves(value) -> bool:
-    return any(
-        isinstance(leaf, jax.Array) or hasattr(leaf, "aval")
-        for leaf in jax.tree.leaves(value)
-    )
-
-
-def _array_like_dtype(value) -> np.dtype | None:
-    dtype = getattr(value, "dtype", None)
-    if dtype is not None:
-        return np.dtype(dtype)
-    if isinstance(value, (np.ndarray, np.generic)):
-        return np.asarray(value).dtype
-    if isinstance(value, (list, tuple)):
-        if _contains_jax_leaves(value):
-            return np.dtype(jnp.asarray(value).dtype)
-        return np.asarray(value).dtype
-    return None
-
-
-def _dtype_name(dtype, *, source: str) -> str:
-    if isinstance(dtype, str):
-        name = dtype
-    else:
-        name = np.dtype(dtype).name
-    if name not in _DTYPE_BY_NAME:
-        accepted = tuple(_DTYPE_BY_NAME)
-        raise TypeError(f"{source} must be one of {accepted}; got {name!r}.")
-    return name
-
-
-def _jnp_dtype_from_name(name: str, *, source: str):
-    if name not in _DTYPE_BY_NAME:
-        accepted = tuple(_DTYPE_BY_NAME)
-        raise TypeError(f"{source} must be one of {accepted}; got {name!r}.")
-    return _DTYPE_BY_NAME[name]
-
-
-def _np_dtype_from_name(name: str, *, source: str) -> np.dtype:
-    if name not in _HOST_DTYPE_BY_NAME:
-        accepted = tuple(_HOST_DTYPE_BY_NAME)
-        raise TypeError(f"{source} must be one of {accepted}; got {name!r}.")
-    return _HOST_DTYPE_BY_NAME[name]
-
-
-def _resolve_jnp_dtype(dtype, *, source: str):
-    if dtype is None:
-        return runtime_jnp_dtype()
-    return _jnp_dtype_from_name(_dtype_name(dtype, source=source), source=source)
-
-
-def _resolve_np_dtype(dtype, *, source: str) -> np.dtype:
-    if dtype is None:
-        return runtime_np_dtype()
-    return _np_dtype_from_name(_dtype_name(dtype, source=source), source=source)
-
-
-def runtime_jnp_dtype():
-    from simsopt.backend import get_backend_policy
-
-    dtype_name = get_backend_policy().runtime_dtype
-    return _jnp_dtype_from_name(dtype_name, source="BackendPolicy.runtime_dtype")
-
-
-def runtime_np_dtype() -> np.dtype:
-    from simsopt.backend import get_backend_policy
-
-    dtype_name = get_backend_policy().runtime_dtype
-    return _np_dtype_from_name(dtype_name, source="BackendPolicy.runtime_dtype")
-
-
-def runtime_host_dtype() -> np.dtype:
-    from simsopt.backend import get_backend_policy
-
-    dtype_name = get_backend_policy().host_dtype
-    return _np_dtype_from_name(dtype_name, source="BackendPolicy.host_dtype")
-
-
-def require_runtime_dtype(name: str, value, *, dtype=None) -> None:
-    expected_dtype = _resolve_np_dtype(dtype, source="dtype")
-    dtype = _array_like_dtype(value)
-    if dtype is not None and dtype != expected_dtype:
-        raise TypeError(
-            f"{name} must have runtime dtype {expected_dtype.name}; got {dtype}."
-        )
-
-
-def require_float64_dtype(name: str, value) -> None:
-    require_runtime_dtype(name, value, dtype="float64")
-
-
-def as_jax_array(value, *, dtype) -> jax.Array:
-    if isinstance(value, jax.Array):
-        return jnp.asarray(value, dtype=dtype)
-    if isinstance(value, (list, tuple)) and _contains_jax_leaves(value):
-        return jnp.asarray(value, dtype=dtype)
-    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
-        return _explicit_device_array(value, dtype=dtype)
-    return jnp.asarray(value, dtype=dtype)
-
-
-def as_jax_float64(value) -> jax.Array:
-    return as_jax_array(value, dtype=jnp.float64)
+__all__ = (
+    "_explicit_device_array",
+    "as_jax_array",
+    "as_jax_float64",
+    "as_jax_int32",
+    "as_runtime_array",
+    "as_runtime_float64",
+    "as_runtime_value",
+    "axis0_entries",
+    "concat_jax_float64",
+    "explicit_inv",
+    "explicit_rsqrt",
+    "eye",
+    "host_dtype",
+    "iter_axis0_entries",
+    "pad_axis",
+    "require_float64_dtype",
+    "require_runtime_dtype",
+    "runtime_device_put",
+    "runtime_dtype",
+    "runtime_eye",
+    "runtime_host_dtype",
+    "runtime_jnp_dtype",
+    "runtime_np_dtype",
+    "runtime_zeros",
+    "scalar_like",
+    "zero_padding_like",
+    "zeros",
+)
 
 
 def iter_axis0_entries(array):
     """Yield axis-0 slices from a shaped JAX array."""
-    for index in range(int(array.shape[0])):
-        yield array[index]
+    axis0_size = int(array.shape[0])
+    if axis0_size == 0:
+        return
+    for entry in jnp.split(array, axis0_size, axis=0):
+        yield jnp.squeeze(entry, axis=0)
 
 
 def axis0_entries(array: object) -> tuple[jax.Array, ...]:
@@ -147,38 +73,12 @@ def axis0_entries(array: object) -> tuple[jax.Array, ...]:
     return tuple(iter_axis0_entries(array_jax))
 
 
-def as_jax_int32(value) -> jax.Array:
-    return as_jax_array(value, dtype=jnp.int32)
-
-
-def as_runtime_array(value, *, dtype, reference):
-    # ``reference`` is accepted for call-site symmetry with tracer-aware APIs;
-    # conversion is device-uniform and does not branch on it.
-    del reference
-    return as_jax_array(value, dtype=dtype)
-
-
-def as_runtime_value(value, *, reference, dtype=None):
-    require_runtime_dtype("reference", reference, dtype=dtype)
-    return as_runtime_array(
-        value,
-        dtype=_resolve_jnp_dtype(dtype, source="dtype"),
-        reference=reference,
-    )
-
-
-def as_runtime_float64(value, *, reference):
-    return as_runtime_array(value, dtype=jnp.float64, reference=reference)
-
-
 def concat_jax_float64(*parts) -> jax.Array:
     return jnp.concatenate(tuple(as_jax_float64(part) for part in parts))
 
 
 def scalar_like(reference, value) -> jax.Array:
-    if isinstance(value, jax.Array) or hasattr(value, "aval"):
-        return jnp.asarray(value, dtype=reference.dtype)
-    return _explicit_device_array(value, dtype=reference.dtype)
+    return as_jax_array(value, dtype=reference.dtype)
 
 
 def zero_padding_like(array, *, axis: int, pad_width: int):

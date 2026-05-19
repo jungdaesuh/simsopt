@@ -74,7 +74,9 @@ _ENTRYPOINT_RUNTIME_AUDIT_PATHS = (
 _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_BACKEND_STRICT",
+    "SIMSOPT_DEBUG",
     "SIMSOPT_JAX_DEBUG_NANS",
+    "SIMSOPT_JAX_DISABLE_JIT",
     "SIMSOPT_JAX_TRANSFER_GUARD",
     "SIMSOPT_JAX_COMPILATION_CACHE_DIR",
     "SIMSOPT_JAX_GPU_PREALLOCATE",
@@ -823,6 +825,8 @@ def test_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants()
             "case_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants",
         ),
         failure_message="GPU ondevice optimizer transfer-guard smoke failed",
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
+        extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
     )
 
 
@@ -870,6 +874,7 @@ def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_spec_eval():
         _JAX_SUBPROCESS_CASES_PATH,
         args=("grouped-gpu-spec-eval",),
         failure_message="grouped Biot-Savart GPU spec transfer-guard smoke failed",
+        extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
     )
 
 
@@ -915,6 +920,7 @@ def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_current_arrays()
         _JAX_SUBPROCESS_CASES_PATH,
         args=("grouped-gpu-current-arrays",),
         failure_message="grouped Biot-Savart GPU current-array transfer-guard smoke failed",
+        extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
     )
 
 
@@ -987,6 +993,7 @@ def test_transfer_guard_disallow_allows_stage2_target_objective_host_closure_con
         _JAX_SUBPROCESS_CASES_PATH,
         args=("stage2-target-objective-host-closure-constants",),
         failure_message="Stage 2 direct objective transfer-guard smoke failed",
+        extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
     )
 
 
@@ -996,7 +1003,7 @@ def test_transfer_guard_disallow_allows_stage2_target_objective_ondevice_entry()
         _JAX_SUBPROCESS_CASES_PATH,
         args=("stage2-target-objective-ondevice-entry",),
         failure_message="Stage 2 ondevice transfer-guard entry smoke failed",
-        timeout=120,
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
         extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
     )
 
@@ -1025,6 +1032,7 @@ def test_transfer_guard_disallow_allows_single_stage_surface_self_intersection()
         _JAX_SUBPROCESS_CASES_PATH,
         args=("single-stage-surface-self-intersection",),
         failure_message="single-stage surface self-intersection transfer-guard smoke failed",
+        extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
     )
 
 

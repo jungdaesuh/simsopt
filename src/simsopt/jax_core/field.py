@@ -29,6 +29,7 @@ from .sharding import (
 from ._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
     pad_axis as _pad_axis,
+    runtime_device_put,
 )
 from .curve_geometry import (
     curve_gamma_and_dash_from_spec,
@@ -47,7 +48,7 @@ from .specs import (
 
 
 def _zeros_float64(shape):
-    return jax.device_put(np.zeros(shape, dtype=np.float64))
+    return runtime_device_put(np.zeros(shape, dtype=np.float64), dtype=np.float64)
 
 
 def _empty_grouped_field_result(points: object, kernel):
@@ -137,24 +138,24 @@ def _place_collective_group_inputs(points, gammas, gammadashs, currents, config)
     if config.point_axis_name is not None:
         point_spec = _axis_partition_spec(config.point_axis_name, int(points.ndim))
     return (
-        jax.device_put(points, NamedSharding(config.mesh, point_spec)),
-        jax.device_put(
+        runtime_device_put(points, target=NamedSharding(config.mesh, point_spec)),
+        runtime_device_put(
             gammas,
-            NamedSharding(
+            target=NamedSharding(
                 config.mesh,
                 _axis_partition_spec(config.coil_axis_name, int(gammas.ndim)),
             ),
         ),
-        jax.device_put(
+        runtime_device_put(
             gammadashs,
-            NamedSharding(
+            target=NamedSharding(
                 config.mesh,
                 _axis_partition_spec(config.coil_axis_name, int(gammadashs.ndim)),
             ),
         ),
-        jax.device_put(
+        runtime_device_put(
             currents,
-            NamedSharding(
+            target=NamedSharding(
                 config.mesh,
                 _axis_partition_spec(config.coil_axis_name, int(currents.ndim)),
             ),
@@ -481,8 +482,8 @@ def grouped_coil_currents_from_spec(
         keep_mask = np.ones(coil_count, dtype=np.float64)
         keep_mask[positions] = 0.0
         currents = (
-            currents * jax.device_put(keep_mask)
-            + jax.device_put(insert) @ group.currents
+            currents * runtime_device_put(keep_mask, dtype=np.float64)
+            + runtime_device_put(insert, dtype=np.float64) @ group.currents
         )
     return currents
 

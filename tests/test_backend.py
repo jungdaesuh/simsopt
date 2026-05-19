@@ -142,14 +142,13 @@ def _set_distributed_init_env(
 def _assert_synced_runtime_env(
     backend, *, mode: str, backend_name: str, platform: str, strict: bool
 ) -> None:
-    runtime_platform = "METAL" if platform == "metal" else platform
-    runtime_platforms = "cuda,cpu" if platform == "cuda" else runtime_platform
+    runtime_platforms = "cuda,cpu" if platform == "cuda" else platform
     assert os.environ["SIMSOPT_BACKEND_MODE"] == mode
     assert os.environ["SIMSOPT_BACKEND_STRICT"] == ("1" if strict else "0")
     assert os.environ["SIMSOPT_BACKEND"] == backend_name
     assert os.environ["STAGE2_BACKEND"] == backend_name
-    assert os.environ["SIMSOPT_JAX_PLATFORM"] == runtime_platform
-    assert os.environ["SIMSOPT_JAX_BACKEND"] == runtime_platform
+    assert os.environ["SIMSOPT_JAX_PLATFORM"] == platform
+    assert os.environ["SIMSOPT_JAX_BACKEND"] == platform
     assert os.environ["JAX_PLATFORMS"] == runtime_platforms
 
 
@@ -168,6 +167,9 @@ def _assert_backend_policy(
     provenance_label: str,
     runtime_dtype: str = "float64",
     host_dtype: str = "float64",
+    default_residency: str = "device",
+    default_optimizer_backend: str = "ondevice",
+    disable_jit: bool = False,
 ) -> None:
     assert policy.mode == mode
     assert policy.backend == backend_name
@@ -177,10 +179,13 @@ def _assert_backend_policy(
     assert policy.requires_x64 is requires_x64
     assert policy.runtime_dtype == runtime_dtype
     assert policy.host_dtype == host_dtype
+    assert policy.default_residency == default_residency
+    assert policy.default_optimizer_backend == default_optimizer_backend
     assert policy.chunk_policy == chunk_policy
     assert policy.tolerance_tier == tolerance_tier
     assert policy.compilation_cache_policy == compilation_cache_policy
     assert policy.provenance_label == provenance_label
+    assert policy.disable_jit is disable_jit
 
 
 def _assert_transfer_guard_resolution(backend, *, mode: str, expected: str | None):
@@ -223,6 +228,8 @@ def test_backend_defaults_to_native_cpu(monkeypatch):
         tolerance_tier="cpu_reference",
         compilation_cache_policy="not_applicable",
         provenance_label="native_cpu",
+        default_residency="host",
+        default_optimizer_backend="scipy",
     )
 
 
@@ -251,23 +258,23 @@ def test_backend_resolves_stage2_backend_env_alias(monkeypatch):
     assert config.jax_platform == "cuda"
 
 
-def test_backend_resolves_explicit_metal_legacy_env_pair(monkeypatch):
+def test_backend_resolves_explicit_mps_legacy_env_pair(monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND", "jax")
-    monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "metal")
+    monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "mps")
     backend = _fresh_backend()
 
     config = backend.get_backend_config()
     policy = backend.get_backend_policy()
 
-    assert config.mode == "jax_metal_smoke"
+    assert config.mode == "jax_mps_smoke"
     assert config.backend == "jax"
-    assert config.jax_platform == "metal"
+    assert config.jax_platform == "mps"
     _assert_backend_policy(
         policy,
-        mode="jax_metal_smoke",
+        mode="jax_mps_smoke",
         backend_name="jax",
-        platform="metal",
+        platform="mps",
         strict=False,
         parity_mode=False,
         requires_x64=False,
@@ -276,7 +283,7 @@ def test_backend_resolves_explicit_metal_legacy_env_pair(monkeypatch):
         chunk_policy="stable_default",
         tolerance_tier="smoke",
         compilation_cache_policy="optional_persistent",
-        provenance_label="jax_metal_smoke",
+        provenance_label="jax_mps_smoke",
     )
     assert backend.requires_x64() is False
 
@@ -309,24 +316,40 @@ def test_set_backend_updates_mode_and_legacy_envs(monkeypatch):
     )
 
 
-def test_set_backend_updates_envs_for_jax_metal_smoke(monkeypatch):
+def test_set_backend_updates_envs_for_jax_mps_smoke(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
 
-    config = backend.set_backend("jax_metal_smoke", configure_runtime=False)
+    config = backend.set_backend("jax_mps_smoke", configure_runtime=False)
 
-    assert config.mode == "jax_metal_smoke"
+    assert config.mode == "jax_mps_smoke"
     assert config.backend == "jax"
-    assert config.jax_platform == "metal"
-    assert backend.get_jax_platform() == "metal"
+    assert config.jax_platform == "mps"
+    assert backend.get_jax_platform() == "mps"
     assert backend.requires_x64() is False
     _assert_synced_runtime_env(
         backend,
-        mode="jax_metal_smoke",
+        mode="jax_mps_smoke",
         backend_name="jax",
-        platform="metal",
+        platform="mps",
         strict=False,
     )
+
+
+def test_jax_metal_smoke_mode_is_rejected(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    with pytest.raises(ValueError, match="jax-metal is unmaintained"):
+        backend.set_backend("jax_metal_smoke", configure_runtime=False)
+
+
+def test_legacy_metal_platform_is_rejected(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND", "jax")
+    monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "metal")
+    backend = _fresh_backend()
+    with pytest.raises(ValueError, match="jax-metal is unmaintained"):
+        backend.get_backend_config()
 
 
 def test_backend_mode_policy_helpers(monkeypatch):
@@ -445,18 +468,18 @@ def test_jax_cpu_fast_mode_wiring(monkeypatch):
     )
 
 
-def test_metal_smoke_mode_policy_helpers(monkeypatch):
+def test_mps_smoke_mode_policy_helpers(monkeypatch):
     _clear_backend_env(monkeypatch)
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_metal_smoke")
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_mps_smoke")
     backend = _fresh_backend()
 
     policy = backend.get_backend_policy()
 
     _assert_backend_policy(
         policy,
-        mode="jax_metal_smoke",
+        mode="jax_mps_smoke",
         backend_name="jax",
-        platform="metal",
+        platform="mps",
         strict=False,
         parity_mode=False,
         requires_x64=False,
@@ -465,13 +488,13 @@ def test_metal_smoke_mode_policy_helpers(monkeypatch):
         chunk_policy="stable_default",
         tolerance_tier="smoke",
         compilation_cache_policy="optional_persistent",
-        provenance_label="jax_metal_smoke",
+        provenance_label="jax_mps_smoke",
     )
     assert backend.is_parity_mode() is False
     assert backend.requires_x64() is False
     _assert_transfer_guard_resolution(
         backend,
-        mode="jax_metal_smoke",
+        mode="jax_mps_smoke",
         expected="log",
     )
 
@@ -1566,6 +1589,36 @@ def test_native_cpu_guardrail_env_does_not_trigger_eager_jax_import(monkeypatch)
     assert backend.should_eagerly_configure_jax() is False
 
 
+def test_use_runtime_debug_overlay_sets_strict_debug_bundle(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    config = backend.use_runtime("jax_cpu_fast", debug=True, configure_runtime=False)
+    policy = backend.get_backend_policy()
+
+    assert config.strict is True
+    assert config.debug_nans is True
+    assert config.disable_jit is True
+    assert config.transfer_guard == "disallow"
+    assert policy.strict is True
+    assert policy.debug_nans is True
+    assert policy.disable_jit is True
+    assert policy.transfer_guard == "disallow"
+
+
+def test_simsopt_debug_env_applies_runtime_debug_overlay(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_DEBUG", "1")
+    backend = _fresh_backend()
+
+    config = backend.set_backend("jax_cpu_fast", configure_runtime=False)
+
+    assert config.strict is True
+    assert config.debug_nans is True
+    assert config.disable_jit is True
+    assert config.transfer_guard == "disallow"
+
+
 def test_jax_modes_default_compilation_cache_dir(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
@@ -1637,6 +1690,7 @@ def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
     assert ("jax_enable_x64", True) in calls
     assert ("jax_default_matmul_precision", "default") in calls
     assert ("jax_debug_nans", False) in calls
+    assert ("jax_disable_jit", False) in calls
     assert ("jax_transfer_guard", "log") in calls
     assert (
         "jax_compilation_cache_dir",
@@ -1646,7 +1700,7 @@ def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
     assert ("jax_persistent_cache_min_entry_size_bytes", -1) in calls
 
 
-def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
+def test_apply_jax_runtime_config_applies_mps_smoke_mode(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
     runtime_module = sys.modules["simsopt.backend.runtime"]
@@ -1659,14 +1713,18 @@ def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
         )
     )
     monkeypatch.setitem(sys.modules, "jax", fake_jax)
+    # The mps plugin is not installed in the test env; bypass the probe so
+    # apply_jax_runtime_config exercises the lane wiring rather than the probe.
+    monkeypatch.setattr(runtime_module, "_probe_mps_plugin", lambda: None)
 
-    backend.set_backend("jax_metal_smoke", configure_runtime=False)
+    backend.set_backend("jax_mps_smoke", configure_runtime=False)
     backend.apply_jax_runtime_config()
 
-    assert ("jax_platforms", "METAL") in calls
+    assert ("jax_platforms", "mps") in calls
     assert ("jax_enable_x64", False) in calls
     assert ("jax_default_matmul_precision", "default") in calls
     assert ("jax_debug_nans", False) in calls
+    assert ("jax_disable_jit", False) in calls
     assert ("jax_transfer_guard", "log") in calls
     assert (
         "jax_compilation_cache_dir",
@@ -1674,6 +1732,48 @@ def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
     ) in calls
     assert ("jax_persistent_cache_min_compile_time_secs", 0.0) in calls
     assert ("jax_persistent_cache_min_entry_size_bytes", -1) in calls
+
+
+def test_probe_mps_plugin_raises_install_hint_when_missing(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    original_find_spec = runtime_module.importlib.util.find_spec
+
+    def _absent_mps_find_spec(name, *args, **kwargs):
+        if name == "jax_plugins.mps":
+            return None
+        return original_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        runtime_module.importlib.util, "find_spec", _absent_mps_find_spec
+    )
+    with pytest.raises(RuntimeError, match="envs/jax-mps.yml"):
+        runtime_module._probe_mps_plugin()
+    # Smoke: backend must remain usable for non-mps lanes through the same probe site.
+    assert backend.get_backend_config().mode == "native_cpu"
+
+
+def test_apply_jax_runtime_config_fails_fast_when_mps_plugin_missing(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    original_find_spec = runtime_module.importlib.util.find_spec
+
+    def _absent_mps_find_spec(name, *args, **kwargs):
+        if name == "jax_plugins.mps":
+            return None
+        return original_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        runtime_module.importlib.util, "find_spec", _absent_mps_find_spec
+    )
+    calls: list[tuple[str, object]] = []
+    _install_fake_jax(monkeypatch, calls=calls)
+    backend.set_backend("jax_mps_smoke", configure_runtime=False)
+    with pytest.raises(RuntimeError, match="envs/jax-mps.yml"):
+        backend.apply_jax_runtime_config()
+    assert calls == []
 
 
 def test_apply_jax_runtime_config_raises_without_cuda_determinism_flag(
@@ -1734,8 +1834,7 @@ def test_apply_jax_runtime_config_rejects_stale_cuda_flag_even_with_official_fla
     backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
     monkeypatch.setenv(
         "XLA_FLAGS",
-        "--xla_gpu_deterministic_ops=true "
-        "--xla_gpu_exclude_nondeterministic_ops=true",
+        "--xla_gpu_deterministic_ops=true --xla_gpu_exclude_nondeterministic_ops=true",
     )
     _install_fake_jax(monkeypatch)
 
@@ -1767,6 +1866,44 @@ def test_apply_jax_runtime_config_applies_gpu_memory_policy(monkeypatch):
     assert os.environ["XLA_CLIENT_MEM_FRACTION"] == "0.5"
     assert os.environ["TF_GPU_ALLOCATOR"] == "cuda_malloc_async"
     assert ("jax_default_matmul_precision", "default") in calls
+
+
+def test_apply_jax_runtime_config_accepts_preimported_jax_with_matching_gpu_memory_env(
+    monkeypatch,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_exclude_nondeterministic_ops=true")
+    monkeypatch.setenv("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    calls: list[tuple[str, object]] = []
+    _install_fake_jax(monkeypatch, calls=calls, default_backend="gpu")
+    sys.modules["jax"].__name__ = "jax"
+    monkeypatch.setitem(sys.modules, "jax._src", types.SimpleNamespace())
+
+    backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    backend.apply_jax_runtime_config()
+
+    assert os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+    assert ("jax_transfer_guard", "log") in calls
+
+
+def test_apply_jax_runtime_config_rejects_preimported_jax_with_missing_gpu_memory_env(
+    monkeypatch,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_exclude_nondeterministic_ops=true")
+    calls: list[tuple[str, object]] = []
+    _install_fake_jax(monkeypatch, calls=calls, default_backend="gpu")
+    sys.modules["jax"].__name__ = "jax"
+    monkeypatch.setitem(sys.modules, "jax._src", types.SimpleNamespace())
+
+    backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    with pytest.raises(RuntimeError, match="GPU memory environment variables"):
+        backend.apply_jax_runtime_config()
+
+    assert "XLA_PYTHON_CLIENT_PREALLOCATE" not in os.environ
+    assert calls == []
 
 
 def test_gpu_memory_env_overrides_mode_defaults(monkeypatch):
@@ -1826,14 +1963,17 @@ def test_with_cpu_device_for_construction_uses_real_jax_cpu_default_device(
     def add_one(value):
         return value + 1.0
 
+    assert add_one._cache_size() == 0
     with backend.with_cpu_device_for_construction() as active_device:
         constructed = jnp.asarray([1.0], dtype=jnp.float64)
         compiled = add_one(constructed)
 
+    assert add_one._cache_size() == 1
     outside = jnp.asarray([2.0], dtype=jnp.float64)
     outside_compiled = add_one(outside)
     jax.block_until_ready((compiled, outside_compiled))
 
+    assert add_one._cache_size() == 2
     assert backend.get_compilation_cache_dir() == str(cache_dir)
     assert active_device.platform == "cpu"
     assert constructed.device.platform == "cpu"

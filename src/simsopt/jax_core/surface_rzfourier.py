@@ -19,6 +19,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
+from ._math_utils import as_jax_float64 as _as_jax_float64
+from ._math_utils import runtime_device_put
 from ._device_scalars import device_one, float_scalar, two_pi
 from ._vector_norms import norm3 as _norm3
 from ._vector_norms import unit_vector3 as _unit_vector3
@@ -37,14 +39,6 @@ _SCATTER_SET_DIMS_1D = lax.ScatterDimensionNumbers(
     operand_batching_dims=(),
     scatter_indices_batching_dims=(),
 )
-
-
-def _as_jax_float64(value) -> jax.Array:
-    if isinstance(value, jax.Array):
-        return jnp.asarray(value, dtype=jnp.float64)
-    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
-        return jax.device_put(np.asarray(value, dtype=np.float64))
-    return jnp.asarray(value, dtype=jnp.float64)
 
 
 def _zero_based_mode_range(count: int, reference: jax.Array) -> jax.Array:
@@ -303,7 +297,7 @@ def _scatter_coefficients(
     target_size: int,
     source_offset: int,
 ) -> jax.Array:
-    indices = jax.device_put(np.asarray(positions, dtype=np.int32)).reshape(-1, 1)
+    indices = runtime_device_put(positions, dtype=np.int32).reshape(-1, 1)
     start = int(source_offset)
     values = lax.slice_in_dim(dofs, start, start + int(positions.size), axis=0)
     base = _as_jax_float64(np.zeros(int(target_size), dtype=np.float64))

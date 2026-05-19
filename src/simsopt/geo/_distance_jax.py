@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..jax_core._math_utils import as_runtime_float64
+from ..jax_core._math_utils import as_runtime_float64, runtime_device_put
 
 
 def _stack_point_clouds(point_clouds):
@@ -22,7 +22,10 @@ def _stack_point_clouds(point_clouds):
         count = point_cloud.shape[0]
         points[index, :count, :] = point_cloud
         valid[index, :count] = True
-    return jax.device_put(points), jax.device_put(valid)
+    return (
+        runtime_device_put(points),
+        runtime_device_put(valid, dtype=np.bool_),
+    )
 
 
 def _min_dist2_matrix(left_points, left_valid, right_points, right_valid):

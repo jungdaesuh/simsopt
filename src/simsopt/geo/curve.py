@@ -61,12 +61,18 @@ __all__ = [
 _HAS_JAX = _jax_vjp is not None
 
 
-def _as_jax_float64(value):
+def _as_numpy_float64(value):
+    if isinstance(value, np.ndarray):
+        return np.asarray(value, dtype=np.float64)
     if not _HAS_JAX:
         return np.asarray(value, dtype=np.float64)
-    from ..jax_core._math_utils import as_jax_float64 as _distributed_as_jax_float64
+    return np.asarray(jax.device_get(value), dtype=np.float64)
 
-    return _distributed_as_jax_float64(value)
+
+if _HAS_JAX:
+    from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
+else:
+    _as_jax_float64 = _as_numpy_float64
 
 
 def _as_runtime_jax_float64(value):
@@ -86,14 +92,6 @@ def _as_runtime_float64_ref(value, *, reference):
 
 
 _TWO_PI = 2.0 * np.pi
-
-
-def _as_numpy_float64(value):
-    if isinstance(value, np.ndarray):
-        return np.asarray(value, dtype=np.float64)
-    if not _HAS_JAX:
-        return np.asarray(value, dtype=np.float64)
-    return np.asarray(jax.device_get(value), dtype=np.float64)
 
 
 def _one_like(reference):

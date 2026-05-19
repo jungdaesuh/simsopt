@@ -19,6 +19,7 @@ from ._math_utils import (
     as_jax_float64 as _as_float64_array,
     as_jax_int32 as _as_int32_array,
     as_runtime_float64 as _as_runtime_float64,
+    runtime_device_put,
 )
 
 
@@ -1234,7 +1235,7 @@ def make_current_value_spec(value: object) -> CurrentValueSpec:
 
 def _normalize_rotmat(rotmat: object | None) -> tuple[jax.Array, bool]:
     if rotmat is None:
-        return jax.device_put(np.eye(3, dtype=np.float64)), False
+        return runtime_device_put(np.eye(3, dtype=np.float64), dtype=np.float64), False
     return _as_float64_array(rotmat), True
 
 

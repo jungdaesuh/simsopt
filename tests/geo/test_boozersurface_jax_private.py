@@ -653,7 +653,7 @@ _ALL_JAX_BACKEND_MODES = (
     "jax_cpu_parity",
     "jax_gpu_parity",
     "jax_gpu_fast",
-    "jax_metal_smoke",
+    "jax_mps_smoke",
 )
 
 

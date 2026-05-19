@@ -12,6 +12,7 @@ import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from ..backend import get_sharding_tuning, maybe_initialize_distributed_jax
+from ..backend.dtypes import runtime_device_put
 from ..backend.runtime import register_backend_cache_clear
 
 __all__ = [
@@ -191,7 +192,7 @@ def _replicated_sharding_for(platform: str, axis_name: str) -> NamedSharding | N
 
 def _place_array(array, sharding):
     if isinstance(array, (np.ndarray, jax.Array)):
-        return jax.device_put(array, sharding)
+        return runtime_device_put(array, target=sharding)
     return lax.with_sharding_constraint(jnp.asarray(array), sharding)
 
 
