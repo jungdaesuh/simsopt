@@ -64,6 +64,7 @@ artifact or blocks the next wave with a concrete failure.
   - `m4680_g` is the GPU allocation account reported by NERSC. The `_g`
     suffix is part of the GPU project/account name, not an arbitrary local
     convention.
+- [ ] Perlmutter CPU account for CPU-only jobs: `<cpu_account_from_iris>`
 - [ ] Exact repo SHA to test: `<repo_sha>`
 - [ ] Source mode:
   - [ ] clean committed SHA pushed to `fork/gpu-purity-stage2-20260405`
@@ -80,7 +81,10 @@ artifact or blocks the next wave with a concrete failure.
   export REPO_REF="gpu-purity-stage2-20260405"
   export REPO_URL="git@github.com:jungdaesuh/simsopt.git"
   export SCRATCH_ROOT="${SCRATCH}/simsopt-jax-${REPO_SHA}"
+  export ENV_ROOT="${SCRATCH_ROOT}/conda-env"
   export RESULTS_ROOT="${SCRATCH}/simsopt-jax-results/${REPO_SHA}"
+  export STAGE2_GEOMETRY_REPRO_MAXITER=21
+  export STAGE2_GEOMETRY_REL_TOL=1e-6
   ```
 
 ## Source And Environment Setup
@@ -114,6 +118,7 @@ set -euo pipefail
 : "${REPO_REF:?set REPO_REF}"
 : "${REPO_URL:?set REPO_URL}"
 : "${SCRATCH_ROOT:?set SCRATCH_ROOT}"
+: "${ENV_ROOT:?set ENV_ROOT}"
 : "${RESULTS_ROOT:?set RESULTS_ROOT}"
 
 mkdir -p "${SCRATCH_ROOT}" "${RESULTS_ROOT}"
@@ -128,11 +133,25 @@ git fetch origin "${REPO_REF}"
 git checkout "${REPO_SHA}"
 git submodule update --init --recursive
 
-python3 -m venv "${SCRATCH_ROOT}/venv"
-. "${SCRATCH_ROOT}/venv/bin/activate"
+module load python
+conda create -y -p "${ENV_ROOT}" python=3.11 pip numpy scipy
+conda activate "${ENV_ROOT}"
+
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install "jax[cuda12]==0.9.2"
+python -m pip install --upgrade "jax[cuda12]==0.9.2"
 python -m pip install -e ".[deploy_gpu]"
+
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
+
+python - <<'PY'
+import jax
+import jaxlib
+
+if jax.__version__ != "0.9.2" or jaxlib.__version__ != "0.9.2":
+    raise SystemExit(
+        f"expected jax/jaxlib 0.9.2, got {jax.__version__}/{jaxlib.__version__}"
+    )
+PY
 
 python - <<'PY'
 from repo_bootstrap import bootstrap_local_simsopt
@@ -148,12 +167,17 @@ image and `SIMSOPT_BENCHMARK_JAX_VERSION` performance contract currently use
 0.9.2, so this plan pins the hardware proof to that known runtime before
 comparing or benchmarking.
 
-Optional container alternative: NERSC's Python/JAX guidance recommends NVIDIA
-JAX containers through Shifter or Podman-HPC as the most reliable GPU setup on
-Perlmutter. The venv path above is acceptable for the repo's pinned
-`jax[cuda12]` wheel proof because JAX carries its CUDA userspace libraries, but
-if wheel/runtime compatibility fails, rebuild this same source snapshot inside a
-container and keep the proof commands and artifact contract unchanged.
+Container environment lane: NERSC's Python/JAX guidance recommends NVIDIA JAX
+containers through Shifter or Podman-HPC as the most reliable GPU setup on
+Perlmutter. Treat the conda/pip lane above and a container lane as separate
+environment choices made before Wave 0. Do not switch environment lanes within a
+single proof bundle; if the environment lane changes, rerun all waves from the
+same source snapshot and label the artifacts with that lane.
+
+The pip-wheel lane uses JAX's bundled CUDA userspace libraries. Do not load a
+separate `cudatoolkit` module for this lane, and keep
+`SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled` in GPU jobs so repo subprocess helpers
+do not prepend a local CUDA toolkit or `LD_LIBRARY_PATH` over the wheel stack.
 
 Record setup provenance:
 
@@ -163,6 +187,27 @@ Record setup provenance:
 - [ ] `python -m pip freeze`
 - [ ] `python -c 'import jax, jaxlib; print(jax.__version__, jaxlib.__version__)'`
 - [ ] `python -c 'import simsopt, simsoptpp; print(simsopt.__version__, simsoptpp.__file__)'`
+
+### Common Slurm Job Prologue
+
+Every batch script that uses the piped commands below starts with this prologue
+so `pytest | tee ...` and proof-script pipelines preserve the failing command's
+exit status.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${SCRATCH_ROOT:?set SCRATCH_ROOT}"
+: "${ENV_ROOT:?set ENV_ROOT}"
+: "${RESULTS_ROOT:?set RESULTS_ROOT}"
+
+module load python
+conda activate "${ENV_ROOT}"
+
+cd "${SCRATCH_ROOT}/repo"
+export PYTHONPATH="$PWD:$PWD/src"
+```
 
 ## Wave 0: CPU Import And Full Test Baseline
 
@@ -185,21 +230,22 @@ Example CPU batch header:
 ```bash
 #SBATCH -A <cpu_account_from_iris>
 #SBATCH -C cpu
-#SBATCH -q regular
+#SBATCH -q shared
 #SBATCH -t 02:00:00
-#SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 32
 ```
 
 Use the CPU project account reported by `iris`; do not assume the GPU account
-`m4680_g` is accepted for CPU-only jobs.
+`m4680_g` is accepted for CPU-only jobs. The batch header above intentionally
+uses CPU `shared` QOS for a 32-logical-CPU pytest lane. If running under
+whole-node CPU `regular` QOS with one task, use NERSC's CPU-node affinity
+formula and request `-c 256` instead.
 
 Environment:
 
 ```bash
 cd "${SCRATCH_ROOT}/repo"
-. "${SCRATCH_ROOT}/venv/bin/activate"
 export PYTHONPATH="$PWD:$PWD/src"
 export JAX_ENABLE_X64=1
 export JAX_PLATFORMS=cpu
@@ -279,6 +325,13 @@ python benchmarks/stage2_e2e_comparison.py \
   --equilibria-dir examples/single_stage_optimization/equilibria \
   --output-json "${RESULTS_ROOT}/wave1_cpu_banana/stage2_cpu_e2e.json"
 
+python benchmarks/stage2_e2e_comparison.py \
+  --platform cpu \
+  --maxiter "${STAGE2_GEOMETRY_REPRO_MAXITER}" \
+  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}" \
+  --equilibria-dir examples/single_stage_optimization/equilibria \
+  --output-json "${RESULTS_ROOT}/wave1_cpu_banana/stage2_cpu_e2e_geometry_repro.json"
+
 python benchmarks/single_stage_init_parity.py \
   --platform cpu \
   --equilibria-dir examples/single_stage_optimization/equilibria \
@@ -298,6 +351,8 @@ python benchmarks/single_stage_outer_loop_probe.py \
 Acceptance:
 
 - [ ] `stage2_cpu_e2e.json` has `passed: true`.
+- [ ] `stage2_cpu_e2e_geometry_repro.json` has `passed: true` and gates final
+  banana-coil geometry through `geometry_rel_tol`.
 - [ ] `single_stage_cpu_init.json` has `passed: true`.
 - [ ] CPU/C++/SciPy oracle and JAX CPU candidate are both represented.
 - [ ] Any CPU banana failure blocks GPU correctness interpretation.
@@ -326,14 +381,15 @@ Preflight body:
 
 ```bash
 cd "${SCRATCH_ROOT}/repo"
-. "${SCRATCH_ROOT}/venv/bin/activate"
+conda activate "${ENV_ROOT}"
 
 export PYTHONPATH="$PWD:$PWD/src"
 export JAX_ENABLE_X64=1
-export JAX_PLATFORMS=cuda
+export JAX_PLATFORMS=cuda,cpu
 export SIMSOPT_JAX_PLATFORM=cuda
 export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
@@ -358,6 +414,8 @@ payload = {
     "jaxlib": jaxlib.__version__,
     "backend": jax.default_backend(),
     "devices": [str(device) for device in jax.devices()],
+    "jax_platforms": "'"${JAX_PLATFORMS}"'",
+    "cuda_library_mode": "'"${SIMSOPT_JAX_CUDA_LIBRARY_MODE}"'",
     "x64": bool(jax.config.read("jax_enable_x64")),
     "simsopt": getattr(simsopt, "__version__", None),
     "simsoptpp": simsoptpp.__file__,
@@ -373,6 +431,7 @@ Acceptance:
 
 - [ ] `nvidia-smi` reports an A100 GPU.
 - [ ] JAX default backend is CUDA/GPU.
+- [ ] `JAX_PLATFORMS=cuda,cpu`; CUDA is first and remains the default backend.
 - [ ] JAX x64 is true.
 - [ ] `simsoptpp` imports from the prepared checkout.
 - [ ] Slurm job id and hardware facts are saved.
@@ -387,10 +446,11 @@ Environment inside the GPU job:
 ```bash
 export PYTHONPATH="$PWD:$PWD/src"
 export JAX_ENABLE_X64=1
-export JAX_PLATFORMS=cuda
+export JAX_PLATFORMS=cuda,cpu
 export SIMSOPT_JAX_PLATFORM=cuda
 export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 ```
@@ -403,7 +463,6 @@ mkdir -p "${RESULTS_ROOT}/wave3_gpu_pytest"
 python -m pytest \
   tests/test_jax_import_smoke.py::test_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants \
   tests/test_jax_import_smoke.py::test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_spec_eval \
-  tests/test_jax_import_smoke.py::test_grouped_biot_savart_coil_collective_parity_and_lowering \
   tests/test_jax_import_smoke.py::test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_current_arrays \
   tests/test_jax_import_smoke.py::test_transfer_guard_disallow_allows_stage2_target_objective_host_closure_constants \
   tests/test_jax_import_smoke.py::test_transfer_guard_disallow_allows_stage2_target_objective_ondevice_entry \
@@ -411,6 +470,18 @@ python -m pytest \
   -ra --tb=short --durations=50 \
   --junitxml="${RESULTS_ROOT}/wave3_gpu_pytest/gpu_runtime_smoke.xml" \
   | tee "${RESULTS_ROOT}/wave3_gpu_pytest/gpu_runtime_smoke.log"
+```
+
+Run the grouped coil collective lowering control separately. That test forces a
+CPU host-platform sharding setup inside its subprocess and is useful regression
+coverage, but it is not GPU signoff.
+
+```bash
+python -m pytest \
+  tests/test_jax_import_smoke.py::test_grouped_biot_savart_coil_collective_parity_and_lowering \
+  -ra --tb=short --durations=50 \
+  --junitxml="${RESULTS_ROOT}/wave3_gpu_pytest/grouped_collective_cpu_lowering.xml" \
+  | tee "${RESULTS_ROOT}/wave3_gpu_pytest/grouped_collective_cpu_lowering.log"
 ```
 
 Then run the real-fixture GPU M5 parity class:
@@ -426,6 +497,8 @@ python -m pytest \
 Acceptance:
 
 - [ ] No CUDA runtime boundary smoke fails.
+- [ ] Grouped coil collective lowering control passes, but is not counted as
+  CUDA proof.
 - [ ] Real-fixture GPU M5 parity class passes or produces a concrete failure
   artifact.
 - [ ] Any skip must be justified by environment facts, not by missing CUDA.
@@ -446,7 +519,8 @@ export JAX_ENABLE_X64=1
 export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_JAX_PLATFORM=cuda
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
-export JAX_PLATFORMS=cuda
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
+export JAX_PLATFORMS=cuda,cpu
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
@@ -465,7 +539,22 @@ python benchmarks/stage2_e2e_comparison.py \
   --output-json "${RESULTS_ROOT}/wave4_gpu_parity/stage2_cuda_e2e.json"
 ```
 
-### 4C. Banana Single-Stage CUDA Init
+### 4C. Banana Stage 2 CUDA Geometry Repro
+
+The default 20-iteration Stage 2 rung is a smoke budget whose geometry gate is
+report-only in the repo ladder contract. Release-grade signoff also runs an
+explicit geometry-repro rung.
+
+```bash
+python benchmarks/stage2_e2e_comparison.py \
+  --platform cuda \
+  --maxiter "${STAGE2_GEOMETRY_REPRO_MAXITER}" \
+  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}" \
+  --equilibria-dir examples/single_stage_optimization/equilibria \
+  --output-json "${RESULTS_ROOT}/wave4_gpu_parity/stage2_cuda_e2e_geometry_repro.json"
+```
+
+### 4D. Banana Single-Stage CUDA Init
 
 ```bash
 python benchmarks/single_stage_init_parity.py \
@@ -479,6 +568,8 @@ Acceptance:
 
 - [ ] Non-banana follow-up has real `jax_gpu` runtime metadata and passes.
 - [ ] Stage 2 CUDA artifact has `passed: true`.
+- [ ] Stage 2 CUDA geometry-repro artifact has `passed: true` and gates final
+  banana-coil geometry through `geometry_rel_tol`.
 - [ ] Single-stage CUDA artifact has `passed: true`.
 - [ ] Each CUDA artifact records CUDA backend, devices, x64, `nvidia-smi`,
   driver/runtime, repo SHA, dirty status, and memory.
@@ -500,11 +591,23 @@ Command with warm-start run directory:
 ```bash
 mkdir -p "${RESULTS_ROOT}/wave5_production_gpu"
 
+export PYTHONPATH="$PWD:$PWD/src"
+export JAX_ENABLE_X64=1
+export JAX_PLATFORMS=cuda,cpu
+export SIMSOPT_JAX_PLATFORM=cuda
+export SIMSOPT_BACKEND_MODE=jax_gpu_parity
+export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
 bash benchmarks/hf_jobs/run_production_gpu_proof.sh \
   --results-dir "${RESULTS_ROOT}/wave5_production_gpu/production_gpu_proof" \
   --equilibria-dir examples/single_stage_optimization/equilibria \
   --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
   --stage2-platform cuda \
+  --stage2-maxiter "${STAGE2_GEOMETRY_REPRO_MAXITER}" \
+  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}" \
   --single-stage-platform cuda \
   --single-stage-warm-start-run-dir "${SINGLE_STAGE_WARM_START_RUN_DIR}"
 ```
@@ -517,6 +620,8 @@ bash benchmarks/hf_jobs/run_production_gpu_proof.sh \
   --equilibria-dir examples/single_stage_optimization/equilibria \
   --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
   --stage2-platform cuda \
+  --stage2-maxiter "${STAGE2_GEOMETRY_REPRO_MAXITER}" \
+  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}" \
   --single-stage-platform cuda \
   --single-stage-jax-runtime-seed-spec "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC}"
 ```
@@ -526,6 +631,7 @@ Acceptance:
 - [ ] CUDA PTX and CUBIN canaries pass.
 - [ ] `stage2_cold.json` exists and passes.
 - [ ] `stage2_warm.json` exists and passes.
+- [ ] `stage2_warm_repro.json` exists and passes.
 - [ ] `single_stage_cold.json` exists and passes.
 - [ ] `single_stage_warm.json` exists and passes.
 - [ ] `boozer_well_conditioned_adjoint.json` exists and passes.
@@ -543,6 +649,13 @@ Run GPU phase in a GPU job:
 ```bash
 mkdir -p "${RESULTS_ROOT}/wave6_performance"
 
+export PYTHONPATH="$PWD:$PWD/src"
+export JAX_ENABLE_X64=1
+export JAX_PLATFORMS=cuda,cpu
+export SIMSOPT_JAX_PLATFORM=cuda
+export SIMSOPT_BACKEND_MODE=jax_gpu_parity
+export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
@@ -556,6 +669,8 @@ python benchmarks/tier5_performance_characterization.py \
 Run CPU phase in a CPU job:
 
 ```bash
+export PYTHONPATH="$PWD:$PWD/src"
+export JAX_ENABLE_X64=1
 export JAX_PLATFORMS=cpu
 export SIMSOPT_JAX_PLATFORM=cpu
 
@@ -582,6 +697,7 @@ Run CPU:
 
 ```bash
 export JAX_PLATFORMS=cpu
+export JAX_ENABLE_X64=1
 export SIMSOPT_BENCHMARK_JAX_VERSION=0.9.2
 
 python benchmarks/cpu_run_code_benchmark.py \
@@ -593,9 +709,12 @@ python benchmarks/cpu_run_code_benchmark.py \
 Run GPU:
 
 ```bash
-export JAX_PLATFORMS=cuda
+export JAX_PLATFORMS=cuda,cpu
+export JAX_ENABLE_X64=1
 export SIMSOPT_JAX_PLATFORM=cuda
+export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_BENCHMARK_JAX_VERSION=0.9.2
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
@@ -659,7 +778,11 @@ Create:
 
 - [ ] CPU setup and environment build happen on login nodes.
 - [ ] CPU full tests run on CPU compute nodes, not login nodes.
+- [ ] Every Slurm job script uses `set -euo pipefail` before any command that
+  pipes test/proof output through `tee`.
 - [ ] GPU preflight/proofs run under `shared` QOS with `--gpus-per-task=1`.
+- [ ] GPU jobs use `JAX_PLATFORMS=cuda,cpu`; CUDA must stay first and must be
+  the recorded default backend.
 - [ ] GPU `srun` commands use `--cpu-bind=cores` instead of relying on
   `SLURM_CPU_BIND`.
 - [ ] Use `interactive` only for manual diagnosis.
@@ -698,7 +821,10 @@ Every structured proof artifact must include or be accompanied by:
 - [ ] JAX devices
 - [ ] x64 enabled
 - [ ] CUDA visibility env
+- [ ] CUDA library mode
 - [ ] XLA flags
+- [ ] Stage 2 geometry policy and `proof_parity` block where the runner emits
+  them
 - [ ] peak RSS
 - [ ] peak GPU memory where available
 - [ ] pass/fail and failure list
@@ -713,6 +839,21 @@ Every structured proof artifact must include or be accompanied by:
 - [ ] Any tolerance relaxation requires a separate review and cannot be folded
   into this run silently.
 - [ ] Performance results are advisory until all correctness waves pass.
+
+## Official Docs Checked
+
+- JAX installation: `https://docs.jax.dev/en/latest/installation.html`
+- JAX configuration options: `https://docs.jax.dev/en/latest/config_options.html`
+- JAX default dtypes and x64: `https://docs.jax.dev/en/latest/default_dtypes.html`
+- JAX GPU memory allocation:
+  `https://docs.jax.dev/en/latest/gpu_memory_allocation.html`
+- NERSC Python on Perlmutter:
+  `https://docs.nersc.gov/development/languages/python/using-python-perlmutter/`
+- NERSC Perlmutter running jobs:
+  `https://docs.nersc.gov/systems/perlmutter/running-jobs/`
+- NERSC affinity: `https://docs.nersc.gov/jobs/affinity/`
+- NERSC resource usage policy:
+  `https://docs.nersc.gov/policies/resource-usage/`
 
 ## Related Repo Files
 
