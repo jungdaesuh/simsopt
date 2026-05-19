@@ -29,7 +29,7 @@ round-2 closeout. Three user concerns drive the prioritization:
 2. **Leverage JAX/CUDA strengths** — `jit`, `vmap`, donation, sharding,
    precision contracts, deterministic enforcement.
 3. **Provide CPU-fallback configs that relieve GPU memory pressure**
-   from full compilation — runtime-level XLA memory flags, per-platform
+   from full compilation — runtime-level JAX/XLA memory env vars, per-platform
    dense-Jacobian budgets, selective host residency, documented
    recovery workflows.
 
@@ -93,13 +93,16 @@ them.
    `benchmarks/single_stage_init_parity.py::_pre_newton_census_gate_failures`
    on any `*_parity` mode. Validate against
    `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES`.
-2. **Donation policy.** Per round-2 N3 closeout, donation is allowed
-   only on internal buffers. The canonical pattern is the caller-copy
-   helpers at `src/simsopt/geo/surfaceobjectives_jax.py:4810-4845`:
-   the host or boundary wrapper invokes `.copy()` on the caller input
-   before passing to a `donate_argnums`-jitted callable. Any new
-   donation site must follow this pattern. JAX buffer-donation docs
-   are the upstream reference.
+2. **Donation policy.** Per the updated round-2 N3 closeout at
+   current HEAD, optimizer-runner donation is not retained: the
+   audited L-BFGS-B state donation emitted JAX "donated buffers were
+   not usable" warnings. New donation is allowed only when a local
+   wrapper owns a fresh, semantically-dead buffer and the output can
+   actually reuse it without warnings. The current canonical positive
+   pattern is the caller-copy boundary at
+   `src/simsopt/geo/surfaceobjectives_jax.py:4810-4845`, which copies
+   caller input before invoking the donating JIT. JAX buffer-donation
+   docs are the upstream reference.
 3. **Profiling before refactoring.** Per round-2 N9 and N18, no
    speculative remat or kernel rewrite without a recorded HLO or
    profile baseline. Use `benchmarks/grouped_adjoint_memory_probe.py`
@@ -152,20 +155,28 @@ This round-3 doc is the synthesis of:
     userspace/toolchain mismatches"). Project memory was internal,
     not repo-canonical.
   - N31 allocator semantics: `XLA_PYTHON_CLIENT_ALLOCATOR` accepts
-    `platform` / `vmm` (BFC when unset); `cudaMallocAsync` is
-    selected via the separate env var `TF_GPU_ALLOCATOR=cuda_malloc_async`.
-    Also: `set_backend()` does NOT currently accept a `policy=`
-    keyword; an extension is proposed as part of N31.
+    `platform` / `vmm` (BFC when unset); `vmm` uses
+    `XLA_CLIENT_MEM_FRACTION`; `cudaMallocAsync` is selected via the
+    separate env var `TF_GPU_ALLOCATOR=cuda_malloc_async`. Also:
+    `set_backend()` does NOT currently accept a `policy=` keyword, and
+    N31 uses explicit keyword extensions rather than a broad policy
+    override.
   - N34: dropped transparent in-process GPU-OOM-to-CPU retry of
     compiled JITs; the deliverable is now checkpoint/restart plus
     selective residency, with narrow `jax.default_device(cpu)` use
     only where a fresh compile is permissible.
+- Fourth cross-validation (this pass) incorporated current HEAD
+  `54b084d29` ("fix: close unsafe lbfgs donation"), correcting the
+  round-3 donation guardrail and N22 donation wording to match
+  round-2 N3's final "no optimizer-runner donation retained" closeout.
 
 External references used:
 
-- JAX buffer donation: `https://github.com/google/jax/blob/main/docs/buffer_donation.md`
-- JAX GPU memory allocation env vars: `https://github.com/google/jax/blob/main/docs/gpu_memory_allocation.rst`
-- JAX host offloading / explicit `device_put` sharding: `https://github.com/google/jax/blob/main/docs/notebooks/host-offloading.md`
+- JAX buffer donation: `https://docs.jax.dev/en/latest/buffer_donation.html`
+- JAX GPU memory allocation env vars: `https://docs.jax.dev/en/latest/gpu_memory_allocation.html`
+- JAX memories and host offloading: `https://docs.jax.dev/en/latest/notebooks/host-offloading.html`
+- JAX `jax.default_device`: `https://docs.jax.dev/en/latest/_autosummary/jax.default_device.html`
+- JAX configuration options: `https://docs.jax.dev/en/latest/config_options.html`
 
 ## Status summary
 
@@ -181,7 +192,7 @@ External references used:
 | N28 | 2 | Confirmed | Make CUDA-determinism enforcement unconditional under CUDA |
 | N29 | 2 | Confirmed (doc-only) | Document `jax_gpu_parity` single-device default; reconsider after N30 |
 | N30 | 2 | Hardware-gated | Earn real-GPU speedup proof on N11 surface sharding + N12 seed batching |
-| N31 | 3 | Confirmed | Plumb `XLA_PYTHON_CLIENT_*` and `TF_GPU_ALLOCATOR` through `apply_jax_runtime_config`; extend `set_backend()` signature |
+| N31 | 3 | Confirmed | Plumb JAX GPU memory env vars through `apply_jax_runtime_config`; add explicit `set_backend()` override keywords |
 | N32 | 3 | Confirmed | Split `max_dense_jacobian_bytes` into CPU and GPU defaults |
 | N33 | 3 | Confirmed | Add selective CPU-residency option for large warm-start factors |
 | N34 | 3 | Confirmed (narrow) | Document checkpoint/restart workflow; offer per-instance device pin; no transparent compiled-JIT retargeting |
@@ -203,7 +214,7 @@ decisions established by earlier waves.
 - N27: matmul-precision pin for parity modes.
 - N28: CUDA-determinism unconditional under CUDA.
 - N29: document `jax_gpu_parity` single-device default.
-- N31: XLA memory flags plumbed (and `set_backend()` signature
+- N31: JAX GPU memory env vars plumbed (and `set_backend()` signature
   extension).
 - N32: dense-Jacobian budget split.
 
@@ -266,7 +277,7 @@ solve in `BoozerResidualJAX.dJ`, `IotasJAX.dJ`, and
 `NonQuasiSymmetricRatioJAX.dJ` therefore blocks on at least one scalar
 device→host transfer per term per outer iteration. The chain leads
 through `_checked_boozer_linear_solve` at
-`src/simsopt/geo/surfaceobjectives_jax.py:1881-1894` to a Python
+`src/simsopt/geo/surfaceobjectives_jax.py:1887-1901` to a Python
 `if`-on-host.
 
 ### Rationale
@@ -287,15 +298,16 @@ approach is consistent with that rule.
 ### Implementation
 
 1. Introduce `_solve_with_nan_on_failure(solver, *args)` that calls
-   `solver` and uses `jax.lax.cond(success, lambda s: s, lambda s:
-   jnp.where(False, s, jnp.nan), solution)` to mask outputs on
-   failure. Place near other private helpers in
+   `solver` and uses `jax.lax.cond` on the device-resident success
+   scalar to return either the solved value or
+   `jax.tree.map(lambda leaf: jnp.full_like(leaf, jnp.nan), solution)`.
+   Place near other private helpers in
    `boozersurface_jax.py`.
 2. In `pack_callbacks` (line 3522), stop calling `_host_bool`. Return
    `(masked_solution, success_jax_scalar)`. Downstream consumers that
    need the device bool keep it as a JAX scalar; consumers that need
    a Python bool materialize it once at the outermost boundary.
-3. In `_checked_boozer_linear_solve` at `surfaceobjectives_jax.py:1881`,
+3. In `_checked_boozer_linear_solve` at `surfaceobjectives_jax.py:1887`,
    replace `if not _host_bool(success): ...` with a `jnp.isfinite`
    check carried in the IFT adjoint state.
 4. Update `BoozerResidualJAX.dJ`, `IotasJAX.dJ`,
@@ -334,15 +346,16 @@ iteration before the next iteration is scheduled.
 
 ### Rationale
 
-The LM / L-BFGS traceable paths
-(`src/simsopt/geo/optimizer_jax.py:1436`,
-`src/simsopt/geo/optimizer_jax_private/_lbfgs.py:172`) already model
-the equivalent logic with `lax.while_loop`, `lax.cond`, and in-graph
-finiteness checks. The manual method is the laggard. Closing the gap
-brings the manual fallback up to the traceable path's GPU efficiency,
-which matters because users who hit numerical edge cases sometimes
-opt into `method='manual'` for diagnostic transparency, and they
-should not pay a 7x host-stall tax.
+The traceable LM and private L-BFGS-B paths already model equivalent
+state transitions with `lax.while_loop`, `lax.cond`, and in-graph
+finiteness checks
+(`src/simsopt/geo/optimizer_jax.py:1280,1380,2365,3747`,
+`src/simsopt/geo/optimizer_jax_private/_lbfgs.py:247-258`). The
+manual method is the laggard. Closing the gap brings the manual
+fallback up to the traceable path's GPU efficiency, which matters
+because users who hit numerical edge cases sometimes opt into
+`method='manual'` for diagnostic transparency, and they should not pay
+a 7x host-stall tax.
 
 ### Implementation
 
@@ -357,9 +370,10 @@ should not pay a 7x host-stall tax.
      scalars.
 3. Convert convergence and accept/reject decisions to `cond_fn`
    logic using `lax.cond`.
-4. Wrap the loop in `jax.jit` with the appropriate
-   `static_argnames`. Donation may apply to the state pytree if
-   caller-copy invariant is established; defer to Wave 4 audit.
+4. Wrap the loop in `jax.jit` with the appropriate `static_argnames`.
+   Do not add optimizer-runner donation in this pass; round-2 N3
+   closed with no optimizer-runner donation retained after warning
+   audit.
 5. Materialize host scalars only at the outermost boundary for
    logger or callback use, guarded by a verbosity flag.
 
@@ -373,7 +387,7 @@ should not pay a 7x host-stall tax.
   fixture.
 - Steady-state runtime on `jax_cpu_fast` for manual method shows
   monotonic improvement vs pre-port; gather on
-  `tier5_performance_characterization.py`.
+  `benchmarks/tier5_performance_characterization.py`.
 
 ## N23: stop materializing direct-coil scalar before public boundary
 
@@ -385,8 +399,8 @@ should not pay a 7x host-stall tax.
 `_host_scalar(objective_value)` inside
 `_evaluate_direct_coil_objective_value` and
 `_value_and_direct_coil_gradient`. `_boozer_solve_observability_payload`
-at `:2174` reads JAX scalars on every `_ensure_solved_value_state`
-call (fired via `_log_boozer_solve_state` at `:2211` from every
+at `:2173-2183` reads JAX scalars on every `_ensure_solved_value_state`
+call (fired via `_log_boozer_solve_state` at `:2217` from every
 objective `J()`/`dJ()` invocation).
 
 ### Rationale
@@ -400,17 +414,18 @@ handler is actually attached, eliminating the routine cost.
 
 1. Change `_evaluate_direct_coil_objective_value` return type from
    `(host_scalar, ...)` to `(jax_scalar, ...)`. Update callers at
-   `BoozerResidualJAX._value_and_dJ_by_dcoil_dofs` (line 2510) and
-   the parallel `IotasJAX` / `NonQuasiSymmetricRatioJAX` calls at
-   `:2620, :2682, :2798`.
+   `BoozerResidualJAX._value_and_dJ_by_dcoil_dofs` (`:2502-2520`)
+   and the parallel `IotasJAX`, `MajorRadiusJAX`, and
+   `NonQuasiSymmetricRatioJAX` paths at `:2625`, `:2686`, and
+   `:2795`.
 2. Materialize the public scalar exactly once at the
-   `J()` / `dJ()` return statement (lines 765, 773).
+   `_BoozerObjectiveBase.J()` / `compute()` boundary (`:2416-2442`).
 3. Wrap `_boozer_solve_observability_payload` in
    `if _booz_solve_observer_active(): ...`; the gate checks
    `logging.getLogger(...).isEnabledFor(...)` or a CLAUDE.md-style
    `SIMSOPT_BOOZER_OBSERVABILITY` env flag.
 4. When the gate is closed, skip the `_host_inf_norm` calls at
-   `:2169-2171`.
+   `:2175` and `:2177`.
 
 ### Acceptance criteria
 
@@ -606,7 +621,7 @@ share computation in each helper.
 
 `Precision.HIGHEST` is opted into in three sites only:
 `src/simsopt/jax_core/biotsavart.py:418`,
-`src/simsopt/geo/surfaceobjectives_jax.py:1651-1652`,
+`src/simsopt/geo/surfaceobjectives_jax.py:1657-1658`,
 `src/simsopt/geo/optimizer_jax_private/_common.py:27-28`. The global
 `jax.config.update("jax_default_matmul_precision", "highest")` is
 never called in `apply_jax_runtime_config`. Round-2 N7 closed a
@@ -798,7 +813,7 @@ unfulfilled.
   `benchmarks/single_stage_init_parity.py` under the proven sharding
   config).
 
-## N31: plumb XLA memory env vars through `apply_jax_runtime_config`
+## N31: plumb JAX GPU memory env vars through `apply_jax_runtime_config`
 
 - [ ] Status: confirmed.
 
@@ -810,10 +825,13 @@ The following env vars are not set or asserted by
 - `XLA_PYTHON_CLIENT_PREALLOCATE` (bool): controls eager 75%
   preallocation.
 - `XLA_PYTHON_CLIENT_MEM_FRACTION` (float in `(0, 1]`): bounds total
-  preallocated fraction when preallocation is on.
+  preallocated fraction for the default BFC allocator when
+  preallocation is on.
 - `XLA_PYTHON_CLIENT_ALLOCATOR`: per official JAX GPU
   memory-allocation docs, accepts `platform` or `vmm`; default
   (unset) selects BFC.
+- `XLA_CLIENT_MEM_FRACTION`: per official JAX GPU memory-allocation
+  docs, controls the fraction for the experimental `vmm` allocator.
 - `TF_GPU_ALLOCATOR=cuda_malloc_async`: this is a **separate** env
   var that selects CUDA's asynchronous allocator. It is NOT a value
   of `XLA_PYTHON_CLIENT_ALLOCATOR`.
@@ -839,6 +857,9 @@ client to honor them.
 1. Add to `BackendPolicy` in `src/simsopt/backend/runtime.py`:
    - `xla_gpu_preallocate: bool | None = None`
    - `xla_gpu_mem_fraction: float | None = None`
+     (semantic fraction knob; apply to
+     `XLA_PYTHON_CLIENT_MEM_FRACTION` for default/BFC allocation and
+     to `XLA_CLIENT_MEM_FRACTION` when `xla_gpu_allocator == "vmm"`).
    - `xla_gpu_allocator: Literal["platform", "vmm"] | None = None`
      (None means do-not-set, falling back to BFC).
    - `tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None`
@@ -849,11 +870,12 @@ client to honor them.
    - `xla_gpu_allocator=None` (leave BFC; users who want `platform`
      or `vmm` opt in via env override),
    - `xla_gpu_mem_fraction=None` (None means do-not-set, falling
-     back to JAX's 0.75 default),
+     back to JAX's allocator defaults),
    - `tf_gpu_allocator=None`.
 3. In `apply_jax_runtime_config`, set the env vars via
-   `os.environ[...]` BEFORE the `jax.config.update("jax_platforms",
-   ...)` call at `runtime.py:1725-1728`.
+   `os.environ[...]` before the local `import jax` and before the
+   `jax.config.update("jax_platforms", ...)` call at
+   `runtime.py:1725-1728`.
 4. If JAX is already imported, raise an explanatory error rather
    than silently accept no-op env writes.
 5. Env-var overrides:
@@ -865,13 +887,13 @@ client to honor them.
    at `runtime.py:1740-1748` is
    `(mode, *, strict, debug_nans, transfer_guard,
    compilation_cache_dir, configure_runtime)` — no `policy=`
-   parameter. This item adds an explicit `policy: BackendPolicy |
-   None = None` keyword. When `policy` is provided, it overrides
-   the mode-derived defaults field-by-field for the four new fields
-   above. Add an entry to the signature, plumb through
-   `_config_from_mode`, and document in the docstring.
+   parameter. Do not add a broad `policy=` override. This item adds
+   explicit typed keywords for the four new knobs:
+   `xla_gpu_preallocate`, `xla_gpu_mem_fraction`,
+   `xla_gpu_allocator`, and `tf_gpu_allocator`. Plumb them through
+   `_config_from_mode`, and document them in the docstring.
 7. Resolution priority (after the extension):
-   `set_backend(..., policy=...)` > `SIMSOPT_*` env > mode-derived
+   explicit `set_backend()` keyword > `SIMSOPT_*` env > mode-derived
    `_MODE_POLICY_DEFAULTS`.
 
 ### Acceptance criteria
@@ -883,13 +905,18 @@ client to honor them.
   confirms env propagation; downstream `jax.devices()[0].memory_stats()`
   reports halved bytes_in_use_limit (or equivalent JAX-version-
   specific metric).
+- Subprocess test under `SIMSOPT_JAX_GPU_ALLOCATOR=vmm` and
+  `SIMSOPT_JAX_GPU_MEM_FRACTION=0.5`: confirms
+  `XLA_PYTHON_CLIENT_ALLOCATOR=vmm` and
+  `XLA_CLIENT_MEM_FRACTION=0.5` are set before JAX initialization.
 - Subprocess test under `SIMSOPT_TF_GPU_ALLOCATOR=cuda_malloc_async`:
   confirms env propagation; XLA log line on JAX import names the
   cudaMallocAsync allocator.
-- `banana_coil_solver.py` on GPU works from a fresh shell without
-  manual `XLA_PYTHON_CLIENT_PREALLOCATE` export.
-- New `set_backend(mode, policy=BackendPolicy(...))` call accepts
-  the policy keyword without breaking existing callers.
+- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
+  on GPU works from a fresh shell without manual
+  `XLA_PYTHON_CLIENT_PREALLOCATE` export.
+- New explicit `set_backend(...)` keyword arguments accept all four
+  fields without breaking existing callers.
 
 ## N32: split `max_dense_jacobian_bytes` into CPU and GPU defaults
 
@@ -951,8 +978,9 @@ active device. None target `jax.devices('cpu')[0]` for host
 residency. The LS-lane `(P, L, U)` factors stored at
 `boozersurface_jax.py:3609-3669` and consumed downstream at
 `surfaceobjectives_jax.py:4660-4666, 6075-6081` live on the active
-device. For N = 8192 the live device footprint is approximately
-`2 × N² × 8 = 1 GB` per LS solver instance.
+device. For N = 8192, dense `P`, `L`, and `U` arrays occupy
+approximately `3 × N² × 8 = 1.5 GiB` per LS solver instance when all
+three are materialized.
 
 ### Rationale
 
@@ -960,10 +988,11 @@ Per JAX host-offloading docs: explicit `jax.device_put(..., device=
 jax.devices('cpu')[0])` is supported and preserves the array's
 logical identity. For workflows where the factors are reused
 infrequently relative to the per-call GPU compute, host residency
-frees ~`N² × 8 × 2` HBM bytes per solver at the cost of a
-host→device transfer per adjoint solve. Whether this is a win
-depends on the call ratio; offering it as an option is independently
-useful.
+frees up to `3 × N² × 8` HBM bytes per solver, depending on whether
+the runtime carries dense `P`, `L`, and `U` or a packed solve
+representation. The cost is a host→device transfer when the factors
+are consumed. Whether this is a win depends on the call ratio;
+offering it as an option is independently useful.
 
 ### Implementation
 
@@ -986,8 +1015,10 @@ useful.
 - New test instantiates two `BoozerSurfaceJAX` solvers in the same
   process with `linearization_residency="device"` and `"host"`;
   both produce equal adjoint gradients within `rtol=1e-12`.
-- Memory probe shows host-residency variant frees the
-  expected `N² × 8 × 2` device bytes per solver.
+- Memory probe reports expected bytes from the actual factor
+  representation (`P,L,U` dense triples up to `3 × N² × 8`; packed
+  forms lower) and shows host-residency frees that amount from
+  device memory.
 - Per-solve transfer cost recorded in the probe report.
 
 ## N34: checkpoint/restart workflow and per-instance device pin
@@ -1011,12 +1042,12 @@ Full mode-switch is constrained by JAX upstream. What IS possible:
 - **Data-residency switch** via explicit `jax.device_put` to a
   specific device (CPU or GPU). This is what N33 uses for
   warm-start factors and what JAX host-offloading docs describe.
-- **Per-instance device pin** for new objects constructed under a
-  `with jax.default_device(jax.devices('cpu')[0]):` block. Any
-  NEW JIT compiled inside that block targets CPU; existing
-  compiled JITs are unaffected. This admits a "build a CPU-resident
-  BoozerSurfaceJAX alongside a GPU-resident one" pattern, but pays
-  a compile-cache miss on first call.
+- **Per-instance device pin** for new objects constructed and first
+  evaluated under a `with jax.default_device(jax.devices('cpu')[0]):`
+  block. Arrays and computations created inside that block default to
+  CPU; existing GPU-compiled JITs are unaffected. This admits a
+  "build a CPU-resident BoozerSurfaceJAX alongside a GPU-resident one"
+  pattern, but pays a compile-cache miss on first call.
 - **Documented checkpoint-and-restart workflow**: save solver state
   to disk, restart with a `jax_cpu_*` mode env var, load state,
   resume. This is the realistic OOM-recovery path for users
@@ -1030,15 +1061,18 @@ per-call retargeting of compiled JITs.
 1. Document the checkpoint-and-restart workflow in
    `docs/source/jax_gpu_setup.rst` under a new "OOM Recovery"
    section:
-   - Save solver state to disk via existing pickle path.
+   - Save solver state through the existing SIMSOPT artifact path
+     (`Optimizable.save()` / `load()`; for Stage 2, the
+     `biot_savart_opt.json` and adjacent run artifacts used by
+     `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`).
    - Restart with `SIMSOPT_BACKEND_MODE=jax_cpu_fast` or
      `jax_cpu_parity`.
    - Load state and resume.
 2. Add a small helper
    `simsopt.backend.runtime.with_cpu_device_for_construction()` that
    returns a context manager wrapping
-   `jax.default_device(jax.devices('cpu')[0])`. Document that
-   anything compiled inside the block is CPU-resident and that
+   `jax.default_device(jax.devices('cpu')[0])`. Document that arrays
+   and computations created inside the block default to CPU and that
    GPU-compiled siblings remain GPU-resident.
 3. Build on N33: when a user constructs a `BoozerSurfaceJAX` inside
    the helper context, the `linearization_residency` option may be
