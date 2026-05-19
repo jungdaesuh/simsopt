@@ -11,7 +11,7 @@ transform helpers:
 - ``simsopt.geo.surfaceobjectives_jax._traceable_runtime_deviceify_tree``
 
 The removed branches relied on the (false) assumption that
-``jax.tree_util.tree_flatten`` and ``tree_map`` raise ``TypeError`` for
+``jax.tree.flatten`` and ``tree_map`` raise ``TypeError`` for
 classes that are not registered as pytree nodes. JAX 0.10 treats every
 unregistered class as a single leaf and never raises. The branches were
 therefore unreachable; they were also masking the only real failure mode

@@ -45,9 +45,9 @@ setUpModule, tearDownModule = make_module_jit_hooks(parameters, value=False)
 
 
 def taylor_test(f, df, x, epsilons=None, direction=None):
-    np.random.seed(1)
+    rng = np.random.RandomState(1)
     if direction is None:
-        direction = np.random.rand(*(x.shape)) - 0.5
+        direction = rng.rand(*(x.shape)) - 0.5
     dfx = df(x) @ direction
     if epsilons is None:
         epsilons = np.power(2.0, -np.asarray(range(7, 20)))
@@ -78,7 +78,7 @@ def taylor_test(f, df, x, epsilons=None, direction=None):
 
 
 def get_curve(curvetype, rotated, x=np.asarray([0.5])):
-    np.random.seed(2)
+    rng = np.random.RandomState(2)
     rand_scale = 0.01
     order = 4
 
@@ -146,7 +146,7 @@ def get_curve(curvetype, rotated, x=np.asarray([0.5])):
     else:
         assert False
 
-    curve.x = dofs + rand_scale * np.random.rand(len(dofs)).reshape(dofs.shape)
+    curve.x = dofs + rand_scale * rng.rand(len(dofs)).reshape(dofs.shape)
 
     if rotated:
         curve = RotatedCurve(curve, 0.5, flip=False)
@@ -170,7 +170,7 @@ class Testing(unittest.TestCase):
     def get_curvexyzfouriersymmetries(self, stellsym=True, x=None, nfp=None, ntor=1):
         # returns a CurveXYZFourierSymmetries that is randomly perturbed
 
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         rand_scale = 1e-2
 
         if nfp is None:
@@ -188,7 +188,7 @@ class Testing(unittest.TestCase):
         curve.set("zs(1)", -2 * r)
         curve.set("zs(2)", r)
         dofs = curve.x.copy()
-        curve.x = dofs + rand_scale * np.random.rand(len(dofs)).reshape(dofs.shape)
+        curve.x = dofs + rand_scale * rng.rand(len(dofs)).reshape(dofs.shape)
 
         return curve
 

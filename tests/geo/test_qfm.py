@@ -52,7 +52,7 @@ class QfmSurfaceTests(unittest.TestCase):
                         
 
     def subtest_qfm_objective_gradient(self, surfacetype, stellsym, config):
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         base_curves, base_currents, ma, nfp, bs = get_data(config)
         bs_tf = BiotSavart(bs.coils)
 
@@ -68,7 +68,7 @@ class QfmSurfaceTests(unittest.TestCase):
         f0, J0 = qfm_surface.qfm_objective(
             x, derivatives=1)
 
-        h = np.random.uniform(size=x.shape)-0.5
+        h = rng.uniform(size=x.shape) - 0.5
         Jex = J0@h
 
         err_old = 1e9
@@ -94,7 +94,7 @@ class QfmSurfaceTests(unittest.TestCase):
                     self.subtest_qfm_label_constraint_gradient(surfacetype, stellsym)
 
     def subtest_qfm_label_constraint_gradient(self, surfacetype, stellsym):
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
         bs_tf = BiotSavart(bs.coils)
 
@@ -109,7 +109,7 @@ class QfmSurfaceTests(unittest.TestCase):
         x = s.get_dofs()
         f0, J0 = qfm_surface.qfm_label_constraint(x, derivatives=1)
 
-        h = np.random.uniform(size=x.shape)-0.5
+        h = rng.uniform(size=x.shape) - 0.5
         Jex = J0@h
 
         err_old = 1e9
@@ -138,7 +138,7 @@ class QfmSurfaceTests(unittest.TestCase):
 
 
     def subtest_qfm_penalty_constraints_gradient(self, surfacetype, stellsym, config):
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         base_curves, base_currents, ma, nfp, bs = get_data(config)
         bs_tf = BiotSavart(bs.coils)
 
@@ -156,7 +156,7 @@ class QfmSurfaceTests(unittest.TestCase):
         f0, J0 = qfm_surface.qfm_penalty_constraints(
             x, derivatives=1, constraint_weight=weight)
 
-        h = np.random.uniform(size=x.shape)-0.5
+        h = rng.uniform(size=x.shape) - 0.5
         Jex = J0@h
 
         err_old = 1e9
@@ -197,7 +197,7 @@ class QfmSurfaceTests(unittest.TestCase):
         fixed volume. Then solve constrained problem using SLSQP. Repeat
         both steps for fixed area. Check that volume is preserved.
         """
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
 
         if stellsym:
@@ -211,8 +211,9 @@ class QfmSurfaceTests(unittest.TestCase):
             curves_flipped = [RotatedCurve(c, 0, True) for c in base_curves]
             currents_flipped = [-cur for cur in base_currents]
             for c in curves_flipped:
-                c.rotmat += 0.001*np.random.uniform(low=-1., high=1.,
-                                                    size=c.rotmat.shape)
+                c.rotmat += 0.001 * rng.uniform(
+                    low=-1., high=1., size=c.rotmat.shape
+                )
                 c.rotmatT = c.rotmat.T.copy()
             coils = coils_via_symmetries(base_curves + curves_flipped, base_currents + currents_flipped, nfp, False)
         bs = BiotSavart(coils)
@@ -308,6 +309,7 @@ class QfmSurfaceTests(unittest.TestCase):
         is raised if 'LBFGS' or 'SLSQP' is passed.
         """
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
+        rng = np.random.RandomState(1)
 
         if stellsym:
             coils = bs.coils
@@ -320,8 +322,9 @@ class QfmSurfaceTests(unittest.TestCase):
             curves_flipped = [RotatedCurve(c, 0, True) for c in base_curves]
             currents_flipped = [-cur for cur in base_currents]
             for c in curves_flipped:
-                c.rotmat += 0.001*np.random.uniform(low=-1., high=1.,
-                                                    size=c.rotmat.shape)
+                c.rotmat += 0.001 * rng.uniform(
+                    low=-1., high=1., size=c.rotmat.shape
+                )
                 c.rotmatT = c.rotmat.T.copy()
             coils = coils_via_symmetries(base_curves + curves_flipped, base_currents + currents_flipped, nfp, False)
 

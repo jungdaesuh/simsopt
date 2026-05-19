@@ -87,8 +87,8 @@ def _assert_central_difference_contraction(objective_builder):
     objective = objective_builder()
     dofs = np.asarray(objective.x, dtype=float).copy()
 
-    np.random.seed(1)
-    h = np.random.standard_normal(size=dofs.shape)
+    rng = np.random.default_rng(1)
+    h = rng.standard_normal(size=dofs.shape)
     df = np.sum(np.asarray(objective.dJ(), dtype=float) * h)
 
     errf_old = 1e10
@@ -116,9 +116,9 @@ class CoilStrainTesting(unittest.TestCase):
             curve.set('ys(1)', 1e-4)
             curve.fix_all()
             order = 2
-            np.random.seed(1)
+            rng = np.random.default_rng(1)
             rotation = FrameRotation(quadpoints, order)
-            rotation.x = np.random.standard_normal(size=(2*order+1,))
+            rotation.x = rng.standard_normal(size=(2*order+1,))
             framedcurve_cls = FramedCurveCentroid if centroid else FramedCurveFrenet
             framedcurve = framedcurve_cls(curve, rotation)
             Jt = LPTorsionalStrainPenalty(framedcurve, width=1e-3, p=2, threshold=0)

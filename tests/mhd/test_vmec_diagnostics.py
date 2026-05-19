@@ -299,8 +299,8 @@ class IotaTargetMetricTests(unittest.TestCase):
 
             # Compute random direction for surface perturbation
             dofs = np.copy(vmec.boundary.get_dofs())
-            np.random.seed(0)
-            vec = np.random.standard_normal(dofs.shape)
+            rng = np.random.RandomState(0)
+            vec = rng.standard_normal(dofs.shape)
             unitvec = vec / np.sqrt(np.vdot(vec, vec))
 
             def iota_fun(epsilon):
@@ -355,8 +355,8 @@ class IotaWeightedTests(unittest.TestCase):
 
             # Compute random direction for surface perturbation
             dofs = np.copy(vmec.boundary.x)
-            np.random.seed(0)
-            vec = np.random.standard_normal(dofs.shape)
+            rng = np.random.RandomState(0)
+            vec = rng.standard_normal(dofs.shape)
             unitvec = vec / np.sqrt(np.vdot(vec, vec))
 
             def iota_fun(epsilon):
@@ -415,8 +415,8 @@ class WellWeightedTests(unittest.TestCase):
 
             # Compute random direction for surface perturbation
             dofs = np.copy(vmec.boundary.get_dofs())
-            np.random.seed(0)
-            vec = np.random.standard_normal(dofs.shape)
+            rng = np.random.RandomState(0)
+            vec = rng.standard_normal(dofs.shape)
             unitvec = vec / np.sqrt(np.vdot(vec, vec))
 
             def well_fun(epsilon):

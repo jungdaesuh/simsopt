@@ -362,7 +362,7 @@ class BoozerSurfaceTests(unittest.TestCase):
     def subtest_boozer_penalty_constraints_gradient(
         self, surfacetype, stellsym, optimize_G=False
     ):
-        np.random.seed(1)
+        rng = np.random.default_rng(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
         bs_tf = BiotSavart(bs.coils)
         current_sum = nfp * sum(abs(c.get_value()) for c in base_currents)
@@ -393,7 +393,7 @@ class BoozerSurfaceTests(unittest.TestCase):
                 )
             )
         f0, J0 = fun(x, derivatives=1, constraint_weight=weight, optimize_G=optimize_G)
-        h = np.random.uniform(size=x.shape) - 0.5
+        h = rng.uniform(size=x.shape) - 0.5
         Jex = J0 @ h
 
         err_old = 1e9
@@ -416,7 +416,7 @@ class BoozerSurfaceTests(unittest.TestCase):
     def subtest_boozer_penalty_constraints_hessian(
         self, surfacetype, stellsym, optimize_G=False
     ):
-        np.random.seed(1)
+        rng = np.random.default_rng(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
         bs_tf = BiotSavart(bs.coils)
         current_sum = nfp * sum(abs(c.get_value()) for c in base_currents)
@@ -446,8 +446,8 @@ class BoozerSurfaceTests(unittest.TestCase):
             )
 
         f0, J0, H0 = fun(x, derivatives=2, optimize_G=optimize_G)
-        h1 = np.random.uniform(size=x.shape) - 0.5
-        h2 = np.random.uniform(size=x.shape) - 0.5
+        h1 = rng.uniform(size=x.shape) - 0.5
+        h2 = rng.uniform(size=x.shape) - 0.5
         d2f = h1 @ H0 @ h2
 
         err_old = 1e9
@@ -481,7 +481,7 @@ class BoozerSurfaceTests(unittest.TestCase):
     def subtest_boozer_constrained_jacobian(
         self, surfacetype, stellsym, optimize_G=False
     ):
-        np.random.seed(1)
+        rng = np.random.default_rng(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
         bs_tf = BiotSavart(bs.coils)
         current_sum = nfp * sum(abs(c.get_value()) for c in base_currents)
@@ -514,7 +514,7 @@ class BoozerSurfaceTests(unittest.TestCase):
             xl, derivatives=1, optimize_G=optimize_G
         )
 
-        h = np.random.uniform(size=xl.shape) - 0.5
+        h = rng.uniform(size=xl.shape) - 0.5
         dres_exact = dres0 @ h
 
         err_old = 1e9
@@ -570,12 +570,11 @@ class BoozerSurfaceTests(unittest.TestCase):
             # applying rotational symmetry
             from simsopt.geo.curve import RotatedCurve
 
+            rng = np.random.default_rng(1)
             curves_flipped = [RotatedCurve(c, 0, True) for c in base_curves]
             currents_flipped = [-cur for cur in base_currents]
             for c in curves_flipped:
-                c.rotmat += 0.001 * np.random.uniform(
-                    low=-1.0, high=1.0, size=c.rotmat.shape
-                )
+                c.rotmat += 0.001 * rng.uniform(low=-1.0, high=1.0, size=c.rotmat.shape)
                 c.rotmatT = c.rotmat.T
             coils = coils_via_symmetries(
                 base_curves + curves_flipped,
@@ -812,7 +811,6 @@ class BoozerSurfaceTests(unittest.TestCase):
     def subtest_minimize_boozer_penalty_constraints_ls_manual(
         self, stellsym, optimize_G
     ):
-        np.random.seed(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
         bs_tf = BiotSavart(bs.coils)
         current_sum = nfp * sum(abs(c.get_value()) for c in base_currents)
@@ -882,7 +880,6 @@ class BoozerSurfaceTests(unittest.TestCase):
                     self.subtest_need_to_run_code_false(stellsym, optimize_G)
 
     def subtest_need_to_run_code_false(self, stellsym, optimize_G):
-        np.random.seed(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
         bs_tf = BiotSavart(bs.coils)
         current_sum = nfp * sum(abs(c.get_value()) for c in base_currents)
@@ -939,7 +936,6 @@ class BoozerSurfaceTests(unittest.TestCase):
                 self.subtest_minimize_boozer_exact_constraints_newton_G_None(stellsym)
 
     def subtest_minimize_boozer_exact_constraints_newton_G_None(self, stellsym):
-        np.random.seed(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
         bs_tf = BiotSavart(bs.coils)
 
@@ -977,7 +973,6 @@ class BoozerSurfaceTests(unittest.TestCase):
         """
         Test minimize_boozer_exact_constraints_newton with stellsym=False (non-stellarator symmetric).
         """
-        np.random.seed(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
 
         # Create non-stellarator symmetric configuration

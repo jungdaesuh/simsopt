@@ -120,8 +120,8 @@ class FluxObjectiveTests(unittest.TestCase):
 
     def check_taylor_test(self, J):
         dofs = J.x
-        np.random.seed(1)
-        h = np.random.uniform(size=dofs.shape)
+        rng = np.random.default_rng(1)
+        h = rng.uniform(size=dofs.shape)
         dJ0 = J.dJ()
         dJh = sum(dJ0 * h)
         err_old = 1e10

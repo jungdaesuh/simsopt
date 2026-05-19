@@ -83,10 +83,9 @@ class MultifilamentTesting(unittest.TestCase):
 
         g = c.gamma()
         v = np.ones_like(g)
-        np.random.seed(1)
-
-        v = np.random.standard_normal(size=g.shape)
-        h = np.random.standard_normal(size=dofs.shape)
+        rng = np.random.RandomState(1)
+        v = rng.standard_normal(size=g.shape)
+        h = rng.standard_normal(size=dofs.shape)
         df = np.sum(c.dgamma_by_dcoeff_vjp(v)(c)*h)
         dg = np.sum(c.dgammadash_by_dcoeff_vjp(v)(c)*h)
 
@@ -134,6 +133,7 @@ class MultifilamentTesting(unittest.TestCase):
             # check that the coil pack is centered around the underlying curve
             assert np.linalg.norm(np.mean([f.gamma() for f in fils], axis=0)-c.gamma()) < 1e-13
 
+        rng = np.random.RandomState(1)
         for frame in ['centroid', 'frenet']:
             numfilaments_n = 2
             numfilaments_b = 3
@@ -153,7 +153,7 @@ class MultifilamentTesting(unittest.TestCase):
                 c, numfilaments_n, numfilaments_b, gapsize_n, gapsize_b,
                 rotation_order=3, rotation_scaling=None, frame=frame)
             xr = fils[0].rotation.x
-            fils[0].rotation.x = xr + 1e-2*np.random.standard_normal(size=xr.shape)
+            fils[0].rotation.x = xr + 1e-2*rng.standard_normal(size=xr.shape)
             check(fils, c, numfilaments_n, numfilaments_b)
 
     def test_biotsavart_with_symmetries(self):
@@ -162,7 +162,7 @@ class MultifilamentTesting(unittest.TestCase):
         properly with symmetries, biot savart, and objectives that only depend
         on the underlying curve (not the finite build filaments)
         """
-        np.random.seed(1)
+        rng = np.random.RandomState(1)
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx", coil_order=5)
 
         for frame in ['centroid', 'frenet']:
@@ -194,9 +194,8 @@ class MultifilamentTesting(unittest.TestCase):
                 return (JF.J(), JF.dJ()) if grad else JF.J()
 
             dofs = JF.x
-            dofs += 1e-2 * np.random.standard_normal(size=dofs.shape)
-            np.random.seed(1)
-            h = np.random.uniform(size=dofs.shape)
+            dofs += 1e-2 * rng.standard_normal(size=dofs.shape)
+            h = rng.uniform(size=dofs.shape)
             J0, dJ0 = fun(dofs)
             dJh = sum(dJ0 * h)
             err = 1e6

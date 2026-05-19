@@ -313,10 +313,10 @@ def test_grouped_coil_set_spec_is_a_real_jittable_pytree():
         ]
     )
 
-    leaves, treedef = jax.tree_util.tree_flatten(grouped)
-    rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+    leaves, treedef = jax.tree.flatten(grouped)
+    rebuilt = jax.tree.unflatten(treedef, leaves)
 
-    assert treedef == jax.tree_util.tree_structure(rebuilt)
+    assert treedef == jax.tree.structure(rebuilt)
     assert rebuilt.groups[0].coil_indices == (1,)
     assert rebuilt.groups[1].coil_indices == (2, 9)
     np.testing.assert_allclose(rebuilt.groups[0].gammas, grouped.groups[0].gammas)
@@ -369,8 +369,8 @@ def test_single_stage_runtime_spec_is_a_real_jittable_pytree():
         ntheta=surface.quadpoints_theta.shape[0],
     )
 
-    leaves, treedef = jax.tree_util.tree_flatten(runtime)
-    rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+    leaves, treedef = jax.tree.flatten(runtime)
+    rebuilt = jax.tree.unflatten(treedef, leaves)
 
     assert rebuilt.mpol == surface.mpol
     assert rebuilt.seed.target_labels == ("qs_error", "boozer_residual")
@@ -404,10 +404,10 @@ def test_coil_set_dof_extraction_spec_is_a_real_jittable_pytree():
         ]
     )
 
-    leaves, treedef = jax.tree_util.tree_flatten(extraction_spec)
-    rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+    leaves, treedef = jax.tree.flatten(extraction_spec)
+    rebuilt = jax.tree.unflatten(treedef, leaves)
 
-    assert treedef == jax.tree_util.tree_structure(rebuilt)
+    assert treedef == jax.tree.structure(rebuilt)
     assert len(rebuilt.coils) == 1
     assert rebuilt.coils[0].symmetry.scale == 2.0
 
