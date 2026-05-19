@@ -76,11 +76,12 @@ def _get_boozer_adjoint_runtime_state(booz_surf):
 
 
 def _solve_boozer_runtime_transpose(adjoint_state, rhs):
-    rhs_runtime = _runtime_as_jax_float64(rhs) if _HAS_JAX else rhs
     solve_with_status = getattr(adjoint_state, "solve_transpose_with_status", None)
     if callable(solve_with_status):
+        rhs_runtime = _runtime_as_jax_float64(rhs) if _HAS_JAX else rhs
         adjoint, success = solve_with_status(rhs_runtime)
-        if not bool(np.asarray(success)):
+        success_host = jax.device_get(success) if _HAS_JAX else success
+        if not bool(np.asarray(success_host)):
             raise RuntimeError(
                 "Boozer adjoint linear solve failed on the runtime-state path "
                 f"({adjoint_state.linearization_kind})."
@@ -92,7 +93,8 @@ def _solve_boozer_runtime_transpose(adjoint_state, rhs):
             "Boozer adjoint runtime state exposes neither "
             "solve_transpose_with_status nor solve_transpose."
         )
-    return solve(rhs_runtime)
+    rhs_host = np.asarray(jax.device_get(rhs)) if _HAS_JAX else rhs
+    return solve(rhs_host)
 
 
 def _project_boozer_runtime_adjoint_derivative(

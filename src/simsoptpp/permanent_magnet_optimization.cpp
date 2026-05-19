@@ -201,6 +201,7 @@ std::tuple<Array, Array, Array, Array> MwPGP_algorithm(Array& A_obj, Array& b_ob
         printf("Iteration ... |Am - b|^2 ... |m-w|^2/v ...   a|m|^2 ...  b|m-1|^2 ...   c|m|_1 ...   d|m|_0 ... Total Error:\n");
 
     // Main loop over the optimization iterations
+    int print_interval = std::max(1, max_iter / 5);
     for (int k = 0; k < max_iter; ++k) {
 
 	      x_k_prev = x_k1;
@@ -301,8 +302,8 @@ std::tuple<Array, Array, Array, Array> MwPGP_algorithm(Array& A_obj, Array& b_ob
             }
         }
 
-	// fairly convoluted way to print every ~ max_iter / 20 iterations
-        if (verbose && ((k % (int(max_iter / 5.0)) == 0) || k == 0 || k == max_iter - 1)) {
+	// Print every ~max_iter / 5 iterations, including the first and final iterations.
+        if (verbose && ((k % print_interval == 0) || k == 0 || k == max_iter - 1)) {
 	    print_MwPGP(A_obj, b_obj, x_k1, m_proxy, m_maxima, m_history, objective_history, R2_history, print_iter, k, nu, reg_l0, reg_l1, reg_l2);
 	    if (R2_history(print_iter) < min_fb) break;
             print_iter += 1;

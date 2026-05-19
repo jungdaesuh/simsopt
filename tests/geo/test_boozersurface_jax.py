@@ -1759,6 +1759,8 @@ class TestOptimizerAdapter:
         assert np.isinf(_ls_hessian_symmetry_rel(jnp.full((3, 3), jnp.inf)))
         symmetric = jnp.asarray([[2.0, 0.5], [0.5, 3.0]])
         assert _ls_hessian_symmetry_rel(symmetric) == 0.0
+        with jax.transfer_guard("disallow"):
+            assert _ls_hessian_symmetry_rel(symmetric) == 0.0
 
         assert _ls_factorization_backend(None, optimizer_backend="scipy") is None
         H = jnp.asarray([[1.0, 0.0], [0.0, 1.0]])

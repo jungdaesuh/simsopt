@@ -2949,11 +2949,13 @@ def _ls_hessian_symmetry_rel(H) -> float | None:
     if H is None:
         return None
     norms = np.asarray(
-        jnp.stack(
-            [
-                jnp.linalg.norm(H, ord="fro"),
-                jnp.linalg.norm(H - H.T, ord="fro"),
-            ]
+        jax.device_get(
+            jnp.stack(
+                [
+                    jnp.linalg.norm(H, ord="fro"),
+                    jnp.linalg.norm(H - H.T, ord="fro"),
+                ]
+            )
         )
     )
     H_norm = float(norms[0])

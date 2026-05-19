@@ -108,6 +108,99 @@ def test_axis0_entries_preserves_empty_axis0_tuple():
     assert axis0_entries(jnp.zeros((0, 3))) == ()
 
 
+def test_surface_rzfourier_coefficient_scatter_forward_is_transfer_clean():
+    from simsopt.jax_core.surface_rzfourier import _scatter_coefficients
+
+    positions = np.asarray([0, 2, 4], dtype=np.int32)
+
+    def scatter_from_dofs(dofs):
+        return _scatter_coefficients(
+            positions,
+            dofs,
+            target_size=8,
+            source_offset=1,
+        )
+
+    dofs = jax.device_put(np.arange(5.0, dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        scattered = scatter_from_dofs(dofs)
+
+    np.testing.assert_allclose(
+        np.asarray(jax.device_get(scattered)),
+        np.asarray([1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 0.0, 0.0], dtype=np.float64),
+    )
+
+
+def test_surface_rzfourier_scatter_vjp_is_transfer_clean():
+    from simsopt.jax_core.surface_rzfourier import _scatter_coefficients
+
+    positions = np.asarray([0, 2, 4], dtype=np.int32)
+
+    def scatter_from_dofs(dofs):
+        return _scatter_coefficients(
+            positions,
+            dofs,
+            target_size=8,
+            source_offset=1,
+        )
+
+    dofs = jax.device_put(np.arange(5.0, dtype=np.float64))
+    cotangent = jax.device_put(np.ones(8, dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        _, pullback = jax.vjp(scatter_from_dofs, dofs)
+        (gradient,) = pullback(cotangent)
+
+    np.testing.assert_allclose(
+        np.asarray(jax.device_get(gradient)),
+        np.asarray([0.0, 1.0, 1.0, 1.0, 0.0], dtype=np.float64),
+    )
+
+
+def test_cws_rz_curve_pullback_is_transfer_clean():
+    from simsopt.jax_core import (
+        make_curve_cwsfourier_rz_spec,
+        make_surface_rzfourier_spec,
+    )
+    from simsopt.jax_core.curve_geometry import (
+        curve_gamma_and_dash_from_dofs,
+        curve_pullback_from_dofs,
+    )
+
+    surface = make_surface_rzfourier_spec(
+        rc=jnp.asarray([[1.0], [0.25]], dtype=jnp.float64),
+        zs=jnp.asarray([[0.0], [0.2]], dtype=jnp.float64),
+        quadpoints_phi=jnp.asarray([0.0, 0.5], dtype=jnp.float64),
+        quadpoints_theta=jnp.asarray([0.0, 0.5], dtype=jnp.float64),
+        nfp=1,
+        stellsym=True,
+    )
+    curve = make_curve_cwsfourier_rz_spec(
+        dofs=jnp.asarray([0.1, 0.0, 0.2, 0.0, 0.0, 0.0], dtype=jnp.float64),
+        quadpoints=jnp.asarray([0.0, 0.5], dtype=jnp.float64),
+        surface=surface,
+        order=1,
+    )
+    gamma, gammadash = curve_gamma_and_dash_from_dofs(curve, curve.dofs)
+    gamma_cotangent = jax.device_put(np.ones(gamma.shape, dtype=np.float64))
+    gammadash_cotangent = jax.device_put(np.ones(gammadash.shape, dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
+            curve,
+            curve.dofs,
+            gamma_cotangent,
+            gammadash_cotangent,
+        )
+
+    assert coeff_cotangent.shape == curve.dofs.shape
+    assert surface_cotangent is not None
+    assert surface_cotangent.shape == (3,)
+    assert np.all(np.isfinite(np.asarray(jax.device_get(coeff_cotangent))))
+    assert np.all(np.isfinite(np.asarray(jax.device_get(surface_cotangent))))
+
+
 def test_as_runtime_float64_uses_runtime_policy_dtype_for_host_values():
     from simsopt.backend.dtypes import as_runtime_float64
 

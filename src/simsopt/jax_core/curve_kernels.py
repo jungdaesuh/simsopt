@@ -145,6 +145,7 @@ def curve_cws_rz_gamma_from_dofs(
     ntor,
     nfp,
     stellsym=True,
+    use_custom_vjp=False,
 ):
     """Return 3D coordinates for a CWS Fourier curve on an RZ Fourier surface."""
     phi, theta = gamma_2d(curve_dofs, qpts, order, G, H)
@@ -156,5 +157,6 @@ def curve_cws_rz_gamma_from_dofs(
         ntor=ntor,
         nfp=nfp,
         stellsym=stellsym,
+        use_custom_vjp=use_custom_vjp,
     )
     return _surface_rz_fourier_gamma_pointwise(surface_spec, phi, theta)

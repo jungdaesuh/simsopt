@@ -106,9 +106,12 @@ artifact or blocks the next wave with a concrete failure.
 - [ ] If dirty proof: generate a patch and file manifest, and mark all
   artifacts as dirty-tree evidence.
 
-### Perlmutter Login-Node Setup
+### Perlmutter Source Setup And Environment Lane
 
-Run this on a login node, not inside a GPU allocation.
+Run the source checkout and modest environment setup on a login node, not
+inside a GPU allocation. Do not run heavyweight pytest/proof workloads there.
+If dependency solving or editable builds become compute- or memory-intensive,
+move that step into an interactive or batch allocation before continuing.
 
 ```bash
 set -euo pipefail
@@ -138,8 +141,8 @@ conda create -y -p "${ENV_ROOT}" python=3.11 pip numpy scipy
 conda activate "${ENV_ROOT}"
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install --upgrade "jax[cuda12]==0.9.2"
-python -m pip install -e ".[deploy_gpu]"
+python -m pip install --upgrade "jax==0.10.0" "jaxlib==0.10.0"
+python -m pip install -e ".[test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
 
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 
@@ -147,9 +150,10 @@ python - <<'PY'
 import jax
 import jaxlib
 
-if jax.__version__ != "0.9.2" or jaxlib.__version__ != "0.9.2":
+if tuple(map(int, jax.__version__.split(".")[:2])) < (0, 9):
     raise SystemExit(
-        f"expected jax/jaxlib 0.9.2, got {jax.__version__}/{jaxlib.__version__}"
+        f"expected JAX >= 0.9 for the on-device optimizer lane, "
+        f"got {jax.__version__}/{jaxlib.__version__}"
     )
 PY
 
@@ -161,23 +165,37 @@ print(simsoptpp.__file__)
 PY
 ```
 
-The first GPU proof intentionally pins `jax[cuda12]==0.9.2` even though local
-CPU development environments may move faster. The repo's production GPU proof
-image and `SIMSOPT_BENCHMARK_JAX_VERSION` performance contract currently use
-0.9.2, so this plan pins the hardware proof to that known runtime before
-comparing or benchmarking.
+Environment lane decision:
 
-Container environment lane: NERSC's Python/JAX guidance recommends NVIDIA JAX
-containers through Shifter or Podman-HPC as the most reliable GPU setup on
-Perlmutter. Treat the conda/pip lane above and a container lane as separate
-environment choices made before Wave 0. Do not switch environment lanes within a
-single proof bundle; if the environment lane changes, rerun all waves from the
-same source snapshot and label the artifacts with that lane.
+- [ ] The conda environment above is the CPU/reference environment and a source
+  validation environment. It is not GPU signoff by itself.
+- [ ] Preferred Perlmutter GPU lane: run the proof inside a NERSC-supported
+  NVIDIA JAX container through Shifter or Podman-HPC, then install the repo and
+  non-JAX proof dependencies into that runtime without replacing the container's
+  JAX wheels.
+- [ ] Proven pip-wheel candidate: `python -m pip install "jax[cuda12]==0.10.0"`
+  resolves for Linux `manylinux_2_27_x86_64` / Python 3.11 in a 2026-05-19
+  dry-run. Record a fresh dry-run in the proof bundle before launch.
+- [ ] Blocked legacy pip-wheel lane: do not launch a proof with
+  `python -m pip install "jax[cuda12]==0.9.2"` or an unpinned `deploy_gpu`
+  install that resolves to 0.9.2; that dry-run failed because the required
+  `jax-cuda12-plugin==0.9.2` wheel was not available from PyPI for the target.
 
-The pip-wheel lane uses JAX's bundled CUDA userspace libraries. Do not load a
-separate `cudatoolkit` module for this lane, and keep
+The benchmark scripts default `SIMSOPT_BENCHMARK_JAX_VERSION` to `0.10.0`.
+For a container lane, set `SIMSOPT_BENCHMARK_JAX_VERSION` to the JAX version
+recorded by Wave 2 only after confirming that the on-device optimizer runtime
+accepts that version.
+Do not switch environment lanes within a single proof bundle; if the environment
+lane changes, rerun all waves from the same source snapshot and label the
+artifacts with that lane.
+
+For a future proven pip-wheel lane, use JAX's bundled CUDA userspace libraries.
+Do not load a separate `cudatoolkit` module for that lane, and keep
 `SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled` in GPU jobs so repo subprocess helpers
 do not prepend a local CUDA toolkit or `LD_LIBRARY_PATH` over the wheel stack.
+If using the container lane, replace `module load python` / `conda activate`
+prologue commands in the GPU job bodies with the selected Shifter or Podman-HPC
+runtime invocation and record the image digest in the final report.
 
 Record setup provenance:
 
@@ -698,7 +716,7 @@ Run CPU:
 ```bash
 export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
-export SIMSOPT_BENCHMARK_JAX_VERSION=0.9.2
+export SIMSOPT_BENCHMARK_JAX_VERSION=0.10.0
 
 python benchmarks/cpu_run_code_benchmark.py \
   --backend ondevice \
@@ -713,7 +731,7 @@ export JAX_PLATFORMS=cuda,cpu
 export JAX_ENABLE_X64=1
 export SIMSOPT_JAX_PLATFORM=cuda
 export SIMSOPT_BACKEND_MODE=jax_gpu_parity
-export SIMSOPT_BENCHMARK_JAX_VERSION=0.9.2
+export SIMSOPT_BENCHMARK_JAX_VERSION=0.10.0
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -774,9 +792,64 @@ Create:
   - [ ] performance data collected but no win claimed
   - [ ] blocked, with exact blocking artifact
 
+## Execution Snapshot: 2026-05-19 Perlmutter JAX 0.10.0 Dirty-Tree Run
+
+Artifact root:
+`/pscratch/sd/j/jungdae/simsopt-jax-results/jax-0.10.0-e2e-memperf-customvjp-20260519T095319Z`
+
+Source/runtime:
+
+- Remote worktree: `/pscratch/sd/j/jungdae/simsopt-jax-worktree`
+- Remote base SHA recorded by artifacts: `d03699dd398cc898212b10daefd03d5a4d7f1676`
+- Runtime: Python 3.11, `jax==0.10.0`, `jaxlib==0.10.0`
+- Evidence class: dirty-tree hardware proof; do not treat as clean-release
+  signoff until the intended patch slice is committed and rerun from that SHA.
+
+Correctness and fix-validation results:
+
+| Area | Job / command | Result | Time / memory |
+| --- | --- | --- | --- |
+| Native `simsoptpp` rebuild after PM print-interval fix | Slurm `53165120` | PASS | 2:10.59 wall by `/usr/bin/time`; 967824 KB MaxRSS by `/usr/bin/time`; Slurm batch MaxRSS 13387572K |
+| PM QA reduced fixed-state fixture | Slurm `53165165` | PASS | 0:13.18 wall; 934088 KB MaxRSS |
+| GPU runtime smoke and grouped lowering | Slurm `53164465` first two packets | PASS | runtime smoke 3:04.11 / 3317048 KB; grouped lowering 0:38.15 / 1072004 KB |
+| GPU M5 public wrapper rerun after transfer-clean CWS pullback fix | Slurm `53164835` | PASS | 1:53.04 wall; 3033300 KB MaxRSS; `3 passed in 99.81s` |
+
+Performance and memory-pressure results:
+
+| Area | Job | Result | Time / memory | Notes |
+| --- | --- | --- | --- | --- |
+| Tier 5 CPU performance characterization | `53164679` first phase | PASS | 3:31.33 wall; 4897820 KB MaxRSS | CPU phase artifact completed before the later run-code benchmark failure. |
+| CPU run-code benchmark, all configs in one process | `53164679` second phase | FAIL | 1:19:47 wall; 11775832 KB MaxRSS; exit 1 | Failed during Full-HBT repeat 3/3 with JAX/XLA CPU `LLVM compilation error: Cannot allocate memory` and `Failed to materialize symbols`. Treat as accumulated CPU compile-memory pressure in the benchmark process. |
+| CPU run-code benchmark, isolated Full-HBT only | `53165744` | PASS | 36:36.59 wall; 6939428 KB MaxRSS; Slurm batch MaxRSS 7453984K | Full-HBT repeat median 403451.6 ms; first call 499.291 s; LS 8204.9 ms; Newton 378095.5 ms. |
+| GPU Tier 5 high-memory retry | `53164760` | TIMEOUT | Slurm timeout at 2:00:16; step MaxRSS 76182456K under `--mem-per-gpu=80G`; sampled GPU memory peak 2347 MiB | Passed Stage 2 CPU-vs-JAX value/gradient parity (`J` rel_err `3.95e-16`, grad L2 rel_err `1.56e-14`) but did not complete performance characterization before walltime. |
+| GPU Tier 5 original 57 GB run | `53164210` | FAIL / OOM | 50:05.20 wall; 58045712 KB MaxRSS; exit 1 | Establishes that the pressure is host memory, not GPU VRAM. |
+
+Current verdict for this run:
+
+- [x] Local transfer-clean and scatter/CWS regression packet passed.
+- [x] PM native SIGFPE fixture passed after rebuilding the exact C++ bytes.
+- [x] GPU M5 public-wrapper transfer-clean test packet passed on real CUDA.
+- [x] CPU performance data collected for Tier 5 and run-code Full-HBT.
+- [x] GPU memory-pressure data collected.
+- [ ] GPU performance characterization completed.
+- [ ] Release-grade GPU performance claim accepted.
+
+Blocking interpretation:
+
+- The GPU high-memory run survived past the prior 57 GB OOM point but timed out
+  at the two-hour Slurm limit while still inside Tier 5 GPU characterization.
+  This blocks any GPU performance win claim.
+- The CPU all-config benchmark failure is reproducible evidence that running
+  every large config in one JAX process accumulates enough CPU/XLA compile
+  pressure to fail. The isolated Full-HBT rerun completed, so the Full-HBT
+  timing itself is available and the failure is a benchmark-process memory
+  pressure issue rather than a solver correctness failure.
+
 ## Slurm Execution Policy
 
-- [ ] CPU setup and environment build happen on login nodes.
+- [ ] Source checkout and modest environment setup may happen on login nodes;
+  heavyweight dependency builds, full tests, and proof workloads run on compute
+  nodes.
 - [ ] CPU full tests run on CPU compute nodes, not login nodes.
 - [ ] Every Slurm job script uses `set -euo pipefail` before any command that
   pipes test/proof output through `tee`.

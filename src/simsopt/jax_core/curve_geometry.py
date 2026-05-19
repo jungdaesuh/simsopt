@@ -1011,6 +1011,8 @@ def _curve_cws_gamma_and_dash_from_parts(
     spec: CurveCWSFourierRZSpec,
     curve_dofs,
     surface_dofs,
+    *,
+    use_custom_vjp: bool = False,
 ):
     quadpoints, tangents = _curve_quadpoints(spec, reference=curve_dofs)
 
@@ -1026,6 +1028,7 @@ def _curve_cws_gamma_and_dash_from_parts(
             spec.surface.ntor,
             spec.surface.nfp,
             spec.surface.stellsym,
+            use_custom_vjp=use_custom_vjp,
         )
 
     return jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
@@ -1046,7 +1049,12 @@ def curve_pullback_from_dofs(spec: CurveSpec, dofs, dg, dgd):
         surface_dofs = spec.surface_dofs()
 
         def outputs(curve_x, surface_x):
-            return _curve_cws_gamma_and_dash_from_parts(spec, curve_x, surface_x)
+            return _curve_cws_gamma_and_dash_from_parts(
+                spec,
+                curve_x,
+                surface_x,
+                use_custom_vjp=True,
+            )
 
         _, pullback = jax.vjp(outputs, curve_dofs, surface_dofs)
         coeff_cotangent, surface_cotangent = pullback((dg_jax, dgd_jax))

@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HEARTBEAT_INTERVAL_S="${HEARTBEAT_INTERVAL_S:-60}"
 GPU_DETERMINISM_XLA_FLAG="--xla_gpu_exclude_nondeterministic_ops=true"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 RESULTS_DIR=""
 EQUILIBRIA_DIR=""
@@ -80,7 +81,7 @@ if [[ -z "${GEOMETRY_REL_TOL_ARG}" ]]; then
   GEOMETRY_REL_TOL_ARG="__NONE__"
 fi
 if ! mapfile -t STAGE2_RUNG_NAMES < <(
-  python - "${REPO_ROOT}" "${STAGE2_MAXITER}" "${GEOMETRY_REL_TOL_ARG}" <<'PY'
+  "${PYTHON_BIN}" - "${REPO_ROOT}" "${STAGE2_MAXITER}" "${GEOMETRY_REL_TOL_ARG}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -122,7 +123,7 @@ declare -a EXPECTED_PROBES=(
 emit_payload_summary() {
   local name="$1"
   local output_json="$2"
-  python - "${name}" "${output_json}" <<'PY'
+  "${PYTHON_BIN}" - "${name}" "${output_json}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -171,7 +172,7 @@ annotate_probe_payload() {
   if [[ ! -f "${output_json}" ]]; then
     return
   fi
-  python - "${output_json}" "${peak_file}" "$@" <<'PY'
+  "${PYTHON_BIN}" - "${output_json}" "${peak_file}" "$@" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -262,7 +263,7 @@ run_cuda_canary() {
     CUDA_CACHE_DISABLE=1 \
     CUDA_CACHE_PATH="${cuda_cache_dir}" \
     JAX_COMPILATION_CACHE_DIR="${canary_cache_dir}" \
-    python - "${mode}" "${output_json}" <<'PY'
+    "${PYTHON_BIN}" - "${mode}" "${output_json}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -301,7 +302,7 @@ if backend not in {"gpu", "cuda"}:
 
 @jax.jit
 def canary_kernel(x: jax.Array) -> jax.Array:
-    return jnp.sum(x @ x.T) + jnp.sum(jnp.sin(x))
+    return jnp.sum(jnp.sin(x) * jnp.cos(x) + x * x)
 
 
 x: jax.Array = jnp.arange(1.0, 1025.0, dtype=jnp.float64).reshape((32, 32))
@@ -330,7 +331,7 @@ if [[ "${SIMSOPT_FAKE_GPU:-}" != "1" && ( "${STAGE2_PLATFORM}" == "cuda" || "${S
 fi
 
 run_probe stage2_cold "${RESULTS_DIR}/stage2_cold.json" \
-  python "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
+  "${PYTHON_BIN}" "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
     --platform "${STAGE2_PLATFORM}" \
     --equilibria-dir "${EQUILIBRIA_DIR}" \
     --nphi "${STAGE2_NPHI}" \
@@ -340,7 +341,7 @@ run_probe stage2_cold "${RESULTS_DIR}/stage2_cold.json" \
     --output-json "${RESULTS_DIR}/stage2_cold.json" || OVERALL_RC=1
 
 run_probe stage2_warm "${RESULTS_DIR}/stage2_warm.json" \
-  python "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
+  "${PYTHON_BIN}" "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
     --platform "${STAGE2_PLATFORM}" \
     --equilibria-dir "${EQUILIBRIA_DIR}" \
     --nphi "${STAGE2_NPHI}" \
@@ -351,7 +352,7 @@ run_probe stage2_warm "${RESULTS_DIR}/stage2_warm.json" \
 
 if [[ " ${STAGE2_RUNG_NAMES[*]} " == *" stage2_warm_repro "* ]]; then
   run_probe stage2_warm_repro "${RESULTS_DIR}/stage2_warm_repro.json" \
-    python "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
+    "${PYTHON_BIN}" "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
       --platform "${STAGE2_PLATFORM}" \
       --equilibria-dir "${EQUILIBRIA_DIR}" \
       --nphi "${STAGE2_NPHI}" \
@@ -396,14 +397,14 @@ if [[ "${SINGLE_STAGE_DISABLE_TARGET_LANE_SUCCESS_FILTER}" == "1" ]]; then
 fi
 
 run_probe single_stage_cold "${RESULTS_DIR}/single_stage_cold.json" \
-  python "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
+  "${PYTHON_BIN}" "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
     --platform "${SINGLE_STAGE_PLATFORM}" \
     "${single_stage_probe_args[@]}" \
     --case-artifacts-dir "${RESULTS_DIR}/artifacts/single_stage_cold" \
     --output-json "${RESULTS_DIR}/single_stage_cold.json" || OVERALL_RC=1
 
 run_probe single_stage_warm "${RESULTS_DIR}/single_stage_warm.json" \
-  python "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
+  "${PYTHON_BIN}" "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
     --platform "${SINGLE_STAGE_PLATFORM}" \
     "${single_stage_probe_args[@]}" \
     --case-artifacts-dir "${RESULTS_DIR}/artifacts/single_stage_warm" \
@@ -411,7 +412,7 @@ run_probe single_stage_warm "${RESULTS_DIR}/single_stage_warm.json" \
 
 run_probe boozer_well_conditioned_adjoint \
   "${RESULTS_DIR}/boozer_well_conditioned_adjoint.json" \
-  python "${REPO_ROOT}/benchmarks/hf_jobs/cuda_pytest_probe.py" \
+  "${PYTHON_BIN}" "${REPO_ROOT}/benchmarks/hf_jobs/cuda_pytest_probe.py" \
     --name boozer_well_conditioned_adjoint \
     --platform "${SINGLE_STAGE_PLATFORM}" \
     --output-json "${RESULTS_DIR}/boozer_well_conditioned_adjoint.json" \
@@ -421,7 +422,7 @@ run_probe boozer_well_conditioned_adjoint \
 
 run_probe reduction_cancellation_stress \
   "${RESULTS_DIR}/reduction_cancellation_stress.json" \
-  python "${REPO_ROOT}/benchmarks/hf_jobs/cuda_pytest_probe.py" \
+  "${PYTHON_BIN}" "${REPO_ROOT}/benchmarks/hf_jobs/cuda_pytest_probe.py" \
     --name reduction_cancellation_stress \
     --platform "${SINGLE_STAGE_PLATFORM}" \
     --output-json "${RESULTS_DIR}/reduction_cancellation_stress.json" \
@@ -429,7 +430,7 @@ run_probe reduction_cancellation_stress \
     -q \
     tests/core/test_reductions.py::test_pairwise_and_compensated_reductions_match_cpu_gpu_on_cancellation_stress || OVERALL_RC=1
 
-python - "${RESULTS_DIR}" "${STAGE2_PLATFORM}" "${SINGLE_STAGE_PLATFORM}" "${REPO_ROOT}" "${EXPECTED_PROBES[@]}" <<'PY'
+"${PYTHON_BIN}" - "${RESULTS_DIR}" "${STAGE2_PLATFORM}" "${SINGLE_STAGE_PLATFORM}" "${REPO_ROOT}" "${EXPECTED_PROBES[@]}" <<'PY'
 import json
 import math
 import os

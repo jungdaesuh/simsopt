@@ -270,10 +270,10 @@ def test_traceable_iota_target_penalty_uses_runtime_scalar_constants(
     _assert_allclose(penalty, 0.125)
 
 
-def test_value_and_direct_coil_gradient_hostifies_objective_value(
+def test_value_and_direct_coil_gradient_keeps_objective_value_on_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Objective scalars should cross back to Python only via explicit device_get."""
+    """Direct-coil objective scalars should stay as JAX values at this helper."""
     calls = {"count": 0}
     original_host_scalar = soj._host_scalar
 
@@ -296,6 +296,7 @@ def test_value_and_direct_coil_gradient_hostifies_objective_value(
         jnp.asarray([0.0, 0.0], dtype=jnp.float64),
     )
 
-    assert calls["count"] == 1
-    assert value == pytest.approx(3.5)
+    assert calls["count"] == 0
+    assert isinstance(value, jax.Array)
+    _assert_allclose(value, 3.5)
     _assert_allclose(gradient, [2.0, -3.0], dtype=float)

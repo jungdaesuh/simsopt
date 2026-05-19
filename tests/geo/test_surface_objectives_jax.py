@@ -1259,6 +1259,28 @@ def test_direct_coil_value_helpers_keep_value_as_jax_scalar():
     np.testing.assert_allclose(np.asarray(gradient), np.asarray([3.0, -1.0]))
 
 
+def test_legacy_boozer_transpose_explicitly_hostifies_rhs_under_transfer_guard():
+    rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    recorded: dict[str, object] = {}
+
+    class LegacyAdjointState:
+        linearization_kind = "hessian"
+
+        def solve_transpose(self, rhs_host):
+            recorded["rhs"] = rhs_host
+            return rhs_host + 1.0
+
+    with jax.transfer_guard("disallow"):
+        solved = surfaceobjectives_module._solve_boozer_runtime_transpose(
+            LegacyAdjointState(),
+            rhs,
+        )
+
+    assert isinstance(recorded["rhs"], np.ndarray)
+    np.testing.assert_allclose(recorded["rhs"], np.asarray([1.0, -2.0]))
+    np.testing.assert_allclose(solved, np.asarray([2.0, -1.0]))
+
+
 def test_checked_boozer_linear_solve_rejects_factor_only_state():
     adjoint_state = types.SimpleNamespace(
         linearization_kind="exact_jacobian",

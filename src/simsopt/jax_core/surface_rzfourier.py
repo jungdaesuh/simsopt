@@ -12,6 +12,7 @@ autodiff would materialize an impractically large quadrature-by-dof tape.
 
 from __future__ import annotations
 
+from functools import partial
 from math import comb
 
 import jax
@@ -290,17 +291,22 @@ def _surface_rz_fourier_derivative_from_terms(
     )
 
 
-def _scatter_coefficients(
-    positions: np.ndarray,
+def _scatter_zero_like(reference: jax.Array, size: int) -> jax.Array:
+    zero = jnp.sum(lax.slice_in_dim(reference, 0, 0, axis=0))
+    return jnp.broadcast_to(zero, (int(size),))
+
+
+def _scatter_coefficients_impl(
+    positions: tuple[int, ...],
     dofs: jax.Array,
-    *,
     target_size: int,
     source_offset: int,
 ) -> jax.Array:
-    indices = runtime_device_put(positions, dtype=np.int32).reshape(-1, 1)
+    positions_array = np.asarray(positions, dtype=np.int32)
+    indices = runtime_device_put(positions_array, dtype=np.int32).reshape(-1, 1)
     start = int(source_offset)
-    values = lax.slice_in_dim(dofs, start, start + int(positions.size), axis=0)
-    base = _as_jax_float64(np.zeros(int(target_size), dtype=np.float64))
+    values = lax.slice_in_dim(dofs, start, start + int(positions_array.size), axis=0)
+    base = _scatter_zero_like(dofs, target_size)
     return lax.scatter(
         base,
         indices,
@@ -309,6 +315,105 @@ def _scatter_coefficients(
         indices_are_sorted=True,
         unique_indices=True,
         mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS,
+    )
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(0, 2, 3))
+def _scatter_coefficients_vjp_impl(
+    positions: tuple[int, ...],
+    dofs: jax.Array,
+    target_size: int,
+    source_offset: int,
+) -> jax.Array:
+    return _scatter_coefficients_impl(
+        positions,
+        dofs,
+        target_size,
+        source_offset,
+    )
+
+
+def _scatter_coefficients_fwd(
+    positions: tuple[int, ...],
+    dofs: jax.Array,
+    target_size: int,
+    source_offset: int,
+) -> tuple[jax.Array, tuple[int]]:
+    return _scatter_coefficients_impl(
+        positions,
+        dofs,
+        target_size,
+        source_offset,
+    ), (int(dofs.shape[0]),)
+
+
+def _scatter_coefficients_bwd(
+    positions: tuple[int, ...],
+    target_size: int,
+    source_offset: int,
+    residual: tuple[int],
+    cotangent: jax.Array,
+) -> tuple[jax.Array]:
+    del target_size
+    (dofs_size,) = residual
+    positions_array = np.asarray(positions, dtype=np.int32)
+    columns = np.arange(
+        int(source_offset),
+        int(source_offset) + int(positions_array.size),
+        dtype=np.int32,
+    )
+    updates = jnp.take(
+        cotangent,
+        runtime_device_put(positions_array, dtype=np.int32),
+        axis=0,
+    )
+    base = _scatter_zero_like(cotangent, dofs_size)
+    return (
+        lax.scatter(
+            base,
+            runtime_device_put(columns, dtype=np.int32).reshape(-1, 1),
+            updates,
+            _SCATTER_SET_DIMS_1D,
+            indices_are_sorted=True,
+            unique_indices=True,
+            mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS,
+        ),
+    )
+
+
+_scatter_coefficients_vjp_impl.defvjp(
+    _scatter_coefficients_fwd,
+    _scatter_coefficients_bwd,
+)
+
+
+def _scatter_coefficients_raw(
+    positions: np.ndarray,
+    dofs: jax.Array,
+    *,
+    target_size: int,
+    source_offset: int,
+) -> jax.Array:
+    return _scatter_coefficients_impl(
+        tuple(int(position) for position in positions),
+        dofs,
+        int(target_size),
+        int(source_offset),
+    )
+
+
+def _scatter_coefficients(
+    positions: np.ndarray,
+    dofs: jax.Array,
+    *,
+    target_size: int,
+    source_offset: int,
+) -> jax.Array:
+    return _scatter_coefficients_vjp_impl(
+        tuple(int(position) for position in positions),
+        dofs,
+        int(target_size),
+        int(source_offset),
     )
 
 
@@ -339,6 +444,7 @@ def _coefficients_from_dofs(
     mpol: int,
     ntor: int,
     stellsym: bool,
+    use_custom_vjp: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     coeff_shape = (mpol + 1, 2 * ntor + 1)
     flat_size = coeff_shape[0] * coeff_shape[1]
@@ -356,10 +462,13 @@ def _coefficients_from_dofs(
     rc_count = int(include_positions.size)
     tail_count = int(exclude_positions.size)
     dofs = _as_jax_float64(dofs)
+    scatter_coefficients = (
+        _scatter_coefficients if use_custom_vjp else _scatter_coefficients_raw
+    )
 
     def scatter_block(positions: np.ndarray, source_offset: int) -> jax.Array:
         return jnp.reshape(
-            _scatter_coefficients(
+            scatter_coefficients(
                 positions,
                 dofs,
                 target_size=flat_size,
@@ -371,9 +480,8 @@ def _coefficients_from_dofs(
     rc = scatter_block(include_positions, 0)
     if stellsym:
         zs = scatter_block(exclude_positions, rc_count)
-        zero = jnp.reshape(
-            _as_jax_float64(np.zeros(flat_size, dtype=np.float64)),
-            coeff_shape,
+        zero = lax.stop_gradient(
+            jnp.reshape(_scatter_zero_like(dofs, flat_size), coeff_shape)
         )
         return rc, zero, zero, zs
 
@@ -402,12 +510,14 @@ def surface_rz_fourier_spec_from_dofs(
     ntor: int,
     nfp: int,
     stellsym: bool,
+    use_custom_vjp: bool = False,
 ) -> SurfaceRZFourierSpec:
     rc, rs, zc, zs = _coefficients_from_dofs(
         dofs,
         mpol=mpol,
         ntor=ntor,
         stellsym=stellsym,
+        use_custom_vjp=use_custom_vjp,
     )
     return make_surface_rzfourier_spec(
         rc=rc,
@@ -422,7 +532,10 @@ def surface_rz_fourier_spec_from_dofs(
 
 
 def _spec_from_dofs(
-    spec: SurfaceRZFourierSpec, dofs: jax.Array
+    spec: SurfaceRZFourierSpec,
+    dofs: jax.Array,
+    *,
+    use_custom_vjp: bool = False,
 ) -> SurfaceRZFourierSpec:
     return surface_rz_fourier_spec_from_dofs(
         dofs,
@@ -432,6 +545,7 @@ def _spec_from_dofs(
         ntor=spec.ntor,
         nfp=spec.nfp,
         stellsym=spec.stellsym,
+        use_custom_vjp=use_custom_vjp,
     )
 
 
@@ -460,7 +574,10 @@ def _evaluate_vjp_from_dofs(
 ):
     dofs_jax = _as_jax_float64(dofs)
     cotangent_jax = _as_jax_float64(cotangent)
-    _, pullback = jax.vjp(lambda x: evaluator(_spec_from_dofs(spec, x)), dofs_jax)
+    _, pullback = jax.vjp(
+        lambda x: evaluator(_spec_from_dofs(spec, x, use_custom_vjp=True)),
+        dofs_jax,
+    )
     return pullback(cotangent_jax)[0]
 
 

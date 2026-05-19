@@ -1581,6 +1581,21 @@ def test_surface_rzfourier_spec_from_dofs_round_trip():
     )
 
 
+def test_surface_rzfourier_stellsym_zero_blocks_ignore_nonfinite_rc():
+    spec = surface_rz_fourier_spec_from_dofs(
+        jax.device_put(np.asarray([np.inf, 7.0, 3.0], dtype=np.float64)),
+        quadpoints_phi=jnp.asarray([0.0], dtype=jnp.float64),
+        quadpoints_theta=jnp.asarray([0.0], dtype=jnp.float64),
+        mpol=1,
+        ntor=0,
+        nfp=1,
+        stellsym=True,
+    )
+
+    np.testing.assert_array_equal(np.asarray(jax.device_get(spec.rs)), np.zeros((2, 1)))
+    np.testing.assert_array_equal(np.asarray(jax.device_get(spec.zc)), np.zeros((2, 1)))
+
+
 def test_surface_rzfourier_dofs_round_trip_stellsym():
     _assert_dofs_round_trip(_make_surface(stellsym=True))
 
