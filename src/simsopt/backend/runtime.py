@@ -42,13 +42,16 @@ _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 # jaxlib 0.10; selecting it must hard-fail with a pointer to jax_mps_smoke.
 _DEPRECATED_PLATFORMS = {"metal": "mps"}
 _DEPRECATED_MODES = {"jax_metal_smoke": "jax_mps_smoke"}
+_MPS_PYPROJECT_EXTRA_INSTALL = "python -m pip install '.[JAX,JAX_MPS]'"
 _MPS_NOT_AVAILABLE_HINT = (
-    "jax-mps is not importable. Install with envs/jax-mps.yml (python=3.13) "
-    "or pick a cpu/cuda mode."
+    "jax-mps is not importable. Install the tracked pyproject extra with "
+    f"{_MPS_PYPROJECT_EXTRA_INSTALL} (python>=3.13 on darwin), then select "
+    "jax_mps_smoke; or pick a cpu/cuda mode."
 )
 _DEPRECATION_HINT_FMT = (
     "{name}={value!r} was removed (jax-metal is unmaintained upstream and "
-    "incompatible with jaxlib 0.10). Use {replacement!r} with envs/jax-mps.yml."
+    "incompatible with jaxlib 0.10). Use {replacement!r} after installing the "
+    f"tracked pyproject extra with {_MPS_PYPROJECT_EXTRA_INSTALL}."
 )
 
 _BACKEND_ENV = "SIMSOPT_BACKEND"
@@ -273,7 +276,7 @@ _MODE_POLICY_DEFAULTS = {
         "runtime_dtype": "float32",
         "host_dtype": "float32",
         "default_residency": "device",
-        "default_optimizer_backend": "ondevice",
+        "default_optimizer_backend": "scipy",
         "chunk_policy": "stable_default",
         "tolerance_tier": "smoke",
         "compilation_cache_policy": "optional_persistent",

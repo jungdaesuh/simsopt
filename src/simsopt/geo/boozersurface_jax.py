@@ -3368,10 +3368,9 @@ class BoozerSurfaceJAX(Optimizable):
             path is used; otherwise BoozerLS.
         options: dict of solver options (see ``_DEFAULT_OPTIONS_*``).
             For LS solves, the omitted ``optimizer_backend`` default follows the
-            active simsopt backend contract: ``"scipy"`` on CPU/reference and
-            ``"ondevice"`` on JAX backend modes. ``optimizer_backend="scipy"``
-            remains the trusted CPU/reference lane and
-            ``"ondevice"`` is the target on-device lane.
+            active simsopt backend policy. ``optimizer_backend="scipy"`` remains
+            the trusted CPU/reference lane and ``"ondevice"`` is the target
+            on-device lane.
             ``record_scipy_callback_trace=True`` records every SciPy adapter
             objective evaluation on the SciPy reference lane only.
             ``least_squares_algorithm="quasi-newton"``
@@ -5178,14 +5177,19 @@ class BoozerSurfaceJAX(Optimizable):
         require_target_backend_x64(optimizer_backend)
         if optimizer_backend != "ondevice":
             backend_config = get_backend_config()
-            if backend_config.backend == "jax":
+            policy_optimizer_backend = get_backend_policy().default_optimizer_backend
+            if (
+                backend_config.backend == "jax"
+                and optimizer_backend != policy_optimizer_backend
+            ):
                 raise RuntimeError(
                     "BoozerSurfaceJAX cannot use "
                     f"optimizer_backend={optimizer_backend!r} on the LS "
                     "reference solver lane while simsopt backend mode "
-                    f"{backend_config.mode!r} requires optimizer_backend='ondevice'. "
-                    "Select optimizer_backend='ondevice' or switch to the "
-                    "native_cpu reference backend."
+                    f"{backend_config.mode!r} requires "
+                    f"optimizer_backend={policy_optimizer_backend!r}. Select "
+                    f"optimizer_backend={policy_optimizer_backend!r} "
+                    "or switch to the native_cpu reference backend."
                 )
             raise_if_strict_jax_fallback(
                 component="BoozerSurfaceJAX",

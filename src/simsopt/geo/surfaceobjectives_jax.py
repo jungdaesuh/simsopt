@@ -980,11 +980,13 @@ def _curve_stacks_from_grouped_spec(coil_set_spec):
 
 
 def _curve_stacks_from_curve_tuple(coil_gammas):
-    grouped: dict[tuple[int, ...], list[jax.Array]] = {}
+    grouped: dict[tuple[tuple[int, ...], type], list[jax.Array]] = {}
     for gamma in coil_gammas:
         gamma_arr = _as_jax_float64(gamma).reshape((-1, 3))
-        key = tuple(int(dim) for dim in gamma_arr.shape)
-        grouped.setdefault(key, []).append(gamma_arr)
+        shape = tuple(int(dim) for dim in gamma_arr.shape)
+        # Do not stack traced primals with closed-over device arrays: JAX treats
+        # that as staging a constant and transfer_guard=disallow rejects it.
+        grouped.setdefault((shape, type(gamma_arr)), []).append(gamma_arr)
     return tuple(jnp.stack(gammas, axis=0) for gammas in grouped.values())
 
 

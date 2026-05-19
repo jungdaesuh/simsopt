@@ -284,6 +284,7 @@ def test_backend_resolves_explicit_mps_legacy_env_pair(monkeypatch):
         tolerance_tier="smoke",
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_mps_smoke",
+        default_optimizer_backend="scipy",
     )
     assert backend.requires_x64() is False
 
@@ -489,6 +490,7 @@ def test_mps_smoke_mode_policy_helpers(monkeypatch):
         tolerance_tier="smoke",
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_mps_smoke",
+        default_optimizer_backend="scipy",
     )
     assert backend.is_parity_mode() is False
     assert backend.requires_x64() is False
@@ -1754,7 +1756,7 @@ def test_probe_mps_plugin_raises_install_hint_when_child_missing(monkeypatch):
     monkeypatch.setattr(
         runtime_module.importlib.util, "find_spec", _missing_mps_child_find_spec
     )
-    with pytest.raises(RuntimeError, match="envs/jax-mps.yml"):
+    with pytest.raises(RuntimeError, match="JAX_MPS"):
         runtime_module._probe_mps_plugin()
     # Smoke: backend must remain usable for non-mps lanes through the same probe site.
     assert backend.get_backend_config().mode == "native_cpu"
@@ -1776,7 +1778,7 @@ def test_probe_mps_plugin_raises_install_hint_when_parent_missing(monkeypatch):
     monkeypatch.setattr(
         runtime_module.importlib.util, "find_spec", _missing_parent_find_spec
     )
-    with pytest.raises(RuntimeError, match="envs/jax-mps.yml"):
+    with pytest.raises(RuntimeError, match="JAX_MPS"):
         runtime_module._probe_mps_plugin()
     assert checked_specs == ["jax_plugins"]
     assert backend.get_backend_config().mode == "native_cpu"
@@ -1799,7 +1801,7 @@ def test_apply_jax_runtime_config_fails_fast_when_mps_plugin_missing(monkeypatch
     calls: list[tuple[str, object]] = []
     _install_fake_jax(monkeypatch, calls=calls)
     backend.set_backend("jax_mps_smoke", configure_runtime=False)
-    with pytest.raises(RuntimeError, match="envs/jax-mps.yml"):
+    with pytest.raises(RuntimeError, match="JAX_MPS"):
         backend.apply_jax_runtime_config()
     assert calls == []
 

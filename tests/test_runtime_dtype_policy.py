@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -179,6 +180,57 @@ def test_boozer_optimizer_backend_auto_uses_policy_default():
 
         assert native_options["optimizer_backend"] == "scipy"
         assert jax_options["optimizer_backend"] == "ondevice"
+
+        set_backend("jax_mps_smoke", configure_runtime=False)
+        mps_options = boozersurface_jax._normalize_solver_options(
+            {"optimizer_backend": "auto"},
+            "ls",
+        )
+
+        assert mps_options["optimizer_backend"] == "scipy"
+
+
+def test_boozer_ls_mps_smoke_default_avoids_target_x64_gate(monkeypatch):
+    from simsopt.geo import boozersurface_jax
+    from simsopt.geo import optimizer_jax as optimizer_module
+
+    with _temporary_backend("jax_mps_smoke"):
+        monkeypatch.setattr(optimizer_module, "_x64_enabled", lambda: False)
+
+        default_options = boozersurface_jax._normalize_solver_options({}, "ls")
+        auto_options = boozersurface_jax._normalize_solver_options(
+            {"optimizer_backend": "auto"},
+            "ls",
+        )
+
+        assert default_options["optimizer_backend"] == "scipy"
+        assert auto_options["optimizer_backend"] == "scipy"
+        optimizer_module.require_target_backend_x64(
+            default_options["optimizer_backend"]
+        )
+        optimizer_module.require_target_backend_x64(auto_options["optimizer_backend"])
+
+        with pytest.raises(RuntimeError, match="requires jax_enable_x64=True"):
+            optimizer_module.require_target_backend_x64("ondevice")
+
+
+def test_boozer_ls_mps_smoke_default_reaches_reference_method(monkeypatch):
+    from simsopt.geo import optimizer_jax as optimizer_module
+    from simsopt.geo.boozersurface_jax import BoozerSurfaceJAX, _normalize_solver_options
+
+    with _temporary_backend("jax_mps_smoke"):
+        monkeypatch.setattr(optimizer_module, "_x64_enabled", lambda: False)
+        options = _normalize_solver_options({}, "ls")
+        options["limited_memory"] = False
+        options["force_ondevice_limited_memory"] = False
+
+        with pytest.warns(RuntimeWarning, match="legacy adapter seam"):
+            method = BoozerSurfaceJAX._resolve_optimizer_method(
+                SimpleNamespace(options=options),
+                optimize_G=True,
+            )
+
+        assert method == "bfgs"
 
 
 def test_boozer_linearization_residency_uses_policy_default():

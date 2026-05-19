@@ -933,6 +933,11 @@ _ALL_JAX_BACKEND_MODES = (
     "jax_gpu_fast",
     "jax_mps_smoke",
 )
+_TARGET_ONDEVICE_JAX_BACKEND_MODES = (
+    "jax_cpu_parity",
+    "jax_gpu_parity",
+    "jax_gpu_fast",
+)
 _NON_ONDEVICE_LS_BACKENDS = ("scipy",)
 _NON_TARGET_MINIMIZE_METHODS = ("adam", "bfgs", "lbfgs")
 
@@ -4613,16 +4618,16 @@ class TestBoozerSurfaceJAXClass:
         assert res["optimizer_method"] == "bfgs-ondevice"
         assert res["success"] is True
 
-    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
+    @pytest.mark.parametrize("backend_mode", _TARGET_ONDEVICE_JAX_BACKEND_MODES)
     @pytest.mark.parametrize("optimizer_backend", ["scipy"])
-    def test_run_code_rejects_non_ondevice_ls_lane_in_any_jax_backend_mode(
+    def test_run_code_rejects_non_ondevice_ls_lane_in_target_jax_backend_modes(
         self,
         monkeypatch,
         request,
         backend_mode,
         optimizer_backend,
     ):
-        """Any JAX backend mode must keep Boozer LS on the ondevice lane."""
+        """Target JAX backend modes must keep Boozer LS on the ondevice lane."""
         booz = _make_mock_boozer_surface()
         enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
         booz.options["optimizer_backend"] = optimizer_backend
@@ -4633,9 +4638,48 @@ class TestBoozerSurfaceJAXClass:
         ):
             booz.run_code(iota=0.3, G=0.05)
 
-    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
+    def test_lbfgs_allows_mps_smoke_policy_default_reference_ls_lane(
+        self,
+        monkeypatch,
+        request,
+    ):
+        enable_non_strict_jax_backend(monkeypatch, request, mode="jax_mps_smoke")
+        booz = _make_mock_boozer_surface()
+        captured = {}
+
+        def fake_reference_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad=False,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
+            assert value_and_grad is True
+            captured["method"] = method
+            return _successful_minimize_result(x0)
+
+        monkeypatch.setattr(_bsj, "reference_minimize", fake_reference_minimize)
+
+        assert booz.options["optimizer_backend"] == "scipy"
+        with pytest.warns(RuntimeWarning, match="legacy adapter seam"):
+            res = booz.minimize_boozer_penalty_constraints_LBFGS(
+                iota=0.3,
+                G=0.05,
+                verbose=False,
+            )
+
+        assert captured["method"] == "bfgs"
+        assert res["optimizer_method"] == "bfgs"
+        assert res["success"] is True
+
+    @pytest.mark.parametrize("backend_mode", _TARGET_ONDEVICE_JAX_BACKEND_MODES)
     @pytest.mark.parametrize("optimizer_backend", _NON_ONDEVICE_LS_BACKENDS)
-    def test_resolve_optimizer_method_rejects_non_ondevice_ls_lane_in_any_jax_backend_mode(
+    def test_resolve_optimizer_method_rejects_non_ondevice_ls_lane_in_target_jax_backend_modes(
         self,
         monkeypatch,
         request,
