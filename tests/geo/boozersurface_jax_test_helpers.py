@@ -59,6 +59,16 @@ newton_polish = _opt.newton_polish
 newton_exact = _opt.newton_exact
 PRIVATE_OPTIMIZER_JAX_VERSION = _opt.PRIVATE_OPTIMIZER_JAX_VERSION
 
+
+def _mock_linear_solve_status(success=True):
+    return _opt._LinearSolveStatus(
+        success=jnp.asarray(success),
+        residual=jnp.asarray(0.0, dtype=jnp.float64),
+        residual_relative=jnp.asarray(0.0, dtype=jnp.float64),
+        iterations=jnp.asarray(0, dtype=jnp.int32),
+    )
+
+
 _boozer_penalty_objective = _bsj._boozer_penalty_objective
 _boozer_exact_coil_vjp = _bsj._boozer_exact_coil_vjp
 _boozer_ls_coil_vjp = _bsj._boozer_ls_coil_vjp

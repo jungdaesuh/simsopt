@@ -9,6 +9,9 @@ import pytest
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
+_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR = float(np.sqrt(np.finfo(np.float32).eps))
+_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP = 1e-3
+
 
 def _restore_backend_config(config) -> None:
     from simsopt.backend import set_backend
@@ -49,8 +52,12 @@ def test_jax_mps_smoke_policy_runtime_dtype():
         assert policy.runtime_dtype == "float32"
         assert policy.host_dtype == "float32"
         assert policy.tolerance_tier == "float32_smoke"
-        assert policy.linear_solve_tolerance_floor == pytest.approx(1e-6)
-        assert policy.linear_solve_tolerance_cap is None
+        assert policy.linear_solve_tolerance_floor == pytest.approx(
+            _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR
+        )
+        assert policy.linear_solve_tolerance_cap == pytest.approx(
+            _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP
+        )
 
 
 def test_jax_cpu_float32_smoke_policy_runtime_dtype():
@@ -62,8 +69,12 @@ def test_jax_cpu_float32_smoke_policy_runtime_dtype():
         assert policy.runtime_dtype == "float32"
         assert policy.host_dtype == "float32"
         assert policy.tolerance_tier == "float32_smoke"
-        assert policy.linear_solve_tolerance_floor == pytest.approx(1e-6)
-        assert policy.linear_solve_tolerance_cap is None
+        assert policy.linear_solve_tolerance_floor == pytest.approx(
+            _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR
+        )
+        assert policy.linear_solve_tolerance_cap == pytest.approx(
+            _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP
+        )
 
 
 def test_float64_modes_keep_float64_policy_dtype():

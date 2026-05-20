@@ -59,6 +59,7 @@ from simsopt.geo.surface_fourier_jax import (
     surface_gammadash2_from_dofs,
     stellsym_scatter_indices,
 )
+from .boozersurface_jax_test_helpers import _mock_linear_solve_status
 from .surface_test_helpers import get_exact_surface, get_surface
 
 _MPOL = 1
@@ -1250,7 +1251,7 @@ def test_operator_adjoint_signoff_gate_failed_solve_returns_nan_gradient(
 
 def test_checked_boozer_linear_solve_uses_public_status_boundary(monkeypatch):
     rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-    success_status = jnp.asarray(True)
+    success_status = _mock_linear_solve_status(True)
     host_bool_calls = []
 
     def host_bool(value):
@@ -1274,7 +1275,7 @@ def test_checked_boozer_linear_solve_uses_public_status_boundary(monkeypatch):
         np.asarray(solved),
         np.asarray(3.0 * rhs),
     )
-    assert host_bool_calls == [success_status]
+    assert host_bool_calls == [success_status.success]
 
 
 def test_checked_boozer_linear_solve_raises_on_failed_status():
@@ -1283,7 +1284,7 @@ def test_checked_boozer_linear_solve_raises_on_failed_status():
         linearization_kind="hessian",
         solve_transpose_with_status=lambda vector: (
             3.0 * vector,
-            jnp.asarray(False),
+            _mock_linear_solve_status(False),
         ),
     )
 
@@ -1378,7 +1379,7 @@ def test_exact_batched_adjoint_solves_each_rhs_column_via_operator():
 
     def solve_transpose_with_status(rhs):
         calls.append(np.asarray(rhs, dtype=np.float64))
-        return 2.0 * rhs, jnp.asarray(True)
+        return 2.0 * rhs, _mock_linear_solve_status(True)
 
     adjoint_state = types.SimpleNamespace(
         linearization_kind="exact_jacobian",
@@ -1440,7 +1441,7 @@ def test_traceable_solve_exact_linearization_uses_operator_with_factors_present(
             np.asarray(residual_fn(x)),
             np.asarray(solved_x + coil_set_spec),
         )
-        return solve_rhs + 1.0, jnp.asarray(True)
+        return solve_rhs + 1.0, _mock_linear_solve_status(True)
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module._optimizer_jax,
@@ -1556,7 +1557,7 @@ def test_traceable_exact_warmstart_prediction_uses_operator_solve(monkeypatch):
             np.asarray(residual_fn(x)),
             np.asarray(baseline_x + baseline_coil_dofs),
         )
-        return rhs, jnp.asarray(True)
+        return rhs, _mock_linear_solve_status(True)
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module._optimizer_jax,
@@ -3223,7 +3224,7 @@ def test_iotas_jax_exact_wrapper_gradient_matches_dense_projection_unit(
 
     def solve_transpose_with_status(rhs):
         np.testing.assert_allclose(np.asarray(rhs), rhs_np)
-        return jnp.linalg.solve(A.T, rhs), jnp.asarray(True)
+        return jnp.linalg.solve(A.T, rhs), _mock_linear_solve_status(True)
 
     adjoint_state = types.SimpleNamespace(
         linearization_kind="exact_jacobian",
@@ -7202,7 +7203,7 @@ def test_major_radius_jax_value_and_native_adjoint_gradient():
         linearization_kind="hessian",
         solve_transpose_with_status=lambda rhs: (
             2.0 * rhs,
-            jnp.asarray(True),
+            _mock_linear_solve_status(True),
         ),
         project_coil_adjoint_derivative=lambda _adjoint: (
             surfaceobjectives_module.Derivative(
@@ -7354,7 +7355,7 @@ def test_major_radius_jax_re_solve_directional_finite_difference(
                 linearization_kind=linearization_kind,
                 solve_transpose_with_status=lambda rhs: (
                     rhs,
-                    jnp.asarray(True),
+                    _mock_linear_solve_status(True),
                 ),
                 stream_group_vjps=lambda adjoint: iter(((adjoint, (0,)),)),
             )

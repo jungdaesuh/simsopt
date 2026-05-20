@@ -19,6 +19,7 @@ from .boozersurface_jax_test_helpers import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     _bsj,
     _make_mock_boozer_surface,
+    _mock_linear_solve_status,
     _opt,
     _patch_newton_polish_runner,
     _soj,
@@ -42,10 +43,13 @@ def test_solve_boozer_adjoint_rejects_factor_only_runtime_state():
 def test_solve_boozer_adjoint_raises_on_failed_operator_runtime():
     adjoint_state = types.SimpleNamespace(
         linearization_kind="hessian",
-        solve_transpose_with_status=lambda rhs: (rhs, False),
+        solve_transpose_with_status=lambda rhs: (
+            rhs,
+            _mock_linear_solve_status(False),
+        ),
     )
 
-    with pytest.raises(RuntimeError, match="operator-backed runtime path"):
+    with pytest.raises(RuntimeError, match="Boozer adjoint linear solve failed"):
         _soj._solve_boozer_adjoint(adjoint_state, jnp.ones((2,), dtype=jnp.float64))
 
 
@@ -105,17 +109,6 @@ def test_matrix_rhs_linear_operators_apply_columns():
     np.testing.assert_allclose(
         np.asarray(jacobian_operator["transpose_matvec"](rhs)),
         np.asarray(A.T @ rhs),
-        rtol=1e-12,
-        atol=1e-12,
-    )
-
-    least_squares_operator = _opt._least_squares_normal_operator(
-        lambda y: A @ y - jnp.asarray([0.1, -0.2, 0.3], dtype=jnp.float64),
-        x,
-    )
-    np.testing.assert_allclose(
-        np.asarray(least_squares_operator["matvec"](rhs)),
-        np.asarray(A.T @ (A @ rhs)),
         rtol=1e-12,
         atol=1e-12,
     )
@@ -2205,7 +2198,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         def exact_operator_solve(_matvec, rhs, *, tol):
             del tol
             observed["calls"] += 1
-            return rhs, jnp.asarray(True)
+            return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _opt,
@@ -2237,6 +2230,41 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert bool(result["success"]) is True
         assert bool(result["hessian_materialized"]) is True
         assert observed["calls"] == 1
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_accepts_finite_descent_step_with_failed_status(
+        self, monkeypatch
+    ):
+        """Traceable Newton should match the nontraceable inexact-step contract."""
+
+        def finite_descent_step_failed_status(_matvec, rhs, *, tol):
+            del _matvec, tol
+            return rhs, _mock_linear_solve_status(False)
+
+        monkeypatch.setattr(
+            _opt,
+            "_solve_square_array_system_operator_only",
+            finite_descent_step_failed_status,
+        )
+        _opt._make_traceable_newton_polish_runner.cache_clear()
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=1,
+            tol=1e-12,
+            stab=0.0,
+            materialize_hessian=True,
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(result["x"]),
+            np.zeros_like(np.asarray(x0)),
+            atol=1e-12,
+        )
+        assert bool(result["success"]) is True
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME

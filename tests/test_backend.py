@@ -27,6 +27,7 @@ _BACKEND_MODULE_NAMES = (
 )
 _MISSING_MODULE = object()
 _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR = float(np.sqrt(np.finfo(np.float32).eps))
+_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP = 1e-3
 
 
 def _snapshot_backend_modules() -> dict[str, object]:
@@ -300,7 +301,7 @@ def test_backend_resolves_explicit_mps_legacy_env_pair(monkeypatch):
         provenance_label="jax_mps_smoke",
         default_optimizer_backend="scipy",
         linear_solve_tolerance_floor=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
-        linear_solve_tolerance_cap=None,
+        linear_solve_tolerance_cap=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
     )
     assert backend.requires_x64() is False
 
@@ -508,7 +509,7 @@ def test_mps_smoke_mode_policy_helpers(monkeypatch):
         provenance_label="jax_mps_smoke",
         default_optimizer_backend="scipy",
         linear_solve_tolerance_floor=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
-        linear_solve_tolerance_cap=None,
+        linear_solve_tolerance_cap=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
     )
     assert backend.is_parity_mode() is False
     assert backend.requires_x64() is False
@@ -541,7 +542,7 @@ def test_cpu_float32_smoke_mode_policy_helpers(monkeypatch):
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_cpu_float32_smoke",
         linear_solve_tolerance_floor=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
-        linear_solve_tolerance_cap=None,
+        linear_solve_tolerance_cap=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
     )
     assert backend.is_parity_mode() is False
     assert backend.requires_x64() is False
@@ -626,8 +627,16 @@ def test_gpu_dense_square_operator_budget_boundary_contract(monkeypatch, mode):
         ("jax_cpu_parity", 1e-14, 1e-10),
         ("jax_gpu_fast", 1e-14, 1e-10),
         ("jax_gpu_parity", 1e-14, 1e-10),
-        ("jax_cpu_float32_smoke", _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR, None),
-        ("jax_mps_smoke", _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR, None),
+        (
+            "jax_cpu_float32_smoke",
+            _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
+            _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
+        ),
+        (
+            "jax_mps_smoke",
+            _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
+            _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
+        ),
     ),
 )
 def test_policy_defaults_pin_linear_solve_tolerance_contract(

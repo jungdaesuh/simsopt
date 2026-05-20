@@ -3856,40 +3856,6 @@ class BoozerSurfaceJAX(Optimizable):
         # On the supported JAX/CUDA LS lane, runtime adjoints stay
         # operator-backed even if a dense Hessian/PLU was materialized for
         # diagnostics or parity probes.
-        if linearization_kind == "least_squares_normal":
-            residual_fn = self._make_penalty_residual_with(
-                optimize_G,
-                solved_state.weight_inv_modB,
-                coil_set_spec=self.coil_set_spec,
-                hostify_inputs=False,
-                decision_split_mode="jvp",
-            )
-            operator = _optimizer_jax._least_squares_normal_operator(residual_fn, x)
-
-            def solve_forward(rhs):
-                return _optimizer_jax._solve_least_squares_normal_system(
-                    residual_fn,
-                    x,
-                    rhs,
-                    tol=tol_host,
-                )
-
-            def solve_forward_with_status(rhs):
-                return _optimizer_jax._solve_least_squares_normal_system_with_status(
-                    residual_fn,
-                    x,
-                    rhs,
-                    tol=tol_host,
-                )
-
-            return pack_callbacks(
-                operator["matvec"],
-                operator["transpose_matvec"],
-                solve_forward,
-                solve_forward_with_status=solve_forward_with_status,
-                solve_transpose_with_status=solve_forward_with_status,
-            )
-
         if linearization_kind == "hessian":
             objective_fn = self._make_penalty_objective_with(
                 optimize_G,

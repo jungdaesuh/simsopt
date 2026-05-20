@@ -70,6 +70,7 @@ from .boozersurface_jax_test_helpers import (
     _make_mock_boozer_surface,
     _make_mock_coils,
     _make_simple_torus_coeffs,
+    _mock_linear_solve_status,
     _opt,
     _patch_newton_polish_runner,
     _simple_torus_geometry_values,
@@ -1880,58 +1881,6 @@ class TestOptimizerAdapter:
             "exact_factorization_backend",
             "exact_condition_estimate",
         )
-
-    def test_least_squares_normal_system_fails_closed_on_nonfinite_operator_solve(
-        self, monkeypatch
-    ):
-        """LS adjoint solves should not cascade into a dense normal fallback."""
-        x = jnp.asarray([1.0, -1.0], dtype=jnp.float64)
-        rhs = jnp.asarray([2.0, -3.0], dtype=jnp.float64)
-        operator_calls = []
-        dense_calls = []
-
-        monkeypatch.setattr(
-            _opt,
-            "_least_squares_normal_operator",
-            lambda _residual_fn, _x: {
-                "flat_residual_fn": "flat-residual-marker",
-                "matvec": lambda vec: vec,
-                "transpose_matvec": lambda vec: vec,
-            },
-        )
-
-        def fake_operator_solve(_matvec, solve_rhs, *, tol):
-            operator_calls.append((np.asarray(solve_rhs, dtype=float), float(tol)))
-            return jnp.full_like(solve_rhs, jnp.nan), False
-
-        def fake_materialize(flat_residual_fn, materialize_x):
-            dense_calls.append(
-                (flat_residual_fn, np.asarray(materialize_x, dtype=float))
-            )
-            return None, None, None, jnp.eye(2, dtype=jnp.float64)
-
-        monkeypatch.setattr(
-            _opt,
-            "_solve_square_array_system_operator_only",
-            fake_operator_solve,
-        )
-        monkeypatch.setattr(
-            _opt,
-            "_materialize_dense_least_squares_linearization",
-            fake_materialize,
-        )
-
-        solved, success = _opt._solve_least_squares_normal_system_with_status(
-            lambda trial_x: trial_x,
-            x,
-            rhs,
-            tol=1.0e-10,
-        )
-
-        assert len(operator_calls) == 1
-        assert dense_calls == []
-        assert bool(np.asarray(success)) is False
-        assert not np.any(np.isfinite(np.asarray(solved)))
 
     @staticmethod
     def _patch_newton_polish_linear_step(monkeypatch, step, residual):
@@ -5616,7 +5565,7 @@ class TestBoozerSurfaceJAXClass:
             del tol
             stab_value = float(np.asarray(stab))
             recorded_stabs.append(stab_value)
-            return rhs / (1.0 + stab_value), True
+            return rhs / (1.0 + stab_value), _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
@@ -5628,7 +5577,7 @@ class TestBoozerSurfaceJAXClass:
         rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         solved, success = adjoint_state.solve_transpose_with_status(rhs)
 
-        assert bool(np.asarray(success)) is True
+        assert bool(np.asarray(success.success)) is True
         np.testing.assert_allclose(recorded_stabs, np.asarray([1.0e-4]))
         np.testing.assert_allclose(
             np.asarray(adjoint_state.apply_transpose(solved)),
@@ -5740,7 +5689,7 @@ class TestBoozerSurfaceJAXClass:
             tol,
         ):
             del stab, tol
-            return rhs, jnp.asarray(True)
+            return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
@@ -5755,10 +5704,10 @@ class TestBoozerSurfaceJAXClass:
 
         adjoint_state = booz.get_adjoint_runtime_state()
         rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-        solved, success = adjoint_state.solve_transpose_with_status(rhs)
+        solved, status = adjoint_state.solve_transpose_with_status(rhs)
 
-        assert isinstance(success, jax.Array)
-        assert bool(original_asarray(success)) is True
+        assert isinstance(status.success, jax.Array)
+        assert bool(original_asarray(status.success)) is True
         np.testing.assert_allclose(
             original_asarray(adjoint_state.apply_transpose(solved)),
             original_asarray(rhs),
@@ -5777,71 +5726,6 @@ class TestBoozerSurfaceJAXClass:
 
         assert all(factor.device.platform == "cpu" for factor in hosted)
         np.testing.assert_allclose(np.asarray(hosted[0]), np.ones((2, 2)))
-
-    def test_get_adjoint_runtime_state_ls_normal_uses_host_tolerance_boundary(
-        self, monkeypatch
-    ):
-        """LS-normal runtime solves must not pass device scalars into eager helpers."""
-        booz = _make_mock_boozer_surface()
-        booz.need_to_run_code = False
-        booz.options["newton_tol"] = 1e-8
-        booz.res = {
-            "success": True,
-            "primal_success": True,
-            "adjoint_linear_solve_available": True,
-            "sdofs": _runtime_sdofs_for(booz),
-            "iota": jnp.asarray(0.3, dtype=jnp.float64),
-            "G": jnp.asarray(0.05, dtype=jnp.float64),
-            "weight_inv_modB": True,
-            "linearization_kind": "least_squares_normal",
-            "PLU": tuple(jnp.eye(booz.x.size, dtype=jnp.float64) for _ in range(3)),
-            "dense_linear_solve_factors_available": True,
-            "vjp_groups": lambda *_args, **_kwargs: iter(()),
-        }
-
-        monkeypatch.setattr(
-            _bsj._optimizer_jax,
-            "_least_squares_normal_operator",
-            lambda _residual_fn, _x: {
-                "matvec": lambda vec: vec,
-                "transpose_matvec": lambda vec: vec,
-            },
-        )
-
-        def fake_solve_least_squares_normal_system_with_status(
-            _residual_fn,
-            _x,
-            rhs,
-            *,
-            tol,
-        ):
-            tol_value = float(np.asarray(tol))
-            assert tol_value == pytest.approx(booz._linear_solve_tolerance())
-            return rhs, jnp.asarray(True)
-
-        monkeypatch.setattr(
-            _bsj._optimizer_jax,
-            "_solve_least_squares_normal_system_with_status",
-            fake_solve_least_squares_normal_system_with_status,
-        )
-
-        original_asarray = _patch_boozer_asarray_rejecting_jax_arrays(
-            monkeypatch,
-            "unexpected implicit device scalar materialization",
-        )
-
-        adjoint_state = booz.get_adjoint_runtime_state()
-        rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-        solved, success = adjoint_state.solve_transpose_with_status(rhs)
-
-        assert bool(original_asarray(success)) is True
-        np.testing.assert_allclose(original_asarray(solved), original_asarray(rhs))
-        np.testing.assert_allclose(
-            original_asarray(adjoint_state.apply_transpose(solved)),
-            original_asarray(rhs),
-            rtol=0.0,
-            atol=1e-12,
-        )
 
     def test_get_adjoint_runtime_state_exact_jacobian_uses_host_tolerance_boundary(
         self, monkeypatch
@@ -5895,7 +5779,7 @@ class TestBoozerSurfaceJAXClass:
             del transpose
             tol_value = float(np.asarray(tol))
             assert tol_value == pytest.approx(booz._linear_solve_tolerance())
-            return rhs, jnp.asarray(True)
+            return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
@@ -6051,7 +5935,7 @@ class TestBoozerSurfaceJAXClass:
 
         def fake_operator_solve(_residual_fn, _x, rhs, *, transpose, tol):
             operator_calls.append((bool(transpose), float(tol)))
-            return rhs + 1.0, jnp.asarray(True)
+            return rhs + 1.0, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
@@ -9696,7 +9580,7 @@ class TestBuildBoozerSurfaceRuntimeState:
             "_solve_jacobian_system_with_status",
             lambda _residual_fn, _x, rhs, *, transpose, tol: (
                 rhs,
-                jnp.asarray(True),
+                _mock_linear_solve_status(True),
             ),
         )
 

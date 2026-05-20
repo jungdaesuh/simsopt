@@ -1517,7 +1517,7 @@ def _gmres_solve_least_squares_system(
             v,
         )
 
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_host_to_device("allow"):
         step, _ = gmres(
             matvec,
             grad,
@@ -3049,7 +3049,7 @@ def _run_operator_gmres(matvec, rhs, *, tol):
     # host-to-device conversions even when the caller provides fully device-
     # resident operands. Keep the allowance scoped to the library call so the
     # surrounding operator path remains strict-transfer clean.
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_host_to_device("allow"):
         return gmres(
             matvec,
             rhs,
@@ -3121,9 +3121,7 @@ def _linear_solve_residual_tolerance(rhs, tol):
 
 
 def _linear_solve_status_success(status):
-    # Some callback lanes still emit a bare success array rather than a
-    # ``_LinearSolveStatus`` NamedTuple; accept both for now.
-    return status.success if hasattr(status, "success") else status
+    return status.success
 
 
 def _linear_solve_iteration_count(info):
@@ -3314,7 +3312,7 @@ def _hager_higham_inverse_1_norm_estimate(
     # flag as a violation. Mirror the ``_run_operator_gmres`` allowance:
     # scope the relaxation to the library call so the surrounding solve
     # path stays strict-transfer clean.
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_host_to_device("allow"):
         _, estimate = lax.fori_loop(0, int(iterations), body_fun, (x0, zero))
     return estimate
 
@@ -3513,65 +3511,6 @@ def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
         residual=jnp.max(column_statuses.residual),
         residual_relative=jnp.max(column_statuses.residual_relative),
         iterations=jnp.max(column_statuses.iterations),
-    )
-
-
-def _least_squares_normal_operator(residual_fn, x):
-    flat_residual_fn = jax.jit(_flattened_residual_output(residual_fn))
-    _, pullback = jax.vjp(flat_residual_fn, x)
-    first_leaf = _require_tree_first_leaf(
-        x,
-        detail="Least-squares linear operator state must contain at least one leaf.",
-    )
-    dtype = first_leaf.dtype
-    decision_size = sum(
-        int(np.asarray(jnp.asarray(leaf).size)) for leaf in jax.tree.leaves(x)
-    )
-
-    def matvec_column(v):
-        return _least_squares_matvec(flat_residual_fn, x, pullback, v)
-
-    def matvec(v):
-        return _apply_column_batched_operator(matvec_column, v)
-
-    return {
-        "kind": "least_squares_normal",
-        "shape": (decision_size, decision_size),
-        "dtype": dtype,
-        "flat_residual_fn": flat_residual_fn,
-        "matvec": matvec,
-        "transpose_matvec": matvec,
-    }
-
-
-def _solve_least_squares_normal_system(
-    residual_fn,
-    x,
-    rhs,
-    *,
-    tol,
-):
-    solution, _ = _solve_least_squares_normal_system_with_status(
-        residual_fn,
-        x,
-        rhs,
-        tol=tol,
-    )
-    return solution
-
-
-def _solve_least_squares_normal_system_with_status(
-    residual_fn,
-    x,
-    rhs,
-    *,
-    tol,
-):
-    operator = _least_squares_normal_operator(residual_fn, x)
-    return _solve_square_array_system_operator_only(
-        operator["matvec"],
-        rhs,
-        tol=tol,
     )
 
 
@@ -3918,7 +3857,7 @@ def _make_traceable_newton_polish_runner(
             def matvec(v):
                 return hvp_fn(state["x"], v) + stab_value * v
 
-            dx, linear_status = _solve_square_array_system_operator_only(
+            dx, _ = _solve_square_array_system_operator_only(
                 matvec,
                 state["grad"],
                 tol=linear_tol,
@@ -3931,9 +3870,7 @@ def _make_traceable_newton_polish_runner(
                 state["grad"],
                 state["norm"],
             )
-            accepted = (
-                _linear_solve_status_success(linear_status) & candidate["accepted"]
-            )
+            accepted = candidate["accepted"]
             next_nit = state["nit"] + 1
             if progress_callback_enabled:
                 lax.cond(
