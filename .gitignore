@@ -71,3 +71,9 @@ tests/boundary*
 # Version file
 src/simsopt/_version.py
 
+# Root-level local diagnostics
+/jax_mem_test.py
+/objective_runtimes_semilogy.png
+/taylor_errors.png
+/test_coil.vtu
+/.gpd/state.json.bak

@@ -230,17 +230,18 @@ def place_active_replicated(value, *, dtype=None, mode: str | None = None):
 
 
 def _place_leading_axis_arrays(arrays, *, mesh: Mesh, axis_name: str):
-    with jax.transfer_guard("allow"):
-        return tuple(
-            _place_array(
-                array,
-                NamedSharding(
-                    mesh,
-                    _partition_spec_for_axis(axis_name, int(jnp.ndim(array))),
-                ),
+    with jax.transfer_guard_host_to_device("allow"):
+        with jax.transfer_guard_device_to_device("allow"):
+            return tuple(
+                _place_array(
+                    array,
+                    NamedSharding(
+                        mesh,
+                        _partition_spec_for_axis(axis_name, int(jnp.ndim(array))),
+                    ),
+                )
+                for array in arrays
             )
-            for array in arrays
-        )
 
 
 def _array_leaf_ndim(leaf) -> int | None:

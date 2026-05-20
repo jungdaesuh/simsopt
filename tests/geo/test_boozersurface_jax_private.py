@@ -633,6 +633,8 @@ def test_bfgs_curvature_terms_reject_bad_curvature_updates():
     s_k = jnp.asarray([1.0, 0.0], dtype=jnp.float64)
     y_negative = jnp.asarray([-1.0e-3, 0.0], dtype=jnp.float64)
     y_near_orthogonal = jnp.asarray([1.0e-20, 1.0], dtype=jnp.float64)
+    s_k_float32 = jnp.asarray([1.0, 0.0], dtype=jnp.float32)
+    y_float32_boundary = jnp.asarray([1.0e-5, 1.0], dtype=jnp.float32)
 
     _, _, negative_valid, _ = _private_bfgs._bfgs_curvature_terms(
         s_k,
@@ -644,9 +646,15 @@ def test_bfgs_curvature_terms_reject_bad_curvature_updates():
         y_near_orthogonal,
         x_dtype=s_k.dtype,
     )
+    _, _, float32_boundary_valid, _ = _private_bfgs._bfgs_curvature_terms(
+        s_k_float32,
+        y_float32_boundary,
+        x_dtype=s_k_float32.dtype,
+    )
 
     assert bool(negative_valid) is False
     assert bool(near_orthogonal_valid) is False
+    assert bool(float32_boundary_valid) is False
 
 
 # ---------------------------------------------------------------------------

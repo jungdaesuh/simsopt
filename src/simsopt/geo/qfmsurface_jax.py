@@ -12,7 +12,7 @@ from .._core.jax_host_boundary import (
     host_scalar as _host_scalar,
 )
 from ..backend import is_jax_backend
-from ..jax_core._math_utils import as_jax_float64
+from ..jax_core._math_utils import as_jax_float64, runtime_jnp_dtype
 from ..jax_core.qfm_solver import (
     qfm_augmented_lagrangian_solve_jax,
     qfm_label_jax_from_dofs,
@@ -70,17 +70,24 @@ class QfmSurfaceJAX:
             return "toroidal_flux", int(self.label.idx)
         raise TypeError(f"Unsupported QFM label object {type(self.label).__name__!r}.")
 
-    def _coil_set_spec(self):
-        return self.biotsavart.coil_set_spec_from_dofs(
-            jnp.asarray(self.biotsavart.x, dtype=jnp.float64)
+    def _coil_set_spec(self, biotsavart):
+        return biotsavart.coil_set_spec_from_dofs(
+            jnp.asarray(biotsavart.x, dtype=runtime_jnp_dtype())
         )
 
     def _solve_inputs(self):
         label, toroidal_flux_idx = self._label_contract()
+        label_biotsavart = (
+            self.label.biotsavart
+            if isinstance(self.label, ToroidalFlux)
+            else self.biotsavart
+        )
         return (
             self.surface.surface_spec(),
+            self.label.surface.surface_spec(),
             as_jax_float64(self.surface.get_dofs()),
-            self._coil_set_spec(),
+            self._coil_set_spec(self.biotsavart),
+            self._coil_set_spec(label_biotsavart),
             label,
             toroidal_flux_idx,
         )
@@ -89,14 +96,22 @@ class QfmSurfaceJAX:
         """Return the label residual objective and optional JAX gradient."""
         if derivatives not in (0, 1):
             raise ValueError("derivatives must be 0 or 1.")
-        spec, _dofs, coil_set_spec, label, toroidal_flux_idx = self._solve_inputs()
+        (
+            _spec,
+            label_spec,
+            _dofs,
+            _coil_set_spec,
+            label_coil_set_spec,
+            label,
+            toroidal_flux_idx,
+        ) = self._solve_inputs()
         dofs = as_jax_float64(x)
 
         def value_fn(surface_dofs):
             label_value = qfm_label_jax_from_dofs(
-                spec,
+                label_spec,
                 surface_dofs,
-                coil_set_spec,
+                label_coil_set_spec,
                 label=label,
                 toroidal_flux_idx=toroidal_flux_idx,
             )
@@ -111,7 +126,15 @@ class QfmSurfaceJAX:
         """Return the QFM residual and optional JAX gradient."""
         if derivatives not in (0, 1):
             raise ValueError("derivatives must be 0 or 1.")
-        spec, _dofs, coil_set_spec, _label, _toroidal_flux_idx = self._solve_inputs()
+        (
+            spec,
+            _label_spec,
+            _dofs,
+            coil_set_spec,
+            _label_coil_set_spec,
+            _label,
+            _toroidal_flux_idx,
+        ) = self._solve_inputs()
         dofs = as_jax_float64(x)
 
         def value_fn(surface_dofs):
@@ -127,7 +150,15 @@ class QfmSurfaceJAX:
         """Return the QFM penalty objective and optional JAX gradient."""
         if derivatives not in (0, 1):
             raise ValueError("derivatives must be 0 or 1.")
-        spec, _dofs, coil_set_spec, label, toroidal_flux_idx = self._solve_inputs()
+        (
+            spec,
+            label_spec,
+            _dofs,
+            coil_set_spec,
+            label_coil_set_spec,
+            label,
+            toroidal_flux_idx,
+        ) = self._solve_inputs()
         dofs = as_jax_float64(x)
 
         def value_fn(surface_dofs):
@@ -136,6 +167,8 @@ class QfmSurfaceJAX:
                 surface_dofs,
                 coil_set_spec,
                 label=label,
+                label_spec=label_spec,
+                label_coil_set_spec=label_coil_set_spec,
                 targetlabel=self.targetlabel,
                 constraint_weight=constraint_weight,
                 toroidal_flux_idx=toroidal_flux_idx,
@@ -173,7 +206,15 @@ class QfmSurfaceJAX:
         optimizer: str = "bfgs",
     ) -> dict[str, object]:
         """Run the pure JAX QFM penalty solve and write final DOFs once."""
-        spec, dofs, coil_set_spec, label, toroidal_flux_idx = self._solve_inputs()
+        (
+            spec,
+            label_spec,
+            dofs,
+            coil_set_spec,
+            label_coil_set_spec,
+            label,
+            toroidal_flux_idx,
+        ) = self._solve_inputs()
         final_dofs, info = qfm_penalty_solve_jax(
             spec,
             coil_set_spec,
@@ -185,6 +226,8 @@ class QfmSurfaceJAX:
             tol=tol,
             optimizer=optimizer,
             toroidal_flux_idx=toroidal_flux_idx,
+            label_spec=label_spec,
+            label_coil_set_spec=label_coil_set_spec,
         )
         return self._penalty_result_dict(final_dofs, info)
 
@@ -209,7 +252,15 @@ class QfmSurfaceJAX:
         optimizer: str = "bfgs",
     ) -> dict[str, object]:
         """Run the pure JAX augmented-Lagrangian QFM solve."""
-        spec, dofs, coil_set_spec, label, toroidal_flux_idx = self._solve_inputs()
+        (
+            spec,
+            label_spec,
+            dofs,
+            coil_set_spec,
+            label_coil_set_spec,
+            label,
+            toroidal_flux_idx,
+        ) = self._solve_inputs()
         max_outer, inner_max_iter = _augmented_lagrangian_iteration_budget(maxiter)
         final_dofs, info = qfm_augmented_lagrangian_solve_jax(
             spec,
@@ -222,6 +273,8 @@ class QfmSurfaceJAX:
             tol=tol,
             optimizer=optimizer,
             toroidal_flux_idx=toroidal_flux_idx,
+            label_spec=label_spec,
+            label_coil_set_spec=label_coil_set_spec,
         )
         return self._augmented_result_dict(final_dofs, info)
 

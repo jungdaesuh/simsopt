@@ -172,6 +172,15 @@ def _gpmo_cpu_grid(seed: int = 2801) -> _GPMOCPUGrid:
     )
 
 
+def _small_rhs_gpmo_cpu_grid(seed: int = 2801) -> _GPMOCPUGrid:
+    grid = _gpmo_cpu_grid(seed=seed)
+    grid.b_obj = 1.0e-3 * grid.b_obj
+    grid.ATb = grid.A_obj.T @ grid.b_obj
+    grid.m = grid.m0.copy()
+    grid.m_proxy = grid.m0.copy()
+    return grid
+
+
 def _gpmo_pol_vectors(seed: int, ndipoles: int, n_vectors: int = 4) -> np.ndarray:
     rng = np.random.default_rng(seed)
     raw = rng.standard_normal(size=(ndipoles, n_vectors, 3))
@@ -577,6 +586,75 @@ def test_relax_and_split_jax_matches_cpu_after_multiple_outer_steps():
     np.testing.assert_allclose(
         np.asarray(result.m_proxy_history).reshape(n_outer, -1),
         np.asarray(cpu_m_proxy_history),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+
+
+def test_relax_and_split_jax_default_epsilon_matches_cpu_early_stop():
+    cpu_grid = _small_rhs_gpmo_cpu_grid(seed=2034)
+    jax_grid = PermanentMagnetGridJAX.from_cpu(_small_rhs_gpmo_cpu_grid(seed=2034))
+    nu = 5.0
+    reg_l1 = 0.04 / nu
+    n_steps = 4
+    n_outer = 4
+    cpu_grid.ATA_scale += 1.0 / nu
+    alpha = 2.0 * (1.0 - 1.0e-5) / cpu_grid.ATA_scale
+
+    _errors, cpu_m_history, cpu_m_proxy_history = relax_and_split(
+        cpu_grid,
+        max_iter=n_steps,
+        max_iter_RS=n_outer,
+        epsilon=0.0,
+        min_fb=0.0,
+        nu=nu,
+        reg_l1=reg_l1,
+        verbose=True,
+    )
+    result = relax_and_split_jax(
+        jax_grid,
+        alpha=alpha,
+        max_iter=n_steps,
+        max_iter_RS=n_outer,
+        nu=nu,
+        reg_l1=reg_l1,
+    )
+
+    assert len(cpu_m_history) == 1
+    assert len(cpu_m_proxy_history) == 1
+    np.testing.assert_allclose(
+        np.asarray(result.m),
+        np.asarray(cpu_grid.m).reshape(cpu_grid.ndipoles, 3),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.m_history[0]),
+        np.asarray(cpu_m_history[0]),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.m_proxy_history[0]).reshape(-1),
+        np.asarray(cpu_m_proxy_history[0]),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.m_history[1:]),
+        np.broadcast_to(
+            np.asarray(result.m_history[0]),
+            np.asarray(result.m_history[1:]).shape,
+        ),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.m_proxy_history[1:]),
+        np.broadcast_to(
+            np.asarray(result.m_proxy_history[0]),
+            np.asarray(result.m_proxy_history[1:]).shape,
+        ),
         rtol=_STATE_TRACE_RTOL,
         atol=_STATE_TRACE_ATOL,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import simsopt.geo.optimizer_jax_private._bfgs as _private_bfgs
 
 from conftest import enable_strict_jax_backend, host_array, host_scalar
 
@@ -17,6 +18,7 @@ from simsopt.geo.qfmsurface import QfmSurface
 from simsopt.geo.qfmsurface_jax import QfmSurfaceJAX
 from simsopt.geo.surfaceobjectives import Area, QfmResidual, ToroidalFlux, Volume
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+from simsopt.jax_core import qfm_solver as qfm_solver_module
 from simsopt.jax_core.qfm_solver import (
     QfmAugmentedLagrangianInfo,
     QfmPenaltySolveInfo,
@@ -104,6 +106,21 @@ def _make_test_qfm_xyz_volume_case():
 
 def _scaled_biotsavart(coils, scale: float):
     return BiotSavart([Coil(coil.curve, scale * coil.current) for coil in coils])
+
+
+def test_qfm_bfgs_curvature_floor_rejects_float32_boundary() -> None:
+    s = jnp.asarray([1.0, 0.0], dtype=jnp.float32)
+    y = jnp.asarray([1.0e-5, 1.0], dtype=jnp.float32)
+
+    qfm_valid = qfm_solver_module._bfgs_has_valid_curvature(s, y)
+    _, _, private_valid, _ = _private_bfgs._bfgs_curvature_terms(
+        s,
+        y,
+        x_dtype=s.dtype,
+    )
+
+    assert bool(qfm_valid) is False
+    assert bool(private_valid) is False
 
 
 def _cpu_label_constraint_value_and_grad(label, target: float, dofs: np.ndarray):
@@ -323,7 +340,7 @@ def test_qfm_augmented_lagrangian_meets_upstream_exact_acceptance() -> None:
         label_spec=jax_surface.surface_spec(),
         label_coil_set_spec=coil_set_spec,
         max_outer=3,
-        inner_max_iter=100,
+        inner_max_iter=200,
         tol=1e-8,
     )
 
@@ -379,7 +396,7 @@ def test_qfm_augmented_lagrangian_kkt_diagnostic_no_worse_than_host_slsqp() -> N
         label_spec=surface_spec,
         label_coil_set_spec=coil_set_spec,
         max_outer=3,
-        inner_max_iter=100,
+        inner_max_iter=200,
         tol=1e-8,
     )
 

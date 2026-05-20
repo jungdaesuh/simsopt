@@ -33,7 +33,7 @@ The plan treats MPS as a float32 smoke lane unless and until a separate FP32 pro
 
 - Float32 single-stage target-lane gradients fail closed with NaN sentinels (`surfaceobjectives_jax.py:3762-3769`) when the adjoint solve fails its success contract; the scalar objective stays finite because it reads cached baseline state.
 - The target LS Boozer path forces `linear_solve_factors=None` (`surfaceobjectives_jax.py:3484-3492, 4081`) and routes adjoint solves through operator GMRES on the normal equations (`optimizer_jax.py:3445-3481`), which squares conditioning; the CPU float32 smoke diagnosis shows this path fails the residual gate at the smoke fixture.
-- The current operator-GMRES success gate `||residual|| ≤ max(1e-12, 10·tol·||rhs||)` uses the effective Boozer linear-solve tolerance (`boozersurface_jax.py:3563-3585`). Float32 smoke currently has `linear_solve_tolerance_floor=1e-6` and `linear_solve_tolerance_cap=None` (`runtime.py:190-201`; `tests/test_runtime_dtype_policy.py:52-66`), so the smoke tolerance bottoms out at `1e-6` rather than being capped at `1e-6`.
+- The current operator-GMRES success gate `||residual|| ≤ max(1e-12, 10·tol·||rhs||)` uses the effective Boozer linear-solve tolerance (`boozersurface_jax.py:3563-3585`). Float32 smoke now has `linear_solve_tolerance_floor=sqrt(eps(float32))≈3.45e-4` and `linear_solve_tolerance_cap=1e-3` (`runtime.py:190-201`; `tests/test_runtime_dtype_policy.py:52-66`), so requested tolerances are clamped into the float32 backward-error scale.
 - The "11/11 NaN" diagnostic counts the 11-DOF gradient vector, not 11 term components; the term diagnostic enumerates the `_TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS` list (`surfaceobjectives_jax.py:212-221, 5134-5148`), so `non_qs` always reports first because it is index 0.
 - The CPU float32 smoke rerun now marks the optimizer result as failed when `fun`, `jac`, or `x` is non-finite (`optimizer_jax_reference.py:93-105`, `optimizer_jax_private/_result_converters.py:20-24`, `optimizer_host_lbfgs.py:1513-1536`).
 - Pre-gate MPS smoke artifacts do not prove post-fix behavior. The stage-2 artifact (`.artifacts/production_parity_maxiter7_20260519/mps_stage2_smoke_r3/stage2_mps_trajectory.json`) shows a suspicious constant gradient-norm trajectory, and its nested `results.json` reports `OPTIMIZER_SUCCESS=True` with finite `FINAL_OBJECTIVE`/`FINAL_DOFS` but null `OPTIMIZER_FUN_FINITE`/`OPTIMIZER_JAC_FINITE`/`OPTIMIZER_INVALID_STATE` flags. A separate single-stage smoke artifact (`mps_single_stage_scipyjax_smoke_r1/boozer_init_progress.json`) reports `solve_success=true, iterations=0.0`. The gap is the missing result-acceptance and independent finiteness gate that Wave 1 closes.
@@ -83,7 +83,7 @@ These must be pinned before the corresponding wave runs.
 - [ ] (gates Wave 1) Decide whether rejected-run artifacts remain in the main run directory with a rejection marker, or move under `diagnostics/`. SSOT: pick one location.
 - [ ] (gates Wave 1) Decide whether `sanitize_json_payload` is split into `sanitize_diagnostic_payload` + (no sanitization for accepted artifacts) or kept as one function gated by an explicit `is_accepted=False` argument. KISS: prefer the split.
 - [ ] (gates Wave 2) Pin the singular/gauge-null LS adjoint solver contract. Options to choose from: (a) tier-scaled tolerance on the existing `_solve_square_array_system_operator_only` path using `BackendPolicy.linear_solve_tolerance_floor/cap` (no κ²-squaring, only tolerance widening for `float32_smoke`); (b) LSQR/LSMR on the original operator (no normal equations); (c) iterative refinement around a packed-factor inner solve. The chosen contract must validate against the **original** (un-transformed) residual.
-- [ ] (gates Wave 2) Pin the residual metric and tolerance source for packed-factor solve success. SSOT: `||A x - b|| / max(||b||, eps_runtime) ≤ effective_linear_solve_tolerance(policy, requested_tol)`, where the helper clamps by `BackendPolicy.linear_solve_tolerance_floor/cap` (`parity` cap `1e-10`; current `float32_smoke` floor `1e-6`, cap `None`). If implementation chooses a finite smoke cap, update `runtime.py` and policy tests in the same wave. The packed-factor and operator-only solves report the same status object shape.
+- [x] (gates Wave 2) Pin the residual metric and tolerance source for packed-factor solve success. SSOT: `||A x - b|| / max(||b||, eps_runtime) ≤ effective_linear_solve_tolerance(policy, requested_tol)`, where the helper clamps by `BackendPolicy.linear_solve_tolerance_floor/cap` (`parity` cap `1e-10`; current `float32_smoke` floor `sqrt(eps(float32))≈3.45e-4`, cap `1e-3`). The packed-factor and operator-only solves report the same status object shape.
 - [ ] (gates Wave 6) Decide whether float32 smoke gradients are diagnostic-only in every harness or gate a separate smoke contract. The current `validation_ladder_contract.py` marks float32 smoke as `production_parity=False`, but `non_banana_example_cpp_jax_cpu_parity.py:596, 615-617, 2740-2745` still computes a `verdict="fail"` for diagnostic-tagged comparisons. SSOT: pick one rule.
 - [ ] (gates Wave 6+) Decide whether a formal FP32 production parity contract will be created later for MPS. Out of scope for this plan if deferred.
 
@@ -151,7 +151,7 @@ Implementation tasks:
   - [ ] singular/gauge-null least-squares solve (current `_solve_hessian_least_squares_system_with_status` at `optimizer_jax.py:3445-3481`);
   - [ ] packed-factor solve via the LS lane PLU triangular solves (`boozersurface_jax.py:3514-3540, 3700-3706`, `surfaceobjectives_jax.py:3217-3299`).
 - [ ] Stop routing a successful direct square operator solve through the normal-equation LS path. Today, `surfaceobjectives_jax.py:3484-3492, 4081` forces `linear_solve_factors=None`, which forces the LS fallback regardless of whether the direct operator already meets the original residual contract. Gate that switch on actual direct-solve failure, not on the absence of stored factors.
-- [ ] Pin the singular/gauge-null LS contract per the Wave-0 decision. Per-tier tolerance source: `BackendPolicy.linear_solve_tolerance_floor` / `cap` (`runtime.py:190-201`). Current `float32_smoke` uses floor `1e-6` with cap `None`, and the convergence gate must be the **original-operator** residual, not the κ²-squared normal-equation residual.
+- [ ] Pin the singular/gauge-null LS contract per the Wave-0 decision. Per-tier tolerance source: `BackendPolicy.linear_solve_tolerance_floor` / `cap` (`runtime.py:190-201`). Current `float32_smoke` uses floor `sqrt(eps(float32))≈3.45e-4` with cap `1e-3`, and the convergence gate must be the **original-operator** residual, not the κ²-squared normal-equation residual.
 - [ ] Replace the operator-GMRES success gate `||residual|| ≤ max(1e-12, 10·tol·||rhs||)` (`optimizer_jax.py:3083-3094`) with `||A x - b|| / max(||b||, eps_runtime) ≤ effective_linear_solve_tolerance(policy, requested_tol)` so the gate uses the same floor/cap helper as Boozer solves. Float64 production lanes keep cap `1e-10`.
 - [ ] Add residual and finiteness checks to the packed-factor forward and transpose solve callbacks (`boozersurface_jax.py:3700-3706` and the traceable LS adjoint at `surfaceobjectives_jax.py:3217-3299`), using the same per-tier residual metric.
 - [ ] Preserve the fail-closed NaN sentinel (`_traceable_adjoint_gradient_or_nan`) when the selected solve contract fails.
@@ -193,14 +193,14 @@ Critical-path implementation tasks (banana smoke reachability confirmed):
 
 Tests:
 
-- [ ] Unit test for `SquaredFluxJAX._gather_field_free_dofs` under both `jax_cpu_float32_smoke` and `jax_cpu_parity` policies.
-- [ ] Unit test for `QfmSurfaceJAX._coil_set_spec` under both policies.
-- [ ] Runtime dtype policy test that verifies representative arrays in the smoke critical path are float32 in `jax_cpu_float32_smoke` and `jax_mps_smoke`, and remain float64 in `jax_cpu_parity` and `jax_gpu_parity`.
+- [x] Unit test for `SquaredFluxJAX._gather_field_free_dofs` under both `jax_cpu_float32_smoke` and `jax_cpu_parity` policies.
+- [x] Unit test for `QfmSurfaceJAX._coil_set_spec` under both policies.
+- [x] Runtime dtype policy test that verifies representative arrays in the smoke critical path are float32 in `jax_cpu_float32_smoke` and `jax_mps_smoke`, and remain float64 in `jax_cpu_parity` and `jax_gpu_parity`.
 
 Acceptance criteria:
 
-- [ ] Float32 smoke lanes do not upcast through helper or entrypoint paths on the smoke critical path.
-- [ ] Float64 production lanes still construct float64 arrays.
+- [x] Float32 smoke lanes do not upcast through helper or entrypoint paths on the smoke critical path.
+- [x] Float64 production lanes still construct float64 arrays.
 - [ ] Renamed helpers compile under the same call sites; no caller change needed beyond the rename.
 
 Out of scope for this wave (tracked in Wave 8): bootstrap JAX profile derivatives, VMEC fieldline diagnostics, VMEC geometry helpers, PM workflow paths, wireframe workflow paths, MHD frozen-state casts. None of these are imported by the banana single-stage example or the non-banana CPU/MPS smoke harnesses (verified by grep against `tests/test_jax_mps_smoke.py`, `tests/test_mps_smoke_dtype.py`, and `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`).
@@ -323,10 +323,10 @@ Purpose: track validated regressions, stale-code risks, and off-critical-path dt
 
 Implementation tasks (adjacent regressions):
 
-- [ ] QFM augmented Lagrangian: decide whether `QfmAugmentedLagrangianInfo.fun` (`jax_core/qfm_solver.py:64`, write site at `:704`) means augmented value or raw QFM value, then add a CPU/analytic oracle test before changing behavior. The current diff flipped semantics from `result.fun` (augmented) to `metrics.qfm_value` (raw) and only added a change-pinning test (`tests/geo/test_qfmsurface_jax.py:475`).
-- [ ] Relax-and-split JAX: compare the new `epsilon_RS=1.0e-3` short-circuit (`permanent_magnet_optimization_jax.py:805, 821`) against the previous fixed-iteration loop; either restore behavior or document the API delta with an oracle test against the CPU implementation.
+- [x] QFM augmented Lagrangian: `QfmAugmentedLagrangianInfo.fun` is the raw QFM value, and `augmented_value` carries the augmented objective. The contract is pinned by `tests/geo/test_qfmsurface_jax.py`.
+- [x] Relax-and-split JAX: default `epsilon_RS=1.0e-3` short-circuit is intentional parity with the CPU implementation and is covered by a default-argument CPU/JAX oracle test in `tests/solve/test_permanent_magnet_optimization_jax_item28.py`.
 - [ ] Optimizer status code: document `LBFGS_STATUS_NONFINITE = 6` (`optimizer_jax_private/_types.py:15`) as repo-local; add tests around `success`, `status`, and `message` for both the SciPy adapter (`_mark_scipy_result_invalid_state` in `optimizer_jax_reference.py:101`) and the on-device adapter (`_result_converters._mark_nonfinite`). Verify parity between the two — coverage already exists at `tests/geo/test_optimizer_result_converters.py:172, 190, 226`; add gap tests only if behavior diverges.
-- [ ] BFGS curvature criterion in QFM (`jax_core/qfm_solver.py:460-464`): the floor was loosened from `sqrt(eps)` to `eps * ||y|| * ||s||`. Add an oracle test against the SciPy BFGS reference trajectory before locking the new floor.
+- [x] BFGS curvature criterion in QFM (`jax_core/qfm_solver.py`): restore the canonical `sqrt(eps) * ||y|| * ||s||` floor and pin the float32 boundary against the shared private-BFGS oracle in `tests/geo/test_qfmsurface_jax.py`.
 - [ ] `_normalize_scipy_result` status 6 is currently safe vs SciPy upstream (SciPy uses warnflag 0/1/2 only) but is still a private contract; document this in the constant's docstring.
 - [ ] Float32 smoke harness: resolve whether gradient entries tagged `diagnostic_only` can still make the fixture verdict fail (`non_banana_example_cpp_jax_cpu_parity.py:596, 615-617, 2740-2745` vs `validation_ladder_contract.py:65-78` `production_parity=False`); encode one SSOT rule.
 - [ ] Tautology tests: replace change-pinning tests with CPU, analytic, or committed-fixture oracle tests where the behavior is contract-bearing. Concrete candidates: `tests/geo/test_qfmsurface_jax.py:475`, `tests/solve/test_permanent_magnet_optimization_jax_item28.py:537`.
@@ -342,8 +342,8 @@ Implementation tasks (off-critical-path dtype hygiene; deferred from Wave 3):
 
 Cleanup tasks:
 
-- [ ] MPI and serial JAX solvers: if `src/simsopt/solve/mpi_jax.py` / `serial_jax.py` remain in scope, the Wave-5 transfer-boundary and Wave-1 result-gate contracts apply.
-- [ ] Root-level debug outputs: remove or gitignore `jax_mem_test.py`, `objective_runtimes_semilogy.png`, `taylor_errors.png`, `test_coil.vtu`, and `.gpd/state.json.bak`.
+- [x] MPI and serial JAX solvers remain in scope: the Wave-5 transfer-boundary and Wave-1 result-gate contracts apply to `src/simsopt/solve/mpi_jax.py` / `serial_jax.py`, with coverage in `tests/solve/test_mpi_jax.py` and `tests/solve/test_serial_jax.py`.
+- [x] Root-level debug outputs: remove or gitignore `jax_mem_test.py`, `objective_runtimes_semilogy.png`, `taylor_errors.png`, `test_coil.vtu`, and `.gpd/state.json.bak`.
 - [ ] `simsopt/mhd/__init__.py:17` `import jax as _` shadows Python's last-result convention; rename to `_jax` or drop the alias.
 
 Acceptance criteria:
@@ -371,7 +371,7 @@ Acceptance criteria:
 - [ ] P1: Rerun float64 CPU production parity (Wave 7) — the latest CPU parity artifact on this branch is dated 2026-05-18, before the recent dtype-centralization commits.
 - [ ] P1: Audit QFM, relax-and-split, and optimizer-status adjacent regressions before production signoff.
 - [ ] P2: Rerun CUDA production parity on Perlmutter.
-- [ ] P2: Clean root-level debug artifacts.
+- [x] P2: Clean root-level debug artifacts.
 - [ ] P2: Rename stale `*_float64`-suffixed helpers (`curve_geometry.py:60, 75, 79, 83`) that route through runtime dtype.
 - [ ] P2: Off-critical-path dtype hygiene (bootstrap, VMEC, PM, wireframe) per Wave 8.
 
@@ -397,5 +397,5 @@ Acceptance criteria:
 
 ## Open Decisions
 
-- [ ] Decide whether root debug artifacts should be deleted, moved, or gitignored (Wave 8 cleanup).
-- [ ] Decide whether adjacent dirty-tree regressions (QFM augmented Lagrangian semantics, relax-and-split `epsilon_RS`, QFM BFGS curvature floor) are fixed in this plan or split into a separate dated plan after Wave 1.
+- [x] Decide whether root debug artifacts should be deleted, moved, or gitignored (Wave 8 cleanup). Decision: gitignore root-local diagnostics, including `.gpd/state.json.bak`.
+- [x] Decide whether adjacent dirty-tree regressions (QFM augmented Lagrangian semantics, relax-and-split `epsilon_RS`, QFM BFGS curvature floor) are fixed in this plan or split into a separate dated plan after Wave 1. Decision: fix and test them in this plan.

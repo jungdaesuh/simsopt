@@ -140,6 +140,16 @@ _BFGS_STATUS_NOT_DESCENT = 4
 _BFGS_LINE_SEARCH_MAXITER = 20
 
 
+def _bfgs_has_valid_curvature(s: jax.Array, y: jax.Array) -> jax.Array:
+    ys = jnp.dot(y, s)
+    curvature_scale = jnp.linalg.norm(y) * jnp.linalg.norm(s)
+    dtype = jnp.result_type(ys, curvature_scale)
+    curvature_floor = (
+        jnp.sqrt(jnp.asarray(jnp.finfo(dtype).eps, dtype=dtype)) * curvature_scale
+    )
+    return jnp.isfinite(ys) & jnp.isfinite(curvature_scale) & (ys > curvature_floor)
+
+
 def _surface_spec_with_dofs(spec, dofs: object):
     return replace(spec, dofs=as_jax_float64(dofs))
 
@@ -535,12 +545,7 @@ def _bfgs_minimize(
                     s = next_x - descent_state.x
                     y = next_grad - descent_state.grad
                     ys = jnp.dot(y, s)
-                    update_floor = (
-                        jnp.finfo(next_x.dtype).eps
-                        * jnp.linalg.norm(y)
-                        * jnp.linalg.norm(s)
-                    )
-                    update_hessian = accepted & (ys > update_floor)
+                    update_hessian = accepted & _bfgs_has_valid_curvature(s, y)
                     safe_ys = jnp.where(
                         update_hessian, ys, jnp.asarray(1.0, next_x.dtype)
                     )

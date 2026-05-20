@@ -131,6 +131,50 @@ def test_as_runtime_value_uses_policy_dtype_for_host_values():
         assert value64.dtype == jnp.float64
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_dtype"),
+    (
+        ("jax_cpu_float32_smoke", jnp.float32),
+        ("jax_cpu_parity", jnp.float64),
+    ),
+)
+def test_squared_flux_field_dofs_follow_runtime_policy_dtype(mode, expected_dtype):
+    from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
+
+    objective = object.__new__(SquaredFluxJAX)
+    objective.field = SimpleNamespace(x=np.asarray([1.0, 2.0, 3.0], dtype=np.float64))
+
+    with _temporary_backend(mode):
+        assert objective._gather_field_free_dofs().dtype == expected_dtype
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_dtype"),
+    (
+        ("jax_cpu_float32_smoke", jnp.float32),
+        ("jax_cpu_parity", jnp.float64),
+    ),
+)
+def test_qfm_surface_coil_spec_dofs_follow_runtime_policy_dtype(mode, expected_dtype):
+    from simsopt.geo.qfmsurface_jax import QfmSurfaceJAX
+
+    class CapturingBiotSavart:
+        def __init__(self) -> None:
+            self.x = np.asarray([1.0, 2.0, 3.0], dtype=np.float64)
+            self.observed_dtype = None
+
+        def coil_set_spec_from_dofs(self, dofs):
+            self.observed_dtype = dofs.dtype
+            return dofs
+
+    qfm_surface = object.__new__(QfmSurfaceJAX)
+
+    with _temporary_backend(mode):
+        biotsavart = CapturingBiotSavart()
+        qfm_surface._coil_set_spec(biotsavart)
+        assert biotsavart.observed_dtype == expected_dtype
+
+
 def test_axis0_entries_preserves_empty_axis0_tuple():
     from simsopt.jax_core._math_utils import axis0_entries
 
