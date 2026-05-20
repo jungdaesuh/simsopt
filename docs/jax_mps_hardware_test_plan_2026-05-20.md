@@ -48,11 +48,35 @@ Observed on 2026-05-20 before this document was written:
 Implication: local MPS hardware proof must run under `.conda/jax-mps`, not
 under `.conda/jax`.
 
+Official-doc boundary:
+
+- JAX's standard installation docs do not treat Mac GPU as a supported
+  production backend; the JAX table marks Apple GPU experimental and the Mac
+  GPU section directs standard users to CPU installation.
+- Apple's Metal JAX page documents a separate experimental Metal plug-in path
+  and says unsupported data types include `np.float64`, `np.complex64`, and
+  `np.complex128`.
+- JAX's `JAX_PLATFORMS` option is fail-closed: every listed platform must
+  initialize, and the first platform in the list becomes the default.
+- JAX transfer guard `disallow` rejects implicit host/device transfers while
+  allowing explicit `jax.device_put*()` and `jax.device_get()` calls.
+- This repo-local plan tests the installed `.conda/jax-mps` interpreter and
+  backend id `mps`. Do not infer that a passing artifact validates Apple's
+  `jax-metal` package, standard JAX CUDA behavior, or float64 production
+  parity.
+
+Official sources checked:
+
+- https://docs.jax.dev/en/latest/installation.html
+- https://docs.jax.dev/en/latest/config_options.html#platforms
+- https://docs.jax.dev/en/latest/default_dtypes.html
+- https://docs.jax.dev/en/latest/transfer_guard.html
+- https://developer.apple.com/metal/jax/
+
 ## Required Inputs
 
 - [ ] Exact repo SHA to test: `<repo_sha>`.
-  - Current committed candidate after the strict-solve slice:
-    `76c1b40bc`.
+  - Fill from `git rev-parse HEAD` immediately before Wave 0.
 - [ ] Source mode:
   - [ ] clean committed SHA, or
   - [ ] dirty-tree proof with explicit `git diff` manifest.
@@ -104,38 +128,47 @@ import importlib.metadata as metadata
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from simsopt.backend import get_backend_policy, set_backend
 
 set_backend("jax_mps_smoke")
-value = jnp.asarray([1.0, 2.0], dtype=jnp.float32)
-value = (value + jnp.asarray([3.0, 4.0], dtype=jnp.float32)).block_until_ready()
+mps_device = jax.devices("mps")[0]
+value = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float32), mps_device)
+delta = jax.device_put(np.asarray([3.0, 4.0], dtype=np.float32), mps_device)
+value = jnp.add(value, delta).block_until_ready()
 
 payload = {
     "jax": jax.__version__,
     "jax_mps_version": metadata.version("jax-mps"),
     "backend": jax.default_backend(),
     "devices": [str(device) for device in jax.devices()],
+    "device_platforms": [device.platform for device in jax.devices()],
     "x64": bool(jax.config.read("jax_enable_x64")),
     "policy_runtime_dtype": get_backend_policy().runtime_dtype,
     "policy_tolerance_tier": get_backend_policy().tolerance_tier,
     "value_dtype": str(value.dtype),
     "value_device": str(value.device),
+    "value_device_platform": value.device.platform,
 }
 print(json.dumps(payload, indent=2, sort_keys=True))
 assert payload["backend"] == "mps"
 assert payload["x64"] is False
 assert payload["policy_runtime_dtype"] == "float32"
 assert payload["policy_tolerance_tier"] == "float32_smoke"
-assert "MpsDevice" in payload["value_device"]
+assert "mps" in payload["device_platforms"]
+assert payload["value_device_platform"] == "mps"
 PY
 ```
 
 Acceptance:
 
 - [ ] `backend` is exactly `mps`.
-- [ ] At least one device string contains `MpsDevice`.
+- [ ] At least one device reports `platform == "mps"`.
 - [ ] x64 is false.
+- [ ] `jax-mps` is installed and its version is recorded.
+- [ ] `jax-metal` is either absent or explicitly recorded separately; this plan
+  does not mix `jax-mps` and `jax-metal` artifacts.
 - [ ] backend policy reports `runtime_dtype=float32`.
 - [ ] backend policy reports `tolerance_tier=float32_smoke`.
 - [ ] `git status` is recorded. Dirty-tree evidence is allowed only if the
@@ -210,6 +243,15 @@ Acceptance:
 Optional diagnostic inventory:
 
 ```bash
+SIMSOPT_BACKEND_MODE=jax_cpu_parity \
+SIMSOPT_JAX_TRANSFER_GUARD=disallow \
+JAX_PLATFORMS=cpu \
+JAX_ENABLE_X64=1 \
+"${CPU_PYTHON}" benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
+  --fixtures all-supported \
+  --lanes cpu_cpp,jax_cpu \
+  --output-json "${RESULTS_ROOT}/wave2_non_banana/cpu_all_supported_diagnostic_baseline.json"
+
 SIMSOPT_BACKEND_MODE=jax_mps_smoke \
 SIMSOPT_BACKEND_STRICT=1 \
 SIMSOPT_JAX_TRANSFER_GUARD=disallow \
@@ -218,6 +260,7 @@ JAX_ENABLE_X64=0 \
 "${MPS_PYTHON}" benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
   --fixtures all-supported \
   --lanes cpu_cpp,jax_mps \
+  --baseline-json "${RESULTS_ROOT}/wave2_non_banana/cpu_all_supported_diagnostic_baseline.json" \
   --output-json "${RESULTS_ROOT}/wave2_non_banana/mps_all_supported_diagnostic.json"
 ```
 
@@ -259,6 +302,9 @@ Acceptance:
 - [ ] `results.json` reports `OPTIMIZER_SUCCESS=true`.
 - [ ] `results.json` records `backend_mode=jax_mps_smoke`,
   `runtime_dtype=float32`, and `tolerance_tier=float32_smoke`.
+- [ ] `results.json` records MPS execution for the target-lane JAX value/grad
+  path. `--optimizer-backend scipy-jax` is host optimizer control only; it is
+  not accepted as a CPU reroute.
 - [ ] Objective, final DOFs, and optimizer gradient finiteness fields are
   accepted by the strict result gate.
 - [ ] If the process exits nonzero or writes `REJECTED.json`, classify the
@@ -341,7 +387,12 @@ CPU float64 oracle | JAX CPU float64 | JAX CUDA float64 | MPS float32 smoke
 
 - [ ] Missing MPS backend blocks all MPS hardware claims.
 - [ ] Any MPS command that records CPU backend is invalid for MPS signoff.
-- [ ] Any accepted artifact containing masked non-finite values is invalid.
+- [ ] Any accepted artifact containing non-finite active objective, state, or
+  gradient values is invalid.
+- [ ] Inactive zero-weight terms must have `active=false` or equivalent
+  dependency metadata and zero weighted contribution. A non-finite inactive raw
+  diagnostic value must not poison the accepted objective, but it must not be
+  counted as active physics evidence.
 - [ ] Any `results.json` refusal is a real failure unless explicitly accepted
   as a rejected-run diagnostic.
 - [ ] Float32 MPS smoke failures do not weaken CPU/CUDA float64 production
