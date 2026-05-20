@@ -1355,6 +1355,12 @@ def _traceable_weighted_single_stage_outer_term_values(
     for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         term_value = term_values[term_name]
         weight = outer_objective_config.get(weight_key, 0.0)
+        if not _traceable_single_stage_weight_is_active(weight):
+            weighted_terms[term_name] = _runtime_float64_scalar(
+                0.0,
+                reference=term_value,
+            )
+            continue
         weighted_terms[term_name] = (
             _runtime_float64_scalar(weight, reference=term_value) * term_value
         )

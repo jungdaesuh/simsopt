@@ -5740,10 +5740,34 @@ def test_traceable_weighted_single_stage_outer_terms_accept_device_scalar_weight
         )
     }
     actual = {
-        term_name: float(np.asarray(jax.device_get(value)))
-        for term_name, value in weighted_terms.items()
+        term_name: host_scalar(value) for term_name, value in weighted_terms.items()
     }
     assert actual == expected
+
+
+def test_traceable_weighted_single_stage_outer_terms_mask_inactive_nonfinite_values():
+    term_values = {
+        term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
+        for index, (term_name, _weight_key) in enumerate(
+            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        )
+    }
+    term_values["non_qs"] = jnp.asarray(np.nan, dtype=jnp.float64)
+    term_values["residual"] = jnp.asarray(np.inf, dtype=jnp.float64)
+    outer_objective_config = {
+        "non_qs_weight": jnp.asarray(0.0, dtype=jnp.float64),
+        "iota_weight": jnp.asarray(2.0, dtype=jnp.float64),
+    }
+
+    with jax.transfer_guard("disallow"):
+        weighted_terms = surfaceobjectives_jax_module._traceable_weighted_single_stage_outer_term_values(
+            term_values,
+            outer_objective_config=outer_objective_config,
+        )
+
+    assert host_scalar(weighted_terms["non_qs"]) == 0.0
+    assert host_scalar(weighted_terms["residual"]) == 0.0
+    assert host_scalar(weighted_terms["iota"]) == 6.0
 
 
 def test_traceable_runtime_deviceify_tree_explicitly_restages_jax_arrays(monkeypatch):
