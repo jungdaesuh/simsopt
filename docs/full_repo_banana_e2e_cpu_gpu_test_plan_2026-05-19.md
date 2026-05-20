@@ -180,10 +180,9 @@ Environment lane decision:
   dry-run. Record a fresh dry-run in the proof bundle before launch.
 - [ ] Do not reuse a CPU-only `jax` / `jaxlib` environment for the Wave 2+
   GPU preflight or proof waves.
-- [ ] Blocked legacy pip-wheel lane: do not launch a proof with
-  `python -m pip install "jax[cuda12]==0.9.2"` or an unpinned `deploy_gpu`
-  install that resolves to 0.9.2; that dry-run failed because the required
-  `jax-cuda12-plugin==0.9.2` wheel was not available from PyPI for the target.
+- [ ] Blocked legacy pip-wheel lane: do not launch a proof with any stale
+  dependency spec that resolves to an unavailable CUDA plugin wheel for the
+  target.
 
 The benchmark scripts default `SIMSOPT_BENCHMARK_JAX_VERSION` to `0.10.0`.
 For a container lane, set `SIMSOPT_BENCHMARK_JAX_VERSION` to the JAX version
