@@ -62,9 +62,11 @@ def _fresh_backend():
     package = types.ModuleType("simsopt")
     package.__path__ = [str(package_root)]
     sys.modules["simsopt"] = package
+    backend_package_root = package_root / "backend"
     spec = importlib.util.spec_from_file_location(
         "simsopt.backend",
-        package_root / "backend.py",
+        backend_package_root / "__init__.py",
+        submodule_search_locations=[str(backend_package_root)],
     )
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
@@ -170,6 +172,8 @@ def _assert_backend_policy(
     default_residency: str = "device",
     default_optimizer_backend: str = "ondevice",
     disable_jit: bool = False,
+    linear_solve_tolerance_floor: float = 1e-14,
+    linear_solve_tolerance_cap: float | None = 1e-10,
 ) -> None:
     assert policy.mode == mode
     assert policy.backend == backend_name
@@ -186,6 +190,15 @@ def _assert_backend_policy(
     assert policy.compilation_cache_policy == compilation_cache_policy
     assert policy.provenance_label == provenance_label
     assert policy.disable_jit is disable_jit
+    assert policy.linear_solve_tolerance_floor == pytest.approx(
+        linear_solve_tolerance_floor
+    )
+    if linear_solve_tolerance_cap is None:
+        assert policy.linear_solve_tolerance_cap is None
+    else:
+        assert policy.linear_solve_tolerance_cap == pytest.approx(
+            linear_solve_tolerance_cap
+        )
 
 
 def _assert_transfer_guard_resolution(backend, *, mode: str, expected: str | None):
@@ -281,10 +294,12 @@ def test_backend_resolves_explicit_mps_legacy_env_pair(monkeypatch):
         runtime_dtype="float32",
         host_dtype="float32",
         chunk_policy="stable_default",
-        tolerance_tier="smoke",
+        tolerance_tier="float32_smoke",
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_mps_smoke",
         default_optimizer_backend="scipy",
+        linear_solve_tolerance_floor=1e-6,
+        linear_solve_tolerance_cap=None,
     )
     assert backend.requires_x64() is False
 
@@ -487,16 +502,52 @@ def test_mps_smoke_mode_policy_helpers(monkeypatch):
         runtime_dtype="float32",
         host_dtype="float32",
         chunk_policy="stable_default",
-        tolerance_tier="smoke",
+        tolerance_tier="float32_smoke",
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_mps_smoke",
         default_optimizer_backend="scipy",
+        linear_solve_tolerance_floor=1e-6,
+        linear_solve_tolerance_cap=None,
     )
     assert backend.is_parity_mode() is False
     assert backend.requires_x64() is False
     _assert_transfer_guard_resolution(
         backend,
         mode="jax_mps_smoke",
+        expected="log",
+    )
+
+
+def test_cpu_float32_smoke_mode_policy_helpers(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_float32_smoke")
+    backend = _fresh_backend()
+
+    policy = backend.get_backend_policy()
+
+    _assert_backend_policy(
+        policy,
+        mode="jax_cpu_float32_smoke",
+        backend_name="jax",
+        platform="cpu",
+        strict=False,
+        parity_mode=False,
+        requires_x64=False,
+        runtime_dtype="float32",
+        host_dtype="float32",
+        chunk_policy="stable_default",
+        tolerance_tier="float32_smoke",
+        compilation_cache_policy="optional_persistent",
+        provenance_label="jax_cpu_float32_smoke",
+        linear_solve_tolerance_floor=1e-6,
+        linear_solve_tolerance_cap=None,
+    )
+    assert backend.is_parity_mode() is False
+    assert backend.requires_x64() is False
+    assert policy.max_dense_jacobian_bytes == 256 * 1024 * 1024
+    _assert_transfer_guard_resolution(
+        backend,
+        mode="jax_cpu_float32_smoke",
         expected="log",
     )
 
@@ -524,8 +575,10 @@ def test_gpu_parity_mode_exposes_ci_contract_defaults(monkeypatch):
         ("native_cpu", "highest", 4 * 1024 * 1024 * 1024),
         ("jax_cpu_fast", "default", 4 * 1024 * 1024 * 1024),
         ("jax_cpu_parity", "highest", 4 * 1024 * 1024 * 1024),
+        ("jax_cpu_float32_smoke", "default", 256 * 1024 * 1024),
         ("jax_gpu_fast", "default", 256 * 1024 * 1024),
         ("jax_gpu_parity", "highest", 256 * 1024 * 1024),
+        ("jax_mps_smoke", "default", 256 * 1024 * 1024),
     ),
 )
 def test_policy_defaults_pin_precision_and_dense_budget(
@@ -541,6 +594,36 @@ def test_policy_defaults_pin_precision_and_dense_budget(
 
     assert policy.matmul_precision == precision
     assert policy.max_dense_jacobian_bytes == dense_bytes
+
+
+@pytest.mark.parametrize(
+    ("mode", "tolerance_floor", "tolerance_cap"),
+    (
+        ("native_cpu", 1e-14, 1e-10),
+        ("jax_cpu_fast", 1e-14, 1e-10),
+        ("jax_cpu_parity", 1e-14, 1e-10),
+        ("jax_gpu_fast", 1e-14, 1e-10),
+        ("jax_gpu_parity", 1e-14, 1e-10),
+        ("jax_cpu_float32_smoke", 1e-6, None),
+        ("jax_mps_smoke", 1e-6, None),
+    ),
+)
+def test_policy_defaults_pin_linear_solve_tolerance_contract(
+    monkeypatch,
+    mode,
+    tolerance_floor,
+    tolerance_cap,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    policy = backend.get_backend_policy(mode)
+
+    assert policy.linear_solve_tolerance_floor == pytest.approx(tolerance_floor)
+    if tolerance_cap is None:
+        assert policy.linear_solve_tolerance_cap is None
+    else:
+        assert policy.linear_solve_tolerance_cap == pytest.approx(tolerance_cap)
 
 
 def test_dense_jacobian_env_overrides_follow_platform(monkeypatch):

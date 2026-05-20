@@ -48,9 +48,25 @@ def test_jax_mps_smoke_policy_runtime_dtype():
 
         assert policy.runtime_dtype == "float32"
         assert policy.host_dtype == "float32"
+        assert policy.tolerance_tier == "float32_smoke"
+        assert policy.linear_solve_tolerance_floor == pytest.approx(1e-6)
+        assert policy.linear_solve_tolerance_cap is None
 
 
-def test_non_mps_modes_keep_float64_policy_dtype():
+def test_jax_cpu_float32_smoke_policy_runtime_dtype():
+    from simsopt.backend import get_backend_policy
+
+    with _temporary_backend("jax_cpu_float32_smoke"):
+        policy = get_backend_policy()
+
+        assert policy.runtime_dtype == "float32"
+        assert policy.host_dtype == "float32"
+        assert policy.tolerance_tier == "float32_smoke"
+        assert policy.linear_solve_tolerance_floor == pytest.approx(1e-6)
+        assert policy.linear_solve_tolerance_cap is None
+
+
+def test_float64_modes_keep_float64_policy_dtype():
     from simsopt.backend import get_backend_policy
 
     for mode in (
@@ -64,6 +80,8 @@ def test_non_mps_modes_keep_float64_policy_dtype():
 
         assert policy.runtime_dtype == "float64"
         assert policy.host_dtype == "float64"
+        assert policy.linear_solve_tolerance_floor == pytest.approx(1e-14)
+        assert policy.linear_solve_tolerance_cap == pytest.approx(1e-10)
 
 
 def test_require_runtime_dtype_follows_backend_policy():
@@ -303,13 +321,34 @@ def test_boozer_ls_mps_smoke_default_avoids_target_x64_gate(monkeypatch):
         )
         optimizer_module.require_target_backend_x64(auto_options["optimizer_backend"])
 
+        optimizer_module.require_target_backend_x64("ondevice")
+
+
+def test_parity_target_backend_still_requires_x64(monkeypatch):
+    from simsopt.geo import optimizer_jax as optimizer_module
+
+    with _temporary_backend("jax_cpu_parity"):
+        monkeypatch.setattr(optimizer_module, "_x64_enabled", lambda: False)
+
         with pytest.raises(RuntimeError, match="requires jax_enable_x64=True"):
             optimizer_module.require_target_backend_x64("ondevice")
 
 
+def test_cpu_float32_smoke_target_backend_uses_float32_policy_gate(monkeypatch):
+    from simsopt.geo import optimizer_jax as optimizer_module
+
+    with _temporary_backend("jax_cpu_float32_smoke"):
+        monkeypatch.setattr(optimizer_module, "_x64_enabled", lambda: False)
+
+        optimizer_module.require_target_backend_x64("ondevice")
+
+
 def test_boozer_ls_mps_smoke_default_reaches_reference_method(monkeypatch):
     from simsopt.geo import optimizer_jax as optimizer_module
-    from simsopt.geo.boozersurface_jax import BoozerSurfaceJAX, _normalize_solver_options
+    from simsopt.geo.boozersurface_jax import (
+        BoozerSurfaceJAX,
+        _normalize_solver_options,
+    )
 
     with _temporary_backend("jax_mps_smoke"):
         monkeypatch.setattr(optimizer_module, "_x64_enabled", lambda: False)

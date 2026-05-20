@@ -7,6 +7,7 @@ an explicit mode-based public API for the new runtime surface:
 - ``native_cpu``
 - ``jax_cpu_fast``
 - ``jax_cpu_parity``
+- ``jax_cpu_float32_smoke``
 - ``jax_gpu_fast``
 - ``jax_gpu_parity``
 - ``jax_mps_smoke``
@@ -149,6 +150,7 @@ VALID_BACKEND_MODES = (
     "native_cpu",
     "jax_cpu_fast",
     "jax_cpu_parity",
+    "jax_cpu_float32_smoke",
     "jax_gpu_fast",
     "jax_gpu_parity",
     "jax_mps_smoke",
@@ -158,6 +160,7 @@ _MODE_TO_RUNTIME = {
     "native_cpu": ("cpu", "cpu"),
     "jax_cpu_fast": ("jax", "cpu"),
     "jax_cpu_parity": ("jax", "cpu"),
+    "jax_cpu_float32_smoke": ("jax", "cpu"),
     "jax_gpu_parity": ("jax", "cuda"),
     "jax_gpu_fast": ("jax", "cuda"),
     "jax_mps_smoke": ("jax", "mps"),
@@ -184,6 +187,18 @@ _GPU_MEMORY_MODE_DEFAULTS = {
 }
 _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU = 4 * 1024 * 1024 * 1024
 _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU = 256 * 1024 * 1024
+_FLOAT64_LINEAR_SOLVE_TOLERANCE_FLOOR = 1e-14
+_FLOAT64_LINEAR_SOLVE_TOLERANCE_CAP = 1e-10
+_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR = 1e-6
+_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP = None
+_FLOAT64_LINEAR_SOLVE_DEFAULTS = {
+    "linear_solve_tolerance_floor": _FLOAT64_LINEAR_SOLVE_TOLERANCE_FLOOR,
+    "linear_solve_tolerance_cap": _FLOAT64_LINEAR_SOLVE_TOLERANCE_CAP,
+}
+_FLOAT32_SMOKE_LINEAR_SOLVE_DEFAULTS = {
+    "linear_solve_tolerance_floor": _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
+    "linear_solve_tolerance_cap": _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
+}
 
 _MODE_POLICY_DEFAULTS = {
     "native_cpu": {
@@ -199,6 +214,7 @@ _MODE_POLICY_DEFAULTS = {
         "matmul_precision": "highest",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU,
         "provenance_label": "native_cpu",
+        **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
@@ -215,6 +231,7 @@ _MODE_POLICY_DEFAULTS = {
         "matmul_precision": "default",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU,
         "provenance_label": "jax_cpu_fast",
+        **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
@@ -231,6 +248,24 @@ _MODE_POLICY_DEFAULTS = {
         "matmul_precision": "highest",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU,
         "provenance_label": "jax_cpu_parity",
+        **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
+        **_NO_GPU_MEMORY_DEFAULTS,
+        **_NO_CI_REPRODUCIBILITY_DEFAULTS,
+    },
+    "jax_cpu_float32_smoke": {
+        "parity_mode": False,
+        "requires_x64": False,
+        "runtime_dtype": "float32",
+        "host_dtype": "float32",
+        "default_residency": "device",
+        "default_optimizer_backend": "ondevice",
+        "chunk_policy": "stable_default",
+        "tolerance_tier": "float32_smoke",
+        "compilation_cache_policy": "optional_persistent",
+        "matmul_precision": "default",
+        "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
+        "provenance_label": "jax_cpu_float32_smoke",
+        **_FLOAT32_SMOKE_LINEAR_SOLVE_DEFAULTS,
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
@@ -247,6 +282,7 @@ _MODE_POLICY_DEFAULTS = {
         "matmul_precision": "highest",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
         "provenance_label": "jax_gpu_parity",
+        **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
         **_GPU_MEMORY_MODE_DEFAULTS,
         "gpu_reduction_order_max_ulp": 10,
         "gpu_reduction_order_rel_tol": 1e-12,
@@ -267,6 +303,7 @@ _MODE_POLICY_DEFAULTS = {
         "matmul_precision": "default",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
         "provenance_label": "jax_gpu_fast",
+        **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
         **_GPU_MEMORY_MODE_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
@@ -278,11 +315,12 @@ _MODE_POLICY_DEFAULTS = {
         "default_residency": "device",
         "default_optimizer_backend": "scipy",
         "chunk_policy": "stable_default",
-        "tolerance_tier": "smoke",
+        "tolerance_tier": "float32_smoke",
         "compilation_cache_policy": "optional_persistent",
         "matmul_precision": "default",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
         "provenance_label": "jax_mps_smoke",
+        **_FLOAT32_SMOKE_LINEAR_SOLVE_DEFAULTS,
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
@@ -292,6 +330,7 @@ _FIELD_KERNEL_DEFAULTS = {
     "native_cpu": {"coil_chunk_size": 0, "quadrature_block_size": 0},
     "jax_cpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
     "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
+    "jax_cpu_float32_smoke": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
     "jax_mps_smoke": {"coil_chunk_size": 16, "quadrature_block_size": 0},
@@ -306,6 +345,7 @@ _MODE_SHARDING_DEFAULTS = {
     "native_cpu": "none",
     "jax_cpu_fast": "none",
     "jax_cpu_parity": "none",
+    "jax_cpu_float32_smoke": "none",
     "jax_gpu_parity": "none",
     "jax_gpu_fast": "hybrid",
     "jax_mps_smoke": "none",
@@ -415,6 +455,7 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "native_cpu": None,
     "jax_cpu_fast": "log",
     "jax_cpu_parity": "log",
+    "jax_cpu_float32_smoke": "log",
     "jax_gpu_parity": "log",
     "jax_gpu_fast": "log",
     "jax_mps_smoke": "log",
@@ -496,9 +537,7 @@ def _stale_cuda_determinism_message() -> str:
 
 
 def _enabled_gpu_determinism_flags_text() -> str:
-    return " or ".join(
-        f"{flag_name}=true" for flag_name in _GPU_DETERMINISM_XLA_FLAGS
-    )
+    return " or ".join(f"{flag_name}=true" for flag_name in _GPU_DETERMINISM_XLA_FLAGS)
 
 
 @dataclass(frozen=True)
@@ -527,6 +566,8 @@ class BackendPolicy:
     compilation_cache_policy: str
     matmul_precision: str
     max_dense_jacobian_bytes: int | None
+    linear_solve_tolerance_floor: float
+    linear_solve_tolerance_cap: float | None
     provenance_label: str
     xla_gpu_preallocate: bool | None
     xla_gpu_mem_fraction: float | None
@@ -1479,6 +1520,12 @@ def _validate_policy_dtype(value: object, *, mode: str, field: str) -> str:
     return dtype_name
 
 
+def _optional_float_policy_default(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
 def _policy_from_config(config: BackendConfig) -> BackendPolicy:
     defaults = _get_mode_policy_defaults(config.mode)
     return BackendPolicy(
@@ -1513,6 +1560,10 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         max_dense_jacobian_bytes=_resolve_policy_max_dense_jacobian_bytes(
             config,
             defaults,
+        ),
+        linear_solve_tolerance_floor=float(defaults["linear_solve_tolerance_floor"]),
+        linear_solve_tolerance_cap=_optional_float_policy_default(
+            defaults["linear_solve_tolerance_cap"]
         ),
         provenance_label=str(defaults["provenance_label"]),
         xla_gpu_preallocate=config.xla_gpu_preallocate,
@@ -2188,7 +2239,9 @@ def _set_runtime_env(name: str, value: str | None) -> None:
     os.environ[name] = value
 
 
-def _gpu_memory_runtime_env(config: BackendConfig) -> tuple[tuple[str, str | None], ...]:
+def _gpu_memory_runtime_env(
+    config: BackendConfig,
+) -> tuple[tuple[str, str | None], ...]:
     if config.xla_gpu_preallocate is None:
         preallocate = None
     else:
