@@ -44,10 +44,37 @@ def _single_lm_iteration(residual_fn, state):
     )
 
 
-def _collect_released_callable(callable_ref):
+def _assert_callable_released(callable_ref):
     for _ in range(3):
         gc.collect()
     assert callable_ref() is None
+
+
+def _assert_weak_runner_cache(
+    runner_factory,
+    make_callable,
+    same_options,
+    changed_options=None,
+):
+    def build_runners():
+        callable_fn = make_callable()
+        callable_ref = weakref.ref(callable_fn)
+        first = runner_factory(callable_fn, *same_options)
+        second = runner_factory(callable_fn, *same_options)
+        changed = (
+            None
+            if changed_options is None
+            else runner_factory(callable_fn, *changed_options)
+        )
+        return callable_ref, first, second, changed
+
+    callable_ref, first, second, changed = build_runners()
+
+    assert not hasattr(runner_factory, "cache_info")
+    assert first is second
+    if changed is not None:
+        assert changed is not first
+    _assert_callable_released(callable_ref)
 
 
 def test_lm_damping_decreases_by_half_for_good_step():
@@ -143,13 +170,10 @@ def test_lm_gmres_uses_incremental_method_inside_narrow_transfer_guard(monkeypat
 
 
 def test_traceable_lm_runner_cache_uses_weak_callable_ownership():
-    def make_runner():
-        def residual_fn(x):
-            return x
-
-        callable_ref = weakref.ref(residual_fn)
-        first = _opt._make_traceable_levenberg_marquardt_runner(
-            residual_fn,
+    _assert_weak_runner_cache(
+        _opt._make_traceable_levenberg_marquardt_runner,
+        lambda: lambda x: x,
+        (
             4,
             1.0e-8,
             1.0e-8,
@@ -159,21 +183,8 @@ def test_traceable_lm_runner_cache_uses_weak_callable_ownership():
             None,
             True,
             True,
-        )
-        second = _opt._make_traceable_levenberg_marquardt_runner(
-            residual_fn,
-            4,
-            1.0e-8,
-            1.0e-8,
-            1.0e-8,
-            None,
-            False,
-            None,
-            True,
-            True,
-        )
-        disabled = _opt._make_traceable_levenberg_marquardt_runner(
-            residual_fn,
+        ),
+        (
             4,
             1.0e-8,
             1.0e-8,
@@ -183,15 +194,8 @@ def test_traceable_lm_runner_cache_uses_weak_callable_ownership():
             None,
             False,
             False,
-        )
-        return callable_ref, first, second, disabled
-
-    callable_ref, first, second, disabled = make_runner()
-
-    assert not hasattr(_opt._make_traceable_levenberg_marquardt_runner, "cache_info")
-    assert first is second
-    assert disabled is not first
-    _collect_released_callable(callable_ref)
+        ),
+    )
 
 
 def test_traceable_lm_callbacks_remain_active_without_runner_cache():
@@ -221,63 +225,40 @@ def test_traceable_lm_callbacks_remain_active_without_runner_cache():
 
 
 def test_traceable_newton_polish_runner_cache_uses_weak_callable_ownership():
-    def make_runner():
+    def make_objective():
         def objective_fn(x):
             return 0.5 * jnp.dot(x, x)
 
-        callable_ref = weakref.ref(objective_fn)
-        first = _opt._make_traceable_newton_polish_runner(
-            objective_fn,
+        return objective_fn
+
+    _assert_weak_runner_cache(
+        _opt._make_traceable_newton_polish_runner,
+        make_objective,
+        (
             4,
             1.0e-8,
             0.0,
             False,
             None,
             True,
-        )
-        second = _opt._make_traceable_newton_polish_runner(
-            objective_fn,
-            4,
-            1.0e-8,
-            0.0,
-            False,
-            None,
-            True,
-        )
-        disabled = _opt._make_traceable_newton_polish_runner(
-            objective_fn,
+        ),
+        (
             4,
             1.0e-8,
             0.0,
             False,
             None,
             False,
-        )
-        return callable_ref, first, second, disabled
-
-    callable_ref, first, second, disabled = make_runner()
-
-    assert not hasattr(_opt._make_traceable_newton_polish_runner, "cache_info")
-    assert first is second
-    assert disabled is not first
-    _collect_released_callable(callable_ref)
+        ),
+    )
 
 
 def test_traceable_exact_newton_runner_cache_uses_weak_callable_ownership():
-    def make_runner():
-        def residual_fn(x):
-            return x
-
-        callable_ref = weakref.ref(residual_fn)
-        first = _opt._make_traceable_exact_newton_runner(residual_fn, 4, 1.0e-8)
-        second = _opt._make_traceable_exact_newton_runner(residual_fn, 4, 1.0e-8)
-        return callable_ref, first, second
-
-    callable_ref, first, second = make_runner()
-
-    assert not hasattr(_opt._make_traceable_exact_newton_runner, "cache_info")
-    assert second is first
-    _collect_released_callable(callable_ref)
+    _assert_weak_runner_cache(
+        _opt._make_traceable_exact_newton_runner,
+        lambda: lambda x: x,
+        (4, 1.0e-8),
+    )
 
 
 def test_matrix_free_lm_iteration_count_stays_close_to_scipy_lm():
