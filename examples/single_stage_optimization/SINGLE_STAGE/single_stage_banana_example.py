@@ -89,6 +89,7 @@ from simsopt.jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
+    runtime_device_put,
 )
 from simsopt.geo import (
     BoozerSurface,
@@ -10114,6 +10115,24 @@ def snapshot_accepted_step_state(
     )
 
 
+def _mean_abs_bdotn_on_surface(bs, surface) -> float:
+    unitn = surface.unitnormal()
+    field_on_surface = bs.B().reshape(unitn.shape)
+    if isinstance(field_on_surface, jax.Array):
+        unitn_on_field_sharding = runtime_device_put(
+            unitn,
+            target=field_on_surface.sharding,
+        ).reshape(field_on_surface.shape)
+        return host_float(
+            jnp.mean(
+                jnp.abs(
+                    jnp.sum(field_on_surface * unitn_on_field_sharding, axis=2)
+                )
+            )
+        )
+    return float(np.mean(np.abs(np.sum(field_on_surface * unitn, axis=2))))
+
+
 def accept_step(
     run_dict,
     boozer_surface,
@@ -10193,10 +10212,7 @@ def accept_step(
         _bs_pts_before = bs._points_jax  # JAX arrays are immutable; no copy needed
 
     bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
-    unitn = boozer_surface.surface.unitnormal()
-    BdotN = host_float(
-        np.mean(np.abs(np.sum(host_array(bs.B()).reshape(unitn.shape) * unitn, axis=2)))
-    )
+    BdotN = _mean_abs_bdotn_on_surface(bs, boozer_surface.surface)
 
     # Restore bs state — no persistent mutation
     if _bs_pts_before is not None:

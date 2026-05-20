@@ -11190,17 +11190,93 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(len(bs.set_points_calls), 2)
         np.testing.assert_array_equal(bs.set_points_calls[1], INITIAL_PTS)
 
+    def test_mean_abs_bdotn_on_surface_keeps_numpy_field_on_host(self):
+        module = self.load_module()
+
+        class _BS:
+            def B(self):
+                return np.array([[0.0, 0.0, 0.25], [0.0, 0.0, -0.75]])
+
+        class _Surface:
+            def unitnormal(self):
+                normal = np.zeros((1, 2, 3))
+                normal[..., 2] = 1.0
+                return normal
+
+        with patch.object(
+            module,
+            "runtime_device_put",
+            side_effect=AssertionError("NumPy field diagnostic must stay on host"),
+        ):
+            bdotn = module._mean_abs_bdotn_on_surface(_BS(), _Surface())
+
+        self.assertEqual(bdotn, 0.5)
+
+    def test_mean_abs_bdotn_on_surface_reduces_jax_field_on_device(self):
+        module = self.load_module()
+        original_host_array = module.host_array
+        original_runtime_device_put = module.runtime_device_put
+        runtime_put_targets = []
+        full_field = jnp.ones((1, 2, 3), dtype=jnp.float64) * 0.25
+
+        class _BS:
+            def B(self):
+                return full_field
+
+        class _Surface:
+            def unitnormal(self):
+                normal = np.zeros((1, 2, 3))
+                normal[..., 2] = 1.0
+                return normal
+
+        def counted_host_array(value, *, dtype=np.float64):
+            self.assertIsNot(
+                value,
+                full_field,
+                "BdotN reporting should reduce the full field on device.",
+            )
+            return original_host_array(value, dtype=dtype)
+
+        def counted_runtime_device_put(value, **kwargs):
+            runtime_put_targets.append(kwargs.get("target"))
+            return original_runtime_device_put(value, **kwargs)
+
+        with patch.object(module, "host_array", counted_host_array), patch.object(
+            module, "runtime_device_put", counted_runtime_device_put
+        ):
+            with jax.transfer_guard("disallow"):
+                bdotn = module._mean_abs_bdotn_on_surface(_BS(), _Surface())
+
+        self.assertEqual(bdotn, 0.25)
+        self.assertEqual(runtime_put_targets, [full_field.sharding])
+
     def test_accept_step_explicitly_materializes_jax_diagnostics(self):
         module = self.load_module()
         host_calls = {"float": 0, "array": 0}
         original_host_float = module.host_float
         original_host_array = module.host_array
+        full_field = jnp.ones((2, 3), dtype=jnp.float64) * 0.01
+        scalar_true = jnp.asarray(True)
+        scalar_iter = jnp.asarray(1)
+        scalar_objective = jnp.asarray(1.0, dtype=jnp.float64)
+        scalar_half = jnp.asarray(0.5, dtype=jnp.float64)
+        scalar_iota = jnp.asarray(0.15, dtype=jnp.float64)
+        scalar_G = jnp.asarray(1.0, dtype=jnp.float64)
+        scalar_distance = jnp.asarray(0.1, dtype=jnp.float64)
+        scalar_length = jnp.asarray(6.0, dtype=jnp.float64)
+        gradient = jnp.arange(5, dtype=jnp.float64)
+        zero_gradient = jnp.zeros(5, dtype=jnp.float64)
 
         def counted_host_float(value):
             host_calls["float"] += 1
             return original_host_float(value)
 
         def counted_host_array(value, *, dtype=np.float64):
+            self.assertIsNot(
+                value,
+                full_field,
+                "BdotN reporting should reduce the full field on device.",
+            )
             host_calls["array"] += 1
             return original_host_array(value, dtype=dtype)
 
@@ -11215,8 +11291,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 self._current_pts = np.asarray(pts).copy()
 
             def B(self):
-                n = self._current_pts.shape[0]
-                return jnp.ones((n, 3), dtype=jnp.float64) * 0.01
+                return full_field
 
         class _Surface:
             def __init__(self):
@@ -11231,38 +11306,38 @@ class SingleStageExampleTests(unittest.TestCase):
                 return normal
 
             def volume(self):
-                return jnp.asarray(1.0, dtype=jnp.float64)
+                return scalar_objective
 
         class _BoozerSurface:
             def __init__(self):
                 self.surface = _Surface()
                 self.res = {
-                    "success": jnp.asarray(True),
-                    "iter": jnp.asarray(1),
-                    "iota": jnp.asarray(0.15, dtype=jnp.float64),
-                    "G": jnp.asarray(1.0, dtype=jnp.float64),
+                    "success": scalar_true,
+                    "iter": scalar_iter,
+                    "iota": scalar_iota,
+                    "G": scalar_G,
                 }
 
         class _JF:
             def J(self):
-                return jnp.asarray(1.0, dtype=jnp.float64)
+                return scalar_objective
 
             def dJ(self):
-                return jnp.arange(5, dtype=jnp.float64)
+                return gradient
 
         class _Objective:
             def J(self):
-                return jnp.asarray(0.5, dtype=jnp.float64)
+                return scalar_half
 
             def dJ(self):
-                return jnp.zeros(5, dtype=jnp.float64)
+                return zero_gradient
 
             def shortest_distance(self):
-                return jnp.asarray(0.1, dtype=jnp.float64)
+                return scalar_distance
 
         class _IotaObj:
             def J(self):
-                return jnp.asarray(0.15, dtype=jnp.float64)
+                return scalar_iota
 
         class _Curve:
             def gamma(self):
@@ -11273,7 +11348,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         class _CurveLength:
             def J(self):
-                return jnp.asarray(6.0, dtype=jnp.float64)
+                return scalar_length
 
         run_dict = {
             "lscount": 5,
@@ -11304,6 +11379,9 @@ class SingleStageExampleTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "test.log")
+            boozer_surface = _BoozerSurface()
+            objective = _JF()
+            biotsavart = _BS()
             with patch.object(module, "host_float", counted_host_float), patch.object(
                 module, "host_array", counted_host_array
             ), patch.object(
@@ -11311,9 +11389,9 @@ class SingleStageExampleTests(unittest.TestCase):
             ), patch.object(module, "BiotSavart", _BS):
                 module.accept_step(
                     run_dict,
-                    _BoozerSurface(),
-                    _JF(),
-                    _BS(),
+                    boozer_surface,
+                    objective,
+                    biotsavart,
                     objectives,
                     diagnostics_refs,
                     log_path,
@@ -13721,6 +13799,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
             constraint_method="penalty",
             init_only=False,
             skip_postprocess=True,
+            disable_accepted_step_callback=False,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -13759,6 +13838,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
             runtime_contract["constraint_method"],
             "penalty",
         )
+        self.assertTrue(runtime_contract["accepted_step_callback"])
         self.assertEqual(envelope["provenance"]["repo_sha"], "deadbeef")
         self.assertEqual(
             problem_contract["equilibrium"]["filename"],
