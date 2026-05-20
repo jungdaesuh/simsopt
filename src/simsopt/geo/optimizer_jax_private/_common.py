@@ -18,7 +18,7 @@ import numpy as np
 from jax import lax
 
 from ..._core.jax_host_boundary import host_array as _callback_host_array
-from ...backend import get_backend_policy
+from ...backend import get_backend_policy, is_float32_smoke_policy
 from ...jax_core.sharding import place_active_replicated
 from ..optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
@@ -254,12 +254,7 @@ def _require_private_optimizer_runtime(x0):
             "fall back to optimizer_backend='scipy'."
         )
     policy = get_backend_policy()
-    float32_smoke = (
-        not policy.requires_x64
-        and policy.runtime_dtype == "float32"
-        and policy.tolerance_tier == "float32_smoke"
-    )
-    if not _x64_enabled() and not float32_smoke:
+    if not _x64_enabled() and not is_float32_smoke_policy(policy):
         raise RuntimeError(
             "On-device optimizer requires jax_enable_x64=True before import/use."
         )

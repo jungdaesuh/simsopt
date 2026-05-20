@@ -222,14 +222,14 @@ def _lbfgsb_public_status(state, *, maxiter_limit, maxfun_limit):
     nonfinite_status = jnp.asarray(LBFGS_STATUS_NONFINITE, dtype=task0.dtype)
     zero = jnp.zeros_like(task0)
     one = jnp.ones_like(task0)
-    return jnp.where(
-        (task0 == lbfgsb.ABNORMAL) & nonfinite,
-        nonfinite_status,
-        jnp.where(
+    return jnp.select(
+        [
+            (task0 == lbfgsb.ABNORMAL) & nonfinite,
             task0 == lbfgsb.CONVERGENCE,
-            zero,
-            jnp.where(limited, one, one + one),
-        ),
+            limited,
+        ],
+        [nonfinite_status, zero, one],
+        default=one + one,
     )
 
 

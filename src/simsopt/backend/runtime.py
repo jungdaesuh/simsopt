@@ -1743,6 +1743,15 @@ def get_tolerance_tier(mode: str | None = None) -> str:
     return get_backend_policy(mode).tolerance_tier
 
 
+def is_float32_smoke_policy(policy: BackendPolicy) -> bool:
+    """Return True when ``policy`` describes a float32 smoke-tolerance lane."""
+    return (
+        not policy.requires_x64
+        and policy.runtime_dtype == "float32"
+        and policy.tolerance_tier == "float32_smoke"
+    )
+
+
 def get_compilation_cache_policy(mode: str | None = None) -> str:
     """Return the compilation-cache policy label for the resolved mode."""
     return get_backend_policy(mode).compilation_cache_policy

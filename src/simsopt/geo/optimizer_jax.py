@@ -116,6 +116,7 @@ from scipy.optimize import OptimizeResult
 from ..backend import (
     get_backend_config,
     get_backend_policy,
+    is_float32_smoke_policy,
     raise_if_strict_jax_fallback,
     strict_target_lane_purity,
     target_lane_purity_requested,
@@ -785,12 +786,7 @@ def require_target_backend_x64(optimizer_backend):
         return
     if _x64_enabled():
         return
-    policy = get_backend_policy()
-    if (
-        not policy.requires_x64
-        and policy.runtime_dtype == "float32"
-        and policy.tolerance_tier == "float32_smoke"
-    ):
+    if is_float32_smoke_policy(get_backend_policy()):
         return
     role = OPTIMIZER_BACKEND_ROLE[optimizer_backend]
     raise RuntimeError(
@@ -3125,6 +3121,8 @@ def _linear_solve_residual_tolerance(rhs, tol):
 
 
 def _linear_solve_status_success(status):
+    # Some callback lanes still emit a bare success array rather than a
+    # ``_LinearSolveStatus`` NamedTuple; accept both for now.
     return status.success if hasattr(status, "success") else status
 
 
@@ -3435,6 +3433,8 @@ def _dense_square_operator_materialization_allowed(rhs):
 def _dense_square_operator_matrix(matvec, rhs):
     rhs = jnp.asarray(rhs)
     dimension = int(rhs.shape[0])
+    # ``jnp.eye`` in JAX 0.10 emits an implicit int64 H→D transfer that breaks
+    # ``transfer_guard("disallow")`` contracts; route via explicit device_put.
     eye = _explicit_device_array(
         np.eye(dimension, dtype=np.dtype(rhs.dtype)),
         dtype=rhs.dtype,

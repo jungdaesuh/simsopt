@@ -1072,6 +1072,8 @@ def _curve_surface_distance_batch_compiled(
     flat_gammas = gammas.reshape((-1, gammas.shape[-1]))
     flat_gammadashs = gammadashs.reshape((-1, gammadashs.shape[-1]))
     curve_count = int(gammas.shape[0])
+    # cs_distance_pure normalizes by (#curve_pts * #surface_pts); flattening N
+    # curves divides by (N*R*C) so we multiply by N to recover sum_i sum_{q,c}.
     return _runtime_float64_scalar(curve_count, reference=minimum_distance) * (
         cs_distance_pure(
             flat_gammas,

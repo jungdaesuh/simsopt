@@ -29,6 +29,7 @@ Builds on M3's composed derivative path:
 import hashlib
 import inspect
 from dataclasses import dataclass, field
+import functools
 from functools import partial
 from itertools import count
 
@@ -136,6 +137,18 @@ _TRACEABLE_SOLVE_STATE_TOKEN_COUNTER = count()
 
 def _new_traceable_solve_state_token() -> int:
     return next(_TRACEABLE_SOLVE_STATE_TOKEN_COUNTER)
+
+
+def _with_host_bridge_transfer_guard(fn):
+    """Allow explicit host-PLU bridge transfers inside callback closures."""
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        with jax.transfer_guard_device_to_host("allow"):
+            with jax.transfer_guard_host_to_device("allow"):
+                return fn(*args, **kwargs)
+
+    return wrapped
 
 
 SOLVE_QUALITY_LS_FIELDS: tuple[str, ...] = (
@@ -3775,57 +3788,57 @@ class BoozerSurfaceJAX(Optimizable):
             )
             H_host = P_host @ L_host @ U_host
 
+            @_with_host_bridge_transfer_guard
             def apply_forward(rhs):
-                with jax.transfer_guard("allow"):
-                    return jnp.asarray(
-                        H_host @ np.asarray(rhs, dtype=np.float64), dtype=x.dtype
-                    )
+                return jnp.asarray(
+                    H_host @ np.asarray(rhs, dtype=np.float64), dtype=x.dtype
+                )
 
+            @_with_host_bridge_transfer_guard
             def apply_transpose(rhs):
-                with jax.transfer_guard("allow"):
-                    return jnp.asarray(
-                        H_host.T @ np.asarray(rhs, dtype=np.float64),
-                        dtype=x.dtype,
-                    )
+                return jnp.asarray(
+                    H_host.T @ np.asarray(rhs, dtype=np.float64),
+                    dtype=x.dtype,
+                )
 
+            @_with_host_bridge_transfer_guard
             def solve_forward(rhs):
-                with jax.transfer_guard("allow"):
-                    rhs_host = np.asarray(rhs, dtype=np.float64)
-                    y = scipy.linalg.solve_triangular(
-                        L_host,
-                        P_host.T @ rhs_host,
-                        lower=True,
-                    )
-                    solved = scipy.linalg.solve_triangular(U_host, y, lower=False)
-                    return jnp.asarray(solved, dtype=x.dtype)
+                rhs_host = np.asarray(rhs, dtype=np.float64)
+                y = scipy.linalg.solve_triangular(
+                    L_host,
+                    P_host.T @ rhs_host,
+                    lower=True,
+                )
+                solved = scipy.linalg.solve_triangular(U_host, y, lower=False)
+                return jnp.asarray(solved, dtype=x.dtype)
 
+            @_with_host_bridge_transfer_guard
             def solve_transpose(rhs):
-                with jax.transfer_guard("allow"):
-                    rhs_host = np.asarray(rhs, dtype=np.float64)
-                    y = scipy.linalg.solve_triangular(U_host.T, rhs_host, lower=True)
-                    z = scipy.linalg.solve_triangular(L_host.T, y, lower=False)
-                    solved = P_host @ z
-                    return jnp.asarray(solved, dtype=x.dtype)
+                rhs_host = np.asarray(rhs, dtype=np.float64)
+                y = scipy.linalg.solve_triangular(U_host.T, rhs_host, lower=True)
+                z = scipy.linalg.solve_triangular(L_host.T, y, lower=False)
+                solved = P_host @ z
+                return jnp.asarray(solved, dtype=x.dtype)
 
+            @_with_host_bridge_transfer_guard
             def solve_forward_with_status(rhs):
-                with jax.transfer_guard("allow"):
-                    solved = solve_forward(rhs)
-                    return solved, _optimizer_jax._dense_linear_solve_status(
-                        apply_forward,
-                        solved,
-                        jnp.asarray(rhs, dtype=x.dtype),
-                        tol=tol_host,
-                    )
+                solved = solve_forward(rhs)
+                return solved, _optimizer_jax._dense_linear_solve_status(
+                    apply_forward,
+                    solved,
+                    jnp.asarray(rhs, dtype=x.dtype),
+                    tol=tol_host,
+                )
 
+            @_with_host_bridge_transfer_guard
             def solve_transpose_with_status(rhs):
-                with jax.transfer_guard("allow"):
-                    solved = solve_transpose(rhs)
-                    return solved, _optimizer_jax._dense_linear_solve_status(
-                        apply_transpose,
-                        solved,
-                        jnp.asarray(rhs, dtype=x.dtype),
-                        tol=tol_host,
-                    )
+                solved = solve_transpose(rhs)
+                return solved, _optimizer_jax._dense_linear_solve_status(
+                    apply_transpose,
+                    solved,
+                    jnp.asarray(rhs, dtype=x.dtype),
+                    tol=tol_host,
+                )
 
             return pack_callbacks(
                 apply_forward,
