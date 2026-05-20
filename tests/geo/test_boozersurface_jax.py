@@ -2487,6 +2487,61 @@ class TestBoozerSurfaceJAXClass:
             booz_b._traceable_solve_state_token
         )
 
+    def test_instantiation_registers_surface_and_label_invalidation_sources(self):
+        """Surface and label changes invalidate caches without widening coil DOFs."""
+
+        class _OptimizableMockSurface(_bsj.Optimizable):
+            jax_surface_kind = "generic"
+
+            def __init__(self):
+                _bsj.Optimizable.__init__(self, x0=np.asarray([10.0, 11.0]))
+                self._surface_dofs = np.zeros(27)
+                self.mpol = 1
+                self.ntor = 1
+                self.nfp = 1
+                self.stellsym = False
+                self.quadpoints_phi = np.linspace(0.0, 1.0, 3, endpoint=False)
+                self.quadpoints_theta = np.linspace(0.0, 1.0, 3, endpoint=False)
+
+            def get_dofs(self):
+                return self._surface_dofs.copy()
+
+            def set_dofs(self, dofs):
+                self._surface_dofs = np.asarray(dofs, dtype=np.float64)
+
+            def get_stellsym_mask(self):
+                return np.ones((3, 3), dtype=bool)
+
+        class _OptimizablePlumbingVolumeLabel(_bsj.Optimizable):
+            def __init__(self, surface):
+                _bsj.Optimizable.__init__(self, x0=np.asarray([12.0]))
+                self.surface = surface
+
+        bs = _MockBiotSavart(_make_mock_coils())
+        surface = _OptimizableMockSurface()
+        label = _OptimizablePlumbingVolumeLabel(surface)
+        booz = BoozerSurfaceJAX(
+            bs,
+            surface,
+            label,
+            1.0,
+            constraint_weight=1.0,
+        )
+
+        assert booz.parents == [bs]
+        assert booz.dof_size == bs.dof_size
+        assert booz.full_dof_size == bs.full_dof_size
+
+        for source in (surface, label):
+            booz.need_to_run_code = False
+            token = booz._traceable_solve_state_token
+            booz._traceable_runtime_entry_cache = object()
+            source.set_recompute_flag()
+
+            assert booz.need_to_run_code is True
+            assert booz._traceable_solve_state_token != token
+            assert booz._traceable_runtime_entry_cache is None
+
     def test_instantiation_accepts_spec_only_biotsavart(self):
         """The grouped-coil spec path must not require a legacy ``_coils`` list."""
 
@@ -3930,8 +3985,12 @@ class TestBoozerSurfaceJAXClass:
         """recompute_bell sets the dirty flag."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
+        token = booz._traceable_solve_state_token
+        booz._traceable_runtime_entry_cache = object()
         booz.recompute_bell()
         assert booz.need_to_run_code is True
+        assert booz._traceable_solve_state_token != token
+        assert booz._traceable_runtime_entry_cache is None
 
     def test_pack_unpack_roundtrip(self):
         """_pack and _unpack are inverses."""

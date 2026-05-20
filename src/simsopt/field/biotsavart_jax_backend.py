@@ -1174,12 +1174,12 @@ class BiotSavartJAX(Optimizable):
         super().set_recompute_flag(parent=parent)
 
     def _set_global_coil_dofs(self, optimizable_setter, coil_dofs):
-        self._advance_coil_dof_state()
         self._suppress_dependency_coil_dof_state = True
         try:
             optimizable_setter(self, coil_dofs)
         finally:
             self._suppress_dependency_coil_dof_state = False
+        self._advance_coil_dof_state()
 
     @property
     def x(self):

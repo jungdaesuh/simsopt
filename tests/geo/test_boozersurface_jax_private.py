@@ -29,6 +29,11 @@ from .boozersurface_jax_test_helpers import (
 )
 
 
+def test_pytree_inexact_dtype_empty_tree_respects_x64_policy():
+    expected_dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    assert _opt_common._pytree_inexact_dtype({}) == expected_dtype
+
+
 def test_solve_boozer_adjoint_rejects_factor_only_runtime_state():
     adjoint_state = types.SimpleNamespace(
         linearization_kind="exact_jacobian",

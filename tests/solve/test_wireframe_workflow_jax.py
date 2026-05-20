@@ -1,4 +1,7 @@
-"""N7 live-loop tests for wireframe GSCO JAX workflow state."""
+"""N7 live-loop tests for wireframe GSCO JAX workflow state.
+
+Lane key: reporting_contract for host-boundary live-loop invariants.
+"""
 
 from __future__ import annotations
 
@@ -12,10 +15,13 @@ import simsoptpp as sopp
 
 from simsopt.jax_core.wireframe_workflow import (
     WireframeGSCOLiveParams,
+    _wireframe_gsco_multistep_initial_state,
     find_wireframe_coil_sizes_jax,
+    greedy_stellarator_coil_optimization_jax,
     gsco_live_loop_jax,
     wireframe_gsco_initial_state,
     wireframe_gsco_multistep_loop_jax,
+    wireframe_gsco_never_stop,
 )
 
 
@@ -97,6 +103,99 @@ def _params(
         no_new_coils=False,
         match_current=False,
     )
+
+
+def test_wireframe_initial_states_allow_strict_host_to_device_transfer_guard():
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _gsco_problem()
+    )
+    params = _params(
+        A,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        default_current=0.2,
+        max_current=1.0,
+        max_loop_count=3,
+        lambda_s=0.01,
+    )
+
+    with jax.transfer_guard_host_to_device("disallow"):
+        state = wireframe_gsco_initial_state(
+            params,
+            b,
+            x_init,
+            loop_count_init,
+            history_capacity=4,
+        )
+        multistep_state = _wireframe_gsco_multistep_initial_state(
+            x_init,
+            loop_count_init,
+            current_fraction=0.5,
+        )
+        assert np.asarray(wireframe_gsco_never_stop(state)).item() is False
+        assert state.iter_history.shape == (4,)
+        assert multistep_state.current_fraction.shape == ()
+        assert np.asarray(multistep_state.done).item() is False
+        result = greedy_stellarator_coil_optimization_jax(
+            False,
+            False,
+            False,
+            A,
+            b,
+            0.2,
+            1.0,
+            3,
+            loops,
+            free_loops,
+            segments,
+            connections,
+            0.01,
+            3,
+            x_init,
+            loop_count_init,
+        )
+        sampled = greedy_stellarator_coil_optimization_jax(
+            False,
+            False,
+            False,
+            A,
+            b,
+            0.2,
+            1.0,
+            3,
+            loops,
+            free_loops,
+            segments,
+            connections,
+            0.01,
+            3,
+            x_init,
+            loop_count_init,
+            record_every=1,
+        )
+        no_crossing = greedy_stellarator_coil_optimization_jax(
+            True,
+            False,
+            False,
+            A,
+            b,
+            0.2,
+            1.0,
+            3,
+            loops,
+            free_loops,
+            segments,
+            connections,
+            0.01,
+            3,
+            x_init,
+            loop_count_init,
+        )
+        assert result.iter_history.shape == (4,)
+        assert sampled.iter_history.shape == (5,)
+        assert no_crossing.iter_history.shape == (4,)
 
 
 def _run_cpp_gsco(

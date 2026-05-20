@@ -1,33 +1,45 @@
-import sys
+import importlib.util
 
-from .serial import *
-from .mpi import *
-from .permanent_magnet_optimization import *
-from .wireframe_optimization import *
+from .._lazy_exports import build_lazy_export_map, resolve_lazy_export
 
 try:
-    import jax as _  # noqa: F401
+    from simsoptpp import Curve as _  # noqa: F401
 
-    _has_jax = True
-except ImportError:
-    _has_jax = False
+    _has_simsoptpp = True
+except (ImportError, AttributeError):
+    _has_simsoptpp = False
 
-if _has_jax:
-    from .permanent_magnet_optimization_jax import *
-    from .wireframe_optimization_jax import *
+_has_jax = importlib.util.find_spec("jax") is not None
 
-
-def _module_all(name):
-    return list(sys.modules[f"{__name__}.{name}"].__all__)
-
-
-__all__ = (
-    _module_all("serial")
-    + _module_all("mpi")
-    + _module_all("permanent_magnet_optimization")
-    + _module_all("wireframe_optimization")
+_CORE_SOLVE_MODULES = ("serial",)
+_SIMSOPTPP_SOLVE_MODULES = (
+    "mpi",
+    "permanent_magnet_optimization",
+    "wireframe_optimization",
 )
+_JAX_SOLVE_MODULES = (
+    "serial_jax",
+    "mpi_jax",
+    "permanent_magnet_optimization_jax",
+)
+_SIMSOPTPP_JAX_SOLVE_MODULES = ("wireframe_optimization_jax",)
+
+_solve_modules = _CORE_SOLVE_MODULES
+if _has_simsoptpp:
+    _solve_modules += _SIMSOPTPP_SOLVE_MODULES
 if _has_jax:
-    __all__ += _module_all("permanent_magnet_optimization_jax") + _module_all(
-        "wireframe_optimization_jax"
-    )
+    _solve_modules += _JAX_SOLVE_MODULES
+if _has_simsoptpp and _has_jax:
+    _solve_modules += _SIMSOPTPP_JAX_SOLVE_MODULES
+
+_EXPORT_TO_MODULE, __all__ = build_lazy_export_map(__file__, _solve_modules)
+
+
+def __getattr__(name):
+    value = resolve_lazy_export(__name__, _EXPORT_TO_MODULE, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

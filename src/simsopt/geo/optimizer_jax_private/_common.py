@@ -194,7 +194,7 @@ def _norm(x, *, ord=None):
 def _pytree_inexact_dtype(tree):
     leaves = jax.tree.leaves(tree)
     if not leaves:
-        return jnp.float32
+        return jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
     dtype = jnp.result_type(*[jnp.asarray(leaf) for leaf in leaves])
     if not jnp.issubdtype(dtype, jnp.inexact):
         dtype = jnp.promote_types(dtype, jnp.float32)

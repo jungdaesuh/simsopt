@@ -1,0 +1,37 @@
+"""Regression tests for small JAX kernel numeric helpers."""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+jax.config.update("jax_enable_x64", True)
+
+from simsopt.jax_core._spline_utils import _safe_divide
+from simsopt.jax_core.curve_xyz_fourier import _constant_row
+
+
+def test_safe_divide_has_finite_zero_denominator_gradient():
+    def scalar_value(denominator):
+        return _safe_divide(jnp.asarray(2.0, dtype=jnp.float64), denominator)
+
+    gradient = jax.grad(scalar_value)(jnp.asarray(0.0, dtype=jnp.float64))
+
+    assert np.isfinite(np.asarray(gradient))
+    np.testing.assert_allclose(np.asarray(gradient), 0.0)
+
+
+def test_constant_row_accepts_traced_value():
+    @jax.jit
+    def row_for(value):
+        return _constant_row(3, value, reference=jnp.asarray(1.0, dtype=jnp.float64))
+
+    np.testing.assert_allclose(
+        np.asarray(row_for(jnp.asarray(1.0, dtype=jnp.float64))),
+        np.ones((1, 3)),
+    )
+    np.testing.assert_allclose(
+        np.asarray(row_for(jnp.asarray(0.0, dtype=jnp.float64))),
+        np.zeros((1, 3)),
+    )

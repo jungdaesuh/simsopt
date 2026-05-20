@@ -2122,7 +2122,7 @@ def _traceable_runtime_deviceify_leaf(leaf, device):
 
 def _traceable_runtime_deviceify_tree(tree):
     """Recursively device-place cached runtime arrays for strict diagnostics."""
-    device = jax.devices()[0]
+    device = jax.local_devices()[0]
     return jax.tree.map(
         lambda leaf: _traceable_runtime_deviceify_leaf(leaf, device),
         tree,
@@ -2551,7 +2551,13 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
             weight_inv_modB,
         )
         adjoint_state = _resolved_boozer_adjoint_runtime_state(self.boozer_surface)
-        dJ_ds = self._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
+        dJ_ds = self._compute_dJ_ds(
+            coil_set_spec,
+            iota,
+            G,
+            weight_inv_modB,
+            sdofs=solved_state.sdofs,
+        )
         adjoint = _solve_boozer_adjoint(adjoint_state, dJ_ds)
         adjoint_gradient = _adjoint_coil_dofs_gradient(
             adjoint_state.stream_group_vjps,
@@ -2587,9 +2593,9 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
             coil_set_spec,
         )
 
-    def _compute_dJ_ds(self, coil_set_spec, iota, G, weight_inv_modB):
+    def _compute_dJ_ds(self, coil_set_spec, iota, G, weight_inv_modB, *, sdofs):
         """Compute ∂J_BR/∂[surface_dofs, iota, G] via JAX autodiff."""
-        x_inner, optimize_G = self._inner_objective_state(iota, G)
+        x_inner, optimize_G = self._inner_objective_state(iota, G, sdofs=sdofs)
 
         def objective(x):
             return _boozer_residual_J_of_x_inner(
@@ -2905,6 +2911,7 @@ def compute_standard_surface_objective_gradients(
         iota_value,
         G,
         weight_inv_modB,
+        sdofs=sdofs,
     )
 
     lhs_dtype = _adjoint_state_dtype(adjoint_state)
@@ -4227,20 +4234,26 @@ def _build_traceable_objective_compiled_bundle_from_state(
     def _value_and_grad_for(coil_dofs):
         result = jitted_forward_result_for(coil_dofs)
 
-        def _accepted_candidate_gradient(_):
+        def _total_gradient_at(candidate_coil_dofs, candidate_x, linear_solve_factors):
             return compiled_total_gradient_for(
+                candidate_coil_dofs,
+                candidate_x,
+                linear_solve_factors,
+            )
+
+        def _accepted_candidate_gradient(_):
+            return _total_gradient_at(
                 coil_dofs,
                 result["x"],
                 result["linear_solve_factors"],
             )
 
         def _rejected_candidate_gradient(_):
-            grad, _ = compiled_total_gradient_for(
+            return _total_gradient_at(
                 baseline_coil_dofs,
                 baseline_x,
                 baseline_linear_solve_factors,
             )
-            return grad, _runtime_bool(True)
 
         grad, linear_solve_success = lax.cond(
             result["success"],
@@ -4687,21 +4700,27 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
             solved_linear_solve_factors
         )
 
-        def _accepted_candidate_gradient(_):
+        def _gradient_or_nan(candidate_coil_dofs, candidate_x, linear_solve_factors):
             grad, linear_solve_success = compiled_total_gradient_for(
+                candidate_coil_dofs,
+                candidate_x,
+                linear_solve_factors,
+            )
+            return _traceable_adjoint_gradient_or_nan(grad, linear_solve_success)
+
+        def _accepted_candidate_gradient(_):
+            return _gradient_or_nan(
                 coil_dofs,
                 solved_x,
                 solved_linear_solve_factors,
             )
-            return _traceable_adjoint_gradient_or_nan(grad, linear_solve_success)
 
         def _rejected_candidate_gradient(_):
-            grad, _ = compiled_total_gradient_for(
+            return _gradient_or_nan(
                 baseline_coil_dofs,
                 baseline_x,
                 baseline_linear_solve_factors,
             )
-            return grad
 
         grad = lax.cond(
             success,

@@ -20,7 +20,7 @@ def _mode_numbers(order, *, reference):
 def _constant_row(length, value, *, reference):
     one = jax.lax.stop_gradient(device_one(reference))
     zero = one - one
-    scalar = one if value == 1.0 else zero
+    scalar = jnp.where(_as_runtime_float64(value, reference=one) == one, one, zero)
     return jnp.broadcast_to(scalar, (1, int(length)))
 
 

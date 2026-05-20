@@ -7,7 +7,7 @@ import numpy as np
 
 import simsoptpp as sopp
 from .._core.util import parallel_loop_bounds
-from ..backend.runtime import is_jax_backend
+from ..backend import is_jax_backend
 from ..field.magneticfield import MagneticField
 from ..field.boozermagneticfield import BoozerMagneticField
 from ..field.sampling import draw_uniform_on_curve, draw_uniform_on_surface
@@ -571,18 +571,9 @@ def _trace_particles_boozer_jax(
     local_stz = np.asarray(stz_inits[first:last], dtype=np.float64)
     local_speed_par = np.asarray(speed_par[first:last], dtype=np.float64)
     if local_stz.shape[0] > 0:
-        abs_B_initial_values = []
-        G0_values = []
-        for point in local_stz:
-            field.set_points(point.reshape((1, 3)))
-            abs_B_initial_values.append(
-                float(np.asarray(field.modB(), dtype=np.float64).reshape(-1)[0])
-            )
-            G0_values.append(
-                float(np.asarray(field.G(), dtype=np.float64).reshape(-1)[0])
-            )
-        abs_B_initial = np.asarray(abs_B_initial_values, dtype=np.float64)
-        G0 = np.asarray(G0_values, dtype=np.float64)
+        field.set_points(local_stz)
+        abs_B_initial = np.asarray(field.modB(), dtype=np.float64).reshape(-1)
+        G0 = np.asarray(field.G(), dtype=np.float64).reshape(-1)
         mus = _magnetic_moments(float(speed_total), local_speed_par, abs_B_initial)
         dtmaxs = _boozer_particle_dtmaxs(G0, abs_B_initial, float(speed_total))
         spec = GuidingCenterTracingSpec(

@@ -2965,13 +2965,17 @@ def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkey
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = None
     obj._direct_objective_value_and_grad = object()
+    dJ_ds_sdofs = []
     obj._inner_objective_state = lambda _iota, _G, *, sdofs=None: (
         jnp.asarray([0.1, 0.2], dtype=jnp.float64),
         True,
     )
-    obj._compute_dJ_ds = lambda _coil_set_spec, _iota, _G, _weight_inv_modB: (
-        jnp.asarray([0.0, 1.0], dtype=jnp.float64)
-    )
+
+    def _compute_dJ_ds(_coil_set_spec, _iota, _G, _weight_inv_modB, *, sdofs):
+        dJ_ds_sdofs.append(sdofs)
+        return jnp.asarray([0.0, 1.0], dtype=jnp.float64)
+
+    obj._compute_dJ_ds = _compute_dJ_ds
 
     solved_state = types.SimpleNamespace(
         sdofs=jnp.asarray([0.4], dtype=jnp.float64),
@@ -3035,6 +3039,10 @@ def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkey
     np.testing.assert_allclose(np.asarray(gradient), np.asarray([3.0, -3.0]))
     assert obj._J == 2.5
     assert obj._dJ is None
+    assert len(dJ_ds_sdofs) == 1
+    np.testing.assert_allclose(
+        np.asarray(dJ_ds_sdofs[0]), np.asarray(solved_state.sdofs)
+    )
 
 
 def test_iotas_jax_native_gradient_stays_flat_until_public_boundary(monkeypatch):
@@ -4623,6 +4631,63 @@ def test_traceable_value_and_grad_rejected_candidate_uses_baseline_gradient(
     )
 
 
+def test_traceable_value_and_grad_rejected_candidate_surfaces_baseline_adjoint_failure(
+    monkeypatch,
+):
+    baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+    failed_gradient = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
+    state = {
+        "objective_kwargs": {},
+        "baseline_x": jnp.asarray([1.0, -1.0], dtype=jnp.float64),
+        "baseline_value": jnp.asarray(1.25, dtype=jnp.float64),
+        "baseline_linear_solve_factors": None,
+        "baseline_coil_dofs": baseline_coil_dofs,
+        "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
+        "optimize_G": False,
+        "predictor_kind": "none",
+        "linearization_kind": "hessian",
+        "linear_solve_tol": 1.0e-10,
+        "linear_solve_stab": 0.0,
+    }
+
+    def fake_forward_result(_booz_jax, _coil_set_spec_from_dofs, **_kwargs):
+        return {
+            "value": jnp.asarray(2.5, dtype=jnp.float64),
+            "x": jnp.asarray([4.0, -4.0], dtype=jnp.float64),
+            "sdofs": jnp.asarray([4.0], dtype=jnp.float64),
+            "iota": jnp.asarray(-4.0, dtype=jnp.float64),
+            "G": None,
+            "linear_solve_factors": None,
+            "success": jnp.asarray(False, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+            "adjoint_linear_solve_available": jnp.asarray(True, dtype=bool),
+        }
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_forward_result",
+        fake_forward_result,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_total_gradient_with_status",
+        lambda *_args, **_kwargs: (
+            failed_gradient,
+            jnp.asarray(False, dtype=bool),
+        ),
+    )
+
+    bundle = surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+        object(),
+        state,
+    )
+    value, grad = bundle["compiled_value_and_grad_for"](
+        jnp.asarray([9.0, -8.0], dtype=jnp.float64)
+    )
+
+    _assert_primal_value_with_nonfinite_gradient(value, grad, 2.5)
+
+
 def test_host_boundary_with_baseline_peel_falls_through_for_traced_inputs():
     baseline = np.asarray([1.0, 2.0], dtype=np.float64)
     wrapped = surfaceobjectives_jax_module._host_boundary_with_baseline_peel(
@@ -4852,6 +4917,40 @@ def test_traceable_custom_vjp_surfaces_adjoint_solve_failure_as_nan_gradient():
     )
 
     grad = jax.grad(objective)(jnp.asarray([0.5, -0.25], dtype=jnp.float64))
+    _assert_nonfinite_gradient(grad)
+
+
+def test_traceable_custom_vjp_rejected_candidate_surfaces_baseline_adjoint_failure():
+    failed_gradient = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
+
+    def compiled_forward_result_for(coil_dofs):
+        return {
+            "value": jnp.asarray(1.25, dtype=jnp.float64),
+            "x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            "linear_solve_factors": None,
+            "success": jnp.asarray(False, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+        }
+
+    compiled_bundle = {
+        "compiled_forward_result_for": compiled_forward_result_for,
+        "compiled_total_gradient_for": lambda *_args: (
+            failed_gradient,
+            jnp.asarray(False, dtype=bool),
+        ),
+        "state": {
+            "baseline_coil_dofs": jnp.asarray([0.5, -0.25], dtype=jnp.float64),
+            "baseline_x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            "baseline_linear_solve_factors": None,
+        },
+    }
+    objective = (
+        surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
+            compiled_bundle
+        )
+    )
+
+    grad = jax.grad(objective)(jnp.asarray([9.0, -8.0], dtype=jnp.float64))
     _assert_nonfinite_gradient(grad)
 
 
@@ -5777,7 +5876,7 @@ def test_traceable_runtime_deviceify_tree_explicitly_restages_jax_arrays(monkeyp
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module.jax,
-        "devices",
+        "local_devices",
         lambda: [active_device],
     )
 

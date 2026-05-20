@@ -11,6 +11,8 @@ from jax.experimental import io_callback
 
 from ._math_utils import as_jax_float64 as _as_jax_float64
 from ._math_utils import as_jax_int32 as _as_jax_int32
+from ._math_utils import runtime_init_array as _runtime_init_array
+from ._math_utils import runtime_init_scalar as _runtime_init_scalar
 
 __all__ = [
     "WireframeGSCOResult",
@@ -205,11 +207,22 @@ def _has_tracer_leaf(value) -> bool:
 def wireframe_gsco_never_stop(state: WireframeGSCOLiveState) -> jax.Array:
     """Keep scanning until the static ``max_steps`` budget is consumed."""
 
-    return jnp.asarray(False)
+    return _runtime_init_scalar(False, jnp.bool_)
 
 
 def _gsco_active_entries(x: jax.Array, tol: jax.Array) -> jax.Array:
-    return jnp.where(jnp.abs(x) > tol, 1.0, 0.0)
+    return (jnp.abs(x) > tol).astype(x.dtype)
+
+
+def _gsco_signed_loop_delta(currents: jax.Array) -> jax.Array:
+    return jnp.stack((currents, currents, -currents, -currents), axis=-1)
+
+
+def _update_vector_entry(
+    vector: jax.Array, index: jax.Array, value: jax.Array
+) -> jax.Array:
+    positions = jnp.arange(int(vector.shape[0]), dtype=index.dtype)
+    return jnp.where(positions == index, jnp.broadcast_to(value, vector.shape), vector)
 
 
 def _gsco_two_f_s(x: jax.Array, tol: jax.Array) -> jax.Array:
@@ -217,7 +230,8 @@ def _gsco_two_f_s(x: jax.Array, tol: jax.Array) -> jax.Array:
 
 
 def _gsco_opposite_candidate_index(opt_ind: jax.Array, n_loops: int) -> jax.Array:
-    return (opt_ind + n_loops) % (2 * n_loops)
+    n_loops_arr = _runtime_init_scalar(n_loops, opt_ind.dtype)
+    return (opt_ind + n_loops_arr) % _runtime_init_scalar(2 * n_loops, opt_ind.dtype)
 
 
 def _gsco_candidate_currents(
@@ -227,42 +241,54 @@ def _gsco_candidate_currents(
 ) -> jax.Array:
     n_loops = int(params.loops.shape[0])
     candidate_ids = jnp.arange(2 * n_loops, dtype=jnp.int32)
-    loop_ids = candidate_ids % n_loops
-    directions = jnp.where(candidate_ids < n_loops, 1.0, -1.0).astype(x.dtype)
-    direction_counts = jnp.where(candidate_ids < n_loops, 1, -1).astype(
+    n_loops_arr = _runtime_init_scalar(n_loops, candidate_ids.dtype)
+    loop_ids = candidate_ids % n_loops_arr
+    positive_float = _runtime_init_scalar(1, x.dtype)
+    positive_int = _runtime_init_scalar(1, loop_count.dtype)
+    first_direction = candidate_ids < n_loops_arr
+    directions = jnp.where(first_direction, positive_float, -positive_float).astype(
+        x.dtype
+    )
+    direction_counts = jnp.where(first_direction, positive_int, -positive_int).astype(
         loop_count.dtype
     )
     loop_inds = params.loops[loop_ids, :]
-    loop_signs = jnp.asarray([1.0, 1.0, -1.0, -1.0], dtype=x.dtype)
     loop_x = x[loop_inds]
 
-    eligible = params.free_loops[loop_ids] == 1
+    eligible = params.free_loops[loop_ids] == _runtime_init_scalar(
+        1, params.free_loops.dtype
+    )
     if params.max_loop_count > 0:
         next_counts = loop_count[loop_ids] + direction_counts
-        eligible = eligible & (jnp.abs(next_counts) <= params.max_loop_count)
+        eligible = eligible & (
+            jnp.abs(next_counts)
+            <= _runtime_init_scalar(params.max_loop_count, next_counts.dtype)
+        )
 
     if params.no_new_coils:
         eligible = eligible & jnp.any(
-            _gsco_active_entries(loop_x, params.tol) > 0.0, axis=1
+            _gsco_active_entries(loop_x, params.tol) > _runtime_init_scalar(0, x.dtype),
+            axis=1,
         )
 
+    zero = _runtime_init_scalar(0, x.dtype)
     if params.match_current:
         abs_loop_x = jnp.abs(loop_x)
-        nonzero_currents = abs_loop_x > 0.0
+        nonzero_currents = abs_loop_x > zero
         matched_abs_current = jnp.max(
-            jnp.where(nonzero_currents, abs_loop_x, 0.0),
+            jnp.where(nonzero_currents, abs_loop_x, zero),
             axis=1,
         )
         mismatch = jnp.any(
             jnp.where(
                 nonzero_currents,
                 abs_loop_x != matched_abs_current[:, None],
-                False,
+                nonzero_currents != nonzero_currents,
             ),
             axis=1,
         )
         loop_current = jnp.where(
-            matched_abs_current != 0.0,
+            matched_abs_current != zero,
             directions * matched_abs_current,
             directions * params.default_current,
         )
@@ -270,14 +296,14 @@ def _gsco_candidate_currents(
     else:
         loop_current = directions * params.default_current
 
-    candidate_x = loop_x + loop_signs[None, :] * loop_current[:, None]
+    loop_deltas = _gsco_signed_loop_delta(loop_current)
+    candidate_x = loop_x + loop_deltas
     eligible = eligible & jnp.all(jnp.abs(candidate_x) <= params.max_current, axis=1)
 
     if params.no_crossing:
-        toroidal_segment_inds = loop_inds[:, [0, 2]]
+        toroidal_segment_inds = jnp.stack((loop_inds[:, 0], loop_inds[:, 2]), axis=1)
         nodes = jnp.reshape(params.segments[toroidal_segment_inds, :], (2 * n_loops, 4))
         connected = params.connections[nodes, :]
-        loop_deltas = loop_signs[None, :] * loop_current[:, None]
         matches = connected[:, :, :, None] == loop_inds[:, None, None, :]
         first_match = jnp.argmax(matches, axis=3)
         matched_delta = jnp.take_along_axis(
@@ -285,12 +311,17 @@ def _gsco_candidate_currents(
             first_match[:, :, :, None],
             axis=3,
         )[:, :, :, 0]
-        current_to_add = jnp.where(jnp.any(matches, axis=3), matched_delta, 0.0)
+        current_to_add = jnp.where(jnp.any(matches, axis=3), matched_delta, zero)
         active_connections = jnp.abs(x[connected] + current_to_add) > params.tol
-        crossing_found = jnp.any(jnp.sum(active_connections, axis=2) > 2, axis=1)
+        crossing_found = jnp.any(
+            jnp.sum(active_connections, axis=2) > _runtime_init_scalar(2, jnp.int32),
+            axis=1,
+        )
         eligible = eligible & ~crossing_found
 
-    return jnp.where(eligible, loop_current, 0.0)
+    return jnp.where(
+        eligible, loop_current, _runtime_init_scalar(0, loop_current.dtype)
+    )
 
 
 def _gsco_candidate_objectives(
@@ -302,9 +333,10 @@ def _gsco_candidate_objectives(
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     n_loops = int(params.loops.shape[0])
     candidate_ids = jnp.arange(2 * n_loops, dtype=jnp.int32)
-    loop_inds = params.loops[candidate_ids % n_loops, :]
-    loop_signs = jnp.asarray([1.0, 1.0, -1.0, -1.0], dtype=x.dtype)
-    loop_delta = loop_signs[None, :] * candidate_currents[:, None]
+    loop_inds = params.loops[
+        candidate_ids % _runtime_init_scalar(n_loops, candidate_ids.dtype), :
+    ]
+    loop_delta = _gsco_signed_loop_delta(candidate_currents)
 
     field_delta = jnp.sum(params.A[:, loop_inds] * loop_delta[None, :, :], axis=2)
     two_f_b = jnp.sum((residual[:, None] + field_delta) ** 2, axis=0)
@@ -315,7 +347,7 @@ def _gsco_candidate_objectives(
     two_f_s = two_f_s_latest + two_df - two_df_orig
     two_f = two_f_b + params.lambda_s * two_f_s
     inf = jnp.finfo(params.A.dtype).max
-    eligible = candidate_currents != 0.0
+    eligible = candidate_currents != _runtime_init_scalar(0, candidate_currents.dtype)
     return (
         jnp.where(eligible, two_f_b, inf),
         jnp.where(eligible, two_f_s, inf),
@@ -422,8 +454,9 @@ def find_wireframe_coil_sizes_jax(
     loop_count_arr = jnp.reshape(_as_jax_int32(loop_count), (-1,))
     neighbors_arr = _as_jax_int32(neighbors)
     n_cells = int(loop_count_arr.shape[0])
-    active = loop_count_arr != 0
-    sentinel = jnp.asarray(n_cells, dtype=jnp.int32)
+    zero_count = _runtime_init_scalar(0, loop_count_arr.dtype)
+    active = loop_count_arr != zero_count
+    sentinel = _runtime_init_scalar(n_cells, jnp.int32)
     initial_labels = jnp.where(active, jnp.arange(n_cells, dtype=jnp.int32), sentinel)
 
     def _propagate(labels, _iteration):
@@ -440,14 +473,18 @@ def find_wireframe_coil_sizes_jax(
         initial_labels,
         jnp.arange(n_cells, dtype=jnp.int32),
     )
-    label_for_count = jnp.where(active, labels, 0)
+    label_for_count = jnp.where(active, labels, _runtime_init_scalar(0, labels.dtype))
     component_sizes = jnp.bincount(
         label_for_count,
         weights=active.astype(jnp.int32),
         length=n_cells,
     )
-    safe_labels = jnp.minimum(labels, n_cells - 1)
-    return jnp.where(active, component_sizes[safe_labels], 0)
+    safe_labels = jnp.minimum(labels, _runtime_init_scalar(n_cells - 1, labels.dtype))
+    return jnp.where(
+        active,
+        component_sizes[safe_labels],
+        _runtime_init_scalar(0, component_sizes.dtype),
+    )
 
 
 def _wireframe_enclosed_segment_mask(
@@ -455,15 +492,17 @@ def _wireframe_enclosed_segment_mask(
     loop_count: jax.Array,
     cell_key: jax.Array,
 ) -> jax.Array:
-    active_cells = jnp.reshape(loop_count, (-1,)) != 0
+    active_cells = jnp.reshape(loop_count, (-1,)) != _runtime_init_scalar(
+        0, loop_count.dtype
+    )
     n_segments = int(x.shape[0])
     enclosed_count = jnp.bincount(
         jnp.reshape(cell_key, (-1,)),
         weights=jnp.repeat(active_cells.astype(jnp.int32), cell_key.shape[1]),
         length=n_segments,
     )
-    enclosed = enclosed_count > 0
-    return enclosed & (jnp.reshape(x, (-1,)) == 0.0)
+    enclosed = enclosed_count > _runtime_init_scalar(0, enclosed_count.dtype)
+    return enclosed & (jnp.reshape(x, (-1,)) == _runtime_init_scalar(0, x.dtype))
 
 
 def _wireframe_prune_small_coils(
@@ -475,17 +514,21 @@ def _wireframe_prune_small_coils(
     min_coil_size: int,
 ) -> tuple[jax.Array, jax.Array]:
     coil_sizes = find_wireframe_coil_sizes_jax(loop_count, neighbors)
-    small_cells = (coil_sizes > 0) & (coil_sizes < int(min_coil_size))
+    small_cells = (coil_sizes > _runtime_init_scalar(0, coil_sizes.dtype)) & (
+        coil_sizes < _runtime_init_scalar(int(min_coil_size), coil_sizes.dtype)
+    )
     n_segments = int(x.shape[0])
     segment_prune_count = jnp.bincount(
         jnp.reshape(cell_key, (-1,)),
         weights=jnp.repeat(small_cells.astype(jnp.int32), cell_key.shape[1]),
         length=n_segments,
     )
-    segment_prune_mask = segment_prune_count > 0
+    segment_prune_mask = segment_prune_count > _runtime_init_scalar(
+        0, segment_prune_count.dtype
+    )
     return (
-        jnp.where(segment_prune_mask, jnp.zeros((), dtype=x.dtype), x),
-        jnp.where(small_cells, jnp.zeros((), dtype=loop_count.dtype), loop_count),
+        jnp.where(segment_prune_mask, x - x, x),
+        jnp.where(small_cells, loop_count - loop_count, loop_count),
     )
 
 
@@ -506,19 +549,15 @@ def wireframe_gsco_initial_state(
     two_f_b0 = jnp.sum(residual0 * residual0)
     two_f_s0 = _gsco_two_f_s(x0, params.tol)
     two_f0 = two_f_b0 + params.lambda_s * two_f_s0
+    half = _runtime_init_scalar(0.5, params.A.dtype)
 
-    iter_history = jnp.zeros((history_capacity,), dtype=jnp.int32)
-    curr_history = jnp.zeros((history_capacity,), dtype=params.A.dtype)
-    loop_history = jnp.zeros((history_capacity,), dtype=jnp.int32)
-    f_b_history = (
-        jnp.zeros((history_capacity,), dtype=params.A.dtype).at[0].set(0.5 * two_f_b0)
-    )
-    f_s_history = (
-        jnp.zeros((history_capacity,), dtype=params.A.dtype).at[0].set(0.5 * two_f_s0)
-    )
-    f_history = (
-        jnp.zeros((history_capacity,), dtype=params.A.dtype).at[0].set(0.5 * two_f0)
-    )
+    iter_history = _runtime_init_array((history_capacity,), 0, jnp.int32)
+    curr_history = _runtime_init_array((history_capacity,), 0, params.A.dtype)
+    loop_history = _runtime_init_array((history_capacity,), 0, jnp.int32)
+    history_tail = _runtime_init_array((history_capacity - 1,), 0, params.A.dtype)
+    f_b_history = jnp.concatenate((jnp.reshape(half * two_f_b0, (1,)), history_tail))
+    f_s_history = jnp.concatenate((jnp.reshape(half * two_f_s0, (1,)), history_tail))
+    f_history = jnp.concatenate((jnp.reshape(half * two_f0, (1,)), history_tail))
     return WireframeGSCOLiveState(
         x=x0,
         loop_count=loop_count0,
@@ -526,9 +565,9 @@ def wireframe_gsco_initial_state(
         two_f_b=two_f_b0,
         two_f_s=two_f_s0,
         two_f=two_f0,
-        opt_ind_prev=jnp.asarray(-1, dtype=jnp.int32),
-        history_length=jnp.asarray(1, dtype=jnp.int32),
-        done=jnp.asarray(False),
+        opt_ind_prev=_runtime_init_scalar(-1, jnp.int32),
+        history_length=_runtime_init_scalar(1, jnp.int32),
+        done=_runtime_init_scalar(False, jnp.bool_),
         iter_history=iter_history,
         curr_history=curr_history,
         loop_history=loop_history,
@@ -556,17 +595,26 @@ def _gsco_live_step(
     n_loops = int(params.loops.shape[0])
     opt_ind = jnp.argmin(two_fs).astype(jnp.int32)
     current = candidate_currents[opt_ind]
-    loop_ind = (opt_ind % n_loops).astype(jnp.int32)
-    direction_count = jnp.where(opt_ind < n_loops, 1, -1).astype(state.loop_count.dtype)
+    n_loops_arr = _runtime_init_scalar(n_loops, opt_ind.dtype)
+    loop_ind = (opt_ind % n_loops_arr).astype(jnp.int32)
+    one_loop_count = _runtime_init_scalar(1, state.loop_count.dtype)
+    direction_count = jnp.where(
+        opt_ind < n_loops_arr,
+        one_loop_count,
+        -one_loop_count,
+    ).astype(state.loop_count.dtype)
     loop_inds = params.loops[loop_ind, :]
-    loop_signs = jnp.asarray([1.0, 1.0, -1.0, -1.0], dtype=params.A.dtype)
-    delta_x = loop_signs * current
+    delta_x = _gsco_signed_loop_delta(current)
     residual_delta = jnp.sum(params.A[:, loop_inds] * delta_x[None, :], axis=1)
 
-    n_eligible = jnp.sum(candidate_currents != 0.0)
-    stop_none_eligible = n_eligible < 1
+    n_eligible = jnp.sum(
+        candidate_currents != _runtime_init_scalar(0, candidate_currents.dtype)
+    )
+    stop_none_eligible = n_eligible < _runtime_init_scalar(1, n_eligible.dtype)
     opposite_opt_ind = _gsco_opposite_candidate_index(opt_ind, n_loops)
-    stop_undone_loop = (iteration > 0) & (opposite_opt_ind == state.opt_ind_prev)
+    stop_undone_loop = (iteration > _runtime_init_scalar(0, iteration.dtype)) & (
+        opposite_opt_ind == state.opt_ind_prev
+    )
     reject_undo = stop_undone_loop & (two_fs[opt_ind] > state.two_f)
     accept_loop = (~stop_none_eligible) & (~reject_undo)
     stop_now = stop_none_eligible | stop_undone_loop
@@ -587,12 +635,25 @@ def _gsco_live_step(
 
     write_index = state.history_length
     history_length_next = write_index + accept_loop.astype(write_index.dtype)
-    iter_history_candidate = state.iter_history.at[write_index].set(write_index)
-    curr_history_candidate = state.curr_history.at[write_index].set(current)
-    loop_history_candidate = state.loop_history.at[write_index].set(loop_ind)
-    f_b_history_candidate = state.f_B_history.at[write_index].set(0.5 * two_f_b_next)
-    f_s_history_candidate = state.f_S_history.at[write_index].set(0.5 * two_f_s_next)
-    f_history_candidate = state.f_history.at[write_index].set(0.5 * two_f_next)
+    iter_history_candidate = _update_vector_entry(
+        state.iter_history, write_index, write_index
+    )
+    curr_history_candidate = _update_vector_entry(
+        state.curr_history, write_index, current
+    )
+    loop_history_candidate = _update_vector_entry(
+        state.loop_history, write_index, loop_ind
+    )
+    half = _runtime_init_scalar(0.5, params.A.dtype)
+    f_b_history_candidate = _update_vector_entry(
+        state.f_B_history, write_index, half * two_f_b_next
+    )
+    f_s_history_candidate = _update_vector_entry(
+        state.f_S_history, write_index, half * two_f_s_next
+    )
+    f_history_candidate = _update_vector_entry(
+        state.f_history, write_index, half * two_f_next
+    )
 
     next_state = WireframeGSCOLiveState(
         x=x_next,
@@ -698,18 +759,14 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
     two_f_s0 = _gsco_two_f_s(x0, params.tol)
     two_f0 = two_f_b0 + params.lambda_s * two_f_s0
     record_capacity = _gsco_record_capacity(max_iter, record_every)
-    iter_history0 = jnp.zeros((record_capacity,), dtype=jnp.int32)
-    curr_history0 = jnp.zeros((record_capacity,), dtype=params.A.dtype)
-    loop_history0 = jnp.zeros((record_capacity,), dtype=jnp.int32)
-    f_b_history0 = (
-        jnp.zeros((record_capacity,), dtype=params.A.dtype).at[0].set(0.5 * two_f_b0)
-    )
-    f_s_history0 = (
-        jnp.zeros((record_capacity,), dtype=params.A.dtype).at[0].set(0.5 * two_f_s0)
-    )
-    f_history0 = (
-        jnp.zeros((record_capacity,), dtype=params.A.dtype).at[0].set(0.5 * two_f0)
-    )
+    half = _runtime_init_scalar(0.5, params.A.dtype)
+    iter_history0 = _runtime_init_array((record_capacity,), 0, jnp.int32)
+    curr_history0 = _runtime_init_array((record_capacity,), 0, params.A.dtype)
+    loop_history0 = _runtime_init_array((record_capacity,), 0, jnp.int32)
+    history_tail = _runtime_init_array((record_capacity - 1,), 0, params.A.dtype)
+    f_b_history0 = jnp.concatenate((jnp.reshape(half * two_f_b0, (1,)), history_tail))
+    f_s_history0 = jnp.concatenate((jnp.reshape(half * two_f_s0, (1,)), history_tail))
+    f_history0 = jnp.concatenate((jnp.reshape(half * two_f0, (1,)), history_tail))
 
     def _active_step(carry, iteration):
         (
@@ -748,17 +805,27 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
         n_loops = int(params.loops.shape[0])
         opt_ind = jnp.argmin(two_fs).astype(jnp.int32)
         current = candidate_currents[opt_ind]
-        loop_ind = (opt_ind % n_loops).astype(jnp.int32)
-        direction_count = jnp.where(opt_ind < n_loops, 1, -1).astype(loop_count.dtype)
+        n_loops_arr = _runtime_init_scalar(n_loops, opt_ind.dtype)
+        loop_ind = (opt_ind % n_loops_arr).astype(jnp.int32)
+        one_loop_count = _runtime_init_scalar(1, loop_count.dtype)
+        direction_count = jnp.where(
+            opt_ind < n_loops_arr,
+            one_loop_count,
+            -one_loop_count,
+        ).astype(loop_count.dtype)
         loop_inds = params.loops[loop_ind, :]
-        loop_signs = jnp.asarray([1.0, 1.0, -1.0, -1.0], dtype=params.A.dtype)
-        delta_x = loop_signs * current
+        delta_x = _gsco_signed_loop_delta(current)
         residual_delta = jnp.sum(params.A[:, loop_inds] * delta_x[None, :], axis=1)
 
-        n_eligible = jnp.sum(candidate_currents != 0.0)
-        stop_none_eligible = n_eligible < 1
+        zero_current = _runtime_init_scalar(0, candidate_currents.dtype)
+        n_eligible = jnp.sum(candidate_currents != zero_current)
+        one_count = _runtime_init_scalar(1, n_eligible.dtype)
+        zero_count = _runtime_init_scalar(0, n_eligible.dtype)
+        stop_none_eligible = n_eligible < one_count
         opposite_opt_ind = _gsco_opposite_candidate_index(opt_ind, n_loops)
-        stop_undone_loop = (iteration > 0) & (opposite_opt_ind == opt_ind_prev)
+        stop_undone_loop = (iteration > _runtime_init_scalar(0, iteration.dtype)) & (
+            opposite_opt_ind == opt_ind_prev
+        )
         reject_undo = stop_undone_loop & (two_fs[opt_ind] > two_f)
         accept_loop = (~stop_none_eligible) & (~reject_undo)
         stop_now = stop_none_eligible | stop_undone_loop
@@ -777,14 +844,20 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
         two_f_next = jnp.where(accept_loop, two_f_candidate, two_f)
 
         accepted_count_next = accepted_count + accept_loop.astype(accepted_count.dtype)
-        should_record = accept_loop & ((accepted_count_next % record_every) == 0)
+        should_record = accept_loop & (
+            (
+                accepted_count_next
+                % _runtime_init_scalar(record_every, accepted_count_next.dtype)
+            )
+            == zero_count
+        )
         slot = recorded_count
         recorded_count_next = recorded_count + should_record.astype(
             recorded_count.dtype
         )
-        f_b_row = 0.5 * two_f_b_next
-        f_s_row = 0.5 * two_f_s_next
-        f_row = 0.5 * two_f_next
+        f_b_row = half * two_f_b_next
+        f_s_row = half * two_f_s_next
+        f_row = half * two_f_next
 
         return (
             x_next,
@@ -809,30 +882,34 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
             jnp.where(accept_loop, f_row, last_f),
             jnp.where(
                 should_record,
-                iter_history.at[slot].set(accepted_count_next),
+                _update_vector_entry(iter_history, slot, accepted_count_next),
                 iter_history,
             ),
             jnp.where(
                 should_record,
-                curr_history.at[slot].set(current),
+                _update_vector_entry(curr_history, slot, current),
                 curr_history,
             ),
             jnp.where(
                 should_record,
-                loop_history.at[slot].set(loop_ind),
+                _update_vector_entry(loop_history, slot, loop_ind),
                 loop_history,
             ),
             jnp.where(
                 should_record,
-                f_b_history.at[slot].set(f_b_row),
+                _update_vector_entry(f_b_history, slot, f_b_row),
                 f_b_history,
             ),
             jnp.where(
                 should_record,
-                f_s_history.at[slot].set(f_s_row),
+                _update_vector_entry(f_s_history, slot, f_s_row),
                 f_s_history,
             ),
-            jnp.where(should_record, f_history.at[slot].set(f_row), f_history),
+            jnp.where(
+                should_record,
+                _update_vector_entry(f_history, slot, f_row),
+                f_history,
+            ),
         ), None
 
     def _scan_body(carry, iteration):
@@ -852,16 +929,16 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
             two_f_b0,
             two_f_s0,
             two_f0,
-            jnp.asarray(-1, dtype=jnp.int32),
-            jnp.asarray(False),
-            jnp.asarray(0, dtype=jnp.int32),
-            jnp.asarray(1, dtype=jnp.int32),
-            jnp.asarray(0, dtype=jnp.int32),
-            jnp.asarray(0.0, dtype=params.A.dtype),
-            jnp.asarray(0, dtype=jnp.int32),
-            0.5 * two_f_b0,
-            0.5 * two_f_s0,
-            0.5 * two_f0,
+            _runtime_init_scalar(-1, jnp.int32),
+            _runtime_init_scalar(False, jnp.bool_),
+            _runtime_init_scalar(0, jnp.int32),
+            _runtime_init_scalar(1, jnp.int32),
+            _runtime_init_scalar(0, jnp.int32),
+            _runtime_init_scalar(0, params.A.dtype),
+            _runtime_init_scalar(0, jnp.int32),
+            half * two_f_b0,
+            half * two_f_s0,
+            half * two_f0,
             iter_history0,
             curr_history0,
             loop_history0,
@@ -895,7 +972,11 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
         f_s_history,
         f_history,
     ) = final_carry
-    final_unrecorded = (accepted_count > 0) & ((accepted_count % record_every) != 0)
+    zero_count = _runtime_init_scalar(0, accepted_count.dtype)
+    record_every_arr = _runtime_init_scalar(record_every, accepted_count.dtype)
+    final_unrecorded = (accepted_count > zero_count) & (
+        (accepted_count % record_every_arr) != zero_count
+    )
     final_slot = recorded_count
     history_length = recorded_count + final_unrecorded.astype(recorded_count.dtype)
     return WireframeGSCOResult(
@@ -904,32 +985,32 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
         history_length=history_length,
         iter_history=jnp.where(
             final_unrecorded,
-            iter_history.at[final_slot].set(last_iter),
+            _update_vector_entry(iter_history, final_slot, last_iter),
             iter_history,
         ),
         curr_history=jnp.where(
             final_unrecorded,
-            curr_history.at[final_slot].set(last_curr),
+            _update_vector_entry(curr_history, final_slot, last_curr),
             curr_history,
         ),
         loop_history=jnp.where(
             final_unrecorded,
-            loop_history.at[final_slot].set(last_loop),
+            _update_vector_entry(loop_history, final_slot, last_loop),
             loop_history,
         ),
         f_B_history=jnp.where(
             final_unrecorded,
-            f_b_history.at[final_slot].set(last_f_b),
+            _update_vector_entry(f_b_history, final_slot, last_f_b),
             f_b_history,
         ),
         f_S_history=jnp.where(
             final_unrecorded,
-            f_s_history.at[final_slot].set(last_f_s),
+            _update_vector_entry(f_s_history, final_slot, last_f_s),
             f_s_history,
         ),
         f_history=jnp.where(
             final_unrecorded,
-            f_history.at[final_slot].set(last_f),
+            _update_vector_entry(f_history, final_slot, last_f),
             f_history,
         ),
     )
@@ -959,7 +1040,7 @@ def greedy_stellarator_coil_optimization_jax(
     A = _as_jax_float64(A_obj)
     n_iter = int(max_iter)
     _validate_record_every(record_every)
-    default_current_abs = jnp.abs(jnp.asarray(default_current, dtype=A.dtype))
+    default_current_abs = jnp.abs(_runtime_init_scalar(default_current, A.dtype))
     params = WireframeGSCOLiveParams(
         A=A,
         loops=_as_jax_int32(loops),
@@ -967,9 +1048,9 @@ def greedy_stellarator_coil_optimization_jax(
         segments=_as_jax_int32(segments),
         connections=_as_jax_int32(connections),
         default_current=default_current_abs,
-        max_current=jnp.abs(jnp.asarray(max_current, dtype=A.dtype)),
-        lambda_s=jnp.asarray(lambda_S, dtype=A.dtype),
-        tol=0.001 * default_current_abs,
+        max_current=jnp.abs(_runtime_init_scalar(max_current, A.dtype)),
+        lambda_s=_runtime_init_scalar(lambda_S, A.dtype),
+        tol=_runtime_init_scalar(0.001, A.dtype) * default_current_abs,
         max_loop_count=abs(int(max_loop_count)),
         no_crossing=no_crossing,
         no_new_coils=no_new_coils,
@@ -1004,14 +1085,14 @@ def _wireframe_gsco_multistep_initial_state(
     loop_count0 = jnp.reshape(_as_jax_int32(loop_count_init), (-1,))
     return WireframeGSCOMultistepState(
         x=x0,
-        previous_x=jnp.zeros_like(x0),
+        previous_x=x0 - x0,
         loop_count=loop_count0,
-        enclosed_segment_mask=jnp.zeros_like(x0, dtype=bool),
-        current_fraction=jnp.asarray(current_fraction, dtype=x0.dtype),
-        has_previous=jnp.asarray(False),
-        done=jnp.asarray(False),
-        nonfinal_steps=jnp.asarray(0, dtype=jnp.int32),
-        final_adjustment_run=jnp.asarray(False),
+        enclosed_segment_mask=x0 != x0,
+        current_fraction=_runtime_init_scalar(current_fraction, x0.dtype),
+        has_previous=_runtime_init_scalar(False, jnp.bool_),
+        done=_runtime_init_scalar(False, jnp.bool_),
+        nonfinal_steps=_runtime_init_scalar(0, jnp.int32),
+        final_adjustment_run=_runtime_init_scalar(False, jnp.bool_),
     )
 
 
@@ -1054,8 +1135,8 @@ def wireframe_gsco_multistep_loop_jax(
         loop_count_init,
         current_fraction=initial_current_fraction,
     )
-    current_scale_arr = jnp.asarray(current_scale, dtype=base_params.A.dtype)
-    final_max_current_arr = jnp.asarray(final_max_current, dtype=base_params.A.dtype)
+    current_scale_arr = _runtime_init_scalar(current_scale, base_params.A.dtype)
+    final_max_current_arr = _runtime_init_scalar(final_max_current, base_params.A.dtype)
 
     def _run_gsco_step(
         state: WireframeGSCOMultistepState,
@@ -1094,8 +1175,10 @@ def wireframe_gsco_multistep_loop_jax(
             state,
             base_constrained | state.enclosed_segment_mask,
             default_current=jnp.abs(state.current_fraction * current_scale_arr),
-            max_current=1.1 * jnp.abs(state.current_fraction * current_scale_arr),
-            tol=0.001 * jnp.abs(state.current_fraction * current_scale_arr),
+            max_current=_runtime_init_scalar(1.1, base_params.A.dtype)
+            * jnp.abs(state.current_fraction * current_scale_arr),
+            tol=_runtime_init_scalar(0.001, base_params.A.dtype)
+            * jnp.abs(state.current_fraction * current_scale_arr),
             no_new_coils=False,
             match_current=False,
         )
@@ -1116,11 +1199,12 @@ def wireframe_gsco_multistep_loop_jax(
             previous_x=state.x,
             loop_count=pruned_loop_count,
             enclosed_segment_mask=enclosed,
-            current_fraction=0.5 * state.current_fraction,
-            has_previous=jnp.asarray(True),
-            done=jnp.asarray(False),
-            nonfinal_steps=state.nonfinal_steps + jnp.asarray(1, dtype=jnp.int32),
-            final_adjustment_run=jnp.asarray(False),
+            current_fraction=_runtime_init_scalar(0.5, base_params.A.dtype)
+            * state.current_fraction,
+            has_previous=_runtime_init_scalar(True, jnp.bool_),
+            done=_runtime_init_scalar(False, jnp.bool_),
+            nonfinal_steps=state.nonfinal_steps + _runtime_init_scalar(1, jnp.int32),
+            final_adjustment_run=_runtime_init_scalar(False, jnp.bool_),
         )
 
     def _final_update(
@@ -1129,9 +1213,9 @@ def wireframe_gsco_multistep_loop_jax(
         gsco_state = _run_gsco_step(
             state,
             base_constrained,
-            default_current=jnp.zeros((), dtype=base_params.A.dtype),
+            default_current=_runtime_init_scalar(0, base_params.A.dtype),
             max_current=jnp.abs(final_max_current_arr),
-            tol=jnp.zeros((), dtype=base_params.A.dtype),
+            tol=_runtime_init_scalar(0, base_params.A.dtype),
             no_new_coils=True,
             match_current=True,
         )
@@ -1140,8 +1224,8 @@ def wireframe_gsco_multistep_loop_jax(
             x=gsco_state.x,
             loop_count=gsco_state.loop_count,
             enclosed_segment_mask=jnp.zeros_like(state.enclosed_segment_mask),
-            done=jnp.asarray(True),
-            final_adjustment_run=jnp.asarray(True),
+            done=_runtime_init_scalar(True, jnp.bool_),
+            final_adjustment_run=_runtime_init_scalar(True, jnp.bool_),
         )
 
     def _active_outer_step(

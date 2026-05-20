@@ -3478,6 +3478,9 @@ class BoozerSurfaceJAX(Optimizable):
         surface_runtime_state=None,
     ):
         super().__init__(depends_on=[biotsavart])
+        for candidate in (surface, label):
+            if isinstance(candidate, Optimizable):
+                candidate._add_child(self)
 
         self.biotsavart = biotsavart
         self.surface = surface
@@ -3747,23 +3750,31 @@ class BoozerSurfaceJAX(Optimizable):
                     transpose=True,
                 )
 
-            def solve_forward_with_status(rhs):
-                solved = solve_forward(rhs)
-                return solved, _optimizer_jax._dense_linear_solve_status(
-                    apply_forward,
-                    solved,
-                    jnp.asarray(rhs, dtype=x.dtype),
+            def dense_status(matrix, matvec, solution, rhs):
+                rhs = jnp.asarray(rhs, dtype=x.dtype)
+                status = _optimizer_jax._dense_linear_solve_status(
+                    matvec,
+                    solution,
+                    rhs,
                     tol=tol_host,
                 )
+                backward_error_success = (
+                    _optimizer_jax._dense_matrix_backward_error_success(
+                        matrix,
+                        solution,
+                        rhs,
+                        tol=tol_host,
+                    )
+                )
+                return status._replace(success=status.success | backward_error_success)
+
+            def solve_forward_with_status(rhs):
+                solved = solve_forward(rhs)
+                return solved, dense_status(H_dev, apply_forward, solved, rhs)
 
             def solve_transpose_with_status(rhs):
                 solved = solve_transpose(rhs)
-                return solved, _optimizer_jax._dense_linear_solve_status(
-                    apply_transpose,
-                    solved,
-                    jnp.asarray(rhs, dtype=x.dtype),
-                    tol=tol_host,
-                )
+                return solved, dense_status(H_dev.T, apply_transpose, solved, rhs)
 
             return pack_callbacks(
                 apply_forward,
@@ -3896,12 +3907,26 @@ class BoozerSurfaceJAX(Optimizable):
                     tol=tol_host,
                 )
 
+            def solve_transpose_with_status(rhs):
+                return _optimizer_jax._solve_hessian_least_squares_system_with_status(
+                    objective_fn,
+                    x,
+                    rhs,
+                    stab=stab,
+                    tol=tol_host,
+                )
+
+            def solve_transpose(rhs):
+                solution, _status = solve_transpose_with_status(rhs)
+                return solution
+
             return pack_callbacks(
                 apply_forward,
                 apply_forward,
                 solve_forward,
+                solve_transpose,
                 solve_forward_with_status=solve_forward_with_status,
-                solve_transpose_with_status=solve_forward_with_status,
+                solve_transpose_with_status=solve_transpose_with_status,
             )
 
         if linearization_kind == "exact_jacobian":
@@ -4014,6 +4039,8 @@ class BoozerSurfaceJAX(Optimizable):
     def recompute_bell(self, parent=None):
         """Mark solver as needing re-execution (dirty flag)."""
         self.need_to_run_code = True
+        self._traceable_solve_state_token = _new_traceable_solve_state_token()
+        self._traceable_runtime_entry_cache = None
 
     def _validate_none_G_precondition(self, G):
         if G is not None:

@@ -1,5 +1,7 @@
 """Compatibility facade for backend-owned JAX dtype helpers."""
 
+# public-facade: underscore-prefixed for legacy compatibility.
+
 from __future__ import annotations
 
 import jax
@@ -48,6 +50,8 @@ __all__ = (
     "runtime_dtype",
     "runtime_eye",
     "runtime_host_dtype",
+    "runtime_init_array",
+    "runtime_init_scalar",
     "runtime_jnp_dtype",
     "runtime_np_dtype",
     "runtime_zeros",
@@ -79,6 +83,16 @@ def concat_jax_float64(*parts) -> jax.Array:
 
 def scalar_like(reference, value) -> jax.Array:
     return as_jax_array(value, dtype=reference.dtype)
+
+
+def runtime_init_array(shape: object, fill_value: object, dtype: object) -> jax.Array:
+    return runtime_device_put(
+        np.full(_shape_tuple(shape), fill_value, dtype=np.dtype(dtype))
+    )
+
+
+def runtime_init_scalar(value: object, dtype: object) -> jax.Array:
+    return runtime_device_put(np.asarray(value, dtype=np.dtype(dtype)))
 
 
 def zero_padding_like(array, *, axis: int, pad_width: int):
