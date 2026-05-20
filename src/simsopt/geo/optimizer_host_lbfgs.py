@@ -7,6 +7,8 @@ from typing import Callable, NamedTuple
 import numpy as np
 
 
+# Repo-local terminal status for non-finite f(x), x, or gradient state. SciPy's
+# low-level L-BFGS-B warnflag contract remains 0/1/2.
 LBFGS_STATUS_NONFINITE = 6
 _INT32_COUNTER_MAX = np.iinfo(np.int32).max
 _INVALID_STEP_LOG_MAX_CAPACITY = 256
@@ -1530,9 +1532,12 @@ def minimize_lbfgs_host_core(
         maxfun_limit=maxfun_limit_value,
         maxgrad_limit=maxgrad_limit_value,
     )
+    recorded_nonfinite_step = any(
+        bool(event.nonfinite_step) for event in state.invalid_step_events
+    )
     if state.converged:
         status = 0
-    elif state_nonfinite:
+    elif state_nonfinite or recorded_nonfinite_step:
         status = LBFGS_STATUS_NONFINITE
     elif limit_status != 0:
         status = limit_status
@@ -1592,7 +1597,7 @@ _LBFGS_STATUS_MESSAGES = {
     4: "Optimization terminated successfully (ftol).",
     5: "Line search failed or produced an invalid step.",
     LBFGS_STATUS_NONFINITE: (
-        "Non-finite objective or gradient encountered during iteration."
+        "Non-finite objective, iterate, or gradient encountered during iteration."
     ),
 }
 _LBFGS_SUCCESS_STATUSES = frozenset({0, 4})

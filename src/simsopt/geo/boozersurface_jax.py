@@ -817,9 +817,7 @@ def _prepare_result_callback(
     return callback
 
 
-def _as_boozer_penalty_optimizer_state(
-    x, *, optimize_G, decision_split_mode="reverse"
-):
+def _as_boozer_penalty_optimizer_state(x, *, optimize_G, decision_split_mode="reverse"):
     if optimize_G:
         if isinstance(x, _BoozerPenaltyOptimizerStateWithG):
             return _BoozerPenaltyOptimizerStateWithG(
@@ -1148,9 +1146,7 @@ def _penalty_params(
         iota=place_active_replicated(_as_jax_float64(iota)),
         G=place_active_replicated(_as_jax_float64(G_value)),
         targetlabel=place_active_replicated(_as_jax_float64(targetlabel)),
-        constraint_weight=place_active_replicated(
-            _as_jax_float64(constraint_weight)
-        ),
+        constraint_weight=place_active_replicated(_as_jax_float64(constraint_weight)),
         label_type=label_type,
         phi_idx=phi_idx,
         weight_inv_modB=weight_inv_modB,
@@ -2111,6 +2107,7 @@ def _boozer_exact_residual_impl(
     mask_indices,
     weight_inv_modB,
     include_axis_constraint,
+    decision_split_mode="jvp",
 ):
     """Residual vector for the BoozerExact Newton system.
 
@@ -2120,7 +2117,11 @@ def _boozer_exact_residual_impl(
     Returns: (n_eq,) residual vector where ``r(x) = 0`` at the solution.
     The decision vector is always ``x = [surface_dofs, iota, G]``.
     """
-    sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=True)
+    sdofs, iota, G = _split_decision_vector_jax(
+        x,
+        optimize_G=True,
+        decision_split_mode=decision_split_mode,
+    )
 
     geometry = _geometry_from_surface_dofs(
         sdofs,
@@ -2211,6 +2212,7 @@ def _boozer_exact_residual_stellsym(
     phi_idx,
     mask_indices,
     weight_inv_modB,
+    decision_split_mode="jvp",
 ):
     return _boozer_exact_residual_impl(
         x,
@@ -2238,6 +2240,7 @@ def _boozer_exact_residual_stellsym(
         mask_indices=mask_indices,
         weight_inv_modB=weight_inv_modB,
         include_axis_constraint=False,
+        decision_split_mode=decision_split_mode,
     )
 
 
@@ -2267,6 +2270,7 @@ def _boozer_exact_residual_nonstellsym(
     phi_idx,
     mask_indices,
     weight_inv_modB,
+    decision_split_mode="jvp",
 ):
     return _boozer_exact_residual_impl(
         x,
@@ -2294,6 +2298,7 @@ def _boozer_exact_residual_nonstellsym(
         mask_indices=mask_indices,
         weight_inv_modB=weight_inv_modB,
         include_axis_constraint=True,
+        decision_split_mode=decision_split_mode,
     )
 
 
@@ -3771,50 +3776,56 @@ class BoozerSurfaceJAX(Optimizable):
             H_host = P_host @ L_host @ U_host
 
             def apply_forward(rhs):
-                return jnp.asarray(
-                    H_host @ np.asarray(rhs, dtype=np.float64), dtype=x.dtype
-                )
+                with jax.transfer_guard("allow"):
+                    return jnp.asarray(
+                        H_host @ np.asarray(rhs, dtype=np.float64), dtype=x.dtype
+                    )
 
             def apply_transpose(rhs):
-                return jnp.asarray(
-                    H_host.T @ np.asarray(rhs, dtype=np.float64),
-                    dtype=x.dtype,
-                )
+                with jax.transfer_guard("allow"):
+                    return jnp.asarray(
+                        H_host.T @ np.asarray(rhs, dtype=np.float64),
+                        dtype=x.dtype,
+                    )
 
             def solve_forward(rhs):
-                rhs_host = np.asarray(rhs, dtype=np.float64)
-                y = scipy.linalg.solve_triangular(
-                    L_host,
-                    P_host.T @ rhs_host,
-                    lower=True,
-                )
-                solved = scipy.linalg.solve_triangular(U_host, y, lower=False)
-                return jnp.asarray(solved, dtype=x.dtype)
+                with jax.transfer_guard("allow"):
+                    rhs_host = np.asarray(rhs, dtype=np.float64)
+                    y = scipy.linalg.solve_triangular(
+                        L_host,
+                        P_host.T @ rhs_host,
+                        lower=True,
+                    )
+                    solved = scipy.linalg.solve_triangular(U_host, y, lower=False)
+                    return jnp.asarray(solved, dtype=x.dtype)
 
             def solve_transpose(rhs):
-                rhs_host = np.asarray(rhs, dtype=np.float64)
-                y = scipy.linalg.solve_triangular(U_host.T, rhs_host, lower=True)
-                z = scipy.linalg.solve_triangular(L_host.T, y, lower=False)
-                solved = P_host @ z
-                return jnp.asarray(solved, dtype=x.dtype)
+                with jax.transfer_guard("allow"):
+                    rhs_host = np.asarray(rhs, dtype=np.float64)
+                    y = scipy.linalg.solve_triangular(U_host.T, rhs_host, lower=True)
+                    z = scipy.linalg.solve_triangular(L_host.T, y, lower=False)
+                    solved = P_host @ z
+                    return jnp.asarray(solved, dtype=x.dtype)
 
             def solve_forward_with_status(rhs):
-                solved = solve_forward(rhs)
-                return solved, _optimizer_jax._dense_linear_solve_status(
-                    apply_forward,
-                    solved,
-                    jnp.asarray(rhs, dtype=x.dtype),
-                    tol=tol_host,
-                )
+                with jax.transfer_guard("allow"):
+                    solved = solve_forward(rhs)
+                    return solved, _optimizer_jax._dense_linear_solve_status(
+                        apply_forward,
+                        solved,
+                        jnp.asarray(rhs, dtype=x.dtype),
+                        tol=tol_host,
+                    )
 
             def solve_transpose_with_status(rhs):
-                solved = solve_transpose(rhs)
-                return solved, _optimizer_jax._dense_linear_solve_status(
-                    apply_transpose,
-                    solved,
-                    jnp.asarray(rhs, dtype=x.dtype),
-                    tol=tol_host,
-                )
+                with jax.transfer_guard("allow"):
+                    solved = solve_transpose(rhs)
+                    return solved, _optimizer_jax._dense_linear_solve_status(
+                        apply_transpose,
+                        solved,
+                        jnp.asarray(rhs, dtype=x.dtype),
+                        tol=tol_host,
+                    )
 
             return pack_callbacks(
                 apply_forward,
@@ -4476,7 +4487,11 @@ class BoozerSurfaceJAX(Optimizable):
             scatter_indices = _hostify_tree(scatter_indices)
 
         def objective_fn(x):
-            sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=optimize_G)
+            sdofs, iota, G = _split_decision_vector_jax(
+                x,
+                optimize_G=optimize_G,
+                decision_split_mode="jvp",
+            )
             if not optimize_G:
                 G = compute_G_from_currents(
                     _grouped_coil_currents(
@@ -4543,7 +4558,11 @@ class BoozerSurfaceJAX(Optimizable):
             label_scatter_indices = _hostify_tree(label_scatter_indices)
 
         def constraint_fn(x):
-            sdofs, _iota, _G = _split_decision_vector_jax(x, optimize_G=optimize_G)
+            sdofs, _iota, _G = _split_decision_vector_jax(
+                x,
+                optimize_G=optimize_G,
+                decision_split_mode="jvp",
+            )
             geometry = _geometry_from_surface_dofs(
                 sdofs,
                 quadpoints_phi=quadpoints_phi,

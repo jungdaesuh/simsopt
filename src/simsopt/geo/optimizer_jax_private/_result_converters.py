@@ -41,13 +41,15 @@ _LBFGS_STATUS_MESSAGES = {
     4: "Optimization terminated successfully (ftol).",
     5: "Line search failed.",
     LBFGS_STATUS_NONFINITE: (
-        "Non-finite objective or gradient encountered during iteration."
+        "Non-finite objective, iterate, or gradient encountered during iteration."
     ),
 }
 
 _LBFGS_SUCCESS_STATUSES = frozenset({0, 4})
 
-_INVALID_STATE_MESSAGE = "Optimization failed with non-finite objective or gradient."
+_INVALID_STATE_MESSAGE = (
+    "Optimization failed with non-finite objective, iterate, or gradient."
+)
 
 
 def _status_message(status, invalid_state, messages):
@@ -84,6 +86,8 @@ def _lbfgs_success(status, invalid_state, state):
 
 
 def _lbfgs_message(status, invalid_state, state):
+    if status == LBFGS_STATUS_NONFINITE:
+        return _status_message_lbfgs(status, False)
     task = getattr(state, "task", None)
     if task is not None:
         from . import _lbfgsb_scipy as lbfgsb

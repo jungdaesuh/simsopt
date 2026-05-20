@@ -129,21 +129,12 @@ def _validate_decision_vector_tail(x_jax, *, optimize_G):
 def _split_decision_vector_lax(x_jax, *, optimize_G):
     surface_size = int(x_jax.shape[0]) - (2 if optimize_G else 1)
     if optimize_G:
-        sdofs = lax.slice_in_dim(x_jax, 0, surface_size, axis=0)
-        iota = jnp.reshape(
-            lax.slice_in_dim(x_jax, surface_size, surface_size + 1, axis=0),
-            (),
-        )
-        G = jnp.reshape(
-            lax.slice_in_dim(x_jax, surface_size + 1, surface_size + 2, axis=0),
-            (),
-        )
+        sdofs, iota, G = jnp.split(x_jax, (surface_size, surface_size + 1))
+        iota = jnp.reshape(iota, ())
+        G = jnp.reshape(G, ())
         return sdofs, iota, G
-    sdofs = lax.slice_in_dim(x_jax, 0, surface_size, axis=0)
-    iota = jnp.reshape(
-        lax.slice_in_dim(x_jax, surface_size, surface_size + 1, axis=0),
-        (),
-    )
+    sdofs, iota = jnp.split(x_jax, (surface_size,))
+    iota = jnp.reshape(iota, ())
     return sdofs, iota, None
 
 
@@ -746,7 +737,7 @@ def boozer_penalty_composed(
     optimize_G,
     weight_inv_modB=True,
     reduction_mode="default",
-    decision_split_mode="reverse",
+    decision_split_mode="jvp",
 ):
     """Composed scalar penalty objective: DOFs → geometry → field → residual → scalar.
 
@@ -770,6 +761,9 @@ def boozer_penalty_composed(
             compensated scalar contraction for oracle investigations, and
             ``"cpu_ordered"`` mirrors the C++ point/component accumulation
             order for host-SciPy Boozer LS parity checks.
+        decision_split_mode: ``"jvp"`` keeps the scalar objective compatible
+            with forward-over-reverse transforms such as ``jax.hessian``;
+            reverse-mode-only wrappers select ``"reverse"`` explicitly.
 
     Returns:
         Scalar objective value.
@@ -811,7 +805,9 @@ def boozer_penalty_grad_composed(x, **kwargs):
     Returns:
         (val, grad): scalar objective value and (n,) gradient vector.
     """
-    return jax.value_and_grad(boozer_penalty_composed)(x, **kwargs)
+    grad_kwargs = dict(kwargs)
+    grad_kwargs.setdefault("decision_split_mode", "reverse")
+    return jax.value_and_grad(boozer_penalty_composed)(x, **grad_kwargs)
 
 
 def boozer_penalty_hvp_composed(x, v, **kwargs):

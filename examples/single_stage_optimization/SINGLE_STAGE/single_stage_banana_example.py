@@ -83,6 +83,7 @@ from banana_opt.single_stage_objectives import evaluate_alm_objective
 # SIMSOPT imports
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable, load
+from simsopt.backend import get_tolerance_tier
 from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.field import BiotSavart
 from simsopt.jax_core._math_utils import (
@@ -90,6 +91,7 @@ from simsopt.jax_core._math_utils import (
     as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
     runtime_device_put,
+    runtime_np_dtype,
 )
 from simsopt.geo import (
     BoozerSurface,
@@ -97,6 +99,7 @@ from simsopt.geo import (
     LpCurveCurvature,
     SurfaceRZFourier,
     SurfaceXYZTensorFourier,
+    coil_dofs_gradient_to_derivative,
     curves_to_vtk,
 )
 from simsopt.geo.curve import surfrz_gamma_lin
@@ -122,7 +125,6 @@ from simsopt.geo.surfaceobjectives import (
     boozer_surface_residual,
     boozer_surface_residual_dB,
 )
-from simsopt.geo.surfaceobjectives_jax import _coil_dofs_gradient_to_derivative
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
 from simsopt.field.biotsavart_jax_backend import SingleStageRuntimeSpecBiotSavartJAX
@@ -141,8 +143,10 @@ from simsopt.jax_core.surface_rzfourier import (
     surface_rz_fourier_spec_from_dofs,
 )
 from hardware_constraints import (
+    accepted_result_payload,
+    accepted_result_rejection_reasons,
     apply_hardware_constraint_verdict,
-    sanitize_json_payload,
+    sanitize_diagnostic_payload,
 )
 from jax_host_boundary import host_array, host_bool, host_float, host_int
 from plotting_utils import cross_section_plot, norm_field_plot, norm_field_summary
@@ -167,13 +171,18 @@ _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS = frozenset({"ondevice", "scipy-jax"})
 _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND = "scipy-jax-fullgraph"
 _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD = "lbfgs-scipy-jax-fullgraph"
 _JAX_ONDEVICE_BOOZER_OUTER_OPTIMIZER_BACKENDS = _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS
+_JAX_TARGET_OUTER_MAXLS_BACKENDS = _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS | {
+    _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND
+}
 _REFERENCE_OUTER_MAXLS_DEFAULT = 20
 _TARGET_OUTER_MAXLS_BENCHMARK_DEFAULT = 4
 _TARGET_OUTER_MAXLS_DEFAULT = 8
+_TARGET_OUTER_MAXLS_FLOAT32_SMOKE_DEFAULT = 100
 _REFERENCE_OUTER_MAXCOR_DEFAULT = 300
 _TARGET_OUTER_MAXCOR_DEFAULT = 20
 _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT = 1e-6
 _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT = 1e-8
+_TARGET_LANE_BOOZER_NEWTON_TOL_FLOAT32_SMOKE_DEFAULT = 1e-6
 _TARGET_LANE_BOOZER_BFGS_MAXITER_BENCHMARK_DEFAULT = 64
 _SINGLE_STAGE_RESULTS_SCHEMA_VERSION = 1
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
@@ -330,7 +339,7 @@ def begin_jax_profile_trace(profile_dir):
     return _stop_trace
 
 
-_NONFINITE_OPTIMIZER_MESSAGE_FRAGMENT = "non-finite objective or gradient"
+_NONFINITE_OPTIMIZER_MESSAGE_FRAGMENT = "non-finite objective"
 
 
 def _termination_message_indicates_invalid_optimizer_state(message):
@@ -740,7 +749,7 @@ def _target_lane_signature_tree(value):
             "sha256": hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest(),
         }
     if isinstance(value, np.generic):
-        return sanitize_json_payload(value)
+        return sanitize_diagnostic_payload(value)
     return value
 
 
@@ -1540,6 +1549,11 @@ def _evaluate_single_stage_hardware_status(objectives, diagnostics):
     )
 
 
+def _evaluate_single_stage_hardware_status_reporting_boundary(objectives, diagnostics):
+    with jax.transfer_guard_device_to_host("allow"):
+        return _evaluate_single_stage_hardware_status(objectives, diagnostics)
+
+
 _TRACEABLE_REPORTING_FLOAT_FIELDS = (
     "final_non_qs",
     "final_boozer_residual",
@@ -1612,7 +1626,7 @@ def build_single_stage_full_graph_host_callback_value_and_grad(
     from simsopt.geo.optimizer_jax import _mark_cacheable_jit_value_and_grad
 
     host_template = _single_stage_optimizer_dofs_array(optimizer_dofs).reshape(-1)
-    host_dtype = host_template.dtype
+    host_dtype = runtime_np_dtype()
     value_spec = jax.ShapeDtypeStruct((), jnp.dtype(host_dtype))
     grad_spec = jax.ShapeDtypeStruct(host_template.shape, jnp.dtype(host_dtype))
 
@@ -4559,6 +4573,7 @@ def parse_args():
         args.optimizer_backend,
         args.outer_maxls,
         benchmark_mode=args.benchmark_mode,
+        tolerance_tier=get_tolerance_tier(),
     )
     args.target_lane_outer_initial_step_size = (
         resolve_target_lane_outer_initial_step_size(
@@ -5303,7 +5318,7 @@ def resolve_single_stage_final_penalty_metrics(
     optimizer_success=None,
 ):
     """Resolve final reported penalties/hardware metrics for one single-stage run."""
-    del init_only, termination_message, optimizer_success
+    del init_only, termination_message
     benchmark_hardware_status = {
         "success": None,
         "violation_keys": ["skipped_in_benchmark_mode"],
@@ -5311,6 +5326,11 @@ def resolve_single_stage_final_penalty_metrics(
     }
 
     if use_target_lane:
+        if optimizer_success is False:
+            raise RuntimeError(
+                "Target-lane optimizer failed; no accepted final target-lane "
+                "reporting metrics are available for results.json."
+            )
         return _require_cached_target_lane_reporting_metrics(
             run_dict,
             coil_dofs,
@@ -7661,16 +7681,27 @@ def resolve_single_stage_default_optimizer_backend(
     return "scipy"
 
 
+def _is_float32_smoke_tolerance_tier(tolerance_tier):
+    return (tolerance_tier or get_tolerance_tier()) == "float32_smoke"
+
+
 def resolve_single_stage_outer_maxls(
     field_backend,
     optimizer_backend,
     outer_maxls=None,
     *,
     benchmark_mode=False,
+    tolerance_tier=None,
 ):
     """Resolve the effective outer L-BFGS line-search budget for this lane."""
     if outer_maxls is not None:
         resolved = int(outer_maxls)
+    elif (
+        field_backend == "jax"
+        and optimizer_backend in _JAX_TARGET_OUTER_MAXLS_BACKENDS
+        and _is_float32_smoke_tolerance_tier(tolerance_tier)
+    ):
+        resolved = _TARGET_OUTER_MAXLS_FLOAT32_SMOKE_DEFAULT
     elif benchmark_mode and field_backend == "jax" and optimizer_backend == "ondevice":
         resolved = _TARGET_OUTER_MAXLS_BENCHMARK_DEFAULT
     elif field_backend == "jax" and optimizer_backend == "ondevice":
@@ -8663,7 +8694,8 @@ def resolve_single_stage_outer_optimizer_initial_dofs(
 def build_scaled_outer_phase_initial_dofs(dofs, *, use_target_lane):
     """Return zero-origin optimizer coordinates for a scaled initial phase."""
     if use_target_lane:
-        return _as_runtime_float64(0.0, reference=dofs) * dofs
+        runtime_dofs = runtime_device_put(dofs)
+        return runtime_dofs - runtime_dofs
     return np.zeros_like(_single_stage_optimizer_dofs_array(dofs))
 
 
@@ -9154,12 +9186,17 @@ _DIAG_LABELS = {
 
 
 def write_json_file(path, payload):
-    """Write a sanitized JSON payload to disk."""
+    """Write a diagnostic/progress JSON payload to disk."""
     output_dir = os.path.dirname(path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as outfile:
-        json.dump(sanitize_json_payload(payload), outfile, indent=2, allow_nan=False)
+        json.dump(
+            sanitize_diagnostic_payload(payload),
+            outfile,
+            indent=2,
+            allow_nan=False,
+        )
 
 
 def build_stage_progress_recorder(path):
@@ -9281,6 +9318,7 @@ def resolve_target_lane_boozer_init_base_overrides(
     target_lane_boozer_bfgs_maxiter,
     target_lane_boozer_newton_tol,
     target_lane_boozer_newton_maxiter,
+    tolerance_tier=None,
 ):
     """Return the baseline target-lane init overrides for JAX/ondevice solves."""
     if (
@@ -9300,8 +9338,13 @@ def resolve_target_lane_boozer_init_base_overrides(
         if target_lane_boozer_bfgs_tol is None
         else min(float(target_lane_boozer_bfgs_tol), 1.0e-8)
     )
+    default_newton_tol = (
+        _TARGET_LANE_BOOZER_NEWTON_TOL_FLOAT32_SMOKE_DEFAULT
+        if _is_float32_smoke_tolerance_tier(tolerance_tier)
+        else _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT
+    )
     newton_tol_override = (
-        _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT
+        default_newton_tol
         if (target_lane_boozer_newton_tol is None and not bool(boozer_limited_memory))
         else (
             None
@@ -9931,7 +9974,7 @@ def _single_stage_iota_projection_decomposition(raw_iota, adjoint_state, adjoint
         adjoint_state,
         adjoint,
     )
-    raw_derivative = _coil_dofs_gradient_to_derivative(
+    raw_derivative = coil_dofs_gradient_to_derivative(
         raw_iota.biotsavart,
         raw_flat_gradient,
     )
@@ -10125,9 +10168,7 @@ def _mean_abs_bdotn_on_surface(bs, surface) -> float:
         ).reshape(field_on_surface.shape)
         return host_float(
             jnp.mean(
-                jnp.abs(
-                    jnp.sum(field_on_surface * unitn_on_field_sharding, axis=2)
-                )
+                jnp.abs(jnp.sum(field_on_surface * unitn_on_field_sharding, axis=2))
             )
         )
     return float(np.mean(np.abs(np.sum(field_on_surface * unitn, axis=2))))
@@ -10194,7 +10235,7 @@ def accept_step(
     max_r = np.max(np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2))
     max_z = np.max(np.abs(gamma[:, 2]))
     length = host_float(curvelength_obj.J())
-    hardware_status = _evaluate_single_stage_hardware_status(
+    hardware_status = _evaluate_single_stage_hardware_status_reporting_boundary(
         objectives,
         diagnostics_refs,
     )
@@ -11039,9 +11080,76 @@ def with_single_stage_results_payload(snapshot, results):
     return replace(snapshot, results_payload=payload)
 
 
+_ACCEPTED_RESULT_METADATA_PATHS = (
+    ("provenance", "backend_mode"),
+    ("provenance", "runtime_dtype"),
+    ("provenance", "host_dtype"),
+    ("provenance", "tolerance_tier"),
+    ("max_iterations",),
+)
+
+_ACCEPTED_RESULT_METRIC_PATHS = (
+    ("FIELD_ERROR",),
+    ("MAX_CURVATURE",),
+    ("COIL_LENGTH",),
+)
+
+
+def single_stage_result_rejection_reasons(snapshot):
+    """Return accepted-artifact rejection reasons for a final result snapshot."""
+    optimizer_status = snapshot.optimizer_result.get("status")
+    optimizer_ran = optimizer_status is not None
+    return accepted_result_rejection_reasons(
+        snapshot.results_payload,
+        optimizer_success=snapshot.optimizer_result.get("success"),
+        optimizer_status=optimizer_status,
+        final_objective=snapshot.optimizer_diagnostics.get("fun"),
+        final_dofs=snapshot.final_coil_dofs,
+        final_gradient_finite=snapshot.optimizer_diagnostics.get("jac_finite"),
+        require_gradient=optimizer_ran,
+        required_metric_paths=_ACCEPTED_RESULT_METRIC_PATHS,
+        required_metadata_paths=_ACCEPTED_RESULT_METADATA_PATHS,
+    )
+
+
+def build_single_stage_rejected_marker(snapshot, reasons):
+    """Return the explicit marker written when results.json is refused."""
+    return {
+        "accepted": False,
+        "rejection_reasons": list(reasons),
+        "optimizer": dict(snapshot.optimizer_result),
+        "optimizer_diagnostics": dict(snapshot.optimizer_diagnostics),
+        "artifact_contract": {
+            "accepted_results_filename": "results.json",
+            "diagnostic_marker_filename": "REJECTED.json",
+        },
+    }
+
+
+def write_single_stage_rejected_marker(output_dir, snapshot, reasons):
+    """Write the explicit rejected-run marker next to diagnostic artifacts."""
+    write_json_file(
+        os.path.join(output_dir, "REJECTED.json"),
+        build_single_stage_rejected_marker(snapshot, reasons),
+    )
+
+
 def write_single_stage_results_json(output_dir, snapshot):
     """Write results.json from the finalized result snapshot payload."""
-    write_json_file(os.path.join(output_dir, "results.json"), snapshot.results_payload)
+    output_path = os.path.join(output_dir, "results.json")
+    accepted_payload = accepted_result_payload(
+        snapshot.results_payload,
+        optimizer_success=snapshot.optimizer_result.get("success"),
+        optimizer_status=snapshot.optimizer_result.get("status"),
+        final_objective=snapshot.optimizer_diagnostics.get("fun"),
+        final_dofs=snapshot.final_coil_dofs,
+        final_gradient_finite=snapshot.optimizer_diagnostics.get("jac_finite"),
+        require_gradient=snapshot.optimizer_result.get("status") is not None,
+        required_metric_paths=_ACCEPTED_RESULT_METRIC_PATHS,
+        required_metadata_paths=_ACCEPTED_RESULT_METADATA_PATHS,
+    )
+    with open(output_path, "w", encoding="utf-8") as outfile:
+        json.dump(accepted_payload, outfile, indent=2, allow_nan=False)
 
 
 # Convergence tolerances for different mpol values (module-level for testability)
@@ -12019,9 +12127,11 @@ if __name__ == "__main__":
         )
     initial_hardware_start_s = _perf_counter_s()
     record_outer_optimizer_event("initial_hardware_status_started")
-    run_dict["hardware_constraint_status"] = _evaluate_single_stage_hardware_status(
-        objectives,
-        diagnostics_refs,
+    run_dict["hardware_constraint_status"] = (
+        _evaluate_single_stage_hardware_status_reporting_boundary(
+            objectives,
+            diagnostics_refs,
+        )
     )
     record_outer_optimizer_event(
         "initial_hardware_status_returned",
@@ -12910,6 +13020,13 @@ if __name__ == "__main__":
                             curvature_threshold=CURVATURE_THRESHOLD,
                             curvature_weight=CURVATURE_WEIGHT,
                         )
+                    )
+                    write_json_file(
+                        os.path.join(
+                            OUT_DIR_ITER,
+                            "target_lane_gradient_diagnosis.json",
+                        ),
+                        target_lane_gradient_diagnosis,
                     )
                     outer_optimizer_end_s = _perf_counter_s()
                     _record_timing(
@@ -14319,4 +14436,12 @@ if __name__ == "__main__":
         final_result_snapshot,
         results,
     )
-    write_single_stage_results_json(OUT_DIR_ITER, final_result_snapshot)
+    rejection_reasons = single_stage_result_rejection_reasons(final_result_snapshot)
+    if rejection_reasons:
+        write_single_stage_rejected_marker(
+            OUT_DIR_ITER,
+            final_result_snapshot,
+            rejection_reasons,
+        )
+    else:
+        write_single_stage_results_json(OUT_DIR_ITER, final_result_snapshot)

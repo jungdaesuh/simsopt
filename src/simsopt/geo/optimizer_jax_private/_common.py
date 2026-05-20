@@ -18,6 +18,7 @@ import numpy as np
 from jax import lax
 
 from ..._core.jax_host_boundary import host_array as _callback_host_array
+from ...backend import get_backend_policy
 from ...jax_core.sharding import place_active_replicated
 from ..optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
@@ -252,12 +253,18 @@ def _require_private_optimizer_runtime(x0):
             "Use a supported JAX runtime or "
             "fall back to optimizer_backend='scipy'."
         )
-    if not _x64_enabled():
+    policy = get_backend_policy()
+    float32_smoke = (
+        not policy.requires_x64
+        and policy.runtime_dtype == "float32"
+        and policy.tolerance_tier == "float32_smoke"
+    )
+    if not _x64_enabled() and not float32_smoke:
         raise RuntimeError(
             "On-device optimizer requires jax_enable_x64=True before import/use."
         )
 
-    x0 = _as_jax_dtype(x0, jnp.float64)
+    x0 = _as_jax_dtype(x0, jnp.dtype(policy.runtime_dtype))
     if x0.ndim != 1:
         raise ValueError(
             f"On-device optimizer expects a flat 1-D decision vector, got {x0.shape}."

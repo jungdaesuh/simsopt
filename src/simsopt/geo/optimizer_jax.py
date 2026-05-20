@@ -65,8 +65,8 @@ LM family note:
   ``least_squares_algorithm="optimistix-lm"`` to engage the optional
   Optimistix/Lineax LSMR lane.
 
-Target private methods (ported from the pinned upstream JAX 0.9.2 optimizer
-sources and validated against the checked local JAX 0.10.0 runtime):
+Target private methods (maintained for the pinned JAX 0.10.0 runtime after the
+initial port from the upstream JAX optimizer sources):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
   - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
 
@@ -100,7 +100,7 @@ from functools import lru_cache, wraps
 from itertools import count
 import re
 from threading import Lock
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import numpy as np
 
@@ -165,7 +165,7 @@ __all__ = [
 ]
 
 
-PRIVATE_OPTIMIZER_JAX_VERSION = "0.9.2"
+PRIVATE_OPTIMIZER_JAX_VERSION = "0.10.0"
 CONCRETE_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
 TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS = frozenset(
     {"scipy-jax", "scipy-jax-fullgraph"}
@@ -178,8 +178,7 @@ VALID_OUTER_OPTIMIZER_BACKENDS = (
     TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS | CONCRETE_OPTIMIZER_BACKENDS
 )
 _OUTER_OPTIMIZER_BACKEND_MESSAGE = (
-    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
-    "scipy-jax-fullgraph."
+    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, scipy-jax-fullgraph."
 )
 _RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE = (
     "optimizer_backend must be one of: auto, scipy, ondevice, scipy-jax, "
@@ -242,6 +241,7 @@ _EISENSTAT_WALKER_MIN_ETA = 1.0e-12
 _EISENSTAT_WALKER_MAX_ETA = 0.5
 _NEWTON_BACKTRACKING_MAX_STEPS = 8
 _HAGER_HIGHAM_CONDITION_ITERATIONS = 5
+_LINEAR_SOLVE_ITERATIONS_UNKNOWN = -1
 _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
@@ -249,6 +249,19 @@ _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
 _TRACEABLE_CALLBACK_LOCK = Lock()
 _TRACEABLE_CALLBACK_IDS = count(1)
 _TRACEABLE_CALLBACKS: dict[int, Callable[..., object]] = {}
+
+
+class _LinearSolveStatus(NamedTuple):
+    success: jax.Array
+    residual: jax.Array
+    residual_relative: jax.Array
+    iterations: jax.Array
+
+    def __array__(self, dtype=None):
+        return np.asarray(jax.device_get(self.success), dtype=dtype)
+
+    def __bool__(self):
+        return bool(np.asarray(self))
 
 
 def resolve_optimizer_backend(optimizer_backend: str | None) -> str:
@@ -447,6 +460,10 @@ def _x64_enabled():
 
 def _device_scalar(value, *, dtype=jnp.float64):
     return runtime_device_put(value, dtype=dtype)
+
+
+def _device_int32(value):
+    return runtime_device_put(value, dtype=jnp.int32)
 
 
 def _optimizer_flat_vector(value, *, dtype=None) -> jax.Array:
@@ -767,6 +784,13 @@ def require_target_backend_x64(optimizer_backend):
     if optimizer_backend not in TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS:
         return
     if _x64_enabled():
+        return
+    policy = get_backend_policy()
+    if (
+        not policy.requires_x64
+        and policy.runtime_dtype == "float32"
+        and policy.tolerance_tier == "float32_smoke"
+    ):
         return
     role = OPTIMIZER_BACKEND_ROLE[optimizer_backend]
     raise RuntimeError(
@@ -1455,6 +1479,7 @@ def _make_traceable_levenberg_marquardt_runner(
 
     run_solver.__name__ = "traceable_levenberg_marquardt_run_solver"
     if not callback_enabled and not progress_callback_enabled:
+
         def run_solver_without_callbacks(x_init, fn_args):
             return run_solver(x_init, fn_args, 0, 0)
 
@@ -3064,44 +3089,129 @@ def _gmres_solve_exact_newton_system(jvp_fn, x, rhs, *, tol):
 
 
 def _gmres_solve_array_system(matvec, rhs, *, tol):
-    solution, _ = _run_operator_gmres(matvec, rhs, tol=tol)
+    solution, info = _run_operator_gmres(matvec, rhs, tol=tol)
     residual = rhs - matvec(solution)
-    return solution, residual
+    return solution, residual, info
 
 
 def _linear_solve_finite(solution, residual):
     return jnp.all(jnp.isfinite(solution)) & jnp.all(jnp.isfinite(residual))
 
 
-def _linear_solve_residual_tolerance(rhs, tol):
+def _effective_linear_solve_tolerance(rhs, tol):
+    dtype = rhs.dtype
+    policy = get_backend_policy()
+    tol_value = _optimizer_scalar(tol, dtype=dtype)
+    tolerance_floor = _device_scalar(policy.linear_solve_tolerance_floor, dtype=dtype)
+    tolerance_cap = (
+        _device_scalar(jnp.inf, dtype=dtype)
+        if policy.linear_solve_tolerance_cap is None
+        else _device_scalar(policy.linear_solve_tolerance_cap, dtype=dtype)
+    )
+    return jnp.minimum(tolerance_cap, jnp.maximum(tolerance_floor, tol_value))
+
+
+def _linear_solve_residual_scale(rhs):
     dtype = rhs.dtype
     rhs_norm = jnp.linalg.norm(rhs)
-    tol_value = _optimizer_scalar(tol, dtype=dtype)
-    one = _device_scalar(1.0, dtype=dtype)
-    ten = _device_scalar(10.0, dtype=dtype)
-    minimum = _device_scalar(1e-12, dtype=dtype)
-    scale = jnp.maximum(rhs_norm, one)
-    return jnp.maximum(
-        minimum,
-        ten * tol_value * scale,
+    eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
+    return jnp.maximum(rhs_norm, eps)
+
+
+def _linear_solve_residual_tolerance(rhs, tol):
+    return _effective_linear_solve_tolerance(rhs, tol) * _linear_solve_residual_scale(
+        rhs
+    )
+
+
+def _linear_solve_status_success(status):
+    return status.success if hasattr(status, "success") else status
+
+
+def _linear_solve_iteration_count(info):
+    if info is None:
+        return _device_int32(_LINEAR_SOLVE_ITERATIONS_UNKNOWN)
+    return _device_int32(info)
+
+
+def _linear_solve_status_iterations(iterations):
+    if isinstance(iterations, jax.Array) or hasattr(iterations, "aval"):
+        return jnp.asarray(iterations, dtype=jnp.int32)
+    return _device_int32(iterations)
+
+
+def _combine_linear_solve_iteration_counts(*counts):
+    counts = tuple(_linear_solve_status_iterations(count) for count in counts)
+    all_known = counts[0] >= _device_int32(0)
+    for iteration_count in counts[1:]:
+        all_known = all_known & (iteration_count >= _device_int32(0))
+    total = sum(counts, _device_int32(0))
+    return lax.cond(
+        all_known,
+        lambda _: total,
+        lambda _: _device_int32(_LINEAR_SOLVE_ITERATIONS_UNKNOWN),
+        operand=None,
+    )
+
+
+def _linear_solve_iterations_host_value(iterations):
+    value = int(np.asarray(jax.device_get(iterations)))
+    if value == _LINEAR_SOLVE_ITERATIONS_UNKNOWN:
+        return None
+    return value
+
+
+def _linear_solve_status(solution, residual, rhs, *, tol, iterations):
+    residual_norm = jnp.linalg.norm(residual)
+    residual_relative = residual_norm / _linear_solve_residual_scale(rhs)
+    effective_tolerance = _effective_linear_solve_tolerance(rhs, tol)
+    success = (
+        _linear_solve_finite(solution, residual)
+        & jnp.isfinite(residual_norm)
+        & jnp.isfinite(residual_relative)
+        & (residual_relative <= effective_tolerance)
+    )
+    return _LinearSolveStatus(
+        success=success,
+        residual=residual_norm,
+        residual_relative=residual_relative,
+        iterations=_linear_solve_status_iterations(iterations),
+    )
+
+
+def _dense_linear_solve_status(matvec, solution, rhs, *, tol):
+    residual = rhs - matvec(solution)
+    return _linear_solve_status(
+        solution,
+        residual,
+        rhs,
+        tol=tol,
+        iterations=_device_int32(0),
+    )
+
+
+def _dense_matrix_backward_error_success(matrix, solution, rhs, *, tol):
+    residual = rhs - matrix @ solution
+    dtype = rhs.dtype
+    residual_norm = jnp.linalg.norm(residual)
+    scale = jnp.linalg.norm(matrix) * jnp.linalg.norm(solution) + jnp.linalg.norm(rhs)
+    eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
+    threshold = _effective_linear_solve_tolerance(rhs, tol) * jnp.maximum(scale, eps)
+    return (
+        _linear_solve_finite(solution, residual)
+        & jnp.isfinite(residual_norm)
+        & jnp.isfinite(scale)
+        & (residual_norm <= threshold)
     )
 
 
 def _relative_residual_norm(residual, rhs, *, ord=None):
-    """Return ``||residual|| / max(||rhs||, 1)`` when ``||rhs||`` is not
-    representably nonzero (denormals included), else ``||residual|| /
-    ||rhs||``. The unit fallback prevents the denormal floor from
-    inflating residual_rel by ~10^308 when the RHS is the zero vector
-    (a legitimate degenerate adjoint state) which would otherwise force
-    the forward-error gate to spurious failure.
-    """
+    """Return ``||residual|| / max(||rhs||, eps_runtime)``."""
     dtype = rhs.dtype
     residual_norm = jnp.linalg.norm(residual, ord=ord)
     rhs_norm = jnp.linalg.norm(rhs, ord=ord)
-    tiny = _device_scalar(jnp.finfo(dtype).tiny, dtype=dtype)
-    one = _device_scalar(1.0, dtype=dtype)
-    safe_norm = jnp.where(rhs_norm > tiny, rhs_norm, one)
-    return residual_norm / safe_norm
+    eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
+    return residual_norm / jnp.maximum(rhs_norm, eps)
 
 
 def _relative_residual_1_norm(residual, rhs):
@@ -3256,18 +3366,25 @@ def _dense_matrix_solve_forward_error_success(matrix, solution, rhs, *, tol):
 
 def _solve_square_vector_system_operator_only(matvec, rhs, *, tol):
     """Solve one square linear system with operator-only GMRES refinement."""
-    solution, residual = _gmres_solve_array_system(matvec, rhs, tol=tol)
-    residual_norm = jnp.linalg.norm(residual)
-    residual_tol = _linear_solve_residual_tolerance(rhs, tol)
-    solve_finite = _linear_solve_finite(solution, residual) & jnp.isfinite(
-        residual_norm
+    effective_tol = _effective_linear_solve_tolerance(rhs, tol)
+    solution, residual, info = _gmres_solve_array_system(
+        matvec,
+        rhs,
+        tol=effective_tol,
+    )
+    status = _linear_solve_status(
+        solution,
+        residual,
+        rhs,
+        tol=tol,
+        iterations=_linear_solve_iteration_count(info),
     )
 
     def refine(_):
-        correction, correction_residual = _gmres_solve_array_system(
+        correction, correction_residual, correction_info = _gmres_solve_array_system(
             matvec,
             residual,
-            tol=tol,
+            tol=effective_tol,
         )
         correction_finite = _linear_solve_finite(correction, correction_residual)
         refined_solution = lax.cond(
@@ -3277,21 +3394,26 @@ def _solve_square_vector_system_operator_only(matvec, rhs, *, tol):
             operand=None,
         )
         refined_residual = rhs - matvec(refined_solution)
-        return refined_solution, refined_residual
+        refined_iterations = _combine_linear_solve_iteration_counts(
+            _linear_solve_iteration_count(info),
+            _linear_solve_iteration_count(correction_info),
+        )
+        return refined_solution, refined_residual, refined_iterations
 
-    solution, residual = lax.cond(
-        solve_finite & (residual_norm > residual_tol),
+    solution, residual, iterations = lax.cond(
+        _linear_solve_finite(solution, residual) & (~status.success),
         refine,
-        lambda _: (solution, residual),
+        lambda _: (solution, residual, status.iterations),
         operand=None,
     )
-    residual_norm = jnp.linalg.norm(residual)
-    success = (
-        _linear_solve_finite(solution, residual)
-        & jnp.isfinite(residual_norm)
-        & (residual_norm <= residual_tol)
+    status = _linear_solve_status(
+        solution,
+        residual,
+        rhs,
+        tol=tol,
+        iterations=iterations,
     )
-    return solution, success
+    return solution, status
 
 
 def _apply_column_batched_operator(matvec, rhs):
@@ -3299,6 +3421,77 @@ def _apply_column_batched_operator(matvec, rhs):
     if rhs.ndim == 1:
         return matvec(rhs)
     return jax.vmap(matvec, in_axes=1, out_axes=1)(rhs)
+
+
+def _dense_square_operator_materialization_allowed(rhs):
+    rhs = jnp.asarray(rhs)
+    if rhs.ndim != 1:
+        return False
+    dimension = int(rhs.shape[0])
+    matrix_bytes = dimension * dimension * np.dtype(rhs.dtype).itemsize
+    return matrix_bytes <= int(get_backend_policy().max_dense_jacobian_bytes)
+
+
+def _dense_square_operator_matrix(matvec, rhs):
+    rhs = jnp.asarray(rhs)
+    dimension = int(rhs.shape[0])
+    eye = _explicit_device_array(
+        np.eye(dimension, dtype=np.dtype(rhs.dtype)),
+        dtype=rhs.dtype,
+    )
+    return _apply_column_batched_operator(matvec, eye)
+
+
+def _solve_dense_square_operator_system_with_status(matvec, rhs, *, tol):
+    matrix = _dense_square_operator_matrix(matvec, rhs)
+    lu_piv = jsp_linalg.lu_factor(matrix)
+    solution = jsp_linalg.lu_solve(lu_piv, rhs)
+
+    def refine_once(current_solution):
+        current_residual = rhs - matrix @ current_solution
+        correction = jsp_linalg.lu_solve(lu_piv, current_residual)
+        candidate_solution = current_solution + correction
+        candidate_residual = rhs - matrix @ candidate_solution
+        candidate_finite = _linear_solve_finite(
+            candidate_solution,
+            candidate_residual,
+        )
+        improved = candidate_finite & (
+            jnp.linalg.norm(candidate_residual) <= jnp.linalg.norm(current_residual)
+        )
+        return lax.select(improved, candidate_solution, current_solution)
+
+    for _ in range(2):
+        solution = refine_once(solution)
+
+    residual = rhs - matrix @ solution
+    return solution, _linear_solve_status(
+        solution,
+        residual,
+        rhs,
+        tol=tol,
+        iterations=_device_int32(0),
+    )
+
+
+def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *, tol):
+    matrix = _dense_square_operator_matrix(matvec, rhs)
+    solution = jnp.linalg.lstsq(matrix, rhs, rcond=None)[0]
+    residual = rhs - matrix @ solution
+    status = _linear_solve_status(
+        solution,
+        residual,
+        rhs,
+        tol=tol,
+        iterations=_device_int32(0),
+    )
+    backward_error_success = _dense_matrix_backward_error_success(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+    )
+    return solution, status._replace(success=status.success | backward_error_success)
 
 
 def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
@@ -3310,12 +3503,17 @@ def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
     def solve_column(column):
         return _solve_square_vector_system_operator_only(matvec, column, tol=tol)
 
-    solutions, successes = jax.vmap(
+    solutions, column_statuses = jax.vmap(
         solve_column,
         in_axes=1,
         out_axes=(1, 0),
     )(rhs)
-    return solutions, jnp.all(successes)
+    return solutions, _LinearSolveStatus(
+        success=jnp.all(column_statuses.success),
+        residual=jnp.max(column_statuses.residual),
+        residual_relative=jnp.max(column_statuses.residual_relative),
+        iterations=jnp.max(column_statuses.iterations),
+    )
 
 
 def _least_squares_normal_operator(residual_fn, x):
@@ -3443,35 +3641,28 @@ def _solve_hessian_least_squares_system_with_status(
     stab,
     tol,
 ):
-    """Solve singular Hessian systems through operator-only normal equations.
-
-    Some LS Boozer fixtures expose gauge-null Hessian directions, so the
-    adjoint equation can be inconsistent even with finite branch tangents. The
-    target lane uses the Moore-Penrose minimum-residual system for those
-    Hessian linearizations while keeping the path matrix-free: solve
-    ``H.T @ H @ y = H.T @ rhs`` through the same operator GMRES contract.
-    """
+    """Solve a Hessian adjoint system without forming normal equations."""
     operator = _hessian_linear_operator(objective_fn, x, stab=stab)
     rhs = jnp.asarray(rhs)
-    normal_rhs = operator["transpose_matvec"](rhs)
-
-    def normal_matvec(vector):
-        return operator["transpose_matvec"](operator["matvec"](vector))
-
-    solution, normal_success = _solve_square_array_system_operator_only(
-        normal_matvec,
-        normal_rhs,
+    if _dense_square_operator_materialization_allowed(rhs):
+        return _solve_dense_square_operator_least_squares_system_with_status(
+            operator["matvec"],
+            rhs,
+            tol=tol,
+        )
+    solution, status = _solve_square_array_system_operator_only(
+        operator["matvec"],
+        rhs,
         tol=tol,
     )
-    normal_residual = normal_rhs - normal_matvec(solution)
     primal_residual = rhs - operator["matvec"](solution)
-    success = (
-        normal_success
-        & jnp.all(jnp.isfinite(solution))
-        & jnp.all(jnp.isfinite(normal_residual))
-        & jnp.all(jnp.isfinite(primal_residual))
+    return solution, _linear_solve_status(
+        solution,
+        primal_residual,
+        rhs,
+        tol=tol,
+        iterations=status.iterations,
     )
-    return solution, success
 
 
 def _jacobian_linear_operator(residual_fn, x):
@@ -3727,7 +3918,7 @@ def _make_traceable_newton_polish_runner(
             def matvec(v):
                 return hvp_fn(state["x"], v) + stab_value * v
 
-            dx, linear_success = _solve_square_array_system_operator_only(
+            dx, linear_status = _solve_square_array_system_operator_only(
                 matvec,
                 state["grad"],
                 tol=linear_tol,
@@ -3740,7 +3931,9 @@ def _make_traceable_newton_polish_runner(
                 state["grad"],
                 state["norm"],
             )
-            accepted = linear_success & candidate["accepted"]
+            accepted = (
+                _linear_solve_status_success(linear_status) & candidate["accepted"]
+            )
             next_nit = state["nit"] + 1
             if progress_callback_enabled:
                 lax.cond(
@@ -3805,6 +3998,7 @@ def _make_traceable_newton_polish_runner(
 
     run_solver.__name__ = "traceable_newton_polish_run_solver"
     if not progress_callback_enabled:
+
         def run_solver_without_callback(x_init, fn_args):
             return run_solver(x_init, fn_args, 0)
 

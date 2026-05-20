@@ -24,6 +24,7 @@ from ._common import (
 )
 from . import _lbfgsb_scipy as lbfgsb
 from ._types import (
+    LBFGS_STATUS_NONFINITE,
     _LBFGSInvalidStepLog,
     _LBFGSResults,
 )
@@ -217,12 +218,18 @@ def _resolve_lbfgs_history_size(maxcor, *, maxiter_limit) -> int:
 def _lbfgsb_public_status(state, *, maxiter_limit, maxfun_limit):
     task0 = state.workspace.task[0]
     limited = (state.nfev > maxfun_limit) | (state.n_iterations >= maxiter_limit)
+    nonfinite = (~jnp.isfinite(state.f)) | jnp.any(~jnp.isfinite(state.g))
+    nonfinite_status = jnp.asarray(LBFGS_STATUS_NONFINITE, dtype=task0.dtype)
     zero = jnp.zeros_like(task0)
     one = jnp.ones_like(task0)
     return jnp.where(
-        task0 == lbfgsb.CONVERGENCE,
-        zero,
-        jnp.where(limited, one, one + one),
+        (task0 == lbfgsb.ABNORMAL) & nonfinite,
+        nonfinite_status,
+        jnp.where(
+            task0 == lbfgsb.CONVERGENCE,
+            zero,
+            jnp.where(limited, one, one + one),
+        ),
     )
 
 

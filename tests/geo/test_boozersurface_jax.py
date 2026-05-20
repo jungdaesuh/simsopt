@@ -1554,6 +1554,64 @@ class TestOptimizerAdapter:
         np.testing.assert_allclose(result.x, np.asarray(x0))
         np.testing.assert_allclose(result.jac, np.asarray([-2.0, 2.0]))
 
+    def test_target_scipy_jax_marks_host_optimizer_transfer_boundaries(
+        self, monkeypatch
+    ):
+        events = []
+
+        @contextmanager
+        def transfer_guard_device_to_host(level):
+            events.append(("d2h", level))
+            yield
+
+        @contextmanager
+        def transfer_guard_host_to_device(level):
+            events.append(("h2d", level))
+            yield
+
+        def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
+            del jac, method, options, callback
+            value, grad = fun(x0)
+            return types.SimpleNamespace(
+                x=np.asarray(x0),
+                jac=np.asarray(grad),
+                fun=float(value),
+                nit=0,
+                nfev=1,
+                njev=1,
+                success=True,
+                status=0,
+            )
+
+        def value_and_grad(x):
+            return jnp.sum((x - 1.0) ** 2), 2.0 * (x - 1.0)
+
+        monkeypatch.setattr(_opt, "_x64_enabled", lambda: True)
+        monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
+        monkeypatch.setattr(
+            _opt_ref.jax,
+            "transfer_guard_device_to_host",
+            transfer_guard_device_to_host,
+        )
+        monkeypatch.setattr(
+            _opt_ref.jax,
+            "transfer_guard_host_to_device",
+            transfer_guard_host_to_device,
+        )
+
+        _opt.target_minimize(
+            value_and_grad,
+            jnp.array([0.0, 2.0], dtype=jnp.float64),
+            method="lbfgs-scipy-jax",
+            tol=1e-8,
+            maxiter=3,
+            options={"maxcor": 7},
+            value_and_grad=True,
+        )
+
+        assert ("d2h", "allow") in events
+        assert ("h2d", "allow") in events
+
     @pytest.mark.parametrize(
         "method",
         ["lbfgs-scipy-jax", "lbfgs-scipy-jax-fullgraph"],
@@ -5025,7 +5083,7 @@ class TestBoozerSurfaceJAXClass:
             diff = jnp.asarray(x, dtype=jnp.float64) - target
             return 0.5 * jnp.dot(diff, diff), diff
 
-        _enable_strict_jax_backend(monkeypatch, request)
+        enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
         result = jax_minimize(
             objective_value_and_grad,
             x0,
@@ -5376,6 +5434,44 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(H.T @ np.asarray(solved), np.asarray(rhs))
         assert bool(np.asarray(success)) is True
 
+    def test_scipy_plu_runtime_callbacks_allow_host_bridge_under_strict_guard(self):
+        """The explicit scipy PLU callback bridge must mark its host transfers."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        booz.need_to_run_code = False
+        n = booz._pack_decision_vector(0.3, 0.05).size
+        factor_diag = jnp.linspace(1.0, 2.0, n, dtype=jnp.float64)
+        P = jnp.eye(n, dtype=jnp.float64)
+        L = jnp.eye(n, dtype=jnp.float64)
+        U = jnp.diag(factor_diag)
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "hessian": P @ L @ U,
+            "PLU": (P, L, U),
+            "dense_linear_solve_factors_available": True,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jax.device_put(np.linspace(0.25, 1.25, n, dtype=np.float64))
+
+        with jax.transfer_guard("disallow"):
+            forward, forward_status = adjoint_state.solve_forward_with_status(rhs)
+            transpose, transpose_status = adjoint_state.solve_transpose_with_status(rhs)
+
+        assert adjoint_state.linear_solve_backend == "dense-plu"
+        assert bool(np.asarray(forward_status.success))
+        assert bool(np.asarray(transpose_status.success))
+        np.testing.assert_allclose(np.asarray(forward), np.asarray(rhs / factor_diag))
+        np.testing.assert_allclose(np.asarray(transpose), np.asarray(rhs / factor_diag))
+
     def test_get_adjoint_runtime_state_uses_shared_lu_piv_for_ondevice_hessian(self):
         """JAX on-device factor-once metadata must match the packed-LU branch."""
         booz = _make_mock_boozer_surface()
@@ -5542,16 +5638,17 @@ class TestBoozerSurfaceJAXClass:
         )
 
     def test_linear_solve_tolerance_uses_float32_smoke_floor(self, request):
-        from simsopt.backend import get_backend_config, set_backend
+        from simsopt.backend import get_backend_config, get_backend_policy, set_backend
 
         previous_backend = get_backend_config()
         request.addfinalizer(lambda: _restore_backend_config(previous_backend))
         set_backend("jax_cpu_float32_smoke", configure_runtime=False)
+        expected_floor = get_backend_policy().linear_solve_tolerance_floor
         booz = _make_mock_boozer_surface()
         booz.options["bfgs_tol"] = 1.0e-10
         booz.options["newton_tol"] = 1.0e-6
 
-        assert booz._linear_solve_tolerance() == pytest.approx(1.0e-6)
+        assert booz._linear_solve_tolerance() == pytest.approx(expected_floor)
 
     def test_linear_solve_tolerance_preserves_float64_floor(self, request):
         from simsopt.backend import get_backend_config, set_backend
@@ -6373,7 +6470,9 @@ class TestBoozerSurfaceJAXExactPath:
 
     def test_exact_result_dict_keys(self):
         """Exact-path result dict has all CPU-contract keys."""
-        booz = _make_mock_boozer_surface_exact()
+        booz = _make_mock_boozer_surface_exact(
+            options={"linearization_residency": "device"}
+        )
         res = _run_mock_exact_boozer_success(booz)
         expected_keys = {
             "residual",
@@ -6460,13 +6559,11 @@ class TestBoozerSurfaceJAXExactPath:
 
         host_permutation = host_booz.res["PLU"][0]
         device_permutation = device_booz.res["PLU"][0]
-        assert apply_plu_projection._cache_size() == 0
+        assert host_permutation.device == cpu_device
         with with_cpu_device_for_construction():
             host_projected = apply_plu_projection(host_permutation, rhs)
-        assert apply_plu_projection._cache_size() == 1
         device_projected = apply_plu_projection(device_permutation, rhs)
         jax.block_until_ready((host_projected, device_projected))
-        assert apply_plu_projection._cache_size() == 2
         np.testing.assert_allclose(
             np.asarray(host_projected),
             np.asarray(device_projected),

@@ -31,6 +31,8 @@ import threading
 from typing import Callable, Literal
 import warnings
 
+import numpy as np
+
 _LOGGER = logging.getLogger(__name__)
 
 _VALID_BACKENDS = ("cpu", "jax")
@@ -189,7 +191,7 @@ _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU = 4 * 1024 * 1024 * 1024
 _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU = 256 * 1024 * 1024
 _FLOAT64_LINEAR_SOLVE_TOLERANCE_FLOOR = 1e-14
 _FLOAT64_LINEAR_SOLVE_TOLERANCE_CAP = 1e-10
-_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR = 1e-6
+_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR = float(np.sqrt(np.finfo(np.float32).eps))
 _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP = None
 _FLOAT64_LINEAR_SOLVE_DEFAULTS = {
     "linear_solve_tolerance_floor": _FLOAT64_LINEAR_SOLVE_TOLERANCE_FLOOR,

@@ -10,12 +10,14 @@ boundary for SciPy-controlled lanes. CPU/reference execution enters through
 
 from __future__ import annotations
 
+import jax
 import numpy as np
 
 from scipy.optimize import OptimizeResult
 from scipy.optimize import minimize as scipy_minimize
 
 from .optimizer_host_lbfgs import (
+    LBFGS_STATUS_NONFINITE,
     host_invalid_step_log_to_list,
     lbfgs_status_is_success,
     lbfgs_status_message,
@@ -55,17 +57,27 @@ def _scipy_callback_contract(callback):
 
 
 def _scipy_scalar_value(value, *, dtype):
-    scalar = np.asarray(value, dtype=np.dtype(dtype))
+    scalar = _scipy_host_array(value, dtype=dtype)
     if scalar.shape != ():
         raise ValueError("SciPy objective callable must return scalar shape ().")
     return scalar[()]
 
 
+def _scipy_host_array(value, *, dtype):
+    with jax.transfer_guard_device_to_host("allow"):
+        return np.asarray(value, dtype=np.dtype(dtype))
+
+
+def _target_array_from_scipy_host(value, *, dtype):
+    with jax.transfer_guard_host_to_device("allow"):
+        return _optimizer._optimizer_flat_vector(value, dtype=dtype)
+
+
 def _scipy_initial_call_contract(x_np, value, gradient, *, dtype):
     return {
-        "decision_vector": np.asarray(x_np, dtype=np.dtype(dtype)).copy(),
+        "decision_vector": _scipy_host_array(x_np, dtype=dtype).copy(),
         "fun": _scipy_scalar_value(value, dtype=dtype),
-        "gradient": np.asarray(gradient, dtype=np.dtype(dtype)).copy(),
+        "gradient": _scipy_host_array(gradient, dtype=dtype).copy(),
     }
 
 
@@ -90,9 +102,27 @@ def _scipy_result_contract(
     }
 
 
+def _scipy_result_has_invalid_state(result) -> bool:
+    return (
+        not np.all(np.isfinite(np.asarray(result.fun)))
+        or not np.all(np.isfinite(np.asarray(result.jac)))
+        or not np.all(np.isfinite(np.asarray(result.x)))
+    )
+
+
+def _mark_scipy_result_invalid_state(result):
+    result.success = False
+    result.status = LBFGS_STATUS_NONFINITE
+    result.message = (
+        "Non-finite objective, iterate, or gradient encountered during iteration."
+    )
+    return result
+
+
 def _normalize_scipy_result(result, *, x_dtype):
-    result.x = _optimizer._optimizer_flat_vector(result.x, dtype=x_dtype)
-    result.jac = _optimizer._optimizer_flat_vector(result.jac, dtype=x_dtype)
+    invalid_state = _scipy_result_has_invalid_state(result)
+    result.x = _target_array_from_scipy_host(result.x, dtype=x_dtype)
+    result.jac = _target_array_from_scipy_host(result.jac, dtype=x_dtype)
     result.nit = int(getattr(result, "nit", 0))
     result.nfev = int(getattr(result, "nfev", 0))
     if hasattr(result, "njev"):
@@ -100,6 +130,8 @@ def _normalize_scipy_result(result, *, x_dtype):
     result.success = bool(result.success)
     if hasattr(result, "status"):
         result.status = int(result.status)
+    if invalid_state:
+        _mark_scipy_result_invalid_state(result)
     return result
 
 
@@ -122,14 +154,14 @@ def _scipy_dispatch_core(scipy_fun, x0, *, method, tol, maxiter, options):
     if callback is not None:
 
         def scipy_callback(x_np):
-            callback(_optimizer._optimizer_flat_vector(x_np, dtype=x_dtype))
+            callback(_target_array_from_scipy_host(x_np, dtype=x_dtype))
 
     result = _normalize_scipy_result(
         # SciPy consumes host arrays here by contract; keep that cast confined
         # to the explicit SciPy-control adapter.
         scipy_minimize(
             scipy_fun,
-            np.asarray(x0, dtype=np.dtype(x_dtype)),
+            _scipy_host_array(x0, dtype=x_dtype),
             jac=True,
             method=scipy_method,
             options=scipy_opts,
@@ -170,14 +202,14 @@ def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
     )
 
     def scipy_fun(x_np):
-        x_jax = _optimizer._optimizer_flat_vector(x_np, dtype=x_dtype)
+        x_jax = _target_array_from_scipy_host(x_np, dtype=x_dtype)
         val, grad = val_and_grad_fn(x_jax)
         # ``minimize(jac=True)`` consumes the same host scalar/array shape
         # returned by the CPU Boozer objective callable.
         host_value = _scipy_scalar_value(val, dtype=x_dtype)
-        host_gradient = np.asarray(
+        host_gradient = _scipy_host_array(
             grad,
-            dtype=np.dtype(x_dtype),
+            dtype=x_dtype,
         )
         if "payload" not in initial_call:
             initial_call["payload"] = _scipy_initial_call_contract(
@@ -226,14 +258,14 @@ def target_scipy_minimize_value_and_grad(
     )
 
     def scipy_fun(x_np):
-        x_jax = _optimizer._optimizer_flat_vector(x_np, dtype=x_dtype)
+        x_jax = _target_array_from_scipy_host(x_np, dtype=x_dtype)
         val, grad = fun(x_jax)
         # ``minimize(jac=True)`` consumes the same host scalar/array shape
         # returned by the CPU Boozer objective callable.
         host_value = _scipy_scalar_value(val, dtype=x_dtype)
-        host_gradient = np.asarray(
+        host_gradient = _scipy_host_array(
             grad,
-            dtype=np.dtype(x_dtype),
+            dtype=x_dtype,
         )
         if "payload" not in initial_call:
             initial_call["payload"] = _scipy_initial_call_contract(
@@ -273,14 +305,14 @@ def _scipy_minimize_value_and_grad(fun, x0, *, method, tol, maxiter, options):
     )
 
     def scipy_fun(x_np):
-        x_jax = _optimizer._optimizer_flat_vector(x_np, dtype=x_dtype)
+        x_jax = _target_array_from_scipy_host(x_np, dtype=x_dtype)
         val, grad = fun(x_jax)
         # ``minimize(jac=True)`` consumes the same host scalar/array shape
         # returned by the CPU Boozer objective callable.
         host_value = _scipy_scalar_value(val, dtype=x_dtype)
-        host_gradient = np.asarray(
+        host_gradient = _scipy_host_array(
             grad,
-            dtype=np.dtype(x_dtype),
+            dtype=x_dtype,
         )
         if "payload" not in initial_call:
             initial_call["payload"] = _scipy_initial_call_contract(
@@ -357,7 +389,7 @@ def _trace_minimize_value_and_grad(
 
     result = minimize_lbfgs_host_core(
         eval_value_and_grad_host,
-        np.asarray(x0, dtype=np.dtype(x_dtype)),
+        _scipy_host_array(x0, dtype=x_dtype),
         maxiter=maxiter,
         gtol=tol,
         maxcor=int(options.get("maxcor", 200)),

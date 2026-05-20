@@ -227,7 +227,7 @@ def test_private_lbfgs_result_status_six_dict_entry_surfaces_when_state_is_finit
     assert result.success is False
     assert (
         result.message
-        == "Non-finite objective or gradient encountered during iteration."
+        == "Non-finite objective, iterate, or gradient encountered during iteration."
     )
 
 

@@ -197,6 +197,65 @@ class SingleStageExampleTests(unittest.TestCase):
             "dJ": np.zeros(5),
         }
 
+    @staticmethod
+    def _make_accepted_single_stage_results_payload():
+        return {
+            "FIELD_ERROR": 0.01,
+            "MAX_CURVATURE": 1.0,
+            "COIL_LENGTH": 2.0,
+            "max_iterations": 7,
+            "provenance": {
+                "backend_mode": "jax_cpu_parity",
+                "runtime_dtype": "float64",
+                "host_dtype": "float64",
+                "tolerance_tier": "parity",
+            },
+        }
+
+    @staticmethod
+    def _make_single_stage_final_snapshot(
+        module,
+        *,
+        optimizer_result=None,
+        optimizer_diagnostics=None,
+        results_payload=None,
+    ):
+        snapshot = module.SingleStageFinalResultSnapshot(
+            final_coil_dofs=np.array([1.0], dtype=np.float64),
+            solved_surface_state={"sdofs": np.array([0.1], dtype=np.float64)},
+            final_metrics={},
+            final_distances={},
+            hardware_status={},
+            optimizer_result=(
+                {"success": True, "status": 0}
+                if optimizer_result is None
+                else optimizer_result
+            ),
+            optimizer_diagnostics=(
+                {"fun": 0.01, "jac_finite": True}
+                if optimizer_diagnostics is None
+                else optimizer_diagnostics
+            ),
+            timings={"script_total_s": 1.5},
+            artifact_policy={
+                "write_restart_artifacts": False,
+                "write_full_artifacts": False,
+            },
+            boozer_optimizer_method="BFGS",
+            results_payload={},
+            field_error=0.01,
+            self_intersecting=False,
+            self_intersection_check_available=True,
+        )
+        return module.with_single_stage_results_payload(
+            snapshot,
+            (
+                SingleStageExampleTests._make_accepted_single_stage_results_payload()
+                if results_payload is None
+                else results_payload
+            ),
+        )
+
     def load_module(self):
         return load_single_stage_example_module()
 
@@ -1142,6 +1201,24 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(overrides["bfgs_tol_override"], 1.0e-8)
         self.assertEqual(overrides["newton_tol_override"], 1.0e-8)
 
+    def test_resolve_target_lane_boozer_init_base_overrides_uses_float32_smoke_newton_tol(
+        self,
+    ):
+        module = self.load_module()
+
+        overrides = module.resolve_target_lane_boozer_init_base_overrides(
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            boozer_limited_memory=False,
+            target_lane_boozer_bfgs_tol=None,
+            target_lane_boozer_bfgs_maxiter=None,
+            target_lane_boozer_newton_tol=None,
+            target_lane_boozer_newton_maxiter=None,
+            tolerance_tier="float32_smoke",
+        )
+
+        self.assertEqual(overrides["newton_tol_override"], 1.0e-6)
+
     def test_resolve_target_lane_boozer_init_base_overrides_is_empty_off_target_lane(
         self,
     ):
@@ -2056,7 +2133,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_build_scaled_outer_phase_initial_dofs_target_lane_is_transfer_safe(self):
         module = self.load_module()
-        dofs = jax.device_put(np.array([1.0, -2.0, 3.0], dtype=np.float64))
+        dofs = np.array([1.0, -2.0, 3.0], dtype=np.float64)
 
         with jax.transfer_guard("disallow"):
             zeros = module.build_scaled_outer_phase_initial_dofs(
@@ -2688,6 +2765,30 @@ class SingleStageExampleTests(unittest.TestCase):
             jnp.array([1.0, 2.0], dtype=jnp.float64)
         )
 
+        self.assertEqual(float(value), 3.0)
+        np.testing.assert_array_equal(np.asarray(gradient), np.array([1.0, 1.0]))
+
+    def test_full_graph_host_callback_value_and_grad_uses_runtime_dtype(self):
+        module = self.load_module()
+        module.runtime_np_dtype = lambda: np.dtype(np.float32)
+
+        def host_value_and_grad(x):
+            x = np.asarray(x, dtype=np.float32)
+            return np.asarray(np.sum(x), dtype=np.float32), np.ones_like(x)
+
+        value_and_grad = (
+            module.build_single_stage_full_graph_host_callback_value_and_grad(
+                host_value_and_grad,
+                np.array([1.0, 2.0], dtype=np.float64),
+            )
+        )
+
+        value, gradient = jax.jit(value_and_grad)(
+            jnp.array([1.0, 2.0], dtype=jnp.float32)
+        )
+
+        self.assertEqual(value.dtype, jnp.dtype(jnp.float32))
+        self.assertEqual(gradient.dtype, jnp.dtype(jnp.float32))
         self.assertEqual(float(value), 3.0)
         np.testing.assert_array_equal(np.asarray(gradient), np.array([1.0, 1.0]))
 
@@ -4885,18 +4986,22 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_extract_optimizer_diagnostics_uses_nonfinite_message_fallback(self):
         module = self.load_module()
 
-        diagnostics = module.extract_optimizer_diagnostics(
-            None,
-            ran_optimizer=True,
-            termination_message="Optimization failed with non-finite objective or gradient.",
-        )
+        for message in (
+            "Optimization failed with non-finite objective or gradient.",
+            "Optimization failed with non-finite objective, iterate, or gradient.",
+        ):
+            diagnostics = module.extract_optimizer_diagnostics(
+                None,
+                ran_optimizer=True,
+                termination_message=message,
+            )
 
-        self.assertIsNone(diagnostics["fun"])
-        self.assertFalse(diagnostics["fun_finite"])
-        self.assertFalse(diagnostics["jac_finite"])
-        self.assertIsNone(diagnostics["jac_inf_norm"])
-        self.assertIsNone(diagnostics["x_finite"])
-        self.assertTrue(diagnostics["invalid_state"])
+            self.assertIsNone(diagnostics["fun"])
+            self.assertFalse(diagnostics["fun_finite"])
+            self.assertFalse(diagnostics["jac_finite"])
+            self.assertIsNone(diagnostics["jac_inf_norm"])
+            self.assertIsNone(diagnostics["x_finite"])
+            self.assertTrue(diagnostics["invalid_state"])
 
     def test_summarize_optimizer_result_for_progress_handles_scaled_phase_state(self):
         module = self.load_module()
@@ -5149,6 +5254,34 @@ class SingleStageExampleTests(unittest.TestCase):
                 benchmark_mode=True,
             ),
             4,
+        )
+
+    def test_resolve_single_stage_outer_maxls_uses_float32_smoke_budget_for_target_lane(
+        self,
+    ):
+        module = self.load_module()
+
+        for optimizer_backend in ("ondevice", "scipy-jax", "scipy-jax-fullgraph"):
+            self.assertEqual(
+                module.resolve_single_stage_outer_maxls(
+                    "jax",
+                    optimizer_backend,
+                    tolerance_tier="float32_smoke",
+                ),
+                100,
+            )
+
+    def test_resolve_single_stage_outer_maxls_preserves_explicit_float32_budget(self):
+        module = self.load_module()
+
+        self.assertEqual(
+            module.resolve_single_stage_outer_maxls(
+                "jax",
+                "scipy-jax",
+                20,
+                tolerance_tier="float32_smoke",
+            ),
+            20,
         )
 
     def test_resolve_target_lane_outer_initial_step_size_omits_stale_default(self):
@@ -5531,6 +5664,60 @@ class SingleStageExampleTests(unittest.TestCase):
                     init_only=False,
                     termination_message="ok",
                     optimizer_success=True,
+                )
+
+    def test_resolve_single_stage_final_penalty_metrics_rejects_failed_target_lane_optimizer(
+        self,
+    ):
+        module = self.load_module()
+
+        class RejectingPenalty:
+            def J(self):
+                raise AssertionError("host-side penalty wrapper should not be used")
+
+        class RejectingDistance(RejectingPenalty):
+            def shortest_distance(self):
+                raise AssertionError("host-side distance wrapper should not be used")
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            side_effect=AssertionError(
+                "failed target-lane optimizer must not rebuild final metrics"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Target-lane optimizer failed; no accepted final target-lane "
+                "reporting metrics are available for results.json",
+            ):
+                module.resolve_single_stage_final_penalty_metrics(
+                    use_target_lane=True,
+                    benchmark_mode=False,
+                    skip_outer_optimizer=False,
+                    boozer_surface=object(),
+                    bs=object(),
+                    iota_target=0.21,
+                    coil_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                    outer_objective_config="config-marker",
+                    success_filter="success-filter-marker",
+                    curvelength=RejectingPenalty(),
+                    j_non_qs=RejectingPenalty(),
+                    j_boozer_residual=RejectingPenalty(),
+                    j_iota=RejectingPenalty(),
+                    j_curve_length=RejectingPenalty(),
+                    j_curve_curve=RejectingDistance(),
+                    j_curve_surface=RejectingDistance(),
+                    j_surface_surface=RejectingDistance(),
+                    j_curvature=RejectingPenalty(),
+                    cc_dist=0.05,
+                    cs_dist=0.02,
+                    ss_dist=0.04,
+                    curvature_threshold=40.0,
+                    run_dict={},
+                    init_only=False,
+                    termination_message="Non-finite objective or gradient",
+                    optimizer_success=False,
                 )
 
     def test_resolve_single_stage_final_penalty_metrics_prefers_cached_target_lane_summary(
@@ -6122,29 +6309,11 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_write_single_stage_results_json_uses_snapshot_payload(self):
         module = self.load_module()
-        snapshot = module.SingleStageFinalResultSnapshot(
-            final_coil_dofs=np.array([1.0], dtype=np.float64),
-            solved_surface_state={"sdofs": np.array([0.1], dtype=np.float64)},
-            final_metrics={},
-            final_distances={},
-            hardware_status={},
-            optimizer_result={},
-            optimizer_diagnostics={},
-            timings={"script_total_s": 1.5},
-            artifact_policy={
-                "write_restart_artifacts": False,
-                "write_full_artifacts": False,
-            },
-            boozer_optimizer_method="BFGS",
-            results_payload={},
-            field_error=0.01,
-            self_intersecting=False,
-            self_intersection_check_available=True,
-        )
-        mutable_results = {"TIMINGS": {"script_total_s": 99.0}, "FIELD_ERROR": 0.01}
-        final_snapshot = module.with_single_stage_results_payload(
-            snapshot,
-            mutable_results,
+        mutable_results = self._make_accepted_single_stage_results_payload()
+        mutable_results["TIMINGS"] = {"script_total_s": 99.0}
+        final_snapshot = self._make_single_stage_final_snapshot(
+            module,
+            results_payload=mutable_results,
         )
         mutable_results["FIELD_ERROR"] = 99.0
         mutable_results["TIMINGS"] = {"script_total_s": 99.0}
@@ -6155,6 +6324,48 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(payload["FIELD_ERROR"], 0.01)
         self.assertEqual(payload["TIMINGS"], {"script_total_s": 1.5})
+
+    def test_single_stage_rejected_marker_records_failed_gate(self):
+        module = self.load_module()
+        snapshot = self._make_single_stage_final_snapshot(
+            module,
+            optimizer_result={"success": False, "status": 5},
+        )
+        reasons = module.single_stage_result_rejection_reasons(snapshot)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.write_single_stage_rejected_marker(tmpdir, snapshot, reasons)
+            marker = json.loads((Path(tmpdir) / "REJECTED.json").read_text())
+
+        self.assertFalse(marker["accepted"])
+        self.assertIn("optimizer_success_not_true", marker["rejection_reasons"])
+
+    def test_write_single_stage_results_json_rejects_failed_optimizer(self):
+        module = self.load_module()
+        final_snapshot = self._make_single_stage_final_snapshot(
+            module,
+            optimizer_result={"success": False, "status": 5},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(
+                ValueError,
+                "optimizer_success_not_true, optimizer_status_5",
+            ):
+                module.write_single_stage_results_json(tmpdir, final_snapshot)
+            self.assertFalse((Path(tmpdir) / "results.json").exists())
+
+    def test_write_single_stage_results_json_rejects_nonfinite_gradient(self):
+        module = self.load_module()
+        final_snapshot = self._make_single_stage_final_snapshot(
+            module,
+            optimizer_diagnostics={"fun": 0.01, "jac_finite": False},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "final_gradient_nonfinite"):
+                module.write_single_stage_results_json(tmpdir, final_snapshot)
+            self.assertFalse((Path(tmpdir) / "results.json").exists())
 
     def test_summarize_single_stage_final_optimizer_result_copies_status(self):
         module = self.load_module()
@@ -7478,7 +7689,7 @@ class SingleStageExampleTests(unittest.TestCase):
             checkpoint_payloads.append(
                 (
                     path,
-                    json.loads(json.dumps(module.sanitize_json_payload(payload))),
+                    json.loads(json.dumps(module.sanitize_diagnostic_payload(payload))),
                 )
             )
 
@@ -12926,6 +13137,21 @@ class SegmentDistanceTests(unittest.TestCase):
 
 
 class HardwareConstraintTests(unittest.TestCase):
+    @staticmethod
+    def _make_accepted_stage2_results_payload():
+        return {
+            "field_error": 0.25,
+            "FINAL_CURVE_LENGTH": 3.0,
+            "FINAL_MEAN_ABS_RELBN": 1.0e-3,
+            "provenance": {
+                "backend_mode": "jax_cpu_parity",
+                "runtime_dtype": "float64",
+                "host_dtype": "float64",
+                "tolerance_tier": "parity",
+            },
+            "problem_contract": {"runtime_contract": {"max_iterations": 7}},
+        }
+
     def test_jax_curvature_threshold_matches_stage_specific_contracts(self):
         stage2_module = load_stage2_module()
         single_stage_module = load_single_stage_example_module()
@@ -12940,6 +13166,51 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(single_stage_module.resolve_curvature_threshold(39.0), 39.0)
         self.assertEqual(single_stage_module.resolve_curvature_threshold(80.0), 80.0)
         self.assertEqual(single_stage_module.resolve_curvature_threshold(120.0), 100.0)
+
+    def test_single_stage_hardware_status_reporting_boundary_allows_d2h(self):
+        module = load_single_stage_example_module()
+        events = []
+
+        @contextmanager
+        def transfer_guard_device_to_host(level):
+            events.append(("enter", level))
+            yield
+            events.append(("exit", level))
+
+        class _DistanceObjective:
+            def __init__(self, distance):
+                self.distance = distance
+
+            def shortest_distance(self):
+                return self.distance
+
+        class _Curve:
+            def kappa(self):
+                return np.array([39.0])
+
+        objectives = {
+            "cc": _DistanceObjective(0.06),
+            "cs": _DistanceObjective(0.03),
+            "surf": _DistanceObjective(0.05),
+        }
+        diagnostics = {"banana_curve": _Curve()}
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.02
+        module.SS_DIST = 0.04
+        module.CURVATURE_THRESHOLD = 40.0
+
+        with patch.object(
+            module.jax,
+            "transfer_guard_device_to_host",
+            transfer_guard_device_to_host,
+        ):
+            status = module._evaluate_single_stage_hardware_status_reporting_boundary(
+                objectives,
+                diagnostics,
+            )
+
+        self.assertEqual(events, [("enter", "allow"), ("exit", "allow")])
+        self.assertTrue(status["success"])
 
     def test_stage2_hardware_constraints_pass_at_boundaries(self):
         module = load_stage2_module()
@@ -13474,7 +13745,7 @@ class HardwareConstraintTests(unittest.TestCase):
                     "converged; hardware_constraints_failed",
                 )
 
-    def test_sanitize_json_payload_replaces_non_finite_numbers(self):
+    def test_sanitize_diagnostic_payload_replaces_non_finite_numbers(self):
         module = load_single_stage_example_module()
 
         payload = {
@@ -13484,13 +13755,26 @@ class HardwareConstraintTests(unittest.TestCase):
             "nested": [np.float64(2.0), np.float64(np.nan)],
         }
 
-        sanitized = module.sanitize_json_payload(payload)
+        sanitized = module.sanitize_diagnostic_payload(payload)
 
         self.assertEqual(sanitized["finite"], 1.25)
         self.assertIsNone(sanitized["nan"])
         self.assertIsNone(sanitized["inf"])
         self.assertEqual(sanitized["nested"][0], 2.0)
         self.assertIsNone(sanitized["nested"][1])
+
+    def test_accepted_result_payload_rejects_non_finite_numbers(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(ValueError, "payload.nan must be finite"):
+            module.accepted_result_payload(
+                {"nan": float("nan")},
+                optimizer_success=True,
+                optimizer_status=0,
+                final_objective=1.0,
+                final_dofs=np.array([1.0], dtype=np.float64),
+                require_gradient=False,
+            )
 
     def test_target_lane_success_filter_cache_signature_accepts_spec_dataclasses(
         self,
@@ -13569,6 +13853,48 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertIsNone(payload["nan_value"])
         self.assertIsNone(payload["inf_value"])
+
+    def test_stage2_result_gate_rejects_missing_optimizer_gradient(self):
+        module = load_stage2_module()
+        optimizer_result = types.SimpleNamespace(
+            success=True,
+            status=0,
+            message="ok",
+        )
+
+        reasons = module.stage2_result_rejection_reasons(
+            self._make_accepted_stage2_results_payload(),
+            optimizer_result=optimizer_result,
+            optimizer_success=True,
+            final_objective=1.0,
+            final_dofs=np.asarray([1.0], dtype=np.float64),
+        )
+
+        self.assertIn("final_gradient_nonfinite", reasons)
+
+    def test_stage2_write_results_json_rejects_failed_optimizer(self):
+        module = load_stage2_module()
+        optimizer_result = types.SimpleNamespace(
+            success=False,
+            status=5,
+            message="Line search failed.",
+            jac=np.asarray([0.0], dtype=np.float64),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(
+                ValueError,
+                "optimizer_success_not_true, optimizer_status_5",
+            ):
+                module.write_stage2_results_json(
+                    tmpdir,
+                    self._make_accepted_stage2_results_payload(),
+                    optimizer_result=optimizer_result,
+                    optimizer_success=False,
+                    final_objective=1.0,
+                    final_dofs=np.asarray([1.0], dtype=np.float64),
+                )
+            self.assertFalse((Path(tmpdir) / "results.json").exists())
 
 
 class CrossSectionNormalizationTests(unittest.TestCase):

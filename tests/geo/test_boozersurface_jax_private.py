@@ -503,6 +503,45 @@ def test_minimize_lbfgs_host_core_rejected_step_log_separates_requested_alpha():
     assert event.curvature_margin == pytest.approx(-1.0e-3)
 
 
+def test_minimize_lbfgs_host_core_nonfinite_step_terminates_status_nonfinite():
+    def quad(x):
+        x = np.asarray(x, dtype=np.float64)
+        return float(0.5 * np.dot(x, x)), x
+
+    def nonfinite_step_line_search(**_kwargs):
+        return _host_lbfgs.HostLineSearchResults(
+            failed=False,
+            nit=1,
+            nfev=1,
+            ngev=1,
+            k=2,
+            a_k=0.5,
+            f_k=0.25,
+            g_k=np.asarray([np.inf], dtype=np.float64),
+            status=0,
+            requested_initial_step=0.5,
+            first_tested_alpha=0.5,
+            best_finite_alpha=0.5,
+            returned_alpha=0.5,
+            failure_reason="accepted",
+            armijo_margin=0.0,
+            curvature_margin=0.0,
+        )
+
+    result = _host_lbfgs.minimize_lbfgs_host_core(
+        quad,
+        np.asarray([1.0], dtype=np.float64),
+        maxiter=2,
+        initial_step_size=0.5,
+        line_search_value_and_grad=nonfinite_step_line_search,
+    )
+
+    assert result.failed is True
+    assert result.status == _host_lbfgs.LBFGS_STATUS_NONFINITE
+    assert len(result.invalid_step_events) == 1
+    assert result.invalid_step_events[0].nonfinite_step is True
+
+
 def test_minimize_lbfgs_host_core_does_not_record_trace_by_default():
     def quad(x):
         x = np.asarray(x, dtype=np.float64)
@@ -1953,10 +1992,10 @@ class TestLBFGSMethodPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
-    def test_lbfgs_ondevice_reports_scipy_status_for_nonfinite_initial_gradient(
+    def test_lbfgs_ondevice_reports_repo_status_for_nonfinite_initial_gradient(
         self,
     ):
-        """Entry with a non-finite initial gradient must match SciPy's abnormal status."""
+        """Entry with a non-finite gradient must terminate with repo status 6."""
 
         def jax_inf_grad_at_origin(x):
             value = jnp.asarray(0.0, dtype=x.dtype)
@@ -1987,8 +2026,8 @@ class TestLBFGSMethodPrivate:
         )
 
         assert result.success is scipy_result.success
-        assert result.status == scipy_result.status
-        assert result.message == scipy_result.message
+        assert result.status == _host_lbfgs.LBFGS_STATUS_NONFINITE
+        assert "non-finite" in result.message.lower()
         assert len(result.invalid_step_log) == 1
         assert result.invalid_step_log[0]["line_search_failed"] is True
         assert result.invalid_step_log[0]["nonfinite_step"] is True
@@ -2022,14 +2061,87 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
-    def test_hessian_least_squares_system_solves_singular_minimum_residual(self):
+    def test_hessian_system_status_reports_original_residual_shape(self):
+        x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        rhs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+
+        def objective(z):
+            return 0.5 * jnp.dot(z, z)
+
+        solution, status = _opt._solve_hessian_system_with_status(
+            objective,
+            x,
+            rhs,
+            stab=0.0,
+            tol=1e-10,
+        )
+        residual = rhs - solution
+
+        assert bool(np.asarray(status.success))
+        assert status._fields == (
+            "success",
+            "residual",
+            "residual_relative",
+            "iterations",
+        )
+        assert np.asarray(status.residual).shape == ()
+        assert np.asarray(status.residual_relative).shape == ()
+        assert isinstance(status.iterations, jax.Array)
+        assert np.asarray(status.iterations).shape == ()
+        np.testing.assert_allclose(
+            np.asarray(status.residual), np.linalg.norm(residual)
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_linear_solve_unknown_iterations_remain_scalar_jax_array(self):
+        rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        status = _opt._linear_solve_status(
+            rhs,
+            jnp.zeros_like(rhs),
+            rhs,
+            tol=1e-10,
+            iterations=_opt._linear_solve_iteration_count(None),
+        )
+
+        assert isinstance(status.iterations, jax.Array)
+        assert np.asarray(status.iterations).shape == ()
+        assert int(np.asarray(status.iterations)) == -1
+        assert _opt._linear_solve_iterations_host_value(status.iterations) is None
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_hessian_least_squares_dense_status_runs_under_strict_transfer_guard(self):
+        x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        rhs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+
+        def objective(z):
+            return 0.5 * jnp.dot(z, z)
+
+        with jax.transfer_guard("disallow"):
+            solution, status = _opt._solve_hessian_least_squares_system_with_status(
+                objective,
+                x,
+                rhs,
+                stab=0.0,
+                tol=1e-10,
+            )
+
+        assert bool(np.asarray(status.success))
+        assert isinstance(status.iterations, jax.Array)
+        assert np.asarray(status.iterations).shape == ()
+        np.testing.assert_allclose(np.asarray(solution), np.asarray(rhs), atol=1e-12)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_hessian_least_squares_system_rejects_original_residual_miss(self):
         x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         rhs = jnp.asarray([1.0, 1.0], dtype=jnp.float64)
 
         def objective(z):
             return 0.5 * z[0] * z[0]
 
-        solution, success = _opt._solve_hessian_least_squares_system_with_status(
+        solution, status = _opt._solve_hessian_least_squares_system_with_status(
             objective,
             x,
             rhs,
@@ -2037,15 +2149,11 @@ class TestBoozerSurfaceJAXClassPrivate:
             tol=1e-10,
         )
         hessian_residual = rhs - jnp.asarray([solution[0], 0.0], dtype=jnp.float64)
-        normal_residual = jnp.asarray(
-            [hessian_residual[0], 0.0],
-            dtype=jnp.float64,
-        )
 
-        assert bool(np.asarray(success))
-        np.testing.assert_allclose(solution, np.asarray([1.0, 0.0]))
-        np.testing.assert_allclose(normal_residual, np.zeros(2), atol=1e-12)
-        assert np.linalg.norm(np.asarray(hessian_residual)) == pytest.approx(1.0)
+        assert not bool(np.asarray(status))
+        assert np.all(np.isfinite(np.asarray(solution)))
+        assert np.linalg.norm(np.asarray(hessian_residual)) > 1e-10
+        assert float(np.asarray(status.residual_relative)) > 1e-10
 
     def test_gmres_iteration_limits_bound_hvp_work(self):
         assert _opt._gmres_iteration_limits(39) == (39, 10)

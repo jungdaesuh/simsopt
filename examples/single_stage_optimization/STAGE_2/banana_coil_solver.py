@@ -39,8 +39,10 @@ from equilibria_paths import (
     resolve_equilibrium_path,
 )
 from hardware_constraints import (
+    accepted_result_payload,
+    accepted_result_rejection_reasons,
     apply_hardware_constraint_verdict,
-    sanitize_json_payload,
+    sanitize_diagnostic_payload,
 )
 from run_metadata import build_artifact_manifest, build_runtime_provenance
 from alm_utils import (
@@ -384,6 +386,14 @@ def parse_args():
         "--skip-postprocess",
         action="store_true",
         help="Skip heavy VTK/plot/save artifact generation while still writing results.json.",
+    )
+    parser.add_argument(
+        "--disable-accepted-step-callback",
+        action="store_true",
+        help=(
+            "Disable accepted-step host callbacks in the target optimizer while "
+            "still writing endpoint artifacts from the optimizer result."
+        ),
     )
     parser.add_argument(
         "--probe-only",
@@ -2455,12 +2465,116 @@ def build_stage2_probe_payload(
 
 
 def write_json_file(path, payload):
-    """Write JSON payloads for probe/export workflows."""
+    """Write diagnostic/probe JSON payloads."""
     output_dir = os.path.dirname(path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as outfile:
-        json.dump(sanitize_json_payload(payload), outfile, indent=2, allow_nan=False)
+        json.dump(
+            sanitize_diagnostic_payload(payload),
+            outfile,
+            indent=2,
+            allow_nan=False,
+        )
+
+
+_STAGE2_ACCEPTED_METADATA_PATHS = (
+    ("provenance", "backend_mode"),
+    ("provenance", "runtime_dtype"),
+    ("provenance", "host_dtype"),
+    ("provenance", "tolerance_tier"),
+    ("problem_contract", "runtime_contract", "max_iterations"),
+)
+
+_STAGE2_ACCEPTED_METRIC_PATHS = (
+    ("field_error",),
+    ("FINAL_CURVE_LENGTH",),
+    ("FINAL_MEAN_ABS_RELBN",),
+)
+
+
+def stage2_result_rejection_reasons(
+    results,
+    *,
+    optimizer_result,
+    optimizer_success,
+    final_objective,
+    final_dofs,
+):
+    """Return accepted-artifact rejection reasons for Stage 2 results."""
+    final_gradient = (
+        None if optimizer_result is None else getattr(optimizer_result, "jac", None)
+    )
+    return accepted_result_rejection_reasons(
+        results,
+        optimizer_success=optimizer_success,
+        optimizer_status=None
+        if optimizer_result is None
+        else getattr(optimizer_result, "status", None),
+        final_objective=final_objective,
+        final_dofs=final_dofs,
+        final_gradient=final_gradient,
+        require_gradient=optimizer_result is not None,
+        required_metric_paths=_STAGE2_ACCEPTED_METRIC_PATHS,
+        required_metadata_paths=_STAGE2_ACCEPTED_METADATA_PATHS,
+    )
+
+
+def write_stage2_rejected_marker(output_dir, *, reasons, optimizer_result):
+    """Write the explicit rejected-run marker next to Stage 2 diagnostics."""
+    write_json_file(
+        os.path.join(output_dir, "REJECTED.json"),
+        {
+            "accepted": False,
+            "rejection_reasons": list(reasons),
+            "optimizer": {
+                "success": None
+                if optimizer_result is None
+                else bool(getattr(optimizer_result, "success", False)),
+                "status": None
+                if optimizer_result is None
+                else getattr(optimizer_result, "status", None),
+                "message": None
+                if optimizer_result is None
+                else str(getattr(optimizer_result, "message", "")),
+            },
+            "artifact_contract": {
+                "accepted_results_filename": "results.json",
+                "diagnostic_marker_filename": "REJECTED.json",
+            },
+        },
+    )
+
+
+def write_stage2_results_json(
+    output_dir,
+    results,
+    *,
+    optimizer_result,
+    optimizer_success,
+    final_objective,
+    final_dofs,
+):
+    """Write accepted Stage 2 results after proving artifact gates."""
+    accepted_payload = accepted_result_payload(
+        results,
+        optimizer_success=optimizer_success,
+        optimizer_status=None
+        if optimizer_result is None
+        else getattr(optimizer_result, "status", None),
+        final_objective=final_objective,
+        final_dofs=final_dofs,
+        final_gradient=None
+        if optimizer_result is None
+        else getattr(optimizer_result, "jac", None),
+        require_gradient=optimizer_result is not None,
+        required_metric_paths=_STAGE2_ACCEPTED_METRIC_PATHS,
+        required_metadata_paths=_STAGE2_ACCEPTED_METADATA_PATHS,
+    )
+    with open(
+        os.path.join(output_dir, "results.json"), "w", encoding="utf-8"
+    ) as outfile:
+        json.dump(accepted_payload, outfile, indent=2, allow_nan=False)
 
 
 def _log_taylor_test_summary(label, result):
@@ -2543,6 +2657,7 @@ def build_stage2_problem_contract(
             "max_iterations": int(MAXITER),
             "init_only": bool(args.init_only),
             "skip_postprocess": bool(args.skip_postprocess),
+            "accepted_step_callback": not bool(args.disable_accepted_step_callback),
         },
     }
 
@@ -3277,6 +3392,7 @@ if __name__ == "__main__":
             "Probe-only mode requested; exiting before optimization and post-processing."
         )
         sys.exit(0)
+    res = None
     if args.init_only:
         res_nit = 0
         optimizer_success = True
@@ -3405,7 +3521,9 @@ if __name__ == "__main__":
             gtol=args.gtol,
             inner_optimizer_contract=alm_inner_optimizer_contract,
             target_inner_value_and_grad=alm_target_value_and_grad,
-            accepted_callback=accepted_callback,
+            accepted_callback=(
+                None if args.disable_accepted_step_callback else accepted_callback
+            ),
             outer_state_callback=outer_state_callback,
         )
         alm_result = res
@@ -3565,7 +3683,7 @@ if __name__ == "__main__":
                 else target_objective_bundle.objective
             ),
             residual_fun=target_residual,
-            callback=accepted_callback,
+            callback=None if args.disable_accepted_step_callback else accepted_callback,
         )
         JF.x = flatten_stage2_target_optimizer_state(res.x)
         res_nit = res.nit
@@ -3902,6 +4020,7 @@ if __name__ == "__main__":
         hardware_status,
         init_only=args.init_only,
     )
+    stage2_final_dofs = host_array(JF.x)
     results = {
         **build_stage2_results_envelope(
             output_root=OUT_DIR_ITER,
@@ -4008,7 +4127,7 @@ if __name__ == "__main__":
             if best_feasible_partial is None
             else float(best_feasible_partial.objective)
         ),
-        "FINAL_DOFS": host_array(JF.x).tolist(),
+        "FINAL_DOFS": stage2_final_dofs.tolist(),
         "FINAL_OBJECTIVE": final_snapshot["J"],
         "OBJECTIVE_J": final_snapshot["J"],
         "FINAL_SQUARED_FLUX": final_snapshot["Jf"],
@@ -4027,4 +4146,25 @@ if __name__ == "__main__":
     }
     if optimizer_timings is not None:
         results["OPTIMIZER_TIMINGS"] = optimizer_timings
-    write_json_file(os.path.join(OUT_DIR_ITER, "results.json"), results)
+    rejection_reasons = stage2_result_rejection_reasons(
+        results,
+        optimizer_result=res,
+        optimizer_success=optimizer_success,
+        final_objective=final_snapshot["J"],
+        final_dofs=stage2_final_dofs,
+    )
+    if rejection_reasons:
+        write_stage2_rejected_marker(
+            OUT_DIR_ITER,
+            reasons=rejection_reasons,
+            optimizer_result=res,
+        )
+    else:
+        write_stage2_results_json(
+            OUT_DIR_ITER,
+            results,
+            optimizer_result=res,
+            optimizer_success=optimizer_success,
+            final_objective=final_snapshot["J"],
+            final_dofs=stage2_final_dofs,
+        )

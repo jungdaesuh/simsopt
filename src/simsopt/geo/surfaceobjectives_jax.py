@@ -100,6 +100,7 @@ from ..jax_core.sharding import (
 )
 from .curve import incremental_arclength_pure, kappa_pure
 from ._pairwise_reductions import (
+    _resolve_pairwise_penalty_chunk_size,
     pairwise_min_distance_batched_pure,
     pairwise_selected_smoothmin_distance_batched_pure,
     pairwise_selected_smoothmin_distance_pure,
@@ -142,6 +143,7 @@ __all__ = [
     "PrincipalCurvatureJAX",
     "QfmResidualJAX",
     "VolumeJAX",
+    "coil_dofs_gradient_to_derivative",
     "compute_standard_surface_objective_gradients",
     "make_traceable_single_stage_alm_runtime_bundle",
     "make_traceable_objective",
@@ -453,16 +455,20 @@ def surface_volume_jax_from_dofs(spec, dofs):
     return _surface_volume_from_dofs(spec, dofs)
 
 
+def _surface_scalar_grad_jax_from_dofs(surface_scalar_fn, spec, dofs):
+    return jax.jit(
+        lambda surface_spec, x: jax.grad(lambda y: surface_scalar_fn(surface_spec, y))(
+            x
+        )
+    )(spec, _as_jax_float64(dofs))
+
+
 def surface_darea_jax_from_dofs(spec, dofs):
-    return jax.grad(lambda x: surface_area_jax_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
-    )
+    return _surface_scalar_grad_jax_from_dofs(surface_area_jax_from_dofs, spec, dofs)
 
 
 def surface_dvolume_jax_from_dofs(spec, dofs):
-    return jax.grad(lambda x: surface_volume_jax_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
-    )
+    return _surface_scalar_grad_jax_from_dofs(surface_volume_jax_from_dofs, spec, dofs)
 
 
 def surface_d2area_jax_from_dofs(spec, dofs):
@@ -674,6 +680,8 @@ def surface_qfm_penalty_jax_from_dofs(
         dofs,
         coil_set_spec,
         label=label,
+        label_spec=spec,
+        label_coil_set_spec=coil_set_spec,
         targetlabel=targetlabel,
         constraint_weight=constraint_weight,
         toroidal_flux_idx=toroidal_flux_idx,
@@ -696,6 +704,8 @@ def surface_qfm_penalty_value_and_grad_jax_from_dofs(
         dofs,
         coil_set_spec,
         label=label,
+        label_spec=spec,
+        label_coil_set_spec=coil_set_spec,
         targetlabel=targetlabel,
         constraint_weight=constraint_weight,
         toroidal_flux_idx=toroidal_flux_idx,
@@ -1048,6 +1058,31 @@ def _curve_curve_distance_batch(
     return jnp.sum(distances)
 
 
+@partial(jax.jit, static_argnames=("chunk_size_token",))
+def _curve_surface_distance_batch_compiled(
+    gammas,
+    gammadashs,
+    surface_gamma,
+    surface_normal,
+    minimum_distance,
+    *,
+    chunk_size_token,
+):
+    del chunk_size_token
+    flat_gammas = gammas.reshape((-1, gammas.shape[-1]))
+    flat_gammadashs = gammadashs.reshape((-1, gammadashs.shape[-1]))
+    curve_count = int(gammas.shape[0])
+    return _runtime_float64_scalar(curve_count, reference=minimum_distance) * (
+        cs_distance_pure(
+            flat_gammas,
+            flat_gammadashs,
+            surface_gamma,
+            surface_normal,
+            minimum_distance,
+        )
+    )
+
+
 def _curve_surface_distance_batch(
     gammas,
     gammadashs,
@@ -1055,18 +1090,17 @@ def _curve_surface_distance_batch(
     surface_normal,
     minimum_distance,
 ):
-    if int(gammas.shape[0]) == 0:
+    curve_count = int(gammas.shape[0])
+    if curve_count == 0:
         return _runtime_float64_scalar(0.0, reference=minimum_distance)
-    distances = jax.vmap(
-        lambda gamma, gammadash: cs_distance_pure(
-            gamma,
-            gammadash,
-            surface_gamma,
-            surface_normal,
-            minimum_distance,
-        )
-    )(gammas, gammadashs)
-    return jnp.sum(distances)
+    return _curve_surface_distance_batch_compiled(
+        gammas,
+        gammadashs,
+        surface_gamma,
+        surface_normal,
+        minimum_distance,
+        chunk_size_token=_resolve_pairwise_penalty_chunk_size(),
+    )
 
 
 def _curve_curve_penalty_from_grouped_spec(coil_set_spec, minimum_distance):
@@ -1108,9 +1142,7 @@ def _curve_surface_penalty_from_grouped_spec(
     total = _runtime_float64_scalar(0.0, reference=minimum_distance)
     surface_gamma = surface_gamma.reshape((-1, 3))
     surface_normal = surface_normal.reshape((-1, 3))
-    for gammas, gammadashs in _curve_geometry_stacks_from_grouped_spec(
-        coil_set_spec
-    ):
+    for gammas, gammadashs in _curve_geometry_stacks_from_grouped_spec(coil_set_spec):
         total = total + _curve_surface_distance_batch(
             gammas,
             gammadashs,
@@ -1323,14 +1355,9 @@ def _traceable_weighted_single_stage_outer_term_values(
     for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         term_value = term_values[term_name]
         weight = outer_objective_config.get(weight_key, 0.0)
-        if weight:
-            weighted_terms[term_name] = (
-                _runtime_float64_scalar(weight, reference=term_value) * term_value
-            )
-        else:
-            weighted_terms[term_name] = _runtime_float64_scalar(
-                0.0, reference=term_value
-            )
+        weighted_terms[term_name] = (
+            _runtime_float64_scalar(weight, reference=term_value) * term_value
+        )
     return weighted_terms
 
 
@@ -1873,8 +1900,8 @@ def _checked_boozer_linear_solve(adjoint_state, rhs, *, transpose):
             f"solve_{direction}_with_status; "
             "cannot solve the inner linearization."
         )
-    solution, success = solve_with_status(rhs)
-    if not _host_bool(success):
+    solution, status = solve_with_status(rhs)
+    if not _host_bool(_optimizer_jax._linear_solve_status_success(status)):
         raise RuntimeError(
             "Boozer adjoint linear solve failed on the JAX runtime-state path "
             f"({adjoint_state.linearization_kind})."
@@ -1926,7 +1953,7 @@ def _adjoint_coil_dofs_gradient(stream_group_vjps, adjoint, biotsavart, coil_dof
     return total_gradient
 
 
-def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
+def coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
     """Convert a flat free-DOF gradient into the public ``Derivative`` contract."""
     coil_dofs_gradient = _host_array(coil_dofs_gradient, dtype=np.float64)
     deriv_data = {}
@@ -1953,7 +1980,7 @@ def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
 
 
 def _project_native_dJ_by_dcoil_dofs(surface_objective):
-    return _coil_dofs_gradient_to_derivative(
+    return coil_dofs_gradient_to_derivative(
         surface_objective.biotsavart,
         surface_objective._dJ_by_dcoil_dofs,
     )
@@ -3158,6 +3185,7 @@ def _traceable_directional_inner_stationarity(
     runtime_objective_kwargs = _traceable_runtime_deviceify_tree(objective_kwargs)
     inner_objective = _make_boozer_penalty_objective_closure(
         coil_set_spec=coil_set_spec,
+        decision_split_mode="jvp",
         **runtime_objective_kwargs,
     )
     return jax.jvp(inner_objective, (x_inner,), (tangent,))[1]
@@ -3177,6 +3205,7 @@ def _traceable_inner_stationarity_coil_jvp(
         def inner_objective_of_coils(current_coil_dofs):
             inner_objective = _make_boozer_penalty_objective_closure(
                 coil_set_spec=coil_set_spec_from_dofs(current_coil_dofs),
+                decision_split_mode="jvp",
                 **runtime_objective_kwargs,
             )
             return inner_objective(current_x_inner)
@@ -3236,6 +3265,7 @@ def _traceable_solve_hessian_linearization(
     # ``test_runtime_bundle_host_wrappers_allow_host_inputs_under_strict_transfer_guard``).
     objective_fn = _make_boozer_penalty_objective_closure(
         coil_set_spec=coil_set_spec,
+        decision_split_mode="jvp",
         **_traceable_inner_objective_kwargs(objective_kwargs),
     )
     return _optimizer_jax._solve_hessian_least_squares_system_with_status(
@@ -3277,35 +3307,6 @@ def _traceable_plu_matvec(linear_solve_factors, vector, *, transpose):
 def _traceable_plu_matrix(linear_solve_factors):
     P, L, U = _traceable_plu_unpack_triple(linear_solve_factors)
     return P @ (L @ U)
-
-
-def _traceable_plu_residual_tolerance(
-    linear_solve_factors,
-    solution,
-    rhs,
-    residual_tol,
-    *,
-    matrix=None,
-):
-    """Return the Wilkinson-style backward-error pad for the success gate.
-
-    The ``matrix`` argument lets callers that have already materialized
-    ``P @ L @ U`` reuse it; otherwise the dense product is rebuilt from
-    ``linear_solve_factors`` once.
-    """
-    if matrix is None:
-        matrix = _traceable_plu_matrix(linear_solve_factors)
-    dtype = rhs.dtype
-    eps = _optimizer_jax._device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
-    dimension = _optimizer_jax._device_scalar(matrix.shape[0], dtype=dtype)
-    safety = _optimizer_jax._device_scalar(100.0, dtype=dtype)
-    backward_error = (
-        safety
-        * dimension
-        * eps
-        * (jnp.linalg.norm(matrix) * jnp.linalg.norm(solution) + jnp.linalg.norm(rhs))
-    )
-    return jnp.maximum(residual_tol, backward_error)
 
 
 def _traceable_solve_plu_linearization(
@@ -3353,13 +3354,6 @@ def _traceable_solve_plu_linearization(
         rhs,
         linear_solve_tol,
     )
-    residual_tol = _traceable_plu_residual_tolerance(
-        linear_solve_factors,
-        solution,
-        rhs,
-        residual_tol,
-        matrix=matrix,
-    )
     residual_rel = _optimizer_jax._relative_residual_1_norm(residual, rhs)
     # The Boozer LS Hessian is symmetric by construction (J^T J is symmetric
     # for any J). Therefore κ_1(matrix) == κ_1(matrix.T) and we can estimate
@@ -3379,14 +3373,21 @@ def _traceable_solve_plu_linearization(
         condition_estimate,
         tol=linear_solve_tol,
     )
+    status = _optimizer_jax._linear_solve_status(
+        solution,
+        residual,
+        rhs,
+        tol=linear_solve_tol,
+        iterations=0,
+    )
     success = (
         jnp.all(jnp.isfinite(solution))
         & jnp.all(jnp.isfinite(residual))
         & jnp.isfinite(residual_norm)
-        & (residual_norm <= residual_tol)
+        & (status.residual <= residual_tol)
         & forward_error_success
     )
-    return solution, success
+    return solution, status._replace(success=success)
 
 
 def _traceable_solve_exact_linearization(
@@ -3866,7 +3867,7 @@ def _traceable_objective_gradient_parts(
             lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
             solved_x,
         )
-        adjoint, linear_solve_success = _traceable_solve_linearization(
+        adjoint, linear_solve_status = _traceable_solve_linearization(
             booz_jax,
             solved_x,
             dJ_dx,
@@ -3877,6 +3878,9 @@ def _traceable_objective_gradient_parts(
             linear_solve_tol=linear_solve_tol,
             linear_solve_stab=linear_solve_stab,
             transpose=True,
+        )
+        linear_solve_success = _optimizer_jax._linear_solve_status_success(
+            linear_solve_status
         )
 
     if not depends_on_coil_dofs:
@@ -3955,7 +3959,7 @@ def _traceable_predict_warmstart_x(
             **inner_objective_kwargs,
         )
 
-    dx, linear_solve_success = _traceable_solve_linearization(
+    dx, linear_solve_status = _traceable_solve_linearization(
         booz_jax,
         baseline_x,
         -forcing,
@@ -3966,6 +3970,9 @@ def _traceable_predict_warmstart_x(
         linear_solve_tol=linear_solve_tol,
         linear_solve_stab=linear_solve_stab,
         transpose=False,
+    )
+    linear_solve_success = _optimizer_jax._linear_solve_status_success(
+        linear_solve_status
     )
     predicted_x = baseline_x + dx
     preserve_failed_predictor = (
@@ -4493,18 +4500,17 @@ def _ensure_traceable_runtime_seeded_value_and_grad(runtime_entry, booz_jax):
     baseline_linear_solve_factors = _traceable_runtime_deviceify_tree(
         state["baseline_linear_solve_factors"]
     )
-    with jax.transfer_guard("allow"):
-        baseline_gradient, baseline_linear_solve_success = seeded_compiled_bundle[
-            "compiled_total_gradient_for"
-        ](
-            baseline_coil_dofs,
-            baseline_x,
-            baseline_linear_solve_factors,
-        )
-        baseline_gradient = _traceable_adjoint_gradient_or_nan(
-            baseline_gradient,
-            baseline_linear_solve_success,
-        )
+    baseline_gradient, baseline_linear_solve_success = seeded_compiled_bundle[
+        "compiled_total_gradient_for"
+    ](
+        baseline_coil_dofs,
+        baseline_x,
+        baseline_linear_solve_factors,
+    )
+    baseline_gradient = _traceable_adjoint_gradient_or_nan(
+        baseline_gradient,
+        baseline_linear_solve_success,
+    )
     seeded_value_and_grad = TraceableObjectiveSeededValueAndGrad(
         value_and_grad=_ensure_traceable_runtime_optimizer_value_and_grad(
             runtime_entry,
@@ -4536,17 +4542,18 @@ def _make_traceable_lazy_host_reporting_metrics(runtime_entry):
         include_distances = bool(include_distance_metrics)
         cached_metrics = baseline_host_metrics.get(include_distances)
         if cached_metrics is None:
-            with jax.transfer_guard("allow"):
+            metrics = _traceable_reporting_metrics_from_solution(
+                state["objective_kwargs"],
+                state["coil_set_spec_from_dofs"],
+                coil_dofs=baseline_coil_dofs_jax,
+                solved_x=baseline_x,
+                solver_success=_runtime_bool(True),
+                optimize_G=bool(state["optimize_G"]),
+                include_distance_metrics=include_distances,
+            )
+            with jax.transfer_guard_device_to_host("allow"):
                 cached_metrics = _hostify_traceable_reporting_metrics(
-                    _traceable_reporting_metrics_from_solution(
-                        state["objective_kwargs"],
-                        state["coil_set_spec_from_dofs"],
-                        coil_dofs=baseline_coil_dofs_jax,
-                        solved_x=baseline_x,
-                        solver_success=_runtime_bool(True),
-                        optimize_G=bool(state["optimize_G"]),
-                        include_distance_metrics=include_distances,
-                    ),
+                    metrics,
                     include_distance_metrics=include_distances,
                 )
             baseline_host_metrics[include_distances] = cached_metrics
@@ -4597,24 +4604,24 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry, booz_jax):
             state["baseline_linear_solve_factors"]
         )
         baseline_value_jax = _traceable_runtime_deviceify_tree(state["baseline_value"])
-        with jax.transfer_guard("allow"):
-            baseline_gradient, baseline_linear_solve_success = (
-                _traceable_total_gradient_with_status(
-                    booz_jax,
-                    state["coil_set_spec_from_dofs"],
-                    coil_dofs=baseline_coil_dofs_jax,
-                    solved_x=baseline_x,
-                    solved_linear_solve_factors=baseline_linear_solve_factors,
-                    linearization_kind=state["linearization_kind"],
-                    linear_solve_tol=state["linear_solve_tol"],
-                    linear_solve_stab=state["linear_solve_stab"],
-                    objective_kwargs=state["objective_kwargs"],
-                )
+        baseline_gradient, baseline_linear_solve_success = (
+            _traceable_total_gradient_with_status(
+                booz_jax,
+                state["coil_set_spec_from_dofs"],
+                coil_dofs=baseline_coil_dofs_jax,
+                solved_x=baseline_x,
+                solved_linear_solve_factors=baseline_linear_solve_factors,
+                linearization_kind=state["linearization_kind"],
+                linear_solve_tol=state["linear_solve_tol"],
+                linear_solve_stab=state["linear_solve_stab"],
+                objective_kwargs=state["objective_kwargs"],
             )
-            baseline_gradient = _traceable_adjoint_gradient_or_nan(
-                baseline_gradient,
-                baseline_linear_solve_success,
-            )
+        )
+        baseline_gradient = _traceable_adjoint_gradient_or_nan(
+            baseline_gradient,
+            baseline_linear_solve_success,
+        )
+        with jax.transfer_guard_device_to_host("allow"):
             baseline_gradient = _host_array(
                 baseline_gradient,
                 dtype=np.float64,
@@ -5146,6 +5153,16 @@ def _summarize_traceable_gradient(gradient):
     }
 
 
+def _summarize_traceable_linear_solve_status(status):
+    return {
+        "residual": _summarize_traceable_scalar(status.residual),
+        "residual_relative": _summarize_traceable_scalar(status.residual_relative),
+        "iterations": _optimizer_jax._linear_solve_iterations_host_value(
+            status.iterations
+        ),
+    }
+
+
 def _traceable_term_adjoint_solve_report(
     booz_jax,
     coil_set_spec_from_dofs,
@@ -5178,7 +5195,7 @@ def _traceable_term_adjoint_solve_report(
         )
 
     rhs = _strict_scalar_grad(objective_of_x, solved_x)
-    adjoint, success = _traceable_solve_linearization(
+    adjoint, status = _traceable_solve_linearization(
         booz_jax,
         solved_x,
         rhs,
@@ -5190,8 +5207,10 @@ def _traceable_term_adjoint_solve_report(
         linear_solve_stab=linear_solve_stab,
         transpose=True,
     )
+    success = _optimizer_jax._linear_solve_status_success(status)
     report = {
         "success": bool(np.asarray(jax.device_get(success))),
+        **_summarize_traceable_linear_solve_status(status),
         "rhs_norm": _summarize_traceable_scalar(jnp.linalg.norm(rhs)),
         "solution_norm": _summarize_traceable_scalar(jnp.linalg.norm(adjoint)),
         "solution": _summarize_traceable_gradient(adjoint),
@@ -5203,34 +5222,28 @@ def _traceable_term_adjoint_solve_report(
             transpose=True,
         )
         residual_norm = jnp.linalg.norm(residual)
-        base_residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
+        residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
             rhs,
             linear_solve_tol,
-        )
-        residual_tol = _traceable_plu_residual_tolerance(
-            solved_linear_solve_factors,
-            adjoint,
-            rhs,
-            base_residual_tol,
         )
         matrix = _traceable_plu_matrix(solved_linear_solve_factors)
         report["plu"] = {
             "matrix_norm": _summarize_traceable_scalar(jnp.linalg.norm(matrix)),
-            "base_residual_tolerance": _summarize_traceable_scalar(base_residual_tol),
             "residual_tolerance": _summarize_traceable_scalar(residual_tol),
             "residual_norm": _summarize_traceable_scalar(residual_norm),
             "relative_residual": _summarize_traceable_scalar(
-                residual_norm / jnp.linalg.norm(rhs)
+                _optimizer_jax._relative_residual_norm(residual, rhs)
             ),
         }
     elif linearization_kind == "hessian":
         objective_fn = _make_boozer_penalty_objective_closure(
             coil_set_spec=coil_set_spec,
+            decision_split_mode="jvp",
             **_traceable_inner_objective_kwargs(objective_kwargs),
         )
         hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
         candidate_stab = float(linear_solve_stab)
-        solution, attempt_success = (
+        solution, attempt_status = (
             _optimizer_jax._solve_hessian_least_squares_system_with_status(
                 objective_fn,
                 solved_x,
@@ -5239,46 +5252,27 @@ def _traceable_term_adjoint_solve_report(
                 tol=linear_solve_tol,
             )
         )
-        normal_operator = _optimizer_jax._hessian_linear_operator(
+        attempt_success = _optimizer_jax._linear_solve_status_success(attempt_status)
+        hessian_operator = _optimizer_jax._hessian_linear_operator(
             objective_fn,
             solved_x,
             stab=candidate_stab,
-        )
-        normal_rhs = normal_operator["transpose_matvec"](rhs)
-        normal_residual = normal_rhs - normal_operator["transpose_matvec"](
-            normal_operator["matvec"](solution)
-        )
-        normal_residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
-            normal_rhs,
-            linear_solve_tol,
         )
         residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
             rhs,
             linear_solve_tol,
         )
-        residual = rhs - normal_operator["matvec"](solution)
+        residual = rhs - hessian_operator["matvec"](solution)
         residual_norm = jnp.linalg.norm(residual)
-        normal_residual_norm = jnp.linalg.norm(normal_residual)
         report["hessian_least_squares_operator"] = {
             "attempts": [
                 {
                     "stab": candidate_stab,
                     "success": bool(np.asarray(jax.device_get(attempt_success))),
+                    **_summarize_traceable_linear_solve_status(attempt_status),
                     "solution": _summarize_traceable_gradient(solution),
                     "solution_norm": _summarize_traceable_scalar(
                         jnp.linalg.norm(solution)
-                    ),
-                    "normal_residual_tolerance": _summarize_traceable_scalar(
-                        normal_residual_tol
-                    ),
-                    "normal_residual_norm": _summarize_traceable_scalar(
-                        normal_residual_norm
-                    ),
-                    "normal_relative_residual": _summarize_traceable_scalar(
-                        _optimizer_jax._relative_residual_norm(
-                            normal_residual,
-                            normal_rhs,
-                        )
                     ),
                     "primal_residual_tolerance": _summarize_traceable_scalar(
                         residual_tol
@@ -5290,20 +5284,25 @@ def _traceable_term_adjoint_solve_report(
                 }
             ]
         }
-        solution, attempt_success = _optimizer_jax._solve_hessian_system_with_status(
+        solution, attempt_status = _optimizer_jax._solve_hessian_system_with_status(
             objective_fn,
             solved_x,
             rhs,
             stab=candidate_stab,
             tol=linear_solve_tol,
         )
-        residual = rhs - (hvp_fn(solved_x, solution) + candidate_stab * solution)
+        attempt_success = _optimizer_jax._linear_solve_status_success(attempt_status)
+        residual = rhs - (
+            hvp_fn(solved_x, solution)
+            + _runtime_float64_scalar(candidate_stab, reference=solution) * solution
+        )
         residual_norm = jnp.linalg.norm(residual)
         report["hessian_operator"] = {
             "attempts": [
                 {
                     "stab": candidate_stab,
                     "success": bool(np.asarray(jax.device_get(attempt_success))),
+                    **_summarize_traceable_linear_solve_status(attempt_status),
                     "solution": _summarize_traceable_gradient(solution),
                     "solution_norm": _summarize_traceable_scalar(
                         jnp.linalg.norm(solution)
@@ -5338,7 +5337,7 @@ def diagnose_traceable_objective_runtime(
     )
     compiled_bundle = runtime_entry["compiled_bundle"]
     state = compiled_bundle["state"]
-    objective_kwargs = state["objective_kwargs"]
+    objective_kwargs = _traceable_runtime_deviceify_tree(state["objective_kwargs"])
     if objective_kwargs["outer_objective_config"] is None:
         raise RuntimeError(
             "Traceable runtime diagnosis requires the full single-stage outer objective."
@@ -5426,7 +5425,9 @@ def diagnose_traceable_objective_runtime(
         )
         term_report = {
             "weight": float(
-                objective_kwargs["outer_objective_config"].get(weight_key, 0.0)
+                _host_scalar(
+                    objective_kwargs["outer_objective_config"].get(weight_key, 0.0)
+                )
             ),
             "raw_value": _summarize_traceable_scalar(raw_terms[term_name]),
             "weighted_value": _summarize_traceable_scalar(weighted_terms[term_name]),

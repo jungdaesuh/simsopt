@@ -179,9 +179,9 @@ def test_split_decision_vector_static_slices_under_transfer_guard():
     value_and_grad_with_G = jax.jit(jax.value_and_grad(scalar_with_G_jvp_safe))
     value_and_grad_without_G = jax.jit(jax.value_and_grad(scalar_without_G_jvp_safe))
     hvp_with_G = jax.jit(
-        lambda x, tangent: jax.jvp(
-            jax.grad(scalar_with_G_jvp_safe), (x,), (tangent,)
-        )[1]
+        lambda x, tangent: jax.jvp(jax.grad(scalar_with_G_jvp_safe), (x,), (tangent,))[
+            1
+        ]
     )
     hvp_without_G = jax.jit(
         lambda x, tangent: jax.jvp(
@@ -191,9 +191,7 @@ def test_split_decision_vector_static_slices_under_transfer_guard():
 
     with jax.transfer_guard("disallow"):
         _value_with_G_jvp, grad_with_G_jvp = value_and_grad_with_G(x_with_G)
-        _value_without_G_jvp, grad_without_G_jvp = value_and_grad_without_G(
-            x_without_G
-        )
+        _value_without_G_jvp, grad_without_G_jvp = value_and_grad_without_G(x_without_G)
         hvp_with_G_result = hvp_with_G(x_with_G, tangent_with_G)
         hvp_without_G_result = hvp_without_G(x_without_G, tangent_without_G)
         grad_with_G_jvp.block_until_ready()
@@ -209,14 +207,62 @@ def test_split_decision_vector_static_slices_under_transfer_guard():
     assert G_none is None
     np.testing.assert_allclose(host_array(grad_with_G), [0.2, 0.4, 0.6, 0.5, 0.4])
     np.testing.assert_allclose(host_array(grad_without_G), [1.2, 1.4, 1.0])
-    np.testing.assert_allclose(
-        host_array(grad_with_G_jvp), [0.2, 0.4, 0.6, 0.5, 0.4]
-    )
+    np.testing.assert_allclose(host_array(grad_with_G_jvp), [0.2, 0.4, 0.6, 0.5, 0.4])
     np.testing.assert_allclose(host_array(grad_without_G_jvp), [1.2, 1.4, 1.0])
-    np.testing.assert_allclose(
-        host_array(hvp_with_G_result), [2.0, 2.0, 2.0, 1.0, 1.0]
-    )
+    np.testing.assert_allclose(host_array(hvp_with_G_result), [2.0, 2.0, 2.0, 1.0, 1.0])
     np.testing.assert_allclose(host_array(hvp_without_G_result), [2.0, 2.0, 0.0])
+
+
+def test_split_decision_vector_float32_vjp_under_transfer_guard():
+    from simsopt.backend import get_backend_config, set_backend
+
+    previous = get_backend_config()
+    set_backend("jax_cpu_float32_smoke", configure_runtime=False)
+    try:
+        x_with_G = jnp.asarray([0.1, 0.2, 0.3, 0.4, 0.5], dtype=jnp.float32)
+        x_without_G = jnp.asarray([0.6, 0.7, 0.8], dtype=jnp.float32)
+        cotangent = jnp.asarray(1.0, dtype=jnp.float32)
+        x_with_G.block_until_ready()
+        x_without_G.block_until_ready()
+        cotangent.block_until_ready()
+
+        def scalar_with_G(x):
+            sdofs, iota, G = _split_decision_vector(x, optimize_G=True)
+            return jnp.sum(sdofs * sdofs) + iota * G
+
+        def scalar_without_G(x):
+            sdofs, iota, G = _split_decision_vector(x, optimize_G=False)
+            assert G is None
+            return jnp.sum(sdofs * sdofs) + iota
+
+        with jax.transfer_guard("disallow"):
+            _value_with_G, pullback_with_G = jax.vjp(scalar_with_G, x_with_G)
+            (grad_with_G,) = pullback_with_G(cotangent)
+            _value_without_G, pullback_without_G = jax.vjp(
+                scalar_without_G,
+                x_without_G,
+            )
+            (grad_without_G,) = pullback_without_G(cotangent)
+            grad_with_G.block_until_ready()
+            grad_without_G.block_until_ready()
+
+        np.testing.assert_allclose(
+            host_array(grad_with_G, dtype=np.float32),
+            np.asarray([0.2, 0.4, 0.6, 0.5, 0.4], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            host_array(grad_without_G, dtype=np.float32),
+            np.asarray([1.2, 1.4, 1.0], dtype=np.float32),
+        )
+    finally:
+        set_backend(
+            previous.mode,
+            strict=previous.strict,
+            debug_nans=previous.debug_nans,
+            transfer_guard=previous.transfer_guard,
+            compilation_cache_dir=previous.compilation_cache_dir,
+            configure_runtime=False,
+        )
 
 
 def test_unpack_decision_vector_rejects_unknown_split_mode():

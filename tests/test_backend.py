@@ -26,6 +26,7 @@ _BACKEND_MODULE_NAMES = (
     "simsopt.backend.runtime",
 )
 _MISSING_MODULE = object()
+_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR = float(np.sqrt(np.finfo(np.float32).eps))
 
 
 def _snapshot_backend_modules() -> dict[str, object]:
@@ -298,7 +299,7 @@ def test_backend_resolves_explicit_mps_legacy_env_pair(monkeypatch):
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_mps_smoke",
         default_optimizer_backend="scipy",
-        linear_solve_tolerance_floor=1e-6,
+        linear_solve_tolerance_floor=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
         linear_solve_tolerance_cap=None,
     )
     assert backend.requires_x64() is False
@@ -506,7 +507,7 @@ def test_mps_smoke_mode_policy_helpers(monkeypatch):
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_mps_smoke",
         default_optimizer_backend="scipy",
-        linear_solve_tolerance_floor=1e-6,
+        linear_solve_tolerance_floor=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
         linear_solve_tolerance_cap=None,
     )
     assert backend.is_parity_mode() is False
@@ -539,7 +540,7 @@ def test_cpu_float32_smoke_mode_policy_helpers(monkeypatch):
         tolerance_tier="float32_smoke",
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_cpu_float32_smoke",
-        linear_solve_tolerance_floor=1e-6,
+        linear_solve_tolerance_floor=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
         linear_solve_tolerance_cap=None,
     )
     assert backend.is_parity_mode() is False
@@ -596,6 +597,27 @@ def test_policy_defaults_pin_precision_and_dense_budget(
     assert policy.max_dense_jacobian_bytes == dense_bytes
 
 
+@pytest.mark.parametrize("mode", ("jax_gpu_fast", "jax_gpu_parity"))
+def test_gpu_dense_square_operator_budget_boundary_contract(monkeypatch, mode):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    policy = backend.get_backend_policy(mode)
+
+    bytes_per_float64 = np.dtype(np.float64).itemsize
+    boundary_dimension = int(
+        np.sqrt(policy.max_dense_jacobian_bytes / bytes_per_float64)
+    )
+
+    assert policy.max_dense_jacobian_bytes == 256 * 1024 * 1024
+    assert boundary_dimension == 5792
+    assert boundary_dimension * boundary_dimension * bytes_per_float64 <= (
+        policy.max_dense_jacobian_bytes
+    )
+    assert (boundary_dimension + 1) ** 2 * bytes_per_float64 > (
+        policy.max_dense_jacobian_bytes
+    )
+
+
 @pytest.mark.parametrize(
     ("mode", "tolerance_floor", "tolerance_cap"),
     (
@@ -604,8 +626,8 @@ def test_policy_defaults_pin_precision_and_dense_budget(
         ("jax_cpu_parity", 1e-14, 1e-10),
         ("jax_gpu_fast", 1e-14, 1e-10),
         ("jax_gpu_parity", 1e-14, 1e-10),
-        ("jax_cpu_float32_smoke", 1e-6, None),
-        ("jax_mps_smoke", 1e-6, None),
+        ("jax_cpu_float32_smoke", _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR, None),
+        ("jax_mps_smoke", _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR, None),
     ),
 )
 def test_policy_defaults_pin_linear_solve_tolerance_contract(
