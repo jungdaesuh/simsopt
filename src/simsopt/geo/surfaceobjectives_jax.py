@@ -844,15 +844,13 @@ class QfmResidualJAX(Optimizable):
     def __init__(self, surface, biotsavart):
         self.surface = surface
         self.biotsavart = biotsavart
-        self.biotsavart.append_parent(self.surface)
         super().__init__(depends_on=[surface, biotsavart])
 
     def recompute_bell(self, parent=None):
         self.invalidate_cache()
 
     def invalidate_cache(self):
-        gamma = self.surface.gamma()
-        self.biotsavart.set_points(gamma.reshape((-1, 3)))
+        return None
 
     def _surface_spec_dofs_and_coil_spec(self):
         _current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)

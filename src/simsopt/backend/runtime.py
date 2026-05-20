@@ -41,9 +41,7 @@ _VALID_POLICY_DTYPES = ("float32", "float64")
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
 # Deprecated selectors removed in favour of the jax-mps Apple Silicon lane.
-# jax-metal (last release 2024-10) is unmaintained and incompatible with
-# jaxlib 0.10; selecting it must hard-fail with a pointer to jax_mps_smoke.
-_DEPRECATED_PLATFORMS = {"metal": "mps"}
+_DEPRECATED_PLATFORMS = {"metal": "jax_mps_smoke"}
 _DEPRECATED_MODES = {"jax_metal_smoke": "jax_mps_smoke"}
 _MPS_PYPROJECT_EXTRA_INSTALL = "python -m pip install '.[JAX,JAX_MPS]'"
 _MPS_NOT_AVAILABLE_HINT = (
@@ -52,8 +50,8 @@ _MPS_NOT_AVAILABLE_HINT = (
     "jax_mps_smoke; or pick a cpu/cuda mode."
 )
 _DEPRECATION_HINT_FMT = (
-    "{name}={value!r} was removed (jax-metal is unmaintained upstream and "
-    "incompatible with jaxlib 0.10). Use {replacement!r} after installing the "
+    "{name}={value!r} was removed because SIMSOPT no longer supports "
+    "jax-metal on the tracked JAX lane. Use {replacement!r} after installing the "
     f"tracked pyproject extra with {_MPS_PYPROJECT_EXTRA_INSTALL}."
 )
 

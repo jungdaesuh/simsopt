@@ -261,7 +261,7 @@ def least_squares_serial_solve_jax(
         def residuals_for_solver(x, _args):
             residual_values = prob.residuals(x)
             objective_value = jnp.sum(residual_values * residual_values)
-            jax.debug.callback(evaluation_logger, x, objective_value, ordered=True)
+            jax.debug.callback(evaluation_logger, x, objective_value, ordered=False)
             return residual_values
 
         solution = optx.least_squares(
@@ -312,7 +312,7 @@ def serial_solve_jax(
 
         def objective_for_solver(x, _args):
             objective_value = prob.objective(x)
-            jax.debug.callback(evaluation_logger, x, objective_value, ordered=True)
+            jax.debug.callback(evaluation_logger, x, objective_value, ordered=False)
             return objective_value
 
         solution = optx.minimise(
@@ -396,13 +396,13 @@ def constrained_serial_solve_jax(
                         objective_logger,
                         candidate_x,
                         objective_value,
-                        ordered=True,
+                        ordered=False,
                     )
                     jax.debug.callback(
                         constraint_logger,
                         candidate_x,
                         constraints,
-                        ordered=True,
+                        ordered=False,
                     )
                     return (
                         objective_value

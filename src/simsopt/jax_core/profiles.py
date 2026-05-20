@@ -94,7 +94,7 @@ def _raise_invalid_spline_degree() -> None:
 
 
 def _invalid_spline_value_branch(operands) -> jax.Array:
-    jax.debug.callback(_raise_invalid_spline_degree)
+    jax.debug.callback(_raise_invalid_spline_degree, ordered=False)
     return jnp.zeros_like(as_jax_float64(operands[2]))
 
 

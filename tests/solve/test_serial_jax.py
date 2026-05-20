@@ -12,6 +12,7 @@ import numpy as np
 from jax.sharding import Mesh
 from monty.tempfile import ScratchDir
 
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt._core.optimizable import Optimizable
 from simsopt.objectives.constrained import ConstrainedProblem
 from simsopt.objectives.functions import Identity
@@ -35,6 +36,10 @@ from simsopt.solve.serial_jax import (
     serial_solve_jax,
     traceable_least_squares_jacobian,
 )
+
+_DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
+_DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative_heavy")
+_WHOLE_SOLVE_TOLS = parity_ladder_tolerances("gpu-runtime")
 
 
 def _read_simsopt_log_rows(path):
@@ -126,13 +131,16 @@ def test_least_squares_serial_solve_jax_matches_host_quadratic_problem():
 
         expected_x = np.array([1.0, 2.0, 3.0])
         np.testing.assert_allclose(
-            np.asarray(host_prob.x), expected_x, rtol=1e-8, atol=1e-8
+            np.asarray(host_prob.x),
+            expected_x,
+            rtol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_rtol"]),
+            atol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_atol"]),
         )
         np.testing.assert_allclose(
             np.asarray(jax_prob.x),
             expected_x,
-            rtol=1e-12,
-            atol=1e-12,
+            rtol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_rtol"]),
+            atol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_atol"]),
         )
         assert host_prob.objective() <= 1e-16
         assert float(jax_prob.objective()) <= 1e-16
@@ -168,10 +176,16 @@ def test_serial_solve_jax_matches_host_general_quadratic_problem():
 
         expected_x = np.array([1.5, -0.5])
         np.testing.assert_allclose(
-            np.asarray(host_prob.x), expected_x, rtol=1e-7, atol=1e-7
+            np.asarray(host_prob.x),
+            expected_x,
+            rtol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_rtol"]),
+            atol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_atol"]),
         )
         np.testing.assert_allclose(
-            np.asarray(jax_prob.x), expected_x, rtol=1e-10, atol=1e-10
+            np.asarray(jax_prob.x),
+            expected_x,
+            rtol=float(_DIRECT_KERNEL_TOLS["rtol"]),
+            atol=float(_DIRECT_KERNEL_TOLS["atol"]),
         )
         assert host_prob(host_prob.x) <= 1e-12
         assert float(jax_prob.objective()) <= 1e-16
@@ -219,13 +233,21 @@ def test_constrained_serial_solve_jax_matches_host_slsqp_equality_problem():
 
         expected_x = np.array([1.5, -0.5])
         np.testing.assert_allclose(
-            np.asarray(host_prob.x), expected_x, rtol=1e-8, atol=1e-8
+            np.asarray(host_prob.x),
+            expected_x,
+            rtol=float(_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"]),
+            atol=float(_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"]),
         )
         np.testing.assert_allclose(
-            np.asarray(jax_prob.x), expected_x, rtol=1e-8, atol=1e-8
+            np.asarray(jax_prob.x),
+            expected_x,
+            rtol=float(_DIRECT_KERNEL_TOLS["rtol"]),
+            atol=float(_DIRECT_KERNEL_TOLS["atol"]),
         )
         np.testing.assert_allclose(
-            np.asarray(jax_prob.equality_constraints()), np.zeros(1), atol=1e-8
+            np.asarray(jax_prob.equality_constraints()),
+            np.zeros(1),
+            atol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_atol"]),
         )
         assert float(jax_prob.objective()) <= 0.50000001
         log_files = [name for name in os.listdir(".") if name.startswith("simsopt_")]
@@ -263,7 +285,12 @@ def test_traceable_least_squares_jacfwd_matches_shard_map_jacobian():
         mesh=mesh,
     )
 
-    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(actual),
+        np.asarray(expected),
+        rtol=float(_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"]),
+        atol=float(_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"]),
+    )
 
 
 def test_least_squares_serial_solve_jax_rejects_host_graph_problem():

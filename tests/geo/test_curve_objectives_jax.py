@@ -6,9 +6,9 @@ import inspect
 
 import jax
 import numpy as np
+import pytest
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
-from simsopt.geo import curveobjectives as curveobjectives_module
 from simsopt.geo.curveobjectives import (
     ArclengthVariation,
     CurveCurveDistance,
@@ -54,6 +54,7 @@ from simsopt.jax_core import (
 
 
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
+_FD_GRADIENT = parity_ladder_tolerances("fd-gradient")
 _RTOL = _DIRECT_KERNEL["rtol"]
 _ATOL = _DIRECT_KERNEL["atol"]
 
@@ -160,8 +161,7 @@ def test_representative_curve_objective_mirrors_match_cpu_values():
     )
 
 
-def test_remaining_curve_objective_mirrors_match_cpu_values(monkeypatch):
-    monkeypatch.setattr(curveobjectives_module, "is_jax_backend", lambda: True)
+def test_remaining_curve_objective_mirrors_match_cpu_values():
     curve1 = _build_offset_nonplanar_curve(0.0)
     curve2 = _build_offset_nonplanar_curve(3.5)
 
@@ -233,6 +233,48 @@ def _assert_objective_matches_cpu(cpu_objective, jax_objective):
         rtol=5e-9,
         atol=5e-10,
     )
+
+
+def _assert_curve_objective_directional_fd(objective, curve):
+    x0 = np.asarray(curve.x, dtype=np.float64).copy()
+    direction = np.linspace(-1.0, 1.0, x0.size, dtype=np.float64)
+    direction /= np.linalg.norm(direction)
+    gradient = np.asarray(objective.dJ(), dtype=np.float64)
+    directional_gradient = float(np.dot(gradient, direction))
+
+    step = 1.0e-6
+    curve.x = x0 + step * direction
+    value_plus = float(objective.J())
+    curve.x = x0 - step * direction
+    value_minus = float(objective.J())
+    curve.x = x0
+
+    directional_fd = (value_plus - value_minus) / (2.0 * step)
+    np.testing.assert_allclose(
+        directional_gradient,
+        directional_fd,
+        rtol=float(_FD_GRADIENT["directional_fd_rtol"]),
+        atol=float(_FD_GRADIENT["directional_fd_atol"]),
+    )
+
+
+@pytest.mark.parametrize(
+    "objective_factory",
+    [
+        lambda curve: CurveLengthJAX(curve),
+        lambda curve: LpCurveCurvatureJAX(curve, p=2, threshold=0.0),
+        lambda curve: MeanSquaredCurvatureJAX(curve),
+        lambda curve: LpCurveCurvatureBarrierJAX(
+            curve,
+            2.0 * float(np.max(curve.kappa())),
+        ),
+    ],
+)
+def test_public_curve_objective_jax_gradients_match_directional_fd(
+    objective_factory,
+):
+    curve = _build_nonplanar_curve()
+    _assert_curve_objective_directional_fd(objective_factory(curve), curve)
 
 
 def test_public_curve_objective_jax_wrappers_match_cpu_values_and_gradients():

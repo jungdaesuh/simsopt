@@ -485,6 +485,9 @@ class _BoozerSurfaceRuntimeState:
     quadpoints_phi: jax.Array
     quadpoints_theta: jax.Array
     scatter_indices: jax.Array | None
+    quadpoints_phi_signature: tuple = field(metadata={"static": True})
+    quadpoints_theta_signature: tuple = field(metadata={"static": True})
+    scatter_indices_signature: tuple | None = field(metadata={"static": True})
     mpol: int = field(metadata={"static": True})
     ntor: int = field(metadata={"static": True})
     nfp: int = field(metadata={"static": True})
@@ -680,29 +683,68 @@ def _is_exact_surface_xyz_tensor_fourier(surface_kind: str) -> bool:
     return surface_kind == "xyztensorfourier"
 
 
+def _host_array_signature(array) -> tuple[str, tuple[int, ...], str] | None:
+    if array is None:
+        return None
+    array_np = np.ascontiguousarray(np.asarray(array))
+    return (
+        str(array_np.dtype),
+        tuple(int(dim) for dim in array_np.shape),
+        hashlib.blake2b(array_np.tobytes(), digest_size=16).hexdigest(),
+    )
+
+
 def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
     """Snapshot the immutable surface metadata required by JAX Boozer solves."""
+    quadpoints_phi = np.asarray(surface.quadpoints_phi, dtype=np.float64)
+    quadpoints_theta = np.asarray(surface.quadpoints_theta, dtype=np.float64)
+    surface_kind = _surface_geometry_kind(surface)
     scatter_indices = None
+    scatter_indices_host = None
     if surface.stellsym:
-        geometry_kind = _surface_geometry_kind(surface)
-        if geometry_kind in {"generic", "xyztensorfourier"}:
-            scatter_indices = _generic_surface_scatter_operator(
-                surface.mpol,
-                surface.ntor,
+        if surface_kind in {"generic", "xyztensorfourier"}:
+            positions = np.asarray(
+                stellsym_scatter_indices(surface.mpol, surface.ntor),
+                dtype=np.int32,
             )
+            n_per_coord = int((2 * surface.mpol + 1) * (2 * surface.ntor + 1))
+            scatter_indices_host = np.zeros(
+                (3 * n_per_coord, positions.size),
+                dtype=np.float64,
+            )
+            scatter_indices_host[positions, np.arange(positions.size)] = 1.0
+            scatter_indices = _as_jax_float64(scatter_indices_host)
         else:
-            scatter_indices = _as_jax_int32(
-                stellsym_scatter_indices(surface.mpol, surface.ntor)
+            scatter_indices_host = np.asarray(
+                stellsym_scatter_indices(surface.mpol, surface.ntor),
+                dtype=np.int32,
             )
+            scatter_indices = _as_jax_int32(scatter_indices_host)
     return _BoozerSurfaceRuntimeState(
-        quadpoints_phi=_as_jax_float64(surface.quadpoints_phi),
-        quadpoints_theta=_as_jax_float64(surface.quadpoints_theta),
+        quadpoints_phi=_as_jax_float64(quadpoints_phi),
+        quadpoints_theta=_as_jax_float64(quadpoints_theta),
         scatter_indices=scatter_indices,
+        quadpoints_phi_signature=_host_array_signature(quadpoints_phi),
+        quadpoints_theta_signature=_host_array_signature(quadpoints_theta),
+        scatter_indices_signature=_host_array_signature(scatter_indices_host),
         mpol=int(surface.mpol),
         ntor=int(surface.ntor),
         nfp=int(surface.nfp),
         stellsym=bool(surface.stellsym),
-        surface_kind=_surface_geometry_kind(surface),
+        surface_kind=surface_kind,
+    )
+
+
+def _boozer_surface_runtime_signature(state: _BoozerSurfaceRuntimeState):
+    return (
+        int(state.mpol),
+        int(state.ntor),
+        int(state.nfp),
+        bool(state.stellsym),
+        str(state.surface_kind),
+        state.quadpoints_phi_signature,
+        state.quadpoints_theta_signature,
+        state.scatter_indices_signature,
     )
 
 
@@ -859,21 +901,6 @@ def _as_boozer_penalty_optimizer_state(x, *, optimize_G, decision_split_mode="re
     return _BoozerPenaltyOptimizerState(
         surface_dofs=sdofs,
         iota=iota,
-    )
-
-
-def _traceable_array_signature(array):
-    """Return a value-based signature for traced static array-like inputs."""
-    if array is None:
-        return None
-    if isinstance(array, jax.Array):
-        array_np = np.asarray(jax.device_get(array))
-    else:
-        array_np = np.asarray(array)
-    return (
-        str(array_np.dtype),
-        tuple(int(dim) for dim in array_np.shape),
-        array_np.tobytes(),
     )
 
 
@@ -3556,6 +3583,9 @@ class BoozerSurfaceJAX(Optimizable):
         self.stellsym = runtime_state.stellsym
         self.quadpoints_phi = runtime_state.quadpoints_phi
         self.quadpoints_theta = runtime_state.quadpoints_theta
+        self._surface_runtime_signature = _boozer_surface_runtime_signature(
+            runtime_state
+        )
         self._surface_geometry_kind = runtime_state.surface_kind
         self.scatter_indices = runtime_state.scatter_indices
         self.label_mpol = label_runtime_state.mpol
@@ -3564,6 +3594,9 @@ class BoozerSurfaceJAX(Optimizable):
         self.label_stellsym = label_runtime_state.stellsym
         self.label_quadpoints_phi = label_runtime_state.quadpoints_phi
         self.label_quadpoints_theta = label_runtime_state.quadpoints_theta
+        self._label_surface_runtime_signature = _boozer_surface_runtime_signature(
+            label_runtime_state
+        )
         self._label_surface_geometry_kind = label_runtime_state.surface_kind
         self.label_scatter_indices = label_runtime_state.scatter_indices
 
@@ -4777,11 +4810,6 @@ class BoozerSurfaceJAX(Optimizable):
     def _traceable_surface_signature(self):
         """Signature for metadata that becomes a traced constant in JAX closures."""
         return (
-            int(self.mpol),
-            int(self.ntor),
-            int(self.nfp),
-            bool(self.stellsym),
-            str(self._surface_geometry_kind),
             int(self.label_mpol),
             int(self.label_ntor),
             int(self.label_nfp),
@@ -4790,12 +4818,8 @@ class BoozerSurfaceJAX(Optimizable):
             float(self.targetlabel),
             str(self.label_type),
             int(self.phi_idx),
-            _traceable_array_signature(self.quadpoints_phi),
-            _traceable_array_signature(self.quadpoints_theta),
-            _traceable_array_signature(self.scatter_indices),
-            _traceable_array_signature(self.label_quadpoints_phi),
-            _traceable_array_signature(self.label_quadpoints_theta),
-            _traceable_array_signature(self.label_scatter_indices),
+            self._surface_runtime_signature,
+            self._label_surface_runtime_signature,
         )
 
     def _traceable_surface_runtime_args(self):
@@ -4863,7 +4887,7 @@ class BoozerSurfaceJAX(Optimizable):
         return (
             bool(weight_inv_modB),
             self._traceable_surface_signature(),
-            _traceable_array_signature(mask_indices),
+            tuple(int(dim) for dim in mask_indices.shape),
         )
 
     def _get_traceable_penalty_objective(
@@ -5873,6 +5897,10 @@ class BoozerSurfaceJAX(Optimizable):
         """Public LS solver matching the baseline BoozerSurface API."""
         if not self.need_to_run_code:
             return self.res
+        raise_if_strict_jax_fallback(
+            component="BoozerSurfaceJAX",
+            detail="host-controlled exact-constraints Newton loop",
+        )
 
         optimize_G = G is not None
         s = self.surface

@@ -34,7 +34,10 @@ from .._core.util import ObjectiveFailure
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from ..jax_core.biotsavart import biot_savart_B
-from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
+from ..jax_core._math_utils import (
+    as_jax_float64 as _as_jax_float64,
+    runtime_jnp_dtype as _runtime_jnp_dtype,
+)
 from ..jax_core.objectives_flux import (
     build_fourier_basis,
     fixed_surface_flux_integral,
@@ -247,15 +250,15 @@ class SquaredFluxJAX(Optimizable):
             return
         self._init_spec_native(field)
 
-    def _bind_native_forward(self, forward):
+    def _bind_native_forward(self, forward, *forward_args):
         jit_forward = jax.jit(forward)
         jit_val_grad = jax.jit(jax.value_and_grad(forward, argnums=0))
 
         def _jit_forward_dofs(flat_dofs):
-            return jit_forward(flat_dofs, self._flux_spec)
+            return jit_forward(flat_dofs, self._flux_spec, *forward_args)
 
         def _jit_val_grad_dofs(flat_dofs):
-            return jit_val_grad(flat_dofs, self._flux_spec)
+            return jit_val_grad(flat_dofs, self._flux_spec, *forward_args)
 
         self._jit_forward_dofs = _jit_forward_dofs
         self._jit_val_grad_dofs = _jit_val_grad_dofs
@@ -270,57 +273,84 @@ class SquaredFluxJAX(Optimizable):
 
         k = 2 * order + 1
 
-        # Static coil descriptors (unrolled by JIT tracer)
+        # Static coil descriptors.
         base_curves = tuple(field._unique_base_curves)
-        base_curve_idxs = tuple(d[0] for d in field._coil_descs)
-        base_current_idxs = tuple(d[1] for d in field._coil_descs)
-        rotmats = tuple(d[2] for d in field._coil_descs)
-        current_scales = tuple(d[3] for d in field._coil_descs)
-        n_coils = len(field._coil_descs)
-
-        def forward(flat_dofs, flux_spec):
-            curve_dofs = [
-                field._local_full_dofs_from_free_vector(curve, flat_dofs)
-                for curve in base_curves
+        coil_descs = tuple(field._coil_descs)
+        runtime_dtype = _runtime_jnp_dtype()
+        base_curve_idxs = jnp.asarray(
+            [d[0] for d in coil_descs],
+            dtype=jnp.int32,
+        )
+        base_current_idxs = jnp.asarray(
+            [d[1] for d in coil_descs],
+            dtype=jnp.int32,
+        )
+        rotmats = jnp.stack(
+            [
+                jnp.eye(3, dtype=runtime_dtype)
+                if d[2] is None
+                else jnp.asarray(d[2], dtype=runtime_dtype)
+                for d in coil_descs
             ]
-            current_vals = [
-                field._scalar_current_value_from_dofs(
-                    current,
-                    flat_dofs,
-                    "uniform CurveXYZFourier fast path",
-                )
-                for current in field._unique_base_currents
-            ]
+        )
+        current_scales = jnp.asarray(
+            [d[3] for d in coil_descs],
+            dtype=runtime_dtype,
+        )
 
-            gammas = []
-            gammadashs = []
-            currents = []
+        def forward(
+            flat_dofs,
+            flux_spec,
+            basis,
+            dbasis,
+            base_curve_idxs,
+            base_current_idxs,
+            rotmats,
+            current_scales,
+        ):
+            curve_dofs = jnp.stack(
+                [
+                    field._local_full_dofs_from_free_vector(curve, flat_dofs).reshape(
+                        3, k
+                    )
+                    for curve in base_curves
+                ]
+            )
+            current_vals = jnp.stack(
+                [
+                    field._scalar_current_value_from_dofs(
+                        current,
+                        flat_dofs,
+                        "uniform CurveXYZFourier fast path",
+                    )
+                    for current in field._unique_base_currents
+                ]
+            )
 
-            for ci in range(n_coils):
-                coeffs = curve_dofs[base_curve_idxs[ci]].reshape(3, k)
-                g = basis @ coeffs.T
-                gd = dbasis @ coeffs.T
-
-                rm = rotmats[ci]
-                if rm is not None:
-                    g = g @ rm
-                    gd = gd @ rm
-
-                gammas.append(g)
-                gammadashs.append(gd)
-                currents.append(
-                    current_vals[base_current_idxs[ci]] * current_scales[ci]
-                )
+            coeffs = curve_dofs[base_curve_idxs]
+            gammas = jnp.einsum("qk,nck->nqc", basis, coeffs)
+            gammadashs = jnp.einsum("qk,nck->nqc", dbasis, coeffs)
+            gammas = jnp.einsum("nqi,nij->nqj", gammas, rotmats)
+            gammadashs = jnp.einsum("nqi,nij->nqj", gammadashs, rotmats)
+            currents = current_vals[base_current_idxs] * current_scales
 
             B = biot_savart_B(
                 flux_spec.points,
-                jnp.stack(gammas),
-                jnp.stack(gammadashs),
-                jnp.array(currents, dtype=jnp.float64),
+                gammas,
+                gammadashs,
+                currents,
             )
             return fixed_surface_flux_integral_from_B(B, flux_spec)
 
-        self._bind_native_forward(forward)
+        self._bind_native_forward(
+            forward,
+            basis,
+            dbasis,
+            base_curve_idxs,
+            base_current_idxs,
+            rotmats,
+            current_scales,
+        )
 
     def _init_spec_native(self, field):
         """Build the immutable-spec native path for general JAX-capable fields."""
@@ -342,7 +372,7 @@ class SquaredFluxJAX(Optimizable):
 
     def _gather_field_free_dofs(self):
         """Read the current flat free-DOF vector from the field dependency."""
-        return _as_jax_float64(self.field.x)
+        return jnp.asarray(self.field.x, dtype=_runtime_jnp_dtype())
 
     # ------------------------------------------------------------------
     # Public API

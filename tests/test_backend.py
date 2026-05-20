@@ -357,7 +357,7 @@ def test_set_backend_updates_envs_for_jax_mps_smoke(monkeypatch):
 def test_jax_metal_smoke_mode_is_rejected(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
-    with pytest.raises(ValueError, match="jax-metal is unmaintained"):
+    with pytest.raises(ValueError, match="no longer supports jax-metal"):
         backend.set_backend("jax_metal_smoke", configure_runtime=False)
 
 
@@ -366,7 +366,7 @@ def test_legacy_metal_platform_is_rejected(monkeypatch):
     monkeypatch.setenv("SIMSOPT_BACKEND", "jax")
     monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "metal")
     backend = _fresh_backend()
-    with pytest.raises(ValueError, match="jax-metal is unmaintained"):
+    with pytest.raises(ValueError, match="jax_mps_smoke"):
         backend.get_backend_config()
 
 

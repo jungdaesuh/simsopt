@@ -1,5 +1,5 @@
 """
-End-to-end test for the JAX-native SquaredFluxJAX path.
+End-to-end test for the JAX-native SquaredFlux kernel path.
 
 Validates that the Fourier-basis forward and value_and_grad path
 produces correct results without depending on simsoptpp.
@@ -7,8 +7,8 @@ produces correct results without depending on simsoptpp.
 Tests:
 1. Fourier basis gamma matches jaxfouriercurve_pure.
 2. Fourier basis gammadash matches JVP of gamma.
-3. SquaredFluxJAX.J() matches manual computation.
-4. SquaredFluxJAX.dJ() matches centred finite differences.
+3. The fixed-surface flux kernel matches manual computation.
+4. The fixed-surface flux kernel gradient matches centred finite differences.
 5. JAX-native path is detected for CurveXYZFourier coils.
 6. Gradient accumulation works for shared-DOF (symmetry) coils.
 """

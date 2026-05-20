@@ -521,9 +521,16 @@ class SpecBackedBiotSavartJAX(Optimizable):
         self._points_cyl_jax: jax.Array | None = None
         self._points_version = 0
         self._dof_layout_version = 0
+        self._free_dof_layout_ready = False
         self._uses_uniform_curve_xyz_fourier_fastpath = False
         Optimizable.__init__(self, x0=host_array(self._x, dtype=np.float64))
         self._coils = self._coils_from_dofs(self._x)
+        self._free_dof_layout_ready = True
+
+    def update_free_dof_size_indices(self) -> None:
+        super().update_free_dof_size_indices()
+        if self._free_dof_layout_ready:
+            self._dof_layout_version += 1
 
     def _coils_from_dofs(
         self,

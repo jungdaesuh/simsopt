@@ -544,15 +544,15 @@ class TestBiotSavartJaxAnalytical:
 
         np.testing.assert_allclose(np.array(B_total), np.array(B1 + B2), atol=1e-14)
 
-    def test_point_on_coil_field_is_finite(self):
-        """Documented r=0 clamp keeps point-on-coil B finite in JAX."""
+    def test_point_on_coil_field_surfaces_singularity(self):
+        """Point-on-coil inputs expose the Biot-Savart singularity."""
         gammas, gammadashs = _make_circular_coil(R=1.0, nquad=64)
         currents = jnp.array([1e5])
         points = gammas[0, :1, :]
 
         B = biot_savart_B(points, gammas, gammadashs, currents)
 
-        assert bool(np.all(np.asarray(jnp.isfinite(B))))
+        assert not bool(np.all(np.asarray(jnp.isfinite(B))))
 
     def test_grouped_biot_savart_A_host_helper_matches_dense_kernel(self):
         """Direct host-helper pin for grouped vector potential accumulation."""
@@ -1869,6 +1869,26 @@ class TestBiotSavartJAXCoilStateToken:
 
         assert spec_backed_a._coil_dof_state_token != initial_token
         assert spec_backed_a._coil_dofs_generation == 1
+
+    def test_spec_backed_biotsavart_jax_advances_layout_version_on_fix(self):
+        from simsopt.field.biotsavart_jax_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+        )
+        from simsopt.jax_core.specs import make_biot_savart_spec
+
+        coils = self._make_two_basic_coils()
+        bs_jax = BiotSavartJAX(list(coils))
+        spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+        spec_backed = SpecBackedBiotSavartJAX(spec)
+        initial_version = spec_backed._dof_layout_version
+
+        spec_backed.fix(0)
+
+        assert spec_backed._dof_layout_version > initial_version
 
     def test_spec_backed_biotsavart_x_setter_writes_free_dofs(self):
         from simsopt.field.biotsavart_jax_backend import (

@@ -1312,6 +1312,7 @@ def adam_optimize_traceable(
                 jax.debug.callback(
                     lambda current_x: callback(_hostify_optimizer_tree(current_x)),
                     next_state["x"],
+                    ordered=False,
                 )
             if progress_callback is not None:
                 jax.debug.callback(
@@ -1319,6 +1320,7 @@ def adam_optimize_traceable(
                     next_state["nit"],
                     next_state["fun"],
                     next_state["grad_norm_inf"],
+                    ordered=False,
                 )
             return next_state
 
@@ -1403,6 +1405,7 @@ def _make_traceable_levenberg_marquardt_runner(
                         _invoke_traceable_lm_callback,
                         callback_token,
                         next_state["x"],
+                        ordered=False,
                     ),
                     lambda _: None,
                     operand=None,
@@ -1416,6 +1419,7 @@ def _make_traceable_levenberg_marquardt_runner(
                         next_state["nit"],
                         next_state["cost"],
                         next_state["grad_norm_inf"],
+                        ordered=False,
                     ),
                     lambda _: None,
                     operand=None,
@@ -2390,6 +2394,7 @@ def levenberg_marquardt_minpack_traceable(
                             _hostify_optimizer_tree(unravel(flat_x))
                         ),
                         next_state["x"],
+                        ordered=False,
                     ),
                     lambda _: None,
                     operand=None,
@@ -2402,6 +2407,7 @@ def levenberg_marquardt_minpack_traceable(
                         next_state["nit"],
                         next_state["cost"],
                         next_state["grad_norm_inf"],
+                        ordered=False,
                     ),
                     lambda _: None,
                     operand=None,
@@ -3680,6 +3686,10 @@ def newton_polish(
     The dense Hessian is still materialized once at the final iterate so
     callers retain the existing adjoint/PLU contract.
     """
+    raise_if_strict_jax_fallback(
+        component="newton_polish",
+        detail="host-controlled Newton polish loop",
+    )
     val_and_grad_fn = _cached_jit_value_and_grad(objective_fn)
     hvp_fn = _hessian_vector_product_fn(objective_fn)
 
@@ -3881,6 +3891,7 @@ def _make_traceable_newton_polish_runner(
                         next_nit,
                         candidate["val"],
                         candidate["norm"],
+                        ordered=False,
                     ),
                     lambda _: None,
                     operand=None,
@@ -4005,6 +4016,10 @@ def newton_exact(
     hot loop. The dense Jacobian is rebuilt once at the final iterate only for
     public compatibility metadata and diagnostics.
     """
+    raise_if_strict_jax_fallback(
+        component="newton_exact",
+        detail="host-controlled exact Newton loop",
+    )
     res_fn = jax.jit(residual_fn)
     jvp_fn = _jacobian_vector_product_fn(residual_fn)
 

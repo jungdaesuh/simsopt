@@ -274,7 +274,7 @@ def _patch_traceable_exact_warmstart_failure(monkeypatch, failed_dx):
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
         "_traceable_solve_linearization",
-        lambda *_args, **_kwargs: (failed_dx, jnp.asarray(False, dtype=bool)),
+        lambda *_args, **_kwargs: (failed_dx, _mock_linear_solve_status(False)),
     )
 
 
@@ -1642,7 +1642,7 @@ def test_traceable_exact_warmstart_success_matches_reference_operator_linearizat
             A_np @ baseline_x_np + B_np @ baseline_coil_dofs_np,
         )
         linear_operator = A.T if transpose else A
-        return jnp.linalg.solve(linear_operator, rhs), jnp.asarray(True, dtype=bool)
+        return jnp.linalg.solve(linear_operator, rhs), _mock_linear_solve_status(True)
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module._optimizer_jax,
@@ -1691,7 +1691,7 @@ def test_traceable_hessian_solve_uses_configured_stabilization_once(monkeypatch)
         np.testing.assert_allclose(np.asarray(current_x), np.asarray(solved_x))
         np.testing.assert_allclose(np.asarray(current_rhs), np.asarray(rhs))
         assert stab == pytest.approx(1.0e-4)
-        return 2.0 * current_rhs, jnp.asarray(True, dtype=bool)
+        return 2.0 * current_rhs, _mock_linear_solve_status(True)
 
     _patch_traceable_hessian_solve(
         monkeypatch,
@@ -1738,7 +1738,7 @@ def test_traceable_hessian_solve_uses_configured_stabilization_under_jit(
         stab_value = jnp.asarray(stab, dtype=current_rhs.dtype)
         jax.debug.callback(_record_stab, stab_value, ordered=True)
         success = stab_value == jnp.asarray(1.0e-4, dtype=current_rhs.dtype)
-        return 2.0 * current_rhs, success
+        return 2.0 * current_rhs, _mock_linear_solve_status(success)
 
     _patch_traceable_hessian_solve(
         monkeypatch,
@@ -1957,7 +1957,7 @@ def test_traceable_ls_warmstart_failure_preserves_baseline_state(monkeypatch):
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
         "_traceable_solve_linearization",
-        lambda *_args, **_kwargs: (failed_dx, jnp.asarray(False, dtype=bool)),
+        lambda *_args, **_kwargs: (failed_dx, _mock_linear_solve_status(False)),
     )
 
     predicted, success = surfaceobjectives_jax_module._traceable_predict_warmstart_x(
@@ -5026,6 +5026,7 @@ def test_traceable_inner_stationarity_coil_jvp_matches_full_stationarity_jvp(
 def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
     true_value = jax.device_put(np.asarray(True, dtype=bool))
+    true_status = _mock_linear_solve_status(true_value)
 
     def _strict_quadratic_inner_objective_closure(*, coil_set_spec, **_kwargs):
         def inner_objective(x_inner):
@@ -5055,7 +5056,7 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
         "_traceable_solve_linearization",
         lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
             rhs,
-            true_value,
+            true_status,
         ),
     )
 
@@ -5108,6 +5109,7 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
     monkeypatch,
 ):
     true_value = jax.device_put(np.asarray(True, dtype=bool))
+    true_status = _mock_linear_solve_status(true_value)
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -5136,7 +5138,7 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
         "_traceable_solve_linearization",
         lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
             rhs,
-            true_value,
+            true_status,
         ),
     )
 
@@ -5450,6 +5452,7 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
     monkeypatch,
 ):
     true_value = jax.device_put(np.asarray(True, dtype=bool))
+    true_status = _mock_linear_solve_status(true_value)
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -5476,7 +5479,7 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
         "_traceable_solve_linearization",
         lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
             rhs,
-            true_value,
+            true_status,
         ),
     )
     monkeypatch.setattr(
@@ -5562,6 +5565,7 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
     monkeypatch,
 ):
     true_value = jax.device_put(np.asarray(True, dtype=bool))
+    true_status = _mock_linear_solve_status(true_value)
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -5590,7 +5594,7 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
         "_traceable_solve_linearization",
         lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
             rhs,
-            true_value,
+            true_status,
         ),
     )
     monkeypatch.setattr(
@@ -6252,6 +6256,32 @@ def _make_qfm_pair(surfacetype, stellsym):
         surfaceobjectives_jax_module.QfmResidualJAX(surface, bs_jax),
         surface,
     )
+
+
+def test_qfm_residual_jax_constructor_does_not_mutate_biotsavart_graph():
+    surface = get_surface(
+        "SurfaceRZFourier",
+        False,
+        mpol=1,
+        ntor=1,
+        nfp=1,
+        nphi=7,
+        ntheta=8,
+        full=True,
+    )
+    _bs_cpu, bs_jax = _make_qfm_biotsavart_pair()
+    parents_before = tuple(bs_jax.parents)
+    dof_size_before = bs_jax.dof_size
+    layout_version_before = bs_jax._dof_layout_version
+    points_version_before = bs_jax._points_version
+
+    qfm = surfaceobjectives_jax_module.QfmResidualJAX(surface, bs_jax)
+    qfm.invalidate_cache()
+
+    assert tuple(bs_jax.parents) == parents_before
+    assert bs_jax.dof_size == dof_size_before
+    assert bs_jax._dof_layout_version == layout_version_before
+    assert bs_jax._points_version == points_version_before
 
 
 def _surface_gradient_value(tf, _):

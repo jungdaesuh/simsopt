@@ -2379,6 +2379,16 @@ def _make_mock_boozer_surface_mixed_quad(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1
     return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=1.0)
 
 
+def test_traceable_surface_signature_uses_host_owned_metadata_digest():
+    booz = _make_mock_boozer_surface_mixed_quad()
+
+    with jax.transfer_guard("disallow"):
+        signature = booz._traceable_surface_signature()
+
+    assert signature[-2][5][0] == "float64"
+    assert isinstance(signature[-2][5][2], str)
+
+
 class _MockToroidalFluxLabel:
     def __init__(self, surface):
         self.surface = surface

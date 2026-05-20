@@ -7,7 +7,6 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
-from jax.experimental import io_callback
 
 from ._math_utils import as_jax_float64 as _as_jax_float64
 from ._math_utils import as_jax_int32 as _as_jax_int32
@@ -385,19 +384,21 @@ def _validate_gsco_history_capacity(
             "max_steps must fit the GSCO history capacity; "
             f"got max_steps={max_steps}, history_capacity={history_capacity}."
         )
+    history_dtype = state.history_length.dtype
     if _has_tracer_leaf(state.history_length):
-        history_length = io_callback(
-            _validate_gsco_history_length_runtime,
-            jax.ShapeDtypeStruct((), state.history_length.dtype),
-            state.history_length,
-            jnp.asarray(max_steps, dtype=state.history_length.dtype),
-            jnp.asarray(history_capacity, dtype=state.history_length.dtype),
+        max_steps_value = jnp.asarray(max_steps, dtype=history_dtype)
+        history_capacity_value = jnp.asarray(
+            history_capacity,
+            dtype=history_dtype,
         )
-        return replace(state, history_length=history_length)
+        invalid_history = (state.history_length < 1) | (
+            state.history_length + max_steps_value > history_capacity_value
+        )
+        return replace(state, done=state.done | invalid_history)
     history_length = _validate_gsco_history_length_runtime(
         state.history_length,
-        jnp.asarray(max_steps, dtype=state.history_length.dtype),
-        jnp.asarray(history_capacity, dtype=state.history_length.dtype),
+        jnp.asarray(max_steps, dtype=history_dtype),
+        jnp.asarray(history_capacity, dtype=history_dtype),
     )
     return replace(state, history_length=history_length)
 

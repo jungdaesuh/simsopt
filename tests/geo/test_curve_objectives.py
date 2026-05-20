@@ -110,6 +110,55 @@ def _curve_surface_distance_inputs():
     return gamma_curve, gammadash_curve, gamma_surface, surface_normal
 
 
+def _numpy_pairwise_distances(points_a, points_b):
+    return np.linalg.norm(points_a[:, None, :] - points_b[None, :, :], axis=-1)
+
+
+def _numpy_pairwise_weights(weights_a, weights_b):
+    return (
+        np.linalg.norm(weights_a, axis=1)[:, None]
+        * np.linalg.norm(weights_b, axis=1)[None, :]
+    )
+
+
+def _numpy_cc_distance(gamma1, gammadash1, gamma2, gammadash2, minimum_distance):
+    dists = _numpy_pairwise_distances(gamma1, gamma2)
+    arc_lengths = _numpy_pairwise_weights(gammadash1, gammadash2)
+    excess = np.maximum(float(minimum_distance) - dists, 0.0)
+    return float(np.sum(arc_lengths * np.square(excess)) / dists.size)
+
+
+def _numpy_cc_distance_barrier(
+    gamma1,
+    gammadash1,
+    gamma2,
+    gammadash2,
+    minimum_distance,
+):
+    dists = _numpy_pairwise_distances(gamma1, gamma2)
+    if np.any(dists <= minimum_distance):
+        return np.inf
+    arc_lengths = _numpy_pairwise_weights(gammadash1, gammadash2)
+    barrier = -np.log1p(-(float(minimum_distance) / dists))
+    return float(np.sum(arc_lengths * barrier) / dists.size)
+
+
+def _numpy_cs_distance(gammac, gammadashc, gammas, normals, minimum_distance):
+    dists = _numpy_pairwise_distances(gammac, gammas)
+    weights = _numpy_pairwise_weights(gammadashc, normals)
+    excess = np.maximum(float(minimum_distance) - dists, 0.0)
+    return float(np.sum(weights * np.square(excess)) / dists.size)
+
+
+def _numpy_max_distance(gamma1, gamma2, maximum_distance, p):
+    dists = _numpy_pairwise_distances(gamma1, gamma2)
+    rowwise_pnorm = np.sum(dists**p, axis=1) ** (1.0 / p)
+    return float(
+        np.sum(np.square(np.maximum(rowwise_pnorm - maximum_distance, 0.0)))
+        / gamma1.shape[0]
+    )
+
+
 def _sampled_curve_pair_minimum_distance(curves, *, downsample):
     return min(
         np.min(
@@ -191,7 +240,7 @@ def test_framed_curve_twist_reuses_shared_jit_kernels(
     assert _legacy_curveobjective_jit_attrs(objective2) == []
 
 
-def test_pairwise_penalty_chunking_matches_dense_paths(monkeypatch):
+def test_pairwise_penalty_chunking_matches_dense_paths_and_numpy_oracles(monkeypatch):
     gamma1 = np.array(
         [
             [0.00, 0.00, 0.00],
@@ -278,11 +327,34 @@ def test_pairwise_penalty_chunking_matches_dense_paths(monkeypatch):
     monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
     invalidate_backend_cache()
 
+    expected_cc = _numpy_cc_distance(gamma1, gammadash1, gamma2, gammadash2, 0.09)
+    expected_cc_barrier = _numpy_cc_distance_barrier(
+        gamma1,
+        gammadash1,
+        gamma2,
+        gammadash2,
+        0.01,
+    )
+    expected_cs = _numpy_cs_distance(
+        gamma1,
+        gammadash1,
+        surface_gamma,
+        surface_normal,
+        0.05,
+    )
+    expected_max = _numpy_max_distance(gamma1, gamma2, 0.30, -10)
+    expected_min = float(np.min(_numpy_pairwise_distances(gamma1, surface_gamma)))
+
     assert chunked_cc == pytest.approx(dense_cc, rel=1e-12, abs=1e-12)
     assert chunked_cc_barrier == pytest.approx(dense_cc_barrier, rel=1e-12, abs=1e-12)
     assert chunked_cs == pytest.approx(dense_cs, rel=1e-12, abs=1e-12)
     assert chunked_max == pytest.approx(dense_max, rel=1e-12, abs=1e-12)
     assert chunked_min == pytest.approx(dense_min, rel=1e-12, abs=1e-12)
+    assert dense_cc == pytest.approx(expected_cc, rel=1e-12, abs=1e-12)
+    assert dense_cc_barrier == pytest.approx(expected_cc_barrier, rel=1e-12, abs=1e-12)
+    assert dense_cs == pytest.approx(expected_cs, rel=1e-12, abs=1e-12)
+    assert dense_max == pytest.approx(expected_max, rel=1e-12, abs=1e-12)
+    assert dense_min == pytest.approx(expected_min, rel=1e-12, abs=1e-12)
 
 
 def test_curve_surface_chunked_gradient_respects_strict_transfer_guard(monkeypatch):
@@ -532,6 +604,7 @@ def test_pairwise_penalty_chunking_is_strict_transfer_safe(monkeypatch, request)
     dense_min = float(pairwise_min_distance_pure(gamma1, gamma2, chunk_size=0))
 
     assert chunked_min == pytest.approx(dense_min, rel=1e-12, abs=1e-12)
+
 
 class Testing(unittest.TestCase):
     curvetypes = [
@@ -1100,15 +1173,9 @@ class Testing(unittest.TestCase):
                 objective2 = LinkingNumber(curves2, downsample)
                 objective3 = LinkingNumber(curves3, downsample)
 
-                np.testing.assert_allclose(
-                    objective1.J(), 0, atol=1e-14, rtol=1e-14
-                )
-                np.testing.assert_allclose(
-                    objective2.J(), 1, atol=1e-14, rtol=1e-14
-                )
-                np.testing.assert_allclose(
-                    objective3.J(), 1, atol=1e-14, rtol=1e-14
-                )
+                np.testing.assert_allclose(objective1.J(), 0, atol=1e-14, rtol=1e-14)
+                np.testing.assert_allclose(objective2.J(), 1, atol=1e-14, rtol=1e-14)
+                np.testing.assert_allclose(objective3.J(), 1, atol=1e-14, rtol=1e-14)
 
     def test_linking_number_planar(self):
         for downsample in [1, 2, 5]:
@@ -1147,15 +1214,9 @@ class Testing(unittest.TestCase):
                 objective2 = LinkingNumber(curves2, downsample)
                 objective3 = LinkingNumber(curves3, downsample)
 
-                np.testing.assert_allclose(
-                    objective1.J(), 0, atol=1e-14, rtol=1e-14
-                )
-                np.testing.assert_allclose(
-                    objective2.J(), 1, atol=1e-14, rtol=1e-14
-                )
-                np.testing.assert_allclose(
-                    objective3.J(), 1, atol=1e-14, rtol=1e-14
-                )
+                np.testing.assert_allclose(objective1.J(), 0, atol=1e-14, rtol=1e-14)
+                np.testing.assert_allclose(objective2.J(), 1, atol=1e-14, rtol=1e-14)
+                np.testing.assert_allclose(objective3.J(), 1, atol=1e-14, rtol=1e-14)
 
     def test_curve_curve_distance_empty_candidates(self):
         curve1 = CurvePlanarFourier(100, 0)

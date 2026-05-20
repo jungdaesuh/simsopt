@@ -1666,6 +1666,7 @@ def _lbfgsb_emit_accepted_step(
         state.g,
         state.nfev,
         state.njev,
+        ordered=False,
     )
     return state
 

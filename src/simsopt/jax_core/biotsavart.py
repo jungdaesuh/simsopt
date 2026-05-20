@@ -117,18 +117,7 @@ def _as_int32_scalar(value):
 
 
 def _safe_radius_squared(diff):
-    # Behavior divergence vs C++ Biot-Savart: the C++ kernel returns NaN/Inf
-    # for point-on-coil inputs (r2 == 0), allowing the divergence to surface
-    # immediately. The JAX path silently clamps r2 at 1e-60 to keep the
-    # 1/r^3 chain inside float64 (1/(1e-60)^1.5 = 1e90; using the float64
-    # subnormal minimum ~5e-324 would yield 1/(5e-324)^1.5 ~ 9e484, which
-    # overflows float64 max ~1.8e308 by ~177 orders of magnitude). This is a
-    # deliberate documented divergence: production workflows do not land on
-    # point-on-coil geometry, and matching the C++ NaN/Inf behavior would
-    # require a separate validation cycle. See docs/source/jax_acceptance.rst
-    # ("Domain-edge behavior") for the policy rationale.
-    r2 = jnp.sum(diff * diff, axis=-1)
-    return jnp.maximum(r2, _float64_scalar(r2, 1e-60))
+    return jnp.sum(diff * diff, axis=-1)
 
 
 def _cross_product(left, right):
