@@ -275,12 +275,13 @@ _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
 _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
+_TRACEABLE_RUNNER_CACHE_TOKEN_ATTR = "_simsopt_traceable_runner_cache_token"
 _TRACEABLE_CALLBACK_LOCK = Lock()
 _TRACEABLE_CALLBACK_IDS = count(1)
 _TRACEABLE_CALLBACKS: dict[int, Callable[..., object]] = {}
 _TRACEABLE_RUNNER_CACHE_LOCK = Lock()
-# Traceable solver closures capture problem state that is not safely comparable.
-# Cache only weakref-able callables by identity; build uncached runners otherwise.
+# Explicit traceable cache tokens own semantic reuse; bare callables stay
+# isolated by object identity because their closure state is not comparable.
 _TRACEABLE_LM_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE = {}
 _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE = {}
@@ -377,20 +378,47 @@ class _StrongTraceableCallableRef:
         return self._callable_fn
 
 
-def _traceable_runner_cache_entry_dead(cache, callable_id, callable_ref):
+class _TraceableRunnerCallableCell:
+    __slots__ = ("_callable_ref",)
+
+    def __init__(self, callable_ref):
+        self._callable_ref = callable_ref
+
+    def __call__(self):
+        return self._callable_ref()
+
+    def replace_ref(self, callable_ref):
+        self._callable_ref = callable_ref
+
+    def owns_ref(self, callable_ref):
+        return self._callable_ref is callable_ref
+
+
+def _traceable_runner_cache_entry_key(callable_fn):
+    traceable_token = getattr(callable_fn, _TRACEABLE_RUNNER_CACHE_TOKEN_ATTR, None)
+    if traceable_token is not None:
+        return ("traceable-token", traceable_token), True
+    return ("callable-identity", id(callable_fn)), False
+
+
+def _traceable_runner_cache_entry_dead(cache, cache_entry_key, callable_ref):
     with _TRACEABLE_RUNNER_CACHE_LOCK:
-        cache_entry = cache.get(callable_id)
-        if cache_entry is not None and cache_entry[0] is callable_ref:
-            cache.pop(callable_id, None)
+        cache_entry = cache.get(cache_entry_key)
+        if cache_entry is not None and cache_entry[0].owns_ref(callable_ref):
+            cache.pop(cache_entry_key, None)
 
 
-def _traceable_runner_callable_ref(callable_fn, cache=None, callable_id=None):
+def _traceable_runner_callable_ref(callable_fn, cache=None, cache_entry_key=None):
+    if cache is None:
+        try:
+            return ref(callable_fn)
+        except TypeError:
+            return None
+
     def remove_callable_ref(callable_ref):
-        _traceable_runner_cache_entry_dead(cache, callable_id, callable_ref)
+        _traceable_runner_cache_entry_dead(cache, cache_entry_key, callable_ref)
 
     try:
-        if cache is None:
-            return ref(callable_fn)
         return ref(callable_fn, remove_callable_ref)
     except TypeError:
         return None
@@ -401,24 +429,33 @@ def _cached_traceable_runner(cache, callable_fn, cache_key, build_runner):
     if callable_ref is None:
         return build_runner(_StrongTraceableCallableRef(callable_fn))
 
-    callable_id = id(callable_fn)
+    cache_entry_key, is_token_keyed = _traceable_runner_cache_entry_key(callable_fn)
     with _TRACEABLE_RUNNER_CACHE_LOCK:
-        cache_entry = cache.get(callable_id)
-        if cache_entry is None or cache_entry[0]() is not callable_fn:
+        cache_entry = cache.get(cache_entry_key)
+        if cache_entry is None or (
+            not is_token_keyed and cache_entry[0]() is not callable_fn
+        ):
             callable_ref = _traceable_runner_callable_ref(
                 callable_fn,
-                cache,
-                callable_id,
+                # Token-keyed runners are owned by the semantic token, not by a
+                # transient closure object. Identity-keyed runners still clean
+                # up with the callable weakref.
+                None if is_token_keyed else cache,
+                cache_entry_key,
             )
             if callable_ref is None:
                 return build_runner(_StrongTraceableCallableRef(callable_fn))
+            callable_cell = _TraceableRunnerCallableCell(callable_ref)
             callable_cache = {}
-            cache[callable_id] = (callable_ref, callable_cache)
+            cache[cache_entry_key] = (callable_cell, callable_cache)
         else:
-            callable_ref, callable_cache = cache_entry
+            callable_cell, callable_cache = cache_entry
+            if is_token_keyed and callable_cell() is not callable_fn:
+                callable_ref = _traceable_runner_callable_ref(callable_fn)
+                callable_cell.replace_ref(callable_ref)
         runner = callable_cache.get(cache_key)
         if runner is None:
-            runner = build_runner(callable_ref)
+            runner = build_runner(callable_cell)
             callable_cache[cache_key] = runner
         return runner
 
@@ -830,10 +867,16 @@ def _mark_cacheable_jit_value_and_grad(fun):
     return fun
 
 
+def _mark_traceable_runner_cacheable(fun, *, cache_token):
+    # Same contract as ``_mark_cacheable_jit_value_and_grad``.
+    setattr(fun, _TRACEABLE_RUNNER_CACHE_TOKEN_ATTR, cache_token)
+    return fun
+
+
 def _mark_structured_private_solver_cacheable(fun, *, cache_token):
     # Same contract as ``_mark_cacheable_jit_value_and_grad``.
     setattr(fun, _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR, cache_token)
-    return fun
+    return _mark_traceable_runner_cacheable(fun, cache_token=cache_token)
 
 
 def wrap_strict_target_lane_value_and_grad(fun):

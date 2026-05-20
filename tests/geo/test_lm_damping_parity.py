@@ -289,6 +289,13 @@ class _EqualCallable:
         return 0
 
 
+def _semantic_identity_callable(cache_token):
+    def callable_fn(x):
+        return x
+
+    return _opt._mark_traceable_runner_cacheable(callable_fn, cache_token=cache_token)
+
+
 _TRACEABLE_RUNNER_CASES = (
     pytest.param(
         _opt._make_traceable_levenberg_marquardt_runner,
@@ -346,6 +353,61 @@ def test_traceable_runner_cache_uses_identity_for_equal_callable_objects(
     second = runner_factory(second_callable, *options)
 
     assert first is not second
+
+
+@pytest.mark.parametrize(("runner_factory", "options"), _TRACEABLE_RUNNER_CASES)
+def test_traceable_runner_cache_uses_explicit_semantic_token(
+    runner_factory,
+    options,
+):
+    first_callable = _semantic_identity_callable(("semantic-identity", 1))
+    callable_ref = weakref.ref(first_callable)
+    first = runner_factory(first_callable, *options)
+    del first_callable
+    _assert_callable_released(callable_ref)
+
+    second_callable = _semantic_identity_callable(("semantic-identity", 1))
+    second = runner_factory(second_callable, *options)
+    third = runner_factory(
+        _semantic_identity_callable(("semantic-identity", 2)),
+        *options,
+    )
+
+    assert second is first
+    assert third is not first
+
+
+def test_exact_newton_semantic_cache_rebinds_callable_before_first_trace():
+    def residual_factory():
+        def residual_fn(x):
+            return x - jnp.asarray([1.0], dtype=x.dtype)
+
+        return _opt._mark_traceable_runner_cacheable(
+            residual_fn,
+            cache_token=("unit-root-residual",),
+        )
+
+    residual_fn = residual_factory()
+    callable_ref = weakref.ref(residual_fn)
+    runner = _opt._make_traceable_exact_newton_runner(
+        residual_fn,
+        4,
+        1.0e-8,
+    )
+    del residual_fn
+    _assert_callable_released(callable_ref)
+
+    rebound_residual_fn = residual_factory()
+    rebound_runner = _opt._make_traceable_exact_newton_runner(
+        rebound_residual_fn,
+        4,
+        1.0e-8,
+    )
+
+    assert rebound_runner is runner
+    result = rebound_runner(jnp.asarray([0.0], dtype=jnp.float64), ())
+    np.testing.assert_allclose(result["x"], np.asarray([1.0]), atol=1.0e-8)
+    assert bool(result["success"])
 
 
 def test_matrix_free_lm_iteration_count_stays_close_to_scipy_lm():

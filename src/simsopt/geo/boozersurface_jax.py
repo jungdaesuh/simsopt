@@ -4381,6 +4381,10 @@ class BoozerSurfaceJAX(Optimizable):
                 objective_fn = _optimizer_jax._mark_cacheable_jit_value_and_grad(
                     objective_fn
                 )
+                objective_fn = _optimizer_jax._mark_traceable_runner_cacheable(
+                    objective_fn,
+                    cache_token=("boozer-penalty-objective", key),
+                )
                 self._reference_penalty_objective_cache[key] = objective_fn
             return objective_fn
         return _make_boozer_penalty_objective_closure(
@@ -4970,6 +4974,10 @@ class BoozerSurfaceJAX(Optimizable):
                     **surface_args,
                 )
 
+            objective_fn = _optimizer_jax._mark_traceable_runner_cacheable(
+                objective_fn,
+                cache_token=("boozer-traceable-penalty-objective", key),
+            )
             self._traceable_penalty_objective_cache[key] = objective_fn
         return self._traceable_penalty_objective_cache[key]
 
@@ -5000,6 +5008,10 @@ class BoozerSurfaceJAX(Optimizable):
                     **surface_args,
                 )
 
+            residual_fn = _optimizer_jax._mark_traceable_runner_cacheable(
+                residual_fn,
+                cache_token=("boozer-traceable-penalty-residual", key),
+            )
             self._traceable_penalty_residual_cache[key] = residual_fn
         return self._traceable_penalty_residual_cache[key]
 
@@ -5021,6 +5033,10 @@ class BoozerSurfaceJAX(Optimizable):
                     **surface_args,
                 )
 
+            residual_fn = _optimizer_jax._mark_traceable_runner_cacheable(
+                residual_fn,
+                cache_token=("boozer-traceable-exact-residual", key),
+            )
             self._traceable_exact_residual_cache[key] = residual_fn
         return self._traceable_exact_residual_cache[key]
 
