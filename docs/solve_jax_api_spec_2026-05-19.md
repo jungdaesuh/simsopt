@@ -576,22 +576,47 @@ Rows that mention `optimizer_backend` describe wrapper-resolved selector tuples 
 # simsopt/geo/optimizer_jax.py (existing module, kept as the shim)
 
 def jax_minimize(fn, x0, *, method="bfgs", **kwargs):
-    warnings.warn(
-        "simsopt.geo.optimizer_jax.jax_minimize is deprecated; "
-        "use simsopt.solve.jax.minimize(fn, x0, driver=...) instead. "
-        f"Translation: method={method!r} → driver={driver}.",
-        DeprecationWarning,
-        stacklevel=2,
+    if method not in _SUPPORTED_METHODS:
+        raise ValueError(
+            f"Unknown method {method!r}. Supported: {sorted(_SUPPORTED_METHODS)}."
+        )
+    translated_driver = _DEPRECATED_MINIMIZE_METHOD_TO_DRIVER[method]
+    _warn_deprecated_solve_jax_call(
+        api="jax_minimize",
+        method=method,
+        translated_driver=translated_driver,
+        caller_frame=sys._getframe(1),
     )
+    return _jax_minimize_legacy(fn, x0, method=method, **kwargs)
+
+def _warn_deprecated_solve_jax_call(*, api, method, translated_driver, caller_frame):
+    callsite = _DeprecationCallSite(
+        api=api,
+        filename=caller_frame.f_code.co_filename,
+        lineno=caller_frame.f_lineno,
+        function=caller_frame.f_code.co_name,
+    )
+    with _DEPRECATED_SOLVE_JAX_CALLSITE_LOCK:
+        should_warn = callsite not in _DEPRECATED_SOLVE_JAX_CALLSITES
+        if should_warn:
+            _DEPRECATED_SOLVE_JAX_CALLSITES.add(callsite)
+    if should_warn:
+        warnings.warn(
+            f"simsopt.geo.optimizer_jax.{api} is deprecated; use "
+            "simsopt.solve.jax instead. Translation: "
+            f"method={method!r} -> driver={translated_driver!r}.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
     _DEPRECATION_LOGGER.info(
         "deprecated_solve_jax_call",
         extra={
+            "old_api": api,
             "old_method": method,
-            "translated_driver": driver,
-            "stack": _shim_caller_stack(stacklevel=2),
+            "translated_driver": translated_driver,
+            "stack": _shim_caller_stack(caller_frame),
         },
     )
-    return _jax_minimize_legacy(fn, x0, method=method, **kwargs)
 ```
 
 **Shim guarantees:**
