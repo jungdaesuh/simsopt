@@ -3210,6 +3210,7 @@ class TestBoozerSurfaceJAXClass:
             coil_arrays=None,
             *,
             hostify_inputs=True,
+            decision_split_mode="sentinel",
         ):
             del (
                 optimize_G,
@@ -3219,6 +3220,7 @@ class TestBoozerSurfaceJAXClass:
                 hostify_inputs,
             )
             captured["weight_inv_modB"] = weight_inv_modB
+            captured["decision_split_mode"] = decision_split_mode
             return lambda x: jnp.zeros_like(x)
 
         def fake_reference_least_squares(
@@ -3257,6 +3259,7 @@ class TestBoozerSurfaceJAXClass:
         )
 
         assert captured["weight_inv_modB"] is False
+        assert captured["decision_split_mode"] == "reverse"
         assert res["weight_inv_modB"] is False
 
     def test_public_ls_api_rejects_invalid_backend_after_options_mutation(self):

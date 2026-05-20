@@ -261,6 +261,93 @@ def test_traceable_exact_newton_runner_cache_uses_weak_callable_ownership():
     )
 
 
+class _SlotCallable:
+    __slots__ = ()
+
+    def __call__(self, x):
+        return x
+
+
+class _UnhashableCallable:
+    __slots__ = ("__weakref__",)
+
+    def __call__(self, x):
+        return x
+
+    def __eq__(self, other):
+        return self is other
+
+
+class _EqualCallable:
+    def __call__(self, x):
+        return x
+
+    def __eq__(self, other):
+        return isinstance(other, _EqualCallable)
+
+    def __hash__(self):
+        return 0
+
+
+_TRACEABLE_RUNNER_CASES = (
+    pytest.param(
+        _opt._make_traceable_levenberg_marquardt_runner,
+        (4, 1.0e-8, 1.0e-8, 1.0e-8, None, False, None, True, True),
+        id="lm",
+    ),
+    pytest.param(
+        _opt._make_traceable_newton_polish_runner,
+        (4, 1.0e-8, 0.0, False, None, True),
+        id="newton-polish",
+    ),
+    pytest.param(
+        _opt._make_traceable_exact_newton_runner,
+        (4, 1.0e-8),
+        id="exact-newton",
+    ),
+)
+
+
+@pytest.mark.parametrize(("runner_factory", "options"), _TRACEABLE_RUNNER_CASES)
+def test_traceable_runner_cache_accepts_nonweakrefable_callable_objects(
+    runner_factory,
+    options,
+):
+    callable_fn = _SlotCallable()
+
+    first = runner_factory(callable_fn, *options)
+    second = runner_factory(callable_fn, *options)
+
+    assert first is not second
+
+
+@pytest.mark.parametrize(("runner_factory", "options"), _TRACEABLE_RUNNER_CASES)
+def test_traceable_runner_cache_accepts_unhashable_callable_objects(
+    runner_factory,
+    options,
+):
+    callable_fn = _UnhashableCallable()
+
+    first = runner_factory(callable_fn, *options)
+    second = runner_factory(callable_fn, *options)
+
+    assert first is second
+
+
+@pytest.mark.parametrize(("runner_factory", "options"), _TRACEABLE_RUNNER_CASES)
+def test_traceable_runner_cache_uses_identity_for_equal_callable_objects(
+    runner_factory,
+    options,
+):
+    first_callable = _EqualCallable()
+    second_callable = _EqualCallable()
+
+    first = runner_factory(first_callable, *options)
+    second = runner_factory(second_callable, *options)
+
+    assert first is not second
+
+
 def test_matrix_free_lm_iteration_count_stays_close_to_scipy_lm():
     A_np = np.asarray([[3.0, 1.0], [1.0, 4.0], [2.0, -1.0]], dtype=float)
     b_np = np.asarray([5.0, 7.0, 0.5], dtype=float)
