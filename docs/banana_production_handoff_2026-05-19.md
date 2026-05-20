@@ -24,9 +24,20 @@ python -m pip install -e ".[deploy_gpu]"
 
 The repository extras are the SSOT. `deploy` includes the CPU/JAX development
 dependencies used by the banana workflow. `deploy_gpu` routes through the
-repo `JAX_GPU` extra, which currently installs `jax[cuda12]`. Current JAX docs
-also publish `jax[cuda13]`; changing CUDA wheel families is an explicit
-environment-lane decision, not a banana workflow change.
+repo `JAX_GPU` extra, which installs `jax[cuda12]==0.10.0` plus the typed
+`simsopt.solve.jax` runtime optimizer libraries. Current JAX docs also publish
+`jax[cuda13]`; changing CUDA wheel families is an explicit environment-lane
+decision, not a banana workflow change.
+
+For Perlmutter proof jobs, use the durable Slurm runner below rather than
+hand-editing the install sequence. The runner installs the pinned CUDA JAX
+wheel first, exports `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT` for editable
+metadata generation on research branches, then installs the repo `JAX_GPU`
+proof extras. That split keeps the measured CUDA lane explicit while still
+installing the typed optimizer runtime dependencies.
+
+Use a fresh environment for proof runs. Do not reuse an environment that already
+contains packages constraining JAX below `0.10.0`.
 
 Runtime selectors:
 
@@ -175,8 +186,8 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
   --iota-target 0.17 \
   --vol-target 0.10 \
   --cc-dist 0.07 \
-  --mpol 15 \
-  --ntor 6 \
+  --mpol 10 \
+  --ntor 10 \
   --init-only \
   --minimal-artifacts \
   --output-root .artifacts/single_stage_cpu_init
@@ -197,8 +208,8 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
   --iota-target 0.17 \
   --vol-target 0.10 \
   --cc-dist 0.07 \
-  --mpol 15 \
-  --ntor 6 \
+  --mpol 10 \
+  --ntor 10 \
   --init-only \
   --minimal-artifacts \
   --output-root .artifacts/single_stage_jax_cpu_init
@@ -222,8 +233,8 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
   --iota-target 0.17 \
   --vol-target 0.10 \
   --cc-dist 0.07 \
-  --mpol 15 \
-  --ntor 6 \
+  --mpol 10 \
+  --ntor 10 \
   --init-only \
   --minimal-artifacts \
   --output-root .artifacts/single_stage_jax_gpu_init
@@ -324,15 +335,15 @@ Use the durable runner:
 
 ```bash
 export RESULTS_ROOT="${SCRATCH}/simsopt-jax-results/$(git rev-parse --short HEAD)"
-export JAX_GPU_WHEEL_SPEC="jax[cuda12]"
+export JAX_GPU_WHEEL_SPEC="jax[cuda12]==0.10.0"
 sbatch -A <gpu_account> benchmarks/perlmutter/banana_e2e_cpu_gpu.slurm
 ```
 
 If the account has a default GPU project, omit `-A`. The script uses Perlmutter
 `shared` QOS for the 1-GPU smoke/proof path. Four-GPU comparisons require a
 full-node `regular` job; do not repurpose the shared 1-GPU script for that.
-`JAX_GPU_WHEEL_SPEC` is for pinning the repo CUDA 12 wheel lane, for example
-`jax[cuda12]==<version>`. Switching to CUDA 13 requires changing the repo
+`JAX_GPU_WHEEL_SPEC` pins the repo CUDA 12 wheel lane; the current lane is
+`jax[cuda12]==0.10.0`. Switching to CUDA 13 requires changing the repo
 `JAX_GPU` extra and the runner's CUDA plugin provenance probe together.
 
 ## Sources

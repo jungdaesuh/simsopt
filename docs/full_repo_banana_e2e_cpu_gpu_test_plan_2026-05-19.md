@@ -140,10 +140,12 @@ module load python
 conda create -y -p "${ENV_ROOT}" python=3.11 pip numpy scipy
 conda activate "${ENV_ROOT}"
 JAX_GPU_WHEEL_SPEC="${JAX_GPU_WHEEL_SPEC:-jax[cuda12]==0.10.0}"
+SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT:-1.9.4.dev0}"
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT
 
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install --upgrade "${JAX_GPU_WHEEL_SPEC}"
-python -m pip install -e ".[test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
+python -m pip install -e ".[JAX_GPU,test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
 
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 
@@ -151,9 +153,9 @@ python - <<'PY'
 import jax
 import jaxlib
 
-if tuple(map(int, jax.__version__.split(".")[:2])) < (0, 9):
+if (jax.__version__, jaxlib.__version__) != ("0.10.0", "0.10.0"):
     raise SystemExit(
-        f"expected JAX >= 0.9 for the on-device optimizer lane, "
+        f"expected JAX/JAXLIB 0.10.0 for the on-device optimizer lane, "
         f"got {jax.__version__}/{jaxlib.__version__}"
     )
 PY
@@ -166,20 +168,27 @@ print(simsoptpp.__file__)
 PY
 ```
 
+The split install is intentional: the first command fixes the CUDA JAX wheel
+lane under test, and the editable repo install repeats the repo `JAX_GPU`
+requirement to add the typed optimizer runtime dependencies without changing
+that pinned lane. Do not replace it with a monolithic `.[deploy_gpu]` install in
+the Slurm proof runner.
+
 Environment lane decision:
 
 - [ ] The conda environment above is the pip-wheel GPU proof runtime and can
   also run the CPU/reference waves. It is not GPU signoff by itself until Wave
   2 records a CUDA/GPU backend from a Slurm GPU job.
 - [ ] Preferred Perlmutter GPU lane: run the proof inside a NERSC-supported
-  NVIDIA JAX container through Shifter or Podman-HPC, then install the repo and
-  non-JAX proof dependencies into that runtime without replacing the container's
-  JAX wheels.
+  NVIDIA JAX container through Shifter or Podman-HPC, then install the repo
+  proof dependencies into that runtime without replacing the container's JAX
+  wheels.
 - [ ] Proven pip-wheel candidate: `python -m pip install "jax[cuda12]==0.10.0"`
   resolves for Linux `manylinux_2_27_x86_64` / Python 3.11 in a 2026-05-19
   dry-run. Record a fresh dry-run in the proof bundle before launch.
-- [ ] Do not reuse a CPU-only `jax` / `jaxlib` environment for the Wave 2+
-  GPU preflight or proof waves.
+- [ ] Do not reuse a CPU-only `jax` / `jaxlib` environment or a package-rich
+  environment whose installed dependencies constrain JAX below `0.10.0` for the
+  Wave 2+ GPU preflight or proof waves.
 - [ ] Blocked legacy pip-wheel lane: do not launch a proof with any stale
   dependency spec that resolves to an unavailable CUDA plugin wheel for the
   target.
@@ -446,6 +455,7 @@ payload = {
     "simsoptpp": simsoptpp.__file__,
 }
 print(json.dumps(payload, indent=2, sort_keys=True))
+assert (payload["jax"], payload["jaxlib"]) == ("0.10.0", "0.10.0")
 assert payload["backend"] in {"cuda", "gpu"}
 assert payload["x64"] is True
 PY

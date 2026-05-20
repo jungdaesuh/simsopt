@@ -16,12 +16,13 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
 JOB_RESULTS="${RESULTS_ROOT}/${SLURM_JOB_ID}"
 ENV_ROOT="${ENV_ROOT:-${JOB_RESULTS}/venv}"
-JAX_GPU_WHEEL_SPEC="${JAX_GPU_WHEEL_SPEC:-jax[cuda12]}"
+JAX_GPU_WHEEL_SPEC="${JAX_GPU_WHEEL_SPEC:-jax[cuda12]==0.10.0}"
+JAX_CACHE_WHEEL_SPEC="${JAX_CACHE_WHEEL_SPEC:-etils}"
+SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT:-1.9.4.dev0}"
 LOG_DIR="${JOB_RESULTS}/logs"
 ARTIFACT_DIR="${JOB_RESULTS}/artifacts"
 FIXTURE_DIR="benchmarks/fixtures/single_stage_seed_iota15"
 FIXTURE_STAGE2_BS="${FIXTURE_DIR}/biot_savart_opt.json"
-FIXTURE_RUNTIME_SPEC="${FIXTURE_DIR}/single_stage_jax_runtime_spec.json"
 
 mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 exec > >(tee "${LOG_DIR}/driver_stdout.log")
@@ -32,10 +33,11 @@ module load python
 
 python3 -m venv "${ENV_ROOT}"
 . "${ENV_ROOT}/bin/activate"
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install --upgrade "${JAX_GPU_WHEEL_SPEC}"
-python -m pip install -e ".[deploy_gpu]"
+python -m pip install --upgrade "${JAX_GPU_WHEEL_SPEC}" "${JAX_CACHE_WHEEL_SPEC}"
+python -m pip install -e ".[JAX_GPU,test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
 python -m pip freeze > "${JOB_RESULTS}/pip_freeze.txt"
 
 git rev-parse HEAD > "${JOB_RESULTS}/repo_sha.txt"
@@ -44,10 +46,13 @@ git status --short > "${JOB_RESULTS}/git_status_short.txt"
 export SLURM_CPU_BIND="cores"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export SIMSOPT_BACKEND_MODE=jax_gpu_parity
+export SIMSOPT_BACKEND_STRICT=1
+export SIMSOPT_JAX_TRANSFER_GUARD=disallow
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export SIMSOPT_JAX_PLATFORM=cuda
 export JAX_ENABLE_X64=1
 export JAX_PLATFORMS=cuda,cpu
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 unset LD_LIBRARY_PATH
 
@@ -66,6 +71,10 @@ payload = {
         "JAX_ENABLE_X64": os.environ.get("JAX_ENABLE_X64"),
         "JAX_PLATFORMS": os.environ.get("JAX_PLATFORMS"),
         "SIMSOPT_BACKEND_MODE": os.environ.get("SIMSOPT_BACKEND_MODE"),
+        "SIMSOPT_BACKEND_STRICT": os.environ.get("SIMSOPT_BACKEND_STRICT"),
+        "SIMSOPT_JAX_TRANSFER_GUARD": os.environ.get(
+            "SIMSOPT_JAX_TRANSFER_GUARD"
+        ),
         "SIMSOPT_JAX_CUDA_LIBRARY_MODE": os.environ.get(
             "SIMSOPT_JAX_CUDA_LIBRARY_MODE"
         ),
@@ -86,6 +95,10 @@ if payload["default_backend"] not in {"cuda", "gpu"}:
     raise SystemExit(
         f"expected default JAX backend cuda/gpu, got {payload['default_backend']}"
     )
+if (payload["jax"], payload["jaxlib"]) != ("0.10.0", "0.10.0"):
+    raise SystemExit(
+        f"expected JAX/JAXLIB 0.10.0, got {payload['jax']}/{payload['jaxlib']}"
+    )
 if not payload["x64"]:
     raise SystemExit("expected JAX x64 mode to be enabled")
 print(json.dumps(payload, indent=2, sort_keys=True))
@@ -93,7 +106,8 @@ PY
 
 run_step() {
   local name="$1"
-  shift
+  local backend_mode="$2"
+  shift 2
   local step_dir="${ARTIFACT_DIR}/${name}"
   mkdir -p "${step_dir}"
 
@@ -104,7 +118,8 @@ run_step() {
   local monitor_pid="$!"
 
   set +e
-  /usr/bin/time -v \
+  SIMSOPT_BACKEND_MODE="${backend_mode}" \
+    /usr/bin/time -v \
     srun -n 1 -c 32 --gpus-per-task=1 "$@" \
     > "${step_dir}/stdout.log" \
     2> "${step_dir}/stderr_time.log"
@@ -121,32 +136,35 @@ run_step() {
 }
 
 run_step stage2_cpu \
+  jax_cpu_parity \
   python benchmarks/stage2_e2e_comparison.py \
     --platform cpu \
     --output-json "${ARTIFACT_DIR}/stage2_cpu.json"
 
 run_step stage2_cuda \
+  jax_gpu_parity \
   python benchmarks/stage2_e2e_comparison.py \
     --platform cuda \
     --output-json "${ARTIFACT_DIR}/stage2_cuda.json"
 
 run_step single_stage_cpu \
+  jax_cpu_parity \
   python benchmarks/single_stage_init_parity.py \
     --platform cpu \
     --stage2-bs-path "${FIXTURE_STAGE2_BS}" \
-    --jax-runtime-seed-spec "${FIXTURE_RUNTIME_SPEC}" \
     --case-artifacts-dir "${ARTIFACT_DIR}/single_stage_cpu_cases" \
     --output-json "${ARTIFACT_DIR}/single_stage_cpu.json"
 
 run_step single_stage_cuda \
+  jax_gpu_parity \
   python benchmarks/single_stage_init_parity.py \
     --platform cuda \
     --stage2-bs-path "${FIXTURE_STAGE2_BS}" \
-    --jax-runtime-seed-spec "${FIXTURE_RUNTIME_SPEC}" \
     --case-artifacts-dir "${ARTIFACT_DIR}/single_stage_cuda_cases" \
     --output-json "${ARTIFACT_DIR}/single_stage_cuda.json"
 
 run_step tier5_cuda \
+  jax_gpu_parity \
   python benchmarks/tier5_performance_characterization.py \
     --platform cuda \
     --stage2-bs-path "${FIXTURE_STAGE2_BS}" \

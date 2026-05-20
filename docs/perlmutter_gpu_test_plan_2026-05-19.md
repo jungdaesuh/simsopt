@@ -87,6 +87,8 @@ set -euo pipefail
 : "${REPO_REF:?set REPO_REF}"
 : "${SCRATCH_ROOT:?set SCRATCH_ROOT}"
 JAX_GPU_WHEEL_SPEC="${JAX_GPU_WHEEL_SPEC:-jax[cuda12]==0.10.0}"
+SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT:-1.9.4.dev0}"
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT
 
 mkdir -p "${SCRATCH_ROOT}"
 cd "${SCRATCH_ROOT}"
@@ -104,7 +106,7 @@ python3 -m venv "${SCRATCH_ROOT}/venv"
 . "${SCRATCH_ROOT}/venv/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install --upgrade "${JAX_GPU_WHEEL_SPEC}"
-python -m pip install -e ".[test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
+python -m pip install -e ".[JAX_GPU,test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
 ```
 
 The virtualenv above is the pip-wheel GPU proof runtime. It is not GPU signoff
@@ -112,10 +114,15 @@ by itself until the Slurm GPU smoke records a CUDA/GPU backend. The current
 candidate is `jax[cuda12]==0.10.0`; a 2026-05-19 dry-run resolved that exact
 wheel set for Linux `manylinux_2_27_x86_64` / Python 3.11. Record a fresh
 dry-run before launch, or use the NERSC-recommended NVIDIA JAX container lane.
+The split install keeps the CUDA JAX wheel explicit, then repeats the repo
+`JAX_GPU` extra to install the typed optimizer runtime dependencies without
+changing that pinned lane; do not replace it with a monolithic `.[deploy_gpu]`
+install in this proof lane.
 Do not launch the legacy `jax[cuda12]==0.9.2` lane; its required
 `jax-cuda12-plugin==0.9.2` wheel was not available for the target. Do not reuse
-a CPU-only `jax` / `jaxlib` virtualenv for the canary, shared smoke, or proof
-jobs below.
+a CPU-only `jax` / `jaxlib` virtualenv, or any package-rich virtualenv whose
+installed dependencies constrain JAX below `0.10.0`, for the canary, shared
+smoke, or proof jobs below.
 
 Verify the local extension resolves from this checkout:
 
@@ -175,6 +182,7 @@ print("jax-cuda12-pjrt", metadata.version("jax-cuda12-pjrt"))
 print("backend", jax.default_backend())
 print("devices", jax.devices())
 print("x64", jax.config.read("jax_enable_x64"))
+assert (jax.__version__, jaxlib.__version__) == ("0.10.0", "0.10.0")
 assert jax.default_backend() in {"cuda", "gpu"}
 assert jax.config.read("jax_enable_x64") is True
 PY
@@ -252,6 +260,7 @@ payload = {
     "simsoptpp": simsoptpp.__file__,
 }
 print(json.dumps(payload, indent=2, sort_keys=True))
+assert (payload["jax"], payload["jaxlib"]) == ("0.10.0", "0.10.0")
 assert payload["backend"] in {"cuda", "gpu"}
 assert payload["x64"] is True
 PY
