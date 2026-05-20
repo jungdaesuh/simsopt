@@ -3153,6 +3153,50 @@ class TestBoozerSurfaceJAXClass:
         assert res["success"] is True
         assert booz.need_to_run_code is False
 
+    def test_public_ls_ondevice_lm_runs_under_strict_jax_backend(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """Strict target lanes should not reject the public on-device LS path."""
+        enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        calls = []
+
+        def fake_target_least_squares(
+            residual_fn,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options=None,
+            callback=None,
+            progress_callback=None,
+        ):
+            del residual_fn, tol, maxiter, options, callback, progress_callback
+            calls.append(method)
+            flat_x0, _ = ravel_pytree(x0)
+            return types.SimpleNamespace(
+                x=x0,
+                residual=jnp.zeros_like(flat_x0),
+                jac=jnp.zeros_like(flat_x0),
+                residual_jacobian=jnp.eye(flat_x0.size, dtype=flat_x0.dtype),
+                success=True,
+            )
+
+        monkeypatch.setattr(_bsj, "target_least_squares", fake_target_least_squares)
+
+        res = booz.minimize_boozer_penalty_constraints_ls(
+            iota=0.3,
+            G=0.05,
+            method="lm",
+        )
+
+        assert calls == ["lm-ondevice"]
+        assert res["success"] is True
+
     def test_public_ls_api_accepts_weight_inv_modB_override(self, monkeypatch):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "scipy"
@@ -3413,6 +3457,30 @@ class TestBoozerSurfaceJAXClass:
             rtol=1e-12,
             atol=1e-12,
         )
+
+    @pytest.mark.parametrize("stellsym", [True, False])
+    @pytest.mark.parametrize("optimize_G", [True, False])
+    def test_public_exact_constraints_newton_rejects_strict_jax_backend(
+        self,
+        monkeypatch,
+        request,
+        stellsym,
+        optimize_G,
+    ):
+        """Exact-constraints Newton is a host-controlled compatibility solver."""
+        enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
+        booz = _make_mock_boozer_surface_exact(stellsym=stellsym)
+        initial_G = 0.05 if optimize_G else None
+
+        with pytest.raises(
+            RuntimeError,
+            match="host-controlled exact-constraints Newton loop",
+        ):
+            booz.minimize_boozer_exact_constraints_newton(
+                iota=0.3,
+                G=initial_G,
+                maxiter=1,
+            )
 
     @pytest.mark.parametrize("stellsym", [True, False])
     @pytest.mark.parametrize("optimize_G", [True, False])
@@ -5393,33 +5461,47 @@ class TestBoozerSurfaceJAXClass:
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
-        recorded = {}
+        solve_calls = []
 
-        def fake_solve_hessian_system(objective_fn, x, rhs, *, stab, tol):
+        def fake_solve_hessian_system_with_status(objective_fn, x, rhs, *, stab, tol):
             del objective_fn
-            recorded["x_shape"] = tuple(np.asarray(x).shape)
-            recorded["rhs"] = np.asarray(rhs)
-            recorded["stab"] = stab
-            recorded["tol"] = tol
-            return rhs
+            solve_calls.append(
+                {
+                    "x_shape": tuple(np.asarray(x).shape),
+                    "rhs": np.asarray(rhs),
+                    "stab": stab,
+                    "tol": tol,
+                }
+            )
+            return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
-            "_solve_hessian_system",
-            fake_solve_hessian_system,
+            "_solve_hessian_least_squares_system_with_status",
+            fake_solve_hessian_system_with_status,
         )
         adjoint_state = booz.get_adjoint_runtime_state()
-        solved = adjoint_state.solve_transpose(
-            jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        rhs = jnp.linspace(
+            1.0,
+            -2.0,
+            adjoint_state.decision_size,
+            dtype=jnp.float64,
         )
+        adjoint_state.solve_transpose(rhs)
 
         _assert_operator_adjoint_state(
             adjoint_state,
             dense_factors_available=True,
         )
-        np.testing.assert_allclose(np.asarray(solved), np.asarray([1.0, -2.0]))
-        np.testing.assert_allclose(recorded["rhs"], np.asarray([1.0, -2.0]))
-        assert recorded["x_shape"][0] == booz._pack_decision_vector(0.3, 0.05).size
+        assert len(solve_calls) == 1
+        np.testing.assert_allclose(solve_calls[0]["rhs"], np.asarray(rhs))
+        assert (
+            solve_calls[0]["x_shape"][0]
+            == booz._pack_decision_vector(
+                0.3,
+                0.05,
+            ).size
+        )
 
     def test_get_adjoint_runtime_state_uses_dense_plu_for_scipy_hessian(self):
         """Host-dispatched CPU parity uses the same dense adjoint solve as CPU."""

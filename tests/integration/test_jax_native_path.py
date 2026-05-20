@@ -1,16 +1,16 @@
 """
-End-to-end test for the JAX-native SquaredFlux kernel path.
+End-to-end test for the JAX-native Fourier/Biot-Savart flux kernel path.
 
-Validates that the Fourier-basis forward and value_and_grad path
-produces correct results without depending on simsoptpp.
+Validates that the Fourier-basis forward and value_and_grad path produces
+correct results. Basis-level tests use the public CPU CurveXYZFourier API as
+the oracle so the JAX path is not compared only against another JAX formula.
 
 Tests:
-1. Fourier basis gamma matches jaxfouriercurve_pure.
-2. Fourier basis gammadash matches JVP of gamma.
-3. The fixed-surface flux kernel matches manual computation.
+1. Fourier basis gamma matches CurveXYZFourier.gamma().
+2. Fourier basis gammadash matches CurveXYZFourier.gammadash().
+3. The fixed-surface flux kernel matches an independent NumPy Biot-Savart oracle.
 4. The fixed-surface flux kernel gradient matches centred finite differences.
-5. JAX-native path is detected for CurveXYZFourier coils.
-6. Gradient accumulation works for shared-DOF (symmetry) coils.
+5. Gradient accumulation works for shared-DOF (symmetry) coils.
 """
 
 import importlib.util
@@ -24,6 +24,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.objectives.integral_bdotn_jax import integral_BdotN
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
@@ -72,52 +73,28 @@ def _central_difference_gradient(objective, flat_dofs, eps):
 # -----------------------------------------------------------------------
 
 
-def _jaxfouriercurve_pure(dofs, quadpoints, order):
-    """Reference implementation (loop-based, from curvexyzfourier.py)."""
-    k = len(dofs) // 3
-    coeffs = [dofs[:k], dofs[k : 2 * k], dofs[2 * k :]]
-    points = quadpoints
-    gamma = jnp.zeros((len(points), 3))
-    for i in range(3):
-        gamma = gamma.at[:, i].add(coeffs[i][0])
-        for j in range(1, order + 1):
-            gamma = gamma.at[:, i].add(
-                coeffs[i][2 * j - 1] * jnp.sin(2 * jnp.pi * j * points)
-            )
-            gamma = gamma.at[:, i].add(
-                coeffs[i][2 * j] * jnp.cos(2 * jnp.pi * j * points)
-            )
-    return gamma
+def _curvexyzfourier_cpu_geometry(dofs, quadpoints, order):
+    """CPU CurveXYZFourier geometry oracle from the public SIMSOPT curve API."""
+    curve = CurveXYZFourier(np.asarray(quadpoints, dtype=np.float64), order)
+    curve.set_dofs(np.asarray(dofs, dtype=np.float64))
+    return (
+        curve.gamma(),
+        curve.gammadash(),
+        curve.gammadashdash(),
+        curve.gammadashdashdash(),
+    )
 
 
-def _jaxfouriercurve_geometry_ref(dofs, quadpoints, order):
-    """Reference loop implementation for XYZ Fourier geometry derivatives."""
-    k = len(dofs) // 3
-    coeffs = [dofs[:k], dofs[k : 2 * k], dofs[2 * k :]]
-    points = quadpoints
-    gamma = jnp.zeros((len(points), 3))
-    gammadash = jnp.zeros((len(points), 3))
-    gammadashdash = jnp.zeros((len(points), 3))
-    gammadashdashdash = jnp.zeros((len(points), 3))
-    two_pi = 2.0 * jnp.pi
-    for i in range(3):
-        gamma = gamma.at[:, i].add(coeffs[i][0])
-        for j in range(1, order + 1):
-            scale = two_pi * j
-            arg = scale * points
-            s = jnp.sin(arg)
-            c = jnp.cos(arg)
-            xs = coeffs[i][2 * j - 1]
-            xc = coeffs[i][2 * j]
-            gamma = gamma.at[:, i].add(xs * s + xc * c)
-            gammadash = gammadash.at[:, i].add(scale * (xs * c - xc * s))
-            gammadashdash = gammadashdash.at[:, i].add(
-                -(scale * scale) * (xs * s + xc * c)
-            )
-            gammadashdashdash = gammadashdashdash.at[:, i].add(
-                -(scale * scale * scale) * (xs * c - xc * s)
-            )
-    return gamma, gammadash, gammadashdash, gammadashdashdash
+def _biot_savart_B_numpy(points, gammas, gammadashs, currents):
+    points_np = np.asarray(points, dtype=np.float64)
+    gammas_np = np.asarray(gammas, dtype=np.float64)
+    gammadashs_np = np.asarray(gammadashs, dtype=np.float64)
+    currents_np = np.asarray(currents, dtype=np.float64)
+    diff = gammas_np[None, :, :, :] - points_np[:, None, None, :]
+    radius_cubed = np.sum(diff * diff, axis=-1) ** 1.5
+    integrand = np.cross(diff, gammadashs_np[None, :, :, :]) / radius_cubed[..., None]
+    coil_integrals = np.mean(integrand, axis=2)
+    return 1.0e-7 * np.einsum("c,pcj->pj", currents_np, coil_integrals)
 
 
 # -----------------------------------------------------------------------
@@ -126,7 +103,7 @@ def _jaxfouriercurve_geometry_ref(dofs, quadpoints, order):
 
 
 class TestFourierBasis:
-    """Validate _build_fourier_basis against the loop-based reference."""
+    """Validate _build_fourier_basis against the CPU CurveXYZFourier API."""
 
     @pytest.mark.parametrize("order", [1, 3, 6])
     def test_gamma_parity(self, order):
@@ -139,7 +116,7 @@ class TestFourierBasis:
         k = 2 * order + 1
 
         gamma_basis = basis @ dofs.reshape(3, k).T
-        gamma_ref = _jaxfouriercurve_pure(dofs, quadpoints, order)
+        gamma_ref = _curvexyzfourier_cpu_geometry(dofs, quadpoints, order)[0]
 
         np.testing.assert_allclose(
             np.array(gamma_basis), np.array(gamma_ref), atol=1e-13
@@ -147,7 +124,7 @@ class TestFourierBasis:
 
     @pytest.mark.parametrize("order", [1, 3, 6])
     def test_gammadash_parity(self, order):
-        """dbasis @ coeffs.T matches JVP of gamma."""
+        """dbasis @ coeffs.T matches CurveXYZFourier.gammadash()."""
         npts = 64
         quadpoints = jnp.linspace(0, 1, npts, endpoint=False)
         basis, dbasis = _build_fourier_basis(quadpoints, order)
@@ -158,16 +135,9 @@ class TestFourierBasis:
         coeffs = dofs.reshape(3, k)
 
         gd_basis = dbasis @ coeffs.T
+        gd_ref = _curvexyzfourier_cpu_geometry(dofs, quadpoints, order)[1]
 
-        # Reference via JVP
-        ones = jnp.ones_like(quadpoints)
-        _, gd_jvp = jax.jvp(
-            lambda p: _jaxfouriercurve_pure(dofs, p, order),
-            (quadpoints,),
-            (ones,),
-        )
-
-        np.testing.assert_allclose(np.array(gd_basis), np.array(gd_jvp), atol=1e-12)
+        np.testing.assert_allclose(np.array(gd_basis), np.array(gd_ref), atol=1e-12)
 
     def test_gammadash_finite_difference(self):
         """dbasis @ coeffs.T matches centred finite differences."""
@@ -204,7 +174,7 @@ class TestFourierBasis:
         )
         expected = tuple(
             np.asarray(part)
-            for part in _jaxfouriercurve_geometry_ref(dofs, quadpoints, order)
+            for part in _curvexyzfourier_cpu_geometry(dofs, quadpoints, order)
         )
 
         for actual_part, expected_part in zip(actual, expected):
@@ -219,8 +189,8 @@ class TestFourierBasis:
 class TestEndToEndForward:
     """Validate the composed DOFs → gamma → B → integral pipeline."""
 
-    def test_single_coil_matches_manual(self):
-        """Single coil: basis-based forward matches manual computation."""
+    def test_single_coil_matches_numpy_biot_savart_oracle(self):
+        """Single coil: basis-based forward matches an independent NumPy oracle."""
         order = 3
         nquad = 128
         quadpoints = jnp.linspace(0, 1, nquad, endpoint=False)
@@ -248,16 +218,27 @@ class TestEndToEndForward:
             gammadash[None, :, :],
             jnp.array([current]),
         )
+        B_expected = _biot_savart_B_numpy(
+            surf_points,
+            gamma[None, :, :],
+            gammadash[None, :, :],
+            np.asarray([current], dtype=np.float64),
+        )
 
-        # Compute integral manually
         normal = jnp.array(rng.randn(nphi, ntheta, 3) * 0.1)
         normal = normal.at[..., 2].add(1.0)
         target = jnp.zeros((nphi, ntheta))
         Bcoil = B.reshape((nphi, ntheta, 3))
-        J_manual = float(integral_BdotN(Bcoil, target, normal, "quadratic flux"))
+        expected_Bcoil = jnp.asarray(B_expected).reshape((nphi, ntheta, 3))
+        J_actual = float(integral_BdotN(Bcoil, target, normal, "quadratic flux"))
+        J_expected = float(
+            integral_BdotN(expected_Bcoil, target, normal, "quadratic flux")
+        )
 
-        assert J_manual > 0  # sanity check
-        assert np.isfinite(J_manual)
+        np.testing.assert_allclose(
+            np.asarray(B), B_expected, rtol=1.0e-12, atol=1.0e-16
+        )
+        np.testing.assert_allclose(J_actual, J_expected, rtol=1.0e-12, atol=1.0e-16)
 
 
 # -----------------------------------------------------------------------

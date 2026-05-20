@@ -997,6 +997,27 @@ class TestBoozerResidualM1Limitations:
         assert host_scalar(jnp.abs(grad[-2])) > 1e-10
         assert host_scalar(jnp.abs(grad[-1])) > 1e-10
 
+    def test_surface_dof_hessian_blocks_are_zero(self):
+        """The M1 Hessian must split [surface_dofs, iota, G] by nsurfdofs."""
+        B, xphi, xtheta = _make_synthetic_data(8, 10)
+        G, iota = 1.5, 0.3
+        nsurfdofs = 5
+
+        hessian = boozer_residual_hessian(G, iota, B, xphi, xtheta, nsurfdofs)
+
+        assert hessian.shape == (nsurfdofs + 2, nsurfdofs + 2)
+        np.testing.assert_allclose(
+            host_array(hessian[:nsurfdofs, :]),
+            0.0,
+            atol=1e-30,
+        )
+        np.testing.assert_allclose(
+            host_array(hessian[:, :nsurfdofs]),
+            0.0,
+            atol=1e-30,
+        )
+        assert host_scalar(jnp.abs(hessian[-1, -1])) > 1e-10
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

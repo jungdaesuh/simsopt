@@ -5502,6 +5502,9 @@ class BoozerSurfaceJAX(Optimizable):
         optimize_G = G is not None
         s = self.surface
         x0 = self._pack_decision_vector(iota, G)
+        decision_split_mode = (
+            "jvp" if self.options["optimizer_backend"] == "ondevice" else "reverse"
+        )
         method = self._resolve_optimizer_method(
             limited_memory=limited_memory,
             optimize_G=optimize_G,
@@ -5512,6 +5515,7 @@ class BoozerSurfaceJAX(Optimizable):
                 optimize_G,
                 weight_inv_modB,
                 constraint_weight,
+                decision_split_mode=decision_split_mode,
             )
             least_squares_runner = (
                 target_least_squares
@@ -5897,14 +5901,13 @@ class BoozerSurfaceJAX(Optimizable):
         """Public LS solver matching the baseline BoozerSurface API."""
         if not self.need_to_run_code:
             return self.res
-        raise_if_strict_jax_fallback(
-            component="BoozerSurfaceJAX",
-            detail="host-controlled exact-constraints Newton loop",
-        )
 
         optimize_G = G is not None
         s = self.surface
         x0 = self._pack_decision_vector(iota, G)
+        decision_split_mode = (
+            "jvp" if self.options["optimizer_backend"] == "ondevice" else "reverse"
+        )
         # Reuse the centralized backend/algorithm validation seam even though
         # this public method forces an LM/manual route rather than the
         # constructor-wide least_squares_algorithm policy.
@@ -5919,6 +5922,7 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
                 constraint_weight,
                 hostify_inputs=self.options["optimizer_backend"] != "ondevice",
+                decision_split_mode=decision_split_mode,
             )
             result = self._run_manual_penalty_least_squares(
                 residual_fn,
@@ -5962,6 +5966,7 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB,
             constraint_weight,
             hostify_inputs=self.options["optimizer_backend"] != "ondevice",
+            decision_split_mode=decision_split_mode,
         )
         if self.options["optimizer_backend"] == "ondevice":
             resolved_method = self._resolve_optimizer_method(
@@ -6373,6 +6378,10 @@ class BoozerSurfaceJAX(Optimizable):
         """
         if not self.need_to_run_code:
             return self.res
+        raise_if_strict_jax_fallback(
+            component="BoozerSurfaceJAX",
+            detail="host-controlled exact-constraints Newton loop",
+        )
 
         optimize_G = G is not None
         s = self.surface

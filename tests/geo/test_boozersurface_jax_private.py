@@ -2218,7 +2218,6 @@ class TestBoozerSurfaceJAXClassPrivate:
             "_solve_square_array_system_operator_only",
             exact_operator_solve,
         )
-        _opt._make_traceable_newton_polish_runner.cache_clear()
 
         x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         result = _opt.newton_polish_traceable(
@@ -2260,7 +2259,6 @@ class TestBoozerSurfaceJAXClassPrivate:
             "_solve_square_array_system_operator_only",
             finite_descent_step_failed_status,
         )
-        _opt._make_traceable_newton_polish_runner.cache_clear()
 
         x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         result = _opt.newton_polish_traceable(
@@ -2301,7 +2299,6 @@ class TestBoozerSurfaceJAXClassPrivate:
             fake_operator_only_linear_solve,
         )
         monkeypatch.setattr(_opt, "_materialize_dense_hessian", forbid_dense_hessian)
-        _opt._make_traceable_newton_polish_runner.cache_clear()
 
         x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         result = _opt.newton_polish_traceable(
@@ -2335,7 +2332,6 @@ class TestBoozerSurfaceJAXClassPrivate:
             "_solve_square_array_system_operator_only",
             fake_operator_only_linear_solve,
         )
-        _opt._make_traceable_newton_polish_runner.cache_clear()
 
         x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         result = _opt.newton_polish_traceable(

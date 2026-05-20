@@ -284,8 +284,10 @@ def _pack(surface_dofs, iota, G):
 
 def _unpack(x, nsurfdofs):
     """Unpack a single vector into (surface_dofs, iota, G)."""
-    del nsurfdofs
-    return _split_decision_vector(x, optimize_G=True)
+    x_jax = _as_runtime_value(x, reference=x)
+    surface_size = int(nsurfdofs)
+    sdofs, iota, G = jnp.split(x_jax, (surface_size, surface_size + 1))
+    return sdofs, jnp.reshape(iota, ()), jnp.reshape(G, ())
 
 
 def _boozer_objective_from_packed(

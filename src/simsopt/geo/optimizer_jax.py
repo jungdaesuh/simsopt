@@ -101,6 +101,7 @@ from itertools import count
 import re
 from threading import Lock
 from typing import Callable, NamedTuple
+from weakref import WeakKeyDictionary, ref
 
 import numpy as np
 
@@ -250,6 +251,10 @@ _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
 _TRACEABLE_CALLBACK_LOCK = Lock()
 _TRACEABLE_CALLBACK_IDS = count(1)
 _TRACEABLE_CALLBACKS: dict[int, Callable[..., object]] = {}
+_TRACEABLE_RUNNER_CACHE_LOCK = Lock()
+_TRACEABLE_LM_RUNNER_CACHE = WeakKeyDictionary()
+_TRACEABLE_NEWTON_POLISH_RUNNER_CACHE = WeakKeyDictionary()
+_TRACEABLE_EXACT_NEWTON_RUNNER_CACHE = WeakKeyDictionary()
 
 
 class _LinearSolveStatus(NamedTuple):
@@ -296,6 +301,27 @@ def _lookup_traceable_callback(token, kind: str) -> Callable[..., object]:
     if callback is None:
         raise RuntimeError(f"Missing active traceable {kind} callback token.")
     return callback
+
+
+def _lookup_traceable_runner_callable(callable_ref, kind: str):
+    callable_fn = callable_ref()
+    if callable_fn is None:
+        raise RuntimeError(f"Traceable {kind} callable has been released.")
+    return callable_fn
+
+
+def _cached_traceable_runner(cache, callable_fn, cache_key, build_runner):
+    callable_ref = ref(callable_fn)
+    with _TRACEABLE_RUNNER_CACHE_LOCK:
+        callable_cache = cache.get(callable_fn)
+        if callable_cache is None:
+            callable_cache = {}
+            cache[callable_fn] = callable_cache
+        runner = callable_cache.get(cache_key)
+        if runner is None:
+            runner = build_runner(callable_ref)
+            callable_cache[cache_key] = runner
+        return runner
 
 
 def _invoke_traceable_lm_callback(token, x) -> None:
@@ -1338,7 +1364,6 @@ def _least_squares_gradient_state(flat_residual_fn, x):
     return residual, cost, grad, grad_norm_inf, pullback
 
 
-@lru_cache(maxsize=128)
 def _make_traceable_levenberg_marquardt_runner(
     residual_fn,
     maxiter,
@@ -1351,7 +1376,51 @@ def _make_traceable_levenberg_marquardt_runner(
     callback_enabled,
     progress_callback_enabled,
 ):
+    cache_key = (
+        int(maxiter),
+        float(tol),
+        float(ftol),
+        float(xtol),
+        None if gtol is None else float(gtol),
+        bool(materialize_dense_linearization),
+        max_dense_linearization_bytes,
+        bool(callback_enabled),
+        bool(progress_callback_enabled),
+    )
+    return _cached_traceable_runner(
+        _TRACEABLE_LM_RUNNER_CACHE,
+        residual_fn,
+        cache_key,
+        lambda residual_fn_ref: _build_traceable_levenberg_marquardt_runner(
+            residual_fn_ref,
+            int(maxiter),
+            float(tol),
+            float(ftol),
+            float(xtol),
+            None if gtol is None else float(gtol),
+            bool(materialize_dense_linearization),
+            max_dense_linearization_bytes,
+            bool(callback_enabled),
+            bool(progress_callback_enabled),
+        ),
+    )
+
+
+def _build_traceable_levenberg_marquardt_runner(
+    residual_fn_ref,
+    maxiter,
+    tol,
+    ftol,
+    xtol,
+    gtol,
+    materialize_dense_linearization,
+    max_dense_linearization_bytes,
+    callback_enabled,
+    progress_callback_enabled,
+):
     def run_solver(x_init, fn_args, callback_token, progress_callback_token):
+        residual_fn = _lookup_traceable_runner_callable(residual_fn_ref, "LM residual")
+
         def residual_eval(x):
             return jnp.ravel(jnp.asarray(residual_fn(x, *fn_args)))
 
@@ -3813,9 +3882,41 @@ def newton_polish(
     }
 
 
-@lru_cache(maxsize=128)
 def _make_traceable_newton_polish_runner(
     objective_fn,
+    maxiter,
+    tol,
+    stab,
+    materialize_hessian,
+    max_dense_hessian_bytes,
+    progress_callback_enabled,
+):
+    cache_key = (
+        int(maxiter),
+        float(tol),
+        float(stab),
+        bool(materialize_hessian),
+        max_dense_hessian_bytes,
+        bool(progress_callback_enabled),
+    )
+    return _cached_traceable_runner(
+        _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE,
+        objective_fn,
+        cache_key,
+        lambda objective_fn_ref: _build_traceable_newton_polish_runner(
+            objective_fn_ref,
+            int(maxiter),
+            float(tol),
+            float(stab),
+            bool(materialize_hessian),
+            max_dense_hessian_bytes,
+            bool(progress_callback_enabled),
+        ),
+    )
+
+
+def _build_traceable_newton_polish_runner(
+    objective_fn_ref,
     maxiter,
     tol,
     stab,
@@ -3826,6 +3927,11 @@ def _make_traceable_newton_polish_runner(
     requested_materialize_hessian = materialize_hessian
 
     def run_solver(x_init, fn_args, progress_callback_token):
+        objective_fn = _lookup_traceable_runner_callable(
+            objective_fn_ref,
+            "Newton objective",
+        )
+
         def objective_eval(x):
             return objective_fn(x, *fn_args)
 
@@ -4105,13 +4211,35 @@ def newton_exact(
     }
 
 
-@lru_cache(maxsize=128)
 def _make_traceable_exact_newton_runner(
     residual_fn,
     maxiter,
     tol,
 ):
+    cache_key = (int(maxiter), float(tol))
+    return _cached_traceable_runner(
+        _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE,
+        residual_fn,
+        cache_key,
+        lambda residual_fn_ref: _build_traceable_exact_newton_runner(
+            residual_fn_ref,
+            int(maxiter),
+            float(tol),
+        ),
+    )
+
+
+def _build_traceable_exact_newton_runner(
+    residual_fn_ref,
+    maxiter,
+    tol,
+):
     def run_solver(x_init, fn_args):
+        residual_fn = _lookup_traceable_runner_callable(
+            residual_fn_ref,
+            "exact Newton residual",
+        )
+
         def residual_eval(x):
             return residual_fn(x, *fn_args)
 
