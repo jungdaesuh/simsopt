@@ -3273,11 +3273,13 @@ _ONDEVICE_OPTIMIZER_METHODS = (
 _LS_DYNAMIC_OPTION_KEYS = frozenset(
     {"least_squares_algorithm", "materialize_dense_linearization"}
 )
+_TYPED_LS_OPTION_KEYS = frozenset({"inner_driver"})
 
 _ALLOWED_OPTIONS_LS = (
     frozenset(_DEFAULT_OPTIONS_LS)
     | {"linearization_residency"}
     | _LS_DYNAMIC_OPTION_KEYS
+    | _TYPED_LS_OPTION_KEYS
     | _PRIVATE_OPTIMIZER_OPTIONS
     | _LBFGS_TUNING_OPTIONS
     | _LM_TUNING_OPTIONS
@@ -3341,6 +3343,45 @@ def _default_ls_optimizer_backend() -> str:
     return get_backend_policy().default_optimizer_backend
 
 
+def _apply_inner_driver_option(normalized_options, driver_options):
+    conflicts = []
+    optimizer_backend = normalized_options.get("optimizer_backend")
+    if optimizer_backend is not None:
+        effective_optimizer_backend = _optimizer_jax.resolve_optimizer_backend(
+            optimizer_backend
+        )
+        if effective_optimizer_backend != driver_options.optimizer_backend:
+            conflicts.append("optimizer_backend")
+    least_squares_algorithm = normalized_options.get("least_squares_algorithm")
+    if (
+        least_squares_algorithm is not None
+        and least_squares_algorithm != driver_options.least_squares_algorithm
+    ):
+        conflicts.append("least_squares_algorithm")
+    if (
+        "limited_memory" in normalized_options
+        and bool(normalized_options["limited_memory"]) != driver_options.limited_memory
+    ):
+        conflicts.append("limited_memory")
+    if (
+        normalized_options.get("force_ondevice_limited_memory", False)
+        and driver_options.optimizer_backend == "ondevice"
+        and not driver_options.limited_memory
+    ):
+        conflicts.append("force_ondevice_limited_memory")
+    if conflicts:
+        option_names = ", ".join(conflicts)
+        raise ValueError(
+            f"BoozerSurfaceJAX option 'inner_driver' conflicts with {option_names}."
+        )
+
+    normalized_options["optimizer_backend"] = driver_options.optimizer_backend
+    normalized_options["limited_memory"] = driver_options.limited_memory
+    normalized_options["least_squares_algorithm"] = (
+        driver_options.least_squares_algorithm
+    )
+
+
 def _normalize_solver_options(raw_options, boozer_type):
     """Validate and normalize constructor options for a Boozer solve mode."""
     if "bfgs_method" in raw_options:
@@ -3357,7 +3398,16 @@ def _normalize_solver_options(raw_options, boozer_type):
         unknown_keys = ", ".join(repr(key) for key in unknown_option_keys)
         raise ValueError(f"Unknown BoozerSurfaceJAX option(s): {unknown_keys}.")
 
-    optimizer_backend = raw_options.get("optimizer_backend")
+    normalized_options = dict(raw_options)
+    if boozer_type == "ls":
+        inner_driver = normalized_options.pop("inner_driver", None)
+        if inner_driver is not None:
+            _apply_inner_driver_option(
+                normalized_options,
+                _optimizer_jax.boozer_inner_driver_legacy_options(inner_driver),
+            )
+
+    optimizer_backend = normalized_options.get("optimizer_backend")
     if (
         optimizer_backend is not None
         and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
@@ -3373,21 +3423,21 @@ def _normalize_solver_options(raw_options, boozer_type):
     if linearization_residency not in _LINEARIZATION_RESIDENCY_VALUES:
         allowed = ", ".join(sorted(_LINEARIZATION_RESIDENCY_VALUES))
         raise ValueError(f"linearization_residency must be one of: {allowed}.")
-    least_squares_algorithm = raw_options.get("least_squares_algorithm")
+    least_squares_algorithm = normalized_options.get("least_squares_algorithm")
     if (
         least_squares_algorithm is not None
         and least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS
     ):
         allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
         raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
-    if is_parity_mode() and float(raw_options.get("newton_stab", 0.0)) != 0.0:
+    if is_parity_mode() and float(normalized_options.get("newton_stab", 0.0)) != 0.0:
         raise ValueError(
             "BoozerSurfaceJAX parity mode requires newton_stab=0.0 so "
             "linear residuals are checked against the undamped operator."
         )
 
     if boozer_type == "ls":
-        private_keys = sorted(set(raw_options) & _PRIVATE_OPTIMIZER_OPTIONS)
+        private_keys = sorted(set(normalized_options) & _PRIVATE_OPTIMIZER_OPTIONS)
         if private_keys and effective_optimizer_backend == "scipy":
             keys_str = ", ".join(repr(k) for k in private_keys)
             raise ValueError(
@@ -3395,7 +3445,6 @@ def _normalize_solver_options(raw_options, boozer_type):
                 "optimizer_backend='ondevice'."
             )
 
-    normalized_options = dict(raw_options)
     if boozer_type == "ls":
         normalized_options["optimizer_backend"] = effective_optimizer_backend
         if "least_squares_algorithm" not in normalized_options:
@@ -3480,7 +3529,9 @@ class BoozerSurfaceJAX(Optimizable):
             For LS solves, the omitted ``optimizer_backend`` default follows the
             active simsopt backend policy. ``optimizer_backend="scipy"`` remains
             the trusted CPU/reference lane and ``"ondevice"`` is the target
-            on-device lane.
+            on-device lane. ``inner_driver=Driver.*`` is accepted as the typed
+            selector and normalized to the legacy option tuple for the current
+            compatibility boundary.
             ``record_scipy_callback_trace=True`` records every SciPy adapter
             objective evaluation on the SciPy reference lane only.
             ``least_squares_algorithm="quasi-newton"``
@@ -4442,9 +4493,11 @@ class BoozerSurfaceJAX(Optimizable):
         coil_arrays=None,
         *,
         hostify_inputs=True,
-        decision_split_mode="reverse",
+        decision_split_mode=None,
     ):
         """Build the LS residual-vector closure with explicit grouped-field inputs."""
+        if decision_split_mode is None:
+            decision_split_mode = "reverse" if hostify_inputs else "jvp"
         resolved_coil_set_spec = _resolved_coil_set_spec(
             self.coil_set_spec,
             coil_arrays=coil_arrays,

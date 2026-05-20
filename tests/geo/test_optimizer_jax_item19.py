@@ -36,8 +36,37 @@ def test_item19_target_outer_loop_contract_defaults_to_ondevice_lbfgs():
     )
 
     assert contract == _opt.TargetOptimizerContract(
-        method="lbfgs-ondevice",
+        driver=_opt.Driver.SIMSOPT_LBFGSB,
         use_least_squares_objective=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("optimizer_backend", "limited_memory", "least_squares_algorithm", "driver"),
+    [
+        ("scipy", False, "quasi-newton", _opt.Driver.SCIPY_BFGS),
+        ("scipy", True, "quasi-newton", _opt.Driver.SCIPY_LBFGSB),
+        ("ondevice", False, "quasi-newton", _opt.Driver.SIMSOPT_BFGS),
+        ("ondevice", True, "quasi-newton", _opt.Driver.SIMSOPT_LBFGSB),
+        ("scipy", False, "lm", _opt.Driver.SIMSOPT_LM_GMRES_HOST),
+        ("ondevice", False, "lm", _opt.Driver.SIMSOPT_LM_GMRES),
+        ("ondevice", False, "lm-minpack", _opt.Driver.SIMSOPT_LM_QR),
+        ("ondevice", False, "optimistix-lm", _opt.Driver.OPTIMISTIX_LM),
+    ],
+)
+def test_item19_boozer_inner_driver_contract_stays_typed(
+    optimizer_backend,
+    limited_memory,
+    least_squares_algorithm,
+    driver,
+):
+    assert (
+        _opt.resolve_boozer_inner_driver(
+            optimizer_backend,
+            limited_memory=limited_memory,
+            least_squares_algorithm=least_squares_algorithm,
+        )
+        == driver
     )
 
 
@@ -47,7 +76,9 @@ def test_item19_reference_and_target_optimizer_lanes_stay_explicit():
         "scipy",
         component_label="item19 reference optimizer",
     )
-    assert reference_contract == _opt.ReferenceOptimizerContract(method="lbfgs")
+    assert reference_contract == _opt.ReferenceOptimizerContract(
+        driver=_opt.Driver.SCIPY_LBFGSB,
+    )
 
     with pytest.raises(ValueError, match="requires optimizer_backend='ondevice'"):
         _opt.resolve_target_outer_loop_optimizer_contract(

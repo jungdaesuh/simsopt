@@ -201,6 +201,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self,
     ):
         from simsopt.geo.optimizer_jax import (
+            Driver,
             ReferenceOptimizerContract,
             TargetOptimizerContract,
         )
@@ -213,7 +214,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         resolve_contract = functions[
             "resolve_single_stage_alm_inner_optimizer_contract"
         ]
-        target_contract = TargetOptimizerContract(method="lbfgs-ondevice")
+        target_contract = TargetOptimizerContract(driver=Driver.SIMSOPT_LBFGSB)
 
         self.assertIs(
             resolve_contract("alm", target_contract),
@@ -223,7 +224,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIsNone(
             resolve_contract(
                 "alm",
-                ReferenceOptimizerContract(method="scipy-lbfgsb"),
+                ReferenceOptimizerContract(driver=Driver.SCIPY_LBFGSB),
             )
         )
 
@@ -601,6 +602,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         """
 
         from simsopt.geo.optimizer_jax import (
+            Driver,
             PRIVATE_OPTIMIZER_JAX_VERSION,
             TargetOptimizerContract,
             private_optimizer_runtime_is_supported,
@@ -697,7 +699,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 settings,
                 inner_options,
                 inner_optimizer_contract=TargetOptimizerContract(
-                    method="lbfgs-ondevice"
+                    driver=Driver.SIMSOPT_LBFGSB
                 ),
                 target_inner_value_and_grad=target_inner_value_and_grad,
             )
@@ -777,7 +779,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
 
     def test_target_alm_requires_native_value_and_grad(self):
-        from simsopt.geo.optimizer_jax import TargetOptimizerContract
+        from simsopt.geo.optimizer_jax import Driver, TargetOptimizerContract
 
         alm_utils = load_alm_utils_module()
         settings = alm_utils.ALMSettings(
@@ -841,9 +843,36 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 settings,
                 inner_options,
                 inner_optimizer_contract=TargetOptimizerContract(
-                    method="lbfgs-ondevice"
+                    driver=Driver.SIMSOPT_LBFGSB
                 ),
             )
+
+    def test_target_alm_accepts_scipy_control_target_contracts(self):
+        from simsopt.geo.optimizer_jax import (
+            Driver,
+            TargetObjectiveRoute,
+            TargetOptimizerContract,
+            target_minimize,
+        )
+
+        alm_utils = load_alm_utils_module()
+
+        for objective_route, expected_method in (
+            (TargetObjectiveRoute.SCIPY_JAX, "lbfgs-scipy-jax"),
+            (
+                TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH,
+                "lbfgs-scipy-jax-fullgraph",
+            ),
+        ):
+            with self.subTest(objective_route=objective_route):
+                method, optimizer = alm_utils._resolve_target_inner_optimizer(
+                    TargetOptimizerContract(
+                        driver=Driver.SCIPY_LBFGSB,
+                        objective_route=objective_route,
+                    )
+                )
+                self.assertEqual(method, expected_method)
+                self.assertIs(optimizer, target_minimize)
 
     def test_single_stage_results_surface_keeps_surrogate_alm_aliases(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()

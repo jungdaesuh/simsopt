@@ -45,17 +45,44 @@ GPU install (CUDA 12)::
 
 Both the public and private optimizer lanes are Python ``3.11+`` with the
 ``jax`` / ``jaxlib`` distributions resolved by ``pyproject.toml``. The trusted
-reference backend remains
-``SIMSOPT_BACKEND_MODE=native_cpu`` with ``optimizer_backend="scipy"``.
-All JAX backend modes now require the on-device optimizer lane at the
-high-level Stage 2 / single-stage / Boozer contracts, so ``backend="jax"``
-cannot silently route back through the host SciPy loops. The remaining SciPy
-adapter is a CPU/reference-only oracle path.
+reference backend remains ``SIMSOPT_BACKEND_MODE=native_cpu`` with
+``optimizer_backend="scipy"``. Plain ``optimizer_backend="scipy"`` is
+CPU/reference-only. JAX Stage 2 and single-stage target runs may use
+``optimizer_backend="ondevice"``, ``optimizer_backend="scipy-jax"``, or
+``optimizer_backend="scipy-jax-fullgraph"``; the two SciPy-control JAX lanes
+keep JAX value/gradient evaluation while SciPy owns the host control loop.
 
 Verify the install::
 
     python -c "import jax; print(jax.devices())"
     # Should show: [CudaDevice(id=0)]
+
+Frozen VMEC State
+-----------------
+
+VMEC diagnostics cross a host boundary before entering JAX. Use
+``vmec_freeze_splines`` to snapshot the radial spline state from either a live
+``Vmec`` object or an existing ``vmec_splines`` structure, then pass the frozen
+state to the JAX diagnostic kernels::
+
+    from simsopt.mhd.vmec_diagnostics_jax import (
+        vmec_compute_geometry_jax,
+        vmec_freeze_splines,
+    )
+
+    frozen = vmec_freeze_splines(vmec)
+    geometry = vmec_compute_geometry_jax(frozen, s, theta, phi)
+
+The frozen object is an immutable snapshot of the VMEC spline coefficients and
+metadata. If the VMEC object is rerun, mutated, or reloaded, call
+``vmec_freeze_splines`` again and use the new frozen state. Compiled JAX
+diagnostics must consume the frozen pytree state; they must not read live
+``Vmec.wout`` state or refit radial splines inside the compiled region.
+
+This boundary preserves the upstream CPU diagnostic contract: CPU VMEC and
+``vmec_splines`` remain the reference oracle, while
+``vmec_compute_geometry_jax`` and ``vmec_fieldlines_jax`` replay the frozen
+spline state for CPU/GPU parity checks.
 
 Environment Variables
 ---------------------
@@ -340,7 +367,7 @@ Troubleshooting
 ---------------
 
 **"No GPU/TPU found"**
-  Check ``nvidia-smi`` output.  Ensure ``jax[cuda12]`` is installed
+  Check ``nvidia-smi`` output.  Ensure ``jax[cuda12]==0.10.0`` is installed
   (the CUDA extras are on the ``jax`` package, not ``jaxlib``).  Verify CUDA driver version is compatible with
   the installed ``jaxlib`` (JAX docs have a compatibility table).
 

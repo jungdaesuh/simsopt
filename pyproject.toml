@@ -83,17 +83,22 @@ JAX = [
     "jaxlib==0.10.0",
     "numpy>=2.0,<2.5",
     "scipy>=1.13",
-]
-JAX_OPTIMISTIX = [
-    "simsopt[JAX]",
+    'optax>=0.2.8; python_version >= "3.11"',
     'optimistix>=0.1; python_version >= "3.11"',
     'lineax>=0.1.1; python_version >= "3.11"',
     'equinox>=0.11.11; python_version >= "3.11"',
+]
+JAX_OPTIMISTIX = [
+    "simsopt[JAX]",
 ]
 JAX_GPU = [
     "jax[cuda12]==0.10.0",
     "numpy>=2.0,<2.5",
     "scipy>=1.13",
+    'optax>=0.2.8; python_version >= "3.11"',
+    'optimistix>=0.1; python_version >= "3.11"',
+    'lineax>=0.1.1; python_version >= "3.11"',
+    'equinox>=0.11.11; python_version >= "3.11"',
 ]
 JAX_MPS = [
     'jax-mps; python_version >= "3.13" and sys_platform == "darwin"',
@@ -108,12 +113,12 @@ dev = [
     "ruff>=0.14",
 ]
 deploy = [
-    "simsopt[JAX,JAX_OPTIMISTIX,test,ALGS]",
+    "simsopt[JAX,test,ALGS]",
     "shapely>=2.1,<3",
     "numba>=0.64,<0.66",
 ]
 deploy_gpu = [
-    "simsopt[JAX_GPU,JAX_OPTIMISTIX,test,ALGS]",
+    "simsopt[JAX_GPU,test,ALGS]",
     "shapely>=2.1,<3",
     "numba>=0.64,<0.66",
 ]

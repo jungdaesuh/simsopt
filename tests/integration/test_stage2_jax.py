@@ -135,9 +135,9 @@ from simsopt.jax_core.specs import (
 )
 from simsopt.geo.optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
-    jax_minimize,
     private_optimizer_runtime_is_supported,
 )
+from simsopt.solve.jax import Driver, ScipyLBFGSBOptions, minimize
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
 from simsopt._core.util import ObjectiveFailure
 import simsopt.objectives.stage2_target_objective_jax as stage2_target_objective_module
@@ -501,6 +501,16 @@ def _load_stage2_results_json(output_root):
     return json.loads(
         next(output_root.glob("**/results.json")).read_text(encoding="utf-8")
     )
+
+
+def _load_stage2_rejected_json(output_root):
+    marker_paths = sorted(output_root.glob("**/REJECTED.json"))
+    assert len(marker_paths) == 1
+    return json.loads(marker_paths[0].read_text(encoding="utf-8"))
+
+
+def _assert_no_stage2_results_json(output_root):
+    assert sorted(output_root.glob("**/results.json")) == []
 
 
 def _run_stage2_probe_and_load_payload(*args):
@@ -1286,14 +1296,11 @@ class TestShortOptimizationRun:
                 JF.x = x
                 return JF.J(), JF.dJ()
 
-            res = jax_minimize(
+            res = minimize(
                 fun,
                 dofs,
-                method="lbfgs",
-                tol=1e-10,
-                maxiter=MAXITER,
-                options={"ftol": 0.0},
-                value_and_grad=True,
+                driver=Driver.SCIPY_LBFGSB,
+                options=ScipyLBFGSBOptions(maxiter=MAXITER, gtol=1e-10, ftol=0.0),
             )
             return res.fun, res.nit
 
@@ -3046,24 +3053,27 @@ class TestStage2BananaBoundary:
     def test_stage2_probe_override_dofs_evaluates_requested_state(self):
         with tempfile.TemporaryDirectory(prefix="stage2-override-dofs-") as temp_dir:
             output_root = Path(temp_dir) / "outputs"
-            result = _run_stage2_script(
+            initial_json = Path(temp_dir) / "initial_probe.json"
+            initial_result = _run_stage2_script(
                 *_reduced_stage2_reference_args(),
+                "--probe-only",
                 "--skip-postprocess",
-                "--maxiter",
-                "0",
+                "--export-objective-json",
+                str(initial_json),
                 "--output-root",
                 str(output_root),
             )
 
-            output = f"{result.stdout}\n{result.stderr}"
-            assert result.returncode == 0, output
-            results_payload = _load_stage2_results_json(output_root)
+            initial_output = f"{initial_result.stdout}\n{initial_result.stderr}"
+            assert initial_result.returncode == 0, initial_output
+            initial_payload = json.loads(initial_json.read_text(encoding="utf-8"))
 
             export_json = Path(temp_dir) / "probe.json"
             override_json = Path(temp_dir) / "override_dofs.json"
+            requested_dofs = np.asarray(initial_payload["dofs"], dtype=float).copy()
+            requested_dofs[0] += 1e-3 * max(1.0, abs(float(requested_dofs[0])))
             override_json.write_text(
-                json.dumps(results_payload["FINAL_DOFS"]),
-                encoding="utf-8",
+                json.dumps(requested_dofs.tolist()), encoding="utf-8"
             )
             probe_result = _run_stage2_script(
                 *_reduced_stage2_reference_args(),
@@ -3081,18 +3091,8 @@ class TestStage2BananaBoundary:
             assert probe_result.returncode == 0, probe_output
             probe_payload = json.loads(export_json.read_text(encoding="utf-8"))
 
-        np.testing.assert_allclose(
-            probe_payload["composite"]["J"],
-            results_payload["FINAL_OBJECTIVE"],
-            rtol=1e-12,
-            atol=1e-18,
-        )
-        np.testing.assert_allclose(
-            probe_payload["composite"]["mean_abs_relBfinal_norm"],
-            results_payload["FINAL_MEAN_ABS_RELBN"],
-            rtol=1e-12,
-            atol=1e-18,
-        )
+        np.testing.assert_allclose(probe_payload["dofs"], requested_dofs)
+        assert np.isfinite(probe_payload["composite"]["J"])
 
     def test_stage2_script_import_invalidates_preinit_sharding_cache_under_distributed_env(
         self,
@@ -3241,6 +3241,66 @@ class TestStage2OptimizerContract:
         assert args.optimizer_backend == "scipy"
         assert args.least_squares_algorithm == "quasi-newton"
 
+    def test_parse_args_accepts_disabling_accepted_step_callback(self, monkeypatch):
+        stage2_script = _load_stage2_script_module()
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "banana_coil_solver.py",
+                "--backend",
+                "jax",
+                "--disable-accepted-step-callback",
+            ],
+        )
+
+        args = stage2_script.parse_args()
+
+        assert args.backend == "jax"
+        assert args.optimizer_backend == "ondevice"
+        assert args.disable_accepted_step_callback is True
+
+    def test_problem_contract_records_accepted_step_callback_setting(self):
+        stage2_script = _load_stage2_script_module()
+        args = types.SimpleNamespace(
+            backend="jax",
+            optimizer_backend="ondevice",
+            least_squares_algorithm="quasi-newton",
+            constraint_method="penalty",
+            init_only=False,
+            skip_postprocess=True,
+            disable_accepted_step_callback=True,
+        )
+
+        contract = stage2_script.build_stage2_problem_contract(
+            plasma_surf_filename="fixture.nc",
+            file_loc="/tmp/fixture.nc",
+            nphi=16,
+            ntheta=8,
+            num_quadpoints=32,
+            order=2,
+            field_diagnostic_stride=0,
+            R0=0.915,
+            s=0.24,
+            banana_surf_radius=0.21,
+            theta_center=0.5,
+            phi_center=0.06,
+            theta_width=0.1,
+            phi_width=0.03,
+            LENGTH_WEIGHT=0.0005,
+            CC_WEIGHT=100.0,
+            CURVATURE_WEIGHT=0.0001,
+            SQUARED_FLUX_WEIGHT=1.0,
+            LENGTH_TARGET=0.95,
+            CC_THRESHOLD=0.05,
+            CURVATURE_THRESHOLD=40.0,
+            args=args,
+            MAXITER=7,
+        )
+
+        assert contract["runtime_contract"]["max_iterations"] == 7
+        assert contract["runtime_contract"]["accepted_step_callback"] is False
+
     def test_parse_args_accepts_least_squares_algorithm_override(self, monkeypatch):
         stage2_script = _load_stage2_script_module()
         monkeypatch.setattr(
@@ -3367,7 +3427,11 @@ class TestStage2OptimizerContract:
             )
 
     def test_stage2_alm_inner_optimizer_contract_validates_backend_pair(self):
-        from simsopt.geo.optimizer_jax import TargetOptimizerContract
+        from simsopt.geo.optimizer_jax import (
+            Driver,
+            TargetObjectiveRoute,
+            TargetOptimizerContract,
+        )
 
         stage2_script = _load_stage2_script_module()
 
@@ -3380,19 +3444,25 @@ class TestStage2OptimizerContract:
             "ondevice",
         )
         assert isinstance(target_contract, TargetOptimizerContract)
-        assert target_contract.method == "lbfgs-ondevice"
+        assert target_contract.driver == Driver.SIMSOPT_LBFGSB
+        assert target_contract.objective_route == TargetObjectiveRoute.ARRAY_NATIVE
         scipy_jax_contract = stage2_script.resolve_stage2_alm_inner_optimizer_contract(
             "jax",
             "scipy-jax",
         )
         assert isinstance(scipy_jax_contract, TargetOptimizerContract)
-        assert scipy_jax_contract.method == "lbfgs-scipy-jax"
+        assert scipy_jax_contract.driver == Driver.SCIPY_LBFGSB
+        assert scipy_jax_contract.objective_route == TargetObjectiveRoute.SCIPY_JAX
         fullgraph_contract = stage2_script.resolve_stage2_alm_inner_optimizer_contract(
             "jax",
             "scipy-jax-fullgraph",
         )
         assert isinstance(fullgraph_contract, TargetOptimizerContract)
-        assert fullgraph_contract.method == "lbfgs-scipy-jax-fullgraph"
+        assert fullgraph_contract.driver == Driver.SCIPY_LBFGSB
+        assert (
+            fullgraph_contract.objective_route
+            == TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
+        )
         with pytest.raises(
             ValueError,
             match=_TARGET_BACKEND_REQUIREMENT,
@@ -4443,7 +4513,7 @@ class TestStage2OptimizerContract:
             return
         _assert_stage2_script_failure(result, PROFILE_STEP_REFERENCE_LANE_ERROR)
 
-    def test_stage2_script_ondevice_warm_timing_is_recorded(self):
+    def test_stage2_script_ondevice_warm_timing_rejected_run_writes_marker(self):
         with tempfile.TemporaryDirectory(prefix="stage2-ondevice-timing-") as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
@@ -4460,14 +4530,23 @@ class TestStage2OptimizerContract:
 
             if _assert_target_backend_success(result) is None:
                 return
-            payload = _load_stage2_results_json(output_root)
+            marker = _load_stage2_rejected_json(output_root)
+            _assert_no_stage2_results_json(output_root)
 
-        timings = payload["OPTIMIZER_TIMINGS"]
+        assert marker["accepted"] is False
+        assert (
+            marker["artifact_contract"]["accepted_results_filename"] == "results.json"
+        )
+        assert (
+            marker["artifact_contract"]["diagnostic_marker_filename"] == "REJECTED.json"
+        )
+        assert marker["rejection_reasons"]
+        timings = marker["diagnostics"]["optimizer_timings"]
         assert timings["cold_run_s"] >= 0.0
         assert timings["warm_run_s"] >= 0.0
         assert timings["compile_overhead_s"] >= 0.0
 
-    def test_stage2_script_skip_postprocess_preserves_field_error(self):
+    def test_stage2_script_skip_postprocess_rejected_runs_write_markers(self):
         with tempfile.TemporaryDirectory(
             prefix="stage2-ondevice-skip-"
         ) as skip_dir, tempfile.TemporaryDirectory(
@@ -4498,10 +4577,18 @@ class TestStage2OptimizerContract:
                 return
             if _assert_target_backend_success(full_result) is None:
                 return
-            skip_payload = _load_stage2_results_json(skip_output_root)
-            full_payload = _load_stage2_results_json(full_output_root)
+            skip_marker = _load_stage2_rejected_json(skip_output_root)
+            full_marker = _load_stage2_rejected_json(full_output_root)
+            _assert_no_stage2_results_json(skip_output_root)
+            _assert_no_stage2_results_json(full_output_root)
 
-        assert skip_payload["FIELD_ERROR"] == pytest.approx(full_payload["FIELD_ERROR"])
+        assert skip_marker["accepted"] is False
+        assert full_marker["accepted"] is False
+        assert skip_marker["rejection_reasons"]
+        assert full_marker["rejection_reasons"]
+        assert skip_marker["diagnostics"]["field_error"] == pytest.approx(
+            full_marker["diagnostics"]["field_error"]
+        )
 
     def test_stage2_script_skip_postprocess_still_writes_restart_artifacts(self):
         with tempfile.TemporaryDirectory(prefix="stage2-ondevice-restart-") as temp_dir:

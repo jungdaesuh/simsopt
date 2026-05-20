@@ -1,6 +1,6 @@
 # `simsopt.solve.jax` API specification
 
-**Status:** Draft v0.3. Bindings are not final; resolved decisions and corrected review findings are listed in §14. Sign off on each before any code lands against this spec.
+**Status:** Implementation draft v0.6. Current branch implements the additive API slice; resolved decisions and corrected review findings are listed in §14. Sign off before release-facing API freeze.
 
 **Owner:** simsopt-jax port maintainers.
 
@@ -63,7 +63,7 @@ The cumulative effect: ~6775 lines across `optimizer_jax.py` (4628) + `optimizer
 
 ## 3. Driver enum (SSOT)
 
-`Driver` is a `StrEnum` (Python 3.11+) declared in `simsopt.solve.jax.contracts`. **It is the only solver-selection axis exposed to callers.**
+`Driver` is a `StrEnum`-compatible enum exported from `simsopt.solve.jax.contracts`. The implementation lives in `simsopt.solve._jax_driver` so Python-compatible legacy modules can share the same enum without importing the Python-3.11+ public `simsopt.solve.jax` package. **It is the only solver-selection axis exposed to callers.**
 
 ```python
 from enum import StrEnum
@@ -143,7 +143,7 @@ def least_squares(
 - `options` defaults to `None` → driver applies its built-in defaults (documented in §5).
 - `options`'s concrete type must match the chosen `driver` (e.g., `Driver.OPTIMISTIX_LM` requires `OptimistixLMOptions | None`). Mismatch raises `TypeError` at the dispatch boundary.
 - `callback` receives a typed `OptimizerCallbackEvent` (defined in `contracts`) at each accepted iteration for callback-capable drivers. Drivers without a real iteration-callback contract raise `ValueError` if `callback` is passed. Initial no-callback drivers: `SCIPY_LM` (SciPy documents least-squares callbacks only for `trf` and `dogbox`, not `lm`) and `OPTIMISTIX_LM` (current wrapper rejects callbacks).
-- Both functions raise the chosen driver's library `ImportError` only if the required dependency isn't installed. Importing `simsopt.solve.jax` and `simsopt.solve.jax.contracts` must not import Optax, Optimistix, Lineax, or CUDA-specific packages.
+- `simsopt.solve.jax` is the runtime API package and imports required runtime optimizer libraries at module import time; install the `JAX` or `JAX_GPU` extra before importing it. The import-light boundaries are `simsopt.solve.__init__` and `simsopt.solve._jax_driver`, which must not import Optax, Optimistix, Lineax, or CUDA-specific packages. `simsopt.solve.jax.contracts` is under the runtime package, so importing it executes the runtime package initializer first.
 - `least_squares` rejects scalar drivers (`SCIPY_LBFGSB`, `OPTAX_LBFGS`, etc.) and vice versa with `ValueError` at dispatch.
 - JAX-backed drivers call `jax.block_until_ready()` on returned JAX leaves before measuring `wallclock_s` or converting final outputs to host arrays. Otherwise `wallclock_s` would only measure asynchronous dispatch on GPU/TPU.
 
@@ -177,7 +177,7 @@ class ScipyLBFGSBOptions(OptionsBase):
 
 @dataclass(frozen=True)
 class ScipyLMOptions(OptionsBase):
-    maxiter: int = 1500
+    max_nfev: int = 1500
     ftol: float = 1e-8
     xtol: float = 1e-8
     gtol: float = 1e-8
@@ -398,7 +398,7 @@ ResidualFn = Callable[[OptimizerInput], ArrayResult]
 ```
 
 Returns a 1-D residual vector. The Jacobian is computed by the driver:
-- `SCIPY_LM` — by finite difference (or by passing `jac=...` separately; outside this spec's contract).
+- `SCIPY_LM` — by SciPy `least_squares` finite differencing. This spec does not expose a separate `jac=` public parameter; adding one would be a Tier 3 API change.
 - `OPTIMISTIX_LM`, `SIMSOPT_LM_*` — by `jax.jacrev` / `jax.jacfwd` per driver-internal policy.
 
 ### 7.3 Optimizer callback event (typed discriminated union)
@@ -563,7 +563,7 @@ Rows that mention `optimizer_backend` describe wrapper-resolved selector tuples 
 
 **`BoozerSurfaceJAX` two-axis case** (outer driver + inner solver):
 - Today: `BoozerSurfaceJAX` LS options accept `optimizer_backend in {"auto", "scipy", "ondevice"}` and `least_squares_algorithm in {"quasi-newton", "lm", "lm-minpack", "optimistix-lm"}`. The `scipy-jax-fullgraph` string is an outer single-stage optimizer backend, not a valid `BoozerSurfaceJAX` constructor option.
-- New: the outer single-stage solve selects `outer_driver=Driver.SCIPY_LBFGSB` with a caller-owned fullgraph value/grad factory; the inner Boozer LS solve selects `inner_driver=Driver.SIMSOPT_LM_GMRES_HOST`, `Driver.SIMSOPT_LM_GMRES`, `Driver.SIMSOPT_LM_QR`, or `Driver.OPTIMISTIX_LM` according to the previous `optimizer_backend` / `least_squares_algorithm` pair.
+- New: the outer single-stage/Stage 2 solve selects a `TargetOptimizerContract(driver=Driver.SCIPY_LBFGSB, objective_route=...)` with a caller-owned value/grad factory for SciPy-control JAX lanes; the inner Boozer LS solve selects `inner_driver=Driver.SIMSOPT_LM_GMRES_HOST`, `Driver.SIMSOPT_LM_GMRES`, `Driver.SIMSOPT_LM_QR`, or `Driver.OPTIMISTIX_LM` according to the previous `optimizer_backend` / `least_squares_algorithm` pair.
 - The fullgraph factory is invoked once at outer solve time; the resulting callable is handed to `minimize`. Inner Boozer LS construction does not own that factory.
 
 ---
@@ -591,7 +591,7 @@ def jax_minimize(fn, x0, *, method="bfgs", **kwargs):
             "stack": _shim_caller_stack(stacklevel=2),
         },
     )
-    return simsopt.solve.jax.minimize(fn, x0, driver=driver, options=options, **rest)
+    return _jax_minimize_legacy(fn, x0, method=method, **kwargs)
 ```
 
 **Shim guarantees:**
@@ -603,7 +603,7 @@ def jax_minimize(fn, x0, *, method="bfgs", **kwargs):
 
 ## 10. Migration path
 
-Categorized by caller class. Concrete file/line lists, hot-spot ranking, and the 15-PR sequence live in [`docs/solve_jax_api_caller_inventory_2026-05-19.md`](./solve_jax_api_caller_inventory_2026-05-19.md) (§§2, 8, 10). Headline scale from that audit: **~129 external call sites** across 13 old method strings; **fewer than 10** in production `src/`; the rest are tests, benchmarks, and one large example.
+Categorized by caller class. Concrete file/line lists, hot-spot ranking, and the 15-PR sequence live in [`docs/solve_jax_api_caller_inventory_2026-05-19.md`](./solve_jax_api_caller_inventory_2026-05-19.md) (§§2, 8, 10). Headline scale from that audit: **~130 external call sites** across 13 old method strings; **fewer than 10** in production `src/`; the rest are tests, benchmarks, and one large example.
 
 ### Category A: Direct callers of `jax_minimize` / `jax_least_squares`
 
@@ -615,7 +615,7 @@ Categorized by caller class. Concrete file/line lists, hot-spot ranking, and the
 
 - `BoozerSurfaceJAX` accepts solver policy through its LS options: `optimizer_backend=` and `least_squares_algorithm=`.
 - `QfmSurfaceJAX` and `BiotSavartJAX` do not currently expose these constructor kwargs; the [caller inventory](./solve_jax_api_caller_inventory_2026-05-19.md) §6 confirmed no solver-string plumbing in their call paths. They are not part of this migration.
-- Migration: add `outer_driver` and `inner_driver` kwargs to `BoozerSurfaceJAX`'s solver-option surface; deprecate the old string kwargs.
+- Migration: add `inner_driver` to `BoozerSurfaceJAX`'s solver-option surface; outer solve selection stays in Stage 2 / single-stage resolver contracts through `ReferenceOptimizerContract` and `TargetOptimizerContract`.
 - Tier 3 (changes `BoozerSurfaceJAX` public API).
 
 ### Category C: autoresearch run configs and external scripts
@@ -685,7 +685,7 @@ If the shim or new API ships and breaks a known caller class:
 | D6 | Compat shim signalling | Both `DeprecationWarning` and structured log | applied |
 | D7 | Deprecation length | Two minor releases of shim, removal in the third | applied |
 | D8 | Test location | `tests/solve/jax/` mirroring source layout | applied |
-| D9 | Dense BFGS (`method="bfgs"`, `method="bfgs-ondevice"`) | **Keep** as `SCIPY_BFGS` and `SIMSOPT_BFGS` production drivers. Caller audit confirmed active use at small n (Boozer inner solve: `boozersurface_jax.py:5791, 5847`; 6 explicit `method="bfgs"` sites in `tests/geo/test_boozersurface_jax.py`; benchmark expectations in `tests/test_benchmark_helpers.py:5372-5421`). | applied |
+| D9 | Dense BFGS (`method="bfgs"`, `method="bfgs-ondevice"`) | **Keep** as `SCIPY_BFGS` and `SIMSOPT_BFGS` production drivers. Caller audit confirmed active use at small n (Boozer inner solve: `boozersurface_jax.py:5884, 5940`; 6 explicit `method="bfgs"` sites in `tests/geo/test_boozersurface_jax.py`; benchmark expectations in `tests/test_benchmark_helpers.py:5586-5635`). | applied |
 | D10 | `OptimizerCallbackEvent` schema | Typed discriminated dataclass union with `Literal[Driver.X]` tagging. One concrete event subclass per callback-capable driver; cross-driver minimum fields on `_OptimizerCallbackEventBase` (`iteration`, `x`, `fun`, `grad_norm_inf`, `wallclock_s`). No `extras: dict[str, Any]` escape hatch. See §7.3. | applied |
 | D11 | Where the fullgraph value/grad builders live | `simsopt.objectives.jax.*` (separate from `solve.jax`) | applied |
 | D12 | Python floor for `solve.jax` | The new subpackage is Python 3.11+ at runtime, but this spec does not raise upstream SIMSOPT's project-wide `requires-python >=3.8`. `simsopt.solve.__init__` must not import `simsopt.solve.jax`; importing the subpackage directly on Python <3.11 is unsupported. Native `StrEnum` stays inside the subpackage boundary. | applied |
@@ -716,6 +716,7 @@ src/simsopt/solve/
 ├── mpi.py                          # upstream
 ├── permanent_magnet_optimization.py
 ├── wireframe_optimization.py
+├── _jax_driver.py                  # Python-compatible Driver enum SSOT
 ├── __init__.py                     # must not import .jax while upstream supports Python 3.8
 └── jax/
     ├── __init__.py                 # exports: minimize, least_squares, Driver, OptimizerResult
@@ -776,3 +777,6 @@ Old file (`src/simsopt/geo/optimizer_jax.py`) retained as the compat shim entry 
   - Fixed `OptimizerResult` status/fingerprint contracts and required JAX result blocking before timing.
   - Corrected Python-floor wording so upstream SIMSOPT's project-wide `>=3.8` install contract is not silently broken.
 - 2026-05-19 v0.3 — cross-referenced the published caller inventory at `docs/solve_jax_api_caller_inventory_2026-05-19.md` from §1, §8, §10, and §10's wrapper note. Confirmed QfmSurfaceJAX/BiotSavartJAX exclusion from the inventory.
+- 2026-05-19 v0.4 — corrected SciPy LM docs alignment (`max_nfev`, current MINPACK `lmder` routing) and linked the spec to the caller-inventory v0.1 drift fixes.
+- 2026-05-20 v0.5 — refreshed live-tree line references for D9 after the caller inventory v0.2 codebase-drift update.
+- 2026-05-20 v0.6 — resolved the import-boundary conflict: `simsopt.solve.jax` is the runtime API and imports optimizer runtime dependencies statically; the shared `Driver` boundary remains import-light.
