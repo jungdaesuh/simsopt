@@ -32,6 +32,7 @@ if _REPO_SRC_ROOT not in sys.path:
     sys.path.insert(0, _REPO_SRC_ROOT)
 
 from simsopt.field.biotsavart_jax import biot_savart_A
+from simsopt._core.jax_host_boundary import scalar_pullback_seed
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 from simsopt.field.coil import Current, coils_via_symmetries
@@ -41,6 +42,7 @@ from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo import optimizer_jax as optimizer_jax_module
 from simsopt.geo import surfaceobjectives as surfaceobjectives_module
 from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
+from simsopt.geo.curveobjectives import cs_distance_pure
 from simsopt.geo.qfmsurface import QfmSurface
 from simsopt.backend import invalidate_backend_cache
 from simsopt.geo._pairwise_reductions import (
@@ -156,7 +158,7 @@ def _reject_coil_dofs_gradient_to_derivative(*_args):
 def _patch_reject_coil_dofs_gradient_to_derivative(monkeypatch):
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_coil_dofs_gradient_to_derivative",
+        "coil_dofs_gradient_to_derivative",
         _reject_coil_dofs_gradient_to_derivative,
     )
 
@@ -714,6 +716,60 @@ def test_curve_surface_signed_constraint_chunking_matches_dense_value_and_grad(
     )
 
 
+def test_curve_surface_distance_batch_gradient_respects_strict_transfer_guard(
+    monkeypatch,
+):
+    rng = np.random.default_rng(20260520)
+    gammas = jax.device_put(
+        rng.normal(size=(5, 31, 3)).astype(np.float32) * np.float32(0.01)
+    )
+    gammadashs = jax.device_put(np.full((5, 31, 3), 0.1, dtype=np.float32))
+    surface_gamma = jax.device_put(
+        rng.normal(size=(64, 3)).astype(np.float32) * np.float32(0.01)
+    )
+    surface_normal = jax.device_put(np.full((64, 3), 0.2, dtype=np.float32))
+    minimum_distance = jax.device_put(np.asarray(0.05, dtype=np.float32))
+
+    _with_pairwise_chunk_size(monkeypatch, 2)
+    try:
+        with jax.transfer_guard("disallow"):
+            value, pullback = jax.vjp(
+                lambda current_gammas: (
+                    surfaceobjectives_jax_module._curve_surface_distance_batch(
+                        current_gammas,
+                        gammadashs,
+                        surface_gamma,
+                        surface_normal,
+                        minimum_distance,
+                    )
+                ),
+                gammas,
+            )
+            grad_gammas = pullback(scalar_pullback_seed(value))[0]
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    assert np.isfinite(float(jax.device_get(value)))
+    assert np.all(np.isfinite(np.asarray(jax.device_get(grad_gammas))))
+    reference = sum(
+        cs_distance_pure(
+            gammas[curve_index],
+            gammadashs[curve_index],
+            surface_gamma,
+            surface_normal,
+            minimum_distance,
+        )
+        for curve_index in range(int(gammas.shape[0]))
+    )
+    np.testing.assert_allclose(
+        np.asarray(jax.device_get(value)),
+        np.asarray(jax.device_get(reference)),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+
+
 def _sample_curve(point_count: int, offset: float):
     grid = jnp.linspace(0.0, 1.0, point_count, dtype=jnp.float64)
     return jnp.stack(
@@ -1089,8 +1145,10 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
 
 
 def test_traceable_value_and_grad_boundary_preserves_caller_jax_buffer() -> None:
-    value_and_grad = surfaceobjectives_jax_module._make_traceable_value_and_grad_boundary(
-        _donating_sum_value_and_grad()
+    value_and_grad = (
+        surfaceobjectives_jax_module._make_traceable_value_and_grad_boundary(
+            _donating_sum_value_and_grad()
+        )
     )
     coil_dofs = jnp.ones((4,), dtype=jnp.float64)
 
@@ -1101,8 +1159,10 @@ def test_traceable_value_and_grad_boundary_preserves_caller_jax_buffer() -> None
 
 
 def test_traceable_host_value_and_grad_preserves_caller_jax_buffer() -> None:
-    host_value_and_grad = surfaceobjectives_jax_module._make_traceable_host_value_and_grad(
-        _donating_sum_value_and_grad()
+    host_value_and_grad = (
+        surfaceobjectives_jax_module._make_traceable_host_value_and_grad(
+            _donating_sum_value_and_grad()
+        )
     )
     coil_dofs = jnp.ones((4,), dtype=jnp.float64)
 
@@ -2858,7 +2918,7 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_coil_dofs_gradient_to_derivative",
+        "coil_dofs_gradient_to_derivative",
         lambda _biotsavart, gradient: (
             np.testing.assert_allclose(np.asarray(gradient), np.asarray([0.0])),
             surfaceobjectives_jax_module.Derivative({}),
@@ -3130,7 +3190,7 @@ def test_public_dJ_projects_cached_native_gradient_without_recomputing(
     obj.compute = reject_compute
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_coil_dofs_gradient_to_derivative",
+        "coil_dofs_gradient_to_derivative",
         project_native_gradient,
     )
 
@@ -3190,7 +3250,7 @@ def test_iotas_jax_exact_wrapper_gradient_matches_dense_projection_unit(
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_coil_dofs_gradient_to_derivative",
+        "coil_dofs_gradient_to_derivative",
         lambda _biotsavart, gradient: np.asarray(gradient, dtype=float),
     )
     fake_booz = types.SimpleNamespace(
@@ -5075,6 +5135,81 @@ def test_traceable_single_stage_effective_dependency_flags_respect_active_weight
     )
 
 
+def test_traceable_term_adjoint_solve_report_serializes_unknown_iterations_as_null(
+    monkeypatch,
+):
+    def unknown_status(rhs):
+        return optimizer_jax_module._linear_solve_status(
+            rhs,
+            jnp.zeros_like(rhs),
+            rhs,
+            tol=1.0e-10,
+            iterations=optimizer_jax_module._linear_solve_iteration_count(None),
+        )
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_single_stage_effective_dependency_flags",
+        lambda *_args, **_kwargs: (True, True),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_inner_objective_kwargs",
+        lambda _objective_kwargs: {},
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_evaluate_traceable_weighted_single_stage_outer_term",
+        lambda _term_name, x_inner, _coil_dofs, coil_set_spec, _kwargs: jnp.dot(
+            x_inner,
+            coil_set_spec,
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_solve_linearization",
+        lambda _booz_jax, _solved_x, rhs, *_args, **_kwargs: (
+            rhs,
+            unknown_status(rhs),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_boozer_penalty_objective_closure",
+        lambda **_kwargs: lambda x_inner: 0.5 * jnp.dot(x_inner, x_inner),
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_solve_hessian_least_squares_system_with_status",
+        lambda _objective_fn, _x, rhs, **_kwargs: (rhs, unknown_status(rhs)),
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_solve_hessian_system_with_status",
+        lambda _objective_fn, _x, rhs, **_kwargs: (rhs, unknown_status(rhs)),
+    )
+
+    report = surfaceobjectives_jax_module._traceable_term_adjoint_solve_report(
+        object(),
+        lambda coil_dofs: coil_dofs,
+        coil_dofs=jax.device_put(np.asarray([0.5, -1.25], dtype=np.float64)),
+        solved_x=jax.device_put(np.asarray([1.5, -0.25], dtype=np.float64)),
+        solved_linear_solve_factors=None,
+        linearization_kind="hessian",
+        linear_solve_tol=1.0e-10,
+        linear_solve_stab=0.0,
+        objective_kwargs={},
+        term_name="non_qs",
+    )
+
+    assert report["success"] is True
+    assert report["iterations"] is None
+    least_squares_attempt = report["hessian_least_squares_operator"]["attempts"][0]
+    operator_attempt = report["hessian_operator"]["attempts"][0]
+    assert least_squares_attempt["iterations"] is None
+    assert operator_attempt["iterations"] is None
+
+
 def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_direct_grad(
     monkeypatch,
 ):
@@ -5416,6 +5551,13 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         call_checks[name] = isinstance(value, jax.Array)
         return value
 
+    def _record_objective_config(name, value):
+        call_checks[name] = (
+            value is not objective_config
+            and set(value) == set(objective_config)
+            and all(isinstance(leaf, jax.Array) for leaf in value.values())
+        )
+
     def fake_total_gradient_with_status(
         _booz_jax,
         _coil_set_spec_from_dofs,
@@ -5431,11 +5573,14 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         del linearization_kind, linear_solve_tol, linear_solve_stab
         _record_array("total_gradient_coil_dofs", coil_dofs)
         _record_array("total_gradient_solved_x", solved_x)
+        _record_objective_config(
+            "total_gradient_objective_config",
+            objective_kwargs["outer_objective_config"],
+        )
         plu_leaves = jax.tree.leaves(solved_linear_solve_factors)
         call_checks["total_gradient_solved_linear_solve_factors"] = all(
             isinstance(leaf, jax.Array) for leaf in plu_leaves
         )
-        assert objective_kwargs["outer_objective_config"] is objective_config
         return (
             jnp.asarray([0.5, -0.75], dtype=jnp.float64),
             jnp.asarray(True, dtype=bool),
@@ -5444,6 +5589,10 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
     def fake_term_values(solved_x, coil_dofs, _coil_set_spec, **_objective_kwargs):
         _record_array("raw_terms_solved_x", solved_x)
         _record_array("raw_terms_coil_dofs", coil_dofs)
+        _record_objective_config(
+            "raw_terms_objective_config",
+            _objective_kwargs["outer_objective_config"],
+        )
         return {
             term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
             for index, (term_name, _weight_key) in enumerate(
@@ -5452,7 +5601,9 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         }
 
     def fake_weighted_term_values(raw_terms, *, outer_objective_config):
-        assert outer_objective_config is objective_config
+        _record_objective_config(
+            "weighted_terms_objective_config", outer_objective_config
+        )
         return dict(raw_terms)
 
     def fake_gradient_parts(
@@ -5471,11 +5622,14 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         del linearization_kind, linear_solve_tol, linear_solve_stab
         _record_array("gradient_parts_coil_dofs", coil_dofs)
         _record_array("gradient_parts_solved_x", solved_x)
+        _record_objective_config(
+            "gradient_parts_objective_config",
+            objective_kwargs["outer_objective_config"],
+        )
         plu_leaves = jax.tree.leaves(solved_linear_solve_factors)
         call_checks["gradient_parts_solved_linear_solve_factors"] = all(
             isinstance(leaf, jax.Array) for leaf in plu_leaves
         )
-        assert objective_kwargs["outer_objective_config"] is objective_config
         assert term_name is not None
         grad = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
         return grad, grad, grad, jnp.asarray(True, dtype=bool)
@@ -5546,13 +5700,50 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
     assert call_checks == {
         "total_gradient_coil_dofs": True,
         "total_gradient_solved_x": True,
+        "total_gradient_objective_config": True,
         "total_gradient_solved_linear_solve_factors": True,
         "raw_terms_solved_x": True,
         "raw_terms_coil_dofs": True,
+        "raw_terms_objective_config": True,
+        "weighted_terms_objective_config": True,
         "gradient_parts_coil_dofs": True,
         "gradient_parts_solved_x": True,
+        "gradient_parts_objective_config": True,
         "gradient_parts_solved_linear_solve_factors": True,
     }
+
+
+def test_traceable_weighted_single_stage_outer_terms_accept_device_scalar_weights():
+    term_values = {
+        term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
+        for index, (term_name, _weight_key) in enumerate(
+            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        )
+    }
+    outer_objective_config = {
+        weight_key: jnp.asarray(float(index % 2), dtype=jnp.float64)
+        for index, (_term_name, weight_key) in enumerate(
+            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        )
+    }
+
+    with jax.transfer_guard("disallow"):
+        weighted_terms = surfaceobjectives_jax_module._traceable_weighted_single_stage_outer_term_values(
+            term_values,
+            outer_objective_config=outer_objective_config,
+        )
+
+    expected = {
+        term_name: float(index + 1) * float(index % 2)
+        for index, (term_name, _weight_key) in enumerate(
+            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        )
+    }
+    actual = {
+        term_name: float(np.asarray(jax.device_get(value)))
+        for term_name, value in weighted_terms.items()
+    }
+    assert actual == expected
 
 
 def test_traceable_runtime_deviceify_tree_explicitly_restages_jax_arrays(monkeypatch):
@@ -5604,7 +5795,9 @@ def test_traceable_custom_vjp_restages_linear_solve_factors_at_consumption(
                 continue
             is_tracer = isinstance(leaf, jax.core.Tracer)
             value = None if is_tracer else np.asarray(jax.device_get(leaf))
-            deviceified_records.append((is_tracer, tuple(leaf.shape), leaf.dtype, value))
+            deviceified_records.append(
+                (is_tracer, tuple(leaf.shape), leaf.dtype, value)
+            )
         return original_deviceify_tree(tree)
 
     monkeypatch.setattr(
@@ -6892,21 +7085,26 @@ class TestQfmPenaltyJAX:
             jnp.asarray(bs_jax.x, dtype=jnp.float64)
         )
         surface_spec = surface.surface_spec()
-        targetlabel = _qfm_penalty_target(surfaceobjectives_module.Area(surface).J())
+        targetlabel = jnp.asarray(
+            _qfm_penalty_target(surfaceobjectives_module.Area(surface).J()),
+            dtype=dofs.dtype,
+        )
 
         @jax.jit
-        def compiled(surface_dofs):
+        def compiled(
+            surface_spec_value, surface_dofs, coil_set_spec_value, targetlabel_value
+        ):
             return surfaceobjectives_jax_module.surface_qfm_penalty_value_and_grad_jax_from_dofs(
-                surface_spec,
+                surface_spec_value,
                 surface_dofs,
-                coil_set_spec,
+                coil_set_spec_value,
                 label="area",
-                targetlabel=targetlabel,
+                targetlabel=targetlabel_value,
                 constraint_weight=2.0,
             )
 
         with jax.transfer_guard("disallow"):
-            value, grad = compiled(dofs)
+            value, grad = compiled(surface_spec, dofs, coil_set_spec, targetlabel)
 
         assert np.isfinite(host_scalar(value))
         assert host_array(grad, dtype=np.float64).shape == tuple(dofs.shape)

@@ -9,23 +9,29 @@ import numpy as np
 from conftest import enable_strict_jax_backend, host_array, host_scalar
 
 from simsopt.configs.zoo import get_data
+from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+from simsopt.field.coil import Coil
 from simsopt.geo import qfmsurface_jax as qfmsurface_jax_module
+from simsopt.geo.qfmsurface import QfmSurface
 from simsopt.geo.qfmsurface_jax import QfmSurfaceJAX
-from simsopt.geo.surfaceobjectives import Area, Volume
+from simsopt.geo.surfaceobjectives import Area, QfmResidual, ToroidalFlux, Volume
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.jax_core.qfm_solver import (
     QfmAugmentedLagrangianInfo,
     QfmPenaltySolveInfo,
     qfm_augmented_lagrangian_solve_jax,
+    qfm_exact_kkt_residual_jax_from_dofs,
     qfm_penalty_jax_from_dofs,
     qfm_penalty_solve_jax,
     qfm_penalty_value_and_grad_jax_from_dofs,
     qfm_residual_jax_from_dofs,
 )
 
+from .surface_test_helpers import get_surface
 
-def _make_qfm_case():
+
+def _make_ncsx_rz_qfm_surface():
     _base_curves, _base_currents, magnetic_axis, nfp, biotsavart = get_data("ncsx")
     phis = np.linspace(0.0, 1.0 / nfp, 6, endpoint=False)
     thetas = np.linspace(0.0, 1.0, 6, endpoint=False)
@@ -38,6 +44,33 @@ def _make_qfm_case():
         quadpoints_theta=thetas,
     )
     surface.fit_to_curve(magnetic_axis, 0.2, flip_theta=True)
+    return biotsavart, surface
+
+
+def _make_qfm_case():
+    biotsavart, surface = _make_ncsx_rz_qfm_surface()
+    return BiotSavartJAX(biotsavart.coils), surface
+
+
+def _make_label_grid_qfm_cpu_case():
+    _base_curves, _base_currents, _magnetic_axis, nfp, biotsavart = get_data("ncsx")
+    phis = np.linspace(0.0, 1.0 / nfp, 6, endpoint=False)
+    thetas = np.linspace(0.0, 1.0, 5, endpoint=False)
+    surface = SurfaceRZFourier(
+        mpol=3,
+        ntor=2,
+        stellsym=True,
+        nfp=nfp,
+        quadpoints_phi=phis,
+        quadpoints_theta=thetas,
+    )
+    dofs = np.asarray(surface.get_dofs(), dtype=np.float64)
+    surface.x = dofs + 0.02 * np.sin(np.arange(dofs.size, dtype=np.float64))
+    return biotsavart, surface
+
+
+def _make_label_grid_qfm_case():
+    biotsavart, surface = _make_label_grid_qfm_cpu_case()
     return BiotSavartJAX(biotsavart.coils), surface
 
 
@@ -51,6 +84,94 @@ def _make_qfm_inputs():
     biotsavart, surface = _make_qfm_case()
     dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
     return biotsavart, surface, dofs, _coil_set_spec(biotsavart)
+
+
+def _make_test_qfm_xyz_volume_case():
+    _base_curves, _base_currents, magnetic_axis, nfp, biotsavart = get_data("ncsx")
+    phis = np.linspace(0.0, 1.0 / nfp, 20, endpoint=False)
+    thetas = np.linspace(0.0, 1.0, 20, endpoint=False)
+    surface = get_surface(
+        "SurfaceXYZFourier",
+        True,
+        phis=phis,
+        thetas=thetas,
+        ntor=4,
+        mpol=4,
+    )
+    surface.fit_to_curve(magnetic_axis, 0.2)
+    return biotsavart, surface
+
+
+def _scaled_biotsavart(coils, scale: float):
+    return BiotSavart([Coil(coil.curve, scale * coil.current) for coil in coils])
+
+
+def _cpu_label_constraint_value_and_grad(label, target: float, dofs: np.ndarray):
+    label.surface.x = np.asarray(dofs, dtype=np.float64)
+    residual = label.J() - target
+    return 0.5 * residual**2, residual * label.dJ_by_dsurfacecoefficients()
+
+
+def _cpu_qfm_penalty_value_and_grad(
+    biotsavart,
+    surface,
+    label,
+    target: float,
+    dofs: np.ndarray,
+    constraint_weight: float,
+):
+    surface.x = np.asarray(dofs, dtype=np.float64)
+    qfm = QfmResidual(surface, biotsavart)
+    qfm_value = qfm.J()
+    qfm_gradient = qfm.dJ_by_dsurfacecoefficients()
+    label.surface.x = np.asarray(dofs, dtype=np.float64)
+    label_residual = label.J() - target
+    label_gradient = label.dJ_by_dsurfacecoefficients()
+    return (
+        qfm_value + 0.5 * constraint_weight * label_residual**2,
+        qfm_gradient + constraint_weight * label_residual * label_gradient,
+    )
+
+
+def _cpu_label_value(label, dofs: object) -> float:
+    label.surface.x = host_array(dofs)
+    return label.J()
+
+
+def _qfm_surface_with_distinct_label_field():
+    _base_curves, _base_currents, magnetic_axis, nfp, biotsavart = get_data("ncsx")
+    phis = np.linspace(0.0, 1.0 / nfp, 6, endpoint=False)
+    thetas = np.linspace(0.0, 1.0, 6, endpoint=False)
+    surface_cpu = SurfaceRZFourier(
+        mpol=1,
+        ntor=1,
+        stellsym=True,
+        nfp=nfp,
+        quadpoints_phi=phis,
+        quadpoints_theta=thetas,
+    )
+    surface_cpu.fit_to_curve(magnetic_axis, 0.2, flip_theta=True)
+    surface_jax = SurfaceRZFourier(
+        mpol=1,
+        ntor=1,
+        stellsym=True,
+        nfp=nfp,
+        quadpoints_phi=phis,
+        quadpoints_theta=thetas,
+    )
+    surface_jax.x = np.asarray(surface_cpu.get_dofs(), dtype=np.float64)
+    qfm_field_cpu = BiotSavart(biotsavart.coils)
+    label_field_cpu = _scaled_biotsavart(biotsavart.coils, 0.73)
+    qfm_field_jax = BiotSavartJAX(qfm_field_cpu.coils)
+    label_field_jax = BiotSavartJAX(label_field_cpu.coils)
+    return (
+        qfm_field_cpu,
+        label_field_cpu,
+        surface_cpu,
+        qfm_field_jax,
+        label_field_jax,
+        surface_jax,
+    )
 
 
 def _penalty_info(dofs: jax.Array) -> QfmPenaltySolveInfo:
@@ -96,6 +217,8 @@ def test_qfm_penalty_solve_jax_reduces_fixed_state_penalty() -> None:
         dofs,
         coil_set_spec,
         label="area",
+        label_spec=surface.surface_spec(),
+        label_coil_set_spec=coil_set_spec,
         targetlabel=target,
         constraint_weight=1.0,
     )
@@ -107,6 +230,8 @@ def test_qfm_penalty_solve_jax_reduces_fixed_state_penalty() -> None:
         target,
         1.0,
         dofs,
+        label_spec=surface.surface_spec(),
+        label_coil_set_spec=coil_set_spec,
         max_iter=5,
         tol=1e-8,
     )
@@ -116,10 +241,353 @@ def test_qfm_penalty_solve_jax_reduces_fixed_state_penalty() -> None:
     assert host_array(info.gradient).shape == tuple(dofs.shape)
 
 
+def test_qfm_penalty_solve_jax_not_worse_than_host_lbfgsb_diagnostic() -> None:
+    """Diagnostic: JAX penalty solve is not worse than host LBFGS-B residual."""
+    biotsavart_cpu, surface_cpu = _make_test_qfm_xyz_volume_case()
+    _biotsavart_src, surface_jax = _make_test_qfm_xyz_volume_case()
+    label_cpu = Volume(surface_cpu)
+    target = label_cpu.J()
+    qfm_cpu = QfmSurface(
+        BiotSavart(biotsavart_cpu.coils),
+        surface_cpu,
+        label_cpu,
+        target,
+    )
+
+    cpu_result = qfm_cpu.minimize_qfm_penalty_constraints_LBFGS(
+        tol=1e-8,
+        maxiter=200,
+        constraint_weight=1.0,
+    )
+    cpu_qfm_residual = qfm_cpu.qfm_objective(surface_cpu.get_dofs())
+    biotsavart_jax = BiotSavartJAX(biotsavart_cpu.coils)
+    coil_set_spec = _coil_set_spec(biotsavart_jax)
+    final_dofs, info = qfm_penalty_solve_jax(
+        surface_jax.surface_spec(),
+        coil_set_spec,
+        "volume",
+        target,
+        1.0,
+        jnp.asarray(surface_jax.get_dofs(), dtype=jnp.float64),
+        label_spec=surface_jax.surface_spec(),
+        label_coil_set_spec=coil_set_spec,
+        max_iter=400,
+        tol=1e-8,
+    )
+
+    assert cpu_result["success"]
+    assert final_dofs.shape == tuple(surface_jax.get_dofs().shape)
+    assert host_scalar(info.qfm_value) <= cpu_qfm_residual * (1.0 + 1.0e-6)
+
+
+def test_qfm_augmented_lagrangian_meets_upstream_exact_acceptance() -> None:
+    """AL exact path meets upstream QFM acceptance after the host LBFGS warm start."""
+    biotsavart_cpu, warm_surface = _make_test_qfm_xyz_volume_case()
+    label = Volume(warm_surface)
+    target = label.J()
+    warm_qfm = QfmSurface(
+        BiotSavart(biotsavart_cpu.coils),
+        warm_surface,
+        label,
+        target,
+    )
+    warm_result = warm_qfm.minimize_qfm_penalty_constraints_LBFGS(
+        tol=1e-8,
+        maxiter=1000,
+        constraint_weight=1.0,
+    )
+    warm_dofs = np.asarray(warm_surface.get_dofs(), dtype=np.float64)
+
+    _biotsavart_src, host_surface = _make_test_qfm_xyz_volume_case()
+    host_surface.x = warm_dofs.copy()
+    host_qfm = QfmSurface(
+        BiotSavart(biotsavart_cpu.coils),
+        host_surface,
+        Volume(host_surface),
+        target,
+    )
+    host_result = host_qfm.minimize_qfm_exact_constraints_SLSQP(tol=1e-9, maxiter=1000)
+    host_qfm_residual = host_qfm.qfm_objective(host_surface.get_dofs())
+    host_label_residual = Volume(host_surface).J() - target
+
+    _biotsavart_src, jax_surface = _make_test_qfm_xyz_volume_case()
+    jax_surface.x = warm_dofs.copy()
+    biotsavart_jax = BiotSavartJAX(biotsavart_cpu.coils)
+    coil_set_spec = _coil_set_spec(biotsavart_jax)
+    al_dofs, al_info = qfm_augmented_lagrangian_solve_jax(
+        jax_surface.surface_spec(),
+        coil_set_spec,
+        "volume",
+        target,
+        jnp.asarray(jax_surface.get_dofs(), dtype=jnp.float64),
+        label_spec=jax_surface.surface_spec(),
+        label_coil_set_spec=coil_set_spec,
+        max_outer=3,
+        inner_max_iter=100,
+        tol=1e-8,
+    )
+
+    assert warm_result["success"]
+    assert host_result["success"]
+    assert host_qfm_residual < 1.0e-5
+    assert abs(host_label_residual) < 3.0e-5
+    assert abs(host_scalar(al_info.label_residual)) <= 1.0e-6
+    assert host_scalar(al_info.qfm_value) < 1.0e-5
+    assert host_scalar(al_info.qfm_value) <= host_qfm_residual
+    assert al_dofs.shape == tuple(jax_surface.get_dofs().shape)
+
+
+def test_qfm_augmented_lagrangian_kkt_diagnostic_no_worse_than_host_slsqp() -> None:
+    """Diagnostic: natural equality KKT residual, not host SLSQP DOF identity."""
+    biotsavart_cpu, warm_surface = _make_test_qfm_xyz_volume_case()
+    label = Volume(warm_surface)
+    target = label.J()
+    warm_qfm = QfmSurface(
+        BiotSavart(biotsavart_cpu.coils),
+        warm_surface,
+        label,
+        target,
+    )
+    warm_result = warm_qfm.minimize_qfm_penalty_constraints_LBFGS(
+        tol=1e-8,
+        maxiter=1000,
+        constraint_weight=1.0,
+    )
+    warm_dofs = np.asarray(warm_surface.get_dofs(), dtype=np.float64)
+
+    _biotsavart_src, host_surface = _make_test_qfm_xyz_volume_case()
+    host_surface.x = warm_dofs.copy()
+    host_qfm = QfmSurface(
+        BiotSavart(biotsavart_cpu.coils),
+        host_surface,
+        Volume(host_surface),
+        target,
+    )
+    host_result = host_qfm.minimize_qfm_exact_constraints_SLSQP(tol=1e-9, maxiter=1000)
+
+    _biotsavart_src, jax_surface = _make_test_qfm_xyz_volume_case()
+    jax_surface.x = warm_dofs.copy()
+    biotsavart_jax = BiotSavartJAX(biotsavart_cpu.coils)
+    coil_set_spec = _coil_set_spec(biotsavart_jax)
+    surface_spec = jax_surface.surface_spec()
+    al_dofs, al_info = qfm_augmented_lagrangian_solve_jax(
+        surface_spec,
+        coil_set_spec,
+        "volume",
+        target,
+        jnp.asarray(jax_surface.get_dofs(), dtype=jnp.float64),
+        label_spec=surface_spec,
+        label_coil_set_spec=coil_set_spec,
+        max_outer=3,
+        inner_max_iter=100,
+        tol=1e-8,
+    )
+
+    host_kkt = qfm_exact_kkt_residual_jax_from_dofs(
+        surface_spec,
+        jnp.asarray(host_surface.get_dofs(), dtype=jnp.float64),
+        coil_set_spec,
+        label="volume",
+        label_spec=surface_spec,
+        label_coil_set_spec=coil_set_spec,
+        targetlabel=target,
+    )
+    al_kkt = qfm_exact_kkt_residual_jax_from_dofs(
+        surface_spec,
+        al_dofs,
+        coil_set_spec,
+        label="volume",
+        label_spec=surface_spec,
+        label_coil_set_spec=coil_set_spec,
+        targetlabel=target,
+    )
+
+    assert warm_result["success"]
+    assert host_result["success"]
+    assert abs(host_scalar(al_info.label_residual)) <= 1.0e-6
+    assert host_scalar(host_kkt.label_gradient_norm) > 1.0
+    assert host_scalar(al_kkt.label_gradient_norm) > 1.0
+    assert host_scalar(al_kkt.feasibility_abs) <= host_scalar(host_kkt.feasibility_abs)
+    assert host_scalar(al_kkt.stationarity_inf) <= host_scalar(
+        host_kkt.stationarity_inf
+    ) * (1.0 + 1.0e-8)
+
+
+def test_qfm_augmented_lagrangian_success_uses_absolute_kkt() -> None:
+    """KKT-passing AL results are successful at the public solver surface."""
+    _biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
+    target = 0.99 * Area(surface).J()
+    surface_spec = surface.surface_spec()
+    perturbation = 1.0e-3 * jnp.sin(jnp.arange(dofs.size, dtype=jnp.float64))
+    final_dofs, info = qfm_augmented_lagrangian_solve_jax(
+        surface_spec,
+        coil_set_spec,
+        "area",
+        target,
+        dofs + perturbation,
+        label_spec=surface_spec,
+        label_coil_set_spec=coil_set_spec,
+        max_outer=5,
+        inner_max_iter=100,
+        tol=1.0e-6,
+    )
+    kkt = qfm_exact_kkt_residual_jax_from_dofs(
+        surface_spec,
+        final_dofs,
+        coil_set_spec,
+        label="area",
+        label_spec=surface_spec,
+        label_coil_set_spec=coil_set_spec,
+        targetlabel=target,
+    )
+
+    assert bool(host_scalar(info.success))
+    assert host_scalar(kkt.feasibility_abs) <= 1.0e-6
+    assert host_scalar(kkt.stationarity_inf) <= 1.0e-6
+
+
+def test_qfm_augmented_lagrangian_rejects_feasible_nonstationary_state() -> None:
+    """Label feasibility alone is not enough for exact-path AL success."""
+    _biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
+    target = 0.99 * Area(surface).J()
+    surface_spec = surface.surface_spec()
+    final_dofs, info = qfm_augmented_lagrangian_solve_jax(
+        surface_spec,
+        coil_set_spec,
+        "area",
+        target,
+        dofs,
+        label_spec=surface_spec,
+        label_coil_set_spec=coil_set_spec,
+        max_outer=2,
+        inner_max_iter=20,
+        tol=2.0e-4,
+    )
+    kkt = qfm_exact_kkt_residual_jax_from_dofs(
+        surface_spec,
+        final_dofs,
+        coil_set_spec,
+        label="area",
+        label_spec=surface_spec,
+        label_coil_set_spec=coil_set_spec,
+        targetlabel=target,
+    )
+
+    assert host_scalar(kkt.feasibility_abs) <= 2.0e-4
+    assert host_scalar(kkt.stationarity_inf) > 2.0e-4
+    assert not bool(host_scalar(info.success))
+
+
+def test_qfm_augmented_lagrangian_branch_stability_uses_kkt_invariants() -> None:
+    """Small warm-start perturbations preserve objective, label, and KKT invariants."""
+    _biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
+    target = 0.99 * Area(surface).J()
+    surface_spec = surface.surface_spec()
+    perturbation = jnp.sin(jnp.arange(dofs.size, dtype=jnp.float64))
+    results = []
+    for scale in (0.0, 1.0e-4, 1.0e-3):
+        final_dofs, info = qfm_augmented_lagrangian_solve_jax(
+            surface_spec,
+            coil_set_spec,
+            "area",
+            target,
+            dofs + scale * perturbation,
+            label_spec=surface_spec,
+            label_coil_set_spec=coil_set_spec,
+            max_outer=5,
+            inner_max_iter=100,
+            tol=1.0e-6,
+        )
+        kkt = qfm_exact_kkt_residual_jax_from_dofs(
+            surface_spec,
+            final_dofs,
+            coil_set_spec,
+            label="area",
+            label_spec=surface_spec,
+            label_coil_set_spec=coil_set_spec,
+            targetlabel=target,
+        )
+        assert bool(host_scalar(info.success))
+        assert host_scalar(kkt.feasibility_abs) <= 1.0e-6
+        assert host_scalar(kkt.stationarity_inf) <= 1.0e-6
+        results.append(
+            (
+                host_scalar(info.qfm_value),
+                host_scalar(info.label_residual),
+                host_scalar(kkt.stationarity_inf),
+            )
+        )
+
+    qfm_values, label_residuals, stationarity_values = zip(*results, strict=True)
+    np.testing.assert_allclose(qfm_values, qfm_values[0], rtol=1.0e-7, atol=1.0e-12)
+    np.testing.assert_allclose(
+        label_residuals,
+        label_residuals[0],
+        rtol=0.0,
+        atol=1.0e-9,
+    )
+    assert np.ptp(np.asarray(stationarity_values)) <= 5.0e-7
+
+
+def test_qfm_penalty_fixed_state_gradient_matches_centered_fd() -> None:
+    """Derivative-heavy lane: fixed-state JAX gradient matches FD."""
+    _biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
+    target = 0.98 * Area(surface).J()
+    surface_spec = surface.surface_spec()
+    value, gradient = qfm_penalty_value_and_grad_jax_from_dofs(
+        surface_spec,
+        dofs,
+        coil_set_spec,
+        label="area",
+        label_spec=surface_spec,
+        label_coil_set_spec=coil_set_spec,
+        targetlabel=target,
+        constraint_weight=1.0,
+    )
+    step = 2.0**-18
+    finite_difference_gradient = []
+    for idx in range(dofs.size):
+        basis = np.zeros(dofs.size, dtype=np.float64)
+        basis[idx] = 1.0
+        basis_jax = jnp.asarray(basis, dtype=jnp.float64)
+        value_plus = qfm_penalty_jax_from_dofs(
+            surface_spec,
+            dofs + step * basis_jax,
+            coil_set_spec,
+            label="area",
+            label_spec=surface_spec,
+            label_coil_set_spec=coil_set_spec,
+            targetlabel=target,
+            constraint_weight=1.0,
+        )
+        value_minus = qfm_penalty_jax_from_dofs(
+            surface_spec,
+            dofs - step * basis_jax,
+            coil_set_spec,
+            label="area",
+            label_spec=surface_spec,
+            label_coil_set_spec=coil_set_spec,
+            targetlabel=target,
+            constraint_weight=1.0,
+        )
+        finite_difference_gradient.append(
+            (host_scalar(value_plus) - host_scalar(value_minus)) / (2.0 * step)
+        )
+
+    assert np.isfinite(host_scalar(value))
+    np.testing.assert_allclose(
+        np.asarray(finite_difference_gradient),
+        host_array(gradient),
+        rtol=1.0e-8,
+        atol=1.0e-10,
+    )
+
+
 def test_qfm_penalty_solve_jax_transfer_guard_clean() -> None:
     """The BFGS solver core does not enter JAX's host-staging optimizer path."""
     _biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
-    target = 0.98 * Area(surface).J()
+    target = jnp.asarray(0.98 * Area(surface).J(), dtype=dofs.dtype)
+    constraint_weight = jnp.asarray(1.0, dtype=dofs.dtype)
 
     with jax.transfer_guard("disallow"):
         final_dofs, info = qfm_penalty_solve_jax(
@@ -127,8 +595,10 @@ def test_qfm_penalty_solve_jax_transfer_guard_clean() -> None:
             coil_set_spec,
             "area",
             target,
-            1.0,
+            constraint_weight,
             dofs,
+            label_spec=surface.surface_spec(),
+            label_coil_set_spec=coil_set_spec,
             max_iter=1,
             tol=1e-8,
         )
@@ -140,7 +610,7 @@ def test_qfm_penalty_solve_jax_transfer_guard_clean() -> None:
 def test_qfm_augmented_lagrangian_solve_jax_transfer_guard_clean() -> None:
     """The AL wrapper keeps scalar updates and inner BFGS staging on device."""
     _biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
-    target = Area(surface).J()
+    target = jnp.asarray(0.99 * Area(surface).J(), dtype=dofs.dtype)
 
     with jax.transfer_guard("disallow"):
         final_dofs, info = qfm_augmented_lagrangian_solve_jax(
@@ -149,13 +619,17 @@ def test_qfm_augmented_lagrangian_solve_jax_transfer_guard_clean() -> None:
             "area",
             target,
             dofs,
-            max_outer=1,
+            label_spec=surface.surface_spec(),
+            label_coil_set_spec=coil_set_spec,
+            max_outer=2,
             inner_max_iter=1,
             tol=1e-8,
         )
 
     assert final_dofs.shape == dofs.shape
     assert host_array(info.gradient).shape == tuple(dofs.shape)
+    np.testing.assert_allclose(host_scalar(info.penalty_weight), 100.0)
+    assert host_scalar(info.multiplier) != 0.0
 
 
 def test_qfm_augmented_lagrangian_info_reports_qfm_gradient() -> None:
@@ -169,6 +643,8 @@ def test_qfm_augmented_lagrangian_info_reports_qfm_gradient() -> None:
         "area",
         target,
         dofs,
+        label_spec=surface.surface_spec(),
+        label_coil_set_spec=coil_set_spec,
         max_outer=1,
         inner_max_iter=1,
         tol=1e-8,
@@ -189,8 +665,8 @@ def test_qfm_augmented_lagrangian_info_reports_qfm_gradient() -> None:
     )
 
 
-def test_qfm_augmented_lagrangian_info_uses_final_inner_objective_state() -> None:
-    """AL diagnostics describe the objective minimized by the final inner solve."""
+def test_qfm_augmented_lagrangian_info_keeps_augmented_value_separate() -> None:
+    """AL diagnostics keep public QFM ``fun`` separate from augmented value."""
     _biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
     target = 0.99 * Area(surface).J()
 
@@ -200,33 +676,39 @@ def test_qfm_augmented_lagrangian_info_uses_final_inner_objective_state() -> Non
         "area",
         target,
         dofs,
-        max_outer=1,
+        label_spec=surface.surface_spec(),
+        label_coil_set_spec=coil_set_spec,
+        max_outer=2,
         inner_max_iter=1,
         tol=1e-8,
     )
 
-    np.testing.assert_allclose(
+    np.testing.assert_allclose(host_scalar(info.fun), host_scalar(info.qfm_value))
+    assert not np.isclose(
         host_scalar(info.augmented_value),
         host_scalar(info.fun),
-        rtol=1e-12,
-        atol=1e-14,
+        rtol=1e-8,
+        atol=1e-12,
     )
-    np.testing.assert_allclose(host_scalar(info.multiplier), 0.0, rtol=0.0, atol=0.0)
+    assert host_scalar(info.multiplier) != 0.0
     np.testing.assert_allclose(
         host_scalar(info.penalty_weight),
-        10.0,
+        100.0,
         rtol=0.0,
         atol=0.0,
     )
 
 
 def test_qfm_surface_jax_penalty_value_and_gradient_do_not_mutate_surface() -> None:
-    """Oracle: pure value/grad helper for the same trial surface DOFs."""
-    biotsavart, surface = _make_qfm_case()
+    """Oracle: CPU QFM residual plus CPU label value/gradient at trial DOFs."""
+    biotsavart_cpu, surface_cpu = _make_ncsx_rz_qfm_surface()
+    _biotsavart_src, surface = _make_ncsx_rz_qfm_surface()
+    biotsavart = BiotSavartJAX(biotsavart_cpu.coils)
     initial_dofs = np.asarray(surface.get_dofs(), dtype=np.float64)
     trial_dofs = initial_dofs.copy()
     trial_dofs[0] += 1.0e-3
-    target = 0.99 * Area(surface).J()
+    label_cpu = Area(surface_cpu)
+    target = 0.99 * label_cpu.J()
     qfm_surface = QfmSurfaceJAX(biotsavart, surface, Area(surface), target)
 
     value, gradient = qfm_surface.qfm_penalty_constraints(
@@ -234,18 +716,284 @@ def test_qfm_surface_jax_penalty_value_and_gradient_do_not_mutate_surface() -> N
         derivatives=1,
         constraint_weight=1.5,
     )
-    expected_value, expected_gradient = qfm_penalty_value_and_grad_jax_from_dofs(
-        surface.surface_spec(),
-        jnp.asarray(trial_dofs, dtype=jnp.float64),
-        _coil_set_spec(biotsavart),
-        label="area",
-        targetlabel=target,
-        constraint_weight=1.5,
+    expected_value, expected_gradient = _cpu_qfm_penalty_value_and_grad(
+        biotsavart_cpu,
+        surface_cpu,
+        label_cpu,
+        target,
+        trial_dofs,
+        1.5,
     )
 
-    np.testing.assert_allclose(value, host_scalar(expected_value), rtol=1e-12)
-    np.testing.assert_allclose(gradient, host_array(expected_gradient), rtol=1e-10)
+    np.testing.assert_allclose(value, expected_value, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(gradient, expected_gradient, rtol=1e-8, atol=1e-10)
     np.testing.assert_allclose(surface.get_dofs(), initial_dofs, rtol=0.0, atol=0.0)
+
+
+def test_qfm_surface_jax_label_constraint_uses_label_surface_spec() -> None:
+    """Label residuals use the label-owned quadrature grid, matching CPU QFM."""
+    biotsavart_cpu, surface_cpu = _make_label_grid_qfm_cpu_case()
+    _biotsavart_src, surface = _make_label_grid_qfm_cpu_case()
+    biotsavart = BiotSavartJAX(biotsavart_cpu.coils)
+    label_cpu = Area(
+        surface_cpu,
+        nphi=4,
+        ntheta=9,
+        range=SurfaceRZFourier.RANGE_FULL_TORUS,
+    )
+    label = Area(
+        surface,
+        nphi=4,
+        ntheta=9,
+        range=SurfaceRZFourier.RANGE_FULL_TORUS,
+    )
+    target = label_cpu.J()
+    trial_dofs = np.asarray(surface.get_dofs(), dtype=np.float64)
+    trial_dofs = trial_dofs + 0.01 * np.cos(np.arange(trial_dofs.size))
+    qfm_surface = QfmSurfaceJAX(biotsavart, surface, label, target)
+
+    value, gradient = qfm_surface.qfm_label_constraint(trial_dofs, derivatives=1)
+    expected_value, expected_gradient = _cpu_label_constraint_value_and_grad(
+        label_cpu,
+        target,
+        trial_dofs,
+    )
+    wrong_label = Area(surface_cpu)
+    wrong_value, _wrong_gradient = _cpu_label_constraint_value_and_grad(
+        wrong_label,
+        target,
+        trial_dofs,
+    )
+
+    np.testing.assert_allclose(value, expected_value, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(gradient, expected_gradient, rtol=1e-8, atol=1e-10)
+    assert not np.isclose(value, wrong_value, rtol=1e-8, atol=1e-12)
+
+
+def test_qfm_surface_jax_penalty_constraints_use_label_surface_spec() -> None:
+    """Penalty value/gradient keep QFM and label quadrature specs separate."""
+    biotsavart_cpu, surface_cpu = _make_label_grid_qfm_cpu_case()
+    _biotsavart_src, surface = _make_label_grid_qfm_cpu_case()
+    biotsavart = BiotSavartJAX(biotsavart_cpu.coils)
+    label_cpu = Area(
+        surface_cpu,
+        nphi=4,
+        ntheta=9,
+        range=SurfaceRZFourier.RANGE_FULL_TORUS,
+    )
+    label = Area(
+        surface,
+        nphi=4,
+        ntheta=9,
+        range=SurfaceRZFourier.RANGE_FULL_TORUS,
+    )
+    target = label_cpu.J()
+    trial_dofs = np.asarray(surface.get_dofs(), dtype=np.float64)
+    trial_dofs = trial_dofs + 0.01 * np.cos(np.arange(trial_dofs.size))
+    qfm_surface = QfmSurfaceJAX(biotsavart, surface, label, target)
+
+    value, gradient = qfm_surface.qfm_penalty_constraints(
+        trial_dofs,
+        derivatives=1,
+        constraint_weight=1.5,
+    )
+    expected_value, expected_gradient = _cpu_qfm_penalty_value_and_grad(
+        biotsavart_cpu,
+        surface_cpu,
+        label_cpu,
+        target,
+        trial_dofs,
+        1.5,
+    )
+    wrong_value, _wrong_gradient = _cpu_qfm_penalty_value_and_grad(
+        biotsavart_cpu,
+        surface_cpu,
+        Area(surface_cpu),
+        target,
+        trial_dofs,
+        1.5,
+    )
+
+    np.testing.assert_allclose(value, expected_value, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(gradient, expected_gradient, rtol=1e-8, atol=1e-10)
+    assert not np.isclose(value, wrong_value, rtol=1e-8, atol=1e-12)
+
+
+def test_qfm_surface_jax_toroidal_flux_uses_label_owned_biotsavart() -> None:
+    """Oracle: CPU QFM keeps residual and toroidal-flux label fields separate."""
+    (
+        qfm_field_cpu,
+        label_field_cpu,
+        surface_cpu,
+        qfm_field_jax,
+        label_field_jax,
+        surface_jax,
+    ) = _qfm_surface_with_distinct_label_field()
+    target = 0.94 * ToroidalFlux(surface_cpu, label_field_cpu).J()
+    trial_dofs = np.asarray(surface_cpu.get_dofs(), dtype=np.float64)
+    trial_dofs = trial_dofs + 0.01 * np.sin(np.arange(trial_dofs.size))
+    label_cpu = ToroidalFlux(surface_cpu, label_field_cpu)
+    label_jax = ToroidalFlux(surface_jax, label_field_jax)
+    qfm_surface = QfmSurfaceJAX(qfm_field_jax, surface_jax, label_jax, target)
+
+    value, gradient = qfm_surface.qfm_penalty_constraints(
+        trial_dofs,
+        derivatives=1,
+        constraint_weight=1.2,
+    )
+    expected_value, expected_gradient = _cpu_qfm_penalty_value_and_grad(
+        qfm_field_cpu,
+        surface_cpu,
+        label_cpu,
+        target,
+        trial_dofs,
+        1.2,
+    )
+    wrong_value, _wrong_gradient = _cpu_qfm_penalty_value_and_grad(
+        qfm_field_cpu,
+        surface_cpu,
+        ToroidalFlux(surface_cpu, BiotSavart(qfm_field_cpu.coils)),
+        target,
+        trial_dofs,
+        1.2,
+    )
+
+    np.testing.assert_allclose(value, expected_value, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(gradient, expected_gradient, rtol=1e-8, atol=1e-10)
+    assert not np.isclose(value, wrong_value, rtol=1e-8, atol=1e-12)
+
+
+def test_qfm_solvers_report_label_value_on_label_surface_spec() -> None:
+    """Real penalty and AL solver info use the label-owned quadrature grid."""
+    biotsavart, surface = _make_label_grid_qfm_case()
+    _biotsavart_cpu, label_probe_surface = _make_label_grid_qfm_cpu_case()
+    label = Area(
+        surface,
+        nphi=4,
+        ntheta=9,
+        range=SurfaceRZFourier.RANGE_FULL_TORUS,
+    )
+    surface_spec = surface.surface_spec()
+    label_spec = label.surface.surface_spec()
+    coil_set_spec = _coil_set_spec(biotsavart)
+    init_dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+    target = label.J()
+    label_probe = Area(
+        label_probe_surface,
+        nphi=4,
+        ntheta=9,
+        range=SurfaceRZFourier.RANGE_FULL_TORUS,
+    )
+    wrong_probe = Area(label_probe_surface)
+
+    penalty_dofs, penalty_info = qfm_penalty_solve_jax(
+        surface_spec,
+        coil_set_spec,
+        "area",
+        target,
+        1.0,
+        init_dofs,
+        label_spec=label_spec,
+        label_coil_set_spec=coil_set_spec,
+        max_iter=0,
+        tol=1e-8,
+    )
+    al_dofs, al_info = qfm_augmented_lagrangian_solve_jax(
+        surface_spec,
+        coil_set_spec,
+        "area",
+        target,
+        init_dofs,
+        label_spec=label_spec,
+        label_coil_set_spec=coil_set_spec,
+        max_outer=1,
+        inner_max_iter=1,
+        tol=1e-8,
+    )
+
+    expected_penalty_label = _cpu_label_value(label_probe, penalty_dofs)
+    wrong_penalty_label = _cpu_label_value(wrong_probe, penalty_dofs)
+    expected_al_label = _cpu_label_value(label_probe, al_dofs)
+    wrong_al_label = _cpu_label_value(wrong_probe, al_dofs)
+
+    np.testing.assert_allclose(
+        host_scalar(penalty_info.label_value),
+        expected_penalty_label,
+        rtol=1e-10,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        host_scalar(al_info.label_value),
+        expected_al_label,
+        rtol=1e-10,
+        atol=1e-12,
+    )
+    assert not np.isclose(
+        host_scalar(penalty_info.label_value),
+        wrong_penalty_label,
+        rtol=1e-8,
+        atol=1e-12,
+    )
+    assert not np.isclose(
+        host_scalar(al_info.label_value),
+        wrong_al_label,
+        rtol=1e-8,
+        atol=1e-12,
+    )
+
+
+def test_qfm_surface_jax_solver_receives_label_surface_spec(
+    monkeypatch,
+    request,
+) -> None:
+    """Penalty solves preserve label-specific quadrature/range metadata."""
+    enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
+    biotsavart, surface = _make_label_grid_qfm_case()
+    label = Area(
+        surface,
+        nphi=4,
+        ntheta=9,
+        range=SurfaceRZFourier.RANGE_FULL_TORUS,
+    )
+    observed = {}
+
+    def fake_penalty_solve(
+        spec,
+        coil_set_spec,
+        label_name,
+        targetlabel,
+        constraint_weight,
+        init_dofs,
+        *,
+        max_iter,
+        tol,
+        optimizer,
+        toroidal_flux_idx,
+        label_spec,
+        label_coil_set_spec,
+    ):
+        observed["surface_grid"] = (
+            spec.quadpoints_phi.shape,
+            spec.quadpoints_theta.shape,
+        )
+        observed["label_grid"] = (
+            label_spec.quadpoints_phi.shape,
+            label_spec.quadpoints_theta.shape,
+        )
+        final_dofs = jnp.asarray(init_dofs, dtype=jnp.float64)
+        return final_dofs, _penalty_info(final_dofs)
+
+    monkeypatch.setattr(
+        qfmsurface_jax_module,
+        "qfm_penalty_solve_jax",
+        fake_penalty_solve,
+    )
+    qfm_surface = QfmSurfaceJAX(biotsavart, surface, label, label.J())
+
+    qfm_surface.minimize_qfm(method="BFGS", maxiter=3)
+
+    assert observed["surface_grid"] == ((6,), (5,))
+    assert observed["label_grid"] == ((4,), (9,))
 
 
 def test_qfm_surface_jax_penalty_writeback_happens_after_solver(
@@ -270,6 +1018,8 @@ def test_qfm_surface_jax_penalty_writeback_happens_after_solver(
         tol,
         optimizer,
         toroidal_flux_idx,
+        label_spec,
+        label_coil_set_spec,
     ):
         observed["label"] = label
         observed["surface_dofs_during_solver"] = np.asarray(surface.get_dofs())
@@ -303,7 +1053,13 @@ def test_qfm_surface_jax_augmented_lagrangian_dispatches_without_slsqp_fallback(
 ) -> None:
     """Strict JAX ``AL`` dispatch uses the augmented-Lagrangian solver."""
     enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
-    biotsavart, surface = _make_qfm_case()
+    biotsavart, surface = _make_label_grid_qfm_case()
+    label = Volume(
+        surface,
+        nphi=4,
+        ntheta=9,
+        range=SurfaceRZFourier.RANGE_FULL_TORUS,
+    )
     calls = []
 
     def fake_augmented_solve(
@@ -318,8 +1074,13 @@ def test_qfm_surface_jax_augmented_lagrangian_dispatches_without_slsqp_fallback(
         tol,
         optimizer,
         toroidal_flux_idx,
+        label_spec,
+        label_coil_set_spec,
     ):
         calls.append((label, max_outer, inner_max_iter, optimizer))
+        calls.append(
+            (label_spec.quadpoints_phi.shape, label_spec.quadpoints_theta.shape)
+        )
         final_dofs = jnp.asarray(init_dofs, dtype=jnp.float64)
         return final_dofs, _augmented_info(final_dofs)
 
@@ -339,13 +1100,13 @@ def test_qfm_surface_jax_augmented_lagrangian_dispatches_without_slsqp_fallback(
     qfm_surface = QfmSurfaceJAX(
         biotsavart,
         surface,
-        Volume(surface),
-        Volume(surface).J(),
+        label,
+        label.J(),
     )
 
     result = qfm_surface.minimize_qfm(method="AL", maxiter=4)
 
-    assert calls == [("volume", 4, 1, "bfgs")]
+    assert calls == [("volume", 4, 1, "bfgs"), ((4,), (9,))]
     assert result["success"] is True
     assert result["fun"] == 0.1
 
@@ -377,7 +1138,16 @@ def test_qfm_surface_jax_native_dispatch_rejects_unwired_lm(
 
 
 def test_qfm_surface_jax_lazy_geo_export() -> None:
-    """The public geo package lazily exports ``QfmSurfaceJAX``."""
+    """Smoke: public geo package can construct and evaluate ``QfmSurfaceJAX``."""
     from simsopt.geo import QfmSurfaceJAX as exported
 
-    assert exported is QfmSurfaceJAX
+    biotsavart, surface = _make_qfm_case()
+    label = Area(surface)
+    qfm_surface = exported(biotsavart, surface, label, label.J())
+
+    np.testing.assert_allclose(
+        qfm_surface.qfm_label_constraint(surface.x),
+        0.0,
+        rtol=0.0,
+        atol=1.0e-28,
+    )

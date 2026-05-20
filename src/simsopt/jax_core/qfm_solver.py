@@ -30,8 +30,10 @@ from .surface_rzfourier import (
 
 __all__ = [
     "QfmAugmentedLagrangianInfo",
+    "QfmExactKktInfo",
     "QfmPenaltySolveInfo",
     "qfm_augmented_lagrangian_solve_jax",
+    "qfm_exact_kkt_residual_jax_from_dofs",
     "qfm_label_jax_from_dofs",
     "qfm_penalty_jax_from_dofs",
     "qfm_penalty_solve_jax",
@@ -74,6 +76,16 @@ class QfmAugmentedLagrangianInfo(NamedTuple):
     penalty_weight: jax.Array
 
 
+class QfmExactKktInfo(NamedTuple):
+    """Natural equality-KKT residual for the exact QFM constraint."""
+
+    feasibility_abs: jax.Array
+    stationarity_inf: jax.Array
+    lagrange_multiplier: jax.Array
+    qfm_gradient_inf: jax.Array
+    label_gradient_norm: jax.Array
+
+
 class _BFGSResult(NamedTuple):
     x: jax.Array
     success: jax.Array
@@ -100,6 +112,24 @@ class _QfmMetrics(NamedTuple):
     qfm_value: jax.Array
     label_value: jax.Array
     label_residual: jax.Array
+
+
+def _qfm_exact_kkt_from_gradients(
+    label_residual: jax.Array,
+    qfm_gradient: jax.Array,
+    label_gradient: jax.Array,
+) -> QfmExactKktInfo:
+    label_gradient_norm_squared = jnp.dot(label_gradient, label_gradient)
+    lagrange_multiplier = -jnp.dot(label_gradient, qfm_gradient)
+    lagrange_multiplier = lagrange_multiplier / label_gradient_norm_squared
+    stationarity = qfm_gradient + lagrange_multiplier * label_gradient
+    return QfmExactKktInfo(
+        feasibility_abs=jnp.abs(label_residual),
+        stationarity_inf=jnp.max(jnp.abs(stationarity)),
+        lagrange_multiplier=lagrange_multiplier,
+        qfm_gradient_inf=jnp.max(jnp.abs(qfm_gradient)),
+        label_gradient_norm=jnp.sqrt(label_gradient_norm_squared),
+    )
 
 
 _BFGS_STATUS_RUNNING = 1
@@ -218,14 +248,16 @@ def _qfm_metrics(
     coil_set_spec: object,
     *,
     label: str,
+    label_spec: object,
+    label_coil_set_spec: object,
     targetlabel: object,
     toroidal_flux_idx: int,
 ) -> _QfmMetrics:
     qfm_value = qfm_residual_jax_from_dofs(spec, dofs, coil_set_spec)
     label_value = qfm_label_jax_from_dofs(
-        spec,
+        label_spec,
         dofs,
-        coil_set_spec,
+        label_coil_set_spec,
         label=label,
         toroidal_flux_idx=toroidal_flux_idx,
     )
@@ -273,6 +305,8 @@ def qfm_penalty_jax_from_dofs(
     coil_set_spec: object,
     *,
     label: str,
+    label_spec: object,
+    label_coil_set_spec: object,
     targetlabel: object,
     constraint_weight: object = 1.0,
     toroidal_flux_idx: int = 0,
@@ -283,6 +317,8 @@ def qfm_penalty_jax_from_dofs(
         dofs,
         coil_set_spec,
         label=label,
+        label_spec=label_spec,
+        label_coil_set_spec=label_coil_set_spec,
         targetlabel=targetlabel,
         toroidal_flux_idx=toroidal_flux_idx,
     )
@@ -298,6 +334,8 @@ def qfm_penalty_value_and_grad_jax_from_dofs(
     coil_set_spec: object,
     *,
     label: str,
+    label_spec: object,
+    label_coil_set_spec: object,
     targetlabel: object,
     constraint_weight: object = 1.0,
     toroidal_flux_idx: int = 0,
@@ -309,11 +347,50 @@ def qfm_penalty_value_and_grad_jax_from_dofs(
             surface_dofs,
             coil_set_spec,
             label=label,
+            label_spec=label_spec,
+            label_coil_set_spec=label_coil_set_spec,
             targetlabel=targetlabel,
             constraint_weight=constraint_weight,
             toroidal_flux_idx=toroidal_flux_idx,
         )
     )(as_jax_float64(dofs))
+
+
+def qfm_exact_kkt_residual_jax_from_dofs(
+    spec,
+    dofs: object,
+    coil_set_spec: object,
+    *,
+    label: str,
+    label_spec: object,
+    label_coil_set_spec: object,
+    targetlabel: object,
+    toroidal_flux_idx: int = 0,
+) -> QfmExactKktInfo:
+    """Return the first-order KKT residual for ``label(dofs) = targetlabel``."""
+    dofs_value = as_jax_float64(dofs)
+    qfm_value, qfm_gradient = jax.value_and_grad(
+        lambda surface_dofs: qfm_residual_jax_from_dofs(
+            spec,
+            surface_dofs,
+            coil_set_spec,
+        )
+    )(dofs_value)
+    label_value, label_gradient = jax.value_and_grad(
+        lambda surface_dofs: qfm_label_jax_from_dofs(
+            label_spec,
+            surface_dofs,
+            label_coil_set_spec,
+            label=label,
+            toroidal_flux_idx=toroidal_flux_idx,
+        )
+    )(dofs_value)
+    label_residual = label_value - as_runtime_float64(targetlabel, reference=qfm_value)
+    return _qfm_exact_kkt_from_gradients(
+        label_residual,
+        qfm_gradient,
+        label_gradient,
+    )
 
 
 def _qfm_augmented_lagrangian_jax_from_dofs(
@@ -322,6 +399,8 @@ def _qfm_augmented_lagrangian_jax_from_dofs(
     coil_set_spec: object,
     *,
     label: str,
+    label_spec: object,
+    label_coil_set_spec: object,
     targetlabel: object,
     multiplier: object,
     penalty_weight: object,
@@ -332,6 +411,8 @@ def _qfm_augmented_lagrangian_jax_from_dofs(
         dofs,
         coil_set_spec,
         label=label,
+        label_spec=label_spec,
+        label_coil_set_spec=label_coil_set_spec,
         targetlabel=targetlabel,
         toroidal_flux_idx=toroidal_flux_idx,
     )
@@ -390,16 +471,27 @@ def _bfgs_line_search(value_and_grad, x, fun, grad, direction):
     return best_x, best_fun, best_grad, accepted, n_evals
 
 
-def _bfgs_minimize(objective, init_dofs: object, *, max_iter: int, tol: float):
+def _bfgs_minimize(
+    objective,
+    init_dofs: object,
+    *objective_args: object,
+    max_iter: int,
+    tol: float,
+):
     max_iter_value = int(max_iter)
     if max_iter_value < 0:
         raise ValueError("max_iter must be non-negative.")
     tol_value = float(tol)
-    value_and_grad = jax.value_and_grad(objective)
+    value_and_grad = jax.value_and_grad(
+        lambda surface_dofs, args: objective(surface_dofs, *args)
+    )
 
     @jax.jit
-    def run(x_init):
-        fun0, grad0 = value_and_grad(x_init)
+    def run(x_init, *args):
+        def bound_value_and_grad(surface_dofs):
+            return value_and_grad(surface_dofs, args)
+
+        fun0, grad0 = bound_value_and_grad(x_init)
         state0 = _BFGSState(
             x=x_init,
             fun=fun0,
@@ -434,7 +526,7 @@ def _bfgs_minimize(objective, init_dofs: object, *, max_iter: int, tol: float):
 
                 def descent_step(descent_state):
                     next_x, next_fun, next_grad, accepted, n_evals = _bfgs_line_search(
-                        value_and_grad,
+                        bound_value_and_grad,
                         descent_state.x,
                         descent_state.fun,
                         descent_state.grad,
@@ -443,7 +535,11 @@ def _bfgs_minimize(objective, init_dofs: object, *, max_iter: int, tol: float):
                     s = next_x - descent_state.x
                     y = next_grad - descent_state.grad
                     ys = jnp.dot(y, s)
-                    update_floor = jnp.sqrt(jnp.finfo(next_x.dtype).eps)
+                    update_floor = (
+                        jnp.finfo(next_x.dtype).eps
+                        * jnp.linalg.norm(y)
+                        * jnp.linalg.norm(s)
+                    )
                     update_hessian = accepted & (ys > update_floor)
                     safe_ys = jnp.where(
                         update_hessian, ys, jnp.asarray(1.0, next_x.dtype)
@@ -515,7 +611,7 @@ def _bfgs_minimize(objective, init_dofs: object, *, max_iter: int, tol: float):
             njev=final_state.njev,
         )
 
-    return run(as_jax_float64(init_dofs))
+    return run(as_jax_float64(init_dofs), *objective_args)
 
 
 def _scalar_from_vector(reference: jax.Array, value: float) -> jax.Array:
@@ -542,23 +638,42 @@ def _penalty_info(
     result,
     *,
     label: str,
+    label_spec: object,
+    label_coil_set_spec: object,
     targetlabel: object,
     constraint_weight: object,
     toroidal_flux_idx: int,
 ) -> QfmPenaltySolveInfo:
     @jax.jit
-    def compute(dofs_value, success, status, fun, gradient, nit, nfev, njev):
+    def compute(
+        spec_value,
+        dofs_value,
+        coil_set_spec_value,
+        label_spec_value,
+        label_coil_set_spec_value,
+        targetlabel_value,
+        constraint_weight_value,
+        success,
+        status,
+        fun,
+        gradient,
+        nit,
+        nfev,
+        njev,
+    ):
         metrics = _qfm_metrics(
-            spec,
+            spec_value,
             dofs_value,
-            coil_set_spec,
+            coil_set_spec_value,
             label=label,
-            targetlabel=targetlabel,
+            label_spec=label_spec_value,
+            label_coil_set_spec=label_coil_set_spec_value,
+            targetlabel=targetlabel_value,
             toroidal_flux_idx=toroidal_flux_idx,
         )
         penalty_value = _qfm_penalty_from_metrics(
             metrics,
-            constraint_weight=constraint_weight,
+            constraint_weight=constraint_weight_value,
         )
         return QfmPenaltySolveInfo(
             success=success,
@@ -575,7 +690,13 @@ def _penalty_info(
         )
 
     return compute(
+        spec,
         as_jax_float64(dofs),
+        coil_set_spec,
+        label_spec,
+        label_coil_set_spec,
+        targetlabel,
+        constraint_weight,
         result.success,
         result.status,
         result.fun,
@@ -594,6 +715,8 @@ def qfm_penalty_solve_jax(
     constraint_weight: object,
     init_dofs: object,
     *,
+    label_spec: object,
+    label_coil_set_spec: object,
     max_iter: int,
     tol: float,
     optimizer: str = "bfgs",
@@ -602,18 +725,39 @@ def qfm_penalty_solve_jax(
     """Minimize the QFM penalty objective without mutating a surface object."""
     _require_bfgs_optimizer(optimizer)
 
-    def objective(surface_dofs):
+    def objective(
+        surface_dofs,
+        spec_value,
+        coil_set_spec_value,
+        label_spec_value,
+        label_coil_set_spec_value,
+        targetlabel_value,
+        constraint_weight_value,
+    ):
         return qfm_penalty_jax_from_dofs(
-            spec,
+            spec_value,
             surface_dofs,
-            coil_set_spec,
+            coil_set_spec_value,
             label=label,
-            targetlabel=targetlabel,
-            constraint_weight=constraint_weight,
+            label_spec=label_spec_value,
+            label_coil_set_spec=label_coil_set_spec_value,
+            targetlabel=targetlabel_value,
+            constraint_weight=constraint_weight_value,
             toroidal_flux_idx=toroidal_flux_idx,
         )
 
-    result = _bfgs_minimize(objective, init_dofs, max_iter=max_iter, tol=tol)
+    result = _bfgs_minimize(
+        objective,
+        init_dofs,
+        spec,
+        coil_set_spec,
+        label_spec,
+        label_coil_set_spec,
+        targetlabel,
+        constraint_weight,
+        max_iter=max_iter,
+        tol=tol,
+    )
     final_dofs = as_jax_float64(result.x)
     return (
         final_dofs,
@@ -623,6 +767,8 @@ def qfm_penalty_solve_jax(
             coil_set_spec,
             result,
             label=label,
+            label_spec=label_spec,
+            label_coil_set_spec=label_coil_set_spec,
             targetlabel=targetlabel,
             constraint_weight=constraint_weight,
             toroidal_flux_idx=toroidal_flux_idx,
@@ -637,6 +783,8 @@ def _augmented_info(
     result,
     *,
     label: str,
+    label_spec: object,
+    label_coil_set_spec: object,
     targetlabel: object,
     multiplier: object,
     penalty_weight: object,
@@ -644,32 +792,61 @@ def _augmented_info(
     tol: float,
 ) -> QfmAugmentedLagrangianInfo:
     @jax.jit
-    def compute(dofs_value, success, status, fun, nit, nfev, njev):
-        metrics = _qfm_metrics(
-            spec,
-            dofs_value,
-            coil_set_spec,
-            label=label,
-            targetlabel=targetlabel,
-            toroidal_flux_idx=toroidal_flux_idx,
+    def compute(
+        spec_value,
+        dofs_value,
+        coil_set_spec_value,
+        label_spec_value,
+        label_coil_set_spec_value,
+        targetlabel_value,
+        multiplier_value,
+        penalty_weight_value,
+        status,
+        nit,
+        nfev,
+        njev,
+    ):
+        qfm_value, qfm_gradient = jax.value_and_grad(
+            lambda surface_dofs: qfm_residual_jax_from_dofs(
+                spec_value,
+                surface_dofs,
+                coil_set_spec_value,
+            )
+        )(dofs_value)
+        label_value, label_gradient = jax.value_and_grad(
+            lambda surface_dofs: qfm_label_jax_from_dofs(
+                label_spec_value,
+                surface_dofs,
+                label_coil_set_spec_value,
+                label=label,
+                toroidal_flux_idx=toroidal_flux_idx,
+            )
+        )(dofs_value)
+        label_residual = label_value - as_runtime_float64(
+            targetlabel_value, reference=qfm_value
+        )
+        metrics = _QfmMetrics(
+            qfm_value=qfm_value,
+            label_value=label_value,
+            label_residual=label_residual,
         )
         augmented_value = _qfm_augmented_from_metrics(
             metrics,
-            multiplier=multiplier,
-            penalty_weight=penalty_weight,
+            multiplier=multiplier_value,
+            penalty_weight=penalty_weight_value,
         )
-        qfm_gradient = jax.grad(
-            lambda surface_dofs: qfm_residual_jax_from_dofs(
-                spec,
-                surface_dofs,
-                coil_set_spec,
-            )
-        )(dofs_value)
-        accepted = success & (jnp.abs(metrics.label_residual) <= float(tol))
+        kkt = _qfm_exact_kkt_from_gradients(
+            label_residual,
+            qfm_gradient,
+            label_gradient,
+        )
+        accepted = (jnp.abs(label_residual) <= float(tol)) & (
+            kkt.stationarity_inf <= float(tol)
+        )
         return QfmAugmentedLagrangianInfo(
             success=accepted,
             status=status,
-            fun=fun,
+            fun=metrics.qfm_value,
             gradient=qfm_gradient,
             nit=nit,
             nfev=nfev,
@@ -678,18 +855,26 @@ def _augmented_info(
             label_residual=metrics.label_residual,
             qfm_value=metrics.qfm_value,
             augmented_value=augmented_value,
-            multiplier=as_runtime_float64(multiplier, reference=metrics.qfm_value),
+            multiplier=as_runtime_float64(
+                multiplier_value,
+                reference=metrics.qfm_value,
+            ),
             penalty_weight=as_runtime_float64(
-                penalty_weight,
+                penalty_weight_value,
                 reference=metrics.qfm_value,
             ),
         )
 
     return compute(
+        spec,
         as_jax_float64(dofs),
-        result.success,
+        coil_set_spec,
+        label_spec,
+        label_coil_set_spec,
+        targetlabel,
+        multiplier,
+        penalty_weight,
         result.status,
-        result.fun,
         result.nit,
         result.nfev,
         result.njev,
@@ -703,13 +888,15 @@ def qfm_augmented_lagrangian_solve_jax(
     targetlabel: object,
     init_dofs: object,
     *,
+    label_spec: object,
+    label_coil_set_spec: object,
     max_outer: int,
     inner_max_iter: int,
     tol: float,
     optimizer: str = "bfgs",
     initial_penalty_weight: float = 10.0,
     penalty_growth: float = 10.0,
-    max_penalty_weight: float = 1.0e8,
+    max_penalty_weight: float = 250.0,
     toroidal_flux_idx: int = 0,
 ):
     """Run a pure-JAX augmented-Lagrangian QFM solve."""
@@ -725,13 +912,24 @@ def qfm_augmented_lagrangian_solve_jax(
     penalty_weight = _scalar_from_vector(dofs, initial_penalty_weight)
 
     @jax.jit
-    def update_multipliers(dofs_value, multiplier_value, penalty_weight_value):
+    def update_multipliers(
+        dofs_value,
+        multiplier_value,
+        penalty_weight_value,
+        spec_value,
+        coil_set_spec_value,
+        label_spec_value,
+        label_coil_set_spec_value,
+        targetlabel_value,
+    ):
         metrics = _qfm_metrics(
-            spec,
+            spec_value,
             dofs_value,
-            coil_set_spec,
+            coil_set_spec_value,
             label=label,
-            targetlabel=targetlabel,
+            label_spec=label_spec_value,
+            label_coil_set_spec=label_coil_set_spec_value,
+            targetlabel=targetlabel_value,
             toroidal_flux_idx=toroidal_flux_idx,
         )
         next_multiplier = (
@@ -749,21 +947,39 @@ def qfm_augmented_lagrangian_solve_jax(
         result_multiplier = multiplier
         result_penalty_weight = penalty_weight
 
-        def objective(surface_dofs):
+        def objective(
+            surface_dofs,
+            spec_value,
+            coil_set_spec_value,
+            label_spec_value,
+            label_coil_set_spec_value,
+            targetlabel_value,
+            multiplier_value,
+            penalty_weight_value,
+        ):
             return _qfm_augmented_lagrangian_jax_from_dofs(
-                spec,
+                spec_value,
                 surface_dofs,
-                coil_set_spec,
+                coil_set_spec_value,
                 label=label,
-                targetlabel=targetlabel,
-                multiplier=multiplier,
-                penalty_weight=penalty_weight,
+                label_spec=label_spec_value,
+                label_coil_set_spec=label_coil_set_spec_value,
+                targetlabel=targetlabel_value,
+                multiplier=multiplier_value,
+                penalty_weight=penalty_weight_value,
                 toroidal_flux_idx=toroidal_flux_idx,
             )
 
         result = _bfgs_minimize(
             objective,
             dofs,
+            spec,
+            coil_set_spec,
+            label_spec,
+            label_coil_set_spec,
+            targetlabel,
+            multiplier,
+            penalty_weight,
             max_iter=inner_max_iter_value,
             tol=tol,
         )
@@ -773,6 +989,11 @@ def qfm_augmented_lagrangian_solve_jax(
                 dofs,
                 multiplier,
                 penalty_weight,
+                spec,
+                coil_set_spec,
+                label_spec,
+                label_coil_set_spec,
+                targetlabel,
             )
 
     return (
@@ -783,6 +1004,8 @@ def qfm_augmented_lagrangian_solve_jax(
             coil_set_spec,
             result,
             label=label,
+            label_spec=label_spec,
+            label_coil_set_spec=label_coil_set_spec,
             targetlabel=targetlabel,
             multiplier=result_multiplier,
             penalty_weight=result_penalty_weight,

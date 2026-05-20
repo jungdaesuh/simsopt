@@ -26,6 +26,7 @@ from simsopt.solve.wireframe_optimization import (
     rcls_wireframe,
     regularized_constrained_least_squares,
 )
+import simsopt.solve.wireframe_optimization_jax as wireframe_optimization_jax
 from simsopt.solve.wireframe_optimization_jax import (
     _gsco_opposite_candidate_index,
     bnorm_obj_matrices_jax,
@@ -196,6 +197,22 @@ def _public_optimize_problem(seed: int = 3105):
     return wireframe, A, b
 
 
+def _count_device_get_calls(monkeypatch):
+    calls = []
+    original_device_get = wireframe_optimization_jax.jax.device_get
+
+    def counted_device_get(value):
+        calls.append(value)
+        return original_device_get(value)
+
+    monkeypatch.setattr(
+        wireframe_optimization_jax.jax,
+        "device_get",
+        counted_device_get,
+    )
+    return calls
+
+
 def _compare_gsco_result(actual, expected) -> None:
     (
         x_expected,
@@ -348,7 +365,9 @@ def test_regularized_constrained_least_squares_handles_no_constraints() -> None:
     )
 
 
-def test_regularized_constrained_least_squares_exact_rank_deficient_matches_cpu() -> None:
+def test_regularized_constrained_least_squares_exact_rank_deficient_matches_cpu() -> (
+    None
+):
     A = np.ascontiguousarray(
         np.array(
             [
@@ -401,10 +420,14 @@ def test_regularized_constrained_least_squares_rank_deficient_matches_cpu() -> N
 
     assert np.linalg.cond(lhs) > 1.0e8
     assert np.max(np.abs(expected)) > 1.0e7
+    condition_limited_rtol = max(
+        _RTOL,
+        np.linalg.cond(lhs) * np.finfo(np.float64).eps,
+    )
     np.testing.assert_allclose(
         np.asarray(actual),
         expected,
-        rtol=_RTOL,
+        rtol=condition_limited_rtol,
         atol=_ATOL,
     )
 
@@ -586,6 +609,25 @@ def test_optimize_wireframe_jax_rcls_matches_public_cpu_and_mutates() -> None:
         rtol=_RTOL,
         atol=_ATOL,
     )
+
+
+def test_optimize_wireframe_jax_rcls_materializes_result_once(monkeypatch) -> None:
+    jax_wireframe, A, b = _public_optimize_problem(seed=3113)
+    params = {"reg_W": 0.1, "assume_no_crossings": False}
+    device_get_calls = _count_device_get_calls(monkeypatch)
+
+    actual = optimize_wireframe_jax(
+        jax_wireframe,
+        "rcls",
+        params,
+        Amat=A,
+        bvec=b,
+        verbose=False,
+    )
+
+    assert len(device_get_calls) == 1
+    assert actual["x"].shape == (jax_wireframe.n_segments, 1)
+    assert np.asarray(actual["f"]).shape == ()
 
 
 def test_optimize_wireframe_jax_rcls_matches_cpu_with_public_constraints() -> None:
@@ -1017,6 +1059,75 @@ def test_gsco_wireframe_jax_wrapper_matches_cpp_without_mutating_wireframe() -> 
     np.testing.assert_array_equal(fixture.currents, x_init.ravel())
 
 
+def test_gsco_wireframe_jax_record_every_keeps_cadence_and_final_history_rows() -> None:
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _gsco_problem()
+    )
+    fixture = _GSCOFixture(
+        currents=x_init.ravel().copy(),
+        loops=loops,
+        free_loops=free_loops,
+        segments=segments,
+        connected_segments=connections,
+    )
+    full = gsco_wireframe_jax(
+        fixture,
+        A,
+        b,
+        0.15,
+        False,
+        False,
+        0.2,
+        np.inf,
+        5,
+        1,
+        loop_count_init=loop_count_init,
+        record_every=None,
+        verbose=False,
+    )
+    sampled = gsco_wireframe_jax(
+        fixture,
+        A,
+        b,
+        0.15,
+        False,
+        False,
+        0.2,
+        np.inf,
+        5,
+        1,
+        loop_count_init=loop_count_init,
+        record_every=2,
+        verbose=False,
+    )
+    full_rows = np.asarray([0, 2, 4], dtype=np.int64)
+    sampled_history = slice(0, int(np.asarray(sampled.history_length)))
+
+    np.testing.assert_allclose(
+        np.asarray(sampled.x),
+        np.asarray(full.x),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(sampled.loop_count), np.asarray(full.loop_count)
+    )
+    for field_name in (
+        "iter_history",
+        "curr_history",
+        "loop_history",
+        "f_B_history",
+        "f_S_history",
+        "f_history",
+    ):
+        np.testing.assert_allclose(
+            np.asarray(getattr(sampled, field_name))[sampled_history],
+            np.asarray(getattr(full, field_name))[full_rows],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+
 def test_optimize_wireframe_jax_gsco_matches_public_cpu_and_iteration_helper() -> None:
     cpu_wireframe, A, b = _public_optimize_problem(seed=3106)
     jax_wireframe, _, _ = _public_optimize_problem(seed=3106)
@@ -1068,6 +1179,77 @@ def test_optimize_wireframe_jax_gsco_matches_public_cpu_and_iteration_helper() -
         rtol=_RTOL,
         atol=_ATOL,
     )
+
+
+def test_optimize_wireframe_jax_gsco_record_every_keeps_plot_history_rows() -> None:
+    full_wireframe, A, b = _public_optimize_problem(seed=3115)
+    sampled_wireframe, _, _ = _public_optimize_problem(seed=3115)
+    params = {
+        "lambda_S": 0.1,
+        "max_iter": 4,
+        "print_interval": 1,
+        "default_current": 0.2,
+        "no_crossing": False,
+        "match_current": False,
+    }
+    full = optimize_wireframe_jax(
+        full_wireframe,
+        "gsco",
+        params,
+        Amat=A,
+        bvec=b,
+        verbose=False,
+    )
+    sampled_params = dict(params, record_every=2)
+    sampled = optimize_wireframe_jax(
+        sampled_wireframe,
+        "gsco",
+        sampled_params,
+        Amat=A,
+        bvec=b,
+        verbose=False,
+    )
+    rows = np.asarray([0, 2, 4], dtype=np.int64)
+
+    np.testing.assert_allclose(sampled["x"], full["x"], rtol=_RTOL, atol=_ATOL)
+    np.testing.assert_array_equal(sampled["loop_count"], full["loop_count"])
+    for key in ("iter_hist", "loop_hist"):
+        np.testing.assert_array_equal(sampled[key], full[key][rows])
+    for key in ("curr_hist", "f_B_hist", "f_S_hist", "f_hist"):
+        np.testing.assert_allclose(
+            sampled[key],
+            full[key][rows],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+    with pytest.raises(ValueError, match="record_every"):
+        get_gsco_iteration_jax(1, sampled, sampled_wireframe)
+
+
+def test_optimize_wireframe_jax_gsco_materializes_result_once(monkeypatch) -> None:
+    jax_wireframe, A, b = _public_optimize_problem(seed=3114)
+    params = {
+        "lambda_S": 0.1,
+        "max_iter": 3,
+        "print_interval": 1,
+        "default_current": 0.2,
+        "no_crossing": False,
+        "match_current": False,
+    }
+    device_get_calls = _count_device_get_calls(monkeypatch)
+
+    actual = optimize_wireframe_jax(
+        jax_wireframe,
+        "gsco",
+        params,
+        Amat=A,
+        bvec=b,
+        verbose=False,
+    )
+
+    assert len(device_get_calls) == 1
+    assert actual["x"].shape == (jax_wireframe.n_segments, 1)
+    assert actual["f_B_hist"].shape == actual["iter_hist"].shape
 
 
 def test_optimize_wireframe_jax_gsco_accepts_present_none_initial_state() -> None:
@@ -1173,3 +1355,74 @@ def test_gsco_jax_jits_under_transfer_guard() -> None:
 
     assert int(np.asarray(out.history_length)) == 5
     assert np.all(np.isfinite(np.asarray(out.f_history[:5])))
+
+
+def test_gsco_jax_record_every_jits_under_transfer_guard() -> None:
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _gsco_problem()
+    )
+    A_device = jax.device_put(jnp.asarray(A))
+    b_device = jax.device_put(jnp.asarray(b))
+    loops_device = jax.device_put(jnp.asarray(loops, dtype=jnp.int32))
+    free_loops_device = jax.device_put(jnp.asarray(free_loops, dtype=jnp.int32))
+    segments_device = jax.device_put(jnp.asarray(segments, dtype=jnp.int32))
+    connections_device = jax.device_put(jnp.asarray(connections, dtype=jnp.int32))
+    x_init_device = jax.device_put(jnp.asarray(x_init))
+    loop_count_device = jax.device_put(jnp.asarray(loop_count_init, dtype=jnp.int32))
+
+    @jax.jit
+    def _solve(
+        A_data,
+        b_data,
+        loops_data,
+        free_data,
+        segments_data,
+        connections_data,
+        x_data,
+        count_data,
+    ):
+        return greedy_stellarator_coil_optimization_jax(
+            False,
+            False,
+            False,
+            A_data,
+            b_data,
+            0.2,
+            np.inf,
+            0,
+            loops_data,
+            free_data,
+            segments_data,
+            connections_data,
+            0.15,
+            5,
+            x_data,
+            count_data,
+            record_every=2,
+        )
+
+    _solve(
+        A_device,
+        b_device,
+        loops_device,
+        free_loops_device,
+        segments_device,
+        connections_device,
+        x_init_device,
+        loop_count_device,
+    ).x.block_until_ready()
+    with jax.transfer_guard("disallow"):
+        out = _solve(
+            A_device,
+            b_device,
+            loops_device,
+            free_loops_device,
+            segments_device,
+            connections_device,
+            x_init_device,
+            loop_count_device,
+        )
+        out.x.block_until_ready()
+
+    assert int(np.asarray(out.history_length)) == 3
+    assert np.all(np.isfinite(np.asarray(out.f_history[:3])))
