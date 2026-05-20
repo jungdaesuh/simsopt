@@ -99,7 +99,7 @@ from ..jax_core.biotsavart import (
 from ..jax_core.specs import GroupedCoilSetSpec
 from ..jax_core.sharding import place_active_replicated
 from .boozer_residual_jax import (
-    _split_decision_vector as _split_boozer_decision_vector,
+    _split_decision_vector_for_mode as _split_boozer_decision_vector_for_mode,
     boozer_residual_scalar_and_grad_cpu_ordered,
     boozer_residual_scalar,
     boozer_residual_vector,
@@ -503,14 +503,14 @@ class _BoozerPenaltyGeometry:
     xtheta: jax.Array
 
 
+def _place_active_replicated_tree(tree):
+    return jax.tree_util.tree_map(place_active_replicated, tree)
+
+
 def _place_active_replicated_geometry(
     geometry: _BoozerPenaltyGeometry,
 ) -> _BoozerPenaltyGeometry:
-    return _BoozerPenaltyGeometry(
-        gamma=place_active_replicated(geometry.gamma),
-        xphi=place_active_replicated(geometry.xphi),
-        xtheta=place_active_replicated(geometry.xtheta),
-    )
+    return _place_active_replicated_tree(geometry)
 
 
 @jax.tree_util.register_dataclass
@@ -817,7 +817,9 @@ def _prepare_result_callback(
     return callback
 
 
-def _as_boozer_penalty_optimizer_state(x, *, optimize_G):
+def _as_boozer_penalty_optimizer_state(
+    x, *, optimize_G, decision_split_mode="reverse"
+):
     if optimize_G:
         if isinstance(x, _BoozerPenaltyOptimizerStateWithG):
             return _BoozerPenaltyOptimizerStateWithG(
@@ -832,7 +834,11 @@ def _as_boozer_penalty_optimizer_state(x, *, optimize_G):
         )
 
     x_jax = _as_jax_float64(x)
-    sdofs, iota, G = _split_decision_vector_jax(x_jax, optimize_G=optimize_G)
+    sdofs, iota, G = _split_decision_vector_jax(
+        x_jax,
+        optimize_G=optimize_G,
+        decision_split_mode=decision_split_mode,
+    )
     if optimize_G:
         return _BoozerPenaltyOptimizerStateWithG(
             surface_dofs=sdofs,
@@ -898,8 +904,12 @@ def _boozer_penalty_optimizer_state_to_vector(x, *, optimize_G):
     )
 
 
-def _split_decision_vector_jax(x, *, optimize_G):
-    return _split_boozer_decision_vector(x, optimize_G=optimize_G)
+def _split_decision_vector_jax(x, *, optimize_G, decision_split_mode="reverse"):
+    return _split_boozer_decision_vector_for_mode(
+        x,
+        optimize_G=optimize_G,
+        decision_split_mode=decision_split_mode,
+    )
 
 
 def _generic_surface_scatter_operator(mpol: int, ntor: int):
@@ -1031,8 +1041,13 @@ def _geometry_from_x(
     scatter_indices,
     surface_kind,
     optimize_G,
+    decision_split_mode="reverse",
 ):
-    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
+    optimizer_state = _as_boozer_penalty_optimizer_state(
+        x,
+        optimize_G=optimize_G,
+        decision_split_mode=decision_split_mode,
+    )
     geometry = _geometry_from_surface_dofs(
         optimizer_state.surface_dofs,
         quadpoints_phi=quadpoints_phi,
@@ -1130,10 +1145,12 @@ def _penalty_params(
     weight_inv_modB,
 ):
     return _BoozerPenaltyParams(
-        iota=_as_jax_float64(iota),
-        G=_as_jax_float64(G_value),
-        targetlabel=_as_jax_float64(targetlabel),
-        constraint_weight=_as_jax_float64(constraint_weight),
+        iota=place_active_replicated(_as_jax_float64(iota)),
+        G=place_active_replicated(_as_jax_float64(G_value)),
+        targetlabel=place_active_replicated(_as_jax_float64(targetlabel)),
+        constraint_weight=place_active_replicated(
+            _as_jax_float64(constraint_weight)
+        ),
         label_type=label_type,
         phi_idx=phi_idx,
         weight_inv_modB=weight_inv_modB,
@@ -1814,6 +1831,7 @@ def _boozer_penalty_objective(
     optimize_G,
     weight_inv_modB,
     boozer_reduction_mode="default",
+    decision_split_mode="reverse",
 ):
     """Scalarized penalty objective for the BoozerLS inner solve.
 
@@ -1837,6 +1855,7 @@ def _boozer_penalty_objective(
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
         optimize_G=optimize_G,
+        decision_split_mode=decision_split_mode,
     )
     label_geometry = _geometry_from_surface_dofs(
         optimizer_state.surface_dofs,
@@ -1913,8 +1932,13 @@ def _boozer_penalty_residual_vector(
     phi_idx,
     optimize_G,
     weight_inv_modB,
+    decision_split_mode="reverse",
 ):
-    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
+    optimizer_state = _as_boozer_penalty_optimizer_state(
+        x,
+        optimize_G=optimize_G,
+        decision_split_mode=decision_split_mode,
+    )
     G_value = (
         optimizer_state.G
         if optimize_G
@@ -2568,7 +2592,7 @@ def _build_ls_grouped_vjp_snapshot(
         label_field_shape=_field_shape_from_geometry(label_geometry),
         coil_set_spec=coil_set_spec,
     )
-    return _BoozerLSGroupedVJPSnapshot(
+    snapshot = _BoozerLSGroupedVJPSnapshot(
         quadpoints_phi=booz_surf.quadpoints_phi,
         quadpoints_theta=booz_surf.quadpoints_theta,
         scatter_indices=booz_surf.scatter_indices,
@@ -2602,6 +2626,7 @@ def _build_ls_grouped_vjp_snapshot(
         coil_indices=tuple(tuple(indices) for indices in booz_surf._coil_index_lists),
         solver_generation=solve_generation,
     )
+    return _place_active_replicated_tree(snapshot)
 
 
 def _geometry_tangent_from_decision_tangent(
@@ -2756,7 +2781,8 @@ def _ls_directional_from_field_terms(
 
 
 def _ls_field_term_cotangents(snapshot: _BoozerLSGroupedVJPSnapshot, tangent):
-    unit_cotangent = _as_jax_float64(1.0)
+    tangent = place_active_replicated(_as_jax_float64(tangent))
+    unit_cotangent = place_active_replicated(_as_jax_float64(1.0))
     if snapshot.optimize_G:
         _, field_pullback = jax.vjp(
             lambda terms: _ls_directional_from_field_terms(snapshot, terms, tangent),
@@ -2808,12 +2834,14 @@ def _ls_penalty_directional_objective(
     optimize_G,
     weight_inv_modB,
 ):
+    tangent = place_active_replicated(_as_jax_float64(tangent))
     return _directional_derivative(
         _make_ls_penalty_objective(
             booz_surf,
             coil_arrays,
             optimize_G,
             weight_inv_modB,
+            decision_split_mode="jvp",
         ),
         x,
         tangent,
@@ -2825,6 +2853,8 @@ def _make_ls_penalty_objective(
     coil_arrays,
     optimize_G,
     weight_inv_modB,
+    *,
+    decision_split_mode="reverse",
 ):
     return _make_boozer_penalty_objective_closure(
         coil_arrays=coil_arrays,
@@ -2850,6 +2880,7 @@ def _make_ls_penalty_objective(
         phi_idx=booz_surf.phi_idx,
         optimize_G=optimize_G,
         weight_inv_modB=weight_inv_modB,
+        decision_split_mode=decision_split_mode,
     )
 
 
@@ -3560,18 +3591,29 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB=bool(self.res["weight_inv_modB"]),
         )
 
+    def _linear_solve_tolerance_bounds(self):
+        policy = get_backend_policy()
+        tolerance_cap = policy.linear_solve_tolerance_cap
+        if tolerance_cap is None:
+            tolerance_cap = float("inf")
+        return policy.linear_solve_tolerance_floor, tolerance_cap
+
     def _linear_solve_tolerance(self):
+        tolerance_floor, tolerance_cap = self._linear_solve_tolerance_bounds()
         if self.boozer_type == "exact":
-            return min(1e-10, max(float(self.options["newton_tol"]) * 0.1, 1e-14))
+            return min(
+                tolerance_cap,
+                max(float(self.options["newton_tol"]) * 0.1, tolerance_floor),
+            )
         return min(
-            1e-10,
+            tolerance_cap,
             max(
                 min(
                     float(self.options["bfgs_tol"]),
                     float(self.options["newton_tol"]),
                 )
                 * 0.1,
-                1e-14,
+                tolerance_floor,
             ),
         )
 
@@ -3612,8 +3654,9 @@ class BoozerSurfaceJAX(Optimizable):
         ):
             def _with_nan_status(solver):
                 def wrapped(rhs):
-                    solution, success = solver(rhs)
-                    return _solve_with_nan_on_failure(solution, success), success
+                    solution, status = solver(rhs)
+                    success = _optimizer_jax._linear_solve_status_success(status)
+                    return _solve_with_nan_on_failure(solution, success), status
 
                 return wrapped
 
@@ -3688,11 +3731,21 @@ class BoozerSurfaceJAX(Optimizable):
 
             def solve_forward_with_status(rhs):
                 solved = solve_forward(rhs)
-                return solved, jnp.all(jnp.isfinite(solved))
+                return solved, _optimizer_jax._dense_linear_solve_status(
+                    apply_forward,
+                    solved,
+                    jnp.asarray(rhs, dtype=x.dtype),
+                    tol=tol_host,
+                )
 
             def solve_transpose_with_status(rhs):
                 solved = solve_transpose(rhs)
-                return solved, jnp.all(jnp.isfinite(solved))
+                return solved, _optimizer_jax._dense_linear_solve_status(
+                    apply_transpose,
+                    solved,
+                    jnp.asarray(rhs, dtype=x.dtype),
+                    tol=tol_host,
+                )
 
             return pack_callbacks(
                 apply_forward,
@@ -3747,11 +3800,21 @@ class BoozerSurfaceJAX(Optimizable):
 
             def solve_forward_with_status(rhs):
                 solved = solve_forward(rhs)
-                return solved, jnp.all(jnp.isfinite(solved))
+                return solved, _optimizer_jax._dense_linear_solve_status(
+                    apply_forward,
+                    solved,
+                    jnp.asarray(rhs, dtype=x.dtype),
+                    tol=tol_host,
+                )
 
             def solve_transpose_with_status(rhs):
                 solved = solve_transpose(rhs)
-                return solved, jnp.all(jnp.isfinite(solved))
+                return solved, _optimizer_jax._dense_linear_solve_status(
+                    apply_transpose,
+                    solved,
+                    jnp.asarray(rhs, dtype=x.dtype),
+                    tol=tol_host,
+                )
 
             return pack_callbacks(
                 apply_forward,
@@ -3775,6 +3838,7 @@ class BoozerSurfaceJAX(Optimizable):
                 solved_state.weight_inv_modB,
                 coil_set_spec=self.coil_set_spec,
                 hostify_inputs=False,
+                decision_split_mode="jvp",
             )
             operator = _optimizer_jax._least_squares_normal_operator(residual_fn, x)
 
@@ -4164,6 +4228,7 @@ class BoozerSurfaceJAX(Optimizable):
         *,
         hostify_inputs=True,
         boozer_reduction_mode="default",
+        decision_split_mode="reverse",
     ):
         """Build penalty objective with explicit overrides."""
         resolved_coil_set_spec = _resolved_coil_set_spec(
@@ -4180,6 +4245,7 @@ class BoozerSurfaceJAX(Optimizable):
                 resolved_constraint_weight,
                 resolved_coil_set_spec,
                 boozer_reduction_mode=boozer_reduction_mode,
+                decision_split_mode=decision_split_mode,
             )
             objective_fn = self._reference_penalty_objective_cache.get(key)
             if objective_fn is None:
@@ -4209,6 +4275,7 @@ class BoozerSurfaceJAX(Optimizable):
                     optimize_G=optimize_G,
                     weight_inv_modB=weight_inv_modB,
                     boozer_reduction_mode=boozer_reduction_mode,
+                    decision_split_mode=decision_split_mode,
                 )
                 objective_fn = _optimizer_jax._mark_cacheable_jit_value_and_grad(
                     objective_fn
@@ -4241,6 +4308,7 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
             boozer_reduction_mode=boozer_reduction_mode,
+            decision_split_mode=decision_split_mode,
         )
 
     def _make_penalty_value_and_grad_cpu_ordered_with(
@@ -4324,6 +4392,7 @@ class BoozerSurfaceJAX(Optimizable):
         coil_arrays=None,
         *,
         hostify_inputs=True,
+        decision_split_mode="reverse",
     ):
         """Build the LS residual-vector closure with explicit grouped-field inputs."""
         resolved_coil_set_spec = _resolved_coil_set_spec(
@@ -4339,6 +4408,7 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
                 resolved_constraint_weight,
                 resolved_coil_set_spec,
+                decision_split_mode=decision_split_mode,
             )
             residual_fn = self._reference_penalty_residual_cache.get(key)
             if residual_fn is None:
@@ -4348,6 +4418,7 @@ class BoozerSurfaceJAX(Optimizable):
                     constraint_weight=resolved_constraint_weight,
                     optimize_G=optimize_G,
                     weight_inv_modB=weight_inv_modB,
+                    decision_split_mode=decision_split_mode,
                     **self._traceable_surface_runtime_args(),
                 )
                 self._reference_penalty_residual_cache[key] = residual_fn
@@ -4377,6 +4448,7 @@ class BoozerSurfaceJAX(Optimizable):
             phi_idx=self.phi_idx,
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
+            decision_split_mode=decision_split_mode,
         )
 
     def _make_exact_objective_with(
@@ -4737,12 +4809,14 @@ class BoozerSurfaceJAX(Optimizable):
         coil_set_spec,
         *,
         boozer_reduction_mode="default",
+        decision_split_mode="reverse",
     ):
         return (
             bool(optimize_G),
             bool(weight_inv_modB),
             float(constraint_weight),
             boozer_reduction_mode,
+            decision_split_mode,
             self._traceable_surface_signature(),
             _runtime_cache_tree_signature(coil_set_spec),
         )
@@ -4790,6 +4864,7 @@ class BoozerSurfaceJAX(Optimizable):
                     constraint_weight=resolved_constraint_weight,
                     optimize_G=optimize_G,
                     weight_inv_modB=weight_inv_modB,
+                    decision_split_mode="jvp",
                     **surface_args,
                 )
 
@@ -4819,6 +4894,7 @@ class BoozerSurfaceJAX(Optimizable):
                     constraint_weight=resolved_constraint_weight,
                     optimize_G=optimize_G,
                     weight_inv_modB=weight_inv_modB,
+                    decision_split_mode="jvp",
                     **surface_args,
                 )
 
@@ -5513,11 +5589,14 @@ class BoozerSurfaceJAX(Optimizable):
         G_provided = optimize_G
         s = self.surface
         x0 = self._pack_decision_vector(iota, G)
+        method = self._resolve_optimizer_method(optimize_G=optimize_G)
         obj_fn = self._make_penalty_objective_with(
-            optimize_G, weight_inv_modB, constraint_weight
+            optimize_G,
+            weight_inv_modB,
+            constraint_weight,
+            decision_split_mode="jvp",
         )
 
-        method = self._resolve_optimizer_method(optimize_G=optimize_G)
         result = self._run_newton_polish_for_method(
             method,
             obj_fn,

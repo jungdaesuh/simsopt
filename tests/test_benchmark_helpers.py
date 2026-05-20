@@ -1790,6 +1790,33 @@ def test_single_stage_init_cpu_parity_requests_shared_seed_for_outer_runs(tmp_pa
     )
 
 
+def test_single_stage_init_high_resolution_outer_run_requires_continuation_seed(
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.maxiter = 10
+    args.mpol = 6
+    args.ntor = 6
+    args.warm_start_run_dir = None
+    args.jax_runtime_seed_spec = None
+
+    assert single_stage_init_parity_module._requires_continuation_seed(args)
+    with pytest.raises(
+        ValueError,
+        match="high-resolution outer runs require --warm-start-run-dir",
+    ):
+        single_stage_init_parity_module._run_single_stage_case_pair(
+            args,
+            benchmark_mode=True,
+            reference_backend="cpu",
+            reference_benchmark_mode=False,
+            case_root=tmp_path / "case",
+        )
+
+    args.warm_start_run_dir = str(tmp_path / "continuation-donor")
+    assert not single_stage_init_parity_module._requires_continuation_seed(args)
+
+
 def test_single_stage_fixture_optimizer_backend_defaults_by_backend():
     assert default_optimizer_backend_for_backend("jax") == "ondevice"
     assert default_optimizer_backend_for_backend("cpu") == "scipy"
@@ -3101,6 +3128,7 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     expected_lanes = {
         "direct_kernel",
         "relaxed_kernel",
+        "float32_smoke",
         "ls_wrapper_gradient",
         "derivative_heavy",
         "direct_hessian_oracle",
@@ -3129,6 +3157,17 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert relaxed["rtol"] == pytest.approx(1e-6)
     assert relaxed["atol"] == pytest.approx(1e-8)
     assert relaxed["documents_reduction_order_drift"] is True
+
+    float32_smoke = parity_ladder_tolerances("float32-smoke")
+    assert float32_smoke["rtol"] == pytest.approx(1e-5)
+    assert float32_smoke["atol"] == pytest.approx(1e-6)
+    assert float32_smoke["objective_rtol"] == pytest.approx(1e-4)
+    assert float32_smoke["objective_atol"] == pytest.approx(1e-6)
+    assert float32_smoke["gradient_rtol"] == pytest.approx(1e-3)
+    assert float32_smoke["gradient_atol"] == pytest.approx(1e-5)
+    assert float32_smoke["runtime_dtype_float32"] is True
+    assert float32_smoke["production_parity"] is False
+    assert float32_smoke["gradient_diagnostic_only"] is True
 
     ls_wrapper = parity_ladder_tolerances("ls-wrapper-gradient")
     assert ls_wrapper["rtol"] == pytest.approx(1e-10)
@@ -3644,6 +3683,60 @@ def test_run_code_benchmark_runtime_lane_matches_ladder_vocabulary(monkeypatch):
     )
     with pytest.raises(ValueError, match="optimizer_backend must be one of"):
         run_code_benchmark_common._resolve_runtime_lane(("hybrid",))
+
+
+def test_artifact_host_helpers_use_direction_specific_transfer_guard(monkeypatch):
+    calls = []
+
+    class FakeGuard:
+        def __init__(self, level):
+            self.level = level
+
+        def __enter__(self):
+            calls.append(("enter_device_to_host", self.level))
+
+        def __exit__(self, exc_type, exc, traceback):
+            del exc_type, exc, traceback
+            calls.append(("exit_device_to_host", self.level))
+
+    class FakeJax:
+        def transfer_guard_device_to_host(self, level):
+            calls.append(("device_to_host", level))
+            return FakeGuard(level)
+
+        def transfer_guard(self, level):
+            raise AssertionError(f"broad transfer_guard used with {level!r}")
+
+        def device_get(self, value):
+            calls.append(("device_get", value))
+            return [1.0, 2.0]
+
+    monkeypatch.setattr(
+        run_code_benchmark_common,
+        "_jax_modules",
+        lambda: (FakeJax(), object(), object()),
+    )
+
+    assert run_code_benchmark_common.artifact_host_value("device-buffer") == [
+        1.0,
+        2.0,
+    ]
+    host_array = run_code_benchmark_common.artifact_host_array(
+        "device-buffer",
+        dtype=np.float32,
+    )
+
+    np.testing.assert_array_equal(host_array, np.array([1.0, 2.0], dtype=np.float32))
+    assert calls == [
+        ("device_to_host", "allow"),
+        ("enter_device_to_host", "allow"),
+        ("device_get", "device-buffer"),
+        ("exit_device_to_host", "allow"),
+        ("device_to_host", "allow"),
+        ("enter_device_to_host", "allow"),
+        ("device_get", "device-buffer"),
+        ("exit_device_to_host", "allow"),
+    ]
 
 
 def test_require_x64_runtime_rejects_float32_runtime():

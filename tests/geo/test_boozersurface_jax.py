@@ -962,6 +962,24 @@ def _assert_explicit_lm_options_forwarded(captured_options, booz):
         assert captured_options[key] == booz.options[key]
 
 
+def _restore_backend_config(config):
+    from simsopt.backend import set_backend
+
+    set_backend(
+        config.mode,
+        strict=config.strict,
+        debug_nans=config.debug_nans,
+        disable_jit=config.disable_jit,
+        transfer_guard=config.transfer_guard,
+        compilation_cache_dir=config.compilation_cache_dir,
+        xla_gpu_preallocate=config.xla_gpu_preallocate,
+        xla_gpu_mem_fraction=config.xla_gpu_mem_fraction,
+        xla_gpu_allocator=config.xla_gpu_allocator,
+        tf_gpu_allocator=config.tf_gpu_allocator,
+        configure_runtime=False,
+    )
+
+
 def _target_lane_rejection_pattern(
     component: str, method: str, backend_mode: str
 ) -> str:
@@ -5397,6 +5415,45 @@ class TestBoozerSurfaceJAXClass:
         assert adjoint_state.dense_linear_solve_factors_available is True
         np.testing.assert_array_equal(np.asarray(solved), np.asarray(expected))
 
+    def test_packed_factor_runtime_status_rejects_high_original_residual(self):
+        """Packed LU solves must validate the original operator residual."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.need_to_run_code = False
+        n = booz._pack_decision_vector(0.3, 0.05).size
+        factor_matrix = jnp.eye(n, dtype=jnp.float64)
+        reported_operator = 2.0 * factor_matrix
+        lu_piv = _opt._factor_dense_hessian(
+            factor_matrix,
+            optimizer_backend="ondevice",
+        )
+        plu = _opt._plu_from_lu_piv(lu_piv)
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "hessian": reported_operator,
+            "PLU": plu,
+            "LU_PIV": lu_piv,
+            "dense_linear_solve_factors_available": True,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jnp.ones(n, dtype=jnp.float64)
+        raw_solved = adjoint_state.solve_forward(rhs)
+        solved, status = adjoint_state.solve_forward_with_status(rhs)
+
+        assert np.all(np.isfinite(np.asarray(raw_solved)))
+        assert not bool(np.asarray(status))
+        assert np.all(np.isnan(np.asarray(solved)))
+        assert float(np.asarray(status.residual_relative)) > 1e-10
+
     def test_get_adjoint_runtime_state_rejects_unknown_kind_even_when_plu_exists(
         self,
     ):
@@ -5483,6 +5540,30 @@ class TestBoozerSurfaceJAXClass:
             rtol=0.0,
             atol=1e-12,
         )
+
+    def test_linear_solve_tolerance_uses_float32_smoke_floor(self, request):
+        from simsopt.backend import get_backend_config, set_backend
+
+        previous_backend = get_backend_config()
+        request.addfinalizer(lambda: _restore_backend_config(previous_backend))
+        set_backend("jax_cpu_float32_smoke", configure_runtime=False)
+        booz = _make_mock_boozer_surface()
+        booz.options["bfgs_tol"] = 1.0e-10
+        booz.options["newton_tol"] = 1.0e-6
+
+        assert booz._linear_solve_tolerance() == pytest.approx(1.0e-6)
+
+    def test_linear_solve_tolerance_preserves_float64_floor(self, request):
+        from simsopt.backend import get_backend_config, set_backend
+
+        previous_backend = get_backend_config()
+        request.addfinalizer(lambda: _restore_backend_config(previous_backend))
+        set_backend("jax_cpu_parity", configure_runtime=False)
+        booz = _make_mock_boozer_surface()
+        booz.options["bfgs_tol"] = 1.0e-10
+        booz.options["newton_tol"] = 1.0e-6
+
+        assert booz._linear_solve_tolerance() == pytest.approx(1.0e-11)
 
     def test_get_adjoint_runtime_state_hessian_apply_uses_column_batched_rhs(
         self, monkeypatch
@@ -7866,6 +7947,48 @@ class TestVJPHooks:
             atol=1e-10,
         )
         assert abs(float(dropped_directional - fd_directional)) > 1e-7
+
+    def test_ls_group_vjp_places_snapshot_and_cotangents_on_active_mesh(
+        self, monkeypatch
+    ):
+        """Grouped VJP snapshots and callback cotangents use active placement."""
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+        import simsopt.jax_core.sharding as sharding_module
+
+        active_sharding = NamedSharding(
+            Mesh(np.asarray(jax.devices("cpu"), dtype=object), ("d",)),
+            P(),
+        )
+        monkeypatch.setattr(
+            sharding_module,
+            "active_replicated_sharding",
+            lambda *, mode=None: active_sharding,
+        )
+
+        def assert_active_sharding(array):
+            assert array.sharding.is_equivalent_to(active_sharding, array.ndim)
+
+        def assert_active_tree_sharding(tree):
+            for leaf in jax.tree_util.tree_leaves(tree):
+                if isinstance(leaf, jax.Array):
+                    assert_active_sharding(leaf)
+
+        booz = _make_mock_boozer_surface()
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        x, _ = _bsj._ls_decision_vector(booz, iota, G)
+        lm_host = np.linspace(0.1, 1.0, int(x.shape[0]), dtype=np.float64)
+        snapshot = _bsj._build_ls_grouped_vjp_snapshot(
+            booz,
+            iota,
+            G,
+            solve_generation=booz._solver_generation,
+            weight_inv_modB=True,
+        )
+        assert_active_tree_sharding(snapshot)
+
+        cotangents = _bsj._ls_field_term_cotangents(snapshot, lm_host)
+        assert_active_tree_sharding(cotangents)
 
     @pytest.mark.parametrize("stellsym", [False, True])
     def test_ls_group_vjp_snapshot_static_metadata_is_hashable(self, stellsym):

@@ -106,6 +106,7 @@ TARGET_OPTIMIZER_BACKENDS = (
     SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND,
 )
 DEFAULT_OUTER_MAXITER = 0
+MAX_COLD_SEED_OUTER_RUN_RESOLUTION = 4
 TRACE_PARITY_OUTER_MAXLS = 8
 _TARGET_LANE_FINAL_ONLY_SYNC = "final-only"
 _TARGET_LANE_PER_ACCEPT_SYNC = "per-accept"
@@ -961,6 +962,34 @@ def _needs_shared_init_seed(
     return bool(reference_backend == "cpu" and int(args.maxiter) > 0)
 
 
+def _has_explicit_single_stage_seed(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "jax_runtime_seed_spec", None) is not None
+        or getattr(args, "warm_start_run_dir", None) is not None
+    )
+
+
+def _requires_continuation_seed(args: argparse.Namespace) -> bool:
+    return bool(
+        int(args.maxiter) > 0
+        and not _has_explicit_single_stage_seed(args)
+        and max(int(args.mpol), int(args.ntor)) > MAX_COLD_SEED_OUTER_RUN_RESOLUTION
+    )
+
+
+def _require_supported_single_stage_seed_contract(args: argparse.Namespace) -> None:
+    if not _requires_continuation_seed(args):
+        return
+    raise ValueError(
+        "single_stage_init_parity high-resolution outer runs require "
+        "--warm-start-run-dir or --jax-runtime-seed-spec; build the donor with "
+        "examples/single_stage_optimization/SINGLE_STAGE/"
+        "run_single_stage_continuation.py. "
+        f"Got mpol={int(args.mpol)}, ntor={int(args.ntor)}, "
+        f"maxiter={int(args.maxiter)}."
+    )
+
+
 def _namespace_with_overrides(
     args: argparse.Namespace,
     **overrides: Any,
@@ -984,6 +1013,7 @@ def _run_single_stage_case_pair(
     dict[str, Any] | None,
     dict[str, Any] | None,
 ]:
+    _require_supported_single_stage_seed_contract(args)
     compare_surface_geometry = _should_compare_surface_geometry(
         args,
         benchmark_mode=benchmark_mode,
