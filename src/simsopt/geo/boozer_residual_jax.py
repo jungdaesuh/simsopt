@@ -93,19 +93,100 @@ __all__ = [
 
 def _split_decision_vector(x, *, optimize_G):
     x_jax = _as_runtime_value(x, reference=x)
+    _validate_decision_vector_tail(x_jax, optimize_G=optimize_G)
+    if optimize_G:
+        return _split_decision_vector_with_G_vjp_safe(x_jax)
+    sdofs, iota = _split_decision_vector_without_G_vjp_safe(x_jax)
+    return sdofs, iota, None
+
+
+def _split_decision_vector_jvp_safe(x, *, optimize_G):
+    x_jax = _as_runtime_value(x, reference=x)
+    _validate_decision_vector_tail(x_jax, optimize_G=optimize_G)
+    return _split_decision_vector_lax(x_jax, optimize_G=optimize_G)
+
+
+def _split_decision_vector_for_mode(x, *, optimize_G, decision_split_mode):
+    if decision_split_mode == "reverse":
+        return _split_decision_vector(x, optimize_G=optimize_G)
+    if decision_split_mode == "jvp":
+        return _split_decision_vector_jvp_safe(x, optimize_G=optimize_G)
+    raise ValueError(
+        f"unknown decision_split_mode {decision_split_mode!r}; "
+        "expected 'reverse' or 'jvp'."
+    )
+
+
+def _validate_decision_vector_tail(x_jax, *, optimize_G):
     tail_size = 2 if optimize_G else 1
-    surface_size = int(x_jax.shape[0]) - tail_size
-    if surface_size < 0:
+    if int(x_jax.shape[0]) < tail_size:
         raise ValueError(
             f"decision vector length {int(x_jax.shape[0])} is too short for "
             f"optimize_G={optimize_G}; expected at least {tail_size} entries."
         )
-    sdofs = x_jax[:surface_size]
-    iota = x_jax[surface_size]
+
+
+def _split_decision_vector_lax(x_jax, *, optimize_G):
+    surface_size = int(x_jax.shape[0]) - (2 if optimize_G else 1)
     if optimize_G:
-        G = x_jax[surface_size + 1]
+        sdofs = lax.slice_in_dim(x_jax, 0, surface_size, axis=0)
+        iota = jnp.reshape(
+            lax.slice_in_dim(x_jax, surface_size, surface_size + 1, axis=0),
+            (),
+        )
+        G = jnp.reshape(
+            lax.slice_in_dim(x_jax, surface_size + 1, surface_size + 2, axis=0),
+            (),
+        )
         return sdofs, iota, G
+    sdofs = lax.slice_in_dim(x_jax, 0, surface_size, axis=0)
+    iota = jnp.reshape(
+        lax.slice_in_dim(x_jax, surface_size, surface_size + 1, axis=0),
+        (),
+    )
     return sdofs, iota, None
+
+
+@jax.custom_vjp
+def _split_decision_vector_with_G_vjp_safe(x_jax):
+    return _split_decision_vector_lax(x_jax, optimize_G=True)
+
+
+def _split_decision_vector_with_G_vjp_safe_fwd(x_jax):
+    return _split_decision_vector_lax(x_jax, optimize_G=True), None
+
+
+def _split_decision_vector_with_G_vjp_safe_bwd(_residual, cotangents):
+    sdofs_ct, iota_ct, G_ct = cotangents
+    return (jnp.concatenate((sdofs_ct, jnp.ravel(iota_ct), jnp.ravel(G_ct))),)
+
+
+_split_decision_vector_with_G_vjp_safe.defvjp(
+    _split_decision_vector_with_G_vjp_safe_fwd,
+    _split_decision_vector_with_G_vjp_safe_bwd,
+)
+
+
+@jax.custom_vjp
+def _split_decision_vector_without_G_vjp_safe(x_jax):
+    sdofs, iota, _G = _split_decision_vector_lax(x_jax, optimize_G=False)
+    return sdofs, iota
+
+
+def _split_decision_vector_without_G_vjp_safe_fwd(x_jax):
+    sdofs, iota, _G = _split_decision_vector_lax(x_jax, optimize_G=False)
+    return (sdofs, iota), None
+
+
+def _split_decision_vector_without_G_vjp_safe_bwd(_residual, cotangents):
+    sdofs_ct, iota_ct = cotangents
+    return (jnp.concatenate((sdofs_ct, jnp.ravel(iota_ct))),)
+
+
+_split_decision_vector_without_G_vjp_safe.defvjp(
+    _split_decision_vector_without_G_vjp_safe_fwd,
+    _split_decision_vector_without_G_vjp_safe_bwd,
+)
 
 
 def _inverse_modB(B2):
@@ -583,13 +664,23 @@ def _surface_geometry_from_dofs(
     return sgf(*args), sg1f(*args), sg2f(*args)
 
 
-def _unpack_decision_vector(x, coil_arrays, optimize_G):
+def _unpack_decision_vector(
+    x,
+    coil_arrays,
+    optimize_G,
+    *,
+    decision_split_mode="reverse",
+):
     """Unpack decision vector into (sdofs, iota, G).
 
     Args:
         coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
     """
-    sdofs, iota, G = _split_decision_vector(x, optimize_G=optimize_G)
+    sdofs, iota, G = _split_decision_vector_for_mode(
+        x,
+        optimize_G=optimize_G,
+        decision_split_mode=decision_split_mode,
+    )
     if optimize_G:
         return sdofs, iota, G
     all_currents = jnp.concatenate([c for _, _, c in coil_arrays])
@@ -608,6 +699,7 @@ def _composed_pipeline(
     stellsym,
     scatter_indices,
     optimize_G,
+    decision_split_mode="reverse",
 ):
     """Shared pipeline: unpack x → surface geometry → Biot-Savart field.
 
@@ -616,7 +708,12 @@ def _composed_pipeline(
 
     Returns (sdofs, iota, G, gamma, xphi, xtheta, B).
     """
-    sdofs, iota, G = _unpack_decision_vector(x, coil_arrays, optimize_G)
+    sdofs, iota, G = _unpack_decision_vector(
+        x,
+        coil_arrays,
+        optimize_G,
+        decision_split_mode=decision_split_mode,
+    )
 
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -649,6 +746,7 @@ def boozer_penalty_composed(
     optimize_G,
     weight_inv_modB=True,
     reduction_mode="default",
+    decision_split_mode="reverse",
 ):
     """Composed scalar penalty objective: DOFs → geometry → field → residual → scalar.
 
@@ -687,6 +785,7 @@ def boozer_penalty_composed(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         optimize_G=optimize_G,
+        decision_split_mode=decision_split_mode,
     )
     return boozer_residual_scalar(
         G,
@@ -733,7 +832,9 @@ def boozer_penalty_hvp_composed(x, v, **kwargs):
     """
     x_jax = jnp.asarray(x)
     v_jax = jnp.asarray(v)
-    grad_fn = jax.grad(lambda y: boozer_penalty_composed(y, **kwargs))
+    hvp_kwargs = dict(kwargs)
+    hvp_kwargs["decision_split_mode"] = "jvp"
+    grad_fn = jax.grad(lambda y: boozer_penalty_composed(y, **hvp_kwargs))
     return jax.jvp(grad_fn, (x_jax,), (v_jax,))[1]
 
 
@@ -750,6 +851,7 @@ def _boozer_residual_vector_composed(
     scatter_indices,
     optimize_G=True,
     weight_inv_modB=False,
+    decision_split_mode="reverse",
 ):
     """Composed residual vector: DOFs → geometry → field → residual vector.
 
@@ -775,6 +877,7 @@ def _boozer_residual_vector_composed(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         optimize_G=optimize_G,
+        decision_split_mode=decision_split_mode,
     )
     return boozer_residual_vector(
         G,
@@ -802,7 +905,11 @@ def boozer_residual_jvp_composed(x, v, **kwargs):
     """
     x_jax = jnp.asarray(x)
     v_jax = jnp.asarray(v)
-    residual_fn = lambda x_value: _boozer_residual_vector_composed(x_value, **kwargs)
+    jvp_kwargs = dict(kwargs)
+    jvp_kwargs["decision_split_mode"] = "jvp"
+    residual_fn = lambda x_value: _boozer_residual_vector_composed(
+        x_value, **jvp_kwargs
+    )
     return jax.jvp(residual_fn, (x_jax,), (v_jax,))
 
 
@@ -861,14 +968,20 @@ def boozer_residual_jacobian_composed(
         * int(np.shape(kwargs["quadpoints_phi"])[0])
         * int(np.shape(kwargs["quadpoints_theta"])[0])
     )
-    residual_fn = lambda x_value: _boozer_residual_vector_composed(x_value, **kwargs)
-
     if n_res < n_dofs:
+        residual_fn = lambda x_value: _boozer_residual_vector_composed(
+            x_value, **kwargs
+        )
         r, vjp_fn = jax.vjp(residual_fn, x_jax)
         cotangent_basis = jnp.eye(n_res, dtype=r.dtype)
         (J,) = jax.vmap(vjp_fn)(cotangent_basis)
         return r, J
 
+    jvp_kwargs = dict(kwargs)
+    jvp_kwargs["decision_split_mode"] = "jvp"
+    residual_fn = lambda x_value: _boozer_residual_vector_composed(
+        x_value, **jvp_kwargs
+    )
     r, jvp_fn = jax.linearize(residual_fn, x_jax)
     tangent_basis = jnp.eye(n_dofs, dtype=x_jax.dtype)
     return r, jnp.swapaxes(jax.vmap(jvp_fn)(tangent_basis), 0, 1)

@@ -24,6 +24,7 @@ import sys
 import pytest
 import numpy as np
 
+import jax
 import jax.numpy as jnp
 
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,7 @@ from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 import simsopt.geo.boozer_residual_jax as _brj
 from simsopt.geo.boozer_residual_jax import (
     _split_decision_vector,
+    _split_decision_vector_jvp_safe,
     _unpack_decision_vector,
     boozer_penalty_hvp_composed,
     boozer_residual_jacobian_composed,
@@ -117,6 +119,114 @@ def test_split_decision_vector_rejects_missing_tail_entries():
 
     with pytest.raises(ValueError, match="decision vector length 0 is too short"):
         _split_decision_vector(jnp.asarray([], dtype=jnp.float64), optimize_G=False)
+
+
+def test_split_decision_vector_static_slices_under_transfer_guard():
+    """Static Boozer slices must not trigger host-to-device transfers."""
+
+    x_with_G = jnp.asarray([0.1, 0.2, 0.3, 0.4, 0.5], dtype=jnp.float64)
+    x_without_G = jnp.asarray([0.6, 0.7, 0.8], dtype=jnp.float64)
+    x_with_G.block_until_ready()
+    x_without_G.block_until_ready()
+
+    def scalar_with_G(x):
+        sdofs, iota, G = _split_decision_vector(x, optimize_G=True)
+        return jnp.sum(sdofs * sdofs) + iota * G
+
+    def scalar_without_G(x):
+        sdofs, iota, G = _split_decision_vector(x, optimize_G=False)
+        assert G is None
+        return jnp.sum(sdofs * sdofs) + iota
+
+    tangent_with_G = jnp.ones_like(x_with_G)
+    tangent_without_G = jnp.ones_like(x_without_G)
+    cotangent = jnp.asarray(1.0, dtype=jnp.float64)
+    tangent_with_G.block_until_ready()
+    tangent_without_G.block_until_ready()
+    cotangent.block_until_ready()
+
+    with jax.transfer_guard("disallow"):
+        sdofs, iota, G = _split_decision_vector(x_with_G, optimize_G=True)
+        sdofs.block_until_ready()
+        iota.block_until_ready()
+        G.block_until_ready()
+
+        sdofs_no_G, iota_no_G, G_none = _split_decision_vector(
+            x_without_G,
+            optimize_G=False,
+        )
+        sdofs_no_G.block_until_ready()
+        iota_no_G.block_until_ready()
+        _value_with_G, pullback_with_G = jax.vjp(scalar_with_G, x_with_G)
+        (grad_with_G,) = pullback_with_G(cotangent)
+        _value_without_G, pullback_without_G = jax.vjp(
+            scalar_without_G,
+            x_without_G,
+        )
+        (grad_without_G,) = pullback_without_G(cotangent)
+        grad_with_G.block_until_ready()
+        grad_without_G.block_until_ready()
+
+    def scalar_with_G_jvp_safe(x):
+        sdofs, iota, G = _split_decision_vector_jvp_safe(x, optimize_G=True)
+        return jnp.sum(sdofs * sdofs) + iota * G
+
+    def scalar_without_G_jvp_safe(x):
+        sdofs, iota, G = _split_decision_vector_jvp_safe(x, optimize_G=False)
+        assert G is None
+        return jnp.sum(sdofs * sdofs) + iota
+
+    value_and_grad_with_G = jax.jit(jax.value_and_grad(scalar_with_G_jvp_safe))
+    value_and_grad_without_G = jax.jit(jax.value_and_grad(scalar_without_G_jvp_safe))
+    hvp_with_G = jax.jit(
+        lambda x, tangent: jax.jvp(
+            jax.grad(scalar_with_G_jvp_safe), (x,), (tangent,)
+        )[1]
+    )
+    hvp_without_G = jax.jit(
+        lambda x, tangent: jax.jvp(
+            jax.grad(scalar_without_G_jvp_safe), (x,), (tangent,)
+        )[1]
+    )
+
+    with jax.transfer_guard("disallow"):
+        _value_with_G_jvp, grad_with_G_jvp = value_and_grad_with_G(x_with_G)
+        _value_without_G_jvp, grad_without_G_jvp = value_and_grad_without_G(
+            x_without_G
+        )
+        hvp_with_G_result = hvp_with_G(x_with_G, tangent_with_G)
+        hvp_without_G_result = hvp_without_G(x_without_G, tangent_without_G)
+        grad_with_G_jvp.block_until_ready()
+        grad_without_G_jvp.block_until_ready()
+        hvp_with_G_result.block_until_ready()
+        hvp_without_G_result.block_until_ready()
+
+    np.testing.assert_allclose(host_array(sdofs), [0.1, 0.2, 0.3])
+    assert host_scalar(iota) == pytest.approx(0.4)
+    assert host_scalar(G) == pytest.approx(0.5)
+    np.testing.assert_allclose(host_array(sdofs_no_G), [0.6, 0.7])
+    assert host_scalar(iota_no_G) == pytest.approx(0.8)
+    assert G_none is None
+    np.testing.assert_allclose(host_array(grad_with_G), [0.2, 0.4, 0.6, 0.5, 0.4])
+    np.testing.assert_allclose(host_array(grad_without_G), [1.2, 1.4, 1.0])
+    np.testing.assert_allclose(
+        host_array(grad_with_G_jvp), [0.2, 0.4, 0.6, 0.5, 0.4]
+    )
+    np.testing.assert_allclose(host_array(grad_without_G_jvp), [1.2, 1.4, 1.0])
+    np.testing.assert_allclose(
+        host_array(hvp_with_G_result), [2.0, 2.0, 2.0, 1.0, 1.0]
+    )
+    np.testing.assert_allclose(host_array(hvp_without_G_result), [2.0, 2.0, 0.0])
+
+
+def test_unpack_decision_vector_rejects_unknown_split_mode():
+    with pytest.raises(ValueError, match="unknown decision_split_mode"):
+        _unpack_decision_vector(
+            jnp.asarray([0.1, 0.2], dtype=jnp.float64),
+            [],
+            True,
+            decision_split_mode="invalid",
+        )
 
 
 def test_unpack_decision_vector_uses_current_ssot_when_G_not_optimized():
@@ -247,7 +357,8 @@ def test_composed_penalty_hvp_matches_dense_hessian_product(monkeypatch):
         dtype=jnp.float64,
     )
 
-    def fake_penalty(x, *, scale, offset):
+    def fake_penalty(x, *, scale, offset, decision_split_mode):
+        assert decision_split_mode == "jvp"
         quadratic = 0.5 * x @ (matrix @ x)
         return scale * (quadratic + jnp.sum(jnp.sin(x))) + offset
 
@@ -260,7 +371,12 @@ def test_composed_penalty_hvp_matches_dense_hessian_product(monkeypatch):
 
     actual = boozer_penalty_hvp_composed(x, v, scale=scale, offset=offset)
     dense_hessian = _brj.jax.hessian(
-        lambda y: fake_penalty(y, scale=scale, offset=offset)
+        lambda y: fake_penalty(
+            y,
+            scale=scale,
+            offset=offset,
+            decision_split_mode="jvp",
+        )
     )(x)
     expected = dense_hessian @ v
 
@@ -272,7 +388,8 @@ def test_composed_residual_jvp_vjp_match_jax_products(monkeypatch):
         del args, kwargs
         raise AssertionError("dense Jacobian should not be materialized")
 
-    def fake_residual(x, *, scale):
+    def fake_residual(x, *, scale, decision_split_mode="reverse"):
+        assert decision_split_mode in {"reverse", "jvp"}
         return scale * jnp.asarray(
             [
                 x[0] + x[1] ** 2,
