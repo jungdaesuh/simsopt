@@ -1,3 +1,9 @@
+"""Historical item-19 optimizer routing/import regression tests.
+
+The filename tracks the original review item for optimizer dispatch cleanup;
+the Boozer M1 Hessian split regression lives in ``test_boozer_residual_jax.py``.
+"""
+
 from pathlib import Path
 
 import pytest

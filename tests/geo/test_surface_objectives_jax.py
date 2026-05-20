@@ -1826,6 +1826,14 @@ def test_traceable_hessian_solve_uses_dense_plu_forward_and_transpose():
     )
 
 
+def test_traceable_plu_unpack_rejects_unsupported_factor_arity():
+    matrix = jnp.eye(2, dtype=jnp.float64)
+    unsupported_factors = (matrix, matrix, matrix, matrix)
+
+    with pytest.raises(AssertionError, match="linear_solve_factors"):
+        surfaceobjectives_jax_module._traceable_plu_unpack_lu_piv(unsupported_factors)
+
+
 def test_traceable_hessian_plu_solve_requires_forward_error_gate(monkeypatch):
     matrix = jnp.asarray(
         [

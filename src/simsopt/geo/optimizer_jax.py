@@ -252,6 +252,8 @@ _TRACEABLE_CALLBACK_LOCK = Lock()
 _TRACEABLE_CALLBACK_IDS = count(1)
 _TRACEABLE_CALLBACKS: dict[int, Callable[..., object]] = {}
 _TRACEABLE_RUNNER_CACHE_LOCK = Lock()
+# Traceable solver closures capture problem state that is not safely comparable;
+# use callable identity for ownership and option tuples for per-callable reuse.
 _TRACEABLE_LM_RUNNER_CACHE = WeakKeyDictionary()
 _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE = WeakKeyDictionary()
 _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE = WeakKeyDictionary()

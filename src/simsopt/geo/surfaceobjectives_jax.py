@@ -3305,7 +3305,11 @@ def _traceable_plu_unpack_triple(linear_solve_factors):
 
 def _traceable_plu_unpack_lu_piv(linear_solve_factors):
     """Return ``(lu, piv)`` from a 5-tuple ``linear_solve_factors``, else ``None``."""
-    if len(linear_solve_factors) == 5:
+    factor_count = len(linear_solve_factors)
+    assert factor_count in (3, 5), (
+        "linear_solve_factors must be (P, L, U) or (P, L, U, lu, piv)"
+    )
+    if factor_count == 5:
         return linear_solve_factors[3], linear_solve_factors[4]
     return None
 
