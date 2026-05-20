@@ -10,7 +10,7 @@ Status: Implementation in progress. Waves 1-5 have code changes and focused loca
 - [x] MPS smoke interpreter recorded: `.conda/jax-mps/bin/python` imports `jax==0.10.0`, `jaxlib==0.10.0`, backend `mps`, devices `[MpsDevice(id=0)]`.
 - [x] Non-target base interpreter recorded: `/opt/homebrew/Caskroom/miniforge/base/bin/python` imports `jax==0.9.2`, `jaxlib==0.9.2`, backend `cpu`; do not use base `python` as plan-grade proof for this document.
 - [x] Official docs rechecked for JAX transfer guard, `jax.custom_vjp`, `jax.lax.slice_in_dim`, JAX CUDA installation support, NVIDIA CUDA driver/toolkit compatibility, SIMSOPT Boozer residual/BoozerSurface contracts, and SciPy L-BFGS-B status semantics.
-- [x] Context7 was used for current JAX and NVIDIA CUDA documentation; official upstream web docs were also checked for source links.
+- [x] Context7 lookup was attempted during the doc review but quota-limited; this document's authoritative references are the direct official upstream links in "Official Documentation Constraints" below.
 - [x] Fixed strict transfer-guard failure in Boozer decision-vector splitting: reverse-mode eager VJP uses a custom VJP split whose transpose concatenates cotangents without introducing a host-to-device scalar transfer; HVP/JVP/linearize callers use the plain `lax.slice_in_dim` split because JAX `custom_vjp` does not support forward-mode autodiff.
 - [x] Split mode is now fail-fast: only `"reverse"` and `"jvp"` are accepted; unknown internal modes raise `ValueError`.
 - [x] Tightened the repo-local non-finite optimizer status contract: status `6` now reports non-finite objective, iterate, or gradient consistently across host L-BFGS, private L-BFGS result conversion, SciPy reference normalization, and single-stage/continuation invalid-state parsing.
@@ -76,18 +76,18 @@ The plan treats MPS as a float32 smoke lane unless and until a separate FP32 pro
 
 ## Validated State and Remaining Risks
 
-- Float32 single-stage target-lane gradients fail closed with NaN sentinels (`surfaceobjectives_jax.py:3762-3769`) when the adjoint solve fails its success contract; the scalar objective stays finite because it reads cached baseline state.
-- The target LS Boozer path forces `linear_solve_factors=None` (`surfaceobjectives_jax.py:3484-3492, 4081`) and routes adjoint solves through operator GMRES on the normal equations (`optimizer_jax.py:3445-3481`), which squares conditioning; the CPU float32 smoke diagnosis shows this path fails the residual gate at the smoke fixture.
-- The current operator-GMRES success gate `||residual|| ≤ max(1e-12, 10·tol·||rhs||)` uses the effective Boozer linear-solve tolerance (`boozersurface_jax.py:3563-3585`). Float32 smoke now has `linear_solve_tolerance_floor=sqrt(eps(float32))≈3.45e-4` and `linear_solve_tolerance_cap=1e-3` (`runtime.py:190-201`; `tests/test_runtime_dtype_policy.py:52-66`), so requested tolerances are clamped into the float32 backward-error scale.
-- The "11/11 NaN" diagnostic counts the 11-DOF gradient vector, not 11 term components; the term diagnostic enumerates the `_TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS` list (`surfaceobjectives_jax.py:212-221, 5134-5148`), so `non_qs` always reports first because it is index 0.
-- The CPU float32 smoke rerun now marks the optimizer result as failed when `fun`, `jac`, or `x` is non-finite (`optimizer_jax_reference.py:93-105`, `optimizer_jax_private/_result_converters.py:20-24`, `optimizer_host_lbfgs.py:1513-1536`).
+- Float32 single-stage target-lane gradients fail closed with NaN sentinels (`surfaceobjectives_jax.py:3778-3785`) when the adjoint solve fails its success contract; the scalar objective stays finite because it reads cached baseline state.
+- The target LS Boozer runtime lane intentionally carries `linear_solve_factors=None` (`surfaceobjectives_jax.py:3500-3508`) so compiled adjoint solves stay matrix-free. In the current tree this does **not** mean normal equations: `_solve_hessian_least_squares_system_with_status` documents "without forming normal equations", uses dense `lstsq` when the square operator can be materialized, otherwise uses operator-only GMRES, and then validates the original residual (`optimizer_jax.py:3970-3999`). The remaining banana CPU/MPS float32 smoke failure is therefore a real original-residual adjoint failure, not a current `H^T H` fallback.
+- The current solve-status gate is `||A x - b|| / max(||b||, eps_runtime) <= effective_linear_solve_tolerance(policy, requested_tol)` (`optimizer_jax.py:3492-3569`). Float32 smoke now has `linear_solve_tolerance_floor=sqrt(eps(float32))≈3.45e-4` and `linear_solve_tolerance_cap=1e-3` (`runtime.py:190-201`; `tests/test_runtime_dtype_policy.py:52-66`), so requested tolerances are clamped into the float32 backward-error scale.
+- The "11/11 NaN" diagnostic counts the 11-DOF gradient vector, not 11 term components; the term diagnostic enumerates the `_TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS` list (`surfaceobjectives_jax.py:214-223, 5439-5482`), so `non_qs` always reports first because it is index 0.
+- The CPU float32 smoke rerun now marks the optimizer result as failed when `fun`, `jac`, or `x` is non-finite (`optimizer_jax_reference.py:105-124`, `optimizer_jax_private/_result_converters.py:20-45`, `optimizer_host_lbfgs.py:1527-1553,1604-1624`).
 - Pre-gate MPS smoke artifacts do not prove post-fix behavior. The stage-2 artifact (`.artifacts/production_parity_maxiter7_20260519/mps_stage2_smoke_r3/stage2_mps_trajectory.json`) shows a suspicious constant gradient-norm trajectory, and its nested `results.json` reports `OPTIMIZER_SUCCESS=True` with finite `FINAL_OBJECTIVE`/`FINAL_DOFS` but null `OPTIMIZER_FUN_FINITE`/`OPTIMIZER_JAC_FINITE`/`OPTIMIZER_INVALID_STATE` flags. A separate single-stage smoke artifact (`mps_single_stage_scipyjax_smoke_r1/boozer_init_progress.json`) reports `solve_success=true, iterations=0.0`. Wave 1 has added the current result-acceptance and independent finiteness gate; these old artifacts remain baseline evidence only.
 - The packed-PLU runtime callbacks (`boozersurface_jax.py:3730-3865`) and the traceable PLU linearization (`surfaceobjectives_jax.py:3329-3407`) now report residual-quality status, not only finite solution entries.
 - Diagnostic serialization is split from accepted serialization: `sanitize_diagnostic_payload` keeps NaN/Inf masking for diagnostic payloads, while `strict_accepted_payload` / `accepted_result_payload` reject non-finite accepted artifacts (`hardware_constraints.py:26-168`).
 - Single-stage accepted artifact writes now route through `write_single_stage_final_artifact` and `write_single_stage_results_json` (`single_stage_banana_example.py:11227-11252`), so final-result finiteness is checked independently of the old target-lane metrics guard.
 - MPS policy is float32 smoke by design (`runtime.py:310-326`): `runtime_dtype=float32`, `requires_x64=False`, `tolerance_tier=float32_smoke`, `default_optimizer_backend="scipy"`.
 - The backend facade skew is closed in the current tree: the shadowed legacy `src/simsopt/backend.py` shim is deleted, and the package facade in `src/simsopt/backend/__init__.py` is the only public backend facade.
-- Float32-smoke-critical dtype leaks are closed in the current tree: `SquaredFluxJAX._gather_field_free_dofs` now uses `runtime_jnp_dtype()` (`fluxobjective_jax.py:373-375`), `QfmSurfaceJAX._coil_set_spec` uses `runtime_jnp_dtype()` (`qfmsurface_jax.py:73-76`), and curve geometry helper names no longer imply float64 (`curve_geometry.py:60-84`). Off-critical-path float64 leaks (bootstrap, VMEC, PM/wireframe workflows) are still tracked in Wave 8.
+- Float32-smoke-critical dtype leaks are closed in the current tree: `SquaredFluxJAX._gather_field_free_dofs` now uses `runtime_jnp_dtype()` (`objectives/fluxobjective_jax.py:373-375`), `QfmSurfaceJAX._coil_set_spec` uses `runtime_jnp_dtype()` (`geo/qfmsurface_jax.py:73-76`), and curve geometry helper names no longer imply float64 (`jax_core/curve_geometry.py:60-84`). Off-critical-path float64 leaks (bootstrap, VMEC, PM/wireframe workflows) are still tracked in Wave 8.
 
 ## Official Documentation Constraints
 
@@ -97,6 +97,7 @@ The implementation must respect these upstream contracts. Pinned runtime: `jax==
 - JAX transfer guard distinguishes explicit transfers (`jax.device_put*()`, `jax.device_get()`) from implicit transfers. Direction-specific settings are `jax_transfer_guard_host_to_device`, `jax_transfer_guard_device_to_device`, `jax_transfer_guard_device_to_host`, plus the `with jax.transfer_guard(level): ...` context manager. Only `disallow_explicit` blocks `device_get`/`device_put`; `log` and `disallow` target implicit transfers. Reference: [JAX transfer guard](https://docs.jax.dev/en/latest/transfer_guard.html).
 - `jax.device_get()` is the explicit host materialization API and is classified as an explicit transfer by the guard. Reference: [jax.device_get](https://docs.jax.dev/en/latest/_autosummary/jax.device_get.html).
 - The active MPS backend in this repo is `tillahoffmann/jax-mps` (MLX-backed PJRT plugin pinned to jaxlib 0.10.x). MLX supports float32 only, so float64 is structurally unavailable on this lane. Reference: [tillahoffmann/jax-mps](https://github.com/tillahoffmann/jax-mps). The legacy Apple `jax-metal` path was removed in this repo and now hard-fails as incompatible with jaxlib 0.10 (`runtime.py:41-55`); keep Apple's page only as historical context: [Apple Accelerated JAX on Mac](https://developer.apple.com/metal/jax/).
+- SIMSOPT's BoozerSurface contract is a constrained least-squares problem whose residual vector comes from `boozer_surface_residual`; endpoint optimizer claims must therefore be grounded in residual/objective checks, not only a solver success flag. Reference: [SIMSOPT BoozerSurface docs](https://simsopt.readthedocs.io/latest/simsopt.geo.html#simsopt.geo.boozersurface.BoozerSurface).
 - SciPy `OptimizeResult.status` is solver-specific and `message` is the explanatory contract. Reference: [SciPy OptimizeResult](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.OptimizeResult.html).
 - SciPy's low-level L-BFGS-B interface returns `(x, f, d)` with `d["warnflag"] ∈ {0, 1, 2}` and `d["task"]`; status `6` is not part of that low-level `warnflag` contract, so the repo-local `LBFGS_STATUS_NONFINITE = 6` (`optimizer_jax_private/_types.py:15`) is reserved for non-finite state in this codebase only and must not be presented as universal. Reference: [SciPy fmin_l_bfgs_b](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.fmin_l_bfgs_b.html).
 
@@ -136,19 +137,19 @@ These must be pinned before the corresponding wave runs.
 
 ### Wave 0 - Pin Contracts Before Fixes
 
-- [ ] Add this plan to the remediation tracking checklist.
-- [ ] Record the exact current source snapshot, branch (`gpu-purity-stage2-20260405`), and dirty-file list before implementation starts.
-- [ ] Record the existing failing CPU float32 smoke artifact path and the pre-fix MPS trajectory artifact path (`.artifacts/production_parity_maxiter7_20260519/mps_stage2_smoke_r3/`) as baseline evidence.
+- [x] Add this plan to the remediation tracking checklist.
+- [ ] Re-record the exact current source snapshot, branch (`gpu-purity-stage2-20260405`), and dirty-file list before the next implementation wave starts. The current branch is a dirty integration tree; do not reuse older line-number evidence as production proof.
+- [x] Record the existing failing CPU float32 smoke artifact path and the pre-fix MPS trajectory artifact path (`.artifacts/production_parity_maxiter7_20260519/mps_stage2_smoke_r3/`) as baseline evidence.
 - [x] Pin the Wave-1-gating decisions (rejection-marker location, sanitize-helper split). Pin the Wave-2-gating decisions (singular-LS solver contract, packed-factor residual metric).
 - [x] Record the exact official-doc references used for dtype, transfer, MPS, and SciPy optimizer behavior (see Official Documentation Constraints above; cite the jax-mps README for the float32-only constraint).
-- [ ] Inventory root-level debug artifacts and decide delete, move, or gitignore before cleanup.
+- [x] Inventory root-level debug artifacts and decide delete, move, or gitignore before cleanup. Decision: gitignore confirmed root-local diagnostics; do not delete user artifacts during this plan.
 
 Acceptance criteria:
 
-- [ ] Baseline evidence is listed in the implementation notes.
-- [ ] The production parity contract is not changed.
-- [ ] MPS is still documented as float32 smoke, not production parity.
-- [ ] Wave 1 cannot start before its gating decisions are pinned; Wave 2 cannot start before its gating decisions are pinned.
+- [x] Baseline evidence is listed in the implementation notes.
+- [x] The production parity contract is not changed.
+- [x] MPS is still documented as float32 smoke, not production parity.
+- [x] Wave 1 cannot start before its gating decisions are pinned; Wave 2 cannot start before its gating decisions are pinned.
 
 ### Wave 1 - Accepted Artifact Gate SSOT
 
@@ -165,7 +166,7 @@ Implementation tasks:
   - [x] final gradient is finite when the lane contract requires a gradient;
   - [x] reporting metrics declared required by the artifact schema are finite;
   - [x] `backend_mode`, `runtime_dtype`, `host_dtype`, `tolerance_tier`, and `maxiter` are recorded.
-- [x] Gate both target-lane (`single_stage_banana_example.py:5316-5320`) and non-target-lane (`:5326-5377`) final reporting through that one helper; delete the duplicated target-lane-only check.
+- [x] Gate both target-lane and non-target-lane final artifact writes through `write_single_stage_final_artifact` / `write_single_stage_results_json` (`single_stage_banana_example.py:11227-11252`); delete the duplicated target-lane-only check.
 - [x] If side artifacts (`outer_optimizer_progress.json`, `boozer_init_progress.json`, `target_lane_gradient_diagnosis.json`, etc.) continue to be written after failure, write one explicit `REJECTED.json` rejection marker alongside them so downstream validators do not have to scan logs.
 - [x] Per-iteration `nonfinite_step` events (`optimizer_host_lbfgs.py:1359-1366`) escalate to `LBFGS_STATUS_NONFINITE` at termination instead of resolving silently to `status=0/1`.
 
@@ -192,12 +193,12 @@ Purpose: fix the adjoint-solve failure at the numerical contract boundary.
 Implementation tasks:
 
 - [x] Split the adjoint linear-solve contract into three explicit solve kinds with one shared status-object shape `{success: bool, residual: float, residual_relative: float, iterations: int}`:
-  - [x] square Hessian solve via `_solve_square_array_system_operator_only` (`optimizer_jax.py:3083-3094, 3296-3300`);
-  - [x] singular/gauge-null least-squares solve (current `_solve_hessian_least_squares_system_with_status` at `optimizer_jax.py:3445-3481`);
+  - [x] square Hessian solve via `_solve_square_array_system_operator_only` (`optimizer_jax.py:3890-3909`);
+  - [x] singular/gauge-null least-squares solve (current `_solve_hessian_least_squares_system_with_status` at `optimizer_jax.py:3970-3999`);
   - [x] packed-factor solve via the LS lane PLU triangular solves (`boozersurface_jax.py:3730-3865`, `surfaceobjectives_jax.py:3329-3407`).
-- [x] Stop routing a successful direct square operator solve through the normal-equation LS path. Today, `surfaceobjectives_jax.py:3484-3492, 4081` forces `linear_solve_factors=None`, which forces the LS fallback regardless of whether the direct operator already meets the original residual contract. Gate that switch on actual direct-solve failure, not on the absence of stored factors.
+- [x] Keep the no-factor LS runtime lane matrix-free and original-residual-gated. `surfaceobjectives_jax.py:3500-3508` intentionally returns `linear_solve_factors=None`, and `surfaceobjectives_jax.py:3250-3290` routes that case to the operator-backed solve; the root fix is that absence of PLU factors no longer means a normal-equation solve, CPU dense fallback, or unchecked success.
 - [x] Pin the singular/gauge-null LS contract per the Wave-0 decision. Per-tier tolerance source: `BackendPolicy.linear_solve_tolerance_floor` / `cap` (`runtime.py:190-201`). Current `float32_smoke` uses floor `sqrt(eps(float32))≈3.45e-4` with cap `1e-3`, and the convergence gate must be the **original-operator** residual, not the κ²-squared normal-equation residual.
-- [x] Replace the operator-GMRES success gate `||residual|| ≤ max(1e-12, 10·tol·||rhs||)` (`optimizer_jax.py:3083-3094`) with `||A x - b|| / max(||b||, eps_runtime) ≤ effective_linear_solve_tolerance(policy, requested_tol)` so the gate uses the same floor/cap helper as Boozer solves. Float64 production lanes keep cap `1e-10`.
+- [x] Replace the legacy operator-GMRES success gate with `||A x - b|| / max(||b||, eps_runtime) ≤ effective_linear_solve_tolerance(policy, requested_tol)` (`optimizer_jax.py:3492-3569`) so the gate uses the same floor/cap helper as Boozer solves. Float64 production lanes keep cap `1e-10`.
 - [x] Add residual and finiteness checks to the packed-factor forward and transpose solve callbacks (`boozersurface_jax.py:3730-3865` and the traceable LS adjoint at `surfaceobjectives_jax.py:3329-3407`), using the same per-tier residual metric.
 - [x] Preserve the fail-closed NaN sentinel (`_traceable_adjoint_gradient_or_nan`) when the selected solve contract fails.
 
@@ -231,9 +232,9 @@ Purpose: make float32 smoke actually exercise float32 paths end to end. YAGNI: o
 
 Critical-path implementation tasks (banana smoke reachability confirmed):
 
-- [x] Replace the hardcoded `_as_jax_float64(self.field.x)` cast in `SquaredFluxJAX._gather_field_free_dofs` with the runtime-policy dtype helper (`fluxobjective_jax.py:373-375`).
-- [x] Replace the hardcoded `jnp.float64` cast on `biotsavart.x` in `QfmSurfaceJAX._coil_set_spec` (`qfmsurface_jax.py:73-76`) with the runtime-policy dtype helper.
-- [x] Rename the former `_as_explicit_float64`, `_explicit_scalar`, `_ones_like_float64`, and `_zeros_like_float64` helpers to runtime-dtype names (`curve_geometry.py:60-84`).
+- [x] Replace the hardcoded `_as_jax_float64(self.field.x)` cast in `SquaredFluxJAX._gather_field_free_dofs` with the runtime-policy dtype helper (`objectives/fluxobjective_jax.py:373-375`).
+- [x] Replace the hardcoded `jnp.float64` cast on `biotsavart.x` in `QfmSurfaceJAX._coil_set_spec` (`geo/qfmsurface_jax.py:73-76`) with the runtime-policy dtype helper.
+- [x] Rename the former `_as_explicit_float64`, `_explicit_scalar`, `_ones_like_float64`, and `_zeros_like_float64` helpers to runtime-dtype names (`jax_core/curve_geometry.py:60-84`).
 - [ ] Audit single-stage banana helper casts (`single_stage_banana_example.py`) and classify each as (a) runtime-policy, (b) host/SciPy boundary, or (c) intentional float64 production-only. Record the classification next to each call site.
 
 Tests:
@@ -257,10 +258,11 @@ Purpose: restore clean public import boundaries and remove visible private-modul
 Implementation tasks:
 
 - [x] Delete `src/simsopt/backend.py`. It is shadowed by the `src/simsopt/backend/` package — Python resolves `import simsopt.backend` to `backend/__init__.py`, so the shim is dead code at runtime and drifts from the SSOT facade. SSOT: one facade in `backend/__init__.py`.
-- [x] Update `src/simsopt/_core/optimizable.py:32` and `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py:86` to import `get_tolerance_tier` from `simsopt.backend` instead of `simsopt.backend.runtime`. Apply the same fix to any other public-helper imports that reach into `simsopt.backend.runtime`.
-- [x] Promote `_coil_dofs_gradient_to_derivative` (`surfaceobjectives_jax.py:1931`) to a non-underscore public name and re-export from `simsopt.geo`, then update `single_stage_banana_example.py:126`.
+- [x] Update `src/simsopt/_core/optimizable.py` and `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py:88` to import `get_tolerance_tier` from `simsopt.backend` instead of `simsopt.backend.runtime`. Apply the same fix to any other public-helper imports that reach into `simsopt.backend.runtime`.
+- [x] Promote `_coil_dofs_gradient_to_derivative` (`surfaceobjectives_jax.py:1962`) to public `coil_dofs_gradient_to_derivative`, re-export from `simsopt.geo`, and update `single_stage_banana_example.py:104`.
 - [x] Treat `src/simsopt/jax_core/_math_utils.py` as a documented compatibility facade (its module docstring already states "Compatibility facade for backend-owned JAX dtype helpers"). Either rename it to drop the underscore or add an explicit `# public-facade: underscore-prefixed for legacy compatibility` marker so the audit grep does not re-flag it.
 - [x] Remove `_gsco_opposite_candidate_index` from `__all__` in `src/simsopt/solve/wireframe_optimization_jax.py:35` (private name should not be exported).
+- [ ] Promote, relocate, or remove the banana example's remaining private optimizer import `_mark_cacheable_jit_value_and_grad` (`single_stage_banana_example.py:118`) before closing the "No example requires a private core symbol" acceptance item.
 
 Tests:
 
@@ -285,7 +287,7 @@ Implementation tasks:
 - [x] Wrap the MPI Jacobian materialization at `src/simsopt/solve/mpi_jax.py:70` (`np.asarray(jax.device_get(local_columns))`) in `jax.transfer_guard_device_to_host("allow")`.
 - [x] Replace the per-row `jax.device_get` at `src/simsopt/solve/serial_jax.py:100-102` with a batched materialization at write boundary, also under `jax.transfer_guard_device_to_host("allow")`.
 - [x] Audit `mpi_jax.py:114-127` non-leader worker loop: ensure shutdown handles `command is None` as well as `STOP` to avoid hangs when sentinel propagation differs (e.g., mock comm in tests).
-- [ ] Keep compute and gradient paths under strict transfer guard (`disallow` for production parity lanes, default for smoke).
+- [ ] Keep accepted compute and gradient validations under strict transfer guard (`disallow` for production parity lanes and the MPS smoke rerun). The full all-supported MPS artifact still reports strict-transfer failures, so this remains open.
 - [x] Consolidate duplicated artifact materialization helpers: `_jax_artifact_host_array` (`benchmarks/non_banana_example_parity_fixtures.py:35`) and `_artifact_host_value` / `_host_float_array` (`benchmarks/non_banana_example_cpp_jax_cpu_parity.py:344`) into one helper in `benchmarks/run_code_benchmark_common.py` (or a dedicated `benchmarks/_host_io.py`). DRY: one materialization helper.
 - [x] Use direction-specific `jax.transfer_guard_device_to_host("allow")` at host materialization boundaries instead of broad `jax.transfer_guard("allow")`.
 
@@ -294,7 +296,7 @@ Tests:
 - [ ] Transfer-guard strict test for compute path (`SquaredFluxJAX.dJ`, `BoozerSurfaceJAX.run_code`) — no D→H transfers during compute.
 - [x] Transfer-guard allowed test for artifact serialization boundary.
 - [ ] Transfer-guard allowed test for MPI/serial host-solver boundary if those modules are kept; if `mpi_jax.py` / `serial_jax.py` are out of scope for production, mark them as such and add the test only at the boundary entrypoint.
-- [ ] MPS smoke test with `SIMSOPT_JAX_TRANSFER_GUARD=disallow` configured.
+- [x] MPS smoke test with `SIMSOPT_JAX_TRANSFER_GUARD=disallow` configured for the proven narrow fixture and the failing all-supported artifact.
 
 Acceptance criteria:
 
@@ -374,22 +376,22 @@ Implementation tasks (adjacent regressions):
 - [x] BFGS curvature criterion in QFM (`jax_core/qfm_solver.py`): restore the canonical `sqrt(eps) * ||y|| * ||s||` floor and pin the float32 boundary against the shared private-BFGS oracle in `tests/geo/test_qfmsurface_jax.py`.
 - [x] `_normalize_scipy_result` status 6 is documented as repo-local in the constant comment; SciPy's low-level L-BFGS-B `warnflag` contract remains 0/1/2.
 - [x] Float32 smoke harness: gradient entries tagged `diagnostic_only` no longer make the fixture verdict fail. SSOT: `validation_ladder_contract.py` marks the tier as `production_parity=False` / `gradient_diagnostic_only=True`, and `non_banana_example_cpp_jax_cpu_parity.py` excludes diagnostic-only gradient failures from verdict-gating failures.
-- [ ] Tautology tests: replace change-pinning tests with CPU, analytic, or committed-fixture oracle tests where the behavior is contract-bearing. Concrete candidates: `tests/geo/test_qfmsurface_jax.py:475`, `tests/solve/test_permanent_magnet_optimization_jax_item28.py:537`.
+- [ ] Tautology tests: replace change-pinning tests with CPU, analytic, or committed-fixture oracle tests where the behavior is contract-bearing. Current QFM augmented-Lagrangian tests now include upstream exact/KKT oracle coverage (`tests/geo/test_qfmsurface_jax.py:300-430`); the remaining concrete candidate is the high-`epsilon_RS` forced scan-stop test (`tests/solve/test_permanent_magnet_optimization_jax_item28.py:545-560`).
 
 Implementation tasks (off-critical-path dtype hygiene; deferred from Wave 3):
 
 - [ ] Replace hardcoded float64 in bootstrap JAX profile derivative paths (`src/simsopt/mhd/bootstrap_jax.py:144, 174`).
 - [ ] Replace hardcoded float64 in VMEC fieldline diagnostics (`src/simsopt/mhd/vmec_diagnostics_jax.py:60, 61, 64, 74`).
 - [ ] Replace hardcoded float64 in VMEC geometry helpers (`src/simsopt/jax_core/vmec_geometry.py:289`).
-- [ ] Replace runtime-float64 helper usage in PM workflow paths (`src/simsopt/jax_core/pm_workflow.py:83, 84, 164`) where the value should follow runtime dtype.
-- [ ] Replace runtime-float64 helper usage in wireframe workflow paths (`src/simsopt/jax_core/wireframe_workflow.py:345, 346, 547`) where the value should follow runtime dtype.
+- [ ] Audit and replace runtime-float64 helper usage in PM workflow paths where the value should follow runtime dtype. Current grep shows `_as_jax_float64` call sites in `src/simsopt/jax_core/pm_workflow.py` around lines `291-1092`; classify physics-required host precision separately from runtime-policy arrays before editing.
+- [ ] Audit and replace runtime-float64 helper usage in wireframe workflow paths where the value should follow runtime dtype. Current grep shows `_as_jax_float64` call sites in `src/simsopt/jax_core/wireframe_workflow.py` around lines `546-1118`; classify physics-required host precision separately from runtime-policy arrays before editing.
 - [ ] Audit tracing, magnetic-axis, and MHD frozen-state float64 casts before claiming float32 end-to-end coverage outside the banana smoke perimeter.
 
 Cleanup tasks:
 
 - [x] MPI and serial JAX solvers remain in scope: the Wave-5 transfer-boundary and Wave-1 result-gate contracts apply to `src/simsopt/solve/mpi_jax.py` / `serial_jax.py`, with coverage in `tests/solve/test_mpi_jax.py` and `tests/solve/test_serial_jax.py`.
 - [x] Root-level debug outputs: remove or gitignore `jax_mem_test.py`, `objective_runtimes_semilogy.png`, `taylor_errors.png`, `test_coil.vtu`, and `.gpd/state.json.bak`.
-- [ ] `simsopt/mhd/__init__.py:17` `import jax as _` shadows Python's last-result convention; rename to `_jax` or drop the alias.
+- [x] `simsopt/mhd/__init__.py` no longer imports `jax as _`; it uses `importlib.util.find_spec("jax")` and `_jax_spec` instead.
 
 Acceptance criteria:
 
@@ -404,12 +406,12 @@ Acceptance criteria:
 - [x] P0: Implement one accepted-artifact gate SSOT covering both target and non-target lanes.
 - [x] P0: Add final-result finiteness checks independent of optimizer success, including escalation of transient `nonfinite_step` events to `LBFGS_STATUS_NONFINITE` at termination.
 - [x] P0: Tier-scale the operator-GMRES success gate by `effective_linear_solve_tolerance(policy, requested_tol)`; no change to float64 parity.
-- [x] P0: Stop forcing the LS adjoint to the normal-equation path when the direct operator solve already meets the original-operator residual; gate the switch on actual direct-solve failure.
+- [x] P0: Keep the no-factor LS adjoint path matrix-free and original-residual-gated; absence of PLU factors no longer implies a normal-equation solve, CPU substitution, or unchecked success.
 - [x] P0: Pin the residual metric `||A x - b|| / max(||b||, eps_runtime)` as the SSOT solve-success criterion for both operator-only and packed-factor solves.
 - [x] P0: Add residual gates to packed-factor LS callbacks (`boozersurface_jax.py:3730-3865`, `surfaceobjectives_jax.py:3329-3407`).
-- [x] P1: Clean runtime dtype policy leaks on the float32 smoke critical path (`fluxobjective_jax.py:373-375`, `qfmsurface_jax.py:73-76`).
+- [x] P1: Clean runtime dtype policy leaks on the float32 smoke critical path (`objectives/fluxobjective_jax.py:373-375`, `geo/qfmsurface_jax.py:73-76`).
 - [x] P1: Delete the shadowed `src/simsopt/backend.py` shim; the package `backend/__init__.py` is the only facade.
-- [x] P1: Clean public/private API imports in the banana example (`single_stage_banana_example.py:86, 89-94, 126`).
+- [ ] P1: Finish banana-example API import cleanup. Public backend/geo imports are cleaned (`single_stage_banana_example.py:88,104`), `_math_utils` is documented as a compatibility facade, but the private optimizer import `_mark_cacheable_jit_value_and_grad` remains tracked in Wave 4.
 - [x] P1: Add transfer-guard materialization boundaries at `mpi_jax.py:70` and `serial_jax.py:100-102`.
 - [x] P1: Consolidate duplicated artifact-materialization helpers in `benchmarks/`.
 - [ ] P1: Rerun CPU float32 smoke and MPS float32 smoke (Wave 6). Current status: non-banana MPS narrow surface fixture passes, full all-supported run produced a failing artifact, and banana CPU/MPS `scipy-jax` maxiter=7 both fail closed on all-NaN target-lane gradients. Acceptance remains blocked.
@@ -417,7 +419,7 @@ Acceptance criteria:
 - [x] P1: Audit QFM, relax-and-split, and optimizer-status adjacent regressions before production signoff.
 - [ ] P2: Rerun CUDA production parity on Perlmutter.
 - [x] P2: Clean root-level debug artifacts by gitignoring the confirmed root-local diagnostics.
-- [x] P2: Rename stale `*_float64`-suffixed helpers in `curve_geometry.py` to runtime-dtype names (`curve_geometry.py:60-84`).
+- [x] P2: Rename stale `*_float64`-suffixed helpers in `curve_geometry.py` to runtime-dtype names (`jax_core/curve_geometry.py:60-84`).
 - [ ] P2: Off-critical-path dtype hygiene (bootstrap, VMEC, PM, wireframe) per Wave 8.
 
 ## Review Checklist
