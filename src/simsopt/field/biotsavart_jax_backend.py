@@ -829,9 +829,9 @@ class SpecBackedBiotSavartJAX(Optimizable):
                     dofs_gradient,
                     extraction_specs[global_i],
                     coil_specs[global_i],
-                    d_g[local_i],
-                    d_gd[local_i],
-                    d_c[local_i],
+                    jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False),
+                    jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False),
+                    jax.lax.index_in_dim(d_c, local_i, axis=0, keepdims=False),
                     coil_dofs,
                 )
         return dofs_gradient
@@ -1081,9 +1081,9 @@ def project_coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
                 deriv_data,
                 _project_single_coil_cotangent_data(
                     coils[global_i],
-                    d_g[local_i],
-                    d_gd[local_i],
-                    d_c[local_i],
+                    jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False),
+                    jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False),
+                    jax.lax.index_in_dim(d_c, local_i, axis=0, keepdims=False),
                 ),
             )
     return Derivative(deriv_data)
