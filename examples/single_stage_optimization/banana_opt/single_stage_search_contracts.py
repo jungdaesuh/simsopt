@@ -33,6 +33,44 @@ _DIAGNOSTIC_HARDWARE_RATIO_NAMES = frozenset(
 )
 
 
+def _finite_float_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, (bool, np.bool_)):
+        return None
+    numeric = float(value)
+    if not np.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _frontier_kam_certification_status(
+    *,
+    enabled: bool,
+    ok: bool | None,
+    reason: str,
+    hardware_ok: bool | None,
+    topology_evaluated: bool | None,
+    topology_broken: bool | None,
+    accepted_iteration: int | None,
+    topology_accepted_iteration: int | None,
+    kam_fraction: float | None,
+    kam_min: float | None,
+    kam_deficit: float | None,
+) -> dict[str, object]:
+    return {
+        "enabled": enabled,
+        "ok": ok,
+        "reason": reason,
+        "hardware_ok": hardware_ok,
+        "topology_evaluated": topology_evaluated,
+        "topology_broken": topology_broken,
+        "accepted_iteration": accepted_iteration,
+        "topology_accepted_iteration": topology_accepted_iteration,
+        "kam_fraction": kam_fraction,
+        "kam_min": kam_min,
+        "kam_deficit": kam_deficit,
+    }
+
+
 def evaluate_frontier_trust_status(
     search_eval: Mapping[str, object],
     *,
@@ -59,6 +97,152 @@ def evaluate_frontier_trust_status(
         "threshold": trust_threshold,
         "excess": excess,
     }
+
+
+def evaluate_frontier_kam_certification(
+    topology_entry: Mapping[str, object] | None,
+    *,
+    enabled: bool,
+    hardware_ok: bool | None,
+    kam_min: float | None,
+    accepted_iteration: int | None = None,
+) -> dict[str, object]:
+    if not enabled:
+        return _frontier_kam_certification_status(
+            enabled=False,
+            ok=None,
+            reason="disabled",
+            hardware_ok=None,
+            topology_evaluated=None,
+            topology_broken=None,
+            accepted_iteration=accepted_iteration,
+            topology_accepted_iteration=None,
+            kam_fraction=None,
+            kam_min=None,
+            kam_deficit=None,
+        )
+    if kam_min is None:
+        raise ValueError("frontier KAM certification requires kam_min")
+    resolved_kam_min = float(kam_min)
+    if not np.isfinite(resolved_kam_min) or not (0.0 <= resolved_kam_min <= 1.0):
+        raise ValueError("frontier KAM certification requires kam_min in [0, 1]")
+    if topology_entry is None:
+        return _frontier_kam_certification_status(
+            enabled=True,
+            ok=False,
+            reason=(
+                "topology_not_evaluated"
+                if hardware_ok is True
+                else "hardware_failed"
+            ),
+            hardware_ok=bool(hardware_ok),
+            topology_evaluated=False,
+            topology_broken=None,
+            accepted_iteration=accepted_iteration,
+            topology_accepted_iteration=None,
+            kam_fraction=None,
+            kam_min=resolved_kam_min,
+            kam_deficit=None,
+        )
+
+    topology_accepted_iteration = topology_entry.get("accepted_iteration")
+    topology_broken = bool(topology_entry.get("topology_broken", False))
+    raw_kam_fraction = _finite_float_or_none(topology_entry.get("kam_fraction"))
+    kam_fraction_out_of_range = raw_kam_fraction is not None and not (
+        0.0 <= raw_kam_fraction <= 1.0
+    )
+    kam_fraction = None if kam_fraction_out_of_range else raw_kam_fraction
+    if accepted_iteration is not None and topology_accepted_iteration is not None:
+        if int(topology_accepted_iteration) != int(accepted_iteration):
+            return _frontier_kam_certification_status(
+                enabled=True,
+                ok=False,
+                reason="topology_not_current",
+                hardware_ok=bool(hardware_ok),
+                topology_evaluated=True,
+                topology_broken=topology_broken,
+                accepted_iteration=accepted_iteration,
+                topology_accepted_iteration=int(topology_accepted_iteration),
+                kam_fraction=raw_kam_fraction,
+                kam_min=resolved_kam_min,
+                kam_deficit=None,
+            )
+
+    topology_iteration = (
+        None if topology_accepted_iteration is None else int(topology_accepted_iteration)
+    )
+    if topology_broken:
+        return _frontier_kam_certification_status(
+            enabled=True,
+            ok=False,
+            reason="topology_broken",
+            hardware_ok=bool(hardware_ok),
+            topology_evaluated=True,
+            topology_broken=True,
+            accepted_iteration=accepted_iteration,
+            topology_accepted_iteration=topology_iteration,
+            kam_fraction=raw_kam_fraction,
+            kam_min=resolved_kam_min,
+            kam_deficit=(
+                None
+                if kam_fraction is None
+                else max(resolved_kam_min - kam_fraction, 0.0)
+            ),
+        )
+    if kam_fraction_out_of_range:
+        return _frontier_kam_certification_status(
+            enabled=True,
+            ok=False,
+            reason="kam_fraction_out_of_range",
+            hardware_ok=bool(hardware_ok),
+            topology_evaluated=True,
+            topology_broken=False,
+            accepted_iteration=accepted_iteration,
+            topology_accepted_iteration=topology_iteration,
+            kam_fraction=raw_kam_fraction,
+            kam_min=resolved_kam_min,
+            kam_deficit=None,
+        )
+    if kam_fraction is None:
+        return _frontier_kam_certification_status(
+            enabled=True,
+            ok=False,
+            reason=(
+                "kam_fraction_missing"
+                if hardware_ok is True
+                else "hardware_failed"
+            ),
+            hardware_ok=bool(hardware_ok),
+            topology_evaluated=True,
+            topology_broken=False,
+            accepted_iteration=accepted_iteration,
+            topology_accepted_iteration=topology_iteration,
+            kam_fraction=None,
+            kam_min=resolved_kam_min,
+            kam_deficit=None,
+        )
+
+    kam_deficit = max(resolved_kam_min - kam_fraction, 0.0)
+    certified = hardware_ok is True and kam_deficit == 0.0
+    if kam_deficit > 0.0:
+        reason = "kam_fraction_below_min"
+    elif hardware_ok is not True:
+        reason = "hardware_failed"
+    else:
+        reason = "certified"
+    return _frontier_kam_certification_status(
+        enabled=True,
+        ok=bool(certified),
+        reason=reason,
+        hardware_ok=bool(hardware_ok),
+        topology_evaluated=True,
+        topology_broken=False,
+        accepted_iteration=accepted_iteration,
+        topology_accepted_iteration=topology_iteration,
+        kam_fraction=kam_fraction,
+        kam_min=resolved_kam_min,
+        kam_deficit=float(kam_deficit),
+    )
 
 
 def evaluate_frontier_trust_penalty(

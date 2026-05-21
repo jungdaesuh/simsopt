@@ -112,6 +112,7 @@ from banana_opt.single_stage_search_contracts import (
     evaluate_frontier_hard_invalidation as _evaluate_frontier_hard_invalidation_impl,
     evaluate_frontier_hardware_search_contract as _evaluate_frontier_hardware_search_contract_impl,
     evaluate_frontier_hardware_search_penalty as _evaluate_frontier_hardware_search_penalty_impl,
+    evaluate_frontier_kam_certification as _evaluate_frontier_kam_certification_impl,
     evaluate_frontier_topology_search_contract as _evaluate_frontier_topology_search_contract_impl,
     evaluate_frontier_topology_search_penalty as _evaluate_frontier_topology_search_penalty_impl,
     evaluate_frontier_trust_penalty as _evaluate_frontier_trust_penalty_impl,
@@ -200,6 +201,7 @@ from banana_opt.poloidal_extent import (
     smooth_max_poloidal_extent_signed_constraint_with_hard_signal,
 )
 from banana_opt.self_intersect import CurveSelfIntersect
+from banana_opt.wout_convention import wout_convention_artifact_fields
 from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for test access via importlib
     DEFAULT_PHASE1_CONFIG,
     Phase1Config,
@@ -1181,6 +1183,12 @@ def parse_args():
     parser.add_argument("--epsilon-constraint-boozer-max", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--frontier-epsilon-penalty-weight", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
+        "--frontier-kam-min",
+        type=float,
+        default=float(os.environ.get("FRONTIER_KAM_MIN", "0.0")),
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--vol-target",
         type=float,
         default=float(os.environ.get("VOL_TARGET", "0.10")),
@@ -1523,16 +1531,10 @@ def parse_args():
             "False",
         ),
         help=(
-            "Opt-in rollout flag: align the post-inner ALM signal-mismatch arm "
-            "with the documented hybrid-signal contract by routing through the "
-            "existing dual-update transition when signal_mismatch_active AND "
-            "hard_feasible_for_update AND the surrogate carries a positive "
-            "shift. When unset (default), behavior is unchanged: the "
-            "signal-mismatch arm bumps the penalty as in prior releases. The "
-            "converged-gate false-success guards at alm_utils.py:4624/4660 "
-            "remain coupled to signal_mismatch_active regardless of this "
-            "flag. See docs/alm_hybrid_signal_contract_2026-05-08.md "
-            "lines 37-41."
+            "Opt-in rollout flag: when hard constraints are feasible but the "
+            "surrogate signal remains active, keep the bounded ALM inner "
+            "continuation path alive instead of taking the legacy penalty-bump "
+            "arm. The dual-update stationarity gate remains unchanged."
         ),
     )
     parser.add_argument(
@@ -2470,6 +2472,43 @@ def checkpoint_confinement_objective(proxy_objective, topology_result, confineme
     return float(proxy_objective) + float(confinement_weight) * float(topology_result["confinement_loss"])
 
 
+def topology_archive_entry(accepted_iteration, proxy_objective, checkpoint_objective_total, topology_result):
+    return {
+        "accepted_iteration": accepted_iteration,
+        "J": float(proxy_objective),
+        "checkpoint_objective_total": checkpoint_objective_total,
+        "topology_state": topology_result["evaluation_state"],
+        "topology_broken": bool(topology_result["broken"]),
+        "topology_error": topology_result.get("evaluation_error"),
+        "topology_error_type": topology_result.get("evaluation_error_type"),
+        "survival_fraction": topology_result["survival_fraction"],
+        "survived_lines": topology_result["survived_lines"],
+        "nfieldlines": topology_result["nfieldlines"],
+        "tmax": topology_result["tmax"],
+        "mean_exit_time": topology_result["mean_exit_time"],
+        "confinement_score": topology_result["confinement_score"],
+        "mean_line_loss": topology_result["mean_line_loss"],
+        "worst_k_line_loss": topology_result["worst_k_line_loss"],
+        "early_exit_fraction": topology_result["early_exit_fraction"],
+        "confinement_loss": topology_result["confinement_loss"],
+        "confinement_surrogate_k": topology_result["confinement_surrogate_k"],
+        "confinement_early_exit_threshold": topology_result["confinement_early_exit_threshold"],
+        "kam_fraction": topology_result["kam_fraction"],
+        "kam_median_width": topology_result["kam_median_width"],
+        "kam_width_ratio": topology_result.get("kam_width_ratio"),
+        "cross_section_span": topology_result["cross_section_span"],
+        "stop_reason_counts": topology_result["stop_reason_counts"],
+        "first_exit": topology_result.get("first_exit"),
+        "per_phi_hit_counts": topology_result.get("per_phi_hit_counts"),
+        "line_metrics": topology_result.get("line_metrics"),
+        "line_lifetimes": topology_result.get("line_lifetimes"),
+        "line_losses": topology_result.get("line_losses"),
+        "seed_contract": topology_result.get("seed_contract"),
+        "field_model": topology_result.get("field_model"),
+        "transport_diagnostics": topology_result.get("transport_diagnostics"),
+    }
+
+
 def _format_topology_error(error):
     return str(error) or repr(error)
 
@@ -2512,6 +2551,303 @@ def safe_score_topology(
         tol=tol,
         **kwargs,
     )
+
+
+_FRONTIER_CERTIFICATION_SEARCH_FIELDS = {
+    "enabled": "frontier_certification_enabled",
+    "ok": "frontier_certification_ok",
+    "reason": "frontier_certification_reason",
+    "hardware_ok": "frontier_certification_hardware_ok",
+    "topology_evaluated": "frontier_kam_topology_evaluated",
+    "topology_broken": "frontier_kam_topology_broken",
+    "accepted_iteration": "frontier_kam_accepted_iteration",
+    "topology_accepted_iteration": "frontier_kam_topology_accepted_iteration",
+    "kam_fraction": "frontier_kam_fraction",
+    "kam_min": "frontier_kam_min",
+    "kam_deficit": "frontier_kam_deficit",
+}
+
+
+def annotate_frontier_certification_fields(field_payload, certification_status):
+    annotated = dict(field_payload)
+    for status_key, search_key in _FRONTIER_CERTIFICATION_SEARCH_FIELDS.items():
+        annotated[search_key] = certification_status.get(status_key)
+    return annotated
+
+
+def annotate_search_eval_frontier_certification(search_eval, certification_status):
+    return annotate_frontier_certification_fields(search_eval, certification_status)
+
+
+def frontier_certification_status_from_field_payload(field_payload):
+    return {
+        status_key: field_payload.get(search_key)
+        for status_key, search_key in _FRONTIER_CERTIFICATION_SEARCH_FIELDS.items()
+    }
+
+
+def frontier_certification_status_from_search_eval(search_eval):
+    return frontier_certification_status_from_field_payload(search_eval)
+
+
+def frontier_certification_results_payload(certification_status, *, prefix=""):
+    return {
+        f"{prefix}FRONTIER_CERTIFICATION_ENABLED": certification_status.get("enabled"),
+        f"{prefix}FRONTIER_CERTIFICATION_OK": certification_status.get("ok"),
+        f"{prefix}FRONTIER_CERTIFIED": certification_status.get("ok"),
+        f"{prefix}FRONTIER_CERTIFICATION_REASON": certification_status.get("reason"),
+        f"{prefix}FRONTIER_CERTIFICATION_HARDWARE_OK": certification_status.get("hardware_ok"),
+        f"{prefix}FRONTIER_KAM_TOPOLOGY_EVALUATED": certification_status.get("topology_evaluated"),
+        f"{prefix}FRONTIER_KAM_TOPOLOGY_BROKEN": certification_status.get("topology_broken"),
+        f"{prefix}FRONTIER_KAM_ACCEPTED_ITERATION": certification_status.get("accepted_iteration"),
+        f"{prefix}FRONTIER_KAM_TOPOLOGY_ACCEPTED_ITERATION": certification_status.get(
+            "topology_accepted_iteration"
+        ),
+        f"{prefix}FRONTIER_KAM_FRACTION": certification_status.get("kam_fraction"),
+        f"{prefix}FRONTIER_KAM_MIN": certification_status.get("kam_min"),
+        f"{prefix}FRONTIER_KAM_DEFICIT": certification_status.get("kam_deficit"),
+    }
+
+
+def build_frontier_kam_certification_status(
+    topology_entry,
+    *,
+    hardware_status,
+    accepted_iteration,
+):
+    return _evaluate_frontier_kam_certification_impl(
+        topology_entry,
+        enabled=frontier_mode_enabled(),
+        hardware_ok=(
+            None if hardware_status is None else bool(hardware_status.get("success", False))
+        ),
+        kam_min=FRONTIER_KAM_MIN,
+        accepted_iteration=accepted_iteration,
+    )
+
+
+def refresh_frontier_certification_status(
+    run_dict,
+    *,
+    hardware_status,
+    accepted_iteration,
+    topology_entry=None,
+):
+    certification_status = build_frontier_kam_certification_status(
+        topology_entry,
+        hardware_status=hardware_status,
+        accepted_iteration=accepted_iteration,
+    )
+    run_dict["frontier_certification_status"] = certification_status
+    run_dict["search_eval"] = annotate_search_eval_frontier_certification(
+        run_dict["search_eval"],
+        certification_status,
+    )
+    return certification_status
+
+
+def frontier_certification_status_matches_iteration(
+    certification_status,
+    accepted_iteration,
+):
+    if certification_status.get("enabled") is not True:
+        return False
+    if certification_status.get("reason") is None:
+        return False
+    status_iteration = certification_status.get("accepted_iteration")
+    if status_iteration is None or int(status_iteration) != int(accepted_iteration):
+        return False
+    topology_iteration = certification_status.get("topology_accepted_iteration")
+    return topology_iteration is None or int(topology_iteration) == int(accepted_iteration)
+
+
+def restore_or_refresh_frontier_certification_status_after_resume(
+    run_dict,
+    *,
+    stored_certification_status,
+    hardware_status,
+    accepted_iteration,
+):
+    if frontier_certification_status_matches_iteration(
+        stored_certification_status,
+        accepted_iteration,
+    ):
+        run_dict["frontier_certification_status"] = stored_certification_status
+        run_dict["search_eval"] = annotate_search_eval_frontier_certification(
+            run_dict["search_eval"],
+            stored_certification_status,
+        )
+        return stored_certification_status
+    return refresh_frontier_certification_status(
+        run_dict,
+        hardware_status=hardware_status,
+        accepted_iteration=accepted_iteration,
+    )
+
+
+def finite_topology_rank_component(value, *, unit_interval=False):
+    if value is None or isinstance(value, (bool, np.bool_)):
+        return -np.inf
+    numeric = float(value)
+    if not np.isfinite(numeric):
+        return -np.inf
+    if unit_interval and not (0.0 <= numeric <= 1.0):
+        return -np.inf
+    return numeric
+
+
+def topology_kam_rank_key(topology_entry):
+    return (
+        finite_topology_rank_component(
+            topology_entry.get("kam_fraction"),
+            unit_interval=True,
+        ),
+        finite_topology_rank_component(
+            topology_entry.get("survival_fraction"),
+            unit_interval=True,
+        ),
+        finite_topology_rank_component(topology_entry.get("confinement_score")),
+    )
+
+
+def best_topology_certification_payload(certification_status):
+    return {
+        "BEST_TOPOLOGY_CERTIFICATION_ENABLED": certification_status.get("enabled"),
+        "BEST_TOPOLOGY_CERTIFICATION_OK": certification_status.get("ok"),
+        "BEST_TOPOLOGY_CERTIFIED": certification_status.get("ok"),
+        "BEST_TOPOLOGY_CERTIFICATION_REASON": certification_status.get("reason"),
+        "BEST_TOPOLOGY_CERTIFICATION_HARDWARE_OK": certification_status.get("hardware_ok"),
+        "BEST_TOPOLOGY_CERTIFICATION_KAM_MIN": certification_status.get("kam_min"),
+        "BEST_TOPOLOGY_CERTIFICATION_KAM_DEFICIT": certification_status.get("kam_deficit"),
+    }
+
+
+def frontier_reportable_success(is_frontier_mode, final_feasibility_ok, certification_status):
+    if not is_frontier_mode:
+        return None
+    return bool(final_feasibility_ok and certification_status.get("ok") is True)
+
+
+def best_topology_results_payload(run_dict):
+    best_topology = run_dict.get("best_topology", {})
+    certification_status = frontier_certification_status_from_field_payload(best_topology)
+    return {
+        "BEST_TOPOLOGY_ACCEPTED_ITERATION": best_topology.get("accepted_iteration"),
+        "BEST_TOPOLOGY_CONFINEMENT_SCORE": best_topology.get("confinement_score"),
+        "BEST_TOPOLOGY_CONFINEMENT_LOSS": best_topology.get("confinement_loss"),
+        "BEST_TOPOLOGY_KAM_FRACTION": best_topology.get("kam_fraction"),
+        "BEST_TOPOLOGY_KAM_MEDIAN_WIDTH": best_topology.get("kam_median_width"),
+        "BEST_TOPOLOGY_CROSS_SECTION_SPAN": best_topology.get("cross_section_span"),
+        "BEST_TOPOLOGY_TRANSPORT_DIAGNOSTICS": best_topology.get("transport_diagnostics"),
+        "BEST_TOPOLOGY_DIAGNOSTICS": optional_topology_score_diagnostics(
+            run_dict.get("best_topology"),
+            artifact_role="best_topology",
+        ),
+        **best_topology_certification_payload(certification_status),
+    }
+
+
+def maybe_record_topology_score(
+    run_dict,
+    *,
+    accepted_iteration,
+    proxy_objective,
+    outer_surf,
+    biotsavart,
+    surface_data,
+    hardware_status,
+):
+    if TOPOLOGY_SCORER_EVERY <= 0 or accepted_iteration % TOPOLOGY_SCORER_EVERY != 0:
+        return None
+
+    topo_result = safe_score_topology(
+        outer_surf,
+        biotsavart,
+        nfieldlines=TOPOLOGY_SCORER_NFIELDLINES,
+        tmax=TOPOLOGY_SCORER_TMAX,
+        **confinement_surrogate_kwargs(),
+    )
+    checkpoint_objective_total = (
+        np.inf
+        if topo_result["broken"]
+        else checkpoint_confinement_objective(
+            proxy_objective,
+            topo_result,
+            CONFINEMENT_OBJECTIVE_WEIGHT,
+        )
+    )
+    topo_entry = topology_archive_entry(
+        accepted_iteration,
+        proxy_objective,
+        checkpoint_objective_total,
+        topo_result,
+    )
+    certification_status = build_frontier_kam_certification_status(
+        topo_entry,
+        hardware_status=hardware_status,
+        accepted_iteration=accepted_iteration,
+    )
+    topo_entry = annotate_frontier_certification_fields(
+        topo_entry,
+        certification_status,
+    )
+    run_dict["latest_topology_entry"] = topo_entry
+    append_jsonl_artifact(
+        os.path.join(OUT_DIR_ITER, "topology_archive.jsonl"),
+        topo_entry,
+    )
+
+    if (
+        not topo_result["broken"]
+        and (
+            "best_topology" not in run_dict
+            or topology_kam_rank_key(topo_entry)
+            > topology_kam_rank_key(run_dict["best_topology"])
+        )
+    ):
+        run_dict["best_topology"] = topo_entry
+        write_topology_checkpoint_artifacts(
+            os.path.join(OUT_DIR_ITER, "best_topology"),
+            artifact_role="best_topology_checkpoint",
+            topology_entry=topo_entry,
+            biotsavart=biotsavart,
+            surface_data=surface_data,
+        )
+
+    if (
+        not topo_result["broken"]
+        and CONFINEMENT_OBJECTIVE_WEIGHT > 0.0
+        and (
+            "best_confinement_objective" not in run_dict
+            or topo_entry["checkpoint_objective_total"]
+            < run_dict["best_confinement_objective"]["checkpoint_objective_total"]
+        )
+    ):
+        run_dict["best_confinement_objective"] = topo_entry
+        write_topology_checkpoint_artifacts(
+            os.path.join(OUT_DIR_ITER, "best_confinement_objective"),
+            artifact_role="best_confinement_objective_checkpoint",
+            topology_entry=topo_entry,
+            biotsavart=biotsavart,
+            surface_data=surface_data,
+        )
+
+    if topo_result["broken"]:
+        print(
+            f"  [topology] iter={accepted_iteration}: "
+            f"broken ({topo_result.get('evaluation_error_type')}: "
+            f"{topo_result.get('evaluation_error')})"
+        )
+    else:
+        print(
+            f"  [topology] iter={accepted_iteration}: "
+            f"survival={topo_result['survived_lines']}/{topo_result['nfieldlines']}, "
+            f"kam_fraction={topo_result['kam_fraction']:.4f}, "
+            f"confinement={topo_result['confinement_score']:.4f}, "
+            f"loss={topo_result['confinement_loss']:.4f}, "
+            f"mean_exit={topo_result['mean_exit_time']}"
+        )
+    return topo_entry
 
 
 def validate_confinement_surrogate_args(args):
@@ -2569,6 +2905,7 @@ class RunIdentityConfig:
     alm_iota_penalty_threshold: float | None
     alm_length_penalty_threshold: float | None
     single_stage_goal_mode: str | None
+    frontier_kam_min: float | None
     vol_target: float
     iota_target: float
     boozer_I: float
@@ -2690,6 +3027,7 @@ class PreservedTimeoutReplayConfig:
     epsilon_constraint_qa_max: float | None = None
     epsilon_constraint_boozer_max: float | None = None
     frontier_epsilon_penalty_weight: float | None = None
+    frontier_kam_min: float | None = None
     stage2_seed_surf_path: str | None = None
     major_radius: float = VACUUM_VESSEL_MAJOR_RADIUS_M
 
@@ -3007,6 +3345,7 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     epsilon_constraint_qa_max=None,
     epsilon_constraint_boozer_max=None,
     frontier_epsilon_penalty_weight=None,
+    frontier_kam_min=None,
 )
 
 
@@ -3069,6 +3408,11 @@ def make_run_identity_config(
         single_stage_goal_mode=(
             # Preserve legacy run fingerprints for explicit/implicit target-mode equivalence.
             args.single_stage_goal_mode if args.single_stage_goal_mode != "target" else None
+        ),
+        frontier_kam_min=(
+            float(args.frontier_kam_min)
+            if args.single_stage_goal_mode == "frontier"
+            else None
         ),
         vol_target=vol_target,
         iota_target=iota_target,
@@ -3556,6 +3900,16 @@ def accepted_search_metric(run_dict):
     return float(search_eval["total"])
 
 
+def frontier_best_feasible_selection_key(search_eval, metric):
+    if not frontier_mode_enabled():
+        certification_rank = 0
+    else:
+        certification_rank = (
+            0 if search_eval.get("frontier_certification_ok") is True else 1
+        )
+    return (certification_rank, float(metric))
+
+
 def snapshot_diagnostic_incumbent_state(run_dict):
     search_eval = diagnostic_search_eval_for_current_state(run_dict)
     if search_eval is run_dict["search_eval"]:
@@ -3607,8 +3961,14 @@ def maybe_update_best_feasible_incumbent(run_dict, incumbent_stage):
         return False
     metric = accepted_search_metric(run_dict)
     best_metric = run_dict.get("best_feasible_metric")
-    if best_metric is not None and metric >= best_metric:
-        return False
+    if best_metric is not None:
+        current_key = frontier_best_feasible_selection_key(run_dict["search_eval"], metric)
+        best_key = frontier_best_feasible_selection_key(
+            run_dict["best_feasible_incumbent"].search_eval,
+            best_metric,
+        )
+        if current_key >= best_key:
+            return False
     run_dict["best_feasible_incumbent"] = snapshot_diagnostic_incumbent_state(run_dict)
     run_dict["best_feasible_metric"] = metric
     run_dict["best_feasible_stage"] = str(incumbent_stage)
@@ -3672,6 +4032,8 @@ def apply_frontier_scalarization_override(objective_eval, *, alm_formulation="we
         cs_weight=globals().get("CS_WEIGHT", 0.0),
         curvature_weight=globals().get("CURVATURE_WEIGHT", 0.0),
         poloidal_extent_weight=SINGLE_STAGE_POLOIDAL_WEIGHT,
+        width_weight=SINGLE_STAGE_WIDTH_WEIGHT,
+        selfint_weight=SINGLE_STAGE_SELFINT_WEIGHT,
         objective_optimizable=globals().get("JF"),
         alm_formulation=alm_formulation,
         alm_multipliers=globals().get("ALM_MULTIPLIERS"),
@@ -3844,6 +4206,7 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_BOOZER_OBJECTIVE": None,
             "BEST_FEASIBLE_FRONTIER_RANK_OBJECTIVE_J": None,
             "BEST_FEASIBLE_FRONTIER_TRUST_OK": None,
+            **frontier_certification_results_payload({}, prefix="BEST_FEASIBLE_"),
             "BEST_FEASIBLE_FINAL_IOTA": None,
             "BEST_FEASIBLE_FINAL_VOLUME": None,
             **build_single_stage_banana_current_payload_fields(
@@ -3891,6 +4254,7 @@ def build_best_feasible_results_summary(
         surface_status = run_dict["surface_status"]
         search_eval = run_dict["search_eval"]
         topology_status = run_dict["topology_gate_status"]
+        certification_status = frontier_certification_status_from_search_eval(search_eval)
         return {
             "BEST_FEASIBLE_AVAILABLE": True,
             "BEST_FEASIBLE_STAGE": run_dict.get("best_feasible_stage"),
@@ -3906,6 +4270,10 @@ def build_best_feasible_results_summary(
                 else None
             ),
             "BEST_FEASIBLE_FRONTIER_TRUST_OK": search_eval.get("frontier_trust_ok"),
+            **frontier_certification_results_payload(
+                certification_status,
+                prefix="BEST_FEASIBLE_",
+            ),
             "BEST_FEASIBLE_FINAL_IOTA": float(surface_status["iotas"][-1]),
             "BEST_FEASIBLE_FINAL_VOLUME": float(surface_status["volumes"][-1]),
             **build_single_stage_banana_current_payload_fields(
@@ -4724,10 +5092,35 @@ def set_alm_runtime_state(multipliers, penalty, constraint_names=None):
         ALM_CONSTRAINT_NAMES = [str(name) for name in constraint_names]
 
 
-def validate_resume_alm_state(resume_alm_state, constraint_names):
+def validate_alm_constraint_scales(constraint_scales, constraint_names, *, label):
+    scales = np.asarray(constraint_scales, dtype=float)
+    expected_shape = (len(constraint_names),)
+    if scales.shape != expected_shape:
+        raise ValueError(
+            f"{label} constraint_scales length mismatch: "
+            f"got={scales.shape[0]}, expected={len(constraint_names)}"
+        )
+    if np.any(~np.isfinite(scales)):
+        raise ValueError(f"{label} constraint_scales must be finite")
+    if np.any(scales <= 0.0):
+        raise ValueError(f"{label} constraint_scales must be positive")
+    return scales.copy()
+
+
+def current_alm_constraint_scales(search_eval, constraint_names):
+    if "constraint_scales" not in search_eval:
+        raise ValueError("Current ALM search evaluation is missing constraint_scales")
+    return validate_alm_constraint_scales(
+        search_eval["constraint_scales"],
+        constraint_names,
+        label="Current ALM",
+    )
+
+
+def validate_resume_alm_state(resume_alm_state, constraint_names, constraint_scales):
     missing_fields = [
         field
-        for field in ("constraint_names", "multipliers", "penalty")
+        for field in ("constraint_names", "constraint_scales", "multipliers", "penalty")
         if field not in resume_alm_state
     ]
     if missing_fields:
@@ -4741,6 +5134,22 @@ def validate_resume_alm_state(resume_alm_state, constraint_names):
         raise ValueError(
             "ALM resume constraint_names mismatch: "
             f"saved={saved_constraint_names}, current={current_constraint_names}"
+        )
+    saved_constraint_scales = validate_alm_constraint_scales(
+        resume_alm_state["constraint_scales"],
+        current_constraint_names,
+        label="ALM resume",
+    )
+    current_constraint_scales = validate_alm_constraint_scales(
+        constraint_scales,
+        current_constraint_names,
+        label="Current ALM",
+    )
+    if not np.array_equal(saved_constraint_scales, current_constraint_scales):
+        raise ValueError(
+            "ALM resume constraint_scales mismatch: "
+            f"saved={saved_constraint_scales.tolist()}, "
+            f"current={current_constraint_scales.tolist()}"
         )
     raw_multipliers = np.asarray(resume_alm_state["multipliers"], dtype=float)
     if raw_multipliers.shape != (len(current_constraint_names),):
@@ -4770,10 +5179,58 @@ def build_single_stage_alm_settings(args):
         trust_radius_shrink=args.alm_trust_radius_shrink,
         trust_radius_grow=args.alm_trust_radius_grow,
         max_inner_attempts=args.alm_max_inner_attempts,
-        prefer_dual_update_on_signal_mismatch=bool(
-            getattr(args, "alm_fix_signal_mismatch_guard", False)
-        ),
+        continue_on_signal_mismatch=bool(args.alm_fix_signal_mismatch_guard),
     )
+
+
+_SINGLE_STAGE_ALM_EVAL_PASSTHROUGH_FIELDS = (
+    "base_grad",
+    "hard_signed_constraint_values",
+    "hard_violation_values",
+    "surrogate_signed_constraint_values",
+    "hard_dual_update_values",
+    "normalized_signed_constraint_values",
+    "normalized_feasibility_values",
+    "raw_constraint_values",
+    "raw_solver_constraint_values",
+    "raw_dual_update_values",
+    "raw_feasibility_values",
+    "raw_hard_signed_constraint_values",
+    "raw_hard_violation_values",
+    "raw_surrogate_signed_constraint_values",
+    "raw_hard_dual_update_values",
+    "raw_constraint_grads",
+    "raw_constraint_activity_tolerances",
+    "constraint_scales",
+    "constraint_blocks",
+    "constraint_scale_sources",
+    "search_hardware_constraint_payload_kind",
+    "alm_formulation",
+)
+
+
+def _copy_single_stage_alm_eval_value(value):
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    if isinstance(value, list):
+        return [
+            item.copy() if isinstance(item, np.ndarray) else item
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            item.copy() if isinstance(item, np.ndarray) else item
+            for item in value
+        )
+    return value
+
+
+def _copy_single_stage_alm_passthrough_fields(metric_eval):
+    return {
+        field_name: _copy_single_stage_alm_eval_value(metric_eval[field_name])
+        for field_name in _SINGLE_STAGE_ALM_EVAL_PASSTHROUGH_FIELDS
+        if field_name in metric_eval
+    }
 
 
 def _jsonable_value(value):
@@ -6401,6 +6858,7 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             "frontier_epsilon_penalty_weight",
             "epsilon_penalty_weight",
         ),
+        frontier_kam_min=globals().get("FRONTIER_KAM_MIN", replay_config.frontier_kam_min),
     )
 
 
@@ -6644,15 +7102,24 @@ def build_preserved_timeout_results_payload(
     if artifact_hardware_snapshot.get("coil_length") is None:
         artifact_hardware_snapshot["coil_length"] = float(coil_length)
     hardware_status = hardware_snapshot["artifact_hardware_status"]
+    certification_status = frontier_certification_status_from_search_eval(search_eval)
     final_feasibility_ok = refinement_eligible_for_hardware_status(
         run_dict,
         hardware_status,
     )
     source_stage = str(incumbent_stage)
     is_frontier_mode = replay_config.single_stage_goal_mode == "frontier"
+    # Producer-side WOUT convention stamp. Mirrors the Stage 2 producer pattern in
+    # ``banana_coil_solver`` so preserved-timeout sidecars carry the same SSOT lane
+    # metadata at write time, without depending on the consumer-side legacy upgrader.
+    wout_convention_fields = wout_convention_artifact_fields(
+        wout_path=replay_config.plasma_surf_path,
+        tf_current_A=float(hardware_snapshot["tf_current_A"]),
+    )
     payload = {
         "PLASMA_SURF_FILENAME": replay_config.plasma_surf_filename,
         "PLASMA_SURF_PATH": replay_config.plasma_surf_path,
+        **wout_convention_fields,
         "SEED_ARTIFACT_ROLE": replay_config.seed_artifact_role,
         "OFFSPEC_REPLAY_DEBUG_ONLY": replay_config.offspec_replay_debug_only,
         "SINGLE_STAGE_RESUME_BS_PATH": replay_config.single_stage_resume_bs_path,
@@ -6707,6 +7174,11 @@ def build_preserved_timeout_results_payload(
         "FINAL_IOTA": float(final_iota),
         "FINAL_VOLUME": float(final_volume),
         "FINAL_FEASIBILITY_OK": bool(final_feasibility_ok),
+        "FRONTIER_REPORTABLE_SUCCESS": frontier_reportable_success(
+            is_frontier_mode,
+            final_feasibility_ok,
+            certification_status,
+        ),
         "SELF_INTERSECTING": bool(run_dict["intersecting"]),
         **build_single_stage_banana_current_payload_fields(banana_current_state),
         **build_hardware_constraint_artifact_payload_fields(artifact_hardware_snapshot),
@@ -6724,6 +7196,8 @@ def build_preserved_timeout_results_payload(
         "NONQS_RATIO": float(objective_eval["J_QS"]),
         "BOOZER_RESIDUAL": float(objective_eval["J_Boozer"]),
         "FRONTIER_TRUST_OK": search_eval.get("frontier_trust_ok"),
+        **frontier_certification_results_payload(certification_status),
+        **best_topology_results_payload(run_dict),
         "FRONTIER_BOOZER_TRUST_THRESHOLD": search_eval.get("frontier_boozer_trust_threshold"),
         "FRONTIER_BOOZER_TRUST_EXCESS": search_eval.get("frontier_boozer_trust_excess"),
         "FRONTIER_REFERENCE_IOTA": replay_config.frontier_iota_reference,
@@ -7007,6 +7481,9 @@ def build_single_stage_solver_checkpoint_state(
         best_feasible_stage=run_dict.get("best_feasible_stage"),
         best_feasible_metric=run_dict.get("best_feasible_metric"),
         out_dir_iter=str(out_dir_iter),
+        latest_topology_entry=run_dict.get("latest_topology_entry"),
+        best_topology=run_dict.get("best_topology"),
+        best_confinement_objective=run_dict.get("best_confinement_objective"),
         run_counters={
             "it": run_dict.get("it", 0),
             "invalid_state_rejects_total": run_dict.get(
@@ -7070,8 +7547,13 @@ def current_solver_checkpoint_alm_state():
     alm_state = current_preserved_timeout_alm_state()
     if alm_state is None:
         return None
+    checkpoint_scales = current_alm_constraint_scales(
+        globals()["run_dict"]["search_eval"],
+        ALM_CONSTRAINT_NAMES,
+    )
     return {
         "constraint_names": list(ALM_CONSTRAINT_NAMES),
+        "constraint_scales": checkpoint_scales,
         "penalty": float(alm_state.penalty),
         "multipliers": np.asarray(alm_state.multipliers, dtype=float).copy(),
     }
@@ -7830,6 +8312,7 @@ def evaluate_search_step(x):
         if metric_eval is not None and "constraint_values" in metric_eval:
             feasibility_values = np.asarray(metric_eval["feasibility_values"], dtype=float)
             dual_update_values = np.asarray(metric_eval["dual_update_values"], dtype=float)
+            evaluation.update(_copy_single_stage_alm_passthrough_fields(metric_eval))
             evaluation.update(
                 {
                     "constraint_values": np.asarray(metric_eval["constraint_values"], dtype=float),
@@ -8029,6 +8512,22 @@ def callback(x):
     incumbent_stage = run_dict.get("accepted_boozer_stage", globals().get("stage", "initial"))
     run_dict["accepted_boozer_stage"] = incumbent_stage
     run_dict['intersecting'] = any(full_stack_status['self_intersections'])
+    accepted_iteration = int(run_dict['accepted_iterations'] + 1)
+    frontier_topology_entry = maybe_record_topology_score(
+        run_dict,
+        accepted_iteration=accepted_iteration,
+        proxy_objective=J,
+        outer_surf=outer_surface_data['boozer_surface'].surface,
+        biotsavart=bs,
+        surface_data=surface_data,
+        hardware_status=hardware_status,
+    )
+    refresh_frontier_certification_status(
+        run_dict,
+        hardware_status=hardware_status,
+        accepted_iteration=accepted_iteration,
+        topology_entry=frontier_topology_entry,
+    )
     best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, incumbent_stage)
     best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, incumbent_stage)
 
@@ -8036,7 +8535,6 @@ def callback(x):
         outer_entry['boozer_surface'].surface,
         bs,
     )
-    accepted_iteration = int(run_dict['accepted_iterations'] + 1)
     if (
         SINGLE_STAGE_GOAL_MODE == "frontier"
         and run_dict.get("frontier_conditioning_first_accepted_report") is None
@@ -8224,111 +8722,6 @@ def callback(x):
         save_surface_artifacts(surface_data, bs, ckpt_dir, "surf", also_write_outer_legacy=False)
         print(f"  [checkpoint] Saved iteration {run_dict['accepted_iterations']} to {ckpt_dir}")
 
-    # Periodic topology scoring (medium-fidelity confinement evaluation)
-    if TOPOLOGY_SCORER_EVERY > 0 and run_dict['accepted_iterations'] % TOPOLOGY_SCORER_EVERY == 0:
-        outer_surf = outer_surface_data['boozer_surface'].surface
-        topo_result = safe_score_topology(
-            outer_surf,
-            bs,
-            nfieldlines=TOPOLOGY_SCORER_NFIELDLINES,
-            tmax=TOPOLOGY_SCORER_TMAX,
-            **confinement_surrogate_kwargs(),
-        )
-        checkpoint_objective_total = (
-            np.inf
-            if topo_result["broken"]
-            else checkpoint_confinement_objective(
-                J,
-                topo_result,
-                CONFINEMENT_OBJECTIVE_WEIGHT,
-            )
-        )
-        topo_entry = {
-            "accepted_iteration": run_dict['accepted_iterations'],
-            "J": float(J),
-            "checkpoint_objective_total": checkpoint_objective_total,
-            "topology_state": topo_result["evaluation_state"],
-            "topology_broken": bool(topo_result["broken"]),
-            "topology_error": topo_result.get("evaluation_error"),
-            "topology_error_type": topo_result.get("evaluation_error_type"),
-            "survival_fraction": topo_result["survival_fraction"],
-            "survived_lines": topo_result["survived_lines"],
-            "nfieldlines": topo_result["nfieldlines"],
-            "tmax": topo_result["tmax"],
-            "mean_exit_time": topo_result["mean_exit_time"],
-            "confinement_score": topo_result["confinement_score"],
-            "mean_line_loss": topo_result["mean_line_loss"],
-            "worst_k_line_loss": topo_result["worst_k_line_loss"],
-            "early_exit_fraction": topo_result["early_exit_fraction"],
-            "confinement_loss": topo_result["confinement_loss"],
-            "confinement_surrogate_k": topo_result["confinement_surrogate_k"],
-            "confinement_early_exit_threshold": topo_result["confinement_early_exit_threshold"],
-            "stop_reason_counts": topo_result["stop_reason_counts"],
-            "first_exit": topo_result.get("first_exit"),
-            "per_phi_hit_counts": topo_result.get("per_phi_hit_counts"),
-            "line_metrics": topo_result.get("line_metrics"),
-            "line_lifetimes": topo_result.get("line_lifetimes"),
-            "line_losses": topo_result.get("line_losses"),
-            "seed_contract": topo_result.get("seed_contract"),
-            "field_model": topo_result.get("field_model"),
-            "transport_diagnostics": topo_result.get("transport_diagnostics"),
-        }
-        # Append to archive JSONL
-        archive_path = os.path.join(OUT_DIR_ITER, "topology_archive.jsonl")
-        append_jsonl_artifact(archive_path, topo_entry)
-
-        # Track best states
-        if (
-            not topo_result["broken"]
-            and (
-                'best_topology' not in run_dict
-                or topo_entry['confinement_score'] > run_dict['best_topology']['confinement_score']
-            )
-        ):
-            run_dict['best_topology'] = topo_entry
-            best_dir = os.path.join(OUT_DIR_ITER, "best_topology")
-            write_topology_checkpoint_artifacts(
-                best_dir,
-                artifact_role="best_topology_checkpoint",
-                topology_entry=topo_entry,
-                biotsavart=bs,
-                surface_data=surface_data,
-            )
-
-        if (
-            not topo_result["broken"]
-            and CONFINEMENT_OBJECTIVE_WEIGHT > 0.0
-            and (
-                'best_confinement_objective' not in run_dict
-                or topo_entry['checkpoint_objective_total'] < run_dict['best_confinement_objective']['checkpoint_objective_total']
-            )
-        ):
-            run_dict['best_confinement_objective'] = topo_entry
-            best_dir = os.path.join(OUT_DIR_ITER, "best_confinement_objective")
-            write_topology_checkpoint_artifacts(
-                best_dir,
-                artifact_role="best_confinement_objective_checkpoint",
-                topology_entry=topo_entry,
-                biotsavart=bs,
-                surface_data=surface_data,
-            )
-
-        if topo_result["broken"]:
-            print(
-                f"  [topology] iter={run_dict['accepted_iterations']}: "
-                f"broken ({topo_result.get('evaluation_error_type')}: "
-                f"{topo_result.get('evaluation_error')})"
-            )
-        else:
-            print(
-                f"  [topology] iter={run_dict['accepted_iterations']}: "
-                f"survival={topo_result['survived_lines']}/{topo_result['nfieldlines']}, "
-                f"confinement={topo_result['confinement_score']:.4f}, "
-                f"loss={topo_result['confinement_loss']:.4f}, "
-                f"mean_exit={topo_result['mean_exit_time']}"
-            )
-
-
 # Convergence tolerances for different mpol values (module-level for testability)
 MULTISURFACE_RAMP_ITERATIONS = 0
 INNER_SURFACE_INITIAL_WEIGHT = 1.0
@@ -8367,6 +8760,7 @@ TOPOLOGY_SCORER_EVERY = 0
 TOPOLOGY_SCORER_NFIELDLINES = 12
 TOPOLOGY_SCORER_TMAX = 50.0
 CONFINEMENT_OBJECTIVE_WEIGHT = 0.0
+FRONTIER_KAM_MIN = 0.0
 CONFINEMENT_SURROGATE_WORST_K = 3
 CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
 CONFINEMENT_SURROGATE_MEAN_WEIGHT = 0.2
@@ -8501,6 +8895,7 @@ if __name__ == "__main__":
     TOPOLOGY_SCORER_NFIELDLINES = args.topology_scorer_nfieldlines
     TOPOLOGY_SCORER_TMAX = args.topology_scorer_tmax
     CONFINEMENT_OBJECTIVE_WEIGHT = args.confinement_objective_weight
+    FRONTIER_KAM_MIN = args.frontier_kam_min
     CONFINEMENT_SURROGATE_WORST_K = args.confinement_surrogate_worst_k
     CONFINEMENT_SURROGATE_EARLY_THRESHOLD = args.confinement_surrogate_early_threshold
     CONFINEMENT_SURROGATE_MEAN_WEIGHT = args.confinement_surrogate_mean_weight
@@ -8525,6 +8920,8 @@ if __name__ == "__main__":
         raise ValueError("--topology-gate-survival-threshold must be between 0 and 1")
     if args.topology_gate_penalty_scale < 0.0:
         raise ValueError("--topology-gate-penalty-scale must be non-negative")
+    if not np.isfinite(args.frontier_kam_min) or not (0.0 <= args.frontier_kam_min <= 1.0):
+        raise ValueError("--frontier-kam-min must be finite and between 0 and 1")
     if args.hardware_search_soft_iterations < 0:
         raise ValueError("--hardware-search-soft-iterations must be non-negative")
     if args.curvature_traversal_band < 0.0:
@@ -8607,6 +9004,7 @@ if __name__ == "__main__":
         ),
         num_banana_current_controls=None,
         single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
+        frontier_kam_min=FRONTIER_KAM_MIN,
         major_radius=R0,
     )
 
@@ -9026,6 +9424,21 @@ if __name__ == "__main__":
         'frontier_conditioning_seed_report': initial_frontier_conditioning_report,
         'frontier_conditioning_first_accepted_report': None,
     }
+    initial_topology_entry = maybe_record_topology_score(
+        run_dict,
+        accepted_iteration=0,
+        proxy_objective=initial_search_eval["total"],
+        outer_surf=outer_surface_data["boozer_surface"].surface,
+        biotsavart=bs,
+        surface_data=surface_data,
+        hardware_status=initial_hardware_snapshot["search_hardware_status"],
+    )
+    refresh_frontier_certification_status(
+        run_dict,
+        hardware_status=initial_hardware_snapshot["search_hardware_status"],
+        accepted_iteration=0,
+        topology_entry=initial_topology_entry,
+    )
     restored_from_solver_checkpoint = False
     resume_alm_state = None
     if resume_solver_checkpoint_payload is not None:
@@ -9037,6 +9450,9 @@ if __name__ == "__main__":
             restore_incumbent_from_solver_checkpoint(
                 resume_solver_checkpoint_payload
             ),
+        )
+        restored_frontier_certification_status = (
+            frontier_certification_status_from_search_eval(run_dict["search_eval"])
         )
         run_counters = dict(
             resume_solver_checkpoint_payload.get("run_counters", {})
@@ -9103,6 +9519,14 @@ if __name__ == "__main__":
         run_dict["best_feasible_metric"] = resume_solver_checkpoint_payload.get(
             "best_feasible_metric"
         )
+        for topology_key in (
+            "latest_topology_entry",
+            "best_topology",
+            "best_confinement_objective",
+        ):
+            restored_topology_entry = resume_solver_checkpoint_payload.get(topology_key)
+            if isinstance(restored_topology_entry, dict):
+                run_dict[topology_key] = dict(restored_topology_entry)
         run_dict["frontier_conditioning_seed_report"] = (
             resume_solver_checkpoint_payload.get(
                 "conditioning_seed_report",
@@ -9116,13 +9540,24 @@ if __name__ == "__main__":
             )
         )
         refresh_accepted_search_state(run_dict, restored_stage)
+        restore_or_refresh_frontier_certification_status_after_resume(
+            run_dict,
+            stored_certification_status=restored_frontier_certification_status,
+            hardware_status=run_dict.get("accepted_hardware_status"),
+            accepted_iteration=run_dict["accepted_iterations"],
+        )
         dofs = np.asarray(run_dict["accepted_x"], dtype=float).copy()
         resume_alm_state = resume_solver_checkpoint_payload.get("alm_state")
         if CONSTRAINT_METHOD == "alm" and isinstance(resume_alm_state, dict):
             ALM_CONSTRAINT_NAMES = current_single_stage_alm_constraint_names()
+            resume_constraint_scales = current_alm_constraint_scales(
+                run_dict["search_eval"],
+                ALM_CONSTRAINT_NAMES,
+            )
             ALM_MULTIPLIERS, ALM_PENALTY = validate_resume_alm_state(
                 resume_alm_state,
                 ALM_CONSTRAINT_NAMES,
+                resume_constraint_scales,
             )
         initial_best_accepted_updated = False
         initial_best_feasible_updated = False
@@ -9409,9 +9844,14 @@ if __name__ == "__main__":
             else resume_solver_checkpoint_payload.get("alm_state")
         )
         if CONSTRAINT_METHOD == "alm" and isinstance(resume_alm_state, dict):
+            resume_constraint_scales = current_alm_constraint_scales(
+                run_dict["search_eval"],
+                alm_constraint_names,
+            )
             initial_alm_multipliers, initial_alm_penalty = validate_resume_alm_state(
                 resume_alm_state,
                 alm_constraint_names,
+                resume_constraint_scales,
             )
         else:
             initial_alm_multipliers = np.zeros(len(alm_constraint_names), dtype=float)
@@ -10009,6 +10449,12 @@ if __name__ == "__main__":
     nonqs_ratio = None if args.init_only else float(JnonQSRatio.J())
     boozer_residual = None if args.init_only else float(JBoozerResidual.J())
     final_hardware_status = final_hardware_snapshot["artifact_hardware_status"]
+    frontier_certification_status = refresh_frontier_certification_status(
+        run_dict,
+        hardware_status=final_hardware_status,
+        accepted_iteration=run_dict["accepted_iterations"],
+        topology_entry=run_dict.get("latest_topology_entry"),
+    )
     final_feasibility_ok = refinement_eligible_for_hardware_status(
         run_dict,
         final_hardware_status,
@@ -10193,6 +10639,9 @@ if __name__ == "__main__":
         "ALM_TRUST_RADIUS_GROW": args.alm_trust_radius_grow if CONSTRAINT_METHOD == "alm" else None,
         "ALM_MAX_INNER_ATTEMPTS": args.alm_max_inner_attempts if CONSTRAINT_METHOD == "alm" else None,
         "ALM_MAX_SUBPROBLEM_CONTINUATIONS": args.alm_max_subproblem_continuations if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_FIX_SIGNAL_MISMATCH_GUARD": (
+            bool(args.alm_fix_signal_mismatch_guard) if CONSTRAINT_METHOD == "alm" else None
+        ),
         "ALM_DISTANCE_SMOOTHING": args.alm_distance_smoothing if CONSTRAINT_METHOD == "alm" else None,
         "ALM_CURVATURE_SMOOTHING": args.alm_curvature_smoothing if CONSTRAINT_METHOD == "alm" else None,
         "ALM_EFFECTIVE_DISTANCE_SMOOTHING": current_alm_distance_smoothing() if CONSTRAINT_METHOD == "alm" else None,
@@ -10447,6 +10896,11 @@ if __name__ == "__main__":
         ),
         "FINAL_SEARCH_SURFACE_WEIGHTS": final_search_surface_weights,
         "FINAL_FEASIBILITY_OK": final_feasibility_ok,
+        "FRONTIER_REPORTABLE_SUCCESS": frontier_reportable_success(
+            frontier_mode_enabled(),
+            final_feasibility_ok,
+            frontier_certification_status,
+        ),
         "SELF_INTERSECTING": run_dict['intersecting'],
         **build_single_stage_banana_current_payload_fields(banana_current_state),
         "BANANA_CURRENT_DIAGNOSTICS_ENABLED": (
@@ -10497,6 +10951,7 @@ if __name__ == "__main__":
         "NONQS_RATIO": nonqs_ratio,
         "BOOZER_RESIDUAL": boozer_residual,
         "FRONTIER_TRUST_OK": final_frontier_trust_status["ok"],
+        **frontier_certification_results_payload(frontier_certification_status),
         "FRONTIER_BOOZER_TRUST_EXCESS": final_frontier_trust_status["excess"],
         "FRONTIER_BOOZER_TRUST_EXCESS_RATIO": run_dict["search_eval"].get(
             "frontier_boozer_trust_excess_ratio"
@@ -10530,17 +10985,7 @@ if __name__ == "__main__":
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
         "INITIAL_MAX_CURVATURE": float(initial_max_curvature),
-        "BEST_TOPOLOGY_ACCEPTED_ITERATION": run_dict.get("best_topology", {}).get("accepted_iteration"),
-        "BEST_TOPOLOGY_CONFINEMENT_SCORE": run_dict.get("best_topology", {}).get("confinement_score"),
-        "BEST_TOPOLOGY_CONFINEMENT_LOSS": run_dict.get("best_topology", {}).get("confinement_loss"),
-        "BEST_TOPOLOGY_TRANSPORT_DIAGNOSTICS": run_dict.get(
-            "best_topology",
-            {},
-        ).get("transport_diagnostics"),
-        "BEST_TOPOLOGY_DIAGNOSTICS": optional_topology_score_diagnostics(
-            run_dict.get("best_topology"),
-            artifact_role="best_topology",
-        ),
+        **best_topology_results_payload(run_dict),
         "BEST_CONFINEMENT_OBJECTIVE_ACCEPTED_ITERATION": run_dict.get("best_confinement_objective", {}).get("accepted_iteration"),
         "BEST_CONFINEMENT_OBJECTIVE_TOTAL": run_dict.get("best_confinement_objective", {}).get("checkpoint_objective_total"),
         "BEST_CONFINEMENT_OBJECTIVE_PROXY_J": run_dict.get("best_confinement_objective", {}).get("J"),
@@ -10563,6 +11008,15 @@ if __name__ == "__main__":
             initial_surface_iotas,
             final_surface_volumes,
             final_surface_iotas,
+        )
+    )
+    # Producer-side WOUT convention stamp. Mirrors the Stage 2 producer pattern in
+    # ``banana_coil_solver`` so single-stage artifacts carry the same SSOT lane
+    # metadata at write time, without depending on the consumer-side legacy upgrader.
+    results.update(
+        wout_convention_artifact_fields(
+            wout_path=file_loc,
+            tf_current_A=stage2_tf_current_A,
         )
     )
     write_json_artifact(os.path.join(OUT_DIR_ITER, "results.json"), results)

@@ -2022,6 +2022,26 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(result["survived_lines"], 0)
         self.assertTrue(np.isinf(result["confinement_loss"]))
 
+    def test_kam_fraction_counts_empty_hit_rows_as_unbounded_seeds(self):
+        module = load_topology_scorer_module()
+        bounded_line = np.array(
+            [
+                [0.0, 0.0, 1.00, 0.0, 0.00],
+                [1.0, 0.0, 1.01, 0.0, 0.01],
+                [2.0, 0.0, 1.02, 0.0, 0.00],
+            ],
+            dtype=float,
+        )
+
+        fraction, median_width = module.kam_fraction(
+            [np.empty((0, 5)), bounded_line],
+            cross_section_span=1.0,
+            width_ratio=0.25,
+        )
+
+        self.assertAlmostEqual(fraction, 0.5)
+        self.assertAlmostEqual(median_width, 0.5 * (1.0 + np.sqrt(0.02 ** 2 + 0.01 ** 2)))
+
     def test_trace_metrics_rejects_malformed_empty_hit_rows(self):
         topology_module = load_topology_scorer_module()
 
@@ -3325,6 +3345,230 @@ class HardwareConstraintTests(unittest.TestCase):
             ],
         )
 
+    def test_topology_archive_entry_preserves_kam_metrics(self):
+        module = load_single_stage_example_module()
+        topology_result = {
+            "evaluation_state": "evaluated",
+            "broken": False,
+            "evaluation_error": None,
+            "evaluation_error_type": None,
+            "survival_fraction": 1.0,
+            "survived_lines": 12,
+            "nfieldlines": 12,
+            "tmax": 80.0,
+            "mean_exit_time": None,
+            "confinement_score": 1.0,
+            "mean_line_loss": 0.0,
+            "worst_k_line_loss": 0.0,
+            "early_exit_fraction": 0.0,
+            "confinement_loss": 0.0,
+            "confinement_surrogate_k": 3,
+            "confinement_early_exit_threshold": 0.2,
+            "kam_fraction": 1.0 / 12.0,
+            "kam_median_width": 0.08275987797445103,
+            "cross_section_span": 0.19712474791042184,
+            "stop_reason_counts": {"surface_exit": 0},
+            "first_exit": None,
+            "per_phi_hit_counts": [71, 60, 60, 60],
+            "line_metrics": [],
+            "line_lifetimes": [],
+            "line_losses": [],
+            "seed_contract": {"nfieldlines": 12},
+            "field_model": "biotsavart",
+            "transport_diagnostics": {"status": "partial"},
+        }
+
+        entry = module.topology_archive_entry(
+            9,
+            -0.701188557808912,
+            -0.701188557808912,
+            topology_result,
+        )
+
+        self.assertEqual(entry["accepted_iteration"], 9)
+        self.assertEqual(entry["kam_fraction"], topology_result["kam_fraction"])
+        self.assertEqual(entry["kam_median_width"], topology_result["kam_median_width"])
+        self.assertEqual(entry["cross_section_span"], topology_result["cross_section_span"])
+
+    def test_initial_topology_score_writes_archive_and_confinement_checkpoint(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_KAM_MIN = 0.30
+        module.TOPOLOGY_SCORER_EVERY = 5
+        module.TOPOLOGY_SCORER_NFIELDLINES = 12
+        module.TOPOLOGY_SCORER_TMAX = 80.0
+        module.CONFINEMENT_OBJECTIVE_WEIGHT = 1.0
+        module.CONFINEMENT_SURROGATE_WORST_K = 3
+        module.CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
+        module.CONFINEMENT_SURROGATE_MEAN_WEIGHT = 1.0
+        module.CONFINEMENT_SURROGATE_WORST_WEIGHT = 0.0
+        module.CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.0
+        topology_result = {
+            "evaluation_state": "evaluated",
+            "broken": False,
+            "evaluation_error": None,
+            "evaluation_error_type": None,
+            "survival_fraction": 1.0,
+            "survived_lines": 12,
+            "nfieldlines": 12,
+            "tmax": 80.0,
+            "mean_exit_time": None,
+            "confinement_score": 4.0,
+            "mean_line_loss": 0.0,
+            "worst_k_line_loss": 0.0,
+            "early_exit_fraction": 0.0,
+            "confinement_loss": 0.25,
+            "confinement_surrogate_k": 3,
+            "confinement_early_exit_threshold": 0.2,
+            "kam_fraction": 0.5,
+            "kam_median_width": 0.08,
+            "cross_section_span": 0.2,
+            "stop_reason_counts": {"surface_exit": 0},
+            "first_exit": None,
+            "per_phi_hit_counts": [60, 60, 60, 60],
+            "line_metrics": [],
+            "line_lifetimes": [],
+            "line_losses": [],
+            "seed_contract": {"nfieldlines": 12},
+            "field_model": "biotsavart",
+            "transport_diagnostics": {"status": "partial"},
+        }
+        run_dict = {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.OUT_DIR_ITER = tmpdir
+            with patch.object(
+                module,
+                "safe_score_topology",
+                return_value=topology_result,
+            ), patch.object(module, "write_topology_checkpoint_artifacts") as write_checkpoint:
+                entry = module.maybe_record_topology_score(
+                    run_dict,
+                    accepted_iteration=0,
+                    proxy_objective=2.0,
+                    outer_surf=object(),
+                    biotsavart=object(),
+                    surface_data=[],
+                    hardware_status={"success": True, "violations": []},
+                )
+
+            archive_entries = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "topology_archive.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertEqual(entry["accepted_iteration"], 0)
+        self.assertEqual(archive_entries[0]["accepted_iteration"], 0)
+        self.assertEqual(run_dict["best_topology"]["accepted_iteration"], 0)
+        self.assertEqual(run_dict["best_confinement_objective"]["accepted_iteration"], 0)
+        checkpoint_dir_names = [
+            Path(call.args[0]).name for call in write_checkpoint.call_args_list
+        ]
+        self.assertIn("best_topology", checkpoint_dir_names)
+        self.assertIn("best_confinement_objective", checkpoint_dir_names)
+
+    def test_best_topology_ranks_kam_before_confinement_score(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_KAM_MIN = 0.30
+        module.TOPOLOGY_SCORER_EVERY = 1
+        module.TOPOLOGY_SCORER_NFIELDLINES = 12
+        module.TOPOLOGY_SCORER_TMAX = 80.0
+        module.CONFINEMENT_OBJECTIVE_WEIGHT = 1.0
+        module.CONFINEMENT_SURROGATE_WORST_K = 3
+        module.CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
+        module.CONFINEMENT_SURROGATE_MEAN_WEIGHT = 1.0
+        module.CONFINEMENT_SURROGATE_WORST_WEIGHT = 0.0
+        module.CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.0
+
+        def topology_result(kam_fraction, survival_fraction, confinement_score):
+            return {
+                "evaluation_state": "evaluated",
+                "broken": False,
+                "evaluation_error": None,
+                "evaluation_error_type": None,
+                "survival_fraction": survival_fraction,
+                "survived_lines": int(round(12 * survival_fraction)),
+                "nfieldlines": 12,
+                "tmax": 80.0,
+                "mean_exit_time": None,
+                "confinement_score": confinement_score,
+                "mean_line_loss": 0.0,
+                "worst_k_line_loss": 0.0,
+                "early_exit_fraction": 0.0,
+                "confinement_loss": 1.0 / confinement_score,
+                "confinement_surrogate_k": 3,
+                "confinement_early_exit_threshold": 0.2,
+                "kam_fraction": kam_fraction,
+                "kam_median_width": 0.08,
+                "cross_section_span": 0.2,
+                "stop_reason_counts": {"surface_exit": 0},
+                "first_exit": None,
+                "per_phi_hit_counts": [60, 60, 60, 60],
+                "line_metrics": [],
+                "line_lifetimes": [],
+                "line_losses": [],
+                "seed_contract": {"nfieldlines": 12},
+                "field_model": "biotsavart",
+                "transport_diagnostics": {"status": "partial"},
+            }
+
+        run_dict = {}
+        low_kam_high_confinement = topology_result(
+            kam_fraction=1.0 / 12.0,
+            survival_fraction=1.0,
+            confinement_score=100.0,
+        )
+        high_kam_lower_confinement = topology_result(
+            kam_fraction=0.5,
+            survival_fraction=0.75,
+            confinement_score=2.0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.OUT_DIR_ITER = tmpdir
+            with patch.object(
+                module,
+                "safe_score_topology",
+                side_effect=[low_kam_high_confinement, high_kam_lower_confinement],
+            ), patch.object(module, "write_topology_checkpoint_artifacts"):
+                first_entry = module.maybe_record_topology_score(
+                    run_dict,
+                    accepted_iteration=1,
+                    proxy_objective=5.0,
+                    outer_surf=object(),
+                    biotsavart=object(),
+                    surface_data=[],
+                    hardware_status={"success": True, "violations": []},
+                )
+                second_entry = module.maybe_record_topology_score(
+                    run_dict,
+                    accepted_iteration=2,
+                    proxy_objective=5.0,
+                    outer_surf=object(),
+                    biotsavart=object(),
+                    surface_data=[],
+                    hardware_status={"success": True, "violations": []},
+                )
+
+            archive_entries = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "topology_archive.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertFalse(first_entry["frontier_certification_ok"])
+        self.assertTrue(second_entry["frontier_certification_ok"])
+        self.assertEqual(run_dict["best_topology"]["accepted_iteration"], 2)
+        self.assertEqual(archive_entries[0]["accepted_iteration"], 1)
+        self.assertEqual(archive_entries[1]["accepted_iteration"], 2)
+        payload = module.best_topology_results_payload(run_dict)
+        self.assertAlmostEqual(payload["BEST_TOPOLOGY_KAM_FRACTION"], 0.5)
+        self.assertEqual(payload["BEST_TOPOLOGY_CERTIFICATION_REASON"], "certified")
+
     def test_build_banana_current_coordinate_report_tracks_indices_bounds_and_gradients(self):
         module = load_single_stage_example_module()
         current_a, current_b, banana_current_state, objective = (
@@ -3976,6 +4220,16 @@ class HardwareConstraintTests(unittest.TestCase):
             "best_feasible_metric": None,
             "best_feasible_stage": None,
         }
+        module.refresh_frontier_certification_status(
+            run_dict,
+            hardware_status=run_dict["accepted_hardware_status"],
+            accepted_iteration=0,
+            topology_entry={
+                "accepted_iteration": 0,
+                "topology_broken": False,
+                "kam_fraction": 0.5,
+            },
+        )
 
         self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "initial"))
         self.assertEqual(run_dict["best_feasible_metric"], 4.0)
@@ -3992,6 +4246,148 @@ class HardwareConstraintTests(unittest.TestCase):
         run_dict["J"] = 2.0
         self.assertFalse(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
         self.assertEqual(run_dict["best_feasible_metric"], 4.0)
+
+    def test_frontier_refinement_labels_uncertified_without_starving_best_feasible(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_KAM_MIN = 0.30
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 4.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": diagnostic_search_eval_payload(
+                {
+                    "total": 4.0,
+                    "frontier_rank_total": 4.0,
+                    "frontier_trust_ok": True,
+                    "surface_weights": np.array([1.0]),
+                }
+            ),
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": True, "success": True},
+            "intersecting": False,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+        }
+
+        low_kam_status = module.refresh_frontier_certification_status(
+            run_dict,
+            hardware_status=run_dict["accepted_hardware_status"],
+            accepted_iteration=5,
+            topology_entry={
+                "accepted_iteration": 5,
+                "topology_broken": False,
+                "kam_fraction": 1.0 / 12.0,
+            },
+        )
+
+        self.assertFalse(low_kam_status["ok"])
+        self.assertEqual(low_kam_status["reason"], "kam_fraction_below_min")
+        self.assertTrue(module.refinement_eligible_incumbent(run_dict))
+        self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "accepted"))
+        self.assertFalse(run_dict["search_eval"]["frontier_certification_ok"])
+        self.assertAlmostEqual(run_dict["search_eval"]["frontier_kam_fraction"], 1.0 / 12.0)
+        self.assertFalse(
+            run_dict["best_feasible_incumbent"].search_eval["frontier_certification_ok"]
+        )
+        self.assertFalse(module.frontier_reportable_success(True, True, low_kam_status))
+        self.assertIsNone(module.frontier_reportable_success(False, True, low_kam_status))
+
+        high_kam_status = module.refresh_frontier_certification_status(
+            run_dict,
+            hardware_status=run_dict["accepted_hardware_status"],
+            accepted_iteration=6,
+            topology_entry={
+                "accepted_iteration": 6,
+                "topology_broken": False,
+                "kam_fraction": 0.5,
+            },
+        )
+
+        self.assertTrue(high_kam_status["ok"])
+        self.assertEqual(high_kam_status["reason"], "certified")
+        self.assertTrue(module.refinement_eligible_incumbent(run_dict))
+        self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "certified"))
+        self.assertEqual(run_dict["best_feasible_stage"], "certified")
+        self.assertTrue(
+            run_dict["best_feasible_incumbent"].search_eval["frontier_certification_ok"]
+        )
+        self.assertTrue(module.frontier_reportable_success(True, True, high_kam_status))
+
+    def test_frontier_default_kam_floor_reports_hardware_failed_not_kam_deficit(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_KAM_MIN = 0.0
+        run_dict = {
+            "search_eval": {
+                "total": 4.0,
+                "frontier_rank_total": 4.0,
+            },
+        }
+
+        status = module.refresh_frontier_certification_status(
+            run_dict,
+            hardware_status={"success": False, "violations": ["hardware failed"]},
+            accepted_iteration=9,
+            topology_entry={
+                "accepted_iteration": 9,
+                "topology_broken": False,
+                "kam_fraction": 1.0 / 12.0,
+            },
+        )
+
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["reason"], "hardware_failed")
+        self.assertFalse(status["hardware_ok"])
+        self.assertAlmostEqual(status["kam_fraction"], 1.0 / 12.0)
+        self.assertEqual(status["kam_min"], 0.0)
+        self.assertEqual(status["kam_deficit"], 0.0)
+        self.assertFalse(module.frontier_reportable_success(True, True, status))
+        self.assertIsNone(module.frontier_reportable_success(False, True, status))
+        self.assertFalse(run_dict["search_eval"]["frontier_certification_ok"])
+        self.assertEqual(
+            run_dict["search_eval"]["frontier_certification_reason"],
+            "hardware_failed",
+        )
+
+    def test_resume_preserves_current_frontier_certification_status(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        run_dict = {
+            "search_eval": {
+                "total": 4.0,
+                "frontier_rank_total": 4.0,
+            },
+        }
+        stored_certification_status = {
+            "enabled": True,
+            "ok": True,
+            "reason": "certified",
+            "hardware_ok": True,
+            "topology_evaluated": True,
+            "topology_broken": False,
+            "accepted_iteration": 5,
+            "topology_accepted_iteration": 5,
+            "kam_fraction": 0.5,
+            "kam_min": 0.30,
+            "kam_deficit": 0.0,
+        }
+
+        restored = module.restore_or_refresh_frontier_certification_status_after_resume(
+            run_dict,
+            stored_certification_status=stored_certification_status,
+            hardware_status={"success": True, "violations": []},
+            accepted_iteration=5,
+        )
+
+        self.assertEqual(restored["reason"], "certified")
+        self.assertTrue(run_dict["search_eval"]["frontier_certification_ok"])
+        self.assertEqual(run_dict["search_eval"]["frontier_certification_reason"], "certified")
+        self.assertAlmostEqual(run_dict["search_eval"]["frontier_kam_fraction"], 0.5)
 
     def test_refinement_eligible_incumbent_requires_topology_success(self):
         module = load_single_stage_example_module()
@@ -4085,7 +4481,7 @@ class HardwareConstraintTests(unittest.TestCase):
         fake_outer = FakeBoozerSurface()
         module.PRESERVED_TIMEOUT_REPLAY_CONFIG = module.PreservedTimeoutReplayConfig(
             plasma_surf_filename="wout_test.nc",
-            plasma_surf_path="/equilibria/wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
             stage2_bs_path="/seeds/biot_savart_opt.json",
             stage2_results_path="/seeds/results.json",
             mpol=8,
@@ -4303,7 +4699,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module = load_single_stage_example_module()
         replay_config = module.PreservedTimeoutReplayConfig(
             plasma_surf_filename="wout_test.nc",
-            plasma_surf_path="/equilibria/wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
             stage2_bs_path="/seeds/biot_savart_opt.json",
             stage2_results_path="/seeds/results.json",
             mpol=8,
@@ -4328,6 +4724,20 @@ class HardwareConstraintTests(unittest.TestCase):
             "surface_status": {"success": True},
             "accepted_hardware_status": {"success": False},
             "topology_gate_status": {"success": True},
+            "best_topology": {
+                "accepted_iteration": 1,
+                "confinement_score": 0.91,
+                "confinement_loss": 0.08,
+                "kam_fraction": 0.5,
+                "kam_median_width": 0.08,
+                "cross_section_span": 0.2,
+                "frontier_certification_enabled": True,
+                "frontier_certification_ok": True,
+                "frontier_certification_reason": "certified",
+                "frontier_certification_hardware_ok": True,
+                "frontier_kam_min": 0.30,
+                "frontier_kam_deficit": 0.0,
+            },
         }
         payload = module.build_preserved_timeout_results_payload(
             replay_config=replay_config,
@@ -4361,7 +4771,7 @@ class HardwareConstraintTests(unittest.TestCase):
             accepted_iteration=1,
         )
 
-        self.assertEqual(payload["PLASMA_SURF_PATH"], "/equilibria/wout_test.nc")
+        self.assertEqual(payload["PLASMA_SURF_PATH"], str(SIGNED_CW_WOUT_PATH))
         self.assertEqual(payload["SEED_ARTIFACT_ROLE"], "stage2")
         self.assertFalse(payload["OFFSPEC_REPLAY_DEBUG_ONLY"])
         self.assertIsNone(payload["SINGLE_STAGE_RESUME_BS_PATH"])
@@ -4393,12 +4803,147 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["BANANA_CURRENT_A"], 1.4e4)
         self.assertEqual(payload["BANANA_CURRENT_MAX_A"], 1.6e4)
         self.assertIsNone(payload["FINAL_TOPOLOGY_TRANSPORT_DIAGNOSTICS"])
+        self.assertEqual(payload["BEST_TOPOLOGY_ACCEPTED_ITERATION"], 1)
+        self.assertAlmostEqual(payload["BEST_TOPOLOGY_KAM_FRACTION"], 0.5)
+        self.assertTrue(payload["BEST_TOPOLOGY_CERTIFICATION_OK"])
+
+    def test_build_preserved_timeout_results_payload_stamps_producer_wout_convention(self):
+        # Producer-side stamping of WOUT_CONVENTION / WOUT_OFF_SPEC for the
+        # preserved-timeout sidecar — proven via build_preserved_timeout_results_payload
+        # alone, without the consumer-side legacy upgrader being invoked. Mirrors
+        # the Stage 2 producer stamp emitted by ``banana_coil_solver``.
+        module = load_single_stage_example_module()
+        replay_config = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_10x10.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            stage2_seed_surf_path="/seeds/surf_opt_boozer_surface.json",
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 7.5e-4,
+                "base_total": 7.4e-4,
+            },
+            "J": 7.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": True},
+        }
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_feasible",
+            incumbent_stage="initial",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 2.7e-4, "J_Boozer": 4.8e-7},
+            field_error=3.5e-4,
+            final_iota=0.14997,
+            final_volume=0.09998,
+            hardware_snapshot={
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
+                "max_curvature": 19.8,
+                "tf_current_A": -8.0e4,
+                "curve_curve_min_dist": 0.0496,
+                "curve_surface_min_dist": 0.067,
+                "surface_vessel_min_dist": 0.082,
+            },
+            coil_length=2.91,
+            accepted_iteration=1,
+        )
+
+        # Stamp matches the WOUT lane (signed_cw fixture) and the negative
+        # TF-current sign: WOUT_OFF_SPEC must be False.
+        self.assertEqual(payload["WOUT_CONVENTION"], "signed_cw")
+        self.assertIs(payload["WOUT_OFF_SPEC"], False)
+
+    def test_build_preserved_timeout_results_payload_stamps_offspec_when_tf_lane_disagrees(self):
+        # Same WOUT fixture but a positive TF current: the producer must stamp
+        # WOUT_OFF_SPEC=True at write time rather than masking the mismatch.
+        module = load_single_stage_example_module()
+        replay_config = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_10x10.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 7.5e-4,
+                "base_total": 7.4e-4,
+            },
+            "J": 7.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": True},
+        }
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_feasible",
+            incumbent_stage="initial",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 2.7e-4, "J_Boozer": 4.8e-7},
+            field_error=3.5e-4,
+            final_iota=0.14997,
+            final_volume=0.09998,
+            hardware_snapshot={
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
+                "max_curvature": 19.8,
+                "tf_current_A": 8.0e4,
+                "curve_curve_min_dist": 0.0496,
+                "curve_surface_min_dist": 0.067,
+                "surface_vessel_min_dist": 0.082,
+            },
+            coil_length=2.91,
+            accepted_iteration=1,
+        )
+
+        self.assertEqual(payload["WOUT_CONVENTION"], "signed_cw")
+        self.assertIs(payload["WOUT_OFF_SPEC"], True)
+
+    def test_single_stage_final_results_write_stamps_producer_wout_convention(self):
+        # Producer-side wiring check for the final results.json write at end of
+        # main(): the file's source must call ``wout_convention_artifact_fields``
+        # immediately before ``write_json_artifact(..., "results.json", ...)`` so
+        # the stamp lands at producer time, independent of the consumer-side
+        # legacy upgrader. This test guards against the wiring being removed.
+        source = EXAMPLE_MODULE_PATH.read_text(encoding="utf-8")
+        write_idx = source.index('write_json_artifact(os.path.join(OUT_DIR_ITER, "results.json")')
+        # Window the lookback to the immediately-preceding lines so unrelated
+        # call sites elsewhere in the file cannot spoof a passing assertion.
+        window = source[max(0, write_idx - 800):write_idx]
+        self.assertIn("wout_convention_artifact_fields(", window)
+        self.assertIn("wout_path=file_loc", window)
+        self.assertIn("tf_current_A=stage2_tf_current_A", window)
 
     def test_build_preserved_timeout_results_payload_reports_banana_current_mode_fields(self):
         module = load_single_stage_example_module()
         replay_config = module.PreservedTimeoutReplayConfig(
             plasma_surf_filename="wout_test.nc",
-            plasma_surf_path="/equilibria/wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
             stage2_bs_path="/seeds/biot_savart_opt.json",
             stage2_results_path="/seeds/results.json",
             mpol=8,
@@ -4444,6 +4989,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "search_hardware_status": {"success": True, "violations": []},
                 "artifact_hardware_status": {"success": True, "violations": []},
                 "max_curvature": 19.8,
+                "tf_current_A": -8.0e4,
                 "curve_curve_min_dist": 0.0496,
                 "curve_surface_min_dist": 0.067,
                 "surface_vessel_min_dist": 0.082,
@@ -4466,7 +5012,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module = load_single_stage_example_module()
         replay_config = module.PreservedTimeoutReplayConfig(
             plasma_surf_filename="wout_test.nc",
-            plasma_surf_path="/equilibria/wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
             stage2_bs_path="/seeds/biot_savart_opt.json",
             stage2_results_path="/seeds/results.json",
             mpol=8,
@@ -4543,6 +5089,7 @@ class HardwareConstraintTests(unittest.TestCase):
                     "search_hardware_status": {"success": True, "violations": []},
                     "artifact_hardware_status": {"success": True, "violations": []},
                     "max_curvature": 18.2,
+                    "tf_current_A": -8.0e4,
                     "curve_curve_min_dist": 0.051,
                     "curve_surface_min_dist": 0.068,
                     "surface_vessel_min_dist": 0.084,
@@ -4753,7 +5300,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module = load_single_stage_example_module()
         replay_config = module.PreservedTimeoutReplayConfig(
             plasma_surf_filename="wout_test.nc",
-            plasma_surf_path="/equilibria/wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
             stage2_bs_path="/seeds/biot_savart_opt.json",
             stage2_results_path="/seeds/results.json",
             mpol=8,
@@ -4795,6 +5342,7 @@ class HardwareConstraintTests(unittest.TestCase):
                     "violations": ["coil_length 2.100000 exceeds threshold 2.000000"],
                 },
                 "max_curvature": 19.8,
+                "tf_current_A": -8.0e4,
                 "curve_curve_min_dist": 0.0501,
                 "curve_surface_min_dist": 0.067,
                 "surface_vessel_min_dist": 0.082,
@@ -4814,7 +5362,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module = load_single_stage_example_module()
         replay_config = module.PreservedTimeoutReplayConfig(
             plasma_surf_filename="wout_test.nc",
-            plasma_surf_path="/equilibria/wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
             stage2_bs_path="/seeds/biot_savart_opt.json",
             stage2_results_path="/seeds/results.json",
             mpol=8,
@@ -4854,6 +5402,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "artifact_hardware_status": {"success": True, "violations": []},
                 "coil_length": None,
                 "max_curvature": 19.8,
+                "tf_current_A": -8.0e4,
                 "curve_curve_min_dist": 0.0501,
                 "curve_surface_min_dist": 0.067,
                 "surface_vessel_min_dist": 0.082,
@@ -4868,7 +5417,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module = load_single_stage_example_module()
         replay_config = module.PreservedTimeoutReplayConfig(
             plasma_surf_filename="wout_test.nc",
-            plasma_surf_path="/equilibria/wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
             stage2_bs_path="/seeds/biot_savart_opt.json",
             stage2_results_path="/seeds/results.json",
             mpol=8,
@@ -4931,6 +5480,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "search_hardware_status": {"success": True, "violations": []},
                 "artifact_hardware_status": {"success": True, "violations": []},
                 "max_curvature": 19.8,
+                "tf_current_A": -8.0e4,
                 "curve_curve_min_dist": 0.0496,
                 "curve_surface_min_dist": 0.067,
                 "surface_vessel_min_dist": 0.082,
@@ -4958,7 +5508,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module = load_single_stage_example_module()
         replay_seed = module.PreservedTimeoutReplayConfig(
             plasma_surf_filename="wout_test.nc",
-            plasma_surf_path="/equilibria/wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
             stage2_bs_path="/seeds/biot_savart_opt.json",
             stage2_results_path="/seeds/results.json",
             mpol=8,
@@ -5014,6 +5564,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "search_hardware_status": {"success": True, "violations": []},
                 "artifact_hardware_status": {"success": True, "violations": []},
                 "max_curvature": 19.8,
+                "tf_current_A": -8.0e4,
                 "curve_curve_min_dist": 0.0496,
                 "curve_surface_min_dist": 0.067,
                 "surface_vessel_min_dist": 0.082,
@@ -5037,7 +5588,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module = load_single_stage_example_module()
         replay_seed = module.PreservedTimeoutReplayConfig(
             plasma_surf_filename="wout_test.nc",
-            plasma_surf_path="/equilibria/wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
             stage2_bs_path="/seeds/biot_savart_opt.json",
             stage2_results_path="/seeds/results.json",
             mpol=8,
@@ -5803,6 +6354,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "curve_surface_min_dist": 0.03,
             "surface_vessel_min_dist": 0.0,
             "max_curvature": 41.0,
+            "tf_current_A": -8.0e4,
             "success": False,
             "violations": ["coil_coil_min_dist=0.040000 < threshold=0.050000"],
             "search_hardware_status": {
@@ -5829,6 +6381,25 @@ class HardwareConstraintTests(unittest.TestCase):
         module.CHECKPOINT_EVERY = 0
         module.TOPOLOGY_SCORER_EVERY = 0
         module.CONSTRAINT_METHOD = "penalty"
+        # Preserved-timeout writes performed during callback stamp WOUT_CONVENTION
+        # at producer time; pin the replay config so the helper can read a real
+        # WOUT fixture (single_stage_banana_example.py:6657).
+        module.PRESERVED_TIMEOUT_REPLAY_CONFIG = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_10x10.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="",
+            stage2_results_path="",
+            mpol=0,
+            ntor=0,
+            nphi=0,
+            ntheta=0,
+            constraint_weight=None,
+            constraint_method=None,
+            alm_formulation=None,
+            max_iterations=None,
+            target_volume=None,
+            target_iota=None,
+        )
         module.run_dict["surface_state"] = accepted_surface_state
         module.run_dict["it"] = 1
 
@@ -5884,6 +6455,24 @@ class HardwareConstraintTests(unittest.TestCase):
                 "constraint_values": np.array([0.4, 0.1, 0.0]),
                 "feasibility_values": np.array([0.4, 0.1, 0.0]),
                 "dual_update_values": np.array([0.4, 0.1, 0.0]),
+                "hard_signed_constraint_values": np.array([0.0, 0.02, -0.03]),
+                "hard_violation_values": np.array([0.0, 0.02, 0.0]),
+                "surrogate_signed_constraint_values": np.array([0.4, 0.1, 0.0]),
+                "hard_dual_update_values": np.array([0.0, 0.02, -0.03]),
+                "raw_hard_signed_constraint_values": np.array([0.0, 2.0, -3.0]),
+                "raw_hard_violation_values": np.array([0.0, 2.0, 0.0]),
+                "raw_surrogate_signed_constraint_values": np.array([40.0, 10.0, 0.0]),
+                "raw_hard_dual_update_values": np.array([0.0, 2.0, -3.0]),
+                "normalized_signed_constraint_values": np.array([0.4, 0.1, 0.0]),
+                "normalized_feasibility_values": np.array([0.4, 0.1, 0.0]),
+                "constraint_scales": np.array([100.0, 100.0, 100.0]),
+                "constraint_blocks": ["geometry", "geometry", "geometry"],
+                "constraint_scale_sources": [
+                    "threshold:coil_coil_spacing",
+                    "threshold:coil_surface_spacing",
+                    "threshold:max_curvature",
+                ],
+                "base_grad": np.array([0.2, -0.3]),
                 "max_violation": 0.4,
                 "stationarity_norm": 2.5,
                 "constraint_names": ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"],
@@ -5920,6 +6509,39 @@ class HardwareConstraintTests(unittest.TestCase):
             evaluation["constraint_names"],
             ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"],
         )
+        np.testing.assert_array_equal(
+            evaluation["hard_signed_constraint_values"],
+            np.array([0.0, 0.02, -0.03]),
+        )
+        np.testing.assert_array_equal(
+            evaluation["hard_violation_values"],
+            np.array([0.0, 0.02, 0.0]),
+        )
+        np.testing.assert_array_equal(
+            evaluation["surrogate_signed_constraint_values"],
+            np.array([0.4, 0.1, 0.0]),
+        )
+        np.testing.assert_array_equal(
+            evaluation["hard_dual_update_values"],
+            np.array([0.0, 0.02, -0.03]),
+        )
+        np.testing.assert_array_equal(
+            evaluation["raw_hard_signed_constraint_values"],
+            np.array([0.0, 2.0, -3.0]),
+        )
+        np.testing.assert_array_equal(
+            evaluation["constraint_scales"],
+            np.array([100.0, 100.0, 100.0]),
+        )
+        self.assertEqual(
+            evaluation["constraint_scale_sources"],
+            [
+                "threshold:coil_coil_spacing",
+                "threshold:coil_surface_spacing",
+                "threshold:max_curvature",
+            ],
+        )
+        np.testing.assert_array_equal(evaluation["base_grad"], np.array([0.2, -0.3]))
         self.assertAlmostEqual(evaluation["base_total"], 5.0)
         restore_mock.assert_called_once()
 
@@ -7397,6 +8019,235 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(run_dict["phase1_repair_mode_active"])
         self.assertEqual(result["phase1_outcome"], "repair_first_no_local_recovery")
 
+    def _build_repair_first_run_dict(self, *, anchor_hardware_success):
+        anchor_hardware = (
+            {"success": True}
+            if anchor_hardware_success
+            else {
+                "success": False,
+                "violations": [
+                    "coil_coil_min_dist 0.030000 below threshold 0.050000",
+                ],
+                "curve_curve_min_dist": 0.03,
+                "cc_dist": 0.05,
+                "curve_surface_min_dist": 0.02,
+                "cs_dist": 0.015,
+                "surface_vessel_min_dist": 0.05,
+                "ss_dist": 0.04,
+                "max_curvature": 80.0,
+                "curvature_threshold": 100.0,
+            }
+        )
+        return {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": dict(anchor_hardware),
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+        }
+
+    def test_run_penalty_phase1_repair_first_hardware_clean_donor_graduates_on_recovered_accept(self):
+        # Regression: hardware-clean donor with anchor_repair_state==(0,0.0)
+        # used to be structurally unreachable for the repair_state_improved gate.
+        module = self.load_module()
+        run_dict = self._build_repair_first_run_dict(anchor_hardware_success=True)
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            run_dict["accepted_hardware_status"] = {"success": True}
+            run_dict["surface_status"] = {"success": True}
+
+        def fake_minimize(fun, x0, **kwargs):
+            kwargs["callback"](np.array([1.03, -0.97]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=False,
+            seed_regime="repair_first",
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
+        )
+
+        self.assertTrue(result["continue_search"])
+        self.assertEqual(result["phase1_outcome"], "repair_local_recovery_clean_anchor")
+        self.assertEqual(result["startup_local_phase_regime"], "repair_first")
+        self.assertTrue(result["startup_local_recovery_achieved"])
+        self.assertAlmostEqual(result["local_preservation_radius"], 0.015)
+
+    def test_run_penalty_phase1_repair_first_hardware_violating_donor_requires_repair_progress(self):
+        # Hardware-violating donor must still demand repair_state_improved;
+        # recovered_local_accept alone is not enough.
+        module = self.load_module()
+        run_dict = self._build_repair_first_run_dict(anchor_hardware_success=False)
+        unchanged_hardware = dict(run_dict["accepted_hardware_status"])
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            run_dict["accepted_hardware_status"] = dict(unchanged_hardware)
+            run_dict["surface_status"] = {"success": True}
+
+        def fake_minimize(fun, x0, **kwargs):
+            kwargs["callback"](np.array([1.03, -0.97]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=False,
+            seed_regime="repair_first",
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_reject",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
+        )
+
+        self.assertFalse(result["continue_search"])
+        self.assertEqual(result["phase1_outcome"], "repair_first_no_local_recovery")
+        self.assertFalse(result["startup_local_recovery_achieved"])
+
+    def test_run_penalty_phase1_repair_first_hardware_violating_donor_graduates_when_violation_reduces(self):
+        # Hardware-violating donor with genuine repair progress (curvature 120→110)
+        # must still graduate via the original repair_local_recovery path.
+        module = self.load_module()
+        anchor_hardware = {
+            "success": False,
+            "violations": ["max_curvature 120.000000 exceeds threshold 100.000000"],
+            "curve_curve_min_dist": 0.06,
+            "cc_dist": 0.05,
+            "curve_surface_min_dist": 0.02,
+            "cs_dist": 0.015,
+            "surface_vessel_min_dist": 0.05,
+            "ss_dist": 0.04,
+            "max_curvature": 120.0,
+            "curvature_threshold": 100.0,
+        }
+        repaired_hardware = dict(anchor_hardware)
+        repaired_hardware["max_curvature"] = 110.0
+        repaired_hardware["violations"] = ["max_curvature 110.000000 exceeds threshold 100.000000"]
+
+        run_dict = self._build_repair_first_run_dict(anchor_hardware_success=False)
+        run_dict["accepted_hardware_status"] = dict(anchor_hardware)
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            run_dict["accepted_hardware_status"] = dict(repaired_hardware)
+            run_dict["surface_status"] = {"success": True}
+
+        def fake_minimize(fun, x0, **kwargs):
+            kwargs["callback"](np.array([1.03, -0.97]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=False,
+            seed_regime="repair_first",
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
+        )
+
+        self.assertTrue(result["continue_search"])
+        self.assertEqual(result["phase1_outcome"], "repair_local_recovery")
+        self.assertTrue(result["startup_local_recovery_achieved"])
+
+    def test_run_penalty_phase1_repair_first_hardware_clean_donor_fails_without_local_accept(self):
+        # Clean anchor + step that lands on a non-refinement-ready state
+        # (surface solve fails post-step) → no recovered_local_accept → no graduation.
+        module = self.load_module()
+        run_dict = self._build_repair_first_run_dict(anchor_hardware_success=True)
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            run_dict["accepted_hardware_status"] = {"success": True}
+            run_dict["surface_status"] = {"success": False}
+
+        def fake_minimize(fun, x0, **kwargs):
+            kwargs["callback"](np.array([1.03, -0.97]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=False,
+            seed_regime="repair_first",
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_reject",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
+        )
+
+        self.assertFalse(result["continue_search"])
+        self.assertEqual(result["phase1_outcome"], "repair_first_no_local_recovery")
+        self.assertFalse(result["startup_local_recovery_achieved"])
+
     def test_run_penalty_phase1_bridge_only_requires_safe_step_for_donor_ready(self):
         module = self.load_module()
         run_dict = {
@@ -7963,7 +8814,7 @@ class HardwareConstraintTests(unittest.TestCase):
     def test_bounded_improvement_reward_partials_wrap_callable_optimizable_gradients(self):
         module = self.load_module()
 
-        class DummyMetricObjective(Optimizable):
+        class DummyMetricObjective(module.Optimizable):
             def __init__(self):
                 super().__init__(x0=np.array([0.0, 0.0]))
 
@@ -7980,7 +8831,7 @@ class HardwareConstraintTests(unittest.TestCase):
 
         partial_gradient = reward.dJ(partials=True)
 
-        self.assertIsInstance(partial_gradient, Derivative)
+        self.assertIsInstance(partial_gradient, module.Derivative)
         np.testing.assert_allclose(partial_gradient(metric_objective), [-14.13016497, 7.06508249])
 
     def test_build_frontier_goal_config_derives_normalized_weights_and_trust_threshold(self):
@@ -8478,6 +9329,26 @@ class HardwareConstraintTests(unittest.TestCase):
             module.curvelength = _CurveLength()
             module.bs = _BS()
             module.OUT_DIR_ITER = tmpdir
+            # Preserved-timeout writes during callback stamp WOUT_CONVENTION at
+            # producer time; supply the TF current that the hardware snapshot
+            # propagates into the payload (single_stage_banana_example.py:6657).
+            module.stage2_tf_current_A = -8.0e4
+            module.PRESERVED_TIMEOUT_REPLAY_CONFIG = module.PreservedTimeoutReplayConfig(
+                plasma_surf_filename="wout_10x10.nc",
+                plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+                stage2_bs_path="",
+                stage2_results_path="",
+                mpol=0,
+                ntor=0,
+                nphi=0,
+                ntheta=0,
+                constraint_weight=None,
+                constraint_method=None,
+                alm_formulation=None,
+                max_iterations=None,
+                target_volume=None,
+                target_iota=None,
+            )
             module.run_dict = {
                 "surface_state": {
                     "sdofs": [np.array([0.08]), np.array([0.10])],
@@ -9294,6 +10165,7 @@ class RunIdentityTests(unittest.TestCase):
             alm_max_subproblem_continuations=0,
             alm_distance_smoothing=1e-3,
             alm_curvature_smoothing=1e-3,
+            alm_fix_signal_mismatch_guard=False,
             num_surfaces=1,
             inner_surface_ratio=0.8,
             surface_gap_threshold=0.0,
@@ -11808,6 +12680,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "alm_max_subproblem_continuations": 9,
             "alm_distance_smoothing": 0.005,
             "alm_curvature_smoothing": 0.05,
+            "alm_fix_signal_mismatch_guard": False,
             "alm_taylor_test": False,
             "alm_taylor_test_seed": 123,
             "stage2_iota_mode": "off",
@@ -12892,6 +13765,7 @@ class AlmUtilsTests(unittest.TestCase):
         module = load_single_stage_example_module()
         resume_state = {
             "constraint_names": ["coil_surface_spacing"],
+            "constraint_scales": [0.05],
             "multipliers": [2.0],
             "penalty": 3.0,
         }
@@ -12899,6 +13773,7 @@ class AlmUtilsTests(unittest.TestCase):
         multipliers, penalty = module.validate_resume_alm_state(
             resume_state,
             ["coil_surface_spacing"],
+            [0.05],
         )
 
         np.testing.assert_allclose(multipliers, [2.0])
@@ -12907,6 +13782,7 @@ class AlmUtilsTests(unittest.TestCase):
             module.validate_resume_alm_state(
                 resume_state,
                 ["coil_coil_spacing"],
+                [0.05],
             )
 
     def test_validate_resume_alm_state_rejects_multiplier_length_mismatch(self):
@@ -12916,13 +13792,15 @@ class AlmUtilsTests(unittest.TestCase):
             module.validate_resume_alm_state(
                 {
                     "constraint_names": ["coil_surface_spacing", "max_curvature"],
+                    "constraint_scales": [0.05, 100.0],
                     "multipliers": [2.0],
                     "penalty": 3.0,
                 },
                 ["coil_surface_spacing", "max_curvature"],
+                [0.05, 100.0],
             )
 
-    def test_validate_resume_alm_state_rejects_legacy_state_without_names(self):
+    def test_validate_resume_alm_state_rejects_legacy_state_without_names_or_scales(self):
         module = load_single_stage_example_module()
 
         with self.assertRaisesRegex(ValueError, "constraint_names"):
@@ -12932,6 +13810,32 @@ class AlmUtilsTests(unittest.TestCase):
                     "penalty": 3.0,
                 },
                 ["coil_surface_spacing"],
+                [0.05],
+            )
+        with self.assertRaisesRegex(ValueError, "constraint_scales"):
+            module.validate_resume_alm_state(
+                {
+                    "constraint_names": ["coil_surface_spacing"],
+                    "multipliers": [2.0],
+                    "penalty": 3.0,
+                },
+                ["coil_surface_spacing"],
+                [0.05],
+            )
+
+    def test_validate_resume_alm_state_rejects_scale_mismatch(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(ValueError, "constraint_scales mismatch"):
+            module.validate_resume_alm_state(
+                {
+                    "constraint_names": ["coil_surface_spacing"],
+                    "constraint_scales": [0.05],
+                    "multipliers": [2.0],
+                    "penalty": 3.0,
+                },
+                ["coil_surface_spacing"],
+                [0.10],
             )
 
     def test_validate_resume_alm_state_rejects_nan_multipliers(self):
@@ -12943,10 +13847,12 @@ class AlmUtilsTests(unittest.TestCase):
             module.validate_resume_alm_state(
                 {
                     "constraint_names": ["coil_surface_spacing", "max_curvature"],
+                    "constraint_scales": [0.05, 100.0],
                     "multipliers": [2.0, float("nan")],
                     "penalty": 3.0,
                 },
                 ["coil_surface_spacing", "max_curvature"],
+                [0.05, 100.0],
             )
 
     def test_validate_resume_alm_state_rejects_negative_multipliers(self):
@@ -12958,10 +13864,12 @@ class AlmUtilsTests(unittest.TestCase):
             module.validate_resume_alm_state(
                 {
                     "constraint_names": ["coil_surface_spacing", "max_curvature"],
+                    "constraint_scales": [0.05, 100.0],
                     "multipliers": [-1.0, 2.0],
                     "penalty": 3.0,
                 },
                 ["coil_surface_spacing", "max_curvature"],
+                [0.05, 100.0],
             )
 
     def test_validate_resume_alm_state_rejects_inf_multipliers(self):
@@ -12973,10 +13881,12 @@ class AlmUtilsTests(unittest.TestCase):
             module.validate_resume_alm_state(
                 {
                     "constraint_names": ["coil_surface_spacing"],
+                    "constraint_scales": [0.05],
                     "multipliers": [float("inf")],
                     "penalty": 3.0,
                 },
                 ["coil_surface_spacing"],
+                [0.05],
             )
 
     def test_current_solver_checkpoint_alm_state_includes_constraint_names(self):
@@ -12987,9 +13897,11 @@ class AlmUtilsTests(unittest.TestCase):
         )
 
         module.set_alm_runtime_state([1.0, 2.0], 3.0, ["gap", "current"])
+        module.run_dict = {"search_eval": {"constraint_scales": np.array([0.05, 16000.0])}}
         alm_state = module.current_solver_checkpoint_alm_state()
 
         self.assertEqual(alm_state["constraint_names"], ["gap", "current"])
+        np.testing.assert_allclose(alm_state["constraint_scales"], [0.05, 16000.0])
         np.testing.assert_allclose(alm_state["multipliers"], [1.0, 2.0])
         self.assertEqual(alm_state["penalty"], 3.0)
 
