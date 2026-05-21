@@ -2714,6 +2714,84 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertAlmostEqual(configs[0]["seed_label"], 0.25)
         self.assertAlmostEqual(configs[0]["target_volume"], 0.10)
 
+    def test_build_surface_configs_legacy_rejects_more_than_two_surfaces(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(ValueError, "Legacy build_surface_configs"):
+            module.build_surface_configs(
+                "dummy.nc",
+                nphi=11,
+                ntheta=13,
+                seed_label=0.25,
+                major_radius=1.0,
+                outer_target_volume=0.10,
+                num_surfaces=3,
+                inner_surface_ratio=0.8,
+            )
+
+    def test_build_surface_configs_for_contract_builds_published_fixed_stack(self):
+        module = self.load_module()
+
+        class _FakeRZSurface:
+            def __init__(self, label):
+                self.label = label
+                self._major_radius = 2.0
+                self._volume = 10.0 * label
+                self.nfp = 5
+                self._dofs = np.array([1.0])
+
+            def major_radius(self):
+                return self._major_radius
+
+            def get_dofs(self):
+                return self._dofs.copy()
+
+            def set_dofs(self, dofs):
+                dofs = np.asarray(dofs)
+                scale = dofs[0] / self._dofs[0]
+                self._dofs = dofs
+                self._major_radius *= scale
+                self._volume *= scale ** 3
+
+            def volume(self):
+                return self._volume
+
+        fake_factory = SimpleNamespace(
+            from_wout=lambda *_args, **kwargs: _FakeRZSurface(kwargs["s"]),
+        )
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+
+        with patch.object(module, "SurfaceRZFourier", fake_factory):
+            configs = module.build_surface_configs_for_contract(
+                "dummy.nc",
+                nphi=11,
+                ntheta=13,
+                seed_label=0.25,
+                major_radius=1.0,
+                outer_target_volume=0.10,
+                surface_mode_contract=contract,
+            )
+
+        self.assertEqual(
+            [config["name"] for config in configs],
+            ["inner0", "inner1", "outer"],
+        )
+        np.testing.assert_allclose(
+            [config["seed_label"] for config in configs],
+            [0.15, 0.20, 0.25],
+        )
+        np.testing.assert_allclose(
+            [config["target_volume"] for config in configs],
+            [0.06, 0.08, 0.10],
+        )
+
     def test_average_surface_objectives_uses_mean_and_preserves_single_surface_scale(self):
         module = self.load_module()
 
@@ -2814,6 +2892,36 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertAlmostEqual(done["surface_gap_threshold"], 0.005)
         self.assertTrue(done["enforce_nesting"])
         self.assertAlmostEqual(done["gate_scale"], 1.0)
+
+    def test_published_surface_search_policy_uses_fixed_weights_and_strict_gate(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+
+        weights = module.build_surface_search_weights_for_contract(
+            contract,
+            accepted_iterations=0,
+            ramp_iterations=5,
+            initial_inner_weight=0.0,
+        )
+        gate = module.build_surface_search_gate_for_contract(
+            contract,
+            accepted_iterations=0,
+            ramp_iterations=5,
+            initial_inner_weight=0.0,
+            surface_gap_threshold=0.005,
+        )
+
+        np.testing.assert_allclose(weights, [1.0, 1.0, 1.0])
+        self.assertEqual(gate["surface_gap_threshold"], 0.005)
+        self.assertTrue(gate["enforce_nesting"])
+        self.assertEqual(gate["gate_scale"], 1.0)
 
 
 class HardwareConstraintTests(unittest.TestCase):
@@ -14170,6 +14278,33 @@ class AlmUtilsTests(unittest.TestCase):
 
 
 class InitOnlyResultTests(unittest.TestCase):
+    def test_published_surface_mode_runs_search_topology_gate_at_strict_scale(self):
+        module = load_single_stage_example_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+
+        with patch.object(module, "TOPOLOGY_GATE_FIELDLINES", 4), patch.object(
+            module,
+            "safe_evaluate_topology_gate",
+            return_value={"enabled": True, "success": True, "gate_scale": 1.0},
+        ) as gate:
+            status = module.evaluate_search_topology_gate(
+                3,
+                object(),
+                object(),
+                surface_mode_contract=contract,
+            )
+
+        gate.assert_called_once()
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["gate_scale"], 1.0)
+
     def test_final_topology_gate_for_results_skips_expensive_probe_in_init_only(self):
         module = load_single_stage_example_module()
 

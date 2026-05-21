@@ -30,8 +30,8 @@ Today:
   - QS and Boozer residual are averaged across both surfaces
   - `iota` and volume still come from the outer surface only
   - continuation ramps relax the inner-surface weight and gap / vessel thresholds early in the search
-  - topology gating is enabled only in this path
-  - ALM is disabled in this path
+  - topology gating is enabled for multisurface search modes
+  - ALM adjacent surface-spacing constraints are supported
 
 This is not obviously invalid physics, but it is not a clean published contract either.
 
@@ -80,8 +80,8 @@ That continuation behavior may be useful, but it is optimizer policy, not the sc
 
 ### 4. Current feature compatibility already shows the path is not treated as the mainline
 
-- topology gate is only enabled when `num_surfaces > 1`
-- ALM currently requires `num_surfaces == 1`
+- topology gate is enabled by explicit surface-mode policy
+- ALM support is enabled by explicit surface-mode policy
 - Boozer-stage refinement also requires `num_surfaces == 1`
 
 This is a sign that the repo already treats the multisurface path as special-case behavior rather than a stable contract.
@@ -146,8 +146,8 @@ Current `num_surfaces=2` behavior:
 - averages surface-local QS and Boozer residual terms
 - keeps outer-only `iota` and volume terms
 - uses fixed stack checks plus a continuation gate
-- enables topology gate only in this mode
-- does not support ALM
+- enables the multisurface topology gate
+- supports ALM adjacent surface-spacing constraints
 
 This behavior should be preserved exactly first, then renamed to `experimental_multisurface`.
 
@@ -274,7 +274,7 @@ Search policy:
 
 Feature compatibility:
 
-- ALM remains unsupported in v1
+- ALM remains supported for adjacent surface-spacing constraints
 - current refinement restrictions remain unchanged in v1
 
 Acceptance bar:
@@ -331,13 +331,13 @@ Stack-validity policy:
 - adjacent-surface gap is a hard feasibility check in v1, not an objective term
 - outer-surface vessel gap is a hard feasibility check in v1, not an objective term
 - no continuation ramp
-- no topology gate in the optimization objective in v1
-- topology remains a validation / reporting metric, not part of the published mode contract in v1
+- topology gate runs on the outer surface at normal strictness in v1
+- topology scorer remains a validation / reporting metric, separate from the search gate
 
 Feature compatibility:
 
-- weighted-sum mode only in v1
-- ALM remains disabled in v1 unless a later dedicated follow-up adds a clean contract
+- weighted-sum and ALM modes are supported in v1
+- ALM owns adjacent surface-spacing constraints for published stacks
 - current refinement should remain disabled in v1 until the multisurface state contract is made explicit
 
 Acceptance bar:
@@ -550,7 +550,7 @@ Published-mode v1 behavior:
 - global engineering terms
 - stack validity checked every evaluation using fixed thresholds
 - no continuation ramp
-- no topology gate during search
+- topology gate runs on the outer surface at normal strictness during search
 
 Implementation rule:
 
@@ -639,8 +639,8 @@ Initial target capability matrix:
 | capability | single_surface | published_multisurface | experimental_multisurface |
 | --- | --- | --- | --- |
 | weighted-sum objective | yes | yes | yes |
-| ALM | yes | no in v1 | no |
-| topology gate in search | no | no in v1 | yes |
+| ALM | yes | yes | yes |
+| topology gate in search | no | yes | yes |
 | continuation ramp | no | no | yes |
 | fixed surface weights | trivial | yes | no |
 | legacy `num_surfaces` mapping | yes | no | yes |
@@ -753,8 +753,8 @@ Mitigation:
 Mitigation:
 
 - keep published mode simple in v1
-- no topology gate in search
-- no ALM in v1
+- keep the published topology gate outer-surface only
+- keep ALM limited to adjacent surface-spacing constraints
 - benchmark against fixed short-run budgets before broader rollout
 
 ### Risk 5: mode-specific code branches become unmaintainable

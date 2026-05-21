@@ -11,11 +11,18 @@ from banana_opt.hardware_contracts import COIL_LENGTH_MIN_FRACTION
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_status,
     build_threshold_overrides,
+    get_hardware_constraint_spec,
+    get_hardware_constraint_spec_for_alm_name,
 )
 from topology_scorer import (
     score_topology as _score_topology,
     stop_reasons_indicate_broken as _topology_stop_reasons_indicate_broken,
     topology_transport_diagnostics_not_evaluated as _topology_transport_diagnostics_not_evaluated,
+)
+from banana_opt.surface_mode_contracts import (
+    SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK,
+    SurfaceModeContract,
+    surface_mode_surface_names,
 )
 from workflow_helpers import validate_normalized_toroidal_flux
 
@@ -57,6 +64,11 @@ def build_surface_configs(
     inner_surface_ratio,
     surface_factory=SurfaceRZFourier,
 ):
+    if num_surfaces not in {1, 2}:
+        raise ValueError(
+            "Legacy build_surface_configs supports only 1 or 2 surfaces; "
+            "use build_surface_configs_for_contract for published multisurface stacks."
+        )
     seed_label = validate_normalized_toroidal_flux(
         seed_label,
         field_name="single-stage surface seed_label",
@@ -114,6 +126,77 @@ def build_surface_configs(
         },
         configs[0],
     ]
+
+
+def build_surface_configs_for_contract(
+    file_loc,
+    nphi,
+    ntheta,
+    seed_label,
+    major_radius,
+    outer_target_volume,
+    surface_mode_contract: SurfaceModeContract,
+    surface_factory=SurfaceRZFourier,
+):
+    seed_label = validate_normalized_toroidal_flux(
+        seed_label,
+        field_name="single-stage surface seed_label",
+    )
+    names = surface_mode_surface_names(surface_mode_contract)
+    references = []
+    for name, label_fraction in zip(names, surface_mode_contract.label_fractions):
+        surface_label = validate_normalized_toroidal_flux(
+            seed_label * float(label_fraction),
+            field_name=f"single-stage {name} surface seed_label",
+        )
+        reference = surface_factory.from_wout(
+            file_loc,
+            range="half period",
+            nphi=nphi,
+            ntheta=ntheta,
+            s=surface_label,
+        )
+        reference = scale_surface_to_major_radius(reference, major_radius)
+        references.append(
+            {
+                "name": name,
+                "seed_label": surface_label,
+                "reference_volume": reference.volume(),
+                "initial_surface": reference,
+            }
+        )
+
+    outer_reference_volume = references[-1]["reference_volume"]
+    configs = []
+    for reference in references:
+        target_volume = (
+            outer_target_volume
+            * float(reference["reference_volume"])
+            / float(outer_reference_volume)
+        )
+        configs.append(
+            {
+                "name": reference["name"],
+                "seed_label": reference["seed_label"],
+                "target_volume": target_volume,
+                "initial_surface": reference["initial_surface"],
+            }
+        )
+
+    if len(configs) > 1:
+        target_volumes = [config["target_volume"] for config in configs]
+        if not all(
+            left_volume < right_volume
+            for left_volume, right_volume in zip(
+                target_volumes[:-1],
+                target_volumes[1:],
+            )
+        ):
+            raise RuntimeError(
+                "Derived multisurface target volumes are not strictly ordered "
+                "from inner to outer."
+            )
+    return configs
 
 
 def surface_pointcloud_gap(surface_a, surface_b):
@@ -235,6 +318,7 @@ def evaluate_surface_stack(
     gap_ok = all(gap > surface_gap_threshold for gap in adjacent_gaps)
     nesting_ok = True
     bad_nesting_phis = []
+    bad_nesting_pairs = []
     if (
         enforce_nesting
         and len(surface_data) > 1
@@ -243,13 +327,26 @@ def evaluate_surface_stack(
             for entry in surface_data
         )
     ):
-        try:
-            nesting_ok, bad_nesting_phis = cross_sections_are_nested(
-                surface_data[0]["boozer_surface"].surface,
-                surface_data[-1]["boozer_surface"].surface,
+        for inner_index, (inner_entry, outer_entry) in enumerate(
+            zip(surface_data[:-1], surface_data[1:])
+        ):
+            outer_index = inner_index + 1
+            pair_nesting_ok, pair_bad_phis = cross_sections_are_nested(
+                inner_entry["boozer_surface"].surface,
+                outer_entry["boozer_surface"].surface,
             )
-        except Exception:
-            nesting_ok = False
+            if not pair_nesting_ok:
+                bad_nesting_pairs.append(
+                    {
+                        "inner_index": inner_index,
+                        "outer_index": outer_index,
+                        "inner_name": inner_entry.get("name"),
+                        "outer_name": outer_entry.get("name"),
+                        "bad_phis": pair_bad_phis,
+                    }
+                )
+                bad_nesting_phis.extend(pair_bad_phis)
+        nesting_ok = len(bad_nesting_pairs) == 0
 
     success = (
         all(solve_success)
@@ -270,6 +367,7 @@ def evaluate_surface_stack(
         "gap_ok": gap_ok,
         "nesting_ok": nesting_ok,
         "bad_nesting_phis": bad_nesting_phis,
+        "bad_nesting_pairs": bad_nesting_pairs,
     }
 
 
@@ -299,9 +397,9 @@ def evaluate_single_stage_hardware_constraints(
     lcfs_major_radius_m=None,
     lcfs_minor_radius_m=None,
 ):
-    length_min_target = (
-        None if length_target is None else COIL_LENGTH_MIN_FRACTION * float(length_target)
-    )
+    length_min_target = None
+    if length_target is not None:
+        length_min_target = COIL_LENGTH_MIN_FRACTION * float(length_target)
     shared_threshold_inputs = (
         ("coil_coil_spacing", cc_dist),
         ("coil_surface_spacing", cs_dist),
@@ -356,7 +454,7 @@ def evaluate_single_stage_hardware_constraints(
         "search_hardware_status": search_hardware_status,
         "artifact_hardware_status": artifact_hardware_status,
         "curve_curve_min_dist": float(curve_curve_min_dist),
-        "curve_curve_distance_metric_kind": "all_coils",
+        "curve_curve_distance_metric_kind": "banana_coils",
         "cc_dist": float(cc_dist),
         "curve_surface_min_dist": float(curve_surface_min_dist),
         "cs_dist": float(cs_dist),
@@ -397,13 +495,36 @@ def _optional_float(value):
     return None if value is None else float(value)
 
 
-def _constraint_signed_value_by_name(objective_eval):
+def _threshold_from_override_or_schema(name, threshold_override):
+    if threshold_override is not None:
+        return float(threshold_override)
+    return float(get_hardware_constraint_spec(name).threshold)
+
+
+def _constraint_signed_value_by_name(objective_eval, payload_kind):
     names = list(objective_eval["constraint_names"])
-    values = np.asarray(objective_eval["dual_update_values"], dtype=float)
+    value_field = "dual_update_values"
+    if (
+        payload_kind == "signed_residual"
+        and "raw_dual_update_values" in objective_eval
+    ):
+        value_field = "raw_dual_update_values"
+    values = np.asarray(objective_eval[value_field], dtype=float)
     return {
         str(name): float(value)
         for name, value in zip(names, values, strict=True)
     }
+
+
+def _status_constraint_names(objective_eval, payload_kind):
+    if payload_kind != "signed_residual":
+        return None
+    return tuple(
+        dict.fromkeys(
+            get_hardware_constraint_spec_for_alm_name(str(name)).name
+            for name in objective_eval["constraint_names"]
+        )
+    )
 
 
 def _penalty_objective_constraint_entry(name, value):
@@ -458,14 +579,39 @@ def evaluate_single_stage_search_hardware_snapshot(
     width_max_threshold=None,
     self_intersect_penalty=None,
     self_intersect_threshold=None,
+    lcfs_major_radius_m=None,
+    lcfs_minor_radius_m=None,
+    lcfs_major_radius_threshold=None,
+    lcfs_minor_radius_threshold=None,
 ):
-    signed_values = _constraint_signed_value_by_name(objective_eval)
     payload_kind = objective_eval["search_hardware_constraint_payload_kind"]
     if payload_kind not in {"signed_residual", "penalty_objective"}:
         raise ValueError(
             "search hardware constraint payload kind must be "
             "'signed_residual' or 'penalty_objective'."
         )
+    signed_values = _constraint_signed_value_by_name(objective_eval, payload_kind)
+    length_min_target = (
+        None if length_target is None else COIL_LENGTH_MIN_FRACTION * float(length_target)
+    )
+    resolved_coil_length_threshold = _threshold_from_override_or_schema(
+        "coil_length",
+        length_target,
+    )
+    if coil_length is None:
+        coil_length_signed_value = signed_values.get("coil_length_upper_bound")
+        if coil_length_signed_value is not None:
+            coil_length = _upper_bound_measurement_from_signed(
+                resolved_coil_length_threshold,
+                coil_length_signed_value,
+            )
+        elif length_min_target is not None:
+            coil_length_min_signed_value = signed_values.get("coil_length_min")
+            if coil_length_min_signed_value is not None:
+                coil_length = _lower_bound_measurement_from_signed(
+                    length_min_target,
+                    coil_length_min_signed_value,
+                )
     curve_curve_min_dist = None
     if payload_kind == "signed_residual" and "coil_coil_spacing" in signed_values:
         curve_curve_min_dist = _lower_bound_measurement_from_signed(
@@ -499,17 +645,43 @@ def evaluate_single_stage_search_hardware_snapshot(
                 poloidal_extent_threshold_rad,
                 poloidal_extent_signed_value,
             )
+    resolved_lcfs_major_radius_threshold = _threshold_from_override_or_schema(
+        "lcfs_major_radius",
+        lcfs_major_radius_threshold,
+    )
+    if lcfs_major_radius_m is None:
+        lcfs_major_radius_signed_value = signed_values.get("lcfs_major_radius")
+        if lcfs_major_radius_signed_value is not None:
+            lcfs_major_radius_m = _upper_bound_measurement_from_signed(
+                resolved_lcfs_major_radius_threshold,
+                lcfs_major_radius_signed_value,
+            )
+    resolved_lcfs_minor_radius_threshold = _threshold_from_override_or_schema(
+        "lcfs_minor_radius",
+        lcfs_minor_radius_threshold,
+    )
+    if lcfs_minor_radius_m is None:
+        lcfs_minor_radius_signed_value = signed_values.get("lcfs_minor_radius")
+        if lcfs_minor_radius_signed_value is not None:
+            lcfs_minor_radius_m = _upper_bound_measurement_from_signed(
+                resolved_lcfs_minor_radius_threshold,
+                lcfs_minor_radius_signed_value,
+            )
 
     threshold_overrides = build_threshold_overrides(
         (
             ("coil_coil_spacing", cc_dist),
             ("coil_surface_spacing", cs_dist),
             ("max_curvature", curvature_threshold),
+            ("coil_length", length_target),
+            ("coil_length_min", length_min_target),
             ("poloidal_extent", poloidal_extent_threshold_rad),
             ("width_min", width_min_threshold),
             ("width_max", width_max_threshold),
             ("self_intersect", self_intersect_threshold),
             ("banana_current", banana_current_max_A),
+            ("lcfs_major_radius", lcfs_major_radius_threshold),
+            ("lcfs_minor_radius", lcfs_minor_radius_threshold),
         )
     )
     measured_values = {
@@ -517,16 +689,20 @@ def evaluate_single_stage_search_hardware_snapshot(
         "coil_surface_spacing": curve_surface_min_dist,
         "max_curvature": max_curvature,
         "coil_length": coil_length,
+        "coil_length_min": coil_length,
         "poloidal_extent": poloidal_extent_rad,
         "width_min": coil_width,
         "width_max": coil_width,
         "self_intersect": self_intersect_penalty,
         "tf_current": tf_current_A,
         "banana_current": banana_current_A,
+        "lcfs_major_radius": lcfs_major_radius_m,
+        "lcfs_minor_radius": lcfs_minor_radius_m,
     }
     search_hardware_status = build_hardware_constraint_status(
         measured_values,
-        applies_to="penalty",
+        applies_to="alm" if payload_kind == "signed_residual" else "penalty",
+        names=_status_constraint_names(objective_eval, payload_kind),
         threshold_overrides=threshold_overrides,
     )
     if payload_kind == "penalty_objective":
@@ -541,6 +717,9 @@ def evaluate_single_stage_search_hardware_snapshot(
             "ss_dist": float(ss_dist),
             "max_curvature": max_curvature,
             "curvature_threshold": float(curvature_threshold),
+            "coil_length": _optional_float(coil_length),
+            "length_target": _optional_float(length_target),
+            "length_min_target": _optional_float(length_min_target),
             "poloidal_extent_rad": _optional_float(poloidal_extent_rad),
             "poloidal_extent_threshold_rad": _optional_float(
                 poloidal_extent_threshold_rad
@@ -550,6 +729,14 @@ def evaluate_single_stage_search_hardware_snapshot(
             "width_max_threshold": _optional_float(width_max_threshold),
             "self_intersect_penalty": _optional_float(self_intersect_penalty),
             "self_intersect_threshold": _optional_float(self_intersect_threshold),
+            "lcfs_major_radius_m": _optional_float(lcfs_major_radius_m),
+            "lcfs_minor_radius_m": _optional_float(lcfs_minor_radius_m),
+            "lcfs_major_radius_threshold": _optional_float(
+                resolved_lcfs_major_radius_threshold
+            ),
+            "lcfs_minor_radius_threshold": _optional_float(
+                resolved_lcfs_minor_radius_threshold
+            ),
             "tf_current_A": _optional_float(tf_current_A),
             "tf_current_limit_A": _optional_float(tf_current_limit_A),
             "banana_current_A": _optional_float(banana_current_A),
@@ -563,7 +750,7 @@ def evaluate_single_stage_search_hardware_snapshot(
         "search_hardware_status": search_hardware_status,
         "artifact_hardware_status": None,
         "curve_curve_min_dist": curve_curve_min_dist,
-        "curve_curve_distance_metric_kind": "all_coils",
+        "curve_curve_distance_metric_kind": "banana_coils",
         "cc_dist": float(cc_dist),
         "curve_surface_min_dist": curve_surface_min_dist,
         "cs_dist": float(cs_dist),
@@ -573,6 +760,7 @@ def evaluate_single_stage_search_hardware_snapshot(
         "curvature_threshold": float(curvature_threshold),
         "coil_length": _optional_float(coil_length),
         "length_target": _optional_float(length_target),
+        "length_min_target": _optional_float(length_min_target),
         "poloidal_extent_rad": _optional_float(poloidal_extent_rad),
         "poloidal_extent_threshold_rad": _optional_float(
             poloidal_extent_threshold_rad
@@ -582,6 +770,14 @@ def evaluate_single_stage_search_hardware_snapshot(
         "width_max_threshold": _optional_float(width_max_threshold),
         "self_intersect_penalty": _optional_float(self_intersect_penalty),
         "self_intersect_threshold": _optional_float(self_intersect_threshold),
+        "lcfs_major_radius_m": _optional_float(lcfs_major_radius_m),
+        "lcfs_minor_radius_m": _optional_float(lcfs_minor_radius_m),
+        "lcfs_major_radius_threshold": _optional_float(
+            resolved_lcfs_major_radius_threshold
+        ),
+        "lcfs_minor_radius_threshold": _optional_float(
+            resolved_lcfs_minor_radius_threshold
+        ),
         "tf_current_A": _optional_float(tf_current_A),
         "tf_current_limit_A": _optional_float(tf_current_limit_A),
         "banana_current_A": _optional_float(banana_current_A),
@@ -754,6 +950,29 @@ def build_surface_search_weights(
     return weights
 
 
+def build_surface_search_weights_for_contract(
+    surface_mode_contract: SurfaceModeContract,
+    accepted_iterations,
+    ramp_iterations,
+    initial_inner_weight,
+):
+    if (
+        surface_mode_contract.stack_policy
+        == SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK
+    ):
+        if len(surface_mode_contract.weights) != surface_mode_contract.num_surfaces:
+            raise ValueError(
+                "Surface-mode contract weights must match label fractions."
+            )
+        return np.asarray(surface_mode_contract.weights, dtype=float)
+    return build_surface_search_weights(
+        surface_mode_contract.num_surfaces,
+        accepted_iterations,
+        ramp_iterations,
+        initial_inner_weight,
+    )
+
+
 def build_surface_search_gate(
     num_surfaces,
     accepted_iterations,
@@ -779,6 +998,31 @@ def build_surface_search_gate(
         "enforce_nesting": bool(gate_scale >= 1.0),
         "gate_scale": float(gate_scale),
     }
+
+
+def build_surface_search_gate_for_contract(
+    surface_mode_contract: SurfaceModeContract,
+    accepted_iterations,
+    ramp_iterations,
+    initial_inner_weight,
+    surface_gap_threshold,
+):
+    if (
+        surface_mode_contract.stack_policy
+        == SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK
+    ):
+        return {
+            "surface_gap_threshold": float(surface_gap_threshold),
+            "enforce_nesting": True,
+            "gate_scale": 1.0,
+        }
+    return build_surface_search_gate(
+        surface_mode_contract.num_surfaces,
+        accepted_iterations,
+        ramp_iterations,
+        initial_inner_weight,
+        surface_gap_threshold,
+    )
 
 
 def build_scaled_outer_problem(base_fun, base_callback, anchor_x, step_scale):

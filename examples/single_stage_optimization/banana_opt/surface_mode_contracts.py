@@ -26,6 +26,9 @@ SURFACE_STACK_POLICY_EXPERIMENTAL_CONTINUATION_STACK = (
 )
 
 _PUBLISHED_LABEL_FRACTIONS_V1 = (0.6, 0.8, 1.0)
+_SINGLE_SURFACE_NAMES = ("outer",)
+_EXPERIMENTAL_SURFACE_NAMES = ("inner", "outer")
+_PUBLISHED_SURFACE_NAMES_V1 = ("inner0", "inner1", "outer")
 
 
 @dataclass(frozen=True)
@@ -229,6 +232,22 @@ def build_surface_mode_metadata(contract: SurfaceModeContract) -> dict[str, obje
     }
 
 
+def surface_mode_surface_names(contract: SurfaceModeContract) -> tuple[str, ...]:
+    resolved_mode = _validate_surface_mode_name(contract.mode)
+    if resolved_mode == SINGLE_SURFACE:
+        names = _SINGLE_SURFACE_NAMES
+    elif resolved_mode == PUBLISHED_MULTISURFACE:
+        names = _PUBLISHED_SURFACE_NAMES_V1
+    else:
+        names = _EXPERIMENTAL_SURFACE_NAMES
+    if len(names) != contract.num_surfaces:
+        raise ValueError(
+            f"Surface mode {contract.mode!r} defines {len(names)} names for "
+            f"{contract.num_surfaces} label fractions."
+        )
+    return names
+
+
 def _resolve_mode_name(mode_or_contract: str | SurfaceModeContract) -> str:
     if isinstance(mode_or_contract, SurfaceModeContract):
         return mode_or_contract.mode
@@ -238,6 +257,7 @@ def _resolve_mode_name(mode_or_contract: str | SurfaceModeContract) -> str:
 def surface_mode_supports_alm(mode_or_contract: str | SurfaceModeContract) -> bool:
     return _resolve_mode_name(mode_or_contract) in {
         SINGLE_SURFACE,
+        PUBLISHED_MULTISURFACE,
         EXPERIMENTAL_MULTISURFACE,
     }
 
@@ -251,20 +271,19 @@ def surface_mode_supports_boozer_stage_refinement(
 def surface_mode_supports_topology_gate(
     mode_or_contract: str | SurfaceModeContract,
 ) -> bool:
-    return _resolve_mode_name(mode_or_contract) == EXPERIMENTAL_MULTISURFACE
+    return _resolve_mode_name(mode_or_contract) in {
+        PUBLISHED_MULTISURFACE,
+        EXPERIMENTAL_MULTISURFACE,
+    }
 
 
 def surface_mode_runtime_supported(
     mode_or_contract: str | SurfaceModeContract,
 ) -> bool:
-    return _resolve_mode_name(mode_or_contract) != PUBLISHED_MULTISURFACE
+    _resolve_mode_name(mode_or_contract)
+    return True
 
 
 def validate_surface_mode_runtime_support(contract: SurfaceModeContract) -> None:
     if surface_mode_runtime_supported(contract):
         return
-    raise ValueError(
-        "published_multisurface is recognized but not implemented yet in the "
-        "current single-stage runtime. Use single_surface or "
-        "experimental_multisurface for now."
-    )

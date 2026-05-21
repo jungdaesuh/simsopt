@@ -114,7 +114,7 @@ class SurfaceModeContractTests(unittest.TestCase):
         self.assertIsNone(metadata["LEGACY_NUM_SURFACES"])
         self.assertIsNone(metadata["LEGACY_INNER_SURFACE_RATIO"])
 
-    def test_published_multisurface_contract_has_fixed_stack_and_is_runtime_rejected(self):
+    def test_published_multisurface_contract_has_fixed_stack_and_runtime_support(self):
         module = load_surface_mode_contracts_module()
 
         contract = module.build_surface_mode_contract(
@@ -126,17 +126,31 @@ class SurfaceModeContractTests(unittest.TestCase):
         self.assertEqual(contract.label_fractions, (0.6, 0.8, 1.0))
         self.assertEqual(contract.weights, (1.0, 1.0, 1.0))
         self.assertEqual(contract.stack_policy, module.SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK)
-        with self.assertRaisesRegex(ValueError, "not implemented yet"):
-            module.validate_surface_mode_runtime_support(contract)
+        self.assertEqual(
+            module.surface_mode_surface_names(contract),
+            ("inner0", "inner1", "outer"),
+        )
+        module.validate_surface_mode_runtime_support(contract)
 
-    def test_alm_supports_single_and_experimental_surface_modes_only(self):
+    def test_alm_supports_all_surface_modes(self):
         module = load_surface_mode_contracts_module()
 
         self.assertTrue(module.surface_mode_supports_alm(module.SINGLE_SURFACE))
         self.assertTrue(
             module.surface_mode_supports_alm(module.EXPERIMENTAL_MULTISURFACE)
         )
-        self.assertFalse(module.surface_mode_supports_alm(module.PUBLISHED_MULTISURFACE))
+        self.assertTrue(module.surface_mode_supports_alm(module.PUBLISHED_MULTISURFACE))
+
+    def test_topology_gate_supports_published_and_experimental_modes(self):
+        module = load_surface_mode_contracts_module()
+
+        self.assertFalse(module.surface_mode_supports_topology_gate(module.SINGLE_SURFACE))
+        self.assertTrue(
+            module.surface_mode_supports_topology_gate(module.PUBLISHED_MULTISURFACE)
+        )
+        self.assertTrue(
+            module.surface_mode_supports_topology_gate(module.EXPERIMENTAL_MULTISURFACE)
+        )
 
 
 class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
@@ -188,6 +202,9 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             single_stage_poloidal_weight=1.0,
             single_stage_width_weight=1.0,
             single_stage_selfint_weight=1.0,
+            single_stage_poloidal_threshold_rad=1.0,
+            single_stage_width_min_threshold=0.01,
+            single_stage_width_max_threshold=0.06,
             curvature_weight=0.1,
             curvature_threshold=100.0,
             banana_current_max_A=1.6e4,
@@ -265,7 +282,48 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(config.num_surfaces, 2)
+        self.assertEqual(config.surface_mode, module.EXPERIMENTAL_MULTISURFACE)
+        self.assertEqual(config.surface_label_fractions, (0.73, 1.0))
         self.assertEqual(config.inner_surface_ratio, 0.73)
+
+        published_args = SimpleNamespace(**vars(args))
+        published_args.surface_mode = module.PUBLISHED_MULTISURFACE
+        published_contract = module.resolve_surface_mode_contract(
+            published_args,
+            warn_on_legacy_mapping=False,
+        )
+        published_config = module.make_run_identity_config(
+            published_args,
+            stage2_bs_path="seed/biot_savart_opt.json",
+            stage="initial",
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            vol_target=0.1,
+            iota_target=0.15,
+            boozer_I=0.0,
+            plasma_current_A=0.0,
+            banana_surf_radius=0.2,
+            nphi=255,
+            ntheta=64,
+            rng_seed=7,
+            surface_mode_contract=published_contract,
+            effective_num_surfaces=published_contract.num_surfaces,
+            effective_inner_surface_ratio=module.resolve_surface_mode_inner_surface_ratio(
+                published_contract,
+                fallback_inner_surface_ratio=published_args.inner_surface_ratio,
+            ),
+        )
+
+        self.assertEqual(published_config.num_surfaces, 3)
+        self.assertEqual(published_config.surface_mode, module.PUBLISHED_MULTISURFACE)
+        self.assertEqual(
+            published_config.surface_label_fractions,
+            (0.6, 0.8, 1.0),
+        )
+        self.assertNotEqual(
+            config.surface_label_fractions,
+            published_config.surface_label_fractions,
+        )
 
     def test_validate_boozer_stage_refinement_args_rejects_explicit_multisurface_contract(self):
         module = load_single_stage_example_module()
@@ -303,7 +361,7 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             surface_mode_contract=contract,
         )
 
-    def test_validate_surface_mode_constraint_args_rejects_published_multisurface_alm(self):
+    def test_validate_surface_mode_constraint_args_allows_published_multisurface_alm(self):
         module = load_single_stage_example_module()
         args = make_surface_mode_args(
             surface_mode=module.PUBLISHED_MULTISURFACE,
@@ -311,12 +369,49 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
         )
         contract = module.resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
 
+        module.validate_surface_mode_constraint_args(
+            args,
+            surface_mode_contract=contract,
+        )
+
+    def test_validate_surface_mode_constraint_args_rejects_published_frontier(self):
+        module = load_single_stage_example_module()
+        args = make_surface_mode_args(
+            surface_mode=module.PUBLISHED_MULTISURFACE,
+            constraint_method="penalty",
+            single_stage_goal_mode="frontier",
+        )
+        contract = module.resolve_surface_mode_contract(
+            args,
+            warn_on_legacy_mapping=False,
+        )
+
         with self.assertRaisesRegex(
             ValueError,
-            module.EXPERIMENTAL_MULTISURFACE,
+            "--single-stage-goal-mode=target",
         ):
             module.validate_surface_mode_constraint_args(
                 args,
+                surface_mode_contract=contract,
+            )
+
+    def test_resolve_plasma_current_settings_rejects_published_nonzero_default_current(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
+        )
+        contract = module.resolve_surface_mode_contract(
+            make_surface_mode_args(surface_mode=module.PUBLISHED_MULTISURFACE),
+            warn_on_legacy_mapping=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "vacuum-locked"):
+            module.resolve_plasma_current_settings(
+                args,
+                finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
+                default_plasma_current_A=1.0,
                 surface_mode_contract=contract,
             )
 
