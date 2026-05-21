@@ -1300,7 +1300,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "least_squares_algorithm_override": None,
                 "bfgs_tol_override": 1.0e-8,
                 "bfgs_maxiter_override": None,
-                "newton_tol_override": 1.0e-8,
+                "newton_tol_override": 1.0e-11,
                 "newton_maxiter_override": 12,
             },
         )
@@ -1321,7 +1321,7 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
         self.assertEqual(overrides["bfgs_tol_override"], 1.0e-8)
-        self.assertEqual(overrides["newton_tol_override"], 1.0e-8)
+        self.assertEqual(overrides["newton_tol_override"], 1.0e-11)
 
     def test_resolve_target_lane_boozer_init_base_overrides_uses_float32_smoke_newton_tol(
         self,
@@ -1383,7 +1383,7 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
         self.assertEqual(overrides["bfgs_maxiter_override"], 128)
-        self.assertEqual(overrides["newton_tol_override"], 1.0e-8)
+        self.assertEqual(overrides["newton_tol_override"], 1.0e-11)
 
     def test_resolve_target_lane_boozer_init_base_overrides_skips_full_memory_newton_floor_for_lbfgs(
         self,

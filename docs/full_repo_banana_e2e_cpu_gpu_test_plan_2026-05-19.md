@@ -1096,6 +1096,66 @@ the latest strict-transfer issues found by the debug ladder have been fixed
 locally and that the latest GPU debug canary progressed past all previously
 observed transfer failures before timing out.
 
+## Current Execution Update: Optimizer Strict-Transfer Docfix at `710903cfd0`
+
+This update records the optimizer-layer transfer-guard check after official-doc
+cross-checking and the Perlmutter debug proof:
+
+- Local branch: `gpu-purity-stage2-20260405`
+- Base committed SHA:
+  `710903cfd0a2a7ac73d857bc255c675646cf52ce`
+- Remote source checkout patched with the five current-session files:
+  `/pscratch/sd/j/jungdae/simsopt-jax-clean-710903cfd0-docfix-20260521T202439Z-src`
+- Remote runtime:
+  `/pscratch/sd/j/jungdae/simsopt-jax-runtimes/jax-0.10.0`
+- JAX/JAXLIB/CUDA plugin/PJRT: `0.10.0` / `0.10.0` / `0.10.0` / `0.10.0`
+
+Official-doc decision boundary:
+
+- JAX transfer guards distinguish explicit `jax.device_put` / `jax.device_get`
+  from implicit transfers; `disallow` rejects implicit transfers while allowing
+  explicit transfers.
+- JAX closed-over-constant, `make_jaxpr`, and `jax.extend.core` documentation
+  support extracting a `ClosedJaxpr` and passing its constants as explicit
+  dynamic arguments. The documented `closure_convert` API was checked, but
+  rejected for this path after Perlmutter job `53266068` showed it still lowered
+  the GPU `target` array as an implicit device-to-host constant inside the Optax
+  line-search JIT.
+- CUDA best-practices documentation treats host-device transfers as costly and
+  recommends keeping intermediate data on device.
+- Optimistix `minimise` officially passes `args` through to `fn(y, args)`, so
+  the wrapper now passes JAXPR closure constants through `args`.
+- Equinox enumeration docs expose `.where(pred, a, b)` over scalar boolean
+  arrays; the live Perlmutter repro showed current Optimistix/Equinox LBFGS
+  result-enum handling is not full `jax.transfer_guard("disallow")` clean on
+  GPU independent of SIMSOPT. Therefore only Optax LBFGS is used for the
+  full-strict GPU closure-constant proof in this slice; Optimistix LBFGS keeps
+  host-to-device transfer hygiene coverage but is not claimed as a full-strict
+  GPU lane until upstream behavior changes.
+- Post-review correction: the JAXPR closure conversion is limited to Optax
+  LBFGS, because only that branch needs a line-search `value_fn`. Optax Adam
+  keeps the direct eager value/grad contract and now has a regression test for a
+  host-materializing value/grad callback.
+
+Focused local regression packet:
+
+| Command | Result |
+| --- | --- |
+| `python -m pytest -q tests/solve/jax/test_value_grad_contract.py -k 'optax or optimistix'` | PASS: `15 passed, 1 skipped, 2 deselected` |
+| `python -m pytest -q tests/solve/jax/test_driver_dispatch.py tests/solve/jax/test_import_boundaries.py` | PASS: `11 passed` |
+| `python -m pytest -q tests/geo/test_single_stage_example.py -k 'resolve_target_lane_boozer_init_base_overrides'` | PASS: `6 passed, 344 deselected` |
+| `python -m py_compile src/simsopt/solve/jax/_dispatch.py tests/solve/jax/test_value_grad_contract.py examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py tests/geo/test_single_stage_example.py` | PASS |
+| `git diff --check -- docs/full_repo_banana_e2e_cpu_gpu_test_plan_2026-05-19.md src/simsopt/solve/jax/_dispatch.py tests/solve/jax/test_value_grad_contract.py examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py tests/geo/test_single_stage_example.py` | PASS |
+
+Perlmutter debug proof:
+
+| Job | Result | Evidence |
+| --- | --- | --- |
+| `53265848` / `strict-710903` | PASS | JAXPR-const implementation passed `tests/solve/jax/test_value_grad_contract.py -k gpu_closure_constants_run_under_strict_transfer_guard`: `1 passed, 16 deselected in 6.66s`; backend `gpu`; device `cuda:0`; x64 `True`; elapsed `29s`; pytest wall time `11.78s`; process MaxRSS `999476 KB`; sampled peak GPU memory `435 MiB` on A100-40GB; exit `0`. |
+| `53266068` / `strict-710903` | EXPECTED FAIL | Rejected the attempted `jax.closure_convert` implementation: Optax GPU strict-transfer test failed with `Disallowed device-to-host transfer: shape=(2), dtype=F64, device=cuda:0` while lowering the closed-over `target` array. Pytest wall time `12.24s`; process MaxRSS `990660 KB`; exit `1`. |
+| `53266208` / `strict-710903` | PASS | Current synced JAXPR-const implementation passed `tests/solve/jax/test_value_grad_contract.py -k gpu_closure_constants_run_under_strict_transfer_guard`: `1 passed, 16 deselected in 3.14s`; backend `gpu`; device `cuda:0`; x64 `True`; elapsed `21s`; pytest wall time `5.40s`; process MaxRSS `1002364 KB`; sampled peak GPU memory `435 MiB` on A100-40GB; exit `0`. |
+| `53266572` / `strict-710903` | PASS | Public `jax.extend.core` JAXPR execution implementation passed `tests/solve/jax/test_value_grad_contract.py -k gpu_closure_constants_run_under_strict_transfer_guard`: `1 passed, 16 deselected in 3.18s`; backend `gpu`; device `cuda:0`; x64 `True`; elapsed `19s`; pytest wall time `5.32s`; process MaxRSS `1002304 KB`; sampled peak GPU memory `435 MiB` on A100-40GB; exit `0`. |
+
 ## Slurm Execution Policy
 
 - [ ] Source checkout and modest environment setup may happen on login nodes;
@@ -1172,14 +1232,31 @@ Every structured proof artifact must include or be accompanied by:
 - JAX default dtypes and x64: `https://docs.jax.dev/en/latest/default_dtypes.html`
 - JAX GPU memory allocation:
   `https://docs.jax.dev/en/latest/gpu_memory_allocation.html`
+- JAX transfer guard: `https://docs.jax.dev/en/latest/transfer_guard.html`
+- JAX closed-over constants:
+  `https://docs.jax.dev/en/latest/internals/constants.html`
+- JAX `closure_convert`:
+  `https://docs.jax.dev/en/latest/_autosummary/jax.closure_convert.html`
+- JAX `device_put`:
+  `https://docs.jax.dev/en/latest/_autosummary/jax.device_put.html`
+- JAX `make_jaxpr`:
+  `https://docs.jax.dev/en/latest/_autosummary/jax.make_jaxpr.html`
+- JAX `jax.extend.core`:
+  `https://docs.jax.dev/en/latest/jax.extend.core.html`
 - JAX asynchronous dispatch:
   `https://docs.jax.dev/en/latest/async_dispatch.html`
 - JAX benchmarking:
   `https://docs.jax.dev/en/latest/benchmarking.html`
+- CUDA C++ Best Practices, host-device transfer:
+  `https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#data-transfer-between-host-and-device`
 - Optax L-BFGS:
   `https://optax.readthedocs.io/en/latest/_collections/examples/lbfgs.html`
 - Optimistix L-BFGS:
   `https://docs.kidger.site/optimistix/api/minimise/`
+- Equinox enumerations:
+  `https://docs.kidger.site/equinox/api/enumerations/`
+- SIMSOPT geo BoozerSurface:
+  `https://simsopt.readthedocs.io/v1.8.3/simsopt_user.geo.html`
 - NERSC Python on Perlmutter:
   `https://docs.nersc.gov/development/languages/python/using-python-perlmutter/`
 - NERSC Perlmutter running jobs:

@@ -14,6 +14,7 @@ import lineax
 import numpy as np
 import optax
 import optimistix as optx
+from jax.extend import core as jax_core
 from scipy.optimize import OptimizeResult
 from scipy.optimize import least_squares as scipy_least_squares
 from scipy.optimize import minimize as scipy_minimize
@@ -251,29 +252,33 @@ def _block_jax_leaves(value) -> None:
             leaf.block_until_ready()
 
 
-def _scalar_value_from_value_and_grad(value_and_grad_fn: ValueAndGradFn):
-    def scalar_value(x):
-        value, _grad = value_and_grad_fn(x)
-        return value
+def _closure_converted_scalar_value(
+    value_and_grad_fn: ValueAndGradFn,
+    example_params,
+):
+    converted = jax.make_jaxpr(value_and_grad_fn)(example_params)
+    value_and_grad_jaxpr = converted.jaxpr
+    value_and_grad_consts = tuple(converted.consts)
+    const_count = len(value_and_grad_consts)
 
-    return scalar_value
+    def value_and_grad_from_jaxpr(x, consts):
+        closed_jaxpr = jax_core.ClosedJaxpr(value_and_grad_jaxpr, consts)
+        return jax_core.jaxpr_as_fun(closed_jaxpr)(x)
 
-
-def _scalar_value_with_explicit_vjp(value_and_grad_fn: ValueAndGradFn):
     @jax.custom_vjp
-    def scalar_value(x):
-        value, _grad = value_and_grad_fn(x)
+    def scalar_value(x, consts):
+        value, _grad = value_and_grad_from_jaxpr(x, consts)
         return jnp.asarray(value)
 
-    def scalar_value_fwd(x):
-        value, grad = value_and_grad_fn(x)
+    def scalar_value_fwd(x, consts):
+        value, grad = value_and_grad_from_jaxpr(x, consts)
         return jnp.asarray(value), jnp.asarray(grad)
 
     def scalar_value_bwd(explicit_grad, cotangent):
-        return (jnp.asarray(cotangent) * explicit_grad,)
+        return (jnp.asarray(cotangent) * explicit_grad, (None,) * const_count)
 
     scalar_value.defvjp(scalar_value_fwd, scalar_value_bwd)
-    return scalar_value
+    return scalar_value, value_and_grad_consts
 
 
 def _scipy_lm_result(
@@ -402,10 +407,17 @@ def _run_optax_minimize(
 ) -> OptimizeResult:
     start = time.perf_counter()
     params = jnp.asarray(jax.device_put(x0))
-    value_fn = _scalar_value_from_value_and_grad(value_and_grad_fn)
     maxiter = options.maxiter
     gtol = options.gtol
     if isinstance(options, OptaxLBFGSOptions):
+        scalar_value, scalar_value_consts = _closure_converted_scalar_value(
+            value_and_grad_fn,
+            params,
+        )
+
+        def value_fn(current_params, *, scalar_value_consts):
+            return scalar_value(current_params, scalar_value_consts)
+
         if options.line_search != OptaxLineSearch.ZOOM:
             raise ValueError(
                 "OptaxLBFGSOptions.line_search must be OptaxLineSearch.ZOOM."
@@ -418,6 +430,27 @@ def _run_optax_minimize(
                 initial_guess_strategy="one",
             ),
         )
+
+        @jax.jit
+        def apply_optax_step(
+            current_params,
+            current_state,
+            current_grad,
+            current_value,
+            scalar_value_consts,
+        ):
+            updates, next_state = transform.update(
+                current_grad,
+                current_state,
+                current_params,
+                value=current_value,
+                grad=current_grad,
+                value_fn=value_fn,
+                scalar_value_consts=scalar_value_consts,
+            )
+            return optax.apply_updates(current_params, updates), next_state
+
+        optax_step_args = (scalar_value_consts,)
     else:
         transform = (
             optax.adamw(
@@ -436,19 +469,24 @@ def _run_optax_minimize(
             )
         )
 
-    state = jax.jit(transform.init)(params)
-
-    @jax.jit
-    def apply_optax_step(current_params, current_state, current_grad, current_value):
-        updates, next_state = transform.update(
-            current_grad,
-            current_state,
+        @jax.jit
+        def apply_optax_step(
             current_params,
-            value=current_value,
-            grad=current_grad,
-            value_fn=value_fn,
-        )
-        return optax.apply_updates(current_params, updates), next_state
+            current_state,
+            current_grad,
+            current_value,
+        ):
+            del current_value
+            updates, next_state = transform.update(
+                current_grad,
+                current_state,
+                current_params,
+            )
+            return optax.apply_updates(current_params, updates), next_state
+
+        optax_step_args = ()
+
+    state = jax.jit(transform.init)(params)
 
     nfev = 0
     njev = 0
@@ -469,7 +507,7 @@ def _run_optax_minimize(
             message = "Optimization terminated successfully."
             success = True
             break
-        params, state = apply_optax_step(params, state, grad, value)
+        params, state = apply_optax_step(params, state, grad, value, *optax_step_args)
         _block_jax_leaves((params, state))
         completed_iterations = iteration + 1
         value, grad = value_and_grad_fn(params)
@@ -567,10 +605,13 @@ def _run_optimistix_minimize(
     start = time.perf_counter()
     params = jnp.asarray(jax.device_put(x0))
     solver_tol = float(options.tol)
-    explicit_scalar_value = _scalar_value_with_explicit_vjp(value_and_grad_fn)
+    scalar_value_fn, scalar_value_consts = _closure_converted_scalar_value(
+        value_and_grad_fn,
+        params,
+    )
 
-    def scalar_value(current, _args):
-        return explicit_scalar_value(current)
+    def scalar_value(current, scalar_value_consts):
+        return scalar_value_fn(current, scalar_value_consts)
 
     solver = optx.LBFGS(
         rtol=solver_tol,
@@ -582,7 +623,7 @@ def _run_optimistix_minimize(
             scalar_value,
             solver,
             params,
-            args=None,
+            args=scalar_value_consts,
             max_steps=options.maxiter,
             throw=False,
         )

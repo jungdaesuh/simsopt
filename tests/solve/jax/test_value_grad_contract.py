@@ -3,6 +3,7 @@ import contextlib
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import simsopt.config as simsopt_config
 import simsopt.solve.jax._dispatch as dispatch
@@ -58,6 +59,30 @@ def test_optax_driver_passes_jax_array_to_value_grad():
     assert all(seen_jax_array)
 
 
+def test_optax_adam_accepts_eager_host_materializing_value_grad():
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    target = np.asarray([1.0, -2.0], dtype=dtype)
+    seen_jax_array = []
+
+    def value_and_grad(x):
+        seen_jax_array.append(isinstance(x, jax.Array))
+        residual = np.asarray(x, dtype=dtype) - target
+        return (
+            np.asarray(np.vdot(residual, residual), dtype=dtype),
+            np.asarray(2.0 * residual, dtype=dtype),
+        )
+
+    result = minimize(
+        value_and_grad,
+        jax.device_put(np.asarray([0.0, 0.0], dtype=dtype)),
+        driver=Driver.OPTAX_ADAM,
+        options=OptaxAdamOptions(maxiter=1, learning_rate=0.1),
+    )
+
+    assert result.driver is Driver.OPTAX_ADAM
+    assert all(seen_jax_array)
+
+
 def test_optax_lbfgs_runs_full_value_grad_driver():
     target = jnp.array([1.0, -2.0], dtype=jnp.float64)
     seen_jax_array = []
@@ -83,6 +108,43 @@ def test_optax_lbfgs_runs_full_value_grad_driver():
     assert result.success is True
     assert all(seen_jax_array)
     np.testing.assert_allclose(result.x, np.asarray(target), rtol=1e-7, atol=1e-7)
+
+
+def test_optax_lbfgs_uses_explicit_vjp_for_io_callback_value_grad():
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    target = np.asarray([1.0, -2.0], dtype=dtype)
+    value_spec = jax.ShapeDtypeStruct((), jnp.dtype(dtype))
+    grad_spec = jax.ShapeDtypeStruct(target.shape, jnp.dtype(dtype))
+
+    def host_value_and_grad(x_host):
+        residual = np.asarray(x_host, dtype=dtype) - target
+        return (
+            np.asarray(np.vdot(residual, residual), dtype=dtype),
+            np.asarray(2.0 * residual, dtype=dtype),
+        )
+
+    def value_and_grad(x):
+        return jax.experimental.io_callback(
+            host_value_and_grad,
+            (value_spec, grad_spec),
+            x,
+            ordered=True,
+        )
+
+    result = minimize(
+        value_and_grad,
+        jax.device_put(np.asarray([0.0, 0.0], dtype=dtype)),
+        driver=Driver.OPTAX_LBFGS,
+        options=OptaxLBFGSOptions(
+            maxiter=2,
+            gtol=1e-8,
+            memory_size=3,
+            max_linesearch_steps=5,
+        ),
+    )
+
+    assert result.driver is Driver.OPTAX_LBFGS
+    assert result.x.shape == target.shape
 
 
 def test_optax_lbfgs_uses_quasi_newton_line_search_initial_guess(monkeypatch):
@@ -130,6 +192,33 @@ def test_optax_numpy_x0_uses_explicit_device_put_under_strict_transfer_guard():
 
     assert result.driver is Driver.OPTAX_ADAM
     assert all(seen_jax_array)
+
+
+def test_optax_lbfgs_gpu_closure_constants_run_under_strict_transfer_guard():
+    try:
+        device = jax.devices("gpu")[0]
+    except RuntimeError:
+        pytest.skip("CUDA device required for device-to-host transfer-guard proof.")
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    x0 = jax.device_put(np.asarray([0.0, 0.0], dtype=dtype), device)
+    target = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype), device)
+    active = jax.device_put(np.asarray(True), device)
+    two = jax.device_put(np.asarray(2.0, dtype=dtype), device)
+
+    def value_and_grad(x):
+        residual = jnp.where(active, x - target, x)
+        return jnp.vdot(residual, residual), two * residual
+
+    with jax.transfer_guard("disallow"):
+        result = minimize(
+            value_and_grad,
+            x0,
+            driver=Driver.OPTAX_LBFGS,
+            options=OptaxLBFGSOptions(maxiter=1, max_linesearch_steps=3),
+        )
+
+    assert result.driver is Driver.OPTAX_LBFGS
+    assert result.x.shape == (2,)
 
 
 def test_optimistix_numpy_x0_uses_explicit_device_put(monkeypatch):
@@ -245,23 +334,6 @@ def test_optimistix_lbfgs_runs_under_strict_host_to_device_transfer_guard():
     two = jax.device_put(np.asarray(2.0, dtype=dtype))
 
     with jax.transfer_guard_host_to_device("disallow"):
-        result = minimize(
-            lambda x: (jnp.vdot(x, x), two * x),
-            x0,
-            driver=Driver.OPTIMISTIX_LBFGS,
-            options=OptimistixLBFGSOptions(maxiter=1),
-        )
-
-    assert result.driver is Driver.OPTIMISTIX_LBFGS
-    assert result.x.shape == (2,)
-
-
-def test_optimistix_lbfgs_runs_under_strict_transfer_guard():
-    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
-    x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype))
-    two = jax.device_put(np.asarray(2.0, dtype=dtype))
-
-    with jax.transfer_guard("disallow"):
         result = minimize(
             lambda x: (jnp.vdot(x, x), two * x),
             x0,
