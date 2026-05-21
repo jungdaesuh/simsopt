@@ -68,7 +68,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._math_utils import as_jax_float64 as _as_jax_float64
+from ._math_utils import (
+    as_jax_float64 as _as_jax_float64,
+    as_jax_int32 as _as_jax_int32,
+)
 
 __all__ = [
     "GPMOArbVecBacktrackingResult",
@@ -124,9 +127,34 @@ _FIND_MAX_ALPHAF_SENTINEL: float = 1.0e100
 _UNAVAILABLE_CANDIDATE_COST: float = float("inf")
 
 
+def _scalar_like(reference: jax.Array, value: float) -> jax.Array:
+    return _as_jax_float64(np.float64(value)).astype(reference.dtype)
+
+
+def _zeros_like_shape(reference: jax.Array, shape: tuple[int, ...], *, dtype=None):
+    target_dtype = reference.dtype if dtype is None else dtype
+    zero = jnp.sum(reference - reference).astype(target_dtype)
+    return jnp.broadcast_to(zero, shape)
+
+
+def _false_like_shape(reference: jax.Array, shape: tuple[int, ...]):
+    zero = jnp.sum(reference - reference)
+    return jnp.broadcast_to(zero != zero, shape)
+
+
+def _negative_ones_int_like_shape(reference: jax.Array, shape: tuple[int, ...]):
+    zero = jnp.sum(reference - reference).astype(reference.dtype)
+    one = (zero == zero).astype(reference.dtype)
+    return jnp.broadcast_to(zero - one, shape)
+
+
+def _int_scalar_like(reference: jax.Array, value: int) -> jax.Array:
+    return jax.device_put(np.asarray(value, dtype=np.dtype(reference.dtype)))
+
+
 def _argmin_finite_cost(costs: jax.Array, *, axis: int | None = None) -> jax.Array:
     """Return the minimum finite candidate, sorting NaNs after valid costs."""
-    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=costs.dtype)
+    sentinel = _scalar_like(costs, _UNAVAILABLE_CANDIDATE_COST)
     finite_costs = jnp.where(jnp.isfinite(costs), costs, sentinel)
     return jnp.argmin(finite_costs, axis=axis)
 
@@ -498,6 +526,24 @@ def _validate_gpmo_static_args(K: int, single_direction: int, ndipoles: int) -> 
         )
 
 
+def _validate_record_every(record_every: int | None) -> None:
+    if record_every is None:
+        return
+    if not isinstance(record_every, int):
+        raise TypeError(
+            f"record_every must be a Python int; got {type(record_every).__name__}"
+        )
+    if record_every < 1:
+        raise ValueError(f"record_every must be positive; got {record_every}.")
+
+
+def _record_rows(K: int, record_every: int) -> np.ndarray:
+    rows = np.arange(record_every - 1, K, record_every, dtype=np.int32)
+    if rows.size == 0 or rows[-1] != K - 1:
+        rows = np.concatenate([rows, np.asarray([K - 1], dtype=np.int32)])
+    return rows
+
+
 def _validate_gpmo_multi_static_args(
     K: int, single_direction: int, ndipoles: int, Nadjacent: int
 ) -> None:
@@ -636,10 +682,10 @@ def _component_mmax(m_maxima: jax.Array) -> jax.Array:
 
 
 def _single_direction_mask(n_components: int, single_direction: int) -> jax.Array:
+    components = jax.lax.rem(jax.lax.iota(jnp.int32, n_components), np.int32(3))
     if single_direction < 0:
-        return jnp.ones((n_components,), dtype=bool)
-    components = jnp.arange(n_components) % 3
-    return components == single_direction
+        return components == components
+    return components == np.int32(single_direction)
 
 
 def gpmo_baseline_candidate_costs(
@@ -672,7 +718,7 @@ def gpmo_baseline_candidate_costs(
     available_components = jnp.reshape(available, (n_components,))
     direction_mask = _single_direction_mask(n_components, spec.single_direction)
     allowed = available_components & direction_mask
-    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=A_arr.dtype)
+    sentinel = _scalar_like(A_arr, _UNAVAILABLE_CANDIDATE_COST)
     plus = jnp.where(allowed, plus, sentinel)
     minus = jnp.where(allowed, minus, sentinel)
     return jnp.concatenate([plus, minus])
@@ -719,7 +765,7 @@ def _baseline_x_history(
     ndipoles: int,
 ) -> jax.Array:
     """Reconstruct post-step normalized states from the baseline trace."""
-    x0 = jnp.zeros((ndipoles, 3), dtype=selected_signs.dtype)
+    x0 = _zeros_like_shape(selected_signs, (ndipoles, 3))
 
     def _scan_body(x_state, trace_entry):
         dipole, component, sign = trace_entry
@@ -738,6 +784,7 @@ def gpmo_baseline_solve(
     b: jax.Array,
     *,
     K: int,
+    record_every: int | None = None,
 ) -> GPMOBaselineResult:
     """Run the baseline greedy permanent-magnet optimizer in JAX.
 
@@ -751,14 +798,15 @@ def gpmo_baseline_solve(
     m_maxima = _as_jax_float64(spec.m_maxima)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_static_args(K, spec.single_direction, ndipoles)
+    _validate_record_every(record_every)
 
-    x0 = jnp.zeros((ndipoles, 3), dtype=A_arr.dtype)
+    x0 = _zeros_like_shape(A_arr, (ndipoles, 3))
     residual0 = -b_arr
-    available0 = jnp.ones((ndipoles, 3), dtype=bool)
+    available0 = x0 == x0
     if K == 0:
-        empty_int = jnp.zeros((0,), dtype=jnp.int64)
-        empty_float = jnp.zeros((0,), dtype=A_arr.dtype)
-        empty_x_history = jnp.zeros((0, ndipoles, 3), dtype=A_arr.dtype)
+        empty_int = _zeros_like_shape(A_arr, (0,), dtype=jnp.int64)
+        empty_float = _zeros_like_shape(A_arr, (0,))
+        empty_x_history = _zeros_like_shape(A_arr, (0, ndipoles, 3))
         return GPMOBaselineResult(
             x=x0,
             x_history=empty_x_history,
@@ -767,6 +815,85 @@ def gpmo_baseline_solve(
             selected_dipoles=empty_int,
             selected_components=empty_int,
             selected_signs=empty_float,
+        )
+    if record_every is not None:
+        record_rows = _record_rows(K, record_every)
+        record_count = int(record_rows.size)
+        record_rows_arr = _as_jax_int32(record_rows)
+
+        def _recording_scan_body(carry, iteration):
+            (
+                state,
+                next_record_slot,
+                x_history,
+                residual_history,
+                selected_dipoles,
+                selected_components,
+                selected_signs,
+            ) = carry
+            next_state, trace = gpmo_baseline_step(spec, state, A_arr)
+            dipole, component, sign, residual_sq = trace
+            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
+            should_record = iteration == record_rows_arr[safe_slot]
+            x_history_candidate = x_history.at[safe_slot].set(next_state[0])
+            residual_history_candidate = residual_history.at[safe_slot].set(residual_sq)
+            selected_dipoles_candidate = selected_dipoles.at[safe_slot].set(dipole)
+            selected_components_candidate = selected_components.at[safe_slot].set(
+                component
+            )
+            selected_signs_candidate = selected_signs.at[safe_slot].set(sign)
+            return (
+                next_state,
+                next_record_slot + should_record.astype(next_record_slot.dtype),
+                jnp.where(should_record, x_history_candidate, x_history),
+                jnp.where(
+                    should_record,
+                    residual_history_candidate,
+                    residual_history,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_dipoles_candidate,
+                    selected_dipoles,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_components_candidate,
+                    selected_components,
+                ),
+                jnp.where(should_record, selected_signs_candidate, selected_signs),
+            ), None
+
+        final_carry, _ = jax.lax.scan(
+            _recording_scan_body,
+            (
+                (x0, residual0, available0),
+                _zeros_like_shape(A_arr, (), dtype=jnp.int32),
+                _zeros_like_shape(A_arr, (record_count, ndipoles, 3)),
+                _zeros_like_shape(A_arr, (record_count,)),
+                _zeros_like_shape(A_arr, (record_count,), dtype=jnp.int64),
+                _zeros_like_shape(A_arr, (record_count,), dtype=jnp.int64),
+                _zeros_like_shape(A_arr, (record_count,)),
+            ),
+            jax.lax.iota(jnp.int32, K),
+        )
+        (
+            final_state,
+            _next_record_slot,
+            x_history,
+            residual_history,
+            selected_dipoles,
+            selected_components,
+            selected_signs,
+        ) = final_carry
+        return GPMOBaselineResult(
+            x=final_state[0],
+            x_history=x_history,
+            residual=final_state[1],
+            residual_history=residual_history,
+            selected_dipoles=selected_dipoles,
+            selected_components=selected_components,
+            selected_signs=selected_signs,
         )
 
     def _scan_body(state, _):
@@ -949,6 +1076,7 @@ def gpmo_arbvec_solve(
     b: jax.Array,
     *,
     K: int,
+    record_every: int | None = None,
 ) -> GPMOArbVecResult:
     """Run the arbitrary-vector greedy permanent-magnet optimizer in JAX."""
 
@@ -958,6 +1086,7 @@ def gpmo_arbvec_solve(
     pol_vectors = _as_jax_float64(spec.pol_vectors)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_arbvec_static_args(K, ndipoles, pol_vectors)
+    _validate_record_every(record_every)
 
     x0 = jnp.zeros((ndipoles, 3), dtype=A_arr.dtype)
     residual0 = -b_arr
@@ -982,6 +1111,86 @@ def gpmo_arbvec_solve(
         pol_vectors=pol_vectors,
     )
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
+
+    if record_every is not None:
+        record_rows = _record_rows(K, record_every)
+        record_count = int(record_rows.size)
+        record_rows_arr = jnp.asarray(record_rows, dtype=jnp.int32)
+
+        def _recording_scan_body(carry, iteration):
+            (
+                state,
+                next_record_slot,
+                x_history,
+                residual_history,
+                selected_dipoles,
+                selected_vector_indices,
+                selected_signs,
+            ) = carry
+            next_state, trace = gpmo_arbvec_step(scan_spec, state, A_arr, contributions)
+            dipole, vector_index, sign, residual_sq = trace
+            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
+            should_record = iteration == record_rows_arr[safe_slot]
+            x_history_candidate = x_history.at[safe_slot].set(next_state[0])
+            residual_history_candidate = residual_history.at[safe_slot].set(residual_sq)
+            selected_dipoles_candidate = selected_dipoles.at[safe_slot].set(dipole)
+            selected_vector_indices_candidate = selected_vector_indices.at[
+                safe_slot
+            ].set(vector_index)
+            selected_signs_candidate = selected_signs.at[safe_slot].set(sign)
+            return (
+                next_state,
+                next_record_slot + should_record.astype(next_record_slot.dtype),
+                jnp.where(should_record, x_history_candidate, x_history),
+                jnp.where(
+                    should_record,
+                    residual_history_candidate,
+                    residual_history,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_dipoles_candidate,
+                    selected_dipoles,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_vector_indices_candidate,
+                    selected_vector_indices,
+                ),
+                jnp.where(should_record, selected_signs_candidate, selected_signs),
+            ), None
+
+        final_carry, _ = jax.lax.scan(
+            _recording_scan_body,
+            (
+                (x0, residual0, available0),
+                jnp.asarray(0, dtype=jnp.int32),
+                jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
+                jnp.zeros((record_count,), dtype=A_arr.dtype),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=A_arr.dtype),
+            ),
+            jnp.arange(K, dtype=jnp.int32),
+        )
+        (
+            final_state,
+            _next_record_slot,
+            x_history,
+            residual_history,
+            selected_dipoles,
+            selected_vector_indices,
+            selected_signs,
+        ) = final_carry
+        return GPMOArbVecResult(
+            x=final_state[0],
+            x_history=x_history,
+            residual=final_state[1],
+            residual_history=residual_history,
+            selected_dipoles=selected_dipoles,
+            selected_vector_indices=selected_vector_indices,
+            selected_signs=selected_signs,
+        )
 
     def _scan_body(state, _):
         return gpmo_arbvec_step(scan_spec, state, A_arr, contributions)
@@ -1216,37 +1425,41 @@ def initialize_gpmo_arbvec(
         [diff_pos, diff_neg, diff_null[:, None]], axis=1
     )  # (N, 2*n_vectors + 1)
     choice = _argmin_finite_cost(candidates, axis=1)  # (N,)
-    chose_null = choice == 2 * n_vectors
-    chose_minus = (choice >= n_vectors) & (~chose_null)
+    null_choice = jax.device_put(np.asarray(2 * n_vectors, dtype=np.dtype(choice.dtype)))
+    vector_count = jax.device_put(np.asarray(n_vectors, dtype=np.dtype(choice.dtype)))
+    chose_null = choice == null_choice
+    chose_minus = (choice >= vector_count) & (~chose_null)
+    zero_choice = choice - choice
     vector_idx = jnp.where(
         chose_null,
-        jnp.zeros_like(choice),
-        jnp.where(chose_minus, choice - n_vectors, choice),
+        zero_choice,
+        jnp.where(chose_minus, choice - vector_count, choice),
     )
+    zero = _scalar_like(A_arr, 0.0)
     sign = jnp.where(
         chose_null,
-        jnp.asarray(0.0, dtype=A_arr.dtype),
+        zero,
         jnp.where(
             chose_minus,
-            jnp.asarray(-1.0, dtype=A_arr.dtype),
-            jnp.asarray(1.0, dtype=A_arr.dtype),
+            _scalar_like(A_arr, -1.0),
+            _scalar_like(A_arr, 1.0),
         ),
     )
 
     # Only update dipoles whose ``x_init`` is nonzero (matches the C++
     # ``if (x_init(j,0) == 0 && ... ) continue`` guard).
-    nonzero_init = jnp.any(x_init_arr != 0.0, axis=1)  # (N,)
+    nonzero_init = jnp.any(x_init_arr != zero, axis=1)  # (N,)
     placed = nonzero_init & (~chose_null)
-    sign = jnp.where(placed, sign, jnp.asarray(0.0, dtype=A_arr.dtype))
+    sign = jnp.where(placed, sign, zero)
     selected_pol_vec = jnp.take_along_axis(
         pol_vectors_arr, vector_idx[:, None, None], axis=1
     )[:, 0, :]  # (N, 3)
-    x = jnp.where(placed[:, None], sign[:, None] * selected_pol_vec, 0.0)
+    x = jnp.where(placed[:, None], sign[:, None] * selected_pol_vec, zero)
 
     # Running residual: A_scaled @ x.flatten() - b.
     residual = A_arr @ jnp.reshape(x, (ndipoles * 3,)) - b_arr
     available = ~placed
-    current_vector_indices = jnp.where(placed, vector_idx, jnp.zeros_like(vector_idx))
+    current_vector_indices = jnp.where(placed, vector_idx, vector_idx - vector_idx)
     current_signs = sign
     num_nonzero = jnp.sum(placed.astype(jnp.int64))
     return (
@@ -1619,6 +1832,7 @@ def gpmo_arbvec_backtracking_solve(
     *,
     K: int,
     x_init: jax.Array | None = None,
+    record_every: int | None = None,
 ) -> GPMOArbVecBacktrackingResult:
     """Run the arbitrary-vector backtracking greedy permanent-magnet optimizer.
 
@@ -1646,9 +1860,10 @@ def gpmo_arbvec_backtracking_solve(
         spec.max_nMagnets,
         spec.thresh_angle,
     )
+    _validate_record_every(record_every)
 
     if x_init is None:
-        x_init_arr = jnp.zeros((ndipoles, 3), dtype=A_arr.dtype)
+        x_init_arr = _zeros_like_shape(A_arr, (ndipoles, 3))
     else:
         x_init_arr = _as_jax_float64(x_init)
         if x_init_arr.shape != (ndipoles, 3):
@@ -1666,14 +1881,16 @@ def gpmo_arbvec_backtracking_solve(
         initial_num_nonzero,
     ) = initialize_gpmo_arbvec(x_init_arr, pol_vectors, A_arr, b_arr)
 
-    selected_dipoles0 = -jnp.ones((K,), dtype=jnp.int64)
-    selected_vector_indices0 = -jnp.ones((K,), dtype=jnp.int64)
-    selected_signs0 = jnp.zeros((K,), dtype=A_arr.dtype)
+    selected_dipoles0 = _negative_ones_int_like_shape(current_vector_indices0, (K,))
+    selected_vector_indices0 = _negative_ones_int_like_shape(
+        current_vector_indices0, (K,)
+    )
+    selected_signs0 = _zeros_like_shape(A_arr, (K,))
     if K == 0:
-        empty_int = jnp.zeros((0,), dtype=jnp.int64)
-        empty_float = jnp.zeros((0,), dtype=A_arr.dtype)
-        empty_x_history = jnp.zeros((0, ndipoles, 3), dtype=A_arr.dtype)
-        empty_bool = jnp.zeros((0,), dtype=bool)
+        empty_int = _zeros_like_shape(current_vector_indices0, (0,))
+        empty_float = _zeros_like_shape(A_arr, (0,))
+        empty_x_history = _zeros_like_shape(A_arr, (0, ndipoles, 3))
+        empty_bool = _false_like_shape(A_arr, (0,))
         return GPMOArbVecBacktrackingResult(
             x=x0,
             x_history=empty_x_history,
@@ -1701,14 +1918,155 @@ def gpmo_arbvec_backtracking_solve(
         thresh_angle=spec.thresh_angle,
         max_nMagnets=spec.max_nMagnets,
     )
-    cos_thresh_angle = jnp.cos(jnp.asarray(spec.thresh_angle, dtype=A_arr.dtype))
+    cos_thresh_angle = jnp.cos(_scalar_like(A_arr, spec.thresh_angle))
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
 
     # Stopping at the initial-state check: if initialization already
     # satisfies the C++ stop predicate, propagate a final-state carry.
-    initial_stop = (initial_num_nonzero >= ndipoles) | (
-        initial_num_nonzero >= spec.max_nMagnets
+    initial_stop = (
+        initial_num_nonzero >= _int_scalar_like(initial_num_nonzero, ndipoles)
+    ) | (
+        initial_num_nonzero
+        >= _int_scalar_like(initial_num_nonzero, spec.max_nMagnets)
     )
+
+    if record_every is not None:
+        record_rows = _record_rows(K, record_every)
+        record_count = int(record_rows.size)
+        record_rows_arr = jnp.asarray(record_rows, dtype=jnp.int32)
+
+        def _recording_scan_body(carry, iteration):
+            (
+                state,
+                next_record_slot,
+                selected_dipoles_history,
+                selected_vector_indices_history,
+                selected_signs_history,
+                residual_history,
+                x_history,
+                num_nonzeros_history,
+                removed_pair_count_history,
+                done_history,
+            ) = carry
+            next_state, trace = gpmo_arbvec_backtracking_step(
+                scan_spec,
+                state,
+                A_arr,
+                connectivity,
+                cos_thresh_angle,
+                iteration,
+                contributions,
+            )
+            (
+                dipole,
+                vector_index,
+                sign,
+                residual_sq,
+                x_snapshot,
+                num_nonzeros,
+                removed_pair_count,
+                done_snapshot,
+            ) = trace
+            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
+            should_record = iteration == record_rows_arr[safe_slot]
+            return (
+                next_state,
+                next_record_slot + should_record.astype(next_record_slot.dtype),
+                jnp.where(
+                    should_record,
+                    selected_dipoles_history.at[safe_slot].set(dipole),
+                    selected_dipoles_history,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_vector_indices_history.at[safe_slot].set(vector_index),
+                    selected_vector_indices_history,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_signs_history.at[safe_slot].set(sign),
+                    selected_signs_history,
+                ),
+                jnp.where(
+                    should_record,
+                    residual_history.at[safe_slot].set(residual_sq),
+                    residual_history,
+                ),
+                jnp.where(
+                    should_record,
+                    x_history.at[safe_slot].set(x_snapshot),
+                    x_history,
+                ),
+                jnp.where(
+                    should_record,
+                    num_nonzeros_history.at[safe_slot].set(num_nonzeros),
+                    num_nonzeros_history,
+                ),
+                jnp.where(
+                    should_record,
+                    removed_pair_count_history.at[safe_slot].set(removed_pair_count),
+                    removed_pair_count_history,
+                ),
+                jnp.where(
+                    should_record,
+                    done_history.at[safe_slot].set(done_snapshot),
+                    done_history,
+                ),
+            ), None
+
+        final_carry, _ = jax.lax.scan(
+            _recording_scan_body,
+            (
+                (
+                    x0,
+                    residual0,
+                    available0,
+                    current_vector_indices0,
+                    current_signs0,
+                    selected_dipoles0,
+                    selected_vector_indices0,
+                    selected_signs0,
+                    initial_stop,
+                ),
+                jnp.asarray(0, dtype=jnp.int32),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=A_arr.dtype),
+                jnp.zeros((record_count,), dtype=A_arr.dtype),
+                jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=bool),
+            ),
+            jnp.arange(K, dtype=jnp.int32),
+        )
+        (
+            final_state,
+            _next_record_slot,
+            selected_dipoles,
+            selected_vector_indices,
+            selected_signs,
+            residual_history,
+            x_history,
+            num_nonzeros_history,
+            removed_pair_count_history,
+            done_history,
+        ) = final_carry
+        return GPMOArbVecBacktrackingResult(
+            x=final_state[0],
+            x_history=x_history,
+            residual=final_state[1],
+            residual_history=residual_history,
+            selected_dipoles=selected_dipoles,
+            selected_vector_indices=selected_vector_indices,
+            selected_signs=selected_signs,
+            num_nonzeros_history=num_nonzeros_history,
+            removed_pair_count_history=removed_pair_count_history,
+            done_history=done_history,
+            initial_x=x0,
+            initial_residual=residual0,
+            initial_num_nonzero=initial_num_nonzero,
+        )
 
     def _scan_body(state, iteration):
         return gpmo_arbvec_backtracking_step(
@@ -1935,6 +2293,7 @@ def gpmo_multi_solve(
     b: jax.Array,
     *,
     K: int,
+    record_every: int | None = None,
 ) -> GPMOMultiResult:
     """Run the multi-neighbour greedy permanent-magnet optimizer in JAX."""
 
@@ -1943,6 +2302,7 @@ def gpmo_multi_solve(
     m_maxima = _as_jax_float64(spec.m_maxima)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_multi_static_args(K, spec.single_direction, ndipoles, spec.Nadjacent)
+    _validate_record_every(record_every)
 
     x0 = jnp.zeros((ndipoles, 3), dtype=A_arr.dtype)
     residual0 = -b_arr
@@ -1964,6 +2324,96 @@ def gpmo_multi_solve(
         )
 
     connectivity = gpmo_connectivity_matrix(spec.dipole_grid_xyz)
+
+    if record_every is not None:
+        record_rows = _record_rows(K, record_every)
+        record_count = int(record_rows.size)
+        record_rows_arr = jnp.asarray(record_rows, dtype=jnp.int32)
+
+        def _recording_scan_body(carry, iteration):
+            (
+                state,
+                next_record_slot,
+                x_history,
+                residual_history,
+                selected_seed_dipoles,
+                selected_components,
+                selected_signs,
+                selected_groups,
+            ) = carry
+            next_state, trace = gpmo_multi_step(spec, state, A_arr, connectivity)
+            seed_dipole, component, sign, residual_sq, selected_group = trace
+            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
+            should_record = iteration == record_rows_arr[safe_slot]
+            x_history_candidate = x_history.at[safe_slot].set(next_state[0])
+            residual_history_candidate = residual_history.at[safe_slot].set(residual_sq)
+            selected_seed_dipoles_candidate = selected_seed_dipoles.at[safe_slot].set(
+                seed_dipole
+            )
+            selected_components_candidate = selected_components.at[safe_slot].set(
+                component
+            )
+            selected_signs_candidate = selected_signs.at[safe_slot].set(sign)
+            selected_groups_candidate = selected_groups.at[safe_slot].set(
+                selected_group
+            )
+            return (
+                next_state,
+                next_record_slot + should_record.astype(next_record_slot.dtype),
+                jnp.where(should_record, x_history_candidate, x_history),
+                jnp.where(
+                    should_record,
+                    residual_history_candidate,
+                    residual_history,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_seed_dipoles_candidate,
+                    selected_seed_dipoles,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_components_candidate,
+                    selected_components,
+                ),
+                jnp.where(should_record, selected_signs_candidate, selected_signs),
+                jnp.where(should_record, selected_groups_candidate, selected_groups),
+            ), None
+
+        final_carry, _ = jax.lax.scan(
+            _recording_scan_body,
+            (
+                (x0, residual0, available0),
+                jnp.asarray(0, dtype=jnp.int32),
+                jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
+                jnp.zeros((record_count,), dtype=A_arr.dtype),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=A_arr.dtype),
+                jnp.zeros((record_count, spec.Nadjacent), dtype=jnp.int64),
+            ),
+            jnp.arange(K, dtype=jnp.int32),
+        )
+        (
+            final_state,
+            _next_record_slot,
+            x_history,
+            residual_history,
+            selected_seed_dipoles,
+            selected_components,
+            selected_signs,
+            selected_groups,
+        ) = final_carry
+        return GPMOMultiResult(
+            x=final_state[0],
+            x_history=x_history,
+            residual=final_state[1],
+            residual_history=residual_history,
+            selected_seed_dipoles=selected_seed_dipoles,
+            selected_components=selected_components,
+            selected_signs=selected_signs,
+            selected_groups=selected_groups,
+        )
 
     def _scan_body(state, _):
         return gpmo_multi_step(spec, state, A_arr, connectivity)
@@ -2254,6 +2704,7 @@ def gpmo_backtracking_solve(
     b: jax.Array,
     *,
     K: int,
+    record_every: int | None = None,
 ) -> GPMOBacktrackingResult:
     """Run the backtracking greedy permanent-magnet optimizer in JAX.
 
@@ -2274,6 +2725,7 @@ def gpmo_backtracking_solve(
         spec.backtracking,
         spec.max_nMagnets,
     )
+    _validate_record_every(record_every)
 
     x0 = jnp.zeros((ndipoles, 3), dtype=A_arr.dtype)
     residual0 = -b_arr
@@ -2315,6 +2767,135 @@ def gpmo_backtracking_solve(
     def _scan_body(state, iteration):
         return gpmo_backtracking_step(
             scan_spec, state, A_arr, connectivity, iteration, K=K
+        )
+
+    if record_every is not None:
+        record_rows = _record_rows(K, record_every)
+        record_count = int(record_rows.size)
+        record_rows_arr = jnp.asarray(record_rows, dtype=jnp.int32)
+
+        def _recording_scan_body(carry, iteration):
+            (
+                state,
+                next_record_slot,
+                selected_dipoles_history,
+                selected_components_history,
+                selected_signs_history,
+                residual_history,
+                x_history,
+                num_nonzeros_history,
+                removed_pair_count_history,
+                done_history,
+            ) = carry
+            next_state, trace = gpmo_backtracking_step(
+                scan_spec, state, A_arr, connectivity, iteration, K=K
+            )
+            (
+                dipole,
+                component,
+                sign,
+                residual_sq,
+                x_snapshot,
+                num_nonzeros,
+                removed_pair_count,
+                done_snapshot,
+            ) = trace
+            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
+            should_record = iteration == record_rows_arr[safe_slot]
+            return (
+                next_state,
+                next_record_slot + should_record.astype(next_record_slot.dtype),
+                jnp.where(
+                    should_record,
+                    selected_dipoles_history.at[safe_slot].set(dipole),
+                    selected_dipoles_history,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_components_history.at[safe_slot].set(component),
+                    selected_components_history,
+                ),
+                jnp.where(
+                    should_record,
+                    selected_signs_history.at[safe_slot].set(sign),
+                    selected_signs_history,
+                ),
+                jnp.where(
+                    should_record,
+                    residual_history.at[safe_slot].set(residual_sq),
+                    residual_history,
+                ),
+                jnp.where(
+                    should_record,
+                    x_history.at[safe_slot].set(x_snapshot),
+                    x_history,
+                ),
+                jnp.where(
+                    should_record,
+                    num_nonzeros_history.at[safe_slot].set(num_nonzeros),
+                    num_nonzeros_history,
+                ),
+                jnp.where(
+                    should_record,
+                    removed_pair_count_history.at[safe_slot].set(removed_pair_count),
+                    removed_pair_count_history,
+                ),
+                jnp.where(
+                    should_record,
+                    done_history.at[safe_slot].set(done_snapshot),
+                    done_history,
+                ),
+            ), None
+
+        final_carry, _ = jax.lax.scan(
+            _recording_scan_body,
+            (
+                (
+                    x0,
+                    residual0,
+                    available0,
+                    current_signs0,
+                    current_components0,
+                    selected_dipoles0,
+                    selected_components0,
+                    selected_signs0,
+                    jnp.asarray(False),
+                ),
+                jnp.asarray(0, dtype=jnp.int32),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=A_arr.dtype),
+                jnp.zeros((record_count,), dtype=A_arr.dtype),
+                jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=jnp.int64),
+                jnp.zeros((record_count,), dtype=bool),
+            ),
+            jnp.arange(K, dtype=jnp.int32),
+        )
+        (
+            final_state,
+            _next_record_slot,
+            selected_dipoles,
+            selected_components,
+            selected_signs,
+            residual_history,
+            x_history,
+            num_nonzeros_history,
+            removed_pair_count_history,
+            done_history,
+        ) = final_carry
+        return GPMOBacktrackingResult(
+            x=final_state[0],
+            x_history=x_history,
+            residual=final_state[1],
+            residual_history=residual_history,
+            selected_dipoles=selected_dipoles,
+            selected_components=selected_components,
+            selected_signs=selected_signs,
+            num_nonzeros_history=num_nonzeros_history,
+            removed_pair_count_history=removed_pair_count_history,
+            done_history=done_history,
         )
 
     final_state, trace = jax.lax.scan(

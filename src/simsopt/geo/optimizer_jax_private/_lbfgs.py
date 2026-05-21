@@ -174,6 +174,34 @@ def _lbfgsb_mainlb_kernel(
     )
 
 
+def _lbfgsb_start_with_initial_value_and_grad_kernel(
+    *,
+    cache_owner=None,
+    cache_key_prefix=(),
+):
+    def start_with_initial_value_and_grad(
+        state: lbfgsb.LbfgsbState,
+        value,
+        grad,
+    ):
+        started = lbfgsb.lbfgsb_setulb(state)
+        return started._replace(
+            f=jnp.asarray(value, dtype=started.x.dtype),
+            g=jnp.asarray(grad, dtype=started.x.dtype),
+            nfev=started.nfev + jnp.asarray(1, dtype=jnp.int32),
+            njev=started.njev + jnp.asarray(1, dtype=jnp.int32),
+        )
+
+    return _cached_private_solver(
+        cache_owner,
+        cache_key=(
+            "lbfgsb-start-with-initial-value-and-grad",
+            *cache_key_prefix,
+        ),
+        builder=lambda: jax.jit(start_with_initial_value_and_grad),
+    )
+
+
 def _resolve_scipy_lbfgsb_limits(maxiter, maxfun):
     maxiter_limit = _normalize_lbfgs_counter_limit(
         _SCIPY_LBFGSB_DEFAULT_MAXITER if maxiter is None else maxiter
@@ -282,21 +310,22 @@ def _lbfgsb_state_with_initial_value_and_grad(
     initial_value_and_grad,
     *,
     dtype,
+    cache_owner=None,
+    cache_key_prefix=(),
 ) -> lbfgsb.LbfgsbState:
-    started = lbfgsb.lbfgsb_setulb(state)
     value, grad = initial_value_and_grad
+    value = _as_jax_dtype(value, dtype)
     grad = _as_jax_dtype(grad, dtype)
-    if grad.shape != started.x.shape:
+    if grad.shape != state.x.shape:
         raise ValueError(
             "initial_value_and_grad must provide a gradient matching "
-            f"x.shape={started.x.shape}, got {grad.shape}."
+            f"x.shape={state.x.shape}, got {grad.shape}."
         )
-    return started._replace(
-        f=_as_jax_dtype(value, dtype),
-        g=grad,
-        nfev=started.nfev + 1,
-        njev=started.njev + 1,
-    )
+    return _lbfgsb_start_with_initial_value_and_grad_kernel(
+        cache_owner=cache_owner,
+        cache_key_prefix=cache_key_prefix,
+    )(state, value, grad)
+
 
 
 def _lbfgsb_accepted_step_observer(
@@ -449,6 +478,8 @@ def _minimize_lbfgs_private_impl(
             state,
             initial_value_and_grad,
             dtype=dtype,
+            cache_owner=solver_cache_owner,
+            cache_key_prefix=solver_cache_key_prefix,
         )
     optimizer_state_trace = []
     accepted_step_callback = _lbfgsb_accepted_step_observer(

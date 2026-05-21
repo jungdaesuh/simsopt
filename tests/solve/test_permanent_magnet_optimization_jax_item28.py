@@ -470,6 +470,7 @@ def test_relax_and_split_jax_rejects_oversized_alpha():
             reg_l2=reg_l2,
         )
 
+
 def test_relax_and_split_jax_matches_cpp_mwpgp_oracle_one_convex_step():
     grid = _synthetic_grid(seed=2028)
     n_steps = 5
@@ -539,6 +540,61 @@ def test_relax_and_split_jax_updates_l0_proxy_for_fixed_outer_steps():
         rtol=_RTOL,
         atol=_ATOL,
     )
+
+
+def test_relax_and_split_jax_outer_loop_stops_inside_scan() -> None:
+    grid = _synthetic_grid(seed=2033)
+
+    @jax.jit
+    def _run(grid_data: PermanentMagnetGridJAX):
+        return relax_and_split_jax(
+            grid_data,
+            max_iter=3,
+            max_iter_RS=4,
+            nu=5.0,
+            reg_l0=0.02,
+            epsilon_RS=1.0e9,
+        )
+
+    result = _run(grid)
+    result.m.block_until_ready()
+
+    np.testing.assert_allclose(
+        np.asarray(result.m_history[1:]),
+        np.broadcast_to(
+            np.asarray(result.m_history[0]),
+            np.asarray(result.m_history[1:]).shape,
+        ),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.m_proxy_history[1:]),
+        np.broadcast_to(
+            np.asarray(result.m_proxy_history[0]),
+            np.asarray(result.m_proxy_history[1:]).shape,
+        ),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.errors[1:]),
+        np.broadcast_to(
+            np.asarray(result.errors[0]), np.asarray(result.errors[1:]).shape
+        ),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.residual_history[1:]),
+        np.broadcast_to(
+            np.asarray(result.residual_history[0]),
+            np.asarray(result.residual_history[1:]).shape,
+        ),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    assert "scan[" in str(jax.make_jaxpr(_run)(grid))
 
 
 def test_relax_and_split_jax_matches_cpu_after_multiple_outer_steps():
@@ -628,32 +684,34 @@ def test_relax_and_split_jax_default_epsilon_matches_cpu_early_stop():
         rtol=_STATE_TRACE_RTOL,
         atol=_STATE_TRACE_ATOL,
     )
+    m_history_host = np.asarray(result.m_history)
+    m_proxy_history_host = np.asarray(result.m_proxy_history)
     np.testing.assert_allclose(
-        np.asarray(result.m_history[0]),
+        m_history_host[0],
         np.asarray(cpu_m_history[0]),
         rtol=_STATE_TRACE_RTOL,
         atol=_STATE_TRACE_ATOL,
     )
     np.testing.assert_allclose(
-        np.asarray(result.m_proxy_history[0]).reshape(-1),
+        m_proxy_history_host[0].reshape(-1),
         np.asarray(cpu_m_proxy_history[0]),
         rtol=_STATE_TRACE_RTOL,
         atol=_STATE_TRACE_ATOL,
     )
     np.testing.assert_allclose(
-        np.asarray(result.m_history[1:]),
+        m_history_host[1:],
         np.broadcast_to(
-            np.asarray(result.m_history[0]),
-            np.asarray(result.m_history[1:]).shape,
+            m_history_host[0],
+            m_history_host[1:].shape,
         ),
         rtol=_STATE_TRACE_RTOL,
         atol=_STATE_TRACE_ATOL,
     )
     np.testing.assert_allclose(
-        np.asarray(result.m_proxy_history[1:]),
+        m_proxy_history_host[1:],
         np.broadcast_to(
-            np.asarray(result.m_proxy_history[0]),
-            np.asarray(result.m_proxy_history[1:]).shape,
+            m_proxy_history_host[0],
+            m_proxy_history_host[1:].shape,
         ),
         rtol=_STATE_TRACE_RTOL,
         atol=_STATE_TRACE_ATOL,
@@ -700,8 +758,9 @@ def test_gpmo_baseline_jax_matches_cpu_baseline_wrapper():
         rtol=_RTOL,
         atol=_ATOL,
     )
+    m_history_host = np.asarray(result.m_history)
     np.testing.assert_allclose(
-        np.asarray(result.m_history[-1]).reshape(-1),
+        m_history_host[-1].reshape(-1),
         np.asarray(result.m).reshape(-1),
         rtol=_RTOL,
         atol=_ATOL,
@@ -1107,6 +1166,291 @@ def test_gpmo_arbvec_backtracking_jax_jits_under_strict_transfer_guard():
         out.block_until_ready()
 
     assert out.shape == (jax_grid.ndipoles, 3)
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
+def test_gpmo_baseline_jax_record_every_keeps_requested_device_history_rows() -> None:
+    grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2850))
+    full = GPMO_baseline_jax(grid, K=5, record_every=None)
+    sampled = GPMO_baseline_jax(grid, K=5, record_every=2)
+    rows = np.asarray([1, 3, 4], dtype=np.int64)
+
+    np.testing.assert_allclose(
+        np.asarray(sampled.m),
+        np.asarray(full.m),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    for field_name in (
+        "m_history",
+        "x_history",
+        "residual_history",
+        "selected_dipoles",
+        "selected_components",
+        "selected_signs",
+    ):
+        np.testing.assert_allclose(
+            np.asarray(getattr(sampled, field_name)),
+            np.asarray(getattr(full, field_name))[rows],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+
+def test_gpmo_multi_jax_record_every_keeps_requested_device_history_rows() -> None:
+    grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2854))
+    full = GPMO_multi_jax(grid, K=5, Nadjacent=1, record_every=None)
+    sampled = GPMO_multi_jax(grid, K=5, Nadjacent=1, record_every=2)
+    rows = np.asarray([1, 3, 4], dtype=np.int64)
+
+    np.testing.assert_allclose(
+        np.asarray(sampled.m),
+        np.asarray(full.m),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    for field_name in (
+        "m_history",
+        "x_history",
+        "residual_history",
+        "selected_seed_dipoles",
+        "selected_components",
+        "selected_signs",
+        "selected_groups",
+    ):
+        np.testing.assert_allclose(
+            np.asarray(getattr(sampled, field_name)),
+            np.asarray(getattr(full, field_name))[rows],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+
+def test_gpmo_arbvec_jax_record_every_keeps_requested_device_history_rows() -> None:
+    cpu_grid = _gpmo_cpu_grid(seed=2856)
+    cpu_grid.pol_vectors = _gpmo_pol_vectors(seed=2857, ndipoles=cpu_grid.ndipoles)
+    grid = PermanentMagnetGridJAX.from_cpu(cpu_grid)
+    full = GPMO_ArbVec_jax(grid, K=5, record_every=None)
+    sampled = GPMO_ArbVec_jax(grid, K=5, record_every=2)
+    rows = np.asarray([1, 3, 4], dtype=np.int64)
+
+    np.testing.assert_allclose(
+        np.asarray(sampled.m),
+        np.asarray(full.m),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    for field_name in (
+        "m_history",
+        "x_history",
+        "residual_history",
+        "selected_dipoles",
+        "selected_vector_indices",
+        "selected_signs",
+    ):
+        np.testing.assert_allclose(
+            np.asarray(getattr(sampled, field_name)),
+            np.asarray(getattr(full, field_name))[rows],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+
+def test_gpmo_backtracking_jax_record_every_keeps_requested_device_history_rows() -> (
+    None
+):
+    grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2860))
+    full = GPMO_backtracking_jax(
+        grid, K=5, Nadjacent=2, backtracking=2, record_every=None
+    )
+    sampled = GPMO_backtracking_jax(
+        grid, K=5, Nadjacent=2, backtracking=2, record_every=2
+    )
+    rows = np.asarray([1, 3, 4], dtype=np.int64)
+
+    np.testing.assert_allclose(
+        np.asarray(sampled.m),
+        np.asarray(full.m),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    for field_name in (
+        "m_history",
+        "x_history",
+        "residual_history",
+        "selected_dipoles",
+        "selected_components",
+        "selected_signs",
+        "num_nonzeros_history",
+        "removed_pair_count_history",
+        "done_history",
+    ):
+        np.testing.assert_allclose(
+            np.asarray(getattr(sampled, field_name)),
+            np.asarray(getattr(full, field_name))[rows],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+
+
+def test_gpmo_arbvec_backtracking_jax_record_every_keeps_requested_device_history_rows() -> (
+    None
+):
+    cpu_grid = _gpmo_cpu_grid(seed=2862)
+    cpu_grid.pol_vectors = _gpmo_pol_vectors(seed=2863, ndipoles=cpu_grid.ndipoles)
+    grid = PermanentMagnetGridJAX.from_cpu(cpu_grid)
+    full = GPMO_ArbVec_backtracking_jax(
+        grid, K=5, Nadjacent=2, backtracking=2, record_every=None
+    )
+    sampled = GPMO_ArbVec_backtracking_jax(
+        grid, K=5, Nadjacent=2, backtracking=2, record_every=2
+    )
+    rows = np.asarray([1, 3, 4], dtype=np.int64)
+
+    np.testing.assert_allclose(
+        np.asarray(sampled.m),
+        np.asarray(full.m),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    for field_name in (
+        "m_history",
+        "x_history",
+        "residual_history",
+        "selected_dipoles",
+        "selected_vector_indices",
+        "selected_signs",
+        "num_nonzeros_history",
+        "removed_pair_count_history",
+        "done_history",
+    ):
+        np.testing.assert_allclose(
+            np.asarray(getattr(sampled, field_name)),
+            np.asarray(getattr(full, field_name))[rows],
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+    np.testing.assert_allclose(
+        np.asarray(sampled.initial_x),
+        np.asarray(full.initial_x),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(sampled.initial_residual),
+        np.asarray(full.initial_residual),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    assert np.asarray(sampled.initial_num_nonzero) == np.asarray(
+        full.initial_num_nonzero
+    )
+
+
+def test_gpmo_jax_record_every_rejects_invalid_cadence() -> None:
+    cpu_grid = _gpmo_cpu_grid(seed=2852)
+    cpu_grid.pol_vectors = _gpmo_pol_vectors(seed=2853, ndipoles=cpu_grid.ndipoles)
+    grid = PermanentMagnetGridJAX.from_cpu(cpu_grid)
+
+    with pytest.raises(ValueError, match="record_every must be positive"):
+        GPMO_baseline_jax(grid, K=3, record_every=0)
+    with pytest.raises(ValueError, match="record_every must be positive"):
+        GPMO_multi_jax(grid, K=3, Nadjacent=1, record_every=0)
+    with pytest.raises(ValueError, match="record_every must be positive"):
+        GPMO_ArbVec_jax(grid, K=3, record_every=0)
+    with pytest.raises(ValueError, match="record_every must be positive"):
+        GPMO_backtracking_jax(grid, K=3, Nadjacent=1, record_every=0)
+    with pytest.raises(ValueError, match="record_every must be positive"):
+        GPMO_ArbVec_backtracking_jax(grid, K=3, Nadjacent=1, record_every=0)
+
+
+def test_gpmo_jax_record_every_jits_under_strict_transfer_guard() -> None:
+    grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2853))
+
+    @jax.jit
+    def _run(grid_data: PermanentMagnetGridJAX):
+        return GPMO_baseline_jax(grid_data, K=5, record_every=2).m_history
+
+    _run(grid).block_until_ready()
+    with jax.transfer_guard("disallow"):
+        out = _run(grid)
+        out.block_until_ready()
+
+    assert out.shape == (3, grid.ndipoles, 3)
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
+def test_gpmo_multi_jax_record_every_jits_under_strict_transfer_guard() -> None:
+    grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2855))
+
+    @jax.jit
+    def _run(grid_data: PermanentMagnetGridJAX):
+        return GPMO_multi_jax(grid_data, K=5, Nadjacent=1, record_every=2).m_history
+
+    _run(grid).block_until_ready()
+    with jax.transfer_guard("disallow"):
+        out = _run(grid)
+        out.block_until_ready()
+
+    assert out.shape == (3, grid.ndipoles, 3)
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
+def test_gpmo_arbvec_jax_record_every_jits_under_strict_transfer_guard() -> None:
+    cpu_grid = _gpmo_cpu_grid(seed=2858)
+    cpu_grid.pol_vectors = _gpmo_pol_vectors(seed=2859, ndipoles=cpu_grid.ndipoles)
+    grid = PermanentMagnetGridJAX.from_cpu(cpu_grid)
+
+    @jax.jit
+    def _run(grid_data: PermanentMagnetGridJAX):
+        return GPMO_ArbVec_jax(grid_data, K=5, record_every=2).m_history
+
+    _run(grid).block_until_ready()
+    with jax.transfer_guard("disallow"):
+        out = _run(grid)
+        out.block_until_ready()
+
+    assert out.shape == (3, grid.ndipoles, 3)
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
+def test_gpmo_backtracking_jax_record_every_jits_under_strict_transfer_guard() -> None:
+    grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2864))
+
+    @jax.jit
+    def _run(grid_data: PermanentMagnetGridJAX):
+        return GPMO_backtracking_jax(
+            grid_data, K=5, Nadjacent=2, backtracking=2, record_every=2
+        ).m_history
+
+    _run(grid).block_until_ready()
+    with jax.transfer_guard("disallow"):
+        out = _run(grid)
+        out.block_until_ready()
+
+    assert out.shape == (3, grid.ndipoles, 3)
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
+def test_gpmo_arbvec_backtracking_jax_record_every_jits_under_strict_transfer_guard() -> (
+    None
+):
+    cpu_grid = _gpmo_cpu_grid(seed=2866)
+    cpu_grid.pol_vectors = _gpmo_pol_vectors(seed=2867, ndipoles=cpu_grid.ndipoles)
+    grid = PermanentMagnetGridJAX.from_cpu(cpu_grid)
+
+    @jax.jit
+    def _run(grid_data: PermanentMagnetGridJAX):
+        return GPMO_ArbVec_backtracking_jax(
+            grid_data, K=5, Nadjacent=2, backtracking=2, record_every=2
+        ).m_history
+
+    _run(grid).block_until_ready()
+    with jax.transfer_guard("disallow"):
+        out = _run(grid)
+        out.block_until_ready()
+
+    assert out.shape == (3, grid.ndipoles, 3)
     assert np.all(np.isfinite(np.asarray(out)))
 
 

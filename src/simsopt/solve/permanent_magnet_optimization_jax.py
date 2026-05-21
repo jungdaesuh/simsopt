@@ -59,13 +59,19 @@ def _flatten_like(reference: jax.Array, moments: jax.Array) -> jax.Array:
     return jnp.reshape(moments, reference.shape)
 
 
+def _scalar_like(value: float, reference: jax.Array) -> jax.Array:
+    return _as_jax_float64(np.float64(value)).astype(reference.dtype)
+
+
 def _normalized_moment_magnitudes(matrix: jax.Array, m_maxima: jax.Array) -> jax.Array:
-    positive_mmax = m_maxima > 0.0
-    safe_mmax = jnp.where(positive_mmax, m_maxima, 1.0)
+    zero = _scalar_like(0.0, m_maxima)
+    one = _scalar_like(1.0, m_maxima)
+    positive_mmax = m_maxima > zero
+    safe_mmax = jnp.where(positive_mmax, m_maxima, one)
     return jnp.where(
         positive_mmax[:, None],
         jnp.abs(matrix) / safe_mmax[:, None],
-        0.0,
+        zero,
     )
 
 
@@ -320,7 +326,8 @@ def prox_l0_jax(m: object, mmax: object, reg_l0: float, nu: float) -> jax.Array:
     m_maxima = _as_jax_float64(mmax)
     matrix = jnp.reshape(moments, (m_maxima.shape[0], 3))
     normalized = _normalized_moment_magnitudes(matrix, m_maxima)
-    thresholded = matrix * (normalized > (2.0 * reg_l0 * nu))
+    threshold = _scalar_like(2.0 * reg_l0 * nu, normalized)
+    thresholded = matrix * (normalized > threshold)
     return _flatten_like(moments, thresholded)
 
 
@@ -331,9 +338,11 @@ def prox_l1_jax(m: object, mmax: object, reg_l1: float, nu: float) -> jax.Array:
     m_maxima = _as_jax_float64(mmax)
     matrix = jnp.reshape(moments, (m_maxima.shape[0], 3))
     normalized = _normalized_moment_magnitudes(matrix, m_maxima)
+    threshold = _scalar_like(reg_l1 * nu, normalized)
+    zero = _scalar_like(0.0, normalized)
     thresholded = (
         jnp.sign(matrix)
-        * jnp.maximum(normalized - reg_l1 * nu, 0.0)
+        * jnp.maximum(normalized - threshold, zero)
         * m_maxima[:, None]
     )
     return _flatten_like(moments, thresholded)
@@ -374,6 +383,7 @@ def GPMO_baseline_jax(
     K: int,
     reg_l2: float = 0.0,
     single_direction: int = -1,
+    record_every: int | None = None,
 ) -> GPMOBaselineResult:
     """Run the baseline greedy GPMO algorithm on a fixed JAX PM grid.
 
@@ -389,12 +399,13 @@ def GPMO_baseline_jax(
     core = gpmo_baseline_solve(
         GPMOBaselineSpec(
             m_maxima=grid.m_maxima,
-            reg_l2=jnp.asarray(np.float64(reg_l2), dtype=grid.A_obj.dtype),
+            reg_l2=_scalar_like(reg_l2, grid.A_obj),
             single_direction=single_direction,
         ),
         A_scaled,
         grid.b_obj,
         K=K,
+        record_every=record_every,
     )
     m = core.x * grid.m_maxima[:, None]
     m_history = core.x_history * grid.m_maxima[None, :, None]
@@ -418,6 +429,7 @@ def GPMO_multi_jax(
     reg_l2: float = 0.0,
     single_direction: int = -1,
     Nadjacent: int = 7,
+    record_every: int | None = None,
 ) -> GPMOMultiResult:
     """Run the multi-neighbour greedy GPMO algorithm on a fixed JAX PM grid.
 
@@ -432,7 +444,7 @@ def GPMO_multi_jax(
     core = gpmo_multi_solve(
         GPMOMultiSpec(
             m_maxima=grid.m_maxima,
-            reg_l2=jnp.asarray(np.float64(reg_l2), dtype=grid.A_obj.dtype),
+            reg_l2=_scalar_like(reg_l2, grid.A_obj),
             dipole_grid_xyz=grid.dipole_grid_xyz,
             single_direction=single_direction,
             Nadjacent=Nadjacent,
@@ -440,6 +452,7 @@ def GPMO_multi_jax(
         A_scaled,
         grid.b_obj,
         K=K,
+        record_every=record_every,
     )
     m = core.x * grid.m_maxima[:, None]
     m_history = core.x_history * grid.m_maxima[None, :, None]
@@ -466,6 +479,7 @@ def GPMO_backtracking_jax(
     Nadjacent: int = 7,
     backtracking: int = 100,
     max_nMagnets: int = 1000,
+    record_every: int | None = None,
 ) -> GPMOBacktrackingResult:
     """Run the baseline backtracking GPMO algorithm on a fixed JAX PM grid.
 
@@ -479,7 +493,7 @@ def GPMO_backtracking_jax(
     core = gpmo_backtracking_solve(
         GPMOBacktrackingSpec(
             m_maxima=grid.m_maxima,
-            reg_l2=jnp.asarray(np.float64(reg_l2), dtype=grid.A_obj.dtype),
+            reg_l2=_scalar_like(reg_l2, grid.A_obj),
             dipole_grid_xyz=grid.dipole_grid_xyz,
             single_direction=single_direction,
             Nadjacent=Nadjacent,
@@ -489,6 +503,7 @@ def GPMO_backtracking_jax(
         A_scaled,
         grid.b_obj,
         K=K,
+        record_every=record_every,
     )
     m = core.x * grid.m_maxima[:, None]
     m_history = core.x_history * grid.m_maxima[None, :, None]
@@ -524,6 +539,7 @@ def GPMO_ArbVec_jax(
     K: int,
     reg_l2: float = 0.0,
     pol_vectors: object | None = None,
+    record_every: int | None = None,
 ) -> GPMOArbVecResult:
     """Run the arbitrary-vector greedy GPMO algorithm on a fixed JAX PM grid.
 
@@ -538,12 +554,13 @@ def GPMO_ArbVec_jax(
     core = gpmo_arbvec_solve(
         GPMOArbVecSpec(
             m_maxima=grid.m_maxima,
-            reg_l2=jnp.asarray(np.float64(reg_l2), dtype=grid.A_obj.dtype),
+            reg_l2=_scalar_like(reg_l2, grid.A_obj),
             pol_vectors=pol_vectors_arr,
         ),
         A_scaled,
         grid.b_obj,
         K=K,
+        record_every=record_every,
     )
     m = core.x * grid.m_maxima[:, None]
     m_history = core.x_history * grid.m_maxima[None, :, None]
@@ -571,6 +588,7 @@ def GPMO_ArbVec_backtracking_jax(
     max_nMagnets: int = 1000,
     pol_vectors: object | None = None,
     m_init: object | None = None,
+    record_every: int | None = None,
 ) -> GPMOArbVecBacktrackingResult:
     """Run the arbitrary-vector backtracking GPMO algorithm on a fixed JAX PM grid.
 
@@ -586,14 +604,14 @@ def GPMO_ArbVec_backtracking_jax(
     mmax_vec = _component_mmax(grid)
     A_scaled = grid.A_obj * mmax_vec[None, :]
     if m_init is None:
-        x_init_arr = jnp.zeros((grid.ndipoles, 3), dtype=grid.A_obj.dtype)
+        x_init_arr = grid.m0 - grid.m0
     else:
         m_init_arr = _moments_as_matrix("m_init", m_init, grid.ndipoles)
         x_init_arr = m_init_arr / grid.m_maxima[:, None]
     core = gpmo_arbvec_backtracking_solve(
         GPMOArbVecBacktrackingSpec(
             m_maxima=grid.m_maxima,
-            reg_l2=jnp.asarray(np.float64(reg_l2), dtype=grid.A_obj.dtype),
+            reg_l2=_scalar_like(reg_l2, grid.A_obj),
             dipole_grid_xyz=grid.dipole_grid_xyz,
             pol_vectors=pol_vectors_arr,
             Nadjacent=Nadjacent,
@@ -605,6 +623,7 @@ def GPMO_ArbVec_backtracking_jax(
         grid.b_obj,
         K=K,
         x_init=x_init_arr,
+        record_every=record_every,
     )
     m = core.x * grid.m_maxima[:, None]
     m_history = core.x_history * grid.m_maxima[None, :, None]
@@ -614,8 +633,8 @@ def GPMO_ArbVec_backtracking_jax(
         x=core.x,
         x_history=core.x_history,
         residual=core.residual,
-        residual_history=core.residual_history,
         selected_dipoles=core.selected_dipoles,
+        residual_history=core.residual_history,
         selected_vector_indices=core.selected_vector_indices,
         selected_signs=core.selected_signs,
         num_nonzeros_history=core.num_nonzeros_history,
@@ -635,13 +654,9 @@ def _mwpgp_spec(
     nu: float,
     reg_l2: float,
 ) -> PMOptimizationSpec:
-    hessian_scale = grid.ATA_scale + jnp.asarray(
-        np.float64(2.0 * reg_l2 + 1.0 / nu), dtype=grid.A_obj.dtype
-    )
+    hessian_scale = grid.ATA_scale + _scalar_like(2.0 * reg_l2 + 1.0 / nu, grid.A_obj)
     if alpha is None:
-        alpha_value = (
-            jnp.asarray(2.0 * (1.0 - 1.0e-5), dtype=grid.A_obj.dtype) / hessian_scale
-        )
+        alpha_value = _scalar_like(2.0 * (1.0 - 1.0e-5), grid.A_obj) / hessian_scale
     else:
         alpha_value = _as_jax_float64(alpha)
         if _has_tracer_leaf((alpha_value, hessian_scale)):
@@ -649,7 +664,9 @@ def _mwpgp_spec(
                 "Explicit alpha validation requires an eager host-boundary call."
             )
         alpha_host = _host_scalar("alpha", alpha_value)
-        bound_host = _host_scalar("2/lambda_max(H)", 2.0 / hessian_scale)
+        bound_host = _host_scalar(
+            "2/lambda_max(H)", _scalar_like(2.0, hessian_scale) / hessian_scale
+        )
         if alpha_host > bound_host:
             raise ValueError(
                 "alpha must be <= 2/lambda_max(H) for MwPGP fixed-step "
@@ -658,8 +675,8 @@ def _mwpgp_spec(
     return PMOptimizationSpec(
         m_maxima=grid.m_maxima,
         m_proxy=m_proxy,
-        nu=jnp.asarray(np.float64(nu), dtype=grid.A_obj.dtype),
-        reg_l2=jnp.asarray(np.float64(reg_l2), dtype=grid.A_obj.dtype),
+        nu=_scalar_like(nu, grid.A_obj),
+        reg_l2=_scalar_like(reg_l2, grid.A_obj),
         alpha=alpha_value,
     )
 
@@ -678,11 +695,31 @@ def _run_mwpgp(
     return mwpgp_solve(spec, grid.A_obj, grid.ATb, m0, n_steps=max_iter)
 
 
+def _run_mwpgp_with_alpha(
+    grid: PermanentMagnetGridJAX,
+    m0: jax.Array,
+    m_proxy: jax.Array,
+    *,
+    alpha: jax.Array,
+    nu: float,
+    reg_l2: float,
+    max_iter: int,
+) -> tuple[jax.Array, jax.Array]:
+    spec = PMOptimizationSpec(
+        m_maxima=grid.m_maxima,
+        m_proxy=m_proxy,
+        nu=_scalar_like(nu, grid.A_obj),
+        reg_l2=_scalar_like(reg_l2, grid.A_obj),
+        alpha=alpha,
+    )
+    return mwpgp_solve(spec, grid.A_obj, grid.ATb, m0, n_steps=max_iter)
+
+
 def _last_error(
     residual_history: jax.Array, dtype: jnp.dtype, max_iter: int
 ) -> jax.Array:
     if max_iter == 0:
-        return jnp.asarray(0.0, dtype=dtype)
+        return _as_jax_float64(0.0).astype(dtype)
     return residual_history[-1]
 
 
@@ -700,10 +737,94 @@ def _relax_and_split_cost(
     n2 = (
         0.5
         * jnp.sum((m - m_proxy) * (m - m_proxy))
-        / jnp.asarray(np.float64(nu), dtype=m.dtype)
+        / _scalar_like(nu, m)
     )
-    l2 = jnp.asarray(np.float64(reg_l2), dtype=m.dtype) * jnp.sum(m * m)
+    l2 = _scalar_like(reg_l2, m) * jnp.sum(m * m)
     return r2 + n2 + l2
+
+
+def _relax_and_split_scan(
+    grid: PermanentMagnetGridJAX,
+    m: jax.Array,
+    m_proxy: jax.Array,
+    *,
+    alpha: jax.Array,
+    nu: float,
+    reg_l0: float,
+    reg_l1: float,
+    reg_l2: float,
+    max_iter: int,
+    max_iter_RS: int,
+    epsilon_RS: float,
+) -> PMRelaxAndSplitResult:
+    prox = prox_l1_jax if np.isclose(reg_l0, 0.0, atol=1.0e-16) else prox_l0_jax
+    reg_rs = reg_l1 if np.isclose(reg_l0, 0.0, atol=1.0e-16) else reg_l0
+    epsilon = _scalar_like(epsilon_RS, m)
+    zero = jnp.sum(m - m)
+    done = zero != zero
+
+    def _inactive_step(carry):
+        m_done, m_proxy_done, done, error_done, residual_history_done = carry
+        return carry, (error_done, m_done, m_proxy_done, residual_history_done)
+
+    def _active_step(carry):
+        m_current, m_proxy_current, _done, _error, _residual_history = carry
+        m_next, residual_history = _run_mwpgp_with_alpha(
+            grid,
+            m_current,
+            m_proxy_current,
+            alpha=alpha,
+            nu=nu,
+            reg_l2=reg_l2,
+            max_iter=max_iter,
+        )
+        error = _relax_and_split_cost(
+            grid,
+            m_next,
+            m_proxy_current,
+            nu=nu,
+            reg_l2=reg_l2,
+        )
+        m_proxy_next = _moments_as_matrix(
+            "m_proxy", prox(m_next, grid.m_maxima, reg_rs, nu), grid.ndipoles
+        )
+        done_next = jnp.linalg.norm(m_next - m_proxy_next) < epsilon
+        return (
+            m_next,
+            m_proxy_next,
+            done_next,
+            error,
+            residual_history,
+        ), (
+            error,
+            m_next,
+            m_proxy_next,
+            residual_history,
+        )
+
+    def _scan_body(carry, _iteration):
+        return jax.lax.cond(carry[2], _inactive_step, _active_step, carry)
+
+    final_carry, trace = jax.lax.scan(
+        _scan_body,
+        (
+            m,
+            m_proxy,
+            done,
+            zero,
+            jnp.broadcast_to(zero, (max_iter,)),
+        ),
+        jax.lax.iota(jnp.int32, max_iter_RS),
+    )
+    errors, m_history, m_proxy_history, residual_histories = trace
+    return PMRelaxAndSplitResult(
+        errors=errors,
+        m_history=m_history,
+        m_proxy_history=m_proxy_history,
+        m=final_carry[0],
+        m_proxy=final_carry[1],
+        residual_history=residual_histories,
+    )
 
 
 def relax_and_split_jax(
@@ -717,6 +838,7 @@ def relax_and_split_jax(
     reg_l0: float = 0.0,
     reg_l1: float = 0.0,
     reg_l2: float = 0.0,
+    epsilon_RS: float = 1.0e-3,
 ) -> PMRelaxAndSplitResult:
     """Run the fixed-step JAX relax-and-split PM solve wrapper.
 
@@ -769,42 +891,17 @@ def relax_and_split_jax(
     m_proxy = _moments_as_matrix(
         "m_proxy", prox(initial, grid.m_maxima, reg_rs, nu), grid.ndipoles
     )
-    errors = []
-    m_history = []
-    m_proxy_history = []
-    residual_histories = []
-    for _ in range(max_iter_RS):
-        m_proxy_current = m_proxy
-        m, residual_history = _run_mwpgp(
-            grid,
-            m,
-            m_proxy_current,
-            alpha=alpha,
-            nu=nu,
-            reg_l2=reg_l2,
-            max_iter=max_iter,
-        )
-        m_history.append(m)
-        errors.append(
-            _relax_and_split_cost(
-                grid,
-                m,
-                m_proxy_current,
-                nu=nu,
-                reg_l2=reg_l2,
-            )
-        )
-        m_proxy = _moments_as_matrix(
-            "m_proxy", prox(m, grid.m_maxima, reg_rs, nu), grid.ndipoles
-        )
-        m_proxy_history.append(m_proxy)
-        residual_histories.append(residual_history)
-
-    return PMRelaxAndSplitResult(
-        errors=jnp.stack(errors),
-        m_history=jnp.stack(m_history),
-        m_proxy_history=jnp.stack(m_proxy_history),
+    scan_spec = _mwpgp_spec(grid, m_proxy, alpha=alpha, nu=nu, reg_l2=reg_l2)
+    return _relax_and_split_scan(
+        grid,
         m=m,
         m_proxy=m_proxy,
-        residual_history=jnp.stack(residual_histories),
+        alpha=scan_spec.alpha,
+        nu=nu,
+        reg_l0=reg_l0,
+        reg_l1=reg_l1,
+        reg_l2=reg_l2,
+        max_iter=max_iter,
+        max_iter_RS=max_iter_RS,
+        epsilon_RS=epsilon_RS,
     )

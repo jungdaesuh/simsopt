@@ -98,9 +98,14 @@ from simsopt.geo.curvexyzfourier import (  # type: ignore[import-untyped]
 )
 from simsopt.geo.optimizer_jax import (  # type: ignore[import-untyped]
     _mark_cacheable_jit_value_and_grad,
-    jax_minimize,
     private_optimizer_runtime_is_supported,
     target_minimize,
+)
+from simsopt.solve.jax import (  # type: ignore[import-untyped]
+    Driver,
+    SimsoptBFGSOptions,
+    SimsoptLBFGSBOptions,
+    minimize,
 )
 from simsopt.jax_core.biotsavart import (  # type: ignore[import-untyped]
     biot_savart_A,
@@ -172,6 +177,28 @@ LegacyCurveObjectiveGradientCase = Literal[
     "lp-curve-torsion",
     "framed-curve-twist",
 ]
+
+
+def _solve_jax_driver_for_optimizer_method(method: OptimizerMethod) -> Driver:
+    if method == "lbfgs-ondevice":
+        return Driver.SIMSOPT_LBFGSB
+    if method == "bfgs-ondevice":
+        return Driver.SIMSOPT_BFGS
+    raise ValueError(f"Unknown optimizer method {method!r}.")
+
+
+def _solve_jax_options_for_optimizer_method(
+    method: OptimizerMethod,
+    *,
+    maxiter: int,
+) -> SimsoptLBFGSBOptions | SimsoptBFGSOptions:
+    if method == "lbfgs-ondevice":
+        return SimsoptLBFGSBOptions(maxiter=maxiter)
+    if method == "bfgs-ondevice":
+        return SimsoptBFGSOptions(maxiter=maxiter)
+    raise ValueError(f"Unknown optimizer method {method!r}.")
+
+
 _STAGE2_SCRIPT_PATH = (
     _REPO_ROOT
     / "examples"
@@ -270,11 +297,16 @@ def _run_compile_count_case(method: OptimizerMethod) -> None:
         vector = jnp.asarray(x, dtype=jnp.float64)
         return half * jnp.dot(vector, vector)
 
-    cacheable_quad = _mark_cacheable_jit_value_and_grad(quad)
+    cacheable_quad = _mark_cacheable_jit_value_and_grad(jax.value_and_grad(quad))
     x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
 
     def run_once() -> None:
-        result = jax_minimize(cacheable_quad, x0, method=method, maxiter=5)
+        result = minimize(
+            cacheable_quad,
+            x0,
+            driver=_solve_jax_driver_for_optimizer_method(method),
+            options=_solve_jax_options_for_optimizer_method(method, maxiter=5),
+        )
         assert result.success is True
 
     if method == "lbfgs-ondevice":
@@ -408,7 +440,7 @@ def _run_stage2_target_compile_count_case() -> None:
         json.dumps(
             {
                 "case": "stage2-target-compile-count",
-                "method": contract.method,
+                "method": stage2_script.stage2_optimizer_contract_method(contract),
                 "compile_count": compile_count,
                 "run_count": 3,
                 "value_and_grad": True,
@@ -1589,7 +1621,8 @@ def _run_target_minimize_replicated_sharding_vjp_case() -> None:
         _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
         return
 
-    mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
+    local_devices = jax.local_devices()
+    mesh = Mesh(np.asarray(local_devices, dtype=object), ("d",))
     replicated = NamedSharding(mesh, P())
     with jax.transfer_guard_host_to_device("allow"):
         matrix = jax.device_put(np.eye(2, dtype=np.float64), replicated)
@@ -1599,7 +1632,7 @@ def _run_target_minimize_replicated_sharding_vjp_case() -> None:
         )
         x0 = jax.device_put(
             np.asarray([2.0, -1.0], dtype=np.float64),
-            jax.devices()[0],
+            local_devices[0],
         )
 
     def objective(x):
@@ -2336,8 +2369,11 @@ def _run_stage2_target_objective_ondevice_entry_case() -> None:
     bundle, dofs_jax = _build_stage2_target_objective_test_bundle(gpu)
     _, pullback = jax.vjp(bundle.objective, dofs_jax)
     grad = pullback(jax.device_put(np.array(1.0, dtype=np.float64), device=gpu))[0]
-    result = jax_minimize(
-        bundle.objective, dofs_jax, method="lbfgs-ondevice", maxiter=1
+    result = minimize(
+        jax.value_and_grad(bundle.objective),
+        dofs_jax,
+        driver=Driver.SIMSOPT_LBFGSB,
+        options=SimsoptLBFGSBOptions(maxiter=1),
     )
 
     assert np.isfinite(float(jax.device_get(bundle.objective(dofs_jax))))
@@ -2424,6 +2460,8 @@ def _run_mutable_objective_state_case() -> None:
     if not _configure_strict_cpu_parity_backend():
         _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
         return
+
+    from simsopt.geo.optimizer_jax import jax_minimize  # type: ignore[import-untyped]
 
     objective = _ShiftedQuadratic([0.0, 0.0])
     x0 = jnp.asarray(np.array([2.0, -1.0], dtype=np.float64))

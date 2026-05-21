@@ -1181,6 +1181,7 @@ def minimize_lbfgs_host_core(
     line_search_value_and_grad=line_search_value_and_grad_host,
     record_optimizer_state_trace=False,
     max_optimizer_state_trace_bytes=None,
+    invalid_step_log_capacity=None,
 ):
     x0_host = np.asarray(x0_host)
     if x0_host.ndim != 1:
@@ -1213,9 +1214,20 @@ def minimize_lbfgs_host_core(
         raise ValueError("initial_step_size must be positive when provided.")
     ftol_value = np.asarray(ftol, dtype=np_dtype).item()
     gtol_value = np.asarray(gtol, dtype=np_dtype).item()
+    invalid_step_log_capacity_value = (
+        _INVALID_STEP_LOG_MAX_CAPACITY
+        if invalid_step_log_capacity is None
+        else int(invalid_step_log_capacity)
+    )
+    if invalid_step_log_capacity_value < 1:
+        raise ValueError("invalid_step_log_capacity must be positive when provided.")
     invalid_log_capacity = max(
         1,
-        min(int(maxiter_limit_value), _INVALID_STEP_LOG_MAX_CAPACITY),
+        min(
+            int(maxiter_limit_value),
+            invalid_step_log_capacity_value,
+            _INVALID_STEP_LOG_MAX_CAPACITY,
+        ),
     )
 
     if initial_value_and_grad is None:

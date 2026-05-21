@@ -1097,6 +1097,28 @@ def test_lbfgsb_initial_state_uses_fixed_scipy_workspace_shapes_and_dtypes():
     np.testing.assert_array_equal(np.asarray(state.pgtol), 1e-8)
 
 
+def test_lbfgsb_initial_state_preserves_float32_runtime_dtype():
+    state = lbfgsb.lbfgsb_initial_state(
+        np.array([0.25, -0.5, 0.75], dtype=np.float32),
+        m=4,
+        bounds=[(None, None), (0.0, None), (0.0, 1.0)],
+        ftol=1e-6,
+        gtol=1e-5,
+        maxls=11,
+    )
+
+    assert np.asarray(state.x).dtype == np.float32
+    assert np.asarray(state.workspace.wa).dtype == np.float32
+    assert np.asarray(state.workspace.dsave).dtype == np.float32
+    assert np.asarray(state.factr).dtype == np.float32
+    np.testing.assert_allclose(
+        np.asarray(state.factr),
+        np.float32(1e-6) / np.finfo(np.float32).eps,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
 def test_lbfgsb_public_status_matches_scipy_wrapper_mapping():
     assert lbfgsb.lbfgsb_public_status(lbfgsb.CONVERGENCE, 10, 2, 10, 2) == 0
     assert lbfgsb.lbfgsb_public_status(lbfgsb.STOP, 11, 1, 10, 20) == 1

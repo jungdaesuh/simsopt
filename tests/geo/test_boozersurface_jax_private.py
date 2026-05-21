@@ -1091,6 +1091,35 @@ class TestOptimizerAdapterPrivate:
         np.testing.assert_allclose(np.asarray(state.g_k), np.zeros(2), atol=1e-12)
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_minimize_lbfgs_private_preserves_float32_runtime_dtype(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """Float32 smoke lanes must not depend on implicit x64 truncation."""
+        enable_non_strict_jax_backend(
+            monkeypatch,
+            request,
+            mode="jax_cpu_float32_smoke",
+        )
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        state = _opt._minimize_lbfgs_private(
+            quad,
+            jnp.array([1.0, -2.0], dtype=jnp.float32),
+            maxiter=10,
+            gtol=1e-5,
+            maxcor=5,
+        )
+
+        assert np.asarray(state.x_k).dtype == np.float32
+        assert np.asarray(state.g_k).dtype == np.float32
+        assert bool(state.failed) is False
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_callbacks_stay_transfer_clean_under_disallow(self):
         """Accepted-step callbacks must not trip strict transfer guard."""
         half = _device_half()

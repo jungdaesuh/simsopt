@@ -406,6 +406,7 @@ def _trace_minimize_value_and_grad(
             options.get("record_optimizer_state_trace", True)
         ),
         max_optimizer_state_trace_bytes=options.get("max_optimizer_state_trace_bytes"),
+        invalid_step_log_capacity=options.get("invalid_step_log_capacity"),
     )
     return _host_trace_result_to_optimize_result(result)
 

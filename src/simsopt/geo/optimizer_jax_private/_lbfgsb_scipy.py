@@ -346,15 +346,25 @@ def _lbfgsb_dnrm2(x) -> jax.Array:
     return jnp.sqrt(_lbfgsb_ddot(x, x))
 
 
-def lbfgsb_empty_workspace(n: int, m: int) -> LbfgsbWorkspace:
+def _lbfgsb_eps(dtype) -> jax.Array:
+    return jnp.asarray(np.finfo(np.dtype(dtype)).eps, dtype=dtype)
+
+
+def lbfgsb_empty_workspace(
+    n: int,
+    m: int,
+    *,
+    dtype=np.float64,
+) -> LbfgsbWorkspace:
+    float_dtype = np.dtype(dtype)
     return LbfgsbWorkspace(
-        wa=jnp.zeros((lbfgsb_workspace_size(n, m),), dtype=jnp.float64),
+        wa=jnp.zeros((lbfgsb_workspace_size(n, m),), dtype=float_dtype),
         iwa=jnp.zeros((lbfgsb_iwa_size(n),), dtype=jnp.int32),
         task=jnp.zeros((2,), dtype=jnp.int32),
         ln_task=jnp.zeros((2,), dtype=jnp.int32),
         lsave=jnp.zeros((4,), dtype=jnp.int32),
         isave=jnp.zeros((44,), dtype=jnp.int32),
-        dsave=jnp.zeros((29,), dtype=jnp.float64),
+        dsave=jnp.zeros((29,), dtype=float_dtype),
     )
 
 
@@ -369,21 +379,22 @@ def lbfgsb_initial_state(
 ) -> LbfgsbState:
     if int(maxls) <= 0:
         raise ValueError("maxls must be positive.")
-    x = jnp.asarray(x0, dtype=jnp.float64).reshape((-1,))
+    x = jnp.asarray(x0).reshape((-1,))
+    dtype = x.dtype
     n = int(x.shape[0])
     low_bnd, upper_bnd, nbd = lbfgsb_encode_bounds(bounds, n)
     return LbfgsbState(
         m=int(m),
         x=x,
-        l=jnp.asarray(low_bnd, dtype=jnp.float64),
-        u=jnp.asarray(upper_bnd, dtype=jnp.float64),
+        l=jnp.asarray(low_bnd, dtype=dtype),
+        u=jnp.asarray(upper_bnd, dtype=dtype),
         nbd=jnp.asarray(nbd, dtype=jnp.int32),
-        f=jnp.asarray(0.0, dtype=jnp.float64),
-        g=jnp.zeros_like(x, dtype=jnp.float64),
-        factr=jnp.asarray(lbfgsb_factr_from_ftol(ftol), dtype=jnp.float64),
-        pgtol=jnp.asarray(gtol, dtype=jnp.float64),
+        f=jnp.asarray(0.0, dtype=dtype),
+        g=jnp.zeros_like(x, dtype=dtype),
+        factr=jnp.asarray(lbfgsb_factr_from_ftol(ftol, dtype=dtype), dtype=dtype),
+        pgtol=jnp.asarray(gtol, dtype=dtype),
         maxls=int(maxls),
-        workspace=lbfgsb_empty_workspace(n, int(m)),
+        workspace=lbfgsb_empty_workspace(n, int(m), dtype=dtype),
         n_iterations=jnp.asarray(0, dtype=jnp.int32),
         nfev=jnp.asarray(0, dtype=jnp.int32),
         njev=jnp.asarray(0, dtype=jnp.int32),
@@ -392,16 +403,15 @@ def lbfgsb_initial_state(
 
 def _lbfgsb_setulb_start(state: LbfgsbState) -> LbfgsbState:
     n, m = _lbfgsb_state_dimensions(state)
+    dtype = state.x.dtype
     active = lbfgsb_active(state.l, state.u, state.nbd, state.x)
 
     iwa = state.workspace.iwa.at[n : 2 * n].set(active.iwhere)
     lsave = _lbfgsb_lsave(active.prjctd, active.cnstnd, active.boxed, False)
     isave = state.workspace.isave.at[:16].set(_lbfgsb_workspace_partition_isave(n, m))
     isave = isave.at[37].set(jnp.asarray(n, dtype=jnp.int32))
-    dsave = state.workspace.dsave.at[0].set(jnp.asarray(1.0, dtype=jnp.float64))
-    dsave = dsave.at[2].set(
-        state.factr * jnp.asarray(np.finfo(float).eps, dtype=jnp.float64)
-    )
+    dsave = state.workspace.dsave.at[0].set(jnp.asarray(1.0, dtype=dtype))
+    dsave = dsave.at[2].set(state.factr * _lbfgsb_eps(dtype))
 
     workspace = state.workspace._replace(
         iwa=iwa,
@@ -415,6 +425,7 @@ def _lbfgsb_setulb_start(state: LbfgsbState) -> LbfgsbState:
 
 def _lbfgsb_setulb_fg_start_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbState:
     n, m = _lbfgsb_state_dimensions(state)
+    dtype = state.x.dtype
     lws, lwy, lsy, lss, lwt, lwn, lsnd, lz, lr, ld, lt, lxp, lwa = (
         _lbfgsb_workspace_offsets(n, m)
     )
@@ -638,7 +649,7 @@ def _lbfgsb_setulb_fg_start_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbSta
             dsave[13],
             dsave[3],
             dsave[15],
-            jnp.asarray(0.0, dtype=jnp.float64),
+            jnp.asarray(0.0, dtype=dtype),
             dsave[11],
             iteration,
             isave[35],
@@ -767,6 +778,7 @@ def _lbfgsb_setulb_fg_start_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbSta
 
 def _lbfgsb_setulb_subspace_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbState:
     n, m = _lbfgsb_state_dimensions(state)
+    dtype = state.x.dtype
     lws, lwy, lsy, lss, lwt, lwn, lsnd, lz, lr, ld, lt, lxp, lwa = (
         _lbfgsb_workspace_offsets(n, m)
     )
@@ -889,7 +901,7 @@ def _lbfgsb_setulb_subspace_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbSta
             dsave[13],
             dsave[3],
             dsave[15],
-            jnp.asarray(0.0, dtype=jnp.float64),
+            jnp.asarray(0.0, dtype=dtype),
             dsave[11],
             iteration,
             isave[35],
@@ -1006,6 +1018,7 @@ def _lbfgsb_setulb_subspace_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbSta
 
 def _lbfgsb_setulb_line_search_continue(state: LbfgsbState) -> LbfgsbState:
     n, m = _lbfgsb_state_dimensions(state)
+    dtype = state.x.dtype
     _, _, _, _, _, _, _, lz, lr, ld, lt, lxp, _ = _lbfgsb_workspace_offsets(n, m)
     wa = state.workspace.wa
     iwa = state.workspace.iwa
@@ -1033,7 +1046,7 @@ def _lbfgsb_setulb_line_search_continue(state: LbfgsbState) -> LbfgsbState:
         dsave[13],
         dsave[3],
         dsave[15],
-        jnp.asarray(0.0, dtype=jnp.float64),
+        jnp.asarray(0.0, dtype=dtype),
         dsave[11],
         isave[29],
         isave[35],
@@ -1143,6 +1156,7 @@ def _lbfgsb_skipped_lnsrlb_result(
     isave,
     nfgv,
 ) -> LbfgsbLnsrlbResult:
+    dtype = state.x.dtype
     return LbfgsbLnsrlbResult(
         x=state.x,
         fold=dsave[1],
@@ -1154,7 +1168,7 @@ def _lbfgsb_skipped_lnsrlb_result(
         stp=dsave[13],
         dnorm=dsave[3],
         dtd=dsave[15],
-        xstep=jnp.asarray(0.0, dtype=jnp.float64),
+        xstep=jnp.asarray(0.0, dtype=dtype),
         stpmx=dsave[11],
         ifun=isave[35],
         iback=isave[24],
@@ -1182,13 +1196,14 @@ def _lbfgsb_setulb_refreshed_memory_state(
     f,
     g,
 ) -> LbfgsbState:
+    dtype = state.x.dtype
     prjctd, cnstnd, boxed, _ = _lbfgsb_lsave_flags(state)
     int_zero = jnp.asarray(0, dtype=jnp.int32)
     isave = isave.at[26].set(int_zero)
     isave = isave.at[27].set(int_zero)
     isave = isave.at[30].set(int_zero)
     isave = isave.at[34].set(int_zero)
-    dsave = dsave.at[0].set(jnp.asarray(1.0, dtype=jnp.float64))
+    dsave = dsave.at[0].set(jnp.asarray(1.0, dtype=dtype))
     workspace = state.workspace._replace(
         wa=wa,
         iwa=iwa,
@@ -1334,6 +1349,7 @@ def _lbfgsb_setulb_new_x_next_iteration(
     sbgnrm: jax.Array,
 ) -> LbfgsbState:
     n, m = _lbfgsb_state_dimensions(state)
+    dtype = state.x.dtype
     lws, lwy, lsy, lss, lwt, lwn, _, _, lr, ld, lt, _, _ = _lbfgsb_workspace_offsets(
         n, m
     )
@@ -1358,7 +1374,7 @@ def _lbfgsb_setulb_new_x_next_iteration(
     dr = jnp.where(stp == 1.0, gd - gdold, (gd - gdold) * stp)
     ddum = jnp.where(stp == 1.0, -gdold, -gdold * stp)
     next_direction = jnp.where(stp == 1.0, line_direction, stp * line_direction)
-    skip_update = dr <= jnp.asarray(np.finfo(float).eps, dtype=jnp.float64) * ddum
+    skip_update = dr <= _lbfgsb_eps(dtype) * ddum
 
     def skip_update_branch(_):
         workspace = state.workspace._replace(
@@ -1582,8 +1598,8 @@ def lbfgsb_setulb(state: LbfgsbState) -> LbfgsbState:
 def _lbfgsb_evaluate_value_and_grad(value_and_grad, state: LbfgsbState) -> LbfgsbState:
     value, gradient = value_and_grad(state.x)
     return state._replace(
-        f=jnp.asarray(value, dtype=jnp.float64),
-        g=jnp.asarray(gradient, dtype=jnp.float64),
+        f=jnp.asarray(value, dtype=state.x.dtype),
+        g=jnp.asarray(gradient, dtype=state.x.dtype),
         nfev=state.nfev + jnp.asarray(1, dtype=jnp.int32),
         njev=state.njev + jnp.asarray(1, dtype=jnp.int32),
     )
@@ -1688,8 +1704,9 @@ def lbfgsb_inverse_hessian_history(
     )
 
 
-def lbfgsb_factr_from_ftol(ftol: float) -> np.float64:
-    return np.float64(ftol) / np.finfo(float).eps
+def lbfgsb_factr_from_ftol(ftol: float, *, dtype=np.float64) -> np.floating:
+    float_dtype = np.dtype(dtype)
+    return float_dtype.type(ftol) / np.finfo(float_dtype).eps
 
 
 def lbfgsb_task_message(task: np.ndarray | jax.Array) -> str:
@@ -1737,11 +1754,12 @@ def lbfgsb_encode_bounds(bounds, n: int) -> tuple[np.ndarray, np.ndarray, np.nda
 
 
 def lbfgsb_projected_gradient_norm(l, u, nbd, x, g):
-    l = jnp.asarray(l, dtype=jnp.float64)
-    u = jnp.asarray(u, dtype=jnp.float64)
+    dtype = jnp.asarray(x).dtype
+    l = jnp.asarray(l, dtype=dtype)
+    u = jnp.asarray(u, dtype=dtype)
     nbd = jnp.asarray(nbd, dtype=jnp.int32)
-    x = jnp.asarray(x, dtype=jnp.float64)
-    gi = jnp.asarray(g, dtype=jnp.float64)
+    x = jnp.asarray(x, dtype=dtype)
+    gi = jnp.asarray(g, dtype=dtype)
     lower_limited = nbd <= NBD_BOTH
     upper_limited = nbd >= NBD_BOTH
     bounded = nbd != NBD_UNBOUNDED
@@ -1753,10 +1771,11 @@ def lbfgsb_projected_gradient_norm(l, u, nbd, x, g):
 
 
 def lbfgsb_active(l, u, nbd, x):
-    l = jnp.asarray(l, dtype=jnp.float64)
-    u = jnp.asarray(u, dtype=jnp.float64)
+    dtype = jnp.asarray(x).dtype
+    l = jnp.asarray(l, dtype=dtype)
+    u = jnp.asarray(u, dtype=dtype)
     nbd = jnp.asarray(nbd, dtype=jnp.int32)
-    x = jnp.asarray(x, dtype=jnp.float64)
+    x = jnp.asarray(x, dtype=dtype)
 
     has_bound = nbd > NBD_UNBOUNDED
     has_lower = nbd <= NBD_BOTH
@@ -1778,18 +1797,19 @@ def lbfgsb_active(l, u, nbd, x):
 
 
 def lbfgsb_dcstep(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin, stpmax):
-    stx = jnp.asarray(stx, dtype=jnp.float64)
-    fx = jnp.asarray(fx, dtype=jnp.float64)
-    dx = jnp.asarray(dx, dtype=jnp.float64)
-    sty = jnp.asarray(sty, dtype=jnp.float64)
-    fy = jnp.asarray(fy, dtype=jnp.float64)
-    dy = jnp.asarray(dy, dtype=jnp.float64)
-    stp = jnp.asarray(stp, dtype=jnp.float64)
-    fp = jnp.asarray(fp, dtype=jnp.float64)
-    dp = jnp.asarray(dp, dtype=jnp.float64)
+    dtype = jnp.asarray(stp).dtype
+    stx = jnp.asarray(stx, dtype=dtype)
+    fx = jnp.asarray(fx, dtype=dtype)
+    dx = jnp.asarray(dx, dtype=dtype)
+    sty = jnp.asarray(sty, dtype=dtype)
+    fy = jnp.asarray(fy, dtype=dtype)
+    dy = jnp.asarray(dy, dtype=dtype)
+    stp = jnp.asarray(stp, dtype=dtype)
+    fp = jnp.asarray(fp, dtype=dtype)
+    dp = jnp.asarray(dp, dtype=dtype)
     brackt = jnp.asarray(brackt, dtype=jnp.bool_)
-    stpmin = jnp.asarray(stpmin, dtype=jnp.float64)
-    stpmax = jnp.asarray(stpmax, dtype=jnp.float64)
+    stpmin = jnp.asarray(stpmin, dtype=dtype)
+    stpmax = jnp.asarray(stpmax, dtype=dtype)
     sgnd = dp * (dx / jnp.abs(dx))
 
     def higher_value(_):
@@ -1944,6 +1964,7 @@ def _dcsrch_save_variables(
     width,
     width1,
 ):
+    dtype = jnp.asarray(stp).dtype
     isave = jnp.asarray(
         (jnp.where(brackt, 1, 0), stage),
         dtype=jnp.int32,
@@ -1964,7 +1985,7 @@ def _dcsrch_save_variables(
             width,
             width1,
         ),
-        dtype=jnp.float64,
+        dtype=dtype,
     )
     return LbfgsbDcsrchResult(
         stp=stp,
@@ -1989,18 +2010,19 @@ def lbfgsb_dcsrch(
     isave,
     dsave,
 ):
-    f = jnp.asarray(f, dtype=jnp.float64)
-    g = jnp.asarray(g, dtype=jnp.float64)
-    stp = jnp.asarray(stp, dtype=jnp.float64)
-    ftol = jnp.asarray(ftol, dtype=jnp.float64)
-    gtol = jnp.asarray(gtol, dtype=jnp.float64)
-    xtol = jnp.asarray(xtol, dtype=jnp.float64)
-    stpmin = jnp.asarray(stpmin, dtype=jnp.float64)
-    stpmax = jnp.asarray(stpmax, dtype=jnp.float64)
+    dtype = jnp.asarray(stp).dtype
+    f = jnp.asarray(f, dtype=dtype)
+    g = jnp.asarray(g, dtype=dtype)
+    stp = jnp.asarray(stp, dtype=dtype)
+    ftol = jnp.asarray(ftol, dtype=dtype)
+    gtol = jnp.asarray(gtol, dtype=dtype)
+    xtol = jnp.asarray(xtol, dtype=dtype)
+    stpmin = jnp.asarray(stpmin, dtype=dtype)
+    stpmax = jnp.asarray(stpmax, dtype=dtype)
     task = jnp.asarray(task, dtype=jnp.int32)
     task_msg = jnp.asarray(task_msg, dtype=jnp.int32)
     isave = jnp.asarray(isave, dtype=jnp.int32)
-    dsave = jnp.asarray(dsave, dtype=jnp.float64)
+    dsave = jnp.asarray(dsave, dtype=dtype)
 
     def start_branch(_):
         error_msg = jnp.asarray(NO_MSG, dtype=jnp.int32)
@@ -2032,9 +2054,9 @@ def lbfgsb_dcsrch(
             finit=finit,
             fx=finit,
             fy=finit,
-            stx=jnp.asarray(0.0, dtype=jnp.float64),
-            sty=jnp.asarray(0.0, dtype=jnp.float64),
-            stmin=jnp.asarray(0.0, dtype=jnp.float64),
+            stx=jnp.asarray(0.0, dtype=dtype),
+            sty=jnp.asarray(0.0, dtype=dtype),
+            stmin=jnp.asarray(0.0, dtype=dtype),
             stmax=stp + 4.0 * stp,
             width=width,
             width1=width1,
@@ -2227,20 +2249,21 @@ def lbfgsb_matupd(
     stp,
     dtd,
 ):
-    ws = jnp.asarray(ws, dtype=jnp.float64)
-    wy = jnp.asarray(wy, dtype=jnp.float64)
-    sy = jnp.asarray(sy, dtype=jnp.float64)
-    ss = jnp.asarray(ss, dtype=jnp.float64)
-    d = jnp.asarray(d, dtype=jnp.float64)
-    r = jnp.asarray(r, dtype=jnp.float64)
+    dtype = jnp.asarray(ws).dtype
+    ws = jnp.asarray(ws, dtype=dtype)
+    wy = jnp.asarray(wy, dtype=dtype)
+    sy = jnp.asarray(sy, dtype=dtype)
+    ss = jnp.asarray(ss, dtype=dtype)
+    d = jnp.asarray(d, dtype=dtype)
+    r = jnp.asarray(r, dtype=dtype)
     itail = jnp.asarray(itail, dtype=jnp.int32)
     iupdat = jnp.asarray(iupdat, dtype=jnp.int32)
     col = jnp.asarray(col, dtype=jnp.int32)
     head = jnp.asarray(head, dtype=jnp.int32)
-    rr = jnp.asarray(rr, dtype=jnp.float64)
-    dr = jnp.asarray(dr, dtype=jnp.float64)
-    stp = jnp.asarray(stp, dtype=jnp.float64)
-    dtd = jnp.asarray(dtd, dtype=jnp.float64)
+    rr = jnp.asarray(rr, dtype=dtype)
+    dr = jnp.asarray(dr, dtype=dtype)
+    stp = jnp.asarray(stp, dtype=dtype)
+    dtd = jnp.asarray(dtd, dtype=dtype)
     m = int(ws.shape[0])
     next_col = jnp.where(iupdat <= m, iupdat, col)
     next_itail = jnp.where(iupdat <= m, (head + iupdat - 1) % m, (itail + 1) % m)
@@ -2291,19 +2314,20 @@ def lbfgsb_matupd(
 
 
 def lbfgsb_bmv(sy, wt, col, v):
-    sy = jnp.asarray(sy, dtype=jnp.float64)
-    wt = jnp.asarray(wt, dtype=jnp.float64)
-    v = jnp.asarray(v, dtype=jnp.float64)
+    dtype = jnp.asarray(v).dtype
+    sy = jnp.asarray(sy, dtype=dtype)
+    wt = jnp.asarray(wt, dtype=dtype)
+    v = jnp.asarray(v, dtype=dtype)
     col = jnp.asarray(col, dtype=jnp.int32)
     m = int(sy.shape[0])
-    p = jnp.zeros_like(v, dtype=jnp.float64)
+    p = jnp.zeros_like(v, dtype=dtype)
 
-    first_rhs = jnp.zeros((m,), dtype=jnp.float64)
+    first_rhs = jnp.zeros((m,), dtype=dtype)
     for i in range(m):
         first_rhs = first_rhs.at[i].set(jnp.where(i < col, v[col + i], 0.0))
     for i in range(1, m):
         active_i = i < col
-        ssum = jnp.asarray(0.0, dtype=jnp.float64)
+        ssum = jnp.asarray(0.0, dtype=dtype)
         for k in range(i):
             active_k = k < col
             ssum = ssum + jnp.where(
@@ -2319,7 +2343,7 @@ def lbfgsb_bmv(sy, wt, col, v):
     active = memory_index < col
     upper = jnp.triu(wt)
     active_matrix = active[:, None] & active[None, :]
-    solve_matrix = jnp.where(active_matrix, upper, jnp.eye(m, dtype=jnp.float64))
+    solve_matrix = jnp.where(active_matrix, upper, jnp.eye(m, dtype=dtype))
     diagonal = jnp.diag(upper)
     singular_index = jnp.min(
         jnp.where(
@@ -2348,7 +2372,7 @@ def lbfgsb_bmv(sy, wt, col, v):
         p = p.at[i].set(jnp.where(update, scaled_v[i], p[i]))
         p = p.at[col + i].set(jnp.where(update, first_solve[i], p[col + i]))
 
-    second_rhs = jnp.zeros((m,), dtype=jnp.float64)
+    second_rhs = jnp.zeros((m,), dtype=dtype)
     for i in range(m):
         second_rhs = second_rhs.at[i].set(jnp.where(i < col, p[col + i], 0.0))
     second_solve = jsp_linalg.solve_triangular(
@@ -2368,7 +2392,7 @@ def lbfgsb_bmv(sy, wt, col, v):
 
     for i in range(m):
         active_i = factor_ok & (i < col)
-        ssum = jnp.asarray(0.0, dtype=jnp.float64)
+        ssum = jnp.asarray(0.0, dtype=dtype)
         for k in range(i + 1, m):
             active_k = k < col
             ssum = ssum + jnp.where(
@@ -2382,14 +2406,15 @@ def lbfgsb_bmv(sy, wt, col, v):
 
 
 def lbfgsb_formt(wt, sy, ss, col, theta):
-    wt = jnp.asarray(wt, dtype=jnp.float64)
-    sy = jnp.asarray(sy, dtype=jnp.float64)
-    ss = jnp.asarray(ss, dtype=jnp.float64)
+    dtype = jnp.asarray(wt).dtype
+    wt = jnp.asarray(wt, dtype=dtype)
+    sy = jnp.asarray(sy, dtype=dtype)
+    ss = jnp.asarray(ss, dtype=dtype)
     col = jnp.asarray(col, dtype=jnp.int32)
-    theta = jnp.asarray(theta, dtype=jnp.float64)
+    theta = jnp.asarray(theta, dtype=dtype)
     m = int(wt.shape[0])
 
-    t_upper = jnp.zeros_like(wt, dtype=jnp.float64)
+    t_upper = jnp.zeros_like(wt, dtype=dtype)
     for j in range(m):
         active_j = j < col
         t_upper = t_upper.at[0, j].set(
@@ -2399,7 +2424,7 @@ def lbfgsb_formt(wt, sy, ss, col, theta):
         active_i = i < col
         for j in range(i, m):
             active_j = j < col
-            ddum = jnp.asarray(0.0, dtype=jnp.float64)
+            ddum = jnp.asarray(0.0, dtype=dtype)
             for k in range(i):
                 active_k = k < col
                 ddum = ddum + jnp.where(
@@ -2414,7 +2439,7 @@ def lbfgsb_formt(wt, sy, ss, col, theta):
     active = jnp.arange(m, dtype=jnp.int32) < col
     active_matrix = active[:, None] & active[None, :]
     t_matrix = t_upper + jnp.triu(t_upper, k=1).T
-    t_matrix = jnp.where(active_matrix, t_matrix, jnp.eye(m, dtype=jnp.float64))
+    t_matrix = jnp.where(active_matrix, t_matrix, jnp.eye(m, dtype=dtype))
     chol_upper = jnp.linalg.cholesky(t_matrix).T
     wt_next = jnp.where(jnp.triu(active_matrix), chol_upper, wt)
     finite = jnp.all(jnp.isfinite(chol_upper))
@@ -2450,12 +2475,13 @@ def lbfgsb_formk(
     indx2 = jnp.asarray(indx2, dtype=jnp.int32)
     iupdat = jnp.asarray(iupdat, dtype=jnp.int32)
     updatd = jnp.asarray(updatd, dtype=jnp.bool_)
-    wn = jnp.asarray(wn, dtype=jnp.float64)
-    wn1 = jnp.asarray(wn1, dtype=jnp.float64)
-    ws = jnp.asarray(ws, dtype=jnp.float64)
-    wy = jnp.asarray(wy, dtype=jnp.float64)
-    sy = jnp.asarray(sy, dtype=jnp.float64)
-    theta = jnp.asarray(theta, dtype=jnp.float64)
+    dtype = jnp.asarray(wn).dtype
+    wn = jnp.asarray(wn, dtype=dtype)
+    wn1 = jnp.asarray(wn1, dtype=dtype)
+    ws = jnp.asarray(ws, dtype=dtype)
+    wy = jnp.asarray(wy, dtype=dtype)
+    sy = jnp.asarray(sy, dtype=dtype)
+    theta = jnp.asarray(theta, dtype=dtype)
     col = jnp.asarray(col, dtype=jnp.int32)
     head = jnp.asarray(head, dtype=jnp.int32)
     m = int(ws.shape[0])
@@ -2484,9 +2510,9 @@ def lbfgsb_formk(
     block_row_new = jnp.maximum(is_new, 0)
     for jy in range(m):
         active_j = updatd & (jy < col)
-        temp1 = jnp.asarray(0.0, dtype=jnp.float64)
-        temp2 = jnp.asarray(0.0, dtype=jnp.float64)
-        temp3 = jnp.asarray(0.0, dtype=jnp.float64)
+        temp1 = jnp.asarray(0.0, dtype=dtype)
+        temp2 = jnp.asarray(0.0, dtype=dtype)
+        temp3 = jnp.asarray(0.0, dtype=dtype)
         for k in range(n):
             k1 = ind[k]
             free = k < nsub
@@ -2521,7 +2547,7 @@ def lbfgsb_formk(
     for i in range(m):
         active_i = updatd & (i < col)
         is_i = m + i
-        temp3 = jnp.asarray(0.0, dtype=jnp.float64)
+        temp3 = jnp.asarray(0.0, dtype=dtype)
         for k in range(n):
             k1 = ind[k]
             temp3 = temp3 + jnp.where(
@@ -2541,10 +2567,10 @@ def lbfgsb_formk(
         for jy in range(m):
             pair_active = active_iy & (jy <= iy)
             js = m + jy
-            temp1 = jnp.asarray(0.0, dtype=jnp.float64)
-            temp2 = jnp.asarray(0.0, dtype=jnp.float64)
-            temp3 = jnp.asarray(0.0, dtype=jnp.float64)
-            temp4 = jnp.asarray(0.0, dtype=jnp.float64)
+            temp1 = jnp.asarray(0.0, dtype=dtype)
+            temp2 = jnp.asarray(0.0, dtype=dtype)
+            temp3 = jnp.asarray(0.0, dtype=dtype)
+            temp4 = jnp.asarray(0.0, dtype=dtype)
             for k in range(n):
                 k1 = indx2[k]
                 entering = pair_active & (k < nenter)
@@ -2585,8 +2611,8 @@ def lbfgsb_formk(
         jpntr = head
         for jy in range(m):
             pair_active = active_is & (jy < upcl)
-            temp1 = jnp.asarray(0.0, dtype=jnp.float64)
-            temp3 = jnp.asarray(0.0, dtype=jnp.float64)
+            temp1 = jnp.asarray(0.0, dtype=dtype)
+            temp3 = jnp.asarray(0.0, dtype=dtype)
             for k in range(n):
                 k1 = indx2[k]
                 entering = pair_active & (k < nenter)
@@ -2632,13 +2658,13 @@ def lbfgsb_formk(
     active_matrix = active[:, None] & active[None, :]
     first_upper = jnp.triu(wn[:m, :m])
     first_matrix = first_upper + jnp.triu(first_upper, k=1).T
-    first_matrix = jnp.where(active_matrix, first_matrix, jnp.eye(m, dtype=jnp.float64))
+    first_matrix = jnp.where(active_matrix, first_matrix, jnp.eye(m, dtype=dtype))
     first_chol = jnp.linalg.cholesky(first_matrix).T
     first_finite = jnp.all(jnp.isfinite(jnp.where(active_matrix, first_chol, 0.0)))
     wn_first = jnp.where(jnp.triu(active_matrix) & first_finite, first_chol, wn[:m, :m])
     wn = wn.at[:m, :m].set(wn_first)
 
-    rhs = jnp.zeros((m, m), dtype=jnp.float64)
+    rhs = jnp.zeros((m, m), dtype=dtype)
     for j in range(m):
         source_col = col + j
         active_j = j < col
@@ -2673,7 +2699,7 @@ def lbfgsb_formk(
         for j in range(m):
             js_col = col + j
             active_j = active_i & (j >= i) & (j < col)
-            dot = jnp.asarray(0.0, dtype=jnp.float64)
+            dot = jnp.asarray(0.0, dtype=dtype)
             for k in range(m):
                 dot = dot + jnp.where(
                     (k < col) & first_finite,
@@ -2688,7 +2714,7 @@ def lbfgsb_formk(
                 )
             )
 
-    second_upper = jnp.zeros((m, m), dtype=jnp.float64)
+    second_upper = jnp.zeros((m, m), dtype=dtype)
     for i in range(m):
         source_row = col + i
         active_i = i < col
@@ -2700,7 +2726,7 @@ def lbfgsb_formk(
             )
     second_matrix = second_upper + jnp.triu(second_upper, k=1).T
     second_matrix = jnp.where(
-        active_matrix, second_matrix, jnp.eye(m, dtype=jnp.float64)
+        active_matrix, second_matrix, jnp.eye(m, dtype=dtype)
     )
     second_chol = jnp.linalg.cholesky(second_matrix).T
     second_finite = jnp.all(jnp.isfinite(jnp.where(active_matrix, second_chol, 0.0)))
@@ -2735,7 +2761,8 @@ def lbfgsb_formk(
 
 def lbfgsb_hpsolb(last, t, iorder, iheap):
     last = jnp.asarray(last, dtype=jnp.int32)
-    t = jnp.asarray(t, dtype=jnp.float64)
+    dtype = jnp.asarray(t).dtype
+    t = jnp.asarray(t, dtype=dtype)
     iorder = jnp.asarray(iorder, dtype=jnp.int32)
     iheap = jnp.asarray(iheap, dtype=jnp.int32)
     n_slots = int(t.shape[0])
@@ -2835,39 +2862,40 @@ def lbfgsb_cauchy(
     v,
     sbgnrm,
 ):
-    x = jnp.asarray(x, dtype=jnp.float64)
-    l = jnp.asarray(l, dtype=jnp.float64)
-    u = jnp.asarray(u, dtype=jnp.float64)
+    dtype = jnp.asarray(x).dtype
+    x = jnp.asarray(x, dtype=dtype)
+    l = jnp.asarray(l, dtype=dtype)
+    u = jnp.asarray(u, dtype=dtype)
     nbd = jnp.asarray(nbd, dtype=jnp.int32)
-    g = jnp.asarray(g, dtype=jnp.float64)
+    g = jnp.asarray(g, dtype=dtype)
     iorder = jnp.asarray(iorder, dtype=jnp.int32)
     iwhere = jnp.asarray(iwhere, dtype=jnp.int32)
-    t = jnp.asarray(t, dtype=jnp.float64)
-    d = jnp.asarray(d, dtype=jnp.float64)
-    xcp = jnp.asarray(xcp, dtype=jnp.float64)
-    wy = jnp.asarray(wy, dtype=jnp.float64)
-    ws = jnp.asarray(ws, dtype=jnp.float64)
-    sy = jnp.asarray(sy, dtype=jnp.float64)
-    wt = jnp.asarray(wt, dtype=jnp.float64)
-    theta = jnp.asarray(theta, dtype=jnp.float64)
+    t = jnp.asarray(t, dtype=dtype)
+    d = jnp.asarray(d, dtype=dtype)
+    xcp = jnp.asarray(xcp, dtype=dtype)
+    wy = jnp.asarray(wy, dtype=dtype)
+    ws = jnp.asarray(ws, dtype=dtype)
+    sy = jnp.asarray(sy, dtype=dtype)
+    wt = jnp.asarray(wt, dtype=dtype)
+    theta = jnp.asarray(theta, dtype=dtype)
     col = jnp.asarray(col, dtype=jnp.int32)
     head = jnp.asarray(head, dtype=jnp.int32)
-    p = jnp.asarray(p, dtype=jnp.float64)
-    c = jnp.asarray(c, dtype=jnp.float64)
-    wbp = jnp.asarray(wbp, dtype=jnp.float64)
-    v = jnp.asarray(v, dtype=jnp.float64)
-    sbgnrm = jnp.asarray(sbgnrm, dtype=jnp.float64)
+    p = jnp.asarray(p, dtype=dtype)
+    c = jnp.asarray(c, dtype=dtype)
+    wbp = jnp.asarray(wbp, dtype=dtype)
+    v = jnp.asarray(v, dtype=dtype)
+    sbgnrm = jnp.asarray(sbgnrm, dtype=dtype)
     n = int(x.shape[0])
     m = int(ws.shape[0])
     col2 = 2 * col
     active_col2 = jnp.arange(2 * m, dtype=jnp.int32) < col2
     has_gradient = sbgnrm > 0.0
 
-    f1 = jnp.asarray(0.0, dtype=jnp.float64)
+    f1 = jnp.asarray(0.0, dtype=dtype)
     nfree = jnp.asarray(n, dtype=jnp.int32)
     nbreak = jnp.asarray(-1, dtype=jnp.int32)
     ibkmin = jnp.asarray(0, dtype=jnp.int32)
-    bkmin = jnp.asarray(0.0, dtype=jnp.float64)
+    bkmin = jnp.asarray(0.0, dtype=dtype)
     bnded = jnp.asarray(True, dtype=jnp.bool_)
     for i in range(2 * m):
         p = p.at[i].set(jnp.where((i < col2) & has_gradient, 0.0, p[i]))
@@ -2959,7 +2987,7 @@ def lbfgsb_cauchy(
         f2,
     )
     dtm = -f1 / f2
-    tsum = jnp.asarray(0.0, dtype=jnp.float64)
+    tsum = jnp.asarray(0.0, dtype=dtype)
     nseg = jnp.asarray(1, dtype=jnp.int32)
     no_breakpoints = nbreak == -1
     skip_loop = (
@@ -2967,7 +2995,7 @@ def lbfgsb_cauchy(
     )
     nleft = nbreak
     iteration = jnp.asarray(0, dtype=jnp.int32)
-    tj = jnp.asarray(0.0, dtype=jnp.float64)
+    tj = jnp.asarray(0.0, dtype=dtype)
     done = skip_loop
     info = initial_info
 
@@ -3058,7 +3086,7 @@ def lbfgsb_cauchy(
             next_f2 + dibp * 2.0 * wmp - dibp2 * wmw,
             next_f2,
         )
-        next_f2 = jnp.maximum(jnp.finfo(jnp.float64).eps * f2_org, next_f2)
+        next_f2 = jnp.maximum(_lbfgsb_eps(dtype) * f2_org, next_f2)
         # jax-where-division-ok: next_f2 is clamped positive immediately above.
         next_dtm = jnp.where(
             next_nleft >= 0,
@@ -3129,17 +3157,18 @@ def lbfgsb_cmprlb(
     nfree,
     cnstnd,
 ):
-    x = jnp.asarray(x, dtype=jnp.float64)
-    g = jnp.asarray(g, dtype=jnp.float64)
-    ws = jnp.asarray(ws, dtype=jnp.float64)
-    wy = jnp.asarray(wy, dtype=jnp.float64)
-    sy = jnp.asarray(sy, dtype=jnp.float64)
-    wt = jnp.asarray(wt, dtype=jnp.float64)
-    z = jnp.asarray(z, dtype=jnp.float64)
-    r = jnp.asarray(r, dtype=jnp.float64)
-    wa = jnp.asarray(wa, dtype=jnp.float64)
+    dtype = jnp.asarray(x).dtype
+    x = jnp.asarray(x, dtype=dtype)
+    g = jnp.asarray(g, dtype=dtype)
+    ws = jnp.asarray(ws, dtype=dtype)
+    wy = jnp.asarray(wy, dtype=dtype)
+    sy = jnp.asarray(sy, dtype=dtype)
+    wt = jnp.asarray(wt, dtype=dtype)
+    z = jnp.asarray(z, dtype=dtype)
+    r = jnp.asarray(r, dtype=dtype)
+    wa = jnp.asarray(wa, dtype=dtype)
     index = jnp.asarray(index, dtype=jnp.int32)
-    theta = jnp.asarray(theta, dtype=jnp.float64)
+    theta = jnp.asarray(theta, dtype=dtype)
     col = jnp.asarray(col, dtype=jnp.int32)
     head = jnp.asarray(head, dtype=jnp.int32)
     nfree = jnp.asarray(nfree, dtype=jnp.int32)
@@ -3213,21 +3242,22 @@ def lbfgsb_subsm(
 ):
     nsub = jnp.asarray(nsub, dtype=jnp.int32)
     ind = jnp.asarray(ind, dtype=jnp.int32)
-    l = jnp.asarray(l, dtype=jnp.float64)
-    u = jnp.asarray(u, dtype=jnp.float64)
+    dtype = jnp.asarray(x).dtype
+    l = jnp.asarray(l, dtype=dtype)
+    u = jnp.asarray(u, dtype=dtype)
     nbd = jnp.asarray(nbd, dtype=jnp.int32)
-    x = jnp.asarray(x, dtype=jnp.float64)
-    d = jnp.asarray(d, dtype=jnp.float64)
-    xp = jnp.asarray(xp, dtype=jnp.float64)
-    ws = jnp.asarray(ws, dtype=jnp.float64)
-    wy = jnp.asarray(wy, dtype=jnp.float64)
-    theta = jnp.asarray(theta, dtype=jnp.float64)
-    xx = jnp.asarray(xx, dtype=jnp.float64)
-    gg = jnp.asarray(gg, dtype=jnp.float64)
+    x = jnp.asarray(x, dtype=dtype)
+    d = jnp.asarray(d, dtype=dtype)
+    xp = jnp.asarray(xp, dtype=dtype)
+    ws = jnp.asarray(ws, dtype=dtype)
+    wy = jnp.asarray(wy, dtype=dtype)
+    theta = jnp.asarray(theta, dtype=dtype)
+    xx = jnp.asarray(xx, dtype=dtype)
+    gg = jnp.asarray(gg, dtype=dtype)
     col = jnp.asarray(col, dtype=jnp.int32)
     head = jnp.asarray(head, dtype=jnp.int32)
-    wv = jnp.asarray(wv, dtype=jnp.float64)
-    wn = jnp.asarray(wn, dtype=jnp.float64)
+    wv = jnp.asarray(wv, dtype=dtype)
+    wn = jnp.asarray(wn, dtype=dtype)
     m = int(ws.shape[0])
     n = int(ws.shape[1])
     m2 = 2 * m
@@ -3238,8 +3268,8 @@ def lbfgsb_subsm(
     pointr = head
     for i in range(m):
         active_col = i < col
-        temp1 = jnp.asarray(0.0, dtype=jnp.float64)
-        temp2 = jnp.asarray(0.0, dtype=jnp.float64)
+        temp1 = jnp.asarray(0.0, dtype=dtype)
+        temp2 = jnp.asarray(0.0, dtype=dtype)
         for j in range(n):
             active_sub = j < nsub
             k = ind[j]
@@ -3259,7 +3289,7 @@ def lbfgsb_subsm(
 
     active = jnp.arange(m2, dtype=jnp.int32) < (2 * col)
     active_matrix = active[:, None] & active[None, :]
-    factor = jnp.where(active_matrix, jnp.triu(wn), jnp.eye(m2, dtype=jnp.float64))
+    factor = jnp.where(active_matrix, jnp.triu(wn), jnp.eye(m2, dtype=dtype))
     rhs = jnp.where(active, wv, 0.0)
     solved = jsp_linalg.solve_triangular(
         factor,
@@ -3340,8 +3370,8 @@ def lbfgsb_subsm(
     safeguard = valid & (iword == 1) & (dd_p > 0.0)
     safeguarded_x = xp
     safeguarded_d = d
-    alpha = jnp.asarray(1.0, dtype=jnp.float64)
-    temp1 = jnp.asarray(1.0, dtype=jnp.float64)
+    alpha = jnp.asarray(1.0, dtype=dtype)
+    temp1 = jnp.asarray(1.0, dtype=dtype)
     ibd = jnp.asarray(0, dtype=jnp.int32)
     for i in range(n):
         active_sub = safeguard & (i < nsub)
@@ -3456,24 +3486,25 @@ def lbfgsb_lnsrlb(
     temp_task,
     temp_task_msg,
 ):
-    l = jnp.asarray(l, dtype=jnp.float64)
-    u = jnp.asarray(u, dtype=jnp.float64)
+    dtype = jnp.asarray(x).dtype
+    l = jnp.asarray(l, dtype=dtype)
+    u = jnp.asarray(u, dtype=dtype)
     nbd = jnp.asarray(nbd, dtype=jnp.int32)
-    x = jnp.asarray(x, dtype=jnp.float64)
-    f = jnp.asarray(f, dtype=jnp.float64)
-    fold = jnp.asarray(fold, dtype=jnp.float64)
-    gd = jnp.asarray(gd, dtype=jnp.float64)
-    gdold = jnp.asarray(gdold, dtype=jnp.float64)
-    g = jnp.asarray(g, dtype=jnp.float64)
-    d = jnp.asarray(d, dtype=jnp.float64)
-    r = jnp.asarray(r, dtype=jnp.float64)
-    t = jnp.asarray(t, dtype=jnp.float64)
-    z = jnp.asarray(z, dtype=jnp.float64)
-    stp = jnp.asarray(stp, dtype=jnp.float64)
-    dnorm = jnp.asarray(dnorm, dtype=jnp.float64)
-    dtd = jnp.asarray(dtd, dtype=jnp.float64)
-    xstep = jnp.asarray(xstep, dtype=jnp.float64)
-    stpmx = jnp.asarray(stpmx, dtype=jnp.float64)
+    x = jnp.asarray(x, dtype=dtype)
+    f = jnp.asarray(f, dtype=dtype)
+    fold = jnp.asarray(fold, dtype=dtype)
+    gd = jnp.asarray(gd, dtype=dtype)
+    gdold = jnp.asarray(gdold, dtype=dtype)
+    g = jnp.asarray(g, dtype=dtype)
+    d = jnp.asarray(d, dtype=dtype)
+    r = jnp.asarray(r, dtype=dtype)
+    t = jnp.asarray(t, dtype=dtype)
+    z = jnp.asarray(z, dtype=dtype)
+    stp = jnp.asarray(stp, dtype=dtype)
+    dnorm = jnp.asarray(dnorm, dtype=dtype)
+    dtd = jnp.asarray(dtd, dtype=dtype)
+    xstep = jnp.asarray(xstep, dtype=dtype)
+    stpmx = jnp.asarray(stpmx, dtype=dtype)
     iteration = jnp.asarray(iteration, dtype=jnp.int32)
     ifun = jnp.asarray(ifun, dtype=jnp.int32)
     iback = jnp.asarray(iback, dtype=jnp.int32)
@@ -3484,7 +3515,7 @@ def lbfgsb_lnsrlb(
     boxed = jnp.asarray(boxed, dtype=jnp.bool_)
     cnstnd = jnp.asarray(cnstnd, dtype=jnp.bool_)
     isave = jnp.asarray(isave, dtype=jnp.int32)
-    dsave = jnp.asarray(dsave, dtype=jnp.float64)
+    dsave = jnp.asarray(dsave, dtype=dtype)
     temp_task = jnp.asarray(temp_task, dtype=jnp.int32)
     temp_task_msg = jnp.asarray(temp_task_msg, dtype=jnp.int32)
     n = int(x.shape[0])
@@ -3492,7 +3523,7 @@ def lbfgsb_lnsrlb(
     def setup_branch(_):
         next_dnorm = _lbfgsb_dnrm2(d)
         next_dtd = next_dnorm * next_dnorm
-        next_stpmx = jnp.asarray(1.0e10, dtype=jnp.float64)
+        next_stpmx = jnp.asarray(1.0e10, dtype=dtype)
 
         for i in range(n):
             direction_i = d[i]
@@ -3548,7 +3579,7 @@ def lbfgsb_lnsrlb(
             next_stp,
             next_dnorm,
             next_dtd,
-            jnp.asarray(0.0, dtype=jnp.float64),
+            jnp.asarray(0.0, dtype=dtype),
             next_stpmx,
             jnp.asarray(0, dtype=jnp.int32),
             jnp.asarray(0, dtype=jnp.int32),
