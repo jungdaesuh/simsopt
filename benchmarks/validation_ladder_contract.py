@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Union
+from typing import Mapping, Union
+
+from simsopt.geo._optimizer_backend_choices import (
+    VALID_OUTER_OPTIMIZER_BACKENDS,
+    render_invalid_optimizer_backend_message,
+)
 
 
 SHORT_RUN_SMOKE_MAXITER = 20
@@ -61,6 +66,20 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_same_state": True,
         "requires_direct_cpp_oracle": True,
         "documents_reduction_order_drift": True,
+    },
+    "float32_smoke": {
+        "rtol": 1e-5,
+        "atol": 1e-6,
+        "objective_rtol": 1e-4,
+        "objective_atol": 1e-6,
+        "gradient_rtol": 1e-3,
+        "gradient_atol": 1e-5,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "runtime_dtype_float32": True,
+        "smoke_only": True,
+        "production_parity": False,
+        "gradient_diagnostic_only": True,
     },
     "ls_wrapper_gradient": {
         "rtol": 1e-10,
@@ -377,6 +396,16 @@ def parity_ladder_tolerances(lane: str) -> dict[str, ParityToleranceValue]:
     return dict(PARITY_LADDER_TOLERANCES[lane_key])
 
 
+def comparison_failure_gates_verdict(entry: Mapping[str, object]) -> bool:
+    """Return whether a failed comparison should fail the fixture verdict."""
+    return entry.get("verdict") == "fail" and entry.get("diagnostic_only") is not True
+
+
+def comparison_failure_is_diagnostic(entry: Mapping[str, object]) -> bool:
+    """Return whether a failed comparison is recorded as diagnostic-only."""
+    return entry.get("verdict") == "fail" and entry.get("diagnostic_only") is True
+
+
 def grouped_adjoint_memory_budget(
     *,
     fixture: str,
@@ -541,23 +570,21 @@ def evaluate_tier5_performance_budget(
 
 def resolve_probe_lane(*, optimizer_backend: str | None = None) -> str:
     """Map benchmark/probe options to the intended lane label."""
-    if optimizer_backend not in {
-        None,
-        "scipy",
-        "ondevice",
-        "scipy-jax",
-        "scipy-jax-fullgraph",
-    }:
-        raise ValueError(
-            "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
-            "scipy-jax-fullgraph."
-        )
+    if (
+        optimizer_backend is not None
+        and optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS
+    ):
+        raise ValueError(render_invalid_optimizer_backend_message("outer"))
     if optimizer_backend == "ondevice":
         return "private-optimizer"
     if optimizer_backend == "scipy-jax":
         return "target-scipy-control"
     if optimizer_backend == "scipy-jax-fullgraph":
         return "target-scipy-fullgraph-control"
+    if optimizer_backend == "optax-lbfgs":
+        return "target-optax-lbfgs"
+    if optimizer_backend == "optimistix-lbfgs":
+        return "target-optimistix-lbfgs"
     return "trusted-public-reference"
 
 

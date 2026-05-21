@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 import simsopt.geo.optimizer_jax_reference as _opt_ref
 import simsopt.jax_core.biotsavart as _biotsavart_jax_core
+import simsopt.solve.jax._dispatch as _solve_jax_dispatch
 import scipy.linalg
 from jax.flatten_util import ravel_pytree
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
@@ -47,6 +48,14 @@ from simsopt.jax_core import (
 )
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.objectives.utilities import forward_backward
+from simsopt.solve.jax import (
+    Driver,
+    ScipyBFGSOptions,
+    ScipyLBFGSBOptions,
+    SimsoptAdamHostOptions,
+    SimsoptLBFGSBOptions,
+    minimize,
+)
 
 from .boozersurface_jax_test_helpers import (
     BoozerSurfaceJAX,
@@ -1254,7 +1263,12 @@ class TestOptimizerAdapter:
             return (1.0 - x[0]) ** 2 + 100.0 * (x[1] - x[0] ** 2) ** 2
 
         x0 = jnp.array([-1.0, 1.0])
-        result = jax_minimize(rosenbrock, x0, method="bfgs", tol=1e-8, maxiter=500)
+        result = minimize(
+            jax.value_and_grad(rosenbrock),
+            x0,
+            driver=Driver.SCIPY_BFGS,
+            options=ScipyBFGSOptions(maxiter=500, gtol=1e-8),
+        )
         assert result.success
         np.testing.assert_allclose(
             result.x,
@@ -1281,16 +1295,22 @@ class TestOptimizerAdapter:
                 njev=1,
                 success=True,
                 status=0,
+                message="ok",
             )
 
-        monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
-        jax_minimize(
-            lambda x: jnp.sum(x**2),
+        monkeypatch.setattr(_solve_jax_dispatch, "scipy_minimize", fake_scipy_minimize)
+        minimize(
+            jax.value_and_grad(lambda x: jnp.sum(x**2)),
             jnp.array([1.0, -2.0]),
-            method="lbfgs",
-            tol=1e-8,
-            maxiter=7,
-            options={"maxcor": 33, "ftol": 1e-12, "maxfun": 55, "maxls": 66},
+            driver=Driver.SCIPY_LBFGSB,
+            options=ScipyLBFGSBOptions(
+                maxiter=7,
+                gtol=1e-8,
+                maxcor=33,
+                ftol=1e-12,
+                maxfun=55,
+                maxls=66,
+            ),
         )
 
         assert captured["method"] == "L-BFGS-B"
@@ -1625,6 +1645,96 @@ class TestOptimizerAdapter:
                 jnp.array([1.0], dtype=jnp.float64),
                 method=method,
             )
+
+    @pytest.mark.parametrize(
+        (
+            "method",
+            "expected_backend",
+            "expected_driver",
+            "expected_options_type",
+            "expected_maxls",
+        ),
+        [
+            (
+                "optax-lbfgs-ondevice",
+                "optax-lbfgs",
+                _opt.Driver.OPTAX_LBFGS,
+                "OptaxLBFGSOptions",
+                9,
+            ),
+            (
+                "optimistix-lbfgs-ondevice",
+                "optimistix-lbfgs",
+                _opt.Driver.OPTIMISTIX_LBFGS,
+                "OptimistixLBFGSOptions",
+                None,
+            ),
+        ],
+    )
+    def test_target_public_lbfgs_routes_through_typed_jax_minimize(
+        self,
+        monkeypatch,
+        method,
+        expected_backend,
+        expected_driver,
+        expected_options_type,
+        expected_maxls,
+    ):
+        captured = {}
+
+        def fake_require_target_backend_x64(optimizer_backend):
+            captured["x64_backend"] = optimizer_backend
+
+        def fake_public_minimize(value_and_grad, x0, *, driver, options, callback):
+            value, grad = value_and_grad(x0)
+            captured["driver"] = driver
+            captured["options"] = options
+            captured["callback"] = callback
+            return types.SimpleNamespace(
+                x=np.asarray(x0, dtype=float),
+                fun=float(np.asarray(value)),
+                jac=np.asarray(grad, dtype=float),
+                nit=0,
+                nfev=1,
+                njev=1,
+                status=0,
+                success=True,
+                message="ok",
+                driver=driver,
+                options_used=options,
+                optimistix_result=None,
+                optimistix_result_message=None,
+            )
+
+        import simsopt.solve.jax as public_jax
+
+        monkeypatch.setattr(
+            _opt,
+            "require_target_backend_x64",
+            fake_require_target_backend_x64,
+        )
+        monkeypatch.setattr(public_jax, "minimize", fake_public_minimize)
+
+        def value_and_grad(x):
+            return jnp.sum((x - 1.0) ** 2), 2.0 * (x - 1.0)
+
+        result = _opt.target_minimize(
+            value_and_grad,
+            jnp.array([0.0, 2.0], dtype=jnp.float64),
+            method=method,
+            tol=1e-8,
+            maxiter=3,
+            options={"maxcor": 7, "ftol": 1e-12, "maxls": 9},
+            value_and_grad=True,
+        )
+
+        assert captured["x64_backend"] == expected_backend
+        assert captured["driver"] is expected_driver
+        assert type(captured["options"]).__name__ == expected_options_type
+        assert captured["options"].maxiter == 3
+        if expected_maxls is not None:
+            assert captured["options"].max_linesearch_steps == expected_maxls
+        assert result.message == "ok"
 
     def test_target_scipy_jax_fullstate_method_is_unsupported(self):
         with pytest.raises(ValueError, match="only supports target-lane methods"):
@@ -2246,7 +2356,12 @@ class TestNewtonPolishBoozer:
         obj = case["objective"]
 
         # BFGS first
-        bfgs_result = jax_minimize(obj, case["x"], method="bfgs", tol=1e-8, maxiter=200)
+        bfgs_result = minimize(
+            jax.value_and_grad(obj),
+            case["x"],
+            driver=Driver.SCIPY_BFGS,
+            options=ScipyBFGSOptions(maxiter=200, gtol=1e-8),
+        )
         bfgs_grad_norm = float(jnp.linalg.norm(jax.grad(obj)(bfgs_result.x)))
 
         # Newton polish
@@ -2296,8 +2411,11 @@ class TestLBFGSMethod:
         """L-BFGS-B reduces the Boozer penalty objective."""
         case = _build_penalty_problem()
         val_init = float(case["objective"](case["x"]))
-        result = jax_minimize(
-            case["objective"], case["x"], method="lbfgs", tol=1e-10, maxiter=200
+        result = minimize(
+            jax.value_and_grad(case["objective"]),
+            case["x"],
+            driver=Driver.SCIPY_LBFGSB,
+            options=ScipyLBFGSBOptions(maxiter=200, gtol=1e-10),
         )
         assert float(result.fun) < val_init
 
@@ -2621,6 +2739,79 @@ class TestBoozerSurfaceJAXClass:
         )
 
         assert booz.options["least_squares_algorithm"] == expected_algorithm
+
+    @pytest.mark.parametrize(
+        (
+            "inner_driver",
+            "expected_backend",
+            "expected_limited_memory",
+            "expected_algorithm",
+        ),
+        [
+            (Driver.SCIPY_BFGS, "scipy", False, "quasi-newton"),
+            (Driver.SCIPY_LBFGSB, "scipy", True, "quasi-newton"),
+            (Driver.SIMSOPT_BFGS, "ondevice", False, "quasi-newton"),
+            (Driver.SIMSOPT_LBFGSB, "ondevice", True, "quasi-newton"),
+            (Driver.SIMSOPT_LM_GMRES_HOST, "scipy", False, "lm"),
+            (Driver.SIMSOPT_LM_GMRES, "ondevice", False, "lm"),
+            (Driver.SIMSOPT_LM_QR, "ondevice", False, "lm-minpack"),
+            (Driver.OPTIMISTIX_LM, "ondevice", False, "optimistix-lm"),
+        ],
+    )
+    def test_instantiation_accepts_typed_inner_driver_option(
+        self,
+        inner_driver,
+        expected_backend,
+        expected_limited_memory,
+        expected_algorithm,
+    ):
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+            options={"inner_driver": inner_driver},
+        )
+
+        assert booz.options["optimizer_backend"] == expected_backend
+        assert booz.options["limited_memory"] is expected_limited_memory
+        assert booz.options["least_squares_algorithm"] == expected_algorithm
+        assert "inner_driver" not in booz.options
+
+    def test_instantiation_rejects_conflicting_inner_driver_options(self):
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        with pytest.raises(ValueError, match="inner_driver.*optimizer_backend"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+                options={
+                    "inner_driver": Driver.SIMSOPT_LM_GMRES,
+                    "optimizer_backend": "scipy",
+                },
+            )
+
+    def test_instantiation_rejects_non_boozer_inner_driver(self):
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        with pytest.raises(ValueError, match="inner_driver must be one of"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+                options={"inner_driver": Driver.SCIPY_LM},
+            )
 
     @pytest.mark.parametrize(
         ("optimizer_backend", "expected_materialize"),
@@ -3868,6 +4059,10 @@ class TestBoozerSurfaceJAXClass:
             ("scipy-jax", True, "lbfgs-scipy-jax"),
             ("scipy-jax-fullgraph", False, "lbfgs-scipy-jax-fullgraph"),
             ("scipy-jax-fullgraph", True, "lbfgs-scipy-jax-fullgraph"),
+            ("optax-lbfgs", False, "optax-lbfgs-ondevice"),
+            ("optax-lbfgs", True, "optax-lbfgs-ondevice"),
+            ("optimistix-lbfgs", False, "optimistix-lbfgs-ondevice"),
+            ("optimistix-lbfgs", True, "optimistix-lbfgs-ondevice"),
         ],
     )
     def test_resolve_ls_optimizer_method_contract(
@@ -3907,6 +4102,13 @@ class TestBoozerSurfaceJAXClass:
                 False,
                 "quasi-newton",
                 "lbfgs-scipy-jax-fullgraph",
+            ),
+            ("optax-lbfgs", False, "quasi-newton", "optax-lbfgs-ondevice"),
+            (
+                "optimistix-lbfgs",
+                False,
+                "quasi-newton",
+                "optimistix-lbfgs-ondevice",
             ),
             ("scipy", False, "lm", "lm"),
             ("scipy", False, "lm-minpack", "lm"),
@@ -3960,6 +4162,12 @@ class TestBoozerSurfaceJAXClass:
             ("scipy-jax-fullgraph", "lm"),
             ("scipy-jax-fullgraph", "lm-minpack"),
             ("scipy-jax-fullgraph", "optimistix-lm"),
+            ("optax-lbfgs", "lm"),
+            ("optax-lbfgs", "lm-minpack"),
+            ("optax-lbfgs", "optimistix-lm"),
+            ("optimistix-lbfgs", "lm"),
+            ("optimistix-lbfgs", "lm-minpack"),
+            ("optimistix-lbfgs", "optimistix-lm"),
         ],
     )
     def test_resolve_least_squares_optimizer_method_rejects_scipy_control_lm(
@@ -3980,7 +4188,13 @@ class TestBoozerSurfaceJAXClass:
 
     @pytest.mark.parametrize(
         "optimizer_backend",
-        ["ondevice", "scipy-jax", "scipy-jax-fullgraph"],
+        [
+            "ondevice",
+            "scipy-jax",
+            "scipy-jax-fullgraph",
+            "optax-lbfgs",
+            "optimistix-lbfgs",
+        ],
     )
     def test_require_target_backend_x64_rejects_disabled_float64(
         self, monkeypatch, optimizer_backend
@@ -5007,14 +5221,15 @@ class TestBoozerSurfaceJAXClass:
             diff = x - target
             return 0.5 * float(np.dot(diff, diff)), diff
 
-        result = jax_minimize(
+        result = minimize(
             objective_value_and_grad,
             np.asarray([5.0, 3.0], dtype=float),
-            method="adam",
-            maxiter=800,
-            tol=1e-8,
-            value_and_grad=True,
-            options={"step_size": 0.1},
+            driver=Driver.SIMSOPT_ADAM_HOST,
+            options=SimsoptAdamHostOptions(
+                maxiter=800,
+                gtol=1e-8,
+                learning_rate=0.1,
+            ),
         )
 
         assert result.success is True
@@ -5173,11 +5388,11 @@ class TestBoozerSurfaceJAXClass:
             return 0.5 * jnp.dot(diff, diff), diff
 
         enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
-        result = jax_minimize(
+        result = minimize(
             objective_value_and_grad,
             x0,
-            method="lbfgs-ondevice",
-            value_and_grad=True,
+            driver=Driver.SIMSOPT_LBFGSB,
+            options=SimsoptLBFGSBOptions(maxiter=5),
         )
 
         assert result.success is True
@@ -8697,12 +8912,11 @@ class TestParametrizedBFGSConvergence:
     def test_bfgs_reduces_objective(self, stellsym, optimize_G):
         case = _build_penalty_problem(stellsym=stellsym, optimize_G=optimize_G)
         val_init = float(case["objective"](case["x"]))
-        result = jax_minimize(
-            case["objective"],
+        result = minimize(
+            jax.value_and_grad(case["objective"]),
             case["x"],
-            method="bfgs",
-            tol=1e-10,
-            maxiter=200,
+            driver=Driver.SCIPY_BFGS,
+            options=ScipyBFGSOptions(maxiter=200, gtol=1e-10),
         )
         val_final = float(result.fun)
         assert val_final < val_init, (

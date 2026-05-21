@@ -100,8 +100,15 @@ SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
 TARGET_OPTIMIZER_BACKEND = DEFAULT_OPTIMIZER_BACKEND
 SCIPY_JAX_OPTIMIZER_BACKEND = "scipy-jax"
 SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND = "scipy-jax-fullgraph"
-TARGET_OPTIMIZER_BACKENDS = (
+OPTAX_LBFGS_OPTIMIZER_BACKEND = "optax-lbfgs"
+OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND = "optimistix-lbfgs"
+TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS = (
     TARGET_OPTIMIZER_BACKEND,
+    OPTAX_LBFGS_OPTIMIZER_BACKEND,
+    OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND,
+)
+TARGET_OPTIMIZER_BACKENDS = (
+    *TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS,
     SCIPY_JAX_OPTIMIZER_BACKEND,
     SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND,
 )
@@ -123,6 +130,8 @@ _TARGET_OPTIMIZER_METHOD_BY_BACKEND = {
     TARGET_OPTIMIZER_BACKEND: _TARGET_OUTER_OPTIMIZER_METHOD,
     SCIPY_JAX_OPTIMIZER_BACKEND: "lbfgs-scipy-jax",
     SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND: "lbfgs-scipy-jax-fullgraph",
+    OPTAX_LBFGS_OPTIMIZER_BACKEND: "optax-lbfgs-ondevice",
+    OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND: "optimistix-lbfgs-ondevice",
 }
 _TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON = (
     "compile diagnostics are disabled when Phase 1 host-callback diagnostics "
@@ -365,9 +374,10 @@ def parse_args() -> argparse.Namespace:
         choices=TARGET_OPTIMIZER_BACKENDS,
         default=TARGET_OPTIMIZER_BACKEND,
         help=(
-            "JAX outer optimizer backend for the init probe. Use "
-            "scipy-jax-fullgraph for CPU/SciPy-compatible host control over "
-            "the full JAX value/grad graph."
+            "JAX outer optimizer backend for the init probe. Use optax-lbfgs "
+            "or optimistix-lbfgs for public JAX L-BFGS target-lane parity, "
+            "and scipy-jax-fullgraph for CPU/SciPy-compatible host control "
+            "over the full JAX value/grad graph."
         ),
     )
     parser.add_argument(
@@ -480,7 +490,7 @@ def _resolve_target_lane_sync_policy(
 ) -> str:
     if backend != "jax":
         return _TARGET_LANE_PER_ACCEPT_SYNC
-    if args.optimizer_backend != TARGET_OPTIMIZER_BACKEND:
+    if args.optimizer_backend not in TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS:
         return _TARGET_LANE_PER_ACCEPT_SYNC
     if int(args.maxiter) <= 0:
         return _TARGET_LANE_PER_ACCEPT_SYNC
@@ -903,8 +913,18 @@ def _run_single_stage_case(
             ),
         }
         if load_surface_gamma:
-            surf_json = find_single_file(resolved_root, "surf_init.json")
-            payload["surface_gamma"] = _load_surface_gamma_artifact(str(surf_json))
+            if backend == "jax":
+                runtime_spec_json = find_single_file(
+                    resolved_root,
+                    "single_stage_jax_runtime_spec.json",
+                )
+                payload["surface_gamma"] = _load_surface_gamma_runtime_spec(
+                    str(runtime_spec_json),
+                    args,
+                )
+            else:
+                surf_json = find_single_file(resolved_root, "surf_init.json")
+                payload["surface_gamma"] = _load_surface_gamma_artifact(str(surf_json))
         return payload
 
 
@@ -1110,6 +1130,54 @@ def _load_surface_gamma_artifact(surface_json_path: str) -> np.ndarray:
 
     surface = load(surface_json_path)
     return np.asarray(surface.gamma(), dtype=float)
+
+
+def _load_surface_gamma_runtime_spec(
+    runtime_spec_path: str,
+    args: argparse.Namespace,
+) -> np.ndarray:
+    from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+
+    payload = load_json(runtime_spec_path)
+    surface_payload = payload["surface"]
+    _require_runtime_spec_surface_grid(surface_payload, args)
+    surface = SurfaceXYZTensorFourier(
+        nfp=int(surface_payload["nfp"]),
+        stellsym=bool(surface_payload["stellsym"]),
+        mpol=int(surface_payload["mpol"]),
+        ntor=int(surface_payload["ntor"]),
+        quadpoints_phi=_runtime_spec_array(surface_payload["quadpoints_phi"]),
+        quadpoints_theta=_runtime_spec_array(surface_payload["quadpoints_theta"]),
+    )
+    surface.x = _runtime_spec_array(surface_payload["dofs"])
+    return np.asarray(surface.gamma(), dtype=float)
+
+
+def _runtime_spec_array(payload: dict[str, Any]) -> np.ndarray:
+    return np.asarray(payload["data"], dtype=float).reshape(tuple(payload["shape"]))
+
+
+def _require_runtime_spec_surface_grid(
+    surface_payload: dict[str, Any],
+    args: argparse.Namespace,
+) -> None:
+    observed = {
+        "mpol": int(surface_payload["mpol"]),
+        "ntor": int(surface_payload["ntor"]),
+        "nphi": int(np.prod(surface_payload["quadpoints_phi"]["shape"])),
+        "ntheta": int(np.prod(surface_payload["quadpoints_theta"]["shape"])),
+    }
+    expected = {
+        "mpol": int(args.mpol),
+        "ntor": int(args.ntor),
+        "nphi": int(args.nphi),
+        "ntheta": int(args.ntheta),
+    }
+    if observed != expected:
+        raise ValueError(
+            "JAX runtime surface geometry grid does not match this parity run: "
+            f"observed={observed}, expected={expected}."
+        )
 
 
 def _display_path(path: Path) -> str:

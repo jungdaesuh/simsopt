@@ -34,6 +34,7 @@ from conftest import (
 import numpy as np
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt.geo.optimizer_jax import render_invalid_optimizer_backend_message
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE2_SCRIPT = (
@@ -52,12 +53,11 @@ _EQUILIBRIA_PATHS_MODULE = (
 _STAGE2_EQUILIBRIUM_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
 _TARGET_BACKEND_REQUIREMENT = (
     "the Stage 2 outer loop with backend='jax' requires "
-    "optimizer_backend='ondevice', optimizer_backend='scipy-jax', or "
-    "optimizer_backend='scipy-jax-fullgraph'"
+    "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
+    "optimizer_backend='scipy-jax-fullgraph', optimizer_backend='optax-lbfgs', "
+    "or optimizer_backend='optimistix-lbfgs'"
 )
-_OPTIMIZER_BACKEND_CHOICES = (
-    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, scipy-jax-fullgraph."
-)
+_OPTIMIZER_BACKEND_CHOICES = render_invalid_optimizer_backend_message("outer")
 
 
 @lru_cache(maxsize=1)
@@ -151,7 +151,7 @@ from simsopt.objectives.stage2_target_objective_jax import (
 )
 
 WARM_TIMING_REFERENCE_LANE_ERROR = (
-    "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
+    "--record-warm-timings is only supported on the JAX Stage 2 target lane."
 )
 WARM_TIMING_NO_OPTIMIZATION_ERROR = (
     "--record-warm-timings requires an actual Stage 2 optimization run and "
@@ -3370,6 +3370,13 @@ class TestStage2OptimizerContract:
             ("jax", "ondevice", "quasi-newton", "lbfgs-ondevice"),
             ("jax", "ondevice", "lm", "lm-ondevice"),
             ("jax", "scipy-jax", "quasi-newton", "lbfgs-scipy-jax"),
+            ("jax", "optax-lbfgs", "quasi-newton", "optax-lbfgs-ondevice"),
+            (
+                "jax",
+                "optimistix-lbfgs",
+                "quasi-newton",
+                "optimistix-lbfgs-ondevice",
+            ),
             (
                 "jax",
                 "scipy-jax-fullgraph",
@@ -3434,6 +3441,7 @@ class TestStage2OptimizerContract:
         )
 
         stage2_script = _load_stage2_script_module()
+        alm_utils_module = _fresh_import("alm_utils")
 
         assert (
             stage2_script.resolve_stage2_alm_inner_optimizer_contract("cpu", "scipy")
@@ -3463,11 +3471,45 @@ class TestStage2OptimizerContract:
             fullgraph_contract.objective_route
             == TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
         )
+        optax_contract = stage2_script.resolve_stage2_alm_inner_optimizer_contract(
+            "jax",
+            "optax-lbfgs",
+        )
+        assert isinstance(optax_contract, TargetOptimizerContract)
+        assert optax_contract.driver == Driver.OPTAX_LBFGS
+        assert optax_contract.objective_route == TargetObjectiveRoute.ARRAY_NATIVE
+        optax_method, optax_optimizer = (
+            alm_utils_module._resolve_target_inner_optimizer(optax_contract)
+        )
+        assert optax_method == "optax-lbfgs-ondevice"
+        assert optax_optimizer is alm_utils_module.target_minimize
+        optimistix_contract = stage2_script.resolve_stage2_alm_inner_optimizer_contract(
+            "jax",
+            "optimistix-lbfgs",
+        )
+        assert isinstance(optimistix_contract, TargetOptimizerContract)
+        assert optimistix_contract.driver == Driver.OPTIMISTIX_LBFGS
+        assert optimistix_contract.objective_route == TargetObjectiveRoute.ARRAY_NATIVE
+        (
+            optimistix_method,
+            optimistix_optimizer,
+        ) = alm_utils_module._resolve_target_inner_optimizer(optimistix_contract)
+        assert optimistix_method == "optimistix-lbfgs-ondevice"
+        assert optimistix_optimizer is alm_utils_module.target_minimize
         with pytest.raises(
             ValueError,
             match=_TARGET_BACKEND_REQUIREMENT,
         ):
             stage2_script.resolve_stage2_alm_inner_optimizer_contract("jax", "scipy")
+        with pytest.raises(
+            ValueError,
+            match="only supports least_squares_algorithm='quasi-newton'",
+        ):
+            stage2_script.resolve_stage2_alm_inner_optimizer_contract(
+                "jax",
+                "ondevice",
+                least_squares_algorithm="lm",
+            )
 
     @pytest.mark.parametrize(
         ("field_backend", "optimizer_backend", "least_squares_algorithm", "expected"),
@@ -3477,6 +3519,8 @@ class TestStage2OptimizerContract:
             ("jax", "ondevice", "lm", True),
             ("jax", "scipy-jax", "quasi-newton", True),
             ("jax", "scipy-jax-fullgraph", "quasi-newton", True),
+            ("jax", "optax-lbfgs", "quasi-newton", True),
+            ("jax", "optimistix-lbfgs", "quasi-newton", True),
         ],
     )
     def test_target_objective_bundle_is_built_only_for_target_lane(
@@ -3603,6 +3647,28 @@ class TestStage2OptimizerContract:
                 False,
             ),
             (
+                "jax",
+                "optax-lbfgs",
+                "quasi-newton",
+                False,
+                "probe.json",
+                True,
+                True,
+                True,
+                False,
+            ),
+            (
+                "jax",
+                "optimistix-lbfgs",
+                "quasi-newton",
+                False,
+                "probe.json",
+                True,
+                True,
+                True,
+                False,
+            ),
+            (
                 "cpu",
                 "ondevice",
                 "quasi-newton",
@@ -3671,8 +3737,6 @@ class TestStage2OptimizerContract:
         self,
         monkeypatch,
     ):
-        optimizer_jax = _fresh_import("simsopt.geo.optimizer_jax")
-
         stage2_script = _load_stage2_script_module()
 
         cpu_scipy_captured = {}
@@ -3706,7 +3770,7 @@ class TestStage2OptimizerContract:
             )
 
         monkeypatch.setattr(
-            optimizer_jax,
+            stage2_script,
             "reference_minimize",
             fake_reference_minimize,
         )
@@ -3764,7 +3828,7 @@ class TestStage2OptimizerContract:
             )
 
         monkeypatch.setattr(
-            optimizer_jax,
+            stage2_script,
             "target_minimize",
             fake_target_minimize,
         )
@@ -3806,7 +3870,6 @@ class TestStage2OptimizerContract:
     ):
         stage2_script = _load_stage2_script_module()
         alm_utils_module = _fresh_import("alm_utils")
-        optimizer_jax = _fresh_import("simsopt.geo.optimizer_jax")
         calls = {"target": 0, "scipy": 0}
 
         def forbidden_scipy_minimize(*_args, **_kwargs):
@@ -3845,8 +3908,16 @@ class TestStage2OptimizerContract:
                 message="maximum iterations reached",
             )
 
-        monkeypatch.setattr(alm_utils_module, "minimize", forbidden_scipy_minimize)
-        monkeypatch.setattr(optimizer_jax, "target_minimize", fake_target_minimize)
+        monkeypatch.setitem(
+            stage2_script.minimize_alm.__globals__,
+            "minimize",
+            forbidden_scipy_minimize,
+        )
+        monkeypatch.setitem(
+            stage2_script.minimize_alm.__globals__,
+            "target_minimize",
+            fake_target_minimize,
+        )
 
         constraint_names = ["coil_length_upper_bound"]
         settings = alm_utils_module.ALMSettings(
@@ -5609,9 +5680,8 @@ class TestStage2OptimizerContract:
                 message="ok",
             )
 
-        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
         monkeypatch.setattr(
-            optimizer_jax_module,
+            stage2_script,
             "target_minimize",
             fake_target_minimize,
         )
@@ -5701,9 +5771,8 @@ class TestStage2OptimizerContract:
                 message="ok",
             )
 
-        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
         monkeypatch.setattr(
-            optimizer_jax_module,
+            stage2_script,
             "target_least_squares",
             fake_target_least_squares,
         )
@@ -5752,13 +5821,12 @@ class TestStage2OptimizerContract:
         monkeypatch,
     ):
         stage2_script = _load_stage2_script_module()
-        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
 
         def fake_target_least_squares(*args, **kwargs):
             raise AssertionError("target_least_squares should not run")
 
         monkeypatch.setattr(
-            optimizer_jax_module,
+            stage2_script,
             "target_least_squares",
             fake_target_least_squares,
         )
@@ -5822,9 +5890,8 @@ class TestStage2OptimizerContract:
                 message="maximum iterations reached",
             )
 
-        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
         monkeypatch.setattr(
-            optimizer_jax_module,
+            stage2_script,
             "target_minimize",
             fake_target_minimize,
         )
@@ -5913,9 +5980,8 @@ class TestStage2OptimizerContract:
                 message="ok",
             )
 
-        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
         monkeypatch.setattr(
-            optimizer_jax_module,
+            stage2_script,
             "reference_minimize",
             fake_reference_minimize,
         )
@@ -5952,13 +6018,11 @@ class TestStage2OptimizerContract:
     ):
         stage2_script = _load_stage2_script_module()
 
-        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
-
         def fake_reference_minimize(*args, **kwargs):
             raise AssertionError("reference_minimize should not run")
 
         monkeypatch.setattr(
-            optimizer_jax_module,
+            stage2_script,
             "reference_minimize",
             fake_reference_minimize,
         )
@@ -5987,6 +6051,8 @@ class TestStage2OptimizerContract:
             ("scipy", "explicit-composite"),
             ("ondevice", "target-objective"),
             ("scipy-jax", "target-objective"),
+            ("optax-lbfgs", "target-objective"),
+            ("optimistix-lbfgs", "target-objective"),
         ],
     )
     def test_stage2_probe_payload_uses_lane_ssot_objective_source(
@@ -6075,6 +6141,12 @@ class TestStage2OptimizerContract:
                 },
             },
         )
+        target_objective_backends = {
+            "ondevice",
+            "scipy-jax",
+            "optax-lbfgs",
+            "optimistix-lbfgs",
+        }
         expected_self_intersection = {
             "min_distance": 0.25,
             "tolerance": 0.05,
@@ -6108,7 +6180,7 @@ class TestStage2OptimizerContract:
             self_intersection_summary=expected_self_intersection,
             target_objective_bundle=(
                 target_objective_bundle
-                if optimizer_backend in {"ondevice", "scipy-jax"}
+                if optimizer_backend in target_objective_backends
                 else None
             ),
         )
@@ -6134,7 +6206,7 @@ class TestStage2OptimizerContract:
         assert payload["curvature_within_threshold"] is True
         assert payload["curvature_margin"] == pytest.approx(22.0)
         assert payload["self_intersection"] == expected_self_intersection
-        if optimizer_backend in {"ondevice", "scipy-jax"}:
+        if optimizer_backend in target_objective_backends:
             assert payload["composite"]["J"] == pytest.approx(float(expected_value))
             np.testing.assert_allclose(
                 np.asarray(payload["composite"]["dJ"], dtype=float),

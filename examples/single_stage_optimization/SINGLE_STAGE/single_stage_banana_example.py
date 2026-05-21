@@ -42,6 +42,8 @@ from jax.experimental import io_callback
 import jax.numpy as jnp
 import jaxlib
 import numpy as np
+import optax
+import optimistix.compat as optimistix_compat
 
 bootstrap_local_simsopt(SRC_ROOT)
 
@@ -83,7 +85,7 @@ from banana_opt.single_stage_objectives import evaluate_alm_objective
 # SIMSOPT imports
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable, load
-from simsopt.backend import get_tolerance_tier
+from simsopt.backend import get_backend_policy, get_tolerance_tier
 from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.field import BiotSavart
 from simsopt.jax_core._math_utils import (
@@ -107,6 +109,21 @@ from simsopt.geo.curveobjectives import (
     CurveCurveDistance,
     CurveSurfaceDistance,
     pairwise_min_distance_pure,
+)
+from simsopt.geo.optimizer_jax import (
+    Driver,
+    ReferenceOptimizerContract,
+    TargetObjectiveRoute,
+    TargetOptimizerContract,
+    _mark_cacheable_jit_value_and_grad,
+    reference_driver_method,
+    reference_minimize,
+    require_target_backend_x64,
+    resolve_boozer_inner_driver,
+    resolve_reference_outer_loop_optimizer_contract,
+    resolve_target_outer_loop_optimizer_contract,
+    target_driver_method,
+    target_minimize,
 )
 import simsopt.geo.surface as surface_module
 from simsopt.geo.surface_fourier_jax import (
@@ -167,7 +184,16 @@ CURVATURE_THRESHOLD_FLOOR = 20.0
 CURVATURE_THRESHOLD_CEILING = MAX_CURVATURE_INV_M
 TARGET_LANE_ACCEPTED_STEP_SYNC_CHOICES = ("per-accept", "final-only")
 TARGET_LANE_ACCEPTED_STEP_SYNC_DEFAULT = "final-only"
-_JAX_TARGET_OUTER_OPTIMIZER_BACKENDS = frozenset({"ondevice", "scipy-jax"})
+_JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS = frozenset(
+    {"optax-lbfgs", "optimistix-lbfgs"}
+)
+_JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS = (
+    frozenset({"ondevice"}) | _JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
+)
+_JAX_TARGET_OUTER_OPTIMIZER_BACKENDS = (
+    frozenset({"ondevice", "scipy-jax"})
+    | _JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
+)
 _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND = "scipy-jax-fullgraph"
 _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD = "lbfgs-scipy-jax-fullgraph"
 _JAX_ONDEVICE_BOOZER_OUTER_OPTIMIZER_BACKENDS = _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS
@@ -1623,8 +1649,6 @@ def build_single_stage_full_graph_host_callback_value_and_grad(
     optimizer_dofs,
 ):
     """Bridge full-graph ``JF.x`` value/grad into the jitted L-BFGS-B driver."""
-    from simsopt.geo.optimizer_jax import _mark_cacheable_jit_value_and_grad
-
     host_template = _single_stage_optimizer_dofs_array(optimizer_dofs).reshape(-1)
     host_dtype = runtime_np_dtype()
     value_spec = jax.ShapeDtypeStruct((), jnp.dtype(host_dtype))
@@ -1774,6 +1798,8 @@ def should_record_single_stage_outer_optimizer_progress(
             "lbfgs-trace",
             "lbfgs-scipy-jax",
             _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD,
+            "optax-lbfgs-ondevice",
+            "optimistix-lbfgs-ondevice",
         }
     )
 
@@ -2886,7 +2912,7 @@ def resolve_single_stage_policy_initial_phase_settings(
 ):
     """Auto-enable a conservative scaled phase only when the caller left defaults.
 
-    The JAX/ondevice target lane keeps the scaled initial phase as an explicit
+    The JAX target L-BFGS lanes keep the scaled initial phase as an explicit
     opt-in only. That path creates a second compiled outer-optimizer objective
     boundary, which is useful for diagnosis but too expensive for the default
     reduced single-stage proof/runtime lane.
@@ -2903,7 +2929,10 @@ def resolve_single_stage_policy_initial_phase_settings(
             "initial_step_maxiter": int(initial_step_maxiter),
             "auto_enabled": False,
         }
-    if field_backend == "jax" and optimizer_backend == "ondevice":
+    if (
+        field_backend == "jax"
+        and optimizer_backend in _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS
+    ):
         return {
             "initial_step_scale": float(initial_step_scale),
             "initial_step_maxiter": int(initial_step_maxiter),
@@ -4313,7 +4342,14 @@ def parse_args():
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=["scipy", "ondevice", "scipy-jax", "scipy-jax-fullgraph"],
+        choices=[
+            "scipy",
+            "ondevice",
+            "scipy-jax",
+            "scipy-jax-fullgraph",
+            "optax-lbfgs",
+            "optimistix-lbfgs",
+        ],
         default=os.environ.get("OPTIMIZER_BACKEND"),
         help=(
             "JAX outer single-stage optimizer backend. Recorded in the run "
@@ -4321,9 +4357,11 @@ def parse_args():
             "'scipy-jax' keeps SciPy L-BFGS-B control while evaluating the "
             "JAX target-lane value/grad. 'scipy-jax-fullgraph' keeps SciPy "
             "L-BFGS-B control over the full CPU-order Optimizable graph vector "
-            "while evaluating JAX wrapper value/grad. Defaults to 'ondevice' on "
-            "the JAX backend and 'scipy' on the CPU/reference backend when no "
-            "explicit override is provided."
+            "while evaluating JAX wrapper value/grad. 'optax-lbfgs' and "
+            "'optimistix-lbfgs' run public JAX L-BFGS drivers on the same "
+            "target-lane scalar objective as 'ondevice'. Defaults to "
+            "'ondevice' on the JAX backend and 'scipy' on the CPU/reference "
+            "backend when no explicit override is provided."
         ),
     )
     parser.add_argument(
@@ -4997,13 +5035,17 @@ def initialize_boozer_surface(
                 "ondevice",
                 optimizer_backend,
             )
-            options["optimizer_backend"] = resolved_optimizer_backend
+            options["inner_driver"] = resolve_single_stage_boozer_inner_driver(
+                backend,
+                "ondevice",
+                resolved_optimizer_backend,
+                boozer_least_squares_algorithm,
+                boozer_limited_memory,
+            )
             if resolved_optimizer_backend == "ondevice":
                 if boozer_limited_memory:
                     options["force_ondevice_limited_memory"] = True
                     options["materialize_dense_linearization"] = False
-            if boozer_least_squares_algorithm is not None:
-                options["least_squares_algorithm"] = boozer_least_squares_algorithm
             if bfgs_tol_override is not None:
                 options["bfgs_tol"] = float(bfgs_tol_override)
             if bfgs_maxiter_override is not None:
@@ -5892,8 +5934,6 @@ def build_single_stage_target_lane_self_intersection_success_filter(
     bs,
 ):
     """Build a pure-JAX self-intersection rejector for the native ALM lane."""
-    import jax.numpy as jnp
-
     from simsopt.jax_core.field import coil_set_spec_from_dof_extraction_spec
 
     supported_inputs = _supported_surface_self_intersection_inputs(
@@ -6466,8 +6506,6 @@ def build_single_stage_target_lane_hardware_success_filter(
     curvature_threshold,
 ):
     """Build the pure-JAX feasibility filter for the ondevice target lane."""
-    import jax.numpy as jnp
-
     from simsopt.geo.curve import kappa_pure
     from simsopt.geo.boozer_residual_jax import _surface_geometry_from_dofs
     from simsopt.jax_core.curve_geometry import (
@@ -7012,8 +7050,6 @@ def build_target_lane_optimistix_diagnosis(
     gtol,
 ):
     """Run Optimistix BFGS on the target-lane scalar objective."""
-    import optimistix.compat as optimistix_compat
-
     x0 = np.asarray(host_array(dofs), dtype=np.float64).reshape(-1)
     initial_value, initial_grad = jax.value_and_grad(scalar_fun)(
         jnp.asarray(x0, dtype=jnp.float64)
@@ -7091,8 +7127,6 @@ def build_target_lane_optax_diagnosis(
     max_linesearch_steps,
 ):
     """Run Optax L-BFGS on the target-lane scalar objective."""
-    import optax
-
     x0 = np.asarray(host_array(dofs), dtype=np.float64).reshape(-1)
 
     def value_fn(params):
@@ -7286,7 +7320,7 @@ def build_target_lane_scaled_phase1_diagnosis(
             completed_stage_records
         )
         payload = {
-            "contract_method": contract.method,
+            "contract_method": single_stage_optimizer_contract_method(contract),
             "callback_enabled": bool(callback is not None),
             "step_scale": float(step_scale),
             "phase1_maxiter": int(phase1_maxiter),
@@ -7597,8 +7631,10 @@ def resolve_boozer_optimizer_backend(
         raise ValueError(
             "Single-stage JAX backend with optimizer_backend='scipy' is "
             "CPU/reference-only; use optimizer_backend='ondevice', "
-            "optimizer_backend='scipy-jax', or "
-            "optimizer_backend='scipy-jax-fullgraph'. For the JAX target lane, "
+            "optimizer_backend='scipy-jax', "
+            "optimizer_backend='scipy-jax-fullgraph', "
+            "optimizer_backend='optax-lbfgs', or "
+            "optimizer_backend='optimistix-lbfgs'. For the JAX target lane, "
             "select boozer_optimizer_backend='ondevice'."
         )
     if boozer_optimizer_backend is None:
@@ -7669,6 +7705,36 @@ def resolve_single_stage_boozer_limited_memory(
     return False
 
 
+def resolve_single_stage_boozer_inner_driver(
+    field_backend,
+    optimizer_backend,
+    boozer_optimizer_backend=None,
+    boozer_least_squares_algorithm=None,
+    boozer_limited_memory=False,
+):
+    """Resolve the typed inner Boozer driver from the CLI compatibility knobs."""
+    if field_backend != "jax":
+        return None
+    resolved_boozer_backend = resolve_boozer_optimizer_backend(
+        field_backend,
+        optimizer_backend,
+        boozer_optimizer_backend,
+    )
+    resolved_least_squares_algorithm = (
+        resolve_single_stage_default_boozer_least_squares_algorithm(
+            field_backend,
+            optimizer_backend,
+            resolved_boozer_backend,
+            boozer_least_squares_algorithm,
+        )
+    )
+    return resolve_boozer_inner_driver(
+        resolved_boozer_backend,
+        limited_memory=bool(boozer_limited_memory),
+        least_squares_algorithm=resolved_least_squares_algorithm,
+    )
+
+
 def resolve_single_stage_default_optimizer_backend(
     field_backend,
     optimizer_backend=None,
@@ -7702,9 +7768,16 @@ def resolve_single_stage_outer_maxls(
         and _is_float32_smoke_tolerance_tier(tolerance_tier)
     ):
         resolved = _TARGET_OUTER_MAXLS_FLOAT32_SMOKE_DEFAULT
-    elif benchmark_mode and field_backend == "jax" and optimizer_backend == "ondevice":
+    elif (
+        benchmark_mode
+        and field_backend == "jax"
+        and optimizer_backend in _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS
+    ):
         resolved = _TARGET_OUTER_MAXLS_BENCHMARK_DEFAULT
-    elif field_backend == "jax" and optimizer_backend == "ondevice":
+    elif (
+        field_backend == "jax"
+        and optimizer_backend in _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS
+    ):
         resolved = _TARGET_OUTER_MAXLS_DEFAULT
     else:
         resolved = _REFERENCE_OUTER_MAXLS_DEFAULT
@@ -7738,7 +7811,10 @@ def resolve_single_stage_outer_maxcor(
     """Resolve the effective outer L-BFGS correction budget for this lane."""
     if maxcor is not None:
         resolved = int(maxcor)
-    elif field_backend == "jax" and optimizer_backend == "ondevice":
+    elif (
+        field_backend == "jax"
+        and optimizer_backend in _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS
+    ):
         resolved = _TARGET_OUTER_MAXCOR_DEFAULT
     else:
         resolved = _REFERENCE_OUTER_MAXCOR_DEFAULT
@@ -7757,7 +7833,11 @@ def resolve_target_lane_boozer_bfgs_tol(
     """Resolve the temporary Boozer LS tolerance override for target-lane trials."""
     if target_lane_boozer_bfgs_tol is not None:
         resolved = float(target_lane_boozer_bfgs_tol)
-    elif field_backend == "jax" and optimizer_backend == "ondevice" and benchmark_mode:
+    elif (
+        field_backend == "jax"
+        and optimizer_backend in _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS
+        and benchmark_mode
+    ):
         resolved = _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT
     else:
         return None
@@ -7776,7 +7856,11 @@ def resolve_target_lane_boozer_bfgs_maxiter(
     """Resolve the temporary Boozer LS iteration cap for target-lane trials."""
     if target_lane_boozer_bfgs_maxiter is not None:
         resolved = int(target_lane_boozer_bfgs_maxiter)
-    elif field_backend == "jax" and optimizer_backend == "ondevice" and benchmark_mode:
+    elif (
+        field_backend == "jax"
+        and optimizer_backend in _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS
+        and benchmark_mode
+    ):
         resolved = _TARGET_LANE_BOOZER_BFGS_MAXITER_BENCHMARK_DEFAULT
     else:
         return None
@@ -7840,14 +7924,6 @@ def resolve_single_stage_optimizer_contract(
     reference_optimizer_method=None,
 ):
     """Resolve the optimizer contract for the single-stage outer loop."""
-    from simsopt.geo.optimizer_jax import (
-        ReferenceOptimizerContract,
-        TargetOptimizerContract,
-        require_target_backend_x64,
-        resolve_reference_outer_loop_optimizer_contract,
-        resolve_target_outer_loop_optimizer_contract,
-    )
-
     if field_backend == "jax":
         if reference_optimizer_method is not None:
             raise ValueError(
@@ -7855,11 +7931,15 @@ def resolve_single_stage_optimizer_contract(
             )
         if optimizer_backend == "scipy-jax":
             require_target_backend_x64("scipy-jax")
-            return TargetOptimizerContract(method="lbfgs-scipy-jax")
+            return TargetOptimizerContract(
+                driver=Driver.SCIPY_LBFGSB,
+                objective_route=TargetObjectiveRoute.SCIPY_JAX,
+            )
         if optimizer_backend == _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND:
             require_target_backend_x64(_JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND)
             return TargetOptimizerContract(
-                method=_JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD
+                driver=Driver.SCIPY_LBFGSB,
+                objective_route=TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH,
             )
         return resolve_target_outer_loop_optimizer_contract(
             field_backend,
@@ -7871,7 +7951,7 @@ def resolve_single_stage_optimizer_contract(
             raise ValueError(
                 "CPU/reference lbfgs-trace requires optimizer_backend='scipy'."
             )
-        return ReferenceOptimizerContract(method="lbfgs-trace")
+        return ReferenceOptimizerContract(driver=Driver.SIMSOPT_TRACE_LBFGS)
     if reference_optimizer_method not in (None, "lbfgs"):
         raise ValueError(
             "reference_optimizer_method must be one of: lbfgs, lbfgs-trace."
@@ -7883,28 +7963,35 @@ def resolve_single_stage_optimizer_contract(
     )
 
 
+def single_stage_optimizer_contract_method(contract):
+    """Return the legacy method string only at the legacy optimizer boundary."""
+    if isinstance(contract, TargetOptimizerContract):
+        return target_driver_method(contract)
+    if isinstance(contract, ReferenceOptimizerContract):
+        return reference_driver_method(contract.driver)
+    raise RuntimeError(
+        f"Unsupported single-stage optimizer contract {type(contract)!r}."
+    )
+
+
 def single_stage_optimizer_contract_uses_array_native_target_lane(
     contract,
     *,
     constraint_method,
 ):
     """Return whether the outer optimizer should use the target runtime."""
-    from simsopt.geo.optimizer_jax import TargetOptimizerContract
-
     return bool(
         constraint_method == "penalty"
         and isinstance(contract, TargetOptimizerContract)
-        and contract.method != _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD
+        and contract.objective_route != TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
     )
 
 
 def single_stage_optimizer_contract_uses_full_graph_jax_scipy(contract):
     """Return whether the outer optimizer uses CPU-order ``JF.x`` with JAX wrappers."""
-    from simsopt.geo.optimizer_jax import TargetOptimizerContract
-
     return bool(
         isinstance(contract, TargetOptimizerContract)
-        and contract.method == _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD
+        and contract.objective_route == TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
     )
 
 
@@ -7914,12 +8001,12 @@ def single_stage_optimizer_contract_uses_full_state_target_lane(
     constraint_method,
 ):
     """Return whether the pure target lane should consume CPU-order ``JF.x``."""
-    from simsopt.geo.optimizer_jax import TargetOptimizerContract
-
     return bool(
         constraint_method == "penalty"
         and isinstance(contract, TargetOptimizerContract)
-        and contract.method == "lbfgs-ondevice"
+        and contract.driver
+        in {Driver.SIMSOPT_LBFGSB, Driver.OPTAX_LBFGS, Driver.OPTIMISTIX_LBFGS}
+        and contract.objective_route == TargetObjectiveRoute.ARRAY_NATIVE
     )
 
 
@@ -7928,8 +8015,6 @@ def resolve_single_stage_alm_inner_optimizer_contract(
     outer_contract,
 ):
     """Resolve the ALM inner optimizer contract for the single-stage lane."""
-    from simsopt.geo.optimizer_jax import TargetOptimizerContract
-
     if constraint_method != "alm":
         return None
     return (
@@ -7939,9 +8024,9 @@ def resolve_single_stage_alm_inner_optimizer_contract(
 
 def resolve_single_stage_outer_optimizer_method(field_backend, optimizer_backend):
     """Return the shared optimizer adapter method for the outer single-stage loop."""
-    return resolve_single_stage_optimizer_contract(
-        field_backend, optimizer_backend
-    ).method
+    return single_stage_optimizer_contract_method(
+        resolve_single_stage_optimizer_contract(field_backend, optimizer_backend)
+    )
 
 
 def _single_stage_optimizer_dofs_array(x):
@@ -8069,7 +8154,23 @@ def _single_stage_target_optimizer_dofs(x):
 
 
 def target_lane_contract_supports_optimizer_seed(contract):
-    return contract.method == "lbfgs-ondevice"
+    return (
+        contract.driver == Driver.SIMSOPT_LBFGSB
+        and contract.objective_route == TargetObjectiveRoute.ARRAY_NATIVE
+    )
+
+
+def single_stage_target_lane_uses_full_graph_host_callback(
+    *,
+    use_target_lane_full_state_optimizer,
+    init_only,
+    supports_host_callback,
+):
+    return bool(
+        use_target_lane_full_state_optimizer
+        and not init_only
+        and supports_host_callback
+    )
 
 
 def single_stage_target_coil_dof_size(bs):
@@ -8113,7 +8214,7 @@ def build_target_lane_full_state_value_and_grad(
             coil_gradient,
         )
 
-    return full_state_value_and_grad
+    return jax.jit(full_state_value_and_grad)
 
 
 def build_target_lane_scaled_outer_phase_state(anchor_dofs, step_dofs):
@@ -8380,8 +8481,6 @@ def build_scaled_outer_scalar_problem(
 
 def _block_tree_until_ready(tree):
     """Synchronize a pytree of possible JAX arrays before returning timing data."""
-    import jax
-
     for leaf in jax.tree.leaves(tree):
         block_until_ready = getattr(leaf, "block_until_ready", None)
         if block_until_ready is not None:
@@ -8794,13 +8893,6 @@ def run_single_stage_optimizer(
     optimizer_initial_value_and_grad=None,
 ):
     """Run the single-stage outer optimization through the lane-specific adapters."""
-    from simsopt.geo.optimizer_jax import (
-        ReferenceOptimizerContract,
-        TargetOptimizerContract,
-        reference_minimize,
-        target_minimize,
-    )
-
     optimizer_dofs = dofs
     is_target_lane = isinstance(contract, TargetOptimizerContract)
     if fun is not None:
@@ -8842,8 +8934,9 @@ def run_single_stage_optimizer(
                 "optimizer_initial_value_and_grad for method='lbfgs-ondevice'."
             )
         optimizer_dofs = _single_stage_target_optimizer_dofs(dofs)
+        optimizer_method = single_stage_optimizer_contract_method(contract)
         target_minimize_kwargs = {
-            "method": contract.method,
+            "method": optimizer_method,
             "tol": gtol,
             "maxiter": maxiter,
             "options": {
@@ -8871,20 +8964,21 @@ def run_single_stage_optimizer(
         raise RuntimeError(
             f"Unsupported single-stage optimizer contract {type(contract)!r}."
         )
+    optimizer_method = single_stage_optimizer_contract_method(contract)
     if failure_callback is not None:
-        if contract.method != "lbfgs-trace":
+        if optimizer_method != "lbfgs-trace":
             raise ValueError(
                 "Single-stage reference-lane optimization only supports "
                 "failure_callback for method='lbfgs-trace'."
             )
     if optimizer_initial_value_and_grad is not None:
-        if contract.method != "lbfgs-trace":
+        if optimizer_method != "lbfgs-trace":
             raise ValueError(
                 "Single-stage reference-lane optimization only supports "
                 "optimizer_initial_value_and_grad for method='lbfgs-trace'."
             )
     reference_minimize_kwargs = {
-        "method": contract.method,
+        "method": optimizer_method,
         "tol": gtol,
         "maxiter": maxiter,
         "options": {
@@ -8896,7 +8990,7 @@ def run_single_stage_optimizer(
         "callback": callback,
         "progress_callback": progress_callback,
     }
-    if contract.method == "lbfgs-trace":
+    if optimizer_method == "lbfgs-trace":
         reference_minimize_kwargs["failure_callback"] = failure_callback
         reference_minimize_kwargs["initial_value_and_grad"] = (
             optimizer_initial_value_and_grad
@@ -10722,6 +10816,33 @@ def seed_single_stage_initial_objective_from_values(
     run_dict["initial_objective_pending"] = False
 
 
+def seed_pending_single_stage_target_lane_initial_objective(
+    run_dict,
+    *,
+    target_value_and_grad_objective,
+    optimizer_dofs,
+    objective_input_dofs,
+):
+    """Evaluate the fused target-lane objective when the initial value is pending."""
+    if not bool(run_dict.get("initial_objective_pending", False)):
+        return None
+    if target_value_and_grad_objective is None:
+        raise RuntimeError(
+            "Target-lane startup requires the fused target-lane value/gradient "
+            "objective to evaluate the initial optimizer state."
+        )
+    objective_dofs = runtime_device_put(objective_input_dofs(optimizer_dofs))
+    initial_target_value, initial_target_grad = target_value_and_grad_objective(
+        objective_dofs
+    )
+    seed_single_stage_initial_objective_from_values(
+        run_dict,
+        objective_value=initial_target_value,
+        objective_grad=initial_target_grad,
+    )
+    return initial_target_value, initial_target_grad
+
+
 def restore_from_pytree(
     JF,
     boozer_surface,
@@ -10822,8 +10943,10 @@ def require_single_stage_jax_target_lane(
         raise ValueError(
             "JAX production startup consumes immutable runtime seed specs only on "
             "the target optimizer lane; use --constraint-method penalty with "
-            "--optimizer-backend ondevice, --optimizer-backend scipy-jax, or "
-            "--optimizer-backend scipy-jax-fullgraph, or use the CPU/reference lane."
+            "--optimizer-backend ondevice, --optimizer-backend scipy-jax, "
+            "--optimizer-backend scipy-jax-fullgraph, "
+            "--optimizer-backend optax-lbfgs, or "
+            "--optimizer-backend optimistix-lbfgs, or use the CPU/reference lane."
         )
 
 
@@ -11080,6 +11203,24 @@ def with_single_stage_results_payload(snapshot, results):
     return replace(snapshot, results_payload=payload)
 
 
+def with_single_stage_init_only_objective(snapshot, *, initial_objective, init_only):
+    """Use the evaluated initial objective as the final objective for init-only runs."""
+    if not init_only:
+        return snapshot
+    objective = float(initial_objective)
+    if not np.isfinite(objective):
+        return snapshot
+    optimizer_diagnostics = dict(snapshot.optimizer_diagnostics)
+    optimizer_diagnostics.update(
+        {
+            "fun": objective,
+            "fun_finite": True,
+            "invalid_state": False,
+        }
+    )
+    return replace(snapshot, optimizer_diagnostics=optimizer_diagnostics)
+
+
 _ACCEPTED_RESULT_METADATA_PATHS = (
     ("provenance", "backend_mode"),
     ("provenance", "runtime_dtype"),
@@ -11150,6 +11291,16 @@ def write_single_stage_results_json(output_dir, snapshot):
     )
     with open(output_path, "w", encoding="utf-8") as outfile:
         json.dump(accepted_payload, outfile, indent=2, allow_nan=False)
+
+
+def write_single_stage_final_artifact(output_dir, snapshot):
+    """Write the accepted or rejected final artifact for a finalized snapshot."""
+    rejection_reasons = single_stage_result_rejection_reasons(snapshot)
+    if rejection_reasons:
+        write_single_stage_rejected_marker(output_dir, snapshot, rejection_reasons)
+        return False
+    write_single_stage_results_json(output_dir, snapshot)
+    return True
 
 
 # Convergence tolerances for different mpol values (module-level for testability)
@@ -11725,6 +11876,9 @@ if __name__ == "__main__":
         args.optimizer_backend,
         args.reference_optimizer_method,
     )
+    outer_optimizer_legacy_method = single_stage_optimizer_contract_method(
+        outer_contract
+    )
     use_target_lane = single_stage_optimizer_contract_uses_array_native_target_lane(
         outer_contract,
         constraint_method=CONSTRAINT_METHOD,
@@ -11738,8 +11892,12 @@ if __name__ == "__main__":
             constraint_method=CONSTRAINT_METHOD,
         )
     )
-    use_target_lane_full_graph_host_callback = bool(
-        use_target_lane_full_state_optimizer
+    use_target_lane_full_graph_host_callback = (
+        single_stage_target_lane_uses_full_graph_host_callback(
+            use_target_lane_full_state_optimizer=use_target_lane_full_state_optimizer,
+            init_only=args.init_only,
+            supports_host_callback=get_backend_policy().supports_host_callback,
+        )
     )
     use_coil_optimizer_dofs = bool(
         use_target_lane and not use_target_lane_full_state_optimizer
@@ -11748,7 +11906,7 @@ if __name__ == "__main__":
     require_single_stage_jax_target_lane(
         use_jax=use_jax,
         use_target_lane=use_target_lane,
-        optimizer_method=getattr(outer_contract, "method", None),
+        optimizer_method=outer_optimizer_legacy_method,
     )
     outer_optimizer_progress = (
         build_event_progress_recorder(
@@ -11756,7 +11914,7 @@ if __name__ == "__main__":
         )
         if should_record_single_stage_outer_optimizer_progress(
             use_target_lane,
-            optimizer_method=getattr(outer_contract, "method", None),
+            optimizer_method=outer_optimizer_legacy_method,
         )
         else None
     )
@@ -11773,7 +11931,7 @@ if __name__ == "__main__":
             record_outer_optimizer_event(
                 "objective_evaluation",
                 backend=args.backend,
-                optimizer_method=getattr(outer_contract, "method", None),
+                optimizer_method=outer_optimizer_legacy_method,
                 **payload,
             )
 
@@ -11782,7 +11940,7 @@ if __name__ == "__main__":
         use_target_lane=bool(use_target_lane),
         target_lane_full_state_optimizer=bool(use_target_lane_full_state_optimizer),
         output_dir=OUT_DIR_ITER,
-        optimizer_method=getattr(outer_contract, "method", None),
+        optimizer_method=outer_optimizer_legacy_method,
     )
     boozer_init_progress(
         "starting",
@@ -12071,7 +12229,7 @@ if __name__ == "__main__":
         ),
     )
     outer_optimizer_method_record = (
-        "alm" if CONSTRAINT_METHOD == "alm" else outer_contract.method
+        "alm" if CONSTRAINT_METHOD == "alm" else outer_optimizer_legacy_method
     )
     alm_inner_optimizer_contract = resolve_single_stage_alm_inner_optimizer_contract(
         CONSTRAINT_METHOD,
@@ -12268,6 +12426,152 @@ if __name__ == "__main__":
             "Enabling target-lane accepted-step and progress host callbacks "
             "for diagnostic run."
         )
+
+    if args.init_only and use_target_lane:
+        print("Preparing target-lane init objective/runtime bundle...")
+        target_lane_bundle_setup_start_s = _perf_counter_s()
+        target_lane_trial_boozer_overrides = {
+            "bfgs_tol": target_lane_boozer_bfgs_tol_record,
+            "bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
+            "newton_tol": target_lane_boozer_newton_tol_record,
+            "newton_maxiter": target_lane_boozer_newton_maxiter_record,
+        }
+        target_lane_trial_boozer_override_active = any(
+            value is not None for value in target_lane_trial_boozer_overrides.values()
+        )
+        record_outer_optimizer_event(
+            "target_lane_bundle_setup_started",
+            method=outer_optimizer_legacy_method,
+            maxiter=int(MAXITER),
+            use_value_and_grad=bool(use_target_lane_vg),
+            full_state_optimizer=bool(use_target_lane_full_state_optimizer),
+            full_graph_host_callback=bool(use_target_lane_full_graph_host_callback),
+            profile_target_lane=bool(args.profile_target_lane),
+            profile_target_lane_memory_analysis=bool(
+                args.profile_target_lane_memory_analysis
+            ),
+            success_filter_disabled=bool(args.disable_target_lane_success_filter),
+            trial_boozer_overrides={
+                key: None if value is None else float(value)
+                for key, value in target_lane_trial_boozer_overrides.items()
+            },
+        )
+        with temporary_boozer_surface_option_overrides(
+            boozer_surface,
+            **target_lane_trial_boozer_overrides,
+        ):
+            if use_target_lane_full_graph_host_callback:
+                if args.profile_target_lane_memory_analysis:
+                    raise RuntimeError(
+                        "--profile-target-lane-memory-analysis requires the "
+                        "traceable target-lane objective; method='lbfgs-ondevice' "
+                        "evaluates the full JF.x objective through a host callback."
+                    )
+                target_scalar_objective = None
+                target_value_and_grad_objective = (
+                    build_single_stage_full_graph_host_callback_value_and_grad(
+                        adapter,
+                        dofs,
+                    )
+                )
+                target_lane_optimizer_initial_value_and_grad = None
+                target_lane_profile = None
+                target_lane_success_filter = None
+            else:
+                (
+                    target_scalar_objective,
+                    target_value_and_grad_objective,
+                    target_lane_optimizer_initial_value_and_grad,
+                    target_lane_profile,
+                    target_lane_success_filter,
+                ) = prepare_target_lane_outer_objectives(
+                    boozer_surface,
+                    bs,
+                    banana_curve,
+                    VV,
+                    iota_target,
+                    use_target_lane=use_target_lane,
+                    use_value_and_grad=use_target_lane_vg,
+                    use_full_state_optimizer=use_target_lane_full_state_optimizer,
+                    full_state_optimizer_dof_map=(
+                        full_graph_optimizer_dof_map
+                        if use_target_lane_full_state_optimizer
+                        else None
+                    ),
+                    profile_optimizer_dofs=dofs
+                    if use_target_lane_full_state_optimizer
+                    else None,
+                    profile_target_lane=args.profile_target_lane,
+                    profile_target_lane_memory_analysis=(
+                        args.profile_target_lane_memory_analysis
+                    ),
+                    profile_batch_size=args.profile_target_lane_batch_size,
+                    disable_success_filter=args.disable_target_lane_success_filter,
+                    non_qs_weight=1.0,
+                    residual_weight=RES_WEIGHT,
+                    iota_weight=IOTAS_WEIGHT,
+                    length_weight=LENGTH_WEIGHT,
+                    length_target=length_target,
+                    cc_dist=CC_DIST,
+                    cc_weight=CC_WEIGHT,
+                    cs_dist=CS_DIST,
+                    cs_weight=CS_WEIGHT,
+                    ss_dist=SS_DIST,
+                    surf_dist_weight=SURF_DIST_WEIGHT,
+                    curvature_threshold=CURVATURE_THRESHOLD,
+                    curvature_weight=CURVATURE_WEIGHT,
+                )
+        _record_timing(
+            timings,
+            "target_lane_bundle_setup_s",
+            target_lane_bundle_setup_start_s,
+            _perf_counter_s(),
+        )
+        print("Target-lane init objective/runtime bundle ready.")
+        record_outer_optimizer_event(
+            "target_lane_bundle_setup_returned",
+            elapsed_s=float(_perf_counter_s() - target_lane_bundle_setup_start_s),
+            scalar_objective_available=target_scalar_objective is not None,
+            value_and_grad_objective_available=(
+                target_value_and_grad_objective is not None
+            ),
+            optimizer_initial_value_and_grad_available=(
+                target_lane_optimizer_initial_value_and_grad is not None
+            ),
+            full_state_optimizer=bool(use_target_lane_full_state_optimizer),
+            full_graph_host_callback=bool(use_target_lane_full_graph_host_callback),
+        )
+        if bool(run_dict.get("initial_objective_pending", False)):
+            initial_target_eval_start_s = _perf_counter_s()
+            initial_target_value, initial_target_grad = (
+                seed_pending_single_stage_target_lane_initial_objective(
+                    run_dict,
+                    target_value_and_grad_objective=target_value_and_grad_objective,
+                    optimizer_dofs=dofs,
+                    objective_input_dofs=target_lane_objective_input_dofs,
+                )
+            )
+            initial_target_eval_elapsed_s = (
+                _perf_counter_s() - initial_target_eval_start_s
+            )
+            if use_target_lane_full_graph_host_callback and args.profile_target_lane:
+                target_lane_profile = (
+                    _summarize_full_graph_host_callback_initial_profile(
+                        initial_target_eval_elapsed_s,
+                        initial_target_value,
+                        initial_target_grad,
+                    )
+                )
+            target_lane_optimizer_initial_value_and_grad = (
+                initial_target_value,
+                initial_target_grad,
+            )
+            record_single_stage_local_incumbent(run_dict, stage="initial")
+            record_outer_optimizer_event(
+                "target_lane_initial_objective_evaluated",
+                objective_value=_summarize_host_scalar(initial_target_value),
+                objective_grad=_summarize_host_vector(initial_target_grad),
+            )
 
     if args.init_only:
         res_nit = 0
@@ -12589,7 +12893,7 @@ if __name__ == "__main__":
         elif use_target_lane:
             print(
                 "Preparing target-lane outer objective/runtime bundle "
-                f"(method={outer_contract.method}, maxiter={MAXITER})..."
+                f"(method={outer_optimizer_legacy_method}, maxiter={MAXITER})..."
             )
         jax_compile_diagnostics_recorder = None
         if CONSTRAINT_METHOD != "alm":
@@ -12606,7 +12910,7 @@ if __name__ == "__main__":
             target_lane_bundle_setup_start_s = _perf_counter_s()
             record_outer_optimizer_event(
                 "target_lane_bundle_setup_started",
-                method=outer_contract.method,
+                method=outer_optimizer_legacy_method,
                 maxiter=int(MAXITER),
                 use_value_and_grad=bool(use_target_lane_vg),
                 full_state_optimizer=bool(use_target_lane_full_state_optimizer),
@@ -12764,18 +13068,14 @@ if __name__ == "__main__":
                             benchmark_mode=bool(args.benchmark_mode),
                         )
                     if bool(run_dict.get("initial_objective_pending", False)):
-                        if target_value_and_grad_objective is None:
-                            raise RuntimeError(
-                                "Target-lane startup requires the fused target-lane "
-                                "value/gradient objective to evaluate the initial "
-                                "optimizer state."
-                            )
                         initial_target_eval_start_s = _perf_counter_s()
-                        (
-                            initial_target_value,
-                            initial_target_grad,
-                        ) = target_value_and_grad_objective(
-                            target_lane_objective_input_dofs(dofs)
+                        initial_target_value, initial_target_grad = (
+                            seed_pending_single_stage_target_lane_initial_objective(
+                                run_dict,
+                                target_value_and_grad_objective=target_value_and_grad_objective,
+                                optimizer_dofs=dofs,
+                                objective_input_dofs=target_lane_objective_input_dofs,
+                            )
                         )
                         initial_target_eval_elapsed_s = (
                             _perf_counter_s() - initial_target_eval_start_s
@@ -12794,11 +13094,6 @@ if __name__ == "__main__":
                         target_lane_optimizer_initial_value_and_grad = (
                             initial_target_value,
                             initial_target_grad,
-                        )
-                        seed_single_stage_initial_objective_from_values(
-                            run_dict,
-                            objective_value=initial_target_value,
-                            objective_grad=initial_target_grad,
                         )
                         record_single_stage_local_incumbent(
                             run_dict,
@@ -13922,6 +14217,12 @@ if __name__ == "__main__":
         self_intersecting=final_self_intersecting,
         self_intersection_check_available=final_self_intersection_check_available,
     )
+    initial_objective = float(run_dict["initial_objective"])
+    final_result_snapshot = with_single_stage_init_only_objective(
+        final_result_snapshot,
+        initial_objective=initial_objective,
+        init_only=args.init_only,
+    )
     results = {
         **build_single_stage_results_envelope(
             output_root=OUT_DIR_ITER,
@@ -14274,7 +14575,6 @@ if __name__ == "__main__":
                 **alm_result_diagnostics_fields(alm_result),
             }
         )
-    initial_objective = float(run_dict["initial_objective"])
     final_objective = final_result_snapshot.optimizer_diagnostics["fun"]
     objective_decrease = (
         None if final_objective is None else initial_objective - float(final_objective)
@@ -14436,12 +14736,4 @@ if __name__ == "__main__":
         final_result_snapshot,
         results,
     )
-    rejection_reasons = single_stage_result_rejection_reasons(final_result_snapshot)
-    if rejection_reasons:
-        write_single_stage_rejected_marker(
-            OUT_DIR_ITER,
-            final_result_snapshot,
-            rejection_reasons,
-        )
-    else:
-        write_single_stage_results_json(OUT_DIR_ITER, final_result_snapshot)
+    write_single_stage_final_artifact(OUT_DIR_ITER, final_result_snapshot)

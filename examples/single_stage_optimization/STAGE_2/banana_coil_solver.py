@@ -87,6 +87,19 @@ from simsopt.jax_core import (
     curve_spec_with_quadpoints,
     surface_spec_kind,
 )
+from simsopt.geo.optimizer_jax import (
+    ReferenceOptimizerContract,
+    TargetOptimizerContract,
+    VALID_LEAST_SQUARES_ALGORITHMS,
+    reference_driver_method,
+    reference_minimize,
+    resolve_reference_outer_loop_optimizer_contract,
+    resolve_target_outer_loop_optimizer_contract,
+    target_driver_method,
+    target_least_squares,
+    target_minimize,
+    wrap_strict_target_lane_value_and_grad,
+)
 
 maybe_initialize_distributed_jax()
 LOGGER = logging.getLogger(__name__)
@@ -332,8 +345,6 @@ def _capture_stage2_artifact_state(
 
 
 def parse_args():
-    from simsopt.geo.optimizer_jax import VALID_LEAST_SQUARES_ALGORITHMS
-
     parser = argparse.ArgumentParser(
         description="Run Stage 2 banana coil optimization against a fixed plasma surface.",
     )
@@ -671,7 +682,14 @@ def parse_args():
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=["scipy", "ondevice", "scipy-jax", "scipy-jax-fullgraph"],
+        choices=[
+            "scipy",
+            "ondevice",
+            "scipy-jax",
+            "scipy-jax-fullgraph",
+            "optax-lbfgs",
+            "optimistix-lbfgs",
+        ],
         default=os.environ.get("STAGE2_OPTIMIZER_BACKEND")
         or os.environ.get("OPTIMIZER_BACKEND"),
         help=(
@@ -680,9 +698,11 @@ def parse_args():
             "'ondevice' is the JAX target optimizer lane; "
             "'scipy-jax' keeps SciPy L-BFGS-B control with JAX value/grad "
             "evaluations; 'scipy-jax-fullgraph' keeps SciPy control over the "
-            "full JAX target objective graph. Defaults to 'ondevice' on the "
-            "JAX backend and 'scipy' on the CPU/reference backend when no "
-            "explicit override is provided."
+            "full JAX target objective graph; 'optax-lbfgs' and "
+            "'optimistix-lbfgs' run public JAX L-BFGS drivers on the same "
+            "target objective as 'ondevice'. Defaults to 'ondevice' on the JAX "
+            "backend and 'scipy' on the CPU/reference backend when no explicit "
+            "override is provided."
         ),
     )
     parser.add_argument(
@@ -1925,6 +1945,8 @@ _STAGE2_TARGET_OPTIMIZER_BACKENDS = {
     "ondevice",
     "scipy-jax",
     "scipy-jax-fullgraph",
+    "optax-lbfgs",
+    "optimistix-lbfgs",
 }
 
 
@@ -1935,11 +1957,6 @@ def resolve_stage2_optimizer_contract(
     least_squares_algorithm="quasi-newton",
 ):
     """Resolve the optimizer contract for the Stage 2 outer loop."""
-    from simsopt.geo.optimizer_jax import (
-        resolve_reference_outer_loop_optimizer_contract,
-        resolve_target_outer_loop_optimizer_contract,
-    )
-
     if least_squares_algorithm == "lm":
         return resolve_target_outer_loop_optimizer_contract(
             field_backend,
@@ -1969,18 +1986,44 @@ def resolve_stage2_optimizer_method(
     least_squares_algorithm="quasi-newton",
 ):
     """Resolve the shared optimizer substrate for the Stage 2 outer loop."""
-    return resolve_stage2_optimizer_contract(
+    return stage2_optimizer_contract_method(
+        resolve_stage2_optimizer_contract(
+            field_backend,
+            optimizer_backend,
+            least_squares_algorithm=least_squares_algorithm,
+        )
+    )
+
+
+def stage2_optimizer_contract_method(contract):
+    """Return the legacy method string only at the legacy optimizer boundary."""
+    if isinstance(contract, TargetOptimizerContract):
+        return target_driver_method(contract)
+    if isinstance(contract, ReferenceOptimizerContract):
+        return reference_driver_method(contract.driver)
+    raise RuntimeError(f"Unsupported Stage 2 optimizer contract {type(contract)!r}.")
+
+
+def resolve_stage2_alm_inner_optimizer_contract(
+    field_backend,
+    optimizer_backend,
+    *,
+    least_squares_algorithm="quasi-newton",
+):
+    """Resolve the ALM inner optimizer contract for the Stage 2 lane."""
+    contract = resolve_stage2_optimizer_contract(
         field_backend,
         optimizer_backend,
         least_squares_algorithm=least_squares_algorithm,
-    ).method
-
-
-def resolve_stage2_alm_inner_optimizer_contract(field_backend, optimizer_backend):
-    """Resolve the ALM inner optimizer contract for the Stage 2 lane."""
-    from simsopt.geo.optimizer_jax import TargetOptimizerContract
-
-    contract = resolve_stage2_optimizer_contract(field_backend, optimizer_backend)
+    )
+    if (
+        isinstance(contract, TargetOptimizerContract)
+        and contract.use_least_squares_objective
+    ):
+        raise ValueError(
+            "Stage 2 ALM inner optimizer only supports "
+            "least_squares_algorithm='quasi-newton'."
+        )
     return contract if isinstance(contract, TargetOptimizerContract) else None
 
 
@@ -1991,8 +2034,6 @@ def should_build_stage2_target_objective(
     least_squares_algorithm="quasi-newton",
 ):
     """Return whether the JAX Stage 2 target objective should drive optimization."""
-    from simsopt.geo.optimizer_jax import TargetOptimizerContract
-
     contract = resolve_stage2_optimizer_contract(
         field_backend,
         optimizer_backend,
@@ -2047,8 +2088,6 @@ def validate_stage2_target_objective_dof_layout(
 
 
 def resolve_stage2_target_value_and_grad(target_objective_bundle):
-    from simsopt.geo.optimizer_jax import wrap_strict_target_lane_value_and_grad
-
     if target_objective_bundle is None:
         return None
     target_value_and_grad = target_objective_bundle.value_and_grad
@@ -2156,16 +2195,8 @@ def run_stage2_optimizer(
     failure_callback=None,
 ):
     """Run the Stage 2 outer optimization through the lane-specific substrate."""
-    from simsopt.geo.optimizer_jax import (
-        ReferenceOptimizerContract,
-        TargetOptimizerContract,
-        reference_minimize,
-        target_least_squares,
-        target_minimize,
-        wrap_strict_target_lane_value_and_grad,
-    )
-
     use_explicit_value_and_grad = value_and_grad_fun is not None
+    optimizer_method = stage2_optimizer_contract_method(contract)
     if (
         isinstance(contract, TargetOptimizerContract)
         and contract.use_least_squares_objective
@@ -2181,7 +2212,7 @@ def run_stage2_optimizer(
         return target_least_squares(
             residual_fun,
             dofs,
-            method=contract.method,
+            method=optimizer_method,
             tol=gtol,
             maxiter=maxiter,
             callback=callback,
@@ -2198,7 +2229,7 @@ def run_stage2_optimizer(
         if use_explicit_value_and_grad:
             objective_fun = wrap_strict_target_lane_value_and_grad(objective_fun)
         target_minimize_kwargs = {
-            "method": contract.method,
+            "method": optimizer_method,
             "tol": gtol,
             "maxiter": maxiter,
             "options": {
@@ -2231,7 +2262,7 @@ def run_stage2_optimizer(
     return reference_minimize(
         value_and_grad_fun,
         dofs,
-        method=contract.method,
+        method=optimizer_method,
         tol=gtol,
         maxiter=maxiter,
         options={
@@ -2440,6 +2471,7 @@ def build_stage2_probe_payload(
         "nphi": int(nphi),
         "ntheta": int(ntheta),
         "dof_count": int(composite_grad.size),
+        "dofs": dofs.tolist(),
         "curvature_threshold": curvature_threshold,
         "curvature_within_threshold": stage2_curvature_within_threshold(
             curvature,
@@ -2520,13 +2552,30 @@ def stage2_result_rejection_reasons(
     )
 
 
-def write_stage2_rejected_marker(output_dir, *, reasons, optimizer_result):
+def stage2_rejected_diagnostics(results):
+    """Select diagnostics that belong in rejected-run markers, not results.json."""
+    result_keys = {
+        "field_error": "FIELD_ERROR",
+        "final_objective": "FINAL_OBJECTIVE",
+        "final_gradient_norm": "FINAL_GRADIENT_NORM",
+        "final_mean_abs_relBfinal_norm": "FINAL_MEAN_ABS_RELBN",
+        "optimizer_timings": "OPTIMIZER_TIMINGS",
+    }
+    return {
+        diagnostic_key: results[result_key]
+        for diagnostic_key, result_key in result_keys.items()
+        if result_key in results
+    }
+
+
+def write_stage2_rejected_marker(output_dir, *, reasons, optimizer_result, diagnostics):
     """Write the explicit rejected-run marker next to Stage 2 diagnostics."""
     write_json_file(
         os.path.join(output_dir, "REJECTED.json"),
         {
             "accepted": False,
             "rejection_reasons": list(reasons),
+            "diagnostics": sanitize_diagnostic_payload(diagnostics),
             "optimizer": {
                 "success": None
                 if optimizer_result is None
@@ -3061,6 +3110,7 @@ if __name__ == "__main__":
         alm_inner_optimizer_contract = resolve_stage2_alm_inner_optimizer_contract(
             args.backend,
             args.optimizer_backend,
+            least_squares_algorithm=args.least_squares_algorithm,
         )
     else:
         (
@@ -3194,7 +3244,7 @@ if __name__ == "__main__":
     final_artifact_state = None
     if args.record_warm_timings and not use_target_objective_lane:
         raise ValueError(
-            "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
+            "--record-warm-timings is only supported on the JAX Stage 2 target lane."
         )
     if args.profile_step_json is not None and use_target_objective_lane:
         raise ValueError(
@@ -3721,8 +3771,6 @@ if __name__ == "__main__":
                 target_residual = resolve_stage2_target_least_squares_residual(
                     target_objective_bundle
                 )
-                from simsopt.geo.optimizer_jax import TargetOptimizerContract
-
                 if (
                     isinstance(outer_contract, TargetOptimizerContract)
                     and outer_contract.use_least_squares_objective
@@ -4158,6 +4206,7 @@ if __name__ == "__main__":
             OUT_DIR_ITER,
             reasons=rejection_reasons,
             optimizer_result=res,
+            diagnostics=stage2_rejected_diagnostics(results),
         )
     else:
         write_stage2_results_json(

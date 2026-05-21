@@ -3,8 +3,16 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Callable, Sequence
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize, nnls
+
+from simsopt.geo.optimizer_jax import (
+    TargetOptimizerContract,
+    target_driver_method,
+    target_minimize,
+)
 
 
 @dataclass(frozen=True)
@@ -119,6 +127,15 @@ _TARGET_INNER_OPTION_KEYS = (
     "maxgrad",
     "initial_step_size",
 )
+_TARGET_INNER_SCALAR_METHODS = frozenset(
+    {
+        "lbfgs-ondevice",
+        "lbfgs-scipy-jax",
+        "lbfgs-scipy-jax-fullgraph",
+        "optax-lbfgs-ondevice",
+        "optimistix-lbfgs-ondevice",
+    }
+)
 _ACCEPTANCE_TOTAL_ATOL = 1e-10
 _ACCEPTANCE_TOTAL_RTOL = 1e-3
 _ACCEPTANCE_MOVE_TOL = 1e-12
@@ -142,7 +159,9 @@ class _EarlyStopInnerSolve(RuntimeError):
 def validate_alm_cli_args(args) -> None:
     if args.alm_max_outer_iters <= 0:
         raise ValueError("--alm-max-outer-iters must be positive")
-    max_subproblem_continuations = getattr(args, "alm_max_subproblem_continuations", None)
+    max_subproblem_continuations = getattr(
+        args, "alm_max_subproblem_continuations", None
+    )
     if max_subproblem_continuations is not None and max_subproblem_continuations <= 0:
         raise ValueError("--alm-max-subproblem-continuations must be positive")
     if args.alm_penalty_init <= 0.0:
@@ -248,7 +267,9 @@ def augmented_objective(
     ]
     multipliers = np.asarray(multipliers, dtype=float)
     total_value = float(base_value) + float(np.dot(multipliers, constraint_values))
-    total_value += 0.5 * float(penalty) * float(np.dot(constraint_values, constraint_values))
+    total_value += (
+        0.5 * float(penalty) * float(np.dot(constraint_values, constraint_values))
+    )
 
     total_grad = np.array(base_grad, copy=True)
     for multiplier, constraint_value, constraint_grad in zip(
@@ -288,8 +309,13 @@ def augmented_inequality_objective(
 
     total_value = float(base_value)
     if constraint_values.size > 0:
-        total_value += 0.5 / float(penalty) * float(
-            np.dot(positive_shift, positive_shift) - np.dot(multipliers, multipliers)
+        total_value += (
+            0.5
+            / float(penalty)
+            * float(
+                np.dot(positive_shift, positive_shift)
+                - np.dot(multipliers, multipliers)
+            )
         )
 
     total_grad = np.array(base_grad, copy=True)
@@ -334,7 +360,10 @@ def _build_augmented_evaluation(
         "base_grad": np.asarray(base_grad, dtype=float),
         "grad": np.asarray(total_grad, dtype=float),
         "constraint_values": np.asarray(constraint_values, dtype=float),
-        "constraint_grads": [np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads],
+        "constraint_grads": [
+            np.asarray(constraint_grad, dtype=float)
+            for constraint_grad in constraint_grads
+        ],
         "dual_update_values": dual_update_array,
         "feasibility_values": feasibility_array,
         "max_violation": max_feasibility_violation,
@@ -353,14 +382,18 @@ def _max_value(values: np.ndarray) -> float:
 
 def alm_result_diagnostics_fields(alm_result) -> dict:
     return {
-        "ALM_MULTIPLIER_CAP_BINDING": getattr(alm_result, "multiplier_cap_binding", None),
+        "ALM_MULTIPLIER_CAP_BINDING": getattr(
+            alm_result, "multiplier_cap_binding", None
+        ),
         "ALM_MULTIPLIER_CAP_BINDING_INDICES": getattr(
             alm_result,
             "multiplier_cap_binding_indices",
             None,
         ),
         "ALM_FINAL_BASE_OBJECTIVE": getattr(alm_result, "final_base_objective", None),
-        "ALM_FINAL_PENALTY_OBJECTIVE": getattr(alm_result, "final_penalty_objective", None),
+        "ALM_FINAL_PENALTY_OBJECTIVE": getattr(
+            alm_result, "final_penalty_objective", None
+        ),
         "ALM_FINAL_PENALTY_OBJECTIVE_RATIO": getattr(
             alm_result,
             "final_penalty_objective_ratio",
@@ -443,7 +476,11 @@ def _require_finite_evaluation(evaluation: dict, *, context: str) -> None:
 
 
 def _elevated_rejection_total(reference_total: float) -> float:
-    return float(reference_total) + max(abs(float(reference_total)), 1.0) + _ACCEPTANCE_TOTAL_ATOL
+    return (
+        float(reference_total)
+        + max(abs(float(reference_total)), 1.0)
+        + _ACCEPTANCE_TOTAL_ATOL
+    )
 
 
 def _sanitize_nonfinite_inner_evaluation(
@@ -536,7 +573,9 @@ def _made_meaningful_inner_progress(
     final_stationarity_norm: float,
 ) -> bool:
     move_norm = float(
-        np.linalg.norm(np.asarray(end_x, dtype=float) - np.asarray(start_x, dtype=float))
+        np.linalg.norm(
+            np.asarray(end_x, dtype=float) - np.asarray(start_x, dtype=float)
+        )
     )
     move_scale = max(1.0, float(np.linalg.norm(np.asarray(start_x, dtype=float))))
     moved = move_norm > 1e-8 * move_scale
@@ -545,7 +584,9 @@ def _made_meaningful_inner_progress(
     objective_tol = max(1e-8, 0.05 * abs(float(current_total)))
     improved_objective = objective_drop > objective_tol
 
-    stationarity_drop = float(current_stationarity_norm) - float(final_stationarity_norm)
+    stationarity_drop = float(current_stationarity_norm) - float(
+        final_stationarity_norm
+    )
     stationarity_tol = max(1e-6, 0.05 * float(current_stationarity_norm))
     improved_stationarity = stationarity_drop > stationarity_tol
 
@@ -560,8 +601,10 @@ def _made_meaningful_inner_progress(
 
 def _acceptable_total_upper_bound(current_total: float) -> float:
     total_scale = max(np.finfo(float).eps, abs(float(current_total)))
-    return float(current_total) + _ACCEPTANCE_TOTAL_ATOL + (
-        _ACCEPTANCE_TOTAL_RTOL * total_scale
+    return (
+        float(current_total)
+        + _ACCEPTANCE_TOTAL_ATOL
+        + (_ACCEPTANCE_TOTAL_RTOL * total_scale)
     )
 
 
@@ -591,23 +634,28 @@ def _candidate_is_acceptable(
         _candidate_dual_update_values,
         candidate_max_feasibility_violation,
     ) = _extract_constraint_state(candidate_eval)
-    allowed_max_feasibility = max(
-        float(update_feasibility_tol),
-        float(current_max_feasibility_violation),
-    ) + _ACCEPTANCE_TOTAL_ATOL
+    allowed_max_feasibility = (
+        max(
+            float(update_feasibility_tol),
+            float(current_max_feasibility_violation),
+        )
+        + _ACCEPTANCE_TOTAL_ATOL
+    )
     if float(candidate_max_feasibility_violation) > allowed_max_feasibility:
         return False
 
     candidate_total = float(candidate_eval["total"])
-    return candidate_total <= _acceptable_total_upper_bound(float(current_eval["total"]))
+    return candidate_total <= _acceptable_total_upper_bound(
+        float(current_eval["total"])
+    )
 
 
 def _feasibility_improvement_metrics(
     current_max_feasibility_violation: float,
     candidate_max_feasibility_violation: float,
 ) -> tuple[float, float]:
-    feasibility_improvement = (
-        float(current_max_feasibility_violation) - float(candidate_max_feasibility_violation)
+    feasibility_improvement = float(current_max_feasibility_violation) - float(
+        candidate_max_feasibility_violation
     )
     feasibility_improvement_floor = max(
         _INFEASIBLE_STALL_FEASIBILITY_ATOL,
@@ -637,9 +685,11 @@ def _classify_infeasible_inner_stall(
     if candidate_max_feasibility_violation <= float(feasibility_gate):
         return False, False, None
 
-    feasibility_improvement, feasibility_improvement_floor = _feasibility_improvement_metrics(
-        current_max_feasibility_violation,
-        candidate_max_feasibility_violation,
+    feasibility_improvement, feasibility_improvement_floor = (
+        _feasibility_improvement_metrics(
+            current_max_feasibility_violation,
+            candidate_max_feasibility_violation,
+        )
     )
     if feasibility_improvement > feasibility_improvement_floor:
         return False, False, None
@@ -722,9 +772,6 @@ def _build_target_inner_value_and_grad(
     center: np.ndarray,
     widths: np.ndarray | None,
 ):
-    import jax
-    import jax.numpy as jnp
-
     center_arr = np.asarray(center, dtype=float).copy()
     widths_arr = None if widths is None else np.asarray(widths, dtype=float).copy()
 
@@ -762,23 +809,21 @@ def _resolve_target_inner_optimizer(inner_optimizer_contract):
     if inner_optimizer_contract is None:
         return None, None
 
-    from simsopt.geo.optimizer_jax import TargetOptimizerContract, target_minimize
-
     if not isinstance(inner_optimizer_contract, TargetOptimizerContract):
         raise ValueError(
             "minimize_alm() only supports TargetOptimizerContract for "
             "inner_optimizer_contract."
         )
     if inner_optimizer_contract.use_least_squares_objective:
+        raise ValueError("minimize_alm() only supports scalar target ALM inner solves.")
+    method = target_driver_method(inner_optimizer_contract)
+    if method not in _TARGET_INNER_SCALAR_METHODS:
+        allowed = ", ".join(sorted(_TARGET_INNER_SCALAR_METHODS))
         raise ValueError(
-            "minimize_alm() only supports scalar target ALM inner solves."
+            "minimize_alm() target ALM inner solves require one of "
+            f"{allowed}. Got {method!r}."
         )
-    if inner_optimizer_contract.method != "lbfgs-ondevice":
-        raise ValueError(
-            "minimize_alm() only supports method='lbfgs-ondevice' for "
-            "target ALM inner solves."
-        )
-    return inner_optimizer_contract.method, target_minimize
+    return method, target_minimize
 
 
 def _select_inner_solve_profile(
@@ -810,11 +855,13 @@ def _project_nonnegative_multipliers(
     penalty: float,
     multiplier_max: float | None,
 ) -> np.ndarray:
-    projected, _cap_binding, _cap_binding_indices = _project_nonnegative_multipliers_with_diagnostics(
-        multipliers,
-        dual_update_values,
-        penalty,
-        multiplier_max,
+    projected, _cap_binding, _cap_binding_indices = (
+        _project_nonnegative_multipliers_with_diagnostics(
+            multipliers,
+            dual_update_values,
+            penalty,
+            multiplier_max,
+        )
     )
     return projected
 
@@ -826,7 +873,8 @@ def _updated_nonnegative_multipliers(
 ) -> np.ndarray:
     return np.maximum(
         0.0,
-        np.asarray(multipliers, dtype=float) + float(penalty) * np.asarray(dual_update_values, dtype=float),
+        np.asarray(multipliers, dtype=float)
+        + float(penalty) * np.asarray(dual_update_values, dtype=float),
     )
 
 
@@ -886,7 +934,11 @@ def _build_inner_options(
     options["gtol"] = max(base_gtol, staged_gtol)
     options["maxls"] = max(1, int(options.get("maxls", profile.default_maxls)))
 
-    if profile.maxiter_cap is None or profile.maxls_cap is None or profile.ftol_floor is None:
+    if (
+        profile.maxiter_cap is None
+        or profile.maxls_cap is None
+        or profile.ftol_floor is None
+    ):
         return options
 
     requested_maxiter = max(1, int(options.get("maxiter", 150)))
@@ -1039,7 +1091,9 @@ def run_directional_taylor_test(
     base_eval = evaluate_problem(x, multiplier_array, float(penalty))
     base_total = float(base_eval["total"])
     base_grad = np.asarray(base_eval["grad"], dtype=float)
-    directional_derivative = float(np.dot(base_grad.reshape(-1), unit_direction.reshape(-1)))
+    directional_derivative = float(
+        np.dot(base_grad.reshape(-1), unit_direction.reshape(-1))
+    )
     error_floor = 1e-10 * max(1.0, abs(directional_derivative))
 
     errors = []
@@ -1048,11 +1102,15 @@ def run_directional_taylor_test(
     passed = True
     previous_error = None
     for epsilon in taylor_epsilons:
-        plus_eval = evaluate_problem(x + float(epsilon) * unit_direction, multiplier_array, float(penalty))
-        minus_eval = evaluate_problem(x - float(epsilon) * unit_direction, multiplier_array, float(penalty))
-        central_estimate = (
-            float(plus_eval["total"]) - float(minus_eval["total"])
-        ) / (2.0 * float(epsilon))
+        plus_eval = evaluate_problem(
+            x + float(epsilon) * unit_direction, multiplier_array, float(penalty)
+        )
+        minus_eval = evaluate_problem(
+            x - float(epsilon) * unit_direction, multiplier_array, float(penalty)
+        )
+        central_estimate = (float(plus_eval["total"]) - float(minus_eval["total"])) / (
+            2.0 * float(epsilon)
+        )
         error = abs(central_estimate - directional_derivative)
         central_estimates.append(float(central_estimate))
         errors.append(float(error))
@@ -1143,7 +1201,9 @@ def _extract_stage2_constraint_signal_state(
     )
 
 
-def _constraint_activity_tolerances(evaluation: dict, constraint_values: np.ndarray) -> np.ndarray:
+def _constraint_activity_tolerances(
+    evaluation: dict, constraint_values: np.ndarray
+) -> np.ndarray:
     raw_tolerances = evaluation.get("constraint_activity_tolerances")
     if raw_tolerances is None:
         return np.zeros_like(constraint_values)
@@ -1153,7 +1213,9 @@ def _constraint_activity_tolerances(evaluation: dict, constraint_values: np.ndar
         return tolerances
     if tolerances.size == 1:
         return np.full_like(constraint_values, float(tolerances.reshape(())))
-    raise ValueError("constraint_activity_tolerances shape must match constraint_values")
+    raise ValueError(
+        "constraint_activity_tolerances shape must match constraint_values"
+    )
 
 
 def _constraint_activity_mask(
@@ -1216,8 +1278,8 @@ def _constraint_routing_state(
         penalty,
         signal_state.surrogate_signed_constraint_values,
     )
-    hard_feasible_under_gate = (
-        _max_value(signal_state.hard_violation_values) <= float(feasibility_gate)
+    hard_feasible_under_gate = _max_value(signal_state.hard_violation_values) <= float(
+        feasibility_gate
     )
     direct_boundary_mismatch = (
         signal_state.explicit_stage2_signals
@@ -1266,7 +1328,9 @@ def _kkt_stationarity_norm(
             continue
         if float(constraint_value) < -float(activity_tolerance):
             continue
-        active_constraint_grads.append(np.asarray(constraint_grad, dtype=float).reshape(-1))
+        active_constraint_grads.append(
+            np.asarray(constraint_grad, dtype=float).reshape(-1)
+        )
 
     if not active_constraint_grads:
         return None
@@ -1296,7 +1360,9 @@ def _stationarity_metrics(
         kkt_stationarity_norm = None
         effective_stationarity_norm = raw_stationarity_norm
     else:
-        preferred_dual_update_values = routing_state.signal_state.preferred_dual_update_values
+        preferred_dual_update_values = (
+            routing_state.signal_state.preferred_dual_update_values
+        )
         kkt_stationarity_norm = _kkt_stationarity_norm(
             metric_grad,
             evaluation.get("constraint_grads"),
@@ -1325,14 +1391,17 @@ def minimize_alm(
     settings: ALMSettings,
     inner_options: dict,
     inner_optimizer_contract=None,
-    target_inner_value_and_grad: Callable[[object, np.ndarray, float], tuple[object, object]]
+    target_inner_value_and_grad: Callable[
+        [object, np.ndarray, float], tuple[object, object]
+    ]
     | None = None,
     inner_callback: Callable[[np.ndarray], None] | None = None,
     accepted_callback: Callable[[np.ndarray], None] | None = None,
     outer_state_callback: Callable[[int, np.ndarray, float], None] | None = None,
     snapshot_accepted_state_fn: Callable[[], object] | None = None,
     restore_incumbent_state_fn: Callable[[object], None] | None = None,
-    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None = None,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None]
+    | None = None,
     initial_multipliers: np.ndarray | None = None,
     initial_penalty: float | None = None,
 ):
@@ -1349,7 +1418,10 @@ def minimize_alm(
         )
     if settings.penalty_max is not None and settings.penalty_max <= 0.0:
         raise ValueError("settings.penalty_max must be positive when provided")
-    if settings.penalty_max is not None and settings.penalty_max < settings.penalty_init:
+    if (
+        settings.penalty_max is not None
+        and settings.penalty_max < settings.penalty_init
+    ):
         raise ValueError(
             f"settings.penalty_max ({settings.penalty_max}) must be >= "
             f"settings.penalty_init ({settings.penalty_init})"
@@ -1437,7 +1509,9 @@ def minimize_alm(
             outer_iterations=int(outer_iterations),
             constraint_names=list(constraint_names),
             constraint_values=[float(value) for value in feasibility_values],
-            solver_constraint_values=[float(value) for value in solver_constraint_values],
+            solver_constraint_values=[
+                float(value) for value in solver_constraint_values
+            ],
             hard_signed_constraint_values=[
                 float(value)
                 for value in routing_state.signal_state.hard_signed_constraint_values
@@ -1473,7 +1547,9 @@ def minimize_alm(
             final_objective=float(evaluation["total"]),
             final_base_objective=conditioning["conditioning_base_objective"],
             final_penalty_objective=conditioning["conditioning_penalty_objective"],
-            final_penalty_objective_ratio=conditioning["conditioning_penalty_objective_ratio"],
+            final_penalty_objective_ratio=conditioning[
+                "conditioning_penalty_objective_ratio"
+            ],
             final_total_grad_norm=conditioning["conditioning_total_grad_norm"],
             final_base_grad_norm=conditioning["conditioning_base_grad_norm"],
             final_penalty_grad_norm=conditioning["conditioning_penalty_grad_norm"],
@@ -1557,10 +1633,9 @@ def minimize_alm(
         if best_feasible is not None:
             if final_max_feasibility_violation > settings.feasibility_tol:
                 restore_reasons.append("final_iterate_infeasible")
-            if (
-                _incumbent_objective_value(restored_evaluation)
-                > _incumbent_objective_value(best_feasible.evaluation)
-            ):
+            if _incumbent_objective_value(
+                restored_evaluation
+            ) > _incumbent_objective_value(best_feasible.evaluation):
                 restore_reasons.append("final_iterate_worse_than_best_feasible")
 
         if restore_reasons:
@@ -1724,7 +1799,9 @@ def minimize_alm(
                         "stationarity_norm": current_stationarity_norm,
                         "raw_stationarity_norm": current_raw_stationarity_norm,
                         "kkt_stationarity_norm": current_kkt_stationarity_norm,
-                        "constraint_values": [float(value) for value in current_feasibility_values],
+                        "constraint_values": [
+                            float(value) for value in current_feasibility_values
+                        ],
                         "solver_constraint_values": [
                             float(value) for value in current_solver_constraint_values
                         ],
@@ -1740,16 +1817,24 @@ def minimize_alm(
                             float(value)
                             for value in current_routing_state.signal_state.surrogate_signed_constraint_values
                         ],
-                        "hard_max_violation": float(current_routing_state.hard_max_violation),
-                        "surrogate_max_value": float(current_routing_state.surrogate_max_value),
+                        "hard_max_violation": float(
+                            current_routing_state.hard_max_violation
+                        ),
+                        "surrogate_max_value": float(
+                            current_routing_state.surrogate_max_value
+                        ),
                         "hard_positive_shift_zero": bool(
                             current_routing_state.hard_positive_shift_zero
                         ),
                         "signal_mismatch_active": bool(current_signal_mismatch_active),
                         "multipliers": [float(value) for value in multipliers],
-                        "post_update_multipliers": [float(value) for value in multipliers],
+                        "post_update_multipliers": [
+                            float(value) for value in multipliers
+                        ],
                         "feasibility_tolerance": float(update_feasibility_tol),
-                        "effective_feasibility_tolerance": float(effective_feasibility_tol),
+                        "effective_feasibility_tolerance": float(
+                            effective_feasibility_tol
+                        ),
                         "stationarity_tolerance": float(update_stationarity_tol),
                         "trust_radius": trust_radius,
                         "inner_maxiter": None,
@@ -1759,7 +1844,9 @@ def minimize_alm(
                         "inner_attempts": 0,
                         "accepted_move_norm": 0.0,
                         "accepted_move_norm_scaled": 0.0,
-                        "infeasible_stall_move_tolerance": float(_move_tolerance(start_x)),
+                        "infeasible_stall_move_tolerance": float(
+                            _move_tolerance(start_x)
+                        ),
                         "objective_delta": 0.0,
                         "feasibility_delta": 0.0,
                         "feasibility_delta_tolerance": 0.0,
@@ -1816,13 +1903,17 @@ def minimize_alm(
                 )
                 _cached_eval.x = np.asarray(inner_x, dtype=float).copy()
                 _cached_eval.evaluation = evaluation
-                return float(evaluation["total"]), np.asarray(evaluation["grad"], dtype=float)
+                return float(evaluation["total"]), np.asarray(
+                    evaluation["grad"], dtype=float
+                )
 
             def alm_inner_callback(inner_x):
                 if inner_callback is not None:
                     inner_callback(inner_x)
                 inner_x_arr = np.asarray(inner_x, dtype=float)
-                if _cached_eval.x is not None and np.array_equal(inner_x_arr, _cached_eval.x):
+                if _cached_eval.x is not None and np.array_equal(
+                    inner_x_arr, _cached_eval.x
+                ):
                     evaluation = _cached_eval.evaluation
                 else:
                     evaluation = _sanitize_nonfinite_inner_evaluation(
@@ -1902,10 +1993,12 @@ def minimize_alm(
                         candidate_x = np.asarray(result.x, dtype=float).copy()
                     else:
                         result, candidate_x = _run_target_inner_solve(
-                            native_value_and_grad=lambda inner_x: target_inner_value_and_grad(
-                                inner_x,
-                                multipliers,
-                                penalty,
+                            native_value_and_grad=lambda inner_x: (
+                                target_inner_value_and_grad(
+                                    inner_x,
+                                    multipliers,
+                                    penalty,
+                                )
                             ),
                             center=x,
                             attempt_radius=attempt_radius,
@@ -1914,7 +2007,9 @@ def minimize_alm(
                             optimizer=target_inner_optimizer,
                             inner_callback=inner_callback,
                         )
-                    if _cached_eval.x is not None and np.array_equal(candidate_x, _cached_eval.x):
+                    if _cached_eval.x is not None and np.array_equal(
+                        candidate_x, _cached_eval.x
+                    ):
                         candidate_eval = _cached_eval.evaluation
                     else:
                         candidate_eval = _sanitize_nonfinite_inner_evaluation(
@@ -1936,7 +2031,9 @@ def minimize_alm(
                 move_tolerance = _move_tolerance(x)
                 if candidate_eval.get("nonfinite_evaluation"):
                     nonfinite_candidate_evaluation = True
-                    nonfinite_candidate_fields = list(candidate_eval.get("nonfinite_fields", []))
+                    nonfinite_candidate_fields = list(
+                        candidate_eval.get("nonfinite_fields", [])
+                    )
                 acceptable = _candidate_is_acceptable(
                     current_eval,
                     candidate_eval,
@@ -1961,7 +2058,9 @@ def minimize_alm(
                     accepted_eval = candidate_eval
                     if attempt_radius is not None:
                         if moved_norm >= 0.5 * float(attempt_radius):
-                            trust_radius = float(attempt_radius) * float(settings.trust_radius_grow)
+                            trust_radius = float(attempt_radius) * float(
+                                settings.trust_radius_grow
+                            )
                         else:
                             trust_radius = float(attempt_radius)
                     break
@@ -1994,7 +2093,9 @@ def minimize_alm(
 
             if accepted_result is None or accepted_eval is None:
                 if last_attempt_result is None:
-                    raise RuntimeError("ALM failed before any inner optimization result was produced.")
+                    raise RuntimeError(
+                        "ALM failed before any inner optimization result was produced."
+                    )
                 accepted_result = last_attempt_result
                 accepted_eval = current_eval
 
@@ -2100,10 +2201,10 @@ def minimize_alm(
                 "stationarity_norm": stationarity_norm,
                 "raw_stationarity_norm": raw_stationarity_norm,
                 "kkt_stationarity_norm": kkt_stationarity_norm,
-                "constraint_values": [
-                    float(value) for value in feasibility_values
+                "constraint_values": [float(value) for value in feasibility_values],
+                "solver_constraint_values": [
+                    float(value) for value in solver_constraint_values
                 ],
-                "solver_constraint_values": [float(value) for value in solver_constraint_values],
                 "hard_signed_constraint_values": [
                     float(value) for value in hard_signed_constraint_values
                 ],
@@ -2115,7 +2216,9 @@ def minimize_alm(
                 ],
                 "hard_max_violation": float(routing_state.hard_max_violation),
                 "surrogate_max_value": float(routing_state.surrogate_max_value),
-                "hard_positive_shift_zero": bool(routing_state.hard_positive_shift_zero),
+                "hard_positive_shift_zero": bool(
+                    routing_state.hard_positive_shift_zero
+                ),
                 "signal_mismatch_active": bool(signal_mismatch_active),
                 "multipliers": [float(value) for value in multipliers],
                 "post_update_multipliers": [float(value) for value in multipliers],
@@ -2135,15 +2238,18 @@ def minimize_alm(
                 "inner_profile": last_inner_profile,
                 "inner_attempts": int(attempts),
                 "accepted_move_norm": accepted_move_norm,
-                "accepted_move_norm_scaled": accepted_move_norm / max(
+                "accepted_move_norm_scaled": accepted_move_norm
+                / max(
                     1.0,
                     float(np.linalg.norm(start_x)),
                 ),
                 "infeasible_stall_move_tolerance": float(_move_tolerance(start_x)),
-                "objective_delta": float(current_eval["total"]) - float(final_eval["total"]),
+                "objective_delta": float(current_eval["total"])
+                - float(final_eval["total"]),
                 "feasibility_delta": float(feasibility_delta),
                 "feasibility_delta_tolerance": float(feasibility_delta_tol),
-                "stationarity_delta": float(current_stationarity_norm) - float(stationarity_norm),
+                "stationarity_delta": float(current_stationarity_norm)
+                - float(stationarity_norm),
                 "meaningful_progress": bool(made_inner_progress),
                 "feasible_stall_count": int(feasible_stall_count),
                 "infeasible_stall": bool(forced_infeasible_penalty_cycle),
@@ -2158,7 +2264,9 @@ def minimize_alm(
             }
             history_entry.update(_conditioning_metrics(final_eval))
             history.append(history_entry)
-            hard_feasible_strict = routing_state.hard_max_violation <= settings.feasibility_tol
+            hard_feasible_strict = (
+                routing_state.hard_max_violation <= settings.feasibility_tol
+            )
             hard_feasible_for_update = (
                 routing_state.hard_max_violation <= effective_feasibility_tol
             )
@@ -2299,7 +2407,10 @@ def minimize_alm(
                 _emit_history_snapshot(history_entry)
                 continue
 
-            if hard_feasible_for_update and stationarity_norm <= update_stationarity_tol:
+            if (
+                hard_feasible_for_update
+                and stationarity_norm <= update_stationarity_tol
+            ):
                 feasible_stall_count = 0
                 (
                     multipliers,
@@ -2311,9 +2422,13 @@ def minimize_alm(
                     penalty,
                     settings.multiplier_max,
                 )
-                history_entry["post_update_multipliers"] = [float(value) for value in multipliers]
+                history_entry["post_update_multipliers"] = [
+                    float(value) for value in multipliers
+                ]
                 history_entry["multiplier_cap_binding"] = bool(multiplier_cap_binding)
-                history_entry["multiplier_cap_binding_indices"] = list(multiplier_cap_binding_indices)
+                history_entry["multiplier_cap_binding_indices"] = list(
+                    multiplier_cap_binding_indices
+                )
                 if multiplier_cap_binding:
                     cap_binding_detected = True
                     cap_binding_indices.update(multiplier_cap_binding_indices)
@@ -2333,7 +2448,9 @@ def minimize_alm(
                 break
 
             if hard_feasible_for_update:
-                feasible_stall_count = 0 if made_inner_progress else feasible_stall_count + 1
+                feasible_stall_count = (
+                    0 if made_inner_progress else feasible_stall_count + 1
+                )
                 hit_stall_limit = (
                     continuation_iteration == settings.max_subproblem_continuations
                     or feasible_stall_count >= _PLATEAU_STALL_LIMIT
@@ -2385,7 +2502,9 @@ def minimize_alm(
             break
 
     if final_eval is None or last_result is None:
-        raise RuntimeError("ALM failed before any inner optimization result was produced.")
+        raise RuntimeError(
+            "ALM failed before any inner optimization result was produced."
+        )
 
     termination_reason = _termination_reason_from_history(
         history,

@@ -22,6 +22,7 @@ class Driver(StrEnum):
     SCIPY_BFGS = "scipy_bfgs"
     OPTAX_LBFGS = "optax_lbfgs"
     OPTAX_ADAM = "optax_adam"
+    OPTIMISTIX_LBFGS = "optimistix_lbfgs"
     OPTIMISTIX_LM = "optimistix_lm"
     SIMSOPT_LBFGSB = "simsopt_lbfgsb"
     SIMSOPT_BFGS = "simsopt_bfgs"
@@ -48,6 +49,8 @@ _LEGACY_TARGET_MINIMIZE_METHODS = {
     Driver.SIMSOPT_BFGS: "bfgs-ondevice",
     Driver.SIMSOPT_LBFGSB: "lbfgs-ondevice",
     Driver.SIMSOPT_ADAM: "adam-ondevice",
+    Driver.OPTAX_LBFGS: "optax-lbfgs-ondevice",
+    Driver.OPTIMISTIX_LBFGS: "optimistix-lbfgs-ondevice",
 }
 _LEGACY_TARGET_LEAST_SQUARES_METHODS = {
     Driver.SIMSOPT_LM_GMRES: "lm-ondevice",

@@ -705,6 +705,25 @@ def test_single_stage_init_accepts_fullgraph_scipy_control_optimizer(monkeypatch
     assert args.optimizer_backend == "scipy-jax-fullgraph"
 
 
+def test_single_stage_init_accepts_public_lbfgs_optimizers(monkeypatch):
+    for optimizer_backend in ("optax-lbfgs", "optimistix-lbfgs"):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "single_stage_init_parity.py",
+                "--output-json",
+                "/tmp/out.json",
+                "--optimizer-backend",
+                optimizer_backend,
+            ],
+        )
+
+        args = single_stage_init_parity_module.parse_args()
+
+        assert args.optimizer_backend == optimizer_backend
+
+
 def test_single_stage_init_accepts_objective_evaluation_trace(monkeypatch):
     monkeypatch.setattr(
         sys,
@@ -1963,6 +1982,9 @@ def test_stage2_e2e_comparison_import_bootstraps_local_simsopt():
 
 def test_repo_pythonpath_env_auto_clears_inherited_platform_selectors(monkeypatch):
     monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    monkeypatch.setenv("JAX_PLATFORM_NAME", "cuda")
+    monkeypatch.setenv("JAX_XLA_BACKEND", "cuda")
+    monkeypatch.setenv("JAX_DEFAULT_DEVICE", "cuda")
     monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "cuda")
     monkeypatch.setenv("SIMSOPT_JAX_BACKEND", "cuda")
     monkeypatch.setenv("PYTHONPATH", "/tmp/existing")
@@ -1970,6 +1992,9 @@ def test_repo_pythonpath_env_auto_clears_inherited_platform_selectors(monkeypatc
     env = repo_pythonpath_env(platform="auto")
 
     assert "JAX_PLATFORMS" not in env
+    assert "JAX_PLATFORM_NAME" not in env
+    assert "JAX_XLA_BACKEND" not in env
+    assert "JAX_DEFAULT_DEVICE" not in env
     assert "SIMSOPT_JAX_PLATFORM" not in env
     assert "SIMSOPT_JAX_BACKEND" not in env
     assert env["PYTHONPATH"].endswith("/tmp/existing")
@@ -3667,6 +3692,11 @@ def test_resolve_probe_lane_tracks_private_optimizer_backends():
         resolve_probe_lane(optimizer_backend="scipy-jax-fullgraph")
         == "target-scipy-fullgraph-control"
     )
+    assert resolve_probe_lane(optimizer_backend="optax-lbfgs") == "target-optax-lbfgs"
+    assert (
+        resolve_probe_lane(optimizer_backend="optimistix-lbfgs")
+        == "target-optimistix-lbfgs"
+    )
     with pytest.raises(ValueError, match="optimizer_backend must be one of"):
         resolve_probe_lane(optimizer_backend="hybrid")
 
@@ -4283,6 +4313,7 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
         args,
         "jax",
         platform="cpu",
+        load_surface_gamma=False,
     )
 
     assert len(observed_invocations) == 1
@@ -5015,9 +5046,131 @@ def test_single_stage_init_case_threads_profile_target_lane_flag(monkeypatch, tm
         "jax",
         platform="cpu",
         profile_target_lane=True,
+        load_surface_gamma=False,
     )
 
     assert "--profile-target-lane" in observed_command
+
+
+def test_single_stage_init_jax_case_loads_surface_geometry_from_runtime_spec(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.maxiter = 0
+    observed_command: list[str] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_command[:] = list(command)
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+
+    def fake_find_single_file(root: str | Path, pattern: str) -> Path:
+        if pattern == "surf_init.json":
+            raise AssertionError("JAX geometry parity must use the runtime spec")
+        path = Path(root) / pattern
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        fake_find_single_file,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_load_surface_gamma_runtime_spec",
+        lambda _path, _args: np.zeros((2, 2, 3)),
+    )
+
+    payload = single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        load_surface_gamma=True,
+    )
+
+    assert "--full-artifacts" not in observed_command
+    np.testing.assert_allclose(payload["surface_gamma"], np.zeros((2, 2, 3)))
+
+
+def test_single_stage_init_runtime_spec_surface_geometry_is_host_postprocess(
+    tmp_path,
+):
+    import jax
+    from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+
+    quadpoints_phi = np.linspace(0.0, 0.5, 3, endpoint=False)
+    quadpoints_theta = np.linspace(0.0, 1.0, 4, endpoint=False)
+    surface = SurfaceXYZTensorFourier(
+        nfp=2,
+        stellsym=True,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+    surface.x = surface.x + np.linspace(0.0, 1.0e-3, surface.x.size)
+    runtime_spec_path = tmp_path / "single_stage_jax_runtime_seed_spec.json"
+    runtime_spec_path.write_text(
+        json.dumps(
+            {
+                "surface": {
+                    "dofs": {
+                        "dtype": "float64",
+                        "shape": list(surface.x.shape),
+                        "data": surface.x.tolist(),
+                    },
+                    "mpol": 1,
+                    "ntor": 0,
+                    "nfp": 2,
+                    "stellsym": True,
+                    "quadpoints_phi": {
+                        "dtype": "float64",
+                        "shape": list(quadpoints_phi.shape),
+                        "data": quadpoints_phi.tolist(),
+                    },
+                    "quadpoints_theta": {
+                        "dtype": "float64",
+                        "shape": list(quadpoints_theta.shape),
+                        "data": quadpoints_theta.tolist(),
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(mpol=1, ntor=0, nphi=3, ntheta=4)
+
+    with jax.transfer_guard("disallow"):
+        observed = single_stage_init_parity_module._load_surface_gamma_runtime_spec(
+            str(runtime_spec_path),
+            args,
+        )
+
+    np.testing.assert_allclose(observed, surface.gamma())
 
 
 def test_single_stage_init_case_threads_experimental_target_lane_flag(
@@ -5082,6 +5235,7 @@ def test_single_stage_init_case_threads_experimental_target_lane_flag(
         "jax",
         platform="cpu",
         experimental_target_lane_value_and_grad=True,
+        load_surface_gamma=False,
     )
 
     assert "--experimental-target-lane-value-and-grad" in observed_command
@@ -5149,6 +5303,7 @@ def test_single_stage_init_case_threads_disable_target_lane_success_filter_flag(
         args,
         "jax",
         platform="cpu",
+        load_surface_gamma=False,
     )
 
     assert "--disable-target-lane-success-filter" in observed_command
@@ -5219,6 +5374,7 @@ def test_single_stage_init_case_threads_target_lane_boozer_trial_overrides(
         args,
         "jax",
         platform="cpu",
+        load_surface_gamma=False,
     )
 
     assert "--target-lane-boozer-bfgs-tol" in observed_command
@@ -5283,6 +5439,7 @@ def test_single_stage_init_case_preserves_target_lane_value_and_grad_result(
         args,
         "jax",
         platform="cpu",
+        load_surface_gamma=False,
     )
 
     assert payload["results"]["target_lane_value_and_grad"] is True
@@ -5722,6 +5879,15 @@ def _gpu_parity_workflow_path() -> Path:
     return _workflow_path("jax_gpu_parity.yml")
 
 
+def _perlmutter_banana_e2e_script_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "benchmarks"
+        / "perlmutter"
+        / "banana_e2e_cpu_gpu.slurm"
+    )
+
+
 def _workflow_job_section(
     workflow_text: str,
     job_name: str,
@@ -5802,8 +5968,11 @@ def test_compute_adjoint_state_uses_runtime_adjoint_state():
     rhs = np.array([1.0, -2.0])
     expected_spec = object()
 
-    def fake_compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB):
+    expected_sdofs = np.array([5.0, 6.0])
+
+    def fake_compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB, *, sdofs):
         recorded["compute_dJ_ds_args"] = (coil_set_spec, iota, G, weight_inv_modB)
+        recorded["compute_dJ_ds_sdofs"] = np.asarray(sdofs)
         return rhs
 
     def fake_solve_transpose_with_status(passed_rhs):
@@ -5821,6 +5990,7 @@ def test_compute_adjoint_state_uses_runtime_adjoint_state():
                     iota=0.1,
                     G=0.2,
                     weight_inv_modB=False,
+                    sdofs=expected_sdofs,
                 ),
                 solve_transpose=fake_solve_transpose_with_status,
                 solve_transpose_with_status=fake_solve_transpose_with_status,
@@ -5845,6 +6015,7 @@ def test_compute_adjoint_state_uses_runtime_adjoint_state():
     np.testing.assert_allclose(recorded["apply_transpose_adjoint"], rhs)
     np.testing.assert_allclose(recorded["coil_dofs"], np.array([3.0, 4.0]))
     assert recorded["compute_dJ_ds_args"] == (expected_spec, 0.1, 0.2, False)
+    np.testing.assert_allclose(recorded["compute_dJ_ds_sdofs"], expected_sdofs)
 
 
 def test_compute_adjoint_state_raises_when_runtime_operator_solve_fails():
@@ -5855,6 +6026,7 @@ def test_compute_adjoint_state_raises_when_runtime_operator_solve_fails():
                     iota=0.1,
                     G=0.2,
                     weight_inv_modB=False,
+                    sdofs=np.array([5.0, 6.0]),
                 ),
                 linearization_kind="hessian",
                 solve_transpose_with_status=lambda rhs: (rhs, False),
@@ -5864,7 +6036,7 @@ def test_compute_adjoint_state_raises_when_runtime_operator_solve_fails():
             x=np.array([3.0, 4.0]),
             coil_set_spec_from_dofs=lambda _coil_dofs: object(),
         ),
-        _compute_dJ_ds=lambda *_args: np.array([1.0, -2.0]),
+        _compute_dJ_ds=lambda *_args, **_kwargs: np.array([1.0, -2.0]),
     )
 
     with pytest.raises(RuntimeError, match="operator-backed transpose solve"):
@@ -6365,6 +6537,21 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(
     assert stage2_e2e_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
     assert stage2_e2e_args.optimizer_backend == "ondevice"
 
+    for optimizer_backend in ("optax-lbfgs", "optimistix-lbfgs"):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "stage2_e2e_comparison.py",
+                "--output-json",
+                str(tmp_path / f"stage2-tier2-{optimizer_backend}.json"),
+                "--optimizer-backend",
+                optimizer_backend,
+            ],
+        )
+        stage2_e2e_args = stage2_e2e_comparison_module.parse_args()
+        assert stage2_e2e_args.optimizer_backend == optimizer_backend
+
     monkeypatch.setattr(
         sys,
         "argv",
@@ -6577,6 +6764,32 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
         in workflow_text
     )
     assert "benchmark_artifacts/single_stage_outer_loop_cuda.json" in workflow_text
+
+
+def test_perlmutter_banana_e2e_script_enforces_cuda_strict_contract():
+    script_text = _perlmutter_banana_e2e_script_path().read_text(encoding="utf-8")
+
+    assert "export SIMSOPT_BACKEND_MODE=jax_gpu_parity" in script_text
+    assert "export SIMSOPT_BACKEND_STRICT=1" in script_text
+    assert "export SIMSOPT_JAX_TRANSFER_GUARD=disallow" in script_text
+    assert "export JAX_PLATFORMS=cuda,cpu" in script_text
+    assert 'JAX_CACHE_WHEEL_SPEC="${JAX_CACHE_WHEEL_SPEC:-etils}"' in script_text
+    assert (
+        'python -m pip install --upgrade "${JAX_GPU_WHEEL_SPEC}" '
+        '"${JAX_CACHE_WHEEL_SPEC}"' in script_text
+    )
+    assert 'local backend_mode="$2"' in script_text
+    assert 'SIMSOPT_BACKEND_MODE="${backend_mode}"' in script_text
+    assert "run_step stage2_cpu \\\n  jax_cpu_parity" in script_text
+    assert "run_step stage2_cuda \\\n  jax_gpu_parity" in script_text
+    assert "run_step single_stage_cpu \\\n  jax_cpu_parity" in script_text
+    assert "run_step single_stage_cuda \\\n  jax_gpu_parity" in script_text
+    assert "run_step tier5_cuda \\\n  jax_gpu_parity" in script_text
+    assert (
+        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"'
+        in script_text
+    )
+    assert "--jax-runtime-seed-spec" not in script_text
 
 
 def test_gpu_parity_workflow_adds_full_suite_disallow_lane():
@@ -7405,13 +7618,20 @@ def test_stage2_e2e_probe_threads_optimizer_backend_to_both_probe_lanes(
 
 
 def test_stage2_e2e_ondevice_endpoint_lane_uses_jax_cpu_reference():
-    assert stage2_e2e_comparison_module._resolve_stage2_endpoint_cpu_lane(
-        "ondevice"
-    ) == (
-        "jax",
-        "cpu",
-        "cpu-ondevice",
-    )
+    for optimizer_backend in (
+        "ondevice",
+        "scipy-jax",
+        "scipy-jax-fullgraph",
+        "optax-lbfgs",
+        "optimistix-lbfgs",
+    ):
+        assert stage2_e2e_comparison_module._resolve_stage2_endpoint_cpu_lane(
+            optimizer_backend
+        ) == (
+            "jax",
+            "cpu",
+            "cpu-ondevice",
+        )
     assert stage2_e2e_comparison_module._resolve_stage2_endpoint_cpu_lane("scipy") == (
         "cpu",
         "auto",

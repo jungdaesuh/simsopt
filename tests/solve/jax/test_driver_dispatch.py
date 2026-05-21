@@ -47,6 +47,10 @@ def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
         calls.append(("optax", driver.value, type(options).__name__, callback))
         return _fake_result()
 
+    def optimistix_minimize(_fn, _x0, *, options, callback):
+        calls.append(("optimistix", type(options).__name__, callback))
+        return _fake_result()
+
     def reference_minimize(*_args, **kwargs):
         calls.append(("legacy_reference", kwargs["method"]))
         return _fake_result()
@@ -57,6 +61,7 @@ def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
 
     monkeypatch.setattr(dispatch, "_run_scipy_minimize", scipy_minimize)
     monkeypatch.setattr(dispatch, "_run_optax_minimize", optax_minimize)
+    monkeypatch.setattr(dispatch, "_run_optimistix_minimize", optimistix_minimize)
     monkeypatch.setattr(legacy_optimizer, "reference_minimize", reference_minimize)
     monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
 
@@ -65,6 +70,7 @@ def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
         Driver.SCIPY_BFGS,
         Driver.OPTAX_LBFGS,
         Driver.OPTAX_ADAM,
+        Driver.OPTIMISTIX_LBFGS,
         Driver.SIMSOPT_LBFGSB,
         Driver.SIMSOPT_BFGS,
         Driver.SIMSOPT_TRACE_LBFGS,
@@ -79,6 +85,7 @@ def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
         ("scipy", "scipy_bfgs", "ScipyBFGSOptions", None),
         ("optax", "optax_lbfgs", "OptaxLBFGSOptions", None),
         ("optax", "optax_adam", "OptaxAdamOptions", None),
+        ("optimistix", "OptimistixLBFGSOptions", None),
         ("legacy_target", "lbfgs-ondevice"),
         ("legacy_target", "bfgs-ondevice"),
         ("legacy_reference", "lbfgs-trace"),

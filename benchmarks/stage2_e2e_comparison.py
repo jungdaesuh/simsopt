@@ -86,7 +86,16 @@ STAGE2_CURVATURE_TERM_NAME = "curvature_penalty"
 _CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
 _CPU_REFERENCE_ENDPOINT_LANE = ("cpu", "auto", "cpu-reference")
 TARGET_OPTIMIZER_BACKEND = "ondevice"
-TARGET_OPTIMIZER_BACKENDS = ("ondevice", "scipy-jax")
+TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS = (
+    "ondevice",
+    "optax-lbfgs",
+    "optimistix-lbfgs",
+)
+TARGET_OPTIMIZER_BACKENDS = (
+    *TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS,
+    "scipy-jax",
+    "scipy-jax-fullgraph",
+)
 
 
 def _resolve_stage2_endpoint_cpu_lane(
@@ -356,7 +365,7 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
         ]
         if backend == "jax":
             command.extend(["--optimizer-backend", args.optimizer_backend])
-            if args.optimizer_backend == "ondevice":
+            if args.optimizer_backend in TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS:
                 command.append("--record-warm-timings")
         if args.equilibrium_path:
             command.extend(["--equilibrium-path", args.equilibrium_path])
@@ -774,7 +783,7 @@ def _append_stage2_ondevice_failures(
         ),
         (
             bool(comparison["jax_self_intersecting"]),
-            lambda: "Final banana coil is self-intersecting on the ondevice lane.",
+            lambda: "Final banana coil is self-intersecting on the target lane.",
         ),
     ]
     for should_fail, message_factory in checks:
@@ -792,7 +801,7 @@ def evaluate_stage2_e2e_comparison(comparison: dict[str, Any]) -> list[str]:
         cpu_state=cpu_state,
         jax_state=jax_state,
     )
-    if optimizer_backend == "ondevice":
+    if optimizer_backend in TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS:
         _append_stage2_ondevice_failures(failures, comparison)
     _append_geometry_gate_failure(
         failures,
@@ -1031,7 +1040,7 @@ def main() -> None:
         )
     if "jax_optimizer_warm_run_s" in payload["timings"]:
         print(
-            "JAX ondevice optimizer timings: "
+            "JAX target optimizer timings: "
             f"cold={payload['timings']['jax_optimizer_cold_run_s']:.2f}s, "
             f"warm={payload['timings']['jax_optimizer_warm_run_s']:.2f}s, "
             "compile_overhead~="

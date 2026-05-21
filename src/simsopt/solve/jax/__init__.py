@@ -10,6 +10,7 @@ from .contracts import (
     STATUS_CODES,
     OptaxAdamCallbackEvent,
     OptaxLBFGSCallbackEvent,
+    OptimistixLBFGSCallbackEvent,
     ScipyBFGSCallbackEvent,
     ScipyLBFGSBCallbackEvent,
     SimsoptAdamCallbackEvent,
@@ -22,7 +23,7 @@ from .contracts import (
     SimsoptTraceLBFGSCallbackEvent,
     fingerprint_optimizer_result,
 )
-from .optimistix import LinearSolver, OptimistixLMOptions
+from .optimistix import LinearSolver, OptimistixLBFGSOptions, OptimistixLMOptions
 from .optax import OptaxAdamOptions, OptaxLBFGSOptions, OptaxLineSearch
 from .scipy import ScipyBFGSOptions, ScipyLBFGSBOptions, ScipyLMOptions
 from .simsopt import (
@@ -44,6 +45,8 @@ __all__ = [
     "OptaxLBFGSOptions",
     "OptaxLBFGSCallbackEvent",
     "OptaxLineSearch",
+    "OptimistixLBFGSOptions",
+    "OptimistixLBFGSCallbackEvent",
     "OptimizerCallbackEvent",
     "OptimizerResult",
     "OptimizerResultFingerprint",

@@ -6,8 +6,10 @@ import simsopt.config as simsopt_config
 import simsopt.solve.jax._dispatch as dispatch
 from simsopt.solve.jax import (
     Driver,
+    OptimistixLBFGSOptions,
     OptimistixLMOptions,
     OptaxAdamOptions,
+    OptaxLBFGSOptions,
     ScipyBFGSOptions,
     SimsoptBFGSOptions,
     least_squares,
@@ -52,6 +54,58 @@ def test_optax_driver_passes_jax_array_to_value_grad():
 
     assert result.driver is Driver.OPTAX_ADAM
     assert all(seen_jax_array)
+
+
+def test_optax_lbfgs_runs_full_value_grad_driver():
+    target = jnp.array([1.0, -2.0], dtype=jnp.float64)
+    seen_jax_array = []
+
+    def value_and_grad(x):
+        seen_jax_array.append(isinstance(x, jax.Array))
+        residual = x - target
+        return jnp.vdot(residual, residual), 2.0 * residual
+
+    result = minimize(
+        value_and_grad,
+        jnp.array([0.0, 0.0], dtype=jnp.float64),
+        driver=Driver.OPTAX_LBFGS,
+        options=OptaxLBFGSOptions(
+            maxiter=12,
+            gtol=1e-8,
+            memory_size=3,
+            max_linesearch_steps=10,
+        ),
+    )
+
+    assert result.driver is Driver.OPTAX_LBFGS
+    assert result.success is True
+    assert all(seen_jax_array)
+    np.testing.assert_allclose(result.x, np.asarray(target), rtol=1e-7, atol=1e-7)
+
+
+def test_optax_lbfgs_uses_quasi_newton_line_search_initial_guess(monkeypatch):
+    observed = {}
+    real_scale_by_zoom_linesearch = dispatch.optax.scale_by_zoom_linesearch
+
+    def recording_scale_by_zoom_linesearch(*args, **kwargs):
+        observed.update(kwargs)
+        return real_scale_by_zoom_linesearch(*args, **kwargs)
+
+    monkeypatch.setattr(
+        dispatch.optax,
+        "scale_by_zoom_linesearch",
+        recording_scale_by_zoom_linesearch,
+    )
+
+    minimize(
+        lambda x: (jnp.vdot(x, x), 2.0 * x),
+        jnp.array([1.0, -2.0], dtype=jnp.float64),
+        driver=Driver.OPTAX_LBFGS,
+        options=OptaxLBFGSOptions(maxiter=0, max_linesearch_steps=7),
+    )
+
+    assert observed["max_linesearch_steps"] == 7
+    assert observed["initial_guess_strategy"] == "one"
 
 
 def test_optax_numpy_x0_uses_explicit_device_put_under_strict_transfer_guard():
@@ -104,6 +158,47 @@ def test_optimistix_numpy_x0_uses_explicit_device_put(monkeypatch):
     assert staged_numpy_inputs[0] is x0
 
 
+def test_optimistix_lbfgs_runs_full_value_grad_driver():
+    target = jax.device_put(np.asarray([1.0, -2.0], dtype=np.float64))
+    seen_jax_array = []
+
+    def value_and_grad(x):
+        seen_jax_array.append(isinstance(x, jax.Array))
+        residual = x - target
+        return jnp.vdot(residual, residual), 2.0 * residual
+
+    result = minimize(
+        value_and_grad,
+        np.asarray([0.0, 0.0], dtype=np.float64),
+        driver=Driver.OPTIMISTIX_LBFGS,
+        options=OptimistixLBFGSOptions(maxiter=12, tol=1e-8, history_length=3),
+    )
+
+    assert result.driver is Driver.OPTIMISTIX_LBFGS
+    assert result.success is True
+    assert all(seen_jax_array)
+    np.testing.assert_allclose(result.x, np.asarray(target), rtol=1e-7, atol=1e-7)
+
+
+def test_optimistix_lbfgs_uses_supplied_gradient_contract():
+    target = jax.device_put(np.asarray([1.0, -2.0], dtype=np.float64))
+
+    def value_and_grad(x):
+        residual = x - target
+        return jax.lax.stop_gradient(jnp.vdot(residual, residual)), 2.0 * residual
+
+    result = minimize(
+        value_and_grad,
+        np.asarray([0.0, 0.0], dtype=np.float64),
+        driver=Driver.OPTIMISTIX_LBFGS,
+        options=OptimistixLBFGSOptions(maxiter=12, tol=1e-8, history_length=3),
+    )
+
+    assert result.driver is Driver.OPTIMISTIX_LBFGS
+    assert result.success is True
+    np.testing.assert_allclose(result.x, np.asarray(target), rtol=1e-7, atol=1e-7)
+
+
 def test_optimistix_driver_runs_under_strict_host_to_device_transfer_guard():
     dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
     x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype))
@@ -120,6 +215,23 @@ def test_optimistix_driver_runs_under_strict_host_to_device_transfer_guard():
         )
 
     assert result.driver is Driver.OPTIMISTIX_LM
+    assert result.x.shape == (2,)
+
+
+def test_optimistix_lbfgs_runs_under_strict_host_to_device_transfer_guard():
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype))
+    two = jax.device_put(np.asarray(2.0, dtype=dtype))
+
+    with jax.transfer_guard_host_to_device("disallow"):
+        result = minimize(
+            lambda x: (jnp.vdot(x, x), two * x),
+            x0,
+            driver=Driver.OPTIMISTIX_LBFGS,
+            options=OptimistixLBFGSOptions(maxiter=1),
+        )
+
+    assert result.driver is Driver.OPTIMISTIX_LBFGS
     assert result.x.shape == (2,)
 
 

@@ -111,6 +111,13 @@ class OptaxAdamCallbackEvent(_OptimizerCallbackEventBase):
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class OptimistixLBFGSCallbackEvent(_OptimizerCallbackEventBase):
+    history_length: int
+    optimistix_result: str
+    driver: Literal[Driver.OPTIMISTIX_LBFGS] = Driver.OPTIMISTIX_LBFGS
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class SimsoptLBFGSBCallbackEvent(_OptimizerCallbackEventBase):
     accepted_alpha: float
     num_linesearch_steps: int
@@ -174,6 +181,7 @@ OptimizerCallbackEvent: TypeAlias = (
     | ScipyBFGSCallbackEvent
     | OptaxLBFGSCallbackEvent
     | OptaxAdamCallbackEvent
+    | OptimistixLBFGSCallbackEvent
     | SimsoptLBFGSBCallbackEvent
     | SimsoptBFGSCallbackEvent
     | SimsoptTraceLBFGSCallbackEvent
@@ -192,6 +200,7 @@ STATUS_CODES: dict[Driver, tuple[int, ...]] = {
     Driver.SCIPY_BFGS: (0, 1, 2, 3, 6),
     Driver.OPTAX_LBFGS: (0, 1, 2),
     Driver.OPTAX_ADAM: (0, 1, 2),
+    Driver.OPTIMISTIX_LBFGS: (0, 1, 2),
     Driver.OPTIMISTIX_LM: (0, 1, 2),
     Driver.SIMSOPT_LBFGSB: (0, 1, 2, 3, 4, 5, 6),
     Driver.SIMSOPT_BFGS: (-1, 0, 1, 2, 3, 5),

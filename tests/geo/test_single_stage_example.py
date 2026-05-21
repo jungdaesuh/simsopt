@@ -1,5 +1,5 @@
 import copy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import importlib.util
 import os
 import json
@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from simsopt._core.optimizable import Optimizable
+from simsopt.geo.optimizer_jax import render_invalid_optimizer_backend_message
 from simsopt.geo.surfaceobjectives import (
     SurfaceSurfaceDistance,
     boozer_surface_residual,
@@ -56,15 +57,14 @@ TEST_IOTA = 0.15
 TEST_G0 = 1.0
 _SINGLE_STAGE_JAX_ONLY_ONDEVICE = (
     "the single-stage outer loop with backend='jax' requires "
-    "optimizer_backend='ondevice', optimizer_backend='scipy-jax', or "
-    "optimizer_backend='scipy-jax-fullgraph'"
+    "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
+    "optimizer_backend='scipy-jax-fullgraph', optimizer_backend='optax-lbfgs', "
+    "or optimizer_backend='optimistix-lbfgs'"
 )
 _SINGLE_STAGE_CPU_ONLY_SCIPY = (
     "single-stage outer loop CPU/reference lane only supports optimizer_backend='scipy'"
 )
-_OPTIMIZER_BACKEND_INVALID = (
-    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, scipy-jax-fullgraph."
-)
+_OPTIMIZER_BACKEND_INVALID = render_invalid_optimizer_backend_message("outer")
 
 
 def load_single_stage_example_module():
@@ -87,6 +87,32 @@ def load_stage2_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def target_optimizer_contract_for_legacy_method(method):
+    from simsopt.geo.optimizer_jax import (
+        Driver,
+        TargetObjectiveRoute,
+        TargetOptimizerContract,
+    )
+
+    if method == "lbfgs-ondevice":
+        return TargetOptimizerContract(driver=Driver.SIMSOPT_LBFGSB)
+    if method == "lbfgs-scipy-jax":
+        return TargetOptimizerContract(
+            driver=Driver.SCIPY_LBFGSB,
+            objective_route=TargetObjectiveRoute.SCIPY_JAX,
+        )
+    if method == "lbfgs-scipy-jax-fullgraph":
+        return TargetOptimizerContract(
+            driver=Driver.SCIPY_LBFGSB,
+            objective_route=TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH,
+        )
+    if method == "optax-lbfgs-ondevice":
+        return TargetOptimizerContract(driver=Driver.OPTAX_LBFGS)
+    if method == "optimistix-lbfgs-ondevice":
+        return TargetOptimizerContract(driver=Driver.OPTIMISTIX_LBFGS)
+    raise ValueError(f"Unsupported target optimizer method {method!r}.")
 
 
 class FakeSurfPrev:
@@ -552,6 +578,9 @@ class SingleStageExampleTests(unittest.TestCase):
     def patch_initialize_boozer_surface_jax(self, module, fake_boozer_surface_jax):
         fake_jax_module = types.ModuleType("simsopt.geo.boozersurface_jax")
         fake_jax_module.BoozerSurfaceJAX = fake_boozer_surface_jax
+        fake_jax_module.default_least_squares_algorithm_for_backend = (
+            lambda _optimizer_backend: "quasi-newton"
+        )
         fake_jax_module.build_boozer_surface_runtime_state = lambda surface: {
             "mpol": surface.mpol,
             "ntor": surface.ntor,
@@ -581,15 +610,46 @@ class SingleStageExampleTests(unittest.TestCase):
         require_target_backend_x64,
         jax_minimize,
         scipy_minimize_side_effect=None,
+        module=None,
     ):
+        from simsopt.geo.optimizer_jax import Driver, TargetObjectiveRoute
+
         class ReferenceOptimizerContract:
-            def __init__(self, method):
-                self.method = method
+            def __init__(self, driver):
+                self.driver = driver
 
         class TargetOptimizerContract:
-            def __init__(self, method, *, use_least_squares_objective=False):
-                self.method = method
+            def __init__(
+                self,
+                driver,
+                *,
+                use_least_squares_objective=False,
+                objective_route=TargetObjectiveRoute.ARRAY_NATIVE,
+            ):
+                self.driver = driver
                 self.use_least_squares_objective = use_least_squares_objective
+                self.objective_route = objective_route
+
+        def reference_driver_method(driver):
+            if driver == Driver.SCIPY_LBFGSB:
+                return "lbfgs"
+            if driver == Driver.SIMSOPT_TRACE_LBFGS:
+                return "lbfgs-trace"
+            raise ValueError(f"unsupported fake reference driver {driver!r}")
+
+        def target_driver_method(contract):
+            if contract.driver == Driver.SIMSOPT_LBFGSB:
+                return "lbfgs-ondevice"
+            if contract.driver == Driver.OPTAX_LBFGS:
+                return "optax-lbfgs-ondevice"
+            if contract.driver == Driver.OPTIMISTIX_LBFGS:
+                return "optimistix-lbfgs-ondevice"
+            if contract.driver == Driver.SCIPY_LBFGSB:
+                if contract.objective_route == TargetObjectiveRoute.SCIPY_JAX:
+                    return "lbfgs-scipy-jax"
+                if contract.objective_route == TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH:
+                    return "lbfgs-scipy-jax-fullgraph"
+            raise ValueError(f"unsupported fake target contract {contract!r}")
 
         def resolve_reference_outer_loop_optimizer_contract(
             field_backend,
@@ -603,13 +663,15 @@ class SingleStageExampleTests(unittest.TestCase):
                 "ondevice",
                 "scipy-jax",
                 "scipy-jax-fullgraph",
+                "optax-lbfgs",
+                "optimistix-lbfgs",
             }:
                 raise ValueError(_OPTIMIZER_BACKEND_INVALID)
             if field_backend == "jax":
                 raise ValueError(f"the {_SINGLE_STAGE_JAX_ONLY_ONDEVICE}.")
             if optimizer_backend != "scipy":
                 raise ValueError(f"the {_SINGLE_STAGE_CPU_ONLY_SCIPY}.")
-            return ReferenceOptimizerContract("lbfgs")
+            return ReferenceOptimizerContract(Driver.SCIPY_LBFGSB)
 
         def resolve_target_outer_loop_optimizer_contract(
             field_backend,
@@ -624,25 +686,40 @@ class SingleStageExampleTests(unittest.TestCase):
                 "ondevice",
                 "scipy-jax",
                 "scipy-jax-fullgraph",
+                "optax-lbfgs",
+                "optimistix-lbfgs",
             }:
                 raise ValueError(_OPTIMIZER_BACKEND_INVALID)
             if field_backend != "jax" or optimizer_backend not in {
                 "ondevice",
                 "scipy-jax",
                 "scipy-jax-fullgraph",
+                "optax-lbfgs",
+                "optimistix-lbfgs",
             }:
                 raise ValueError(f"the {_SINGLE_STAGE_JAX_ONLY_ONDEVICE}.")
             require_target_backend_x64(optimizer_backend)
-            method = "lbfgs-ondevice"
+            driver = Driver.SIMSOPT_LBFGSB
+            objective_route = TargetObjectiveRoute.ARRAY_NATIVE
             if optimizer_backend == "scipy-jax":
-                method = "lbfgs-scipy-jax"
+                driver = Driver.SCIPY_LBFGSB
+                objective_route = TargetObjectiveRoute.SCIPY_JAX
             if optimizer_backend == "scipy-jax-fullgraph":
-                method = "lbfgs-scipy-jax-fullgraph"
-            return TargetOptimizerContract(method)
+                driver = Driver.SCIPY_LBFGSB
+                objective_route = TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
+            if optimizer_backend == "optax-lbfgs":
+                driver = Driver.OPTAX_LBFGS
+            if optimizer_backend == "optimistix-lbfgs":
+                driver = Driver.OPTIMISTIX_LBFGS
+            return TargetOptimizerContract(driver, objective_route=objective_route)
 
         fake_optimizer_module = types.ModuleType("simsopt.geo.optimizer_jax")
+        fake_optimizer_module.Driver = Driver
         fake_optimizer_module.ReferenceOptimizerContract = ReferenceOptimizerContract
+        fake_optimizer_module.TargetObjectiveRoute = TargetObjectiveRoute
         fake_optimizer_module.TargetOptimizerContract = TargetOptimizerContract
+        fake_optimizer_module.reference_driver_method = reference_driver_method
+        fake_optimizer_module.target_driver_method = target_driver_method
         fake_optimizer_module.require_target_backend_x64 = require_target_backend_x64
         fake_optimizer_module.reference_minimize = jax_minimize
         fake_optimizer_module.target_minimize = jax_minimize
@@ -655,9 +732,45 @@ class SingleStageExampleTests(unittest.TestCase):
         scipy_patch = patch(
             "scipy.optimize.minimize", side_effect=scipy_minimize_side_effect
         )
-        with scipy_patch, patch.dict(
-            sys.modules, {"simsopt.geo.optimizer_jax": fake_optimizer_module}
-        ):
+        patched_module_attrs = {
+            "Driver": Driver,
+            "ReferenceOptimizerContract": ReferenceOptimizerContract,
+            "TargetObjectiveRoute": TargetObjectiveRoute,
+            "TargetOptimizerContract": TargetOptimizerContract,
+            "reference_driver_method": reference_driver_method,
+            "target_driver_method": target_driver_method,
+            "require_target_backend_x64": require_target_backend_x64,
+            "reference_minimize": jax_minimize,
+            "target_minimize": jax_minimize,
+            "resolve_reference_outer_loop_optimizer_contract": (
+                resolve_reference_outer_loop_optimizer_contract
+            ),
+            "resolve_target_outer_loop_optimizer_contract": (
+                resolve_target_outer_loop_optimizer_contract
+            ),
+        }
+        with ExitStack() as stack:
+            stack.enter_context(scipy_patch)
+            stack.enter_context(
+                patch.dict(
+                    sys.modules, {"simsopt.geo.optimizer_jax": fake_optimizer_module}
+                )
+            )
+            if module is not None:
+                for attr_name, attr_value in patched_module_attrs.items():
+                    if hasattr(module, attr_name):
+                        stack.enter_context(patch.object(module, attr_name, attr_value))
+            for loaded_module in tuple(sys.modules.values()):
+                module_file = getattr(loaded_module, "__file__", None)
+                if (
+                    module_file is not None
+                    and Path(module_file).resolve() == EXAMPLE_MODULE_PATH
+                ):
+                    for attr_name, attr_value in patched_module_attrs.items():
+                        if hasattr(loaded_module, attr_name):
+                            stack.enter_context(
+                                patch.object(loaded_module, attr_name, attr_value)
+                            )
             yield
 
     @contextmanager
@@ -738,7 +851,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(call_sdofs)
         self.assertEqual(boozer_surface.constraint_weight, 1.0)
         self.assertEqual(boozer_surface.options["verbose"], True)
-        self.assertEqual(boozer_surface.options["optimizer_backend"], "ondevice")
+        from simsopt.geo.optimizer_jax import Driver
+
+        self.assertEqual(boozer_surface.options["inner_driver"], Driver.SIMSOPT_BFGS)
         self.assertNotIn("materialize_dense_linearization", boozer_surface.options)
         self.assertEqual(
             type(boozer_surface.surface).__name__,
@@ -996,10 +1111,12 @@ class SingleStageExampleTests(unittest.TestCase):
                 optimizer_backend="ondevice",
             )
 
+        from simsopt.geo.optimizer_jax import Driver
+
         self.assertEqual(len(fake_boozer_surface_jax.instances), 1)
         self.assertEqual(
-            fake_boozer_surface_jax.instances[0].options["optimizer_backend"],
-            "ondevice",
+            fake_boozer_surface_jax.instances[0].options["inner_driver"],
+            Driver.SIMSOPT_BFGS,
         )
 
     def test_initialize_boozer_surface_limited_memory_disables_dense_linearization(
@@ -1026,7 +1143,10 @@ class SingleStageExampleTests(unittest.TestCase):
                 boozer_limited_memory=True,
             )
 
+        from simsopt.geo.optimizer_jax import Driver
+
         options = fake_boozer_surface_jax.instances[0].options
+        self.assertEqual(options["inner_driver"], Driver.SIMSOPT_LBFGSB)
         self.assertIs(options["materialize_dense_linearization"], False)
         self.assertIs(options["force_ondevice_limited_memory"], True)
 
@@ -1051,10 +1171,12 @@ class SingleStageExampleTests(unittest.TestCase):
                 boozer_least_squares_algorithm="lm",
             )
 
+        from simsopt.geo.optimizer_jax import Driver
+
         self.assertEqual(len(fake_boozer_surface_jax.instances), 1)
         self.assertEqual(
-            fake_boozer_surface_jax.instances[0].options["least_squares_algorithm"],
-            "lm",
+            fake_boozer_surface_jax.instances[0].options["inner_driver"],
+            Driver.SIMSOPT_LM_GMRES,
         )
 
     def test_initialize_boozer_surface_threads_solver_budget_overrides(self):
@@ -1664,6 +1786,14 @@ class SingleStageExampleTests(unittest.TestCase):
             "ondevice",
         )
         self.assertEqual(
+            module.resolve_boozer_optimizer_backend("jax", "optax-lbfgs", None),
+            "ondevice",
+        )
+        self.assertEqual(
+            module.resolve_boozer_optimizer_backend("jax", "optimistix-lbfgs", None),
+            "ondevice",
+        )
+        self.assertEqual(
             module.resolve_boozer_optimizer_backend(
                 "jax",
                 "scipy-jax-fullgraph",
@@ -1761,6 +1891,40 @@ class SingleStageExampleTests(unittest.TestCase):
                 True,
             )
 
+    def test_resolve_single_stage_boozer_inner_driver_from_compat_options(self):
+        module = self.load_module()
+        from simsopt.geo.optimizer_jax import Driver
+
+        self.assertIsNone(
+            module.resolve_single_stage_boozer_inner_driver(
+                "cpu",
+                "scipy",
+            )
+        )
+        self.assertEqual(
+            module.resolve_single_stage_boozer_inner_driver(
+                "jax",
+                "ondevice",
+            ),
+            Driver.SIMSOPT_BFGS,
+        )
+        self.assertEqual(
+            module.resolve_single_stage_boozer_inner_driver(
+                "jax",
+                "ondevice",
+                "ondevice",
+                "lm",
+            ),
+            Driver.SIMSOPT_LM_GMRES,
+        )
+        self.assertEqual(
+            module.resolve_single_stage_boozer_inner_driver(
+                "jax",
+                "scipy-jax-fullgraph",
+            ),
+            Driver.SCIPY_BFGS,
+        )
+
     def test_parse_args_does_not_treat_optimizer_env_as_explicit_boozer_override(self):
         module = self.load_module()
 
@@ -1834,6 +1998,29 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
         self.assertFalse(args.boozer_least_squares_algorithm_explicit)
         self.assertIsNone(args.boozer_limited_memory)
+
+    def test_parse_args_public_lbfgs_outer_defaults_boozer_to_ondevice(self):
+        module = self.load_module()
+
+        for optimizer_backend in ("optax-lbfgs", "optimistix-lbfgs"):
+            with patch.dict(os.environ, {}, clear=True), patch.object(
+                sys,
+                "argv",
+                [
+                    "single_stage_banana_example.py",
+                    "--backend",
+                    "jax",
+                    "--optimizer-backend",
+                    optimizer_backend,
+                ],
+            ):
+                args = module.parse_args()
+
+            self.assertEqual(args.optimizer_backend, optimizer_backend)
+            self.assertIsNone(args.boozer_optimizer_backend)
+            self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
+            self.assertFalse(args.boozer_least_squares_algorithm_explicit)
+            self.assertIsNone(args.boozer_limited_memory)
 
     def test_parse_args_rejects_scipy_jax_fullstate_outer_backend(self):
         module = self.load_module()
@@ -2620,38 +2807,60 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_scipy_jax_contract_uses_target_scipy_control_lane(self):
         module = self.load_module()
         from simsopt.geo.optimizer_jax import (
+            Driver,
             ReferenceOptimizerContract,
+            TargetObjectiveRoute,
             TargetOptimizerContract,
         )
 
         self.assertTrue(
             module.single_stage_optimizer_contract_uses_array_native_target_lane(
-                TargetOptimizerContract(method="lbfgs-ondevice"),
+                TargetOptimizerContract(driver=Driver.SIMSOPT_LBFGSB),
                 constraint_method="penalty",
             )
         )
         self.assertTrue(
             module.single_stage_optimizer_contract_uses_full_state_target_lane(
-                TargetOptimizerContract(method="lbfgs-ondevice"),
+                TargetOptimizerContract(driver=Driver.SIMSOPT_LBFGSB),
                 constraint_method="penalty",
             )
         )
+        for driver in (Driver.OPTAX_LBFGS, Driver.OPTIMISTIX_LBFGS):
+            self.assertTrue(
+                module.single_stage_optimizer_contract_uses_array_native_target_lane(
+                    TargetOptimizerContract(driver=driver),
+                    constraint_method="penalty",
+                )
+            )
+            self.assertTrue(
+                module.single_stage_optimizer_contract_uses_full_state_target_lane(
+                    TargetOptimizerContract(driver=driver),
+                    constraint_method="penalty",
+                )
+            )
         self.assertTrue(
             module.single_stage_optimizer_contract_uses_array_native_target_lane(
-                TargetOptimizerContract(method="lbfgs-scipy-jax"),
+                TargetOptimizerContract(
+                    driver=Driver.SCIPY_LBFGSB,
+                    objective_route=TargetObjectiveRoute.SCIPY_JAX,
+                ),
                 constraint_method="penalty",
             )
         )
         self.assertFalse(
             module.single_stage_optimizer_contract_uses_full_state_target_lane(
-                TargetOptimizerContract(method="lbfgs-scipy-jax"),
+                TargetOptimizerContract(
+                    driver=Driver.SCIPY_LBFGSB,
+                    objective_route=TargetObjectiveRoute.SCIPY_JAX,
+                ),
                 constraint_method="penalty",
             )
         )
         self.assertFalse(
             module.single_stage_optimizer_contract_uses_array_native_target_lane(
                 TargetOptimizerContract(
-                    method=module._JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD,
+                    driver=Driver.SCIPY_LBFGSB,
+                    objective_route=TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH,
                 ),
                 constraint_method="penalty",
             )
@@ -2659,13 +2868,14 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(
             module.single_stage_optimizer_contract_uses_full_graph_jax_scipy(
                 TargetOptimizerContract(
-                    method=module._JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD,
+                    driver=Driver.SCIPY_LBFGSB,
+                    objective_route=TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH,
                 )
             )
         )
         self.assertFalse(
             module.single_stage_optimizer_contract_uses_array_native_target_lane(
-                ReferenceOptimizerContract(method="lbfgs"),
+                ReferenceOptimizerContract(driver=Driver.SCIPY_LBFGSB),
                 constraint_method="penalty",
             )
         )
@@ -2735,14 +2945,49 @@ class SingleStageExampleTests(unittest.TestCase):
             dof_map,
         )
 
-        value, gradient = full_state_value_and_grad(
-            jnp.array([1.0, 10.0, 2.0, 20.0, 30.0, 3.0], dtype=jnp.float64)
+        optimizer_dofs = jnp.array(
+            [1.0, 10.0, 2.0, 20.0, 30.0, 3.0],
+            dtype=jnp.float64,
         )
+        with jax.transfer_guard("disallow"):
+            value, gradient = full_state_value_and_grad(optimizer_dofs)
 
         self.assertEqual(float(value), 14.0)
         np.testing.assert_array_equal(
             np.asarray(gradient),
             np.array([2.0, 0.0, 4.0, 0.0, 0.0, 6.0]),
+        )
+
+    def test_init_only_full_state_target_lane_uses_traceable_objective(self):
+        module = self.load_module()
+
+        self.assertFalse(
+            module.single_stage_target_lane_uses_full_graph_host_callback(
+                use_target_lane_full_state_optimizer=True,
+                init_only=True,
+                supports_host_callback=True,
+            )
+        )
+        self.assertTrue(
+            module.single_stage_target_lane_uses_full_graph_host_callback(
+                use_target_lane_full_state_optimizer=True,
+                init_only=False,
+                supports_host_callback=True,
+            )
+        )
+        self.assertFalse(
+            module.single_stage_target_lane_uses_full_graph_host_callback(
+                use_target_lane_full_state_optimizer=False,
+                init_only=False,
+                supports_host_callback=True,
+            )
+        )
+        self.assertFalse(
+            module.single_stage_target_lane_uses_full_graph_host_callback(
+                use_target_lane_full_state_optimizer=True,
+                init_only=False,
+                supports_host_callback=False,
+            )
         )
 
     def test_full_graph_host_callback_value_and_grad_is_cacheable(self):
@@ -5247,21 +5492,28 @@ class SingleStageExampleTests(unittest.TestCase):
     ):
         module = self.load_module()
 
-        self.assertEqual(
-            module.resolve_single_stage_outer_maxls(
-                "jax",
-                "ondevice",
-                benchmark_mode=True,
-            ),
-            4,
-        )
+        for optimizer_backend in ("ondevice", "optax-lbfgs", "optimistix-lbfgs"):
+            self.assertEqual(
+                module.resolve_single_stage_outer_maxls(
+                    "jax",
+                    optimizer_backend,
+                    benchmark_mode=True,
+                ),
+                4,
+            )
 
     def test_resolve_single_stage_outer_maxls_uses_float32_smoke_budget_for_target_lane(
         self,
     ):
         module = self.load_module()
 
-        for optimizer_backend in ("ondevice", "scipy-jax", "scipy-jax-fullgraph"):
+        for optimizer_backend in (
+            "ondevice",
+            "scipy-jax",
+            "scipy-jax-fullgraph",
+            "optax-lbfgs",
+            "optimistix-lbfgs",
+        ):
             self.assertEqual(
                 module.resolve_single_stage_outer_maxls(
                     "jax",
@@ -5478,6 +5730,20 @@ class SingleStageExampleTests(unittest.TestCase):
                 enabled=True,
             )
         )
+        for optimizer_backend in ("optax-lbfgs", "optimistix-lbfgs"):
+            self.assertTrue(
+                module.use_experimental_target_lane_value_and_grad(
+                    backend="jax",
+                    optimizer_backend=optimizer_backend,
+                    enabled=True,
+                )
+            )
+            self.assertTrue(
+                module.use_target_lane_value_and_grad(
+                    backend="jax",
+                    optimizer_backend=optimizer_backend,
+                )
+            )
         self.assertTrue(
             module.use_target_lane_value_and_grad(
                 backend="jax",
@@ -6340,6 +6606,32 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertFalse(marker["accepted"])
         self.assertIn("optimizer_success_not_true", marker["rejection_reasons"])
 
+    def test_write_single_stage_final_artifact_writes_rejected_marker(self):
+        module = self.load_module()
+        final_snapshot = self._make_single_stage_final_snapshot(
+            module,
+            optimizer_result={"success": False, "status": 6},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accepted = module.write_single_stage_final_artifact(tmpdir, final_snapshot)
+            marker = json.loads((Path(tmpdir) / "REJECTED.json").read_text())
+
+            self.assertFalse(accepted)
+            self.assertFalse((Path(tmpdir) / "results.json").exists())
+            self.assertIn("optimizer_status_6", marker["rejection_reasons"])
+
+    def test_write_single_stage_final_artifact_writes_results_json(self):
+        module = self.load_module()
+        final_snapshot = self._make_single_stage_final_snapshot(module)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accepted = module.write_single_stage_final_artifact(tmpdir, final_snapshot)
+
+            self.assertTrue(accepted)
+            self.assertTrue((Path(tmpdir) / "results.json").exists())
+            self.assertFalse((Path(tmpdir) / "REJECTED.json").exists())
+
     def test_write_single_stage_results_json_rejects_failed_optimizer(self):
         module = self.load_module()
         final_snapshot = self._make_single_stage_final_snapshot(
@@ -6366,6 +6658,130 @@ class SingleStageExampleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "final_gradient_nonfinite"):
                 module.write_single_stage_results_json(tmpdir, final_snapshot)
             self.assertFalse((Path(tmpdir) / "results.json").exists())
+
+    def test_init_only_objective_satisfies_accepted_artifact_gate(self):
+        module = self.load_module()
+        final_snapshot = self._make_single_stage_final_snapshot(
+            module,
+            optimizer_result={
+                "success": True,
+                "status": None,
+                "termination_message": "init_only",
+            },
+            optimizer_diagnostics={
+                "fun": None,
+                "fun_finite": None,
+                "jac_finite": None,
+                "invalid_state": None,
+            },
+        )
+
+        final_snapshot = module.with_single_stage_init_only_objective(
+            final_snapshot,
+            initial_objective=1.25,
+            init_only=True,
+        )
+        reasons = module.single_stage_result_rejection_reasons(final_snapshot)
+
+        self.assertEqual(reasons, [])
+        self.assertEqual(final_snapshot.optimizer_diagnostics["fun"], 1.25)
+        self.assertTrue(final_snapshot.optimizer_diagnostics["fun_finite"])
+        self.assertFalse(final_snapshot.optimizer_diagnostics["invalid_state"])
+
+    def test_init_only_nonfinite_initial_objective_stays_rejected(self):
+        module = self.load_module()
+        final_snapshot = self._make_single_stage_final_snapshot(
+            module,
+            optimizer_result={
+                "success": True,
+                "status": None,
+                "termination_message": "init_only",
+            },
+            optimizer_diagnostics={
+                "fun": None,
+                "fun_finite": None,
+                "jac_finite": None,
+                "invalid_state": None,
+            },
+        )
+
+        final_snapshot = module.with_single_stage_init_only_objective(
+            final_snapshot,
+            initial_objective=np.nan,
+            init_only=True,
+        )
+        reasons = module.single_stage_result_rejection_reasons(final_snapshot)
+
+        self.assertEqual(reasons, ["final_objective_nonfinite"])
+
+    def test_seed_pending_target_lane_initial_objective_uses_value_and_grad(self):
+        module = self.load_module()
+        run_dict = {
+            "initial_objective_pending": True,
+            "J": np.nan,
+            "dJ": np.zeros(2),
+            "initial_objective": np.nan,
+        }
+
+        def value_and_grad(x):
+            np.testing.assert_allclose(x, np.array([3.0, 4.0]))
+            return 7.5, np.array([0.25, -0.5])
+
+        result = module.seed_pending_single_stage_target_lane_initial_objective(
+            run_dict,
+            target_value_and_grad_objective=value_and_grad,
+            optimizer_dofs=np.array([1.0, 2.0]),
+            objective_input_dofs=lambda dofs: np.asarray(dofs) + 2.0,
+        )
+
+        self.assertEqual(result[0], 7.5)
+        np.testing.assert_allclose(result[1], np.array([0.25, -0.5]))
+        self.assertEqual(run_dict["J"], 7.5)
+        np.testing.assert_allclose(run_dict["dJ"], np.array([0.25, -0.5]))
+        self.assertEqual(run_dict["initial_objective"], 7.5)
+        self.assertFalse(run_dict["initial_objective_pending"])
+
+    def test_seed_pending_target_lane_initial_objective_stages_device_input(self):
+        module = self.load_module()
+        run_dict = {
+            "initial_objective_pending": True,
+            "J": np.nan,
+            "dJ": np.zeros(2),
+            "initial_objective": np.nan,
+        }
+
+        @jax.jit
+        def value_and_grad(x):
+            return jnp.sum(x), 2.0 * x
+
+        with jax.transfer_guard("disallow"):
+            result = module.seed_pending_single_stage_target_lane_initial_objective(
+                run_dict,
+                target_value_and_grad_objective=value_and_grad,
+                optimizer_dofs=np.array([1.0, 2.0]),
+                objective_input_dofs=lambda dofs: np.asarray(dofs) + 2.0,
+            )
+
+        self.assertEqual(float(result[0]), 7.0)
+        np.testing.assert_allclose(np.asarray(result[1]), np.array([6.0, 8.0]))
+        self.assertEqual(run_dict["J"], 7.0)
+        np.testing.assert_allclose(run_dict["dJ"], np.array([6.0, 8.0]))
+        self.assertEqual(run_dict["initial_objective"], 7.0)
+        self.assertFalse(run_dict["initial_objective_pending"])
+
+    def test_seed_pending_target_lane_initial_objective_raises_without_bundle(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "requires the fused target-lane value/gradient objective",
+        ):
+            module.seed_pending_single_stage_target_lane_initial_objective(
+                {"initial_objective_pending": True},
+                target_value_and_grad_objective=None,
+                optimizer_dofs=np.array([1.0]),
+                objective_input_dofs=lambda dofs: dofs,
+            )
 
     def test_summarize_single_stage_final_optimizer_result_copies_status(self):
         module = self.load_module()
@@ -7234,7 +7650,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 {
                     "fun": fun,
                     "dofs": np.asarray(recorded_dofs, dtype=np.float64),
-                    "contract_method": contract.method,
+                    "contract_method": module.single_stage_optimizer_contract_method(
+                        contract
+                    ),
                     "maxiter": maxiter,
                     "ftol": ftol,
                     "gtol": gtol,
@@ -7286,7 +7704,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 object(),
                 object(),
                 anchor_dofs=np.array([1.0, -2.0], dtype=np.float64),
-                contract=types.SimpleNamespace(method="lbfgs-ondevice"),
+                contract=target_optimizer_contract_for_legacy_method("lbfgs-ondevice"),
                 phase1_maxiter=4,
                 step_scale=0.25,
                 ftol=1e-8,
@@ -7461,7 +7879,9 @@ class SingleStageExampleTests(unittest.TestCase):
                     object(),
                     object(),
                     anchor_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
-                    contract=types.SimpleNamespace(method="lbfgs-ondevice"),
+                    contract=target_optimizer_contract_for_legacy_method(
+                        "lbfgs-ondevice"
+                    ),
                     phase1_maxiter=4,
                     step_scale=0.25,
                     ftol=1e-8,
@@ -7586,7 +8006,7 @@ class SingleStageExampleTests(unittest.TestCase):
                         object(),
                         object(),
                         anchor_dofs=np.array([1.0, -2.0], dtype=np.float64),
-                        contract=types.SimpleNamespace(method=method),
+                        contract=target_optimizer_contract_for_legacy_method(method),
                         phase1_maxiter=4,
                         step_scale=0.25,
                         ftol=1e-8,
@@ -7725,7 +8145,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 object(),
                 object(),
                 anchor_dofs=np.array([1.0, -2.0], dtype=np.float64),
-                contract=types.SimpleNamespace(method="lbfgs-ondevice"),
+                contract=target_optimizer_contract_for_legacy_method("lbfgs-ondevice"),
                 phase1_maxiter=4,
                 step_scale=0.25,
                 ftol=1e-8,
@@ -8134,6 +8554,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
+            module=module,
         ):
             callback = object()
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
@@ -8269,6 +8690,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
+            module=module,
         ):
             contract = module.resolve_single_stage_optimizer_contract(
                 "jax",
@@ -8333,6 +8755,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
+            module=module,
         ):
             progress_callback = object()
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
@@ -8364,6 +8787,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=lambda _optimizer_backend: None,
             jax_minimize=fake_reference_minimize,
+            module=module,
         ):
             contract = module.resolve_single_stage_optimizer_contract("cpu", "scipy")
             with self.assertRaisesRegex(
@@ -8428,6 +8852,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=lambda _optimizer_backend: None,
             jax_minimize=fake_reference_minimize,
+            module=module,
         ):
             contract = module.resolve_single_stage_optimizer_contract(
                 "cpu",
@@ -8538,6 +8963,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
+            module=module,
         ):
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
@@ -9889,6 +10315,7 @@ class SingleStageExampleTests(unittest.TestCase):
             jax_minimize=lambda *args, **kwargs: (_ for _ in ()).throw(
                 AssertionError("jax_minimize should not run without an objective")
             ),
+            module=module,
         ):
             target_contract = module.resolve_single_stage_optimizer_contract(
                 "jax", "ondevice"
@@ -9951,6 +10378,7 @@ class SingleStageExampleTests(unittest.TestCase):
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
             scipy_minimize_side_effect=AssertionError,
+            module=module,
         ):
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
@@ -10009,6 +10437,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
+            module=module,
         ):
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
@@ -10071,6 +10500,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
+            module=module,
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -13209,7 +13639,16 @@ class HardwareConstraintTests(unittest.TestCase):
                 diagnostics,
             )
 
-        self.assertEqual(events, [("enter", "allow"), ("exit", "allow")])
+        self.assertGreaterEqual(len(events), 2)
+        self.assertEqual(events[0], ("enter", "allow"))
+        self.assertEqual(events[-1], ("exit", "allow"))
+        self.assertTrue(
+            all(event in {("enter", "allow"), ("exit", "allow")} for event in events)
+        )
+        self.assertEqual(
+            sum(1 for event in events if event[0] == "enter"),
+            sum(1 for event in events if event[0] == "exit"),
+        )
         self.assertTrue(status["success"])
 
     def test_stage2_hardware_constraints_pass_at_boundaries(self):

@@ -81,6 +81,11 @@ Target public stochastic method:
   - ``method="adam-ondevice"``: trace-safe Adam for noisy/stochastic scalar
     objectives on the target lane.
 
+Target public quasi-Newton methods:
+  - ``method="optax-lbfgs-ondevice"``: Optax L-BFGS on the target lane.
+  - ``method="optimistix-lbfgs-ondevice"``: Optimistix L-BFGS on the target
+    lane.
+
 The private methods live in ``optimizer_jax_private/`` and are derived from the
 upstream JAX optimizer implementation pinned by this port, so line-search and
 iteration behavior stay stable across runtime upgrades. High-level JAX backend
@@ -139,6 +144,17 @@ from ..solve._jax_driver import (
     legacy_target_method,
     legacy_target_scipy_control_method,
 )
+from ._optimizer_backend_choices import (
+    CONCRETE_OPTIMIZER_BACKENDS,
+    OUTER_OPTIMIZER_BACKEND_MESSAGE,
+    RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE,
+    TARGET_OUTER_OPTIMIZER_BACKENDS,
+    TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS,
+    TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS,
+    VALID_OPTIMIZER_BACKENDS,
+    VALID_OUTER_OPTIMIZER_BACKENDS,
+    render_invalid_optimizer_backend_message,
+)
 
 __all__ = [
     "BoozerInnerDriverOptions",
@@ -153,7 +169,12 @@ __all__ = [
     "VALID_LEAST_SQUARES_ALGORITHMS",
     "VALID_OPTIMIZER_BACKENDS",
     "VALID_OUTER_OPTIMIZER_BACKENDS",
+    "CONCRETE_OPTIMIZER_BACKENDS",
+    "TARGET_OUTER_OPTIMIZER_BACKENDS",
+    "TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS",
+    "TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
+    "render_invalid_optimizer_backend_message",
     "jax_least_squares",
     "jax_least_squares_optimistix",
     "jax_minimize",
@@ -195,29 +216,15 @@ __all__ = [
 
 
 PRIVATE_OPTIMIZER_JAX_VERSION = "0.10.0"
-CONCRETE_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
-TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS = frozenset(
-    {"scipy-jax", "scipy-jax-fullgraph"}
-)
-TARGET_OUTER_OPTIMIZER_BACKENDS = (
-    frozenset({"ondevice"}) | TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS
-)
-VALID_OPTIMIZER_BACKENDS = frozenset({"auto"}) | CONCRETE_OPTIMIZER_BACKENDS
-VALID_OUTER_OPTIMIZER_BACKENDS = (
-    TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS | CONCRETE_OPTIMIZER_BACKENDS
-)
-_OUTER_OPTIMIZER_BACKEND_MESSAGE = (
-    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, scipy-jax-fullgraph."
-)
-_RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE = (
-    "optimizer_backend must be one of: auto, scipy, ondevice, scipy-jax, "
-    "scipy-jax-fullgraph."
-)
+_OUTER_OPTIMIZER_BACKEND_MESSAGE = OUTER_OPTIMIZER_BACKEND_MESSAGE
+_RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE = RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE
 OPTIMIZER_BACKEND_ROLE = {
     "scipy": "reference",
     "ondevice": "target",
     "scipy-jax": "target-scipy-control",
     "scipy-jax-fullgraph": "target-scipy-control-fullgraph",
+    "optax-lbfgs": "target-optax-lbfgs",
+    "optimistix-lbfgs": "target-optimistix-lbfgs",
 }
 TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = TARGET_OUTER_OPTIMIZER_BACKENDS
 VALID_LEAST_SQUARES_ALGORITHMS = frozenset(
@@ -230,6 +237,8 @@ _SUPPORTED_METHODS = {
     "lbfgs",
     "lbfgs-scipy-jax",
     "lbfgs-scipy-jax-fullgraph",
+    "optax-lbfgs-ondevice",
+    "optimistix-lbfgs-ondevice",
     "lbfgs-trace",
     "bfgs-ondevice",
     "lbfgs-ondevice",
@@ -251,11 +260,18 @@ _TARGET_PRIVATE_METHODS = frozenset({"bfgs-ondevice", "lbfgs-ondevice"})
 _TARGET_SCIPY_CONTROL_METHODS = frozenset(
     {"lbfgs-scipy-jax", "lbfgs-scipy-jax-fullgraph"}
 )
-_TARGET_PUBLIC_METHODS = frozenset({"adam-ondevice"})
+_TARGET_PUBLIC_LBFGS_METHODS = frozenset(
+    {"optax-lbfgs-ondevice", "optimistix-lbfgs-ondevice"}
+)
+_TARGET_PUBLIC_METHODS = frozenset({"adam-ondevice"}) | _TARGET_PUBLIC_LBFGS_METHODS
 _TARGET_METHODS = (
     _TARGET_PRIVATE_METHODS | _TARGET_PUBLIC_METHODS | _TARGET_SCIPY_CONTROL_METHODS
 )
 _TARGET_LBFGSB_METHODS = frozenset({"lbfgs-ondevice"}) | _TARGET_SCIPY_CONTROL_METHODS
+_TARGET_PUBLIC_LBFGS_BACKEND_BY_METHOD = {
+    "optax-lbfgs-ondevice": "optax-lbfgs",
+    "optimistix-lbfgs-ondevice": "optimistix-lbfgs",
+}
 _UNSUPPORTED_TARGET_LBFGSB_OPTIONS = frozenset({"initial_step_size", "maxgrad"})
 _STRICT_REFERENCE_OPTIMIZER_DETAIL = "the host-side SciPy reference optimizer lane"
 _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL = "the host-side JAX reference optimizer lane"
@@ -297,6 +313,8 @@ _DEPRECATED_MINIMIZE_METHOD_TO_DRIVER = {
     "lbfgs-ondevice": "simsopt_lbfgsb",
     "lbfgs-scipy-jax": "scipy_lbfgsb",
     "lbfgs-scipy-jax-fullgraph": "scipy_lbfgsb",
+    "optax-lbfgs-ondevice": "optax_lbfgs",
+    "optimistix-lbfgs-ondevice": "optimistix_lbfgs",
     "lbfgs-trace": "simsopt_trace_lbfgs",
 }
 _DEPRECATED_LEAST_SQUARES_METHOD_TO_DRIVER = {
@@ -988,6 +1006,10 @@ def resolve_optimizer_backend_driver(optimizer_backend, *, limited_memory):
         return resolve_reference_optimizer_driver(limited_memory=limited_memory)
     if optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS:
         return Driver.SCIPY_LBFGSB
+    if optimizer_backend == "optax-lbfgs":
+        return Driver.OPTAX_LBFGS
+    if optimizer_backend == "optimistix-lbfgs":
+        return Driver.OPTIMISTIX_LBFGS
     return resolve_target_optimizer_driver(limited_memory=limited_memory)
 
 
@@ -1082,7 +1104,10 @@ def resolve_least_squares_optimizer_driver(
             optimizer_backend,
             limited_memory=limited_memory,
         )
-    if optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS:
+    if (
+        optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS
+        or optimizer_backend in TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
+    ):
         raise ValueError(
             _scipy_control_least_squares_algorithm_message(optimizer_backend)
         )
@@ -1225,8 +1250,10 @@ def resolve_reference_optimizer_contract(
     if field_backend == "jax":
         raise ValueError(
             f"{component_label} with backend='jax' requires "
-            "optimizer_backend='ondevice', optimizer_backend='scipy-jax', or "
-            "optimizer_backend='scipy-jax-fullgraph'. "
+            "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
+            "optimizer_backend='scipy-jax-fullgraph', "
+            "optimizer_backend='optax-lbfgs', or "
+            "optimizer_backend='optimistix-lbfgs'. "
             "The SciPy/reference optimizer lane is CPU/reference-only."
         )
     if field_backend != "jax" and optimizer_backend != "scipy":
@@ -1258,8 +1285,10 @@ def resolve_target_optimizer_contract(
     ):
         raise ValueError(
             f"{component_label} with backend='jax' requires "
-            "optimizer_backend='ondevice', optimizer_backend='scipy-jax', or "
-            "optimizer_backend='scipy-jax-fullgraph'. "
+            "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
+            "optimizer_backend='scipy-jax-fullgraph', "
+            "optimizer_backend='optax-lbfgs', or "
+            "optimizer_backend='optimistix-lbfgs'. "
             "The SciPy/reference optimizer lane is CPU/reference-only."
         )
     require_target_backend_x64(optimizer_backend)
@@ -1277,6 +1306,18 @@ def resolve_target_optimizer_contract(
             driver=Driver.SCIPY_LBFGSB,
             use_least_squares_objective=False,
             objective_route=objective_route,
+        )
+    if optimizer_backend in TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS:
+        if least_squares_algorithm != "quasi-newton":
+            raise ValueError(
+                _scipy_control_least_squares_algorithm_message(optimizer_backend)
+            )
+        return TargetOptimizerContract(
+            driver=resolve_optimizer_backend_driver(
+                optimizer_backend,
+                limited_memory=limited_memory,
+            ),
+            use_least_squares_objective=False,
         )
     driver = resolve_target_least_squares_optimizer_driver(
         limited_memory=limited_memory,
@@ -5137,18 +5178,106 @@ def target_minimize(
         )
         return _finalize_optimizer_result(result, pytree_adapter)
     if method in _TARGET_PUBLIC_METHODS:
-        require_target_backend_x64("ondevice")
-        result = adam_optimize_traceable(
+        if method == "adam-ondevice":
+            require_target_backend_x64("ondevice")
+            result = adam_optimize_traceable(
+                fun,
+                x0,
+                value_and_grad=value_and_grad,
+                maxiter=maxiter,
+                tol=tol,
+                options=options,
+                callback=callback,
+                progress_callback=progress_callback,
+            )
+            return _adam_result_to_optimize_result(result)
+
+        required_backend = _TARGET_PUBLIC_LBFGS_BACKEND_BY_METHOD[method]
+        require_target_backend_x64(required_backend)
+        fun, x0, _unused_callback, pytree_adapter = _prepare_optimizer_callable_inputs(
             fun,
             x0,
             value_and_grad=value_and_grad,
-            maxiter=maxiter,
-            tol=tol,
-            options=options,
-            callback=callback,
-            progress_callback=progress_callback,
+            callback=None,
         )
-        return _adam_result_to_optimize_result(result)
+        if value_and_grad:
+            value_and_grad_fun = wrap_strict_target_lane_value_and_grad(fun)
+        else:
+            scalar_value_and_grad = jax.value_and_grad(fun)
+
+            def value_and_grad_fun(flat_x):
+                return scalar_value_and_grad(flat_x)
+
+            value_and_grad_fun = wrap_strict_target_lane_value_and_grad(
+                value_and_grad_fun
+            )
+
+        if callback is None and progress_callback is None:
+            public_callback = None
+        else:
+
+            def public_callback(event):
+                if callback is not None:
+                    callback(
+                        event.x
+                        if pytree_adapter is None
+                        else pytree_adapter._hostify_flat(
+                            event.x,
+                            dtype=pytree_adapter.flat_dtype,
+                        )
+                    )
+                if progress_callback is not None:
+                    progress_callback(
+                        event.iteration,
+                        event.fun,
+                        event.grad_norm_inf,
+                    )
+
+        from ..solve.jax import (
+            OptaxLBFGSOptions,
+            OptimistixLBFGSOptions,
+            minimize as public_jax_minimize,
+        )
+
+        if method == "optax-lbfgs-ondevice":
+            public_options = OptaxLBFGSOptions(
+                maxiter=maxiter,
+                gtol=tol,
+                memory_size=int(options.get("maxcor", 200)),
+                scale_init_precond=bool(options.get("scale_init_precond", True)),
+                max_linesearch_steps=int(options.get("maxls", 20)),
+            )
+            driver = Driver.OPTAX_LBFGS
+        else:
+            public_options = OptimistixLBFGSOptions(
+                maxiter=maxiter,
+                tol=tol,
+                history_length=int(options.get("maxcor", 200)),
+            )
+            driver = Driver.OPTIMISTIX_LBFGS
+        public_result = public_jax_minimize(
+            value_and_grad_fun,
+            x0,
+            driver=driver,
+            options=public_options,
+            callback=public_callback,
+        )
+        result = OptimizeResult(
+            x=public_result.x,
+            fun=public_result.fun,
+            jac=public_result.jac,
+            nit=public_result.nit,
+            nfev=public_result.nfev,
+            njev=public_result.njev,
+            status=public_result.status,
+            success=public_result.success,
+            message=public_result.message,
+            driver=public_result.driver,
+            options_used=public_result.options_used,
+            optimistix_result=public_result.optimistix_result,
+            optimistix_result_message=public_result.optimistix_result_message,
+        )
+        return _finalize_optimizer_result(result, pytree_adapter)
 
     if method not in _TARGET_PRIVATE_METHODS:
         raise ValueError(

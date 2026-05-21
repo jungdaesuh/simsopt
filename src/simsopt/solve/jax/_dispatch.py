@@ -30,6 +30,7 @@ from .contracts import (
     OptionsBase,
     OptaxAdamCallbackEvent,
     OptaxLBFGSCallbackEvent,
+    OptimistixLBFGSCallbackEvent,
     ResidualFn,
     ScipyBFGSCallbackEvent,
     ScipyLBFGSBCallbackEvent,
@@ -50,7 +51,11 @@ from .._jax_driver import (
     legacy_target_least_squares_method,
     legacy_target_minimize_method,
 )
-from .optimistix.contracts import LinearSolver, OptimistixLMOptions
+from .optimistix.contracts import (
+    LinearSolver,
+    OptimistixLBFGSOptions,
+    OptimistixLMOptions,
+)
 from .optax.contracts import OptaxAdamOptions, OptaxLBFGSOptions, OptaxLineSearch
 from .scipy.contracts import ScipyBFGSOptions, ScipyLBFGSBOptions, ScipyLMOptions
 from .simsopt.contracts import (
@@ -77,6 +82,7 @@ _MINIMIZE_OPTIONS: dict[Driver, type[OptionsBase]] = {
     Driver.SCIPY_BFGS: ScipyBFGSOptions,
     Driver.OPTAX_LBFGS: OptaxLBFGSOptions,
     Driver.OPTAX_ADAM: OptaxAdamOptions,
+    Driver.OPTIMISTIX_LBFGS: OptimistixLBFGSOptions,
     Driver.SIMSOPT_LBFGSB: SimsoptLBFGSBOptions,
     Driver.SIMSOPT_BFGS: SimsoptBFGSOptions,
     Driver.SIMSOPT_TRACE_LBFGS: SimsoptTraceLBFGSOptions,
@@ -130,6 +136,14 @@ def _host_float(value) -> float:
 
 def _device_scalar(value: float, dtype) -> jax.Array:
     return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+
+
+def _optimistix_result_metadata(result) -> tuple[bool, str, str]:
+    with jax.transfer_guard("allow"):
+        result_text = str(result)
+        result_message = str(optx.RESULTS[result])
+        successful = bool(result == optx.RESULTS.successful)
+    return successful, result_text, result_message
 
 
 def _legacy_minimize_options(options: OptionsBase) -> dict[str, object]:
@@ -242,6 +256,23 @@ def _scalar_value_from_value_and_grad(value_and_grad_fn: ValueAndGradFn):
         value, _grad = value_and_grad_fn(x)
         return value
 
+    return scalar_value
+
+
+def _scalar_value_with_explicit_vjp(value_and_grad_fn: ValueAndGradFn):
+    @jax.custom_vjp
+    def scalar_value(x):
+        value, _grad = value_and_grad_fn(x)
+        return jnp.asarray(value)
+
+    def scalar_value_fwd(x):
+        value, grad = value_and_grad_fn(x)
+        return jnp.asarray(value), jnp.asarray(grad)
+
+    def scalar_value_bwd(explicit_grad, cotangent):
+        return (jnp.asarray(cotangent) * explicit_grad,)
+
+    scalar_value.defvjp(scalar_value_fwd, scalar_value_bwd)
     return scalar_value
 
 
@@ -383,7 +414,8 @@ def _run_optax_minimize(
             memory_size=options.memory_size,
             scale_init_precond=options.scale_init_precond,
             linesearch=optax.scale_by_zoom_linesearch(
-                max_linesearch_steps=options.max_linesearch_steps
+                max_linesearch_steps=options.max_linesearch_steps,
+                initial_guess_strategy="one",
             ),
         )
     else:
@@ -522,6 +554,85 @@ def _emit_optax_callback(
             decrease_error=_host_float(line_search_state.info.decrease_error),
             curvature_error=_host_float(line_search_state.info.curvature_error),
         )
+    )
+
+
+def _run_optimistix_minimize(
+    value_and_grad_fn: ValueAndGradFn,
+    x0,
+    *,
+    options: OptimistixLBFGSOptions,
+    callback: Callback | None,
+) -> OptimizeResult:
+    start = time.perf_counter()
+    params = jnp.asarray(jax.device_put(x0))
+    solver_tol = _device_scalar(options.tol, params.dtype)
+    explicit_scalar_value = _scalar_value_with_explicit_vjp(value_and_grad_fn)
+
+    def scalar_value(current, _args):
+        return explicit_scalar_value(current)
+
+    solver = optx.LBFGS(
+        rtol=solver_tol,
+        atol=solver_tol,
+        history_length=options.history_length,
+    )
+    with jax.transfer_guard_host_to_device("allow"):
+        solution = optx.minimise(
+            scalar_value,
+            solver,
+            params,
+            args=None,
+            max_steps=options.maxiter,
+            throw=False,
+        )
+    solution.value.block_until_ready()
+    value, grad = value_and_grad_fn(solution.value)
+    value = jnp.asarray(value)
+    grad = jnp.asarray(grad)
+    _block_jax_leaves((value, grad))
+    x_host = _host_array(solution.value)
+    fun_host = _host_float(value)
+    jac_host = _host_array(grad)
+    grad_norm_inf = float(np.max(np.abs(jac_host))) if jac_host.size else 0.0
+    finite = (
+        np.all(np.isfinite(x_host))
+        and np.isfinite(fun_host)
+        and np.all(np.isfinite(jac_host))
+    )
+    (
+        optimistix_success,
+        optimistix_result,
+        optimistix_result_message,
+    ) = _optimistix_result_metadata(solution.result)
+    success = optimistix_success and bool(finite)
+    status = 0 if success else 1 if finite else 2
+    num_steps = int(np.asarray(jax.device_get(solution.stats["num_steps"])))
+    wallclock_s = time.perf_counter() - start
+    if callback is not None:
+        callback(
+            OptimistixLBFGSCallbackEvent(
+                iteration=num_steps,
+                x=x_host,
+                fun=fun_host,
+                grad_norm_inf=grad_norm_inf,
+                wallclock_s=wallclock_s,
+                history_length=options.history_length,
+                optimistix_result=optimistix_result,
+            )
+        )
+    return OptimizeResult(
+        x=x_host,
+        fun=fun_host,
+        jac=jac_host,
+        nit=num_steps,
+        nfev=num_steps + 1,
+        njev=num_steps + 1,
+        status=status,
+        success=success,
+        message=optimistix_result,
+        optimistix_result=optimistix_result,
+        optimistix_result_message=optimistix_result_message,
     )
 
 
@@ -762,10 +873,11 @@ def _run_optimistix_lm(
     )
     if hessian_host is not None:
         finite = finite and np.all(np.isfinite(hessian_host))
-    with jax.transfer_guard_host_to_device("allow"):
-        optimistix_success = bool(solution.result == optx.RESULTS.successful)
-        optimistix_result = str(solution.result)
-        optimistix_result_message = str(optx.RESULTS[solution.result])
+    (
+        optimistix_success,
+        optimistix_result,
+        optimistix_result_message,
+    ) = _optimistix_result_metadata(solution.result)
     success = optimistix_success and bool(finite)
     status = 0 if success else 1 if finite else 2
     num_steps = int(np.asarray(jax.device_get(solution.stats["num_steps"])))
@@ -811,6 +923,13 @@ def minimize(
             value_and_grad_fn,
             x0,
             driver=driver,
+            options=options_used,
+            callback=callback,
+        )
+    elif isinstance(options_used, OptimistixLBFGSOptions):
+        result = _run_optimistix_minimize(
+            value_and_grad_fn,
+            x0,
             options=options_used,
             callback=callback,
         )
