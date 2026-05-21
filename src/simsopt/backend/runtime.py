@@ -199,6 +199,10 @@ _FLOAT32_SMOKE_LINEAR_SOLVE_DEFAULTS = {
     "linear_solve_tolerance_floor": _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
     "linear_solve_tolerance_cap": _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
 }
+_HOST_CALLBACK_SUPPORTED_DEFAULTS = {"supports_host_callback": True}
+_NO_HOST_CALLBACK_DEFAULTS = {"supports_host_callback": False}
+_BUFFER_DONATION_SUPPORTED_DEFAULTS = {"supports_buffer_donation": True}
+_NO_BUFFER_DONATION_DEFAULTS = {"supports_buffer_donation": False}
 
 _MODE_POLICY_DEFAULTS = {
     "native_cpu": {
@@ -208,6 +212,8 @@ _MODE_POLICY_DEFAULTS = {
         "host_dtype": "float64",
         "default_residency": "host",
         "default_optimizer_backend": "scipy",
+        **_HOST_CALLBACK_SUPPORTED_DEFAULTS,
+        **_BUFFER_DONATION_SUPPORTED_DEFAULTS,
         "chunk_policy": "host_reference",
         "tolerance_tier": "cpu_reference",
         "compilation_cache_policy": "not_applicable",
@@ -225,6 +231,8 @@ _MODE_POLICY_DEFAULTS = {
         "host_dtype": "float64",
         "default_residency": "device",
         "default_optimizer_backend": "ondevice",
+        **_HOST_CALLBACK_SUPPORTED_DEFAULTS,
+        **_BUFFER_DONATION_SUPPORTED_DEFAULTS,
         "chunk_policy": "performance_tuned",
         "tolerance_tier": "fast",
         "compilation_cache_policy": "optional_persistent",
@@ -242,6 +250,8 @@ _MODE_POLICY_DEFAULTS = {
         "host_dtype": "float64",
         "default_residency": "device",
         "default_optimizer_backend": "ondevice",
+        **_HOST_CALLBACK_SUPPORTED_DEFAULTS,
+        **_BUFFER_DONATION_SUPPORTED_DEFAULTS,
         "chunk_policy": "stable_default",
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
@@ -259,6 +269,8 @@ _MODE_POLICY_DEFAULTS = {
         "host_dtype": "float32",
         "default_residency": "device",
         "default_optimizer_backend": "ondevice",
+        **_HOST_CALLBACK_SUPPORTED_DEFAULTS,
+        **_BUFFER_DONATION_SUPPORTED_DEFAULTS,
         "chunk_policy": "stable_default",
         "tolerance_tier": "float32_smoke",
         "compilation_cache_policy": "optional_persistent",
@@ -276,6 +288,8 @@ _MODE_POLICY_DEFAULTS = {
         "host_dtype": "float64",
         "default_residency": "device",
         "default_optimizer_backend": "ondevice",
+        **_HOST_CALLBACK_SUPPORTED_DEFAULTS,
+        **_BUFFER_DONATION_SUPPORTED_DEFAULTS,
         "chunk_policy": "stable_default",
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
@@ -297,6 +311,8 @@ _MODE_POLICY_DEFAULTS = {
         "host_dtype": "float64",
         "default_residency": "device",
         "default_optimizer_backend": "ondevice",
+        **_HOST_CALLBACK_SUPPORTED_DEFAULTS,
+        **_BUFFER_DONATION_SUPPORTED_DEFAULTS,
         "chunk_policy": "performance_tuned",
         "tolerance_tier": "fast",
         "compilation_cache_policy": "optional_persistent",
@@ -314,6 +330,8 @@ _MODE_POLICY_DEFAULTS = {
         "host_dtype": "float32",
         "default_residency": "device",
         "default_optimizer_backend": "scipy",
+        **_NO_HOST_CALLBACK_DEFAULTS,
+        **_NO_BUFFER_DONATION_DEFAULTS,
         "chunk_policy": "stable_default",
         "tolerance_tier": "float32_smoke",
         "compilation_cache_policy": "optional_persistent",
@@ -561,6 +579,8 @@ class BackendPolicy:
     host_dtype: str
     default_residency: str
     default_optimizer_backend: str
+    supports_host_callback: bool
+    supports_buffer_donation: bool
     chunk_policy: str
     tolerance_tier: str
     compilation_cache_policy: str
@@ -1553,6 +1573,8 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
             defaults["default_optimizer_backend"],
             mode=config.mode,
         ),
+        supports_host_callback=bool(defaults["supports_host_callback"]),
+        supports_buffer_donation=bool(defaults["supports_buffer_donation"]),
         chunk_policy=str(defaults["chunk_policy"]),
         tolerance_tier=str(defaults["tolerance_tier"]),
         compilation_cache_policy=str(defaults["compilation_cache_policy"]),

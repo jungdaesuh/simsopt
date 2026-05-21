@@ -11,9 +11,12 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-from ..backend import get_sharding_tuning, maybe_initialize_distributed_jax
+from ..backend import (
+    get_sharding_tuning,
+    maybe_initialize_distributed_jax,
+    register_backend_cache_clear,
+)
 from ..backend.dtypes import runtime_device_put
-from ..backend.runtime import register_backend_cache_clear
 
 __all__ = [
     "CoilGroupCollectiveConfig",

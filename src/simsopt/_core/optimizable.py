@@ -29,7 +29,7 @@ from .util import ImmutableId, OptimizableMeta, WeakKeyDefaultDict, \
     DofLengthMismatchError
 from .derivative import derivative_dec
 from .json import GSONable, SIMSON, GSONDecoder, GSONEncoder
-from simsopt.backend.runtime import raise_if_target_lane_bypass
+from simsopt.backend import raise_if_target_lane_bypass
 
 try:
     import networkx as nx

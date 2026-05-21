@@ -1,7 +1,6 @@
 """Public backend home for runtime and mode-owned numerical policy helpers."""
 
-# Keep runtime.py as the SSOT. This package __init__ and simsopt/backend.py are
-# facade layers so existing ``simsopt.backend`` imports share one implementation.
+# Keep runtime.py as the SSOT; this package facade is the public import surface.
 
 from .runtime import (
     VALID_BACKEND_MODES,
@@ -42,6 +41,7 @@ from .runtime import (
     is_parity_mode,
     maybe_initialize_distributed_jax,
     query_active_gpu_memory_mb,
+    register_backend_cache_clear,
     should_shard_coil_groups,
     should_shard_points,
     should_shard_pairwise_rows,
@@ -98,6 +98,7 @@ __all__ = [
     "is_parity_mode",
     "maybe_initialize_distributed_jax",
     "query_active_gpu_memory_mb",
+    "register_backend_cache_clear",
     "should_shard_coil_groups",
     "should_shard_points",
     "should_shard_pairwise_rows",

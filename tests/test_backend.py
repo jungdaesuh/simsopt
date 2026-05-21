@@ -173,6 +173,8 @@ def _assert_backend_policy(
     host_dtype: str = "float64",
     default_residency: str = "device",
     default_optimizer_backend: str = "ondevice",
+    supports_host_callback: bool = True,
+    supports_buffer_donation: bool = True,
     disable_jit: bool = False,
     linear_solve_tolerance_floor: float = 1e-14,
     linear_solve_tolerance_cap: float | None = 1e-10,
@@ -187,6 +189,8 @@ def _assert_backend_policy(
     assert policy.host_dtype == host_dtype
     assert policy.default_residency == default_residency
     assert policy.default_optimizer_backend == default_optimizer_backend
+    assert policy.supports_host_callback is supports_host_callback
+    assert policy.supports_buffer_donation is supports_buffer_donation
     assert policy.chunk_policy == chunk_policy
     assert policy.tolerance_tier == tolerance_tier
     assert policy.compilation_cache_policy == compilation_cache_policy
@@ -300,6 +304,8 @@ def test_backend_resolves_explicit_mps_legacy_env_pair(monkeypatch):
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_mps_smoke",
         default_optimizer_backend="scipy",
+        supports_host_callback=False,
+        supports_buffer_donation=False,
         linear_solve_tolerance_floor=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
         linear_solve_tolerance_cap=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
     )
@@ -508,6 +514,8 @@ def test_mps_smoke_mode_policy_helpers(monkeypatch):
         compilation_cache_policy="optional_persistent",
         provenance_label="jax_mps_smoke",
         default_optimizer_backend="scipy",
+        supports_host_callback=False,
+        supports_buffer_donation=False,
         linear_solve_tolerance_floor=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
         linear_solve_tolerance_cap=_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
     )

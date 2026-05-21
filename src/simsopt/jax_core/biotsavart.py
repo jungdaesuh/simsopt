@@ -20,8 +20,8 @@ import numpy as np
 
 from ..backend import (
     get_field_kernel_tuning,
+    register_backend_cache_clear,
 )
-from ..backend.runtime import register_backend_cache_clear
 from ._device_scalars import device_one as _device_one
 from ._math_utils import (
     as_jax_float64 as _as_jax_float64,

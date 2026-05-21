@@ -3,7 +3,7 @@ import numpy as np
 import simsoptpp as sopp
 from .._core.optimizable import Optimizable
 from .._core.json import GSONDecoder
-from ..backend.runtime import raise_if_strict_jax_fallback
+from ..backend import raise_if_strict_jax_fallback
 from .mgrid import MGrid
 
 __all__ = ['MagneticField', 'MagneticFieldSum', 'MagneticFieldMultiply']

@@ -1,27 +1,29 @@
 import os
-import sys
 
-from .mpi import *
-from .logger import *
-from .famus_helpers import *
-from .polarization_project import *
-from .permanent_magnet_helper_functions import *
-from .coil_optimization_helper_functions import *
+from .._lazy_exports import build_lazy_export_map, resolve_lazy_export
+
+_UTIL_MODULES = (
+    "mpi",
+    "logger",
+    "famus_helpers",
+    "polarization_project",
+    "permanent_magnet_helper_functions",
+    "coil_optimization_helper_functions",
+)
+
+_EXPORT_TO_MODULE, _lazy_all = build_lazy_export_map(__file__, _UTIL_MODULES)
 
 """Boolean indicating if we are in the GitHub actions CI"""
-in_github_actions = "CI" in os.environ and os.environ['CI'].lower() in ['1', 'true']
+in_github_actions = "CI" in os.environ and os.environ["CI"].lower() in ["1", "true"]
+
+__all__ = list(_lazy_all) + ["in_github_actions"]
 
 
-def _module_all(name):
-    return list(sys.modules[f"{__name__}.{name}"].__all__)
+def __getattr__(name):
+    value = resolve_lazy_export(__name__, _EXPORT_TO_MODULE, name)
+    globals()[name] = value
+    return value
 
 
-__all__ = (
-    _module_all("mpi")
-    + _module_all("logger")
-    + _module_all("famus_helpers")
-    + _module_all("polarization_project")
-    + _module_all("permanent_magnet_helper_functions")
-    + _module_all("coil_optimization_helper_functions")
-    + ['in_github_actions']
-)
+def __dir__():
+    return sorted(set(globals()) | set(__all__))
