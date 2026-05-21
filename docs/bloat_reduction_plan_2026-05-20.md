@@ -1,9 +1,9 @@
 # simsopt-jax Bloat Reduction Plan
 
-**Status:** Draft v2 — Crucible-reviewed and amended before any code changes.
+**Status:** Draft v3 — current-tree delta refresh against `0e17512b2` after Draft v2.
 **Author:** orchestrator synthesis of 8-lane parallel audit (2026-05-20).
 **Branch:** `gpu-purity-stage2-20260405` (current). New branch recommended for execution: `bloat-reduction-20260520`.
-**Audit basis:** 8 parallel subagent reports plus current-tree Crucible review covering Boozer/objectives, optimizer JAX, jax_core kernels, field/backend, PM/QFM/wireframe, benchmarks/parity, tests, cross-cutting duplication, and official JAX/SciPy/SIMSOPT API documentation checks.
+**Audit basis:** 8 parallel subagent reports plus current-tree Crucible review covering Boozer/objectives, optimizer JAX, jax_core kernels, field/backend, PM/QFM/wireframe, benchmarks/parity, tests, cross-cutting duplication, official JAX/SciPy/SIMSOPT API documentation checks, and a post-v2 codebase-delta validation.
 
 ---
 
@@ -104,7 +104,7 @@ Drawn from `/Users/suhjungdae/code/columbia/AGENTS.md` + `/Users/suhjungdae/.age
 Every PR review must re-confirm these survive bit-identical post-refactor.
 
 - [ ] `_cpu_ordered` byte-identity oracles (`biotsavart_cpu_ordered.py`, `surface_fourier_jax_cpu_ordered.py`, `boozer_residual_jax` cpu_ordered branch).
-- [ ] Forward/adjoint PLU factor reuse at `boozersurface_jax.py:3514-3540` and `surfaceobjectives_jax.py:3167-3220`.
+- [ ] Forward/adjoint PLU factor reuse and reporting at `boozersurface_jax.py:3100-3143`, `boozersurface_jax.py:3730-3949`, and `surfaceobjectives_jax.py:3167-3220`.
 - [ ] `_pre_newton_census_gate_failures` at `single_stage_init_parity.py:2198-2243`. Release blocker.
 - [ ] `PARITY_LADDER_TOLERANCES` and all sibling tolerance tables in `benchmarks/validation_ladder_contract.py`.
 - [ ] 7 backend modes (`native_cpu`, `jax_cpu_fast`, `jax_cpu_parity`, `jax_cpu_float32_smoke`, `jax_gpu_fast`, `jax_gpu_parity`, `jax_mps_smoke`) + hard rejection of removed `jax_metal_smoke` / `metal` selectors.
@@ -146,6 +146,46 @@ Every PR review must re-confirm these survive bit-identical post-refactor.
 - **JAX transfer guard:** [official JAX transfer-guard docs](https://docs.jax.dev/en/latest/transfer_guard.html) distinguish host/device transfer directions, note CPU device fetches are always allowed, and expose thread-local guard contexts. CUDA strict-transfer proof is therefore required for GPU purity claims; CPU-only tests cannot prove device-to-host purity.
 - **JAX persistent compilation cache:** [official JAX persistent-cache docs](https://docs.jax.dev/en/latest/persistent_compilation_cache.html) require shared filesystems or remote storage for multi-process cache reuse; runtime/cache refactors must not imply local rank-0 cache paths are enough for multi-node proof.
 - **SciPy BFGS/L-BFGS-B:** official SciPy docs expose [BFGS Armijo (`c1`) and curvature (`c2`) conditions](https://docs.scipy.org/doc/scipy/reference/optimize.minimize-bfgs.html) and [L-BFGS-B termination semantics](https://docs.scipy.org/doc/scipy/reference/optimize.minimize-lbfgsb.html). QFM Armijo-only solver reuse is a mathematical behavior decision, not a mechanical dedupe.
+
+### 4.5 Current-tree delta and concurrency checkpoint
+
+Refresh basis: Draft v2 commit `7f528ede3`; current checked commit `0e17512b2`. There are 18 commits after Draft v2, so status reports that only cover the first four post-v2 commits are stale.
+
+Committed deltas in high-overlap plan targets since Draft v2:
+
+| File | Committed delta |
+|------|----------------:|
+| `src/simsopt/geo/optimizer_jax.py` | +837 / -93 |
+| `src/simsopt/geo/boozersurface_jax.py` | +150 / -44 |
+| `src/simsopt/geo/qfmsurface_jax.py` | +65 / -12 |
+| `src/simsopt/field/biotsavart_jax_backend.py` | +7 / -0 |
+| `src/simsopt/jax_core/qfm_solver.py` | +11 / -6 |
+| `src/simsopt/geo/surfaceobjectives_jax.py` | +6 / -4 |
+
+Uncommitted overlap as of this refresh. Re-run `git diff --numstat` before executing any item because this list is volatile:
+
+Line-ref basis note: refs outside dirty-overlap files are committed-tree refs against `0e17512b2`. Refs inside dirty-overlap files may be working-tree refs and must be rederived after the overlapping work lands. In this refresh, T2.1/T3.4 Boozer refs are valid against `HEAD`; T3.3 `surfaceobjectives_jax.py` refs and T3.5/T3.6 benchmark refs reflect the current working tree.
+
+| Dirty file | WT delta | Plan overlap |
+|------------|---------:|--------------|
+| `benchmarks/non_banana_example_cpp_jax_cpu_parity.py` | +531 / -87 | T3.6 |
+| `benchmarks/non_banana_example_parity_fixtures.py` | +463 / -352 | T3.5 |
+| `src/simsopt/_core/jax_host_boundary.py` | +2 / -1 | T1.4 |
+| `src/simsopt/backend.py` | +0 / -109 | T1.2 adjacency; legacy facade deletion |
+| `src/simsopt/backend/__init__.py` | +3 / -2 | T1.2 |
+| `src/simsopt/geo/curve.py` | +43 / -16 | T1.4 |
+| `src/simsopt/geo/curveobjectives.py` | +10 / -3 | T1.4 |
+| `src/simsopt/geo/optimizer_host_lbfgs.py` | +13 / -1 | T4.1 |
+| `src/simsopt/geo/optimizer_jax_private/_lbfgs.py` | +40 / -9 | T4.3 adjacency |
+| `src/simsopt/geo/optimizer_jax_private/_lbfgsb_scipy.py` | +204 / -173 | Non-goal; do not touch during bloat work |
+| `src/simsopt/geo/optimizer_jax_reference.py` | +1 / -0 | T2.7 / T4.1 |
+| `src/simsopt/geo/surfaceobjectives_jax.py` | +51 / -19 | T3.3 / T3.8 |
+| `src/simsopt/jax_core/pm_optimization.py` | +615 / -34 | T3.1 |
+| `src/simsopt/jax_core/sharding.py` | +5 / -2 | T2.5 |
+| `src/simsopt/jax_core/tracing.py` | +477 / -253 | T3.7 |
+| `src/simsopt/solve/permanent_magnet_optimization_jax.py` | +157 / -60 | T1.3 / T3.1 |
+
+Execution rule from this checkpoint: before starting any item, rederive line refs from the latest committed tree, then inspect dirty overlap. Do not execute bloat work on a dirty overlapping file unless that pending work has landed or the owner explicitly approves the combined edit.
 
 ---
 
@@ -246,6 +286,14 @@ Goal: bank low-risk LOC reduction first; pattern-validate factory ideas in tiny 
 - **Risk:** Low.
 - **Validation gate:** T1 + `tests/test_pytest_skip_xfail_audit.py` AST check.
 
+### 5.12 — Deferred, not Tier 1: traceable-runner cache dictionaries
+
+- **Files:** `src/simsopt/geo/optimizer_jax.py:301-303, 415-478, 1824-1828, 4330-4334, 4648-4652`.
+- **Current-tree status:** Three cache dictionaries exist for LM, Newton-polish, and exact-Newton traceable runners. `_cached_traceable_runner(...)` already shares weakref/token ownership logic across them.
+- **Do not do:** Do not collapse the dictionaries mechanically into one dict keyed by `(kind, callable_fn, cache_key)`. The current cache contract uses identity keys for bare callables, semantic tokens for marked callables, weakref cleanup for weakrefable callables, and strong refs for nonweakrefable callables. Tests cover nonweakrefable, unhashable, equal-but-distinct, and explicit semantic-token callable objects.
+- **If pursued:** Treat as a Tier 1b local abstraction change, not a T1 deletion. Write two designs, preserve the existing ownership semantics exactly, and prove the same tests still cover per-kind isolation.
+- **Validation gate:** `tests/geo/test_lm_damping_parity.py` cache tests plus focused `optimizer_jax.py` caller inventory for `_TRACEABLE_*_RUNNER_CACHE`.
+
 ### Tier 1 exit gate
 
 All required T1 items merged; guaranteed net LOC reduction ≥ 850; probe-script deletion excluded unless T1.10 migration retires a script safely; full T1 suite green; contract checklist re-affirmed; tag `bloat-reduction-T1-complete`.
@@ -258,12 +306,12 @@ All required T1 items merged; guaranteed net LOC reduction ≥ 850; probe-script
 
 Goal: convert repeated templates into data-driven factories. Each item proves the pattern at small scope before Tier 3 attempts larger folds.
 
-### 6.1 — [ ] T2.1: `_boozer_traceable_result_core` + `_ls_newton_reporting_fields` factories
+### 6.1 — [ ] T2.1: Boozer result-dict factories
 
-- **Files:** `boozersurface_jax.py` 7 result-dict sites (`:5020, 5180, 5565, 5660, 5800, 6180, 6280`) + 3 Newton diagnostics copies (`:5204-5227, 5682-5705, 5827-5853`).
-- **Change:** Introduce 2 helpers; drive from existing `_BOOZER_TRACEABLE_RESULT_KEYS` (`:245`) and `_BOOZER_RESULT_SCHEMAS` (`:195-454`) as constructor SSOT.
+- **Files:** `boozersurface_jax.py` result-dict packaging sites currently start at `:5098`, `:5267`, `:5654`, `:5747`, `:5887`, `:6007`, `:6073`, `:6265`, `:6364`, and `:6511`. Newton/quality reporting duplication now sits inside those dicts rather than the stale v2 ranges.
+- **Change:** Introduce small result-pack helpers such as `_boozer_traceable_result_core(...)`, `_boozer_ls_result_core(...)`, and `_boozer_exact_result_core(...)`; drive from existing `_BOOZER_TRACEABLE_RESULT_KEYS` (`:245`) and `_BOOZER_RESULT_SCHEMAS` (`:195-454`) as constructor SSOT.
 - **LOC saved:** ~130.
-- **Risk:** Low. Schemas already test-pinned.
+- **Risk:** Medium after the post-v2 committed drift. This item touches user-visible result dict schemas and must be semantically inventoried from the latest committed tree before implementation.
 - **Contracts:** Result-dict required/forbidden keys; success-vs-failure `linear_solve_backend` strings; `adjoint_linear_solve_available` flag.
 - **Validation gate:** T2 + result-dict schema tests in `test_boozersurface_jax.py`.
 
@@ -371,25 +419,25 @@ Goal: large-scale folds across multiple files. Higher risk because they touch ho
 ### 7.3 — [ ] T3.3: Profile machinery → sibling diagnostic modules
 
 - **Files:** Move out of hot files:
-  - `biotsavart_jax_backend.py:215-290, 291-303, 1584-1604, 1609-1657, 1865-1878, 2118-2208` → new `biotsavart_jax_profile.py`.
-  - `surfaceobjectives_jax.py:5335-5493` (`diagnose_traceable_objective_runtime`) + `:5623-5823` (profile_suite builder) → new `surfaceobjectives_jax_diagnostics.py`.
+  - `biotsavart_jax_backend.py:215-303, 1650, 2125-2212` → new `biotsavart_jax_profile.py`.
+  - `surfaceobjectives_jax.py:5382-5650` (`diagnose_traceable_objective_runtime`) + `:5670-5959` / `:6270-6284` (profile-suite builder/public wrapper) → new `surfaceobjectives_jax_diagnostics.py`.
 - **LOC saved:** ~620 moved (net same, but hot files shrink dramatically; logical separation improves audit-ability).
-- **Risk:** Low-medium. Maintain redirect imports in original modules for backward compat.
+- **Risk:** Medium while `surfaceobjectives_jax.py` has dirty overlap. Maintain redirect imports in original modules for backward compat.
 - **Contracts:** External test caller signatures (`tests/integration/test_stage2_jax.py:1779`).
 - **Validation gate:** T3 + profile-related tests.
 
 ### 7.4 — [ ] T3.4: `_build_runtime_linear_solve_callbacks` 4-branch refactor
 
-- **Files:** `boozersurface_jax.py:3646-3987` (343 LOC).
-- **Change:** Extract `_pack_dense_plu_callbacks(matrix, lu_piv, status_fn, backend_label, residency)` shared between `shared_lu_piv` (`:3709-3792`) and scipy PLU (`:3794-3867`) branches. Extract `_pack_operator_callbacks(operator_dict, system_solver, system_solver_with_status, stab)` shared between hessian-operator (`:3872-3938`) and exact_jacobian (`:3940-3983`) branches.
+- **Files:** `boozersurface_jax.py:3730-4063` (current function body).
+- **Change:** Extract `_pack_dense_plu_callbacks(matrix, lu_piv, status_fn, backend_label, residency)` shared between `shared_lu_piv` (`:3793-3874`) and scipy PLU (`:3876-3949`) branches. Extract `_pack_operator_callbacks(operator_dict, system_solver, system_solver_with_status, stab)` shared between hessian-operator (`:3954-4014`) and exact_jacobian (`:4016-4059`) branches.
 - **LOC saved:** ~120.
-- **Risk:** Medium. Must preserve byte-identity of shared `(lu, piv)` factor reuse; `_with_nan_status` wrap-once semantics; `apply_forward` / `apply_transpose` wired to device-resident `H_dev` directly.
+- **Risk:** Medium. Must preserve byte-identity of shared `(lu, piv)` factor reuse; `_with_nan_status` wrap-once semantics; `apply_forward` / `apply_transpose` wired to device-resident `H_dev` directly. Re-derive the range from the latest committed tree before implementation.
 - **Contracts:** `linear_solve_backend` reporting strings (`dense-plu-shared`, `dense-plu`, `operator`); `linear_solve_factors` payload shape (tuple of `jnp` arrays).
 - **Validation gate:** T3 + `test_boozersurface_jax_private.py` private optimizer lane + parity-mode CPU test.
 
 ### 7.5 — [ ] T3.5: LaneArtifact-builder coverage extension
 
-- **Files:** `non_banana_example_parity_fixtures.py:304-507` (existing helpers) + 31 inline `LaneArtifact(...)` sites (Lane 6 listed exact line refs).
+- **Files:** `non_banana_example_parity_fixtures.py:354-535` (existing helpers) + remaining inline `LaneArtifact(...)` sites. Current dirty work substantially changes this file; refresh after it lands.
 - **Change:** Extend `_build_cpu_lane` / `_build_jax_lane` / `_build_scalar_lane` to accept arbitrary `raw_arrays` + `fixture_kind`; compute the 7 hash fields from raw arrays via `_METADATA_RAW_ARRAY_KEYS_BY_FIXTURE_KIND` (promote from driver file).
 - **LOC saved:** ~1,650.
 - **Risk:** Low. `LaneArtifact` output byte-identical; all hash kwargs already derived from raw arrays.
@@ -398,7 +446,7 @@ Goal: large-scale folds across multiple files. Higher risk because they touch ho
 
 ### 7.6 — [ ] T3.6: Table-driven `_*_comparisons` driver
 
-- **Files:** `non_banana_example_cpp_jax_cpu_parity.py:951-1670` (11 functions).
+- **Files:** `non_banana_example_cpp_jax_cpu_parity.py:951-1843` (comparison function block in current dirty tree).
 - **Change:** Define `COMPARISON_PLAN_BY_FIXTURE_KIND: Mapping[str, Sequence[ComparisonSpec]]`; single `_apply_comparison_plan(plan, cpu, jax_lane)` driver.
 - **LOC saved:** ~700.
 - **Risk:** Low. Dict-equivalent output.
@@ -642,4 +690,4 @@ Full audit transcripts available in the orchestrator session log (2026-05-20).
 
 ---
 
-*End of plan v2. Crucible-reviewed before any code changes.*
+*End of plan v3. Crucible-reviewed and current-tree refreshed before bloat-reduction code changes.*
