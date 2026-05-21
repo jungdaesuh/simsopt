@@ -1650,11 +1650,13 @@ def build_single_stage_full_graph_host_callback_value_and_grad(
     """Bridge full-graph ``JF.x`` value/grad into the jitted L-BFGS-B driver."""
     host_template = _single_stage_optimizer_dofs_array(optimizer_dofs).reshape(-1)
     host_dtype = runtime_np_dtype()
+    callback_device = jax.devices()[0]
     value_spec = jax.ShapeDtypeStruct((), jnp.dtype(host_dtype))
     grad_spec = jax.ShapeDtypeStruct(host_template.shape, jnp.dtype(host_dtype))
 
     def host_value_and_grad(x):
-        value, grad = value_and_grad(np.asarray(x, dtype=host_dtype).reshape(-1))
+        with jax.default_device(callback_device):
+            value, grad = value_and_grad(np.asarray(x, dtype=host_dtype).reshape(-1))
         return (
             np.asarray(value, dtype=host_dtype),
             np.asarray(grad, dtype=host_dtype).reshape(host_template.shape),

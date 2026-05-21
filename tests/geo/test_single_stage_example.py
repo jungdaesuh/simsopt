@@ -2981,6 +2981,41 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(float(value), 7.0)
         np.testing.assert_allclose(np.asarray(gradient), np.array([6.0, 8.0]))
 
+    def test_full_graph_host_callback_value_and_grad_uses_runtime_default_device(
+        self,
+    ):
+        module = self.load_module()
+        original_default_device = module.jax.default_device
+        callback_devices = []
+
+        @contextmanager
+        def recording_default_device(device):
+            callback_devices.append(device)
+            with original_default_device(device):
+                yield
+
+        def host_value_and_grad(x):
+            return float(np.sum(x)), 2.0 * np.asarray(x)
+
+        with patch.object(module.jax, "default_device", recording_default_device):
+            value_and_grad = (
+                module.build_single_stage_full_graph_host_callback_value_and_grad(
+                    host_value_and_grad,
+                    np.array([1.0, 2.0], dtype=np.float64),
+                )
+            )
+            with jax.transfer_guard_host_to_device("allow"):
+                optimizer_dofs = jax.device_put(
+                    np.array([3.0, 4.0], dtype=np.float64)
+                )
+
+            with jax.transfer_guard("disallow"):
+                value, gradient = value_and_grad(optimizer_dofs)
+
+        self.assertEqual(float(value), 7.0)
+        np.testing.assert_allclose(np.asarray(gradient), np.array([6.0, 8.0]))
+        self.assertEqual(callback_devices, [module.jax.devices()[0]])
+
     def test_init_only_full_state_target_lane_uses_traceable_objective(self):
         module = self.load_module()
 
