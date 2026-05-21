@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding, PartitionSpec as P
 
 _DTYPE_BY_NAME = {
     "float64": jnp.float64,
@@ -29,6 +30,14 @@ def _contains_jax_leaves(value) -> bool:
     )
 
 
+def _is_jax_tracer(value) -> bool:
+    return isinstance(value, jax.core.Tracer)
+
+
+def _contains_traced_jax_leaves(value) -> bool:
+    return any(_is_jax_tracer(leaf) for leaf in jax.tree.leaves(value))
+
+
 def _has_jax_array_value(value) -> bool:
     if isinstance(value, jax.Array) or hasattr(value, "aval"):
         return True
@@ -36,22 +45,46 @@ def _has_jax_array_value(value) -> bool:
 
 
 def _contains_concrete_jax_leaves(value) -> bool:
-    return any(isinstance(leaf, jax.Array) for leaf in jax.tree.leaves(value))
+    return any(
+        isinstance(leaf, jax.Array) and not _is_jax_tracer(leaf)
+        for leaf in jax.tree.leaves(value)
+    )
 
 
 def _has_only_traced_jax_leaves(value) -> bool:
     return _has_jax_array_value(value) and not _contains_concrete_jax_leaves(value)
 
 
-def _reference_sharding(reference):
+def _reference_sharding(reference, *, ndim: int | None = None):
     if isinstance(reference, jax.Array):
-        return getattr(reference, "sharding", None)
+        sharding = getattr(reference, "sharding", None)
+        return _compatible_reference_sharding(sharding, ndim=ndim)
     if isinstance(reference, (list, tuple)):
         for leaf in jax.tree.leaves(reference):
             if isinstance(leaf, jax.Array):
                 sharding = getattr(leaf, "sharding", None)
                 if sharding is not None:
-                    return sharding
+                    return _compatible_reference_sharding(sharding, ndim=ndim)
+    return None
+
+
+def _compatible_reference_sharding(sharding, *, ndim: int | None):
+    if not isinstance(sharding, NamedSharding):
+        return None
+    if ndim is None or len(sharding.spec) <= ndim:
+        return sharding
+    return NamedSharding(sharding.mesh, P())
+
+
+def _value_ndim(value) -> int | None:
+    if _contains_traced_jax_leaves(value):
+        return None
+    if isinstance(value, jax.Array):
+        return int(value.ndim)
+    if hasattr(value, "aval"):
+        return None
+    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
+        return int(np.ndim(value))
     return None
 
 
@@ -182,7 +215,7 @@ def as_jax_int32(value) -> jax.Array:
 
 def as_runtime_array(value, *, dtype=None, reference=None):
     resolved_dtype = _resolve_jnp_dtype(dtype, source="dtype")
-    reference_sharding = _reference_sharding(reference)
+    reference_sharding = _reference_sharding(reference, ndim=_value_ndim(value))
     if reference_sharding is not None and not _has_only_traced_jax_leaves(value):
         return runtime_device_put(value, dtype=resolved_dtype, target=reference_sharding)
     return as_jax_array(value, dtype=resolved_dtype)

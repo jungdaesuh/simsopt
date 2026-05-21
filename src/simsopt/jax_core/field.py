@@ -183,21 +183,16 @@ def _collective_group_field(points, gammas, gammadashs, currents, kernel, config
         currents,
         config.coil_device_count,
     )
-    if config.point_axis_name is not None:
-        # The 2D ``points_coils`` mesh requires sharded inputs on the point
-        # axis. Forcing explicit ``jax.device_put`` here so the lowered
-        # ``shard_map`` does not trigger an implicit single-device →
-        # multi-device transfer that strict transfer-guard would reject.
-        # For 1D ``coil_groups`` we skip the pre-placement to avoid an
-        # avoidable JIT-recompile cost — the ``P()`` in_spec replicates the
-        # point input implicitly without triggering a transfer.
-        points, gammas, gammadashs, currents = _place_collective_group_inputs(
-            points,
-            gammas,
-            gammadashs,
-            currents,
-            config,
-        )
+    # ``shard_map`` requires every input to already match its declared
+    # mesh/in_spec placement. Make the boundary explicit so single-device JAX
+    # arrays do not leak into multi-device collectives.
+    points, gammas, gammadashs, currents = _place_collective_group_inputs(
+        points,
+        gammas,
+        gammadashs,
+        currents,
+        config,
+    )
     point_spec = (
         P() if config.point_axis_name is None else P(config.point_axis_name, None)
     )

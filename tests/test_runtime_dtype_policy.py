@@ -874,8 +874,13 @@ def test_as_runtime_float64_uses_runtime_policy_dtype_for_host_values():
 def test_as_runtime_float64_places_host_values_on_reference_sharding(monkeypatch):
     from simsopt.backend import dtypes
     from simsopt.backend.dtypes import as_runtime_float64
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-    reference = jax.device_put(np.asarray([0.0], dtype=np.float64))
+    mesh = Mesh(np.asarray(jax.devices()[:1], dtype=object), ("d",))
+    reference = jax.device_put(
+        np.asarray([0.0], dtype=np.float64),
+        NamedSharding(mesh, P("d")),
+    )
     original_device_put = dtypes.jax.device_put
     placements = []
 
@@ -892,6 +897,61 @@ def test_as_runtime_float64_places_host_values_on_reference_sharding(monkeypatch
 
     assert placements[-1] is reference.sharding
     assert value.sharding == reference.sharding
+
+
+def test_as_runtime_float64_replicates_lower_rank_values_on_reference_mesh():
+    from simsopt.backend.dtypes import as_runtime_float64
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    mesh = Mesh(np.asarray(jax.devices()[:1], dtype=object), ("d",))
+    reference = jax.device_put(
+        np.zeros((2, 3), dtype=np.float64),
+        NamedSharding(mesh, P("d", None)),
+    )
+
+    value = as_runtime_float64(
+        np.asarray([1.0, 2.0], dtype=np.float64),
+        reference=reference,
+    )
+
+    assert isinstance(value.sharding, NamedSharding)
+    assert value.sharding.mesh == reference.sharding.mesh
+    assert value.sharding.spec == P()
+
+
+def test_as_runtime_float64_does_not_pin_to_single_device_reference(monkeypatch):
+    from simsopt.backend import dtypes
+    from simsopt.backend.dtypes import as_runtime_float64
+
+    reference = jax.device_put(np.asarray([0.0], dtype=np.float64))
+    original_device_put = dtypes.jax.device_put
+    placements = []
+
+    def recording_device_put(value, *args, **kwargs):
+        placements.append(args[0] if args else kwargs.get("device"))
+        return original_device_put(value, *args, **kwargs)
+
+    monkeypatch.setattr(dtypes.jax, "device_put", recording_device_put)
+
+    value = as_runtime_float64(
+        np.asarray([1.0, 2.0], dtype=np.float64),
+        reference=reference,
+    )
+
+    assert placements[-1] is None
+    assert value.shape == (2,)
+
+
+def test_as_jax_float64_accepts_traced_scalar_lists():
+    from simsopt.backend.dtypes import as_jax_float64
+
+    @jax.jit
+    def traced_concat(left, right):
+        return as_jax_float64([left, right])
+
+    value = traced_concat(jnp.asarray(1.0), jnp.asarray(2.0))
+
+    np.testing.assert_allclose(np.asarray(value), np.asarray([1.0, 2.0]))
 
 
 def test_as_runtime_float64_alias_does_not_gate_on_host_reference_dtype():
