@@ -723,6 +723,64 @@ Acceptance:
   driver/runtime, repo SHA, dirty status, and memory.
 - [ ] Any artifact with CPU backend is invalid for GPU signoff.
 
+### 4F. Optimizer Backend E2E Matrix
+
+Purpose: compare the supported L-BFGS control surfaces on the same reduced
+single-stage fixture before interpreting larger single-stage outer-loop timing:
+
+- SciPy L-BFGS CPU reference lane
+- private on-device L-BFGS target lane
+- SciPy-controlled full JAX graph L-BFGS target lane
+- Optimistix L-BFGS target lane
+- Optax L-BFGS target lane
+
+Use a single Slurm job for the matrix. Do not submit one job per backend.
+Each backend rung must wrap `benchmarks/single_stage_init_parity.py` in
+`/usr/bin/time -v`, sample `nvidia-smi`, and write a structured summary.
+This runner owns the relevant oracle contract: its reference lane is the
+SciPy/C++ CPU path, and its target lane is selected by `--optimizer-backend`.
+The target backends are:
+
+```bash
+for backend in ondevice scipy-jax-fullgraph optimistix-lbfgs optax-lbfgs; do
+  rung_dir="${RESULTS_ROOT}/wave4_gpu_parity/optimizer_matrix/${backend}"
+  mkdir -p "${rung_dir}"
+  nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used,memory.total \
+    --format=csv -l 5 > "${rung_dir}/nvidia_smi_monitor.csv" &
+  monitor_pid="$!"
+
+  /usr/bin/time -v -o "${rung_dir}/time.txt" \
+    python benchmarks/single_stage_init_parity.py \
+      --platform cuda \
+      --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
+      --nphi 63 \
+      --ntheta 32 \
+      --mpol 4 \
+      --ntor 4 \
+      --maxiter 1 \
+      --optimizer-backend "${backend}" \
+      --equilibria-dir examples/single_stage_optimization/equilibria \
+      --case-artifacts-dir "${rung_dir}/cases" \
+      --output-json "${rung_dir}/single_stage_optimizer.json"
+
+  kill "${monitor_pid}" 2>/dev/null || true
+  wait "${monitor_pid}" 2>/dev/null || true
+done
+```
+
+Acceptance:
+
+- [ ] Every backend rung exits zero and has `passed: true`.
+- [ ] The SciPy L-BFGS CPU reference lane is recorded in each rung.
+- [ ] The target backend's recorded optimizer method matches the requested
+  public backend contract.
+- [ ] Each rung records fixed-state precision metrics, final metric deltas,
+  CPU wall time, target wall time, `/usr/bin/time -v` maximum resident set
+  size, and sampled peak GPU memory.
+- [ ] This matrix is a reduced single-stage E2E optimizer-control comparison.
+  It is not a substitute for the single-stage `m04n04-i05-useful` and larger
+  rungs.
+
 ## Wave 5: Production Banana GPU Proof Body
 
 Purpose: run the repo's current production GPU proof contract instead of a
@@ -731,10 +789,10 @@ one-off proof command.
 Preconditions:
 
 - [ ] Wave 4 passed.
-- [ ] `SINGLE_STAGE_WARM_START_RUN_DIR` or `SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC`
-  is set.
+- [ ] `m04n04-i05-useful` has passed before any larger single-stage run is
+  submitted.
 
-Command with warm-start run directory:
+Command:
 
 ```bash
 mkdir -p "${RESULTS_ROOT}/wave5_production_gpu"
@@ -750,44 +808,34 @@ export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 python benchmarks/stage2_e2e_comparison.py \
-  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/stage2" \
-  --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
-  --stage2-platform cuda \
-  --stage2-maxiter "${STAGE2_GEOMETRY_REPRO_MAXITER}" \
-  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}"
+  --platform cuda \
+  --maxiter "${STAGE2_GEOMETRY_REPRO_MAXITER}" \
+  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}" \
+  --equilibria-dir examples/single_stage_optimization/equilibria \
+  --output-json "${RESULTS_ROOT}/wave5_production_gpu/stage2_geometry_repro.json"
 
 python benchmarks/single_stage_outer_loop_probe.py \
-  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/single_stage" \
   --platform cuda \
-  --warm-start-run-dir "${SINGLE_STAGE_WARM_START_RUN_DIR}"
-```
-
-Command with runtime seed spec:
-
-```bash
-python benchmarks/stage2_e2e_comparison.py \
-  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/stage2" \
   --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
-  --stage2-platform cuda \
-  --stage2-maxiter "${STAGE2_GEOMETRY_REPRO_MAXITER}" \
-  --geometry-rel-tol "${STAGE2_GEOMETRY_REL_TOL}"
+  --output-json "${RESULTS_ROOT}/wave5_production_gpu/single_stage_outer_loop.json"
 
-python benchmarks/single_stage_outer_loop_probe.py \
-  --results-dir "${RESULTS_ROOT}/wave5_production_gpu/single_stage" \
+python benchmarks/production_boozer_parity_probe.py \
   --platform cuda \
-  --jax-runtime-seed-spec "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC}"
+  --output-json "${RESULTS_ROOT}/wave5_production_gpu/boozer_production_grid.json"
+
+python benchmarks/adjoint_fd_validation.py \
+  --platform cuda \
+  --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
+  --output-json "${RESULTS_ROOT}/wave5_production_gpu/adjoint_fd_validation.json"
 ```
 
 Acceptance:
 
 - [ ] CUDA PTX and CUBIN canaries pass.
-- [ ] `stage2_cold.json` exists and passes.
-- [ ] `stage2_warm.json` exists and passes.
-- [ ] `stage2_warm_repro.json` exists and passes.
-- [ ] `single_stage_cold.json` exists and passes.
-- [ ] `single_stage_warm.json` exists and passes.
-- [ ] `boozer_well_conditioned_adjoint.json` exists and passes.
-- [ ] `reduction_cancellation_stress.json` exists and passes.
+- [ ] `stage2_geometry_repro.json` exists and has `passed: true`.
+- [ ] `single_stage_outer_loop.json` exists and has `passed: true`.
+- [ ] `boozer_production_grid.json` exists and has `passed: true`.
+- [ ] `adjoint_fd_validation.json` exists and has `passed: true`.
 - [ ] Proof summary reports no validation failures.
 
 ## Wave 6: Performance Characterization
@@ -998,6 +1046,53 @@ Blocking interpretation:
   `53170493`, proving the exact current active replicated-placement bytes
   within the 20-minute debug allocation.
 
+## Current Execution Update: Clean Committed SHA `1345ea9e0`
+
+This update records the post-cleanup committed SHA currently under E2E test:
+
+- Local branch: `gpu-purity-stage2-20260405`
+- Current committed SHA:
+  `1345ea9e081a5ebaa0727cf4ae51ebce6bead3a1`
+- Remote clean source checkout:
+  `/pscratch/sd/j/jungdae/simsopt-jax-clean-1345ea9e0-20260521T143208Z-src`
+- Remote runtime:
+  `/pscratch/sd/j/jungdae/simsopt-jax-runtimes/jax-0.10.0`
+- JAX/JAXLIB: `0.10.0` / `0.10.0`
+- Local working tree still has unrelated dirt:
+  `conda.recipe/meta.yaml` and `.conda/`.
+
+Focused local regression packet for this SHA:
+
+| Command | Result |
+| --- | --- |
+| `python -m pytest tests/geo/test_single_stage_example.py -k "runtime_spec_biotsavart_projects_cotangents_to_owner_dofs or runtime_spec_biotsavart_full_artifact_curves_follow_updated_dofs or host_curve_max_curvature_allows_strict_transfer_guard" -q` | PASS: `3 passed, 346 deselected` |
+| `python -m pytest tests/field/test_biotsavart_jax.py -q` | PASS: `52 passed` |
+| `python -m pytest tests/integration/test_stage2_jax.py -k b_pullback_native_projects_to_free_dof_gradient -q` | PASS: `1 passed, 183 deselected` |
+| `python -m pytest tests/test_jax_import_smoke.py -k "transfer_guard_disallow_enforces_single_stage_target_runtime_boundaries or import_biotsavart_jax" -q` | PASS: `2 passed, 119 deselected` |
+
+Single-stage CUDA `m02n02-i03-smoke` debug ladder on Perlmutter:
+
+| Job | SHA | Result | Evidence |
+| --- | --- | --- | --- |
+| `53241854` / `ss-m02-i03-33cb87225-r2` | `33cb87225` | FAIL | Strict transfer guard caught scalar Python indexing in `SpecBackedBiotSavartJAX.coil_cotangents_to_dofs_gradient`; step MaxRSS `22085192K`. |
+| `53242990` / `ss-m02-i03-1d430a699` | `1d430a699` | FAIL | Strict transfer guard caught host-staged zero construction in `SpecBackedCurve.dgammadash_by_dcoeff_vjp`; step MaxRSS `22108988K`. |
+| `53243425` / `ss-m02-i03-7d23c241b` | `7d23c241b` | FAIL | Strict transfer guard caught JAX `integer_pow` JVP in the curvature VJP path; step MaxRSS `22177380K`. |
+| `53244319` / `ss-m02-i03-1345ea9e0` | `1345ea9e0` | TIMEOUT | No strict-transfer traceback before the 30-minute debug walltime. The target lane reached three optimizer iterations and final Boozer solve. Step MaxRSS `22167980K`; sampled peak GPU memory `3153 MiB`; peak GPU utilization `10%`; backend `gpu`; devices `cuda:0..3`; runtime JSON records `simsopt==0.1.dev1885+g1345ea9e0`. |
+
+Open jobs for this SHA:
+
+| Job | Purpose | QOS / partition | State at submission audit |
+| --- | --- | --- | --- |
+| `53245257` / `ss-m02-i03-1345ea9e0-r1h` | Superseded regular-QOS repeat of `m02n02-i03-smoke`. | `gpu_regular` / `gpu_ss11` | CANCELED before proof-body evidence; regular reserves an exclusive GPU node and was replaced by shared-QOS job `53245542`. |
+| `53245542` / `ss-m02-i03-1345ea9e0-shared` | Repeat `m02n02-i03-smoke` with one-hour walltime to distinguish finalization runtime from a new transfer bug. | `gpu_shared` / `shared_gpu_ss11`; live scheduler requires `32` CPU cores for `1` GPU on this partition. | `RUNNING` since `2026-05-21 08:54 PDT` on `nid003192`; reached three optimizer iterations and final Boozer solve; no `single_stage_cuda.json` yet. |
+| `53245429` / `cpu-w0w1-1345ea9e0` | Wave 0 import smoke plus Wave 1 focused CPU banana/proof artifacts, with per-step `/usr/bin/time -v` MaxRSS. | CPU `shared` / `shared_milan_ss11` | `PENDING (Resources)` |
+| `53246693` / `opt-matrix-1345ea9e0` | Superseded Stage 2 optimizer matrix attempt. | `gpu_shared` / `shared_gpu_ss11` | CANCELED after reviewer audit showed this did not exercise the requested SciPy CPU reference lane; the corrected plan uses `benchmarks/single_stage_init_parity.py` instead. |
+
+The current clean-SHA state does not satisfy the full plan. It only proves that
+the latest strict-transfer issues found by the debug ladder have been fixed
+locally and that the latest GPU debug canary progressed past all previously
+observed transfer failures before timing out.
+
 ## Slurm Execution Policy
 
 - [ ] Source checkout and modest environment setup may happen on login nodes;
@@ -1078,6 +1173,10 @@ Every structured proof artifact must include or be accompanied by:
   `https://docs.jax.dev/en/latest/async_dispatch.html`
 - JAX benchmarking:
   `https://docs.jax.dev/en/latest/benchmarking.html`
+- Optax L-BFGS:
+  `https://optax.readthedocs.io/en/latest/_collections/examples/lbfgs.html`
+- Optimistix L-BFGS:
+  `https://docs.kidger.site/optimistix/api/minimise/`
 - NERSC Python on Perlmutter:
   `https://docs.nersc.gov/development/languages/python/using-python-perlmutter/`
 - NERSC Perlmutter running jobs:
