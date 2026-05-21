@@ -6605,6 +6605,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertFalse(marker["accepted"])
         self.assertIn("optimizer_success_not_true", marker["rejection_reasons"])
+        self.assertEqual(marker["diagnostic_results_payload"]["FIELD_ERROR"], 0.01)
 
     def test_write_single_stage_final_artifact_writes_rejected_marker(self):
         module = self.load_module()
@@ -6620,6 +6621,10 @@ class SingleStageExampleTests(unittest.TestCase):
             self.assertFalse(accepted)
             self.assertFalse((Path(tmpdir) / "results.json").exists())
             self.assertIn("optimizer_status_6", marker["rejection_reasons"])
+            self.assertEqual(
+                marker["diagnostic_results_payload"]["FIELD_ERROR"],
+                final_snapshot.results_payload["FIELD_ERROR"],
+            )
 
     def test_write_single_stage_final_artifact_writes_results_json(self):
         module = self.load_module()

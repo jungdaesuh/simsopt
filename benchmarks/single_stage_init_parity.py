@@ -567,9 +567,15 @@ def _single_stage_full_run_lane_contract(
     )
     run_dir = Path(str(case["run_dir"]))
     provenance = results.get("provenance", {})
+    final_artifact_json = str(case["final_artifact_json"])
+    final_artifact_accepted = bool(case["final_artifact_accepted"])
     return {
         "run_dir": str(run_dir),
-        "results_json": str(run_dir / "results.json"),
+        "results_json": str(run_dir / "results.json")
+        if final_artifact_accepted
+        else None,
+        "final_artifact_json": final_artifact_json,
+        "final_artifact_accepted": final_artifact_accepted,
         "progress_json": str(case["outer_optimizer_progress_json"]),
         "runtime_seed_spec_hash": runtime_seed_spec_hash,
         "objective_configuration_hash": objective_hash,
@@ -747,6 +753,37 @@ def _resolved_single_stage_output_root(
         yield Path(temp_dir) / "outputs"
 
 
+def _load_single_stage_final_payload(output_root: Path) -> tuple[dict[str, Any], Path]:
+    """Load the final run payload from the single-stage artifact contract."""
+    results_matches = list(output_root.rglob("results.json"))
+    if len(results_matches) == 1:
+        results_path = results_matches[0]
+        return dict(load_json(results_path)), results_path
+    if len(results_matches) > 1:
+        match_display = ", ".join(str(match) for match in results_matches)
+        raise RuntimeError(
+            f"Expected at most one accepted results.json under {output_root}, "
+            f"found {match_display}"
+        )
+
+    rejected_matches = list(output_root.rglob("REJECTED.json"))
+    if len(rejected_matches) != 1:
+        match_display = ", ".join(str(match) for match in rejected_matches) or "<none>"
+        raise RuntimeError(
+            f"Expected exactly one results.json or REJECTED.json under "
+            f"{output_root}, found rejected markers {match_display}"
+        )
+    rejected_path = rejected_matches[0]
+    marker = dict(load_json(rejected_path))
+    diagnostic_results = marker.get("diagnostic_results_payload")
+    if not isinstance(diagnostic_results, dict):
+        raise RuntimeError(
+            f"{rejected_path} is missing diagnostic_results_payload; fixed-iteration "
+            "parity rungs require the rejected-run diagnostic payload."
+        )
+    return dict(diagnostic_results), rejected_path
+
+
 def _run_single_stage_case(
     args: argparse.Namespace,
     backend: str,
@@ -900,16 +937,20 @@ def _run_single_stage_case(
         )
         elapsed_s = time.perf_counter() - start
 
-        results_json = find_single_file(resolved_root, "results.json")
-        results = dict(load_json(results_json))
+        results, final_artifact_json = _load_single_stage_final_payload(
+            resolved_root
+        )
+        run_dir = final_artifact_json.parent
         payload = {
             "results": results,
             "surface_gamma": None,
             "elapsed_s": float(elapsed_s),
             "phase_timings": _extract_phase_timings(results),
-            "run_dir": str(results_json.parent),
+            "run_dir": str(run_dir),
+            "final_artifact_json": str(final_artifact_json),
+            "final_artifact_accepted": final_artifact_json.name == "results.json",
             "outer_optimizer_progress_json": str(
-                results_json.parent / "outer_optimizer_progress.json"
+                run_dir / "outer_optimizer_progress.json"
             ),
         }
         if load_surface_gamma:

@@ -11416,6 +11416,7 @@ def build_single_stage_rejected_marker(snapshot, reasons):
     return {
         "accepted": False,
         "rejection_reasons": list(reasons),
+        "diagnostic_results_payload": dict(snapshot.results_payload),
         "optimizer": dict(snapshot.optimizer_result),
         "optimizer_diagnostics": dict(snapshot.optimizer_diagnostics),
         "artifact_contract": {

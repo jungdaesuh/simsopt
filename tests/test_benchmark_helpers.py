@@ -4821,8 +4821,36 @@ def _single_stage_contract_case(tmp_path: Path, lane_name: str, results):
     return {
         "results": results,
         "run_dir": str(run_dir),
+        "final_artifact_json": str(run_dir / "results.json"),
+        "final_artifact_accepted": True,
         "outer_optimizer_progress_json": str(progress_json),
     }
+
+
+def test_single_stage_init_loads_rejected_diagnostic_payload(tmp_path):
+    run_dir = tmp_path / "rejected" / "mpol=2-ntor=2"
+    run_dir.mkdir(parents=True)
+    progress_json = run_dir / "outer_optimizer_progress.json"
+    _write_optimizer_trace_progress(progress_json)
+    rejected_payload = {
+        "accepted": False,
+        "rejection_reasons": ["optimizer_status_1"],
+        "diagnostic_results_payload": _single_stage_contract_results(
+            OPTIMIZER_SUCCESS=False,
+            OPTIMIZER_STATUS=1,
+        ),
+    }
+    (run_dir / "REJECTED.json").write_text(
+        json.dumps(rejected_payload), encoding="utf-8"
+    )
+
+    results, artifact_path = (
+        single_stage_init_parity_module._load_single_stage_final_payload(tmp_path)
+    )
+
+    assert artifact_path == run_dir / "REJECTED.json"
+    assert results["OPTIMIZER_SUCCESS"] is False
+    assert results["OPTIMIZER_STATUS"] == 1
 
 
 def test_single_stage_init_full_run_contract_records_reportable_lane_state(
@@ -4876,9 +4904,50 @@ def test_single_stage_init_full_run_contract_records_reportable_lane_state(
     assert lanes["cpu_scipy"]["results_json"] == str(
         Path(cpu_case["run_dir"]) / "results.json"
     )
+    assert lanes["cpu_scipy"]["final_artifact_accepted"] is True
+    assert (
+        lanes["cpu_scipy"]["final_artifact_json"]
+        == lanes["cpu_scipy"]["results_json"]
+    )
     assert (
         lanes["jax_cpu"]["progress_json"] == jax_case["outer_optimizer_progress_json"]
     )
+
+
+def test_single_stage_init_full_run_contract_records_rejected_artifact(
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "cpu"
+    seed_spec = tmp_path / "single_stage_jax_runtime_seed_spec.json"
+    seed_spec.write_text('{"seed": 7}', encoding="utf-8")
+    cpu_case = _single_stage_contract_case(
+        tmp_path,
+        "cpu",
+        _single_stage_contract_results(),
+    )
+    jax_case = _single_stage_contract_case(
+        tmp_path,
+        "jax",
+        _single_stage_contract_results(OPTIMIZER_SUCCESS=False, OPTIMIZER_STATUS=1),
+    )
+    jax_case["final_artifact_json"] = str(Path(jax_case["run_dir"]) / "REJECTED.json")
+    jax_case["final_artifact_accepted"] = False
+
+    contract = (
+        single_stage_init_parity_module.build_single_stage_full_run_artifact_contract(
+            args,
+            reference_backend="cpu",
+            cpu_case=cpu_case,
+            jax_case=jax_case,
+            jax_seed_spec=seed_spec,
+        )
+    )
+
+    lane = contract["lanes"]["jax_cpu"]
+    assert lane["results_json"] is None
+    assert lane["final_artifact_json"] == jax_case["final_artifact_json"]
+    assert lane["final_artifact_accepted"] is False
 
 
 def test_single_stage_init_full_run_contract_preserves_objective_mismatch(
