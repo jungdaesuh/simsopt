@@ -51,6 +51,8 @@ _SIMSOPT_BACKEND_MODE_ENV_VAR = "SIMSOPT_BACKEND_MODE"
 _SIMSOPT_BACKEND_STRICT_ENV_VAR = "SIMSOPT_BACKEND_STRICT"
 _SIMSOPT_TRANSFER_GUARD_ENV_VAR = "SIMSOPT_JAX_TRANSFER_GUARD"
 _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR = "TARGET_LANE_ACCEPTED_STEP_SYNC"
+_SIMSOPT_REPO_SHA_ENV_VAR = "SIMSOPT_REPO_SHA"
+_SIMSOPT_GIT_STATUS_SHORT_ENV_VAR = "SIMSOPT_GIT_STATUS_SHORT"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _XLA_GPU_DETERMINISTIC_OPS_FLAG = "--xla_gpu_exclude_nondeterministic_ops=true"
 _STALE_XLA_GPU_DETERMINISTIC_OPS_FLAGS = ("--xla_gpu_deterministic_ops",)
@@ -489,6 +491,11 @@ def bootstrap_local_simsopt() -> None:
 
 def get_git_sha() -> str:
     """Return the exact repo SHA for provenance."""
+    if _SIMSOPT_REPO_SHA_ENV_VAR in os.environ:
+        repo_sha = os.environ[_SIMSOPT_REPO_SHA_ENV_VAR].strip()
+        if not repo_sha:
+            raise RuntimeError(f"{_SIMSOPT_REPO_SHA_ENV_VAR} must not be empty")
+        return repo_sha
     return subprocess.run(
         ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
         check=True,
@@ -499,6 +506,8 @@ def get_git_sha() -> str:
 
 def get_git_status_short() -> str:
     """Return the short worktree status for provenance."""
+    if _SIMSOPT_GIT_STATUS_SHORT_ENV_VAR in os.environ:
+        return os.environ[_SIMSOPT_GIT_STATUS_SHORT_ENV_VAR]
     return subprocess.run(
         ["git", "-C", str(REPO_ROOT), "status", "--short", "--untracked-files=no"],
         check=True,

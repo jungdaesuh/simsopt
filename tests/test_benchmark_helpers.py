@@ -3843,6 +3843,26 @@ def test_require_x64_runtime_prefers_config_flag_without_array_probe():
     require_x64_runtime(fake_jax, context="Tier 5")
 
 
+def test_git_provenance_uses_explicit_snapshot_env(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_REPO_SHA", "abc123")
+    monkeypatch.setenv("SIMSOPT_GIT_STATUS_SHORT", "")
+
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("git should not be queried for explicit snapshots")
+
+    monkeypatch.setattr(validation_ladder_common.subprocess, "run", fail_run)
+
+    assert validation_ladder_common.get_git_sha() == "abc123"
+    assert validation_ladder_common.get_git_status_short() == ""
+
+
+def test_git_provenance_rejects_empty_explicit_snapshot_sha(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_REPO_SHA", "")
+
+    with pytest.raises(RuntimeError, match="SIMSOPT_REPO_SHA must not be empty"):
+        validation_ladder_common.get_git_sha()
+
+
 def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/probe-cache")
     monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
