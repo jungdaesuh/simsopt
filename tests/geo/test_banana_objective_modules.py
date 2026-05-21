@@ -4268,6 +4268,95 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["objective_value_kinds"], ["hard", "hard"])
         self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard"])
 
+    def test_independent_banana_current_alm_payload_feeds_hardware_snapshot(self):
+        geometry_module = _load_module(
+            SINGLE_STAGE_GEOMETRY_PATH,
+            "banana_single_stage_geometry",
+        )
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        current_a = _FakeCurrentObjective(17000.0, [2.0, -1.0])
+        current_b = _FakeCurrentObjective(-15500.0, [0.5, 1.5])
+
+        objective_eval = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [_FakeAlgebraicObjective(2.0, [0.2, 0.0])],
+            [_FakeAlgebraicObjective(0.0, [0.0, 0.3])],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.1, 0.2, 0.3]),
+            penalty=8.0,
+            objective_optimizable=SimpleNamespace(),
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=(
+                self.module.independent_banana_current_alm_constraint_name(0),
+                self.module.independent_banana_current_alm_constraint_name(1),
+                "qs_error",
+            ),
+            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (-0.2, np.array([0.0, 0.0]), 0.0),
+            curvature_constraint_fn=lambda *_args: (-0.3, np.array([0.0, 0.0]), 0.0),
+            banana_currents=(current_a, current_b),
+            banana_current_threshold=16000.0,
+            alm_formulation="thresholded_physics",
+            qs_threshold=1.0,
+            boozer_threshold=1.0,
+            iota_penalty_threshold=1.0,
+            length_penalty_threshold=1.0,
+            augmented_inequality_objective_fn=lambda *_args: {
+                "total": 5.5,
+                "grad": np.array([0.4, 0.6]),
+                "stationarity_norm": 0.25,
+            },
+            include_diagnostics=False,
+        )
+
+        snapshot = geometry_module.evaluate_single_stage_search_hardware_snapshot(
+            objective_eval,
+            cc_dist=0.05,
+            cs_dist=0.02,
+            ss_dist=0.04,
+            curvature_threshold=40.0,
+            banana_current_max_A=16000.0,
+        )
+
+        self.assertEqual(
+            objective_eval["constraint_names"],
+            [
+                "banana_current_0_upper_bound",
+                "banana_current_1_upper_bound",
+                "qs_error",
+            ],
+        )
+        self.assertEqual(
+            objective_eval["constraint_blocks"],
+            ["current", "current", "physics"],
+        )
+        np.testing.assert_allclose(
+            objective_eval["raw_dual_update_values"],
+            [1000.0, -500.0, 1.0],
+        )
+        self.assertAlmostEqual(snapshot["banana_current_A"], 17000.0)
+        self.assertEqual(
+            set(snapshot["search_hardware_status"]["constraints"]),
+            {"banana_current"},
+        )
+        self.assertNotIn("qs_error", snapshot["search_hardware_status"]["constraints"])
+
     def test_evaluate_alm_objective_reports_active_banana_current_threshold(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [0.2, 0.0])]
         brs = [_FakeAlgebraicObjective(3.0, [0.0, 0.3])]
@@ -5106,6 +5195,55 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             "banana_current",
             result["search_hardware_status"]["constraints"],
         )
+
+    def test_evaluate_single_stage_search_hardware_snapshot_uses_independent_banana_current_residuals(
+        self,
+    ):
+        result = self.module.evaluate_single_stage_search_hardware_snapshot(
+            {
+                "constraint_names": [
+                    "banana_current_0_upper_bound",
+                    "banana_current_1_upper_bound",
+                    "qs_error",
+                ],
+                "dual_update_values": np.array([500.0, 2000.0, 0.0]),
+                "raw_dual_update_values": np.array([1000.0, -500.0, 0.0]),
+                "constraint_blocks": ["current", "current", "physics"],
+                "search_hardware_constraint_payload_kind": "signed_residual",
+            },
+            cc_dist=0.05,
+            cs_dist=0.02,
+            ss_dist=0.04,
+            curvature_threshold=40.0,
+            banana_current_max_A=1.6e4,
+        )
+
+        self.assertAlmostEqual(result["banana_current_A"], 1.7e4)
+        self.assertFalse(result["search_hardware_status"]["success"])
+        self.assertEqual(
+            set(result["search_hardware_status"]["constraints"]),
+            {"banana_current"},
+        )
+        self.assertNotIn("qs_error", result["search_hardware_status"]["constraints"])
+
+    def test_evaluate_single_stage_search_hardware_snapshot_rejects_unknown_nonphysics_alm_name(
+        self,
+    ):
+        with self.assertRaisesRegex(KeyError, "banana_current_o_upper_bound"):
+            self.module.evaluate_single_stage_search_hardware_snapshot(
+                {
+                    "constraint_names": ["banana_current_o_upper_bound"],
+                    "dual_update_values": np.array([0.0]),
+                    "raw_dual_update_values": np.array([0.0]),
+                    "constraint_blocks": ["current"],
+                    "search_hardware_constraint_payload_kind": "signed_residual",
+                },
+                cc_dist=0.05,
+                cs_dist=0.02,
+                ss_dist=0.04,
+                curvature_threshold=40.0,
+                banana_current_max_A=1.6e4,
+            )
 
     def test_evaluate_single_stage_search_hardware_snapshot_uses_penalty_objective_payload(
         self,

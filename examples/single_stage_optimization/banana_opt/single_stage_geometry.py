@@ -13,6 +13,7 @@ from banana_opt.hardware_constraint_schema import (
     build_threshold_overrides,
     get_hardware_constraint_spec,
     get_hardware_constraint_spec_for_alm_name,
+    hardware_constraint_schema_name_for_alm_name,
 )
 from topology_scorer import (
     score_topology as _score_topology,
@@ -519,11 +520,31 @@ def _constraint_signed_value_by_name(objective_eval, payload_kind):
 def _status_constraint_names(objective_eval, payload_kind):
     if payload_kind != "signed_residual":
         return None
-    return tuple(
-        dict.fromkeys(
-            get_hardware_constraint_spec_for_alm_name(str(name)).name
-            for name in objective_eval["constraint_names"]
+    constraint_names = tuple(str(name) for name in objective_eval["constraint_names"])
+    constraint_blocks = objective_eval.get("constraint_blocks")
+    if constraint_blocks is None:
+        return tuple(
+            dict.fromkeys(
+                get_hardware_constraint_spec_for_alm_name(name).name
+                for name in constraint_names
+            )
         )
+    schema_names = []
+    for name, block in zip(constraint_names, constraint_blocks, strict=True):
+        schema_name = hardware_constraint_schema_name_for_alm_name(name)
+        if schema_name is None:
+            if str(block) == "physics":
+                continue
+            raise KeyError(f"Unknown ALM hardware constraint {name!r}.")
+        schema_names.append(schema_name)
+    return tuple(dict.fromkeys(schema_names))
+
+
+def _signed_values_for_hardware_constraint(signed_values, schema_name):
+    return tuple(
+        float(signed_value)
+        for alm_name, signed_value in signed_values.items()
+        if hardware_constraint_schema_name_for_alm_name(str(alm_name)) == schema_name
     )
 
 
@@ -632,11 +653,17 @@ def evaluate_single_stage_search_hardware_snapshot(
             signed_values["max_curvature"],
         )
     if banana_current_A is None and banana_current_max_A is not None:
-        banana_current_signed_value = signed_values.get("banana_current_upper_bound")
-        if banana_current_signed_value is not None:
-            banana_current_A = _upper_bound_measurement_from_signed(
-                banana_current_max_A,
-                banana_current_signed_value,
+        banana_current_signed_values = _signed_values_for_hardware_constraint(
+            signed_values,
+            "banana_current",
+        )
+        if banana_current_signed_values:
+            banana_current_A = max(
+                _upper_bound_measurement_from_signed(
+                    banana_current_max_A,
+                    signed_value,
+                )
+                for signed_value in banana_current_signed_values
             )
     if poloidal_extent_rad is None and poloidal_extent_threshold_rad is not None:
         poloidal_extent_signed_value = signed_values.get("poloidal_extent")

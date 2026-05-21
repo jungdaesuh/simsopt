@@ -22,6 +22,8 @@ from banana_opt.hardware_constraint_schema import (
     get_hardware_constraint_spec,
     hardware_constraint_alm_activity_tolerance,
     hardware_constraint_alm_metadata,
+    independent_banana_current_alm_constraint_name,
+    is_independent_banana_current_alm_constraint_name,
     resolve_alm_scale_with_provenance,
 )
 from banana_opt.objective_gradients import objective_gradient as _objective_gradient
@@ -178,22 +180,8 @@ def _scalar_abs_upper_bound_constraint(optimizable, threshold, objective_optimiz
     return signed_value, grad, _positive_violation(signed_value)
 
 
-def independent_banana_current_alm_constraint_name(index: int) -> str:
-    return f"banana_current_{int(index)}_upper_bound"
-
-
-def _is_independent_banana_current_alm_constraint_name(name: str) -> bool:
-    prefix = "banana_current_"
-    suffix = "_upper_bound"
-    return (
-        name.startswith(prefix)
-        and name.endswith(suffix)
-        and name[len(prefix) : -len(suffix)].isdigit()
-    )
-
-
 def _banana_current_alm_metadata_name(name: str) -> str:
-    if _is_independent_banana_current_alm_constraint_name(name):
+    if is_independent_banana_current_alm_constraint_name(name):
         return "banana_current_upper_bound"
     return name
 
@@ -635,7 +623,7 @@ def _single_stage_alm_constraint_metadata(
         metadata_name = _banana_current_alm_metadata_name(constraint_name)
         uses_hard_value = (
             constraint_name in exact_hardware_names
-            or _is_independent_banana_current_alm_constraint_name(constraint_name)
+            or is_independent_banana_current_alm_constraint_name(constraint_name)
         )
         uses_hard_signal = uses_hard_value or (
             use_hard_geometry_signals and constraint_name in exact_geometry_names

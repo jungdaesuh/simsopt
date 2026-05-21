@@ -957,6 +957,31 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata.objective_value_kind, "hard")
         self.assertEqual(metadata.certification_value_kind, "hard")
 
+    def test_hardware_constraint_schema_resolves_independent_banana_current_alm_names(
+        self,
+    ):
+        schema_module = load_hardware_constraint_schema_module()
+
+        self.assertEqual(
+            schema_module.independent_banana_current_alm_constraint_name(0),
+            "banana_current_0_upper_bound",
+        )
+        self.assertEqual(
+            schema_module.hardware_constraint_schema_name_for_alm_name(
+                "banana_current_0_upper_bound"
+            ),
+            "banana_current",
+        )
+        self.assertEqual(
+            schema_module.get_hardware_constraint_spec_for_alm_name(
+                "banana_current_0_upper_bound"
+            ).name,
+            "banana_current",
+        )
+        self.assertIsNone(
+            schema_module.hardware_constraint_schema_name_for_alm_name("qs_error")
+        )
+
     def test_hardware_constraint_default_activity_tolerance_scales_with_active_threshold(
         self,
     ):

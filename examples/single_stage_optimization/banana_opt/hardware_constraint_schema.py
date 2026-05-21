@@ -322,6 +322,8 @@ _RECOVERY_STATUS_FIELD_NAMES = (
     "RECOVERY_ITERS",
     "RECOVERY_TERMINATION_REASON",
 )
+_INDEPENDENT_BANANA_CURRENT_ALM_PREFIX = "banana_current_"
+_INDEPENDENT_BANANA_CURRENT_ALM_SUFFIX = "_upper_bound"
 
 
 def hardware_constraint_schema() -> tuple[HardwareConstraintSpec, ...]:
@@ -335,13 +337,43 @@ def get_hardware_constraint_spec(name: str) -> HardwareConstraintSpec:
         raise KeyError(f"Unknown hardware constraint {name!r}.") from exc
 
 
-def _schema_name_from_alm_or_schema_name(name: str) -> str:
+def independent_banana_current_alm_constraint_name(index: int) -> str:
+    return (
+        f"{_INDEPENDENT_BANANA_CURRENT_ALM_PREFIX}{int(index)}"
+        f"{_INDEPENDENT_BANANA_CURRENT_ALM_SUFFIX}"
+    )
+
+
+def is_independent_banana_current_alm_constraint_name(name: str) -> bool:
+    if not (
+        name.startswith(_INDEPENDENT_BANANA_CURRENT_ALM_PREFIX)
+        and name.endswith(_INDEPENDENT_BANANA_CURRENT_ALM_SUFFIX)
+    ):
+        return False
+    index_text = name[
+        len(_INDEPENDENT_BANANA_CURRENT_ALM_PREFIX) : -len(
+            _INDEPENDENT_BANANA_CURRENT_ALM_SUFFIX
+        )
+    ]
+    return index_text.isdigit()
+
+
+def hardware_constraint_schema_name_for_alm_name(name: str) -> str | None:
     if name in _SCHEMA_BY_NAME:
         return name
-    try:
-        return _SCHEMA_NAME_BY_ALM_NAME[name]
-    except KeyError as exc:
-        raise KeyError(f"Unknown ALM hardware constraint {name!r}.") from exc
+    schema_name = _SCHEMA_NAME_BY_ALM_NAME.get(name)
+    if schema_name is not None:
+        return schema_name
+    if is_independent_banana_current_alm_constraint_name(name):
+        return "banana_current"
+    return None
+
+
+def _schema_name_from_alm_or_schema_name(name: str) -> str:
+    schema_name = hardware_constraint_schema_name_for_alm_name(name)
+    if schema_name is None:
+        raise KeyError(f"Unknown ALM hardware constraint {name!r}.")
+    return schema_name
 
 
 def get_hardware_constraint_spec_for_alm_name(name: str) -> HardwareConstraintSpec:
