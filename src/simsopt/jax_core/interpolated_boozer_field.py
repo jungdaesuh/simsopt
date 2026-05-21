@@ -300,7 +300,11 @@ def fold_points_for_symmetry(
         zeta = jnp.where(flipped, period - zeta, zeta)
         theta = jnp.where(flipped, two_pi - theta, theta)
     else:
-        flipped = jnp.zeros(theta.shape, dtype=jnp.bool_)
+        # Device-local all-false mask derived from theta so the construction
+        # survives strict transfer_guard("disallow") (no bool-literal H2D).
+        # ``x < x`` is False for finite values AND for NaN (IEEE-754:
+        # NaN < NaN is False), so NaN-bearing theta is treated as not flipped.
+        flipped = theta < theta
 
     return (
         jnp.concatenate(
