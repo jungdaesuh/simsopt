@@ -16,7 +16,8 @@ def _normalized_quaternion(quaternion):
     one = _as_runtime_float64_ref(1.0, reference=norm_sq)
     safe_norm_sq = jnp.where(norm_sq > zero, norm_sq, one)
     normalized = quaternion / jnp.sqrt(safe_norm_sq)
-    return jnp.where(norm_sq > zero, normalized, jnp.zeros_like(quaternion))
+    zero_quaternion = quaternion - quaternion
+    return jnp.where(norm_sq > zero, normalized, zero_quaternion)
 
 
 def _quaternion_rotation_matrix(quaternion):

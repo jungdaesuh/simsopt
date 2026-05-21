@@ -47,6 +47,7 @@ from .._core.jax_host_boundary import (
     host_scalar as _host_scalar,
     scalar_pullback_seed as _explicit_scalar_pullback_seed,
 )
+from ..backend import get_backend_policy
 from .._core.optimizable import Optimizable
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
@@ -67,6 +68,7 @@ from ..jax_core.qfm_solver import (
     qfm_penalty_value_and_grad_jax_from_dofs,
     qfm_residual_jax_from_dofs,
 )
+from ..jax_core._device_scalars import device_one as _device_one, two_pi as _two_pi
 from ..jax_core.specs import surface_spec_kind
 from ..jax_core.surface_fourier import (
     surface_xyz_fourier_gamma_from_spec,
@@ -513,27 +515,34 @@ def surface_mean_cross_sectional_area_jax_from_dofs(spec, dofs):
         spec,
         dofs,
     )
-    x = gamma[:, :, 0]
-    y = gamma[:, :, 1]
+    x, y, _z = jnp.split(gamma, [1, 2], axis=2)
+    gammadash1_x, gammadash1_y, gammadash1_z = jnp.split(gammadash1, [1, 2], axis=2)
+    gammadash2_x, gammadash2_y, gammadash2_z = jnp.split(gammadash2, [1, 2], axis=2)
     radius_squared = x * x + y * y
-    jacobian_00 = (x * gammadash1[:, :, 1] - y * gammadash1[:, :, 0]) / radius_squared
-    jacobian_01 = (x * gammadash2[:, :, 1] - y * gammadash2[:, :, 0]) / radius_squared
-    dz_dtheta = gammadash2[:, :, 2] - (gammadash1[:, :, 2] * jacobian_01 / jacobian_00)
-    signed_area = jnp.mean(jnp.sqrt(radius_squared) * dz_dtheta * jacobian_00) / (
-        2.0 * jnp.pi
+    jacobian_00 = (x * gammadash1_y - y * gammadash1_x) / radius_squared
+    jacobian_01 = (x * gammadash2_y - y * gammadash2_x) / radius_squared
+    dz_dtheta = gammadash2_z - (gammadash1_z * jacobian_01 / jacobian_00)
+    signed_area = (
+        jnp.mean(jnp.sqrt(radius_squared) * dz_dtheta * jacobian_00)
+        / _two_pi(radius_squared)
     )
     return jnp.abs(signed_area)
 
 
 def surface_minor_radius_jax_from_dofs(spec, dofs):
     mean_area = surface_mean_cross_sectional_area_jax_from_dofs(spec, dofs)
-    return jnp.sqrt(mean_area / jnp.pi)
+    one = _device_one(mean_area)
+    pi = _two_pi(mean_area) / (one + one)
+    return jnp.sqrt(mean_area / pi)
 
 
 def surface_major_radius_jax_from_dofs(spec, dofs):
     volume = _surface_volume_from_dofs(spec, dofs)
     minor_radius = surface_minor_radius_jax_from_dofs(spec, dofs)
-    return jnp.abs(volume) / (2.0 * jnp.pi * jnp.pi * minor_radius * minor_radius)
+    one = _device_one(minor_radius)
+    two_pi = _two_pi(minor_radius)
+    pi = two_pi / (one + one)
+    return jnp.abs(volume) / (two_pi * pi * minor_radius * minor_radius)
 
 
 def surface_aspect_ratio_jax_from_dofs(spec, dofs):
@@ -608,8 +617,13 @@ def surface_principal_curvature_jax_from_dofs(
         spec,
         dofs,
     )
-    k1 = curvature[:, :, 2]
-    k2 = curvature[:, :, 3]
+    _mean_curvature, _gaussian_curvature, k1, k2 = jnp.split(
+        curvature,
+        [1, 2, 3],
+        axis=2,
+    )
+    k1 = jnp.reshape(k1, curvature.shape[:2])
+    k2 = jnp.reshape(k2, curvature.shape[:2])
     return jnp.sum(norm_normal * jnp.exp(-(k1 - kappamax1) / weight1)) + jnp.sum(
         norm_normal * jnp.exp(-(-k2 - kappamax2) / weight2)
     )
@@ -629,15 +643,29 @@ def _surface_dprincipal_curvature_jax_from_dofs(
     curvature = surface_curvatures_jax_from_dofs(spec, dofs)
     dnorm_normal = _surface_dnormal_norm_jax_from_dofs(spec, dofs)
     dcurvature = surface_dsurface_curvatures_jax_from_dofs(spec, dofs)
-    exp1 = jnp.exp(-(curvature[:, :, 2] - kappamax1) / weight1)
-    exp2 = jnp.exp((curvature[:, :, 3] + kappamax2) / weight2)
+    _mean_curvature, _gaussian_curvature, k1, k2 = jnp.split(
+        curvature,
+        [1, 2, 3],
+        axis=2,
+    )
+    _dmean_curvature, _dgaussian_curvature, dk1, dk2 = jnp.split(
+        dcurvature,
+        [1, 2, 3],
+        axis=2,
+    )
+    k1 = jnp.reshape(k1, curvature.shape[:2])
+    k2 = jnp.reshape(k2, curvature.shape[:2])
+    dk1 = jnp.reshape(dk1, dcurvature.shape[:2] + dcurvature.shape[3:])
+    dk2 = jnp.reshape(dk2, dcurvature.shape[:2] + dcurvature.shape[3:])
+    exp1 = jnp.exp(-(k1 - kappamax1) / weight1)
+    exp2 = jnp.exp((k2 + kappamax2) / weight2)
     dterm1 = (
         exp1[:, :, None] * dnorm_normal
-        - (norm_normal * exp1 / weight1)[:, :, None] * dcurvature[:, :, 2, :]
+        - (norm_normal * exp1 / weight1)[:, :, None] * dk1
     )
     dterm2 = (
         exp2[:, :, None] * dnorm_normal
-        + (norm_normal * exp2 / weight2)[:, :, None] * dcurvature[:, :, 3, :]
+        + (norm_normal * exp2 / weight2)[:, :, None] * dk2
     )
     return jnp.sum(dterm1 + dterm2, axis=(0, 1))
 
@@ -713,9 +741,10 @@ def surface_qfm_penalty_value_and_grad_jax_from_dofs(
 
 
 def _surface_dqfm_residual_jax_from_dofs(spec, dofs, coil_set_spec):
-    return jax.grad(
-        lambda x: surface_qfm_residual_jax_from_dofs(spec, x, coil_set_spec)
-    )(_as_jax_float64(dofs))
+    return _strict_scalar_grad(
+        lambda x: surface_qfm_residual_jax_from_dofs(spec, x, coil_set_spec),
+        _as_jax_float64(dofs),
+    )
 
 
 def _surface_objective_surface_view(surface, *, range, nphi, ntheta):
@@ -4268,7 +4297,10 @@ def _build_traceable_objective_compiled_bundle_from_state(
             linear_solve_success,
         )
 
-    jitted_value_and_grad_for = jax.jit(_value_and_grad_for, donate_argnums=(0,))
+    jit_kwargs = {}
+    if get_backend_policy().supports_buffer_donation:
+        jit_kwargs["donate_argnums"] = (0,)
+    jitted_value_and_grad_for = jax.jit(_value_and_grad_for, **jit_kwargs)
     compiled_forward_result_for = _make_traceable_runtime_jax_array_boundary(
         jitted_forward_result_for,
         "compiled_forward_result_for",

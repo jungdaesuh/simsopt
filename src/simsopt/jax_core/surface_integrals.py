@@ -18,5 +18,5 @@ def surface_volume(gamma, normal):
 def surface_area(normal):
     """Compute the area of a toroidal surface."""
     nphi, ntheta = normal.shape[:2]
-    norm_n = _norm3(normal)[..., 0]
+    norm_n = jnp.reshape(_norm3(normal), normal.shape[:-1])
     return jnp.sum(norm_n) / _as_jax_float64(nphi * ntheta)

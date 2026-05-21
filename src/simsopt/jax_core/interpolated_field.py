@@ -72,6 +72,23 @@ class InterpolatedFieldSpec:
     _device_GradAbsB: RegularGridInterpolant3DDeviceSpec
 
 
+@dataclass(frozen=True)
+class InterpolatedFieldDeviceState:
+    """Device-resident state for JAX tracing RHS evaluation."""
+
+    nfp: int
+    stellsym: bool
+    B: RegularGridInterpolant3DDeviceSpec
+    GradAbsB: RegularGridInterpolant3DDeviceSpec
+
+
+jax.tree_util.register_dataclass(
+    InterpolatedFieldDeviceState,
+    data_fields=["B", "GradAbsB"],
+    meta_fields=["nfp", "stellsym"],
+)
+
+
 def make_interpolated_field_spec(
     *,
     nfp: int,
@@ -88,6 +105,19 @@ def make_interpolated_field_spec(
         GradAbsB_spec=GradAbsB_spec,
         _device_B=build_regular_grid_interpolant_3d_device_spec(B_spec),
         _device_GradAbsB=build_regular_grid_interpolant_3d_device_spec(GradAbsB_spec),
+    )
+
+
+def make_interpolated_field_device_state(
+    spec: InterpolatedFieldSpec,
+) -> InterpolatedFieldDeviceState:
+    """Extract the explicit device-state pytree used by tracing kernels."""
+
+    return InterpolatedFieldDeviceState(
+        nfp=int(spec.nfp),
+        stellsym=bool(spec.stellsym),
+        B=spec._device_B,
+        GradAbsB=spec._device_GradAbsB,
     )
 
 
@@ -567,6 +597,21 @@ def interpolated_field_B(
     )
 
 
+def interpolated_field_state_B(
+    state: InterpolatedFieldDeviceState, point: jax.Array
+) -> jax.Array:
+    """Evaluate Cartesian ``B`` from an explicit device-state pytree."""
+
+    points = jnp.reshape(point, (1, 3))
+    return _evaluate_cart_field_zero(
+        points,
+        device_spec=state.B,
+        nfp=int(state.nfp),
+        stellsym=bool(state.stellsym),
+        unfold_kind=0,
+    )[0]
+
+
 def interpolated_field_GradAbsB(
     spec: InterpolatedFieldSpec, points_cart: jax.Array
 ) -> jax.Array:
@@ -587,6 +632,29 @@ def interpolated_field_GradAbsB(
         stellsym=bool(spec.stellsym),
         unfold_kind=1,
     )
+
+
+def interpolated_field_state_B_GradAbsB(
+    state: InterpolatedFieldDeviceState, point: jax.Array
+) -> tuple[jax.Array, jax.Array]:
+    """Evaluate Cartesian ``B`` and ``grad|B|`` from explicit device state."""
+
+    points = jnp.reshape(point, (1, 3))
+    B = _evaluate_cart_field_zero(
+        points,
+        device_spec=state.B,
+        nfp=int(state.nfp),
+        stellsym=bool(state.stellsym),
+        unfold_kind=0,
+    )[0]
+    grad_abs_B = _evaluate_cart_field_zero(
+        points,
+        device_spec=state.GradAbsB,
+        nfp=int(state.nfp),
+        stellsym=bool(state.stellsym),
+        unfold_kind=1,
+    )[0]
+    return B, grad_abs_B
 
 
 def interpolated_field_B_cyl_with_initial(
@@ -626,10 +694,14 @@ def interpolated_field_GradAbsB_cyl_with_initial(
 
 
 __all__ = [
+    "InterpolatedFieldDeviceState",
     "InterpolatedFieldSpec",
     "interpolated_field_B",
     "interpolated_field_B_cyl_with_initial",
+    "interpolated_field_state_B",
+    "interpolated_field_state_B_GradAbsB",
     "interpolated_field_GradAbsB",
     "interpolated_field_GradAbsB_cyl_with_initial",
+    "make_interpolated_field_device_state",
     "make_interpolated_field_spec",
 ]

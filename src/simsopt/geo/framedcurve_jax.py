@@ -61,6 +61,13 @@ def _inner(a: jax.Array, b: jax.Array) -> jax.Array:
     return jnp.sum(a * b, axis=1)
 
 
+def _zero_dependency(*values: jax.Array) -> jax.Array:
+    zero = jnp.sum(values[0] - values[0])
+    for value in values[1:]:
+        zero = zero + jnp.sum(value - value)
+    return zero
+
+
 def _frame_twist(
     gammadash: jax.Array,
     t: jax.Array,
@@ -69,7 +76,12 @@ def _frame_twist(
 ) -> jax.Array:
     arc_length = jnp.linalg.norm(gammadash, axis=1)
     triple_product = _inner(n, jnp.cross(ndash, t))
-    return triple_product / (2.0 * jnp.pi * arc_length)
+    return triple_product / (2.0 * jnp.pi * arc_length) + _zero_dependency(
+        gammadash,
+        t,
+        n,
+        ndash,
+    )
 
 
 def _frame_twist_vjps(
@@ -104,7 +116,13 @@ def _torsion_centroid(
         gamma, gammadash, gammadashdash, alpha, alphadash
     )
     arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
-    return _inner(ndash / arc_length, b)
+    return _inner(ndash / arc_length, b) + _zero_dependency(
+        gamma,
+        gammadash,
+        gammadashdash,
+        alpha,
+        alphadash,
+    )
 
 
 def _binormal_curvature_centroid(
@@ -119,7 +137,13 @@ def _binormal_curvature_centroid(
         gamma, gammadash, gammadashdash, alpha, alphadash
     )
     arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
-    return _inner(tdash / arc_length, b)
+    return _inner(tdash / arc_length, b) + _zero_dependency(
+        gamma,
+        gammadash,
+        gammadashdash,
+        alpha,
+        alphadash,
+    )
 
 
 def _torsion_frenet(
@@ -140,7 +164,14 @@ def _torsion_frenet(
         alphadash,
     )
     arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
-    return _inner(ndash / arc_length, b)
+    return _inner(ndash / arc_length, b) + _zero_dependency(
+        gamma,
+        gammadash,
+        gammadashdash,
+        gammadashdashdash,
+        alpha,
+        alphadash,
+    )
 
 
 def _binormal_curvature_frenet(
@@ -161,7 +192,14 @@ def _binormal_curvature_frenet(
         alphadash,
     )
     arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
-    return _inner(tdash / arc_length, b)
+    return _inner(tdash / arc_length, b) + _zero_dependency(
+        gamma,
+        gammadash,
+        gammadashdash,
+        gammadashdashdash,
+        alpha,
+        alphadash,
+    )
 
 
 def _centroid_torsion_vjps(

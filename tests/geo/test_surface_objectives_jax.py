@@ -1113,6 +1113,35 @@ def test_traceable_objective_bundle_donates_value_and_grad_input(monkeypatch):
     assert observed_jit_kwargs["_value_and_grad_for"] == {"donate_argnums": (0,)}
 
 
+def test_traceable_objective_bundle_omits_value_and_grad_donation_for_mps(
+    monkeypatch,
+):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_mps_smoke")
+    invalidate_backend_cache()
+    observed_jit_kwargs: dict[str, dict[str, object]] = {}
+
+    def recording_jit(fun=None, **kwargs):
+        def wrapped(inner):
+            observed_jit_kwargs[inner.__name__] = dict(kwargs)
+            return inner
+
+        if fun is None:
+            return wrapped
+        return wrapped(fun)
+
+    monkeypatch.setattr(surfaceobjectives_jax_module.jax, "jit", recording_jit)
+    try:
+        surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+            object(),
+            _minimal_traceable_objective_state(),
+        )
+    finally:
+        monkeypatch.delenv("SIMSOPT_BACKEND_MODE", raising=False)
+        invalidate_backend_cache()
+
+    assert observed_jit_kwargs["_value_and_grad_for"] == {}
+
+
 def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
     marked: dict[str, object] = {}
     original_mark = optimizer_jax_module._mark_cacheable_jit_value_and_grad

@@ -2,6 +2,8 @@ import numpy as np
 from jax import vjp
 import jax.numpy as jnp
 
+from .._core.optimizable import _is_runtime_jax_value, _runtime_scalar_mul
+from ..jax_core._math_utils import as_runtime_float64 as _as_runtime_float64
 from .framedcurve import (
     FramedCurve,
     FrameRotation,
@@ -27,6 +29,18 @@ approximation of finite build coils.
 """
 
 __all__ = ["create_multifilament_grid", "CurveFilament"]
+
+
+def _runtime_array_like(value, *, reference):
+    if _is_runtime_jax_value(reference):
+        return _as_runtime_float64(value, reference=reference)
+    return value
+
+
+def _runtime_zeros_like(value):
+    if _is_runtime_jax_value(value):
+        return jnp.zeros_like(value)
+    return np.zeros_like(value)
 
 
 class CurveFilament(FramedCurve):
@@ -73,24 +87,38 @@ class CurveFilament(FramedCurve):
         assert quadpoints.shape[0] == self.curve.quadpoints.shape[0]
         assert np.linalg.norm(quadpoints - self.curve.quadpoints) < 1e-15
         t, n, b = self.framedcurve.rotated_frame()
-        gamma[:] = self.curve.gamma() + self.dn * n + self.db * b
+        gamma[:] = (
+            _runtime_array_like(self.curve.gamma(), reference=n)
+            + _runtime_scalar_mul(self.dn, n)
+            + _runtime_scalar_mul(self.db, b)
+        )
 
     def gammadash_impl(self, gammadash):
         td, nd, bd = self.framedcurve.rotated_frame_dash()
-        gammadash[:] = self.curve.gammadash() + self.dn * nd + self.db * bd
+        gammadash[:] = (
+            _runtime_array_like(self.curve.gammadash(), reference=nd)
+            + _runtime_scalar_mul(self.dn, nd)
+            + _runtime_scalar_mul(self.db, bd)
+        )
 
     def dgamma_by_dcoeff_vjp(self, v):
-        zero = np.zeros_like(v)
+        zero = _runtime_zeros_like(v)
         return self.curve.dgamma_by_dcoeff_vjp(
             v
-        ) + self.framedcurve.rotated_frame_dcoeff_vjp(zero, self.dn * v, self.db * v)
+        ) + self.framedcurve.rotated_frame_dcoeff_vjp(
+            zero,
+            _runtime_scalar_mul(self.dn, v),
+            _runtime_scalar_mul(self.db, v),
+        )
 
     def dgammadash_by_dcoeff_vjp(self, v):
-        zero = np.zeros_like(v)
+        zero = _runtime_zeros_like(v)
         return self.curve.dgammadash_by_dcoeff_vjp(
             v
         ) + self.framedcurve.rotated_frame_dash_dcoeff_vjp(
-            zero, self.dn * v, self.db * v
+            zero,
+            _runtime_scalar_mul(self.dn, v),
+            _runtime_scalar_mul(self.db, v),
         )
 
     def _rotation_jax_values(self, dofs):

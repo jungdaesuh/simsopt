@@ -36,7 +36,7 @@ from .._core.derivative import derivative_dec, Derivative
 from ..jax_core.biotsavart import biot_savart_B
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
-    runtime_jnp_dtype as _runtime_jnp_dtype,
+    as_jax_int32 as _as_jax_int32,
 )
 from ..jax_core.objectives_flux import (
     build_fourier_basis,
@@ -276,27 +276,19 @@ class SquaredFluxJAX(Optimizable):
         # Static coil descriptors.
         base_curves = tuple(field._unique_base_curves)
         coil_descs = tuple(field._coil_descs)
-        runtime_dtype = _runtime_jnp_dtype()
-        base_curve_idxs = jnp.asarray(
-            [d[0] for d in coil_descs],
-            dtype=jnp.int32,
+        base_curve_idxs = _as_jax_int32([d[0] for d in coil_descs])
+        base_current_idxs = _as_jax_int32([d[1] for d in coil_descs])
+        rotmats = _as_jax_float64(
+            np.stack(
+                [
+                    np.eye(3, dtype=np.float64)
+                    if d[2] is None
+                    else _host_array(d[2], dtype=np.float64)
+                    for d in coil_descs
+                ]
+            )
         )
-        base_current_idxs = jnp.asarray(
-            [d[1] for d in coil_descs],
-            dtype=jnp.int32,
-        )
-        rotmats = jnp.stack(
-            [
-                jnp.eye(3, dtype=runtime_dtype)
-                if d[2] is None
-                else jnp.asarray(d[2], dtype=runtime_dtype)
-                for d in coil_descs
-            ]
-        )
-        current_scales = jnp.asarray(
-            [d[3] for d in coil_descs],
-            dtype=runtime_dtype,
-        )
+        current_scales = _as_jax_float64([d[3] for d in coil_descs])
 
         def forward(
             flat_dofs,
@@ -372,7 +364,7 @@ class SquaredFluxJAX(Optimizable):
 
     def _gather_field_free_dofs(self):
         """Read the current flat free-DOF vector from the field dependency."""
-        return jnp.asarray(self.field.x, dtype=_runtime_jnp_dtype())
+        return _as_jax_float64(self.field.x)
 
     # ------------------------------------------------------------------
     # Public API

@@ -238,7 +238,7 @@ def _append_event_row(
 ) -> tuple[jax.Array, jax.Array]:
     """Append ``hit_row`` when capacity permits while counting all events."""
 
-    one = jnp.asarray(1, dtype=jnp.int32)
+    one = _device_index(1)
     phi_hits, phi_hits_count = _event_carry_with_lane_axis(
         phi_hits,
         phi_hits_count,
@@ -254,7 +254,7 @@ def _append_event_row(
         lambda hits: hits,
         phi_hits,
     )
-    event_count = jnp.where(event_detected, one, jnp.asarray(0, dtype=jnp.int32))
+    event_count = jnp.where(event_detected, one, _device_index(0))
     phi_hits_count = phi_hits_count + event_count
     return phi_hits, phi_hits_count
 
@@ -272,7 +272,7 @@ def _event_carry_with_lane_axis(
 
 
 def _lane_axis_zero(lane_value: jax.Array) -> jax.Array:
-    return jnp.sum(jnp.zeros_like(lane_value))
+    return jnp.sum(lane_value - lane_value)
 
 
 def _lane_axis_carry_zeroes(
@@ -283,6 +283,76 @@ def _lane_axis_carry_zeroes(
         varying_zero,
         varying_zero.astype(jnp.int32),
         varying_zero != varying_zero,
+    )
+
+
+def _device_array(value, dtype):
+    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+
+
+def _device_zeros(shape: tuple[int, ...], dtype):
+    return jax.device_put(np.zeros(shape, dtype=np.dtype(dtype)))
+
+
+def _as_device_array(value, dtype) -> jax.Array:
+    """Return ``value`` as a JAX array without implicit host-to-device staging."""
+
+    if isinstance(value, (jax.Array, jax.core.Tracer)):
+        return jnp.asarray(value, dtype=dtype)
+    return _device_array(value, dtype)
+
+
+def _device_index(value: int) -> jax.Array:
+    return _device_array(value, jnp.int32)
+
+
+def _device_false() -> jax.Array:
+    return _device_array(False, np.bool_)
+
+
+def _prefix3(vector: jax.Array) -> jax.Array:
+    return jnp.split(vector, [3])[0]
+
+
+def _split_xyz(vector: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+    x, y, z = jnp.split(_prefix3(vector), [1, 2])
+    return jnp.reshape(x, ()), jnp.reshape(y, ()), jnp.reshape(z, ())
+
+
+def _take_entry(vector: jax.Array, index: int) -> jax.Array:
+    indices = jax.device_put(np.asarray((index,), dtype=np.int32))
+    return jax.lax.squeeze(jnp.take(vector, indices, axis=0), (0,))
+
+
+def _stage_fieldline_spec(spec: FieldlineTracingSpec) -> FieldlineTracingSpec:
+    return replace(
+        spec,
+        tmax=_device_array(spec.tmax, np.float64),
+        rtol=_device_array(spec.rtol, np.float64),
+        atol=_device_array(spec.atol, np.float64),
+        dtmax=_device_array(spec.dtmax, np.float64),
+    )
+
+
+def _stage_guiding_center_spec(
+    spec: GuidingCenterTracingSpec,
+) -> GuidingCenterTracingSpec:
+    return replace(
+        spec,
+        tmax=_device_array(spec.tmax, np.float64),
+        rtol=_device_array(spec.rtol, np.float64),
+        atol=_device_array(spec.atol, np.float64),
+        dtmax=_device_array(spec.dtmax, np.float64),
+    )
+
+
+def _stage_fullorbit_spec(spec: FullorbitTracingSpec) -> FullorbitTracingSpec:
+    return replace(
+        spec,
+        tmax=_device_array(spec.tmax, np.float64),
+        rtol=_device_array(spec.rtol, np.float64),
+        atol=_device_array(spec.atol, np.float64),
+        dtmax=_device_array(spec.dtmax, np.float64),
     )
 
 
@@ -527,36 +597,36 @@ def _stopping_criterion_should_stop(
 
     if isinstance(criterion, MinRStoppingCriterion):
         r = jnp.sqrt(x * x + y * y)
-        return r <= jnp.asarray(criterion.crit_r, dtype=dtype)
+        return r <= _device_array(criterion.crit_r, dtype)
     if isinstance(criterion, MaxRStoppingCriterion):
         r = jnp.sqrt(x * x + y * y)
-        return r >= jnp.asarray(criterion.crit_r, dtype=dtype)
+        return r >= _device_array(criterion.crit_r, dtype)
     if isinstance(criterion, MinZStoppingCriterion):
-        return z <= jnp.asarray(criterion.crit_z, dtype=dtype)
+        return z <= _device_array(criterion.crit_z, dtype)
     if isinstance(criterion, MaxZStoppingCriterion):
-        return z >= jnp.asarray(criterion.crit_z, dtype=dtype)
+        return z >= _device_array(criterion.crit_z, dtype)
     if isinstance(criterion, ToroidalTransitStoppingCriterion):
-        transits = jnp.abs(phi_unwrapped - phi_init) / jnp.asarray(
-            2.0 * np.pi, dtype=dtype
+        transits = jnp.abs(phi_unwrapped - phi_init) / _device_array(
+            2.0 * np.pi, dtype
         )
-        return transits >= jnp.asarray(criterion.max_transits, dtype=dtype)
+        return transits >= _device_array(criterion.max_transits, dtype)
     if isinstance(criterion, IterStoppingCriterion):
-        return iter_count > jnp.asarray(int(criterion.max_iter), dtype=jnp.int32)
+        return iter_count > _device_index(int(criterion.max_iter))
     if isinstance(criterion, MinToroidalFluxStoppingCriterion):
         if is_boozer_state:
-            return x <= jnp.asarray(criterion.min_s, dtype=dtype)
-        return jnp.asarray(False)
+            return x <= _device_array(criterion.min_s, dtype)
+        return _device_false()
     if isinstance(criterion, MaxToroidalFluxStoppingCriterion):
         if is_boozer_state:
-            return x >= jnp.asarray(criterion.max_s, dtype=dtype)
-        return jnp.asarray(False)
+            return x >= _device_array(criterion.max_s, dtype)
+        return _device_false()
     if isinstance(criterion, LevelsetStoppingCriterion):
         # Surface classifier returns +1 inside, -1 outside; stop on the
         # accepted step that crosses to < 0 (matches upstream
         # ``simsoptpp/tracing.cpp::LevelsetStoppingCriterion``).
         position = jnp.stack([x, y, z]).reshape(1, 3).astype(dtype)
         sign = criterion.classifier_fn(position)[0]
-        return sign < jnp.asarray(0.0, dtype=dtype)
+        return sign < _device_array(0.0, dtype)
     raise NotImplementedError(
         f"Unsupported JAX stopping criterion: {type(criterion).__name__}"
     )
@@ -574,12 +644,14 @@ def _continuous_phi(
     the floor-division crossing test does not miss a 2pi wrap.
     """
 
-    two_pi = jnp.asarray(2.0 * np.pi, dtype=dtype)
+    two_pi = _device_array(2.0 * np.pi, dtype)
     phi_raw = jnp.arctan2(y, x)
-    phi = jnp.where(phi_raw < jnp.asarray(0.0, dtype=dtype), phi_raw + two_pi, phi_raw)
+    zero = _device_array(0.0, dtype)
+    half = _device_array(0.5, dtype)
+    phi = jnp.where(phi_raw < zero, phi_raw + two_pi, phi_raw)
     nearest_multiple = (
         jnp.sign(phi_near)
-        * jnp.floor(jnp.abs(phi_near / two_pi) + jnp.asarray(0.5, dtype=dtype))
+        * jnp.floor(jnp.abs(phi_near / two_pi) + half)
         * two_pi
     )
     opt1 = nearest_multiple - two_pi + phi
@@ -600,9 +672,9 @@ def get_phi(x, y, phi_near) -> jax.Array:
 
     dtype = jnp.result_type(x, y, phi_near)
     return _continuous_phi(
-        jnp.asarray(x, dtype=dtype),
-        jnp.asarray(y, dtype=dtype),
-        jnp.asarray(phi_near, dtype=dtype),
+        _as_device_array(x, dtype),
+        _as_device_array(y, dtype),
+        _as_device_array(phi_near, dtype),
         dtype,
     )
 
@@ -624,7 +696,7 @@ def _continuous_angle(
     crossing test does not miss a ``2*pi`` wrap.
     """
 
-    two_pi = jnp.asarray(2.0 * np.pi, dtype=dtype)
+    two_pi = _device_array(2.0 * np.pi, dtype)
     k = jnp.round((angle_near - angle_raw) / two_pi)
     return angle_raw + k * two_pi
 
@@ -637,7 +709,7 @@ def _record_trajectory_row(
     y_next: jax.Array,
     should_record: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    write_row = accepted_count + jnp.asarray(1, dtype=jnp.int32)
+    write_row = accepted_count + _device_index(1)
 
     def write(args):
         traj_in, mask_in, row, time, state = args
@@ -654,8 +726,8 @@ def _record_trajectory_row(
     )
     accepted_next = accepted_count + jnp.where(
         should_record,
-        jnp.asarray(1, dtype=jnp.int32),
-        jnp.asarray(0, dtype=jnp.int32),
+        _device_index(1),
+        _device_index(0),
     )
     return traj_next, mask_next, accepted_next
 
@@ -668,7 +740,7 @@ def _should_record_accepted_step(
 
 def _boozer_axis_invalid(y: jax.Array) -> jax.Array:
     s = y[0]
-    zero = jnp.asarray(0.0, dtype=s.dtype)
+    zero = _device_array(0.0, s.dtype)
     return jnp.logical_or(s <= zero, jnp.logical_not(jnp.isfinite(s)))
 
 
@@ -736,31 +808,58 @@ def dopri5_step(
     """
 
     dtype = y.dtype
-    A = jnp.asarray(_DOPRI5_A, dtype=dtype)
-    C = jnp.asarray(_DOPRI5_C, dtype=dtype)
-    B = jnp.asarray(_DOPRI5_B, dtype=dtype)
-    E = jnp.asarray(_DOPRI5_E, dtype=dtype)
-
+    c = lambda value: _device_array(value, dtype)
     k1 = k_first
-    k2 = rhs(t + C[1] * h, y + h * (A[1, 0] * k1))
-    k3 = rhs(t + C[2] * h, y + h * (A[2, 0] * k1 + A[2, 1] * k2))
+    k2 = rhs(t + c(1.0 / 5.0) * h, y + h * (c(1.0 / 5.0) * k1))
+    k3 = rhs(
+        t + c(3.0 / 10.0) * h,
+        y + h * (c(3.0 / 40.0) * k1 + c(9.0 / 40.0) * k2),
+    )
     k4 = rhs(
-        t + C[3] * h,
-        y + h * (A[3, 0] * k1 + A[3, 1] * k2 + A[3, 2] * k3),
-    )
-    k5 = rhs(
-        t + C[4] * h,
-        y + h * (A[4, 0] * k1 + A[4, 1] * k2 + A[4, 2] * k3 + A[4, 3] * k4),
-    )
-    k6 = rhs(
-        t + C[5] * h,
+        t + c(4.0 / 5.0) * h,
         y
         + h
-        * (A[5, 0] * k1 + A[5, 1] * k2 + A[5, 2] * k3 + A[5, 3] * k4 + A[5, 4] * k5),
+        * (c(44.0 / 45.0) * k1 - c(56.0 / 15.0) * k2 + c(32.0 / 9.0) * k3),
     )
-    y_new = y + h * (B[0] * k1 + B[2] * k3 + B[3] * k4 + B[4] * k5 + B[5] * k6)
+    k5 = rhs(
+        t + c(8.0 / 9.0) * h,
+        y
+        + h
+        * (
+            c(19372.0 / 6561.0) * k1
+            - c(25360.0 / 2187.0) * k2
+            + c(64448.0 / 6561.0) * k3
+            - c(212.0 / 729.0) * k4
+        ),
+    )
+    k6 = rhs(
+        t + h,
+        y
+        + h
+        * (
+            c(9017.0 / 3168.0) * k1
+            - c(355.0 / 33.0) * k2
+            + c(46732.0 / 5247.0) * k3
+            + c(49.0 / 176.0) * k4
+            - c(5103.0 / 18656.0) * k5
+        ),
+    )
+    y_new = y + h * (
+        c(35.0 / 384.0) * k1
+        + c(500.0 / 1113.0) * k3
+        + c(125.0 / 192.0) * k4
+        - c(2187.0 / 6784.0) * k5
+        + c(11.0 / 84.0) * k6
+    )
     k7 = rhs(t + h, y_new)
-    y_err = h * (E[0] * k1 + E[2] * k3 + E[3] * k4 + E[4] * k5 + E[5] * k6 + E[6] * k7)
+    y_err = h * (
+        c(71.0 / 57600.0) * k1
+        - c(71.0 / 16695.0) * k3
+        + c(71.0 / 1920.0) * k4
+        - c(17253.0 / 339200.0) * k5
+        + c(22.0 / 525.0) * k6
+        - c(1.0 / 40.0) * k7
+    )
     return y_new, y_err, k7
 
 
@@ -773,7 +872,7 @@ def _error_norm(
 ) -> jax.Array:
     sc = atol + rtol * jnp.maximum(jnp.abs(y), jnp.abs(y_new))
     norm_sq = jnp.mean(jnp.square(y_err / sc))
-    tiny = jnp.asarray(jnp.finfo(norm_sq.dtype).tiny, dtype=norm_sq.dtype)
+    tiny = _device_array(jnp.finfo(norm_sq.dtype).tiny, norm_sq.dtype)
     return jnp.sqrt(jnp.maximum(norm_sq, tiny))
 
 
@@ -781,7 +880,7 @@ def _initial_step_size(
     t0: jax.Array, t_end: jax.Array, dtmax: jax.Array, fraction: float
 ) -> jax.Array:
     span = jnp.abs(t_end - t0)
-    h0 = jnp.asarray(fraction, dtype=span.dtype) * dtmax
+    h0 = _device_array(fraction, span.dtype) * dtmax
     return jnp.minimum(h0, span)
 
 
@@ -846,9 +945,9 @@ def bracket_root_jax(
     """
 
     dtype = f_left.dtype
-    zero = jnp.asarray(0.0, dtype=dtype)
-    half = jnp.asarray(0.5, dtype=dtype)
-    atol_arr = jnp.asarray(atol, dtype=dtype)
+    zero = _device_array(0.0, dtype)
+    half = _device_array(0.5, dtype)
+    atol_arr = _as_device_array(atol, dtype)
     left_first = t_left <= t_right
     t_left_ordered = jnp.where(left_first, t_left, t_right)
     t_right_ordered = jnp.where(left_first, t_right, t_left)
@@ -859,7 +958,7 @@ def bracket_root_jax(
     bracketed_in = jnp.sign(f_left_ordered) * jnp.sign(f_right_ordered) < zero
     left_better = jnp.abs(f_left_ordered) <= jnp.abs(f_right_ordered)
     init = (
-        jnp.asarray(0, dtype=jnp.int32),
+        _device_index(0),
         t_left_ordered,
         t_right_ordered,
         f_left_ordered,
@@ -870,7 +969,7 @@ def bracket_root_jax(
 
     def cond(carry):
         i, _a, _b, _fa, _fb, _best_t, _best_f = carry
-        return i < jnp.asarray(int(max_iters), dtype=jnp.int32)
+        return i < _device_index(int(max_iters))
 
     def body(carry):
         i, a, b, fa, fb, best_t, best_f = carry
@@ -906,7 +1005,7 @@ def bracket_root_jax(
         new_fa = jnp.where(active, jnp.where(keep_left, half * fa, fc), fa)
         new_fb = jnp.where(active, jnp.where(keep_left, fc, half * fb), fb)
         return (
-            i + jnp.asarray(1, dtype=jnp.int32),
+            i + _device_index(1),
             new_a,
             new_b,
             new_fa,
@@ -969,12 +1068,12 @@ def trace_fieldline(
     """
 
     dtype = jnp.float64
-    y0_arr = jnp.asarray(y0, dtype=dtype).reshape((3,))
-    tmax = jnp.asarray(spec.tmax, dtype=dtype)
-    rtol = jnp.asarray(spec.rtol, dtype=dtype)
-    atol = jnp.asarray(spec.atol, dtype=dtype)
-    dtmax = jnp.asarray(spec.dtmax, dtype=dtype)
-    t0 = jnp.asarray(0.0, dtype=dtype)
+    y0_arr = _as_device_array(y0, dtype).reshape((3,))
+    tmax = _as_device_array(spec.tmax, dtype)
+    rtol = _as_device_array(spec.rtol, dtype)
+    atol = _as_device_array(spec.atol, dtype)
+    dtmax = _as_device_array(spec.dtmax, dtype)
+    t0 = _device_array(0.0, dtype)
     max_steps = int(spec.max_steps)
     if max_steps <= 0:
         raise ValueError(f"max_steps must be positive, got {max_steps}")
@@ -986,25 +1085,30 @@ def trace_fieldline(
     rhs = fieldline_rhs(magnetic_field_fn)
     h0 = _initial_step_size(t0, tmax, dtmax, _FIELDLINE_INITIAL_STEP_FRACTION)
     k0 = rhs(t0, y0_arr)
-    one = jnp.asarray(1.0, dtype=dtype)
+    one = _device_array(1.0, dtype)
     lane_zero, lane_zero_i32, lane_false = _lane_axis_carry_zeroes(y0_arr)
-    accepted_count_init = jnp.asarray(0, dtype=jnp.int32) + lane_zero_i32
+    accepted_count_init = _device_array(0, jnp.int32) + lane_zero_i32
     t0_init = t0 + lane_zero
 
     # Pre-allocate the trajectory carry. Row 0 holds the initial state;
     # rows 1..max_steps fill in as accepted steps occur. Padding rows
     # at the end of the run get the final accepted state.
-    traj = jnp.zeros((max_steps + 1, 4), dtype=dtype)
-    traj = traj.at[0, 0].set(t0)
-    traj = traj.at[0, 1:].set(y0_arr)
+    traj_init_row = jnp.concatenate((jnp.reshape(t0, (1,)), y0_arr), axis=0)
+    traj = jnp.concatenate(
+        (
+            jnp.reshape(traj_init_row, (1, 4)),
+            _device_zeros((max_steps, 4), dtype),
+        ),
+        axis=0,
+    )
     traj = traj + lane_zero
-    mask = jnp.zeros((max_steps + 1,), dtype=jnp.bool_)
-    mask = mask.at[0].set(True)
+    mask_indices = jax.lax.iota(jnp.int32, max_steps + 1)
+    mask = mask_indices == _device_array(0, jnp.int32)
     mask = mask | lane_false
 
     # Phi-plane crossing buffer. Each row is ``[t_hit, idx, x, y, z]``.
-    phi_hits_buf = jnp.zeros((max_phi_hits, 5), dtype=dtype)
-    phi_hits_count_init = jnp.asarray(0, dtype=jnp.int32)
+    phi_hits_buf = _device_zeros((max_phi_hits, 5), dtype)
+    phi_hits_count_init = _device_array(0, jnp.int32)
     phi_hits_buf, phi_hits_count_init = _event_carry_with_lane_axis(
         phi_hits_buf,
         phi_hits_count_init,
@@ -1012,18 +1116,18 @@ def trace_fieldline(
     )
 
     if phis is None:
-        phis_arr = jnp.zeros((0,), dtype=dtype)
+        phis_arr = _device_zeros((0,), dtype)
     else:
-        phis_arr = jnp.asarray(phis, dtype=dtype).reshape((-1,))
+        phis_arr = _as_device_array(phis, dtype).reshape((-1,))
     num_phis = int(phis_arr.shape[0])
 
     # Initial unwrapped phi seed (C++ tracing.cpp uses pi).
     phi_init = _continuous_phi(
-        y0_arr[0], y0_arr[1], jnp.asarray(np.pi, dtype=dtype), dtype
+        _take_entry(y0_arr, 0), _take_entry(y0_arr, 1), _device_array(np.pi, dtype), dtype
     )
 
     init_carry = (
-        jnp.asarray(0, dtype=jnp.int32),  # step_count
+        _device_array(0, jnp.int32),  # step_count
         accepted_count_init,
         t0_init,
         y0_arr,
@@ -1035,13 +1139,13 @@ def trace_fieldline(
         phi_hits_count_init,
         phi_init,  # running phi_last
         phi_init,  # transit criterion baseline, set on first accepted step
-        jnp.asarray(0, dtype=jnp.int32) + lane_zero_i32,  # status_event
+        _device_array(0, jnp.int32) + lane_zero_i32,  # status_event
         lane_false,  # stop flag
     )
 
-    max_steps_i32 = jnp.asarray(max_steps, dtype=jnp.int32)
-    max_phi_hits_i32 = jnp.asarray(max_phi_hits, dtype=jnp.int32)
-    two_pi = jnp.asarray(2.0 * np.pi, dtype=dtype)
+    max_steps_i32 = _device_array(max_steps, jnp.int32)
+    max_phi_hits_i32 = _device_array(max_phi_hits, jnp.int32)
+    two_pi = _device_array(2.0 * np.pi, dtype)
 
     def cond(carry):
         (
@@ -1090,18 +1194,18 @@ def trace_fieldline(
         h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
         y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
         err = _error_norm(y_err, y, y_new, rtol, atol)
-        err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
+        err_safe = jnp.where(jnp.isfinite(err), err, _device_array(jnp.inf, dtype))
         accepted = err_safe <= one
         factor = jnp.where(
-            err_safe > jnp.asarray(0.0, dtype=dtype),
-            jnp.asarray(_SAFETY, dtype=dtype)
-            * jnp.power(err_safe, jnp.asarray(-_DOPRI5_EXP, dtype=dtype)),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
+            err_safe > _device_array(0.0, dtype),
+            _device_array(_SAFETY, dtype)
+            * jnp.power(err_safe, _device_array(-_DOPRI5_EXP, dtype)),
+            _device_array(_MAX_FACTOR, dtype),
         )
         factor = jnp.clip(
             factor,
-            jnp.asarray(_MIN_FACTOR, dtype=dtype),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
+            _device_array(_MIN_FACTOR, dtype),
+            _device_array(_MAX_FACTOR, dtype),
         )
         h_next = h_clamped * factor
         t_accepted = _accepted_step_time(t, h_clamped, tmax)
@@ -1140,7 +1244,7 @@ def trace_fieldline(
                 # ``[phi_last, phi_current]`` interval.
                 fak = jnp.round(
                     (
-                        (phi_last_in + phi_curr_in) / jnp.asarray(2.0, dtype=dtype)
+                        (phi_last_in + phi_curr_in) / _device_array(2.0, dtype)
                         - phi_target
                     )
                     / two_pi
@@ -1153,13 +1257,13 @@ def trace_fieldline(
                         _continuous_phi(pos[0], pos[1], phi_last_in, dtype) - phi_shift
                     )
 
-                f_left = diff_at(jnp.asarray(0.0, dtype=dtype))
-                f_right = diff_at(jnp.asarray(1.0, dtype=dtype))
-                bracket_atol = jnp.asarray(1.0e-15, dtype=dtype)
+                f_left = diff_at(_device_array(0.0, dtype))
+                f_right = diff_at(_device_array(1.0, dtype))
+                bracket_atol = _device_array(1.0e-15, dtype)
                 s_root, _f_root, _bracketed = bracket_root_jax(
                     diff_at,
-                    jnp.asarray(0.0, dtype=dtype),
-                    jnp.asarray(1.0, dtype=dtype),
+                    _device_array(0.0, dtype),
+                    _device_array(1.0, dtype),
                     f_left,
                     f_right,
                     max_root_iters,
@@ -1170,7 +1274,7 @@ def trace_fieldline(
                 hit_row = jnp.stack(
                     [
                         t_root,
-                        jnp.asarray(i, dtype=dtype),
+                        _as_device_array(i, dtype),
                         pos_root[0],
                         pos_root[1],
                         pos_root[2],
@@ -1199,7 +1303,7 @@ def trace_fieldline(
         )
 
         # ── Stopping criteria check on accepted state ──
-        first_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
+        first_accepted_step = accepted_count == _device_index(0)
         phi_init_for_criteria = jnp.where(
             first_accepted_step,
             phi_current,
@@ -1228,11 +1332,11 @@ def trace_fieldline(
                     dtype,
                 )
                 fires = jnp.logical_and(jnp.logical_not(stop_in), pred)
-                idx_val = jnp.asarray(-1 - i, dtype=jnp.int32)
+                idx_val = _device_index(-1 - i)
                 hit_row = jnp.stack(
                     [
                         t_next,
-                        jnp.asarray(float(-1 - i), dtype=dtype),
+                        _device_array(float(-1 - i), dtype),
                         y_next[0],
                         y_next[1],
                         y_next[2],
@@ -1249,7 +1353,7 @@ def trace_fieldline(
                 stop_in = jnp.logical_or(stop_in, fires)
             return hits_in, count_in, status_in, stop_in
 
-        iter_count_post = step_count + jnp.asarray(1, dtype=jnp.int32)
+        iter_count_post = step_count + _device_index(1)
 
         (
             phi_hits_after,
@@ -1264,7 +1368,7 @@ def trace_fieldline(
                 phi_hits_after,
                 phi_count_after,
                 status_event,
-                jnp.asarray(False),
+                _device_false(),
                 iter_count_post,
                 phi_current,
                 phi_init_for_criteria,
@@ -1291,7 +1395,7 @@ def trace_fieldline(
         )
 
         return (
-            step_count + jnp.asarray(1, dtype=jnp.int32),
+            step_count + _device_index(1),
             accepted_next,
             t_next,
             y_next,
@@ -1327,31 +1431,24 @@ def trace_fieldline(
     # Pad unused rows with the final accepted state so downstream code
     # that ignores the mask still sees a valid (constant-extension)
     # trajectory.
-    last_row = jnp.concatenate(
-        [jnp.asarray([t_final], dtype=dtype), y_final.reshape((3,))]
+    last_row = jnp.concatenate([jnp.reshape(t_final, (1,)), y_final.reshape((3,))])
+
+    traj_padded = jnp.where(
+        mask_final[:, None],
+        traj_final,
+        jnp.broadcast_to(last_row, traj_final.shape),
     )
 
-    def fill_padding(idx, traj_carry):
-        row_active = mask_final[idx]
-        return jax.lax.cond(
-            row_active,
-            lambda c: c,
-            lambda c: c.at[idx].set(last_row),
-            operand=traj_carry,
-        )
-
-    traj_padded = jax.lax.fori_loop(0, max_steps + 1, fill_padding, traj_final)
-
-    eps_t = jnp.asarray(1.0e-12, dtype=dtype) * jnp.maximum(
-        jnp.abs(tmax), jnp.asarray(1.0, dtype=dtype)
+    eps_t = _device_array(1.0e-12, dtype) * jnp.maximum(
+        jnp.abs(tmax), _device_array(1.0, dtype)
     )
     reached = (tmax - t_final) <= eps_t
     # Status priority: a stopping criterion (status_event_final < 0)
     # wins over budget / reached state.
     status_normal = jnp.where(
         reached,
-        jnp.asarray(0, dtype=jnp.int32),
-        jnp.asarray(1, dtype=jnp.int32),
+        _device_index(0),
+        _device_index(1),
     )
     status = jnp.where(stop_at_exit, status_event_final, status_normal)
 
@@ -1373,6 +1470,7 @@ def trace_fieldlines_batched(
     magnetic_field_fn: Callable[[jax.Array], jax.Array],
     phis: jax.Array | None = None,
     stopping_criteria: tuple = (),
+    magnetic_field_state: object | None = None,
 ) -> FieldlineTracingResult:
     """Trace a batch of fieldlines with one vmapped JAX integration graph.
 
@@ -1382,14 +1480,24 @@ def trace_fieldlines_batched(
     field strength.
     """
 
-    y0s_arr = jnp.asarray(y0s, dtype=jnp.float64).reshape((-1, 3))
-    dtmaxs_arr = jnp.asarray(dtmaxs, dtype=jnp.float64).reshape((-1,))
+    spec = _stage_fieldline_spec(spec)
+    y0s_arr = _as_device_array(y0s, jnp.float64).reshape((-1, 3))
+    dtmaxs_arr = _as_device_array(dtmaxs, jnp.float64).reshape((-1,))
 
-    def trace_one(y0: jax.Array, dtmax: jax.Array) -> FieldlineTracingResult:
+    def trace_one(
+        y0: jax.Array, dtmax: jax.Array, field_state: object | None = None
+    ) -> FieldlineTracingResult:
+        if field_state is None:
+            field_fn = magnetic_field_fn
+        else:
+
+            def field_fn(point):
+                return magnetic_field_fn(field_state, point)
+
         return trace_fieldline(
             replace(spec, dtmax=dtmax),
             y0,
-            magnetic_field_fn,
+            field_fn,
             phis=phis,
             stopping_criteria=stopping_criteria,
         )
@@ -1402,30 +1510,60 @@ def trace_fieldlines_batched(
             config=config,
         )
 
+        out_specs = FieldlineTracingResult(
+            trajectory=P(config.axis_name, None, None),
+            mask=P(config.axis_name, None),
+            steps_taken=P(config.axis_name),
+            status=P(config.axis_name),
+            t_final=P(config.axis_name),
+            phi_hits=P(config.axis_name, None, None),
+            phi_hits_count=P(config.axis_name),
+        )
+        if magnetic_field_state is None:
+
+            @partial(
+                jax.shard_map,
+                mesh=config.mesh,
+                in_specs=(P(config.axis_name, None), P(config.axis_name)),
+                out_specs=out_specs,
+                check_vma=True,
+            )
+            def trace_shard(y0s_block, dtmaxs_block):
+                return jax.lax.map(
+                    lambda inputs: trace_one(*inputs),
+                    (y0s_block, dtmaxs_block),
+                )
+
+            return trace_shard(y0s_arr, dtmaxs_arr)
+
+        field_state_specs = jax.tree.map(lambda _leaf: P(), magnetic_field_state)
+
         @partial(
             jax.shard_map,
             mesh=config.mesh,
-            in_specs=(P(config.axis_name, None), P(config.axis_name)),
-            out_specs=FieldlineTracingResult(
-                trajectory=P(config.axis_name, None, None),
-                mask=P(config.axis_name, None),
-                steps_taken=P(config.axis_name),
-                status=P(config.axis_name),
-                t_final=P(config.axis_name),
-                phi_hits=P(config.axis_name, None, None),
-                phi_hits_count=P(config.axis_name),
+            in_specs=(
+                P(config.axis_name, None),
+                P(config.axis_name),
+                field_state_specs,
             ),
+            out_specs=out_specs,
             check_vma=True,
         )
-        def trace_shard(y0s_block, dtmaxs_block):
+        def trace_shard(y0s_block, dtmaxs_block, field_state_block):
             return jax.lax.map(
-                lambda inputs: trace_one(*inputs),
+                lambda inputs: trace_one(inputs[0], inputs[1], field_state_block),
                 (y0s_block, dtmaxs_block),
             )
 
-        return trace_shard(y0s_arr, dtmaxs_arr)
+        return trace_shard(y0s_arr, dtmaxs_arr, magnetic_field_state)
 
-    return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr)
+    if magnetic_field_state is None:
+        return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr)
+    return jax.vmap(trace_one, in_axes=(0, 0, None))(
+        y0s_arr,
+        dtmaxs_arr,
+        magnetic_field_state,
+    )
 
 
 # ── Guiding-centre vacuum RHS (4-state Cartesian) ─────────────────────
@@ -1545,14 +1683,14 @@ def guiding_center_vacuum_rhs(
         Captured at closure construction; not mutated thereafter.
     """
 
-    m_arr = jnp.asarray(m, dtype=jnp.float64)
-    q_arr = jnp.asarray(q, dtype=jnp.float64)
-    mu_arr = jnp.asarray(mu, dtype=jnp.float64)
+    m_arr = _as_device_array(m, jnp.float64)
+    q_arr = _as_device_array(q, jnp.float64)
+    mu_arr = _as_device_array(mu, jnp.float64)
 
     def rhs(_t: jax.Array, y: jax.Array) -> jax.Array:
         del _t  # Field is autonomous; signature kept for ODE-driver shape.
-        position = y[:3]
-        v_par = y[3]
+        position, v_par_tail = jnp.split(y, [3])
+        v_par = jnp.reshape(v_par_tail, ())
         B_raw, dB_by_dX_raw = magnetic_field_fn(position)
         B = jnp.asarray(B_raw, dtype=y.dtype).reshape((3,))
         dB_by_dX = jnp.asarray(dB_by_dX_raw, dtype=y.dtype).reshape((3, 3))
@@ -1561,18 +1699,16 @@ def guiding_center_vacuum_rhs(
         grad_abs_B = jnp.einsum("l,jl->j", B, dB_by_dX) / abs_B
         # B x grad|B|
         B_cross_grad_abs_B = jnp.cross(B, grad_abs_B)
-        v_perp2 = jnp.asarray(2.0, dtype=y.dtype) * mu_arr * abs_B
+        v_perp2 = _device_array(2.0, y.dtype) * mu_arr * abs_B
         fak1 = v_par / abs_B
         fak2 = (
             m_arr
             / (q_arr * abs_B**3)
-            * (jnp.asarray(0.5, dtype=y.dtype) * v_perp2 + v_par * v_par)
+            * (_device_array(0.5, y.dtype) * v_perp2 + v_par * v_par)
         )
         dposition = fak1 * B + fak2 * B_cross_grad_abs_B
         dv_par = -mu_arr * jnp.dot(B, grad_abs_B) / abs_B
-        return jnp.stack(
-            [dposition[0], dposition[1], dposition[2], dv_par],
-        )
+        return jnp.concatenate([dposition, jnp.reshape(dv_par, (1,))])
 
     return rhs
 
@@ -1620,12 +1756,12 @@ def trace_guiding_center(
     """
 
     dtype = jnp.float64
-    y0_arr = jnp.asarray(y0, dtype=dtype).reshape((4,))
-    tmax = jnp.asarray(spec.tmax, dtype=dtype)
-    rtol = jnp.asarray(spec.rtol, dtype=dtype)
-    atol = jnp.asarray(spec.atol, dtype=dtype)
-    dtmax = jnp.asarray(spec.dtmax, dtype=dtype)
-    t0 = jnp.asarray(0.0, dtype=dtype)
+    y0_arr = _as_device_array(y0, dtype).reshape((4,))
+    tmax = _as_device_array(spec.tmax, dtype)
+    rtol = _as_device_array(spec.rtol, dtype)
+    atol = _as_device_array(spec.atol, dtype)
+    dtmax = _as_device_array(spec.dtmax, dtype)
+    t0 = _device_array(0.0, dtype)
     max_steps = int(spec.max_steps)
     if max_steps <= 0:
         raise ValueError(f"max_steps must be positive, got {max_steps}")
@@ -1637,25 +1773,30 @@ def trace_guiding_center(
     rhs = guiding_center_vacuum_rhs(magnetic_field_fn, m, q, mu)
     h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
     k0 = rhs(t0, y0_arr)
-    one = jnp.asarray(1.0, dtype=dtype)
+    one = _device_array(1.0, dtype)
     lane_zero, lane_zero_i32, lane_false = _lane_axis_carry_zeroes(y0_arr)
-    accepted_count_init = jnp.asarray(0, dtype=jnp.int32) + lane_zero_i32
+    accepted_count_init = _device_index(0) + lane_zero_i32
     t0_init = t0 + lane_zero
 
     # Pre-allocate the trajectory carry with columns (t, x, y, z, v_par).
     # Row 0 holds the initial state; rows 1..max_steps fill in as
     # accepted steps occur. Padding rows at the end of the run get the
     # final accepted state.
-    traj = jnp.zeros((max_steps + 1, 5), dtype=dtype)
-    traj = traj.at[0, 0].set(t0)
-    traj = traj.at[0, 1:].set(y0_arr)
+    traj_init_row = jnp.concatenate((jnp.reshape(t0, (1,)), y0_arr), axis=0)
+    traj = jnp.concatenate(
+        (
+            jnp.reshape(traj_init_row, (1, 5)),
+            _device_zeros((max_steps, 5), dtype),
+        ),
+        axis=0,
+    )
     traj = traj + lane_zero
-    mask = jnp.zeros((max_steps + 1,), dtype=jnp.bool_)
-    mask = mask.at[0].set(True)
+    mask_indices = jax.lax.iota(jnp.int32, max_steps + 1)
+    mask = mask_indices == _device_index(0)
     mask = mask | lane_false
 
-    phi_hits_buf = jnp.zeros((max_phi_hits, 6), dtype=dtype)
-    phi_hits_count_init = jnp.asarray(0, dtype=jnp.int32)
+    phi_hits_buf = _device_zeros((max_phi_hits, 6), dtype)
+    phi_hits_count_init = _device_index(0)
     phi_hits_buf, phi_hits_count_init = _event_carry_with_lane_axis(
         phi_hits_buf,
         phi_hits_count_init,
@@ -1663,17 +1804,16 @@ def trace_guiding_center(
     )
 
     if phis is None:
-        phis_arr = jnp.zeros((0,), dtype=dtype)
+        phis_arr = _device_zeros((0,), dtype)
     else:
-        phis_arr = jnp.asarray(phis, dtype=dtype).reshape((-1,))
+        phis_arr = _as_device_array(phis, dtype).reshape((-1,))
     num_phis = int(phis_arr.shape[0])
 
-    phi_init = _continuous_phi(
-        y0_arr[0], y0_arr[1], jnp.asarray(np.pi, dtype=dtype), dtype
-    )
+    y0_x, y0_y, _y0_z = _split_xyz(y0_arr)
+    phi_init = _continuous_phi(y0_x, y0_y, _device_array(np.pi, dtype), dtype)
 
     init_carry = (
-        jnp.asarray(0, dtype=jnp.int32),  # step_count
+        _device_index(0),  # step_count
         accepted_count_init,
         t0_init,
         y0_arr,
@@ -1685,13 +1825,13 @@ def trace_guiding_center(
         phi_hits_count_init,
         phi_init,
         phi_init,
-        jnp.asarray(0, dtype=jnp.int32) + lane_zero_i32,  # status_event
+        _device_index(0) + lane_zero_i32,  # status_event
         lane_false,
     )
 
-    max_steps_i32 = jnp.asarray(max_steps, dtype=jnp.int32)
-    max_phi_hits_i32 = jnp.asarray(max_phi_hits, dtype=jnp.int32)
-    two_pi = jnp.asarray(2.0 * np.pi, dtype=dtype)
+    max_steps_i32 = _device_index(max_steps)
+    max_phi_hits_i32 = _device_index(max_phi_hits)
+    two_pi = _device_array(2.0 * np.pi, dtype)
 
     def cond(carry):
         (
@@ -1739,18 +1879,18 @@ def trace_guiding_center(
         h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
         y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
         err = _error_norm(y_err, y, y_new, rtol, atol)
-        err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
+        err_safe = jnp.where(jnp.isfinite(err), err, _device_array(jnp.inf, dtype))
         accepted = err_safe <= one
         factor = jnp.where(
-            err_safe > jnp.asarray(0.0, dtype=dtype),
-            jnp.asarray(_SAFETY, dtype=dtype)
-            * jnp.power(err_safe, jnp.asarray(-_DOPRI5_EXP, dtype=dtype)),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
+            err_safe > _device_array(0.0, dtype),
+            _device_array(_SAFETY, dtype)
+            * jnp.power(err_safe, _device_array(-_DOPRI5_EXP, dtype)),
+            _device_array(_MAX_FACTOR, dtype),
         )
         factor = jnp.clip(
             factor,
-            jnp.asarray(_MIN_FACTOR, dtype=dtype),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
+            _device_array(_MIN_FACTOR, dtype),
+            _device_array(_MAX_FACTOR, dtype),
         )
         h_next = h_clamped * factor
         t_accepted = _accepted_step_time(t, h_clamped, tmax)
@@ -1759,7 +1899,8 @@ def trace_guiding_center(
         k_next = jnp.where(accepted, k7, k_first)
 
         # ── Phi-plane crossing detection on accepted steps ──
-        phi_current = _continuous_phi(y_new[0], y_new[1], phi_last, dtype)
+        y_new_x, y_new_y, _y_new_z = _split_xyz(y_new)
+        phi_current = _continuous_phi(y_new_x, y_new_y, phi_last, dtype)
 
         def state_at_fraction(s):
             """Sub-step DOPRI5 from ``(t, y)`` with step ``s * h_clamped``.
@@ -1786,7 +1927,7 @@ def trace_guiding_center(
                 crossed = fl_last != fl_curr
                 fak = jnp.round(
                     (
-                        (phi_last_in + phi_curr_in) / jnp.asarray(2.0, dtype=dtype)
+                        (phi_last_in + phi_curr_in) / _device_array(2.0, dtype)
                         - phi_target
                     )
                     / two_pi
@@ -1795,17 +1936,18 @@ def trace_guiding_center(
 
                 def diff_at(s, phi_last_in=phi_last_in, phi_shift=phi_shift):
                     pos = state_at_fraction(s)
+                    pos_x, pos_y, _pos_z = _split_xyz(pos)
                     return (
-                        _continuous_phi(pos[0], pos[1], phi_last_in, dtype) - phi_shift
+                        _continuous_phi(pos_x, pos_y, phi_last_in, dtype) - phi_shift
                     )
 
-                f_left = diff_at(jnp.asarray(0.0, dtype=dtype))
-                f_right = diff_at(jnp.asarray(1.0, dtype=dtype))
-                bracket_atol = jnp.asarray(1.0e-15, dtype=dtype)
+                f_left = diff_at(_device_array(0.0, dtype))
+                f_right = diff_at(_device_array(1.0, dtype))
+                bracket_atol = _device_array(1.0e-15, dtype)
                 s_root, _f_root, _bracketed = bracket_root_jax(
                     diff_at,
-                    jnp.asarray(0.0, dtype=dtype),
-                    jnp.asarray(1.0, dtype=dtype),
+                    _device_array(0.0, dtype),
+                    _device_array(1.0, dtype),
                     f_left,
                     f_right,
                     max_root_iters,
@@ -1813,15 +1955,13 @@ def trace_guiding_center(
                 )
                 t_root = t + s_root * h_clamped
                 state_root = state_at_fraction(s_root)
-                hit_row = jnp.stack(
+                hit_row = jnp.concatenate(
                     [
-                        t_root,
-                        jnp.asarray(i, dtype=dtype),
-                        state_root[0],
-                        state_root[1],
-                        state_root[2],
-                        state_root[3],
-                    ]
+                        jnp.reshape(t_root, (1,)),
+                        jnp.reshape(_as_device_array(i, dtype), (1,)),
+                        state_root,
+                    ],
+                    axis=0,
                 )
                 return _append_event_row(
                     hits_carry,
@@ -1845,7 +1985,7 @@ def trace_guiding_center(
             operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
         )
 
-        first_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
+        first_accepted_step = accepted_count == _device_index(0)
         phi_init_for_criteria = jnp.where(
             first_accepted_step,
             phi_current,
@@ -1863,27 +2003,26 @@ def trace_guiding_center(
                 phi_init_in,
             ) = args
             for i, criterion in enumerate(stopping_criteria):
+                y_next_x, y_next_y, y_next_z = _split_xyz(y_next)
                 pred = _stopping_criterion_should_stop(
                     criterion,
-                    y_next[0],
-                    y_next[1],
-                    y_next[2],
+                    y_next_x,
+                    y_next_y,
+                    y_next_z,
                     iter_count_in,
                     phi_curr_in,
                     phi_init_in,
                     dtype,
                 )
                 fires = jnp.logical_and(jnp.logical_not(stop_in), pred)
-                idx_val = jnp.asarray(-1 - i, dtype=jnp.int32)
-                hit_row = jnp.stack(
+                idx_val = _device_index(-1 - i)
+                hit_row = jnp.concatenate(
                     [
-                        t_next,
-                        jnp.asarray(float(-1 - i), dtype=dtype),
-                        y_next[0],
-                        y_next[1],
-                        y_next[2],
-                        y_next[3],
-                    ]
+                        jnp.reshape(t_next, (1,)),
+                        jnp.reshape(_device_array(float(-1 - i), dtype), (1,)),
+                        y_next,
+                    ],
+                    axis=0,
                 )
                 hits_in, count_in = _append_event_row(
                     hits_in,
@@ -1896,7 +2035,7 @@ def trace_guiding_center(
                 stop_in = jnp.logical_or(stop_in, fires)
             return hits_in, count_in, status_in, stop_in
 
-        iter_count_post = step_count + jnp.asarray(1, dtype=jnp.int32)
+        iter_count_post = step_count + _device_index(1)
 
         (
             phi_hits_after,
@@ -1911,7 +2050,7 @@ def trace_guiding_center(
                 phi_hits_after,
                 phi_count_after,
                 status_event,
-                jnp.asarray(False),
+                _device_false(),
                 iter_count_post,
                 phi_current,
                 phi_init_for_criteria,
@@ -1937,7 +2076,7 @@ def trace_guiding_center(
         )
 
         return (
-            step_count + jnp.asarray(1, dtype=jnp.int32),
+            step_count + _device_index(1),
             accepted_next,
             t_next,
             y_next,
@@ -1970,29 +2109,21 @@ def trace_guiding_center(
         stop_at_exit,
     ) = _scan_adaptive_steps(cond, body, init_carry, max_steps)
 
-    last_row = jnp.concatenate(
-        [jnp.asarray([t_final], dtype=dtype), y_final.reshape((4,))]
+    last_row = jnp.concatenate([jnp.reshape(t_final, (1,)), y_final.reshape((4,))])
+    traj_padded = jnp.where(
+        mask_final[:, None],
+        traj_final,
+        jnp.broadcast_to(last_row, traj_final.shape),
     )
 
-    def fill_padding(idx, traj_carry):
-        row_active = mask_final[idx]
-        return jax.lax.cond(
-            row_active,
-            lambda c: c,
-            lambda c: c.at[idx].set(last_row),
-            operand=traj_carry,
-        )
-
-    traj_padded = jax.lax.fori_loop(0, max_steps + 1, fill_padding, traj_final)
-
-    eps_t = jnp.asarray(1.0e-12, dtype=dtype) * jnp.maximum(
-        jnp.abs(tmax), jnp.asarray(1.0, dtype=dtype)
+    eps_t = _device_array(1.0e-12, dtype) * jnp.maximum(
+        jnp.abs(tmax), _device_array(1.0, dtype)
     )
     reached = (tmax - t_final) <= eps_t
     status_normal = jnp.where(
         reached,
-        jnp.asarray(0, dtype=jnp.int32),
-        jnp.asarray(1, dtype=jnp.int32),
+        _device_index(0),
+        _device_index(1),
     )
     status = jnp.where(stop_at_exit, status_event_final, status_normal)
 
@@ -2017,20 +2148,32 @@ def trace_guiding_centers_batched(
     q: float,
     phis: jax.Array | None = None,
     stopping_criteria: tuple = (),
+    magnetic_field_state: object | None = None,
 ) -> GuidingCenterTracingResult:
     """Trace Cartesian guiding-centre orbits with one vmapped JAX graph."""
 
-    y0s_arr = jnp.asarray(y0s, dtype=jnp.float64).reshape((-1, 4))
-    dtmaxs_arr = jnp.asarray(dtmaxs, dtype=jnp.float64).reshape((-1,))
-    mus_arr = jnp.asarray(mus, dtype=jnp.float64).reshape((-1,))
+    spec = _stage_guiding_center_spec(spec)
+    y0s_arr = _as_device_array(y0s, jnp.float64).reshape((-1, 4))
+    dtmaxs_arr = _as_device_array(dtmaxs, jnp.float64).reshape((-1,))
+    mus_arr = _as_device_array(mus, jnp.float64).reshape((-1,))
 
     def trace_one(
-        y0: jax.Array, dtmax: jax.Array, mu: jax.Array
+        y0: jax.Array,
+        dtmax: jax.Array,
+        mu: jax.Array,
+        field_state: object | None = None,
     ) -> GuidingCenterTracingResult:
+        if field_state is None:
+            field_fn = magnetic_field_fn
+        else:
+
+            def field_fn(point):
+                return magnetic_field_fn(field_state, point)
+
         return trace_guiding_center(
             replace(spec, dtmax=dtmax),
             y0,
-            magnetic_field_fn,
+            field_fn,
             m=m,
             q=q,
             mu=mu,
@@ -2047,6 +2190,38 @@ def trace_guiding_centers_batched(
             config=config,
         )
 
+        out_specs = GuidingCenterTracingResult(
+            trajectory=P(config.axis_name, None, None),
+            mask=P(config.axis_name, None),
+            steps_taken=P(config.axis_name),
+            status=P(config.axis_name),
+            t_final=P(config.axis_name),
+            phi_hits=P(config.axis_name, None, None),
+            phi_hits_count=P(config.axis_name),
+        )
+        if magnetic_field_state is None:
+
+            @partial(
+                jax.shard_map,
+                mesh=config.mesh,
+                in_specs=(
+                    P(config.axis_name, None),
+                    P(config.axis_name),
+                    P(config.axis_name),
+                ),
+                out_specs=out_specs,
+                check_vma=True,
+            )
+            def trace_shard(y0s_block, dtmaxs_block, mus_block):
+                return jax.lax.map(
+                    lambda inputs: trace_one(*inputs),
+                    (y0s_block, dtmaxs_block, mus_block),
+                )
+
+            return trace_shard(y0s_arr, dtmaxs_arr, mus_arr)
+
+        field_state_specs = jax.tree.map(lambda _leaf: P(), magnetic_field_state)
+
         @partial(
             jax.shard_map,
             mesh=config.mesh,
@@ -2054,27 +2229,32 @@ def trace_guiding_centers_batched(
                 P(config.axis_name, None),
                 P(config.axis_name),
                 P(config.axis_name),
+                field_state_specs,
             ),
-            out_specs=GuidingCenterTracingResult(
-                trajectory=P(config.axis_name, None, None),
-                mask=P(config.axis_name, None),
-                steps_taken=P(config.axis_name),
-                status=P(config.axis_name),
-                t_final=P(config.axis_name),
-                phi_hits=P(config.axis_name, None, None),
-                phi_hits_count=P(config.axis_name),
-            ),
+            out_specs=out_specs,
             check_vma=True,
         )
-        def trace_shard(y0s_block, dtmaxs_block, mus_block):
+        def trace_shard(y0s_block, dtmaxs_block, mus_block, field_state_block):
             return jax.lax.map(
-                lambda inputs: trace_one(*inputs),
+                lambda inputs: trace_one(
+                    inputs[0],
+                    inputs[1],
+                    inputs[2],
+                    field_state_block,
+                ),
                 (y0s_block, dtmaxs_block, mus_block),
             )
 
-        return trace_shard(y0s_arr, dtmaxs_arr, mus_arr)
+        return trace_shard(y0s_arr, dtmaxs_arr, mus_arr, magnetic_field_state)
 
-    return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr, mus_arr)
+    if magnetic_field_state is None:
+        return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr, mus_arr)
+    return jax.vmap(trace_one, in_axes=(0, 0, 0, None))(
+        y0s_arr,
+        dtmaxs_arr,
+        mus_arr,
+        magnetic_field_state,
+    )
 
 
 # ── Shared 4-state DOPRI5 adaptive driver ─────────────────────────────
@@ -3169,6 +3349,7 @@ def trace_guiding_centers_boozer_batched(
 ) -> GuidingCenterTracingResult:
     """Trace Boozer guiding-centre orbits with one device-side batch graph."""
 
+    spec = _stage_guiding_center_spec(spec)
     y0s_arr = jnp.asarray(y0s, dtype=jnp.float64).reshape((-1, 4))
     dtmaxs_arr = jnp.asarray(dtmaxs, dtype=jnp.float64).reshape((-1,))
     mus_arr = jnp.asarray(mus, dtype=jnp.float64).reshape((-1,))
@@ -3819,17 +4000,30 @@ def trace_fullorbits_batched(
     q: float,
     phis: jax.Array | None = None,
     stopping_criteria: tuple = (),
+    magnetic_field_state: object | None = None,
 ) -> FullorbitTracingResult:
     """Trace full-orbit Lorentz trajectories with one vmapped JAX graph."""
 
-    y0s_arr = jnp.asarray(y0s, dtype=jnp.float64).reshape((-1, 6))
-    dtmaxs_arr = jnp.asarray(dtmaxs, dtype=jnp.float64).reshape((-1,))
+    spec = _stage_fullorbit_spec(spec)
+    y0s_arr = _as_device_array(y0s, jnp.float64).reshape((-1, 6))
+    dtmaxs_arr = _as_device_array(dtmaxs, jnp.float64).reshape((-1,))
 
-    def trace_one(y0: jax.Array, dtmax: jax.Array) -> FullorbitTracingResult:
+    def trace_one(
+        y0: jax.Array,
+        dtmax: jax.Array,
+        field_state: object | None = None,
+    ) -> FullorbitTracingResult:
+        if field_state is None:
+            field_fn = magnetic_field_fn
+        else:
+
+            def field_fn(point):
+                return magnetic_field_fn(field_state, point)
+
         return trace_fullorbit(
             replace(spec, dtmax=dtmax),
             y0,
-            magnetic_field_fn,
+            field_fn,
             m=m,
             q=q,
             phis=phis,
@@ -3844,27 +4038,57 @@ def trace_fullorbits_batched(
             config=config,
         )
 
+        out_specs = FullorbitTracingResult(
+            trajectory=P(config.axis_name, None, None),
+            mask=P(config.axis_name, None),
+            steps_taken=P(config.axis_name),
+            status=P(config.axis_name),
+            t_final=P(config.axis_name),
+            phi_hits=P(config.axis_name, None, None),
+            phi_hits_count=P(config.axis_name),
+        )
+        if magnetic_field_state is None:
+
+            @partial(
+                jax.shard_map,
+                mesh=config.mesh,
+                in_specs=(P(config.axis_name, None), P(config.axis_name)),
+                out_specs=out_specs,
+                check_vma=True,
+            )
+            def trace_shard(y0s_block, dtmaxs_block):
+                return jax.lax.map(
+                    lambda inputs: trace_one(*inputs),
+                    (y0s_block, dtmaxs_block),
+                )
+
+            return trace_shard(y0s_arr, dtmaxs_arr)
+
+        field_state_specs = jax.tree.map(lambda _leaf: P(), magnetic_field_state)
+
         @partial(
             jax.shard_map,
             mesh=config.mesh,
-            in_specs=(P(config.axis_name, None), P(config.axis_name)),
-            out_specs=FullorbitTracingResult(
-                trajectory=P(config.axis_name, None, None),
-                mask=P(config.axis_name, None),
-                steps_taken=P(config.axis_name),
-                status=P(config.axis_name),
-                t_final=P(config.axis_name),
-                phi_hits=P(config.axis_name, None, None),
-                phi_hits_count=P(config.axis_name),
+            in_specs=(
+                P(config.axis_name, None),
+                P(config.axis_name),
+                field_state_specs,
             ),
+            out_specs=out_specs,
             check_vma=True,
         )
-        def trace_shard(y0s_block, dtmaxs_block):
+        def trace_shard(y0s_block, dtmaxs_block, field_state_block):
             return jax.lax.map(
-                lambda inputs: trace_one(*inputs),
+                lambda inputs: trace_one(inputs[0], inputs[1], field_state_block),
                 (y0s_block, dtmaxs_block),
             )
 
-        return trace_shard(y0s_arr, dtmaxs_arr)
+        return trace_shard(y0s_arr, dtmaxs_arr, magnetic_field_state)
 
-    return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr)
+    if magnetic_field_state is None:
+        return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr)
+    return jax.vmap(trace_one, in_axes=(0, 0, None))(
+        y0s_arr,
+        dtmaxs_arr,
+        magnetic_field_state,
+    )

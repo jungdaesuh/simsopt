@@ -22,7 +22,7 @@ from .selffield import B_regularized_pure
 from ..geo.curve import _curve_jax_eval_from_arg, _optimizable_dof_map_spec
 from ..geo.jit import jit
 from ..geo.surfacerzfourier import SurfaceRZFourier
-from .._core.optimizable import Optimizable
+from .._core.optimizable import Optimizable, _is_runtime_jax_value
 from .._core.derivative import derivative_dec
 from ..jax_core import (
     curve_gamma_and_dash_from_spec,
@@ -33,6 +33,7 @@ from ..jax_core import (
 )
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
+    iter_axis0_entries,
     zeros as _jax_zeros,
 )
 from ..jax_core.curve_geometry import optimizable_input_dofs_from_map_spec
@@ -790,22 +791,43 @@ def _assemble_curve_current_derivative(
     deriv = 0
     if dgamma is not None:
         deriv += sum(
-            c.curve.dgamma_by_dcoeff_vjp(dgamma[i]) for i, c in enumerate(coils)
+            c.curve.dgamma_by_dcoeff_vjp(block)
+            for c, block in zip(coils, _iter_runtime_axis0_entries(dgamma), strict=True)
         )
     if dgammadash is not None:
         deriv += sum(
-            c.curve.dgammadash_by_dcoeff_vjp(dgammadash[i]) for i, c in enumerate(coils)
+            c.curve.dgammadash_by_dcoeff_vjp(block)
+            for c, block in zip(
+                coils, _iter_runtime_axis0_entries(dgammadash), strict=True
+            )
         )
     if dgammadashdash is not None:
         deriv += sum(
-            c.curve.dgammadashdash_by_dcoeff_vjp(dgammadashdash[i])
-            for i, c in enumerate(coils)
+            c.curve.dgammadashdash_by_dcoeff_vjp(block)
+            for c, block in zip(
+                coils, _iter_runtime_axis0_entries(dgammadashdash), strict=True
+            )
         )
     if dcurrent is not None:
         deriv += sum(
-            c.current.vjp(jnp.asarray([dcurrent[i]])) for i, c in enumerate(coils)
+            c.current.vjp(_reshape_current_derivative(block))
+            for c, block in zip(
+                coils, _iter_runtime_axis0_entries(dcurrent), strict=True
+            )
         )
     return deriv
+
+
+def _iter_runtime_axis0_entries(array):
+    if _is_runtime_jax_value(array):
+        return iter_axis0_entries(array)
+    return iter(array)
+
+
+def _reshape_current_derivative(block):
+    if _is_runtime_jax_value(block):
+        return jnp.reshape(block, (1,))
+    return np.reshape(block, (1,))
 
 
 def _cached_objective_args(owner, build_args):

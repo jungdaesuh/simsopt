@@ -37,6 +37,9 @@ from ..jax_core.interpolated_field import (
     interpolated_field_B_cyl_with_initial,
     interpolated_field_GradAbsB,
     interpolated_field_GradAbsB_cyl_with_initial,
+    interpolated_field_state_B,
+    interpolated_field_state_B_GradAbsB,
+    make_interpolated_field_device_state,
     make_interpolated_field_spec,
 )
 from ..jax_core.regular_grid_interp import (
@@ -284,12 +287,23 @@ class InterpolatedFieldJAX(MagneticField):
         points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
         return interpolated_field_B(self._spec, points)[0]
 
+    def jax_tracing_state(self):
+        return make_interpolated_field_device_state(self._spec)
+
+    @staticmethod
+    def jax_B_at_state(state, point):
+        return interpolated_field_state_B(state, point)
+
     def jax_B_GradAbsB_at(self, point):
         points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
         return (
             interpolated_field_B(self._spec, points)[0],
             interpolated_field_GradAbsB(self._spec, points)[0],
         )
+
+    @staticmethod
+    def jax_B_GradAbsB_at_state(state, point):
+        return interpolated_field_state_B_GradAbsB(state, point)
 
     def dB_by_dX(self):
         raise RuntimeError(

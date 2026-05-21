@@ -8,9 +8,10 @@ import jax.numpy as jnp
 
 def _norm3_primal(vector: jax.Array) -> jax.Array:
     abs_vector = jnp.abs(vector)
+    abs_x, abs_y, abs_z = jnp.split(abs_vector, [1, 2], axis=-1)
     return jnp.hypot(
-        jnp.hypot(abs_vector[..., 0:1], abs_vector[..., 1:2]),
-        abs_vector[..., 2:3],
+        jnp.hypot(abs_x, abs_y),
+        abs_z,
     )
 
 

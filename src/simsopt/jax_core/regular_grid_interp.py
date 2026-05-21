@@ -285,6 +285,34 @@ class RegularGridInterpolant3DDeviceSpec:
     out_of_bounds_ok: bool
 
 
+jax.tree_util.register_dataclass(
+    RegularGridInterpolant3DDeviceSpec,
+    data_fields=[
+        "cell_table",
+        "cell_to_row",
+        "nodes",
+        "scalings",
+        "xmesh",
+        "ymesh",
+        "zmesh",
+        "xmin",
+        "xmax",
+        "ymin",
+        "ymax",
+        "zmin",
+        "zmax",
+        "hx",
+        "hy",
+        "hz",
+        "nx",
+        "ny",
+        "nz",
+        "sentinel_row",
+    ],
+    meta_fields=["degree", "value_size", "out_of_bounds_ok"],
+)
+
+
 def build_regular_grid_interpolant_3d_device_spec(
     spec: RegularGridInterpolant3DSpec,
 ) -> RegularGridInterpolant3DDeviceSpec:

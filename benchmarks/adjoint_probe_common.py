@@ -30,6 +30,7 @@ def compute_adjoint_state(jr_jax) -> tuple[np.ndarray, float]:
         solved_state.iota,
         solved_state.G,
         solved_state.weight_inv_modB,
+        sdofs=solved_state.sdofs,
     )
     solve_with_status = getattr(adjoint_state, "solve_transpose_with_status", None)
     if callable(solve_with_status):

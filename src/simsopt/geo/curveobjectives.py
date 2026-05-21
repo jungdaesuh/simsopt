@@ -9,7 +9,7 @@ from .jit import jit
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from .._core.jax_host_boundary import host_array as _host_array
-from ..backend.runtime import is_jax_backend, raise_if_target_lane_bypass
+from ..backend import is_jax_backend, raise_if_target_lane_bypass
 from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ..jax_core._math_utils import as_jax_int32 as _runtime_as_jax_int32
 from ..jax_core._math_utils import scalar_like as _runtime_scalar_like
@@ -1170,11 +1170,18 @@ class MeanSquaredCurvature(Optimizable):
         self.curve = curve
 
     def J(self):
-        return float(curve_msc_pure(self.curve.kappa(), self.curve.gammadash()))
+        value = curve_msc_pure(
+            _as_jax_float64(self.curve.kappa()),
+            _as_jax_float64(self.curve.gammadash()),
+        )
+        return float(_host_array(value, dtype=np.float64).item())
 
     @derivative_dec
     def dJ(self):
-        grad0, grad1 = _curve_msc_grad(self.curve.kappa(), self.curve.gammadash())
+        grad0, grad1 = _curve_msc_grad(
+            _as_jax_float64(self.curve.kappa()),
+            _as_jax_float64(self.curve.gammadash()),
+        )
         return self.curve.dkappa_by_dcoeff_vjp(
             grad0
         ) + self.curve.dgammadash_by_dcoeff_vjp(grad1)

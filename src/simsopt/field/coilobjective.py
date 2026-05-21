@@ -89,8 +89,8 @@ class CurrentPenalty(Optimizable):
         self.current = current
         # Stage threshold to device once at construction. The pure
         # kernel's ``threshold - threshold`` then resolves to an
-        # on-device zero under ``transfer_guard("disallow")`` without
-        # needing an outer ``transfer_guard("allow")`` scope.
+        # on-device zero under strict transfer-guard checks without
+        # needing a broad transfer allowance.
         self.threshold = as_jax_float64(threshold)
         super().__init__(depends_on=[current])
         self.J_jax = lambda I: current_penalty_pure(I, self.threshold)

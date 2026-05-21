@@ -130,7 +130,11 @@ def _cpp_boozer_wrappers():
     )
     from simsopt.geo.surfaceobjectives import _call_boozer_dresidual_dc
 
-    return _call_boozer_residual_ds, _call_boozer_residual_ds2, _call_boozer_dresidual_dc
+    return (
+        _call_boozer_residual_ds,
+        _call_boozer_residual_ds2,
+        _call_boozer_dresidual_dc,
+    )
 
 
 def _biot_savart_fns():
@@ -417,7 +421,7 @@ def _assert_scalar_directional_consistency(
     )
 
 
-def _assert_scalar_grad_matches(
+def _assert_scalar_grad_matches_jax_ad(
     f,
     x,
     grad,
@@ -441,6 +445,32 @@ def _assert_scalar_grad_matches(
         seed=seed,
         rtol=rtol,
         atol=atol,
+    )
+
+
+def _assert_scalar_directional_central_fd(
+    f,
+    x,
+    grad,
+    *,
+    seed,
+    epsilons=None,
+    tol=1e-5,
+):
+    """Check a scalar gradient with a central finite-difference ladder."""
+    if epsilons is None:
+        epsilons = _FIRST_ORDER_EPSILONS
+    direction = _make_unit_direction(seed, x.shape, x.dtype)
+    linear_term = jnp.vdot(grad, direction)
+    scale = max(abs(float(np.asarray(linear_term))), 1.0)
+    errors = []
+    for eps in epsilons:
+        fd_estimate = (f(x + eps * direction) - f(x - eps * direction)) / (2 * eps)
+        errors.append(abs(float(np.asarray(fd_estimate - linear_term))) / scale)
+    best_error = min(errors)
+    assert best_error <= tol, (
+        "Directional central FD never matched the scalar gradient tightly enough: "
+        f"seed={seed}, best={best_error:.2e}, tol={tol:.2e}"
     )
 
 
@@ -474,7 +504,7 @@ def _assert_composed_penalty_gradient_contract(
         return boozer_penalty_composed(arg, **kwargs)
 
     _, grad = boozer_penalty_grad_composed(x, **kwargs)
-    _assert_scalar_grad_matches(
+    _assert_scalar_grad_matches_jax_ad(
         objective,
         x,
         grad,
@@ -539,7 +569,9 @@ def _assert_second_order_taylor_contract(
     defects = []
     for eps in epsilons:
         actual = float(f(x + eps * direction))
-        approx = value0 + float(eps) * linear_term + 0.5 * float(eps) ** 2 * quadratic_term
+        approx = (
+            value0 + float(eps) * linear_term + 0.5 * float(eps) ** 2 * quadratic_term
+        )
         error = abs(actual - approx)
         scale = max(
             abs(float(eps) * linear_term),
@@ -557,7 +589,9 @@ def _assert_second_order_taylor_contract(
         errors[1:],
     ):
         if prev_err > 0.0 and next_err > 0.0 and next_err < prev_err:
-            orders.append(np.log(prev_err / next_err) / np.log(float(prev_eps / next_eps)))
+            orders.append(
+                np.log(prev_err / next_err) / np.log(float(prev_eps / next_eps))
+            )
 
     best_defect = min(defects)
     assert best_defect <= best_defect_tol, (
@@ -665,7 +699,9 @@ class TestBoozerDirectCppOracles:
             weight_inv_modB=True,
         )
 
-        np.testing.assert_allclose(_host(value_jax), value_cpp / num_res, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(
+            _host(value_jax), value_cpp / num_res, rtol=0, atol=1e-12
+        )
         np.testing.assert_allclose(
             _host(grad_jax),
             np.asarray(grad_cpp, dtype=np.float64) / num_res,
@@ -1005,6 +1041,7 @@ class TestBoozerHessianComposed:
 
     def test_hessian_taylor_convergence(self):
         """Composed Hessian reaches a stable second-order Taylor regime."""
+
         def objective(arg):
             return boozer_penalty_composed(arg, **self.kwargs)
 
@@ -1149,7 +1186,7 @@ class TestBoozerResidualCoilVJP:
             weight_inv_modB=weight_inv_modB,
         )
 
-        _assert_scalar_grad_matches(
+        _assert_scalar_grad_matches_jax_ad(
             objective,
             target,
             grad,
@@ -1157,12 +1194,28 @@ class TestBoozerResidualCoilVJP:
             rtol=1e-10,
             atol=1e-12,
         )
+        return objective, target, grad
 
-    def test_coil_vjp_currents_fd(self):
+    def test_coil_vjp_currents_jax_ad(self):
         """VJP w.r.t. coil currents matches JAX-native scalarization."""
         self._assert_coil_vjp_scalar_contract(2, adjoint_seed=99, check_seed=1099)
 
-    def test_coil_vjp_weight_inv_modB_currents_fd(self):
+    def test_coil_vjp_currents_central_fd(self):
+        """VJP w.r.t. coil currents matches a central finite-difference ladder."""
+        objective, target, grad = self._assert_coil_vjp_scalar_contract(
+            2,
+            adjoint_seed=99,
+            check_seed=1099,
+        )
+        _assert_scalar_directional_central_fd(
+            objective,
+            target,
+            grad,
+            seed=2099,
+            tol=1e-5,
+        )
+
+    def test_coil_vjp_weight_inv_modB_currents_jax_ad(self):
         """VJP covers the public 1/|B|-weighted residual path."""
         self._assert_coil_vjp_scalar_contract(
             2,

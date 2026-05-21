@@ -74,11 +74,16 @@ jax.tree_util.register_dataclass(
 
 
 def _scale(reference: jax.Array) -> jax.Array:
-    return jnp.asarray(_MU0_OVER_4PI, dtype=reference.dtype)
+    return _scalar(reference, _MU0_OVER_4PI)
 
 
 def _scalar(reference: jax.Array, value: float) -> jax.Array:
-    return jnp.asarray(np.float64(value), dtype=reference.dtype)
+    if isinstance(value, jax.Array) or isinstance(value, jax.core.Tracer):
+        return jnp.asarray(value, dtype=reference.dtype)
+    if isinstance(reference, jax.core.Tracer):
+        zero = jnp.sum(reference - reference)
+        return (zero + np.float64(value)).astype(reference.dtype)
+    return _as_jax_float64(np.float64(value)).astype(reference.dtype)
 
 
 def _require_xyz_matrix(name: str, value: object) -> jax.Array:
@@ -365,7 +370,7 @@ def _basis_angles(dipole_points: jax.Array, R0: object):
     y = dipole_points[:, 1]
     z = dipole_points[:, 2]
     phi = jnp.atan2(y, x)
-    theta = jnp.atan2(z, jnp.sqrt(x * x + y * y) - jnp.asarray(R0, dtype=x.dtype))
+    theta = jnp.atan2(z, jnp.sqrt(x * x + y * y) - _scalar(x, R0))
     return jnp.sin(phi), jnp.cos(phi), jnp.sin(theta), jnp.cos(theta)
 
 
@@ -473,11 +478,9 @@ def _symmetry_angles_and_signs(
 ) -> tuple[jax.Array, jax.Array]:
     field_periods = jnp.arange(nfp, dtype=reference.dtype)
     stellarator_copies = jnp.arange(stellsym + 1, dtype=reference.dtype)
-    phi0 = 2.0 * jnp.pi * field_periods[None, :] / jnp.asarray(
-        nfp, dtype=reference.dtype
-    )
+    phi0 = 2.0 * jnp.pi * field_periods[None, :] / _scalar(reference, nfp)
     stell_sign = jnp.power(
-        jnp.asarray(-1.0, dtype=reference.dtype), stellarator_copies[:, None]
+        _scalar(reference, -1.0), stellarator_copies[:, None]
     )
     phi0 = jnp.broadcast_to(phi0, (stellsym + 1, nfp))
     stell_sign = jnp.broadcast_to(stell_sign, (stellsym + 1, nfp))
@@ -555,7 +558,7 @@ def dipole_field_Bn(
         points_arr,
         dipole_points_arr,
         unitnormal_arr,
-        jnp.asarray(np.float64(R0), dtype=points_arr.dtype),
+        _scalar(points_arr, R0),
         nfp=nfp_int,
         stellsym=stellsym_int,
         coordinate_flag=coordinate_flag,
@@ -587,7 +590,7 @@ def _filter_uniform_grid_point(
     ray_points = (
         point[None, :]
         + ray[None, :]
-        * (jnp.asarray(_GRID_RAY_LENGTH, dtype=point.dtype) / _GRID_RAY_COUNT)
+        * (_scalar(point, _GRID_RAY_LENGTH) / _scalar(point, _GRID_RAY_COUNT))
         * ray_steps[:, None]
     )
     inner_anchor = xyz_inner[inner_loc]

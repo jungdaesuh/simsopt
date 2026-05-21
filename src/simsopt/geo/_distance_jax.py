@@ -36,26 +36,53 @@ def _min_dist2_matrix(left_points, left_valid, right_points, right_valid):
 
 
 def _candidate_pairs_from_mask(mask) -> list[tuple[int, int]]:
-    rows, cols = np.nonzero(np.asarray(mask))
+    with jax.transfer_guard_device_to_host("allow"):
+        mask_host = jax.device_get(mask)
+    rows, cols = np.nonzero(np.asarray(mask_host))
     return list(zip(rows.tolist(), cols.tolist(), strict=True))
 
 
 @partial(jax.jit, static_argnames=("num_base_curves",))
-def _within_collection_candidate_mask(
+def _within_collection_candidate_mask_jit(
     points,
     valid,
-    threshold: float,
+    threshold_jax,
     num_base_curves: int,
 ):
     dist2 = _min_dist2_matrix(points, valid, points, valid)
     indices = jnp.arange(points.shape[0])
     lower_triangle = indices[:, None] > indices[None, :]
     base_curve_mask = indices[None, :] < num_base_curves
-    threshold_jax = jnp.asarray(threshold, dtype=points.dtype)
     return (dist2 < jnp.square(threshold_jax)) & lower_triangle & base_curve_mask
 
 
 @jax.jit
+def _between_collections_candidate_mask_jit(
+    left_points,
+    left_valid,
+    right_points,
+    right_valid,
+    threshold_jax,
+):
+    dist2 = _min_dist2_matrix(left_points, left_valid, right_points, right_valid)
+    return dist2 < jnp.square(threshold_jax)
+
+
+def _within_collection_candidate_mask(
+    points,
+    valid,
+    threshold: float,
+    num_base_curves: int,
+):
+    threshold_jax = as_runtime_float64(threshold, reference=points)
+    return _within_collection_candidate_mask_jit(
+        points,
+        valid,
+        threshold_jax,
+        num_base_curves,
+    )
+
+
 def _between_collections_candidate_mask(
     left_points,
     left_valid,
@@ -63,9 +90,14 @@ def _between_collections_candidate_mask(
     right_valid,
     threshold: float,
 ):
-    dist2 = _min_dist2_matrix(left_points, left_valid, right_points, right_valid)
-    threshold_jax = jnp.asarray(threshold, dtype=left_points.dtype)
-    return dist2 < jnp.square(threshold_jax)
+    threshold_jax = as_runtime_float64(threshold, reference=left_points)
+    return _between_collections_candidate_mask_jit(
+        left_points,
+        left_valid,
+        right_points,
+        right_valid,
+        threshold_jax,
+    )
 
 
 def get_close_candidates_within_collection(
@@ -75,11 +107,10 @@ def get_close_candidates_within_collection(
 ) -> list[tuple[int, int]]:
     """Return C++-compatible lower-triangle close point-cloud pairs."""
     points, valid = _stack_point_clouds(point_clouds)
-    threshold_jax = as_runtime_float64(threshold, reference=points)
     mask = _within_collection_candidate_mask(
         points,
         valid,
-        threshold_jax,
+        threshold,
         num_base_curves,
     )
     return _candidate_pairs_from_mask(mask)
@@ -93,12 +124,11 @@ def get_close_candidates_between_collections(
     """Return C++-compatible close pairs across two point-cloud collections."""
     left_points, left_valid = _stack_point_clouds(left_point_clouds)
     right_points, right_valid = _stack_point_clouds(right_point_clouds)
-    threshold_jax = as_runtime_float64(threshold, reference=left_points)
     mask = _between_collections_candidate_mask(
         left_points,
         left_valid,
         right_points,
         right_valid,
-        threshold_jax,
+        threshold,
     )
     return _candidate_pairs_from_mask(mask)

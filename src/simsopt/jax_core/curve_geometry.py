@@ -24,6 +24,7 @@ from .curve_xyz_fourier import (
 )
 from .curve_xyz_fourier_symmetries import jaxXYZFourierSymmetriescurve_pure
 from ._math_utils import (
+    as_runtime_array as _as_runtime_array,
     as_runtime_float64 as _as_runtime_float64,
 )
 from .framedcurve import (
@@ -56,42 +57,42 @@ from .specs import (
 _SURF_TYPE_RZ_FOURIER = "RZ_Fourier"
 
 
-def _as_explicit_float64(value, *, reference=None) -> jax.Array:
+def _as_explicit_runtime_array(value, *, reference=None) -> jax.Array:
     if reference is not None:
         return _as_runtime_float64(value, reference=reference)
     if isinstance(value, jax.Array) or hasattr(value, "aval"):
-        return jnp.asarray(value, dtype=jnp.float64)
+        return _as_runtime_array(value)
     if isinstance(value, (list, tuple)):
         leaves = jax.tree.leaves(value)
         if any(isinstance(leaf, jax.Array) or hasattr(leaf, "aval") for leaf in leaves):
-            return jnp.asarray(value, dtype=jnp.float64)
+            return _as_runtime_array(value)
     raise TypeError(
         "curve_geometry pure helpers require JAX/spec-backed arrays; "
         "materialize an immutable spec or explicit device array first."
     )
 
 
-def _explicit_scalar(value: float, *, reference=None) -> jax.Array:
-    return _as_explicit_float64(value, reference=reference)
+def _runtime_scalar(value: float, *, reference=None) -> jax.Array:
+    return _as_explicit_runtime_array(value, reference=reference)
 
 
-def _ones_like_float64(array: jax.Array) -> jax.Array:
-    return jnp.broadcast_to(_explicit_scalar(1.0, reference=array), array.shape)
+def _ones_like_runtime(array: jax.Array) -> jax.Array:
+    return jnp.broadcast_to(_runtime_scalar(1.0, reference=array), array.shape)
 
 
-def _zeros_like_float64(array: jax.Array) -> jax.Array:
-    return jnp.broadcast_to(_explicit_scalar(0.0, reference=array), array.shape)
+def _zeros_like_runtime(array: jax.Array) -> jax.Array:
+    return jnp.broadcast_to(_runtime_scalar(0.0, reference=array), array.shape)
 
 
-def _element_count_float64(array: jax.Array) -> jax.Array:
-    return _explicit_scalar(float(np.prod(array.shape)), reference=array)
+def _element_count_runtime(array: jax.Array) -> jax.Array:
+    return _runtime_scalar(float(np.prod(array.shape)), reference=array)
 
 
 def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
     positions = np.arange(int(start), int(end), dtype=np.int64)
     selector = np.zeros((positions.size, array.shape[0]), dtype=np.float64)
     selector[np.arange(positions.size), positions] = 1.0
-    return _as_explicit_float64(selector, reference=array) @ array
+    return _as_explicit_runtime_array(selector, reference=array) @ array
 
 
 def _update_1d_static(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
@@ -100,8 +101,8 @@ def _update_1d_static(array: jax.Array, start: int, values: jax.Array) -> jax.Ar
     insert[positions, np.arange(positions.size)] = 1.0
     keep_mask = np.ones(array.shape[0], dtype=np.float64)
     keep_mask[positions] = 0.0
-    return array * _as_explicit_float64(keep_mask, reference=array) + (
-        _as_explicit_float64(insert, reference=array) @ values
+    return array * _as_explicit_runtime_array(keep_mask, reference=array) + (
+        _as_explicit_runtime_array(insert, reference=array) @ values
     )
 
 
@@ -154,7 +155,7 @@ def curve_spec_from_curve(curve):
 
 def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
     curve_dofs = (
-        spec.dofs if dofs is None else _as_explicit_float64(dofs, reference=spec.dofs)
+        spec.dofs if dofs is None else _as_explicit_runtime_array(dofs, reference=spec.dofs)
     )
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "xyz_fourier":
@@ -230,8 +231,8 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
 
 
 def _curve_quadpoints(spec: CurveSpec, *, reference):
-    quadpoints = _as_explicit_float64(spec.quadpoints, reference=reference)
-    return quadpoints, _ones_like_float64(quadpoints)
+    quadpoints = _as_explicit_runtime_array(spec.quadpoints, reference=reference)
+    return quadpoints, _ones_like_runtime(quadpoints)
 
 
 def _curve_geometry_terms_from_kernel(gamma_kernel, quadpoints, tangents, *, order):
@@ -271,8 +272,8 @@ def _direct_curve_geometry_terms(spec: CurveSpec, dofs, *, order):
 
 
 def _mapped_full_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
-    mapped = _as_explicit_float64(map_spec.template_full_dofs, reference=owner_dofs)
-    owner_dofs = _as_explicit_float64(owner_dofs, reference=owner_dofs)
+    mapped = _as_explicit_runtime_array(map_spec.template_full_dofs, reference=owner_dofs)
+    owner_dofs = _as_explicit_runtime_array(owner_dofs, reference=owner_dofs)
     for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
         del target_end
         segment = _slice_1d_static(owner_dofs, owner_start, owner_end)
@@ -299,13 +300,13 @@ def _rotation_alpha_and_dash_from_dofs(
     rotation_map: OptimizableDofMapSpec,
     owner_dofs,
 ):
-    quadpoints = _as_explicit_float64(rotation_spec.quadpoints, reference=owner_dofs)
+    quadpoints = _as_explicit_runtime_array(rotation_spec.quadpoints, reference=owner_dofs)
     if isinstance(rotation_spec, ZeroRotationSpec):
-        zeros = _zeros_like_float64(quadpoints)
+        zeros = _zeros_like_runtime(quadpoints)
         return zeros, zeros
 
     rotation_dofs = _mapped_input_dofs(rotation_map, owner_dofs)
-    rotation_scale = _explicit_scalar(rotation_spec.scale, reference=owner_dofs)
+    rotation_scale = _runtime_scalar(rotation_spec.scale, reference=owner_dofs)
     return (
         rotation_scale
         * jaxrotation_pure(rotation_dofs, quadpoints, rotation_spec.order),
@@ -369,7 +370,7 @@ def _curve_perturbed_geometry_from_dofs(spec: CurvePerturbedSpec, dofs):
 
 
 def _curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
-    quadpoints_jax = _as_explicit_float64(quadpoints, reference=spec.dofs)
+    quadpoints_jax = _as_explicit_runtime_array(quadpoints, reference=spec.dofs)
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "perturbed":
         spec = cast(CurvePerturbedSpec, spec)
@@ -469,9 +470,11 @@ def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
             alpha,
             alphadash,
         )
+    dn = _runtime_scalar(spec.dn, reference=normal)
+    db = _runtime_scalar(spec.db, reference=binormal)
     return (
-        gamma + spec.dn * normal + spec.db * binormal,
-        gammadash + spec.dn * normal_dash + spec.db * binormal_dash,
+        gamma + dn * normal + db * binormal,
+        gammadash + dn * normal_dash + db * binormal_dash,
     )
 
 
@@ -482,20 +485,20 @@ def curve_spec_with_dofs(spec: CurveSpec, dofs):
 def curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
     return _curve_spec_with_quadpoints(
         spec,
-        _as_explicit_float64(quadpoints, reference=spec.dofs),
+        _as_explicit_runtime_array(quadpoints, reference=spec.dofs),
     )
 
 
 def _clamp_unit_interval(value: jax.Array) -> jax.Array:
     return jnp.clip(
         value,
-        _explicit_scalar(0.0, reference=value),
-        _explicit_scalar(1.0, reference=value),
+        _runtime_scalar(0.0, reference=value),
+        _runtime_scalar(1.0, reference=value),
     )
 
 
 def _distance_sq(vector: jax.Array) -> jax.Array:
-    return jnp.maximum(jnp.dot(vector, vector), _explicit_scalar(0.0, reference=vector))
+    return jnp.maximum(jnp.dot(vector, vector), _runtime_scalar(0.0, reference=vector))
 
 
 def _distance(vector: jax.Array) -> jax.Array:
@@ -519,14 +522,14 @@ def segment_segment_distance_pure(
     nondegenerate segment-pair handling. The nondegenerate path splits into
     near-parallel endpoint projections or the standard closest-point clamp.
     """
-    segment_start = _as_explicit_float64(segment_start)
-    segment_end = _as_explicit_float64(segment_end, reference=segment_start)
-    other_start = _as_explicit_float64(other_start, reference=segment_start)
-    other_end = _as_explicit_float64(other_end, reference=segment_start)
-    zero_len = _explicit_scalar(1e-30, reference=segment_start)
-    parallel_eps = _explicit_scalar(1e-10, reference=segment_start)
-    zero = _explicit_scalar(0.0, reference=segment_start)
-    one = _explicit_scalar(1.0, reference=segment_start)
+    segment_start = _as_explicit_runtime_array(segment_start)
+    segment_end = _as_explicit_runtime_array(segment_end, reference=segment_start)
+    other_start = _as_explicit_runtime_array(other_start, reference=segment_start)
+    other_end = _as_explicit_runtime_array(other_end, reference=segment_start)
+    zero_len = _runtime_scalar(1e-30, reference=segment_start)
+    parallel_eps = _runtime_scalar(1e-10, reference=segment_start)
+    zero = _runtime_scalar(0.0, reference=segment_start)
+    one = _runtime_scalar(1.0, reference=segment_start)
 
     u = segment_end - segment_start
     v = other_end - other_start
@@ -583,13 +586,13 @@ def segment_segment_distance_pure(
                     & (tc_int <= one)
                 )
                 candidate_sq = _distance_sq(w0 + sc_int * u - tc_int * v)
-                inf_sq = _explicit_scalar(jnp.inf, reference=segment_start)
+                inf_sq = _runtime_scalar(jnp.inf, reference=segment_start)
                 return jnp.where(interior_valid, candidate_sq, inf_sq)
 
             interior_sq = jax.lax.cond(
                 denom > zero,
                 _interior_sq,
-                lambda _: _explicit_scalar(jnp.inf, reference=segment_start),
+                lambda _: _runtime_scalar(jnp.inf, reference=segment_start),
                 None,
             )
             return jnp.sqrt(jnp.minimum(best_sq, interior_sq))
@@ -628,7 +631,7 @@ def segment_segment_distance_pure(
 
 
 def _closed_curve_segment_arrays(gamma: jax.Array) -> tuple[jax.Array, jax.Array]:
-    gamma = _as_explicit_float64(gamma)
+    gamma = _as_explicit_runtime_array(gamma)
     return gamma, jnp.roll(gamma, shift=-1, axis=0)
 
 
@@ -640,7 +643,7 @@ def closed_curve_self_intersection_min_distance(
     """Return the minimum non-neighbor segment distance of a closed curve."""
     segment_start, segment_end = _closed_curve_segment_arrays(gamma)
     segment_count = segment_start.shape[0]
-    inf_distance = _explicit_scalar(jnp.inf, reference=segment_start)
+    inf_distance = _runtime_scalar(jnp.inf, reference=segment_start)
     if int(segment_count) <= (2 * int(neighbor_skip) + 1):
         return inf_distance
 
@@ -683,10 +686,10 @@ def closed_curve_self_intersection_tolerance(
     """Return the segment-length-scaled self-intersection tolerance."""
     segment_start, segment_end = _closed_curve_segment_arrays(gamma)
     segment_lengths = jnp.linalg.norm(segment_end - segment_start, axis=1)
-    average_segment_length = jnp.sum(segment_lengths) / _element_count_float64(
+    average_segment_length = jnp.sum(segment_lengths) / _element_count_runtime(
         segment_lengths
     )
-    return _explicit_scalar(tolerance_factor, reference=gamma) * average_segment_length
+    return _runtime_scalar(tolerance_factor, reference=gamma) * average_segment_length
 
 
 def _closed_curve_self_intersection_terms(
@@ -705,7 +708,7 @@ def _closed_curve_self_intersection_terms(
     )
     deficit = jnp.maximum(
         tolerance - minimum_distance,
-        _explicit_scalar(0.0, reference=gamma),
+        _runtime_scalar(0.0, reference=gamma),
     )
     return minimum_distance, tolerance, deficit
 
@@ -722,7 +725,7 @@ def closed_curve_self_intersection_penalty(
         tolerance_factor=tolerance_factor,
         neighbor_skip=neighbor_skip,
     )
-    return _explicit_scalar(0.5, reference=gamma) * deficit * deficit
+    return _runtime_scalar(0.5, reference=gamma) * deficit * deficit
 
 
 def closed_curve_self_intersection_summary(
@@ -737,7 +740,7 @@ def closed_curve_self_intersection_summary(
         tolerance_factor=tolerance_factor,
         neighbor_skip=neighbor_skip,
     )
-    penalty = _explicit_scalar(0.5, reference=gamma) * deficit * deficit
+    penalty = _runtime_scalar(0.5, reference=gamma) * deficit * deficit
     return minimum_distance, tolerance, penalty, minimum_distance < tolerance
 
 
@@ -767,19 +770,19 @@ def pair_linking_number_pure(
     ``LinkingNumber.J`` iterates curve pairs and sums the integer
     contributions.
     """
-    gamma1 = _as_explicit_float64(gamma1)
-    gammadash1 = _as_explicit_float64(gammadash1, reference=gamma1)
-    gamma2 = _as_explicit_float64(gamma2, reference=gamma1)
-    gammadash2 = _as_explicit_float64(gammadash2, reference=gamma1)
-    dphi1 = _as_explicit_float64(dphi1, reference=gamma1)
-    dphi2 = _as_explicit_float64(dphi2, reference=gamma1)
+    gamma1 = _as_explicit_runtime_array(gamma1)
+    gammadash1 = _as_explicit_runtime_array(gammadash1, reference=gamma1)
+    gamma2 = _as_explicit_runtime_array(gamma2, reference=gamma1)
+    gammadash2 = _as_explicit_runtime_array(gammadash2, reference=gamma1)
+    dphi1 = _as_explicit_runtime_array(dphi1, reference=gamma1)
+    dphi2 = _as_explicit_runtime_array(dphi2, reference=gamma1)
     difference = gamma1[:, None, :] - gamma2[None, :, :]
     dr = jnp.linalg.norm(difference, axis=-1)
     cross = jnp.cross(gammadash2[None, :, :], difference, axis=-1)
     det = jnp.sum(gammadash1[:, None, :] * cross, axis=-1)
-    inv_dr3 = jnp.where(dr > 0, dr ** (-3), _explicit_scalar(0.0, reference=gamma1))
+    inv_dr3 = jnp.where(dr > 0, dr ** (-3), _runtime_scalar(0.0, reference=gamma1))
     total = jnp.sum(det * inv_dr3)
-    four_pi = _explicit_scalar(4.0 * float(np.pi), reference=gamma1)
+    four_pi = _runtime_scalar(4.0 * float(np.pi), reference=gamma1)
     value = jnp.round(jnp.abs(total * dphi1 * dphi2) / four_pi)
     return value.astype(jnp.int32)
 

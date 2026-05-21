@@ -13,7 +13,8 @@ def _require_jax():
 
 def host_array(value, *, dtype=None):
     jax = _require_jax()
-    array = np.asarray(jax.device_get(value))
+    with jax.transfer_guard_device_to_host("allow"):
+        array = np.asarray(jax.device_get(value))
     if dtype is None:
         return array
     return np.asarray(array, dtype=dtype)

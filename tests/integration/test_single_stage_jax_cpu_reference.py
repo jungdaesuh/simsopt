@@ -6224,8 +6224,11 @@ class TestBoozerResidualAdjointFD:
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
         weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
+        sdofs = booz_surf._get_surface_dofs()
         x_inner = booz_surf._pack_decision_vector(
-            iota, G, sdofs=booz_surf._get_surface_dofs()
+            iota,
+            G,
+            sdofs=sdofs,
         )
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(jr.biotsavart)
         _, direct_gradient = _value_and_direct_coil_gradient(
@@ -6235,7 +6238,13 @@ class TestBoozerResidualAdjointFD:
             G is not None,
             weight_inv_modB,
         )
-        dJ_ds = jr._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
+        dJ_ds = jr._compute_dJ_ds(
+            coil_set_spec,
+            iota,
+            G,
+            weight_inv_modB,
+            sdofs=sdofs,
+        )
         adjoint_state = booz_surf.get_adjoint_runtime_state()
         adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
         adjoint_gradient = _adjoint_coil_dofs_gradient(

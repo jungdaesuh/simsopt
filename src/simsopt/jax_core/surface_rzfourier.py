@@ -554,7 +554,7 @@ def _evaluate_from_dofs(
     spec: SurfaceRZFourierSpec,
     dofs: jax.Array,
 ):
-    return evaluator(_spec_from_dofs(spec, dofs))
+    return evaluator(_spec_from_dofs(spec, dofs, use_custom_vjp=True))
 
 
 def _evaluate_jacobian_from_dofs(
@@ -872,14 +872,20 @@ def surface_rz_fourier_unitnormal_from_dofs(
 def surface_rz_fourier_area_from_spec(spec: SurfaceRZFourierSpec):
     normal = surface_rz_fourier_normal_from_spec(spec)
     nphi, ntheta = normal.shape[:2]
-    return jnp.sum(_normal_norm(normal)[..., 0]) / (nphi * ntheta)
+    return jnp.sum(_normal_norm(normal)[..., 0]) / float_scalar(
+        nphi * ntheta,
+        normal,
+    )
 
 
 def surface_rz_fourier_volume_from_spec(spec: SurfaceRZFourierSpec):
     gamma = surface_rz_fourier_gamma_from_spec(spec)
     normal = surface_rz_fourier_normal_from_spec(spec)
     nphi, ntheta = gamma.shape[:2]
-    return jnp.sum(jnp.sum(gamma * normal, axis=-1)) / (3.0 * nphi * ntheta)
+    return jnp.sum(jnp.sum(gamma * normal, axis=-1)) / float_scalar(
+        3 * nphi * ntheta,
+        gamma,
+    )
 
 
 def surface_rz_fourier_mean_cross_sectional_area_from_spec(
@@ -914,10 +920,9 @@ def surface_rz_fourier_major_radius_from_spec(spec: SurfaceRZFourierSpec):
 
 
 def surface_rz_fourier_aspect_ratio_from_spec(spec: SurfaceRZFourierSpec):
-    return (
-        surface_rz_fourier_major_radius_from_spec(spec)
-        / surface_rz_fourier_minor_radius_from_spec(spec)
-    )
+    return surface_rz_fourier_major_radius_from_spec(
+        spec
+    ) / surface_rz_fourier_minor_radius_from_spec(spec)
 
 
 def surface_rz_fourier_dnormal_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
@@ -1110,7 +1115,9 @@ def surface_rz_fourier_first_fund_form_from_dofs(
 def surface_rz_fourier_second_fund_form_from_dofs(
     spec: SurfaceRZFourierSpec, dofs: jax.Array
 ):
-    return _evaluate_from_dofs(surface_rz_fourier_second_fund_form_from_spec, spec, dofs)
+    return _evaluate_from_dofs(
+        surface_rz_fourier_second_fund_form_from_spec, spec, dofs
+    )
 
 
 def surface_rz_fourier_surface_curvatures_from_dofs(
@@ -1181,17 +1188,13 @@ def surface_rz_fourier_aspect_ratio_from_dofs(
     return _evaluate_from_dofs(surface_rz_fourier_aspect_ratio_from_spec, spec, dofs)
 
 
-def surface_rz_fourier_darea_from_dofs(
-    spec: SurfaceRZFourierSpec, dofs: jax.Array
-):
+def surface_rz_fourier_darea_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
     return jax.grad(lambda x: surface_rz_fourier_area_from_dofs(spec, x))(
         _as_jax_float64(dofs)
     )
 
 
-def surface_rz_fourier_dvolume_from_dofs(
-    spec: SurfaceRZFourierSpec, dofs: jax.Array
-):
+def surface_rz_fourier_dvolume_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
     return jax.grad(lambda x: surface_rz_fourier_volume_from_dofs(spec, x))(
         _as_jax_float64(dofs)
     )
@@ -1229,24 +1232,16 @@ def surface_rz_fourier_daspect_ratio_from_dofs(
     )
 
 
-def surface_rz_fourier_d2area_from_dofs(
-    spec: SurfaceRZFourierSpec, dofs: jax.Array
-):
+def surface_rz_fourier_d2area_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
     dofs = _as_jax_float64(dofs)
     _check_surface_rz_hessian_memory(spec, dofs, name="surface_rz_fourier_d2area")
-    return jax.hessian(lambda x: surface_rz_fourier_area_from_dofs(spec, x))(
-        dofs
-    )
+    return jax.hessian(lambda x: surface_rz_fourier_area_from_dofs(spec, x))(dofs)
 
 
-def surface_rz_fourier_d2volume_from_dofs(
-    spec: SurfaceRZFourierSpec, dofs: jax.Array
-):
+def surface_rz_fourier_d2volume_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
     dofs = _as_jax_float64(dofs)
     _check_surface_rz_hessian_memory(spec, dofs, name="surface_rz_fourier_d2volume")
-    return jax.hessian(lambda x: surface_rz_fourier_volume_from_dofs(spec, x))(
-        dofs
-    )
+    return jax.hessian(lambda x: surface_rz_fourier_volume_from_dofs(spec, x))(dofs)
 
 
 def surface_rz_fourier_d2minor_radius_from_dofs(

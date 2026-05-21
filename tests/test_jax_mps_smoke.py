@@ -27,14 +27,14 @@ def test_biot_savart_b_smoke_runs_on_mps():
     of a circular loop on its axis to within smoke tolerance."""
     import jax
 
-    if not any(device.platform.lower() == "mps" for device in jax.devices()):
+    mps_devices = [device for device in jax.devices() if device.platform.lower() == "mps"]
+    if not mps_devices:
         pytest.skip("jax_plugins.mps importable but no MPS device available")
+    mps_device = mps_devices[0]
 
     import simsopt.backend as backend
 
     backend.set_backend("jax_mps_smoke")
-
-    import jax.numpy as jnp
 
     from simsopt.jax_core.biotsavart import biot_savart_B
 
@@ -55,14 +55,26 @@ def test_biot_savart_b_smoke_runs_on_mps():
     )
     points = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.5]])
 
-    b = np.asarray(
-        biot_savart_B(
-            jnp.asarray(points),
-            jnp.asarray(gamma[None, :, :]),
-            jnp.asarray(gammadash[None, :, :]),
-            jnp.asarray([current]),
-        )
+    points_device = jax.device_put(np.asarray(points, dtype=np.float32), mps_device)
+    gamma_device = jax.device_put(
+        np.asarray(gamma[None, :, :], dtype=np.float32), mps_device
     )
+    gammadash_device = jax.device_put(
+        np.asarray(gammadash[None, :, :], dtype=np.float32), mps_device
+    )
+    currents_device = jax.device_put(
+        np.asarray([current], dtype=np.float32), mps_device
+    )
+
+    b_device = biot_savart_B(
+        points_device,
+        gamma_device,
+        gammadash_device,
+        currents_device,
+    )
+    b_device.block_until_ready()
+    with jax.transfer_guard_device_to_host("allow"):
+        b = np.asarray(jax.device_get(b_device))
 
     assert b.shape == (points.shape[0], 3)
     assert np.all(np.isfinite(b))

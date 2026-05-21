@@ -9,9 +9,20 @@ quadrature points; the host adapter class in
 
 from __future__ import annotations
 
-from math import pi
-
+import jax
 import jax.numpy as jnp
+
+from ._math_utils import scalar_like
+from ._math_utils import as_jax_int32 as _as_jax_int32
+
+
+def _slice_vector(vector, start: int, stop: int):
+    indices = _as_jax_int32(tuple(range(start, stop)))
+    return jnp.take(vector, indices, axis=0)
+
+
+def _vector_entry(vector, index: int):
+    return jax.lax.squeeze(_slice_vector(vector, index, index + 1), (0,))
 
 
 def shift_pure(v, xyz):
@@ -24,9 +35,7 @@ def shift_pure(v, xyz):
     Returns:
      - v+xyz: translated array, size Nx3
     """
-    for ii in range(0, 3):
-        v = v.at[:, ii].add(xyz[ii])
-    return v
+    return v + jnp.expand_dims(xyz, axis=0)
 
 
 def rotate_pure(v, ypr):
@@ -42,26 +51,32 @@ def rotate_pure(v, ypr):
     Returns:
     - v: Rotated set of points
     """
-    yaw = ypr[0]
-    pitch = ypr[1]
-    roll = ypr[2]
+    yaw = _vector_entry(ypr, 0)
+    pitch = _vector_entry(ypr, 1)
+    roll = _vector_entry(ypr, 2)
+    zero = scalar_like(yaw, 0.0)
+    one = scalar_like(yaw, 1.0)
 
-    Myaw = jnp.asarray(
-        [[jnp.cos(yaw), -jnp.sin(yaw), 0], [jnp.sin(yaw), jnp.cos(yaw), 0], [0, 0, 1]]
+    Myaw = jnp.stack(
+        (
+            jnp.stack((jnp.cos(yaw), -jnp.sin(yaw), zero)),
+            jnp.stack((jnp.sin(yaw), jnp.cos(yaw), zero)),
+            jnp.stack((zero, zero, one)),
+        )
     )
-    Mpitch = jnp.asarray(
-        [
-            [jnp.cos(pitch), 0, jnp.sin(pitch)],
-            [0, 1, 0],
-            [-jnp.sin(pitch), 0, jnp.cos(pitch)],
-        ]
+    Mpitch = jnp.stack(
+        (
+            jnp.stack((jnp.cos(pitch), zero, jnp.sin(pitch))),
+            jnp.stack((zero, one, zero)),
+            jnp.stack((-jnp.sin(pitch), zero, jnp.cos(pitch))),
+        )
     )
-    Mroll = jnp.asarray(
-        [
-            [1, 0, 0],
-            [0, jnp.cos(roll), -jnp.sin(roll)],
-            [0, jnp.sin(roll), jnp.cos(roll)],
-        ]
+    Mroll = jnp.stack(
+        (
+            jnp.stack((one, zero, zero)),
+            jnp.stack((zero, jnp.cos(roll), -jnp.sin(roll))),
+            jnp.stack((zero, jnp.sin(roll), jnp.cos(roll))),
+        )
     )
 
     return v @ Myaw @ Mpitch @ Mroll
@@ -78,21 +93,31 @@ def centercurve_pure(dofs, quadpoints, order):
     Returns:
      - gamma: Curve that has been translated and rotated to the desired position.
     """
-    xyz = dofs[0:3]
-    ypr = dofs[3:6]
-    fmn = dofs[6:]
+    xyz = _slice_vector(dofs, 0, 3)
+    ypr = _slice_vector(dofs, 3, 6)
+    fmn = _slice_vector(dofs, 6, dofs.shape[0])
 
-    k = len(fmn) // 3
-    coeffs = [fmn[:k], fmn[k : (2 * k)], fmn[(2 * k) :]]
+    k = fmn.shape[0] // 3
+    coeffs = [
+        _slice_vector(fmn, 0, k),
+        _slice_vector(fmn, k, 2 * k),
+        _slice_vector(fmn, 2 * k, fmn.shape[0]),
+    ]
     points = quadpoints
-    gamma = jnp.zeros((len(points), 3))
+    two_pi = scalar_like(points, 2.0 * jnp.pi)
+    gamma_components = []
     for i in range(0, 3):
+        component = points - points
         for j in range(0, order):
-            gamma = gamma.at[:, i].add(
-                coeffs[i][2 * j] * jnp.sin(2 * pi * (j + 1) * points)
+            mode = scalar_like(two_pi, float(j + 1))
+            angle = two_pi * mode * points
+            component = component + (
+                _vector_entry(coeffs[i], 2 * j) * jnp.sin(angle)
             )
-            gamma = gamma.at[:, i].add(
-                coeffs[i][2 * j + 1] * jnp.cos(2 * pi * (j + 1) * points)
+            component = component + (
+                _vector_entry(coeffs[i], 2 * j + 1) * jnp.cos(angle)
             )
+        gamma_components.append(component)
+    gamma = jnp.stack(tuple(gamma_components), axis=1)
 
     return shift_pure(rotate_pure(gamma, ypr), xyz)

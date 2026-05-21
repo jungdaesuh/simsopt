@@ -88,7 +88,21 @@ def test_coil_dofs_gradient_to_derivative_preserves_shared_dof_round_trip() -> N
     """Shared DOF lineages must not amplify gradients when converted to Derivative."""
     biotsavart, dep_opt_a, dep_opt_b = _build_shared_lineage_biotsavart()
 
-    derivative = soj._coil_dofs_gradient_to_derivative(
+    derivative = soj.coil_dofs_gradient_to_derivative(
+        biotsavart,
+        np.array([2.0, -3.0]),
+    )
+
+    _assert_allclose(derivative(biotsavart), [2.0, -3.0], dtype=float)
+    _assert_allclose(derivative.data[dep_opt_a], [1.0, -1.5, 0.0], dtype=float)
+    _assert_allclose(derivative.data[dep_opt_b], [1.0, -1.5, 0.0], dtype=float)
+
+
+def test_coil_dofs_gradient_to_derivative_public_geo_export() -> None:
+    from simsopt.geo import coil_dofs_gradient_to_derivative
+
+    biotsavart, dep_opt_a, dep_opt_b = _build_shared_lineage_biotsavart()
+    derivative = coil_dofs_gradient_to_derivative(
         biotsavart,
         np.array([2.0, -3.0]),
     )
@@ -126,7 +140,7 @@ def test_coil_dofs_gradient_to_derivative_uses_explicit_host_boundary(
 
     monkeypatch.setattr(soj.jax, "device_get", _counting_device_get)
 
-    derivative = soj._coil_dofs_gradient_to_derivative(
+    derivative = soj.coil_dofs_gradient_to_derivative(
         biotsavart,
         jnp.array([2.0, -3.0], dtype=jnp.float64),
     )

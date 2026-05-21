@@ -28,7 +28,8 @@ import jax.numpy as jnp
 
 from .regular_grid_interp import (
     RegularGridInterpolant3DSpec,
-    evaluate_batch,
+    build_regular_grid_interpolant_3d_device_spec,
+    evaluate_batch_device,
 )
 
 __all__ = [
@@ -69,6 +70,11 @@ def signed_distance_to_cartesian_classifier(
             f"got value_size = {int(interpolant_spec.value_size)}"
         )
 
+    device_spec = build_regular_grid_interpolant_3d_device_spec(interpolant_spec)
+    two_pi = device_spec.ymax - device_spec.ymin
+    width = device_spec.xmax - device_spec.xmin
+    outside = (device_spec.xmin - device_spec.xmin) - width / width
+
     def classify(xyz: jax.Array) -> jax.Array:
         xyz_arr = jnp.asarray(xyz, dtype=jnp.float64)
         was_single = xyz_arr.ndim == 1
@@ -81,21 +87,21 @@ def signed_distance_to_cartesian_classifier(
         r = jnp.linalg.norm(xyz_arr[:, :2], axis=1)
         phi = jnp.mod(
             jnp.arctan2(xyz_arr[:, 1], xyz_arr[:, 0]),
-            jnp.asarray(2.0 * jnp.pi, dtype=jnp.float64),
+            two_pi,
         )
         z = xyz_arr[:, 2]
         rphiz = jnp.stack([r, phi, z], axis=-1)
-        dist = evaluate_batch(interpolant_spec, rphiz)
+        dist = evaluate_batch_device(device_spec, rphiz)
         dist_flat = dist.reshape((-1,))
         in_bounds = (
-            (r >= jnp.asarray(interpolant_spec.xmin, dtype=jnp.float64))
-            & (r <= jnp.asarray(interpolant_spec.xmax, dtype=jnp.float64))
-            & (phi >= jnp.asarray(interpolant_spec.ymin, dtype=jnp.float64))
-            & (phi <= jnp.asarray(interpolant_spec.ymax, dtype=jnp.float64))
-            & (z >= jnp.asarray(interpolant_spec.zmin, dtype=jnp.float64))
-            & (z <= jnp.asarray(interpolant_spec.zmax, dtype=jnp.float64))
+            (r >= device_spec.xmin)
+            & (r <= device_spec.xmax)
+            & (phi >= device_spec.ymin)
+            & (phi <= device_spec.ymax)
+            & (z >= device_spec.zmin)
+            & (z <= device_spec.zmax)
         )
-        result = jnp.sign(jnp.where(in_bounds, dist_flat, -1.0))
+        result = jnp.sign(jnp.where(in_bounds, dist_flat, outside))
         if was_single:
             return result[0]
         return result

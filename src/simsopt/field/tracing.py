@@ -3,6 +3,7 @@ from collections.abc import Callable
 from itertools import repeat
 from math import sqrt
 
+import jax
 import numpy as np
 
 import simsoptpp as sopp
@@ -12,6 +13,7 @@ from ..field.magneticfield import MagneticField
 from ..field.boozermagneticfield import BoozerMagneticField
 from ..field.sampling import draw_uniform_on_curve, draw_uniform_on_surface
 from ..geo.surface import SurfaceClassifier, _surface_classifier_from_interpolant
+from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ..util.constants import (
     ALPHA_PARTICLE_MASS,
     ALPHA_PARTICLE_CHARGE,
@@ -24,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 _QUARTER_TURN = 0.5 * np.pi
+
+
+def _jax_trace_host_array(value: object, *, dtype) -> np.ndarray:
+    with jax.transfer_guard_device_to_host("allow"):
+        return np.asarray(jax.device_get(value), dtype=dtype)
 
 
 def _allgather_flat(comm, values):
@@ -50,10 +57,11 @@ def _batched_jax_trace_payloads(
     forget_exact_path: bool,
     event_context: str,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    trajectories = np.asarray(result.trajectory, dtype=np.float64)
-    masks = np.asarray(result.mask, dtype=bool)
-    phi_hits = np.asarray(result.phi_hits, dtype=np.float64)
-    phi_hit_counts = np.asarray(result.phi_hits_count, dtype=np.int64).reshape(-1)
+    trajectories = _jax_trace_host_array(result.trajectory, dtype=np.float64)
+    masks = _jax_trace_host_array(result.mask, dtype=bool)
+    phi_hits = _jax_trace_host_array(result.phi_hits, dtype=np.float64)
+    phi_hit_counts = _jax_trace_host_array(result.phi_hits_count, dtype=np.int64)
+    phi_hit_counts = phi_hit_counts.reshape(-1)
 
     res_tys: list[np.ndarray] = []
     res_phi_hits: list[np.ndarray] = []
@@ -75,9 +83,9 @@ def _jax_trace_lost(status: int, t_final: float, tmax: float) -> bool:
 
 def _batched_trace_status_arrays(result) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return (
-        np.asarray(result.status, dtype=np.int32).reshape(-1),
-        np.asarray(result.t_final, dtype=np.float64).reshape(-1),
-        np.asarray(result.steps_taken, dtype=np.int32).reshape(-1),
+        _jax_trace_host_array(result.status, dtype=np.int32).reshape(-1),
+        _jax_trace_host_array(result.t_final, dtype=np.float64).reshape(-1),
+        _jax_trace_host_array(result.steps_taken, dtype=np.int32).reshape(-1),
     )
 
 
@@ -223,6 +231,16 @@ def _require_jax_field_B(field: MagneticField) -> Callable[[object], object]:
     return field_fn
 
 
+def _resolve_jax_field_B(
+    field: MagneticField,
+) -> tuple[Callable[..., object], object | None]:
+    state_fn = getattr(field, "jax_B_at_state", None)
+    state_getter = getattr(field, "jax_tracing_state", None)
+    if callable(state_fn) and callable(state_getter):
+        return state_fn, state_getter()
+    return _require_jax_field_B(field), None
+
+
 def _require_jax_field_B_dB(
     field: MagneticField,
 ) -> Callable[[object], tuple[object, object]]:
@@ -248,6 +266,30 @@ def _require_jax_field_B_dB(
         "*JAX field class such as ToroidalFieldJAX or InterpolatedFieldJAX, "
         "or run this tracing call on the CPU backend."
     )
+
+
+def _resolve_jax_field_B_dB(
+    field: MagneticField,
+) -> tuple[Callable[..., tuple[object, object]], object | None]:
+    state_fn = getattr(field, "jax_B_dB_at_state", None)
+    state_getter = getattr(field, "jax_tracing_state", None)
+    if callable(state_fn) and callable(state_getter):
+        return state_fn, state_getter()
+    state_fn = getattr(field, "jax_B_GradAbsB_at_state", None)
+    if callable(state_fn) and callable(state_getter):
+
+        def _state_field_fn(state, point):
+            import jax.numpy as jnp
+
+            B_raw, grad_abs_raw = state_fn(state, point)
+            B = jnp.asarray(B_raw, dtype=jnp.float64).reshape((3,))
+            grad_abs_B = jnp.asarray(grad_abs_raw, dtype=jnp.float64).reshape((3,))
+            abs_B = jnp.linalg.norm(B)
+            dB_by_dX = grad_abs_B[:, None] * B[None, :] / abs_B
+            return B, dB_by_dX
+
+        return _state_field_fn, state_getter()
+    return _require_jax_field_B_dB(field), None
 
 
 def compute_gc_radius(m, vperp, q, absb):
@@ -556,7 +598,7 @@ def _trace_particles_boozer_jax(
 
     jax_stopping_criteria = _translate_stopping_criteria_to_jax(stopping_criteria)
     if len(zetas) > 0:
-        zetas_arr = jnp.asarray(list(zetas), dtype=jnp.float64)
+        zetas_arr = _as_jax_float64(np.asarray(list(zetas), dtype=np.float64))
     else:
         zetas_arr = None
 
@@ -572,8 +614,10 @@ def _trace_particles_boozer_jax(
     local_speed_par = np.asarray(speed_par[first:last], dtype=np.float64)
     if local_stz.shape[0] > 0:
         field.set_points(local_stz)
-        abs_B_initial = np.asarray(field.modB(), dtype=np.float64).reshape(-1)
-        G0 = np.asarray(field.G(), dtype=np.float64).reshape(-1)
+        abs_B_initial = _jax_trace_host_array(field.modB(), dtype=np.float64).reshape(
+            -1
+        )
+        G0 = _jax_trace_host_array(field.G(), dtype=np.float64).reshape(-1)
         mus = _magnetic_moments(float(speed_total), local_speed_par, abs_B_initial)
         dtmaxs = _boozer_particle_dtmaxs(G0, abs_B_initial, float(speed_total))
         spec = GuidingCenterTracingSpec(
@@ -585,11 +629,9 @@ def _trace_particles_boozer_jax(
         )
         result = trace_guiding_centers_boozer_batched(
             spec,
-            jnp.asarray(
-                np.column_stack([local_stz, local_speed_par]), dtype=jnp.float64
-            ),
-            jnp.asarray(dtmaxs, dtype=jnp.float64),
-            jnp.asarray(mus, dtype=jnp.float64),
+            _as_jax_float64(np.column_stack([local_stz, local_speed_par])),
+            _as_jax_float64(dtmaxs),
+            _as_jax_float64(mus),
             field,
             m=float(mass),
             q=float(charge),
@@ -885,18 +927,17 @@ def _trace_particles_jax_guiding_center_vacuum(
             "to the CPU backend."
         )
     import jax
-    import jax.numpy as jnp
 
     from ..jax_core.tracing import (
         GuidingCenterTracingSpec,
         trace_guiding_centers_batched,
     )
 
-    field_fn = _require_jax_field_B_dB(field)
+    field_fn, field_state = _resolve_jax_field_B_dB(field)
 
     jax_stopping_criteria = _translate_stopping_criteria_to_jax(stopping_criteria)
     if len(phis) > 0:
-        phis_arr = jnp.asarray(list(phis), dtype=jnp.float64)
+        phis_arr = _as_jax_float64(np.asarray(list(phis), dtype=np.float64))
     else:
         phis_arr = None
 
@@ -918,9 +959,16 @@ def _trace_particles_jax_guiding_center_vacuum(
     local_xyz = np.asarray(xyz_inits[first:last], dtype=np.float64)
     local_speed_par = np.asarray(speed_par[first:last], dtype=np.float64)
     if local_xyz.shape[0] > 0:
-        local_xyz_device = jnp.asarray(local_xyz, dtype=jnp.float64)
-        B_initial, _ = jax.vmap(field_fn)(local_xyz_device)
-        abs_B_initial = np.linalg.norm(np.asarray(B_initial, dtype=np.float64), axis=1)
+        local_xyz_device = _as_jax_float64(local_xyz)
+        if field_state is None:
+            B_initial, _ = jax.vmap(field_fn)(local_xyz_device)
+        else:
+            B_initial, _ = jax.vmap(lambda point: field_fn(field_state, point))(
+                local_xyz_device
+            )
+        abs_B_initial = np.linalg.norm(
+            _jax_trace_host_array(B_initial, dtype=np.float64), axis=1
+        )
         mus = _magnetic_moments(float(speed_total), local_speed_par, abs_B_initial)
         dtmaxs = _cartesian_particle_dtmaxs(local_xyz, float(speed_total))
         spec = GuidingCenterTracingSpec(
@@ -933,14 +981,15 @@ def _trace_particles_jax_guiding_center_vacuum(
         y0s = np.column_stack([local_xyz, local_speed_par])
         result = trace_guiding_centers_batched(
             spec,
-            jnp.asarray(y0s, dtype=jnp.float64),
-            jnp.asarray(dtmaxs, dtype=jnp.float64),
-            jnp.asarray(mus, dtype=jnp.float64),
+            _as_jax_float64(y0s),
+            _as_jax_float64(dtmaxs),
+            _as_jax_float64(mus),
             field_fn,
             m=float(mass),
             q=float(charge),
             phis=phis_arr,
             stopping_criteria=jax_stopping_criteria,
+            magnetic_field_state=field_state,
         )
         local_res_tys, local_res_phi_hits = _batched_jax_trace_payloads(
             result,
@@ -1024,10 +1073,10 @@ def _trace_particles_jax_fullorbit_vacuum(
         trace_fullorbits_batched,
     )
 
-    field_fn = _require_jax_field_B(field)
+    field_fn, field_state = _resolve_jax_field_B(field)
     jax_stopping_criteria = _translate_stopping_criteria_to_jax(stopping_criteria)
     if len(phis) > 0:
-        phis_arr = jnp.asarray(list(phis), dtype=jnp.float64)
+        phis_arr = _as_jax_float64(np.asarray(list(phis), dtype=np.float64))
     else:
         phis_arr = None
 
@@ -1075,13 +1124,14 @@ def _trace_particles_jax_fullorbit_vacuum(
         )
         result = trace_fullorbits_batched(
             spec,
-            jnp.asarray(np.column_stack([xyz_inits_full, v_inits]), dtype=jnp.float64),
-            jnp.asarray(dtmaxs, dtype=jnp.float64),
+            _as_jax_float64(np.column_stack([xyz_inits_full, v_inits])),
+            _as_jax_float64(dtmaxs),
             field_fn,
             m=float(mass),
             q=float(charge),
             phis=phis_arr,
             stopping_criteria=jax_stopping_criteria,
+            magnetic_field_state=field_state,
         )
         local_res_tys, local_res_phi_hits = _batched_jax_trace_payloads(
             result,
@@ -1764,11 +1814,11 @@ def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, c
 
     from ..jax_core.tracing import FieldlineTracingSpec, trace_fieldlines_batched
 
-    field_fn = _require_jax_field_B(field)
+    field_fn, field_state = _resolve_jax_field_B(field)
 
     jax_stopping_criteria = _translate_stopping_criteria_to_jax(stopping_criteria)
     if len(phis) > 0:
-        phis_arr = jnp.asarray(list(phis), dtype=jnp.float64)
+        phis_arr = _as_jax_float64(np.asarray(list(phis), dtype=np.float64))
     else:
         phis_arr = None
 
@@ -1798,9 +1848,16 @@ def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, c
         axis=1,
     )
     if local_y0.shape[0] > 0:
-        local_y0_device = jnp.asarray(local_y0, dtype=jnp.float64)
-        B_initial = jax.vmap(field_fn)(local_y0_device)
-        abs_B_initial = np.linalg.norm(np.asarray(B_initial, dtype=np.float64), axis=1)
+        local_y0_device = _as_jax_float64(local_y0)
+        if field_state is None:
+            B_initial = jax.vmap(field_fn)(local_y0_device)
+        else:
+            B_initial = jax.vmap(lambda point: field_fn(field_state, point))(
+                local_y0_device
+            )
+        abs_B_initial = np.linalg.norm(
+            _jax_trace_host_array(B_initial, dtype=np.float64), axis=1
+        )
         dtmaxs = _fieldline_dtmaxs(local_y0, abs_B_initial)
         spec = FieldlineTracingSpec(
             tmax=float(tmax),
@@ -1812,10 +1869,11 @@ def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, c
         result = trace_fieldlines_batched(
             spec,
             local_y0_device,
-            jnp.asarray(dtmaxs, dtype=jnp.float64),
+            _as_jax_float64(dtmaxs),
             field_fn,
             phis=phis_arr,
             stopping_criteria=jax_stopping_criteria,
+            magnetic_field_state=field_state,
         )
         local_res_tys, local_res_phi_hits = _batched_jax_trace_payloads(
             result,

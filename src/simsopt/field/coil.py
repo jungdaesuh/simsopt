@@ -2,7 +2,7 @@ from math import pi
 import numpy as np
 import jax.numpy as jnp
 
-from simsopt._core.optimizable import Optimizable
+from simsopt._core.optimizable import Optimizable, _is_runtime_jax_value
 from simsopt._core.derivative import Derivative
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.curve import RotatedCurve
@@ -191,6 +191,8 @@ class RegularizedCoil(Coil):
         B_mutual = mutual_field.B()
         mutualforce = np.cross(self.current.get_value() * tangent, B_mutual)
         selfforce = self.self_force()
+        if _is_runtime_jax_value(selfforce):
+            mutualforce = as_jax_float64(mutualforce)
         return selfforce + mutualforce
 
     def net_force(self, source_coils):

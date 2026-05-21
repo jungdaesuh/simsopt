@@ -16,6 +16,7 @@ methods from:
 from scipy import constants
 import numpy as np
 import jax.numpy as jnp
+from .._core.optimizable import _is_runtime_jax_value
 from ..geo.jit import jit
 
 Biot_savart_prefactor = constants.mu_0 / (4 * np.pi)
@@ -74,7 +75,11 @@ def regularization_circ(a):
     Returns:
         float: The regularization parameter.
     """
-    return a**2 / jnp.sqrt(jnp.e)
+    if _is_runtime_jax_value(a):
+        zero = jnp.sum(a - a)
+        sqrt_e = jnp.sqrt(jnp.exp(jnp.exp(zero)))
+        return a**2 / sqrt_e
+    return np.asarray(a) ** 2 / np.sqrt(np.e)
 
 
 def regularization_rect(a, b):
@@ -145,5 +150,3 @@ def B_regularized_pure(gamma, gammadash, gammadashdash, quadpoints, current, reg
         0.5 * cos_fac / (cos_fac * jnp.sum(rc_prime * rc_prime, axis=1)[:, None] + regularization)**1.5)[:, :, None]
     integral_term = dphi * jnp.sum(first_term + second_term, 1)
     return current * Biot_savart_prefactor * (analytic_term + integral_term)
-
-
