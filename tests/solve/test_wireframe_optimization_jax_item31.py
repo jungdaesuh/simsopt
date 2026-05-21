@@ -365,6 +365,34 @@ def test_regularized_constrained_least_squares_handles_no_constraints() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("eps_factor", "retained"),
+    [
+        (1.0, False),
+        (2.0, True),
+        (4.0, True),
+    ],
+)
+def test_regularized_constrained_least_squares_uses_cpu_rank_cutoff(
+    eps_factor: float, retained: bool
+) -> None:
+    n = 16
+    eps = np.finfo(np.float64).eps
+    lhs_singular_values = np.ones((n,), dtype=np.float64)
+    lhs_singular_values[-1] = eps_factor * eps
+    A = np.diag(np.sqrt(lhs_singular_values))
+    b = np.zeros((n, 1), dtype=np.float64)
+    b[-1, 0] = 1.0 / np.sqrt(lhs_singular_values[-1])
+    C = np.zeros((0, n), dtype=np.float64)
+    d = np.zeros((0, 1), dtype=np.float64)
+
+    expected = regularized_constrained_least_squares(A, b, 0.0, C, d)
+    actual = regularized_constrained_least_squares_jax(A, b, 0.0, C, d)
+
+    assert bool(expected[-1, 0] != 0.0) == retained
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=_RTOL, atol=_ATOL)
+
+
 def test_regularized_constrained_least_squares_exact_rank_deficient_matches_cpu() -> (
     None
 ):

@@ -2,7 +2,7 @@
 
 Date: 2026-05-19
 
-Status: Implementation in progress. Waves 1-5 have code changes and focused local proof in the current tree. The 2026-05-20 review fixed a strict transfer-guard Boozer decision-vector regression and reran the feasible CPU/MPS smoke slice. Later 2026-05-20 Wave 6 passes fixed the `surface_area_volume_simple` strict transfer-guard CPU/MPS path, recorded the full non-banana MPS all-supported failure artifact, and reran banana CPU/MPS float32 `scipy-jax` maxiter=7. Those artifacts were recorded at git head `a5900aa415e6f9323a5fa1180ae02b5e0d1945fb`; current HEAD is `83afc0b03c094a9e0138142531b59cfcfeab3843`, so they are diagnostic evidence but must be rerun before current-HEAD acceptance. Both banana float32 runs fail closed on all-NaN target-lane gradients and write no accepted `results.json`. Wave 8 adjacent-regression cleanup is partially implemented; Wave 7 CPU/CUDA production parity and final Wave 8 signoff remain pending.
+Status: Implementation in progress. Waves 1-5 have code changes and focused local proof in the current tree. The 2026-05-20 review fixed a strict transfer-guard Boozer decision-vector regression and reran the feasible CPU/MPS smoke slice. Later 2026-05-20 Wave 6 passes fixed the `surface_area_volume_simple` strict transfer-guard CPU/MPS path, recorded the full non-banana MPS all-supported failure artifact, and reran banana CPU/MPS float32 `scipy-jax` maxiter=7. Those artifacts were recorded at git head `a5900aa415e6f9323a5fa1180ae02b5e0d1945fb`; current HEAD is `851998ea291dab40c4fe333a2160f808a86a2923`, so they are diagnostic evidence but must be rerun before current-HEAD acceptance. Both banana float32 runs fail closed on all-NaN target-lane gradients and write no accepted `results.json`. Wave 8 adjacent-regression cleanup is partially implemented; Wave 7 CPU/CUDA production parity and final Wave 8 signoff remain pending.
 
 ## Review Evidence - 2026-05-20
 
@@ -90,7 +90,7 @@ The plan treats MPS as a float32 smoke lane unless and until a separate FP32 pro
 - Single-stage accepted artifact writes now route through `write_single_stage_final_artifact` and `write_single_stage_results_json` (`single_stage_banana_example.py:11227-11252`), so final-result finiteness is checked independently of the old target-lane metrics guard.
 - MPS policy is float32 smoke by design (the `jax_mps_smoke` entry in `_MODE_POLICY_DEFAULTS` in `simsopt.backend.runtime`): `runtime_dtype=float32`, `requires_x64=False`, `tolerance_tier=float32_smoke`, `default_optimizer_backend="scipy"`.
 - The backend facade skew is closed in the current tree: the shadowed legacy `src/simsopt/backend.py` shim is deleted, and the package facade in `src/simsopt/backend/__init__.py` is the only public backend facade.
-- Float32-smoke-critical dtype leaks are closed in the current tree: `SquaredFluxJAX._gather_field_free_dofs` now uses `runtime_jnp_dtype()` (`objectives/fluxobjective_jax.py:373-375`), `QfmSurfaceJAX._coil_set_spec` uses `runtime_jnp_dtype()` (`geo/qfmsurface_jax.py:73-76`), and curve geometry helper names no longer imply float64 (`jax_core/curve_geometry.py:60-84`). Off-critical-path float64 leaks (bootstrap, VMEC, PM/wireframe workflows) are still tracked in Wave 8.
+- Float32-smoke-critical dtype leaks are closed in the current tree: `SquaredFluxJAX._gather_field_free_dofs` now uses `runtime_jnp_dtype()` (`objectives/fluxobjective_jax.py:373-375`), `QfmSurfaceJAX._coil_set_spec` uses `runtime_jnp_dtype()` (`geo/qfmsurface_jax.py:73-76`), and curve geometry helper names no longer imply float64 (`jax_core/curve_geometry.py:60-84`). PM/wireframe fixed-state payloads, core kernels, workflows, and solve-helper runtime arrays now use `as_runtime_array` names where runtime policy owns the dtype and have float32-smoke/parity dtype coverage in `tests/test_runtime_dtype_policy.py`. Remaining off-critical-path float64 leaks (bootstrap, VMEC, tracing, magnetic-axis, and MHD frozen-state casts) are still tracked in Wave 8.
 
 ## Official Documentation Constraints
 
@@ -250,9 +250,9 @@ Acceptance criteria:
 
 - [x] Float32 smoke lanes do not upcast through helper or entrypoint paths on the smoke critical path.
 - [x] Float64 production lanes still construct float64 arrays.
-- [ ] Renamed helpers compile under the same call sites; no caller change needed beyond the rename.
+- [x] Renamed helpers compile under the same call sites; no caller change needed beyond the rename.
 
-Out of scope for this wave (tracked in Wave 8): bootstrap JAX profile derivatives, VMEC fieldline diagnostics, VMEC geometry helpers, PM workflow paths, wireframe workflow paths, MHD frozen-state casts. None of these are imported by the banana single-stage example or the non-banana CPU/MPS smoke harnesses (verified by grep against `tests/test_jax_mps_smoke.py`, `tests/test_mps_smoke_dtype.py`, and `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`).
+Out of scope for this wave (tracked in Wave 8): bootstrap JAX profile derivatives, VMEC fieldline diagnostics, VMEC geometry helpers, tracing, magnetic-axis, and MHD frozen-state casts. None of these are imported by the banana single-stage example or the non-banana CPU/MPS smoke harnesses (verified by grep against `tests/test_jax_mps_smoke.py`, `tests/test_mps_smoke_dtype.py`, and `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`).
 
 ### Wave 4 - API Boundary Cleanup
 
@@ -321,7 +321,7 @@ Run order:
 - [x] Non-banana parity harness with `SIMSOPT_BACKEND_MODE=jax_mps_smoke` executed. Narrow `surface_area_volume_simple` passes; full `all-supported` run exits `1` with `.artifacts/jax_mps_float32_20260520/non_banana_mps_all_supported_after_directional_guard_fix.json` (`1` pass, `26` fail). Remaining failures block acceptance.
 - [x] Banana single-stage CPU float32 smoke, maxiter=7 executed; failed closed on all-NaN target-lane gradient and wrote no accepted `results.json`.
 - [x] Banana single-stage MPS float32 smoke, maxiter=7 executed; failed closed on all-NaN target-lane gradient and wrote no accepted `results.json`.
-- [ ] Rerun the full Wave 6 smoke set on current HEAD (`83afc0b03c094a9e0138142531b59cfcfeab3843`). The existing Wave 6 artifacts are from git head `a5900aa415e6f9323a5fa1180ae02b5e0d1945fb` and predate the typed `solve.jax` driver commits plus the semantic traceable-runner cache fix.
+- [ ] Rerun the full Wave 6 smoke set on current HEAD (`851998ea291dab40c4fe333a2160f808a86a2923`). The existing Wave 6 artifacts are from git head `a5900aa415e6f9323a5fa1180ae02b5e0d1945fb` and predate the typed `solve.jax` driver commits plus the semantic traceable-runner cache fix.
 
 Artifact requirements:
 
@@ -381,15 +381,15 @@ Implementation tasks (adjacent regressions):
 - [x] `_normalize_scipy_result` status 6 is documented as repo-local in the constant comment; SciPy's low-level L-BFGS-B `warnflag` contract remains 0/1/2.
 - [x] Float32 smoke harness: gradient entries tagged `diagnostic_only` no longer make the fixture verdict fail. SSOT: `validation_ladder_contract.py` marks the tier as `production_parity=False` / `gradient_diagnostic_only=True`, and `non_banana_example_cpp_jax_cpu_parity.py` excludes diagnostic-only gradient failures from verdict-gating failures.
 - [x] Traceable runner cache: bare callables stay identity-owned, explicit semantic tokens own intentional reuse, and Boozer traceable closures mark semantic tokens. Coverage: `tests/geo/test_lm_damping_parity.py::test_traceable_runner_cache_uses_identity_for_equal_callable_objects`, `tests/geo/test_lm_damping_parity.py::test_traceable_runner_cache_uses_explicit_semantic_token`, and the focused `traceable_runner_cache` pytest shard.
-- [ ] Tautology tests: replace change-pinning tests with CPU, analytic, or committed-fixture oracle tests where the behavior is contract-bearing. Current QFM augmented-Lagrangian tests now include upstream exact/KKT oracle coverage (`tests/geo/test_qfmsurface_jax.py:300-430`); the remaining concrete candidate is the high-`epsilon_RS` forced scan-stop test (`tests/solve/test_permanent_magnet_optimization_jax_item28.py:545-560`).
+- [x] Tautology tests: replace change-pinning tests with CPU, analytic, or committed-fixture oracle tests where the behavior is contract-bearing. Current QFM augmented-Lagrangian tests now include upstream exact/KKT oracle coverage (`tests/geo/test_qfmsurface_jax.py:300-430`), and the high-`epsilon_RS` forced scan-stop test now verifies CPU early-stop parity plus the fixed-shape JAX scan tail contract (`tests/solve/test_permanent_magnet_optimization_jax_item28.py`).
 
 Implementation tasks (off-critical-path dtype hygiene; deferred from Wave 3):
 
 - [ ] Replace hardcoded float64 in bootstrap JAX profile derivative paths (`src/simsopt/mhd/bootstrap_jax.py:144, 174`).
 - [ ] Replace hardcoded float64 in VMEC fieldline diagnostics (`src/simsopt/mhd/vmec_diagnostics_jax.py:60, 61, 64, 74`).
 - [ ] Replace hardcoded float64 in VMEC geometry helpers (`src/simsopt/jax_core/vmec_geometry.py:289`).
-- [ ] Audit and replace runtime-float64 helper usage in PM workflow paths where the value should follow runtime dtype. Current grep shows `_as_jax_float64` call sites in `src/simsopt/jax_core/pm_workflow.py` around lines `291-1092`; classify physics-required host precision separately from runtime-policy arrays before editing.
-- [ ] Audit and replace runtime-float64 helper usage in wireframe workflow paths where the value should follow runtime dtype. Current grep shows `_as_jax_float64` call sites in `src/simsopt/jax_core/wireframe_workflow.py` around lines `546-1118`; classify physics-required host precision separately from runtime-policy arrays before editing.
+- [x] Audit and replace runtime-float64 helper usage in PM workflow paths where the value should follow runtime dtype. `src/simsopt/jax_core/pm_optimization.py`, `src/simsopt/jax_core/pm_workflow.py`, `src/simsopt/geo/permanent_magnet_grid_jax.py`, and `src/simsopt/solve/permanent_magnet_optimization_jax.py` now use `as_runtime_array` names for runtime-policy arrays, and scalar helpers use the reference dtype directly.
+- [x] Audit and replace runtime-float64 helper usage in wireframe workflow paths where the value should follow runtime dtype. `src/simsopt/jax_core/wireframe.py`, `src/simsopt/jax_core/wireframe_workflow.py`, `src/simsopt/field/wireframefield_jax.py`, and `src/simsopt/solve/wireframe_optimization_jax.py` now use `as_runtime_array` names for runtime-policy arrays; solve-wrapper host staging and surface-matrix materialization use `runtime_host_dtype()`.
 - [ ] Audit tracing, magnetic-axis, and MHD frozen-state float64 casts before claiming float32 end-to-end coverage outside the banana smoke perimeter.
 
 Cleanup tasks:
@@ -425,7 +425,7 @@ Acceptance criteria:
 - [ ] P2: Rerun CUDA production parity on Perlmutter.
 - [x] P2: Clean root-level debug artifacts by gitignoring the confirmed root-local diagnostics.
 - [x] P2: Rename stale `*_float64`-suffixed helpers in `curve_geometry.py` to runtime-dtype names (`jax_core/curve_geometry.py:60-84`).
-- [ ] P2: Off-critical-path dtype hygiene (bootstrap, VMEC, PM, wireframe) per Wave 8.
+- [ ] P2: Off-critical-path dtype hygiene (bootstrap, VMEC, tracing, magnetic-axis, and MHD frozen-state casts) per Wave 8.
 
 ## Review Checklist
 
@@ -438,9 +438,9 @@ Acceptance criteria:
 - [ ] No performance result is used to waive correctness.
 - [ ] No dead facade module remains (`backend.py` shim deleted).
 - [ ] Public imports use public facades.
-- [ ] Dtype follows backend runtime policy on the float32 smoke critical path.
+- [x] Dtype follows backend runtime policy on the float32 smoke critical path.
 - [ ] Transfer guard is strict outside explicit materialization boundaries, using `jax_transfer_guard_device_to_host` rather than the broad guard.
-- [ ] Tests include both float32 smoke and float64 parity paths.
+- [x] Tests include both float32 smoke and float64 parity paths.
 - [ ] Solver changes are validated against original residuals, not only transformed systems.
 - [ ] Operator-only and packed-factor solves report the same status object shape.
 - [ ] Physics outputs are checked at fixed state before endpoint interpretation.

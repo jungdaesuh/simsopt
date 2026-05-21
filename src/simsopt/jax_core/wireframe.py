@@ -86,7 +86,7 @@ import jax.numpy as jnp
 
 from .._host_array_contracts import require_nonnegative_int32_indices
 from ._math_utils import (
-    as_jax_float64 as _as_jax_float64,
+    as_runtime_array as _as_runtime_array,
     as_jax_int32 as _as_jax_int32,
 )
 
@@ -109,7 +109,7 @@ def _component(array: jax.Array, index: int) -> jax.Array:
 
 
 def _as_points(points: object) -> jax.Array:
-    points_jax = _as_jax_float64(points)
+    points_jax = _as_runtime_array(points)
     if points_jax.ndim != 2 or points_jax.shape[-1] != 3:
         raise ValueError(
             f"points must have shape (n_points, 3); got {points_jax.shape}."
@@ -133,7 +133,7 @@ def _gather_segment_nodes(
     nodes: object,
     segments: object,
 ) -> tuple[jax.Array, jax.Array]:
-    nodes_jax = _as_jax_float64(nodes)
+    nodes_jax = _as_runtime_array(nodes)
     segments_jax = _as_segments(segments)
     node0 = jnp.take(nodes_jax, segments_jax[:, 0], axis=1)
     node1 = jnp.take(nodes_jax, segments_jax[:, 1], axis=1)
@@ -163,8 +163,8 @@ def wireframe_segment_B(
     """Magnetic field from one straight wire segment with unit current."""
     return _wireframe_segment_B_from_arrays(
         _as_points(points),
-        _as_jax_float64(node0),
-        _as_jax_float64(node1),
+        _as_runtime_array(node0),
+        _as_runtime_array(node1),
     )
 
 
@@ -207,8 +207,8 @@ def wireframe_segment_B_and_dB_by_dX(
     """
     return _wireframe_segment_B_and_dB_by_dX_from_arrays(
         _as_points(points),
-        _as_jax_float64(node0),
-        _as_jax_float64(node1),
+        _as_runtime_array(node0),
+        _as_runtime_array(node1),
     )
 
 
@@ -286,7 +286,7 @@ def wireframe_segment_B_contributions(
 ) -> jax.Array:
     """Return unit-current ``B`` contributions as ``(n_segments, n_points, 3)``."""
     points_jax = _as_points(points)
-    seg_signs_jax = _as_jax_float64(seg_signs).reshape((-1,))
+    seg_signs_jax = _as_runtime_array(seg_signs).reshape((-1,))
     node0, node1 = _gather_segment_nodes(nodes, segments)
 
     def segment_B(node0_by_segment: jax.Array, node1_by_segment: jax.Array):
@@ -315,7 +315,7 @@ def wireframe_segment_dB_by_dX_contributions(
         the spatial derivative direction.
     """
     points_jax = _as_points(points)
-    seg_signs_jax = _as_jax_float64(seg_signs).reshape((-1,))
+    seg_signs_jax = _as_runtime_array(seg_signs).reshape((-1,))
     node0, node1 = _gather_segment_nodes(nodes, segments)
 
     def segment_dB(node0_by_segment: jax.Array, node1_by_segment: jax.Array):
@@ -487,10 +487,10 @@ def _coerce_inputs(
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     return (
         _as_points(points),
-        _as_jax_float64(nodes),
+        _as_runtime_array(nodes),
         _as_segments(segments),
-        _as_jax_float64(seg_signs).reshape((-1,)),
-        _as_jax_float64(currents).reshape((-1,)),
+        _as_runtime_array(seg_signs).reshape((-1,)),
+        _as_runtime_array(currents).reshape((-1,)),
     )
 
 

@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..geo.permanent_magnet_grid_jax import PermanentMagnetGridJAX
-from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
+from ..jax_core._math_utils import as_runtime_array as _as_runtime_array
 from ..jax_core.pm_optimization import (
     GPMOArbVecBacktrackingSpec,
     GPMOArbVecSpec,
@@ -47,7 +47,7 @@ __all__ = [
 
 
 def _moments_as_matrix(name: str, value: object, ndipoles: int) -> jax.Array:
-    moments = _as_jax_float64(value)
+    moments = _as_runtime_array(value)
     if moments.shape == (ndipoles * 3,):
         return jnp.reshape(moments, (ndipoles, 3))
     if moments.shape != (ndipoles, 3):
@@ -60,7 +60,7 @@ def _flatten_like(reference: jax.Array, moments: jax.Array) -> jax.Array:
 
 
 def _scalar_like(value: float, reference: jax.Array) -> jax.Array:
-    return _as_jax_float64(np.float64(value)).astype(reference.dtype)
+    return jnp.asarray(value, dtype=reference.dtype)
 
 
 def _normalized_moment_magnitudes(matrix: jax.Array, m_maxima: jax.Array) -> jax.Array:
@@ -311,8 +311,8 @@ jax.tree_util.register_dataclass(
 def projection_L2_balls_jax(x: object, mmax: object) -> jax.Array:
     """Project dipole moments onto per-dipole L2 balls, matching CPU shape."""
 
-    moments = _as_jax_float64(x)
-    m_maxima = _as_jax_float64(mmax)
+    moments = _as_runtime_array(x)
+    m_maxima = _as_runtime_array(mmax)
     projected = projection_l2_balls(
         jnp.reshape(moments, (m_maxima.shape[0], 3)), m_maxima
     )
@@ -322,8 +322,8 @@ def projection_L2_balls_jax(x: object, mmax: object) -> jax.Array:
 def prox_l0_jax(m: object, mmax: object, reg_l0: float, nu: float) -> jax.Array:
     """JAX port of the CPU ``prox_l0`` thresholding rule."""
 
-    moments = _as_jax_float64(m)
-    m_maxima = _as_jax_float64(mmax)
+    moments = _as_runtime_array(m)
+    m_maxima = _as_runtime_array(mmax)
     matrix = jnp.reshape(moments, (m_maxima.shape[0], 3))
     normalized = _normalized_moment_magnitudes(matrix, m_maxima)
     threshold = _scalar_like(2.0 * reg_l0 * nu, normalized)
@@ -334,8 +334,8 @@ def prox_l0_jax(m: object, mmax: object, reg_l0: float, nu: float) -> jax.Array:
 def prox_l1_jax(m: object, mmax: object, reg_l1: float, nu: float) -> jax.Array:
     """JAX port of the CPU ``prox_l1`` soft-thresholding rule."""
 
-    moments = _as_jax_float64(m)
-    m_maxima = _as_jax_float64(mmax)
+    moments = _as_runtime_array(m)
+    m_maxima = _as_runtime_array(mmax)
     matrix = jnp.reshape(moments, (m_maxima.shape[0], 3))
     normalized = _normalized_moment_magnitudes(matrix, m_maxima)
     threshold = _scalar_like(reg_l1 * nu, normalized)
@@ -527,7 +527,7 @@ def _gpmo_pol_vectors(
     grid: PermanentMagnetGridJAX, pol_vectors: object | None
 ) -> jax.Array:
     if pol_vectors is not None:
-        return _as_jax_float64(pol_vectors)
+        return _as_runtime_array(pol_vectors)
     if grid.pol_vectors is None:
         raise ValueError("GPMO_ArbVec_jax requires pol_vectors.")
     return grid.pol_vectors
@@ -658,7 +658,7 @@ def _mwpgp_spec(
     if alpha is None:
         alpha_value = _scalar_like(2.0 * (1.0 - 1.0e-5), grid.A_obj) / hessian_scale
     else:
-        alpha_value = _as_jax_float64(alpha)
+        alpha_value = _as_runtime_array(alpha)
         if _has_tracer_leaf((alpha_value, hessian_scale)):
             raise ValueError(
                 "Explicit alpha validation requires an eager host-boundary call."
@@ -719,7 +719,7 @@ def _last_error(
     residual_history: jax.Array, dtype: jnp.dtype, max_iter: int
 ) -> jax.Array:
     if max_iter == 0:
-        return _as_jax_float64(0.0).astype(dtype)
+        return jnp.asarray(0.0, dtype=dtype)
     return residual_history[-1]
 
 

@@ -8,7 +8,7 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 
-from ._math_utils import as_jax_float64 as _as_jax_float64
+from ._math_utils import as_runtime_array as _as_runtime_array
 from ._math_utils import runtime_init_array as _runtime_init_array
 from ._math_utils import runtime_init_scalar as _runtime_init_scalar
 from .pm_optimization import (
@@ -288,8 +288,8 @@ def pm_gpmo_baseline_initial_state(
 ) -> PMGPMOLiveState:
     """Create an empty baseline GPMO live state with fixed history capacity."""
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
     return PMGPMOLiveState(
         x=_runtime_init_array((ndipoles, 3), 0, A_arr.dtype),
         residual=-b_arr,
@@ -312,8 +312,8 @@ def pm_gpmo_multi_initial_state(
 ) -> PMGPMOMultiLiveState:
     """Create an empty multi-neighbour GPMO live state."""
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
     ndipoles = int(spec.m_maxima.shape[0])
     return PMGPMOMultiLiveState(
         x=_runtime_init_array((ndipoles, 3), 0, A_arr.dtype),
@@ -340,8 +340,8 @@ def pm_gpmo_arbvec_initial_state(
 ) -> PMGPMOArbVecLiveState:
     """Create an empty ArbVec GPMO live state."""
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
     ndipoles = int(spec.m_maxima.shape[0])
     return PMGPMOArbVecLiveState(
         x=_runtime_init_array((ndipoles, 3), 0, A_arr.dtype),
@@ -365,8 +365,8 @@ def pm_gpmo_backtracking_initial_state(
 ) -> PMGPMOBacktrackingLiveState:
     """Create an empty backtracking GPMO live state."""
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
     ndipoles = int(spec.m_maxima.shape[0])
     return PMGPMOBacktrackingLiveState(
         x=_runtime_init_array((ndipoles, 3), 0, A_arr.dtype),
@@ -399,9 +399,9 @@ def pm_gpmo_arbvec_backtracking_initial_state(
 ) -> PMGPMOArbVecBacktrackingLiveState:
     """Create an ArbVec-backtracking GPMO live state."""
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
-    pol_vectors = _as_jax_float64(spec.pol_vectors)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
+    pol_vectors = _as_runtime_array(spec.pol_vectors)
     ndipoles = int(spec.m_maxima.shape[0])
     _validate_gpmo_arbvec_backtracking_static_args(
         history_capacity,
@@ -415,7 +415,7 @@ def pm_gpmo_arbvec_backtracking_initial_state(
     if x_init is None:
         x_init_arr = _runtime_init_array((ndipoles, 3), 0, A_arr.dtype)
     else:
-        x_init_arr = _as_jax_float64(x_init)
+        x_init_arr = _as_runtime_array(x_init)
     (
         x,
         residual,
@@ -618,7 +618,7 @@ def _validate_arbvec_live_loop_capacity(
     _validate_gpmo_arbvec_static_args(
         final_step,
         ndipoles,
-        _as_jax_float64(spec.pol_vectors),
+        _as_runtime_array(spec.pol_vectors),
     )
 
 
@@ -735,7 +735,7 @@ def _validate_arbvec_backtracking_live_loop_capacity(
     _validate_gpmo_arbvec_backtracking_static_args(
         final_step,
         ndipoles,
-        _as_jax_float64(spec.pol_vectors),
+        _as_runtime_array(spec.pol_vectors),
         spec.Nadjacent,
         spec.backtracking,
         spec.max_nMagnets,
@@ -755,11 +755,11 @@ def pm_gpmo_live_loop_jax(
     """Advance baseline GPMO state through a fixed-length device-side scan."""
 
     _validate_baseline_live_loop_capacity(state, spec, int(max_steps))
-    A_arr = _as_jax_float64(A_scaled)
+    A_arr = _as_runtime_array(A_scaled)
     scan_spec = replace(
         spec,
-        m_maxima=_as_jax_float64(spec.m_maxima),
-        reg_l2=_as_jax_float64(spec.reg_l2),
+        m_maxima=_as_runtime_array(spec.m_maxima),
+        reg_l2=_as_runtime_array(spec.reg_l2),
     )
 
     def _active_step(current: PMGPMOLiveState) -> PMGPMOLiveState:
@@ -815,12 +815,12 @@ def pm_gpmo_arbvec_live_loop_jax(
     """Advance ArbVec GPMO state through a fixed-length scan."""
 
     _validate_arbvec_live_loop_capacity(state, spec, int(max_steps))
-    A_arr = _as_jax_float64(A_scaled)
+    A_arr = _as_runtime_array(A_scaled)
     scan_spec = replace(
         spec,
-        m_maxima=_as_jax_float64(spec.m_maxima),
-        reg_l2=_as_jax_float64(spec.reg_l2),
-        pol_vectors=_as_jax_float64(spec.pol_vectors),
+        m_maxima=_as_runtime_array(spec.m_maxima),
+        reg_l2=_as_runtime_array(spec.reg_l2),
+        pol_vectors=_as_runtime_array(spec.pol_vectors),
     )
     contributions = _gpmo_arbvec_contributions(A_arr, scan_spec.pol_vectors)
 
@@ -878,12 +878,12 @@ def pm_gpmo_backtracking_live_loop_jax(
     """Advance backtracking GPMO state through a fixed-length scan."""
 
     _validate_backtracking_live_loop_capacity(state, spec, int(max_steps))
-    A_arr = _as_jax_float64(A_scaled)
+    A_arr = _as_runtime_array(A_scaled)
     scan_spec = replace(
         spec,
-        m_maxima=_as_jax_float64(spec.m_maxima),
-        reg_l2=_as_jax_float64(spec.reg_l2),
-        dipole_grid_xyz=_as_jax_float64(spec.dipole_grid_xyz),
+        m_maxima=_as_runtime_array(spec.m_maxima),
+        reg_l2=_as_runtime_array(spec.reg_l2),
+        dipole_grid_xyz=_as_runtime_array(spec.dipole_grid_xyz),
     )
     connectivity = gpmo_connectivity_matrix(scan_spec.dipole_grid_xyz)
     history_capacity = int(state.selected_dipoles.shape[0])
@@ -976,13 +976,13 @@ def pm_gpmo_arbvec_backtracking_live_loop_jax(
     """Advance ArbVec-backtracking GPMO state through a fixed-length scan."""
 
     _validate_arbvec_backtracking_live_loop_capacity(state, spec, int(max_steps))
-    A_arr = _as_jax_float64(A_scaled)
+    A_arr = _as_runtime_array(A_scaled)
     scan_spec = replace(
         spec,
-        m_maxima=_as_jax_float64(spec.m_maxima),
-        reg_l2=_as_jax_float64(spec.reg_l2),
-        dipole_grid_xyz=_as_jax_float64(spec.dipole_grid_xyz),
-        pol_vectors=_as_jax_float64(spec.pol_vectors),
+        m_maxima=_as_runtime_array(spec.m_maxima),
+        reg_l2=_as_runtime_array(spec.reg_l2),
+        dipole_grid_xyz=_as_runtime_array(spec.dipole_grid_xyz),
+        pol_vectors=_as_runtime_array(spec.pol_vectors),
     )
     connectivity = gpmo_connectivity_matrix(scan_spec.dipole_grid_xyz)
     cos_thresh_angle = jnp.cos(_runtime_init_scalar(spec.thresh_angle, A_arr.dtype))
@@ -1084,12 +1084,12 @@ def pm_gpmo_multi_live_loop_jax(
     """Advance multi-neighbour GPMO state through a fixed-length scan."""
 
     _validate_multi_live_loop_capacity(state, spec, int(max_steps))
-    A_arr = _as_jax_float64(A_scaled)
+    A_arr = _as_runtime_array(A_scaled)
     scan_spec = replace(
         spec,
-        m_maxima=_as_jax_float64(spec.m_maxima),
-        reg_l2=_as_jax_float64(spec.reg_l2),
-        dipole_grid_xyz=_as_jax_float64(spec.dipole_grid_xyz),
+        m_maxima=_as_runtime_array(spec.m_maxima),
+        reg_l2=_as_runtime_array(spec.reg_l2),
+        dipole_grid_xyz=_as_runtime_array(spec.dipole_grid_xyz),
     )
     connectivity = gpmo_connectivity_matrix(scan_spec.dipole_grid_xyz)
 

@@ -69,7 +69,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ._math_utils import (
-    as_jax_float64 as _as_jax_float64,
+    as_runtime_array as _as_runtime_array,
     as_jax_int32 as _as_jax_int32,
 )
 
@@ -128,7 +128,17 @@ _UNAVAILABLE_CANDIDATE_COST: float = float("inf")
 
 
 def _scalar_like(reference: jax.Array, value: float) -> jax.Array:
-    return _as_jax_float64(np.float64(value)).astype(reference.dtype)
+    return jnp.asarray(value, dtype=reference.dtype)
+
+
+def _find_max_alphaf_sentinel(dtype) -> float:
+    target_dtype = np.dtype(dtype)
+    if (
+        np.issubdtype(target_dtype, np.floating)
+        and _FIND_MAX_ALPHAF_SENTINEL > float(np.finfo(target_dtype).max)
+    ):
+        return float("inf")
+    return _FIND_MAX_ALPHAF_SENTINEL
 
 
 def _zeros_like_shape(reference: jax.Array, shape: tuple[int, ...], *, dtype=None):
@@ -702,10 +712,10 @@ def gpmo_baseline_candidate_costs(
     ``-`` candidates, matching the C++ ``std::min_element`` tie order.
     """
 
-    A_arr = _as_jax_float64(A_scaled)
-    residual_arr = _as_jax_float64(residual)
-    m_maxima = _as_jax_float64(spec.m_maxima)
-    reg_l2 = _as_jax_float64(spec.reg_l2)
+    A_arr = _as_runtime_array(A_scaled)
+    residual_arr = _as_runtime_array(residual)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    reg_l2 = _as_runtime_array(spec.reg_l2)
 
     n_components = A_arr.shape[1]
     penalty = reg_l2 * _component_mmax(m_maxima) ** 2
@@ -793,9 +803,9 @@ def gpmo_baseline_solve(
     with at most one nonzero Cartesian component per selected dipole.
     """
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
-    m_maxima = _as_jax_float64(spec.m_maxima)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
+    m_maxima = _as_runtime_array(spec.m_maxima)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_static_args(K, spec.single_direction, ndipoles)
     _validate_record_every(record_every)
@@ -922,7 +932,7 @@ def gpmo_baseline_solve(
 def gpmo_connectivity_matrix(dipole_grid_xyz: jax.Array) -> jax.Array:
     """Return nearest-neighbour dipole indices, including each dipole itself."""
 
-    xyz = _as_jax_float64(dipole_grid_xyz)
+    xyz = _as_runtime_array(dipole_grid_xyz)
     deltas = xyz[:, None, :] - xyz[None, :, :]
     distances = jnp.sqrt(jnp.sum(deltas * deltas, axis=2))
     return jnp.argsort(distances, axis=1, stable=True)
@@ -941,10 +951,10 @@ def _gpmo_arbvec_candidate_costs_for_allowed(
     residual: jax.Array,
     allowed: jax.Array,
 ) -> jax.Array:
-    residual_arr = _as_jax_float64(residual)
-    m_maxima = _as_jax_float64(spec.m_maxima)
-    reg_l2 = _as_jax_float64(spec.reg_l2)
-    contributions_arr = _as_jax_float64(contributions)
+    residual_arr = _as_runtime_array(residual)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    reg_l2 = _as_runtime_array(spec.reg_l2)
+    contributions_arr = _as_runtime_array(contributions)
 
     residual_sq = jnp.sum(residual_arr * residual_arr)
     dot = jnp.einsum("m,mnp->np", residual_arr, contributions_arr)
@@ -1080,10 +1090,10 @@ def gpmo_arbvec_solve(
 ) -> GPMOArbVecResult:
     """Run the arbitrary-vector greedy permanent-magnet optimizer in JAX."""
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
-    m_maxima = _as_jax_float64(spec.m_maxima)
-    pol_vectors = _as_jax_float64(spec.pol_vectors)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    pol_vectors = _as_runtime_array(spec.pol_vectors)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_arbvec_static_args(K, ndipoles, pol_vectors)
     _validate_record_every(record_every)
@@ -1107,7 +1117,7 @@ def gpmo_arbvec_solve(
 
     scan_spec = GPMOArbVecSpec(
         m_maxima=m_maxima,
-        reg_l2=_as_jax_float64(spec.reg_l2),
+        reg_l2=_as_runtime_array(spec.reg_l2),
         pol_vectors=pol_vectors,
     )
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
@@ -1234,10 +1244,10 @@ def gpmo_arbvec_solve_bucketed(
     so changing the active counts does not change the compiled array shapes.
     """
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
-    m_maxima = _as_jax_float64(spec.m_maxima)
-    pol_vectors = _as_jax_float64(spec.pol_vectors)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    pol_vectors = _as_runtime_array(spec.pol_vectors)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_arbvec_static_args(K, ndipoles, pol_vectors)
     _validate_gpmo_bucket_count("active_ndipoles", active_ndipoles, ndipoles)
@@ -1274,7 +1284,7 @@ def gpmo_arbvec_solve_bucketed(
 
     scan_spec = GPMOArbVecSpec(
         m_maxima=m_maxima,
-        reg_l2=_as_jax_float64(spec.reg_l2),
+        reg_l2=_as_runtime_array(spec.reg_l2),
         pol_vectors=pol_vectors,
     )
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
@@ -1394,10 +1404,10 @@ def initialize_gpmo_arbvec(
         Scalar count of placed dipoles.
     """
 
-    x_init_arr = _as_jax_float64(x_init)
-    pol_vectors_arr = _as_jax_float64(pol_vectors)
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
+    x_init_arr = _as_runtime_array(x_init)
+    pol_vectors_arr = _as_runtime_array(pol_vectors)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
     ndipoles = pol_vectors_arr.shape[0]
     if x_init_arr.shape != (ndipoles, 3):
         raise ValueError(
@@ -1510,8 +1520,8 @@ def _gpmo_arbvec_backtracking_candidate_costs_from_contributions(
     m_maxima: jax.Array,
     reg_l2: jax.Array,
 ) -> jax.Array:
-    contributions_arr = _as_jax_float64(contributions)
-    residual_arr = _as_jax_float64(residual)
+    contributions_arr = _as_runtime_array(contributions)
+    residual_arr = _as_runtime_array(residual)
     residual_sq = jnp.sum(residual_arr * residual_arr)
     dot = jnp.einsum("m,mnp->np", residual_arr, contributions_arr)
     col_sq = jnp.sum(contributions_arr * contributions_arr, axis=0)
@@ -1846,10 +1856,10 @@ def gpmo_arbvec_backtracking_solve(
     ``x_init = zeros((N, 3))``.
     """
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
-    m_maxima = _as_jax_float64(spec.m_maxima)
-    pol_vectors = _as_jax_float64(spec.pol_vectors)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    pol_vectors = _as_runtime_array(spec.pol_vectors)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_arbvec_backtracking_static_args(
         K,
@@ -1865,7 +1875,7 @@ def gpmo_arbvec_backtracking_solve(
     if x_init is None:
         x_init_arr = _zeros_like_shape(A_arr, (ndipoles, 3))
     else:
-        x_init_arr = _as_jax_float64(x_init)
+        x_init_arr = _as_runtime_array(x_init)
         if x_init_arr.shape != (ndipoles, 3):
             raise ValueError(
                 "x_init must have shape (ndipoles, 3); "
@@ -1910,8 +1920,8 @@ def gpmo_arbvec_backtracking_solve(
     connectivity = gpmo_connectivity_matrix(spec.dipole_grid_xyz)
     scan_spec = GPMOArbVecBacktrackingSpec(
         m_maxima=m_maxima,
-        reg_l2=_as_jax_float64(spec.reg_l2),
-        dipole_grid_xyz=_as_jax_float64(spec.dipole_grid_xyz),
+        reg_l2=_as_runtime_array(spec.reg_l2),
+        dipole_grid_xyz=_as_runtime_array(spec.dipole_grid_xyz),
         pol_vectors=pol_vectors,
         Nadjacent=spec.Nadjacent,
         backtracking=spec.backtracking,
@@ -2169,10 +2179,10 @@ def gpmo_multi_candidate_costs(
     candidates, preserving the C++ ``std::min_element`` tie order.
     """
 
-    A_arr = _as_jax_float64(A_scaled)
-    residual_arr = _as_jax_float64(residual)
-    m_maxima = _as_jax_float64(spec.m_maxima)
-    reg_l2 = _as_jax_float64(spec.reg_l2)
+    A_arr = _as_runtime_array(A_scaled)
+    residual_arr = _as_runtime_array(residual)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    reg_l2 = _as_runtime_array(spec.reg_l2)
 
     n_components = A_arr.shape[1]
     component_indices = jnp.arange(n_components)
@@ -2297,9 +2307,9 @@ def gpmo_multi_solve(
 ) -> GPMOMultiResult:
     """Run the multi-neighbour greedy permanent-magnet optimizer in JAX."""
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
-    m_maxima = _as_jax_float64(spec.m_maxima)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
+    m_maxima = _as_runtime_array(spec.m_maxima)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_multi_static_args(K, spec.single_direction, ndipoles, spec.Nadjacent)
     _validate_record_every(record_every)
@@ -2713,9 +2723,9 @@ def gpmo_backtracking_solve(
     later scan iterations carry the final state unchanged.
     """
 
-    A_arr = _as_jax_float64(A_scaled)
-    b_arr = _as_jax_float64(b)
-    m_maxima = _as_jax_float64(spec.m_maxima)
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
+    m_maxima = _as_runtime_array(spec.m_maxima)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_backtracking_static_args(
         K,
@@ -2756,8 +2766,8 @@ def gpmo_backtracking_solve(
     connectivity = gpmo_connectivity_matrix(spec.dipole_grid_xyz)
     scan_spec = GPMOBacktrackingSpec(
         m_maxima=m_maxima,
-        reg_l2=_as_jax_float64(spec.reg_l2),
-        dipole_grid_xyz=_as_jax_float64(spec.dipole_grid_xyz),
+        reg_l2=_as_runtime_array(spec.reg_l2),
+        dipole_grid_xyz=_as_runtime_array(spec.dipole_grid_xyz),
         single_direction=spec.single_direction,
         Nadjacent=spec.Nadjacent,
         backtracking=spec.backtracking,
@@ -3095,7 +3105,7 @@ def find_max_alphaf(
     return jnp.where(
         active,
         alphaf,
-        jnp.asarray(_FIND_MAX_ALPHAF_SENTINEL, dtype=alphaf.dtype),
+        jnp.asarray(_find_max_alphaf_sentinel(alphaf.dtype), dtype=alphaf.dtype),
     )
 
 
@@ -3207,13 +3217,13 @@ def mwpgp_step(
     (x_new, g_new, p_new)
         Updated solver state.
     """
-    A_arr = _as_jax_float64(A)
-    ATb_arr = _as_jax_float64(ATb)
-    m_maxima = _as_jax_float64(spec.m_maxima)
-    m_proxy = _as_jax_float64(spec.m_proxy)
-    nu = _as_jax_float64(spec.nu)
-    reg_l2 = _as_jax_float64(spec.reg_l2)
-    alpha = _as_jax_float64(spec.alpha)
+    A_arr = _as_runtime_array(A)
+    ATb_arr = _as_runtime_array(ATb)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    m_proxy = _as_runtime_array(spec.m_proxy)
+    nu = _as_runtime_array(spec.nu)
+    reg_l2 = _as_runtime_array(spec.reg_l2)
+    alpha = _as_runtime_array(spec.alpha)
     ATb_rs = ATb_arr + m_proxy / nu
     return _step_body(state, A_arr, ATb_rs, m_maxima, alpha, reg_l2, nu)
 
@@ -3250,13 +3260,13 @@ def mwpgp_initial_state(
     ``m_proxy / nu`` contribution is applied from ``spec`` to mirror the
     internal solver initialization.
     """
-    A_arr = _as_jax_float64(A)
-    ATb_arr = _as_jax_float64(ATb)
-    m0_arr = _as_jax_float64(m0)
-    m_maxima = _as_jax_float64(spec.m_maxima)
-    m_proxy = _as_jax_float64(spec.m_proxy)
-    nu = _as_jax_float64(spec.nu)
-    reg_l2 = _as_jax_float64(spec.reg_l2)
+    A_arr = _as_runtime_array(A)
+    ATb_arr = _as_runtime_array(ATb)
+    m0_arr = _as_runtime_array(m0)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    m_proxy = _as_runtime_array(spec.m_proxy)
+    nu = _as_runtime_array(spec.nu)
+    reg_l2 = _as_runtime_array(spec.reg_l2)
     ATb_rs = ATb_arr + m_proxy / nu
     return _initial_state(m0_arr, A_arr, ATb_rs, m_maxima, reg_l2, nu)
 
@@ -3308,14 +3318,14 @@ def mwpgp_solve(
     if n_steps < 0:
         raise ValueError(f"n_steps must be non-negative; got {n_steps}")
 
-    A_arr = _as_jax_float64(A)
-    ATb_arr = _as_jax_float64(ATb)
-    m0_arr = _as_jax_float64(m0)
-    m_maxima = _as_jax_float64(spec.m_maxima)
-    m_proxy = _as_jax_float64(spec.m_proxy)
-    nu = _as_jax_float64(spec.nu)
-    reg_l2 = _as_jax_float64(spec.reg_l2)
-    alpha = _as_jax_float64(spec.alpha)
+    A_arr = _as_runtime_array(A)
+    ATb_arr = _as_runtime_array(ATb)
+    m0_arr = _as_runtime_array(m0)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    m_proxy = _as_runtime_array(spec.m_proxy)
+    nu = _as_runtime_array(spec.nu)
+    reg_l2 = _as_runtime_array(spec.reg_l2)
+    alpha = _as_runtime_array(spec.alpha)
 
     ATb_rs = ATb_arr + m_proxy / nu
     init_state = _initial_state(m0_arr, A_arr, ATb_rs, m_maxima, reg_l2, nu)

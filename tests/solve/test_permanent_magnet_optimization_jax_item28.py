@@ -543,36 +543,77 @@ def test_relax_and_split_jax_updates_l0_proxy_for_fixed_outer_steps():
 
 
 def test_relax_and_split_jax_outer_loop_stops_inside_scan() -> None:
-    grid = _synthetic_grid(seed=2033)
+    cpu_grid = _gpmo_cpu_grid(seed=2033)
+    jax_grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2033))
+    nu = 5.0
+    reg_l1 = 0.04 / nu
+    n_steps = 3
+    n_outer = 4
+    epsilon_rs = 1.0e9
+    cpu_grid.ATA_scale += 1.0 / nu
+
+    _errors, cpu_m_history, cpu_m_proxy_history = relax_and_split(
+        cpu_grid,
+        max_iter=n_steps,
+        max_iter_RS=n_outer,
+        epsilon=0.0,
+        epsilon_RS=epsilon_rs,
+        min_fb=0.0,
+        nu=nu,
+        reg_l1=reg_l1,
+        verbose=True,
+    )
 
     @jax.jit
     def _run(grid_data: PermanentMagnetGridJAX):
         return relax_and_split_jax(
             grid_data,
-            max_iter=3,
-            max_iter_RS=4,
-            nu=5.0,
-            reg_l0=0.02,
-            epsilon_RS=1.0e9,
+            max_iter=n_steps,
+            max_iter_RS=n_outer,
+            nu=nu,
+            reg_l1=reg_l1,
+            epsilon_RS=epsilon_rs,
         )
 
-    result = _run(grid)
+    result = _run(jax_grid)
     result.m.block_until_ready()
 
+    assert len(cpu_m_history) == 1
+    assert len(cpu_m_proxy_history) == 1
     np.testing.assert_allclose(
-        np.asarray(result.m_history[1:]),
+        np.asarray(result.m).reshape(-1),
+        cpu_grid.m,
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    m_history_host = np.asarray(result.m_history)
+    m_proxy_history_host = np.asarray(result.m_proxy_history)
+    np.testing.assert_allclose(
+        m_history_host[0],
+        np.asarray(cpu_m_history[0]),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        m_proxy_history_host[0].reshape(-1),
+        np.asarray(cpu_m_proxy_history[0]),
+        rtol=_STATE_TRACE_RTOL,
+        atol=_STATE_TRACE_ATOL,
+    )
+    np.testing.assert_allclose(
+        m_history_host[1:],
         np.broadcast_to(
-            np.asarray(result.m_history[0]),
-            np.asarray(result.m_history[1:]).shape,
+            m_history_host[0],
+            m_history_host[1:].shape,
         ),
         rtol=_STATE_TRACE_RTOL,
         atol=_STATE_TRACE_ATOL,
     )
     np.testing.assert_allclose(
-        np.asarray(result.m_proxy_history[1:]),
+        m_proxy_history_host[1:],
         np.broadcast_to(
-            np.asarray(result.m_proxy_history[0]),
-            np.asarray(result.m_proxy_history[1:]).shape,
+            m_proxy_history_host[0],
+            m_proxy_history_host[1:].shape,
         ),
         rtol=_STATE_TRACE_RTOL,
         atol=_STATE_TRACE_ATOL,
@@ -594,7 +635,7 @@ def test_relax_and_split_jax_outer_loop_stops_inside_scan() -> None:
         rtol=_STATE_TRACE_RTOL,
         atol=_STATE_TRACE_ATOL,
     )
-    assert "scan[" in str(jax.make_jaxpr(_run)(grid))
+    assert "scan[" in str(jax.make_jaxpr(_run)(jax_grid))
 
 
 def test_relax_and_split_jax_matches_cpu_after_multiple_outer_steps():

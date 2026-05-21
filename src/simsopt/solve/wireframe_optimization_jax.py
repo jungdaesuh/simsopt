@@ -14,8 +14,9 @@ from ..field.wireframefield_jax import WireframeFieldJAX
 from ..geo.surface import Surface
 from ..geo.wireframe_toroidal import ToroidalWireframe
 from ..jax_core._math_utils import (
-    as_jax_float64 as _as_jax_float64,
+    as_runtime_array as _as_runtime_array,
     as_jax_int32 as _as_jax_int32,
+    runtime_host_dtype as _runtime_host_dtype,
 )
 from ..jax_core.wireframe_workflow import (
     WireframeGSCOResult,
@@ -79,7 +80,7 @@ def _jax_native_ext_field_B(ext_field, points):
 
 
 def _regularization_matrix(W: object, n: int) -> jax.Array:
-    W_arr = jnp.squeeze(_as_jax_float64(W))
+    W_arr = jnp.squeeze(_as_runtime_array(W))
     indices = jax.lax.iota(jnp.int32, n)
     identity = (indices[:, None] == indices[None, :]).astype(W_arr.dtype)
     if W_arr.ndim == 0:
@@ -101,7 +102,13 @@ def _regularization_matrix(W: object, n: int) -> jax.Array:
 
 
 def _half_like(reference: jax.Array) -> jax.Array:
-    return _as_jax_float64(np.float64(0.5)).astype(reference.dtype)
+    return jnp.asarray(0.5, dtype=reference.dtype)
+
+
+def _scipy_lstsq_rcond(dtype) -> np.floating:
+    host_dtype = np.dtype(dtype)
+    eps = host_dtype.type(np.finfo(host_dtype).eps)
+    return np.nextafter(eps, host_dtype.type(np.inf))
 
 
 def regularized_constrained_least_squares_jax(
@@ -117,10 +124,10 @@ def regularized_constrained_least_squares_jax(
     ``C x = d`` using the same QR basis construction as the CPU routine.
     """
 
-    Amat = _as_jax_float64(A)
-    bvec = jnp.reshape(_as_jax_float64(b), (-1, 1))
-    Cmat = _as_jax_float64(C)
-    dvec = jnp.reshape(_as_jax_float64(d), (-1, 1))
+    Amat = _as_runtime_array(A)
+    bvec = jnp.reshape(_as_runtime_array(b), (-1, 1))
+    Cmat = _as_runtime_array(C)
+    dvec = jnp.reshape(_as_runtime_array(d), (-1, 1))
 
     m, n = Amat.shape
     if bvec.shape[0] != m:
@@ -151,14 +158,13 @@ def regularized_constrained_least_squares_jax(
     AQ2bvec = AQ2mat.T @ bvec
     RHS = AQ2bvec - AQ2mat.T @ AQ1uvec - WQ2mat.T @ WQ1uvec
 
-    rcond_value = np.float64(max(LHS.shape) * np.finfo(np.dtype(LHS.dtype)).eps)
-    rcond = _as_jax_float64(rcond_value).astype(LHS.dtype)
+    rcond = jnp.asarray(_scipy_lstsq_rcond(LHS.dtype), dtype=LHS.dtype)
     vvec = jnp.linalg.lstsq(LHS, RHS, rcond=rcond)[0]
     return Qfull @ jnp.concatenate((uvec, vvec), axis=0)
 
 
 def _wireframe_regularization_value(W: object, x: jax.Array) -> jax.Array:
-    W_arr = jnp.squeeze(_as_jax_float64(W))
+    W_arr = jnp.squeeze(_as_runtime_array(W))
     half = _half_like(x)
     if W_arr.ndim == 0:
         return half * W_arr**2 * jnp.sum(x**2)
@@ -210,9 +216,13 @@ def gsco_wireframe_jax(
     connections = np.asarray(wframe.connected_segments, dtype=np.int32)
 
     if x_init is None:
-        x_init_arr = np.reshape(np.asarray(wframe.currents, dtype=np.float64), (-1, 1))
+        x_init_arr = np.reshape(
+            np.asarray(wframe.currents, dtype=_runtime_host_dtype()), (-1, 1)
+        )
     else:
-        x_init_arr = np.reshape(np.asarray(x_init, dtype=np.float64), (-1, 1))
+        x_init_arr = np.reshape(
+            np.asarray(x_init, dtype=_runtime_host_dtype()), (-1, 1)
+        )
 
     if loop_count_init is None:
         loop_count_arr = np.zeros(len(free_loops), dtype=np.int32)
@@ -260,8 +270,8 @@ def rcls_wireframe_jax(
     )
     free_segs_host = np.asarray(wframe.unconstrained_segments(), dtype=np.intp)
     free_segs_device = _as_jax_int32(free_segs_host)
-    A_arr = _as_jax_float64(Amat)
-    b_arr = jnp.reshape(_as_jax_float64(bvec), (-1, 1))
+    A_arr = _as_runtime_array(Amat)
+    b_arr = jnp.reshape(_as_runtime_array(bvec), (-1, 1))
 
     if A_arr.shape[1] != int(wframe.n_segments):
         raise ValueError("Input Amat has inconsistent dimensions with wframe")
@@ -313,17 +323,25 @@ def bnorm_obj_matrices_jax(
     if not isinstance(surf_plas, Surface):
         raise ValueError("Input `surf_plas` must be a Surface class instance")
 
-    normal = surf_plas.normal()
+    host_dtype = _runtime_host_dtype()
+    normal = np.asarray(surf_plas.normal(), dtype=host_dtype)
     absn = np.linalg.norm(normal, axis=2)[:, :, None]
     unitn = normal * (1.0 / absn)
     sqrt_area = np.sqrt(absn.reshape((-1, 1)) / float(absn.size))
-    area_weight = sqrt_area if area_weighted else np.ones(sqrt_area.shape)
+    area_weight = (
+        sqrt_area
+        if area_weighted
+        else np.ones(sqrt_area.shape, dtype=host_dtype)
+    )
 
     wf_field = WireframeFieldJAX(wframe)
     wf_field.set_points(surf_plas.gamma().reshape((-1, 3)))
-    A = wf_field.dBnormal_by_dsegmentcurrents_matrix(
-        surf_plas,
-        area_weighted=area_weighted,
+    A = np.ascontiguousarray(
+        wf_field.dBnormal_by_dsegmentcurrents_matrix(
+            surf_plas,
+            area_weighted=area_weighted,
+        ),
+        dtype=host_dtype,
     )
 
     if ext_field is not None:
@@ -332,7 +350,7 @@ def bnorm_obj_matrices_jax(
                 ext_field,
                 surf_plas.gamma().reshape((-1, 3)),
             ),
-            dtype=np.float64,
+            dtype=host_dtype,
         ).reshape(normal.shape)
         bnorm_ext = np.sum(B_ext * unitn, axis=2)[:, :, None]
         bnorm_ext_weighted = bnorm_ext.reshape((-1, 1)) * area_weight
@@ -340,7 +358,7 @@ def bnorm_obj_matrices_jax(
         bnorm_ext_weighted = 0 * area_weight
 
     if bnorm_target is not None:
-        target = np.asarray(bnorm_target, dtype=np.float64)
+        target = np.asarray(bnorm_target, dtype=host_dtype)
         if target.size != area_weight.size:
             raise ValueError(
                 "Input `bnorm_target` must have the same number of elements as "
@@ -350,13 +368,17 @@ def bnorm_obj_matrices_jax(
     else:
         bnorm_target_weighted = 0 * area_weight
 
-    b = np.ascontiguousarray(bnorm_target_weighted - bnorm_ext_weighted)
+    b = np.ascontiguousarray(
+        bnorm_target_weighted - bnorm_ext_weighted,
+        dtype=host_dtype,
+    )
     return A, b
 
 
 def _precomputed_wireframe_matrices(wframe, Amat: object, bvec: object):
-    b = np.array(bvec, dtype=np.float64).reshape((-1, 1))
-    A = np.array(Amat, dtype=np.float64)
+    host_dtype = _runtime_host_dtype()
+    b = np.array(bvec, dtype=host_dtype).reshape((-1, 1))
+    A = np.array(Amat, dtype=host_dtype)
     if np.shape(A) != (len(b), int(wframe.n_segments)):
         raise ValueError(
             "Input `Amat` has inconsistent dimensions with input `bvec` and/or `wframe`"
@@ -365,17 +387,18 @@ def _precomputed_wireframe_matrices(wframe, Amat: object, bvec: object):
 
 
 def _gsco_initial_state(wframe, params: dict):
+    host_dtype = _runtime_host_dtype()
     if params.get("x_init") is not None:
         x_init = np.array(
             np.reshape(params["x_init"], (-1, 1)),
-            dtype=np.float64,
+            dtype=host_dtype,
             order="C",
             copy=True,
         )
     else:
         x_init = np.array(
-            np.reshape(np.asarray(wframe.currents, dtype=np.float64), (-1, 1)),
-            dtype=np.float64,
+            np.reshape(np.asarray(wframe.currents, dtype=host_dtype), (-1, 1)),
+            dtype=host_dtype,
             order="C",
             copy=True,
         )
@@ -414,6 +437,7 @@ def optimize_wireframe_jax(
     if not isinstance(wframe, ToroidalWireframe):
         raise ValueError("Input `wframe` must be a ToroidalWireframe class instance")
 
+    host_dtype = _runtime_host_dtype()
     if surf_plas is not None:
         if Amat is not None or bvec is not None:
             raise ValueError(
@@ -453,7 +477,7 @@ def optimize_wireframe_jax(
                 assume_no_crossings=params.get("assume_no_crossings", False),
             )
         )
-        x = _host_array(result.x, dtype=np.float64)
+        x = _host_array(result.x, dtype=host_dtype)
         _write_wireframe_currents(wframe, x)
         f_B = _host_scalar(result.f_B)
         f_R = _host_scalar(result.f_R)
@@ -486,13 +510,13 @@ def optimize_wireframe_jax(
                 verbose=verbose,
             )
         )
-        x = _host_array(result.x, dtype=np.float64)
+        x = _host_array(result.x, dtype=host_dtype)
         _write_wireframe_currents(wframe, x)
         history_length = int(_host_scalar(result.history_length))
         history_slice = slice(0, history_length)
-        f_B_hist = _host_array(result.f_B_history, dtype=np.float64)[history_slice]
-        f_S_hist = _host_array(result.f_S_history, dtype=np.float64)[history_slice]
-        f_hist = _host_array(result.f_history, dtype=np.float64)[history_slice]
+        f_B_hist = _host_array(result.f_B_history, dtype=host_dtype)[history_slice]
+        f_S_hist = _host_array(result.f_S_history, dtype=host_dtype)[history_slice]
+        f_hist = _host_array(result.f_history, dtype=host_dtype)[history_slice]
         f_B = f_B_hist[-1]
         f_S = f_S_hist[-1]
         f = f_hist[-1]
@@ -502,7 +526,7 @@ def optimize_wireframe_jax(
                 "iter_hist": _host_array(result.iter_history, dtype=np.int64)[
                     history_slice
                 ],
-                "curr_hist": _host_array(result.curr_history, dtype=np.float64)[
+                "curr_hist": _host_array(result.curr_history, dtype=host_dtype)[
                     history_slice
                 ],
                 "loop_hist": _host_array(result.loop_history, dtype=np.int64)[
@@ -545,7 +569,7 @@ def get_gsco_iteration_jax(iteration: int, res: dict, wframe):
         raise ValueError("`iteration` exceeds number of iterations for solution")
 
     cells = wframe.get_cell_key()
-    x_iter = np.array(res["x_init"], dtype=np.float64)
+    x_iter = np.array(res["x_init"], copy=True)
     for index in range(iteration + 1):
         curr_i = res["curr_hist"][index]
         cell_i = res["loop_hist"][index]

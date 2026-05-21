@@ -9,8 +9,9 @@ import jax
 from simsopt._array_contracts import require_nonnegative_int32_indices
 
 from ..jax_core._math_utils import (
-    as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
+    as_runtime_array as _as_runtime_array,
+    runtime_host_dtype as _runtime_host_dtype,
 )
 from ..jax_core.wireframe import (
     wireframe_B,
@@ -25,15 +26,16 @@ __all__ = ["WireframeFieldJAX"]
 
 
 def _snapshot_wireframe_arrays(wframe):
-    nodes = np.array(np.stack(wframe.nodes), dtype=np.float64, order="C", copy=True)
+    host_dtype = _runtime_host_dtype()
+    nodes = np.array(np.stack(wframe.nodes), dtype=host_dtype, order="C", copy=True)
     segments = np.array(
         require_nonnegative_int32_indices("wframe.segments", wframe.segments),
         dtype=np.int32,
         order="C",
         copy=True,
     )
-    seg_signs = np.array(wframe.seg_signs, dtype=np.float64, order="C", copy=True)
-    currents = np.array(wframe.currents, dtype=np.float64, order="C", copy=True)
+    seg_signs = np.array(wframe.seg_signs, dtype=host_dtype, order="C", copy=True)
+    currents = np.array(wframe.currents, dtype=host_dtype, order="C", copy=True)
     return nodes, segments, seg_signs, currents
 
 
@@ -66,22 +68,24 @@ class WireframeFieldJAX(MagneticField):
             _snapshot_wireframe_arrays(wframe)
         )
         self._n_segments = int(self.segments.shape[0])
-        self._nodes_device = _as_jax_float64(self.nodes)
+        self._nodes_device = _as_runtime_array(self.nodes)
         self._segments_device = _as_jax_int32(self.segments)
-        self._seg_signs_device = _as_jax_float64(self.seg_signs)
-        self._currents_device = _as_jax_float64(self.currents)
+        self._seg_signs_device = _as_runtime_array(self.seg_signs)
+        self._currents_device = _as_runtime_array(self.currents)
         self._dB_by_dcoilcurrents = None
 
     def set_points_cart(self, xyz):
         result = super().set_points_cart(xyz)
-        self._points_device = _as_jax_float64(np.asarray(xyz, dtype=np.float64))
+        self._points_device = _as_runtime_array(
+            np.asarray(xyz, dtype=_runtime_host_dtype())
+        )
         self._dB_by_dcoilcurrents = None
         return result
 
     def set_points_cyl(self, rphiz):
         result = super().set_points_cyl(rphiz)
-        self._points_device = _as_jax_float64(
-            np.asarray(self.get_points_cart_ref(), dtype=np.float64)
+        self._points_device = _as_runtime_array(
+            np.asarray(self.get_points_cart_ref(), dtype=_runtime_host_dtype())
         )
         self._dB_by_dcoilcurrents = None
         return result
@@ -95,7 +99,7 @@ class WireframeFieldJAX(MagneticField):
                 self._seg_signs_device,
                 self._currents_device,
             ),
-            dtype=np.float64,
+            dtype=B.dtype,
         )
 
     def _dB_by_dX_impl(self, dB):
@@ -106,7 +110,7 @@ class WireframeFieldJAX(MagneticField):
             self._seg_signs_device,
             self._currents_device,
         )
-        dB[:] = np.asarray(dB_jax, dtype=np.float64)
+        dB[:] = np.asarray(dB_jax, dtype=dB.dtype)
 
     def dB_by_dsegmentcurrents(self, compute_derivatives):
         """Return unit-current segment field contributions.
@@ -134,7 +138,7 @@ class WireframeFieldJAX(MagneticField):
                 self._segments_device,
                 self._seg_signs_device,
             ),
-            dtype=np.float64,
+            dtype=_runtime_host_dtype(),
         )
         self._dB_by_dcoilcurrents = [
             np.ascontiguousarray(contributions[i]) for i in range(self._n_segments)
@@ -150,17 +154,17 @@ class WireframeFieldJAX(MagneticField):
         if not isinstance(surface, SurfaceRZFourier):
             raise ValueError("Surface must be a SurfaceRZFourier object")
 
-        normal = surface.normal()
+        normal = np.asarray(surface.normal(), dtype=_runtime_host_dtype())
         absn = np.linalg.norm(normal, axis=2)
         unitn = normal * (1.0 / absn)[:, :, None]
 
         if area_weighted:
             fac = np.sqrt(absn / float(absn.size))
         else:
-            fac = np.ones(absn.shape)
+            fac = np.ones(absn.shape, dtype=_runtime_host_dtype())
 
         matrix = np.ascontiguousarray(
-            np.zeros((n_points, self._n_segments), dtype=np.float64)
+            np.zeros((n_points, self._n_segments), dtype=_runtime_host_dtype())
         )
         dB_dsc = self.dB_by_dsegmentcurrents(0)
         for i in range(self._n_segments):

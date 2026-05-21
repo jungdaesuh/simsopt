@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import io_callback
 
-from ._math_utils import as_jax_float64 as _as_jax_float64
+from ._math_utils import as_runtime_array as _as_runtime_array
 from ._math_utils import as_jax_int32 as _as_jax_int32
 from ._math_utils import runtime_init_array as _runtime_init_array
 from ._math_utils import runtime_init_scalar as _runtime_init_scalar
@@ -588,8 +588,8 @@ def wireframe_gsco_initial_state(
 ) -> WireframeGSCOLiveState:
     """Create a fixed-capacity GSCO live state with the initial history row."""
 
-    b_arr = jnp.reshape(_as_jax_float64(b), (-1,))
-    x0 = jnp.reshape(_as_jax_float64(x_init), (-1,))
+    b_arr = jnp.reshape(_as_runtime_array(b), (-1,))
+    x0 = jnp.reshape(_as_runtime_array(x_init), (-1,))
     loop_count0 = jnp.reshape(_as_jax_int32(loop_count_init), (-1,))
     residual0 = params.A @ x0 - b_arr
     two_f_b0 = jnp.sum(residual0 * residual0)
@@ -797,8 +797,8 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
     max_iter: int,
     record_every: int,
 ) -> WireframeGSCOResult:
-    b_arr = jnp.reshape(_as_jax_float64(b_obj), (-1,))
-    x0 = jnp.reshape(_as_jax_float64(x_init), (-1,))
+    b_arr = jnp.reshape(_as_runtime_array(b_obj), (-1,))
+    x0 = jnp.reshape(_as_runtime_array(x_init), (-1,))
     loop_count0 = jnp.reshape(_as_jax_int32(loop_count_init), (-1,))
     residual0 = params.A @ x0 - b_arr
     two_f_b0 = jnp.sum(residual0 * residual0)
@@ -1083,7 +1083,7 @@ def greedy_stellarator_coil_optimization_jax(
 ) -> WireframeGSCOResult:
     """Run the fixed-state GSCO live loop and return fixed-shape histories."""
 
-    A = _as_jax_float64(A_obj)
+    A = _as_runtime_array(A_obj)
     n_iter = int(max_iter)
     _validate_record_every(record_every)
     default_current_abs = jnp.abs(_runtime_init_scalar(default_current, A.dtype))
@@ -1127,7 +1127,7 @@ def _wireframe_gsco_multistep_initial_state(
     *,
     current_fraction: float,
 ) -> WireframeGSCOMultistepState:
-    x0 = jnp.reshape(_as_jax_float64(x_init), (-1,))
+    x0 = jnp.reshape(_as_runtime_array(x_init), (-1,))
     loop_count0 = jnp.reshape(_as_jax_int32(loop_count_init), (-1,))
     return WireframeGSCOMultistepState(
         x=x0,
@@ -1160,7 +1160,7 @@ def wireframe_gsco_multistep_loop_jax(
 ) -> WireframeGSCOMultistepResult:
     """Run the wireframe GSCO multistep numerical state machine in JAX."""
 
-    b_arr = jnp.reshape(_as_jax_float64(b_obj), (-1,))
+    b_arr = jnp.reshape(_as_runtime_array(b_obj), (-1,))
     cell_key_arr = _as_jax_int32(cell_key)
     cell_neighbors_arr = _as_jax_int32(cell_neighbors)
     base_constrained = jnp.reshape(
