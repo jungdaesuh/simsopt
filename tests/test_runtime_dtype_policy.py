@@ -954,6 +954,18 @@ def test_as_jax_float64_accepts_traced_scalar_lists():
     np.testing.assert_allclose(np.asarray(value), np.asarray([1.0, 2.0]))
 
 
+def test_as_jax_float64_accepts_jax_scalar_lists_under_transfer_guard():
+    from simsopt.backend.dtypes import as_jax_float64
+
+    left = jax.device_put(jnp.asarray(1.0))
+    right = jax.device_put(jnp.asarray(2.0))
+
+    with jax.transfer_guard_device_to_host("disallow"):
+        value = as_jax_float64([left, right])
+
+    np.testing.assert_allclose(np.asarray(value), np.asarray([1.0, 2.0]))
+
+
 def test_as_runtime_float64_alias_does_not_gate_on_host_reference_dtype():
     from simsopt.backend.dtypes import as_runtime_float64
 

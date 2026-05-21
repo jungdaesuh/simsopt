@@ -77,6 +77,8 @@ def _compatible_reference_sharding(sharding, *, ndim: int | None):
 
 
 def _value_ndim(value) -> int | None:
+    if isinstance(value, (list, tuple)) and _contains_jax_leaves(value):
+        return None
     if _contains_traced_jax_leaves(value):
         return None
     if isinstance(value, jax.Array):
