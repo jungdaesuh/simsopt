@@ -2958,6 +2958,29 @@ class SingleStageExampleTests(unittest.TestCase):
             np.array([2.0, 0.0, 4.0, 0.0, 0.0, 6.0]),
         )
 
+    def test_full_graph_host_callback_value_and_grad_allows_strict_transfer_guard(
+        self,
+    ):
+        module = self.load_module()
+
+        def host_value_and_grad(x):
+            return float(np.sum(x)), 2.0 * np.asarray(x)
+
+        value_and_grad = (
+            module.build_single_stage_full_graph_host_callback_value_and_grad(
+                host_value_and_grad,
+                np.array([1.0, 2.0], dtype=np.float64),
+            )
+        )
+        with jax.transfer_guard_host_to_device("allow"):
+            optimizer_dofs = jax.device_put(np.array([3.0, 4.0], dtype=np.float64))
+
+        with jax.transfer_guard("disallow"):
+            value, gradient = value_and_grad(optimizer_dofs)
+
+        self.assertEqual(float(value), 7.0)
+        np.testing.assert_allclose(np.asarray(gradient), np.array([6.0, 8.0]))
+
     def test_init_only_full_state_target_lane_uses_traceable_objective(self):
         module = self.load_module()
 

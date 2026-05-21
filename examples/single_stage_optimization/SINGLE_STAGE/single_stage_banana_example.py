@@ -1661,12 +1661,13 @@ def build_single_stage_full_graph_host_callback_value_and_grad(
         )
 
     def wrapped(optimizer_x):
-        return io_callback(
-            host_value_and_grad,
-            (value_spec, grad_spec),
-            optimizer_x,
-            ordered=True,
-        )
+        with jax.transfer_guard_host_to_device("allow"):
+            return io_callback(
+                host_value_and_grad,
+                (value_spec, grad_spec),
+                optimizer_x,
+                ordered=True,
+            )
 
     return _mark_cacheable_jit_value_and_grad(wrapped)
 
