@@ -473,7 +473,8 @@ class SpecBackedCurve(Optimizable):
             spec = curve_spec_with_dofs(self._current_curve_spec(), curve_dofs)
             _gamma, gammadash, gammadashdash = curve_geometry_from_spec(spec)
             numerator = jnp.linalg.norm(jnp.cross(gammadash, gammadashdash), axis=1)
-            denominator = jnp.linalg.norm(gammadash, axis=1) ** 3
+            speed = jnp.linalg.norm(gammadash, axis=1)
+            denominator = speed * speed * speed
             return numerator / denominator
 
         curve_spec = self._current_curve_spec()

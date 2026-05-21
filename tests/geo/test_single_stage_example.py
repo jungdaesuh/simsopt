@@ -3960,7 +3960,8 @@ class SingleStageExampleTests(unittest.TestCase):
         expected_kappa = jax.grad(kappa_scalar)(
             jnp.asarray(owner_dofs, dtype=jnp.float64)
         )
-        actual_kappa = curve.dkappa_by_dcoeff_vjp(kappa_weights)(curve)
+        with jax.transfer_guard("disallow"):
+            actual_kappa = curve.dkappa_by_dcoeff_vjp(kappa_weights)(curve)
         np.testing.assert_allclose(
             actual_kappa,
             expected_kappa,
