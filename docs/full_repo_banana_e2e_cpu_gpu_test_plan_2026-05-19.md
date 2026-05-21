@@ -599,6 +599,114 @@ python benchmarks/single_stage_init_parity.py \
   --output-json "${RESULTS_ROOT}/wave4_gpu_parity/single_stage_cuda_init.json"
 ```
 
+### 4E. Banana Single-Stage Outer-Iteration Parity Ladder
+
+Run this ladder after the init-only probe passes. Do not jump straight to
+large mode counts or a 20-iteration run: the first useful optimizer-path signal
+is `mpol=2, ntor=2, maxiter=3`, followed by `4/4/5`, then `6/6/10`, then
+`8/8/20`.
+
+Official-doc timing rule: JAX dispatch is asynchronous, so performance numbers
+must come from artifacts that wait for the computation to finish. For this
+runner, use the structured JSON written after both subprocess lanes finish plus
+`/usr/bin/time -v`; lower-level microbenchmarks must call
+`block_until_ready()` before stopping the timer.
+
+Rungs:
+
+| Rung | `mpol` | `ntor` | `nphi` | `ntheta` | outer `maxiter` | Queue | Seed requirement | Purpose |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| `m02n02-i00-init` | 2 | 2 | 31 | 16 | 0 | `debug` or `shared` | none | CUDA/runtime/init parity canary. |
+| `m02n02-i03-smoke` | 2 | 2 | 31 | 16 | 3 | `debug` or `shared` | none | First real optimizer-path parity check. |
+| `m04n04-i05-useful` | 4 | 4 | 63 | 32 | 5 | `shared` | none | Useful small parity signal without queue waste. |
+| `m06n06-i10-serious` | 6 | 6 | 127 | 48 | 10 | `shared` | `SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC_M06N06` | Serious optimizer-path parity evidence. |
+| `m08n08-i20-release-small` | 8 | 8 | 255 | 64 | 20 | `shared` | `SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC_M08N08` | Small release-grade parity/performance check. |
+
+The `m06n06` and `m08n08` rungs must use a prebuilt runtime seed spec; the
+seed's `mpol`, `ntor`, `nphi`, and `ntheta` must match the rung. The runner
+intentionally rejects cold high-resolution outer runs without
+`--warm-start-run-dir` or `--jax-runtime-seed-spec`.
+
+```bash
+mkdir -p "${RESULTS_ROOT}/wave4_gpu_parity/single_stage_ladder"
+
+export PYTHONPATH="$PWD:$PWD/src"
+export JAX_ENABLE_X64=1
+export JAX_PLATFORMS=cuda,cpu
+export SIMSOPT_JAX_PLATFORM=cuda
+export SIMSOPT_BACKEND_MODE=jax_gpu_parity
+export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+run_single_stage_ladder_rung() {
+  local rung="$1"
+  local mpol="$2"
+  local ntor="$3"
+  local nphi="$4"
+  local ntheta="$5"
+  local maxiter="$6"
+  local seed_spec="${7:-}"
+  local rung_dir="${RESULTS_ROOT}/wave4_gpu_parity/single_stage_ladder/${rung}"
+  mkdir -p "${rung_dir}/cases"
+
+  nvidia-smi --query-gpu=timestamp,index,memory.used,memory.total \
+    --format=csv > "${rung_dir}/nvidia_smi_before.csv"
+
+  local seed_args=()
+  if [[ -n "${seed_spec}" ]]; then
+    seed_args=(--jax-runtime-seed-spec "${seed_spec}")
+  fi
+
+  /usr/bin/time -v -o "${rung_dir}/time.txt" \
+    python benchmarks/single_stage_init_parity.py \
+      --platform cuda \
+      --equilibria-dir examples/single_stage_optimization/equilibria \
+      --mpol "${mpol}" \
+      --ntor "${ntor}" \
+      --nphi "${nphi}" \
+      --ntheta "${ntheta}" \
+      --maxiter "${maxiter}" \
+      --case-artifacts-dir "${rung_dir}/cases" \
+      --output-json "${rung_dir}/single_stage_cuda.json" \
+      "${seed_args[@]}" \
+      > "${rung_dir}/stdout.log" \
+      2> "${rung_dir}/stderr.log"
+
+  nvidia-smi --query-gpu=timestamp,index,memory.used,memory.total \
+    --format=csv > "${rung_dir}/nvidia_smi_after.csv"
+}
+
+run_single_stage_ladder_rung m02n02-i00-init 2 2 31 16 0
+run_single_stage_ladder_rung m02n02-i03-smoke 2 2 31 16 3
+run_single_stage_ladder_rung m04n04-i05-useful 4 4 63 32 5
+run_single_stage_ladder_rung \
+  m06n06-i10-serious 6 6 127 48 10 \
+  "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC_M06N06:?set m06n06 runtime seed spec}"
+run_single_stage_ladder_rung \
+  m08n08-i20-release-small 8 8 255 64 20 \
+  "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC_M08N08:?set m08n08 runtime seed spec}"
+```
+
+Per-rung required records:
+
+- [ ] `${rung}/single_stage_cuda.json` has `passed: true`.
+- [ ] `${rung}/single_stage_cuda.json` records `provenance.backend`,
+  `provenance.devices`, `provenance.peak_rss_mb`, and
+  `provenance.gpu_memory_mb`.
+- [ ] `${rung}/single_stage_cuda.json` records `timings.cpu_elapsed_s`,
+  `timings.jax_elapsed_s`, and phase timing keys for both lanes.
+- [ ] `${rung}/single_stage_cuda.json` records `comparison` parity deltas
+  including iota, volume, field error, and surface geometry where available.
+- [ ] `${rung}/time.txt` records `/usr/bin/time -v` wall time and maximum
+  resident set size for the full rung command.
+- [ ] `${rung}/nvidia_smi_before.csv` and `${rung}/nvidia_smi_after.csv`
+  record per-GPU memory before and after the rung.
+- [ ] Rung summary table reports, for each rung: `mpol`, `ntor`, `maxiter`,
+  `nphi`, `ntheta`, Slurm job id, queue, backend, devices, pass/fail, CPU wall
+  time, JAX wall time, peak RSS, peak GPU memory, and all parity deltas.
+
 Acceptance:
 
 - [ ] Non-banana follow-up has real `jax_gpu` runtime metadata and passes.
@@ -606,6 +714,11 @@ Acceptance:
 - [ ] Stage 2 CUDA geometry-repro artifact has `passed: true` and gates final
   banana-coil geometry through `geometry_rel_tol`.
 - [ ] Single-stage CUDA artifact has `passed: true`.
+- [ ] Single-stage outer-iteration parity ladder passes through at least
+  `m04n04-i05-useful` before any `m06n06` or larger run is submitted.
+- [ ] Single-stage outer-iteration parity ladder records performance and memory
+  for every rung, including CPU/JAX elapsed time, peak RSS, peak GPU memory,
+  and per-rung parity deltas.
 - [ ] Each CUDA artifact records CUDA backend, devices, x64, `nvidia-smi`,
   driver/runtime, repo SHA, dirty status, and memory.
 - [ ] Any artifact with CPU backend is invalid for GPU signoff.
@@ -961,6 +1074,10 @@ Every structured proof artifact must include or be accompanied by:
 - JAX default dtypes and x64: `https://docs.jax.dev/en/latest/default_dtypes.html`
 - JAX GPU memory allocation:
   `https://docs.jax.dev/en/latest/gpu_memory_allocation.html`
+- JAX asynchronous dispatch:
+  `https://docs.jax.dev/en/latest/async_dispatch.html`
+- JAX benchmarking:
+  `https://docs.jax.dev/en/latest/benchmarking.html`
 - NERSC Python on Perlmutter:
   `https://docs.nersc.gov/development/languages/python/using-python-perlmutter/`
 - NERSC Perlmutter running jobs:
