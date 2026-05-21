@@ -13205,6 +13205,17 @@ class SingleStageExampleTests(unittest.TestCase):
             [-3.0, -2.0],
         )
 
+    def test_trace_scalar_summary_uses_explicit_host_boundary(self):
+        module = self.load_module()
+        value = jnp.asarray(1.25, dtype=jnp.float64)
+
+        with jax.transfer_guard_device_to_host("disallow"):
+            summary = module._summarize_host_scalar(value)
+
+        self.assertEqual(summary["value"], 1.25)
+        self.assertTrue(summary["finite"])
+        self.assertIsNone(summary["classification"])
+
     def test_snapshot_to_pytree_accepts_deferred_surface_parent_graph(self):
         module = self.load_module()
         from simsopt.geo.surfacerzfourier import SurfaceRZFourier

@@ -485,7 +485,7 @@ def _classify_nonfinite_scalar(value):
 
 
 def _summarize_host_scalar(value):
-    host_value = float(value)
+    host_value = host_float(value)
     finite = bool(np.isfinite(host_value))
     return {
         "value": host_value if finite else None,
