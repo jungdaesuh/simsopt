@@ -125,7 +125,6 @@ def build_real_single_stage_init_fixture(
                     backend,
                     resolved_optimizer_backend,
                     None,
-                    benchmark_mode=False,
                 )
             ),
             target_lane_boozer_bfgs_maxiter=(
@@ -133,7 +132,6 @@ def build_real_single_stage_init_fixture(
                     backend,
                     resolved_optimizer_backend,
                     None,
-                    benchmark_mode=False,
                 )
             ),
             target_lane_boozer_newton_tol=(

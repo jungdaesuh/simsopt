@@ -205,10 +205,8 @@ _TARGET_OUTER_MAXLS_DEFAULT = 8
 _TARGET_OUTER_MAXLS_FLOAT32_SMOKE_DEFAULT = 100
 _REFERENCE_OUTER_MAXCOR_DEFAULT = 300
 _TARGET_OUTER_MAXCOR_DEFAULT = 20
-_TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT = 1e-6
 _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT = 1e-8
 _TARGET_LANE_BOOZER_NEWTON_TOL_FLOAT32_SMOKE_DEFAULT = 1e-6
-_TARGET_LANE_BOOZER_BFGS_MAXITER_BENCHMARK_DEFAULT = 64
 _SINGLE_STAGE_RESULTS_SCHEMA_VERSION = 1
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA = "simsopt.single_stage.jax_runtime_spec"
@@ -4648,13 +4646,11 @@ def parse_args():
         args.backend,
         args.optimizer_backend,
         args.target_lane_boozer_bfgs_tol,
-        benchmark_mode=args.benchmark_mode,
     )
     args.target_lane_boozer_bfgs_maxiter = resolve_target_lane_boozer_bfgs_maxiter(
         args.backend,
         args.optimizer_backend,
         args.target_lane_boozer_bfgs_maxiter,
-        benchmark_mode=args.benchmark_mode,
     )
     args.target_lane_boozer_newton_tol = resolve_target_lane_boozer_newton_tol(
         args.backend,
@@ -7860,20 +7856,11 @@ def resolve_target_lane_boozer_bfgs_tol(
     field_backend,
     optimizer_backend,
     target_lane_boozer_bfgs_tol=None,
-    *,
-    benchmark_mode=False,
 ):
-    """Resolve the temporary Boozer LS tolerance override for target-lane trials."""
-    if target_lane_boozer_bfgs_tol is not None:
-        resolved = float(target_lane_boozer_bfgs_tol)
-    elif (
-        field_backend == "jax"
-        and optimizer_backend in _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS
-        and benchmark_mode
-    ):
-        resolved = _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT
-    else:
+    """Resolve an explicit Boozer LS tolerance override for target-lane trials."""
+    if target_lane_boozer_bfgs_tol is None:
         return None
+    resolved = float(target_lane_boozer_bfgs_tol)
     if resolved <= 0.0:
         raise ValueError("target_lane_boozer_bfgs_tol must be positive.")
     return resolved
@@ -7883,20 +7870,11 @@ def resolve_target_lane_boozer_bfgs_maxiter(
     field_backend,
     optimizer_backend,
     target_lane_boozer_bfgs_maxiter=None,
-    *,
-    benchmark_mode=False,
 ):
-    """Resolve the temporary Boozer LS iteration cap for target-lane trials."""
-    if target_lane_boozer_bfgs_maxiter is not None:
-        resolved = int(target_lane_boozer_bfgs_maxiter)
-    elif (
-        field_backend == "jax"
-        and optimizer_backend in _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS
-        and benchmark_mode
-    ):
-        resolved = _TARGET_LANE_BOOZER_BFGS_MAXITER_BENCHMARK_DEFAULT
-    else:
+    """Resolve an explicit Boozer LS iteration cap for target-lane trials."""
+    if target_lane_boozer_bfgs_maxiter is None:
         return None
+    resolved = int(target_lane_boozer_bfgs_maxiter)
     if resolved < 1:
         raise ValueError("target_lane_boozer_bfgs_maxiter must be at least 1.")
     return resolved

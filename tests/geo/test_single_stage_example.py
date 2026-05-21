@@ -2131,7 +2131,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(args.target_lane_boozer_newton_tol)
         self.assertIsNone(args.target_lane_boozer_newton_maxiter)
 
-    def test_parse_args_benchmark_mode_uses_target_lane_trial_defaults(self):
+    def test_parse_args_benchmark_mode_preserves_target_lane_boozer_precision(self):
         module = self.load_module()
 
         with patch.dict(os.environ, {}, clear=True), patch.object(
@@ -2148,8 +2148,8 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(args.outer_maxls, 4)
         self.assertIsNone(args.target_lane_outer_initial_step_size)
-        self.assertEqual(args.target_lane_boozer_bfgs_tol, 1e-6)
-        self.assertEqual(args.target_lane_boozer_bfgs_maxiter, 64)
+        self.assertIsNone(args.target_lane_boozer_bfgs_tol)
+        self.assertIsNone(args.target_lane_boozer_bfgs_maxiter)
         self.assertIsNone(args.target_lane_boozer_newton_tol)
         self.assertIsNone(args.target_lane_boozer_newton_maxiter)
 
@@ -7242,8 +7242,23 @@ class SingleStageExampleTests(unittest.TestCase):
                 "profile_suite": "profile-suite-marker",
             }
 
-        def _profile(profile_suite, coil_dofs, *, include_memory_analysis=False):
+        def _profile(
+            profile_suite,
+            coil_dofs,
+            *,
+            include_memory_analysis=False,
+            progress_json_path=None,
+            stablehlo_dir=None,
+            optimizer_value_and_grad=None,
+            optimizer_dofs=None,
+            optimizer_coil_indices=None,
+        ):
             self.assertFalse(include_memory_analysis)
+            self.assertIsNone(progress_json_path)
+            self.assertIsNone(stablehlo_dir)
+            self.assertIsNotNone(optimizer_value_and_grad)
+            self.assertIsNotNone(optimizer_dofs)
+            self.assertIsNone(optimizer_coil_indices)
             profiled_calls.append((profile_suite, coil_dofs))
             return {"ok": True}
 
@@ -7404,8 +7419,23 @@ class SingleStageExampleTests(unittest.TestCase):
                 "profile_suite": "profile-suite-marker",
             }
 
-        def _profile(_profile_suite, _coil_dofs, *, include_memory_analysis=False):
+        def _profile(
+            _profile_suite,
+            _coil_dofs,
+            *,
+            include_memory_analysis=False,
+            progress_json_path=None,
+            stablehlo_dir=None,
+            optimizer_value_and_grad=None,
+            optimizer_dofs=None,
+            optimizer_coil_indices=None,
+        ):
             self.assertFalse(include_memory_analysis)
+            self.assertIsNone(progress_json_path)
+            self.assertIsNone(stablehlo_dir)
+            self.assertIsNotNone(optimizer_value_and_grad)
+            self.assertIsNotNone(optimizer_dofs)
+            self.assertIsNone(optimizer_coil_indices)
             return {"ok": True}
 
         def _profile_batch(profile_suite, coil_dofs_batch):
@@ -7526,6 +7556,8 @@ class SingleStageExampleTests(unittest.TestCase):
             success_filter=None,
             full_state_optimizer_dof_map=None,
             profile_optimizer_dofs=None,
+            profile_progress_json_path=None,
+            stablehlo_dir=None,
         )
 
     def test_prepare_target_lane_outer_objectives_uses_smooth_penalties_without_hard_filter(
@@ -7613,6 +7645,8 @@ class SingleStageExampleTests(unittest.TestCase):
             success_filter=None,
             full_state_optimizer_dof_map=None,
             profile_optimizer_dofs=None,
+            profile_progress_json_path=None,
+            stablehlo_dir=None,
         )
 
     def test_build_target_lane_gradient_diagnosis_threads_config_and_filter(self):
