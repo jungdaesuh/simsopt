@@ -41,6 +41,7 @@ from workflow_helpers import (
     canonical_stage2_iota_constraint_weight,
     format_local_stage2_run_dir,
     resolve_wataru_vf_template_path,
+    stage2_iota_mode_uses_alm_constraint,
     validate_stage2_iota_args,
     validate_normalized_toroidal_flux,
 )
@@ -93,7 +94,7 @@ from banana_opt.hardware_contracts import (
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
-    POLOIDAL_EXTENT_WEIGHT,
+    STAGE2_POLOIDAL_WEIGHT_DEFAULT,
     STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT,
     STAGE2_WIDTH_WEIGHT_DEFAULT,
     TF_CURRENT_CW_DEFAULT_A,
@@ -118,6 +119,7 @@ from banana_opt.current_contracts import (
     FiniteCurrentMode,
     resolve_boozer_current_convention,
     resolve_finite_current_mode,
+    validate_hbt_proxy_vf_current_convention,
 )
 from banana_opt.stage2_single_stage_handoff import (
     boozer_trust_artifact_fields,
@@ -268,8 +270,6 @@ def validate_stage2_iota_cli_args(args) -> None:
 def validate_s_hel_objective_cli_args(args) -> None:
     if not getattr(args, "enable_s_hel_objective", False):
         return
-    if args.stage2_iota_mode != "soft":
-        raise ValueError("--enable-s-hel-objective requires --stage2-iota-mode soft.")
     s_hel_objective_weight = float(args.s_hel_objective_weight)
     if not np.isfinite(s_hel_objective_weight) or s_hel_objective_weight <= 0.0:
         raise ValueError("--s-hel-objective-weight must be finite and positive.")
@@ -337,6 +337,24 @@ def parse_args():
         "--stage2-bs-path",
         default=os.environ.get("STAGE2_BS_PATH"),
         help="Optional path to a saved Stage 2 biot_savart_opt.json seed to restart from.",
+    )
+    parser.add_argument(
+        "--stage2-seed-surf-path",
+        default=os.environ.get("STAGE2_SEED_SURF_PATH"),
+        help=(
+            "Optional saved Boozer-surface artifact used to warm-start the "
+            "Stage 2 iota runtime."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-seed-current-traversal",
+        action="store_true",
+        default=os.environ.get("STAGE2_SEED_CURRENT_TRAVERSAL", "").lower()
+        in {"1", "true", "yes", "on"},
+        help=(
+            "Allow a loaded Stage 2 seed to keep its geometry while retargeting "
+            "proxy/VF traversal currents for current-homotopy rungs."
+        ),
     )
     parser.add_argument(
         "--seed-order-upgrade",
@@ -625,13 +643,35 @@ def parse_args():
         help="Random seed used to build the Stage 2 ALM Taylor-test direction.",
     )
     parser.add_argument(
+        "--alm-fix-signal-mismatch-guard",
+        action="store_true",
+        default=os.environ.get("ALM_FIX_SIGNAL_MISMATCH_GUARD", "0") not in (
+            "",
+            "0",
+            "false",
+            "False",
+        ),
+        help=(
+            "Opt-in rollout flag: align the post-inner Stage 2 ALM signal-mismatch "
+            "arm with the documented hybrid-signal contract by routing through the "
+            "existing dual-update transition when signal_mismatch_active AND "
+            "hard_feasible_for_update AND the surrogate carries a positive "
+            "shift. When unset (default), behavior is unchanged: the "
+            "signal-mismatch arm bumps the penalty as in prior releases. Mirrors "
+            "the single-stage CLI flag of the same name (see "
+            "SINGLE_STAGE/single_stage_banana_example.py and "
+            "docs/alm_hybrid_signal_contract_2026-05-08.md lines 37-41)."
+        ),
+    )
+    parser.add_argument(
         "--stage2-iota-mode",
-        choices=["off", "report", "soft", "alm"],
+        choices=["off", "report", "soft", "alm", "alm-floor"],
         default=os.environ.get("STAGE2_IOTA_MODE", DEFAULT_STAGE2_IOTA_MODE),
         help=(
             "Optional Stage 2 iota mode. 'report' records only a final verification "
             "probe, 'soft' adds a weighted Jiota hot-loop term, and 'alm' adds a hard "
-            "Stage 2 ALM iota_penalty constraint."
+            "Stage 2 ALM target constraint. 'alm-floor' uses the same ALM path as a "
+            "lower-bound iota floor."
         ),
     )
     parser.add_argument(
@@ -852,6 +892,15 @@ def parse_args():
         type=float,
         default=float(os.environ.get("LENGTH_WEIGHT", "0.0005")),
         help="Curve-length penalty weight.",
+    )
+    parser.add_argument(
+        "--stage2-poloidal-weight",
+        type=float,
+        default=float(os.environ.get(
+            "STAGE2_POLOIDAL_WEIGHT",
+            str(STAGE2_POLOIDAL_WEIGHT_DEFAULT),
+        )),
+        help="Stage 2 weighted poloidal-extent hinge weight (penalty path).",
     )
     parser.add_argument(
         "--stage2-width-weight",
@@ -1348,6 +1397,7 @@ def build_stage2_iota_report_payload(
     stage2_bs_artifact_path,
     stage2_results_payload,
     stage2_iota_runtime=None,
+    stage2_seed_surf_path=None,
 ):
     probe_enabled = args.stage2_iota_mode != DEFAULT_STAGE2_IOTA_MODE
     stage2_results_path = build_stage2_results_sidecar_path(stage2_bs_artifact_path)
@@ -1374,6 +1424,9 @@ def build_stage2_iota_report_payload(
         "STAGE2_IOTA_PROBE_SECONDS": None,
         "BOOTABILITY_STAGE2_BS_PATH": stage2_bs_artifact_path,
         "BOOTABILITY_STAGE2_RESULTS_PATH": stage2_results_path,
+        "BOOTABILITY_STAGE2_SURF_PATH": (
+            None if stage2_seed_surf_path is None else str(stage2_seed_surf_path)
+        ),
     }
     payload.update(
         build_stage2_iota_hot_loop_payload(
@@ -1411,6 +1464,7 @@ def build_stage2_iota_report_payload(
         iota_target=float(args.stage2_iota_target),
         iota_tolerance=args.stage2_iota_tolerance,
         constraint_weight=constraint_weight,
+        stage2_seed_surf_path=stage2_seed_surf_path,
     )
     payload.update(
         build_bootability_recovery_payload_fields(
@@ -1422,6 +1476,20 @@ def build_stage2_iota_report_payload(
     )
     payload["STAGE2_IOTA_PROBE_SECONDS"] = time.perf_counter() - probe_start
     return payload
+
+
+def stage2_warm_start_boozer_surface_path(stage2_bs_artifact_path):
+    artifact_path = Path(stage2_bs_artifact_path)
+    variant = artifact_path.stem.removeprefix("biot_savart_opt")
+    return artifact_path.with_name(f"surf_opt{variant}_boozer_surface.json")
+
+
+def save_stage2_warm_start_boozer_surface(stage2_iota_runtime, stage2_bs_artifact_path):
+    if stage2_iota_runtime is None:
+        return None
+    warm_start_path = stage2_warm_start_boozer_surface_path(stage2_bs_artifact_path)
+    stage2_iota_runtime.boozer_surface.save(str(warm_start_path))
+    return warm_start_path
 
 
 def materialize_stage2_artifact_results(
@@ -1461,12 +1529,17 @@ def materialize_stage2_artifact_results(
         stage2_bs_artifact_path
     )
     results.update(constraint_metadata)
+    warm_start_surface_path = save_stage2_warm_start_boozer_surface(
+        stage2_iota_runtime,
+        stage2_bs_artifact_path,
+    )
     results.update(
         build_stage2_iota_report_payload(
             args=args,
             stage2_bs_artifact_path=stage2_bs_artifact_path,
             stage2_results_payload=results,
             stage2_iota_runtime=stage2_iota_runtime,
+            stage2_seed_surf_path=warm_start_surface_path,
         )
     )
     return results
@@ -1716,9 +1789,17 @@ def load_stage2_seed_results(seed_bs_path, *, known_tf_current_A):
     )
 
 
-def _resolve_seeded_numeric_field(cli_value, artifact_value, *, field_name):
+def _resolve_seeded_numeric_field(
+    cli_value,
+    artifact_value,
+    *,
+    field_name,
+    allow_override=False,
+):
     if cli_value is None:
         return 0.0 if artifact_value is None else float(artifact_value)
+    if allow_override:
+        return float(cli_value)
     if artifact_value is None:
         return float(cli_value)
     if not np.isclose(float(cli_value), float(artifact_value), rtol=0.0, atol=1.0e-12):
@@ -1762,6 +1843,9 @@ def _resolve_stage2_finite_current_config(
         "finite_current_mode",
         DEFAULT_FINITE_CURRENT_MODE,
     )
+    allow_seed_current_traversal = bool(
+        getattr(args, "stage2_seed_current_traversal", False)
+    )
     requested_proxy_plasma_current_A = getattr(args, "proxy_plasma_current_A", None)
     requested_vf_current_A = getattr(args, "vf_current_A", None)
     requested_vf_template_path = getattr(args, "vf_template_path", None)
@@ -1799,11 +1883,13 @@ def _resolve_stage2_finite_current_config(
             requested_proxy_plasma_current_A,
             stage2_results.get("PROXY_PLASMA_CURRENT_A"),
             field_name="--proxy-plasma-current-A",
+            allow_override=allow_seed_current_traversal,
         )
         vf_current_A = _resolve_seeded_numeric_field(
             requested_vf_current_A,
             stage2_results.get("VF_CURRENT_A"),
             field_name="--vf-current-A",
+            allow_override=allow_seed_current_traversal,
         )
         if (
             requested_vf_template_path not in {None, ""}
@@ -1819,6 +1905,10 @@ def _resolve_stage2_finite_current_config(
             field_name="--vf-template-path",
         )
 
+    proxy_plasma_current_A, vf_current_A = validate_hbt_proxy_vf_current_convention(
+        proxy_plasma_current_A=proxy_plasma_current_A,
+        vf_current_A=vf_current_A,
+    )
     if vf_current_A != 0.0 and vf_template_path in {None, ""}:
         raise ValueError(
             "--vf-template-path is required when --vf-current-A is non-zero."
@@ -1832,6 +1922,41 @@ def _resolve_stage2_finite_current_config(
             finite_current_mode,
         ),
     )
+
+
+def _assign_fixed_scalar_current(current, value):
+    current.set_dofs([float(value)])
+    current.fix_all()
+
+
+def _retarget_stage2_seed_auxiliary_currents(
+    proxy_coils,
+    vf_coils,
+    *,
+    proxy_plasma_current_A,
+    vf_current_A,
+):
+    if len(proxy_coils) == 1:
+        _assign_fixed_scalar_current(proxy_coils[0].current, proxy_plasma_current_A)
+    elif abs(float(proxy_plasma_current_A)) > 1.0e-12:
+        raise ValueError(
+            "Stage 2 seed current traversal requires one loaded proxy coil when "
+            "--proxy-plasma-current-A is non-zero."
+        )
+
+    for vf_coil in vf_coils:
+        sign = float(np.sign(vf_coil.current.get_value()))
+        if sign == 0.0 and abs(float(vf_current_A)) > 1.0e-12:
+            raise ValueError(
+                "Stage 2 seed current traversal cannot infer a VF sign from a "
+                "zero-current loaded VF coil."
+            )
+        _assign_fixed_scalar_current(vf_coil.current, float(vf_current_A) * sign)
+    if not vf_coils and abs(float(vf_current_A)) > 1.0e-12:
+        raise ValueError(
+            "Stage 2 seed current traversal requires loaded VF coils when "
+            "--vf-current-A is non-zero."
+        )
 
 
 def _build_initialize_coils_kwargs(
@@ -2095,6 +2220,13 @@ def main(parsed_args=None):
             stage2_results=seed_stage2_results,
             seed_order_upgrade=getattr(args, "seed_order_upgrade", None),
         )
+        if args.stage2_seed_current_traversal:
+            _retarget_stage2_seed_auxiliary_currents(
+                new_proxy_coils,
+                new_vf_coils,
+                proxy_plasma_current_A=proxy_plasma_current_A,
+                vf_current_A=vf_current_A,
+            )
         tf_current_A = float(new_tf_coils[0].current.get_value())
         validate_tf_current_limit(tf_current_A)
     else:
@@ -2208,7 +2340,7 @@ def main(parsed_args=None):
         f"(min={BANANA_SELF_INTERSECT_MIN_DISTANCE_M:.4f})"
     )
     stage2_iota_runtime = None
-    if args.stage2_iota_mode in {"soft", "alm"}:
+    if args.stage2_iota_mode != DEFAULT_STAGE2_IOTA_MODE:
         stage2_iota_runtime = build_stage2_iota_runtime(
             equilibrium_file=file_loc,
             bs=new_bs,
@@ -2228,6 +2360,7 @@ def main(parsed_args=None):
             num_tf_coils=args.stage2_iota_num_tf_coils,
             mode=args.stage2_iota_mode,
             weight=args.stage2_iota_weight,
+            stage2_seed_surf_path=args.stage2_seed_surf_path,
         )
         print(
             "Initialized Stage 2 iota hot loop "
@@ -2245,7 +2378,7 @@ def main(parsed_args=None):
         + CC_WEIGHT * Jccdist \
         + CC_WEIGHT * Jcsdist \
         + CURVATURE_WEIGHT * Jc \
-        + POLOIDAL_EXTENT_WEIGHT * Jpe \
+        + args.stage2_poloidal_weight * Jpe \
         + args.stage2_width_weight * (Jwmin + Jwmax) \
         + args.stage2_selfint_weight * Jself
     BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
@@ -2402,7 +2535,9 @@ def main(parsed_args=None):
         alm_constraint_names = stage2_alm_constraint_names(
             include_coil_surface=Jcsdist is not None,
             include_poloidal_extent=True,
-            include_iota_penalty=args.stage2_iota_mode == "alm",
+            include_iota_penalty=stage2_iota_mode_uses_alm_constraint(
+                args.stage2_iota_mode
+            ),
         )
         alm_smoothing_state, history_callback = (
             _make_stage2_alm_adaptive_smoothing_callback(
@@ -2444,8 +2579,12 @@ def main(parsed_args=None):
                 poloidal_extent_smoothing=alm_smoothing_state.curvature_smoothing,
                 smooth_poloidal_extent_signed_constraint=smooth_max_poloidal_extent_signed_constraint,
                 stage2_iota_runtime=(
-                    stage2_iota_runtime if args.stage2_iota_mode == "alm" else None
+                    stage2_iota_runtime
+                    if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode)
+                    else None
                 ),
+                s_hel_objective=s_hel_objective,
+                s_hel_weight=s_hel_weight,
                 Jw=Jw,
                 width_min_threshold=BANANA_WIDTH_MIN_M,
                 width_max_threshold=BANANA_WIDTH_MAX_M,
@@ -2457,13 +2596,13 @@ def main(parsed_args=None):
         def stage2_contract_passes(candidate_state):
             if not candidate_state["hardware_status"]["success"]:
                 return False
-            if args.stage2_iota_mode == "alm":
+            if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode):
                 return bool(candidate_state["stage2_iota_feasible"])
             return True
 
         def should_preserve_secondary_stage2_artifact(candidate_state):
             return (
-                args.stage2_iota_mode == "alm"
+                stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode)
                 and candidate_state["hardware_status"]["success"]
                 and candidate_state["stage2_iota_feasible"] is False
             )
@@ -2506,7 +2645,7 @@ def main(parsed_args=None):
                 }
                 pass_label = (
                     "hardware+iota-pass"
-                    if args.stage2_iota_mode == "alm"
+                    if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode)
                     else "hardware-pass"
                 )
                 print(
@@ -2577,7 +2716,7 @@ def main(parsed_args=None):
             optimizer_success = False
             restore_reason = (
                 "restored_best_exact_hardware_pass_and_iota"
-                if args.stage2_iota_mode == "alm"
+                if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode)
                 else "restored_best_exact_hardware_pass"
             )
             if termination_message:
@@ -2745,7 +2884,9 @@ def main(parsed_args=None):
             termination_message = "hardware_constraints_failed"
         print("/!\\ /!\\ Stage 2 hardware constraint violation /!\\ /!\\")
         print(constraint_summary)
-    if args.stage2_iota_mode == "alm" and not bool(final_iota_feasible):
+    if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode) and not bool(
+        final_iota_feasible
+    ):
         optimizer_success = False
         if termination_message:
             termination_message = f"{termination_message}; stage2_iota_constraint_failed"

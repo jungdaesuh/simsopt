@@ -27,6 +27,7 @@ EXAMPLES_ROOT_STR = str(EXAMPLES_ROOT)
 if EXAMPLES_ROOT_STR not in sys.path:
     sys.path.insert(0, EXAMPLES_ROOT_STR)
 from banana_opt import alm_adaptive_smoothing as _alm_adaptive_smoothing  # noqa: E402
+from banana_opt.wout_convention import wout_convention_artifact_fields  # noqa: E402
 
 
 SINGLE_STAGE_MODULE_PATH = (
@@ -78,11 +79,28 @@ SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH = (
     / "run_single_stage_thresholded_physics_alm.py"
 )
 DEFAULT_ALM_WRAPPER_SURFACE = "wout_nfp10ginsburg_desc_s024match_iota20.nc"
+DEFAULT_ALM_WRAPPER_SURFACE_PATH = (
+    EXAMPLES_ROOT.parents[2]
+    / "DATABASE"
+    / "EQUILIBRIA"
+    / DEFAULT_ALM_WRAPPER_SURFACE
+)
 
 
 def write_stage2_results_with_digest(stage2_bs_path: Path, stage2_results: dict) -> Path:
     results_path = stage2_bs_path.with_name("results.json")
     payload = dict(stage2_results)
+    if "TF_CURRENT_A" in payload:
+        payload.setdefault("PLASMA_SURF_PATH", str(DEFAULT_ALM_WRAPPER_SURFACE_PATH))
+        payload.update(
+            {
+                key: payload.get(key, value)
+                for key, value in wout_convention_artifact_fields(
+                    wout_path=payload["PLASMA_SURF_PATH"],
+                    tf_current_A=payload["TF_CURRENT_A"],
+                ).items()
+            }
+        )
     payload["STAGE2_BS_SHA256"] = hashlib.sha256(
         stage2_bs_path.read_bytes()
     ).hexdigest()
@@ -803,11 +821,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             },
         )
         self.assertEqual(specs["coil_length"].applies_to, frozenset({"alm", "artifact"}))
+        self.assertEqual(specs["coil_length_min"].kind, "lower_bound")
         self.assertEqual(
             specs["coil_length_min"].applies_to,
             frozenset({"alm", "artifact"}),
         )
-        self.assertEqual(specs["coil_length_min"].kind, "lower_bound")
         self.assertEqual(
             specs["poloidal_extent"].applies_to,
             frozenset({"penalty", "alm", "artifact"}),
@@ -816,13 +834,19 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(specs["surface_surface_spacing"].alm_block, "surface")
         self.assertEqual(specs["poloidal_extent"].kind, "upper_bound")
         self.assertEqual(specs["width_min"].kind, "lower_bound")
-        self.assertEqual(specs["width_min"].applies_to, frozenset({"alm", "artifact"}))
+        self.assertEqual(
+            specs["width_min"].applies_to,
+            frozenset({"penalty", "alm", "artifact"}),
+        )
         self.assertEqual(specs["width_max"].kind, "upper_bound")
-        self.assertEqual(specs["width_max"].applies_to, frozenset({"alm", "artifact"}))
+        self.assertEqual(
+            specs["width_max"].applies_to,
+            frozenset({"penalty", "alm", "artifact"}),
+        )
         self.assertEqual(specs["self_intersect"].kind, "upper_bound")
         self.assertEqual(
             specs["self_intersect"].applies_to,
-            frozenset({"alm", "artifact"}),
+            frozenset({"penalty", "alm", "artifact"}),
         )
         self.assertEqual(specs["self_intersect"].threshold, 0.0)
         self.assertEqual(specs["self_intersect"].alm_scale, 1.0)
@@ -1132,6 +1156,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "width_max",
                 "self_intersect",
                 "banana_current_upper_bound",
+                "lcfs_major_radius",
+                "lcfs_minor_radius",
             ],
         )
         stacked_constraint_names = functions["single_stage_alm_constraint_names"](
@@ -1714,7 +1740,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["COIL_PLASMA_MIN_DIST_M"], 0.015)
         self.assertNotIn("PLASMA_VESSEL_MIN_DIST_M", metadata)
         self.assertEqual(metadata["LENGTH_TARGET"], 1.9)
-        self.assertEqual(metadata["LENGTH_MIN_TARGET"], 0.95)
         self.assertEqual(metadata["WIDTH_MIN_THRESHOLD"], 0.05)
         self.assertEqual(metadata["WIDTH_MAX_THRESHOLD"], 0.17)
         self.assertEqual(metadata["SELF_INTERSECT_THRESHOLD"], 0.0)

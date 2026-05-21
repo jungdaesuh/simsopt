@@ -318,6 +318,27 @@ class _FakeSurfaceWithArrayGradient(_FakeSurfaceWithGradient):
         return np.sum(point_gradient.reshape((-1, 3)), axis=0)
 
 
+class _FakeRadiusSurface(Optimizable):
+    def __init__(self, major_radius, minor_radius, major_grad, minor_grad):
+        self._major_radius = float(major_radius)
+        self._minor_radius = float(minor_radius)
+        self._major_grad = np.asarray(major_grad, dtype=float)
+        self._minor_grad = np.asarray(minor_grad, dtype=float)
+        super().__init__(x0=np.zeros(self._major_grad.size))
+
+    def major_radius(self):
+        return self._major_radius
+
+    def minor_radius(self):
+        return self._minor_radius
+
+    def dmajor_radius_by_dcoeff(self):
+        return self._major_grad.copy()
+
+    def dminor_radius_by_dcoeff(self):
+        return self._minor_grad.copy()
+
+
 class _FakeDerivative:
     def __init__(self, gradient=None):
         if isinstance(gradient, dict) or gradient is None:
@@ -780,7 +801,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(fake_boozer_surface.res["G"], 0.35)
         self.assertTrue(fake_boozer_surface.res["success"])
 
-    def _build_fake_stage2_iota_runtime(self, fake_boozer_surface):
+    def _build_fake_stage2_iota_runtime(
+        self,
+        fake_boozer_surface,
+        *,
+        mode="soft",
+        iota_target=0.2,
+        iota_tolerance=5.0e-3,
+    ):
         class _FakeIotaTerm:
             def __init__(self, boozer_surface):
                 self.boozer_surface = boozer_surface
@@ -791,6 +819,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     self.boozer_surface.run_code(res["iota"], G=res["G"])
                     self.boozer_surface.need_to_run_code = False
                 return float(self.boozer_surface.res["iota"])
+
+            def dJ(self):
+                return np.array([0.2, -0.1], dtype=float)
 
         class _FakeQuadraticPenalty:
             def __init__(self, term, target):
@@ -815,11 +846,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             mpol=8,
             ntor=6,
             vol_target=0.12,
-            iota_target=0.2,
-            iota_tolerance=5.0e-3,
+            iota_target=iota_target,
+            iota_tolerance=iota_tolerance,
             constraint_weight=None,
             num_tf_coils=2,
-            mode="soft",
+            mode=mode,
             weight=3.0,
             build_surface_configs_fn=lambda *_args, **_kwargs: [
                 {
@@ -838,7 +869,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     error_message=None,
                 )
             ),
-            compute_tf_G0_fn=lambda _tf_coils: 0.35,
+            derive_signed_G_fn=lambda _bs, *, tf_coils: 0.35,
             iotas_cls=_FakeIotaTerm,
             quadratic_penalty_cls=_FakeQuadraticPenalty,
         )
@@ -1412,8 +1443,16 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
-            [0.4, 0.002, 5.0e-4, 1.0526315789473685e-3,
-             0.02, 5.882352941176471e-3, 1.0e-6, 6.25e-8],
+            [
+                0.4,
+                0.002,
+                5.0e-4,
+                1.0526315789473685e-3,
+                0.02,
+                5.882352941176471e-3,
+                1.0e-6,
+                6.25e-8,
+            ],
         )
         np.testing.assert_allclose(
             result["constraint_scales"],
@@ -1917,22 +1956,22 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             Jc=Jc,
             banana_current=banana_current,
             banana_current_max_A=16000.0,
-            distance_smoothing=0.005,
-            curvature_smoothing=0.02,
-            multipliers=np.array(
-                [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-            ),
-            penalty=12.0,
-            stage2_constraint_activity_tolerances=lambda ds, cs: [
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.array(
+                    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+                ),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
                 ds * 4.0,
                 cs * 4.0,
-                1e-3,
-                1e-3,
-                1e-3,
-                1e-3,
-                1e-6,
-                1e-3,
-            ],
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
+                    1e-3,
+                ],
             smooth_min_distance_signed_constraint=lambda *_args: (
                 -0.008,
                 np.array([0.6, 0.2]),
@@ -1979,20 +2018,20 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             Jc=Jc,
             banana_current=banana_current,
             banana_current_max_A=16000.0,
-            distance_smoothing=0.005,
-            curvature_smoothing=0.02,
-            multipliers=np.array(
-                [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-            ),
-            penalty=12.0,
-            stage2_constraint_activity_tolerances=lambda ds, cs: [
-                ds * 5.0,
-                cs * 6.0,
-                2e-3,
-                4e-3,
-                5e-3,
-                6e-3,
-                3e-6,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.array(
+                    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+                ),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
+                    ds * 5.0,
+                    cs * 6.0,
+                    2e-3,
+                    4e-3,
+                    5e-3,
+                    6e-3,
+                    3e-6,
                 7e-3,
             ],
             smooth_min_distance_signed_constraint=lambda *_args: (
@@ -2337,6 +2376,116 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(runtime.stats.runtime_calls, 1)
         self.assertGreaterEqual(runtime.stats.runtime_seconds, 0.0)
 
+    def test_build_stage2_iota_runtime_uses_warm_start_surface_seed(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        warm_start_surface = SimpleNamespace(nfp=7)
+        calls = {}
+
+        def fail_build_surface_configs(*_args, **_kwargs):
+            raise AssertionError("warm-start path must not rebuild VMEC surface config")
+
+        def fake_warm_start_loader(path):
+            calls["warm_start_path"] = path
+            return SimpleNamespace(surface=warm_start_surface, iota=0.17654321, G=-2.0)
+
+        def fake_attempt_initialize(
+            surf_prev,
+            _mpol,
+            _ntor,
+            _bs,
+            vol_target,
+            _constraint_weight,
+            iota,
+            G0,
+            *,
+            initial_surface_guess,
+            nfp,
+        ):
+            calls["surf_prev"] = surf_prev
+            calls["target_volume"] = vol_target
+            calls["iota"] = iota
+            calls["G0"] = G0
+            calls["initial_surface_guess"] = initial_surface_guess
+            calls["nfp"] = nfp
+            return SimpleNamespace(
+                success=True,
+                boozer_surface=fake_boozer_surface,
+                solve_success=True,
+                self_intersecting=False,
+                solved_iota=0.21,
+                error_type=None,
+                error_message=None,
+            )
+
+        runtime = self.module.build_stage2_iota_runtime(
+            equilibrium_file="demo.nc",
+            bs=SimpleNamespace(),
+            tf_coils=[object(), object()],
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            nphi=91,
+            ntheta=32,
+            mpol=8,
+            ntor=6,
+            vol_target=0.12,
+            iota_target=0.2,
+            iota_tolerance=5.0e-3,
+            constraint_weight=None,
+            num_tf_coils=2,
+            mode="report",
+            stage2_seed_surf_path="/tmp/warm_surface.json",
+            build_surface_configs_fn=fail_build_surface_configs,
+            attempt_initialize_boozer_surface_fn=fake_attempt_initialize,
+            derive_signed_G_fn=lambda _bs, *, tf_coils: 0.35,
+            warm_start_loader=fake_warm_start_loader,
+            iotas_cls=lambda _surface: SimpleNamespace(J=lambda: 0.21),
+            quadratic_penalty_cls=lambda term, target: SimpleNamespace(
+                J=lambda: 0.5 * (term.J() - target) ** 2,
+                dJ=lambda: np.array([0.2, -0.1], dtype=float),
+            ),
+        )
+
+        self.assertAlmostEqual(runtime.initial_state.iota, 0.21)
+        self.assertEqual(calls["warm_start_path"], "/tmp/warm_surface.json")
+        self.assertIs(calls["surf_prev"], warm_start_surface)
+        self.assertIs(calls["initial_surface_guess"], warm_start_surface)
+        self.assertEqual(calls["nfp"], 7)
+        self.assertAlmostEqual(calls["target_volume"], 0.12)
+        self.assertAlmostEqual(calls["iota"], 0.17654321)
+        self.assertAlmostEqual(calls["G0"], -2.0)
+
+    def test_stage2_iota_alm_floor_does_not_penalize_iota_above_floor(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.23, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(
+            fake_boozer_surface,
+            mode="alm-floor",
+            iota_target=0.2,
+        )
+
+        self.assertAlmostEqual(runtime.initial_state.iota, 0.23)
+        self.assertAlmostEqual(runtime.initial_state.penalty, 0.0)
+        self.assertAlmostEqual(runtime.initial_state.abs_error, 0.03)
+        self.assertTrue(runtime.initial_state.feasible)
+        np.testing.assert_allclose(runtime.penalty_objective.dJ(), [0.0, 0.0])
+
+    def test_stage2_iota_alm_floor_penalizes_only_shortfall(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.17, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(
+            fake_boozer_surface,
+            mode="alm-floor",
+            iota_target=0.2,
+            iota_tolerance=0.005,
+        )
+
+        self.assertAlmostEqual(runtime.initial_state.iota, 0.17)
+        self.assertAlmostEqual(runtime.initial_state.penalty, 0.5 * 0.03 * 0.03)
+        self.assertAlmostEqual(runtime.initial_state.abs_error, 0.03)
+        self.assertFalse(runtime.initial_state.feasible)
+        np.testing.assert_allclose(
+            runtime.penalty_objective.dJ(),
+            [-0.006, 0.003],
+        )
+
     def test_build_stage2_iota_runtime_keeps_failed_bootstrap_as_runtime_state(self):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 3908.0, 0.35)
         fake_boozer_surface.res["success"] = False
@@ -2376,7 +2525,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     error_message=None,
                 )
             ),
-            compute_tf_G0_fn=lambda _tf_coils: 0.35,
+            derive_signed_G_fn=lambda _bs, *, tf_coils: 0.35,
             iotas_cls=lambda _surface: SimpleNamespace(J=lambda: 3908.0),
             quadratic_penalty_cls=lambda term, target: SimpleNamespace(
                 J=lambda: 0.5 * (term.J() - target) ** 2,
@@ -2437,7 +2586,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     error_message=None,
                 )
             ),
-            compute_tf_G0_fn=lambda _tf_coils: 0.35,
+            derive_signed_G_fn=lambda _bs, *, tf_coils: 0.35,
             iotas_cls=lambda surface: SimpleNamespace(
                 J=lambda: float(surface.res["iota"])
             ),
@@ -2505,7 +2654,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     error_message=None,
                 )
             ),
-            compute_tf_G0_fn=lambda _tf_coils: 0.35,
+            derive_signed_G_fn=lambda _bs, *, tf_coils: 0.35,
             iotas_cls=lambda surface: SimpleNamespace(
                 J=lambda: float(surface.res["iota"])
             ),
@@ -3241,7 +3390,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
     def test_evaluate_total_objective_includes_length_floor_penalty(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
         length_max = _FakeAlgebraicObjective(1.0, [0.1, 0.2])
-        length_min = _FakeAlgebraicObjective(2.0, [0.3, 0.4])
+        length_min = _FakeAlgebraicObjective(2.0, [0.3, -0.4])
 
         result = self.module.evaluate_total_objective(
             np.array([1.0]),
@@ -3264,7 +3413,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["total"], 15.0)
         self.assertAlmostEqual(result["J_len"], 1.0)
         self.assertAlmostEqual(result["J_len_min"], 2.0)
-        np.testing.assert_allclose(result["grad"], [2.0, 3.0])
+        np.testing.assert_allclose(result["grad"], [2.0, -1.0])
 
     def test_evaluate_total_objective_includes_self_intersect_term(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
@@ -3642,6 +3791,67 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             self.assertEqual(gradient.shape, (2,))
             self.assertTrue(np.all(np.isfinite(gradient)))
         self.assertGreater(np.linalg.norm(result["raw_constraint_grads"][2]), 0.0)
+
+    def test_evaluate_alm_objective_includes_lcfs_radius_constraints(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        lcfs_surface = _FakeRadiusSurface(
+            major_radius=0.923,
+            minor_radius=0.151,
+            major_grad=[2.0, -1.0],
+            minor_grad=[0.5, 0.25],
+        )
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.0, 0.0]),
+            penalty=1.0,
+            objective_optimizable=lcfs_surface,
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface=lcfs_surface,
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=("lcfs_major_radius", "lcfs_minor_radius"),
+            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curvature_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            activity_tolerances_fn=lambda *_args, **_kwargs: np.array(
+                [0.0, 0.0, 0.0],
+                dtype=float,
+            ),
+            lcfs_surface=lcfs_surface,
+            lcfs_major_radius_threshold=0.920,
+            lcfs_minor_radius_threshold=0.150,
+        )
+
+        self.assertEqual(
+            result["constraint_names"],
+            ["lcfs_major_radius", "lcfs_minor_radius"],
+        )
+        np.testing.assert_allclose(result["raw_constraint_values"], [0.003, 0.001])
+        np.testing.assert_allclose(
+            result["raw_constraint_grads"],
+            [[2.0, -1.0], [0.5, 0.25]],
+        )
+        self.assertEqual(result["constraint_blocks"], ["surface", "surface"])
+        self.assertEqual(result["objective_value_kinds"], ["hard", "hard"])
+        self.assertEqual(result["gradient_value_kinds"], ["hard", "hard"])
+        self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard"])
 
     def test_evaluate_alm_objective_uses_hard_surface_stack_for_dual_signal(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
@@ -4285,9 +4495,21 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             VOLUME_WEIGHT=0.0,
             JCurveLength=jlength,
             LENGTH_WEIGHT=1.0,
-            JCurveCurve=_FakeAlgebraicObjective(0.6, [0.3, 0.4]),
-            JCurveSurface=_FakeAlgebraicObjective(0.7, [0.5, 0.6]),
-            JCurvature=_FakeAlgebraicObjective(0.8, [0.7, 0.8]),
+            JCurveCurve=_FakeAlgebraicObjective(
+                0.6,
+                [0.3, 0.4],
+                [0.3, 0.4, 0.0, 0.0],
+            ),
+            JCurveSurface=_FakeAlgebraicObjective(
+                0.7,
+                [0.5, 0.6],
+                [0.5, 0.6, 0.0, 0.0],
+            ),
+            JCurvature=_FakeAlgebraicObjective(
+                0.8,
+                [0.7, 0.8],
+                [0.7, 0.8, 0.0, 0.0],
+            ),
             multipliers=np.array([0.1, 0.2, 0.3]),
             penalty=9.0,
             objective_optimizable=objective,
@@ -4327,8 +4549,78 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         )
 
         np.testing.assert_allclose(result["grad"], [9.0, -2.0, 0.0, 0.0])
+        np.testing.assert_allclose(result["dJ_cc"], [0.3, 0.4, 0.0, 0.0])
+        np.testing.assert_allclose(result["dJ_cs"], [0.5, 0.6, 0.0, 0.0])
+        np.testing.assert_allclose(result["dJ_curvature"], [0.7, 0.8, 0.0, 0.0])
 
-    def test_evaluate_alm_objective_enforces_coil_length_floor_constraint(self):
+    def test_evaluate_alm_objective_enforces_coil_length_upper_bound_constraint(self):
+        objective = SimpleNamespace(name="full")
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0], [0.0, 0.0, 0.0, 0.0])
+        raw_length = _FakeAlgebraicObjective(
+            0.8,
+            [0.2, -0.1],
+            [0.2, -0.1, 0.0, 0.0],
+        )
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.0]),
+            penalty=1.0,
+            objective_optimizable=objective,
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=("coil_length_upper_bound",),
+            curve_curve_constraint_fn=lambda *_args: (
+                0.0,
+                np.array([0.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            curve_surface_constraint_fn=lambda *_args: (
+                0.0,
+                np.array([0.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            curvature_constraint_fn=lambda *_args: (
+                0.0,
+                np.array([0.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            activity_tolerances_fn=lambda ds, cs, include_surface_stack=False: np.array(
+                [ds, ds, cs],
+                dtype=float,
+            ),
+            coil_length_objective=raw_length,
+            coil_length_threshold=0.75,
+        )
+
+        self.assertEqual(result["constraint_names"], ["coil_length_upper_bound"])
+        self.assertAlmostEqual(result["coil_length_upper_bound_threshold"], 0.75)
+        np.testing.assert_allclose(result["raw_constraint_values"], [0.05])
+        np.testing.assert_allclose(result["raw_feasibility_values"], [0.05])
+        np.testing.assert_allclose(
+            result["raw_constraint_grads"][0],
+            [0.2, -0.1, 0.0, 0.0],
+        )
+
+    def test_evaluate_alm_objective_enforces_coil_length_lower_bound_constraint(self):
         objective = SimpleNamespace(name="full")
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0], [0.0, 0.0, 0.0, 0.0])
         raw_length = _FakeAlgebraicObjective(
@@ -4392,7 +4684,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(result["raw_feasibility_values"], [0.15])
         np.testing.assert_allclose(
             result["raw_constraint_grads"][0],
-            [-0.2, 0.1, 0.0, 0.0],
+            [-0.2, 0.1, -0.0, -0.0],
         )
 
     def test_evaluate_alm_objective_thresholded_physics_formulation_promotes_physics_terms_to_constraints(

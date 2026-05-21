@@ -453,6 +453,11 @@ def evaluate_single_stage_search_hardware_snapshot(
     tf_current_limit_A=None,
     banana_current_A=None,
     banana_current_max_A=None,
+    coil_width=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    self_intersect_penalty=None,
+    self_intersect_threshold=None,
 ):
     signed_values = _constraint_signed_value_by_name(objective_eval)
     payload_kind = objective_eval["search_hardware_constraint_payload_kind"]
@@ -501,6 +506,9 @@ def evaluate_single_stage_search_hardware_snapshot(
             ("coil_surface_spacing", cs_dist),
             ("max_curvature", curvature_threshold),
             ("poloidal_extent", poloidal_extent_threshold_rad),
+            ("width_min", width_min_threshold),
+            ("width_max", width_max_threshold),
+            ("self_intersect", self_intersect_threshold),
             ("banana_current", banana_current_max_A),
         )
     )
@@ -510,6 +518,9 @@ def evaluate_single_stage_search_hardware_snapshot(
         "max_curvature": max_curvature,
         "coil_length": coil_length,
         "poloidal_extent": poloidal_extent_rad,
+        "width_min": coil_width,
+        "width_max": coil_width,
+        "self_intersect": self_intersect_penalty,
         "tf_current": tf_current_A,
         "banana_current": banana_current_A,
     }
@@ -534,6 +545,11 @@ def evaluate_single_stage_search_hardware_snapshot(
             "poloidal_extent_threshold_rad": _optional_float(
                 poloidal_extent_threshold_rad
             ),
+            "coil_width": _optional_float(coil_width),
+            "width_min_threshold": _optional_float(width_min_threshold),
+            "width_max_threshold": _optional_float(width_max_threshold),
+            "self_intersect_penalty": _optional_float(self_intersect_penalty),
+            "self_intersect_threshold": _optional_float(self_intersect_threshold),
             "tf_current_A": _optional_float(tf_current_A),
             "tf_current_limit_A": _optional_float(tf_current_limit_A),
             "banana_current_A": _optional_float(banana_current_A),
@@ -561,6 +577,11 @@ def evaluate_single_stage_search_hardware_snapshot(
         "poloidal_extent_threshold_rad": _optional_float(
             poloidal_extent_threshold_rad
         ),
+        "coil_width": _optional_float(coil_width),
+        "width_min_threshold": _optional_float(width_min_threshold),
+        "width_max_threshold": _optional_float(width_max_threshold),
+        "self_intersect_penalty": _optional_float(self_intersect_penalty),
+        "self_intersect_threshold": _optional_float(self_intersect_threshold),
         "tf_current_A": _optional_float(tf_current_A),
         "tf_current_limit_A": _optional_float(tf_current_limit_A),
         "banana_current_A": _optional_float(banana_current_A),

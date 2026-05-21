@@ -89,7 +89,10 @@ from banana_opt.alm_adaptive_smoothing import (
     ALM_SMOOTHING_FLOOR_FRACTION as _ALM_SMOOTHING_FLOOR_FRACTION,
     adapt_alm_smoothing_from_history,
 )
-from banana_opt.boozer_finite_current import BoozerSurfaceFiniteI
+from banana_opt.boozer_finite_current import (
+    BoozerSurfaceFiniteI,
+    derive_signed_G_from_field,
+)
 from banana_opt.boozer_residuals import (  # noqa: F401 - re-exported for importlib-loaded tests
     BoozerResidualExact,
     RefinedBoozerResidual,
@@ -169,6 +172,8 @@ from banana_opt.hardware_contracts import (
     SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT,
     SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT,
     SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT,
+    TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+    TARGET_LCFS_MAX_MINOR_RADIUS_M,
     TF_CURRENT_CW_DEFAULT_A,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
@@ -231,6 +236,7 @@ from banana_opt.stage2_single_stage_handoff import (
     validate_loaded_stage2_coils_partition as _validate_loaded_stage2_coils_partition_impl,
     validate_stage2_seed_bootability_contract as _validate_stage2_seed_bootability_contract_impl,
     validate_stage2_seed_contract as _validate_stage2_seed_contract_impl,
+    validate_stage2_seed_recovery_contract as _validate_stage2_seed_recovery_contract_impl,
 )
 from banana_opt.single_stage_geometry import (
     build_scipy_bounds,
@@ -1015,6 +1021,19 @@ def apply_default_stage2_seed_args(args):
             args.stage2_seed_major_radius,
             accept_offspec_r0_seed=args.accept_offspec_r0_seed,
         )
+    launch_tf_current_A = getattr(args, "tf_current_A", None)
+    if launch_tf_current_A is not None:
+        if args.stage2_seed_tf_current_A is not None and not np.isclose(
+            float(args.stage2_seed_tf_current_A),
+            float(launch_tf_current_A),
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            raise ValueError(
+                "--tf-current-A and --stage2-seed-tf-current-A must match for "
+                "single-stage replay."
+            )
+        args.stage2_seed_tf_current_A = float(launch_tf_current_A)
 
     plasma_profile = DEFAULT_STAGE2_SEEDS_BY_PLASMA.get(
         args.plasma_surf_filename,
@@ -1495,6 +1514,28 @@ def parse_args():
         help="Curvature smooth-max temperature for single-stage ALM curvature constraints.",
     )
     parser.add_argument(
+        "--alm-fix-signal-mismatch-guard",
+        action="store_true",
+        default=os.environ.get("ALM_FIX_SIGNAL_MISMATCH_GUARD", "0") not in (
+            "",
+            "0",
+            "false",
+            "False",
+        ),
+        help=(
+            "Opt-in rollout flag: align the post-inner ALM signal-mismatch arm "
+            "with the documented hybrid-signal contract by routing through the "
+            "existing dual-update transition when signal_mismatch_active AND "
+            "hard_feasible_for_update AND the surrogate carries a positive "
+            "shift. When unset (default), behavior is unchanged: the "
+            "signal-mismatch arm bumps the penalty as in prior releases. The "
+            "converged-gate false-success guards at alm_utils.py:4624/4660 "
+            "remain coupled to signal_mismatch_active regardless of this "
+            "flag. See docs/alm_hybrid_signal_contract_2026-05-08.md "
+            "lines 37-41."
+        ),
+    )
+    parser.add_argument(
         "--alm-formulation",
         choices=["weighted_sum", "thresholded_physics"],
         default=os.environ.get("ALM_FORMULATION", "weighted_sum"),
@@ -1576,6 +1617,15 @@ def parse_args():
         help="Negate --iota-target for mirror-flipped banana-coil seeds.",
     )
     parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
+    parser.add_argument(
+        "--tf-current-A",
+        type=float,
+        default=float(os.environ["TF_CURRENT_A"]) if "TF_CURRENT_A" in os.environ else None,
+        help=(
+            "Signed TF current for the launched single-stage lane. Must match "
+            "--stage2-seed-tf-current-A when both are supplied."
+        ),
+    )
     parser.add_argument(
         "--boozer-stage",
         choices=["initial", "final"],
@@ -1832,8 +1882,9 @@ def parse_args():
         default=os.environ.get("STAGE2_SEED_ROLE", "handoff"),
         help=(
             "Validation role for --stage2-bs-path. 'handoff' requires a hardware-clean "
-            "and bootable Stage 2 seed; 'recovery' requires the hardware seed contract "
-            "only so the bounded Stage 2.5 recovery lane can repair bootability."
+            "and bootable Stage 2 seed; 'recovery' allows traversal-policy geometry "
+            "violations while still requiring complete metadata and non-traversable "
+            "current constraints."
         ),
     )
     parser.add_argument(
@@ -2285,7 +2336,7 @@ def current_single_stage_hardware_snapshot_kwargs(
 
 
 def current_single_stage_search_hardware_snapshot_kwargs():
-    return current_single_stage_common_hardware_snapshot_kwargs()
+    return current_single_stage_hardware_snapshot_kwargs()
 
 
 def current_single_stage_alm_banana_current():
@@ -3239,9 +3290,11 @@ def single_stage_alm_constraint_names(
     available_names = {
         "coil_coil_spacing",
         "coil_surface_spacing",
-        "coil_length_min",
         "max_curvature",
+        "coil_length_min",
         "poloidal_extent",
+        "lcfs_major_radius",
+        "lcfs_minor_radius",
         "width_min",
         "width_max",
         "self_intersect",
@@ -3895,19 +3948,23 @@ def build_boozer_derived_objective_terms(
         for index, surface in enumerate(boozer_surfaces)
     ]
     boozer_residual_cls = boozer_residual_class_for_stage(stage)
-    boozer_residual_kwargs = (
-        {}
-        if boozer_residual_cls is BoozerResidualExact
-        else {"threshold": boozer_residual_threshold}
-    )
-    brs = [
-        boozer_residual_cls(
-            surface,
-            boozer_objective_biot_savarts[index],
-            **boozer_residual_kwargs,
+    brs = []
+    for index, surface in enumerate(boozer_surfaces):
+        boozer_residual_kwargs = (
+            {}
+            if boozer_residual_cls is BoozerResidualExact
+            else {
+                "include_label_constraint": surface.constraint_weight is not None,
+                "threshold": boozer_residual_threshold,
+            }
         )
-        for index, surface in enumerate(boozer_surfaces)
-    ]
+        brs.append(
+            boozer_residual_cls(
+                surface,
+                boozer_objective_biot_savarts[index],
+                **boozer_residual_kwargs,
+            )
+        )
     return {
         "boozer_objective_biot_savarts": boozer_objective_biot_savarts,
         "surface_iota_terms": surface_iota_terms,
@@ -4481,7 +4538,6 @@ def evaluate_base_objective(
     LENGTH_WEIGHT,
     *,
     include_diagnostics=True,
-    JCurveLengthMin=None,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return _evaluate_base_objective_impl(
@@ -4501,7 +4557,6 @@ def evaluate_base_objective(
         JNonQSObjective=objective_terms["JNonQSObjective"],
         JBoozerObjective=objective_terms["JBoozerObjective"],
         include_diagnostics=include_diagnostics,
-        JCurveLengthMin=JCurveLengthMin,
     )
 
 
@@ -4523,7 +4578,6 @@ def evaluate_alm_objective(
     JCoilWidth=None,
     JCurveSelfIntersect=None,
     include_diagnostics=True,
-    JCurveLengthMin=None,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     distance_smoothing, curvature_smoothing = current_alm_smoothing()
@@ -4599,10 +4653,12 @@ def evaluate_alm_objective(
             width_min_threshold=BANANA_WIDTH_MIN_M,
             width_max_threshold=BANANA_WIDTH_MAX_M,
             JCurveSelfIntersect=JCurveSelfIntersect,
+            lcfs_surface=outer_surface_data["boozer_surface"].surface,
+            lcfs_major_radius_threshold=TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+            lcfs_minor_radius_threshold=TARGET_LCFS_MAX_MINOR_RADIUS_M,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
             include_diagnostics=include_diagnostics,
-            JCurveLengthMin=JCurveLengthMin,
         ),
         alm_formulation=args.alm_formulation,
     )
@@ -4631,7 +4687,6 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 JCoilWidth=JCoilWidth,
                 JCurveSelfIntersect=JCurveSelfIntersect,
                 include_diagnostics=include_diagnostics,
-                JCurveLengthMin=JCurveLengthMin,
             )
         )
     return annotate_frontier_search_eval(
@@ -4715,6 +4770,9 @@ def build_single_stage_alm_settings(args):
         trust_radius_shrink=args.alm_trust_radius_shrink,
         trust_radius_grow=args.alm_trust_radius_grow,
         max_inner_attempts=args.alm_max_inner_attempts,
+        prefer_dual_update_on_signal_mismatch=bool(
+            getattr(args, "alm_fix_signal_mismatch_guard", False)
+        ),
     )
 
 
@@ -8292,6 +8350,7 @@ _ALM_SMOOTHING_LOCK = RLock()
 JVolume = None
 JnonQSRatioObjective = None
 JBoozerResidualObjective = None
+JCurveLengthMin = None
 JPoloidalExtent = None
 JCoilWidth = None
 JCurveSelfIntersect = None
@@ -8317,6 +8376,10 @@ CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.2
 
 def validate_stage2_seed_contract(stage2_results):
     _validate_stage2_seed_contract_impl(stage2_results)
+
+
+def validate_stage2_seed_recovery_contract(stage2_results):
+    _validate_stage2_seed_recovery_contract_impl(stage2_results)
 
 
 def validate_stage2_seed_bootability_contract(stage2_results):
@@ -8357,6 +8420,8 @@ if __name__ == "__main__":
             stage2_results,
             accept_offspec_r0_seed=args.accept_offspec_r0_seed,
         )
+    elif args.stage2_seed_role == "recovery":
+        validate_stage2_seed_recovery_contract(stage2_results)
     else:
         validate_stage2_seed_contract(stage2_results)
     if (
@@ -8614,8 +8679,10 @@ if __name__ == "__main__":
     # infeasible traversal during the search itself.
     # Keep the toroidal-current seed tied to the TF bundle only. Extra Wataru
     # proxy/VF coils shape the field through the loaded Biot-Savart object and
-    # should not perturb G0 a second time here.
-    G0 = compute_tf_G0(tf_coils)
+    # should not perturb G0 a second time here. The bs-aware SSOT helper
+    # additionally verifies that ``tf_coils`` is the TF subset of ``bs.coils``
+    # before producing the signed seed (blocks the sign-blind upstream fallback).
+    G0 = derive_signed_G_from_field(bs, tf_coils=tf_coils)
 
     # ==============================================================================
     # OPTIMIZATION SETUP
@@ -9856,7 +9923,6 @@ if __name__ == "__main__":
             IOTAS_WEIGHT,
             JCurveLength,
             LENGTH_WEIGHT,
-            JCurveLengthMin=JCurveLengthMin,
         )
 
         # Save optimized coil configurations

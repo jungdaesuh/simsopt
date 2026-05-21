@@ -353,11 +353,14 @@ def hardware_violation_ratios(
         if _is_diagnostic_hardware_ratio_name(str(name)):
             continue
         threshold = abs(float(entry["threshold"]))
+        violation = float(entry["violation"])
         if threshold > 0.0:
             ratios[str(name)] = float(entry["violation"]) / max(
                 threshold,
                 FINITE_EPS,
             )
+        elif violation > 0.0:
+            ratios[str(name)] = violation
     explicit_ratios = hardware_status.get("violation_ratios")
     if explicit_ratios is not None:
         for name, value in dict(explicit_ratios).items():
