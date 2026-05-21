@@ -871,6 +871,29 @@ def test_as_runtime_float64_uses_runtime_policy_dtype_for_host_values():
         assert value32.dtype == jnp.float32
 
 
+def test_as_runtime_float64_places_host_values_on_reference_sharding(monkeypatch):
+    from simsopt.backend import dtypes
+    from simsopt.backend.dtypes import as_runtime_float64
+
+    reference = jax.device_put(np.asarray([0.0], dtype=np.float64))
+    original_device_put = dtypes.jax.device_put
+    placements = []
+
+    def recording_device_put(value, *args, **kwargs):
+        placements.append(args[0] if args else kwargs.get("device"))
+        return original_device_put(value, *args, **kwargs)
+
+    monkeypatch.setattr(dtypes.jax, "device_put", recording_device_put)
+
+    value = as_runtime_float64(
+        np.asarray([1.0, 2.0], dtype=np.float64),
+        reference=reference,
+    )
+
+    assert placements[-1] is reference.sharding
+    assert value.sharding == reference.sharding
+
+
 def test_as_runtime_float64_alias_does_not_gate_on_host_reference_dtype():
     from simsopt.backend.dtypes import as_runtime_float64
 

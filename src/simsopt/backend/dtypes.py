@@ -35,6 +35,26 @@ def _has_jax_array_value(value) -> bool:
     return isinstance(value, (list, tuple)) and _contains_jax_leaves(value)
 
 
+def _contains_concrete_jax_leaves(value) -> bool:
+    return any(isinstance(leaf, jax.Array) for leaf in jax.tree.leaves(value))
+
+
+def _has_only_traced_jax_leaves(value) -> bool:
+    return _has_jax_array_value(value) and not _contains_concrete_jax_leaves(value)
+
+
+def _reference_sharding(reference):
+    if isinstance(reference, jax.Array):
+        return getattr(reference, "sharding", None)
+    if isinstance(reference, (list, tuple)):
+        for leaf in jax.tree.leaves(reference):
+            if isinstance(leaf, jax.Array):
+                sharding = getattr(leaf, "sharding", None)
+                if sharding is not None:
+                    return sharding
+    return None
+
+
 def _array_like_dtype(value) -> np.dtype | None:
     dtype = getattr(value, "dtype", None)
     if dtype is not None:
@@ -161,8 +181,11 @@ def as_jax_int32(value) -> jax.Array:
 
 
 def as_runtime_array(value, *, dtype=None, reference=None):
-    del reference
-    return as_jax_array(value, dtype=_resolve_jnp_dtype(dtype, source="dtype"))
+    resolved_dtype = _resolve_jnp_dtype(dtype, source="dtype")
+    reference_sharding = _reference_sharding(reference)
+    if reference_sharding is not None and not _has_only_traced_jax_leaves(value):
+        return runtime_device_put(value, dtype=resolved_dtype, target=reference_sharding)
+    return as_jax_array(value, dtype=resolved_dtype)
 
 
 def as_runtime_value(value, *, reference, dtype=None):
@@ -171,8 +194,7 @@ def as_runtime_value(value, *, reference, dtype=None):
 
 
 def as_runtime_float64(value, *, reference):
-    del reference
-    return as_runtime_array(value)
+    return as_runtime_array(value, reference=reference)
 
 
 def require_runtime_dtype(name: str, value, *, dtype=None) -> None:
