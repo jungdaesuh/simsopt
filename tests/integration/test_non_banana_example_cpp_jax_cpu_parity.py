@@ -47,6 +47,8 @@ from benchmarks import non_banana_example_cpp_jax_cpu_parity as harness  # noqa:
 from benchmarks import non_banana_example_parity_fixtures as fixtures  # noqa: E402
 from benchmarks.validation_ladder_contract import (  # noqa: E402
     PARITY_LADDER_TOLERANCES,
+    comparison_failure_gates_verdict,
+    comparison_failure_is_diagnostic,
 )
 
 
@@ -57,6 +59,7 @@ def _subprocess_env(*, jax_platforms: str, jax_enable_x64: str) -> dict[str, str
     env = os.environ.copy()
     env["JAX_PLATFORMS"] = jax_platforms
     env["JAX_ENABLE_X64"] = jax_enable_x64
+    env.pop("SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM", None)
     return env
 
 
@@ -128,7 +131,6 @@ print(json.dumps({
 """
     env = _subprocess_env(jax_platforms="cuda,cpu", jax_enable_x64="0")
     env["SIMSOPT_JAX_PLATFORM"] = "cuda"
-    env["SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM"] = "cuda"
     completed = subprocess.run(
         [sys.executable, "-c", code],
         cwd=REPO_ROOT,
@@ -162,7 +164,9 @@ def test_cli_help_describes_cuda_followup_without_cpu_only_description():
 
     normalized_help = " ".join(completed.stdout.split())
     assert "Run the non-banana example CPU C++/JAX parity harness." in normalized_help
-    assert "CUDA follow-up runs use cpu_cpp,jax_gpu" in normalized_help
+    assert "Accelerator follow-up runs use cpu_cpp,jax_gpu or cpu_cpp,jax_mps" in (
+        normalized_help
+    )
 
 
 def test_cli_minimal_fixture_uses_current_source_tree(tmp_path):
@@ -214,6 +218,52 @@ def test_cli_rejects_jax_gpu_lane_on_cpu_backend(tmp_path):
     assert "jax_gpu lane requires --baseline-json" in completed.stderr
 
 
+def test_cli_rejects_jax_mps_lane_without_baseline(tmp_path):
+    output_path = tmp_path / "mps.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "benchmarks/non_banana_example_cpp_jax_cpu_parity.py"),
+            "--fixtures",
+            "surface_area_volume_simple",
+            "--lanes",
+            "jax_mps",
+            "--output-json",
+            str(output_path),
+        ],
+        cwd=REPO_ROOT,
+        env=_subprocess_env(jax_platforms="cpu", jax_enable_x64="1"),
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    assert "jax_mps lane requires --baseline-json" in completed.stderr
+
+
+def test_cli_rejects_mps_platform_without_mps_lane(tmp_path):
+    output_path = tmp_path / "cpu.json"
+    env = _subprocess_env(jax_platforms="cpu", jax_enable_x64="1")
+    env["SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM"] = "mps"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "benchmarks/non_banana_example_cpp_jax_cpu_parity.py"),
+            "--fixtures",
+            "surface_area_volume_simple",
+            "--lanes",
+            "cpu_cpp,jax_cpu",
+            "--output-json",
+            str(output_path),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    assert "requires lane 'jax_mps'" in completed.stderr
+
+
 def test_jax_gpu_lane_with_baseline_rejects_cpu_runtime(tmp_path):
     baseline_path = tmp_path / "baseline.json"
     baseline_path.write_text(
@@ -225,6 +275,21 @@ def test_jax_gpu_lane_with_baseline_rejects_cpu_runtime(tmp_path):
         harness.run_fixtures(
             ("surface_area_volume_simple",),
             lanes=("cpu_cpp", "jax_gpu"),
+            baseline_json=baseline_path,
+        )
+
+
+def test_jax_mps_lane_with_baseline_rejects_cpu_runtime(tmp_path):
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(
+        json.dumps({"schema_version": fixtures.SCHEMA_VERSION, "fixtures": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="explicit MPS smoke environment"):
+        harness.run_fixtures(
+            ("surface_area_volume_simple",),
+            lanes=("cpu_cpp", "jax_mps"),
             baseline_json=baseline_path,
         )
 
@@ -268,6 +333,55 @@ def test_gpu_runtime_metadata_emits_declared_transfer_guard(monkeypatch):
     assert runtime["compute_capability"] == "9.0"
 
 
+def test_mps_runtime_metadata_records_float32_only_authority(monkeypatch):
+    monkeypatch.setattr(
+        harness,
+        "_jax_devices_metadata",
+        lambda: [{"platform": "mps", "device_kind": "unit-test-mps"}],
+    )
+    monkeypatch.setattr(
+        harness,
+        "_jax_platform_versions",
+        lambda: ("mps plugin test",),
+    )
+    monkeypatch.setattr(
+        harness.importlib_metadata,
+        "version",
+        lambda name: "0.10.1" if name == "jax-mps" else "unexpected",
+    )
+    monkeypatch.setattr(
+        harness,
+        "_runtime_policy_metadata",
+        lambda: {
+            "backend_mode": "jax_mps_smoke",
+            "runtime_dtype": "float32",
+            "host_dtype": "float32",
+            "tolerance_tier": "float32_smoke",
+            "parity_mode": False,
+        },
+    )
+    monkeypatch.setattr(harness, "get_transfer_guard", lambda: "disallow")
+    monkeypatch.setattr(
+        harness,
+        "_mps_transfer_guard_probe",
+        lambda: {"status": "pass", "mode": "disallow"},
+    )
+
+    runtime = harness._mps_runtime_metadata()
+
+    assert runtime["backend_mode"] == "jax_mps_smoke"
+    assert runtime["runtime_dtype"] == "float32"
+    assert runtime["host_dtype"] == "float32"
+    assert runtime["tolerance_tier"] == "float32_smoke"
+    assert runtime["parity_mode"] is False
+    assert runtime["jax_mps_version"] == "0.10.1"
+    assert runtime["transfer_guard"] == "disallow"
+    assert runtime["compute_transfer_guard"] == "disallow"
+    authority = runtime["float64_production_lane_exclusion"]
+    assert authority["source"] == "tillahoffmann/jax-mps README"
+    assert authority["constraint"] == "MLX only supports float32."
+
+
 def test_jax_gpu_lane_jsonable_is_not_proven_by_name_only():
     lane = fixtures.LaneArtifact(
         lane="jax_cpu",
@@ -296,6 +410,46 @@ def test_jax_gpu_lane_jsonable_is_not_proven_by_name_only():
 
     assert payload["lane"] == "jax_gpu"
     assert payload["gpu_readiness"]["gpu_proven"] is False
+
+
+def test_cpu_float32_smoke_import_config_disables_x64(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_float32_smoke")
+
+    assert harness._requested_jax_enable_x64("cpu") == "0"
+    assert harness._requested_jax_enable_x64("mps") == "0"
+    assert harness._requested_jax_enable_x64("cuda") == "1"
+
+
+def test_lane_json_records_numeric_contract_and_finiteness(monkeypatch):
+    lane = fixtures.LaneArtifact(
+        lane="cpu_cpp",
+        objective_total=1.0,
+        objective_native_subtotal=1.0,
+        components={"component": 1.0},
+        gradient=np.asarray([1.0], dtype=np.float64),
+        gradient_norm=1.0,
+        active_dof_names=("x",),
+        active_dof_hash="active",
+        fixed_free_mask_hash="mask",
+        native_curve_spec_hashes=(),
+        surface_point_hash="surface",
+        unit_normal_hash="normal",
+        field_B_hash="field",
+        field_B_max=1.0,
+        field_B_mean=1.0,
+        Bdotn_array_hash="bdotn",
+        Bdotn_max=1.0,
+        Bdotn_mean=1.0,
+        raw_arrays={"field_B": np.asarray([1.0], dtype=np.float64)},
+        timing={},
+    )
+    monkeypatch.setattr(harness, "_runtime_host_np_dtype", lambda: np.dtype(np.float32))
+
+    payload = harness._lane_to_jsonable(lane)
+
+    assert payload["numeric_contract"]["source_precision"] == "float64_oracle"
+    assert payload["numeric_contract"]["artifact_dtype"] == "float32"
+    assert payload["finite_summary"]["all_finite"] is True
 
 
 def test_lane_selection_filters_emitted_lanes_and_pairwise_comparisons(tmp_path):
@@ -383,6 +537,148 @@ def test_jax_cpu_vs_jax_gpu_comparisons_reuse_cpu_baseline_right_values():
     assert entry["jax_cpu_value"] == 1.0
     assert entry["jax_gpu_value"] == 1.0
     assert entry["verdict"] == "pass"
+
+
+def test_jax_cpu_vs_jax_mps_comparisons_reuse_cpu_baseline_right_values():
+    baseline_entry = {
+        "fixture_id": "surface_area_volume_simple",
+        "dof_contract": {"fixture_input_hash": "fixture-hash"},
+        "comparisons": {
+            "cpu_cpp_vs_jax_cpu": [
+                {
+                    "quantity": "area",
+                    "component": "surface_scalar",
+                    "jax_cpu_value": 1.0,
+                }
+            ]
+        },
+    }
+    mps_result = harness.FixtureResult(
+        fixture_id="surface_area_volume_simple",
+        source_example="examples/1_Simple/surf_vol_area.py",
+        classification=fixtures.SUPPORTED,
+        classification_reason="",
+        fixture_inputs={},
+        dof_contract={"fixture_input_hash": "fixture-hash"},
+        native_spec_contract={},
+        lanes={},
+        comparisons={
+            "cpu_cpp_vs_jax_mps": [
+                {
+                    "quantity": "area",
+                    "component": "surface_scalar",
+                    "jax_mps_value": 1.0,
+                }
+            ]
+        },
+        unsupported_components=(),
+        mixed_lane_diagnostics=(),
+        perturbation_diagnostics=None,
+        verdict="pass",
+        passed=True,
+        failures=(),
+    )
+
+    comparisons = harness._jax_cpu_vs_followup_comparisons(
+        baseline_entry=baseline_entry,
+        followup_result=mps_result,
+        followup_lane_name="jax_mps",
+    )
+
+    assert len(comparisons) == 1
+    entry = comparisons[0]
+    assert entry["left_lane"] == "jax_cpu"
+    assert entry["right_lane"] == "jax_mps"
+    assert entry["jax_cpu_value"] == 1.0
+    assert entry["jax_mps_value"] == 1.0
+    assert entry["verdict"] == "pass"
+
+
+def test_mps_followup_comparisons_use_runtime_host_dtype(monkeypatch):
+    monkeypatch.setattr(harness, "_runtime_host_np_dtype", lambda: np.dtype(np.float32))
+
+    entry = harness._compare_json_values(
+        left_value=np.asarray([1.00000001], dtype=np.float64),
+        right_value=np.asarray([1.0], dtype=np.float64),
+        quantity="field_B",
+        component="biot_savart",
+        left_lane="cpu_cpp",
+        right_lane="jax_mps",
+    )
+
+    assert entry["verdict"] == "pass"
+    assert entry["cpu_cpp_value"] == [1.0]
+    assert entry["jax_mps_value"] == [1.0]
+
+
+def test_float32_smoke_tolerance_tier_routes_by_quantity(monkeypatch):
+    monkeypatch.setattr(harness, "get_tolerance_tier", lambda: "float32_smoke")
+
+    bucket, rtol, atol = harness._tolerance_for("field_B")
+    assert bucket == "float32_smoke"
+    assert rtol == pytest.approx(1e-5)
+    assert atol == pytest.approx(1e-6)
+
+    bucket, rtol, atol = harness._tolerance_for("SquaredFlux")
+    assert bucket == "float32_smoke"
+    assert rtol == pytest.approx(1e-4)
+    assert atol == pytest.approx(1e-6)
+
+    bucket, rtol, atol = harness._tolerance_for("gradient")
+    assert bucket == "float32_smoke"
+    assert rtol == pytest.approx(1e-3)
+    assert atol == pytest.approx(1e-5)
+
+
+def test_unknown_runtime_tolerance_tier_fails_closed(monkeypatch):
+    monkeypatch.setattr(harness, "get_tolerance_tier", lambda: "smoke")
+
+    with pytest.raises(RuntimeError, match="Unsupported runtime tolerance tier"):
+        harness._tolerance_for("field_B")
+
+
+def test_float32_smoke_keeps_gradient_as_diagnostic_failure(monkeypatch):
+    monkeypatch.setattr(harness, "get_tolerance_tier", lambda: "float32_smoke")
+
+    field_entry = harness._compare_array(
+        cpu_arr=np.asarray([0.0], dtype=np.float64),
+        jax_arr=np.asarray([2.384185791015625e-7], dtype=np.float64),
+        quantity="field_B",
+        component="biot_savart",
+        active_dof_names=(),
+    )
+    objective_entry = harness._compare_scalar(
+        cpu_value=0.03307057172060013,
+        jax_value=0.03307057544589043,
+        quantity="SquaredFlux",
+        component="SquaredFlux",
+    )
+    gradient_entry = harness._compare_array(
+        cpu_arr=np.asarray([0.017615], dtype=np.float64),
+        jax_arr=np.asarray([0.018186852549910546], dtype=np.float64),
+        quantity="gradient",
+        component="SquaredFlux",
+        active_dof_names=("x",),
+    )
+
+    assert field_entry["verdict"] == "pass"
+    assert objective_entry["verdict"] == "pass"
+    assert gradient_entry["verdict"] == "fail"
+    assert gradient_entry["diagnostic_only"] is True
+    assert (
+        gradient_entry["diagnostic_reason"]
+        == "float32_smoke_gradient_not_production_parity_gate"
+    )
+    assert comparison_failure_is_diagnostic(gradient_entry)
+    assert not comparison_failure_gates_verdict(gradient_entry)
+
+
+def test_followup_comparison_requires_exact_lane_value_key():
+    with pytest.raises(KeyError, match="jax_mps_value"):
+        harness._right_value_for_comparison(
+            {"right_value": 1.0},
+            lane_name="jax_mps",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -987,9 +1283,6 @@ def test_wireframe_gsco_multistep_first_step_reaches_partial_parity():
     assert entry["verdict"] == "partial", entry
     assert entry["classification"] == fixtures.SUPPORTED
     assert entry["unsupported_components"] == [
-        "wireframe_multistep_mutation_loop",
-        "wireframe_small_coil_pruning",
-        "wireframe_final_adjustment_step",
         "wireframe_plot_and_vtk_outputs",
     ]
     expected = {
@@ -1422,6 +1715,17 @@ def test_payload_schema_versioned(minimal_fixture_payload):
     metadata = minimal_fixture_payload["metadata"]
     assert metadata["jax_platform"] == "cpu"
     assert metadata["jax_enable_x64"] is True
+    assert metadata["backend_mode"] == "native_cpu"
+    assert metadata["runtime_dtype"] == "float64"
+    assert metadata["host_dtype"] == "float64"
+    assert metadata["tolerance_tier"] == "cpu_reference"
+    assert metadata["parity_mode"] is False
+    assert metadata["runtime_host_dtype"] == "float64"
+    assert metadata["runtime_tolerance_tier"] == "cpu_reference"
+    assert metadata["artifact_materialization_transfer_guard"] == (
+        "device_to_host_allow"
+    )
+    assert metadata["host_materialization_purpose"] == "json_artifact"
     assert metadata["jax_version"] == jax.__version__
     assert metadata["jaxlib_version"] == jaxlib.__version__
     assert "jax.__version__" in metadata["version_probe_command"]
@@ -1441,6 +1745,37 @@ def test_payload_schema_versioned(minimal_fixture_payload):
     assert lane_schema["jax_gpu"]["cannot_upgrade_cpu_unsupported"] is True
     assert lane_schema["jax_gpu"]["separate_artifact_required"] is True
     assert lane_schema["jax_gpu"]["disallowed_first_proof_lane"] == "jax_gpu_fast"
+    assert lane_schema["jax_mps"]["status"] == "runtime_required"
+    assert lane_schema["jax_mps"]["required_environment"] == {
+        "SIMSOPT_BACKEND_MODE": "jax_mps_smoke",
+        "SIMSOPT_JAX_PLATFORM": "mps",
+        "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+        "JAX_PLATFORMS": "mps",
+        "JAX_ENABLE_X64": "0",
+        "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM": "mps",
+    }
+    assert lane_schema["jax_mps"]["must_reuse_fixture_input_hash"] is True
+    assert lane_schema["jax_mps"]["cannot_upgrade_cpu_unsupported"] is True
+    assert lane_schema["jax_mps"]["separate_artifact_required"] is True
+    assert lane_schema["jax_mps"]["first_proof_lane"] == "jax_mps_smoke"
+    assert lane_schema["jax_mps"]["tolerance_tier"] == "float32_smoke"
+    assert lane_schema["jax_mps"]["gradient_diagnostic_only"] is True
+    assert lane_schema["jax_mps"]["production_parity"] is False
+    assert lane_schema["jax_mps"]["required_provenance_fields"] == (
+        "backend_mode",
+        "jax_version",
+        "jaxlib_version",
+        "jax_mps_version",
+        "device_name",
+        "runtime_dtype",
+        "host_dtype",
+        "tolerance_tier",
+        "transfer_guard",
+        "compute_transfer_guard",
+    )
+    authority = lane_schema["jax_mps"]["float64_production_lane_exclusion"]
+    assert authority["source"] == "tillahoffmann/jax-mps README"
+    assert authority["constraint"] == "MLX only supports float32."
 
 
 def test_no_gpu_required_anywhere(minimal_fixture_payload):

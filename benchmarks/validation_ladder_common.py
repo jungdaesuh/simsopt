@@ -28,6 +28,9 @@ from benchmarks import validation_ladder_contract as ladder_contract
 SRC_ROOT = REPO_ROOT / "src"
 _JAX_PLATFORM_ENV_VARS = (
     "JAX_PLATFORMS",
+    "JAX_PLATFORM_NAME",
+    "JAX_XLA_BACKEND",
+    "JAX_DEFAULT_DEVICE",
     "SIMSOPT_JAX_PLATFORM",
     "SIMSOPT_JAX_BACKEND",
 )
@@ -590,9 +593,7 @@ def _current_sharding_metadata() -> dict[str, Any]:
         "sharding_device_count": int(sharding.device_count),
         "sharding_local_device_count": int(sharding.local_device_count),
         "sharding_min_points_to_shard": int(sharding.min_points_to_shard),
-        "sharding_min_pairwise_rows_to_shard": int(
-            sharding.min_pairwise_rows_to_shard
-        ),
+        "sharding_min_pairwise_rows_to_shard": int(sharding.min_pairwise_rows_to_shard),
         **_distributed_provenance_fields(distributed),
     }
 

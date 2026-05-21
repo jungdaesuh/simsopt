@@ -23,15 +23,18 @@ Implements the harness described by
   partial parity with their remaining host-solver or independent-oracle
   blockers named explicitly.
 
-CPU is the default execution mode. A separate ``jax_gpu`` mode is available
-only when the process is launched with the explicit CUDA parity environment
-and a CPU baseline artifact is supplied for JAX CPU vs JAX GPU comparison.
+CPU is the default execution mode. Separate ``jax_gpu`` and ``jax_mps`` modes
+are available only when the process is launched with the matching accelerator
+environment and a CPU baseline artifact is supplied for JAX CPU vs accelerator
+comparison.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
+from importlib import metadata as importlib_metadata
 import json
 import os
 import platform
@@ -47,7 +50,9 @@ import numpy as np
 LANE_CPU_CPP = "cpu_cpp"
 LANE_JAX_CPU = "jax_cpu"
 LANE_JAX_GPU = "jax_gpu"
-SUPPORTED_LANES = frozenset((LANE_CPU_CPP, LANE_JAX_CPU, LANE_JAX_GPU))
+LANE_JAX_MPS = "jax_mps"
+FOLLOWUP_JAX_LANES = frozenset((LANE_JAX_GPU, LANE_JAX_MPS))
+SUPPORTED_LANES = frozenset((LANE_CPU_CPP, LANE_JAX_CPU, *FOLLOWUP_JAX_LANES))
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
@@ -117,32 +122,54 @@ def _preimport_selected_lanes(argv: Sequence[str]) -> Sequence[str]:
 def _requested_jax_platform() -> str:
     """Return the single JAX platform this process is allowed to initialize."""
     requested = os.environ.get("SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM", "cpu")
-    if requested not in {"cpu", "cuda"}:
+    if requested not in {"cpu", "cuda", "mps"}:
         raise RuntimeError(
             "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM must be "
-            f"'cpu' or 'cuda'; got {requested!r}."
+            f"'cpu', 'cuda', or 'mps'; got {requested!r}."
         )
-    if requested == "cuda" and LANE_JAX_GPU not in _preimport_selected_lanes(
-        sys.argv[1:]
-    ):
-        return "cpu"
+    selected_lanes = _preimport_selected_lanes(sys.argv[1:])
+    if requested == "cuda" and LANE_JAX_GPU not in selected_lanes:
+        raise RuntimeError(
+            "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM='cuda' requires lane "
+            f"{LANE_JAX_GPU!r}; selected_lanes={selected_lanes!r}."
+        )
+    if requested == "mps" and LANE_JAX_MPS not in selected_lanes:
+        raise RuntimeError(
+            "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM='mps' requires lane "
+            f"{LANE_JAX_MPS!r}; selected_lanes={selected_lanes!r}."
+        )
     return requested
 
 
 _REQUESTED_JAX_PLATFORM = _requested_jax_platform()
 
+
+def _requested_jax_enable_x64(requested_platform: str) -> str:
+    if requested_platform == "mps":
+        return "0"
+    if (
+        requested_platform == "cpu"
+        and os.environ.get("SIMSOPT_BACKEND_MODE") == "jax_cpu_float32_smoke"
+    ):
+        return "0"
+    return "1"
+
+
+_REQUESTED_JAX_ENABLE_X64 = _requested_jax_enable_x64(_REQUESTED_JAX_PLATFORM)
+
 # ``jax`` is configured at import time so subsequent imports see exactly one
 # parity runtime. CPU remains the default, even if a parent shell exported a
-# broader platform list. CUDA requires both SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
-# and a jax_gpu lane before this module is imported.
+# broader platform list. Accelerator follow-ups require both
+# SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=<platform> and the matching lane before
+# this module is imported.
 os.environ["JAX_PLATFORMS"] = _REQUESTED_JAX_PLATFORM
-os.environ["JAX_ENABLE_X64"] = "1"
+os.environ["JAX_ENABLE_X64"] = _REQUESTED_JAX_ENABLE_X64
 
 import jax  # noqa: E402  (after env-var setup)
 import jaxlib  # noqa: E402  (after env-var setup)
 
 jax.config.update("jax_platforms", _REQUESTED_JAX_PLATFORM)
-jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", _REQUESTED_JAX_ENABLE_X64 == "1")
 
 from benchmarks.non_banana_example_parity_fixtures import (  # noqa: E402
     FixtureBuild,
@@ -157,16 +184,28 @@ from benchmarks.non_banana_example_parity_fixtures import (  # noqa: E402
     gpu_readiness_metadata,
     supported_fixture_ids,
 )
+from benchmarks.run_code_benchmark_common import (  # noqa: E402
+    artifact_host_array,
+)
 from benchmarks.validation_ladder_common import (  # noqa: E402
     current_xla_cuda_metadata,
     query_nvidia_smi_facts,
 )
 from benchmarks.validation_ladder_contract import (  # noqa: E402
+    comparison_failure_gates_verdict,
+    comparison_failure_is_diagnostic,
     parity_ladder_tolerances,
 )
+from simsopt.backend import (  # noqa: E402
+    get_backend_policy,
+    get_tolerance_tier,
+    get_transfer_guard,
+)
+from simsopt.backend.dtypes import runtime_host_dtype  # noqa: E402
 
 
 CUDA_DEVICE_PLATFORMS = frozenset(("cuda", "gpu"))
+MPS_DEVICE_PLATFORMS = frozenset(("mps",))
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +273,36 @@ _TOLERANCE_BUCKETS = {
 }
 
 
+FLOAT32_SMOKE_TOLERANCE_TIER = "float32_smoke"
+JAX_MPS_FLOAT32_ONLY_AUTHORITY = {
+    "source": "tillahoffmann/jax-mps README",
+    "url": "https://github.com/tillahoffmann/jax-mps#footnotes",
+    "constraint": "MLX only supports float32.",
+    "effect": "jax_mps_smoke is a float32 smoke lane, not float64 production parity.",
+}
+_STRICT_BUCKET_RUNTIME_TIERS = frozenset(("cpu_reference", "parity", "fast"))
+_FLOAT32_SMOKE_OBJECTIVE_QUANTITIES = frozenset(
+    {
+        "objective_native_subtotal",
+        "SquaredFlux",
+        "SquaredFluxJAX",
+    }
+)
+
+
+def _is_gradient_quantity(quantity: str) -> bool:
+    return "gradient" in quantity.lower()
+
+
+def _is_objective_quantity(quantity: str, bucket: str) -> bool:
+    quantity_lower = quantity.lower()
+    return (
+        quantity in _FLOAT32_SMOKE_OBJECTIVE_QUANTITIES
+        or "objective" in quantity_lower
+        or (bucket == "ls_wrapper_gradient" and not _is_gradient_quantity(quantity))
+    )
+
+
 _DOF_NAME_COUNTER_RE = __import__("re").compile(r"^([A-Za-z_][A-Za-z_]*)(\d+)(:.*)$")
 
 
@@ -252,6 +321,28 @@ def _strip_dof_name_counter(name: str) -> str:
 
 def _tolerance_for(quantity: str) -> tuple[str, float, float]:
     bucket = _TOLERANCE_BUCKETS.get(quantity, "direct_kernel")
+    runtime_tier = get_tolerance_tier()
+    if runtime_tier == FLOAT32_SMOKE_TOLERANCE_TIER:
+        tolerances = parity_ladder_tolerances(runtime_tier)
+        if _is_gradient_quantity(quantity):
+            return (
+                runtime_tier,
+                float(tolerances["gradient_rtol"]),
+                float(tolerances["gradient_atol"]),
+            )
+        if _is_objective_quantity(quantity, bucket):
+            return (
+                runtime_tier,
+                float(tolerances["objective_rtol"]),
+                float(tolerances["objective_atol"]),
+            )
+        return runtime_tier, float(tolerances["rtol"]), float(tolerances["atol"])
+    if runtime_tier not in _STRICT_BUCKET_RUNTIME_TIERS:
+        raise RuntimeError(
+            f"Unsupported runtime tolerance tier {runtime_tier!r} for "
+            "non-banana example parity harness."
+        )
+
     tolerances = parity_ladder_tolerances(bucket)
     if bucket == "event_time_tracing":
         return (
@@ -268,6 +359,284 @@ def _tolerance_for(quantity: str) -> tuple[str, float, float]:
     return bucket, rtol, atol
 
 
+def _runtime_host_np_dtype() -> np.dtype:
+    return np.dtype(runtime_host_dtype())
+
+
+def _runtime_policy_metadata() -> Mapping[str, Any]:
+    policy = get_backend_policy()
+    return {
+        "backend_mode": policy.mode,
+        "runtime_dtype": policy.runtime_dtype,
+        "host_dtype": policy.host_dtype,
+        "tolerance_tier": policy.tolerance_tier,
+        "parity_mode": policy.parity_mode,
+    }
+
+
+def _lane_numeric_contract(lane_name: str) -> Mapping[str, str]:
+    policy = get_backend_policy()
+    if lane_name == LANE_CPU_CPP:
+        source_precision = "float64_oracle"
+        device_platform = "host_cpu_cpp"
+    else:
+        source_precision = policy.runtime_dtype
+        device_platform = policy.jax_platform
+    return {
+        "source_precision": source_precision,
+        "artifact_dtype": _runtime_host_np_dtype().name,
+        "runtime_dtype": policy.runtime_dtype,
+        "device_platform": device_platform,
+    }
+
+
+def _finite_array_summary(value: Any) -> Mapping[str, Any]:
+    array = np.asarray(value)
+    if not np.issubdtype(array.dtype, np.number):
+        return {"checked": False, "all_finite": True, "nonfinite_count": 0}
+    finite = np.isfinite(array)
+    return {
+        "checked": True,
+        "all_finite": bool(np.all(finite)),
+        "nonfinite_count": int(array.size - int(np.count_nonzero(finite))),
+    }
+
+
+def _lane_finite_summary(lane: LaneArtifact) -> Mapping[str, Any]:
+    fields: dict[str, Mapping[str, Any]] = {}
+    scalar_fields = {
+        "objective_total": lane.objective_total,
+        "objective_native_subtotal": lane.objective_native_subtotal,
+        "gradient_norm": lane.gradient_norm,
+        "field_B_max": lane.field_B_max,
+        "field_B_mean": lane.field_B_mean,
+        "Bdotn_max": lane.Bdotn_max,
+        "Bdotn_mean": lane.Bdotn_mean,
+        **dict(lane.components),
+    }
+    for name, value in scalar_fields.items():
+        if value is not None:
+            fields[name] = _finite_array_summary(value)
+    for name, value in lane.raw_arrays.items():
+        fields[f"raw_arrays.{name}"] = _finite_array_summary(value)
+    if lane.gradient is not None:
+        fields["gradient"] = _finite_array_summary(lane.gradient)
+
+    checked_fields = {
+        name: summary for name, summary in fields.items() if summary["checked"]
+    }
+    nonfinite_fields = {
+        name: summary
+        for name, summary in checked_fields.items()
+        if not summary["all_finite"]
+    }
+    return {
+        "all_finite": not nonfinite_fields,
+        "checked_field_count": len(checked_fields),
+        "nonfinite_field_count": len(nonfinite_fields),
+        "nonfinite_fields": nonfinite_fields,
+    }
+
+
+def _lane_finite_failures(lane_name: str, lane: LaneArtifact) -> Sequence[str]:
+    summary = _lane_finite_summary(lane)
+    if summary["all_finite"]:
+        return ()
+    return (
+        f"{lane_name} has non-finite fixed-state fields: "
+        f"{sorted(summary['nonfinite_fields'])}",
+    )
+
+
+ARTIFACT_MATERIALIZATION_TRANSFER_GUARD = "device_to_host_allow"
+HOST_MATERIALIZATION_PURPOSE = "json_artifact"
+
+
+def _runtime_host_float_array(value: Any) -> np.ndarray:
+    array = artifact_host_array(value)
+    if array.dtype.kind == "f":
+        return np.asarray(array, dtype=_runtime_host_np_dtype())
+    return array
+
+
+def _host_float_scalar(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return float(artifact_host_array(value, dtype=_runtime_host_np_dtype()))
+
+
+def _host_hash_array(value: Any) -> str:
+    array = np.ascontiguousarray(_runtime_host_float_array(value))
+    return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+_METADATA_RAW_ARRAY_KEYS_BY_FIXTURE_KIND: Mapping[str, Mapping[str, Optional[str]]] = {
+    "biot_savart_squared_flux": {
+        "surface_point": "surface_gamma",
+        "unit_normal": "surface_unit_normal",
+        "field_B": "field_B",
+        "Bdotn": "Bdotn_target_subtracted",
+    },
+    "qfm": {
+        "surface_point": "surface_gamma",
+        "unit_normal": "surface_unit_normal",
+        "field_B": "field_B",
+        "Bdotn": "Bdotn",
+    },
+    "boozer_surface_fixed_state": {
+        "surface_point": "surface_gamma",
+        "unit_normal": "surface_unit_normal",
+        "field_B": "field_B",
+        "Bdotn": None,
+    },
+    "boozer_qa_wrappers_solved_state": {
+        "surface_point": "surface_gamma",
+        "unit_normal": "surface_unit_normal",
+        "field_B": "field_B",
+        "Bdotn": None,
+    },
+    "surface_scalar": {
+        "surface_point": "surface_gamma",
+        "unit_normal": "surface_unit_normal",
+        "field_B": None,
+        "Bdotn": None,
+    },
+    "pm": {
+        "surface_point": "surface_gamma",
+        "unit_normal": "surface_unit_normal",
+        "field_B": "dipole_B",
+        "Bdotn": "dipole_Bn",
+    },
+    "pm_relax_and_split": {
+        "surface_point": "surface_gamma",
+        "unit_normal": "surface_unit_normal",
+        "field_B": "dipole_B",
+        "Bdotn": "dipole_Bn",
+    },
+    "wireframe": {
+        "surface_point": None,
+        "unit_normal": None,
+        "field_B": None,
+        "Bdotn": None,
+    },
+    "wireframe_gsco": {
+        "surface_point": None,
+        "unit_normal": None,
+        "field_B": None,
+        "Bdotn": None,
+    },
+    "tracing": {
+        "surface_point": None,
+        "unit_normal": None,
+        "field_B": None,
+        "Bdotn": None,
+    },
+    "strain": {
+        "surface_point": None,
+        "unit_normal": None,
+        "field_B": None,
+        "Bdotn": None,
+    },
+    "coil_force_energy": {
+        "surface_point": None,
+        "unit_normal": None,
+        "field_B": None,
+        "Bdotn": None,
+    },
+}
+
+
+def _metadata_raw_array(
+    raw_arrays: Mapping[str, np.ndarray],
+    *,
+    fixture_kind: str,
+    metadata_name: str,
+) -> Optional[np.ndarray]:
+    source_keys = _METADATA_RAW_ARRAY_KEYS_BY_FIXTURE_KIND[fixture_kind]
+    raw_array_key = source_keys[metadata_name]
+    if raw_array_key is None:
+        return None
+    return raw_arrays[raw_array_key]
+
+
+def _lane_with_runtime_host_dtype(
+    lane: LaneArtifact,
+    *,
+    fixture_kind: str,
+) -> LaneArtifact:
+    raw_arrays = {
+        name: _runtime_host_float_array(value)
+        for name, value in lane.raw_arrays.items()
+    }
+    gradient = None
+    if lane.gradient is not None:
+        gradient = _runtime_host_float_array(lane.gradient)
+    components = {
+        name: _host_float_scalar(value) for name, value in lane.components.items()
+    }
+    surface_gamma = _metadata_raw_array(
+        raw_arrays,
+        fixture_kind=fixture_kind,
+        metadata_name="surface_point",
+    )
+    surface_unit_normal = _metadata_raw_array(
+        raw_arrays,
+        fixture_kind=fixture_kind,
+        metadata_name="unit_normal",
+    )
+    field_B = _metadata_raw_array(
+        raw_arrays,
+        fixture_kind=fixture_kind,
+        metadata_name="field_B",
+    )
+    bdotn = _metadata_raw_array(
+        raw_arrays,
+        fixture_kind=fixture_kind,
+        metadata_name="Bdotn",
+    )
+    lane_updates = {
+        "objective_total": _host_float_scalar(lane.objective_total),
+        "objective_native_subtotal": _host_float_scalar(lane.objective_native_subtotal),
+        "components": components,
+        "gradient": gradient,
+        "gradient_norm": (
+            None if gradient is None else float(np.linalg.norm(np.asarray(gradient)))
+        ),
+        "field_B_max": _host_float_scalar(lane.field_B_max),
+        "field_B_mean": _host_float_scalar(lane.field_B_mean),
+        "Bdotn_max": _host_float_scalar(lane.Bdotn_max),
+        "Bdotn_mean": _host_float_scalar(lane.Bdotn_mean),
+        "raw_arrays": raw_arrays,
+    }
+    if surface_gamma is not None:
+        lane_updates["surface_point_hash"] = _host_hash_array(surface_gamma)
+    if surface_unit_normal is not None:
+        lane_updates["unit_normal_hash"] = _host_hash_array(surface_unit_normal)
+    if field_B is not None:
+        lane_updates["field_B_hash"] = _host_hash_array(field_B)
+        lane_updates["field_B_max"] = float(np.max(np.abs(field_B)))
+        lane_updates["field_B_mean"] = float(np.mean(np.abs(field_B)))
+    if bdotn is not None:
+        lane_updates["Bdotn_array_hash"] = _host_hash_array(bdotn)
+        lane_updates["Bdotn_max"] = float(np.max(np.abs(bdotn)))
+        lane_updates["Bdotn_mean"] = float(np.mean(np.abs(bdotn)))
+    return replace(lane, **lane_updates)
+
+
+def _build_with_runtime_host_dtype(build: FixtureBuild) -> FixtureBuild:
+    return replace(
+        build,
+        cpu_lane=_lane_with_runtime_host_dtype(
+            build.cpu_lane,
+            fixture_kind=build.spec.fixture_kind,
+        ),
+        jax_lane=_lane_with_runtime_host_dtype(
+            build.jax_lane,
+            fixture_kind=build.spec.fixture_kind,
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Comparison helpers.
 
@@ -281,8 +650,8 @@ def _compare_array(
     active_dof_names: Sequence[str],
 ) -> Mapping[str, Any]:
     bucket, rtol, atol = _tolerance_for(quantity)
-    cpu = np.asarray(cpu_arr, dtype=np.float64)
-    jax_a = np.asarray(jax_arr, dtype=np.float64)
+    cpu = _runtime_host_float_array(cpu_arr)
+    jax_a = _runtime_host_float_array(jax_arr)
 
     if cpu.shape != jax_a.shape:
         return {
@@ -345,6 +714,9 @@ def _compare_array(
         "argmax_dof_name": argmax_dof_name,
         "verdict": verdict,
     }
+    if bucket == FLOAT32_SMOKE_TOLERANCE_TIER and _is_gradient_quantity(quantity):
+        entry["diagnostic_only"] = True
+        entry["diagnostic_reason"] = "float32_smoke_gradient_not_production_parity_gate"
     return entry
 
 
@@ -356,11 +728,13 @@ def _compare_scalar(
     component: str,
 ) -> Mapping[str, Any]:
     bucket, rtol, atol = _tolerance_for(quantity)
+    cpu_value = float(np.asarray(cpu_value, dtype=_runtime_host_np_dtype()))
+    jax_value = float(np.asarray(jax_value, dtype=_runtime_host_np_dtype()))
     abs_diff = abs(jax_value - cpu_value)
     denom = atol + rtol * abs(cpu_value)
     rel = abs_diff / (abs(cpu_value) + atol)
     passed = abs_diff <= denom
-    return {
+    entry = {
         "quantity": quantity,
         "component": component,
         "source_example": None,
@@ -377,6 +751,10 @@ def _compare_scalar(
         "argmax_dof_name": None,
         "verdict": "pass" if passed else "fail",
     }
+    if bucket == FLOAT32_SMOKE_TOLERANCE_TIER and _is_gradient_quantity(quantity):
+        entry["diagnostic_only"] = True
+        entry["diagnostic_reason"] = "float32_smoke_gradient_not_production_parity_gate"
+    return entry
 
 
 def _retarget_comparison_entry(
@@ -448,8 +826,8 @@ def _compare_json_values(
             "failure_reason": "missing baseline or GPU comparison value",
         }
 
-    left = np.asarray(left_value, dtype=np.float64)
-    right = np.asarray(right_value, dtype=np.float64)
+    left = _runtime_host_float_array(left_value)
+    right = _runtime_host_float_array(right_value)
     if left.ndim == 0 and right.ndim == 0:
         entry = _compare_scalar(
             cpu_value=float(left),
@@ -514,6 +892,8 @@ def _lane_to_jsonable(
     emitted_lane_name = lane_name or lane.lane
     return {
         "lane": emitted_lane_name,
+        "numeric_contract": dict(_lane_numeric_contract(emitted_lane_name)),
+        "finite_summary": dict(_lane_finite_summary(lane)),
         "objective_total": lane.objective_total,
         "objective_native_subtotal": lane.objective_native_subtotal,
         "components": dict(lane.components),
@@ -1656,16 +2036,15 @@ def _run_perturbation_diagnostic(build: FixtureBuild) -> Optional[Mapping[str, A
     ):
         return None
 
-    import hashlib
-
-    x0 = np.asarray(build.x0, dtype=np.float64).copy()
+    host_dtype = _runtime_host_np_dtype()
+    x0 = np.asarray(build.x0, dtype=host_dtype).copy()
     grad_jax = (
-        np.asarray(build.jax_lane.gradient, dtype=np.float64)
+        np.asarray(build.jax_lane.gradient, dtype=host_dtype)
         if build.jax_lane.gradient is not None
         else np.zeros_like(x0)
     )
     grad_cpu = (
-        np.asarray(build.cpu_lane.gradient, dtype=np.float64)
+        np.asarray(build.cpu_lane.gradient, dtype=host_dtype)
         if build.cpu_lane.gradient is not None
         else np.zeros_like(x0)
     )
@@ -1683,7 +2062,7 @@ def _run_perturbation_diagnostic(build: FixtureBuild) -> Optional[Mapping[str, A
         }
 
     rng = np.random.default_rng(1)
-    direction = rng.uniform(size=x0.shape).astype(np.float64)
+    direction = rng.uniform(size=x0.shape).astype(host_dtype)
     direction_hash = hashlib.sha256(direction.tobytes()).hexdigest()
 
     samples = []
@@ -1723,9 +2102,9 @@ def _evaluate_supported_fixture(
     *,
     jax_lane_name: str = LANE_JAX_CPU,
 ) -> FixtureResult:
-    build = record.builder()
+    build = _build_with_runtime_host_dtype(record.builder())
     spec = build.spec
-    if jax_lane_name == LANE_JAX_GPU:
+    if jax_lane_name in FOLLOWUP_JAX_LANES:
         _block_lane_artifact_outputs(build.jax_lane)
 
     comparisons = _with_source_example(
@@ -1743,10 +2122,12 @@ def _evaluate_supported_fixture(
         f"{entry['quantity']}/{entry['component']}: max_abs_diff="
         f"{entry['max_abs_diff']!r} rtol={entry['tolerance_rtol']:.2e}"
         for entry in comparisons
-        if entry["verdict"] == "fail"
+        if comparison_failure_gates_verdict(entry)
     ]
     if failures:
         verdict = "fail"
+    elif any(comparison_failure_is_diagnostic(entry) for entry in comparisons):
+        verdict = "partial"
     elif build.unsupported_components:
         verdict = "partial"
     else:
@@ -1788,6 +2169,13 @@ def _evaluate_supported_fixture(
             "cross-lane gradient comparison requires a documented basis "
             "mapping that is not present in this fixture."
         )
+        verdict = "fail"
+    finite_failures = (
+        *_lane_finite_failures(LANE_CPU_CPP, build.cpu_lane),
+        *_lane_finite_failures(jax_lane_name, build.jax_lane),
+    )
+    if finite_failures:
+        failures.extend(finite_failures)
         verdict = "fail"
 
     perturbation = _run_perturbation_diagnostic(build) if dof_basis_aligned else None
@@ -1867,6 +2255,7 @@ def _filter_result_for_lanes(
     parity_pairs = {
         f"{LANE_CPU_CPP}_vs_{LANE_JAX_CPU}": {LANE_CPU_CPP, LANE_JAX_CPU},
         f"{LANE_CPU_CPP}_vs_{LANE_JAX_GPU}": {LANE_CPU_CPP, LANE_JAX_GPU},
+        f"{LANE_CPU_CPP}_vs_{LANE_JAX_MPS}": {LANE_CPU_CPP, LANE_JAX_MPS},
     }
     has_parity_pair = False
     for comparison_key, required_lanes in parity_pairs.items():
@@ -1975,6 +2364,10 @@ def _is_cuda_device(device) -> bool:
     return getattr(device, "platform", None) in CUDA_DEVICE_PLATFORMS
 
 
+def _is_mps_device(device) -> bool:
+    return getattr(device, "platform", None) in MPS_DEVICE_PLATFORMS
+
+
 def _assert_no_gpu_devices() -> None:
     bad = [d for d in jax.devices() if _is_cuda_device(d)]
     if bad:
@@ -2007,6 +2400,34 @@ def _assert_gpu_runtime_contract() -> None:
     if backend not in CUDA_DEVICE_PLATFORMS or not cuda_devices:
         raise RuntimeError(
             "jax_gpu lane requires an active CUDA JAX backend; "
+            f"default_backend={backend!r}, devices={jax.devices()!r}"
+        )
+
+
+def _assert_mps_runtime_contract() -> None:
+    required_env = {
+        "SIMSOPT_BACKEND_MODE": "jax_mps_smoke",
+        "SIMSOPT_JAX_PLATFORM": "mps",
+        "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+        "JAX_PLATFORMS": "mps",
+        "JAX_ENABLE_X64": "0",
+        "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM": "mps",
+    }
+    mismatches = {
+        name: {"expected": expected, "actual": os.environ.get(name)}
+        for name, expected in required_env.items()
+        if os.environ.get(name) != expected
+    }
+    if mismatches:
+        raise RuntimeError(
+            "jax_mps lane requires the explicit MPS smoke environment; "
+            f"mismatches={mismatches!r}"
+        )
+    backend = jax.default_backend()
+    mps_devices = [device for device in jax.devices() if _is_mps_device(device)]
+    if backend not in MPS_DEVICE_PLATFORMS or not mps_devices:
+        raise RuntimeError(
+            "jax_mps lane requires an active MPS JAX backend; "
             f"default_backend={backend!r}, devices={jax.devices()!r}"
         )
 
@@ -2049,6 +2470,38 @@ def _assert_x64() -> None:
         )
 
 
+def _assert_cpu_runtime_contract() -> None:
+    policy = get_backend_policy()
+    if policy.mode == "jax_cpu_float32_smoke":
+        required_env = {
+            "SIMSOPT_BACKEND_MODE": "jax_cpu_float32_smoke",
+            "SIMSOPT_JAX_PLATFORM": "cpu",
+            "JAX_PLATFORMS": "cpu",
+            "JAX_ENABLE_X64": "0",
+            "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM": "cpu",
+        }
+        mismatches = {
+            name: {"expected": expected, "actual": os.environ.get(name)}
+            for name, expected in required_env.items()
+            if os.environ.get(name) != expected
+        }
+        if mismatches:
+            raise RuntimeError(
+                "jax_cpu_float32_smoke lane requires the explicit CPU float32 "
+                f"smoke environment; mismatches={mismatches!r}"
+            )
+        backend = jax.default_backend()
+        if backend != "cpu" or any(_is_cuda_device(device) for device in jax.devices()):
+            raise RuntimeError(
+                "jax_cpu_float32_smoke lane requires an active CPU JAX backend; "
+                f"default_backend={backend!r}, devices={jax.devices()!r}"
+            )
+        return
+
+    _assert_x64()
+    _assert_no_gpu_devices()
+
+
 def _gpu_runtime_metadata() -> Mapping[str, Any]:
     smi_facts = query_nvidia_smi_facts()
     if smi_facts is None:
@@ -2074,20 +2527,67 @@ def _gpu_runtime_metadata() -> Mapping[str, Any]:
     }
 
 
+def _mps_transfer_guard_probe() -> Mapping[str, Any]:
+    seed = jax.device_put(np.asarray([1.0], dtype=np.float32))
+    with jax.transfer_guard("disallow"):
+        value = jax.jit(lambda x: x + np.float32(1.0))(seed)
+        value.block_until_ready()
+    host_value = np.asarray(jax.device_get(value), dtype=np.float32)
+    return {
+        "status": "pass",
+        "mode": "disallow",
+        "explicit_device_get_value": host_value.tolist(),
+    }
+
+
+def _mps_runtime_metadata() -> Mapping[str, Any]:
+    mps_devices = [
+        device for device in _jax_devices_metadata() if device["platform"] == "mps"
+    ]
+    platform_versions = _jax_platform_versions()
+    return {
+        **_runtime_policy_metadata(),
+        "jax_mps_version": importlib_metadata.version("jax-mps"),
+        "device_name": mps_devices[0]["device_kind"],
+        "platform_versions": list(platform_versions),
+        "transfer_guard": get_transfer_guard(),
+        "compute_transfer_guard": get_transfer_guard(),
+        "transfer_guard_probe": _mps_transfer_guard_probe(),
+        "float64_production_lane_exclusion": dict(JAX_MPS_FLOAT32_ONLY_AUTHORITY),
+    }
+
+
+def _mps_readiness_metadata(*, proven: bool = False) -> Mapping[str, Any]:
+    return {
+        **_runtime_policy_metadata(),
+        "mps_ready": bool(proven),
+        "mps_proven": bool(proven),
+        "first_proof_lane": "jax_mps_smoke",
+        "float64_production_lane_exclusion": dict(JAX_MPS_FLOAT32_ONLY_AUTHORITY),
+    }
+
+
 def build_run_metadata(
     *,
     git_sha_override: Optional[str],
     lanes: Sequence[str] = (LANE_CPU_CPP, LANE_JAX_CPU),
 ) -> Mapping[str, Any]:
-    _assert_x64()
     lane_set = set(lanes)
-    if LANE_JAX_GPU in lane_set:
+    if LANE_JAX_MPS in lane_set:
+        _assert_mps_runtime_contract()
+        gpu_runtime = None
+        mps_runtime = _mps_runtime_metadata()
+    elif LANE_JAX_GPU in lane_set:
+        _assert_x64()
         _assert_gpu_runtime_contract()
         gpu_runtime = _gpu_runtime_metadata()
+        mps_runtime = None
     else:
-        _assert_no_gpu_devices()
+        _assert_cpu_runtime_contract()
         gpu_runtime = None
+        mps_runtime = None
     jax_devices = list(_jax_devices_metadata())
+    policy_metadata = _runtime_policy_metadata()
     return {
         "git_head": git_sha_override or _git_head(),
         "git_branch": _git_branch(),
@@ -2097,7 +2597,15 @@ def build_run_metadata(
         "jax_backend": jax_devices[0]["platform"],
         "jax_devices": jax_devices,
         "requested_jax_platform": _REQUESTED_JAX_PLATFORM,
+        **policy_metadata,
+        "runtime_host_dtype": _runtime_host_np_dtype().name,
+        "runtime_tolerance_tier": policy_metadata["tolerance_tier"],
+        "artifact_materialization_transfer_guard": (
+            ARTIFACT_MATERIALIZATION_TRANSFER_GUARD
+        ),
+        "host_materialization_purpose": HOST_MATERIALIZATION_PURPOSE,
         "gpu_runtime": gpu_runtime,
+        "mps_runtime": mps_runtime,
         "python_version": _python_version(),
         "jax_version": _jax_version(),
         "jaxlib_version": _jaxlib_version(),
@@ -2139,6 +2647,41 @@ def build_run_metadata(
                 "first_proof_lane": "jax_gpu_parity",
                 "disallowed_first_proof_lane": "jax_gpu_fast",
             },
+            "jax_mps": {
+                "required": False,
+                "artifact_kind": "jax_mps_followup",
+                "status": "runtime_required",
+                "required_environment": {
+                    "SIMSOPT_BACKEND_MODE": "jax_mps_smoke",
+                    "SIMSOPT_JAX_PLATFORM": "mps",
+                    "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+                    "JAX_PLATFORMS": "mps",
+                    "JAX_ENABLE_X64": "0",
+                    "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM": "mps",
+                },
+                "required_provenance_fields": (
+                    "backend_mode",
+                    "jax_version",
+                    "jaxlib_version",
+                    "jax_mps_version",
+                    "device_name",
+                    "runtime_dtype",
+                    "host_dtype",
+                    "tolerance_tier",
+                    "transfer_guard",
+                    "compute_transfer_guard",
+                ),
+                "must_reuse_fixture_input_hash": True,
+                "cannot_upgrade_cpu_unsupported": True,
+                "separate_artifact_required": True,
+                "first_proof_lane": "jax_mps_smoke",
+                "tolerance_tier": FLOAT32_SMOKE_TOLERANCE_TIER,
+                "gradient_diagnostic_only": True,
+                "production_parity": False,
+                "float64_production_lane_exclusion": dict(
+                    JAX_MPS_FLOAT32_ONLY_AUTHORITY
+                ),
+            },
         },
     }
 
@@ -2177,64 +2720,62 @@ def _right_value_for_comparison(
     lane_name: str,
 ) -> Any:
     lane_key = f"{lane_name}_value"
-    if lane_key in entry:
-        return entry[lane_key]
-    if lane_name == LANE_JAX_CPU:
-        return entry.get("jax_cpu_value")
-    if lane_name == LANE_JAX_GPU:
-        return entry.get("jax_gpu_value")
-    return entry.get("right_value")
+    return entry[lane_key]
 
 
-def _jax_cpu_vs_jax_gpu_comparisons(
+def _jax_cpu_vs_followup_comparisons(
     *,
     baseline_entry: Mapping[str, Any],
-    gpu_result: FixtureResult,
+    followup_result: FixtureResult,
+    followup_lane_name: str,
 ) -> Sequence[Mapping[str, Any]]:
+    if followup_lane_name not in FOLLOWUP_JAX_LANES:
+        raise RuntimeError(f"Unsupported JAX follow-up lane: {followup_lane_name!r}.")
     baseline_hash = (
         baseline_entry.get("dof_contract", {}).get("fixture_input_hash")
         if isinstance(baseline_entry.get("dof_contract"), dict)
         else None
     )
-    gpu_hash = gpu_result.dof_contract.get("fixture_input_hash")
-    if baseline_hash != gpu_hash:
+    followup_hash = followup_result.dof_contract.get("fixture_input_hash")
+    if baseline_hash != followup_hash:
         raise RuntimeError(
-            f"{gpu_result.fixture_id}: baseline fixture_input_hash {baseline_hash!r} "
-            f"does not match GPU fixture_input_hash {gpu_hash!r}."
+            f"{followup_result.fixture_id}: baseline fixture_input_hash "
+            f"{baseline_hash!r} does not match {followup_lane_name} "
+            f"fixture_input_hash {followup_hash!r}."
         )
 
     baseline_comparisons = baseline_entry.get("comparisons", {}).get(
         f"{LANE_CPU_CPP}_vs_{LANE_JAX_CPU}",
         [],
     )
-    gpu_comparisons = gpu_result.comparisons.get(
-        f"{LANE_CPU_CPP}_vs_{LANE_JAX_GPU}",
+    followup_comparisons = followup_result.comparisons.get(
+        f"{LANE_CPU_CPP}_vs_{followup_lane_name}",
         [],
     )
-    if len(baseline_comparisons) != len(gpu_comparisons):
+    if len(baseline_comparisons) != len(followup_comparisons):
         raise RuntimeError(
-            f"{gpu_result.fixture_id}: baseline comparison count "
-            f"{len(baseline_comparisons)} does not match GPU comparison count "
-            f"{len(gpu_comparisons)}."
+            f"{followup_result.fixture_id}: baseline comparison count "
+            f"{len(baseline_comparisons)} does not match {followup_lane_name} "
+            f"comparison count {len(followup_comparisons)}."
         )
 
     comparisons = []
-    for baseline_comparison, gpu_comparison in zip(
+    for baseline_comparison, followup_comparison in zip(
         baseline_comparisons,
-        gpu_comparisons,
+        followup_comparisons,
     ):
         baseline_key = (
             baseline_comparison.get("quantity"),
             baseline_comparison.get("component"),
         )
-        gpu_key = (
-            gpu_comparison.get("quantity"),
-            gpu_comparison.get("component"),
+        followup_key = (
+            followup_comparison.get("quantity"),
+            followup_comparison.get("component"),
         )
-        if baseline_key != gpu_key:
+        if baseline_key != followup_key:
             raise RuntimeError(
-                f"{gpu_result.fixture_id}: comparison mismatch "
-                f"{baseline_key!r} != {gpu_key!r}."
+                f"{followup_result.fixture_id}: comparison mismatch "
+                f"{baseline_key!r} != {followup_key!r}."
             )
         comparisons.append(
             _compare_json_values(
@@ -2243,16 +2784,28 @@ def _jax_cpu_vs_jax_gpu_comparisons(
                     lane_name=LANE_JAX_CPU,
                 ),
                 right_value=_right_value_for_comparison(
-                    gpu_comparison,
-                    lane_name=LANE_JAX_GPU,
+                    followup_comparison,
+                    lane_name=followup_lane_name,
                 ),
-                quantity=str(gpu_comparison["quantity"]),
-                component=str(gpu_comparison["component"]),
+                quantity=str(followup_comparison["quantity"]),
+                component=str(followup_comparison["component"]),
                 left_lane=LANE_JAX_CPU,
-                right_lane=LANE_JAX_GPU,
+                right_lane=followup_lane_name,
             )
         )
     return tuple(comparisons)
+
+
+def _jax_cpu_vs_jax_gpu_comparisons(
+    *,
+    baseline_entry: Mapping[str, Any],
+    gpu_result: FixtureResult,
+) -> Sequence[Mapping[str, Any]]:
+    return _jax_cpu_vs_followup_comparisons(
+        baseline_entry=baseline_entry,
+        followup_result=gpu_result,
+        followup_lane_name=LANE_JAX_GPU,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2270,13 +2823,20 @@ def run_fixtures(
     unsupported_lanes = tuple(lane for lane in lane_set if lane not in SUPPORTED_LANES)
     if unsupported_lanes:
         raise RuntimeError(f"Unsupported parity lane(s): {unsupported_lanes!r}.")
-    if LANE_JAX_CPU in lane_set and LANE_JAX_GPU in lane_set:
+    followup_lanes = tuple(lane for lane in lane_set if lane in FOLLOWUP_JAX_LANES)
+    if len(followup_lanes) > 1:
         raise RuntimeError(
-            "Select jax_gpu in a separate CUDA process and pass --baseline-json "
-            "for jax_cpu_vs_jax_gpu comparisons."
+            "Select one accelerator follow-up lane per process and pass "
+            "--baseline-json for JAX CPU vs accelerator comparisons."
         )
-    if LANE_JAX_GPU in lane_set and baseline_json is None:
-        raise RuntimeError("jax_gpu lane requires --baseline-json.")
+    followup_lane_name = followup_lanes[0] if followup_lanes else None
+    if LANE_JAX_CPU in lane_set and followup_lane_name is not None:
+        raise RuntimeError(
+            f"Select {followup_lane_name} in a separate accelerator process and "
+            "pass --baseline-json for JAX CPU vs accelerator comparisons."
+        )
+    if followup_lane_name is not None and baseline_json is None:
+        raise RuntimeError(f"{followup_lane_name} lane requires --baseline-json.")
 
     baseline_by_id = None
     if baseline_json is not None:
@@ -2288,7 +2848,7 @@ def run_fixtures(
     if baseline_json is not None:
         metadata["baseline_json"] = str(baseline_json)
     fixtures = []
-    jax_lane_name = LANE_JAX_GPU if LANE_JAX_GPU in lane_set else LANE_JAX_CPU
+    jax_lane_name = followup_lane_name or LANE_JAX_CPU
     for fid in fixture_ids_to_run:
         record = get_fixture(fid)
         if record.spec.classification == SUPPORTED:
@@ -2297,33 +2857,33 @@ def run_fixtures(
                     record,
                     jax_lane_name=jax_lane_name,
                 )
-                if baseline_by_id is not None and LANE_JAX_GPU in lane_set:
+                if baseline_by_id is not None and followup_lane_name is not None:
                     baseline_entry = baseline_by_id.get(result.fixture_id)
                     if baseline_entry is None:
                         raise RuntimeError(
                             f"{result.fixture_id}: missing from baseline artifact."
                         )
-                    jax_gpu_comparisons = _jax_cpu_vs_jax_gpu_comparisons(
+                    jax_followup_comparisons = _jax_cpu_vs_followup_comparisons(
                         baseline_entry=baseline_entry,
-                        gpu_result=result,
+                        followup_result=result,
+                        followup_lane_name=followup_lane_name,
                     )
+                    followup_comparison_key = f"{LANE_JAX_CPU}_vs_{followup_lane_name}"
                     result = replace(
                         result,
                         comparisons={
                             **dict(result.comparisons),
-                            f"{LANE_JAX_CPU}_vs_{LANE_JAX_GPU}": list(
-                                jax_gpu_comparisons
-                            ),
+                            followup_comparison_key: list(jax_followup_comparisons),
                         },
                         failures=(
                             *result.failures,
                             *(
                                 f"{entry['quantity']}/{entry['component']} "
-                                f"{LANE_JAX_CPU}_vs_{LANE_JAX_GPU}: "
+                                f"{followup_comparison_key}: "
                                 f"max_abs_diff={entry['max_abs_diff']!r} "
                                 f"rtol={entry['tolerance_rtol']:.2e}"
-                                for entry in jax_gpu_comparisons
-                                if entry["verdict"] == "fail"
+                                for entry in jax_followup_comparisons
+                                if comparison_failure_gates_verdict(entry)
                             ),
                         ),
                     )
@@ -2333,15 +2893,25 @@ def run_fixtures(
                             verdict="fail",
                             passed=False,
                         )
-                    gpu_lane = dict(result.lanes[LANE_JAX_GPU])
-                    gpu_lane["gpu_readiness"] = dict(
-                        gpu_readiness_metadata(proven=result.passed)
-                    )
+                    elif any(
+                        comparison_failure_is_diagnostic(entry)
+                        for entry in jax_followup_comparisons
+                    ):
+                        result = replace(result, verdict="partial", passed=True)
+                    followup_lane = dict(result.lanes[followup_lane_name])
+                    if followup_lane_name == LANE_JAX_GPU:
+                        followup_lane["gpu_readiness"] = dict(
+                            gpu_readiness_metadata(proven=result.passed)
+                        )
+                    else:
+                        followup_lane["mps_readiness"] = dict(
+                            _mps_readiness_metadata(proven=result.passed)
+                        )
                     result = replace(
                         result,
                         lanes={
                             **dict(result.lanes),
-                            LANE_JAX_GPU: gpu_lane,
+                            followup_lane_name: followup_lane,
                         },
                     )
             except FixtureNotSupportedError as exc:
@@ -2356,7 +2926,7 @@ def run_fixtures(
                     dof_contract={},
                     native_spec_contract={},
                     lanes={},
-                    comparisons={"cpu_cpp_vs_jax_cpu": []},
+                    comparisons={f"{LANE_CPU_CPP}_vs_{jax_lane_name}": []},
                     unsupported_components=[],
                     mixed_lane_diagnostics=[],
                     perturbation_diagnostics=None,
@@ -2383,7 +2953,7 @@ def run_fixtures(
                     dof_contract={},
                     native_spec_contract={},
                     lanes={},
-                    comparisons={"cpu_cpp_vs_jax_cpu": []},
+                    comparisons={f"{LANE_CPU_CPP}_vs_{jax_lane_name}": []},
                     unsupported_components=[],
                     mixed_lane_diagnostics=[],
                     perturbation_diagnostics=None,
@@ -2450,15 +3020,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default="cpu_cpp,jax_cpu",
         help=(
             "Comma-separated lane selector. CPU runs use cpu_cpp,jax_cpu. "
-            "CUDA follow-up runs use cpu_cpp,jax_gpu with --baseline-json."
+            "Accelerator follow-up runs use cpu_cpp,jax_gpu or cpu_cpp,jax_mps "
+            "with --baseline-json."
         ),
     )
     parser.add_argument(
         "--baseline-json",
         default=None,
         help=(
-            "CPU artifact JSON used to compare jax_cpu against jax_gpu in "
-            "CUDA follow-up runs."
+            "CPU artifact JSON used to compare jax_cpu against the selected "
+            "accelerator follow-up lane."
         ),
     )
     parser.add_argument(

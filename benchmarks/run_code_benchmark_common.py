@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+from typing import Any
 
 import numpy as np
 
@@ -19,7 +20,7 @@ from benchmarks.validation_ladder_common import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_BENCHMARK_JAX_VERSION = os.environ.get(
-    "SIMSOPT_BENCHMARK_JAX_VERSION", "0.9.2"
+    "SIMSOPT_BENCHMARK_JAX_VERSION", "0.10.0"
 )
 BENCHMARK_BACKEND_CHOICES = ("scipy", "ondevice")
 DEFAULT_PUBLIC_BACKENDS = ("ondevice",)
@@ -54,6 +55,16 @@ def _jax_modules():
     import jax.numpy as jnp
 
     return jax, jaxlib, jnp
+
+
+def artifact_host_value(value: Any) -> Any:
+    jax, _, _ = _jax_modules()
+    with jax.transfer_guard_device_to_host("allow"):
+        return jax.device_get(value)
+
+
+def artifact_host_array(value: Any, *, dtype: object | None = None) -> np.ndarray:
+    return np.asarray(artifact_host_value(value), dtype=dtype)
 
 
 def _progress(message: str) -> None:

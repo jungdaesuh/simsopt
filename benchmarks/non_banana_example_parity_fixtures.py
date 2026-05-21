@@ -19,11 +19,16 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+
+from benchmarks.run_code_benchmark_common import artifact_host_array
+from simsopt.backend import get_backend_config, set_backend
+from simsopt.jax_core._math_utils import as_jax_float64 as _as_jax_float64
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_FILES = REPO_ROOT / "tests" / "test_files"
@@ -59,6 +64,53 @@ class FixtureNotSupportedError(RuntimeError):
     The benchmark records the message as the fixture's classification
     reason; it is not treated as a parity failure.
     """
+
+
+def _artifact_host_float(value: Any) -> float:
+    return float(artifact_host_array(value, dtype=np.float64))
+
+
+def _sum_objective_values(values: Sequence[Any]) -> Any:
+    first = values[0]
+    return sum(values[1:], first)
+
+
+@contextmanager
+def _cpu_oracle_boundary():
+    import jax
+
+    previous = get_backend_config()
+    set_backend(
+        "native_cpu",
+        strict=previous.strict,
+        debug_nans=previous.debug_nans,
+        disable_jit=previous.disable_jit,
+        transfer_guard=previous.transfer_guard,
+        compilation_cache_dir=previous.compilation_cache_dir,
+        xla_gpu_preallocate=previous.xla_gpu_preallocate,
+        xla_gpu_mem_fraction=previous.xla_gpu_mem_fraction,
+        xla_gpu_allocator=previous.xla_gpu_allocator,
+        tf_gpu_allocator=previous.tf_gpu_allocator,
+        configure_runtime=False,
+    )
+    try:
+        with jax.transfer_guard_host_to_device("allow"):
+            with jax.transfer_guard_device_to_host("allow"):
+                yield
+    finally:
+        set_backend(
+            previous.mode,
+            strict=previous.strict,
+            debug_nans=previous.debug_nans,
+            disable_jit=previous.disable_jit,
+            transfer_guard=previous.transfer_guard,
+            compilation_cache_dir=previous.compilation_cache_dir,
+            xla_gpu_preallocate=previous.xla_gpu_preallocate,
+            xla_gpu_mem_fraction=previous.xla_gpu_mem_fraction,
+            xla_gpu_allocator=previous.xla_gpu_allocator,
+            tf_gpu_allocator=previous.tf_gpu_allocator,
+            configure_runtime=False,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -392,25 +444,28 @@ def _build_jax_lane(
 
     native_spec_hashes = _verify_jax_native_spec_contract(coils)
 
-    surface_gamma = np.asarray(surface.gamma(), dtype=np.float64)
-    surface_unit_normal = np.asarray(surface.unitnormal(), dtype=np.float64)
+    surface_gamma = artifact_host_array(surface.gamma(), dtype=np.float64)
+    surface_unit_normal = artifact_host_array(surface.unitnormal(), dtype=np.float64)
     nphi, ntheta = surface_gamma.shape[:2]
 
     start_compile = time.perf_counter()
-    j_total_first = float(jf_jax.J())
-    jax.block_until_ready(np.float64(j_total_first))
+    j_total_first_device = jf_jax.J()
+    jax.block_until_ready(j_total_first_device)
+    _artifact_host_float(j_total_first_device)
     compile_plus_first_s = time.perf_counter() - start_compile
 
     start_exec = time.perf_counter()
     # Force fresh evaluation (clear cache) to time steady-state.
     jf_jax.new_x = True
-    j_total = float(jf_jax.J())
+    j_total_device = jf_jax.J()
+    jax.block_until_ready(j_total_device)
+    j_total = _artifact_host_float(j_total_device)
     jf_jax.new_x = True
-    grad = np.asarray(jf_jax.dJ(), dtype=np.float64)
+    grad = artifact_host_array(jf_jax.dJ(), dtype=np.float64)
     jax.block_until_ready(grad)
     exec_seconds = time.perf_counter() - start_exec
 
-    field_B_flat = np.asarray(bs_jax.B(), dtype=np.float64)
+    field_B_flat = artifact_host_array(bs_jax.B(), dtype=np.float64)
     field_B = field_B_flat.reshape(nphi, ntheta, 3)
     Bdotn = np.sum(field_B * surface_unit_normal, axis=2)
     if target_array is not None:
@@ -446,7 +501,7 @@ def _build_jax_lane(
         gradient=grad,
         gradient_norm=float(np.linalg.norm(grad)),
         active_dof_names=dof_names,
-        active_dof_hash=_hash_array(np.asarray(jf_jax.x, dtype=np.float64)),
+        active_dof_hash=_hash_array(artifact_host_array(jf_jax.x, dtype=np.float64)),
         fixed_free_mask_hash=_hash_mask(free_mask),
         native_curve_spec_hashes=native_spec_hashes,
         surface_point_hash=_hash_array(surface_gamma),
@@ -835,6 +890,7 @@ def _build_qfm_surface_fixed_state():
     from simsopt.field import BiotSavart
     from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
     from simsopt.geo import Area, QfmResidual, SurfaceRZFourier, ToroidalFlux, Volume
+    from simsopt.geo.label_constraints_jax import toroidal_flux_jax
     from simsopt.geo.surfaceobjectives_jax import AreaJAX, QfmResidualJAX, VolumeJAX
 
     start_cpu = time.perf_counter()
@@ -882,14 +938,23 @@ def _build_qfm_surface_fixed_state():
     qfm_jax = QfmResidualJAX(surface_jax, bs_jax)
     area_jax = AreaJAX(surface_jax)
     volume_jax = VolumeJAX(surface_jax)
-    tf_jax = ToroidalFlux(surface_jax, bs_tf_jax)
     qfm_value_jax = qfm_jax.J()
     jax_grad = np.asarray(qfm_jax.dJ_by_dsurfacecoefficients(), dtype=np.float64)
     jax.block_until_ready(jax_grad)
     gamma_jax = np.asarray(surface_jax.gamma(), dtype=np.float64)
+    gammadash2_jax = artifact_host_array(surface_jax.gammadash2(), dtype=np.float64)
     normal_jax = np.asarray(surface_jax.unitnormal(), dtype=np.float64)
     bs_jax.set_points(gamma_jax.reshape((-1, 3)))
     field_B_jax = np.asarray(bs_jax.B(), dtype=np.float64).reshape(25, 25, 3)
+    bs_tf_jax.set_points(np.ascontiguousarray(gamma_jax[0]))
+    A_jax_slice = artifact_host_array(bs_tf_jax.A(), dtype=np.float64)
+    toroidal_flux_jax_value = _artifact_host_float(
+        toroidal_flux_jax(
+            _as_jax_float64(A_jax_slice),
+            _as_jax_float64(gammadash2_jax[0]),
+            gammadash2_jax.shape[1],
+        )
+    )
     setup_jax = time.perf_counter() - start_jax
 
     dofs_cpu = np.asarray(surface_cpu.get_dofs(), dtype=np.float64)
@@ -941,7 +1006,7 @@ def _build_qfm_surface_fixed_state():
             "qfm_residual": float(qfm_value_jax),
             "area": float(area_jax.J()),
             "volume": float(volume_jax.J()),
-            "toroidal_flux": float(tf_jax.J()),
+            "toroidal_flux": toroidal_flux_jax_value,
         },
         gradient=jax_grad,
         gradient_norm=float(np.linalg.norm(jax_grad)),
@@ -1796,6 +1861,7 @@ def _build_pm_qa_relax_and_split_fixed_state():
     """Build reduced QA relax-and-split permanent-magnet parity fixture."""
     import time
     import jax
+    import jax.numpy as jnp
     from simsopt.field import BiotSavart, Current, DipoleField, coils_via_symmetries
     from simsopt.field.dipole_field_jax import DipoleFieldJAX
     from simsopt.geo import (
@@ -1934,17 +2000,23 @@ def _build_pm_qa_relax_and_split_fixed_state():
         m0_cpu = pm_cpu.m
         m0_jax = jax_result.m
 
-    m_jax = np.asarray(jax_result.m, dtype=np.float64).reshape(pm_cpu.ndipoles * 3)
-    m_proxy_jax = np.asarray(jax_result.m_proxy, dtype=np.float64).reshape(
+    m_jax_device = jnp.reshape(jax_result.m, (pm_cpu.ndipoles * 3,))
+    m_proxy_jax_device = jnp.reshape(jax_result.m_proxy, (pm_cpu.ndipoles * 3,))
+    m_jax = artifact_host_array(jax_result.m, dtype=np.float64).reshape(
+        pm_cpu.ndipoles * 3
+    )
+    m_proxy_jax = artifact_host_array(jax_result.m_proxy, dtype=np.float64).reshape(
         pm_cpu.ndipoles * 3
     )
     residual_cpu = np.asarray(pm_cpu.A_obj @ pm_cpu.m - pm_cpu.b_obj, dtype=np.float64)
     residual_proxy_cpu = np.asarray(
         pm_cpu.A_obj @ pm_cpu.m_proxy - pm_cpu.b_obj, dtype=np.float64
     )
-    residual_jax = np.asarray(grid_jax.A_obj @ m_jax - grid_jax.b_obj, dtype=np.float64)
-    residual_proxy_jax = np.asarray(
-        grid_jax.A_obj @ m_proxy_jax - grid_jax.b_obj, dtype=np.float64
+    residual_jax = artifact_host_array(
+        grid_jax.A_obj @ m_jax_device - grid_jax.b_obj, dtype=np.float64
+    )
+    residual_proxy_jax = artifact_host_array(
+        grid_jax.A_obj @ m_proxy_jax_device - grid_jax.b_obj, dtype=np.float64
     )
     cpu_objective = float(0.5 * np.dot(residual_cpu, residual_cpu))
     cpu_proxy_objective = float(0.5 * np.dot(residual_proxy_cpu, residual_proxy_cpu))
@@ -3168,12 +3240,7 @@ def _build_wireframe_gsco_multistep_reduced_diagnostic():
         spec=WIREFRAME_GSCO_MULTISTEP_REDUCED_DIAGNOSTIC_SPEC,
         cpu_lane=cpu_lane,
         jax_lane=jax_lane,
-        unsupported_components=(
-            "wireframe_multistep_mutation_loop",
-            "wireframe_small_coil_pruning",
-            "wireframe_final_adjustment_step",
-            "wireframe_plot_and_vtk_outputs",
-        ),
+        unsupported_components=("wireframe_plot_and_vtk_outputs",),
     )
 
 
@@ -3271,48 +3338,57 @@ def _build_full_stage2_composite():
         + MSC_WEIGHT * sum(msc_quadratic_terms)
     )
 
-    squared_flux_value = float(jf_cpu_sf.J())
-    sum_length_value = float(sum(J.J() for J in Jls))
-    ccdist_value = float(Jccdist.J())
-    csdist_value = float(Jcsdist.J())
-    curvature_sum_value = float(sum(J.J() for J in Jcs))
-    msc_quadratic_sum_value = float(sum(J.J() for J in msc_quadratic_terms))
-    composite_total_value = float(jf_full.J())
+    with _cpu_oracle_boundary():
+        squared_flux_value = _artifact_host_float(jf_cpu_sf.J())
+        sum_length_value = _artifact_host_float(
+            _sum_objective_values([J.J() for J in Jls])
+        )
+        ccdist_value = _artifact_host_float(Jccdist.J())
+        csdist_value = _artifact_host_float(Jcsdist.J())
+        curvature_sum_value = _artifact_host_float(
+            _sum_objective_values([J.J() for J in Jcs])
+        )
+        msc_quadratic_sum_value = _artifact_host_float(
+            _sum_objective_values([J.J() for J in msc_quadratic_terms])
+        )
+        composite_total_value = _artifact_host_float(jf_full.J())
 
-    # Plan §"Math, Physics, And Computation Gates" requires composite
-    # objective reporting to record BOTH raw component values (before
-    # weights) AND weighted component values, plus the composite total
-    # ``JF_total_cpu``. The raw entries below carry ``_raw`` suffixes; the
-    # ``_weighted`` entries reproduce the weights applied by the upstream
-    # example (LENGTH_WEIGHT * sum_CurveLength, CC_WEIGHT * ccdist, etc.).
-    extra_components_cpu = {
-        "SquaredFlux": squared_flux_value,
-        "sum_CurveLength_raw": sum_length_value,
-        "CurveCurveDistance_raw": ccdist_value,
-        "CurveSurfaceDistance_raw": csdist_value,
-        "sum_LpCurveCurvature_raw": curvature_sum_value,
-        "sum_QuadraticPenalty_MeanSquaredCurvature_max_raw": msc_quadratic_sum_value,
-        "sum_CurveLength_weighted": LENGTH_WEIGHT * sum_length_value,
-        "CurveCurveDistance_weighted": CC_WEIGHT * ccdist_value,
-        "CurveSurfaceDistance_weighted": CS_WEIGHT * csdist_value,
-        "sum_LpCurveCurvature_weighted": CURVATURE_WEIGHT * curvature_sum_value,
-        "sum_QuadraticPenalty_MeanSquaredCurvature_max_weighted": (
-            MSC_WEIGHT * msc_quadratic_sum_value
-        ),
-        "JF_total_cpu": composite_total_value,
-    }
-    setup_seconds_cpu = time.perf_counter() - start_setup
+        # Plan §"Math, Physics, And Computation Gates" requires composite
+        # objective reporting to record BOTH raw component values (before
+        # weights) AND weighted component values, plus the composite total
+        # ``JF_total_cpu``. The raw entries below carry ``_raw`` suffixes; the
+        # ``_weighted`` entries reproduce the weights applied by the upstream
+        # example (LENGTH_WEIGHT * sum_CurveLength, CC_WEIGHT * ccdist, etc.).
+        extra_components_cpu = {
+            "SquaredFlux": squared_flux_value,
+            "sum_CurveLength_raw": sum_length_value,
+            "CurveCurveDistance_raw": ccdist_value,
+            "CurveSurfaceDistance_raw": csdist_value,
+            "sum_LpCurveCurvature_raw": curvature_sum_value,
+            "sum_QuadraticPenalty_MeanSquaredCurvature_max_raw": (
+                msc_quadratic_sum_value
+            ),
+            "sum_CurveLength_weighted": LENGTH_WEIGHT * sum_length_value,
+            "CurveCurveDistance_weighted": CC_WEIGHT * ccdist_value,
+            "CurveSurfaceDistance_weighted": CS_WEIGHT * csdist_value,
+            "sum_LpCurveCurvature_weighted": CURVATURE_WEIGHT * curvature_sum_value,
+            "sum_QuadraticPenalty_MeanSquaredCurvature_max_weighted": (
+                MSC_WEIGHT * msc_quadratic_sum_value
+            ),
+            "JF_total_cpu": composite_total_value,
+        }
+        setup_seconds_cpu = time.perf_counter() - start_setup
 
-    cpu_lane = _build_cpu_lane(
-        surface=surface,
-        coils=coils,
-        jf_cpu=jf_full,
-        bs_cpu=bs_cpu,
-        target_array=None,
-        extra_components=extra_components_cpu,
-        setup_seconds=setup_seconds_cpu,
-        objective_component_name="JF_total_cpu",
-    )
+        cpu_lane = _build_cpu_lane(
+            surface=surface,
+            coils=coils,
+            jf_cpu=jf_full,
+            bs_cpu=bs_cpu,
+            target_array=None,
+            extra_components=extra_components_cpu,
+            setup_seconds=setup_seconds_cpu,
+            objective_component_name="JF_total_cpu",
+        )
 
     # JAX lane — build independent coils so neither lane mutates the other's
     # Optimizable tree.
@@ -3349,11 +3425,17 @@ def _build_full_stage2_composite():
         + CURVATURE_WEIGHT * sum(Jcs_jax)
         + MSC_WEIGHT * sum(msc_quadratic_terms_jax)
     )
-    sum_length_value_jax = float(sum(J.J() for J in Jls_jax))
-    ccdist_value_jax = float(Jccdist_jax.J())
-    csdist_value_jax = float(Jcsdist_jax.J())
-    curvature_sum_value_jax = float(sum(J.J() for J in Jcs_jax))
-    msc_quadratic_sum_value_jax = float(sum(J.J() for J in msc_quadratic_terms_jax))
+    sum_length_value_jax = _artifact_host_float(
+        _sum_objective_values([J.J() for J in Jls_jax])
+    )
+    ccdist_value_jax = _artifact_host_float(Jccdist_jax.J())
+    csdist_value_jax = _artifact_host_float(Jcsdist_jax.J())
+    curvature_sum_value_jax = _artifact_host_float(
+        _sum_objective_values([J.J() for J in Jcs_jax])
+    )
+    msc_quadratic_sum_value_jax = _artifact_host_float(
+        _sum_objective_values([J.J() for J in msc_quadratic_terms_jax])
+    )
     setup_seconds_jax = time.perf_counter() - start_jax_setup
 
     jax_lane = _build_jax_lane(
@@ -3363,7 +3445,7 @@ def _build_full_stage2_composite():
         jf_jax=jf_full_jax,
         target_array=None,
         extra_components={
-            "SquaredFluxJAX": float(jf_jax.J()),
+            "SquaredFluxJAX": _artifact_host_float(jf_jax.J()),
             "sum_CurveLength_raw": sum_length_value_jax,
             "CurveCurveDistance_raw": ccdist_value_jax,
             "CurveSurfaceDistance_raw": csdist_value_jax,
@@ -3389,11 +3471,11 @@ def _build_full_stage2_composite():
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
         jf_full.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full.J())
+        return _artifact_host_float(jf_full.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jf_full_jax.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full_jax.J())
+        return _artifact_host_float(jf_full_jax.J())
 
     return FixtureBuild(
         spec=FULL_STAGE2_COMPOSITE_SPEC,
@@ -3499,54 +3581,61 @@ def _build_planar_stage2_composite():
         + linkNum
     )
 
-    squared_flux_value = float(jf_cpu_sf.J())
-    length_qp_value = float(length_quadratic_penalty.J())
-    ccdist_value = float(Jccdist.J())
-    csdist_value = float(Jcsdist.J())
-    curvature_sum_value = float(sum(J.J() for J in Jcs))
-    msc_quadratic_sum_value = float(sum(J.J() for J in msc_quadratic_terms))
-    link_number_value = float(linkNum.J())
-    composite_total_value = float(jf_full.J())
+    with _cpu_oracle_boundary():
+        squared_flux_value = _artifact_host_float(jf_cpu_sf.J())
+        length_qp_value = _artifact_host_float(length_quadratic_penalty.J())
+        ccdist_value = _artifact_host_float(Jccdist.J())
+        csdist_value = _artifact_host_float(Jcsdist.J())
+        curvature_sum_value = _artifact_host_float(
+            _sum_objective_values([J.J() for J in Jcs])
+        )
+        msc_quadratic_sum_value = _artifact_host_float(
+            _sum_objective_values([J.J() for J in msc_quadratic_terms])
+        )
+        link_number_value = _artifact_host_float(linkNum.J())
+        composite_total_value = _artifact_host_float(jf_full.J())
 
-    # Plan §"Math, Physics, And Computation Gates" requires composite
-    # objective reporting to record raw component values, weighted
-    # component values, and the composite total. Planar fixture weights:
-    # LENGTH_WEIGHT * length_quadratic_penalty, CC_WEIGHT * ccdist,
-    # CS_WEIGHT * csdist, CURVATURE_WEIGHT * curvature_sum,
-    # MSC_WEIGHT * msc_quadratic_sum, and LinkingNumber has no weight
-    # multiplier (it enters the composite with weight 1).
-    extra_components_cpu = {
-        "SquaredFlux": squared_flux_value,
-        "QuadraticPenalty_over_sum_CurveLength_identity_raw": length_qp_value,
-        "CurveCurveDistance_raw": ccdist_value,
-        "CurveSurfaceDistance_raw": csdist_value,
-        "sum_LpCurveCurvature_raw": curvature_sum_value,
-        "sum_QuadraticPenalty_MeanSquaredCurvature_identity_raw": msc_quadratic_sum_value,
-        "LinkingNumber_raw": link_number_value,
-        "QuadraticPenalty_over_sum_CurveLength_identity_weighted": (
-            LENGTH_WEIGHT * length_qp_value
-        ),
-        "CurveCurveDistance_weighted": CC_WEIGHT * ccdist_value,
-        "CurveSurfaceDistance_weighted": CS_WEIGHT * csdist_value,
-        "sum_LpCurveCurvature_weighted": CURVATURE_WEIGHT * curvature_sum_value,
-        "sum_QuadraticPenalty_MeanSquaredCurvature_identity_weighted": (
-            MSC_WEIGHT * msc_quadratic_sum_value
-        ),
-        "LinkingNumber_weighted": link_number_value,
-        "JF_total_cpu": composite_total_value,
-    }
-    setup_seconds_cpu = time.perf_counter() - start_setup
+        # Plan §"Math, Physics, And Computation Gates" requires composite
+        # objective reporting to record raw component values, weighted
+        # component values, and the composite total. Planar fixture weights:
+        # LENGTH_WEIGHT * length_quadratic_penalty, CC_WEIGHT * ccdist,
+        # CS_WEIGHT * csdist, CURVATURE_WEIGHT * curvature_sum,
+        # MSC_WEIGHT * msc_quadratic_sum, and LinkingNumber has no weight
+        # multiplier (it enters the composite with weight 1).
+        extra_components_cpu = {
+            "SquaredFlux": squared_flux_value,
+            "QuadraticPenalty_over_sum_CurveLength_identity_raw": length_qp_value,
+            "CurveCurveDistance_raw": ccdist_value,
+            "CurveSurfaceDistance_raw": csdist_value,
+            "sum_LpCurveCurvature_raw": curvature_sum_value,
+            "sum_QuadraticPenalty_MeanSquaredCurvature_identity_raw": (
+                msc_quadratic_sum_value
+            ),
+            "LinkingNumber_raw": link_number_value,
+            "QuadraticPenalty_over_sum_CurveLength_identity_weighted": (
+                LENGTH_WEIGHT * length_qp_value
+            ),
+            "CurveCurveDistance_weighted": CC_WEIGHT * ccdist_value,
+            "CurveSurfaceDistance_weighted": CS_WEIGHT * csdist_value,
+            "sum_LpCurveCurvature_weighted": CURVATURE_WEIGHT * curvature_sum_value,
+            "sum_QuadraticPenalty_MeanSquaredCurvature_identity_weighted": (
+                MSC_WEIGHT * msc_quadratic_sum_value
+            ),
+            "LinkingNumber_weighted": link_number_value,
+            "JF_total_cpu": composite_total_value,
+        }
+        setup_seconds_cpu = time.perf_counter() - start_setup
 
-    cpu_lane = _build_cpu_lane(
-        surface=surface,
-        coils=coils,
-        jf_cpu=jf_full,
-        bs_cpu=bs_cpu,
-        target_array=None,
-        extra_components=extra_components_cpu,
-        setup_seconds=setup_seconds_cpu,
-        objective_component_name="JF_total_cpu",
-    )
+        cpu_lane = _build_cpu_lane(
+            surface=surface,
+            coils=coils,
+            jf_cpu=jf_full,
+            bs_cpu=bs_cpu,
+            target_array=None,
+            extra_components=extra_components_cpu,
+            setup_seconds=setup_seconds_cpu,
+            objective_component_name="JF_total_cpu",
+        )
 
     # JAX lane: build independent planar coils so the JAX field adapter
     # owns disjoint Curve/Current Optimizable nodes.
@@ -3584,12 +3673,16 @@ def _build_planar_stage2_composite():
         + MSC_WEIGHT * sum(msc_quadratic_terms_jax)
         + linkNum_jax
     )
-    length_qp_value_jax = float(length_quadratic_penalty_jax.J())
-    ccdist_value_jax = float(Jccdist_jax.J())
-    csdist_value_jax = float(Jcsdist_jax.J())
-    curvature_sum_value_jax = float(sum(J.J() for J in Jcs_jax))
-    msc_quadratic_sum_value_jax = float(sum(J.J() for J in msc_quadratic_terms_jax))
-    link_number_value_jax = float(linkNum_jax.J())
+    length_qp_value_jax = _artifact_host_float(length_quadratic_penalty_jax.J())
+    ccdist_value_jax = _artifact_host_float(Jccdist_jax.J())
+    csdist_value_jax = _artifact_host_float(Jcsdist_jax.J())
+    curvature_sum_value_jax = _artifact_host_float(
+        _sum_objective_values([J.J() for J in Jcs_jax])
+    )
+    msc_quadratic_sum_value_jax = _artifact_host_float(
+        _sum_objective_values([J.J() for J in msc_quadratic_terms_jax])
+    )
+    link_number_value_jax = _artifact_host_float(linkNum_jax.J())
     setup_seconds_jax = time.perf_counter() - start_jax_setup
 
     jax_lane = _build_jax_lane(
@@ -3599,7 +3692,7 @@ def _build_planar_stage2_composite():
         jf_jax=jf_full_jax,
         target_array=None,
         extra_components={
-            "SquaredFluxJAX": float(jf_jax.J()),
+            "SquaredFluxJAX": _artifact_host_float(jf_jax.J()),
             "QuadraticPenalty_over_sum_CurveLength_identity_raw": (length_qp_value_jax),
             "CurveCurveDistance_raw": ccdist_value_jax,
             "CurveSurfaceDistance_raw": csdist_value_jax,
@@ -3629,11 +3722,11 @@ def _build_planar_stage2_composite():
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
         jf_full.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full.J())
+        return _artifact_host_float(jf_full.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jf_full_jax.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full_jax.J())
+        return _artifact_host_float(jf_full_jax.J())
 
     return FixtureBuild(
         spec=PLANAR_STAGE2_COMPOSITE_SPEC,
@@ -3977,8 +4070,15 @@ def _build_boozer_surface_basic():
 
     # JAX labels: Area, Volume use unnormalized surface normal; ToroidalFlux
     # uses A at the idx=0 phi slice (matching the CPU ToroidalFlux default).
-    area_jax_value = float(area_jax_fn(surface_normal_jax))
-    volume_jax_value = float(volume_jax_fn(surface_gamma_jax, surface_normal_jax))
+    area_jax_value = _artifact_host_float(
+        area_jax_fn(_as_jax_float64(surface_normal_jax))
+    )
+    volume_jax_value = _artifact_host_float(
+        volume_jax_fn(
+            _as_jax_float64(surface_gamma_jax),
+            _as_jax_float64(surface_normal_jax),
+        )
+    )
 
     # Build a *second* independent BiotSavartJAX for ToroidalFlux to mirror
     # the CPU side's separate ``bs_tf`` (also a separate BiotSavart in the
@@ -3987,10 +4087,10 @@ def _build_boozer_surface_basic():
     tf_gamma_slice = surface_gamma_jax[0]
     bs_jax_tf.set_points(np.ascontiguousarray(tf_gamma_slice))
     A_jax_slice = np.asarray(bs_jax_tf.A(), dtype=np.float64)
-    toroidal_flux_jax_value = float(
+    toroidal_flux_jax_value = _artifact_host_float(
         toroidal_flux_jax_fn(
-            A_jax_slice,
-            surface_xtheta_jax[0],
+            _as_jax_float64(A_jax_slice),
+            _as_jax_float64(surface_xtheta_jax[0]),
             ntheta_jax,
         )
     )
@@ -4194,7 +4294,7 @@ def _build_boozer_qa_wrappers():
     nqs_cpu_value = float(
         NonQuasiSymmetricRatio(boozer_surface_cpu, bs_nonQS_cpu, sDIM=sDIM).J()
     )
-    length_sum_cpu_value = float(sum(CurveLength(c).J() for c in base_curves))
+    length_sum_cpu_value = sum(_artifact_host_float(CurveLength(c).J()) for c in base_curves)
 
     setup_seconds_cpu = time.perf_counter() - start_setup
 
@@ -4338,7 +4438,9 @@ def _build_boozer_qa_wrappers():
             axis=0,
         )
     )
-    length_sum_jax_value = float(sum(CurveLengthJAX(c).J() for c in base_curves_jax))
+    length_sum_jax_value = sum(
+        _artifact_host_float(CurveLengthJAX(c).J()) for c in base_curves_jax
+    )
 
     setup_seconds_jax = time.perf_counter() - start_jax_setup
 
@@ -4429,53 +4531,56 @@ def _build_tracing_fieldlines_qa_reduced_endpoint():
     tmax = 20.0
     tol = 1e-12
 
-    start_cpu = time.perf_counter()
-    surface = SurfaceRZFourier.from_vmec_input(
-        str(TESTS_FILES / "input.LandremanPaul2021_QA"),
-        nphi=nphi,
-        ntheta=ntheta,
-        range="full torus",
-    )
-    nfp = surface.nfp
-    bs_cpu = simsopt.load(EXAMPLES / "1_Simple" / "inputs" / "biot_savart_opt.json")
-    gamma = np.asarray(surface.gamma(), dtype=np.float64)
-    rs = np.linalg.norm(gamma[:, :, 0:2], axis=2)
-    zs = gamma[:, :, 2]
-    rrange = (float(np.min(rs)), float(np.max(rs)), interp_n_r)
-    phirange = (0.0, float(2.0 * np.pi / nfp), interp_n_phi)
-    zrange = (0.0, float(np.max(zs)), interp_n_z)
-    phis = [float(0.25 * 2.0 * np.pi / nfp)]
-    sc_fieldline = SurfaceClassifier(surface, h=0.1, p=2)
+    with _cpu_oracle_boundary():
+        start_cpu = time.perf_counter()
+        surface = SurfaceRZFourier.from_vmec_input(
+            str(TESTS_FILES / "input.LandremanPaul2021_QA"),
+            nphi=nphi,
+            ntheta=ntheta,
+            range="full torus",
+        )
+        nfp = surface.nfp
+        bs_cpu = simsopt.load(
+            EXAMPLES / "1_Simple" / "inputs" / "biot_savart_opt.json"
+        )
+        gamma = np.asarray(surface.gamma(), dtype=np.float64)
+        rs = np.linalg.norm(gamma[:, :, 0:2], axis=2)
+        zs = gamma[:, :, 2]
+        rrange = (float(np.min(rs)), float(np.max(rs)), interp_n_r)
+        phirange = (0.0, float(2.0 * np.pi / nfp), interp_n_phi)
+        zrange = (0.0, float(np.max(zs)), interp_n_z)
+        phis = [float(0.25 * 2.0 * np.pi / nfp)]
+        sc_fieldline = SurfaceClassifier(surface, h=0.1, p=2)
 
-    def skip(rs_skip, phis_skip, zs_skip):
-        rphiz = np.asarray([rs_skip, phis_skip, zs_skip]).T.copy()
-        return list((sc_fieldline.evaluate_rphiz(rphiz) < -0.05).flatten())
+        def skip(rs_skip, phis_skip, zs_skip):
+            rphiz = np.asarray([rs_skip, phis_skip, zs_skip]).T.copy()
+            return list((sc_fieldline.evaluate_rphiz(rphiz) < -0.05).flatten())
 
-    stopping_criteria = [LevelsetStoppingCriterion(sc_fieldline.dist)]
+        stopping_criteria = [LevelsetStoppingCriterion(sc_fieldline.dist)]
 
-    cpu_field = InterpolatedField(
-        bs_cpu,
-        interp_degree,
-        rrange,
-        phirange,
-        zrange,
-        True,
-        nfp=nfp,
-        stellsym=True,
-        skip=skip,
-    )
-    cpu_field.set_points(gamma.reshape((-1, 3)))
-    cpu_field_B = np.asarray(cpu_field.B(), dtype=np.float64)
-    cpu_tys, cpu_hits = compute_fieldlines(
-        cpu_field,
-        R0,
-        Z0,
-        tmax=tmax,
-        tol=tol,
-        phis=phis,
-        stopping_criteria=stopping_criteria,
-    )
-    cpu_setup = time.perf_counter() - start_cpu
+        cpu_field = InterpolatedField(
+            bs_cpu,
+            interp_degree,
+            rrange,
+            phirange,
+            zrange,
+            True,
+            nfp=nfp,
+            stellsym=True,
+            skip=skip,
+        )
+        cpu_field.set_points(gamma.reshape((-1, 3)))
+        cpu_field_B = np.asarray(cpu_field.B(), dtype=np.float64)
+        cpu_tys, cpu_hits = compute_fieldlines(
+            cpu_field,
+            R0,
+            Z0,
+            tmax=tmax,
+            tol=tol,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+        cpu_setup = time.perf_counter() - start_cpu
 
     start_jax = time.perf_counter()
     bs_jax_source = simsopt.load(
@@ -4625,60 +4730,61 @@ def _build_tracing_fieldlines_ncsx_reduced_endpoint():
     tol = 1e-12
     surface_radius = 0.70
 
-    start_cpu = time.perf_counter()
-    _base_curves, _currents, axis_cpu, nfp, bs_cpu = get_data("ncsx")
-    surface = SurfaceRZFourier.from_nphi_ntheta(
-        mpol=mpol,
-        ntor=ntor,
-        stellsym=True,
-        nfp=nfp,
-        range="full torus",
-        nphi=nphi,
-        ntheta=ntheta,
-    )
-    surface.fit_to_curve(axis_cpu, surface_radius, flip_theta=False)
-    gamma = np.asarray(surface.gamma(), dtype=np.float64)
-    unit_normal = np.asarray(surface.unitnormal(), dtype=np.float64)
-    rs = np.linalg.norm(gamma[:, :, 0:2], axis=2)
-    zs = gamma[:, :, 2]
-    rrange = (float(np.min(rs)), float(np.max(rs)), interp_n_r)
-    phirange = (0.0, float(2.0 * np.pi / nfp), interp_n_phi)
-    zrange = (0.0, float(np.max(zs)), interp_n_z)
-    axis_gamma = np.asarray(axis_cpu.gamma(), dtype=np.float64)
-    R0 = [float(axis_gamma[0, 0])]
-    Z0 = [float(axis_gamma[0, 2])]
-    phis = [float(0.25 * 2.0 * np.pi / nfp)]
-    sc_fieldline = SurfaceClassifier(surface, h=0.1, p=2)
+    with _cpu_oracle_boundary():
+        start_cpu = time.perf_counter()
+        _base_curves, _currents, axis_cpu, nfp, bs_cpu = get_data("ncsx")
+        surface = SurfaceRZFourier.from_nphi_ntheta(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=True,
+            nfp=nfp,
+            range="full torus",
+            nphi=nphi,
+            ntheta=ntheta,
+        )
+        surface.fit_to_curve(axis_cpu, surface_radius, flip_theta=False)
+        gamma = np.asarray(surface.gamma(), dtype=np.float64)
+        unit_normal = np.asarray(surface.unitnormal(), dtype=np.float64)
+        rs = np.linalg.norm(gamma[:, :, 0:2], axis=2)
+        zs = gamma[:, :, 2]
+        rrange = (float(np.min(rs)), float(np.max(rs)), interp_n_r)
+        phirange = (0.0, float(2.0 * np.pi / nfp), interp_n_phi)
+        zrange = (0.0, float(np.max(zs)), interp_n_z)
+        axis_gamma = np.asarray(axis_cpu.gamma(), dtype=np.float64)
+        R0 = [float(axis_gamma[0, 0])]
+        Z0 = [float(axis_gamma[0, 2])]
+        phis = [float(0.25 * 2.0 * np.pi / nfp)]
+        sc_fieldline = SurfaceClassifier(surface, h=0.1, p=2)
 
-    def skip(rs_skip, phis_skip, zs_skip):
-        rphiz = np.asarray([rs_skip, phis_skip, zs_skip]).T.copy()
-        return list((sc_fieldline.evaluate_rphiz(rphiz) < -0.05).flatten())
+        def skip(rs_skip, phis_skip, zs_skip):
+            rphiz = np.asarray([rs_skip, phis_skip, zs_skip]).T.copy()
+            return list((sc_fieldline.evaluate_rphiz(rphiz) < -0.05).flatten())
 
-    stopping_criteria = [LevelsetStoppingCriterion(sc_fieldline.dist)]
+        stopping_criteria = [LevelsetStoppingCriterion(sc_fieldline.dist)]
 
-    cpu_field = InterpolatedField(
-        bs_cpu,
-        interp_degree,
-        rrange,
-        phirange,
-        zrange,
-        True,
-        nfp=nfp,
-        stellsym=True,
-        skip=skip,
-    )
-    cpu_field.set_points(gamma.reshape((-1, 3)))
-    cpu_field_B = np.asarray(cpu_field.B(), dtype=np.float64)
-    cpu_tys, cpu_hits = compute_fieldlines(
-        cpu_field,
-        R0,
-        Z0,
-        tmax=tmax,
-        tol=tol,
-        phis=phis,
-        stopping_criteria=stopping_criteria,
-    )
-    cpu_setup = time.perf_counter() - start_cpu
+        cpu_field = InterpolatedField(
+            bs_cpu,
+            interp_degree,
+            rrange,
+            phirange,
+            zrange,
+            True,
+            nfp=nfp,
+            stellsym=True,
+            skip=skip,
+        )
+        cpu_field.set_points(gamma.reshape((-1, 3)))
+        cpu_field_B = np.asarray(cpu_field.B(), dtype=np.float64)
+        cpu_tys, cpu_hits = compute_fieldlines(
+            cpu_field,
+            R0,
+            Z0,
+            tmax=tmax,
+            tol=tol,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+        cpu_setup = time.perf_counter() - start_cpu
 
     start_jax = time.perf_counter()
     _base_curves_jax, _currents_jax, _axis_jax, nfp_jax, bs_jax_source = get_data(
@@ -4895,65 +5001,66 @@ def _build_tracing_particle_gc_vac_reduced_endpoint():
     mass = PROTON_MASS
     charge = ELEMENTARY_CHARGE
 
-    start_cpu = time.perf_counter()
-    _base_curves, _base_currents, ma, nfp, bs_cpu = get_data("ncsx")
-    surface = SurfaceRZFourier.from_nphi_ntheta(
-        mpol=mpol,
-        ntor=ntor,
-        stellsym=True,
-        nfp=nfp,
-        range="full torus",
-        nphi=nphi,
-        ntheta=ntheta,
-    )
-    surface.fit_to_curve(ma, surface_radius, flip_theta=False)
-    classifier = SurfaceClassifier(surface, h=0.1, p=2)
-    gamma = np.asarray(surface.gamma(), dtype=np.float64)
-    unit_normal = np.asarray(surface.unitnormal(), dtype=np.float64)
-    rs = np.linalg.norm(gamma[:, :, 0:2], axis=2)
-    zs = gamma[:, :, 2]
-    rrange = (float(np.min(rs)), float(np.max(rs)), interp_n)
-    phirange = (0.0, float(2.0 * np.pi / nfp), 2 * interp_n)
-    zrange = (0.0, float(np.max(zs)), interp_n // 2)
-    phis = [float((i / 4.0) * (2.0 * np.pi / nfp)) for i in range(4)]
+    with _cpu_oracle_boundary():
+        start_cpu = time.perf_counter()
+        _base_curves, _base_currents, ma, nfp, bs_cpu = get_data("ncsx")
+        surface = SurfaceRZFourier.from_nphi_ntheta(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=True,
+            nfp=nfp,
+            range="full torus",
+            nphi=nphi,
+            ntheta=ntheta,
+        )
+        surface.fit_to_curve(ma, surface_radius, flip_theta=False)
+        classifier = SurfaceClassifier(surface, h=0.1, p=2)
+        gamma = np.asarray(surface.gamma(), dtype=np.float64)
+        unit_normal = np.asarray(surface.unitnormal(), dtype=np.float64)
+        rs = np.linalg.norm(gamma[:, :, 0:2], axis=2)
+        zs = gamma[:, :, 2]
+        rrange = (float(np.min(rs)), float(np.max(rs)), interp_n)
+        phirange = (0.0, float(2.0 * np.pi / nfp), 2 * interp_n)
+        zrange = (0.0, float(np.max(zs)), interp_n // 2)
+        phis = [float((i / 4.0) * (2.0 * np.pi / nfp)) for i in range(4)]
 
-    speed_total = sqrt(2.0 * Ekin / mass)
-    np.random.seed(seed)
-    pitch = np.random.uniform(low=-1.0, high=1.0, size=(nparticles,))
-    speed_par = pitch * speed_total
-    xyz_inits, _ = draw_uniform_on_curve(ma, nparticles, safetyfactor=10)
-    stopping_criteria = [LevelsetStoppingCriterion(classifier.dist)]
+        speed_total = sqrt(2.0 * Ekin / mass)
+        np.random.seed(seed)
+        pitch = np.random.uniform(low=-1.0, high=1.0, size=(nparticles,))
+        speed_par = pitch * speed_total
+        xyz_inits, _ = draw_uniform_on_curve(ma, nparticles, safetyfactor=10)
+        stopping_criteria = [LevelsetStoppingCriterion(classifier.dist)]
 
-    cpu_field = InterpolatedField(
-        bs_cpu,
-        interp_degree,
-        rrange,
-        phirange,
-        zrange,
-        True,
-        nfp=nfp,
-        stellsym=True,
-    )
-    cpu_tys, cpu_hits = trace_particles(
-        cpu_field,
-        xyz_inits,
-        speed_par,
-        tmax=tmax,
-        mass=mass,
-        charge=charge,
-        Ekin=Ekin,
-        tol=tol,
-        phis=phis,
-        stopping_criteria=stopping_criteria,
-        mode="gc_vac",
-        forget_exact_path=True,
-    )
-    cpu_field.set_points(gamma.reshape((-1, 3)))
-    cpu_field_B = np.asarray(cpu_field.B(), dtype=np.float64).reshape(gamma.shape)
-    cpu_field_GradAbsB = np.asarray(cpu_field.GradAbsB(), dtype=np.float64).reshape(
-        gamma.shape
-    )
-    cpu_setup = time.perf_counter() - start_cpu
+        cpu_field = InterpolatedField(
+            bs_cpu,
+            interp_degree,
+            rrange,
+            phirange,
+            zrange,
+            True,
+            nfp=nfp,
+            stellsym=True,
+        )
+        cpu_tys, cpu_hits = trace_particles(
+            cpu_field,
+            xyz_inits,
+            speed_par,
+            tmax=tmax,
+            mass=mass,
+            charge=charge,
+            Ekin=Ekin,
+            tol=tol,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+            mode="gc_vac",
+            forget_exact_path=True,
+        )
+        cpu_field.set_points(gamma.reshape((-1, 3)))
+        cpu_field_B = np.asarray(cpu_field.B(), dtype=np.float64).reshape(gamma.shape)
+        cpu_field_GradAbsB = np.asarray(
+            cpu_field.GradAbsB(), dtype=np.float64
+        ).reshape(gamma.shape)
+        cpu_setup = time.perf_counter() - start_cpu
 
     start_jax = time.perf_counter()
     _base_curves_jax, _base_currents_jax, _ma_jax, nfp_jax, bs_jax = get_data("ncsx")
@@ -5184,53 +5291,54 @@ def _build_tracing_boozer_gc_reduced_endpoint():
     speed_total = np.sqrt(2.0 * Ekin / mass)
     speed_par = np.array([0.6 * speed_total], dtype=np.float64)
 
-    start_cpu = time.perf_counter()
-    booz_cpu = _cached_boozer_from_boozmn(wout_file, boozmn_file)
-    bri_cpu = BoozerRadialInterpolant(
-        booz_cpu,
-        order=order,
-        mpol=int(booz_cpu.bx.mboz),
-        ntor=int(booz_cpu.bx.nboz),
-        rescale=True,
-        enforce_vacuum=True,
-    )
-    nfp = int(booz_cpu.equil.wout.nfp)
-    srange = (0.0, 1.0, grid_n)
-    thetarange = (0.0, np.pi, grid_n)
-    zetarange = (0.0, float(2.0 * np.pi / nfp), grid_n)
-    zetas = [float(0.25 * 2.0 * np.pi / nfp)]
-    stopping_criteria = [
-        MinToroidalFluxStoppingCriterion(0.01),
-        MaxToroidalFluxStoppingCriterion(0.99),
-        ToroidalTransitStoppingCriterion(100, True),
-    ]
-    cpu_field = InterpolatedBoozerField(
-        bri_cpu,
-        degree,
-        srange,
-        thetarange,
-        zetarange,
-        True,
-        nfp=nfp,
-        stellsym=True,
-    )
-    cpu_tys, cpu_hits = trace_particles_boozer(
-        cpu_field,
-        stz_inits,
-        speed_par,
-        tmax=tmax,
-        mass=mass,
-        charge=charge,
-        Ekin=Ekin,
-        tol=tol,
-        zetas=zetas,
-        stopping_criteria=stopping_criteria,
-        mode="gc_vac",
-        forget_exact_path=True,
-    )
-    cpu_field.set_points(field_points)
-    cpu_modB = np.asarray(cpu_field.modB(), dtype=np.float64)
-    cpu_setup = time.perf_counter() - start_cpu
+    with _cpu_oracle_boundary():
+        start_cpu = time.perf_counter()
+        booz_cpu = _cached_boozer_from_boozmn(wout_file, boozmn_file)
+        bri_cpu = BoozerRadialInterpolant(
+            booz_cpu,
+            order=order,
+            mpol=int(booz_cpu.bx.mboz),
+            ntor=int(booz_cpu.bx.nboz),
+            rescale=True,
+            enforce_vacuum=True,
+        )
+        nfp = int(booz_cpu.equil.wout.nfp)
+        srange = (0.0, 1.0, grid_n)
+        thetarange = (0.0, np.pi, grid_n)
+        zetarange = (0.0, float(2.0 * np.pi / nfp), grid_n)
+        zetas = [float(0.25 * 2.0 * np.pi / nfp)]
+        stopping_criteria = [
+            MinToroidalFluxStoppingCriterion(0.01),
+            MaxToroidalFluxStoppingCriterion(0.99),
+            ToroidalTransitStoppingCriterion(100, True),
+        ]
+        cpu_field = InterpolatedBoozerField(
+            bri_cpu,
+            degree,
+            srange,
+            thetarange,
+            zetarange,
+            True,
+            nfp=nfp,
+            stellsym=True,
+        )
+        cpu_tys, cpu_hits = trace_particles_boozer(
+            cpu_field,
+            stz_inits,
+            speed_par,
+            tmax=tmax,
+            mass=mass,
+            charge=charge,
+            Ekin=Ekin,
+            tol=tol,
+            zetas=zetas,
+            stopping_criteria=stopping_criteria,
+            mode="gc_vac",
+            forget_exact_path=True,
+        )
+        cpu_field.set_points(field_points)
+        cpu_modB = np.asarray(cpu_field.modB(), dtype=np.float64)
+        cpu_setup = time.perf_counter() - start_cpu
 
     start_jax = time.perf_counter()
     booz_jax = _cached_boozer_from_boozmn(wout_file, boozmn_file)
@@ -5787,6 +5895,8 @@ def _build_finitebuild_support_gate_probe():
     jdist = CurveCurveDistance(curves, dist_min)
     jf_full = jf_cpu + length_pen * sum(length_penalties) + dist_pen * jdist
     setup_cpu = time.perf_counter() - start_cpu
+    length_penalty_sum_value = sum(_artifact_host_float(j.J()) for j in length_penalties)
+    distance_value = _artifact_host_float(jdist.J())
     cpu_lane = _build_cpu_lane(
         surface=surface,
         coils=coils_fb,
@@ -5794,11 +5904,10 @@ def _build_finitebuild_support_gate_probe():
         bs_cpu=bs_cpu,
         target_array=None,
         extra_components={
-            "SquaredFlux": float(jf_cpu.J()),
-            "sum_QuadraticPenalty_CurveLength_max": float(
-                length_pen * sum(j.J() for j in length_penalties)
-            ),
-            "CurveCurveDistance": float(dist_pen * jdist.J()),
+            "SquaredFlux": _artifact_host_float(jf_cpu.J()),
+            "sum_QuadraticPenalty_CurveLength_max": length_pen
+            * length_penalty_sum_value,
+            "CurveCurveDistance": dist_pen * distance_value,
         },
         setup_seconds=setup_cpu,
         objective_component_name="JF_total_cpu",
@@ -5845,6 +5954,10 @@ def _build_finitebuild_support_gate_probe():
     jdist_jax = CurveCurveDistanceJAX(curves_jax, dist_min)
     jf_full_jax = jf_jax + length_pen * sum(length_penalties_jax) + dist_pen * jdist_jax
     setup_jax = time.perf_counter() - start_jax
+    length_penalty_sum_value_jax = sum(
+        _artifact_host_float(j.J()) for j in length_penalties_jax
+    )
+    distance_value_jax = _artifact_host_float(jdist_jax.J())
     jax_lane = _build_jax_lane(
         surface=surface,
         coils=coils_fb_jax,
@@ -5852,11 +5965,10 @@ def _build_finitebuild_support_gate_probe():
         jf_jax=jf_full_jax,
         target_array=None,
         extra_components={
-            "SquaredFluxJAX": float(jf_jax.J()),
-            "sum_QuadraticPenalty_CurveLength_max": float(
-                length_pen * sum(j.J() for j in length_penalties_jax)
-            ),
-            "CurveCurveDistance": float(dist_pen * jdist_jax.J()),
+            "SquaredFluxJAX": _artifact_host_float(jf_jax.J()),
+            "sum_QuadraticPenalty_CurveLength_max": length_pen
+            * length_penalty_sum_value_jax,
+            "CurveCurveDistance": dist_pen * distance_value_jax,
             "filament_count": float(len(coils_fb_jax)),
             "base_curve_count": float(len(base_curves_jax)),
         },
@@ -7145,21 +7257,23 @@ WIREFRAME_GSCO_MULTISTEP_REDUCED_DIAGNOSTIC_SPEC = FixtureSpec(
     classification=SUPPORTED,
     classification_reason=(
         "Reduced first-step GSCO diagnostic is supported through the public "
-        "optimize_wireframe surf_plas/ext_field path. The full mutating "
-        "multistep loop remains explicitly unsupported."
+        "optimize_wireframe surf_plas/ext_field path. The multistep numerical "
+        "state machine is supported in the N7 wireframe workflow tests; "
+        "plot/VTK output remains host-side."
     ),
     rationale=(
         "This pins the example's first immutable GSCO step using the "
         "LandremanPaul QA plasma surface, BNORM wireframe surface, toroidal "
-        "break constraints, and fixed TF-coil external field without claiming "
-        "coil-pruning or final-adjustment parity."
+        "break constraints, and fixed TF-coil external field. The separate "
+        "wireframe workflow tests cover small-coil pruning, enclosed-segment "
+        "constraints, current-fraction scheduling, and final adjustment."
     ),
     acceptance_criteria=(
         "CPU and JAX preserve the example surf_plas/ext_field input mode.",
         "CPU and JAX agree on Amat, bvec, final x, final loop count, and "
         "GSCO history arrays for the reduced first step.",
-        "Full multistep mutation, small-coil pruning, final adjustment, and "
-        "plot/VTK side effects remain named unsupported components.",
+        "The parity row keeps plot/VTK side effects named as host-side "
+        "unsupported output components.",
     ),
     inputs={
         "input_file_hashes": {
