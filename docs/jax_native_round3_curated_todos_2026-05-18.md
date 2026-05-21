@@ -1,4 +1,4 @@
-# JAX-Native Round-3 — Curated TODOs (2026-05-18, refreshed 2026-05-19)
+# JAX-Native Round-3 — Curated TODOs (2026-05-18, refreshed 2026-05-21)
 
 Derived from `docs/jax_native_round3_performance_todos_2026-05-18.md`
 after cross-validating each item against the source. Items the round-3
@@ -15,17 +15,24 @@ landed are reclassified here as either "evidence-only" or "closed".
   `test_exact_linearization_residency_dual_instance_gradient_path_matches`.
 - **N34 dual-instance cache observation added**; worked restart
   example still open.
-- **N30 Perlmutter plan added** —
-  `docs/perlmutter_gpu_test_plan_2026-05-19.md`. Still hardware-gated.
+- **N30 Perlmutter proof closed** —
+  `docs/perlmutter_gpu_test_plan_2026-05-19.md` and
+  `docs/jax_multi_gpu_proof_2026-05-19.md` record the real-hardware
+  multi-GPU proof.
 - **Remaining port-surface plan linked** —
   `docs/remaining_jax_port_surfaces_impl_plan_2026-05-19.md` now tracks
   bootstrap/Redl, profiles, frozen VMEC diagnostics, QFM, traceable solve
   wrappers, and PM/wireframe workflow acceptance against the public JAX docs.
+- **2026-05-21 current-tree validation** — rechecked at HEAD
+  `061ef6c73`. The codebase update did not close any remaining open
+  item below. `benchmarks/grouped_adjoint_memory_probe.py` records
+  grouped-adjoint memory pressure, but it is not the N33 production
+  host-vs-device `linearization_residency` comparison.
 
 ## Critical path
 
-The single remaining item whose absence blocks declaring the JAX GPU
-port delivered.
+The former critical-path multi-GPU item is closed; this section is kept
+for proof provenance.
 
 - [x] **N30 — multi-GPU speedup proof for N11 + N12 sharding**
   - Planning: `docs/perlmutter_gpu_test_plan_2026-05-19.md`,
@@ -62,6 +69,9 @@ Real code or example work remaining, beyond pure measurement.
     LS factors placed on CPU and restaged for runtime solve callbacks;
     **equal-gradient two-solver proof landed**
     (`tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_linearization_residency_dual_instance_gradient_path_matches`).
+  - Current-tree validation: `benchmarks/grouped_adjoint_memory_probe.py`
+    is a grouped-adjoint memory probe, not a host-vs-device residency
+    comparison for this option.
   - Action:
     - [ ] Production-N memory probe (peak HBM / RSS at host vs device
       residency on a real fixture).
@@ -76,6 +86,8 @@ Real code or example work remaining, beyond pure measurement.
       run).
     - [ ] Real GPU hardware proof for the CPU-pinned + GPU-routed
       two-instance compile-cache path.
+  - Current-tree validation: no worked restart script, recorded restart
+    run, or real-GPU two-instance proof artifact was found.
 
 ## Hardware-gated (CPU correctness already in)
 
@@ -165,7 +177,8 @@ benchmark-artifact-only closure paperwork.
 
 ## Provenance
 
-- Reviewed branch: `gpu-purity-stage2-20260405` at HEAD `4da847c72`.
+- Reviewed branch: `gpu-purity-stage2-20260405`; latest current-tree
+  validation at HEAD `061ef6c73`.
 - Source-state cross-checks performed against
   `src/simsopt/backend/runtime.py`,
   `src/simsopt/geo/boozersurface_jax.py`,
@@ -182,3 +195,6 @@ benchmark-artifact-only closure paperwork.
   `cbc0cf0de` ("fix: centralize JAX runtime policy"),
   `bd381d5b4` ("fix: vectorize grouped Biot-Savart paths"),
   `3cd654e7a` ("docs: harden Perlmutter GPU test plan").
+- Current-tree revalidation trigger: user reported that the codebase
+  was updated; rechecked the open curated items, E2E plan verdict, and
+  JAX placement / GPU-memory assumptions against official JAX docs.
