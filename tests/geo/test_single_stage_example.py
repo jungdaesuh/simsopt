@@ -3114,7 +3114,7 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         self.assertFalse(artifact_status["success"])
         self.assertEqual(len(artifact_status["violations"]), 3)
-        self.assertEqual(status["curve_curve_distance_metric_kind"], "all_coils")
+        self.assertEqual(status["curve_curve_distance_metric_kind"], "banana_coils")
         self.assertIn("coil_length", artifact_status["violations"][0])
         self.assertIn("banana_current", artifact_status["violations"][1])
         self.assertIn("tf_current", artifact_status["violations"][2])
@@ -4297,6 +4297,15 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(module.frontier_reportable_success(True, True, low_kam_status))
         self.assertIsNone(module.frontier_reportable_success(False, True, low_kam_status))
 
+        run_dict["J"] = 3.0
+        run_dict["search_eval"] = diagnostic_search_eval_payload(
+            {
+                "total": 3.0,
+                "frontier_rank_total": 3.0,
+                "frontier_trust_ok": True,
+                "surface_weights": np.array([1.0]),
+            }
+        )
         high_kam_status = module.refresh_frontier_certification_status(
             run_dict,
             hardware_status=run_dict["accepted_hardware_status"],
@@ -4307,7 +4316,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 "kam_fraction": 0.5,
             },
         )
-
         self.assertTrue(high_kam_status["ok"])
         self.assertEqual(high_kam_status["reason"], "certified")
         self.assertTrue(module.refinement_eligible_incumbent(run_dict))
@@ -4317,6 +4325,77 @@ class HardwareConstraintTests(unittest.TestCase):
             run_dict["best_feasible_incumbent"].search_eval["frontier_certification_ok"]
         )
         self.assertTrue(module.frontier_reportable_success(True, True, high_kam_status))
+
+    def test_frontier_best_feasible_remains_raw_metric_ordered(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_KAM_MIN = 0.30
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 1.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": diagnostic_search_eval_payload(
+                {
+                    "total": 1.0,
+                    "frontier_rank_total": 1.0,
+                    "frontier_trust_ok": True,
+                    "surface_weights": np.array([1.0]),
+                }
+            ),
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": True, "success": True},
+            "intersecting": False,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+        }
+        module.refresh_frontier_certification_status(
+            run_dict,
+            hardware_status=run_dict["accepted_hardware_status"],
+            accepted_iteration=1,
+            topology_entry={
+                "accepted_iteration": 1,
+                "topology_broken": False,
+                "kam_fraction": 1.0 / 12.0,
+            },
+        )
+        self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "raw_low"))
+        self.assertEqual(run_dict["best_feasible_metric"], 1.0)
+        self.assertEqual(run_dict["best_feasible_stage"], "raw_low")
+        self.assertFalse(
+            run_dict["best_feasible_incumbent"].search_eval["frontier_certification_ok"]
+        )
+
+        run_dict["accepted_x"] = np.array([3.0, 4.0])
+        run_dict["J"] = 100.0
+        run_dict["search_eval"] = diagnostic_search_eval_payload(
+            {
+                "total": 100.0,
+                "frontier_rank_total": 100.0,
+                "frontier_trust_ok": True,
+                "surface_weights": np.array([1.0]),
+            }
+        )
+        module.refresh_frontier_certification_status(
+            run_dict,
+            hardware_status=run_dict["accepted_hardware_status"],
+            accepted_iteration=2,
+            topology_entry={
+                "accepted_iteration": 2,
+                "topology_broken": False,
+                "kam_fraction": 0.5,
+            },
+        )
+
+        self.assertFalse(
+            module.maybe_update_best_feasible_incumbent(run_dict, "certified_worse")
+        )
+        self.assertEqual(run_dict["best_feasible_metric"], 1.0)
+        self.assertEqual(run_dict["best_feasible_stage"], "raw_low")
+        np.testing.assert_allclose(run_dict["best_feasible_incumbent"].x, [1.0, 2.0])
 
     def test_frontier_default_kam_floor_reports_hardware_failed_not_kam_deficit(self):
         module = load_single_stage_example_module()
@@ -11497,6 +11576,94 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertNotEqual(scalarized["base_total"], objective_eval["total"])
         self.assertAlmostEqual(scalarized["total"], expected["total"])
         np.testing.assert_allclose(scalarized["grad"], expected["grad"])
+
+    def test_evaluate_alm_objective_uses_banana_objective_curves_for_spacing_constraints(self):
+        module = load_single_stage_example_module()
+        zero = FakeAlgebraicObjective(0.0, [0.0])
+        all_field_curves = ("tf_curve", "banana_curve", "proxy_curve", "vf_curve")
+        banana_objective_curves = ("banana_curve",)
+        module.curves = all_field_curves
+        module.objective_curves = banana_objective_curves
+        module.outer_surface_data = {
+            "boozer_surface": SimpleNamespace(surface="outer_surface")
+        }
+        module.banana_curve = "banana_curve"
+        module.surface_data = [module.outer_surface_data]
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.015
+        module.CURVATURE_THRESHOLD = 100.0
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.curvelength = zero
+        module.length_target = 1.9
+        module.JF = SimpleNamespace(x=np.array([0.0]))
+        module.args = SimpleNamespace(
+            alm_formulation="weighted_sum",
+            alm_qs_threshold=1.0,
+            alm_boozer_threshold=1.0,
+            alm_iota_penalty_threshold=1.0,
+            alm_length_penalty_threshold=1.0,
+            banana_current_max_A=1.6e4,
+        )
+
+        def fake_evaluate_alm_objective_impl(*_args, **kwargs):
+            self.assertIs(kwargs["curves"], banana_objective_curves)
+            self.assertIsNot(kwargs["curves"], all_field_curves)
+            return {
+                "total": 1.0,
+                "grad": np.array([0.0]),
+                "constraint_values": np.array([]),
+                "constraint_grads": [],
+            }
+
+        with (
+            patch.object(
+                module,
+                "_evaluate_alm_objective_impl",
+                side_effect=fake_evaluate_alm_objective_impl,
+            ),
+            patch.object(
+                module,
+                "apply_frontier_scalarization_override",
+                side_effect=lambda objective_eval, **_kwargs: objective_eval,
+            ),
+            patch.object(
+                module,
+                "single_stage_alm_constraint_names",
+                return_value=[],
+            ),
+            patch.object(
+                module,
+                "current_single_stage_alm_surface_stack_surfaces",
+                return_value=None,
+            ),
+            patch.object(
+                module,
+                "current_single_stage_alm_banana_current",
+                return_value=None,
+            ),
+            patch.object(
+                module,
+                "current_single_stage_alm_banana_currents",
+                return_value=None,
+            ),
+        ):
+            result = module.evaluate_alm_objective(
+                np.array([1.0]),
+                [zero],
+                [zero],
+                RES_WEIGHT=0.0,
+                Jiota=zero,
+                IOTAS_WEIGHT=0.0,
+                JCurveLength=zero,
+                LENGTH_WEIGHT=0.0,
+                JCurveCurve=zero,
+                JCurveSurface=zero,
+                JCurvature=zero,
+                multipliers=np.array([]),
+                penalty=1.0,
+            )
+
+        self.assertAlmostEqual(result["total"], 1.0)
 
     def test_evaluate_total_objective_matches_raw_impl_outside_frontier_mode(self):
         module = load_single_stage_example_module()

@@ -3900,16 +3900,6 @@ def accepted_search_metric(run_dict):
     return float(search_eval["total"])
 
 
-def frontier_best_feasible_selection_key(search_eval, metric):
-    if not frontier_mode_enabled():
-        certification_rank = 0
-    else:
-        certification_rank = (
-            0 if search_eval.get("frontier_certification_ok") is True else 1
-        )
-    return (certification_rank, float(metric))
-
-
 def snapshot_diagnostic_incumbent_state(run_dict):
     search_eval = diagnostic_search_eval_for_current_state(run_dict)
     if search_eval is run_dict["search_eval"]:
@@ -3961,14 +3951,8 @@ def maybe_update_best_feasible_incumbent(run_dict, incumbent_stage):
         return False
     metric = accepted_search_metric(run_dict)
     best_metric = run_dict.get("best_feasible_metric")
-    if best_metric is not None:
-        current_key = frontier_best_feasible_selection_key(run_dict["search_eval"], metric)
-        best_key = frontier_best_feasible_selection_key(
-            run_dict["best_feasible_incumbent"].search_eval,
-            best_metric,
-        )
-        if current_key >= best_key:
-            return False
+    if best_metric is not None and metric >= best_metric:
+        return False
     run_dict["best_feasible_incumbent"] = snapshot_diagnostic_incumbent_state(run_dict)
     run_dict["best_feasible_metric"] = metric
     run_dict["best_feasible_stage"] = str(incumbent_stage)
@@ -4967,7 +4951,7 @@ def evaluate_alm_objective(
             multipliers,
             penalty,
             objective_optimizable=JF,
-            curves=curves,
+            curves=objective_curves,
             curve_curve_min_distance=CC_DIST,
             outer_surface=outer_surface_data["boozer_surface"].surface,
             curve_surface_min_distance=CS_DIST,
