@@ -69,7 +69,7 @@ class PermanentMagnetGridJAX:
             A_obj=_as_jax_float64(pm_grid.A_obj),
             b_obj=_as_jax_float64(pm_grid.b_obj),
             ATb=_reshape_moments("ATb", pm_grid.ATb, ndipoles),
-            ATA_scale=jnp.asarray(np.float64(pm_grid.ATA_scale), dtype=jnp.float64),
+            ATA_scale=_as_jax_float64(np.float64(pm_grid.ATA_scale)),
             m0=_reshape_moments("m0", pm_grid.m0, ndipoles),
             m=_reshape_moments("m", pm_grid.m, ndipoles),
             m_proxy=_reshape_moments("m_proxy", m_proxy_source, ndipoles),
@@ -140,7 +140,8 @@ class PermanentMagnetGridJAX:
             R0,
         )
         A_obj_unscaled = jnp.reshape(A_raw, (nphi_value * ntheta_value, ndipoles * 3))
-        scale = jnp.sqrt(normal_norms / jnp.asarray(nphi_value * ntheta_value))
+        quadrature_count = _as_jax_float64(np.float64(nphi_value * ntheta_value))
+        scale = jnp.sqrt(normal_norms / quadrature_count.astype(normal_norms.dtype))
         A_obj = A_obj_unscaled * scale[:, None]
         b_obj = b_obj_unscaled * scale
         ATb = jnp.reshape(A_obj.T @ b_obj, (ndipoles, 3))
@@ -148,7 +149,7 @@ class PermanentMagnetGridJAX:
         ATA_scale = singular_values[0] * singular_values[0]
 
         if m0 is None:
-            m0_arr = jnp.zeros((ndipoles, 3), dtype=jnp.float64)
+            m0_arr = dipoles - dipoles
         else:
             m0_arr = _reshape_moments("m0", m0, ndipoles)
         if m is None:
@@ -220,7 +221,5 @@ def permanent_magnet_grid_to_jax(pm_grid) -> PermanentMagnetGridJAX:
 def mwpgp_alpha_from_grid(grid: PermanentMagnetGridJAX) -> jax.Array:
     """Return the upstream MwPGP step-size rule ``2 * (1 - 1e-5) / ATA_scale``."""
 
-    return (
-        jnp.asarray(2.0 * MWPGP_ALPHA_SAFETY_FACTOR, dtype=grid.ATA_scale.dtype)
-        / grid.ATA_scale
-    )
+    numerator = _as_jax_float64(2.0 * MWPGP_ALPHA_SAFETY_FACTOR)
+    return numerator.astype(grid.ATA_scale.dtype) / grid.ATA_scale

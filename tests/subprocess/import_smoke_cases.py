@@ -809,9 +809,9 @@ def case_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes() -> Non
     import simsopt.config as simsopt_config
     from simsopt.geo.optimizer_jax import (
         PRIVATE_OPTIMIZER_JAX_VERSION,  # noqa: F401
-        jax_minimize,
         private_optimizer_runtime_is_supported,
     )
+    from simsopt.solve.jax import Driver, SimsoptLBFGSBOptions, minimize
 
     simsopt_config.set_backend(
         "jax_cpu_parity",
@@ -831,33 +831,27 @@ def case_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes() -> Non
         x = jnp.asarray(x, dtype=jnp.float64)
         return half * jnp.dot(x, x), x
 
-    def run_lbfgs(fun, *, value_and_grad=False):
+    def run_lbfgs(value_and_grad_fun):
         callback_points = []
-        progress_points = []
-        result = jax_minimize(
-            fun,
+        result = minimize(
+            value_and_grad_fun,
             x0,
-            method="lbfgs-ondevice",
-            maxiter=5,
-            value_and_grad=value_and_grad,
-            callback=_record_host_arrays(callback_points, dtype=np.float64),
-            progress_callback=_record_progress(progress_points),
+            driver=Driver.SIMSOPT_LBFGSB,
+            options=SimsoptLBFGSBOptions(maxiter=5),
+            callback=lambda event: callback_points.append(
+                np.asarray(event.x, dtype=np.float64)
+            ),
         )
-        return result, callback_points, progress_points
+        return result, callback_points
 
     x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
-    result, callback_points, progress_points = run_lbfgs(quad)
-    result_vg, callback_points_vg, progress_points_vg = run_lbfgs(
-        quad_value_and_grad,
-        value_and_grad=True,
-    )
+    result, callback_points = run_lbfgs(jax.value_and_grad(quad))
+    result_vg, callback_points_vg = run_lbfgs(quad_value_and_grad)
 
     assert result.success is True
     assert result_vg.success is True
     assert callback_points
-    assert progress_points
     assert callback_points_vg
-    assert progress_points_vg
     assert float(result.fun) < float(quad(x0))
     assert float(result_vg.fun) < float(quad(x0))
 
@@ -957,9 +951,9 @@ def case_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes() -> None
     import simsopt.config as simsopt_config
     from simsopt.geo.optimizer_jax import (
         PRIVATE_OPTIMIZER_JAX_VERSION,  # noqa: F401
-        jax_minimize,
         private_optimizer_runtime_is_supported,
     )
+    from simsopt.solve.jax import Driver, SimsoptAdamOptions, minimize
 
     simsopt_config.set_backend(
         "jax_cpu_parity",
@@ -977,14 +971,17 @@ def case_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes() -> None
         diff = x - target
         return half * jnp.dot(diff, diff)
 
+    def quad_value_and_grad(x):
+        x = jnp.asarray(x, dtype=jnp.float64)
+        diff = x - target
+        return half * jnp.dot(diff, diff), diff
+
     x0 = jnp.asarray(np.array([1.5, -2.5], dtype=np.float64))
-    result = jax_minimize(
-        quad,
+    result = minimize(
+        quad_value_and_grad,
         x0,
-        method="adam-ondevice",
-        maxiter=200,
-        tol=1e-5,
-        options={"step_size": 0.05},
+        driver=Driver.SIMSOPT_ADAM,
+        options=SimsoptAdamOptions(maxiter=200, gtol=1e-5, learning_rate=0.05),
     )
 
     assert result.success is True
@@ -999,9 +996,9 @@ def case_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes() -> None:
     import simsopt.config as simsopt_config
     from simsopt.geo.optimizer_jax import (
         PRIVATE_OPTIMIZER_JAX_VERSION,  # noqa: F401
-        jax_least_squares,
         private_optimizer_runtime_is_supported,
     )
+    from simsopt.solve.jax import Driver, SimsoptLMGMRESOptions, least_squares
 
     simsopt_config.set_backend(
         "jax_cpu_parity",
@@ -1018,7 +1015,12 @@ def case_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes() -> None:
         x = jnp.asarray(x, dtype=jnp.float64)
         return x - target
 
-    result = jax_least_squares(residual, x0, method="lm-ondevice", maxiter=8)
+    result = least_squares(
+        residual,
+        x0,
+        driver=Driver.SIMSOPT_LM_GMRES,
+        options=SimsoptLMGMRESOptions(maxiter=8),
+    )
 
     assert result.success is True
     assert float(result.fun) < 0.5 * float(jnp.dot(residual(x0), residual(x0)))
@@ -1273,15 +1275,19 @@ def case_transfer_guard_disallow_allows_squaredfluxjax_construction() -> None:
             quadpoints_theta=quadpoints,
         ),
     ]
+    # Place coils strictly outside the surface to avoid coincident
+    # quadrature points; coincidence yields r=0 in the Biot-Savart
+    # kernel and the resulting NaN would mask the construction contract
+    # this test exercises.
     curve = CurveXYZFourier(16, 1)
-    curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
+    curve.x = np.array([2.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5])
     coils = [Coil(curve, Current(1.0))]
     for surf in surfaces:
         objective = SquaredFluxJAX(surf, BiotSavartJAX(coils))
         assert objective._flux_spec.normal.shape == (8, 8, 3)
 
     curve_mixed = CurveXYZFourier(12, 1)
-    curve_mixed.x = np.array([1.1, -0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.08])
+    curve_mixed.x = np.array([2.2, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4])
     mixed_coils = [Coil(curve, Current(1.0)), Coil(curve_mixed, Current(0.5))]
     mixed_objective = SquaredFluxJAX(
         surfaces[0],
@@ -1308,8 +1314,10 @@ def case_transfer_guard_disallow_allows_clamped_xyztensor_surface_spec() -> None
         quadpoints_phi=quadpoints,
         quadpoints_theta=quadpoints,
     )
+    # Place the coil strictly outside the surface to avoid coincident
+    # quadrature points (see case_transfer_guard_disallow_allows_squaredfluxjax_construction).
     curve = CurveXYZFourier(16, 1)
-    curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
+    curve.x = np.array([2.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5])
     bs_jax = BiotSavartJAX([Coil(curve, Current(1.0))])
     objective = SquaredFluxJAX(surf, bs_jax)
     assert objective._flux_spec.normal.shape == (8, 8, 3)
@@ -2160,13 +2168,35 @@ def case_import_pure_jax_modules() -> None:
 def case_public_jax_helpers_are_exposed_on_package_roots() -> None:
     """Pin the public export surface for the JAX solve/geo helpers.
 
+    Backend runtime helpers must resolve through the public
+    ``simsopt.backend`` package facade, not the shadowed legacy module path.
     The solve helpers are wildcard re-exported from
     ``simsopt.solve.permanent_magnet_optimization_jax`` and
     ``simsopt.solve.wireframe_optimization_jax`` whenever JAX is installed.
     The geo helpers resolve through ``simsopt.geo.__getattr__`` and require
     both JAX and ``simsoptpp`` to be importable.
     """
+    import simsopt.backend as backend
+    from simsopt.backend import (
+        get_tolerance_tier,
+        raise_if_target_lane_bypass,
+        strict_target_lane_purity,
+        target_lane_purity_active,
+        target_lane_purity_requested,
+    )
     import simsopt.solve as solve
+
+    backend_path = Path(backend.__file__).resolve()
+    assert backend_path.parent == _SRC_DIR / "simsopt" / "backend"
+    assert backend_path.name == "__init__.py"
+    backend_helpers = (
+        get_tolerance_tier,
+        raise_if_target_lane_bypass,
+        strict_target_lane_purity,
+        target_lane_purity_active,
+        target_lane_purity_requested,
+    )
+    assert all(callable(helper) for helper in backend_helpers)
 
     solve_helpers = (
         "relax_and_split_jax",
@@ -2194,12 +2224,14 @@ def case_public_jax_helpers_are_exposed_on_package_roots() -> None:
         )
 
     import simsopt.geo as geo
+    from simsopt.geo import coil_dofs_gradient_to_derivative
 
     geo_helpers = ("PermanentMagnetGridJAX", "permanent_magnet_grid_to_jax")
     missing_geo = [name for name in geo_helpers if not hasattr(geo, name)]
     assert not missing_geo, (
         f"simsopt.geo is missing public JAX PM-grid helpers: {missing_geo}"
     )
+    assert callable(coil_dofs_gradient_to_derivative)
 
 
 def case_m5_classes_require_simsoptpp() -> None:

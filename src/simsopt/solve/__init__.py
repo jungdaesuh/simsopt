@@ -9,7 +9,10 @@ try:
 except (ImportError, AttributeError):
     _has_simsoptpp = False
 
-_has_jax = importlib.util.find_spec("jax") is not None
+try:
+    _has_jax = importlib.util.find_spec("jax") is not None
+except ImportError:
+    _has_jax = False
 
 _CORE_SOLVE_MODULES = ("serial",)
 _SIMSOPTPP_SOLVE_MODULES = (

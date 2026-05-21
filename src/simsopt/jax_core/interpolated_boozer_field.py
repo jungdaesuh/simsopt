@@ -207,7 +207,7 @@ class InterpolatedBoozerFieldFrozenState:
             raise KeyError(
                 f"interpolant for scalar {scalar_name!r} has not been built; "
                 f"available: {sorted(self.specs)}"
-        )
+            )
         return spec
 
     def get_device(
@@ -236,7 +236,12 @@ class InterpolatedBoozerFieldFrozenState:
 # ---------------------------------------------------------------------------
 
 
-_TWO_PI = 2.0 * jnp.pi
+def _device_float64(value: float) -> jax.Array:
+    return jax.device_put(np.asarray(value, dtype=np.float64))
+
+
+def _device_scalar(value: float, dtype) -> jax.Array:
+    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
 
 
 def fold_points_for_symmetry(
@@ -267,33 +272,47 @@ def fold_points_for_symmetry(
         ``(points_folded, flipped)`` where ``points_folded`` has the
         same shape as ``points`` and ``flipped`` has shape ``(N,)``.
     """
-    s = points[:, 0]
-    theta = points[:, 1]
-    zeta = points[:, 2]
+    s_col, theta_col, zeta_col = jnp.split(points, [1, 2], axis=1)
+    s = jnp.reshape(s_col, (-1,))
+    theta = jnp.reshape(theta_col, (-1,))
+    zeta = jnp.reshape(zeta_col, (-1,))
+    zero = period - period
+    two_pi = zero + _device_float64(2.0 * np.pi)
+    pi = zero + _device_float64(np.pi)
 
     # theta_mult = int(theta / (2*pi)); theta -= theta_mult * 2*pi
     # Uses truncation-toward-zero like C++ ``int()`` cast.
-    theta_mult = jnp.trunc(theta / _TWO_PI)
-    theta = theta - theta_mult * _TWO_PI
+    theta_mult = jnp.trunc(theta / two_pi)
+    theta = theta - theta_mult * two_pi
     # If theta < 0 add 2*pi, if theta > 2*pi subtract 2*pi.
-    theta = jnp.where(theta < 0.0, theta + _TWO_PI, theta)
-    theta = jnp.where(theta > _TWO_PI, theta - _TWO_PI, theta)
+    theta = jnp.where(theta < zero, theta + two_pi, theta)
+    theta = jnp.where(theta > two_pi, theta - two_pi, theta)
 
     zeta_mult = jnp.trunc(zeta / period)
     zeta = zeta - zeta_mult * period
-    zeta = jnp.where(zeta < 0.0, zeta + period, zeta)
+    zeta = jnp.where(zeta < zero, zeta + period, zeta)
     zeta = jnp.where(zeta > period, zeta - period, zeta)
 
     if stellsym:
-        flipped = theta > jnp.pi
+        flipped = theta > pi
         # Order matters: write zeta first using current (post-fold) value,
-        # then write theta — matching C++ lines 769-779.
+        # then write theta — matching the C++ stellsym fold ordering.
         zeta = jnp.where(flipped, period - zeta, zeta)
-        theta = jnp.where(flipped, _TWO_PI - theta, theta)
+        theta = jnp.where(flipped, two_pi - theta, theta)
     else:
-        flipped = jnp.zeros_like(theta, dtype=bool)
+        flipped = jnp.zeros(theta.shape, dtype=jnp.bool_)
 
-    return jnp.stack([s, theta, zeta], axis=1), flipped
+    return (
+        jnp.concatenate(
+            [
+                jnp.reshape(s, (-1, 1)),
+                jnp.reshape(theta, (-1, 1)),
+                jnp.reshape(zeta, (-1, 1)),
+            ],
+            axis=1,
+        ),
+        flipped,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -578,9 +597,22 @@ def _zeroed_flux_points(points: jax.Array) -> jax.Array:
     so we never broadcast a Python literal onto the device when there is
     actual array traffic on the same call).
     """
-    s = points[:, 0]
-    zeros = jnp.zeros_like(s)
-    return jnp.stack([s, zeros, zeros], axis=1)
+    s_col, _theta_col, _zeta_col = jnp.split(points, [1, 2], axis=1)
+    s = jnp.reshape(s_col, (-1,))
+    zeros = s - s
+    return jnp.concatenate(
+        [
+            jnp.reshape(s, (-1, 1)),
+            jnp.reshape(zeros, (-1, 1)),
+            jnp.reshape(zeros, (-1, 1)),
+        ],
+        axis=1,
+    )
+
+
+def _split_three_columns(raw: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+    col0, col1, col2 = jnp.split(raw, [1, 2], axis=1)
+    return jnp.reshape(col0, (-1,)), jnp.reshape(col1, (-1,)), jnp.reshape(col2, (-1,))
 
 
 def _apply_symmetry(
@@ -608,13 +640,25 @@ def _apply_symmetry(
     # sizes; any other value_size raises so a new field family cannot
     # silently slip through this branch.
     if rule.apply_odd:
+        sign_value = jnp.where(
+            flipped,
+            _device_scalar(-1.0, raw.dtype),
+            _device_scalar(1.0, raw.dtype),
+        )
         if rule.value_size == 1:
-            sign = jnp.where(flipped, -1.0, 1.0)[:, None]
+            sign = jnp.reshape(sign_value, (-1, 1))
             return raw * sign
         if rule.value_size == 3:
-            sign0 = jnp.where(flipped, -1.0, 1.0)
-            col0 = raw[:, 0] * sign0
-            return jnp.stack([col0, raw[:, 1], raw[:, 2]], axis=1)
+            raw0, raw1, raw2 = _split_three_columns(raw)
+            col0 = raw0 * sign_value
+            return jnp.concatenate(
+                [
+                    jnp.reshape(col0, (-1, 1)),
+                    jnp.reshape(raw1, (-1, 1)),
+                    jnp.reshape(raw2, (-1, 1)),
+                ],
+                axis=1,
+            )
         raise ValueError(
             f"apply_odd symmetry has no C++ oracle for value_size="
             f"{rule.value_size}; supported sizes are 1 and 3."
@@ -628,9 +672,21 @@ def _apply_symmetry(
                 f"apply_odd_vector_first_only is only defined for value_size=3; "
                 f"got value_size={rule.value_size}."
             )
-        sign0 = jnp.where(flipped, -1.0, 1.0)
-        col0 = raw[:, 0] * sign0
-        return jnp.stack([col0, raw[:, 1], raw[:, 2]], axis=1)
+        sign0 = jnp.where(
+            flipped,
+            _device_scalar(-1.0, raw.dtype),
+            _device_scalar(1.0, raw.dtype),
+        )
+        raw0, raw1, raw2 = _split_three_columns(raw)
+        col0 = raw0 * sign0
+        return jnp.concatenate(
+            [
+                jnp.reshape(col0, (-1, 1)),
+                jnp.reshape(raw1, (-1, 1)),
+                jnp.reshape(raw2, (-1, 1)),
+            ],
+            axis=1,
+        )
     # apply_even: negate components 1, 2 of a 3-vec. C++ ``apply_even_symmetry``
     # at header lines 799-807 checks ``field.shape(1)==3`` and is undefined
     # for other sizes.
@@ -640,10 +696,22 @@ def _apply_symmetry(
                 f"apply_even is only defined for value_size=3; "
                 f"got value_size={rule.value_size}."
             )
-        sign12 = jnp.where(flipped, -1.0, 1.0)
-        col1 = raw[:, 1] * sign12
-        col2 = raw[:, 2] * sign12
-        return jnp.stack([raw[:, 0], col1, col2], axis=1)
+        sign12 = jnp.where(
+            flipped,
+            _device_scalar(-1.0, raw.dtype),
+            _device_scalar(1.0, raw.dtype),
+        )
+        raw0, raw1, raw2 = _split_three_columns(raw)
+        col1 = raw1 * sign12
+        col2 = raw2 * sign12
+        return jnp.concatenate(
+            [
+                jnp.reshape(raw0, (-1, 1)),
+                jnp.reshape(col1, (-1, 1)),
+                jnp.reshape(col2, (-1, 1)),
+            ],
+            axis=1,
+        )
     # The early-return at the top already handles the all-False rule;
     # any path reaching here would indicate a rule with multiple flags
     # set, which is not a valid C++ ``apply_*_symmetry`` combination.
@@ -685,7 +753,7 @@ def evaluate_scalar(
         rule = SYMMETRY_EXPLOIT_SCALARS[scalar_name]
         folded, flipped = fold_points_for_symmetry(
             points,
-            period=jnp.asarray(state.period, dtype=jnp.float64),
+            period=_device_float64(state.period),
             stellsym=state.stellsym,
         )
         raw = evaluate_batch_device(

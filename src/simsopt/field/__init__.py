@@ -1,3 +1,5 @@
+import importlib.util
+
 from .._lazy_exports import build_lazy_export_map, resolve_lazy_export
 
 # Check simsoptpp availability once; probe a compiled symbol to
@@ -10,10 +12,8 @@ except (ImportError, AttributeError):
     _has_simsoptpp = False
 
 try:
-    import jax as _  # noqa: F401
-
-    _has_jax = True
-except (ImportError, AttributeError):
+    _has_jax = importlib.util.find_spec("jax") is not None
+except ImportError:
     _has_jax = False
 
 _CPU_FIELD_MODULES = (

@@ -13,9 +13,7 @@ except (ImportError, AttributeError):
     _has_simsoptpp = False
 
 try:
-    import jax as _  # noqa: F401
-
-    _has_jax = True
+    _has_jax = importlib.util.find_spec("jax") is not None
 except ImportError:
     _has_jax = False
 

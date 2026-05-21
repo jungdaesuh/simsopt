@@ -79,8 +79,8 @@ def _solve_boozer_runtime_transpose(adjoint_state, rhs):
     solve_with_status = getattr(adjoint_state, "solve_transpose_with_status", None)
     if callable(solve_with_status):
         rhs_runtime = _runtime_as_jax_float64(rhs) if _HAS_JAX else rhs
-        adjoint, success = solve_with_status(rhs_runtime)
-        success_host = jax.device_get(success) if _HAS_JAX else success
+        adjoint, status = solve_with_status(rhs_runtime)
+        success_host = jax.device_get(status.success) if _HAS_JAX else status.success
         if not bool(np.asarray(success_host)):
             raise RuntimeError(
                 "Boozer adjoint linear solve failed on the runtime-state path "

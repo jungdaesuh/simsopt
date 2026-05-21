@@ -22,7 +22,7 @@ from ._common import (
     _require_private_optimizer_runtime,
     _scalar_value_and_grad,
 )
-from ._line_search import _line_search
+from ._line_search import _line_search, _line_search_value_and_grad
 from ._types import _BFGSResults
 
 
@@ -53,11 +53,12 @@ def _minimize_bfgs_private(
     initial_state=None,
     callback=None,
     progress_callback=None,
+    value_and_grad=False,
 ):
     fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
         fun,
         x0,
-        value_and_grad=False,
+        value_and_grad=value_and_grad,
         callback=callback,
     )
     x0 = _require_private_optimizer_runtime(x0)
@@ -66,7 +67,10 @@ def _minimize_bfgs_private(
     maxiter = int(maxiter)
 
     d = x0.shape[0]
-    scalar_value_and_grad = _scalar_value_and_grad(fun)
+    scalar_value_and_grad = (
+        jax.jit(fun) if value_and_grad else _scalar_value_and_grad(fun)
+    )
+    line_search = _line_search_value_and_grad if value_and_grad else _line_search
     gtol_value = np.asarray(gtol, dtype=np.dtype(x0.dtype)).item()
     half_value = np.asarray(0.5, dtype=np.dtype(x0.dtype)).item()
     wolfe_c1_value = np.asarray(1e-4, dtype=np.dtype(x0.dtype)).item()
@@ -115,7 +119,7 @@ def _minimize_bfgs_private(
         wolfe_c1 = _as_jax_dtype(wolfe_c1_value, state.f_k.dtype)
         wolfe_c2 = _as_jax_dtype(wolfe_c2_value, state.f_k.dtype)
         p_k = -_dot(state.H_k, state.g_k)
-        line_search_results = _line_search(
+        line_search_results = line_search(
             fun,
             state.x_k,
             p_k,
@@ -263,14 +267,13 @@ def _minimize_bfgs_private(
 
     run_solver.__name__ = "bfgs_private_run_solver"
     can_cache_solver = (
-        adapter is None
-        and callback is None
-        and progress_callback is None
+        adapter is None and callback is None and progress_callback is None
     )
     solver = _cached_private_solver(
         fun if can_cache_solver else None,
         cache_key=(
             "bfgs",
+            bool(value_and_grad),
             norm,
             int(line_search_maxiter),
             float(gtol_value),
