@@ -3909,7 +3909,8 @@ class SingleStageExampleTests(unittest.TestCase):
         expected_gamma = jax.grad(gamma_scalar)(
             jnp.asarray(owner_dofs, dtype=jnp.float64)
         )
-        actual_gamma = curve.dgamma_by_dcoeff_vjp(d_gamma)(curve)
+        with jax.transfer_guard("disallow"):
+            actual_gamma = curve.dgamma_by_dcoeff_vjp(d_gamma)(curve)
         np.testing.assert_allclose(
             actual_gamma,
             expected_gamma,
@@ -3929,9 +3930,10 @@ class SingleStageExampleTests(unittest.TestCase):
         expected_length = jax.grad(length_scalar)(
             jnp.asarray(owner_dofs, dtype=jnp.float64)
         )
-        actual_length = curve.dincremental_arclength_by_dcoeff_vjp(length_weights)(
-            curve
-        )
+        with jax.transfer_guard("disallow"):
+            actual_length = curve.dincremental_arclength_by_dcoeff_vjp(
+                length_weights
+            )(curve)
         np.testing.assert_allclose(
             actual_length,
             expected_length,

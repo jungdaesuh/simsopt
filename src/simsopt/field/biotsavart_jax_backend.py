@@ -78,6 +78,11 @@ from ._coil_graph import _unwrap_coil_curve_and_current_objects
 
 _COIL_DOF_STATE_TOKEN_COUNTER = count()
 
+
+def _device_zero_like(value: object) -> jax.Array:
+    array = _as_jax_float64(value)
+    return array - array
+
 __all__ = [
     "BiotSavartJAX",
     "BiotSavartFieldPullback",
@@ -448,12 +453,12 @@ class SpecBackedCurve(Optimizable):
     def dgamma_by_dcoeff_vjp(self, v: object) -> Derivative:
         return self._curve_pullback_derivative(
             v,
-            jnp.zeros_like(_as_jax_float64(self.gammadash())),
+            _device_zero_like(self.gammadash()),
         )
 
     def dgammadash_by_dcoeff_vjp(self, v: object) -> Derivative:
         return self._curve_pullback_derivative(
-            jnp.zeros_like(_as_jax_float64(self.gamma())),
+            _device_zero_like(self.gamma()),
             v,
         )
 
