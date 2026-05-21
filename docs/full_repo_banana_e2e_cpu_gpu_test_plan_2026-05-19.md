@@ -735,8 +735,10 @@ single-stage fixture before interpreting larger single-stage outer-loop timing:
 - Optax L-BFGS target lane
 
 Use a single Slurm job for the matrix. Do not submit one job per backend.
-Each backend rung must wrap `benchmarks/single_stage_init_parity.py` in
-`/usr/bin/time -v`, sample `nvidia-smi`, and write a structured summary.
+Each backend rung must run `benchmarks/single_stage_init_parity.py` in
+`--benchmark-mode`, sample `nvidia-smi`, and write a structured summary.
+When the command is launched through `srun`, use Slurm step `MaxRSS` as the
+CPU-memory record; `/usr/bin/time -v` around `srun` records launcher RSS.
 This runner owns the relevant oracle contract: its reference lane is the
 SciPy/C++ CPU path, and its target lane is selected by `--optimizer-backend`.
 The target backends are:
@@ -753,11 +755,12 @@ for backend in ondevice scipy-jax-fullgraph optimistix-lbfgs optax-lbfgs; do
     python benchmarks/single_stage_init_parity.py \
       --platform cuda \
       --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
-      --nphi 63 \
-      --ntheta 32 \
-      --mpol 4 \
-      --ntor 4 \
+      --nphi 31 \
+      --ntheta 16 \
+      --mpol 2 \
+      --ntor 2 \
       --maxiter 1 \
+      --benchmark-mode \
       --optimizer-backend "${backend}" \
       --equilibria-dir examples/single_stage_optimization/equilibria \
       --case-artifacts-dir "${rung_dir}/cases" \
@@ -775,8 +778,8 @@ Acceptance:
 - [ ] The target backend's recorded optimizer method matches the requested
   public backend contract.
 - [ ] Each rung records fixed-state precision metrics, final metric deltas,
-  CPU wall time, target wall time, `/usr/bin/time -v` maximum resident set
-  size, and sampled peak GPU memory.
+  CPU wall time, target wall time, Slurm step `MaxRSS`, `/usr/bin/time -v`
+  launcher/process RSS as applicable, and sampled peak GPU memory.
 - [ ] This matrix is a reduced single-stage E2E optimizer-control comparison.
   It is not a substitute for the single-stage `m04n04-i05-useful` and larger
   rungs.
