@@ -4466,6 +4466,22 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--target-lane-profile-progress-json",
+        default=None,
+        help=(
+            "Write checkpointed progress for each target-lane profile closure. "
+            "This is intended for long-running backend diagnostics."
+        ),
+    )
+    parser.add_argument(
+        "--dump-target-lane-stablehlo-dir",
+        default=None,
+        help=(
+            "Dump StableHLO text for each target-lane profile closure into this "
+            "directory before executing it."
+        ),
+    )
+    parser.add_argument(
         "--record-jax-compile-diagnostics",
         action="store_true",
         help=(
@@ -6779,6 +6795,8 @@ def build_target_lane_outer_objectives(
     success_filter=None,
     full_state_optimizer_dof_map=None,
     profile_optimizer_dofs=None,
+    profile_progress_json_path=None,
+    stablehlo_dir=None,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
     target_scalar_objective = None
@@ -6827,12 +6845,21 @@ def build_target_lane_outer_objectives(
         profile_coil_dofs = build_target_lane_profile_coil_dofs(profile_seed_dofs)
         target_lane_profile = profile_traceable_target_lane_objective(
             runtime_bundle["profile_suite"],
-            full_state_optimizer_dof_map.coil_dofs_from_optimizer_dofs(
+            full_state_optimizer_dof_map.jax_coil_dofs_from_optimizer_dofs(
                 profile_coil_dofs
             )
             if full_state_optimizer_dof_map is not None
             else profile_coil_dofs,
             include_memory_analysis=profile_target_lane_memory_analysis,
+            progress_json_path=profile_progress_json_path,
+            stablehlo_dir=stablehlo_dir,
+            optimizer_value_and_grad=target_value_and_grad_objective,
+            optimizer_dofs=profile_coil_dofs,
+            optimizer_coil_indices=(
+                None
+                if full_state_optimizer_dof_map is None
+                else full_state_optimizer_dof_map.coil_optimizer_indices
+            ),
         )
         target_lane_profile["profile_point_kind"] = "baseline_perturbed"
         if (
@@ -7509,6 +7536,8 @@ def prepare_target_lane_outer_objectives(
     profile_target_lane: bool,
     profile_target_lane_memory_analysis: bool = False,
     profile_batch_size: int,
+    profile_progress_json_path=None,
+    stablehlo_dir=None,
     disable_success_filter: bool,
     non_qs_weight,
     residual_weight,
@@ -7589,6 +7618,8 @@ def prepare_target_lane_outer_objectives(
         success_filter=target_lane_success_filter,
         full_state_optimizer_dof_map=full_state_optimizer_dof_map,
         profile_optimizer_dofs=profile_optimizer_dofs,
+        profile_progress_json_path=profile_progress_json_path,
+        stablehlo_dir=stablehlo_dir,
     )
     if target_scalar_objective is None:
         target_scalar_objective = _scalar_objective_from_value_and_grad(
@@ -8537,6 +8568,20 @@ def _compiled_memory_analysis_stats(fn, *args):
     }
 
 
+def _dump_profile_callable_stablehlo(fn, name, args, stablehlo_dir):
+    """Write StableHLO for one profile callable without executing it."""
+    if stablehlo_dir is None:
+        return None
+    os.makedirs(stablehlo_dir, exist_ok=True)
+    path = os.path.join(stablehlo_dir, f"{name}.stablehlo.mlir")
+    lowerable_fn = fn if hasattr(fn, "lower") else jax.jit(fn)
+    lowered = lowerable_fn.lower(*args)
+    with open(path, "w", encoding="utf-8") as outfile:
+        outfile.write(str(lowered.compiler_ir(dialect="stablehlo")))
+        outfile.write("\n")
+    return path
+
+
 def profile_traceable_target_lane_memory_analysis(
     profile_suite,
     coil_dofs,
@@ -8684,51 +8729,99 @@ def profile_traceable_target_lane_objective(
     coil_dofs,
     *,
     include_memory_analysis=False,
+    progress_json_path=None,
+    stablehlo_dir=None,
+    optimizer_value_and_grad=None,
+    optimizer_dofs=None,
+    optimizer_coil_indices=None,
 ):
     """Profile the traceable target-lane closures at one representative DOF point."""
     profiled = {}
-    forward_result, profiled["forward_result"] = _profile_tree_callable_pair(
-        profile_suite["forward_result"],
+    progress_events = []
+    profile_start_s = _perf_counter_s()
+
+    def record_progress(name, status, **extra):
+        if progress_json_path is None:
+            return
+        event = {
+            "name": name,
+            "status": status,
+            "elapsed_s": _elapsed_s(profile_start_s, _perf_counter_s()),
+        }
+        event.update(extra)
+        progress_events.append(event)
+        write_json_file(
+            progress_json_path,
+            {
+                "current": name,
+                "current_status": status,
+                "complete": False,
+                "events": progress_events,
+            },
+        )
+
+    def profile_callable(name, fn, *args):
+        record_progress(name, "stablehlo_started")
+        stablehlo_path = _dump_profile_callable_stablehlo(
+            fn,
+            name,
+            args,
+            stablehlo_dir,
+        )
+        record_progress(name, "started", stablehlo_path=stablehlo_path)
+        out, timings = _profile_tree_callable_pair(fn, *args)
+        record_progress(name, "returned", timings=timings)
+        return out, timings
+
+    def profile_named(name, *args):
+        return profile_callable(name, profile_suite[name], *args)
+
+    forward_result, profiled["forward_result"] = profile_named(
+        "forward_result",
         coil_dofs,
     )
-    _, profiled["forward_value"] = _profile_tree_callable_pair(
-        profile_suite["forward_value"],
-        coil_dofs,
-    )
-    _, profiled["warmstart_predict"] = _profile_tree_callable_pair(
-        profile_suite["warmstart_predict"],
-        coil_dofs,
-    )
-    solve_result, profiled["inner_solve"] = _profile_tree_callable_pair(
-        profile_suite["inner_solve"],
-        coil_dofs,
-    )
+    _, profiled["forward_value"] = profile_named("forward_value", coil_dofs)
+    _, profiled["warmstart_predict"] = profile_named("warmstart_predict", coil_dofs)
+    solve_result, profiled["inner_solve"] = profile_named("inner_solve", coil_dofs)
     solved_x = forward_result["x"]
     solved_linear_solve_factors = forward_result["linear_solve_factors"]
-    _, profiled["surface_geometry"] = _profile_tree_callable_pair(
-        profile_suite["surface_geometry"],
+    _, profiled["surface_geometry"] = profile_named(
+        "surface_geometry",
         solved_x,
     )
-    _, profiled["field_eval"] = _profile_tree_callable_pair(
-        profile_suite["field_eval"],
+    _, profiled["field_eval"] = profile_named(
+        "field_eval",
         coil_dofs,
         solved_x,
     )
-    _, profiled["solved_total_objective"] = _profile_tree_callable_pair(
-        profile_suite["solved_total_objective"],
+    _, profiled["solved_total_objective"] = profile_named(
+        "solved_total_objective",
         coil_dofs,
         solved_x,
     )
-    _, profiled["solved_total_gradient"] = _profile_tree_callable_pair(
-        profile_suite["solved_total_gradient"],
+    _, profiled["solved_total_gradient"] = profile_named(
+        "solved_total_gradient",
         coil_dofs,
         solved_x,
         solved_linear_solve_factors,
     )
-    _, profiled["value_and_grad_pipeline"] = _profile_tree_callable_pair(
-        profile_suite["value_and_grad_pipeline"],
+    compact_value_and_grad, profiled["value_and_grad_pipeline"] = profile_named(
+        "value_and_grad_pipeline",
         coil_dofs,
     )
+    if optimizer_value_and_grad is not None:
+        exact_value_and_grad, profiled["optimizer_value_and_grad"] = profile_callable(
+            "optimizer_value_and_grad",
+            optimizer_value_and_grad,
+            optimizer_dofs,
+        )
+        profiled["optimizer_value_and_grad_comparison"] = (
+            compare_compact_and_optimizer_value_and_grad(
+                compact_value_and_grad,
+                exact_value_and_grad,
+                optimizer_coil_indices=optimizer_coil_indices,
+            )
+        )
     if include_memory_analysis:
         profiled["memory_analysis"] = profile_traceable_target_lane_memory_analysis(
             profile_suite,
@@ -8737,7 +8830,73 @@ def profile_traceable_target_lane_objective(
             solved_linear_solve_factors,
         )
     profiled["solve_success"] = host_bool(solve_result["success"])
+    if progress_json_path is not None:
+        write_json_file(
+            progress_json_path,
+            {
+                "current": None,
+                "current_status": "complete",
+                "complete": True,
+                "events": progress_events,
+            },
+        )
     return profiled
+
+
+def compare_compact_and_optimizer_value_and_grad(
+    compact_value_and_grad,
+    optimizer_value_and_grad,
+    *,
+    optimizer_coil_indices=None,
+):
+    """Compare compact coil value/grad with the full-state optimizer wrapper."""
+    compact_value, compact_gradient = compact_value_and_grad
+    optimizer_value, optimizer_gradient = optimizer_value_and_grad
+    compact_gradient_host = np.asarray(
+        host_array(compact_gradient),
+        dtype=np.float64,
+    ).reshape(-1)
+    optimizer_gradient_host = np.asarray(
+        host_array(optimizer_gradient),
+        dtype=np.float64,
+    ).reshape(-1)
+    if optimizer_coil_indices is None:
+        active_optimizer_gradient = optimizer_gradient_host
+        inactive_optimizer_gradient = np.asarray([], dtype=np.float64)
+    else:
+        active_indices = np.asarray(optimizer_coil_indices, dtype=np.int64)
+        active_optimizer_gradient = optimizer_gradient_host[active_indices]
+        inactive_mask = np.ones(optimizer_gradient_host.shape, dtype=bool)
+        inactive_mask[active_indices] = False
+        inactive_optimizer_gradient = optimizer_gradient_host[inactive_mask]
+    value_abs_diff = abs(host_float(compact_value) - host_float(optimizer_value))
+    gradient_diff = active_optimizer_gradient - compact_gradient_host
+    gradient_abs_diff_inf = (
+        0.0
+        if gradient_diff.size == 0
+        else float(np.max(np.abs(gradient_diff)))
+    )
+    gradient_reference_inf = (
+        0.0
+        if compact_gradient_host.size == 0
+        else float(np.max(np.abs(compact_gradient_host)))
+    )
+    inactive_gradient_inf = (
+        0.0
+        if inactive_optimizer_gradient.size == 0
+        else float(np.max(np.abs(inactive_optimizer_gradient)))
+    )
+    return {
+        "compact_value": host_float(compact_value),
+        "optimizer_value": host_float(optimizer_value),
+        "value_abs_diff": float(value_abs_diff),
+        "active_gradient_abs_diff_inf": gradient_abs_diff_inf,
+        "active_gradient_reference_inf": gradient_reference_inf,
+        "inactive_gradient_abs_inf": inactive_gradient_inf,
+        "compact_gradient_size": int(compact_gradient_host.size),
+        "optimizer_gradient_size": int(optimizer_gradient_host.size),
+        "inactive_gradient_size": int(inactive_optimizer_gradient.size),
+    }
 
 
 def profile_traceable_target_lane_seed_batch(profile_suite, coil_dofs_batch):
@@ -12505,6 +12664,8 @@ if __name__ == "__main__":
                         args.profile_target_lane_memory_analysis
                     ),
                     profile_batch_size=args.profile_target_lane_batch_size,
+                    profile_progress_json_path=args.target_lane_profile_progress_json,
+                    stablehlo_dir=args.dump_target_lane_stablehlo_dir,
                     disable_success_filter=args.disable_target_lane_success_filter,
                     non_qs_weight=1.0,
                     residual_weight=RES_WEIGHT,
@@ -12983,6 +13144,10 @@ if __name__ == "__main__":
                                 args.profile_target_lane_memory_analysis
                             ),
                             profile_batch_size=args.profile_target_lane_batch_size,
+                            profile_progress_json_path=(
+                                args.target_lane_profile_progress_json
+                            ),
+                            stablehlo_dir=args.dump_target_lane_stablehlo_dir,
                             disable_success_filter=(
                                 args.disable_target_lane_success_filter
                             ),

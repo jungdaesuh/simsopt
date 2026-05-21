@@ -9,6 +9,7 @@ from typing import Any
 
 from simsopt.config import (
     get_backend_mode,
+    get_backend_policy,
     get_compilation_cache_dir,
     get_compilation_cache_policy,
     get_jax_platform,
@@ -47,6 +48,7 @@ def build_runtime_provenance(
     jaxlib_version: str,
 ) -> dict[str, Any]:
     gpu_memory_mb = query_active_gpu_memory_mb()
+    backend_policy = get_backend_policy()
     provenance = {
         "title": title,
         "generated_at_utc": datetime.now(timezone.utc)
@@ -67,6 +69,9 @@ def build_runtime_provenance(
         "x64_enabled": bool(jax_module.config.x64_enabled),
         "backend_mode": get_backend_mode(),
         "backend_label": get_provenance_label(),
+        "runtime_dtype": backend_policy.runtime_dtype,
+        "host_dtype": backend_policy.host_dtype,
+        "tolerance_tier": backend_policy.tolerance_tier,
         "backend_strict": bool(is_backend_strict()),
         "transfer_guard": get_transfer_guard(),
         "jax_platform_request": get_jax_platform(),

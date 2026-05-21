@@ -61,9 +61,10 @@ python -m pip install -e ".[deploy_gpu]"
 
 The `deploy` and `deploy_gpu` extras are the repository SSOT for this workflow.
 As of 2026-05-19, `deploy_gpu` routes through the repo `JAX_GPU` extra, which
-uses the official JAX `jax[cuda12]` CUDA wheel family. Current JAX docs also
-publish `jax[cuda13]`; use a different CUDA wheel only as an explicit
-environment-lane decision.
+pins the official JAX `jax[cuda12]==0.10.0` CUDA wheel family and the typed
+`simsopt.solve.jax` runtime optimizer libraries. Current JAX docs also publish
+`jax[cuda13]`; use a different CUDA wheel only as an explicit environment-lane
+decision.
 
 Runtime environment recipes:
 
@@ -96,8 +97,8 @@ unset LD_LIBRARY_PATH
 
 Official JAX policy that matters for this workflow:
 
-- CUDA pip wheels are installed with extras such as `jax[cuda12]` or
-  `jax[cuda13]`.
+- CUDA pip wheels are installed with extras such as `jax[cuda12]==0.10.0` or
+  an explicitly selected `jax[cuda13]` lane.
 - `JAX_PLATFORMS` is ordered. Every listed platform must initialize, and the
   first listed platform becomes the default.
 - JAX preallocates GPU memory by default; proof jobs set
@@ -231,8 +232,8 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
   --iota-target 0.17 \
   --vol-target 0.10 \
   --cc-dist 0.07 \
-  --mpol 15 \
-  --ntor 6 \
+  --mpol 10 \
+  --ntor 10 \
   --init-only \
   --minimal-artifacts \
   --output-root .artifacts/single_stage_cpu_init
@@ -263,8 +264,8 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
   --iota-target 0.17 \
   --vol-target 0.10 \
   --cc-dist 0.07 \
-  --mpol 15 \
-  --ntor 6 \
+  --mpol 10 \
+  --ntor 10 \
   --init-only \
   --minimal-artifacts \
   --output-root .artifacts/single_stage_jax_cpu_init
@@ -289,8 +290,8 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
   --iota-target 0.17 \
   --vol-target 0.10 \
   --cc-dist 0.07 \
-  --mpol 15 \
-  --ntor 6 \
+  --mpol 10 \
+  --ntor 10 \
   --init-only \
   --minimal-artifacts \
   --output-root .artifacts/single_stage_jax_gpu_init
