@@ -67,6 +67,7 @@ _DEBUG_NANS_ENV = "SIMSOPT_JAX_DEBUG_NANS"
 _DISABLE_JIT_ENV = "SIMSOPT_JAX_DISABLE_JIT"
 _TRANSFER_GUARD_ENV = "SIMSOPT_JAX_TRANSFER_GUARD"
 _COMPILATION_CACHE_DIR_ENV = "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
+_JAX_COMPILATION_CACHE_DIR_ENV = "JAX_COMPILATION_CACHE_DIR"
 _COIL_CHUNK_SIZE_ENV = "SIMSOPT_JAX_COIL_CHUNK_SIZE"
 _QUADRATURE_BLOCK_SIZE_ENV = "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"
 _POINT_CHUNK_SIZE_ENV = "SIMSOPT_JAX_POINT_CHUNK_SIZE"
@@ -1377,6 +1378,9 @@ def _resolve_compilation_cache_dir(
     env_value = _optional_env_value(_COMPILATION_CACHE_DIR_ENV)
     if env_value is not None:
         return env_value
+    jax_env_value = _optional_env_value(_JAX_COMPILATION_CACHE_DIR_ENV)
+    if jax_env_value is not None:
+        return jax_env_value
     return _default_compilation_cache_dir(mode)
 
 

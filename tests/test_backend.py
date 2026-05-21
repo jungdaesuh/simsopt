@@ -1793,6 +1793,22 @@ def test_explicit_compilation_cache_env_overrides_default(monkeypatch):
     assert policy.compilation_cache_dir == "/custom/cache/path"
 
 
+def test_jax_compilation_cache_env_overrides_default(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("JAX_COMPILATION_CACHE_DIR", "/scratch/jax-cache")
+    backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
+
+    config = backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    policy = backend.get_backend_policy("jax_gpu_parity")
+
+    assert config.compilation_cache_dir == "/scratch/jax-cache"
+    assert backend.get_compilation_cache_dir() == "/scratch/jax-cache"
+    assert policy.compilation_cache_dir == "/scratch/jax-cache"
+
+
 def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
