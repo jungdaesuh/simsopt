@@ -76,16 +76,91 @@ __all__ = [
     "boozer_surface_residual_finite_I",
     "boozer_surface_residual_dB_finite_I",
     "BoozerSurfaceFiniteI",
+    "derive_signed_G_from_field",
 ]
 
 
 _EXACT_NEWTON_BACKTRACKING_STEPS = tuple(0.5 ** i for i in range(8))
+
+# SIMSOPT writes the Boozer residual in normalized angles (theta, phi in
+# [0, 1]), so the ``G`` invariant on a flux surface equals
+# ``mu0 * sum_signed(I_TF_linked)`` for a vacuum field — the factor of 2*pi
+# from the angle change of variables cancels the 1/(2*pi) in the
+# Biot-Savart prefactor. The upstream ``boozer_surface_residual`` default
+# uses the *unsigned* sum (``np.abs``), which silently flips the sign of
+# the Newton seed when the linked TF current is negative (e.g., CW HBT
+# TF at -80 kA). This module provides the signed SSOT seed.
+_MU0_TM_PER_A = 4.0e-7 * np.pi
 
 
 def _require_explicit_G(G):
     if G is None:
         raise ValueError("finite-current Boozer paths require an explicit signed G")
     return G
+
+
+def _signed_G_from_tf_currents(tf_coils) -> float:
+    """Internal SSOT formula: ``G = mu0 * sum_signed(I_TF)``.
+
+    Kept private so the public ``derive_signed_G_from_field`` is the single
+    sanctioned entry point that callers declare a field dependency through;
+    the legacy ``compute_tf_G0(tf_coils)`` helper in
+    ``stage2_single_stage_handoff`` delegates here for backward-compatible
+    sites that only carry the TF coil list.
+
+    Duplicate coils in ``tf_coils`` are rejected: the toroidal-current
+    linkage on the Boozer surface counts each *physical* TF coil exactly
+    once, so a repeated coil reference would silently double-count its
+    current in ``G`` and seed Newton with a magnitude inflated by the
+    duplication factor.
+    """
+    if not tf_coils:
+        raise ValueError(
+            "Signed Boozer G derivation requires a non-empty TF coil bundle; "
+            "vacuum-only fields with no TF coils have no toroidal-current "
+            "linkage and cannot seed the Newton solve."
+        )
+    if len({id(c) for c in tf_coils}) != len(tf_coils):
+        raise ValueError(
+            "derive_signed_G_from_field: tf_coils contains duplicate coils"
+        )
+    signed_current_sum = float(
+        sum(coil.current.get_value() for coil in tf_coils)
+    )
+    return _MU0_TM_PER_A * signed_current_sum
+
+
+def derive_signed_G_from_field(biotsavart, *, tf_coils) -> float:
+    """Return the signed Boozer ``G`` seed for a TF bundle in a BS field.
+
+    Computes ``G = mu0 * sum_signed(I_TF)`` in SIMSOPT's normalized-angle
+    convention (same magnitude as the upstream sign-blind default, but
+    signed). ``tf_coils`` is the explicit TF subset of ``biotsavart.coils``
+    -- the function intentionally does *not* try to discover the TF subset
+    from the field, because the banana / proxy / VF coils share a
+    ``BiotSavart`` instance and only the TF bundle contributes to the
+    surface's poloidal-current linkage. ``biotsavart`` is accepted so that
+    callers declare the field dependency explicitly and so the helper can
+    verify that the TF subset really belongs to the field that will feed
+    the Boozer residual.
+
+    Proxy / VF currents intentionally do not enter ``G``: in the
+    finite-enclosed-current Boozer wrapper the proxy plasma current enters
+    via the separate ``I`` invariant (``alpha = G + iota * I``); folding it
+    into ``G`` here would double-count its effect once the proxy field is
+    already part of ``biotsavart``.
+    """
+    if biotsavart is None:
+        raise ValueError("derive_signed_G_from_field requires a BiotSavart field.")
+    field_coil_ids = {id(coil) for coil in biotsavart.coils}
+    for coil in tf_coils:
+        if id(coil) not in field_coil_ids:
+            raise ValueError(
+                "TF coil is not part of the supplied BiotSavart field; signed "
+                "G derivation requires the TF subset to be drawn from the same "
+                "field that feeds the Boozer residual."
+            )
+    return _signed_G_from_tf_currents(tf_coils)
 
 
 def _to_explicit_current_basis(I_value, tensor):

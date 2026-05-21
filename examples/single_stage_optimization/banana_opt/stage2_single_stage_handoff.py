@@ -9,7 +9,11 @@ import numpy as np
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import Volume
 
-from .boozer_finite_current import BoozerSurfaceFiniteI
+from .boozer_finite_current import (
+    BoozerSurfaceFiniteI,
+    _signed_G_from_tf_currents,
+    derive_signed_G_from_field,
+)
 from .json_compat import load_boozer_finite_i
 
 from .coil_groups import (
@@ -127,6 +131,7 @@ __all__ = [
     "compute_boozer_constrained_residual_norm",
     "compute_boozer_trust_state",
     "compute_tf_G0",
+    "derive_signed_G_from_field",
     "evaluate_stage2_seed_hardware_contract",
     "validate_stage2_seed_bootability_contract",
     "validate_stage2_seed_handoff_contract",
@@ -144,6 +149,7 @@ __all__ = [
     "snapshot_boozer_solve_state",
     "validate_loaded_stage2_coils_partition",
     "validate_stage2_seed_contract",
+    "validate_stage2_seed_recovery_contract",
 ]
 
 
@@ -488,7 +494,7 @@ def build_stage2_seed_production_handoff_fields(
     }
 
 
-def validate_stage2_seed_contract(stage2_results):
+def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]) -> None:
     tf_current_A = stage2_results.get("TF_CURRENT_A")
     if tf_current_A is None:
         raise ValueError(
@@ -538,11 +544,41 @@ def validate_stage2_seed_contract(stage2_results):
             "Stage 2 seed poloidal-extent threshold exceeds the HBT-EP half-width "
             f"ceiling of {POLOIDAL_EXTENT_HALF_WIDTH_RAD:.6f} rad."
         )
+
+
+def _missing_stage2_hardware_metric_violations(
+    hardware_status: Mapping[str, object],
+) -> list[str]:
+    return [
+        str(violation)
+        for violation in hardware_status["violations"]
+        if str(violation).startswith("missing required hardware constraint metric ")
+    ]
+
+
+def validate_stage2_seed_contract(stage2_results):
+    _validate_stage2_seed_metadata_contract(stage2_results)
     hardware_status = evaluate_stage2_seed_hardware_contract(stage2_results)
     if not hardware_status["success"]:
         raise ValueError(
             "Stage 2 seed artifact violates the full HBT-EP hardware contract: "
             + "; ".join(hardware_status["violations"])
+        )
+
+
+def validate_stage2_seed_recovery_contract(stage2_results):
+    _validate_stage2_seed_metadata_contract(stage2_results)
+    hardware_status = evaluate_stage2_seed_hardware_contract(stage2_results)
+    missing_metric_violations = _missing_stage2_hardware_metric_violations(
+        hardware_status
+    )
+    forbidden_status = hardware_status["forbidden_traversal_status"]
+    if missing_metric_violations or not forbidden_status["success"]:
+        violations = missing_metric_violations + list(forbidden_status["violations"])
+        raise ValueError(
+            "Stage 2 recovery seed artifact violates the non-traversable "
+            "HBT-EP hardware contract: "
+            + "; ".join(violations)
         )
 
 
@@ -552,11 +588,22 @@ def validate_stage2_seed_handoff_contract(stage2_results):
 
 
 def compute_tf_G0(tf_coils) -> float:
-    # Keep G0 tied to the TF bundle only. Proxy/VF coils already enter the
-    # loaded Biot-Savart field, so folding them into the toroidal-current seed
-    # here would double count their effect during the Boozer initialization.
-    current_sum = float(sum(coil.current.get_value() for coil in tf_coils))
-    return 2.0 * np.pi * current_sum * (4.0 * np.pi * 10.0 ** (-7) / (2.0 * np.pi))
+    """Return the signed Boozer ``G`` seed derived from the TF bundle.
+
+    Thin convenience wrapper around the SSOT formula in
+    :mod:`banana_opt.boozer_finite_current`. Call sites that already hold
+    a ``BiotSavart`` field should prefer
+    :func:`banana_opt.boozer_finite_current.derive_signed_G_from_field`,
+    which verifies that the TF subset is drawn from the same field that
+    will feed the Boozer residual.
+
+    Proxy / VF coils intentionally do not enter ``G``: they shape the
+    Biot-Savart field directly, and the proxy plasma current enters the
+    finite-enclosed-current Boozer residual via the separate ``I``
+    invariant. Folding proxy/VF into ``G`` here would double-count their
+    contribution.
+    """
+    return _signed_G_from_tf_currents(tf_coils)
 
 
 def _coerce_boozer_scalar(value) -> float | None:

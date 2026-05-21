@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import simsoptpp as sopp
 from simsopt._core.json import GSONEncoder, SIMSON
-from simsopt.field.coil import Current, CurrentSum, ScaledCurrent, coils_via_symmetries
+from simsopt.field.coil import Coil, Current, CurrentSum, ScaledCurrent, coils_via_symmetries
 from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, SurfaceRZFourier
@@ -36,6 +36,7 @@ from banana_opt.boozer_finite_current import (
     BoozerSurfaceFiniteI,
     boozer_surface_residual_finite_I,
     boozer_surface_residual_dB_finite_I,
+    derive_signed_G_from_field,
     _exact_vjp_finite_I,
     _lsqgrad_vjp_finite_I,
 )
@@ -1258,6 +1259,496 @@ class BoozerSurfaceTests(unittest.TestCase):
 
         with self.assertRaises(Exception):
             _ = BoozerSurface(bs, s, lab, lab_target)
+
+
+class DeriveSignedGFromFieldTests(unittest.TestCase):
+    """Pin the SSOT signed-G derivation to the upstream sign-blind default's
+    magnitude while making the sign track the TF current direction.
+
+    The upstream ``boozer_surface_residual`` and
+    ``BoozerSurface.boozer_penalty_constraints_vectorized`` fall back to
+    ``G = mu0 * sum_abs(I_coil)`` when ``G is None``. That sign-blind seed
+    drives the Boozer Newton solve onto the wrong-iota branch when the TF
+    current is negative (e.g., HBT CW TF at -80 kA). The banana_opt SSOT
+    helper must keep the magnitude identical for a CCW field (so it
+    bit-equals the upstream legacy path for positive currents) but flip
+    sign for CW fields.
+    """
+
+    _MU0 = 4.0e-7 * np.pi
+
+    def _make_tf_coils(self, *, signed_current_A, num_coils=20):
+        from simsopt.geo import CurveXYZFourier
+
+        coils = []
+        for _ in range(num_coils):
+            curve = CurveXYZFourier(quadpoints=8, order=1)
+            coils.append(Coil(curve, Current(signed_current_A)))
+        return coils
+
+    def test_sign_tracks_tf_current_direction(self):
+        ccw_tf_coils = self._make_tf_coils(signed_current_A=8.0e4)
+        cw_tf_coils = self._make_tf_coils(signed_current_A=-8.0e4)
+
+        ccw_bs = BiotSavart(ccw_tf_coils)
+        cw_bs = BiotSavart(cw_tf_coils)
+
+        ccw_G = derive_signed_G_from_field(ccw_bs, tf_coils=ccw_tf_coils)
+        cw_G = derive_signed_G_from_field(cw_bs, tf_coils=cw_tf_coils)
+
+        expected_magnitude = self._MU0 * 20 * 8.0e4
+        self.assertAlmostEqual(ccw_G, expected_magnitude)
+        self.assertAlmostEqual(cw_G, -expected_magnitude)
+        # The sign-blind upstream default would have agreed with the CCW
+        # case but flipped the CW seed; pinning the absolute equality
+        # documents the magnitude contract.
+        self.assertAlmostEqual(abs(cw_G), ccw_G)
+
+    def test_matches_compute_tf_G0_for_signed_tf_bundle(self):
+        from banana_opt.stage2_single_stage_handoff import compute_tf_G0
+
+        tf_coils = self._make_tf_coils(signed_current_A=-8.0e4)
+        bs = BiotSavart(tf_coils)
+
+        bs_aware_G = derive_signed_G_from_field(bs, tf_coils=tf_coils)
+        legacy_G = compute_tf_G0(tf_coils)
+
+        # Both call sites must route through the same SSOT formula.
+        self.assertEqual(bs_aware_G, legacy_G)
+
+    def test_rejects_tf_coil_not_in_supplied_field(self):
+        field_tf_coils = self._make_tf_coils(signed_current_A=-8.0e4)
+        stray_tf_coils = self._make_tf_coils(signed_current_A=-8.0e4)
+        bs = BiotSavart(field_tf_coils)
+
+        with self.assertRaisesRegex(ValueError, "not part of the supplied BiotSavart"):
+            derive_signed_G_from_field(bs, tf_coils=stray_tf_coils)
+
+    def test_rejects_empty_tf_bundle(self):
+        bs = BiotSavart(self._make_tf_coils(signed_current_A=-8.0e4))
+        with self.assertRaisesRegex(ValueError, "non-empty TF coil bundle"):
+            derive_signed_G_from_field(bs, tf_coils=[])
+
+    def test_rejects_missing_field(self):
+        tf_coils = self._make_tf_coils(signed_current_A=-8.0e4)
+        with self.assertRaisesRegex(ValueError, "requires a BiotSavart field"):
+            derive_signed_G_from_field(None, tf_coils=tf_coils)
+
+    def test_rejects_duplicate_tf_coil_references(self):
+        """A repeated coil reference in ``tf_coils`` would silently
+        double-count its current in ``G`` (each duplicate adds another
+        ``mu0 * I`` term). The SSOT formula counts each physical TF coil
+        exactly once, so the helper must reject duplicates explicitly
+        instead of returning a magnitude inflated by the duplication
+        factor.
+        """
+        tf_coils = self._make_tf_coils(signed_current_A=-8.0e4, num_coils=3)
+        duplicated = list(tf_coils) + [tf_coils[0]]
+        bs = BiotSavart(duplicated)
+        with self.assertRaisesRegex(ValueError, "duplicate coils"):
+            derive_signed_G_from_field(bs, tf_coils=duplicated)
+
+    def test_excludes_non_tf_coils_from_signed_G(self):
+        """Production fields always include banana/proxy/VF coils alongside
+        the TF bundle (``bs = BiotSavart(tf + banana + proxy + vf)``). The
+        SSOT helper's docstring promises proxy/VF currents do NOT enter
+        ``G`` (they shape the field directly, and proxy plasma current
+        enters the finite-I residual via the separate ``I`` invariant).
+        Pin that contract: ``derive_signed_G_from_field`` must return
+        ``mu0 * sum_signed(I_TF)`` over the TF subset only, NOT
+        ``mu0 * sum_*(I_all_coils)`` which is what the upstream sign-blind
+        ``G=None`` fallback would compute over the full field.
+        """
+        tf_coils = self._make_tf_coils(signed_current_A=-8.0e4, num_coils=20)
+        # Non-TF coils carry currents with magnitudes and signs distinct
+        # from the TF bundle so the sign-blind ``sum_abs`` alternative and
+        # the (incorrect) ``sum_signed`` over all coils both differ
+        # numerically from the TF-only signed sum.
+        banana_coils = self._make_tf_coils(signed_current_A=+1.6e4, num_coils=2)
+        proxy_coils = self._make_tf_coils(signed_current_A=-3.0e3, num_coils=2)
+        vf_coils = self._make_tf_coils(signed_current_A=+5.0e3, num_coils=4)
+        non_tf_coils = banana_coils + proxy_coils + vf_coils
+        bs = BiotSavart(tf_coils + non_tf_coils)
+
+        signed_G = derive_signed_G_from_field(bs, tf_coils=tf_coils)
+
+        expected_tf_only_signed_G = self._MU0 * sum(
+            coil.current.get_value() for coil in tf_coils
+        )
+        self.assertAlmostEqual(signed_G, expected_tf_only_signed_G)
+        # TF bundle is CW → signed G is negative.
+        self.assertLess(signed_G, 0.0)
+        # The upstream sign-blind fallback computes ``mu0 * sum_abs`` over
+        # the *whole* field; that is what the SSOT helper must NOT
+        # reproduce when non-TF coils are present.
+        sign_blind_all_coils_G = self._MU0 * sum(
+            abs(coil.current.get_value()) for coil in bs.coils
+        )
+        self.assertNotAlmostEqual(signed_G, sign_blind_all_coils_G)
+        # A naive "signed sum over the whole field" would also be wrong:
+        # it would fold proxy/VF currents into ``G`` and double-count
+        # the proxy's contribution (it already enters via ``I``).
+        signed_all_coils_G = self._MU0 * sum(
+            coil.current.get_value() for coil in bs.coils
+        )
+        self.assertNotAlmostEqual(signed_G, signed_all_coils_G)
+
+
+class SignedGWireInBoozerNewtonConvergenceTests(unittest.TestCase):
+    """End-to-end wire-in test: the production Stage 2 setup path produces a
+    signed ``G`` seed for a CW (negative-current) TF bundle and drives the
+    Boozer Newton solve with that signed seed.
+
+    These tests pair with :class:`DeriveSignedGFromFieldTests`. That class
+    pins the SSOT formula in isolation; this class drives the production
+    ``build_stage2_iota_runtime`` setup chain to confirm the SSOT seed
+    actually reaches the Boozer Newton solve (and lands it on a sensible
+    fixed point, not the upstream sign-blind divergent value).
+
+    The setup deliberately uses a synthetic HBT-EP-style uniform-direction
+    TF bundle (every coil current shares the same sign), so the SSOT
+    ``sum_signed`` formula produces a non-zero seed. Stellsym-symmetric coil
+    fixtures (NCSX, HSX, Giuliani) have ``sum_signed == 0`` by construction
+    and so are not a valid stress test for the sign of ``G``.
+    """
+
+    @staticmethod
+    def _build_hbt_style_tf_coil_bundle(*, signed_current_A, num_coils=20):
+        """Return ``(tf_coils, bs)`` for a synthetic HBT-EP-style TF bundle.
+
+        Coils are dummy ``CurveXYZFourier`` placeholders — the wire-in test
+        cares about the signed ``G`` produced from the bundle's currents and
+        about the bundle being a subset of ``bs.coils``; the field's exact
+        spatial pattern is not the observable.
+        """
+        from simsopt.geo import CurveXYZFourier
+
+        coils = [
+            Coil(CurveXYZFourier(quadpoints=8, order=1), Current(signed_current_A))
+            for _ in range(num_coils)
+        ]
+        bs = BiotSavart(coils)
+        return coils, bs
+
+    def test_build_stage2_iota_runtime_passes_signed_negative_G_for_cw_tf_bundle(self):
+        """Production wire-in observable: a CW TF bundle handed to
+        ``build_stage2_iota_runtime`` results in the *signed* (negative)
+        ``G`` seed being routed into ``attempt_initialize_boozer_surface``,
+        not the upstream sign-blind unsigned default."""
+        import importlib
+        from types import SimpleNamespace
+
+        _import_examples_path()
+        stage2_objectives = importlib.import_module("banana_opt.stage2_objectives")
+
+        cw_current_A = -8.0e4
+        tf_coils, bs = self._build_hbt_style_tf_coil_bundle(
+            signed_current_A=cw_current_A,
+        )
+        recorded = {}
+
+        def fake_attempt_initialize_boozer_surface(*_args, **kwargs):
+            G0 = _args[7] if len(_args) > 7 else kwargs.get("G0")
+            iota = _args[6] if len(_args) > 6 else kwargs.get("iota")
+            bs_arg = _args[3] if len(_args) > 3 else kwargs.get("bs")
+            recorded["G0"] = G0
+            recorded["bs"] = bs_arg
+            recorded["iota"] = iota
+            fake_boozer_surface = SimpleNamespace(
+                surface=SimpleNamespace(
+                    volume=lambda: 0.1,
+                    x=np.zeros(2, dtype=float),
+                ),
+                res={"iota": iota, "G": G0, "success": True, "type": "exact"},
+                need_to_run_code=False,
+                run_code=lambda _iota, _G: {"success": True, "iota": _iota, "G": _G},
+            )
+            return SimpleNamespace(
+                success=True,
+                boozer_surface=fake_boozer_surface,
+                solve_success=True,
+                self_intersecting=False,
+                solved_iota=iota,
+                solved_G=G0,
+                error_type=None,
+                error_message=None,
+            )
+
+        # Inject the surface-configs stub so the test does not depend on a
+        # ``demo.nc`` equilibrium file; the wire-in observable is the value
+        # of ``G0`` recorded by the fake init helper.
+        stage2_objectives.build_stage2_iota_runtime(
+            equilibrium_file="demo.nc",
+            bs=bs,
+            tf_coils=tf_coils,
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            nphi=31,
+            ntheta=16,
+            mpol=4,
+            ntor=4,
+            vol_target=0.1,
+            iota_target=-0.2,
+            iota_tolerance=5.0e-3,
+            constraint_weight=1.0,
+            num_tf_coils=len(tf_coils),
+            mode="report",
+            build_surface_configs_fn=lambda *_a, **_kw: [
+                {
+                    "initial_surface": SimpleNamespace(nfp=1),
+                    "target_volume": 0.1,
+                }
+            ],
+            attempt_initialize_boozer_surface_fn=fake_attempt_initialize_boozer_surface,
+            iotas_cls=lambda _surface: SimpleNamespace(J=lambda: -0.2),
+            quadratic_penalty_cls=lambda term, target: SimpleNamespace(
+                J=lambda: 0.0,
+                dJ=lambda: np.zeros(2, dtype=float),
+            ),
+        )
+
+        # SSOT contract: the wired-in seed must match
+        # ``mu0 * sum_signed(I_TF)`` for the CW bundle (negative, with the
+        # same magnitude the upstream sign-blind default would produce).
+        expected_signed_G = derive_signed_G_from_field(bs, tf_coils=tf_coils)
+        self.assertAlmostEqual(recorded["G0"], expected_signed_G)
+        self.assertLess(recorded["G0"], 0.0)
+        self.assertAlmostEqual(abs(recorded["G0"]), 4.0e-7 * np.pi * 20 * 8.0e4)
+        self.assertIs(recorded["bs"], bs)
+
+    def test_attempt_initialize_boozer_surface_routes_signed_G_through_run_code(self):
+        """The Stage 2 ``attempt_initialize_boozer_surface`` chain hands the
+        caller's signed ``G`` straight into ``BoozerSurfaceFiniteI.run_code``,
+        which now requires an explicit (signed) ``G`` and would raise on the
+        sign-blind ``G=None`` upstream fallback. Verifies the run_code call
+        site preserves the signed seed end-to-end (the contract that
+        ``test_banana_boozer_run_code_calls_pass_explicit_G`` static-checks).
+        """
+        import importlib
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        _import_examples_path()
+        handoff = importlib.import_module(
+            "banana_opt.stage2_single_stage_handoff"
+        )
+
+        cw_current_A = -8.0e4
+        tf_coils, bs = self._build_hbt_style_tf_coil_bundle(
+            signed_current_A=cw_current_A,
+        )
+        signed_G = derive_signed_G_from_field(bs, tf_coils=tf_coils)
+        seen = {}
+
+        class _CapturingBoozerSurface:
+            def __init__(self, bs_inner, surf, vol, vol_target, constraint_weight,
+                         options=None, I=0.0):
+                del options
+                self.bs = bs_inner
+                self.surface = surf
+                self.targetlabel = vol_target
+                self.constraint_weight = constraint_weight
+                self.I = I
+                self.res = None
+                self.need_to_run_code = True
+
+            def run_code(self, iota, G):
+                # The wire-in observable: the production setup chain hands
+                # the signed seed to ``run_code`` without losing the sign.
+                seen["iota"] = iota
+                seen["G"] = G
+                self.res = {"iota": iota, "G": G, "success": True, "type": "exact"}
+                self.need_to_run_code = False
+                return {"success": True, "iota": iota, "G": G}
+
+        surf_prev = SimpleNamespace(
+            quadpoints_theta=np.array([0.0, 0.5]),
+            quadpoints_phi=np.array([0.0, 0.2]),
+            gamma=lambda: np.zeros((2, 2, 3), dtype=float),
+        )
+
+        class _FakeSurface:
+            def __init__(self, **kwargs):
+                self.quadpoints_theta = kwargs["quadpoints_theta"]
+                self.quadpoints_phi = kwargs["quadpoints_phi"]
+                self.dofs = np.zeros(2, dtype=float)
+                self.x = np.zeros(2, dtype=float)
+                self._gamma = np.zeros((2, 2, 3), dtype=float)
+
+            def least_squares_fit(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+
+            def gamma(self):
+                return self._gamma.copy()
+
+            def is_self_intersecting(self):
+                return False
+
+        class _ConstantVolumeLabel:
+            def __init__(self, surface):
+                self.surface = surface
+
+            def J(self):
+                return 0.1
+
+        handoff.attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol=2,
+            ntor=2,
+            bs=bs,
+            vol_target=0.1,
+            constraint_weight=1.0,
+            iota=-0.2,
+            G0=signed_G,
+            boozer_I=0.0,
+            nfp=5,
+            surface_cls=_FakeSurface,
+            volume_cls=_ConstantVolumeLabel,
+            boozer_surface_cls=_CapturingBoozerSurface,
+        )
+
+        # The signed seed makes it through the production chain unchanged.
+        self.assertAlmostEqual(seen["G"], signed_G)
+        self.assertLess(seen["G"], 0.0)
+        self.assertAlmostEqual(seen["iota"], -0.2)
+
+
+def _import_examples_path():
+    """Put the ``examples/single_stage_optimization`` source root on the path
+    so ``banana_opt`` and its submodules import as in production."""
+    import sys
+    from pathlib import Path
+
+    examples_path = (
+        Path(__file__).resolve().parents[2]
+        / "examples"
+        / "single_stage_optimization"
+    )
+    if str(examples_path) not in sys.path:
+        sys.path.insert(0, str(examples_path))
+
+
+class SignedGWireInNewtonConvergenceObservableTests(unittest.TestCase):
+    """Newton-convergence observable: the wired-in signed seed lands the
+    Boozer Newton on a finite, in-band fixed point, while replacing the seed
+    with the *negation* of the signed value (mimicking the failure mode the
+    upstream sign-blind ``G=None`` fallback would create for a CW TF bundle)
+    drives Newton to a divergent or non-physical fixed point.
+
+    The fixture is the existing NCSX-stellsym Boozer-surface convergence
+    pair (cf. :meth:`test_finite_current_exact_newton_converges_on_task25_lane4_fixture`):
+    that lane has the upstream-equivalent ``G > 0`` seed, and reproducing it
+    here keeps the test entirely on shared deterministic upstream fixtures
+    while still demonstrating Newton's *iota* observable shifts when the
+    seed sign flips. The CW HBT-style case is covered as a wire-in-plumbing
+    test in :class:`SignedGWireInBoozerNewtonConvergenceTests`; this class
+    pins the convergence-behavior shift on a fixture where Newton actually
+    converges to a known fixed point.
+    """
+
+    @staticmethod
+    def _make_ncsx_finite_i_boozer_surface(*, G_seed_sign):
+        """Reproduce the
+        ``test_finite_current_exact_newton_converges_on_task25_lane4_fixture``
+        setup, but parameterized by the sign of the G seed handed to
+        ``run_code``. ``G_seed_sign=+1`` mirrors the existing upstream-equivalent
+        lane; ``G_seed_sign=-1`` is the sign-flipped seed that would arise
+        if a downstream caller silently inverted the SSOT helper's signed
+        output.
+        """
+        from simsopt.geo.surfaceobjectives import Area as _Area
+
+        mpol = 3
+        ntor = 3
+        current_I = 4 * np.pi * 1e-7 * 5000
+
+        curves, currents, ma = get_ncsx_data()
+        coils = coils_via_symmetries(curves, currents, 3, True)
+        bs = BiotSavart(coils)
+
+        surface = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=True,
+            nfp=3,
+            quadpoints_phi=np.linspace(0, 1 / 3, 2 * ntor + 1, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1, 2 * mpol + 1, endpoint=False),
+        )
+        surface.fit_to_curve(ma, 0.1, flip_theta=True)
+        label = _Area(surface)
+        boozer_surface = BoozerSurfaceFiniteI(
+            bs, surface, label, label.J(),
+            constraint_weight=None,
+            options={"weight_inv_modB": False, "verbose": False},
+            I=current_I,
+        )
+        # Match the magnitude used by the upstream-equivalent fixture.
+        # ``coils_via_symmetries`` with stellsym=True yields ``sum_signed=0``;
+        # the upstream sign-blind default falls back to ``sum_abs``. Use
+        # that magnitude with the caller-chosen sign so the test exposes
+        # the Newton-convergence shift driven by the *sign* of ``G``.
+        magnitude = 2.0 * np.pi * sum(
+            abs(c.current.get_value()) for c in coils
+        ) * (4.0 * np.pi * 1e-7 / (2.0 * np.pi))
+        return boozer_surface, G_seed_sign * magnitude
+
+    def test_signed_G_seed_lands_newton_in_band(self):
+        """Driving ``run_code`` with the *positive* (matched-sign) G seed
+        converges to the published in-band fixed point, mirroring the
+        existing fixture-pinned NCSX lane."""
+        boozer_surface, signed_G = self._make_ncsx_finite_i_boozer_surface(
+            G_seed_sign=+1.0,
+        )
+        res = boozer_surface.run_code(0.4, G=signed_G)
+        self.assertTrue(res["success"])
+        np.testing.assert_allclose(
+            res["iota"], 0.40283946329212617, rtol=1e-10, atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            res["G"], 13.881987793895558, rtol=1e-10, atol=1e-12,
+        )
+        # Observable: solved iota lies inside the loose physical band
+        # ``|iota| < 1`` (the same band the production Boozer trust gate
+        # rejects out of, with reason ``iota_nonphysical``).
+        self.assertLess(abs(res["iota"]), 1.0)
+
+    def test_sign_flipped_G_seed_lands_newton_on_distinct_fixed_point(self):
+        """Driving the same Newton with the *negated* G seed (the failure
+        mode a downstream caller would introduce by accidentally flipping
+        the sign of the SSOT helper's output, or by feeding the upstream
+        sign-blind unsigned magnitude to a CW TF lane) drives the Newton
+        solve off the converged in-band fixed point: on this NCSX-stellsym
+        lane Newton fails to converge, which is the divergence observable
+        the SSOT signed-G seed exists to prevent. The signed-G wire-in
+        eliminates the ambiguity by routing the SSOT-correct sign through
+        end-to-end.
+        """
+        signed_boozer, signed_G = self._make_ncsx_finite_i_boozer_surface(
+            G_seed_sign=+1.0,
+        )
+        signed_res = signed_boozer.run_code(0.4, G=signed_G)
+        self.assertTrue(signed_res["success"])
+
+        flipped_boozer, flipped_G = self._make_ncsx_finite_i_boozer_surface(
+            G_seed_sign=-1.0,
+        )
+        flipped_res = flipped_boozer.run_code(0.4, G=flipped_G)
+
+        # Seed-sign observable: the seed handed to ``run_code`` keeps its
+        # chirality (sanity check on the fixture).
+        self.assertLess(flipped_G, 0.0)
+        # Divergence observable: the SSOT signed-G seed lands Newton on
+        # the converged in-band fixed point (asserted above for the
+        # positive seed). The sign-flipped seed must NOT land on a
+        # converged fixed point — otherwise the SSOT signed-G claim
+        # ("sign determines convergence") would be vacuous. On this
+        # NCSX-stellsym lane Newton fails (``success=False``); pin that
+        # directly so the test cannot silently become a tautology.
+        self.assertFalse(
+            flipped_res["success"],
+            "Newton must diverge on sign-flipped G seed; otherwise the "
+            "signed-G SSOT claim is unobservable on this fixture.",
+        )
 
 
 if __name__ == "__main__":
