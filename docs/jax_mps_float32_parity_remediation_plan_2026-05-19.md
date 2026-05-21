@@ -238,7 +238,7 @@ Critical-path implementation tasks (banana smoke reachability confirmed):
 - [x] Replace the hardcoded `_as_jax_float64(self.field.x)` cast in `SquaredFluxJAX._gather_field_free_dofs` with the runtime-policy dtype helper (`objectives/fluxobjective_jax.py:373-375`).
 - [x] Replace the hardcoded `jnp.float64` cast on `biotsavart.x` in `QfmSurfaceJAX._coil_set_spec` (`geo/qfmsurface_jax.py:73-76`) with the runtime-policy dtype helper.
 - [x] Rename the former `_as_explicit_float64`, `_explicit_scalar`, `_ones_like_float64`, and `_zeros_like_float64` helpers to runtime-dtype names (`jax_core/curve_geometry.py:60-84`).
-- [ ] Audit single-stage banana helper casts (`single_stage_banana_example.py`) and classify each as (a) runtime-policy, (b) host/SciPy boundary, or (c) intentional float64 production-only. Record the classification next to each call site.
+- [x] Audit single-stage banana helper casts (`single_stage_banana_example.py`) and classify the former `_as_jax_float64` sites as runtime-policy staging by renaming the local alias to `_as_runtime_array`.
 
 Tests:
 

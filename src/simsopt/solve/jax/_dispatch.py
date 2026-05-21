@@ -139,7 +139,7 @@ def _device_scalar(value: float, dtype) -> jax.Array:
 
 
 def _optimistix_result_metadata(result) -> tuple[bool, str, str]:
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_host_to_device("allow"):
         result_text = str(result)
         result_message = str(optx.RESULTS[result])
         successful = bool(result == optx.RESULTS.successful)

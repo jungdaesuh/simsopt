@@ -1343,7 +1343,7 @@ def _run_grouped_biot_savart_points_coils_collective_case() -> None:
     - non-divisible coil counts and mixed quadrature groups still match the
       dense reference.
     """
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_host_to_device("allow"):
         points_np = np.linspace(0.1, 0.9, 24, dtype=np.float64).reshape(8, 3)
         curve_coils = _build_collective_curve_coils()
         bs_cpp = BiotSavart(curve_coils)
@@ -1441,8 +1441,9 @@ def _run_grouped_biot_savart_points_coils_collective_case() -> None:
 
     assert "all_reduce" in lowered.lower(), lowered[:2000]
 
-    with jax.transfer_guard("allow"):
-        _assert_mixed_quadrature_collective_parity(points)
+    with jax.transfer_guard_host_to_device("allow"):
+        with jax.transfer_guard_device_to_host("allow"):
+            _assert_mixed_quadrature_collective_parity(points)
 
 
 def _run_grouped_biot_savart_points_coils_non_divisible_case() -> None:
@@ -1452,7 +1453,7 @@ def _run_grouped_biot_savart_points_coils_non_divisible_case() -> None:
     the point axis is not divisible. Asserts the result still matches the
     dense reference (i.e. padding-trim is correct).
     """
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_host_to_device("allow"):
         points = jax.device_put(
             np.linspace(0.1, 0.9, 21, dtype=np.float64).reshape(7, 3)
         )
@@ -1590,7 +1591,7 @@ def _run_target_minimize_replicated_sharding_vjp_case() -> None:
 
     mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
     replicated = NamedSharding(mesh, P())
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_host_to_device("allow"):
         matrix = jax.device_put(np.eye(2, dtype=np.float64), replicated)
         target = jax.device_put(
             np.asarray([0.25, -0.75], dtype=np.float64),
@@ -1637,7 +1638,7 @@ def _run_boozer_penalty_replicated_sharding_vjp_case() -> None:
     xc[1, 0] = 0.1
     zc[mpol + 1, 0] = 0.1
     surface_dofs = np.concatenate((xc.ravel(), yc.ravel(), zc.ravel()))
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_host_to_device("allow"):
         qphi = jnp.linspace(0.0, 1.0, 4, endpoint=False)
         qtheta = jnp.linspace(0.0, 1.0, 4, endpoint=False)
 
@@ -1650,7 +1651,7 @@ def _run_boozer_penalty_replicated_sharding_vjp_case() -> None:
         (-2.0 * np.pi * np.sin(phi), 2.0 * np.pi * np.cos(phi), np.zeros_like(phi)),
         axis=-1,
     )
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_host_to_device("allow"):
         x0 = jax.device_put(
             np.concatenate((surface_dofs, np.asarray([0.3, 1.0]))),
             replicated,
@@ -1692,7 +1693,7 @@ def _run_boozer_penalty_replicated_sharding_vjp_case() -> None:
         )
 
     value, gradient = jax.jit(jax.value_and_grad(objective))(x0)
-    with jax.transfer_guard("allow"):
+    with jax.transfer_guard_device_to_host("allow"):
         assert bool(jnp.isfinite(value))
         assert bool(jnp.all(jnp.isfinite(gradient)))
     assert getattr(gradient, "sharding").spec == P()

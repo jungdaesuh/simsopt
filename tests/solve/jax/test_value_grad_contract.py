@@ -1,3 +1,5 @@
+import contextlib
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -233,6 +235,44 @@ def test_optimistix_lbfgs_runs_under_strict_host_to_device_transfer_guard():
 
     assert result.driver is Driver.OPTIMISTIX_LBFGS
     assert result.x.shape == (2,)
+
+
+def test_optimistix_metadata_uses_host_to_device_transfer_guard(monkeypatch):
+    events = []
+
+    def broad_transfer_guard(_level):
+        raise AssertionError("optimistix metadata must not use broad transfer_guard")
+
+    def device_to_host_transfer_guard(_level):
+        raise AssertionError(
+            "optimistix metadata must not allow device-to-host broadly"
+        )
+
+    @contextlib.contextmanager
+    def host_to_device_transfer_guard(level):
+        events.append(level)
+        yield
+
+    monkeypatch.setattr(dispatch.jax, "transfer_guard", broad_transfer_guard)
+    monkeypatch.setattr(
+        dispatch.jax,
+        "transfer_guard_device_to_host",
+        device_to_host_transfer_guard,
+    )
+    monkeypatch.setattr(
+        dispatch.jax,
+        "transfer_guard_host_to_device",
+        host_to_device_transfer_guard,
+    )
+
+    successful, result_text, result_message = dispatch._optimistix_result_metadata(
+        dispatch.optx.RESULTS.successful,
+    )
+
+    assert successful is True
+    assert result_text
+    assert result_message == ""
+    assert events == ["allow"]
 
 
 def test_optimistix_success_uses_zero_status():

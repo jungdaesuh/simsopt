@@ -116,7 +116,9 @@ def _as_int32_scalar(value):
     return jnp.asarray(value, dtype=jnp.int32)
 
 
-def _safe_radius_squared(diff):
+def _radius_squared(diff):
+    """Return exact ``r^2`` so point-on-coil singularities stay loud."""
+
     return jnp.sum(diff * diff, axis=-1)
 
 
@@ -358,17 +360,17 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
 
 def _biot_savart_B_integrand(x, gammas, gammadashs):
     diff = gammas - x
-    safe_r2 = _safe_radius_squared(diff)
-    r_inv = _explicit_rsqrt(safe_r2)
-    r_inv3 = r_inv * _explicit_inv(safe_r2)
+    r2 = _radius_squared(diff)
+    r_inv = _explicit_rsqrt(r2)
+    r_inv3 = r_inv * _explicit_inv(r2)
     cross = _cross_product(diff, gammadashs)
     return cross * r_inv3[..., None]
 
 
 def _biot_savart_A_integrand(x, gammas, gammadashs):
     diff = gammas - x
-    safe_r2 = _safe_radius_squared(diff)
-    r_inv = _explicit_rsqrt(safe_r2)
+    r2 = _radius_squared(diff)
+    r_inv = _explicit_rsqrt(r2)
     return gammadashs * r_inv[..., None]
 
 

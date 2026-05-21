@@ -27,8 +27,9 @@
   - `jax.scipy.optimize.minimize` (BFGS only); `jax.scipy.linalg`;
     `jax.lax.while_loop` / `jax.lax.scan`; public `jax.shard_map`;
     `jax.custom_vjp` for reverse-mode implicit differentiation.
-  - `optimistix` (optional `simsopt[JAX_OPTIMISTIX]` lane: LM,
-    IndirectLM, Dogleg, BFGS) for least-squares / minimization;
+  - `optimistix` (optimizer dependencies from the `simsopt[JAX]` /
+    `simsopt[JAX_GPU]` extras: LM, IndirectLM, Dogleg, BFGS) for
+    least-squares / minimization;
     augmented-Lagrangian wrapper for equality-constrained problems.
   - SciPy spline APIs (`InterpolatedUnivariateSpline`,
     `RectBivariateSpline`) for extracting and replaying FITPACK spline
@@ -942,8 +943,8 @@ lane** with a strict traceable-problem protocol that:
   function is pure JAX and whose state is an explicit pytree. Do not
   infer traceability from arbitrary `LeastSquaresProblem` instances;
 - uses `optimistix.LevenbergMarquardt` / `optimistix.GaussNewton` on
-  the device for the inner step in the optional
-  `simsopt[JAX_OPTIMISTIX]` lane;
+  the device for the inner step through the optimizer runtime
+  dependencies in `simsopt[JAX]` / `simsopt[JAX_GPU]`;
 - replaces the per-DOF finite-difference Jacobian with `jax.jacfwd`
   in the gradient-on lane and with a `shard_map`-parallel forward
   finite-difference pass in the no-gradient lane on a single host

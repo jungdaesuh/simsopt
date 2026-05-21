@@ -137,26 +137,20 @@ When To Use Which Backend
 Domain-edge behavior
 --------------------
 
-The JAX Biot-Savart kernel and the C++ Biot-Savart kernel diverge on
-inputs that land at the singular core ``r = ‖x − γ(s)‖ = 0`` (an
+The JAX Biot-Savart kernel preserves the C++ Biot-Savart singularity
+contract on inputs that land at the core ``r = ‖x − γ(s)‖ = 0`` (an
 evaluation point coincident with a coil quadrature point):
 
 - C++ ``simsoptpp`` returns ``NaN``/``Inf`` from the ``1/r^3`` and
   ``1/r^5`` factors, surfacing the divergence to the caller.
-- JAX (``simsopt.jax_core.biotsavart._safe_radius_squared``) clamps
-  ``r²`` at ``1e-60`` so the ``1/r^{1.5}`` factor stays inside
-  float64 (using the float64 subnormal minimum ``~5e-324`` would
-  yield ``1/(5e-324)^{1.5} ~ 9e484``, ~177 orders of magnitude above
-  float64 max ``~1.8e308``). The clamp produces a finite-but-huge
-  numeric value rather than ``NaN``/``Inf``.
+- JAX (``simsopt.jax_core.biotsavart._radius_squared``) preserves exact
+  ``r² = 0`` so the same singularity is loud instead of being hidden by
+  a finite clamp.
 
-This divergence is **documented and intentional** for the current
-target lane: no production research workflow lands on
-point-on-coil geometry, the JAX kernel must keep autodiff finite for
-trace stability, and matching the C++ behavior would require a
-separate validation cycle. Callers that need C++-equivalent
-``NaN``/``Inf`` behavior on degenerate inputs should use the C++
-backend explicitly.
+This edge is **documented and intentional** for the current target lane:
+no production research workflow lands on point-on-coil geometry, but if a
+caller constructs one, the JAX lane must not silently convert the
+singularity into a finite value.
 
 Optimizer family equivalence
 ----------------------------
@@ -174,10 +168,10 @@ Four JAX least-squares methods are exposed by
   It materializes the dense Jacobian and solves the Marquardt
   augmented least-squares step with column-pivoted QR.
 - ``method="optimistix-lm-ondevice"`` (``target_least_squares``) is an
-  optional Optimistix Levenberg-Marquardt lane with Lineax LSMR inner
-  solves. It is exposed by
-  ``least_squares_algorithm="optimistix-lm"`` and requires the
-  ``JAX_OPTIMISTIX`` dependency extra on Python 3.11+.
+  Optimistix Levenberg-Marquardt lane with Lineax LSMR inner solves. It
+  is exposed by ``least_squares_algorithm="optimistix-lm"`` and uses the
+  optimizer runtime dependencies declared by the ``JAX`` and ``JAX_GPU``
+  extras on Python 3.11+.
 
 Neither ``method="lm"`` nor ``method="lm-ondevice"`` is a port of
 MINPACK ``lmder``. Both use:

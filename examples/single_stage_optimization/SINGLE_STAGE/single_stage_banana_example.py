@@ -89,7 +89,7 @@ from simsopt.backend import get_backend_policy, get_tolerance_tier
 from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.field import BiotSavart
 from simsopt.jax_core._math_utils import (
-    as_jax_float64 as _as_jax_float64,
+    as_runtime_array as _as_runtime_array,
     as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
     runtime_device_put,
@@ -191,8 +191,7 @@ _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS = (
     frozenset({"ondevice"}) | _JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
 )
 _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS = (
-    frozenset({"ondevice", "scipy-jax"})
-    | _JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
+    frozenset({"ondevice", "scipy-jax"}) | _JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
 )
 _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND = "scipy-jax-fullgraph"
 _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD = "lbfgs-scipy-jax-fullgraph"
@@ -1377,14 +1376,14 @@ def evaluate_single_stage_hardware_constraints_pure(
     curvature_threshold,
 ):
     """Evaluate single-stage hardware constraints without leaving the runtime lane."""
-    curve_curve_min_dist = _as_jax_float64(curve_curve_min_dist)
-    cc_dist = _as_jax_float64(cc_dist)
-    curve_surface_min_dist = _as_jax_float64(curve_surface_min_dist)
-    cs_dist = _as_jax_float64(cs_dist)
-    surface_vessel_min_dist = _as_jax_float64(surface_vessel_min_dist)
-    ss_dist = _as_jax_float64(ss_dist)
-    max_curvature = _as_jax_float64(max_curvature)
-    curvature_threshold = _as_jax_float64(curvature_threshold)
+    curve_curve_min_dist = _as_runtime_array(curve_curve_min_dist)
+    cc_dist = _as_runtime_array(cc_dist)
+    curve_surface_min_dist = _as_runtime_array(curve_surface_min_dist)
+    cs_dist = _as_runtime_array(cs_dist)
+    surface_vessel_min_dist = _as_runtime_array(surface_vessel_min_dist)
+    ss_dist = _as_runtime_array(ss_dist)
+    max_curvature = _as_runtime_array(max_curvature)
+    curvature_threshold = _as_runtime_array(curvature_threshold)
 
     finite_flags = {
         "curve_curve_min_dist": jnp.isfinite(curve_curve_min_dist),
@@ -1637,7 +1636,7 @@ def _hostify_traceable_reporting_metrics(
 
 def _hostify_traceable_value_and_grad(value_and_grad, x):
     """Evaluate the pure target-lane value/grad contract and host-normalize once."""
-    value, grad = value_and_grad(_as_jax_float64(x))
+    value, grad = value_and_grad(_as_runtime_array(x))
     return (
         host_float(value),
         np.asarray(host_array(grad), dtype=np.float64).reshape(-1),
@@ -2024,7 +2023,7 @@ class DeferredSurfaceXYZTensorFourier:
         self.stellsym = bool(stellsym)
         self.quadpoints_phi = np.asarray(quadpoints_phi, dtype=np.float64)
         self.quadpoints_theta = np.asarray(quadpoints_theta, dtype=np.float64)
-        self._dofs = _as_jax_float64(dofs)
+        self._dofs = _as_runtime_array(dofs)
         self._materialized_surface = None
 
     def _host_dofs(self):
@@ -2047,7 +2046,7 @@ class DeferredSurfaceXYZTensorFourier:
         return self._dofs
 
     def set_dofs(self, dofs):
-        self._dofs = _as_jax_float64(dofs)
+        self._dofs = _as_runtime_array(dofs)
         if self._materialized_surface is not None:
             self._materialized_surface.set_dofs(self._host_dofs())
 
@@ -3223,8 +3222,8 @@ def _surface_xyz_tensor_design_matrix_host(
             ntor=ntor,
             nfp=nfp,
             stellsym=stellsym,
-            quadpoints_phi=_as_jax_float64(quadpoints_phi),
-            quadpoints_theta=_as_jax_float64(quadpoints_theta),
+            quadpoints_phi=_as_runtime_array(quadpoints_phi),
+            quadpoints_theta=_as_runtime_array(quadpoints_theta),
         ),
         dtype=np.float64,
     )
@@ -3232,7 +3231,7 @@ def _surface_xyz_tensor_design_matrix_host(
 
 def _host_and_jax_float64(values):
     host_values = host_array(values, dtype=np.float64)
-    return host_values, _as_jax_float64(host_values)
+    return host_values, _as_runtime_array(host_values)
 
 
 def _fit_surface_xyz_tensor_dofs_to_gamma(
@@ -3466,11 +3465,11 @@ def _target_gamma_from_supported_surface(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
-    quadpoints_theta_jax = _as_jax_float64(quadpoints_theta)
+    quadpoints_phi_jax = _as_runtime_array(quadpoints_phi)
+    quadpoints_theta_jax = _as_runtime_array(quadpoints_theta)
     if isinstance(surface, SerializedSurfaceState):
         surface_class = surface.surface_class
-        source_dofs = _as_jax_float64(surface.dofs)
+        source_dofs = _as_runtime_array(surface.dofs)
         source_mpol = surface.mpol
         source_ntor = surface.ntor
         source_nfp = surface.nfp
@@ -3482,7 +3481,7 @@ def _target_gamma_from_supported_surface(
             surface_class = type(surface).__name__
         if not hasattr(surface, "get_dofs"):
             return None
-        source_dofs = _as_jax_float64(surface.get_dofs())
+        source_dofs = _as_runtime_array(surface.get_dofs())
         source_mpol = int(surface.mpol)
         source_ntor = int(surface.ntor)
         source_nfp = int(surface.nfp)
@@ -4945,7 +4944,7 @@ def initialize_boozer_surface(
             None
             if surface_dofs_override is None
             else (
-                _as_jax_float64(surface_dofs_override)
+                _as_runtime_array(surface_dofs_override)
                 if backend == "jax"
                 else np.asarray(surface_dofs_override, dtype=float)
             )
@@ -4960,9 +4959,9 @@ def initialize_boozer_surface(
     total_start_s = _perf_counter_s()
     fit_start_s = total_start_s
     initial_surface_dofs = (
-        _as_jax_float64(surface_dofs_override)
+        _as_runtime_array(surface_dofs_override)
         if surface_dofs_override is not None
-        else _as_jax_float64(
+        else _as_runtime_array(
             project_surface_dofs_to_resolution(
                 surf_prev,
                 mpol=mpol,
@@ -5720,7 +5719,7 @@ def _supported_surface_self_intersection_inputs(surface):
     if surface_dofs_getter is None or not callable(surface_dofs_getter):
         return None
 
-    surface_dofs = _as_jax_float64(surface_dofs_getter()).reshape(-1)
+    surface_dofs = _as_runtime_array(surface_dofs_getter()).reshape(-1)
     mpol = int(surface.mpol)
     ntor = int(surface.ntor)
     stellsym = bool(surface.stellsym)
@@ -5751,7 +5750,7 @@ def _supported_surface_self_intersection_inputs(surface):
         "nfp": int(surface.nfp),
         "stellsym": stellsym,
         "scatter_indices": scatter_indices,
-        "quadpoints_theta": _as_jax_float64(surface.quadpoints_theta).reshape(-1),
+        "quadpoints_theta": _as_runtime_array(surface.quadpoints_theta).reshape(-1),
     }
 
 
@@ -6140,9 +6139,9 @@ def build_single_stage_target_lane_accepted_step_sync(
         if forward_result_fn is None:
             return boozer_surface.run_code_traceable(
                 bs.coil_set_spec_from_dofs(coil_dofs),
-                _as_jax_float64(run_dict["sdofs"]),
-                _as_jax_float64(run_dict["iota"]),
-                _as_jax_float64(run_dict["G"]),
+                _as_runtime_array(run_dict["sdofs"]),
+                _as_runtime_array(run_dict["iota"]),
+                _as_runtime_array(run_dict["G"]),
             )
         forward_result = forward_result_fn(coil_dofs)
         solve_success = forward_result.get(
@@ -6157,7 +6156,7 @@ def build_single_stage_target_lane_accepted_step_sync(
         }
 
     def sync(run_dict, coil_dofs, *, benchmark_mode, update_run_state=True):
-        coil_dofs = _as_jax_float64(_single_stage_optimizer_dofs_array(coil_dofs))
+        coil_dofs = _as_runtime_array(_single_stage_optimizer_dofs_array(coil_dofs))
         solve_result = accepted_step_solve_result(run_dict, coil_dofs)
         if not host_bool(solve_result["success"]):
             raise RuntimeError(
@@ -6885,7 +6884,7 @@ def build_target_lane_profile_coil_dofs(coil_dofs):
     profile_dofs = host_array(coil_dofs, dtype=np.float64).copy()
     finite_indices = np.flatnonzero(np.isfinite(profile_dofs))
     if finite_indices.size == 0:
-        return _as_jax_float64(profile_dofs)
+        return _as_runtime_array(profile_dofs)
 
     profile_index = int(finite_indices[0])
     current_value = profile_dofs[profile_index]
@@ -6893,7 +6892,7 @@ def build_target_lane_profile_coil_dofs(coil_dofs):
         profile_dofs[profile_index] = np.finfo(np.float64).eps
     else:
         profile_dofs[profile_index] = np.nextafter(current_value, np.inf)
-    return _as_jax_float64(profile_dofs)
+    return _as_runtime_array(profile_dofs)
 
 
 def build_target_lane_profile_batch_coil_dofs(coil_dofs, *, batch_size):
@@ -6904,7 +6903,7 @@ def build_target_lane_profile_batch_coil_dofs(coil_dofs, *, batch_size):
     batched_profile_dofs = np.repeat(baseline_dofs[None, :], batch_size, axis=0)
     finite_indices = np.flatnonzero(np.isfinite(baseline_dofs))
     if finite_indices.size == 0:
-        return _as_jax_float64(batched_profile_dofs)
+        return _as_runtime_array(batched_profile_dofs)
 
     for batch_index in range(batch_size):
         perturb_index = int(finite_indices[batch_index % finite_indices.size])
@@ -6916,7 +6915,7 @@ def build_target_lane_profile_batch_coil_dofs(coil_dofs, *, batch_size):
         batched_profile_dofs[batch_index, perturb_index] = (
             baseline_dofs[perturb_index] + perturb_sign * perturb_delta
         )
-    return _as_jax_float64(batched_profile_dofs)
+    return _as_runtime_array(batched_profile_dofs)
 
 
 def build_target_lane_outer_objective_config(
@@ -8066,7 +8065,7 @@ class SingleStageFullGraphOptimizerDofMap:
         return optimizer[self.coil_optimizer_indices].copy()
 
     def jax_coil_dofs_from_optimizer_dofs(self, optimizer_dofs):
-        optimizer = _as_jax_float64(optimizer_dofs).reshape((-1,))
+        optimizer = _as_runtime_array(optimizer_dofs).reshape((-1,))
         if self.coil_optimizer_indices is None:
             return optimizer
         return jnp.take(
@@ -8076,13 +8075,13 @@ class SingleStageFullGraphOptimizerDofMap:
         )
 
     def jax_full_gradient_from_coil_gradient(self, optimizer_dofs, coil_gradient):
-        optimizer = _as_jax_float64(optimizer_dofs).reshape((-1,))
+        optimizer = _as_runtime_array(optimizer_dofs).reshape((-1,))
         if self.coil_optimizer_indices is None:
-            return _as_jax_float64(coil_gradient).reshape(optimizer.shape)
+            return _as_runtime_array(coil_gradient).reshape(optimizer.shape)
         return (
             jnp.zeros_like(optimizer)
             .at[_as_jax_int32(self.coil_optimizer_indices)]
-            .set(_as_jax_float64(coil_gradient).reshape((-1,)))
+            .set(_as_runtime_array(coil_gradient).reshape((-1,)))
         )
 
 
@@ -8140,17 +8139,17 @@ def _single_stage_outer_optimizer_state(x):
         coil_dofs = x.coil_dofs
     else:
         coil_dofs = x
-    return SingleStageOuterOptimizerState(coil_dofs=_as_jax_float64(coil_dofs))
+    return SingleStageOuterOptimizerState(coil_dofs=_as_runtime_array(coil_dofs))
 
 
 def _single_stage_target_optimizer_dofs(x):
     """Normalize target-lane optimizer inputs without collapsing pytrees."""
     if isinstance(x, ScaledOuterPhaseOptimizerState):
         return ScaledOuterPhaseOptimizerState(
-            step_dofs=_as_jax_float64(x.step_dofs),
-            anchor_dofs=_as_jax_float64(x.anchor_dofs),
+            step_dofs=_as_runtime_array(x.step_dofs),
+            anchor_dofs=_as_runtime_array(x.anchor_dofs),
         )
-    return _as_jax_float64(_single_stage_optimizer_dofs_array(x))
+    return _as_runtime_array(_single_stage_optimizer_dofs_array(x))
 
 
 def target_lane_contract_supports_optimizer_seed(contract):
@@ -8220,8 +8219,8 @@ def build_target_lane_full_state_value_and_grad(
 def build_target_lane_scaled_outer_phase_state(anchor_dofs, step_dofs):
     """Thread fixed target-lane anchors as dynamic optimizer state."""
     return ScaledOuterPhaseOptimizerState(
-        step_dofs=_as_jax_float64(step_dofs),
-        anchor_dofs=_as_jax_float64(anchor_dofs),
+        step_dofs=_as_runtime_array(step_dofs),
+        anchor_dofs=_as_runtime_array(anchor_dofs),
     )
 
 
@@ -8783,7 +8782,7 @@ def resolve_single_stage_outer_optimizer_initial_dofs(
     """Return the optimizer-space DOFs for the selected outer-loop contract."""
     del use_target_lane
     if use_coil_optimizer_dofs:
-        return _as_jax_float64(bs.x.copy())
+        return _as_runtime_array(bs.x.copy())
     native_dofs = _single_stage_optimizer_dofs_array(JF.x.copy())
     if full_graph_optimizer_dof_map is None:
         return native_dofs
@@ -8838,8 +8837,8 @@ def resolve_scaled_outer_phase_final_dofs(
             step_runtime = _explicit_runtime_array(step_dofs)
             scale = _as_runtime_float64(step_scale, reference=runtime_reference)
             return anchor_runtime + scale * step_runtime
-        return _as_jax_float64(anchor_dofs) + _as_jax_float64(step_scale) * (
-            _as_jax_float64(step_dofs)
+        return _as_runtime_array(anchor_dofs) + _as_runtime_array(step_scale) * (
+            _as_runtime_array(step_dofs)
         )
     return _single_stage_optimizer_dofs_array(anchor_dofs) + float(step_scale) * (
         _single_stage_optimizer_dofs_array(step_dofs)
@@ -10043,7 +10042,7 @@ def _single_stage_solve_iota_adjoint(adjoint_state, dJ_ds):
 
 
 def _single_stage_streamed_raw_iota_gradient(raw_iota, adjoint_state, adjoint):
-    coil_dofs = _as_jax_float64(raw_iota.biotsavart.x)
+    coil_dofs = _as_runtime_array(raw_iota.biotsavart.x)
     adjoint_gradient = coil_dofs - coil_dofs
     for d_coil_array, coil_group_indices in adjoint_state.stream_group_vjps(adjoint):
         adjoint_gradient = (

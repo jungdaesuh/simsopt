@@ -793,7 +793,7 @@ def test_gsco_live_loop_accepts_staged_restart_state_under_jit() -> None:
     )
 
 
-def test_gsco_live_loop_marks_staged_capacity_overrun_done_under_jit() -> None:
+def test_gsco_live_loop_rejects_staged_capacity_overrun_under_jit() -> None:
     A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
         _gsco_problem()
     )
@@ -824,10 +824,8 @@ def test_gsco_live_loop_marks_staged_capacity_overrun_done_under_jit() -> None:
     def _run(state):
         return gsco_live_loop_jax(state, max_steps=1, params=params)
 
-    result = _run(over_capacity)
-
-    assert bool(np.asarray(result.done))
-    assert int(np.asarray(result.history_length)) == 3
+    with pytest.raises(jax.errors.JaxRuntimeError, match="history capacity"):
+        jax.block_until_ready(_run(over_capacity))
 
 
 def test_gsco_live_loop_jits_under_transfer_guard() -> None:

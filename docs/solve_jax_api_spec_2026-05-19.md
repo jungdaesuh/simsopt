@@ -52,7 +52,7 @@ The current tree exposes 13 `jax_minimize` / `jax_least_squares` method strings,
 | `lm` | in-tree host/reference JAX LM | matrix-free GMRES | **not SciPy MINPACK**; lossless shim must preserve this algorithm |
 | `lm-ondevice` | in-tree trace-safe JAX LM | matrix-free GMRES | potentially superseded by Optimistix+LSMR (validation pending) |
 | `lm-minpack-ondevice` | in-tree dense QR LM | LAPACK CPU / cuSOLVER CUDA | MINPACK-conditioned, but not MINPACK byte identity; removal needs QR/rank audit |
-| `optimistix-lm-ondevice` | Optimistix LM + Lineax LSMR | matrix-free LSMR | optional target lane today; no callback support in current implementation |
+| `optimistix-lm-ondevice` | Optimistix LM + Lineax LSMR | matrix-free LSMR | target lane backed by the base JAX optimizer deps; no callback support in current implementation |
 | Optax `lbfgs` + zoom (examples/) | Optax | none | example-local diagnostic today; production promotion requires new wrapper tests |
 
 The cumulative effect: ~6775 lines across `optimizer_jax.py` (4628) + `optimizer_host_lbfgs.py` (1611) + `optimizer_jax_reference.py` (536), with a public API that requires the caller to know which `(backend, method, least_squares_algorithm)` tuples are mutually compatible. Information leakage across files; internally-owned behavior config exposed as a registry.

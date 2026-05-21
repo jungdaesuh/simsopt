@@ -694,6 +694,14 @@ def _host_array_signature(array) -> tuple[str, tuple[int, ...], str] | None:
     )
 
 
+def _generic_surface_scatter_operator_host(mpol: int, ntor: int) -> np.ndarray:
+    positions = np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
+    n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
+    operator = np.zeros((3 * n_per_coord, positions.size), dtype=np.float64)
+    operator[positions, np.arange(positions.size)] = 1.0
+    return operator
+
+
 def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
     """Snapshot the immutable surface metadata required by JAX Boozer solves."""
     quadpoints_phi = np.asarray(surface.quadpoints_phi, dtype=np.float64)
@@ -703,16 +711,10 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
     scatter_indices_host = None
     if surface.stellsym:
         if surface_kind in {"generic", "xyztensorfourier"}:
-            positions = np.asarray(
-                stellsym_scatter_indices(surface.mpol, surface.ntor),
-                dtype=np.int32,
+            scatter_indices_host = _generic_surface_scatter_operator_host(
+                surface.mpol,
+                surface.ntor,
             )
-            n_per_coord = int((2 * surface.mpol + 1) * (2 * surface.ntor + 1))
-            scatter_indices_host = np.zeros(
-                (3 * n_per_coord, positions.size),
-                dtype=np.float64,
-            )
-            scatter_indices_host[positions, np.arange(positions.size)] = 1.0
             scatter_indices = _as_jax_float64(scatter_indices_host)
         else:
             scatter_indices_host = np.asarray(
@@ -948,14 +950,6 @@ def _split_decision_vector_jax(x, *, optimize_G, decision_split_mode="reverse"):
         optimize_G=optimize_G,
         decision_split_mode=decision_split_mode,
     )
-
-
-def _generic_surface_scatter_operator(mpol: int, ntor: int):
-    positions = np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
-    n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
-    operator = np.zeros((3 * n_per_coord, positions.size), dtype=np.float64)
-    operator[positions, np.arange(positions.size)] = 1.0
-    return _as_jax_float64(operator)
 
 
 def _cross_product(left, right):

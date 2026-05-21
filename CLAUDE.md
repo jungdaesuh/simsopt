@@ -20,9 +20,8 @@ conda activate jax
   3.11. Fresh env resolution follows `pyproject.toml`.
 - env recipe provides the build toolchain and performs the editable
   `simsopt[JAX,dev]` install used by local validation, including `ruff`
-- optional Track 3 Optimistix/Lineax contract checks use
-  `simsopt[JAX_OPTIMISTIX,dev]` on Python 3.11+; these deps are not part of the
-  base runtime
+- Track 3 Optimistix/Lineax contract checks use `simsopt[JAX,dev]` on Python
+  3.11+; the optimizer runtime dependencies are part of the base JAX extra
 - use this lane for import smoke, pure-JAX unit tests, Stage 2 parity, and the
   public CPU/GPU parity work
 - before recording version-sensitive evidence, verify the imported versions with

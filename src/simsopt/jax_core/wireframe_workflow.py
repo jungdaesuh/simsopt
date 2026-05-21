@@ -7,6 +7,7 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
+from jax.experimental import io_callback
 
 from ._math_utils import as_jax_float64 as _as_jax_float64
 from ._math_utils import as_jax_int32 as _as_jax_int32
@@ -391,16 +392,60 @@ def _validate_gsco_history_capacity(
             history_capacity,
             dtype=history_dtype,
         )
-        invalid_history = (state.history_length < 1) | (
-            state.history_length + max_steps_value > history_capacity_value
+        history_is_valid = (state.history_length >= 1) & (
+            state.history_length + max_steps_value <= history_capacity_value
         )
-        return replace(state, done=state.done | invalid_history)
+        return jax.lax.cond(
+            history_is_valid,
+            lambda valid_state: valid_state,
+            lambda invalid_state: _raise_traced_gsco_history_capacity(
+                invalid_state,
+                max_steps_value,
+                history_capacity_value,
+            ),
+            state,
+        )
     history_length = _validate_gsco_history_length_runtime(
         state.history_length,
         jnp.asarray(max_steps, dtype=history_dtype),
         jnp.asarray(history_capacity, dtype=history_dtype),
     )
     return replace(state, history_length=history_length)
+
+
+def _raise_traced_gsco_history_capacity(
+    state: WireframeGSCOLiveState,
+    max_steps: jax.Array,
+    history_capacity: jax.Array,
+) -> WireframeGSCOLiveState:
+    checked_length = io_callback(
+        _raise_invalid_gsco_history_length,
+        jax.ShapeDtypeStruct((), state.history_length.dtype),
+        state.history_length,
+        max_steps,
+        history_capacity,
+        ordered=True,
+    )
+    return replace(state, history_length=checked_length)
+
+
+def _raise_invalid_gsco_history_length(
+    history_length,
+    max_steps,
+    history_capacity,
+):
+    history_length_int = int(history_length)
+    max_steps_int = int(max_steps)
+    history_capacity_int = int(history_capacity)
+    if history_length_int < 1:
+        raise ValueError(
+            "state.history_length must include the initial row; "
+            f"got {history_length_int}."
+        )
+    raise ValueError(
+        "state.history_length + max_steps must fit GSCO history capacity; "
+        f"got {history_length_int} + {max_steps_int} > {history_capacity_int}."
+    )
 
 
 def _validate_gsco_history_length_runtime(
