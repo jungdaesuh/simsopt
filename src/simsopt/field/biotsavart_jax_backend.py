@@ -817,7 +817,7 @@ class SpecBackedBiotSavartJAX(Optimizable):
         if coil_dofs is None:
             coil_dofs = self.x
         coil_dofs = _as_jax_float64(coil_dofs)
-        dofs_gradient = jnp.zeros_like(coil_dofs)
+        dofs_gradient = coil_dofs - coil_dofs
         coil_specs = coil_specs_from_dof_extraction_spec(
             self._coil_dof_extraction_spec,
             coil_dofs,
@@ -964,15 +964,23 @@ def _dof_map_cotangent_to_owner_gradient(map_spec, input_cotangent, owner_dofs):
     if map_spec.input_mode == "full":
         full_cotangent = input_cotangent
     else:
-        full_cotangent = jnp.zeros_like(map_spec.template_full_dofs)
-        full_cotangent = full_cotangent.at[
-            int(map_spec.input_start) : int(map_spec.input_end)
-        ].add(input_cotangent)
+        zero = jnp.sum(input_cotangent, dtype=input_cotangent.dtype)
+        full_cotangent = jnp.broadcast_to(
+            zero - zero,
+            map_spec.template_full_dofs.shape,
+        )
+        full_cotangent = _add_update_1d(
+            full_cotangent,
+            map_spec.input_start,
+            input_cotangent,
+        )
 
-    owner_gradient = jnp.zeros_like(owner_dofs)
-    for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
-        owner_gradient = owner_gradient.at[int(owner_start) : int(owner_end)].add(
-            full_cotangent[int(target_start) : int(target_end)]
+    owner_gradient = owner_dofs - owner_dofs
+    for owner_start, _owner_end, target_start, target_end in map_spec.owner_segments:
+        owner_gradient = _add_update_1d(
+            owner_gradient,
+            owner_start,
+            _slice_1d(full_cotangent, target_start, target_end),
         )
     return owner_gradient
 

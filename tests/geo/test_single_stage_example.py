@@ -3788,13 +3788,22 @@ class SingleStageExampleTests(unittest.TestCase):
         module = self.load_module()
         owner_dofs = np.linspace(0.1, 1.0, 10, dtype=np.float64)
 
-        def make_map(template_full_dofs, owner_segments):
+        def make_map(
+            template_full_dofs,
+            owner_segments,
+            *,
+            input_mode="full",
+            input_start=0,
+            input_end=None,
+        ):
+            if input_end is None:
+                input_end = len(template_full_dofs)
             return module.jax_specs.make_optimizable_dof_map_spec(
                 template_full_dofs=template_full_dofs,
                 owner_segments=owner_segments,
-                input_mode="full",
-                input_start=0,
-                input_end=len(template_full_dofs),
+                input_mode=input_mode,
+                input_start=input_start,
+                input_end=input_end,
             )
 
         quadpoints = np.linspace(0.0, 1.0, 4, endpoint=False, dtype=np.float64)
@@ -3812,8 +3821,11 @@ class SingleStageExampleTests(unittest.TestCase):
                         ((0, 9, 0, 9),),
                     ),
                     current_map=make_map(
-                        np.zeros(1, dtype=np.float64),
-                        ((9, 10, 0, 1),),
+                        np.array([2.0, 0.0, 3.0], dtype=np.float64),
+                        ((9, 10, 1, 2),),
+                        input_mode="local",
+                        input_start=1,
+                        input_end=2,
                     ),
                 ),
             )
@@ -3864,11 +3876,16 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         d_current = jnp.asarray([0.25], dtype=jnp.float64)
 
-        actual = bs.coil_cotangents_to_dofs_gradient(
-            ((d_gamma[None, ...], d_gammadash[None, ...], d_current),),
-            ((0,),),
-            coil_dofs=owner_dofs,
-        )
+        with jax.transfer_guard_host_to_device("allow"):
+            runtime_owner_dofs = jax.device_put(
+                jnp.asarray(owner_dofs, dtype=jnp.float64)
+            )
+        with jax.transfer_guard("disallow"):
+            actual = bs.coil_cotangents_to_dofs_gradient(
+                ((d_gamma[None, ...], d_gammadash[None, ...], d_current),),
+                ((0,),),
+                coil_dofs=runtime_owner_dofs,
+            )
 
         def scalar(owner):
             group = bs.coil_set_spec_from_dofs(owner).groups[0]
