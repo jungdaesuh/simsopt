@@ -3701,6 +3701,56 @@ def test_resolve_probe_lane_tracks_private_optimizer_backends():
         resolve_probe_lane(optimizer_backend="hybrid")
 
 
+def test_validation_ladder_modules_import_before_simsopt_bootstrap():
+    repo_root = Path(__file__).resolve().parents[1]
+    src_root = repo_root / "src"
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"repo_root = Path({str(repo_root)!r})\n"
+        f"src_root = Path({str(src_root)!r})\n"
+        "sys.path = [str(repo_root), *[p for p in sys.path if p != str(src_root)]]\n"
+        "import benchmarks.validation_ladder_contract as contract\n"
+        "import benchmarks.validation_ladder_common as common\n"
+        "assert 'simsopt' not in sys.modules\n"
+        "common.bootstrap_local_simsopt()\n"
+        "assert contract.resolve_probe_lane(optimizer_backend='optax-lbfgs') == "
+        "'target-optax-lbfgs'\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_validation_ladder_backend_choices_defer_to_optimizer_ssot():
+    from benchmarks import validation_ladder_contract
+    from simsopt.geo import _optimizer_backend_choices, optimizer_jax
+
+    (
+        valid_outer_optimizer_backends,
+        render_invalid_optimizer_backend_message,
+    ) = validation_ladder_contract._outer_optimizer_backend_choices()
+    assert (
+        valid_outer_optimizer_backends
+        is _optimizer_backend_choices.VALID_OUTER_OPTIMIZER_BACKENDS
+    )
+    assert (
+        render_invalid_optimizer_backend_message
+        is _optimizer_backend_choices.render_invalid_optimizer_backend_message
+    )
+    assert (
+        valid_outer_optimizer_backends == optimizer_jax.VALID_OUTER_OPTIMIZER_BACKENDS
+    )
+    assert render_invalid_optimizer_backend_message(
+        "outer"
+    ) == optimizer_jax.render_invalid_optimizer_backend_message("outer")
+
+
 def test_run_code_benchmark_runtime_lane_matches_ladder_vocabulary(monkeypatch):
     monkeypatch.setattr(
         run_code_benchmark_common,

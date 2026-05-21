@@ -4,16 +4,21 @@ from __future__ import annotations
 
 from typing import Mapping, Union
 
-from simsopt.geo._optimizer_backend_choices import (
-    VALID_OUTER_OPTIMIZER_BACKENDS,
-    render_invalid_optimizer_backend_message,
-)
-
 
 SHORT_RUN_SMOKE_MAXITER = 20
 TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG = "tier3_single_stage_outer_loop"
 
 ParityToleranceValue = Union[float, bool, None]
+
+
+def _outer_optimizer_backend_choices():
+    from simsopt.geo._optimizer_backend_choices import (
+        VALID_OUTER_OPTIMIZER_BACKENDS,
+        render_invalid_optimizer_backend_message,
+    )
+
+    return VALID_OUTER_OPTIMIZER_BACKENDS, render_invalid_optimizer_backend_message
+
 
 OPTIMIZER_DRIFT_TOLERANCES = {
     "tier1_stage2_value_gradient": {
@@ -570,9 +575,13 @@ def evaluate_tier5_performance_budget(
 
 def resolve_probe_lane(*, optimizer_backend: str | None = None) -> str:
     """Map benchmark/probe options to the intended lane label."""
+    (
+        valid_outer_optimizer_backends,
+        render_invalid_optimizer_backend_message,
+    ) = _outer_optimizer_backend_choices()
     if (
         optimizer_backend is not None
-        and optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS
+        and optimizer_backend not in valid_outer_optimizer_backends
     ):
         raise ValueError(render_invalid_optimizer_backend_message("outer"))
     if optimizer_backend == "ondevice":
