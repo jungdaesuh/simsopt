@@ -129,6 +129,24 @@ def _optional_host_float(value):
     return None if value is None else host_float(value)
 
 
+def _stage2_artifact_materialize(materialize):
+    """Evaluate an artifact-only host materialization under the narrow guard."""
+    with jax.transfer_guard_device_to_host("allow"):
+        return materialize()
+
+
+def _stage2_artifact_host_array(materialize, *, dtype=None):
+    return host_array(_stage2_artifact_materialize(materialize), dtype=dtype)
+
+
+def _stage2_artifact_host_float(materialize):
+    return host_float(_stage2_artifact_materialize(materialize))
+
+
+def _stage2_artifact_host_bool(materialize):
+    return host_bool(_stage2_artifact_materialize(materialize))
+
+
 def _host_curve_max_curvature(curve):
     return float(np.max(host_array(curve.kappa(), dtype=np.float64)))
 
@@ -1204,10 +1222,12 @@ def _build_stage2_target_term_payload(target_objective_bundle, dofs):
     terms = getattr(target_objective_bundle, "terms", ())
     if raw_terms is None or not terms:
         return None
-    dofs64 = host_array(dofs)
+    dofs64 = _stage2_artifact_host_array(lambda: dofs)
     dofs_jax = jax.device_put(dofs64)
-    raw_values = host_array(raw_terms(dofs_jax))
-    raw_gradients = host_array(_cached_raw_terms_jacobian(raw_terms)(dofs_jax))
+    raw_values = _stage2_artifact_host_array(lambda: raw_terms(dofs_jax))
+    raw_gradients = _stage2_artifact_host_array(
+        lambda: _cached_raw_terms_jacobian(raw_terms)(dofs_jax)
+    )
     entries = {}
     for index, term in enumerate(terms):
         entries[term.name] = _stage2_term_payload_entry(
@@ -1224,27 +1244,45 @@ def build_stage2_target_reporting_snapshot(target_objective_bundle, dofs):
         raise RuntimeError(
             "Stage 2 target objective bundle does not expose reporting_summary."
         )
-    dofs64 = flatten_stage2_target_optimizer_state(dofs)
+    dofs64 = _stage2_artifact_host_array(
+        lambda: flatten_stage2_target_optimizer_state(dofs)
+    )
     dofs_jax = jax.device_put(dofs64)
-    summary = reporting_summary(dofs_jax)
+    summary = _stage2_artifact_materialize(lambda: reporting_summary(dofs_jax))
     target_value_and_grad = resolve_stage2_target_value_and_grad(
         target_objective_bundle
     )
     assert target_value_and_grad is not None
-    value, grad = target_value_and_grad(dofs_jax)
+    value, grad = _stage2_artifact_materialize(
+        lambda: target_value_and_grad(dofs_jax)
+    )
     terms = _build_stage2_target_term_payload(target_objective_bundle, dofs64)
     snapshot = {
-        "J": host_float(value),
-        "Jf": host_float(summary.Jf),
-        "mean_abs_relBfinal_norm": host_float(summary.mean_abs_relBfinal_norm),
-        "curve_length": host_float(summary.curve_length),
-        "coil_coil_distance": host_float(summary.coil_coil_distance),
-        "curve_surface_min_dist": host_float(summary.curve_surface_min_dist),
-        "curvature": host_float(summary.curvature),
-        "banana_current_A": host_float(summary.banana_current_A),
-        "grad_norm": float(np.linalg.norm(host_array(grad))),
-        "distance_constraint_violated": host_bool(summary.distance_constraint_violated),
-        "self_intersecting": host_bool(summary.self_intersecting),
+        "J": _stage2_artifact_host_float(lambda: value),
+        "Jf": _stage2_artifact_host_float(lambda: summary.Jf),
+        "mean_abs_relBfinal_norm": _stage2_artifact_host_float(
+            lambda: summary.mean_abs_relBfinal_norm
+        ),
+        "curve_length": _stage2_artifact_host_float(lambda: summary.curve_length),
+        "coil_coil_distance": _stage2_artifact_host_float(
+            lambda: summary.coil_coil_distance
+        ),
+        "curve_surface_min_dist": _stage2_artifact_host_float(
+            lambda: summary.curve_surface_min_dist
+        ),
+        "curvature": _stage2_artifact_host_float(lambda: summary.curvature),
+        "banana_current_A": _stage2_artifact_host_float(
+            lambda: summary.banana_current_A
+        ),
+        "grad_norm": float(
+            np.linalg.norm(_stage2_artifact_host_array(lambda: grad))
+        ),
+        "distance_constraint_violated": _stage2_artifact_host_bool(
+            lambda: summary.distance_constraint_violated
+        ),
+        "self_intersecting": _stage2_artifact_host_bool(
+            lambda: summary.self_intersecting
+        ),
     }
     if terms is not None:
         snapshot["terms"] = terms
@@ -2363,35 +2401,41 @@ def _build_stage2_probe_composite_payload(
             target_objective_bundle
         )
         assert target_value_and_grad is not None
-        _value, composite_grad = target_value_and_grad(jax.device_put(context.JF.x))
+        _value, composite_grad = _stage2_artifact_materialize(
+            lambda: target_value_and_grad(jax.device_put(context.JF.x))
+        )
         return (
             {
                 **target_snapshot,
                 "objective_source": "target-objective",
             },
-            host_array(composite_grad),
+            _stage2_artifact_host_array(lambda: composite_grad),
             composite_terms,
         )
     explicit_snapshot, explicit_grad, _ = evaluate_stage2_objective(
         context,
     )
     objective_source = "explicit-composite"
-    composite_value = host_float(explicit_snapshot["J"])
-    composite_grad = host_array(explicit_grad)
+    composite_value = _stage2_artifact_host_float(lambda: explicit_snapshot["J"])
+    composite_grad = _stage2_artifact_host_array(lambda: explicit_grad)
     composite_terms = None
     if target_objective_bundle is not None:
-        dofs_jax = jax.device_put(host_array(context.JF.x))
+        dofs_jax = jax.device_put(
+            _stage2_artifact_host_array(lambda: context.JF.x)
+        )
         target_value_and_grad = resolve_stage2_target_value_and_grad(
             target_objective_bundle
         )
         assert target_value_and_grad is not None
-        composite_value, composite_grad = target_value_and_grad(dofs_jax)
-        composite_value = host_float(composite_value)
-        composite_grad = host_array(composite_grad)
+        composite_value, composite_grad = _stage2_artifact_materialize(
+            lambda: target_value_and_grad(dofs_jax)
+        )
+        composite_value = _stage2_artifact_host_float(lambda: composite_value)
+        composite_grad = _stage2_artifact_host_array(lambda: composite_grad)
         objective_source = "target-objective"
         composite_terms = _build_stage2_target_term_payload(
             target_objective_bundle,
-            host_array(context.JF.x),
+            _stage2_artifact_host_array(lambda: context.JF.x),
         )
     return (
         {
@@ -2431,7 +2475,7 @@ def build_stage2_probe_payload(
     target_objective_bundle=None,
 ):
     """Serialize the initialized Stage 2 objective state for parity probes."""
-    dofs = host_array(JF.x)
+    dofs = _stage2_artifact_host_array(lambda: JF.x)
     context = make_stage2_objective_context(
         JF,
         new_bs,
@@ -2460,9 +2504,9 @@ def build_stage2_probe_payload(
             target_objective_bundle,
             dofs,
         )
-    flux_grad = host_array(Jf.dJ())
-    curvature_threshold = host_float(context.Jc.threshold)
-    curvature = host_float(composite_snapshot["curvature"])
+    flux_grad = _stage2_artifact_host_array(lambda: Jf.dJ())
+    curvature_threshold = _stage2_artifact_host_float(lambda: context.Jc.threshold)
+    curvature = _stage2_artifact_host_float(lambda: composite_snapshot["curvature"])
     payload = {
         "backend": backend,
         "optimizer_backend": optimizer_backend,
@@ -2479,7 +2523,7 @@ def build_stage2_probe_payload(
         ),
         "curvature_margin": curvature_threshold - curvature,
         "squared_flux": {
-            "J": host_float(Jf.J()),
+            "J": _stage2_artifact_host_float(lambda: Jf.J()),
             "dJ": flux_grad.tolist(),
             "grad_norm": float(np.linalg.norm(flux_grad)),
         },

@@ -6045,6 +6045,96 @@ class TestStage2OptimizerContract:
                 failure_callback=lambda *args: None,
             )
 
+    def test_stage2_probe_payload_materializes_flux_inside_artifact_boundary(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        guard_depth = {"value": 0}
+
+        class DeviceToHostGuard:
+            def __enter__(self):
+                guard_depth["value"] += 1
+
+            def __exit__(self, exc_type, exc, traceback):
+                del exc_type, exc, traceback
+                guard_depth["value"] -= 1
+
+        def transfer_guard_device_to_host(level):
+            assert level == "allow"
+            return DeviceToHostGuard()
+
+        class BoundaryCheckedFlux(_FakeStage2SquaredFluxTerm):
+            def J(self):
+                assert guard_depth["value"] > 0
+                return super().J()
+
+            def dJ(self):
+                assert guard_depth["value"] > 0
+                return super().dJ()
+
+        monkeypatch.setattr(
+            stage2_script.jax,
+            "transfer_guard_device_to_host",
+            transfer_guard_device_to_host,
+        )
+
+        def fake_evaluate_stage2_objective(
+            _context, *, diagnostics=None, recompute_diagnostics=True
+        ):
+            assert diagnostics is None
+            assert recompute_diagnostics is True
+            return (
+                {
+                    "J": 11.0,
+                    "Jf": 0.125,
+                    "mean_abs_relBfinal_norm": 0.03125,
+                    "curve_length": 1.8,
+                    "coil_coil_distance": 0.12,
+                    "curvature": 18.0,
+                    "grad_norm": 9.0,
+                    "distance_constraint_violated": False,
+                },
+                np.asarray([3.0, -4.0], dtype=float),
+                {},
+            )
+
+        monkeypatch.setattr(
+            stage2_script,
+            "evaluate_stage2_objective",
+            fake_evaluate_stage2_objective,
+        )
+
+        payload = stage2_script.build_stage2_probe_payload(
+            types.SimpleNamespace(x=np.asarray([0.25, -0.5], dtype=float)),
+            object(),
+            object(),
+            object(),
+            BoundaryCheckedFlux(0.5, [0.75, -0.25]),
+            object(),
+            object(),
+            types.SimpleNamespace(threshold=40.0),
+            backend="jax",
+            optimizer_backend="scipy",
+            equilibrium_path="dummy.nc",
+            nphi=31,
+            ntheta=16,
+            squared_flux_weight=1.0,
+            length_weight=0.1,
+            length_target=1.75,
+            cc_weight=10.0,
+            cc_threshold=0.05,
+            curvature_weight=1e-4,
+        )
+
+        assert payload["squared_flux"]["J"] == pytest.approx(0.5)
+        np.testing.assert_allclose(
+            np.asarray(payload["squared_flux"]["dJ"], dtype=float),
+            np.asarray([0.75, -0.25], dtype=float),
+            rtol=0.0,
+            atol=0.0,
+        )
+
     @pytest.mark.parametrize(
         ("optimizer_backend", "expected_source"),
         [
