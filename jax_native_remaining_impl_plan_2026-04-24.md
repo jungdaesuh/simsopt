@@ -92,16 +92,15 @@ union of:
 
 ### Runtime Version Note
 
-- The repo-local interpreter path and conda env name remain historical:
-  `.conda/jax-0.9.2/bin/python` / `jax-0.9.2`.
+- The supported repo-local interpreter is `.conda/jax/bin/python`.
 - The checked local environment currently imports `jax==0.10.0` and
-  `jaxlib==0.10.0`; fresh environment resolution is governed by
+  `jaxlib==0.10.0`; fresh environment resolution is pinned by
   `pyproject.toml`.
 - The `12-circularcoil` blocker was validated against JAX/JAXLIB `0.10.0`:
   `jax.scipy.special` still does not expose `ellipk` / `ellipe`.
-- Do not raise the `pyproject.toml` lower bound above `jax>=0.9.2,<1` unless a
-  future implementation lands a real `0.10`-only API dependency; record the
-  actual imported versions in every validation artifact.
+- Do not use the stale `jax>=0.9.2,<1` floor for fresh environments; the repo
+  pins the supported JAX/JAXLIB runtime at `0.10.0`. Record the actual imported
+  versions in every validation artifact.
 
 ### Cross-Cutting Constraints
 

@@ -96,6 +96,73 @@ that a kernel needs either a tighter contract or stronger arithmetic.
 - Short optimization runs (20+ outer iterations) produce finite
   objectives with monotonically decreasing trend.
 
+Remaining Port Surface Gates
+----------------------------
+
+The remaining JAX-port surfaces use the same lane vocabulary as the parity
+ladder, but their acceptance is narrower than a full workflow endorsement until
+CUDA smoke and committed proof artifacts exist.
+
+**Bootstrap and Redl current**
+
+- ``compute_trapped_fraction_jax`` must match
+  ``compute_trapped_fraction`` on the same ``modB`` / ``sqrtg`` arrays for
+  both 2-D and 3-D inputs. Extrema and flux-surface averages use the
+  direct-kernel lane; the trapped-fraction scalar keeps the measured
+  fixed-quadrature-vs-adaptive-``quad`` error budget.
+- ``j_dot_B_Redl_jax`` must match the CPU ``j_dot_B_Redl`` fixture for
+  ``helicity_n in {0, +1, -1}``. Profile values and derivatives are evaluated
+  once at the host boundary and then passed as explicit arrays to the pure JAX
+  kernel.
+- ``RedlBootstrapJAX`` must keep live ``Profile`` dependencies at the public
+  wrapper boundary while its density / temperature / ``Zeff`` DOF Jacobians are
+  checked against centered finite differences.
+
+**Profiles**
+
+- ``ProfilePolynomialJAX``, ``ProfileScaledJAX``, and
+  ``ProfilePressureJAX`` must match independent closed-form oracles at the
+  same DOF state.
+- ``ProfileSplineJAX`` must replay the host FITPACK spline coefficients without
+  refitting in the JAX value/derivative path. At-knot comparisons use the
+  FITPACK replay round-off budget; off-knot comparisons use the documented
+  SciPy spline truncation budget.
+- Reusable JIT callers pass profile DOFs or frozen spline state explicitly.
+  Direct differentiation through mutable ``Optimizable.f(s)`` object state is
+  not an acceptance claim.
+
+**Frozen VMEC diagnostics**
+
+- ``vmec_freeze_splines`` is the host boundary for VMEC spline state. The
+  JAX kernels consume the frozen pytree and must not read from a live
+  ``Vmec.wout`` object inside compiled code.
+- ``vmec_compute_geometry_jax`` is accepted only when its public wrapper and
+  frozen-state kernel match ``vmec_compute_geometry`` on the same
+  ``vmec_splines`` state and preserve the CPU result field contract modulo JAX
+  array types.
+- ``vmec_fieldlines_jax`` is accepted as a direct-kernel coordinate-line
+  diagnostic plus a branch-stable ``theta_vmec`` resolve. It is not an ODE
+  integrator parity claim.
+
+**QFM and generic solve wrappers**
+
+- ``QfmSurfaceJAX`` penalty solves use fixed-state objective / gradient
+  evidence. The augmented-Lagrangian exact path accepts success from the
+  natural equality KKT residual for ``label(dofs) = targetlabel``; raw inner
+  BFGS status is diagnostic only. Branch stability is checked with objective,
+  label, and KKT invariants, not host-SLSQP DOF identity.
+- ``least_squares_serial_solve_jax``, ``serial_solve_jax``,
+  ``constrained_serial_solve_jax``, and ``least_squares_mpi_solve_jax`` accept
+  explicit traceable problem adapters. They must reject arbitrary mutable host
+  ``Optimizable`` graphs instead of wrapping them or falling back to SciPy.
+
+**Permanent-magnet and wireframe workflows**
+
+- PM and wireframe live-loop JAX paths are accepted for numerical workflow
+  orchestration and inner value/gradient lanes only. Plot, FAMUS, and VTK
+  writers remain host-side output concerns unless a later plan states
+  otherwise.
+
 Performance Gates
 -----------------
 

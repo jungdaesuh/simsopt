@@ -931,6 +931,37 @@ CPU-local runner/schema acceptance criteria:
 - [x] GPU artifacts are separate from CPU artifacts and never overwrite CPU
       evidence.
 
+## MPS Float32 Smoke Lane
+
+Status boundary: `jax_mps` is a reusable follow-up lane for real Apple MPS
+execution. It is not a production parity substitute for the CPU/CUDA float64
+contract.
+
+Implementation checklist:
+
+- [x] Add an explicit `jax_mps` lane to the artifact schema.
+- [x] Require the explicit MPS smoke environment:
+  - [x] `SIMSOPT_BACKEND_MODE=jax_mps_smoke`
+  - [x] `SIMSOPT_JAX_PLATFORM=mps`
+  - [x] `SIMSOPT_JAX_TRANSFER_GUARD=disallow`
+  - [x] `SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=mps`
+  - [x] `JAX_PLATFORMS=mps`
+  - [x] `JAX_ENABLE_X64=0`
+- [x] Fail the MPS run when the selected lanes do not include `jax_mps`.
+- [x] Reuse the same CPU baseline fixture input hash as the JAX CPU lane.
+- [x] Compare CPU/C++ vs JAX MPS and JAX CPU vs JAX MPS in the same artifact.
+- [x] Select tolerances from
+      `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES`
+      through the backend `tolerance_tier="float32_smoke"` SSOT.
+- [x] Keep CPU/CUDA production parity on the existing strict float64 buckets.
+- [x] Treat MPS float32 gradients as diagnostic-only; they still fail the
+      fixture verdict when outside `gradient_rtol=1e-3, gradient_atol=1e-5`.
+- [x] Record MPS provenance: JAX/jaxlib versions, `jax-mps` version, device
+      name, runtime dtype, tolerance tier, and transfer-guard probe.
+- [x] Keep transfer guard at `disallow` for the MPS artifact process while
+      allowing only the explicit `jax.device_get()` materialization boundary
+      used to write JSON artifacts.
+
 ## Implementation Order
 
 Recommended order:

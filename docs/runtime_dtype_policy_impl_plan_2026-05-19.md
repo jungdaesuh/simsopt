@@ -42,6 +42,21 @@ runtime behavior. This plan restores one source of truth.
   `src/simsopt/backend/runtime.py`.
 - [ ] Do not loosen tolerances to hide dtype drift.
 
+## 2026-05-19 Float32 Smoke Tolerance Update
+
+- [x] `jax_mps_smoke` now points at the backend policy
+  `tolerance_tier="float32_smoke"`.
+- [x] The tolerance values live in
+  `benchmarks/validation_ladder_contract.py`, not in the runner.
+- [x] The C++/JAX example parity harness selects `float32_smoke` only from the
+  backend `tolerance_tier`; CPU/CUDA production parity keeps the existing
+  strict `direct_kernel` / `ls_wrapper_gradient` buckets.
+- [x] `float32_smoke` uses `rtol=1e-5, atol=1e-6` for direct values and
+  `objective_rtol=1e-4, objective_atol=1e-6` for objective scalars.
+- [x] Gradient comparisons remain diagnostic-only under the MPS float32 smoke
+  tier. They use `gradient_rtol=1e-3, gradient_atol=1e-5`, and a failing
+  gradient still keeps the fixture verdict at `fail`.
+
 ## Current Tree Facts
 
 - `src/simsopt/geo/surface_fourier_jax.py` is already a 9-line shim into

@@ -17,6 +17,10 @@ landed are reclassified here as either "evidence-only" or "closed".
   example still open.
 - **N30 Perlmutter plan added** —
   `docs/perlmutter_gpu_test_plan_2026-05-19.md`. Still hardware-gated.
+- **Remaining port-surface plan linked** —
+  `docs/remaining_jax_port_surfaces_impl_plan_2026-05-19.md` now tracks
+  bootstrap/Redl, profiles, frozen VMEC diagnostics, QFM, traceable solve
+  wrappers, and PM/wireframe workflow acceptance against the public JAX docs.
 
 ## Critical path
 
