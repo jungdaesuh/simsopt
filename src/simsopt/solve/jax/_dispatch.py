@@ -566,7 +566,7 @@ def _run_optimistix_minimize(
 ) -> OptimizeResult:
     start = time.perf_counter()
     params = jnp.asarray(jax.device_put(x0))
-    solver_tol = _device_scalar(options.tol, params.dtype)
+    solver_tol = float(options.tol)
     explicit_scalar_value = _scalar_value_with_explicit_vjp(value_and_grad_fn)
 
     def scalar_value(current, _args):
@@ -796,7 +796,7 @@ def _run_optimistix_lm(
     options: OptimistixLMOptions,
 ) -> OptimizeResult:
     params = jnp.asarray(jax.device_put(x0))
-    solver_tol = _device_scalar(options.tol, params.dtype)
+    solver_tol = float(options.tol)
 
     def residual_value(current, _args):
         return jnp.ravel(jnp.asarray(residual_fn(current)))

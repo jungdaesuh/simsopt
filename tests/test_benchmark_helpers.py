@@ -4232,6 +4232,14 @@ def test_single_stage_init_parity_tracks_self_intersection_check_availability():
     assert comparison["jax_self_intersection_check_available"] is True
 
 
+def _write_single_stage_result_artifact(command) -> list[str]:
+    command_list = list(command)
+    output_root = Path(command_list[command_list.index("--output-root") + 1])
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "results.json").write_text("{}", encoding="utf-8")
+    return command_list
+
+
 def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(
     monkeypatch, tmp_path
 ):
@@ -4256,10 +4264,15 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(
         "_single_stage_script_path",
         lambda: tmp_path / "driver.py",
     )
+
+    def fake_run_python_script(_script_path, command, **_kwargs):
+        _write_single_stage_result_artifact(command)
+        return argparse.Namespace(stdout="", stderr="")
+
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "run_python_script",
-        lambda *args, **kwargs: argparse.Namespace(stdout="", stderr=""),
+        fake_run_python_script,
     )
 
     def fake_find_single_file(root: str | Path, pattern: str) -> Path:
@@ -4343,7 +4356,8 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
     )
 
     def fake_run_python_script(_script_path, command, **kwargs):
-        observed_invocations.append((list(command), dict(kwargs["env"])))
+        command_list = _write_single_stage_result_artifact(command)
+        observed_invocations.append((command_list, dict(kwargs["env"])))
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -4443,6 +4457,123 @@ def test_single_stage_init_case_threads_fullgraph_optimizer_backend_to_jax_lane(
     assert command[target_lane_sync_flag_index + 1] == "per-accept"
 
 
+def test_single_stage_init_case_threads_cuda_fullgraph_boozer_backend(
+    monkeypatch, tmp_path
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax-fullgraph"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cuda",
+        load_surface_gamma=False,
+    )
+
+    assert len(observed_invocations) == 1
+    command, _env = observed_invocations[0]
+    optimizer_flag_index = command.index("--optimizer-backend")
+    assert command[optimizer_flag_index + 1] == "scipy-jax-fullgraph"
+    boozer_optimizer_flag_index = command.index("--boozer-optimizer-backend")
+    assert command[boozer_optimizer_flag_index + 1] == "ondevice"
+
+
+def test_single_stage_init_case_threads_auto_gpu_fullgraph_boozer_backend(
+    monkeypatch, tmp_path
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax-fullgraph"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module.jax,
+        "default_backend",
+        lambda: "gpu",
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="auto",
+        load_surface_gamma=False,
+    )
+
+    command, _env = observed_invocations[0]
+    boozer_optimizer_flag_index = command.index("--boozer-optimizer-backend")
+    assert command[boozer_optimizer_flag_index + 1] == "ondevice"
+
+
+def test_single_stage_init_case_threads_auto_cpu_fullgraph_keeps_default_boozer(
+    monkeypatch, tmp_path
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax-fullgraph"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module.jax,
+        "default_backend",
+        lambda: "cpu",
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="auto",
+        load_surface_gamma=False,
+    )
+
+    command, _env = observed_invocations[0]
+    assert "--boozer-optimizer-backend" not in command
+
+
 def test_single_stage_init_case_threads_profile_target_lane_only_flag(
     monkeypatch, tmp_path
 ):
@@ -4470,12 +4601,14 @@ def test_single_stage_init_case_threads_profile_target_lane_only_flag(
         "_single_stage_script_path",
         lambda: tmp_path / "driver.py",
     )
+    def fake_run_python_script(_script_path, command, **_kwargs):
+        observed_command.extend(_write_single_stage_result_artifact(command))
+        return argparse.Namespace(stdout="", stderr="")
+
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "run_python_script",
-        lambda _script_path, command, **kwargs: (
-            observed_command.extend(command) or argparse.Namespace(stdout="", stderr="")
-        ),
+        fake_run_python_script,
     )
 
     def fake_find_single_file(root: str | Path, pattern: str) -> Path:
@@ -4544,6 +4677,12 @@ def _single_stage_case_args(tmp_path: Path) -> argparse.Namespace:
 
 def _observe_single_stage_case_invocations(monkeypatch, tmp_path: Path):
     observed_invocations: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        command_list = _write_single_stage_result_artifact(command)
+        observed_invocations.append((command_list, dict(kwargs["env"])))
+        return argparse.Namespace(stdout="", stderr="")
+
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "_single_stage_script_path",
@@ -4552,10 +4691,7 @@ def _observe_single_stage_case_invocations(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "run_python_script",
-        lambda _script_path, command, **kwargs: (
-            observed_invocations.append((list(command), dict(kwargs["env"])))
-            or argparse.Namespace(stdout="", stderr="")
-        ),
+        fake_run_python_script,
     )
     return observed_invocations
 
@@ -5043,7 +5179,7 @@ def test_single_stage_init_case_benchmark_mode_skips_surface_gamma_artifact(
     )
 
     def fake_run_python_script(_script_path, command, **kwargs):
-        observed_command[:] = list(command)
+        observed_command[:] = _write_single_stage_result_artifact(command)
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -5150,7 +5286,7 @@ def test_single_stage_init_case_threads_profile_target_lane_flag(monkeypatch, tm
     )
 
     def fake_run_python_script(_script_path, command, **kwargs):
-        observed_command[:] = list(command)
+        observed_command[:] = _write_single_stage_result_artifact(command)
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -5205,7 +5341,7 @@ def test_single_stage_init_jax_case_loads_surface_geometry_from_runtime_spec(
     )
 
     def fake_run_python_script(_script_path, command, **kwargs):
-        observed_command[:] = list(command)
+        observed_command[:] = _write_single_stage_result_artifact(command)
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -5339,7 +5475,7 @@ def test_single_stage_init_case_threads_experimental_target_lane_flag(
     )
 
     def fake_run_python_script(_script_path, command, **kwargs):
-        observed_command[:] = list(command)
+        observed_command[:] = _write_single_stage_result_artifact(command)
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -5408,7 +5544,7 @@ def test_single_stage_init_case_threads_disable_target_lane_success_filter_flag(
     )
 
     def fake_run_python_script(_script_path, command, **kwargs):
-        observed_command[:] = list(command)
+        observed_command[:] = _write_single_stage_result_artifact(command)
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -5479,7 +5615,7 @@ def test_single_stage_init_case_threads_target_lane_boozer_trial_overrides(
     )
 
     def fake_run_python_script(_script_path, command, **kwargs):
-        observed_command[:] = list(command)
+        observed_command[:] = _write_single_stage_result_artifact(command)
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -5546,10 +5682,15 @@ def test_single_stage_init_case_preserves_target_lane_value_and_grad_result(
         "_single_stage_script_path",
         lambda: tmp_path / "driver.py",
     )
+
+    def fake_run_python_script(_script_path, command, **_kwargs):
+        _write_single_stage_result_artifact(command)
+        return argparse.Namespace(stdout="", stderr="")
+
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "run_python_script",
-        lambda *_args, **_kwargs: argparse.Namespace(stdout="", stderr=""),
+        fake_run_python_script,
     )
     monkeypatch.setattr(
         single_stage_init_parity_module,
@@ -5612,7 +5753,8 @@ def test_single_stage_init_case_pins_default_target_lane_sync_for_cpu_lane(
     monkeypatch.setenv(_TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR, "final-only")
 
     def fake_run_python_script(_script_path, command, **kwargs):
-        observed_invocations.append((list(command), dict(kwargs["env"])))
+        command_list = _write_single_stage_result_artifact(command)
+        observed_invocations.append((command_list, dict(kwargs["env"])))
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(

@@ -497,6 +497,30 @@ def _resolve_target_lane_sync_policy(
     return _TARGET_LANE_FINAL_ONLY_SYNC
 
 
+def _target_platform_uses_cuda(platform: str) -> bool:
+    normalized = str(platform).strip().lower()
+    if normalized == "cuda":
+        return True
+    if normalized != "auto":
+        return False
+    return str(jax.default_backend()).strip().lower() in {"cuda", "gpu"}
+
+
+def _resolve_target_boozer_optimizer_backend(
+    *,
+    backend: str,
+    platform: str,
+    args: argparse.Namespace,
+) -> str | None:
+    if backend != "jax":
+        return None
+    if args.boozer_optimizer_backend is not None:
+        return args.boozer_optimizer_backend
+    if _target_platform_uses_cuda(platform):
+        return TARGET_OPTIMIZER_BACKEND
+    return None
+
+
 def _expected_target_outer_optimizer_method(optimizer_backend: str) -> str:
     return _TARGET_OPTIMIZER_METHOD_BY_BACKEND[optimizer_backend]
 
@@ -846,6 +870,11 @@ def _run_single_stage_case(
             command.extend(["--maxiter", str(args.maxiter)])
         if backend == "jax":
             command.extend(["--optimizer-backend", args.optimizer_backend])
+            boozer_optimizer_backend = _resolve_target_boozer_optimizer_backend(
+                backend=backend,
+                platform=platform,
+                args=args,
+            )
             resolved_seed_spec = (
                 jax_runtime_seed_spec
                 if jax_runtime_seed_spec is not None
@@ -853,11 +882,11 @@ def _run_single_stage_case(
             )
             if resolved_seed_spec is not None:
                 command.extend(["--jax-runtime-seed-spec", str(resolved_seed_spec)])
-            if args.boozer_optimizer_backend is not None:
+            if boozer_optimizer_backend is not None:
                 command.extend(
                     [
                         "--boozer-optimizer-backend",
-                        args.boozer_optimizer_backend,
+                        boozer_optimizer_backend,
                     ]
                 )
         else:

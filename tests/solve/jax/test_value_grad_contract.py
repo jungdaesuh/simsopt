@@ -220,12 +220,48 @@ def test_optimistix_driver_runs_under_strict_host_to_device_transfer_guard():
     assert result.x.shape == (2,)
 
 
+def test_optimistix_driver_runs_under_strict_transfer_guard():
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype))
+
+    with jax.transfer_guard("disallow"):
+        result = least_squares(
+            lambda x: x,
+            x0,
+            driver=Driver.OPTIMISTIX_LM,
+            options=OptimistixLMOptions(
+                maxiter=1,
+                materialize_dense_linearization=False,
+            ),
+        )
+
+    assert result.driver is Driver.OPTIMISTIX_LM
+    assert result.x.shape == (2,)
+
+
 def test_optimistix_lbfgs_runs_under_strict_host_to_device_transfer_guard():
     dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
     x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype))
     two = jax.device_put(np.asarray(2.0, dtype=dtype))
 
     with jax.transfer_guard_host_to_device("disallow"):
+        result = minimize(
+            lambda x: (jnp.vdot(x, x), two * x),
+            x0,
+            driver=Driver.OPTIMISTIX_LBFGS,
+            options=OptimistixLBFGSOptions(maxiter=1),
+        )
+
+    assert result.driver is Driver.OPTIMISTIX_LBFGS
+    assert result.x.shape == (2,)
+
+
+def test_optimistix_lbfgs_runs_under_strict_transfer_guard():
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype))
+    two = jax.device_put(np.asarray(2.0, dtype=dtype))
+
+    with jax.transfer_guard("disallow"):
         result = minimize(
             lambda x: (jnp.vdot(x, x), two * x),
             x0,
