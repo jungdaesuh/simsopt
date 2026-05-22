@@ -423,6 +423,7 @@ export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export SIMSOPT_JAX_GPU_PREALLOCATE=true
 
 mkdir -p "${RESULTS_ROOT}/wave2_gpu_preflight"
 
@@ -488,6 +489,7 @@ export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export SIMSOPT_JAX_GPU_PREALLOCATE=true
 ```
 
 Commands:
@@ -558,6 +560,7 @@ export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export JAX_PLATFORMS=cuda,cpu
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export SIMSOPT_JAX_GPU_PREALLOCATE=true
 
 python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
   --lanes cpu_cpp,jax_gpu \
@@ -639,6 +642,7 @@ export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export SIMSOPT_JAX_GPU_PREALLOCATE=true
 
 run_single_stage_ladder_rung() {
   local rung="$1"
@@ -832,6 +836,7 @@ export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export SIMSOPT_JAX_GPU_PREALLOCATE=true
 
 python benchmarks/stage2_e2e_comparison.py \
   --platform cuda \
@@ -884,6 +889,7 @@ export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export SIMSOPT_JAX_GPU_PREALLOCATE=true
 
 python benchmarks/tier5_performance_characterization.py \
   --platform cuda \
@@ -943,6 +949,7 @@ export SIMSOPT_BENCHMARK_JAX_VERSION=0.10.0
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export SIMSOPT_JAX_GPU_PREALLOCATE=true
 
 python benchmarks/gpu_run_code_benchmark.py \
   --backend ondevice \
@@ -1306,17 +1313,18 @@ Current-SHA Wave 3 GPU pytest slices:
 | --- | --- | --- |
 | `53276235` / `gpu-w3-7750` | PASS | Ran against the clean `7750e34d8` source archive and current `jax-0.10.0` runtime. GPU runtime smoke passed `6 passed in 197.47s`; grouped collective lowering control passed `1 passed in 32.90s`; real-fixture GPU M5 parity class passed `3 passed in 92.91s`. Slurm elapsed `5:48`; overall exit `0`; Slurm step MaxRSS values were `4658772K`, `1190036K`, and `2397356K`; per-step `/usr/bin/time -v` MaxRSS values were `3499948 KB`, `1079592 KB`, and `2793800 KB`. Before/after `nvidia-smi` records show 4x A100-SXM4-40GB visible with `0 MiB / 40960 MiB` retained memory after teardown. |
 
-Current open current-SHA jobs:
+Superseded `7750e34d8` jobs before the clean `c2f59c427f` rerun:
 
 | Job | Purpose | QOS / partition | State at latest audit |
 | --- | --- | --- | --- |
-| `53275983` / `cpu-w0w1-7750` | Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs, with per-step `/usr/bin/time -v` records. | CPU `shared` / `shared_milan_ss11` | `RUNNING` on `nid004087`; currently in `import_smoke` at `2026-05-22T03:20:50Z`; no exitcode yet; Slurm step MaxRSS `10194544K`. |
-| `53276949` / `gpu-w4core-7750` | Wave 4 core GPU proof job: Stage 2 CUDA, Stage 2 geometry repro, single-stage CUDA init, and single-stage ladder rungs through `m04n04-i05-useful`, with per-step timing, RSS, and `nvidia-smi` monitor records. Non-banana GPU follow-up is deferred until `53275983` produces the CPU baseline JSON. | GPU `shared` / `shared_gpu_ss11` | `RUNNING` on `nid008641`; currently in `stage2_cuda_e2e` at `2026-05-22T03:20:50Z`; no JSON/exitcode yet; Slurm step MaxRSS `40648816K`; sampled GPU memory `1085 MiB / 81920 MiB`. |
+| `53275983` / `cpu-w0w1-7750` | Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs, with per-step `/usr/bin/time -v` records. | CPU `shared` / `shared_milan_ss11` | FAILED `import_smoke` because the source archive included macOS AppleDouble metadata; superseded by the clean `c2f59c427f` rerun. |
+| `53276949` / `gpu-w4core-7750` | Wave 4 core GPU proof job: Stage 2 CUDA, Stage 2 geometry repro, single-stage CUDA init, and single-stage ladder rungs through `m04n04-i05-useful`, with per-step timing, RSS, and `nvidia-smi` monitor records. Non-banana GPU follow-up is deferred until the CPU baseline JSON exists. | GPU `shared` / `shared_gpu_ss11` | FAILED `stage2_cuda_e2e` with Slurm `OUT_OF_MEMORY` under the no-preallocation policy; superseded by the preallocated `c2f59c427f` rerun. |
 
 Next GPU submissions after `53276949` must run with
-`XLA_PYTHON_CLIENT_PREALLOCATE=true`. The currently running `53276949` job was
-launched with `XLA_PYTHON_CLIENT_PREALLOCATE=false`, so its timing and memory
-records are interpreted as the no-preallocation baseline rather than the
+`SIMSOPT_JAX_GPU_PREALLOCATE=true` and
+`XLA_PYTHON_CLIENT_PREALLOCATE=true`. Job `53276949` was launched with
+`XLA_PYTHON_CLIENT_PREALLOCATE=false`, so its timing and memory records are
+interpreted as the no-preallocation baseline rather than the
 preallocated-memory rerun.
 
 Official-docs check for this current-SHA run:
