@@ -4202,6 +4202,69 @@ def test_single_stage_init_parity_reports_real_gate_failures():
     assert any("self-intersecting" in failure for failure in failures)
 
 
+def test_single_stage_init_parity_can_defer_public_optimizer_final_metrics():
+    cpu_results = {
+        "FINAL_IOTA": 0.15,
+        "FINAL_VOLUME": 0.10,
+        "FIELD_ERROR": 0.003,
+        "MAX_CURVATURE": 10.0,
+        "SELF_INTERSECTING": False,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": True,
+    }
+    jax_results = {
+        "FINAL_IOTA": 0.17,
+        "FINAL_VOLUME": 0.101,
+        "FIELD_ERROR": 0.004,
+        "MAX_CURVATURE": 10.0,
+        "SELF_INTERSECTING": False,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": True,
+    }
+
+    comparison, failures = evaluate_single_stage_init_parity(
+        cpu_results,
+        jax_results,
+        max_surface_geometry_abs=0.0,
+        max_surface_geometry_rel=0.0,
+        require_final_metric_parity=False,
+    )
+
+    assert failures == []
+    assert comparison["final_metric_parity_required"] is False
+    assert comparison["final_metric_parity_failures"] == [
+        "Final iota disagreement too large: 2.00e-02",
+        "Final volume relative difference too large: 1.00e-02",
+        "Final field error relative difference too large: 3.33e-01",
+    ]
+
+
+def test_single_stage_init_public_optimizer_final_metric_drift_needs_path_split():
+    pass_replay = {"status": "pass"}
+    split_path = {"status": "split"}
+    same_path = {"status": "same-path"}
+
+    assert (
+        single_stage_init_parity_module._optimizer_control_split_accepts_final_metric_drift(
+            same_candidate_replay=pass_replay,
+            optimizer_path_objective_evaluations=split_path,
+        )
+        is True
+    )
+    assert (
+        single_stage_init_parity_module._optimizer_control_split_accepts_final_metric_drift(
+            same_candidate_replay=pass_replay,
+            optimizer_path_objective_evaluations=same_path,
+        )
+        is False
+    )
+    assert (
+        single_stage_init_parity_module._optimizer_control_split_accepts_final_metric_drift(
+            same_candidate_replay={"status": "fail"},
+            optimizer_path_objective_evaluations=split_path,
+        )
+        is False
+    )
+
+
 def test_single_stage_init_parity_tracks_self_intersection_check_availability():
     cpu_results = {
         "FINAL_IOTA": 0.15,
@@ -4842,6 +4905,92 @@ def test_single_stage_init_case_pair_replays_reference_trace_before_jax_fullgrap
     assert calls[3]["backend"] == "jax"
     assert calls[3]["replay"] is None
     assert replay_case["run_dir"] == str(tmp_path / "2_jax")
+
+
+def test_single_stage_init_case_pair_skips_exact_replay_for_public_lbfgs(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "optax-lbfgs"
+    args.maxiter = 3
+    args.platform = "cpu"
+    args.record_objective_evaluation_trace = True
+    calls = []
+
+    def fake_run_single_stage_case(
+        case_args,
+        backend,
+        *,
+        platform,
+        benchmark_mode,
+        load_surface_gamma,
+        output_root,
+        jax_runtime_seed_spec=None,
+        replay_objective_evaluation_trace=None,
+    ):
+        del platform, benchmark_mode, load_surface_gamma, jax_runtime_seed_spec
+        run_dir = tmp_path / f"{len(calls)}_{backend}"
+        run_dir.mkdir()
+        progress_json = run_dir / "outer_optimizer_progress.json"
+        progress_json.write_text(json.dumps({"events": []}), encoding="utf-8")
+        calls.append(
+            {
+                "backend": backend,
+                "warm_start_run_dir": getattr(case_args, "warm_start_run_dir", None),
+                "output_root": Path(output_root),
+                "progress_json": progress_json,
+                "replay": replay_objective_evaluation_trace,
+            }
+        )
+        return {
+            "run_dir": str(run_dir),
+            "results": _single_stage_contract_results(),
+            "outer_optimizer_progress_json": str(progress_json),
+        }
+
+    def fake_compile_seed_spec(run_dir, output_path, _args):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text('{"seed": true}', encoding="utf-8")
+        return Path(output_path)
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_run_single_stage_case",
+        fake_run_single_stage_case,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_compile_jax_runtime_seed_spec_from_run_dir",
+        fake_compile_seed_spec,
+    )
+
+    (*_, replay_case) = single_stage_init_parity_module._run_single_stage_case_pair(
+        args,
+        benchmark_mode=False,
+        reference_backend="cpu",
+        reference_benchmark_mode=False,
+        case_root=tmp_path / "case",
+    )
+
+    assert [call["backend"] for call in calls] == ["cpu", "cpu", "jax"]
+    assert calls[2]["replay"] is None
+    assert replay_case is None
+
+
+def test_single_stage_init_public_optimizer_trace_required_for_outer_loop(tmp_path):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "optax-lbfgs"
+    args.maxiter = 1
+
+    assert single_stage_init_parity_module._public_optimizer_trace_required(args) is True
+
+    args.maxiter = 0
+    assert single_stage_init_parity_module._public_optimizer_trace_required(args) is False
+
+    args.maxiter = 1
+    args.optimizer_backend = "ondevice"
+    assert single_stage_init_parity_module._public_optimizer_trace_required(args) is False
 
 
 def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(

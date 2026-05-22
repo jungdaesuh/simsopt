@@ -1,6 +1,9 @@
 import math
 
+import jax
 import numpy as np
+
+from simsopt._core.jax_host_boundary import host_array
 
 
 _ACCEPTED_OPTIMIZER_STATUSES = frozenset({0, 4})
@@ -29,6 +32,8 @@ def sanitize_diagnostic_payload(value):
         return {key: sanitize_diagnostic_payload(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [sanitize_diagnostic_payload(item) for item in value]
+    if isinstance(value, jax.Array):
+        return sanitize_diagnostic_payload(host_array(value))
     if isinstance(value, np.ndarray):
         return sanitize_diagnostic_payload(value.tolist())
     if isinstance(value, np.floating):

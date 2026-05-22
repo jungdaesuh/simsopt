@@ -14330,6 +14330,22 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(sanitized["nested"][0], 2.0)
         self.assertIsNone(sanitized["nested"][1])
 
+    def test_sanitize_diagnostic_payload_materializes_jax_arrays(self):
+        module = load_single_stage_example_module()
+
+        payload = {
+            "scalar": jnp.asarray(1.25, dtype=jnp.float64),
+            "vector": jnp.asarray([1.0, jnp.inf], dtype=jnp.float64),
+        }
+
+        with jax.transfer_guard("disallow"):
+            sanitized = module.sanitize_diagnostic_payload(payload)
+
+        self.assertEqual(sanitized["scalar"], 1.25)
+        self.assertEqual(sanitized["vector"][0], 1.0)
+        self.assertIsNone(sanitized["vector"][1])
+        json.dumps(sanitized, allow_nan=False)
+
     def test_accepted_result_payload_rejects_non_finite_numbers(self):
         module = load_single_stage_example_module()
 

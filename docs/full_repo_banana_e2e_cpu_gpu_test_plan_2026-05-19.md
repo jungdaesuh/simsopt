@@ -734,6 +734,16 @@ single-stage fixture before interpreting larger single-stage outer-loop timing:
 - Optimistix L-BFGS target lane
 - Optax L-BFGS target lane
 
+This matrix has two different contracts. The private on-device and
+SciPy-controlled full-graph lanes are SciPy/SIMSOPT trajectory-parity lanes:
+the final single-stage metrics must match the CPU reference after the same
+outer-iteration budget. The Optax and Optimistix lanes are public optimizer
+comparison lanes: their fixed-candidate objective/gradient contract, strict
+transfer behavior, performance, and memory are recorded, but their free-running
+accepted-step trajectory is not assumed to be identical to SciPy L-BFGS-B
+unless a same-candidate replay proves that the remaining split is optimizer
+control rather than objective/gradient math.
+
 Use a single Slurm job for the matrix. Do not submit one job per backend.
 Each backend rung must run `benchmarks/single_stage_init_parity.py` in
 `--benchmark-mode`, sample `nvidia-smi`, and write a structured summary.
@@ -747,6 +757,10 @@ The target backends are:
 for backend in ondevice scipy-jax-fullgraph optimistix-lbfgs optax-lbfgs; do
   rung_dir="${RESULTS_ROOT}/wave4_gpu_parity/optimizer_matrix/${backend}"
   mkdir -p "${rung_dir}"
+  trace_args=()
+  if [[ "${backend}" == "optax-lbfgs" || "${backend}" == "optimistix-lbfgs" ]]; then
+    trace_args+=(--record-objective-evaluation-trace)
+  fi
   nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used,memory.total \
     --format=csv -l 5 > "${rung_dir}/nvidia_smi_monitor.csv" &
   monitor_pid="$!"
@@ -762,6 +776,7 @@ for backend in ondevice scipy-jax-fullgraph optimistix-lbfgs optax-lbfgs; do
       --maxiter 1 \
       --benchmark-mode \
       --optimizer-backend "${backend}" \
+      "${trace_args[@]}" \
       --equilibria-dir examples/single_stage_optimization/equilibria \
       --case-artifacts-dir "${rung_dir}/cases" \
       --output-json "${rung_dir}/single_stage_optimizer.json"
@@ -773,13 +788,21 @@ done
 
 Acceptance:
 
-- [ ] Every backend rung exits zero and has `passed: true`.
+- [ ] The SciPy-compatible target rungs, `ondevice` and
+  `scipy-jax-fullgraph`, exit zero and have `passed: true`.
 - [ ] The SciPy L-BFGS CPU reference lane is recorded in each rung.
 - [ ] The target backend's recorded optimizer method matches the requested
   public backend contract.
+- [ ] Public optimizer comparison rungs, `optax-lbfgs` and
+  `optimistix-lbfgs`, record strict-transfer status, same-candidate
+  objective/gradient replay when available, final metric deltas, timing, RSS,
+  and GPU memory. A final-metric split is accepted only as an optimizer-control
+  split after same-candidate objective/gradient parity is proven.
 - [ ] Each rung records fixed-state precision metrics, final metric deltas,
   CPU wall time, target wall time, Slurm step `MaxRSS`, `/usr/bin/time -v`
   launcher/process RSS as applicable, and sampled peak GPU memory.
+- [ ] No production GPU signoff depends on a public optimizer backend that
+  fails full strict-transfer execution.
 - [ ] This matrix is a reduced single-stage E2E optimizer-control comparison.
   It is not a substitute for the single-stage `m04n04-i05-useful` and larger
   rungs.
@@ -1156,6 +1179,100 @@ Perlmutter debug proof:
 | `53266208` / `strict-710903` | PASS | Current synced JAXPR-const implementation passed `tests/solve/jax/test_value_grad_contract.py -k gpu_closure_constants_run_under_strict_transfer_guard`: `1 passed, 16 deselected in 3.14s`; backend `gpu`; device `cuda:0`; x64 `True`; elapsed `21s`; pytest wall time `5.40s`; process MaxRSS `1002364 KB`; sampled peak GPU memory `435 MiB` on A100-40GB; exit `0`. |
 | `53266572` / `strict-710903` | PASS | Public `jax.extend.core` JAXPR execution implementation passed `tests/solve/jax/test_value_grad_contract.py -k gpu_closure_constants_run_under_strict_transfer_guard`: `1 passed, 16 deselected in 3.18s`; backend `gpu`; device `cuda:0`; x64 `True`; elapsed `19s`; pytest wall time `5.32s`; process MaxRSS `1002304 KB`; sampled peak GPU memory `435 MiB` on A100-40GB; exit `0`. |
 
+## Current Execution Update: Committed Strict-Transfer Fix at `ebca962d5`
+
+This update records the committed version of the optimizer strict-transfer fix:
+
+- Committed SHA:
+  `ebca962d5d8bb757d1187aa565469c62672acb2f`
+- Commit: `fix: preserve optimizer strict-transfer constants`
+- Remote source archive:
+  `/pscratch/sd/j/jungdae/simsopt-jax-clean-ebca962d5-strict-20260521T215326Z-src`
+- Remote runtime:
+  `/pscratch/sd/j/jungdae/simsopt-jax-runtimes/jax-0.10.0`
+- Local working tree still has unrelated dirt:
+  `conda.recipe/meta.yaml` and `.conda/`.
+
+Current-SHA Perlmutter debug proof:
+
+| Job | Result | Evidence |
+| --- | --- | --- |
+| `53267612` / `strict-ebca962d5` | PASS | Committed Optax LBFGS closure-constant implementation passed `tests/solve/jax/test_value_grad_contract.py -k gpu_closure_constants_run_under_strict_transfer_guard`: `1 passed, 17 deselected in 3.35s`; JAX/JAXLIB/CUDA plugin/PJRT `0.10.0`; backend `gpu`; device `cuda:0`; x64 `True`; Slurm elapsed `20s`; pytest wall time `5.64s`; process MaxRSS `995616 KB`; exit `0`. |
+
+This is a current-SHA GPU strict-transfer proof for the optimizer-layer
+constant residency fix. It is not a replacement for the Wave 4 optimizer
+backend matrix or the larger single-stage GPU proof rungs.
+
+Current-SHA Wave 4 optimizer backend matrix:
+
+| Job | State | Evidence |
+| --- | --- | --- |
+| `53268207` / `optbench-ebca962d5` | FAILED | Single shared-GPU job ran against source archive `/pscratch/sd/j/jungdae/simsopt-jax-clean-ebca962d5-strict-20260521T215326Z-src` and runtime `/pscratch/sd/j/jungdae/simsopt-jax-runtimes/jax-0.10.0`. Environment recorded JAX/JAXLIB/CUDA plugin/PJRT `0.10.0`, Optax `0.2.8`, Optimistix `0.1.0`, Equinox `0.13.8`, backend `gpu`, device `cuda:0`, x64 `True`, NVIDIA driver `580.105.08`, CUDA `13.0`. The Slurm job failed overall because the public optimizer comparison rungs did not satisfy their current gates, but both SciPy-compatible target lanes passed production trajectory parity. |
+
+Per-rung Wave 4 matrix results:
+
+| Backend | Exit | Pass | Final metric parity | Slurm step RSS | GPU peak | Timing |
+| --- | ---: | --- | --- | ---: | ---: | --- |
+| `ondevice` | `0` | PASS | `iota=2.54e-17`, `volume=1.11e-15`, `field=5.06e-15`, `curvature=1.51e-14` | `15082756K` | `1693 MiB / 40960 MiB` | CPU `13.75s`; JAX `1413.17s`; optimizer `1239.85s`; Boozer solve `39.22s`; Slurm step `24:14` |
+| `scipy-jax-fullgraph` | `0` | PASS | `iota=4.66e-17`, `volume=5.56e-16`, `field=7.88e-16`, `curvature=1.47e-14` | `4164872K` | `1483 MiB / 40960 MiB` | CPU `13.66s`; JAX `622.23s`; optimizer `383.20s`; Boozer solve `24.97s`; Slurm step `10:58` |
+| `optimistix-lbfgs` | `1` | FAIL | no final JSON; failed before artifact write | `4083744K` | `1471 MiB / 40960 MiB` | Slurm step `7:33` |
+| `optax-lbfgs` | `1` | FAIL | `iota=3.55e-05`, `volume=1.98e-04`, `field=1.56e-01`, `curvature=3.47e-01` | `5376264K` | `1497 MiB / 40960 MiB` | CPU `13.55s`; JAX `1023.69s`; optimizer `860.96s`; Boozer solve `27.94s`; Slurm step `17:39` |
+
+The `optax-lbfgs` failed final-state parity after one outer iteration:
+CPU/SIMSOPT L-BFGS-B produced `FINAL_IOTA=0.001445580130964724`,
+`FINAL_VOLUME=0.09989701364124072`,
+`FIELD_ERROR=0.0019267414500637196`, and
+`MAX_CURVATURE=15.67283188282475`; Optax produced
+`FINAL_IOTA=0.0014811217638137767`,
+`FINAL_VOLUME=0.0998772011774527`,
+`FIELD_ERROR=0.0022273458279302534`, and
+`MAX_CURVATURE=21.114297209987548`. This is not, by itself, evidence of a
+physics or objective-gradient bug; it is a free-running optimizer-control split
+until a same-candidate replay proves or falsifies the fixed-candidate math.
+
+Focused optimizer-library strict-transfer probes:
+
+| Job | Result | Evidence |
+| --- | --- | --- |
+| `53270528` / `optlib2-ebca962d5` | COMPLETED | Corrected current-source probe removed the stale editable-install redirect and imported `/pscratch/sd/j/jungdae/simsopt-jax-clean-ebca962d5-strict-20260521T215326Z-src/src/simsopt/__init__.py`. Backend `gpu`, device `cuda:0`, JAX `0.10.0`, Optax `0.2.8`, Optimistix `0.1.0`, Equinox `0.13.8`. Repo Optax supplied-gradient LBFGS under full `jax.transfer_guard("disallow")` completed one step without transfer failure (`ok=True`, `nit=1`, `fun=1.527864045000421`). Repo Optimistix supplied-gradient LBFGS failed full strict transfer with `Disallowed device-to-host transfer: shape=(), dtype=PRED, device=cuda:0`. A direct Optimistix AD-valued minimize also failed full strict transfer with `Disallowed host-to-device transfer: aval=ShapedArray(bool[])`. |
+
+Focused Optax same-candidate replay:
+
+| Job | State | Evidence |
+| --- | --- | --- |
+| `53270745` / `optax-replay-ebca962d5` | HARNESS FAIL | First replay harness ran against the clean source archive but omitted `SIMSOPT_REPO_SHA` and `SIMSOPT_GIT_STATUS_SHORT`. Because the archive is not a Git checkout, `benchmarks/validation_ladder_common.py` failed at provenance collection before physics execution: `git -C ... rev-parse HEAD` returned `128`. Result root: `/pscratch/sd/j/jungdae/simsopt-jax-results/ebca962d5-optax-same-candidate-replay-20260521T234331Z`; Slurm step `00:02`; no benchmark JSON. |
+| `53270856` / `optax-replay-ebca962d5` | INSTRUMENTATION FAIL | Corrected provenance and reached the target Optax replay path, but failed while writing `outer_optimizer_progress.json`: the objective-evaluation trace payload contained a JAX `ArrayImpl`, and `json.dump` rejected it as not JSON serializable. Result root: `/pscratch/sd/j/jungdae/simsopt-jax-results/ebca962d5-optax-same-candidate-replay-20260521T234726Z-provenance`; Slurm step `7:12`; Python MaxRSS `4293920K`; sampled GPU peak `1471 MiB / 40960 MiB`; no benchmark JSON. Local fix: `examples/single_stage_optimization/hardware_constraints.py` now materializes JAX arrays through the explicit host boundary in `sanitize_diagnostic_payload`; focused regression `python -m pytest -q tests/geo/test_single_stage_example.py -k 'sanitize_diagnostic_payload'` passes (`2 passed, 349 deselected`). |
+| `53271080` / `optax-replay-jsonfix` | HARNESS FAIL | JSON serialization fix worked past the previous callback failure, then the benchmark tried to force exact `--replay-objective-evaluation-trace` through the native Optax target-lane path. The single-stage script correctly rejected that unsupported mode with `--replay-objective-evaluation-trace requires the host-dispatched adapter objective path.` Result root: `/pscratch/sd/j/jungdae/simsopt-jax-results/ebca962d5-optax-same-candidate-replay-jsonfix-20260522T000154Z`; Slurm step `7:08`; Python MaxRSS `4552576K`; sampled GPU peak `1471 MiB / 40960 MiB`; no benchmark JSON. Local fix: `benchmarks/single_stage_init_parity.py` now runs exact replay only for `scipy-jax-fullgraph`; public L-BFGS target lanes use the existing trace-vs-trace comparison path. Focused regression `python -m pytest -q tests/test_benchmark_helpers.py -k 'case_pair_replays_reference_trace_before_jax_fullgraph or case_pair_skips_exact_replay_for_public_lbfgs or same_candidate'` passes (`16 passed, 267 deselected`). |
+| `53272435` / `optax-trace-harnessfix` | OLD-GATE FAIL / TRACE PASS | Replay/trace rerun against patched source copy `/pscratch/sd/j/jungdae/simsopt-jax-clean-ebca962d5-optax-trace-harnessfix-20260522T001400Z-src` completed with Slurm elapsed `22:10`; Python step failed in `21:54` with step MaxRSS `5592436K` and sampled GPU peak `1495 MiB / 81920 MiB`. The benchmark JSON had `passed: false` only because the old final-metric gate still hard-failed `iota=3.55e-05`, `volume=1.98e-04`, and `field=1.56e-01`. The trace evidence passed: `same_candidate_replay.status=pass`, `failures=[]`, `max_objective_abs_diff=0.0`, `max_optimizer_gradient_abs_diff=9.59e-14`, and `comparison.optimizer_path_split_kind=optimizer_acceptance_split_after_same_candidate_parity`. Timings: CPU `15.81s`, JAX `1272.40s`, JAX optimizer `1103.99s`, optimizer main `826.10s`, Boozer total `44.32s`. Result root: `/pscratch/sd/j/jungdae/simsopt-jax-results/ebca962d5-optax-same-candidate-trace-harnessfix-20260522T004729Z`. This run predates the final public-optimizer acceptance-contract patch, so it is evidence for trace execution but not final evidence for the updated pass/fail semantics. |
+| `53273813` / `optax-public-accept` | LAUNCHER FAIL | First debug rerun failed in `00:06` before environment capture or physics execution. Root cause was sbatch-generation quoting: `SIMSOPT_GIT_STATUS_SHORT=$'...'` was expanded while generating the script, so `set -u` saw an unbound `$M` on line 25. This is not a JAX/SIMSOPT/physics failure. Result root: `/pscratch/sd/j/jungdae/simsopt-jax-results/ebca962d5-optax-public-acceptance-20260522T012600Z`. |
+| `53273985` / `optax-public-accept` | PASS | Corrected debug rerun with literal heredoc quoting for `SIMSOPT_GIT_STATUS_SHORT`. Current local patched files were synced to `/pscratch/sd/j/jungdae/simsopt-jax-clean-ebca962d5-optax-public-acceptance-20260522T011500Z-src`; SHA-256 hashes match local for `benchmarks/single_stage_init_parity.py`, `examples/single_stage_optimization/hardware_constraints.py`, `tests/test_benchmark_helpers.py`, `tests/geo/test_single_stage_example.py`, and this plan doc. Result root: `/pscratch/sd/j/jungdae/simsopt-jax-results/ebca962d5-optax-public-acceptance-20260522T013000Z`. Slurm elapsed `21:08`; Python step elapsed `20:53`, MaxRSS `5671632K`; sampled GPU peak `1497 MiB / 40960 MiB`; `/usr/bin/time` launcher wall `20:52.85`. Benchmark summary: `run_exit=0`, `passed=true`, `failures=[]`, `same_candidate_replay.status=pass`, `same_candidate_replay.failures=[]`, `max_objective_abs_diff=0.0`, `max_optimizer_gradient_abs_diff=9.59e-14`, `optimizer_path_objective_evaluations.status=split`, `comparison.final_metric_split_accepted=true`, and `comparison.final_metric_parity_required=false`. Timings: CPU `15.15s`, JAX `1213.61s`, JAX optimizer `1058.05s`, optimizer main `781.31s`, Boozer total `37.65s`. |
+
+Local review and validation for the current public-optimizer acceptance patch:
+
+| Check | Result |
+| --- | --- |
+| `python -m pytest -q tests/test_benchmark_helpers.py -k 'single_stage_init_parity_can_defer_public_optimizer_final_metrics or single_stage_init_public_optimizer_final_metric_drift_needs_path_split or single_stage_init_public_optimizer_trace_required_for_outer_loop or case_pair_replays_reference_trace_before_jax_fullgraph or case_pair_skips_exact_replay_for_public_lbfgs or same_candidate'` | PASS: `19 passed, 267 deselected in 2.89s` |
+| `python -m pytest -q tests/geo/test_single_stage_example.py -k 'sanitize_diagnostic_payload'` | PASS: `2 passed, 349 deselected in 2.99s` |
+| `python -m py_compile benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py examples/single_stage_optimization/hardware_constraints.py tests/geo/test_single_stage_example.py examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py` | PASS |
+| `git diff --check -- benchmarks/single_stage_init_parity.py docs/full_repo_banana_e2e_cpu_gpu_test_plan_2026-05-19.md examples/single_stage_optimization/hardware_constraints.py tests/geo/test_single_stage_example.py tests/test_benchmark_helpers.py` | PASS |
+| Reviewer subagent `019e4d39-640e-7db3-951e-77a3678e8167` | PASS: prior findings fixed; public Optax/Optimistix rungs require trace evidence and only accept final metric drift after same-candidate objective/gradient parity plus optimizer-path split; Wave 4 command passes `--record-objective-evaluation-trace` for public optimizer rungs. |
+
+Official-docs check for the optimizer backend interpretation:
+
+- Context7 Optax docs for `/google-deepmind/optax` describe `optax.lbfgs`
+  as a quasi-Newton optimizer whose default line search is
+  `optax.scale_by_zoom_linesearch`; that line search performs extra objective
+  calls and has independent line-search parameters. Therefore Optax L-BFGS is
+  not an exact SciPy L-BFGS-B trajectory oracle.
+- Context7 Optimistix docs for `/patrick-kidger/optimistix` describe
+  `optimistix.minimise` as automatically JIT-compiled through
+  `eqx.filter_jit`, matching the observed strict-transfer failure path through
+  Optimistix/Equinox/JAX lowering.
+- Context7 JAX docs for `/google/jax` confirm transfer guards disallow
+  implicit host/device transfers and that closed-over JAX arrays participate in
+  tracing/lowering as constants, matching the closure-constant residency work
+  already proven by job `53267612`.
+
 ## Slurm Execution Policy
 
 - [ ] Source checkout and modest environment setup may happen on login nodes;
@@ -1164,6 +1281,9 @@ Perlmutter debug proof:
 - [ ] CPU full tests run on CPU compute nodes, not login nodes.
 - [ ] Every Slurm job script uses `set -euo pipefail` before any command that
   pipes test/proof output through `tee`.
+- [ ] Jobs launched from a clean source archive without `.git` export
+  `SIMSOPT_REPO_SHA` and `SIMSOPT_GIT_STATUS_SHORT` so benchmark provenance
+  does not call `git rev-parse` inside a non-Git archive.
 - [ ] GPU preflight/proofs run under `shared` QOS with `--gpus-per-task=1`.
 - [ ] GPU jobs use `JAX_PLATFORMS=cuda,cpu`; CUDA must stay first and must be
   the recorded default backend.

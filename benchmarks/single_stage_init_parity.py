@@ -133,6 +133,12 @@ _TARGET_OPTIMIZER_METHOD_BY_BACKEND = {
     OPTAX_LBFGS_OPTIMIZER_BACKEND: "optax-lbfgs-ondevice",
     OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND: "optimistix-lbfgs-ondevice",
 }
+_EXACT_SAME_CANDIDATE_REPLAY_BACKENDS = frozenset(
+    {SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND}
+)
+_PUBLIC_OPTIMIZER_COMPARISON_BACKENDS = frozenset(
+    {OPTAX_LBFGS_OPTIMIZER_BACKEND, OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND}
+)
 _TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON = (
     "compile diagnostics are disabled when Phase 1 host-callback diagnostics "
     "are enabled because that mode does not provide normal cache-reuse evidence"
@@ -1089,6 +1095,25 @@ def _namespace_with_overrides(
     return argparse.Namespace(**values)
 
 
+def _should_run_exact_same_candidate_replay(args: argparse.Namespace) -> bool:
+    return (
+        bool(getattr(args, "record_objective_evaluation_trace", False))
+        and int(args.maxiter) > 0
+        and args.optimizer_backend in _EXACT_SAME_CANDIDATE_REPLAY_BACKENDS
+    )
+
+
+def _is_public_optimizer_comparison_backend(optimizer_backend: str) -> bool:
+    return optimizer_backend in _PUBLIC_OPTIMIZER_COMPARISON_BACKENDS
+
+
+def _public_optimizer_trace_required(args: argparse.Namespace) -> bool:
+    return (
+        int(args.maxiter) > 0
+        and _is_public_optimizer_comparison_backend(args.optimizer_backend)
+    )
+
+
 def _run_single_stage_case_pair(
     args: argparse.Namespace,
     *,
@@ -1167,10 +1192,7 @@ def _run_single_stage_case_pair(
                 case_root / "single_stage_jax_runtime_seed_spec.json",
                 args,
             )
-    if (
-        bool(getattr(args, "record_objective_evaluation_trace", False))
-        and int(args.maxiter) > 0
-    ):
+    if _should_run_exact_same_candidate_replay(args):
         same_candidate_replay_case = _run_single_stage_case(
             target_args,
             "jax",
@@ -2973,6 +2995,38 @@ def _append_nonfinite_outer_loop_failures(
             )
 
 
+def _final_metric_parity_failures(comparison: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if comparison["final_iota_abs_diff"] >= IOTA_ABS_TOL:
+        failures.append(
+            f"Final iota disagreement too large: {comparison['final_iota_abs_diff']:.2e}"
+        )
+    if comparison["final_volume_rel_diff"] >= VOLUME_REL_TOL:
+        failures.append(
+            "Final volume relative difference too large: "
+            f"{comparison['final_volume_rel_diff']:.2e}"
+        )
+    if comparison["field_error_rel_diff"] >= FIELD_ERROR_REL_TOL:
+        failures.append(
+            "Final field error relative difference too large: "
+            f"{comparison['field_error_rel_diff']:.2e}"
+        )
+    return failures
+
+
+def _optimizer_control_split_accepts_final_metric_drift(
+    *,
+    same_candidate_replay: dict[str, Any] | None,
+    optimizer_path_objective_evaluations: dict[str, Any] | None,
+) -> bool:
+    return (
+        same_candidate_replay is not None
+        and same_candidate_replay["status"] == "pass"
+        and optimizer_path_objective_evaluations is not None
+        and optimizer_path_objective_evaluations["status"] == "split"
+    )
+
+
 def evaluate_single_stage_init_parity(
     cpu_results: dict[str, Any],
     jax_results: dict[str, Any],
@@ -2981,6 +3035,7 @@ def evaluate_single_stage_init_parity(
     max_surface_geometry_rel: float,
     maxiter: int = DEFAULT_OUTER_MAXITER,
     expected_jax_outer_optimizer_method: str = _TARGET_OUTER_OPTIMIZER_METHOD,
+    require_final_metric_parity: bool = True,
 ) -> tuple[dict[str, Any], list[str]]:
     comparison = {
         "final_iota_abs_diff": abs(
@@ -3020,21 +3075,13 @@ def evaluate_single_stage_init_parity(
         "jax_finite_result_keys": _finite_required_result_keys(jax_results),
     }
 
+    final_metric_failures = _final_metric_parity_failures(comparison)
+    comparison["final_metric_parity_required"] = bool(require_final_metric_parity)
+    comparison["final_metric_parity_failures"] = final_metric_failures
+
     failures: list[str] = []
-    if comparison["final_iota_abs_diff"] >= IOTA_ABS_TOL:
-        failures.append(
-            f"Final iota disagreement too large: {comparison['final_iota_abs_diff']:.2e}"
-        )
-    if comparison["final_volume_rel_diff"] >= VOLUME_REL_TOL:
-        failures.append(
-            "Final volume relative difference too large: "
-            f"{comparison['final_volume_rel_diff']:.2e}"
-        )
-    if comparison["field_error_rel_diff"] >= FIELD_ERROR_REL_TOL:
-        failures.append(
-            "Final field error relative difference too large: "
-            f"{comparison['field_error_rel_diff']:.2e}"
-        )
+    if require_final_metric_parity:
+        failures.extend(final_metric_failures)
     if comparison["max_surface_pointwise_rel"] >= SURFACE_GEOMETRY_REL_TOL:
         failures.append(
             "Initial Boozer surface geometry drift too large: "
@@ -3221,6 +3268,7 @@ def main() -> None:
         expected_jax_outer_optimizer_method=_expected_target_outer_optimizer_method(
             args.optimizer_backend
         ),
+        require_final_metric_parity=not _public_optimizer_trace_required(args),
     )
     optimizer_state_trace_parity = None
     same_candidate_replay = None
@@ -3247,6 +3295,26 @@ def main() -> None:
             comparison["optimizer_path_split_kind"] = (
                 "optimizer_acceptance_split_after_same_candidate_parity"
             )
+    if _public_optimizer_trace_required(args):
+        final_metric_failures = comparison["final_metric_parity_failures"]
+        if not bool(args.record_objective_evaluation_trace):
+            failures.append(
+                "Public optimizer comparison rungs require "
+                "--record-objective-evaluation-trace to record the "
+                "same-candidate objective/gradient gate."
+            )
+            failures.extend(final_metric_failures)
+        elif final_metric_failures:
+            if _optimizer_control_split_accepts_final_metric_drift(
+                same_candidate_replay=same_candidate_replay,
+                optimizer_path_objective_evaluations=optimizer_path_objective_evaluations,
+            ):
+                comparison["final_metric_split_accepted"] = True
+                comparison["accepted_final_metric_parity_failures"] = (
+                    final_metric_failures
+                )
+            else:
+                failures.extend(final_metric_failures)
     if int(args.maxiter) > 0 and args.reference_optimizer_method == "lbfgs-trace":
         optimizer_state_trace_parity = _compare_case_optimizer_state_traces(
             cpu_case,
