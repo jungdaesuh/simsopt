@@ -422,7 +422,7 @@ export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
 
 mkdir -p "${RESULTS_ROOT}/wave2_gpu_preflight"
 
@@ -487,7 +487,7 @@ export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
 ```
 
 Commands:
@@ -557,7 +557,7 @@ export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export JAX_PLATFORMS=cuda,cpu
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
 
 python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
   --lanes cpu_cpp,jax_gpu \
@@ -638,7 +638,7 @@ export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
 
 run_single_stage_ladder_rung() {
   local rung="$1"
@@ -831,7 +831,7 @@ export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
 
 python benchmarks/stage2_e2e_comparison.py \
   --platform cuda \
@@ -883,7 +883,7 @@ export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
 
 python benchmarks/tier5_performance_characterization.py \
   --platform cuda \
@@ -942,7 +942,7 @@ export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_BENCHMARK_JAX_VERSION=0.10.0
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
 
 python benchmarks/gpu_run_code_benchmark.py \
   --backend ondevice \
@@ -1310,8 +1310,14 @@ Current open current-SHA jobs:
 
 | Job | Purpose | QOS / partition | State at latest audit |
 | --- | --- | --- | --- |
-| `53275983` / `cpu-w0w1-7750` | Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs, with per-step `/usr/bin/time -v` records. | CPU `shared` / `shared_milan_ss11` | `PENDING (Priority)` |
-| `53276949` / `gpu-w4core-7750` | Wave 4 core GPU proof job: Stage 2 CUDA, Stage 2 geometry repro, single-stage CUDA init, and single-stage ladder rungs through `m04n04-i05-useful`, with per-step timing, RSS, and `nvidia-smi` monitor records. Non-banana GPU follow-up is deferred until `53275983` produces the CPU baseline JSON. | GPU `shared` / `shared_gpu_ss11` | `PENDING (Priority)` |
+| `53275983` / `cpu-w0w1-7750` | Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs, with per-step `/usr/bin/time -v` records. | CPU `shared` / `shared_milan_ss11` | `RUNNING` on `nid004087`; currently in `import_smoke` at `2026-05-22T03:20:50Z`; no exitcode yet; Slurm step MaxRSS `10194544K`. |
+| `53276949` / `gpu-w4core-7750` | Wave 4 core GPU proof job: Stage 2 CUDA, Stage 2 geometry repro, single-stage CUDA init, and single-stage ladder rungs through `m04n04-i05-useful`, with per-step timing, RSS, and `nvidia-smi` monitor records. Non-banana GPU follow-up is deferred until `53275983` produces the CPU baseline JSON. | GPU `shared` / `shared_gpu_ss11` | `RUNNING` on `nid008641`; currently in `stage2_cuda_e2e` at `2026-05-22T03:20:50Z`; no JSON/exitcode yet; Slurm step MaxRSS `40648816K`; sampled GPU memory `1085 MiB / 81920 MiB`. |
+
+Next GPU submissions after `53276949` must run with
+`XLA_PYTHON_CLIENT_PREALLOCATE=true`. The currently running `53276949` job was
+launched with `XLA_PYTHON_CLIENT_PREALLOCATE=false`, so its timing and memory
+records are interpreted as the no-preallocation baseline rather than the
+preallocated-memory rerun.
 
 Official-docs check for this current-SHA run:
 
