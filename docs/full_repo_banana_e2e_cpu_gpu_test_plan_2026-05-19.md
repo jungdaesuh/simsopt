@@ -1273,6 +1273,61 @@ Official-docs check for the optimizer backend interpretation:
   tracing/lowering as constants, matching the closure-constant residency work
   already proven by job `53267612`.
 
+## Current Execution Update: Clean Committed SHA `7750e34d8`
+
+This update records the clean current-SHA rerun after committing the public
+optimizer parity contract.
+
+- Committed SHA:
+  `7750e34d824a72858e1c4d52efcc379d40b1f9de`
+- Commit: `fix: align public optimizer parity contract`
+- Remote source archive:
+  `/pscratch/sd/j/jungdae/simsopt-jax-clean-7750e34d82-20260522T020608Z-src`
+- Remote runtime:
+  `/pscratch/sd/j/jungdae/simsopt-jax-runtimes/jax-0.10.0`
+- Local working tree still has unrelated dirt:
+  `conda.recipe/meta.yaml` and `.conda/`.
+
+Runtime install/provenance correction:
+
+| Job | Result | Evidence |
+| --- | --- | --- |
+| `53275710` / `inst2-7750` | PASS | Installed missing build-system packages `scikit-build-core` and `setuptools_scm`, then rebuilt the runtime editable install as `simsopt-0.1.dev1886+g7750e34d82` from the clean source archive. Import verification records `simsopt.__file__ == /pscratch/sd/j/jungdae/simsopt-jax-clean-7750e34d82-20260522T020608Z-src/src/simsopt/__init__.py`, `jax==0.10.0`, `jaxlib==0.10.0`, backend `cpu`, and `simsoptpp` from the runtime extension path. Slurm elapsed `3:18`; batch MaxRSS `10179604K`. |
+
+Current-SHA Wave 2 GPU preflight:
+
+| Job | Result | Evidence |
+| --- | --- | --- |
+| `53276043` / `gpu-pre-7750` | PASS | JAX/JAXLIB/CUDA plugin/PJRT all `0.10.0`; backend `gpu`; device `cuda:0`; x64 `true`; `SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled`; `XLA_FLAGS` includes `--xla_gpu_exclude_nondeterministic_ops=true`; `simsopt` imports from the clean `7750e34d8` source archive; `nvidia-smi` records an A100-SXM4-40GB with NVIDIA driver `580.105.08` and visible CUDA `13.0`. Slurm elapsed `15s`; timed preflight wall `0:08.32`; process MaxRSS `749332 KB`; GPU memory before probe `0 MiB / 40960 MiB`. |
+
+Current-SHA Wave 3 GPU pytest slices:
+
+| Job | Result | Evidence |
+| --- | --- | --- |
+| `53276235` / `gpu-w3-7750` | PASS | Ran against the clean `7750e34d8` source archive and current `jax-0.10.0` runtime. GPU runtime smoke passed `6 passed in 197.47s`; grouped collective lowering control passed `1 passed in 32.90s`; real-fixture GPU M5 parity class passed `3 passed in 92.91s`. Slurm elapsed `5:48`; overall exit `0`; Slurm step MaxRSS values were `4658772K`, `1190036K`, and `2397356K`; per-step `/usr/bin/time -v` MaxRSS values were `3499948 KB`, `1079592 KB`, and `2793800 KB`. Before/after `nvidia-smi` records show 4x A100-SXM4-40GB visible with `0 MiB / 40960 MiB` retained memory after teardown. |
+
+Current open current-SHA jobs:
+
+| Job | Purpose | QOS / partition | State at latest audit |
+| --- | --- | --- | --- |
+| `53275983` / `cpu-w0w1-7750` | Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs, with per-step `/usr/bin/time -v` records. | CPU `shared` / `shared_milan_ss11` | `PENDING (Priority)` |
+| `53276949` / `gpu-w4core-7750` | Wave 4 core GPU proof job: Stage 2 CUDA, Stage 2 geometry repro, single-stage CUDA init, and single-stage ladder rungs through `m04n04-i05-useful`, with per-step timing, RSS, and `nvidia-smi` monitor records. Non-banana GPU follow-up is deferred until `53275983` produces the CPU baseline JSON. | GPU `shared` / `shared_gpu_ss11` | `PENDING (Priority)` |
+
+Official-docs check for this current-SHA run:
+
+- Context7 JAX docs for `/google/jax` state that JAX dispatch is asynchronous
+  and performance timing must wait for results with `.block_until_ready()` or
+  an equivalent synchronization. The current plan therefore treats benchmark
+  script timings and Slurm `/usr/bin/time -v` records as process-level evidence,
+  while lower-level JAX microbenchmarks must synchronize explicitly.
+- NERSC job-policy documentation was checked for QOS selection. The current
+  run uses `debug` only for short GPU preflight/pytest canaries and CPU
+  `shared` for the longer Wave 0/1 baseline.
+- NVIDIA CUDA best-practices documentation was checked for host/device transfer
+  interpretation; unnecessary host-device transfers remain a performance smell,
+  and strict-transfer failures are treated as correctness issues for GPU-pure
+  proof lanes.
+
 ## Slurm Execution Policy
 
 - [ ] Source checkout and modest environment setup may happen on login nodes;
