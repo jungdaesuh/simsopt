@@ -1367,9 +1367,12 @@ Submitted replacement jobs:
 
 | Job | Purpose | QOS / partition | State at submission |
 | --- | --- | --- | --- |
-| `53279137` / `inst-c2f59` | Reinstall runtime editable package from the clean `c2f59c427f` archive and verify `simsopt.__file__` points at that archive. | CPU `shared` / `shared_milan_ss11` | `PENDING (Priority)` |
-| `53279138` / `cpu-w0w1-c2f59` | Rerun Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs. | CPU `shared` / `shared_milan_ss11` | `PENDING (Dependency)` on `53279137` |
-| `53279139` / `gpu-w4pre-c2f59` | Rerun Wave 4 core GPU proof with `XLA_PYTHON_CLIENT_PREALLOCATE=true`, Stage 2 CUDA, geometry repro, single-stage CUDA init, and ladder rungs through `m04n04-i05-useful`. | GPU `shared` / `shared_gpu_ss11` | `PENDING (Dependency)` on `53279137`; requested `--mem-per-gpu=110G`. |
+| `53279137` / `inst-c2f59` | Superseded install/provenance job. | CPU `shared` / `shared_milan_ss11` | CANCELED before start; short install work belongs in debug. |
+| `53279138` / `cpu-w0w1-c2f59` | Superseded CPU rerun dependent on `53279137`. | CPU `shared` / `shared_milan_ss11` | CANCELED before start. |
+| `53279139` / `gpu-w4pre-c2f59` | Superseded GPU rerun dependent on `53279137`. | GPU `shared` / `shared_gpu_ss11` | CANCELED before start. |
+| `53279392` / `instdbg-c2f59` | Reinstall runtime editable package from the clean `c2f59c427f` archive and verify `simsopt.__file__` points at that archive. | CPU `debug` / `regular_milan_ss11` | `PENDING (Priority)`; no start estimate at latest audit. |
+| `53279393` / `cpu-w0w1-c2f59` | Rerun Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs. | CPU `shared` / `shared_milan_ss11` | `PENDING (Dependency)` on `53279392`. |
+| `53279394` / `gpu-w4pre-c2f59` | Rerun Wave 4 core GPU proof with `XLA_PYTHON_CLIENT_PREALLOCATE=true`, Stage 2 CUDA, geometry repro, single-stage CUDA init, and ladder rungs through `m04n04-i05-useful`. | GPU `shared` / `shared_gpu_ss11` | `PENDING (Dependency)` on `53279392`; requested `--mem-per-gpu=110G`. |
 
 Official-docs check for the rerun:
 
