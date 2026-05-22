@@ -1334,6 +1334,56 @@ Official-docs check for this current-SHA run:
   and strict-transfer failures are treated as correctness issues for GPU-pure
   proof lanes.
 
+## Current Rerun Update: Clean Committed SHA `c2f59c427f`
+
+This update supersedes the open `7750e34d8` jobs after two concrete run issues:
+
+- CPU `53275983` failed `import_smoke` because the previous source archive
+  contained macOS AppleDouble metadata files such as `.__bfgs.py`; the private
+  optimizer source-scan test treated those binary metadata files as Python
+  source. Commit `c2f59c427f` fixes the scanner to inspect visible Python
+  source files only and adds a binary hidden-metadata regression.
+- GPU `53276949` failed the first required Wave 4 step,
+  `stage2_cuda_e2e`, with Slurm `OUT_OF_MEMORY` at MaxRSS `58474700K`
+  against a `57472M` allocation. That run used
+  `XLA_PYTHON_CLIENT_PREALLOCATE=false`; it is retained as the no-preallocation
+  host-memory baseline, not as a failed physics/parity artifact.
+
+The replacement source archive was built with `git archive` for the main repo
+and each submodule to avoid carrying local filesystem metadata:
+
+- Committed SHA:
+  `c2f59c427fc5489a396d61141ffe95ec860df6e3`
+- Commit: `test: ignore hidden metadata in source scan`
+- Remote source archive:
+  `/pscratch/sd/j/jungdae/simsopt-jax-clean-c2f59c427f-20260522T033739Z-src`
+- Archive verification: `src/simsopt/__init__.py` exists,
+  `thirdparty/pybind11/CMakeLists.txt` exists, and no `.__*` or `._*`
+  files are present.
+- Local working tree still has unrelated dirt:
+  `conda.recipe/meta.yaml` and `.conda/`.
+
+Submitted replacement jobs:
+
+| Job | Purpose | QOS / partition | State at submission |
+| --- | --- | --- | --- |
+| `53279137` / `inst-c2f59` | Reinstall runtime editable package from the clean `c2f59c427f` archive and verify `simsopt.__file__` points at that archive. | CPU `shared` / `shared_milan_ss11` | `PENDING (Priority)` |
+| `53279138` / `cpu-w0w1-c2f59` | Rerun Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs. | CPU `shared` / `shared_milan_ss11` | `PENDING (Dependency)` on `53279137` |
+| `53279139` / `gpu-w4pre-c2f59` | Rerun Wave 4 core GPU proof with `XLA_PYTHON_CLIENT_PREALLOCATE=true`, Stage 2 CUDA, geometry repro, single-stage CUDA init, and ladder rungs through `m04n04-i05-useful`. | GPU `shared` / `shared_gpu_ss11` | `PENDING (Dependency)` on `53279137`; requested `--mem-per-gpu=110G`. |
+
+Official-docs check for the rerun:
+
+- Context7 JAX docs for `/google/jax` state that
+  `XLA_PYTHON_CLIENT_PREALLOCATE=false` disables JAX's default GPU memory
+  preallocation and allocates GPU memory on demand. The replacement GPU run
+  intentionally uses `XLA_PYTHON_CLIENT_PREALLOCATE=true` to restore
+  preallocation for the next proof lane.
+- NERSC Perlmutter running-jobs documentation says 1-GPU jobs should use
+  `shared` QOS, shows the 1-node/1-task/1-GPU header with `-c 32` and
+  `--gpus-per-task=1`, and gives `--mem-per-gpu` as the way to size memory
+  for single-GPU shared steps. A Slurm `sbatch --test-only` probe accepted the
+  replacement GPU header with `--mem-per-gpu=110G`.
+
 ## Slurm Execution Policy
 
 - [ ] Source checkout and modest environment setup may happen on login nodes;
