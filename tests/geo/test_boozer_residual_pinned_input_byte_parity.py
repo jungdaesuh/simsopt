@@ -53,6 +53,8 @@ from typing import Any
 import numpy as np
 import pytest
 
+from .boozer_derivative_test_helpers import write_synthetic_outer_optimizer_progress
+
 
 pytestmark = [pytest.mark.parity_census, pytest.mark.boozer]
 
@@ -129,8 +131,13 @@ def canonical_bundle_dir(tmp_path_factory, repo_root_on_sys_path):  # noqa: ARG0
     bundle_root = tmp_path_factory.mktemp("residual_pinned")
     artifact_dir = bundle_root / "artifact"
     dump_dir = bundle_root / "dump"
+    candidate_source = write_synthetic_outer_optimizer_progress(
+        bundle_root / "outer_optimizer_progress.json"
+    )
     rc = main(
         [
+            "--candidate-source",
+            str(candidate_source),
             "--dump-arrays",
             str(artifact_dir),
             "--census",

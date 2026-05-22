@@ -93,7 +93,7 @@ def taylor_test(obj):
     df = obj.dJ()
     dfh = np.sum(df * h)
     err_old = 1e9
-    for i in range(5, 11):
+    for i in range(4, 10):
         eps = 0.5**i
         obj.x = x + 3 * eps * h
         obj.x = x + 2 * eps * h

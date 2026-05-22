@@ -25,6 +25,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from .boozer_derivative_test_helpers import write_synthetic_outer_optimizer_progress
+
 
 pytestmark = [
     pytest.mark.parity_census,
@@ -349,8 +351,13 @@ def npy_bundle_dir(tmp_path_factory):
     bundle = tmp_path_factory.mktemp("npy_bundle")
     artifact_dir = bundle / "artifact"
     dump_dir = bundle / "dump"
+    candidate_source = write_synthetic_outer_optimizer_progress(
+        bundle / "outer_optimizer_progress.json"
+    )
     rc = main(
         [
+            "--candidate-source",
+            str(candidate_source),
             "--dump-arrays",
             str(artifact_dir),
             "--census",

@@ -65,6 +65,10 @@ def _force_jax_backend(monkeypatch):
     monkeypatch.setattr(tracing_module, "is_jax_backend", lambda: True)
 
 
+def _force_cpu_backend(monkeypatch):
+    monkeypatch.setattr(tracing_module, "is_jax_backend", lambda: False)
+
+
 def test_event_hits_prefix_rejects_overflowing_jax_result():
     hits = np.zeros((2, 5), dtype=np.float64)
     with pytest.raises(RuntimeError, match="recorded 3 event rows"):
@@ -87,9 +91,15 @@ def test_compute_fieldlines_jax_warns_on_step_budget_exhaustion(monkeypatch, cap
     import simsopt.jax_core.tracing as jax_tracing
 
     def exhausted_trace_fieldlines(
-        _spec, _y0s, _dtmaxs, _field_fn, phis=None, stopping_criteria=()
+        _spec,
+        _y0s,
+        _dtmaxs,
+        _field_fn,
+        phis=None,
+        stopping_criteria=(),
+        magnetic_field_state=None,
     ):
-        del phis, stopping_criteria
+        del phis, stopping_criteria, magnetic_field_state
         return FieldlineTracingResult(
             trajectory=jnp.asarray(
                 [[[0.0, 1.0, 0.0, 0.0], [0.25, 1.0, 0.25, 0.0]]],
@@ -149,6 +159,7 @@ def test_compute_fieldlines_jax_routes_when_backend_jax(monkeypatch, event_time_
     R_init = 1.4
 
     # CPU oracle: upstream ``dx/dt = B`` parametrisation.
+    _force_cpu_backend(monkeypatch)
     tmax_cpp = 0.4 * (2.0 * np.pi * R_init * R_init) / (B0 * R0_field)
     res_tys_cpu, res_phi_hits_cpu = compute_fieldlines(
         ToroidalField(R0_field, B0),
@@ -299,7 +310,7 @@ def test_compute_fieldlines_jax_accepts_minR_stopping_criterion(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_compute_fieldlines_cpu_path_unchanged_when_backend_cpu():
+def test_compute_fieldlines_cpu_path_unchanged_when_backend_cpu(monkeypatch):
     """With the default CPU backend, the wrapper continues to use ``sopp``.
 
     The lane gate is structural here: we verify the public return
@@ -310,6 +321,7 @@ def test_compute_fieldlines_cpu_path_unchanged_when_backend_cpu():
     dispatching to JAX when the backend is CPU — is caught.
     """
 
+    _force_cpu_backend(monkeypatch)
     res_tys, res_phi_hits = compute_fieldlines(
         ToroidalField(1.3, 0.8),
         [1.4],
@@ -398,6 +410,7 @@ def test_compute_fieldlines_jax_multiple_lines_preserve_order(
     R_inits = [1.1, 1.2]
     tmax_cpp = 0.3 * (2.0 * np.pi * R_inits[0] * R_inits[0]) / (B0 * R0_field)
 
+    _force_cpu_backend(monkeypatch)
     res_tys_cpu, _ = compute_fieldlines(
         ToroidalField(R0_field, B0),
         R_inits,
