@@ -1376,15 +1376,17 @@ Submitted replacement jobs:
 | `53279659` / `instscm-c2f59` | Reinstall runtime editable package from the clean `c2f59c427f` archive with `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT=0.1.dev1888+gc2f59c427f`, then verify `simsopt.__file__` points at that archive. | CPU `debug` / `regular_milan_ss11` | COMPLETED in `00:03:04`; batch MaxRSS `14165100K`; installed `simsopt-0.1.dev1888+gc2f59c427f`; runtime provenance shows JAX/JAXLIB/CUDA plugin/PJRT `0.10.0`, CPU backend for install, x64 enabled, and `simsopt.__file__` under `/pscratch/sd/j/jungdae/simsopt-jax-clean-c2f59c427f-20260522T033739Z-src/src/simsopt/__init__.py`. |
 | `53279660` / `cpu-w0w1-c2f59` | Rerun Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs. | CPU `shared` / `shared_milan_ss11` | `PENDING`; requested `06:00:00` and `60960M`. |
 | `53279661` / `gpu-w4pre-c2f59` | Superseded GPU rerun with `XLA_PYTHON_CLIENT_PREALLOCATE=true`. | GPU `shared` / `shared_gpu_ss11` | FAILED in `00:00:07` before any benchmark step: the provenance Python block imported `jax` before `simsopt`, so `simsopt` correctly rejected late GPU-memory environment resolution. This is a run-script ordering issue, not a physics/parity result. |
-| `53279966` / `gpu-w4pre2-c2f59` | Corrected Wave 4 core GPU proof with `XLA_PYTHON_CLIENT_PREALLOCATE=true`; same workload as `53279661`, but the provenance block imports `simsopt` before `jax` and records preallocation from `os.environ`. | GPU `shared` / `shared_gpu_ss11` | `PENDING (Priority)`; requested `--mem-per-gpu=110G` and `04:00:00`. |
+| `53279966` / `gpu-w4pre2-c2f59` | Superseded GPU rerun with fixed provenance import ordering. | GPU `shared` / `shared_gpu_ss11` | CANCELED after `00:02:04`: runtime provenance proved backend `gpu` and JAX/JAXLIB/CUDA plugin/PJRT `0.10.0`, but reported `preallocate=false` even though the raw Slurm env had `XLA_PYTHON_CLIENT_PREALLOCATE=true`. Root cause: SIMSOPT runtime owns the memory-policy env and rewrote the downstream JAX env from its `jax_gpu_parity` default because `SIMSOPT_JAX_GPU_PREALLOCATE` was not set. This is a run-script policy issue, not a physics/parity result. |
+| `53280092` / `gpu-w4pre3-c2f59` | Corrected Wave 4 core GPU proof with both `SIMSOPT_JAX_GPU_PREALLOCATE=true` and `XLA_PYTHON_CLIENT_PREALLOCATE=true`, plus the `simsopt`-before-`jax` provenance import order. | GPU `shared` / `shared_gpu_ss11` | `PENDING (Priority)`; requested `--mem-per-gpu=110G` and `04:00:00`. |
 
 Official-docs check for the rerun:
 
 - Context7 JAX docs for `/google/jax` state that
   `XLA_PYTHON_CLIENT_PREALLOCATE=false` disables JAX's default GPU memory
   preallocation and allocates GPU memory on demand. The replacement GPU run
-  intentionally uses `XLA_PYTHON_CLIENT_PREALLOCATE=true` to restore
-  preallocation for the next proof lane.
+  intentionally uses SIMSOPT's `SIMSOPT_JAX_GPU_PREALLOCATE=true` policy knob
+  so the SIMSOPT runtime writes `XLA_PYTHON_CLIENT_PREALLOCATE=true` before JAX
+  imports and initializes the CUDA client.
 - Context7 `setuptools-scm` docs for `/pypa/setuptools-scm` state that
   source archives without `.git` need archive metadata or an explicit pretend
   version override. The replacement debug install uses the package-specific
