@@ -1370,9 +1370,12 @@ Submitted replacement jobs:
 | `53279137` / `inst-c2f59` | Superseded install/provenance job. | CPU `shared` / `shared_milan_ss11` | CANCELED before start; short install work belongs in debug. |
 | `53279138` / `cpu-w0w1-c2f59` | Superseded CPU rerun dependent on `53279137`. | CPU `shared` / `shared_milan_ss11` | CANCELED before start. |
 | `53279139` / `gpu-w4pre-c2f59` | Superseded GPU rerun dependent on `53279137`. | GPU `shared` / `shared_gpu_ss11` | CANCELED before start. |
-| `53279392` / `instdbg-c2f59` | Reinstall runtime editable package from the clean `c2f59c427f` archive and verify `simsopt.__file__` points at that archive. | CPU `debug` / `regular_milan_ss11` | `PENDING (Priority)`; no start estimate at latest audit. |
-| `53279393` / `cpu-w0w1-c2f59` | Rerun Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs. | CPU `shared` / `shared_milan_ss11` | `PENDING (Dependency)` on `53279392`. |
-| `53279394` / `gpu-w4pre-c2f59` | Rerun Wave 4 core GPU proof with `XLA_PYTHON_CLIENT_PREALLOCATE=true`, Stage 2 CUDA, geometry repro, single-stage CUDA init, and ladder rungs through `m04n04-i05-useful`. | GPU `shared` / `shared_gpu_ss11` | `PENDING (Dependency)` on `53279392`; requested `--mem-per-gpu=110G`. |
+| `53279392` / `instdbg-c2f59` | Superseded debug install/provenance job. | CPU `debug` / `regular_milan_ss11` | FAILED in `00:00:04`: editable metadata generation could not infer a `setuptools-scm` version from the clean source archive because it has no `.git` directory. |
+| `53279393` / `cpu-w0w1-c2f59` | Superseded CPU rerun dependent on `53279392`. | CPU `shared` / `shared_milan_ss11` | CANCELED after `53279392` failed. |
+| `53279394` / `gpu-w4pre-c2f59` | Superseded GPU rerun dependent on `53279392`. | GPU `shared` / `shared_gpu_ss11` | CANCELED after `53279392` failed. |
+| `53279659` / `instscm-c2f59` | Reinstall runtime editable package from the clean `c2f59c427f` archive with `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT=0.1.dev1888+gc2f59c427f`, then verify `simsopt.__file__` points at that archive. | CPU `debug` / `regular_milan_ss11` | `PENDING (Priority)` at submission; requested `00:30:00`. |
+| `53279660` / `cpu-w0w1-c2f59` | Rerun Wave 0 import smoke, full CPU tests, focused marker reruns, Wave 1 focused CPU banana tests, and structured CPU parity/proof JSONs. | CPU `shared` / `shared_milan_ss11` | `PENDING (Dependency)` on `53279659`; requested `06:00:00`. |
+| `53279661` / `gpu-w4pre-c2f59` | Rerun Wave 4 core GPU proof with `XLA_PYTHON_CLIENT_PREALLOCATE=true`, Stage 2 CUDA, geometry repro, single-stage CUDA init, and ladder rungs through `m04n04-i05-useful`. | GPU `shared` / `shared_gpu_ss11` | `PENDING (Dependency)` on `53279659`; requested `--mem-per-gpu=110G` and `04:00:00`. |
 
 Official-docs check for the rerun:
 
@@ -1381,6 +1384,11 @@ Official-docs check for the rerun:
   preallocation and allocates GPU memory on demand. The replacement GPU run
   intentionally uses `XLA_PYTHON_CLIENT_PREALLOCATE=true` to restore
   preallocation for the next proof lane.
+- Context7 `setuptools-scm` docs for `/pypa/setuptools-scm` state that
+  source archives without `.git` need archive metadata or an explicit pretend
+  version override. The replacement debug install uses the package-specific
+  `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT` override, following the documented
+  PEP 503-normalized `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_${DIST_NAME}` form.
 - NERSC Perlmutter running-jobs documentation says 1-GPU jobs should use
   `shared` QOS, shows the 1-node/1-task/1-GPU header with `-c 32` and
   `--gpus-per-task=1`, and gives `--mem-per-gpu` as the way to size memory
