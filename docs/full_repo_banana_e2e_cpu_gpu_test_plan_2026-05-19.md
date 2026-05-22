@@ -1406,6 +1406,65 @@ Official-docs check for the rerun:
   for single-GPU shared steps. A Slurm `sbatch --test-only` probe accepted the
   replacement GPU header with `--mem-per-gpu=110G`.
 
+## Current Execution Update: Clean Committed SHA `7e297e94b`
+
+Commit `7e297e94b291cab397a13d82d9d489055724e3f9`
+(`fix: restore clean-source parity validation`) supersedes the `c2f59c427f`
+evidence for final signoff. The older `c2f59c427f` GPU preallocation job is
+still useful as a preallocation/resource probe, but it is no longer the current
+release candidate.
+
+Current source and local validation:
+
+- Remote clean source:
+  `/pscratch/sd/j/jungdae/simsopt-jax-clean-7e297e94b-20260522T0542Z-src`
+- Source transfer archive:
+  `/pscratch/sd/j/jungdae/simsopt-jax-slurm/simsopt-jax-7e297e94b.tar.gz`
+- Local focused validation before commit:
+  `48 passed in 10.37s`; `ruff check` passed; `py_compile` passed;
+  `git diff --check` passed.
+- Unrelated local dirt remains outside this proof slice:
+  `conda.recipe/meta.yaml` and `.conda/`.
+
+Current `7e297e94b` Slurm evidence and queued work:
+
+| Job | Purpose | QOS / partition | State |
+| --- | --- | --- | --- |
+| `53283836` / `focus-7e297` | Clean-source focused regression validation for the committed import/parity fixes. | CPU `debug` / `regular_milan_ss11` | PASS: `48 passed in 17.51s`; `/usr/bin/time` wall `0:20.38`; process MaxRSS `1607184 KB`; Slurm batch MaxRSS `2238844K`; elapsed `00:00:42`; exit `0`. |
+| `53284028` / `cpu-w0w1-7e297` | Current-HEAD Wave 0/Wave 1 CPU baseline: import smoke, full CPU tests, focused marker reruns, focused banana CPU tests, and structured CPU proof JSONs with per-step time/RSS. | CPU `shared` / `shared_milan_ss11` | PENDING as of `2026-05-22T05:49Z`; requested `06:00:00`, `32` CPUs, and `64G`; scheduler reason changed from `Priority` to `Resources`. Result root: `/pscratch/sd/j/jungdae/simsopt-jax-results/7e297e94b-wave0-wave1-cpu-20260522T0546Z`. |
+| `53284383` / `gpu-w4pre-7e297` | Current-HEAD Wave 4 GPU preallocation proof: Stage 2 CUDA, Stage 2 geometry repro, single-stage CUDA init, and ladder rungs through `m04n04-i05-useful`, with per-step `/usr/bin/time -v` and `nvidia-smi` monitors. | GPU `shared` / `shared_gpu_ss11` | PENDING as of submission; requested `04:00:00`, `1` GPU, `32` CPUs, and `--mem-per-gpu=110G`. Result root: `/pscratch/sd/j/jungdae/simsopt-jax-results/7e297e94b-wave4-gpu-prealloc-simsoptprealloc-20260522T054815Z`. |
+
+The current-HEAD GPU script exports both memory-policy knobs before any JAX
+client initialization:
+
+```bash
+export JAX_PLATFORMS=cuda,cpu
+export SIMSOPT_JAX_PLATFORM=cuda
+export SIMSOPT_BACKEND_MODE=jax_gpu_parity
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export SIMSOPT_JAX_GPU_PREALLOCATE=true
+export SIMSOPT_REPO_SHA=7e297e94b291cab397a13d82d9d489055724e3f9
+```
+
+Official-docs check for the current-HEAD preallocation run:
+
+- Context7 JAX docs for `/google/jax` were rechecked on `2026-05-22`: JAX
+  preallocates GPU memory by default, `XLA_PYTHON_CLIENT_PREALLOCATE=false`
+  disables preallocation and allocates on demand, and
+  `XLA_PYTHON_CLIENT_MEM_FRACTION` controls the preallocated fraction. The
+  current-HEAD GPU script therefore keeps `XLA_PYTHON_CLIENT_PREALLOCATE=true`
+  explicit and also sets SIMSOPT's upstream policy knob
+  `SIMSOPT_JAX_GPU_PREALLOCATE=true`.
+
+Live old-source resource probe retained for context:
+
+- `53280092` / `gpu-w4pre3-c2f59` remains RUNNING on `nid008528`.
+  It is still in `stage2_cuda_e2e` with no exit artifact yet. Runtime
+  provenance already proves `preallocate=true`; sampled GPU memory is
+  `61757 MiB / 81920 MiB`; Slurm step MaxRSS is `76101844K`. This is
+  preallocation/resource evidence only until the current-HEAD `53284383` run
+  completes.
+
 ## Slurm Execution Policy
 
 - [ ] Source checkout and modest environment setup may happen on login nodes;
