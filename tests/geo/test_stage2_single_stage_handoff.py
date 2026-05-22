@@ -451,6 +451,35 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertEqual(upgraded["VF_CURRENT_A"], 0.0)
         self.assertIsNone(upgraded["VF_TEMPLATE_PATH"])
 
+    def test_upgrade_legacy_stage2_artifact_results_uses_stage2_prefixed_coil_counts(self):
+        artifact_contracts = load_artifact_contracts_module()
+        coil_groups = importlib.import_module("banana_opt.coil_groups")
+
+        upgraded = artifact_contracts.upgrade_legacy_stage2_artifact_results(
+            {
+                "NFP": 5,
+                "STAGE2_NUM_TF_COILS": 20,
+                "STAGE2_NUM_BANANA_COILS": 10,
+                "STAGE2_NUM_PROXY_COILS": 1,
+                "STAGE2_NUM_VF_COILS": 2,
+            }
+        )
+
+        self.assertEqual(upgraded["NUM_TF_COILS"], 20)
+        self.assertEqual(upgraded["NUM_BANANA_COILS"], 10)
+        self.assertEqual(upgraded["NUM_PROXY_COILS"], 1)
+        self.assertEqual(upgraded["NUM_VF_COILS"], 2)
+
+        manifest = coil_groups.infer_manifest_from_legacy_counts(
+            upgraded,
+            total_loaded_coils=33,
+        )
+        self.assertEqual(manifest.total(), 33)
+        self.assertEqual(manifest.count_for_role("tf"), 20)
+        self.assertEqual(manifest.count_for_role("banana"), 10)
+        self.assertEqual(manifest.count_for_role("proxy"), 1)
+        self.assertEqual(manifest.count_for_role("vf"), 2)
+
 
 class HandoffModuleTests(unittest.TestCase):
     def test_warm_start_boozer_seed_default_loader_handles_legacy_finite_i(self):

@@ -142,6 +142,18 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
     )
 
 
+def _backfill_unprefixed_count_from_stage2(
+    upgraded_results: dict,
+    *,
+    count_key: str,
+) -> None:
+    if upgraded_results.get(count_key) is not None:
+        return
+    stage2_count = upgraded_results.get(f"STAGE2_{count_key}")
+    if stage2_count is not None:
+        upgraded_results[count_key] = int(stage2_count)
+
+
 def _infer_legacy_boozer_current_convention(
     *,
     finite_current_mode: str,
@@ -201,6 +213,15 @@ def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
         )
     else:
         upgraded_results["BOOZER_CURRENT_CONVENTION"] = recorded_boozer_current_convention
+    for count_key in (
+        "NUM_BANANA_COILS",
+        "NUM_PROXY_COILS",
+        "NUM_VF_COILS",
+    ):
+        _backfill_unprefixed_count_from_stage2(
+            upgraded_results,
+            count_key=count_key,
+        )
     if upgraded_results.get("NUM_PROXY_COILS") is None:
         upgraded_results["NUM_PROXY_COILS"] = 0
     if upgraded_results.get("NUM_VF_COILS") is None:
@@ -224,6 +245,10 @@ def upgrade_legacy_stage2_artifact_results(
     known_tf_current_A: float | None = None,
 ) -> dict:
     upgraded_results = dict(stage2_artifact_results)
+    _backfill_unprefixed_count_from_stage2(
+        upgraded_results,
+        count_key="NUM_TF_COILS",
+    )
     if upgraded_results.get("TF_CURRENT_A") is None and known_tf_current_A is not None:
         upgraded_results["TF_CURRENT_A"] = float(known_tf_current_A)
     if upgraded_results.get("NUM_TF_COILS") is None and known_num_tf_coils is not None:
