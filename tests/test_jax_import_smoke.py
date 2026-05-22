@@ -359,6 +359,12 @@ def _assert_no_private_jax_src_usage(path: Path, *, label: str) -> None:
     assert forbidden_usages == [], f"{label} must not use jax._src: {forbidden_usages}"
 
 
+def _visible_python_source_files(package_dir: Path) -> list[Path]:
+    return sorted(
+        path for path in package_dir.glob("*.py") if not path.name.startswith(".")
+    )
+
+
 def _find_import_line(path: Path, module_name: str) -> int | None:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     import_lines = []
@@ -393,6 +399,14 @@ def test_find_private_jax_src_usages_detects_alias_attribute_access(tmp_path):
 
     assert "jj._src @ L2" in usages
     assert 'getattr(jj, "_src") @ L3' in usages
+
+
+def test_visible_python_source_files_ignores_hidden_metadata(tmp_path):
+    source_path = tmp_path / "module.py"
+    source_path.write_text("import jax\n", encoding="utf-8")
+    (tmp_path / ".__module.py").write_bytes(b"\x00\x05\x16\x07\xa3")
+
+    assert _visible_python_source_files(tmp_path) == [source_path]
 
 
 def test_import_package_root():
@@ -1355,7 +1369,7 @@ def test_optimizer_jax_public_module_has_no_private_jax_src_usage():
 def test_optimizer_jax_private_package_has_no_private_jax_src_usage():
     """Private optimizer modules must also stay on public JAX APIs."""
     forbidden_usages = {}
-    for path in sorted(_OPTIMIZER_PRIVATE_DIR.glob("*.py")):
+    for path in _visible_python_source_files(_OPTIMIZER_PRIVATE_DIR):
         usages = _find_private_jax_src_usages(path)
         if usages:
             forbidden_usages[str(path.relative_to(_OPTIMIZER_PRIVATE_DIR.parent))] = (
