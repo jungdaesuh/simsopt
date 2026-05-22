@@ -1332,6 +1332,9 @@ def collect_surface_run_metadata(
         "SURFACE_NAMES": [entry["name"] for entry in surface_data],
         "SURFACE_SEED_LABELS": [float(entry["seed_label"]) for entry in surface_data],
         "SURFACE_TARGET_VOLUMES": [float(entry["target_volume"]) for entry in surface_data],
+        "SURFACE_INITIALIZATION_PROVENANCE": [
+            entry["initialization_provenance"] for entry in surface_data
+        ],
         "FINAL_SURFACE_VOLUMES": [float(value) for value in final_surface_volumes],
         "FINAL_SURFACE_IOTAS": [float(value) for value in final_surface_iotas],
         "SURFACE_SELF_INTERSECTING": [bool(value) for value in run_status["self_intersections"]],

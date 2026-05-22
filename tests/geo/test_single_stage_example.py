@@ -2792,6 +2792,601 @@ class SingleStageExampleTests(unittest.TestCase):
             [0.06, 0.08, 0.10],
         )
 
+    def test_published_stage2_seed_initializes_outer_to_inner_and_returns_storage_order(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+        surface_configs = [
+            {
+                "name": "inner0",
+                "seed_label": 0.15,
+                "target_volume": 0.06,
+                "initial_surface": SimpleNamespace(name="wout_inner0"),
+            },
+            {
+                "name": "inner1",
+                "seed_label": 0.20,
+                "target_volume": 0.08,
+                "initial_surface": SimpleNamespace(name="wout_inner1"),
+            },
+            {
+                "name": "outer",
+                "seed_label": 0.25,
+                "target_volume": 0.10,
+                "initial_surface": SimpleNamespace(name="wout_outer"),
+            },
+        ]
+        init_calls = []
+        contraction_calls = []
+
+        class FakeSurface:
+            def __init__(self, name, volume):
+                self.name = name
+                self._volume = volume
+
+            def volume(self):
+                return self._volume
+
+        def fake_initialize_boozer_surface(
+            initial_surface,
+            _mpol,
+            _ntor,
+            _bs,
+            vol_target,
+            _constraint_weight,
+            iota,
+            G0,
+            _boozer_I,
+            *,
+            initial_surface_guess,
+            nfp,
+        ):
+            init_calls.append(
+                {
+                    "surface": initial_surface.name,
+                    "guess": initial_surface_guess.name,
+                    "target_volume": vol_target,
+                    "iota": iota,
+                    "G": G0,
+                    "nfp": nfp,
+                }
+            )
+            solved_name = {
+                "stage2_outer": "solved_outer",
+                "contracted_solved_outer_to_0.08": "solved_inner1",
+                "contracted_solved_inner1_to_0.06": "solved_inner0",
+            }[initial_surface.name]
+            solved_volume = {
+                "solved_outer": 0.10,
+                "solved_inner1": 0.08,
+                "solved_inner0": 0.06,
+            }[solved_name]
+            return SimpleNamespace(
+                surface=FakeSurface(solved_name, solved_volume),
+                res={"iota": float(iota) + 0.01, "G": float(G0) + 1e-9},
+            )
+
+        def fake_contract_surface_to_target_volume(previous_surface, target_volume):
+            contraction_calls.append((previous_surface.name, target_volume))
+            return FakeSurface(
+                f"contracted_{previous_surface.name}_to_{target_volume:.2f}",
+                target_volume,
+            )
+
+        stage2_seed = SimpleNamespace(
+            surface=SimpleNamespace(name="stage2_outer"),
+            iota=0.21,
+            G=0.77,
+        )
+        with patch.object(
+            module,
+            "initialize_boozer_surface",
+            side_effect=fake_initialize_boozer_surface,
+        ), patch.object(
+            module,
+            "contract_surface_to_target_volume",
+            side_effect=fake_contract_surface_to_target_volume,
+        ):
+            surface_data, warm_paths = module.initialize_surface_data_for_contract(
+                surface_configs,
+                surface_mode_contract=contract,
+                mpol=8,
+                ntor=6,
+                bs=object(),
+                constraint_weight=1.0,
+                default_iota=0.15,
+                default_G=1.0,
+                boozer_I=0.0,
+                nfp=5,
+                stage2_seed_surface=stage2_seed,
+                warm_start_surface_stem=None,
+            )
+
+        self.assertEqual(
+            [call["surface"] for call in init_calls],
+            [
+                "stage2_outer",
+                "contracted_solved_outer_to_0.08",
+                "contracted_solved_inner1_to_0.06",
+            ],
+        )
+        self.assertEqual(
+            [call["guess"] for call in init_calls],
+            [call["surface"] for call in init_calls],
+        )
+        np.testing.assert_allclose(
+            [call["G"] for call in init_calls],
+            [0.77, 0.770000001, 0.770000002],
+        )
+        self.assertTrue(all(np.isfinite(call["G"]) for call in init_calls))
+        self.assertEqual(
+            contraction_calls,
+            [("solved_outer", 0.08), ("solved_inner1", 0.06)],
+        )
+        self.assertEqual([entry["name"] for entry in surface_data], ["inner0", "inner1", "outer"])
+        self.assertEqual(
+            [entry["initialization_provenance"] for entry in surface_data],
+            [
+                "inner1_continuation_inner0",
+                "outer_continuation_inner1",
+                "stage2_outer_seed",
+            ],
+        )
+        self.assertEqual(warm_paths, [])
+
+    def test_published_stage2_seed_requires_solved_iota_and_G(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+
+        with patch.object(
+            module,
+            "initialize_boozer_surface",
+            side_effect=AssertionError("surface-only seed must fail before Boozer solve"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "explicit iota and G"):
+                module.initialize_surface_data_for_contract(
+                    [
+                        {"name": "inner0", "seed_label": 0.15, "target_volume": 0.06, "initial_surface": object()},
+                        {"name": "inner1", "seed_label": 0.20, "target_volume": 0.08, "initial_surface": object()},
+                        {"name": "outer", "seed_label": 0.25, "target_volume": 0.10, "initial_surface": object()},
+                    ],
+                    surface_mode_contract=contract,
+                    mpol=8,
+                    ntor=6,
+                    bs=object(),
+                    constraint_weight=1.0,
+                    default_iota=0.15,
+                    default_G=1.0,
+                    boozer_I=0.0,
+                    nfp=5,
+                    stage2_seed_surface=SimpleNamespace(
+                        surface=SimpleNamespace(name="stage2_outer"),
+                        iota=0.21,
+                        G=None,
+                    ),
+                    warm_start_surface_stem=None,
+                )
+
+    def test_published_stage2_seed_completion_uses_bootability_iota_and_signed_G(self):
+        module = self.load_module()
+        seed = module.WarmStartBoozerSeed(
+            surface=SimpleNamespace(name="stage2_outer"),
+            iota=None,
+            G=None,
+            source_path=Path("/tmp/stage2/surf_opt_boozer_surface.json"),
+        )
+
+        completed = module.complete_published_stage2_seed_surface(
+            seed,
+            {"BOOTABILITY_SOLVED_IOTA": 0.1476},
+            initial_G=-2.0106,
+        )
+
+        self.assertIs(completed.surface, seed.surface)
+        self.assertEqual(completed.source_path, seed.source_path)
+        self.assertAlmostEqual(completed.iota, 0.1476)
+        self.assertAlmostEqual(completed.G, -2.0106)
+
+    def test_published_stage2_seed_completion_requires_bootability_iota(self):
+        module = self.load_module()
+        seed = module.WarmStartBoozerSeed(
+            surface=SimpleNamespace(name="stage2_outer"),
+            iota=None,
+            G=-2.0106,
+            source_path=Path("/tmp/stage2/surf_opt_boozer_surface.json"),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "BOOTABILITY_SOLVED_IOTA"):
+            module.complete_published_stage2_seed_surface(
+                seed,
+                {},
+                initial_G=-2.0106,
+            )
+
+    def test_published_stage2_seed_rejects_solved_G_drift(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+
+        class FakeSurface:
+            def __init__(self, name, volume):
+                self.name = name
+                self._volume = volume
+
+            def volume(self):
+                return self._volume
+
+        def fake_initialize_boozer_surface(
+            initial_surface,
+            _mpol,
+            _ntor,
+            _bs,
+            _vol_target,
+            _constraint_weight,
+            iota,
+            G0,
+            _boozer_I,
+            *,
+            initial_surface_guess,
+            nfp,
+        ):
+            del iota, initial_surface_guess, nfp
+            solved_G = 0.77 if initial_surface.name == "stage2_outer" else float(G0) + 0.10
+            solved_volume = {
+                "stage2_outer": 0.10,
+                "contracted_solved_stage2_outer_to_0.08": 0.08,
+                "contracted_solved_contracted_solved_stage2_outer_to_0.08_to_0.06": 0.06,
+            }[initial_surface.name]
+            return SimpleNamespace(
+                surface=FakeSurface(f"solved_{initial_surface.name}", solved_volume),
+                res={"iota": 0.15, "G": solved_G},
+            )
+
+        def fake_contract_surface_to_target_volume(previous_surface, target_volume):
+            return FakeSurface(
+                f"contracted_{previous_surface.name}_to_{target_volume:.2f}",
+                target_volume,
+            )
+
+        with patch.object(
+            module,
+            "initialize_boozer_surface",
+            side_effect=fake_initialize_boozer_surface,
+        ), patch.object(
+            module,
+            "contract_surface_to_target_volume",
+            side_effect=fake_contract_surface_to_target_volume,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "inner0"):
+                module.initialize_surface_data_for_contract(
+                    [
+                        {"name": "inner0", "seed_label": 0.15, "target_volume": 0.06, "initial_surface": object()},
+                        {"name": "inner1", "seed_label": 0.20, "target_volume": 0.08, "initial_surface": object()},
+                        {"name": "outer", "seed_label": 0.25, "target_volume": 0.10, "initial_surface": object()},
+                    ],
+                    surface_mode_contract=contract,
+                    mpol=8,
+                    ntor=6,
+                    bs=object(),
+                    constraint_weight=1.0,
+                    default_iota=0.15,
+                    default_G=1.0,
+                    boozer_I=0.0,
+                    nfp=5,
+                    stage2_seed_surface=SimpleNamespace(
+                        surface=SimpleNamespace(name="stage2_outer"),
+                        iota=0.21,
+                        G=0.77,
+                    ),
+                    warm_start_surface_stem=None,
+                )
+
+    def test_published_stage2_seed_rejects_nonmonotone_actual_volumes(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+
+        class FakeSurface:
+            def __init__(self, name, volume):
+                self.name = name
+                self._volume = volume
+
+            def volume(self):
+                return self._volume
+
+        def fake_initialize_boozer_surface(
+            initial_surface,
+            _mpol,
+            _ntor,
+            _bs,
+            _vol_target,
+            _constraint_weight,
+            iota,
+            G0,
+            _boozer_I,
+            *,
+            initial_surface_guess,
+            nfp,
+        ):
+            del initial_surface_guess, nfp
+            solved_name = {
+                "stage2_outer": "solved_outer",
+                "contracted_solved_outer_to_0.08": "solved_inner1",
+                "contracted_solved_inner1_to_0.06": "solved_inner0",
+            }[initial_surface.name]
+            solved_volume = {
+                "solved_outer": 0.10,
+                "solved_inner1": 0.11,
+                "solved_inner0": 0.12,
+            }[solved_name]
+            return SimpleNamespace(
+                surface=FakeSurface(solved_name, solved_volume),
+                res={"iota": float(iota), "G": float(G0)},
+            )
+
+        def fake_contract_surface_to_target_volume(previous_surface, target_volume):
+            return FakeSurface(
+                f"contracted_{previous_surface.name}_to_{target_volume:.2f}",
+                target_volume,
+            )
+
+        with patch.object(
+            module,
+            "initialize_boozer_surface",
+            side_effect=fake_initialize_boozer_surface,
+        ), patch.object(
+            module,
+            "contract_surface_to_target_volume",
+            side_effect=fake_contract_surface_to_target_volume,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "solved volumes"):
+                module.initialize_surface_data_for_contract(
+                    [
+                        {"name": "inner0", "seed_label": 0.15, "target_volume": 0.06, "initial_surface": object()},
+                        {"name": "inner1", "seed_label": 0.20, "target_volume": 0.08, "initial_surface": object()},
+                        {"name": "outer", "seed_label": 0.25, "target_volume": 0.10, "initial_surface": object()},
+                    ],
+                    surface_mode_contract=contract,
+                    mpol=8,
+                    ntor=6,
+                    bs=object(),
+                    constraint_weight=1.0,
+                    default_iota=0.15,
+                    default_G=1.0,
+                    boozer_I=0.0,
+                    nfp=5,
+                    stage2_seed_surface=SimpleNamespace(
+                        surface=SimpleNamespace(name="stage2_outer"),
+                        iota=0.21,
+                        G=0.77,
+                    ),
+                    warm_start_surface_stem=None,
+                )
+
+    def test_published_without_seed_or_warm_start_rejects_cold_wout_inner_init(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "cold WOUT inner initialization"):
+            module.initialize_surface_data_for_contract(
+                [
+                    {"name": "inner0", "seed_label": 0.15, "target_volume": 0.06, "initial_surface": object()},
+                    {"name": "inner1", "seed_label": 0.20, "target_volume": 0.08, "initial_surface": object()},
+                    {"name": "outer", "seed_label": 0.25, "target_volume": 0.10, "initial_surface": object()},
+                ],
+                surface_mode_contract=contract,
+                mpol=8,
+                ntor=6,
+                bs=object(),
+                constraint_weight=1.0,
+                default_iota=0.15,
+                default_G=1.0,
+                boozer_I=0.0,
+                nfp=5,
+                stage2_seed_surface=None,
+                warm_start_surface_stem=None,
+            )
+
+    def test_published_named_warm_start_stack_remains_strict(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            warm_start_stem = str(Path(tmpdir) / "pubms_seed")
+            with patch.object(
+                module,
+                "initialize_boozer_surface",
+                side_effect=AssertionError("missing named warm-start stack must fail before Boozer solve"),
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    module.initialize_surface_data_for_contract(
+                        [
+                            {"name": "inner0", "seed_label": 0.15, "target_volume": 0.06, "initial_surface": object()},
+                            {"name": "inner1", "seed_label": 0.20, "target_volume": 0.08, "initial_surface": object()},
+                            {"name": "outer", "seed_label": 0.25, "target_volume": 0.10, "initial_surface": object()},
+                        ],
+                        surface_mode_contract=contract,
+                        mpol=8,
+                        ntor=6,
+                        bs=object(),
+                        constraint_weight=1.0,
+                        default_iota=0.15,
+                        default_G=1.0,
+                        boozer_I=0.0,
+                        nfp=5,
+                        stage2_seed_surface=SimpleNamespace(
+                            surface=SimpleNamespace(name="stage2_outer"),
+                            iota=0.21,
+                            G=0.77,
+                        ),
+                        warm_start_surface_stem=warm_start_stem,
+                    )
+
+    def test_published_named_warm_start_stack_loads_all_artifacts_before_solving(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+        loaded_paths = []
+
+        def fake_warm_start_path(_stem, *, surface_name):
+            return Path(f"/tmp/pubms_seed_{surface_name}_boozer_surface.json")
+
+        def fake_load_warm_start_boozer_seed(path):
+            loaded_paths.append(path.name)
+            if "inner0" not in path.name:
+                raise FileNotFoundError(path)
+            return module.WarmStartBoozerSeed(
+                surface=SimpleNamespace(name="warm_inner0"),
+                iota=0.21,
+                G=0.77,
+                source_path=path,
+            )
+
+        with patch.object(
+            module,
+            "resolve_warm_start_boozer_surface_path",
+            side_effect=fake_warm_start_path,
+        ), patch.object(
+            module,
+            "load_warm_start_boozer_seed",
+            side_effect=fake_load_warm_start_boozer_seed,
+        ), patch.object(
+            module,
+            "initialize_boozer_surface",
+            side_effect=AssertionError("partial warm-start stack must fail before Boozer solve"),
+        ) as initialize_mock:
+            with self.assertRaises(FileNotFoundError):
+                module.initialize_surface_data_for_contract(
+                    [
+                        {"name": "inner0", "seed_label": 0.15, "target_volume": 0.06, "initial_surface": object()},
+                        {"name": "inner1", "seed_label": 0.20, "target_volume": 0.08, "initial_surface": object()},
+                        {"name": "outer", "seed_label": 0.25, "target_volume": 0.10, "initial_surface": object()},
+                    ],
+                    surface_mode_contract=contract,
+                    mpol=8,
+                    ntor=6,
+                    bs=object(),
+                    constraint_weight=1.0,
+                    default_iota=0.15,
+                    default_G=1.0,
+                    boozer_I=0.0,
+                    nfp=5,
+                    stage2_seed_surface=SimpleNamespace(
+                        surface=SimpleNamespace(name="stage2_outer"),
+                        iota=0.21,
+                        G=0.77,
+                    ),
+                    warm_start_surface_stem="/tmp/pubms_seed",
+                )
+
+        self.assertEqual(
+            loaded_paths,
+            [
+                "pubms_seed_inner0_boozer_surface.json",
+                "pubms_seed_inner1_boozer_surface.json",
+            ],
+        )
+        initialize_mock.assert_not_called()
+
+    def test_single_surface_initialization_keeps_config_order_without_continuation(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(surface_mode=module.SINGLE_SURFACE, num_surfaces=1, inner_surface_ratio=0.8),
+            warn_on_legacy_mapping=False,
+        )
+        init_sources = []
+
+        def fake_initialize_boozer_surface(
+            initial_surface,
+            *_args,
+            initial_surface_guess,
+            **_kwargs,
+        ):
+            init_sources.append((initial_surface.name, initial_surface_guess))
+            return SimpleNamespace(
+                surface=SimpleNamespace(name=f"solved_{initial_surface.name}"),
+                res={"iota": 0.15, "G": 1.0},
+            )
+
+        with patch.object(
+            module,
+            "initialize_boozer_surface",
+            side_effect=fake_initialize_boozer_surface,
+        ), patch.object(
+            module,
+            "contract_surface_to_target_volume",
+            side_effect=AssertionError("single_surface must not use continuation"),
+        ):
+            surface_data, _warm_paths = module.initialize_surface_data_for_contract(
+                [
+                    {
+                        "name": "outer",
+                        "seed_label": 0.25,
+                        "target_volume": 0.10,
+                        "initial_surface": SimpleNamespace(name="wout_outer"),
+                    }
+                ],
+                surface_mode_contract=contract,
+                mpol=8,
+                ntor=6,
+                bs=object(),
+                constraint_weight=1.0,
+                default_iota=0.15,
+                default_G=1.0,
+                boozer_I=0.0,
+                nfp=5,
+                stage2_seed_surface=None,
+                warm_start_surface_stem=None,
+            )
+
+        self.assertEqual(init_sources, [("wout_outer", None)])
+        self.assertEqual([entry["name"] for entry in surface_data], ["outer"])
+
     def test_average_surface_objectives_uses_mean_and_preserves_single_surface_scale(self):
         module = self.load_module()
 
@@ -10010,8 +10605,18 @@ class HardwareConstraintTests(unittest.TestCase):
     def test_collect_surface_run_metadata_serializes_multisurface_fields(self):
         module = self.load_module()
         surface_data = [
-            {"name": "inner", "seed_label": 0.16, "target_volume": 0.08},
-            {"name": "outer", "seed_label": 0.20, "target_volume": 0.10},
+            {
+                "name": "inner",
+                "seed_label": 0.16,
+                "target_volume": 0.08,
+                "initialization_provenance": "wout_reference",
+            },
+            {
+                "name": "outer",
+                "seed_label": 0.20,
+                "target_volume": 0.10,
+                "initialization_provenance": "stage2_outer_seed",
+            },
         ]
         run_status = {
             "self_intersections": [False, False],
@@ -10031,6 +10636,10 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertEqual(payload["SURFACE_NAMES"], ["inner", "outer"])
         self.assertEqual(payload["ADJACENT_SURFACE_GAPS"], [0.4])
+        self.assertEqual(
+            payload["SURFACE_INITIALIZATION_PROVENANCE"],
+            ["wout_reference", "stage2_outer_seed"],
+        )
         self.assertTrue(payload["SURFACES_NESTED"])
         self.assertEqual(payload["FINAL_SURFACE_VOLUMES"], [0.081, 0.101])
 

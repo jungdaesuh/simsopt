@@ -152,6 +152,7 @@ from banana_opt.current_contracts import (
     infer_uniform_coil_current_A as _infer_uniform_coil_current_A,
     resolve_penalty_traversal_forbidden_box_bounds,
     resolve_plasma_current_settings_for_num_surfaces as _resolve_plasma_current_settings_for_num_surfaces_impl,
+    resolve_plasma_current_settings_for_surface_mode as _resolve_plasma_current_settings_for_surface_mode_impl,
 )
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
@@ -225,6 +226,7 @@ from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for t
     run_penalty_phase1,
 )
 from banana_opt.stage2_single_stage_handoff import (
+    WarmStartBoozerSeed,
     build_equilibrium_path as _build_equilibrium_path_impl,
     compute_tf_G0 as _compute_tf_G0_impl,
     initialize_boozer_surface as _initialize_boozer_surface_impl,
@@ -243,8 +245,11 @@ from banana_opt.stage2_single_stage_handoff import (
 from banana_opt.single_stage_geometry import (
     build_scipy_bounds,
     build_surface_configs as _build_surface_configs_impl,
-    build_surface_search_gate,
-    build_surface_search_weights,
+    build_surface_configs_for_contract as _build_surface_configs_for_contract_impl,
+    build_surface_search_gate,  # noqa: F401 - re-exported for importlib-loaded tests
+    build_surface_search_gate_for_contract,
+    build_surface_search_weights,  # noqa: F401 - re-exported for importlib-loaded tests
+    build_surface_search_weights_for_contract,
     broken_topology_gate_status,
     collect_surface_run_metadata,
     disabled_topology_gate_status,
@@ -911,14 +916,25 @@ def resolve_plasma_current_settings(
     finite_current_mode="wataru_proxy_field",
     default_plasma_current_A=0.0,
     num_surfaces=1,
+    surface_mode_contract: SurfaceModeContract | None = None,
 ):
-    settings = _resolve_plasma_current_settings_for_num_surfaces_impl(
+    resolve_kwargs = dict(
         raw_boozer_I=args.boozer_I,
         plasma_current_A=args.plasma_current_A,
         finite_current_mode=finite_current_mode,
         default_plasma_current_A=default_plasma_current_A,
-        num_surfaces=num_surfaces,
         requested_finite_current_mode=getattr(args, "finite_current_mode", None),
+    )
+    settings = (
+        _resolve_plasma_current_settings_for_num_surfaces_impl(
+            **resolve_kwargs,
+            num_surfaces=num_surfaces,
+        )
+        if surface_mode_contract is None
+        else _resolve_plasma_current_settings_for_surface_mode_impl(
+            **resolve_kwargs,
+            surface_mode_contract=surface_mode_contract,
+        )
     )
 
     return {
@@ -976,6 +992,23 @@ def resolve_surface_mode_contract(args, *, warn_on_legacy_mapping=True):
             DEFAULT_INNER_SURFACE_RATIO,
         ),
         warn_on_legacy_mapping=should_warn,
+    )
+
+
+def current_surface_mode_contract_for_surface_count(surface_count):
+    active_contract = globals().get("surface_mode_contract")
+    if active_contract is not None:
+        return active_contract
+    resolved_surface_count = int(surface_count)
+    if resolved_surface_count not in {1, 2}:
+        raise RuntimeError(
+            "surface_mode_contract must be initialized for published multisurface stacks."
+        )
+    return _build_surface_mode_contract_impl(
+        requested_surface_mode=None,
+        legacy_num_surfaces=resolved_surface_count,
+        legacy_inner_surface_ratio=DEFAULT_INNER_SURFACE_RATIO,
+        warn_on_legacy_mapping=False,
     )
 
 
@@ -1246,8 +1279,8 @@ def parse_args():
             f"{SINGLE_SURFACE!r} preserves the current one-surface baseline, "
             f"{EXPERIMENTAL_MULTISURFACE!r} preserves the current custom two-surface "
             "continuation lane, and "
-            f"{PUBLISHED_MULTISURFACE!r} reserves the future published-aligned "
-            "multisurface contract. When omitted, legacy --num-surfaces mapping is used."
+            f"{PUBLISHED_MULTISURFACE!r} selects the fixed three-surface published "
+            "contract. When omitted, legacy --num-surfaces mapping is used."
         ),
     )
     parser.add_argument(
@@ -1694,6 +1727,33 @@ def parse_args():
         help="Penalty weight for the Single Stage width hinge terms (lower+upper).",
     )
     parser.add_argument(
+        "--single-stage-poloidal-threshold-rad",
+        type=float,
+        default=float(os.environ.get(
+            "SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD",
+            str(POLOIDAL_EXTENT_HALF_WIDTH_RAD),
+        )),
+        help="Single-stage poloidal extent upper threshold in radians.",
+    )
+    parser.add_argument(
+        "--single-stage-width-min-threshold",
+        type=float,
+        default=float(os.environ.get(
+            "SINGLE_STAGE_WIDTH_MIN_THRESHOLD",
+            str(BANANA_WIDTH_MIN_M),
+        )),
+        help="Single-stage banana coil width lower threshold in meters.",
+    )
+    parser.add_argument(
+        "--single-stage-width-max-threshold",
+        type=float,
+        default=float(os.environ.get(
+            "SINGLE_STAGE_WIDTH_MAX_THRESHOLD",
+            str(BANANA_WIDTH_MAX_M),
+        )),
+        help="Single-stage banana coil width upper threshold in meters.",
+    )
+    parser.add_argument(
         "--single-stage-selfint-weight",
         type=float,
         default=float(os.environ.get(
@@ -2120,6 +2180,27 @@ def build_surface_configs(
     )
 
 
+def build_surface_configs_for_contract(
+    file_loc,
+    nphi,
+    ntheta,
+    seed_label,
+    major_radius,
+    outer_target_volume,
+    surface_mode_contract,
+):
+    return _build_surface_configs_for_contract_impl(
+        file_loc,
+        nphi,
+        ntheta,
+        seed_label,
+        major_radius,
+        outer_target_volume,
+        surface_mode_contract,
+        surface_factory=SurfaceRZFourier,
+    )
+
+
 def _resolved_optional_path_string(raw_path):
     if raw_path is None:
         return None
@@ -2161,6 +2242,399 @@ def resolve_initial_boozer_surface_seed(
         default_iota if warm_start_seed.iota is None else warm_start_seed.iota,
         default_G if warm_start_seed.G is None else warm_start_seed.G,
         str(warm_start_seed.source_path),
+    )
+
+
+def _load_required_warm_start_boozer_seeds(
+    surface_configs,
+    *,
+    warm_start_surface_stem,
+    stage2_seed_surface,
+):
+    if warm_start_surface_stem is None:
+        return {}
+
+    seeds_by_name = {}
+    for config in surface_configs:
+        if stage2_seed_surface is not None and config["name"] == "outer":
+            continue
+        warm_start_surface_path = resolve_warm_start_boozer_surface_path(
+            warm_start_surface_stem,
+            surface_name=config["name"],
+        )
+        seeds_by_name[config["name"]] = load_warm_start_boozer_seed(
+            warm_start_surface_path
+        )
+    return seeds_by_name
+
+
+def _fit_contracted_surface(previous_surface, scale):
+    gamma = previous_surface.gamma()
+    centerline = np.mean(gamma, axis=1, keepdims=True)
+    contracted_gamma = centerline + float(scale) * (gamma - centerline)
+    contracted_surface = SurfaceXYZTensorFourier(
+        mpol=previous_surface.mpol,
+        ntor=previous_surface.ntor,
+        nfp=previous_surface.nfp,
+        stellsym=previous_surface.stellsym,
+        quadpoints_theta=previous_surface.quadpoints_theta,
+        quadpoints_phi=previous_surface.quadpoints_phi,
+    )
+    contracted_surface.least_squares_fit(contracted_gamma)
+    return contracted_surface
+
+
+def contract_surface_to_target_volume(previous_surface, target_volume):
+    previous_volume = float(previous_surface.volume())
+    target_volume = float(target_volume)
+    if not (0.0 < target_volume < previous_volume):
+        raise RuntimeError(
+            "Continuation target volume must be strictly inside the solved "
+            f"neighbor: target={target_volume}, neighbor={previous_volume}."
+        )
+
+    lower_scale = 0.0
+    upper_scale = 1.0
+    best_surface = _fit_contracted_surface(previous_surface, upper_scale)
+    upper_volume = float(best_surface.volume())
+    if not (target_volume < upper_volume):
+        raise RuntimeError(
+            "Continuation contraction cannot bracket the target volume: "
+            f"target={target_volume}, upper={upper_volume}."
+        )
+    best_error = abs(upper_volume - target_volume)
+    for _ in range(32):
+        candidate_scale = 0.5 * (lower_scale + upper_scale)
+        candidate = _fit_contracted_surface(previous_surface, candidate_scale)
+        candidate_volume = float(candidate.volume())
+        candidate_error = abs(candidate_volume - target_volume)
+        if candidate_error < best_error:
+            best_surface = candidate
+            best_error = candidate_error
+        if candidate_volume < target_volume:
+            lower_scale = candidate_scale
+        else:
+            upper_scale = candidate_scale
+    return best_surface
+
+
+def _boozer_res_scalar(boozer_surface, key):
+    return float(boozer_surface.res[key])
+
+
+def _require_finite_explicit_G(surface_name, G):
+    G_value = float(G)
+    if not np.isfinite(G_value):
+        raise RuntimeError(
+            f"published_multisurface requires finite explicit G for {surface_name}."
+        )
+    return G_value
+
+
+def _require_published_stage2_solved_seed(stage2_seed_surface):
+    if stage2_seed_surface is None:
+        raise RuntimeError(
+            "published_multisurface Stage 2 handoff requires a saved outer "
+            "Boozer seed; cold WOUT inner initialization is not allowed."
+        )
+    if stage2_seed_surface.iota is None or stage2_seed_surface.G is None:
+        raise RuntimeError(
+            "published_multisurface Stage 2 handoff requires a solved outer "
+            "Boozer seed with explicit iota and G."
+        )
+
+
+_PUBLISHED_SURFACE_G_RTOL = 1e-4
+_PUBLISHED_SURFACE_G_ATOL = 1e-6
+
+
+def _require_published_G_consistency(
+    surface_data,
+    *,
+    rtol=_PUBLISHED_SURFACE_G_RTOL,
+    atol=_PUBLISHED_SURFACE_G_ATOL,
+):
+    reference_name = surface_data[-1]["name"]
+    reference_G = _boozer_res_scalar(surface_data[-1]["boozer_surface"], "G")
+    for entry in surface_data:
+        candidate_G = _boozer_res_scalar(entry["boozer_surface"], "G")
+        if not np.isclose(candidate_G, reference_G, rtol=rtol, atol=atol):
+            raise RuntimeError(
+                "published_multisurface solved G drifted for "
+                f"{entry['name']}: {candidate_G} != {reference_G} "
+                f"from {reference_name}."
+            )
+
+
+def _require_published_volume_order(surface_data):
+    volumes_by_name = {
+        entry["name"]: float(entry["boozer_surface"].surface.volume())
+        for entry in surface_data
+    }
+    ordered_names = ["inner0", "inner1", "outer"]
+    ordered_volumes = [volumes_by_name[name] for name in ordered_names]
+    if not all(np.isfinite(volume) for volume in ordered_volumes):
+        raise RuntimeError(
+            "published_multisurface solved volumes must be finite: "
+            f"{dict(zip(ordered_names, ordered_volumes))}."
+        )
+    if not np.all(np.diff(ordered_volumes) > 0.0):
+        raise RuntimeError(
+            "published_multisurface solved volumes must be strictly ordered "
+            f"inner-to-outer: {dict(zip(ordered_names, ordered_volumes))}."
+        )
+
+
+def _required_published_seed_iota_from_results(stage2_results):
+    iota = stage2_results.get("BOOTABILITY_SOLVED_IOTA")
+    if iota is None:
+        raise RuntimeError(
+            "published_multisurface Stage 2 handoff requires "
+            "BOOTABILITY_SOLVED_IOTA when the serialized Boozer seed omits iota."
+        )
+    iota_value = float(iota)
+    if not np.isfinite(iota_value):
+        raise RuntimeError(
+            "published_multisurface Stage 2 handoff requires finite "
+            "BOOTABILITY_SOLVED_IOTA."
+        )
+    return iota_value
+
+
+def complete_published_stage2_seed_surface(stage2_seed_surface, stage2_results, initial_G):
+    if stage2_seed_surface is None:
+        return None
+    iota = (
+        _required_published_seed_iota_from_results(stage2_results)
+        if stage2_seed_surface.iota is None
+        else float(stage2_seed_surface.iota)
+    )
+    G = (
+        _require_finite_explicit_G("outer", initial_G)
+        if stage2_seed_surface.G is None
+        else _require_finite_explicit_G("outer", stage2_seed_surface.G)
+    )
+    return WarmStartBoozerSeed(
+        surface=stage2_seed_surface.surface,
+        iota=iota,
+        G=G,
+        source_path=stage2_seed_surface.source_path,
+    )
+
+
+def _surface_data_entry(config, boozer_surface, provenance):
+    return {
+        "name": config["name"],
+        "seed_label": config["seed_label"],
+        "target_volume": config["target_volume"],
+        "boozer_surface": boozer_surface,
+        "initialization_provenance": provenance,
+    }
+
+
+def initialize_surface_data_in_config_order(
+    surface_configs,
+    *,
+    mpol,
+    ntor,
+    bs,
+    constraint_weight,
+    default_iota,
+    default_G,
+    boozer_I,
+    nfp,
+    stage2_seed_surface,
+    warm_start_surface_stem,
+):
+    surface_data = []
+    warm_start_surface_paths = []
+    warm_start_seeds_by_name = _load_required_warm_start_boozer_seeds(
+        surface_configs,
+        warm_start_surface_stem=warm_start_surface_stem,
+        stage2_seed_surface=stage2_seed_surface,
+    )
+    for config in surface_configs:
+        warm_start_seed = warm_start_seeds_by_name.get(config["name"])
+        if warm_start_seed is None:
+            (
+                initial_surface,
+                initial_surface_guess,
+                initial_iota,
+                initial_G,
+                warm_start_surface_path,
+            ) = resolve_initial_boozer_surface_seed(
+                config_name=config["name"],
+                default_surface=config["initial_surface"],
+                default_iota=default_iota,
+                default_G=default_G,
+                stage2_seed_surface=stage2_seed_surface,
+                warm_start_surface_stem=None,
+            )
+        else:
+            initial_surface = warm_start_seed.surface
+            initial_surface_guess = warm_start_seed.surface
+            initial_iota = (
+                default_iota if warm_start_seed.iota is None else warm_start_seed.iota
+            )
+            initial_G = default_G if warm_start_seed.G is None else warm_start_seed.G
+            warm_start_surface_path = str(warm_start_seed.source_path)
+        if warm_start_surface_path is not None:
+            warm_start_surface_paths.append(warm_start_surface_path)
+        boozer_surface = initialize_boozer_surface(
+            initial_surface,
+            mpol,
+            ntor,
+            bs,
+            config["target_volume"],
+            constraint_weight,
+            initial_iota,
+            initial_G,
+            boozer_I,
+            initial_surface_guess=initial_surface_guess,
+            nfp=nfp,
+        )
+        provenance = (
+            "warm_start_artifact"
+            if warm_start_surface_path is not None
+            else "stage2_outer_seed"
+            if stage2_seed_surface is not None and config["name"] == "outer"
+            else "wout_reference"
+        )
+        surface_data.append(_surface_data_entry(config, boozer_surface, provenance))
+    return surface_data, warm_start_surface_paths
+
+
+def initialize_published_surface_data_from_stage2_seed(
+    surface_configs,
+    *,
+    mpol,
+    ntor,
+    bs,
+    constraint_weight,
+    boozer_I,
+    nfp,
+    stage2_seed_surface,
+):
+    """Solve published stacks outer-to-inner, then return inner-to-outer data."""
+    _require_published_stage2_solved_seed(stage2_seed_surface)
+    configs_by_name = {config["name"]: config for config in surface_configs}
+    if set(configs_by_name) != {"inner0", "inner1", "outer"}:
+        raise RuntimeError(
+            "published_multisurface continuation expects inner0, inner1, outer."
+        )
+
+    outer_config = configs_by_name["outer"]
+    outer_iota = float(stage2_seed_surface.iota)
+    outer_G = _require_finite_explicit_G("outer", stage2_seed_surface.G)
+    outer_boozer_surface = initialize_boozer_surface(
+        stage2_seed_surface.surface,
+        mpol,
+        ntor,
+        bs,
+        outer_config["target_volume"],
+        constraint_weight,
+        outer_iota,
+        outer_G,
+        boozer_I,
+        initial_surface_guess=stage2_seed_surface.surface,
+        nfp=nfp,
+    )
+    solved_by_name = {
+        "outer": _surface_data_entry(
+            outer_config,
+            outer_boozer_surface,
+            "stage2_outer_seed",
+        )
+    }
+    previous_boozer_surface = outer_boozer_surface
+    for surface_name, provenance in (
+        ("inner1", "outer_continuation_inner1"),
+        ("inner0", "inner1_continuation_inner0"),
+    ):
+        config = configs_by_name[surface_name]
+        continuation_surface = contract_surface_to_target_volume(
+            previous_boozer_surface.surface,
+            config["target_volume"],
+        )
+        boozer_surface = initialize_boozer_surface(
+            continuation_surface,
+            mpol,
+            ntor,
+            bs,
+            config["target_volume"],
+            constraint_weight,
+            _boozer_res_scalar(previous_boozer_surface, "iota"),
+            _require_finite_explicit_G(
+                surface_name,
+                _boozer_res_scalar(previous_boozer_surface, "G"),
+            ),
+            boozer_I,
+            initial_surface_guess=continuation_surface,
+            nfp=nfp,
+        )
+        solved_by_name[surface_name] = _surface_data_entry(
+            config,
+            boozer_surface,
+            provenance,
+        )
+        previous_boozer_surface = boozer_surface
+
+    ordered_surface_data = [
+        solved_by_name[name] for name in ("inner0", "inner1", "outer")
+    ]
+    _require_published_volume_order(ordered_surface_data)
+    _require_published_G_consistency(ordered_surface_data)
+    return ordered_surface_data, []
+
+
+def initialize_surface_data_for_contract(
+    surface_configs,
+    *,
+    surface_mode_contract,
+    mpol,
+    ntor,
+    bs,
+    constraint_weight,
+    default_iota,
+    default_G,
+    boozer_I,
+    nfp,
+    stage2_seed_surface,
+    warm_start_surface_stem,
+):
+    if (
+        surface_mode_contract.mode == PUBLISHED_MULTISURFACE
+        and warm_start_surface_stem is None
+    ):
+        return initialize_published_surface_data_from_stage2_seed(
+            surface_configs,
+            mpol=mpol,
+            ntor=ntor,
+            bs=bs,
+            constraint_weight=constraint_weight,
+            boozer_I=boozer_I,
+            nfp=nfp,
+            stage2_seed_surface=stage2_seed_surface,
+        )
+
+    standard_stage2_seed_surface = (
+        None
+        if surface_mode_contract.mode == PUBLISHED_MULTISURFACE
+        and warm_start_surface_stem is not None
+        else stage2_seed_surface
+    )
+    return initialize_surface_data_in_config_order(
+        surface_configs,
+        mpol=mpol,
+        ntor=ntor,
+        bs=bs,
+        constraint_weight=constraint_weight,
+        default_iota=default_iota,
+        default_G=default_G,
+        boozer_I=boozer_I,
+        nfp=nfp,
+        stage2_seed_surface=standard_stage2_seed_surface,
+        warm_start_surface_stem=warm_start_surface_stem,
     )
 
 
@@ -2290,7 +2764,7 @@ def current_single_stage_common_hardware_snapshot_kwargs(
         "coil_length": resolved_coil_length,
         "length_target": resolved_length_target,
         "poloidal_extent_rad": resolved_poloidal_extent_rad,
-        "poloidal_extent_threshold_rad": POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+        "poloidal_extent_threshold_rad": SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
         "tf_current_A": resolved_tf_current_A,
         "tf_current_limit_A": (
             None if resolved_tf_current_A is None else TF_CURRENT_HARD_LIMIT_A
@@ -2324,8 +2798,8 @@ def current_single_stage_hardware_snapshot_kwargs(
             "coil_width": (
                 None if coil_width_obj is None else float(coil_width_obj.J())
             ),
-            "width_min_threshold": BANANA_WIDTH_MIN_M,
-            "width_max_threshold": BANANA_WIDTH_MAX_M,
+            "width_min_threshold": SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
+            "width_max_threshold": SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             "self_intersect_penalty": (
                 None
                 if self_intersect_obj is None
@@ -2338,7 +2812,14 @@ def current_single_stage_hardware_snapshot_kwargs(
 
 
 def current_single_stage_search_hardware_snapshot_kwargs():
-    return current_single_stage_hardware_snapshot_kwargs()
+    snapshot_kwargs = current_single_stage_hardware_snapshot_kwargs()
+    snapshot_kwargs.update(
+        {
+            "lcfs_major_radius_threshold": TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+            "lcfs_minor_radius_threshold": TARGET_LCFS_MAX_MINOR_RADIUS_M,
+        }
+    )
+    return snapshot_kwargs
 
 
 def current_single_stage_alm_banana_current():
@@ -2915,6 +3396,9 @@ class RunIdentityConfig:
     single_stage_poloidal_weight: float
     single_stage_width_weight: float
     single_stage_selfint_weight: float
+    single_stage_poloidal_threshold_rad: float
+    single_stage_width_min_threshold: float
+    single_stage_width_max_threshold: float
     curvature_weight: float
     curvature_threshold: float
     banana_surf_radius: float
@@ -2939,6 +3423,8 @@ class RunIdentityConfig:
     alm_feas_tol: float
     alm_stationarity_tol: float
     num_surfaces: int
+    surface_mode: str
+    surface_label_fractions: tuple[float, ...]
     inner_surface_ratio: float
     surface_gap_threshold: float
     multisurface_ramp_iterations: int
@@ -3410,7 +3896,7 @@ def make_run_identity_config(
             args.single_stage_goal_mode if args.single_stage_goal_mode != "target" else None
         ),
         frontier_kam_min=(
-            float(args.frontier_kam_min)
+            float(getattr(args, "frontier_kam_min", 0.0))
             if args.single_stage_goal_mode == "frontier"
             else None
         ),
@@ -3423,6 +3909,21 @@ def make_run_identity_config(
         single_stage_poloidal_weight=args.single_stage_poloidal_weight,
         single_stage_width_weight=args.single_stage_width_weight,
         single_stage_selfint_weight=args.single_stage_selfint_weight,
+        single_stage_poloidal_threshold_rad=getattr(
+            args,
+            "single_stage_poloidal_threshold_rad",
+            POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+        ),
+        single_stage_width_min_threshold=getattr(
+            args,
+            "single_stage_width_min_threshold",
+            BANANA_WIDTH_MIN_M,
+        ),
+        single_stage_width_max_threshold=getattr(
+            args,
+            "single_stage_width_max_threshold",
+            BANANA_WIDTH_MAX_M,
+        ),
         curvature_weight=args.curvature_weight,
         curvature_threshold=args.curvature_threshold,
         banana_surf_radius=banana_surf_radius,
@@ -3459,6 +3960,10 @@ def make_run_identity_config(
         alm_feas_tol=args.alm_feas_tol,
         alm_stationarity_tol=args.alm_stationarity_tol,
         num_surfaces=resolved_num_surfaces,
+        surface_mode=resolved_contract.mode,
+        surface_label_fractions=tuple(
+            float(value) for value in resolved_contract.label_fractions
+        ),
         inner_surface_ratio=resolved_inner_surface_ratio,
         surface_gap_threshold=args.surface_gap_threshold,
         multisurface_ramp_iterations=args.multisurface_ramp_iterations,
@@ -3566,7 +4071,18 @@ def validate_surface_mode_constraint_args(
     ):
         raise ValueError(
             "--constraint-method=alm currently requires "
-            f"--surface-mode={SINGLE_SURFACE} or --surface-mode={EXPERIMENTAL_MULTISURFACE}"
+            f"--surface-mode={SINGLE_SURFACE}, "
+            f"--surface-mode={EXPERIMENTAL_MULTISURFACE}, or "
+            f"--surface-mode={PUBLISHED_MULTISURFACE}"
+        )
+    if (
+        surface_mode_contract.mode == PUBLISHED_MULTISURFACE
+        and getattr(args, "single_stage_goal_mode", "target") == "frontier"
+    ):
+        raise ValueError(
+            "published_multisurface v1 supports only "
+            "--single-stage-goal-mode=target; frontier mode is not enabled for "
+            "the published fixed-stack contract."
         )
 
 
@@ -4423,7 +4939,7 @@ def build_single_stage_objective_bundle(
     JPoloidalExtent = PoloidalExtent(
         banana_curves[0],
         VACUUM_VESSEL_MAJOR_RADIUS_M,
-        POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+        SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
     )
     JCoilWidth = EllipseWidth(
         banana_curves[0],
@@ -4456,6 +4972,8 @@ def build_single_stage_objective_bundle(
         POLOIDAL_EXTENT_WEIGHT=SINGLE_STAGE_POLOIDAL_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
         JCurveLengthMin=JCurveLengthMin,
+        width_min_threshold=SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
+        width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
     )
     return {
         "surface_iota_terms": surface_iota_terms,
@@ -4544,8 +5062,11 @@ def apply_single_stage_objective_bundle(objective_bundle):
 def refresh_accepted_search_state(run_dict, accepted_stage):
     JF.x = run_dict["accepted_x"].copy()
     restore_surface_states(surface_data, run_dict["surface_state"])
-    current_search_weights = build_surface_search_weights(
-        len(surface_data),
+    active_surface_mode_contract = current_surface_mode_contract_for_surface_count(
+        len(surface_data)
+    )
+    current_search_weights = build_surface_search_weights_for_contract(
+        active_surface_mode_contract,
         run_dict["accepted_iterations"],
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
@@ -4841,10 +5362,22 @@ def evaluate_total_objective(
     JCurveLengthMin=None,
     JCoilWidth=None,
     WIDTH_WEIGHT=0.0,
+    width_min_threshold=None,
+    width_max_threshold=None,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
+    resolved_width_min_threshold = (
+        SINGLE_STAGE_WIDTH_MIN_THRESHOLD
+        if width_min_threshold is None
+        else width_min_threshold
+    )
+    resolved_width_max_threshold = (
+        SINGLE_STAGE_WIDTH_MAX_THRESHOLD
+        if width_max_threshold is None
+        else width_max_threshold
+    )
     return apply_frontier_scalarization_override(
         _evaluate_total_objective_impl(
             surface_weights,
@@ -4872,6 +5405,8 @@ def evaluate_total_objective(
             JCurveLengthMin=JCurveLengthMin,
             JCoilWidth=JCoilWidth,
             WIDTH_WEIGHT=WIDTH_WEIGHT,
+            width_min_threshold=resolved_width_min_threshold,
+            width_max_threshold=resolved_width_max_threshold,
             JCurveSelfIntersect=JCurveSelfIntersect,
             SELFINT_WEIGHT=SELFINT_WEIGHT,
         ),
@@ -4995,15 +5530,15 @@ def evaluate_alm_objective(
             banana_currents=current_single_stage_alm_banana_currents(),
             banana_current_threshold=args.banana_current_max_A,
             JPoloidalExtent=JPoloidalExtent,
-            poloidal_extent_threshold=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+            poloidal_extent_threshold=SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
             poloidal_extent_smoothing=curvature_smoothing,
             poloidal_extent_constraint_fn=_smooth_max_poloidal_extent_signed_constraint,
             poloidal_extent_constraint_with_hard_signal_fn=(
                 smooth_max_poloidal_extent_signed_constraint_with_hard_signal
             ),
             JCoilWidth=JCoilWidth,
-            width_min_threshold=BANANA_WIDTH_MIN_M,
-            width_max_threshold=BANANA_WIDTH_MAX_M,
+            width_min_threshold=SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
+            width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             JCurveSelfIntersect=JCurveSelfIntersect,
             lcfs_surface=outer_surface_data["boozer_surface"].surface,
             lcfs_major_radius_threshold=TARGET_LCFS_MAX_MAJOR_RADIUS_M,
@@ -5062,6 +5597,8 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             JCurveLengthMin=JCurveLengthMin,
             JCoilWidth=JCoilWidth,
             WIDTH_WEIGHT=SINGLE_STAGE_WIDTH_WEIGHT,
+            width_min_threshold=SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
+            width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             JCurveSelfIntersect=JCurveSelfIntersect,
             SELFINT_WEIGHT=SINGLE_STAGE_SELFINT_WEIGHT,
         )
@@ -6187,15 +6724,18 @@ def evaluate_banana_current_fd_probe(
     accepted_iterations,
 ):
     reference_x = np.asarray(reference_x, dtype=float)
-    search_gate = build_surface_search_gate(
-        len(surface_data),
+    active_surface_mode_contract = current_surface_mode_contract_for_surface_count(
+        len(surface_data)
+    )
+    search_gate = build_surface_search_gate_for_contract(
+        active_surface_mode_contract,
         accepted_iterations,
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
     )
-    search_surface_weights = build_surface_search_weights(
-        len(surface_data),
+    search_surface_weights = build_surface_search_weights_for_contract(
+        active_surface_mode_contract,
         accepted_iterations,
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
@@ -7334,8 +7874,11 @@ def diagnostic_search_eval_for_current_state(run_dict):
         return search_eval
     surface_weights = search_eval.get("surface_weights")
     if surface_weights is None:
-        surface_weights = build_surface_search_weights(
-            len(surface_data),
+        active_surface_mode_contract = current_surface_mode_contract_for_surface_count(
+            len(surface_data)
+        )
+        surface_weights = build_surface_search_weights_for_contract(
+            active_surface_mode_contract,
             run_dict.get("accepted_iterations", 0),
             MULTISURFACE_RAMP_ITERATIONS,
             INNER_SURFACE_INITIAL_WEIGHT,
@@ -7564,6 +8107,8 @@ def build_total_objective(
     JCurveLengthMin=None,
     JCoilWidth=None,
     WIDTH_WEIGHT=0.0,
+    width_min_threshold=BANANA_WIDTH_MIN_M,
+    width_max_threshold=BANANA_WIDTH_MAX_M,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
 ):
@@ -7588,6 +8133,8 @@ def build_total_objective(
         JCurveLengthMin=JCurveLengthMin,
         JCoilWidth=JCoilWidth,
         WIDTH_WEIGHT=WIDTH_WEIGHT,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
         JCurveSelfIntersect=JCurveSelfIntersect,
         SELFINT_WEIGHT=SELFINT_WEIGHT,
     )
@@ -7962,8 +8509,11 @@ def evaluate_search_step(x):
     run_dict.setdefault("curvature_precheck_rejects", 0)
     run_dict.setdefault("curvature_overcap_boozer_evals", 0)
     run_dict.setdefault("curvature_overcap_boozer_evals_this_iteration", 0)
-    search_gate = build_surface_search_gate(
-        len(surface_data),
+    active_surface_mode_contract = current_surface_mode_contract_for_surface_count(
+        len(surface_data)
+    )
+    search_gate = build_surface_search_gate_for_contract(
+        active_surface_mode_contract,
         run_dict['accepted_iterations'],
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
@@ -8002,8 +8552,8 @@ def evaluate_search_step(x):
     repair_phase1_mode_active = bool(run_dict.get("phase1_repair_mode_active", False))
 
     if success:
-        search_surface_weights = build_surface_search_weights(
-            len(surface_data),
+        search_surface_weights = build_surface_search_weights_for_contract(
+            active_surface_mode_contract,
             run_dict['accepted_iterations'],
             MULTISURFACE_RAMP_ITERATIONS,
             INNER_SURFACE_INITIAL_WEIGHT,
@@ -8379,14 +8929,17 @@ def callback(x):
     outer_entry = surface_data[-1]
 
     # Store last accepted state
-    search_surface_weights = build_surface_search_weights(
-        len(surface_data),
+    active_surface_mode_contract = current_surface_mode_contract_for_surface_count(
+        len(surface_data)
+    )
+    search_surface_weights = build_surface_search_weights_for_contract(
+        active_surface_mode_contract,
         run_dict['accepted_iterations'],
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
     )
-    search_gate = build_surface_search_gate(
-        len(surface_data),
+    search_gate = build_surface_search_gate_for_contract(
+        active_surface_mode_contract,
         run_dict['accepted_iterations'],
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
@@ -8734,6 +9287,9 @@ JCurveSelfIntersect = None
 SINGLE_STAGE_POLOIDAL_WEIGHT = POLOIDAL_EXTENT_WEIGHT
 SINGLE_STAGE_WIDTH_WEIGHT = 0.0
 SINGLE_STAGE_SELFINT_WEIGHT = 0.0
+SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD = POLOIDAL_EXTENT_HALF_WIDTH_RAD
+SINGLE_STAGE_WIDTH_MIN_THRESHOLD = BANANA_WIDTH_MIN_M
+SINGLE_STAGE_WIDTH_MAX_THRESHOLD = BANANA_WIDTH_MAX_M
 EFFECTIVE_RES_WEIGHT = 0.0
 EFFECTIVE_IOTAS_WEIGHT = 0.0
 EFFECTIVE_VOLUME_WEIGHT = 0.0
@@ -8856,6 +9412,7 @@ if __name__ == "__main__":
         finite_current_mode=finite_current_mode,
         default_plasma_current_A=float(stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)),
         num_surfaces=effective_num_surfaces,
+        surface_mode_contract=surface_mode_contract,
     )
     boozer_I = plasma_current_settings["boozer_I"]
     plasma_current_A = plasma_current_settings["plasma_current_A"]
@@ -8929,6 +9486,10 @@ if __name__ == "__main__":
         CONSTRAINT_WEIGHT,
         surface_mode_contract=surface_mode_contract,
     )
+    validate_surface_mode_constraint_args(
+        args,
+        surface_mode_contract=surface_mode_contract,
+    )
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
     TOPOLOGY_GATE_FIELDLINES = args.topology_gate_fieldlines
@@ -8993,15 +9554,14 @@ if __name__ == "__main__":
     )
 
     # Initialize the boundary magnetic surface and scale it to the target major radius
-    surface_configs = build_surface_configs(
+    surface_configs = build_surface_configs_for_contract(
         file_loc,
         nphi,
         ntheta,
         s,
         R0,
         vol_target,
-        effective_num_surfaces,
-        effective_inner_surface_ratio,
+        surface_mode_contract,
     )
     warm_start_surface_stem = _resolved_optional_path_string(
         args.warm_start_surface_stem
@@ -9102,49 +9662,35 @@ if __name__ == "__main__":
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # Initialize Boozer surfaces with target parameters
-    surface_data = []
-    warm_start_surface_paths = []
     stage2_seed_surface = (
         None
         if stage2_seed_surf_path is None
         else load_warm_start_boozer_seed(stage2_seed_surf_path)
     )
-    for config in surface_configs:
-        (
-            initial_surface,
-            initial_surface_guess,
-            initial_iota,
-            initial_G,
-            warm_start_surface_path,
-        ) = resolve_initial_boozer_surface_seed(
-            config_name=config["name"],
-            default_surface=config["initial_surface"],
-            default_iota=iota_target,
-            default_G=G0,
-            stage2_seed_surface=stage2_seed_surface,
-            warm_start_surface_stem=warm_start_surface_stem,
+    if (
+        stage2_seed_surface is not None
+        and surface_mode_contract.mode == PUBLISHED_MULTISURFACE
+        and warm_start_surface_stem is None
+    ):
+        stage2_seed_surface = complete_published_stage2_seed_surface(
+            stage2_seed_surface,
+            stage2_results,
+            G0,
         )
-        if warm_start_surface_path is not None:
-            warm_start_surface_paths.append(warm_start_surface_path)
-        boozer_surface = initialize_boozer_surface(
-            initial_surface,
-            mpol,
-            ntor,
-            bs,
-            config["target_volume"],
-            CONSTRAINT_WEIGHT,
-            initial_iota,
-            initial_G,
-            boozer_I,
-            initial_surface_guess=initial_surface_guess,
-            nfp=banana_surf_nfp,
-        )
-        surface_data.append({
-            "name": config["name"],
-            "seed_label": config["seed_label"],
-            "target_volume": config["target_volume"],
-            "boozer_surface": boozer_surface,
-        })
+    surface_data, warm_start_surface_paths = initialize_surface_data_for_contract(
+        surface_configs,
+        surface_mode_contract=surface_mode_contract,
+        mpol=mpol,
+        ntor=ntor,
+        bs=bs,
+        constraint_weight=CONSTRAINT_WEIGHT,
+        default_iota=iota_target,
+        default_G=G0,
+        boozer_I=boozer_I,
+        nfp=banana_surf_nfp,
+        stage2_seed_surface=stage2_seed_surface,
+        warm_start_surface_stem=warm_start_surface_stem,
+    )
     outer_surface_data = surface_data[-1]
 
     # ==============================================================================
@@ -9190,6 +9736,24 @@ if __name__ == "__main__":
     SINGLE_STAGE_POLOIDAL_WEIGHT = float(args.single_stage_poloidal_weight)
     SINGLE_STAGE_WIDTH_WEIGHT = float(args.single_stage_width_weight)
     SINGLE_STAGE_SELFINT_WEIGHT = float(args.single_stage_selfint_weight)
+    SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD = float(
+        args.single_stage_poloidal_threshold_rad
+    )
+    SINGLE_STAGE_WIDTH_MIN_THRESHOLD = float(
+        args.single_stage_width_min_threshold
+    )
+    SINGLE_STAGE_WIDTH_MAX_THRESHOLD = float(
+        args.single_stage_width_max_threshold
+    )
+    if SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD <= 0.0:
+        raise ValueError("--single-stage-poloidal-threshold-rad must be positive.")
+    if SINGLE_STAGE_WIDTH_MIN_THRESHOLD <= 0.0:
+        raise ValueError("--single-stage-width-min-threshold must be positive.")
+    if SINGLE_STAGE_WIDTH_MAX_THRESHOLD < SINGLE_STAGE_WIDTH_MIN_THRESHOLD:
+        raise ValueError(
+            "--single-stage-width-max-threshold must be >= "
+            "--single-stage-width-min-threshold."
+        )
     RES_WEIGHT = args.res_weight
     IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight
@@ -9308,8 +9872,8 @@ if __name__ == "__main__":
     # INITIALIZE OPTIMIZATION STATE
     # ==============================================================================
     # Initialize run_dict after JF and boozer_surface are ready
-    initial_search_surface_weights = build_surface_search_weights(
-        len(surface_data),
+    initial_search_surface_weights = build_surface_search_weights_for_contract(
+        surface_mode_contract,
         0,
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
@@ -9326,8 +9890,8 @@ if __name__ == "__main__":
             effective_res_weight=EFFECTIVE_RES_WEIGHT,
         )
     )
-    initial_search_gate = build_surface_search_gate(
-        len(surface_data),
+    initial_search_gate = build_surface_search_gate_for_contract(
+        surface_mode_contract,
         0,
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
@@ -9802,10 +10366,6 @@ if __name__ == "__main__":
     bridge_local_donor_ready = False
     final_source_stage = stage
     alm_result = None
-    validate_surface_mode_constraint_args(
-        args,
-        surface_mode_contract=surface_mode_contract,
-    )
     if args.init_only:
         res_nit = 0
         final_volume = initial_volume
@@ -10595,6 +11155,9 @@ if __name__ == "__main__":
         "SINGLE_STAGE_POLOIDAL_WEIGHT": SINGLE_STAGE_POLOIDAL_WEIGHT,
         "SINGLE_STAGE_WIDTH_WEIGHT": SINGLE_STAGE_WIDTH_WEIGHT,
         "SINGLE_STAGE_SELFINT_WEIGHT": SINGLE_STAGE_SELFINT_WEIGHT,
+        "SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD": SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
+        "SINGLE_STAGE_WIDTH_MIN_THRESHOLD": SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
+        "SINGLE_STAGE_WIDTH_MAX_THRESHOLD": SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
         "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
         "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
         "LENGTH_WEIGHT": LENGTH_WEIGHT,
