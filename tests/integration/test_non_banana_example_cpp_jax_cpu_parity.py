@@ -148,6 +148,62 @@ print(json.dumps({
     assert set(observed["device_platforms"]) == {"cpu"}
 
 
+def test_run_metadata_uses_provenance_env_in_source_archive(monkeypatch, tmp_path):
+    monkeypatch.setattr(harness, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("SIMSOPT_REPO_SHA", "abc123")
+    monkeypatch.setenv("SIMSOPT_GIT_STATUS_SHORT", " M changed.py")
+
+    real_check_output = subprocess.check_output
+
+    def fail_git_shellout(command, *args, **kwargs):
+        if isinstance(command, (list, tuple)) and command[:1] == ["git"]:
+            raise AssertionError("source-archive provenance must not shell out to git")
+        return real_check_output(command, *args, **kwargs)
+
+    monkeypatch.setattr(harness.subprocess, "check_output", fail_git_shellout)
+
+    metadata = harness.build_run_metadata(git_sha_override=None)
+
+    assert metadata["git_head"] == "abc123"
+    assert metadata["git_branch"] == "source-archive"
+    assert metadata["dirty_tree_summary"] == {
+        "available": True,
+        "is_dirty": True,
+        "entry_count": 1,
+        "entries": [" M changed.py"],
+    }
+
+
+def test_run_metadata_preserves_git_checkout_dirty_summary(monkeypatch, tmp_path):
+    monkeypatch.setattr(harness, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("SIMSOPT_REPO_SHA", "abc123")
+    monkeypatch.setenv("SIMSOPT_GIT_STATUS_SHORT", " M stale-env.py")
+    (tmp_path / ".git").write_text(
+        "gitdir: /tmp/source-worktree-git-dir\n",
+        encoding="utf-8",
+    )
+
+    def fake_check_output(command, *args, **kwargs):
+        if command == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return "feature/worktree\n"
+        if command == ["git", "status", "--porcelain"]:
+            return " M tracked.py\n?? generated.txt\n"
+        raise AssertionError(f"unexpected git command: {command!r}")
+
+    monkeypatch.setattr(harness.subprocess, "check_output", fake_check_output)
+
+    metadata = harness.build_run_metadata(git_sha_override=None)
+
+    assert metadata["git_head"] == "abc123"
+    assert metadata["git_branch"] == "feature/worktree"
+    assert metadata["dirty_tree_summary"] == {
+        "available": True,
+        "is_dirty": True,
+        "entry_count": 2,
+        "entries": [" M tracked.py", "?? generated.txt"],
+    }
+
+
 def test_cli_help_describes_cuda_followup_without_cpu_only_description():
     completed = subprocess.run(
         [

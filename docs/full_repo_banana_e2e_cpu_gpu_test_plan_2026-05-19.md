@@ -640,7 +640,7 @@ export SIMSOPT_JAX_PLATFORM=cuda
 export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM=cuda
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true --xla_gpu_enable_command_buffer="
 export XLA_PYTHON_CLIENT_PREALLOCATE=true
 export SIMSOPT_JAX_GPU_PREALLOCATE=true
 
@@ -723,6 +723,10 @@ Acceptance:
 - [ ] Single-stage outer-iteration parity ladder records performance and memory
   for every rung, including CPU/JAX elapsed time, peak RSS, peak GPU memory,
   and per-rung parity deltas.
+- [ ] Single-stage outer-iteration parity ladder records
+  `--xla_gpu_enable_command_buffer=` in `XLA_FLAGS`; this disables CUDA command
+  buffers for the multi-rung ladder after the regular-GPU run exhausted VRAM
+  while instantiating hundreds of alive CUDA graphs.
 - [ ] Each CUDA artifact records CUDA backend, devices, x64, `nvidia-smi`,
   driver/runtime, repo SHA, dirty status, and memory.
 - [ ] Any artifact with CPU backend is invalid for GPU signoff.
@@ -735,18 +739,22 @@ single-stage fixture before interpreting larger single-stage outer-loop timing:
 - SciPy L-BFGS CPU reference lane
 - private on-device L-BFGS target lane
 - SciPy-controlled full JAX graph L-BFGS target lane
-- Optimistix L-BFGS target lane
 - Optax L-BFGS target lane
+- Optimistix L-BFGS diagnostic lane
 
 This matrix has two different contracts. The private on-device and
 SciPy-controlled full-graph lanes are SciPy/SIMSOPT trajectory-parity lanes:
 the final single-stage metrics must match the CPU reference after the same
-outer-iteration budget. The Optax and Optimistix lanes are public optimizer
-comparison lanes: their fixed-candidate objective/gradient contract, strict
-transfer behavior, performance, and memory are recorded, but their free-running
-accepted-step trajectory is not assumed to be identical to SciPy L-BFGS-B
-unless a same-candidate replay proves that the remaining split is optimizer
-control rather than objective/gradient math.
+outer-iteration budget. The Optax lane is the public optimizer comparison lane:
+its fixed-candidate objective/gradient contract, strict transfer behavior,
+performance, and memory are recorded, but its free-running accepted-step
+trajectory is not assumed to be identical to SciPy L-BFGS-B unless a
+same-candidate replay proves that the remaining split is optimizer control
+rather than objective/gradient math. Optimistix L-BFGS remains diagnostic on
+JAX `0.10.0` / Optimistix `0.1.0`: the focused GPU probe below records an
+upstream full-`jax.transfer_guard("disallow")` failure independent of SIMSOPT,
+so it is not part of the strict signoff matrix until that upstream behavior is
+clean.
 
 Use a single Slurm job for the matrix. Do not submit one job per backend.
 Each backend rung must run `benchmarks/single_stage_init_parity.py` in
@@ -758,11 +766,11 @@ SciPy/C++ CPU path, and its target lane is selected by `--optimizer-backend`.
 The target backends are:
 
 ```bash
-for backend in ondevice scipy-jax-fullgraph optimistix-lbfgs optax-lbfgs; do
+for backend in ondevice scipy-jax-fullgraph optax-lbfgs; do
   rung_dir="${RESULTS_ROOT}/wave4_gpu_parity/optimizer_matrix/${backend}"
   mkdir -p "${rung_dir}"
   trace_args=()
-  if [[ "${backend}" == "optax-lbfgs" || "${backend}" == "optimistix-lbfgs" ]]; then
+  if [[ "${backend}" == "optax-lbfgs" ]]; then
     trace_args+=(--record-objective-evaluation-trace)
   fi
   nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used,memory.total \
@@ -797,11 +805,15 @@ Acceptance:
 - [ ] The SciPy L-BFGS CPU reference lane is recorded in each rung.
 - [ ] The target backend's recorded optimizer method matches the requested
   public backend contract.
-- [ ] Public optimizer comparison rungs, `optax-lbfgs` and
-  `optimistix-lbfgs`, record strict-transfer status, same-candidate
-  objective/gradient replay when available, final metric deltas, timing, RSS,
-  and GPU memory. A final-metric split is accepted only as an optimizer-control
-  split after same-candidate objective/gradient parity is proven.
+- [ ] Public optimizer comparison rung `optax-lbfgs` records strict-transfer
+  status, same-candidate objective/gradient replay when available, final metric
+  deltas, timing, RSS, and GPU memory. A final-metric split is accepted only as
+  an optimizer-control split after same-candidate objective/gradient parity is
+  proven.
+- [ ] Optimistix L-BFGS full-strict status is recorded as a separate diagnostic
+  against the current Optimistix/Equinox/JAX versions; it is not a production
+  GPU signoff blocker until the independent upstream strict-transfer probe is
+  clean.
 - [ ] Each rung records fixed-state precision metrics, final metric deltas,
   CPU wall time, target wall time, Slurm step `MaxRSS`, `/usr/bin/time -v`
   launcher/process RSS as applicable, and sampled peak GPU memory.

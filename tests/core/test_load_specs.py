@@ -16,6 +16,7 @@ from simsopt._core.optimizable import load  # noqa: E402
 from simsopt.jax_core.field import grouped_biot_savart_B_from_spec  # noqa: E402
 from simsopt.jax_core.specs import (  # noqa: E402
     BiotSavartSpec,
+    CoilGroupSpec,
     GroupedCoilSetSpec,
     SurfaceRZFourierSpec,
 )
@@ -135,6 +136,37 @@ def test_biot_savart_restart_spec_round_trips_with_dof_extraction(tmp_path):
         np.asarray(legacy_bs.B()),
         rtol=1e-12,
         atol=1e-12,
+    )
+
+
+def test_biot_savart_spec_writer_uses_explicit_jax_host_boundary(tmp_path):
+    jax = pytest.importorskip("jax")
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    group = CoilGroupSpec(
+        gammas=jax.device_put(np.zeros((1, 2, 3), dtype=dtype)),
+        gammadashs=jax.device_put(np.ones((1, 2, 3), dtype=dtype)),
+        currents=jax.device_put(np.asarray([1.5], dtype=dtype)),
+        coil_indices=(0,),
+    )
+    spec = GroupedCoilSetSpec(groups=(group,))
+    output = tmp_path / "strict_biot_savart_spec.json"
+
+    with jax.transfer_guard("disallow"):
+        save_biot_savart_spec(output, spec)
+
+    loaded = load_specs(output)["coil_set_spec"]
+    assert isinstance(loaded, GroupedCoilSetSpec)
+    np.testing.assert_allclose(
+        np.asarray(loaded.groups[0].gammas),
+        np.asarray(group.gammas),
+    )
+    np.testing.assert_allclose(
+        np.asarray(loaded.groups[0].gammadashs),
+        np.asarray(group.gammadashs),
+    )
+    np.testing.assert_allclose(
+        np.asarray(loaded.groups[0].currents),
+        np.asarray(group.currents),
     )
 
 

@@ -385,7 +385,9 @@ class GSONEncoder(json.JSONEncoder):
             return {"@module": "uuid", "@class": "UUID", "string": str(o)}
 
         if jax is not None and isinstance(o, jax.Array):
-            o = np.asarray(o)
+            from .jax_host_boundary import host_array
+
+            o = host_array(o)
 
         if isinstance(o, np.ndarray):
             if str(o.dtype).startswith("complex"):
@@ -643,7 +645,12 @@ def _decode_jax_core_spec_dataclass(
 
 
 def _json_array_dict(value: object) -> dict:
-    arr = np.asarray(value)
+    if jax is not None and isinstance(value, jax.Array):
+        from .jax_host_boundary import host_array
+
+        arr = host_array(value)
+    else:
+        arr = np.asarray(value)
     if arr.dtype.kind == "c":
         data = [arr.real.tolist(), arr.imag.tolist()]
     else:

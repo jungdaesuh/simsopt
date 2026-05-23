@@ -189,6 +189,7 @@ from benchmarks.run_code_benchmark_common import (  # noqa: E402
 )
 from benchmarks.validation_ladder_common import (  # noqa: E402
     current_xla_cuda_metadata,
+    get_git_sha,
     query_nvidia_smi_facts,
 )
 from benchmarks.validation_ladder_contract import (  # noqa: E402
@@ -2286,14 +2287,16 @@ def _filter_result_for_lanes(
 
 
 def _git_head() -> str:
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(REPO_ROOT),
-        text=True,
-    ).strip()
+    return get_git_sha()
+
+
+def _has_git_metadata() -> bool:
+    return (REPO_ROOT / ".git").exists()
 
 
 def _git_branch() -> str:
+    if not _has_git_metadata():
+        return "source-archive"
     return subprocess.check_output(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=str(REPO_ROOT),
@@ -2302,11 +2305,14 @@ def _git_branch() -> str:
 
 
 def _dirty_tree_summary() -> Mapping[str, Any]:
-    porcelain = subprocess.check_output(
-        ["git", "status", "--porcelain"],
-        cwd=str(REPO_ROOT),
-        text=True,
-    )
+    if not _has_git_metadata() and "SIMSOPT_GIT_STATUS_SHORT" in os.environ:
+        porcelain = os.environ["SIMSOPT_GIT_STATUS_SHORT"]
+    else:
+        porcelain = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=str(REPO_ROOT),
+            text=True,
+        )
     lines = [line for line in porcelain.splitlines() if line.strip()]
     return {
         "available": True,
