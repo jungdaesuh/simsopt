@@ -718,9 +718,10 @@ def parse_args():
             "evaluations; 'scipy-jax-fullgraph' keeps SciPy control over the "
             "full JAX target objective graph; 'optax-lbfgs' and "
             "'optimistix-lbfgs' run public JAX L-BFGS drivers on the same "
-            "target objective as 'ondevice'. Defaults to 'ondevice' on the JAX "
-            "backend and 'scipy' on the CPU/reference backend when no explicit "
-            "override is provided."
+            "target objective as 'ondevice'. Defaults to 'scipy' on the "
+            "CPU/reference backend. On the JAX backend, defaults to "
+            "'scipy-jax-fullgraph' if running on a JAX-CPU platform (to save "
+            "memory) and 'ondevice' if running on a GPU/CUDA platform."
         ),
     )
     parser.add_argument(
@@ -772,6 +773,19 @@ def parse_args():
         args.least_squares_algorithm,
     )
     validate_stage2_constraint_method_args(args)
+
+    # Warn when explicit CPU ondevice selects the memory-heavy compiled optimizer loop.
+    if args.backend == "jax" and args.optimizer_backend == "ondevice":
+        from simsopt.backend.runtime import get_backend_config
+        config = get_backend_config()
+        if config.jax_platform == "cpu":
+            LOGGER.warning(
+                "WARNING: Running JAX 'ondevice' optimizer on CPU. "
+                "This compiles the entire optimization loop in JAX and requires significant host RAM, "
+                "which may trigger an Out-Of-Memory (OOM) crash. "
+                "Consider using --optimizer-backend scipy-jax-fullgraph to reduce memory usage."
+            )
+
     return args
 
 
@@ -780,6 +794,10 @@ def resolve_stage2_default_optimizer_backend(field_backend, optimizer_backend=No
     if optimizer_backend is not None:
         return optimizer_backend
     if field_backend == "jax":
+        from simsopt.backend.runtime import get_backend_config
+        config = get_backend_config()
+        if config.jax_platform == "cpu":
+            return "scipy-jax-fullgraph"
         return "ondevice"
     return "scipy"
 

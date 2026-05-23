@@ -4360,8 +4360,9 @@ def parse_args():
             "while evaluating JAX wrapper value/grad. 'optax-lbfgs' and "
             "'optimistix-lbfgs' run public JAX L-BFGS drivers on the same "
             "target-lane scalar objective as 'ondevice'. Defaults to "
-            "'ondevice' on the JAX backend and 'scipy' on the CPU/reference "
-            "backend when no explicit override is provided."
+            "'scipy' on the CPU/reference backend. On the JAX backend, defaults to "
+            "'scipy-jax-fullgraph' if running on a JAX-CPU platform (to save "
+            "memory) and 'ondevice' if running on a GPU/CUDA platform."
         ),
     )
     parser.add_argument(
@@ -4687,6 +4688,20 @@ def parse_args():
             "target-lane profiling and diagnostic flags are only supported with "
             "--constraint-method=penalty"
         )
+
+    # Warn when explicit CPU ondevice selects the memory-heavy compiled optimizer loop.
+    if args.backend == "jax" and args.optimizer_backend == "ondevice":
+        from simsopt.backend.runtime import get_backend_config
+        config = get_backend_config()
+        if config.jax_platform == "cpu":
+            local_logger = logging.getLogger(__name__)
+            local_logger.warning(
+                "WARNING: Running JAX 'ondevice' optimizer on CPU. "
+                "This compiles the entire optimization loop in JAX and requires significant host RAM, "
+                "which may trigger an Out-Of-Memory (OOM) crash. "
+                "Consider using --optimizer-backend scipy-jax-fullgraph to reduce memory usage."
+            )
+
     return args
 
 
@@ -7772,6 +7787,10 @@ def resolve_single_stage_default_optimizer_backend(
     if optimizer_backend is not None:
         return optimizer_backend
     if field_backend == "jax":
+        from simsopt.backend.runtime import get_backend_config
+        config = get_backend_config()
+        if config.jax_platform == "cpu":
+            return "scipy-jax-fullgraph"
         return "ondevice"
     return "scipy"
 

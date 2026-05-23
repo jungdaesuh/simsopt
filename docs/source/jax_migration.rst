@@ -9,11 +9,12 @@ The CPU path remains the default and the correctness oracle.
 
 The trusted least-squares backend remains the native CPU/reference lane
 with ``optimizer_backend="scipy"``.
-High-level JAX backend flows now require ``optimizer_backend="ondevice"``,
-so Stage 2, single-stage, and Boozer LS execution no longer route through
-SciPy when ``backend="jax"`` is active. The remaining SciPy adapter is kept
-only as a CPU/reference oracle path, and it still crosses a host NumPy
-boundary by construction.
+High-level JAX backend flows use a platform-sensitive default optimizer lane:
+JAX CPU defaults to ``optimizer_backend="scipy-jax-fullgraph"`` to keep SciPy
+optimizer control around the full JAX objective graph and avoid compiling the
+entire optimizer loop into one large XLA graph, while CUDA/GPU defaults to
+``optimizer_backend="ondevice"``. Explicit CPU ``ondevice`` remains available
+for target-lane stress tests, but it is memory-intensive and emits a warning.
 
 Stage 2 (Field + Flux Objective)
 --------------------------------

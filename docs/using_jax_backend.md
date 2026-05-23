@@ -185,8 +185,11 @@ Single-stage traceable target-lane contract:
 
 The current CPU reference lane remains the oracle for broad workflow trust.
 Public acceptance still centers on the `native_cpu` / `scipy` oracle lane.
-When `backend="jax"` is active, the supported optimizer lane is `ondevice`;
-the retained `scipy` adapter stays available only on the CPU/reference path.
+When `backend="jax"` is active, the implicit optimizer lane is
+platform-sensitive: JAX CPU defaults to `scipy-jax-fullgraph` to avoid compiling
+the full optimizer loop into one large XLA graph, while CUDA/GPU defaults to
+`ondevice`. Explicit CPU `ondevice` remains available for target-lane stress
+tests, but it is memory-intensive and emits a warning.
 
 Exact Boozer note:
 
@@ -263,14 +266,16 @@ JAX_PLATFORMS=cpu \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
   --backend jax \
-  --optimizer-backend ondevice \
+  --optimizer-backend scipy-jax-fullgraph \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
   --probe-only \
   --skip-postprocess
 ```
 
-Use this to validate the JAX Stage 2 path on CPU before moving to GPU.
-It does not exercise the retained SciPy oracle lane.
+Use this to validate the JAX Stage 2 objective path on CPU before moving to GPU
+without paying the host-memory cost of compiling the full on-device optimizer
+loop. Use explicit `--optimizer-backend ondevice` on CPU only for targeted
+target-lane stress tests with sufficient host RAM.
 
 Stage 2 live constraint-method note:
 
@@ -306,14 +311,14 @@ JAX_PLATFORMS=cpu \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax \
-  --optimizer-backend ondevice \
-  --boozer-optimizer-backend ondevice \
+  --optimizer-backend scipy-jax-fullgraph \
   --jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json \
   --init-only
 ```
 
-This is the required single-stage JAX execution lane. Do not treat it as a
-replacement for the public CPU/reference `scipy` oracle lane:
+This is the JAX CPU comparison lane. Do not treat it as a replacement for the
+public CPU/reference `scipy` oracle lane. The CUDA target lane remains
+`ondevice`:
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_gpu_parity \
@@ -359,8 +364,7 @@ JAX_PLATFORMS=cpu \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax \
-  --optimizer-backend ondevice \
-  --boozer-optimizer-backend ondevice \
+  --optimizer-backend scipy-jax-fullgraph \
   --jax-runtime-seed-spec /path/to/single_stage_jax_runtime_spec.json \
   --init-only
 ```
