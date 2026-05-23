@@ -24,6 +24,8 @@ from uuid import UUID
 
 import numpy as np
 
+from .jax_host_boundary import host_array
+
 try:
     import jax
 except ImportError:
@@ -385,8 +387,6 @@ class GSONEncoder(json.JSONEncoder):
             return {"@module": "uuid", "@class": "UUID", "string": str(o)}
 
         if jax is not None and isinstance(o, jax.Array):
-            from .jax_host_boundary import host_array
-
             o = host_array(o)
 
         if isinstance(o, np.ndarray):
@@ -646,8 +646,6 @@ def _decode_jax_core_spec_dataclass(
 
 def _json_array_dict(value: object) -> dict:
     if jax is not None and isinstance(value, jax.Array):
-        from .jax_host_boundary import host_array
-
         arr = host_array(value)
     else:
         arr = np.asarray(value)
