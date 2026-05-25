@@ -16,8 +16,11 @@ from simsopt._core.jax_host_boundary import (
 
 def test_host_tree_materializes_jax_leaves():
     tree = {
-        "x": jnp.asarray([1.0, 2.0], dtype=jnp.float64),
-        "nested": (jnp.asarray(3.5, dtype=jnp.float64), np.asarray([4.0])),
+        "x": jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64)),
+        "nested": (
+            jax.device_put(np.asarray(3.5, dtype=np.float64)),
+            np.asarray([4.0]),
+        ),
     }
 
     result = host_tree(tree)
@@ -30,7 +33,7 @@ def test_host_tree_materializes_jax_leaves():
 
 def test_host_tree_dtype_coerces_numeric_leaves():
     tree = {
-        "x": jnp.asarray([1, 2], dtype=jnp.int32),
+        "x": jax.device_put(np.asarray([1, 2], dtype=np.int32)),
         "nested": (np.asarray([3], dtype=np.int16), 4),
     }
 
@@ -46,13 +49,14 @@ def test_strict_scalar_grad_helpers_use_explicit_scalar_seed():
     def objective(x, scale):
         return scale * jnp.sum(x * x)
 
-    x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-    value, grad = strict_scalar_value_and_grad(objective, x, 0.5)
+    x = jax.device_put(np.asarray([1.0, -2.0], dtype=np.float64))
+    scale = jax.device_put(np.asarray(0.5, dtype=np.float64))
+    value, grad = strict_scalar_value_and_grad(objective, x, scale)
 
     np.testing.assert_allclose(host_array(value), np.array(2.5))
     np.testing.assert_allclose(host_array(grad), np.array([1.0, -2.0]))
     np.testing.assert_allclose(
-        host_array(strict_scalar_grad(lambda arg: objective(arg, 0.5), x)),
+        host_array(strict_scalar_grad(lambda arg: objective(arg, scale), x)),
         np.array([1.0, -2.0]),
     )
 
@@ -86,8 +90,8 @@ def test_explicit_cotangent_basis_returns_runtime_unit_vector():
 
 
 def test_host_python_scalar_helpers_materialize_native_python_scalars():
-    float_value = host_float(jnp.asarray(3.5, dtype=jnp.float32))
-    int_value = host_int(jnp.asarray(7, dtype=jnp.int32))
+    float_value = host_float(jax.device_put(np.asarray(3.5, dtype=np.float32)))
+    int_value = host_int(jax.device_put(np.asarray(7, dtype=np.int32)))
 
     assert isinstance(float_value, float)
     assert float_value == 3.5
