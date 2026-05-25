@@ -70,6 +70,7 @@ import numpy as np
 
 from ._math_utils import (
     as_runtime_array as _as_runtime_array,
+    as_runtime_value as _as_runtime_value,
     as_jax_int32 as _as_jax_int32,
 )
 
@@ -128,7 +129,15 @@ _UNAVAILABLE_CANDIDATE_COST: float = float("inf")
 
 
 def _scalar_like(reference: jax.Array, value: float) -> jax.Array:
-    return jnp.asarray(value, dtype=reference.dtype)
+    return _as_runtime_value(value, reference=reference, dtype=reference.dtype)
+
+
+def _device_scalar(value: object, dtype) -> jax.Array:
+    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+
+
+def _bool_scalar(value: bool) -> jax.Array:
+    return _device_scalar(value, np.bool_)
 
 
 def _find_max_alphaf_sentinel(dtype) -> float:
@@ -159,7 +168,7 @@ def _negative_ones_int_like_shape(reference: jax.Array, shape: tuple[int, ...]):
 
 
 def _int_scalar_like(reference: jax.Array, value: int) -> jax.Array:
-    return jax.device_put(np.asarray(value, dtype=np.dtype(reference.dtype)))
+    return _device_scalar(value, reference.dtype)
 
 
 def _argmin_finite_cost(costs: jax.Array, *, axis: int | None = None) -> jax.Array:
@@ -968,7 +977,7 @@ def _gpmo_arbvec_candidate_costs_for_allowed(
     plus = plus + penalty[:, None]
     minus = minus + penalty[:, None]
 
-    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=contributions_arr.dtype)
+    sentinel = _scalar_like(contributions_arr, _UNAVAILABLE_CANDIDATE_COST)
     plus = jnp.where(allowed, plus, sentinel)
     minus = jnp.where(allowed, minus, sentinel)
     return jnp.concatenate([jnp.ravel(plus), jnp.ravel(minus)])
@@ -1125,7 +1134,7 @@ def gpmo_arbvec_solve(
     if record_every is not None:
         record_rows = _record_rows(K, record_every)
         record_count = int(record_rows.size)
-        record_rows_arr = jnp.asarray(record_rows, dtype=jnp.int32)
+        record_rows_arr = _as_jax_int32(record_rows)
 
         def _recording_scan_body(carry, iteration):
             (
@@ -1174,7 +1183,7 @@ def gpmo_arbvec_solve(
             _recording_scan_body,
             (
                 (x0, residual0, available0),
-                jnp.asarray(0, dtype=jnp.int32),
+                _device_scalar(0, jnp.int32),
                 jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
                 jnp.zeros((record_count,), dtype=A_arr.dtype),
                 jnp.zeros((record_count,), dtype=jnp.int64),
@@ -1317,9 +1326,9 @@ def gpmo_arbvec_solve_bucketed(
         available_new = jnp.where(done, available, available_placed)
         residual_sq = jnp.sum(residual_new * residual_new)
         trace = (
-            jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), dipole),
-            jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), vector_index),
-            jnp.where(done, jnp.asarray(0.0, dtype=residual.dtype), sign),
+            jnp.where(done, _device_scalar(-1, jnp.int64), dipole),
+            jnp.where(done, _device_scalar(-1, jnp.int64), vector_index),
+            jnp.where(done, _scalar_like(residual, 0.0), sign),
             residual_sq,
         )
         return (x_new, residual_new, available_new, done_new), trace
@@ -1534,7 +1543,7 @@ def _gpmo_arbvec_backtracking_candidate_costs_from_contributions(
     minus = minus + penalty
 
     allowed = available[:, None]
-    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=contributions_arr.dtype)
+    sentinel = _scalar_like(contributions_arr, _UNAVAILABLE_CANDIDATE_COST)
     plus = jnp.where(allowed, plus, sentinel)
     minus = jnp.where(allowed, minus, sentinel)
     return jnp.concatenate([jnp.ravel(plus), jnp.ravel(minus)])
@@ -1579,8 +1588,8 @@ def _gpmo_arbvec_remove_one_pair(
         available.at[jk].set(True).at[cj].set(True),
         current_vector_indices.at[jk].set(0).at[cj].set(0),
         current_signs.at[jk].set(0.0).at[cj].set(0.0),
-        jnp.asarray(True),
-        removed_count + jnp.asarray(1, dtype=removed_count.dtype),
+        _bool_scalar(True),
+        removed_count + _device_scalar(1, removed_count.dtype),
     )
 
 
@@ -1611,8 +1620,8 @@ def _gpmo_arbvec_remove_pairs(
     seed iterations.
     """
 
-    removed_count0 = jnp.asarray(0, dtype=jnp.int64)
-    sentinel_cos = jnp.asarray(2.0, dtype=A_scaled.dtype)
+    removed_count0 = _device_scalar(0, jnp.int64)
+    sentinel_cos = _scalar_like(A_scaled, 2.0)
 
     def _seed_body_clean(seed_state, jk):
         (
@@ -1646,7 +1655,7 @@ def _gpmo_arbvec_remove_pairs(
 
         (min_cos_angle, cj_min), _ = jax.lax.scan(
             _neighbor_body_clean,
-            (sentinel_cos, jnp.asarray(0, dtype=connectivity.dtype)),
+            (sentinel_cos, _device_scalar(0, connectivity.dtype)),
             jnp.arange(Nadjacent),
         )
 
@@ -1662,7 +1671,7 @@ def _gpmo_arbvec_remove_pairs(
                     available_seed,
                     vector_idx_seed,
                     signs_seed,
-                    jnp.asarray(False),
+                    _bool_scalar(False),
                     removed_count_seed,
                 ),
                 A_scaled,
@@ -1784,7 +1793,7 @@ def gpmo_arbvec_backtracking_step(
             args[2],
             args[3],
             args[4],
-            jnp.asarray(0, dtype=jnp.int64),
+            _device_scalar(0, jnp.int64),
         ),
         (
             x_placed,
@@ -1819,9 +1828,9 @@ def gpmo_arbvec_backtracking_step(
         done_new,
     )
     trace = (
-        jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), dipole),
-        jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), vector_index),
-        jnp.where(done, jnp.asarray(0.0, dtype=residual.dtype), sign),
+        jnp.where(done, _device_scalar(-1, jnp.int64), dipole),
+        jnp.where(done, _device_scalar(-1, jnp.int64), vector_index),
+        jnp.where(done, _scalar_like(residual, 0.0), sign),
         jnp.where(done, jnp.sum(residual * residual), residual_sq),
         next_state[0],
         jnp.where(
@@ -1829,7 +1838,7 @@ def gpmo_arbvec_backtracking_step(
             jnp.sum((~available).astype(jnp.int64)),
             num_nonzeros,
         ),
-        jnp.where(done, jnp.asarray(0, dtype=jnp.int64), removed_count),
+        jnp.where(done, _device_scalar(0, jnp.int64), removed_count),
         done_new,
     )
     return next_state, trace
@@ -1943,7 +1952,7 @@ def gpmo_arbvec_backtracking_solve(
     if record_every is not None:
         record_rows = _record_rows(K, record_every)
         record_count = int(record_rows.size)
-        record_rows_arr = jnp.asarray(record_rows, dtype=jnp.int32)
+        record_rows_arr = _as_jax_int32(record_rows)
 
         def _recording_scan_body(carry, iteration):
             (
@@ -2038,7 +2047,7 @@ def gpmo_arbvec_backtracking_solve(
                     selected_signs0,
                     initial_stop,
                 ),
-                jnp.asarray(0, dtype=jnp.int32),
+                _device_scalar(0, jnp.int32),
                 jnp.zeros((record_count,), dtype=jnp.int64),
                 jnp.zeros((record_count,), dtype=jnp.int64),
                 jnp.zeros((record_count,), dtype=A_arr.dtype),
@@ -2217,7 +2226,7 @@ def gpmo_multi_candidate_costs(
 
     direction_mask = _single_direction_mask(n_components, spec.single_direction)
     allowed = jnp.reshape(available, (n_components,)) & direction_mask & has_enough
-    sentinel = jnp.asarray(_UNAVAILABLE_CANDIDATE_COST, dtype=A_arr.dtype)
+    sentinel = _scalar_like(A_arr, _UNAVAILABLE_CANDIDATE_COST)
     plus = jnp.where(allowed, plus, sentinel)
     minus = jnp.where(allowed, minus, sentinel)
     return jnp.concatenate([plus, minus])
@@ -2338,7 +2347,7 @@ def gpmo_multi_solve(
     if record_every is not None:
         record_rows = _record_rows(K, record_every)
         record_count = int(record_rows.size)
-        record_rows_arr = jnp.asarray(record_rows, dtype=jnp.int32)
+        record_rows_arr = _as_jax_int32(record_rows)
 
         def _recording_scan_body(carry, iteration):
             (
@@ -2394,7 +2403,7 @@ def gpmo_multi_solve(
             _recording_scan_body,
             (
                 (x0, residual0, available0),
-                jnp.asarray(0, dtype=jnp.int32),
+                _device_scalar(0, jnp.int32),
                 jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
                 jnp.zeros((record_count,), dtype=A_arr.dtype),
                 jnp.zeros((record_count,), dtype=jnp.int64),
@@ -2484,8 +2493,8 @@ def _gpmo_backtracking_remove_one_pair(
         available.at[jk, :].set(True).at[cj, :].set(True),
         current_signs.at[jk].set(0.0).at[cj].set(0.0),
         current_components,
-        jnp.asarray(True),
-        removed_count + jnp.asarray(1, dtype=removed_count.dtype),
+        _bool_scalar(True),
+        removed_count + _device_scalar(1, removed_count.dtype),
     )
 
 
@@ -2505,7 +2514,7 @@ def _gpmo_backtracking_remove_pairs(
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Mirror the C++ dewyrming pass over prior selected dipoles."""
 
-    removed_count0 = jnp.asarray(0, dtype=jnp.int64)
+    removed_count0 = _device_scalar(0, jnp.int64)
 
     def _seed_body(seed_state, hist_index):
         (
@@ -2565,7 +2574,7 @@ def _gpmo_backtracking_remove_pairs(
             available_seed,
             signs_seed,
             components_seed,
-            jnp.asarray(False),
+            _bool_scalar(False),
             removed_count_seed,
         )
         neighbor_state, _ = jax.lax.scan(
@@ -2663,7 +2672,7 @@ def gpmo_backtracking_step(
             args[2],
             args[3],
             args[4],
-            jnp.asarray(0, dtype=jnp.int64),
+            _device_scalar(0, jnp.int64),
         ),
         (
             x_placed,
@@ -2694,15 +2703,15 @@ def gpmo_backtracking_step(
         done_new,
     )
     trace = (
-        jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), dipole),
-        jnp.where(done, jnp.asarray(-1, dtype=jnp.int64), component),
-        jnp.where(done, jnp.asarray(0.0, dtype=residual.dtype), sign),
+        jnp.where(done, _device_scalar(-1, jnp.int64), dipole),
+        jnp.where(done, _device_scalar(-1, jnp.int64), component),
+        jnp.where(done, _scalar_like(residual, 0.0), sign),
         jnp.where(done, jnp.sum(residual * residual), residual_sq),
         next_state[0],
         jnp.where(
             done, jnp.sum(jnp.any(~available, axis=1).astype(jnp.int64)), num_nonzeros
         ),
-        jnp.where(done, jnp.asarray(0, dtype=jnp.int64), removed_count),
+        jnp.where(done, _device_scalar(0, jnp.int64), removed_count),
         done_new,
     )
     return next_state, trace
@@ -2782,7 +2791,7 @@ def gpmo_backtracking_solve(
     if record_every is not None:
         record_rows = _record_rows(K, record_every)
         record_count = int(record_rows.size)
-        record_rows_arr = jnp.asarray(record_rows, dtype=jnp.int32)
+        record_rows_arr = _as_jax_int32(record_rows)
 
         def _recording_scan_body(carry, iteration):
             (
@@ -2869,9 +2878,9 @@ def gpmo_backtracking_solve(
                     selected_dipoles0,
                     selected_components0,
                     selected_signs0,
-                    jnp.asarray(False),
+                    _bool_scalar(False),
                 ),
-                jnp.asarray(0, dtype=jnp.int32),
+                _device_scalar(0, jnp.int32),
                 jnp.zeros((record_count,), dtype=jnp.int64),
                 jnp.zeros((record_count,), dtype=jnp.int64),
                 jnp.zeros((record_count,), dtype=A_arr.dtype),
@@ -2919,7 +2928,7 @@ def gpmo_backtracking_solve(
             selected_dipoles0,
             selected_components0,
             selected_signs0,
-            jnp.asarray(False),
+            _bool_scalar(False),
         ),
         jnp.arange(K),
     )
@@ -2985,8 +2994,10 @@ def _on_ball(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
     """
     xmag2 = jnp.sum(m * m, axis=1)  # (N,)
     mmax2 = m_maxima * m_maxima  # (N,)
+    abs_tol = _scalar_like(mmax2, _BALL_ACTIVE_ABS_TOL)
+    rel_tol = _scalar_like(mmax2, _BALL_ACTIVE_REL_TOL)
     return jnp.abs(xmag2 - mmax2) < (
-        _BALL_ACTIVE_ABS_TOL + _BALL_ACTIVE_REL_TOL * mmax2
+        abs_tol + rel_tol * mmax2
     )
 
 
@@ -3005,8 +3016,8 @@ def phi_mwpgp(m: jax.Array, g: jax.Array, m_maxima: jax.Array) -> jax.Array:
     Mirrors ``phi_MwPGP`` in ``permanent_magnet_optimization.cpp:18``.
     """
     on_ball = _on_ball(m, m_maxima)
-    # When on_ball, set to 0; otherwise keep g.
-    return jnp.where(on_ball[:, None], 0.0, g)
+    zero = _scalar_like(g, 0.0)
+    return jnp.where(on_ball[:, None], zero, g)
 
 
 def g_reduced_gradient(
@@ -3047,10 +3058,9 @@ def _beta_tilde(
     mg = jnp.sum(m * g, axis=1)  # <m_i, g_i>
     ng = mg / safe_norm  # (N,)
     grg = g_reduced_gradient(m, g, alpha, m_maxima)  # (N, 3)
-    # ``ng > 0`` -> ``g``; else -> ``grg``.
-    on_active_grad = jnp.where((ng > 0.0)[:, None], g, grg)
-    # off-ball -> zero
-    return jnp.where(on_ball[:, None], on_active_grad, 0.0)
+    zero = _scalar_like(g, 0.0)
+    on_active_grad = jnp.where((ng > _scalar_like(ng, 0.0))[:, None], g, grg)
+    return jnp.where(on_ball[:, None], on_active_grad, zero)
 
 
 def g_reduced_projected_gradient(
@@ -3089,23 +3099,27 @@ def find_max_alphaf(
         Shape ``(N,)``.
     """
     a = jnp.sum(p * p, axis=1)
-    b = -2.0 * jnp.sum(m * p, axis=1)
+    zero = _scalar_like(a, 0.0)
+    one = _scalar_like(a, 1.0)
+    two = _scalar_like(a, 2.0)
+    four = _scalar_like(a, 4.0)
+    b = -two * jnp.sum(m * p, axis=1)
     c = jnp.sum(m * m, axis=1) - m_maxima * m_maxima
-    disc = b * b - 4.0 * a * c
+    disc = b * b - four * a * c
     # Guard the sqrt against tiny negative values arising from FP rounding
     # of the very-close-to-boundary case (``c ≈ 0``). The C++ kernel does
     # not need this because dipoles strictly satisfy ``c <= 0``; in JAX
     # autodiff this can still hit ``sqrt(-0.0)`` which is fine but a
     # tracer-safe ``maximum`` is harmless.
-    active = a > _FIND_MAX_ALPHAF_TOL
-    safe_disc = jnp.where(active, jnp.maximum(disc, 0.0), 1.0)
+    active = a > _scalar_like(a, _FIND_MAX_ALPHAF_TOL)
+    safe_disc = jnp.where(active, jnp.maximum(disc, zero), one)
     sqrt_disc = jnp.sqrt(safe_disc)
-    safe_a = jnp.where(active, a, 1.0)
-    alphaf = (-b + sqrt_disc) / (2.0 * safe_a)
+    safe_a = jnp.where(active, a, one)
+    alphaf = (-b + sqrt_disc) / (two * safe_a)
     return jnp.where(
         active,
         alphaf,
-        jnp.asarray(_find_max_alphaf_sentinel(alphaf.dtype), dtype=alphaf.dtype),
+        _scalar_like(alphaf, _find_max_alphaf_sentinel(alphaf.dtype)),
     )
 
 
@@ -3131,7 +3145,9 @@ def _hessian_action(
     v_flat = _flatten_moments(v)
     Av = A @ v_flat
     AtAv = A.T @ Av
-    scale = 2.0 * (reg_l2 + 1.0 / (2.0 * nu))
+    one = _scalar_like(nu, 1.0)
+    two = _scalar_like(nu, 2.0)
+    scale = two * (reg_l2 + one / (two * nu))
     return (AtAv + scale * v_flat).reshape(v.shape[0], 3)
 
 
@@ -3337,13 +3353,13 @@ def mwpgp_solve(
         # Diagnostic: residual-squared minus the constant ||b||^2 term.
         x_flat = _flatten_moments(x_new)
         Ax = A_arr @ x_flat
-        residual_sq_proxy = jnp.sum(Ax * Ax) - 2.0 * jnp.sum(
+        residual_sq_proxy = jnp.sum(Ax * Ax) - _scalar_like(Ax, 2.0) * jnp.sum(
             x_flat * ATb_arr.reshape(-1)
         )
         return (x_new, g_new, p_new), residual_sq_proxy
 
     if n_steps == 0:
-        return m0_arr, jnp.zeros((0,), dtype=m0_arr.dtype)
+        return m0_arr, _zeros_like_shape(m0_arr, (0,), dtype=m0_arr.dtype)
 
     final_state, residual_history = jax.lax.scan(
         _scan_body, init_state, xs=None, length=n_steps

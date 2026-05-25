@@ -9,7 +9,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..geo.permanent_magnet_grid_jax import PermanentMagnetGridJAX
-from ..jax_core._math_utils import as_runtime_array as _as_runtime_array
+from ..jax_core._math_utils import (
+    as_runtime_array as _as_runtime_array,
+    as_runtime_value as _as_runtime_value,
+)
 from ..jax_core.pm_optimization import (
     GPMOArbVecBacktrackingSpec,
     GPMOArbVecSpec,
@@ -60,7 +63,15 @@ def _flatten_like(reference: jax.Array, moments: jax.Array) -> jax.Array:
 
 
 def _scalar_like(value: float, reference: jax.Array) -> jax.Array:
-    return jnp.asarray(value, dtype=reference.dtype)
+    return _as_runtime_value(value, reference=reference, dtype=reference.dtype)
+
+
+def _zeros_like_shape(reference: jax.Array, shape: tuple[int, ...]) -> jax.Array:
+    return _as_runtime_array(
+        np.zeros(shape, dtype=np.dtype(reference.dtype)),
+        dtype=reference.dtype,
+        reference=reference,
+    )
 
 
 def _normalized_moment_magnitudes(matrix: jax.Array, m_maxima: jax.Array) -> jax.Array:
@@ -715,12 +726,15 @@ def _run_mwpgp_with_alpha(
     return mwpgp_solve(spec, grid.A_obj, grid.ATb, m0, n_steps=max_iter)
 
 
-def _last_error(
-    residual_history: jax.Array, dtype: jnp.dtype, max_iter: int
-) -> jax.Array:
-    if max_iter == 0:
-        return jnp.asarray(0.0, dtype=dtype)
+@jax.jit
+def _last_residual_error(residual_history: jax.Array) -> jax.Array:
     return residual_history[-1]
+
+
+def _last_error(residual_history: jax.Array, max_iter: int) -> jax.Array:
+    if max_iter == 0:
+        return _scalar_like(0.0, residual_history)
+    return _last_residual_error(residual_history)
 
 
 def _relax_and_split_cost(
@@ -872,9 +886,9 @@ def relax_and_split_jax(
             max_iter=max_iter,
         )
         return PMRelaxAndSplitResult(
-            errors=jnp.reshape(_last_error(residual_history, m.dtype, max_iter), (1,)),
+            errors=jnp.reshape(_last_error(residual_history, max_iter), (1,)),
             m_history=m[None, :, :],
-            m_proxy_history=jnp.empty((0, grid.ndipoles, 3), dtype=m.dtype),
+            m_proxy_history=_zeros_like_shape(m, (0, grid.ndipoles, 3)),
             m=m,
             m_proxy=m,
             residual_history=residual_history[None, :],

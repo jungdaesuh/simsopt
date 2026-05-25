@@ -775,6 +775,17 @@ def test_relax_and_split_jax_jits_under_strict_transfer_guard():
     assert np.all(np.isfinite(np.asarray(out)))
 
 
+def test_relax_and_split_jax_runs_eager_under_strict_transfer_guard():
+    grid = _synthetic_grid(seed=2032)
+
+    with jax.transfer_guard("disallow"):
+        out = relax_and_split_jax(grid, max_iter=3).m
+        out.block_until_ready()
+
+    assert out.shape == (grid.ndipoles, 3)
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
 def test_gpmo_baseline_jax_matches_cpu_baseline_wrapper():
     cpu_grid = _gpmo_cpu_grid(seed=2802)
     jax_grid = PermanentMagnetGridJAX.from_cpu(cpu_grid)
@@ -1182,6 +1193,37 @@ def test_gpmo_arbvec_backtracking_jax_with_m_init():
         atol=_STATE_TRACE_ATOL,
     )
     assert int(result.initial_num_nonzero) == 2
+
+
+def test_gpmo_baseline_jax_runs_eager_under_strict_transfer_guard():
+    grid = PermanentMagnetGridJAX.from_cpu(_gpmo_cpu_grid(seed=2846))
+
+    with jax.transfer_guard("disallow"):
+        out = GPMO_baseline_jax(grid, K=3, reg_l2=0.15).m
+        out.block_until_ready()
+
+    assert out.shape == (grid.ndipoles, 3)
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
+def test_gpmo_arbvec_backtracking_jax_runs_eager_under_strict_transfer_guard():
+    cpu_grid = _gpmo_cpu_grid(seed=2847)
+    cpu_grid.pol_vectors = _gpmo_pol_vectors(seed=2848, ndipoles=cpu_grid.ndipoles)
+    grid = PermanentMagnetGridJAX.from_cpu(cpu_grid)
+
+    with jax.transfer_guard("disallow"):
+        out = GPMO_ArbVec_backtracking_jax(
+            grid,
+            K=4,
+            Nadjacent=2,
+            backtracking=2,
+            thresh_angle=float(np.pi / 3.0),
+            max_nMagnets=3,
+        ).m
+        out.block_until_ready()
+
+    assert out.shape == (grid.ndipoles, 3)
+    assert np.all(np.isfinite(np.asarray(out)))
 
 
 def test_gpmo_arbvec_backtracking_jax_jits_under_strict_transfer_guard():

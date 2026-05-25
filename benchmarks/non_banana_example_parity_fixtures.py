@@ -4348,7 +4348,7 @@ def _build_boozer_qa_wrappers():
     start_jax_setup = time.perf_counter()
     bs_jax_mod, _flux_jax_mod = _jax_imports()
     BiotSavartJAX = bs_jax_mod.BiotSavartJAX
-    from simsopt.geo.boozersurface_jax import _generic_surface_scatter_operator
+    from simsopt.geo.boozersurface_jax import _generic_surface_scatter_operator_host
     from simsopt.geo.surfaceobjectives_jax import (
         _qs_ratio_pure,
         surface_major_radius_jax_from_dofs,
@@ -4421,7 +4421,7 @@ def _build_boozer_qa_wrappers():
     # scatter operator built from ``stellsym_scatter_indices`` rather than
     # the raw integer mask used for RZFourier surfaces.
     scatter_indices = (
-        _generic_surface_scatter_operator(mpol, ntor) if stellsym else None
+        _generic_surface_scatter_operator_host(mpol, ntor) if stellsym else None
     )
     nqs_jax_value = float(
         _qs_ratio_pure(

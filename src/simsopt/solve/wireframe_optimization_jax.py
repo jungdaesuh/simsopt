@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -15,6 +16,7 @@ from ..geo.surface import Surface
 from ..geo.wireframe_toroidal import ToroidalWireframe
 from ..jax_core._math_utils import (
     as_runtime_array as _as_runtime_array,
+    as_runtime_value as _as_runtime_value,
     as_jax_int32 as _as_jax_int32,
     runtime_host_dtype as _runtime_host_dtype,
 )
@@ -102,7 +104,7 @@ def _regularization_matrix(W: object, n: int) -> jax.Array:
 
 
 def _half_like(reference: jax.Array) -> jax.Array:
-    return jnp.asarray(0.5, dtype=reference.dtype)
+    return _as_runtime_value(0.5, reference=reference, dtype=reference.dtype)
 
 
 def _scipy_lstsq_rcond(dtype) -> np.floating:
@@ -111,36 +113,19 @@ def _scipy_lstsq_rcond(dtype) -> np.floating:
     return np.nextafter(eps, host_dtype.type(np.inf))
 
 
-def regularized_constrained_least_squares_jax(
-    A: object,
-    b: object,
-    W: object,
-    C: object,
-    d: object,
+@jax.jit
+def _regularized_constrained_least_squares_core(
+    Amat: jax.Array,
+    bvec: jax.Array,
+    W: jax.Array,
+    Cmat: jax.Array,
+    dvec: jax.Array,
 ) -> jax.Array:
-    """JAX port of ``regularized_constrained_least_squares``.
-
-    Solves ``min_x 0.5 * (||A x - b||^2 + ||W x||^2)`` subject to
-    ``C x = d`` using the same QR basis construction as the CPU routine.
-    """
-
-    Amat = _as_runtime_array(A)
-    bvec = jnp.reshape(_as_runtime_array(b), (-1, 1))
-    Cmat = _as_runtime_array(C)
-    dvec = jnp.reshape(_as_runtime_array(d), (-1, 1))
-
-    m, n = Amat.shape
-    if bvec.shape[0] != m:
-        raise ValueError("Number of elements in b must match rows in A")
-    if Cmat.shape[1] != n:
-        raise ValueError("A and C must have the same number of columns")
-    if dvec.shape[0] != Cmat.shape[0]:
-        raise ValueError("Number of elements in d must match rows in C")
-
+    m, n = (int(dim) for dim in Amat.shape)
     Wmat = _regularization_matrix(W, n)
     Ctra = Cmat.T
     Qfull, Rtall = jnp.linalg.qr(Ctra, mode="complete")
-    p = Cmat.shape[0]
+    p = int(Cmat.shape[0])
     Q1mat = Qfull[:, :p]
     Q2mat = Qfull[:, p:]
     Rmat = Rtall[:p, :]
@@ -158,9 +143,49 @@ def regularized_constrained_least_squares_jax(
     AQ2bvec = AQ2mat.T @ bvec
     RHS = AQ2bvec - AQ2mat.T @ AQ1uvec - WQ2mat.T @ WQ1uvec
 
-    rcond = jnp.asarray(_scipy_lstsq_rcond(LHS.dtype), dtype=LHS.dtype)
+    rcond = _as_runtime_value(
+        _scipy_lstsq_rcond(LHS.dtype),
+        reference=LHS,
+        dtype=LHS.dtype,
+    )
     vvec = jnp.linalg.lstsq(LHS, RHS, rcond=rcond)[0]
     return Qfull @ jnp.concatenate((uvec, vvec), axis=0)
+
+
+def regularized_constrained_least_squares_jax(
+    A: object,
+    b: object,
+    W: object,
+    C: object,
+    d: object,
+) -> jax.Array:
+    """JAX port of ``regularized_constrained_least_squares``.
+
+    Solves ``min_x 0.5 * (||A x - b||^2 + ||W x||^2)`` subject to
+    ``C x = d`` using the same QR basis construction as the CPU routine.
+    """
+
+    Amat = _as_runtime_array(A)
+    bvec = jnp.reshape(_as_runtime_array(b), (-1, 1))
+    W_arr = _as_runtime_array(W)
+    Cmat = _as_runtime_array(C)
+    dvec = jnp.reshape(_as_runtime_array(d), (-1, 1))
+
+    m, n = (int(dim) for dim in Amat.shape)
+    if bvec.shape[0] != m:
+        raise ValueError("Number of elements in b must match rows in A")
+    if Cmat.shape[1] != n:
+        raise ValueError("A and C must have the same number of columns")
+    if dvec.shape[0] != Cmat.shape[0]:
+        raise ValueError("Number of elements in d must match rows in C")
+
+    return _regularized_constrained_least_squares_core(
+        Amat,
+        bvec,
+        W_arr,
+        Cmat,
+        dvec,
+    )
 
 
 def _wireframe_regularization_value(W: object, x: jax.Array) -> jax.Array:
@@ -171,6 +196,17 @@ def _wireframe_regularization_value(W: object, x: jax.Array) -> jax.Array:
     if W_arr.ndim == 1:
         return half * jnp.sum((W_arr * jnp.ravel(x)) ** 2)
     return half * jnp.sum((W_arr @ x) ** 2)
+
+
+@partial(jax.jit, static_argnames=("n_segments",))
+def _insert_free_segment_solution(
+    free_segments: jax.Array,
+    xfree: jax.Array,
+    *,
+    n_segments: int,
+) -> jax.Array:
+    x = jnp.zeros((int(n_segments), 1), dtype=xfree.dtype)
+    return x.at[free_segments, :].set(xfree)
 
 
 def _host_pytree(value: object):
@@ -300,8 +336,11 @@ def rcls_wireframe_jax(
         C,
         d,
     )
-    x = jnp.zeros((int(wframe.n_segments), 1), dtype=A_arr.dtype)
-    x = x.at[free_segs_device, :].set(xfree)
+    x = _insert_free_segment_solution(
+        free_segs_device,
+        xfree,
+        n_segments=int(wframe.n_segments),
+    )
 
     residual = A_arr @ x - b_arr
     f_B = _half_like(A_arr) * jnp.sum(residual * residual)

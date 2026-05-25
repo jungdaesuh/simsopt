@@ -346,6 +346,18 @@ def test_regularized_constrained_least_squares_jits_under_transfer_guard() -> No
     assert np.all(np.isfinite(np.asarray(out)))
 
 
+def test_regularized_constrained_least_squares_runs_eager_under_transfer_guard() -> None:
+    A, b, C, d, _ = _least_squares_problem()
+    W = np.array([0.2, 0.3, 0.4, 0.5], dtype=np.float64)
+
+    with jax.transfer_guard("disallow"):
+        out = regularized_constrained_least_squares_jax(A, b, W, C, d)
+        out.block_until_ready()
+
+    assert out.shape == (4, 1)
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
 def test_regularized_constrained_least_squares_handles_no_constraints() -> None:
     rng = np.random.default_rng(3103)
     A = np.ascontiguousarray(rng.standard_normal(size=(7, 3)))
@@ -508,6 +520,32 @@ def test_rcls_wireframe_jax_matches_cpu_without_mutating_wireframe(reg_W) -> Non
     np.testing.assert_allclose(np.asarray(result.f_R), f_R_cpu, rtol=_RTOL, atol=_ATOL)
     np.testing.assert_allclose(np.asarray(result.f), f_cpu, rtol=_RTOL, atol=_ATOL)
     np.testing.assert_array_equal(fixture.currents, np.full(5, 7.0, dtype=np.float64))
+
+
+def test_rcls_wireframe_jax_runs_eager_under_transfer_guard() -> None:
+    rng = np.random.default_rng(3105)
+    Amat = np.ascontiguousarray(rng.standard_normal(size=(8, 5)))
+    bvec = np.ascontiguousarray(rng.standard_normal(size=(8, 1)))
+    fixture = _WireframeFixture(
+        n_segments=5,
+        free_segments=np.array([0, 2, 4], dtype=np.int64),
+        C=np.ascontiguousarray(np.array([[1.0, -1.0, 0.5]], dtype=np.float64)),
+        d=np.ascontiguousarray(np.array([[0.2]], dtype=np.float64)),
+        currents=np.full(5, 7.0, dtype=np.float64),
+    )
+
+    with jax.transfer_guard("disallow"):
+        result = rcls_wireframe_jax(
+            fixture,
+            Amat,
+            bvec,
+            0.15,
+            assume_no_crossings=True,
+        )
+        result.x.block_until_ready()
+
+    assert result.x.shape == (5, 1)
+    assert np.all(np.isfinite(np.asarray(result.x)))
 
 
 @pytest.mark.parametrize("area_weighted", (False, True))
