@@ -32,10 +32,12 @@ def isolate_backend_runtime(monkeypatch):
 @patch("simsopt.backend.runtime.get_backend_config")
 def test_resolve_stage2_default_optimizer_backend(mock_get_config):
     mock_get_config.return_value = backend_config("cpu")
+    invalidate_backend_cache()
     assert resolve_stage2_default_optimizer_backend("jax") == "scipy-jax-fullgraph"
     assert resolve_stage2_default_optimizer_backend("cpu") == "scipy"
 
     mock_get_config.return_value = backend_config("cuda")
+    invalidate_backend_cache()
     assert resolve_stage2_default_optimizer_backend("jax") == "ondevice"
     assert resolve_stage2_default_optimizer_backend("cpu") == "scipy"
 
@@ -45,10 +47,12 @@ def test_resolve_stage2_default_optimizer_backend(mock_get_config):
 @patch("simsopt.backend.runtime.get_backend_config")
 def test_resolve_single_stage_default_optimizer_backend(mock_get_config):
     mock_get_config.return_value = backend_config("cpu")
+    invalidate_backend_cache()
     assert resolve_single_stage_default_optimizer_backend("jax") == "scipy-jax-fullgraph"
     assert resolve_single_stage_default_optimizer_backend("cpu") == "scipy"
 
     mock_get_config.return_value = backend_config("cuda")
+    invalidate_backend_cache()
     assert resolve_single_stage_default_optimizer_backend("jax") == "ondevice"
     assert resolve_single_stage_default_optimizer_backend("cpu") == "scipy"
 
@@ -58,6 +62,7 @@ def test_resolve_single_stage_default_optimizer_backend(mock_get_config):
 @patch("simsopt.backend.runtime.get_backend_config")
 def test_stage2_cpu_ondevice_warning(mock_get_config, caplog):
     mock_get_config.return_value = backend_config("cpu")
+    invalidate_backend_cache()
 
     test_args = [
         "banana_coil_solver.py",
@@ -76,6 +81,7 @@ def test_stage2_cpu_ondevice_warning(mock_get_config, caplog):
 @patch("simsopt.backend.runtime.get_backend_config")
 def test_stage2_gpu_ondevice_no_warning(mock_get_config, caplog):
     mock_get_config.return_value = backend_config("cuda")
+    invalidate_backend_cache()
 
     test_args = [
         "banana_coil_solver.py",
@@ -96,6 +102,7 @@ def test_stage2_parse_args_uses_platform_default(mock_get_config, caplog):
     test_args = ["banana_coil_solver.py", "--backend", "jax"]
 
     mock_get_config.return_value = backend_config("cpu")
+    invalidate_backend_cache()
     caplog.clear()
     with patch.object(sys, "argv", test_args):
         with caplog.at_level(logging.WARNING):
@@ -104,6 +111,7 @@ def test_stage2_parse_args_uses_platform_default(mock_get_config, caplog):
     assert not any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
 
     mock_get_config.return_value = backend_config("cuda")
+    invalidate_backend_cache()
     caplog.clear()
     with patch.object(sys, "argv", test_args):
         with caplog.at_level(logging.WARNING):
@@ -115,6 +123,7 @@ def test_stage2_parse_args_uses_platform_default(mock_get_config, caplog):
 @patch("simsopt.backend.runtime.get_backend_config")
 def test_single_stage_cpu_ondevice_warning(mock_get_config, caplog):
     mock_get_config.return_value = backend_config("cpu")
+    invalidate_backend_cache()
 
     test_args = [
         "single_stage_banana_example.py",
@@ -133,6 +142,7 @@ def test_single_stage_cpu_ondevice_warning(mock_get_config, caplog):
 @patch("simsopt.backend.runtime.get_backend_config")
 def test_single_stage_gpu_ondevice_no_warning(mock_get_config, caplog):
     mock_get_config.return_value = backend_config("cuda")
+    invalidate_backend_cache()
 
     test_args = [
         "single_stage_banana_example.py",
@@ -153,6 +163,7 @@ def test_single_stage_parse_args_uses_platform_default(mock_get_config, caplog):
     test_args = ["single_stage_banana_example.py", "--backend", "jax"]
 
     mock_get_config.return_value = backend_config("cpu")
+    invalidate_backend_cache()
     caplog.clear()
     with patch.object(sys, "argv", test_args):
         with caplog.at_level(logging.WARNING):
@@ -161,6 +172,7 @@ def test_single_stage_parse_args_uses_platform_default(mock_get_config, caplog):
     assert not any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
 
     mock_get_config.return_value = backend_config("cuda")
+    invalidate_backend_cache()
     caplog.clear()
     with patch.object(sys, "argv", test_args):
         with caplog.at_level(logging.WARNING):
