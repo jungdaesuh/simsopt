@@ -227,6 +227,7 @@ def build_stage2_mode_args(
         toroidal_flux=args.toroidal_flux,
         basin_seed=args.basin_seed,
         constraint_method=_constraint_method_for_mode(mode),
+        alm_fix_signal_mismatch_guard=False,
         stage2_iota_mode=mode,
         stage2_iota_target=None if mode == "off" else args.stage2_iota_target,
         stage2_iota_tolerance=args.stage2_iota_tolerance,
@@ -412,6 +413,11 @@ def _decision_summary(
     donor_repair_signal: dict[str, object] | None,
 ) -> dict[str, object]:
     baseline_payload = payloads_by_mode.get(baseline_mode)
+    baseline_error = (
+        None
+        if baseline_payload is None
+        else _float_or_none(baseline_payload.get("stage2_iota_abs_error"))
+    )
     soft_improvement = None
     soft_multiplier = None
     alm_multiplier = None
@@ -432,7 +438,9 @@ def _decision_summary(
         donor_repair_signal is not None
         and donor_repair_signal.get("best_case_bootable")
     )
-    if donor_repair_bootable:
+    if (
+        donor_repair_bootable
+    ):
         recommendation = "prefer_unified_runner_donor_repair"
         reason = "donor_repair_already_solves_bootability_with_less_risk"
     else:

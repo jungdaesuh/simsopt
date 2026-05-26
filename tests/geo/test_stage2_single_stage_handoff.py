@@ -1,5 +1,6 @@
 import importlib
 import importlib.util
+import ast
 import hashlib
 import json
 import sys
@@ -82,6 +83,11 @@ def load_workflow_runner_common_module():
     return importlib.import_module("workflow_runner_common")
 
 
+def _banana_source_paths():
+    for relative_root in ("banana_opt", "SINGLE_STAGE", "STAGE_2"):
+        yield from (EXAMPLE_ROOT / relative_root).rglob("*.py")
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(payload)
@@ -95,6 +101,7 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _valid_stage2_contract_fields() -> dict[str, object]:
+    hardware_contracts = importlib.import_module("banana_opt.hardware_contracts")
     return {
         "MAJOR_RADIUS": 0.976,
         "TOROIDAL_FLUX": 0.24,
@@ -117,12 +124,14 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "BANANA_CURRENT_A": 1.1e4,
         "BANANA_INIT_CURRENT_A": -1.0e4,
         "BANANA_CURRENT_MAX_A": 1.6e4,
-        "FINAL_LCFS_MAJOR_RADIUS_M": 0.92,
-        "FINAL_LCFS_MINOR_RADIUS_M": 0.15,
+        "TF_CURRENT_A": -8.0e4,
+        "FINAL_LCFS_MAJOR_RADIUS_M": hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        "FINAL_LCFS_MINOR_RADIUS_M": hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M,
         "CC_THRESHOLD": 0.05,
         "CC_WEIGHT": 100.0,
         "CURVATURE_WEIGHT": 1.0e-4,
         "LENGTH_TARGET": 1.9,
+        "LENGTH_MIN_TARGET": 0.95,
         "LENGTH_WEIGHT": 5.0e-4,
         "order": 2,
         "PROXY_PLASMA_CURRENT_A": 0.0,
@@ -309,6 +318,27 @@ def _bootability_status(
 
 
 class HandoffSchemaTests(unittest.TestCase):
+    def test_hbt_proxy_vf_current_convention_requires_nonnegative_ratio(self):
+        current_contracts = importlib.import_module("banana_opt.current_contracts")
+
+        self.assertEqual(
+            current_contracts.validate_hbt_proxy_vf_current_convention(
+                proxy_plasma_current_A=9.0e3,
+                vf_current_A=9.0e3 / 6.5,
+            ),
+            (9.0e3, 9.0e3 / 6.5),
+        )
+        with self.assertRaisesRegex(ValueError, "proxy plasma current"):
+            current_contracts.validate_hbt_proxy_vf_current_convention(
+                proxy_plasma_current_A=-1.0,
+                vf_current_A=0.0,
+            )
+        with self.assertRaisesRegex(ValueError, "proxy/VF convention"):
+            current_contracts.validate_hbt_proxy_vf_current_convention(
+                proxy_plasma_current_A=9.0e3,
+                vf_current_A=5.0e2,
+            )
+
     def test_validate_stage2_seed_bootability_contract_accepts_fact_based_report(self):
         module = load_handoff_module()
         payload = {
@@ -484,6 +514,93 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertEqual(manifest.count_for_role("proxy"), 1)
         self.assertEqual(manifest.count_for_role("vf"), 2)
 
+    def test_upgrade_legacy_stage2_artifact_results_backfills_wout_convention_for_legacy_single_stage_sidecar(self):
+        """Salvaged single-stage sidecars omit WOUT_CONVENTION/WOUT_OFF_SPEC.
+
+        The Stage 2 seed-contract validator requires both keys; backfilling
+        from PLASMA_SURF_PATH + TF_CURRENT_A in the upgrader keeps every
+        validator caller passing without forcing every single-stage write
+        site to stamp the fields independently.
+        """
+        artifact_contracts = load_artifact_contracts_module()
+        handoff = load_handoff_module()
+        legacy_sidecar_payload = {
+            **_valid_stage2_contract_fields(),
+            "PLASMA_SURF_PATH": str(SIGNED_CW_WOUT_PATH),
+            "TF_CURRENT_A": -8.0e4,
+        }
+        legacy_sidecar_payload.pop("WOUT_CONVENTION")
+        legacy_sidecar_payload.pop("WOUT_OFF_SPEC")
+
+        upgraded = artifact_contracts.upgrade_legacy_stage2_artifact_results(
+            legacy_sidecar_payload
+        )
+
+        self.assertEqual(upgraded["WOUT_CONVENTION"], "signed_cw")
+        self.assertFalse(upgraded["WOUT_OFF_SPEC"])
+        handoff.validate_stage2_seed_contract(upgraded)
+
+    def test_upgrade_legacy_stage2_artifact_results_preserves_existing_wout_convention_stamps(self):
+        """An already-stamped artifact must round-trip unchanged.
+
+        The upgrader is not a producer-side validator. Overwriting a drifted
+        stamp would mask the violation that ``validate_stage2_seed_contract``
+        is designed to catch.
+        """
+        artifact_contracts = load_artifact_contracts_module()
+        drifted_payload = {
+            **_valid_stage2_contract_fields(),
+            "TF_CURRENT_A": -8.0e4,
+            "WOUT_CONVENTION": "positive_ccw",
+            "WOUT_OFF_SPEC": True,
+        }
+
+        upgraded = artifact_contracts.upgrade_legacy_stage2_artifact_results(
+            drifted_payload
+        )
+
+        self.assertEqual(upgraded["WOUT_CONVENTION"], "positive_ccw")
+        self.assertTrue(upgraded["WOUT_OFF_SPEC"])
+
+    def test_upgrade_legacy_stage2_artifact_results_skips_wout_backfill_without_inputs(self):
+        """Without PLASMA_SURF_PATH or TF_CURRENT_A, no stamping happens.
+
+        The validator surfaces the precise missing key rather than the
+        upgrader fabricating a value from incomplete provenance.
+        """
+        artifact_contracts = load_artifact_contracts_module()
+
+        upgraded_missing_path = artifact_contracts.upgrade_legacy_stage2_artifact_results(
+            {"TF_CURRENT_A": -8.0e4},
+        )
+        self.assertNotIn("WOUT_CONVENTION", upgraded_missing_path)
+        self.assertNotIn("WOUT_OFF_SPEC", upgraded_missing_path)
+
+        upgraded_missing_tf = artifact_contracts.upgrade_legacy_stage2_artifact_results(
+            {"PLASMA_SURF_PATH": str(SIGNED_CW_WOUT_PATH)},
+        )
+        self.assertNotIn("WOUT_CONVENTION", upgraded_missing_tf)
+        self.assertNotIn("WOUT_OFF_SPEC", upgraded_missing_tf)
+
+    def test_upgrade_legacy_stage2_artifact_results_skips_wout_backfill_when_file_absent(self):
+        """A nonexistent PLASMA_SURF_PATH triggers no I/O and no stamping.
+
+        Lets the validator's own ``PLASMA_SURF_PATH`` precondition surface
+        the broken provenance, rather than the upgrader raising a netCDF
+        read error one layer deeper than the validator.
+        """
+        artifact_contracts = load_artifact_contracts_module()
+
+        upgraded = artifact_contracts.upgrade_legacy_stage2_artifact_results(
+            {
+                "PLASMA_SURF_PATH": "/nonexistent/wout_missing.nc",
+                "TF_CURRENT_A": -8.0e4,
+            }
+        )
+
+        self.assertNotIn("WOUT_CONVENTION", upgraded)
+        self.assertNotIn("WOUT_OFF_SPEC", upgraded)
+
 
 class HandoffModuleTests(unittest.TestCase):
     def test_warm_start_boozer_seed_default_loader_handles_legacy_finite_i(self):
@@ -517,7 +634,7 @@ class HandoffModuleTests(unittest.TestCase):
             self._fixed_current_coil(-1.1e4),
         ]
         proxy_coils = [self._fixed_current_coil(9.0e3)] if include_proxy_vf else []
-        vf_coils = [self._fixed_current_coil(-5.0e2)] if include_proxy_vf else []
+        vf_coils = [self._fixed_current_coil(-(9.0e3 / 6.5))] if include_proxy_vf else []
         fake_bs = SimpleNamespace(coils=[*tf_coils, *banana_coils, *proxy_coils, *vf_coils])
         stage2_artifact_results = {
             **_valid_stage2_contract_fields(),
@@ -533,7 +650,7 @@ class HandoffModuleTests(unittest.TestCase):
                     "NUM_VF_COILS": 1,
                     "FINITE_CURRENT_MODE": "wataru_proxy_field",
                     "PROXY_PLASMA_CURRENT_A": 9.0e3,
-                    "VF_CURRENT_A": 5.0e2,
+                    "VF_CURRENT_A": 9.0e3 / 6.5,
                 }
             )
         return tf_coils, fake_bs, stage2_artifact_results
@@ -558,11 +675,96 @@ class HandoffModuleTests(unittest.TestCase):
         def J(self):
             return 0.1
 
+    def test_attempt_initialize_boozer_surface_threads_requested_volume_target(self):
+        module = load_handoff_module()
+        surf_prev = SimpleNamespace(
+            quadpoints_theta=np.array([0.0, 0.5]),
+            quadpoints_phi=np.array([0.0, 0.2]),
+            gamma=lambda: np.zeros((2, 2, 3), dtype=float),
+        )
+        seen_volume_targets = []
+
+        class _FakeSurface:
+            def __init__(self, **kwargs):
+                self.quadpoints_theta = kwargs["quadpoints_theta"]
+                self.quadpoints_phi = kwargs["quadpoints_phi"]
+                self.dofs = np.zeros(2, dtype=float)
+                self.x = np.zeros(2, dtype=float)
+                self._gamma = np.zeros((2, 2, 3), dtype=float)
+
+            def least_squares_fit(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+
+            def gamma(self):
+                return self._gamma.copy()
+
+            def is_self_intersecting(self):
+                return False
+
+        class _FakeBoozerSurface:
+            def __init__(
+                self,
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options,
+                I=0.0,
+            ):
+                del bs, vol, constraint_weight, options, I
+                seen_volume_targets.append(vol_target)
+                self.surface = surf
+                self.res = {"iota": 0.2, "G": 0.35, "success": True}
+                self.need_to_run_code = True
+
+            def run_code(self, iota, G):
+                del iota, G
+                self.need_to_run_code = False
+                return {"success": True}
+
+        result = module.attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol=8,
+            ntor=6,
+            bs=object(),
+            vol_target=0.035,
+            constraint_weight=1.0,
+            iota=0.2,
+            G0=0.35,
+            boozer_I=0.0,
+            nfp=5,
+            surface_cls=_FakeSurface,
+            volume_cls=self._ConstantVolumeLabel,
+            boozer_surface_cls=_FakeBoozerSurface,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(seen_volume_targets, [0.035])
+
     def test_compute_tf_G0_preserves_tf_current_sign(self):
         module = load_handoff_module()
         tf_coils = [self._fixed_current_coil(-8.0e4) for _ in range(20)]
 
         self.assertAlmostEqual(module.compute_tf_G0(tf_coils), -4.0e-7 * np.pi * 1.6e6)
+
+    def test_banana_boozer_run_code_calls_pass_explicit_G(self):
+        violations = []
+        for path in _banana_source_paths():
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "run_code"
+                ):
+                    continue
+                if len(node.args) >= 2 or any(keyword.arg == "G" for keyword in node.keywords):
+                    continue
+                violations.append(f"{path.relative_to(EXAMPLE_ROOT)}:{node.lineno}")
+
+        self.assertEqual(violations, [])
 
     def test_validate_stage2_seed_contract_accepts_nonbootable_recovery_input(self):
         module = load_handoff_module()
@@ -601,6 +803,77 @@ class HandoffModuleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "WOUT_OFF_SPEC=True"):
             module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_proxy_vf_ratio_drift(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "TF_CURRENT_A": -8.0e4,
+            "PROXY_PLASMA_CURRENT_A": 9.0e3,
+            "VF_CURRENT_A": 5.0e2,
+        }
+
+        with self.assertRaisesRegex(ValueError, "proxy/VF convention"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_recovery_contract_accepts_traversal_geometry(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "TF_CURRENT_A": -8.0e4,
+            "COIL_LENGTH": 0.91,
+            "COIL_WIDTH": 0.252,
+            "SELF_INTERSECT_PENALTY": 2.0e-4,
+        }
+
+        module.validate_stage2_seed_recovery_contract(stage2_results)
+        with self.assertRaisesRegex(ValueError, "full HBT-EP hardware contract"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_stage2_seed_hardware_contract_uses_artifact_length_min_target(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "LENGTH_TARGET": 1.80,
+            "LENGTH_MIN_TARGET": 0.90,
+            "COIL_LENGTH": 0.91,
+        }
+
+        hardware_status = module.evaluate_stage2_seed_hardware_contract(stage2_results)
+
+        self.assertTrue(hardware_status["success"])
+        self.assertEqual(
+            hardware_status["constraints"]["coil_length_min"]["threshold"],
+            0.90,
+        )
+
+    def test_validate_stage2_seed_recovery_contract_rejects_current_violation(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "TF_CURRENT_A": -8.0e4,
+            "BANANA_CURRENT_A": 1.6001e4,
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "non-traversable HBT-EP hardware contract: .*banana_current",
+        ):
+            module.validate_stage2_seed_recovery_contract(stage2_results)
+
+    def test_validate_stage2_seed_recovery_contract_rejects_missing_metrics(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "TF_CURRENT_A": -8.0e4,
+        }
+        stage2_results.pop("COIL_LENGTH")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "missing required hardware constraint metric coil_length",
+        ):
+            module.validate_stage2_seed_recovery_contract(stage2_results)
 
     def test_validate_stage2_seed_handoff_contract_rejects_nonbootable_artifact(self):
         module = load_handoff_module()
@@ -1825,9 +2098,100 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertAlmostEqual(recorded["iota"], 0.2)
         self.assertEqual(recorded["nfp"], 5)
 
+    def test_probe_stage2_seed_bootability_rebuilds_when_loaded_surface_has_no_solved_state(self):
+        module = load_handoff_module()
+        tf_coils, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
+            include_proxy_vf=False
+        )
+        cold_surface = SimpleNamespace(nfp=5)
+        surface_only = SimpleNamespace(nfp=5)
+        recorded = {}
+
+        def fake_attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol,
+            ntor,
+            bs,
+            vol_target,
+            constraint_weight,
+            iota,
+            G0,
+            boozer_I=0.0,
+            *,
+            initial_surface_guess,
+            nfp,
+        ):
+            recorded.update(
+                surf_prev=surf_prev,
+                initial_surface_guess=initial_surface_guess,
+                iota=iota,
+                G0=G0,
+                boozer_I=boozer_I,
+                nfp=nfp,
+            )
+            return module.BoozerInitializationResult(
+                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                solve_success=True,
+                self_intersecting=False,
+                success=True,
+                solved_iota=0.2,
+                solved_G=G0,
+                volume=0.1,
+            )
+
+        with patch.object(
+            module,
+            "build_equilibrium_path",
+            return_value="/tmp/equilibria/demo.nc",
+        ) as build_equilibrium_path, patch.object(
+            module,
+            "build_surface_configs",
+            return_value=[{"initial_surface": cold_surface, "target_volume": 0.1}],
+        ) as build_surface_configs, patch.object(
+            module,
+            "load_warm_start_boozer_seed",
+            return_value=module.WarmStartBoozerSeed(
+                surface=surface_only,
+                iota=0.2,
+                G=None,
+                source_path=Path("/tmp/legacy/surf_opt_boozer_surface.json"),
+            ),
+        ), patch.object(
+            module,
+            "attempt_initialize_boozer_surface",
+            side_effect=fake_attempt_initialize_boozer_surface,
+        ):
+            status = module.probe_stage2_seed_bootability(
+                stage2_bs_path="/tmp/legacy/biot_savart_opt.json",
+                stage2_artifact_results=stage2_artifact_results,
+                plasma_surf_filename="demo.nc",
+                equilibria_dir="/tmp/equilibria",
+                num_tf_coils=20,
+                nphi=31,
+                ntheta=16,
+                mpol=8,
+                ntor=6,
+                vol_target=0.1,
+                iota_target=0.2,
+                iota_tolerance=5.0e-3,
+                constraint_weight=1.0,
+                boozer_I=0.0,
+                stage2_seed_surf_path="/tmp/legacy/surf_opt_boozer_surface.json",
+                bs_loader=lambda _path: fake_bs,
+            )
+
+        self.assertTrue(module.bootability_passes(status))
+        build_equilibrium_path.assert_called_once()
+        build_surface_configs.assert_called_once()
+        self.assertIs(recorded["surf_prev"], cold_surface)
+        self.assertIsNone(recorded["initial_surface_guess"])
+        self.assertAlmostEqual(recorded["iota"], 0.2)
+        self.assertAlmostEqual(recorded["G0"], module.compute_tf_G0(tf_coils))
+        self.assertEqual(recorded["nfp"], 5)
+
     def test_probe_stage2_seed_bootability_uses_warm_start_boozer_surface_artifact(self):
         module = load_handoff_module()
-        _, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
+        tf_coils, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
             include_proxy_vf=False
         )
         warm_start_surface = SimpleNamespace(nfp=5)
@@ -1927,6 +2291,7 @@ class Stage2SolverIotaReportTests(unittest.TestCase):
         plasma_surf_filename = "/tmp/hbt_stage1/wout_hbt_v2_abs.nc"
         stage2_bs_path = "/tmp/stage2/biot_savart_opt.json"
         stage2_results_path = "/tmp/stage2/results.json"
+        stage2_seed_surf_path = "/tmp/stage2/surf_opt_boozer_surface.json"
         bootability_status = _bootability_status(
             handoff,
             stage=handoff.BOOTABILITY_STAGE_PROBE,
@@ -1950,6 +2315,9 @@ class Stage2SolverIotaReportTests(unittest.TestCase):
             plasma_surf_filename=plasma_surf_filename,
             equilibria_dir="/tmp/database/equilibria",
             equilibrium_path=None,
+            accept_offspec_tf_current_sign=False,
+            accept_offspec_tf_current_magnitude=False,
+            accept_offspec_banana_current_max=False,
         )
 
         with patch.object(
@@ -1964,6 +2332,7 @@ class Stage2SolverIotaReportTests(unittest.TestCase):
                     "STAGE2_BS_PATH": stage2_bs_path,
                     "STAGE2_RESULTS_PATH": stage2_results_path,
                 },
+                stage2_seed_surf_path=stage2_seed_surf_path,
             )
 
         self.assertEqual(
@@ -1974,6 +2343,11 @@ class Stage2SolverIotaReportTests(unittest.TestCase):
             probe.call_args.kwargs["equilibrium_path"],
             plasma_surf_filename,
         )
+        self.assertEqual(
+            probe.call_args.kwargs["stage2_seed_surf_path"],
+            stage2_seed_surf_path,
+        )
+        self.assertEqual(payload["BOOTABILITY_STAGE2_SURF_PATH"], stage2_seed_surf_path)
         self.assertTrue(payload["STAGE2_ROOT_FIX_ENABLED"])
         self.assertEqual(payload["BOOTABILITY_REASON"], handoff.BOOTABILITY_REASON_OK)
 
@@ -2099,6 +2473,25 @@ class UnifiedRunnerTests(unittest.TestCase):
         self.assertEqual(stage2_args.stage2_iota_mode, "report")
         self.assertAlmostEqual(stage2_args.stage2_iota_target, 0.2)
         self.assertAlmostEqual(stage2_args.stage2_iota_vol_target, 0.13)
+
+    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_generated_stage2(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--iota-target",
+                "0.2",
+                "--alm-fix-signal-mismatch-guard",
+            ]
+        )
+        stage2_args = wrapper.build_stage2_generation_args(
+            args,
+            output_root=Path("/tmp/stage2"),
+        )
+
+        self.assertTrue(stage2_args.alm_fix_signal_mismatch_guard)
 
     def test_production_handoff_payload_requires_explicit_wout_status(self):
         wrapper = load_wrapper_module()
@@ -2485,6 +2878,32 @@ class UnifiedRunnerTests(unittest.TestCase):
             str(args.recovery_maxiter),
         )
 
+    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_pre_boozer_repair(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+                "--alm-fix-signal-mismatch-guard",
+            ]
+        )
+
+        command = wrapper.build_recovery_command(
+            args,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            recovery_output_root=Path("/tmp/recovery"),
+            original_stage2_results={
+                **_valid_stage2_contract_fields(),
+                "TF_CURRENT_A": -8.0e4,
+                "FINITE_CURRENT_MODE": "wataru_proxy_field",
+            },
+        )
+
+        self.assertIn("--alm-fix-signal-mismatch-guard", command)
+
     def test_pre_boozer_stage2_repair_rejects_unsupported_finite_current_mode(self):
         wrapper = load_wrapper_module()
 
@@ -2556,6 +2975,52 @@ class UnifiedRunnerTests(unittest.TestCase):
             command[command.index("--single-stage-banana-current-mode") + 1],
             "independent",
         )
+
+    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_thresholded_recovery(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "/tmp/stage1/wout_new_stage1.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+                "--recovery-stage",
+                wrapper.RECOVERY_STAGE_THRESHOLDED_PHYSICS_ALM,
+                "--alm-fix-signal-mismatch-guard",
+            ]
+        )
+
+        command = wrapper.build_recovery_command(
+            args,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            recovery_output_root=Path("/tmp/recovery"),
+        )
+
+        self.assertIn("--alm-fix-signal-mismatch-guard", command)
+
+    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_full_single_stage(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+                "--constraint-method",
+                "alm",
+                "--alm-fix-signal-mismatch-guard",
+            ]
+        )
+
+        command = wrapper.build_full_single_stage_command(
+            args,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            full_output_root=Path("/tmp/full"),
+        )
+
+        self.assertIn("--alm-fix-signal-mismatch-guard", command)
 
     def test_recovery_only_nonbootable_reports_pre_boozer_repair_required(self):
         wrapper = load_wrapper_module()

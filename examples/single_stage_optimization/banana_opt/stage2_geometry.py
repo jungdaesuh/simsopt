@@ -278,6 +278,37 @@ def load_plasma_geometry(target_lcfs_major_radius_m, s_working, file_loc, nphi, 
     )
 
 
+def load_plasma_geometry_for_working_major_radius(
+    target_working_major_radius_m,
+    s_working,
+    file_loc,
+    nphi,
+    ntheta,
+):
+    working_surface = load_vmec_surface(file_loc, s_working, nphi, ntheta)
+    lcfs_surface = load_vmec_surface(file_loc, 1.0, nphi, ntheta)
+    target_working_major_radius = float(target_working_major_radius_m)
+    if target_working_major_radius <= 0.0:
+        raise ValueError("Target working-surface major radius must be positive.")
+    scale_factor = target_working_major_radius / float(working_surface.major_radius())
+    working_surface = _scale_surface(working_surface, scale_factor)
+    lcfs_surface = _scale_surface(lcfs_surface, scale_factor)
+    LOGGER.info("Working surface major radius target: %s", target_working_major_radius)
+    LOGGER.info("Working surface major radius actual: %s", working_surface.major_radius())
+    LOGGER.info("Working surface minor radius: %s", working_surface.minor_radius())
+    LOGGER.info("LCFS major radius: %s", lcfs_surface.major_radius())
+    LOGGER.info("LCFS minor radius: %s", lcfs_surface.minor_radius())
+    return PlasmaGeometry(
+        working_surface=working_surface,
+        lcfs_surface=lcfs_surface,
+        working_major_radius_m=float(working_surface.major_radius()),
+        working_minor_radius_m=float(working_surface.minor_radius()),
+        lcfs_major_radius_m=float(lcfs_surface.major_radius()),
+        lcfs_minor_radius_m=float(lcfs_surface.minor_radius()),
+        scale_factor=float(scale_factor),
+    )
+
+
 def init_surface(target_lcfs_major_radius_m, s, file_loc, nphi, ntheta):
     return load_plasma_geometry(
         target_lcfs_major_radius_m,

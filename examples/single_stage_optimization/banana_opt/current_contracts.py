@@ -13,6 +13,11 @@ from banana_opt.hardware_constraint_schema import (
     hardware_constraint_penalty_box_bound_names,
     resolve_penalty_box_bound_threshold,
 )
+from banana_opt.surface_mode_contracts import (
+    PUBLISHED_MULTISURFACE,
+    SINGLE_SURFACE,
+    SurfaceModeContract,
+)
 
 
 MU0 = 4.0e-7 * np.pi
@@ -30,6 +35,8 @@ FiniteCurrentMode = Literal["boozer_surrogate", "wataru_proxy_field"]
 EffectiveCurrentMode = Literal["vacuum", "boozer_surrogate", "wataru_proxy_field"]
 CURRENT_MODE_ZERO_TOL = 1e-12
 DEFAULT_FINITE_CURRENT_MODE: FiniteCurrentMode = "wataru_proxy_field"
+HBT_PROXY_VF_CURRENT_RATIO = 1.0 / 6.5
+HBT_PROXY_VF_CURRENT_TOL_A = 1.0e-9
 FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA: FiniteCurrentModeSource = (
     "artifact_metadata"
 )
@@ -48,10 +55,12 @@ __all__ = [
     "FiniteCurrentModeSource",
     "FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA",
     "FINITE_CURRENT_MODE_SOURCE_LEGACY_ASSUMED_DEFAULT",
+    "HBT_PROXY_VF_CURRENT_RATIO",
     "MU0",
     "MU0_OVER_2PI",
     "PenaltyBoxBoundHandler",
     "PlasmaCurrentSettings",
+    "apply_banana_current_seed_sign_box_bound",
     "apply_banana_current_upper_bound",
     "apply_penalty_traversal_forbidden_box_bounds",
     "banana_current_exceeds_limit",
@@ -61,10 +70,12 @@ __all__ = [
     "resolve_boozer_current_convention",
     "resolve_finite_current_mode",
     "resolve_effective_current_mode",
+    "validate_hbt_proxy_vf_current_convention",
     "resolve_penalty_traversal_forbidden_box_bounds",
     "resolve_loaded_tf_current_A",
     "resolve_plasma_current_settings",
     "resolve_plasma_current_settings_for_num_surfaces",
+    "resolve_plasma_current_settings_for_surface_mode",
     "resolve_single_surface_plasma_current_settings",
     "unwrap_current_optimizable",
 ]
@@ -84,6 +95,7 @@ class PlasmaCurrentSettings:
 class PenaltyBoxBoundHandler:
     apply_bound: Callable[[object, float], None]
     exceeds_limit: Callable[[float, float], bool]
+    apply_seed_sign_bound: Callable[[object, float, float], None] | None = None
 
 
 _BOOZER_CURRENT_SCALE_BY_CONVENTION: Mapping[BoozerCurrentConvention, float] = {
@@ -137,6 +149,37 @@ def boozer_I_to_physical_current_A(
     convention: BoozerCurrentConvention = "mu0",
 ) -> float:
     return float(boozer_I) / _BOOZER_CURRENT_SCALE_BY_CONVENTION[convention]
+
+
+def validate_hbt_proxy_vf_current_convention(
+    *,
+    proxy_plasma_current_A: float,
+    vf_current_A: float,
+) -> tuple[float, float]:
+    """Validate Wataru's HBT proxy/VF current convention.
+
+    The HBT notes define the proxy current as non-negative and the VF current
+    as ``proxy / 6.5``. This contract intentionally does not derive proxy or VF
+    signs from the TF-current sign.
+    """
+    proxy_current_A = float(proxy_plasma_current_A)
+    resolved_vf_current_A = float(vf_current_A)
+    if proxy_current_A < 0.0:
+        raise ValueError("HBT proxy plasma current must be non-negative.")
+    if resolved_vf_current_A < 0.0:
+        raise ValueError("HBT VF current must be non-negative.")
+    expected_vf_current_A = proxy_current_A * HBT_PROXY_VF_CURRENT_RATIO
+    if not np.isclose(
+        resolved_vf_current_A,
+        expected_vf_current_A,
+        rtol=1.0e-12,
+        atol=HBT_PROXY_VF_CURRENT_TOL_A,
+    ):
+        raise ValueError(
+            "HBT proxy/VF convention requires "
+            "--vf-current-A = --proxy-plasma-current-A / 6.5."
+        )
+    return proxy_current_A, resolved_vf_current_A
 
 
 def resolve_finite_current_mode(
@@ -230,6 +273,33 @@ def apply_banana_current_upper_bound(current, banana_current_max_A):
     current_optimizable.local_upper_bounds = upper_bounds
 
 
+def apply_banana_current_seed_sign_box_bound(
+    current,
+    banana_current_max_A,
+    seed_current_A,
+):
+    seed_current_A = float(seed_current_A)
+    if seed_current_A == 0.0:
+        raise ValueError("Banana current seed must be non-zero to preserve its sign.")
+    current_optimizable, scale = unwrap_current_optimizable(current)
+    if scale == 0.0:
+        raise ValueError("Banana current scale must be non-zero to apply a bound.")
+    lower_bounds = np.asarray(current_optimizable.local_lower_bounds, dtype=float).copy()
+    upper_bounds = np.asarray(current_optimizable.local_upper_bounds, dtype=float).copy()
+    scaled_magnitude_bound = float(banana_current_max_A) / abs(scale)
+    seed_sign_matches_scale = np.sign(seed_current_A) == np.sign(scale)
+    if seed_sign_matches_scale:
+        lower_bounds[0] = max(lower_bounds[0], 0.0)
+        upper_bounds[0] = min(upper_bounds[0], scaled_magnitude_bound)
+    else:
+        lower_bounds[0] = max(lower_bounds[0], -scaled_magnitude_bound)
+        upper_bounds[0] = min(upper_bounds[0], 0.0)
+    if lower_bounds[0] > upper_bounds[0]:
+        raise ValueError("Banana current sign-preserving bounds are inconsistent.")
+    current_optimizable.local_lower_bounds = lower_bounds
+    current_optimizable.local_upper_bounds = upper_bounds
+
+
 def banana_current_exceeds_limit(current_A: float, banana_current_max_A: float) -> bool:
     return abs(float(current_A)) > float(banana_current_max_A)
 
@@ -238,6 +308,7 @@ _PENALTY_BOX_BOUND_HANDLERS: Mapping[str, PenaltyBoxBoundHandler] = {
     "banana_current": PenaltyBoxBoundHandler(
         apply_bound=apply_banana_current_upper_bound,
         exceeds_limit=banana_current_exceeds_limit,
+        apply_seed_sign_bound=apply_banana_current_seed_sign_box_bound,
     ),
 }
 
@@ -253,18 +324,24 @@ def _penalty_box_bound_handler(name: str) -> PenaltyBoxBoundHandler:
 
 def resolve_penalty_traversal_forbidden_box_bounds(
     requested_thresholds: Mapping[str, float | None],
+    *,
+    allow_offspec_threshold_names: frozenset[str] = frozenset(),
 ) -> dict[str, float]:
     # Only penalty-search box bounds need runtime handlers here. ALM and
     # artifact enforcement consume the schema through separate paths.
-    return {
-        name: resolve_penalty_box_bound_threshold(
+    resolved_thresholds: dict[str, float] = {}
+    for name in hardware_constraint_penalty_box_bound_names(
+        traversal_policy="forbidden",
+    ):
+        requested_threshold = requested_thresholds.get(name)
+        if requested_threshold is not None and name in allow_offspec_threshold_names:
+            resolved_thresholds[name] = float(requested_threshold)
+            continue
+        resolved_thresholds[name] = resolve_penalty_box_bound_threshold(
             name,
-            requested_threshold=requested_thresholds.get(name),
+            requested_threshold=requested_threshold,
         )
-        for name in hardware_constraint_penalty_box_bound_names(
-            traversal_policy="forbidden",
-        )
-    }
+    return resolved_thresholds
 
 
 def apply_penalty_traversal_forbidden_box_bounds(
@@ -274,9 +351,12 @@ def apply_penalty_traversal_forbidden_box_bounds(
     seed_values: Mapping[str, float | None] | None = None,
     validate_seed: bool = False,
     seed_context: str = "Loaded seed",
+    allow_offspec_threshold_names: frozenset[str] = frozenset(),
+    preserve_seed_sign_names: frozenset[str] = frozenset(),
 ) -> dict[str, float]:
     resolved_thresholds = resolve_penalty_traversal_forbidden_box_bounds(
         requested_thresholds,
+        allow_offspec_threshold_names=allow_offspec_threshold_names,
     )
     applied_thresholds: dict[str, float] = {}
     for name, threshold in resolved_thresholds.items():
@@ -296,7 +376,19 @@ def apply_penalty_traversal_forbidden_box_bounds(
                     f"{seed_context} {name}={float(seed_value):.6f} exceeds the "
                     f"traversal-forbidden penalty box bound {threshold:.6f}."
                 )
-        handler.apply_bound(target, threshold)
+        if name in preserve_seed_sign_names:
+            if seed_values is None or seed_values.get(name) is None:
+                raise ValueError(
+                    f"{seed_context} {name} is required to preserve the seed sign."
+                )
+            if handler.apply_seed_sign_bound is None:
+                raise ValueError(
+                    f"No sign-preserving penalty box-bound handler registered for "
+                    f"hardware constraint {name!r}."
+                )
+            handler.apply_seed_sign_bound(target, threshold, float(seed_values[name]))
+        else:
+            handler.apply_bound(target, threshold)
         applied_thresholds[name] = threshold
     return applied_thresholds
 
@@ -310,7 +402,12 @@ def infer_uniform_coil_current_A(coils) -> float | None:
     return None
 
 
-def resolve_loaded_tf_current_A(recorded_tf_current_A, tf_coils) -> float:
+def resolve_loaded_tf_current_A(
+    recorded_tf_current_A,
+    tf_coils,
+    *,
+    allow_offspec_current_contract: bool = False,
+) -> float:
     realized_tf_current_A = infer_uniform_coil_current_A(tf_coils)
     if realized_tf_current_A is None:
         raise ValueError(
@@ -328,6 +425,10 @@ def resolve_loaded_tf_current_A(recorded_tf_current_A, tf_coils) -> float:
             f"{realized_tf_current_A:.6f} A does not match the artifact metadata "
             f"TF_CURRENT_A={float(recorded_tf_current_A):.6f} A."
         )
+    if allow_offspec_current_contract:
+        if not np.isfinite(realized_tf_current_A) or realized_tf_current_A == 0.0:
+            raise ValueError("Loaded Stage 2 TF coil current must be finite and non-zero.")
+        return float(realized_tf_current_A)
     return validate_tf_current_limit(realized_tf_current_A)
 
 
@@ -432,6 +533,71 @@ def resolve_plasma_current_settings_for_num_surfaces(
             raw_boozer_I=raw_boozer_I,
             plasma_current_A=plasma_current_A,
             default_plasma_current_A=default_plasma_current_A,
+        )
+    return resolve_plasma_current_settings(
+        raw_boozer_I=raw_boozer_I,
+        plasma_current_A=plasma_current_A,
+        finite_current_mode=finite_current_mode,
+        default_plasma_current_A=default_plasma_current_A,
+    )
+
+
+def resolve_plasma_current_settings_for_surface_mode(
+    *,
+    raw_boozer_I: float | None,
+    plasma_current_A: float | None,
+    finite_current_mode: FiniteCurrentMode = DEFAULT_FINITE_CURRENT_MODE,
+    default_plasma_current_A: float = 0.0,
+    surface_mode_contract: SurfaceModeContract,
+    requested_finite_current_mode: FiniteCurrentMode | None = None,
+) -> PlasmaCurrentSettings:
+    if surface_mode_contract.mode == PUBLISHED_MULTISURFACE:
+        if requested_finite_current_mode not in {
+            None,
+            "",
+            DEFAULT_FINITE_CURRENT_MODE,
+        }:
+            raise ValueError(
+                "published_multisurface v1 is vacuum-locked; remove "
+                "--finite-current-mode or set it to "
+                f"{DEFAULT_FINITE_CURRENT_MODE!r}."
+            )
+        if finite_current_mode != DEFAULT_FINITE_CURRENT_MODE:
+            raise ValueError(
+                "published_multisurface v1 is vacuum-locked and cannot inherit "
+                f"finite-current donor mode {finite_current_mode!r}."
+            )
+        if raw_boozer_I is not None:
+            raise ValueError(
+                "published_multisurface v1 is vacuum-locked and rejects raw "
+                "--boozer-I overrides."
+            )
+        if (
+            plasma_current_A is not None
+            and abs(float(plasma_current_A)) > CURRENT_MODE_ZERO_TOL
+        ):
+            raise ValueError(
+                "published_multisurface v1 is vacuum-locked and rejects nonzero "
+                "--plasma-current-A."
+            )
+        if abs(float(default_plasma_current_A)) > CURRENT_MODE_ZERO_TOL:
+            raise ValueError(
+                "published_multisurface v1 is vacuum-locked and rejects nonzero "
+                "artifact default plasma current."
+            )
+        return resolve_single_surface_plasma_current_settings(
+            raw_boozer_I=None,
+            plasma_current_A=plasma_current_A,
+            default_plasma_current_A=0.0,
+        )
+    if surface_mode_contract.mode == SINGLE_SURFACE:
+        return resolve_plasma_current_settings_for_num_surfaces(
+            raw_boozer_I=raw_boozer_I,
+            plasma_current_A=plasma_current_A,
+            finite_current_mode=finite_current_mode,
+            default_plasma_current_A=default_plasma_current_A,
+            num_surfaces=1,
+            requested_finite_current_mode=requested_finite_current_mode,
         )
     return resolve_plasma_current_settings(
         raw_boozer_I=raw_boozer_I,

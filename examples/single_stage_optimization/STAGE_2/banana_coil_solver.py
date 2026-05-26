@@ -73,6 +73,7 @@ from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basi
 from banana_opt.stage2_geometry import (
     initialize_coils as _initialize_coils,
     is_self_intersecting,
+    load_plasma_geometry_for_working_major_radius,
     load_vmec_surface as _load_stage2_vmec_surface,
     load_plasma_geometry as _load_plasma_geometry,
     magnetic_field_plots as _magnetic_field_plots,
@@ -103,6 +104,7 @@ from banana_opt.hardware_contracts import (
     TARGET_LCFS_MAX_MINOR_RADIUS_M,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
+    validate_banana_winding_surface_radius,
     validate_major_radius,
     validate_target_lcfs_major_radius,
     validate_target_lcfs_minor_radius,
@@ -235,14 +237,25 @@ def _print_taylor_test_summary(name: str, result: dict) -> None:
 def validate_banana_current_cli_args(args) -> None:
     banana_init_current_A = float(args.banana_init_current_A)
     banana_current_max_A = float(args.banana_current_max_A)
-    if not (-BANANA_CURRENT_HARD_LIMIT_A <= banana_init_current_A < 0.0):
+    accepts_offspec_sign = bool(args.accept_offspec_banana_current_sign)
+    accepts_offspec_current_max = bool(args.accept_offspec_banana_current_max)
+    if accepts_offspec_sign:
+        if (
+            banana_init_current_A == 0.0
+            or abs(banana_init_current_A) > BANANA_CURRENT_HARD_LIMIT_A
+        ):
+            raise ValueError(
+                f"--banana-init-current-A must be non-zero with magnitude <= "
+                f"{BANANA_CURRENT_HARD_LIMIT_A:.0f}."
+            )
+    elif not (-BANANA_CURRENT_HARD_LIMIT_A <= banana_init_current_A < 0.0):
         raise ValueError(
             f"--banana-init-current-A must be in the interval "
             f"[-{BANANA_CURRENT_HARD_LIMIT_A:.0f}, 0)."
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
-    if banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A:
+    if banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A and not accepts_offspec_current_max:
         raise ValueError(
             f"--banana-current-max-A must be in the interval "
             f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
@@ -251,7 +264,47 @@ def validate_banana_current_cli_args(args) -> None:
         raise ValueError(
             "abs(--banana-init-current-A) cannot exceed --banana-current-max-A."
         )
-    validate_tf_current_limit(args.tf_current_A)
+
+
+def validate_stage2_tf_current_value(
+    tf_current_A,
+    *,
+    accepts_offspec_sign: bool,
+    accepts_offspec_magnitude: bool,
+    field_name: str,
+) -> None:
+    tf_current_A = float(tf_current_A)
+    if accepts_offspec_sign or accepts_offspec_magnitude:
+        if not np.isfinite(tf_current_A) or tf_current_A == 0.0:
+            raise ValueError(f"{field_name} must be finite and non-zero.")
+        if tf_current_A > 0.0 and not accepts_offspec_sign:
+            raise ValueError(
+                f"Positive {field_name} requires --accept-offspec-tf-current-sign."
+            )
+        if abs(tf_current_A) > TF_CURRENT_HARD_LIMIT_A and not accepts_offspec_magnitude:
+            raise ValueError(
+                f"|{field_name}| above the hardware limit requires "
+                "--accept-offspec-tf-current-magnitude."
+            )
+        return
+    validate_tf_current_limit(tf_current_A)
+
+
+def validate_stage2_tf_current_cli_args(args) -> None:
+    validate_stage2_tf_current_value(
+        args.tf_current_A,
+        accepts_offspec_sign=bool(args.accept_offspec_tf_current_sign),
+        accepts_offspec_magnitude=bool(args.accept_offspec_tf_current_magnitude),
+        field_name="--tf-current-A",
+    )
+
+
+def stage2_current_contract_allows_offspec(args) -> bool:
+    return (
+        bool(args.accept_offspec_tf_current_sign)
+        or bool(args.accept_offspec_tf_current_magnitude)
+        or bool(args.accept_offspec_banana_current_max)
+    )
 
 
 def validate_stage2_iota_cli_args(args) -> None:
@@ -394,6 +447,12 @@ def parse_args():
         default=TARGET_LCFS_MAX_MINOR_RADIUS_M,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--stage2-plasma-scaling-mode",
+        choices=("lcfs", "working"),
+        default=os.environ.get("STAGE2_PLASMA_SCALING_MODE", "lcfs"),
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
     parser.add_argument("--ntheta", type=int, default=int(os.environ.get("NTHETA", "64")))
     parser.add_argument(
@@ -474,6 +533,31 @@ def parse_args():
             "Vacuum-vessel major radius (fixed contract, "
             f"= {VACUUM_VESSEL_MAJOR_RADIUS_M:.3f} m)."
         ),
+    )
+    parser.add_argument(
+        "--accept-offspec-major-radius",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--accept-offspec-banana-current-sign",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--accept-offspec-banana-current-max",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--accept-offspec-tf-current-sign",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--accept-offspec-tf-current-magnitude",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--toroidal-flux",
@@ -655,15 +739,11 @@ def parse_args():
             "False",
         ),
         help=(
-            "Opt-in rollout flag: align the post-inner Stage 2 ALM signal-mismatch "
-            "arm with the documented hybrid-signal contract by routing through the "
-            "existing dual-update transition when signal_mismatch_active AND "
-            "hard_feasible_for_update AND the surrogate carries a positive "
-            "shift. When unset (default), behavior is unchanged: the "
-            "signal-mismatch arm bumps the penalty as in prior releases. Mirrors "
-            "the single-stage CLI flag of the same name (see "
-            "SINGLE_STAGE/single_stage_banana_example.py and "
-            "docs/alm_hybrid_signal_contract_2026-05-08.md lines 37-41)."
+            "Opt-in rollout flag: when hard constraints are feasible but the "
+            "surrogate signal remains active, keep the bounded Stage 2 ALM "
+            "inner-continuation path alive instead of taking the legacy "
+            "penalty-bump arm. The dual-update stationarity gate remains "
+            "unchanged. Mirrors the single-stage CLI flag of the same name."
         ),
     )
     parser.add_argument(
@@ -820,7 +900,7 @@ def parse_args():
         default=bool(int(os.environ.get("ENABLE_S_HEL_OBJECTIVE", "0"))),
         help=(
             "Enable the Phase 3b helical-content objective in the "
-            "untrusted-but-evaluable soft-iota lane. This is the explicit "
+            "untrusted-but-evaluable Stage 2 objective lane. This is the explicit "
             "post-gradient-validation schedule gate; use "
             "--s-hel-objective-weight to set the current ramp value."
         ),
@@ -1032,6 +1112,7 @@ def parse_args():
     args = parser.parse_args()
     try:
         validate_banana_current_cli_args(args)
+        validate_stage2_tf_current_cli_args(args)
         validate_stage2_iota_cli_args(args)
         validate_s_hel_objective_cli_args(args)
     except ValueError as exc:
@@ -1476,6 +1557,7 @@ def build_stage2_iota_report_payload(
         iota_tolerance=args.stage2_iota_tolerance,
         constraint_weight=constraint_weight,
         stage2_seed_surf_path=stage2_seed_surf_path,
+        allow_offspec_current_contract=stage2_current_contract_allows_offspec(args),
     )
     payload.update(
         build_bootability_recovery_payload_fields(
@@ -1583,6 +1665,7 @@ def build_stage2_constraint_artifact_metadata(
     }
     contract, _trace = resolve_constraint_contract_from_wire_names(
         cli_overrides=cli_overrides,
+        allow_offspec_current_contract=stage2_current_contract_allows_offspec(args),
     )
     resolved_override_reason = override_reason
     return build_constraint_metadata(
@@ -2089,6 +2172,7 @@ def main(parsed_args=None):
     validate_stage2_iota_cli_args(args)
     if parsed_args is not None:
         validate_banana_current_cli_args(args)
+        validate_stage2_tf_current_cli_args(args)
 
     # File for the desired boundary magnetic surface:
     plasma_surf_filename = args.plasma_surf_filename
@@ -2141,7 +2225,12 @@ def main(parsed_args=None):
     num_quadpoints = args.num_quadpoints # number of quadature points for coils
     order = args.order # number of Fourier modes for coils
 
-    R0 = validate_major_radius(args.major_radius) # major radius (vacuum-vessel contract)
+    if args.accept_offspec_major_radius:
+        R0 = float(args.major_radius)
+        if R0 <= 0.0:
+            raise ValueError("--major-radius must be positive.")
+    else:
+        R0 = validate_major_radius(args.major_radius) # major radius (vacuum-vessel contract)
     s = validate_normalized_toroidal_flux(
         args.toroidal_flux,
         field_name="--toroidal-flux",
@@ -2152,12 +2241,7 @@ def main(parsed_args=None):
     target_lcfs_minor_radius_m = validate_target_lcfs_minor_radius(
         args.target_lcfs_max_minor_radius_m
     )
-    banana_surf_radius = args.banana_surf_radius
-    if abs(banana_surf_radius - BANANA_WINDING_MINOR_RADIUS_M) > 1.0e-12:
-        raise ValueError(
-            "Stage 2 banana winding surface must remain concentric with the vessel at "
-            f"minor radius {BANANA_WINDING_MINOR_RADIUS_M:.6f} m."
-        )
+    banana_surf_radius = validate_banana_winding_surface_radius(args.banana_surf_radius)
 
     # Scale the plasma family from the LCFS target.  The vessel/winding R0 stays
     # at the hardware contract value and is not reused as a plasma radius.
@@ -2167,42 +2251,55 @@ def main(parsed_args=None):
         surf_coils,
         VV,
     ) = build_hbt_reference_surfaces(lcfs_probe.nfp, banana_surf_radius)
-    geometry_preflight = select_plasma_geometry_preflight_candidate(
-        lcfs_surface=lcfs_probe,
-        requested_s=s,
-        target_lcfs_major_radius_m=target_lcfs_major_radius_m,
-        target_lcfs_minor_radius_m=target_lcfs_minor_radius_m,
-        vessel_surface=VV,
-    )
-    selected_geometry = geometry_preflight.selected
-    if (
-        abs(selected_geometry.s_working - s) > 1.0e-12
-        or abs(
-            selected_geometry.target_lcfs_major_radius_m
-            - target_lcfs_major_radius_m
+    if args.stage2_plasma_scaling_mode == "working":
+        plasma_geometry = load_plasma_geometry_for_working_major_radius(
+            R0,
+            s,
+            file_loc,
+            nphi,
+            ntheta,
         )
-        > 1.0e-12
-    ):
-        print(
-            "Stage 2 geometry preflight selected "
-            f"s={selected_geometry.s_working:.6f}, "
-            "target_lcfs_major_radius_m="
-            f"{selected_geometry.target_lcfs_major_radius_m:.6f} "
-            f"from {len(geometry_preflight.candidates)} candidates."
+        target_lcfs_major_radius_m = plasma_geometry.lcfs_major_radius_m
+    else:
+        geometry_preflight = select_plasma_geometry_preflight_candidate(
+            lcfs_surface=lcfs_probe,
+            requested_s=s,
+            target_lcfs_major_radius_m=target_lcfs_major_radius_m,
+            target_lcfs_minor_radius_m=target_lcfs_minor_radius_m,
+            vessel_surface=VV,
         )
-    s = selected_geometry.s_working
-    target_lcfs_major_radius_m = selected_geometry.target_lcfs_major_radius_m
-    plasma_geometry = _load_plasma_geometry(
-        target_lcfs_major_radius_m,
-        s,
-        file_loc,
-        nphi,
-        ntheta,
-    )
+        selected_geometry = geometry_preflight.selected
+        if (
+            abs(selected_geometry.s_working - s) > 1.0e-12
+            or abs(
+                selected_geometry.target_lcfs_major_radius_m
+                - target_lcfs_major_radius_m
+            )
+            > 1.0e-12
+        ):
+            print(
+                "Stage 2 geometry preflight selected "
+                f"s={selected_geometry.s_working:.6f}, "
+                "target_lcfs_major_radius_m="
+                f"{selected_geometry.target_lcfs_major_radius_m:.6f} "
+                f"from {len(geometry_preflight.candidates)} candidates."
+            )
+        s = selected_geometry.s_working
+        target_lcfs_major_radius_m = selected_geometry.target_lcfs_major_radius_m
+        plasma_geometry = _load_plasma_geometry(
+            target_lcfs_major_radius_m,
+            s,
+            file_loc,
+            nphi,
+            ntheta,
+        )
     new_surf = plasma_geometry.working_surface
     lcfs_surf = plasma_geometry.lcfs_surface
     banana_surf_nfp = new_surf.nfp
-    if plasma_geometry.lcfs_minor_radius_m > target_lcfs_minor_radius_m:
+    if (
+        args.stage2_plasma_scaling_mode != "working"
+        and plasma_geometry.lcfs_minor_radius_m > target_lcfs_minor_radius_m
+    ):
         raise ValueError(
             "Scaled LCFS minor radius violates the HBT-EP plasma target "
             f"({plasma_geometry.lcfs_minor_radius_m:.6f} m > "
@@ -2239,7 +2336,12 @@ def main(parsed_args=None):
                 vf_current_A=vf_current_A,
             )
         tf_current_A = float(new_tf_coils[0].current.get_value())
-        validate_tf_current_limit(tf_current_A)
+        validate_stage2_tf_current_value(
+            tf_current_A,
+            accepts_offspec_sign=bool(args.accept_offspec_tf_current_sign),
+            accepts_offspec_magnitude=bool(args.accept_offspec_tf_current_magnitude),
+            field_name="loaded Stage 2 seed TF current",
+        )
     else:
         (
             new_bs,
@@ -2462,6 +2564,7 @@ def main(parsed_args=None):
             alm_max_inner_attempts=args.alm_max_inner_attempts,
             alm_distance_smoothing=args.alm_distance_smoothing,
             alm_curvature_smoothing=args.alm_curvature_smoothing,
+            alm_fix_signal_mismatch_guard=args.alm_fix_signal_mismatch_guard,
             basin_hops=args.basin_hops,
             basin_stepsize=args.basin_stepsize,
             basin_temperature=args.basin_temperature,
@@ -2530,6 +2633,12 @@ def main(parsed_args=None):
             seed_values={"banana_current": initial_banana_current_A},
             validate_seed=bool(args.stage2_bs_path),
             seed_context="Loaded Stage 2 seed",
+            allow_offspec_threshold_names=(
+                frozenset({"banana_current"})
+                if args.accept_offspec_banana_current_max
+                else frozenset()
+            ),
+            preserve_seed_sign_names=frozenset({"banana_current"}),
         )
         lbfgsb_bounds = build_lbfgsb_bounds(JF)
     s_hel_objective, s_hel_weight = build_s_hel_objective(args, new_bs, new_surf)

@@ -41,6 +41,7 @@ def _args(**overrides) -> SimpleNamespace:
         proxy_plasma_current_A=None,
         vf_current_A=None,
         vf_template_path=None,
+        stage2_seed_current_traversal=False,
         stage2_bs_path=None,
     )
     base.update(overrides)
@@ -60,8 +61,8 @@ def _legacy_zero_vf_donor_results():
 def _full_vf_donor_results():
     return {
         "FINITE_CURRENT_MODE": "wataru_proxy_field",
-        "PROXY_PLASMA_CURRENT_A": -1.0e3,
-        "VF_CURRENT_A": 3.0e3,
+        "PROXY_PLASMA_CURRENT_A": 1.0e3,
+        "VF_CURRENT_A": 1.0e3 / 6.5,
         "VF_TEMPLATE_PATH": "/recorded/donor_vf_template.json",
         "NUM_VF_COILS": 4,
     }
@@ -136,6 +137,56 @@ class SeededRestartTrustsDonorMetadataTests(unittest.TestCase):
                 ),
                 stage2_results=donor_results,
             )
+
+    def test_seeded_current_traversal_allows_proxy_and_vf_current_override(self):
+        donor_results = _full_vf_donor_results()
+
+        config = stage2_solver._resolve_stage2_finite_current_config(
+            _args(
+                stage2_bs_path="/some/donor.json",
+                proxy_plasma_current_A=5.0e2,
+                vf_current_A=5.0e2 / 6.5,
+                stage2_seed_current_traversal=True,
+            ),
+            stage2_results=donor_results,
+        )
+
+        self.assertEqual(config.proxy_plasma_current_A, 5.0e2)
+        self.assertEqual(config.vf_current_A, 5.0e2 / 6.5)
+        self.assertEqual(config.vf_template_path, donor_results["VF_TEMPLATE_PATH"])
+
+    def test_seeded_current_traversal_retargets_loaded_auxiliary_currents(self):
+        class FakeCurrent:
+            def __init__(self, value):
+                self.value = value
+                self.fixed = False
+
+            def get_value(self):
+                return self.value
+
+            def set_dofs(self, values):
+                self.value = float(values[0])
+
+            def fix_all(self):
+                self.fixed = True
+
+        proxy = SimpleNamespace(current=FakeCurrent(1000.0))
+        vf_plus = SimpleNamespace(current=FakeCurrent(153.846))
+        vf_minus = SimpleNamespace(current=FakeCurrent(-153.846))
+
+        stage2_solver._retarget_stage2_seed_auxiliary_currents(
+            [proxy],
+            [vf_plus, vf_minus],
+            proxy_plasma_current_A=500.0,
+            vf_current_A=76.923,
+        )
+
+        self.assertEqual(proxy.current.get_value(), 500.0)
+        self.assertEqual(vf_plus.current.get_value(), 76.923)
+        self.assertEqual(vf_minus.current.get_value(), -76.923)
+        self.assertTrue(proxy.current.fixed)
+        self.assertTrue(vf_plus.current.fixed)
+        self.assertTrue(vf_minus.current.fixed)
 
 
 class FreshRunAutoResolvesBundledTemplateTests(unittest.TestCase):

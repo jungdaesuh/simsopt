@@ -202,6 +202,9 @@ class UnifiedRunnerStage2InputTests(unittest.TestCase):
                 stage2_tf_current_A=None,
                 stage2_toroidal_flux=None,
                 stage2_basin_seed=None,
+                iota_target=0.2,
+                vol_target=0.10,
+                alm_fix_signal_mismatch_guard=False,
             )
 
             with patch.object(

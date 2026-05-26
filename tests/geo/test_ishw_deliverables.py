@@ -640,8 +640,10 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             "SHORTEST_SELF_DISTANCE": 0.01,
             "SELF_INTERSECT_MIN_DISTANCE": 0.01,
             "BANANA_CURRENT_A": abs(float(banana_init_current_A)),
-            "FINAL_LCFS_MAJOR_RADIUS_M": 0.92,
-            "FINAL_LCFS_MINOR_RADIUS_M": 0.15,
+            "FINAL_LCFS_MAJOR_RADIUS_M": in_bounds_lcfs_major_radius_m(),
+            "FINAL_LCFS_MINOR_RADIUS_M": in_bounds_lcfs_minor_radius_m(),
+            "LENGTH_TARGET": 1.9,
+            "LENGTH_MIN_TARGET": 0.95,
             "PLASMA_SURF_PATH": str(SIGNED_CW_WOUT_PATH),
             "WOUT_CONVENTION": "signed_cw",
             "WOUT_OFF_SPEC": False,
@@ -1398,6 +1400,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 plasma_vessel_min_dist=0.04,
                 plasma_vessel_threshold=0.04,
                 poloidal_extent_threshold_rad=0.7853981633974483,
+                length_min_target=0.9,
                 banana_current_max_A=1.6e4,
                 final_plasma_major_radius_m=in_bounds_lcfs_major_radius_m(),
                 final_plasma_minor_radius_m=in_bounds_lcfs_minor_radius_m(),
@@ -1407,7 +1410,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
                     J=lambda: 0.0,
                     shortest_self_distance=lambda: 0.02,
                 ),
-                length_min_target=0.95,
                 width_min_threshold=0.05,
                 width_max_threshold=0.17,
                 self_intersect_min_distance=0.01,
@@ -1608,6 +1610,9 @@ class Stage2IotaReportingTests(unittest.TestCase):
             stage2_iota_vol_target=0.1,
             stage2_iota_constraint_weight=1.0,
             plasma_surf_filename="demo.nc",
+            accept_offspec_tf_current_sign=False,
+            accept_offspec_tf_current_magnitude=False,
+            accept_offspec_banana_current_max=False,
         )
 
         with patch.object(
@@ -1663,6 +1668,9 @@ class Stage2IotaReportingTests(unittest.TestCase):
             stage2_iota_vol_target=0.1,
             stage2_iota_constraint_weight=0.0,
             plasma_surf_filename="demo.nc",
+            accept_offspec_tf_current_sign=False,
+            accept_offspec_tf_current_magnitude=False,
+            accept_offspec_banana_current_max=False,
         )
 
         with patch.object(
@@ -1706,6 +1714,9 @@ class Stage2IotaReportingTests(unittest.TestCase):
             stage2_iota_vol_target=0.1,
             stage2_iota_constraint_weight=1.0,
             plasma_surf_filename="demo.nc",
+            accept_offspec_tf_current_sign=False,
+            accept_offspec_tf_current_magnitude=False,
+            accept_offspec_banana_current_max=False,
         )
         runtime = SimpleNamespace(
             stats=SimpleNamespace(
@@ -1764,8 +1775,8 @@ class Stage2IotaReportingTests(unittest.TestCase):
         module = load_stage2_module()
 
         args = SimpleNamespace(
-            stage2_iota_weight=1.0,
             stage2_iota_mode="alm",
+            stage2_iota_weight=1.0,
             stage2_iota_vol_target=0.1,
             stage2_iota_constraint_weight=1.0,
             stage2_iota_num_tf_coils=20,
@@ -1797,13 +1808,13 @@ class Stage2IotaReportingTests(unittest.TestCase):
             stage2_iota_runtime=runtime,
         )
 
+        self.assertTrue(payload["STAGE2_IOTA_OBJECTIVE_COUPLED"])
+        self.assertTrue(payload["STAGE2_IOTA_HOT_LOOP_ENABLED"])
         self.assertEqual(payload["STAGE2_IOTA_INITIAL"], 0.18)
         self.assertEqual(payload["STAGE2_IOTA_INITIAL_PENALTY"], 0.03)
         self.assertEqual(payload["STAGE2_IOTA_EFFECTIVE_WEIGHT"], 2.5)
         self.assertEqual(payload["STAGE2_IOTA_FINAL"], 0.201)
         self.assertEqual(payload["STAGE2_IOTA_VALUE"], 0.201)
-        self.assertTrue(payload["STAGE2_IOTA_OBJECTIVE_COUPLED"])
-        self.assertTrue(payload["STAGE2_IOTA_HOT_LOOP_ENABLED"])
         self.assertEqual(payload["STAGE2_IOTA_FINAL_PENALTY"], 0.0)
         self.assertEqual(payload["STAGE2_IOTA_FINAL_ABS_ERROR"], 1.0e-3)
         self.assertFalse(payload["STAGE2_IOTA_FINAL_FEASIBLE"])

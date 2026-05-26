@@ -25,9 +25,12 @@ from .coil_groups import (
     partition_coils_by_manifest,
     resolve_manifest,
 )
-from .current_contracts import resolve_finite_current_mode, resolve_loaded_tf_current_A
+from .current_contracts import (
+    resolve_finite_current_mode,
+    resolve_loaded_tf_current_A,
+    validate_hbt_proxy_vf_current_convention,
+)
 from .hardware_contracts import (
-    COIL_LENGTH_MIN_FRACTION,
     MAX_CURVATURE_INV_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     validate_banana_winding_surface_radius,
@@ -36,7 +39,6 @@ from .hardware_contracts import (
 )
 from .hardware_constraint_schema import (
     build_hardware_constraint_status,
-    build_threshold_overrides,
     hardware_constraint_artifact_field_names,
     hardware_constraint_artifact_value_field_names,
 )
@@ -254,6 +256,10 @@ class WarmStartBoozerSeed:
     G: float | None
     source_path: Path
 
+    @property
+    def has_solved_state(self) -> bool:
+        return self.iota is not None and self.G is not None
+
 
 @dataclass(frozen=True)
 class Stage2CoilPartitions:
@@ -269,8 +275,17 @@ class Stage2CoilPartitions:
     coil_groups_manifest_is_legacy_inferred: bool = False
 
 
-def resolve_stage2_tf_current_A(stage2_results, tf_coils):
-    return resolve_loaded_tf_current_A(stage2_results.get("TF_CURRENT_A"), tf_coils)
+def resolve_stage2_tf_current_A(
+    stage2_results,
+    tf_coils,
+    *,
+    allow_offspec_current_contract: bool = False,
+):
+    return resolve_loaded_tf_current_A(
+        stage2_results.get("TF_CURRENT_A"),
+        tf_coils,
+        allow_offspec_current_contract=allow_offspec_current_contract,
+    )
 
 
 def resolve_stage2_num_tf_coils(stage2_results, requested_num_tf_coils):
@@ -422,22 +437,11 @@ def evaluate_stage2_seed_hardware_contract(
     stage2_results: Mapping[str, object],
 ) -> dict[str, object]:
     measured_values = _stage2_seed_measured_values(stage2_results)
-    length_target = _first_stage2_result_value(
-        stage2_results,
-        ("length_target", "LENGTH_TARGET"),
-    )
-    length_min_target = (
-        None if length_target is None else COIL_LENGTH_MIN_FRACTION * float(length_target)
-    )
     return build_hardware_constraint_status(
         measured_values,
         applies_to="artifact",
-        threshold_overrides=build_threshold_overrides(
-            (
-                ("coil_length_min", length_min_target),
-            )
-        ),
         require_values=True,
+        threshold_overrides={"coil_length_min": float(stage2_results["LENGTH_MIN_TARGET"])},
     )
 
 
@@ -500,6 +504,10 @@ def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]
             "artifact with TF-current metadata."
         )
     validate_tf_current_limit(tf_current_A)
+    validate_hbt_proxy_vf_current_convention(
+        proxy_plasma_current_A=stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0),
+        vf_current_A=stage2_results.get("VF_CURRENT_A", 0.0),
+    )
     validate_wout_convention_artifact_fields(
         stage2_results_path="<stage2_seed_contract>",
         stage2_artifact_results=dict(stage2_results),
@@ -1172,7 +1180,7 @@ def attempt_initialize_boozer_surface(
             bs,
             surf,
             vol,
-            vol_target,
+            float(vol_target),
             constraint_weight,
             options={"verbose": True},
             I=boozer_I,
@@ -1192,7 +1200,7 @@ def attempt_initialize_boozer_surface(
             bs,
             surf_exact,
             vol,
-            vol_target,
+            float(vol_target),
             None,
             options={"verbose": True},
             I=boozer_I,
@@ -1417,23 +1425,29 @@ def _probe_initialization_inputs(
     ntheta: int,
     vol_target: float,
     iota_target: float,
+    bs,
     tf_coils,
     stage2_seed_surf_path: str | Path | None,
     artifact_loader,
 ) -> tuple[object, float, object | None, float, float]:
-    default_G = compute_tf_G0(tf_coils)
+    # The bs-aware helper verifies that the TF subset belongs to the same
+    # BiotSavart field that feeds the Boozer residual. Cold probes use the
+    # signed value directly; solved warm-start artifacts carry their own
+    # explicit G.
+    default_G = derive_signed_G_from_field(bs, tf_coils=tf_coils)
     if stage2_seed_surf_path is not None:
         warm_start_seed = load_warm_start_boozer_seed(
             stage2_seed_surf_path,
             artifact_loader=artifact_loader,
         )
-        return (
-            warm_start_seed.surface,
-            float(vol_target),
-            warm_start_seed.surface,
-            iota_target if warm_start_seed.iota is None else warm_start_seed.iota,
-            default_G if warm_start_seed.G is None else warm_start_seed.G,
-        )
+        if warm_start_seed.has_solved_state:
+            return (
+                warm_start_seed.surface,
+                float(vol_target),
+                warm_start_seed.surface,
+                warm_start_seed.iota,
+                warm_start_seed.G,
+            )
 
     equilibrium_file = build_equilibrium_path(
         plasma_surf_filename,
@@ -1481,6 +1495,7 @@ def probe_stage2_seed_bootability(
     equilibrium_path: str | Path | None = None,
     database_equilibria_dir: str | Path | None = None,
     stage2_seed_surf_path: str | Path | None = None,
+    allow_offspec_current_contract: bool = False,
     bs_loader=load_boozer_finite_i,
     warm_start_loader=load_boozer_finite_i,
 ) -> dict[str, object]:
@@ -1503,7 +1518,11 @@ def probe_stage2_seed_bootability(
             requested_num_tf_coils=num_tf_coils,
         )
         tf_coils = coil_partitions.tf_coils
-        resolve_stage2_tf_current_A(stage2_artifact_results, tf_coils)
+        resolve_stage2_tf_current_A(
+            stage2_artifact_results,
+            tf_coils,
+            allow_offspec_current_contract=allow_offspec_current_contract,
+        )
         (
             initial_surface,
             target_volume,
@@ -1520,6 +1539,7 @@ def probe_stage2_seed_bootability(
             ntheta=ntheta,
             vol_target=vol_target,
             iota_target=iota_target,
+            bs=bs,
             tf_coils=tf_coils,
             stage2_seed_surf_path=stage2_seed_surf_path,
             artifact_loader=warm_start_loader,

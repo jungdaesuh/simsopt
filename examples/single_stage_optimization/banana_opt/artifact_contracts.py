@@ -19,6 +19,7 @@ from .hardware_contracts import (
 )
 from .hardware_constraint_schema import build_bootability_recovery_payload_fields
 from .constraint_contract import CONSTRAINT_SCHEMA_VERSION
+from .wout_convention import wout_convention_artifact_fields
 from workflow_helpers import canonical_stage2_iota_constraint_weight
 
 
@@ -92,9 +93,9 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
         "BOOTABILITY_STAGE2_BS_PATH": None,
         "BOOTABILITY_STAGE2_RESULTS_PATH": None,
         "IOTA_NEAR_TARGET": None,
+        "STAGE2_IOTA_OBJECTIVE_COUPLED": False,
         "STAGE2_IOTA_HOT_LOOP_ENABLED": False,
         "STAGE2_IOTA_BOOTSTRAP_SECONDS": None,
-        "STAGE2_IOTA_OBJECTIVE_COUPLED": False,
         "STAGE2_IOTA_RUNTIME_SECONDS": None,
         "STAGE2_IOTA_RUNTIME_CALLS": None,
         "STAGE2_IOTA_INITIAL": None,
@@ -239,6 +240,42 @@ def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
             upgraded_results["NUM_BANANA_COILS"] = 2 * int(nfp)
 
 
+def _upgrade_legacy_wout_convention_metadata(upgraded_results: dict) -> None:
+    """Backfill WOUT_CONVENTION/WOUT_OFF_SPEC for legacy artifacts.
+
+    Backfill — producers now stamp at write time per task #40 (2026-05-21);
+    this remains for legacy artifacts and round-trip safety.
+
+    Stage 2 artifacts emitted by ``banana_coil_solver`` stamp both keys, but
+    single-stage outputs (regular ``results.json`` and preserved-timeout
+    sidecars such as ``results_best_feasible.partial.json``) historically did
+    not. The Stage 2 seed-contract validator now requires both keys, so any
+    seed re-promoted from a single-stage artifact needs them backfilled here
+    rather than re-stamped at each producer site.
+
+    Backfill is atomic — both keys are computed together from
+    ``PLASMA_SURF_PATH`` and ``TF_CURRENT_A`` already present in the dict.
+    If either input is absent or the WOUT file is not yet on disk, no fields
+    are added; the downstream validator surfaces the precise gap.
+    Already-recorded values are preserved so the upgrader cannot mask a
+    drifted producer-side stamp.
+    """
+    if "WOUT_CONVENTION" in upgraded_results or "WOUT_OFF_SPEC" in upgraded_results:
+        return
+    plasma_surf_path = upgraded_results.get("PLASMA_SURF_PATH")
+    tf_current_A = upgraded_results.get("TF_CURRENT_A")
+    if plasma_surf_path is None or tf_current_A is None:
+        return
+    if not Path(str(plasma_surf_path)).is_file():
+        return
+    upgraded_results.update(
+        wout_convention_artifact_fields(
+            wout_path=str(plasma_surf_path),
+            tf_current_A=float(tf_current_A),
+        )
+    )
+
+
 def upgrade_legacy_stage2_artifact_results(
     stage2_artifact_results: dict,
     *,
@@ -266,6 +303,7 @@ def upgrade_legacy_stage2_artifact_results(
     _upgrade_legacy_bootability_recovery_metadata(upgraded_results)
     _upgrade_legacy_stage2_iota_report_metadata(upgraded_results)
     _upgrade_legacy_finite_current_metadata(upgraded_results)
+    _upgrade_legacy_wout_convention_metadata(upgraded_results)
     _upgrade_legacy_constraint_contract_metadata(upgraded_results)
     return upgraded_results
 

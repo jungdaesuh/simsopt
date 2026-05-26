@@ -70,8 +70,8 @@ class ConstraintContractResolverTests(unittest.TestCase):
             contract["banana_surf_radius"],
             hc.BANANA_WINDING_MINOR_RADIUS_M,
         )
-        self.assertEqual(contract["TARGET_LCFS_MAX_MAJOR_RADIUS_M"], 0.92)
-        self.assertEqual(contract["TARGET_LCFS_MAX_MINOR_RADIUS_M"], 0.15)
+        self.assertEqual(contract["TARGET_LCFS_MAX_MAJOR_RADIUS_M"], 0.903)
+        self.assertAlmostEqual(contract["TARGET_LCFS_MAX_MINOR_RADIUS_M"], 0.132)
 
     def test_resolve_with_no_inputs_returns_hardware_defaults(self):
         module = load_constraint_contract_module()
@@ -318,6 +318,28 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
 
         self.assertEqual(contract_lower["TF_CURRENT_A"], -70000.0)
         self.assertEqual(contract_upper["TF_CURRENT_A"], -70000.0)
+
+    def test_wire_name_resolver_allows_explicit_offspec_current_contract(self):
+        module = load_constraint_contract_module()
+
+        contract, _ = module.resolve_constraint_contract_from_wire_names(
+            cli_overrides={
+                "tf_current_A": 100000.0,
+                "banana_current_max_A": 20000.0,
+            },
+            allow_offspec_current_contract=True,
+        )
+
+        self.assertEqual(contract["TF_CURRENT_A"], 100000.0)
+        self.assertEqual(contract["BANANA_CURRENT_MAX_A"], 20000.0)
+
+    def test_wire_name_resolver_rejects_offspec_current_without_replay_flag(self):
+        module = load_constraint_contract_module()
+
+        with self.assertRaisesRegex(ValueError, "TF coil current must be negative"):
+            module.resolve_constraint_contract_from_wire_names(
+                cli_overrides={"tf_current_A": 100000.0},
+            )
 
     def test_wire_name_resolver_rejects_legacy_fixed_geometry_aliases(self):
         module = load_constraint_contract_module()

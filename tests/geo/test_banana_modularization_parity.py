@@ -475,6 +475,7 @@ class SnapshotParityTests(unittest.TestCase):
             curvature_smoothing=0.02,
             multipliers=np.zeros(8),
             penalty=12.0,
+            length_min_target=0.95,
         )
 
         def evaluate_current(**overrides):
@@ -489,7 +490,6 @@ class SnapshotParityTests(unittest.TestCase):
                 width_max_threshold=0.17,
                 Jself=Jself,
                 self_intersect_threshold=0.0,
-                length_min_target=0.95,
             )
 
         actual = evaluate_current()
@@ -511,7 +511,7 @@ class SnapshotParityTests(unittest.TestCase):
             0.2,
             0.05,
             0.028571428571428595,
-            -0.8947368421052633,
+            -0.8947368421052632,
             -1.0,
             -0.4117647058823529,
             0.0,
@@ -531,7 +531,7 @@ class SnapshotParityTests(unittest.TestCase):
             -0.16,
             0.01875,
             0.028571428571428595,
-            -0.8947368421052633,
+            -0.8947368421052632,
             -1.0,
             -0.4117647058823529,
             0.0,
@@ -562,6 +562,10 @@ class SnapshotParityTests(unittest.TestCase):
         np.testing.assert_allclose(
             actual["constraint_grads"][2],
             [0.17142857142857143, 0.2285714285714286],
+        )
+        np.testing.assert_allclose(
+            actual["constraint_grads"][3],
+            [-0.3157894736842105, -0.4210526315789474],
         )
         np.testing.assert_allclose(
             actual["constraint_grads"][-1], [4.375e-5, -2.5e-5]
@@ -627,8 +631,16 @@ class SnapshotParityTests(unittest.TestCase):
         )
         np.testing.assert_allclose(
             actual["raw_surrogate_signed_constraint_values"],
-            [-0.008, 0.75, 0.050000000000000044, -0.8500000000000001,
-             -0.05, -0.07, 0.0, -6500.0],
+            [
+                -0.008,
+                0.75,
+                0.050000000000000044,
+                -0.8500000000000001,
+                -0.05,
+                -0.07,
+                0.0,
+                -6500.0,
+            ],
         )
         self.assertAlmostEqual(actual["base_value"], 3.5)
         self.assertAlmostEqual(actual["max_feasibility_violation"], 0.2)

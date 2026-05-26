@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
@@ -197,8 +198,28 @@ def _apply_layer(
         trace[key] = source_label
 
 
-def _validate_engineering_values(contract: dict[str, float]) -> None:
-    _hc.validate_tf_current_limit(contract[_KEY_TF_CURRENT_A])
+def _validate_tf_current_contract(
+    tf_current_A: float,
+    *,
+    allow_offspec_current_contract: bool,
+) -> None:
+    if allow_offspec_current_contract:
+        current = float(tf_current_A)
+        if not math.isfinite(current) or current == 0.0:
+            raise ValueError("TF_CURRENT_A must be finite and non-zero.")
+        return
+    _hc.validate_tf_current_limit(tf_current_A)
+
+
+def _validate_engineering_values(
+    contract: dict[str, float],
+    *,
+    allow_offspec_current_contract: bool,
+) -> None:
+    _validate_tf_current_contract(
+        contract[_KEY_TF_CURRENT_A],
+        allow_offspec_current_contract=allow_offspec_current_contract,
+    )
     _hc.validate_banana_winding_surface_radius(contract[_KEY_BANANA_SURF_RADIUS])
     if contract[_KEY_BANANA_CURRENT_MAX_A] <= 0.0:
         raise ValueError(
@@ -235,6 +256,7 @@ def resolve_constraint_contract(
     profile: Mapping[str, Any] | None = None,
     spec_json: Mapping[str, Any] | None = None,
     cli_overrides: Mapping[str, Any] | None = None,
+    allow_offspec_current_contract: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Resolve the full constraint contract from layered inputs.
 
@@ -266,8 +288,14 @@ def resolve_constraint_contract(
             layer=layer,
         )
 
-    _validate_engineering_values(contract)
-    if contract[_KEY_BANANA_CURRENT_MAX_A] > _hc.BANANA_CURRENT_HARD_LIMIT_A:
+    _validate_engineering_values(
+        contract,
+        allow_offspec_current_contract=allow_offspec_current_contract,
+    )
+    if (
+        contract[_KEY_BANANA_CURRENT_MAX_A] > _hc.BANANA_CURRENT_HARD_LIMIT_A
+        and not allow_offspec_current_contract
+    ):
         raise ValueError(
             "BANANA_CURRENT_MAX_A exceeds the hardware limit "
             f"{_hc.BANANA_CURRENT_HARD_LIMIT_A:.0f} A."
@@ -292,6 +320,7 @@ def resolve_constraint_contract_from_wire_names(
     profile: Mapping[str, Any] | None = None,
     spec_json: Mapping[str, Any] | None = None,
     cli_overrides: Mapping[str, Any] | None = None,
+    allow_offspec_current_contract: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Like :func:`resolve_constraint_contract` but accepts legacy wire names.
 
@@ -303,6 +332,7 @@ def resolve_constraint_contract_from_wire_names(
         profile=_translate_layer(profile),
         spec_json=_translate_layer(spec_json),
         cli_overrides=_translate_layer(cli_overrides),
+        allow_offspec_current_contract=allow_offspec_current_contract,
     )
 
 
