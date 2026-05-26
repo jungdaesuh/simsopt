@@ -117,6 +117,12 @@ _DEFAULT_STAGE2_IOTA_MODE = "off"
 _DEFAULT_STAGE2_IOTA_TOLERANCE = 5.0e-3
 _DEFAULT_STAGE2_IOTA_WEIGHT = 1.0
 _DEFAULT_STAGE2_IOTA_VOL_TARGET = 0.10
+_DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT = 1.0
+_DEFAULT_STAGE2_IOTA_NUM_TF_COILS = 20
+_DEFAULT_STAGE2_IOTA_NPHI = 91
+_DEFAULT_STAGE2_IOTA_NTHETA = 32
+_DEFAULT_STAGE2_IOTA_MPOL = 8
+_DEFAULT_STAGE2_IOTA_NTOR = 6
 # Deprecated hot-loop names remain only so legacy artifact/test helpers can
 # classify old payloads. validate_stage2_iota_args rejects them for production.
 _DEPRECATED_STAGE2_IOTA_ALM_HOT_LOOP_MODES = frozenset({"alm", "alm-floor"})
@@ -124,12 +130,6 @@ _DEPRECATED_STAGE2_IOTA_OBJECTIVE_COUPLED_HOT_LOOP_MODES = frozenset(
     {"soft"}
 ).union(_DEPRECATED_STAGE2_IOTA_ALM_HOT_LOOP_MODES)
 _STAGE2_IOTA_PRODUCTION_MODES = frozenset({"off", "report"})
-_DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT = 1.0
-_DEFAULT_STAGE2_IOTA_NUM_TF_COILS = 20
-_DEFAULT_STAGE2_IOTA_NPHI = 91
-_DEFAULT_STAGE2_IOTA_NTHETA = 32
-_DEFAULT_STAGE2_IOTA_MPOL = 8
-_DEFAULT_STAGE2_IOTA_NTOR = 6
 _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN = 255
 # 8 hex chars = 32 bits of discriminator. The visible prefix already carries
 # the distinguishing parameters; the hash is only a tie-breaker for truncated
@@ -376,6 +376,7 @@ def format_stage2_constraint_suffix(
     alm_max_inner_attempts: int = _DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS,
     alm_distance_smoothing: float = _DEFAULT_STAGE2_ALM_DISTANCE_SMOOTHING,
     alm_curvature_smoothing: float = _DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING,
+    alm_fix_signal_mismatch_guard: bool = False,
 ) -> str:
     if constraint_method == "alm":
         suffix = (
@@ -436,6 +437,8 @@ def format_stage2_constraint_suffix(
         for label, value, default in optional_alm_segments:
             if value != default:
                 suffix += f"-{label}={format_compact_float(float(value))}"
+        if alm_fix_signal_mismatch_guard:
+            suffix += "-ALMSigGuard=1"
         return suffix
     return "-CM=penalty"
 
@@ -484,12 +487,17 @@ def format_stage2_iota_suffix(
     canonical_constraint_weight = canonical_stage2_iota_constraint_weight(
         stage2_iota_constraint_weight
     )
+    constraint_weight_label = (
+        "exact"
+        if canonical_constraint_weight is None
+        else format_compact_float(canonical_constraint_weight)
+    )
     suffix = (
         f"-IM={stage2_iota_mode}"
         f"-ITarget={format_compact_float(stage2_iota_target)}"
         f"-ITol={format_compact_float(stage2_iota_tolerance)}"
         f"-IVol={format_compact_float(stage2_iota_vol_target)}"
-        f"-ICW={'exact' if canonical_constraint_weight is None else format_compact_float(canonical_constraint_weight)}"
+        f"-ICW={constraint_weight_label}"
     )
     if stage2_iota_mode == "soft":
         suffix += f"-IW={format_compact_float(stage2_iota_weight)}"
@@ -521,6 +529,7 @@ def format_local_stage2_run_dir(
     alm_max_inner_attempts: int = _DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS,
     alm_distance_smoothing: float = _DEFAULT_STAGE2_ALM_DISTANCE_SMOOTHING,
     alm_curvature_smoothing: float = _DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING,
+    alm_fix_signal_mismatch_guard: bool = False,
     basin_hops: int,
     basin_stepsize: float,
     basin_temperature: float = 1.0,
@@ -556,6 +565,7 @@ def format_local_stage2_run_dir(
             alm_max_inner_attempts,
             alm_distance_smoothing,
             alm_curvature_smoothing,
+            alm_fix_signal_mismatch_guard,
         )
         + format_stage2_basin_suffix(
             basin_hops,
@@ -609,6 +619,7 @@ def local_stage2_bs_path(
     alm_max_inner_attempts: int = _DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS,
     alm_distance_smoothing: float = _DEFAULT_STAGE2_ALM_DISTANCE_SMOOTHING,
     alm_curvature_smoothing: float = _DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING,
+    alm_fix_signal_mismatch_guard: bool = False,
     basin_hops: int,
     basin_stepsize: float,
     basin_temperature: float = 1.0,
@@ -646,6 +657,7 @@ def local_stage2_bs_path(
             alm_max_inner_attempts=alm_max_inner_attempts,
             alm_distance_smoothing=alm_distance_smoothing,
             alm_curvature_smoothing=alm_curvature_smoothing,
+            alm_fix_signal_mismatch_guard=alm_fix_signal_mismatch_guard,
             basin_hops=basin_hops,
             basin_stepsize=basin_stepsize,
             basin_temperature=basin_temperature,

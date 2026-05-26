@@ -441,6 +441,46 @@ class WorkflowHelpersTests(unittest.TestCase):
         self.assertIn("-ALMDist=0.01", run_dir)
         self.assertIn("-ALMCurv=0.5", run_dir)
 
+    def test_local_stage2_run_dir_encodes_signal_mismatch_guard(self):
+        module = load_workflow_helpers_module()
+        spec = module.Stage2SeedSpec(
+            plasma_surf_filename="demo.nc",
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            tf_current_A=-8.0e4,
+            order=2,
+        )
+
+        run_dir = module.format_local_stage2_run_dir(
+            spec,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            alm_fix_signal_mismatch_guard=True,
+            basin_hops=0,
+            basin_stepsize=0.01,
+        )
+        baseline_run_dir = module.format_local_stage2_run_dir(
+            spec,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            alm_fix_signal_mismatch_guard=False,
+            basin_hops=0,
+            basin_stepsize=0.01,
+        )
+
+        self.assertIn("-ALMSigGuard=1", run_dir)
+        self.assertNotEqual(run_dir, baseline_run_dir)
+
     def test_format_local_stage2_run_dir_includes_wataru_field_suffix(self):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
@@ -691,6 +731,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             alm_max_subproblem_continuations=9,
             alm_distance_smoothing=0.01,
             alm_curvature_smoothing=0.05,
+            alm_fix_signal_mismatch_guard=True,
             basin_hops=0,
             basin_stepsize=0.01,
             basin_seed=None,
@@ -713,6 +754,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
         ):
             self.assertIn(flag, command)
             self.assertEqual(command[command.index(flag) + 1], expected)
+        self.assertIn("--alm-fix-signal-mismatch-guard", command)
 
     def test_build_stage2_command_threads_wataru_field_controls(self):
         module = load_workflow_common_module()
@@ -1501,6 +1543,31 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
             init_only=False,
         )
 
+    def test_stage2_artifact_config_rejects_non_bool_alm_signal_guard(self):
+        module = load_workflow_common_module()
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "Stage2AlmControls.alm_fix_signal_mismatch_guard must be bool",
+        ):
+            module.Stage2ArtifactConfig(
+                plasma_surf_filename="demo.nc",
+                output_root=Path("/tmp/stage2"),
+                equilibria_dir=None,
+                tf_current_A=-8.0e4,
+                major_radius=0.976,
+                toroidal_flux=0.24,
+                length_weight=0.0005,
+                cc_weight=100.0,
+                cc_threshold=0.05,
+                curvature_weight=0.0001,
+                curvature_threshold=100.0,
+                banana_surf_radius=0.21,
+                order=2,
+                constraint_method="alm",
+                alm_fix_signal_mismatch_guard="false",
+            )
+
     def test_stage2_alm_schema_matches_stage2_artifact_config_fields(self):
         module = load_workflow_common_module()
 
@@ -1511,9 +1578,14 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
             field_name.removeprefix("alm_")
             for field_name in module.stage2_artifact_config_flat_field_names()
             if field_name.startswith("alm_")
+            and field_name != "alm_fix_signal_mismatch_guard"
         }
 
         self.assertEqual(stage2_suffixes, config_suffixes)
+        self.assertIn(
+            "alm_fix_signal_mismatch_guard",
+            module.stage2_artifact_config_flat_field_names(),
+        )
         self.assertEqual(module.stage2_alm_default("penalty_init"), 0.1)
         self.assertEqual(module.stage2_alm_default("penalty_scale"), 2.0)
         self.assertEqual(module.stage2_alm_default("curvature_smoothing"), 0.25)
@@ -1573,7 +1645,7 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
             tuple(flat_config),
             module.stage2_artifact_config_flat_field_names(),
         )
-        self.assertEqual(len(flat_config), 54)
+        self.assertEqual(len(flat_config), 55)
         self.assertEqual(
             module.Stage2ArtifactConfig.__slots__,
             (

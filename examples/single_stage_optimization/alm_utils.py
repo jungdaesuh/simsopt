@@ -40,6 +40,12 @@ def _finite_alm_integer_or_none(name: str, value) -> int | None:
     return _finite_alm_integer(name, value)
 
 
+def _strict_alm_bool(name: str, value) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{name} must be bool")
+    return value
+
+
 def _positive_alm_integer(name: str, value) -> int:
     value_i = _finite_alm_integer(name, value)
     if value_i <= 0:
@@ -74,6 +80,11 @@ class ALMSettings:
     relaxed_feasibility_gate_cap: float = 1e-2
     multiplier_max: float | None = 1.0e6
     history_max_entries: int | None = 512
+    # Opt-in: when True, a hard-feasible/surrogate-active signal mismatch with
+    # a live surrogate positive shift stays on the bounded inner-continuation
+    # path instead of taking the legacy penalty-increase arm. This does not
+    # bypass the dual-update stationarity gate.
+    continue_on_signal_mismatch: bool = False
 
     def __post_init__(self) -> None:
         # Mirrors `validate_alm_cli_args` so direct programmatic construction
@@ -135,6 +146,10 @@ class ALMSettings:
         history_max_entries = _finite_alm_integer_or_none(
             "ALMSettings.history_max_entries",
             self.history_max_entries,
+        )
+        _strict_alm_bool(
+            "ALMSettings.continue_on_signal_mismatch",
+            self.continue_on_signal_mismatch,
         )
         if max_outer_iterations <= 0:
             raise ValueError("ALMSettings.max_outer_iterations must be positive")
@@ -2491,6 +2506,23 @@ def _dual_update_gate_satisfied(
     )
 
 
+def _signal_mismatch_subproblem_continue_should_fire(
+    *,
+    settings: ALMSettings,
+    signal_mismatch_active: bool,
+    hard_feasible_for_update: bool,
+    routing_state: "ALMConstraintRoutingState",
+) -> bool:
+    """Opt-in continuation repair for sustained hard/surrogate disagreement."""
+    if not settings.continue_on_signal_mismatch:
+        return False
+    if not signal_mismatch_active:
+        return False
+    if not hard_feasible_for_update:
+        return False
+    return not routing_state.surrogate_positive_shift_zero
+
+
 def _build_constraint_metadata_tuples(
     constraint_names: Sequence[str],
     constraint_blocks: Sequence[str] | None,
@@ -2774,13 +2806,11 @@ def _emit_alm_history_snapshot(
 ) -> None:
     if history_callback is None:
         return
-    # L2: callback contract is now strict. The history list is a defensive
-    # shallow copy (mutations by the callback do not affect ALM internal
-    # state). The entries within the list remain shared references — the
-    # callback may read fields safely, but should not mutate them. The
-    # latest entry is a deep snapshot. Multipliers are an owned copy.
+    # L2: callback contract is strict. The callback receives owned history
+    # entries, owned latest-entry data, and owned multipliers, so callback
+    # mutation cannot corrupt ALM internal state.
     history_callback(
-        list(history),
+        [_snapshot_history_entry(entry) for entry in history],
         _snapshot_history_entry(latest_entry),
         multipliers.copy(),
         float(penalty),
@@ -3617,6 +3647,16 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
                     trust_radius = float(attempt_radius)
             break
         if infeasible_inner_stall:
+            if (
+                inner_false_success
+                and attempt_radius is not None
+                and attempt_index < request.settings.max_inner_attempts
+            ):
+                attempt_radius = float(attempt_radius) * float(
+                    request.settings.trust_radius_grow
+                )
+                trust_radius = float(attempt_radius)
+                continue
             accepted_result = result
             accepted_eval = request.current_eval
             accepted_x = request.x.copy()
@@ -4394,7 +4434,7 @@ def _run_alm_continuation_step(
         max_feasibility_violation,
     ) = _extract_constraint_state(state.final_eval)
     # M5: post-inner routing must use the same clamped feasibility gate as the
-    # pre-inner routing at L3818-3840; the previous unclamped pass let the
+    # pre-inner routing above; the previous unclamped pass let the
     # active masks diverge within one outer iteration on early ALM steps.
     routing_state = _constraint_routing_state(
         state.final_eval,
@@ -4758,6 +4798,43 @@ def _run_alm_continuation_step(
 
     if signal_mismatch_active and hard_feasible_for_update:
         if not made_inner_progress or continuation_iteration > 0:
+            if _signal_mismatch_subproblem_continue_should_fire(
+                settings=settings,
+                signal_mismatch_active=signal_mismatch_active,
+                hard_feasible_for_update=hard_feasible_for_update,
+                routing_state=routing_state,
+            ):
+                state.feasible_stall_count = 0
+                history_entry["signal_mismatch_continuation_repair"] = True
+                if continuation_iteration == settings.max_subproblem_continuations:
+                    history_entry["subproblem_limit_reason"] = (
+                        "max_subproblem_continuations"
+                    )
+                    history_entry["feasible_stall_count"] = int(state.feasible_stall_count)
+                    return _emit_alm_penalty_increase_arm(
+                        state=state,
+                        settings=settings,
+                        run_state=run_state,
+                        evaluate_problem=evaluate_problem,
+                        history_entry=history_entry,
+                        history_callback=history_callback,
+                        constraint_names=constraint_names,
+                        constraint_names_tuple=constraint_names_tuple,
+                        constraint_blocks_tuple=constraint_blocks_tuple,
+                        last_outer_iteration=outer_iteration,
+                        restore_incumbent_state_fn=restore_incumbent_state_fn,
+                        inner_result=result,
+                        is_final_outer=is_final_outer,
+                        action="signal_mismatch_subproblem_limit_penalty_increase",
+                    )
+                _grow_continuation_trust_radius(run_state, settings)
+                return _emit_alm_subproblem_continue(
+                    state=state,
+                    run_state=run_state,
+                    history_entry=history_entry,
+                    history_callback=history_callback,
+                    is_final_outer=is_final_outer,
+                )
             if routing_state.surrogate_positive_shift_zero:
                 return _emit_alm_stall_failure_step(
                     state=state,
@@ -4794,6 +4871,25 @@ def _run_alm_continuation_step(
                 action="signal_mismatch_penalty_increase",
             )
         state.feasible_stall_count = 0
+        if continuation_iteration == settings.max_subproblem_continuations:
+            history_entry["subproblem_limit_reason"] = "max_subproblem_continuations"
+            history_entry["feasible_stall_count"] = int(state.feasible_stall_count)
+            return _emit_alm_penalty_increase_arm(
+                state=state,
+                settings=settings,
+                run_state=run_state,
+                evaluate_problem=evaluate_problem,
+                history_entry=history_entry,
+                history_callback=history_callback,
+                constraint_names=constraint_names,
+                constraint_names_tuple=constraint_names_tuple,
+                constraint_blocks_tuple=constraint_blocks_tuple,
+                last_outer_iteration=outer_iteration,
+                restore_incumbent_state_fn=restore_incumbent_state_fn,
+                inner_result=result,
+                is_final_outer=is_final_outer,
+                action="signal_mismatch_subproblem_limit_penalty_increase",
+            )
         _grow_continuation_trust_radius(run_state, settings)
         return _emit_alm_subproblem_continue(
             state=state,

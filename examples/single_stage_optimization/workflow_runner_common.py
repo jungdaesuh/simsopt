@@ -20,10 +20,10 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from workflow_helpers import (
     DEFAULT_STAGE2_LENGTH_TARGET,
-    validate_stage2_iota_args,
     Stage2SeedSpec,
     local_stage2_bs_path,
     resolve_wataru_vf_template_path,
+    validate_stage2_iota_args,
     validate_normalized_toroidal_flux,
 )
 from banana_opt.artifact_contracts import (
@@ -37,7 +37,11 @@ from banana_opt.alm_defaults import (
     stage2_alm_default,
 )
 from banana_opt.constraint_contract import resolve_constraint_contract_from_wire_names
-from banana_opt.hardware_contracts import validate_major_radius
+from banana_opt.hardware_contracts import (
+    TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+    TARGET_LCFS_MAX_MINOR_RADIUS_M,
+    validate_major_radius,
+)
 
 STAGE2_SCRIPT_PATH = SCRIPT_DIR / "STAGE_2" / "banana_coil_solver.py"
 SINGLE_STAGE_SCRIPT_PATH = SCRIPT_DIR / "SINGLE_STAGE" / "single_stage_banana_example.py"
@@ -81,6 +85,12 @@ def append_alm_cli_flags(
         )
 
 
+def require_bool(value: object, *, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise TypeError(f"{field_name} must be bool, got {type(value).__name__}")
+    return value
+
+
 @dataclass(frozen=True)
 class Stage2ArtifactEnsureResult:
     artifact_path: Path
@@ -111,6 +121,7 @@ STAGE2_ARTIFACT_CONFIG_FLAT_FIELD_NAMES = (
     "basin_hops",
     "basin_stepsize",
     *_STAGE2_ALM_FIELD_NAMES[3:],
+    "alm_fix_signal_mismatch_guard",
     "basin_temperature",
     "basin_niter_success",
     "basin_seed",
@@ -180,8 +191,8 @@ class Stage2ConstraintPolicy:
     cc_threshold: float
     curvature_threshold: float
     length_target: float = DEFAULT_STAGE2_LENGTH_TARGET
-    target_lcfs_max_major_radius_m: float = 0.92
-    target_lcfs_max_minor_radius_m: float = 0.15
+    target_lcfs_max_major_radius_m: float = TARGET_LCFS_MAX_MAJOR_RADIUS_M
+    target_lcfs_max_minor_radius_m: float = TARGET_LCFS_MAX_MINOR_RADIUS_M
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +213,13 @@ class Stage2AlmControls:
     )
     alm_distance_smoothing: float = stage2_alm_default("distance_smoothing")
     alm_curvature_smoothing: float = stage2_alm_default("curvature_smoothing")
+    alm_fix_signal_mismatch_guard: bool = False
+
+    def __post_init__(self) -> None:
+        require_bool(
+            self.alm_fix_signal_mismatch_guard,
+            field_name="Stage2AlmControls.alm_fix_signal_mismatch_guard",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +305,7 @@ class Stage2ArtifactConfig:
         ),
         alm_distance_smoothing: float = stage2_alm_default("distance_smoothing"),
         alm_curvature_smoothing: float = stage2_alm_default("curvature_smoothing"),
+        alm_fix_signal_mismatch_guard: bool = False,
         basin_temperature: float = 1.0,
         basin_niter_success: int = 0,
         basin_seed: int | None = None,
@@ -298,8 +317,8 @@ class Stage2ArtifactConfig:
         proxy_plasma_current_A: float = 0.0,
         vf_current_A: float = 0.0,
         vf_template_path: str | None = None,
-        target_lcfs_max_major_radius_m: float = 0.92,
-        target_lcfs_max_minor_radius_m: float = 0.15,
+        target_lcfs_max_major_radius_m: float = TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        target_lcfs_max_minor_radius_m: float = TARGET_LCFS_MAX_MINOR_RADIUS_M,
         stage2_iota_mode: str = "off",
         stage2_iota_target: float | None = None,
         stage2_iota_tolerance: float = 5.0e-3,
@@ -379,6 +398,7 @@ class Stage2ArtifactConfig:
                 alm_max_subproblem_continuations=alm_max_subproblem_continuations,
                 alm_distance_smoothing=alm_distance_smoothing,
                 alm_curvature_smoothing=alm_curvature_smoothing,
+                alm_fix_signal_mismatch_guard=alm_fix_signal_mismatch_guard,
             ),
         )
         object.__setattr__(
@@ -565,6 +585,10 @@ class Stage2ArtifactConfig:
     @property
     def alm_curvature_smoothing(self) -> float:
         return self._alm.alm_curvature_smoothing
+
+    @property
+    def alm_fix_signal_mismatch_guard(self) -> bool:
+        return self._alm.alm_fix_signal_mismatch_guard
 
     @property
     def basin_temperature(self) -> float:
@@ -799,6 +823,8 @@ def build_stage2_command(
         command.extend(["--constraint-override-reason", constraint_override_reason])
     if config.constraint_method == "alm":
         append_alm_cli_flags(command, config, cli_fields=STAGE2_ALM_CLI_FIELDS)
+        if config.alm_fix_signal_mismatch_guard:
+            command.append("--alm-fix-signal-mismatch-guard")
     if config.basin_hops > 0:
         command.extend(
             [

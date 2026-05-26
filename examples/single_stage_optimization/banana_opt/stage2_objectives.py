@@ -48,6 +48,7 @@ from banana_opt.smooth_distance_selection import (
     surface_dgamma_by_dcoeff_derivative,
     surface_points_tree_shape,
 )
+from banana_opt.boozer_finite_current import derive_signed_G_from_field
 from banana_opt.stage2_single_stage_handoff import (
     BOOZER_FAILURE_POLICY_REPORT_FAILURE,
     BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
@@ -58,7 +59,7 @@ from banana_opt.stage2_single_stage_handoff import (
     attempt_initialize_boozer_surface,
     boozer_trust_tolerance,
     compute_boozer_trust_state,
-    compute_tf_G0,
+    load_warm_start_boozer_seed,
     restore_boozer_solve_state,
     run_boozer_with_failure_policy,
     snapshot_boozer_solve_state,
@@ -70,6 +71,7 @@ from simsopt.objectives import QuadraticPenalty
 _SMOOTHING_EPS = float(np.finfo(float).eps)
 _STAGE2_SOLVE_FAILURE_REJECT_VIOLATION = 1.0
 _STAGE2_HOT_LOOP_SELF_INTERSECTION_ANGLE = 0.0
+_STAGE2_IOTA_ALM_FLOOR_MODE = "alm-floor"
 
 _STAGE2_FAILURE_REASON_NONE = None
 _STAGE2_FAILURE_REASON_SOLVE = "solve_failed"
@@ -204,6 +206,7 @@ class Stage2GuardedBoozerEvaluator:
         *,
         target: float,
         tolerance: float,
+        mode: str,
     ) -> Stage2IotaState:
         trust_state = self.last_trust_state
         if self.last_successful_state is None:
@@ -216,6 +219,7 @@ class Stage2GuardedBoozerEvaluator:
                 iota,
                 target=target,
                 tolerance=tolerance,
+                mode=mode,
                 solve_failed=True,
                 trust_state=trust_state,
             )
@@ -223,6 +227,7 @@ class Stage2GuardedBoozerEvaluator:
             self.last_successful_state.iota,
             target=target,
             tolerance=tolerance,
+            mode=mode,
             solve_failed=True,
             trust_state=trust_state,
         )
@@ -310,17 +315,23 @@ class Stage2GuardedBoozerEvaluator:
         *,
         target: float,
         tolerance: float,
+        mode: str,
     ) -> Stage2IotaEvaluation:
         self._refresh_if_needed()
         if self.last_solve_failed:
             return Stage2IotaEvaluation(
-                state=self._build_failed_state(target=target, tolerance=tolerance)
+                state=self._build_failed_state(
+                    target=target,
+                    tolerance=tolerance,
+                    mode=mode,
+                )
             )
         return _evaluate_stage2_iota_terms(
             iota_term,
             penalty_objective,
             target=target,
             tolerance=tolerance,
+            mode=mode,
             trust_state=self.last_trust_state,
         )
 
@@ -331,21 +342,29 @@ class Stage2GuardedBoozerEvaluator:
         *,
         target: float,
         tolerance: float,
+        mode: str,
     ) -> Stage2IotaState:
         self._refresh_if_needed()
         if self.last_solve_failed:
-            return self._build_failed_state(target=target, tolerance=tolerance)
+            return self._build_failed_state(
+                target=target,
+                tolerance=tolerance,
+                mode=mode,
+            )
         return _build_stage2_iota_state(
             iota_term,
             penalty_objective,
             target=target,
             tolerance=tolerance,
+            mode=mode,
             trust_state=self.last_trust_state,
         )
 
 
 @dataclass
 class Stage2IotaRuntime:
+    """Deprecated Stage 2 hot-loop runtime, retained for legacy payload helpers."""
+
     mode: str
     boozer_surface: object
     iota_term: object
@@ -375,9 +394,64 @@ def stage2_iota_penalty_threshold(iota_tolerance: float) -> float:
     return 0.5 * tolerance * tolerance
 
 
+def _stage2_iota_floor_shortfall(iota: float, target: float) -> float:
+    return max(float(target) - float(iota), 0.0)
+
+
 def _stage2_iota_penalty(iota: float, target: float) -> float:
     delta = float(iota) - float(target)
     return 0.5 * delta * delta
+
+
+def _stage2_iota_floor_penalty(iota: float, target: float) -> float:
+    shortfall = _stage2_iota_floor_shortfall(iota, target)
+    return 0.5 * shortfall * shortfall
+
+
+def _stage2_iota_mode_uses_floor(mode: str) -> bool:
+    return str(mode) == _STAGE2_IOTA_ALM_FLOOR_MODE
+
+
+def _stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint(mode: str) -> bool:
+    return str(mode) in {"alm", _STAGE2_IOTA_ALM_FLOOR_MODE}
+
+
+def _stage2_iota_state_penalty(iota: float, target: float, *, mode: str) -> float:
+    if _stage2_iota_mode_uses_floor(mode):
+        return _stage2_iota_floor_penalty(iota, target)
+    return _stage2_iota_penalty(iota, target)
+
+
+def _stage2_iota_state_feasible(
+    iota: float,
+    *,
+    target: float,
+    tolerance: float,
+    solve_failed: bool,
+    mode: str,
+) -> bool:
+    if solve_failed:
+        return False
+    if _stage2_iota_mode_uses_floor(mode):
+        return _stage2_iota_floor_shortfall(iota, target) <= float(tolerance)
+    return abs(float(iota) - float(target)) <= float(tolerance)
+
+
+class Stage2IotaFloorPenalty:
+    def __init__(self, iota_term, target: float):
+        self.iota_term = iota_term
+        self.target = float(target)
+
+    def J(self) -> float:
+        return _stage2_iota_floor_penalty(float(self.iota_term.J()), self.target)
+
+    def dJ(self):
+        iota = float(self.iota_term.J())
+        shortfall = self.target - iota
+        iota_grad = np.asarray(self.iota_term.dJ(), dtype=float)
+        if shortfall <= 0.0:
+            return np.zeros_like(iota_grad)
+        return -shortfall * iota_grad
 
 
 def _trust_kwargs(
@@ -426,6 +500,7 @@ def _build_stage2_iota_state_from_iota(
     *,
     target: float,
     tolerance: float,
+    mode: str,
     solve_failed: bool = False,
     trust_state: BoozerTrustState | None = None,
 ) -> Stage2IotaState:
@@ -433,9 +508,15 @@ def _build_stage2_iota_state_from_iota(
     abs_error = abs(iota_value - float(target))
     return Stage2IotaState(
         iota=iota_value,
-        penalty=_stage2_iota_penalty(iota_value, target),
+        penalty=_stage2_iota_state_penalty(iota_value, target, mode=mode),
         abs_error=abs_error,
-        feasible=not solve_failed and abs_error <= float(tolerance),
+        feasible=_stage2_iota_state_feasible(
+            iota_value,
+            target=target,
+            tolerance=tolerance,
+            solve_failed=bool(solve_failed),
+            mode=mode,
+        ),
         solve_failed=bool(solve_failed),
         **_trust_kwargs(trust_state, solve_failed=bool(solve_failed)),
     )
@@ -480,6 +561,7 @@ def _build_stage2_iota_state(
     *,
     target: float,
     tolerance: float,
+    mode: str,
     solve_failed: bool = False,
     trust_state: BoozerTrustState | None = None,
 ) -> Stage2IotaState:
@@ -490,7 +572,13 @@ def _build_stage2_iota_state(
         iota=iota,
         penalty=penalty,
         abs_error=abs_error,
-        feasible=not solve_failed and abs_error <= float(tolerance),
+        feasible=_stage2_iota_state_feasible(
+            iota,
+            target=target,
+            tolerance=tolerance,
+            solve_failed=bool(solve_failed),
+            mode=mode,
+        ),
         solve_failed=bool(solve_failed),
         **_trust_kwargs(trust_state, solve_failed=bool(solve_failed)),
     )
@@ -502,6 +590,7 @@ def _evaluate_stage2_iota_terms(
     *,
     target: float,
     tolerance: float,
+    mode: str,
     solve_failed: bool = False,
     trust_state: BoozerTrustState | None = None,
 ) -> Stage2IotaEvaluation:
@@ -510,6 +599,7 @@ def _evaluate_stage2_iota_terms(
         penalty_objective,
         target=target,
         tolerance=tolerance,
+        mode=mode,
         solve_failed=solve_failed,
         trust_state=trust_state,
     )
@@ -528,6 +618,7 @@ def evaluate_stage2_iota(
             stage2_iota_runtime.penalty_objective,
             target=stage2_iota_runtime.target,
             tolerance=stage2_iota_runtime.tolerance,
+            mode=stage2_iota_runtime.mode,
         )
     else:
         evaluation = _evaluate_stage2_iota_terms(
@@ -535,6 +626,7 @@ def evaluate_stage2_iota(
             stage2_iota_runtime.penalty_objective,
             target=stage2_iota_runtime.target,
             tolerance=stage2_iota_runtime.tolerance,
+            mode=stage2_iota_runtime.mode,
         )
     stage2_iota_runtime.last_state = evaluation.state
     return evaluation
@@ -549,6 +641,7 @@ def evaluate_stage2_iota_state(
             stage2_iota_runtime.penalty_objective,
             target=stage2_iota_runtime.target,
             tolerance=stage2_iota_runtime.tolerance,
+            mode=stage2_iota_runtime.mode,
         )
     else:
         state = _build_stage2_iota_state(
@@ -556,9 +649,27 @@ def evaluate_stage2_iota_state(
             stage2_iota_runtime.penalty_objective,
             target=stage2_iota_runtime.target,
             tolerance=stage2_iota_runtime.tolerance,
+            mode=stage2_iota_runtime.mode,
         )
     stage2_iota_runtime.last_state = state
     return state
+
+
+def _add_stage2_s_hel_objective(
+    objective_value: float,
+    objective_grad: np.ndarray,
+    *,
+    s_hel_objective,
+    s_hel_weight: float,
+) -> tuple[float, np.ndarray]:
+    s_hel_objective.recompute_bell()
+    s_hel_value = float(s_hel_objective.J())
+    return (
+        float(objective_value) + float(s_hel_weight) * (1.0 - s_hel_value),
+        np.asarray(objective_grad, dtype=float)
+        - float(s_hel_weight)
+        * np.asarray(s_hel_objective.dJ_by_dcoils(), dtype=float),
+    )
 
 
 def _coerce_stage2_partition_counts(
@@ -630,9 +741,11 @@ def build_stage2_iota_runtime(
     num_tf_coils: int,
     mode: str,
     weight: float = 1.0,
+    stage2_seed_surf_path=None,
     build_surface_configs_fn=build_surface_configs,
     attempt_initialize_boozer_surface_fn=attempt_initialize_boozer_surface,
-    compute_tf_G0_fn=compute_tf_G0,
+    derive_signed_G_fn=derive_signed_G_from_field,
+    warm_start_loader=load_warm_start_boozer_seed,
     iotas_cls=Iotas,
     quadratic_penalty_cls=QuadraticPenalty,
 ) -> Stage2IotaRuntime:
@@ -642,27 +755,51 @@ def build_stage2_iota_runtime(
             f"match the actual TF-coil count ({len(tf_coils)}), got {num_tf_coils}."
         )
 
-    outer_surface_config = build_surface_configs_fn(
-        equilibrium_file,
-        int(nphi),
-        int(ntheta),
-        float(toroidal_flux),
-        float(major_radius),
-        float(vol_target),
-        1,
-        0.8,
-    )[-1]
+    # The bs-aware helper verifies that the TF subset belongs to the same
+    # BiotSavart field that feeds the Boozer residual. Cold bootstraps use the
+    # signed value directly; solved warm-start artifacts carry their own
+    # explicit G.
+    tf_G0 = derive_signed_G_fn(bs, tf_coils=tf_coils)
+
+    warm_start_seed = (
+        None
+        if stage2_seed_surf_path is None
+        else warm_start_loader(stage2_seed_surf_path)
+    )
+    if warm_start_seed is not None and warm_start_seed.has_solved_state:
+        initial_surface = warm_start_seed.surface
+        target_volume = float(vol_target)
+        initial_surface_guess = warm_start_seed.surface
+        initial_iota = float(warm_start_seed.iota)
+        initial_G = float(warm_start_seed.G)
+    else:
+        outer_surface_config = build_surface_configs_fn(
+            equilibrium_file,
+            int(nphi),
+            int(ntheta),
+            float(toroidal_flux),
+            float(major_radius),
+            float(vol_target),
+            1,
+            0.8,
+        )[-1]
+        initial_surface = outer_surface_config["initial_surface"]
+        target_volume = outer_surface_config["target_volume"]
+        initial_surface_guess = None
+        initial_iota = float(iota_target)
+        initial_G = tf_G0
     bootstrap_start = time.perf_counter()
     initialization = attempt_initialize_boozer_surface_fn(
-        outer_surface_config["initial_surface"],
+        initial_surface,
         int(mpol),
         int(ntor),
         bs,
-        outer_surface_config["target_volume"],
+        target_volume,
         constraint_weight,
-        float(iota_target),
-        compute_tf_G0_fn(tf_coils),
-        nfp=outer_surface_config["initial_surface"].nfp,
+        initial_iota,
+        initial_G,
+        initial_surface_guess=initial_surface_guess,
+        nfp=initial_surface.nfp,
     )
     bootstrap_seconds = time.perf_counter() - bootstrap_start
     if initialization.boozer_surface is None:
@@ -693,7 +830,10 @@ def build_stage2_iota_runtime(
 
     boozer_surface.run_code = timed_run_code
     iota_term = iotas_cls(boozer_surface)
-    penalty_objective = quadratic_penalty_cls(iota_term, float(iota_target))
+    if _stage2_iota_mode_uses_floor(mode):
+        penalty_objective = Stage2IotaFloorPenalty(iota_term, float(iota_target))
+    else:
+        penalty_objective = quadratic_penalty_cls(iota_term, float(iota_target))
     if initialization.success:
         guarded_boozer_evaluator = Stage2GuardedBoozerEvaluator.from_successful_surface(
             boozer_surface,
@@ -703,6 +843,7 @@ def build_stage2_iota_runtime(
             penalty_objective,
             target=float(iota_target),
             tolerance=float(iota_tolerance),
+            mode=str(mode),
             trust_state=guarded_boozer_evaluator.last_trust_state,
         )
     else:
@@ -727,6 +868,7 @@ def build_stage2_iota_runtime(
             failed_iota,
             target=float(iota_target),
             tolerance=float(iota_tolerance),
+            mode=str(mode),
             solve_failed=True,
             trust_state=guarded_boozer_evaluator.last_trust_state,
         )
@@ -771,6 +913,7 @@ def build_stage2_alm_settings(args):
         trust_radius_shrink=args.alm_trust_radius_shrink,
         trust_radius_grow=args.alm_trust_radius_grow,
         max_inner_attempts=args.alm_max_inner_attempts,
+        continue_on_signal_mismatch=bool(args.alm_fix_signal_mismatch_guard),
     )
 
 
@@ -1222,6 +1365,9 @@ def build_stage2_results(
         "MAJOR_RADIUS": major_radius,
         "R0_OFF_SPEC": is_major_radius_offspec(major_radius),
         "TOROIDAL_FLUX": toroidal_flux,
+        "STAGE2_PLASMA_SCALING_MODE": str(
+            getattr(args, "stage2_plasma_scaling_mode", "lcfs")
+        ),
         "NFP": int(nfp),
         "banana_surf_radius": banana_surf_radius,
         "order": order,
@@ -1257,6 +1403,9 @@ def build_stage2_results(
         "ALM_MAX_OUTER_ITERS": args.alm_max_outer_iters if alm_enabled else None,
         "ALM_MAX_SUBPROBLEM_CONTINUATIONS": (
             args.alm_max_subproblem_continuations if alm_enabled else None
+        ),
+        "ALM_FIX_SIGNAL_MISMATCH_GUARD": (
+            bool(args.alm_fix_signal_mismatch_guard) if alm_enabled else None
         ),
         "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
         "ALM_PENALTY_INIT": args.alm_penalty_init if alm_enabled else None,
@@ -1472,9 +1621,6 @@ def make_stage2_fun(
         JF.x = dofs
         J = float(JF.J())
         grad = np.asarray(JF.dJ(), dtype=float)
-        if s_hel_enabled:
-            # Drop the stale FFT/gradient cache; the coil DOFs just moved.
-            s_hel_objective.recompute_bell()
         iota_state = None
         iota_evaluation = None
         if soft_mode_enabled:
@@ -1497,20 +1643,8 @@ def make_stage2_fun(
                 # reject sentinel, which would create a gradient discontinuity
                 # at the trust boundary.
                 #
-                # Phase 3, "S_HEL as a ramped Stage 2 objective term"
-                # (plan lines 280-284): the untrusted-but-evaluable lane is
-                # exactly where the helical-content push earns its keep —
-                # the iota signal is unreliable, so a non-Boozer topology
-                # force keeps the optimizer climbing toward helical |B|.
-                if s_hel_enabled:
-                    s_hel_value = float(s_hel_objective.J())
-                    J += float(s_hel_weight) * (1.0 - s_hel_value)
-                    grad = grad + (
-                        -float(s_hel_weight)
-                        * np.asarray(
-                            s_hel_objective.dJ_by_dcoils(), dtype=float
-                        )
-                    )
+                # The non-Boozer S_HEL term is applied below when enabled.
+                pass
             else:
                 effective_weight = _resolve_stage2_soft_effective_weight(
                     stage2_iota_runtime,
@@ -1522,6 +1656,13 @@ def make_stage2_fun(
                     effective_weight
                     * np.asarray(iota_evaluation.penalty_grad, dtype=float)
                 )
+        if s_hel_enabled:
+            J, grad = _add_stage2_s_hel_objective(
+                J,
+                grad,
+                s_hel_objective=s_hel_objective,
+                s_hel_weight=s_hel_weight,
+            )
         if emit_diagnostics:
             unitn = new_surf.unitnormal()
             BdotN = np.mean(
@@ -2053,6 +2194,8 @@ def evaluate_stage2_alm_problem(
     poloidal_extent_smoothing=None,
     smooth_poloidal_extent_signed_constraint=None,
     stage2_iota_runtime: Stage2IotaRuntime | None = None,
+    s_hel_objective=None,
+    s_hel_weight: float = 0.0,
     Jw=None,
     width_min_threshold=None,
     width_max_threshold=None,
@@ -2094,6 +2237,13 @@ def evaluate_stage2_alm_problem(
     base_objective.x = dofs
     base_value = float(base_objective.J())
     base_grad = np.asarray(base_objective.dJ(), dtype=float)
+    if s_hel_objective is not None and float(s_hel_weight) > 0.0:
+        base_value, base_grad = _add_stage2_s_hel_objective(
+            base_value,
+            base_grad,
+            s_hel_objective=s_hel_objective,
+            s_hel_weight=s_hel_weight,
+        )
     base_objective_optimizable = base_objective
 
     coil_length = float(Jls.J())
@@ -2222,7 +2372,10 @@ def evaluate_stage2_alm_problem(
     iota_violation = None
     iota_signed_value = None
     include_iota_penalty = (
-        stage2_iota_runtime is not None and stage2_iota_runtime.mode == "alm"
+        stage2_iota_runtime is not None
+        and _stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint(
+            stage2_iota_runtime.mode
+        )
     )
     stage2_iota_penalty_threshold_value = None
     if stage2_iota_runtime is not None:
@@ -2508,6 +2661,7 @@ def evaluate_stage2_alm_problem(
             f", Len={coil_length:.1f}m, Len+={length_violation:.2e}, "
             f"Leng={coil_length - length_target:.2e}"
         )
+        outstr += f", LenMin+={length_min_violation:.2e}"
         outstr += (
             f", C-C-Sep={curve_curve_min_dist:.2f}m, "
             f"CC+={curve_curve_violation:.2e}, "
@@ -2523,7 +2677,6 @@ def evaluate_stage2_alm_problem(
             f", Curvature={max_curvature:.2f}, Curv+={curvature_violation:.2e}, "
             f"Curvg={curvature_signed_value:.2e}"
         )
-        outstr += f", LenMin+={length_min_violation:.2e}"
         outstr += (
             f", W={coil_width_value:.3f}m, "
             f"Wmin+={width_min_violation:.2e}, "

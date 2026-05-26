@@ -414,6 +414,7 @@ class TestStage2IotaStateTrustPropagation:
             0.2,
             target=0.2,
             tolerance=0.01,
+            mode="alm",
             solve_failed=False,
             trust_state=trust,
         )
@@ -681,6 +682,67 @@ class TestStage2FunHonorsTrust:
         np.testing.assert_allclose(grad, base_grad - s_hel_weight * s_hel_grad)
         assert s_hel_objective.recompute_calls == 1
 
+    def test_s_hel_objective_does_not_require_iota_runtime(self):
+        objectives = load_stage2_objectives_module()
+
+        base_J = 0.4
+        base_grad = np.array([1.0, 2.0])
+        s_hel_weight = 2.0e-3
+        s_hel_value = 0.75
+        s_hel_grad = np.array([5.0, -6.0])
+
+        class _FixedJF:
+            def __init__(self):
+                self.x = np.array([0.0, 0.0])
+
+            def J(self):
+                return base_J
+
+            def dJ(self):
+                return base_grad.copy()
+
+        class _SHelObjective:
+            def __init__(self):
+                self.recompute_calls = 0
+
+            def recompute_bell(self):
+                self.recompute_calls += 1
+
+            def J(self):
+                return s_hel_value
+
+            def dJ_by_dcoils(self):
+                return s_hel_grad.copy()
+
+        s_hel_objective = _SHelObjective()
+        fake_surface = SimpleNamespace(
+            unitnormal=lambda: np.zeros((1, 1, 3)),
+            gamma=lambda: np.zeros((1, 1, 3)),
+        )
+        fake_bs = SimpleNamespace(
+            set_points=lambda points: None,
+            clear_cached_properties=lambda: None,
+            B=lambda: np.zeros((1, 1, 3)),
+        )
+        fun = objectives.make_stage2_fun(
+            JF=_FixedJF(),
+            new_bs=fake_bs,
+            new_surf=fake_surface,
+            Jf=SimpleNamespace(J=lambda: 0.0),
+            Jls=SimpleNamespace(J=lambda: 0.0),
+            Jccdist=SimpleNamespace(shortest_distance=lambda: 0.0),
+            Jc=SimpleNamespace(J=lambda: 0.0),
+            stage2_iota_runtime=None,
+            s_hel_objective=s_hel_objective,
+            s_hel_weight=s_hel_weight,
+        )
+
+        J, grad = fun(np.array([0.0, 0.0]))
+
+        assert J == pytest.approx(base_J + s_hel_weight * (1.0 - s_hel_value))
+        np.testing.assert_allclose(grad, base_grad - s_hel_weight * s_hel_grad)
+        assert s_hel_objective.recompute_calls == 1
+
 
 # ---------------------------------------------------------------------------
 # ALM-lane helpers (mirroring the soft-lane synthetic Stage 2 evaluator state
@@ -874,6 +936,7 @@ def _build_untrusted_iota_state(objectives, handoff):
         0.2,
         target=0.2,
         tolerance=0.05,
+        mode="alm",
         solve_failed=False,
         trust_state=trust,
     )
@@ -892,6 +955,90 @@ class TestStage2AlmProblemHonorsTrust:
     pin the inversion such that any regression that re-injects a non-zero
     iota signal or a non-zero iota gradient would fail one of them.
     """
+
+    def test_s_hel_objective_contributes_to_alm_base_objective(self):
+        objectives = load_stage2_objectives_module()
+
+        base_J = 3.5
+        base_grad = np.array([1.2, -0.5])
+        s_hel_weight = 2.0e-3
+        s_hel_value = 0.8
+        s_hel_grad = np.array([4.0, -2.0])
+
+        class _SHelObjective:
+            def __init__(self):
+                self.recompute_calls = 0
+
+            def recompute_bell(self):
+                self.recompute_calls += 1
+
+            def J(self):
+                return s_hel_value
+
+            def dJ_by_dcoils(self):
+                return s_hel_grad.copy()
+
+        s_hel_objective = _SHelObjective()
+        captured = {}
+
+        def fake_augmented(
+            received_base_value,
+            received_base_grad,
+            *_args,
+        ):
+            captured["base_grad"] = np.asarray(received_base_grad, dtype=float)
+            return {
+                "total": float(received_base_value),
+                "grad": captured["base_grad"].copy(),
+                "stationarity_norm": 0.0,
+            }
+
+        with mock.patch.object(
+            objectives,
+            "augmented_inequality_objective",
+            side_effect=fake_augmented,
+        ):
+            result = objectives.evaluate_stage2_alm_problem(
+                dofs=np.array([0.25, -0.4]),
+                base_objective=_AlmFakeBaseObjective(base_J, base_grad),
+                new_bs=_AlmFakeBiotSavart((4, 3)),
+                new_surf=_AlmFakeSurfaceNormals((2, 2, 3)),
+                Jf=_AlmFakeScalarObjective(0.25),
+                Jls=_AlmFakeLengthObjective(2.2, [0.3, 0.4]),
+                length_target=2.0,
+                Jccdist=_AlmFakeCurveDistance(0.05, 0.04),
+                Jc=_AlmFakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5),
+                banana_current=_AlmFakeCurrentObjective(9500.0, [0.7, -0.4]),
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.zeros(8),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
+                    ds * 4.0,
+                    cs * 4.0,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
+                ],
+                smooth_min_distance_signed_constraint=_alm_default_distance_constraint,
+                smooth_max_curvature_signed_constraint=_alm_default_curvature_constraint,
+                s_hel_objective=s_hel_objective,
+                s_hel_weight=s_hel_weight,
+                **_alm_default_geometric_parity_kwargs(),
+            )
+
+        assert result["base_value"] == pytest.approx(
+            base_J + s_hel_weight * (1.0 - s_hel_value)
+        )
+        np.testing.assert_allclose(
+            captured["base_grad"],
+            base_grad - s_hel_weight * s_hel_grad,
+        )
+        assert s_hel_objective.recompute_calls == 1
 
     def test_untrusted_iota_zeroes_signed_value_and_gradient(self):
         objectives = load_stage2_objectives_module()

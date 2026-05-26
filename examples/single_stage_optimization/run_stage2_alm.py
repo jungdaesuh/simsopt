@@ -20,6 +20,7 @@ from workflow_runner_common import (  # noqa: E402
     resolved_path,
     resolved_optional_path,
     json_dumps,
+    require_bool,
     timeout_or_none,
     stage2_artifact_config_flat_dict,
     write_json,
@@ -38,6 +39,7 @@ from banana_opt.current_contracts import DEFAULT_FINITE_CURRENT_MODE  # noqa: E4
 from banana_opt.alm_defaults import stage2_alm_default  # noqa: E402
 from banana_opt.hardware_contracts import (  # noqa: E402
     BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_TARGET_M,
@@ -73,7 +75,7 @@ _BASE_STAGE2_PROFILE = {
     "cc_threshold": COIL_COIL_MIN_DIST_M,
     "curvature_weight": 0.0001,
     "curvature_threshold": MAX_CURVATURE_INV_M,
-    "banana_surf_radius": 0.21,
+    "banana_surf_radius": BANANA_WINDING_MINOR_RADIUS_M,
     "order": 2,
     "banana_init_current_A": -1.0e4,
     "banana_current_max_A": BANANA_CURRENT_HARD_LIMIT_A,
@@ -100,6 +102,7 @@ _BASE_STAGE2_PROFILE = {
     ),
     "alm_distance_smoothing": stage2_alm_default("distance_smoothing"),
     "alm_curvature_smoothing": stage2_alm_default("curvature_smoothing"),
+    "alm_fix_signal_mismatch_guard": False,
     "basin_hops": 0,
     "basin_stepsize": 0.01,
     "basin_temperature": 1.0,
@@ -144,6 +147,7 @@ STAGE2_SPEC_KEYS = (
     "alm_max_subproblem_continuations",
     "alm_distance_smoothing",
     "alm_curvature_smoothing",
+    "alm_fix_signal_mismatch_guard",
     "basin_hops",
     "basin_stepsize",
     "basin_temperature",
@@ -184,6 +188,7 @@ OPTIONAL_STAGE2_SPEC_KEYS = (
     "alm_max_subproblem_continuations",
     "alm_distance_smoothing",
     "alm_curvature_smoothing",
+    "alm_fix_signal_mismatch_guard",
 )
 
 
@@ -310,6 +315,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Deprecated Stage 2 iota metadata mode. 'report' runs only the "
             "post-optimization Boozer/iota probe; hot-loop iota constraints "
             "are not production Stage 2."
+        ),
+    )
+    parser.add_argument(
+        "--alm-fix-signal-mismatch-guard",
+        action="store_true",
+        default=False,
+        help=(
+            "Forward the Stage 2 solver-native ALM signal-mismatch continuation "
+            "repair flag. The Stage 2 child runs with inherited ALM_* env stripped, "
+            "so this CLI flag is the explicit SSOT."
         ),
     )
     parser.add_argument(
@@ -598,6 +613,13 @@ def build_stage2_alm_config(
         ),
         alm_distance_smoothing=float(resolved_spec["alm_distance_smoothing"]),
         alm_curvature_smoothing=float(resolved_spec["alm_curvature_smoothing"]),
+        alm_fix_signal_mismatch_guard=(
+            require_bool(
+                resolved_spec["alm_fix_signal_mismatch_guard"],
+                field_name="stage2_spec.alm_fix_signal_mismatch_guard",
+            )
+            or args.alm_fix_signal_mismatch_guard
+        ),
         basin_hops=basin_hops,
         basin_stepsize=float(resolved_spec["basin_stepsize"]),
         basin_temperature=float(resolved_spec["basin_temperature"]),
@@ -651,6 +673,7 @@ def _expected_stage2_alm_solver_metadata(config: Stage2ArtifactConfig) -> dict:
         "ALM_MAX_SUBPROBLEM_CONTINUATIONS": config.alm_max_subproblem_continuations,
         "ALM_DISTANCE_SMOOTHING": config.alm_distance_smoothing,
         "ALM_CURVATURE_SMOOTHING": config.alm_curvature_smoothing,
+        "ALM_FIX_SIGNAL_MISMATCH_GUARD": config.alm_fix_signal_mismatch_guard,
     }
     if config.constraint_method == "alm":
         return metadata

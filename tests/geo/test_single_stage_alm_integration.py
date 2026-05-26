@@ -4,6 +4,7 @@ import io
 import importlib
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -78,7 +79,7 @@ SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH = (
     EXAMPLES_ROOT
     / "run_single_stage_thresholded_physics_alm.py"
 )
-DEFAULT_ALM_WRAPPER_SURFACE = "wout_nfp10ginsburg_desc_s024match_iota20.nc"
+DEFAULT_ALM_WRAPPER_SURFACE = "wout_nfp5ginsburg_000_002084_iota20.nc"
 DEFAULT_ALM_WRAPPER_SURFACE_PATH = (
     EXAMPLES_ROOT.parents[2]
     / "DATABASE"
@@ -250,6 +251,7 @@ def _make_alm_args(**overrides):
         "alm_trust_radius_shrink": 0.4,
         "alm_trust_radius_grow": 1.8,
         "alm_max_inner_attempts": 5,
+        "alm_fix_signal_mismatch_guard": False,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -289,6 +291,7 @@ def make_stage2_alm_wrapper_args(**overrides):
         "stage2_iota_ntheta": 32,
         "stage2_iota_mpol": 8,
         "stage2_iota_ntor": 6,
+        "alm_fix_signal_mismatch_guard": False,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -303,7 +306,7 @@ def make_complete_stage2_spec_payload(**overrides):
         "cc_threshold": 0.06,
         "curvature_weight": 0.0002,
         "curvature_threshold": 45.0,
-        "banana_surf_radius": 0.21,
+        "banana_surf_radius": 0.142,
         "tf_current_A": -8.0e4,
         "order": 3,
         "banana_init_current_A": -1.2e4,
@@ -370,6 +373,7 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "alm_max_inner_attempts": 4,
         "alm_distance_smoothing": 0.005,
         "alm_curvature_smoothing": 0.05,
+        "alm_fix_signal_mismatch_guard": False,
         "alm_qs_threshold": 3e-3,
         "alm_boozer_threshold": 1e-4,
         "alm_iota_penalty_threshold": 1e-4,
@@ -414,10 +418,15 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         globals_for_extract = {
             "argparse": _argparse,
             "os": _os,
-            "COIL_COIL_MIN_DIST_M": 0.05,
+            "COIL_COIL_MIN_DIST_M": 0.0462,
             "COIL_LENGTH_HARD_LIMIT_M": 2.0,
             "COIL_LENGTH_TARGET_M": 1.9,
-            "COIL_PLASMA_MIN_DIST_M": 0.015,
+            "COIL_PLASMA_MIN_DIST_M": 0.010,
+            "POLOIDAL_EXTENT_HALF_WIDTH_RAD": 1.2217304763960306,
+            "BANANA_WIDTH_MIN_M": 0.05,
+            "BANANA_WIDTH_MAX_M": 0.17,
+            "BANANA_SELF_INTERSECT_MIN_DISTANCE_M": 0.01,
+            "BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR": 1.5,
             "DEFAULT_EQUILIBRIA_DIR": "/tmp/fake_eq",
             "DEFAULT_SINGLE_STAGE_OUTPUT_ROOT": "/tmp/fake_out",
             "DEFAULT_DATABASE_STAGE2_ROOT": "/tmp/fake_db",
@@ -1416,9 +1425,26 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             command[command.index("--alm-penalty-max") + 1],
             str(float(module.stage2_alm_default("penalty_max"))),
         )
+        self.assertNotIn("--alm-fix-signal-mismatch-guard", command)
         self.assertIn("--banana-current-max-A", command)
         self.assertEqual(command[command.index("--banana-current-max-A") + 1], "16000.0")
         self.assertEqual(command[command.index("--toroidal-flux") + 1], "0.37")
+
+    def test_stage2_alm_wrapper_forwards_signal_mismatch_guard(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(alm_fix_signal_mismatch_guard=True)
+        resolved_spec, _ = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+
+        command = module.build_stage2_command(
+            config,
+            python_executable=args.python_executable,
+        )
+        metadata = module._expected_stage2_alm_solver_metadata(config)
+
+        self.assertIn("--alm-fix-signal-mismatch-guard", command)
+        self.assertTrue(config.alm_fix_signal_mismatch_guard)
+        self.assertTrue(metadata["ALM_FIX_SIGNAL_MISMATCH_GUARD"])
 
     def test_stage2_alm_wrapper_command_threads_constraint_metadata_flags(self):
         module = load_stage2_alm_wrapper_module()
@@ -1453,9 +1479,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(resolved_spec_source, "profile:standard_80ka")
         self.assertEqual(resolved_spec["tf_current_A"], -8.0e4)
-        self.assertEqual(resolved_spec["cc_threshold"], 0.05)
+        self.assertEqual(resolved_spec["cc_threshold"], 0.0462)
         self.assertEqual(resolved_spec["curvature_threshold"], 100.0)
-        self.assertEqual(resolved_spec["banana_surf_radius"], 0.21)
+        self.assertEqual(resolved_spec["banana_surf_radius"], 0.142)
         self.assertEqual(resolved_spec["finite_current_mode"], "wataru_proxy_field")
 
     def test_stage2_alm_wrapper_rejects_tf_current_above_hard_limit(self):
@@ -1586,8 +1612,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 json.dumps(
                     make_complete_stage2_spec_payload(
                         length_target=1.6,
-                        target_lcfs_max_major_radius_m=0.91,
-                        target_lcfs_max_minor_radius_m=0.14,
+                        target_lcfs_max_major_radius_m=0.900,
+                        target_lcfs_max_minor_radius_m=0.130,
                     )
                 ),
                 encoding="utf-8",
@@ -1610,22 +1636,22 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             )
 
         self.assertEqual(config.length_target, 1.6)
-        self.assertEqual(config.target_lcfs_max_major_radius_m, 0.91)
-        self.assertEqual(config.target_lcfs_max_minor_radius_m, 0.14)
+        self.assertEqual(config.target_lcfs_max_major_radius_m, 0.900)
+        self.assertEqual(config.target_lcfs_max_minor_radius_m, 0.130)
         self.assertEqual(metadata["EFFECTIVE_VALUES"]["COIL_LENGTH_TARGET_M"], 1.6)
-        self.assertEqual(metadata["EFFECTIVE_VALUES"]["TARGET_LCFS_MAX_MAJOR_RADIUS_M"], 0.91)
-        self.assertEqual(metadata["EFFECTIVE_VALUES"]["TARGET_LCFS_MAX_MINOR_RADIUS_M"], 0.14)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["TARGET_LCFS_MAX_MAJOR_RADIUS_M"], 0.900)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["TARGET_LCFS_MAX_MINOR_RADIUS_M"], 0.130)
         self.assertIn("--length-target", command)
         self.assertEqual(command[command.index("--length-target") + 1], "1.6")
         self.assertIn("--target-lcfs-max-major-radius-m", command)
         self.assertEqual(
             command[command.index("--target-lcfs-max-major-radius-m") + 1],
-            "0.91",
+            "0.9",
         )
         self.assertIn("--target-lcfs-max-minor-radius-m", command)
         self.assertEqual(
             command[command.index("--target-lcfs-max-minor-radius-m") + 1],
-            "0.14",
+            "0.13",
         )
 
     def test_stage2_alm_wrapper_summary_includes_resolved_config(self):
@@ -1655,7 +1681,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["resolved_stage2_config"]["alm_distance_smoothing"], 0.005)
         self.assertEqual(summary["resolved_stage2_config"]["alm_curvature_smoothing"], 0.25)
         self.assertEqual(summary["resolved_stage2_config"]["curvature_threshold"], 100.0)
-        self.assertEqual(summary["resolved_stage2_config"]["banana_surf_radius"], 0.21)
+        self.assertEqual(summary["resolved_stage2_config"]["banana_surf_radius"], 0.142)
         self.assertEqual(
             summary["resolved_stage2_config"]["finite_current_mode"],
             "wataru_proxy_field",
@@ -1663,7 +1689,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["resolved_stage2_config"]["output_root"], str(Path("outputs").resolve()))
         self.assertEqual(
             summary["fixed_stage2_hardware_contract"],
-            {"COIL_PLASMA_MIN_DIST_M": 0.015},
+            {"COIL_PLASMA_MIN_DIST_M": 0.010},
         )
         self.assertEqual(summary["output_contract"], "materialized_stage2_artifact")
         self.assertFalse(summary["contains_solver_outputs"])
@@ -1762,7 +1788,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["basin_temperature"], 2.5)
         self.assertEqual(metadata["basin_niter_success"], 8)
         self.assertEqual(metadata["basin_seed"], 11)
-        self.assertEqual(metadata["COIL_PLASMA_MIN_DIST_M"], 0.015)
+        self.assertEqual(metadata["COIL_PLASMA_MIN_DIST_M"], 0.010)
         self.assertNotIn("PLASMA_VESSEL_MIN_DIST_M", metadata)
         self.assertEqual(metadata["LENGTH_TARGET"], 1.9)
         self.assertEqual(metadata["WIDTH_MIN_THRESHOLD"], 0.05)
@@ -1831,8 +1857,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             spec_payload = make_complete_stage2_spec_payload(
                 length_target=1.6,
-                target_lcfs_max_major_radius_m=0.91,
-                target_lcfs_max_minor_radius_m=0.14,
+                target_lcfs_max_major_radius_m=0.900,
+                target_lcfs_max_minor_radius_m=0.130,
             )
             spec_path_a = Path(tmpdir) / "a.json"
             spec_path_b = Path(tmpdir) / "b.json"
@@ -1880,7 +1906,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
     def test_stage2_alm_wrapper_load_validated_artifact_allows_no_op_cli_override_reason_drift(self):
         module = load_stage2_alm_wrapper_module()
         args_default = make_stage2_alm_wrapper_args()
-        args_no_op = make_stage2_alm_wrapper_args(cc_threshold=0.05)
+        args_no_op = make_stage2_alm_wrapper_args(cc_threshold=0.0462)
         resolved_spec_default, resolved_spec_source_default = module.resolve_stage2_spec_payload(
             args_default
         )
@@ -1989,14 +2015,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "FIELD_ERROR": 2.0e-4,
                 "HARDWARE_CONSTRAINTS_OK": True,
                 "CURVE_SURFACE_MIN_DIST": 0.017,
-                "COIL_PLASMA_MIN_DIST_M": 0.015,
+                "COIL_PLASMA_MIN_DIST_M": 0.010,
                 "SURFACE_VESSEL_MIN_DIST": 0.041,
                 "PLASMA_VESSEL_MIN_DIST_M": 0.04,
             },
         )
 
         self.assertEqual(summary["coil_plasma_min_dist"], 0.017)
-        self.assertEqual(summary["coil_plasma_threshold"], 0.015)
+        self.assertEqual(summary["coil_plasma_threshold"], 0.010)
         self.assertEqual(summary["plasma_vessel_min_dist"], 0.041)
         self.assertEqual(summary["plasma_vessel_threshold"], 0.04)
 
@@ -2137,6 +2163,31 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(override_config.basin_seed, 42)
         self.assertEqual(module._expected_stage2_artifact_metadata(override_config)["basin_seed"], 42)
 
+    def test_stage2_alm_wrapper_rejects_string_signal_mismatch_guard(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spec_path = Path(tmpdir) / "stage2_string_bool_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    make_complete_stage2_spec_payload(
+                        alm_fix_signal_mismatch_guard="false"
+                    )
+                ),
+                encoding="utf-8",
+            )
+            args = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(spec_path),
+            )
+            resolved_spec, _ = module.resolve_stage2_spec_payload(args)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "stage2_spec.alm_fix_signal_mismatch_guard must be bool",
+            ):
+                module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+
     def test_stage2_alm_wrapper_rejects_nonfinite_alm_spec_before_summary_output(self):
         module = load_stage2_alm_wrapper_module()
 
@@ -2244,6 +2295,34 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             str(Path("eqdir").resolve()),
         )
         self.assertIn("--flip-banana", command)
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_forwards_signal_mismatch_guard(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+        args = make_single_stage_thresholded_physics_rerun_args(
+            alm_fix_signal_mismatch_guard=True,
+        )
+
+        command = module.build_single_stage_thresholded_physics_command(args)
+
+        self.assertIn("--alm-fix-signal-mismatch-guard", command)
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_env_does_not_set_guard(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with patch.dict(os.environ, {"ALM_FIX_SIGNAL_MISMATCH_GUARD": "1"}), patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_thresholded_physics_alm.py",
+                "--plasma-surf-filename",
+                DEFAULT_ALM_WRAPPER_SURFACE,
+                "--stage2-bs-path",
+                "seed.json",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertFalse(args.alm_fix_signal_mismatch_guard)
 
     def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_accepts_seed_order_upgrade(self):
         module = load_single_stage_thresholded_physics_rerun_module()
@@ -2429,7 +2508,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         ):
             args = module.parse_args()
 
-        self.assertEqual(args.cs_dist, 0.015)
+        self.assertEqual(args.cs_dist, 0.010)
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
         self.assertEqual(args.alm_boozer_threshold, 1.0e-4)

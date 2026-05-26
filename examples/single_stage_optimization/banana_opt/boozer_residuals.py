@@ -88,6 +88,12 @@ class RefinedBoozerResidual(Optimizable):
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
         self.grid_multiplier = grid_multiplier
+        if include_label_constraint and boozer_surface.constraint_weight is None:
+            raise ValueError(
+                "Boozer residual label constraints require a numeric "
+                "constraint_weight. Exact-constrained Boozer surfaces must set "
+                "include_label_constraint=False."
+            )
         self.include_label_constraint = include_label_constraint
         self.weight_inv_modB = weight_inv_modB
         self.threshold = float(threshold)
@@ -257,6 +263,6 @@ class BoozerResidualExact(RefinedBoozerResidual):
             boozer_surface,
             bs,
             grid_multiplier=4,
-            include_label_constraint=True,
+            include_label_constraint=boozer_surface.constraint_weight is not None,
             weight_inv_modB=True,
         )

@@ -34,6 +34,10 @@ from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
     BANANA_CURRENT_MODE_INDEPENDENT,
     BANANA_CURRENT_MODE_SHARED,
 )
+from banana_opt.hardware_contracts import (  # noqa: E402
+    COIL_COIL_MIN_DIST_M,
+    COIL_PLASMA_MIN_DIST_M,
+)
 from alm_utils import (  # noqa: E402
     require_positive_alm_threshold,
     validate_alm_cli_args,
@@ -180,8 +184,8 @@ def parse_args() -> argparse.Namespace:
             "artifact predates that metadata field."
         ),
     )
-    parser.add_argument("--cc-dist", type=float, default=0.05)
-    parser.add_argument("--cs-dist", type=float, default=0.015)
+    parser.add_argument("--cc-dist", type=float, default=COIL_COIL_MIN_DIST_M)
+    parser.add_argument("--cs-dist", type=float, default=COIL_PLASMA_MIN_DIST_M)
     parser.add_argument("--curvature-threshold", type=float, default=100.0)
     parser.add_argument(
         "--hardware-search-mode",
@@ -213,6 +217,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alm-trust-radius-shrink", type=float, default=0.5)
     parser.add_argument("--alm-trust-radius-grow", type=float, default=1.5)
     parser.add_argument("--alm-max-inner-attempts", type=int, default=4)
+    parser.add_argument(
+        "--alm-fix-signal-mismatch-guard",
+        action="store_true",
+        default=False,
+        help=(
+            "Forward the single-stage ALM signal-mismatch continuation repair "
+            "flag. The child solver runs with inherited ALM_* env stripped, so "
+            "this CLI flag is the explicit SSOT."
+        ),
+    )
     parser.add_argument("--alm-distance-smoothing", type=float, default=0.005)
     parser.add_argument("--alm-curvature-smoothing", type=float, default=0.05)
     parser.add_argument(
@@ -370,6 +384,8 @@ def build_single_stage_thresholded_physics_command(
         "--alm-length-penalty-threshold",
         str(args.alm_length_penalty_threshold),
     ]
+    if args.alm_fix_signal_mismatch_guard:
+        command.append("--alm-fix-signal-mismatch-guard")
     if equilibria_dir is not None:
         command.extend(["--equilibria-dir", str(equilibria_dir)])
     append_single_stage_handoff_flags(command, args)

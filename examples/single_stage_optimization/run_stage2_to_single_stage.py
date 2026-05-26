@@ -186,6 +186,16 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         help="Optional Stage 2 generation basin-hopping seed override.",
     )
     parser.add_argument(
+        "--alm-fix-signal-mismatch-guard",
+        action="store_true",
+        default=False,
+        help=(
+            "Forward the ALM signal-mismatch continuation repair flag into "
+            "generated Stage 2 donors, bounded recovery, and the final "
+            "single-stage run."
+        ),
+    )
+    parser.add_argument(
         "--recovery-output-root",
         "--repair-output-root",
         dest="recovery_output_root",
@@ -328,6 +338,7 @@ def build_stage2_generation_args(
         stage2_iota_ntheta=32,
         stage2_iota_mpol=8,
         stage2_iota_ntor=6,
+        alm_fix_signal_mismatch_guard=args.alm_fix_signal_mismatch_guard,
     )
 
 
@@ -603,6 +614,7 @@ def build_pre_boozer_stage2_repair_config(
         alm_max_subproblem_continuations=args.alm_max_subproblem_continuations,
         alm_distance_smoothing=args.alm_distance_smoothing,
         alm_curvature_smoothing=args.alm_curvature_smoothing,
+        alm_fix_signal_mismatch_guard=args.alm_fix_signal_mismatch_guard,
         banana_init_current_A=_required_stage2_float(
             original_stage2_results,
             "BANANA_INIT_CURRENT_A",
@@ -744,6 +756,7 @@ def build_recovery_command(
         alm_max_inner_attempts=args.alm_max_inner_attempts,
         alm_distance_smoothing=args.alm_distance_smoothing,
         alm_curvature_smoothing=args.alm_curvature_smoothing,
+        alm_fix_signal_mismatch_guard=args.alm_fix_signal_mismatch_guard,
         alm_qs_threshold=(
             recovery_runner.DEFAULT_ALM_QS_THRESHOLD
             if args.alm_qs_threshold is None

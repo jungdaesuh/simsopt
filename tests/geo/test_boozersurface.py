@@ -172,6 +172,33 @@ class BoozerSurfaceTests(unittest.TestCase):
         self.assertEqual(res["iota"], expected_iota)
         self.assertEqual(res["G"], 2.0)
 
+    def test_finite_current_exact_newton_singular_direction_raises(self):
+        boozer_surface = self._make_synthetic_exact_finite_i_newton_surface()
+        surface = boozer_surface.surface
+        residual_size = 3 * surface.quadpoints_phi.size * surface.quadpoints_theta.size
+
+        def residual_finite_I(surface, iota, G, biotsavart, derivatives, I):
+            residual = np.ones(residual_size)
+            jacobian = np.zeros((residual_size, surface.get_dofs().size + 2))
+            return residual, jacobian
+
+        with patch(
+            "banana_opt.boozer_finite_current.boozer_surface_residual_finite_I",
+            side_effect=residual_finite_I,
+        ), patch("banana_opt.boozer_finite_current.lu", return_value=(None, None, None)), patch(
+            "banana_opt.boozer_finite_current.forward_solve",
+            side_effect=np.linalg.LinAlgError("singular matrix"),
+        ):
+            with self.assertRaisesRegex(np.linalg.LinAlgError, "singular matrix"):
+                boozer_surface.solve_residual_equation_exactly_newton(
+                    tol=1.0e-12,
+                    maxiter=1,
+                    iota=0.0,
+                    G=2.0,
+                )
+
+        self.assertTrue(boozer_surface.need_to_run_code)
+
     def _assert_directional_fd_convergence(self, f, coeffs, direction, directional_derivative):
         err_old = 1e9
         epsilons = np.power(2., -np.asarray(range(11, 18)))

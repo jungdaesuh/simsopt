@@ -43,28 +43,28 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
         doc_path = repo_root / "docs" / "alm_hybrid_signal_contract_2026-05-08.md"
         doc = doc_path.read_text(encoding="utf-8")
         citations = {
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2446-2453": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2599-2606": (
                 "augmented_inequality_objective("
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2454-2482": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2611-2639": (
                 '"hard_dual_update_values"'
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2468-2476": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2621-2628": (
                 '"raw_dual_update_values"'
             ),
             "examples/single_stage_optimization/alm_utils.py:2197-2249": (
                 "def _extract_stage2_constraint_signal_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:3384-3402": (
+            "examples/single_stage_optimization/alm_utils.py:3414-3430": (
                 "routing_state.signal_state.preferred_dual_update_values"
             ),
             "examples/single_stage_optimization/alm_utils.py:2291-2349": (
                 "def _constraint_routing_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4558-4567": (
+            "examples/single_stage_optimization/alm_utils.py:4605-4614": (
                 "and not signal_mismatch_active"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4265-4278": (
+            "examples/single_stage_optimization/alm_utils.py:4301-4314": (
                 "and not run_state.last_cap_binding_active"
             ),
         }
@@ -1513,6 +1513,15 @@ class AlmNormalizeRunInputsValidationTests(unittest.TestCase):
                     rf"ALMSettings\.{field} must be an integer",
                 ):
                     self._settings(module, **{field: 1.5})
+
+    def test_settings_construction_rejects_non_bool_signal_mismatch_flag(self):
+        module = load_alm_utils_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ALMSettings\.continue_on_signal_mismatch must be bool",
+        ):
+            self._settings(module, continue_on_signal_mismatch="false")
 
     def test_normalize_rejects_nonfinite_initial_penalty(self):
         module = load_alm_utils_module()
@@ -3024,6 +3033,242 @@ class MinimizeAlmTests(unittest.TestCase):
         for action in first_actions:
             self.assertNotIn(action, forbidden_actions)
 
+    @staticmethod
+    def _signal_mismatch_boundary_evaluation_factory(_test):
+        """Stage-2-signal fixture engineered to land in the post-inner
+        ``signal_mismatch_active and hard_feasible_for_update`` branch
+        with the dual-update gate FAILING on stationarity.
+
+        Construction:
+        - hard violation 0.0, hard signed -1e-2 (negative under
+          activity tolerance) -> ``hard_feasible_for_update`` True,
+          hard activity mask False.
+        - surrogate signed 0.05 positive (small enough to fall under
+          ``effective_feasibility_tol``) -> surrogate activity mask True
+          via ``_constraint_activity_mask``;
+          ``surrogate_positive_shift = 10*0.05 = 0.5 > 0``.
+        - Hard / surrogate masks disagree -> ``signal_mismatch_active``
+          True. Coupled with ``hard_feasible_under_gate`` and surrogate
+          positive shift, ``direct_boundary_mismatch`` also fires.
+        - ``feasibility_values = 0.05 <= effective_feasibility_tol``
+          so ``_classify_infeasible_inner_stall`` does NOT mark the
+          subsequent stationary inner calls as ``forced_infeasible_
+          penalty_cycle``. This keeps the post-inner branch reaching
+          the signal-mismatch continuation arm instead of the infeasible-
+          stall penalty arm.
+        - ``constraint_grads=[0.0]`` cannot span ``base_grad=[1.0]``,
+          so ``_surrogate_kkt_stationarity_norm`` is 1.0 >>
+          ``update_stationarity_tol = 1/penalty_init = 0.1``, forcing
+          the dual-update gate to FAIL on the stationarity
+          condition even though hard feasibility is satisfied. This pins
+          the boundary where the opt-in flag may continue the inner
+          subproblem but must not fire a dual update.
+        """
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return _test._stage2_signal_evaluation(
+                total=1.0,
+                grad=np.array([1.0]),
+                base_grad=np.array([1.0]),
+                # Surrogate values must be below ``effective_feasibility_tol``
+                # = max(feasibility_tol, min(update_feasibility_tol,
+                # relaxed_feasibility_gate_cap=1e-2)) so the inner
+                # candidate is not classified as forced_infeasible_penalty_cycle.
+                constraint_values=np.array([5.0e-3]),
+                dual_update_values=np.array([5.0e-3]),
+                feasibility_values=np.array([5.0e-3]),
+                hard_signed_constraint_values=np.array([-1.0e-2]),
+                hard_violation_values=np.array([0.0]),
+                surrogate_signed_constraint_values=np.array([5.0e-3]),
+                hard_dual_update_values=np.array([-1.0e-2]),
+                # Zero gradient on constraint so the surrogate KKT
+                # residual cannot collapse and the stationarity
+                # gate fails. This is what reproduces the production
+                # bug pattern.
+                constraint_grads=[np.array([0.0])],
+                constraint_activity_tolerances=np.array([1.0e-3]),
+                stationarity_norm=1.0,
+            )
+        return evaluate_problem
+
+    @staticmethod
+    def _signal_mismatch_boundary_fake_minimize_factory():
+        """Inner-solve stub for the signal-mismatch boundary fixture.
+
+        Reports ``success=True`` on every call so the post-inner branch
+        is not routed through ``inner_attempt.forced_infeasible_penalty_cycle``
+        before signal-mismatch routing. The first call advances x by 1.0;
+        subsequent calls hold position, so the run is feasible-but-stuck under
+        sustained mismatch, the exact condition that fires the signal-mismatch
+        arm in the legacy path.
+        """
+        call_count = {"count": 0}
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            call_count["count"] += 1
+            if call_count["count"] == 1:
+                return SimpleNamespace(
+                    x=np.array([1.0]),
+                    nit=1,
+                    success=True,
+                    message="CONVERGENCE",
+                )
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float).copy(),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        return fake_minimize
+
+    def test_signal_mismatch_flag_extends_continuation_without_dual_update_when_stationarity_fails(self):
+        """The signal-mismatch repair flag must not bypass stationarity.
+
+        In this boundary case the hard channel is feasible and the surrogate
+        carries a live positive shift, but the surrogate KKT residual is large
+        enough that the documented dual-update stationarity gate fails. The
+        flag may keep the bounded inner-continuation path alive; it must not
+        route through ``_handle_alm_dual_update_transition``.
+        """
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            max_subproblem_continuations=2,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=1,
+            penalty_init=10.0,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            continue_on_signal_mismatch=True,
+        )
+
+        with patch.object(
+            module,
+            "minimize",
+            side_effect=self._signal_mismatch_boundary_fake_minimize_factory(),
+        ):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                self._signal_mismatch_boundary_evaluation_factory(self),
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        actions = [entry["action"] for entry in result.history]
+        self.assertIn("subproblem_continue", actions)
+        self.assertNotIn("dual_update", actions)
+        self.assertNotIn("signal_mismatch_penalty_increase", actions)
+        self.assertTrue(
+            any(
+                entry.get("signal_mismatch_continuation_repair")
+                for entry in result.history
+            )
+        )
+
+        # Mismatch must still be flagged in history (preserves the
+        # success-labeling guard semantics).
+        self.assertTrue(
+            all(entry["signal_mismatch_active"] for entry in result.history)
+        )
+
+        # False-success protection: the converged arm still consumes
+        # ``not signal_mismatch_active``, so the run must not be labeled a
+        # success.
+        self.assertFalse(result.success)
+
+    def test_signal_mismatch_flag_respects_max_subproblem_continuations(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            max_subproblem_continuations=0,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=1,
+            penalty_init=10.0,
+            penalty_scale=2.0,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            continue_on_signal_mismatch=True,
+        )
+
+        with patch.object(
+            module,
+            "minimize",
+            side_effect=self._signal_mismatch_boundary_fake_minimize_factory(),
+        ):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                self._signal_mismatch_boundary_evaluation_factory(self),
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        actions = [entry["action"] for entry in result.history]
+        self.assertIn("signal_mismatch_subproblem_limit_penalty_increase", actions)
+        self.assertNotIn("subproblem_continue", actions)
+        self.assertEqual(
+            result.history[0]["subproblem_limit_reason"],
+            "max_subproblem_continuations",
+        )
+        self.assertGreater(result.penalty, settings.penalty_init)
+        self.assertFalse(result.success)
+
+    def test_signal_mismatch_arm_preserves_penalty_increase_when_flag_disabled(self):
+        """Regression: with the opt-in flag OFF (the default), the
+        documented legacy behavior survives unchanged. The same boundary
+        fixture as the flag-on test routes through the
+        ``signal_mismatch_penalty_increase`` arm and does not fire
+        ``dual_update``.
+        """
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            max_subproblem_continuations=2,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=1,
+            penalty_init=10.0,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            # Explicit default to make the regression intent visible.
+            continue_on_signal_mismatch=False,
+        )
+
+        with patch.object(
+            module,
+            "minimize",
+            side_effect=self._signal_mismatch_boundary_fake_minimize_factory(),
+        ):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                self._signal_mismatch_boundary_evaluation_factory(self),
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        actions = [entry["action"] for entry in result.history]
+        # Legacy behavior: no dual update fires under the mismatch arm;
+        # the run instead routes through the penalty-increase path.
+        self.assertNotIn("dual_update", actions)
+        self.assertIn("signal_mismatch_penalty_increase", actions)
+        self.assertFalse(result.success)
+        # Multipliers stay at zero because the legacy penalty-increase
+        # arm only doubles ``rho`` (mu untouched). This is the
+        # multiplier-zero plateau pattern from the production bug.
+        np.testing.assert_allclose(result.multipliers, np.zeros(1))
+
     def test_minimize_alm_increases_penalty_only_when_feasibility_is_bad(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
@@ -3178,6 +3423,10 @@ class MinimizeAlmTests(unittest.TestCase):
             )
 
         def history_callback(history, latest_entry, multipliers, penalty):
+            history[-1]["action"] = "mutated_by_callback_history"
+            history[-1]["constraint_values"][0] = 99.0
+            latest_entry["action"] = "mutated_by_callback_latest"
+            latest_entry["constraint_values"][0] = 88.0
             history_snapshots.append(
                 {
                     "history": history,
@@ -3207,19 +3456,15 @@ class MinimizeAlmTests(unittest.TestCase):
         np.testing.assert_allclose(result.history[0]["post_update_multipliers"], [0.0])
         self.assertTrue(result.history[0]["infeasible_stall"])
         self.assertEqual(result.history[0]["inner_attempts"], 1)
-        # L2: callback receives a defensive copy of the history list (not
-        # the live ALM-internal list). The outer list identity must
-        # differ; entries within remain shared references and may have
-        # been mutated by ALM after the snapshot was taken (e.g., the
-        # final action annotation), so a per-iteration value-equality
-        # check against `result.history` is not appropriate. The length
-        # at callback time is at most the final length.
+        # L2: callback receives owned history entries, not the live
+        # ALM-internal dicts. Mutating the callback payload must not corrupt
+        # result.history.
         self.assertIsNot(history_snapshots[-1]["history"], result.history)
         self.assertLessEqual(
             len(history_snapshots[-1]["history"]), len(result.history)
         )
         self.assertIsNot(history_snapshots[-1]["latest_entry"], result.history[0])
-        self.assertTrue(history_snapshots[-1]["history_had_deferred_source"])
+        self.assertFalse(history_snapshots[-1]["history_had_deferred_source"])
         self.assertNotIn(source_key, result.history[0])
         self.assertNotIn(
             source_key,
@@ -3227,11 +3472,12 @@ class MinimizeAlmTests(unittest.TestCase):
         )
         self.assertEqual(
             history_snapshots[-1]["latest_entry"]["action"],
-            "infeasible_stall_penalty_increase",
+            "mutated_by_callback_latest",
         )
-        self.assertEqual(history_snapshots[-1]["latest_entry"]["outer_termination"], "max_outer")
-        history_snapshots[-1]["latest_entry"]["action"] = "mutated_by_callback_owner"
-        history_snapshots[-1]["latest_entry"]["constraint_values"][0] = 99.0
+        self.assertEqual(
+            history_snapshots[-1]["history"][0]["action"],
+            "mutated_by_callback_history",
+        )
         self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
         self.assertEqual(result.history[0]["constraint_values"], [2.0])
 
@@ -5541,6 +5787,79 @@ class ClassifyInfeasibleInnerStallTests(unittest.TestCase):
         self.assertFalse(infeasible_stall)
         self.assertFalse(false_success)
         self.assertIsNone(reason)
+
+
+class RunAlmInnerAttemptFalseSuccessTests(unittest.TestCase):
+    def test_false_success_stall_retries_with_grown_trust_radius(self):
+        module = load_alm_utils_module()
+        current_eval = _complete_alm_evaluation({
+            "total": 1.0,
+            "grad": np.array([0.0]),
+            "constraint_values": np.array([2.0e-2]),
+        })
+
+        def evaluate_problem(x, multipliers, penalty):
+            del multipliers, penalty
+            if np.allclose(x, np.zeros_like(x)):
+                return current_eval
+            return _complete_alm_evaluation({
+                "total": 0.5,
+                "grad": np.array([0.0]),
+                "constraint_values": np.array([-1.0e-2]),
+            })
+
+        calls = []
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, x, jac, method, callback, options
+            calls.append(bounds)
+            if len(calls) == 1:
+                return SimpleNamespace(
+                    x=np.array([0.0]),
+                    nit=0,
+                    success=True,
+                    message="CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+                )
+            return SimpleNamespace(
+                x=np.array([0.15]),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        request = module.ALMInnerAttemptRequest(
+            x=np.array([0.0]),
+            current_eval=current_eval,
+            multipliers=np.zeros(1),
+            penalty_argument=1.0,
+            evaluate_problem=evaluate_problem,
+            inner_options={"maxiter": 5, "ftol": 1.0e-12, "gtol": 1.0e-12},
+            settings=module.ALMSettings(
+                max_inner_attempts=2,
+                trust_radius_init=0.1,
+                trust_radius_grow=2.0,
+            ),
+            continuation_iteration=0,
+            trust_radius=0.1,
+            current_max_feasibility_violation=2.0e-2,
+            update_feasibility_tol=1.0e-3,
+            update_stationarity_tol=1.0e-6,
+            effective_feasibility_tol=1.0e-3,
+            inner_callback=None,
+            constraint_names_tuple=("poloidal_extent",),
+            constraint_blocks_tuple=None,
+        )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module._run_alm_inner_attempts(request)
+
+        self.assertEqual(result.attempts, 2)
+        self.assertFalse(result.forced_infeasible_penalty_cycle)
+        self.assertFalse(result.forced_inner_false_success)
+        self.assertAlmostEqual(result.x[0], 0.15)
+        self.assertAlmostEqual(result.trust_radius, 0.4)
+        self.assertEqual(calls[0], [(-0.1, 0.1)])
+        self.assertEqual(calls[1], [(-0.2, 0.2)])
 
 
 class SkippedInnerShortcutTests(unittest.TestCase):

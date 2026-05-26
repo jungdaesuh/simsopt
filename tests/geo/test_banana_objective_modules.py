@@ -2386,7 +2386,12 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
 
         def fake_warm_start_loader(path):
             calls["warm_start_path"] = path
-            return SimpleNamespace(surface=warm_start_surface, iota=0.17654321, G=-2.0)
+            return SimpleNamespace(
+                surface=warm_start_surface,
+                iota=0.17654321,
+                G=0.35,
+                has_solved_state=True,
+            )
 
         def fake_attempt_initialize(
             surf_prev,
@@ -2436,7 +2441,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             stage2_seed_surf_path="/tmp/warm_surface.json",
             build_surface_configs_fn=fail_build_surface_configs,
             attempt_initialize_boozer_surface_fn=fake_attempt_initialize,
-            derive_signed_G_fn=lambda _bs, *, tf_coils: 0.35,
+            derive_signed_G_fn=lambda _bs, *, tf_coils: -0.35,
             warm_start_loader=fake_warm_start_loader,
             iotas_cls=lambda _surface: SimpleNamespace(J=lambda: 0.21),
             quadratic_penalty_cls=lambda term, target: SimpleNamespace(
@@ -2452,7 +2457,93 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(calls["nfp"], 7)
         self.assertAlmostEqual(calls["target_volume"], 0.12)
         self.assertAlmostEqual(calls["iota"], 0.17654321)
-        self.assertAlmostEqual(calls["G0"], -2.0)
+        self.assertAlmostEqual(calls["G0"], 0.35)
+
+    def test_build_stage2_iota_runtime_rebuilds_when_warm_start_has_no_solved_state(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, -0.35)
+        warm_start_surface = SimpleNamespace(nfp=7)
+        cold_surface = SimpleNamespace(nfp=5)
+        calls = {}
+
+        def fake_build_surface_configs(*_args):
+            calls["built_cold_surface"] = True
+            return [{"initial_surface": cold_surface, "target_volume": 0.12}]
+
+        def fake_warm_start_loader(path):
+            calls["warm_start_path"] = path
+            return SimpleNamespace(
+                surface=warm_start_surface,
+                iota=0.17654321,
+                G=None,
+                has_solved_state=False,
+            )
+
+        def fake_attempt_initialize(
+            surf_prev,
+            _mpol,
+            _ntor,
+            _bs,
+            vol_target,
+            _constraint_weight,
+            iota,
+            G0,
+            *,
+            initial_surface_guess,
+            nfp,
+        ):
+            calls["surf_prev"] = surf_prev
+            calls["target_volume"] = vol_target
+            calls["iota"] = iota
+            calls["G0"] = G0
+            calls["initial_surface_guess"] = initial_surface_guess
+            calls["nfp"] = nfp
+            return SimpleNamespace(
+                success=True,
+                boozer_surface=fake_boozer_surface,
+                solve_success=True,
+                self_intersecting=False,
+                solved_iota=0.21,
+                error_type=None,
+                error_message=None,
+            )
+
+        runtime = self.module.build_stage2_iota_runtime(
+            equilibrium_file="demo.nc",
+            bs=SimpleNamespace(),
+            tf_coils=[object(), object()],
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            nphi=91,
+            ntheta=32,
+            mpol=8,
+            ntor=6,
+            vol_target=0.12,
+            iota_target=0.2,
+            iota_tolerance=5.0e-3,
+            constraint_weight=None,
+            num_tf_coils=2,
+            mode="report",
+            stage2_seed_surf_path="/tmp/surface_only.json",
+            build_surface_configs_fn=fake_build_surface_configs,
+            attempt_initialize_boozer_surface_fn=fake_attempt_initialize,
+            derive_signed_G_fn=lambda _bs, *, tf_coils: -0.35,
+            warm_start_loader=fake_warm_start_loader,
+            iotas_cls=lambda _surface: SimpleNamespace(J=lambda: 0.21),
+            quadratic_penalty_cls=lambda term, target: SimpleNamespace(
+                J=lambda: 0.5 * (term.J() - target) ** 2,
+                dJ=lambda: np.array([0.2, -0.1], dtype=float),
+            ),
+        )
+
+        self.assertAlmostEqual(runtime.initial_state.iota, 0.21)
+        self.assertEqual(calls["warm_start_path"], "/tmp/surface_only.json")
+        self.assertTrue(calls["built_cold_surface"])
+        self.assertIs(calls["surf_prev"], cold_surface)
+        self.assertIsNone(calls["initial_surface_guess"])
+        self.assertEqual(calls["nfp"], 5)
+        self.assertAlmostEqual(calls["target_volume"], 0.12)
+        self.assertAlmostEqual(calls["iota"], 0.2)
+        self.assertAlmostEqual(calls["G0"], -0.35)
 
     def test_stage2_iota_alm_floor_does_not_penalize_iota_above_floor(self):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.23, 0.35)
@@ -2953,6 +3044,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 alm_trust_radius_shrink=0.4,
                 alm_trust_radius_grow=1.8,
                 alm_max_inner_attempts=5,
+                alm_fix_signal_mismatch_guard=False,
             )
         )
 
@@ -2986,6 +3078,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             alm_max_inner_attempts=5,
             alm_distance_smoothing=0.005,
             alm_curvature_smoothing=0.05,
+            alm_fix_signal_mismatch_guard=True,
             alm_taylor_test=True,
             alm_taylor_test_seed=123,
         )
@@ -3101,6 +3194,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertFalse(result["HARDWARE_CONSTRAINTS_OK"])
         self.assertEqual(result["HARDWARE_CONSTRAINT_VIOLATIONS"], ["too_curved"])
         self.assertEqual(result["ALM_MAX_OUTER_ITERS"], 7)
+        self.assertTrue(result["ALM_FIX_SIGNAL_MISMATCH_GUARD"])
         self.assertEqual(result["ALM_OUTER_ITERATIONS"], 4)
         self.assertEqual(result["ALM_FINAL_TRUST_RADIUS"], 0.125)
         self.assertEqual(result["ALM_SCHEMA_VERSION"], ALM_SCHEMA_VERSION)
@@ -3713,6 +3807,10 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["objective_value_kinds"], ["hard", "hard", "hard"])
         self.assertEqual(result["gradient_value_kinds"], ["hard", "hard", "hard"])
         self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard", "hard"])
+        self.assertAlmostEqual(result["J_coil_width"], 0.12)
+        np.testing.assert_allclose(result["dJ_coil_width"], [0.2, 0.0])
+        self.assertAlmostEqual(result["J_self_intersect"], 0.003)
+        np.testing.assert_allclose(result["dJ_self_intersect"], [0.0, 0.4])
 
     def test_evaluate_alm_objective_accepts_real_width_and_self_intersect_objectives(self):
         ellipse_module = _load_module(ELLIPSE_WIDTH_PATH, "banana_ellipse_width_real")
@@ -3967,11 +4065,10 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             gamma_points=[[0.876, 0.0, 0.0]],
             kappa_values=[5.0],
         )
-        JPoloidalExtent = SimpleNamespace(
-            curve=curve,
-            R_winding=0.976,
-            Z_winding=0.0,
-        )
+        JPoloidalExtent = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        JPoloidalExtent.curve = curve
+        JPoloidalExtent.R_winding = 0.976
+        JPoloidalExtent.Z_winding = 0.0
 
         def fake_augmented(
             base_value,
@@ -5029,6 +5126,167 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         )
         self.assertEqual(result, {"success": True})
 
+    def test_evaluate_surface_stack_checks_adjacent_nesting_pairs(self):
+        class _FakeSurface:
+            def __init__(self, volume):
+                self._volume = float(volume)
+
+            def volume(self):
+                return self._volume
+
+            def is_self_intersecting(self):
+                return False
+
+            def cross_section(self, *_args, **_kwargs):
+                return np.zeros((4, 3))
+
+        def _entry(name, volume, iota):
+            return {
+                "name": name,
+                "boozer_surface": SimpleNamespace(
+                    surface=_FakeSurface(volume),
+                    res={"iota": iota, "success": True},
+                ),
+            }
+
+        surface_data = [
+            _entry("inner0", 1.0, 0.1),
+            _entry("inner1", 2.0, 0.2),
+            _entry("outer", 3.0, 0.3),
+        ]
+
+        with mock.patch.object(
+            self.module,
+            "surface_pointcloud_gap",
+            return_value=0.1,
+        ), mock.patch.object(
+            self.module,
+            "cross_sections_are_nested",
+            side_effect=[(True, []), (False, [0.25])],
+        ) as nested_mock:
+            result = self.module.evaluate_surface_stack(
+                surface_data,
+                surface_gap_threshold=0.0,
+                enforce_nesting=True,
+            )
+
+        self.assertFalse(result["success"])
+        self.assertFalse(result["nesting_ok"])
+        self.assertEqual(result["bad_nesting_phis"], [0.25])
+        self.assertEqual(
+            result["bad_nesting_pairs"],
+            [
+                {
+                    "inner_index": 1,
+                    "outer_index": 2,
+                    "inner_name": "inner1",
+                    "outer_name": "outer",
+                    "bad_phis": [0.25],
+                }
+            ],
+        )
+        self.assertEqual(nested_mock.call_count, 2)
+
+    def test_evaluate_surface_stack_marks_goes_back_nesting_pair_invalid(self):
+        class _FakeSurface:
+            def __init__(self, volume):
+                self._volume = float(volume)
+
+            def volume(self):
+                return self._volume
+
+            def is_self_intersecting(self):
+                return False
+
+            def cross_section(self, *_args, **_kwargs):
+                return np.zeros((4, 3))
+
+        def _entry(name, volume, iota):
+            return {
+                "name": name,
+                "boozer_surface": SimpleNamespace(
+                    surface=_FakeSurface(volume),
+                    res={"iota": iota, "success": True},
+                ),
+            }
+
+        surface_data = [
+            _entry("inner", 1.0, 0.1),
+            _entry("outer", 2.0, 0.2),
+        ]
+
+        with mock.patch.object(
+            self.module,
+            "surface_pointcloud_gap",
+            return_value=0.1,
+        ), mock.patch.object(
+            self.module,
+            "cross_sections_are_nested",
+            side_effect=RuntimeError("surface 'goes back' on itself"),
+        ):
+            result = self.module.evaluate_surface_stack(
+                surface_data,
+                surface_gap_threshold=0.0,
+                enforce_nesting=True,
+            )
+
+        self.assertFalse(result["success"])
+        self.assertFalse(result["nesting_ok"])
+        self.assertEqual(result["bad_nesting_phis"], [])
+        self.assertEqual(
+            result["bad_nesting_pairs"],
+            [
+                {
+                    "inner_index": 0,
+                    "outer_index": 1,
+                    "inner_name": "inner",
+                    "outer_name": "outer",
+                    "bad_phis": [],
+                }
+            ],
+        )
+
+    def test_evaluate_surface_stack_reraises_unexpected_nesting_error(self):
+        surface_data = [
+            {
+                "name": "inner",
+                "boozer_surface": SimpleNamespace(
+                    surface=SimpleNamespace(
+                        volume=lambda: 1.0,
+                        is_self_intersecting=lambda: False,
+                        cross_section=lambda *_args, **_kwargs: np.zeros((4, 3)),
+                    ),
+                    res={"iota": 0.1, "success": True},
+                ),
+            },
+            {
+                "name": "outer",
+                "boozer_surface": SimpleNamespace(
+                    surface=SimpleNamespace(
+                        volume=lambda: 2.0,
+                        is_self_intersecting=lambda: False,
+                        cross_section=lambda *_args, **_kwargs: np.zeros((4, 3)),
+                    ),
+                    res={"iota": 0.2, "success": True},
+                ),
+            },
+        ]
+
+        with mock.patch.object(
+            self.module,
+            "surface_pointcloud_gap",
+            return_value=0.1,
+        ), mock.patch.object(
+            self.module,
+            "cross_sections_are_nested",
+            side_effect=RuntimeError("unexpected cross-section bug"),
+        ), self.assertRaisesRegex(RuntimeError, "unexpected cross-section bug"):
+            self.module.evaluate_surface_stack(
+                surface_data,
+                surface_gap_threshold=0.0,
+                enforce_nesting=True,
+            )
+
     def test_continuation_inner_surface_weight_validates_and_ramps(self):
         self.assertEqual(
             self.module.continuation_inner_surface_weight(1, 0, 5, 0.2),
@@ -5196,6 +5454,36 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             result["search_hardware_status"]["constraints"],
         )
 
+    def test_evaluate_single_stage_search_hardware_snapshot_uses_raw_alm_residuals(
+        self,
+    ):
+        result = self.module.evaluate_single_stage_search_hardware_snapshot(
+            {
+                "constraint_names": [
+                    "coil_coil_spacing",
+                    "coil_surface_spacing",
+                    "max_curvature",
+                    "banana_current_upper_bound",
+                ],
+                "dual_update_values": np.array(
+                    [1.024514, 21.270667, -0.00018, -0.03125]
+                ),
+                "raw_dual_update_values": np.array([-0.002, -0.074, -0.018, -500.0]),
+                "search_hardware_constraint_payload_kind": "signed_residual",
+            },
+            cc_dist=0.05,
+            cs_dist=0.015,
+            ss_dist=0.04,
+            curvature_threshold=100.0,
+            banana_current_max_A=1.6e4,
+        )
+
+        self.assertAlmostEqual(result["curve_curve_min_dist"], 0.052)
+        self.assertAlmostEqual(result["curve_surface_min_dist"], 0.089)
+        self.assertAlmostEqual(result["max_curvature"], 99.982)
+        self.assertAlmostEqual(result["banana_current_A"], 1.55e4)
+        self.assertTrue(result["search_hardware_status"]["success"])
+
     def test_evaluate_single_stage_search_hardware_snapshot_uses_independent_banana_current_residuals(
         self,
     ):
@@ -5244,6 +5532,54 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
                 curvature_threshold=40.0,
                 banana_current_max_A=1.6e4,
             )
+
+    def test_evaluate_single_stage_search_hardware_snapshot_uses_lcfs_alm_residuals(
+        self,
+    ):
+        result = self.module.evaluate_single_stage_search_hardware_snapshot(
+            {
+                "constraint_names": [
+                    "coil_coil_spacing",
+                    "coil_surface_spacing",
+                    "max_curvature",
+                    "lcfs_major_radius",
+                    "lcfs_minor_radius",
+                ],
+                "dual_update_values": np.array([0.0, 0.0, 0.0, 1.0e-4, 2.0e-4]),
+                "raw_dual_update_values": np.array(
+                    [-0.002, -0.074, -0.018, 0.006, 0.003]
+                ),
+                "search_hardware_constraint_payload_kind": "signed_residual",
+            },
+            cc_dist=0.05,
+            cs_dist=0.015,
+            ss_dist=0.04,
+            curvature_threshold=100.0,
+        )
+
+        self.assertFalse(result["search_hardware_status"]["success"])
+        self.assertAlmostEqual(result["lcfs_major_radius_m"], 0.926)
+        self.assertAlmostEqual(result["lcfs_minor_radius_m"], 0.153)
+        self.assertIn(
+            "lcfs_major_radius",
+            result["search_hardware_status"]["constraints"],
+        )
+        self.assertIn(
+            "lcfs_minor_radius",
+            result["search_hardware_status"]["constraints"],
+        )
+        self.assertTrue(
+            any(
+                "lcfs_major_radius" in violation
+                for violation in result["violations"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "lcfs_minor_radius" in violation
+                for violation in result["violations"]
+            )
+        )
 
     def test_evaluate_single_stage_search_hardware_snapshot_uses_penalty_objective_payload(
         self,

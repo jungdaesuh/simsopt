@@ -822,6 +822,38 @@ class BoozerSurfaceFiniteI(BoozerSurface):
             if not s.stellsym:
                 rows.append(np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0.0, 0.0])))
             return np.vstack(rows)
+
+        def result_from_state(residual, jacobian, iteration, success, plu, message=None):
+            res = {
+                "residual": residual,
+                "jacobian": jacobian,
+                "iter": iteration,
+                "success": success,
+                "G": G,
+                "s": s,
+                "iota": iota,
+                "PLU": plu,
+                "mask": mask,
+                "type": "exact",
+                "weight_inv_modB": False,
+                # Wrap the upstream alpha-only vjp so it sees alpha = G + iota * I.
+                "vjp": partial(_exact_vjp_finite_I, self.I),
+            }
+            if message is not None:
+                res["message"] = message
+            res = self._annotate_current(res)
+
+            if verbose:
+                print(
+                    f"NEWTON solve - {res['success']}  iter={res['iter']}, iota={res['iota']:.16f}, "
+                    f"||residual||_inf = {np.linalg.norm(res['residual'], ord=np.inf):.3e}",
+                    flush=True,
+                )
+
+            self.res = res
+            self.need_to_run_code = False
+            return res
+
         x = np.concatenate((s.get_dofs(), [iota, G]))
         i = 0
         r, J = boozer_surface_residual_finite_I(
@@ -878,30 +910,4 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         J = constrained_jacobian(J)
 
         P, L, U = lu(J)
-        res = {
-            "residual": r,
-            "jacobian": J,
-            "iter": i,
-            "success": norm <= tol,
-            "G": G,
-            "s": s,
-            "iota": iota,
-            "PLU": (P, L, U),
-            "mask": mask,
-            "type": "exact",
-            "weight_inv_modB": False,
-            # Wrap the upstream alpha-only vjp so it sees alpha = G + iota * I.
-            "vjp": partial(_exact_vjp_finite_I, self.I),
-        }
-        res = self._annotate_current(res)
-
-        if verbose:
-            print(
-                f"NEWTON solve - {res['success']}  iter={res['iter']}, iota={res['iota']:.16f}, "
-                f"||residual||_inf = {np.linalg.norm(res['residual'], ord=np.inf):.3e}",
-                flush=True,
-            )
-
-        self.res = res
-        self.need_to_run_code = False
-        return res
+        return result_from_state(r, J, i, norm <= tol, (P, L, U))
