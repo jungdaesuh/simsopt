@@ -13,10 +13,15 @@ Implements the joint VMEC + coil objective from
        + volume_weight * (V - V_target)^2         (HBT extension)
     J2 = SquaredFlux(local)                        (paper Eq. 26)
        + omega_L         * sum QuadraticPenalty(L_i, L*)
+                         + sum QuadraticPenalty(L_i, 0.5 L*, "min")
        + omega_kappa_max * sum LpCurveCurvature(c_i, p=2, kappa*)
        + omega_kappa_msc * sum QuadraticPenalty(MSC(c_i), msc*)
        + omega_d         * CurveCurveDistance
        + omega_ell       * sum ArclengthVariation
+       + omega_current   * QuadraticPenalty(|I_banana|, I_max, "max")
+       + omega_width     * width-window hinge penalty
+       + omega_self      * CurveSelfIntersect
+       + omega_poloidal  * PoloidalExtent
 
 Gradient contract (plan section "Gradient contract"):
 
@@ -30,11 +35,9 @@ Gradient contract (plan section "Gradient contract"):
 Step-clamp barrier (plan section "Optimizer entrypoint"):
 the driver clamps proposed steps before any VMEC call. The clamp barrier
 is implemented in ``banana_drivers/04_vmec_singlestage_driver.py``, which
-wraps this bundle's ``J_and_grad`` and returns a finite quadratic-barrier
-value / gradient without running VMEC when the proposed ``x`` violates the
-boundary or coil clamp. **This module does not implement the clamp**; the
-bundle's ``J_scalar``, ``compute_grad``, and ``J_and_grad`` always run
-VMEC when called.
+wraps this bundle's ``J_and_grad`` and rejects out-of-clamp candidates without
+running VMEC. **This module does not implement the clamp**; the bundle's
+``J_scalar``, ``compute_grad``, and ``J_and_grad`` always run VMEC when called.
 
 This module is intentionally NOT a runnable script. The caller
 (``banana_drivers/04_vmec_singlestage_driver.py``) owns the MPI launch,
@@ -45,8 +48,10 @@ the step-clamp barrier, and the ``scipy.optimize.minimize`` call.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -57,16 +62,21 @@ EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if EXAMPLE_ROOT not in sys.path:
     sys.path.insert(0, EXAMPLE_ROOT)
 
-from simsopt._core.derivative import Derivative
+from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.finite_difference import MPIFiniteDifference
-from simsopt.field import BiotSavart, Current, coils_via_symmetries
+from simsopt._core.optimizable import Optimizable
+from simsopt._core.util import ObjectiveFailure
+from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
+from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import (
     ArclengthVariation,
     CurveCurveDistance,
+    CurveCWSFourierCPP,
     CurveLength,
     CurveSurfaceDistance,
     LpCurveCurvature,
     MeanSquaredCurvature,
+    SurfaceRZFourier,
     create_equally_spaced_curves,
 )
 from simsopt.mhd import QuasisymmetryRatioResidual, Vmec
@@ -79,12 +89,10 @@ from banana_opt.hardware_contracts import (
     BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR,
     BANANA_WIDTH_MAX_M,
     BANANA_WIDTH_MIN_M,
-    BANANA_WINDING_MINOR_RADIUS_M,
-    BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+    COIL_LENGTH_MIN_FRACTION,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
-    VACUUM_VESSEL_MAJOR_RADIUS_M,
 )
-from banana_opt.poloidal_extent import max_poloidal_extent_rad
+from banana_opt.poloidal_extent import PoloidalExtent, max_poloidal_extent_rad
 from banana_opt.self_intersect import CurveSelfIntersect
 
 from .vmec_single_stage_config import (
@@ -95,6 +103,7 @@ from .vmec_single_stage_config import (
 from .vmec_single_stage_exceptions import (
     IotaSurfaceTargetMiss,
     SeedZeroGradientTrap,
+    vmec_call_failure_from_objective_failure,
 )
 
 
@@ -103,11 +112,14 @@ class VmecSingleStageObjective:
     """Bundle returned by :func:`build_objective`.
 
     Exposes a single ``J_and_grad`` entrypoint so the scipy driver pays one
-    VMEC run per outer iteration (``scipy.optimize.minimize(..., jac=True)``
-    unpacks the ``(value, gradient)`` tuple from a single call). The legacy
-    ``J_scalar`` and ``compute_grad`` views are kept for unit tests but
-    they internally short-circuit to ``J_and_grad`` so they share the
-    cached VMEC run when called back-to-back on the same ``x``.
+    scalar-plus-gradient objective call per optimizer candidate
+    (``scipy.optimize.minimize(..., jac=True)`` unpacks the ``(value,
+    gradient)`` tuple from a single call). Boundary finite differences still
+    run VMEC for perturbed surfaces; ``vmec_call_counts`` reports the actual
+    base and finite-difference VMEC attempts. The legacy ``J_scalar`` and
+    ``compute_grad`` views are kept for unit tests but they internally
+    short-circuit to ``J_and_grad`` so they share the cached objective pair
+    when called back-to-back on the same ``x``.
 
     The driver's step-clamp lives in ``banana_drivers/04_vmec_singlestage_driver.py``;
     this module does not duplicate the clamp.
@@ -117,6 +129,8 @@ class VmecSingleStageObjective:
     J_scalar: Callable[[np.ndarray], float]
     compute_grad: Callable[[np.ndarray], np.ndarray]
     metrics_snapshot: Callable[[], Dict[str, object]]
+    vmec_call_counts: Callable[[], Dict[str, int]]
+    export_artifacts: Callable[[str, str], Dict[str, str]]
     dof_schema: Dict[str, object]
     x0: np.ndarray
     n_coil_dofs: int
@@ -124,6 +138,22 @@ class VmecSingleStageObjective:
     n_boundary_dofs: int
     coil_currents_slice: slice
     boundary_slice: slice
+
+
+class _CurrentMagnitude(Optimizable):
+    """Expose ``abs(current.get_value())`` as a differentiable scalar objective."""
+
+    def __init__(self, current) -> None:
+        Optimizable.__init__(self, x0=np.asarray([]), depends_on=[current])
+        self.current = current
+
+    def J(self) -> float:
+        return abs(float(self.current.get_value()))
+
+    @derivative_dec
+    def dJ(self):
+        sign = np.sign(float(self.current.get_value()))
+        return sign * self.current.vjp(np.array([1.0]))
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +204,9 @@ def assemble_dof_schema(
 
     Per plan section "Artifact Manifest", the schema must list:
         - coil-shape DOFs
-        - current DOFs (one pinned per paper page 7)
+        - current DOFs (banana-current DOFs only)
         - VMEC boundary DOFs
-        - fixed DOFs (at minimum ``RBC(0,0)`` and the pinned current index)
+        - fixed DOFs (at minimum ``RBC(0,0)`` and the fixed TF current)
         - vector ordering
         - units
 
@@ -187,8 +217,9 @@ def assemble_dof_schema(
     order so the schema is faithful even though the objective body does
     not slice between coil-shape and free-current DOFs.
 
-    The pinned current does *not* appear in ``current_dof_names``; it is
-    recorded under ``fixed_dofs.pinned_currents`` with the pinned value.
+    The fixed TF current does *not* appear in ``current_dof_names``; it is
+    recorded under ``fixed_dofs.pinned_currents`` with the fixed value for
+    manifest compatibility.
     """
 
     return {
@@ -276,18 +307,23 @@ class _ObjectiveBundle:
     Jal: List[ArclengthVariation]
     Jwidth: ProjectedEllipseWidth
     Jself: CurveSelfIntersect
+    Jpoloidal: PoloidalExtent
     JF: object  # composite J2 optimizable
     qs: QuasisymmetryRatioResidual
     base_curves: List[object]
-    base_currents: List[Current]
+    base_currents: List[object]
     curves: List[object]
     coils: List[object]
     config: VmecSingleStageConfig
     coil_currents_slice: slice
     boundary_slice: slice
     prior_axis: Optional[Tuple[np.ndarray, np.ndarray]]
+    last_base_input_file: Optional[str] = None
+    last_base_wout_file: Optional[str] = None
     _last_x_hash: Optional[bytes] = None
     _last_J_grad: Optional[Tuple[float, np.ndarray]] = None
+    n_vmec_base_calls: int = 0
+    n_vmec_boundary_fd_calls: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +390,24 @@ def _mixed_surface_derivative_local_squared_flux(
     return np.asarray(Derivative({surf: deriv})(surf), dtype=float)
 
 
+def _assign_vmec_schedule(vi, cfg: VmecSingleStageConfig) -> None:
+    """Assign the VMEC radial schedule, clearing stale seed entries first."""
+
+    if not (len(cfg.ns_array) == len(cfg.ftol_array) == len(cfg.niter_array)):
+        raise ValueError(
+            "VMEC schedule arrays must have matching lengths: "
+            f"ns={len(cfg.ns_array)}, ftol={len(cfg.ftol_array)}, "
+            f"niter={len(cfg.niter_array)}"
+        )
+    n_schedule = len(cfg.ns_array)
+    vi.ns_array[:] = 0
+    vi.ftol_array[:] = 0.0
+    vi.niter_array[:] = 0
+    vi.ns_array[:n_schedule] = np.asarray(cfg.ns_array, dtype=int)
+    vi.ftol_array[:n_schedule] = np.asarray(cfg.ftol_array, dtype=float)
+    vi.niter_array[:n_schedule] = np.asarray(cfg.niter_array, dtype=int)
+
+
 # ---------------------------------------------------------------------------
 # J1 and J2 component evaluators
 # ---------------------------------------------------------------------------
@@ -404,6 +458,24 @@ def _evaluate_dJ2_dxcoils(bundle: _ObjectiveBundle) -> np.ndarray:
     return np.asarray(bundle.JF.dJ(), dtype=float)
 
 
+class _BoundaryJ1FiniteDifferenceProblem(Optimizable):
+    """Optimizable adapter required by SIMSOPT ``MPIFiniteDifference``."""
+
+    def __init__(self, bundle: _ObjectiveBundle, run_vmec: Callable[[], None]) -> None:
+        x0 = np.asarray(bundle.surf.x, dtype=float).copy()
+        super().__init__(x0=x0, fixed=np.full(x0.size, False))
+        self._bundle = bundle
+        self._run_vmec = run_vmec
+
+    def objective(self) -> float:
+        self._bundle.surf.x = np.asarray(self.full_x, dtype=float)
+        self._bundle.vmec.need_to_run_code = True
+        self._run_vmec()
+        return _evaluate_J1(self._bundle)
+
+    return_fn_map = {"objective": objective}
+
+
 def _lcfs_radii(surface) -> Tuple[float, float]:
     gamma = surface.gamma().reshape((-1, 3))
     major_r = np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2)
@@ -421,35 +493,68 @@ def _build_coil_block(
     *,
     nfp: int,
     stellsym: bool,
-    R0: float,
-    R1: float,
-    ncoils: int,
-    nmodes_coils: int,
+    tf_num: int,
+    tf_R0: float,
+    tf_R1: float,
+    tf_order: int,
+    tf_current_A: float,
+    winding_surface_R0: float,
+    winding_surface_minor_radius: float,
+    banana_order: int,
+    banana_phi0: float,
+    banana_phi1: float,
+    banana_theta0: float,
+    banana_theta1: float,
+    banana_current_init_A: float,
     nquadpoints: int,
-    tf_current_pin_A: float,
-    pinned_current_coil_index: int,
-) -> Tuple[List[object], List[Current], List[object], List[object]]:
-    """Build base curves, base currents (one pinned), coils, curves."""
+) -> Tuple[List[object], List[object], List[object], List[object]]:
+    """Build fixed TF coils plus optimized banana master curve/current."""
 
-    base_curves = create_equally_spaced_curves(
-        ncoils,
-        nfp,
-        stellsym=stellsym,
-        R0=R0,
-        R1=R1,
-        order=nmodes_coils,
+    tf_curves = create_equally_spaced_curves(
+        int(tf_num),
+        1,
+        stellsym=False,
+        R0=float(tf_R0),
+        R1=float(tf_R1),
+        order=int(tf_order),
         numquadpoints=nquadpoints,
     )
-    base_currents = [Current(1.0) * 1.0e5 for _ in range(ncoils)]
-    # Paper page-7: pin exactly one current to avoid the zero-current
-    # quadratic-flux trap. Plan: "the pinned TF-current convention satisfies
-    # this only if dof_schema.fixed_dofs explicitly records the pinned
-    # current index and value."
-    pinned = base_currents[pinned_current_coil_index]
-    pinned.set_value(float(tf_current_pin_A))
-    pinned.fix_all()
+    tf_currents = [
+        ScaledCurrent(Current(1.0), float(tf_current_A)) for _ in tf_curves
+    ]
+    for curve in tf_curves:
+        curve.fix_all()
+    for current in tf_currents:
+        current.fix_all()
+    tf_coils = [Coil(curve, current) for curve, current in zip(tf_curves, tf_currents)]
 
-    coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
+    winding_surface = SurfaceRZFourier(nfp=int(nfp), stellsym=bool(stellsym))
+    winding_surface.set_rc(0, 0, float(winding_surface_R0))
+    winding_surface.set_rc(1, 0, float(winding_surface_minor_radius))
+    winding_surface.set_zs(1, 0, float(winding_surface_minor_radius))
+    winding_surface.fix_all()
+
+    banana_curve = CurveCWSFourierCPP(
+        np.linspace(0.0, 1.0, int(nquadpoints), endpoint=False),
+        order=int(banana_order),
+        surf=winding_surface,
+    )
+    banana_curve.set("phic(0)", float(banana_phi0))
+    banana_curve.set("phic(1)", float(banana_phi1))
+    banana_curve.set("thetac(0)", float(banana_theta0))
+    banana_curve.set("thetas(1)", float(banana_theta1))
+
+    banana_current = ScaledCurrent(Current(1.0), float(banana_current_init_A))
+    banana_coils = coils_via_symmetries(
+        [banana_curve],
+        [banana_current],
+        int(nfp),
+        bool(stellsym),
+    )
+
+    base_curves = [banana_curve]
+    base_currents = [banana_current]
+    coils = tf_coils + banana_coils
     curves = [c.curve for c in coils]
     return base_curves, base_currents, curves, coils
 
@@ -459,10 +564,6 @@ def build_objective(
     *,
     mpi: MpiPartition,
     config: VmecSingleStageConfig,
-    ncoils: int = 3,
-    nmodes_coils: int = 7,
-    coil_circle_radius_R1: float = 0.6,
-    nquadpoints: int = 128,
     prior_wout_path: Optional[str] = None,
 ) -> "VmecSingleStageObjective":
     """Factory: build SIMSOPT objective graph and return the bundle.
@@ -473,9 +574,9 @@ def build_objective(
         mpi: ``MpiPartition`` from the caller. The driver owns the partition
             lifecycle. Plan section "MPI partitioning and worker isolation":
             one ``Vmec`` per MPI group.
-        config: Frozen run config.
-        ncoils, nmodes_coils, coil_circle_radius_R1, nquadpoints: Coil
-            initial-condition parameters. Pinned by the caller, not optimized.
+        config: Frozen run config, including VMEC schedule and HW coil
+            initialization. Fixed TF coils provide the background field; only
+            the banana master curve/current enter the optimizer DOF block.
         prior_wout_path: Optional path to a prior accepted ``wout`` whose
             axis (``raxis_cc``, ``zaxis_cs``) is reused as the initial axis
             guess on a moved boundary. Plan section "SIMSOPT/VMEC API
@@ -486,8 +587,10 @@ def build_objective(
 
     Returns:
         :class:`VmecSingleStageObjective` bundle exposing ``J_and_grad``
-        (one VMEC run per call), ``J_scalar`` / ``compute_grad`` (thin
-        views over the cached pair), ``dof_schema``, and DOF block sizes.
+        (one scalar-plus-gradient objective call; internally one base VMEC
+        attempt plus boundary finite-difference VMEC attempts when uncached),
+        ``J_scalar`` / ``compute_grad`` (thin views over the cached pair),
+        ``dof_schema``, actual VMEC-call counters, and DOF block sizes.
 
         - ``J_scalar(x)``: returns ``J = J1 + w_coils * J2`` from a single
           VMEC run on ``x``. The step-clamp barrier is **not** applied here;
@@ -513,9 +616,7 @@ def build_objective(
     # explicit ``need_to_run_code = True`` per the SIMSOPT VMEC docstring
     # (mhd/vmec.py:153-157).
     vi = vmec.indata
-    vi.ns_array[: len(cfg.ns_array)] = np.asarray(cfg.ns_array, dtype=int)
-    vi.ftol_array[: len(cfg.ftol_array)] = np.asarray(cfg.ftol_array, dtype=float)
-    vi.niter_array[: len(cfg.niter_array)] = np.asarray(cfg.niter_array, dtype=int)
+    _assign_vmec_schedule(vi, cfg)
     vi.delt = float(cfg.delt)
     vi.mpol = int(cfg.mpol)
     vi.ntor = int(cfg.ntor)
@@ -544,13 +645,20 @@ def build_objective(
     base_curves, base_currents, curves, coils = _build_coil_block(
         nfp=surf.nfp,
         stellsym=True,
-        R0=float(cfg.R0),
-        R1=float(coil_circle_radius_R1),
-        ncoils=int(ncoils),
-        nmodes_coils=int(nmodes_coils),
-        nquadpoints=int(nquadpoints),
-        tf_current_pin_A=float(cfg.tf_current_pin_A),
-        pinned_current_coil_index=int(cfg.pinned_current_coil_index),
+        tf_num=int(cfg.tf_num),
+        tf_R0=float(cfg.tf_R0),
+        tf_R1=float(cfg.tf_R1),
+        tf_order=int(cfg.tf_order),
+        tf_current_A=float(cfg.tf_current_pin_A),
+        winding_surface_R0=float(cfg.winding_surface_R0),
+        winding_surface_minor_radius=float(cfg.winding_surface_minor_radius),
+        banana_order=int(cfg.banana_order),
+        banana_phi0=float(cfg.banana_phi0),
+        banana_phi1=float(cfg.banana_phi1),
+        banana_theta0=float(cfg.banana_theta0),
+        banana_theta1=float(cfg.banana_theta1),
+        banana_current_init_A=float(cfg.banana_current_init_A),
+        nquadpoints=int(cfg.banana_nquadpoints),
     )
     bs = BiotSavart(coils)
     bs.set_points(surf.gamma().reshape((-1, 3)))
@@ -567,8 +675,8 @@ def build_objective(
     Jal = [ArclengthVariation(c) for c in base_curves]
     Jwidth = ProjectedEllipseWidth(
         base_curves[0],
-        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
-        BANANA_WINDING_MINOR_RADIUS_M,
+        float(cfg.winding_surface_R0),
+        float(cfg.winding_surface_minor_radius),
     )
     Jself = CurveSelfIntersect(
         base_curves[0],
@@ -576,6 +684,11 @@ def build_objective(
         neighbor_skip=int(
             BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * base_curves[0].order
         ),
+    )
+    Jpoloidal = PoloidalExtent(
+        base_curves[0],
+        float(cfg.winding_surface_R0),
+        POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     )
 
     # ----- J1 building blocks -----
@@ -593,12 +706,36 @@ def build_objective(
     JF = (
         Jf
         + cfg.omega_L
-        * sum(QuadraticPenalty(Jl, float(cfg.L_threshold)) for Jl in Jls)
+        * sum(
+            QuadraticPenalty(Jl, float(cfg.L_threshold))
+            + QuadraticPenalty(
+                Jl,
+                COIL_LENGTH_MIN_FRACTION * float(cfg.L_threshold),
+                "min",
+            )
+            for Jl in Jls
+        )
         + cfg.omega_kappa_max * sum(Jkappa)
         + cfg.omega_kappa_msc
         * sum(QuadraticPenalty(Jm, float(cfg.kappa_msc_threshold)) for Jm in Jmsc)
         + cfg.omega_d * Jcc
         + cfg.omega_ell * sum(Jal)
+        + cfg.omega_current
+        * sum(
+            QuadraticPenalty(
+                _CurrentMagnitude(current),
+                float(cfg.banana_current_max_abs_A),
+                "max",
+            )
+            for current in base_currents
+        )
+        + cfg.omega_width
+        * (
+            QuadraticPenalty(Jwidth, BANANA_WIDTH_MIN_M, "min")
+            + QuadraticPenalty(Jwidth, BANANA_WIDTH_MAX_M, "max")
+        )
+        + cfg.omega_self_intersect * Jself
+        + cfg.omega_poloidal * Jpoloidal
     )
     # ``JF.x`` is the combined (coil-shape, current) DOF vector. SIMSOPT
     # decides the internal order via ``_get_ancestors`` (sorted by name);
@@ -609,10 +746,12 @@ def build_objective(
     n_coils_currents = coils_currents_dofs.size
     n_boundary_dofs = int(surf.x.size)
 
-    # Count free vs pinned currents for the schema. SIMSOPT ``Current`` has a
-    # single dof named "x0"; one is pinned by ``_build_coil_block``.
+    # Count free vs pinned currents for the schema. The list contains
+    # ``ScaledCurrent(Current(1), banana_current_init_A)`` exposes its free DOF
+    # through the scaled current's ancestor walk. Fixed TF currents are outside
+    # ``base_currents`` and are recorded as fixed hardware in the schema.
     n_current_dofs_free = sum(
-        1 for c in base_currents if not c.is_fixed("x0")
+        len(current.dof_names) for current in base_currents
     )
     n_coil_shape_dofs = n_coils_currents - n_current_dofs_free
 
@@ -630,7 +769,6 @@ def build_objective(
     current_dof_names = [
         name
         for current in base_currents
-        if not current.is_fixed("x0")
         for name in current.dof_names
     ]
 
@@ -674,6 +812,7 @@ def build_objective(
         Jal=Jal,
         Jwidth=Jwidth,
         Jself=Jself,
+        Jpoloidal=Jpoloidal,
         JF=JF,
         qs=qs,
         base_curves=base_curves,
@@ -707,14 +846,52 @@ def build_objective(
         bundle.vmec.indata.zaxis_cs[:m] = zaxis_cs[:m]
         bundle.vmec.need_to_run_code = True
 
+    def _run_vmec_base() -> None:
+        bundle.n_vmec_base_calls += 1
+        try:
+            bundle.vmec.run()
+        except ObjectiveFailure as exc:
+            raise vmec_call_failure_from_objective_failure(
+                exc, phase="base"
+            ) from exc
+        output_path = Path(bundle.vmec.output_file)
+        input_name = output_path.name.replace("wout_", "input.", 1).removesuffix(".nc")
+        bundle.last_base_input_file = str(output_path.with_name(input_name))
+        bundle.last_base_wout_file = str(output_path)
+        # VMEC normally deletes the previous run's files on the next run.
+        # The accepted-candidate base run is promotion evidence, so preserve it
+        # through the subsequent boundary finite-difference VMEC calls.
+        bundle.vmec.files_to_delete = []
+
+    def _run_vmec_boundary_fd() -> None:
+        bundle.n_vmec_boundary_fd_calls += 1
+        try:
+            bundle.vmec.run()
+        except ObjectiveFailure as exc:
+            raise vmec_call_failure_from_objective_failure(
+                exc, phase="boundary_fd"
+            ) from exc
+
+    def vmec_call_counts() -> Dict[str, int]:
+        base = int(bundle.n_vmec_base_calls)
+        boundary_fd = int(bundle.n_vmec_boundary_fd_calls)
+        return {
+            "base": base,
+            "boundary_fd": boundary_fd,
+            "total": base + boundary_fd,
+        }
+
     def J_and_grad(x: np.ndarray) -> Tuple[float, np.ndarray]:
-        """Single combined entrypoint. One VMEC run per ``x``.
+        """Single combined scalar-plus-gradient entrypoint.
 
         ``scipy.optimize.minimize(..., jac=True)`` unpacks the tuple from
         one call; ``J_scalar`` and ``compute_grad`` are thin views that
         return one half of the cached pair. The cache is keyed by the
         ``x.tobytes()`` digest so a back-to-back ``J_scalar``/``compute_grad``
         pair on the same ``x`` does not re-enter VMEC.
+
+        An uncached call performs one base VMEC run plus the VMEC runs required
+        by boundary finite differences in ``MPIFiniteDifference``.
 
         Raises:
             IotaSurfaceTargetMiss: ``iota_at_promotion_surface(wout)``
@@ -737,7 +914,7 @@ def build_objective(
         _refresh_axis()
         # Caller is responsible for ``os.chdir(scratch)`` BEFORE invoking
         # this. VMEC writes side files into cwd.
-        bundle.vmec.run()
+        _run_vmec_base()
         bundle.bs.set_points(bundle.surf.gamma().reshape((-1, 3)))
 
         iota_promo = iota_at_promotion_surface(
@@ -767,13 +944,14 @@ def build_objective(
 
         # dJ1/dx_surface via MPIFiniteDifference over boundary DOFs only.
         # Plan section "Gradient contract": "MPIFiniteDifference only for
-        # VMEC/stage-1 boundary terms."
-        def _J1_for_fd() -> float:
-            bundle.vmec.run()
-            return _evaluate_J1(bundle)
-
+        # VMEC/stage-1 boundary terms." SIMSOPT requires the function passed
+        # to MPIFiniteDifference to be a method of an Optimizable.
+        boundary_fd_problem = _BoundaryJ1FiniteDifferenceProblem(
+            bundle,
+            _run_vmec_boundary_fd,
+        )
         with MPIFiniteDifference(
-            _J1_for_fd,
+            boundary_fd_problem.objective,
             mpi,
             diff_method="forward",
             abs_step=bundle.config.eps_fd_xsurface_abs,
@@ -786,6 +964,11 @@ def build_objective(
             else:
                 dJ1_dxsurface = np.zeros(n_boundary_dofs, dtype=float)
         mpi.comm_world.Bcast(dJ1_dxsurface, root=0)
+        bundle.surf.x = x[bundle.boundary_slice]
+        if bundle.last_base_wout_file is not None:
+            bundle.vmec.output_file = bundle.last_base_wout_file
+            bundle.vmec.load_wout()
+        bundle.vmec.need_to_run_code = True
 
         grad = np.zeros_like(x, dtype=float)
         grad[bundle.coil_currents_slice] = (
@@ -815,11 +998,7 @@ def build_objective(
         base_current_values = [
             float(current.get_value()) for current in bundle.base_currents
         ]
-        free_current_values = [
-            value
-            for index, value in enumerate(base_current_values)
-            if index != int(cfg.pinned_current_coil_index)
-        ]
+        free_current_values = list(base_current_values)
         banana_current_max_abs = (
             max(abs(value) for value in free_current_values)
             if free_current_values
@@ -829,13 +1008,16 @@ def build_objective(
         max_curvature = max(
             float(np.max(curve.kappa())) for curve in bundle.curves
         )
+        vmec_counts = vmec_call_counts()
         return {
             "FIELD_ERROR": float(bundle.Jf.J()),
             "COIL_LENGTH": max(coil_lengths),
             "COIL_LENGTH_TARGET": float(cfg.length_target),
-            "LENGTH_MIN_TARGET": 0.5 * float(cfg.length_target),
+            "LENGTH_MIN_TARGET": COIL_LENGTH_MIN_FRACTION * float(cfg.length_target),
             "CURVE_CURVE_MIN_DIST": float(bundle.Jcc.shortest_distance()),
+            "CURVE_CURVE_MIN_DIST_LIMIT": float(cfg.cc_threshold),
             "CURVE_SURFACE_MIN_DIST": float(bundle.Jcs.shortest_distance()),
+            "CURVE_SURFACE_MIN_DIST_LIMIT": float(cfg.cs_threshold),
             "CURVE_CURVE_DISTANCE_METRIC_KIND": "shortest_distance",
             "MAX_CURVATURE": max_curvature,
             "CURVATURE_THRESHOLD": float(cfg.kappa_max_threshold),
@@ -846,7 +1028,7 @@ def build_objective(
             "SELF_INTERSECT_THRESHOLD": 0.0,
             "POLOIDAL_EXTENT_RAD": max_poloidal_extent_rad(
                 bundle.base_curves[0],
-                VACUUM_VESSEL_MAJOR_RADIUS_M,
+                float(cfg.winding_surface_R0),
             ),
             "POLOIDAL_EXTENT_THRESHOLD_RAD": POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             "TF_CURRENT_A": float(cfg.tf_current_pin_A),
@@ -859,10 +1041,38 @@ def build_objective(
             "IOTA_TARGET": float(cfg.iota_target),
             "IOTA_SURFACE_TOLERANCE": float(cfg.iota_tol),
             "FINAL_VOLUME": float(bundle.vmec.volume()),
-            "VMEC_CONVERGED": int(wout.ier_flag) == 11,
+            "VMEC_CONVERGED": int(wout.ier_flag) == 0,
+            "VMEC_CODE_CHANNEL": "wout_ier_flag",
             "VMEC_IER_FLAG": int(wout.ier_flag),
+            "VMEC_BASE_CALLS": vmec_counts["base"],
+            "VMEC_BOUNDARY_FD_CALLS": vmec_counts["boundary_fd"],
+            "VMEC_TOTAL_CALLS": vmec_counts["total"],
             "FINAL_LCFS_MAJOR_RADIUS_M": lcfs_major,
             "FINAL_LCFS_MINOR_RADIUS_M": lcfs_minor,
+        }
+
+    def export_artifacts(out_dir: str, stem: str) -> Dict[str, str]:
+        """Write replayable artifacts for the latest successful base VMEC run."""
+
+        if bundle.last_base_input_file is None or bundle.last_base_wout_file is None:
+            raise RuntimeError("No successful base VMEC run is available to export.")
+        artifact_dir = Path(out_dir)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        input_path = artifact_dir / f"input.{stem}"
+        wout_path = artifact_dir / f"wout_{stem}.nc"
+        biot_savart_path = artifact_dir / "biot_savart_opt.json"
+        surf_path = artifact_dir / "surf_opt.json"
+
+        shutil.copy2(bundle.last_base_input_file, input_path)
+        shutil.copy2(bundle.last_base_wout_file, wout_path)
+        bundle.bs.save(str(biot_savart_path))
+        bundle.surf.save(str(surf_path))
+        return {
+            "vmec_input": str(input_path),
+            "vmec_wout": str(wout_path),
+            "biot_savart": str(biot_savart_path),
+            "surface": str(surf_path),
         }
 
     return VmecSingleStageObjective(
@@ -870,6 +1080,8 @@ def build_objective(
         J_scalar=J_scalar,
         compute_grad=compute_grad,
         metrics_snapshot=metrics_snapshot,
+        vmec_call_counts=vmec_call_counts,
+        export_artifacts=export_artifacts,
         dof_schema=dof_schema,
         x0=x0,
         n_coil_dofs=int(n_coil_shape_dofs),

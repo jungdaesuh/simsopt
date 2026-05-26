@@ -14,8 +14,14 @@ slope check — this is documented behavior, not a bug.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
+from simsopt._core.util import ObjectiveFailure
+from simsopt.field import Current
+from simsopt.field.coil import ScaledCurrent
+from simsopt.objectives import QuadraticPenalty
 
 from examples.single_stage_optimization.VMEC_SINGLE_STAGE import (
     FIRST_ORDER_SLOPE_BAND,
@@ -25,6 +31,15 @@ from examples.single_stage_optimization.VMEC_SINGLE_STAGE import (
     taylor_J2_alone_centered_eq28,
     taylor_J_combined_centered_eq29_xsurface,
     taylor_J_combined_forward_eq29_xcoils,
+)
+from examples.single_stage_optimization.VMEC_SINGLE_STAGE.vmec_single_stage_exceptions import (
+    vmec_call_failure_from_objective_failure,
+)
+from examples.single_stage_optimization.VMEC_SINGLE_STAGE.vmec_single_stage_banana import (
+    _BoundaryJ1FiniteDifferenceProblem,
+    _CurrentMagnitude,
+    _assign_vmec_schedule,
+    _build_coil_block,
 )
 
 
@@ -213,3 +228,119 @@ def test_dof_schema_preserves_simsopt_coil_shape_name_format() -> None:
         "coil_shape dof_names lost SIMSOPT mode-pattern format; "
         "a defensive fallback may have re-entered build_objective"
     )
+
+
+def test_build_coil_block_uses_fixed_tf_and_bounded_banana_seed() -> None:
+    base_curves, base_currents, curves, coils = _build_coil_block(
+        nfp=5,
+        stellsym=True,
+        tf_num=20,
+        tf_R0=0.976,
+        tf_R1=0.4,
+        tf_order=1,
+        tf_current_A=-8.0e4,
+        winding_surface_R0=0.903,
+        winding_surface_minor_radius=0.142,
+        banana_order=2,
+        banana_phi0=0.06,
+        banana_phi1=0.03,
+        banana_theta0=0.5,
+        banana_theta1=0.1,
+        banana_current_init_A=-1.0e4,
+        nquadpoints=16,
+    )
+
+    assert len(base_curves) == 1
+    assert len(base_currents) == 1
+    assert len(coils) == 30
+    assert len(curves) == 30
+    assert base_currents[0].get_value() == pytest.approx(-1.0e4)
+    assert len(base_currents[0].dof_names) == 1
+    assert all(coil.current.get_value() == pytest.approx(-8.0e4) for coil in coils[:20])
+    assert all(coil.current.dof_names == [] for coil in coils[:20])
+
+
+def test_current_magnitude_penalty_is_zero_inside_cap_and_positive_above() -> None:
+    inner_current = Current(1.0)
+    banana_current = ScaledCurrent(inner_current, -1.0e4)
+    penalty = QuadraticPenalty(_CurrentMagnitude(banana_current), 1.6e4, "max")
+
+    assert penalty.J() == pytest.approx(0.0)
+    inner_current.x = np.array([2.0])
+    assert penalty.J() > 0.0
+
+
+def test_objective_failure_ierr14_maps_to_nonfinite_output() -> None:
+    failure = vmec_call_failure_from_objective_failure(
+        ObjectiveFailure("VMEC did not converge. ierr=14"),
+        phase="base",
+    )
+
+    assert failure.ier_flag == 14
+    assert failure.failure_class == "vmec_nonfinite_output"
+    assert failure.retryable is False
+    assert str(failure) == "base VMEC failed: VMEC did not converge. ierr=14"
+
+
+def test_boundary_j1_fd_problem_is_bound_optimizable_method() -> None:
+    class FakeSurface:
+        def __init__(self) -> None:
+            self.x = np.array([1.0, -2.0])
+
+    class FakeVmec:
+        def __init__(self) -> None:
+            self.need_to_run_code = False
+            self.wout = SimpleNamespace(ns=2, iotaf=np.array([0.1, 0.2]))
+
+        def aspect(self) -> float:
+            return 12.7
+
+        def volume(self) -> float:
+            return 0.095
+
+    fake_bundle = SimpleNamespace(
+        surf=FakeSurface(),
+        vmec=FakeVmec(),
+        qs=SimpleNamespace(total=lambda: 0.0),
+        config=SimpleNamespace(
+            qs_weight=1.0,
+            aspect_weight=1.0,
+            aspect_target=12.7,
+            iota_weight=1.0,
+            iota_target=0.2,
+            volume_weight=1.0,
+            volume_target=0.095,
+            iota_promotion_surface_s=1.0,
+        ),
+    )
+    calls = []
+
+    def run_vmec() -> None:
+        calls.append(np.asarray(fake_bundle.surf.x, dtype=float).copy())
+
+    problem = _BoundaryJ1FiniteDifferenceProblem(fake_bundle, run_vmec)
+    problem.x = np.array([3.0, 4.0])
+
+    assert problem.objective() == pytest.approx(0.0)
+    assert len(calls) == 1
+    np.testing.assert_allclose(calls[0], np.array([3.0, 4.0]))
+    assert fake_bundle.vmec.need_to_run_code is True
+
+
+def test_assign_vmec_schedule_clears_stale_seed_tail() -> None:
+    vi = SimpleNamespace(
+        ns_array=np.array([13, 25, 51, 101]),
+        ftol_array=np.array([1.0e-10, 1.0e-10, 1.0e-10, 1.0e-10]),
+        niter_array=np.array([10000, 10000, 10000, 10000]),
+    )
+    cfg = SimpleNamespace(
+        ns_array=(13,),
+        ftol_array=(1.0e-10,),
+        niter_array=(3000,),
+    )
+
+    _assign_vmec_schedule(vi, cfg)
+
+    np.testing.assert_array_equal(vi.ns_array, np.array([13, 0, 0, 0]))
+    np.testing.assert_allclose(vi.ftol_array, np.array([1.0e-10, 0.0, 0.0, 0.0]))
+    np.testing.assert_array_equal(vi.niter_array, np.array([3000, 0, 0, 0]))

@@ -11,11 +11,12 @@ Plan section "SIMSOPT/VMEC API Constraints":
 
 This module is the single seed-materialization path. The loader:
 
-1. Initializes a ``Vmec`` from the ``wout`` (read-only).
+1. Locates the ``input.<ext>`` paired with the saved ``wout_<ext>.nc``.
 2. Rejects the seed when ``lfreeb=True`` or ``mgrid_file`` is populated
    (plan section "SIMSOPT/VMEC API Constraints" H9: "reject any seed input
    with ``lfreeb = .true.`` or a populated ``mgrid_file``").
-3. Pins ``lfreeb=False``, ``pres_scale=0.0`` (Stage A: vacuum only).
+3. Pins ``lfreeb=False``, pressure/current profiles to zero (Stage A:
+   fixed-boundary vacuum only).
 4. Calls ``vmec.write_input(out_path)`` to produce a rerunnable namelist.
 
 Hand-editing ``indata.rbc/rbs/zbc/zbs`` is forbidden per plan: VMEC boundary
@@ -52,7 +53,7 @@ def materialize_rerunnable_input(
 
     Raises:
         ValueError: If ``wout_path`` is not a ``wout_*.nc`` file, if the
-            wout reports ``lfreeb=True``, if it carries a populated
+            paired input reports ``lfreeb=True``, if it carries a populated
             ``mgrid_file``, or if the caller requests ``lfreeb=True`` or
             ``pres_scale != 0.0``.
     """
@@ -103,7 +104,8 @@ def materialize_rerunnable_input(
             "(lfreeb=.true.); reject."
         )
     mgrid = vi.mgrid_file.decode("utf-8").strip()
-    if mgrid:
+    has_mgrid = bool(mgrid) and mgrid.upper() != "NONE"
+    if has_mgrid:
         raise ValueError(
             f"Seed input {paired_input} carries a populated mgrid_file "
             f"({mgrid!r}); reject."
@@ -112,6 +114,9 @@ def materialize_rerunnable_input(
     # Pin fixed-boundary + vacuum even if the source already does.
     vi.lfreeb = False
     vi.pres_scale = 0.0
+    vi.curtor = 0.0
+    vi.ac[:] = 0.0
+    vi.am[:] = 0.0
 
     vmec.write_input(str(out_path))
     return out_path

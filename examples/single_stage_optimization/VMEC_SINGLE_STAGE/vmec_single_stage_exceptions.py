@@ -19,7 +19,29 @@ autoresearch ledger and the optimizer treats the candidate as rejected.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
+
+
+RUNVMEC_IERR_FAILURE_CLASS: dict[int, str] = {
+    0: "vmec_internal_error",
+    1: "vmec_bad_initial_jacobian",
+    2: "vmec_more_iter",
+    4: "vmec_bad_initial_jacobian",
+    5: "vmec_internal_error",
+    7: "vmec_input_invalid",
+    8: "vmec_radial_refinement_failed",
+    9: "vmec_nonfinite_output",
+    12: "vmec_nonfinite_output",
+    13: "aspect_ratio_runaway",
+    14: "vmec_nonfinite_output",
+    15: "vmec_timeout",
+    16: "vmec_nonfinite_output",
+}
+
+_OBJECTIVE_FAILURE_IERR_RE = re.compile(
+    r"VMEC did not converge\.\s*ierr\s*=\s*(-?\d+)"
+)
 
 
 class VmecCallFailure(Exception):
@@ -55,6 +77,28 @@ class VmecCallFailure(Exception):
             self.failure_class = failure_class
         if retryable is not None:
             self.retryable = retryable
+
+
+def vmec_call_failure_from_objective_failure(
+    exc: Exception,
+    *,
+    phase: str,
+) -> VmecCallFailure:
+    """Convert SIMSOPT ``ObjectiveFailure`` into the Stage A failure taxonomy."""
+
+    match = _OBJECTIVE_FAILURE_IERR_RE.search(str(exc))
+    ier_flag = int(match.group(1)) if match is not None else None
+    failure_class = (
+        RUNVMEC_IERR_FAILURE_CLASS.get(ier_flag, "vmec_internal_error")
+        if ier_flag is not None
+        else "vmec_crash"
+    )
+    return VmecCallFailure(
+        f"{phase} VMEC failed: {exc}",
+        ier_flag=ier_flag,
+        failure_class=failure_class,
+        retryable=False,
+    )
 
 
 class IotaSurfaceTargetMiss(VmecCallFailure):
