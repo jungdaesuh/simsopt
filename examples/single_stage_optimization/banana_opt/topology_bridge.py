@@ -271,7 +271,8 @@ def compute_fieldline_iota_proxy(
     # either reached the tmax cap (survived) or tripped the escape cage
     # / box guard (escaped). They sum to ``len(histories)`` by construction
     # (which equals ``nfieldlines`` for a healthy tracer).
-    escape_count = int(sum(_line_was_lost(hits) for hits in phi_hits))
+    line_was_lost = [_line_was_lost(hits) for hits in phi_hits]
+    escape_count = int(sum(line_was_lost))
     n_surviving = int(len(histories) - escape_count)
 
     coordinate_axis = build_surface_centroid_axis(surface)
@@ -281,7 +282,9 @@ def compute_fieldline_iota_proxy(
     poloidal = np.asarray(poloidal, dtype=float)
 
     trusted_iotas: list[float] = []
-    for ntor, npol in zip(toroidal, poloidal):
+    for was_lost, ntor, npol in zip(line_was_lost, toroidal, poloidal):
+        if was_lost:
+            continue
         if not np.isfinite(ntor) or not np.isfinite(npol):
             continue
         if abs(ntor) < float(n_transits_target):

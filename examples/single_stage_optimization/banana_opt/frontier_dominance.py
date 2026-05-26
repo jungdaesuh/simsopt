@@ -96,6 +96,10 @@ CONSTRAINT_METRIC_FIELDS = {
     "hardware_constraints_ok": "HARDWARE_CONSTRAINTS_OK",
     "final_feasibility_ok": "FINAL_FEASIBILITY_OK",
     "final_topology_gate_success": "FINAL_TOPOLOGY_GATE_SUCCESS",
+    "frontier_certification_ok": "FRONTIER_CERTIFICATION_OK",
+    "frontier_certification_reason": "FRONTIER_CERTIFICATION_REASON",
+    "frontier_kam_fraction": "FRONTIER_KAM_FRACTION",
+    "frontier_kam_min": "FRONTIER_KAM_MIN",
     "frontier_trust_ok": "FRONTIER_TRUST_OK",
 }
 
@@ -145,6 +149,12 @@ def is_certified_results(results: Mapping[str, object]) -> bool:
     trust_ok = results.get("FRONTIER_TRUST_OK")
     if trust_ok is False:
         return False
+    frontier_certification_ok = results.get("FRONTIER_CERTIFICATION_OK")
+    if frontier_certification_ok is False:
+        return False
+    if results.get("SINGLE_STAGE_GOAL_MODE") == "frontier":
+        if frontier_certification_ok is not True:
+            return False
     return objective_metrics_complete(extract_objective_metrics(results))
 
 

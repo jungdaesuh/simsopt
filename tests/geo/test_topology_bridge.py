@@ -278,6 +278,47 @@ class TestProxyTracingContract:
         assert result.reason == bridge.FAILURE_ESCAPED
         assert result.escape_count == n_lines
 
+    def test_escaped_lines_above_transit_threshold_are_not_trusted(
+        self, monkeypatch
+    ):
+        """Escaped trajectories must not contribute a fake converged iota."""
+        bridge = load_topology_bridge()
+        n_lines = 3
+        histories = [_fake_history() for _ in range(n_lines)]
+        phi_hits = [
+            np.array([[0.0, -1.0, 0.5, 0.0, 0.0]]) for _ in range(n_lines)
+        ]
+        monkeypatch.setattr(
+            bridge,
+            "compute_fieldlines",
+            lambda field, R0, Z0, **kwargs: (histories, phi_hits),
+        )
+        monkeypatch.setattr(
+            bridge,
+            "compute_toroidal_transits",
+            lambda traced, flux=False: np.array([50.0, 100.0, 200.0]),
+        )
+        monkeypatch.setattr(
+            bridge,
+            "compute_poloidal_transits",
+            lambda traced, ma=None, flux=True: np.array([0.0, 22.0, 44.0]),
+        )
+
+        result = bridge.compute_fieldline_iota_proxy(
+            field=object(),
+            surface=_toroid_surface(),
+            nfieldlines=n_lines,
+            tmax=10.0,
+            tol=1e-8,
+            escape_radius=2.0,
+            n_transits_target=50,
+        )
+        assert result.valid is False
+        assert result.iota_proxy is None
+        assert result.reason == bridge.FAILURE_ESCAPED
+        assert result.n_surviving == 0
+        assert result.escape_count == n_lines
+
     def test_no_history_returns_no_history_reason(self, monkeypatch):
         bridge = load_topology_bridge()
         monkeypatch.setattr(

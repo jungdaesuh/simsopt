@@ -140,7 +140,7 @@ def phi_hit_counts(fieldlines_phi_hits, phis):
     return [
         int(
             sum(
-                np.sum(_normalize_trace_hits(fieldline)[:, 1] == i)
+                np.sum(_trace_hits_before_first_stop(fieldline)[0][:, 1] == i)
                 for fieldline in fieldlines_phi_hits
             )
         )
@@ -635,6 +635,15 @@ def _normalize_trace_hits(hits):
     return hits
 
 
+def _trace_hits_before_first_stop(hits):
+    normalized_hits = _normalize_trace_hits(hits)
+    stop_indices = np.flatnonzero(normalized_hits[:, 1] < 0)
+    if stop_indices.size == 0:
+        return normalized_hits, None
+    first_stop_index = int(stop_indices[0])
+    return normalized_hits[:first_stop_index], normalized_hits[first_stop_index]
+
+
 def validate_trace_arrays(fieldlines_tys, fieldlines_phi_hits):
     if len(fieldlines_tys) != len(fieldlines_phi_hits):
         raise ValueError("Topology tracing returned mismatched history and hit counts")
@@ -670,10 +679,11 @@ def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="
 
     for seed_index, (history, hits) in enumerate(zip(fieldlines_tys, fieldlines_phi_hits)):
         history = _normalize_trace_history(history)
-        hits = _normalize_trace_hits(hits)
-        negative_hits = hits[hits[:, 1] < 0]
-        first_stop = negative_hits[0] if negative_hits.size else None
-        per_phi_counts = [int(np.sum(hits[:, 1] == i)) for i in range(len(phis))]
+        hits_before_stop, first_stop = _trace_hits_before_first_stop(hits)
+        per_phi_counts = [
+            int(np.sum(hits_before_stop[:, 1] == i))
+            for i in range(len(phis))
+        ]
         final_time = float(history[-1, 0]) if len(history) else None
 
         if first_stop is None:
@@ -737,19 +747,18 @@ def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="
 
 
 def kam_fraction(fieldlines_phi_hits, cross_section_span, width_ratio=0.25):
-    """Seed-independent confinement proxy.
+    """Scorer-setting-dependent bounded seed-line fraction.
 
     For each traced seed line, measures the radial+axial span of its Poincare
     hits. A line whose hits stay within a narrow band (< width_ratio times the
     cross-section span) and never triggers a stopping criterion is classified
-    as lying on a preserved flux surface. The returned fraction is the count
-    of such bounded, surviving lines divided by the total number of seeds.
+    as bounded. The returned fraction is the count of bounded seed lines
+    divided by the total traced seed count. Empty or inconclusive hit rows are
+    counted as unbounded so they cannot inflate the fraction.
 
-    Because the classification is based on the spread of hits rather than
-    whether a fixed set of seeds survive, the metric is insensitive to the
-    seed placement strategy — it measures how many flux surfaces in the
-    equilibrium are actually preserved, not how many of your particular
-    seeds happened to land on them.
+    This is not a seed-independent KAM invariant. It is tied to the scorer
+    settings and seed contract: nfieldlines, nphis, tmax, width_ratio, and the
+    midplane radial seed placement.
     """
     if cross_section_span <= 0.0 or not len(fieldlines_phi_hits):
         return 0.0, 0.0
@@ -758,11 +767,12 @@ def kam_fraction(fieldlines_phi_hits, cross_section_span, width_ratio=0.25):
     widths = []
     total = 0
     for line_hits in fieldlines_phi_hits:
-        arr = np.asarray(line_hits)
-        if arr.size == 0:
-            continue
+        hits_before_stop, first_stop = _trace_hits_before_first_stop(line_hits)
         total += 1
-        valid = arr[arr[:, 1] >= 0]
+        if hits_before_stop.size == 0:
+            widths.append(float(cross_section_span))
+            continue
+        valid = hits_before_stop[hits_before_stop[:, 1] >= 0]
         if valid.shape[0] < 3:
             widths.append(float(cross_section_span))
             continue
@@ -770,7 +780,7 @@ def kam_fraction(fieldlines_phi_hits, cross_section_span, width_ratio=0.25):
         z = valid[:, 4]
         span_this = float(np.hypot(float(r.max() - r.min()), float(z.max() - z.min())))
         widths.append(span_this)
-        lost = bool(arr[-1, 1] < 0)
+        lost = first_stop is not None
         if span_this <= threshold and not lost:
             bounded += 1
     if total == 0:
@@ -861,6 +871,7 @@ def empty_topology_score_result(
     *,
     surrogate_worst_k=1,
     surrogate_early_exit_threshold=0.0,
+    kam_width_ratio=0.25,
     seed_contract=None,
     field_model=None,
     transport_diagnostics=None,
@@ -887,6 +898,7 @@ def empty_topology_score_result(
         "line_losses": [],
         "kam_fraction": 0.0,
         "kam_median_width": 0.0,
+        "kam_width_ratio": float(kam_width_ratio),
         "cross_section_span": 0.0,
         "seed_contract": seed_contract,
         "field_model": field_model,
@@ -926,6 +938,7 @@ def score_topology(
     surrogate_mean_weight=0.2,
     surrogate_worst_weight=0.6,
     surrogate_early_weight=0.2,
+    kam_width_ratio=0.25,
     inset_fraction=0.05,
     field_policy=None,
     interpolation_grid=None,
@@ -935,7 +948,7 @@ def score_topology(
 
     Seeding is a midplane radial sweep (phi=0, Z=0). Returns a dict with
     survival_fraction, mean_exit_time, stop_reason_counts, per-line metrics,
-    and kam_fraction (a seed-independent confinement proxy). When
+    and kam_fraction (a scorer-setting-dependent bounded seed-line fraction). When
     compute_transport_diagnostics is False, skips the surface-field structure
     computation and returns a not-evaluated stub (used by the search-time
     gate, which does not consume transport diagnostics for its decision).
@@ -996,7 +1009,11 @@ def score_topology(
     )
 
     span = cross_section_span(surface)
-    kam_frac, kam_median = kam_fraction(fieldlines_phi_hits, span)
+    kam_frac, kam_median = kam_fraction(
+        fieldlines_phi_hits,
+        span,
+        width_ratio=kam_width_ratio,
+    )
 
     return {
         "survival_fraction": metrics["survival_fraction"],
@@ -1019,6 +1036,7 @@ def score_topology(
         "line_losses": surrogate["line_losses"],
         "kam_fraction": float(kam_frac),
         "kam_median_width": float(kam_median),
+        "kam_width_ratio": float(kam_width_ratio),
         "cross_section_span": float(span),
         "seed_contract": seed_contract,
         "field_model": field_model,
@@ -1067,6 +1085,7 @@ def safe_score_topology(
                     "surrogate_early_exit_threshold",
                     0.0,
                 ),
+                kam_width_ratio=kwargs.get("kam_width_ratio", 0.25),
                 seed_contract=build_midplane_seed_contract(
                     nfieldlines,
                     kwargs.get("inset_fraction", 0.05),

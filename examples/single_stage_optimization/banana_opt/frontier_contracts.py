@@ -24,14 +24,14 @@ FRONTIER_ARCHIVE_STATES = (
 FRONTIER_FINAL_OUTPUT_ARCHIVE_STATES = (FRONTIER_ARCHIVE_STATE_CERTIFIED,)
 SUPPORTED_FRONTIER_ENGINES = ("multilane_local",)
 
-FRONTIER_ARCHIVE_SCHEMA_VERSION = "frontier_archive_v1"
+FRONTIER_ARCHIVE_SCHEMA_VERSION = "frontier_archive_v2"
 FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION = "frontier_campaign_progress_v1"
 FRONTIER_LANE_CONTRACT_SCHEMA_VERSION = "frontier_lane_contract_v1"
 FRONTIER_LANE_RECORD_SCHEMA_VERSION = "frontier_lane_record_v1"
-FRONTIER_CAMPAIGN_MANIFEST_SCHEMA_VERSION = "frontier_campaign_manifest_v1"
+FRONTIER_CAMPAIGN_MANIFEST_SCHEMA_VERSION = "frontier_campaign_manifest_v2"
 FRONTIER_CAMPAIGN_SUMMARY_SCHEMA_VERSION = "frontier_campaign_summary_v1"
 FRONTIER_CAMPAIGN_RECOMMENDED_SCHEMA_VERSION = "frontier_campaign_recommended_v1"
-FRONTIER_SOLVER_CHECKPOINT_SCHEMA_VERSION = "single_stage_solver_checkpoint_v1"
+FRONTIER_SOLVER_CHECKPOINT_SCHEMA_VERSION = "single_stage_solver_checkpoint_v2"
 
 FRONTIER_CERTIFICATION_ONLY_METRICS = (
     "coil_length",
@@ -41,6 +41,10 @@ FRONTIER_CERTIFICATION_ONLY_METRICS = (
     "hardware_constraints_ok",
     "final_feasibility_ok",
     "final_topology_gate_success",
+    "frontier_certification_ok",
+    "frontier_certification_reason",
+    "frontier_kam_fraction",
+    "frontier_kam_min",
     "frontier_trust_ok",
     "finite_eval_ok",
 )

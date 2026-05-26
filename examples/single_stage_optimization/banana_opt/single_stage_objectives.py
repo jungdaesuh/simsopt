@@ -82,6 +82,8 @@ def build_total_objective(
     JCurveLengthMin=None,
     JCoilWidth=None,
     WIDTH_WEIGHT=0.0,
+    width_min_threshold=BANANA_WIDTH_MIN_M,
+    width_max_threshold=BANANA_WIDTH_MAX_M,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
 ):
@@ -102,8 +104,8 @@ def build_total_objective(
         objective = objective + POLOIDAL_EXTENT_WEIGHT * JPoloidalExtent
     if JCoilWidth is not None:
         objective = objective + WIDTH_WEIGHT * (
-            QuadraticPenalty(JCoilWidth, BANANA_WIDTH_MIN_M, "min")
-            + QuadraticPenalty(JCoilWidth, BANANA_WIDTH_MAX_M, "max")
+            QuadraticPenalty(JCoilWidth, width_min_threshold, "min")
+            + QuadraticPenalty(JCoilWidth, width_max_threshold, "max")
         )
     if JCurveSelfIntersect is not None:
         objective = objective + SELFINT_WEIGHT * JCurveSelfIntersect
@@ -295,6 +297,8 @@ def evaluate_total_objective(
     JCurveLengthMin=None,
     JCoilWidth=None,
     WIDTH_WEIGHT=0.0,
+    width_min_threshold=BANANA_WIDTH_MIN_M,
+    width_max_threshold=BANANA_WIDTH_MAX_M,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
 ):
@@ -331,6 +335,8 @@ def evaluate_total_objective(
         JCurveLengthMin=JCurveLengthMin,
         JCoilWidth=JCoilWidth,
         WIDTH_WEIGHT=WIDTH_WEIGHT,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
         JCurveSelfIntersect=JCurveSelfIntersect,
         SELFINT_WEIGHT=SELFINT_WEIGHT,
     )
@@ -419,10 +425,10 @@ def evaluate_total_objective(
             else _objective_gradient(JCurveSelfIntersect, objective_optimizable)
         ),
         "coil_width_min_threshold": (
-            None if JCoilWidth is None else BANANA_WIDTH_MIN_M
+            None if JCoilWidth is None else float(width_min_threshold)
         ),
         "coil_width_max_threshold": (
-            None if JCoilWidth is None else BANANA_WIDTH_MAX_M
+            None if JCoilWidth is None else float(width_max_threshold)
         ),
         "self_intersect_min_distance": (
             None
@@ -890,7 +896,9 @@ def evaluate_alm_objective(
             poloidal_extent_violation,
         )
     coil_width_value = None
+    coil_width_grad = None
     self_intersect_penalty = None
+    self_intersect_grad = None
     if JCoilWidth is not None:
         coil_width_value = float(JCoilWidth.J())
         coil_width_grad = _objective_gradient(JCoilWidth, objective_optimizable)
@@ -910,10 +918,14 @@ def evaluate_alm_objective(
             )
     if JCurveSelfIntersect is not None:
         self_intersect_penalty = float(JCurveSelfIntersect.J())
+        self_intersect_grad = _objective_gradient(
+            JCurveSelfIntersect,
+            objective_optimizable,
+        )
         self_intersect_signed_value = self_intersect_penalty
         hardware_constraints["self_intersect"] = (
             self_intersect_signed_value,
-            _objective_gradient(JCurveSelfIntersect, objective_optimizable),
+            self_intersect_grad,
             _positive_violation(self_intersect_signed_value),
         )
     if lcfs_surface is not None and lcfs_major_radius_threshold is not None:
@@ -1259,12 +1271,38 @@ def evaluate_alm_objective(
             base_eval["poloidal_extent_threshold_rad"] = float(
                 poloidal_extent_threshold
             )
+        base_eval["J_poloidal_extent"] = (
+            0.0 if JPoloidalExtent is None else float(JPoloidalExtent.J())
+        )
+        base_eval["dJ_poloidal_extent"] = (
+            np.zeros_like(base_eval["grad"])
+            if JPoloidalExtent is None
+            else _objective_gradient(JPoloidalExtent, objective_optimizable)
+        )
+        base_eval["J_coil_width"] = (
+            0.0 if JCoilWidth is None else float(coil_width_value)
+        )
+        base_eval["dJ_coil_width"] = (
+            np.zeros_like(base_eval["grad"])
+            if JCoilWidth is None
+            else np.asarray(coil_width_grad, dtype=float)
+        )
         if JCoilWidth is not None:
             base_eval["coil_width"] = coil_width_value
             if width_min_threshold is not None:
                 base_eval["coil_width_min_threshold"] = float(width_min_threshold)
             if width_max_threshold is not None:
                 base_eval["coil_width_max_threshold"] = float(width_max_threshold)
+        base_eval["J_self_intersect"] = (
+            0.0
+            if JCurveSelfIntersect is None
+            else float(self_intersect_penalty)
+        )
+        base_eval["dJ_self_intersect"] = (
+            np.zeros_like(base_eval["grad"])
+            if JCurveSelfIntersect is None
+            else np.asarray(self_intersect_grad, dtype=float)
+        )
         if JCurveSelfIntersect is not None:
             base_eval["self_intersect_penalty"] = self_intersect_penalty
             base_eval["self_intersect_threshold"] = 0.0

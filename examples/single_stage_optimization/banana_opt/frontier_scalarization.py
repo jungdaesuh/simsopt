@@ -218,6 +218,8 @@ def apply_frontier_scalarization_override(
     cs_weight,
     curvature_weight,
     poloidal_extent_weight=0.0,
+    width_weight=0.0,
+    selfint_weight=0.0,
     objective_optimizable=None,
     alm_formulation="weighted_sum",
     alm_multipliers=None,
@@ -284,7 +286,8 @@ def apply_frontier_scalarization_override(
 
     if alm_formulation == "weighted_sum":
         # SSOT: both ALM and non-ALM branches sum the full geometry-penalty
-        # bundle (length, cc, cs, curvature, surf_dist, poloidal_extent) into
+        # bundle (length, cc, cs, curvature, poloidal_extent, width,
+        # self-intersection) into
         # ``base_total`` / ``physics_total`` so cross-formulation comparisons
         # operate on the same physical denominator.
         penalty_total, penalty_grad = _frontier_penalty_geometry_total_grad(
@@ -294,6 +297,8 @@ def apply_frontier_scalarization_override(
             cs_weight=cs_weight,
             curvature_weight=curvature_weight,
             poloidal_extent_weight=poloidal_extent_weight,
+            width_weight=width_weight,
+            selfint_weight=selfint_weight,
         )
         if "constraint_values" in annotated and "constraint_grads" in annotated:
             if alm_multipliers is None or alm_penalty is None:
@@ -352,6 +357,8 @@ def _frontier_penalty_geometry_total_grad(
     cs_weight,
     curvature_weight,
     poloidal_extent_weight=0.0,
+    width_weight=0.0,
+    selfint_weight=0.0,
 ):
     total = (
         float(length_weight) * float(objective_eval["J_len"])
@@ -371,6 +378,28 @@ def _frontier_penalty_geometry_total_grad(
     total += float(poloidal_extent_weight) * float(
         objective_eval.get("J_poloidal_extent", 0.0)
     )
+    if float(width_weight) != 0.0:
+        width_total, width_grad = _frontier_width_penalty_total_grad(objective_eval)
+        total += float(width_weight) * width_total
+        grad = grad + float(width_weight) * width_grad
+    if float(selfint_weight) != 0.0:
+        total += float(selfint_weight) * float(objective_eval["J_self_intersect"])
+        grad = grad + float(selfint_weight) * np.asarray(
+            objective_eval["dJ_self_intersect"],
+            dtype=float,
+        )
+    return float(total), grad
+
+
+def _frontier_width_penalty_total_grad(objective_eval):
+    width = float(objective_eval["J_coil_width"])
+    width_grad = np.asarray(objective_eval["dJ_coil_width"], dtype=float)
+    min_threshold = float(objective_eval["coil_width_min_threshold"])
+    max_threshold = float(objective_eval["coil_width_max_threshold"])
+    min_hinge = min(width - min_threshold, 0.0)
+    max_hinge = max(width - max_threshold, 0.0)
+    total = 0.5 * min_hinge * min_hinge + 0.5 * max_hinge * max_hinge
+    grad = (min_hinge + max_hinge) * width_grad
     return float(total), grad
 
 

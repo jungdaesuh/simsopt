@@ -61,6 +61,10 @@ def build_solver_checkpoint_payload(
     out_dir_iter: str,
     run_counters: Mapping[str, object],
     alm_state: Mapping[str, object] | None = None,
+    latest_topology_entry: Mapping[str, object] | None = None,
+    best_topology: Mapping[str, object] | None = None,
+    best_hw_clean_topology: Mapping[str, object] | None = None,
+    best_confinement_objective: Mapping[str, object] | None = None,
     conditioning_seed_report: Mapping[str, object] | None = None,
     conditioning_first_accepted_report: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
@@ -98,6 +102,18 @@ def build_solver_checkpoint_payload(
             str(key): _serialize_value(value)
             for key, value in alm_state.items()
         },
+        "latest_topology_entry": None
+        if latest_topology_entry is None
+        else _serialize_value(dict(latest_topology_entry)),
+        "best_topology": None
+        if best_topology is None
+        else _serialize_value(dict(best_topology)),
+        "best_hw_clean_topology": None
+        if best_hw_clean_topology is None
+        else _serialize_value(dict(best_hw_clean_topology)),
+        "best_confinement_objective": None
+        if best_confinement_objective is None
+        else _serialize_value(dict(best_confinement_objective)),
         "conditioning_seed_report": None
         if conditioning_seed_report is None
         else _serialize_value(dict(conditioning_seed_report)),

@@ -892,6 +892,49 @@ class FrontierContractTests(unittest.TestCase):
             first_accepted_report,
         )
 
+    def test_solver_checkpoint_accepts_legacy_v2_without_topology_snapshots(self):
+        checkpoint_module = load_frontier_solver_checkpoint_module()
+        incumbents = load_incumbents_module()
+
+        incumbent = incumbents.SingleStageIncumbentState(
+            x=np.array([1.0, 2.0]),
+            surface_state={"surface": [1.0]},
+            objective_total=1.25,
+            objective_grad=np.array([0.1, 0.2]),
+            search_eval={"total": 1.25, "grad": [0.1, 0.2]},
+            surface_status={"ok": True},
+            search_surface_status={"ok": True},
+            accepted_hardware_status={"success": True},
+            topology_gate_status={"success": True},
+        )
+        payload = checkpoint_module.build_solver_checkpoint_payload(
+            goal_mode="frontier",
+            constraint_method="penalty",
+            stage2_bs_path="/tmp/seed.json",
+            requested_maxiter=300,
+            runtime_maxiter=120,
+            accepted_iterations=5,
+            accepted_boozer_stage="initial",
+            accepted_incumbent=incumbent,
+            best_accepted_incumbent=None,
+            best_accepted_stage=None,
+            best_accepted_metric=None,
+            best_feasible_incumbent=None,
+            best_feasible_stage=None,
+            best_feasible_metric=None,
+            out_dir_iter="/tmp/out",
+            run_counters={"it": 6},
+        )
+        for optional_key in (
+            "latest_topology_entry",
+            "best_topology",
+            "best_hw_clean_topology",
+            "best_confinement_objective",
+        ):
+            payload.pop(optional_key)
+
+        checkpoint_module.validate_solver_checkpoint_payload(payload)
+
     def test_solver_checkpoint_disk_round_trip_via_write_and_load(self):
         # Closes the gap that the existing in-memory round-trip only validated
         # the build/dict path, not the persisted-on-disk JSON contract.

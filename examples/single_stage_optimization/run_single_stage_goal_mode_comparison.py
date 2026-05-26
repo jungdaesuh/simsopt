@@ -248,6 +248,16 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--alm-max-subproblem-continuations", type=int, default=20)
     parser.add_argument("--alm-distance-smoothing", type=float, default=0.005)
     parser.add_argument("--alm-curvature-smoothing", type=float, default=0.05)
+    parser.add_argument(
+        "--alm-fix-signal-mismatch-guard",
+        action="store_true",
+        default=False,
+        help=(
+            "Forward the single-stage ALM signal-mismatch continuation repair "
+            "flag. This is opt-in so existing comparison runs keep their legacy "
+            "ALM closeout behavior."
+        ),
+    )
     parser.add_argument("--alm-formulation", choices=["weighted_sum", "thresholded_physics"], default=os.environ.get("ALM_FORMULATION", "weighted_sum"))
     parser.add_argument("--alm-qs-threshold", type=float, default=float(os.environ["ALM_QS_THRESHOLD"]) if "ALM_QS_THRESHOLD" in os.environ else None)
     parser.add_argument("--alm-boozer-threshold", type=float, default=float(os.environ["ALM_BOOZER_THRESHOLD"]) if "ALM_BOOZER_THRESHOLD" in os.environ else None)
@@ -712,6 +722,11 @@ def build_single_stage_goal_mode_command(
                 "--alm-curvature-smoothing",
                 str(args.alm_curvature_smoothing),
             ]
+        )
+        append_bool_flag(
+            command,
+            "--alm-fix-signal-mismatch-guard",
+            args.alm_fix_signal_mismatch_guard,
         )
     if args.basin_hops > 0:
         command.extend(

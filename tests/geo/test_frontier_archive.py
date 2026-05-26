@@ -597,6 +597,36 @@ class FrontierArchiveTests(unittest.TestCase):
         self.assertEqual(final_member.archive_state, archive_module.FRONTIER_ARCHIVE_STATE_REJECTED)
         self.assertEqual(final_member.member_id, "campaign:lane_01:rejected")
 
+    def test_frontier_mode_archive_requires_kam_certification(self):
+        archive_module = load_frontier_archive_module()
+        payload = self._make_completed_payload()
+        payload["results"].update(
+            {
+                "SINGLE_STAGE_GOAL_MODE": "frontier",
+                "FRONTIER_CERTIFICATION_OK": False,
+                "FRONTIER_CERTIFICATION_REASON": "kam_fraction_below_min",
+                "FRONTIER_KAM_FRACTION": 1.0 / 12.0,
+                "FRONTIER_KAM_MIN": 0.30,
+            }
+        )
+
+        member = archive_module.build_archive_member_from_results(
+            campaign_id="campaign",
+            lane_id="lane_chaotic",
+            payload=payload,
+            rerun_contract={},
+        )
+
+        self.assertFalse(member.hard_certification_ok)
+        self.assertEqual(
+            member.constraint_metrics["frontier_certification_reason"],
+            "kam_fraction_below_min",
+        )
+        self.assertAlmostEqual(
+            member.constraint_metrics["frontier_kam_fraction"],
+            1.0 / 12.0,
+        )
+
     def test_build_frontier_lane_record_tracks_provisional_and_certified_ids(self):
         archive_module = load_frontier_archive_module()
         progress_state_module = load_frontier_progress_state_module()

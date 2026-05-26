@@ -307,10 +307,16 @@ def _resolve_phase1_accept_outcome(
     donor_ready_local_accept,
     recovered_local_accept,
     repair_local_accept,
+    anchor_already_clean,
 ):
     if seed_regime == _SEED_REGIME_PRESERVE_FIRST:
         return donor_ready_local_accept, "safe_local_accept", recovered_local_accept
     if seed_regime == _SEED_REGIME_REPAIR_FIRST:
+        # Hardware-clean donors are at the repair_progress_state floor: monotone
+        # decrease is unreachable, so graduate on the same local-refinement signal
+        # that bridge_only uses.
+        if anchor_already_clean:
+            return recovered_local_accept, "repair_local_recovery_clean_anchor", recovered_local_accept
         return repair_local_accept, "repair_local_recovery", repair_local_accept
     if seed_regime == _SEED_REGIME_BRIDGE_ONLY:
         phase1_outcome = (
@@ -359,6 +365,9 @@ def evaluate_penalty_phase1_local_accept(
         recovered_local_accept
         and step_rms <= float(phase1_config.safe_step_rms_limit)
     )
+    # Hardware-clean anchors sit at the repair_progress_state floor (0, 0.0);
+    # repair_state_improved is structurally unreachable for them.
+    anchor_already_clean = anchor_repair_state == (0, 0.0)
     (
         phase1_graduated,
         phase1_outcome,
@@ -368,6 +377,7 @@ def evaluate_penalty_phase1_local_accept(
         donor_ready_local_accept=donor_ready_local_accept,
         recovered_local_accept=recovered_local_accept,
         repair_local_accept=repair_local_accept,
+        anchor_already_clean=anchor_already_clean,
     )
     return {
         "step_rms": float(step_rms),

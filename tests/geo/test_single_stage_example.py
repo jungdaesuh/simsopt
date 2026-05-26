@@ -159,6 +159,43 @@ def diagnostic_search_eval_payload(base_payload):
     }
 
 
+def topology_hardware_snapshot(
+    *,
+    search_success=True,
+    artifact_success=True,
+    search_violations=None,
+    artifact_violations=None,
+):
+    def hardware_status(success, violations):
+        resolved_violations = [] if violations is None else list(violations)
+        return {
+            "success": bool(success),
+            "violations": resolved_violations,
+            "constraints": {
+                "max_curvature": {
+                    "success": bool(success),
+                    "value": 99.0 if success else 102.0,
+                    "threshold": 100.0,
+                    "violation": 0.0 if success else 2.0,
+                }
+            },
+            "violation_ratios": {
+                "max_curvature_penalty": 0.0 if success else 0.02,
+            },
+        }
+
+    return {
+        "search_hardware_status": hardware_status(
+            search_success,
+            search_violations,
+        ),
+        "artifact_hardware_status": hardware_status(
+            artifact_success,
+            artifact_violations,
+        ),
+    }
+
+
 def search_hardware_penalty_payload(values=(0.0, 0.0, 0.0)):
     return {
         "constraint_names": [
@@ -2073,6 +2110,37 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(metrics["validation_status"], "broken")
         self.assertEqual(metrics["stop_reason_counts"]["iteration_limit"], 1)
+
+    def test_kam_fraction_and_trace_metrics_share_first_stop_semantics(self):
+        topology_module = load_topology_scorer_module()
+        hits = np.array(
+            [
+                [0.0, 0.0, 1.00, 0.0, 0.00],
+                [1.0, 0.0, 1.01, 0.0, 0.01],
+                [2.0, -1.0, 1.01, 0.0, 0.01],
+                [3.0, 0.0, 1.02, 0.0, 0.00],
+                [4.0, 0.0, 1.03, 0.0, 0.01],
+            ],
+            dtype=float,
+        )
+
+        metrics = topology_module.trace_metrics(
+            [np.array([[0.0, 1.0, 0.0, 0.0]])],
+            [hits],
+            [0.0],
+            ["surface_exit"],
+            mode="validation",
+        )
+        fraction, median_width = topology_module.kam_fraction(
+            [hits],
+            cross_section_span=1.0,
+            width_ratio=0.25,
+        )
+
+        self.assertEqual(metrics["survived_lines"], 0)
+        self.assertEqual(metrics["per_phi_hit_counts"], [2])
+        self.assertEqual(fraction, 0.0)
+        self.assertEqual(median_width, 1.0)
 
     def test_midplane_seed_radii_produces_inset_radial_sweep(self):
         topology_module = load_topology_scorer_module()
@@ -4086,12 +4154,16 @@ class HardwareConstraintTests(unittest.TestCase):
             -0.701188557808912,
             -0.701188557808912,
             topology_result,
+            topology_hardware_snapshot(),
         )
 
         self.assertEqual(entry["accepted_iteration"], 9)
+        self.assertEqual(entry["topology_archive_schema_version"], 2)
         self.assertEqual(entry["kam_fraction"], topology_result["kam_fraction"])
         self.assertEqual(entry["kam_median_width"], topology_result["kam_median_width"])
         self.assertEqual(entry["cross_section_span"], topology_result["cross_section_span"])
+        self.assertTrue(entry["artifact_hardware_ok"])
+        self.assertTrue(entry["search_hardware_ok"])
 
     def test_initial_topology_score_writes_archive_and_confinement_checkpoint(self):
         module = load_single_stage_example_module()
@@ -4152,7 +4224,7 @@ class HardwareConstraintTests(unittest.TestCase):
                     outer_surf=object(),
                     biotsavart=object(),
                     surface_data=[],
-                    hardware_status={"success": True, "violations": []},
+                    hardware_snapshot=topology_hardware_snapshot(),
                 )
 
             archive_entries = [
@@ -4164,15 +4236,19 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertEqual(entry["accepted_iteration"], 0)
         self.assertEqual(archive_entries[0]["accepted_iteration"], 0)
+        self.assertEqual(archive_entries[0]["topology_archive_schema_version"], 2)
+        self.assertTrue(archive_entries[0]["artifact_hardware_ok"])
         self.assertEqual(run_dict["best_topology"]["accepted_iteration"], 0)
+        self.assertEqual(run_dict["best_hw_clean_topology"]["accepted_iteration"], 0)
         self.assertEqual(run_dict["best_confinement_objective"]["accepted_iteration"], 0)
         checkpoint_dir_names = [
             Path(call.args[0]).name for call in write_checkpoint.call_args_list
         ]
         self.assertIn("best_topology", checkpoint_dir_names)
+        self.assertIn("best_hw_clean_topology", checkpoint_dir_names)
         self.assertIn("best_confinement_objective", checkpoint_dir_names)
 
-    def test_best_topology_ranks_kam_before_confinement_score(self):
+    def test_best_topology_ranks_survival_before_kam(self):
         module = load_single_stage_example_module()
         module.SINGLE_STAGE_GOAL_MODE = "frontier"
         module.FRONTIER_KAM_MIN = 0.30
@@ -4244,7 +4320,7 @@ class HardwareConstraintTests(unittest.TestCase):
                     outer_surf=object(),
                     biotsavart=object(),
                     surface_data=[],
-                    hardware_status={"success": True, "violations": []},
+                    hardware_snapshot=topology_hardware_snapshot(),
                 )
                 second_entry = module.maybe_record_topology_score(
                     run_dict,
@@ -4253,7 +4329,7 @@ class HardwareConstraintTests(unittest.TestCase):
                     outer_surf=object(),
                     biotsavart=object(),
                     surface_data=[],
-                    hardware_status={"success": True, "violations": []},
+                    hardware_snapshot=topology_hardware_snapshot(),
                 )
 
             archive_entries = [
@@ -4265,12 +4341,197 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertFalse(first_entry["frontier_certification_ok"])
         self.assertTrue(second_entry["frontier_certification_ok"])
-        self.assertEqual(run_dict["best_topology"]["accepted_iteration"], 2)
+        self.assertEqual(run_dict["best_topology"]["accepted_iteration"], 1)
         self.assertEqual(archive_entries[0]["accepted_iteration"], 1)
         self.assertEqual(archive_entries[1]["accepted_iteration"], 2)
         payload = module.best_topology_results_payload(run_dict)
-        self.assertAlmostEqual(payload["BEST_TOPOLOGY_KAM_FRACTION"], 0.5)
-        self.assertEqual(payload["BEST_TOPOLOGY_CERTIFICATION_REASON"], "certified")
+        self.assertAlmostEqual(payload["BEST_TOPOLOGY_KAM_FRACTION"], 1.0 / 12.0)
+        self.assertEqual(
+            payload["BEST_TOPOLOGY_CERTIFICATION_REASON"],
+            "kam_fraction_below_min",
+        )
+
+    def test_best_hw_clean_topology_filters_strict_artifact_hardware(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "target"
+        module.FRONTIER_KAM_MIN = 0.30
+        module.TOPOLOGY_SCORER_EVERY = 1
+        module.TOPOLOGY_SCORER_NFIELDLINES = 8
+        module.TOPOLOGY_SCORER_TMAX = 25.0
+        module.CONFINEMENT_OBJECTIVE_WEIGHT = 1.0
+        module.CONFINEMENT_SURROGATE_WORST_K = 3
+        module.CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
+        module.CONFINEMENT_SURROGATE_MEAN_WEIGHT = 1.0
+        module.CONFINEMENT_SURROGATE_WORST_WEIGHT = 0.0
+        module.CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.0
+
+        def topology_result(kam_fraction, survival_fraction, confinement_score):
+            return {
+                "evaluation_state": "evaluated",
+                "broken": False,
+                "evaluation_error": None,
+                "evaluation_error_type": None,
+                "survival_fraction": survival_fraction,
+                "survived_lines": int(round(8 * survival_fraction)),
+                "nfieldlines": 8,
+                "tmax": 25.0,
+                "mean_exit_time": None,
+                "confinement_score": confinement_score,
+                "mean_line_loss": 0.0,
+                "worst_k_line_loss": 0.0,
+                "early_exit_fraction": 0.0,
+                "confinement_loss": 1.0 / confinement_score,
+                "confinement_surrogate_k": 3,
+                "confinement_early_exit_threshold": 0.2,
+                "kam_fraction": kam_fraction,
+                "kam_median_width": 0.08,
+                "cross_section_span": 0.2,
+                "stop_reason_counts": {"surface_exit": 0},
+                "first_exit": None,
+                "per_phi_hit_counts": [40, 40, 40, 40],
+                "line_metrics": [],
+                "line_lifetimes": [],
+                "line_losses": [],
+                "seed_contract": {"nfieldlines": 8},
+                "field_model": "biotsavart",
+                "transport_diagnostics": {"status": "partial"},
+            }
+
+        run_dict = {}
+        hw_clean_lower_kam = topology_result(
+            kam_fraction=0.375,
+            survival_fraction=0.875,
+            confinement_score=0.899,
+        )
+        hw_failed_higher_kam = topology_result(
+            kam_fraction=0.625,
+            survival_fraction=1.0,
+            confinement_score=1.0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.OUT_DIR_ITER = tmpdir
+            with patch.object(
+                module,
+                "safe_score_topology",
+                side_effect=[hw_clean_lower_kam, hw_failed_higher_kam],
+            ), patch.object(module, "write_topology_checkpoint_artifacts"):
+                first_entry = module.maybe_record_topology_score(
+                    run_dict,
+                    accepted_iteration=0,
+                    proxy_objective=3.0,
+                    outer_surf=object(),
+                    biotsavart=object(),
+                    surface_data=[],
+                    hardware_snapshot=topology_hardware_snapshot(),
+                )
+                second_entry = module.maybe_record_topology_score(
+                    run_dict,
+                    accepted_iteration=3,
+                    proxy_objective=2.5,
+                    outer_surf=object(),
+                    biotsavart=object(),
+                    surface_data=[],
+                    hardware_snapshot=topology_hardware_snapshot(
+                        artifact_success=False,
+                        artifact_violations=["max_curvature 102.000000 above threshold 100.000000"],
+                    ),
+                )
+
+            archive_entries = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "topology_archive.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertTrue(first_entry["artifact_hardware_ok"])
+        self.assertFalse(second_entry["artifact_hardware_ok"])
+        self.assertEqual(run_dict["best_topology"]["accepted_iteration"], 3)
+        self.assertEqual(run_dict["best_hw_clean_topology"]["accepted_iteration"], 0)
+        self.assertFalse(archive_entries[1]["artifact_hardware_ok"])
+        payload = module.best_topology_results_payload(run_dict)
+        self.assertAlmostEqual(payload["BEST_TOPOLOGY_KAM_FRACTION"], 0.625)
+        self.assertFalse(payload["BEST_TOPOLOGY_ARTIFACT_HARDWARE_OK"])
+        self.assertAlmostEqual(payload["BEST_HW_CLEAN_TOPOLOGY_KAM_FRACTION"], 0.375)
+        self.assertTrue(payload["BEST_HW_CLEAN_TOPOLOGY_ARTIFACT_HARDWARE_OK"])
+
+    def test_best_topology_payload_keeps_missing_records_unknown(self):
+        module = load_single_stage_example_module()
+
+        empty_payload = module.best_topology_results_payload({})
+
+        self.assertIsNone(empty_payload["BEST_TOPOLOGY_KAM_FRACTION"])
+        self.assertIsNone(empty_payload["BEST_TOPOLOGY_ARTIFACT_HARDWARE_OK"])
+        self.assertIsNone(empty_payload["BEST_TOPOLOGY_DIAGNOSTICS"])
+        self.assertIsNone(empty_payload["BEST_HW_CLEAN_TOPOLOGY_KAM_FRACTION"])
+        self.assertIsNone(empty_payload["BEST_HW_CLEAN_TOPOLOGY_ARTIFACT_HARDWARE_OK"])
+        self.assertIsNone(empty_payload["BEST_HW_CLEAN_TOPOLOGY_DIAGNOSTICS"])
+
+        raw_only_payload = module.best_topology_results_payload(
+            {
+                "best_topology": {
+                    "accepted_iteration": 3,
+                    "topology_broken": False,
+                    "kam_fraction": 0.625,
+                    "artifact_hardware_ok": False,
+                }
+            }
+        )
+
+        self.assertAlmostEqual(raw_only_payload["BEST_TOPOLOGY_KAM_FRACTION"], 0.625)
+        self.assertFalse(raw_only_payload["BEST_TOPOLOGY_ARTIFACT_HARDWARE_OK"])
+        self.assertEqual(
+            raw_only_payload["BEST_TOPOLOGY_DIAGNOSTICS"]["reason"],
+            "score_recorded",
+        )
+        self.assertIsNone(raw_only_payload["BEST_HW_CLEAN_TOPOLOGY_KAM_FRACTION"])
+        self.assertIsNone(raw_only_payload["BEST_HW_CLEAN_TOPOLOGY_DIAGNOSTICS"])
+
+        unproven_hw_clean_payload = module.best_topology_results_payload(
+            {
+                "best_hw_clean_topology": {
+                    "accepted_iteration": 4,
+                    "topology_broken": False,
+                    "kam_fraction": 0.75,
+                }
+            }
+        )
+
+        self.assertIsNone(
+            unproven_hw_clean_payload["BEST_HW_CLEAN_TOPOLOGY_KAM_FRACTION"]
+        )
+        self.assertIsNone(
+            unproven_hw_clean_payload["BEST_HW_CLEAN_TOPOLOGY_ARTIFACT_HARDWARE_OK"]
+        )
+
+    def test_legacy_resume_clears_pre_resume_topology_entries(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "latest_topology_entry": {"accepted_iteration": 0},
+            "best_topology": {"accepted_iteration": 0},
+            "best_hw_clean_topology": {"accepted_iteration": 0},
+            "best_confinement_objective": {"accepted_iteration": 0},
+        }
+
+        module.restore_topology_checkpoint_entries(
+            run_dict,
+            {
+                "best_topology": {
+                    "accepted_iteration": 7,
+                    "kam_fraction": 0.5,
+                },
+                "best_hw_clean_topology": {
+                    "accepted_iteration": 8,
+                    "kam_fraction": 0.75,
+                }
+            },
+        )
+
+        self.assertNotIn("latest_topology_entry", run_dict)
+        self.assertNotIn("best_hw_clean_topology", run_dict)
+        self.assertNotIn("best_confinement_objective", run_dict)
+        self.assertEqual(run_dict["best_topology"]["accepted_iteration"], 7)
 
     def test_build_banana_current_coordinate_report_tracks_indices_bounds_and_gradients(self):
         module = load_single_stage_example_module()
@@ -11456,7 +11717,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not single-stage bootable"):
             module.validate_stage2_seed_bootability_contract(stage2_results)
 
-    def test_validate_stage2_seed_bootability_contract_accepts_live_trusted_handoff(self):
+    def test_validate_stage2_seed_bootability_contract_accepts_legacy_alm_label_by_facts(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(
             module,
@@ -11472,7 +11733,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         module.validate_stage2_seed_bootability_contract(stage2_results)
 
-    def test_validate_stage2_seed_bootability_contract_rejects_report_only_handoff(self):
+    def test_validate_stage2_seed_bootability_contract_accepts_report_handoff_by_facts(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(
             module,
@@ -11486,8 +11747,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             BOOTABILITY_TARGET_IOTA=0.16,
         )
 
-        with self.assertRaisesRegex(ValueError, "STAGE2_IOTA_MODE='report'"):
-            module.validate_stage2_seed_bootability_contract(stage2_results)
+        module.validate_stage2_seed_bootability_contract(stage2_results)
 
     def test_resolve_single_stage_banana_surf_radius_defaults_to_loaded_artifact(self):
         module = load_single_stage_example_module()
@@ -12808,10 +13068,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
     def _stage2_s_hel_argv(self, *extra_args: str) -> list[str]:
         return [
             "banana_coil_solver.py",
-            "--stage2-iota-mode",
-            "soft",
-            "--stage2-iota-target",
-            "0.16",
             "--enable-s-hel-objective",
             *extra_args,
         ]
@@ -12829,7 +13085,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertTrue(args.enable_s_hel_objective)
         self.assertEqual(args.s_hel_objective_weight, 1.0e-3)
 
-    def test_stage2_parse_args_accepts_iota_alm_floor_mode(self):
+    def test_stage2_parse_args_rejects_iota_alm_floor_mode(self):
         module = load_stage2_module()
 
         with patch.object(
@@ -12845,10 +13101,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 "0.12",
             ],
         ):
-            args = module.parse_args()
-
-        self.assertEqual(args.stage2_iota_mode, "alm-floor")
-        self.assertEqual(args.stage2_iota_target, 0.12)
+            with self.assertRaises(SystemExit):
+                module.parse_args()
 
     def test_stage2_build_s_hel_objective_constructs_enabled_schedule(self):
         module = load_stage2_module()
@@ -13025,16 +13279,29 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         args = SimpleNamespace(
             banana_current_max_A=20000.0,
+            offspec_replay_debug_only=False,
         )
 
         with self.assertRaisesRegex(ValueError, "banana-current-max-A"):
             module.validate_single_stage_current_args(args)
+
+    def test_validate_single_stage_current_args_allows_offspec_debug_replay_limit(self):
+        module = load_single_stage_example_module()
+
+        args = SimpleNamespace(
+            banana_current_max_A=20000.0,
+            offspec_replay_debug_only=True,
+            single_stage_banana_current_mode="shared",
+        )
+
+        module.validate_single_stage_current_args(args)
 
     def test_validate_single_stage_current_args_allows_independent_alm(self):
         module = load_single_stage_example_module()
 
         args = SimpleNamespace(
             banana_current_max_A=16000.0,
+            offspec_replay_debug_only=False,
             single_stage_banana_current_mode="independent",
             constraint_method="alm",
         )
@@ -13175,6 +13442,31 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.stage2_seed_tf_current_A, -70000.0)
 
+    def test_apply_default_stage2_seed_args_allows_offspec_debug_tf_current(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+            stage2_seed_major_radius=0.915,
+            stage2_seed_toroidal_flux=None,
+            stage2_seed_length_weight=None,
+            stage2_seed_cc_weight=None,
+            stage2_seed_curvature_weight=None,
+            stage2_seed_cc_threshold=None,
+            stage2_seed_curvature_threshold=None,
+            stage2_seed_banana_surf_radius=None,
+            stage2_seed_tf_current_A=None,
+            stage2_seed_order=None,
+            stage2_seed_banana_init_current_A=None,
+            accept_offspec_r0_seed=True,
+            offspec_replay_debug_only=True,
+            tf_current_A=100000.0,
+        )
+
+        module.apply_default_stage2_seed_args(args)
+
+        self.assertEqual(args.stage2_seed_tf_current_A, 100000.0)
+        self.assertEqual(args.stage2_seed_major_radius, 0.915)
+
     def test_apply_default_stage2_seed_args_rejects_conflicting_tf_current(self):
         module = load_single_stage_example_module()
         args = SimpleNamespace(
@@ -13288,6 +13580,10 @@ class CurrentBaselineContractTests(unittest.TestCase):
             banana_init_current_A=18000.0,
             banana_current_max_A=20000.0,
             tf_current_A=-80000.0,
+            accept_offspec_banana_current_sign=False,
+            accept_offspec_banana_current_max=False,
+            accept_offspec_tf_current_sign=False,
+            accept_offspec_tf_current_magnitude=False,
         )
 
         with self.assertRaisesRegex(ValueError, "banana-init-current-A"):
@@ -13305,6 +13601,36 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(resolved, {"banana_current": 16000.0})
         np.testing.assert_allclose(leaf_current.local_lower_bounds, [-16000.0])
         np.testing.assert_allclose(leaf_current.local_upper_bounds, [16000.0])
+
+    def test_stage2_penalty_traversal_can_preserve_positive_seed_sign(self):
+        module = load_stage2_module()
+        leaf_current, scaled_current = _make_unbounded_scaled_current()
+
+        resolved = module.apply_penalty_traversal_forbidden_box_bounds(
+            bound_targets={"banana_current": scaled_current},
+            requested_thresholds={"banana_current": 16000.0},
+            seed_values={"banana_current": 10000.0},
+            preserve_seed_sign_names=frozenset({"banana_current"}),
+        )
+
+        self.assertEqual(resolved, {"banana_current": 16000.0})
+        np.testing.assert_allclose(leaf_current.local_lower_bounds, [0.0])
+        np.testing.assert_allclose(leaf_current.local_upper_bounds, [16000.0])
+
+    def test_stage2_penalty_traversal_can_preserve_negative_seed_sign(self):
+        module = load_stage2_module()
+        leaf_current, scaled_current = _make_unbounded_scaled_current()
+
+        resolved = module.apply_penalty_traversal_forbidden_box_bounds(
+            bound_targets={"banana_current": scaled_current},
+            requested_thresholds={"banana_current": 16000.0},
+            seed_values={"banana_current": -10000.0},
+            preserve_seed_sign_names=frozenset({"banana_current"}),
+        )
+
+        self.assertEqual(resolved, {"banana_current": 16000.0})
+        np.testing.assert_allclose(leaf_current.local_lower_bounds, [-16000.0])
+        np.testing.assert_allclose(leaf_current.local_upper_bounds, [0.0])
 
     def test_shared_penalty_traversal_helper_uses_schema_bound(self):
         module = load_stage2_module()
@@ -13580,8 +13906,14 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "stage2_iota_ntor": 6,
             "length_weight": 5e-4,
             "length_target": 1.9,
-            "target_lcfs_max_major_radius_m": 0.92,
-            "target_lcfs_max_minor_radius_m": 0.15,
+            "target_lcfs_max_major_radius_m": in_bounds_lcfs_major_radius_m(),
+            "target_lcfs_max_minor_radius_m": in_bounds_lcfs_minor_radius_m(),
+            "stage2_plasma_scaling_mode": "lcfs",
+            "accept_offspec_major_radius": False,
+            "accept_offspec_banana_current_sign": False,
+            "accept_offspec_banana_current_max": False,
+            "accept_offspec_tf_current_sign": False,
+            "accept_offspec_tf_current_magnitude": False,
             "cc_threshold": 0.05,
             "cc_weight": 100.0,
             "curvature_weight": 1e-4,
@@ -13641,6 +13973,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "curve_surface_surface_label": None,
             "surface_surface_min_distance_labels": None,
             "plasma_geometry_args": None,
+            "stage2_iota_runtime_builds": 0,
+            "stage2_iota_probes": 0,
+            "stage2_iota_probe_kwargs": None,
             "results": None,
         }
 
@@ -14054,6 +14389,25 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["plasma_geometry_args"] = args
             return fake_plasma_geometry
 
+        def fake_build_stage2_iota_runtime(*_args, **_kwargs):
+            runtime["stage2_iota_runtime_builds"] += 1
+            raise AssertionError("Stage 2 report/off must not build Stage2IotaRuntime")
+
+        def fake_probe_stage2_seed_bootability(**kwargs):
+            runtime["stage2_iota_probes"] += 1
+            runtime["stage2_iota_probe_kwargs"] = dict(kwargs)
+            return {
+                "BOOZER_BOOTABLE": True,
+                "BOOZER_TRUSTED": True,
+                "IOTA_NEAR_TARGET": True,
+                "IOTA_FEASIBLE": True,
+                "BOOTABILITY_REASON": "ok",
+                "BOOTABILITY_STAGE": "post_gate_report",
+                "BOOTABILITY_TARGET_IOTA": kwargs["iota_target"],
+                "BOOTABILITY_SOLVED_IOTA": kwargs["iota_target"],
+                "BOOTABILITY_SELF_INTERSECTING": False,
+            }
+
         with tempfile.TemporaryDirectory() as tmpdir:
             equilibrium_path = Path(tmpdir) / "demo.nc"
             equilibrium_path.write_bytes(SIGNED_CW_WOUT_PATH.read_bytes())
@@ -14164,6 +14518,16 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(module, "is_self_intersecting", lambda *_args, **_kwargs: False),
                     patch.object(
                         module,
+                        "build_stage2_iota_runtime",
+                        side_effect=fake_build_stage2_iota_runtime,
+                    ),
+                    patch.object(
+                        module,
+                        "probe_stage2_seed_bootability",
+                        side_effect=fake_probe_stage2_seed_bootability,
+                    ),
+                    patch.object(
+                        module,
                         "compute_stage2_bs_sha256",
                         return_value="0" * 64,
                     ),
@@ -14256,6 +14620,26 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertTrue(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
         self.assertTrue(runtime["results"]["STAGE2_BS_PATH"].endswith("seed.json"))
 
+    def test_stage2_main_report_runs_post_gate_without_hot_loop_runtime(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=True,
+            arg_overrides={
+                "stage2_iota_mode": "report",
+                "stage2_iota_target": 0.2,
+            },
+        )
+
+        self.assertEqual(runtime["stage2_iota_runtime_builds"], 0)
+        self.assertEqual(runtime["stage2_iota_probes"], 1)
+        self.assertTrue(runtime["results"]["STAGE2_ROOT_FIX_ENABLED"])
+        self.assertFalse(runtime["results"]["STAGE2_IOTA_OBJECTIVE_COUPLED"])
+        self.assertFalse(runtime["results"]["STAGE2_IOTA_HOT_LOOP_ENABLED"])
+        self.assertTrue(runtime["results"]["BOOZER_BOOTABLE"])
+        self.assertTrue(runtime["results"]["BOOZER_TRUSTED"])
+        self.assertEqual(runtime["stage2_iota_probe_kwargs"]["iota_target"], 0.2)
+
     def test_stage2_main_reports_lcfs_metrics_and_boundary_clearance(self):
         runtime = self._run_stage2_main(
             init_only=True,
@@ -14272,7 +14656,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["surface_surface_min_distance_labels"],
             ("lcfs", "vv"),
         )
-        self.assertEqual(runtime["plasma_geometry_args"][0], 0.92)
+        self.assertEqual(
+            runtime["plasma_geometry_args"][0],
+            in_bounds_lcfs_major_radius_m(),
+        )
         self.assertEqual(runtime["results"]["MAJOR_RADIUS"], 0.976)
         self.assertEqual(
             runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"],

@@ -1088,6 +1088,9 @@ def apply_default_stage2_seed_args(args):
     contract, _trace = _resolve_constraint_contract_from_wire_names_impl(
         profile=constraint_profile,
         cli_overrides=cli_seed_layer,
+        allow_offspec_current_contract=bool(
+            getattr(args, "offspec_replay_debug_only", False)
+        ),
     )
     if args.stage2_seed_major_radius is None:
         args.stage2_seed_major_radius = contract["VACUUM_VESSEL_MAJOR_RADIUS_M"]
@@ -2715,7 +2718,7 @@ def compute_single_stage_surface_vessel_min_dist(
 def single_stage_banana_poloidal_extent_rad(banana_curve):
     return max_poloidal_extent_rad(
         banana_curve,
-        VACUUM_VESSEL_MAJOR_RADIUS_M,
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     )
 
 
@@ -2953,7 +2956,55 @@ def checkpoint_confinement_objective(proxy_objective, topology_result, confineme
     return float(proxy_objective) + float(confinement_weight) * float(topology_result["confinement_loss"])
 
 
-def topology_archive_entry(accepted_iteration, proxy_objective, checkpoint_objective_total, topology_result):
+TOPOLOGY_ARCHIVE_SCHEMA_VERSION = 2
+
+
+def topology_hardware_status_archive_fields(prefix, hardware_status):
+    return {
+        f"{prefix}_hardware_ok": (
+            None
+            if hardware_status is None
+            else bool(hardware_status["success"])
+        ),
+        f"{prefix}_hardware_violations": (
+            None
+            if hardware_status is None
+            else list(hardware_status["violations"])
+        ),
+        f"{prefix}_hardware_constraints": (
+            None
+            if hardware_status is None
+            else dict(hardware_status["constraints"])
+        ),
+        f"{prefix}_hardware_violation_ratios": (
+            None
+            if hardware_status is None
+            else hardware_status.get("violation_ratios")
+        ),
+    }
+
+
+def topology_archive_hardware_fields(hardware_snapshot):
+    return {
+        "topology_archive_schema_version": TOPOLOGY_ARCHIVE_SCHEMA_VERSION,
+        **topology_hardware_status_archive_fields(
+            "search",
+            hardware_snapshot["search_hardware_status"],
+        ),
+        **topology_hardware_status_archive_fields(
+            "artifact",
+            hardware_snapshot["artifact_hardware_status"],
+        ),
+    }
+
+
+def topology_archive_entry(
+    accepted_iteration,
+    proxy_objective,
+    checkpoint_objective_total,
+    topology_result,
+    hardware_snapshot,
+):
     return {
         "accepted_iteration": accepted_iteration,
         "J": float(proxy_objective),
@@ -2987,6 +3038,7 @@ def topology_archive_entry(accepted_iteration, proxy_objective, checkpoint_objec
         "seed_contract": topology_result.get("seed_contract"),
         "field_model": topology_result.get("field_model"),
         "transport_diagnostics": topology_result.get("transport_diagnostics"),
+        **topology_archive_hardware_fields(hardware_snapshot),
     }
 
 
@@ -3177,18 +3229,22 @@ def finite_topology_rank_component(value, *, unit_interval=False):
     return numeric
 
 
-def topology_kam_rank_key(topology_entry):
+def topology_survival_rank_key(topology_entry):
     return (
-        finite_topology_rank_component(
-            topology_entry.get("kam_fraction"),
-            unit_interval=True,
-        ),
         finite_topology_rank_component(
             topology_entry.get("survival_fraction"),
             unit_interval=True,
         ),
+        finite_topology_rank_component(
+            topology_entry.get("kam_fraction"),
+            unit_interval=True,
+        ),
         finite_topology_rank_component(topology_entry.get("confinement_score")),
     )
+
+
+def topology_entry_is_artifact_hardware_clean(topology_entry):
+    return topology_entry is not None and topology_entry.get("artifact_hardware_ok") is True
 
 
 def best_topology_certification_payload(certification_status):
@@ -3209,23 +3265,77 @@ def frontier_reportable_success(is_frontier_mode, final_feasibility_ok, certific
     return bool(final_feasibility_ok and certification_status.get("ok") is True)
 
 
-def best_topology_results_payload(run_dict):
-    best_topology = run_dict.get("best_topology", {})
-    certification_status = frontier_certification_status_from_field_payload(best_topology)
+def topology_results_fields(topology_entry, *, prefix, artifact_role):
+    entry_fields = {} if topology_entry is None else topology_entry
     return {
-        "BEST_TOPOLOGY_ACCEPTED_ITERATION": best_topology.get("accepted_iteration"),
-        "BEST_TOPOLOGY_CONFINEMENT_SCORE": best_topology.get("confinement_score"),
-        "BEST_TOPOLOGY_CONFINEMENT_LOSS": best_topology.get("confinement_loss"),
-        "BEST_TOPOLOGY_KAM_FRACTION": best_topology.get("kam_fraction"),
-        "BEST_TOPOLOGY_KAM_MEDIAN_WIDTH": best_topology.get("kam_median_width"),
-        "BEST_TOPOLOGY_CROSS_SECTION_SPAN": best_topology.get("cross_section_span"),
-        "BEST_TOPOLOGY_TRANSPORT_DIAGNOSTICS": best_topology.get("transport_diagnostics"),
-        "BEST_TOPOLOGY_DIAGNOSTICS": optional_topology_score_diagnostics(
-            run_dict.get("best_topology"),
+        f"{prefix}_ACCEPTED_ITERATION": entry_fields.get("accepted_iteration"),
+        f"{prefix}_CONFINEMENT_SCORE": entry_fields.get("confinement_score"),
+        f"{prefix}_CONFINEMENT_LOSS": entry_fields.get("confinement_loss"),
+        f"{prefix}_KAM_FRACTION": entry_fields.get("kam_fraction"),
+        f"{prefix}_KAM_MEDIAN_WIDTH": entry_fields.get("kam_median_width"),
+        f"{prefix}_CROSS_SECTION_SPAN": entry_fields.get("cross_section_span"),
+        f"{prefix}_TRANSPORT_DIAGNOSTICS": entry_fields.get("transport_diagnostics"),
+        f"{prefix}_ARTIFACT_HARDWARE_OK": entry_fields.get("artifact_hardware_ok"),
+        f"{prefix}_ARTIFACT_HARDWARE_VIOLATIONS": entry_fields.get(
+            "artifact_hardware_violations"
+        ),
+        f"{prefix}_SEARCH_HARDWARE_OK": entry_fields.get("search_hardware_ok"),
+        f"{prefix}_SEARCH_HARDWARE_VIOLATIONS": entry_fields.get(
+            "search_hardware_violations"
+        ),
+        f"{prefix}_DIAGNOSTICS": optional_topology_score_diagnostics(
+            topology_entry,
+            artifact_role=artifact_role,
+        ),
+    }
+
+
+def best_topology_results_payload(run_dict):
+    best_topology = run_dict.get("best_topology")
+    raw_best_hw_clean_topology = run_dict.get("best_hw_clean_topology")
+    best_hw_clean_topology = (
+        raw_best_hw_clean_topology
+        if topology_entry_is_artifact_hardware_clean(raw_best_hw_clean_topology)
+        else None
+    )
+    certification_status = frontier_certification_status_from_field_payload(
+        {} if best_topology is None else best_topology
+    )
+    return {
+        **topology_results_fields(
+            best_topology,
+            prefix="BEST_TOPOLOGY",
             artifact_role="best_topology",
         ),
         **best_topology_certification_payload(certification_status),
+        **topology_results_fields(
+            best_hw_clean_topology,
+            prefix="BEST_HW_CLEAN_TOPOLOGY",
+            artifact_role="best_hw_clean_topology",
+        ),
     }
+
+
+TOPOLOGY_CHECKPOINT_ENTRY_KEYS = (
+    "latest_topology_entry",
+    "best_topology",
+    "best_hw_clean_topology",
+    "best_confinement_objective",
+)
+
+
+def restore_topology_checkpoint_entries(run_dict, checkpoint_payload):
+    for topology_key in TOPOLOGY_CHECKPOINT_ENTRY_KEYS:
+        restored_topology_entry = checkpoint_payload.get(topology_key)
+        if topology_key == "best_hw_clean_topology" and not (
+            topology_entry_is_artifact_hardware_clean(restored_topology_entry)
+        ):
+            run_dict.pop(topology_key, None)
+            continue
+        if isinstance(restored_topology_entry, dict):
+            run_dict[topology_key] = dict(restored_topology_entry)
+        else:
+            run_dict.pop(topology_key, None)
 
 
 def maybe_record_topology_score(
@@ -3236,7 +3346,7 @@ def maybe_record_topology_score(
     outer_surf,
     biotsavart,
     surface_data,
-    hardware_status,
+    hardware_snapshot,
 ):
     if TOPOLOGY_SCORER_EVERY <= 0 or accepted_iteration % TOPOLOGY_SCORER_EVERY != 0:
         return None
@@ -3262,10 +3372,12 @@ def maybe_record_topology_score(
         proxy_objective,
         checkpoint_objective_total,
         topo_result,
+        hardware_snapshot,
     )
+    artifact_hardware_status = hardware_snapshot["artifact_hardware_status"]
     certification_status = build_frontier_kam_certification_status(
         topo_entry,
-        hardware_status=hardware_status,
+        hardware_status=artifact_hardware_status,
         accepted_iteration=accepted_iteration,
     )
     topo_entry = annotate_frontier_certification_fields(
@@ -3282,14 +3394,32 @@ def maybe_record_topology_score(
         not topo_result["broken"]
         and (
             "best_topology" not in run_dict
-            or topology_kam_rank_key(topo_entry)
-            > topology_kam_rank_key(run_dict["best_topology"])
+            or topology_survival_rank_key(topo_entry)
+            > topology_survival_rank_key(run_dict["best_topology"])
         )
     ):
         run_dict["best_topology"] = topo_entry
         write_topology_checkpoint_artifacts(
             os.path.join(OUT_DIR_ITER, "best_topology"),
             artifact_role="best_topology_checkpoint",
+            topology_entry=topo_entry,
+            biotsavart=biotsavart,
+            surface_data=surface_data,
+        )
+
+    if (
+        not topo_result["broken"]
+        and topology_entry_is_artifact_hardware_clean(topo_entry)
+        and (
+            "best_hw_clean_topology" not in run_dict
+            or topology_survival_rank_key(topo_entry)
+            > topology_survival_rank_key(run_dict["best_hw_clean_topology"])
+        )
+    ):
+        run_dict["best_hw_clean_topology"] = topo_entry
+        write_topology_checkpoint_artifacts(
+            os.path.join(OUT_DIR_ITER, "best_hw_clean_topology"),
+            artifact_role="best_hw_clean_topology_checkpoint",
             topology_entry=topo_entry,
             biotsavart=biotsavart,
             surface_data=surface_data,
@@ -3362,7 +3492,10 @@ def validate_single_stage_current_args(args):
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
-    if banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A:
+    if (
+        banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A
+        and not bool(getattr(args, "offspec_replay_debug_only", False))
+    ):
         raise ValueError(
             f"--banana-current-max-A must be in the interval "
             f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
@@ -4938,7 +5071,7 @@ def build_single_stage_objective_bundle(
     )
     JPoloidalExtent = PoloidalExtent(
         banana_curves[0],
-        VACUUM_VESSEL_MAJOR_RADIUS_M,
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
         SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
     )
     JCoilWidth = EllipseWidth(
@@ -8010,6 +8143,7 @@ def build_single_stage_solver_checkpoint_state(
         out_dir_iter=str(out_dir_iter),
         latest_topology_entry=run_dict.get("latest_topology_entry"),
         best_topology=run_dict.get("best_topology"),
+        best_hw_clean_topology=run_dict.get("best_hw_clean_topology"),
         best_confinement_objective=run_dict.get("best_confinement_objective"),
         run_counters={
             "it": run_dict.get("it", 0),
@@ -9057,11 +9191,11 @@ def callback(x):
         outer_surf=outer_surface_data['boozer_surface'].surface,
         biotsavart=bs,
         surface_data=surface_data,
-        hardware_status=hardware_status,
+        hardware_snapshot=hardware_snapshot,
     )
     refresh_frontier_certification_status(
         run_dict,
-        hardware_status=hardware_status,
+        hardware_status=hardware_snapshot["artifact_hardware_status"],
         accepted_iteration=accepted_iteration,
         topology_entry=frontier_topology_entry,
     )
@@ -9979,11 +10113,11 @@ if __name__ == "__main__":
         outer_surf=outer_surface_data["boozer_surface"].surface,
         biotsavart=bs,
         surface_data=surface_data,
-        hardware_status=initial_hardware_snapshot["search_hardware_status"],
+        hardware_snapshot=initial_hardware_snapshot,
     )
     refresh_frontier_certification_status(
         run_dict,
-        hardware_status=initial_hardware_snapshot["search_hardware_status"],
+        hardware_status=initial_hardware_snapshot["artifact_hardware_status"],
         accepted_iteration=0,
         topology_entry=initial_topology_entry,
     )
@@ -10067,14 +10201,10 @@ if __name__ == "__main__":
         run_dict["best_feasible_metric"] = resume_solver_checkpoint_payload.get(
             "best_feasible_metric"
         )
-        for topology_key in (
-            "latest_topology_entry",
-            "best_topology",
-            "best_confinement_objective",
-        ):
-            restored_topology_entry = resume_solver_checkpoint_payload.get(topology_key)
-            if isinstance(restored_topology_entry, dict):
-                run_dict[topology_key] = dict(restored_topology_entry)
+        restore_topology_checkpoint_entries(
+            run_dict,
+            resume_solver_checkpoint_payload,
+        )
         run_dict["frontier_conditioning_seed_report"] = (
             resume_solver_checkpoint_payload.get(
                 "conditioning_seed_report",
