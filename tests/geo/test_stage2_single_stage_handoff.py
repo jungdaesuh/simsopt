@@ -140,7 +140,7 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "BOOTABILITY_ABS_IOTA_ERROR": 0.0,
         "BOOTABILITY_ERROR_TYPE": None,
         "BOOTABILITY_ERROR_MESSAGE": None,
-        "STAGE2_IOTA_MODE": "alm",
+        "STAGE2_IOTA_MODE": "report",
         "BOOZER_SOLVE_SUCCESS": True,
         "BOOZER_SELF_INTERSECTING": False,
         "BOOZER_CONSTRAINED_RESIDUAL_NORM": 1.0e-14,
@@ -309,20 +309,24 @@ def _bootability_status(
 
 
 class HandoffSchemaTests(unittest.TestCase):
-    def test_validate_stage2_seed_bootability_contract_accepts_alm_only(self):
+    def test_validate_stage2_seed_bootability_contract_accepts_fact_based_report(self):
         module = load_handoff_module()
         payload = {
             **_valid_stage2_contract_fields(),
-            "STAGE2_IOTA_MODE": "alm",
+            "STAGE2_IOTA_MODE": "report",
             "BOOZER_TRUSTED": True,
         }
 
         module.validate_stage2_seed_bootability_contract(payload)
 
-        soft_payload = dict(payload)
-        soft_payload["STAGE2_IOTA_MODE"] = "soft"
-        with self.assertRaisesRegex(ValueError, "STAGE2_IOTA_MODE='soft'"):
-            module.validate_stage2_seed_bootability_contract(soft_payload)
+        legacy_mode_payload = dict(payload)
+        legacy_mode_payload["STAGE2_IOTA_MODE"] = "alm"
+        module.validate_stage2_seed_bootability_contract(legacy_mode_payload)
+
+        off_target_payload = dict(payload)
+        off_target_payload["IOTA_NEAR_TARGET"] = False
+        off_target_payload["IOTA_FEASIBLE"] = False
+        module.validate_stage2_seed_bootability_contract(off_target_payload)
 
         offspec_wout_payload = dict(payload)
         offspec_wout_payload["WOUT_OFF_SPEC"] = True
@@ -613,7 +617,7 @@ class HandoffModuleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not single-stage bootable"):
             module.validate_stage2_seed_handoff_contract(stage2_results)
 
-    def test_classify_bootability_result_accepts_iota_mismatch_as_evaluable_domain(
+    def test_classify_bootability_result_records_iota_miss_as_telemetry(
         self,
     ):
         module = load_handoff_module()
@@ -637,7 +641,7 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertTrue(status["BOOZER_BOOTABLE"])
         self.assertFalse(status["IOTA_NEAR_TARGET"])
         self.assertFalse(status["IOTA_FEASIBLE"])
-        self.assertEqual(status["BOOTABILITY_REASON"], module.BOOTABILITY_REASON_IOTA_MISMATCH)
+        self.assertEqual(status["BOOTABILITY_REASON"], module.BOOTABILITY_REASON_OK)
         self.assertAlmostEqual(status["BOOTABILITY_ABS_IOTA_ERROR"], 0.08)
 
     def test_bootability_passes_rejects_truthy_non_boolean_flags(self):
@@ -2092,7 +2096,7 @@ class UnifiedRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(stage2_args.constraint_method, "alm")
-        self.assertEqual(stage2_args.stage2_iota_mode, "alm")
+        self.assertEqual(stage2_args.stage2_iota_mode, "report")
         self.assertAlmostEqual(stage2_args.stage2_iota_target, 0.2)
         self.assertAlmostEqual(stage2_args.stage2_iota_vol_target, 0.13)
 
@@ -2466,7 +2470,7 @@ class UnifiedRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             command[command.index("--stage2-iota-mode") + 1],
-            "alm",
+            "report",
         )
         self.assertEqual(
             command[command.index("--stage2-iota-target") + 1],
@@ -2640,7 +2644,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     command[command.index("--stage2-iota-mode") + 1],
-                    "alm",
+                    "report",
                 )
                 self.assertEqual(
                     command[command.index("--stage2-iota-target") + 1],
@@ -2656,7 +2660,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                     repaired_results_path,
                     {
                         **original_stage2_results,
-                        "STAGE2_IOTA_MODE": "alm",
+                        "STAGE2_IOTA_MODE": "report",
                         "iterations": 5,
                     },
                 )
@@ -2736,7 +2740,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             self.assertEqual(payload["recovered_bs_path"], str(repaired_bs_path))
             self.assertIsNone(payload["warm_start_surface_stem"])
             self.assertEqual(payload["results"]["SEED_ROLE"], "bootable_handoff")
-            self.assertEqual(payload["results"]["STAGE2_IOTA_MODE"], "alm")
+            self.assertEqual(payload["results"]["STAGE2_IOTA_MODE"], "report")
             self.assertFalse(payload["results"]["WOUT_OFF_SPEC"])
             self.assertFalse(payload["results"]["DIAGNOSTIC_ONLY"])
             self.assertTrue(payload["results"]["PRODUCTION_HANDOFF_READY"])
@@ -2754,7 +2758,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             self.assertEqual(probe_call["stage2_results"]["iterations"], 5)
             self.assertIsNone(probe_call["warm_start_boozer_surface_path"])
 
-    def test_full_mode_rejects_bootable_iota_off_target_before_optimizer(self):
+    def test_full_mode_runs_bootable_iota_off_target_seed(self):
         wrapper = load_wrapper_module()
         handoff = load_handoff_module()
 
@@ -2798,7 +2802,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             initial_probe = _bootability_status(
                 handoff,
                 stage=handoff.BOOTABILITY_STAGE_PROBE,
-                reason=handoff.BOOTABILITY_REASON_IOTA_MISMATCH,
+                reason=handoff.BOOTABILITY_REASON_OK,
                 bootable=True,
                 iota_feasible=False,
                 solved_iota=0.12,
@@ -2817,7 +2821,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "run_full_single_stage",
                 side_effect=fake_full_run,
             ) as full_mock:
-                with self.assertRaisesRegex(ValueError, "IOTA_NEAR_TARGET=False"):
+                self.assertEqual(
                     wrapper.main(
                         [
                             "--plasma-surf-filename",
@@ -2827,10 +2831,12 @@ class UnifiedRunnerTests(unittest.TestCase):
                             "--output-root",
                             str(output_root),
                         ]
-                    )
+                    ),
+                    0,
+                )
 
             recovery_mock.assert_not_called()
-            full_mock.assert_not_called()
+            full_mock.assert_called_once()
 
     def test_recovery_only_conflict_with_skip_recovery_is_rejected(self):
         wrapper = load_wrapper_module()

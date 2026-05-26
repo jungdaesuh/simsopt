@@ -125,7 +125,7 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         "--bootability-iota-tolerance",
         type=float,
         default=5.0e-3,
-        help="Absolute |iota_solved - iota_target| tolerance required for donor bootability.",
+        help="Absolute |iota_solved - iota_target| tolerance recorded as donor iota telemetry.",
     )
     parser.add_argument(
         "--stage2-profile",
@@ -317,7 +317,7 @@ def build_stage2_generation_args(
         toroidal_flux=args.stage2_toroidal_flux,
         basin_seed=args.stage2_basin_seed,
         constraint_method="alm",
-        stage2_iota_mode="alm",
+        stage2_iota_mode="report",
         stage2_iota_target=resolve_single_stage_iota_target_arg(args),
         stage2_iota_tolerance=5.0e-3,
         stage2_iota_weight=1.0,
@@ -625,7 +625,7 @@ def build_pre_boozer_stage2_repair_config(
         ),
         vf_current_A=_required_stage2_float(original_stage2_results, "VF_CURRENT_A"),
         vf_template_path=original_stage2_results.get("VF_TEMPLATE_PATH"),
-        stage2_iota_mode="alm",
+        stage2_iota_mode="report",
         stage2_iota_target=resolve_single_stage_iota_target_arg(args),
         stage2_iota_tolerance=5.0e-3,
         stage2_iota_weight=1.0,

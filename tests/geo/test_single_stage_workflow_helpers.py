@@ -150,12 +150,12 @@ class WorkflowHelpersTests(unittest.TestCase):
                 order=2,
             )
 
-    def test_validate_stage2_iota_args_rejects_soft_mode_under_alm(self):
+    def test_validate_stage2_iota_args_rejects_soft_hot_loop_mode(self):
         module = load_workflow_helpers_module()
 
         with self.assertRaisesRegex(
             ValueError,
-            "--stage2-iota-mode=soft is incompatible with --constraint-method=alm",
+            "--stage2-iota-mode only supports 'off' or post-gate 'report'",
         ):
             module.validate_stage2_iota_args(
                 stage2_iota_mode="soft",
@@ -169,6 +169,27 @@ class WorkflowHelpersTests(unittest.TestCase):
                 stage2_iota_ntor=6,
                 stage2_iota_weight=3.0,
                 constraint_method="alm",
+            )
+
+    def test_validate_stage2_iota_args_rejects_alm_floor_hot_loop_mode(self):
+        module = load_workflow_helpers_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--stage2-iota-mode only supports 'off' or post-gate 'report'",
+        ):
+            module.validate_stage2_iota_args(
+                stage2_iota_mode="alm-floor",
+                stage2_iota_target=0.2,
+                stage2_iota_tolerance=5.0e-3,
+                stage2_iota_vol_target=0.1,
+                stage2_iota_num_tf_coils=20,
+                stage2_iota_nphi=91,
+                stage2_iota_ntheta=32,
+                stage2_iota_mpol=8,
+                stage2_iota_ntor=6,
+                stage2_iota_weight=3.0,
+                constraint_method="penalty",
             )
 
     def test_format_local_stage2_run_dir_includes_constraint_and_basin_suffix(self):
@@ -327,7 +348,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             alm_penalty_scale=10.0,
             basin_hops=0,
             basin_stepsize=0.01,
-            stage2_iota_mode="soft",
+            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_tolerance=5.0e-3,
             stage2_iota_weight=3.0,
@@ -340,10 +361,9 @@ class WorkflowHelpersTests(unittest.TestCase):
             stage2_iota_ntor=6,
         )
 
-        self.assertIn("-IM=soft", run_dir)
+        self.assertIn("-IM=report", run_dir)
         self.assertIn("-ITarget=0.2", run_dir)
         self.assertIn("-ITol=0.005", run_dir)
-        self.assertIn("-IW=3", run_dir)
         self.assertIn("-IVol=0.12", run_dir)
         self.assertIn("-ICW=exact", run_dir)
 

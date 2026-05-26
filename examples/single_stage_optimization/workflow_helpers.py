@@ -117,6 +117,13 @@ _DEFAULT_STAGE2_IOTA_MODE = "off"
 _DEFAULT_STAGE2_IOTA_TOLERANCE = 5.0e-3
 _DEFAULT_STAGE2_IOTA_WEIGHT = 1.0
 _DEFAULT_STAGE2_IOTA_VOL_TARGET = 0.10
+# Deprecated hot-loop names remain only so legacy artifact/test helpers can
+# classify old payloads. validate_stage2_iota_args rejects them for production.
+_DEPRECATED_STAGE2_IOTA_ALM_HOT_LOOP_MODES = frozenset({"alm", "alm-floor"})
+_DEPRECATED_STAGE2_IOTA_OBJECTIVE_COUPLED_HOT_LOOP_MODES = frozenset(
+    {"soft"}
+).union(_DEPRECATED_STAGE2_IOTA_ALM_HOT_LOOP_MODES)
+_STAGE2_IOTA_PRODUCTION_MODES = frozenset({"off", "report"})
 _DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT = 1.0
 _DEFAULT_STAGE2_IOTA_NUM_TF_COILS = 20
 _DEFAULT_STAGE2_IOTA_NPHI = 91
@@ -139,6 +146,19 @@ def canonical_stage2_iota_constraint_weight(
     return None if normalized_constraint_weight <= 0.0 else normalized_constraint_weight
 
 
+def stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint(
+    stage2_iota_mode: str,
+) -> bool:
+    return str(stage2_iota_mode) in _DEPRECATED_STAGE2_IOTA_ALM_HOT_LOOP_MODES
+
+
+def stage2_iota_mode_deprecated_hot_loop_coupled(stage2_iota_mode: str) -> bool:
+    return (
+        str(stage2_iota_mode)
+        in _DEPRECATED_STAGE2_IOTA_OBJECTIVE_COUPLED_HOT_LOOP_MODES
+    )
+
+
 def validate_stage2_iota_args(
     *,
     stage2_iota_mode: str,
@@ -153,6 +173,11 @@ def validate_stage2_iota_args(
     stage2_iota_weight: float,
     constraint_method: str,
 ) -> None:
+    if stage2_iota_mode not in _STAGE2_IOTA_PRODUCTION_MODES:
+        raise ValueError(
+            "--stage2-iota-mode only supports 'off' or post-gate 'report'. "
+            "The Stage 2 iota hot-loop modes were removed from production Stage 2."
+        )
     if stage2_iota_mode == _DEFAULT_STAGE2_IOTA_MODE:
         return
     if stage2_iota_target is None:
@@ -172,16 +197,6 @@ def validate_stage2_iota_args(
     if stage2_iota_mpol <= 0 or stage2_iota_ntor <= 0:
         raise ValueError(
             "--stage2-iota-mpol and --stage2-iota-ntor must both be positive."
-        )
-    if stage2_iota_mode == "soft" and stage2_iota_weight <= 0.0:
-        raise ValueError("--stage2-iota-weight must be positive in soft mode.")
-    if stage2_iota_mode == "soft" and constraint_method == "alm":
-        raise ValueError(
-            "--stage2-iota-mode=soft is incompatible with --constraint-method=alm."
-        )
-    if stage2_iota_mode == "alm" and constraint_method != "alm":
-        raise ValueError(
-            "--stage2-iota-mode=alm requires --constraint-method=alm."
         )
 
 

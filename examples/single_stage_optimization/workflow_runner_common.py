@@ -20,6 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from workflow_helpers import (
     DEFAULT_STAGE2_LENGTH_TARGET,
+    validate_stage2_iota_args,
     Stage2SeedSpec,
     local_stage2_bs_path,
     resolve_wataru_vf_template_path,
@@ -431,25 +432,19 @@ class Stage2ArtifactConfig:
                 "target_lcfs_max_minor_radius_m": self.target_lcfs_max_minor_radius_m,
             }
         )
-        if self.stage2_iota_mode != "off" and self.stage2_iota_target is None:
-            raise ValueError(
-                "Stage2ArtifactConfig.stage2_iota_target is required when "
-                "stage2_iota_mode is enabled."
-            )
-        if self.stage2_iota_mode == "soft" and self.stage2_iota_weight <= 0.0:
-            raise ValueError(
-                "Stage2ArtifactConfig.stage2_iota_weight must be positive in soft mode."
-            )
-        if self.stage2_iota_mode == "soft" and self.constraint_method == "alm":
-            raise ValueError(
-                "Stage2ArtifactConfig.stage2_iota_mode='soft' is incompatible with "
-                "constraint_method='alm'."
-            )
-        if self.stage2_iota_mode == "alm" and self.constraint_method != "alm":
-            raise ValueError(
-                "Stage2ArtifactConfig.stage2_iota_mode='alm' requires "
-                "constraint_method='alm'."
-            )
+        validate_stage2_iota_args(
+            stage2_iota_mode=self.stage2_iota_mode,
+            stage2_iota_target=self.stage2_iota_target,
+            stage2_iota_tolerance=self.stage2_iota_tolerance,
+            stage2_iota_vol_target=self.stage2_iota_vol_target,
+            stage2_iota_num_tf_coils=self.stage2_iota_num_tf_coils,
+            stage2_iota_nphi=self.stage2_iota_nphi,
+            stage2_iota_ntheta=self.stage2_iota_ntheta,
+            stage2_iota_mpol=self.stage2_iota_mpol,
+            stage2_iota_ntor=self.stage2_iota_ntor,
+            stage2_iota_weight=self.stage2_iota_weight,
+            constraint_method=self.constraint_method,
+        )
 
     @property
     def plasma_surf_filename(self) -> str:
@@ -846,13 +841,6 @@ def build_stage2_command(
                 str(config.stage2_iota_ntor),
             ]
         )
-        if config.stage2_iota_mode == "soft":
-            command.extend(
-                [
-                    "--stage2-iota-weight",
-                    str(config.stage2_iota_weight),
-                ]
-            )
     return command
 
 

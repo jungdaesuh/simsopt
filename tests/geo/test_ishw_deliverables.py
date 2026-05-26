@@ -1419,7 +1419,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
         self.assertFalse(state["stage2_iota_solve_failed"])
         self.assertGreaterEqual(field.clear_count, 1)
 
-    def test_build_stage2_command_forwards_stage2_iota_hot_loop_flags(self):
+    def test_build_stage2_command_forwards_stage2_iota_report_flags(self):
         module = load_workflow_common_module()
 
         config = module.Stage2ArtifactConfig(
@@ -1442,7 +1442,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             alm_penalty_scale=10.0,
             basin_hops=0,
             basin_stepsize=0.01,
-            stage2_iota_mode="soft",
+            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_tolerance=1.0e-2,
             stage2_iota_weight=3.0,
@@ -1459,7 +1459,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
 
         self.assertEqual(
             command[command.index("--stage2-iota-mode") + 1],
-            "soft",
+            "report",
         )
         self.assertEqual(
             command[command.index("--stage2-iota-target") + 1],
@@ -1469,10 +1469,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             command[command.index("--stage2-iota-tolerance") + 1],
             "0.01",
         )
-        self.assertEqual(
-            command[command.index("--stage2-iota-weight") + 1],
-            "3.0",
-        )
+        self.assertNotIn("--stage2-iota-weight", command)
         self.assertEqual(
             command[command.index("--stage2-iota-vol-target") + 1],
             "0.12",
@@ -1487,7 +1484,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "stage2_iota_mode='alm' requires constraint_method='alm'",
+            "--stage2-iota-mode only supports 'off' or post-gate 'report'",
         ):
             module.Stage2ArtifactConfig(
                 plasma_surf_filename="demo.nc",
@@ -1518,7 +1515,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "stage2_iota_mode='soft' is incompatible with constraint_method='alm'",
+            "--stage2-iota-mode only supports 'off' or post-gate 'report'",
         ):
             module.Stage2ArtifactConfig(
                 plasma_surf_filename="demo.nc",
@@ -1691,11 +1688,11 @@ class Stage2IotaReportingTests(unittest.TestCase):
         self.assertIsNone(probe_mock.call_args.kwargs["constraint_weight"])
         self.assertIsNone(payload["STAGE2_IOTA_CONSTRAINT_WEIGHT"])
 
-    def test_stage2_iota_report_payload_persists_hot_loop_and_probe_timings(self):
+    def test_stage2_iota_report_payload_does_not_mark_hot_loop_enabled(self):
         module = load_stage2_module()
 
         args = SimpleNamespace(
-            stage2_iota_mode="alm",
+            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_tolerance=5.0e-3,
             stage2_iota_weight=1.0,
@@ -1753,13 +1750,14 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 stage2_iota_runtime=runtime,
             )
 
-        self.assertTrue(payload["STAGE2_IOTA_HOT_LOOP_ENABLED"])
-        self.assertEqual(payload["STAGE2_IOTA_BOOTSTRAP_SECONDS"], 0.25)
-        self.assertEqual(payload["STAGE2_IOTA_RUNTIME_SECONDS"], 1.5)
-        self.assertEqual(payload["STAGE2_IOTA_RUNTIME_CALLS"], 7)
-        self.assertEqual(payload["STAGE2_IOTA_FINAL"], 0.201)
-        self.assertEqual(payload["STAGE2_IOTA_VALUE"], 0.201)
-        self.assertFalse(payload["STAGE2_IOTA_FINAL_SOLVE_FAILED"])
+        self.assertFalse(payload["STAGE2_IOTA_OBJECTIVE_COUPLED"])
+        self.assertFalse(payload["STAGE2_IOTA_HOT_LOOP_ENABLED"])
+        self.assertIsNone(payload["STAGE2_IOTA_BOOTSTRAP_SECONDS"])
+        self.assertIsNone(payload["STAGE2_IOTA_RUNTIME_SECONDS"])
+        self.assertIsNone(payload["STAGE2_IOTA_RUNTIME_CALLS"])
+        self.assertIsNone(payload["STAGE2_IOTA_FINAL"])
+        self.assertIsNone(payload["STAGE2_IOTA_VALUE"])
+        self.assertIsNone(payload["STAGE2_IOTA_FINAL_SOLVE_FAILED"])
         self.assertIsNotNone(payload["STAGE2_IOTA_PROBE_SECONDS"])
 
     def test_stage2_iota_hot_loop_payload_preserves_final_values_after_solve_failure(self):
@@ -1767,6 +1765,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
 
         args = SimpleNamespace(
             stage2_iota_weight=1.0,
+            stage2_iota_mode="alm",
             stage2_iota_vol_target=0.1,
             stage2_iota_constraint_weight=1.0,
             stage2_iota_num_tf_coils=20,
@@ -1803,6 +1802,8 @@ class Stage2IotaReportingTests(unittest.TestCase):
         self.assertEqual(payload["STAGE2_IOTA_EFFECTIVE_WEIGHT"], 2.5)
         self.assertEqual(payload["STAGE2_IOTA_FINAL"], 0.201)
         self.assertEqual(payload["STAGE2_IOTA_VALUE"], 0.201)
+        self.assertTrue(payload["STAGE2_IOTA_OBJECTIVE_COUPLED"])
+        self.assertTrue(payload["STAGE2_IOTA_HOT_LOOP_ENABLED"])
         self.assertEqual(payload["STAGE2_IOTA_FINAL_PENALTY"], 0.0)
         self.assertEqual(payload["STAGE2_IOTA_FINAL_ABS_ERROR"], 1.0e-3)
         self.assertFalse(payload["STAGE2_IOTA_FINAL_FEASIBLE"])

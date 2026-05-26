@@ -94,6 +94,7 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
         "IOTA_NEAR_TARGET": None,
         "STAGE2_IOTA_HOT_LOOP_ENABLED": False,
         "STAGE2_IOTA_BOOTSTRAP_SECONDS": None,
+        "STAGE2_IOTA_OBJECTIVE_COUPLED": False,
         "STAGE2_IOTA_RUNTIME_SECONDS": None,
         "STAGE2_IOTA_RUNTIME_CALLS": None,
         "STAGE2_IOTA_INITIAL": None,

@@ -25,8 +25,8 @@ from workflow_runner_common import (  # noqa: E402
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_iota_decision_gate"
 DEFAULT_SUMMARY_JSON = "stage2_iota_decision_gate_summary.json"
 DEFAULT_SUMMARY_CSV = "stage2_iota_decision_gate_summary.csv"
-DEFAULT_BENCHMARK_MODES = "report,soft,alm"
-ALLOWED_MODES = ("off", "report", "soft", "alm")
+DEFAULT_BENCHMARK_MODES = "off,report"
+ALLOWED_MODES = ("off", "report")
 CSV_FIELDNAMES = (
     "mode",
     "status",
@@ -111,8 +111,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--benchmark-modes",
         default=DEFAULT_BENCHMARK_MODES,
         help=(
-            "Comma-separated Stage 2 iota modes to compare. Allowed values: "
-            "off, report, soft, alm."
+            "Comma-separated Stage 2 iota metadata modes to compare. "
+            "Allowed values: off, report."
         ),
     )
     parser.add_argument(
@@ -125,7 +125,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stage2-iota-target",
         type=float,
         default=None,
-        help="Shared iota target used for report/soft/alm benchmark modes.",
+        help="Shared iota target used for report-mode post-gate probes.",
     )
     parser.add_argument(
         "--stage2-iota-tolerance",
@@ -151,8 +151,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1.0e-3,
         help=(
-            "Minimum absolute iota-error improvement required before soft/hard "
-            "modes are treated as materially better than the baseline."
+            "Deprecated hot-loop decision threshold retained in the summary schema."
         ),
     )
     parser.add_argument(
@@ -190,9 +189,9 @@ def validate_args(args: argparse.Namespace) -> list[str]:
             modes.append(mode)
     if args.baseline_mode not in modes:
         raise ValueError("--baseline-mode must be included in --benchmark-modes.")
-    if any(mode != "off" for mode in modes) and args.stage2_iota_target is None:
+    if "report" in modes and args.stage2_iota_target is None:
         raise ValueError(
-            "--stage2-iota-target is required when benchmarking report/soft/alm modes."
+            "--stage2-iota-target is required when benchmarking report mode."
         )
     if args.minimum_iota_error_improvement < 0.0:
         raise ValueError("--minimum-iota-error-improvement must be non-negative.")
@@ -202,7 +201,7 @@ def validate_args(args: argparse.Namespace) -> list[str]:
 
 
 def _constraint_method_for_mode(mode: str) -> str:
-    return "penalty" if mode == "soft" else "alm"
+    return "alm"
 
 
 def build_stage2_mode_args(
@@ -413,33 +412,9 @@ def _decision_summary(
     donor_repair_signal: dict[str, object] | None,
 ) -> dict[str, object]:
     baseline_payload = payloads_by_mode.get(baseline_mode)
-    soft_payload = payloads_by_mode.get("soft")
-    alm_payload = payloads_by_mode.get("alm")
-    baseline_error = (
-        None
-        if baseline_payload is None
-        else _float_or_none(baseline_payload.get("stage2_iota_abs_error"))
-    )
-    soft_error = (
-        None
-        if soft_payload is None
-        else _float_or_none(soft_payload.get("stage2_iota_abs_error"))
-    )
     soft_improvement = None
-    if baseline_error is not None and soft_error is not None:
-        soft_improvement = baseline_error - soft_error
     soft_multiplier = None
-    if soft_payload is not None:
-        soft_multiplier = _runtime_multiplier(
-            soft_payload,
-            baseline_payload=baseline_payload,
-        )
     alm_multiplier = None
-    if alm_payload is not None:
-        alm_multiplier = _runtime_multiplier(
-            alm_payload,
-            baseline_payload=baseline_payload,
-        )
 
     if baseline_payload is None or baseline_payload.get("status") == "dry_run":
         return _recommendation_payload(
@@ -457,40 +432,12 @@ def _decision_summary(
         donor_repair_signal is not None
         and donor_repair_signal.get("best_case_bootable")
     )
-    if (
-        donor_repair_bootable
-        and (
-            soft_improvement is None
-            or soft_improvement < minimum_iota_error_improvement
-            or soft_multiplier is None
-            or soft_multiplier > max_acceptable_runtime_multiplier
-        )
-    ):
+    if donor_repair_bootable:
         recommendation = "prefer_unified_runner_donor_repair"
         reason = "donor_repair_already_solves_bootability_with_less_risk"
-    elif (
-        alm_payload is not None
-        and bool(alm_payload.get("hardware_constraints_ok"))
-        and bool(alm_payload.get("boozer_bootable"))
-        and bool(alm_payload.get("iota_feasible"))
-        and alm_multiplier is not None
-        and alm_multiplier <= max_acceptable_runtime_multiplier
-    ):
-        recommendation = "proceed_to_hard_stage2_alm_iota"
-        reason = "alm_mode_hits_hardware_and_iota_with_acceptable_runtime"
-    elif (
-        soft_payload is not None
-        and bool(soft_payload.get("hardware_constraints_ok"))
-        and soft_improvement is not None
-        and soft_improvement >= minimum_iota_error_improvement
-        and soft_multiplier is not None
-        and soft_multiplier <= max_acceptable_runtime_multiplier
-    ):
-        recommendation = "keep_soft_stage2_iota_for_more_measurement"
-        reason = "soft_mode_improves_iota_without_losing_hardware_or_runtime_budget"
     else:
         recommendation = "stop_at_unified_runner_or_reporting_probe"
-        reason = "stage2_native_iota_cost_or_signal_is_not_yet_compelling"
+        reason = "stage2_iota_hot_loop_is_deprecated_use_post_gate_report"
     return _recommendation_payload(
         recommendation=recommendation,
         reason=reason,

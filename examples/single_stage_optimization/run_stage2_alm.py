@@ -304,12 +304,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-iota-mode",
-        choices=["off", "report", "alm"],
+        choices=["off", "report"],
         default="off",
         help=(
-            "Optional Stage 2 iota mode. 'report' runs only the final verification "
-            "probe, and 'alm' adds a hard Stage 2 ALM iota_penalty constraint. "
-            "This wrapper pins --constraint-method=alm, so soft mode is not exposed here."
+            "Deprecated Stage 2 iota metadata mode. 'report' runs only the "
+            "post-optimization Boozer/iota probe; hot-loop iota constraints "
+            "are not production Stage 2."
         ),
     )
     parser.add_argument(
@@ -678,8 +678,6 @@ def _expected_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
                 "STAGE2_IOTA_NTOR": config.stage2_iota_ntor,
             }
         )
-    if config.stage2_iota_mode == "soft":
-        expected_iota_metadata["STAGE2_IOTA_WEIGHT"] = config.stage2_iota_weight
     return {
         "PLASMA_SURF_FILENAME": Path(config.plasma_surf_filename).name,
         "TF_CURRENT_A": config.tf_current_A,

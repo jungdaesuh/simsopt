@@ -41,7 +41,8 @@ from workflow_helpers import (
     canonical_stage2_iota_constraint_weight,
     format_local_stage2_run_dir,
     resolve_wataru_vf_template_path,
-    stage2_iota_mode_uses_alm_constraint,
+    stage2_iota_mode_deprecated_hot_loop_coupled,
+    stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint,
     validate_stage2_iota_args,
     validate_normalized_toroidal_flux,
 )
@@ -165,6 +166,8 @@ from banana_opt.self_intersect import CurveSelfIntersect
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
+# Deprecated as a production-control selector. Preserve this CLI/artifact field
+# for provenance only; objective-coupled iota must be represented separately.
 DEFAULT_STAGE2_IOTA_MODE = "off"
 DEFAULT_STAGE2_IOTA_TOLERANCE = 5.0e-3
 DEFAULT_STAGE2_IOTA_WEIGHT = 1.0
@@ -665,13 +668,12 @@ def parse_args():
     )
     parser.add_argument(
         "--stage2-iota-mode",
-        choices=["off", "report", "soft", "alm", "alm-floor"],
+        choices=["off", "report"],
         default=os.environ.get("STAGE2_IOTA_MODE", DEFAULT_STAGE2_IOTA_MODE),
         help=(
-            "Optional Stage 2 iota mode. 'report' records only a final verification "
-            "probe, 'soft' adds a weighted Jiota hot-loop term, and 'alm' adds a hard "
-            "Stage 2 ALM target constraint. 'alm-floor' uses the same ALM path as a "
-            "lower-bound iota floor."
+            "Deprecated Stage 2 iota metadata mode. 'report' records only a "
+            "post-optimization Boozer/iota probe; iota hot-loop objective modes "
+            "are not part of production Stage 2."
         ),
     )
     parser.add_argument(
@@ -704,7 +706,10 @@ def parse_args():
                 str(DEFAULT_STAGE2_IOTA_WEIGHT),
             )
         ),
-        help="Jiota weight used when --stage2-iota-mode=soft.",
+        help=(
+            "Deprecated hot-loop Jiota weight retained for artifact metadata; "
+            "ignored by production off/report modes."
+        ),
     )
     parser.add_argument(
         "--stage2-iota-vol-target",
@@ -1177,6 +1182,9 @@ def build_stage2_iota_hot_loop_payload(
     args,
     stage2_iota_runtime,
 ):
+    iota_objective_coupled = stage2_iota_mode_deprecated_hot_loop_coupled(
+        getattr(args, "stage2_iota_mode", DEFAULT_STAGE2_IOTA_MODE)
+    )
     constraint_weight = canonical_stage2_iota_constraint_weight(
         getattr(
             args,
@@ -1208,7 +1216,10 @@ def build_stage2_iota_hot_loop_payload(
         "STAGE2_IOTA_NTOR": int(
             getattr(args, "stage2_iota_ntor", DEFAULT_STAGE2_IOTA_NTOR)
         ),
-        "STAGE2_IOTA_HOT_LOOP_ENABLED": stage2_iota_runtime is not None,
+        "STAGE2_IOTA_OBJECTIVE_COUPLED": iota_objective_coupled,
+        "STAGE2_IOTA_HOT_LOOP_ENABLED": (
+            stage2_iota_runtime is not None and iota_objective_coupled
+        ),
         "STAGE2_IOTA_BOOTSTRAP_SECONDS": None,
         "STAGE2_IOTA_RUNTIME_SECONDS": None,
         "STAGE2_IOTA_RUNTIME_CALLS": None,
@@ -1250,7 +1261,7 @@ def build_stage2_iota_hot_loop_payload(
         "S_HEL_OBJECTIVE_WEIGHT": None,
         "PRE_BOOZER_TOPOLOGY_SCORE": None,
     }
-    if stage2_iota_runtime is None:
+    if stage2_iota_runtime is None or not iota_objective_coupled:
         return payload
 
     final_state = stage2_iota_runtime.last_state
@@ -2340,7 +2351,12 @@ def main(parsed_args=None):
         f"(min={BANANA_SELF_INTERSECT_MIN_DISTANCE_M:.4f})"
     )
     stage2_iota_runtime = None
-    if args.stage2_iota_mode != DEFAULT_STAGE2_IOTA_MODE:
+    deprecated_iota_alm_hot_loop = (
+        stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint(
+            args.stage2_iota_mode
+        )
+    )
+    if stage2_iota_mode_deprecated_hot_loop_coupled(args.stage2_iota_mode):
         stage2_iota_runtime = build_stage2_iota_runtime(
             equilibrium_file=file_loc,
             bs=new_bs,
@@ -2535,9 +2551,7 @@ def main(parsed_args=None):
         alm_constraint_names = stage2_alm_constraint_names(
             include_coil_surface=Jcsdist is not None,
             include_poloidal_extent=True,
-            include_iota_penalty=stage2_iota_mode_uses_alm_constraint(
-                args.stage2_iota_mode
-            ),
+            include_iota_penalty=deprecated_iota_alm_hot_loop,
         )
         alm_smoothing_state, history_callback = (
             _make_stage2_alm_adaptive_smoothing_callback(
@@ -2579,9 +2593,7 @@ def main(parsed_args=None):
                 poloidal_extent_smoothing=alm_smoothing_state.curvature_smoothing,
                 smooth_poloidal_extent_signed_constraint=smooth_max_poloidal_extent_signed_constraint,
                 stage2_iota_runtime=(
-                    stage2_iota_runtime
-                    if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode)
-                    else None
+                    stage2_iota_runtime if deprecated_iota_alm_hot_loop else None
                 ),
                 s_hel_objective=s_hel_objective,
                 s_hel_weight=s_hel_weight,
@@ -2596,13 +2608,13 @@ def main(parsed_args=None):
         def stage2_contract_passes(candidate_state):
             if not candidate_state["hardware_status"]["success"]:
                 return False
-            if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode):
+            if deprecated_iota_alm_hot_loop:
                 return bool(candidate_state["stage2_iota_feasible"])
             return True
 
         def should_preserve_secondary_stage2_artifact(candidate_state):
             return (
-                stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode)
+                deprecated_iota_alm_hot_loop
                 and candidate_state["hardware_status"]["success"]
                 and candidate_state["stage2_iota_feasible"] is False
             )
@@ -2645,7 +2657,7 @@ def main(parsed_args=None):
                 }
                 pass_label = (
                     "hardware+iota-pass"
-                    if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode)
+                    if deprecated_iota_alm_hot_loop
                     else "hardware-pass"
                 )
                 print(
@@ -2716,7 +2728,7 @@ def main(parsed_args=None):
             optimizer_success = False
             restore_reason = (
                 "restored_best_exact_hardware_pass_and_iota"
-                if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode)
+                if deprecated_iota_alm_hot_loop
                 else "restored_best_exact_hardware_pass"
             )
             if termination_message:
@@ -2884,9 +2896,7 @@ def main(parsed_args=None):
             termination_message = "hardware_constraints_failed"
         print("/!\\ /!\\ Stage 2 hardware constraint violation /!\\ /!\\")
         print(constraint_summary)
-    if stage2_iota_mode_uses_alm_constraint(args.stage2_iota_mode) and not bool(
-        final_iota_feasible
-    ):
+    if deprecated_iota_alm_hot_loop and not bool(final_iota_feasible):
         optimizer_success = False
         if termination_message:
             termination_message = f"{termination_message}; stage2_iota_constraint_failed"

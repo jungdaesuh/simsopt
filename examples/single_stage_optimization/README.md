@@ -203,8 +203,9 @@ Useful notes:
 - `--stage2-spec-json` is the fully explicit path for non-profile Stage 2 contracts
 - `--dry-run` prints and records the resolved config and exact Stage 2 command without launching it
 - dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real solver artifact root
-- `--stage2-iota-mode report --stage2-iota-target ...` enables a reporting-only Boozer/iota probe for the generated Stage 2 artifact; this records `BOOZER_BOOTABLE`, `IOTA_FEASIBLE`, `STAGE2_ROOT_FIX_ENABLED`, and `STAGE2_IOTA_*` metadata in `results.json` without changing the Stage 2 optimization objective
-- because `run_stage2_alm.py` always launches the Stage 2 solver with `--constraint-method=alm`, its supported iota modes are `off`, `report`, and `alm`; the penalty-path `soft` mode remains available only on the direct `STAGE_2/banana_coil_solver.py` entrypoint
+- `--stage2-iota-mode` is deprecated as a production-control signal. Treat `STAGE2_IOTA_MODE` as provenance metadata only, not as handoff evidence. Production handoff must use measured `BOOZER_*`, `IOTA_*`, `VOLUME_*`, hardware, optimizer, and WOUT-convention facts.
+- `--stage2-iota-mode report --stage2-iota-target ...` is the intended post-gate Boozer/iota probe for a generated Stage 2 artifact; it records `BOOZER_BOOTABLE`, `IOTA_FEASIBLE`, `STAGE2_ROOT_FIX_ENABLED`, and `STAGE2_IOTA_*` metadata in `results.json`
+- `off` and `report` are the only production Stage 2 iota metadata modes; the former `soft`, `alm`, and `alm-floor` hot-loop modes are retired
 
 ### Unified Stage-2-To-Single-Stage Handoff
 
@@ -433,7 +434,7 @@ Key Stage 2 controls:
   `--maxiter`, `--ftol`, `--gtol`
 - ALM path:
   `--constraint-method alm`, `--alm-max-outer-iters`, `--alm-penalty-init`, `--alm-penalty-scale`, `--alm-feas-tol`, `--alm-stationarity-tol`, `--alm-trust-radius-*`, `--alm-max-inner-attempts`, `--alm-max-subproblem-continuations`, `--alm-distance-smoothing`, `--alm-curvature-smoothing`, `--alm-taylor-test`
-- reporting-only root-fix probe:
+- deprecated iota-mode metadata / post-gate probe:
   `--stage2-iota-mode report`, `--stage2-iota-target`, `--stage2-iota-tolerance`, `--stage2-iota-vol-target`, `--stage2-iota-constraint-weight` (negative selects exact Boozer Newton mode), `--stage2-iota-num-tf-coils`, `--stage2-iota-nphi`, `--stage2-iota-ntheta`, `--stage2-iota-mpol`, `--stage2-iota-ntor`
 - basin-hopping path:
   `--basin-hops`, `--basin-stepsize`, `--basin-temperature`, `--basin-niter-success`, `--basin-seed`

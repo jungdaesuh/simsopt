@@ -280,7 +280,7 @@ class Stage2DecisionGateTests(unittest.TestCase):
             ) as load_mock:
                 payload = module.run_mode_case(
                     args,
-                    mode="alm",
+                    mode="report",
                     output_root=root / "case",
                 )
 
@@ -296,7 +296,7 @@ class Stage2DecisionGateTests(unittest.TestCase):
             )
             self.assertTrue(payload["artifact_reused"])
 
-    def test_run_mode_case_soft_uses_penalty_stage2_mode(self):
+    def test_run_mode_case_report_uses_alm_stage2_mode(self):
         module = load_decision_gate_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -310,24 +310,22 @@ class Stage2DecisionGateTests(unittest.TestCase):
                     "standard_80ka",
                     "--stage2-iota-target",
                     "0.2",
-                    "--stage2-iota-weight",
-                    "3.0",
                     "--output-root",
                     str(root / "outputs"),
                     "--benchmark-modes",
-                    "report,soft,alm",
+                    "off,report",
                 ]
             )
 
             payload = module.run_mode_case(
                 args,
-                mode="soft",
-                output_root=root / "soft",
+                mode="report",
+                output_root=root / "report",
             )
             mode_args = module.build_stage2_mode_args(
                 args,
-                mode="soft",
-                output_root=root / "soft",
+                mode="report",
+                output_root=root / "report",
             )
             resolved_spec, _ = module.stage2_alm_runner.resolve_stage2_spec_payload(
                 mode_args
@@ -340,25 +338,21 @@ class Stage2DecisionGateTests(unittest.TestCase):
         command = payload["command"]
         self.assertEqual(
             command[command.index("--constraint-method") + 1],
-            "penalty",
+            "alm",
         )
         self.assertEqual(
             command[command.index("--stage2-iota-mode") + 1],
-            "soft",
+            "report",
         )
-        self.assertEqual(
-            command[command.index("--stage2-iota-weight") + 1],
-            "3.0",
-        )
-        self.assertNotIn("--alm-max-outer-iters", command)
+        self.assertNotIn("--stage2-iota-weight", command)
         self.assertEqual(
             payload["resolved_stage2_config"]["constraint_method"],
-            "penalty",
+            "alm",
         )
         expected_metadata = module.stage2_alm_runner._expected_stage2_artifact_metadata(
             config
         )
-        self.assertIsNone(expected_metadata["ALM_PENALTY_INIT"])
+        self.assertEqual(expected_metadata["ALM_PENALTY_INIT"], config.alm_penalty_init)
 
     def test_dry_run_summary_uses_requested_modes(self):
         module = load_decision_gate_module()
@@ -372,9 +366,8 @@ class Stage2DecisionGateTests(unittest.TestCase):
                 module,
                 "run_mode_case",
                 side_effect=[
+                    {"mode": "off", "status": "dry_run", "command": ["python", "off"]},
                     {"mode": "report", "status": "dry_run", "command": ["python", "report"]},
-                    {"mode": "soft", "status": "dry_run", "command": ["python", "soft"]},
-                    {"mode": "alm", "status": "dry_run", "command": ["python", "alm"]},
                 ],
             ):
                 result = module.main(
@@ -397,14 +390,14 @@ class Stage2DecisionGateTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            self.assertEqual(summary["benchmark_modes"], ["report", "soft", "alm"])
+            self.assertEqual(summary["benchmark_modes"], ["off", "report"])
             self.assertEqual(
                 summary["recommendation"]["recommendation"],
                 "insufficient_runtime_data",
             )
             self.assertIn("mode", summary_csv_path.read_text(encoding="utf-8"))
 
-    def test_decision_gate_prefers_donor_repair_when_soft_signal_is_weak(self):
+    def test_decision_gate_prefers_donor_repair_when_report_is_not_bootable(self):
         module = load_decision_gate_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -429,29 +422,20 @@ class Stage2DecisionGateTests(unittest.TestCase):
                 "run_mode_case",
                 side_effect=[
                     {
+                        "mode": "off",
+                        "status": "completed",
+                        "run_wallclock_seconds": 8.0,
+                        "stage2_iota_abs_error": None,
+                        "hardware_constraints_ok": True,
+                        "boozer_bootable": False,
+                        "iota_feasible": False,
+                    },
+                    {
                         "mode": "report",
                         "status": "completed",
                         "run_wallclock_seconds": 10.0,
                         "stage2_iota_abs_error": 0.02,
                         "hardware_constraints_ok": True,
-                        "boozer_bootable": False,
-                        "iota_feasible": False,
-                    },
-                    {
-                        "mode": "soft",
-                        "status": "completed",
-                        "run_wallclock_seconds": 28.0,
-                        "stage2_iota_abs_error": 0.0195,
-                        "hardware_constraints_ok": True,
-                        "boozer_bootable": False,
-                        "iota_feasible": False,
-                    },
-                    {
-                        "mode": "alm",
-                        "status": "completed",
-                        "run_wallclock_seconds": 40.0,
-                        "stage2_iota_abs_error": 0.001,
-                        "hardware_constraints_ok": False,
                         "boozer_bootable": False,
                         "iota_feasible": False,
                     },
@@ -479,7 +463,7 @@ class Stage2DecisionGateTests(unittest.TestCase):
                 "prefer_unified_runner_donor_repair",
             )
 
-    def test_decision_gate_can_recommend_hard_alm(self):
+    def test_decision_gate_stops_at_reporting_probe(self):
         module = load_decision_gate_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -491,27 +475,18 @@ class Stage2DecisionGateTests(unittest.TestCase):
                 "run_mode_case",
                 side_effect=[
                     {
-                        "mode": "report",
+                        "mode": "off",
                         "status": "completed",
-                        "run_wallclock_seconds": 10.0,
-                        "stage2_iota_abs_error": 0.02,
+                        "run_wallclock_seconds": 8.0,
+                        "stage2_iota_abs_error": None,
                         "hardware_constraints_ok": True,
                         "boozer_bootable": False,
                         "iota_feasible": False,
                     },
                     {
-                        "mode": "soft",
+                        "mode": "report",
                         "status": "completed",
-                        "run_wallclock_seconds": 14.0,
-                        "stage2_iota_abs_error": 0.005,
-                        "hardware_constraints_ok": True,
-                        "boozer_bootable": True,
-                        "iota_feasible": True,
-                    },
-                    {
-                        "mode": "alm",
-                        "status": "completed",
-                        "run_wallclock_seconds": 18.0,
+                        "run_wallclock_seconds": 10.0,
                         "stage2_iota_abs_error": 5.0e-4,
                         "hardware_constraints_ok": True,
                         "boozer_bootable": True,
@@ -536,7 +511,7 @@ class Stage2DecisionGateTests(unittest.TestCase):
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 summary["recommendation"]["recommendation"],
-                "proceed_to_hard_stage2_alm_iota",
+                "stop_at_unified_runner_or_reporting_probe",
             )
 
 

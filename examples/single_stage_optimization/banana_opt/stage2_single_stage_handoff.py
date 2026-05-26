@@ -54,7 +54,6 @@ BOOTABILITY_REASON_IOTA_MISMATCH = "iota_mismatch"
 
 BOOTABILITY_STAGE_PROBE = "probe"
 BOOTABILITY_STAGE_RECOVERY = "recovery"
-_PROMOTABLE_STAGE2_IOTA_MODES = frozenset({"alm"})
 _PRODUCTION_HANDOFF_SEED_ROLE = "bootable_handoff"
 
 BOOZER_FAILURE_POLICY_REPORT_FAILURE = "report_failure"
@@ -447,9 +446,7 @@ def validate_stage2_seed_bootability_contract(
 ) -> None:
     if (
         bootability_passes(stage2_results)
-        and stage2_results.get("STAGE2_IOTA_MODE") in _PROMOTABLE_STAGE2_IOTA_MODES
         and stage2_results.get("BOOZER_TRUSTED") is True
-        and stage2_results.get("IOTA_NEAR_TARGET") is True
         and stage2_results.get("WOUT_OFF_SPEC") is False
         and stage2_results.get("SEED_ROLE") == _PRODUCTION_HANDOFF_SEED_ROLE
         and stage2_results.get("DIAGNOSTIC_ONLY") is False
@@ -1376,16 +1373,11 @@ def classify_bootability_result(
         )
     abs_iota_error = abs(float(solved_iota) - float(target_iota))
     iota_near_target = abs_iota_error <= float(iota_tolerance)
-    bootability_reason = (
-        BOOTABILITY_REASON_OK
-        if iota_near_target
-        else BOOTABILITY_REASON_IOTA_MISMATCH
-    )
     payload = {
         "BOOZER_BOOTABLE": True,
         "IOTA_NEAR_TARGET": iota_near_target,
         "IOTA_FEASIBLE": iota_near_target,
-        "BOOTABILITY_REASON": bootability_reason,
+        "BOOTABILITY_REASON": BOOTABILITY_REASON_OK,
         "BOOTABILITY_STAGE": stage,
         "BOOTABILITY_TARGET_IOTA": float(target_iota),
         "BOOTABILITY_SOLVED_IOTA": float(solved_iota),
