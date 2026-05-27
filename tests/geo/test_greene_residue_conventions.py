@@ -10,6 +10,7 @@ import pytest
 from examples.single_stage_optimization.banana_opt.topology.fieldline_map import (
     FieldlineIntegratorOptions,
     LowToroidalFieldError,
+    cartesian_from_cylindrical,
     fieldline_rhs_phi,
     integrate_full_torus_return_map,
     integrate_tangent_full_torus_return_map,
@@ -53,13 +54,19 @@ from examples.single_stage_optimization.banana_opt.topology.residue_diagnostics 
     run_residue_probe,
 )
 from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity import (
+    BIOT_SAVART_BRANCH_RESOLVED_FD_MODE,
     BRANCH_RESOLVED_FD_MODE,
     FROZEN_ORBIT_FD_MODE,
+    biot_savart_b_and_dB_vjp_dot_test,
+    branch_resolved_biot_savart_residue_central_difference,
     branch_resolved_residue_central_difference,
     frozen_orbit_residue_central_difference,
 )
+from simsopt.field.biotsavart import BiotSavart
+from simsopt.field.coil import Coil, Current
 from simsopt.field.magneticfieldclasses import PoloidalField, ToroidalField
 from simsopt.field.tracing import compute_fieldlines
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
 
 
 def _finite_difference_dB_by_dX(
@@ -209,6 +216,91 @@ class LowToroidalRatioField:
         radius = np.sqrt(x**2 + y**2)
         e_phi = np.stack([-y / radius, x / radius, np.zeros_like(radius)], axis=-1)
         return 1.0e-12 * e_phi + np.asarray([0.0, 0.0, 1.0], dtype=float)
+
+
+def _make_toroidal_field_coil(phi: float) -> Coil:
+    center_radius = 1.0
+    coil_radius = 0.25
+    radial = np.asarray([math.cos(phi), math.sin(phi), 0.0], dtype=float)
+    center = center_radius * radial
+    curve = CurveXYZFourier(64, 1)
+    curve.set_dofs(
+        [
+            center[0],
+            coil_radius * radial[0],
+            0.0,
+            center[1],
+            coil_radius * radial[1],
+            0.0,
+            0.0,
+            0.0,
+            coil_radius,
+        ]
+    )
+    current = Current(1.0e5)
+    current.fix_all()
+    return Coil(curve, current)
+
+
+def _make_toroidal_field_biot_savart(num_coils: int = 8) -> BiotSavart:
+    return BiotSavart(
+        [
+            _make_toroidal_field_coil(2.0 * math.pi * float(index) / num_coils)
+            for index in range(num_coils)
+        ]
+    )
+
+
+def _unit_biot_savart_direction(field: BiotSavart) -> np.ndarray:
+    rng = np.random.default_rng(4)
+    direction = rng.normal(size=np.asarray(field.x, dtype=float).shape)
+    return direction / np.linalg.norm(direction)
+
+
+def _residue_vjp_test_points(result) -> np.ndarray:
+    return_map = result.tangent_result.return_map
+    indices = range(0, return_map.phi_grid.size, 8)
+    return np.asarray(
+        [
+            cartesian_from_cylindrical(
+                float(return_map.states[index, 0]),
+                float(return_map.phi_grid[index]),
+                float(return_map.states[index, 1]),
+            )
+            for index in indices
+        ],
+        dtype=float,
+    )
+
+
+def _biot_savart_residue_gate_inputs():
+    target = RationalTarget(
+        p=0,
+        q=1,
+        radial_label=math.sqrt(0.1**2 + 0.05**2),
+        radial_window=(0.05, 0.2),
+        branches=(GREENE_BRANCH_X,),
+    )
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-8,
+        atol=1.0e-10,
+        max_step=0.05,
+        samples_per_full_torus=48,
+        min_bphi_over_b=1.0e-7,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-7,
+        winding_tolerance=1.0e-4,
+        max_iterations=8,
+        max_step_norm=0.02,
+    )
+    return (
+        _make_toroidal_field_biot_savart(),
+        target,
+        PoincareChart(axis_r=1.0, axis_z=0.0),
+        integrator_options,
+        solver_options,
+    )
 
 
 def test_rational_target_locks_iota_fourier_and_manifest_conventions():
@@ -833,6 +925,75 @@ def test_residue_sensitivity_central_differences_match_analytic_residue_slope():
     assert branch_resolved.plus_status == BRANCH_STATUS_CONVERGED
     assert branch_resolved.minus_status == BRANCH_STATUS_CONVERGED
     assert branch_resolved.to_json_dict()["parameter_name"] == "rotation_angle"
+
+
+def test_biot_savart_branch_residue_directional_oracle_uses_real_coil_dofs():
+    field, target, chart, integrator_options, solver_options = (
+        _biot_savart_residue_gate_inputs()
+    )
+    original_x = np.asarray(field.x, dtype=float).copy()
+
+    diagnostic = branch_resolved_biot_savart_residue_central_difference(
+        field,
+        (1.1, 0.05),
+        direction=_unit_biot_savart_direction(field),
+        step=1.0e-8,
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_X,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert diagnostic.mode == BIOT_SAVART_BRANCH_RESOLVED_FD_MODE
+    assert diagnostic.base_status == BRANCH_STATUS_CONVERGED
+    assert diagnostic.plus_status == BRANCH_STATUS_CONVERGED
+    assert diagnostic.minus_status == BRANCH_STATUS_CONVERGED
+    assert diagnostic.direction_norm == pytest.approx(1.0)
+    assert math.isfinite(diagnostic.derivative)
+    assert diagnostic.base_winding == pytest.approx(0.0, abs=1.0e-4)
+    assert diagnostic.plus_winding == pytest.approx(0.0, abs=1.0e-4)
+    assert diagnostic.minus_winding == pytest.approx(0.0, abs=1.0e-4)
+    assert diagnostic.to_json_dict()["mode"] == BIOT_SAVART_BRANCH_RESOLVED_FD_MODE
+    np.testing.assert_allclose(field.x, original_x)
+
+
+def test_biot_savart_b_and_dB_vjp_dot_test_matches_central_difference():
+    field, target, chart, integrator_options, solver_options = (
+        _biot_savart_residue_gate_inputs()
+    )
+    original_x = np.asarray(field.x, dtype=float).copy()
+    orbit = solve_periodic_orbit(
+        field,
+        (1.1, 0.05),
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_X,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+    points = _residue_vjp_test_points(orbit)
+    rng = np.random.default_rng(3)
+    b_cotangent = 0.1 * rng.normal(size=(points.shape[0], 3))
+    grad_b_cotangent = 0.01 * rng.normal(size=(points.shape[0], 3, 3))
+
+    diagnostic = biot_savart_b_and_dB_vjp_dot_test(
+        field,
+        points=points,
+        b_cotangent=b_cotangent,
+        grad_b_cotangent=grad_b_cotangent,
+        direction=_unit_biot_savart_direction(field),
+        step=1.0e-6,
+    )
+
+    assert diagnostic.absolute_error < 1.0e-9
+    assert diagnostic.relative_error < 1.0e-9
+    assert diagnostic.central_difference == pytest.approx(
+        diagnostic.vjp_dot,
+        abs=1.0e-9,
+    )
+    assert diagnostic.to_json_dict()["step"] == pytest.approx(1.0e-6)
+    np.testing.assert_allclose(field.x, original_x)
 
 
 def test_phi_return_map_matches_existing_section_hit_geometry_for_tokamak_field():
