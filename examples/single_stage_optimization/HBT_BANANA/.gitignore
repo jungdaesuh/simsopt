@@ -1,0 +1,7 @@
+__pycache__/
+*/__pycache__/
+outputs/
+registry.db*
+!inputs/wout_nfp22ginsburg_000_014417_iota15.nc
+!inputs/wout_stage1_seed.nc
+!jhalpern30/wout_nfp22ginsburg_000_014417_iota15.nc
