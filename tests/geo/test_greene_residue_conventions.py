@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from fractions import Fraction
 import math
 
@@ -28,6 +29,16 @@ from examples.single_stage_optimization.banana_opt.topology.greene_residue impor
 from examples.single_stage_optimization.banana_opt.topology.poincare_chart import (
     PoincareChart,
 )
+from examples.single_stage_optimization.banana_opt.topology.periodic_orbit import (
+    BRANCH_STATUS_BRANCH_MISMATCH,
+    BRANCH_STATUS_CONVERGED,
+    BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW,
+    BRANCH_STATUS_WRONG_WINDING,
+    PeriodicOrbitSolverOptions,
+    continue_periodic_orbit,
+    discover_periodic_orbit,
+    solve_periodic_orbit,
+)
 from examples.single_stage_optimization.banana_opt.topology.rational_target import (
     GREENE_BRANCH_O,
     GREENE_BRANCH_X,
@@ -38,6 +49,21 @@ from examples.single_stage_optimization.banana_opt.topology.rational_target impo
 )
 from simsopt.field.magneticfieldclasses import PoloidalField, ToroidalField
 from simsopt.field.tracing import compute_fieldlines
+
+
+def _finite_difference_dB_by_dX(
+    evaluate_field: Callable[[np.ndarray], np.ndarray],
+    points: np.ndarray,
+) -> np.ndarray:
+    epsilon = 1.0e-6
+    jacobian = np.empty((points.shape[0], 3, 3), dtype=float)
+    for coordinate_index in range(3):
+        direction = np.zeros(3, dtype=float)
+        direction[coordinate_index] = epsilon
+        plus = evaluate_field(points + direction)
+        minus = evaluate_field(points - direction)
+        jacobian[:, coordinate_index, :] = (plus - minus) / (2.0 * epsilon)
+    return jacobian
 
 
 class CircularTransformField:
@@ -71,15 +97,91 @@ class CircularTransformField:
         return self._B_at(self.points)
 
     def dB_by_dX(self) -> np.ndarray:
-        epsilon = 1.0e-6
-        jacobian = np.empty((self.points.shape[0], 3, 3), dtype=float)
-        for coordinate_index in range(3):
-            direction = np.zeros(3, dtype=float)
-            direction[coordinate_index] = epsilon
-            plus = self._B_at(self.points + direction)
-            minus = self._B_at(self.points - direction)
-            jacobian[:, coordinate_index, :] = (plus - minus) / (2.0 * epsilon)
-        return jacobian
+        return _finite_difference_dB_by_dX(self._B_at, self.points)
+
+
+class DrivenPeriodicOrbitField:
+    def __init__(
+        self,
+        *,
+        axis_r: float,
+        axis_z: float,
+        target: RationalTarget,
+        orbit_radius: float,
+        phase0: float,
+        tangent_generator: np.ndarray,
+        orbit_winding: float | None = None,
+    ):
+        self.axis_r = float(axis_r)
+        self.axis_z = float(axis_z)
+        self.target = target
+        self.orbit_radius = float(orbit_radius)
+        self.phase0 = float(phase0)
+        self.angular_rate = (
+            target.iota_float
+            if orbit_winding is None
+            else float(orbit_winding) / float(target.q)
+        )
+        self.tangent_generator = np.asarray(tangent_generator, dtype=float)
+        self.points = np.empty((0, 3), dtype=float)
+
+    def set_points(self, points: np.ndarray) -> "DrivenPeriodicOrbitField":
+        self.points = np.asarray(points, dtype=float)
+        return self
+
+    def initial_orbit_state(self) -> tuple[float, float]:
+        theta = self.phase0
+        return (
+            self.axis_r + self.orbit_radius * math.cos(theta),
+            self.axis_z + self.orbit_radius * math.sin(theta),
+        )
+
+    def _orbit_state_and_velocity(
+        self,
+        phi: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        theta = self.phase0 + self.angular_rate * (phi - self.target.phi0)
+        orbit_r = self.axis_r + self.orbit_radius * np.cos(theta)
+        orbit_z = self.axis_z + self.orbit_radius * np.sin(theta)
+        orbit_dr_dphi = -self.orbit_radius * self.angular_rate * np.sin(theta)
+        orbit_dz_dphi = self.orbit_radius * self.angular_rate * np.cos(theta)
+        return orbit_r, orbit_z, orbit_dr_dphi, orbit_dz_dphi
+
+    def _B_at(self, points: np.ndarray) -> np.ndarray:
+        x = points[:, 0]
+        y = points[:, 1]
+        z = points[:, 2]
+        radius = np.sqrt(x**2 + y**2)
+        phi = np.arctan2(y, x)
+        cos_phi = x / radius
+        sin_phi = y / radius
+        orbit_r, orbit_z, orbit_dr_dphi, orbit_dz_dphi = self._orbit_state_and_velocity(
+            phi
+        )
+        delta_r = radius - orbit_r
+        delta_z = z - orbit_z
+        d_radius_dphi = (
+            orbit_dr_dphi
+            + self.tangent_generator[0, 0] * delta_r
+            + self.tangent_generator[0, 1] * delta_z
+        )
+        d_z_dphi = (
+            orbit_dz_dphi
+            + self.tangent_generator[1, 0] * delta_r
+            + self.tangent_generator[1, 1] * delta_z
+        )
+        b_phi = np.ones_like(radius)
+        b_r = d_radius_dphi / radius
+        b_z = d_z_dphi / radius
+        b_x = b_r * cos_phi - b_phi * sin_phi
+        b_y = b_r * sin_phi + b_phi * cos_phi
+        return np.stack([b_x, b_y, b_z], axis=-1)
+
+    def B(self) -> np.ndarray:
+        return self._B_at(self.points)
+
+    def dB_by_dX(self) -> np.ndarray:
+        return _finite_difference_dB_by_dX(self._B_at, self.points)
 
 
 class LowToroidalRatioField:
@@ -311,6 +413,256 @@ def test_tangent_target_map_matches_centered_return_map_perturbation():
     assert greene_residue_diagnostic_from_matrix(
         tangent_result.monodromy
     ).residue == pytest.approx(0.0, abs=3.0e-8)
+
+
+def test_periodic_orbit_solver_converges_to_known_elliptic_branch():
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_window=(0.18, 0.23),
+        fourier_m=1,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    period = 2.0 * math.pi * float(target.q)
+    tangent_generator = (0.5 * math.pi / period) * np.asarray(
+        [[0.0, -1.0], [1.0, 0.0]],
+        dtype=float,
+    )
+    field = DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.2,
+        phase0=0.35,
+        tangent_generator=tangent_generator,
+    )
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-6,
+        max_iterations=8,
+        max_step_norm=0.08,
+    )
+    true_state = np.asarray(field.initial_orbit_state(), dtype=float)
+    initial_state = true_state + np.asarray([0.018, -0.012], dtype=float)
+
+    result = solve_periodic_orbit(
+        field,
+        initial_state,
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert result.status == BRANCH_STATUS_CONVERGED
+    assert result.converged
+    assert result.state == pytest.approx(true_state, abs=4.0e-7)
+    assert result.closure_residual_norm < 1.0e-9
+    assert result.winding == pytest.approx(1.0, abs=1.0e-7)
+    assert result.radial_label == pytest.approx(0.2, abs=4.0e-7)
+    assert result.residue_diagnostic.classification == GREENE_RESIDUE_ELLIPTIC_O
+    assert result.residue_diagnostic.residue == pytest.approx(0.5, abs=4.0e-6)
+    assert result.tangent_result.det_m == pytest.approx(1.0, abs=4.0e-6)
+
+    branch_state = result.to_branch_state(
+        generation=3,
+        accepted_iteration_id="accepted-0",
+    )
+    continued_field = DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.205,
+        phase0=0.35,
+        tangent_generator=tangent_generator,
+    )
+    continued = continue_periodic_orbit(
+        continued_field,
+        branch_state,
+        target=target,
+        chart=chart,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert continued.status == BRANCH_STATUS_CONVERGED
+    assert continued.state == pytest.approx(
+        continued_field.initial_orbit_state(),
+        abs=4.0e-7,
+    )
+    assert continued.radial_label == pytest.approx(0.205, abs=4.0e-7)
+
+
+def test_periodic_orbit_discovery_accepts_multistart_initial_guesses():
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_window=(0.18, 0.23),
+        fourier_m=1,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    period = 2.0 * math.pi * float(target.q)
+    field = DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.2,
+        phase0=-0.25,
+        tangent_generator=(0.5 * math.pi / period)
+        * np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=float),
+    )
+    true_state = np.asarray(field.initial_orbit_state(), dtype=float)
+
+    result = discover_periodic_orbit(
+        field,
+        (
+            true_state + np.asarray([0.02, -0.02], dtype=float),
+            true_state + np.asarray([-0.01, 0.01], dtype=float),
+        ),
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=FieldlineIntegratorOptions(
+            rtol=1.0e-10,
+            atol=1.0e-12,
+            max_step=0.025,
+            samples_per_full_torus=96,
+        ),
+        solver_options=PeriodicOrbitSolverOptions(
+            residual_tolerance=1.0e-9,
+            winding_tolerance=1.0e-6,
+            max_iterations=8,
+            max_step_norm=0.08,
+        ),
+    )
+
+    assert result.status == BRANCH_STATUS_CONVERGED
+    assert result.state == pytest.approx(true_state, abs=4.0e-7)
+
+
+def test_periodic_orbit_solver_reports_radial_winding_and_branch_failures():
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_window=(0.18, 0.23),
+        fourier_m=1,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    period = 2.0 * math.pi * float(target.q)
+    field = DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.2,
+        phase0=0.0,
+        tangent_generator=(0.5 * math.pi / period)
+        * np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=float),
+    )
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-6,
+        max_iterations=8,
+        max_step_norm=0.08,
+    )
+    hyperbolic_field = DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.2,
+        phase0=0.0,
+        tangent_generator=(0.4 / period)
+        * np.asarray([[1.0, 0.0], [0.0, -1.0]], dtype=float),
+    )
+    hyperbolic_initial_state = np.asarray(
+        hyperbolic_field.initial_orbit_state(),
+        dtype=float,
+    ) + np.asarray([0.01, -0.015], dtype=float)
+    hyperbolic_result = solve_periodic_orbit(
+        hyperbolic_field,
+        hyperbolic_initial_state,
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_X,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    outside_window = solve_periodic_orbit(
+        field,
+        field.initial_orbit_state(),
+        target=RationalTarget(
+            p=1,
+            q=1,
+            radial_window=(0.1, 0.15),
+            fourier_m=1,
+            fourier_n=1,
+        ),
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+    branch_mismatch = solve_periodic_orbit(
+        field,
+        field.initial_orbit_state(),
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_X,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    wrong_winding_target = RationalTarget(
+        p=2,
+        q=1,
+        radial_window=(0.18, 0.23),
+        fourier_m=1,
+        fourier_n=2,
+    )
+    wrong_winding_field = DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=wrong_winding_target,
+        orbit_radius=0.2,
+        phase0=0.0,
+        tangent_generator=(0.5 * math.pi / period)
+        * np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=float),
+        orbit_winding=1.0,
+    )
+    wrong_winding = solve_periodic_orbit(
+        wrong_winding_field,
+        wrong_winding_field.initial_orbit_state(),
+        target=wrong_winding_target,
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert hyperbolic_result.status == BRANCH_STATUS_CONVERGED
+    assert (
+        hyperbolic_result.residue_diagnostic.classification
+        == GREENE_RESIDUE_HYPERBOLIC_X
+    )
+    assert outside_window.status == BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW
+    assert branch_mismatch.status == BRANCH_STATUS_BRANCH_MISMATCH
+    assert wrong_winding.status == BRANCH_STATUS_WRONG_WINDING
 
 
 def test_phi_return_map_matches_existing_section_hit_geometry_for_tokamak_field():
