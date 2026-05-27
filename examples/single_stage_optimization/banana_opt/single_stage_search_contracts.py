@@ -17,6 +17,7 @@ from .search_evaluation import (
     FINITE_EPS,
     annotate_search_evaluation_finiteness,
 )
+from .topology.kam_birkhoff import KAM_FRACTION_SEMANTICS
 
 _DEFAULT_FRONTIER_SEARCH_CONTRACT_PENALTY_SCALE = 4.0
 _DIAGNOSTIC_HARDWARE_RATIO_NAMES = frozenset(
@@ -42,7 +43,20 @@ def _finite_float_or_none(value: object) -> float | None:
     return numeric
 
 
-def _frontier_kam_certification_status(
+def _topology_entry_invariant_torus_fraction(
+    topology_entry: Mapping[str, object],
+) -> float | None:
+    explicit_fraction = _finite_float_or_none(
+        topology_entry.get("invariant_torus_fraction")
+    )
+    if explicit_fraction is not None:
+        return explicit_fraction
+    if topology_entry.get("kam_fraction_semantics") != KAM_FRACTION_SEMANTICS:
+        return None
+    return _finite_float_or_none(topology_entry.get("kam_fraction"))
+
+
+def _frontier_invariant_torus_certification_status(
     *,
     enabled: bool,
     ok: bool | None,
@@ -52,9 +66,9 @@ def _frontier_kam_certification_status(
     topology_broken: bool | None,
     accepted_iteration: int | None,
     topology_accepted_iteration: int | None,
-    kam_fraction: float | None,
-    kam_min: float | None,
-    kam_deficit: float | None,
+    invariant_torus_fraction: float | None,
+    invariant_torus_min: float | None,
+    invariant_torus_deficit: float | None,
 ) -> dict[str, object]:
     return {
         "enabled": enabled,
@@ -65,9 +79,12 @@ def _frontier_kam_certification_status(
         "topology_broken": topology_broken,
         "accepted_iteration": accepted_iteration,
         "topology_accepted_iteration": topology_accepted_iteration,
-        "kam_fraction": kam_fraction,
-        "kam_min": kam_min,
-        "kam_deficit": kam_deficit,
+        "invariant_torus_fraction": invariant_torus_fraction,
+        "invariant_torus_min": invariant_torus_min,
+        "invariant_torus_deficit": invariant_torus_deficit,
+        "kam_fraction": invariant_torus_fraction,
+        "kam_min": invariant_torus_min,
+        "kam_deficit": invariant_torus_deficit,
     }
 
 
@@ -108,7 +125,7 @@ def evaluate_frontier_kam_certification(
     accepted_iteration: int | None = None,
 ) -> dict[str, object]:
     if not enabled:
-        return _frontier_kam_certification_status(
+        return _frontier_invariant_torus_certification_status(
             enabled=False,
             ok=None,
             reason="disabled",
@@ -117,17 +134,21 @@ def evaluate_frontier_kam_certification(
             topology_broken=None,
             accepted_iteration=accepted_iteration,
             topology_accepted_iteration=None,
-            kam_fraction=None,
-            kam_min=None,
-            kam_deficit=None,
+            invariant_torus_fraction=None,
+            invariant_torus_min=None,
+            invariant_torus_deficit=None,
         )
     if kam_min is None:
-        raise ValueError("frontier KAM certification requires kam_min")
-    resolved_kam_min = float(kam_min)
-    if not np.isfinite(resolved_kam_min) or not (0.0 <= resolved_kam_min <= 1.0):
-        raise ValueError("frontier KAM certification requires kam_min in [0, 1]")
+        raise ValueError("frontier invariant-torus certification requires kam_min")
+    resolved_invariant_torus_min = float(kam_min)
+    if not np.isfinite(resolved_invariant_torus_min) or not (
+        0.0 <= resolved_invariant_torus_min <= 1.0
+    ):
+        raise ValueError(
+            "frontier invariant-torus certification requires kam_min in [0, 1]"
+        )
     if topology_entry is None:
-        return _frontier_kam_certification_status(
+        return _frontier_invariant_torus_certification_status(
             enabled=True,
             ok=False,
             reason=(
@@ -140,21 +161,28 @@ def evaluate_frontier_kam_certification(
             topology_broken=None,
             accepted_iteration=accepted_iteration,
             topology_accepted_iteration=None,
-            kam_fraction=None,
-            kam_min=resolved_kam_min,
-            kam_deficit=None,
+            invariant_torus_fraction=None,
+            invariant_torus_min=resolved_invariant_torus_min,
+            invariant_torus_deficit=None,
         )
 
     topology_accepted_iteration = topology_entry.get("accepted_iteration")
     topology_broken = bool(topology_entry.get("topology_broken", False))
-    raw_kam_fraction = _finite_float_or_none(topology_entry.get("kam_fraction"))
-    kam_fraction_out_of_range = raw_kam_fraction is not None and not (
-        0.0 <= raw_kam_fraction <= 1.0
+    raw_invariant_torus_fraction = _topology_entry_invariant_torus_fraction(
+        topology_entry
     )
-    kam_fraction = None if kam_fraction_out_of_range else raw_kam_fraction
+    invariant_torus_fraction_out_of_range = (
+        raw_invariant_torus_fraction is not None
+        and not (0.0 <= raw_invariant_torus_fraction <= 1.0)
+    )
+    invariant_torus_fraction = (
+        None
+        if invariant_torus_fraction_out_of_range
+        else raw_invariant_torus_fraction
+    )
     if accepted_iteration is not None and topology_accepted_iteration is not None:
         if int(topology_accepted_iteration) != int(accepted_iteration):
-            return _frontier_kam_certification_status(
+            return _frontier_invariant_torus_certification_status(
                 enabled=True,
                 ok=False,
                 reason="topology_not_current",
@@ -163,16 +191,16 @@ def evaluate_frontier_kam_certification(
                 topology_broken=topology_broken,
                 accepted_iteration=accepted_iteration,
                 topology_accepted_iteration=int(topology_accepted_iteration),
-                kam_fraction=raw_kam_fraction,
-                kam_min=resolved_kam_min,
-                kam_deficit=None,
+                invariant_torus_fraction=raw_invariant_torus_fraction,
+                invariant_torus_min=resolved_invariant_torus_min,
+                invariant_torus_deficit=None,
             )
 
     topology_iteration = (
         None if topology_accepted_iteration is None else int(topology_accepted_iteration)
     )
     if topology_broken:
-        return _frontier_kam_certification_status(
+        return _frontier_invariant_torus_certification_status(
             enabled=True,
             ok=False,
             reason="topology_broken",
@@ -181,34 +209,37 @@ def evaluate_frontier_kam_certification(
             topology_broken=True,
             accepted_iteration=accepted_iteration,
             topology_accepted_iteration=topology_iteration,
-            kam_fraction=raw_kam_fraction,
-            kam_min=resolved_kam_min,
-            kam_deficit=(
+            invariant_torus_fraction=raw_invariant_torus_fraction,
+            invariant_torus_min=resolved_invariant_torus_min,
+            invariant_torus_deficit=(
                 None
-                if kam_fraction is None
-                else max(resolved_kam_min - kam_fraction, 0.0)
+                if invariant_torus_fraction is None
+                else max(
+                    resolved_invariant_torus_min - invariant_torus_fraction,
+                    0.0,
+                )
             ),
         )
-    if kam_fraction_out_of_range:
-        return _frontier_kam_certification_status(
+    if invariant_torus_fraction_out_of_range:
+        return _frontier_invariant_torus_certification_status(
             enabled=True,
             ok=False,
-            reason="kam_fraction_out_of_range",
+            reason="invariant_torus_fraction_out_of_range",
             hardware_ok=bool(hardware_ok),
             topology_evaluated=True,
             topology_broken=False,
             accepted_iteration=accepted_iteration,
             topology_accepted_iteration=topology_iteration,
-            kam_fraction=raw_kam_fraction,
-            kam_min=resolved_kam_min,
-            kam_deficit=None,
+            invariant_torus_fraction=raw_invariant_torus_fraction,
+            invariant_torus_min=resolved_invariant_torus_min,
+            invariant_torus_deficit=None,
         )
-    if kam_fraction is None:
-        return _frontier_kam_certification_status(
+    if invariant_torus_fraction is None:
+        return _frontier_invariant_torus_certification_status(
             enabled=True,
             ok=False,
             reason=(
-                "kam_fraction_missing"
+                "invariant_torus_fraction_missing"
                 if hardware_ok is True
                 else "hardware_failed"
             ),
@@ -217,20 +248,23 @@ def evaluate_frontier_kam_certification(
             topology_broken=False,
             accepted_iteration=accepted_iteration,
             topology_accepted_iteration=topology_iteration,
-            kam_fraction=None,
-            kam_min=resolved_kam_min,
-            kam_deficit=None,
+            invariant_torus_fraction=None,
+            invariant_torus_min=resolved_invariant_torus_min,
+            invariant_torus_deficit=None,
         )
 
-    kam_deficit = max(resolved_kam_min - kam_fraction, 0.0)
-    certified = hardware_ok is True and kam_deficit == 0.0
-    if kam_deficit > 0.0:
-        reason = "kam_fraction_below_min"
+    invariant_torus_deficit = max(
+        resolved_invariant_torus_min - invariant_torus_fraction,
+        0.0,
+    )
+    certified = hardware_ok is True and invariant_torus_deficit == 0.0
+    if invariant_torus_deficit > 0.0:
+        reason = "invariant_torus_fraction_below_min"
     elif hardware_ok is not True:
         reason = "hardware_failed"
     else:
         reason = "certified"
-    return _frontier_kam_certification_status(
+    return _frontier_invariant_torus_certification_status(
         enabled=True,
         ok=bool(certified),
         reason=reason,
@@ -239,9 +273,9 @@ def evaluate_frontier_kam_certification(
         topology_broken=False,
         accepted_iteration=accepted_iteration,
         topology_accepted_iteration=topology_iteration,
-        kam_fraction=kam_fraction,
-        kam_min=resolved_kam_min,
-        kam_deficit=float(kam_deficit),
+        invariant_torus_fraction=invariant_torus_fraction,
+        invariant_torus_min=resolved_invariant_torus_min,
+        invariant_torus_deficit=float(invariant_torus_deficit),
     )
 
 

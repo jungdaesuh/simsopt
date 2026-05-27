@@ -98,6 +98,8 @@ CONSTRAINT_METRIC_FIELDS = {
     "final_topology_gate_success": "FINAL_TOPOLOGY_GATE_SUCCESS",
     "frontier_certification_ok": "FRONTIER_CERTIFICATION_OK",
     "frontier_certification_reason": "FRONTIER_CERTIFICATION_REASON",
+    "frontier_invariant_torus_fraction": "FRONTIER_INVARIANT_TORUS_FRACTION",
+    "frontier_invariant_torus_min": "FRONTIER_INVARIANT_TORUS_MIN",
     "frontier_kam_fraction": "FRONTIER_KAM_FRACTION",
     "frontier_kam_min": "FRONTIER_KAM_MIN",
     "frontier_trust_ok": "FRONTIER_TRUST_OK",
@@ -154,6 +156,8 @@ def is_certified_results(results: Mapping[str, object]) -> bool:
         return False
     if results.get("SINGLE_STAGE_GOAL_MODE") == "frontier":
         if frontier_certification_ok is not True:
+            return False
+        if _as_finite_float(results.get("FRONTIER_INVARIANT_TORUS_FRACTION")) is None:
             return False
     return objective_metrics_complete(extract_objective_metrics(results))
 

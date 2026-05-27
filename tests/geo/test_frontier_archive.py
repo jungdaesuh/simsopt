@@ -604,7 +604,9 @@ class FrontierArchiveTests(unittest.TestCase):
             {
                 "SINGLE_STAGE_GOAL_MODE": "frontier",
                 "FRONTIER_CERTIFICATION_OK": False,
-                "FRONTIER_CERTIFICATION_REASON": "kam_fraction_below_min",
+                "FRONTIER_CERTIFICATION_REASON": "invariant_torus_fraction_below_min",
+                "FRONTIER_INVARIANT_TORUS_FRACTION": 1.0 / 12.0,
+                "FRONTIER_INVARIANT_TORUS_MIN": 0.30,
                 "FRONTIER_KAM_FRACTION": 1.0 / 12.0,
                 "FRONTIER_KAM_MIN": 0.30,
             }
@@ -620,12 +622,44 @@ class FrontierArchiveTests(unittest.TestCase):
         self.assertFalse(member.hard_certification_ok)
         self.assertEqual(
             member.constraint_metrics["frontier_certification_reason"],
-            "kam_fraction_below_min",
+            "invariant_torus_fraction_below_min",
+        )
+        self.assertAlmostEqual(
+            member.constraint_metrics["frontier_invariant_torus_fraction"],
+            1.0 / 12.0,
         )
         self.assertAlmostEqual(
             member.constraint_metrics["frontier_kam_fraction"],
             1.0 / 12.0,
         )
+
+    def test_frontier_mode_archive_rejects_legacy_kam_certification_without_invariant_torus_fraction(
+        self,
+    ):
+        archive_module = load_frontier_archive_module()
+        payload = self._make_completed_payload()
+        payload["results"].update(
+            {
+                "SINGLE_STAGE_GOAL_MODE": "frontier",
+                "FRONTIER_CERTIFICATION_OK": True,
+                "FRONTIER_CERTIFICATION_REASON": "legacy_certified",
+                "FRONTIER_KAM_FRACTION": 0.75,
+                "FRONTIER_KAM_MIN": 0.30,
+            }
+        )
+
+        member = archive_module.build_archive_member_from_results(
+            campaign_id="campaign",
+            lane_id="lane_legacy_kam",
+            payload=payload,
+            rerun_contract={},
+        )
+
+        self.assertFalse(member.hard_certification_ok)
+        self.assertIsNone(
+            member.constraint_metrics["frontier_invariant_torus_fraction"]
+        )
+        self.assertAlmostEqual(member.constraint_metrics["frontier_kam_fraction"], 0.75)
 
     def test_build_frontier_lane_record_tracks_provisional_and_certified_ids(self):
         archive_module = load_frontier_archive_module()

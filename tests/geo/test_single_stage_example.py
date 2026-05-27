@@ -19,6 +19,9 @@ import numpy as np
 import simsopt.geo.surfaceobjectives as surfaceobjectives_module
 from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
+from examples.single_stage_optimization.banana_opt.topology.kam_birkhoff import (
+    KAM_FRACTION_SEMANTICS,
+)
 from simsopt.field.coil import Current, ScaledCurrent
 from simsopt.objectives.utilities import forward_backward
 
@@ -1980,6 +1983,16 @@ class SingleStageExampleTests(unittest.TestCase):
 
         class _Surface:
             nfp = 1
+
+            def cross_section(self, *, phi, thetas):
+                theta = np.linspace(0.0, 2.0 * np.pi, int(thetas), endpoint=False)
+                return np.column_stack(
+                    (
+                        1.1 + 0.1 * np.cos(theta),
+                        np.zeros_like(theta) + float(phi),
+                        0.1 * np.sin(theta),
+                    )
+                )
 
         fieldlines_tys = [
             np.array([[0.0, 1.0, 0.0, 0.0]]),
@@ -4159,6 +4172,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "confinement_loss": 0.0,
             "confinement_surrogate_k": 3,
             "confinement_early_exit_threshold": 0.2,
+            "invariant_torus_fraction": 1.0 / 12.0,
             "kam_fraction": 1.0 / 12.0,
             "kam_median_width": 0.08275987797445103,
             "cross_section_span": 0.19712474791042184,
@@ -4183,6 +4197,10 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertEqual(entry["accepted_iteration"], 9)
         self.assertEqual(entry["topology_archive_schema_version"], 2)
+        self.assertEqual(
+            entry["invariant_torus_fraction"],
+            topology_result["invariant_torus_fraction"],
+        )
         self.assertEqual(entry["kam_fraction"], topology_result["kam_fraction"])
         self.assertEqual(entry["kam_median_width"], topology_result["kam_median_width"])
         self.assertEqual(entry["cross_section_span"], topology_result["cross_section_span"])
@@ -4192,6 +4210,7 @@ class HardwareConstraintTests(unittest.TestCase):
     def test_initial_topology_score_writes_archive_and_confinement_checkpoint(self):
         module = load_single_stage_example_module()
         module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_INVARIANT_TORUS_MIN = 0.30
         module.FRONTIER_KAM_MIN = 0.30
         module.TOPOLOGY_SCORER_EVERY = 5
         module.TOPOLOGY_SCORER_NFIELDLINES = 12
@@ -4219,6 +4238,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "confinement_loss": 0.25,
             "confinement_surrogate_k": 3,
             "confinement_early_exit_threshold": 0.2,
+            "invariant_torus_fraction": 0.5,
             "kam_fraction": 0.5,
             "kam_median_width": 0.08,
             "cross_section_span": 0.2,
@@ -4275,6 +4295,7 @@ class HardwareConstraintTests(unittest.TestCase):
     def test_best_topology_ranks_survival_before_kam(self):
         module = load_single_stage_example_module()
         module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_INVARIANT_TORUS_MIN = 0.30
         module.FRONTIER_KAM_MIN = 0.30
         module.TOPOLOGY_SCORER_EVERY = 1
         module.TOPOLOGY_SCORER_NFIELDLINES = 12
@@ -4304,6 +4325,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "confinement_loss": 1.0 / confinement_score,
                 "confinement_surrogate_k": 3,
                 "confinement_early_exit_threshold": 0.2,
+                "invariant_torus_fraction": kam_fraction,
                 "kam_fraction": kam_fraction,
                 "kam_median_width": 0.08,
                 "cross_section_span": 0.2,
@@ -4369,15 +4391,20 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(archive_entries[0]["accepted_iteration"], 1)
         self.assertEqual(archive_entries[1]["accepted_iteration"], 2)
         payload = module.best_topology_results_payload(run_dict)
+        self.assertAlmostEqual(
+            payload["BEST_TOPOLOGY_INVARIANT_TORUS_FRACTION"],
+            1.0 / 12.0,
+        )
         self.assertAlmostEqual(payload["BEST_TOPOLOGY_KAM_FRACTION"], 1.0 / 12.0)
         self.assertEqual(
             payload["BEST_TOPOLOGY_CERTIFICATION_REASON"],
-            "kam_fraction_below_min",
+            "invariant_torus_fraction_below_min",
         )
 
     def test_best_hw_clean_topology_filters_strict_artifact_hardware(self):
         module = load_single_stage_example_module()
         module.SINGLE_STAGE_GOAL_MODE = "target"
+        module.FRONTIER_INVARIANT_TORUS_MIN = 0.30
         module.FRONTIER_KAM_MIN = 0.30
         module.TOPOLOGY_SCORER_EVERY = 1
         module.TOPOLOGY_SCORER_NFIELDLINES = 8
@@ -4407,6 +4434,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "confinement_loss": 1.0 / confinement_score,
                 "confinement_surrogate_k": 3,
                 "confinement_early_exit_threshold": 0.2,
+                "invariant_torus_fraction": kam_fraction,
                 "kam_fraction": kam_fraction,
                 "kam_median_width": 0.08,
                 "cross_section_span": 0.2,
@@ -4475,8 +4503,13 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(run_dict["best_hw_clean_topology"]["accepted_iteration"], 0)
         self.assertFalse(archive_entries[1]["artifact_hardware_ok"])
         payload = module.best_topology_results_payload(run_dict)
+        self.assertAlmostEqual(payload["BEST_TOPOLOGY_INVARIANT_TORUS_FRACTION"], 0.625)
         self.assertAlmostEqual(payload["BEST_TOPOLOGY_KAM_FRACTION"], 0.625)
         self.assertFalse(payload["BEST_TOPOLOGY_ARTIFACT_HARDWARE_OK"])
+        self.assertAlmostEqual(
+            payload["BEST_HW_CLEAN_TOPOLOGY_INVARIANT_TORUS_FRACTION"],
+            0.375,
+        )
         self.assertAlmostEqual(payload["BEST_HW_CLEAN_TOPOLOGY_KAM_FRACTION"], 0.375)
         self.assertTrue(payload["BEST_HW_CLEAN_TOPOLOGY_ARTIFACT_HARDWARE_OK"])
 
@@ -5215,6 +5248,7 @@ class HardwareConstraintTests(unittest.TestCase):
             topology_entry={
                 "accepted_iteration": 0,
                 "topology_broken": False,
+                "invariant_torus_fraction": 0.5,
                 "kam_fraction": 0.5,
             },
         )
@@ -5238,6 +5272,7 @@ class HardwareConstraintTests(unittest.TestCase):
     def test_frontier_refinement_labels_uncertified_without_starving_best_feasible(self):
         module = load_single_stage_example_module()
         module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_INVARIANT_TORUS_MIN = 0.30
         module.FRONTIER_KAM_MIN = 0.30
         run_dict = {
             "accepted_x": np.array([1.0, 2.0]),
@@ -5269,15 +5304,23 @@ class HardwareConstraintTests(unittest.TestCase):
             topology_entry={
                 "accepted_iteration": 5,
                 "topology_broken": False,
+                "invariant_torus_fraction": 1.0 / 12.0,
                 "kam_fraction": 1.0 / 12.0,
             },
         )
 
         self.assertFalse(low_kam_status["ok"])
-        self.assertEqual(low_kam_status["reason"], "kam_fraction_below_min")
+        self.assertEqual(
+            low_kam_status["reason"],
+            "invariant_torus_fraction_below_min",
+        )
         self.assertTrue(module.refinement_eligible_incumbent(run_dict))
         self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "accepted"))
         self.assertFalse(run_dict["search_eval"]["frontier_certification_ok"])
+        self.assertAlmostEqual(
+            run_dict["search_eval"]["frontier_invariant_torus_fraction"],
+            1.0 / 12.0,
+        )
         self.assertAlmostEqual(run_dict["search_eval"]["frontier_kam_fraction"], 1.0 / 12.0)
         self.assertFalse(
             run_dict["best_feasible_incumbent"].search_eval["frontier_certification_ok"]
@@ -5301,6 +5344,7 @@ class HardwareConstraintTests(unittest.TestCase):
             topology_entry={
                 "accepted_iteration": 6,
                 "topology_broken": False,
+                "invariant_torus_fraction": 0.5,
                 "kam_fraction": 0.5,
             },
         )
@@ -5317,6 +5361,7 @@ class HardwareConstraintTests(unittest.TestCase):
     def test_frontier_best_feasible_remains_raw_metric_ordered(self):
         module = load_single_stage_example_module()
         module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_INVARIANT_TORUS_MIN = 0.30
         module.FRONTIER_KAM_MIN = 0.30
         run_dict = {
             "accepted_x": np.array([1.0, 2.0]),
@@ -5347,6 +5392,7 @@ class HardwareConstraintTests(unittest.TestCase):
             topology_entry={
                 "accepted_iteration": 1,
                 "topology_broken": False,
+                "invariant_torus_fraction": 1.0 / 12.0,
                 "kam_fraction": 1.0 / 12.0,
             },
         )
@@ -5374,6 +5420,7 @@ class HardwareConstraintTests(unittest.TestCase):
             topology_entry={
                 "accepted_iteration": 2,
                 "topology_broken": False,
+                "invariant_torus_fraction": 0.5,
                 "kam_fraction": 0.5,
             },
         )
@@ -5388,6 +5435,7 @@ class HardwareConstraintTests(unittest.TestCase):
     def test_frontier_default_kam_floor_reports_hardware_failed_not_kam_deficit(self):
         module = load_single_stage_example_module()
         module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_INVARIANT_TORUS_MIN = 0.0
         module.FRONTIER_KAM_MIN = 0.0
         run_dict = {
             "search_eval": {
@@ -5403,6 +5451,7 @@ class HardwareConstraintTests(unittest.TestCase):
             topology_entry={
                 "accepted_iteration": 9,
                 "topology_broken": False,
+                "invariant_torus_fraction": 1.0 / 12.0,
                 "kam_fraction": 1.0 / 12.0,
             },
         )
@@ -5410,6 +5459,9 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(status["ok"])
         self.assertEqual(status["reason"], "hardware_failed")
         self.assertFalse(status["hardware_ok"])
+        self.assertAlmostEqual(status["invariant_torus_fraction"], 1.0 / 12.0)
+        self.assertEqual(status["invariant_torus_min"], 0.0)
+        self.assertEqual(status["invariant_torus_deficit"], 0.0)
         self.assertAlmostEqual(status["kam_fraction"], 1.0 / 12.0)
         self.assertEqual(status["kam_min"], 0.0)
         self.assertEqual(status["kam_deficit"], 0.0)
@@ -5420,6 +5472,41 @@ class HardwareConstraintTests(unittest.TestCase):
             run_dict["search_eval"]["frontier_certification_reason"],
             "hardware_failed",
         )
+
+    def test_frontier_certification_requires_invariant_torus_semantics_for_legacy_kam_field(self):
+        module = load_single_stage_example_module()
+
+        legacy_proxy_status = module._evaluate_frontier_kam_certification_impl(
+            {
+                "accepted_iteration": 1,
+                "topology_broken": False,
+                "kam_fraction": 0.5,
+            },
+            enabled=True,
+            hardware_ok=True,
+            kam_min=0.30,
+            accepted_iteration=1,
+        )
+        wba_alias_status = module._evaluate_frontier_kam_certification_impl(
+            {
+                "accepted_iteration": 1,
+                "topology_broken": False,
+                "kam_fraction": 0.5,
+                "kam_fraction_semantics": KAM_FRACTION_SEMANTICS,
+            },
+            enabled=True,
+            hardware_ok=True,
+            kam_min=0.30,
+            accepted_iteration=1,
+        )
+
+        self.assertFalse(legacy_proxy_status["ok"])
+        self.assertEqual(
+            legacy_proxy_status["reason"],
+            "invariant_torus_fraction_missing",
+        )
+        self.assertTrue(wba_alias_status["ok"])
+        self.assertEqual(wba_alias_status["reason"], "certified")
 
     def test_resume_preserves_current_frontier_certification_status(self):
         module = load_single_stage_example_module()
@@ -5439,6 +5526,9 @@ class HardwareConstraintTests(unittest.TestCase):
             "topology_broken": False,
             "accepted_iteration": 5,
             "topology_accepted_iteration": 5,
+            "invariant_torus_fraction": 0.5,
+            "invariant_torus_min": 0.30,
+            "invariant_torus_deficit": 0.0,
             "kam_fraction": 0.5,
             "kam_min": 0.30,
             "kam_deficit": 0.0,
@@ -5454,6 +5544,10 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(restored["reason"], "certified")
         self.assertTrue(run_dict["search_eval"]["frontier_certification_ok"])
         self.assertEqual(run_dict["search_eval"]["frontier_certification_reason"], "certified")
+        self.assertAlmostEqual(
+            run_dict["search_eval"]["frontier_invariant_torus_fraction"],
+            0.5,
+        )
         self.assertAlmostEqual(run_dict["search_eval"]["frontier_kam_fraction"], 0.5)
 
     def test_refinement_eligible_incumbent_requires_topology_success(self):
@@ -5780,6 +5874,27 @@ class HardwareConstraintTests(unittest.TestCase):
             target_volume=0.10,
             target_iota=0.15,
             stage2_seed_surf_path="/seeds/surf_opt_boozer_surface.json",
+            stage2_policy_metadata=module.stage2_policy_metadata_items(
+                {
+                    "BOOZER_CURRENT_CONVENTION": "mu0",
+                    "BOOZER_I": -0.008168140899333462,
+                    "G0_POLICY": "signed_explicit_tf_current",
+                    "PROXY_PLACEMENT_MODE": "surface_major_radius_z0",
+                    "PROXY_VF_CURRENT_SCALAR_POLICY": "signed_physical_scalar",
+                    "PROXY_PLASMA_CURRENT_A": -6.5e3,
+                    "VF_CURRENT_A": -1.0e3,
+                    "VF_CURRENT_MAX_A": 1.6e4,
+                    "VF_TEMPLATE_PATH": "/seeds/vf.json",
+                    "VF_TEMPLATE_SHA256": "abc123",
+                    "VF_CURRENT_SIGN_POLICY": "template_sign_abs_proxy_current",
+                    "VF_CURRENT_MUTABILITY": "shared_unfixed_scaled_current",
+                    "FLIP_BANANA": True,
+                    "BANANA_CURRENT_SIGN": -1,
+                    "BANANA_CURRENT_PINNED": True,
+                    "BANANA_I_FIXED_S2_KA": -14.0,
+                    "IOTA_TARGET_SIGN": -1,
+                }
+            ),
         )
         run_dict = {
             "search_eval": {
@@ -5795,6 +5910,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "accepted_iteration": 1,
                 "confinement_score": 0.91,
                 "confinement_loss": 0.08,
+                "invariant_torus_fraction": 0.5,
                 "kam_fraction": 0.5,
                 "kam_median_width": 0.08,
                 "cross_section_span": 0.2,
@@ -5802,6 +5918,8 @@ class HardwareConstraintTests(unittest.TestCase):
                 "frontier_certification_ok": True,
                 "frontier_certification_reason": "certified",
                 "frontier_certification_hardware_ok": True,
+                "frontier_invariant_torus_min": 0.30,
+                "frontier_invariant_torus_deficit": 0.0,
                 "frontier_kam_min": 0.30,
                 "frontier_kam_deficit": 0.0,
             },
@@ -5843,6 +5961,32 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(payload["OFFSPEC_REPLAY_DEBUG_ONLY"])
         self.assertIsNone(payload["SINGLE_STAGE_RESUME_BS_PATH"])
         self.assertEqual(payload["STAGE2_BS_PATH"], "/seeds/biot_savart_opt.json")
+        self.assertEqual(payload["STAGE2_BOOZER_CURRENT_CONVENTION"], "mu0")
+        self.assertEqual(payload["STAGE2_BOOZER_I"], -0.008168140899333462)
+        self.assertEqual(payload["STAGE2_G0_POLICY"], "signed_explicit_tf_current")
+        self.assertEqual(payload["STAGE2_PROXY_PLACEMENT_MODE"], "surface_major_radius_z0")
+        self.assertEqual(
+            payload["STAGE2_PROXY_VF_CURRENT_SCALAR_POLICY"],
+            "signed_physical_scalar",
+        )
+        self.assertEqual(payload["STAGE2_PROXY_PLASMA_CURRENT_A"], -6.5e3)
+        self.assertEqual(payload["STAGE2_VF_CURRENT_A"], -1.0e3)
+        self.assertEqual(payload["STAGE2_VF_CURRENT_MAX_A"], 1.6e4)
+        self.assertEqual(payload["STAGE2_VF_TEMPLATE_PATH"], "/seeds/vf.json")
+        self.assertEqual(payload["STAGE2_VF_TEMPLATE_SHA256"], "abc123")
+        self.assertEqual(
+            payload["STAGE2_VF_CURRENT_SIGN_POLICY"],
+            "template_sign_abs_proxy_current",
+        )
+        self.assertEqual(
+            payload["STAGE2_VF_CURRENT_MUTABILITY"],
+            "shared_unfixed_scaled_current",
+        )
+        self.assertTrue(payload["STAGE2_FLIP_BANANA"])
+        self.assertEqual(payload["STAGE2_BANANA_CURRENT_SIGN"], -1)
+        self.assertTrue(payload["STAGE2_BANANA_CURRENT_PINNED"])
+        self.assertEqual(payload["STAGE2_BANANA_I_FIXED_S2_KA"], -14.0)
+        self.assertEqual(payload["STAGE2_IOTA_TARGET_SIGN"], -1)
         self.assertEqual(
             payload["STAGE2_SEED_SURF_PATH"],
             "/seeds/surf_opt_boozer_surface.json",
@@ -14057,6 +14201,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "tf_current_A": -8.0e4,
             "banana_init_current_A": -1.0e4,
             "banana_current_max_A": 1.6e4,
+            "vf_current_max_A": 1.6e4,
             "major_radius": 0.976,
             "toroidal_flux": 0.24,
             "order": 2,
@@ -14912,8 +15057,13 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "wataru_proxy_field")
         self.assertEqual(runtime["results"]["NUM_PROXY_COILS"], 1)
         self.assertEqual(runtime["results"]["NUM_VF_COILS"], 20)
+        self.assertEqual(
+            runtime["results"]["PROXY_VF_CURRENT_SCALAR_POLICY"],
+            "nonnegative_magnitude",
+        )
         self.assertEqual(runtime["results"]["PROXY_PLASMA_CURRENT_A"], 9000.0)
         self.assertEqual(runtime["results"]["VF_CURRENT_A"], vf_current_A)
+        self.assertEqual(runtime["results"]["VF_CURRENT_MAX_A"], 1.6e4)
         self.assertEqual(
             runtime["results"]["VF_TEMPLATE_PATH"],
             workflow_helpers.default_wataru_vf_template_path(),

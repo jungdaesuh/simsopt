@@ -24,6 +24,7 @@ from import_provenance import configure_local_simsopt_imports
 
 configure_local_simsopt_imports(__file__)
 
+from banana_opt.topology.kam_birkhoff import KAM_FRACTION_SEMANTICS
 from banana_opt.json_compat import load_boozer_finite_i as load
 from topology_scorer import safe_score_topology
 
@@ -45,6 +46,8 @@ class TrajectoryRow:
     boozer_residual: float | None
     iota: float | None
     volume: float | None
+    invariant_torus_fraction: float | None
+    invariant_torus_min: float | None
     kam_fraction: float | None
     kam_min: float | None
     survival_fraction: float | None
@@ -57,8 +60,9 @@ class TrajectoryRow:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build frontier Pareto/KAM trajectory artifacts from a single-stage "
-            "run directory. The primary KAM source is topology_archive.jsonl; "
+            "Build frontier Pareto/invariant-torus trajectory artifacts from a "
+            "single-stage run directory. The primary invariant-torus source is "
+            "topology_archive.jsonl; "
             "root-level partial/final JSON files and log.txt provide metadata."
         )
     )
@@ -75,10 +79,12 @@ def parse_args() -> argparse.Namespace:
         help="Output filename stem. Default: %(default)s.",
     )
     parser.add_argument(
+        "--recompute-missing-invariant-torus",
         "--recompute-missing-kam",
+        dest="recompute_missing_kam",
         action="store_true",
         help=(
-            "For topology_archive rows without KAM fields, recompute from "
+            "For topology_archive rows without invariant-torus fields, recompute from "
             "checkpoint_iterNNNN/biot_savart.json and "
             "checkpoint_iterNNNN/surf_outer.json, falling back to a "
             "Boozer-surface wrapper when needed."
@@ -110,6 +116,17 @@ def bool_or_none(value) -> bool | None:
         if lowered in {"false", "0", "no"}:
             return False
     return bool(value)
+
+
+def topology_entry_invariant_torus_fraction(
+    entry: Mapping[str, object],
+) -> float | None:
+    explicit_fraction = finite_float_or_none(entry.get("invariant_torus_fraction"))
+    if explicit_fraction is not None:
+        return explicit_fraction
+    if entry.get("kam_fraction_semantics") != KAM_FRACTION_SEMANTICS:
+        return None
+    return finite_float_or_none(entry.get("kam_fraction"))
 
 
 def first_float(text: str) -> float | None:
@@ -308,9 +325,10 @@ def topology_archive_rows(
     for line_number, entry in iter_jsonl(archive_path):
         accepted_iteration = int(entry["accepted_iteration"])
         log_record = log_records.get(accepted_iteration, {})
+        invariant_torus_fraction = topology_entry_invariant_torus_fraction(entry)
         kam_fraction = finite_float_or_none(entry.get("kam_fraction"))
         source_artifact_path = f"{archive_path}:{line_number}"
-        if kam_fraction is None and recompute_missing_kam:
+        if invariant_torus_fraction is None and recompute_missing_kam:
             recomputed, recomputed_source = recompute_checkpoint_topology(
                 run_dir,
                 accepted_iteration,
@@ -319,14 +337,20 @@ def topology_archive_rows(
             )
             if recomputed is not None:
                 recomputed_broken = bool_or_none(recomputed.get("broken"))
+                invariant_torus_fraction = topology_entry_invariant_torus_fraction(
+                    recomputed
+                )
                 kam_fraction = finite_float_or_none(recomputed.get("kam_fraction"))
                 if recomputed_broken:
+                    invariant_torus_fraction = None
                     kam_fraction = None
                 entry = {
                     **entry,
                     "survival_fraction": recomputed.get("survival_fraction"),
                     "topology_broken": recomputed_broken,
+                    "invariant_torus_fraction": invariant_torus_fraction,
                     "kam_fraction": kam_fraction,
+                    "kam_fraction_semantics": recomputed.get("kam_fraction_semantics"),
                 }
                 source_artifact_path = str(recomputed_source)
         hardware_ok = bool_or_none(
@@ -351,6 +375,10 @@ def topology_archive_rows(
                 boozer_residual=finite_float_or_none(log_record.get("boozer_residual")),
                 iota=finite_float_or_none(log_record.get("iota")),
                 volume=finite_float_or_none(log_record.get("volume")),
+                invariant_torus_fraction=invariant_torus_fraction,
+                invariant_torus_min=finite_float_or_none(
+                    entry.get("frontier_invariant_torus_min")
+                ),
                 kam_fraction=kam_fraction,
                 kam_min=finite_float_or_none(entry.get("frontier_kam_min")),
                 survival_fraction=finite_float_or_none(entry.get("survival_fraction")),
@@ -379,13 +407,28 @@ def result_payload_row(
     if not path.is_file():
         return None
     payload = read_json(path)
+    invariant_torus_fraction = finite_float_or_none(
+        payload.get("FRONTIER_INVARIANT_TORUS_FRACTION")
+    )
     kam_fraction = finite_float_or_none(payload.get("FRONTIER_KAM_FRACTION"))
     survival_fraction = finite_float_or_none(
         payload.get("FINAL_TOPOLOGY_SURVIVAL_FRACTION")
     )
-    topology_broken = bool_or_none(payload.get("FRONTIER_KAM_TOPOLOGY_BROKEN"))
+    topology_broken = bool_or_none(
+        payload.get(
+            "FRONTIER_INVARIANT_TORUS_TOPOLOGY_BROKEN",
+            payload.get("FRONTIER_KAM_TOPOLOGY_BROKEN"),
+        )
+    )
     if topology_result is not None:
         topology_broken = bool_or_none(topology_result.get("broken"))
+        if invariant_torus_fraction is None:
+            if topology_broken:
+                invariant_torus_fraction = None
+            else:
+                invariant_torus_fraction = topology_entry_invariant_torus_fraction(
+                    topology_result
+                )
         if kam_fraction is None:
             if topology_broken:
                 kam_fraction = None
@@ -412,6 +455,10 @@ def result_payload_row(
         boozer_residual=finite_float_or_none(payload.get("BOOZER_RESIDUAL")),
         iota=finite_float_or_none(payload.get("FINAL_IOTA")),
         volume=finite_float_or_none(payload.get("FINAL_VOLUME")),
+        invariant_torus_fraction=invariant_torus_fraction,
+        invariant_torus_min=finite_float_or_none(
+            payload.get("FRONTIER_INVARIANT_TORUS_MIN")
+        ),
         kam_fraction=kam_fraction,
         kam_min=finite_float_or_none(payload.get("FRONTIER_KAM_MIN")),
         survival_fraction=survival_fraction,
@@ -449,10 +496,21 @@ def solver_checkpoint_row(path: Path) -> TrajectoryRow | None:
         boozer_residual=finite_float_or_none(search_eval.get("J_Boozer")),
         iota=finite_float_or_none(iotas[-1] if iotas else None),
         volume=finite_float_or_none(volumes[-1] if volumes else None),
+        invariant_torus_fraction=finite_float_or_none(
+            search_eval.get("frontier_invariant_torus_fraction")
+        ),
+        invariant_torus_min=finite_float_or_none(
+            search_eval.get("frontier_invariant_torus_min")
+        ),
         kam_fraction=finite_float_or_none(search_eval.get("frontier_kam_fraction")),
         kam_min=finite_float_or_none(search_eval.get("frontier_kam_min")),
         survival_fraction=None,
-        topology_broken=bool_or_none(search_eval.get("frontier_kam_topology_broken")),
+        topology_broken=bool_or_none(
+            search_eval.get(
+                "frontier_invariant_torus_topology_broken",
+                search_eval.get("frontier_kam_topology_broken"),
+            )
+        ),
         hardware_ok=bool_or_none(hardware_status.get("success")),
         frontier_certification_ok=bool_or_none(search_eval.get("frontier_certification_ok")),
         frontier_certification_reason=(
@@ -510,7 +568,12 @@ def build_rows(
         row_path = run_dir / filename
         if row_path.is_file() and recompute_missing_kam:
             payload = read_json(row_path)
-            if finite_float_or_none(payload.get("FRONTIER_KAM_FRACTION")) is None:
+            if (
+                finite_float_or_none(
+                    payload.get("FRONTIER_INVARIANT_TORUS_FRACTION")
+                )
+                is None
+            ):
                 topology_result, topology_source_path = recompute_root_topology(
                     run_dir,
                     source_kind,
@@ -585,17 +648,40 @@ def write_plot(path: Path, rows: list[TrajectoryRow]) -> None:
         ("boozer_residual", "Boozer residual", axes[1]),
         ("iota", "iota", axes[2]),
         ("volume", "volume", axes[2]),
-        ("kam_fraction", "KAM fraction", axes[3]),
+        ("invariant_torus_fraction", "Invariant torus fraction", axes[3]),
     ):
         xs, ys = series(rows, attr)
         if xs:
             axis.plot(xs, ys, marker="o", linewidth=1.2, label=label)
 
-    kam_min_values = [
-        row.kam_min for row in rows if row.kam_min is not None and math.isfinite(row.kam_min)
+    invariant_torus_min_values = [
+        row.invariant_torus_min
+        for row in rows
+        if row.invariant_torus_min is not None
+        and math.isfinite(row.invariant_torus_min)
     ]
-    if kam_min_values:
-        axes[3].axhline(kam_min_values[-1], color="tab:red", linestyle="--", label="KAM min")
+    if invariant_torus_min_values:
+        axes[3].axhline(
+            invariant_torus_min_values[-1],
+            color="tab:red",
+            linestyle="--",
+            label="Invariant torus min",
+        )
+    legacy_kam_rows = [
+        row
+        for row in rows
+        if row.invariant_torus_fraction is None and row.kam_fraction is not None
+    ]
+    legacy_xs, legacy_ys = series(legacy_kam_rows, "kam_fraction")
+    if legacy_xs:
+        axes[3].plot(
+            legacy_xs,
+            legacy_ys,
+            marker="x",
+            linewidth=1.0,
+            linestyle=":",
+            label="Legacy bounded-seed KAM fraction",
+        )
 
     for attr, label in (
         ("hardware_ok", "hardware OK"),
@@ -624,7 +710,7 @@ def write_plot(path: Path, rows: list[TrajectoryRow]) -> None:
         handles, _ = axis.get_legend_handles_labels()
         if handles:
             axis.legend(loc="best")
-    fig.suptitle("Frontier Pareto / KAM Trajectory")
+    fig.suptitle("Frontier Pareto / Invariant-Torus Trajectory")
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
 

@@ -2453,7 +2453,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         ):
             args = module.parse_args()
 
-        self.assertEqual(args.cs_dist, 0.015)
+        self.assertEqual(args.cs_dist, module.COIL_PLASMA_MIN_DIST_M)
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
         self.assertEqual(args.maxcor, module.DEFAULT_LBFGSB_MAXCOR)
@@ -3460,6 +3460,12 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "FINAL_TOPOLOGY_GATE_SUCCESS": True,
                 "FRONTIER_CERTIFICATION_OK": True,
                 "FRONTIER_CERTIFICATION_REASON": "ok",
+                "FRONTIER_INVARIANT_TORUS_FRACTION": 1.0,
+                "FRONTIER_INVARIANT_TORUS_MIN": 0.0,
+                "FRONTIER_INVARIANT_TORUS_DEFICIT": 0.0,
+                "FRONTIER_KAM_FRACTION": 1.0,
+                "FRONTIER_KAM_MIN": 0.0,
+                "FRONTIER_KAM_DEFICIT": 0.0,
                 "FINAL_IOTA": final_iota,
                 "FINAL_VOLUME": final_volume,
                 "NONQS_RATIO": nonqs_ratio,

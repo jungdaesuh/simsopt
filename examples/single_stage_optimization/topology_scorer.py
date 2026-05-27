@@ -11,9 +11,23 @@ cannot drift between callback and validation.
 """
 
 import copy
+from pathlib import Path
+import sys
 
 import numpy as np
 import simsoptpp as sopp
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from banana_opt.topology.kam_birkhoff import (
+    DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
+    KAM_FRACTION_SEMANTICS,
+    classify_fieldline_hits,
+    classifier_settings_payload,
+    summarize_seed_classifications,
+)
 
 
 SEED_MODE_MIDPLANE = "midplane_radial_sweep"
@@ -788,6 +802,46 @@ def kam_fraction(fieldlines_phi_hits, cross_section_span, width_ratio=0.25):
     return float(bounded) / float(total), float(np.median(widths))
 
 
+def poloidal_axis_point(surface):
+    """Return the R/Z center used to unwrap Poincare poloidal angles."""
+
+    cross_section = surface.cross_section(phi=0.0, thetas=512)
+    radii = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+    return {
+        "r": float(np.mean(radii)),
+        "z": float(np.mean(cross_section[:, 2])),
+        "source": "surface_phi0_cross_section_centroid",
+    }
+
+
+def invariant_torus_classification(fieldlines_phi_hits, surface, *, plane_index=0):
+    axis = poloidal_axis_point(surface)
+    settings = DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS
+    if int(plane_index) != settings.target_phi_index:
+        settings = type(settings)(
+            target_phi_index=int(plane_index),
+            min_returns=settings.min_returns,
+            invariant_digits_min=settings.invariant_digits_min,
+            island_digits_min=settings.island_digits_min,
+            island_rational_tolerance=settings.island_rational_tolerance,
+            island_max_denominator=settings.island_max_denominator,
+            diff_floor=settings.diff_floor,
+        )
+    classifications = classify_fieldline_hits(
+        fieldlines_phi_hits,
+        stopped_before_hit_fn=_trace_hits_before_first_stop,
+        axis_r=axis["r"],
+        axis_z=axis["z"],
+        settings=settings,
+    )
+    return {
+        **summarize_seed_classifications(classifications),
+        "wba_axis": axis,
+        "wba_poincare_plane_index": int(settings.target_phi_index),
+        "wba_settings": classifier_settings_payload(settings),
+    }
+
+
 def cross_section_span(surface):
     """Representative cross-section extent used by kam_fraction as a scale."""
     gamma = surface.gamma()
@@ -897,6 +951,24 @@ def empty_topology_score_result(
         "line_lifetimes": [],
         "line_losses": [],
         "kam_fraction": 0.0,
+        "kam_fraction_semantics": KAM_FRACTION_SEMANTICS,
+        "invariant_torus_fraction": 0.0,
+        "invariant_torus_count": 0,
+        "wba_seed_count": 0,
+        "wba_survived_seed_count": 0,
+        "wba_classified_seed_count": 0,
+        "wba_classification_counts": {},
+        "wba_rotation_number_median": None,
+        "wba_matching_digits_min": None,
+        "wba_matching_digits_median": None,
+        "wba_seed_classifications": [],
+        "wba_axis": None,
+        "wba_poincare_plane_index": 0,
+        "wba_settings": classifier_settings_payload(
+            DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS
+        ),
+        "legacy_bounded_seed_fraction": 0.0,
+        "legacy_bounded_seed_median_width": 0.0,
         "kam_median_width": 0.0,
         "kam_width_ratio": float(kam_width_ratio),
         "cross_section_span": 0.0,
@@ -948,7 +1020,7 @@ def score_topology(
 
     Seeding is a midplane radial sweep (phi=0, Z=0). Returns a dict with
     survival_fraction, mean_exit_time, stop_reason_counts, per-line metrics,
-    and kam_fraction (a scorer-setting-dependent bounded seed-line fraction). When
+    and invariant_torus_fraction (a WBA convergence-rate classifier). When
     compute_transport_diagnostics is False, skips the surface-field structure
     computation and returns a not-evaluated stub (used by the search-time
     gate, which does not consume transport diagnostics for its decision).
@@ -1009,11 +1081,12 @@ def score_topology(
     )
 
     span = cross_section_span(surface)
-    kam_frac, kam_median = kam_fraction(
+    legacy_bounded_fraction, kam_median = kam_fraction(
         fieldlines_phi_hits,
         span,
         width_ratio=kam_width_ratio,
     )
+    wba = invariant_torus_classification(fieldlines_phi_hits, surface)
 
     return {
         "survival_fraction": metrics["survival_fraction"],
@@ -1034,7 +1107,23 @@ def score_topology(
         "line_metrics": metrics["line_metrics"],
         "line_lifetimes": surrogate["line_lifetimes"],
         "line_losses": surrogate["line_losses"],
-        "kam_fraction": float(kam_frac),
+        "kam_fraction": float(wba["invariant_torus_fraction"]),
+        "kam_fraction_semantics": KAM_FRACTION_SEMANTICS,
+        "invariant_torus_fraction": float(wba["invariant_torus_fraction"]),
+        "invariant_torus_count": int(wba["invariant_torus_count"]),
+        "wba_seed_count": int(wba["wba_seed_count"]),
+        "wba_survived_seed_count": int(wba["wba_survived_seed_count"]),
+        "wba_classified_seed_count": int(wba["wba_classified_seed_count"]),
+        "wba_classification_counts": wba["wba_classification_counts"],
+        "wba_rotation_number_median": wba["wba_rotation_number_median"],
+        "wba_matching_digits_min": wba["wba_matching_digits_min"],
+        "wba_matching_digits_median": wba["wba_matching_digits_median"],
+        "wba_seed_classifications": wba["wba_seed_classifications"],
+        "wba_axis": wba["wba_axis"],
+        "wba_poincare_plane_index": wba["wba_poincare_plane_index"],
+        "wba_settings": wba["wba_settings"],
+        "legacy_bounded_seed_fraction": float(legacy_bounded_fraction),
+        "legacy_bounded_seed_median_width": float(kam_median),
         "kam_median_width": float(kam_median),
         "kam_width_ratio": float(kam_width_ratio),
         "cross_section_span": float(span),

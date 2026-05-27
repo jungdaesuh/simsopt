@@ -43,6 +43,8 @@ FRONTIER_CERTIFICATION_ONLY_METRICS = (
     "final_topology_gate_success",
     "frontier_certification_ok",
     "frontier_certification_reason",
+    "frontier_invariant_torus_fraction",
+    "frontier_invariant_torus_min",
     "frontier_kam_fraction",
     "frontier_kam_min",
     "frontier_trust_ok",

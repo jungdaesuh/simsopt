@@ -10,7 +10,17 @@ def load_calibration_module():
     return load_module(FRONTIER_KAM_CALIBRATION_SCRIPT, "frontier_kam_calibration")
 
 
-def make_row(module, label, *, kam_fraction, hardware_ok=True, topology_broken=False):
+def make_row(
+    module,
+    label,
+    *,
+    kam_fraction,
+    invariant_torus_fraction=None,
+    hardware_ok=True,
+    topology_broken=False,
+):
+    if invariant_torus_fraction is None:
+        invariant_torus_fraction = kam_fraction
     return module.CalibrationRow(
         donor_label=label,
         run_dir=f"/tmp/{label}",
@@ -30,6 +40,7 @@ def make_row(module, label, *, kam_fraction, hardware_ok=True, topology_broken=F
         nfieldlines=12,
         tmax=50.0,
         nphis=4,
+        invariant_torus_fraction=invariant_torus_fraction,
         kam_fraction=kam_fraction,
         kam_median_width=0.01,
         kam_width_ratio=0.25,
@@ -51,15 +62,49 @@ def test_calibration_summary_recommends_floor_from_hw_clean_donors():
 
     summary = module.calibration_summary(
         rows,
-        frontier_kam_min=0.30,
+        frontier_invariant_torus_min=0.30,
         selection_margin=1.0 / 12.0,
     )
 
     assert summary["hw_clean_donor_count"] == 2
+    assert summary["invariant_torus_fraction_min"] == 0.25
     assert summary["kam_fraction_min"] == 0.25
     assert summary["configured_threshold_rejecting_hw_clean_donors"] == ["low"]
     assert summary["configured_threshold_accepts_all_hw_clean_donors"] is False
+    assert summary["recommended_frontier_invariant_torus_min"] == 0.25 - 1.0 / 12.0
     assert summary["recommended_frontier_kam_min"] == 0.25 - 1.0 / 12.0
+
+
+def test_calibration_summary_uses_invariant_torus_fraction_over_legacy_kam():
+    module = load_calibration_module()
+    rows = [
+        make_row(
+            module,
+            "low_invariant_high_legacy",
+            invariant_torus_fraction=0.20,
+            kam_fraction=0.80,
+        ),
+        make_row(
+            module,
+            "high_invariant_low_legacy",
+            invariant_torus_fraction=0.60,
+            kam_fraction=0.10,
+        ),
+    ]
+
+    summary = module.calibration_summary(
+        rows,
+        frontier_invariant_torus_min=0.30,
+        selection_margin=0.05,
+    )
+
+    assert summary["invariant_torus_fraction_min"] == 0.20
+    assert summary["kam_fraction_min"] == 0.20
+    assert summary["configured_threshold_rejecting_hw_clean_donors"] == [
+        "low_invariant_high_legacy"
+    ]
+    assert summary["recommended_frontier_invariant_torus_min"] == 0.20 - 0.05
+    assert summary["recommended_frontier_kam_min"] == 0.20 - 0.05
 
 
 def test_calibration_summary_allows_zero_floor_when_known_good_donor_has_zero_kam():
@@ -71,7 +116,7 @@ def test_calibration_summary_allows_zero_floor_when_known_good_donor_has_zero_ka
 
     summary = module.calibration_summary(
         rows,
-        frontier_kam_min=0.30,
+        frontier_invariant_torus_min=0.30,
         selection_margin=1.0 / 12.0,
     )
 
@@ -79,6 +124,7 @@ def test_calibration_summary_allows_zero_floor_when_known_good_donor_has_zero_ka
         "current_champion",
         "other",
     ]
+    assert summary["recommended_frontier_invariant_torus_min"] == 0.0
     assert summary["recommended_frontier_kam_min"] == 0.0
 
 
@@ -143,6 +189,7 @@ def test_score_donor_run_uses_root_artifacts_and_scorer_contract(
             "confinement_loss": 0.12,
             "confinement_surrogate_k": 3,
             "confinement_early_exit_threshold": 0.2,
+            "invariant_torus_fraction": 1.0 / 12.0,
             "kam_fraction": 1.0 / 12.0,
             "kam_median_width": 0.08,
             "kam_width_ratio": 0.25,
@@ -179,6 +226,7 @@ def test_score_donor_run_uses_root_artifacts_and_scorer_contract(
     assert row.surface_path.endswith("surf_opt_boozer_surface.json")
     assert row.hardware_constraints_ok is True
     assert row.topology_broken is False
+    assert row.invariant_torus_fraction == 1.0 / 12.0
     assert row.kam_fraction == 1.0 / 12.0
     assert json.loads(row.seed_contract_json) == {"nfieldlines": 12}
 
@@ -190,7 +238,7 @@ def test_score_donor_run_uses_root_artifacts_and_scorer_contract(
         nphis=4,
         kam_width_ratio=0.25,
         inset_fraction=0.05,
-        frontier_kam_min=0.0,
+        frontier_invariant_torus_min=0.0,
         selection_margin=1.0 / 12.0,
     )
     assert payload["summary"]["hw_clean_donor_count"] == 1

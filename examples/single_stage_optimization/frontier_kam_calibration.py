@@ -30,9 +30,9 @@ from frontier_pareto_trajectory import (
 from topology_scorer import finalize_topology_score_result, score_topology
 
 
-SCHEMA_VERSION = "frontier_kam_calibration_v1"
-DEFAULT_OUTPUT_STEM = "frontier_kam_calibration"
-DEFAULT_FRONTIER_KAM_MIN = 0.0
+SCHEMA_VERSION = "frontier_invariant_torus_calibration_v1"
+DEFAULT_OUTPUT_STEM = "frontier_invariant_torus_calibration"
+DEFAULT_FRONTIER_INVARIANT_TORUS_MIN = 0.0
 DEFAULT_NFIELDLINES = 12
 DEFAULT_TMAX = 50.0
 DEFAULT_NPHIS = 4
@@ -60,6 +60,7 @@ class CalibrationRow:
     nfieldlines: int
     tmax: float
     nphis: int
+    invariant_torus_fraction: float
     kam_fraction: float
     kam_median_width: float
     kam_width_ratio: float
@@ -72,7 +73,7 @@ class CalibrationRow:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Calibrate frontier KAM certification thresholds on known-good "
+            "Calibrate frontier invariant-torus certification thresholds on known-good "
             "donor run directories. Each donor is scored from final root "
             "biot_savart/surface artifacts with the same Poincare scorer "
             "settings used for certification."
@@ -87,21 +88,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kam-width-ratio", type=float, default=DEFAULT_KAM_WIDTH_RATIO)
     parser.add_argument("--inset-fraction", type=float, default=DEFAULT_INSET_FRACTION)
     parser.add_argument(
+        "--frontier-invariant-torus-min",
+        type=float,
+        default=None,
+        help="Currently configured invariant-torus threshold to evaluate against donors.",
+    )
+    parser.add_argument(
         "--frontier-kam-min",
         type=float,
-        default=DEFAULT_FRONTIER_KAM_MIN,
-        help="Currently configured threshold to evaluate against donors.",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--selection-margin",
         type=float,
         default=None,
         help=(
-            "Margin below the minimum HW-clean donor KAM fraction. Defaults to "
-            "one seed-line fraction, 1 / nfieldlines."
+            "Margin below the minimum HW-clean donor invariant-torus fraction. "
+            "Defaults to one seed-line fraction, 1 / nfieldlines."
         ),
     )
     return parser.parse_args()
+
+
+def resolve_frontier_invariant_torus_min_arg(args: argparse.Namespace) -> float:
+    if args.frontier_invariant_torus_min is not None:
+        return float(args.frontier_invariant_torus_min)
+    if args.frontier_kam_min is not None:
+        return float(args.frontier_kam_min)
+    return DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
 
 
 def read_results_payload(run_dir: Path) -> Mapping[str, object]:
@@ -169,6 +184,7 @@ def score_donor_run(
         nfieldlines=int(topology_result["nfieldlines"]),
         tmax=float(topology_result["tmax"]),
         nphis=int(nphis),
+        invariant_torus_fraction=float(topology_result["invariant_torus_fraction"]),
         kam_fraction=float(topology_result["kam_fraction"]),
         kam_median_width=float(topology_result["kam_median_width"]),
         kam_width_ratio=float(topology_result["kam_width_ratio"]),
@@ -191,42 +207,67 @@ def score_donor_run(
     )
 
 
-def hw_clean_kam_values(rows: Iterable[CalibrationRow]) -> list[float]:
+def hw_clean_invariant_torus_values(rows: Iterable[CalibrationRow]) -> list[float]:
     return [
-        row.kam_fraction
+        row.invariant_torus_fraction
         for row in rows
         if row.hardware_constraints_ok is True and not row.topology_broken
     ]
 
 
+def hw_clean_kam_values(rows: Iterable[CalibrationRow]) -> list[float]:
+    return hw_clean_invariant_torus_values(rows)
+
+
 def calibration_summary(
     rows: list[CalibrationRow],
     *,
-    frontier_kam_min: float,
+    frontier_invariant_torus_min: float,
     selection_margin: float,
 ) -> dict[str, object]:
-    kam_values = hw_clean_kam_values(rows)
+    invariant_torus_values = hw_clean_invariant_torus_values(rows)
     rejecting_labels = [
         row.donor_label
         for row in rows
         if (
             row.hardware_constraints_ok is True
             and not row.topology_broken
-            and row.kam_fraction < frontier_kam_min
+            and row.invariant_torus_fraction < frontier_invariant_torus_min
         )
     ]
     recommended = None
-    if kam_values:
-        recommended = max(0.0, min(kam_values) - float(selection_margin))
+    if invariant_torus_values:
+        recommended = max(0.0, min(invariant_torus_values) - float(selection_margin))
     return {
-        "configured_frontier_kam_min": float(frontier_kam_min),
+        "configured_frontier_invariant_torus_min": float(frontier_invariant_torus_min),
+        "configured_frontier_kam_min": float(frontier_invariant_torus_min),
         "selection_margin": float(selection_margin),
-        "hw_clean_donor_count": len(kam_values),
-        "kam_fraction_min": None if not kam_values else min(kam_values),
-        "kam_fraction_median": None if not kam_values else statistics.median(kam_values),
-        "kam_fraction_max": None if not kam_values else max(kam_values),
+        "hw_clean_donor_count": len(invariant_torus_values),
+        "invariant_torus_fraction_min": (
+            None if not invariant_torus_values else min(invariant_torus_values)
+        ),
+        "invariant_torus_fraction_median": (
+            None
+            if not invariant_torus_values
+            else statistics.median(invariant_torus_values)
+        ),
+        "invariant_torus_fraction_max": (
+            None if not invariant_torus_values else max(invariant_torus_values)
+        ),
+        "kam_fraction_min": (
+            None if not invariant_torus_values else min(invariant_torus_values)
+        ),
+        "kam_fraction_median": (
+            None
+            if not invariant_torus_values
+            else statistics.median(invariant_torus_values)
+        ),
+        "kam_fraction_max": (
+            None if not invariant_torus_values else max(invariant_torus_values)
+        ),
         "configured_threshold_rejecting_hw_clean_donors": rejecting_labels,
         "configured_threshold_accepts_all_hw_clean_donors": not rejecting_labels,
+        "recommended_frontier_invariant_torus_min": recommended,
         "recommended_frontier_kam_min": recommended,
     }
 
@@ -240,7 +281,7 @@ def calibration_payload(
     nphis: int,
     kam_width_ratio: float,
     inset_fraction: float,
-    frontier_kam_min: float,
+    frontier_invariant_torus_min: float,
     selection_margin: float,
 ) -> dict[str, object]:
     return {
@@ -257,7 +298,7 @@ def calibration_payload(
         },
         "summary": calibration_summary(
             rows,
-            frontier_kam_min=frontier_kam_min,
+            frontier_invariant_torus_min=frontier_invariant_torus_min,
             selection_margin=selection_margin,
         ),
         "rows": [asdict(row) for row in rows],
@@ -275,6 +316,8 @@ def write_csv(path: Path, rows: list[CalibrationRow]) -> None:
 
 def main() -> None:
     args = parse_args()
+    args.frontier_invariant_torus_min = resolve_frontier_invariant_torus_min_arg(args)
+    args.frontier_kam_min = args.frontier_invariant_torus_min
     if args.nfieldlines <= 0:
         raise ValueError("--nfieldlines must be positive")
     if args.nphis <= 0:
@@ -285,10 +328,12 @@ def main() -> None:
         raise ValueError("--kam-width-ratio must be finite and positive")
     if not math.isfinite(args.inset_fraction) or args.inset_fraction < 0.0:
         raise ValueError("--inset-fraction must be finite and non-negative")
-    if not math.isfinite(args.frontier_kam_min) or not (
-        0.0 <= args.frontier_kam_min <= 1.0
+    if not math.isfinite(args.frontier_invariant_torus_min) or not (
+        0.0 <= args.frontier_invariant_torus_min <= 1.0
     ):
-        raise ValueError("--frontier-kam-min must be finite and in [0, 1]")
+        raise ValueError(
+            "--frontier-invariant-torus-min must be finite and in [0, 1]"
+        )
 
     selection_margin = (
         1.0 / int(args.nfieldlines)
@@ -325,7 +370,7 @@ def main() -> None:
                 nphis=int(args.nphis),
                 kam_width_ratio=float(args.kam_width_ratio),
                 inset_fraction=float(args.inset_fraction),
-                frontier_kam_min=float(args.frontier_kam_min),
+                frontier_invariant_torus_min=float(args.frontier_invariant_torus_min),
                 selection_margin=selection_margin,
             ),
             indent=2,

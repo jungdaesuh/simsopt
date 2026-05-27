@@ -58,6 +58,15 @@ class FrontierContractTests(unittest.TestCase):
         scalarization = load_frontier_scalarization_module()
         runtime_calibration = load_frontier_runtime_calibration_module()
 
+        self.assertIn(
+            "frontier_invariant_torus_fraction",
+            contracts.FRONTIER_CERTIFICATION_ONLY_METRICS,
+        )
+        self.assertIn(
+            "frontier_invariant_torus_min",
+            contracts.FRONTIER_CERTIFICATION_ONLY_METRICS,
+        )
+
         args = campaign_module.parse_args(
             [
                 "--plasma-surf-filename",

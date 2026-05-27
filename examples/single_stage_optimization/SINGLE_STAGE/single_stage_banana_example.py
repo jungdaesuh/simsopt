@@ -1221,7 +1221,13 @@ def parse_args():
     parser.add_argument(
         "--frontier-kam-min",
         type=float,
-        default=float(os.environ.get("FRONTIER_KAM_MIN", "0.0")),
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frontier-invariant-torus-min",
+        type=float,
+        default=None,
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -1248,7 +1254,8 @@ def parse_args():
         default=float(os.environ["BOOZER_I"]) if "BOOZER_I" in os.environ else None,
         help=(
             "Expert/internal override for the solver-facing BoozerSurface I input. "
-            "Prefer --plasma-current-A for the standard Wataru-style mu0*I_A path."
+            "Prefer --plasma-current-A for finite-current modes with a physical "
+            "plasma-current convention."
         ),
     )
     parser.add_argument(
@@ -1258,7 +1265,7 @@ def parse_args():
         help=(
             "User-facing enclosed toroidal plasma current in physical SI amperes. "
             "In single-surface mode this is converted to BoozerSurface I using "
-            "Wataru's mu0*I_A convention."
+            "the selected finite-current mode's Boozer current convention."
         ),
     )
     parser.add_argument(
@@ -2126,6 +2133,16 @@ def parse_args():
         help="RNG seed for basin-hopping (-1 = random). Set for reproducibility.",
     )
     return parser.parse_args()
+
+
+def resolve_frontier_invariant_torus_min_arg(args):
+    if args.frontier_invariant_torus_min is not None:
+        return float(args.frontier_invariant_torus_min)
+    if args.frontier_kam_min is not None:
+        return float(args.frontier_kam_min)
+    if "FRONTIER_INVARIANT_TORUS_MIN" in os.environ:
+        return float(os.environ["FRONTIER_INVARIANT_TORUS_MIN"])
+    return float(os.environ.get("FRONTIER_KAM_MIN", "0.0"))
 
 
 def initialize_boozer_surface(
@@ -3025,7 +3042,25 @@ def topology_archive_entry(
         "confinement_loss": topology_result["confinement_loss"],
         "confinement_surrogate_k": topology_result["confinement_surrogate_k"],
         "confinement_early_exit_threshold": topology_result["confinement_early_exit_threshold"],
+        "invariant_torus_fraction": topology_result["invariant_torus_fraction"],
+        "invariant_torus_count": topology_result.get("invariant_torus_count"),
+        "wba_seed_count": topology_result.get("wba_seed_count"),
+        "wba_survived_seed_count": topology_result.get("wba_survived_seed_count"),
+        "wba_classified_seed_count": topology_result.get("wba_classified_seed_count"),
+        "wba_classification_counts": topology_result.get("wba_classification_counts"),
+        "wba_rotation_number_median": topology_result.get("wba_rotation_number_median"),
+        "wba_matching_digits_min": topology_result.get("wba_matching_digits_min"),
+        "wba_matching_digits_median": topology_result.get("wba_matching_digits_median"),
+        "wba_seed_classifications": topology_result.get("wba_seed_classifications"),
+        "wba_axis": topology_result.get("wba_axis"),
+        "wba_poincare_plane_index": topology_result.get("wba_poincare_plane_index"),
+        "wba_settings": topology_result.get("wba_settings"),
         "kam_fraction": topology_result["kam_fraction"],
+        "kam_fraction_semantics": topology_result.get("kam_fraction_semantics"),
+        "legacy_bounded_seed_fraction": topology_result.get("legacy_bounded_seed_fraction"),
+        "legacy_bounded_seed_median_width": topology_result.get(
+            "legacy_bounded_seed_median_width"
+        ),
         "kam_median_width": topology_result["kam_median_width"],
         "kam_width_ratio": topology_result.get("kam_width_ratio"),
         "cross_section_span": topology_result["cross_section_span"],
@@ -3091,6 +3126,16 @@ _FRONTIER_CERTIFICATION_SEARCH_FIELDS = {
     "ok": "frontier_certification_ok",
     "reason": "frontier_certification_reason",
     "hardware_ok": "frontier_certification_hardware_ok",
+    "topology_evaluated": "frontier_invariant_torus_topology_evaluated",
+    "topology_broken": "frontier_invariant_torus_topology_broken",
+    "accepted_iteration": "frontier_invariant_torus_accepted_iteration",
+    "topology_accepted_iteration": "frontier_invariant_torus_topology_accepted_iteration",
+    "invariant_torus_fraction": "frontier_invariant_torus_fraction",
+    "invariant_torus_min": "frontier_invariant_torus_min",
+    "invariant_torus_deficit": "frontier_invariant_torus_deficit",
+}
+
+_FRONTIER_CERTIFICATION_LEGACY_SEARCH_FIELDS = {
     "topology_evaluated": "frontier_kam_topology_evaluated",
     "topology_broken": "frontier_kam_topology_broken",
     "accepted_iteration": "frontier_kam_accepted_iteration",
@@ -3105,6 +3150,8 @@ def annotate_frontier_certification_fields(field_payload, certification_status):
     annotated = dict(field_payload)
     for status_key, search_key in _FRONTIER_CERTIFICATION_SEARCH_FIELDS.items():
         annotated[search_key] = certification_status.get(status_key)
+    for status_key, search_key in _FRONTIER_CERTIFICATION_LEGACY_SEARCH_FIELDS.items():
+        annotated[search_key] = certification_status.get(status_key)
     return annotated
 
 
@@ -3113,10 +3160,20 @@ def annotate_search_eval_frontier_certification(search_eval, certification_statu
 
 
 def frontier_certification_status_from_field_payload(field_payload):
-    return {
+    status = {
         status_key: field_payload.get(search_key)
         for status_key, search_key in _FRONTIER_CERTIFICATION_SEARCH_FIELDS.items()
     }
+    for status_key, search_key in _FRONTIER_CERTIFICATION_LEGACY_SEARCH_FIELDS.items():
+        if status.get(status_key) is None:
+            status[status_key] = field_payload.get(search_key)
+    if status.get("kam_fraction") is None:
+        status["kam_fraction"] = status.get("invariant_torus_fraction")
+    if status.get("kam_min") is None:
+        status["kam_min"] = status.get("invariant_torus_min")
+    if status.get("kam_deficit") is None:
+        status["kam_deficit"] = status.get("invariant_torus_deficit")
+    return status
 
 
 def frontier_certification_status_from_search_eval(search_eval):
@@ -3130,11 +3187,32 @@ def frontier_certification_results_payload(certification_status, *, prefix=""):
         f"{prefix}FRONTIER_CERTIFIED": certification_status.get("ok"),
         f"{prefix}FRONTIER_CERTIFICATION_REASON": certification_status.get("reason"),
         f"{prefix}FRONTIER_CERTIFICATION_HARDWARE_OK": certification_status.get("hardware_ok"),
+        f"{prefix}FRONTIER_INVARIANT_TORUS_TOPOLOGY_EVALUATED": certification_status.get(
+            "topology_evaluated"
+        ),
+        f"{prefix}FRONTIER_INVARIANT_TORUS_TOPOLOGY_BROKEN": certification_status.get(
+            "topology_broken"
+        ),
+        f"{prefix}FRONTIER_INVARIANT_TORUS_ACCEPTED_ITERATION": certification_status.get(
+            "accepted_iteration"
+        ),
+        f"{prefix}FRONTIER_INVARIANT_TORUS_TOPOLOGY_ACCEPTED_ITERATION": certification_status.get(
+            "topology_accepted_iteration"
+        ),
         f"{prefix}FRONTIER_KAM_TOPOLOGY_EVALUATED": certification_status.get("topology_evaluated"),
         f"{prefix}FRONTIER_KAM_TOPOLOGY_BROKEN": certification_status.get("topology_broken"),
         f"{prefix}FRONTIER_KAM_ACCEPTED_ITERATION": certification_status.get("accepted_iteration"),
         f"{prefix}FRONTIER_KAM_TOPOLOGY_ACCEPTED_ITERATION": certification_status.get(
             "topology_accepted_iteration"
+        ),
+        f"{prefix}FRONTIER_INVARIANT_TORUS_FRACTION": certification_status.get(
+            "invariant_torus_fraction"
+        ),
+        f"{prefix}FRONTIER_INVARIANT_TORUS_MIN": certification_status.get(
+            "invariant_torus_min"
+        ),
+        f"{prefix}FRONTIER_INVARIANT_TORUS_DEFICIT": certification_status.get(
+            "invariant_torus_deficit"
         ),
         f"{prefix}FRONTIER_KAM_FRACTION": certification_status.get("kam_fraction"),
         f"{prefix}FRONTIER_KAM_MIN": certification_status.get("kam_min"),
@@ -3154,7 +3232,7 @@ def build_frontier_kam_certification_status(
         hardware_ok=(
             None if hardware_status is None else bool(hardware_status.get("success", False))
         ),
-        kam_min=FRONTIER_KAM_MIN,
+        kam_min=FRONTIER_INVARIANT_TORUS_MIN,
         accepted_iteration=accepted_iteration,
     )
 
@@ -3236,7 +3314,10 @@ def topology_survival_rank_key(topology_entry):
             unit_interval=True,
         ),
         finite_topology_rank_component(
-            topology_entry.get("kam_fraction"),
+            topology_entry.get(
+                "invariant_torus_fraction",
+                topology_entry.get("kam_fraction"),
+            ),
             unit_interval=True,
         ),
         finite_topology_rank_component(topology_entry.get("confinement_score")),
@@ -3254,6 +3335,16 @@ def best_topology_certification_payload(certification_status):
         "BEST_TOPOLOGY_CERTIFIED": certification_status.get("ok"),
         "BEST_TOPOLOGY_CERTIFICATION_REASON": certification_status.get("reason"),
         "BEST_TOPOLOGY_CERTIFICATION_HARDWARE_OK": certification_status.get("hardware_ok"),
+        "BEST_TOPOLOGY_CERTIFICATION_INVARIANT_TORUS_FRACTION": certification_status.get(
+            "invariant_torus_fraction"
+        ),
+        "BEST_TOPOLOGY_CERTIFICATION_INVARIANT_TORUS_MIN": certification_status.get(
+            "invariant_torus_min"
+        ),
+        "BEST_TOPOLOGY_CERTIFICATION_INVARIANT_TORUS_DEFICIT": certification_status.get(
+            "invariant_torus_deficit"
+        ),
+        "BEST_TOPOLOGY_CERTIFICATION_KAM_FRACTION": certification_status.get("kam_fraction"),
         "BEST_TOPOLOGY_CERTIFICATION_KAM_MIN": certification_status.get("kam_min"),
         "BEST_TOPOLOGY_CERTIFICATION_KAM_DEFICIT": certification_status.get("kam_deficit"),
     }
@@ -3271,8 +3362,25 @@ def topology_results_fields(topology_entry, *, prefix, artifact_role):
         f"{prefix}_ACCEPTED_ITERATION": entry_fields.get("accepted_iteration"),
         f"{prefix}_CONFINEMENT_SCORE": entry_fields.get("confinement_score"),
         f"{prefix}_CONFINEMENT_LOSS": entry_fields.get("confinement_loss"),
+        f"{prefix}_INVARIANT_TORUS_FRACTION": entry_fields.get(
+            "invariant_torus_fraction"
+        ),
+        f"{prefix}_INVARIANT_TORUS_COUNT": entry_fields.get("invariant_torus_count"),
         f"{prefix}_KAM_FRACTION": entry_fields.get("kam_fraction"),
+        f"{prefix}_KAM_FRACTION_SEMANTICS": entry_fields.get("kam_fraction_semantics"),
+        f"{prefix}_LEGACY_BOUNDED_SEED_FRACTION": entry_fields.get(
+            "legacy_bounded_seed_fraction"
+        ),
         f"{prefix}_KAM_MEDIAN_WIDTH": entry_fields.get("kam_median_width"),
+        f"{prefix}_WBA_CLASSIFICATION_COUNTS": entry_fields.get(
+            "wba_classification_counts"
+        ),
+        f"{prefix}_WBA_ROTATION_NUMBER_MEDIAN": entry_fields.get(
+            "wba_rotation_number_median"
+        ),
+        f"{prefix}_WBA_MATCHING_DIGITS_MEDIAN": entry_fields.get(
+            "wba_matching_digits_median"
+        ),
         f"{prefix}_CROSS_SECTION_SPAN": entry_fields.get("cross_section_span"),
         f"{prefix}_TRANSPORT_DIAGNOSTICS": entry_fields.get("transport_diagnostics"),
         f"{prefix}_ARTIFACT_HARDWARE_OK": entry_fields.get("artifact_hardware_ok"),
@@ -3453,7 +3561,7 @@ def maybe_record_topology_score(
         print(
             f"  [topology] iter={accepted_iteration}: "
             f"survival={topo_result['survived_lines']}/{topo_result['nfieldlines']}, "
-            f"kam_fraction={topo_result['kam_fraction']:.4f}, "
+            f"invariant_torus_fraction={topo_result['invariant_torus_fraction']:.4f}, "
             f"confinement={topo_result['confinement_score']:.4f}, "
             f"loss={topo_result['confinement_loss']:.4f}, "
             f"mean_exit={topo_result['mean_exit_time']}"
@@ -3647,6 +3755,7 @@ class PreservedTimeoutReplayConfig:
     epsilon_constraint_boozer_max: float | None = None
     frontier_epsilon_penalty_weight: float | None = None
     frontier_kam_min: float | None = None
+    stage2_policy_metadata: tuple[tuple[str, object], ...] | None = None
     stage2_seed_surf_path: str | None = None
     major_radius: float = VACUUM_VESSEL_MAJOR_RADIUS_M
 
@@ -5901,6 +6010,49 @@ def _jsonable_value(value):
     return value
 
 
+_STAGE2_POLICY_METADATA_KEYS = (
+    "BOOZER_CURRENT_CONVENTION",
+    "BOOZER_I",
+    "G0_POLICY",
+    "PROXY_PLACEMENT_MODE",
+    "PROXY_VF_CURRENT_SCALAR_POLICY",
+    "PROXY_PLASMA_CURRENT_A",
+    "VF_CURRENT_A",
+    "VF_CURRENT_MAX_A",
+    "VF_TEMPLATE_PATH",
+    "VF_TEMPLATE_SHA256",
+    "VF_CURRENT_SIGN_POLICY",
+    "VF_CURRENT_MUTABILITY",
+    "FLIP_BANANA",
+    "BANANA_CURRENT_SIGN",
+    "BANANA_CURRENT_PINNED",
+    "BANANA_I_FIXED_S2_KA",
+    "IOTA_TARGET_SIGN",
+)
+
+
+def stage2_policy_metadata_items(stage2_results):
+    if stage2_results is None:
+        return None
+    return tuple(
+        (key, _jsonable_value(stage2_results.get(key)))
+        for key in _STAGE2_POLICY_METADATA_KEYS
+    )
+
+
+def stage2_policy_metadata_payload(stage2_policy_metadata, *, prefix="STAGE2_"):
+    if stage2_policy_metadata is None:
+        metadata = {}
+    elif isinstance(stage2_policy_metadata, dict):
+        metadata = stage2_policy_metadata
+    else:
+        metadata = dict(stage2_policy_metadata)
+    return {
+        f"{prefix}{key}": _jsonable_value(metadata.get(key))
+        for key in _STAGE2_POLICY_METADATA_KEYS
+    }
+
+
 def write_json_artifact(path, payload):
     temp_path = f"{path}.tmp"
     serialized = _common_json_dumps(payload, indent=2)
@@ -7353,6 +7505,7 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
     replay_config = globals().get("PRESERVED_TIMEOUT_REPLAY_CONFIG", PRESERVED_TIMEOUT_REPLAY_CONFIG)
     stage2_bs_path = globals().get("stage2_bs_path")
     stage2_results_path = globals().get("stage2_results_path")
+    stage2_results_value = globals().get("stage2_results")
     frontier_goal_config = globals().get("FRONTIER_GOAL_CONFIG", replay_config)
     surface_data_value = globals().get("surface_data")
     banana_current_state = globals().get("banana_current_state")
@@ -7516,6 +7669,11 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             "epsilon_penalty_weight",
         ),
         frontier_kam_min=globals().get("FRONTIER_KAM_MIN", replay_config.frontier_kam_min),
+        stage2_policy_metadata=(
+            stage2_policy_metadata_items(stage2_results_value)
+            if stage2_results_value is not None
+            else replay_config.stage2_policy_metadata
+        ),
     )
 
 
@@ -7783,6 +7941,7 @@ def build_preserved_timeout_results_payload(
         "STAGE2_BS_PATH": replay_config.stage2_bs_path,
         "STAGE2_SEED_SURF_PATH": replay_config.stage2_seed_surf_path,
         "STAGE2_RESULTS_PATH": replay_config.stage2_results_path,
+        **stage2_policy_metadata_payload(replay_config.stage2_policy_metadata),
         "mpol": replay_config.mpol,
         "ntor": replay_config.ntor,
         "nphi": replay_config.nphi,
@@ -9434,6 +9593,7 @@ TOPOLOGY_SCORER_EVERY = 0
 TOPOLOGY_SCORER_NFIELDLINES = 12
 TOPOLOGY_SCORER_TMAX = 50.0
 CONFINEMENT_OBJECTIVE_WEIGHT = 0.0
+FRONTIER_INVARIANT_TORUS_MIN = 0.0
 FRONTIER_KAM_MIN = 0.0
 CONFINEMENT_SURROGATE_WORST_K = 3
 CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
@@ -9489,6 +9649,8 @@ if __name__ == "__main__":
     # CONFIGURATION PARAMETERS
     # ==============================================================================
     args = apply_default_stage2_seed_args(parse_args())
+    args.frontier_invariant_torus_min = resolve_frontier_invariant_torus_min_arg(args)
+    args.frontier_kam_min = args.frontier_invariant_torus_min
     if args.banana_current_fd_diagnostics:
         args.banana_current_diagnostics = True
     if args.banana_current_fd_relative_step_fraction <= 0.0:
@@ -9599,6 +9761,7 @@ if __name__ == "__main__":
     TOPOLOGY_SCORER_NFIELDLINES = args.topology_scorer_nfieldlines
     TOPOLOGY_SCORER_TMAX = args.topology_scorer_tmax
     CONFINEMENT_OBJECTIVE_WEIGHT = args.confinement_objective_weight
+    FRONTIER_INVARIANT_TORUS_MIN = args.frontier_invariant_torus_min
     FRONTIER_KAM_MIN = args.frontier_kam_min
     CONFINEMENT_SURROGATE_WORST_K = args.confinement_surrogate_worst_k
     CONFINEMENT_SURROGATE_EARLY_THRESHOLD = args.confinement_surrogate_early_threshold
@@ -9624,8 +9787,12 @@ if __name__ == "__main__":
         raise ValueError("--topology-gate-survival-threshold must be between 0 and 1")
     if args.topology_gate_penalty_scale < 0.0:
         raise ValueError("--topology-gate-penalty-scale must be non-negative")
-    if not np.isfinite(args.frontier_kam_min) or not (0.0 <= args.frontier_kam_min <= 1.0):
-        raise ValueError("--frontier-kam-min must be finite and between 0 and 1")
+    if not np.isfinite(args.frontier_invariant_torus_min) or not (
+        0.0 <= args.frontier_invariant_torus_min <= 1.0
+    ):
+        raise ValueError(
+            "--frontier-invariant-torus-min must be finite and between 0 and 1"
+        )
     if args.hardware_search_soft_iterations < 0:
         raise ValueError("--hardware-search-soft-iterations must be non-negative")
     if args.curvature_traversal_band < 0.0:
@@ -9713,6 +9880,7 @@ if __name__ == "__main__":
         num_banana_current_controls=None,
         single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
         frontier_kam_min=FRONTIER_KAM_MIN,
+        stage2_policy_metadata=stage2_policy_metadata_items(stage2_results),
         major_radius=R0,
     )
 
@@ -11256,6 +11424,7 @@ if __name__ == "__main__":
         "STAGE2_SEED_ORDER": order,
         "STAGE2_FINITE_CURRENT_MODE": stage2_results["FINITE_CURRENT_MODE"],
         "STAGE2_BOOZER_CURRENT_CONVENTION": stage2_results["BOOZER_CURRENT_CONVENTION"],
+        **stage2_policy_metadata_payload(stage2_results),
         "STAGE2_NUM_BANANA_COILS": coil_partitions.num_banana_coils,
         "STAGE2_NUM_PROXY_COILS": coil_partitions.num_proxy_coils,
         "STAGE2_NUM_VF_COILS": coil_partitions.num_vf_coils,
