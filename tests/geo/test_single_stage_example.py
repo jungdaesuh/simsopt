@@ -14422,11 +14422,20 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertEqual(phi_width, np.pi / 8.0)
             self.assertEqual(theta_width, np.pi / 6.0)
             self.assertTrue(str(out_dir).endswith("outputs-demo.nc/"))
-            # Proxy is always built; VF is built iff vf_template_path is set.
-            # That kwarg is the layout signal this mock needs to mirror.
+            # Proxy is always built; the default VF count comes from the profile.
+            # Seeded restarts still preserve the donor's recorded partition.
+            finite_current_mode = extra_kwargs.get(
+                "finite_current_mode",
+                "wataru_proxy_field",
+            )
+            num_vf_coils = 0
+            if extra_kwargs.get("vf_template_path"):
+                num_vf_coils = module.get_finite_current_profile(
+                    finite_current_mode,
+                ).default_num_vf_coils
             curves, proxy_coils, vf_coils = build_coil_bundle(
                 num_proxy_coils=1,
-                num_vf_coils=1 if extra_kwargs.get("vf_template_path") else 0,
+                num_vf_coils=num_vf_coils,
             )
             fake_bs.coils = [*fake_tf_coils, *fake_banana_coils, *proxy_coils, *vf_coils]
             return (
@@ -14902,7 +14911,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         )
         self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "wataru_proxy_field")
         self.assertEqual(runtime["results"]["NUM_PROXY_COILS"], 1)
-        self.assertEqual(runtime["results"]["NUM_VF_COILS"], 1)
+        self.assertEqual(runtime["results"]["NUM_VF_COILS"], 20)
         self.assertEqual(runtime["results"]["PROXY_PLASMA_CURRENT_A"], 9000.0)
         self.assertEqual(runtime["results"]["VF_CURRENT_A"], vf_current_A)
         self.assertEqual(

@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import sys
@@ -126,13 +127,25 @@ class FiniteCurrentProfileTests(unittest.TestCase):
 
         self.assertIs(profile, WATARU_PROFILE)
         self.assertEqual(profile.mode, "wataru_proxy_field")
-        self.assertEqual(profile.default_num_vf_coils, 2)
+        self.assertEqual(profile.default_num_tf_coils, 20)
+        self.assertEqual(profile.default_num_banana_coils, 10)
+        self.assertEqual(profile.default_num_proxy_coils, 1)
+        self.assertEqual(profile.default_num_vf_coils, 20)
+        self.assertEqual(profile.default_total_coils, 51)
+        self.assertEqual(profile.build_default_coil_groups_manifest().total(), 51)
         self.assertEqual(profile.g0_policy, "signed_explicit_tf_current")
         self.assertEqual(profile.proxy_placement_policy, "vmec_axis_zeroth_coefficients")
         self.assertEqual(profile.vf_current_mutability, "independent_fixed_current")
         self.assertIsNotNone(profile.default_vf_template_path)
         self.assertTrue(profile.default_vf_template_path.is_file())
-        self.assertEqual(len(load_boozer_finite_i(str(profile.default_vf_template_path)).coils), 2)
+        self.assertEqual(
+            len(load_boozer_finite_i(str(profile.default_vf_template_path)).coils),
+            20,
+        )
+        self.assertEqual(
+            hashlib.sha256(profile.default_vf_template_path.read_bytes()).hexdigest(),
+            profile.vf_template_sha256,
+        )
 
     def test_jhalpern_profile_records_51_coil_layout_and_rejection_boundary(self):
         profile = get_finite_current_profile("jhalpern30_proxy_field")

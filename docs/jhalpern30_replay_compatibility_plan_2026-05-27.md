@@ -155,10 +155,10 @@ policy.
 | jhalpern-superior behavior | Current repo state | Required adoption | Rationale |
 | --- | --- | --- | --- |
 | Faithful historical reproducer | Current code is a structured Stage 2 pipeline, not an exact replay contract | Add explicit `jhalpern30_proxy_field` mode and tests against historical construction | Replay needs the old behavior as source of truth, not a nearby modern interpretation |
-| Correct 20-coil VF template | Default bundled `wataru_vf_template.json` has 2 VF coils | Vendor `jhalpern30_vf_biotsavart.json` and resolve it only for the compatibility mode | Historical runs used the 20-coil input template |
+| Correct 20-coil VF template | Default bundled `wataru_vf_template.json` now also has 20 VF coils | Vendor `jhalpern30_vf_biotsavart.json` for the compatibility mode, and keep the Wataru default template count aligned | Historical runs used the 20-coil input template, and fresh default artifacts should share the same coil cardinality |
 | Historical proxy placement | Wataru proxy uses scaled VMEC axis zeroth coefficients `raxis_cc[0]` and `zaxis_cs[0]` | Add mode-specific builder using `surf.major_radius()` and `Z = 0` | Proxy field geometry is part of the old basin |
 | Signed proxy current | Wataru validator rejects negative proxy/VF current | Add a separate jhalpern validator that allows signed proxy current | Current validator is correct for Wataru mode, but not for replay |
-| Historical coil cardinality | Current Wataru finite-current path is typically `20 TF + 10 banana + 1 proxy + 2 VF = 33` coils | Add jhalpern mode layout `20 TF + 10 banana + 1 proxy + 20 VF = 51` coils | The saved BiotSavart ordering and group counts are part of replay compatibility |
+| Historical coil cardinality | Current Wataru finite-current path now defaults to `20 TF + 10 banana + 1 proxy + 20 VF = 51` coils | Keep jhalpern mode at the same 51-coil layout while preserving mode-specific proxy placement, VF mutability, and current-sign policy | The saved BiotSavart ordering and group counts are part of replay compatibility |
 | VF current mutability and signs | Current repo fixes independent VF currents | Add jhalpern VF builder using shared `ScaledCurrent(Current(1.0), VF_CURRENT_A)` and `unfix_all()`; effective currents are `abs(proxy_current_A) / 6.5 * sign(template_current)` for nonzero proxy | Old optimization allowed VF current DOFs to move, and the sign algebra is part of replay |
 | Boozer finite-current `I` | Current repo already supports `mu0 * plasma_current_A` for Wataru mode | Preserve that convention for jhalpern mode and label it separately from `G0` | jhalpern passes `I=mu0 * proxy_current_A` into `BoozerSurface` |
 | Banana sign and iota sign | Current repo has its own banana seed and current controls | Add replay mapping for `--flip-banana`, `_flip`, `BANANA_CURRENT_SIGN`, `BANANA_I_FIXED_S2`, and `IOTA_TARGET_SIGN` | Historical `_flip` changes both banana-current sign and the iota target sign |
@@ -476,8 +476,9 @@ Known unrelated blockers:
       historical builders, StageNN import, and parsing/validation helpers.
 - [x] Consumers that need policy metadata use `get_finite_current_profile(...)`
       instead of importing jhalpern-specific constants.
-- [x] Profile tests prove jhalpern remains 51 coils, Wataru remains default, and
-      `run_stage2_to_single_stage.py` remains unsupported for jhalpern replay.
+- [x] Profile tests prove jhalpern remains 51 coils, Wataru remains the default
+      mode with the same default coil count, and `run_stage2_to_single_stage.py`
+      remains unsupported for jhalpern replay.
 - [x] User-facing docs no longer imply jhalpern replay uses donor repair or
       `run_stage2_to_single_stage.py`.
 - [x] Focused validation has been re-run after the donor-repair retirement
