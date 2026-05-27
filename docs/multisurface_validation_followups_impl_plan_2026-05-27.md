@@ -79,7 +79,7 @@ shipped physics.
 
 ## Implementation Plan
 
-1. **[Tier 1 — decide + patch] Experimental-mode surface-weight ramp is ignored by the objective**
+1. **[Tier 1 — DECIDED 2026-05-27: option (a), gate/diagnostics-only] Experimental-mode surface-weight ramp**
    - Context: `_resolve_surface_objective_terms` (`single_stage_objectives.py`)
      computes `raw_*` from `surface_weights` but then returns
      `objective_* = raw_* if JxxxObjective is None else JxxxObjective`. The production
@@ -89,10 +89,20 @@ shipped physics.
      `build_surface_search_weights`) reaches only diagnostics + the acceptance gate
      (`build_surface_search_gate`: gap-threshold scaling + `enforce_nesting` toggle).
      Inert for published `(1,1,1)`; a real silent divergence for the experimental ramp.
-   - [ ] Determine intended semantics of the experimental inner-weight ramp (objective-biasing vs. gate/diagnostics-only) — see Open Questions.
-   - [ ] If **gate-only is intended (recommended, low-risk):** add a docstring/comment at `_resolve_surface_objective_terms`, `build_surface_search_weights`, and `evaluate_total_objective` stating the objective uses uniform surface weights and the ramp governs the acceptance gate + diagnostics only; optionally rename `surface_weights` in the objective path to `diagnostic_surface_weights` to kill the implication.
-   - [ ] If **objective-biasing is intended:** thread the live ramp weights into the descended objective (rebuild `JnonQSRatio`/`JBoozerResidual` with current `surface_weights` per accepted iteration, or stop overriding `raw_*`), and confirm the Optimizable graph rebuild cost is acceptable.
-   - [ ] Add a regression test asserting the chosen behavior (experimental non-uniform weights either *do* or *provably do not* change `evaluate_total_objective["total"]`).
+   - **Decision: (a) gate/diagnostics-only — do NOT thread the ramp into the objective.**
+     Rationale: the ramp is a function of `accepted_iterations` (`single_stage_geometry.py:963`),
+     so wiring it into the descended objective would minimize a *moving objective*, breaking
+     the LBFGS-B/ALM line search + quasi-Newton Hessian and making the solution path-dependent.
+     The acceptance gate already handles the real failure mode (a not-yet-resolved inner surface
+     rejecting steps); both options converge to the same full-strength (weight→1) objective; and
+     `test_single_stage_alm_surface_stack_gate_relaxes_spacing_only_for_solver`
+     confirms the relaxation is intended to be solver/gate-scoped. The objective-weight plumbing
+     is vestigial (severed by the `JNonQSObjective`/`JBoozerObjective` refactor).
+   - [ ] Document `_resolve_surface_objective_terms`, `build_surface_search_weights`, and `evaluate_total_objective`: the objective uses uniform surface weights; the continuation ramp governs the acceptance gate + diagnostics only.
+   - [ ] Rename the objective-path `surface_weights` arg to `diagnostic_surface_weights` (or drop it from the objective path) so it no longer implies it weights the descended objective; leave the gate wiring (`build_surface_search_gate`) unchanged.
+   - [ ] ~~Option (b): thread ramp weights into the descended objective~~ — **rejected** (moving-objective hazard; see Decision).
+   - [ ] Add a regression test asserting experimental non-uniform ramp weights **provably do not** change `evaluate_total_objective["total"]` (they affect only `gate_scale` + diagnostics).
+   - [ ] (Deferred — only if profiling shows a poorly-resolved inner surface dominating the gradient) consider a *fixed, bounded* inner weight applied once at bundle build (contract `weights` field): a static reweighting with no moving-objective problem, NOT the per-iteration ramp.
 
 2. **[Tier 2 — physics observability] Interior iota / shear is unconstrained**
    - Context: `Jiota` uses `surface_iota_terms[-1]` (outer only); `JVolume` uses
@@ -143,7 +153,8 @@ shipped physics.
 
 ## Completion Criteria
 
-- [ ] Tier 1 decision recorded (gate-only vs. objective-biasing) and implemented + tested.
+- [x] Tier 1 decision recorded — **option (a), gate/diagnostics-only** (2026-05-27).
+- [ ] Tier 1 implemented: doc + objective-path arg rename + regression test proving ramp weights do not change `evaluate_total_objective["total"]`.
 - [ ] Interior-iota diagnostic emitted in run metadata (Tier 2 minimum).
 - [ ] Explicit positive/ordered volume guard added with a rejecting test (Tier 3).
 - [ ] Tier 4 items either done or explicitly closed as obsolete/not-worth-it with a one-line reason.
@@ -151,6 +162,6 @@ shipped physics.
 
 ## Open Questions
 
-- Is the experimental `continuation_inner_surface_weight` ramp **intended to bias the descended objective**, or is it **gate/diagnostics-only**? (Decision owner: physics/optimization lead. This selects Tier 1 option a vs. b.)
+- ~~Is the experimental `continuation_inner_surface_weight` ramp objective-biasing or gate/diagnostics-only?~~ **Resolved 2026-05-27: gate/diagnostics-only (Tier 1 option a).** See the Tier 1 Decision; reopen only if profiling shows inner-surface gradient domination (then a *static* weight, not the ramp).
 - Should interior iota be an actual **constraint/penalty** or only a **diagnostic**? (Physics-design call; affects whether Tier 2 step 3 is in scope.)
 - Did the concurrent VF-current work **rename/relocate `vf_coils.py` / `VFCoilBuildResult`** permanently? (Confirm before Tier 4 typing task.)
