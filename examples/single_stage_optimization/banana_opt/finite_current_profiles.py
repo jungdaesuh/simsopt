@@ -6,10 +6,16 @@ from typing import Mapping
 
 from banana_opt.coil_groups import CoilGroupsManifest, build_contiguous_manifest
 from banana_opt.current_contracts import (
+    BananaReplayPolicy,
     BoozerCurrentConvention,
     DEFAULT_FINITE_CURRENT_MODE,
     FiniteCurrentMode,
+    G0Policy,
     HBT_PROXY_VF_CURRENT_RATIO,
+    ProxyPlacementPolicy,
+    ProxyVfCurrentScalarPolicy,
+    VfCurrentMutability,
+    VfCurrentSignPolicy,
     resolve_boozer_current_convention,
 )
 
@@ -33,14 +39,15 @@ class FiniteCurrentProfile:
     default_num_proxy_coils: int
     default_num_vf_coils: int
     boozer_current_convention: BoozerCurrentConvention
-    g0_policy: str
-    proxy_placement_policy: str
+    g0_policy: G0Policy
+    proxy_placement_policy: ProxyPlacementPolicy
+    proxy_vf_current_scalar_policy: ProxyVfCurrentScalarPolicy
     default_vf_template_path: Path | None
     vf_template_sha256: str | None
     vf_current_ratio: float
-    vf_current_sign_policy: str
-    vf_current_mutability: str
-    banana_replay_policy: str
+    vf_current_sign_policy: VfCurrentSignPolicy
+    vf_current_mutability: VfCurrentMutability
+    banana_replay_policy: BananaReplayPolicy
     supported_entrypoints: tuple[str, ...]
     rejected_entrypoints: tuple[str, ...]
     required_artifact_metadata_keys: tuple[str, ...]
@@ -68,6 +75,7 @@ _COMMON_REQUIRED_ARTIFACT_METADATA_KEYS = (
     "BOOZER_CURRENT_CONVENTION",
     "G0_POLICY",
     "PROXY_PLACEMENT_MODE",
+    "PROXY_VF_CURRENT_SCALAR_POLICY",
     "PROXY_PLASMA_CURRENT_A",
     "VF_CURRENT_A",
     "VF_TEMPLATE_PATH",
@@ -93,6 +101,7 @@ WATARU_PROFILE = FiniteCurrentProfile(
     ),
     g0_policy="signed_explicit_tf_current",
     proxy_placement_policy="vmec_axis_zeroth_coefficients",
+    proxy_vf_current_scalar_policy="nonnegative_magnitude",
     default_vf_template_path=DEFAULT_WATARU_VF_TEMPLATE_PATH,
     vf_template_sha256="1df87dbe845b014199fb1a4a1a414a2dff922d0ae9da10b1861092d0f326d989",
     vf_current_ratio=HBT_PROXY_VF_CURRENT_RATIO,
@@ -119,6 +128,7 @@ JHALPERN30_PROFILE = FiniteCurrentProfile(
     ),
     g0_policy="signed_explicit_tf_current",
     proxy_placement_policy="surface_major_radius_z0",
+    proxy_vf_current_scalar_policy="signed_physical_scalar",
     default_vf_template_path=DEFAULT_JHALPERN30_VF_TEMPLATE_PATH,
     vf_template_sha256="1df87dbe845b014199fb1a4a1a414a2dff922d0ae9da10b1861092d0f326d989",
     vf_current_ratio=HBT_PROXY_VF_CURRENT_RATIO,
@@ -172,6 +182,9 @@ JHALPERN30_NUM_VF_COILS = JHALPERN30_PROFILE.default_num_vf_coils
 JHALPERN30_G0_POLICY = JHALPERN30_PROFILE.g0_policy
 JHALPERN30_BOOZER_CURRENT_CONVENTION = JHALPERN30_PROFILE.boozer_current_convention
 JHALPERN30_PROXY_PLACEMENT_MODE = JHALPERN30_PROFILE.proxy_placement_policy
+JHALPERN30_PROXY_VF_CURRENT_SCALAR_POLICY = (
+    JHALPERN30_PROFILE.proxy_vf_current_scalar_policy
+)
 JHALPERN30_VF_CURRENT_SIGN_POLICY = JHALPERN30_PROFILE.vf_current_sign_policy
 JHALPERN30_VF_CURRENT_MUTABILITY = JHALPERN30_PROFILE.vf_current_mutability
 JHALPERN30_VF_TEMPLATE_SHA256 = JHALPERN30_PROFILE.vf_template_sha256
@@ -190,6 +203,7 @@ __all__ = [
     "JHALPERN30_NUM_VF_COILS",
     "JHALPERN30_PROFILE",
     "JHALPERN30_PROXY_PLACEMENT_MODE",
+    "JHALPERN30_PROXY_VF_CURRENT_SCALAR_POLICY",
     "JHALPERN30_VF_CURRENT_MUTABILITY",
     "JHALPERN30_VF_CURRENT_SIGN_POLICY",
     "JHALPERN30_VF_TEMPLATE_SHA256",

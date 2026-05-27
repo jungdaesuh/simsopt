@@ -108,11 +108,13 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
                 proxy_plasma_current_A=proxy_current_A,
                 vf_current_A=vf_current_A,
             )
-        with self.assertRaisesRegex(ValueError, "jhalpern30 proxy/VF convention"):
+        self.assertEqual(
             current_contracts.validate_jhalpern30_proxy_vf_current_convention(
                 proxy_plasma_current_A=proxy_current_A,
-                vf_current_A=1.0e3,
-            )
+                vf_current_A=-750.0,
+            ),
+            (proxy_current_A, -750.0),
+        )
 
     def test_boozer_current_and_single_surface_mode_use_mu0_signed_proxy_current(self):
         proxy_current_A = -6.5e3
@@ -163,10 +165,11 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
 
     def test_vf_builder_shares_mutable_leaf_current_with_template_signs(self):
         proxy_current_A = -6.5e3
-        vf_coils = compat.build_jhalpern30_vf_coils(
+        vf_build_result = compat.build_jhalpern30_vf_coil_build_result(
             proxy_current_A,
             compat.resolve_jhalpern30_vf_template_path(None),
         )
+        vf_coils = vf_build_result.coils
 
         self.assertEqual(len(vf_coils), compat.JHALPERN30_NUM_VF_COILS)
         template_signs = compat.validate_jhalpern30_vf_template(
@@ -175,6 +178,11 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
         first_leaf_current, first_scale = current_contracts.unwrap_current_optimizable(
             vf_coils[0].current,
         )
+        control_leaf_current, control_scale = current_contracts.unwrap_current_optimizable(
+            vf_build_result.current_control,
+        )
+        self.assertIs(control_leaf_current, first_leaf_current)
+        self.assertAlmostEqual(abs(control_scale), abs(proxy_current_A) / 6.5)
         self.assertTrue(np.all(first_leaf_current.dofs_free_status))
         self.assertTrue(np.all(vf_coils[0].current.dofs_free_status))
         self.assertAlmostEqual(first_scale, abs(proxy_current_A) / 6.5)
@@ -198,6 +206,34 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
                 coil.current.get_value(),
                 1.25 * abs(proxy_current_A) / 6.5 * template_sign,
             )
+
+    def test_shared_vf_bound_targets_leaf_current_without_scale_mutation(self):
+        proxy_current_A = -6.5e3
+        vf_build_result = compat.build_jhalpern30_vf_coil_build_result(
+            proxy_current_A,
+            compat.resolve_jhalpern30_vf_template_path(None),
+        )
+        leaf_current, scale = current_contracts.unwrap_current_optimizable(
+            vf_build_result.current_control,
+        )
+        original_scale = vf_build_result.current_control.scale
+
+        current_contracts.apply_vf_current_upper_bound(
+            vf_build_result.current_control,
+            2.5e3,
+        )
+
+        self.assertEqual(vf_build_result.current_control.scale, original_scale)
+        np.testing.assert_allclose(
+            leaf_current.local_lower_bounds,
+            [-2.5e3 / abs(scale)],
+        )
+        np.testing.assert_allclose(
+            leaf_current.local_upper_bounds,
+            [2.5e3 / abs(scale)],
+        )
+        self.assertTrue(current_contracts.vf_current_exceeds_limit(2.6e3, 2.5e3))
+        self.assertFalse(current_contracts.vf_current_exceeds_limit(-2.4e3, 2.5e3))
 
     def test_banana_sign_and_pin_replay_contract(self):
         free_replay = compat.resolve_jhalpern30_banana_current_replay(
@@ -278,6 +314,10 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
         self.assertEqual(results["TF_CURRENT_A"], -8.0e4)
         self.assertEqual(results["PROXY_PLASMA_CURRENT_A"], -6.5e3)
         self.assertEqual(results["BOOZER_I"], compat.jhalpern30_proxy_boozer_I(-6.5e3))
+        self.assertEqual(
+            results["PROXY_VF_CURRENT_SCALAR_POLICY"],
+            "signed_physical_scalar",
+        )
         self.assertEqual(results["VF_CURRENT_A"], -1.0e3)
         self.assertEqual(
             [coil.current.get_value() for coil in biot_savart.coils[31:]],

@@ -191,6 +191,11 @@ def _infer_legacy_boozer_current_convention(
 
 
 def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
+    from .finite_current_profiles import (
+        FINITE_CURRENT_PROFILES,
+        JHALPERN30_FINITE_CURRENT_MODE,
+    )
+
     finite_current_mode = upgraded_results.get("FINITE_CURRENT_MODE")
     finite_current_mode_source = upgraded_results.get("FINITE_CURRENT_MODE_SOURCE")
     if finite_current_mode in {None, ""}:
@@ -204,15 +209,17 @@ def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
         upgraded_results["FINITE_CURRENT_MODE_SOURCE"] = (
             FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA
         )
+    is_jhalpern30_mode = finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE
     recorded_boozer_current_convention = upgraded_results.get("BOOZER_CURRENT_CONVENTION")
     if recorded_boozer_current_convention in {None, ""}:
-        upgraded_results["BOOZER_CURRENT_CONVENTION"] = (
-            _infer_legacy_boozer_current_convention(
-                finite_current_mode=finite_current_mode,
-                plasma_current_A=upgraded_results.get("PLASMA_CURRENT_A"),
-                boozer_I=upgraded_results.get("BOOZER_I"),
+        if not is_jhalpern30_mode:
+            upgraded_results["BOOZER_CURRENT_CONVENTION"] = (
+                _infer_legacy_boozer_current_convention(
+                    finite_current_mode=finite_current_mode,
+                    plasma_current_A=upgraded_results.get("PLASMA_CURRENT_A"),
+                    boozer_I=upgraded_results.get("BOOZER_I"),
+                )
             )
-        )
     else:
         upgraded_results["BOOZER_CURRENT_CONVENTION"] = recorded_boozer_current_convention
     for count_key in (
@@ -224,17 +231,36 @@ def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
             upgraded_results,
             count_key=count_key,
         )
-    if upgraded_results.get("NUM_PROXY_COILS") is None:
+    if upgraded_results.get("NUM_PROXY_COILS") is None and not is_jhalpern30_mode:
         upgraded_results["NUM_PROXY_COILS"] = 0
-    if upgraded_results.get("NUM_VF_COILS") is None:
+    if upgraded_results.get("NUM_VF_COILS") is None and not is_jhalpern30_mode:
         upgraded_results["NUM_VF_COILS"] = 0
-    if upgraded_results.get("PROXY_PLASMA_CURRENT_A") is None:
+    if (
+        upgraded_results.get("PROXY_PLASMA_CURRENT_A") is None
+        and not is_jhalpern30_mode
+    ):
         upgraded_results["PROXY_PLASMA_CURRENT_A"] = 0.0
-    if upgraded_results.get("VF_CURRENT_A") is None:
+    if upgraded_results.get("VF_CURRENT_A") is None and not is_jhalpern30_mode:
         upgraded_results["VF_CURRENT_A"] = 0.0
-    if upgraded_results.get("VF_TEMPLATE_PATH") is None:
+    if upgraded_results.get("VF_TEMPLATE_PATH") is None and not is_jhalpern30_mode:
         upgraded_results["VF_TEMPLATE_PATH"] = None
-    if upgraded_results.get("NUM_BANANA_COILS") is None:
+
+    profile = FINITE_CURRENT_PROFILES.get(finite_current_mode)
+    if profile is not None and not is_jhalpern30_mode:
+        policy_defaults = {
+            "G0_POLICY": profile.g0_policy,
+            "PROXY_PLACEMENT_MODE": profile.proxy_placement_policy,
+            "PROXY_VF_CURRENT_SCALAR_POLICY": profile.proxy_vf_current_scalar_policy,
+            "VF_TEMPLATE_SHA256": profile.vf_template_sha256,
+            "VF_CURRENT_SIGN_POLICY": profile.vf_current_sign_policy,
+            "VF_CURRENT_MUTABILITY": profile.vf_current_mutability,
+        }
+        for key, value in policy_defaults.items():
+            if upgraded_results.get(key) is None:
+                upgraded_results[key] = value
+    if upgraded_results.get("VF_CURRENT_MAX_A") is None:
+        upgraded_results["VF_CURRENT_MAX_A"] = BANANA_CURRENT_HARD_LIMIT_A
+    if upgraded_results.get("NUM_BANANA_COILS") is None and not is_jhalpern30_mode:
         nfp = upgraded_results.get("NFP")
         if nfp is not None:
             upgraded_results["NUM_BANANA_COILS"] = 2 * int(nfp)

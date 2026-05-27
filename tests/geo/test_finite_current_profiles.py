@@ -135,6 +135,8 @@ class FiniteCurrentProfileTests(unittest.TestCase):
         self.assertEqual(profile.build_default_coil_groups_manifest().total(), 51)
         self.assertEqual(profile.g0_policy, "signed_explicit_tf_current")
         self.assertEqual(profile.proxy_placement_policy, "vmec_axis_zeroth_coefficients")
+        self.assertEqual(profile.proxy_vf_current_scalar_policy, "nonnegative_magnitude")
+        self.assertEqual(profile.vf_current_sign_policy, "template_sign_vf_current_scalar")
         self.assertEqual(profile.vf_current_mutability, "independent_fixed_current")
         self.assertIsNotNone(profile.default_vf_template_path)
         self.assertTrue(profile.default_vf_template_path.is_file())
@@ -159,7 +161,12 @@ class FiniteCurrentProfileTests(unittest.TestCase):
         self.assertEqual(profile.build_default_coil_groups_manifest().total(), 51)
         self.assertEqual(profile.g0_policy, "signed_explicit_tf_current")
         self.assertEqual(profile.proxy_placement_policy, "surface_major_radius_z0")
+        self.assertEqual(
+            profile.proxy_vf_current_scalar_policy,
+            "signed_physical_scalar",
+        )
         self.assertEqual(profile.vf_current_sign_policy, "template_sign_abs_proxy_current")
+        self.assertEqual(profile.vf_current_mutability, "shared_unfixed_scaled_current")
         self.assertIn(
             "run_stage2_to_single_stage.py:pre_boozer_repair",
             profile.rejected_entrypoints,
@@ -242,6 +249,10 @@ class FiniteCurrentProfileTests(unittest.TestCase):
         self.assertEqual(
             results["PROXY_PLACEMENT_MODE"],
             JHALPERN30_PROFILE.proxy_placement_policy,
+        )
+        self.assertEqual(
+            results["PROXY_VF_CURRENT_SCALAR_POLICY"],
+            JHALPERN30_PROFILE.proxy_vf_current_scalar_policy,
         )
         self.assertEqual(
             results["VF_TEMPLATE_SHA256"],

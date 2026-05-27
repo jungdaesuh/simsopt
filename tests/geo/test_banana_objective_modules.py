@@ -3066,6 +3066,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             init_only=False,
             banana_init_current_A=-1.0e4,
             banana_current_max_A=1.6e4,
+            vf_current_max_A=1.6e4,
             basin_hops=2,
             basin_stepsize=0.01,
             basin_temperature=2.5,

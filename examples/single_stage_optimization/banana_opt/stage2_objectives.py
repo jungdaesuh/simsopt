@@ -1277,6 +1277,7 @@ def build_stage2_results(
     self_intersect_min_distance=None,
     length_min_target=None,
     proxy_placement_mode="vmec_axis_zeroth_coefficients",
+    proxy_vf_current_scalar_policy="nonnegative_magnitude",
     vf_template_sha256=None,
     vf_current_sign_policy="template_sign_vf_current_scalar",
     vf_current_mutability="independent_fixed_current",
@@ -1353,8 +1354,10 @@ def build_stage2_results(
         "BOOZER_I": float(boozer_I),
         "G0_POLICY": str(g0_policy),
         "PROXY_PLACEMENT_MODE": str(proxy_placement_mode),
+        "PROXY_VF_CURRENT_SCALAR_POLICY": str(proxy_vf_current_scalar_policy),
         "PROXY_PLASMA_CURRENT_A": float(proxy_plasma_current_A),
         "VF_CURRENT_A": float(vf_current_A),
+        "VF_CURRENT_MAX_A": float(args.vf_current_max_A),
         "VF_TEMPLATE_PATH": (
             None if vf_template_path in {None, ""} else str(vf_template_path)
         ),

@@ -31,6 +31,27 @@ CurrentInputSource = Literal[
 ]
 FiniteCurrentModeSource = Literal["artifact_metadata", "legacy_assumed_default"]
 BoozerCurrentConvention = Literal["mu0_over_2pi", "mu0"]
+G0Policy = Literal["signed_explicit_tf_current"]
+ProxyPlacementPolicy = Literal[
+    "vmec_axis_zeroth_coefficients",
+    "surface_major_radius_z0",
+]
+ProxyVfCurrentScalarPolicy = Literal[
+    "nonnegative_magnitude",
+    "signed_physical_scalar",
+]
+VfCurrentSignPolicy = Literal[
+    "template_sign_vf_current_scalar",
+    "template_sign_abs_proxy_current",
+]
+VfCurrentMutability = Literal[
+    "independent_fixed_current",
+    "shared_unfixed_scaled_current",
+]
+BananaReplayPolicy = Literal[
+    "stage2_cli_seed_current",
+    "flip_banana_parent_suffix_env_BANANA_CURRENT_SIGN_BANANA_I_FIXED_S2",
+]
 FiniteCurrentMode = Literal[
     "boozer_surrogate",
     "wataru_proxy_field",
@@ -64,14 +85,22 @@ __all__ = [
     "FiniteCurrentModeSource",
     "FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA",
     "FINITE_CURRENT_MODE_SOURCE_LEGACY_ASSUMED_DEFAULT",
+    "BananaReplayPolicy",
+    "G0Policy",
     "HBT_PROXY_VF_CURRENT_RATIO",
     "MU0",
     "MU0_OVER_2PI",
     "PenaltyBoxBoundHandler",
     "PlasmaCurrentSettings",
+    "ProxyPlacementPolicy",
+    "ProxyVfCurrentScalarPolicy",
+    "VFCoilBuildResult",
+    "VfCurrentMutability",
+    "VfCurrentSignPolicy",
     "apply_banana_current_seed_sign_box_bound",
     "apply_banana_current_upper_bound",
     "apply_penalty_traversal_forbidden_box_bounds",
+    "apply_vf_current_upper_bound",
     "banana_current_exceeds_limit",
     "boozer_I_to_physical_current_A",
     "infer_uniform_coil_current_A",
@@ -82,6 +111,8 @@ __all__ = [
     "validate_hbt_proxy_vf_current_convention",
     "validate_jhalpern30_proxy_vf_current_convention",
     "validate_proxy_vf_current_convention_for_mode",
+    "validate_signed_proxy_vf_current_convention",
+    "vf_current_exceeds_limit",
     "resolve_penalty_traversal_forbidden_box_bounds",
     "resolve_loaded_tf_current_A",
     "resolve_plasma_current_settings",
@@ -100,6 +131,12 @@ class PlasmaCurrentSettings:
     boozer_current_convention: BoozerCurrentConvention
     mode: FiniteCurrentMode
     effective_mode: EffectiveCurrentMode
+
+
+@dataclass(frozen=True)
+class VFCoilBuildResult:
+    coils: list[object]
+    current_control: object | None
 
 
 @dataclass(frozen=True)
@@ -184,6 +221,23 @@ def validate_hbt_proxy_vf_current_convention(
         raise ValueError("HBT proxy plasma current must be non-negative.")
     if resolved_vf_current_A < 0.0:
         raise ValueError("HBT VF current must be non-negative.")
+    return _validate_proxy_vf_current_ratio(
+        proxy_current_A,
+        resolved_vf_current_A,
+        context="HBT proxy/VF convention",
+        requirement="--vf-current-A = --proxy-plasma-current-A / 6.5",
+    )
+
+
+def _validate_proxy_vf_current_ratio(
+    proxy_current_A: float,
+    resolved_vf_current_A: float,
+    *,
+    context: str,
+    requirement: str,
+) -> tuple[float, float]:
+    if not np.isfinite(proxy_current_A) or not np.isfinite(resolved_vf_current_A):
+        raise ValueError(f"{context} requires finite proxy and VF currents.")
     expected_vf_current_A = proxy_current_A * HBT_PROXY_VF_CURRENT_RATIO
     if not np.isclose(
         resolved_vf_current_A,
@@ -191,10 +245,19 @@ def validate_hbt_proxy_vf_current_convention(
         rtol=1.0e-12,
         atol=HBT_PROXY_VF_CURRENT_TOL_A,
     ):
-        raise ValueError(
-            "HBT proxy/VF convention requires "
-            "--vf-current-A = --proxy-plasma-current-A / 6.5."
-        )
+        raise ValueError(f"{context} requires {requirement}.")
+    return proxy_current_A, resolved_vf_current_A
+
+
+def validate_signed_proxy_vf_current_convention(
+    *,
+    proxy_plasma_current_A: float,
+    vf_current_A: float,
+) -> tuple[float, float]:
+    proxy_current_A = float(proxy_plasma_current_A)
+    resolved_vf_current_A = float(vf_current_A)
+    if not np.isfinite(proxy_current_A) or not np.isfinite(resolved_vf_current_A):
+        raise ValueError("signed proxy/VF convention requires finite currents.")
     return proxy_current_A, resolved_vf_current_A
 
 
@@ -206,24 +269,19 @@ def validate_jhalpern30_proxy_vf_current_convention(
     """Validate the signed proxy/VF scalar contract for jhalpern30 replay.
 
     Historical jhalpern30 runs allowed signed proxy current. The scalar
-    ``VF_CURRENT_A`` remains ``proxy / 6.5``; individual effective VF coil
-    signs are then reconstructed from the historical VF template and the proxy
-    sign, so not every VF coil carries this scalar sign directly.
+    ``VF_CURRENT_A`` starts from ``proxy / 6.5`` by default, but the jhalpern
+    VF profile is shared and mutable, so optimized artifacts may carry a final
+    signed VF scalar that no longer equals the proxy ratio.
     """
-    proxy_current_A = float(proxy_plasma_current_A)
-    resolved_vf_current_A = float(vf_current_A)
-    expected_vf_current_A = proxy_current_A * HBT_PROXY_VF_CURRENT_RATIO
-    if not np.isclose(
-        resolved_vf_current_A,
-        expected_vf_current_A,
-        rtol=1.0e-12,
-        atol=HBT_PROXY_VF_CURRENT_TOL_A,
-    ):
+    if float(proxy_plasma_current_A) == 0.0:
         raise ValueError(
-            "jhalpern30 proxy/VF convention requires "
-            "VF_CURRENT_A = PROXY_PLASMA_CURRENT_A / 6.5."
+            "jhalpern30 proxy/VF convention requires non-zero "
+            "PROXY_PLASMA_CURRENT_A."
         )
-    return proxy_current_A, resolved_vf_current_A
+    return validate_signed_proxy_vf_current_convention(
+        proxy_plasma_current_A=proxy_plasma_current_A,
+        vf_current_A=vf_current_A,
+    )
 
 
 def validate_proxy_vf_current_convention_for_mode(
@@ -321,17 +379,25 @@ def unwrap_current_optimizable(current):
     return current_optimizable, scale
 
 
-def apply_banana_current_upper_bound(current, banana_current_max_A):
+def _apply_scaled_symmetric_current_bound(current, current_max_A, *, label: str) -> None:
     current_optimizable, scale = unwrap_current_optimizable(current)
     if scale == 0.0:
-        raise ValueError("Banana current scale must be non-zero to apply a bound.")
+        raise ValueError(f"{label} current scale must be non-zero to apply a bound.")
     lower_bounds = np.asarray(current_optimizable.local_lower_bounds, dtype=float).copy()
     upper_bounds = np.asarray(current_optimizable.local_upper_bounds, dtype=float).copy()
-    scaled_magnitude_bound = float(banana_current_max_A) / abs(scale)
+    scaled_magnitude_bound = float(current_max_A) / abs(scale)
     lower_bounds[0] = max(lower_bounds[0], -scaled_magnitude_bound)
     upper_bounds[0] = min(upper_bounds[0], scaled_magnitude_bound)
     current_optimizable.local_lower_bounds = lower_bounds
     current_optimizable.local_upper_bounds = upper_bounds
+
+
+def apply_banana_current_upper_bound(current, banana_current_max_A):
+    _apply_scaled_symmetric_current_bound(
+        current,
+        banana_current_max_A,
+        label="Banana",
+    )
 
 
 def apply_banana_current_seed_sign_box_bound(
@@ -363,6 +429,18 @@ def apply_banana_current_seed_sign_box_bound(
 
 def banana_current_exceeds_limit(current_A: float, banana_current_max_A: float) -> bool:
     return abs(float(current_A)) > float(banana_current_max_A)
+
+
+def apply_vf_current_upper_bound(current, vf_current_max_A):
+    _apply_scaled_symmetric_current_bound(
+        current,
+        vf_current_max_A,
+        label="VF",
+    )
+
+
+def vf_current_exceeds_limit(current_A: float, vf_current_max_A: float) -> bool:
+    return abs(float(current_A)) > float(vf_current_max_A)
 
 
 _PENALTY_BOX_BOUND_HANDLERS: Mapping[str, PenaltyBoxBoundHandler] = {

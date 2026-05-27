@@ -13,6 +13,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+from examples.single_stage_optimization.banana_opt.finite_current_profiles import (
+    get_finite_current_profile,
+)
 from simsopt.field import BiotSavart, Coil, Current
 from simsopt.geo import CurveXYZFourier
 
@@ -165,6 +168,42 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "PRODUCTION_HANDOFF_READY": True,
         "HANDOFF_BLOCKING_GATE": None,
         "PROMOTION_READY": True,
+    }
+
+
+def _valid_jhalpern_stage2_contract_fields() -> dict[str, object]:
+    profile = get_finite_current_profile("jhalpern30_proxy_field")
+    return {
+        **_valid_stage2_contract_fields(),
+        "FINITE_CURRENT_MODE": "jhalpern30_proxy_field",
+        "BOOZER_CURRENT_CONVENTION": "mu0",
+        "BOOZER_I": -0.008168140899333462,
+        "G0_POLICY": "signed_explicit_tf_current",
+        "PROXY_PLACEMENT_MODE": "surface_major_radius_z0",
+        "PROXY_VF_CURRENT_SCALAR_POLICY": "signed_physical_scalar",
+        "PROXY_PLASMA_CURRENT_A": -6.5e3,
+        "VF_CURRENT_A": -1.0e3,
+        "VF_TEMPLATE_PATH": str(profile.default_vf_template_path),
+        "VF_TEMPLATE_SHA256": profile.vf_template_sha256,
+        "VF_CURRENT_SIGN_POLICY": "template_sign_abs_proxy_current",
+        "VF_CURRENT_MUTABILITY": "shared_unfixed_scaled_current",
+        "NUM_TF_COILS": 20,
+        "NUM_BANANA_COILS": 10,
+        "NUM_PROXY_COILS": 1,
+        "NUM_VF_COILS": 20,
+        "TOTAL_COILS": 51,
+        "COIL_GROUPS": profile.build_default_coil_groups_manifest().to_json_payload(),
+        "FLIP_BANANA": True,
+        "BANANA_CURRENT_SIGN": -1,
+        "BANANA_CURRENT_PINNED": False,
+        "BANANA_I_FIXED_S2_KA": None,
+        "IOTA_TARGET_SIGN": -1,
+        "JHALPERN30_STAGE_NAME": "stage00",
+        "JHALPERN30_STAGE_STATE": {
+            "iota": 0.29789,
+            "G": -2.0106,
+            "volume": 0.03993,
+        },
     }
 
 
@@ -901,14 +940,91 @@ class HandoffModuleTests(unittest.TestCase):
 
     def test_validate_stage2_seed_contract_accepts_jhalpern_signed_proxy_vf(self):
         module = load_handoff_module()
-        stage2_results = {
-            **_valid_stage2_contract_fields(),
-            "FINITE_CURRENT_MODE": "jhalpern30_proxy_field",
-            "PROXY_PLASMA_CURRENT_A": -6.5e3,
-            "VF_CURRENT_A": -1.0e3,
-        }
+        stage2_results = _valid_jhalpern_stage2_contract_fields()
 
         module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_jhalpern_missing_replay_metadata(self):
+        module = load_handoff_module()
+        stage2_results = _valid_jhalpern_stage2_contract_fields()
+        stage2_results.pop("IOTA_TARGET_SIGN")
+
+        with self.assertRaisesRegex(ValueError, "IOTA_TARGET_SIGN"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_jhalpern_null_replay_metadata(self):
+        module = load_handoff_module()
+        stage2_results = _valid_jhalpern_stage2_contract_fields()
+        stage2_results["IOTA_TARGET_SIGN"] = None
+
+        with self.assertRaisesRegex(ValueError, "IOTA_TARGET_SIGN"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_jhalpern_policy_drift(self):
+        module = load_handoff_module()
+        stage2_results = _valid_jhalpern_stage2_contract_fields()
+        stage2_results["PROXY_VF_CURRENT_SCALAR_POLICY"] = "nonnegative_magnitude"
+
+        with self.assertRaisesRegex(ValueError, "PROXY_VF_CURRENT_SCALAR_POLICY"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_jhalpern_coil_count_drift(self):
+        module = load_handoff_module()
+        stage2_results = _valid_jhalpern_stage2_contract_fields()
+        stage2_results["NUM_VF_COILS"] = 0
+
+        with self.assertRaisesRegex(ValueError, "NUM_VF_COILS"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_upgrade_does_not_fabricate_jhalpern_required_policy_metadata(self):
+        artifact_contracts = load_artifact_contracts_module()
+        handoff = load_handoff_module()
+        stage2_results = _valid_jhalpern_stage2_contract_fields()
+        stage2_results.pop("PROXY_VF_CURRENT_SCALAR_POLICY")
+
+        upgraded = artifact_contracts.upgrade_legacy_stage2_artifact_results(
+            stage2_results,
+        )
+
+        self.assertNotIn("PROXY_VF_CURRENT_SCALAR_POLICY", upgraded)
+        with self.assertRaisesRegex(ValueError, "PROXY_VF_CURRENT_SCALAR_POLICY"):
+            handoff.validate_stage2_seed_contract(upgraded)
+
+    def test_upgrade_does_not_fabricate_jhalpern_required_current_metadata(self):
+        artifact_contracts = load_artifact_contracts_module()
+        handoff = load_handoff_module()
+        stage2_results = _valid_jhalpern_stage2_contract_fields()
+        stage2_results.pop("VF_CURRENT_A")
+
+        upgraded = artifact_contracts.upgrade_legacy_stage2_artifact_results(
+            stage2_results,
+        )
+
+        self.assertNotIn("VF_CURRENT_A", upgraded)
+        with self.assertRaisesRegex(ValueError, "VF_CURRENT_A"):
+            handoff.validate_stage2_seed_contract(upgraded)
+
+    def test_upgrade_does_not_fabricate_jhalpern_boozer_convention_metadata(self):
+        artifact_contracts = load_artifact_contracts_module()
+        handoff = load_handoff_module()
+        stage2_results = _valid_jhalpern_stage2_contract_fields()
+        stage2_results.pop("BOOZER_CURRENT_CONVENTION")
+
+        upgraded = artifact_contracts.upgrade_legacy_stage2_artifact_results(
+            stage2_results,
+        )
+
+        self.assertNotIn("BOOZER_CURRENT_CONVENTION", upgraded)
+        with self.assertRaisesRegex(ValueError, "BOOZER_CURRENT_CONVENTION"):
+            handoff.validate_stage2_seed_contract(upgraded)
+
+    def test_validate_stage2_seed_contract_rejects_jhalpern_zero_proxy_current(self):
+        module = load_handoff_module()
+        stage2_results = _valid_jhalpern_stage2_contract_fields()
+        stage2_results["PROXY_PLASMA_CURRENT_A"] = 0.0
+
+        with self.assertRaisesRegex(ValueError, "non-zero PROXY_PLASMA_CURRENT_A"):
+            module.validate_stage2_seed_contract(stage2_results)
 
     def test_validate_stage2_seed_recovery_contract_accepts_traversal_geometry(self):
         module = load_handoff_module()

@@ -16,6 +16,7 @@ from simsopt.geo import CurveCWSFourierCPP, CurveXYZFourier
 from banana_opt.current_contracts import (
     HBT_PROXY_VF_CURRENT_RATIO,
     MU0,
+    VFCoilBuildResult,
     validate_jhalpern30_proxy_vf_current_convention,
 )
 from banana_opt.finite_current_profiles import (
@@ -29,6 +30,7 @@ from banana_opt.finite_current_profiles import (
     JHALPERN30_NUM_VF_COILS,
     JHALPERN30_PROFILE,
     JHALPERN30_PROXY_PLACEMENT_MODE,
+    JHALPERN30_PROXY_VF_CURRENT_SCALAR_POLICY,
     JHALPERN30_VF_CURRENT_MUTABILITY,
     JHALPERN30_VF_CURRENT_SIGN_POLICY,
     JHALPERN30_VF_TEMPLATE_SHA256,
@@ -208,12 +210,12 @@ def build_jhalpern30_proxy_plasma_current_coils(
     return [Coil(proxy_curve, proxy_current)]
 
 
-def build_jhalpern30_vf_coils(
+def build_jhalpern30_vf_coil_build_result(
     proxy_current_A: float,
     template_path: str | Path,
     *,
     load_fn=load_boozer_finite_i,
-) -> list[Coil]:
+) -> VFCoilBuildResult:
     resolved_proxy_current_A = float(proxy_current_A)
     vf_current_A = resolved_proxy_current_A * HBT_PROXY_VF_CURRENT_RATIO
     template_path = resolve_jhalpern30_vf_template_path(str(template_path))
@@ -235,7 +237,23 @@ def build_jhalpern30_vf_coils(
         vf_current = shared_scaled_current * (template_sign * proxy_sign)
         vf_current.unfix_all()
         vf_coils.append(Coil(vf_curve, vf_current))
-    return vf_coils
+    return VFCoilBuildResult(
+        coils=vf_coils,
+        current_control=shared_scaled_current,
+    )
+
+
+def build_jhalpern30_vf_coils(
+    proxy_current_A: float,
+    template_path: str | Path,
+    *,
+    load_fn=load_boozer_finite_i,
+) -> list[Coil]:
+    return build_jhalpern30_vf_coil_build_result(
+        proxy_current_A,
+        template_path,
+        load_fn=load_fn,
+    ).coils
 
 
 def jhalpern30_flip_from_stage_parent(path: str | Path) -> bool:
@@ -365,6 +383,7 @@ def import_jhalpern30_stage_bundle(
         "PROXY_PLACEMENT_MODE": JHALPERN30_PROXY_PLACEMENT_MODE,
         "G0_POLICY": JHALPERN30_G0_POLICY,
         "PROXY_PLASMA_CURRENT_A": proxy_current_A,
+        "PROXY_VF_CURRENT_SCALAR_POLICY": JHALPERN30_PROXY_VF_CURRENT_SCALAR_POLICY,
         "VF_CURRENT_A": proxy_current_A * HBT_PROXY_VF_CURRENT_RATIO,
         "VF_TEMPLATE_PATH": str(DEFAULT_JHALPERN30_VF_TEMPLATE_PATH),
         "VF_TEMPLATE_SHA256": JHALPERN30_VF_TEMPLATE_SHA256,
@@ -409,8 +428,10 @@ __all__ = [
     "JHALPERN30_STAGE_STATE_REQUIRED_KEYS",
     "Jhalpern30BananaCurrentReplay",
     "Jhalpern30StageBundle",
+    "JHALPERN30_PROXY_VF_CURRENT_SCALAR_POLICY",
     "build_jhalpern30_banana_coils",
     "build_jhalpern30_proxy_plasma_current_coils",
+    "build_jhalpern30_vf_coil_build_result",
     "build_jhalpern30_vf_coils",
     "import_jhalpern30_stage_bundle",
     "jhalpern30_banana_current_sign",

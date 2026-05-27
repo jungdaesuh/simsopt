@@ -28,6 +28,11 @@ from .coil_groups import (
 from .current_contracts import (
     resolve_finite_current_mode,
     resolve_loaded_tf_current_A,
+    validate_proxy_vf_current_convention_for_mode,
+)
+from .finite_current_profiles import (
+    JHALPERN30_FINITE_CURRENT_MODE,
+    get_finite_current_profile,
 )
 from .hardware_contracts import (
     MAX_CURVATURE_INV_M,
@@ -54,6 +59,22 @@ BOOTABILITY_REASON_IOTA_MISMATCH = "iota_mismatch"
 BOOTABILITY_STAGE_PROBE = "probe"
 BOOTABILITY_STAGE_RECOVERY = "recovery"
 _PRODUCTION_HANDOFF_SEED_ROLE = "coil_seed_handoff"
+_JHALPERN30_NULLABLE_STAGE2_METADATA_KEYS = frozenset({"BANANA_I_FIXED_S2_KA"})
+_JHALPERN30_PROFILE_CANONICAL_METADATA_KEYS = (
+    "BOOZER_CURRENT_CONVENTION",
+    "G0_POLICY",
+    "PROXY_PLACEMENT_MODE",
+    "PROXY_VF_CURRENT_SCALAR_POLICY",
+    "VF_TEMPLATE_SHA256",
+    "VF_CURRENT_SIGN_POLICY",
+    "VF_CURRENT_MUTABILITY",
+    "NUM_TF_COILS",
+    "NUM_BANANA_COILS",
+    "NUM_PROXY_COILS",
+    "NUM_VF_COILS",
+    "TOTAL_COILS",
+    "COIL_GROUPS",
+)
 
 BOOZER_FAILURE_POLICY_REPORT_FAILURE = "report_failure"
 BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS = "restore_last_success"
@@ -521,6 +542,75 @@ def _validate_stage2_seed_curvature_threshold_contract(
         )
 
 
+def _validate_stage2_seed_profile_metadata_contract(
+    stage2_results: Mapping[str, object],
+) -> None:
+    finite_current_mode = resolve_finite_current_mode(
+        None,
+        artifact_mode=stage2_results.get("FINITE_CURRENT_MODE"),
+        artifact_mode_source=stage2_results.get("FINITE_CURRENT_MODE_SOURCE"),
+    )
+    if finite_current_mode != JHALPERN30_FINITE_CURRENT_MODE:
+        return
+    profile = get_finite_current_profile(finite_current_mode)
+    missing_keys = tuple(
+        key for key in profile.required_artifact_metadata_keys
+        if key not in stage2_results
+    )
+    if missing_keys:
+        missing = ", ".join(missing_keys)
+        raise ValueError(
+            "jhalpern30 Stage 2 seed artifact is missing required finite-current "
+            f"metadata: {missing}."
+        )
+    null_keys = tuple(
+        key for key in profile.required_artifact_metadata_keys
+        if key not in _JHALPERN30_NULLABLE_STAGE2_METADATA_KEYS
+        and stage2_results[key] is None
+    )
+    if null_keys:
+        null_fields = ", ".join(null_keys)
+        raise ValueError(
+            "jhalpern30 Stage 2 seed artifact has null required finite-current "
+            f"metadata: {null_fields}."
+        )
+    validate_proxy_vf_current_convention_for_mode(
+        finite_current_mode,
+        proxy_plasma_current_A=stage2_results["PROXY_PLASMA_CURRENT_A"],
+        vf_current_A=stage2_results["VF_CURRENT_A"],
+    )
+    expected_metadata = {
+        "BOOZER_CURRENT_CONVENTION": profile.boozer_current_convention,
+        "G0_POLICY": profile.g0_policy,
+        "PROXY_PLACEMENT_MODE": profile.proxy_placement_policy,
+        "PROXY_VF_CURRENT_SCALAR_POLICY": profile.proxy_vf_current_scalar_policy,
+        "VF_TEMPLATE_SHA256": profile.vf_template_sha256,
+        "VF_CURRENT_SIGN_POLICY": profile.vf_current_sign_policy,
+        "VF_CURRENT_MUTABILITY": profile.vf_current_mutability,
+        "NUM_TF_COILS": profile.default_num_tf_coils,
+        "NUM_BANANA_COILS": profile.default_num_banana_coils,
+        "NUM_PROXY_COILS": profile.default_num_proxy_coils,
+        "NUM_VF_COILS": profile.default_num_vf_coils,
+        "TOTAL_COILS": profile.default_total_coils,
+        "COIL_GROUPS": profile.build_default_coil_groups_manifest().to_json_payload(),
+    }
+    for key in _JHALPERN30_PROFILE_CANONICAL_METADATA_KEYS:
+        expected_value = expected_metadata[key]
+        actual_value = stage2_results[key]
+        if isinstance(expected_value, int):
+            matches = int(actual_value) == expected_value
+        elif isinstance(expected_value, str):
+            matches = str(actual_value) == expected_value
+        else:
+            matches = actual_value == expected_value
+        if not matches:
+            raise ValueError(
+                "jhalpern30 Stage 2 seed artifact metadata does not match the "
+                f"profile contract for {key}: expected {expected_value!r}, "
+                f"got {actual_value!r}."
+            )
+
+
 def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]) -> None:
     tf_current_A = stage2_results.get("TF_CURRENT_A")
     if tf_current_A is None:
@@ -534,6 +624,7 @@ def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]
         stage2_results_path="<stage2_seed_contract>",
         stage2_artifact_results=dict(stage2_results),
     )
+    _validate_stage2_seed_profile_metadata_contract(stage2_results)
     if stage2_results.get("WOUT_OFF_SPEC") is not False:
         raise ValueError(
             "Stage 2 seed artifact violates the WOUT convention contract: "

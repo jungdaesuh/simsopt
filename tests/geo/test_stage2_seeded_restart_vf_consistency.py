@@ -1,10 +1,7 @@
-"""Regression tests for Wataru-faithful seeded-restart VF metadata consistency.
+"""Regression tests for seeded-restart proxy/VF metadata consistency.
 
-Fix #4: a seeded Stage 2 restart must trust the donor artifact's recorded
-VF_TEMPLATE_PATH verbatim. Silently promoting a legacy zero-VF donor's
-``None`` path to the bundled default would desync artifact metadata from
-the actual ``bs.coils`` layout (which partition_loaded_stage2_coils slices
-from the saved BiotSavart, not from the resolved config).
+Seeded Stage 2 restart must trust donor artifact metadata for Wataru fixed-VF
+coils and preserve jhalpern30 shared-VF current traversal/sign contracts.
 """
 
 import importlib.util
@@ -13,6 +10,8 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+
+import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -188,6 +187,55 @@ class SeededRestartTrustsDonorMetadataTests(unittest.TestCase):
         self.assertTrue(vf_plus.current.fixed)
         self.assertTrue(vf_minus.current.fixed)
 
+    def test_seeded_current_traversal_retargets_shared_scaled_vf_current(self):
+        proxy = SimpleNamespace(current=stage2_solver.Current(-6.5e3))
+        shared_vf = stage2_solver.Current(1.0) * 1.0e3
+        vf_negative = SimpleNamespace(current=shared_vf * -1.0)
+        vf_positive = SimpleNamespace(current=shared_vf * 1.0)
+
+        stage2_solver._retarget_stage2_seed_auxiliary_currents(
+            [proxy],
+            [vf_negative, vf_positive],
+            proxy_plasma_current_A=6.5e3,
+            vf_current_A=1.0e3,
+            vf_current_mutability="shared_unfixed_scaled_current",
+        )
+
+        self.assertEqual(proxy.current.get_value(), 6.5e3)
+        self.assertEqual(shared_vf.get_value(), -1.0e3)
+        self.assertEqual(vf_negative.current.get_value(), 1.0e3)
+        self.assertEqual(vf_positive.current.get_value(), -1.0e3)
+        self.assertFalse(np.any(proxy.current.dofs_free_status))
+        self.assertTrue(np.all(shared_vf.dofs_free_status))
+
+    def test_seeded_current_traversal_preserves_same_sign_negative_shared_vf(self):
+        proxy = SimpleNamespace(current=stage2_solver.Current(-6.5e3))
+        shared_vf = stage2_solver.Current(1.0) * -1.0e3
+        vf_from_positive_template = SimpleNamespace(current=shared_vf * -1.0)
+        vf_from_negative_template = SimpleNamespace(current=shared_vf * 1.0)
+
+        stage2_solver._retarget_stage2_seed_auxiliary_currents(
+            [proxy],
+            [vf_from_positive_template, vf_from_negative_template],
+            proxy_plasma_current_A=-13.0e3,
+            vf_current_A=-2.0e3,
+            vf_current_mutability="shared_unfixed_scaled_current",
+        )
+
+        self.assertEqual(proxy.current.get_value(), -13.0e3)
+        self.assertEqual(shared_vf.get_value(), -2.0e3)
+        self.assertEqual(vf_from_positive_template.current.get_value(), 2.0e3)
+        self.assertEqual(vf_from_negative_template.current.get_value(), -2.0e3)
+
+    def test_realized_vf_current_reads_shared_control_value(self):
+        shared_vf = stage2_solver.Current(2.0) * -1.0e3
+
+        self.assertEqual(
+            stage2_solver._realized_vf_current_A(shared_vf, -1.0e3),
+            -2.0e3,
+        )
+        self.assertEqual(stage2_solver._realized_vf_current_A(None, 76.923), 76.923)
+
 
 class FreshRunAutoResolvesBundledTemplateTests(unittest.TestCase):
     def test_fresh_run_fills_bundled_default_when_none_given(self):
@@ -238,6 +286,24 @@ class FreshRunAutoResolvesBundledTemplateTests(unittest.TestCase):
         self.assertEqual(config.vf_current_A, -1.0e3)
         self.assertTrue(Path(config.vf_template_path).is_file())
         self.assertIn("jhalpern30_vf_biotsavart", config.vf_template_path)
+
+    def test_fresh_jhalpern_run_rejects_zero_proxy_current(self):
+        with self.assertRaisesRegex(ValueError, "non-zero PROXY_PLASMA_CURRENT_A"):
+            stage2_solver._resolve_stage2_finite_current_config(
+                _args(finite_current_mode="jhalpern30_proxy_field"),
+                stage2_results=None,
+            )
+
+    def test_fresh_jhalpern_run_rejects_alm_without_vf_bounds_support(self):
+        with self.assertRaisesRegex(ValueError, "ALM does not support VF current bounds"):
+            stage2_solver._resolve_stage2_finite_current_config(
+                _args(
+                    finite_current_mode="jhalpern30_proxy_field",
+                    proxy_plasma_current_A=-6.5e3,
+                    constraint_method="alm",
+                ),
+                stage2_results=None,
+            )
 
     def test_seeded_jhalpern_current_traversal_recomputes_vf_when_proxy_changes(self):
         donor_results = {

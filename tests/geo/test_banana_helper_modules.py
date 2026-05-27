@@ -431,12 +431,19 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             "Coil",
             FakeCoil,
         ):
+            result = self.module.build_vf_coil_build_result(
+                vf_current_A=500.0,
+                vf_template_path="/tmp/vf_template.json",
+                load_fn=lambda _path: template,
+            )
             coils = self.module.build_vf_coils(
                 vf_current_A=500.0,
                 vf_template_path="/tmp/vf_template.json",
                 load_fn=lambda _path: template,
             )
 
+        self.assertIsNone(result.current_control)
+        self.assertEqual([coil.current.value for coil in result.coils], [500.0, -500.0])
         self.assertEqual([coil.current.value for coil in coils], [500.0, -500.0])
         self.assertTrue(all(coil.curve.fixed for coil in coils))
         self.assertTrue(all(coil.current.fixed for coil in coils))
@@ -456,6 +463,32 @@ class Stage2GeometryHelperTests(unittest.TestCase):
                 vf_current_A=500.0,
                 vf_template_path="/tmp/vf_template.json",
                 load_fn=lambda _path: SimpleNamespace(coils=[FakeCoil()]),
+            )
+
+    def test_shared_vf_current_control_requires_one_leaf_current(self):
+        shared_current = self.module.Current(1.0) * 120.0
+        shared_control = self.module.shared_vf_current_control_for_coils(
+            [
+                SimpleNamespace(current=shared_current * 1.0),
+                SimpleNamespace(current=shared_current * -1.0),
+            ]
+        )
+
+        self.assertIs(shared_control, shared_current)
+
+        with self.assertRaisesRegex(ValueError, "share one leaf Current"):
+            self.module.shared_vf_current_control_for_coils(
+                [
+                    SimpleNamespace(current=self.module.Current(120.0)),
+                    SimpleNamespace(current=self.module.Current(-120.0)),
+                ]
+            )
+
+    def test_coerce_vf_build_result_rejects_raw_list_when_control_required(self):
+        with self.assertRaisesRegex(ValueError, "requires VFCoilBuildResult"):
+            self.module.coerce_vf_coil_build_result(
+                [object()],
+                requires_current_control=True,
             )
 
     def test_check_all_pairs_skips_adjacent_segments(self):

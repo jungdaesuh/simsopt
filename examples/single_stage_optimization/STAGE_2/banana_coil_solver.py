@@ -71,6 +71,8 @@ from banana_opt.coil_order_upgrade import (
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
 from banana_opt.stage2_geometry import (
+    VFCoilBuildResult,
+    coerce_vf_coil_build_result,
     initialize_coils as _initialize_coils,
     is_self_intersecting,
     load_plasma_geometry_for_working_major_radius,
@@ -78,6 +80,7 @@ from banana_opt.stage2_geometry import (
     load_plasma_geometry as _load_plasma_geometry,
     magnetic_field_plots as _magnetic_field_plots,
     select_plasma_geometry_preflight_candidate,
+    shared_vf_current_control_for_coils,
     surface_surface_min_distance as _surface_surface_min_distance,
 )
 from banana_opt.hardware_contracts import (
@@ -117,12 +120,14 @@ from banana_opt.hardware_constraint_schema import (
 from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR
 from banana_opt.current_contracts import (
     BoozerCurrentConvention,
+    apply_vf_current_upper_bound,
     apply_penalty_traversal_forbidden_box_bounds,
     DEFAULT_FINITE_CURRENT_MODE,
     FiniteCurrentMode,
     physical_current_to_boozer_I,
     resolve_boozer_current_convention,
     resolve_finite_current_mode,
+    unwrap_current_optimizable,
     validate_proxy_vf_current_convention_for_mode,
 )
 from banana_opt.finite_current_profiles import (
@@ -203,6 +208,7 @@ class Stage2FiniteCurrentConfig:
     finite_current_mode: FiniteCurrentMode
     proxy_plasma_current_A: float
     vf_current_A: float
+    vf_current_max_A: float
     vf_template_path: str | None
     boozer_current_convention: BoozerCurrentConvention
 
@@ -274,6 +280,45 @@ def validate_banana_current_cli_args(args) -> None:
     if abs(banana_init_current_A) > banana_current_max_A:
         raise ValueError(
             "abs(--banana-init-current-A) cannot exceed --banana-current-max-A."
+        )
+
+
+def validate_vf_current_bound_config(
+    *,
+    vf_current_A: float,
+    vf_current_max_A: float,
+    finite_current_mode: FiniteCurrentMode,
+) -> float:
+    vf_current_max_A = float(vf_current_max_A)
+    if not np.isfinite(vf_current_max_A) or vf_current_max_A <= 0.0:
+        raise ValueError("--vf-current-max-A must be finite and positive.")
+    profile = get_finite_current_profile(finite_current_mode)
+    if (
+        profile.vf_current_mutability == "shared_unfixed_scaled_current"
+        and abs(float(vf_current_A)) > vf_current_max_A
+    ):
+        raise ValueError(
+            "abs(VF_CURRENT_A) cannot exceed --vf-current-max-A for shared "
+            "optimizable VF current."
+        )
+    return vf_current_max_A
+
+
+def validate_vf_current_optimizer_config(
+    *,
+    finite_current_mode: FiniteCurrentMode,
+    constraint_method: str,
+    init_only: bool = False,
+) -> None:
+    profile = get_finite_current_profile(finite_current_mode)
+    if (
+        profile.vf_current_mutability == "shared_unfixed_scaled_current"
+        and str(constraint_method) == "alm"
+        and not bool(init_only)
+    ):
+        raise ValueError(
+            "shared optimizable VF current requires penalty/L-BFGS-B bounds; "
+            "Stage 2 ALM does not support VF current bounds."
         )
 
 
@@ -531,7 +576,11 @@ def parse_args():
             if "PROXY_PLASMA_CURRENT_A" in os.environ
             else None
         ),
-        help="Physical SI amperes for the Wataru-style proxy plasma-current coil.",
+        help=(
+            "Physical SI amperes for the proxy plasma-current coil. Wataru mode "
+            "requires a nonnegative magnitude; jhalpern30 mode treats the value "
+            "as a signed physical scalar."
+        ),
     )
     parser.add_argument(
         "--vf-current-A",
@@ -539,7 +588,20 @@ def parse_args():
         default=(
             float(os.environ["VF_CURRENT_A"]) if "VF_CURRENT_A" in os.environ else None
         ),
-        help="Physical SI amperes for each sign-preserving VF template current.",
+        help=(
+            "Physical SI amperes for the VF scalar. Wataru mode applies it to "
+            "fixed independent sign-preserving template currents; jhalpern30 mode "
+            "uses it as the signed shared mutable VF current scalar."
+        ),
+    )
+    parser.add_argument(
+        "--vf-current-max-A",
+        type=float,
+        default=float(os.environ.get("VF_CURRENT_MAX_A", str(BANANA_CURRENT_HARD_LIMIT_A))),
+        help=(
+            "Hard L-BFGS-B bound on the realized shared VF current in SI amperes "
+            "when the selected finite-current profile makes VF current optimizable."
+        ),
     )
     parser.add_argument(
         "--vf-template-path",
@@ -1978,6 +2040,11 @@ def _resolve_stage2_finite_current_config(
         ),
     )
     finite_current_profile = get_finite_current_profile(finite_current_mode)
+    validate_vf_current_optimizer_config(
+        finite_current_mode=finite_current_mode,
+        constraint_method=getattr(args, "constraint_method", "penalty"),
+        init_only=getattr(args, "init_only", False),
+    )
     if stage2_results is None:
         # Fresh Stage 2: auto-resolve the bundled VF template so the zero-current
         # VF bundle is always serialized. This is the Wataru-faithful shape;
@@ -2046,6 +2113,15 @@ def _resolve_stage2_finite_current_config(
         proxy_plasma_current_A=proxy_plasma_current_A,
         vf_current_A=vf_current_A,
     )
+    vf_current_max_A = validate_vf_current_bound_config(
+        vf_current_A=vf_current_A,
+        vf_current_max_A=getattr(
+            args,
+            "vf_current_max_A",
+            BANANA_CURRENT_HARD_LIMIT_A,
+        ),
+        finite_current_mode=finite_current_mode,
+    )
     if vf_template_path in {None, ""} and (
         vf_current_A != 0.0
         or finite_current_profile.mode == JHALPERN30_FINITE_CURRENT_MODE
@@ -2057,6 +2133,7 @@ def _resolve_stage2_finite_current_config(
         finite_current_mode=finite_current_mode,
         proxy_plasma_current_A=proxy_plasma_current_A,
         vf_current_A=vf_current_A,
+        vf_current_max_A=vf_current_max_A,
         vf_template_path=vf_template_path,
         boozer_current_convention=resolve_boozer_current_convention(
             finite_current_mode,
@@ -2064,9 +2141,26 @@ def _resolve_stage2_finite_current_config(
     )
 
 
+def _assign_scalar_current_value(current, value):
+    if hasattr(current, "set_dofs"):
+        current.set_dofs([float(value)])
+        return current
+    current_optimizable, scale = unwrap_current_optimizable(current)
+    if scale == 0.0:
+        raise ValueError("Current scale must be non-zero for current retargeting.")
+    current_optimizable.set_dofs([float(value) / scale])
+    return current_optimizable
+
+
+def _realized_vf_current_A(vf_current_control, fallback_vf_current_A):
+    if vf_current_control is None:
+        return float(fallback_vf_current_A)
+    return float(vf_current_control.get_value())
+
+
 def _assign_fixed_scalar_current(current, value):
-    current.set_dofs([float(value)])
-    current.fix_all()
+    current_optimizable = _assign_scalar_current_value(current, value)
+    current_optimizable.fix_all()
 
 
 def _retarget_stage2_seed_auxiliary_currents(
@@ -2075,7 +2169,11 @@ def _retarget_stage2_seed_auxiliary_currents(
     *,
     proxy_plasma_current_A,
     vf_current_A,
+    vf_current_mutability="independent_fixed_current",
 ):
+    loaded_proxy_current_A = (
+        float(proxy_coils[0].current.get_value()) if len(proxy_coils) == 1 else None
+    )
     if len(proxy_coils) == 1:
         _assign_fixed_scalar_current(proxy_coils[0].current, proxy_plasma_current_A)
     elif abs(float(proxy_plasma_current_A)) > 1.0e-12:
@@ -2083,6 +2181,32 @@ def _retarget_stage2_seed_auxiliary_currents(
             "Stage 2 seed current traversal requires one loaded proxy coil when "
             "--proxy-plasma-current-A is non-zero."
         )
+
+    if vf_current_mutability == "shared_unfixed_scaled_current":
+        vf_current_control = shared_vf_current_control_for_coils(vf_coils)
+        if vf_current_control is None:
+            if abs(float(vf_current_A)) > 1.0e-12:
+                raise ValueError(
+                    "Stage 2 seed current traversal requires loaded VF coils when "
+                    "--vf-current-A is non-zero."
+                )
+            return
+        if loaded_proxy_current_A is None or loaded_proxy_current_A == 0.0:
+            raise ValueError(
+                "Stage 2 seed current traversal requires a non-zero loaded proxy "
+                "coil to retarget shared VF current signs."
+            )
+        old_proxy_sign = float(np.sign(loaded_proxy_current_A))
+        new_proxy_sign = float(np.sign(proxy_plasma_current_A))
+        if new_proxy_sign == 0.0:
+            raise ValueError(
+                "Stage 2 seed current traversal requires non-zero proxy current "
+                "for shared VF current signs."
+            )
+        control_value_A = float(vf_current_A) * new_proxy_sign / old_proxy_sign
+        _assign_scalar_current_value(vf_current_control, control_value_A)
+        vf_current_control.unfix_all()
+        return
 
     for vf_coil in vf_coils:
         sign = float(np.sign(vf_coil.current.get_value()))
@@ -2243,6 +2367,7 @@ def main(parsed_args=None):
         stage2_results=seed_stage2_results,
     )
     finite_current_mode = finite_current_config.finite_current_mode
+    finite_current_profile = get_finite_current_profile(finite_current_mode)
     proxy_plasma_current_A = finite_current_config.proxy_plasma_current_A
     vf_current_A = finite_current_config.vf_current_A
     vf_template_path = finite_current_config.vf_template_path
@@ -2362,6 +2487,7 @@ def main(parsed_args=None):
         raise ValueError("Stage 2 geometry preflight selected inconsistent NFP.")
     plasma_vessel_min_dist = _surface_surface_min_distance(lcfs_surf, VV)
 
+    new_vf_build_result = VFCoilBuildResult(coils=[], current_control=None)
     if args.stage2_bs_path:
         print(f"Loading Stage 2 seed from {args.stage2_bs_path}")
         (
@@ -2386,6 +2512,17 @@ def main(parsed_args=None):
                 new_vf_coils,
                 proxy_plasma_current_A=proxy_plasma_current_A,
                 vf_current_A=vf_current_A,
+                vf_current_mutability=finite_current_profile.vf_current_mutability,
+            )
+        if finite_current_profile.vf_current_mutability == "shared_unfixed_scaled_current":
+            new_vf_build_result = VFCoilBuildResult(
+                coils=new_vf_coils,
+                current_control=shared_vf_current_control_for_coils(new_vf_coils),
+            )
+        else:
+            new_vf_build_result = VFCoilBuildResult(
+                coils=new_vf_coils,
+                current_control=None,
             )
         tf_current_A = float(new_tf_coils[0].current.get_value())
         validate_stage2_tf_current_value(
@@ -2401,7 +2538,7 @@ def main(parsed_args=None):
             new_banana_curve,
             new_banana_coils,
             new_proxy_coils,
-            new_vf_coils,
+            raw_vf_build_result,
         ) = _initialize_coils(
             new_surf,
             surf_coils,
@@ -2423,7 +2560,16 @@ def main(parsed_args=None):
                 nphi=nphi,
                 ntheta=ntheta,
             ),
+            return_vf_build_result=True,
         )
+        new_vf_build_result = coerce_vf_coil_build_result(
+            raw_vf_build_result,
+            requires_current_control=(
+                finite_current_profile.vf_current_mutability
+                == "shared_unfixed_scaled_current"
+            ),
+        )
+        new_vf_coils = new_vf_build_result.coils
         new_tf_coils = tf_coils
     order = int(new_banana_curve.order)
     new_surf_coils = surf_coils
@@ -2432,6 +2578,7 @@ def main(parsed_args=None):
     # clearance or length objectives.
     objective_curves = [coil.curve for coil in new_banana_coils]
     initial_banana_current_A = float(new_banana_coils[0].current.get_value())
+    vf_current_control = new_vf_build_result.current_control
 
     # MAIN OPTIMIZATION
     # ---------------------------------------------------------------------------------------
@@ -2698,6 +2845,11 @@ def main(parsed_args=None):
             ),
             preserve_seed_sign_names=frozenset({"banana_current"}),
         )
+        if vf_current_control is not None:
+            apply_vf_current_upper_bound(
+                vf_current_control,
+                finite_current_config.vf_current_max_A,
+            )
         lbfgsb_bounds = build_lbfgsb_bounds(JF)
     s_hel_objective, s_hel_weight = build_s_hel_objective(args, new_bs, new_surf)
     fun = make_stage2_fun(
@@ -3114,6 +3266,7 @@ def main(parsed_args=None):
         banana_current_sign = 1
         banana_current_pinned = False
         banana_i_fixed_s2_kA = None
+    final_vf_current_A = _realized_vf_current_A(vf_current_control, vf_current_A)
 
     stage2_results_kwargs = dict(
         args=args,
@@ -3136,9 +3289,12 @@ def main(parsed_args=None):
         finite_current_mode=finite_current_mode,
         boozer_current_convention=boozer_current_convention,
         proxy_plasma_current_A=proxy_plasma_current_A,
-        vf_current_A=vf_current_A,
+        vf_current_A=final_vf_current_A,
         vf_template_path=vf_template_path,
         proxy_placement_mode=finite_current_profile.proxy_placement_policy,
+        proxy_vf_current_scalar_policy=(
+            finite_current_profile.proxy_vf_current_scalar_policy
+        ),
         vf_template_sha256=vf_template_sha256,
         vf_current_sign_policy=finite_current_profile.vf_current_sign_policy,
         vf_current_mutability=finite_current_profile.vf_current_mutability,

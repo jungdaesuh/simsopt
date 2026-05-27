@@ -31,11 +31,14 @@ from banana_opt.hardware_contracts import (
     validate_target_lcfs_major_radius,
     validate_target_lcfs_minor_radius,
 )
+from banana_opt.current_contracts import unwrap_current_optimizable
+from banana_opt.current_contracts import VFCoilBuildResult
 from banana_opt.finite_current_profiles import JHALPERN30_FINITE_CURRENT_MODE
+from banana_opt.finite_current_profiles import get_finite_current_profile
 from banana_opt.jhalpern30_compat import (
     build_jhalpern30_banana_coils,
     build_jhalpern30_proxy_plasma_current_coils,
-    build_jhalpern30_vf_coils,
+    build_jhalpern30_vf_coil_build_result,
     resolve_jhalpern30_vf_template_path,
 )
 from banana_opt.json_compat import load_boozer_finite_i as load
@@ -356,6 +359,9 @@ def build_proxy_plasma_current_coils(
     )
     axis_scale = float(surface_scale_factor)
     proxy_curve = CurveXYZFourier(128, 1)
+    # Wataru proxy placement is the zeroth VMEC magnetic-axis coefficient,
+    # scaled with the surface family. It intentionally is not the full Fourier
+    # magnetic axis and differs from jhalpern30's surface-major-radius ring.
     proxy_curve.set("xc(1)", float(raxis_cc[0]) * axis_scale)
     proxy_curve.set("ys(1)", float(raxis_cc[0]) * axis_scale)
     proxy_curve.set("zc(0)", float(zaxis_cs[0]) * axis_scale)
@@ -365,12 +371,12 @@ def build_proxy_plasma_current_coils(
     return [Coil(proxy_curve, proxy_current)]
 
 
-def build_vf_coils(
+def build_vf_coil_build_result(
     *,
     vf_current_A: float,
     vf_template_path: str,
     load_fn=load,
-) -> list[Coil]:
+) -> VFCoilBuildResult:
     loaded_template = load_fn(vf_template_path)
     template_coils = getattr(loaded_template, "coils", None)
     if not template_coils:
@@ -390,7 +396,90 @@ def build_vf_coils(
         vf_current = Current(float(vf_current_A) * sign)
         vf_current.fix_all()
         vf_coils.append(Coil(vf_curve, vf_current))
-    return vf_coils
+    return VFCoilBuildResult(coils=vf_coils, current_control=None)
+
+
+def build_vf_coils(
+    *,
+    vf_current_A: float,
+    vf_template_path: str,
+    load_fn=load,
+) -> list[Coil]:
+    return build_vf_coil_build_result(
+        vf_current_A=vf_current_A,
+        vf_template_path=vf_template_path,
+        load_fn=load_fn,
+    ).coils
+
+
+def build_vf_coils_for_profile(
+    *,
+    finite_current_mode: str,
+    proxy_current_A: float,
+    vf_current_A: float,
+    vf_template_path: str,
+    load_fn=load,
+) -> VFCoilBuildResult:
+    profile = get_finite_current_profile(finite_current_mode)
+    if profile.vf_current_mutability == "shared_unfixed_scaled_current":
+        return build_jhalpern30_vf_coil_build_result(
+            float(proxy_current_A),
+            resolve_jhalpern30_vf_template_path(vf_template_path),
+            load_fn=load_fn,
+        )
+    if profile.vf_current_mutability == "independent_fixed_current":
+        return build_vf_coil_build_result(
+            vf_current_A=float(vf_current_A),
+            vf_template_path=str(vf_template_path),
+            load_fn=load_fn,
+        )
+    raise ValueError(
+        f"Unsupported VF current mutability {profile.vf_current_mutability!r}."
+    )
+
+
+def coerce_vf_coil_build_result(
+    value,
+    *,
+    requires_current_control: bool = False,
+) -> VFCoilBuildResult:
+    if isinstance(value, VFCoilBuildResult):
+        if requires_current_control and value.coils and value.current_control is None:
+            raise ValueError(
+                "shared VF current profile requires a VF current control."
+            )
+        return value
+    if requires_current_control:
+        raise ValueError(
+            "shared VF current profile requires VFCoilBuildResult, not a raw coil list."
+        )
+    return VFCoilBuildResult(coils=list(value), current_control=None)
+
+
+def shared_vf_current_control_for_coils(vf_coils: list[Coil]) -> object | None:
+    if not vf_coils:
+        return None
+    first_current = vf_coils[0].current
+    shared_current, first_scale = unwrap_current_optimizable(first_current)
+    for coil in vf_coils[1:]:
+        current, scale = unwrap_current_optimizable(coil.current)
+        if current is not shared_current:
+            raise ValueError(
+                "shared VF current profile requires all VF coils to share one "
+                "leaf Current."
+            )
+        if not np.isclose(abs(scale), abs(first_scale), rtol=1.0e-12, atol=1.0e-12):
+            raise ValueError(
+                "shared VF current profile requires equal-magnitude VF scale "
+                "factors."
+            )
+    shared_parent = getattr(first_current, "current_to_scale", None)
+    if shared_parent is not None and all(
+        getattr(coil.current, "current_to_scale", None) is shared_parent
+        for coil in vf_coils
+    ):
+        return shared_parent
+    return first_current
 
 
 def initialize_coils(
@@ -417,6 +506,7 @@ def initialize_coils(
     finite_current_mode="wataru_proxy_field",
     flip_banana=False,
     banana_i_fixed_s2=None,
+    return_vf_build_result=False,
 ):
     banana_curve = CurveCWSFourierCPP(
         np.linspace(0, 1, num_quadpoints, endpoint=False),
@@ -461,17 +551,15 @@ def initialize_coils(
             toroidal_flux=float(toroidal_flux),
             plasma_current_A=float(proxy_plasma_current_A),
         )
-    vf_coils: list[Coil] = []
-    if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
-        vf_coils = build_jhalpern30_vf_coils(
-            float(proxy_plasma_current_A),
-            resolve_jhalpern30_vf_template_path(vf_template_path),
-        )
-    elif vf_template_path not in {None, ""}:
-        vf_coils = build_vf_coils(
+    vf_build_result = VFCoilBuildResult(coils=[], current_control=None)
+    if vf_template_path not in {None, ""}:
+        vf_build_result = build_vf_coils_for_profile(
+            finite_current_mode=finite_current_mode,
+            proxy_current_A=float(proxy_plasma_current_A),
             vf_current_A=float(vf_current_A),
             vf_template_path=str(vf_template_path),
         )
+    vf_coils = vf_build_result.coils
 
     coils = tf_coils + banana_coils + proxy_coils + vf_coils
     bs = BiotSavart(coils)
@@ -484,6 +572,8 @@ def initialize_coils(
         "B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
     }
     surf.to_vtk(out_dir + "surf_init", extra_data=point_data)
+    if return_vf_build_result:
+        return bs, curves, banana_curve, banana_coils, proxy_coils, vf_build_result
     return bs, curves, banana_curve, banana_coils, proxy_coils, vf_coils
 
 
