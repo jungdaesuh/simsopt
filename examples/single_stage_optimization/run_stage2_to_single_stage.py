@@ -28,6 +28,7 @@ from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
     probe_stage2_seed_bootability,
     resolve_stage2_finite_current_mode,
     validate_stage2_seed_bootability_contract,
+    validate_stage2_seed_contract,
 )
 from workflow_runner_common import (  # noqa: E402
     Stage2ArtifactConfig,
@@ -74,8 +75,8 @@ SEED_SOURCE_RECOVERED_STAGE2_DONOR = "recovered_stage2_donor"
 def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the unified Stage 2 -> bootability probe -> recovery -> single-stage "
-            "workflow with fail-closed production handoff checks."
+            "Run the unified Stage 2 coil-seed -> optional bootability probe/recovery "
+            "-> single-stage workflow with fail-closed coil-seed checks."
         ),
         parents=[goal_mode_runner.build_parser(add_help=False)],
         add_help=add_help,
@@ -327,7 +328,7 @@ def build_stage2_generation_args(
         toroidal_flux=args.stage2_toroidal_flux,
         basin_seed=args.stage2_basin_seed,
         constraint_method="alm",
-        stage2_iota_mode="report",
+        stage2_iota_mode="off",
         stage2_iota_target=resolve_single_stage_iota_target_arg(args),
         stage2_iota_tolerance=5.0e-3,
         stage2_iota_weight=1.0,
@@ -637,7 +638,7 @@ def build_pre_boozer_stage2_repair_config(
         ),
         vf_current_A=_required_stage2_float(original_stage2_results, "VF_CURRENT_A"),
         vf_template_path=original_stage2_results.get("VF_TEMPLATE_PATH"),
-        stage2_iota_mode="report",
+        stage2_iota_mode="off",
         stage2_iota_target=resolve_single_stage_iota_target_arg(args),
         stage2_iota_tolerance=5.0e-3,
         stage2_iota_weight=1.0,
@@ -1206,13 +1207,9 @@ def next_required_lane(
     full_payload: dict[str, object] | None,
     blocking_reason: str | None,
 ) -> str:
-    if initial_probe is None:
-        return LANE_BOOZER_ACTIVATION
     if blocking_reason == BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED:
         return LANE_PRE_BOOZER_REPAIR
-    if full_payload is None:
-        return LANE_SINGLE_STAGE_TARGET
-    if full_payload.get("status") == "completed":
+    if full_payload is not None and full_payload.get("status") == "completed":
         return LANE_PROMOTION
     return LANE_SINGLE_STAGE_TARGET
 
@@ -1281,12 +1278,15 @@ def main(argv: list[str] | None = None) -> int:
     original_stage2_bs_path = stage2_input["stage2_bs_path"]
     original_stage2_results_path = stage2_input["stage2_results_path"]
     stage2_results = stage2_input["stage2_results"]
-    initial_probe = build_probe_status(
-        args,
-        stage2_bs_path=original_stage2_bs_path,
-        stage2_results=stage2_results,
-        stage=BOOTABILITY_STAGE_PROBE,
-    )
+    validate_stage2_seed_contract(stage2_results)
+    initial_probe = None
+    if args.probe_only or args.recovery_only:
+        initial_probe = build_probe_status(
+            args,
+            stage2_bs_path=original_stage2_bs_path,
+            stage2_results=stage2_results,
+            stage=BOOTABILITY_STAGE_PROBE,
+        )
     if args.probe_only:
         summary = build_summary(
             args,
@@ -1301,25 +1301,18 @@ def main(argv: list[str] | None = None) -> int:
     recovery_payload = None
     handoff_bs_path = original_stage2_bs_path
     handoff_warm_start_surface_stem = None
-    handoff_bootability = initial_probe
+    handoff_bootability = None
     recovery_attempted = False
     recovery_succeeded = False
     recovery_iters = None
     recovery_termination_reason = None
     seed_source = SEED_SOURCE_DIRECT_STAGE2_DONOR
 
-    if not bootability_passes(initial_probe):
-        if args.skip_recovery:
-            summary = build_summary(
-                args,
-                stage2_input=stage2_input,
-                initial_probe=initial_probe,
-                recovery_payload=None,
-                full_payload=None,
-                blocking_reason=BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED,
-            )
-            write_json(summary_path, summary)
-            return 0
+    if (
+        args.recovery_only
+        and initial_probe is not None
+        and not bootability_passes(initial_probe)
+    ):
         recovery_payload = run_recovery_stage(
             args,
             original_stage2_bs_path=original_stage2_bs_path,
@@ -1368,7 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
         write_json(summary_path, summary)
         return 0
 
-    if not args.dry_run:
+    if handoff_bootability is not None and not args.dry_run:
         handoff_results_path = (
             Path(recovery_payload["results_path"])
             if recovery_succeeded and recovery_payload is not None
@@ -1400,7 +1393,7 @@ def main(argv: list[str] | None = None) -> int:
         full_output_root=full_output_root,
         warm_start_surface_stem=handoff_warm_start_surface_stem,
     )
-    if full_payload["status"] == "completed":
+    if full_payload["status"] == "completed" and handoff_bootability is not None:
         full_results_path = Path(full_payload["results_path"])
         full_payload["results"] = update_results_json(
             full_results_path,

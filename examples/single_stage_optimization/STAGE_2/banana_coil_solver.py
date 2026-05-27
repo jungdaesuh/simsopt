@@ -40,7 +40,7 @@ from workflow_helpers import (
     Stage2SeedSpec,
     canonical_stage2_iota_constraint_weight,
     format_local_stage2_run_dir,
-    resolve_wataru_vf_template_path,
+    resolve_finite_current_vf_template_path,
     stage2_iota_mode_deprecated_hot_loop_coupled,
     stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint,
     validate_stage2_iota_args,
@@ -120,9 +120,21 @@ from banana_opt.current_contracts import (
     apply_penalty_traversal_forbidden_box_bounds,
     DEFAULT_FINITE_CURRENT_MODE,
     FiniteCurrentMode,
+    HBT_PROXY_VF_CURRENT_RATIO,
+    physical_current_to_boozer_I,
     resolve_boozer_current_convention,
     resolve_finite_current_mode,
-    validate_hbt_proxy_vf_current_convention,
+    validate_proxy_vf_current_convention_for_mode,
+)
+from banana_opt.jhalpern30_compat import (
+    JHALPERN30_FINITE_CURRENT_MODE,
+    JHALPERN30_G0_POLICY,
+    JHALPERN30_PROXY_PLACEMENT_MODE,
+    JHALPERN30_VF_CURRENT_MUTABILITY,
+    JHALPERN30_VF_CURRENT_SIGN_POLICY,
+    jhalpern30_iota_target_sign,
+    resolve_jhalpern30_banana_current_replay,
+    sha256_file,
 )
 from banana_opt.stage2_single_stage_handoff import (
     boozer_trust_artifact_fields,
@@ -464,7 +476,10 @@ def parse_args():
         "--banana-surf-radius",
         type=float,
         default=float(os.environ.get("BANANA_SURF_RADIUS", str(BANANA_WINDING_MINOR_RADIUS_M))),
-        help="Coil surface minor radius (default 0.21 m, concentric with HBT vacuum vessel).",
+        help=(
+            "Coil surface minor radius. Defaults to the hardware contract "
+            "banana winding minor radius."
+        ),
     )
     parser.add_argument(
         "--tf-current-A",
@@ -492,12 +507,21 @@ def parse_args():
     )
     parser.add_argument(
         "--finite-current-mode",
-        choices=["wataru_proxy_field"],
+        choices=["wataru_proxy_field", "jhalpern30_proxy_field"],
         default=os.environ.get("FINITE_CURRENT_MODE"),
         help=(
-            "Passive artifact-provenance label. Retained for backward "
-            "compatibility; Stage 2 always uses the Wataru proxy-field model "
-            "after the root-fix refactor."
+            "Finite-current construction mode. Default preserves the Wataru "
+            "proxy-field model; jhalpern30_proxy_field enables historical "
+            "replay construction."
+        ),
+    )
+    parser.add_argument(
+        "--flip-banana",
+        action="store_true",
+        default=os.environ.get("FLIP_BANANA", "").lower() in {"1", "true", "yes", "on"},
+        help=(
+            "Use the historical jhalpern30 flipped banana-current sign and "
+            "record the matching iota-target sign metadata."
         ),
     )
     parser.add_argument(
@@ -1956,16 +1980,25 @@ def _resolve_stage2_finite_current_config(
     )
     if stage2_results is None:
         # Fresh Stage 2: auto-resolve the bundled VF template so the zero-current
-        # VF bundle is always serialized. This is the Wataru-faithful shape.
+        # VF bundle is always serialized. This is the Wataru-faithful shape;
+        # jhalpern30 resolves its historical 20-coil template instead.
         proxy_plasma_current_A = (
             0.0
             if requested_proxy_plasma_current_A is None
             else float(requested_proxy_plasma_current_A)
         )
-        vf_current_A = (
-            0.0 if requested_vf_current_A is None else float(requested_vf_current_A)
+        if requested_vf_current_A is None:
+            vf_current_A = (
+                proxy_plasma_current_A * HBT_PROXY_VF_CURRENT_RATIO
+                if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE
+                else 0.0
+            )
+        else:
+            vf_current_A = float(requested_vf_current_A)
+        vf_template_path = resolve_finite_current_vf_template_path(
+            finite_current_mode,
+            requested_vf_template_path,
         )
-        vf_template_path = resolve_wataru_vf_template_path(requested_vf_template_path)
     else:
         # Seeded restart: trust the donor artifact verbatim. Legacy zero-VF
         # donors must stay zero-VF — silently upgrading their VF_TEMPLATE_PATH
@@ -1986,6 +2019,13 @@ def _resolve_stage2_finite_current_config(
             allow_override=allow_seed_current_traversal,
         )
         if (
+            allow_seed_current_traversal
+            and finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE
+            and requested_proxy_plasma_current_A is not None
+            and requested_vf_current_A is None
+        ):
+            vf_current_A = proxy_plasma_current_A * HBT_PROXY_VF_CURRENT_RATIO
+        if (
             requested_vf_template_path not in {None, ""}
             and _is_legacy_zero_vf_donor(stage2_results)
         ):
@@ -1999,11 +2039,14 @@ def _resolve_stage2_finite_current_config(
             field_name="--vf-template-path",
         )
 
-    proxy_plasma_current_A, vf_current_A = validate_hbt_proxy_vf_current_convention(
+    proxy_plasma_current_A, vf_current_A = validate_proxy_vf_current_convention_for_mode(
+        finite_current_mode,
         proxy_plasma_current_A=proxy_plasma_current_A,
         vf_current_A=vf_current_A,
     )
-    if vf_current_A != 0.0 and vf_template_path in {None, ""}:
+    if vf_template_path in {None, ""} and (
+        vf_current_A != 0.0 or finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE
+    ):
         raise ValueError(
             "--vf-template-path is required when --vf-current-A is non-zero."
         )
@@ -2055,6 +2098,7 @@ def _retarget_stage2_seed_auxiliary_currents(
 
 def _build_initialize_coils_kwargs(
     *,
+    args,
     finite_current_config: Stage2FiniteCurrentConfig,
     equilibrium_file,
     surface_scale_factor,
@@ -2071,6 +2115,9 @@ def _build_initialize_coils_kwargs(
         "proxy_plasma_current_A": finite_current_config.proxy_plasma_current_A,
         "vf_current_A": finite_current_config.vf_current_A,
         "vf_template_path": finite_current_config.vf_template_path,
+        "finite_current_mode": finite_current_config.finite_current_mode,
+        "flip_banana": bool(getattr(args, "flip_banana", False)),
+        "banana_i_fixed_s2": os.environ.get("BANANA_I_FIXED_S2"),
     }
 
 
@@ -2197,6 +2244,8 @@ def main(parsed_args=None):
     vf_current_A = finite_current_config.vf_current_A
     vf_template_path = finite_current_config.vf_template_path
     boozer_current_convention = finite_current_config.boozer_current_convention
+    if bool(args.flip_banana) and finite_current_mode != JHALPERN30_FINITE_CURRENT_MODE:
+        raise ValueError("--flip-banana is only supported by jhalpern30_proxy_field.")
 
     nphi = args.nphi
     ntheta = args.ntheta
@@ -2363,6 +2412,7 @@ def main(parsed_args=None):
             theta_width,
             OUT_DIR,
             **_build_initialize_coils_kwargs(
+                args=args,
                 finite_current_config=finite_current_config,
                 equilibrium_file=file_loc,
                 surface_scale_factor=plasma_geometry.scale_factor,
@@ -2478,6 +2528,10 @@ def main(parsed_args=None):
             num_tf_coils=args.stage2_iota_num_tf_coils,
             mode=args.stage2_iota_mode,
             weight=args.stage2_iota_weight,
+            boozer_I=physical_current_to_boozer_I(
+                proxy_plasma_current_A,
+                convention=boozer_current_convention,
+            ),
             stage2_seed_surf_path=args.stage2_seed_surf_path,
         )
         print(
@@ -2542,6 +2596,7 @@ def main(parsed_args=None):
         proxy_plasma_current_A=proxy_plasma_current_A,
         vf_current_A=vf_current_A,
         vf_template_path=vf_template_path,
+        flip_banana=bool(args.flip_banana),
         target_lcfs_max_major_radius_m=float(args.target_lcfs_max_major_radius_m),
         target_lcfs_max_minor_radius_m=float(args.target_lcfs_max_minor_radius_m),
     )
@@ -3039,6 +3094,22 @@ def main(parsed_args=None):
         wout_path=file_loc,
         tf_current_A=tf_current_A,
     )
+    vf_template_sha256 = (
+        None if vf_template_path in {None, ""} else sha256_file(vf_template_path)
+    )
+    is_jhalpern30_mode = finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE
+    if is_jhalpern30_mode:
+        banana_replay = resolve_jhalpern30_banana_current_replay(
+            flip_banana=bool(args.flip_banana),
+            banana_i_fixed_s2=os.environ.get("BANANA_I_FIXED_S2"),
+        )
+        banana_current_sign = banana_replay.banana_current_sign
+        banana_current_pinned = banana_replay.banana_current_pinned
+        banana_i_fixed_s2_kA = banana_replay.banana_i_fixed_s2_kA
+    else:
+        banana_current_sign = 1
+        banana_current_pinned = False
+        banana_i_fixed_s2_kA = None
 
     stage2_results_kwargs = dict(
         args=args,
@@ -3063,6 +3134,34 @@ def main(parsed_args=None):
         proxy_plasma_current_A=proxy_plasma_current_A,
         vf_current_A=vf_current_A,
         vf_template_path=vf_template_path,
+        proxy_placement_mode=(
+            JHALPERN30_PROXY_PLACEMENT_MODE
+            if is_jhalpern30_mode
+            else "vmec_axis_zeroth_coefficients"
+        ),
+        vf_template_sha256=vf_template_sha256,
+        vf_current_sign_policy=(
+            JHALPERN30_VF_CURRENT_SIGN_POLICY
+            if is_jhalpern30_mode
+            else "template_sign_vf_current_scalar"
+        ),
+        vf_current_mutability=(
+            JHALPERN30_VF_CURRENT_MUTABILITY
+            if is_jhalpern30_mode
+            else "independent_fixed_current"
+        ),
+        flip_banana=bool(args.flip_banana),
+        banana_current_sign=banana_current_sign,
+        banana_current_pinned=banana_current_pinned,
+        banana_i_fixed_s2_kA=banana_i_fixed_s2_kA,
+        iota_target_sign=jhalpern30_iota_target_sign(
+            flip_banana=bool(args.flip_banana)
+        ),
+        g0_policy=JHALPERN30_G0_POLICY,
+        boozer_I=physical_current_to_boozer_I(
+            proxy_plasma_current_A,
+            convention=boozer_current_convention,
+        ),
         total_coils=(
             len(new_tf_coils)
             + len(new_banana_coils)

@@ -1623,6 +1623,25 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertAlmostEqual(settings["boozer_I"], 0.125)
         self.assertAlmostEqual(settings["plasma_current_A"], 0.125 / (4.0e-7 * np.pi))
 
+    def test_resolve_plasma_current_settings_single_surface_allows_jhalpern_mode(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=None,
+                plasma_current_A=None,
+                finite_current_mode="jhalpern30_proxy_field",
+            ),
+            finite_current_mode="jhalpern30_proxy_field",
+            default_plasma_current_A=-6500.0,
+            num_surfaces=1,
+        )
+
+        self.assertEqual(settings["mode"], "jhalpern30_proxy_field")
+        self.assertEqual(settings["effective_mode"], "jhalpern30_proxy_field")
+        self.assertEqual(settings["input_source"], "artifact_default_A")
+        self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * -6500.0)
+
     def test_resolve_plasma_current_settings_single_surface_rejects_conflicting_requested_mode(self):
         module = self.load_module()
 
@@ -11495,7 +11514,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         stage2_results = {
             "MAJOR_RADIUS": module.VACUUM_VESSEL_MAJOR_RADIUS_M,
             "TOROIDAL_FLUX": 0.24,
-            "banana_surf_radius": 0.22,
+            "banana_surf_radius": hardware_contracts.BANANA_WINDING_MINOR_RADIUS_M,
             "COIL_LENGTH": module.COIL_LENGTH_HARD_LIMIT_M,
             "CURVE_CURVE_MIN_DIST": module.COIL_COIL_MIN_DIST_M,
             "CURVE_SURFACE_MIN_DIST": module.COIL_PLASMA_MIN_DIST_M,
@@ -11643,6 +11662,25 @@ class CurrentBaselineContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing banana_surf_radius"):
             module.validate_stage2_seed_contract(stage2_results)
 
+    def test_validate_stage2_seed_contract_accepts_in_vessel_banana_winding_radius_drift(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            banana_surf_radius=0.21,
+        )
+
+        module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_out_of_vessel_banana_winding_radius(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            banana_surf_radius=0.223,
+        )
+
+        with self.assertRaisesRegex(ValueError, "vacuum vessel minor radius"):
+            module.validate_stage2_seed_contract(stage2_results)
+
     def test_validate_stage2_seed_contract_rejects_missing_curvature_threshold(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(module)
@@ -11651,26 +11689,40 @@ class CurrentBaselineContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing CURVATURE_THRESHOLD"):
             module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_missing_poloidal_extent_threshold(self):
+    def test_validate_stage2_seed_contract_accepts_curvature_threshold_below_ceiling(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            CURVATURE_THRESHOLD=50.0,
+        )
+
+        module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_curvature_threshold_above_ceiling(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            CURVATURE_THRESHOLD=100.1,
+        )
+
+        with self.assertRaisesRegex(ValueError, "curvature threshold exceeds"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_accepts_missing_diagnostic_poloidal_extent_threshold(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(module)
         stage2_results.pop("POLOIDAL_EXTENT_THRESHOLD_RAD", None)
 
-        with self.assertRaisesRegex(ValueError, "missing POLOIDAL_EXTENT_THRESHOLD_RAD"):
-            module.validate_stage2_seed_contract(stage2_results)
+        module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_missing_full_contract_metric(self):
+    def test_validate_stage2_seed_contract_accepts_missing_diagnostic_full_contract_metric(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(module)
         stage2_results.pop("COIL_LENGTH", None)
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "missing required hardware constraint metric coil_length",
-        ):
-            module.validate_stage2_seed_contract(stage2_results)
+        module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_lcfs_major_radius_above_limit(self):
+    def test_validate_stage2_seed_contract_accepts_lcfs_major_radius_telemetry(self):
         module = load_single_stage_example_module()
         hardware_contracts = load_hardware_contracts_module()
         stage2_results = self._upgrade_stage2_seed_results(
@@ -11680,28 +11732,25 @@ class CurrentBaselineContractTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(ValueError, "lcfs_major_radius"):
-            module.validate_stage2_seed_contract(stage2_results)
+        module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_banana_current_above_limit(self):
+    def test_validate_stage2_seed_contract_accepts_banana_current_telemetry(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(
             module,
             BANANA_CURRENT_A=module.BANANA_CURRENT_HARD_LIMIT_A + 1.0,
         )
 
-        with self.assertRaisesRegex(ValueError, "banana_current"):
-            module.validate_stage2_seed_contract(stage2_results)
+        module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_poloidal_extent_threshold_above_limit(self):
+    def test_validate_stage2_seed_contract_accepts_poloidal_extent_threshold_telemetry(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(
             module,
             POLOIDAL_EXTENT_THRESHOLD_RAD=module.POLOIDAL_EXTENT_HALF_WIDTH_RAD + 1.0e-3,
         )
 
-        with self.assertRaisesRegex(ValueError, "poloidal-extent threshold exceeds"):
-            module.validate_stage2_seed_contract(stage2_results)
+        module.validate_stage2_seed_contract(stage2_results)
 
     def test_validate_stage2_seed_bootability_contract_rejects_nonbootable_handoff(self):
         module = load_single_stage_example_module()
@@ -13044,6 +13093,24 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.tf_current_A, -80000.0)
 
+    def test_stage2_parse_args_accepts_jhalpern_mode_and_flip_banana(self):
+        module = load_stage2_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "banana_coil_solver.py",
+                "--finite-current-mode",
+                "jhalpern30_proxy_field",
+                "--flip-banana",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.finite_current_mode, "jhalpern30_proxy_field")
+        self.assertTrue(args.flip_banana)
+
     def test_stage2_parse_args_accepts_stage2_poloidal_weight(self):
         module = load_stage2_module()
 
@@ -13172,7 +13239,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         with patch.object(sys, "argv", ["single_stage_banana_example.py"]):
             args = module.parse_args()
 
-        self.assertEqual(args.cs_dist, 0.015)
+        self.assertEqual(args.cs_dist, module.COIL_PLASMA_MIN_DIST_M)
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.banana_current_max_A, 16000.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
@@ -13205,6 +13272,22 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertTrue(args.flip_banana)
 
+    def test_single_stage_parse_args_accepts_jhalpern_finite_current_mode(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--finite-current-mode",
+                "jhalpern30_proxy_field",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.finite_current_mode, "jhalpern30_proxy_field")
+
     def test_resolve_single_stage_iota_target_negates_flip_banana(self):
         module = load_single_stage_example_module()
 
@@ -13220,6 +13303,45 @@ class CurrentBaselineContractTests(unittest.TestCase):
             ),
             -0.15,
         )
+
+    def test_resolve_effective_single_stage_iota_target_honors_stage2_flip_metadata(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(iota_target=0.15, flip_banana=False)
+
+        self.assertEqual(
+            module.resolve_effective_single_stage_iota_target(
+                args,
+                {"FLIP_BANANA": True, "IOTA_TARGET_SIGN": -1},
+            ),
+            -0.15,
+        )
+        self.assertEqual(
+            module.resolve_effective_single_stage_iota_target(
+                args,
+                {"FLIP_BANANA": False, "IOTA_TARGET_SIGN": 1},
+            ),
+            0.15,
+        )
+
+    def test_resolve_effective_single_stage_iota_target_rejects_partial_flip_metadata(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(iota_target=0.15, flip_banana=False)
+
+        with self.assertRaisesRegex(ValueError, "missing FLIP_BANANA"):
+            module.resolve_effective_single_stage_iota_target(
+                args,
+                {"IOTA_TARGET_SIGN": -1},
+            )
+
+    def test_resolve_effective_single_stage_iota_target_rejects_conflicting_flip_metadata(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(iota_target=0.15, flip_banana=False)
+
+        with self.assertRaisesRegex(ValueError, "metadata disagree"):
+            module.resolve_effective_single_stage_iota_target(
+                args,
+                {"FLIP_BANANA": True, "IOTA_TARGET_SIGN": 1},
+            )
 
     def test_flip_banana_banner_reports_effective_iota_target(self):
         module = load_single_stage_example_module()
@@ -13388,9 +13510,12 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module.apply_default_stage2_seed_args(args)
 
         self.assertEqual(args.stage2_seed_curvature_threshold, 100.0)
-        self.assertEqual(args.stage2_seed_banana_surf_radius, 0.21)
+        self.assertEqual(
+            args.stage2_seed_banana_surf_radius,
+            module.BANANA_WINDING_MINOR_RADIUS_M,
+        )
         self.assertEqual(args.stage2_seed_tf_current_A, -8.0e4)
-        self.assertEqual(args.stage2_seed_cc_threshold, 0.05)
+        self.assertEqual(args.stage2_seed_cc_threshold, module.COIL_COIL_MIN_DIST_M)
         self.assertEqual(args.stage2_seed_major_radius, 0.976)
         self.assertEqual(args.stage2_seed_toroidal_flux, 0.24)
         self.assertEqual(args.stage2_seed_banana_init_current_A, -1.0e4)
@@ -13861,6 +13986,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "output_root": str(output_root),
             "stage2_bs_path": str(Path(output_root) / "seed.json"),
             "stage2_seed_current_traversal": False,
+            "flip_banana": False,
             "nphi": 8,
             "ntheta": 8,
             "init_only": True,
@@ -14233,9 +14359,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertEqual(phi_width, np.pi / 8.0)
             self.assertEqual(theta_width, np.pi / 6.0)
             self.assertTrue(str(out_dir).endswith("outputs-demo.nc/"))
-            # Fix #4: _initialize_coils no longer takes finite_current_mode.
-            # Proxy is always built; VF is built iff vf_template_path is set —
-            # that kwarg is the SSOT the mock must mirror.
+            # Proxy is always built; VF is built iff vf_template_path is set.
+            # That kwarg is the layout signal this mock needs to mirror.
             curves, proxy_coils, vf_coils = build_coil_bundle(
                 num_proxy_coils=1,
                 num_vf_coils=1 if extra_kwargs.get("vf_template_path") else 0,
@@ -14516,6 +14641,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(module, "cross_section_plot", lambda *_args, **_kwargs: None),
                     patch.object(module, "_magnetic_field_plots", lambda *_args, **_kwargs: 0.03),
                     patch.object(module, "is_self_intersecting", lambda *_args, **_kwargs: False),
+                    patch.object(module, "sha256_file", lambda *_args, **_kwargs: "0" * 64),
                     patch.object(
                         module,
                         "build_stage2_iota_runtime",
@@ -14730,7 +14856,24 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["initialize_extra_kwargs"]["vf_template_path"],
             workflow_helpers.default_wataru_vf_template_path(),
         )
+        self.assertEqual(
+            runtime["initialize_extra_kwargs"]["finite_current_mode"],
+            "wataru_proxy_field",
+        )
         self.assertEqual(runtime["initialize_extra_kwargs"]["surface_scale_factor"], 0.75)
+
+    def test_stage2_main_wataru_mode_ignores_jhalpern_banana_pin_env(self):
+        with patch.dict(os.environ, {"BANANA_I_FIXED_S2": "not-a-number"}):
+            runtime = self._run_stage2_main(
+                init_only=True,
+                constraint_method="penalty",
+                use_seed=False,
+                arg_overrides={"finite_current_mode": "wataru_proxy_field"},
+            )
+
+        self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "wataru_proxy_field")
+        self.assertFalse(runtime["results"]["BANANA_CURRENT_PINNED"])
+        self.assertIsNone(runtime["results"]["BANANA_I_FIXED_S2_KA"])
 
     def test_stage2_main_rejects_wataru_proxy_vf_ratio_drift(self):
         with self.assertRaisesRegex(ValueError, "proxy/VF convention"):

@@ -28,13 +28,10 @@ from .coil_groups import (
 from .current_contracts import (
     resolve_finite_current_mode,
     resolve_loaded_tf_current_A,
-    validate_hbt_proxy_vf_current_convention,
 )
 from .hardware_contracts import (
     MAX_CURVATURE_INV_M,
-    POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     validate_banana_winding_surface_radius,
-    validate_major_radius,
     validate_tf_current_limit,
 )
 from .hardware_constraint_schema import (
@@ -502,12 +499,8 @@ def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]
             "Stage 2 seed artifact is missing TF_CURRENT_A even after legacy-contract "
             "upgrade. Pass --stage2-seed-tf-current-A explicitly or use a newer "
             "artifact with TF-current metadata."
-        )
-    validate_tf_current_limit(tf_current_A)
-    validate_hbt_proxy_vf_current_convention(
-        proxy_plasma_current_A=stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0),
-        vf_current_A=stage2_results.get("VF_CURRENT_A", 0.0),
     )
+    validate_tf_current_limit(tf_current_A)
     validate_wout_convention_artifact_fields(
         stage2_results_path="<stage2_seed_contract>",
         stage2_artifact_results=dict(stage2_results),
@@ -517,12 +510,6 @@ def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]
             "Stage 2 seed artifact violates the WOUT convention contract: "
             "WOUT_OFF_SPEC=True."
         )
-    major_radius = _required_stage2_result_value(
-        stage2_results,
-        "MAJOR_RADIUS",
-        "the vacuum-vessel major-radius contract",
-    )
-    validate_major_radius(major_radius)
     banana_surf_radius = _required_stage2_result_value(
         stage2_results,
         "banana_surf_radius",
@@ -536,18 +523,8 @@ def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]
     )
     if float(curvature_threshold) > MAX_CURVATURE_INV_M:
         raise ValueError(
-            "Stage 2 seed curvature threshold exceeds the hardware ceiling of "
-            f"{MAX_CURVATURE_INV_M:.1f} m^-1."
-        )
-    poloidal_extent_threshold_rad = _required_stage2_result_value(
-        stage2_results,
-        "POLOIDAL_EXTENT_THRESHOLD_RAD",
-        "the poloidal-extent hardware contract",
-    )
-    if float(poloidal_extent_threshold_rad) > POLOIDAL_EXTENT_HALF_WIDTH_RAD:
-        raise ValueError(
-            "Stage 2 seed poloidal-extent threshold exceeds the HBT-EP half-width "
-            f"ceiling of {POLOIDAL_EXTENT_HALF_WIDTH_RAD:.6f} rad."
+            "Stage 2 seed curvature threshold exceeds the hardware ceiling: "
+            f"{float(curvature_threshold):.6g} > {MAX_CURVATURE_INV_M:.6g} m^-1."
         )
 
 
@@ -563,12 +540,6 @@ def _missing_stage2_hardware_metric_violations(
 
 def validate_stage2_seed_contract(stage2_results):
     _validate_stage2_seed_metadata_contract(stage2_results)
-    hardware_status = evaluate_stage2_seed_hardware_contract(stage2_results)
-    if not hardware_status["success"]:
-        raise ValueError(
-            "Stage 2 seed artifact violates the full HBT-EP hardware contract: "
-            + "; ".join(hardware_status["violations"])
-        )
 
 
 def validate_stage2_seed_recovery_contract(stage2_results):
@@ -589,7 +560,6 @@ def validate_stage2_seed_recovery_contract(stage2_results):
 
 def validate_stage2_seed_handoff_contract(stage2_results):
     validate_stage2_seed_contract(stage2_results)
-    validate_stage2_seed_bootability_contract(stage2_results)
 
 
 def compute_tf_G0(tf_coils) -> float:

@@ -215,7 +215,7 @@ class FreshRunAutoResolvesBundledTemplateTests(unittest.TestCase):
 
         with mock.patch.object(
             stage2_solver,
-            "resolve_wataru_vf_template_path",
+            "resolve_finite_current_vf_template_path",
             return_value=None,
         ):
             with self.assertRaises(ValueError):
@@ -223,6 +223,55 @@ class FreshRunAutoResolvesBundledTemplateTests(unittest.TestCase):
                     _args(vf_current_A=3.0e3),
                     stage2_results=None,
                 )
+
+    def test_fresh_jhalpern_run_derives_signed_vf_and_default_template(self):
+        config = stage2_solver._resolve_stage2_finite_current_config(
+            _args(
+                finite_current_mode="jhalpern30_proxy_field",
+                proxy_plasma_current_A=-6.5e3,
+            ),
+            stage2_results=None,
+        )
+
+        self.assertEqual(config.finite_current_mode, "jhalpern30_proxy_field")
+        self.assertEqual(config.proxy_plasma_current_A, -6.5e3)
+        self.assertEqual(config.vf_current_A, -1.0e3)
+        self.assertTrue(Path(config.vf_template_path).is_file())
+        self.assertIn("jhalpern30_vf_biotsavart", config.vf_template_path)
+
+    def test_seeded_jhalpern_current_traversal_recomputes_vf_when_proxy_changes(self):
+        donor_results = {
+            "FINITE_CURRENT_MODE": "jhalpern30_proxy_field",
+            "PROXY_PLASMA_CURRENT_A": -6.5e3,
+            "VF_CURRENT_A": -1.0e3,
+            "VF_TEMPLATE_PATH": "/recorded/jhalpern30_vf_biotsavart.json",
+            "NUM_VF_COILS": 20,
+        }
+
+        config = stage2_solver._resolve_stage2_finite_current_config(
+            _args(
+                stage2_bs_path="/some/donor.json",
+                finite_current_mode="jhalpern30_proxy_field",
+                proxy_plasma_current_A=6.5e3,
+                stage2_seed_current_traversal=True,
+            ),
+            stage2_results=donor_results,
+        )
+
+        self.assertEqual(config.proxy_plasma_current_A, 6.5e3)
+        self.assertEqual(config.vf_current_A, 1.0e3)
+        self.assertEqual(config.vf_template_path, donor_results["VF_TEMPLATE_PATH"])
+
+    def test_wataru_mode_still_rejects_negative_proxy_current(self):
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            stage2_solver._resolve_stage2_finite_current_config(
+                _args(
+                    finite_current_mode="wataru_proxy_field",
+                    proxy_plasma_current_A=-6.5e3,
+                    vf_current_A=-1.0e3,
+                ),
+                stage2_results=None,
+            )
 
 
 if __name__ == "__main__":

@@ -332,10 +332,16 @@ def evaluate_surface_stack(
             zip(surface_data[:-1], surface_data[1:])
         ):
             outer_index = inner_index + 1
-            pair_nesting_ok, pair_bad_phis = cross_sections_are_nested(
-                inner_entry["boozer_surface"].surface,
-                outer_entry["boozer_surface"].surface,
-            )
+            try:
+                pair_nesting_ok, pair_bad_phis = cross_sections_are_nested(
+                    inner_entry["boozer_surface"].surface,
+                    outer_entry["boozer_surface"].surface,
+                )
+            except RuntimeError as exc:
+                if not _is_surface_goes_back_error(exc):
+                    raise
+                pair_nesting_ok = False
+                pair_bad_phis = []
             if not pair_nesting_ok:
                 bad_nesting_pairs.append(
                     {

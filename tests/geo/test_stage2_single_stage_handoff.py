@@ -105,7 +105,7 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
     return {
         "MAJOR_RADIUS": 0.976,
         "TOROIDAL_FLUX": 0.24,
-        "banana_surf_radius": 0.21,
+        "banana_surf_radius": hardware_contracts.BANANA_WINDING_MINOR_RADIUS_M,
         "COIL_LENGTH": 2.0,
         "CURVE_CURVE_MIN_DIST": 0.05,
         "CURVE_SURFACE_MIN_DIST": 0.015,
@@ -780,7 +780,7 @@ class HandoffModuleTests(unittest.TestCase):
 
         module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_stale_wout_convention_stamp(self):
+    def test_validate_stage2_seed_contract_rejects_stale_wout_convention_telemetry(self):
         module = load_handoff_module()
         stage2_results = {
             **_valid_stage2_contract_fields(),
@@ -788,7 +788,7 @@ class HandoffModuleTests(unittest.TestCase):
             "WOUT_CONVENTION": "positive_ccw",
         }
 
-        with self.assertRaisesRegex(ValueError, "WOUT_CONVENTION=.*does not match"):
+        with self.assertRaisesRegex(ValueError, "WOUT_CONVENTION"):
             module.validate_stage2_seed_contract(stage2_results)
 
     def test_validate_stage2_seed_contract_rejects_offspec_wout_convention(self):
@@ -804,7 +804,45 @@ class HandoffModuleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "WOUT_OFF_SPEC=True"):
             module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_proxy_vf_ratio_drift(self):
+    def test_validate_stage2_seed_contract_accepts_in_vessel_banana_radius_drift(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "banana_surf_radius": 0.21,
+        }
+
+        module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_out_of_vessel_banana_radius(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "banana_surf_radius": 0.223,
+        }
+
+        with self.assertRaisesRegex(ValueError, "vacuum vessel minor radius"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_accepts_curvature_threshold_below_ceiling(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "CURVATURE_THRESHOLD": 50.0,
+        }
+
+        module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_curvature_threshold_above_ceiling(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "CURVATURE_THRESHOLD": 100.1,
+        }
+
+        with self.assertRaisesRegex(ValueError, "curvature threshold exceeds"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_accepts_proxy_vf_ratio_drift_telemetry(self):
         module = load_handoff_module()
         stage2_results = {
             **_valid_stage2_contract_fields(),
@@ -813,8 +851,18 @@ class HandoffModuleTests(unittest.TestCase):
             "VF_CURRENT_A": 5.0e2,
         }
 
-        with self.assertRaisesRegex(ValueError, "proxy/VF convention"):
-            module.validate_stage2_seed_contract(stage2_results)
+        module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_accepts_jhalpern_signed_proxy_vf(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "FINITE_CURRENT_MODE": "jhalpern30_proxy_field",
+            "PROXY_PLASMA_CURRENT_A": -6.5e3,
+            "VF_CURRENT_A": -1.0e3,
+        }
+
+        module.validate_stage2_seed_contract(stage2_results)
 
     def test_validate_stage2_seed_recovery_contract_accepts_traversal_geometry(self):
         module = load_handoff_module()
@@ -827,8 +875,7 @@ class HandoffModuleTests(unittest.TestCase):
         }
 
         module.validate_stage2_seed_recovery_contract(stage2_results)
-        with self.assertRaisesRegex(ValueError, "full HBT-EP hardware contract"):
-            module.validate_stage2_seed_contract(stage2_results)
+        module.validate_stage2_seed_contract(stage2_results)
 
     def test_stage2_seed_hardware_contract_uses_artifact_length_min_target(self):
         module = load_handoff_module()
@@ -875,7 +922,7 @@ class HandoffModuleTests(unittest.TestCase):
         ):
             module.validate_stage2_seed_recovery_contract(stage2_results)
 
-    def test_validate_stage2_seed_handoff_contract_rejects_nonbootable_artifact(self):
+    def test_validate_stage2_seed_handoff_contract_accepts_nonbootable_telemetry(self):
         module = load_handoff_module()
         stage2_results = {
             **_valid_stage2_contract_fields(),
@@ -887,8 +934,7 @@ class HandoffModuleTests(unittest.TestCase):
             "BOOTABILITY_TARGET_IOTA": -0.16,
         }
 
-        with self.assertRaisesRegex(ValueError, "not single-stage bootable"):
-            module.validate_stage2_seed_handoff_contract(stage2_results)
+        module.validate_stage2_seed_handoff_contract(stage2_results)
 
     def test_classify_bootability_result_records_iota_miss_as_telemetry(
         self,
@@ -2451,7 +2497,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             "/tmp/stage2/surf_opt_boozer_surface.json",
         )
 
-    def test_generated_stage2_uses_alm_iota_for_promotable_handoff(self):
+    def test_generated_stage2_disables_iota_for_coil_seed_handoff(self):
         wrapper = load_wrapper_module()
 
         args = wrapper.parse_args(
@@ -2470,7 +2516,7 @@ class UnifiedRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(stage2_args.constraint_method, "alm")
-        self.assertEqual(stage2_args.stage2_iota_mode, "report")
+        self.assertEqual(stage2_args.stage2_iota_mode, "off")
         self.assertAlmostEqual(stage2_args.stage2_iota_target, 0.2)
         self.assertAlmostEqual(stage2_args.stage2_iota_vol_target, 0.13)
 
@@ -2861,18 +2907,9 @@ class UnifiedRunnerTests(unittest.TestCase):
             command[command.index("--constraint-method") + 1],
             "alm",
         )
-        self.assertEqual(
-            command[command.index("--stage2-iota-mode") + 1],
-            "report",
-        )
-        self.assertEqual(
-            command[command.index("--stage2-iota-target") + 1],
-            "0.2",
-        )
-        self.assertEqual(
-            command[command.index("--stage2-iota-vol-target") + 1],
-            "0.13",
-        )
+        self.assertNotIn("--stage2-iota-mode", command)
+        self.assertNotIn("--stage2-iota-target", command)
+        self.assertNotIn("--stage2-iota-vol-target", command)
         self.assertEqual(
             command[command.index("--maxiter") + 1],
             str(args.recovery_maxiter),
@@ -3094,7 +3131,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
                 "FINITE_CURRENT_MODE": "wataru_proxy_field",
-                "STAGE2_IOTA_MODE": "report",
+                "STAGE2_IOTA_MODE": "off",
             }
 
             def fake_run_command(command, *, timeout_seconds, dry_run):
@@ -3107,25 +3144,16 @@ class UnifiedRunnerTests(unittest.TestCase):
                     command[command.index("--finite-current-mode") + 1],
                     "wataru_proxy_field",
                 )
-                self.assertEqual(
-                    command[command.index("--stage2-iota-mode") + 1],
-                    "report",
-                )
-                self.assertEqual(
-                    command[command.index("--stage2-iota-target") + 1],
-                    "0.2",
-                )
-                self.assertEqual(
-                    command[command.index("--stage2-iota-vol-target") + 1],
-                    "0.13",
-                )
+                self.assertNotIn("--stage2-iota-mode", command)
+                self.assertNotIn("--stage2-iota-target", command)
+                self.assertNotIn("--stage2-iota-vol-target", command)
                 repaired_bs_path.parent.mkdir(parents=True, exist_ok=True)
                 repaired_bs_path.write_text("{}", encoding="utf-8")
                 _write_json(
                     repaired_results_path,
                     {
                         **original_stage2_results,
-                        "STAGE2_IOTA_MODE": "report",
+                        "STAGE2_IOTA_MODE": "off",
                         "iterations": 5,
                     },
                 )
@@ -3205,7 +3233,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             self.assertEqual(payload["recovered_bs_path"], str(repaired_bs_path))
             self.assertIsNone(payload["warm_start_surface_stem"])
             self.assertEqual(payload["results"]["SEED_ROLE"], "bootable_handoff")
-            self.assertEqual(payload["results"]["STAGE2_IOTA_MODE"], "report")
+            self.assertEqual(payload["results"]["STAGE2_IOTA_MODE"], "off")
             self.assertFalse(payload["results"]["WOUT_OFF_SPEC"])
             self.assertFalse(payload["results"]["DIAGNOSTIC_ONLY"])
             self.assertTrue(payload["results"]["PRODUCTION_HANDOFF_READY"])
@@ -3223,13 +3251,12 @@ class UnifiedRunnerTests(unittest.TestCase):
             self.assertEqual(probe_call["stage2_results"]["iterations"], 5)
             self.assertIsNone(probe_call["warm_start_boozer_surface_path"])
 
-    def test_full_mode_runs_bootable_iota_off_target_seed(self):
+    def test_full_mode_runs_coil_seed_without_bootability_probe(self):
         wrapper = load_wrapper_module()
-        handoff = load_handoff_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            stage2_bs_path, stage2_results_path = self._stage2_seed_paths(root)
+            stage2_bs_path, _ = self._stage2_seed_paths(root)
             output_root = root / "outputs"
             full_case_dir = output_root / "full" / "target" / "mpol=8-ntor=6-test"
             expected_handoff_bs_path = stage2_bs_path.resolve()
@@ -3264,21 +3291,10 @@ class UnifiedRunnerTests(unittest.TestCase):
                     ),
                 }
 
-            initial_probe = _bootability_status(
-                handoff,
-                stage=handoff.BOOTABILITY_STAGE_PROBE,
-                reason=handoff.BOOTABILITY_REASON_OK,
-                bootable=True,
-                iota_feasible=False,
-                solved_iota=0.12,
-                self_intersecting=False,
-            )
-
             with patch.object(
                 wrapper,
                 "build_probe_status",
-                return_value=initial_probe,
-            ), patch.object(
+            ) as probe_mock, patch.object(
                 wrapper,
                 "run_recovery_stage",
             ) as recovery_mock, patch.object(
@@ -3300,8 +3316,16 @@ class UnifiedRunnerTests(unittest.TestCase):
                     0,
                 )
 
+            probe_mock.assert_not_called()
             recovery_mock.assert_not_called()
             full_mock.assert_called_once()
+            summary = json.loads(
+                (output_root / wrapper.DEFAULT_SUMMARY_JSON).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertIsNone(summary["bootability_probe"])
+            self.assertEqual(summary["next_required_lane"], wrapper.LANE_PROMOTION)
 
     def test_recovery_only_conflict_with_skip_recovery_is_rejected(self):
         wrapper = load_wrapper_module()

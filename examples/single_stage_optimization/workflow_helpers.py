@@ -15,6 +15,11 @@ from banana_opt.hardware_contracts import (
     TARGET_LCFS_MAX_MAJOR_RADIUS_M as DEFAULT_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
     TARGET_LCFS_MAX_MINOR_RADIUS_M as DEFAULT_TARGET_LCFS_MAX_MINOR_RADIUS_M,
 )
+from banana_opt.jhalpern30_compat import (
+    DEFAULT_JHALPERN30_VF_TEMPLATE_PATH,
+    JHALPERN30_FINITE_CURRENT_MODE,
+    resolve_jhalpern30_vf_template_path,
+)
 
 DEFAULT_WATARU_VF_TEMPLATE_PATH = (
     SCRIPT_DIR / "banana_opt" / "wataru_vf_template.json"
@@ -45,6 +50,10 @@ def default_wataru_vf_template_path() -> str | None:
     return str(DEFAULT_WATARU_VF_TEMPLATE_PATH)
 
 
+def default_jhalpern30_vf_template_path() -> str:
+    return str(DEFAULT_JHALPERN30_VF_TEMPLATE_PATH)
+
+
 def resolve_wataru_vf_template_path(vf_template_path: str | None) -> str | None:
     """Return ``vf_template_path`` if non-empty, else the bundled default.
 
@@ -56,6 +65,15 @@ def resolve_wataru_vf_template_path(vf_template_path: str | None) -> str | None:
     if vf_template_path not in {None, ""}:
         return vf_template_path
     return default_wataru_vf_template_path()
+
+
+def resolve_finite_current_vf_template_path(
+    finite_current_mode: str,
+    vf_template_path: str | None,
+) -> str | None:
+    if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
+        return resolve_jhalpern30_vf_template_path(vf_template_path)
+    return resolve_wataru_vf_template_path(vf_template_path)
 
 
 @dataclass(frozen=True)
@@ -77,6 +95,7 @@ class Stage2SeedSpec:
     proxy_plasma_current_A: float = 0.0
     vf_current_A: float = 0.0
     vf_template_path: str | None = None
+    flip_banana: bool = False
     length_target: float = DEFAULT_STAGE2_LENGTH_TARGET
     target_lcfs_max_major_radius_m: float = DEFAULT_TARGET_LCFS_MAX_MAJOR_RADIUS_M
     target_lcfs_max_minor_radius_m: float = DEFAULT_TARGET_LCFS_MAX_MINOR_RADIUS_M
@@ -348,8 +367,10 @@ def format_stage2_finite_current_suffix(spec: Stage2SeedSpec) -> str:
     # now that Wataru-faithful Stage 2 always resolves a VF template path,
     # the current magnitudes are the load-bearing signal for naming.
     if (
-        abs(float(spec.proxy_plasma_current_A)) <= 1.0e-12
+        spec.finite_current_mode != JHALPERN30_FINITE_CURRENT_MODE
+        and abs(float(spec.proxy_plasma_current_A)) <= 1.0e-12
         and abs(float(spec.vf_current_A)) <= 1.0e-12
+        and not bool(spec.flip_banana)
     ):
         return ""
     suffix = f"-FCM={spec.finite_current_mode}"
@@ -357,6 +378,8 @@ def format_stage2_finite_current_suffix(spec: Stage2SeedSpec) -> str:
     suffix += f"-VFC={format_compact_float(spec.vf_current_A)}"
     if spec.vf_template_path not in {None, ""}:
         suffix += f"-VFT={Path(spec.vf_template_path).stem}"
+    if bool(spec.flip_banana):
+        suffix += "-FLIP=1"
     return suffix
 
 
@@ -547,6 +570,7 @@ def format_local_stage2_run_dir(
     stage2_iota_mpol: int = _DEFAULT_STAGE2_IOTA_MPOL,
     stage2_iota_ntor: int = _DEFAULT_STAGE2_IOTA_NTOR,
 ) -> str:
+    flip_suffix = "_flip" if bool(spec.flip_banana) else ""
     full = (
         format_local_stage2_seed_dir(spec)
         + format_stage2_constraint_suffix(
@@ -588,16 +612,19 @@ def format_local_stage2_run_dir(
             stage2_iota_ntor,
         )
     )
-    if len(full) > _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN:
+    if len(full) + len(flip_suffix) > _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN:
         import hashlib as _hashlib
-        digest = _hashlib.sha1(full.encode("utf-8")).hexdigest()[
+        digest = _hashlib.sha1((full + flip_suffix).encode("utf-8")).hexdigest()[
             :_LOCAL_STAGE2_RUN_DIR_HASH_HEX_LEN
         ]
         visible_prefix_len = (
-            _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN - len("-H=") - len(digest)
+            _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN
+            - len("-H=")
+            - len(digest)
+            - len(flip_suffix)
         )
         full = full[:visible_prefix_len] + "-H=" + digest
-    return full
+    return full + flip_suffix
 
 
 def local_stage2_bs_path(

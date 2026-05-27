@@ -2403,6 +2403,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             iota,
             G0,
             *,
+            boozer_I,
             initial_surface_guess,
             nfp,
         ):
@@ -2410,6 +2411,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             calls["target_volume"] = vol_target
             calls["iota"] = iota
             calls["G0"] = G0
+            calls["boozer_I"] = boozer_I
             calls["initial_surface_guess"] = initial_surface_guess
             calls["nfp"] = nfp
             return SimpleNamespace(
@@ -2438,6 +2440,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             constraint_weight=None,
             num_tf_coils=2,
             mode="report",
+            boozer_I=0.0125,
             stage2_seed_surf_path="/tmp/warm_surface.json",
             build_surface_configs_fn=fail_build_surface_configs,
             attempt_initialize_boozer_surface_fn=fake_attempt_initialize,
@@ -2458,6 +2461,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(calls["target_volume"], 0.12)
         self.assertAlmostEqual(calls["iota"], 0.17654321)
         self.assertAlmostEqual(calls["G0"], 0.35)
+        self.assertAlmostEqual(calls["boozer_I"], 0.0125)
 
     def test_build_stage2_iota_runtime_rebuilds_when_warm_start_has_no_solved_state(self):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, -0.35)
@@ -2488,6 +2492,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             iota,
             G0,
             *,
+            boozer_I,
             initial_surface_guess,
             nfp,
         ):
@@ -2495,6 +2500,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             calls["target_volume"] = vol_target
             calls["iota"] = iota
             calls["G0"] = G0
+            calls["boozer_I"] = boozer_I
             calls["initial_surface_guess"] = initial_surface_guess
             calls["nfp"] = nfp
             return SimpleNamespace(
@@ -5558,8 +5564,18 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         )
 
         self.assertFalse(result["search_hardware_status"]["success"])
-        self.assertAlmostEqual(result["lcfs_major_radius_m"], 0.926)
-        self.assertAlmostEqual(result["lcfs_minor_radius_m"], 0.153)
+        hardware_contracts = _load_module(
+            HARDWARE_CONTRACTS_PATH,
+            "banana_hw_contracts",
+        )
+        self.assertAlmostEqual(
+            result["lcfs_major_radius_m"],
+            hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M + 0.006,
+        )
+        self.assertAlmostEqual(
+            result["lcfs_minor_radius_m"],
+            hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M + 0.003,
+        )
         self.assertIn(
             "lcfs_major_radius",
             result["search_hardware_status"]["constraints"],
@@ -6123,7 +6139,7 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
 
     def test_lcfs_artifact_upper_bound_tolerates_roundoff(self):
         spec = self.module.get_hardware_constraint_spec("lcfs_major_radius")
-        roundoff_major_radius = 0.9200000000000039
+        roundoff_major_radius = self.module.TARGET_LCFS_MAX_MAJOR_RADIUS_M + 3.9e-15
 
         self.assertEqual(
             self.module.hardware_constraint_violation(spec, roundoff_major_radius),
@@ -6131,12 +6147,12 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
         )
 
     def test_lcfs_artifact_payload_writes_ok_for_roundoff(self):
-        roundoff_major_radius = 0.9200000000000039
+        roundoff_major_radius = self.module.TARGET_LCFS_MAX_MAJOR_RADIUS_M + 3.9e-15
         lcfs_constraint_names = {"lcfs_major_radius", "lcfs_minor_radius"}
         status = self.module.build_hardware_constraint_status(
             {
                 "lcfs_major_radius": roundoff_major_radius,
-                "lcfs_minor_radius": 0.15,
+                "lcfs_minor_radius": self.module.TARGET_LCFS_MAX_MINOR_RADIUS_M,
             },
             applies_to="artifact",
             names=lcfs_constraint_names,
@@ -6145,7 +6161,7 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
         payload = self.module.build_hardware_constraint_artifact_payload_fields(
             {
                 "lcfs_major_radius_m": roundoff_major_radius,
-                "lcfs_minor_radius_m": 0.15,
+                "lcfs_minor_radius_m": self.module.TARGET_LCFS_MAX_MINOR_RADIUS_M,
                 "artifact_hardware_status": status,
             },
             names=lcfs_constraint_names,
@@ -6158,7 +6174,7 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
 
     def test_lcfs_artifact_upper_bound_rejects_real_excess(self):
         spec = self.module.get_hardware_constraint_spec("lcfs_major_radius")
-        real_excess_major_radius = 0.92000000001
+        real_excess_major_radius = self.module.TARGET_LCFS_MAX_MAJOR_RADIUS_M + 1.0e-11
 
         self.assertGreater(
             self.module.hardware_constraint_violation(spec, real_excess_major_radius),

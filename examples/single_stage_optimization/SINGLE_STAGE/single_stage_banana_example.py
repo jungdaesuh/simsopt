@@ -1263,13 +1263,13 @@ def parse_args():
     )
     parser.add_argument(
         "--finite-current-mode",
-        choices=["boozer_surrogate", "wataru_proxy_field"],
+        choices=["boozer_surrogate", "wataru_proxy_field", "jhalpern30_proxy_field"],
         default=os.environ.get("FINITE_CURRENT_MODE"),
         help=(
             "Finite-current interpretation for the loaded Stage 2 donor. When omitted, "
             "single-stage reload uses the donor artifact metadata. Ignored when "
-            "--num-surfaces=1 unless set to wataru_proxy_field, because the "
-            "single-surface path is locked to the Wataru proxy-field contract."
+            "--num-surfaces=1 unless set to wataru_proxy_field or "
+            "jhalpern30_proxy_field."
         ),
     )
     parser.add_argument("--maxiter", type=int, default=int(os.environ.get("MAXITER", "300")))
@@ -9454,14 +9454,41 @@ def validate_stage2_seed_bootability_contract(stage2_results):
     _validate_stage2_seed_bootability_contract_impl(stage2_results)
 
 
+def resolve_stage2_seed_flip_banana(stage2_results):
+    artifact_flip_banana = stage2_results.get("FLIP_BANANA")
+    if artifact_flip_banana is None:
+        if stage2_results.get("IOTA_TARGET_SIGN") is not None:
+            raise ValueError(
+                "Stage 2 seed artifact has IOTA_TARGET_SIGN but is missing FLIP_BANANA."
+            )
+        return False
+    if artifact_flip_banana is not True and artifact_flip_banana is not False:
+        raise ValueError("Stage 2 seed FLIP_BANANA must be boolean.")
+    iota_target_sign = stage2_results.get("IOTA_TARGET_SIGN")
+    if iota_target_sign is not None:
+        expected_iota_target_sign = -1 if artifact_flip_banana else 1
+        if int(iota_target_sign) != expected_iota_target_sign:
+            raise ValueError(
+                "Stage 2 seed FLIP_BANANA and IOTA_TARGET_SIGN metadata disagree."
+            )
+    return artifact_flip_banana
+
+
+def resolve_effective_single_stage_flip_banana(args, stage2_results):
+    return bool(args.flip_banana) or resolve_stage2_seed_flip_banana(stage2_results)
+
+
+def resolve_effective_single_stage_iota_target(args, stage2_results):
+    if resolve_stage2_seed_flip_banana(stage2_results) and not bool(args.flip_banana):
+        return -float(args.iota_target)
+    return resolve_single_stage_iota_target(args)
+
+
 if __name__ == "__main__":
     # ==============================================================================
     # CONFIGURATION PARAMETERS
     # ==============================================================================
     args = apply_default_stage2_seed_args(parse_args())
-    iota_target = resolve_single_stage_iota_target(args)
-    if args.flip_banana:
-        print(format_flip_banana_banner(args.iota_target, iota_target), flush=True)
     if args.banana_current_fd_diagnostics:
         args.banana_current_diagnostics = True
     if args.banana_current_fd_relative_step_fraction <= 0.0:
@@ -9492,11 +9519,13 @@ if __name__ == "__main__":
         validate_stage2_seed_recovery_contract(stage2_results)
     else:
         validate_stage2_seed_contract(stage2_results)
-    if (
-        seed_artifact_role == SEED_ARTIFACT_ROLE_STAGE2
-        and args.stage2_seed_role == "handoff"
-    ):
-        validate_stage2_seed_bootability_contract(stage2_results)
+    effective_flip_banana = resolve_effective_single_stage_flip_banana(
+        args,
+        stage2_results,
+    )
+    iota_target = resolve_effective_single_stage_iota_target(args, stage2_results)
+    if effective_flip_banana:
+        print(format_flip_banana_banner(args.iota_target, iota_target), flush=True)
     R0 = validate_seed_major_radius(
         stage2_results["MAJOR_RADIUS"],
         accept_offspec_r0_seed=args.accept_offspec_r0_seed,
@@ -11467,7 +11496,9 @@ if __name__ == "__main__":
         "FINAL_TOPOLOGY_STOP_REASON_COUNTS": final_topology_status["stop_reason_counts"],
         "TARGET_VOLUME": None if args.single_stage_goal_mode == "frontier" else float(vol_target),
         "TARGET_IOTA": None if args.single_stage_goal_mode == "frontier" else float(iota_target),
-        "FLIP_BANANA": bool(args.flip_banana),
+        "FLIP_BANANA": bool(effective_flip_banana),
+        "REQUESTED_FLIP_BANANA": bool(args.flip_banana),
+        "STAGE2_SEED_FLIP_BANANA": stage2_results.get("FLIP_BANANA"),
         "BOOZER_SURFACE_TARGET_VOLUMES": [float(entry["target_volume"]) for entry in surface_data],
         "SINGLE_STAGE_GOAL_MODE": args.single_stage_goal_mode,
         "SINGLE_STAGE_GOAL_MODE_IMPL": current_frontier_goal_mode_impl(),

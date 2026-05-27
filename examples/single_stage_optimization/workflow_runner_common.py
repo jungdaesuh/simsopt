@@ -22,7 +22,7 @@ from workflow_helpers import (
     DEFAULT_STAGE2_LENGTH_TARGET,
     Stage2SeedSpec,
     local_stage2_bs_path,
-    resolve_wataru_vf_template_path,
+    resolve_finite_current_vf_template_path,
     validate_stage2_iota_args,
     validate_normalized_toroidal_flux,
 )
@@ -133,6 +133,7 @@ STAGE2_ARTIFACT_CONFIG_FLAT_FIELD_NAMES = (
     "proxy_plasma_current_A",
     "vf_current_A",
     "vf_template_path",
+    "flip_banana",
     "target_lcfs_max_major_radius_m",
     "target_lcfs_max_minor_radius_m",
     "stage2_iota_mode",
@@ -238,10 +239,17 @@ class Stage2FiniteCurrentConfig:
     proxy_plasma_current_A: float = 0.0
     vf_current_A: float = 0.0
     vf_template_path: str | None = None
+    flip_banana: bool = False
+
+    def __post_init__(self) -> None:
+        require_bool(self.flip_banana, field_name="Stage2FiniteCurrentConfig.flip_banana")
 
     @property
     def effective_vf_template_path(self) -> str | None:
-        return resolve_wataru_vf_template_path(self.vf_template_path)
+        return resolve_finite_current_vf_template_path(
+            self.finite_current_mode,
+            self.vf_template_path,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +325,7 @@ class Stage2ArtifactConfig:
         proxy_plasma_current_A: float = 0.0,
         vf_current_A: float = 0.0,
         vf_template_path: str | None = None,
+        flip_banana: bool = False,
         target_lcfs_max_major_radius_m: float = TARGET_LCFS_MAX_MAJOR_RADIUS_M,
         target_lcfs_max_minor_radius_m: float = TARGET_LCFS_MAX_MINOR_RADIUS_M,
         stage2_iota_mode: str = "off",
@@ -421,6 +430,7 @@ class Stage2ArtifactConfig:
                 proxy_plasma_current_A=proxy_plasma_current_A,
                 vf_current_A=vf_current_A,
                 vf_template_path=vf_template_path,
+                flip_banana=flip_banana,
             ),
         )
         object.__setattr__(
@@ -635,6 +645,10 @@ class Stage2ArtifactConfig:
         return self._finite_current.vf_template_path
 
     @property
+    def flip_banana(self) -> bool:
+        return self._finite_current.flip_banana
+
+    @property
     def target_lcfs_max_major_radius_m(self) -> float:
         return self._constraint_policy.target_lcfs_max_major_radius_m
 
@@ -733,6 +747,7 @@ def build_stage2_seed_spec(config: Stage2ArtifactConfig) -> Stage2SeedSpec:
         proxy_plasma_current_A=config.proxy_plasma_current_A,
         vf_current_A=config.vf_current_A,
         vf_template_path=config.effective_vf_template_path,
+        flip_banana=config.flip_banana,
         target_lcfs_max_major_radius_m=config.target_lcfs_max_major_radius_m,
         target_lcfs_max_minor_radius_m=config.target_lcfs_max_minor_radius_m,
     )
@@ -815,6 +830,8 @@ def build_stage2_command(
     effective_vf_template_path = config.effective_vf_template_path
     if effective_vf_template_path not in {None, ""}:
         command.extend(["--vf-template-path", str(effective_vf_template_path)])
+    if config.flip_banana:
+        command.append("--flip-banana")
     if config.equilibria_dir is not None:
         command.extend(["--equilibria-dir", config.equilibria_dir])
     if constraint_profile_label not in {None, ""}:

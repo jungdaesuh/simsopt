@@ -842,6 +842,59 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             helpers.default_wataru_vf_template_path(),
         )
 
+    def test_build_stage2_command_threads_jhalpern_mode_template_and_flip(self):
+        module = load_workflow_common_module()
+        helpers = load_workflow_helpers_module()
+        config = module.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir="/tmp/equilibria",
+            tf_current_A=-8.0e4,
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            order=2,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_seed=None,
+            init_only=False,
+            finite_current_mode="jhalpern30_proxy_field",
+            proxy_plasma_current_A=-6500.0,
+            vf_current_A=-1000.0,
+            vf_template_path=None,
+            flip_banana=True,
+        )
+
+        command = module.build_stage2_command(config, python_executable="python")
+
+        self.assertEqual(
+            command[command.index("--finite-current-mode") + 1],
+            "jhalpern30_proxy_field",
+        )
+        self.assertEqual(
+            command[command.index("--proxy-plasma-current-A") + 1],
+            "-6500.0",
+        )
+        self.assertEqual(command[command.index("--vf-current-A") + 1], "-1000.0")
+        self.assertEqual(
+            command[command.index("--vf-template-path") + 1],
+            helpers.default_jhalpern30_vf_template_path(),
+        )
+        self.assertIn("--flip-banana", command)
+        artifact_path = module.resolve_stage2_artifact_path(config)
+        self.assertIn("-FCM=jhalpern30_proxy_field", str(artifact_path))
+        self.assertIn("-FLIP=1", str(artifact_path))
+        self.assertTrue(artifact_path.parent.name.endswith("_flip"))
+
     def test_stage2_artifact_config_preserves_raw_template_and_resolves_identity_default(self):
         common = load_workflow_common_module()
         baseline = load_baseline_sweep_module()
@@ -1037,10 +1090,10 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "TOROIDAL_FLUX": 0.24,
             "LENGTH_WEIGHT": 0.0005,
             "CC_WEIGHT": 100.0,
-            "CC_THRESHOLD": 0.05,
+            "CC_THRESHOLD": 0.0462,
             "CURVATURE_WEIGHT": 0.0001,
-            "CURVATURE_THRESHOLD": 100.0,
-            "banana_surf_radius": 0.21,
+            "CURVATURE_THRESHOLD": 40.0,
+            "banana_surf_radius": 0.142,
             "order": 2,
             "CONSTRAINT_METHOD": "penalty",
             "CONTRACT_SCHEMA_VERSION": 1,
@@ -1072,10 +1125,10 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "toroidal_flux": 0.24,
             "length_weight": 0.0005,
             "cc_weight": 100.0,
-            "cc_threshold": 0.05,
+            "cc_threshold": 0.0462,
             "curvature_weight": 0.0001,
-            "curvature_threshold": 100.0,
-            "banana_surf_radius": 0.21,
+            "curvature_threshold": 40.0,
+            "banana_surf_radius": 0.142,
             "order": 2,
             "constraint_method": "penalty",
             "alm_max_outer_iters": 10,
@@ -1101,10 +1154,10 @@ class BaselineSweepScriptTests(unittest.TestCase):
             toroidal_flux=0.24,
             stage2_length_weight=0.0005,
             stage2_cc_weight=100.0,
-            stage2_cc_threshold=0.05,
+            stage2_cc_threshold=0.0462,
             stage2_curvature_weight=0.0001,
             stage2_curvature_threshold=40.0,
-            banana_surf_radius=0.21,
+            banana_surf_radius=0.142,
             stage2_order=2,
             stage2_constraint_method="penalty",
             stage2_basin_hops=0,
@@ -1645,7 +1698,7 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
             tuple(flat_config),
             module.stage2_artifact_config_flat_field_names(),
         )
-        self.assertEqual(len(flat_config), 55)
+        self.assertEqual(len(flat_config), 56)
         self.assertEqual(
             module.Stage2ArtifactConfig.__slots__,
             (
@@ -3405,6 +3458,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "FINAL_FEASIBILITY_OK": True,
                 "HARDWARE_CONSTRAINTS_OK": True,
                 "FINAL_TOPOLOGY_GATE_SUCCESS": True,
+                "FRONTIER_CERTIFICATION_OK": True,
+                "FRONTIER_CERTIFICATION_REASON": "ok",
                 "FINAL_IOTA": final_iota,
                 "FINAL_VOLUME": final_volume,
                 "NONQS_RATIO": nonqs_ratio,

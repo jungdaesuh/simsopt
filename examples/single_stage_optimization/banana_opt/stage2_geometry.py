@@ -31,6 +31,13 @@ from banana_opt.hardware_contracts import (
     validate_target_lcfs_major_radius,
     validate_target_lcfs_minor_radius,
 )
+from banana_opt.jhalpern30_compat import (
+    JHALPERN30_FINITE_CURRENT_MODE,
+    build_jhalpern30_banana_coils,
+    build_jhalpern30_proxy_plasma_current_coils,
+    build_jhalpern30_vf_coils,
+    resolve_jhalpern30_vf_template_path,
+)
 from banana_opt.json_compat import load_boozer_finite_i as load
 
 
@@ -407,6 +414,9 @@ def initialize_coils(
     proxy_plasma_current_A=0.0,
     vf_current_A=0.0,
     vf_template_path=None,
+    finite_current_mode="wataru_proxy_field",
+    flip_banana=False,
+    banana_i_fixed_s2=None,
 ):
     banana_curve = CurveCWSFourierCPP(
         np.linspace(0, 1, num_quadpoints, endpoint=False),
@@ -418,27 +428,46 @@ def initialize_coils(
     banana_curve.set("phic(1)", phi_width)
     banana_curve.set("thetas(1)", theta_width)
 
-    banana_coils = coils_via_symmetries(
-        [banana_curve],
-        [ScaledCurrent(Current(1), banana_init_current_A)],
-        surf_coils.nfp,
-        surf_coils.stellsym,
-    )
+    if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
+        banana_coils, _banana_replay = build_jhalpern30_banana_coils(
+            banana_curve,
+            surf_coils=surf_coils,
+            flip_banana=bool(flip_banana),
+            banana_i_fixed_s2=banana_i_fixed_s2,
+        )
+    else:
+        banana_coils = coils_via_symmetries(
+            [banana_curve],
+            [ScaledCurrent(Current(1), banana_init_current_A)],
+            surf_coils.nfp,
+            surf_coils.stellsym,
+        )
 
-    # Proxy plasma-current coil: always built (Wataru convention). With
+    # Proxy plasma-current coil: always built for the selected finite-current mode. With
     # plasma_current_A=0.0 it contributes no field, keeping the I=0 baseline
     # bit-equivalent to the historical vacuum case while preserving a single
     # bs.coils layout regardless of current magnitude.
-    proxy_coils = build_proxy_plasma_current_coils(
-        equilibrium_file=equilibrium_file,
-        surface_scale_factor=float(surface_scale_factor),
-        nphi=int(nphi),
-        ntheta=int(ntheta),
-        toroidal_flux=float(toroidal_flux),
-        plasma_current_A=float(proxy_plasma_current_A),
-    )
+    if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
+        proxy_coils = build_jhalpern30_proxy_plasma_current_coils(
+            surf,
+            float(proxy_plasma_current_A),
+        )
+    else:
+        proxy_coils = build_proxy_plasma_current_coils(
+            equilibrium_file=equilibrium_file,
+            surface_scale_factor=float(surface_scale_factor),
+            nphi=int(nphi),
+            ntheta=int(ntheta),
+            toroidal_flux=float(toroidal_flux),
+            plasma_current_A=float(proxy_plasma_current_A),
+        )
     vf_coils: list[Coil] = []
-    if vf_template_path not in {None, ""}:
+    if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
+        vf_coils = build_jhalpern30_vf_coils(
+            float(proxy_plasma_current_A),
+            resolve_jhalpern30_vf_template_path(vf_template_path),
+        )
+    elif vf_template_path not in {None, ""}:
         vf_coils = build_vf_coils(
             vf_current_A=float(vf_current_A),
             vf_template_path=str(vf_template_path),

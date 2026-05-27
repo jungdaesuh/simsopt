@@ -31,8 +31,17 @@ CurrentInputSource = Literal[
 ]
 FiniteCurrentModeSource = Literal["artifact_metadata", "legacy_assumed_default"]
 BoozerCurrentConvention = Literal["mu0_over_2pi", "mu0"]
-FiniteCurrentMode = Literal["boozer_surrogate", "wataru_proxy_field"]
-EffectiveCurrentMode = Literal["vacuum", "boozer_surrogate", "wataru_proxy_field"]
+FiniteCurrentMode = Literal[
+    "boozer_surrogate",
+    "wataru_proxy_field",
+    "jhalpern30_proxy_field",
+]
+EffectiveCurrentMode = Literal[
+    "vacuum",
+    "boozer_surrogate",
+    "wataru_proxy_field",
+    "jhalpern30_proxy_field",
+]
 CURRENT_MODE_ZERO_TOL = 1e-12
 DEFAULT_FINITE_CURRENT_MODE: FiniteCurrentMode = "wataru_proxy_field"
 HBT_PROXY_VF_CURRENT_RATIO = 1.0 / 6.5
@@ -71,6 +80,8 @@ __all__ = [
     "resolve_finite_current_mode",
     "resolve_effective_current_mode",
     "validate_hbt_proxy_vf_current_convention",
+    "validate_jhalpern30_proxy_vf_current_convention",
+    "validate_proxy_vf_current_convention_for_mode",
     "resolve_penalty_traversal_forbidden_box_bounds",
     "resolve_loaded_tf_current_A",
     "resolve_plasma_current_settings",
@@ -117,6 +128,9 @@ _BOOZER_CURRENT_CONVENTION_BY_MODE: Mapping[
     # (Originally written as BoozerSurface(..., I=...); the I= kwarg moved to the
     # examples-side BoozerSurfaceFiniteI wrapper during the finite-I refactor.)
     "wataru_proxy_field": "mu0",
+    # jhalpern30 also passes BoozerSurface(..., I=mu0*proxy_current_A). The
+    # compatibility mode keeps that parameter separate from fresh-run G0.
+    "jhalpern30_proxy_field": "mu0",
 }
 
 
@@ -125,6 +139,8 @@ def _validated_finite_current_mode(mode: str) -> FiniteCurrentMode:
         return "boozer_surrogate"
     if mode == "wataru_proxy_field":
         return "wataru_proxy_field"
+    if mode == "jhalpern30_proxy_field":
+        return "jhalpern30_proxy_field"
     raise ValueError(f"Unsupported finite-current mode {mode!r}.")
 
 
@@ -180,6 +196,51 @@ def validate_hbt_proxy_vf_current_convention(
             "--vf-current-A = --proxy-plasma-current-A / 6.5."
         )
     return proxy_current_A, resolved_vf_current_A
+
+
+def validate_jhalpern30_proxy_vf_current_convention(
+    *,
+    proxy_plasma_current_A: float,
+    vf_current_A: float,
+) -> tuple[float, float]:
+    """Validate the signed proxy/VF scalar contract for jhalpern30 replay.
+
+    Historical jhalpern30 runs allowed signed proxy current. The scalar
+    ``VF_CURRENT_A`` remains ``proxy / 6.5``; individual effective VF coil
+    signs are then reconstructed from the historical VF template and the proxy
+    sign, so not every VF coil carries this scalar sign directly.
+    """
+    proxy_current_A = float(proxy_plasma_current_A)
+    resolved_vf_current_A = float(vf_current_A)
+    expected_vf_current_A = proxy_current_A * HBT_PROXY_VF_CURRENT_RATIO
+    if not np.isclose(
+        resolved_vf_current_A,
+        expected_vf_current_A,
+        rtol=1.0e-12,
+        atol=HBT_PROXY_VF_CURRENT_TOL_A,
+    ):
+        raise ValueError(
+            "jhalpern30 proxy/VF convention requires "
+            "VF_CURRENT_A = PROXY_PLASMA_CURRENT_A / 6.5."
+        )
+    return proxy_current_A, resolved_vf_current_A
+
+
+def validate_proxy_vf_current_convention_for_mode(
+    finite_current_mode: FiniteCurrentMode,
+    *,
+    proxy_plasma_current_A: float,
+    vf_current_A: float,
+) -> tuple[float, float]:
+    if finite_current_mode == "jhalpern30_proxy_field":
+        return validate_jhalpern30_proxy_vf_current_convention(
+            proxy_plasma_current_A=proxy_plasma_current_A,
+            vf_current_A=vf_current_A,
+        )
+    return validate_hbt_proxy_vf_current_convention(
+        proxy_plasma_current_A=proxy_plasma_current_A,
+        vf_current_A=vf_current_A,
+    )
 
 
 def resolve_finite_current_mode(
@@ -489,21 +550,19 @@ def resolve_single_surface_plasma_current_settings(
     *,
     raw_boozer_I: float | None,
     plasma_current_A: float | None,
+    finite_current_mode: FiniteCurrentMode = DEFAULT_FINITE_CURRENT_MODE,
     default_plasma_current_A: float = 0.0,
 ) -> PlasmaCurrentSettings:
-    """Resolve the single-surface Boozer current using Wataru's contract.
+    """Resolve the single-surface Boozer current for an explicit replay mode.
 
     User-facing current input remains physical plasma current in amperes. The
     solver-facing BoozerSurface ``I`` parameter is then derived as ``mu0 * I_A``.
     A raw Boozer-current value is still allowed as an explicit expert override.
-    Single-surface mode also locks the recorded provenance mode to the Wataru
-    proxy-field contract even though the numerical current convention is
-    identical to the generic multisurface path today.
     """
     return resolve_plasma_current_settings(
         raw_boozer_I=raw_boozer_I,
         plasma_current_A=plasma_current_A,
-        finite_current_mode=DEFAULT_FINITE_CURRENT_MODE,
+        finite_current_mode=finite_current_mode,
         default_plasma_current_A=default_plasma_current_A,
     )
 
@@ -523,15 +582,22 @@ def resolve_plasma_current_settings_for_num_surfaces(
             None,
             "",
             DEFAULT_FINITE_CURRENT_MODE,
+            "jhalpern30_proxy_field",
         }:
             raise ValueError(
                 "Single-surface mode is locked to "
-                f"{DEFAULT_FINITE_CURRENT_MODE!r}; remove --finite-current-mode or "
-                f"set it to {DEFAULT_FINITE_CURRENT_MODE!r}."
+                f"{DEFAULT_FINITE_CURRENT_MODE!r} or 'jhalpern30_proxy_field'; "
+                "remove --finite-current-mode or select one of those replay modes."
             )
+        single_surface_mode = (
+            "jhalpern30_proxy_field"
+            if finite_current_mode == "jhalpern30_proxy_field"
+            else DEFAULT_FINITE_CURRENT_MODE
+        )
         return resolve_single_surface_plasma_current_settings(
             raw_boozer_I=raw_boozer_I,
             plasma_current_A=plasma_current_A,
+            finite_current_mode=single_surface_mode,
             default_plasma_current_A=default_plasma_current_A,
         )
     return resolve_plasma_current_settings(
