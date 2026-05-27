@@ -277,9 +277,8 @@ Implemented profile file:
          replay artifact -> direct single-stage replay.
    - [x] Remove or reword stale text that implies jhalpern replay should flow
          through donor repair or `run_stage2_to_single_stage.py`.
-   - [x] After donor-repair retirement commit `9676c40f5`, keep only historical
-         or explicit rejection-boundary references to
-         `run_single_stage_donor_repair.py`.
+   - [x] After donor-repair retirement commit `9676c40f5`, remove active
+         donor-repair routing from the jhalpern handoff docs.
    - [x] Add a short "ported, not symlinked" note to the relevant handoff docs
          so future users understand why `results.json` is regenerated.
 2. Finite-current profile registry

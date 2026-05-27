@@ -408,16 +408,16 @@ def _stage2_iota_floor_penalty(iota: float, target: float) -> float:
     return 0.5 * shortfall * shortfall
 
 
-def _stage2_iota_mode_uses_floor(mode: str) -> bool:
+def _stage2_iota_runtime_uses_floor(mode: str) -> bool:
     return str(mode) == _STAGE2_IOTA_ALM_FLOOR_MODE
 
 
-def _stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint(mode: str) -> bool:
+def _stage2_iota_runtime_uses_deprecated_alm_hot_loop_constraint(mode: str) -> bool:
     return str(mode) in {"alm", _STAGE2_IOTA_ALM_FLOOR_MODE}
 
 
 def _stage2_iota_state_penalty(iota: float, target: float, *, mode: str) -> float:
-    if _stage2_iota_mode_uses_floor(mode):
+    if _stage2_iota_runtime_uses_floor(mode):
         return _stage2_iota_floor_penalty(iota, target)
     return _stage2_iota_penalty(iota, target)
 
@@ -432,7 +432,7 @@ def _stage2_iota_state_feasible(
 ) -> bool:
     if solve_failed:
         return False
-    if _stage2_iota_mode_uses_floor(mode):
+    if _stage2_iota_runtime_uses_floor(mode):
         return _stage2_iota_floor_shortfall(iota, target) <= float(tolerance)
     return abs(float(iota) - float(target)) <= float(tolerance)
 
@@ -832,7 +832,7 @@ def build_stage2_iota_runtime(
 
     boozer_surface.run_code = timed_run_code
     iota_term = iotas_cls(boozer_surface)
-    if _stage2_iota_mode_uses_floor(mode):
+    if _stage2_iota_runtime_uses_floor(mode):
         penalty_objective = Stage2IotaFloorPenalty(iota_term, float(iota_target))
     else:
         penalty_objective = quadratic_penalty_cls(iota_term, float(iota_target))
@@ -2401,7 +2401,7 @@ def evaluate_stage2_alm_problem(
     iota_signed_value = None
     include_iota_penalty = (
         stage2_iota_runtime is not None
-        and _stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint(
+        and _stage2_iota_runtime_uses_deprecated_alm_hot_loop_constraint(
             stage2_iota_runtime.mode
         )
     )

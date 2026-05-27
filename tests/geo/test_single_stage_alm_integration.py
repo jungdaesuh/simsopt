@@ -280,10 +280,8 @@ def make_stage2_alm_wrapper_args(**overrides):
         "target_lcfs_max_minor_radius_m": None,
         "banana_surf_radius": None,
         "constraint_method": "alm",
-        "stage2_iota_mode": "off",
         "stage2_iota_target": None,
         "stage2_iota_tolerance": 5.0e-3,
-        "stage2_iota_weight": 1.0,
         "stage2_iota_vol_target": 0.10,
         "stage2_iota_constraint_weight": 1.0,
         "stage2_iota_num_tf_coils": 20,
@@ -1333,40 +1331,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         ):
             with self.assertRaises(SystemExit) as excinfo:
                 module.parse_args()
-
-        self.assertEqual(excinfo.exception.code, 2)
-
-    def test_stage2_alm_wrapper_rejects_soft_iota_mode_at_parse_time(self):
-        module = load_stage2_alm_wrapper_module()
-
-        with self.assertRaises(SystemExit) as excinfo:
-            module.parse_args(
-                [
-                    "--plasma-surf-filename",
-                    DEFAULT_ALM_WRAPPER_SURFACE,
-                    "--profile",
-                    "standard_80ka",
-                    "--stage2-iota-mode",
-                    "soft",
-                ]
-            )
-
-        self.assertEqual(excinfo.exception.code, 2)
-
-    def test_stage2_alm_wrapper_does_not_expose_soft_iota_weight_flag(self):
-        module = load_stage2_alm_wrapper_module()
-
-        with self.assertRaises(SystemExit) as excinfo:
-            module.parse_args(
-                [
-                    "--plasma-surf-filename",
-                    DEFAULT_ALM_WRAPPER_SURFACE,
-                    "--profile",
-                    "standard_80ka",
-                    "--stage2-iota-weight",
-                    "3.0",
-                ]
-            )
 
         self.assertEqual(excinfo.exception.code, 2)
 

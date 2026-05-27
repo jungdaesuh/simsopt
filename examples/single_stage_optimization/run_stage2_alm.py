@@ -308,16 +308,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional override for the VMEC flux-surface label s in [0, 1].",
     )
     parser.add_argument(
-        "--stage2-iota-mode",
-        choices=["off", "report"],
-        default="off",
-        help=(
-            "Deprecated Stage 2 iota metadata mode. 'report' runs only the "
-            "post-optimization Boozer/iota probe; hot-loop iota constraints "
-            "are not production Stage 2."
-        ),
-    )
-    parser.add_argument(
         "--alm-fix-signal-mismatch-guard",
         action="store_true",
         default=False,
@@ -331,14 +321,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stage2-iota-target",
         type=float,
         default=None,
-        help="Target iota used when --stage2-iota-mode is enabled.",
+        help="Optional target iota for the post-optimization Stage 2 probe.",
     )
     parser.add_argument(
         "--stage2-iota-tolerance",
         type=float,
         default=5.0e-3,
         help=(
-            "Iota deviation tolerance used when --stage2-iota-mode is enabled. "
+            "Iota deviation tolerance used by the optional Stage 2 probe. "
             "Units: dimensionless iota deviation (|iota - iota_target| <= tolerance). "
             "This is intentionally different from --alm-iota-penalty-threshold, "
             "which is in squared-penalty units. See the 'Iota threshold units' "
@@ -392,7 +382,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.set_defaults(
         constraint_method="alm",
-        stage2_iota_weight=1.0,
     )
     return parser.parse_args(argv)
 
@@ -643,10 +632,8 @@ def build_stage2_alm_config(
         target_lcfs_max_minor_radius_m=float(
             constraint_contract["TARGET_LCFS_MAX_MINOR_RADIUS_M"]
         ),
-        stage2_iota_mode=args.stage2_iota_mode,
         stage2_iota_target=args.stage2_iota_target,
         stage2_iota_tolerance=args.stage2_iota_tolerance,
-        stage2_iota_weight=args.stage2_iota_weight,
         stage2_iota_vol_target=args.stage2_iota_vol_target,
         stage2_iota_constraint_weight=args.stage2_iota_constraint_weight,
         stage2_iota_num_tf_coils=args.stage2_iota_num_tf_coils,
@@ -682,10 +669,9 @@ def _expected_stage2_alm_solver_metadata(config: Stage2ArtifactConfig) -> dict:
 
 def _expected_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
     expected_iota_metadata = {
-        "STAGE2_ROOT_FIX_ENABLED": config.stage2_iota_mode != "off",
-        "STAGE2_IOTA_MODE": config.stage2_iota_mode,
+        "STAGE2_ROOT_FIX_ENABLED": config.stage2_iota_target is not None,
     }
-    if config.stage2_iota_mode != "off":
+    if config.stage2_iota_target is not None:
         expected_iota_metadata.update(
             {
                 "STAGE2_IOTA_TARGET": config.stage2_iota_target,
@@ -843,7 +829,6 @@ def build_summary(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     validate_stage2_iota_args(
-        stage2_iota_mode=args.stage2_iota_mode,
         stage2_iota_target=args.stage2_iota_target,
         stage2_iota_tolerance=args.stage2_iota_tolerance,
         stage2_iota_vol_target=args.stage2_iota_vol_target,
@@ -852,8 +837,6 @@ def main(argv: list[str] | None = None) -> int:
         stage2_iota_ntheta=args.stage2_iota_ntheta,
         stage2_iota_mpol=args.stage2_iota_mpol,
         stage2_iota_ntor=args.stage2_iota_ntor,
-        stage2_iota_weight=args.stage2_iota_weight,
-        constraint_method=args.constraint_method,
     )
     resolved_spec, resolved_spec_source = resolve_stage2_spec_payload(args)
     config = build_stage2_alm_config(args, resolved_spec=resolved_spec)

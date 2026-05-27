@@ -487,7 +487,6 @@ def validate_stage2_seed_bootability_contract(
         f"PRODUCTION_HANDOFF_READY={stage2_results.get('PRODUCTION_HANDOFF_READY')!r}, "
         f"HANDOFF_BLOCKING_GATE={stage2_results.get('HANDOFF_BLOCKING_GATE')!r}, "
         f"PROMOTION_READY={stage2_results.get('PROMOTION_READY')!r}, "
-        f"STAGE2_IOTA_MODE={stage2_results.get('STAGE2_IOTA_MODE')!r}, "
         f"WOUT_OFF_SPEC={stage2_results.get('WOUT_OFF_SPEC')!r}, "
         f"BOOZER_BOOTABLE={stage2_results.get('BOOZER_BOOTABLE')!r}, "
         f"BOOZER_TRUSTED={stage2_results.get('BOOZER_TRUSTED')!r}, "
@@ -987,7 +986,8 @@ def boozer_trust_artifact_fields(
 
     Always returns the top-level trust keys (with ``None`` placeholders when no
     solve has been attempted), so the artifact contract is identical across the
-    default Stage 2 path, report-mode certification, and unified handoff callers.
+    default Stage 2 path, target-driven probe certification, and unified handoff
+    callers.
     """
 
     if trust_state is None:

@@ -150,47 +150,37 @@ class WorkflowHelpersTests(unittest.TestCase):
                 order=2,
             )
 
-    def test_validate_stage2_iota_args_rejects_soft_hot_loop_mode(self):
+    def test_validate_stage2_iota_args_rejects_nonpositive_tolerance_when_targeted(self):
         module = load_workflow_helpers_module()
 
         with self.assertRaisesRegex(
             ValueError,
-            "--stage2-iota-mode only supports 'off' or post-gate 'report'",
+            "--stage2-iota-tolerance must be positive",
         ):
             module.validate_stage2_iota_args(
-                stage2_iota_mode="soft",
                 stage2_iota_target=0.2,
-                stage2_iota_tolerance=5.0e-3,
+                stage2_iota_tolerance=0.0,
                 stage2_iota_vol_target=0.1,
                 stage2_iota_num_tf_coils=20,
                 stage2_iota_nphi=91,
                 stage2_iota_ntheta=32,
                 stage2_iota_mpol=8,
                 stage2_iota_ntor=6,
-                stage2_iota_weight=3.0,
-                constraint_method="alm",
             )
 
-    def test_validate_stage2_iota_args_rejects_alm_floor_hot_loop_mode(self):
+    def test_validate_stage2_iota_args_skips_probe_validation_without_target(self):
         module = load_workflow_helpers_module()
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "--stage2-iota-mode only supports 'off' or post-gate 'report'",
-        ):
-            module.validate_stage2_iota_args(
-                stage2_iota_mode="alm-floor",
-                stage2_iota_target=0.2,
-                stage2_iota_tolerance=5.0e-3,
-                stage2_iota_vol_target=0.1,
-                stage2_iota_num_tf_coils=20,
-                stage2_iota_nphi=91,
-                stage2_iota_ntheta=32,
-                stage2_iota_mpol=8,
-                stage2_iota_ntor=6,
-                stage2_iota_weight=3.0,
-                constraint_method="penalty",
-            )
+        module.validate_stage2_iota_args(
+            stage2_iota_target=None,
+            stage2_iota_tolerance=0.0,
+            stage2_iota_vol_target=0.0,
+            stage2_iota_num_tf_coils=0,
+            stage2_iota_nphi=0,
+            stage2_iota_ntheta=0,
+            stage2_iota_mpol=0,
+            stage2_iota_ntor=0,
+        )
 
     def test_format_local_stage2_run_dir_includes_constraint_and_basin_suffix(self):
         module = load_workflow_helpers_module()
@@ -348,10 +338,8 @@ class WorkflowHelpersTests(unittest.TestCase):
             alm_penalty_scale=10.0,
             basin_hops=0,
             basin_stepsize=0.01,
-            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_tolerance=5.0e-3,
-            stage2_iota_weight=3.0,
             stage2_iota_vol_target=0.12,
             stage2_iota_constraint_weight=0.0,
             stage2_iota_num_tf_coils=20,
@@ -361,7 +349,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             stage2_iota_ntor=6,
         )
 
-        self.assertIn("-IM=report", run_dir)
+        self.assertNotIn("-IM=", run_dir)
         self.assertIn("-ITarget=0.2", run_dir)
         self.assertIn("-ITol=0.005", run_dir)
         self.assertIn("-IVol=0.12", run_dir)
@@ -1698,7 +1686,7 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
             tuple(flat_config),
             module.stage2_artifact_config_flat_field_names(),
         )
-        self.assertEqual(len(flat_config), 56)
+        self.assertEqual(len(flat_config), 54)
         self.assertEqual(
             module.Stage2ArtifactConfig.__slots__,
             (

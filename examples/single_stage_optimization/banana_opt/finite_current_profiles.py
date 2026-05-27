@@ -144,7 +144,6 @@ JHALPERN30_PROFILE = FiniteCurrentProfile(
     ),
     rejected_entrypoints=(
         "run_stage2_to_single_stage.py:pre_boozer_repair",
-        "run_single_stage_donor_repair.py",
     ),
     required_artifact_metadata_keys=(
         *_COMMON_REQUIRED_ARTIFACT_METADATA_KEYS,

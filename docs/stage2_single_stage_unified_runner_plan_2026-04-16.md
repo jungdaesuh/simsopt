@@ -1,7 +1,7 @@
 # Stage 2 + Single-Stage Unified Runner Plan
 
 Date: 2026-04-16
-Status: Partially implemented. The unified runner, shared handoff schema, and Stage 2 iota decision-gate wrapper have landed; the standalone donor-repair sibling wrapper was retired on 2026-05-27; remaining items are rollout/measurement follow-ups.
+Status: Partially implemented. The unified runner and shared handoff schema have landed; the standalone donor-repair sibling wrapper and Stage 2 iota decision-gate wrapper were retired on 2026-05-27; remaining items are rollout/measurement follow-ups.
 Scope: `examples/single_stage_optimization/` user-facing runner orchestration, donor-handoff contract, and shared Boozer probe seam.
 
 ## Implementation Status
@@ -12,12 +12,13 @@ The core workflow described here is now live in the working tree:
 - `examples/single_stage_optimization/banana_opt/stage2_single_stage_handoff.py`
 - `examples/single_stage_optimization/banana_opt/hardware_constraint_schema.py`
 
-Retirement note, 2026-05-27: `examples/single_stage_optimization/run_single_stage_donor_repair.py` was retired after review. The supported Stage 2.5 lane is `run_stage2_to_single_stage.py`; the shared `BOOTABILITY_*` / `RECOVERY_*` helper schema remains live.
+Retirement note, 2026-05-27: the standalone donor-repair batch alias was retired after review. The supported Stage 2.5 lane is `run_stage2_to_single_stage.py`; the shared `BOOTABILITY_*` / `RECOVERY_*` helper schema remains live.
 
-The later Stage 2-native benchmark / recommendation layer that this plan feeds is also
-implemented in `examples/single_stage_optimization/run_stage2_iota_decision_gate.py`.
-What still remains open from this document is empirical execution: collecting runtime and
-success-rate measurements and deciding whether any deeper merge is justified.
+Stage 2-native Boozer/`iota` measurement now lives behind the target-driven
+`--stage2-iota-target` probe on the Stage 2 runners themselves; there is no
+separate decision-gate wrapper. What still remains open from this document is
+empirical execution: collecting runtime and success-rate measurements and
+deciding whether any deeper merge is justified.
 
 ## Verdict
 
@@ -89,7 +90,7 @@ Do not call the new step "repair mode" or "bridge" unqualified in code, docstrin
 ## Non-Goals (verified preserved)
 
 - [x] Do not rewrite Stage 2 and single-stage into one giant objective first.
-- [x] Do not put full Boozer/`iota`/QS terms directly into the Stage 2 L-BFGS-B hot loop. → Stage 2 hot loop still geometry-only when `--stage2-iota-mode=off` (default); reporting-only probe runs after Stage 2 convergence.
+- [x] Do not put full Boozer/`iota`/QS terms directly into the Stage 2 L-BFGS-B hot loop. → Stage 2 hot loop is geometry-only when no `--stage2-iota-target` is supplied; the target-driven Boozer/`iota` probe runs after Stage 2 convergence.
 - [x] Do not replace existing Stage 2 or single-stage result schemas wholesale in the first pass.
 - [x] Do not require ALM parity between Stage 2 and single-stage before the workflow seam is proven.
 - [x] Do not overload the single-stage-only `alm_state.partial.json` file; Stage 2.5 recovery state, if persisted, gets a distinct filename. → Recovery runs the existing single-stage `thresholded_physics` ALM under its own `<output>/recovery/` root; no Stage 2 partial-state artifact introduced.
@@ -99,7 +100,7 @@ Do not call the new step "repair mode" or "bridge" unqualified in code, docstrin
 ### Deliverable
 
 - [x] Add a new wrapper entrypoint, `examples/single_stage_optimization/run_stage2_to_single_stage.py`.
-- [x] Before landing, decide whether to unify with the sibling plan's Phase B7 alias `run_single_stage_donor_repair.py` (retired 2026-05-27). → Historical decision: **coexist**. Both landed (`run_stage2_to_single_stage.py`, retired `run_single_stage_donor_repair.py`). Both imported the same `banana_opt/stage2_single_stage_handoff.py` helpers and emitted the same `BOOTABILITY_*`/`RECOVERY_*` payload via `build_bootability_recovery_payload_fields(...)`; no second repair stack was created.
+- [x] Before landing, decide whether to unify with the sibling plan's Phase B7 alias. → Historical decision: **coexist**. Both the unified runner and the now-retired standalone batch alias imported the same `banana_opt/stage2_single_stage_handoff.py` helpers and emitted the same `BOOTABILITY_*`/`RECOVERY_*` payload via `build_bootability_recovery_payload_fields(...)`; no second repair stack was created.
 
 ### Responsibilities
 
@@ -262,7 +263,7 @@ Flag-combination rules (reject contradictions at CLI parse time):
 ### Avoid Editing Unless Needed
 
 - [~] `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
-  - Stage 2 *did* gain a reporting-only probe here after all (sibling plan's Phase B3 landed alongside this workstream). `banana_coil_solver.py` now calls `probe_stage2_seed_bootability(...)` when `--stage2-iota-mode` is not `off`, and emits the same `BOOTABILITY_*` payload via `build_bootability_recovery_payload_fields(...)`. This is additive and does not change default behavior (`--stage2-iota-mode=off`).
+  - Stage 2 *did* gain an optional post-gate probe here after all (sibling plan's Phase B3 landed alongside this workstream). `banana_coil_solver.py` now calls `probe_stage2_seed_bootability(...)` when `--stage2-iota-target` is supplied, and emits the same `BOOTABILITY_*` payload via `build_bootability_recovery_payload_fields(...)`. This is additive and does not change default geometry-only behavior when the target is omitted.
 
 ## Schema / Metadata Todos
 
@@ -337,13 +338,13 @@ Manual validation items remain human acceptance steps; they are not tracked in t
 
 ### Step 4
 
-- [ ] Benchmark recovery cost and success rate for the current `off`/`report` decision-gate path. → **pending**; scaffolding exists via `run_stage2_iota_decision_gate.py`, but canonical empirical runs still need to be collected.
-- [x] Feed those measurements into the broader Stage 2 `iota` decision gate. → Current decision-gate scope is `off`/`report`; retired hot-loop lanes require a new plan to reopen.
+- [ ] Benchmark recovery cost and success rate for the current target-driven probe path. → **pending**; use `run_stage2_alm.py --stage2-iota-target ...` or the unified Stage 2.5 probe path for canonical empirical runs.
+- [x] Feed those measurements into the broader Stage 2 `iota` decision. → Current active scope is target-driven post-gate probing; retired hot-loop lanes require a new plan to reopen.
 - [x] Decide whether Stage 2 itself needs an `iota`-aware soft term. → Current active workflow keeps Stage 2 hot-loop iota work retired and uses the unified Stage 2.5 handoff/recovery path.
 
 ### Step 5
 
-- [~] Only after the handoff works, reconsider Stage 2-native soft or hard `iota`. → Historical `soft`/`alm` hot-loop lanes are retired; the active decision-gate runner now measures `off → report` only.
+- [~] Only after the handoff works, reconsider Stage 2-native soft or hard `iota`. → Historical `soft`/`alm` hot-loop lanes are retired; the active Stage 2-native path is target-driven post-gate probing only.
 - [ ] Only after that, reconsider a deeper objective-level merge. → Not undertaken; see Decision Gate below.
 
 ## Decision Gate For A True Merge Later
@@ -371,7 +372,7 @@ Any downstream edits should recheck these anchors before landing.
 
 ## Bottom Line
 
-- [x] Build **one workflow**. → `run_stage2_to_single_stage.py`; the historical Phase B7 batch alias `run_single_stage_donor_repair.py` shared the same helpers while it existed and was retired on 2026-05-27.
+- [x] Build **one workflow**. → `run_stage2_to_single_stage.py`; the historical Phase B7 batch alias shared the same helpers while it existed and was retired on 2026-05-27.
 - [x] Keep **two optimization regimes** (Stage 2 and single-stage). → Stage 2 hot loop remains geometry-only by default; single-stage physics terms live in the recovery and full-run stages.
 - [x] Insert **one explicit Stage 2.5 bootability / bootstrap-recovery contract** between them, named to avoid collision with single-stage's existing `REPAIR_FIRST` / `BRIDGE_ONLY` vocabulary. → `BOOTABILITY_*` / `RECOVERY_*` payload + `UNIFIED_SEED_SOURCE` labels.
 

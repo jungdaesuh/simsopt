@@ -333,10 +333,8 @@ def build_stage2_generation_args(
         toroidal_flux=args.stage2_toroidal_flux,
         basin_seed=args.stage2_basin_seed,
         constraint_method="alm",
-        stage2_iota_mode="off",
-        stage2_iota_target=resolve_single_stage_iota_target_arg(args),
+        stage2_iota_target=None,
         stage2_iota_tolerance=5.0e-3,
-        stage2_iota_weight=1.0,
         stage2_iota_vol_target=args.vol_target,
         stage2_iota_constraint_weight=1.0,
         stage2_iota_num_tf_coils=20,
@@ -643,17 +641,6 @@ def build_pre_boozer_stage2_repair_config(
         ),
         vf_current_A=_required_stage2_float(original_stage2_results, "VF_CURRENT_A"),
         vf_template_path=original_stage2_results.get("VF_TEMPLATE_PATH"),
-        stage2_iota_mode="off",
-        stage2_iota_target=resolve_single_stage_iota_target_arg(args),
-        stage2_iota_tolerance=5.0e-3,
-        stage2_iota_weight=1.0,
-        stage2_iota_vol_target=args.vol_target,
-        stage2_iota_constraint_weight=1.0,
-        stage2_iota_num_tf_coils=20,
-        stage2_iota_nphi=91,
-        stage2_iota_ntheta=32,
-        stage2_iota_mpol=8,
-        stage2_iota_ntor=6,
     )
 
 
@@ -988,7 +975,6 @@ def run_pre_boozer_stage2_repair(
             results_path,
             recovery_probe,
             source_stage2_results=original_stage2_results,
-            iota_mode_stage2_results=results,
             original_stage2_bs_path=original_stage2_bs_path,
             original_stage2_results_path=original_stage2_results_path,
             recovery_attempted=True,
@@ -1057,7 +1043,6 @@ def stage2_production_handoff_payload(
     bootability_status: dict[str, object],
     *,
     source_stage2_results: dict,
-    iota_mode_stage2_results: dict | None = None,
     original_stage2_bs_path: Path,
     original_stage2_results_path: Path,
     recovery_attempted: bool,
@@ -1081,10 +1066,6 @@ def stage2_production_handoff_payload(
             wout_off_spec=_wout_off_spec_for_handoff(source_stage2_results),
         )
     )
-    stage2_iota_source = iota_mode_stage2_results or source_stage2_results
-    stage2_iota_mode = stage2_iota_source.get("STAGE2_IOTA_MODE")
-    if stage2_iota_mode is not None:
-        payload["STAGE2_IOTA_MODE"] = stage2_iota_mode
     return payload
 
 
@@ -1093,7 +1074,6 @@ def stamp_and_validate_stage2_production_handoff(
     bootability_status: dict[str, object],
     *,
     source_stage2_results: dict,
-    iota_mode_stage2_results: dict | None = None,
     original_stage2_bs_path: Path,
     original_stage2_results_path: Path,
     recovery_attempted: bool,
@@ -1105,7 +1085,6 @@ def stamp_and_validate_stage2_production_handoff(
     payload = stage2_production_handoff_payload(
         bootability_status,
         source_stage2_results=source_stage2_results,
-        iota_mode_stage2_results=iota_mode_stage2_results,
         original_stage2_bs_path=original_stage2_bs_path,
         original_stage2_results_path=original_stage2_results_path,
         recovery_attempted=recovery_attempted,

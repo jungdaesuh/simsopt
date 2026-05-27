@@ -12124,27 +12124,10 @@ class CurrentBaselineContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "IOTA_NEAR_TARGET=False"):
             module.validate_stage2_seed_bootability_contract(stage2_results)
 
-    def test_validate_stage2_seed_bootability_contract_accepts_legacy_alm_label_by_facts(self):
+    def test_validate_stage2_seed_bootability_contract_accepts_handoff_by_facts(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(
             module,
-            STAGE2_IOTA_MODE="alm",
-            BOOZER_BOOTABLE=True,
-            BOOZER_TRUSTED=True,
-            IOTA_NEAR_TARGET=True,
-            IOTA_FEASIBLE=True,
-            BOOTABILITY_REASON="ok",
-            BOOTABILITY_SOLVED_IOTA=0.16,
-            BOOTABILITY_TARGET_IOTA=0.16,
-        )
-
-        module.validate_stage2_seed_bootability_contract(stage2_results)
-
-    def test_validate_stage2_seed_bootability_contract_accepts_report_handoff_by_facts(self):
-        module = load_single_stage_example_module()
-        stage2_results = self._upgrade_stage2_seed_results(
-            module,
-            STAGE2_IOTA_MODE="report",
             BOOZER_BOOTABLE=True,
             BOOZER_TRUSTED=True,
             IOTA_NEAR_TARGET=True,
@@ -13510,25 +13493,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertTrue(args.enable_s_hel_objective)
         self.assertEqual(args.s_hel_objective_weight, 1.0e-3)
 
-    def test_stage2_parse_args_rejects_iota_alm_floor_mode(self):
-        module = load_stage2_module()
-
-        with patch.object(
-            sys,
-            "argv",
-            [
-                "banana_coil_solver.py",
-                "--constraint-method",
-                "alm",
-                "--stage2-iota-mode",
-                "alm-floor",
-                "--stage2-iota-target",
-                "0.12",
-            ],
-        ):
-            with self.assertRaises(SystemExit):
-                module.parse_args()
-
     def test_stage2_build_s_hel_objective_constructs_enabled_schedule(self):
         module = load_stage2_module()
         args = SimpleNamespace(
@@ -13554,7 +13518,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(weight, 2.0e-3)
         self.assertEqual(calls, [(field, surface)])
 
-    def test_stage2_parse_args_accepts_s_hel_objective_without_soft_iota(self):
+    def test_stage2_parse_args_accepts_s_hel_objective_without_iota_probe(self):
         module = load_stage2_module()
 
         with patch.object(
@@ -13565,7 +13529,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertTrue(args.enable_s_hel_objective)
-        self.assertEqual(args.stage2_iota_mode, "off")
+        self.assertIsNone(args.stage2_iota_target)
 
     def test_stage2_parse_args_rejects_nonpositive_s_hel_weight(self):
         module = load_stage2_module()
@@ -14378,10 +14342,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "alm_fix_signal_mismatch_guard": False,
             "alm_taylor_test": False,
             "alm_taylor_test_seed": 123,
-            "stage2_iota_mode": "off",
             "stage2_iota_target": None,
             "stage2_iota_tolerance": 5.0e-3,
-            "stage2_iota_weight": 1.0,
             "stage2_iota_vol_target": 0.10,
             "stage2_iota_constraint_weight": 1.0,
             "stage2_iota_num_tf_coils": 20,
@@ -14458,7 +14420,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "curve_surface_surface_label": None,
             "surface_surface_min_distance_labels": None,
             "plasma_geometry_args": None,
-            "stage2_iota_runtime_builds": 0,
             "stage2_iota_probes": 0,
             "stage2_iota_probe_kwargs": None,
             "results": None,
@@ -14882,10 +14843,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["plasma_geometry_args"] = args
             return fake_plasma_geometry
 
-        def fake_build_stage2_iota_runtime(*_args, **_kwargs):
-            runtime["stage2_iota_runtime_builds"] += 1
-            raise AssertionError("Stage 2 report/off must not build Stage2IotaRuntime")
-
         def fake_probe_stage2_seed_bootability(**kwargs):
             runtime["stage2_iota_probes"] += 1
             runtime["stage2_iota_probe_kwargs"] = dict(kwargs)
@@ -15012,11 +14969,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(module, "sha256_file", lambda *_args, **_kwargs: "0" * 64),
                     patch.object(
                         module,
-                        "build_stage2_iota_runtime",
-                        side_effect=fake_build_stage2_iota_runtime,
-                    ),
-                    patch.object(
-                        module,
                         "probe_stage2_seed_bootability",
                         side_effect=fake_probe_stage2_seed_bootability,
                     ),
@@ -15120,12 +15072,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             constraint_method="penalty",
             use_seed=True,
             arg_overrides={
-                "stage2_iota_mode": "report",
                 "stage2_iota_target": 0.2,
             },
         )
 
-        self.assertEqual(runtime["stage2_iota_runtime_builds"], 0)
         self.assertEqual(runtime["stage2_iota_probes"], 1)
         self.assertTrue(runtime["results"]["STAGE2_ROOT_FIX_ENABLED"])
         self.assertFalse(runtime["results"]["STAGE2_IOTA_OBJECTIVE_COUPLED"])

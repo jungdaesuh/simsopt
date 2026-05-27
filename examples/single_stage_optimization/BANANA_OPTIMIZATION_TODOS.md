@@ -726,7 +726,6 @@ Current anchors:
 - `tests/geo/test_curve_objectives.py`
 - `tests/objectives/test_fluxobjective.py`
 - `tests/geo/test_surface_objectives.py`
-- `examples/single_stage_optimization/run_stage2_iota_decision_gate.py`
 
 Problem:
 

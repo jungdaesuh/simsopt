@@ -134,9 +134,7 @@ _DEFAULT_STAGE2_ALM_TRUST_RADIUS_GROW = 1.5
 _DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS = 4
 _DEFAULT_STAGE2_ALM_DISTANCE_SMOOTHING = 0.005
 _DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING = 0.25
-_DEFAULT_STAGE2_IOTA_MODE = "off"
 _DEFAULT_STAGE2_IOTA_TOLERANCE = 5.0e-3
-_DEFAULT_STAGE2_IOTA_WEIGHT = 1.0
 _DEFAULT_STAGE2_IOTA_VOL_TARGET = 0.10
 _DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT = 1.0
 _DEFAULT_STAGE2_IOTA_NUM_TF_COILS = 20
@@ -144,13 +142,6 @@ _DEFAULT_STAGE2_IOTA_NPHI = 91
 _DEFAULT_STAGE2_IOTA_NTHETA = 32
 _DEFAULT_STAGE2_IOTA_MPOL = 8
 _DEFAULT_STAGE2_IOTA_NTOR = 6
-# Deprecated hot-loop names remain only so legacy artifact/test helpers can
-# classify old payloads. validate_stage2_iota_args rejects them for production.
-_DEPRECATED_STAGE2_IOTA_ALM_HOT_LOOP_MODES = frozenset({"alm", "alm-floor"})
-_DEPRECATED_STAGE2_IOTA_OBJECTIVE_COUPLED_HOT_LOOP_MODES = frozenset(
-    {"soft"}
-).union(_DEPRECATED_STAGE2_IOTA_ALM_HOT_LOOP_MODES)
-_STAGE2_IOTA_PRODUCTION_MODES = frozenset({"off", "report"})
 _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN = 255
 # 8 hex chars = 32 bits of discriminator. The visible prefix already carries
 # the distinguishing parameters; the hash is only a tie-breaker for truncated
@@ -167,22 +158,8 @@ def canonical_stage2_iota_constraint_weight(
     return None if normalized_constraint_weight <= 0.0 else normalized_constraint_weight
 
 
-def stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint(
-    stage2_iota_mode: str,
-) -> bool:
-    return str(stage2_iota_mode) in _DEPRECATED_STAGE2_IOTA_ALM_HOT_LOOP_MODES
-
-
-def stage2_iota_mode_deprecated_hot_loop_coupled(stage2_iota_mode: str) -> bool:
-    return (
-        str(stage2_iota_mode)
-        in _DEPRECATED_STAGE2_IOTA_OBJECTIVE_COUPLED_HOT_LOOP_MODES
-    )
-
-
 def validate_stage2_iota_args(
     *,
-    stage2_iota_mode: str,
     stage2_iota_target: float | None,
     stage2_iota_tolerance: float,
     stage2_iota_vol_target: float,
@@ -191,20 +168,9 @@ def validate_stage2_iota_args(
     stage2_iota_ntheta: int,
     stage2_iota_mpol: int,
     stage2_iota_ntor: int,
-    stage2_iota_weight: float,
-    constraint_method: str,
 ) -> None:
-    if stage2_iota_mode not in _STAGE2_IOTA_PRODUCTION_MODES:
-        raise ValueError(
-            "--stage2-iota-mode only supports 'off' or post-gate 'report'. "
-            "The Stage 2 iota hot-loop modes were removed from production Stage 2."
-        )
-    if stage2_iota_mode == _DEFAULT_STAGE2_IOTA_MODE:
-        return
     if stage2_iota_target is None:
-        raise ValueError(
-            "--stage2-iota-target is required when --stage2-iota-mode is enabled."
-        )
+        return
     if stage2_iota_tolerance <= 0.0:
         raise ValueError("--stage2-iota-tolerance must be positive.")
     if stage2_iota_vol_target <= 0.0:
@@ -492,10 +458,8 @@ def format_stage2_basin_suffix(
 
 
 def format_stage2_iota_suffix(
-    stage2_iota_mode: str = _DEFAULT_STAGE2_IOTA_MODE,
     stage2_iota_target: float | None = None,
     stage2_iota_tolerance: float = _DEFAULT_STAGE2_IOTA_TOLERANCE,
-    stage2_iota_weight: float = _DEFAULT_STAGE2_IOTA_WEIGHT,
     stage2_iota_vol_target: float = _DEFAULT_STAGE2_IOTA_VOL_TARGET,
     stage2_iota_constraint_weight: float = _DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT,
     stage2_iota_num_tf_coils: int = _DEFAULT_STAGE2_IOTA_NUM_TF_COILS,
@@ -504,12 +468,8 @@ def format_stage2_iota_suffix(
     stage2_iota_mpol: int = _DEFAULT_STAGE2_IOTA_MPOL,
     stage2_iota_ntor: int = _DEFAULT_STAGE2_IOTA_NTOR,
 ) -> str:
-    if stage2_iota_mode == _DEFAULT_STAGE2_IOTA_MODE:
-        return ""
     if stage2_iota_target is None:
-        raise ValueError(
-            "stage2_iota_target is required when stage2_iota_mode is enabled."
-        )
+        return ""
     canonical_constraint_weight = canonical_stage2_iota_constraint_weight(
         stage2_iota_constraint_weight
     )
@@ -519,14 +479,11 @@ def format_stage2_iota_suffix(
         else format_compact_float(canonical_constraint_weight)
     )
     suffix = (
-        f"-IM={stage2_iota_mode}"
         f"-ITarget={format_compact_float(stage2_iota_target)}"
         f"-ITol={format_compact_float(stage2_iota_tolerance)}"
         f"-IVol={format_compact_float(stage2_iota_vol_target)}"
         f"-ICW={constraint_weight_label}"
     )
-    if stage2_iota_mode == "soft":
-        suffix += f"-IW={format_compact_float(stage2_iota_weight)}"
     suffix += (
         f"-INTF={int(stage2_iota_num_tf_coils)}"
         f"-INPhi={int(stage2_iota_nphi)}"
@@ -561,10 +518,8 @@ def format_local_stage2_run_dir(
     basin_temperature: float = 1.0,
     basin_niter_success: int = 0,
     basin_seed: int | None = None,
-    stage2_iota_mode: str = _DEFAULT_STAGE2_IOTA_MODE,
     stage2_iota_target: float | None = None,
     stage2_iota_tolerance: float = _DEFAULT_STAGE2_IOTA_TOLERANCE,
-    stage2_iota_weight: float = _DEFAULT_STAGE2_IOTA_WEIGHT,
     stage2_iota_vol_target: float = _DEFAULT_STAGE2_IOTA_VOL_TARGET,
     stage2_iota_constraint_weight: float = _DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT,
     stage2_iota_num_tf_coils: int = _DEFAULT_STAGE2_IOTA_NUM_TF_COILS,
@@ -602,10 +557,8 @@ def format_local_stage2_run_dir(
             basin_seed,
         )
         + format_stage2_iota_suffix(
-            stage2_iota_mode,
             stage2_iota_target,
             stage2_iota_tolerance,
-            stage2_iota_weight,
             stage2_iota_vol_target,
             stage2_iota_constraint_weight,
             stage2_iota_num_tf_coils,
@@ -655,10 +608,8 @@ def local_stage2_bs_path(
     basin_temperature: float = 1.0,
     basin_niter_success: int = 0,
     basin_seed: int | None = None,
-    stage2_iota_mode: str = _DEFAULT_STAGE2_IOTA_MODE,
     stage2_iota_target: float | None = None,
     stage2_iota_tolerance: float = _DEFAULT_STAGE2_IOTA_TOLERANCE,
-    stage2_iota_weight: float = _DEFAULT_STAGE2_IOTA_WEIGHT,
     stage2_iota_vol_target: float = _DEFAULT_STAGE2_IOTA_VOL_TARGET,
     stage2_iota_constraint_weight: float = _DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT,
     stage2_iota_num_tf_coils: int = _DEFAULT_STAGE2_IOTA_NUM_TF_COILS,
@@ -693,10 +644,8 @@ def local_stage2_bs_path(
             basin_temperature=basin_temperature,
             basin_niter_success=basin_niter_success,
             basin_seed=basin_seed,
-            stage2_iota_mode=stage2_iota_mode,
             stage2_iota_target=stage2_iota_target,
             stage2_iota_tolerance=stage2_iota_tolerance,
-            stage2_iota_weight=stage2_iota_weight,
             stage2_iota_vol_target=stage2_iota_vol_target,
             stage2_iota_constraint_weight=stage2_iota_constraint_weight,
             stage2_iota_num_tf_coils=stage2_iota_num_tf_coils,

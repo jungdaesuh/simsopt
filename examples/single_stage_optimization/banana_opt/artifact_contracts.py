@@ -82,10 +82,8 @@ def _upgrade_legacy_bootability_recovery_metadata(upgraded_results: dict) -> Non
 def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
     defaults = {
         "STAGE2_ROOT_FIX_ENABLED": False,
-        "STAGE2_IOTA_MODE": "off",
         "STAGE2_IOTA_TARGET": None,
         "STAGE2_IOTA_TOLERANCE": None,
-        "STAGE2_IOTA_WEIGHT": 1.0,
         "STAGE2_IOTA_VOL_TARGET": 0.10,
         "STAGE2_IOTA_CONSTRAINT_WEIGHT": 1.0,
         "STAGE2_IOTA_NUM_TF_COILS": 20,

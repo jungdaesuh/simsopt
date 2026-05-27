@@ -136,10 +136,8 @@ STAGE2_ARTIFACT_CONFIG_FLAT_FIELD_NAMES = (
     "flip_banana",
     "target_lcfs_max_major_radius_m",
     "target_lcfs_max_minor_radius_m",
-    "stage2_iota_mode",
     "stage2_iota_target",
     "stage2_iota_tolerance",
-    "stage2_iota_weight",
     "stage2_iota_vol_target",
     "stage2_iota_constraint_weight",
     "stage2_iota_num_tf_coils",
@@ -254,10 +252,8 @@ class Stage2FiniteCurrentConfig:
 
 @dataclass(frozen=True, slots=True)
 class Stage2IotaConfig:
-    stage2_iota_mode: str = "off"
     stage2_iota_target: float | None = None
     stage2_iota_tolerance: float = 5.0e-3
-    stage2_iota_weight: float = 1.0
     stage2_iota_vol_target: float = 0.10
     stage2_iota_constraint_weight: float = 1.0
     stage2_iota_num_tf_coils: int = 20
@@ -328,10 +324,8 @@ class Stage2ArtifactConfig:
         flip_banana: bool = False,
         target_lcfs_max_major_radius_m: float = TARGET_LCFS_MAX_MAJOR_RADIUS_M,
         target_lcfs_max_minor_radius_m: float = TARGET_LCFS_MAX_MINOR_RADIUS_M,
-        stage2_iota_mode: str = "off",
         stage2_iota_target: float | None = None,
         stage2_iota_tolerance: float = 5.0e-3,
-        stage2_iota_weight: float = 1.0,
         stage2_iota_vol_target: float = 0.10,
         stage2_iota_constraint_weight: float = 1.0,
         stage2_iota_num_tf_coils: int = 20,
@@ -437,10 +431,8 @@ class Stage2ArtifactConfig:
             self,
             "_iota",
             Stage2IotaConfig(
-                stage2_iota_mode=stage2_iota_mode,
                 stage2_iota_target=stage2_iota_target,
                 stage2_iota_tolerance=stage2_iota_tolerance,
-                stage2_iota_weight=stage2_iota_weight,
                 stage2_iota_vol_target=stage2_iota_vol_target,
                 stage2_iota_constraint_weight=stage2_iota_constraint_weight,
                 stage2_iota_num_tf_coils=stage2_iota_num_tf_coils,
@@ -463,7 +455,6 @@ class Stage2ArtifactConfig:
             }
         )
         validate_stage2_iota_args(
-            stage2_iota_mode=self.stage2_iota_mode,
             stage2_iota_target=self.stage2_iota_target,
             stage2_iota_tolerance=self.stage2_iota_tolerance,
             stage2_iota_vol_target=self.stage2_iota_vol_target,
@@ -472,8 +463,6 @@ class Stage2ArtifactConfig:
             stage2_iota_ntheta=self.stage2_iota_ntheta,
             stage2_iota_mpol=self.stage2_iota_mpol,
             stage2_iota_ntor=self.stage2_iota_ntor,
-            stage2_iota_weight=self.stage2_iota_weight,
-            constraint_method=self.constraint_method,
         )
 
     @property
@@ -657,20 +646,12 @@ class Stage2ArtifactConfig:
         return self._constraint_policy.target_lcfs_max_minor_radius_m
 
     @property
-    def stage2_iota_mode(self) -> str:
-        return self._iota.stage2_iota_mode
-
-    @property
     def stage2_iota_target(self) -> float | None:
         return self._iota.stage2_iota_target
 
     @property
     def stage2_iota_tolerance(self) -> float:
         return self._iota.stage2_iota_tolerance
-
-    @property
-    def stage2_iota_weight(self) -> float:
-        return self._iota.stage2_iota_weight
 
     @property
     def stage2_iota_vol_target(self) -> float:
@@ -859,11 +840,9 @@ def build_stage2_command(
             command.extend(["--basin-seed", str(config.basin_seed)])
     if config.init_only:
         command.append("--init-only")
-    if config.stage2_iota_mode != "off":
+    if config.stage2_iota_target is not None:
         command.extend(
             [
-                "--stage2-iota-mode",
-                config.stage2_iota_mode,
                 "--stage2-iota-target",
                 str(config.stage2_iota_target),
                 "--stage2-iota-tolerance",

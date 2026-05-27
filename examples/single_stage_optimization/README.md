@@ -7,7 +7,6 @@ This directory contains the current banana-coil workflow stack for this reposito
 - wrapper workflows in [run_80ka_baseline_tradeoff_sweep.py](run_80ka_baseline_tradeoff_sweep.py) and [run_finite_current_smoke.py](run_finite_current_smoke.py)
 - generic Stage 2 ALM wrapper in [run_stage2_alm.py](run_stage2_alm.py)
 - unified Stage 2.5 handoff runner in [run_stage2_to_single_stage.py](run_stage2_to_single_stage.py)
-- Stage 2 iota decision-gate benchmark wrapper in [run_stage2_iota_decision_gate.py](run_stage2_iota_decision_gate.py)
 - generic single-stage ALM rerun wrapper in [run_single_stage_thresholded_physics_alm.py](run_single_stage_thresholded_physics_alm.py)
 - explicit target-vs-frontier comparison wrapper in [run_single_stage_goal_mode_comparison.py](run_single_stage_goal_mode_comparison.py)
 - explicit iota-target sweep wrapper in [run_single_stage_iota_target_sweep.py](run_single_stage_iota_target_sweep.py)
@@ -46,28 +45,24 @@ There are several wrapper entrypoints for the general ALM workflow:
    It can load or generate a Stage 2 donor, probe Boozer / iota bootability once per donor, optionally run the bounded recovery stage, and then hand off into the full single-stage workflow.
    Historical `jhalpern30_proxy_field` replay artifacts are the exception: import them with `import_jhalpern30_replay.py`, then run direct single-stage against the imported artifact.
 
-5. `run_stage2_iota_decision_gate.py`
-   This is the late-roadmap benchmark / decision-gate lane.
-   It runs the same canonical Stage 2 configuration across `off` and `report` iota modes, records runtime and bootability / iota metrics, and emits a recommendation about whether Stage 2-native iota work is justified.
-
-6. `run_single_stage_thresholded_physics_alm.py`
+5. `run_single_stage_thresholded_physics_alm.py`
    This is the generic single-stage ALM rerun lane.
    It requires an explicit Stage 2 artifact plus an explicit plasma surface, pins `--constraint-method alm`, `--alm-formulation thresholded_physics`, and warning-mode hardware handling, and validates that the Stage 2 artifact matches the requested plasma surface before launch.
 
-7. `run_single_stage_goal_mode_comparison.py`
+6. `run_single_stage_goal_mode_comparison.py`
    This is the matched target-vs-frontier comparison lane.
    It requires one explicit Stage 2 artifact plus one explicit plasma surface, runs single-stage twice with identical settings except for `--single-stage-goal-mode {target, frontier}`, validates Stage 2 surface identity, and writes one summary JSON with per-mode metrics plus frontier-minus-target deltas.
 
 There are three wrapper entrypoints for the ISHW analysis / slide-deliverable lane:
 
-8. `run_single_stage_iota_target_sweep.py`
+7. `run_single_stage_iota_target_sweep.py`
    This reuses one explicit Stage 2 donor and sweeps single-stage `--iota-target` over a user-provided list.
    It writes a compact summary JSON plus a slide-friendly CSV without aborting the entire sweep when one target fails.
 
-9. `run_banana_current_scan.py`
+8. `run_banana_current_scan.py`
    This reuses one optimized Stage 2 donor, scales the banana-coil current from zero to the donor current, attempts single-stage init-only Boozer startup at each point, and falls back to standalone Poincare artifacts when Boozer startup fails.
 
-10. `plot_ishw_tradeoffs.py`
+9. `plot_ishw_tradeoffs.py`
    This reads the sweep/scan summaries, generates slide-ready figures, and can optionally rerun and copy a reference Poincare directory into one output bundle.
 
 ## Branch Scope
@@ -109,7 +104,6 @@ examples/single_stage_optimization/
 ├── run_finite_current_smoke.py
 ├── run_stage2_alm.py
 ├── run_stage2_to_single_stage.py
-├── run_stage2_iota_decision_gate.py
 ├── run_single_stage_iota_target_sweep.py
 ├── run_banana_current_scan.py
 ├── plot_ishw_tradeoffs.py
@@ -198,9 +192,13 @@ Useful notes:
 - `--stage2-spec-json` is the fully explicit path for non-profile Stage 2 contracts
 - `--dry-run` prints and records the resolved config and exact Stage 2 command without launching it
 - dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real solver artifact root
-- `--stage2-iota-mode` is deprecated as a production-control signal. Treat `STAGE2_IOTA_MODE` as provenance metadata only, not as handoff evidence. Production handoff must use measured `BOOZER_*`, `IOTA_*`, `VOLUME_*`, hardware, optimizer, and WOUT-convention facts.
-- `--stage2-iota-mode report --stage2-iota-target ...` is the intended post-gate Boozer/iota probe for a generated Stage 2 artifact; it records `BOOZER_BOOTABLE`, `IOTA_FEASIBLE`, `STAGE2_ROOT_FIX_ENABLED`, and `STAGE2_IOTA_*` metadata in `results.json`
-- `off` and `report` are the only production Stage 2 iota metadata modes; the former `soft`, `alm`, and `alm-floor` hot-loop modes are retired
+- Stage 2 has no user-facing iota mode selector. Passing `--stage2-iota-target ...`
+  requests the optional post-gate Boozer/iota probe for a generated Stage 2
+  artifact; omitting it keeps Stage 2 geometry-only.
+- The optional probe records measured `BOOZER_*`, `IOTA_*`,
+  `STAGE2_ROOT_FIX_ENABLED`, and `STAGE2_IOTA_*` metadata in `results.json`.
+  Production handoff must use these measured facts plus volume, hardware,
+  optimizer, and WOUT-convention facts.
 
 ### Unified Stage-2-To-Single-Stage Handoff
 
@@ -245,28 +243,6 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
 ```
 
 The imported sibling `results.json` carries `FINITE_CURRENT_MODE=jhalpern30_proxy_field`, `COIL_GROUPS`, the 51-coil layout metadata, signed-G policy metadata, Boozer finite-current `I`, and the historical flip/banana-current replay fields consumed by direct single-stage replay.
-
-### Stage 2 Iota Decision Gate
-
-Use this when you want a reproducible benchmark for the later Track B decision gate:
-
-- runs one canonical Stage 2 configuration across a list of `--benchmark-modes`
-- records wallclock, hardware feasibility, bootability, and Stage 2 iota metrics per mode
-- computes runtime multipliers versus a baseline mode and emits a recommendation about whether to keep pushing Stage 2-native iota work
-
-```bash
-cd /path/to/simsopt-surrogate
-python examples/single_stage_optimization/run_stage2_iota_decision_gate.py \
-  --plasma-surf-filename wout_nfp10ginsburg_desc_s024match_iota20.nc \
-  --profile standard_80ka \
-  --stage2-iota-target 0.20
-```
-
-Useful notes:
-
-- default benchmark modes are `off,report`
-- `--baseline-mode report` uses the reporting probe as the runtime and iota-error baseline
-- the summary CSV is designed for direct spreadsheet / slide-table use when discussing runtime multipliers and iota improvement
 
 ### Single-Stage Thresholded-Physics ALM Rerun
 
@@ -424,8 +400,8 @@ Key Stage 2 controls:
   `--maxiter`, `--ftol`, `--gtol`
 - ALM path:
   `--constraint-method alm`, `--alm-max-outer-iters`, `--alm-penalty-init`, `--alm-penalty-scale`, `--alm-feas-tol`, `--alm-stationarity-tol`, `--alm-trust-radius-*`, `--alm-max-inner-attempts`, `--alm-max-subproblem-continuations`, `--alm-distance-smoothing`, `--alm-curvature-smoothing`, `--alm-taylor-test`
-- deprecated iota-mode metadata / post-gate probe:
-  `--stage2-iota-mode report`, `--stage2-iota-target`, `--stage2-iota-tolerance`, `--stage2-iota-vol-target`, `--stage2-iota-constraint-weight` (negative selects exact Boozer Newton mode), `--stage2-iota-num-tf-coils`, `--stage2-iota-nphi`, `--stage2-iota-ntheta`, `--stage2-iota-mpol`, `--stage2-iota-ntor`
+- optional post-gate Boozer/iota probe:
+  `--stage2-iota-target`, `--stage2-iota-tolerance`, `--stage2-iota-vol-target`, `--stage2-iota-constraint-weight` (negative selects exact Boozer Newton mode), `--stage2-iota-num-tf-coils`, `--stage2-iota-nphi`, `--stage2-iota-ntheta`, `--stage2-iota-mpol`, `--stage2-iota-ntor`
 - basin-hopping path:
   `--basin-hops`, `--basin-stepsize`, `--basin-temperature`, `--basin-niter-success`, `--basin-seed`
 

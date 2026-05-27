@@ -152,7 +152,6 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "BOOTABILITY_ABS_IOTA_ERROR": 0.0,
         "BOOTABILITY_ERROR_TYPE": None,
         "BOOTABILITY_ERROR_MESSAGE": None,
-        "STAGE2_IOTA_MODE": "report",
         "BOOZER_SOLVE_SUCCESS": True,
         "BOOZER_SELF_INTERSECTING": False,
         "BOOZER_CONSTRAINED_RESIDUAL_NORM": 1.0e-14,
@@ -378,19 +377,14 @@ class HandoffSchemaTests(unittest.TestCase):
                 vf_current_A=5.0e2,
             )
 
-    def test_validate_stage2_seed_bootability_contract_accepts_fact_based_report(self):
+    def test_validate_stage2_seed_bootability_contract_accepts_fact_based_handoff(self):
         module = load_handoff_module()
         payload = {
             **_valid_stage2_contract_fields(),
-            "STAGE2_IOTA_MODE": "report",
             "BOOZER_TRUSTED": True,
         }
 
         module.validate_stage2_seed_bootability_contract(payload)
-
-        legacy_mode_payload = dict(payload)
-        legacy_mode_payload["STAGE2_IOTA_MODE"] = "alm"
-        module.validate_stage2_seed_bootability_contract(legacy_mode_payload)
 
         off_target_payload = dict(payload)
         off_target_payload["IOTA_NEAR_TARGET"] = False
@@ -2510,7 +2504,6 @@ class Stage2SolverIotaReportTests(unittest.TestCase):
             self_intersecting=False,
         )
         args = SimpleNamespace(
-            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_tolerance=5.0e-3,
             stage2_iota_constraint_weight=1.0,
@@ -2659,7 +2652,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             "/tmp/stage2/surf_opt_boozer_surface.json",
         )
 
-    def test_generated_stage2_disables_iota_for_coil_seed_handoff(self):
+    def test_generated_stage2_stays_geometry_only_for_coil_seed_handoff(self):
         wrapper = load_wrapper_module()
 
         args = wrapper.parse_args(
@@ -2678,9 +2671,7 @@ class UnifiedRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(stage2_args.constraint_method, "alm")
-        self.assertEqual(stage2_args.stage2_iota_mode, "off")
-        self.assertAlmostEqual(stage2_args.stage2_iota_target, 0.2)
-        self.assertAlmostEqual(stage2_args.stage2_iota_vol_target, 0.13)
+        self.assertIsNone(stage2_args.stage2_iota_target)
 
     def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_generated_stage2(self):
         wrapper = load_wrapper_module()
@@ -2720,7 +2711,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing WOUT_OFF_SPEC"):
                 wrapper.stage2_production_handoff_payload(
                     bootability_status,
-                    source_stage2_results={"STAGE2_IOTA_MODE": "alm"},
+                    source_stage2_results={},
                     original_stage2_bs_path=root / "biot_savart_opt.json",
                     original_stage2_results_path=root / "results.json",
                     recovery_attempted=False,
@@ -2754,7 +2745,6 @@ class UnifiedRunnerTests(unittest.TestCase):
                     results_path,
                     bootability_status,
                     source_stage2_results={
-                        "STAGE2_IOTA_MODE": "alm",
                         "WOUT_OFF_SPEC": True,
                     },
                     original_stage2_bs_path=root / "biot_savart_opt.json",
@@ -3293,7 +3283,6 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
                 "FINITE_CURRENT_MODE": "wataru_proxy_field",
-                "STAGE2_IOTA_MODE": "off",
             }
 
             def fake_run_command(command, *, timeout_seconds, dry_run):
@@ -3315,7 +3304,6 @@ class UnifiedRunnerTests(unittest.TestCase):
                     repaired_results_path,
                     {
                         **original_stage2_results,
-                        "STAGE2_IOTA_MODE": "off",
                         "iterations": 5,
                     },
                 )
@@ -3395,7 +3383,6 @@ class UnifiedRunnerTests(unittest.TestCase):
             self.assertEqual(payload["recovered_bs_path"], str(repaired_bs_path))
             self.assertIsNone(payload["warm_start_surface_stem"])
             self.assertEqual(payload["results"]["SEED_ROLE"], "coil_seed_handoff")
-            self.assertEqual(payload["results"]["STAGE2_IOTA_MODE"], "off")
             self.assertFalse(payload["results"]["WOUT_OFF_SPEC"])
             self.assertFalse(payload["results"]["DIAGNOSTIC_ONLY"])
             self.assertTrue(payload["results"]["PRODUCTION_HANDOFF_READY"])

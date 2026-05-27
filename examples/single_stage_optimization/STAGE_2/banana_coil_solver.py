@@ -41,8 +41,6 @@ from workflow_helpers import (
     canonical_stage2_iota_constraint_weight,
     format_local_stage2_run_dir,
     resolve_finite_current_vf_template_path,
-    stage2_iota_mode_deprecated_hot_loop_coupled,
-    stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint,
     validate_stage2_iota_args,
     validate_normalized_toroidal_flux,
 )
@@ -161,7 +159,6 @@ from banana_opt.wout_convention import wout_convention_artifact_fields
 from topology_scorer import padded_bounds
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
-    build_stage2_iota_runtime,
     build_stage2_results as _build_stage2_results_impl,
     evaluate_stage2_alm_problem as _evaluate_stage2_alm_problem,
     evaluate_stage2_hardware_constraints as _evaluate_stage2_hardware_constraints,
@@ -184,11 +181,7 @@ from banana_opt.self_intersect import CurveSelfIntersect
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
-# Deprecated as a production-control selector. Preserve this CLI/artifact field
-# for provenance only; objective-coupled iota must be represented separately.
-DEFAULT_STAGE2_IOTA_MODE = "off"
 DEFAULT_STAGE2_IOTA_TOLERANCE = 5.0e-3
-DEFAULT_STAGE2_IOTA_WEIGHT = 1.0
 DEFAULT_STAGE2_IOTA_VOL_TARGET = 0.10
 DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT = 1.0
 DEFAULT_STAGE2_IOTA_NUM_TF_COILS = 20
@@ -365,7 +358,6 @@ def stage2_current_contract_allows_offspec(args) -> bool:
 
 def validate_stage2_iota_cli_args(args) -> None:
     validate_stage2_iota_args(
-        stage2_iota_mode=args.stage2_iota_mode,
         stage2_iota_target=args.stage2_iota_target,
         stage2_iota_tolerance=args.stage2_iota_tolerance,
         stage2_iota_vol_target=args.stage2_iota_vol_target,
@@ -374,8 +366,6 @@ def validate_stage2_iota_cli_args(args) -> None:
         stage2_iota_ntheta=args.stage2_iota_ntheta,
         stage2_iota_mpol=args.stage2_iota_mpol,
         stage2_iota_ntor=args.stage2_iota_ntor,
-        stage2_iota_weight=args.stage2_iota_weight,
-        constraint_method=args.constraint_method,
     )
 
 
@@ -832,16 +822,6 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--stage2-iota-mode",
-        choices=["off", "report"],
-        default=os.environ.get("STAGE2_IOTA_MODE", DEFAULT_STAGE2_IOTA_MODE),
-        help=(
-            "Deprecated Stage 2 iota metadata mode. 'report' records only a "
-            "post-optimization Boozer/iota probe; iota hot-loop objective modes "
-            "are not part of production Stage 2."
-        ),
-    )
-    parser.add_argument(
         "--stage2-iota-target",
         type=float,
         default=(
@@ -861,20 +841,6 @@ def parse_args():
             )
         ),
         help="Absolute |iota_solved - iota_target| tolerance for the Stage 2 iota path.",
-    )
-    parser.add_argument(
-        "--stage2-iota-weight",
-        type=float,
-        default=float(
-            os.environ.get(
-                "STAGE2_IOTA_WEIGHT",
-                str(DEFAULT_STAGE2_IOTA_WEIGHT),
-            )
-        ),
-        help=(
-            "Deprecated hot-loop Jiota weight retained for artifact metadata; "
-            "ignored by production off/report modes."
-        ),
     )
     parser.add_argument(
         "--stage2-iota-vol-target",
@@ -1348,9 +1314,6 @@ def build_stage2_iota_hot_loop_payload(
     args,
     stage2_iota_runtime,
 ):
-    iota_objective_coupled = stage2_iota_mode_deprecated_hot_loop_coupled(
-        getattr(args, "stage2_iota_mode", DEFAULT_STAGE2_IOTA_MODE)
-    )
     constraint_weight = canonical_stage2_iota_constraint_weight(
         getattr(
             args,
@@ -1359,9 +1322,6 @@ def build_stage2_iota_hot_loop_payload(
         )
     )
     payload = {
-        "STAGE2_IOTA_WEIGHT": float(
-            getattr(args, "stage2_iota_weight", DEFAULT_STAGE2_IOTA_WEIGHT)
-        ),
         "STAGE2_IOTA_EFFECTIVE_WEIGHT": None,
         "STAGE2_IOTA_VOL_TARGET": float(
             getattr(args, "stage2_iota_vol_target", DEFAULT_STAGE2_IOTA_VOL_TARGET)
@@ -1382,10 +1342,8 @@ def build_stage2_iota_hot_loop_payload(
         "STAGE2_IOTA_NTOR": int(
             getattr(args, "stage2_iota_ntor", DEFAULT_STAGE2_IOTA_NTOR)
         ),
-        "STAGE2_IOTA_OBJECTIVE_COUPLED": iota_objective_coupled,
-        "STAGE2_IOTA_HOT_LOOP_ENABLED": (
-            stage2_iota_runtime is not None and iota_objective_coupled
-        ),
+        "STAGE2_IOTA_OBJECTIVE_COUPLED": False,
+        "STAGE2_IOTA_HOT_LOOP_ENABLED": False,
         "STAGE2_IOTA_BOOTSTRAP_SECONDS": None,
         "STAGE2_IOTA_RUNTIME_SECONDS": None,
         "STAGE2_IOTA_RUNTIME_CALLS": None,
@@ -1402,8 +1360,8 @@ def build_stage2_iota_hot_loop_payload(
         "STAGE2_IOTA_FEASIBLE": None,
         "STAGE2_IOTA_PENALTY_THRESHOLD": None,
         # Phase 1 Boozer residual trust gate (Stage 2 / single-stage handoff
-        # plan). Always emitted so the artifact contract is identical across
-        # the off / soft / probe lanes.
+        # plan). Always emitted so the artifact contract is identical whether
+        # the optional post-run iota probe is requested or skipped.
         "BOOZER_SOLVE_SUCCESS": None,
         "BOOZER_SELF_INTERSECTING": None,
         "BOOZER_CONSTRAINED_RESIDUAL_NORM": None,
@@ -1427,7 +1385,7 @@ def build_stage2_iota_hot_loop_payload(
         "S_HEL_OBJECTIVE_WEIGHT": None,
         "PRE_BOOZER_TOPOLOGY_SCORE": None,
     }
-    if stage2_iota_runtime is None or not iota_objective_coupled:
+    if stage2_iota_runtime is None:
         return payload
 
     final_state = stage2_iota_runtime.last_state
@@ -1576,7 +1534,7 @@ def build_stage2_iota_report_payload(
     stage2_iota_runtime=None,
     stage2_seed_surf_path=None,
 ):
-    probe_enabled = args.stage2_iota_mode != DEFAULT_STAGE2_IOTA_MODE
+    probe_enabled = args.stage2_iota_target is not None
     stage2_results_path = build_stage2_results_sidecar_path(stage2_bs_artifact_path)
     recorded_stage2_seed_path = stage2_results_payload.get(
         "STAGE2_BS_PATH",
@@ -1587,7 +1545,6 @@ def build_stage2_iota_report_payload(
     )
     payload = {
         "STAGE2_ROOT_FIX_ENABLED": probe_enabled,
-        "STAGE2_IOTA_MODE": args.stage2_iota_mode,
         "STAGE2_IOTA_TARGET": (
             None
             if args.stage2_iota_target is None
@@ -2653,43 +2610,7 @@ def main(parsed_args=None):
         f"(min={BANANA_SELF_INTERSECT_MIN_DISTANCE_M:.4f})"
     )
     stage2_iota_runtime = None
-    deprecated_iota_alm_hot_loop = (
-        stage2_iota_mode_uses_deprecated_alm_hot_loop_constraint(
-            args.stage2_iota_mode
-        )
-    )
-    if stage2_iota_mode_deprecated_hot_loop_coupled(args.stage2_iota_mode):
-        stage2_iota_runtime = build_stage2_iota_runtime(
-            equilibrium_file=file_loc,
-            bs=new_bs,
-            tf_coils=new_tf_coils,
-            major_radius=float(new_surf.major_radius()),
-            toroidal_flux=s,
-            nphi=args.stage2_iota_nphi,
-            ntheta=args.stage2_iota_ntheta,
-            mpol=args.stage2_iota_mpol,
-            ntor=args.stage2_iota_ntor,
-            vol_target=args.stage2_iota_vol_target,
-            iota_target=float(args.stage2_iota_target),
-            iota_tolerance=args.stage2_iota_tolerance,
-            constraint_weight=resolve_stage2_iota_constraint_weight(
-                args.stage2_iota_constraint_weight
-            ),
-            num_tf_coils=args.stage2_iota_num_tf_coils,
-            mode=args.stage2_iota_mode,
-            weight=args.stage2_iota_weight,
-            boozer_I=physical_current_to_boozer_I(
-                proxy_plasma_current_A,
-                convention=boozer_current_convention,
-            ),
-            stage2_seed_surf_path=args.stage2_seed_surf_path,
-        )
-        print(
-            "Initialized Stage 2 iota hot loop "
-            f"mode={args.stage2_iota_mode}, "
-            f"iota={stage2_iota_runtime.initial_state.iota:.4f}, "
-            f"Jiota={stage2_iota_runtime.initial_state.penalty:.2e}"
-        )
+    deprecated_iota_alm_hot_loop = False
 
     # TOTAL OBJECTIVE FUNCTION -
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
@@ -2775,10 +2696,8 @@ def main(parsed_args=None):
             basin_temperature=args.basin_temperature,
             basin_niter_success=args.basin_niter_success,
             basin_seed=rng_seed,
-            stage2_iota_mode=args.stage2_iota_mode,
             stage2_iota_target=args.stage2_iota_target,
             stage2_iota_tolerance=args.stage2_iota_tolerance,
-            stage2_iota_weight=args.stage2_iota_weight,
             stage2_iota_vol_target=args.stage2_iota_vol_target,
             stage2_iota_constraint_weight=args.stage2_iota_constraint_weight,
             stage2_iota_num_tf_coils=args.stage2_iota_num_tf_coils,

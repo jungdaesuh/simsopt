@@ -1426,7 +1426,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
         self.assertFalse(state["stage2_iota_solve_failed"])
         self.assertGreaterEqual(field.clear_count, 1)
 
-    def test_build_stage2_command_forwards_stage2_iota_report_flags(self):
+    def test_build_stage2_command_forwards_target_driven_stage2_iota_probe_flags(self):
         module = load_workflow_common_module()
 
         config = module.Stage2ArtifactConfig(
@@ -1449,10 +1449,8 @@ class Stage2IotaReportingTests(unittest.TestCase):
             alm_penalty_scale=10.0,
             basin_hops=0,
             basin_stepsize=0.01,
-            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_tolerance=1.0e-2,
-            stage2_iota_weight=3.0,
             stage2_iota_vol_target=0.12,
             stage2_iota_constraint_weight=-1.0,
             stage2_iota_num_tf_coils=20,
@@ -1465,10 +1463,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
         command = module.build_stage2_command(config, python_executable="python")
 
         self.assertEqual(
-            command[command.index("--stage2-iota-mode") + 1],
-            "report",
-        )
-        self.assertEqual(
             command[command.index("--stage2-iota-target") + 1],
             "0.2",
         )
@@ -1476,7 +1470,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
             command[command.index("--stage2-iota-tolerance") + 1],
             "0.01",
         )
-        self.assertNotIn("--stage2-iota-weight", command)
         self.assertEqual(
             command[command.index("--stage2-iota-vol-target") + 1],
             "0.12",
@@ -1485,68 +1478,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
             command[command.index("--stage2-iota-constraint-weight") + 1],
             "-1.0",
         )
-
-    def test_stage2_artifact_config_rejects_iota_alm_without_alm_constraint_method(self):
-        module = load_workflow_common_module()
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "--stage2-iota-mode only supports 'off' or post-gate 'report'",
-        ):
-            module.Stage2ArtifactConfig(
-                plasma_surf_filename="demo.nc",
-                output_root=Path("/tmp/stage2"),
-                equilibria_dir=None,
-                tf_current_A=-8.0e4,
-                major_radius=0.976,
-                toroidal_flux=0.24,
-                length_weight=0.0005,
-                cc_weight=100.0,
-                cc_threshold=0.05,
-                curvature_weight=0.0001,
-                curvature_threshold=100.0,
-                banana_surf_radius=canonical_banana_radius_m(),
-                order=2,
-                constraint_method="penalty",
-                alm_max_outer_iters=10,
-                alm_penalty_init=1.0,
-                alm_penalty_scale=10.0,
-                basin_hops=0,
-                basin_stepsize=0.01,
-                stage2_iota_mode="alm",
-                stage2_iota_target=0.2,
-            )
-
-    def test_stage2_artifact_config_rejects_iota_soft_with_alm_constraint_method(self):
-        module = load_workflow_common_module()
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "--stage2-iota-mode only supports 'off' or post-gate 'report'",
-        ):
-            module.Stage2ArtifactConfig(
-                plasma_surf_filename="demo.nc",
-                output_root=Path("/tmp/stage2"),
-                equilibria_dir=None,
-                tf_current_A=-8.0e4,
-                major_radius=0.976,
-                toroidal_flux=0.24,
-                length_weight=0.0005,
-                cc_weight=100.0,
-                cc_threshold=0.05,
-                curvature_weight=0.0001,
-                curvature_threshold=100.0,
-                banana_surf_radius=canonical_banana_radius_m(),
-                order=2,
-                constraint_method="alm",
-                alm_max_outer_iters=10,
-                alm_penalty_init=1.0,
-                alm_penalty_scale=10.0,
-                basin_hops=0,
-                basin_stepsize=0.01,
-                stage2_iota_mode="soft",
-                stage2_iota_target=0.2,
-            )
 
     def test_run_stage2_alm_expected_metadata_canonicalizes_exact_constraint_weight(self):
         module = load_module(EXAMPLE_ROOT / "run_stage2_alm.py", "run_stage2_alm")
@@ -1571,7 +1502,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
             alm_penalty_scale=10.0,
             basin_hops=0,
             basin_stepsize=0.01,
-            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_constraint_weight=0.0,
         )
@@ -1580,12 +1510,12 @@ class Stage2IotaReportingTests(unittest.TestCase):
 
         self.assertIsNone(expected_metadata["STAGE2_IOTA_CONSTRAINT_WEIGHT"])
 
-    def test_run_stage2_alm_rejects_enabled_iota_mode_without_target_before_launch(self):
+    def test_run_stage2_alm_rejects_invalid_targeted_iota_tolerance_before_launch(self):
         module = load_module(EXAMPLE_ROOT / "run_stage2_alm.py", "run_stage2_alm")
 
         with self.assertRaisesRegex(
             ValueError,
-            "--stage2-iota-target is required when --stage2-iota-mode is enabled.",
+            "--stage2-iota-tolerance must be positive",
         ):
             module.main(
                 [
@@ -1593,8 +1523,10 @@ class Stage2IotaReportingTests(unittest.TestCase):
                     "demo.nc",
                     "--profile",
                     "standard_80ka",
-                    "--stage2-iota-mode",
-                    "report",
+                    "--stage2-iota-target",
+                    "0.2",
+                    "--stage2-iota-tolerance",
+                    "0",
                 ]
             )
 
@@ -1602,7 +1534,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
         module = load_stage2_module()
 
         args = SimpleNamespace(
-            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_tolerance=5.0e-3,
             equilibria_dir="/tmp/equilibria",
@@ -1641,7 +1572,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
             )
 
         self.assertTrue(payload["STAGE2_ROOT_FIX_ENABLED"])
-        self.assertEqual(payload["STAGE2_IOTA_MODE"], "report")
         self.assertTrue(payload["BOOZER_BOOTABLE"])
         self.assertTrue(payload["IOTA_NEAR_TARGET"])
         self.assertTrue(payload["IOTA_FEASIBLE"])
@@ -1660,7 +1590,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
         module = load_stage2_module()
 
         args = SimpleNamespace(
-            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_tolerance=5.0e-3,
             equilibria_dir="/tmp/equilibria",
@@ -1705,10 +1634,8 @@ class Stage2IotaReportingTests(unittest.TestCase):
         module = load_stage2_module()
 
         args = SimpleNamespace(
-            stage2_iota_mode="report",
             stage2_iota_target=0.2,
             stage2_iota_tolerance=5.0e-3,
-            stage2_iota_weight=1.0,
             equilibria_dir="/tmp/equilibria",
             equilibrium_path=None,
             stage2_iota_num_tf_coils=20,
@@ -1723,24 +1650,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
             accept_offspec_tf_current_magnitude=False,
             accept_offspec_banana_current_max=False,
         )
-        runtime = SimpleNamespace(
-            stats=SimpleNamespace(
-                bootstrap_seconds=0.25,
-                runtime_seconds=1.5,
-                runtime_calls=7,
-            ),
-            initial_state=SimpleNamespace(iota=0.18, penalty=0.03),
-            last_state=SimpleNamespace(
-                iota=0.201,
-                penalty=0.0,
-                abs_error=1.0e-3,
-                feasible=True,
-                solve_failed=False,
-            ),
-            penalty_threshold=5.0e-3,
-            effective_weight=2.5,
-        )
-
         with patch.object(
             module,
             "probe_stage2_seed_bootability",
@@ -1763,7 +1672,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 args=args,
                 stage2_bs_artifact_path="/tmp/stage2/biot_savart_opt.json",
                 stage2_results_payload={},
-                stage2_iota_runtime=runtime,
             )
 
         self.assertFalse(payload["STAGE2_IOTA_OBJECTIVE_COUPLED"])
@@ -1780,8 +1688,6 @@ class Stage2IotaReportingTests(unittest.TestCase):
         module = load_stage2_module()
 
         args = SimpleNamespace(
-            stage2_iota_mode="alm",
-            stage2_iota_weight=1.0,
             stage2_iota_vol_target=0.1,
             stage2_iota_constraint_weight=1.0,
             stage2_iota_num_tf_coils=20,
@@ -1813,8 +1719,8 @@ class Stage2IotaReportingTests(unittest.TestCase):
             stage2_iota_runtime=runtime,
         )
 
-        self.assertTrue(payload["STAGE2_IOTA_OBJECTIVE_COUPLED"])
-        self.assertTrue(payload["STAGE2_IOTA_HOT_LOOP_ENABLED"])
+        self.assertFalse(payload["STAGE2_IOTA_OBJECTIVE_COUPLED"])
+        self.assertFalse(payload["STAGE2_IOTA_HOT_LOOP_ENABLED"])
         self.assertEqual(payload["STAGE2_IOTA_INITIAL"], 0.18)
         self.assertEqual(payload["STAGE2_IOTA_INITIAL_PENALTY"], 0.03)
         self.assertEqual(payload["STAGE2_IOTA_EFFECTIVE_WEIGHT"], 2.5)
