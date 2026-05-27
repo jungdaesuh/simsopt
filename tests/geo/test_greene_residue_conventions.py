@@ -53,14 +53,28 @@ from examples.single_stage_optimization.banana_opt.topology.residue_diagnostics 
     radial_multistart_initial_guesses,
     run_residue_probe,
 )
+from examples.single_stage_optimization.banana_opt.topology.residue_objective import (
+    DEFAULT_RESIDUE_OBJECTIVE_WEIGHT,
+    BiotSavartGreeneResidueObjective,
+    ResidueBranchSeed,
+    residue_branch_seed_from_payload,
+    residue_objective_target_manifest_id,
+)
 from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity import (
     BIOT_SAVART_BRANCH_RESOLVED_FD_MODE,
     BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE,
+    BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE,
+    BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_SATISFIED_FROZEN,
+    BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE,
+    BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
     BRANCH_RESOLVED_FD_MODE,
+    DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
     FROZEN_ORBIT_FD_MODE,
     biot_savart_b_and_dB_vjp_dot_test,
     branch_resolved_biot_savart_residue_central_difference,
     branch_resolved_biot_savart_residue_taylor_diagnostic,
+    branch_resolved_biot_savart_residue_vjp,
+    branch_resolved_biot_savart_residue_vjp_taylor_diagnostic,
     branch_resolved_residue_central_difference,
     frozen_orbit_residue_central_difference,
 )
@@ -253,8 +267,8 @@ def _make_toroidal_field_biot_savart(num_coils: int = 8) -> BiotSavart:
     )
 
 
-def _unit_biot_savart_direction(field: BiotSavart) -> np.ndarray:
-    rng = np.random.default_rng(4)
+def _unit_biot_savart_direction(field: BiotSavart, *, seed: int = 4) -> np.ndarray:
+    rng = np.random.default_rng(seed)
     direction = rng.normal(size=np.asarray(field.x, dtype=float).shape)
     return direction / np.linalg.norm(direction)
 
@@ -302,6 +316,46 @@ def _biot_savart_residue_gate_inputs():
         PoincareChart(axis_r=1.0, axis_z=0.0),
         integrator_options,
         solver_options,
+    )
+
+
+def _biot_savart_residue_objective_inputs():
+    field, _target, chart, integrator_options, _solver_options = (
+        _biot_savart_residue_gate_inputs()
+    )
+    original_x = np.asarray(field.x, dtype=float).copy()
+    direction = _unit_biot_savart_direction(field, seed=2)
+    target = RationalTarget(
+        p=0,
+        q=1,
+        radial_label=0.126,
+        radial_window=(0.10, 0.16),
+        branches=(GREENE_BRANCH_O,),
+        weight=1.7,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-10,
+        winding_tolerance=1.0e-4,
+        max_iterations=20,
+        max_step_norm=0.02,
+    )
+    validation_id = "pytest-residue-objective"
+    seed = ResidueBranchSeed(
+        target_id=target.manifest_key(),
+        branch=GREENE_BRANCH_O,
+        section_state=(1.1, 0.05),
+        validation_id=validation_id,
+    )
+    return (
+        field,
+        target,
+        chart,
+        integrator_options,
+        solver_options,
+        seed,
+        validation_id,
+        original_x,
+        direction,
     )
 
 
@@ -1091,6 +1145,292 @@ def test_biot_savart_branch_residue_directional_taylor_gate_serializes_real_coil
     assert len(payload["samples"]) == 3
     assert len(payload["observed_orders"]) == 2
     np.testing.assert_allclose(field.x, original_x)
+
+
+def test_biot_savart_residue_vjp_freezes_near_success_branch():
+    field, _target, chart, integrator_options, _solver_options = (
+        _biot_savart_residue_gate_inputs()
+    )
+    target = RationalTarget(
+        p=0,
+        q=1,
+        radial_label=0.04,
+        radial_window=(0.03, 0.2),
+        branches=(GREENE_BRANCH_O,),
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-8,
+        winding_tolerance=1.0e-4,
+        max_iterations=20,
+        max_step_norm=0.02,
+    )
+
+    diagnostic = branch_resolved_biot_savart_residue_vjp(
+        field,
+        (1.1, 0.05),
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert diagnostic.mode == BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE
+    assert (
+        diagnostic.gradient_status
+        == BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_SATISFIED_FROZEN
+    )
+    assert abs(diagnostic.residue) < DEFAULT_RESIDUE_SATISFIED_THRESHOLD
+    assert diagnostic.gradient_norm == pytest.approx(0.0)
+    np.testing.assert_allclose(diagnostic.gradient, np.zeros_like(field.x))
+    np.testing.assert_allclose(diagnostic.derivative(field), np.zeros_like(field.x))
+
+
+def test_biot_savart_residue_vjp_taylor_gate_is_second_order():
+    field, _target, chart, integrator_options, _solver_options = (
+        _biot_savart_residue_gate_inputs()
+    )
+    original_x = np.asarray(field.x, dtype=float).copy()
+    direction = _unit_biot_savart_direction(field, seed=2)
+    field.x = original_x + 1.0e-3 * direction
+    target = RationalTarget(
+        p=0,
+        q=1,
+        radial_label=0.126,
+        radial_window=(0.10, 0.16),
+        branches=(GREENE_BRANCH_O,),
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-10,
+        winding_tolerance=1.0e-4,
+        max_iterations=20,
+        max_step_norm=0.02,
+    )
+
+    taylor = branch_resolved_biot_savart_residue_vjp_taylor_diagnostic(
+        field,
+        (1.1, 0.05),
+        direction=direction,
+        probe_steps=(1.0e-5, 5.0e-6, 2.5e-6),
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+    gradient_field, _target, gradient_chart, gradient_integrator_options, _solver = (
+        _biot_savart_residue_gate_inputs()
+    )
+    gradient_field.x = original_x + 1.0e-3 * direction
+    gradient_diagnostic = branch_resolved_biot_savart_residue_vjp(
+        gradient_field,
+        (1.1, 0.05),
+        target=target,
+        chart=gradient_chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=gradient_integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert gradient_diagnostic.mode == BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE
+    assert (
+        gradient_diagnostic.gradient_status
+        == BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE
+    )
+    assert gradient_diagnostic.cotangent_point_count > 0
+    assert gradient_diagnostic.gradient_norm > 0.0
+    assert taylor.mode == BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE
+    assert taylor.base_status == BRANCH_STATUS_CONVERGED
+    assert min(taylor.observed_orders) > 1.95
+    for sample in taylor.samples:
+        assert sample.status == BRANCH_STATUS_CONVERGED
+    np.testing.assert_allclose(field.x, original_x + 1.0e-3 * direction)
+    np.testing.assert_allclose(gradient_field.x, original_x + 1.0e-3 * direction)
+
+
+def test_biot_savart_greene_residue_objective_is_disabled_by_default():
+    (
+        field,
+        target,
+        chart,
+        integrator_options,
+        solver_options,
+        _seed,
+        _validation_id,
+        _original_x,
+        _direction,
+    ) = _biot_savart_residue_objective_inputs()
+
+    objective = BiotSavartGreeneResidueObjective(
+        field,
+        targets=(target,),
+        chart=chart,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+    payload = objective.to_json_dict()
+
+    assert objective.objective_weight == pytest.approx(DEFAULT_RESIDUE_OBJECTIVE_WEIGHT)
+    assert objective.J() == pytest.approx(0.0)
+    np.testing.assert_allclose(objective.dJ(), np.zeros_like(field.x))
+    assert objective.branch_values() == ()
+    assert objective.gradient_diagnostics() == ()
+    assert payload["enabled"] is False
+    assert payload["target_manifest_id"] == residue_objective_target_manifest_id(
+        (target,)
+    )
+    assert payload["value"] == pytest.approx(0.0)
+    assert payload["branches"] == []
+
+
+def test_biot_savart_greene_residue_objective_requires_validated_manifest():
+    (
+        field,
+        target,
+        chart,
+        integrator_options,
+        solver_options,
+        seed,
+        validation_id,
+        _original_x,
+        _direction,
+    ) = _biot_savart_residue_objective_inputs()
+    target_manifest_id = residue_objective_target_manifest_id((target,))
+    payload_seed = residue_branch_seed_from_payload(
+        {
+            "target_id": target.manifest_key(),
+            "branch": GREENE_BRANCH_O,
+            "section_state": (1.1, 0.05),
+        },
+        validation_id=validation_id,
+    )
+
+    assert payload_seed == seed
+    with pytest.raises(ValueError, match="validation_id"):
+        BiotSavartGreeneResidueObjective(
+            field,
+            targets=(target,),
+            chart=chart,
+            branch_seeds=(seed,),
+            objective_weight=1.0,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+    with pytest.raises(ValueError, match="Missing Greene residue objective branch"):
+        BiotSavartGreeneResidueObjective(
+            field,
+            targets=(target,),
+            chart=chart,
+            branch_seeds=(),
+            validation_id=validation_id,
+            objective_weight=1.0,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+    with pytest.raises(ValueError, match="target_manifest_id"):
+        BiotSavartGreeneResidueObjective(
+            field,
+            targets=(target,),
+            chart=chart,
+            branch_seeds=(seed,),
+            validation_id=validation_id,
+            target_manifest_id=target_manifest_id + "-stale",
+            objective_weight=1.0,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+    with pytest.raises(ValueError, match="validation_id does not match"):
+        BiotSavartGreeneResidueObjective(
+            field,
+            targets=(target,),
+            chart=chart,
+            branch_seeds=(
+                ResidueBranchSeed(
+                    target_id=target.manifest_key(),
+                    branch=GREENE_BRANCH_O,
+                    section_state=(1.1, 0.05),
+                    validation_id="other-validation",
+                ),
+            ),
+            validation_id=validation_id,
+            objective_weight=1.0,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+
+
+def test_biot_savart_greene_residue_objective_taylor_gate_is_second_order():
+    (
+        field,
+        target,
+        chart,
+        integrator_options,
+        solver_options,
+        seed,
+        validation_id,
+        original_x,
+        direction,
+    ) = _biot_savart_residue_objective_inputs()
+    base_x = original_x + 1.0e-3 * direction
+    objective_weight = 0.75
+    residue_scale = 0.5
+    target_manifest_id = residue_objective_target_manifest_id((target,))
+
+    def make_objective() -> BiotSavartGreeneResidueObjective:
+        return BiotSavartGreeneResidueObjective(
+            field,
+            targets=(target,),
+            chart=chart,
+            branch_seeds=(seed,),
+            validation_id=validation_id,
+            target_manifest_id=target_manifest_id,
+            objective_weight=objective_weight,
+            residue_scale=residue_scale,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+
+    field.x = base_x
+    objective = make_objective()
+    base_value = objective.J()
+    gradient = np.asarray(objective.dJ(), dtype=float)
+    diagnostic = branch_resolved_biot_savart_residue_vjp(
+        field,
+        seed.section_state,
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+    expected_value = (
+        objective_weight
+        * float(target.weight)
+        * 0.5
+        * (diagnostic.residue / residue_scale) ** 2
+    )
+    directional_derivative = float(np.dot(gradient, direction))
+    residuals: list[float] = []
+
+    for step in (1.0e-5, 5.0e-6, 2.5e-6):
+        field.x = base_x + step * direction
+        sampled_value = make_objective().J()
+        residuals.append(
+            abs(sampled_value - base_value - step * directional_derivative)
+        )
+    field.x = base_x
+
+    observed_orders = tuple(
+        math.log(residuals[index] / residuals[index + 1]) / math.log(2.0)
+        for index in range(len(residuals) - 1)
+    )
+
+    assert objective.to_json_dict()["target_manifest_id"] == target_manifest_id
+    assert objective.to_json_dict()["enabled"] is True
+    assert base_value == pytest.approx(expected_value, rel=1.0e-5)
+    assert np.linalg.norm(gradient) > 0.0
+    assert diagnostic.gradient_status == BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE
+    assert min(observed_orders) > 1.95
 
 
 def test_biot_savart_b_and_dB_vjp_dot_test_matches_central_difference():

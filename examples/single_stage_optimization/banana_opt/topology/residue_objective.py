@@ -1,0 +1,430 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from math import isfinite
+
+from simsopt._core.derivative import Derivative, derivative_dec
+from simsopt._core.optimizable import Optimizable
+from simsopt.field.biotsavart import BiotSavart
+
+from .fieldline_map import (
+    DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
+    FieldlineIntegratorOptions,
+)
+from .periodic_orbit import (
+    BRANCH_STATUS_CONVERGED,
+    DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
+    PeriodicOrbitSolverOptions,
+)
+from .poincare_chart import PoincareChart
+from .rational_target import GREENE_BRANCHES, RationalTarget
+from .residue_sensitivity import (
+    DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
+    BiotSavartBranchResidueVjpDiagnostic,
+    branch_resolved_biot_savart_residue_vjp,
+    solve_biot_savart_residue_branch,
+)
+
+
+GREENE_RESIDUE_OBJECTIVE_SCHEMA_VERSION = "greene_residue_objective_v1"
+DEFAULT_RESIDUE_OBJECTIVE_WEIGHT = 0.0
+
+ResidueBranchKey = tuple[str, str]
+SectionState = tuple[float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class ResidueBranchSeed:
+    """Validated fixed-point seed for one target manifest and O/X branch."""
+
+    target_id: str
+    branch: str
+    section_state: Sequence[float]
+    validation_id: str
+
+    def __post_init__(self) -> None:
+        target_id = str(self.target_id)
+        branch = str(self.branch)
+        validation_id = str(self.validation_id)
+        if target_id == "":
+            raise ValueError("Greene residue branch seed target_id must be nonempty")
+        if branch not in GREENE_BRANCHES:
+            raise ValueError(f"Unknown Greene residue branch label: {branch}")
+        if validation_id == "":
+            raise ValueError(
+                "Greene residue branch seed validation_id must be nonempty"
+            )
+        object.__setattr__(self, "target_id", target_id)
+        object.__setattr__(self, "branch", branch)
+        object.__setattr__(
+            self,
+            "section_state",
+            _normalize_section_state(self.section_state),
+        )
+        object.__setattr__(self, "validation_id", validation_id)
+
+    @property
+    def key(self) -> ResidueBranchKey:
+        return (self.target_id, self.branch)
+
+    def to_json_dict(self) -> dict[str, object]:
+        return {
+            "target_id": self.target_id,
+            "branch": self.branch,
+            "section_state": list(self.section_state),
+            "validation_id": self.validation_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResidueObjectiveBranchValue:
+    target_id: str
+    branch: str
+    residue: float
+    residue_scale: float
+    target_weight: float
+    objective_weight: float
+    branch_objective: float
+    state: SectionState
+
+    def to_json_dict(self) -> dict[str, object]:
+        return {
+            "target_id": self.target_id,
+            "branch": self.branch,
+            "residue": self.residue,
+            "residue_scale": self.residue_scale,
+            "target_weight": self.target_weight,
+            "objective_weight": self.objective_weight,
+            "branch_objective": self.branch_objective,
+            "state": list(self.state),
+        }
+
+
+class BiotSavartGreeneResidueObjective(Optimizable):
+    """Opt-in direct-BiotSavart Greene residue objective.
+
+    The objective is zero by default. A nonzero weight requires explicit
+    target-manifest seeds from a prior validated branch solve.
+    """
+
+    def __init__(
+        self,
+        biot_savart: BiotSavart,
+        *,
+        targets: Sequence[RationalTarget],
+        chart: PoincareChart,
+        branch_seeds: Sequence[ResidueBranchSeed] = (),
+        validation_id: str = "",
+        objective_weight: float = DEFAULT_RESIDUE_OBJECTIVE_WEIGHT,
+        residue_scale: float = 1.0,
+        target_manifest_id: str | None = None,
+        integrator_options: FieldlineIntegratorOptions = (
+            DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS
+        ),
+        solver_options: PeriodicOrbitSolverOptions = (
+            DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS
+        ),
+        r_satisfied: float = DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
+        local_difference_step: float = 1.0e-6,
+    ) -> None:
+        if not isinstance(biot_savart, BiotSavart):
+            raise TypeError("Greene residue objective requires direct BiotSavart")
+        targets_tuple = tuple(targets)
+        if len(targets_tuple) == 0:
+            raise ValueError("Greene residue objective requires at least one target")
+        objective_weight_value = float(objective_weight)
+        if objective_weight_value < 0.0 or not isfinite(objective_weight_value):
+            raise ValueError(
+                "Greene residue objective weight must be finite and nonnegative"
+            )
+        residue_scale_value = float(residue_scale)
+        if residue_scale_value <= 0.0 or not isfinite(residue_scale_value):
+            raise ValueError("Greene residue objective residue_scale must be positive")
+        validation_label = str(validation_id)
+        branch_seeds_tuple = tuple(branch_seeds)
+        if objective_weight_value > 0.0 and validation_label == "":
+            raise ValueError("Greene residue objective validation_id must be nonempty")
+        if (
+            objective_weight_value == 0.0
+            and branch_seeds_tuple
+            and validation_label == ""
+        ):
+            raise ValueError(
+                "Greene residue objective validation_id must be nonempty when "
+                "branch seeds are provided"
+            )
+        computed_target_manifest_id = residue_objective_target_manifest_id(
+            targets_tuple
+        )
+        if (
+            target_manifest_id is not None
+            and str(target_manifest_id) != computed_target_manifest_id
+        ):
+            raise ValueError(
+                "Greene residue objective target_manifest_id does not match targets"
+            )
+
+        Optimizable.__init__(self, depends_on=[biot_savart])
+        self.biot_savart = biot_savart
+        self.targets = targets_tuple
+        self.chart = chart
+        self.validation_id = validation_label
+        self.target_manifest_id = computed_target_manifest_id
+        self.objective_weight = objective_weight_value
+        self.residue_scale = residue_scale_value
+        self.integrator_options = integrator_options
+        self.solver_options = solver_options
+        self.r_satisfied = float(r_satisfied)
+        self.local_difference_step = float(local_difference_step)
+        requires_branch_validation = objective_weight_value > 0.0 or bool(
+            branch_seeds_tuple
+        )
+        self._branch_state_by_key = (
+            _validated_seed_state_map(
+                targets_tuple,
+                branch_seeds_tuple,
+                validation_id=validation_label,
+            )
+            if requires_branch_validation
+            else {}
+        )
+        self._J: float | None = None
+        self._dJ: Derivative | None = None
+        self._branch_values: tuple[ResidueObjectiveBranchValue, ...] | None = None
+        self._gradient_diagnostics: (
+            tuple[BiotSavartBranchResidueVjpDiagnostic, ...] | None
+        ) = None
+
+    def J(self) -> float:
+        if self._J is None:
+            self._compute_value()
+        return float(self._J)
+
+    @derivative_dec
+    def dJ(self) -> Derivative:
+        if self._dJ is None:
+            self._compute_gradient()
+        return self._dJ
+
+    def recompute_bell(self, parent=None) -> None:
+        self._J = None
+        self._dJ = None
+        self._branch_values = None
+        self._gradient_diagnostics = None
+
+    def branch_values(self) -> tuple[ResidueObjectiveBranchValue, ...]:
+        if self._branch_values is None:
+            self._compute_value()
+        return self._branch_values
+
+    def gradient_diagnostics(self) -> tuple[BiotSavartBranchResidueVjpDiagnostic, ...]:
+        if self._gradient_diagnostics is None:
+            self._compute_gradient()
+        return self._gradient_diagnostics
+
+    def to_json_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": GREENE_RESIDUE_OBJECTIVE_SCHEMA_VERSION,
+            "enabled": self.objective_weight > 0.0,
+            "target_manifest_id": self.target_manifest_id,
+            "validation_id": self.validation_id,
+            "objective_weight": self.objective_weight,
+            "residue_scale": self.residue_scale,
+            "value": self.J(),
+            "branches": [value.to_json_dict() for value in self.branch_values()],
+        }
+
+    def _compute_value(self) -> None:
+        if self.objective_weight == 0.0:
+            self._J = 0.0
+            self._branch_values = ()
+            return
+
+        branch_values: list[ResidueObjectiveBranchValue] = []
+        objective_value = 0.0
+        for target in self.targets:
+            target_id = target.manifest_key()
+            for branch in target.branches:
+                key = (target_id, branch)
+                result = solve_biot_savart_residue_branch(
+                    self.biot_savart,
+                    self._branch_state_by_key[key],
+                    target=target,
+                    chart=self.chart,
+                    branch=branch,
+                    integrator_options=self.integrator_options,
+                    solver_options=self.solver_options,
+                )
+                if result.status != BRANCH_STATUS_CONVERGED:
+                    raise ValueError(
+                        "Greene residue objective branch solve requires "
+                        f"{BRANCH_STATUS_CONVERGED}, got {result.status}"
+                    )
+                self._branch_state_by_key[key] = result.state
+                residue = float(result.residue_diagnostic.residue)
+                branch_objective = self._branch_objective(target, residue)
+                objective_value += branch_objective
+                branch_values.append(
+                    ResidueObjectiveBranchValue(
+                        target_id=target_id,
+                        branch=branch,
+                        residue=residue,
+                        residue_scale=self.residue_scale,
+                        target_weight=target.weight,
+                        objective_weight=self.objective_weight,
+                        branch_objective=branch_objective,
+                        state=result.state,
+                    )
+                )
+        self._J = float(objective_value)
+        self._branch_values = tuple(branch_values)
+
+    def _compute_gradient(self) -> None:
+        if self.objective_weight == 0.0:
+            self._dJ = Derivative()
+            self._gradient_diagnostics = ()
+            return
+
+        if self._branch_values is None:
+            self._compute_value()
+
+        derivative = Derivative()
+        diagnostics: list[BiotSavartBranchResidueVjpDiagnostic] = []
+        for target in self.targets:
+            target_id = target.manifest_key()
+            for branch in target.branches:
+                key = (target_id, branch)
+                diagnostic = branch_resolved_biot_savart_residue_vjp(
+                    self.biot_savart,
+                    self._branch_state_by_key[key],
+                    target=target,
+                    chart=self.chart,
+                    branch=branch,
+                    integrator_options=self.integrator_options,
+                    solver_options=self.solver_options,
+                    r_satisfied=self.r_satisfied,
+                    local_difference_step=self.local_difference_step,
+                )
+                self._branch_state_by_key[key] = diagnostic.state
+                derivative += (
+                    self._branch_gradient_scale(target, diagnostic.residue)
+                    * diagnostic.derivative
+                )
+                diagnostics.append(diagnostic)
+        self._dJ = derivative
+        self._gradient_diagnostics = tuple(diagnostics)
+
+    def _branch_objective(self, target: RationalTarget, residue: float) -> float:
+        scaled_residue = float(residue) / self.residue_scale
+        return float(
+            self.objective_weight
+            * 0.5
+            * float(target.weight)
+            * scaled_residue
+            * scaled_residue
+        )
+
+    def _branch_gradient_scale(self, target: RationalTarget, residue: float) -> float:
+        return float(
+            self.objective_weight
+            * float(target.weight)
+            * float(residue)
+            / (self.residue_scale * self.residue_scale)
+        )
+
+
+def residue_branch_seed_from_payload(
+    payload: Mapping[str, object],
+    *,
+    validation_id: str,
+) -> ResidueBranchSeed:
+    seed_validation_id = str(payload.get("validation_id", validation_id))
+    return ResidueBranchSeed(
+        target_id=str(payload["target_id"]),
+        branch=str(payload["branch"]),
+        section_state=payload["section_state"],
+        validation_id=seed_validation_id,
+    )
+
+
+def residue_objective_target_manifest_id(targets: Sequence[RationalTarget]) -> str:
+    payload = [target.manifest_key() for target in targets]
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=False).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def disabled_residue_objective_payload(
+    *,
+    target_manifest_id: str,
+    objective_weight: float,
+    residue_scale: float,
+) -> dict[str, object]:
+    return {
+        "schema_version": GREENE_RESIDUE_OBJECTIVE_SCHEMA_VERSION,
+        "enabled": False,
+        "target_manifest_id": str(target_manifest_id),
+        "validation_id": "",
+        "objective_weight": float(objective_weight),
+        "residue_scale": float(residue_scale),
+        "value": 0.0,
+        "gradient_norm": 0.0,
+        "branches": [],
+    }
+
+
+def _validated_seed_state_map(
+    targets: Sequence[RationalTarget],
+    branch_seeds: Sequence[ResidueBranchSeed],
+    *,
+    validation_id: str,
+) -> dict[ResidueBranchKey, SectionState]:
+    expected_keys = _target_branch_keys(targets)
+    if len(set(expected_keys)) != len(expected_keys):
+        raise ValueError("Duplicate Greene residue objective target/branch keys")
+    seed_by_key: dict[ResidueBranchKey, ResidueBranchSeed] = {}
+    for seed in branch_seeds:
+        if seed.validation_id != validation_id:
+            raise ValueError(
+                "Greene residue objective seed validation_id does not match "
+                f"{validation_id!r}"
+            )
+        if seed.key in seed_by_key:
+            raise ValueError(
+                f"Duplicate Greene residue objective branch seed for {seed.key}"
+            )
+        seed_by_key[seed.key] = seed
+
+    missing = [key for key in expected_keys if key not in seed_by_key]
+    if missing:
+        raise ValueError(f"Missing Greene residue objective branch seeds: {missing}")
+    unexpected = sorted(set(seed_by_key) - set(expected_keys))
+    if unexpected:
+        raise ValueError(
+            f"Unknown Greene residue objective branch seed targets: {unexpected}"
+        )
+    return {key: seed_by_key[key].section_state for key in expected_keys}
+
+
+def _target_branch_keys(
+    targets: Sequence[RationalTarget],
+) -> tuple[ResidueBranchKey, ...]:
+    return tuple(
+        (target.manifest_key(), branch)
+        for target in targets
+        for branch in target.branches
+    )
+
+
+def _normalize_section_state(state: Sequence[float]) -> SectionState:
+    if len(state) != 2:
+        raise ValueError("Greene residue branch seed section_state must have length 2")
+    radius = float(state[0])
+    height = float(state[1])
+    if not isfinite(radius) or not isfinite(height):
+        raise ValueError("Greene residue branch seed section_state must be finite")
+    if radius <= 0.0:
+        raise ValueError("Greene residue branch seed section_state requires R > 0")
+    return (radius, height)

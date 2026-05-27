@@ -1,8 +1,165 @@
-import numpy as np
-from simsopt.geo import CurveRZFourier
-from scipy.integrate import solve_ivp
+import math
 
-__all__ = ['compute_on_axis_iota']
+import numpy as np
+from scipy.integrate import solve_ivp
+from scipy.optimize import least_squares
+
+from simsopt.geo import CurveRZFourier
+
+__all__ = ['compute_on_axis_iota', 'locate_magnetic_axis_point']
+
+
+def _cylindrical_basis(phi):
+    c = math.cos(float(phi))
+    s = math.sin(float(phi))
+    return (
+        np.asarray([c, s, 0.0], dtype=float),
+        np.asarray([-s, c, 0.0], dtype=float),
+        np.asarray([0.0, 0.0, 1.0], dtype=float),
+    )
+
+
+def _fieldline_rhs_phi(phi, state, magnetic_field, min_bphi_over_b):
+    radius = float(state[0])
+    z = float(state[1])
+    if radius <= 0.0 or not math.isfinite(radius) or not math.isfinite(z):
+        raise ValueError("magnetic-axis state requires finite R > 0 and finite Z")
+
+    e_r, e_phi, e_z = _cylindrical_basis(phi)
+    point = np.asarray(
+        [[radius * math.cos(float(phi)), radius * math.sin(float(phi)), z]],
+        dtype=float,
+    )
+    magnetic_field.set_points(point)
+    b_vector = np.asarray(magnetic_field.B(), dtype=float)
+    if b_vector.shape != (1, 3):
+        raise ValueError(f"Magnetic field B() must have shape (1, 3), got {b_vector.shape}")
+    b = b_vector[0]
+    b_norm = float(np.linalg.norm(b))
+    if b_norm <= 0.0 or not math.isfinite(b_norm):
+        raise ValueError("Magnetic field norm must be finite and positive")
+    b_phi = float(np.dot(b, e_phi))
+    if abs(b_phi) / b_norm <= float(min_bphi_over_b):
+        raise ValueError("|B_phi|/|B| fell below the magnetic-axis threshold")
+    return np.asarray(
+        [
+            radius * float(np.dot(b, e_r)) / b_phi,
+            radius * float(np.dot(b, e_z)) / b_phi,
+        ],
+        dtype=float,
+    )
+
+
+def _axis_return_residual(
+    state,
+    *,
+    magnetic_field,
+    phi0,
+    toroidal_span,
+    scale,
+    rtol,
+    atol,
+    max_step,
+    min_bphi_over_b,
+):
+    start = np.asarray(state, dtype=float)
+    solution = solve_ivp(
+        lambda phi, rz: _fieldline_rhs_phi(
+            phi,
+            rz,
+            magnetic_field,
+            min_bphi_over_b,
+        ),
+        (float(phi0), float(phi0) + float(toroidal_span)),
+        start,
+        method="DOP853",
+        rtol=float(rtol),
+        atol=float(atol),
+        max_step=float(max_step),
+        t_eval=(float(phi0) + float(toroidal_span),),
+    )
+    if not solution.success:
+        raise RuntimeError(f"magnetic-axis return-map integration failed: {solution.message}")
+    return (np.asarray(solution.y[:, -1], dtype=float) - start) / float(scale)
+
+
+def locate_magnetic_axis_point(
+    magnetic_field,
+    initial_guess,
+    *,
+    nfp=1,
+    phi0=0.0,
+    r_bounds=None,
+    z_bounds=None,
+    residual_tolerance=1.0e-8,
+    rtol=1.0e-9,
+    atol=1.0e-11,
+    max_step=0.05,
+    min_bphi_over_b=1.0e-8,
+    max_nfev=80,
+):
+    """Locate the magnetic-axis fixed point in an R/Z Poincare section.
+
+    The returned point is the root of ``P(R, Z) - (R, Z)`` for the field-line
+    return map over one field period. This avoids using the boundary centroid
+    as a proxy for the magnetic axis when defining poloidal angles.
+    """
+    guess = np.asarray(initial_guess, dtype=float)
+    if guess.shape != (2,):
+        raise ValueError("magnetic-axis initial_guess must be [R, Z]")
+    if guess[0] <= 0.0 or not np.all(np.isfinite(guess)):
+        raise ValueError("magnetic-axis initial_guess requires finite R > 0 and finite Z")
+    resolved_nfp = int(nfp)
+    if resolved_nfp <= 0:
+        raise ValueError("magnetic-axis locator requires nfp > 0")
+    tolerance = float(residual_tolerance)
+    if tolerance <= 0.0 or not math.isfinite(tolerance):
+        raise ValueError("magnetic-axis residual_tolerance must be finite and positive")
+
+    lower_r, upper_r = (
+        (np.finfo(float).eps, np.inf) if r_bounds is None else tuple(r_bounds)
+    )
+    lower_z, upper_z = ((-np.inf, np.inf) if z_bounds is None else tuple(z_bounds))
+    lower = np.asarray([float(lower_r), float(lower_z)], dtype=float)
+    upper = np.asarray([float(upper_r), float(upper_z)], dtype=float)
+    if not np.all(lower < upper):
+        raise ValueError("magnetic-axis bounds must be ordered")
+
+    scale = max(float(abs(guess[0])), 1.0)
+    result = least_squares(
+        lambda state: _axis_return_residual(
+            state,
+            magnetic_field=magnetic_field,
+            phi0=float(phi0),
+            toroidal_span=2.0 * math.pi / float(resolved_nfp),
+            scale=scale,
+            rtol=rtol,
+            atol=atol,
+            max_step=max_step,
+            min_bphi_over_b=min_bphi_over_b,
+        ),
+        guess,
+        bounds=(lower, upper),
+        xtol=tolerance,
+        ftol=tolerance,
+        gtol=tolerance,
+        max_nfev=int(max_nfev),
+    )
+    residual_norm = float(np.linalg.norm(result.fun))
+    if not result.success or residual_norm > tolerance:
+        raise RuntimeError(
+            "magnetic-axis fixed-point solve did not converge below "
+            f"{tolerance:g}; residual={residual_norm:g}"
+        )
+    return {
+        "r": float(result.x[0]),
+        "z": float(result.x[1]),
+        "phi": float(phi0),
+        "nfp": resolved_nfp,
+        "source": "magnetic_axis_fieldline_fixed_point",
+        "normalized_return_residual": residual_norm,
+        "iterations": int(result.nfev),
+    }
 
 
 def compute_on_axis_iota(axis, magnetic_field):

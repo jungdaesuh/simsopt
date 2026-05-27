@@ -6,24 +6,36 @@ from typing import Protocol
 
 import numpy as np
 
+from simsopt._core.derivative import Derivative
 from simsopt.field.biotsavart import BiotSavart
 
 from .fieldline_map import (
     DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
     DifferentiableMagneticFieldLike,
     FieldlineIntegratorOptions,
+    FieldlineReturnResult,
     FieldlineTangentReturnResult,
+    cartesian_from_cylindrical,
+    cylindrical_basis,
     integrate_tangent_target_return_map,
+    target_winding_residual,
 )
 from .greene_residue import (
     GreeneResidueDiagnostic,
     greene_residue_diagnostic_from_matrix,
 )
 from .periodic_orbit import (
+    BRANCH_STATUS_BRANCH_MISMATCH,
     BRANCH_STATUS_CONVERGED,
-    DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
+    BRANCH_STATUS_MAX_ITERATIONS,
+    BRANCH_STATUS_NEWTON_STALLED,
+    BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW,
+    BRANCH_STATUS_WRONG_WINDING,
     PeriodicOrbitResult,
+    DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
     PeriodicOrbitSolverOptions,
+    radial_label_in_target_window,
+    residue_classification_matches_branch,
     solve_periodic_orbit,
 )
 from .poincare_chart import PoincareChart
@@ -34,6 +46,11 @@ FROZEN_ORBIT_FD_MODE = "frozen_orbit"
 BRANCH_RESOLVED_FD_MODE = "branch_resolved"
 BIOT_SAVART_BRANCH_RESOLVED_FD_MODE = "biot_savart_branch_resolved"
 BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE = "biot_savart_branch_resolved_taylor"
+BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE = "biot_savart_branch_resolved_vjp"
+BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE = "biot_savart_branch_resolved_vjp_taylor"
+BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE = "active"
+BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_SATISFIED_FROZEN = "satisfied_frozen"
+DEFAULT_RESIDUE_SATISFIED_THRESHOLD = 1.0e-4
 
 
 SectionState = tuple[float, float]
@@ -196,6 +213,53 @@ class BiotSavartBranchResidueTaylorDiagnostic:
         payload["samples"] = [sample.to_json_dict() for sample in self.samples]
         payload["observed_orders"] = list(self.observed_orders)
         return payload
+
+
+@dataclass(frozen=True, slots=True)
+class BiotSavartBranchResidueVjpDiagnostic:
+    mode: str
+    gradient_status: str
+    residue: float
+    base_status: str
+    state: SectionState
+    final_state: SectionState
+    closure_residual: SectionState
+    monodromy: MonodromyMatrix
+    trace_m: float
+    det_m: float
+    dresidue_dstate: SectionState
+    implicit_adjoint: SectionState
+    cotangent_point_count: int
+    b_cotangent_norm: float
+    grad_b_cotangent_norm: float
+    gradient_norm: float
+    gradient: DofDirection
+    derivative: Derivative
+
+    @property
+    def residue_derivative(self) -> Derivative:
+        return self.derivative
+
+    def to_json_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "gradient_status": self.gradient_status,
+            "residue": self.residue,
+            "base_status": self.base_status,
+            "state": list(self.state),
+            "final_state": list(self.final_state),
+            "closure_residual": list(self.closure_residual),
+            "monodromy": _matrix_to_jsonable(self.monodromy),
+            "trace_m": self.trace_m,
+            "det_m": self.det_m,
+            "dresidue_dstate": list(self.dresidue_dstate),
+            "implicit_adjoint": list(self.implicit_adjoint),
+            "cotangent_point_count": self.cotangent_point_count,
+            "b_cotangent_norm": self.b_cotangent_norm,
+            "grad_b_cotangent_norm": self.grad_b_cotangent_norm,
+            "gradient_norm": self.gradient_norm,
+            "gradient": list(self.gradient),
+        }
 
 
 def frozen_orbit_residue_evaluation(
@@ -620,6 +684,1032 @@ def branch_resolved_biot_savart_residue_taylor_diagnostic(
         samples=tuple(samples),
         observed_orders=_observed_orders(tuple(samples)),
     )
+
+
+def branch_resolved_biot_savart_residue_vjp(
+    biot_savart: BiotSavart,
+    initial_state: Sequence[float],
+    *,
+    target: RationalTarget,
+    chart: PoincareChart,
+    branch: str,
+    integrator_options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
+    solver_options: PeriodicOrbitSolverOptions = DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
+    r_satisfied: float = DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
+    local_difference_step: float = 1.0e-6,
+) -> BiotSavartBranchResidueVjpDiagnostic:
+    field = _require_direct_biot_savart(biot_savart)
+    satisfied_threshold = float(r_satisfied)
+    if satisfied_threshold < 0.0:
+        raise ValueError("Greene residue r_satisfied must be nonnegative")
+    local_step = _positive_step(local_difference_step)
+    orbit = _solve_rk4_periodic_orbit(
+        field,
+        initial_state,
+        target=target,
+        chart=chart,
+        branch=branch,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+    _require_converged(orbit, label="base")
+    residue = float(orbit.residue_diagnostic.residue)
+    monodromy = np.asarray(orbit.tangent_result.monodromy, dtype=float)
+    if abs(residue) <= satisfied_threshold:
+        derivative = Derivative()
+        cotangent_stats = _CotangentStats(
+            point_count=0,
+            b_cotangent_norm=0.0,
+            grad_b_cotangent_norm=0.0,
+        )
+        gradient = np.asarray(derivative(field), dtype=float)
+        return _vjp_diagnostic_from_parts(
+            orbit=orbit,
+            derivative=derivative,
+            gradient=gradient,
+            dresidue_dstate=np.zeros(2, dtype=float),
+            implicit_adjoint=np.zeros(2, dtype=float),
+            cotangent_stats=cotangent_stats,
+            gradient_status=BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_SATISFIED_FROZEN,
+        )
+
+    dresidue_dstate = _rk4_residue_state_gradient(
+        field,
+        orbit.state,
+        target=target,
+        integrator_options=integrator_options,
+        local_difference_step=local_step,
+    )
+    fixed_point_jacobian = monodromy - np.eye(2, dtype=float)
+    implicit_adjoint = np.linalg.solve(fixed_point_jacobian.T, dresidue_dstate)
+    terminal_adjoint = np.asarray(
+        [
+            -implicit_adjoint[0],
+            -implicit_adjoint[1],
+            -0.25,
+            0.0,
+            0.0,
+            -0.25,
+        ],
+        dtype=float,
+    )
+    derivative, cotangent_stats = _rk4_vjp_derivative(
+        field,
+        orbit.state,
+        target=target,
+        integrator_options=integrator_options,
+        terminal_adjoint=terminal_adjoint,
+        local_difference_step=local_step,
+    )
+    gradient = np.asarray(derivative(field), dtype=float)
+    return _vjp_diagnostic_from_parts(
+        orbit=orbit,
+        derivative=derivative,
+        gradient=gradient,
+        dresidue_dstate=dresidue_dstate,
+        implicit_adjoint=implicit_adjoint,
+        cotangent_stats=cotangent_stats,
+        gradient_status=BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE,
+    )
+
+
+def branch_resolved_biot_savart_residue_vjp_taylor_diagnostic(
+    biot_savart: BiotSavart,
+    initial_state: Sequence[float],
+    *,
+    direction: Sequence[float],
+    probe_steps: Sequence[float],
+    target: RationalTarget,
+    chart: PoincareChart,
+    branch: str,
+    integrator_options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
+    solver_options: PeriodicOrbitSolverOptions = DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
+    r_satisfied: float = DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
+    local_difference_step: float = 1.0e-6,
+) -> BiotSavartBranchResidueTaylorDiagnostic:
+    field = _require_direct_biot_savart(biot_savart)
+    steps = _normalized_probe_steps(probe_steps)
+    gradient_diagnostic = branch_resolved_biot_savart_residue_vjp(
+        field,
+        initial_state,
+        target=target,
+        chart=chart,
+        branch=branch,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+        r_satisfied=r_satisfied,
+        local_difference_step=local_difference_step,
+    )
+    original_x = np.asarray(field.x, dtype=float).copy()
+    direction_array, direction_norm = _normalized_direction(
+        direction,
+        expected_shape=original_x.shape,
+    )
+    directional_derivative = float(
+        np.dot(np.asarray(gradient_diagnostic.gradient, dtype=float), direction_array)
+    )
+    samples: list[BiotSavartResidueTaylorSample] = []
+    try:
+        for step_value in steps:
+            field.x = original_x + step_value * direction_array
+            result = _solve_rk4_periodic_orbit(
+                field,
+                gradient_diagnostic.state,
+                target=target,
+                chart=chart,
+                branch=branch,
+                integrator_options=integrator_options,
+                solver_options=solver_options,
+            )
+            _require_converged(result, label=f"probe step {step_value:g}")
+            residue = float(result.residue_diagnostic.residue)
+            prediction = float(
+                gradient_diagnostic.residue + step_value * directional_derivative
+            )
+            residual = float(residue - prediction)
+            samples.append(
+                BiotSavartResidueTaylorSample(
+                    step=step_value,
+                    residue=residue,
+                    first_order_prediction=prediction,
+                    residual=residual,
+                    absolute_residual=abs(residual),
+                    status=result.status,
+                    state=result.state,
+                )
+            )
+    finally:
+        field.x = original_x
+
+    return BiotSavartBranchResidueTaylorDiagnostic(
+        mode=BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
+        derivative_step=local_difference_step,
+        direction_norm=direction_norm,
+        direction=tuple(float(component) for component in direction_array),
+        base_residue=gradient_diagnostic.residue,
+        directional_derivative=directional_derivative,
+        base_status=gradient_diagnostic.base_status,
+        base_state=gradient_diagnostic.state,
+        samples=tuple(samples),
+        observed_orders=_observed_orders(tuple(samples)),
+    )
+
+
+def solve_biot_savart_residue_branch(
+    biot_savart: BiotSavart,
+    initial_state: Sequence[float],
+    *,
+    target: RationalTarget,
+    chart: PoincareChart,
+    branch: str,
+    integrator_options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
+    solver_options: PeriodicOrbitSolverOptions = DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
+) -> PeriodicOrbitResult:
+    field = _require_direct_biot_savart(biot_savart)
+    return _solve_rk4_periodic_orbit(
+        field,
+        initial_state,
+        target=target,
+        chart=chart,
+        branch=branch,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _FieldData:
+    point: np.ndarray
+    b: np.ndarray
+    grad_b: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _RhsEvaluation:
+    field_data: _FieldData
+    rhs: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _Rk4StepRecord:
+    phi: float
+    step: float
+    state: np.ndarray
+    stage1: _RhsEvaluation
+    stage2_state: np.ndarray
+    stage2: _RhsEvaluation
+    stage3_state: np.ndarray
+    stage3: _RhsEvaluation
+    stage4_state: np.ndarray
+    stage4: _RhsEvaluation
+
+
+@dataclass(frozen=True, slots=True)
+class _CotangentStats:
+    point_count: int
+    b_cotangent_norm: float
+    grad_b_cotangent_norm: float
+
+
+def _solve_rk4_periodic_orbit(
+    field: DifferentiableMagneticFieldLike,
+    initial_state: Sequence[float],
+    *,
+    target: RationalTarget,
+    chart: PoincareChart,
+    branch: str,
+    integrator_options: FieldlineIntegratorOptions,
+    solver_options: PeriodicOrbitSolverOptions,
+) -> PeriodicOrbitResult:
+    branch_label = _validate_branch_for_target(target, branch)
+    start_state = np.asarray(_normalize_state(initial_state), dtype=float)
+    state = start_state.copy()
+
+    for iteration in range(solver_options.max_iterations + 1):
+        tangent_result, _records = _rk4_tangent_return_map(
+            field,
+            state,
+            target=target,
+            chart=chart,
+            integrator_options=integrator_options,
+            with_tape=False,
+        )
+        closure_residual = (
+            np.asarray(tangent_result.return_map.final_state, dtype=float) - state
+        )
+        residual_norm = float(np.linalg.norm(closure_residual))
+        if residual_norm <= solver_options.residual_tolerance:
+            return _rk4_periodic_orbit_result(
+                target=target,
+                branch=branch_label,
+                chart=chart,
+                initial_state=(float(start_state[0]), float(start_state[1])),
+                state=state,
+                closure_residual=closure_residual,
+                closure_residual_norm=residual_norm,
+                iterations=iteration,
+                status=_rk4_branch_status(
+                    target=target,
+                    branch=branch_label,
+                    chart=chart,
+                    tangent_result=tangent_result,
+                    solver_options=solver_options,
+                ),
+                tangent_result=tangent_result,
+            )
+        if iteration == solver_options.max_iterations:
+            return _rk4_periodic_orbit_result(
+                target=target,
+                branch=branch_label,
+                chart=chart,
+                initial_state=(float(start_state[0]), float(start_state[1])),
+                state=state,
+                closure_residual=closure_residual,
+                closure_residual_norm=residual_norm,
+                iterations=iteration,
+                status=BRANCH_STATUS_MAX_ITERATIONS,
+                tangent_result=tangent_result,
+            )
+
+        jacobian = np.asarray(tangent_result.monodromy, dtype=float) - np.eye(2)
+        step = _trust_region_step(
+            jacobian,
+            closure_residual,
+            max_step_norm=solver_options.max_step_norm,
+        )
+        next_state = _damped_rk4_newton_state(
+            field,
+            state,
+            step,
+            current_residual_norm=residual_norm,
+            target=target,
+            chart=chart,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+        if next_state is None:
+            return _rk4_periodic_orbit_result(
+                target=target,
+                branch=branch_label,
+                chart=chart,
+                initial_state=(float(start_state[0]), float(start_state[1])),
+                state=state,
+                closure_residual=closure_residual,
+                closure_residual_norm=residual_norm,
+                iterations=iteration,
+                status=BRANCH_STATUS_NEWTON_STALLED,
+                tangent_result=tangent_result,
+            )
+        state = next_state
+
+    raise RuntimeError("RK4 periodic-orbit solver exited unexpectedly")
+
+
+def _rk4_tangent_return_map(
+    field: DifferentiableMagneticFieldLike,
+    initial_state: Sequence[float],
+    *,
+    target: RationalTarget,
+    chart: PoincareChart,
+    integrator_options: FieldlineIntegratorOptions,
+    with_tape: bool,
+) -> tuple[FieldlineTangentReturnResult, tuple[_Rk4StepRecord, ...]]:
+    start_state = np.asarray(_normalize_state(initial_state), dtype=float)
+    steps_per_torus = max(int(integrator_options.samples_per_full_torus), 96)
+    steps = steps_per_torus * int(target.q)
+    if steps <= 0:
+        raise ValueError("RK4 return map requires a positive step count")
+    phi_start = float(target.phi0)
+    phi_stop = phi_start + 2.0 * np.pi * float(target.q)
+    step = (phi_stop - phi_start) / float(steps)
+    augmented = np.concatenate([start_state, np.eye(2, dtype=float).reshape(4)])
+    phi_values = [phi_start]
+    states = [start_state.copy()]
+    bphi_ratios: list[float] = []
+    records: list[_Rk4StepRecord] = []
+
+    for step_index in range(steps):
+        phi = phi_start + float(step_index) * step
+        augmented, record = _rk4_step(
+            field,
+            phi,
+            augmented,
+            step,
+            integrator_options=integrator_options,
+        )
+        bphi_ratios.extend(
+            (
+                _bphi_over_b(record.stage1.field_data.b, phi),
+                _bphi_over_b(record.stage2.field_data.b, phi + 0.5 * step),
+                _bphi_over_b(record.stage3.field_data.b, phi + 0.5 * step),
+                _bphi_over_b(record.stage4.field_data.b, phi + step),
+            )
+        )
+        if with_tape:
+            records.append(record)
+        phi_values.append(phi + step)
+        states.append(np.asarray(augmented[:2], dtype=float).copy())
+
+    phi_grid = np.asarray(phi_values, dtype=float)
+    state_grid = np.asarray(states, dtype=float)
+    monodromy = np.asarray(augmented[2:], dtype=float).reshape((2, 2))
+    unwrapped_theta = chart.unwrapped_thetas(state_grid)
+    return_map = FieldlineReturnResult(
+        initial_state=(float(start_state[0]), float(start_state[1])),
+        final_state=(float(state_grid[-1, 0]), float(state_grid[-1, 1])),
+        phi_grid=phi_grid,
+        states=state_grid,
+        unwrapped_theta=unwrapped_theta,
+        winding=float((unwrapped_theta[-1] - unwrapped_theta[0]) / (2.0 * np.pi)),
+        min_bphi_over_b=float(np.min(np.asarray(bphi_ratios, dtype=float))),
+    )
+    return (
+        FieldlineTangentReturnResult(
+            return_map=return_map,
+            monodromy=monodromy,
+            trace_m=float(np.trace(monodromy)),
+            det_m=float(np.linalg.det(monodromy)),
+        ),
+        tuple(records),
+    )
+
+
+def _rk4_step(
+    field: DifferentiableMagneticFieldLike,
+    phi: float,
+    state: np.ndarray,
+    step: float,
+    *,
+    integrator_options: FieldlineIntegratorOptions,
+    stage1_override: tuple[np.ndarray, np.ndarray] | None = None,
+    stage2_override: tuple[np.ndarray, np.ndarray] | None = None,
+    stage3_override: tuple[np.ndarray, np.ndarray] | None = None,
+    stage4_override: tuple[np.ndarray, np.ndarray] | None = None,
+) -> tuple[np.ndarray, _Rk4StepRecord]:
+    state_array = np.asarray(state, dtype=float)
+    stage1 = _augmented_rhs_evaluation(
+        field,
+        float(phi),
+        state_array,
+        integrator_options=integrator_options,
+        override=stage1_override,
+    )
+    stage2_state = state_array + 0.5 * float(step) * stage1.rhs
+    stage2 = _augmented_rhs_evaluation(
+        field,
+        float(phi) + 0.5 * float(step),
+        stage2_state,
+        integrator_options=integrator_options,
+        override=stage2_override,
+    )
+    stage3_state = state_array + 0.5 * float(step) * stage2.rhs
+    stage3 = _augmented_rhs_evaluation(
+        field,
+        float(phi) + 0.5 * float(step),
+        stage3_state,
+        integrator_options=integrator_options,
+        override=stage3_override,
+    )
+    stage4_state = state_array + float(step) * stage3.rhs
+    stage4 = _augmented_rhs_evaluation(
+        field,
+        float(phi) + float(step),
+        stage4_state,
+        integrator_options=integrator_options,
+        override=stage4_override,
+    )
+    next_state = (
+        state_array
+        + float(step)
+        * (stage1.rhs + 2.0 * stage2.rhs + 2.0 * stage3.rhs + stage4.rhs)
+        / 6.0
+    )
+    return (
+        next_state,
+        _Rk4StepRecord(
+            phi=float(phi),
+            step=float(step),
+            state=state_array.copy(),
+            stage1=stage1,
+            stage2_state=stage2_state.copy(),
+            stage2=stage2,
+            stage3_state=stage3_state.copy(),
+            stage3=stage3,
+            stage4_state=stage4_state.copy(),
+            stage4=stage4,
+        ),
+    )
+
+
+def _augmented_rhs_evaluation(
+    field: DifferentiableMagneticFieldLike,
+    phi: float,
+    state: np.ndarray,
+    *,
+    integrator_options: FieldlineIntegratorOptions,
+    override: tuple[np.ndarray, np.ndarray] | None,
+) -> _RhsEvaluation:
+    if override is None:
+        field_data = _field_data_at_augmented_state(field, float(phi), state)
+    else:
+        point = cartesian_from_cylindrical(
+            float(state[0]),
+            float(phi),
+            float(state[1]),
+        )
+        field_data = _FieldData(
+            point=point,
+            b=np.asarray(override[0], dtype=float),
+            grad_b=np.asarray(override[1], dtype=float),
+        )
+    rhs = _augmented_rhs_from_field_data(
+        float(phi),
+        state,
+        field_data.b,
+        field_data.grad_b,
+        min_bphi_over_b=integrator_options.min_bphi_over_b,
+    )
+    return _RhsEvaluation(field_data=field_data, rhs=rhs)
+
+
+def _field_data_at_augmented_state(
+    field: DifferentiableMagneticFieldLike,
+    phi: float,
+    state: np.ndarray,
+) -> _FieldData:
+    point = cartesian_from_cylindrical(float(state[0]), float(phi), float(state[1]))
+    field.set_points(point.reshape((1, 3)))
+    b = np.asarray(field.B(), dtype=float)
+    grad_b = np.asarray(field.dB_by_dX(), dtype=float)
+    if b.shape != (1, 3):
+        raise ValueError(f"Magnetic field B() must have shape (1, 3), got {b.shape}")
+    if grad_b.shape != (1, 3, 3):
+        raise ValueError(
+            f"Magnetic field dB_by_dX() must have shape (1, 3, 3), got {grad_b.shape}"
+        )
+    return _FieldData(point=point, b=b[0].copy(), grad_b=grad_b[0].copy())
+
+
+def _augmented_rhs_from_field_data(
+    phi: float,
+    augmented_state: np.ndarray,
+    b_vector: np.ndarray,
+    field_jacobian_xyz: np.ndarray,
+    *,
+    min_bphi_over_b: float,
+) -> np.ndarray:
+    state = np.asarray(augmented_state[:2], dtype=float)
+    tangent_matrix = np.asarray(augmented_state[2:], dtype=float).reshape((2, 2))
+    velocity, jacobian = _rhs_and_jacobian_from_field_data(
+        float(phi),
+        state,
+        np.asarray(b_vector, dtype=float),
+        np.asarray(field_jacobian_xyz, dtype=float),
+        min_bphi_over_b=float(min_bphi_over_b),
+    )
+    return np.concatenate([velocity, (jacobian @ tangent_matrix).reshape(4)])
+
+
+def _rhs_and_jacobian_from_field_data(
+    phi: float,
+    state: np.ndarray,
+    b_vector: np.ndarray,
+    field_jacobian_xyz: np.ndarray,
+    *,
+    min_bphi_over_b: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    radius = float(state[0])
+    if radius <= 0.0:
+        raise ValueError("RK4 Greene state requires R > 0")
+    e_r, e_phi, e_z = cylindrical_basis(float(phi))
+    b_norm = float(np.linalg.norm(b_vector))
+    if b_norm <= 0.0 or not np.isfinite(b_norm):
+        raise ValueError("Magnetic field norm must be finite and positive")
+    b_phi = float(np.dot(b_vector, e_phi))
+    if abs(b_phi) / b_norm <= float(min_bphi_over_b):
+        raise ValueError("|B_phi|/|B| fell below the Greene RK4 threshold")
+    b_r = float(np.dot(b_vector, e_r))
+    b_z = float(np.dot(b_vector, e_z))
+    dB_dR = e_r @ field_jacobian_xyz
+    dB_dZ = e_z @ field_jacobian_xyz
+    dbr_dr = float(np.dot(dB_dR, e_r))
+    dbphi_dr = float(np.dot(dB_dR, e_phi))
+    dbz_dr = float(np.dot(dB_dR, e_z))
+    dbr_dz = float(np.dot(dB_dZ, e_r))
+    dbphi_dz = float(np.dot(dB_dZ, e_phi))
+    dbz_dz = float(np.dot(dB_dZ, e_z))
+
+    inv_bphi = 1.0 / b_phi
+    inv_bphi_squared = inv_bphi * inv_bphi
+    velocity = np.asarray(
+        [radius * b_r * inv_bphi, radius * b_z * inv_bphi],
+        dtype=float,
+    )
+    jacobian = np.asarray(
+        [
+            [
+                b_r * inv_bphi
+                + radius * (dbr_dr * b_phi - b_r * dbphi_dr) * inv_bphi_squared,
+                radius * (dbr_dz * b_phi - b_r * dbphi_dz) * inv_bphi_squared,
+            ],
+            [
+                b_z * inv_bphi
+                + radius * (dbz_dr * b_phi - b_z * dbphi_dr) * inv_bphi_squared,
+                radius * (dbz_dz * b_phi - b_z * dbphi_dz) * inv_bphi_squared,
+            ],
+        ],
+        dtype=float,
+    )
+    return velocity, jacobian
+
+
+def _rk4_residue_state_gradient(
+    field: DifferentiableMagneticFieldLike,
+    state: SectionState,
+    *,
+    target: RationalTarget,
+    integrator_options: FieldlineIntegratorOptions,
+    local_difference_step: float,
+) -> np.ndarray:
+    base_state = np.asarray(state, dtype=float)
+    gradient = np.empty(2, dtype=float)
+    for index in range(2):
+        step = _scaled_difference_step(base_state[index], local_difference_step)
+        perturbation = np.zeros(2, dtype=float)
+        perturbation[index] = step
+        plus = _rk4_residue_at_state(
+            field,
+            base_state + perturbation,
+            target=target,
+            integrator_options=integrator_options,
+        )
+        minus = _rk4_residue_at_state(
+            field,
+            base_state - perturbation,
+            target=target,
+            integrator_options=integrator_options,
+        )
+        gradient[index] = (plus - minus) / (2.0 * step)
+    return gradient
+
+
+def _rk4_residue_at_state(
+    field: DifferentiableMagneticFieldLike,
+    state: np.ndarray,
+    *,
+    target: RationalTarget,
+    integrator_options: FieldlineIntegratorOptions,
+) -> float:
+    chart = PoincareChart(axis_r=float(state[0]), axis_z=float(state[1]))
+    tangent_result, _records = _rk4_tangent_return_map(
+        field,
+        state,
+        target=target,
+        chart=chart,
+        integrator_options=integrator_options,
+        with_tape=False,
+    )
+    return float(
+        greene_residue_diagnostic_from_matrix(tangent_result.monodromy).residue
+    )
+
+
+def _rk4_vjp_derivative(
+    field: BiotSavart,
+    state: SectionState,
+    *,
+    target: RationalTarget,
+    integrator_options: FieldlineIntegratorOptions,
+    terminal_adjoint: np.ndarray,
+    local_difference_step: float,
+) -> tuple[Derivative, _CotangentStats]:
+    _tangent_result, records = _rk4_tangent_return_map(
+        field,
+        state,
+        target=target,
+        chart=PoincareChart(axis_r=float(state[0]), axis_z=float(state[1])),
+        integrator_options=integrator_options,
+        with_tape=True,
+    )
+    adjoint = np.asarray(terminal_adjoint, dtype=float)
+    points: list[np.ndarray] = []
+    b_cotangents: list[np.ndarray] = []
+    grad_b_cotangents: list[np.ndarray] = []
+    for record in reversed(records):
+        adjoint = _rk4_step_vjp(
+            field,
+            record,
+            adjoint,
+            integrator_options=integrator_options,
+            local_difference_step=local_difference_step,
+            points=points,
+            b_cotangents=b_cotangents,
+            grad_b_cotangents=grad_b_cotangents,
+        )
+    derivative, stats = _biot_savart_derivative_from_cotangents(
+        field,
+        points,
+        b_cotangents,
+        grad_b_cotangents,
+    )
+    return derivative, stats
+
+
+def _rk4_step_vjp(
+    field: DifferentiableMagneticFieldLike,
+    record: _Rk4StepRecord,
+    output_adjoint: np.ndarray,
+    *,
+    integrator_options: FieldlineIntegratorOptions,
+    local_difference_step: float,
+    points: list[np.ndarray],
+    b_cotangents: list[np.ndarray],
+    grad_b_cotangents: list[np.ndarray],
+) -> np.ndarray:
+    state_jacobian = _rk4_step_state_jacobian(
+        field,
+        record,
+        integrator_options=integrator_options,
+        local_difference_step=local_difference_step,
+    )
+    previous_adjoint = state_jacobian.T @ output_adjoint
+    for stage_index in (1, 2, 3, 4):
+        point, b_cotangent, grad_b_cotangent = _rk4_stage_cotangents(
+            field,
+            record,
+            output_adjoint,
+            stage_index=stage_index,
+            integrator_options=integrator_options,
+            local_difference_step=local_difference_step,
+        )
+        points.append(point)
+        b_cotangents.append(b_cotangent)
+        grad_b_cotangents.append(grad_b_cotangent)
+    return previous_adjoint
+
+
+def _rk4_step_state_jacobian(
+    field: DifferentiableMagneticFieldLike,
+    record: _Rk4StepRecord,
+    *,
+    integrator_options: FieldlineIntegratorOptions,
+    local_difference_step: float,
+) -> np.ndarray:
+    jacobian = np.empty((6, 6), dtype=float)
+    for index in range(6):
+        step = _scaled_difference_step(record.state[index], local_difference_step)
+        perturbation = np.zeros(6, dtype=float)
+        perturbation[index] = step
+        plus, _record = _rk4_step(
+            field,
+            record.phi,
+            record.state + perturbation,
+            record.step,
+            integrator_options=integrator_options,
+        )
+        minus, _record = _rk4_step(
+            field,
+            record.phi,
+            record.state - perturbation,
+            record.step,
+            integrator_options=integrator_options,
+        )
+        jacobian[:, index] = (plus - minus) / (2.0 * step)
+    return jacobian
+
+
+def _rk4_stage_cotangents(
+    field: DifferentiableMagneticFieldLike,
+    record: _Rk4StepRecord,
+    output_adjoint: np.ndarray,
+    *,
+    stage_index: int,
+    integrator_options: FieldlineIntegratorOptions,
+    local_difference_step: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if stage_index == 1:
+        field_data = record.stage1.field_data
+    elif stage_index == 2:
+        field_data = record.stage2.field_data
+    elif stage_index == 3:
+        field_data = record.stage3.field_data
+    elif stage_index == 4:
+        field_data = record.stage4.field_data
+    else:
+        raise ValueError("RK4 stage index must be in 1..4")
+    b_cotangent = np.empty(3, dtype=float)
+    grad_b_cotangent = np.empty((3, 3), dtype=float)
+    for component in range(3):
+        step = _scaled_difference_step(field_data.b[component], local_difference_step)
+        plus_b = field_data.b.copy()
+        minus_b = field_data.b.copy()
+        plus_b[component] += step
+        minus_b[component] -= step
+        plus = _rk4_step_with_stage_override(
+            field,
+            record,
+            stage_index=stage_index,
+            b_override=plus_b,
+            grad_b_override=field_data.grad_b,
+            integrator_options=integrator_options,
+        )
+        minus = _rk4_step_with_stage_override(
+            field,
+            record,
+            stage_index=stage_index,
+            b_override=minus_b,
+            grad_b_override=field_data.grad_b,
+            integrator_options=integrator_options,
+        )
+        b_cotangent[component] = float(
+            np.dot(output_adjoint, (plus - minus) / (2.0 * step))
+        )
+    for row in range(3):
+        for column in range(3):
+            step = _scaled_difference_step(
+                field_data.grad_b[row, column],
+                local_difference_step,
+            )
+            plus_grad = field_data.grad_b.copy()
+            minus_grad = field_data.grad_b.copy()
+            plus_grad[row, column] += step
+            minus_grad[row, column] -= step
+            plus = _rk4_step_with_stage_override(
+                field,
+                record,
+                stage_index=stage_index,
+                b_override=field_data.b,
+                grad_b_override=plus_grad,
+                integrator_options=integrator_options,
+            )
+            minus = _rk4_step_with_stage_override(
+                field,
+                record,
+                stage_index=stage_index,
+                b_override=field_data.b,
+                grad_b_override=minus_grad,
+                integrator_options=integrator_options,
+            )
+            grad_b_cotangent[row, column] = float(
+                np.dot(output_adjoint, (plus - minus) / (2.0 * step))
+            )
+    return field_data.point.copy(), b_cotangent, grad_b_cotangent
+
+
+def _rk4_step_with_stage_override(
+    field: DifferentiableMagneticFieldLike,
+    record: _Rk4StepRecord,
+    *,
+    stage_index: int,
+    b_override: np.ndarray,
+    grad_b_override: np.ndarray,
+    integrator_options: FieldlineIntegratorOptions,
+) -> np.ndarray:
+    override = (np.asarray(b_override, dtype=float), np.asarray(grad_b_override))
+    stage1_override = override if stage_index == 1 else None
+    stage2_override = override if stage_index == 2 else None
+    stage3_override = override if stage_index == 3 else None
+    stage4_override = override if stage_index == 4 else None
+    value, _record = _rk4_step(
+        field,
+        record.phi,
+        record.state,
+        record.step,
+        integrator_options=integrator_options,
+        stage1_override=stage1_override,
+        stage2_override=stage2_override,
+        stage3_override=stage3_override,
+        stage4_override=stage4_override,
+    )
+    return value
+
+
+def _biot_savart_derivative_from_cotangents(
+    field: BiotSavart,
+    points: Sequence[np.ndarray],
+    b_cotangents: Sequence[np.ndarray],
+    grad_b_cotangents: Sequence[np.ndarray],
+) -> tuple[Derivative, _CotangentStats]:
+    if len(points) == 0:
+        return Derivative(), _CotangentStats(
+            point_count=0,
+            b_cotangent_norm=0.0,
+            grad_b_cotangent_norm=0.0,
+        )
+    point_array = np.asarray(points, dtype=float)
+    b_cotangent_array = np.asarray(b_cotangents, dtype=float)
+    grad_b_cotangent_array = np.asarray(grad_b_cotangents, dtype=float)
+    field.set_points(point_array)
+    dB_part, dgradB_part = field.B_and_dB_vjp(
+        b_cotangent_array,
+        grad_b_cotangent_array,
+    )
+    derivative = dB_part + dgradB_part
+    return derivative, _CotangentStats(
+        point_count=int(point_array.shape[0]),
+        b_cotangent_norm=float(np.linalg.norm(b_cotangent_array)),
+        grad_b_cotangent_norm=float(np.linalg.norm(grad_b_cotangent_array)),
+    )
+
+
+def _vjp_diagnostic_from_parts(
+    *,
+    orbit: PeriodicOrbitResult,
+    derivative: Derivative,
+    gradient: np.ndarray,
+    dresidue_dstate: np.ndarray,
+    implicit_adjoint: np.ndarray,
+    cotangent_stats: _CotangentStats,
+    gradient_status: str,
+) -> BiotSavartBranchResidueVjpDiagnostic:
+    return BiotSavartBranchResidueVjpDiagnostic(
+        mode=BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE,
+        gradient_status=gradient_status,
+        residue=float(orbit.residue_diagnostic.residue),
+        base_status=orbit.status,
+        state=orbit.state,
+        final_state=_normalize_state(orbit.tangent_result.return_map.final_state),
+        closure_residual=orbit.closure_residual,
+        monodromy=_monodromy_matrix(orbit.tangent_result.monodromy),
+        trace_m=float(orbit.tangent_result.trace_m),
+        det_m=float(orbit.tangent_result.det_m),
+        dresidue_dstate=(float(dresidue_dstate[0]), float(dresidue_dstate[1])),
+        implicit_adjoint=(float(implicit_adjoint[0]), float(implicit_adjoint[1])),
+        cotangent_point_count=cotangent_stats.point_count,
+        b_cotangent_norm=cotangent_stats.b_cotangent_norm,
+        grad_b_cotangent_norm=cotangent_stats.grad_b_cotangent_norm,
+        gradient_norm=float(np.linalg.norm(gradient)),
+        gradient=tuple(float(component) for component in gradient),
+        derivative=derivative,
+    )
+
+
+def _rk4_periodic_orbit_result(
+    *,
+    target: RationalTarget,
+    branch: str,
+    chart: PoincareChart,
+    initial_state: SectionState,
+    state: np.ndarray,
+    closure_residual: np.ndarray,
+    closure_residual_norm: float,
+    iterations: int,
+    status: str,
+    tangent_result: FieldlineTangentReturnResult,
+) -> PeriodicOrbitResult:
+    state_tuple = (float(state[0]), float(state[1]))
+    return PeriodicOrbitResult(
+        target=target,
+        branch=branch,
+        initial_state=initial_state,
+        state=state_tuple,
+        closure_residual=(float(closure_residual[0]), float(closure_residual[1])),
+        closure_residual_norm=float(closure_residual_norm),
+        iterations=int(iterations),
+        status=status,
+        tangent_result=tangent_result,
+        residue_diagnostic=greene_residue_diagnostic_from_matrix(
+            tangent_result.monodromy
+        ),
+        winding=tangent_result.return_map.winding,
+        radial_label=chart.radial_label(state_tuple),
+        min_bphi_over_b=tangent_result.return_map.min_bphi_over_b,
+    )
+
+
+def _rk4_branch_status(
+    *,
+    target: RationalTarget,
+    branch: str,
+    chart: PoincareChart,
+    tangent_result: FieldlineTangentReturnResult,
+    solver_options: PeriodicOrbitSolverOptions,
+) -> str:
+    return_map = tangent_result.return_map
+    radial_label = chart.radial_label(return_map.initial_state)
+    if not radial_label_in_target_window(
+        radial_label,
+        target,
+        tolerance=solver_options.radial_window_tolerance,
+    ):
+        return BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW
+    if (
+        abs(target_winding_residual(return_map, target))
+        > solver_options.winding_tolerance
+    ):
+        return BRANCH_STATUS_WRONG_WINDING
+    diagnostic = greene_residue_diagnostic_from_matrix(tangent_result.monodromy)
+    if not residue_classification_matches_branch(branch, diagnostic):
+        return BRANCH_STATUS_BRANCH_MISMATCH
+    return BRANCH_STATUS_CONVERGED
+
+
+def _damped_rk4_newton_state(
+    field: DifferentiableMagneticFieldLike,
+    state: np.ndarray,
+    step: np.ndarray,
+    *,
+    current_residual_norm: float,
+    target: RationalTarget,
+    chart: PoincareChart,
+    integrator_options: FieldlineIntegratorOptions,
+    solver_options: PeriodicOrbitSolverOptions,
+) -> np.ndarray | None:
+    damping = 1.0
+    while damping >= solver_options.min_damping:
+        candidate = state + damping * step
+        if candidate[0] > 0.0 and np.all(np.isfinite(candidate)):
+            tangent_result, _records = _rk4_tangent_return_map(
+                field,
+                candidate,
+                target=target,
+                chart=chart,
+                integrator_options=integrator_options,
+                with_tape=False,
+            )
+            candidate_residual = (
+                np.asarray(tangent_result.return_map.final_state, dtype=float)
+                - candidate
+            )
+            if float(np.linalg.norm(candidate_residual)) < current_residual_norm:
+                return candidate
+        damping *= solver_options.damping_shrink
+    return None
+
+
+def _trust_region_step(
+    jacobian: np.ndarray,
+    closure_residual: np.ndarray,
+    *,
+    max_step_norm: float,
+) -> np.ndarray:
+    step = np.linalg.lstsq(jacobian, -closure_residual, rcond=None)[0]
+    step_norm = float(np.linalg.norm(step))
+    if step_norm > float(max_step_norm):
+        return step * (float(max_step_norm) / step_norm)
+    return step
+
+
+def _validate_branch_for_target(target: RationalTarget, branch: str) -> str:
+    branch_label = str(branch)
+    if branch_label not in target.branches:
+        raise ValueError(
+            f"Greene branch {branch_label} is not enabled for target "
+            f"{target.manifest_key()}"
+        )
+    return branch_label
+
+
+def _bphi_over_b(b_vector: np.ndarray, phi: float) -> float:
+    _e_r, e_phi, _e_z = cylindrical_basis(float(phi))
+    b_norm = float(np.linalg.norm(b_vector))
+    if b_norm <= 0.0:
+        raise ValueError("Magnetic field norm must be positive")
+    return abs(float(np.dot(b_vector, e_phi))) / b_norm
+
+
+def _scaled_difference_step(value: float, local_difference_step: float) -> float:
+    return float(local_difference_step) * max(1.0, abs(float(value)))
 
 
 def _normalize_state(state: Sequence[float]) -> SectionState:

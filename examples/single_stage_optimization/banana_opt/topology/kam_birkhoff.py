@@ -24,6 +24,7 @@ KAM_CLASS_ISLAND_CHAIN = "island_chain"
 KAM_CLASS_CHAOTIC = "chaotic"
 KAM_CLASS_INSUFFICIENT_RETURNS = "insufficient_returns"
 KAM_CLASS_INVALID_POLAR_REFERENCE = "invalid_poloidal_reference"
+KAM_CLASS_MISSING_MAGNETIC_AXIS = "missing_magnetic_axis"
 KAM_CLASS_LOST = "lost"
 
 WBA_EVALUATION_EVALUATED = "evaluated"
@@ -32,6 +33,9 @@ WBA_EVALUATION_NOT_EVALUATED_NO_SURVIVED_SEEDS = "not_evaluated_no_survived_seed
 WBA_EVALUATION_NOT_EVALUATED_INSUFFICIENT_RETURNS = "not_evaluated_insufficient_returns"
 WBA_EVALUATION_NOT_EVALUATED_INVALID_POLAR_REFERENCE = (
     "not_evaluated_invalid_poloidal_reference"
+)
+WBA_EVALUATION_NOT_EVALUATED_MISSING_MAGNETIC_AXIS = (
+    "not_evaluated_missing_magnetic_axis"
 )
 WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS = "not_evaluated_no_classified_seeds"
 
@@ -249,6 +253,24 @@ def invalid_poloidal_reference_classification(
     )
 
 
+def missing_magnetic_axis_classification(
+    *,
+    seed_index: int,
+    return_count: int,
+) -> SeedClassification:
+    return SeedClassification(
+        seed_index=int(seed_index),
+        classification=KAM_CLASS_MISSING_MAGNETIC_AXIS,
+        return_count=int(return_count),
+        rotation_number=None,
+        matching_digits=None,
+        first_half_rotation_number=None,
+        second_half_rotation_number=None,
+        nearest_rational=None,
+        reason="magnetic_axis_reference_not_available",
+    )
+
+
 def classify_return_points(
     return_points_xyz: Sequence[Sequence[float]],
     *,
@@ -387,6 +409,7 @@ def summarize_seed_classifications(
         KAM_CLASS_CHAOTIC: 0,
         KAM_CLASS_INSUFFICIENT_RETURNS: 0,
         KAM_CLASS_INVALID_POLAR_REFERENCE: 0,
+        KAM_CLASS_MISSING_MAGNETIC_AXIS: 0,
         KAM_CLASS_LOST: 0,
     }
     for item in classifications:
@@ -411,6 +434,9 @@ def summarize_seed_classifications(
         not_evaluated_reason = evaluation_state
     elif counts[KAM_CLASS_INVALID_POLAR_REFERENCE] > 0:
         evaluation_state = WBA_EVALUATION_NOT_EVALUATED_INVALID_POLAR_REFERENCE
+        not_evaluated_reason = evaluation_state
+    elif counts[KAM_CLASS_MISSING_MAGNETIC_AXIS] == survived_count:
+        evaluation_state = WBA_EVALUATION_NOT_EVALUATED_MISSING_MAGNETIC_AXIS
         not_evaluated_reason = evaluation_state
     else:
         evaluation_state = WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS

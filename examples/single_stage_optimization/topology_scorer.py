@@ -16,6 +16,7 @@ import sys
 
 import numpy as np
 import simsoptpp as sopp
+from simsopt.field.magnetic_axis_helpers import locate_magnetic_axis_point
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -25,6 +26,7 @@ from banana_opt.topology.kam_birkhoff import (
     DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
     KAM_FRACTION_SEMANTICS,
     WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS,
+    missing_magnetic_axis_classification,
     classify_fieldline_hits,
     classifier_settings_payload,
     summarize_seed_classifications,
@@ -835,20 +837,64 @@ def kam_fraction(fieldlines_phi_hits, cross_section_span, width_ratio=0.25):
     return float(bounded) / float(total), float(np.median(widths))
 
 
-def poloidal_axis_point(surface):
-    """Return the R/Z center used to unwrap Poincare poloidal angles."""
-
+def _surface_phi0_bounds(surface):
     cross_section = surface.cross_section(phi=0.0, thetas=512)
     radii = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+    z = cross_section[:, 2]
+    span = max(
+        float(np.max(radii) - np.min(radii)),
+        float(np.max(z) - np.min(z)),
+        1.0e-3,
+    )
+    lower_radius = max(np.finfo(float).eps, float(np.min(radii) - span))
+    return (
+        (lower_radius, float(np.max(radii) + span)),
+        (float(np.min(z) - span), float(np.max(z) + span)),
+        (float(np.mean(radii)), float(np.mean(z))),
+    )
+
+
+def poloidal_axis_point(surface, bfield=None):
+    """Return the magnetic-axis R/Z point used for WBA poloidal angles."""
+
+    if bfield is None:
+        raise ValueError("WBA poloidal-angle classification requires a magnetic field")
+    r_bounds, z_bounds, initial_guess = _surface_phi0_bounds(surface)
+    return locate_magnetic_axis_point(
+        bfield,
+        initial_guess,
+        nfp=surface.nfp,
+        phi0=0.0,
+        r_bounds=r_bounds,
+        z_bounds=z_bounds,
+    )
+
+
+def _wba_missing_magnetic_axis_result(fieldlines_phi_hits, settings):
+    classifications = [
+        missing_magnetic_axis_classification(
+            seed_index=seed_index,
+            return_count=0,
+        )
+        for seed_index, _line_hits in enumerate(fieldlines_phi_hits)
+    ]
+    summary = summarize_seed_classifications(classifications)
     return {
-        "r": float(np.mean(radii)),
-        "z": float(np.mean(cross_section[:, 2])),
-        "source": "surface_phi0_cross_section_centroid",
+        **summary,
+        "wba_axis": None,
+        "wba_poincare_plane_index": int(settings.target_phi_index),
+        "wba_settings": classifier_settings_payload(settings),
     }
 
 
-def invariant_torus_classification(fieldlines_phi_hits, surface, *, plane_index=0):
-    axis = poloidal_axis_point(surface)
+def invariant_torus_classification(
+    fieldlines_phi_hits,
+    surface,
+    *,
+    plane_index=0,
+    bfield=None,
+    axis_point=None,
+):
     settings = DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS
     if int(plane_index) != settings.target_phi_index:
         settings = type(settings)(
@@ -862,6 +908,13 @@ def invariant_torus_classification(fieldlines_phi_hits, surface, *, plane_index=
             min_winding_sign_fraction=settings.min_winding_sign_fraction,
             winding_increment_floor=settings.winding_increment_floor,
         )
+    if axis_point is None and bfield is None:
+        return _wba_missing_magnetic_axis_result(fieldlines_phi_hits, settings)
+    axis = (
+        dict(axis_point)
+        if axis_point is not None
+        else poloidal_axis_point(surface, bfield=bfield)
+    )
     classifications = classify_fieldline_hits(
         fieldlines_phi_hits,
         stopped_before_hit_fn=_trace_hits_before_first_stop,
@@ -1051,6 +1104,7 @@ def score_topology(
     field_policy=None,
     interpolation_grid=None,
     compute_transport_diagnostics=True,
+    magnetic_axis_point=None,
 ):
     """Score field-line confinement on a Boozer surface.
 
@@ -1131,7 +1185,12 @@ def score_topology(
         span,
         width_ratio=kam_width_ratio,
     )
-    wba = invariant_torus_classification(fieldlines_phi_hits, surface)
+    wba = invariant_torus_classification(
+        fieldlines_phi_hits,
+        surface,
+        bfield=traced_field,
+        axis_point=magnetic_axis_point,
+    )
     invariant_torus_fraction = wba["invariant_torus_fraction"]
     promoted_kam_fraction = (
         None if invariant_torus_fraction is None else float(invariant_torus_fraction)
