@@ -33,6 +33,7 @@ from banana_opt.hardware_contracts import (
 )
 from banana_opt.current_contracts import unwrap_current_optimizable
 from banana_opt.current_contracts import VFCoilBuildResult
+from banana_opt.current_contracts import resolve_jhalpern30_fresh_vf_current_A
 from banana_opt.finite_current_profiles import JHALPERN30_FINITE_CURRENT_MODE
 from banana_opt.finite_current_profiles import get_finite_current_profile
 from banana_opt.jhalpern30_compat import (
@@ -422,6 +423,10 @@ def build_vf_coils_for_profile(
 ) -> VFCoilBuildResult:
     profile = get_finite_current_profile(finite_current_mode)
     if profile.vf_current_mutability == "shared_unfixed_scaled_current":
+        resolve_jhalpern30_fresh_vf_current_A(
+            proxy_plasma_current_A=float(proxy_current_A),
+            requested_vf_current_A=float(vf_current_A),
+        )
         return build_jhalpern30_vf_coil_build_result(
             float(proxy_current_A),
             resolve_jhalpern30_vf_template_path(vf_template_path),

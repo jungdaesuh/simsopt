@@ -17,6 +17,7 @@ from banana_opt.current_contracts import (
     HBT_PROXY_VF_CURRENT_RATIO,
     MU0,
     VFCoilBuildResult,
+    resolve_jhalpern30_fresh_vf_current_A,
     validate_jhalpern30_proxy_vf_current_convention,
 )
 from banana_opt.finite_current_profiles import (
@@ -217,7 +218,9 @@ def build_jhalpern30_vf_coil_build_result(
     load_fn=load_boozer_finite_i,
 ) -> VFCoilBuildResult:
     resolved_proxy_current_A = float(proxy_current_A)
-    vf_current_A = resolved_proxy_current_A * HBT_PROXY_VF_CURRENT_RATIO
+    vf_current_A = resolve_jhalpern30_fresh_vf_current_A(
+        proxy_plasma_current_A=resolved_proxy_current_A,
+    )
     template_path = resolve_jhalpern30_vf_template_path(str(template_path))
     loaded_template, template_signs = _load_validated_jhalpern30_vf_template(
         template_path,
@@ -241,19 +244,6 @@ def build_jhalpern30_vf_coil_build_result(
         coils=vf_coils,
         current_control=shared_scaled_current,
     )
-
-
-def build_jhalpern30_vf_coils(
-    proxy_current_A: float,
-    template_path: str | Path,
-    *,
-    load_fn=load_boozer_finite_i,
-) -> list[Coil]:
-    return build_jhalpern30_vf_coil_build_result(
-        proxy_current_A,
-        template_path,
-        load_fn=load_fn,
-    ).coils
 
 
 def jhalpern30_flip_from_stage_parent(path: str | Path) -> bool:
@@ -432,7 +422,6 @@ __all__ = [
     "build_jhalpern30_banana_coils",
     "build_jhalpern30_proxy_plasma_current_coils",
     "build_jhalpern30_vf_coil_build_result",
-    "build_jhalpern30_vf_coils",
     "import_jhalpern30_stage_bundle",
     "jhalpern30_banana_current_sign",
     "jhalpern30_flip_from_stage_parent",

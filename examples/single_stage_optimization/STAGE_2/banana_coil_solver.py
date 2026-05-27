@@ -125,6 +125,7 @@ from banana_opt.current_contracts import (
     physical_current_to_boozer_I,
     resolve_boozer_current_convention,
     resolve_finite_current_mode,
+    resolve_jhalpern30_fresh_vf_current_A,
     unwrap_current_optimizable,
     validate_proxy_vf_current_convention_for_mode,
 )
@@ -580,8 +581,10 @@ def parse_args():
         ),
         help=(
             "Physical SI amperes for the VF scalar. Wataru mode applies it to "
-            "fixed independent sign-preserving template currents; jhalpern30 mode "
-            "uses it as the signed shared mutable VF current scalar."
+            "fixed independent sign-preserving template currents. Fresh "
+            "jhalpern30 mode derives it from --proxy-plasma-current-A / 6.5; "
+            "seeded jhalpern30 current traversal may retarget the shared mutable "
+            "VF current scalar."
         ),
     )
     parser.add_argument(
@@ -2011,12 +2014,13 @@ def _resolve_stage2_finite_current_config(
             if requested_proxy_plasma_current_A is None
             else float(requested_proxy_plasma_current_A)
         )
-        if requested_vf_current_A is None:
-            vf_current_A = (
-                proxy_plasma_current_A * finite_current_profile.vf_current_ratio
-                if finite_current_profile.mode == JHALPERN30_FINITE_CURRENT_MODE
-                else 0.0
+        if finite_current_profile.mode == JHALPERN30_FINITE_CURRENT_MODE:
+            vf_current_A = resolve_jhalpern30_fresh_vf_current_A(
+                proxy_plasma_current_A=proxy_plasma_current_A,
+                requested_vf_current_A=requested_vf_current_A,
             )
+        elif requested_vf_current_A is None:
+            vf_current_A = 0.0
         else:
             vf_current_A = float(requested_vf_current_A)
         vf_template_path = resolve_finite_current_vf_template_path(

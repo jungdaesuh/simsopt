@@ -24,6 +24,7 @@ if str(EXAMPLE_ROOT) not in sys.path:
 
 from banana_opt import current_contracts  # noqa: E402
 from banana_opt import jhalpern30_compat as compat  # noqa: E402
+from banana_opt import stage2_geometry  # noqa: E402
 from banana_opt import stage2_single_stage_handoff as handoff  # noqa: E402
 from banana_opt.coil_groups import build_contiguous_manifest  # noqa: E402
 
@@ -205,6 +206,18 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
             self.assertAlmostEqual(
                 coil.current.get_value(),
                 1.25 * abs(proxy_current_A) / 6.5 * template_sign,
+            )
+
+    def test_profile_vf_builder_rejects_mismatched_fresh_jhalpern_scalar(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "fresh jhalpern30 derives --vf-current-A",
+        ):
+            stage2_geometry.build_vf_coils_for_profile(
+                finite_current_mode=compat.JHALPERN30_FINITE_CURRENT_MODE,
+                proxy_current_A=-6.5e3,
+                vf_current_A=999.0,
+                vf_template_path="unused.json",
             )
 
     def test_shared_vf_bound_targets_leaf_current_without_scale_mutation(self):

@@ -98,115 +98,116 @@ DOFs.
 ## Implementation Plan
 
 1. Make finite-current policy typed and explicit.
-   - [ ] Replace string-only policy fields in `FiniteCurrentProfile` with typed
+   - [x] Replaced string-only policy fields in `FiniteCurrentProfile` with typed
      `Literal` aliases for proxy placement, proxy/VF sign policy, and VF-current
      DOF policy.
-   - [ ] Add a profile-level field that states whether proxy/VF scalar currents
+   - [x] Added a profile-level field that states whether proxy/VF scalar currents
      are signed or magnitude-only.
-   - [ ] Keep `wataru_proxy_field` and `jhalpern30_proxy_field` as separate
+   - [x] Kept `wataru_proxy_field` and `jhalpern30_proxy_field` as separate
      profiles; do not merge replay behavior into the default profile.
-   - [ ] Add tests in `tests/geo/test_finite_current_profiles.py` asserting the
+   - [x] Added tests in `tests/geo/test_finite_current_profiles.py` asserting the
      exact policy values for both profiles.
 
 2. Item 1: keep production proxy placement VMEC-axis based.
-   - [ ] Keep `wataru_proxy_field` default proxy placement as
+   - [x] Kept `wataru_proxy_field` default proxy placement as
      `vmec_axis_zeroth_coefficients`.
-   - [ ] Add a short code-level contract near
+   - [x] Added a short code-level contract near
      `build_proxy_plasma_current_coils()` stating that the current implementation
      is a circular proxy coil using the zeroth magnetic-axis coefficients read
      from the VMEC wout.
-   - [ ] Add a focused unit test that loads fake `raxis_cc` / `zaxis_cs` data and
+   - [x] Added a focused unit test that loads fake `raxis_cc` / `zaxis_cs` data and
      verifies `xc(1)`, `ys(1)`, and `zc(0)` are derived from VMEC-axis values,
      not `surface.major_radius()`.
-   - [ ] Keep `surface_major_radius_z0` only in `jhalpern30_proxy_field` tests
+   - [x] Kept `surface_major_radius_z0` only in `jhalpern30_proxy_field` tests
      and metadata.
-   - [ ] Optional follow-up: add `vmec_axis_fourier_curve` as a new explicit
+   - Future follow-up: add `vmec_axis_fourier_curve` as a new explicit
      proxy placement policy if a real run needs the full magnetic-axis curve.
      If implemented, use all available wout axis Fourier coefficients instead
      of `Surface.major_radius()`. Do not silently replace the current
      zeroth-axis placement without a parity/smoke comparison.
 
 3. Item 2: adopt signed scalar current semantics where the mode permits it.
-   - [ ] Split the current validation concepts in `current_contracts.py`:
-     ratio validation (`VF_CURRENT_A = PROXY_PLASMA_CURRENT_A / 6.5`) should be
-     independent from sign policy.
-   - [ ] Add a signed proxy/VF validation helper that accepts negative proxy and
-     VF scalars and rejects only ratio mismatch or non-finite values.
-   - [ ] Keep the existing nonnegative Wataru helper available until the
+   - [x] Split the current validation concepts in `current_contracts.py`:
+     Wataru ratio validation remains separate from jhalpern signed scalar
+     validation.
+   - [x] Added a signed proxy/VF validation helper that accepts negative proxy and
+     VF scalars and rejects non-finite values; fresh jhalpern runs enforce the
+     `VF_CURRENT_A = PROXY_PLASMA_CURRENT_A / 6.5` start value through
+     `resolve_jhalpern30_fresh_vf_current_A`.
+   - [x] Kept the existing nonnegative Wataru helper available until the
      production-mode policy decision is made; do not silently reinterpret old
      artifacts.
-   - [ ] If `wataru_proxy_field` is moved to signed scalar semantics, update its
-     profile metadata, `validate_proxy_vf_current_convention_for_mode()`, and
-     tests in one commit.
-   - [ ] Ensure hardware or traversal limits use `abs(current_A)` and preserve
+   - Future follow-up: if `wataru_proxy_field` is moved to signed scalar
+     semantics, update its profile metadata,
+     `validate_proxy_vf_current_convention_for_mode()`, and tests in one
+     commit.
+   - [x] Ensured hardware or traversal limits use `abs(current_A)` and preserve
      the original current sign in artifact metadata.
-   - [ ] Verify Boozer finite-current conversion remains
+   - [x] Verified Boozer finite-current conversion remains
      `BOOZER_I = mu0 * signed_proxy_current_A`, separate from `G0`.
-   - [ ] Keep signed proxy/VF metadata (`PROXY_PLASMA_CURRENT_A`,
+   - [x] Kept signed proxy/VF metadata (`PROXY_PLASMA_CURRENT_A`,
      `VF_CURRENT_A`) separate from scalar banana-current summaries; signed banana
      current consumers must read `BANANA_CURRENTS_A` when `BANANA_CURRENT_A` is
      a legacy or max-abs hardware summary.
 
 4. Item 3: add an explicit shared optimizable VF-current policy.
-   - [ ] Introduce a small builder result type, for example
+   - [x] Introduced a small builder result type,
      `VFCoilBuildResult(coils, current_control)`, so callers can bound the
      shared VF DOF without inspecting nested `ScaledCurrent` wrappers.
-   - [ ] Keep the existing fixed-current builder behavior for
+   - [x] Kept the existing fixed-current builder behavior for
      `independent_fixed_current`.
-   - [ ] Add a shared builder for `shared_unfixed_scaled_current`:
+   - [x] Added a shared builder for `shared_unfixed_scaled_current`:
      create one `Current(1.0)`, wrap it in
      `ScaledCurrent(shared_current, vf_current_A)`, apply template signs, and
      call `unfix_all()` only for the explicit shared-optimizable policy.
-   - [ ] Route VF builder selection from `FiniteCurrentProfile.vf_current_mutability`
+   - [x] Routed VF builder selection from `FiniteCurrentProfile.vf_current_mutability`
      instead of ad hoc mode checks.
-   - [ ] Add a VF-current bound handler modeled after
+   - [x] Added a VF-current bound handler modeled after
      `apply_banana_current_upper_bound()` before any
      `shared_unfixed_scaled_current` object enters an optimizer objective.
      Target the leaf `Current`, not `ScaledCurrent.scale`.
-   - [ ] Do not mutate `ScaledCurrent.scale`; the optimizer variable is the
+   - [x] Did not mutate `ScaledCurrent.scale`; the optimizer variable is the
      underlying shared `Current(1.0)`.
-   - [ ] Add a schema or CLI-owned threshold for `vf_current_max_A` before
+   - [x] Added a schema/CLI-owned threshold for `vf_current_max_A` before
      enabling shared optimizable VF in production runs.
-   - [ ] Keep 20 independent VF-current DOFs out of scope unless a separate
+   - [x] Kept 20 independent VF-current DOFs out of scope unless a separate
      physics reason and validation plan are written.
 
 5. Thread the policy through Stage 2 and single-stage.
-   - [ ] Update `STAGE_2/banana_coil_solver.py` so seeded current traversal does
+   - [x] Updated `STAGE_2/banana_coil_solver.py` so seeded current traversal does
      not force shared VF currents back to fixed independent currents when the
      profile says shared optimizable.
-   - [ ] Update artifact payload construction so `VF_CURRENT_MUTABILITY`,
+   - [x] Updated artifact payload construction so `VF_CURRENT_MUTABILITY`,
      `VF_CURRENT_SIGN_POLICY`, `PROXY_PLACEMENT_MODE`, and signed
      `PROXY_PLASMA_CURRENT_A` / `VF_CURRENT_A` are emitted consistently.
-   - [ ] Update single-stage replay parsing/reporting so signed proxy/VF
+   - [x] Updated single-stage replay parsing/reporting so signed proxy/VF
      metadata remains source-owned and signed banana-current consumers use
      `BANANA_CURRENTS_A` rather than scalar `BANANA_CURRENT_A` when the scalar
      is a max-abs hardware summary.
-   - [ ] Keep `run_stage2_to_single_stage.py` rejection behavior for unsupported
+   - [x] Kept `run_stage2_to_single_stage.py` rejection behavior for unsupported
      profile paths unless it is explicitly upgraded.
 
 6. Documentation and migration.
-   - [ ] Update `docs/jhalpern30_replay_compatibility_plan_2026-05-27.md` only
+   - [x] Updated `docs/jhalpern30_replay_compatibility_plan_2026-05-27.md` only
      if this work changes replay facts already documented there.
-   - [ ] Add a short user-facing note explaining the three policies:
+   - [x] Added a short user-facing note explaining the three policies:
      proxy placement, signed current scalar, and VF-current DOF policy.
-   - [ ] Document that SIMSOPT mutation is isolated to coil/current object
+   - [x] Documented that SIMSOPT mutation is isolated to coil/current object
      construction and optimizer execution; profile specs remain immutable.
 
 ## Validation Plan
 
-- [ ] Run focused profile tests:
-  `PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_finite_current_profiles.py -q`
-- [ ] Run proxy/VF geometry tests:
-  `PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_jhalpern30_compat.py tests/geo/test_wataru_vf_template_resolution.py -q`
-- [ ] Run seeded-restart current tests:
-  `PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_stage2_seeded_restart_vf_consistency.py -q`
-- [ ] Run Stage 2 handoff tests:
-  `PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_stage2_single_stage_handoff.py -q`
-- [ ] Run single-stage metadata tests:
-  `PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_single_stage_example.py -q`
-- [ ] Run lint and whitespace checks:
-  `ruff check examples/single_stage_optimization/banana_opt examples/single_stage_optimization/STAGE_2 tests/geo`
-- [ ] Run `git diff --check`.
+- [x] Ran focused profile/proxy/VF/seeded-restart tests:
+  `PYTHONPATH=examples/single_stage_optimization .conda-env/bin/python3.11 -m pytest -q tests/geo/test_jhalpern30_compat.py tests/geo/test_stage2_seeded_restart_vf_consistency.py tests/geo/test_finite_current_profiles.py`
+  (`36 passed`, 2 pyoculus/SciPy deprecation warnings).
+- [x] Ran downstream Stage 2 handoff/workflow command tests:
+  `PYTHONPATH=examples/single_stage_optimization .conda-env/bin/python3.11 -m pytest -q tests/geo/test_stage2_single_stage_handoff.py::UnifiedRunnerTests tests/geo/test_single_stage_workflow_helpers.py`
+  (`173 passed`, 2 pyoculus/SciPy deprecation warnings).
+- [x] Ran py_compile on touched implementation and focused test files:
+  `PYTHONPATH=examples/single_stage_optimization .conda-env/bin/python3.11 -m py_compile ...`
+- [x] Ran lint:
+  `ruff check examples/single_stage_optimization/banana_opt/current_contracts.py examples/single_stage_optimization/banana_opt/jhalpern30_compat.py examples/single_stage_optimization/banana_opt/stage2_geometry.py examples/single_stage_optimization/STAGE_2/banana_coil_solver.py tests/geo/test_jhalpern30_compat.py tests/geo/test_stage2_seeded_restart_vf_consistency.py`
+- [x] Ran `git diff --check`.
 
 ## Risks and Mitigations
 
@@ -239,19 +240,19 @@ DOFs.
 
 ## Completion Criteria
 
-- [ ] `FiniteCurrentProfile` exposes typed, tested policies for proxy
+- [x] `FiniteCurrentProfile` exposes typed, tested policies for proxy
   placement, current sign semantics, and VF-current DOF behavior.
-- [ ] Production/default proxy placement remains VMEC-axis based and tests prove
+- [x] Production/default proxy placement remains VMEC-axis based and tests prove
   it does not use `surface.major_radius()`.
-- [ ] Signed current semantics are explicit and artifact-visible wherever they
+- [x] Signed current semantics are explicit and artifact-visible wherever they
   are enabled.
-- [ ] Shared optimizable VF current is available only through an explicit
+- [x] Shared optimizable VF current is available only through an explicit
   profile/policy and has a bound before optimizer use.
-- [ ] Any shared VF-current bound is applied to the leaf `Current`; no plan or
+- [x] Any shared VF-current bound is applied to the leaf `Current`; no plan or
   test assumes `ScaledCurrent.scale` is a mutable optimizer variable.
-- [ ] `jhalpern30_proxy_field` replay behavior remains unchanged except for
+- [x] `jhalpern30_proxy_field` replay behavior remains unchanged except for
   deliberate metadata/type tightening.
-- [ ] Focused tests, ruff, and `git diff --check` pass.
+- [x] Focused tests, ruff, and `git diff --check` pass.
 
 ## Open Questions
 

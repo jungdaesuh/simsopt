@@ -225,7 +225,7 @@ Implemented profile file:
       hash, 20-coil count, and template signs are testable.
 - [x] Implemented `build_jhalpern30_proxy_plasma_current_coils(surface,
       proxy_current_A)` using `surface.major_radius()` and `Z = 0`.
-- [x] Implemented `build_jhalpern30_vf_coils(proxy_current_A, template_path)`
+- [x] Implemented `build_jhalpern30_vf_coil_build_result(proxy_current_A, template_path)`
       using the 20-coil template, shared mutable `ScaledCurrent(Current(1.0),
       VF_CURRENT_A)`, `unfix_all()`, fixed VF curves, and template-sign effective
       currents.
@@ -233,7 +233,7 @@ Implemented profile file:
       `BANANA_CURRENT_SIGN`, `BANANA_I_FIXED_S2`, `_flip`, and
       `IOTA_TARGET_SIGN`.
 - [x] Added mode dispatch in `banana_opt/stage2_geometry.py` so Wataru keeps the
-      VMEC-axis proxy plus 2-coil VF behavior while jhalpern gets historical
+      VMEC-axis proxy plus fixed independent VF behavior while jhalpern gets historical
       proxy/VF/banana construction.
 - [x] Added `validate_jhalpern30_proxy_vf_current_convention` and dispatched to
       it only for `jhalpern30_proxy_field`.

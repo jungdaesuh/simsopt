@@ -287,6 +287,32 @@ class FreshRunAutoResolvesBundledTemplateTests(unittest.TestCase):
         self.assertTrue(Path(config.vf_template_path).is_file())
         self.assertIn("jhalpern30_vf_biotsavart", config.vf_template_path)
 
+    def test_fresh_jhalpern_run_accepts_explicit_derived_vf_current(self):
+        config = stage2_solver._resolve_stage2_finite_current_config(
+            _args(
+                finite_current_mode="jhalpern30_proxy_field",
+                proxy_plasma_current_A=-6.5e3,
+                vf_current_A=-1.0e3,
+            ),
+            stage2_results=None,
+        )
+
+        self.assertEqual(config.vf_current_A, -1.0e3)
+
+    def test_fresh_jhalpern_run_rejects_explicit_vf_current_mismatch(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "fresh jhalpern30 derives --vf-current-A",
+        ):
+            stage2_solver._resolve_stage2_finite_current_config(
+                _args(
+                    finite_current_mode="jhalpern30_proxy_field",
+                    proxy_plasma_current_A=-6.5e3,
+                    vf_current_A=999.0,
+                ),
+                stage2_results=None,
+            )
+
     def test_fresh_jhalpern_run_rejects_zero_proxy_current(self):
         with self.assertRaisesRegex(ValueError, "non-zero PROXY_PLASMA_CURRENT_A"):
             stage2_solver._resolve_stage2_finite_current_config(

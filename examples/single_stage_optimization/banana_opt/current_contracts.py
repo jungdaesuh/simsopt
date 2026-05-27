@@ -111,6 +111,7 @@ __all__ = [
     "resolve_boozer_current_convention",
     "resolve_finite_current_mode",
     "resolve_effective_current_mode",
+    "resolve_jhalpern30_fresh_vf_current_A",
     "validate_hbt_proxy_vf_current_convention",
     "validate_jhalpern30_proxy_vf_current_convention",
     "validate_proxy_vf_current_convention_for_mode",
@@ -285,6 +286,38 @@ def validate_jhalpern30_proxy_vf_current_convention(
         proxy_plasma_current_A=proxy_plasma_current_A,
         vf_current_A=vf_current_A,
     )
+
+
+def resolve_jhalpern30_fresh_vf_current_A(
+    *,
+    proxy_plasma_current_A: float,
+    requested_vf_current_A: float | None = None,
+) -> float:
+    """Resolve jhalpern30 fresh-run VF current from the signed proxy current."""
+    proxy_current_A = float(proxy_plasma_current_A)
+    derived_vf_current_A = proxy_current_A * HBT_PROXY_VF_CURRENT_RATIO
+    validate_jhalpern30_proxy_vf_current_convention(
+        proxy_plasma_current_A=proxy_current_A,
+        vf_current_A=derived_vf_current_A,
+    )
+    if requested_vf_current_A is None:
+        return derived_vf_current_A
+    requested_vf_current_A = float(requested_vf_current_A)
+    if not np.isfinite(requested_vf_current_A):
+        raise ValueError("fresh jhalpern30 --vf-current-A must be finite.")
+    if not np.isclose(
+        requested_vf_current_A,
+        derived_vf_current_A,
+        rtol=1.0e-12,
+        atol=HBT_PROXY_VF_CURRENT_TOL_A,
+    ):
+        raise ValueError(
+            "fresh jhalpern30 derives --vf-current-A from "
+            "--proxy-plasma-current-A / 6.5; omit --vf-current-A or pass the "
+            "derived value. Explicit jhalpern30 VF retargeting is only "
+            "supported for seeded current traversal."
+        )
+    return derived_vf_current_A
 
 
 def validate_proxy_vf_current_convention_for_mode(
