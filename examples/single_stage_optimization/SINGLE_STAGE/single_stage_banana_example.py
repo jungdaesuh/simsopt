@@ -64,6 +64,20 @@ from topology_scorer import (
     safe_score_topology as _safe_score_topology_impl,
     topology_transport_diagnostics_not_evaluated as _topology_transport_diagnostics_not_evaluated,
 )
+from banana_opt.topology.fieldline_map import FieldlineIntegratorOptions
+from banana_opt.topology.kam_birkhoff import KAM_FRACTION_SEMANTICS
+from banana_opt.topology.periodic_orbit import PeriodicOrbitSolverOptions
+from banana_opt.topology.poincare_chart import PoincareChart
+from banana_opt.topology.residue_objective import (
+    BiotSavartGreeneResidueObjective,
+    DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
+    DEFAULT_RESIDUE_OBJECTIVE_WEIGHT,
+    DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
+    disabled_residue_objective_payload,
+    load_residue_objective_seeds,
+    load_residue_objective_targets,
+    residue_objective_target_manifest_id,
+)
 from workflow_helpers import (
     Stage2SeedSpec,
     format_database_stage2_seed_dir,
@@ -102,7 +116,10 @@ from banana_opt.constraint_contract import (
     resolve_constraint_contract_from_wire_names as _resolve_constraint_contract_from_wire_names_impl,
 )
 from banana_opt.coil_order_upgrade import upgrade_loaded_seed_biot_savart_order
-from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
+from banana_opt.basin_hopping import (
+    run_basin_hopping,
+    telemetry_values as basin_telemetry_values,
+)
 from banana_opt.basin_hopping import (  # noqa: F401 - re-exported for importlib-loaded tests
     _normalized_step_rms as basin_normalized_step_rms,
 )
@@ -276,14 +293,11 @@ from banana_opt.single_stage_geometry import (  # noqa: F401 - re-exported for i
 from banana_opt.single_stage_constraints import (
     smooth_max_curvature_signed_constraint as _smooth_max_curvature_signed_constraint,
     smooth_min_curve_curve_signed_constraint as _smooth_min_curve_curve_signed_constraint,
-    smooth_min_curve_curve_signed_constraint_with_hard_signal
-    as _smooth_min_curve_curve_signed_constraint_with_hard_signal,
+    smooth_min_curve_curve_signed_constraint_with_hard_signal as _smooth_min_curve_curve_signed_constraint_with_hard_signal,
     smooth_min_curve_surface_signed_constraint as _smooth_min_curve_surface_signed_constraint,
-    smooth_min_curve_surface_signed_constraint_with_hard_signal
-    as _smooth_min_curve_surface_signed_constraint_with_hard_signal,
+    smooth_min_curve_surface_signed_constraint_with_hard_signal as _smooth_min_curve_surface_signed_constraint_with_hard_signal,
     smooth_min_surface_stack_signed_constraint as _smooth_min_surface_stack_signed_constraint,
-    smooth_min_surface_stack_signed_constraint_with_hard_signal
-    as _smooth_min_surface_stack_signed_constraint_with_hard_signal,
+    smooth_min_surface_stack_signed_constraint_with_hard_signal as _smooth_min_surface_stack_signed_constraint_with_hard_signal,
 )
 from banana_opt.single_stage_search_policy import (
     CurvatureTraversalPolicy,
@@ -334,11 +348,18 @@ from banana_opt.surface_mode_contracts import (
     surface_mode_supports_topology_gate,
     validate_surface_mode_runtime_support,
 )
+
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
-DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
+DEFAULT_EQUILIBRIA_DIR = (
+    DATABASE_EQUILIBRIA_DIR
+    if os.path.isdir(DATABASE_EQUILIBRIA_DIR)
+    else os.path.join(EXAMPLE_ROOT, "equilibria")
+)
 DEFAULT_LOCAL_STAGE2_ROOT = os.path.join(EXAMPLE_ROOT, "STAGE_2")
-DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(REPO_ROOT, "DATABASE", "COIL_OPTIMIZATION", "outputs")
+DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(
+    REPO_ROOT, "DATABASE", "COIL_OPTIMIZATION", "outputs"
+)
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
 LEGACY_STAGE2_BANANA_WINDING_MINOR_RADIUS_M = 0.22
 DEFAULT_HARDWARE_SEARCH_MODE = "hard"
@@ -395,6 +416,8 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "banana_init_current_A": -1.0e4,
     },
 }
+
+
 def add_confinement_surrogate_args(parser):
     parser.add_argument(
         "--confinement-objective-weight",
@@ -445,7 +468,9 @@ def _resolve_unique_stage2_match(patterns, note):
         print(f"Note: found {note} at {os.path.dirname(unique_matches[0])}")
         return unique_matches[0]
     if len(unique_matches) > 1:
-        match_dirs = "\n".join(f"  - {os.path.dirname(match)}" for match in unique_matches)
+        match_dirs = "\n".join(
+            f"  - {os.path.dirname(match)}" for match in unique_matches
+        )
         raise FileNotFoundError(
             "Multiple Stage 2 outputs match the requested seed specification. "
             "Pass --stage2-bs-path explicitly to choose one.\n"
@@ -533,7 +558,9 @@ def build_stage2_bs_path(args):
             args.plasma_surf_filename,
         )
         for lookup_spec, compatibility_note in lookup_specs:
-            note_suffix = "" if compatibility_note is None else f"; {compatibility_note}"
+            note_suffix = (
+                "" if compatibility_note is None else f"; {compatibility_note}"
+            )
             seed_dir = format_database_stage2_seed_dir(lookup_spec)
             candidate = os.path.join(
                 parent,
@@ -548,7 +575,9 @@ def build_stage2_bs_path(args):
                     )
                 return candidate
 
-            legacy_init_dir = format_database_stage2_seed_dir_without_init_current(lookup_spec)
+            legacy_init_dir = format_database_stage2_seed_dir_without_init_current(
+                lookup_spec
+            )
             legacy_init = os.path.join(
                 parent,
                 legacy_init_dir,
@@ -672,12 +701,22 @@ def build_stage2_bs_path(args):
 
         current_matches = _resolve_unique_stage2_match(
             [
-                os.path.join(parent, seed_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
+                os.path.join(
+                    parent, seed_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"
+                ),
                 os.path.join(parent, seed_dir + "-CM=alm-*", "biot_savart_opt.json"),
-                os.path.join(parent, seed_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"),
-                os.path.join(parent, legacy_init_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
-                os.path.join(parent, legacy_init_dir + "-CM=alm-*", "biot_savart_opt.json"),
-                os.path.join(parent, legacy_init_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"),
+                os.path.join(
+                    parent, seed_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"
+                ),
+                os.path.join(
+                    parent, legacy_init_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"
+                ),
+                os.path.join(
+                    parent, legacy_init_dir + "-CM=alm-*", "biot_savart_opt.json"
+                ),
+                os.path.join(
+                    parent, legacy_init_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"
+                ),
             ],
             "current Stage 2 output"
             if compatibility_note is None
@@ -701,8 +740,12 @@ def build_stage2_bs_path(args):
 
         no_tfc_matches = _resolve_unique_stage2_match(
             [
-                os.path.join(parent, no_tfc_dir + "-CM=penalty", "biot_savart_opt.json"),
-                os.path.join(parent, no_tfc_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
+                os.path.join(
+                    parent, no_tfc_dir + "-CM=penalty", "biot_savart_opt.json"
+                ),
+                os.path.join(
+                    parent, no_tfc_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"
+                ),
                 os.path.join(parent, no_tfc_dir + "-BH=*", "biot_savart_opt.json"),
             ],
             "legacy Stage 2 output (missing TFC segment)"
@@ -714,8 +757,12 @@ def build_stage2_bs_path(args):
 
         legacy_matches = _resolve_unique_stage2_match(
             [
-                os.path.join(parent, legacy_dir + "-CM=penalty", "biot_savart_opt.json"),
-                os.path.join(parent, legacy_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
+                os.path.join(
+                    parent, legacy_dir + "-CM=penalty", "biot_savart_opt.json"
+                ),
+                os.path.join(
+                    parent, legacy_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"
+                ),
                 os.path.join(parent, legacy_dir + "-BH=*", "biot_savart_opt.json"),
             ],
             "legacy Stage 2 output (missing CCT/CT segments)"
@@ -770,14 +817,21 @@ def resolve_single_stage_seed_artifact(args):
         )
     stage2_bs_path = build_stage2_bs_path(args)
     stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
-    return stage2_bs_path, stage2_results_path, stage2_results, SEED_ARTIFACT_ROLE_STAGE2
+    return (
+        stage2_bs_path,
+        stage2_results_path,
+        stage2_results,
+        SEED_ARTIFACT_ROLE_STAGE2,
+    )
 
 
 def validate_seed_major_radius(major_radius, *, accept_offspec_r0_seed: bool):
     radius = float(major_radius)
     if accept_offspec_r0_seed:
         if radius <= 0.0:
-            raise ValueError("--accept-offspec-r0-seed requires a positive seed major radius.")
+            raise ValueError(
+                "--accept-offspec-r0-seed requires a positive seed major radius."
+            )
         return radius
     return validate_major_radius(radius)
 
@@ -834,7 +888,9 @@ def resolve_stage2_num_tf_coils(stage2_results, requested_num_tf_coils):
     return _resolve_stage2_num_tf_coils_impl(stage2_results, requested_num_tf_coils)
 
 
-def resolve_single_stage_banana_surf_radius(stage2_results, requested_banana_surf_radius):
+def resolve_single_stage_banana_surf_radius(
+    stage2_results, requested_banana_surf_radius
+):
     return _resolve_single_stage_banana_surf_radius_impl(
         stage2_results,
         requested_banana_surf_radius,
@@ -1119,7 +1175,9 @@ def parse_args():
     )
     parser.add_argument(
         "--plasma-surf-filename",
-        default=os.environ.get("PLASMA_SURF_FILENAME", "wout_nfp22ginsburg_000_014417_iota15.nc"),
+        default=os.environ.get(
+            "PLASMA_SURF_FILENAME", "wout_nfp22ginsburg_000_014417_iota15.nc"
+        ),
         help="VMEC wout filename under the equilibria directory.",
     )
     parser.add_argument(
@@ -1134,7 +1192,9 @@ def parse_args():
     )
     parser.add_argument(
         "--output-root",
-        default=os.environ.get("SINGLE_STAGE_OUTPUT_ROOT", DEFAULT_SINGLE_STAGE_OUTPUT_ROOT),
+        default=os.environ.get(
+            "SINGLE_STAGE_OUTPUT_ROOT", DEFAULT_SINGLE_STAGE_OUTPUT_ROOT
+        ),
         help="Directory where the single-stage output family will be written.",
     )
     parser.add_argument(
@@ -1155,11 +1215,15 @@ def parse_args():
     parser.add_argument(
         "--banana-surf-radius",
         type=float,
-        default=float(os.environ["BANANA_SURF_RADIUS"]) if "BANANA_SURF_RADIUS" in os.environ else None,
+        default=float(os.environ["BANANA_SURF_RADIUS"])
+        if "BANANA_SURF_RADIUS" in os.environ
+        else None,
         help="Coil surface minor radius. Defaults to the Stage 2 seed radius when omitted.",
     )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
-    parser.add_argument("--ntheta", type=int, default=int(os.environ.get("NTHETA", "64")))
+    parser.add_argument(
+        "--ntheta", type=int, default=int(os.environ.get("NTHETA", "64"))
+    )
     parser.add_argument(
         "--init-only",
         action="store_true",
@@ -1183,21 +1247,51 @@ def parse_args():
     parser.add_argument(
         "--frontier-volume-weight",
         type=float,
-        default=float(os.environ["FRONTIER_VOLUME_WEIGHT"]) if "FRONTIER_VOLUME_WEIGHT" in os.environ else None,
+        default=float(os.environ["FRONTIER_VOLUME_WEIGHT"])
+        if "FRONTIER_VOLUME_WEIGHT" in os.environ
+        else None,
         help=(
             "Independent volume-reward weight for frontier mode. Normalised against the "
             "legacy baseline (100) to set effective_volume_weight. When omitted, the volume "
             "weight falls back to --iotas-weight. Ignored in target mode."
         ),
     )
-    parser.add_argument("--frontier-reference-iota", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-reference-iota-scale", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-reference-volume", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-reference-volume-scale", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-reference-qa", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-reference-boozer", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-boozer-trust-threshold", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-boozer-trust-penalty-scale", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--frontier-reference-iota", type=float, default=None, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--frontier-reference-iota-scale",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frontier-reference-volume", type=float, default=None, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--frontier-reference-volume-scale",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frontier-reference-qa", type=float, default=None, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--frontier-reference-boozer", type=float, default=None, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--frontier-boozer-trust-threshold",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frontier-boozer-trust-penalty-scale",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--frontier-scalarization-type",
         choices=[
@@ -1209,15 +1303,54 @@ def parse_args():
         default=None,
         help=argparse.SUPPRESS,
     )
-    parser.add_argument("--frontier-chebyshev-rho", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-chebyshev-sharpness", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-chebyshev-weight-iota", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-chebyshev-weight-volume", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-chebyshev-weight-qa", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-chebyshev-weight-boozer", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--epsilon-constraint-qa-max", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--epsilon-constraint-boozer-max", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--frontier-epsilon-penalty-weight", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--frontier-chebyshev-rho", type=float, default=None, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--frontier-chebyshev-sharpness",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frontier-chebyshev-weight-iota",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frontier-chebyshev-weight-volume",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frontier-chebyshev-weight-qa",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frontier-chebyshev-weight-boozer",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--epsilon-constraint-qa-max", type=float, default=None, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--epsilon-constraint-boozer-max",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frontier-epsilon-penalty-weight",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--frontier-kam-min",
         type=float,
@@ -1261,7 +1394,9 @@ def parse_args():
     parser.add_argument(
         "--plasma-current-A",
         type=float,
-        default=float(os.environ["PLASMA_CURRENT_A"]) if "PLASMA_CURRENT_A" in os.environ else None,
+        default=float(os.environ["PLASMA_CURRENT_A"])
+        if "PLASMA_CURRENT_A" in os.environ
+        else None,
         help=(
             "User-facing enclosed toroidal plasma current in physical SI amperes. "
             "In single-surface mode this is converted to BoozerSurface I using "
@@ -1279,7 +1414,9 @@ def parse_args():
             "jhalpern30_proxy_field."
         ),
     )
-    parser.add_argument("--maxiter", type=int, default=int(os.environ.get("MAXITER", "300")))
+    parser.add_argument(
+        "--maxiter", type=int, default=int(os.environ.get("MAXITER", "300"))
+    )
     parser.add_argument(
         "--surface-mode",
         choices=SURFACE_MODE_CHOICES,
@@ -1567,7 +1704,8 @@ def parse_args():
     parser.add_argument(
         "--alm-fix-signal-mismatch-guard",
         action="store_true",
-        default=os.environ.get("ALM_FIX_SIGNAL_MISMATCH_GUARD", "0") not in (
+        default=os.environ.get("ALM_FIX_SIGNAL_MISMATCH_GUARD", "0")
+        not in (
             "",
             "0",
             "false",
@@ -1661,11 +1799,15 @@ def parse_args():
         action="store_true",
         help="Negate --iota-target for mirror-flipped banana-coil seeds.",
     )
-    parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
+    parser.add_argument(
+        "--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20"))
+    )
     parser.add_argument(
         "--tf-current-A",
         type=float,
-        default=float(os.environ["TF_CURRENT_A"]) if "TF_CURRENT_A" in os.environ else None,
+        default=float(os.environ["TF_CURRENT_A"])
+        if "TF_CURRENT_A" in os.environ
+        else None,
         help=(
             "Signed TF current for the launched single-stage lane. Must match "
             "--stage2-seed-tf-current-A when both are supplied."
@@ -1712,64 +1854,94 @@ def parse_args():
         default=int(os.environ.get("REFINEMENT_MAX_STALLED_CHUNKS", "2")),
         help="Abort refinement after this many consecutive chunks without accepted-state improvement.",
     )
-    parser.add_argument("--cc-dist", type=float, default=float(os.environ.get("CC_DIST", str(COIL_COIL_MIN_DIST_M))))
-    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", str(MAX_CURVATURE_INV_M))))
-    parser.add_argument("--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100")))
-    parser.add_argument("--curvature-weight", type=float, default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")))
-    parser.add_argument("--length-weight", type=float, default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
-                        help="Curve length penalty weight (default 1).")
+    parser.add_argument(
+        "--cc-dist",
+        type=float,
+        default=float(os.environ.get("CC_DIST", str(COIL_COIL_MIN_DIST_M))),
+    )
+    parser.add_argument(
+        "--curvature-threshold",
+        type=float,
+        default=float(os.environ.get("CURVATURE_THRESHOLD", str(MAX_CURVATURE_INV_M))),
+    )
+    parser.add_argument(
+        "--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100"))
+    )
+    parser.add_argument(
+        "--curvature-weight",
+        type=float,
+        default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")),
+    )
+    parser.add_argument(
+        "--length-weight",
+        type=float,
+        default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
+        help="Curve length penalty weight (default 1).",
+    )
     parser.add_argument(
         "--single-stage-poloidal-weight",
         type=float,
-        default=float(os.environ.get(
-            "SINGLE_STAGE_POLOIDAL_WEIGHT",
-            str(SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT),
-        )),
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_POLOIDAL_WEIGHT",
+                str(SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT),
+            )
+        ),
         help="Penalty weight for the Single Stage poloidal extent hinge term.",
     )
     parser.add_argument(
         "--single-stage-width-weight",
         type=float,
-        default=float(os.environ.get(
-            "SINGLE_STAGE_WIDTH_WEIGHT",
-            str(SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT),
-        )),
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_WIDTH_WEIGHT",
+                str(SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT),
+            )
+        ),
         help="Penalty weight for the Single Stage width hinge terms (lower+upper).",
     )
     parser.add_argument(
         "--single-stage-poloidal-threshold-rad",
         type=float,
-        default=float(os.environ.get(
-            "SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD",
-            str(POLOIDAL_EXTENT_HALF_WIDTH_RAD),
-        )),
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD",
+                str(POLOIDAL_EXTENT_HALF_WIDTH_RAD),
+            )
+        ),
         help="Single-stage poloidal extent upper threshold in radians.",
     )
     parser.add_argument(
         "--single-stage-width-min-threshold",
         type=float,
-        default=float(os.environ.get(
-            "SINGLE_STAGE_WIDTH_MIN_THRESHOLD",
-            str(BANANA_WIDTH_MIN_M),
-        )),
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_WIDTH_MIN_THRESHOLD",
+                str(BANANA_WIDTH_MIN_M),
+            )
+        ),
         help="Single-stage banana coil width lower threshold in meters.",
     )
     parser.add_argument(
         "--single-stage-width-max-threshold",
         type=float,
-        default=float(os.environ.get(
-            "SINGLE_STAGE_WIDTH_MAX_THRESHOLD",
-            str(BANANA_WIDTH_MAX_M),
-        )),
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_WIDTH_MAX_THRESHOLD",
+                str(BANANA_WIDTH_MAX_M),
+            )
+        ),
         help="Single-stage banana coil width upper threshold in meters.",
     )
     parser.add_argument(
         "--single-stage-selfint-weight",
         type=float,
-        default=float(os.environ.get(
-            "SINGLE_STAGE_SELF_INTERSECT_WEIGHT",
-            str(SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT),
-        )),
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_SELF_INTERSECT_WEIGHT",
+                str(SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT),
+            )
+        ),
         help="Penalty weight for the Single Stage curve self-intersection term.",
     )
     parser.add_argument(
@@ -1895,14 +2067,30 @@ def parse_args():
             "passing a smaller value makes the run stricter."
         ),
     )
-    parser.add_argument("--res-weight", type=float, default=float(os.environ.get("RES_WEIGHT", "1000")),
-                        help="Boozer residual penalty weight (default 1000).")
-    parser.add_argument("--iotas-weight", type=float, default=float(os.environ.get("IOTAS_WEIGHT", "100")),
-                        help="Iota target tracking weight (default 100).")
-    parser.add_argument("--cs-weight", type=float, default=float(os.environ.get("CS_WEIGHT", "1")),
-                        help="Coil-surface distance penalty weight (default 1).")
-    parser.add_argument("--cs-dist", type=float, default=float(os.environ.get("CS_DIST", str(COIL_PLASMA_MIN_DIST_M))),
-                        help=f"Minimum coil-surface distance in meters (default {COIL_PLASMA_MIN_DIST_M:.3f}, HBT spec).")
+    parser.add_argument(
+        "--res-weight",
+        type=float,
+        default=float(os.environ.get("RES_WEIGHT", "1000")),
+        help="Boozer residual penalty weight (default 1000).",
+    )
+    parser.add_argument(
+        "--iotas-weight",
+        type=float,
+        default=float(os.environ.get("IOTAS_WEIGHT", "100")),
+        help="Iota target tracking weight (default 100).",
+    )
+    parser.add_argument(
+        "--cs-weight",
+        type=float,
+        default=float(os.environ.get("CS_WEIGHT", "1")),
+        help="Coil-surface distance penalty weight (default 1).",
+    )
+    parser.add_argument(
+        "--cs-dist",
+        type=float,
+        default=float(os.environ.get("CS_DIST", str(COIL_PLASMA_MIN_DIST_M))),
+        help=f"Minimum coil-surface distance in meters (default {COIL_PLASMA_MIN_DIST_M:.3f}, HBT spec).",
+    )
     parser.add_argument(
         "--maxcor",
         type=int,
@@ -2021,52 +2209,72 @@ def parse_args():
     parser.add_argument(
         "--stage2-seed-major-radius",
         type=float,
-        default=float(os.environ["STAGE2_SEED_MAJOR_RADIUS"]) if "STAGE2_SEED_MAJOR_RADIUS" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_MAJOR_RADIUS"])
+        if "STAGE2_SEED_MAJOR_RADIUS" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-toroidal-flux",
         type=float,
-        default=float(os.environ["STAGE2_SEED_TOROIDAL_FLUX"]) if "STAGE2_SEED_TOROIDAL_FLUX" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_TOROIDAL_FLUX"])
+        if "STAGE2_SEED_TOROIDAL_FLUX" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-length-weight",
         type=float,
-        default=float(os.environ["STAGE2_SEED_LENGTH_WEIGHT"]) if "STAGE2_SEED_LENGTH_WEIGHT" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_LENGTH_WEIGHT"])
+        if "STAGE2_SEED_LENGTH_WEIGHT" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-cc-weight",
         type=float,
-        default=float(os.environ["STAGE2_SEED_CC_WEIGHT"]) if "STAGE2_SEED_CC_WEIGHT" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_CC_WEIGHT"])
+        if "STAGE2_SEED_CC_WEIGHT" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-curvature-weight",
         type=float,
-        default=float(os.environ["STAGE2_SEED_CURVATURE_WEIGHT"]) if "STAGE2_SEED_CURVATURE_WEIGHT" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_CURVATURE_WEIGHT"])
+        if "STAGE2_SEED_CURVATURE_WEIGHT" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-cc-threshold",
         type=float,
-        default=float(os.environ["STAGE2_SEED_CC_THRESHOLD"]) if "STAGE2_SEED_CC_THRESHOLD" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_CC_THRESHOLD"])
+        if "STAGE2_SEED_CC_THRESHOLD" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-curvature-threshold",
         type=float,
-        default=float(os.environ["STAGE2_SEED_CURVATURE_THRESHOLD"]) if "STAGE2_SEED_CURVATURE_THRESHOLD" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_CURVATURE_THRESHOLD"])
+        if "STAGE2_SEED_CURVATURE_THRESHOLD" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-banana-surf-radius",
         type=float,
-        default=float(os.environ["STAGE2_SEED_BANANA_SURF_RADIUS"]) if "STAGE2_SEED_BANANA_SURF_RADIUS" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_BANANA_SURF_RADIUS"])
+        if "STAGE2_SEED_BANANA_SURF_RADIUS" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-tf-current-A",
         type=float,
-        default=float(os.environ["STAGE2_SEED_TF_CURRENT_A"]) if "STAGE2_SEED_TF_CURRENT_A" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_TF_CURRENT_A"])
+        if "STAGE2_SEED_TF_CURRENT_A" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-order",
         type=int,
-        default=int(os.environ["STAGE2_SEED_ORDER"]) if "STAGE2_SEED_ORDER" in os.environ else None,
+        default=int(os.environ["STAGE2_SEED_ORDER"])
+        if "STAGE2_SEED_ORDER" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-banana-init-current-A",
@@ -2100,6 +2308,144 @@ def parse_args():
         type=float,
         default=float(os.environ.get("TOPOLOGY_SCORER_TMAX", "50.0")),
         help="Integration horizon for callback topology scorer (default 50.0).",
+    )
+    parser.add_argument(
+        "--residue-objective-weight",
+        type=float,
+        default=float(
+            os.environ.get(
+                "RESIDUE_OBJECTIVE_WEIGHT",
+                str(DEFAULT_RESIDUE_OBJECTIVE_WEIGHT),
+            )
+        ),
+        help=(
+            "Opt-in direct-BiotSavart Greene residue objective weight. "
+            "A nonzero value requires validated target and branch-seed JSON files."
+        ),
+    )
+    parser.add_argument(
+        "--residue-objective-targets-json",
+        default=os.environ.get("RESIDUE_OBJECTIVE_TARGETS_JSON"),
+        help="JSON file with a top-level 'targets' list of Greene residue RationalTarget payloads.",
+    )
+    parser.add_argument(
+        "--residue-objective-seeds-json",
+        default=os.environ.get("RESIDUE_OBJECTIVE_SEEDS_JSON"),
+        help=(
+            "JSON file with target_manifest_id, validation_status='passed', "
+            "validation_artifact_id, and branch_seeds for the Greene residue objective."
+        ),
+    )
+    parser.add_argument(
+        "--residue-objective-axis-r",
+        type=float,
+        default=(
+            float(os.environ["RESIDUE_OBJECTIVE_AXIS_R"])
+            if "RESIDUE_OBJECTIVE_AXIS_R" in os.environ
+            else None
+        ),
+        help="Magnetic-axis R coordinate used by the Greene residue Poincare chart.",
+    )
+    parser.add_argument(
+        "--residue-objective-axis-z",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_AXIS_Z", "0.0")),
+        help="Magnetic-axis Z coordinate used by the Greene residue Poincare chart.",
+    )
+    parser.add_argument(
+        "--residue-objective-poloidal-orientation",
+        type=int,
+        choices=(-1, 1),
+        default=int(os.environ.get("RESIDUE_OBJECTIVE_POLOIDAL_ORIENTATION", "1")),
+        help="Poloidal-angle orientation for the Greene residue Poincare chart.",
+    )
+    parser.add_argument(
+        "--residue-objective-radial-label-scale",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_RADIAL_LABEL_SCALE", "1.0")),
+        help="Scale converting chart radius to the target radial label.",
+    )
+    parser.add_argument(
+        "--residue-objective-scale",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_SCALE", "1.0")),
+        help="Residue scale R_scale for 0.5 * (R_G / R_scale)^2.",
+    )
+    parser.add_argument(
+        "--residue-objective-r-satisfied",
+        type=float,
+        default=float(
+            os.environ.get(
+                "RESIDUE_OBJECTIVE_R_SATISFIED",
+                str(DEFAULT_RESIDUE_SATISFIED_THRESHOLD),
+            )
+        ),
+        help="Near-success |R_G| threshold whose gradient is frozen.",
+    )
+    parser.add_argument(
+        "--residue-objective-local-difference-step",
+        type=float,
+        default=float(
+            os.environ.get("RESIDUE_OBJECTIVE_LOCAL_DIFFERENCE_STEP", "1e-6")
+        ),
+        help="Local finite-difference step used inside the residue VJP kernel.",
+    )
+    parser.add_argument(
+        "--residue-objective-rtol",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_RTOL", "1e-9")),
+    )
+    parser.add_argument(
+        "--residue-objective-atol",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_ATOL", "1e-11")),
+    )
+    parser.add_argument(
+        "--residue-objective-max-step",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_MAX_STEP", "0.05")),
+    )
+    parser.add_argument(
+        "--residue-objective-samples-per-full-torus",
+        type=int,
+        default=int(
+            os.environ.get(
+                "RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS",
+                str(DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS),
+            )
+        ),
+    )
+    parser.add_argument(
+        "--residue-objective-min-bphi-over-b",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_MIN_BPHI_OVER_B", "1e-8")),
+    )
+    parser.add_argument(
+        "--residue-objective-newton-residual-tolerance",
+        type=float,
+        default=float(
+            os.environ.get("RESIDUE_OBJECTIVE_NEWTON_RESIDUAL_TOLERANCE", "1e-9")
+        ),
+    )
+    parser.add_argument(
+        "--residue-objective-winding-tolerance",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_WINDING_TOLERANCE", "1e-7")),
+    )
+    parser.add_argument(
+        "--residue-objective-det-tolerance",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_DET_TOLERANCE", "1e-5")),
+    )
+    parser.add_argument(
+        "--residue-objective-max-newton-iterations",
+        type=int,
+        default=int(os.environ.get("RESIDUE_OBJECTIVE_MAX_NEWTON_ITERATIONS", "12")),
+    )
+    parser.add_argument(
+        "--residue-objective-max-newton-step-norm",
+        type=float,
+        default=float(os.environ.get("RESIDUE_OBJECTIVE_MAX_NEWTON_STEP_NORM", "0.05")),
     )
     add_confinement_surrogate_args(parser)
     parser.add_argument(
@@ -2437,7 +2783,9 @@ def _required_published_seed_iota_from_results(stage2_results):
     return iota_value
 
 
-def complete_published_stage2_seed_surface(stage2_seed_surface, stage2_results, initial_G):
+def complete_published_stage2_seed_surface(
+    stage2_seed_surface, stage2_results, initial_G
+):
     if stage2_seed_surface is None:
         return None
     iota = (
@@ -2837,9 +3185,7 @@ def current_single_stage_hardware_snapshot_kwargs(
             "width_min_threshold": SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
             "width_max_threshold": SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             "self_intersect_penalty": (
-                None
-                if self_intersect_obj is None
-                else float(self_intersect_obj.J())
+                None if self_intersect_obj is None else float(self_intersect_obj.J())
             ),
             "self_intersect_threshold": 0.0,
         }
@@ -2889,17 +3235,19 @@ def current_single_stage_alm_surface_stack_surfaces():
         SURFACE_GAP_THRESHOLD,
     ):
         return None
-    return tuple(
-        entry["boozer_surface"].surface
-        for entry in surface_data
-    )
+    return tuple(entry["boozer_surface"].surface for entry in surface_data)
 
 
-def surface_stack_search_gate_for_solver(search_gate, *, constraint_method, surface_count):
-    if single_stage_surface_stack_alm_enabled(
-        surface_count,
-        search_gate["surface_gap_threshold"],
-    ) and str(constraint_method) == "alm":
+def surface_stack_search_gate_for_solver(
+    search_gate, *, constraint_method, surface_count
+):
+    if (
+        single_stage_surface_stack_alm_enabled(
+            surface_count,
+            search_gate["surface_gap_threshold"],
+        )
+        and str(constraint_method) == "alm"
+    ):
         solver_gate = dict(search_gate)
         solver_gate["surface_gap_threshold"] = 0.0
         return solver_gate
@@ -2985,34 +3333,32 @@ def confinement_surrogate_kwargs():
     }
 
 
-def checkpoint_confinement_objective(proxy_objective, topology_result, confinement_weight):
-    return float(proxy_objective) + float(confinement_weight) * float(topology_result["confinement_loss"])
+def checkpoint_confinement_objective(
+    proxy_objective, topology_result, confinement_weight
+):
+    return float(proxy_objective) + float(confinement_weight) * float(
+        topology_result["confinement_loss"]
+    )
 
 
 TOPOLOGY_ARCHIVE_SCHEMA_VERSION = 2
+GREENE_RESIDUE_OBJECTIVE_ARCHIVE_SCHEMA_VERSION = "greene_residue_objective_archive_v1"
+GREENE_RESIDUE_OBJECTIVE_ARCHIVE_FILENAME = "greene_residue_objective_archive.jsonl"
 
 
 def topology_hardware_status_archive_fields(prefix, hardware_status):
     return {
         f"{prefix}_hardware_ok": (
-            None
-            if hardware_status is None
-            else bool(hardware_status["success"])
+            None if hardware_status is None else bool(hardware_status["success"])
         ),
         f"{prefix}_hardware_violations": (
-            None
-            if hardware_status is None
-            else list(hardware_status["violations"])
+            None if hardware_status is None else list(hardware_status["violations"])
         ),
         f"{prefix}_hardware_constraints": (
-            None
-            if hardware_status is None
-            else dict(hardware_status["constraints"])
+            None if hardware_status is None else dict(hardware_status["constraints"])
         ),
         f"{prefix}_hardware_violation_ratios": (
-            None
-            if hardware_status is None
-            else hardware_status.get("violation_ratios")
+            None if hardware_status is None else hardware_status.get("violation_ratios")
         ),
     }
 
@@ -3057,7 +3403,9 @@ def topology_archive_entry(
         "early_exit_fraction": topology_result["early_exit_fraction"],
         "confinement_loss": topology_result["confinement_loss"],
         "confinement_surrogate_k": topology_result["confinement_surrogate_k"],
-        "confinement_early_exit_threshold": topology_result["confinement_early_exit_threshold"],
+        "confinement_early_exit_threshold": topology_result[
+            "confinement_early_exit_threshold"
+        ],
         "invariant_torus_fraction": topology_result["invariant_torus_fraction"],
         "invariant_torus_count": topology_result.get("invariant_torus_count"),
         "wba_seed_count": topology_result.get("wba_seed_count"),
@@ -3075,7 +3423,9 @@ def topology_archive_entry(
         "wba_settings": topology_result.get("wba_settings"),
         "kam_fraction": topology_result["kam_fraction"],
         "kam_fraction_semantics": topology_result.get("kam_fraction_semantics"),
-        "legacy_bounded_seed_fraction": topology_result.get("legacy_bounded_seed_fraction"),
+        "legacy_bounded_seed_fraction": topology_result.get(
+            "legacy_bounded_seed_fraction"
+        ),
         "legacy_bounded_seed_median_width": topology_result.get(
             "legacy_bounded_seed_median_width"
         ),
@@ -3099,7 +3449,9 @@ def _format_topology_error(error):
     return str(error) or repr(error)
 
 
-def safe_evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_threshold):
+def safe_evaluate_topology_gate(
+    surface, bfield, nfieldlines, tmax, tol, survival_threshold
+):
     try:
         return evaluate_topology_gate(
             surface,
@@ -3159,6 +3511,7 @@ _FRONTIER_CERTIFICATION_LEGACY_SEARCH_FIELDS = {
     "accepted_iteration": "frontier_kam_accepted_iteration",
     "topology_accepted_iteration": "frontier_kam_topology_accepted_iteration",
     "kam_fraction": "frontier_kam_fraction",
+    "kam_fraction_semantics": "frontier_kam_fraction_semantics",
     "kam_min": "frontier_kam_min",
     "kam_deficit": "frontier_kam_deficit",
 }
@@ -3182,15 +3535,37 @@ def frontier_certification_status_from_field_payload(field_payload):
         status_key: field_payload.get(search_key)
         for status_key, search_key in _FRONTIER_CERTIFICATION_SEARCH_FIELDS.items()
     }
+    for status_key in (
+        "invariant_torus_fraction",
+        "invariant_torus_min",
+        "invariant_torus_deficit",
+    ):
+        if status.get(status_key) is None:
+            status[status_key] = field_payload.get(status_key)
     for status_key, search_key in _FRONTIER_CERTIFICATION_LEGACY_SEARCH_FIELDS.items():
         if status.get(status_key) is None:
             status[status_key] = field_payload.get(search_key)
+    legacy_kam_uses_wba = status.get("kam_fraction_semantics") == KAM_FRACTION_SEMANTICS
     if status.get("kam_fraction") is None:
         status["kam_fraction"] = status.get("invariant_torus_fraction")
+        status["kam_fraction_semantics"] = (
+            KAM_FRACTION_SEMANTICS
+            if status.get("invariant_torus_fraction") is not None
+            else status.get("kam_fraction_semantics")
+        )
     if status.get("kam_min") is None:
         status["kam_min"] = status.get("invariant_torus_min")
     if status.get("kam_deficit") is None:
         status["kam_deficit"] = status.get("invariant_torus_deficit")
+    if status.get("invariant_torus_fraction") is None and legacy_kam_uses_wba:
+        status["invariant_torus_fraction"] = status.get("kam_fraction")
+    if status.get("invariant_torus_min") is None and legacy_kam_uses_wba:
+        status["invariant_torus_min"] = status.get("kam_min")
+    if status.get("invariant_torus_deficit") is None and legacy_kam_uses_wba:
+        status["invariant_torus_deficit"] = status.get("kam_deficit")
+    if status.get("ok") is True and status.get("invariant_torus_fraction") is None:
+        status["ok"] = False
+        status["reason"] = "invariant_torus_fraction_missing"
     return status
 
 
@@ -3204,7 +3579,9 @@ def frontier_certification_results_payload(certification_status, *, prefix=""):
         f"{prefix}FRONTIER_CERTIFICATION_OK": certification_status.get("ok"),
         f"{prefix}FRONTIER_CERTIFIED": certification_status.get("ok"),
         f"{prefix}FRONTIER_CERTIFICATION_REASON": certification_status.get("reason"),
-        f"{prefix}FRONTIER_CERTIFICATION_HARDWARE_OK": certification_status.get("hardware_ok"),
+        f"{prefix}FRONTIER_CERTIFICATION_HARDWARE_OK": certification_status.get(
+            "hardware_ok"
+        ),
         f"{prefix}FRONTIER_INVARIANT_TORUS_TOPOLOGY_EVALUATED": certification_status.get(
             "topology_evaluated"
         ),
@@ -3217,9 +3594,15 @@ def frontier_certification_results_payload(certification_status, *, prefix=""):
         f"{prefix}FRONTIER_INVARIANT_TORUS_TOPOLOGY_ACCEPTED_ITERATION": certification_status.get(
             "topology_accepted_iteration"
         ),
-        f"{prefix}FRONTIER_KAM_TOPOLOGY_EVALUATED": certification_status.get("topology_evaluated"),
-        f"{prefix}FRONTIER_KAM_TOPOLOGY_BROKEN": certification_status.get("topology_broken"),
-        f"{prefix}FRONTIER_KAM_ACCEPTED_ITERATION": certification_status.get("accepted_iteration"),
+        f"{prefix}FRONTIER_KAM_TOPOLOGY_EVALUATED": certification_status.get(
+            "topology_evaluated"
+        ),
+        f"{prefix}FRONTIER_KAM_TOPOLOGY_BROKEN": certification_status.get(
+            "topology_broken"
+        ),
+        f"{prefix}FRONTIER_KAM_ACCEPTED_ITERATION": certification_status.get(
+            "accepted_iteration"
+        ),
         f"{prefix}FRONTIER_KAM_TOPOLOGY_ACCEPTED_ITERATION": certification_status.get(
             "topology_accepted_iteration"
         ),
@@ -3233,6 +3616,9 @@ def frontier_certification_results_payload(certification_status, *, prefix=""):
             "invariant_torus_deficit"
         ),
         f"{prefix}FRONTIER_KAM_FRACTION": certification_status.get("kam_fraction"),
+        f"{prefix}FRONTIER_KAM_FRACTION_SEMANTICS": certification_status.get(
+            "kam_fraction_semantics"
+        ),
         f"{prefix}FRONTIER_KAM_MIN": certification_status.get("kam_min"),
         f"{prefix}FRONTIER_KAM_DEFICIT": certification_status.get("kam_deficit"),
     }
@@ -3248,7 +3634,9 @@ def build_frontier_kam_certification_status(
         topology_entry,
         enabled=frontier_mode_enabled(),
         hardware_ok=(
-            None if hardware_status is None else bool(hardware_status.get("success", False))
+            None
+            if hardware_status is None
+            else bool(hardware_status.get("success", False))
         ),
         kam_min=FRONTIER_INVARIANT_TORUS_MIN,
         accepted_iteration=accepted_iteration,
@@ -3287,7 +3675,24 @@ def frontier_certification_status_matches_iteration(
     if status_iteration is None or int(status_iteration) != int(accepted_iteration):
         return False
     topology_iteration = certification_status.get("topology_accepted_iteration")
-    return topology_iteration is None or int(topology_iteration) == int(accepted_iteration)
+    if topology_iteration is not None and int(topology_iteration) != int(
+        accepted_iteration
+    ):
+        return False
+    if certification_status.get("ok") is True:
+        invariant_fraction = certification_status.get("invariant_torus_fraction")
+        if invariant_fraction is None:
+            if (
+                certification_status.get("kam_fraction_semantics")
+                != KAM_FRACTION_SEMANTICS
+            ):
+                return False
+            invariant_fraction = certification_status.get("kam_fraction")
+        if invariant_fraction is None:
+            return False
+        numeric_fraction = float(invariant_fraction)
+        return np.isfinite(numeric_fraction) and 0.0 <= numeric_fraction <= 1.0
+    return True
 
 
 def restore_or_refresh_frontier_certification_status_after_resume(
@@ -3326,16 +3731,19 @@ def finite_topology_rank_component(value, *, unit_interval=False):
 
 
 def topology_survival_rank_key(topology_entry):
+    invariant_torus_fraction = topology_entry.get("invariant_torus_fraction")
+    if (
+        invariant_torus_fraction is None
+        and topology_entry.get("kam_fraction_semantics") == KAM_FRACTION_SEMANTICS
+    ):
+        invariant_torus_fraction = topology_entry.get("kam_fraction")
     return (
         finite_topology_rank_component(
             topology_entry.get("survival_fraction"),
             unit_interval=True,
         ),
         finite_topology_rank_component(
-            topology_entry.get(
-                "invariant_torus_fraction",
-                topology_entry.get("kam_fraction"),
-            ),
+            invariant_torus_fraction,
             unit_interval=True,
         ),
         finite_topology_rank_component(topology_entry.get("confinement_score")),
@@ -3343,7 +3751,10 @@ def topology_survival_rank_key(topology_entry):
 
 
 def topology_entry_is_artifact_hardware_clean(topology_entry):
-    return topology_entry is not None and topology_entry.get("artifact_hardware_ok") is True
+    return (
+        topology_entry is not None
+        and topology_entry.get("artifact_hardware_ok") is True
+    )
 
 
 def best_topology_certification_payload(certification_status):
@@ -3352,7 +3763,9 @@ def best_topology_certification_payload(certification_status):
         "BEST_TOPOLOGY_CERTIFICATION_OK": certification_status.get("ok"),
         "BEST_TOPOLOGY_CERTIFIED": certification_status.get("ok"),
         "BEST_TOPOLOGY_CERTIFICATION_REASON": certification_status.get("reason"),
-        "BEST_TOPOLOGY_CERTIFICATION_HARDWARE_OK": certification_status.get("hardware_ok"),
+        "BEST_TOPOLOGY_CERTIFICATION_HARDWARE_OK": certification_status.get(
+            "hardware_ok"
+        ),
         "BEST_TOPOLOGY_CERTIFICATION_INVARIANT_TORUS_FRACTION": certification_status.get(
             "invariant_torus_fraction"
         ),
@@ -3362,13 +3775,19 @@ def best_topology_certification_payload(certification_status):
         "BEST_TOPOLOGY_CERTIFICATION_INVARIANT_TORUS_DEFICIT": certification_status.get(
             "invariant_torus_deficit"
         ),
-        "BEST_TOPOLOGY_CERTIFICATION_KAM_FRACTION": certification_status.get("kam_fraction"),
+        "BEST_TOPOLOGY_CERTIFICATION_KAM_FRACTION": certification_status.get(
+            "kam_fraction"
+        ),
         "BEST_TOPOLOGY_CERTIFICATION_KAM_MIN": certification_status.get("kam_min"),
-        "BEST_TOPOLOGY_CERTIFICATION_KAM_DEFICIT": certification_status.get("kam_deficit"),
+        "BEST_TOPOLOGY_CERTIFICATION_KAM_DEFICIT": certification_status.get(
+            "kam_deficit"
+        ),
     }
 
 
-def frontier_reportable_success(is_frontier_mode, final_feasibility_ok, certification_status):
+def frontier_reportable_success(
+    is_frontier_mode, final_feasibility_ok, certification_status
+):
     if not is_frontier_mode:
         return None
     return bool(final_feasibility_ok and certification_status.get("ok") is True)
@@ -3520,13 +3939,10 @@ def maybe_record_topology_score(
         topo_entry,
     )
 
-    if (
-        not topo_result["broken"]
-        and (
-            "best_topology" not in run_dict
-            or topology_survival_rank_key(topo_entry)
-            > topology_survival_rank_key(run_dict["best_topology"])
-        )
+    if not topo_result["broken"] and (
+        "best_topology" not in run_dict
+        or topology_survival_rank_key(topo_entry)
+        > topology_survival_rank_key(run_dict["best_topology"])
     ):
         run_dict["best_topology"] = topo_entry
         write_topology_checkpoint_artifacts(
@@ -3604,12 +4020,168 @@ def validate_confinement_surrogate_args(args):
         raise ValueError("--confinement-surrogate-worst-k must be positive")
     if not (0.0 < args.confinement_surrogate_early_threshold <= 1.0):
         raise ValueError("--confinement-surrogate-early-threshold must be in (0, 1]")
-    if min(
-        args.confinement_surrogate_mean_weight,
-        args.confinement_surrogate_worst_weight,
-        args.confinement_surrogate_early_weight,
-    ) < 0.0:
+    if (
+        min(
+            args.confinement_surrogate_mean_weight,
+            args.confinement_surrogate_worst_weight,
+            args.confinement_surrogate_early_weight,
+        )
+        < 0.0
+    ):
         raise ValueError("--confinement-surrogate-* weights must be non-negative")
+
+
+def validate_residue_objective_args(args):
+    residue_objective_weight = float(args.residue_objective_weight)
+    if residue_objective_weight < 0.0 or not np.isfinite(residue_objective_weight):
+        raise ValueError("--residue-objective-weight must be finite and non-negative")
+    positive_fields = {
+        "--residue-objective-radial-label-scale": args.residue_objective_radial_label_scale,
+        "--residue-objective-scale": args.residue_objective_scale,
+        "--residue-objective-local-difference-step": args.residue_objective_local_difference_step,
+        "--residue-objective-rtol": args.residue_objective_rtol,
+        "--residue-objective-atol": args.residue_objective_atol,
+        "--residue-objective-max-step": args.residue_objective_max_step,
+        "--residue-objective-newton-residual-tolerance": args.residue_objective_newton_residual_tolerance,
+        "--residue-objective-winding-tolerance": args.residue_objective_winding_tolerance,
+        "--residue-objective-max-newton-step-norm": args.residue_objective_max_newton_step_norm,
+    }
+    for flag_name, value in positive_fields.items():
+        numeric_value = float(value)
+        if numeric_value <= 0.0 or not np.isfinite(numeric_value):
+            raise ValueError(f"{flag_name} must be finite and positive")
+    nonnegative_fields = {
+        "--residue-objective-r-satisfied": args.residue_objective_r_satisfied,
+        "--residue-objective-min-bphi-over-b": args.residue_objective_min_bphi_over_b,
+        "--residue-objective-det-tolerance": args.residue_objective_det_tolerance,
+    }
+    for flag_name, value in nonnegative_fields.items():
+        numeric_value = float(value)
+        if numeric_value < 0.0 or not np.isfinite(numeric_value):
+            raise ValueError(f"{flag_name} must be finite and non-negative")
+    if int(args.residue_objective_samples_per_full_torus) < 8:
+        raise ValueError("--residue-objective-samples-per-full-torus must be >= 8")
+    if int(args.residue_objective_max_newton_iterations) <= 0:
+        raise ValueError("--residue-objective-max-newton-iterations must be positive")
+    if residue_objective_weight == 0.0:
+        return
+    if args.residue_objective_targets_json is None:
+        raise ValueError(
+            "--residue-objective-targets-json is required when "
+            "--residue-objective-weight is nonzero"
+        )
+    if args.residue_objective_seeds_json is None:
+        raise ValueError(
+            "--residue-objective-seeds-json is required when "
+            "--residue-objective-weight is nonzero"
+        )
+    if args.residue_objective_axis_r is None:
+        raise ValueError(
+            "--residue-objective-axis-r is required when "
+            "--residue-objective-weight is nonzero"
+        )
+    axis_r = float(args.residue_objective_axis_r)
+    axis_z = float(args.residue_objective_axis_z)
+    if axis_r <= 0.0 or not np.isfinite(axis_r) or not np.isfinite(axis_z):
+        raise ValueError("--residue-objective-axis-* must be finite with axis-r > 0")
+
+
+def build_residue_objective_from_args(args, biot_savart):
+    residue_objective_weight = float(args.residue_objective_weight)
+    if residue_objective_weight == 0.0:
+        return None
+    targets = load_residue_objective_targets(args.residue_objective_targets_json)
+    target_manifest_id = residue_objective_target_manifest_id(targets)
+    validation_id, branch_seeds = load_residue_objective_seeds(
+        args.residue_objective_seeds_json,
+        target_manifest_id=target_manifest_id,
+    )
+    chart = PoincareChart(
+        axis_r=float(args.residue_objective_axis_r),
+        axis_z=float(args.residue_objective_axis_z),
+        poloidal_orientation=int(args.residue_objective_poloidal_orientation),
+        radial_label_scale=float(args.residue_objective_radial_label_scale),
+    )
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=float(args.residue_objective_rtol),
+        atol=float(args.residue_objective_atol),
+        max_step=float(args.residue_objective_max_step),
+        samples_per_full_torus=int(args.residue_objective_samples_per_full_torus),
+        min_bphi_over_b=float(args.residue_objective_min_bphi_over_b),
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=float(args.residue_objective_newton_residual_tolerance),
+        winding_tolerance=float(args.residue_objective_winding_tolerance),
+        det_tolerance=float(args.residue_objective_det_tolerance),
+        max_iterations=int(args.residue_objective_max_newton_iterations),
+        max_step_norm=float(args.residue_objective_max_newton_step_norm),
+    )
+    return BiotSavartGreeneResidueObjective(
+        biot_savart,
+        targets=targets,
+        chart=chart,
+        branch_seeds=branch_seeds,
+        objective_weight=residue_objective_weight,
+        residue_scale=float(args.residue_objective_scale),
+        target_manifest_id=target_manifest_id,
+        validation_id=validation_id,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+        r_satisfied=float(args.residue_objective_r_satisfied),
+        local_difference_step=float(args.residue_objective_local_difference_step),
+    )
+
+
+def residue_objective_payload_from_search_eval(search_eval):
+    if (
+        search_eval is not None
+        and search_eval.get("residue_objective_payload") is not None
+    ):
+        payload = dict(search_eval["residue_objective_payload"])
+        residue_grad = np.asarray(search_eval["dJ_residue_objective"], dtype=float)
+        return {**payload, "gradient_norm": float(np.linalg.norm(residue_grad))}
+    objective = globals().get("JResidueObjective")
+    if objective is None:
+        return disabled_residue_objective_payload(
+            target_manifest_id="",
+            objective_weight=0.0,
+            residue_scale=1.0,
+        )
+    return objective.to_json_dict()
+
+
+def residue_objective_results_payload(search_eval):
+    payload = residue_objective_payload_from_search_eval(search_eval)
+    enabled = bool(payload["enabled"])
+    return {
+        "GREENE_RESIDUE_OBJECTIVE_ENABLED": enabled,
+        "GREENE_RESIDUE_OBJECTIVE_TARGET_MANIFEST_ID": payload["target_manifest_id"],
+        "GREENE_RESIDUE_OBJECTIVE_VALIDATION_ID": payload["validation_id"],
+        "GREENE_RESIDUE_OBJECTIVE_WEIGHT": payload["objective_weight"],
+        "GREENE_RESIDUE_OBJECTIVE_SCALE": payload["residue_scale"],
+        "GREENE_RESIDUE_OBJECTIVE_VALUE": payload["value"],
+        "GREENE_RESIDUE_OBJECTIVE_GRADIENT_NORM": payload.get("gradient_norm"),
+        "GREENE_RESIDUE_OBJECTIVE_PAYLOAD": payload,
+        "GREENE_RESIDUE_OBJECTIVE_ARCHIVE_FILENAME": (
+            GREENE_RESIDUE_OBJECTIVE_ARCHIVE_FILENAME if enabled else None
+        ),
+    }
+
+
+def record_residue_objective_diagnostics(out_dir, accepted_iteration, objective_eval):
+    payload = objective_eval.get("residue_objective_payload")
+    if payload is None or payload["enabled"] is not True:
+        return
+    append_jsonl_artifact(
+        os.path.join(out_dir, GREENE_RESIDUE_OBJECTIVE_ARCHIVE_FILENAME),
+        {
+            "schema_version": GREENE_RESIDUE_OBJECTIVE_ARCHIVE_SCHEMA_VERSION,
+            "accepted_iteration": int(accepted_iteration),
+            "residue_objective": residue_objective_payload_from_search_eval(
+                objective_eval
+            ),
+        },
+    )
 
 
 def validate_single_stage_current_args(args):
@@ -3628,9 +4200,8 @@ def validate_single_stage_current_args(args):
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
-    if (
-        banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A
-        and not bool(getattr(args, "offspec_replay_debug_only", False))
+    if banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A and not bool(
+        getattr(args, "offspec_replay_debug_only", False)
     ):
         raise ValueError(
             f"--banana-current-max-A must be in the interval "
@@ -3729,6 +4300,9 @@ class RunIdentityConfig:
     warm_start_surface_stem: str | None = None
     stage2_seed_surf_path: str | None = None
     seed_regime: str | None = None
+    residue_objective_weight: float = 0.0
+    residue_objective_target_manifest_id: str | None = None
+    residue_objective_validation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3850,8 +4424,12 @@ class BoundedImprovementReward(Optimizable):
         if not np.isfinite(self.reference):
             raise ValueError("BoundedImprovementReward requires a finite reference")
         if not np.isfinite(self.scale) or self.scale <= 0.0:
-            raise ValueError("BoundedImprovementReward requires a positive finite scale")
-        depends_on = [metric_objective] if isinstance(metric_objective, Optimizable) else []
+            raise ValueError(
+                "BoundedImprovementReward requires a positive finite scale"
+            )
+        depends_on = (
+            [metric_objective] if isinstance(metric_objective, Optimizable) else []
+        )
         super().__init__(depends_on=depends_on)
 
     def _scaled_delta(self):
@@ -3876,9 +4454,12 @@ class BoundedImprovementReward(Optimizable):
                         )
                     }
                 )
-            return lambda objective_optimizable: prefactor * np.asarray(
-                partial_gradient(objective_optimizable),
-                dtype=float,
+            return lambda objective_optimizable: (
+                prefactor
+                * np.asarray(
+                    partial_gradient(objective_optimizable),
+                    dtype=float,
+                )
             )
         return prefactor * np.asarray(self.metric_objective.dJ(), dtype=float)
 
@@ -4124,6 +4705,7 @@ def make_run_identity_config(
     effective_num_surfaces: int | None = None,
     effective_inner_surface_ratio: float | None = None,
     num_banana_current_controls: int = 1,
+    residue_objective=None,
 ):
     resolved_contract = (
         resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
@@ -4160,10 +4742,14 @@ def make_run_identity_config(
         alm_qs_threshold=getattr(args, "alm_qs_threshold", None),
         alm_boozer_threshold=getattr(args, "alm_boozer_threshold", None),
         alm_iota_penalty_threshold=getattr(args, "alm_iota_penalty_threshold", None),
-        alm_length_penalty_threshold=getattr(args, "alm_length_penalty_threshold", None),
+        alm_length_penalty_threshold=getattr(
+            args, "alm_length_penalty_threshold", None
+        ),
         single_stage_goal_mode=(
             # Preserve legacy run fingerprints for explicit/implicit target-mode equivalence.
-            args.single_stage_goal_mode if args.single_stage_goal_mode != "target" else None
+            args.single_stage_goal_mode
+            if args.single_stage_goal_mode != "target"
+            else None
         ),
         frontier_kam_min=(
             float(getattr(args, "frontier_kam_min", 0.0))
@@ -4275,6 +4861,13 @@ def make_run_identity_config(
             == _SINGLE_STAGE_SEED_REGIME_AUTO
             else args.seed_regime
         ),
+        residue_objective_weight=float(getattr(args, "residue_objective_weight", 0.0)),
+        residue_objective_target_manifest_id=(
+            None if residue_objective is None else residue_objective.target_manifest_id
+        ),
+        residue_objective_validation_id=(
+            None if residue_objective is None else residue_objective.validation_id
+        ),
     )
 
 
@@ -4284,6 +4877,17 @@ def build_run_identity_config(config):
         if (
             field.name == "single_stage_banana_current_coordinate_scaling"
             and value == BANANA_CURRENT_COORDINATE_SCALING_NONE
+        ):
+            continue
+        if field.name == "residue_objective_weight" and float(value) == 0.0:
+            continue
+        if (
+            field.name
+            in {
+                "residue_objective_target_manifest_id",
+                "residue_objective_validation_id",
+            }
+            and value is None
         ):
             continue
         values.append(value)
@@ -4304,27 +4908,39 @@ def validate_boozer_stage_refinement_args(
         else surface_mode_contract
     )
     if args.constraint_method != "penalty":
-        raise ValueError("--boozer-stage-refinement currently requires --constraint-method=penalty")
+        raise ValueError(
+            "--boozer-stage-refinement currently requires --constraint-method=penalty"
+        )
     if not surface_mode_supports_boozer_stage_refinement(resolved_contract):
         raise ValueError(
             "--boozer-stage-refinement currently requires "
             f"--surface-mode={SINGLE_SURFACE} (legacy --num-surfaces=1)"
         )
     if args.basin_hops > 0:
-        raise ValueError("--boozer-stage-refinement is not supported with --basin-hops > 0")
+        raise ValueError(
+            "--boozer-stage-refinement is not supported with --basin-hops > 0"
+        )
     if args.boozer_stage != "initial":
-        raise ValueError("--boozer-stage-refinement currently requires --boozer-stage=initial")
+        raise ValueError(
+            "--boozer-stage-refinement currently requires --boozer-stage=initial"
+        )
     if args.refinement_boozer_stage != "final":
-        raise ValueError("--boozer-stage-refinement currently requires --refinement-boozer-stage=final")
+        raise ValueError(
+            "--boozer-stage-refinement currently requires --refinement-boozer-stage=final"
+        )
     if constraint_weight is None:
         raise ValueError(
             "--boozer-stage-refinement currently requires least-squares Boozer initialization "
             "(--constraint-weight >= 0)"
         )
     if args.refinement_maxiter <= 0:
-        raise ValueError("--refinement-maxiter must be positive when --boozer-stage-refinement is enabled")
+        raise ValueError(
+            "--refinement-maxiter must be positive when --boozer-stage-refinement is enabled"
+        )
     if args.refinement_chunk_maxiter <= 0:
-        raise ValueError("--refinement-chunk-maxiter must be positive when --boozer-stage-refinement is enabled")
+        raise ValueError(
+            "--refinement-chunk-maxiter must be positive when --boozer-stage-refinement is enabled"
+        )
     if args.refinement_max_stalled_chunks <= 0:
         raise ValueError(
             "--refinement-max-stalled-chunks must be positive when --boozer-stage-refinement is enabled"
@@ -4370,10 +4986,7 @@ def validate_single_stage_alm_formulation_args(args):
         # the saved ALM multiplier. thresholded_physics + ALM is unaffected because
         # LENGTH_WEIGHT does not enter JF in that mode (see single_stage_objectives
         # evaluate_base_objective). See .alm_audit/FIX_PLAN.md S1.
-        if (
-            args.constraint_method == "alm"
-            and float(args.length_weight) != 0.0
-        ):
+        if args.constraint_method == "alm" and float(args.length_weight) != 0.0:
             raise ValueError(
                 "ALM weighted_sum formulation owns the coil-length constraint; "
                 f"--length-weight must be 0 in this mode (got {args.length_weight}). "
@@ -4533,7 +5146,10 @@ def current_frontier_goal_mode_impl():
     frontier_goal_config = current_frontier_goal_config()
     if frontier_goal_config is None:
         return FRONTIER_GOAL_MODE_IMPL
-    if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT:
+    if (
+        frontier_goal_config.scalarization_type
+        == FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT
+    ):
         return "frontier_achievement_chebyshev_v1"
     if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_EPSILON:
         return "frontier_epsilon_constraint_v1"
@@ -4618,7 +5234,9 @@ def preserved_incumbent_eligible(run_dict):
         return False
     if search_eval.get("finite_eval_ok") is False:
         return False
-    if frontier_mode_enabled() and not bool(search_eval.get("frontier_trust_ok", False)):
+    if frontier_mode_enabled() and not bool(
+        search_eval.get("frontier_trust_ok", False)
+    ):
         return False
     return bool(np.isfinite(float(search_eval["total"])))
 
@@ -4801,14 +5419,21 @@ def current_state_matches_best_hardware_near_miss_incumbent(
         return False
     metric = hardware_near_miss_metric(run_dict, hardware_status)
     best_metric = run_dict.get("best_hardware_near_miss_metric")
-    return best_metric is not None and metric == tuple(best_metric) and np.array_equal(
-        np.asarray(run_dict["accepted_x"], dtype=float),
-        np.asarray(incumbent.x, dtype=float),
+    return (
+        best_metric is not None
+        and metric == tuple(best_metric)
+        and np.array_equal(
+            np.asarray(run_dict["accepted_x"], dtype=float),
+            np.asarray(incumbent.x, dtype=float),
+        )
     )
 
 
 def frontier_goal_mode_warning_message(frontier_goal_config):
-    if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT:
+    if (
+        frontier_goal_config.scalarization_type
+        == FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT
+    ):
         return (
             "INFO: --single-stage-goal-mode=frontier uses an achievement/Chebyshev "
             "tradeoff score: iota, volume, QA error, and Boozer residual are compared "
@@ -4842,13 +5467,13 @@ def frontier_goal_mode_warning_message(frontier_goal_config):
     )
 
 
-def apply_frontier_scalarization_override(objective_eval, *, alm_formulation="weighted_sum"):
+def apply_frontier_scalarization_override(
+    objective_eval, *, alm_formulation="weighted_sum"
+):
     frontier_goal_config = current_frontier_goal_config()
     surface_iota_terms_local = globals().get("surface_iota_terms")
     surface_iota_term = (
-        None
-        if not surface_iota_terms_local
-        else surface_iota_terms_local[-1]
+        None if not surface_iota_terms_local else surface_iota_terms_local[-1]
     )
     return _apply_frontier_scalarization_override_impl(
         objective_eval,
@@ -4893,7 +5518,8 @@ def resolve_single_stage_goal_objective_terms(
     if goal_mode == "frontier":
         frontier_goal_config = require_frontier_goal_config(frontier_goal_config)
         return {
-            "JnonQSRatioObjective": (1.0 / frontier_goal_config.qs_reference) * JnonQSRatio,
+            "JnonQSRatioObjective": (1.0 / frontier_goal_config.qs_reference)
+            * JnonQSRatio,
             "JBoozerResidualObjective": (1.0 / frontier_goal_config.boozer_reference)
             * JBoozerResidual,
             "effective_res_weight": frontier_goal_config.effective_boozer_weight,
@@ -4914,7 +5540,9 @@ def resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT):
     return {
         "JNonQSObjective": objective_nonqs,
         "JBoozerObjective": objective_boozer,
-        "effective_res_weight": RES_WEIGHT if objective_boozer is None else EFFECTIVE_RES_WEIGHT,
+        "effective_res_weight": RES_WEIGHT
+        if objective_boozer is None
+        else EFFECTIVE_RES_WEIGHT,
         "effective_iotas_weight": (
             IOTAS_WEIGHT if objective_nonqs is None else EFFECTIVE_IOTAS_WEIGHT
         ),
@@ -4987,7 +5615,9 @@ def build_single_stage_iota_objective(
     raise ValueError(f"Unsupported single-stage goal mode {goal_mode!r}")
 
 
-def build_single_stage_volume_objective(surface_volume_term, *, goal_mode, frontier_goal_config=None):
+def build_single_stage_volume_objective(
+    surface_volume_term, *, goal_mode, frontier_goal_config=None
+):
     if goal_mode == "target":
         return None
     if goal_mode == "frontier":
@@ -5086,15 +5716,23 @@ def build_best_feasible_results_summary(
         surface_status = run_dict["surface_status"]
         search_eval = run_dict["search_eval"]
         topology_status = run_dict["topology_gate_status"]
-        certification_status = frontier_certification_status_from_search_eval(search_eval)
+        certification_status = frontier_certification_status_from_search_eval(
+            search_eval
+        )
         return {
             "BEST_FEASIBLE_AVAILABLE": True,
             "BEST_FEASIBLE_STAGE": run_dict.get("best_feasible_stage"),
             "BEST_FEASIBLE_SEARCH_OBJECTIVE_J": float(search_eval["total"]),
-            "BEST_FEASIBLE_BASE_OBJECTIVE_J": float(search_eval.get("physics_total", search_eval["total"])),
-            "BEST_FEASIBLE_QA_OBJECTIVE": float(search_eval.get("J_QS")) if search_eval.get("J_QS") is not None else None,
+            "BEST_FEASIBLE_BASE_OBJECTIVE_J": float(
+                search_eval.get("physics_total", search_eval["total"])
+            ),
+            "BEST_FEASIBLE_QA_OBJECTIVE": float(search_eval.get("J_QS"))
+            if search_eval.get("J_QS") is not None
+            else None,
             "BEST_FEASIBLE_BOOZER_OBJECTIVE": (
-                float(search_eval.get("J_Boozer")) if search_eval.get("J_Boozer") is not None else None
+                float(search_eval.get("J_Boozer"))
+                if search_eval.get("J_Boozer") is not None
+                else None
             ),
             "BEST_FEASIBLE_FRONTIER_RANK_OBJECTIVE_J": (
                 float(search_eval.get("frontier_rank_total"))
@@ -5117,10 +5755,16 @@ def build_best_feasible_results_summary(
                 prefix="BEST_FEASIBLE_",
             ),
             "BEST_FEASIBLE_SURFACE_STACK_OK": bool(surface_status["success"]),
-            "BEST_FEASIBLE_SELF_INTERSECTING": bool(any(surface_status["self_intersections"])),
-            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": bool(topology_status["success"]),
+            "BEST_FEASIBLE_SELF_INTERSECTING": bool(
+                any(surface_status["self_intersections"])
+            ),
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": bool(
+                topology_status["success"]
+            ),
             "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_STATE": topology_status.get("state"),
-            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_ERROR": topology_status.get("evaluation_error"),
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_ERROR": topology_status.get(
+                "evaluation_error"
+            ),
             "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_DIAGNOSTICS": build_topology_gate_diagnostics(
                 topology_status,
                 artifact_role="best_feasible_final_topology_gate",
@@ -5218,6 +5862,7 @@ def build_single_stage_objective_bundle(
     goal_mode="target",
     frontier_goal_config=None,
     boozer_residual_threshold=0.0,
+    JResidueObjective=None,
 ):
     boozer_terms = build_boozer_derived_objective_terms(
         stage,
@@ -5306,12 +5951,11 @@ def build_single_stage_objective_bundle(
         JCurveLengthMin=JCurveLengthMin,
         width_min_threshold=SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
         width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
+        JResidueObjective=JResidueObjective,
     )
     return {
         "surface_iota_terms": surface_iota_terms,
-        "boozer_objective_biot_savarts": boozer_terms[
-            "boozer_objective_biot_savarts"
-        ],
+        "boozer_objective_biot_savarts": boozer_terms["boozer_objective_biot_savarts"],
         "nonQSs": nonQSs,
         "brs": brs,
         "curvelength": curvelength,
@@ -5335,6 +5979,7 @@ def build_single_stage_objective_bundle(
         "JPoloidalExtent": JPoloidalExtent,
         "JCoilWidth": JCoilWidth,
         "JCurveSelfIntersect": JCurveSelfIntersect,
+        "JResidueObjective": JResidueObjective,
         "JF": JF,
     }
 
@@ -5363,6 +6008,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JPoloidalExtent
     global JCoilWidth
     global JCurveSelfIntersect
+    global JResidueObjective
     global JF
 
     surface_iota_terms = objective_bundle["surface_iota_terms"]
@@ -5388,6 +6034,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JPoloidalExtent = objective_bundle["JPoloidalExtent"]
     JCoilWidth = objective_bundle["JCoilWidth"]
     JCurveSelfIntersect = objective_bundle["JCurveSelfIntersect"]
+    JResidueObjective = objective_bundle["JResidueObjective"]
     JF = objective_bundle["JF"]
 
 
@@ -5407,7 +6054,9 @@ def refresh_accepted_search_state(run_dict, accepted_stage):
     run_dict["J"] = current_search_eval["total"]
     run_dict["dJ"] = current_search_eval["grad"].copy()
     run_dict["search_eval"] = current_search_eval
-    run_dict["frontier_trust_status"] = evaluate_frontier_trust_status(current_search_eval)
+    run_dict["frontier_trust_status"] = evaluate_frontier_trust_status(
+        current_search_eval
+    )
     run_dict["accepted_boozer_stage"] = accepted_stage
     run_dict["x_prev"] = run_dict["accepted_x"].copy()
     run_dict["trial_hardware_status"] = None
@@ -5529,7 +6178,9 @@ def run_chunked_refinement(
     abort_reason = None
 
     while total_iterations < refinement_maxiter:
-        chunk_budget = min(refinement_chunk_maxiter, refinement_maxiter - total_iterations)
+        chunk_budget = min(
+            refinement_chunk_maxiter, refinement_maxiter - total_iterations
+        )
         chunk_result, chunk_incumbent = run_refinement_chunk(
             run_dict,
             current_seed_incumbent,
@@ -5641,9 +6292,7 @@ def resolve_single_stage_seed_regime(
     `autoresearch/scripts/run_one.py`; the two repos intentionally share this
     routing contract.
     """
-    requested_regime = str(
-        requested_seed_regime or _DEFAULT_SINGLE_STAGE_SEED_REGIME
-    )
+    requested_regime = str(requested_seed_regime or _DEFAULT_SINGLE_STAGE_SEED_REGIME)
     if constraint_method != "penalty":
         return _SINGLE_STAGE_SEED_REGIME_GLOBAL_SEARCH
     if init_only or basin_hops > 0 or num_surfaces != 1:
@@ -5747,6 +6396,7 @@ def evaluate_total_objective(
             width_max_threshold=resolved_width_max_threshold,
             JCurveSelfIntersect=JCurveSelfIntersect,
             SELFINT_WEIGHT=SELFINT_WEIGHT,
+            JResidueObjective=globals().get("JResidueObjective"),
         ),
         alm_formulation="weighted_sum",
     )
@@ -5781,6 +6431,7 @@ def evaluate_base_objective(
         ),
         JNonQSObjective=objective_terms["JNonQSObjective"],
         JBoozerObjective=objective_terms["JBoozerObjective"],
+        JResidueObjective=globals().get("JResidueObjective"),
         include_diagnostics=include_diagnostics,
     )
 
@@ -5883,6 +6534,7 @@ def evaluate_alm_objective(
             lcfs_minor_radius_threshold=TARGET_LCFS_MAX_MINOR_RADIUS_M,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
+            JResidueObjective=globals().get("JResidueObjective"),
             include_diagnostics=include_diagnostics,
         ),
         alm_formulation=args.alm_formulation,
@@ -5984,11 +6636,12 @@ def validate_resume_alm_state(resume_alm_state, constraint_names, constraint_sca
     ]
     if missing_fields:
         raise ValueError(
-            "ALM resume state missing required fields: "
-            + ", ".join(missing_fields)
+            "ALM resume state missing required fields: " + ", ".join(missing_fields)
         )
     current_constraint_names = [str(name) for name in constraint_names]
-    saved_constraint_names = [str(name) for name in resume_alm_state["constraint_names"]]
+    saved_constraint_names = [
+        str(name) for name in resume_alm_state["constraint_names"]
+    ]
     if saved_constraint_names != current_constraint_names:
         raise ValueError(
             "ALM resume constraint_names mismatch: "
@@ -6032,7 +6685,9 @@ def build_single_stage_alm_settings(args):
         feasibility_tol=args.alm_feas_tol,
         stationarity_tol=args.alm_stationarity_tol,
         trust_radius_init=(
-            None if float(args.alm_trust_radius_init) == 0.0 else args.alm_trust_radius_init
+            None
+            if float(args.alm_trust_radius_init) == 0.0
+            else args.alm_trust_radius_init
         ),
         trust_radius_min=args.alm_trust_radius_min,
         trust_radius_shrink=args.alm_trust_radius_shrink,
@@ -6072,14 +6727,10 @@ def _copy_single_stage_alm_eval_value(value):
     if isinstance(value, np.ndarray):
         return value.copy()
     if isinstance(value, list):
-        return [
-            item.copy() if isinstance(item, np.ndarray) else item
-            for item in value
-        ]
+        return [item.copy() if isinstance(item, np.ndarray) else item for item in value]
     if isinstance(value, tuple):
         return tuple(
-            item.copy() if isinstance(item, np.ndarray) else item
-            for item in value
+            item.copy() if isinstance(item, np.ndarray) else item for item in value
         )
     return value
 
@@ -6219,12 +6870,8 @@ def _safe_optional_ratio(numerator, denominator):
 def _sanitize_banana_current_fd_probe_result(result):
     if isinstance(result, dict):
         objective_total = result.get("objective_total")
-        resolved_success = bool(
-            result.get("success", objective_total is not None)
-        )
-        resolved_surface_success = bool(
-            result.get("surface_success", resolved_success)
-        )
+        resolved_success = bool(result.get("success", objective_total is not None))
+        resolved_surface_success = bool(result.get("surface_success", resolved_success))
         return {
             "success": resolved_success,
             "surface_success": resolved_surface_success,
@@ -6234,9 +6881,7 @@ def _sanitize_banana_current_fd_probe_result(result):
             "rejection_reason": result.get("rejection_reason"),
             "topology_state": result.get("topology_state"),
             "hardware_ok": (
-                None
-                if "hardware_ok" not in result
-                else bool(result.get("hardware_ok"))
+                None if "hardware_ok" not in result else bool(result.get("hardware_ok"))
             ),
         }
     return {
@@ -6293,11 +6938,7 @@ def _select_largest_abs_noncurrent_coordinate_indices(
     x = np.asarray(x, dtype=float)
     current_index_set = {int(index) for index in coordinate_indices}
     ranked_indices = sorted(
-        (
-            int(index)
-            for index in range(x.size)
-            if int(index) not in current_index_set
-        ),
+        (int(index) for index in range(x.size) if int(index) not in current_index_set),
         key=lambda index: abs(float(x[index])),
         reverse=True,
     )
@@ -6395,9 +7036,7 @@ def _build_relative_fd_coordinate_group(
             )
             abs_central_differences.append(abs(central_difference_per_unit))
         max_abs_objective_delta = (
-            None
-            if not successful_abs_deltas
-            else float(max(successful_abs_deltas))
+            None if not successful_abs_deltas else float(max(successful_abs_deltas))
         )
         mean_abs_objective_delta = (
             None
@@ -6480,9 +7119,7 @@ def build_banana_current_finite_difference_probe(
         current_indices,
         max_count=len(current_indices),
     )
-    objective_dof_names = tuple(
-        str(name) for name in objective_optimizable.dof_names
-    )
+    objective_dof_names = tuple(str(name) for name in objective_optimizable.dof_names)
     current_group = _build_relative_fd_coordinate_group(
         baseline_x=baseline_x,
         baseline_total=baseline_total,
@@ -6587,12 +7224,10 @@ def _banana_current_bound_activity(
                     None if not upper_is_finite else float(upper_bound_A - value_A)
                 ),
                 "at_lower_bound": bool(
-                    lower_is_finite
-                    and _bound_is_active(value_A, lower_bound_A)
+                    lower_is_finite and _bound_is_active(value_A, lower_bound_A)
                 ),
                 "at_upper_bound": bool(
-                    upper_is_finite
-                    and _bound_is_active(value_A, upper_bound_A)
+                    upper_is_finite and _bound_is_active(value_A, upper_bound_A)
                 ),
             }
         )
@@ -6611,7 +7246,9 @@ def _optimizer_bounds_arrays(objective_optimizable, active_optimizer_bounds=None
     if active_optimizer_bounds is None:
         return default_lower_bounds, default_upper_bounds
 
-    if hasattr(active_optimizer_bounds, "lb") and hasattr(active_optimizer_bounds, "ub"):
+    if hasattr(active_optimizer_bounds, "lb") and hasattr(
+        active_optimizer_bounds, "ub"
+    ):
         lower_bounds = np.asarray(active_optimizer_bounds.lb, dtype=float)
         upper_bounds = np.asarray(active_optimizer_bounds.ub, dtype=float)
     else:
@@ -6727,7 +7364,9 @@ def _gradient_report_fields(
     noncurrent_gradient_l2 = float(np.linalg.norm(noncurrent_gradient))
     full_gradient_l2 = float(np.linalg.norm(physical_report_gradient))
     return {
-        _gradient_report_key(prefix, "coordinate_gradients"): coordinate_gradient.tolist(),
+        _gradient_report_key(
+            prefix, "coordinate_gradients"
+        ): coordinate_gradient.tolist(),
         _gradient_report_key(prefix, "coordinate_gradient_l2"): coordinate_gradient_l2,
         _gradient_report_key(prefix, "noncurrent_gradient_l2"): noncurrent_gradient_l2,
         _gradient_report_key(prefix, "full_gradient_l2"): full_gradient_l2,
@@ -6811,8 +7450,12 @@ def _project_lbfgsb_gradient(
     projected_gradient = gradient_array.copy()
     fixed_coordinate_mask = lower_active & upper_active
     projected_gradient[fixed_coordinate_mask] = 0.0
-    projected_gradient[lower_active & ~fixed_coordinate_mask & (gradient_array > 0.0)] = 0.0
-    projected_gradient[upper_active & ~fixed_coordinate_mask & (gradient_array < 0.0)] = 0.0
+    projected_gradient[
+        lower_active & ~fixed_coordinate_mask & (gradient_array > 0.0)
+    ] = 0.0
+    projected_gradient[
+        upper_active & ~fixed_coordinate_mask & (gradient_array < 0.0)
+    ] = 0.0
     return projected_gradient
 
 
@@ -7040,9 +7683,9 @@ def record_banana_current_diagnostics_report(
     )
     if rejected_trial:
         diagnostics_state["latest_rejected_trial_report"] = report
-        diagnostics_state["rejected_trial_reports_recorded"] = int(
-            diagnostics_state.get("rejected_trial_reports_recorded", 0)
-        ) + 1
+        diagnostics_state["rejected_trial_reports_recorded"] = (
+            int(diagnostics_state.get("rejected_trial_reports_recorded", 0)) + 1
+        )
         rejected_reports = diagnostics_state.setdefault(
             "recent_rejected_trial_reports",
             [],
@@ -7050,9 +7693,9 @@ def record_banana_current_diagnostics_report(
         rejected_reports.append(report)
         if len(rejected_reports) > BANANA_CURRENT_DIAGNOSTIC_REJECT_REPORT_LIMIT:
             rejected_reports.pop(0)
-            diagnostics_state["rejected_trial_reports_dropped"] = int(
-                diagnostics_state.get("rejected_trial_reports_dropped", 0)
-            ) + 1
+            diagnostics_state["rejected_trial_reports_dropped"] = (
+                int(diagnostics_state.get("rejected_trial_reports_dropped", 0)) + 1
+            )
         return
     diagnostics_state["latest_accepted_report"] = report
     diagnostics_state.setdefault("accepted_reports", []).append(report)
@@ -7272,7 +7915,10 @@ def run_banana_current_rejected_trial_replay_study(
     try:
         for report_index, report in enumerate(rejected_reports):
             accepted_iteration = int(report["accepted_iteration"])
-            if str(accepted_iteration) not in replay_context_state["accepted_incumbents"]:
+            if (
+                str(accepted_iteration)
+                not in replay_context_state["accepted_incumbents"]
+            ):
                 replay_reports.append(
                     {
                         "report_index": int(report_index),
@@ -7317,8 +7963,7 @@ def run_banana_current_rejected_trial_replay_study(
                 accepted_iterations=accepted_iteration,
             )
             replay_success = bool(
-                replay_probe["success"]
-                and replay_probe["rejection_reason"] is None
+                replay_probe["success"] and replay_probe["rejection_reason"] is None
             )
             replay_reports.append(
                 {
@@ -7360,7 +8005,9 @@ def run_banana_current_rejected_trial_replay_study(
     rescued_replays = 0
     for replay_report in replay_reports:
         rejection_reason = replay_report.get("original_rejection_reason")
-        rejection_counts[rejection_reason] = rejection_counts.get(rejection_reason, 0) + 1
+        rejection_counts[rejection_reason] = (
+            rejection_counts.get(rejection_reason, 0) + 1
+        )
         if replay_report.get("replay_status") != "completed":
             continue
         completed_replays += 1
@@ -7598,7 +8245,9 @@ def current_preserved_timeout_alm_state() -> PreservedTimeoutALMState | None:
 
 
 def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
-    replay_config = globals().get("PRESERVED_TIMEOUT_REPLAY_CONFIG", PRESERVED_TIMEOUT_REPLAY_CONFIG)
+    replay_config = globals().get(
+        "PRESERVED_TIMEOUT_REPLAY_CONFIG", PRESERVED_TIMEOUT_REPLAY_CONFIG
+    )
     stage2_bs_path = globals().get("stage2_bs_path")
     stage2_results_path = globals().get("stage2_results_path")
     stage2_results_value = globals().get("stage2_results")
@@ -7627,10 +8276,10 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
     replay_num_banana_current_controls = replay_config.num_banana_current_controls
     if banana_current_state is not None:
         replay_banana_current_mode = banana_current_state.mode
-        replay_banana_current_coordinate_scaling = banana_current_state.coordinate_scaling
-        replay_num_banana_current_controls = (
-            banana_current_state.num_control_currents()
+        replay_banana_current_coordinate_scaling = (
+            banana_current_state.coordinate_scaling
         )
+        replay_num_banana_current_controls = banana_current_state.num_control_currents()
 
     def frontier_replay_value(replay_attr, config_attr):
         if isinstance(frontier_goal_config, FrontierGoalConfig):
@@ -7638,17 +8287,23 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         return getattr(replay_config, replay_attr)
 
     return PreservedTimeoutReplayConfig(
-        plasma_surf_filename=globals().get("plasma_surf_filename", replay_config.plasma_surf_filename),
+        plasma_surf_filename=globals().get(
+            "plasma_surf_filename", replay_config.plasma_surf_filename
+        ),
         plasma_surf_path=globals().get("file_loc", replay_config.plasma_surf_path),
         stage2_bs_path=(
-            replay_config.stage2_bs_path if stage2_bs_path is None else str(stage2_bs_path)
+            replay_config.stage2_bs_path
+            if stage2_bs_path is None
+            else str(stage2_bs_path)
         ),
         stage2_seed_surf_path=globals().get(
             "stage2_seed_surf_path",
             replay_config.stage2_seed_surf_path,
         ),
         stage2_results_path=(
-            replay_config.stage2_results_path if stage2_results_path is None else str(stage2_results_path)
+            replay_config.stage2_results_path
+            if stage2_results_path is None
+            else str(stage2_results_path)
         ),
         seed_artifact_role=replay_seed_artifact_role,
         offspec_replay_debug_only=replay_offspec_debug,
@@ -7657,8 +8312,12 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         ntor=globals().get("ntor", replay_config.ntor),
         nphi=globals().get("nphi", replay_config.nphi),
         ntheta=globals().get("ntheta", replay_config.ntheta),
-        constraint_weight=globals().get("CONSTRAINT_WEIGHT", replay_config.constraint_weight),
-        constraint_method=globals().get("CONSTRAINT_METHOD", replay_config.constraint_method),
+        constraint_weight=globals().get(
+            "CONSTRAINT_WEIGHT", replay_config.constraint_weight
+        ),
+        constraint_method=globals().get(
+            "CONSTRAINT_METHOD", replay_config.constraint_method
+        ),
         alm_formulation=globals().get("ALM_FORMULATION", replay_config.alm_formulation),
         max_iterations=globals().get("MAXITER", replay_config.max_iterations),
         target_volume=globals().get("vol_target", replay_config.target_volume),
@@ -7671,7 +8330,9 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             "EFFECTIVE_SEED_REGIME",
             replay_config.effective_seed_regime,
         ),
-        single_stage_goal_mode=globals().get("SINGLE_STAGE_GOAL_MODE", replay_config.single_stage_goal_mode),
+        single_stage_goal_mode=globals().get(
+            "SINGLE_STAGE_GOAL_MODE", replay_config.single_stage_goal_mode
+        ),
         single_stage_banana_current_mode=replay_banana_current_mode,
         single_stage_banana_current_coordinate_scaling=(
             replay_banana_current_coordinate_scaling
@@ -7683,14 +8344,20 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             if surface_data_value is None
             else tuple(float(entry["target_volume"]) for entry in surface_data_value)
         ),
-        frontier_iota_reference=frontier_replay_value("frontier_iota_reference", "iota_reference"),
+        frontier_iota_reference=frontier_replay_value(
+            "frontier_iota_reference", "iota_reference"
+        ),
         frontier_iota_scale=frontier_replay_value("frontier_iota_scale", "iota_scale"),
         frontier_volume_reference=frontier_replay_value(
             "frontier_volume_reference",
             "volume_reference",
         ),
-        frontier_volume_scale=frontier_replay_value("frontier_volume_scale", "volume_scale"),
-        frontier_qs_reference=frontier_replay_value("frontier_qs_reference", "qs_reference"),
+        frontier_volume_scale=frontier_replay_value(
+            "frontier_volume_scale", "volume_scale"
+        ),
+        frontier_qs_reference=frontier_replay_value(
+            "frontier_qs_reference", "qs_reference"
+        ),
         frontier_qs_scale=frontier_replay_value("frontier_qs_scale", "qs_scale"),
         frontier_boozer_reference=frontier_replay_value(
             "frontier_boozer_reference",
@@ -7764,7 +8431,9 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             "frontier_epsilon_penalty_weight",
             "epsilon_penalty_weight",
         ),
-        frontier_kam_min=globals().get("FRONTIER_KAM_MIN", replay_config.frontier_kam_min),
+        frontier_kam_min=globals().get(
+            "FRONTIER_KAM_MIN", replay_config.frontier_kam_min
+        ),
         stage2_policy_metadata=(
             stage2_policy_metadata_items(stage2_results_value)
             if stage2_results_value is not None
@@ -7967,7 +8636,9 @@ def _alm_result_view_from_search_eval(search_eval, multipliers):
             search_eval,
             "raw_surrogate_signed_constraint_values",
         ),
-        surrogate_signed_constraint_values=search_eval.get("surrogate_signed_constraint_values"),
+        surrogate_signed_constraint_values=search_eval.get(
+            "surrogate_signed_constraint_values"
+        ),
         final_hard_max_violation=_first_present_alm_eval_value(
             search_eval,
             "final_hard_max_violation",
@@ -8046,11 +8717,15 @@ def build_preserved_timeout_results_payload(
         "nphi": replay_config.nphi,
         "ntheta": replay_config.ntheta,
         "CONSTRAINT_WEIGHT": (
-            None if replay_config.constraint_weight is None else float(replay_config.constraint_weight)
+            None
+            if replay_config.constraint_weight is None
+            else float(replay_config.constraint_weight)
         ),
         "CONSTRAINT_METHOD": replay_config.constraint_method,
         "ALM_FORMULATION": (
-            replay_config.alm_formulation if replay_config.constraint_method == "alm" else None
+            replay_config.alm_formulation
+            if replay_config.constraint_method == "alm"
+            else None
         ),
         "REQUESTED_SEED_REGIME": replay_config.requested_seed_regime,
         "EFFECTIVE_SEED_REGIME": replay_config.effective_seed_regime,
@@ -8096,11 +8771,16 @@ def build_preserved_timeout_results_payload(
         ),
         "SELF_INTERSECTING": bool(run_dict["intersecting"]),
         **build_single_stage_banana_current_payload_fields(banana_current_state),
+        **residue_objective_results_payload(search_eval),
         **build_hardware_constraint_artifact_payload_fields(artifact_hardware_snapshot),
         **search_step_metrics_payload(run_dict),
-        "FINAL_TOPOLOGY_GATE_SUCCESS": bool(run_dict["topology_gate_status"]["success"]),
+        "FINAL_TOPOLOGY_GATE_SUCCESS": bool(
+            run_dict["topology_gate_status"]["success"]
+        ),
         "FINAL_TOPOLOGY_GATE_STATE": run_dict["topology_gate_status"].get("state"),
-        "FINAL_TOPOLOGY_GATE_ERROR": run_dict["topology_gate_status"].get("evaluation_error"),
+        "FINAL_TOPOLOGY_GATE_ERROR": run_dict["topology_gate_status"].get(
+            "evaluation_error"
+        ),
         "FINAL_TOPOLOGY_GATE_DIAGNOSTICS": build_topology_gate_diagnostics(
             run_dict["topology_gate_status"],
             artifact_role=f"{preservation_kind}_final_topology_gate",
@@ -8113,7 +8793,9 @@ def build_preserved_timeout_results_payload(
         "FRONTIER_TRUST_OK": search_eval.get("frontier_trust_ok"),
         **frontier_certification_results_payload(certification_status),
         **best_topology_results_payload(run_dict),
-        "FRONTIER_BOOZER_TRUST_THRESHOLD": search_eval.get("frontier_boozer_trust_threshold"),
+        "FRONTIER_BOOZER_TRUST_THRESHOLD": search_eval.get(
+            "frontier_boozer_trust_threshold"
+        ),
         "FRONTIER_BOOZER_TRUST_EXCESS": search_eval.get("frontier_boozer_trust_excess"),
         "FRONTIER_REFERENCE_IOTA": replay_config.frontier_iota_reference,
         "FRONTIER_REFERENCE_IOTA_SCALE": replay_config.frontier_iota_scale,
@@ -8167,7 +8849,9 @@ def build_preserved_timeout_results_payload(
     }
     if replay_config.constraint_method == "alm":
         if alm_runtime_state is None:
-            raise ValueError("alm_runtime_state is required when constraint_method='alm'")
+            raise ValueError(
+                "alm_runtime_state is required when constraint_method='alm'"
+            )
         final_multipliers = np.asarray(
             alm_runtime_state.multipliers,
             dtype=float,
@@ -8184,12 +8868,16 @@ def build_preserved_timeout_results_payload(
                     search_eval.get("stationarity_norm"),
                 ),
                 "ALM_FINAL_FEASIBILITY_TOL": run_dict.get("alm_feasibility_tolerance"),
-                "ALM_FINAL_STATIONARITY_TOL": run_dict.get("alm_stationarity_tolerance"),
+                "ALM_FINAL_STATIONARITY_TOL": run_dict.get(
+                    "alm_stationarity_tolerance"
+                ),
                 "ALM_FINAL_PENALTY": float(alm_runtime_state.penalty),
                 "ALM_FINAL_MULTIPLIERS": final_multipliers.tolist(),
                 **_jsonable_value(
                     build_alm_final_constraint_payload(
-                        _alm_result_view_from_search_eval(search_eval, final_multipliers)
+                        _alm_result_view_from_search_eval(
+                            search_eval, final_multipliers
+                        )
                     )
                 ),
             }
@@ -8548,9 +9236,7 @@ def build_single_stage_solver_checkpoint_state(
             "frontier_trust_rejects": run_dict.get("frontier_trust_rejects", 0),
         },
         alm_state=alm_state,
-        conditioning_seed_report=run_dict.get(
-            "frontier_conditioning_seed_report"
-        ),
+        conditioning_seed_report=run_dict.get("frontier_conditioning_seed_report"),
         conditioning_first_accepted_report=run_dict.get(
             "frontier_conditioning_first_accepted_report"
         ),
@@ -8628,6 +9314,7 @@ def build_total_objective(
     width_max_threshold=BANANA_WIDTH_MAX_M,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
+    JResidueObjective=None,
 ):
     return _build_total_objective_impl(
         JnonQSRatio,
@@ -8654,6 +9341,7 @@ def build_total_objective(
         width_max_threshold=width_max_threshold,
         JCurveSelfIntersect=JCurveSelfIntersect,
         SELFINT_WEIGHT=SELFINT_WEIGHT,
+        JResidueObjective=JResidueObjective,
     )
 
 
@@ -8691,6 +9379,7 @@ def finalize_surface_stack(
         )
     run_state["intersecting"] = any(run_state["surface_status"]["self_intersections"])
     return run_state["surface_status"]
+
 
 def normPlot(surf, bs, filename):
     """Plot normal magnetic field — delegates to shared norm_field_plot."""
@@ -8819,24 +9508,16 @@ def search_step_metrics_payload(run_dict):
         ),
         "SEARCH_STEP_OTHER_REJECTS": int(metrics["other_rejects"]),
         "SEARCH_STEP_OBJECTIVE_EVALS": int(metrics["objective_evaluations"]),
-        "SEARCH_STEP_FAST_OBJECTIVE_EVALS": int(
-            metrics["fast_objective_evaluations"]
-        ),
+        "SEARCH_STEP_FAST_OBJECTIVE_EVALS": int(metrics["fast_objective_evaluations"]),
         "SEARCH_STEP_DIAGNOSTIC_OBJECTIVE_EVALS": int(
             metrics["diagnostic_objective_evaluations"]
         ),
         "SEARCH_STEP_CURVATURE_PRECHECK_SECONDS": float(
             metrics["curvature_precheck_seconds"]
         ),
-        "SEARCH_STEP_SURFACE_SOLVE_SECONDS": float(
-            metrics["surface_solve_seconds"]
-        ),
-        "SEARCH_STEP_OBJECTIVE_EVAL_SECONDS": float(
-            metrics["objective_eval_seconds"]
-        ),
-        "SEARCH_STEP_TOPOLOGY_GATE_SECONDS": float(
-            metrics["topology_gate_seconds"]
-        ),
+        "SEARCH_STEP_SURFACE_SOLVE_SECONDS": float(metrics["surface_solve_seconds"]),
+        "SEARCH_STEP_OBJECTIVE_EVAL_SECONDS": float(metrics["objective_eval_seconds"]),
+        "SEARCH_STEP_TOPOLOGY_GATE_SECONDS": float(metrics["topology_gate_seconds"]),
         "SEARCH_STEP_HARDWARE_SNAPSHOT_SECONDS": float(
             metrics["hardware_snapshot_seconds"]
         ),
@@ -8871,9 +9552,8 @@ def current_curvature_traversal_policy():
 
 
 def curvature_traversal_precheck_enabled(policy):
-    return (
-        globals().get("CONSTRAINT_METHOD", "penalty") != "alm"
-        and (policy.band_ratio > 0.0 or policy.eval_budget > 0)
+    return globals().get("CONSTRAINT_METHOD", "penalty") != "alm" and (
+        policy.band_ratio > 0.0 or policy.eval_budget > 0
     )
 
 
@@ -8885,9 +9565,7 @@ def evaluate_curvature_traversal_precheck(x, metrics):
     precheck_start = time.perf_counter()
     JF.x = x
     max_curvature = float(np.max(banana_curve.kappa()))
-    used_budget = int(
-        run_dict.get("curvature_overcap_boozer_evals_this_iteration", 0)
-    )
+    used_budget = int(run_dict.get("curvature_overcap_boozer_evals_this_iteration", 0))
     decision = decide_curvature_traversal(
         max_curvature=max_curvature,
         curvature_threshold=CURVATURE_THRESHOLD,
@@ -9008,15 +9686,15 @@ def evaluate_search_step(x):
         Dictionary with objective value and gradient for the current search step.
     """
     step_start = time.perf_counter()
-    dx = np.linalg.norm(x - run_dict['x_prev'])
+    dx = np.linalg.norm(x - run_dict["x_prev"])
     metrics = search_step_metrics_for_run(run_dict)
     metrics["evaluations"] += 1
     metrics["last_step_norm"] = float(dx)
     outer_entry = surface_data[-1]
-    run_dict['x_prev'] = x.copy()
+    run_dict["x_prev"] = x.copy()
     print(f"Step size: {dx:.2e}")
 
-    run_dict['lscount'] += 1
+    run_dict["lscount"] += 1
     run_dict["trial_hardware_status"] = None
     run_dict.setdefault("invalid_state_rejects_total", 0)
     run_dict.setdefault("topology_gate_rejects", 0)
@@ -9031,7 +9709,7 @@ def evaluate_search_step(x):
     )
     search_gate = build_surface_search_gate_for_contract(
         active_surface_mode_contract,
-        run_dict['accepted_iterations'],
+        run_dict["accepted_iterations"],
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
@@ -9055,13 +9733,13 @@ def evaluate_search_step(x):
         x,
         JF,
         surface_data,
-        run_dict['surface_state'],
+        run_dict["surface_state"],
         vessel_surface=VV if len(surface_data) > 1 else None,
-        surface_gap_threshold=solver_search_gate['surface_gap_threshold'],
-        enforce_nesting=solver_search_gate['enforce_nesting'],
+        surface_gap_threshold=solver_search_gate["surface_gap_threshold"],
+        enforce_nesting=solver_search_gate["enforce_nesting"],
     )
     metrics["surface_solve_seconds"] += time.perf_counter() - surface_solve_start
-    success = stack_status['success']
+    success = stack_status["success"]
 
     rejection_increment = None
     rejection_reason = None
@@ -9071,7 +9749,7 @@ def evaluate_search_step(x):
     if success:
         search_surface_weights = build_surface_search_weights_for_contract(
             active_surface_mode_contract,
-            run_dict['accepted_iterations'],
+            run_dict["accepted_iterations"],
             MULTISURFACE_RAMP_ITERATIONS,
             INNER_SURFACE_INITIAL_WEIGHT,
         )
@@ -9082,8 +9760,8 @@ def evaluate_search_step(x):
         )
         metrics["objective_eval_seconds"] += time.perf_counter() - objective_eval_start
         record_search_step_objective_eval(metrics, objective_eval)
-        J = objective_eval['total']
-        dJ = objective_eval['grad']
+        J = objective_eval["total"]
+        dJ = objective_eval["grad"]
         frontier_trust_status = evaluate_frontier_trust_status(objective_eval)
         run_dict["frontier_trust_status"] = frontier_trust_status
         if frontier_trust_status["enabled"] and not frontier_trust_status["ok"]:
@@ -9115,8 +9793,7 @@ def evaluate_search_step(x):
             print(f"Hard invalidation reason: {hard_invalidation['reason']}")
             if hard_invalidation["fields"]:
                 print(
-                    "Invalid frontier fields: "
-                    + ", ".join(hard_invalidation["fields"])
+                    "Invalid frontier fields: " + ", ".join(hard_invalidation["fields"])
                 )
 
         if success:
@@ -9124,14 +9801,14 @@ def evaluate_search_step(x):
             topology_gate_start = time.perf_counter()
             topology_status = evaluate_search_topology_gate(
                 len(surface_data),
-                outer_entry['boozer_surface'].surface,
+                outer_entry["boozer_surface"].surface,
                 bs,
                 surface_mode_contract=active_surface_mode_contract,
             )
             metrics["topology_gate_seconds"] += (
                 time.perf_counter() - topology_gate_start
             )
-            run_dict['topology_gate_status'] = topology_status
+            run_dict["topology_gate_status"] = topology_status
             topology_state = _topology_gate_state(topology_status)
             if topology_state == "broken":
                 success = False
@@ -9147,15 +9824,17 @@ def evaluate_search_step(x):
                 )
                 topology_contract = _evaluate_frontier_topology_search_contract_impl(
                     topology_status,
-                    previous_objective=run_dict['J'],
+                    previous_objective=run_dict["J"],
                     penalty_scale=topology_gate_penalty_scale,
                 )
                 if topology_contract["reject"]:
                     if frontier_mode_enabled():
-                        topology_penalty = _evaluate_frontier_topology_search_penalty_impl(
-                            topology_status,
-                            previous_objective=run_dict['J'],
-                            penalty_scale=topology_gate_penalty_scale,
+                        topology_penalty = (
+                            _evaluate_frontier_topology_search_penalty_impl(
+                                topology_status,
+                                previous_objective=run_dict["J"],
+                                penalty_scale=topology_gate_penalty_scale,
+                            )
                         )
                         objective_eval = _apply_frontier_search_contract_penalties_impl(
                             objective_eval,
@@ -9173,7 +9852,7 @@ def evaluate_search_step(x):
                             f"{topology_penalty['penalty']:.6e} "
                             f"(deficit={topology_penalty['deficit']:.6e})"
                         )
-                        if topology_status['first_exit_time'] is not None:
+                        if topology_status["first_exit_time"] is not None:
                             print(
                                 "First topology exit at "
                                 f"t={topology_status['first_exit_time']:.6e}, "
@@ -9192,8 +9871,10 @@ def evaluate_search_step(x):
                             f"(fraction={topology_status['survival_fraction']:.3f}, "
                             f"threshold={topology_status['survival_threshold']:.3f})"
                         )
-                        print(f"Topology rejection increment = {rejection_increment:.6e}")
-                        if topology_status['first_exit_time'] is not None:
+                        print(
+                            f"Topology rejection increment = {rejection_increment:.6e}"
+                        )
+                        if topology_status["first_exit_time"] is not None:
                             print(
                                 "First topology exit at "
                                 f"t={topology_status['first_exit_time']:.6e}, "
@@ -9237,10 +9918,12 @@ def evaluate_search_step(x):
                         hardware_penalty_scale = float(
                             globals().get("HARDWARE_SEARCH_PENALTY_SCALE", 4.0)
                         )
-                        hardware_penalty = _evaluate_frontier_hardware_search_penalty_impl(
-                            hardware_status,
-                            previous_objective=run_dict["J"],
-                            penalty_scale=hardware_penalty_scale,
+                        hardware_penalty = (
+                            _evaluate_frontier_hardware_search_penalty_impl(
+                                hardware_status,
+                                previous_objective=run_dict["J"],
+                                penalty_scale=hardware_penalty_scale,
+                            )
                         )
                         objective_eval = _apply_frontier_search_contract_penalties_impl(
                             objective_eval,
@@ -9266,7 +9949,9 @@ def evaluate_search_step(x):
                         rejection_increment = hardware_contract["rejection_increment"]
                         print("/!\\ /!\\ Hardware constraints violated /!\\ /!\\")
                 elif hardware_contract["warning_only"]:
-                    print("/!\\ /!\\ Hardware constraints violated (warning only) /!\\ /!\\")
+                    print(
+                        "/!\\ /!\\ Hardware constraints violated (warning only) /!\\ /!\\"
+                    )
                 for violation in hardware_status["violations"]:
                     print(violation)
                 trial_surface_status = evaluate_surface_stack(
@@ -9316,42 +10001,48 @@ def evaluate_search_step(x):
                 )
 
         if success:
-            J = objective_eval['total']
-            dJ = objective_eval['grad']
-            run_dict['last_successful_eval'] = objective_eval
-            run_dict['last_successful_eval_weights'] = np.asarray(search_surface_weights).copy()
+            J = objective_eval["total"]
+            dJ = objective_eval["grad"]
+            run_dict["last_successful_eval"] = objective_eval
+            run_dict["last_successful_eval_weights"] = np.asarray(
+                search_surface_weights
+            ).copy()
             print(f"Volume: {outer_entry['boozer_surface'].surface.volume()}")
             print(f"Iota: {surface_iota_terms[-1].J()}")
             if len(surface_data) > 1:
-                print(f"Surface search weights: {objective_eval['surface_weights'].tolist()}")
+                print(
+                    f"Surface search weights: {objective_eval['surface_weights'].tolist()}"
+                )
                 print(f"Surface gate scale: {search_gate['gate_scale']:.6f}")
                 print(f"Adjacent surface gaps: {stack_status['adjacent_gaps']}")
                 print(f"Outer vessel gap: {stack_status['outer_vessel_gap']}")
 
     if not success:
-        if rejection_reason is None and not stack_status['success']:
+        if rejection_reason is None and not stack_status["success"]:
             run_dict["surface_solve_rejects"] += 1
             run_dict["invalid_state_rejects_total"] += 1
-        if stack_status['success']:
+        if stack_status["success"]:
             print("/!\\ /!\\ Candidate rejected after surface solve /!\\ /!\\")
         else:
-            run_dict['topology_gate_status'] = disabled_topology_gate_status(
+            run_dict["topology_gate_status"] = disabled_topology_gate_status(
                 TOPOLOGY_GATE_TMAX,
                 TOPOLOGY_GATE_TOL,
                 TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
             )
             print("/!\\ /!\\ Boozer surface rejected /!\\ /!\\")
-        if not all(stack_status['solve_success']):
+        if not all(stack_status["solve_success"]):
             print("Boozer solver failed")
-        if any(stack_status['self_intersections']):
+        if any(stack_status["self_intersections"]):
             print("Surface is self-intersecting")
         if len(surface_data) > 1:
-            if not stack_status['volumes_ordered']:
+            if not stack_status["volumes_ordered"]:
                 print("Surface volumes are not strictly ordered")
-            if not stack_status['gap_ok']:
+            if not stack_status["gap_ok"]:
                 print(f"Adjacent surfaces too close: {stack_status['adjacent_gaps']}")
-            if search_gate['enforce_nesting'] and not stack_status['nesting_ok']:
-                print(f"Surfaces are not nested on phi slices: {stack_status['bad_nesting_phis']}")
+            if search_gate["enforce_nesting"] and not stack_status["nesting_ok"]:
+                print(
+                    f"Surfaces are not nested on phi slices: {stack_status['bad_nesting_phis']}"
+                )
         hardware_status = run_dict.get("trial_hardware_status")
         if hardware_status is not None and not hardware_status["success"]:
             print("Hardware constraints violated")
@@ -9385,7 +10076,7 @@ def evaluate_search_step(x):
         # and produces y_k=0 if the step is ever accepted, safely skipping
         # the BFGS Hessian update.
         if rejection_increment is None:
-            rejection_increment = max(abs(run_dict['J']), 1.0)
+            rejection_increment = max(abs(run_dict["J"]), 1.0)
         record_search_step_rejection(
             metrics,
             rejection_reason=rejection_reason,
@@ -9393,10 +10084,10 @@ def evaluate_search_step(x):
             hardware_status=hardware_status,
             rejection_increment=rejection_increment,
         )
-        J = run_dict['J'] + rejection_increment
-        dJ = run_dict['dJ'].copy()
-        JF.x = run_dict['accepted_x']
-        restore_surface_states(surface_data, run_dict['surface_state'])
+        J = run_dict["J"] + rejection_increment
+        dJ = run_dict["dJ"].copy()
+        JF.x = run_dict["accepted_x"]
+        restore_surface_states(surface_data, run_dict["surface_state"])
     else:
         record_search_step_acceptance(metrics)
 
@@ -9404,14 +10095,22 @@ def evaluate_search_step(x):
     if CONSTRAINT_METHOD == "alm":
         metric_eval = objective_eval
         if metric_eval is None or "constraint_values" not in metric_eval:
-            metric_eval = run_dict.get("last_successful_eval", run_dict.get("search_eval"))
+            metric_eval = run_dict.get(
+                "last_successful_eval", run_dict.get("search_eval")
+            )
         if metric_eval is not None and "constraint_values" in metric_eval:
-            feasibility_values = np.asarray(metric_eval["feasibility_values"], dtype=float)
-            dual_update_values = np.asarray(metric_eval["dual_update_values"], dtype=float)
+            feasibility_values = np.asarray(
+                metric_eval["feasibility_values"], dtype=float
+            )
+            dual_update_values = np.asarray(
+                metric_eval["dual_update_values"], dtype=float
+            )
             evaluation.update(_copy_single_stage_alm_passthrough_fields(metric_eval))
             evaluation.update(
                 {
-                    "constraint_values": np.asarray(metric_eval["constraint_values"], dtype=float),
+                    "constraint_values": np.asarray(
+                        metric_eval["constraint_values"], dtype=float
+                    ),
                     "max_violation": float(metric_eval["max_violation"]),
                     "stationarity_norm": float(metric_eval["stationarity_norm"]),
                     "metric_grad": np.asarray(
@@ -9433,7 +10132,9 @@ def evaluate_search_step(x):
                     "max_feasibility_violation": float(
                         metric_eval.get(
                             "max_feasibility_violation",
-                            np.max(feasibility_values) if feasibility_values.size > 0 else 0.0,
+                            np.max(feasibility_values)
+                            if feasibility_values.size > 0
+                            else 0.0,
                         )
                     ),
                     "base_total": float(
@@ -9486,7 +10187,7 @@ def callback(x):
         x: Current degrees of freedom (coil parameters) from accepted step
     """
     # Update count for tracking
-    run_dict['lscount'] = 0
+    run_dict["lscount"] = 0
     run_dict["curvature_overcap_boozer_evals_this_iteration"] = 0
     outer_entry = surface_data[-1]
 
@@ -9496,42 +10197,42 @@ def callback(x):
     )
     search_surface_weights = build_surface_search_weights_for_contract(
         active_surface_mode_contract,
-        run_dict['accepted_iterations'],
+        run_dict["accepted_iterations"],
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
     )
     search_gate = build_surface_search_gate_for_contract(
         active_surface_mode_contract,
-        run_dict['accepted_iterations'],
+        run_dict["accepted_iterations"],
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
     )
     if (
-        'last_successful_eval' in run_dict
+        "last_successful_eval" in run_dict
         and np.array_equal(
-            run_dict.get('last_successful_eval_weights', None),
+            run_dict.get("last_successful_eval_weights", None),
             search_surface_weights,
         )
-        and search_eval_has_diagnostics(run_dict['last_successful_eval'])
+        and search_eval_has_diagnostics(run_dict["last_successful_eval"])
     ):
-        objective_eval = run_dict['last_successful_eval']
+        objective_eval = run_dict["last_successful_eval"]
     else:
         objective_eval = evaluate_search_objective(
             search_surface_weights,
             include_diagnostics=True,
         )
-    run_dict['surface_state'] = snapshot_surface_states(surface_data)
-    run_dict['accepted_x'] = x.copy()
-    run_dict['J'] = objective_eval['total']
-    run_dict['dJ'] = objective_eval['grad'].copy()
-    run_dict['search_eval'] = objective_eval
-    topology_status = run_dict['topology_gate_status']
+    run_dict["surface_state"] = snapshot_surface_states(surface_data)
+    run_dict["accepted_x"] = x.copy()
+    run_dict["J"] = objective_eval["total"]
+    run_dict["dJ"] = objective_eval["grad"].copy()
+    run_dict["search_eval"] = objective_eval
+    topology_status = run_dict["topology_gate_status"]
     search_stack_status = evaluate_surface_stack(
         surface_data,
         vessel_surface=VV if len(surface_data) > 1 else None,
-        surface_gap_threshold=search_gate['surface_gap_threshold'],
-        enforce_nesting=search_gate['enforce_nesting'],
+        surface_gap_threshold=search_gate["surface_gap_threshold"],
+        enforce_nesting=search_gate["enforce_nesting"],
     )
     full_stack_status = evaluate_surface_stack(
         surface_data,
@@ -9539,13 +10240,13 @@ def callback(x):
         surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
         enforce_nesting=True,
     )
-    run_dict['search_surface_status'] = search_stack_status
-    run_dict['surface_status'] = full_stack_status
-    run_dict['topology_gate_status'] = topology_status
+    run_dict["search_surface_status"] = search_stack_status
+    run_dict["surface_status"] = full_stack_status
+    run_dict["topology_gate_status"] = topology_status
 
     # Evaluate diagnostics
-    J = run_dict['J']
-    grad = run_dict['dJ']
+    J = run_dict["J"]
+    grad = run_dict["dJ"]
     banana_current_diagnostics = run_dict.get("banana_current_diagnostics")
     if banana_current_diagnostics is not None:
         accepted_report = build_banana_current_coordinate_report(
@@ -9562,32 +10263,32 @@ def callback(x):
             banana_current_diagnostics,
             accepted_report,
         )
-    
-    J_QS = objective_eval['J_QS']
-    dJ_QS = np.linalg.norm(objective_eval['dJ_QS'])
-    J_Boozer = objective_eval['J_Boozer']
-    dJ_Boozer = np.linalg.norm(objective_eval['dJ_Boozer'])
-    J_iota = objective_eval['J_iota']
-    dJ_iota = np.linalg.norm(objective_eval['dJ_iota'])
-    J_volume = objective_eval.get('J_volume', 0.0)
-    dJ_volume = np.linalg.norm(objective_eval.get('dJ_volume', np.zeros_like(grad)))
+
+    J_QS = objective_eval["J_QS"]
+    dJ_QS = np.linalg.norm(objective_eval["dJ_QS"])
+    J_Boozer = objective_eval["J_Boozer"]
+    dJ_Boozer = np.linalg.norm(objective_eval["dJ_Boozer"])
+    J_iota = objective_eval["J_iota"]
+    dJ_iota = np.linalg.norm(objective_eval["dJ_iota"])
+    J_volume = objective_eval.get("J_volume", 0.0)
+    dJ_volume = np.linalg.norm(objective_eval.get("dJ_volume", np.zeros_like(grad)))
     J_len = JCurveLength.J()
     dJ_len = np.linalg.norm(JCurveLength.dJ())
     J_cc = JCurveCurve.J()
     dJ_cc = np.linalg.norm(JCurveCurve.dJ())
     J_cs = JCurveSurface.J()
     dJ_cs = np.linalg.norm(JCurveSurface.dJ())
-    J_curvature = objective_eval['J_curvature']
-    dJ_curvature = np.linalg.norm(objective_eval['dJ_curvature'])
+    J_curvature = objective_eval["J_curvature"]
+    dJ_curvature = np.linalg.norm(objective_eval["dJ_curvature"])
 
     iota_values = [term.J() for term in surface_iota_terms]
-    volume_values = [entry['boozer_surface'].surface.volume() for entry in surface_data]
+    volume_values = [entry["boozer_surface"].surface.volume() for entry in surface_data]
     iota_str = ", ".join(f"{value:.4f}" for value in iota_values)
     volume_str = ", ".join(f"{value:.4f}" for value in volume_values)
 
     gamma = banana_curve.gamma()
-    max_r = np.max(np.sqrt(gamma[:,0]**2 + gamma[:,1]**2))
-    max_z = np.max(np.abs(gamma[:,2]))
+    max_r = np.max(np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2))
+    max_z = np.max(np.abs(gamma[:, 2]))
     length = curvelength.J()
     hardware_snapshot = evaluate_single_stage_hardware_snapshot(
         JCurveCurve,
@@ -9607,16 +10308,23 @@ def callback(x):
     surface_vessel_min = hardware_snapshot["surface_vessel_min_dist"]
     max_curvature = hardware_snapshot["max_curvature"]
     hardware_status = hardware_snapshot["search_hardware_status"]
-    run_dict['accepted_hardware_status'] = hardware_status
-    incumbent_stage = run_dict.get("accepted_boozer_stage", globals().get("stage", "initial"))
+    run_dict["accepted_hardware_status"] = hardware_status
+    incumbent_stage = run_dict.get(
+        "accepted_boozer_stage", globals().get("stage", "initial")
+    )
     run_dict["accepted_boozer_stage"] = incumbent_stage
-    run_dict['intersecting'] = any(full_stack_status['self_intersections'])
-    accepted_iteration = int(run_dict['accepted_iterations'] + 1)
+    run_dict["intersecting"] = any(full_stack_status["self_intersections"])
+    accepted_iteration = int(run_dict["accepted_iterations"] + 1)
+    record_residue_objective_diagnostics(
+        OUT_DIR_ITER,
+        accepted_iteration,
+        objective_eval,
+    )
     frontier_topology_entry = maybe_record_topology_score(
         run_dict,
         accepted_iteration=accepted_iteration,
         proxy_objective=J,
-        outer_surf=outer_surface_data['boozer_surface'].surface,
+        outer_surf=outer_surface_data["boozer_surface"].surface,
         biotsavart=bs,
         surface_data=surface_data,
         hardware_snapshot=hardware_snapshot,
@@ -9627,8 +10335,12 @@ def callback(x):
         accepted_iteration=accepted_iteration,
         topology_entry=frontier_topology_entry,
     )
-    best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, incumbent_stage)
-    best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, incumbent_stage)
+    best_accepted_updated = maybe_update_best_accepted_incumbent(
+        run_dict, incumbent_stage
+    )
+    best_feasible_updated = maybe_update_best_feasible_incumbent(
+        run_dict, incumbent_stage
+    )
     best_hardware_near_miss_updated = maybe_update_best_hardware_near_miss_incumbent(
         run_dict,
         incumbent_stage,
@@ -9642,7 +10354,7 @@ def callback(x):
     )
 
     field_error, BdotN = compute_surface_field_metrics(
-        outer_entry['boozer_surface'].surface,
+        outer_entry["boozer_surface"].surface,
         bs,
     )
     if (
@@ -9727,21 +10439,35 @@ def callback(x):
 
     width = 35
     buffer = io.StringIO()
-    print("="*70, file=buffer)
+    print("=" * 70, file=buffer)
     print(f"ITERATION {run_dict['it']}", file=buffer)
     print(f"{'Objective J':{width}} = {J:.6e}", file=buffer)
     if CONSTRAINT_METHOD == "alm":
-        print(f"{'Base Objective J':{width}} = {objective_eval['base_total']:.6e}", file=buffer)
-        print(f"{'ALM outer iter':{width}} = {run_dict.get('alm_outer_iteration')}", file=buffer)
+        print(
+            f"{'Base Objective J':{width}} = {objective_eval['base_total']:.6e}",
+            file=buffer,
+        )
+        print(
+            f"{'ALM outer iter':{width}} = {run_dict.get('alm_outer_iteration')}",
+            file=buffer,
+        )
         print(f"{'ALM penalty μ':{width}} = {ALM_PENALTY:.6e}", file=buffer)
         print(f"{'ALM multipliers':{width}} = {ALM_MULTIPLIERS.tolist()}", file=buffer)
     print(f"{'||∇J||':{width}} = {np.linalg.norm(grad):.6e}", file=buffer)
     print(f"{'nonQS ratio':{width}} = {J_QS:.6e} (dJ = {dJ_QS:.6e})", file=buffer)
-    print(f"{'Boozer Residual':{width}} = {J_Boozer:.6e} (dJ = {dJ_Boozer:.6e})", file=buffer)
-    iota_term_label = "ι Reward" if SINGLE_STAGE_GOAL_MODE == "frontier" else "ι Penalty"
+    print(
+        f"{'Boozer Residual':{width}} = {J_Boozer:.6e} (dJ = {dJ_Boozer:.6e})",
+        file=buffer,
+    )
+    iota_term_label = (
+        "ι Reward" if SINGLE_STAGE_GOAL_MODE == "frontier" else "ι Penalty"
+    )
     print(f"{iota_term_label:{width}} = {J_iota:.6e} (dJ = {dJ_iota:.6e})", file=buffer)
     if SINGLE_STAGE_GOAL_MODE == "frontier":
-        print(f"{'Volume Reward':{width}} = {J_volume:.6e} (dJ = {dJ_volume:.6e})", file=buffer)
+        print(
+            f"{'Volume Reward':{width}} = {J_volume:.6e} (dJ = {dJ_volume:.6e})",
+            file=buffer,
+        )
         print(
             f"{'Frontier Rank J':{width}} = "
             f"{objective_eval.get('frontier_rank_total', J):.6e}",
@@ -9769,17 +10495,49 @@ def callback(x):
         )
     print(f"{'Iotas (actual)':{width}} = {iota_str}", file=buffer)
     print(f"{'Volume':{width}} = {volume_str}", file=buffer)
-    print(f"{'Curve Length Penalty':{width}} = {J_len:.6e} (dJ = {dJ_len:.6e})", file=buffer)
-    print(f"{'Curve-Curve Penalty':{width}} = {J_cc:.6e} (min={curvecurve_min:.3e}) (dJ = {dJ_cc:.6e})", file=buffer)
-    print(f"{'Curve-Surface Penalty':{width}} = {J_cs:.6e} (min={curvesurf_min:.3e}) (dJ = {dJ_cs:.6e})", file=buffer)
-    print(f"{'Curvature Penalty':{width}} = {J_curvature:.6e} (dJ = {dJ_curvature:.6e})", file=buffer)
+    print(
+        f"{'Curve Length Penalty':{width}} = {J_len:.6e} (dJ = {dJ_len:.6e})",
+        file=buffer,
+    )
+    print(
+        f"{'Curve-Curve Penalty':{width}} = {J_cc:.6e} (min={curvecurve_min:.3e}) (dJ = {dJ_cc:.6e})",
+        file=buffer,
+    )
+    print(
+        f"{'Curve-Surface Penalty':{width}} = {J_cs:.6e} (min={curvesurf_min:.3e}) (dJ = {dJ_cs:.6e})",
+        file=buffer,
+    )
+    print(
+        f"{'Curvature Penalty':{width}} = {J_curvature:.6e} (dJ = {dJ_curvature:.6e})",
+        file=buffer,
+    )
+    if objective_eval.get("residue_objective_enabled"):
+        J_residue = float(objective_eval["J_residue_objective"])
+        dJ_residue = np.linalg.norm(objective_eval["dJ_residue_objective"])
+        print(
+            f"{'Greene Residue Objective':{width}} = "
+            f"{J_residue:.6e} (dJ = {dJ_residue:.6e})",
+            file=buffer,
+        )
     print(f"{'⟨|B·n|⟩':{width}} = {BdotN:.6e}", file=buffer)
     if len(surface_data) > 1:
-        print(f"{'Surface search weights':{width}} = {objective_eval['surface_weights'].tolist()}", file=buffer)
-        print(f"{'Surface gate scale':{width}} = {search_gate['gate_scale']:.6f}", file=buffer)
-        print(f"{'Search gap threshold':{width}} = {search_gate['surface_gap_threshold']:.6e}", file=buffer)
-        print(f"{'Search nesting enforced':{width}} = {search_gate['enforce_nesting']}", file=buffer)
-        if topology_status['enabled']:
+        print(
+            f"{'Surface search weights':{width}} = {objective_eval['surface_weights'].tolist()}",
+            file=buffer,
+        )
+        print(
+            f"{'Surface gate scale':{width}} = {search_gate['gate_scale']:.6f}",
+            file=buffer,
+        )
+        print(
+            f"{'Search gap threshold':{width}} = {search_gate['surface_gap_threshold']:.6e}",
+            file=buffer,
+        )
+        print(
+            f"{'Search nesting enforced':{width}} = {search_gate['enforce_nesting']}",
+            file=buffer,
+        )
+        if topology_status["enabled"]:
             print(
                 f"{'Topology survival':{width}} = "
                 f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
@@ -9787,25 +10545,57 @@ def callback(x):
                 f"threshold={topology_status['survival_threshold']:.6f})",
                 file=buffer,
             )
-            print(f"{'Topology stop counts':{width}} = {topology_status['stop_reason_counts']}", file=buffer)
-            print(f"{'Topology first exit time':{width}} = {topology_status['first_exit_time']}", file=buffer)
-            print(f"{'Topology first exit angle':{width}} = {topology_status['first_exit_angle']}", file=buffer)
-            print(f"{'Topology first exit reason':{width}} = {topology_status['first_exit_reason']}", file=buffer)
-        print(f"{'Adjacent surface gaps':{width}} = {full_stack_status['adjacent_gaps']}", file=buffer)
-        print(f"{'Outer vessel gap':{width}} = {full_stack_status['outer_vessel_gap']:.6e}", file=buffer)
-        print(f"{'Surfaces nested':{width}} = {full_stack_status['nesting_ok']}", file=buffer)
-        print(f"{'Bad nesting phis':{width}} = {full_stack_status['bad_nesting_phis']}", file=buffer)
+            print(
+                f"{'Topology stop counts':{width}} = {topology_status['stop_reason_counts']}",
+                file=buffer,
+            )
+            print(
+                f"{'Topology first exit time':{width}} = {topology_status['first_exit_time']}",
+                file=buffer,
+            )
+            print(
+                f"{'Topology first exit angle':{width}} = {topology_status['first_exit_angle']}",
+                file=buffer,
+            )
+            print(
+                f"{'Topology first exit reason':{width}} = {topology_status['first_exit_reason']}",
+                file=buffer,
+            )
+        print(
+            f"{'Adjacent surface gaps':{width}} = {full_stack_status['adjacent_gaps']}",
+            file=buffer,
+        )
+        print(
+            f"{'Outer vessel gap':{width}} = {full_stack_status['outer_vessel_gap']:.6e}",
+            file=buffer,
+        )
+        print(
+            f"{'Surfaces nested':{width}} = {full_stack_status['nesting_ok']}",
+            file=buffer,
+        )
+        print(
+            f"{'Bad nesting phis':{width}} = {full_stack_status['bad_nesting_phis']}",
+            file=buffer,
+        )
 
     print(f"{'Intersecting':{width}} = {run_dict['intersecting']}", file=buffer)
     print(f"{'Max Curve R':{width}} = {max_r:.6e}", file=buffer)
     print(f"{'Max Curve Z':{width}} = {max_z:.6e}", file=buffer)
     print(f"{'Max Curvature':{width}} = {max_curvature:.6e}", file=buffer)
     print(f"{'Curve Length':{width}} = {length:.6e}", file=buffer)
-    print(f"{'Surface-Vessel Min Dist':{width}} = {surface_vessel_min:.6e}", file=buffer)
-    print(f"{'Hardware Constraints OK':{width}} = {hardware_status['success']}", file=buffer)
+    print(
+        f"{'Surface-Vessel Min Dist':{width}} = {surface_vessel_min:.6e}", file=buffer
+    )
+    print(
+        f"{'Hardware Constraints OK':{width}} = {hardware_status['success']}",
+        file=buffer,
+    )
     if hardware_status["violations"]:
-        print(f"{'Hardware Violations':{width}} = {hardware_status['violations']}", file=buffer)
-    print("="*70, file=buffer)
+        print(
+            f"{'Hardware Violations':{width}} = {hardware_status['violations']}",
+            file=buffer,
+        )
+    print("=" * 70, file=buffer)
 
     output_str = buffer.getvalue()
     buffer.close()
@@ -9817,8 +10607,8 @@ def callback(x):
         f.write(output_str + "\n")
 
     # Advance iteration counter
-    run_dict['accepted_iterations'] += 1
-    run_dict['it'] += 1
+    run_dict["accepted_iterations"] += 1
+    run_dict["it"] += 1
     banana_current_replay_context = run_dict.get("banana_current_replay_context")
     if banana_current_replay_context is not None:
         record_banana_current_replay_context_snapshot(
@@ -9847,12 +10637,19 @@ def callback(x):
         )
 
     # Periodic checkpoint saving
-    if CHECKPOINT_EVERY > 0 and run_dict['accepted_iterations'] % CHECKPOINT_EVERY == 0:
-        ckpt_dir = os.path.join(OUT_DIR_ITER, f"checkpoint_iter{run_dict['accepted_iterations']:04d}")
+    if CHECKPOINT_EVERY > 0 and run_dict["accepted_iterations"] % CHECKPOINT_EVERY == 0:
+        ckpt_dir = os.path.join(
+            OUT_DIR_ITER, f"checkpoint_iter{run_dict['accepted_iterations']:04d}"
+        )
         os.makedirs(ckpt_dir, exist_ok=True)
         bs.save(os.path.join(ckpt_dir, "biot_savart.json"))
-        save_surface_artifacts(surface_data, bs, ckpt_dir, "surf", also_write_outer_legacy=False)
-        print(f"  [checkpoint] Saved iteration {run_dict['accepted_iterations']} to {ckpt_dir}")
+        save_surface_artifacts(
+            surface_data, bs, ckpt_dir, "surf", also_write_outer_legacy=False
+        )
+        print(
+            f"  [checkpoint] Saved iteration {run_dict['accepted_iterations']} to {ckpt_dir}"
+        )
+
 
 # Convergence tolerances for different mpol values (module-level for testability)
 MULTISURFACE_RAMP_ITERATIONS = 0
@@ -9879,6 +10676,7 @@ JCurveLengthMin = None
 JPoloidalExtent = None
 JCoilWidth = None
 JCurveSelfIntersect = None
+JResidueObjective = None
 SINGLE_STAGE_POLOIDAL_WEIGHT = POLOIDAL_EXTENT_WEIGHT
 SINGLE_STAGE_WIDTH_WEIGHT = 0.0
 SINGLE_STAGE_SELFINT_WEIGHT = 0.0
@@ -9956,9 +10754,7 @@ if __name__ == "__main__":
     if args.banana_current_fd_diagnostics:
         args.banana_current_diagnostics = True
     if args.banana_current_fd_relative_step_fraction <= 0.0:
-        raise ValueError(
-            "--banana-current-fd-relative-step-fraction must be positive."
-        )
+        raise ValueError("--banana-current-fd-relative-step-fraction must be positive.")
     if args.accept_offspec_r0_seed and not args.offspec_replay_debug_only:
         raise ValueError(
             "--accept-offspec-r0-seed requires --offspec-replay-debug-only."
@@ -10016,8 +10812,12 @@ if __name__ == "__main__":
     ALM_PENALTY = args.alm_penalty_init
     ALM_DISTANCE_SMOOTHING = args.alm_distance_smoothing
     ALM_CURVATURE_SMOOTHING = args.alm_curvature_smoothing
-    ALM_DISTANCE_SMOOTHING_MIN = args.alm_distance_smoothing * _ALM_SMOOTHING_FLOOR_FRACTION
-    ALM_CURVATURE_SMOOTHING_MIN = args.alm_curvature_smoothing * _ALM_SMOOTHING_FLOOR_FRACTION
+    ALM_DISTANCE_SMOOTHING_MIN = (
+        args.alm_distance_smoothing * _ALM_SMOOTHING_FLOOR_FRACTION
+    )
+    ALM_CURVATURE_SMOOTHING_MIN = (
+        args.alm_curvature_smoothing * _ALM_SMOOTHING_FLOOR_FRACTION
+    )
     requested_finite_current_mode = getattr(
         args,
         "finite_current_mode",
@@ -10037,7 +10837,9 @@ if __name__ == "__main__":
     plasma_current_settings = resolve_plasma_current_settings(
         args,
         finite_current_mode=finite_current_mode,
-        default_plasma_current_A=float(stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)),
+        default_plasma_current_A=float(
+            stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)
+        ),
         num_surfaces=effective_num_surfaces,
         surface_mode_contract=surface_mode_contract,
     )
@@ -10102,16 +10904,15 @@ if __name__ == "__main__":
     if args.curvature_traversal_eval_budget < 0:
         raise ValueError("--curvature-traversal-eval-budget must be non-negative")
     if (
-        (
-            args.curvature_traversal_band > 0.0
-            or args.curvature_traversal_eval_budget > 0
+        args.curvature_traversal_band > 0.0 or args.curvature_traversal_eval_budget > 0
+    ) and args.curvature_threshold <= 0.0:
+        raise ValueError(
+            "--curvature-threshold must be positive for curvature traversal"
         )
-        and args.curvature_threshold <= 0.0
-    ):
-        raise ValueError("--curvature-threshold must be positive for curvature traversal")
     validate_alm_cli_args(args)
     validate_single_stage_alm_formulation_args(args)
     validate_confinement_surrogate_args(args)
+    validate_residue_objective_args(args)
     validate_single_stage_current_args(args)
     validate_boozer_stage_refinement_args(
         args,
@@ -10208,11 +11009,13 @@ if __name__ == "__main__":
         surf_coils,
     ) = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
 
-    bs, coil_partitions, banana_current_state = resolve_single_stage_banana_current_state(
-        bs,
-        coil_partitions,
-        mode=args.single_stage_banana_current_mode,
-        coordinate_scaling=args.single_stage_banana_current_coordinate_scaling,
+    bs, coil_partitions, banana_current_state = (
+        resolve_single_stage_banana_current_state(
+            bs,
+            coil_partitions,
+            mode=args.single_stage_banana_current_mode,
+            coordinate_scaling=args.single_stage_banana_current_coordinate_scaling,
+        )
     )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = replace(
         PRESERVED_TIMEOUT_REPLAY_CONFIG,
@@ -10233,6 +11036,7 @@ if __name__ == "__main__":
     # Clearance/length objectives operate on the optimizable banana curves only;
     # TF/proxy/VF curves are fixed field sources and must not enter the penalty.
     objective_curves = banana_curves
+    JResidueObjective = build_residue_objective_from_args(args, bs)
     if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME:
         stage2_tf_current_A = resolve_single_stage_resume_tf_current_A(
             stage2_results,
@@ -10266,7 +11070,11 @@ if __name__ == "__main__":
 
     # Resolve basin-hopping RNG seed early so it's available for config_hash
     if args.basin_hops > 0:
-        rng_seed = args.basin_seed if args.basin_seed >= 0 else int.from_bytes(os.urandom(4), 'big')
+        rng_seed = (
+            args.basin_seed
+            if args.basin_seed >= 0
+            else int.from_bytes(os.urandom(4), "big")
+        )
     else:
         rng_seed = None
 
@@ -10288,6 +11096,7 @@ if __name__ == "__main__":
         effective_num_surfaces=effective_num_surfaces,
         effective_inner_surface_ratio=effective_inner_surface_ratio,
         num_banana_current_controls=banana_current_state.num_control_currents(),
+        residue_objective=JResidueObjective,
     )
     config_str = build_run_identity_config(run_identity_config)
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
@@ -10333,27 +11142,39 @@ if __name__ == "__main__":
     curves_to_vtk(curves, OUT_DIR_ITER + "/curves_init", close=True)
     bs.save(OUT_DIR_ITER + "/biot_savart_init.json")
 
-    save_surface_artifacts(surface_data, bs, OUT_DIR_ITER, "surf_init", also_write_outer_legacy=True)
+    save_surface_artifacts(
+        surface_data, bs, OUT_DIR_ITER, "surf_init", also_write_outer_legacy=True
+    )
     print(f"Volume: {outer_surface_data['boozer_surface'].surface.volume()}")
 
     # Generate initial diagnostic plots
-    initial_field_error = normPlot(outer_surface_data['boozer_surface'].surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
+    initial_field_error = normPlot(
+        outer_surface_data["boozer_surface"].surface,
+        bs,
+        OUT_DIR_ITER + "/NormPlotInitial",
+    )
     try:
         cross_section_plot(
             surf_coils,
-            outer_surface_data['boozer_surface'].surface,
+            outer_surface_data["boozer_surface"].surface,
             banana_curve,
             OUT_DIR_ITER + "/CrossSectionInitial",
             lcfs_clearance_reference,
             VV,
         )
     except Exception as e:
-        print(f"WARNING: CrossSectionInitial plot failed (surface may fold at high mpol): {e}")
-    initial_volume = outer_surface_data['boozer_surface'].surface.volume()
-    initial_iota = Iotas(outer_surface_data['boozer_surface']).J()
+        print(
+            f"WARNING: CrossSectionInitial plot failed (surface may fold at high mpol): {e}"
+        )
+    initial_volume = outer_surface_data["boozer_surface"].surface.volume()
+    initial_iota = Iotas(outer_surface_data["boozer_surface"]).J()
     initial_max_curvature = np.max(banana_curve.kappa())
-    initial_surface_volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
-    initial_surface_iotas = [Iotas(entry["boozer_surface"]).J() for entry in surface_data]
+    initial_surface_volumes = [
+        entry["boozer_surface"].surface.volume() for entry in surface_data
+    ]
+    initial_surface_iotas = [
+        Iotas(entry["boozer_surface"]).J() for entry in surface_data
+    ]
     initial_qs_objective, initial_boozer_objective = measure_frontier_reference_metrics(
         stage,
         surface_data,
@@ -10372,12 +11193,8 @@ if __name__ == "__main__":
     SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD = float(
         args.single_stage_poloidal_threshold_rad
     )
-    SINGLE_STAGE_WIDTH_MIN_THRESHOLD = float(
-        args.single_stage_width_min_threshold
-    )
-    SINGLE_STAGE_WIDTH_MAX_THRESHOLD = float(
-        args.single_stage_width_max_threshold
-    )
+    SINGLE_STAGE_WIDTH_MIN_THRESHOLD = float(args.single_stage_width_min_threshold)
+    SINGLE_STAGE_WIDTH_MAX_THRESHOLD = float(args.single_stage_width_max_threshold)
     if SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD <= 0.0:
         raise ValueError("--single-stage-poloidal-threshold-rad must be positive.")
     if SINGLE_STAGE_WIDTH_MIN_THRESHOLD <= 0.0:
@@ -10391,15 +11208,11 @@ if __name__ == "__main__":
     IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight
     if args.cc_dist < COIL_COIL_MIN_DIST_M:
-        raise ValueError(
-            f"--cc-dist must be >= {COIL_COIL_MIN_DIST_M:.3f} m."
-        )
+        raise ValueError(f"--cc-dist must be >= {COIL_COIL_MIN_DIST_M:.3f} m.")
     CC_DIST = float(args.cc_dist)
     CS_WEIGHT = args.cs_weight
     if args.cs_dist < COIL_PLASMA_MIN_DIST_M:
-        raise ValueError(
-            f"--cs-dist must be >= {COIL_PLASMA_MIN_DIST_M:.3f} m."
-        )
+        raise ValueError(f"--cs-dist must be >= {COIL_PLASMA_MIN_DIST_M:.3f} m.")
     CS_DIST = float(args.cs_dist)
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = float(args.curvature_threshold)
@@ -10472,6 +11285,7 @@ if __name__ == "__main__":
                 alm_formulation=ALM_FORMULATION,
                 alm_boozer_threshold=args.alm_boozer_threshold,
             ),
+            JResidueObjective=JResidueObjective,
         )
         apply_single_stage_objective_bundle(objective_bundle)
         return objective_bundle
@@ -10565,48 +11379,55 @@ if __name__ == "__main__":
         ),
     )
     run_dict = {
-        'surface_state': snapshot_surface_states(surface_data),
-        'J': initial_search_eval['total'],
-        'dJ': initial_search_eval['grad'].copy(),
-        'search_eval': initial_search_eval,
-        'it': 1,
-        'accepted_iterations': 0,
-        'lscount': 0,
-        'x_prev': dofs.copy(),
-        'accepted_x': dofs.copy(),
-        'intersecting': any(entry["boozer_surface"].surface.is_self_intersecting() for entry in surface_data),
-        'trial_hardware_status': None,
-        'accepted_hardware_status': initial_hardware_snapshot["search_hardware_status"],
-        'surface_status': initial_surface_status,
-        'search_surface_status': initial_search_surface_status,
-        'topology_gate_status': initial_topology_status,
-        'frontier_trust_status': evaluate_frontier_trust_status(initial_search_eval),
-        'accepted_boozer_stage': stage,
-        'alm_feasibility_tolerance': args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
-        'alm_stationarity_tolerance': args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
-        'alm_adaptive_smoothing_events': [] if CONSTRAINT_METHOD == "alm" else None,
-        'best_accepted_incumbent': None,
-        'best_accepted_metric': None,
-        'best_accepted_stage': None,
-        'best_feasible_incumbent': None,
-        'best_feasible_metric': None,
-        'best_feasible_stage': None,
-        'best_hardware_near_miss_incumbent': None,
-        'best_hardware_near_miss_metric': None,
-        'best_hardware_near_miss_stage': None,
-        'invalid_state_rejects_total': 0,
-        'topology_gate_rejects': 0,
-        'hardware_rejects': 0,
-        'curvature_precheck_rejects': 0,
-        'curvature_overcap_boozer_evals': 0,
-        'curvature_overcap_boozer_evals_this_iteration': 0,
-        'surface_solve_rejects': 0,
-        'frontier_trust_rejects': 0,
-        'active_optimizer_bounds': current_optimizer_bounds(),
-        'banana_current_diagnostics': None,
-        'banana_current_replay_context': None,
-        'frontier_conditioning_seed_report': initial_frontier_conditioning_report,
-        'frontier_conditioning_first_accepted_report': None,
+        "surface_state": snapshot_surface_states(surface_data),
+        "J": initial_search_eval["total"],
+        "dJ": initial_search_eval["grad"].copy(),
+        "search_eval": initial_search_eval,
+        "it": 1,
+        "accepted_iterations": 0,
+        "lscount": 0,
+        "x_prev": dofs.copy(),
+        "accepted_x": dofs.copy(),
+        "intersecting": any(
+            entry["boozer_surface"].surface.is_self_intersecting()
+            for entry in surface_data
+        ),
+        "trial_hardware_status": None,
+        "accepted_hardware_status": initial_hardware_snapshot["search_hardware_status"],
+        "surface_status": initial_surface_status,
+        "search_surface_status": initial_search_surface_status,
+        "topology_gate_status": initial_topology_status,
+        "frontier_trust_status": evaluate_frontier_trust_status(initial_search_eval),
+        "accepted_boozer_stage": stage,
+        "alm_feasibility_tolerance": args.alm_feas_tol
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "alm_stationarity_tolerance": args.alm_stationarity_tol
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "alm_adaptive_smoothing_events": [] if CONSTRAINT_METHOD == "alm" else None,
+        "best_accepted_incumbent": None,
+        "best_accepted_metric": None,
+        "best_accepted_stage": None,
+        "best_feasible_incumbent": None,
+        "best_feasible_metric": None,
+        "best_feasible_stage": None,
+        "best_hardware_near_miss_incumbent": None,
+        "best_hardware_near_miss_metric": None,
+        "best_hardware_near_miss_stage": None,
+        "invalid_state_rejects_total": 0,
+        "topology_gate_rejects": 0,
+        "hardware_rejects": 0,
+        "curvature_precheck_rejects": 0,
+        "curvature_overcap_boozer_evals": 0,
+        "curvature_overcap_boozer_evals_this_iteration": 0,
+        "surface_solve_rejects": 0,
+        "frontier_trust_rejects": 0,
+        "active_optimizer_bounds": current_optimizer_bounds(),
+        "banana_current_diagnostics": None,
+        "banana_current_replay_context": None,
+        "frontier_conditioning_seed_report": initial_frontier_conditioning_report,
+        "frontier_conditioning_first_accepted_report": None,
     }
     initial_topology_entry = maybe_record_topology_score(
         run_dict,
@@ -10631,16 +11452,12 @@ if __name__ == "__main__":
         objective_bundle = rebuild_stage_objective_bundle(restored_stage)
         restore_single_stage_incumbent_state(
             run_dict,
-            restore_incumbent_from_solver_checkpoint(
-                resume_solver_checkpoint_payload
-            ),
+            restore_incumbent_from_solver_checkpoint(resume_solver_checkpoint_payload),
         )
         restored_frontier_certification_status = (
             frontier_certification_status_from_search_eval(run_dict["search_eval"])
         )
-        run_counters = dict(
-            resume_solver_checkpoint_payload.get("run_counters", {})
-        )
+        run_counters = dict(resume_solver_checkpoint_payload.get("run_counters", {}))
         run_dict["it"] = int(run_counters.get("it", run_dict["it"]))
         run_dict["accepted_iterations"] = int(
             resume_solver_checkpoint_payload["accepted_iterations"]
@@ -10653,9 +11470,7 @@ if __name__ == "__main__":
         run_dict["topology_gate_rejects"] = int(
             run_counters.get("topology_gate_rejects", 0)
         )
-        run_dict["hardware_rejects"] = int(
-            run_counters.get("hardware_rejects", 0)
-        )
+        run_dict["hardware_rejects"] = int(run_counters.get("hardware_rejects", 0))
         run_dict["curvature_precheck_rejects"] = int(
             run_counters.get("curvature_precheck_rejects", 0)
         )
@@ -10767,8 +11582,12 @@ if __name__ == "__main__":
         initial_best_feasible_updated = False
         initial_best_hardware_near_miss_updated = False
     else:
-        initial_best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, stage)
-        initial_best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, stage)
+        initial_best_accepted_updated = maybe_update_best_accepted_incumbent(
+            run_dict, stage
+        )
+        initial_best_feasible_updated = maybe_update_best_feasible_incumbent(
+            run_dict, stage
+        )
         initial_best_hardware_near_miss_updated = (
             maybe_update_best_hardware_near_miss_incumbent(
                 run_dict,
@@ -10800,9 +11619,7 @@ if __name__ == "__main__":
                     trial_x,
                     reference_x=reference_x,
                     reference_surface_state=reference_surface_state,
-                    accepted_iterations=int(
-                        run_dict.get("accepted_iterations", 0)
-                    ),
+                    accepted_iterations=int(run_dict.get("accepted_iterations", 0)),
                 )
 
         run_dict["banana_current_diagnostics"] = build_banana_current_diagnostics_state(
@@ -10850,12 +11667,10 @@ if __name__ == "__main__":
             run_dict["banana_current_replay_context"],
         )
     if args.banana_current_replay_diagnostics_path:
-        banana_current_replay_summary = (
-            run_banana_current_rejected_trial_replay_study(
-                args.banana_current_replay_diagnostics_path,
-                replay_context_path=args.banana_current_replay_context_path,
-                replay_output_path=args.banana_current_replay_output_path,
-            )
+        banana_current_replay_summary = run_banana_current_rejected_trial_replay_study(
+            args.banana_current_replay_diagnostics_path,
+            replay_context_path=args.banana_current_replay_context_path,
+            replay_output_path=args.banana_current_replay_output_path,
         )
         if not args.banana_current_diagnostics:
             args.init_only = True
@@ -10919,7 +11734,9 @@ if __name__ == "__main__":
     def refresh_preserved_timeout_artifacts_from_best_states():
         current_state = snapshot_single_stage_incumbent_state(run_dict)
         current_stage = run_dict.get("accepted_boozer_stage", stage)
-        current_x_prev = np.asarray(run_dict.get("x_prev", run_dict["accepted_x"]), dtype=float).copy()
+        current_x_prev = np.asarray(
+            run_dict.get("x_prev", run_dict["accepted_x"]), dtype=float
+        ).copy()
         current_intersecting = bool(run_dict.get("intersecting", False))
         current_frontier_trust_status = copy.deepcopy(
             run_dict.get("frontier_trust_status")
@@ -11072,7 +11889,9 @@ if __name__ == "__main__":
         print("Skipping single-stage optimizer because --init-only was provided.")
     elif CONSTRAINT_METHOD == "alm":
         if args.basin_hops > 0:
-            raise ValueError("--basin-hops is not supported with --constraint-method=alm")
+            raise ValueError(
+                "--basin-hops is not supported with --constraint-method=alm"
+            )
         alm_settings = build_single_stage_alm_settings(args)
         alm_constraint_names = current_single_stage_alm_constraint_names()
         ALM_CONSTRAINT_NAMES = list(alm_constraint_names)
@@ -11233,7 +12052,9 @@ if __name__ == "__main__":
             res.penalty,
             outer_iteration=getattr(res, "outer_iterations", None),
             latest_history_entry=(
-                None if not alm_partial_state["history"] else alm_partial_state["history"][-1]
+                None
+                if not alm_partial_state["history"]
+                else alm_partial_state["history"][-1]
             ),
             termination_message=termination_message,
             optimizer_success=optimizer_success,
@@ -11259,13 +12080,20 @@ if __name__ == "__main__":
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
         run_dict["active_optimizer_bounds"] = current_optimizer_bounds()
         minimizer_kwargs = {
-            'method': 'L-BFGS-B',
-            'jac': True,
-            'bounds': current_optimizer_bounds(),
-            'callback': callback,
-            'options': {'maxiter': RUNTIME_MAXITER, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
+            "method": "L-BFGS-B",
+            "jac": True,
+            "bounds": current_optimizer_bounds(),
+            "callback": callback,
+            "options": {
+                "maxiter": RUNTIME_MAXITER,
+                "maxcor": args.maxcor,
+                "ftol": ftol,
+                "gtol": gtol,
+            },
         }
-        basin_niter_success = args.basin_niter_success if args.basin_niter_success > 0 else None
+        basin_niter_success = (
+            args.basin_niter_success if args.basin_niter_success > 0 else None
+        )
         print(
             f"Basin-hopping with {args.basin_hops} hops, "
             f"stepsize={args.basin_stepsize}, "
@@ -11301,13 +12129,17 @@ if __name__ == "__main__":
         basin_best_hop_index = basin_telemetry.get("basin_best_hop_index")
         basin_best_result_source = basin_telemetry.get("basin_best_result_source")
         basin_objective_improvement = basin_telemetry.get("basin_objective_improvement")
-        basin_hop_count = res.nit if hasattr(res, 'nit') else None
-        basin_minimization_failures = res.minimization_failures if hasattr(res, 'minimization_failures') else None
-        if hasattr(res, 'lowest_optimization_result') and hasattr(res.lowest_optimization_result, 'nit'):
+        basin_hop_count = res.nit if hasattr(res, "nit") else None
+        basin_minimization_failures = (
+            res.minimization_failures if hasattr(res, "minimization_failures") else None
+        )
+        if hasattr(res, "lowest_optimization_result") and hasattr(
+            res.lowest_optimization_result, "nit"
+        ):
             res_nit = res.lowest_optimization_result.nit
         else:
             res_nit = basin_hop_count if basin_hop_count is not None else 0
-        if hasattr(res, 'lowest_optimization_result'):
+        if hasattr(res, "lowest_optimization_result"):
             lowest_result = res.lowest_optimization_result
             optimizer_status = getattr(lowest_result, "status", None)
             termination_message = normalize_optimizer_termination_message(
@@ -11319,12 +12151,14 @@ if __name__ == "__main__":
                 hardware_rejects=run_dict["hardware_rejects"],
                 topology_gate_rejects=run_dict["topology_gate_rejects"],
             )
-            optimizer_success = bool(getattr(lowest_result, 'success', True))
+            optimizer_success = bool(getattr(lowest_result, "success", True))
         else:
-            termination_message = str(getattr(res, 'message', 'basinhopping_complete'))
+            termination_message = str(getattr(res, "message", "basinhopping_complete"))
             optimizer_success = True
             optimizer_status = getattr(res, "status", None)
-        print(f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}")
+        print(
+            f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}"
+        )
     else:
         enable_local_preservation = penalty_feasible_start_local_preservation_enabled(
             run_dict,
@@ -11378,9 +12212,7 @@ if __name__ == "__main__":
             phase1_first_accepted_step_rms = phase1_result[
                 "phase1_first_accepted_step_rms"
             ]
-            phase1_max_accepted_step_rms = phase1_result[
-                "phase1_max_accepted_step_rms"
-            ]
+            phase1_max_accepted_step_rms = phase1_result["phase1_max_accepted_step_rms"]
             phase1_anchor_restore_used = phase1_result["phase1_anchor_restore_used"]
             phase1_unsafe_accept_rollbacks = phase1_result[
                 "phase1_unsafe_accept_rollbacks"
@@ -11444,10 +12276,15 @@ if __name__ == "__main__":
                     fun,
                     dofs,
                     jac=True,
-                    method='L-BFGS-B',
+                    method="L-BFGS-B",
                     bounds=phase2_bounds,
                     callback=callback,
-                    options={'maxiter': remaining_maxiter, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
+                    options={
+                        "maxiter": remaining_maxiter,
+                        "maxcor": args.maxcor,
+                        "ftol": ftol,
+                        "gtol": gtol,
+                    },
                 )
             res_nit = (phase1_iterations or 0) + res.nit
             optimizer_status = getattr(res, "status", None)
@@ -11462,7 +12299,9 @@ if __name__ == "__main__":
             )
             optimizer_success = bool(res.success)
             if phase1_termination_message is not None:
-                termination_message = f"phase1={phase1_termination_message}; phase2={termination_message}"
+                termination_message = (
+                    f"phase1={phase1_termination_message}; phase2={termination_message}"
+                )
             print(termination_message)
         else:
             res = SimpleNamespace(
@@ -11474,7 +12313,8 @@ if __name__ == "__main__":
                     if startup_local_preservation_preserved_start
                     else "phase1_only"
                 ),
-                success=bool(phase1_success) and not startup_local_preservation_preserved_start,
+                success=bool(phase1_success)
+                and not startup_local_preservation_preserved_start,
             )
             res_nit = res.nit
             termination_message = str(res.message)
@@ -11585,15 +12425,17 @@ if __name__ == "__main__":
             surface_data,
             run_dict,
             vessel_surface=VV if len(surface_data) > 1 else None,
-            surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+            surface_gap_threshold=SURFACE_GAP_THRESHOLD
+            if len(surface_data) > 1
+            else 0.0,
         )
         final_source_stage = run_dict.get("accepted_boozer_stage", final_source_stage)
 
         full_objective_eval = evaluate_search_objective(np.ones(len(surface_data)))
-        run_dict['J'] = full_objective_eval['total']
-        run_dict['dJ'] = full_objective_eval['grad'].copy()
-        run_dict['full_eval'] = full_objective_eval
-        run_dict['base_eval'] = evaluate_base_objective(
+        run_dict["J"] = full_objective_eval["total"]
+        run_dict["dJ"] = full_objective_eval["grad"].copy()
+        run_dict["full_eval"] = full_objective_eval
+        run_dict["base_eval"] = evaluate_base_objective(
             np.ones(len(surface_data)),
             nonQSs,
             brs,
@@ -11608,10 +12450,12 @@ if __name__ == "__main__":
         curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
         bs.save(OUT_DIR_ITER + "/biot_savart_opt.json")
 
-        save_surface_artifacts(surface_data, bs, OUT_DIR_ITER, "surf_opt", also_write_outer_legacy=True)
+        save_surface_artifacts(
+            surface_data, bs, OUT_DIR_ITER, "surf_opt", also_write_outer_legacy=True
+        )
 
-        final_volume = outer_surface_data['boozer_surface'].surface.volume()
-        final_iota = Iotas(outer_surface_data['boozer_surface']).J()
+        final_volume = outer_surface_data["boozer_surface"].surface.volume()
+        final_iota = Iotas(outer_surface_data["boozer_surface"]).J()
         final_hardware_snapshot = evaluate_single_stage_hardware_snapshot(
             JCurveCurve,
             CC_DIST,
@@ -11628,47 +12472,61 @@ if __name__ == "__main__":
             ),
         )
         final_max_curvature = final_hardware_snapshot["max_curvature"]
-        final_surface_volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
-        final_surface_iotas = [Iotas(entry["boozer_surface"]).J() for entry in surface_data]
+        final_surface_volumes = [
+            entry["boozer_surface"].surface.volume() for entry in surface_data
+        ]
+        final_surface_iotas = [
+            Iotas(entry["boozer_surface"]).J() for entry in surface_data
+        ]
         print(f"Volume: {final_volume}")
         print(f"Iota: {final_iota}")
         print(f"Max Curvature: {final_max_curvature}")
 
         # Generate final diagnostic plots
-        fieldError = normPlot(outer_surface_data['boozer_surface'].surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
+        fieldError = normPlot(
+            outer_surface_data["boozer_surface"].surface,
+            bs,
+            OUT_DIR_ITER + "/NormPlotOptimized",
+        )
         try:
             cross_section_plot(
                 surf_coils,
-                outer_surface_data['boozer_surface'].surface,
+                outer_surface_data["boozer_surface"].surface,
                 banana_curve,
                 OUT_DIR_ITER + "/CrossSectionOptimized",
                 lcfs_clearance_reference,
                 VV,
             )
         except Exception as e:
-            print(f"WARNING: CrossSectionOptimized plot failed (surface may fold at high mpol): {e}")
+            print(
+                f"WARNING: CrossSectionOptimized plot failed (surface may fold at high mpol): {e}"
+            )
     else:
         final_surface_volumes = initial_surface_volumes
         final_surface_iotas = initial_surface_iotas
-        run_dict['full_eval'] = None
-        run_dict['base_eval'] = None
-        run_dict['J'] = None
-        run_dict['dJ'] = None
+        run_dict["full_eval"] = None
+        run_dict["base_eval"] = None
+        run_dict["J"] = None
+        run_dict["dJ"] = None
 
     final_topology_status = final_topology_gate_for_results(
         args.init_only,
         len(surface_data),
-        outer_surface_data['boozer_surface'].surface,
+        outer_surface_data["boozer_surface"].surface,
         bs,
         surface_mode_contract=surface_mode_contract,
     )
     surface_mode_metadata = _build_surface_mode_metadata_impl(surface_mode_contract)
-    objective_j = float(run_dict['J']) if run_dict['J'] is not None else None
-    base_objective_j = None if run_dict['base_eval'] is None else float(run_dict['base_eval']['total'])
-    search_objective_j = float(run_dict['search_eval']['total'])
-    final_frontier_trust_status = evaluate_frontier_trust_status(run_dict["search_eval"])
+    objective_j = float(run_dict["J"]) if run_dict["J"] is not None else None
+    base_objective_j = (
+        None if run_dict["base_eval"] is None else float(run_dict["base_eval"]["total"])
+    )
+    search_objective_j = float(run_dict["search_eval"]["total"])
+    final_frontier_trust_status = evaluate_frontier_trust_status(
+        run_dict["search_eval"]
+    )
     frontier_rank_objective_j = run_dict["search_eval"].get("frontier_rank_total")
-    final_search_surface_weights = run_dict['search_eval']['surface_weights'].tolist()
+    final_search_surface_weights = run_dict["search_eval"]["surface_weights"].tolist()
     if final_hardware_snapshot is None:
         final_hardware_snapshot = evaluate_single_stage_hardware_snapshot(
             JCurveCurve,
@@ -11828,10 +12686,18 @@ if __name__ == "__main__":
         "boozer_stage": reported_boozer_stage(args.boozer_stage, final_source_stage),
         "REQUESTED_BOOZER_STAGE": args.boozer_stage,
         "BOOZER_STAGE_REFINEMENT": bool(args.boozer_stage_refinement),
-        "REFINEMENT_BOOZER_STAGE": args.refinement_boozer_stage if args.boozer_stage_refinement else None,
-        "REFINEMENT_MAXITER": args.refinement_maxiter if args.boozer_stage_refinement else None,
-        "REFINEMENT_CHUNK_MAXITER": args.refinement_chunk_maxiter if args.boozer_stage_refinement else None,
-        "REFINEMENT_MAX_STALLED_CHUNKS": args.refinement_max_stalled_chunks if args.boozer_stage_refinement else None,
+        "REFINEMENT_BOOZER_STAGE": args.refinement_boozer_stage
+        if args.boozer_stage_refinement
+        else None,
+        "REFINEMENT_MAXITER": args.refinement_maxiter
+        if args.boozer_stage_refinement
+        else None,
+        "REFINEMENT_CHUNK_MAXITER": args.refinement_chunk_maxiter
+        if args.boozer_stage_refinement
+        else None,
+        "REFINEMENT_MAX_STALLED_CHUNKS": args.refinement_max_stalled_chunks
+        if args.boozer_stage_refinement
+        else None,
         "REFINEMENT_ATTEMPTED": refinement_attempted,
         "REFINEMENT_SUCCESS": refinement_success,
         "REFINEMENT_ITERATIONS": refinement_iterations,
@@ -11875,36 +12741,74 @@ if __name__ == "__main__":
         "iterations": res_nit,
         "FTOL": ftol,
         "GTOL": gtol,
-        "ALM_MAX_OUTER_ITERS": args.alm_max_outer_iters if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_MAX_OUTER_ITERS": args.alm_max_outer_iters
+        if CONSTRAINT_METHOD == "alm"
+        else None,
         "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
-        "ALM_PENALTY_INIT": args.alm_penalty_init if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_PENALTY_SCALE": args.alm_penalty_scale if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_PENALTY_INIT": args.alm_penalty_init
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_PENALTY_SCALE": args.alm_penalty_scale
+        if CONSTRAINT_METHOD == "alm"
+        else None,
         "ALM_PENALTY_MAX": args.alm_penalty_max if CONSTRAINT_METHOD == "alm" else None,
         "ALM_FEAS_TOL": args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_STATIONARITY_TOL": args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TRUST_RADIUS_INIT": args.alm_trust_radius_init if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TRUST_RADIUS_MIN": args.alm_trust_radius_min if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TRUST_RADIUS_SHRINK": args.alm_trust_radius_shrink if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TRUST_RADIUS_GROW": args.alm_trust_radius_grow if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_MAX_INNER_ATTEMPTS": args.alm_max_inner_attempts if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_MAX_SUBPROBLEM_CONTINUATIONS": args.alm_max_subproblem_continuations if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_STATIONARITY_TOL": args.alm_stationarity_tol
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_TRUST_RADIUS_INIT": args.alm_trust_radius_init
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_TRUST_RADIUS_MIN": args.alm_trust_radius_min
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_TRUST_RADIUS_SHRINK": args.alm_trust_radius_shrink
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_TRUST_RADIUS_GROW": args.alm_trust_radius_grow
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_MAX_INNER_ATTEMPTS": args.alm_max_inner_attempts
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_MAX_SUBPROBLEM_CONTINUATIONS": args.alm_max_subproblem_continuations
+        if CONSTRAINT_METHOD == "alm"
+        else None,
         "ALM_FIX_SIGNAL_MISMATCH_GUARD": (
-            bool(args.alm_fix_signal_mismatch_guard) if CONSTRAINT_METHOD == "alm" else None
+            bool(args.alm_fix_signal_mismatch_guard)
+            if CONSTRAINT_METHOD == "alm"
+            else None
         ),
-        "ALM_DISTANCE_SMOOTHING": args.alm_distance_smoothing if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_CURVATURE_SMOOTHING": args.alm_curvature_smoothing if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_EFFECTIVE_DISTANCE_SMOOTHING": current_alm_distance_smoothing() if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_EFFECTIVE_CURVATURE_SMOOTHING": current_alm_curvature_smoothing() if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_ADAPTIVE_SMOOTHING_EVENTS": run_dict["alm_adaptive_smoothing_events"] if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_QS_THRESHOLD": args.alm_qs_threshold if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_BOOZER_THRESHOLD": args.alm_boozer_threshold if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_DISTANCE_SMOOTHING": args.alm_distance_smoothing
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_CURVATURE_SMOOTHING": args.alm_curvature_smoothing
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_EFFECTIVE_DISTANCE_SMOOTHING": current_alm_distance_smoothing()
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_EFFECTIVE_CURVATURE_SMOOTHING": current_alm_curvature_smoothing()
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_ADAPTIVE_SMOOTHING_EVENTS": run_dict["alm_adaptive_smoothing_events"]
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_QS_THRESHOLD": args.alm_qs_threshold
+        if CONSTRAINT_METHOD == "alm"
+        else None,
+        "ALM_BOOZER_THRESHOLD": args.alm_boozer_threshold
+        if CONSTRAINT_METHOD == "alm"
+        else None,
         "ALM_IOTA_PENALTY_THRESHOLD": (
             args.alm_iota_penalty_threshold if CONSTRAINT_METHOD == "alm" else None
         ),
         "ALM_LENGTH_PENALTY_THRESHOLD": (
             args.alm_length_penalty_threshold if CONSTRAINT_METHOD == "alm" else None
         ),
-        "ALM_PARTIAL_STATE_FILENAME": "alm_state.partial.json" if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_PARTIAL_STATE_FILENAME": "alm_state.partial.json"
+        if CONSTRAINT_METHOD == "alm"
+        else None,
         "ALM_TERMINATION_REASON": getattr(alm_result, "termination_reason", None),
         "ALM_CONVERGED": getattr(alm_result, "converged_to_tolerances", None),
         "ALM_EXIT_CLASS": getattr(alm_result, "exit_class", None),
@@ -11918,7 +12822,9 @@ if __name__ == "__main__":
             "stationarity_satisfied",
             None,
         ),
-        "ALM_RESTORED_BEST_FEASIBLE": getattr(alm_result, "restored_best_feasible", None),
+        "ALM_RESTORED_BEST_FEASIBLE": getattr(
+            alm_result, "restored_best_feasible", None
+        ),
         "ALM_RESTORED_BEST_FEASIBLE_REASON": getattr(
             alm_result,
             "restored_best_feasible_reason",
@@ -11937,7 +12843,9 @@ if __name__ == "__main__":
             "final_max_feasibility_violation",
             None,
         ),
-        "ALM_FINAL_STATIONARITY_NORM": getattr(alm_result, "final_stationarity_norm", None),
+        "ALM_FINAL_STATIONARITY_NORM": getattr(
+            alm_result, "final_stationarity_norm", None
+        ),
         "ALM_FINAL_RAW_STATIONARITY_NORM": getattr(
             alm_result,
             "final_raw_stationarity_norm",
@@ -12036,23 +12944,35 @@ if __name__ == "__main__":
         "FINAL_TOPOLOGY_FIRST_EXIT_TIME": final_topology_status["first_exit_time"],
         "FINAL_TOPOLOGY_FIRST_EXIT_ANGLE": final_topology_status["first_exit_angle"],
         "FINAL_TOPOLOGY_FIRST_EXIT_REASON": final_topology_status["first_exit_reason"],
-        "FINAL_TOPOLOGY_STOP_REASON_COUNTS": final_topology_status["stop_reason_counts"],
-        "TARGET_VOLUME": None if args.single_stage_goal_mode == "frontier" else float(vol_target),
-        "TARGET_IOTA": None if args.single_stage_goal_mode == "frontier" else float(iota_target),
+        "FINAL_TOPOLOGY_STOP_REASON_COUNTS": final_topology_status[
+            "stop_reason_counts"
+        ],
+        "TARGET_VOLUME": None
+        if args.single_stage_goal_mode == "frontier"
+        else float(vol_target),
+        "TARGET_IOTA": None
+        if args.single_stage_goal_mode == "frontier"
+        else float(iota_target),
         "FLIP_BANANA": bool(effective_flip_banana),
         "REQUESTED_FLIP_BANANA": bool(args.flip_banana),
         "STAGE2_SEED_FLIP_BANANA": stage2_results.get("FLIP_BANANA"),
-        "BOOZER_SURFACE_TARGET_VOLUMES": [float(entry["target_volume"]) for entry in surface_data],
+        "BOOZER_SURFACE_TARGET_VOLUMES": [
+            float(entry["target_volume"]) for entry in surface_data
+        ],
         "SINGLE_STAGE_GOAL_MODE": args.single_stage_goal_mode,
         "SINGLE_STAGE_GOAL_MODE_IMPL": current_frontier_goal_mode_impl(),
         "FRONTIER_REFERENCE_IOTA": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.iota_reference
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.iota_reference
         ),
         "FRONTIER_REFERENCE_IOTA_SCALE": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.iota_scale
         ),
         "FRONTIER_REFERENCE_VOLUME": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.volume_reference
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.volume_reference
         ),
         "FRONTIER_REFERENCE_VOLUME_SCALE": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.volume_scale
@@ -12064,13 +12984,17 @@ if __name__ == "__main__":
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.qs_scale
         ),
         "FRONTIER_REFERENCE_BOOZER": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.boozer_reference
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.boozer_reference
         ),
         "FRONTIER_REFERENCE_BOOZER_SCALE": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.boozer_scale
         ),
         "FRONTIER_SCALARIZATION_TYPE": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.scalarization_type
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.scalarization_type
         ),
         "FRONTIER_CHEBYSHEV_RHO": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_rho
@@ -12081,22 +13005,34 @@ if __name__ == "__main__":
             else FRONTIER_GOAL_CONFIG.chebyshev_sharpness
         ),
         "FRONTIER_CHEBYSHEV_WEIGHT_IOTA": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_weight_iota
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.chebyshev_weight_iota
         ),
         "FRONTIER_CHEBYSHEV_WEIGHT_VOLUME": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_weight_volume
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.chebyshev_weight_volume
         ),
         "FRONTIER_CHEBYSHEV_WEIGHT_QA": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_weight_qa
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.chebyshev_weight_qa
         ),
         "FRONTIER_CHEBYSHEV_WEIGHT_BOOZER": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_weight_boozer
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.chebyshev_weight_boozer
         ),
         "EPSILON_CONSTRAINT_QA_MAX": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.epsilon_constraint_qa_max
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.epsilon_constraint_qa_max
         ),
         "EPSILON_CONSTRAINT_BOOZER_MAX": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.epsilon_constraint_boozer_max
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.epsilon_constraint_boozer_max
         ),
         "FRONTIER_EPSILON_PENALTY_WEIGHT": (
             None
@@ -12109,27 +13045,35 @@ if __name__ == "__main__":
             else FRONTIER_GOAL_CONFIG.boozer_trust_penalty_scale
         ),
         "FRONTIER_EFFECTIVE_QA_WEIGHT": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_qs_weight
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.effective_qs_weight
         ),
         "FRONTIER_EFFECTIVE_BOOZER_WEIGHT": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_boozer_weight
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.effective_boozer_weight
         ),
         "FRONTIER_EFFECTIVE_IOTA_WEIGHT": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_iota_weight
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.effective_iota_weight
         ),
         "FRONTIER_EFFECTIVE_VOLUME_WEIGHT": (
-            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_volume_weight
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.effective_volume_weight
         ),
         "FRONTIER_VOLUME_WEIGHT_INPUT": (
-            args.frontier_volume_weight if args.single_stage_goal_mode == "frontier" else None
+            args.frontier_volume_weight
+            if args.single_stage_goal_mode == "frontier"
+            else None
         ),
         "FRONTIER_BOOZER_TRUST_THRESHOLD": final_frontier_trust_status["threshold"],
         "PLASMA_CURRENT_A": float(plasma_current_A),
         "PLASMA_CURRENT_INPUT_SOURCE": plasma_current_input_source,
         "PLASMA_CURRENT_SURROGATE_SCOPE": (
-            "shared_all_surfaces"
-            if effective_num_surfaces > 1
-            else "single_surface"
+            "shared_all_surfaces" if effective_num_surfaces > 1 else "single_surface"
         ),
         "FINITE_CURRENT_MODE": finite_current_mode,
         "BOOZER_CURRENT_CONVENTION": boozer_current_convention,
@@ -12143,7 +13087,9 @@ if __name__ == "__main__":
         "SEARCH_OBJECTIVE_J": search_objective_j,
         **constraint_metadata,
         "FRONTIER_RANK_OBJECTIVE_J": (
-            None if frontier_rank_objective_j is None else float(frontier_rank_objective_j)
+            None
+            if frontier_rank_objective_j is None
+            else float(frontier_rank_objective_j)
         ),
         "FINAL_SEARCH_SURFACE_WEIGHTS": final_search_surface_weights,
         "FINAL_FEASIBILITY_OK": final_feasibility_ok,
@@ -12152,8 +13098,9 @@ if __name__ == "__main__":
             final_feasibility_ok,
             frontier_certification_status,
         ),
-        "SELF_INTERSECTING": run_dict['intersecting'],
+        "SELF_INTERSECTING": run_dict["intersecting"],
         **build_single_stage_banana_current_payload_fields(banana_current_state),
+        **residue_objective_results_payload(run_dict["search_eval"]),
         "BANANA_CURRENT_DIAGNOSTICS_ENABLED": (
             run_dict.get("banana_current_diagnostics") is not None
         ),
@@ -12193,9 +13140,7 @@ if __name__ == "__main__":
         "TOPOLOGY_GATE_REJECTS": run_dict["topology_gate_rejects"],
         "HARDWARE_REJECTS": run_dict["hardware_rejects"],
         "CURVATURE_PRECHECK_REJECTS": run_dict["curvature_precheck_rejects"],
-        "CURVATURE_OVERCAP_BOOZER_EVALS": run_dict[
-            "curvature_overcap_boozer_evals"
-        ],
+        "CURVATURE_OVERCAP_BOOZER_EVALS": run_dict["curvature_overcap_boozer_evals"],
         "SURFACE_SOLVE_REJECTS": run_dict["surface_solve_rejects"],
         "FRONTIER_TRUST_REJECTS": run_dict["frontier_trust_rejects"],
         **search_step_metrics_payload(run_dict),
@@ -12208,13 +13153,21 @@ if __name__ == "__main__":
             "frontier_boozer_trust_excess_ratio"
         ),
         "FRONTIER_TRUST_PENALTY": run_dict["search_eval"].get("frontier_trust_penalty"),
-        "FRONTIER_CONTRACT_PENALTY": run_dict["search_eval"].get("frontier_contract_penalty"),
-        "FRONTIER_EPSILON_PENALTY": run_dict["search_eval"].get("frontier_epsilon_penalty"),
-        "FRONTIER_HARDWARE_PENALTY": run_dict["search_eval"].get("frontier_hardware_penalty"),
+        "FRONTIER_CONTRACT_PENALTY": run_dict["search_eval"].get(
+            "frontier_contract_penalty"
+        ),
+        "FRONTIER_EPSILON_PENALTY": run_dict["search_eval"].get(
+            "frontier_epsilon_penalty"
+        ),
+        "FRONTIER_HARDWARE_PENALTY": run_dict["search_eval"].get(
+            "frontier_hardware_penalty"
+        ),
         "FRONTIER_HARDWARE_MAX_VIOLATION_RATIO": run_dict["search_eval"].get(
             "frontier_hardware_max_violation_ratio"
         ),
-        "FRONTIER_TOPOLOGY_PENALTY": run_dict["search_eval"].get("frontier_topology_penalty"),
+        "FRONTIER_TOPOLOGY_PENALTY": run_dict["search_eval"].get(
+            "frontier_topology_penalty"
+        ),
         "FRONTIER_TOPOLOGY_DEFICIT": run_dict["search_eval"].get(
             "frontier_topology_deficit"
         ),
@@ -12230,17 +13183,27 @@ if __name__ == "__main__":
             "usable_scale_ok"
         ),
         "FRONTIER_VOLUME_OBJECTIVE": (
-            None if args.init_only else float(run_dict["search_eval"].get("J_volume", 0.0))
+            None
+            if args.init_only
+            else float(run_dict["search_eval"].get("J_volume", 0.0))
         ),
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
         "INITIAL_MAX_CURVATURE": float(initial_max_curvature),
         **best_topology_results_payload(run_dict),
-        "BEST_CONFINEMENT_OBJECTIVE_ACCEPTED_ITERATION": run_dict.get("best_confinement_objective", {}).get("accepted_iteration"),
-        "BEST_CONFINEMENT_OBJECTIVE_TOTAL": run_dict.get("best_confinement_objective", {}).get("checkpoint_objective_total"),
-        "BEST_CONFINEMENT_OBJECTIVE_PROXY_J": run_dict.get("best_confinement_objective", {}).get("J"),
-        "BEST_CONFINEMENT_OBJECTIVE_LOSS": run_dict.get("best_confinement_objective", {}).get("confinement_loss"),
+        "BEST_CONFINEMENT_OBJECTIVE_ACCEPTED_ITERATION": run_dict.get(
+            "best_confinement_objective", {}
+        ).get("accepted_iteration"),
+        "BEST_CONFINEMENT_OBJECTIVE_TOTAL": run_dict.get(
+            "best_confinement_objective", {}
+        ).get("checkpoint_objective_total"),
+        "BEST_CONFINEMENT_OBJECTIVE_PROXY_J": run_dict.get(
+            "best_confinement_objective", {}
+        ).get("J"),
+        "BEST_CONFINEMENT_OBJECTIVE_LOSS": run_dict.get(
+            "best_confinement_objective", {}
+        ).get("confinement_loss"),
         "BEST_CONFINEMENT_OBJECTIVE_TRANSPORT_DIAGNOSTICS": run_dict.get(
             "best_confinement_objective",
             {},
@@ -12254,7 +13217,7 @@ if __name__ == "__main__":
     results.update(
         collect_surface_run_metadata(
             surface_data,
-            run_dict['surface_status'],
+            run_dict["surface_status"],
             initial_surface_volumes,
             initial_surface_iotas,
             final_surface_volumes,

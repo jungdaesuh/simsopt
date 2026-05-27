@@ -34,6 +34,7 @@ BRANCH_STATUS_NEWTON_STALLED = "newton_stalled"
 BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW = "outside_radial_window"
 BRANCH_STATUS_WRONG_WINDING = "wrong_winding"
 BRANCH_STATUS_BRANCH_MISMATCH = "branch_mismatch"
+BRANCH_STATUS_BAD_DETERMINANT = "bad_tangent_determinant"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +92,7 @@ class PeriodicOrbitSolverOptions:
     residual_tolerance: float = 1.0e-9
     winding_tolerance: float = 1.0e-7
     radial_window_tolerance: float = 1.0e-8
+    det_tolerance: float = 1.0e-5
     max_iterations: int = 12
     max_step_norm: float = 0.05
     min_damping: float = 0.0625
@@ -100,6 +102,7 @@ class PeriodicOrbitSolverOptions:
         residual_tolerance = float(self.residual_tolerance)
         winding_tolerance = float(self.winding_tolerance)
         radial_window_tolerance = float(self.radial_window_tolerance)
+        det_tolerance = float(self.det_tolerance)
         max_step_norm = float(self.max_step_norm)
         min_damping = float(self.min_damping)
         damping_shrink = float(self.damping_shrink)
@@ -112,6 +115,10 @@ class PeriodicOrbitSolverOptions:
             raise ValueError(
                 "Periodic orbit radial_window_tolerance must be finite and nonnegative"
             )
+        if det_tolerance < 0.0 or not isfinite(det_tolerance):
+            raise ValueError(
+                "Periodic orbit det_tolerance must be finite and nonnegative"
+            )
         if max_iterations <= 0:
             raise ValueError("Periodic orbit max_iterations must be positive")
         if max_step_norm <= 0.0 or not isfinite(max_step_norm):
@@ -123,6 +130,7 @@ class PeriodicOrbitSolverOptions:
         object.__setattr__(self, "residual_tolerance", residual_tolerance)
         object.__setattr__(self, "winding_tolerance", winding_tolerance)
         object.__setattr__(self, "radial_window_tolerance", radial_window_tolerance)
+        object.__setattr__(self, "det_tolerance", det_tolerance)
         object.__setattr__(self, "max_iterations", max_iterations)
         object.__setattr__(self, "max_step_norm", max_step_norm)
         object.__setattr__(self, "min_damping", min_damping)
@@ -201,6 +209,14 @@ def radial_label_in_target_window(
         <= label
         <= radial_window[1] + window_tolerance
     )
+
+
+def tangent_map_determinant_within_tolerance(
+    tangent_result: FieldlineTangentReturnResult,
+    solver_options: PeriodicOrbitSolverOptions,
+) -> bool:
+    det_m = float(tangent_result.det_m)
+    return isfinite(det_m) and abs(det_m - 1.0) <= solver_options.det_tolerance
 
 
 def solve_periodic_orbit(
@@ -460,6 +476,11 @@ def _validated_branch_status(
         > solver_options.winding_tolerance
     ):
         return BRANCH_STATUS_WRONG_WINDING
+    if not tangent_map_determinant_within_tolerance(
+        tangent_result,
+        solver_options,
+    ):
+        return BRANCH_STATUS_BAD_DETERMINANT
     residue_diagnostic = greene_residue_diagnostic_from_matrix(tangent_result.monodromy)
     if not residue_classification_matches_branch(branch, residue_diagnostic):
         return BRANCH_STATUS_BRANCH_MISMATCH

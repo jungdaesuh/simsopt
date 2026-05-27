@@ -32,7 +32,9 @@ from banana_opt.poloidal_extent import (
     poloidal_extent_signed_constraint,
 )
 from banana_opt.search_evaluation import annotate_search_evaluation_finiteness
-from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
+from banana_opt.single_stage_constraints import (
+    single_stage_constraint_activity_tolerances,
+)
 from banana_opt.smooth_distance_selection import (
     pairwise_block_min,
     point_tree,
@@ -57,7 +59,11 @@ def average_surface_objectives(objectives, weights=None):
     weighted_sum = None
     for weight, objective in zip(weights, objectives):
         weighted_objective = weight * objective
-        weighted_sum = weighted_objective if weighted_sum is None else weighted_sum + weighted_objective
+        weighted_sum = (
+            weighted_objective
+            if weighted_sum is None
+            else weighted_sum + weighted_objective
+        )
     return (1.0 / total_weight) * weighted_sum
 
 
@@ -86,6 +92,7 @@ def build_total_objective(
     width_max_threshold=BANANA_WIDTH_MAX_M,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
+    JResidueObjective=None,
 ):
     objective = (
         JnonQSRatio
@@ -109,6 +116,8 @@ def build_total_objective(
         )
     if JCurveSelfIntersect is not None:
         objective = objective + SELFINT_WEIGHT * JCurveSelfIntersect
+    if JResidueObjective is not None:
+        objective = objective + JResidueObjective
     return objective
 
 
@@ -138,7 +147,9 @@ def _resolve_surface_objective_terms(
         brs,
     )
     objective_J_QS_obj = raw_J_QS_obj if JNonQSObjective is None else JNonQSObjective
-    objective_J_Boozer_obj = raw_J_Boozer_obj if JBoozerObjective is None else JBoozerObjective
+    objective_J_Boozer_obj = (
+        raw_J_Boozer_obj if JBoozerObjective is None else JBoozerObjective
+    )
     return raw_J_QS_obj, raw_J_Boozer_obj, objective_J_QS_obj, objective_J_Boozer_obj
 
 
@@ -162,7 +173,9 @@ def _objective_lower_bound_constraint(objective, threshold, objective_optimizabl
     return signed_value, grad, _positive_violation(signed_value)
 
 
-def _surface_upper_bound_constraint(surface, value, dvalue_by_dcoeff, threshold, objective_optimizable):
+def _surface_upper_bound_constraint(
+    surface, value, dvalue_by_dcoeff, threshold, objective_optimizable
+):
     signed_value = float(value) - float(threshold)
     derivative = Derivative({surface: np.asarray(dvalue_by_dcoeff, dtype=float)})
     optimizable = surface if objective_optimizable is None else objective_optimizable
@@ -178,6 +191,12 @@ def _optional_objective_value_and_gradient(
     if objective is None:
         return 0.0, np.zeros_like(reference_grad)
     return float(objective.J()), _objective_gradient(objective, objective_optimizable)
+
+
+def _optional_objective_payload(objective):
+    if objective is None:
+        return None
+    return objective.to_json_dict()
 
 
 def _scalar_abs_upper_bound_constraint(optimizable, threshold, objective_optimizable):
@@ -311,6 +330,7 @@ def evaluate_total_objective(
     width_max_threshold=BANANA_WIDTH_MAX_M,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
+    JResidueObjective=None,
 ):
     (
         raw_J_QS_obj,
@@ -349,6 +369,7 @@ def evaluate_total_objective(
         width_max_threshold=width_max_threshold,
         JCurveSelfIntersect=JCurveSelfIntersect,
         SELFINT_WEIGHT=SELFINT_WEIGHT,
+        JResidueObjective=JResidueObjective,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
     constraint_names, constraint_values = _penalty_search_constraint_payload(
@@ -374,78 +395,87 @@ def evaluate_total_objective(
         if JVolume is None
         else _objective_gradient(JVolume, objective_optimizable)
     )
-    evaluation.update({
-        "diagnostics_included": True,
-        "J_QS": float(raw_J_QS_obj.J()),
-        "dJ_QS": _objective_gradient(raw_J_QS_obj, objective_optimizable),
-        "J_QS_objective": float(objective_J_QS_obj.J()),
-        "dJ_QS_objective": _objective_gradient(
-            objective_J_QS_obj,
-            objective_optimizable,
-        ),
-        "J_Boozer": float(raw_J_Boozer_obj.J()),
-        "dJ_Boozer": _objective_gradient(raw_J_Boozer_obj, objective_optimizable),
-        "J_Boozer_objective": float(objective_J_Boozer_obj.J()),
-        "dJ_Boozer_objective": _objective_gradient(
-            objective_J_Boozer_obj,
-            objective_optimizable,
-        ),
-        "J_iota": float(Jiota.J()),
-        "dJ_iota": _objective_gradient(Jiota, objective_optimizable),
-        "J_volume": 0.0 if JVolume is None else float(JVolume.J()),
-        "dJ_volume": volume_grad,
-        "J_len": float(JCurveLength.J()),
-        "dJ_len": _objective_gradient(JCurveLength, objective_optimizable),
-        "J_len_min": (
-            0.0 if JCurveLengthMin is None else float(JCurveLengthMin.J())
-        ),
-        "dJ_len_min": (
-            np.zeros_like(total_grad)
-            if JCurveLengthMin is None
-            else _objective_gradient(JCurveLengthMin, objective_optimizable)
-        ),
-        "J_cc": float(JCurveCurve.J()),
-        "dJ_cc": _objective_gradient(JCurveCurve, objective_optimizable),
-        "J_cs": float(JCurveSurface.J()),
-        "dJ_cs": _objective_gradient(JCurveSurface, objective_optimizable),
-        "J_curvature": float(JCurvature.J()),
-        "dJ_curvature": _objective_gradient(JCurvature, objective_optimizable),
-        "J_poloidal_extent": (
-            0.0 if JPoloidalExtent is None else float(JPoloidalExtent.J())
-        ),
-        "dJ_poloidal_extent": (
-            np.zeros_like(total_grad)
-            if JPoloidalExtent is None
-            else _objective_gradient(JPoloidalExtent, objective_optimizable)
-        ),
-        "J_coil_width": (
-            0.0 if JCoilWidth is None else float(JCoilWidth.J())
-        ),
-        "dJ_coil_width": (
-            np.zeros_like(total_grad)
-            if JCoilWidth is None
-            else _objective_gradient(JCoilWidth, objective_optimizable)
-        ),
-        "J_self_intersect": (
-            0.0 if JCurveSelfIntersect is None else float(JCurveSelfIntersect.J())
-        ),
-        "dJ_self_intersect": (
-            np.zeros_like(total_grad)
-            if JCurveSelfIntersect is None
-            else _objective_gradient(JCurveSelfIntersect, objective_optimizable)
-        ),
-        "coil_width_min_threshold": (
-            None if JCoilWidth is None else float(width_min_threshold)
-        ),
-        "coil_width_max_threshold": (
-            None if JCoilWidth is None else float(width_max_threshold)
-        ),
-        "self_intersect_min_distance": (
-            None
-            if JCurveSelfIntersect is None
-            else BANANA_SELF_INTERSECT_MIN_DISTANCE_M
-        ),
-    })
+    residue_value, residue_grad = _optional_objective_value_and_gradient(
+        JResidueObjective,
+        total_grad,
+        objective_optimizable,
+    )
+    evaluation.update(
+        {
+            "diagnostics_included": True,
+            "J_QS": float(raw_J_QS_obj.J()),
+            "dJ_QS": _objective_gradient(raw_J_QS_obj, objective_optimizable),
+            "J_QS_objective": float(objective_J_QS_obj.J()),
+            "dJ_QS_objective": _objective_gradient(
+                objective_J_QS_obj,
+                objective_optimizable,
+            ),
+            "J_Boozer": float(raw_J_Boozer_obj.J()),
+            "dJ_Boozer": _objective_gradient(raw_J_Boozer_obj, objective_optimizable),
+            "J_Boozer_objective": float(objective_J_Boozer_obj.J()),
+            "dJ_Boozer_objective": _objective_gradient(
+                objective_J_Boozer_obj,
+                objective_optimizable,
+            ),
+            "J_iota": float(Jiota.J()),
+            "dJ_iota": _objective_gradient(Jiota, objective_optimizable),
+            "J_volume": 0.0 if JVolume is None else float(JVolume.J()),
+            "dJ_volume": volume_grad,
+            "J_len": float(JCurveLength.J()),
+            "dJ_len": _objective_gradient(JCurveLength, objective_optimizable),
+            "J_len_min": (
+                0.0 if JCurveLengthMin is None else float(JCurveLengthMin.J())
+            ),
+            "dJ_len_min": (
+                np.zeros_like(total_grad)
+                if JCurveLengthMin is None
+                else _objective_gradient(JCurveLengthMin, objective_optimizable)
+            ),
+            "J_cc": float(JCurveCurve.J()),
+            "dJ_cc": _objective_gradient(JCurveCurve, objective_optimizable),
+            "J_cs": float(JCurveSurface.J()),
+            "dJ_cs": _objective_gradient(JCurveSurface, objective_optimizable),
+            "J_curvature": float(JCurvature.J()),
+            "dJ_curvature": _objective_gradient(JCurvature, objective_optimizable),
+            "J_poloidal_extent": (
+                0.0 if JPoloidalExtent is None else float(JPoloidalExtent.J())
+            ),
+            "dJ_poloidal_extent": (
+                np.zeros_like(total_grad)
+                if JPoloidalExtent is None
+                else _objective_gradient(JPoloidalExtent, objective_optimizable)
+            ),
+            "J_coil_width": (0.0 if JCoilWidth is None else float(JCoilWidth.J())),
+            "dJ_coil_width": (
+                np.zeros_like(total_grad)
+                if JCoilWidth is None
+                else _objective_gradient(JCoilWidth, objective_optimizable)
+            ),
+            "J_self_intersect": (
+                0.0 if JCurveSelfIntersect is None else float(JCurveSelfIntersect.J())
+            ),
+            "dJ_self_intersect": (
+                np.zeros_like(total_grad)
+                if JCurveSelfIntersect is None
+                else _objective_gradient(JCurveSelfIntersect, objective_optimizable)
+            ),
+            "J_residue_objective": residue_value,
+            "dJ_residue_objective": residue_grad,
+            "residue_objective_enabled": JResidueObjective is not None,
+            "residue_objective_payload": _optional_objective_payload(JResidueObjective),
+            "coil_width_min_threshold": (
+                None if JCoilWidth is None else float(width_min_threshold)
+            ),
+            "coil_width_max_threshold": (
+                None if JCoilWidth is None else float(width_max_threshold)
+            ),
+            "self_intersect_min_distance": (
+                None
+                if JCurveSelfIntersect is None
+                else BANANA_SELF_INTERSECT_MIN_DISTANCE_M
+            ),
+        }
+    )
     return annotate_search_evaluation_finiteness(evaluation)
 
 
@@ -466,6 +496,7 @@ def evaluate_base_objective(
     _surface_pair=None,
     JNonQSObjective=None,
     JBoozerObjective=None,
+    JResidueObjective=None,
     include_diagnostics=True,
 ):
     if _surface_pair is not None:
@@ -477,7 +508,9 @@ def evaluate_base_objective(
             brs,
         )
     objective_J_QS_obj = raw_J_QS_obj if JNonQSObjective is None else JNonQSObjective
-    objective_J_Boozer_obj = raw_J_Boozer_obj if JBoozerObjective is None else JBoozerObjective
+    objective_J_Boozer_obj = (
+        raw_J_Boozer_obj if JBoozerObjective is None else JBoozerObjective
+    )
     base_objective = (
         objective_J_QS_obj
         + RES_WEIGHT * objective_J_Boozer_obj
@@ -486,20 +519,27 @@ def evaluate_base_objective(
     )
     if JVolume is not None:
         base_objective = base_objective + VOLUME_WEIGHT * JVolume
-    physics_total = float(base_objective.J())
-    base_grad = _objective_gradient(base_objective, objective_optimizable)
+    physics_terms_total = float(base_objective.J())
+    physics_grad = _objective_gradient(base_objective, objective_optimizable)
+    residue_value, residue_grad = _optional_objective_value_and_gradient(
+        JResidueObjective,
+        physics_grad,
+        objective_optimizable,
+    )
     if alm_formulation == "thresholded_physics":
-        total = 0.0
-        grad = np.zeros_like(base_grad)
+        total = residue_value
+        grad = residue_grad
     elif alm_formulation == "weighted_sum":
-        total = physics_total
-        grad = base_grad
+        total = physics_terms_total + residue_value
+        grad = physics_grad + residue_grad
     else:
         raise ValueError(f"Unsupported ALM formulation {alm_formulation!r}")
+    physics_total = total if JResidueObjective is not None else physics_terms_total
     evaluation = {
         "total": total,
         "grad": grad,
         "physics_total": physics_total,
+        "physics_terms_total": physics_terms_total,
         "surface_weights": np.asarray(diagnostic_surface_weights, dtype=float).copy(),
         "diagnostics_included": False,
     }
@@ -507,27 +547,37 @@ def evaluate_base_objective(
         return annotate_search_evaluation_finiteness(evaluation)
 
     volume_grad = (
-        np.zeros_like(base_grad)
+        np.zeros_like(physics_grad)
         if JVolume is None
         else _objective_gradient(JVolume, objective_optimizable)
     )
-    evaluation.update({
-        "diagnostics_included": True,
-        "J_QS": float(raw_J_QS_obj.J()),
-        "dJ_QS": _objective_gradient(raw_J_QS_obj, objective_optimizable),
-        "J_QS_objective": float(objective_J_QS_obj.J()),
-        "dJ_QS_objective": _objective_gradient(objective_J_QS_obj, objective_optimizable),
-        "J_Boozer": float(raw_J_Boozer_obj.J()),
-        "dJ_Boozer": _objective_gradient(raw_J_Boozer_obj, objective_optimizable),
-        "J_Boozer_objective": float(objective_J_Boozer_obj.J()),
-        "dJ_Boozer_objective": _objective_gradient(objective_J_Boozer_obj, objective_optimizable),
-        "J_iota": float(Jiota.J()),
-        "dJ_iota": _objective_gradient(Jiota, objective_optimizable),
-        "J_volume": 0.0 if JVolume is None else float(JVolume.J()),
-        "dJ_volume": volume_grad,
-        "J_len": float(JCurveLength.J()),
-        "dJ_len": _objective_gradient(JCurveLength, objective_optimizable),
-    })
+    evaluation.update(
+        {
+            "diagnostics_included": True,
+            "J_QS": float(raw_J_QS_obj.J()),
+            "dJ_QS": _objective_gradient(raw_J_QS_obj, objective_optimizable),
+            "J_QS_objective": float(objective_J_QS_obj.J()),
+            "dJ_QS_objective": _objective_gradient(
+                objective_J_QS_obj, objective_optimizable
+            ),
+            "J_Boozer": float(raw_J_Boozer_obj.J()),
+            "dJ_Boozer": _objective_gradient(raw_J_Boozer_obj, objective_optimizable),
+            "J_Boozer_objective": float(objective_J_Boozer_obj.J()),
+            "dJ_Boozer_objective": _objective_gradient(
+                objective_J_Boozer_obj, objective_optimizable
+            ),
+            "J_iota": float(Jiota.J()),
+            "dJ_iota": _objective_gradient(Jiota, objective_optimizable),
+            "J_volume": 0.0 if JVolume is None else float(JVolume.J()),
+            "dJ_volume": volume_grad,
+            "J_len": float(JCurveLength.J()),
+            "dJ_len": _objective_gradient(JCurveLength, objective_optimizable),
+            "J_residue_objective": residue_value,
+            "dJ_residue_objective": residue_grad,
+            "residue_objective_enabled": JResidueObjective is not None,
+            "residue_objective_payload": _optional_objective_payload(JResidueObjective),
+        }
+    )
     return annotate_search_evaluation_finiteness(evaluation)
 
 
@@ -749,6 +799,7 @@ def evaluate_alm_objective(
     lcfs_minor_radius_threshold=None,
     JNonQSObjective=None,
     JBoozerObjective=None,
+    JResidueObjective=None,
     include_diagnostics=True,
 ):
     raw_surface_pair = _surface_objective_pair(diagnostic_surface_weights, nonQSs, brs)
@@ -769,6 +820,7 @@ def evaluate_alm_objective(
         _surface_pair=raw_surface_pair,
         JNonQSObjective=JNonQSObjective,
         JBoozerObjective=JBoozerObjective,
+        JResidueObjective=JResidueObjective,
         include_diagnostics=include_diagnostics,
     )
 
@@ -803,11 +855,13 @@ def evaluate_alm_objective(
         distance_smoothing,
         objective_optimizable,
     )
-    curvature_signed_value, curvature_grad, curvature_violation = curvature_constraint_fn(
-        banana_curve,
-        curvature_threshold,
-        curvature_smoothing,
-        objective_optimizable,
+    curvature_signed_value, curvature_grad, curvature_violation = (
+        curvature_constraint_fn(
+            banana_curve,
+            curvature_threshold,
+            curvature_smoothing,
+            objective_optimizable,
+        )
     )
 
     hardware_constraints: dict[str, tuple[float, np.ndarray, float]] = {
@@ -849,10 +903,12 @@ def evaluate_alm_objective(
             surface_stack_violation,
         )
     if coil_length_objective is not None and coil_length_threshold is not None:
-        hardware_constraints["coil_length_upper_bound"] = _objective_upper_bound_constraint(
-            coil_length_objective,
-            coil_length_threshold,
-            objective_optimizable,
+        hardware_constraints["coil_length_upper_bound"] = (
+            _objective_upper_bound_constraint(
+                coil_length_objective,
+                coil_length_threshold,
+                objective_optimizable,
+            )
         )
     if coil_length_objective is not None and coil_length_min_threshold is not None:
         hardware_constraints["coil_length_min"] = _objective_lower_bound_constraint(
@@ -870,12 +926,12 @@ def evaluate_alm_objective(
         )
     if banana_currents is not None and banana_current_threshold is not None:
         for index, current in enumerate(banana_currents):
-            hardware_constraints[independent_banana_current_alm_constraint_name(index)] = (
-                _scalar_abs_upper_bound_constraint(
-                    current,
-                    banana_current_threshold,
-                    objective_optimizable,
-                )
+            hardware_constraints[
+                independent_banana_current_alm_constraint_name(index)
+            ] = _scalar_abs_upper_bound_constraint(
+                current,
+                banana_current_threshold,
+                objective_optimizable,
             )
     if (
         JPoloidalExtent is not None
@@ -966,12 +1022,14 @@ def evaluate_alm_objective(
         name: float(values[2]) for name, values in hardware_constraints.items()
     }
     if hard_surrogate_diagnostics:
-        curve_curve_hard_signed_value, curve_curve_hard_violation = _resolve_hard_signal(
-            curve_curve_hard_signed_value,
-            curve_curve_hard_violation,
-            _hard_min_curve_curve_signed_constraint,
-            curves,
-            curve_curve_min_distance,
+        curve_curve_hard_signed_value, curve_curve_hard_violation = (
+            _resolve_hard_signal(
+                curve_curve_hard_signed_value,
+                curve_curve_hard_violation,
+                _hard_min_curve_curve_signed_constraint,
+                curves,
+                curve_curve_min_distance,
+            )
         )
         curve_surface_hard_signed_value, curve_surface_hard_violation = (
             _resolve_hard_signal(
@@ -985,11 +1043,16 @@ def evaluate_alm_objective(
         )
         hard_signed_values_by_name["coil_coil_spacing"] = curve_curve_hard_signed_value
         hard_violation_values_by_name["coil_coil_spacing"] = curve_curve_hard_violation
-        hard_signed_values_by_name["coil_surface_spacing"] = curve_surface_hard_signed_value
-        hard_violation_values_by_name["coil_surface_spacing"] = curve_surface_hard_violation
-        hard_signed_values_by_name["max_curvature"], hard_violation_values_by_name[
-            "max_curvature"
-        ] = _hard_max_curvature_signed_constraint(banana_curve, curvature_threshold)
+        hard_signed_values_by_name["coil_surface_spacing"] = (
+            curve_surface_hard_signed_value
+        )
+        hard_violation_values_by_name["coil_surface_spacing"] = (
+            curve_surface_hard_violation
+        )
+        (
+            hard_signed_values_by_name["max_curvature"],
+            hard_violation_values_by_name["max_curvature"],
+        ) = _hard_max_curvature_signed_constraint(banana_curve, curvature_threshold)
         if surface_stack_surfaces is not None:
             surface_stack_hard_signed_value, surface_stack_hard_violation = (
                 _resolve_hard_signal(
@@ -1019,7 +1082,9 @@ def evaluate_alm_objective(
             hard_signed_values_by_name["poloidal_extent"] = (
                 poloidal_extent_hard_signed_value
             )
-            hard_violation_values_by_name["poloidal_extent"] = poloidal_extent_hard_violation
+            hard_violation_values_by_name["poloidal_extent"] = (
+                poloidal_extent_hard_violation
+            )
 
     physics_constraints: dict[str, tuple[float, np.ndarray, float]] = {}
     if alm_formulation == "thresholded_physics":
@@ -1108,8 +1173,7 @@ def evaluate_alm_objective(
     if JPoloidalExtent is not None:
         geometry_names.append("poloidal_extent")
     constraint_tolerance_by_name = {
-        name: float(value)
-        for name, value in zip(geometry_names, geometry_tolerances)
+        name: float(value) for name, value in zip(geometry_names, geometry_tolerances)
     }
     for constraint_name in active_constraint_names:
         metadata_name = _banana_current_alm_metadata_name(constraint_name)
@@ -1221,7 +1285,9 @@ def evaluate_alm_objective(
     base_eval["search_hardware_constraint_payload_kind"] = "signed_residual"
     base_eval.update(metadata_payload)
     base_eval["raw_constraint_values"] = np.asarray(constraint_values, dtype=float)
-    base_eval["raw_solver_constraint_values"] = np.asarray(constraint_values, dtype=float)
+    base_eval["raw_solver_constraint_values"] = np.asarray(
+        constraint_values, dtype=float
+    )
     base_eval["raw_dual_update_values"] = np.asarray(dual_update_values, dtype=float)
     base_eval["raw_feasibility_values"] = np.asarray(feasibility_values, dtype=float)
     base_eval["raw_hard_signed_constraint_values"] = np.asarray(
@@ -1308,9 +1374,7 @@ def evaluate_alm_objective(
             if width_max_threshold is not None:
                 base_eval["coil_width_max_threshold"] = float(width_max_threshold)
         base_eval["J_self_intersect"] = (
-            0.0
-            if JCurveSelfIntersect is None
-            else float(self_intersect_penalty)
+            0.0 if JCurveSelfIntersect is None else float(self_intersect_penalty)
         )
         base_eval["dJ_self_intersect"] = (
             np.zeros_like(base_eval["grad"])

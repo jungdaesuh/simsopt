@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -26,10 +26,12 @@ from banana_opt.topology.residue_diagnostics import run_residue_probe  # noqa: E
 from banana_opt.topology.residue_objective import (  # noqa: E402
     BiotSavartGreeneResidueObjective,
     DEFAULT_RESIDUE_OBJECTIVE_WEIGHT,
+    DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
     DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
     ResidueBranchSeed,
     disabled_residue_objective_payload,
-    residue_branch_seed_from_payload,
+    load_residue_objective_seeds,
+    load_residue_objective_targets,
     residue_objective_target_manifest_id,
 )
 
@@ -70,10 +72,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rtol", type=float, default=1.0e-9)
     parser.add_argument("--atol", type=float, default=1.0e-11)
     parser.add_argument("--max-step", type=float, default=0.05)
-    parser.add_argument("--samples-per-full-torus", type=int, default=128)
+    parser.add_argument(
+        "--samples-per-full-torus",
+        type=int,
+        default=DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
+    )
     parser.add_argument("--min-bphi-over-b", type=float, default=1.0e-8)
     parser.add_argument("--newton-residual-tolerance", type=float, default=1.0e-9)
     parser.add_argument("--winding-tolerance", type=float, default=1.0e-7)
+    parser.add_argument("--det-tolerance", type=float, default=1.0e-5)
     parser.add_argument("--max-newton-iterations", type=int, default=12)
     parser.add_argument("--max-newton-step-norm", type=float, default=0.05)
     parser.add_argument(
@@ -94,8 +101,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--residue-objective-seeds-json",
         help=(
-            "JSON file with target_manifest_id, validation_artifact_id, and "
-            "branch_seeds. Required when --residue-objective-weight is nonzero."
+            "JSON file with target_manifest_id, validation_status='passed', "
+            "validation_artifact_id, and branch_seeds. Required when "
+            "--residue-objective-weight is nonzero."
         ),
     )
     parser.add_argument(
@@ -111,69 +119,6 @@ def parse_args() -> argparse.Namespace:
         help="Local finite-difference step used inside the residue VJP kernel.",
     )
     return parser.parse_args()
-
-
-def _target_from_payload(payload: Mapping[str, object]) -> RationalTarget:
-    return RationalTarget(
-        p=int(payload["p"]),
-        q=int(payload["q"]),
-        weight=float(payload.get("weight", 1.0)),
-        radial_label=payload.get("radial_label"),
-        radial_window=payload.get("radial_window"),
-        branches=payload.get("branches", ("O", "X")),
-        phi0=float(payload.get("phi0", 0.0)),
-        nfp=int(payload.get("nfp", 1)),
-        fourier_m=payload.get("fourier_m"),
-        fourier_n=payload.get("fourier_n"),
-    )
-
-
-def load_targets(path: str | Path) -> tuple[RationalTarget, ...]:
-    with Path(path).resolve().open(encoding="utf-8") as infile:
-        payload = json.load(infile)
-    if not isinstance(payload, Mapping):
-        raise ValueError("Greene residue targets JSON must be an object")
-    targets_payload = payload["targets"]
-    if not isinstance(targets_payload, Sequence):
-        raise ValueError("Greene residue targets JSON 'targets' must be a sequence")
-    return tuple(_target_from_payload(dict(target)) for target in targets_payload)
-
-
-def load_residue_objective_seeds(
-    path: str | Path,
-    *,
-    target_manifest_id: str,
-) -> tuple[str, tuple[ResidueBranchSeed, ...]]:
-    with Path(path).resolve().open(encoding="utf-8") as infile:
-        payload = json.load(infile)
-    if not isinstance(payload, Mapping):
-        raise ValueError("Greene residue objective seeds JSON must be an object")
-    seed_target_manifest_id = str(payload["target_manifest_id"])
-    if seed_target_manifest_id != target_manifest_id:
-        raise ValueError(
-            "Greene residue objective seeds JSON target_manifest_id does not "
-            "match the requested targets"
-        )
-    validation_artifact_id = str(payload["validation_artifact_id"])
-    if validation_artifact_id == "":
-        raise ValueError(
-            "Greene residue objective seeds JSON validation_artifact_id must be nonempty"
-        )
-    seed_payloads = payload["branch_seeds"]
-    if not isinstance(seed_payloads, Sequence):
-        raise ValueError(
-            "Greene residue objective seeds JSON branch_seeds must be a sequence"
-        )
-    return (
-        validation_artifact_id,
-        tuple(
-            residue_branch_seed_from_payload(
-                dict(seed),
-                validation_id=validation_artifact_id,
-            )
-            for seed in seed_payloads
-        ),
-    )
 
 
 def resolve_biot_savart_artifact(
@@ -266,7 +211,7 @@ def evaluate_output_dir(
 
 def main() -> None:
     args = parse_args()
-    targets = load_targets(args.targets_json)
+    targets = load_residue_objective_targets(args.targets_json)
     target_manifest_id = residue_objective_target_manifest_id(targets)
     residue_objective_weight = float(args.residue_objective_weight)
     if residue_objective_weight < 0.0:
@@ -301,6 +246,7 @@ def main() -> None:
     solver_options = PeriodicOrbitSolverOptions(
         residual_tolerance=args.newton_residual_tolerance,
         winding_tolerance=args.winding_tolerance,
+        det_tolerance=args.det_tolerance,
         max_iterations=args.max_newton_iterations,
         max_step_norm=args.max_newton_step_norm,
     )

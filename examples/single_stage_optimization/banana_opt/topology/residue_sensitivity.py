@@ -25,6 +25,7 @@ from .greene_residue import (
     greene_residue_diagnostic_from_matrix,
 )
 from .periodic_orbit import (
+    BRANCH_STATUS_BAD_DETERMINANT,
     BRANCH_STATUS_BRANCH_MISMATCH,
     BRANCH_STATUS_CONVERGED,
     BRANCH_STATUS_MAX_ITERATIONS,
@@ -37,6 +38,7 @@ from .periodic_orbit import (
     radial_label_in_target_window,
     residue_classification_matches_branch,
     solve_periodic_orbit,
+    tangent_map_determinant_within_tolerance,
 )
 from .poincare_chart import PoincareChart
 from .rational_target import RationalTarget
@@ -1638,6 +1640,11 @@ def _rk4_branch_status(
         > solver_options.winding_tolerance
     ):
         return BRANCH_STATUS_WRONG_WINDING
+    if not tangent_map_determinant_within_tolerance(
+        tangent_result,
+        solver_options,
+    ):
+        return BRANCH_STATUS_BAD_DETERMINANT
     diagnostic = greene_residue_diagnostic_from_matrix(tangent_result.monodromy)
     if not residue_classification_matches_branch(branch, diagnostic):
         return BRANCH_STATUS_BRANCH_MISMATCH

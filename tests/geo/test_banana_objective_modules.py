@@ -48,6 +48,7 @@ MANUFACTURABILITY_ALM_CONSTRAINT_NAMES = (
 
 sys.path.insert(0, str(EXAMPLES_ROOT))
 from alm_utils import ALM_SCHEMA_VERSION  # noqa: E402
+
 del sys.path[0]
 
 
@@ -174,9 +175,7 @@ class _XAwareQuadraticObjective:
     def J(self):
         x = self._x()
         return float(
-            self.constant
-            + np.dot(self.linear, x)
-            + 0.5 * self.quadratic * np.dot(x, x)
+            self.constant + np.dot(self.linear, x) + 0.5 * self.quadratic * np.dot(x, x)
         )
 
     def gradient(self):
@@ -245,6 +244,20 @@ class _FakeAlgebraicObjective:
         )
 
     __rmul__ = __mul__
+
+
+class _FakeResidueObjective(_FakeAlgebraicObjective):
+    def to_json_dict(self):
+        return {
+            "schema_version": "test_residue_objective_v1",
+            "enabled": True,
+            "target_manifest_id": "test-targets",
+            "validation_id": "test-validation",
+            "objective_weight": 1.0,
+            "residue_scale": 1.0,
+            "value": self.J(),
+            "branches": [],
+        }
 
 
 class _FakeCurveDistance:
@@ -897,7 +910,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 iota_penalty_threshold=0.0,
             )
 
-    def test_stage2_alm_constraint_metadata_rejects_explicit_negative_iota_threshold(self):
+    def test_stage2_alm_constraint_metadata_rejects_explicit_negative_iota_threshold(
+        self,
+    ):
         with self.assertRaisesRegex(
             ValueError,
             r"ALM threshold 'stage2:iota_penalty' must be a finite positive value",
@@ -909,7 +924,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 iota_penalty_threshold=-1.0,
             )
 
-    def test_stage2_alm_constraint_metadata_accepts_subnormal_positive_iota_threshold(self):
+    def test_stage2_alm_constraint_metadata_accepts_subnormal_positive_iota_threshold(
+        self,
+    ):
         # Subnormal positive threshold passes validation; floor applies as
         # defense-in-depth so scale never goes below ALM_OBJECTIVE_SCALE_FLOOR.
         metadata_by_name = self.module._stage2_alm_constraint_metadata(
@@ -922,7 +939,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(metadata.raw_threshold, 1.0e-15)
         self.assertEqual(metadata.scale, self.module.ALM_OBJECTIVE_SCALE_FLOOR)
 
-    def test_stage2_iota_alm_metadata_records_scale_floor_when_threshold_below_floor(self):
+    def test_stage2_iota_alm_metadata_records_scale_floor_when_threshold_below_floor(
+        self,
+    ):
         # M7 provenance: a tiny-but-positive threshold floors the scale and the
         # metadata records both the bool flag and the ":floored" source suffix.
         metadata_by_name = self.module._stage2_alm_constraint_metadata(
@@ -937,7 +956,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertTrue(metadata.source.endswith(":floored"))
         self.assertEqual(metadata.source, "stage2_iota_penalty_threshold:floored")
 
-    def test_stage2_iota_alm_metadata_does_not_record_floor_when_threshold_above_floor(self):
+    def test_stage2_iota_alm_metadata_does_not_record_floor_when_threshold_above_floor(
+        self,
+    ):
         # M7 provenance: a healthy positive threshold leaves scale == raw and
         # neither the flag nor a ":floored" suffix is recorded.
         metadata_by_name = self.module._stage2_alm_constraint_metadata(
@@ -1314,9 +1335,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             np.testing.assert_allclose(grads[2], [0.15, 0.2])
             np.testing.assert_allclose(grads[3], [-0.3 / 0.95, -0.4 / 0.95])
             np.testing.assert_allclose(grads[4], [-10.0, 5.0])
-            np.testing.assert_allclose(
-                grads[5], [0.5 / 0.17, -0.25 / 0.17]
-            )
+            np.testing.assert_allclose(grads[5], [0.5 / 0.17, -0.25 / 0.17])
             np.testing.assert_allclose(grads[6], [0.1, -0.2])
             np.testing.assert_allclose(grads[7], [4.375e-5, -2.5e-5])
             np.testing.assert_allclose(
@@ -1351,9 +1370,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 banana_current_max_A=16000.0,
                 distance_smoothing=0.005,
                 curvature_smoothing=0.02,
-                multipliers=np.array(
-                    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-                ),
+                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]),
                 penalty=12.0,
                 stage2_constraint_activity_tolerances=lambda ds, cs: [
                     ds * 4.0,
@@ -1840,9 +1857,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 banana_current_max_A=16000.0,
                 distance_smoothing=0.005,
                 curvature_smoothing=0.02,
-                multipliers=np.array(
-                    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-                ),
+                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]),
                 penalty=12.0,
                 stage2_constraint_activity_tolerances=lambda ds, cs: [
                     ds * 4.0,
@@ -1956,22 +1971,20 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             Jc=Jc,
             banana_current=banana_current,
             banana_current_max_A=16000.0,
-                distance_smoothing=0.005,
-                curvature_smoothing=0.02,
-                multipliers=np.array(
-                    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-                ),
-                penalty=12.0,
-                stage2_constraint_activity_tolerances=lambda ds, cs: [
+            distance_smoothing=0.005,
+            curvature_smoothing=0.02,
+            multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]),
+            penalty=12.0,
+            stage2_constraint_activity_tolerances=lambda ds, cs: [
                 ds * 4.0,
                 cs * 4.0,
-                    1e-3,
-                    1e-3,
-                    1e-3,
-                    1e-3,
-                    1e-6,
-                    1e-3,
-                ],
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-6,
+                1e-3,
+            ],
             smooth_min_distance_signed_constraint=lambda *_args: (
                 -0.008,
                 np.array([0.6, 0.2]),
@@ -1984,15 +1997,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             **_default_geometric_parity_kwargs(),
         )
 
-        self.assertEqual(
-            result["constraint_names"][-1], "banana_current_upper_bound"
-        )
+        self.assertEqual(result["constraint_names"][-1], "banana_current_upper_bound")
         self.assertAlmostEqual(result["dual_update_values"][-1], 0.0625)
         self.assertAlmostEqual(result["feasibility_values"][-1], 0.0625)
         self.assertAlmostEqual(result["raw_dual_update_values"][-1], 1000.0)
-        np.testing.assert_allclose(
-            result["constraint_grads"][-1], [-4.375e-5, 2.5e-5]
-        )
+        np.testing.assert_allclose(result["constraint_grads"][-1], [-4.375e-5, 2.5e-5])
 
     def test_evaluate_stage2_alm_problem_uses_activity_tolerance_helper(self):
         base_objective = _FakeAlgebraicObjective(
@@ -2018,20 +2027,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             Jc=Jc,
             banana_current=banana_current,
             banana_current_max_A=16000.0,
-                distance_smoothing=0.005,
-                curvature_smoothing=0.02,
-                multipliers=np.array(
-                    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-                ),
-                penalty=12.0,
-                stage2_constraint_activity_tolerances=lambda ds, cs: [
-                    ds * 5.0,
-                    cs * 6.0,
-                    2e-3,
-                    4e-3,
-                    5e-3,
-                    6e-3,
-                    3e-6,
+            distance_smoothing=0.005,
+            curvature_smoothing=0.02,
+            multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]),
+            penalty=12.0,
+            stage2_constraint_activity_tolerances=lambda ds, cs: [
+                ds * 5.0,
+                cs * 6.0,
+                2e-3,
+                4e-3,
+                5e-3,
+                6e-3,
+                3e-6,
                 7e-3,
             ],
             smooth_min_distance_signed_constraint=lambda *_args: (
@@ -2463,7 +2470,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(calls["G0"], 0.35)
         self.assertAlmostEqual(calls["boozer_I"], 0.0125)
 
-    def test_build_stage2_iota_runtime_rebuilds_when_warm_start_has_no_solved_state(self):
+    def test_build_stage2_iota_runtime_rebuilds_when_warm_start_has_no_solved_state(
+        self,
+    ):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, -0.35)
         warm_start_surface = SimpleNamespace(nfp=7)
         cold_surface = SimpleNamespace(nfp=5)
@@ -3211,7 +3220,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["CURVE_CURVE_DISTANCE_METRIC_KIND"], "banana_coils")
         self.assertTrue(result["ALM_MULTIPLIER_CAP_BINDING"])
         self.assertEqual(result["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
-        np.testing.assert_allclose(result["ALM_FINAL_CONSTRAINT_VALUES"], [0.0, 1.0, 0.0])
+        np.testing.assert_allclose(
+            result["ALM_FINAL_CONSTRAINT_VALUES"], [0.0, 1.0, 0.0]
+        )
         np.testing.assert_allclose(
             result["ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES"],
             [0.0, 0.01, 0.0],
@@ -3257,7 +3268,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             result["ALM_CONSTRAINT_SCALE_SOURCES"],
             ["one", "limit", "threshold"],
         )
-        np.testing.assert_allclose(result["ALM_FINAL_RAW_DUAL_ESTIMATES"], [0.1, 0.002, 0.3])
+        np.testing.assert_allclose(
+            result["ALM_FINAL_RAW_DUAL_ESTIMATES"], [0.1, 0.002, 0.3]
+        )
         self.assertEqual(result["ALM_FINAL_HARD_MAX_VIOLATION"], 0.01)
         self.assertEqual(result["ALM_FINAL_SURROGATE_MAX_VALUE"], 0.2)
         self.assertTrue(result["ALM_FINAL_HARD_POSITIVE_SHIFT_ZERO"])
@@ -3312,11 +3325,13 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         objective = SimpleNamespace(x=np.array([2.0, -3.0]))
         curve = _FakeCurve(gamma_points=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
 
-        signed_value, grad, hard_signed_value = self.module.smooth_min_distance_signed_constraint(
-            [curve],
-            minimum_distance=0.05,
-            temperature=0.01,
-            base_objective_optimizable=objective,
+        signed_value, grad, hard_signed_value = (
+            self.module.smooth_min_distance_signed_constraint(
+                [curve],
+                minimum_distance=0.05,
+                temperature=0.01,
+                base_objective_optimizable=objective,
+            )
         )
 
         self.assertAlmostEqual(signed_value, 0.05)
@@ -3449,7 +3464,9 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(metadata.source, "threshold:qs_error:floored")
         self.assertEqual(metadata.raw_threshold, 5.0e-13)
 
-    def test_physics_alm_metadata_does_not_record_floor_when_threshold_above_floor(self):
+    def test_physics_alm_metadata_does_not_record_floor_when_threshold_above_floor(
+        self,
+    ):
         # M7 provenance: a healthy threshold leaves scale == raw and the
         # provenance flag stays `False` with no `:floored` source suffix.
         metadata = self.module._physics_alm_metadata(
@@ -3548,7 +3565,9 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(result["grad"], [1.5, -0.75])
 
-    def test_evaluate_total_objective_skips_geometric_parity_when_objectives_missing(self):
+    def test_evaluate_total_objective_skips_geometric_parity_when_objectives_missing(
+        self,
+    ):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
 
         result = self.module.evaluate_total_objective(
@@ -3576,7 +3595,9 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertIsNone(result["coil_width_max_threshold"])
         self.assertIsNone(result["self_intersect_min_distance"])
 
-    def test_evaluate_total_objective_includes_coil_width_term_via_quadratic_penalty(self):
+    def test_evaluate_total_objective_includes_coil_width_term_via_quadratic_penalty(
+        self,
+    ):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
         coil_width = _FakeAlgebraicObjective(0.02, [1.0, 0.5])
 
@@ -3729,6 +3750,38 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["total"], 23.0)
         np.testing.assert_allclose(result["grad"], [9.9, 1.0])
 
+    def test_evaluate_total_objective_includes_residue_objective(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        residue = _FakeResidueObjective(0.7, [0.4, -0.2])
+
+        result = self.module.evaluate_total_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=0.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=0.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=0.0,
+            JResidueObjective=residue,
+        )
+
+        self.assertAlmostEqual(result["total"], 0.7)
+        self.assertAlmostEqual(result["J_residue_objective"], 0.7)
+        self.assertTrue(result["residue_objective_enabled"])
+        self.assertEqual(
+            result["residue_objective_payload"]["target_manifest_id"],
+            "test-targets",
+        )
+        np.testing.assert_allclose(result["grad"], [0.4, -0.2])
+        np.testing.assert_allclose(result["dJ_residue_objective"], [0.4, -0.2])
+
     def test_evaluate_alm_objective_includes_width_and_self_intersect_constraints(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
         coil_width = _FakeAlgebraicObjective(0.12, [0.2, 0.0])
@@ -3789,7 +3842,11 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             curvature_smoothing=0.05,
             constraint_names=MANUFACTURABILITY_ALM_CONSTRAINT_NAMES,
             curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
-            curve_surface_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (
+                -0.1,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
             curvature_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
             augmented_inequality_objective_fn=fake_augmented,
             activity_tolerances_fn=lambda *_args, **_kwargs: np.array(
@@ -3808,9 +3865,13 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(result["constraint_scales"], [0.05, 0.17, 1.0])
         np.testing.assert_allclose(result["raw_thresholds"], [0.05, 0.17, 0.0])
-        np.testing.assert_allclose(result["raw_constraint_values"], [-0.07, -0.05, 0.003])
+        np.testing.assert_allclose(
+            result["raw_constraint_values"], [-0.07, -0.05, 0.003]
+        )
         np.testing.assert_allclose(result["feasibility_values"], [0.0, 0.0, 0.003])
-        self.assertEqual(result["constraint_blocks"], ["geometry", "geometry", "geometry"])
+        self.assertEqual(
+            result["constraint_blocks"], ["geometry", "geometry", "geometry"]
+        )
         self.assertEqual(result["objective_value_kinds"], ["hard", "hard", "hard"])
         self.assertEqual(result["gradient_value_kinds"], ["hard", "hard", "hard"])
         self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard", "hard"])
@@ -3819,7 +3880,9 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["J_self_intersect"], 0.003)
         np.testing.assert_allclose(result["dJ_self_intersect"], [0.0, 0.4])
 
-    def test_evaluate_alm_objective_accepts_real_width_and_self_intersect_objectives(self):
+    def test_evaluate_alm_objective_accepts_real_width_and_self_intersect_objectives(
+        self,
+    ):
         ellipse_module = _load_module(ELLIPSE_WIDTH_PATH, "banana_ellipse_width_real")
         self_intersect_module = _load_module(
             SELF_INTERSECT_PATH,
@@ -3933,7 +3996,11 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             curvature_smoothing=0.05,
             constraint_names=("lcfs_major_radius", "lcfs_minor_radius"),
             curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
-            curve_surface_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (
+                -0.1,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
             curvature_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
             activity_tolerances_fn=lambda *_args, **_kwargs: np.array(
                 [0.0, 0.0, 0.0],
@@ -3964,15 +4031,9 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             _FakeCurve(gamma_points=[[0.0, 0.0, 0.0]]),
             _FakeCurve(gamma_points=[[1.0, 0.0, 0.0]]),
         )
-        outer_surface = _FakeSurfaceWithGradient(
-            gamma_points=[[[0.5, 0.0, 0.0]]]
-        )
-        surface_a = _FakeSurfaceWithGradient(
-            gamma_points=[[[0.0, 0.0, 0.0]]]
-        )
-        surface_b = _FakeSurfaceWithGradient(
-            gamma_points=[[[0.04, 0.0, 0.0]]]
-        )
+        outer_surface = _FakeSurfaceWithGradient(gamma_points=[[[0.5, 0.0, 0.0]]])
+        surface_a = _FakeSurfaceWithGradient(gamma_points=[[[0.0, 0.0, 0.0]]])
+        surface_b = _FakeSurfaceWithGradient(gamma_points=[[[0.04, 0.0, 0.0]]])
         banana_curve = _FakeCurve(
             gamma_points=[[0.0, 0.0, 0.0]],
             kappa_values=[5.0],
@@ -4283,7 +4344,9 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertTrue(result["passed"], result)
         self.assertGreaterEqual(result["direction_count"], 4)
 
-    def test_evaluate_alm_objective_supports_independent_banana_current_constraints(self):
+    def test_evaluate_alm_objective_supports_independent_banana_current_constraints(
+        self,
+    ):
         nonqs = [_FakeAlgebraicObjective(2.0, [0.2, 0.0])]
         brs = [_FakeAlgebraicObjective(3.0, [0.0, 0.3])]
         jiota = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
@@ -4348,7 +4411,11 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 self.module.independent_banana_current_alm_constraint_name(1),
             ),
             curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
-            curve_surface_constraint_fn=lambda *_args: (-0.2, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (
+                -0.2,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
             curvature_constraint_fn=lambda *_args: (-0.3, np.array([0.0, 0.0]), 0.0),
             banana_currents=(current_a, current_b),
             banana_current_threshold=16000.0,
@@ -4412,7 +4479,11 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 "qs_error",
             ),
             curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
-            curve_surface_constraint_fn=lambda *_args: (-0.2, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (
+                -0.2,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
             curvature_constraint_fn=lambda *_args: (-0.3, np.array([0.0, 0.0]), 0.0),
             banana_currents=(current_a, current_b),
             banana_current_threshold=16000.0,
@@ -4496,7 +4567,11 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             curvature_smoothing=0.05,
             constraint_names=("banana_current_upper_bound",),
             curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
-            curve_surface_constraint_fn=lambda *_args: (-0.2, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (
+                -0.2,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
             curvature_constraint_fn=lambda *_args: (-0.3, np.array([0.0, 0.0]), 0.0),
             banana_current=banana_current,
             banana_current_threshold=20000.0,
@@ -4628,7 +4703,151 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         self.assertAlmostEqual(result["total"], 0.0)
         self.assertAlmostEqual(result["physics_total"], 25.0)
+        self.assertAlmostEqual(result["physics_terms_total"], 25.0)
         np.testing.assert_allclose(result["grad"], [0.0, 0.0, 0.0, 0.0])
+
+    def test_evaluate_base_objective_weighted_sum_includes_residue_objective(self):
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+        residue = _FakeResidueObjective(
+            0.7,
+            [0.4, -0.2],
+            [0.4, -0.2, 0.0, 0.0],
+        )
+
+        result = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            objective_optimizable=objective,
+            JResidueObjective=residue,
+        )
+
+        self.assertAlmostEqual(result["total"], 25.7)
+        self.assertAlmostEqual(result["physics_total"], 25.7)
+        self.assertAlmostEqual(result["physics_terms_total"], 25.0)
+        self.assertAlmostEqual(result["J_residue_objective"], 0.7)
+        np.testing.assert_allclose(result["grad"], [5.0, 2.6, 0.0, 0.0])
+
+    def test_evaluate_base_objective_thresholded_physics_optimizes_residue_objective(
+        self,
+    ):
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+        residue = _FakeResidueObjective(
+            0.7,
+            [0.4, -0.2],
+            [0.4, -0.2, 0.0, 0.0],
+        )
+
+        result = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            objective_optimizable=objective,
+            alm_formulation="thresholded_physics",
+            JResidueObjective=residue,
+        )
+
+        self.assertAlmostEqual(result["total"], 0.7)
+        self.assertAlmostEqual(result["physics_total"], 0.7)
+        self.assertAlmostEqual(result["physics_terms_total"], 25.0)
+        np.testing.assert_allclose(result["grad"], [0.4, -0.2, 0.0, 0.0])
+
+    def test_evaluate_alm_objective_base_total_includes_residue_objective(self):
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+        residue = _FakeResidueObjective(
+            0.7,
+            [0.4, -0.2],
+            [0.4, -0.2, 0.0, 0.0],
+        )
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+
+        def fake_augmented(
+            base_value,
+            base_grad,
+            constraint_values,
+            constraint_grads,
+            multipliers,
+            penalty,
+        ):
+            self.assertAlmostEqual(base_value, 25.7)
+            np.testing.assert_allclose(base_grad, [5.0, 2.6, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_values, [-2.0])
+            np.testing.assert_allclose(constraint_grads, [[20.0, 0.0, 0.0, 0.0]])
+            np.testing.assert_allclose(multipliers, [0.1])
+            self.assertAlmostEqual(penalty, 4.0)
+            return {
+                "total": 26.0,
+                "grad": np.array([5.1, 2.7, 0.0, 0.0]),
+                "stationarity_norm": 0.5,
+            }
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.1]),
+            penalty=4.0,
+            objective_optimizable=objective,
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=("coil_coil_spacing",),
+            curve_curve_constraint_fn=lambda *_args: (
+                -0.1,
+                np.array([1.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            curve_surface_constraint_fn=lambda *_args: (
+                0.0,
+                np.array([0.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            curvature_constraint_fn=lambda *_args: (
+                0.0,
+                np.array([0.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            augmented_inequality_objective_fn=fake_augmented,
+            activity_tolerances_fn=lambda ds, cs, include_surface_stack=False: np.array(
+                [ds, ds, cs],
+                dtype=float,
+            ),
+            JResidueObjective=residue,
+        )
+
+        self.assertAlmostEqual(result["physics_total"], 25.7)
+        self.assertAlmostEqual(result["physics_terms_total"], 25.0)
+        self.assertAlmostEqual(result["base_total"], 25.7)
+        self.assertAlmostEqual(result["total"], 26.0)
 
     def test_evaluate_base_objective_rejects_unknown_alm_formulation(self):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
@@ -5162,15 +5381,18 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             _entry("outer", 3.0, 0.3),
         ]
 
-        with mock.patch.object(
-            self.module,
-            "surface_pointcloud_gap",
-            return_value=0.1,
-        ), mock.patch.object(
-            self.module,
-            "cross_sections_are_nested",
-            side_effect=[(True, []), (False, [0.25])],
-        ) as nested_mock:
+        with (
+            mock.patch.object(
+                self.module,
+                "surface_pointcloud_gap",
+                return_value=0.1,
+            ),
+            mock.patch.object(
+                self.module,
+                "cross_sections_are_nested",
+                side_effect=[(True, []), (False, [0.25])],
+            ) as nested_mock,
+        ):
             result = self.module.evaluate_surface_stack(
                 surface_data,
                 surface_gap_threshold=0.0,
@@ -5222,14 +5444,17 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             _entry("outer", 2.0, 0.2),
         ]
 
-        with mock.patch.object(
-            self.module,
-            "surface_pointcloud_gap",
-            return_value=0.1,
-        ), mock.patch.object(
-            self.module,
-            "cross_sections_are_nested",
-            side_effect=RuntimeError("surface 'goes back' on itself"),
+        with (
+            mock.patch.object(
+                self.module,
+                "surface_pointcloud_gap",
+                return_value=0.1,
+            ),
+            mock.patch.object(
+                self.module,
+                "cross_sections_are_nested",
+                side_effect=RuntimeError("surface 'goes back' on itself"),
+            ),
         ):
             result = self.module.evaluate_surface_stack(
                 surface_data,
@@ -5279,15 +5504,19 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             },
         ]
 
-        with mock.patch.object(
-            self.module,
-            "surface_pointcloud_gap",
-            return_value=0.1,
-        ), mock.patch.object(
-            self.module,
-            "cross_sections_are_nested",
-            side_effect=RuntimeError("unexpected cross-section bug"),
-        ), self.assertRaisesRegex(RuntimeError, "unexpected cross-section bug"):
+        with (
+            mock.patch.object(
+                self.module,
+                "surface_pointcloud_gap",
+                return_value=0.1,
+            ),
+            mock.patch.object(
+                self.module,
+                "cross_sections_are_nested",
+                side_effect=RuntimeError("unexpected cross-section bug"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "unexpected cross-section bug"),
+        ):
             self.module.evaluate_surface_stack(
                 surface_data,
                 surface_gap_threshold=0.0,
@@ -5586,16 +5815,10 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             result["search_hardware_status"]["constraints"],
         )
         self.assertTrue(
-            any(
-                "lcfs_major_radius" in violation
-                for violation in result["violations"]
-            )
+            any("lcfs_major_radius" in violation for violation in result["violations"])
         )
         self.assertTrue(
-            any(
-                "lcfs_minor_radius" in violation
-                for violation in result["violations"]
-            )
+            any("lcfs_minor_radius" in violation for violation in result["violations"])
         )
 
     def test_evaluate_single_stage_search_hardware_snapshot_uses_penalty_objective_payload(
@@ -6182,7 +6405,9 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
             0.0,
         )
 
-    def test_hardware_constraint_alm_metadata_records_floor_for_subnormal_threshold(self):
+    def test_hardware_constraint_alm_metadata_records_floor_for_subnormal_threshold(
+        self,
+    ):
         # M7 hardware-schema mirror: the threshold-driven path records floor
         # provenance when the override falls below the physical scale floor.
         metadata = self.module.hardware_constraint_alm_metadata(
@@ -6193,7 +6418,9 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
         self.assertTrue(metadata.scale_floor_applied)
         self.assertEqual(metadata.source, "threshold:coil_coil_spacing:floored")
 
-    def test_hardware_constraint_alm_metadata_does_not_record_floor_for_healthy_threshold(self):
+    def test_hardware_constraint_alm_metadata_does_not_record_floor_for_healthy_threshold(
+        self,
+    ):
         # M7 hardware-schema mirror: the healthy-threshold path leaves
         # `scale_floor_applied=False` and the source string unsuffixed.
         metadata = self.module.hardware_constraint_alm_metadata(
@@ -6204,7 +6431,9 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
         self.assertFalse(metadata.scale_floor_applied)
         self.assertEqual(metadata.source, "threshold:coil_coil_spacing")
 
-    def test_hardware_constraint_alm_metadata_records_floor_when_spec_alm_scale_subnormal(self):
+    def test_hardware_constraint_alm_metadata_records_floor_when_spec_alm_scale_subnormal(
+        self,
+    ):
         # M7 hardware-schema mirror: the alm_scale-driven path also records
         # floor provenance and stamps the `schema:` base source.
         spec = self.module.HardwareConstraintSpec(
@@ -6223,7 +6452,9 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
         self.assertTrue(floor_applied)
         self.assertEqual(source, "schema:coil_coil_spacing.alm_scale:floored")
 
-    def test_hardware_constraint_alm_metadata_does_not_record_floor_when_spec_alm_scale_healthy(self):
+    def test_hardware_constraint_alm_metadata_does_not_record_floor_when_spec_alm_scale_healthy(
+        self,
+    ):
         # M7 hardware-schema mirror: healthy spec.alm_scale path keeps
         # `scale_floor_applied=False` and the unsuffixed `schema:` source.
         spec = self.module.HardwareConstraintSpec(

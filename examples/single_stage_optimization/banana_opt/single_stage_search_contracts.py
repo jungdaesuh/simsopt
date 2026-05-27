@@ -83,6 +83,9 @@ def _frontier_invariant_torus_certification_status(
         "invariant_torus_min": invariant_torus_min,
         "invariant_torus_deficit": invariant_torus_deficit,
         "kam_fraction": invariant_torus_fraction,
+        "kam_fraction_semantics": (
+            KAM_FRACTION_SEMANTICS if invariant_torus_fraction is not None else None
+        ),
         "kam_min": invariant_torus_min,
         "kam_deficit": invariant_torus_deficit,
     }
@@ -152,9 +155,7 @@ def evaluate_frontier_kam_certification(
             enabled=True,
             ok=False,
             reason=(
-                "topology_not_evaluated"
-                if hardware_ok is True
-                else "hardware_failed"
+                "topology_not_evaluated" if hardware_ok is True else "hardware_failed"
             ),
             hardware_ok=bool(hardware_ok),
             topology_evaluated=False,
@@ -176,9 +177,7 @@ def evaluate_frontier_kam_certification(
         and not (0.0 <= raw_invariant_torus_fraction <= 1.0)
     )
     invariant_torus_fraction = (
-        None
-        if invariant_torus_fraction_out_of_range
-        else raw_invariant_torus_fraction
+        None if invariant_torus_fraction_out_of_range else raw_invariant_torus_fraction
     )
     if accepted_iteration is not None and topology_accepted_iteration is not None:
         if int(topology_accepted_iteration) != int(accepted_iteration):
@@ -197,7 +196,9 @@ def evaluate_frontier_kam_certification(
             )
 
     topology_iteration = (
-        None if topology_accepted_iteration is None else int(topology_accepted_iteration)
+        None
+        if topology_accepted_iteration is None
+        else int(topology_accepted_iteration)
     )
     if topology_broken:
         return _frontier_invariant_torus_certification_status(
@@ -304,13 +305,12 @@ def evaluate_frontier_trust_penalty(
     if excess_ratio == 0.0:
         penalty_grad = np.zeros_like(grad)
     else:
-        penalty_grad = (
-            (2.0 * excess_ratio / scale)
-            * np.asarray(search_eval["dJ_Boozer"], dtype=float)
+        penalty_grad = (2.0 * excess_ratio / scale) * np.asarray(
+            search_eval["dJ_Boozer"], dtype=float
         )
     return {
         "enabled": True,
-        "penalty": float(excess_ratio ** 2),
+        "penalty": float(excess_ratio**2),
         "grad": penalty_grad,
         "scale": scale,
         "excess_ratio": float(excess_ratio),
@@ -343,7 +343,9 @@ def annotate_frontier_search_eval(
         float(annotated["total"]) + trust_penalty["penalty"]
     )
     annotated["total"] = annotated["frontier_rank_total"]
-    annotated["grad"] = np.asarray(annotated["grad"], dtype=float) + trust_penalty["grad"]
+    annotated["grad"] = (
+        np.asarray(annotated["grad"], dtype=float) + trust_penalty["grad"]
+    )
     annotated["frontier_trust_ok"] = trust_status["ok"]
     annotated["frontier_boozer_trust_threshold"] = trust_status["threshold"]
     annotated["frontier_boozer_trust_excess"] = trust_status["excess"]
@@ -449,7 +451,9 @@ def apply_frontier_search_contract_penalties(
     topology_penalty: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     annotated = dict(search_eval)
-    existing_rank_total = float(annotated.get("frontier_rank_total", annotated["total"]))
+    existing_rank_total = float(
+        annotated.get("frontier_rank_total", annotated["total"])
+    )
     contract_penalty = 0.0
 
     if hardware_penalty is not None:
@@ -487,13 +491,17 @@ def evaluate_frontier_hard_invalidation(
 ) -> dict[str, object]:
     if not surface_success:
         if surface_status is not None:
-            if not all(bool(value) for value in surface_status.get("solve_success", [])):
+            if not all(
+                bool(value) for value in surface_status.get("solve_success", [])
+            ):
                 return {
                     "invalid": True,
                     "reason": "surface_solve_failed",
                     "fields": ["solve_success"],
                 }
-            if any(bool(value) for value in surface_status.get("self_intersections", [])):
+            if any(
+                bool(value) for value in surface_status.get("self_intersections", [])
+            ):
                 return {
                     "invalid": True,
                     "reason": "geometry_state_unrestorable",

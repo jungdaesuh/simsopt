@@ -5,6 +5,9 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
+from pathlib import Path
+
+import numpy as np
 
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
@@ -30,7 +33,9 @@ from .residue_sensitivity import (
 
 
 GREENE_RESIDUE_OBJECTIVE_SCHEMA_VERSION = "greene_residue_objective_v1"
+GREENE_RESIDUE_OBJECTIVE_VALIDATION_STATUS_PASSED = "passed"
 DEFAULT_RESIDUE_OBJECTIVE_WEIGHT = 0.0
+DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS = 768
 
 ResidueBranchKey = tuple[str, str]
 SectionState = tuple[float, float]
@@ -84,6 +89,14 @@ class ResidueObjectiveBranchValue:
     target_id: str
     branch: str
     residue: float
+    status: str
+    monodromy: tuple[tuple[float, float], tuple[float, float]]
+    trace_m: float
+    det_m: float
+    winding: float
+    radial_label: float
+    closure_residual_norm: float
+    min_bphi_over_b: float
     residue_scale: float
     target_weight: float
     objective_weight: float
@@ -95,6 +108,14 @@ class ResidueObjectiveBranchValue:
             "target_id": self.target_id,
             "branch": self.branch,
             "residue": self.residue,
+            "status": self.status,
+            "monodromy": [list(row) for row in self.monodromy],
+            "trace_m": self.trace_m,
+            "det_m": self.det_m,
+            "winding": self.winding,
+            "radial_label": self.radial_label,
+            "closure_residual_norm": self.closure_residual_norm,
+            "min_Bphi_over_B": self.min_bphi_over_b,
             "residue_scale": self.residue_scale,
             "target_weight": self.target_weight,
             "objective_weight": self.objective_weight,
@@ -263,15 +284,26 @@ class BiotSavartGreeneResidueObjective(Optimizable):
                         "Greene residue objective branch solve requires "
                         f"{BRANCH_STATUS_CONVERGED}, got {result.status}"
                     )
-                self._branch_state_by_key[key] = result.state
                 residue = float(result.residue_diagnostic.residue)
                 branch_objective = self._branch_objective(target, residue)
+                monodromy = np.asarray(result.tangent_result.monodromy, dtype=float)
                 objective_value += branch_objective
                 branch_values.append(
                     ResidueObjectiveBranchValue(
                         target_id=target_id,
                         branch=branch,
                         residue=residue,
+                        status=result.status,
+                        monodromy=(
+                            (float(monodromy[0, 0]), float(monodromy[0, 1])),
+                            (float(monodromy[1, 0]), float(monodromy[1, 1])),
+                        ),
+                        trace_m=result.tangent_result.trace_m,
+                        det_m=result.tangent_result.det_m,
+                        winding=result.winding,
+                        radial_label=result.radial_label,
+                        closure_residual_norm=result.closure_residual_norm,
+                        min_bphi_over_b=result.min_bphi_over_b,
                         residue_scale=self.residue_scale,
                         target_weight=target.weight,
                         objective_weight=self.objective_weight,
@@ -308,7 +340,6 @@ class BiotSavartGreeneResidueObjective(Optimizable):
                     r_satisfied=self.r_satisfied,
                     local_difference_step=self.local_difference_step,
                 )
-                self._branch_state_by_key[key] = diagnostic.state
                 derivative += (
                     self._branch_gradient_scale(target, diagnostic.residue)
                     * diagnostic.derivative
@@ -347,6 +378,76 @@ def residue_branch_seed_from_payload(
         branch=str(payload["branch"]),
         section_state=payload["section_state"],
         validation_id=seed_validation_id,
+    )
+
+
+def residue_target_from_payload(payload: Mapping[str, object]) -> RationalTarget:
+    return RationalTarget(
+        p=int(payload["p"]),
+        q=int(payload["q"]),
+        weight=float(payload.get("weight", 1.0)),
+        radial_label=payload.get("radial_label"),
+        radial_window=payload.get("radial_window"),
+        branches=payload.get("branches", ("O", "X")),
+        phi0=float(payload.get("phi0", 0.0)),
+        nfp=int(payload.get("nfp", 1)),
+        fourier_m=payload.get("fourier_m"),
+        fourier_n=payload.get("fourier_n"),
+    )
+
+
+def load_residue_objective_targets(path: str | Path) -> tuple[RationalTarget, ...]:
+    with Path(path).resolve().open(encoding="utf-8") as infile:
+        payload = json.load(infile)
+    if not isinstance(payload, Mapping):
+        raise ValueError("Greene residue targets JSON must be an object")
+    targets_payload = payload["targets"]
+    if not isinstance(targets_payload, Sequence):
+        raise ValueError("Greene residue targets JSON 'targets' must be a sequence")
+    return tuple(
+        residue_target_from_payload(dict(target)) for target in targets_payload
+    )
+
+
+def load_residue_objective_seeds(
+    path: str | Path,
+    *,
+    target_manifest_id: str,
+) -> tuple[str, tuple[ResidueBranchSeed, ...]]:
+    with Path(path).resolve().open(encoding="utf-8") as infile:
+        payload = json.load(infile)
+    if not isinstance(payload, Mapping):
+        raise ValueError("Greene residue objective seeds JSON must be an object")
+    seed_target_manifest_id = str(payload["target_manifest_id"])
+    if seed_target_manifest_id != target_manifest_id:
+        raise ValueError(
+            "Greene residue objective seeds JSON target_manifest_id does not "
+            "match the requested targets"
+        )
+    validation_status = str(payload["validation_status"])
+    if validation_status != GREENE_RESIDUE_OBJECTIVE_VALIDATION_STATUS_PASSED:
+        raise ValueError(
+            "Greene residue objective seeds JSON validation_status must be passed"
+        )
+    validation_artifact_id = str(payload["validation_artifact_id"])
+    if validation_artifact_id == "":
+        raise ValueError(
+            "Greene residue objective seeds JSON validation_artifact_id must be nonempty"
+        )
+    seed_payloads = payload["branch_seeds"]
+    if not isinstance(seed_payloads, Sequence):
+        raise ValueError(
+            "Greene residue objective seeds JSON branch_seeds must be a sequence"
+        )
+    return (
+        validation_artifact_id,
+        tuple(
+            residue_branch_seed_from_payload(
+                dict(seed),
+                validation_id=validation_artifact_id,
+            )
+            for seed in seed_payloads
+        ),
     )
 
 
