@@ -35,6 +35,11 @@ BRANCH_RESOLVED_FD_MODE = "branch_resolved"
 BIOT_SAVART_BRANCH_RESOLVED_FD_MODE = "biot_savart_branch_resolved"
 
 
+SectionState = tuple[float, float]
+MonodromyMatrix = tuple[tuple[float, float], tuple[float, float]]
+DofDirection = tuple[float, ...]
+
+
 class ScalarFieldFactory(Protocol):
     def __call__(self, parameter_value: float) -> DifferentiableMagneticFieldLike: ...
 
@@ -81,6 +86,7 @@ class BiotSavartBranchResidueCentralDifferenceDiagnostic:
     mode: str
     step: float
     direction_norm: float
+    direction: DofDirection
     base_residue: float
     plus_residue: float
     minus_residue: float
@@ -88,9 +94,22 @@ class BiotSavartBranchResidueCentralDifferenceDiagnostic:
     base_status: str
     plus_status: str
     minus_status: str
-    base_state: tuple[float, float]
-    plus_state: tuple[float, float]
-    minus_state: tuple[float, float]
+    base_state: SectionState
+    plus_state: SectionState
+    minus_state: SectionState
+    branch_state_derivative: SectionState
+    base_final_state: SectionState
+    plus_final_state: SectionState
+    minus_final_state: SectionState
+    final_state_derivative: SectionState
+    base_closure_residual: SectionState
+    plus_closure_residual: SectionState
+    minus_closure_residual: SectionState
+    closure_residual_derivative: SectionState
+    base_monodromy: MonodromyMatrix
+    plus_monodromy: MonodromyMatrix
+    minus_monodromy: MonodromyMatrix
+    monodromy_derivative: MonodromyMatrix
     base_det_m: float
     plus_det_m: float
     minus_det_m: float
@@ -98,11 +117,30 @@ class BiotSavartBranchResidueCentralDifferenceDiagnostic:
     plus_winding: float
     minus_winding: float
 
+    @property
+    def residue_derivative(self) -> float:
+        return self.derivative
+
     def to_json_dict(self) -> dict[str, object]:
         payload = asdict(self)
+        payload["residue_derivative"] = self.derivative
+        payload["direction"] = list(self.direction)
         payload["base_state"] = list(self.base_state)
         payload["plus_state"] = list(self.plus_state)
         payload["minus_state"] = list(self.minus_state)
+        payload["branch_state_derivative"] = list(self.branch_state_derivative)
+        payload["base_final_state"] = list(self.base_final_state)
+        payload["plus_final_state"] = list(self.plus_final_state)
+        payload["minus_final_state"] = list(self.minus_final_state)
+        payload["final_state_derivative"] = list(self.final_state_derivative)
+        payload["base_closure_residual"] = list(self.base_closure_residual)
+        payload["plus_closure_residual"] = list(self.plus_closure_residual)
+        payload["minus_closure_residual"] = list(self.minus_closure_residual)
+        payload["closure_residual_derivative"] = list(self.closure_residual_derivative)
+        payload["base_monodromy"] = _matrix_to_jsonable(self.base_monodromy)
+        payload["plus_monodromy"] = _matrix_to_jsonable(self.plus_monodromy)
+        payload["minus_monodromy"] = _matrix_to_jsonable(self.minus_monodromy)
+        payload["monodromy_derivative"] = _matrix_to_jsonable(self.monodromy_derivative)
         return payload
 
 
@@ -327,10 +365,17 @@ def branch_resolved_biot_savart_residue_central_difference(
 
     plus_residue = float(plus.residue_diagnostic.residue)
     minus_residue = float(minus.residue_diagnostic.residue)
+    base_final_state = _normalize_state(base.tangent_result.return_map.final_state)
+    plus_final_state = _normalize_state(plus.tangent_result.return_map.final_state)
+    minus_final_state = _normalize_state(minus.tangent_result.return_map.final_state)
+    base_monodromy = _monodromy_matrix(base.tangent_result.monodromy)
+    plus_monodromy = _monodromy_matrix(plus.tangent_result.monodromy)
+    minus_monodromy = _monodromy_matrix(minus.tangent_result.monodromy)
     return BiotSavartBranchResidueCentralDifferenceDiagnostic(
         mode=BIOT_SAVART_BRANCH_RESOLVED_FD_MODE,
         step=step_value,
         direction_norm=direction_norm,
+        direction=tuple(float(component) for component in direction_array),
         base_residue=float(base.residue_diagnostic.residue),
         plus_residue=plus_residue,
         minus_residue=minus_residue,
@@ -341,6 +386,35 @@ def branch_resolved_biot_savart_residue_central_difference(
         base_state=base.state,
         plus_state=plus.state,
         minus_state=minus.state,
+        branch_state_derivative=_central_difference_state(
+            plus.state,
+            minus.state,
+            step_value,
+        ),
+        base_final_state=base_final_state,
+        plus_final_state=plus_final_state,
+        minus_final_state=minus_final_state,
+        final_state_derivative=_central_difference_state(
+            plus_final_state,
+            minus_final_state,
+            step_value,
+        ),
+        base_closure_residual=base.closure_residual,
+        plus_closure_residual=plus.closure_residual,
+        minus_closure_residual=minus.closure_residual,
+        closure_residual_derivative=_central_difference_state(
+            plus.closure_residual,
+            minus.closure_residual,
+            step_value,
+        ),
+        base_monodromy=base_monodromy,
+        plus_monodromy=plus_monodromy,
+        minus_monodromy=minus_monodromy,
+        monodromy_derivative=_central_difference_monodromy(
+            plus_monodromy,
+            minus_monodromy,
+            step_value,
+        ),
         base_det_m=float(base.tangent_result.det_m),
         plus_det_m=float(plus.tangent_result.det_m),
         minus_det_m=float(minus.tangent_result.det_m),
@@ -431,10 +505,47 @@ def biot_savart_b_and_dB_vjp_dot_test(
     )
 
 
-def _normalize_state(state: Sequence[float]) -> tuple[float, float]:
+def _normalize_state(state: Sequence[float]) -> SectionState:
     if len(state) != 2:
         raise ValueError("Residue sensitivity state must be [R, Z]")
     return (float(state[0]), float(state[1]))
+
+
+def _monodromy_matrix(matrix: object) -> MonodromyMatrix:
+    monodromy = np.asarray(matrix, dtype=float)
+    if monodromy.shape != (2, 2):
+        raise ValueError(
+            f"Greene residue monodromy must have shape (2, 2), got {monodromy.shape}"
+        )
+    return (
+        (float(monodromy[0, 0]), float(monodromy[0, 1])),
+        (float(monodromy[1, 0]), float(monodromy[1, 1])),
+    )
+
+
+def _central_difference_state(
+    plus_state: Sequence[float],
+    minus_state: Sequence[float],
+    step: float,
+) -> SectionState:
+    plus = np.asarray(_normalize_state(plus_state), dtype=float)
+    minus = np.asarray(_normalize_state(minus_state), dtype=float)
+    derivative = (plus - minus) / (2.0 * float(step))
+    return (float(derivative[0]), float(derivative[1]))
+
+
+def _central_difference_monodromy(
+    plus_monodromy: MonodromyMatrix,
+    minus_monodromy: MonodromyMatrix,
+    step: float,
+) -> MonodromyMatrix:
+    plus = np.asarray(plus_monodromy, dtype=float)
+    minus = np.asarray(minus_monodromy, dtype=float)
+    return _monodromy_matrix((plus - minus) / (2.0 * float(step)))
+
+
+def _matrix_to_jsonable(matrix: MonodromyMatrix) -> list[list[float]]:
+    return [list(row) for row in matrix]
 
 
 def _positive_step(step: float) -> float:

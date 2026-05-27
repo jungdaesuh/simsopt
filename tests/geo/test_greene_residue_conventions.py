@@ -932,12 +932,14 @@ def test_biot_savart_branch_residue_directional_oracle_uses_real_coil_dofs():
         _biot_savart_residue_gate_inputs()
     )
     original_x = np.asarray(field.x, dtype=float).copy()
+    direction = _unit_biot_savart_direction(field)
+    step = 1.0e-8
 
     diagnostic = branch_resolved_biot_savart_residue_central_difference(
         field,
         (1.1, 0.05),
-        direction=_unit_biot_savart_direction(field),
-        step=1.0e-8,
+        direction=direction,
+        step=step,
         target=target,
         chart=chart,
         branch=GREENE_BRANCH_X,
@@ -950,11 +952,104 @@ def test_biot_savart_branch_residue_directional_oracle_uses_real_coil_dofs():
     assert diagnostic.plus_status == BRANCH_STATUS_CONVERGED
     assert diagnostic.minus_status == BRANCH_STATUS_CONVERGED
     assert diagnostic.direction_norm == pytest.approx(1.0)
+    np.testing.assert_allclose(diagnostic.direction, direction)
     assert math.isfinite(diagnostic.derivative)
     assert diagnostic.base_winding == pytest.approx(0.0, abs=1.0e-4)
     assert diagnostic.plus_winding == pytest.approx(0.0, abs=1.0e-4)
     assert diagnostic.minus_winding == pytest.approx(0.0, abs=1.0e-4)
-    assert diagnostic.to_json_dict()["mode"] == BIOT_SAVART_BRANCH_RESOLVED_FD_MODE
+    np.testing.assert_allclose(
+        np.asarray(diagnostic.branch_state_derivative),
+        (
+            np.asarray(diagnostic.plus_state, dtype=float)
+            - np.asarray(diagnostic.minus_state, dtype=float)
+        )
+        / (2.0 * step),
+    )
+    np.testing.assert_allclose(
+        np.asarray(diagnostic.final_state_derivative),
+        (
+            np.asarray(diagnostic.plus_final_state, dtype=float)
+            - np.asarray(diagnostic.minus_final_state, dtype=float)
+        )
+        / (2.0 * step),
+    )
+    np.testing.assert_allclose(
+        np.asarray(diagnostic.monodromy_derivative),
+        (
+            np.asarray(diagnostic.plus_monodromy, dtype=float)
+            - np.asarray(diagnostic.minus_monodromy, dtype=float)
+        )
+        / (2.0 * step),
+    )
+    assert diagnostic.residue_derivative == pytest.approx(diagnostic.derivative)
+    assert diagnostic.residue_derivative == pytest.approx(
+        (diagnostic.plus_residue - diagnostic.minus_residue) / (2.0 * step)
+    )
+    assert diagnostic.base_residue == pytest.approx(
+        (2.0 - np.trace(np.asarray(diagnostic.base_monodromy, dtype=float))) / 4.0
+    )
+    assert diagnostic.plus_residue == pytest.approx(
+        (2.0 - np.trace(np.asarray(diagnostic.plus_monodromy, dtype=float))) / 4.0
+    )
+    assert diagnostic.minus_residue == pytest.approx(
+        (2.0 - np.trace(np.asarray(diagnostic.minus_monodromy, dtype=float))) / 4.0
+    )
+    assert diagnostic.residue_derivative == pytest.approx(
+        -0.25 * np.trace(np.asarray(diagnostic.monodromy_derivative, dtype=float))
+    )
+    for section_state, final_state, closure_residual in (
+        (
+            diagnostic.base_state,
+            diagnostic.base_final_state,
+            diagnostic.base_closure_residual,
+        ),
+        (
+            diagnostic.plus_state,
+            diagnostic.plus_final_state,
+            diagnostic.plus_closure_residual,
+        ),
+        (
+            diagnostic.minus_state,
+            diagnostic.minus_final_state,
+            diagnostic.minus_closure_residual,
+        ),
+    ):
+        np.testing.assert_allclose(
+            np.asarray(final_state, dtype=float)
+            - np.asarray(section_state, dtype=float),
+            np.asarray(closure_residual, dtype=float),
+        )
+    assert np.asarray(diagnostic.base_monodromy, dtype=float).shape == (2, 2)
+    assert np.asarray(diagnostic.plus_monodromy, dtype=float).shape == (2, 2)
+    assert np.asarray(diagnostic.minus_monodromy, dtype=float).shape == (2, 2)
+    assert np.asarray(diagnostic.monodromy_derivative, dtype=float).shape == (2, 2)
+    assert np.all(np.isfinite(np.asarray(diagnostic.branch_state_derivative)))
+    assert np.all(np.isfinite(np.asarray(diagnostic.final_state_derivative)))
+    assert np.all(np.isfinite(np.asarray(diagnostic.closure_residual_derivative)))
+    assert np.all(np.isfinite(np.asarray(diagnostic.monodromy_derivative)))
+    for closure_residual in (
+        diagnostic.base_closure_residual,
+        diagnostic.plus_closure_residual,
+        diagnostic.minus_closure_residual,
+    ):
+        assert np.linalg.norm(np.asarray(closure_residual, dtype=float)) < 1.0e-7
+    payload = diagnostic.to_json_dict()
+    assert payload["mode"] == BIOT_SAVART_BRANCH_RESOLVED_FD_MODE
+    np.testing.assert_allclose(payload["direction"], direction)
+    assert payload["residue_derivative"] == pytest.approx(diagnostic.derivative)
+    assert payload["derivative"] == pytest.approx(diagnostic.derivative)
+    assert np.asarray(payload["base_final_state"], dtype=float).shape == (2,)
+    assert np.asarray(payload["plus_final_state"], dtype=float).shape == (2,)
+    assert np.asarray(payload["minus_final_state"], dtype=float).shape == (2,)
+    assert np.asarray(payload["final_state_derivative"], dtype=float).shape == (2,)
+    assert np.asarray(payload["base_closure_residual"], dtype=float).shape == (2,)
+    assert np.asarray(payload["plus_closure_residual"], dtype=float).shape == (2,)
+    assert np.asarray(payload["minus_closure_residual"], dtype=float).shape == (2,)
+    assert np.asarray(payload["closure_residual_derivative"], dtype=float).shape == (2,)
+    assert np.asarray(payload["base_monodromy"], dtype=float).shape == (2, 2)
+    assert np.asarray(payload["plus_monodromy"], dtype=float).shape == (2, 2)
+    assert np.asarray(payload["minus_monodromy"], dtype=float).shape == (2, 2)
+    assert np.asarray(payload["monodromy_derivative"], dtype=float).shape == (2, 2)
     np.testing.assert_allclose(field.x, original_x)
 
 
