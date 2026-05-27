@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal, Mapping
+from typing import TYPE_CHECKING, Callable, Literal, Mapping
 
 import numpy as np
 
@@ -18,6 +18,9 @@ from banana_opt.surface_mode_contracts import (
     SINGLE_SURFACE,
     SurfaceModeContract,
 )
+
+if TYPE_CHECKING:
+    from simsopt.field.coil import Coil
 
 
 MU0 = 4.0e-7 * np.pi
@@ -135,7 +138,7 @@ class PlasmaCurrentSettings:
 
 @dataclass(frozen=True)
 class VFCoilBuildResult:
-    coils: list[object]
+    coils: list[Coil]
     current_control: object | None
 
 

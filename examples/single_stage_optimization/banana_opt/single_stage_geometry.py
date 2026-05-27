@@ -1,3 +1,4 @@
+import math
 import os
 
 import numpy as np
@@ -29,6 +30,8 @@ from workflow_helpers import validate_normalized_toroidal_flux
 
 
 _SURFACE_GOES_BACK_ERROR_FRAGMENT = "surface 'goes back' on itself"
+INTERIOR_IOTA_LOW_ORDER_RATIONAL_MAX_DENOMINATOR = 8
+INTERIOR_IOTA_LOW_ORDER_RATIONAL_TOLERANCE = 5.0e-3
 
 
 def _is_surface_goes_back_error(error):
@@ -970,6 +973,12 @@ def build_surface_search_weights(
     ramp_iterations,
     initial_inner_weight,
 ):
+    """Return diagnostic surface weights for multisurface search telemetry.
+
+    The experimental continuation ramp is solver/gate-scoped. Production
+    objective wrappers use fixed global QS/Boozer objectives, so these weights
+    are recorded with diagnostics and do not retarget the descended objective.
+    """
     if num_surfaces <= 0:
         raise ValueError("num_surfaces must be positive")
     weights = np.ones(num_surfaces)
@@ -1006,6 +1015,72 @@ def build_surface_search_weights_for_contract(
     )
 
 
+def nearest_low_order_rational(value, max_denominator):
+    if max_denominator <= 0:
+        raise ValueError("max_denominator must be positive")
+    iota = float(value)
+    if not np.isfinite(iota):
+        return None
+    best = None
+    for denominator in range(1, int(max_denominator) + 1):
+        numerator = int(round(iota * denominator))
+        divisor = math.gcd(abs(numerator), denominator)
+        reduced_numerator = numerator // divisor
+        reduced_denominator = denominator // divisor
+        rational_value = float(reduced_numerator) / float(reduced_denominator)
+        abs_error = abs(iota - rational_value)
+        candidate = {
+            "numerator": int(reduced_numerator),
+            "denominator": int(reduced_denominator),
+            "rational_value": rational_value,
+            "abs_error": abs_error,
+        }
+        if best is None or (
+            abs_error,
+            reduced_denominator,
+        ) < (
+            best["abs_error"],
+            best["denominator"],
+        ):
+            best = candidate
+    return best
+
+
+def interior_iota_low_order_rational_diagnostics(
+    surface_data,
+    final_surface_iotas,
+    *,
+    max_denominator=INTERIOR_IOTA_LOW_ORDER_RATIONAL_MAX_DENOMINATOR,
+    tolerance=INTERIOR_IOTA_LOW_ORDER_RATIONAL_TOLERANCE,
+):
+    if tolerance <= 0.0:
+        raise ValueError("interior iota rational tolerance must be positive")
+    if max_denominator <= 0:
+        raise ValueError("interior iota rational max denominator must be positive")
+    matches = []
+    for surface_index, (entry, iota) in enumerate(
+        zip(surface_data[:-1], final_surface_iotas[:-1])
+    ):
+        nearest = nearest_low_order_rational(iota, max_denominator)
+        if nearest is None or nearest["abs_error"] > float(tolerance):
+            continue
+        matches.append(
+            {
+                "surface_index": int(surface_index),
+                "surface_name": entry["name"],
+                "iota": float(iota),
+                **nearest,
+            }
+        )
+    return {
+        "near_low_order_rational": bool(matches),
+        "matches": matches,
+        "max_denominator": int(max_denominator),
+        "tolerance": float(tolerance),
+        "convention": "signed_iota=p/q; interior_surfaces_exclude_outer",
+    }
+
+
 def build_surface_search_gate(
     num_surfaces,
     accepted_iterations,
@@ -1013,6 +1088,7 @@ def build_surface_search_gate(
     initial_inner_weight,
     surface_gap_threshold,
 ):
+    """Return the acceptance gate controlled by the multisurface ramp."""
     if num_surfaces <= 1:
         return {
             "surface_gap_threshold": float(surface_gap_threshold),
@@ -1334,6 +1410,10 @@ def collect_surface_run_metadata(
     final_surface_volumes,
     final_surface_iotas,
 ):
+    interior_iota_diagnostics = interior_iota_low_order_rational_diagnostics(
+        surface_data,
+        final_surface_iotas,
+    )
     return {
         "SURFACE_NAMES": [entry["name"] for entry in surface_data],
         "SURFACE_SEED_LABELS": [float(entry["seed_label"]) for entry in surface_data],
@@ -1352,4 +1432,19 @@ def collect_surface_run_metadata(
         "BAD_NESTING_PHIS": [float(value) for value in run_status["bad_nesting_phis"]],
         "INITIAL_SURFACE_VOLUMES": [float(value) for value in initial_surface_volumes],
         "INITIAL_SURFACE_IOTAS": [float(value) for value in initial_surface_iotas],
+        "FINAL_INTERIOR_IOTA_NEAR_LOW_ORDER_RATIONAL": interior_iota_diagnostics[
+            "near_low_order_rational"
+        ],
+        "FINAL_INTERIOR_IOTA_LOW_ORDER_RATIONAL_MATCHES": interior_iota_diagnostics[
+            "matches"
+        ],
+        "FINAL_INTERIOR_IOTA_LOW_ORDER_RATIONAL_MAX_DENOMINATOR": (
+            interior_iota_diagnostics["max_denominator"]
+        ),
+        "FINAL_INTERIOR_IOTA_LOW_ORDER_RATIONAL_TOLERANCE": (
+            interior_iota_diagnostics["tolerance"]
+        ),
+        "FINAL_INTERIOR_IOTA_LOW_ORDER_RATIONAL_CONVENTION": (
+            interior_iota_diagnostics["convention"]
+        ),
     }

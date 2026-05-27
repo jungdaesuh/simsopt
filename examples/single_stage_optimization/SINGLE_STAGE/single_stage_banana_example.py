@@ -2304,9 +2304,24 @@ def _fit_contracted_surface(previous_surface, scale):
     return contracted_surface
 
 
+def _require_positive_finite_volume(context, volume):
+    volume_value = float(volume)
+    if not (np.isfinite(volume_value) and volume_value > 0.0):
+        raise RuntimeError(
+            f"{context} volume must be finite and positive: {volume_value}."
+        )
+    return volume_value
+
+
 def contract_surface_to_target_volume(previous_surface, target_volume):
-    previous_volume = float(previous_surface.volume())
-    target_volume = float(target_volume)
+    previous_volume = _require_positive_finite_volume(
+        "Continuation solved neighbor",
+        previous_surface.volume(),
+    )
+    target_volume = _require_positive_finite_volume(
+        "Continuation target",
+        target_volume,
+    )
     if not (0.0 < target_volume < previous_volume):
         raise RuntimeError(
             "Continuation target volume must be strictly inside the solved "
@@ -2316,7 +2331,10 @@ def contract_surface_to_target_volume(previous_surface, target_volume):
     lower_scale = 0.0
     upper_scale = 1.0
     best_surface = _fit_contracted_surface(previous_surface, upper_scale)
-    upper_volume = float(best_surface.volume())
+    upper_volume = _require_positive_finite_volume(
+        "Continuation contraction upper",
+        best_surface.volume(),
+    )
     if not (target_volume < upper_volume):
         raise RuntimeError(
             "Continuation contraction cannot bracket the target volume: "
@@ -2388,16 +2406,14 @@ def _require_published_G_consistency(
 
 def _require_published_volume_order(surface_data):
     volumes_by_name = {
-        entry["name"]: float(entry["boozer_surface"].surface.volume())
+        entry["name"]: _require_positive_finite_volume(
+            f"published_multisurface solved {entry['name']}",
+            entry["boozer_surface"].surface.volume(),
+        )
         for entry in surface_data
     }
     ordered_names = ["inner0", "inner1", "outer"]
     ordered_volumes = [volumes_by_name[name] for name in ordered_names]
-    if not all(np.isfinite(volume) for volume in ordered_volumes):
-        raise RuntimeError(
-            "published_multisurface solved volumes must be finite: "
-            f"{dict(zip(ordered_names, ordered_volumes))}."
-        )
     if not np.all(np.diff(ordered_volumes) > 0.0):
         raise RuntimeError(
             "published_multisurface solved volumes must be strictly ordered "
@@ -5585,7 +5601,7 @@ def penalty_feasible_start_local_preservation_enabled(
 
 
 def evaluate_total_objective(
-    surface_weights,
+    diagnostic_surface_weights,
     nonQSs,
     brs,
     RES_WEIGHT,
@@ -5609,6 +5625,12 @@ def evaluate_total_objective(
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
 ):
+    """Evaluate the fixed descended objective and surface-weighted diagnostics.
+
+    In production search paths, global QS/Boozer objective terms are resolved
+    below, so continuation-ramp weights are telemetry/gate inputs rather than
+    moving objective weights.
+    """
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     resolved_width_min_threshold = (
         SINGLE_STAGE_WIDTH_MIN_THRESHOLD
@@ -5622,7 +5644,7 @@ def evaluate_total_objective(
     )
     return apply_frontier_scalarization_override(
         _evaluate_total_objective_impl(
-            surface_weights,
+            diagnostic_surface_weights,
             nonQSs,
             brs,
             objective_terms["effective_res_weight"],
@@ -5657,7 +5679,7 @@ def evaluate_total_objective(
 
 
 def evaluate_base_objective(
-    surface_weights,
+    diagnostic_surface_weights,
     nonQSs,
     brs,
     RES_WEIGHT,
@@ -5670,7 +5692,7 @@ def evaluate_base_objective(
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return _evaluate_base_objective_impl(
-        surface_weights,
+        diagnostic_surface_weights,
         nonQSs,
         brs,
         objective_terms["effective_res_weight"],
@@ -5690,7 +5712,7 @@ def evaluate_base_objective(
 
 
 def evaluate_alm_objective(
-    surface_weights,
+    diagnostic_surface_weights,
     nonQSs,
     brs,
     RES_WEIGHT,
@@ -5712,7 +5734,7 @@ def evaluate_alm_objective(
     distance_smoothing, curvature_smoothing = current_alm_smoothing()
     return apply_frontier_scalarization_override(
         _evaluate_alm_objective_impl(
-            surface_weights,
+            diagnostic_surface_weights,
             nonQSs,
             brs,
             objective_terms["effective_res_weight"],

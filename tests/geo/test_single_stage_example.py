@@ -3293,6 +3293,40 @@ class SingleStageExampleTests(unittest.TestCase):
                     warm_start_surface_stem=None,
                 )
 
+    def test_published_stage2_seed_rejects_non_positive_actual_volumes(self):
+        module = self.load_module()
+
+        def surface(name, volume):
+            return SimpleNamespace(name=name, volume=lambda: volume)
+
+        surface_data = [
+            {
+                "name": "inner0",
+                "boozer_surface": SimpleNamespace(surface=surface("inner0", -0.12)),
+            },
+            {
+                "name": "inner1",
+                "boozer_surface": SimpleNamespace(surface=surface("inner1", -0.11)),
+            },
+            {
+                "name": "outer",
+                "boozer_surface": SimpleNamespace(surface=surface("outer", -0.10)),
+            },
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "finite and positive"):
+            module._require_published_volume_order(surface_data)
+
+    def test_contract_surface_to_target_volume_rejects_non_positive_volumes(self):
+        module = self.load_module()
+        positive_neighbor = SimpleNamespace(volume=lambda: 0.10)
+        negative_neighbor = SimpleNamespace(volume=lambda: -0.10)
+
+        with self.assertRaisesRegex(RuntimeError, "Continuation solved neighbor"):
+            module.contract_surface_to_target_volume(negative_neighbor, 0.08)
+        with self.assertRaisesRegex(RuntimeError, "Continuation target"):
+            module.contract_surface_to_target_volume(positive_neighbor, 0.0)
+
     def test_published_without_seed_or_warm_start_rejects_cold_wout_inner_init(self):
         module = self.load_module()
         contract = module.resolve_surface_mode_contract(
@@ -9657,6 +9691,68 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(ramped["total"], 38.0)
         np.testing.assert_allclose(ramped["grad"], [8.0, 14.0 / 3.0])
 
+    def test_evaluate_total_objective_keeps_ramp_weights_diagnostic_with_global_objectives(self):
+        module = self.load_module()
+        module.SINGLE_STAGE_GOAL_MODE = "target"
+        module.FRONTIER_GOAL_CONFIG = None
+
+        nonqs = [
+            FakeAlgebraicObjective(2.0, [2.0, 0.0]),
+            FakeAlgebraicObjective(6.0, [4.0, 0.0]),
+        ]
+        brs = [
+            FakeAlgebraicObjective(10.0, [1.0, 1.0]),
+            FakeAlgebraicObjective(20.0, [3.0, 3.0]),
+        ]
+        global_nonqs = FakeAlgebraicObjective(100.0, [10.0, 0.0])
+        global_boozer = FakeAlgebraicObjective(50.0, [0.0, 5.0])
+        zero = FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        resolved_terms = {
+            "effective_res_weight": 2.0,
+            "effective_iotas_weight": 3.0,
+            "effective_volume_weight": 0.0,
+            "JNonQSObjective": global_nonqs,
+            "JBoozerObjective": global_boozer,
+            "JVolume": None,
+        }
+
+        def evaluate(weights):
+            with patch.object(
+                module,
+                "resolve_current_surface_objective_terms",
+                return_value=resolved_terms,
+            ):
+                return module.evaluate_total_objective(
+                    np.array(weights, dtype=float),
+                    nonqs,
+                    brs,
+                    RES_WEIGHT=999.0,
+                    Jiota=zero,
+                    IOTAS_WEIGHT=888.0,
+                    JCurveLength=zero,
+                    LENGTH_WEIGHT=4.0,
+                    JCurveCurve=zero,
+                    CC_WEIGHT=5.0,
+                    JCurveSurface=zero,
+                    CS_WEIGHT=6.0,
+                    JCurvature=zero,
+                    CURVATURE_WEIGHT=7.0,
+                )
+
+        outer_only = evaluate([0.0, 1.0])
+        ramped = evaluate([0.5, 1.0])
+
+        self.assertNotEqual(outer_only["J_QS"], ramped["J_QS"])
+        self.assertNotEqual(outer_only["J_Boozer"], ramped["J_Boozer"])
+        self.assertEqual(outer_only["J_QS_objective"], ramped["J_QS_objective"])
+        self.assertEqual(
+            outer_only["J_Boozer_objective"],
+            ramped["J_Boozer_objective"],
+        )
+        self.assertEqual(outer_only["total"], ramped["total"])
+        np.testing.assert_allclose(outer_only["grad"], ramped["grad"])
+        np.testing.assert_allclose(ramped["surface_weights"], [0.5, 1.0])
+
     def test_evaluate_search_objective_uses_fast_payload_outside_frontier_mode(self):
         module = self.load_module()
         module.SINGLE_STAGE_GOAL_MODE = "target"
@@ -11060,7 +11156,7 @@ class HardwareConstraintTests(unittest.TestCase):
             initial_surface_volumes=[0.08, 0.10],
             initial_surface_iotas=[0.12, 0.15],
             final_surface_volumes=[0.081, 0.101],
-            final_surface_iotas=[0.121, 0.151],
+            final_surface_iotas=[1.0 / 3.0, 0.151],
         )
 
         self.assertEqual(payload["SURFACE_NAMES"], ["inner", "outer"])
@@ -11071,6 +11167,61 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         self.assertTrue(payload["SURFACES_NESTED"])
         self.assertEqual(payload["FINAL_SURFACE_VOLUMES"], [0.081, 0.101])
+        self.assertTrue(payload["FINAL_INTERIOR_IOTA_NEAR_LOW_ORDER_RATIONAL"])
+        self.assertEqual(
+            payload["FINAL_INTERIOR_IOTA_LOW_ORDER_RATIONAL_MATCHES"],
+            [
+                {
+                    "surface_index": 0,
+                    "surface_name": "inner",
+                    "iota": 1.0 / 3.0,
+                    "numerator": 1,
+                    "denominator": 3,
+                    "rational_value": 1.0 / 3.0,
+                    "abs_error": 0.0,
+                }
+            ],
+        )
+        self.assertEqual(
+            payload["FINAL_INTERIOR_IOTA_LOW_ORDER_RATIONAL_CONVENTION"],
+            "signed_iota=p/q; interior_surfaces_exclude_outer",
+        )
+
+    def test_collect_surface_run_metadata_ignores_outer_rational_iota(self):
+        module = self.load_module()
+        surface_data = [
+            {
+                "name": "inner",
+                "seed_label": 0.16,
+                "target_volume": 0.08,
+                "initialization_provenance": "wout_reference",
+            },
+            {
+                "name": "outer",
+                "seed_label": 0.20,
+                "target_volume": 0.10,
+                "initialization_provenance": "stage2_outer_seed",
+            },
+        ]
+        run_status = {
+            "self_intersections": [False, False],
+            "adjacent_gaps": [0.4],
+            "outer_vessel_gap": None,
+            "nesting_ok": True,
+            "bad_nesting_phis": [],
+        }
+
+        payload = module.collect_surface_run_metadata(
+            surface_data,
+            run_status,
+            initial_surface_volumes=[0.08, 0.10],
+            initial_surface_iotas=[0.12, 0.15],
+            final_surface_volumes=[0.081, 0.101],
+            final_surface_iotas=[0.231, 1.0 / 3.0],
+        )
+
+        self.assertFalse(payload["FINAL_INTERIOR_IOTA_NEAR_LOW_ORDER_RATIONAL"])
+        self.assertEqual(payload["FINAL_INTERIOR_IOTA_LOW_ORDER_RATIONAL_MATCHES"], [])
 
 
 class BoozerFallbackLBFGSBTests(unittest.TestCase):

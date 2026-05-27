@@ -112,21 +112,31 @@ def build_total_objective(
     return objective
 
 
-def _surface_objective_pair(surface_weights, nonQSs, brs):
-    J_QS_obj = average_surface_objectives(nonQSs, weights=surface_weights)
-    J_Boozer_obj = average_surface_objectives(brs, weights=surface_weights)
+def _surface_objective_pair(diagnostic_surface_weights, nonQSs, brs):
+    J_QS_obj = average_surface_objectives(nonQSs, weights=diagnostic_surface_weights)
+    J_Boozer_obj = average_surface_objectives(brs, weights=diagnostic_surface_weights)
     return J_QS_obj, J_Boozer_obj
 
 
 def _resolve_surface_objective_terms(
-    surface_weights,
+    diagnostic_surface_weights,
     nonQSs,
     brs,
     *,
     JNonQSObjective=None,
     JBoozerObjective=None,
 ):
-    raw_J_QS_obj, raw_J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
+    """Resolve diagnostic and descended QS/Boozer objectives.
+
+    Production callers pass fixed global objectives, so search-ramp weights affect
+    only raw diagnostics. Standalone callers without overrides use those weights
+    as the objective pair for backwards-compatible helper behavior.
+    """
+    raw_J_QS_obj, raw_J_Boozer_obj = _surface_objective_pair(
+        diagnostic_surface_weights,
+        nonQSs,
+        brs,
+    )
     objective_J_QS_obj = raw_J_QS_obj if JNonQSObjective is None else JNonQSObjective
     objective_J_Boozer_obj = raw_J_Boozer_obj if JBoozerObjective is None else JBoozerObjective
     return raw_J_QS_obj, raw_J_Boozer_obj, objective_J_QS_obj, objective_J_Boozer_obj
@@ -272,7 +282,7 @@ def _penalty_search_constraint_payload(
 
 
 def evaluate_total_objective(
-    surface_weights,
+    diagnostic_surface_weights,
     nonQSs,
     brs,
     RES_WEIGHT,
@@ -308,7 +318,7 @@ def evaluate_total_objective(
         objective_J_QS_obj,
         objective_J_Boozer_obj,
     ) = _resolve_surface_objective_terms(
-        surface_weights,
+        diagnostic_surface_weights,
         nonQSs,
         brs,
         JNonQSObjective=JNonQSObjective,
@@ -349,7 +359,7 @@ def evaluate_total_objective(
     evaluation = {
         "total": float(total_objective.J()),
         "grad": total_grad,
-        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
+        "surface_weights": np.asarray(diagnostic_surface_weights, dtype=float).copy(),
         "diagnostics_included": False,
         "constraint_names": constraint_names,
         "dual_update_values": constraint_values,
@@ -440,7 +450,7 @@ def evaluate_total_objective(
 
 
 def evaluate_base_objective(
-    surface_weights,
+    diagnostic_surface_weights,
     nonQSs,
     brs,
     RES_WEIGHT,
@@ -461,7 +471,11 @@ def evaluate_base_objective(
     if _surface_pair is not None:
         raw_J_QS_obj, raw_J_Boozer_obj = _surface_pair
     else:
-        raw_J_QS_obj, raw_J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
+        raw_J_QS_obj, raw_J_Boozer_obj = _surface_objective_pair(
+            diagnostic_surface_weights,
+            nonQSs,
+            brs,
+        )
     objective_J_QS_obj = raw_J_QS_obj if JNonQSObjective is None else JNonQSObjective
     objective_J_Boozer_obj = raw_J_Boozer_obj if JBoozerObjective is None else JBoozerObjective
     base_objective = (
@@ -486,7 +500,7 @@ def evaluate_base_objective(
         "total": total,
         "grad": grad,
         "physics_total": physics_total,
-        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
+        "surface_weights": np.asarray(diagnostic_surface_weights, dtype=float).copy(),
         "diagnostics_included": False,
     }
     if not include_diagnostics:
@@ -672,7 +686,7 @@ def _resolve_hard_signal(
 
 
 def evaluate_alm_objective(
-    surface_weights,
+    diagnostic_surface_weights,
     nonQSs,
     brs,
     RES_WEIGHT,
@@ -737,10 +751,10 @@ def evaluate_alm_objective(
     JBoozerObjective=None,
     include_diagnostics=True,
 ):
-    raw_surface_pair = _surface_objective_pair(surface_weights, nonQSs, brs)
+    raw_surface_pair = _surface_objective_pair(diagnostic_surface_weights, nonQSs, brs)
     raw_J_QS_obj, raw_J_Boozer_obj = raw_surface_pair
     base_eval = evaluate_base_objective(
-        surface_weights,
+        diagnostic_surface_weights,
         nonQSs,
         brs,
         RES_WEIGHT,

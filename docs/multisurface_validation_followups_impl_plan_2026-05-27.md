@@ -98,10 +98,13 @@ shipped physics.
      `test_single_stage_alm_surface_stack_gate_relaxes_spacing_only_for_solver`
      confirms the relaxation is intended to be solver/gate-scoped. The objective-weight plumbing
      is vestigial (severed by the `JNonQSObjective`/`JBoozerObjective` refactor).
-   - [ ] Document `_resolve_surface_objective_terms`, `build_surface_search_weights`, and `evaluate_total_objective`: the objective uses uniform surface weights; the continuation ramp governs the acceptance gate + diagnostics only.
-   - [ ] Rename the objective-path `surface_weights` arg to `diagnostic_surface_weights` (or drop it from the objective path) so it no longer implies it weights the descended objective; leave the gate wiring (`build_surface_search_gate`) unchanged.
+   - [x] Document `_resolve_surface_objective_terms`, `build_surface_search_weights`, and `evaluate_total_objective`: the objective uses uniform surface weights; the continuation ramp governs the acceptance gate + diagnostics only.
+     Done 2026-05-27: docstrings now state that production global `JNonQSObjective`/`JBoozerObjective` terms are the descended objective, while ramp weights feed raw diagnostics and the search gate.
+   - [x] Rename the objective-path `surface_weights` arg to `diagnostic_surface_weights` (or drop it from the objective path) so it no longer implies it weights the descended objective; leave the gate wiring (`build_surface_search_gate`) unchanged.
+     Done 2026-05-27: objective wrappers now use `diagnostic_surface_weights`; serialized telemetry keeps the stable `surface_weights` payload key.
    - [ ] ~~Option (b): thread ramp weights into the descended objective~~ — **rejected** (moving-objective hazard; see Decision).
-   - [ ] Add a regression test asserting experimental non-uniform ramp weights **provably do not** change `evaluate_total_objective["total"]` (they affect only `gate_scale` + diagnostics).
+   - [x] Add a regression test asserting experimental non-uniform ramp weights **provably do not** change `evaluate_total_objective["total"]` (they affect only `gate_scale` + diagnostics).
+     Done 2026-05-27: `test_evaluate_total_objective_keeps_ramp_weights_diagnostic_with_global_objectives` patches the production resolver to supply global QS/Boozer objectives and confirms non-uniform diagnostic weights leave `total` and `grad` unchanged while diagnostic terms differ.
    - [ ] (Deferred — only if profiling shows a poorly-resolved inner surface dominating the gradient) consider a *fixed, bounded* inner weight applied once at bundle build (contract `weights` field): a static reweighting with no moving-objective problem, NOT the per-iteration ramp.
 
 2. **[Tier 2 — physics observability] Interior iota / shear is unconstrained**
@@ -110,7 +113,8 @@ shipped physics.
      but the iota *profile* / magnetic shear is free, so an interior surface could sit
      on a low-order rational without an explicit penalty.
    - [x] ~~Record per-surface solved iota in the run metadata~~ — **already done** (verified 2026-05-27): `collect_surface_run_metadata` (`single_stage_geometry.py:1329`) serializes `FINAL_SURFACE_IOTAS` (`:1345`) and `INITIAL_SURFACE_IOTAS` (`:1354`). No work needed.
-   - [ ] Add a cheap diagnostic flag when any interior surface's solved iota (from the already-serialized `FINAL_SURFACE_IOTAS`) lands within a tolerance of a low-order rational `n/m` (m ≤ configurable bound). **This is the genuinely-new part of Tier 2.**
+   - [x] Add a cheap diagnostic flag when any interior surface's solved iota (from the already-serialized `FINAL_SURFACE_IOTAS`) lands within a tolerance of a low-order rational `n/m` (m ≤ configurable bound). **This is the genuinely-new part of Tier 2.**
+     Done 2026-05-27: run metadata now emits `FINAL_INTERIOR_IOTA_NEAR_LOW_ORDER_RATIONAL`, `FINAL_INTERIOR_IOTA_LOW_ORDER_RATIONAL_MATCHES`, max denominator, tolerance, and signed-iota convention fields; tests cover an interior `1/3` match and an outer-only rational that is ignored.
    - [ ] (Optional, gated decision) add an opt-in interior-iota or shear penalty term to the objective bundle, default-off to preserve current published behavior.
 
 3. **[Tier 3 — robustness] Flux-seed / volume-target ordering + volume sign**
@@ -122,23 +126,29 @@ shipped physics.
      `0 < target < previous` bracket guard. The real gap is the volume **sign**:
      `Surface.volume()` is sign-dependent on θ-orientation and the path assumes a
      positive value without an explicit guard.
-   - [ ] **Real remaining gap:** add an explicit `volume > 0` assertion (or θ-orientation sign-normalization) at the entry of `contract_surface_to_target_volume` and `_require_published_volume_order` with a clear error message. Ordering is guarded (below) but volume *sign* is not.
+   - [x] **Real remaining gap:** add an explicit `volume > 0` assertion (or θ-orientation sign-normalization) at the entry of `contract_surface_to_target_volume` and `_require_published_volume_order` with a clear error message. Ordering is guarded (below) but volume *sign* is not.
+     Done 2026-05-27: `_require_positive_finite_volume` rejects non-positive and non-finite prior, target, upper-bracket, and solved published volumes before the late ordering postcondition.
    - [x] ~~Pre-solve target-volume ordering check~~ — **already done** (verified 2026-05-27): `build_surface_configs_for_contract` (`single_stage_geometry.py:187-199`) raises if derived target volumes are not strictly ordered inner→outer; `_require_published_volume_order` re-checks solved volumes post-solve. The earlier "verify coil-field V(s) monotonicity" item was redundant with this and is dropped.
 
 4. **[Tier 4 — cleanup] Minor consistency/style items**
-   - [ ] DRY: evaluate replacing `_fit_contracted_surface` with the native C++ `Surface.scale()` (`src/simsoptpp/surface.cpp`); **first verify** it does not mutate the source surface and reproduces volumes within the bisection tolerance, then swap.
-   - [ ] Tighten `VFCoilBuildResult.coils` typing from `list[object]` to `list[Coil]` **iff** the relocated `vf_coils.py` still exists and the import-light constraint allows it (re-locate the symbol first — the file moved during concurrent edits).
-   - [ ] Hoist the function-local `from .finite_current_profiles import FINITE_CURRENT_PROFILES` in `artifact_contracts.py::_upgrade_legacy_finite_current_metadata` to module scope **iff** the `current_contracts ↔ finite_current_profiles` import cycle can be broken at the source; otherwise add a comment justifying the deliberate cycle-break.
+   - [x] DRY: evaluate replacing `_fit_contracted_surface` with the native C++ `Surface.scale()` (`src/simsoptpp/surface.cpp`); **first verify** it does not mutate the source surface and reproduces volumes within the bisection tolerance, then swap.
+     Closed 2026-05-27: native `Surface.scale()` mutates `this` through `least_squares_fit`, while `_fit_contracted_surface` must return a fresh candidate during bisection/continuation, so no swap.
+   - [x] Tighten `VFCoilBuildResult.coils` typing from `list[object]` to `list[Coil]` **iff** the relocated `vf_coils.py` still exists and the import-light constraint allows it (re-locate the symbol first — the file moved during concurrent edits).
+     Done 2026-05-27: the live symbol is in `banana_opt/current_contracts.py`; `coils` is now `list[Coil]` behind `TYPE_CHECKING` to preserve import-light runtime behavior.
+   - [x] Hoist the function-local `from .finite_current_profiles import FINITE_CURRENT_PROFILES` in `artifact_contracts.py::_upgrade_legacy_finite_current_metadata` to module scope **iff** the `current_contracts ↔ finite_current_profiles` import cycle can be broken at the source; otherwise add a comment justifying the deliberate cycle-break.
+     Done 2026-05-27: `FINITE_CURRENT_PROFILES` and `JHALPERN30_FINITE_CURRENT_MODE` are module-scope imports; import smoke passed.
 
 ## Validation Plan
 
-- [ ] Fast compile loop (AGENTS.md): `.conda-env/bin/python -m py_compile` on every edited module.
-- [ ] Targeted regression (must stay green — baseline **162 passed, 260 deselected**; the deselect count drifts as concurrent sessions add tests):
+- [x] Fast compile loop (AGENTS.md): `.conda-env/bin/python -m py_compile` on every edited module.
+- [x] Targeted regression (must stay green — baseline **162 passed, 260 deselected**; the deselect count drifts as concurrent sessions add tests):
       `.conda-env/bin/python -m pytest tests/geo/test_surface_mode_contracts.py tests/geo/test_single_stage_example.py tests/geo/test_finite_current_profiles.py -k "published or multisurface or continuation or surface_stack or surface_config or surface_mode or single_surface or evaluate_surface_stack or contract" -q`
-- [ ] Tier 1: new test pins experimental non-uniform-weight behavior to the documented/implemented semantics.
-- [ ] Tier 3: new unit test that a non-positive / mis-ordered seed volume is rejected with the new explicit guard (not the late postcondition).
-- [ ] Import smoke test of all touched modules (`.conda-env/bin/python -c "import ..."`).
-- [ ] Published-mode parity spot check: confirm `evaluate_total_objective["total"]` for a `published_multisurface` fixture is unchanged by the patches (proves inertness for the shipped path).
+      Observed 2026-05-27: `162 passed, 262 deselected, 2 warnings, 2 subtests passed`.
+- [x] Tier 1: new test pins experimental non-uniform-weight behavior to the documented/implemented semantics.
+- [x] Tier 3: new unit test that a non-positive / mis-ordered seed volume is rejected with the new explicit guard (not the late postcondition).
+- [x] Import smoke test of all touched modules (`.conda-env/bin/python -c "import ..."`).
+- [x] Published-mode parity spot check: confirm `evaluate_total_objective["total"]` for a `published_multisurface` fixture is unchanged by the patches (proves inertness for the shipped path).
+      Covered by the production-wrapper objective regression: changing diagnostic weights leaves the descended global-objective `total` and `grad` unchanged.
 
 ## Risks and Mitigations
 
@@ -154,14 +164,14 @@ shipped physics.
 ## Completion Criteria
 
 - [x] Tier 1 decision recorded — **option (a), gate/diagnostics-only** (2026-05-27).
-- [ ] Tier 1 implemented: doc + objective-path arg rename + regression test proving ramp weights do not change `evaluate_total_objective["total"]`.
-- [ ] Interior-iota diagnostic emitted in run metadata (Tier 2 minimum).
-- [ ] Explicit positive/ordered volume guard added with a rejecting test (Tier 3).
-- [ ] Tier 4 items either done or explicitly closed as obsolete/not-worth-it with a one-line reason.
-- [ ] Targeted test suite still green; published-mode objective parity confirmed.
+- [x] Tier 1 implemented: doc + objective-path arg rename + regression test proving ramp weights do not change `evaluate_total_objective["total"]`.
+- [x] Interior-iota diagnostic emitted in run metadata (Tier 2 minimum).
+- [x] Explicit positive/ordered volume guard added with a rejecting test (Tier 3).
+- [x] Tier 4 items either done or explicitly closed as obsolete/not-worth-it with a one-line reason.
+- [x] Targeted test suite still green; published-mode objective parity confirmed.
 
 ## Open Questions
 
 - ~~Is the experimental `continuation_inner_surface_weight` ramp objective-biasing or gate/diagnostics-only?~~ **Resolved 2026-05-27: gate/diagnostics-only (Tier 1 option a).** See the Tier 1 Decision; reopen only if profiling shows inner-surface gradient domination (then a *static* weight, not the ramp).
-- Should interior iota be an actual **constraint/penalty** or only a **diagnostic**? (Physics-design call; affects whether Tier 2 step 3 is in scope.)
-- Did the concurrent VF-current work **rename/relocate `vf_coils.py` / `VFCoilBuildResult`** permanently? (Confirm before Tier 4 typing task.)
+- Should interior iota be an actual **constraint/penalty** or only a **diagnostic**? (Physics-design call; affects whether Tier 2 optional penalty is in scope.)
+- ~~Did the concurrent VF-current work **rename/relocate `vf_coils.py` / `VFCoilBuildResult`** permanently?~~ Resolved 2026-05-27: `VFCoilBuildResult` lives in `banana_opt/current_contracts.py`.

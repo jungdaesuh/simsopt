@@ -13,6 +13,10 @@ from .current_contracts import (
     resolve_boozer_current_convention,
     resolve_effective_current_mode,
 )
+from .finite_current_profiles import (
+    FINITE_CURRENT_PROFILES,
+    JHALPERN30_FINITE_CURRENT_MODE,
+)
 from .hardware_contracts import (
     fixed_stage2_artifact_hardware_contract,
     stage2_artifact_hardware_contract,
@@ -191,11 +195,6 @@ def _infer_legacy_boozer_current_convention(
 
 
 def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
-    from .finite_current_profiles import (
-        FINITE_CURRENT_PROFILES,
-        JHALPERN30_FINITE_CURRENT_MODE,
-    )
-
     finite_current_mode = upgraded_results.get("FINITE_CURRENT_MODE")
     finite_current_mode_source = upgraded_results.get("FINITE_CURRENT_MODE_SOURCE")
     if finite_current_mode in {None, ""}:
