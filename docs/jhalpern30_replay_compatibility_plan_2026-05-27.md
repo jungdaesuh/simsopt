@@ -7,11 +7,9 @@ retirement
 **Scope:** Add an explicit compatibility path for reproducing historical `jhalpern30`
 single-stage and stage-2 behavior in this repo.
 
-**Architecture follow-up:** The jhalpern behavior is implemented, but the mode
-policy is still too centered on `banana_opt/jhalpern30_compat.py`. The next
-cleanup is to promote finite-current mode policy into a shared
-`banana_opt/finite_current_profiles.py` registry and leave
-`jhalpern30_compat.py` as the historical adapter/builder implementation.
+**Architecture follow-up:** The finite-current mode policy now lives in
+`banana_opt/finite_current_profiles.py`. `banana_opt/jhalpern30_compat.py`
+remains the historical adapter/builder/import implementation.
 
 ## Reference Points
 
@@ -43,7 +41,9 @@ cleanup is to promote finite-current mode policy into a shared
   `examples/single_stage_optimization/banana_opt/jhalpern30_vf_biotsavart.json`
   with sha256
   `1df87dbe845b014199fb1a4a1a414a2dff922d0ae9da10b1861092d0f326d989`.
-- Centralized replay behavior in
+- Finite-current mode policy metadata now lives in
+  `examples/single_stage_optimization/banana_opt/finite_current_profiles.py`;
+  historical replay builders/import/parsing remain in
   `examples/single_stage_optimization/banana_opt/jhalpern30_compat.py`.
 - Threaded jhalpern mode through Stage 2 geometry, current resolution,
   workflow command construction, single-stage finite-current parsing, and the
@@ -121,10 +121,10 @@ policy.
 - [x] Thread the compatibility mode through supported downstream consumers while
       keeping unsupported Wataru-only wrappers explicitly rejected.
 - [x] Record enough artifact metadata to prevent silent mode drift.
-- [ ] Add a root-level-in-`banana_opt` finite-current profile registry so
+- [x] Add a root-level-in-`banana_opt` finite-current profile registry so
       `wataru_proxy_field` and `jhalpern30_proxy_field` are peers with typed
       policy metadata instead of scattered mode-specific constants.
-- [ ] Demote `banana_opt/jhalpern30_compat.py` from policy SSOT to historical
+- [x] Demote `banana_opt/jhalpern30_compat.py` from policy SSOT to historical
       builders/import adapter after the profile registry owns mode metadata.
 
 ## Non-Goals
@@ -171,11 +171,11 @@ policy.
 
 ## Architecture Follow-up: Finite-Current Profiles
 
-Current implementation chose the smallest working replay adapter first:
-`jhalpern30_compat.py` owns historical constants, builders, template validation,
-and the StageNN importer. That is acceptable for the initial port, but it is not
-the right long-term SSOT because generic callers must still know the mode string
-and import jhalpern-specific constants.
+The initial port chose the smallest working replay adapter first:
+`jhalpern30_compat.py` owned historical constants, builders, template validation,
+and the StageNN importer. That was acceptable for the first port, but it was not
+the right long-term SSOT because generic callers had to know the mode string and
+import jhalpern-specific constants.
 
 Two designs were considered:
 
@@ -200,6 +200,10 @@ Profile fields should include:
 - supported entrypoints
 - explicitly rejected entrypoints
 - artifact metadata keys required for this mode
+
+Implemented profile file:
+
+- `examples/single_stage_optimization/banana_opt/finite_current_profiles.py`
 
 ## Current Implementation Status
 
@@ -268,7 +272,7 @@ Profile fields should include:
 ### Remaining cleanup
 
 1. Documentation and user-facing path cleanup
-   - [ ] Update user-facing docs to describe the supported jhalpern path as:
+   - [x] Update user-facing docs to describe the supported jhalpern path as:
          historical bundle -> `import_jhalpern30_replay.py` -> current-repo
          replay artifact -> direct single-stage replay.
    - [x] Remove or reword stale text that implies jhalpern replay should flow
@@ -276,21 +280,21 @@ Profile fields should include:
    - [x] After donor-repair retirement commit `9676c40f5`, keep only historical
          or explicit rejection-boundary references to
          `run_single_stage_donor_repair.py`.
-   - [ ] Add a short "ported, not symlinked" note to the relevant handoff docs
+   - [x] Add a short "ported, not symlinked" note to the relevant handoff docs
          so future users understand why `results.json` is regenerated.
 2. Finite-current profile registry
-   - [ ] Add `examples/single_stage_optimization/banana_opt/finite_current_profiles.py`.
-   - [ ] Define a frozen `FiniteCurrentProfile` data object with fields for:
+   - [x] Add `examples/single_stage_optimization/banana_opt/finite_current_profiles.py`.
+   - [x] Define a frozen `FiniteCurrentProfile` data object with fields for:
          mode, coil counts, Boozer current convention, G0 policy, proxy placement
          policy, VF template path/hash, VF current policy, banana replay policy,
          supported entrypoints, rejected entrypoints, and required artifact
          metadata keys.
-   - [ ] Add `get_finite_current_profile(mode)` and fail loudly for unsupported
+   - [x] Add `get_finite_current_profile(mode)` and fail loudly for unsupported
          modes.
-   - [ ] Add profiles for `wataru_proxy_field` and `jhalpern30_proxy_field`.
-   - [ ] Keep `DEFAULT_FINITE_CURRENT_MODE = "wataru_proxy_field"` in
+   - [x] Add profiles for `wataru_proxy_field` and `jhalpern30_proxy_field`.
+   - [x] Keep `DEFAULT_FINITE_CURRENT_MODE = "wataru_proxy_field"` in
          `current_contracts.py`; do not make the registry change the default.
-   - [ ] Move shared policy constants out of `jhalpern30_compat.py` into the
+   - [x] Move shared policy constants out of `jhalpern30_compat.py` into the
          jhalpern profile:
          `JHALPERN30_NUM_TF_COILS`, `JHALPERN30_NUM_BANANA_COILS`,
          `JHALPERN30_NUM_PROXY_COILS`, `JHALPERN30_NUM_VF_COILS`,
@@ -298,40 +302,40 @@ Profile fields should include:
          `JHALPERN30_VF_CURRENT_SIGN_POLICY`,
          `JHALPERN30_VF_CURRENT_MUTABILITY`, and
          `JHALPERN30_VF_TEMPLATE_SHA256`.
-   - [ ] Keep implementation-only helpers in `jhalpern30_compat.py`: historical
+   - [x] Keep implementation-only helpers in `jhalpern30_compat.py`: historical
          builders, StageNN importer, template validation, stage-state parsing,
          `_flip` parsing, and `BANANA_I_FIXED_S2` replay helper logic.
 3. Consumer migration
-   - [ ] Replace scattered `finite_current_mode == "jhalpern30_proxy_field"` or
+   - [x] Replace scattered `finite_current_mode == "jhalpern30_proxy_field"` or
          `JHALPERN30_FINITE_CURRENT_MODE` checks with profile queries when the
          caller only needs policy metadata.
-   - [ ] Audit `SINGLE_STAGE/single_stage_banana_example.py`,
+   - [x] Audit `SINGLE_STAGE/single_stage_banana_example.py`,
          `STAGE_2/banana_coil_solver.py`, `workflow_helpers.py`, and
          `stage2_geometry.py` for copied jhalpern constants that should read
          from `finite_current_profiles.py`.
-   - [ ] Keep the 51-coil manifest construction metadata-driven through
+   - [x] Keep the 51-coil manifest construction metadata-driven through
          `COIL_GROUPS`; do not add position-based special cases outside the
          importer and geometry builders.
-   - [ ] Keep mode-specific builder dispatch in `stage2_geometry.py`; profile
+   - [x] Keep mode-specific builder dispatch in `stage2_geometry.py`; profile
          metadata should select policy, not hide distinct construction logic
          behind a shallow pass-through abstraction.
 4. Rejection-boundary cleanup
-   - [ ] Keep a test proving `run_stage2_to_single_stage.py` rejects
+   - [x] Keep a test proving `run_stage2_to_single_stage.py` rejects
          `jhalpern30_proxy_field` with a clear Wataru-only message.
-   - [ ] Keep a test proving single-stage accepts `jhalpern30_proxy_field` when
+   - [x] Keep a test proving single-stage accepts `jhalpern30_proxy_field` when
          the artifact metadata is present.
-   - [ ] Ensure any future wrapper that consumes `FINITE_CURRENT_MODE` either
+   - [x] Ensure any future wrapper that consumes `FINITE_CURRENT_MODE` either
          handles `jhalpern30_proxy_field` explicitly or rejects it with a
          mode-specific error.
 5. Evidence refresh
    - [x] Re-run the focused jhalpern and Wataru regression tests after the
          donor-repair cleanup was committed.
-   - [ ] Record the exact passing commands and commit hash in this document if
+   - [x] Record the exact passing commands and commit hash in this document if
          this plan is used as handoff evidence.
 
 ## Validation Plan
 
-- [ ] Add and run finite-current profile tests:
+- [x] Add and run finite-current profile tests:
 
 ```bash
 PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_finite_current_profiles.py -q
@@ -348,36 +352,67 @@ Required assertions:
   as unsupported.
 - the StageNN importer emits metadata matching the jhalpern profile.
 
-- [ ] Run the focused jhalpern compatibility test:
+- [x] Run the focused jhalpern compatibility test:
 
 ```bash
 PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_jhalpern30_compat.py -q
 ```
 
-- [ ] Run the Wataru/VF regression tests:
+- [x] Run the Wataru/VF regression tests:
 
 ```bash
 PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_stage2_seeded_restart_vf_consistency.py tests/geo/test_wataru_vf_template_resolution.py -q
 ```
 
-- [ ] Run the Stage 2/single-stage handoff regression suite:
+- [x] Run the Stage 2/single-stage handoff regression suite:
 
 ```bash
 PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_stage2_single_stage_handoff.py -q
 ```
 
-- [ ] Run the single-stage example regression suite:
+- [x] Run the single-stage example regression suite:
 
 ```bash
 PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_single_stage_example.py -q
 ```
 
-- [ ] Run static/doc hygiene:
+- [x] Run focused static/doc hygiene for the touched implementation files:
 
 ```bash
-python -m ruff check examples/single_stage_optimization tests/geo
+python3.13 -m ruff check examples/single_stage_optimization/banana_opt/finite_current_profiles.py examples/single_stage_optimization/banana_opt/jhalpern30_compat.py examples/single_stage_optimization/workflow_helpers.py examples/single_stage_optimization/STAGE_2/banana_coil_solver.py examples/single_stage_optimization/run_stage2_to_single_stage.py tests/geo/test_finite_current_profiles.py
 git diff --check
 ```
+
+Full-tree `python3.13 -m ruff check examples/single_stage_optimization tests/geo`
+is currently blocked by an unrelated pre-existing unused import in
+`tests/geo/test_boozersurface.py:1556`.
+
+## Validation Evidence
+
+Validated against implementation commit `7da55dae1` with this doc/test delta in
+the working tree; donor-repair retirement exists in history as `9676c40f5`.
+
+Passing:
+
+```bash
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_finite_current_profiles.py -q
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_jhalpern30_compat.py -q
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_stage2_seeded_restart_vf_consistency.py tests/geo/test_wataru_vf_template_resolution.py -q
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_stage2_single_stage_handoff.py -q
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_single_stage_example.py -q
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_single_stage_workflow_helpers.py::WorkflowRunnerCommonTests::test_build_stage2_command_threads_jhalpern_mode_template_and_flip tests/geo/test_single_stage_workflow_helpers.py::WorkflowRunnerCommonTests::test_stage2_artifact_config_preserves_raw_template_and_resolves_identity_default -q
+python3.13 -m ruff check examples/single_stage_optimization/banana_opt/finite_current_profiles.py examples/single_stage_optimization/banana_opt/jhalpern30_compat.py examples/single_stage_optimization/workflow_helpers.py examples/single_stage_optimization/STAGE_2/banana_coil_solver.py examples/single_stage_optimization/run_stage2_to_single_stage.py tests/geo/test_finite_current_profiles.py
+git diff --check
+```
+
+Known unrelated blockers:
+
+- `tests/geo/test_single_stage_workflow_helpers.py -q` has one existing
+  hardware-threshold expectation failure:
+  `GoalModeComparisonScriptTests::test_goal_mode_comparison_wrapper_defaults_match_single_stage_entrypoint`
+  expects `cs_dist=0.015` while the dirty tree default is `0.010`.
+- full-tree `ruff` has one existing unused import in
+  `tests/geo/test_boozersurface.py:1556`.
 
 ## Risks and Mitigations
 
@@ -435,28 +470,25 @@ git diff --check
 - [x] Artifact metadata distinguishes Wataru and jhalpern runs.
 - [x] There is no runtime dependency on
       `/Users/suhjungdae/code/columbia/banana_drivers-main`.
-- [ ] `banana_opt/finite_current_profiles.py` exists and owns finite-current
+- [x] `banana_opt/finite_current_profiles.py` exists and owns finite-current
       mode policy metadata for Wataru and jhalpern profiles.
-- [ ] `jhalpern30_compat.py` no longer owns shared policy constants; it owns only
+- [x] `jhalpern30_compat.py` no longer owns shared policy constants; it owns only
       historical builders, StageNN import, and parsing/validation helpers.
-- [ ] Consumers that need policy metadata use `get_finite_current_profile(...)`
+- [x] Consumers that need policy metadata use `get_finite_current_profile(...)`
       instead of importing jhalpern-specific constants.
-- [ ] Profile tests prove jhalpern remains 51 coils, Wataru remains default, and
+- [x] Profile tests prove jhalpern remains 51 coils, Wataru remains default, and
       `run_stage2_to_single_stage.py` remains unsupported for jhalpern replay.
 - [x] User-facing docs no longer imply jhalpern replay uses donor repair or
       `run_stage2_to_single_stage.py`.
 - [x] Focused validation has been re-run after the donor-repair retirement
       landed.
 
-## Open Questions
+## Current Decisions
 
-- Should `run_stage2_to_single_stage.py` remain permanently Wataru-only, or
-  should a future implementation add jhalpern support there? Current decision:
-  keep it Wataru-only and route jhalpern replay through the StageNN adapter plus
-  direct single-stage replay.
-- Should profile-owned constants keep their historical `JHALPERN30_*` export
-  names for compatibility, or should callers migrate immediately to profile
-  fields? Current preference: migrate internal callers to profile fields and
-  keep compatibility aliases only if external scripts require them.
-- Which README/examples still need the direct StageNN-adapter-to-single-stage
-  replay path documented more prominently?
+- Keep `run_stage2_to_single_stage.py` Wataru-only unless a future request
+  explicitly adds jhalpern support there; current jhalpern replay routes through
+  the StageNN adapter plus direct single-stage replay.
+- Profile-owned constants now live in `finite_current_profiles.py`; internal
+  consumers that need policy metadata use the profile. `jhalpern30_compat.py`
+  keeps compatibility aliases as imported names but no longer exports them from
+  `__all__`.

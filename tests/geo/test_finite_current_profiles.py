@@ -18,6 +18,7 @@ SIGNED_CW_WOUT_PATH = Path(__file__).resolve().parents[1] / "test_files" / "wout
 if str(EXAMPLE_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_ROOT))
 
+import workflow_helpers  # noqa: E402
 from banana_opt import jhalpern30_compat as compat  # noqa: E402
 from banana_opt.finite_current_profiles import (  # noqa: E402
     JHALPERN30_PROFILE,
@@ -102,6 +103,23 @@ def _pre_boozer_repair_fields(finite_current_mode: str) -> dict[str, object]:
     }
 
 
+def _workflow_stage2_spec(finite_current_mode: str) -> workflow_helpers.Stage2SeedSpec:
+    return workflow_helpers.Stage2SeedSpec(
+        plasma_surf_filename="demo.nc",
+        major_radius=0.976,
+        toroidal_flux=0.24,
+        length_weight=5.0e-4,
+        cc_weight=100.0,
+        cc_threshold=0.05,
+        curvature_weight=1.0e-4,
+        curvature_threshold=40.0,
+        banana_surf_radius=0.142,
+        tf_current_A=-8.0e4,
+        order=2,
+        finite_current_mode=finite_current_mode,
+    )
+
+
 class FiniteCurrentProfileTests(unittest.TestCase):
     def test_wataru_profile_preserves_default_template_and_counts(self):
         profile = get_finite_current_profile("wataru_proxy_field")
@@ -137,6 +155,17 @@ class FiniteCurrentProfileTests(unittest.TestCase):
     def test_unknown_profile_mode_fails_loudly(self):
         with self.assertRaisesRegex(ValueError, "Unsupported finite-current profile"):
             get_finite_current_profile("boozer_surrogate")
+
+    def test_workflow_helpers_fail_loudly_for_unsupported_profile_modes(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported finite-current profile"):
+            workflow_helpers.resolve_finite_current_vf_template_path(
+                "boozer_surrogate",
+                None,
+            )
+        with self.assertRaisesRegex(ValueError, "Unsupported finite-current profile"):
+            workflow_helpers.format_stage2_finite_current_suffix(
+                _workflow_stage2_spec("typo_proxy_field"),
+            )
 
     def test_stage2_to_single_stage_rejects_jhalpern_pre_boozer_repair(self):
         wrapper = _load_stage2_wrapper_module()
