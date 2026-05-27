@@ -120,18 +120,17 @@ from banana_opt.current_contracts import (
     apply_penalty_traversal_forbidden_box_bounds,
     DEFAULT_FINITE_CURRENT_MODE,
     FiniteCurrentMode,
-    HBT_PROXY_VF_CURRENT_RATIO,
     physical_current_to_boozer_I,
     resolve_boozer_current_convention,
     resolve_finite_current_mode,
     validate_proxy_vf_current_convention_for_mode,
 )
-from banana_opt.jhalpern30_compat import (
+from banana_opt.finite_current_profiles import (
+    FINITE_CURRENT_PROFILES,
     JHALPERN30_FINITE_CURRENT_MODE,
-    JHALPERN30_G0_POLICY,
-    JHALPERN30_PROXY_PLACEMENT_MODE,
-    JHALPERN30_VF_CURRENT_MUTABILITY,
-    JHALPERN30_VF_CURRENT_SIGN_POLICY,
+    get_finite_current_profile,
+)
+from banana_opt.jhalpern30_compat import (
     jhalpern30_iota_target_sign,
     resolve_jhalpern30_banana_current_replay,
     sha256_file,
@@ -507,7 +506,7 @@ def parse_args():
     )
     parser.add_argument(
         "--finite-current-mode",
-        choices=["wataru_proxy_field", "jhalpern30_proxy_field"],
+        choices=tuple(FINITE_CURRENT_PROFILES),
         default=os.environ.get("FINITE_CURRENT_MODE"),
         help=(
             "Finite-current construction mode. Default preserves the Wataru "
@@ -1978,6 +1977,7 @@ def _resolve_stage2_finite_current_config(
             else stage2_results.get("FINITE_CURRENT_MODE_SOURCE")
         ),
     )
+    finite_current_profile = get_finite_current_profile(finite_current_mode)
     if stage2_results is None:
         # Fresh Stage 2: auto-resolve the bundled VF template so the zero-current
         # VF bundle is always serialized. This is the Wataru-faithful shape;
@@ -1989,8 +1989,8 @@ def _resolve_stage2_finite_current_config(
         )
         if requested_vf_current_A is None:
             vf_current_A = (
-                proxy_plasma_current_A * HBT_PROXY_VF_CURRENT_RATIO
-                if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE
+                proxy_plasma_current_A * finite_current_profile.vf_current_ratio
+                if finite_current_profile.mode == JHALPERN30_FINITE_CURRENT_MODE
                 else 0.0
             )
         else:
@@ -2020,11 +2020,13 @@ def _resolve_stage2_finite_current_config(
         )
         if (
             allow_seed_current_traversal
-            and finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE
+            and finite_current_profile.mode == JHALPERN30_FINITE_CURRENT_MODE
             and requested_proxy_plasma_current_A is not None
             and requested_vf_current_A is None
         ):
-            vf_current_A = proxy_plasma_current_A * HBT_PROXY_VF_CURRENT_RATIO
+            vf_current_A = (
+                proxy_plasma_current_A * finite_current_profile.vf_current_ratio
+            )
         if (
             requested_vf_template_path not in {None, ""}
             and _is_legacy_zero_vf_donor(stage2_results)
@@ -2045,7 +2047,8 @@ def _resolve_stage2_finite_current_config(
         vf_current_A=vf_current_A,
     )
     if vf_template_path in {None, ""} and (
-        vf_current_A != 0.0 or finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE
+        vf_current_A != 0.0
+        or finite_current_profile.mode == JHALPERN30_FINITE_CURRENT_MODE
     ):
         raise ValueError(
             "--vf-template-path is required when --vf-current-A is non-zero."
@@ -3097,7 +3100,8 @@ def main(parsed_args=None):
     vf_template_sha256 = (
         None if vf_template_path in {None, ""} else sha256_file(vf_template_path)
     )
-    is_jhalpern30_mode = finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE
+    finite_current_profile = get_finite_current_profile(finite_current_mode)
+    is_jhalpern30_mode = finite_current_profile.mode == JHALPERN30_FINITE_CURRENT_MODE
     if is_jhalpern30_mode:
         banana_replay = resolve_jhalpern30_banana_current_replay(
             flip_banana=bool(args.flip_banana),
@@ -3134,22 +3138,10 @@ def main(parsed_args=None):
         proxy_plasma_current_A=proxy_plasma_current_A,
         vf_current_A=vf_current_A,
         vf_template_path=vf_template_path,
-        proxy_placement_mode=(
-            JHALPERN30_PROXY_PLACEMENT_MODE
-            if is_jhalpern30_mode
-            else "vmec_axis_zeroth_coefficients"
-        ),
+        proxy_placement_mode=finite_current_profile.proxy_placement_policy,
         vf_template_sha256=vf_template_sha256,
-        vf_current_sign_policy=(
-            JHALPERN30_VF_CURRENT_SIGN_POLICY
-            if is_jhalpern30_mode
-            else "template_sign_vf_current_scalar"
-        ),
-        vf_current_mutability=(
-            JHALPERN30_VF_CURRENT_MUTABILITY
-            if is_jhalpern30_mode
-            else "independent_fixed_current"
-        ),
+        vf_current_sign_policy=finite_current_profile.vf_current_sign_policy,
+        vf_current_mutability=finite_current_profile.vf_current_mutability,
         flip_banana=bool(args.flip_banana),
         banana_current_sign=banana_current_sign,
         banana_current_pinned=banana_current_pinned,
@@ -3157,7 +3149,7 @@ def main(parsed_args=None):
         iota_target_sign=jhalpern30_iota_target_sign(
             flip_banana=bool(args.flip_banana)
         ),
-        g0_policy=JHALPERN30_G0_POLICY,
+        g0_policy=finite_current_profile.g0_policy,
         boozer_I=physical_current_to_boozer_I(
             proxy_plasma_current_A,
             convention=boozer_current_convention,

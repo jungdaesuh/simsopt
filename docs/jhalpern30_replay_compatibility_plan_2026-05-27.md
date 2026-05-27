@@ -1,9 +1,17 @@
 # jhalpern30 Replay Compatibility Adoption Plan
 
 **Date:** 2026-05-27
-**Status:** Implemented in `simsopt-surrogate`; focused verification passing
+**Status:** Implemented in `simsopt-surrogate`; finite-current profile registry
+follow-up implemented with focused verification refreshed after donor-repair
+retirement
 **Scope:** Add an explicit compatibility path for reproducing historical `jhalpern30`
 single-stage and stage-2 behavior in this repo.
+
+**Architecture follow-up:** The jhalpern behavior is implemented, but the mode
+policy is still too centered on `banana_opt/jhalpern30_compat.py`. The next
+cleanup is to promote finite-current mode policy into a shared
+`banana_opt/finite_current_profiles.py` registry and leave
+`jhalpern30_compat.py` as the historical adapter/builder implementation.
 
 ## Reference Points
 
@@ -50,8 +58,13 @@ single-stage and stage-2 behavior in this repo.
   narrow: WOUT convention, TF current, banana winding-surface radius, and
   curvature threshold. Proxy/VF mode validation is enforced at Stage 2 finite
   current config/import construction instead of becoming a general seed gate.
+- Upstream Simsopt `BoozerSurface` does not expose an `I=` constructor in
+  `/Users/suhjungdae/code/opensource/simsopt`; this repo ports the legacy
+  finite-current behavior through the examples-side
+  `banana_opt.boozer_finite_current.BoozerSurfaceFiniteI` wrapper and
+  `banana_opt.json_compat.load_boozer_finite_i`.
 
-Focused verification:
+Focused verification command set:
 
 ```bash
 PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_jhalpern30_compat.py -q
@@ -105,24 +118,37 @@ policy.
       `G`, use saved `G` rather than recomputing fresh-run G0.
 - [x] Add a simple handoff/import path for `stageNN/bsurf_opt.json` plus
       `stageNN/state.json` with `stage00` as the primary handoff case.
-- [x] Thread the compatibility mode through downstream consumers that currently
-      accept only `boozer_surrogate` or `wataru_proxy_field`.
+- [x] Thread the compatibility mode through supported downstream consumers while
+      keeping unsupported Wataru-only wrappers explicitly rejected.
 - [x] Record enough artifact metadata to prevent silent mode drift.
+- [ ] Add a root-level-in-`banana_opt` finite-current profile registry so
+      `wataru_proxy_field` and `jhalpern30_proxy_field` are peers with typed
+      policy metadata instead of scattered mode-specific constants.
+- [ ] Demote `banana_opt/jhalpern30_compat.py` from policy SSOT to historical
+      builders/import adapter after the profile registry owns mode metadata.
 
 ## Non-Goals
 
-- [ ] Do not replace the current signed-G SSOT for normal workflows.
-      `mu0 * sum(I_tf)` remains the correct general policy for signed TF currents.
-- [ ] Do not make `jhalpern30` compatibility the default mode.
-- [ ] Do not relax Wataru/HBT validators to accept negative proxy/VF current.
-      Signed proxy current belongs only to the explicit `jhalpern30_proxy_field`
-      mode.
-- [ ] Do not add silent fallback discovery for missing templates, missing state,
-      or wrong artifact names.
-- [ ] Do not rewrite the existing config/registry pipeline. Add an adapter or
-      explicit import path for historical bundles.
-- [ ] Do not modify the older implemented objective-parity plan in
-      `docs/jhalpern30_external_parity_impl_plan_2026-05-12.md`.
+- Do not replace the current signed-G SSOT for normal workflows.
+  `mu0 * sum(I_tf)` remains the correct general policy for signed TF currents.
+- Do not make `jhalpern30` compatibility the default mode.
+- Do not relax Wataru/HBT validators to accept negative proxy/VF current.
+  Signed proxy current belongs only to the explicit `jhalpern30_proxy_field`
+  mode.
+- Do not add silent fallback discovery for missing templates, missing state, or
+  wrong artifact names.
+- Do not rewrite the existing config/registry pipeline. Use the explicit
+  StageNN adapter path for historical bundles.
+- Do not route jhalpern replay through donor-repair wrappers. The separate
+  donor-repair retirement plan owns that cleanup.
+- Do not symlink the historical bundle at runtime. The supported path ports the
+  historical `stageNN/bsurf_opt.json` plus `stageNN/state.json` into this
+  repo's artifact contract.
+- Do not move jhalpern policy to repository root or make it global default
+  state. The registry belongs under `banana_opt`, next to `current_contracts.py`,
+  `artifact_contracts.py`, and `coil_groups.py`.
+- Do not modify the older implemented objective-parity plan in
+  `docs/jhalpern30_external_parity_impl_plan_2026-05-12.md`.
 
 ## Requirements Analysis
 
@@ -139,376 +165,298 @@ policy.
 | Banana current pinning | Current repo uses CLI/config current controls, not jhalpern's env toggle | Preserve jhalpern's env contract: unset or empty `BANANA_I_FIXED_S2` leaves the banana current free; numeric `BANANA_I_FIXED_S2` pins the raw current DOF and applies `BANANA_CURRENT_SIGN` to the scale | This changes whether banana current is an optimizer variable |
 | Hardcoded negative G0 | Current repo derives signed G from signed TF currents | Do not adopt jhalpern's `-mu0 * sum(abs(I_tf))`; keep explicit signed-G as the repo policy | The jhalpern value is historical basin behavior, not the correct general current contract |
 | Simple handoff path | Current driver expects config, registry, and fixed artifact layout | Add explicit importer for `stageNN/bsurf_opt.json` plus `stageNN/state.json`, with `stage00` as the primary case | Historical handoffs are one script plus per-stage state |
-| Downstream consumer gates | Single-stage CLI and repair wrappers currently reject non-Wataru replay modes | Update or explicitly bypass those consumers | A Stage 2-only mode does not satisfy the stated single-stage replay scope |
-| Less abstraction drift | Current pipeline has multiple config/artifact layers | Centralize replay policy in one compatibility module | Fewer scattered conditionals means fewer mode-default mismatches |
+| Downstream consumer gates | Single-stage accepts `jhalpern30_proxy_field`; pre-Boozer repair via `run_stage2_to_single_stage.py` remains Wataru-only | Keep direct single-stage replay supported, and keep unsupported wrappers explicitly rejecting jhalpern mode | A Stage 2-only mode does not satisfy the stated single-stage replay scope, but pre-Boozer repair is not the right replay route |
+| Less abstraction drift | Current pipeline has multiple config/artifact layers | Centralize historical replay implementation in one compatibility module | Fewer scattered historical builders/parsers means fewer mode-default mismatches |
+| Finite-current policy SSOT | Mode policy is split across `current_contracts.py`, `jhalpern30_compat.py`, `stage2_geometry.py`, `workflow_helpers.py`, `banana_coil_solver.py`, and single-stage parsing | Add `banana_opt/finite_current_profiles.py` as the typed registry for layout, policies, templates, and entrypoint support | Future modes should add one profile rather than coordinated edits across callers |
 
-## Design Decisions
+## Architecture Follow-up: Finite-Current Profiles
 
-### 1. Use an explicit mode
+Current implementation chose the smallest working replay adapter first:
+`jhalpern30_compat.py` owns historical constants, builders, template validation,
+and the StageNN importer. That is acceptable for the initial port, but it is not
+the right long-term SSOT because generic callers must still know the mode string
+and import jhalpern-specific constants.
 
-Add `jhalpern30_proxy_field` to the finite-current mode model. This avoids
-changing the meaning of `wataru_proxy_field` and keeps production behavior
-stable.
+Two designs were considered:
 
-Expected updates:
+1. Keep `jhalpern30_compat.py` as the policy owner.
+   - Rejected for long-term maintenance: it makes a historical adapter the
+     place where generic finite-current policy lives.
+2. Add `banana_opt/finite_current_profiles.py`.
+   - Chosen: it gives `wataru_proxy_field` and `jhalpern30_proxy_field` equal,
+     typed profile records while preserving `jhalpern30_compat.py` for
+     implementation details that are truly historical.
 
-- [ ] Extend `FiniteCurrentMode`.
-- [ ] Extend `EffectiveCurrentMode` if needed.
-- [ ] Add mode-specific current convention metadata.
-- [ ] Keep `DEFAULT_FINITE_CURRENT_MODE = "wataru_proxy_field"`.
-- [ ] Add CLI choices for the new mode where Stage 2 accepts finite current.
+Profile fields should include:
 
-### 2. Centralize compatibility logic
+- finite-current mode name
+- coil-layout counts and `COIL_GROUPS` manifest construction inputs
+- Boozer current convention
+- G0 policy name
+- proxy placement policy
+- VF template path and hash
+- VF current sign/mutability policy
+- banana sign/pinning/replay policy
+- supported entrypoints
+- explicitly rejected entrypoints
+- artifact metadata keys required for this mode
 
-Create one compatibility module rather than scattering historical rules across
-the Stage 2 solver, geometry helpers, and handoff code.
+## Current Implementation Status
 
-Proposed file:
+### Completed port
 
-`examples/single_stage_optimization/banana_opt/jhalpern30_compat.py`
+- [x] Added explicit finite-current mode `jhalpern30_proxy_field` in
+      `banana_opt/current_contracts.py` while preserving
+      `DEFAULT_FINITE_CURRENT_MODE = "wataru_proxy_field"`.
+- [x] Added mode-specific current convention metadata so jhalpern Boozer current
+      remains `mu0`-normalized without changing Wataru validation.
+- [x] Centralized historical policy in
+      `banana_opt/jhalpern30_compat.py` instead of spreading constants through
+      Stage 2 and single-stage call sites.
+- [x] Vendored the historical 20-coil VF template as
+      `banana_opt/jhalpern30_vf_biotsavart.json` and pinned the recorded sha256.
+- [x] Implemented `resolve_jhalpern30_vf_template_path` with no absolute runtime
+      dependency on `/Users/suhjungdae/code/columbia/banana_drivers-main`.
+- [x] Implemented `validate_jhalpern30_vf_template` so the bundled template's
+      hash, 20-coil count, and template signs are testable.
+- [x] Implemented `build_jhalpern30_proxy_plasma_current_coils(surface,
+      proxy_current_A)` using `surface.major_radius()` and `Z = 0`.
+- [x] Implemented `build_jhalpern30_vf_coils(proxy_current_A, template_path)`
+      using the 20-coil template, shared mutable `ScaledCurrent(Current(1.0),
+      VF_CURRENT_A)`, `unfix_all()`, fixed VF curves, and template-sign effective
+      currents.
+- [x] Implemented `build_jhalpern30_banana_coils(...)` and replay helpers for
+      `BANANA_CURRENT_SIGN`, `BANANA_I_FIXED_S2`, `_flip`, and
+      `IOTA_TARGET_SIGN`.
+- [x] Added mode dispatch in `banana_opt/stage2_geometry.py` so Wataru keeps the
+      VMEC-axis proxy plus 2-coil VF behavior while jhalpern gets historical
+      proxy/VF/banana construction.
+- [x] Added `validate_jhalpern30_proxy_vf_current_convention` and dispatched to
+      it only for `jhalpern30_proxy_field`.
+- [x] Kept `validate_hbt_proxy_vf_current_convention` unchanged for Wataru mode;
+      Wataru still rejects negative proxy/VF current.
+- [x] Threaded mode-aware VF template resolution through workflow helpers.
+- [x] Added single-stage CLI/current-resolution support for
+      `jhalpern30_proxy_field`.
+- [x] Preserved signed-G behavior: this repo still treats fresh-run
+      `G0 = mu0 * sum(I_tf)` as the general policy and records
+      `G0_POLICY = signed_explicit_tf_current` for imported jhalpern artifacts.
+- [x] Added Boozer finite-current normalization as a separate contract:
+      `BOOZER_I = mu0 * proxy_current_A`.
+- [x] Implemented the StageNN adapter in
+      `import_jhalpern30_replay.py` and
+      `banana_opt/jhalpern30_compat.py::import_jhalpern30_stage_bundle`.
+- [x] Made the adapter a port/conversion step, not a symlink: it writes
+      `biot_savart_opt.json`, copies the source `bsurf_opt.json` and
+      `state.json`, and writes a current-repo `results.json`.
+- [x] Adapter output includes `FINITE_CURRENT_MODE`,
+      `BOOZER_CURRENT_CONVENTION`, `BOOZER_I`, `PROXY_PLACEMENT_MODE`,
+      `G0_POLICY`, `PROXY_PLASMA_CURRENT_A`, `VF_CURRENT_A`,
+      `VF_TEMPLATE_PATH`, `VF_TEMPLATE_SHA256`, `VF_CURRENT_SIGN_POLICY`,
+      `VF_CURRENT_MUTABILITY`, `FLIP_BANANA`, `BANANA_CURRENT_SIGN`,
+      `BANANA_CURRENT_PINNED`, `BANANA_I_FIXED_S2_KA`, `IOTA_TARGET_SIGN`,
+      `NUM_TF_COILS`, `NUM_BANANA_COILS`, `NUM_PROXY_COILS`, `NUM_VF_COILS`,
+      `TOTAL_COILS`, `COIL_GROUPS`, source hashes, and StageNN state
+      provenance.
+- [x] Kept `run_stage2_to_single_stage.py` Wataru-only for pre-Boozer repair; it
+      explicitly rejects non-Wataru finite-current modes instead of pretending
+      to support jhalpern replay.
+- [x] Kept `validate_stage2_seed_contract` narrow and aligned with the active
+      coil-seed contract. Proxy/VF validation belongs to finite-current mode
+      construction and the importer, not the general seed gate.
 
-Responsibilities:
+### Remaining cleanup
 
-- [ ] Historical VF template path.
-- [ ] Historical VF template hash/count validation helper.
-- [ ] Proxy placement builder.
-- [ ] VF coil builder.
-- [ ] Signed proxy/VF current convention validation.
-- [ ] Boozer `I = mu0 * proxy_current_A` policy labeling.
-- [ ] Signed-G preservation checks so jhalpern mode cannot silently switch to
-      negative-abs G0.
-- [ ] Banana sign and iota sign replay helpers.
-- [ ] StageNN state parsing helpers.
+1. Documentation and user-facing path cleanup
+   - [ ] Update user-facing docs to describe the supported jhalpern path as:
+         historical bundle -> `import_jhalpern30_replay.py` -> current-repo
+         replay artifact -> direct single-stage replay.
+   - [x] Remove or reword stale text that implies jhalpern replay should flow
+         through donor repair or `run_stage2_to_single_stage.py`.
+   - [x] After donor-repair retirement commit `9676c40f5`, keep only historical
+         or explicit rejection-boundary references to
+         `run_single_stage_donor_repair.py`.
+   - [ ] Add a short "ported, not symlinked" note to the relevant handoff docs
+         so future users understand why `results.json` is regenerated.
+2. Finite-current profile registry
+   - [ ] Add `examples/single_stage_optimization/banana_opt/finite_current_profiles.py`.
+   - [ ] Define a frozen `FiniteCurrentProfile` data object with fields for:
+         mode, coil counts, Boozer current convention, G0 policy, proxy placement
+         policy, VF template path/hash, VF current policy, banana replay policy,
+         supported entrypoints, rejected entrypoints, and required artifact
+         metadata keys.
+   - [ ] Add `get_finite_current_profile(mode)` and fail loudly for unsupported
+         modes.
+   - [ ] Add profiles for `wataru_proxy_field` and `jhalpern30_proxy_field`.
+   - [ ] Keep `DEFAULT_FINITE_CURRENT_MODE = "wataru_proxy_field"` in
+         `current_contracts.py`; do not make the registry change the default.
+   - [ ] Move shared policy constants out of `jhalpern30_compat.py` into the
+         jhalpern profile:
+         `JHALPERN30_NUM_TF_COILS`, `JHALPERN30_NUM_BANANA_COILS`,
+         `JHALPERN30_NUM_PROXY_COILS`, `JHALPERN30_NUM_VF_COILS`,
+         `JHALPERN30_G0_POLICY`, `JHALPERN30_PROXY_PLACEMENT_MODE`,
+         `JHALPERN30_VF_CURRENT_SIGN_POLICY`,
+         `JHALPERN30_VF_CURRENT_MUTABILITY`, and
+         `JHALPERN30_VF_TEMPLATE_SHA256`.
+   - [ ] Keep implementation-only helpers in `jhalpern30_compat.py`: historical
+         builders, StageNN importer, template validation, stage-state parsing,
+         `_flip` parsing, and `BANANA_I_FIXED_S2` replay helper logic.
+3. Consumer migration
+   - [ ] Replace scattered `finite_current_mode == "jhalpern30_proxy_field"` or
+         `JHALPERN30_FINITE_CURRENT_MODE` checks with profile queries when the
+         caller only needs policy metadata.
+   - [ ] Audit `SINGLE_STAGE/single_stage_banana_example.py`,
+         `STAGE_2/banana_coil_solver.py`, `workflow_helpers.py`, and
+         `stage2_geometry.py` for copied jhalpern constants that should read
+         from `finite_current_profiles.py`.
+   - [ ] Keep the 51-coil manifest construction metadata-driven through
+         `COIL_GROUPS`; do not add position-based special cases outside the
+         importer and geometry builders.
+   - [ ] Keep mode-specific builder dispatch in `stage2_geometry.py`; profile
+         metadata should select policy, not hide distinct construction logic
+         behind a shallow pass-through abstraction.
+4. Rejection-boundary cleanup
+   - [ ] Keep a test proving `run_stage2_to_single_stage.py` rejects
+         `jhalpern30_proxy_field` with a clear Wataru-only message.
+   - [ ] Keep a test proving single-stage accepts `jhalpern30_proxy_field` when
+         the artifact metadata is present.
+   - [ ] Ensure any future wrapper that consumes `FINITE_CURRENT_MODE` either
+         handles `jhalpern30_proxy_field` explicitly or rejects it with a
+         mode-specific error.
+5. Evidence refresh
+   - [x] Re-run the focused jhalpern and Wataru regression tests after the
+         donor-repair cleanup was committed.
+   - [ ] Record the exact passing commands and commit hash in this document if
+         this plan is used as handoff evidence.
 
-### 3. Keep signed G explicit
+## Validation Plan
 
-Current repo policy:
-
-```text
-G0 = mu0 * sum(I_tf)
-```
-
-Do not adopt the jhalpern30 fresh-run policy:
-
-```text
-G0 = -mu0 * sum(abs(I_tf))
-```
-
-Boozer finite-current policy:
-
-```text
-I  = mu0 * proxy_current_A
-```
-
-Implementation requirement:
-
-- [ ] Do not change `compute_tf_G0(tf_coils)` to the jhalpern negative-abs
-      formula.
-- [ ] Existing hot/probe paths call
-      `derive_signed_G_from_field(bs, tf_coils=...)`; jhalpern mode must keep
-      that BiotSavart/TF-subset validation.
-- [ ] If a historical `state.json` provides saved `G`, treat it as replay
-      provenance only. Do not use it to redefine the fresh-run G policy unless
-      the caller explicitly requests a saved Boozer-surface resume path.
-- [ ] Tests must cover positive-TF, negative-TF, and mixed-sign TF inputs so the
-      behavior cannot be mistaken for the signed general policy.
-- [ ] Tests must prove Boozer `I` is `mu0 * proxy_current_A` and is not folded
-      into `G0`.
-
-## Detailed Implementation Plan
-
-### Phase 0: Baseline probes
-
-- [ ] Record the current behavior of `wataru_proxy_field` before edits.
-- [ ] Write a small local probe that loads the historical 20-coil VF template and
-      records:
-      - coil count
-      - template current signs
-      - object types for current wrappers
-      - initial effective currents for positive, negative, and zero proxy current
-- [ ] Probe `jhalpern30/singlestage.py` and `jhalpern30/stage2.py` construction
-      directly, then use those numbers as expected values for compatibility
-      tests.
-- [ ] Confirm the exact fresh-run versus resume G0 path:
-      - fresh current-repo run: explicit signed TF-current sum
-      - historical Boozer-surface resume: saved `G` from state
-      - no adoption of jhalpern's fresh-run negative-abs TF-current sum
-- [ ] Confirm the exact Boozer `I` path:
-      - `BOOZER_I_PARAM = mu0 * PROXY_CURRENT_KA * 1e3`
-      - passed into `BoozerSurface(..., I=...)`
-- [ ] Confirm banana sign inputs:
-      - `--flip-banana` in stage 2
-      - `_flip` parent-directory suffix in single-stage replay
-      - `BANANA_I_FIXED_S2`
-      - `IOTA_TARGET_SIGN`
-      - unset or empty `BANANA_I_FIXED_S2` means free banana-current DOF
-      - numeric `BANANA_I_FIXED_S2` means fixed banana-current DOF after
-        applying `BANANA_CURRENT_SIGN`
-
-### Phase 1: Mode and metadata plumbing
-
-- [ ] Add `jhalpern30_proxy_field` to finite-current mode literals.
-- [ ] Add a current-convention descriptor for the mode.
-- [ ] Reuse existing artifact metadata and add only missing replay fields:
-      - `FINITE_CURRENT_MODE`
-      - `BOOZER_CURRENT_CONVENTION`
-      - `PROXY_PLACEMENT_MODE`
-      - `VF_TEMPLATE_PATH`
-      - `VF_TEMPLATE_SHA256`
-      - `NUM_PROXY_COILS`
-      - `NUM_VF_COILS`
-      - `TOTAL_COILS`
-      - `PROXY_PLASMA_CURRENT_A`
-      - `VF_CURRENT_A`
-      - `VF_CURRENT_SIGN_POLICY`
-      - `VF_CURRENT_MUTABILITY`
-      - `FLIP_BANANA`
-      - `BANANA_CURRENT_SIGN`
-      - `BANANA_CURRENT_PINNED`
-      - `BANANA_I_FIXED_S2_KA`
-      - `IOTA_TARGET_SIGN`
-      - `G0_POLICY = signed_explicit_tf_current`
-- [ ] Ensure the jhalpern importer/writer emits the existing `COIL_GROUPS`
-      manifest plus `NUM_*` legacy counts.
-- [ ] Add partition tests for
-      `20 TF + 10 banana + 1 proxy + 20 VF = 51` total coils; the current
-      partition/load path is already metadata-driven, so the task is to
-      preserve and extend that path rather than replace it.
-- [ ] Add schema/version notes if current artifact metadata has a version field.
-
-### Phase 2: Bundle the historical VF template
-
-- [ ] Copy the historical template to:
-      `examples/single_stage_optimization/banana_opt/jhalpern30_vf_biotsavart.json`
-- [ ] Add a resolver for the jhalpern template.
-- [ ] Add tests that verify:
-      - the bundled file loads with Simsopt
-      - the file has 20 coils
-      - the signs match the historical template
-      - the sha256 matches the recorded historical hash unless the file is
-        deliberately regenerated and the plan/doc is updated
-- [ ] Do not use the user's absolute `banana_drivers-main` path at runtime.
-
-### Phase 3: Proxy and VF builders
-
-- [ ] Add `build_jhalpern30_proxy_plasma_current_coils(surface, proxy_current_A)`.
-      - Uses `surface.major_radius()`.
-      - Sets `Z = 0`.
-      - Builds exactly one proxy coil.
-      - Keeps proxy current fixed, matching jhalpern.
-- [ ] Add `build_jhalpern30_vf_coils(proxy_current_A, template_path)`.
-      - Loads the 20-coil template.
-      - Computes the signed scale `VF_CURRENT_A = proxy_current_A / 6.5`.
-      - Reproduces jhalpern sign algebra exactly.
-      - For nonzero proxy current, effective per-coil current is
-        `abs(proxy_current_A) / 6.5 * sign(template_current)`.
-      - Uses shared `ScaledCurrent(Current(1.0), VF_CURRENT_A)`.
-      - Calls `unfix_all()` on VF currents.
-      - Fixes VF curves.
-- [ ] Add mode dispatch in coil initialization:
-      - Wataru mode keeps VMEC-axis proxy placement and fixed VF currents.
-      - jhalpern mode uses historical placement and mutable VF currents.
-- [ ] Add tests comparing the generated coil layout against a direct
-      jhalpern-style construction.
-
-### Phase 4: Current validation and CLI behavior
-
-- [ ] Keep `validate_hbt_proxy_vf_current_convention` unchanged for Wataru mode.
-- [ ] Add `validate_jhalpern30_proxy_vf_current_convention`.
-      - Allows signed `proxy_current_A`.
-      - Requires stored/scalar `vf_current_A == proxy_current_A / 6.5` when the
-        caller supplies a VF current.
-      - Documents that effective VF coil currents follow the template signs and
-        are not simply the signed scalar repeated across all VF coils.
-      - Allows zero proxy current explicitly.
-      - Rejects inconsistent proxy/VF signs only in this mode's own terms.
-- [ ] Update `_resolve_stage2_finite_current_config` to dispatch by mode.
-- [x] Keep `validate_stage2_seed_contract` aligned with the active coil-seed
-      contract. It no longer gates on proxy/VF telemetry; jhalpern proxy/VF
-      validation is dispatched by mode in Stage 2 finite-current config and the
-      importer path.
-- [ ] Add CLI support:
-      - `--finite-current-mode jhalpern30_proxy_field`
-      - optional jhalpern VF template override for test/probe use
-      - no silent fallback if an explicit template path is invalid
-- [ ] Make the chosen mode visible in logs and artifact metadata.
-
-### Phase 5: G0 non-adoption guardrails
-
-- [ ] Keep fresh jhalpern-compat runs on the current repo signed-G path:
-      `derive_signed_G_from_field(bs, tf_coils=...)`.
-- [ ] Keep the field-aware validation that proves the TF subset belongs to the
-      same `BiotSavart` field.
-- [ ] Route resumed jhalpern Boozer surfaces through saved state `G`.
-- [ ] Keep existing signed-G helpers for normal production routes.
-- [ ] Thread the non-adoption guardrails through live call sites:
-      - `banana_opt.stage2_objectives.build_stage2_iota_runtime`
-      - `banana_opt.stage2_single_stage_handoff.probe_stage2_seed_bootability`
-        / `_probe_initialization_inputs`
-      - the StageNN importer
-- [ ] Add tests:
-      - signed-G helper returns `mu0 * sum(I_tf)`.
-      - jhalpern mode still returns `mu0 * sum(I_tf)` for fresh runs.
-      - no fresh-run path computes `-mu0 * sum(abs(I_tf))`.
-      - resume path uses saved `G` even if TF coil currents would imply a
-        different fresh-run value.
-      - Boozer `I` remains `mu0 * proxy_current_A`.
-
-### Phase 6: Downstream consumers
-
-- [ ] Update or explicitly bypass
-      `SINGLE_STAGE/single_stage_banana_example.py`.
-      - Its CLI currently accepts only `boozer_surrogate` and
-        `wataru_proxy_field`.
-      - Its single-surface current resolver is locked to the Wataru default.
-- [ ] Update or explicitly bypass `run_stage2_to_single_stage.py`.
-      - It currently hard-requires `FINITE_CURRENT_MODE='wataru_proxy_field'`
-        for pre-Boozer repair.
-      - If jhalpern replay should not use this wrapper, add a clear rejection
-        test and document the supported path.
-      - If it should use this wrapper, update `build_recovery_command` and its
-        tests for `jhalpern30_proxy_field`.
-- [ ] Make template resolution mode-aware in:
-      - `workflow_helpers.py`
-      - `workflow_runner_common.py`
-      - `Stage2SeedSpec`
-      - run-directory suffixing / provenance helpers
-- [ ] Add consumer tests proving a jhalpern artifact can reach the intended
-      single-stage replay path, or proving that unsupported wrappers reject it
-      loudly with a mode-specific message.
-
-### Phase 7: StageNN handoff importer
-
-- [ ] Add an explicit importer for historical bundles:
-      - input directory contains `stageNN/bsurf_opt.json`
-      - input directory contains `stageNN/state.json`
-      - `stage00` is the primary handoff case, but the importer should not bake
-        in stage 0 if the state file advertises another `stage_idx`.
-- [ ] Validate required state fields:
-      - `iota`
-      - `G`
-      - `volume`
-      - `iota_target`
-      - `stage_idx`
-      - `stage_mpol`
-      - `stage_ntor`
-      - `stage_order`
-      - `stage_qp`
-- [ ] Distinguish historical input routes:
-      - raw `biot_savart_opt.json` import
-      - warm-start reconstruction when proxy/VF must be rebuilt
-      - Boozer-surface resume from `stageNN/`
-- [ ] Emit one canonical current-repo artifact bundle, not an ambiguous in-memory
-      alternative:
-      - `biot_savart_opt.json`
-      - `results.json`
-      - `COIL_GROUPS`
-      - `NUM_TF_COILS`
-      - `NUM_BANANA_COILS`
-      - `NUM_PROXY_COILS`
-      - `NUM_VF_COILS`
-      - `FINITE_CURRENT_MODE`
-      - `BOOZER_CURRENT_CONVENTION`
-      - `PROXY_PLASMA_CURRENT_A`
-      - `VF_CURRENT_A`
-      - `VF_TEMPLATE_PATH`
-      - `VF_TEMPLATE_SHA256`
-      - `STAGE2_BS_SHA256`
-      - resume-surface and state provenance
-- [ ] Fail loudly on missing files, unsupported JSON object types, or mode
-      mismatch.
-- [x] Document the importer command once implemented:
+- [ ] Add and run finite-current profile tests:
 
 ```bash
-PYTHONPATH=examples/single_stage_optimization python \
-  examples/single_stage_optimization/import_jhalpern30_replay.py \
-  /path/to/historical/bundle \
-  --stage-name stage00 \
-  --plasma-surf-path /path/to/wout.nc \
-  --output-dir /path/to/current-repo-artifact
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_finite_current_profiles.py -q
 ```
 
-### Phase 8: Tests and validation
+Required assertions:
 
-- [ ] Unit tests for finite-current mode parsing and metadata.
-- [ ] Unit tests for the bundled VF template.
-- [ ] Unit tests for proxy placement.
-- [ ] Unit tests for mutable jhalpern VF currents.
-      - all 20 VF coils share the same unwrapped leaf `Current`
-      - the leaf current is unfixed
-      - VF curves are fixed
-      - changing the shared leaf DOF updates all effective VF currents with the
-        expected template signs
-- [ ] Unit tests for signed proxy current validation.
-- [ ] Unit tests for G0 non-adoption.
-- [ ] Unit tests for Boozer `I = mu0 * proxy_current_A`.
-- [ ] Unit tests for banana sign and iota target sign replay.
-- [ ] Integration test for jhalpern mode coil layout:
-      `20 TF + 10 banana + 1 proxy + 20 VF = 51` total coils.
-- [ ] Seeded restart test using StageNN-style state.
-- [ ] Importer test that materializes canonical `biot_savart_opt.json` plus
-      `results.json`.
-- [ ] Regression test that Wataru mode still rejects negative proxy/VF current.
-- [ ] Regression test that Wataru mode still uses the 2-coil default VF template.
-- [ ] Downstream-consumer tests for single-stage and repair wrapper acceptance or
-      explicit rejection.
+- `get_finite_current_profile("wataru_proxy_field")` preserves the Wataru
+  default profile and 2-VF-template path.
+- `get_finite_current_profile("jhalpern30_proxy_field")` reports
+  `20 TF + 10 banana + 1 proxy + 20 VF = 51`.
+- the jhalpern profile has `G0_POLICY = signed_explicit_tf_current`.
+- the jhalpern profile marks `run_stage2_to_single_stage.py` pre-Boozer repair
+  as unsupported.
+- the StageNN importer emits metadata matching the jhalpern profile.
 
-Suggested focused commands after Phase 8 adds `tests/geo/test_jhalpern30_compat.py`:
+- [ ] Run the focused jhalpern compatibility test:
 
 ```bash
-PYTHONPATH=examples/single_stage_optimization python -m pytest \
-  tests/geo/test_banana_helper_modules.py \
-  tests/geo/test_stage2_single_stage_handoff.py \
-  tests/geo/test_stage2_seeded_restart_vf_consistency.py \
-  tests/geo/test_wataru_vf_template_resolution.py \
-  tests/geo/test_jhalpern30_compat.py \
-  -q
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_jhalpern30_compat.py -q
+```
 
-PYTHONPATH=examples/single_stage_optimization python -m pytest \
-  tests/geo/test_single_stage_example.py \
-  tests/geo/test_single_stage_alm_integration.py \
-  -q
+- [ ] Run the Wataru/VF regression tests:
 
+```bash
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_stage2_seeded_restart_vf_consistency.py tests/geo/test_wataru_vf_template_resolution.py -q
+```
+
+- [ ] Run the Stage 2/single-stage handoff regression suite:
+
+```bash
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_stage2_single_stage_handoff.py -q
+```
+
+- [ ] Run the single-stage example regression suite:
+
+```bash
+PYTHONPATH=build/cp313-cp313-macosx_26_0_arm64:src:examples/single_stage_optimization python3.13 -m pytest tests/geo/test_single_stage_example.py -q
+```
+
+- [ ] Run static/doc hygiene:
+
+```bash
 python -m ruff check examples/single_stage_optimization tests/geo
 git diff --check
 ```
 
-## Done Criteria
+## Risks and Mitigations
 
-- [ ] `wataru_proxy_field` tests pass unchanged.
-- [ ] `jhalpern30_proxy_field` builds the historical proxy and VF layout.
-- [ ] `jhalpern30_proxy_field` emits
+- Risk: VF current sign algebra is easy to simplify incorrectly.
+  Mitigation: Keep tests that inspect the shared leaf current, `unfix_all()`,
+  fixed VF curves, and template-sign effective currents.
+- Risk: Future cleanup may accidentally route jhalpern replay through
+  Wataru-only pre-Boozer repair wrappers.
+  Mitigation: Keep explicit rejection tests for `run_stage2_to_single_stage.py`
+  and document direct single-stage replay as the supported path.
+- Risk: The jhalpern negative-abs G0 policy may be reintroduced while copying
+  other jhalpern behavior.
+  Mitigation: Keep `G0_POLICY = signed_explicit_tf_current` metadata and tests
+  that distinguish `G0 = mu0 * sum(I_tf)` from `-mu0 * sum(abs(I_tf))`.
+- Risk: Historical Boozer JSON files carrying `BoozerSurface(I=...)` metadata
+  will not load through plain upstream Simsopt.
+  Mitigation: Use this repo's `load_boozer_finite_i` decoder for the adapter and
+  fail loudly on unsupported object/version load errors; do not silently rebuild
+  a different seed.
+- Risk: 51-coil ordering can drift if code relies on positional assumptions
+  instead of metadata.
+  Mitigation: Keep `COIL_GROUPS` and `NUM_*` metadata emitted by the adapter and
+  consumed by partition/load code.
+- Risk: A profile registry can become a shallow pass-through if it only wraps
+  existing `if mode == ...` branches.
+  Mitigation: Store durable policy data in the profile and leave construction
+  logic in builder modules; callers should use the profile only when they need
+  policy metadata.
+- Risk: Moving constants can create a partial-conversion state where both
+  `jhalpern30_compat.py` and `finite_current_profiles.py` claim to own the same
+  policy.
+  Mitigation: Move profile-owned constants in one scoped change and leave
+  adapter-owned functions in `jhalpern30_compat.py`.
+
+## Completion Criteria
+
+- [x] `jhalpern30_proxy_field` builds the historical proxy and VF layout.
+- [x] `jhalpern30_proxy_field` emits
       `20 TF + 10 banana + 1 proxy + 20 VF = 51` total coils.
-- [ ] The bundled VF template has 20 coils and matches the historical template.
-- [ ] Negative proxy current is accepted only in jhalpern mode.
-- [ ] VF currents are mutable only in jhalpern mode.
-- [ ] Fresh jhalpern-compat replay uses this repo's explicit signed G:
+- [x] The bundled VF template has 20 coils and matches the historical template
+      hash.
+- [x] Negative proxy current is accepted only in jhalpern mode.
+- [x] VF currents are mutable only in jhalpern mode.
+- [x] Fresh jhalpern-compat paths preserve this repo's explicit signed-G policy:
       `mu0 * sum(I_tf)`.
-- [ ] Fresh jhalpern replay passes `BoozerSurface I = mu0 * proxy_current_A`.
-- [ ] Resume jhalpern replay uses saved `G`.
-- [ ] Banana sign, `_flip`, and iota-target sign semantics are explicit and tested.
-- [ ] StageNN handoff import is explicit, validated, and documented.
-- [ ] Importer emits a canonical current-repo artifact bundle with `COIL_GROUPS`.
-- [ ] Artifact metadata is sufficient to distinguish Wataru and jhalpern runs.
-- [ ] No runtime dependency on `/Users/suhjungdae/code/columbia/banana_drivers-main`.
+- [x] Jhalpern Boozer finite-current metadata records
+      `I = mu0 * proxy_current_A`.
+- [x] Resume/imported jhalpern artifacts preserve saved `G` as StageNN
+      provenance.
+- [x] Banana sign, `_flip`, `BANANA_I_FIXED_S2`, and iota-target sign semantics
+      are explicit and tested.
+- [x] StageNN handoff import is explicit, validated, documented, and writes a
+      current-repo artifact bundle.
+- [x] Importer emits a canonical `results.json` with `COIL_GROUPS`.
+- [x] Artifact metadata distinguishes Wataru and jhalpern runs.
+- [x] There is no runtime dependency on
+      `/Users/suhjungdae/code/columbia/banana_drivers-main`.
+- [ ] `banana_opt/finite_current_profiles.py` exists and owns finite-current
+      mode policy metadata for Wataru and jhalpern profiles.
+- [ ] `jhalpern30_compat.py` no longer owns shared policy constants; it owns only
+      historical builders, StageNN import, and parsing/validation helpers.
+- [ ] Consumers that need policy metadata use `get_finite_current_profile(...)`
+      instead of importing jhalpern-specific constants.
+- [ ] Profile tests prove jhalpern remains 51 coils, Wataru remains default, and
+      `run_stage2_to_single_stage.py` remains unsupported for jhalpern replay.
+- [x] User-facing docs no longer imply jhalpern replay uses donor repair or
+      `run_stage2_to_single_stage.py`.
+- [x] Focused validation has been re-run after the donor-repair retirement
+      landed.
 
-## Risks and Open Questions
+## Open Questions
 
-- [ ] VF current sign algebra is easy to simplify incorrectly. The implementation
-      must match the object graph and effective initial currents from jhalpern,
-      not just the apparent formula.
-- [ ] Current partition/load code is already metadata-driven via `COIL_GROUPS`
-      and `NUM_*`. The risk is failing to emit correct jhalpern metadata, not
-      needing to redesign partitioning from scratch.
-- [ ] Some historical Boozer JSON files may require Simsopt forks with
-      `BoozerSurface(I=...)` compatibility. The importer should report this as
-      an unsupported object/version problem, not silently rebuild a different
-      seed.
-- [ ] The jhalpern negative-abs G0 policy is intentionally not adopted. The
-      implementation must not reintroduce it while adding other jhalpern
-      compatibility pieces.
-- [ ] Pre-Boozer repair and single-stage wrappers currently have Wataru-only
-      assumptions. The implementation must choose acceptance or explicit
-      rejection; leaving them implicit would produce confusing handoff failures.
-- [ ] If the historical 20-coil template is large, keep it as a data artifact
-      with a hash test instead of regenerating it from code.
+- Should `run_stage2_to_single_stage.py` remain permanently Wataru-only, or
+  should a future implementation add jhalpern support there? Current decision:
+  keep it Wataru-only and route jhalpern replay through the StageNN adapter plus
+  direct single-stage replay.
+- Should profile-owned constants keep their historical `JHALPERN30_*` export
+  names for compatibility, or should callers migrate immediately to profile
+  fields? Current preference: migrate internal callers to profile fields and
+  keep compatibility aliases only if external scripts require them.
+- Which README/examples still need the direct StageNN-adapter-to-single-stage
+  replay path documented more prominently?

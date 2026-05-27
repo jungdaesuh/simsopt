@@ -44,6 +44,7 @@ There are several wrapper entrypoints for the general ALM workflow:
 4. `run_stage2_to_single_stage.py`
    This is the one-command Stage 2.5 handoff lane.
    It can load or generate a Stage 2 donor, probe Boozer / iota bootability once per donor, optionally run the bounded recovery stage, and then hand off into the full single-stage workflow.
+   Historical `jhalpern30_proxy_field` replay artifacts are the exception: import them with `import_jhalpern30_replay.py`, then run direct single-stage against the imported artifact.
 
 5. `run_stage2_iota_decision_gate.py`
    This is the late-roadmap benchmark / decision-gate lane.
@@ -191,9 +192,9 @@ Useful notes:
 
 - output root defaults to `examples/single_stage_optimization/outputs_stage2_alm`
 - the built-in `standard_80ka` profile now matches the canonical hardware baseline:
-  `tf_current_A=-8.0e4`, `banana_surf_radius=0.21`, `cc_threshold=0.05`, `curvature_threshold=100`
+  `tf_current_A=-8.0e4`, `banana_surf_radius=0.142`, `cc_threshold=0.0462`, `curvature_threshold=100`
 - the wrapper exposes fixed Stage 2 contract metadata in its summary/artifact validation:
-  `coil-plasma >= 0.015 m`, `coil_length <= 2.0 m`; LCFS-to-vessel spacing is reported as a diagnostic metric
+  `coil-plasma >= 0.010 m`, `coil_length <= 2.0 m`; LCFS-to-vessel spacing is reported as a diagnostic metric
 - `--stage2-spec-json` is the fully explicit path for non-profile Stage 2 contracts
 - `--dry-run` prints and records the resolved config and exact Stage 2 command without launching it
 - dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real solver artifact root
@@ -222,8 +223,28 @@ Useful notes:
 - `--probe-only` stops after the bootability probe
 - `--recovery-only` stops after the bounded recovery stage
 - `--skip-recovery` keeps this as a pure reporting / handoff classification run
+- this wrapper is the Wataru Stage 2.5 recovery lane; for historical `jhalpern30` replay, import `stageNN/bsurf_opt.json` plus `state.json` with `import_jhalpern30_replay.py`, then run `SINGLE_STAGE/single_stage_banana_example.py` directly against the imported `biot_savart_opt.json`
 - when recovery finishes via a preserved partial artifact, the wrapper now reuses the matching `biot_savart_*` file and saved `surf_*_boozer_surface.json` seed instead of silently cold-starting from the equilibrium again
 - final single-stage `results.json` is augmented with the shared `BOOTABILITY_*`, `RECOVERY_*`, and `UNIFIED_SEED_SOURCE` provenance fields
+
+### Historical jhalpern30 Replay Import
+
+Use this path for historical `jhalpern30` handoff bundles that contain `stageNN/bsurf_opt.json` and `stageNN/state.json`. The importer ports the historical bundle into this repo's artifact contract; it does not symlink the old bundle or route through donor repair.
+
+```bash
+cd /path/to/simsopt-surrogate
+python examples/single_stage_optimization/import_jhalpern30_replay.py \
+  /path/to/historical_bundle \
+  --stage-name stage00 \
+  --plasma-surf-path /path/to/wout.nc \
+  --output-dir /path/to/imported_jhalpern30_artifact
+
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --stage2-bs-path /path/to/imported_jhalpern30_artifact/biot_savart_opt.json \
+  --plasma-surf-filename /path/to/wout.nc
+```
+
+The imported sibling `results.json` carries `FINITE_CURRENT_MODE=jhalpern30_proxy_field`, `COIL_GROUPS`, the 51-coil layout metadata, signed-G policy metadata, Boozer finite-current `I`, and the historical flip/banana-current replay fields consumed by direct single-stage replay.
 
 ### Stage 2 Iota Decision Gate
 
@@ -384,7 +405,7 @@ python banana_coil_solver.py \
   --equilibria-dir ../equilibria \
   --major-radius 0.976 \
   --toroidal-flux 0.24 \
-  --banana-surf-radius 0.21 \
+  --banana-surf-radius 0.142 \
   --constraint-method penalty
 ```
 
@@ -458,7 +479,7 @@ For the common nfp22 example equilibria, defaults are filled automatically when 
 Important caveat:
 
 - the built-in nfp22 single-stage seed defaults now match the current HBT hardware baseline
-- in particular, the default nfp22 seed set uses `stage2_seed_tf_current_A = -8.0e4`, `stage2_seed_banana_surf_radius = 0.21`, and `stage2_seed_curvature_threshold = 100`
+- in particular, the default nfp22 seed set uses `stage2_seed_tf_current_A = -8.0e4`, `stage2_seed_banana_surf_radius = 0.142`, and `stage2_seed_curvature_threshold = 100`
 - if you need a non-baseline seed family, pass the Stage 2 seed / artifact explicitly instead of relying on implicit defaults
 
 ## Manual Single-Stage
@@ -474,7 +495,7 @@ python single_stage_banana_example.py \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
   --stage2-seed-major-radius 0.976 \
   --stage2-seed-toroidal-flux 0.24 \
-  --stage2-seed-banana-surf-radius 0.21 \
+  --stage2-seed-banana-surf-radius 0.142 \
   --single-stage-goal-mode target \
   --iota-target 0.17 \
   --vol-target 0.10 \

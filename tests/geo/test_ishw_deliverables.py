@@ -87,6 +87,11 @@ def in_bounds_lcfs_minor_radius_m():
     return hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M - 0.01
 
 
+def canonical_banana_radius_m():
+    hardware_contracts = load_hardware_contracts_module()
+    return hardware_contracts.BANANA_WINDING_MINOR_RADIUS_M
+
+
 def write_stage2_results_with_digest(stage2_bs_path: Path, stage2_results: dict) -> Path:
     results_path = stage2_bs_path.with_name("results.json")
     payload = dict(stage2_results)
@@ -623,7 +628,7 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             "NUM_VF_COILS": 0,
             "MAJOR_RADIUS": 0.976,
             "TOROIDAL_FLUX": 0.24,
-            "banana_surf_radius": 0.21,
+            "banana_surf_radius": canonical_banana_radius_m(),
             "COIL_LENGTH": 2.0,
             "CURVE_CURVE_MIN_DIST": 0.05,
             "CURVE_SURFACE_MIN_DIST": 0.015,
@@ -1436,7 +1441,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             cc_threshold=0.05,
             curvature_weight=0.0001,
             curvature_threshold=100.0,
-            banana_surf_radius=0.21,
+            banana_surf_radius=canonical_banana_radius_m(),
             order=2,
             constraint_method="penalty",
             alm_max_outer_iters=10,
@@ -1500,7 +1505,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 cc_threshold=0.05,
                 curvature_weight=0.0001,
                 curvature_threshold=100.0,
-                banana_surf_radius=0.21,
+                banana_surf_radius=canonical_banana_radius_m(),
                 order=2,
                 constraint_method="penalty",
                 alm_max_outer_iters=10,
@@ -1531,7 +1536,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 cc_threshold=0.05,
                 curvature_weight=0.0001,
                 curvature_threshold=100.0,
-                banana_surf_radius=0.21,
+                banana_surf_radius=canonical_banana_radius_m(),
                 order=2,
                 constraint_method="alm",
                 alm_max_outer_iters=10,
@@ -1558,7 +1563,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             cc_threshold=0.05,
             curvature_weight=0.0001,
             curvature_threshold=100.0,
-            banana_surf_radius=0.21,
+            banana_surf_radius=canonical_banana_radius_m(),
             order=2,
             constraint_method="alm",
             alm_max_outer_iters=10,

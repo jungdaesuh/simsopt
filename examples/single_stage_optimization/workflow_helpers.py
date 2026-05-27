@@ -15,15 +15,16 @@ from banana_opt.hardware_contracts import (
     TARGET_LCFS_MAX_MAJOR_RADIUS_M as DEFAULT_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
     TARGET_LCFS_MAX_MINOR_RADIUS_M as DEFAULT_TARGET_LCFS_MAX_MINOR_RADIUS_M,
 )
-from banana_opt.jhalpern30_compat import (
+from banana_opt.finite_current_profiles import (
     DEFAULT_JHALPERN30_VF_TEMPLATE_PATH,
+    DEFAULT_WATARU_VF_TEMPLATE_PATH,
     JHALPERN30_FINITE_CURRENT_MODE,
+    get_finite_current_profile,
+)
+from banana_opt.jhalpern30_compat import (
     resolve_jhalpern30_vf_template_path,
 )
 
-DEFAULT_WATARU_VF_TEMPLATE_PATH = (
-    SCRIPT_DIR / "banana_opt" / "wataru_vf_template.json"
-)
 _FLOAT_DEFAULT_ABS_TOL = 1.0e-12
 
 
@@ -71,7 +72,8 @@ def resolve_finite_current_vf_template_path(
     finite_current_mode: str,
     vf_template_path: str | None,
 ) -> str | None:
-    if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
+    profile = get_finite_current_profile(finite_current_mode)
+    if profile.mode == JHALPERN30_FINITE_CURRENT_MODE:
         return resolve_jhalpern30_vf_template_path(vf_template_path)
     return resolve_wataru_vf_template_path(vf_template_path)
 
@@ -367,7 +369,8 @@ def format_stage2_finite_current_suffix(spec: Stage2SeedSpec) -> str:
     # now that Wataru-faithful Stage 2 always resolves a VF template path,
     # the current magnitudes are the load-bearing signal for naming.
     if (
-        spec.finite_current_mode != JHALPERN30_FINITE_CURRENT_MODE
+        get_finite_current_profile(spec.finite_current_mode).mode
+        != JHALPERN30_FINITE_CURRENT_MODE
         and abs(float(spec.proxy_plasma_current_A)) <= 1.0e-12
         and abs(float(spec.vf_current_A)) <= 1.0e-12
         and not bool(spec.flip_banana)

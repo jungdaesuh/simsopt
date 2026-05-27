@@ -1895,7 +1895,7 @@ def parse_args():
     parser.add_argument("--cs-weight", type=float, default=float(os.environ.get("CS_WEIGHT", "1")),
                         help="Coil-surface distance penalty weight (default 1).")
     parser.add_argument("--cs-dist", type=float, default=float(os.environ.get("CS_DIST", str(COIL_PLASMA_MIN_DIST_M))),
-                        help="Minimum coil-surface distance in meters (default 0.015 = 1.5 cm, HBT spec).")
+                        help=f"Minimum coil-surface distance in meters (default {COIL_PLASMA_MIN_DIST_M:.3f}, HBT spec).")
     parser.add_argument(
         "--maxcor",
         type=int,

@@ -160,7 +160,7 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "PLASMA_SURF_PATH": str(SIGNED_CW_WOUT_PATH),
         "WOUT_CONVENTION": "signed_cw",
         "WOUT_OFF_SPEC": False,
-        "SEED_ROLE": "bootable_handoff",
+        "SEED_ROLE": "coil_seed_handoff",
         "DIAGNOSTIC_ONLY": False,
         "PRODUCTION_HANDOFF_READY": True,
         "HANDOFF_BLOCKING_GATE": None,
@@ -356,7 +356,8 @@ class HandoffSchemaTests(unittest.TestCase):
         off_target_payload = dict(payload)
         off_target_payload["IOTA_NEAR_TARGET"] = False
         off_target_payload["IOTA_FEASIBLE"] = False
-        module.validate_stage2_seed_bootability_contract(off_target_payload)
+        with self.assertRaisesRegex(ValueError, "IOTA_NEAR_TARGET=False"):
+            module.validate_stage2_seed_bootability_contract(off_target_payload)
 
         offspec_wout_payload = dict(payload)
         offspec_wout_payload["WOUT_OFF_SPEC"] = True
@@ -804,6 +805,41 @@ class HandoffModuleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "WOUT_OFF_SPEC=True"):
             module.validate_stage2_seed_contract(stage2_results)
 
+    def test_validate_stage2_seed_contract_accepts_positive_tf_current_magnitude(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "PLASMA_SURF_PATH": str(POSITIVE_CCW_WOUT_PATH),
+            "TF_CURRENT_A": 8.0e4,
+            "WOUT_CONVENTION": "positive_ccw",
+            "WOUT_OFF_SPEC": False,
+        }
+
+        module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_over_limit_tf_current(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "PLASMA_SURF_PATH": str(POSITIVE_CCW_WOUT_PATH),
+            "TF_CURRENT_A": 8.00001e4,
+            "WOUT_CONVENTION": "positive_ccw",
+            "WOUT_OFF_SPEC": False,
+        }
+
+        with self.assertRaisesRegex(ValueError, "TF current magnitude limit"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_zero_tf_current(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "TF_CURRENT_A": 0.0,
+        }
+
+        with self.assertRaisesRegex(ValueError, "finite, nonzero"):
+            module.validate_stage2_seed_contract(stage2_results)
+
     def test_validate_stage2_seed_contract_accepts_in_vessel_banana_radius_drift(self):
         module = load_handoff_module()
         stage2_results = {
@@ -840,6 +876,16 @@ class HandoffModuleTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "curvature threshold exceeds"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_nan_curvature_threshold(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "CURVATURE_THRESHOLD": float("nan"),
+        }
+
+        with self.assertRaisesRegex(ValueError, "CURVATURE_THRESHOLD must be finite"):
             module.validate_stage2_seed_contract(stage2_results)
 
     def test_validate_stage2_seed_contract_accepts_proxy_vf_ratio_drift_telemetry(self):
@@ -3232,7 +3278,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             self.assertEqual(payload["result_source"], wrapper.RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM)
             self.assertEqual(payload["recovered_bs_path"], str(repaired_bs_path))
             self.assertIsNone(payload["warm_start_surface_stem"])
-            self.assertEqual(payload["results"]["SEED_ROLE"], "bootable_handoff")
+            self.assertEqual(payload["results"]["SEED_ROLE"], "coil_seed_handoff")
             self.assertEqual(payload["results"]["STAGE2_IOTA_MODE"], "off")
             self.assertFalse(payload["results"]["WOUT_OFF_SPEC"])
             self.assertFalse(payload["results"]["DIAGNOSTIC_ONLY"])

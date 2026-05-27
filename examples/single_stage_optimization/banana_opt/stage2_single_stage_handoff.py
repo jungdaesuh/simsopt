@@ -31,8 +31,8 @@ from .current_contracts import (
 )
 from .hardware_contracts import (
     MAX_CURVATURE_INV_M,
+    TF_CURRENT_HARD_LIMIT_A,
     validate_banana_winding_surface_radius,
-    validate_tf_current_limit,
 )
 from .hardware_constraint_schema import (
     build_hardware_constraint_status,
@@ -53,7 +53,7 @@ BOOTABILITY_REASON_IOTA_MISMATCH = "iota_mismatch"
 
 BOOTABILITY_STAGE_PROBE = "probe"
 BOOTABILITY_STAGE_RECOVERY = "recovery"
-_PRODUCTION_HANDOFF_SEED_ROLE = "bootable_handoff"
+_PRODUCTION_HANDOFF_SEED_ROLE = "coil_seed_handoff"
 
 BOOZER_FAILURE_POLICY_REPORT_FAILURE = "report_failure"
 BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS = "restore_last_success"
@@ -448,6 +448,8 @@ def validate_stage2_seed_bootability_contract(
     if (
         bootability_passes(stage2_results)
         and stage2_results.get("BOOZER_TRUSTED") is True
+        and stage2_results.get("IOTA_NEAR_TARGET") is True
+        and stage2_results.get("IOTA_FEASIBLE") is True
         and stage2_results.get("WOUT_OFF_SPEC") is False
         and stage2_results.get("SEED_ROLE") == _PRODUCTION_HANDOFF_SEED_ROLE
         and stage2_results.get("DIAGNOSTIC_ONLY") is False
@@ -492,6 +494,33 @@ def build_stage2_seed_production_handoff_fields(
     }
 
 
+def _validate_stage2_seed_tf_current_limit(tf_current_A: object) -> None:
+    current = float(tf_current_A)
+    current_abs = abs(current)
+    if (
+        not np.isfinite(current)
+        or current_abs <= 0.0
+        or current_abs > TF_CURRENT_HARD_LIMIT_A
+    ):
+        raise ValueError(
+            "Stage 2 seed TF_CURRENT_A must be finite, nonzero, and within "
+            f"the hard TF current magnitude limit {TF_CURRENT_HARD_LIMIT_A:.0f} A."
+        )
+
+
+def _validate_stage2_seed_curvature_threshold_contract(
+    curvature_threshold: object,
+) -> None:
+    threshold = float(curvature_threshold)
+    if not np.isfinite(threshold):
+        raise ValueError("Stage 2 seed CURVATURE_THRESHOLD must be finite.")
+    if threshold > MAX_CURVATURE_INV_M:
+        raise ValueError(
+            "Stage 2 seed curvature threshold exceeds the hardware ceiling: "
+            f"{threshold:.6g} > {MAX_CURVATURE_INV_M:.6g} m^-1."
+        )
+
+
 def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]) -> None:
     tf_current_A = stage2_results.get("TF_CURRENT_A")
     if tf_current_A is None:
@@ -500,7 +529,7 @@ def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]
             "upgrade. Pass --stage2-seed-tf-current-A explicitly or use a newer "
             "artifact with TF-current metadata."
     )
-    validate_tf_current_limit(tf_current_A)
+    _validate_stage2_seed_tf_current_limit(tf_current_A)
     validate_wout_convention_artifact_fields(
         stage2_results_path="<stage2_seed_contract>",
         stage2_artifact_results=dict(stage2_results),
@@ -521,11 +550,7 @@ def _validate_stage2_seed_metadata_contract(stage2_results: Mapping[str, object]
         "CURVATURE_THRESHOLD",
         "the curvature hardware contract",
     )
-    if float(curvature_threshold) > MAX_CURVATURE_INV_M:
-        raise ValueError(
-            "Stage 2 seed curvature threshold exceeds the hardware ceiling: "
-            f"{float(curvature_threshold):.6g} > {MAX_CURVATURE_INV_M:.6g} m^-1."
-        )
+    _validate_stage2_seed_curvature_threshold_contract(curvature_threshold)
 
 
 def _missing_stage2_hardware_metric_violations(

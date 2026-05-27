@@ -31,8 +31,8 @@ from banana_opt.hardware_contracts import (
     validate_target_lcfs_major_radius,
     validate_target_lcfs_minor_radius,
 )
+from banana_opt.finite_current_profiles import JHALPERN30_FINITE_CURRENT_MODE
 from banana_opt.jhalpern30_compat import (
-    JHALPERN30_FINITE_CURRENT_MODE,
     build_jhalpern30_banana_coils,
     build_jhalpern30_proxy_plasma_current_coils,
     build_jhalpern30_vf_coils,

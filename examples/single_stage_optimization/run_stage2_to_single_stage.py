@@ -17,6 +17,9 @@ import run_stage2_alm as stage2_alm_runner  # noqa: E402
 from banana_opt.current_contracts import (  # noqa: E402
     resolve_plasma_current_settings_for_num_surfaces,
 )
+from banana_opt.finite_current_profiles import (  # noqa: E402
+    WATARU_PROFILE,
+)
 from banana_opt.hardware_constraint_schema import (  # noqa: E402
     build_bootability_recovery_payload_fields,
 )
@@ -76,7 +79,9 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run the unified Stage 2 coil-seed -> optional bootability probe/recovery "
-            "-> single-stage workflow with fail-closed coil-seed checks."
+            "-> single-stage workflow with fail-closed coil-seed checks. Historical "
+            "jhalpern30 replay uses import_jhalpern30_replay.py followed by direct "
+            "single-stage replay instead of this Wataru recovery lane."
         ),
         parents=[goal_mode_runner.build_parser(add_help=False)],
         add_help=add_help,
@@ -525,10 +530,10 @@ def _required_stage2_str(stage2_results: dict, key: str) -> str:
 
 def _required_pre_boozer_stage2_finite_current_mode(stage2_results: dict) -> str:
     finite_current_mode = _required_stage2_str(stage2_results, "FINITE_CURRENT_MODE")
-    if finite_current_mode != "wataru_proxy_field":
+    if finite_current_mode != WATARU_PROFILE.mode:
         raise ValueError(
             "Pre-Boozer Stage 2 repair requires "
-            "FINITE_CURRENT_MODE='wataru_proxy_field'."
+            f"FINITE_CURRENT_MODE={WATARU_PROFILE.mode!r}."
         )
     return finite_current_mode
 

@@ -8,10 +8,10 @@ Updated HBT constraint SSOT:
 - TF coil current is fixed at `80 kA`
 - banana coil current has an upper limit of `16 kA`
 - coil length uses a `1.9 m` default target with a `2.0 m` hard ceiling
-- coil-plasma clearance is `1.5 cm`
+- coil-plasma clearance is `1.0 cm`
 - LCFS-to-vessel spacing is recorded as a SurfaceSurfaceDistance diagnostic
 - maximum curvature is `100 m^-1`
-- banana winding surface minor radius is `0.21 m`
+- banana winding surface minor radius is `0.142 m`
 
 ## Enforced Baseline Limits
 
@@ -21,7 +21,7 @@ All hardware threshold CLI arguments are validated against the current HBT hardw
 
 | Constraint | CLI Flag | Baseline Limit | Enforcement |
 |-----------|----------|---------------|-------------|
-| Coil-coil distance | `--cc-threshold` | 0.05m (5cm) | reject below 0.05m |
+| Coil-coil distance | `--cc-threshold` | 0.0462m (4.62cm) | reject below 0.0462m |
 | Curvature limit | `--curvature-threshold` | 100 | reject above 100m^-1 |
 | Coil length target | `--length-target` | 1.9m target, 2.0m hard ceiling | reject above 2.0m |
 
@@ -32,10 +32,10 @@ but this metric is diagnostic-only and does not reject otherwise valid seeds.
 
 | Constraint | CLI Flag | Baseline Limit | Enforcement |
 |-----------|----------|---------------|-------------|
-| Coil-coil distance | `--cc-dist` | 0.05m (5cm) | reject below 0.05m |
+| Coil-coil distance | `--cc-dist` | 0.0462m (4.62cm) | reject below 0.0462m |
 | Curvature limit | `--curvature-threshold` | 100 | reject above 100m^-1 |
 | Coil length target | `--length-target` | 1.9m target, 2.0m hard ceiling | reject above 2.0m |
-| Coil-surface clearance | `--cs-dist` | 0.015m (1.5cm) | reject below 0.015m |
+| Coil-surface clearance | `--cs-dist` | 0.010m (1.0cm) | reject below 0.010m |
 | Surface-vessel spacing | `--ss-dist` | diagnostic reference | recorded, not a hardware rejection gate |
 
 **Note:** The current HBT lane fixes the TF current baseline at `80 kA` and uses the tighter coil-plasma clearance plus `100 m^-1` curvature limit as the default hardware contract.

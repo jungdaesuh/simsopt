@@ -13,12 +13,25 @@ from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import CurveCWSFourierCPP, CurveXYZFourier
 
-from banana_opt.coil_groups import build_contiguous_manifest
 from banana_opt.current_contracts import (
     HBT_PROXY_VF_CURRENT_RATIO,
     MU0,
-    resolve_boozer_current_convention,
     validate_jhalpern30_proxy_vf_current_convention,
+)
+from banana_opt.finite_current_profiles import (
+    DEFAULT_JHALPERN30_VF_TEMPLATE_PATH,
+    JHALPERN30_BOOZER_CURRENT_CONVENTION,
+    JHALPERN30_FINITE_CURRENT_MODE,
+    JHALPERN30_G0_POLICY,
+    JHALPERN30_NUM_BANANA_COILS,
+    JHALPERN30_NUM_PROXY_COILS,
+    JHALPERN30_NUM_TF_COILS,
+    JHALPERN30_NUM_VF_COILS,
+    JHALPERN30_PROFILE,
+    JHALPERN30_PROXY_PLACEMENT_MODE,
+    JHALPERN30_VF_CURRENT_MUTABILITY,
+    JHALPERN30_VF_CURRENT_SIGN_POLICY,
+    JHALPERN30_VF_TEMPLATE_SHA256,
 )
 from banana_opt.hardware_contracts import (
     BANANA_WINDING_MINOR_RADIUS_M,
@@ -28,21 +41,6 @@ from banana_opt.json_compat import load_boozer_finite_i
 from banana_opt.wout_convention import wout_convention_artifact_fields
 
 
-JHALPERN30_FINITE_CURRENT_MODE = "jhalpern30_proxy_field"
-JHALPERN30_PROXY_PLACEMENT_MODE = "surface_major_radius_z0"
-JHALPERN30_VF_TEMPLATE_SHA256 = (
-    "1df87dbe845b014199fb1a4a1a414a2dff922d0ae9da10b1861092d0f326d989"
-)
-JHALPERN30_NUM_VF_COILS = 20
-JHALPERN30_NUM_PROXY_COILS = 1
-JHALPERN30_NUM_TF_COILS = 20
-JHALPERN30_NUM_BANANA_COILS = 10
-JHALPERN30_G0_POLICY = "signed_explicit_tf_current"
-JHALPERN30_BOOZER_CURRENT_CONVENTION = resolve_boozer_current_convention(
-    JHALPERN30_FINITE_CURRENT_MODE
-)
-JHALPERN30_VF_CURRENT_SIGN_POLICY = "template_sign_abs_proxy_current"
-JHALPERN30_VF_CURRENT_MUTABILITY = "shared_unfixed_scaled_current"
 JHALPERN30_STAGE_STATE_REQUIRED_KEYS = (
     "iota",
     "G",
@@ -57,9 +55,6 @@ JHALPERN30_STAGE_STATE_REQUIRED_KEYS = (
 JHALPERN30_STAGE_BSURF_FILENAME = "bsurf_opt.json"
 JHALPERN30_STAGE_STATE_FILENAME = "state.json"
 JHALPERN30_IMPORTED_RESULTS_SCHEMA_VERSION = 1
-
-_MODULE_DIR = Path(__file__).resolve().parent
-DEFAULT_JHALPERN30_VF_TEMPLATE_PATH = _MODULE_DIR / "jhalpern30_vf_biotsavart.json"
 
 
 @dataclass(frozen=True)
@@ -308,12 +303,7 @@ def _copy_or_save_biot_savart(
 
 
 def _extract_jhalpern30_tf_current_A(biotsavart: BiotSavart) -> float:
-    expected_total_coils = (
-        JHALPERN30_NUM_TF_COILS
-        + JHALPERN30_NUM_BANANA_COILS
-        + JHALPERN30_NUM_PROXY_COILS
-        + JHALPERN30_NUM_VF_COILS
-    )
+    expected_total_coils = JHALPERN30_PROFILE.default_total_coils
     if len(biotsavart.coils) != expected_total_coils:
         raise ValueError(
             "jhalpern30 stage importer expected "
@@ -355,12 +345,7 @@ def import_jhalpern30_stage_bundle(
         flip_banana=flip_banana,
         banana_i_fixed_s2=None,
     )
-    coil_groups = build_contiguous_manifest(
-        num_tf_coils=JHALPERN30_NUM_TF_COILS,
-        num_banana_coils=JHALPERN30_NUM_BANANA_COILS,
-        num_proxy_coils=JHALPERN30_NUM_PROXY_COILS,
-        num_vf_coils=JHALPERN30_NUM_VF_COILS,
-    )
+    coil_groups = JHALPERN30_PROFILE.build_default_coil_groups_manifest()
     tf_current_A = _extract_jhalpern30_tf_current_A(biotsavart)
     wout_fields = wout_convention_artifact_fields(
         wout_path=plasma_surf_path,
@@ -421,19 +406,7 @@ def import_jhalpern30_stage_bundle(
 
 
 __all__ = [
-    "DEFAULT_JHALPERN30_VF_TEMPLATE_PATH",
-    "JHALPERN30_BOOZER_CURRENT_CONVENTION",
-    "JHALPERN30_FINITE_CURRENT_MODE",
-    "JHALPERN30_G0_POLICY",
-    "JHALPERN30_NUM_BANANA_COILS",
-    "JHALPERN30_NUM_PROXY_COILS",
-    "JHALPERN30_NUM_TF_COILS",
-    "JHALPERN30_NUM_VF_COILS",
-    "JHALPERN30_PROXY_PLACEMENT_MODE",
     "JHALPERN30_STAGE_STATE_REQUIRED_KEYS",
-    "JHALPERN30_VF_CURRENT_MUTABILITY",
-    "JHALPERN30_VF_CURRENT_SIGN_POLICY",
-    "JHALPERN30_VF_TEMPLATE_SHA256",
     "Jhalpern30BananaCurrentReplay",
     "Jhalpern30StageBundle",
     "build_jhalpern30_banana_coils",

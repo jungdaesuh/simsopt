@@ -34,6 +34,7 @@ from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
     BANANA_CURRENT_MODE_SHARED,
 )
 from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR  # noqa: E402
+from banana_opt.hardware_contracts import COIL_PLASMA_MIN_DIST_M  # noqa: E402
 from banana_opt.surface_mode_contracts import (  # noqa: E402
     DEFAULT_INNER_SURFACE_RATIO,
     SURFACE_MODE_CHOICES,
@@ -384,7 +385,7 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--length-target", type=float, default=float(os.environ["SS_LENGTH_TARGET"]) if "SS_LENGTH_TARGET" in os.environ else None)
     parser.add_argument("--cs-weight", type=float, default=1.0)
     parser.add_argument("--cc-dist", type=float, default=0.05)
-    parser.add_argument("--cs-dist", type=float, default=0.015)
+    parser.add_argument("--cs-dist", type=float, default=COIL_PLASMA_MIN_DIST_M)
     parser.add_argument("--curvature-threshold", type=float, default=100.0)
     parser.add_argument("--checkpoint-every", type=int, default=int(os.environ.get("CHECKPOINT_EVERY", "0")))
     parser.add_argument(
