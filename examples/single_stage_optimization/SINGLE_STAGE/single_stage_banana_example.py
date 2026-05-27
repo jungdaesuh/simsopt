@@ -4745,6 +4745,68 @@ def maybe_update_best_feasible_incumbent(run_dict, incumbent_stage):
     return True
 
 
+def hardware_near_miss_eligible_incumbent(run_dict, hardware_status):
+    if hardware_status is None or bool(hardware_status.get("success", False)):
+        return False
+    if not topology_gate_allows_incumbent(run_dict):
+        return False
+    return preserved_incumbent_eligible(run_dict)
+
+
+def hardware_near_miss_metric(run_dict, hardware_status):
+    return (
+        float(hardware_violation_score(hardware_status)),
+        float(accepted_search_metric(run_dict)),
+    )
+
+
+def snapshot_hardware_near_miss_incumbent_state(run_dict, hardware_status):
+    saved_hardware_status = run_dict["accepted_hardware_status"]
+    run_dict["accepted_hardware_status"] = hardware_status
+    try:
+        return snapshot_diagnostic_incumbent_state(run_dict)
+    finally:
+        run_dict["accepted_hardware_status"] = saved_hardware_status
+
+
+def maybe_update_best_hardware_near_miss_incumbent(
+    run_dict,
+    incumbent_stage,
+    *,
+    hardware_status,
+):
+    if not hardware_near_miss_eligible_incumbent(run_dict, hardware_status):
+        return False
+    metric = hardware_near_miss_metric(run_dict, hardware_status)
+    best_metric = run_dict.get("best_hardware_near_miss_metric")
+    if best_metric is not None and metric >= tuple(best_metric):
+        return False
+    run_dict["best_hardware_near_miss_incumbent"] = (
+        snapshot_hardware_near_miss_incumbent_state(run_dict, hardware_status)
+    )
+    run_dict["best_hardware_near_miss_metric"] = metric
+    run_dict["best_hardware_near_miss_stage"] = str(incumbent_stage)
+    return True
+
+
+def current_state_matches_best_hardware_near_miss_incumbent(
+    run_dict,
+    *,
+    hardware_status,
+):
+    if not hardware_near_miss_eligible_incumbent(run_dict, hardware_status):
+        return False
+    incumbent = run_dict.get("best_hardware_near_miss_incumbent")
+    if incumbent is None:
+        return False
+    metric = hardware_near_miss_metric(run_dict, hardware_status)
+    best_metric = run_dict.get("best_hardware_near_miss_metric")
+    return best_metric is not None and metric == tuple(best_metric) and np.array_equal(
+        np.asarray(run_dict["accepted_x"], dtype=float),
+        np.asarray(incumbent.x, dtype=float),
+    )
+
+
 def frontier_goal_mode_warning_message(frontier_goal_config):
     if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT:
         return (
@@ -7714,14 +7776,17 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
 _PRESERVED_TIMEOUT_RESULTS_FILENAMES = {
     "best_feasible": "results_best_feasible.partial.json",
     "best_accepted": "results_best_accepted.partial.json",
+    "best_hardware_near_miss": "results_best_hardware_near_miss.partial.json",
 }
 _PRESERVED_TIMEOUT_BS_FILENAMES = {
     "best_feasible": "biot_savart_best_feasible.json",
     "best_accepted": "biot_savart_best_accepted.json",
+    "best_hardware_near_miss": "biot_savart_best_hardware_near_miss.json",
 }
 _PRESERVED_TIMEOUT_SURFACE_STEMS = {
     "best_feasible": "surf_best_feasible",
     "best_accepted": "surf_best_accepted",
+    "best_hardware_near_miss": "surf_best_hardware_near_miss",
 }
 
 
@@ -8092,6 +8157,12 @@ def build_preserved_timeout_results_payload(
         "PRESERVED_TIMEOUT_SALVAGE_KIND": preservation_kind,
         "PRESERVED_TIMEOUT_SALVAGE_STAGE": source_stage,
         "MAJOR_RADIUS": float(replay_config.major_radius),
+        "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": float(
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        ),
+        "COIL_WINDING_SURFACE_MAJOR_RADIUS_M": float(
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        ),
         "R0_OFF_SPEC": is_major_radius_offspec(replay_config.major_radius),
     }
     if replay_config.constraint_method == "alm":
@@ -8250,6 +8321,120 @@ def write_preserved_timeout_artifacts_for_current_state(
     )
 
 
+_TRIAL_INCUMBENT_RUN_DICT_FIELDS = (
+    "accepted_x",
+    "surface_state",
+    "J",
+    "dJ",
+    "search_eval",
+    "surface_status",
+    "search_surface_status",
+    "accepted_hardware_status",
+    "topology_gate_status",
+    "intersecting",
+)
+
+
+@contextmanager
+def temporary_trial_incumbent_state(
+    run_dict,
+    *,
+    x,
+    surface_data,
+    objective_eval,
+    surface_status,
+    search_surface_status,
+    hardware_status,
+    topology_gate_status,
+):
+    saved_values = {
+        field_name: copy.deepcopy(run_dict[field_name])
+        for field_name in _TRIAL_INCUMBENT_RUN_DICT_FIELDS
+        if field_name in run_dict
+    }
+    try:
+        run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+        run_dict["surface_state"] = snapshot_surface_states(surface_data)
+        run_dict["J"] = float(objective_eval["total"])
+        run_dict["dJ"] = np.asarray(objective_eval["grad"], dtype=float).copy()
+        run_dict["search_eval"] = objective_eval
+        run_dict["surface_status"] = surface_status
+        run_dict["search_surface_status"] = search_surface_status
+        run_dict["accepted_hardware_status"] = hardware_status
+        run_dict["topology_gate_status"] = topology_gate_status
+        run_dict["intersecting"] = any(surface_status["self_intersections"])
+        yield
+    finally:
+        for field_name in _TRIAL_INCUMBENT_RUN_DICT_FIELDS:
+            if field_name in saved_values:
+                run_dict[field_name] = saved_values[field_name]
+            else:
+                run_dict.pop(field_name, None)
+
+
+def maybe_write_best_hardware_near_miss_trial_artifacts(
+    out_dir,
+    *,
+    incumbent_stage,
+    run_dict,
+    x,
+    objective_eval,
+    search_surface_status,
+    surface_status,
+    hardware_snapshot,
+    coil_length,
+    field_error,
+    biotsavart,
+    surface_data,
+):
+    hardware_status = hardware_snapshot["artifact_hardware_status"]
+    if hardware_status is None or bool(hardware_status.get("success", False)):
+        return False
+    with temporary_trial_incumbent_state(
+        run_dict,
+        x=x,
+        surface_data=surface_data,
+        objective_eval=objective_eval,
+        surface_status=surface_status,
+        search_surface_status=search_surface_status,
+        hardware_status=hardware_status,
+        topology_gate_status=run_dict["topology_gate_status"],
+    ):
+        updated = maybe_update_best_hardware_near_miss_incumbent(
+            run_dict,
+            incumbent_stage,
+            hardware_status=hardware_status,
+        )
+        if not updated:
+            return False
+        incumbent = run_dict["best_hardware_near_miss_incumbent"]
+        run_dict["J"] = incumbent.objective_total
+        run_dict["dJ"] = incumbent.objective_grad
+        run_dict["search_eval"] = incumbent.search_eval
+        write_preserved_timeout_artifacts(
+            out_dir,
+            preservation_kind="best_hardware_near_miss",
+            results_payload=build_preserved_timeout_results_payload(
+                replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
+                preservation_kind="best_hardware_near_miss",
+                incumbent_stage=incumbent_stage,
+                run_dict=run_dict,
+                objective_eval=incumbent.search_eval,
+                field_error=field_error,
+                final_iota=surface_status["iotas"][-1],
+                final_volume=surface_status["volumes"][-1],
+                hardware_snapshot=hardware_snapshot,
+                banana_current_state=globals().get("banana_current_state"),
+                coil_length=coil_length,
+                accepted_iteration=int(run_dict.get("accepted_iterations", 0)),
+                alm_runtime_state=current_preserved_timeout_alm_state(),
+            ),
+            biotsavart=biotsavart,
+            surface_data=surface_data,
+        )
+        return True
+
+
 def build_single_stage_alm_partial_state(
     run_dict,
     constraint_names,
@@ -8333,6 +8518,11 @@ def build_single_stage_solver_checkpoint_state(
         best_feasible_incumbent=run_dict.get("best_feasible_incumbent"),
         best_feasible_stage=run_dict.get("best_feasible_stage"),
         best_feasible_metric=run_dict.get("best_feasible_metric"),
+        best_hardware_near_miss_incumbent=run_dict.get(
+            "best_hardware_near_miss_incumbent"
+        ),
+        best_hardware_near_miss_stage=run_dict.get("best_hardware_near_miss_stage"),
+        best_hardware_near_miss_metric=run_dict.get("best_hardware_near_miss_metric"),
         out_dir_iter=str(out_dir_iter),
         latest_topology_entry=run_dict.get("latest_topology_entry"),
         best_topology=run_dict.get("best_topology"),
@@ -9079,6 +9269,51 @@ def evaluate_search_step(x):
                     print("/!\\ /!\\ Hardware constraints violated (warning only) /!\\ /!\\")
                 for violation in hardware_status["violations"]:
                     print(violation)
+                trial_surface_status = evaluate_surface_stack(
+                    surface_data,
+                    vessel_surface=VV if len(surface_data) > 1 else None,
+                    surface_gap_threshold=(
+                        SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0
+                    ),
+                    enforce_nesting=True,
+                )
+                trial_coil_length = curvelength.J()
+                trial_hardware_snapshot = evaluate_single_stage_hardware_snapshot(
+                    JCurveCurve,
+                    CC_DIST,
+                    JCurveSurface,
+                    CS_DIST,
+                    trial_surface_status,
+                    PLASMA_VESSEL_MIN_DIST_M,
+                    banana_curve,
+                    CURVATURE_THRESHOLD,
+                    outer_entry["boozer_surface"].surface,
+                    VV,
+                    **current_single_stage_hardware_snapshot_kwargs(
+                        coil_length=trial_coil_length,
+                    ),
+                )
+                trial_field_error, _trial_bdotn = compute_surface_field_metrics(
+                    outer_entry["boozer_surface"].surface,
+                    bs,
+                )
+                maybe_write_best_hardware_near_miss_trial_artifacts(
+                    OUT_DIR_ITER,
+                    incumbent_stage=run_dict.get(
+                        "accepted_boozer_stage",
+                        globals().get("stage", "initial"),
+                    ),
+                    run_dict=run_dict,
+                    x=x,
+                    objective_eval=objective_eval,
+                    search_surface_status=stack_status,
+                    surface_status=trial_surface_status,
+                    hardware_snapshot=trial_hardware_snapshot,
+                    coil_length=trial_coil_length,
+                    field_error=trial_field_error,
+                    biotsavart=bs,
+                    surface_data=surface_data,
+                )
 
         if success:
             J = objective_eval['total']
@@ -9394,6 +9629,17 @@ def callback(x):
     )
     best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, incumbent_stage)
     best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, incumbent_stage)
+    best_hardware_near_miss_updated = maybe_update_best_hardware_near_miss_incumbent(
+        run_dict,
+        incumbent_stage,
+        hardware_status=hardware_snapshot["artifact_hardware_status"],
+    )
+    best_hardware_near_miss_matches_current = (
+        current_state_matches_best_hardware_near_miss_incumbent(
+            run_dict,
+            hardware_status=hardware_snapshot["artifact_hardware_status"],
+        )
+    )
 
     field_error, BdotN = compute_surface_field_metrics(
         outer_entry['boozer_surface'].surface,
@@ -9441,6 +9687,28 @@ def callback(x):
             results_payload=build_preserved_timeout_results_payload(
                 replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
                 preservation_kind="best_feasible",
+                incumbent_stage=incumbent_stage,
+                run_dict=run_dict,
+                objective_eval=objective_eval,
+                field_error=field_error,
+                final_iota=iota_values[-1],
+                final_volume=volume_values[-1],
+                hardware_snapshot=hardware_snapshot,
+                banana_current_state=globals().get("banana_current_state"),
+                coil_length=length,
+                accepted_iteration=accepted_iteration,
+                alm_runtime_state=current_preserved_timeout_alm_state(),
+            ),
+            biotsavart=bs,
+            surface_data=surface_data,
+        )
+    if best_hardware_near_miss_updated or best_hardware_near_miss_matches_current:
+        write_preserved_timeout_artifacts(
+            OUT_DIR_ITER,
+            preservation_kind="best_hardware_near_miss",
+            results_payload=build_preserved_timeout_results_payload(
+                replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
+                preservation_kind="best_hardware_near_miss",
                 incumbent_stage=incumbent_stage,
                 run_dict=run_dict,
                 objective_eval=objective_eval,
@@ -10323,6 +10591,9 @@ if __name__ == "__main__":
         'best_feasible_incumbent': None,
         'best_feasible_metric': None,
         'best_feasible_stage': None,
+        'best_hardware_near_miss_incumbent': None,
+        'best_hardware_near_miss_metric': None,
+        'best_hardware_near_miss_stage': None,
         'invalid_state_rejects_total': 0,
         'topology_gate_rejects': 0,
         'hardware_rejects': 0,
@@ -10432,6 +10703,30 @@ if __name__ == "__main__":
         run_dict["best_feasible_metric"] = resume_solver_checkpoint_payload.get(
             "best_feasible_metric"
         )
+        restored_best_hardware_near_miss_incumbent = restore_optional_incumbent(
+            resume_solver_checkpoint_payload,
+            "best_hardware_near_miss_incumbent",
+        )
+        run_dict["best_hardware_near_miss_stage"] = (
+            resume_solver_checkpoint_payload.get("best_hardware_near_miss_stage")
+        )
+        run_dict["best_hardware_near_miss_incumbent"] = (
+            normalize_diagnostic_incumbent_for_stage(
+                run_dict,
+                restored_best_hardware_near_miss_incumbent,
+                run_dict["best_hardware_near_miss_stage"],
+                restored_stage,
+                rebuild_stage_objective_bundle,
+            )
+        )
+        best_hardware_near_miss_metric = resume_solver_checkpoint_payload.get(
+            "best_hardware_near_miss_metric"
+        )
+        run_dict["best_hardware_near_miss_metric"] = (
+            None
+            if best_hardware_near_miss_metric is None
+            else tuple(float(value) for value in best_hardware_near_miss_metric)
+        )
         restore_topology_checkpoint_entries(
             run_dict,
             resume_solver_checkpoint_payload,
@@ -10470,9 +10765,17 @@ if __name__ == "__main__":
             )
         initial_best_accepted_updated = False
         initial_best_feasible_updated = False
+        initial_best_hardware_near_miss_updated = False
     else:
         initial_best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, stage)
         initial_best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, stage)
+        initial_best_hardware_near_miss_updated = (
+            maybe_update_best_hardware_near_miss_incumbent(
+                run_dict,
+                stage,
+                hardware_status=initial_hardware_snapshot["artifact_hardware_status"],
+            )
+        )
     EFFECTIVE_SEED_REGIME = resolve_single_stage_seed_regime(
         REQUESTED_SEED_REGIME,
         run_dict,
@@ -10600,6 +10903,18 @@ if __name__ == "__main__":
             field_error=initial_field_error,
             coil_length=initial_coil_length,
         )
+    if initial_best_hardware_near_miss_updated:
+        write_preserved_timeout_artifacts_for_current_state(
+            OUT_DIR_ITER,
+            preservation_kind="best_hardware_near_miss",
+            incumbent_stage=stage,
+            run_dict=run_dict,
+            bs=bs,
+            surface_data=surface_data,
+            hardware_snapshot=initial_hardware_snapshot,
+            field_error=initial_field_error,
+            coil_length=initial_coil_length,
+        )
 
     def refresh_preserved_timeout_artifacts_from_best_states():
         current_state = snapshot_single_stage_incumbent_state(run_dict)
@@ -10616,6 +10931,11 @@ if __name__ == "__main__":
             for preservation_kind, incumbent_key, stage_key in (
                 ("best_accepted", "best_accepted_incumbent", "best_accepted_stage"),
                 ("best_feasible", "best_feasible_incumbent", "best_feasible_stage"),
+                (
+                    "best_hardware_near_miss",
+                    "best_hardware_near_miss_incumbent",
+                    "best_hardware_near_miss_stage",
+                ),
             ):
                 incumbent = run_dict.get(incumbent_key)
                 if incumbent is None:
@@ -10650,7 +10970,21 @@ if __name__ == "__main__":
                     VV,
                     **current_single_stage_hardware_snapshot_kwargs(),
                 )
-                run_dict["accepted_hardware_status"] = hardware_snapshot["search_hardware_status"]
+                if preservation_kind == "best_hardware_near_miss":
+                    run_dict["accepted_hardware_status"] = hardware_snapshot[
+                        "artifact_hardware_status"
+                    ]
+                    if bool(run_dict["accepted_hardware_status"].get("success", False)):
+                        remove_preserved_timeout_artifacts(
+                            OUT_DIR_ITER,
+                            preservation_kind=preservation_kind,
+                            surface_data=surface_data,
+                        )
+                        continue
+                else:
+                    run_dict["accepted_hardware_status"] = hardware_snapshot[
+                        "search_hardware_status"
+                    ]
                 field_error, _ = compute_surface_field_metrics(outer_surface, bs)
                 write_preserved_timeout_artifacts_for_current_state(
                     OUT_DIR_ITER,
@@ -11527,6 +11861,12 @@ if __name__ == "__main__":
         "IOTAS_WEIGHT": IOTAS_WEIGHT,
         "MAJOR_RADIUS": R0,
         "R0_OFF_SPEC": is_major_radius_offspec(R0),
+        "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": float(
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        ),
+        "COIL_WINDING_SURFACE_MAJOR_RADIUS_M": float(
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        ),
         "TOROIDAL_FLUX": s,
         "banana_surf_radius": banana_surf_radius,
         "order": order,

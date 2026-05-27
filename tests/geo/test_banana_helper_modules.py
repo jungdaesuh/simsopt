@@ -73,7 +73,10 @@ class BananaReferenceSurfaceTests(unittest.TestCase):
 
         self.assertEqual(
             surfaces.coil_winding_surface.rc,
-            {(0, 0): 0.976, (1, 0): 0.23},
+            {
+                (0, 0): module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+                (1, 0): 0.23,
+            },
         )
         self.assertEqual(
             surfaces.coil_winding_surface.zs,

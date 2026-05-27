@@ -5063,6 +5063,176 @@ class HardwareConstraintTests(unittest.TestCase):
                 2.5e-4,
             )
 
+    def test_maybe_update_best_hardware_near_miss_ranks_by_violation_first(self):
+        module = load_single_stage_example_module()
+
+        def hardware_status(violation_ratio):
+            return {
+                "success": False,
+                "violations": ["poloidal_extent"],
+                "violation_ratios": {"poloidal_extent": violation_ratio},
+                "constraints": {},
+            }
+
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 8.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {"total": 8.0, "surface_weights": np.array([1.0])},
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": hardware_status(0.2),
+            "topology_gate_status": {"enabled": False, "success": True},
+            "intersecting": False,
+            "best_hardware_near_miss_incumbent": None,
+            "best_hardware_near_miss_metric": None,
+            "best_hardware_near_miss_stage": None,
+        }
+
+        def rich_eval_for_current_state(surface_weights, *, include_diagnostics=None):
+            self.assertTrue(include_diagnostics)
+            np.testing.assert_allclose(
+                surface_weights,
+                run_dict["search_eval"]["surface_weights"],
+            )
+            return diagnostic_search_eval_payload(run_dict["search_eval"])
+
+        with patch.object(
+            module,
+            "evaluate_search_objective",
+            side_effect=rich_eval_for_current_state,
+        ) as evaluate_mock:
+            self.assertTrue(
+                module.maybe_update_best_hardware_near_miss_incumbent(
+                    run_dict,
+                    "initial",
+                    hardware_status=run_dict["accepted_hardware_status"],
+                )
+            )
+            self.assertEqual(run_dict["best_hardware_near_miss_metric"], (0.2, 8.0))
+            self.assertEqual(run_dict["best_hardware_near_miss_stage"], "initial")
+            self.assertEqual(evaluate_mock.call_count, 1)
+
+            run_dict["accepted_hardware_status"] = hardware_status(0.3)
+            run_dict["search_eval"] = {"total": 1.0, "surface_weights": np.array([1.0])}
+            run_dict["J"] = 1.0
+            self.assertFalse(
+                module.maybe_update_best_hardware_near_miss_incumbent(
+                    run_dict,
+                    "worse_hardware",
+                    hardware_status=run_dict["accepted_hardware_status"],
+                )
+            )
+            self.assertEqual(run_dict["best_hardware_near_miss_metric"], (0.2, 8.0))
+            self.assertEqual(run_dict["best_hardware_near_miss_stage"], "initial")
+
+            run_dict["accepted_hardware_status"] = hardware_status(0.1)
+            run_dict["search_eval"] = {"total": 20.0, "surface_weights": np.array([1.0])}
+            run_dict["J"] = 20.0
+            self.assertTrue(
+                module.maybe_update_best_hardware_near_miss_incumbent(
+                    run_dict,
+                    "better_hardware",
+                    hardware_status=run_dict["accepted_hardware_status"],
+                )
+            )
+            self.assertEqual(run_dict["best_hardware_near_miss_metric"], (0.1, 20.0))
+            self.assertEqual(run_dict["best_hardware_near_miss_stage"], "better_hardware")
+            self.assertEqual(evaluate_mock.call_count, 2)
+            self.assertTrue(
+                module.current_state_matches_best_hardware_near_miss_incumbent(
+                    run_dict,
+                    hardware_status=run_dict["accepted_hardware_status"],
+                )
+            )
+            self.assertFalse(
+                module.current_state_matches_best_hardware_near_miss_incumbent(
+                    run_dict,
+                    hardware_status={"success": True, "violations": []},
+                )
+            )
+
+            run_dict["accepted_hardware_status"] = hardware_status(0.05)
+            run_dict["search_eval"] = {"total": 0.5, "surface_weights": np.array([1.0])}
+            run_dict["J"] = 0.5
+            self.assertFalse(
+                module.maybe_update_best_hardware_near_miss_incumbent(
+                    run_dict,
+                    "artifact_clean",
+                    hardware_status={"success": True, "violations": []},
+                )
+            )
+            self.assertEqual(run_dict["best_hardware_near_miss_metric"], (0.1, 20.0))
+            self.assertEqual(run_dict["best_hardware_near_miss_stage"], "better_hardware")
+
+    def test_solver_checkpoint_preserves_best_hardware_near_miss_incumbent(self):
+        module = load_single_stage_example_module()
+        hardware_status = {
+            "success": False,
+            "violations": ["poloidal_extent"],
+            "violation_ratios": {"poloidal_extent": 0.2},
+            "constraints": {},
+        }
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 4.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {"total": 4.0, "surface_weights": np.array([1.0])},
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": False, "success": True},
+            "intersecting": False,
+            "accepted_iterations": 3,
+            "best_hardware_near_miss_incumbent": None,
+            "best_hardware_near_miss_metric": None,
+            "best_hardware_near_miss_stage": None,
+        }
+
+        def rich_eval_for_current_state(surface_weights, *, include_diagnostics=None):
+            self.assertTrue(include_diagnostics)
+            np.testing.assert_allclose(surface_weights, [1.0])
+            return diagnostic_search_eval_payload(
+                {"total": 4.0, "surface_weights": surface_weights}
+            )
+
+        with patch.object(
+            module,
+            "evaluate_search_objective",
+            side_effect=rich_eval_for_current_state,
+        ):
+            self.assertTrue(
+                module.maybe_update_best_hardware_near_miss_incumbent(
+                    run_dict,
+                    "initial",
+                    hardware_status=hardware_status,
+                )
+            )
+            payload = module.build_single_stage_solver_checkpoint_state(
+                run_dict,
+                requested_maxiter=10,
+                runtime_maxiter=10,
+                accepted_stage="initial",
+                goal_mode="target",
+                constraint_method="penalty",
+                stage2_bs_path="/tmp/biot_savart.json",
+                out_dir_iter="/tmp/out",
+            )
+
+        self.assertEqual(payload["best_hardware_near_miss_metric"], [0.2, 4.0])
+        self.assertEqual(payload["best_hardware_near_miss_stage"], "initial")
+        self.assertFalse(
+            payload["best_hardware_near_miss_incumbent"][
+                "accepted_hardware_status"
+            ]["success"]
+        )
+        self.assertAlmostEqual(
+            payload["best_hardware_near_miss_incumbent"]["search_eval"]["J_QS"],
+            2.5e-4,
+        )
+
     def test_maybe_update_best_accepted_incumbent_tracks_valid_nonself_intersecting_states(self):
         module = load_single_stage_example_module()
         run_dict = {
@@ -5650,6 +5820,28 @@ class HardwareConstraintTests(unittest.TestCase):
                 fake_outer.saved,
                 [str(out_dir / "surf_best_feasible_outer_boozer_surface.json")],
             )
+            module.write_preserved_timeout_artifacts(
+                out_dir,
+                preservation_kind="best_hardware_near_miss",
+                results_payload=payload,
+                biotsavart=fake_bs,
+                surface_data=[{"name": "outer", "boozer_surface": fake_outer}],
+            )
+
+            near_miss_results = out_dir / "results_best_hardware_near_miss.partial.json"
+            self.assertTrue(near_miss_results.exists())
+            self.assertEqual(
+                fake_bs.saved[-1],
+                str(out_dir / "biot_savart_best_hardware_near_miss.json"),
+            )
+            self.assertEqual(
+                fake_outer.surface.saved[-1],
+                str(out_dir / "surf_best_hardware_near_miss_outer.json"),
+            )
+            self.assertEqual(
+                fake_outer.saved[-1],
+                str(out_dir / "surf_best_hardware_near_miss_outer_boozer_surface.json"),
+            )
 
     def test_preserved_timeout_artifacts_recompute_diagnostics_for_compact_search_eval(self):
         module = load_single_stage_example_module()
@@ -5756,6 +5948,14 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(payload["SEARCH_OBJECTIVE_J"], compact_eval["total"])
         self.assertAlmostEqual(payload["NONQS_RATIO"], rich_eval["J_QS"])
         self.assertAlmostEqual(payload["BOOZER_RESIDUAL"], rich_eval["J_Boozer"])
+        self.assertAlmostEqual(
+            payload["BANANA_WINDING_SURFACE_MAJOR_RADIUS_M"],
+            module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        )
+        self.assertAlmostEqual(
+            payload["COIL_WINDING_SURFACE_MAJOR_RADIUS_M"],
+            module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        )
 
     def test_build_topology_gate_diagnostics_distinguishes_pass_reject_and_broken(self):
         module = load_single_stage_example_module()
@@ -15085,6 +15285,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["stage2_iota_probe_kwargs"]["iota_target"], 0.2)
 
     def test_stage2_main_reports_lcfs_metrics_and_boundary_clearance(self):
+        module = load_stage2_module()
         runtime = self._run_stage2_main(
             init_only=True,
             constraint_method="penalty",
@@ -15105,6 +15306,14 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             in_bounds_lcfs_major_radius_m(),
         )
         self.assertEqual(runtime["results"]["MAJOR_RADIUS"], 0.976)
+        self.assertEqual(
+            runtime["results"]["BANANA_WINDING_SURFACE_MAJOR_RADIUS_M"],
+            module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        )
+        self.assertEqual(
+            runtime["results"]["COIL_WINDING_SURFACE_MAJOR_RADIUS_M"],
+            module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        )
         self.assertEqual(
             runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"],
             in_bounds_lcfs_major_radius_m(),

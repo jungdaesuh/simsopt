@@ -20,6 +20,7 @@ from banana_opt.coil_groups import (
     build_contiguous_manifest,
 )
 from banana_opt.hardware_contracts import (
+    BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     COIL_LENGTH_MIN_FRACTION,
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
@@ -1392,6 +1393,12 @@ def build_stage2_results(
         "LENGTH_TARGET": length_target,
         "MAJOR_RADIUS": major_radius,
         "R0_OFF_SPEC": is_major_radius_offspec(major_radius),
+        "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": float(
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        ),
+        "COIL_WINDING_SURFACE_MAJOR_RADIUS_M": float(
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        ),
         "TOROIDAL_FLUX": toroidal_flux,
         "STAGE2_PLASMA_SCALING_MODE": str(
             getattr(args, "stage2_plasma_scaling_mode", "lcfs")

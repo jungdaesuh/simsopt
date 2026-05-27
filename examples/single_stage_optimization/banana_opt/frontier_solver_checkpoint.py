@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -60,6 +60,9 @@ def build_solver_checkpoint_payload(
     best_feasible_metric: float | None,
     out_dir_iter: str,
     run_counters: Mapping[str, object],
+    best_hardware_near_miss_incumbent: SingleStageIncumbentState | None = None,
+    best_hardware_near_miss_stage: str | None = None,
+    best_hardware_near_miss_metric: Sequence[float] | None = None,
     alm_state: Mapping[str, object] | None = None,
     latest_topology_entry: Mapping[str, object] | None = None,
     best_topology: Mapping[str, object] | None = None,
@@ -91,6 +94,13 @@ def build_solver_checkpoint_payload(
         else single_stage_incumbent_state_to_json_dict(best_feasible_incumbent),
         "best_feasible_stage": best_feasible_stage,
         "best_feasible_metric": _optional_float(best_feasible_metric),
+        "best_hardware_near_miss_incumbent": None
+        if best_hardware_near_miss_incumbent is None
+        else single_stage_incumbent_state_to_json_dict(best_hardware_near_miss_incumbent),
+        "best_hardware_near_miss_stage": best_hardware_near_miss_stage,
+        "best_hardware_near_miss_metric": None
+        if best_hardware_near_miss_metric is None
+        else _serialize_value(tuple(float(value) for value in best_hardware_near_miss_metric)),
         "out_dir_iter": str(out_dir_iter),
         "run_counters": {
             str(key): _serialize_value(value)
