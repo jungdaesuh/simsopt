@@ -409,7 +409,7 @@ def callback(x):
 # ==============================================================================
 # CONFIGURATION PARAMETERS
 # ==============================================================================
-banana_surf_radius = 0.215
+banana_surf_radius = 0.142
 banana_surf_nfp = 5
 nphi = 255
 ntheta = 64
@@ -449,9 +449,9 @@ hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
 hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
 hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
 
-# The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.22
+# The banana coil winding surface is concentric with the HBT vessel.
 surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
-surf_coils.set_rc(0, 0, 0.976)
+surf_coils.set_rc(0, 0, 0.903)
 surf_coils.set_rc(1, 0, banana_surf_radius)
 surf_coils.set_zs(1, 0, banana_surf_radius)
 
@@ -460,7 +460,7 @@ surf_coils.set_zs(1, 0, banana_surf_radius)
 # ==============================================================================
 plasma_surf_filename = 'wout_nfp22ginsburg_000_014417_iota15.nc'
 file_loc = f'../equilibria/{plasma_surf_filename}'
-bs = load(f'../STAGE_2/outputs-{plasma_surf_filename}/R0=0.925-s=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.215-Order=2/biot_savart_opt.json')
+bs = load(f'../STAGE_2/outputs-{plasma_surf_filename}/R0=0.925-s=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.142-Order=2/biot_savart_opt.json')
 
 # Initialize the boundary magnetic surface and scale it to the target major radius
 surf = SurfaceRZFourier.from_wout(file_loc, range="half period", nphi=255, ntheta=64, s=0.24)
@@ -527,19 +527,19 @@ LENGTH_WEIGHT = 1
 RES_WEIGHT = 1e3
 IOTAS_WEIGHT = 1e2
 CC_WEIGHT = 1e2
-CC_DIST = 0.05
+CC_DIST = 0.0462
 CS_WEIGHT = 1
-CS_DIST = 0.02
+CS_DIST = 0.01
 SURF_DIST_WEIGHT = 1e3
 SS_DIST = 0.04
 CURVATURE_WEIGHT = 1e-1
-CURVATURE_THRESHOLD = 20
+CURVATURE_THRESHOLD = 100
 phi_list = np.linspace(0, 1 / boozer_surface.surface.nfp, 5)
 
 # Individual objective terms
 iota = Iotas(boozer_surface)
 curvelength = CurveLength(banana_curves[0])
-length_target = curvelength.J()
+length_target = 1.9
 
 Jiota = QuadraticPenalty(iota, iota_target)
 JnonQSRatio = sum(nonQSs)
@@ -631,4 +631,3 @@ results = {
 }
 with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
     json.dump(results, outfile, indent=2)
-

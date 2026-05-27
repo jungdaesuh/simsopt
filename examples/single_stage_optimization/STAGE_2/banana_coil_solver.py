@@ -261,11 +261,11 @@ nphi = 255
 ntheta = 64
 surf = None
 
-# The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.215
-banana_surf_radius = 0.215
+# The banana coil winding surface is concentric with the HBT vessel.
+banana_surf_radius = 0.142
 banana_surf_nfp = 5
 surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
-surf_coils.set_rc(0, 0, 0.976)
+surf_coils.set_rc(0, 0, 0.903)
 surf_coils.set_rc(1, 0, banana_surf_radius)
 surf_coils.set_zs(1, 0, banana_surf_radius)
 
@@ -278,7 +278,7 @@ VV.set_zs(1, 0, 0.222)
 
 # Create the TF coils in HBT - these will be fixed but create background toroidal field:
 tf_curves = create_equally_spaced_curves(20, 1, stellsym=False, R0=0.976, R1=0.4, order=1)
-tf_currents = [Current(1.0) * 1e5 for i in range(20)]   # At some point, update with actual HBT TF current
+tf_currents = [Current(1.0) * -80e3 for i in range(20)]   # HBT TF current
 
 # All the TF degrees of freedom are fixed
 for tf_curve in tf_curves:
@@ -320,17 +320,17 @@ MAXITER = 300
 intersecting = False
 
 # Weight on the curve lengths in the objective function
-# We'll penalize the coil if it becomes longer than an target length of 1.75 m
+# We'll penalize the coil if it becomes longer than the 1.9 m buffered target.
 LENGTH_WEIGHT = 5e-4
-LENGTH_TARGET = 1.75
+LENGTH_TARGET = 1.9
 
 # Threshold and weight for the coil-to-coil distance penalty
-CC_THRESHOLD = 0.05 # keep 5 cm between coils (arbitrary)
+CC_THRESHOLD = 0.0462
 CC_WEIGHT = 100
 
 # Threshold and weight for the coil curvature penalty
 CURVATURE_WEIGHT = 1e-4
-CURVATURE_THRESHOLD = 40
+CURVATURE_THRESHOLD = 100
 
 # Define the individual terms objective function:
 Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n

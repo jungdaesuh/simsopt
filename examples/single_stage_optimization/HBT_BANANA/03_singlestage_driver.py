@@ -124,7 +124,8 @@ VMEC_S = cfg['plasma_surface']['vmec_s']
 WOUT_FILE = artifact_path("stage1", STAGE1_ID, OUT_DIR, "wout_opt")
 
 # Objective thresholds (hardware constraints — not relaxable)
-LENGTH_THRESHOLD = cfg['thresholds']['length_max']
+LENGTH_MAX_HW    = cfg['thresholds']['length_max']
+LENGTH_THRESHOLD = cfg['thresholds']['length_target']
 CC_THRESHOLD     = cfg['thresholds']['coil_coil_min']
 CS_THRESHOLD     = cfg['thresholds']['coil_surface_min']
 CURV_THRESHOLD   = cfg['thresholds']['curvature_max']
@@ -191,7 +192,8 @@ INPUT PARAMETERS ─────────────────────
         wout        = {WOUT_FILE}
 
     Thresholds:
-        length_max  = {LENGTH_THRESHOLD} m
+        length_abs  = {LENGTH_MAX_HW} m
+        length_tgt  = {LENGTH_THRESHOLD} m
         cc_min      = {CC_THRESHOLD} m
         cs_min      = {CS_THRESHOLD} m
         curv_max    = {CURV_THRESHOLD} m^-1

@@ -145,6 +145,7 @@ STAGE2_INPUT_KEYS = (
     "winding_surface.a",
     # Hardware thresholds + stage 2 relaxation
     "thresholds.length_max",
+    "thresholds.length_target",
     "thresholds.coil_coil_min",
     "thresholds.curvature_max",
     "stage2_relaxation.length",
@@ -174,6 +175,7 @@ SINGLESTAGE_INPUT_KEYS = (
     "boozer.ntor",
     "boozer.constraint_weight",
     "thresholds.length_max",
+    "thresholds.length_target",
     "thresholds.coil_coil_min",
     "thresholds.coil_surface_min",
     "thresholds.curvature_max",

@@ -77,7 +77,7 @@ wout_nfp22ginsburg_000_014417_iota15.nc
 **Key Parameters** (editable in script):
 - `R0`: Major radius target (default: 0.925 m)
 - `s`: Normalized toroidal flux surface (default: 0.24)
-- `banana_surf_radius`: Coil surface radius (default: 0.215 m)
+- `banana_surf_radius`: Coil surface minor radius (default: 0.142 m)
 - `order`: Fourier modes for coils (default: 2)
 - `MAXITER`: Maximum optimization iterations (default: 300)
 
@@ -102,7 +102,7 @@ sbatch banana-scan.sh
 
 Update the path to the Stage 2 output directory (around line 42):
 ```python
-bs = load(f'../STAGE_2/outputs-{plasma_surf_filename}/R0=0.925-s=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.215-Order=2/biot_savart_opt.json')
+bs = load(f'../STAGE_2/outputs-{plasma_surf_filename}/R0=0.925-s=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.142-Order=2/biot_savart_opt.json')
 ```
 
 Ensure this path matches your Stage 2 output directory.
@@ -175,9 +175,9 @@ sbatch poincare-plot.sh
 
 ### Stage 2 (Banana Coil Solver)
 - **Squared Flux**: Minimize `B dot n` (normal field on plasma surface)
-- **Curve Length**: Penalize coils longer than target (1.75 m)
-- **Coil-Coil Distance**: Maintain minimum separation (5 cm)
-- **Curvature**: Limit maximum curvature (threshold: 40 m^-1)
+- **Curve Length**: Penalize coils longer than target (1.9 m; absolute limit 2.0 m)
+- **Coil-Coil Distance**: Maintain minimum separation (4.62 cm)
+- **Curvature**: Limit maximum curvature (threshold: 100 m^-1)
 
 ### Single Stage
 - **Quasi-Symmetry**: Minimize non-quasi-symmetric ratio

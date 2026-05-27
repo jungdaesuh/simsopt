@@ -27,8 +27,8 @@ from self_intersect import CurveSelfIntersect
 from current_penalty import CurrentPenaltyWrapper
 
 
-WINDSURF_MAJOR_R = 0.976
-WINDSURF_MINOR_R = 0.210
+WINDSURF_MAJOR_R = 0.903
+WINDSURF_MINOR_R = 0.142
 
 # FINITE-CURRENT SCAN: select plasma current (kA) for this run via CLI or env var.
 def _current_kA_type(s):
@@ -51,7 +51,7 @@ BANANA_CURRENT_SIGN = -1 if FLIP_BANANA else 1
 print(f"Stage 2 weighted optimization with I = {PROXY_CURRENT_KA:>9.5f} kA"
       f"{'  [FLIP_BANANA]' if FLIP_BANANA else ''}")
 
-def retrieve_winding_surface(curve, Rax=0.976):
+def retrieve_winding_surface(curve, Rax=WINDSURF_MAJOR_R):
     x, y, z = curve.gamma().T
     R = np.sqrt(x**2 + y**2)
     Z = z
@@ -209,11 +209,11 @@ os.makedirs(OUT_DIR, exist_ok=True)
 nphi = 64
 ntheta = 63
 
-# The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.210
-banana_surf_radius = 0.210
+# The banana coil winding surface is concentric with the HBT vessel.
+banana_surf_radius = WINDSURF_MINOR_R
 banana_surf_nfp = 5
 surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
-surf_coils.set_rc(0, 0, 0.976)
+surf_coils.set_rc(0, 0, WINDSURF_MAJOR_R)
 surf_coils.set_rc(1, 0, banana_surf_radius)
 surf_coils.set_zs(1, 0, banana_surf_radius)
 
@@ -336,11 +336,11 @@ MAXITER = int(os.environ.get("BANANA_STAGE2_MAXITER", "2"))
 # Hardware thresholds for weighted mode.
 LENGTH_TARGET = 1.9
 
-CC_THRESHOLD = 0.05
+CC_THRESHOLD = 0.0462
 
 CURVATURE_THRESHOLD = 100
 
-POLOIDAL_THRESHOLD = float(os.environ.get('BANANA_POLOIDAL_TARGET_DEG', 45))
+POLOIDAL_THRESHOLD = float(os.environ.get('BANANA_POLOIDAL_TARGET_DEG', 70))
 
 WIDTH_MIN = 0.05
 WIDTH_MAX = 0.17

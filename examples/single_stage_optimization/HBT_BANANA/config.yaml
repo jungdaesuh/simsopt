@@ -38,13 +38,14 @@ warm_start:
 device:
   nfp: 5
   stellsym: true
-  major_radius: 0.976     # m (TF coil + winding surface R0; HBT_MAJOR_RADIUS)
+  major_radius: 0.976     # m (vacuum vessel / TF major radius; HBT_MAJOR_RADIUS)
+  vessel_minor_radius: 0.222  # m (vacuum vessel minor radius)
   plasma_radius: 0.92     # m (baseline target LCFS major radius; TARGET_LCFS_MAJOR_R)
   plasma_minor_radius: 0.15  # m (LCFS shell limit minor radius; TARGET_LCFS_MINOR_R)
 
 # ── TF coils (fixed, not optimized) ─────────────────────────────────────────
 tf_coils:
-  current: 80.0e+3    # A (derived from B = 0.35 T at R = 0.92 m)
+  current: -80.0e+3   # A (HBT TF operating current, signed SIMSOPT convention)
   num: 20
   nfp: 1
   stellsym: false
@@ -53,7 +54,7 @@ tf_coils:
   order: 1
   # Vacuum toroidal field integral rbtor = mu_0 * N_TF * I_TF / (2*pi).
   # Device constant, informational here.
-  rbtor: 0.32           # T*m (20 x 80 kA)
+  rbtor: -0.32          # T*m (20 x -80 kA)
 
 # ── Banana coils ─────────────────────────────────────────────────────────────
 banana_coils:
@@ -94,8 +95,8 @@ banana_coils:
 
 # ── Winding surface ─────────────────────────────────────────────────────────
 winding_surface:
-  R0: 0.976       # m (WINDSURF_MAJOR_R, same as TF)
-  a: 0.210        # m (WINDSURF_MINOR_R)
+  R0: 0.903       # m (banana coil winding surface major radius)
+  a: 0.142        # m (banana coil winding surface minor radius)
 
 # ── Plasma surface (VMEC) ───────────────────────────────────────────────────
 # In the current pipeline, stage 1 warm-starts from a resized seed wout whose
@@ -203,12 +204,13 @@ targets:
 # Singlestage enforces these unmodified. Stage 2 applies `stage2_relaxation`
 # factors on top.
 thresholds:
-  length_max: 2.0           # m — max banana coil length (soft bound; the real
-                            # poloidal-footprint cap is the CWS-frame
-                            # poloidal_extent objective in new_objectives/)
-  coil_coil_min: 0.05       # m — min coil-coil clearance (HW-verified)
-  coil_surface_min: 0.015   # m — min coil-surface clearance, singlestage only
+  length_max: 2.0           # m — absolute max banana coil length
+  length_target: 1.9        # m — optimization target with 10 cm buffer
+  coil_coil_min: 0.0462     # m — min coil-coil clearance (HW-verified)
+  coil_surface_min: 0.01    # m — min coil-plasma clearance, singlestage only
                             # (HW-verified)
+  plasma_vessel_min: 0.04   # m — min plasma-vessel clearance
+  poloidal_half_width_max_deg: 70.0  # deg — 140 deg full poloidal width
   curvature_max: 100        # m^-1 — max curvature (HW-verified: selected
                             # conductor has min bending radius ~1 cm)
 
@@ -220,7 +222,7 @@ thresholds:
 # Env var overrides: BANANA_STAGE2_LENGTH_RELAX, BANANA_STAGE2_CC_RELAX,
 # BANANA_STAGE2_CURV_RELAX.
 stage2_relaxation:
-  length:    1.05  # effective length_max      = length_max      * length
+  length:    1.05  # effective length_target   = length_target   * length
   coil_coil: 1.05  # effective coil_coil_min   = coil_coil_min   / coil_coil
   curvature: 1.05  # effective curvature_max   = curvature_max   * curvature
 

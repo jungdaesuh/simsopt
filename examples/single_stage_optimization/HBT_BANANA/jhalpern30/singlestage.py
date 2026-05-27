@@ -338,7 +338,8 @@ def callback(x):
 # ==============================================================================
 # CONFIGURATION PARAMETERS
 # ==============================================================================
-banana_surf_radius = 0.215
+WINDSURF_MAJOR_R = 0.903
+WINDSURF_MINOR_R = 0.142
 banana_surf_nfp = 5
 nphi = 64
 ntheta = 63
@@ -632,11 +633,11 @@ for stage_idx, stage in enumerate(ramp_stages):
     SELFINT_WEIGHT   = 1e2
     CURRENT_WEIGHT   = float(os.environ.get('BANANA_CURRENT_WEIGHT', 1e2))
 
-    CC_DIST             = 0.05
-    CS_DIST             = 0.015
+    CC_DIST             = 0.0462
+    CS_DIST             = 0.01
     CURVATURE_THRESHOLD = 100
     LENGTH_TARGET       = 1.90
-    POLOIDAL_THRESHOLD  = float(os.environ.get('BANANA_POLOIDAL_TARGET_DEG', 45))
+    POLOIDAL_THRESHOLD  = float(os.environ.get('BANANA_POLOIDAL_TARGET_DEG', 70))
     WIDTH_MIN           = 0.05
     WIDTH_MAX           = 0.17
     SELFINT_THRESHOLD   = 1/CURVATURE_THRESHOLD
@@ -657,10 +658,8 @@ for stage_idx, stage in enumerate(ramp_stages):
     JCurveSurface = CurveSurfaceDistance(banana_curves, boozer_surface.surface, CS_DIST)
     JCurvature = LpCurveCurvature(banana_curves[0], 4, CURVATURE_THRESHOLD)
 
-    WINDSURF_MAJOR_R = 0.976
     Jpe = PoloidalExtent(banana_curve, WINDSURF_MAJOR_R, POLOIDAL_THRESHOLD*np.pi/180)
 
-    WINDSURF_MINOR_R = 0.210
     Jw = EllipseWidth(banana_curve, WINDSURF_MAJOR_R, WINDSURF_MINOR_R)
     Jwmin = QuadraticPenalty(Jw, WIDTH_MIN, "min") # don't let it collapse
     Jwmax = QuadraticPenalty(Jw, WIDTH_MAX, "max") # fits through 30 cm port

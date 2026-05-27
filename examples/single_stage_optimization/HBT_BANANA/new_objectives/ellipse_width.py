@@ -103,7 +103,7 @@ class ProjectedEllipseWidth(Optimizable):
     .. code-block:: python
 
         from simsopt.objectives import QuadraticPenalty
-        Jw = ProjectedEllipseWidth(curve, R_winding=0.976, a_winding=0.210)
+        Jw = ProjectedEllipseWidth(curve, R_winding=0.903, a_winding=0.142)
         Jmin = QuadraticPenalty(Jw, 0.05, "min")  # don't let it collapse
         Jmax = QuadraticPenalty(Jw, 0.30, "max")  # fits through 30 cm port
 

@@ -76,6 +76,7 @@ if STAGE2_CURRENT_MODE not in ('free', 'penalized', 'fixed'):
 
 # Hardware engineering tolerances (enforced unmodified by singlestage).
 LENGTH_MAX_HW = float(cfg['thresholds']['length_max'])
+LENGTH_TARGET_HW = float(cfg['thresholds']['length_target'])
 CC_MIN_HW     = float(cfg['thresholds']['coil_coil_min'])
 CURV_MAX_HW   = float(cfg['thresholds']['curvature_max'])
 
@@ -90,7 +91,7 @@ CURV_RELAX   = float(os.environ.get(
     'BANANA_STAGE2_CURV_RELAX',   cfg['stage2_relaxation']['curvature']))
 
 # Effective thresholds seen by the stage 2 objective.
-LENGTH_THRESHOLD = LENGTH_MAX_HW * LENGTH_RELAX
+LENGTH_THRESHOLD = LENGTH_TARGET_HW * LENGTH_RELAX
 CC_THRESHOLD     = CC_MIN_HW     / CC_RELAX
 CURV_THRESHOLD   = CURV_MAX_HW   * CURV_RELAX
 
@@ -194,9 +195,10 @@ INPUT PARAMETERS ─────────────────────
         current_cap_hard = {BANANA_CURRENT_CAP} (L-BFGS-B bound)
 
     Thresholds (HW tolerance × stage 2 relaxation = effective):
-        length_max  = {LENGTH_MAX_HW} m   × {LENGTH_RELAX} = {LENGTH_THRESHOLD} m
-        cc_min      = {CC_MIN_HW} m       / {CC_RELAX}     = {CC_THRESHOLD} m
-        curv_max    = {CURV_MAX_HW} m^-1  × {CURV_RELAX}   = {CURV_THRESHOLD} m^-1
+        length_abs  = {LENGTH_MAX_HW} m
+        length_tgt  = {LENGTH_TARGET_HW} m × {LENGTH_RELAX} = {LENGTH_THRESHOLD} m
+        cc_min      = {CC_MIN_HW} m        / {CC_RELAX}     = {CC_THRESHOLD} m
+        curv_max    = {CURV_MAX_HW} m^-1   × {CURV_RELAX}   = {CURV_THRESHOLD} m^-1
 
     Objective weights:
         squared_flux = {SQF_WEIGHT:.3e}
