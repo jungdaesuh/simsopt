@@ -14,7 +14,6 @@ EXAMPLE_ROOT = (
     / "examples"
     / "single_stage_optimization"
 )
-DONOR_REPAIR_PATH = EXAMPLE_ROOT / "run_single_stage_donor_repair.py"
 DECISION_GATE_PATH = EXAMPLE_ROOT / "run_stage2_iota_decision_gate.py"
 UNIFIED_RUNNER_PATH = EXAMPLE_ROOT / "run_stage2_to_single_stage.py"
 
@@ -28,155 +27,12 @@ def load_module(path: Path, stem: str):
     return module
 
 
-def load_donor_repair_module():
-    return load_module(DONOR_REPAIR_PATH, "run_single_stage_donor_repair")
-
-
 def load_decision_gate_module():
     return load_module(DECISION_GATE_PATH, "run_stage2_iota_decision_gate")
 
 
 def load_unified_runner_module():
     return load_module(UNIFIED_RUNNER_PATH, "run_stage2_to_single_stage")
-
-
-class DonorRepairWrapperTests(unittest.TestCase):
-    def test_dry_run_writes_summary_and_case_commands(self):
-        module = load_donor_repair_module()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            summary_path = root / "summary.json"
-            summary_csv_path = root / "summary.csv"
-            stage2_bs_path = root / "stage2" / "biot_savart_opt.json"
-            stage2_results_path = root / "stage2" / "results.json"
-
-            with patch.object(
-                module.unified_runner,
-                "resolve_stage2_input",
-                return_value={
-                    "source": "generated_artifact",
-                    "stage2_bs_path": stage2_bs_path,
-                    "stage2_results_path": stage2_results_path,
-                    "stage2_results": None,
-                    "artifact_reused": False,
-                    "command": ["python", "run_stage2_alm.py"],
-                    "config_source": "profile:standard_80ka",
-                },
-            ):
-                result = module.main(
-                    [
-                        "--dry-run",
-                        "--plasma-surf-filename",
-                        "demo.nc",
-                        "--stage2-profile",
-                        "standard_80ka",
-                        "--output-root",
-                        str(root / "outputs"),
-                        "--summary-json",
-                        str(summary_path),
-                        "--summary-csv",
-                        str(summary_csv_path),
-                        "--iota-targets",
-                        "0.18,0.2",
-                    ]
-                )
-
-            self.assertEqual(result, 0)
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            self.assertTrue(summary["dry_run"])
-            self.assertEqual(summary["best_case_id"], None)
-            self.assertEqual([case["status"] for case in summary["cases"]], ["dry_run", "dry_run"])
-            self.assertIsNone(summary["cases"][0]["recovery_command"])
-            self.assertIn("case_id", summary_csv_path.read_text(encoding="utf-8"))
-
-    def test_best_donor_manifest_prefers_bootable_case(self):
-        module = load_donor_repair_module()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            stage2_bs_path = root / "stage2" / "biot_savart_opt.json"
-            stage2_results_path = root / "stage2" / "results.json"
-            summary_path = root / "summary.json"
-            best_donor_path = root / "best.json"
-
-            probe_failed = {
-                "BOOZER_BOOTABLE": False,
-                "IOTA_NEAR_TARGET": False,
-                "IOTA_FEASIBLE": False,
-                "BOOTABILITY_REASON": "self_intersection",
-                "BOOTABILITY_STAGE": "probe",
-                "BOOTABILITY_TARGET_IOTA": 0.18,
-                "BOOTABILITY_SOLVED_IOTA": 0.01,
-                "BOOTABILITY_ABS_IOTA_ERROR": 0.17,
-            }
-            probe_bootable = {
-                "BOOZER_BOOTABLE": True,
-                "IOTA_NEAR_TARGET": True,
-                "IOTA_FEASIBLE": True,
-                "BOOTABILITY_REASON": "ok",
-                "BOOTABILITY_STAGE": "probe",
-                "BOOTABILITY_TARGET_IOTA": 0.20,
-                "BOOTABILITY_SOLVED_IOTA": 0.2005,
-                "BOOTABILITY_ABS_IOTA_ERROR": 5.0e-4,
-            }
-            with patch.object(
-                module.unified_runner,
-                "resolve_stage2_input",
-                return_value={
-                    "source": "existing_artifact",
-                    "stage2_bs_path": stage2_bs_path,
-                    "stage2_results_path": stage2_results_path,
-                    "stage2_results": {"PLASMA_SURF_FILENAME": "demo.nc"},
-                    "artifact_reused": True,
-                    "command": None,
-                    "config_source": None,
-                },
-            ), patch.object(
-                module.unified_runner,
-                "build_probe_status",
-                side_effect=[probe_failed, probe_bootable],
-            ), patch.object(
-                module.unified_runner,
-                "run_recovery_stage",
-                return_value={
-                    "status": "completed",
-                    "recovery_succeeded": False,
-                    "recovery_iters": 4,
-                    "recovery_termination_reason": "not_bootable_after_budget",
-                },
-            ) as recovery_mock:
-                result = module.main(
-                    [
-                        "--plasma-surf-filename",
-                        "demo.nc",
-                        "--stage2-bs-path",
-                        str(stage2_bs_path),
-                        "--output-root",
-                        str(root / "outputs"),
-                        "--summary-json",
-                        str(summary_path),
-                        "--best-donor-json",
-                        str(best_donor_path),
-                        "--iota-targets",
-                        "0.18,0.20",
-                    ]
-                )
-
-            self.assertEqual(result, 0)
-            recovery_mock.assert_called_once()
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            self.assertEqual(summary["best_case_id"], "repair_iota_0p2")
-            self.assertEqual(
-                summary["cases"][0]["blocking_reason"],
-                module.unified_runner.BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED,
-            )
-            best_donor = json.loads(best_donor_path.read_text(encoding="utf-8"))
-            self.assertTrue(best_donor["handoff_bootable"])
-            self.assertEqual(
-                best_donor["selected_seed_source"],
-                module.unified_runner.SEED_SOURCE_DIRECT_STAGE2_DONOR,
-            )
 
 
 class UnifiedRunnerStage2InputTests(unittest.TestCase):
@@ -400,24 +256,11 @@ class Stage2DecisionGateTests(unittest.TestCase):
             )
             self.assertIn("mode", summary_csv_path.read_text(encoding="utf-8"))
 
-    def test_decision_gate_prefers_donor_repair_when_report_is_not_bootable(self):
+    def test_decision_gate_nonbootable_report_stays_on_supported_seam(self):
         module = load_decision_gate_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            donor_repair_summary = root / "donor_repair_summary.json"
-            donor_repair_summary.write_text(
-                json.dumps(
-                    {
-                        "best_case": {
-                            "case_id": "repair_iota_0p2",
-                            "handoff_bootable": True,
-                            "selected_seed_source": "recovered_stage2_donor",
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
             summary_path = root / "summary.json"
 
             with patch.object(
@@ -452,8 +295,6 @@ class Stage2DecisionGateTests(unittest.TestCase):
                         "standard_80ka",
                         "--stage2-iota-target",
                         "0.2",
-                        "--donor-repair-summary",
-                        str(donor_repair_summary),
                         "--summary-json",
                         str(summary_path),
                     ]
@@ -463,8 +304,12 @@ class Stage2DecisionGateTests(unittest.TestCase):
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 summary["recommendation"]["recommendation"],
-                "prefer_unified_runner_donor_repair",
+                "stop_at_unified_runner_or_reporting_probe",
             )
+            for payload in (summary, summary["recommendation"]):
+                self.assertTrue(
+                    all(not key.startswith("donor_") for key in payload)
+                )
 
     def test_decision_gate_stops_at_reporting_probe(self):
         module = load_decision_gate_module()

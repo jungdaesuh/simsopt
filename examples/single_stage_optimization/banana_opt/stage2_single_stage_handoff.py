@@ -869,10 +869,9 @@ def boozer_trust_artifact_fields(
 ) -> dict[str, object]:
     """Build the artifact-key payload for a Boozer trust state.
 
-    Always returns the five top-level trust keys (with ``None`` placeholders
-    when no solve has been attempted), so the artifact contract is identical
-    across the off / soft / probe lanes and registry ingest never sees a
-    missing key.
+    Always returns the top-level trust keys (with ``None`` placeholders when no
+    solve has been attempted), so the artifact contract is identical across the
+    default Stage 2 path, report-mode certification, and unified handoff callers.
     """
 
     if trust_state is None:

@@ -1,7 +1,7 @@
 # Stage 2 + Single-Stage Unified Runner Plan
 
 Date: 2026-04-16
-Status: Partially implemented. The unified runner, donor-repair sibling wrapper, shared handoff schema, and Stage 2 iota decision-gate wrapper have landed; remaining items are rollout/measurement follow-ups.
+Status: Partially implemented. The unified runner, shared handoff schema, and Stage 2 iota decision-gate wrapper have landed; the standalone donor-repair sibling wrapper was retired on 2026-05-27; remaining items are rollout/measurement follow-ups.
 Scope: `examples/single_stage_optimization/` user-facing runner orchestration, donor-handoff contract, and shared Boozer probe seam.
 
 ## Implementation Status
@@ -9,9 +9,10 @@ Scope: `examples/single_stage_optimization/` user-facing runner orchestration, d
 The core workflow described here is now live in the working tree:
 
 - `examples/single_stage_optimization/run_stage2_to_single_stage.py`
-- `examples/single_stage_optimization/run_single_stage_donor_repair.py`
 - `examples/single_stage_optimization/banana_opt/stage2_single_stage_handoff.py`
 - `examples/single_stage_optimization/banana_opt/hardware_constraint_schema.py`
+
+Retirement note, 2026-05-27: `examples/single_stage_optimization/run_single_stage_donor_repair.py` was retired after review. The supported Stage 2.5 lane is `run_stage2_to_single_stage.py`; the shared `BOOTABILITY_*` / `RECOVERY_*` helper schema remains live.
 
 The later Stage 2-native benchmark / recommendation layer that this plan feeds is also
 implemented in `examples/single_stage_optimization/run_stage2_iota_decision_gate.py`.
@@ -35,8 +36,8 @@ This document is the **first implementation slice** of the broader root-fix road
 
 - The broader document remains the umbrella strategy and decision log.
 - This document is the concrete execution plan for the sibling plan's **Phase B2** ("Implement The Unified Runner And Reporting-Only Probe"), which explicitly names this file at sibling-plan lines 423–424.
-- The probe and recovery helpers defined here must be reused by any later Stage 2-native reporting, soft, or hard `iota` implementation (sibling plan Phases B3, B4, and B6).
-- The sibling plan's **Phase B7** ("Optional Standalone Donor-Repair Entrypoint") is a later batch-workflow sibling of this runner and must share the same helpers and status schema.
+- The probe and recovery helpers defined here remain the shared path for current Stage 2-native reporting and for any future plan that explicitly reopens the retired `soft`/`alm` hot-loop `iota` lanes.
+- The sibling plan's **Phase B7** ("Optional Standalone Donor-Repair Entrypoint") was a later batch-workflow sibling of this runner; it shared the same helpers and status schema while it existed, then was retired on 2026-05-27.
 - Contract open questions frozen in sibling plan Phase B0 (reference surface, rational-surface blocklist, acceptance tolerances) are inputs here; this document does not re-decide them.
 - This document does **not** compete with the broader plan; it operationalizes the "fix the handoff contract first" path before modifying the Stage 2 hot loop.
 
@@ -98,7 +99,7 @@ Do not call the new step "repair mode" or "bridge" unqualified in code, docstrin
 ### Deliverable
 
 - [x] Add a new wrapper entrypoint, `examples/single_stage_optimization/run_stage2_to_single_stage.py`.
-- [x] Before landing, decide whether to unify with the sibling plan's Phase B7 alias `run_single_stage_donor_repair.py`. → Decision: **coexist**. Both landed (`run_stage2_to_single_stage.py`, `run_single_stage_donor_repair.py`). Both import the same `banana_opt/stage2_single_stage_handoff.py` helpers and emit the same `BOOTABILITY_*`/`RECOVERY_*` payload via `build_bootability_recovery_payload_fields(...)`; no second repair stack was created.
+- [x] Before landing, decide whether to unify with the sibling plan's Phase B7 alias `run_single_stage_donor_repair.py` (retired 2026-05-27). → Historical decision: **coexist**. Both landed (`run_stage2_to_single_stage.py`, retired `run_single_stage_donor_repair.py`). Both imported the same `banana_opt/stage2_single_stage_handoff.py` helpers and emitted the same `BOOTABILITY_*`/`RECOVERY_*` payload via `build_bootability_recovery_payload_fields(...)`; no second repair stack was created.
 
 ### Responsibilities
 
@@ -336,13 +337,13 @@ Manual validation items remain human acceptance steps; they are not tracked in t
 
 ### Step 4
 
-- [ ] Benchmark recovery cost and success rate. → **pending**; scaffolding exists via `run_stage2_iota_decision_gate.py`, but the benchmark data collection/summary is empirical work that still needs to be executed on canonical cases.
-- [ ] Feed those measurements into the broader Stage 2 `iota` decision gate (sibling plan Phase B4). → **pending**.
-- [ ] Decide whether Stage 2 itself needs an `iota`-aware soft term. → **partial**: the soft term is now *available* behind `--stage2-iota-mode=soft` in `banana_coil_solver.py`, but the measurement-driven decision to promote it to default has not been made.
+- [ ] Benchmark recovery cost and success rate for the current `off`/`report` decision-gate path. → **pending**; scaffolding exists via `run_stage2_iota_decision_gate.py`, but canonical empirical runs still need to be collected.
+- [x] Feed those measurements into the broader Stage 2 `iota` decision gate. → Current decision-gate scope is `off`/`report`; retired hot-loop lanes require a new plan to reopen.
+- [x] Decide whether Stage 2 itself needs an `iota`-aware soft term. → Current active workflow keeps Stage 2 hot-loop iota work retired and uses the unified Stage 2.5 handoff/recovery path.
 
 ### Step 5
 
-- [~] Only after the handoff works, reconsider Stage 2-native soft or hard `iota`. → Implementation ladder now present (`off → report → soft → alm` via `--stage2-iota-mode`); promotion / default-mode choice is still pending measurement data.
+- [~] Only after the handoff works, reconsider Stage 2-native soft or hard `iota`. → Historical `soft`/`alm` hot-loop lanes are retired; the active decision-gate runner now measures `off → report` only.
 - [ ] Only after that, reconsider a deeper objective-level merge. → Not undertaken; see Decision Gate below.
 
 ## Decision Gate For A True Merge Later
@@ -370,7 +371,7 @@ Any downstream edits should recheck these anchors before landing.
 
 ## Bottom Line
 
-- [x] Build **one workflow**. → `run_stage2_to_single_stage.py` (plus Phase B7 batch alias `run_single_stage_donor_repair.py` sharing the same helpers).
+- [x] Build **one workflow**. → `run_stage2_to_single_stage.py`; the historical Phase B7 batch alias `run_single_stage_donor_repair.py` shared the same helpers while it existed and was retired on 2026-05-27.
 - [x] Keep **two optimization regimes** (Stage 2 and single-stage). → Stage 2 hot loop remains geometry-only by default; single-stage physics terms live in the recovery and full-run stages.
 - [x] Insert **one explicit Stage 2.5 bootability / bootstrap-recovery contract** between them, named to avoid collision with single-stage's existing `REPAIR_FIRST` / `BRIDGE_ONLY` vocabulary. → `BOOTABILITY_*` / `RECOVERY_*` payload + `UNIFIED_SEED_SOURCE` labels.
 

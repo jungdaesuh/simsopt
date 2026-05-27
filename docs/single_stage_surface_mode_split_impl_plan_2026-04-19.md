@@ -120,7 +120,6 @@ Current wrappers also pass through this behavior, including:
 
 - `run_single_stage_goal_mode_comparison.py`
 - `run_stage2_to_single_stage.py`
-- `run_single_stage_donor_repair.py`
 
 Some wrappers inherit the surface flags transitively through parent parsers rather than redeclaring them locally.
 
@@ -427,7 +426,7 @@ Likely touched files:
 - `banana_opt/surface_mode_contracts.py`
 - `run_single_stage_goal_mode_comparison.py`
 - `run_stage2_to_single_stage.py`
-- `run_single_stage_donor_repair.py`
+- historical `run_single_stage_donor_repair.py` (retired 2026-05-27; no longer an active file target)
 
 Acceptance:
 

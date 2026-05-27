@@ -7,7 +7,6 @@ This directory contains the current banana-coil workflow stack for this reposito
 - wrapper workflows in [run_80ka_baseline_tradeoff_sweep.py](run_80ka_baseline_tradeoff_sweep.py) and [run_finite_current_smoke.py](run_finite_current_smoke.py)
 - generic Stage 2 ALM wrapper in [run_stage2_alm.py](run_stage2_alm.py)
 - unified Stage 2.5 handoff runner in [run_stage2_to_single_stage.py](run_stage2_to_single_stage.py)
-- standalone donor-repair wrapper in [run_single_stage_donor_repair.py](run_single_stage_donor_repair.py)
 - Stage 2 iota decision-gate benchmark wrapper in [run_stage2_iota_decision_gate.py](run_stage2_iota_decision_gate.py)
 - generic single-stage ALM rerun wrapper in [run_single_stage_thresholded_physics_alm.py](run_single_stage_thresholded_physics_alm.py)
 - explicit target-vs-frontier comparison wrapper in [run_single_stage_goal_mode_comparison.py](run_single_stage_goal_mode_comparison.py)
@@ -36,7 +35,7 @@ There are two supported wrapper entrypoints for most day-to-day work:
    This is a finite-current surrogate smoke harness.
    It reuses one frozen coil-only Stage 2 artifact and varies only `--plasma-current-A` through the single-stage surrogate path.
 
-There are two wrapper entrypoints for the general ALM workflow:
+There are several wrapper entrypoints for the general ALM workflow:
 
 3. `run_stage2_alm.py`
    This ensures a Stage 2 ALM artifact from either a named built-in profile or a full explicit Stage 2 spec JSON.
@@ -46,32 +45,28 @@ There are two wrapper entrypoints for the general ALM workflow:
    This is the one-command Stage 2.5 handoff lane.
    It can load or generate a Stage 2 donor, probe Boozer / iota bootability once per donor, optionally run the bounded recovery stage, and then hand off into the full single-stage workflow.
 
-5. `run_single_stage_donor_repair.py`
-   This is the batch donor-repair lane.
-   It reuses the unified handoff helpers over one or more `--iota-target` values, ranks the resulting donors, and writes a best-donor manifest without launching the full single-stage workflow.
-
-6. `run_stage2_iota_decision_gate.py`
+5. `run_stage2_iota_decision_gate.py`
    This is the late-roadmap benchmark / decision-gate lane.
-   It runs the same canonical Stage 2 configuration across `report`, `soft`, and `alm` iota modes, records runtime and bootability / iota metrics, and emits a recommendation about whether Stage 2-native iota work is justified.
+   It runs the same canonical Stage 2 configuration across `off` and `report` iota modes, records runtime and bootability / iota metrics, and emits a recommendation about whether Stage 2-native iota work is justified.
 
-7. `run_single_stage_thresholded_physics_alm.py`
+6. `run_single_stage_thresholded_physics_alm.py`
    This is the generic single-stage ALM rerun lane.
    It requires an explicit Stage 2 artifact plus an explicit plasma surface, pins `--constraint-method alm`, `--alm-formulation thresholded_physics`, and warning-mode hardware handling, and validates that the Stage 2 artifact matches the requested plasma surface before launch.
 
-8. `run_single_stage_goal_mode_comparison.py`
+7. `run_single_stage_goal_mode_comparison.py`
    This is the matched target-vs-frontier comparison lane.
    It requires one explicit Stage 2 artifact plus one explicit plasma surface, runs single-stage twice with identical settings except for `--single-stage-goal-mode {target, frontier}`, validates Stage 2 surface identity, and writes one summary JSON with per-mode metrics plus frontier-minus-target deltas.
 
 There are three wrapper entrypoints for the ISHW analysis / slide-deliverable lane:
 
-9. `run_single_stage_iota_target_sweep.py`
+8. `run_single_stage_iota_target_sweep.py`
    This reuses one explicit Stage 2 donor and sweeps single-stage `--iota-target` over a user-provided list.
    It writes a compact summary JSON plus a slide-friendly CSV without aborting the entire sweep when one target fails.
 
-10. `run_banana_current_scan.py`
+9. `run_banana_current_scan.py`
    This reuses one optimized Stage 2 donor, scales the banana-coil current from zero to the donor current, attempts single-stage init-only Boozer startup at each point, and falls back to standalone Poincare artifacts when Boozer startup fails.
 
-11. `plot_ishw_tradeoffs.py`
+10. `plot_ishw_tradeoffs.py`
    This reads the sweep/scan summaries, generates slide-ready figures, and can optionally rerun and copy a reference Poincare directory into one output bundle.
 
 ## Branch Scope
@@ -113,7 +108,6 @@ examples/single_stage_optimization/
 ├── run_finite_current_smoke.py
 ├── run_stage2_alm.py
 ├── run_stage2_to_single_stage.py
-├── run_single_stage_donor_repair.py
 ├── run_stage2_iota_decision_gate.py
 ├── run_single_stage_iota_target_sweep.py
 ├── run_banana_current_scan.py
@@ -231,29 +225,6 @@ Useful notes:
 - when recovery finishes via a preserved partial artifact, the wrapper now reuses the matching `biot_savart_*` file and saved `surf_*_boozer_surface.json` seed instead of silently cold-starting from the equilibrium again
 - final single-stage `results.json` is augmented with the shared `BOOTABILITY_*`, `RECOVERY_*`, and `UNIFIED_SEED_SOURCE` provenance fields
 
-### Standalone Donor Repair
-
-Use this when you want to batch the Stage 2.5 repair logic over one or more `iota` targets without launching full single-stage:
-
-- requires the same Stage 2 seed inputs as the unified handoff runner
-- accepts one `--iota-target` or a comma-separated `--iota-targets` list
-- reuses the exact same probe and recovery helpers as `run_stage2_to_single_stage.py`
-- writes a ranked summary plus a `best_repaired_donor.json` manifest when at least one bootable donor is found
-
-```bash
-cd /path/to/simsopt-surrogate
-python examples/single_stage_optimization/run_single_stage_donor_repair.py \
-  --plasma-surf-filename wout_nfp10ginsburg_desc_s024match_iota20.nc \
-  --stage2-bs-path /full/path/to/biot_savart_opt.json \
-  --iota-targets 0.18,0.20,0.22
-```
-
-Useful notes:
-
-- `--skip-recovery` ranks direct probe results without attempting bounded recovery
-- the best-donor manifest records the selected donor artifact path plus the shared bootability payload
-- this entrypoint never launches the full single-stage workflow and rejects `--force-full-single-stage-after-recovery-fail`
-
 ### Stage 2 Iota Decision Gate
 
 Use this when you want a reproducible benchmark for the later Track B decision gate:
@@ -261,7 +232,6 @@ Use this when you want a reproducible benchmark for the later Track B decision g
 - runs one canonical Stage 2 configuration across a list of `--benchmark-modes`
 - records wallclock, hardware feasibility, bootability, and Stage 2 iota metrics per mode
 - computes runtime multipliers versus a baseline mode and emits a recommendation about whether to keep pushing Stage 2-native iota work
-- can optionally fold in a prior `run_single_stage_donor_repair.py` summary via `--donor-repair-summary`
 
 ```bash
 cd /path/to/simsopt-surrogate
@@ -273,9 +243,8 @@ python examples/single_stage_optimization/run_stage2_iota_decision_gate.py \
 
 Useful notes:
 
-- default benchmark modes are `report,soft,alm`
-- `--baseline-mode report` compares the hot-loop modes against the probe-only Stage 2 baseline
-- `soft` is the Stage 2 penalty-path Jiota benchmark; `alm` is the hard ALM iota-constraint benchmark
+- default benchmark modes are `off,report`
+- `--baseline-mode report` uses the reporting probe as the runtime and iota-error baseline
 - the summary CSV is designed for direct spreadsheet / slide-table use when discussing runtime multipliers and iota improvement
 
 ### Single-Stage Thresholded-Physics ALM Rerun

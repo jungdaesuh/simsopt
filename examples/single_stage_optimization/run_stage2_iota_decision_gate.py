@@ -13,7 +13,6 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import run_stage2_alm as stage2_alm_runner  # noqa: E402
 from workflow_runner_common import (  # noqa: E402
-    load_json,
     parse_csv,
     resolved_optional_path,
     resolved_path,
@@ -163,15 +162,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "decision gate recommends stopping at the unified-runner seam."
         ),
     )
-    parser.add_argument(
-        "--donor-repair-summary",
-        default=None,
-        help=(
-            "Optional summary JSON from run_single_stage_donor_repair.py. When "
-            "provided, the recommendation can account for whether donor repair "
-            "already solves the practical workflow problem."
-        ),
-    )
     return parser.parse_args(argv)
 
 
@@ -254,20 +244,15 @@ def _recommendation_payload(
     reason: str,
     max_acceptable_runtime_multiplier: float,
     minimum_iota_error_improvement: float,
-    soft_improvement: float | None,
-    soft_multiplier: float | None,
-    alm_multiplier: float | None,
-    donor_repair_signal: dict[str, object] | None,
 ) -> dict[str, object]:
     return {
         "recommendation": recommendation,
         "reason": reason,
         "runtime_multiplier_threshold": max_acceptable_runtime_multiplier,
         "minimum_iota_error_improvement": minimum_iota_error_improvement,
-        "soft_iota_error_improvement": soft_improvement,
-        "soft_runtime_multiplier": soft_multiplier,
-        "alm_runtime_multiplier": alm_multiplier,
-        "donor_repair_signal": donor_repair_signal,
+        "soft_iota_error_improvement": None,
+        "soft_runtime_multiplier": None,
+        "alm_runtime_multiplier": None,
     }
 
 
@@ -363,30 +348,6 @@ def run_mode_case(
     return payload
 
 
-def _load_donor_repair_signal(path: Path | None) -> dict[str, object] | None:
-    if path is None:
-        return None
-    summary = load_json(path)
-    if not isinstance(summary, dict):
-        raise ValueError(
-            f"Donor-repair summary must be a JSON object: {path}"
-        )
-    best_case = summary.get("best_case")
-    if not isinstance(best_case, dict):
-        return {
-            "summary_path": str(path),
-            "best_case_present": False,
-            "best_case_bootable": False,
-        }
-    return {
-        "summary_path": str(path),
-        "best_case_present": True,
-        "best_case_bootable": bool(best_case.get("handoff_bootable")),
-        "best_case_id": best_case.get("case_id"),
-        "selected_seed_source": best_case.get("selected_seed_source"),
-    }
-
-
 def _runtime_multiplier(
     payload: dict[str, object],
     *,
@@ -410,17 +371,8 @@ def _decision_summary(
     baseline_mode: str,
     minimum_iota_error_improvement: float,
     max_acceptable_runtime_multiplier: float,
-    donor_repair_signal: dict[str, object] | None,
 ) -> dict[str, object]:
     baseline_payload = payloads_by_mode.get(baseline_mode)
-    baseline_error = (
-        None
-        if baseline_payload is None
-        else _float_or_none(baseline_payload.get("stage2_iota_abs_error"))
-    )
-    soft_improvement = None
-    soft_multiplier = None
-    alm_multiplier = None
 
     if baseline_payload is None or baseline_payload.get("status") == "dry_run":
         return _recommendation_payload(
@@ -428,33 +380,15 @@ def _decision_summary(
             reason="dry_run_or_missing_baseline",
             max_acceptable_runtime_multiplier=max_acceptable_runtime_multiplier,
             minimum_iota_error_improvement=minimum_iota_error_improvement,
-            soft_improvement=soft_improvement,
-            soft_multiplier=soft_multiplier,
-            alm_multiplier=alm_multiplier,
-            donor_repair_signal=donor_repair_signal,
         )
 
-    donor_repair_bootable = bool(
-        donor_repair_signal is not None
-        and donor_repair_signal.get("best_case_bootable")
-    )
-    if (
-        donor_repair_bootable
-    ):
-        recommendation = "prefer_unified_runner_donor_repair"
-        reason = "donor_repair_already_solves_bootability_with_less_risk"
-    else:
-        recommendation = "stop_at_unified_runner_or_reporting_probe"
-        reason = "stage2_iota_hot_loop_is_deprecated_use_post_gate_report"
+    recommendation = "stop_at_unified_runner_or_reporting_probe"
+    reason = "stage2_iota_hot_loop_is_deprecated_use_post_gate_report"
     return _recommendation_payload(
         recommendation=recommendation,
         reason=reason,
         max_acceptable_runtime_multiplier=max_acceptable_runtime_multiplier,
         minimum_iota_error_improvement=minimum_iota_error_improvement,
-        soft_improvement=soft_improvement,
-        soft_multiplier=soft_multiplier,
-        alm_multiplier=alm_multiplier,
-        donor_repair_signal=donor_repair_signal,
     )
 
 
@@ -476,7 +410,6 @@ def build_summary(
     mode_payloads: list[dict[str, object]],
     summary_csv_path: Path,
     recommendation: dict[str, object],
-    donor_repair_signal: dict[str, object] | None,
 ) -> dict[str, object]:
     return {
         "experiment_family": "stage2_iota_decision_gate",
@@ -487,7 +420,6 @@ def build_summary(
         "summary_csv": str(summary_csv_path),
         "mode_results": mode_payloads,
         "recommendation": recommendation,
-        "donor_repair_signal": donor_repair_signal,
     }
 
 
@@ -506,10 +438,6 @@ def main(argv: list[str] | None = None) -> int:
         output_root=output_root,
         default_filename=DEFAULT_SUMMARY_CSV,
     )
-    donor_repair_signal = _load_donor_repair_signal(
-        resolved_optional_path(args.donor_repair_summary)
-    )
-
     mode_payloads = [
         run_mode_case(
             args,
@@ -525,7 +453,6 @@ def main(argv: list[str] | None = None) -> int:
         baseline_mode=args.baseline_mode,
         minimum_iota_error_improvement=args.minimum_iota_error_improvement,
         max_acceptable_runtime_multiplier=args.max_acceptable_runtime_multiplier,
-        donor_repair_signal=donor_repair_signal,
     )
     write_csv_rows(
         summary_csv_path,
@@ -547,7 +474,6 @@ def main(argv: list[str] | None = None) -> int:
         mode_payloads=mode_payloads,
         summary_csv_path=summary_csv_path,
         recommendation=recommendation,
-        donor_repair_signal=donor_repair_signal,
     )
     write_json(summary_path, summary)
     print(json.dumps(summary, indent=2))
