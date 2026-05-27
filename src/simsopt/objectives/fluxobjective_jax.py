@@ -348,15 +348,15 @@ class SquaredFluxJAX(Optimizable):
         """Build the immutable-spec native path for general JAX-capable fields."""
         coil_dof_extraction_spec = _strict_field_coil_dof_extraction_spec(field)
 
-        def forward(flat_dofs, flux_spec):
+        def forward(flat_dofs, flux_spec, coil_dof_extraction):
             coil_specs = coil_specs_from_dof_extraction_spec(
-                coil_dof_extraction_spec,
+                coil_dof_extraction,
                 flat_dofs,
             )
             coil_set_spec = grouped_coil_set_spec_from_coil_specs(coil_specs)
             return fixed_surface_flux_integral(coil_set_spec, flux_spec)
 
-        self._bind_native_forward(forward)
+        self._bind_native_forward(forward, coil_dof_extraction_spec)
 
     # ------------------------------------------------------------------
     # DOF gathering

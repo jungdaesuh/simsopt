@@ -345,6 +345,32 @@ def test_optimistix_lbfgs_runs_under_strict_host_to_device_transfer_guard():
     assert result.x.shape == (2,)
 
 
+@pytest.mark.xfail(
+    raises=jax.errors.JaxRuntimeError,
+    strict=True,
+    reason=(
+        "Optimistix/Equinox scalar predicate handling is not CUDA "
+        "device-to-host transfer clean under full jax.transfer_guard('disallow')."
+    ),
+)
+def test_optimistix_lbfgs_gpu_full_transfer_guard_upstream_predicate_xfail():
+    try:
+        device = jax.devices("gpu")[0]
+    except RuntimeError:
+        pytest.skip("CUDA device required for full strict-transfer predicate proof.")
+    dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype), device)
+    two = jax.device_put(np.asarray(2.0, dtype=dtype), device)
+
+    with jax.transfer_guard("disallow"):
+        minimize(
+            lambda x: (jnp.vdot(x, x), two * x),
+            x0,
+            driver=Driver.OPTIMISTIX_LBFGS,
+            options=OptimistixLBFGSOptions(maxiter=1),
+        )
+
+
 def test_optimistix_metadata_uses_host_to_device_transfer_guard(monkeypatch):
     events = []
 

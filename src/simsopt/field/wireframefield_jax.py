@@ -19,6 +19,7 @@ from ..jax_core.wireframe import (
     wireframe_segment_B_contributions,
     wireframe_segment_dB_by_dX_contributions,
 )
+from ._jax_common import host_cache_array as _host_cache_array
 from ..geo.surfacerzfourier import SurfaceRZFourier
 from .magneticfield import MagneticField
 
@@ -91,7 +92,7 @@ class WireframeFieldJAX(MagneticField):
         return result
 
     def _B_impl(self, B):
-        B[:] = np.asarray(
+        B[:] = _host_cache_array(
             wireframe_B(
                 self._points_device,
                 self._nodes_device,
@@ -110,7 +111,7 @@ class WireframeFieldJAX(MagneticField):
             self._seg_signs_device,
             self._currents_device,
         )
-        dB[:] = np.asarray(dB_jax, dtype=dB.dtype)
+        dB[:] = _host_cache_array(dB_jax, dtype=dB.dtype)
 
     def dB_by_dsegmentcurrents(self, compute_derivatives):
         """Return unit-current segment field contributions.
@@ -131,7 +132,7 @@ class WireframeFieldJAX(MagneticField):
             if compute_derivatives == 0
             else _wireframe_segment_dB_by_dX_contributions_jit
         )
-        contributions = np.asarray(
+        contributions = _host_cache_array(
             contribution_kernel(
                 self._points_device,
                 self._nodes_device,

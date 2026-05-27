@@ -11,6 +11,7 @@ from ..jax_core.analytic_pure_fields import (
     poloidal_B,
     poloidal_dB,
 )
+from ._jax_common import host_cache_array as _host_cache_array
 from ._jax_common import points_device as _points_device
 from .magneticfield import MagneticField
 
@@ -32,7 +33,7 @@ class PoloidalFieldJAX(MagneticField):
 
     def _B_impl(self, B):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        B[:] = np.asarray(
+        B[:] = _host_cache_array(
             poloidal_B(self._spec, _points_device(points)), dtype=np.float64
         )
 
@@ -46,7 +47,7 @@ class PoloidalFieldJAX(MagneticField):
 
     def _dB_by_dX_impl(self, dB):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        dB[:] = np.asarray(
+        dB[:] = _host_cache_array(
             poloidal_dB(self._spec, _points_device(points)), dtype=np.float64
         )
 

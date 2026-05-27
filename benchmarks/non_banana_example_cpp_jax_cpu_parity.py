@@ -392,7 +392,7 @@ def _lane_numeric_contract(lane_name: str) -> Mapping[str, str]:
 
 
 def _finite_array_summary(value: Any) -> Mapping[str, Any]:
-    array = np.asarray(value)
+    array = artifact_host_array(value)
     if not np.issubdtype(array.dtype, np.number):
         return {"checked": False, "all_finite": True, "nonfinite_count": 0}
     finite = np.isfinite(array)
@@ -718,6 +718,95 @@ def _compare_array(
     if bucket == FLOAT32_SMOKE_TOLERANCE_TIER and _is_gradient_quantity(quantity):
         entry["diagnostic_only"] = True
         entry["diagnostic_reason"] = "float32_smoke_gradient_not_production_parity_gate"
+    return entry
+
+
+def _compare_derived_normal_projection(
+    *,
+    cpu_field: np.ndarray,
+    jax_field: np.ndarray,
+    cpu_normal: np.ndarray,
+    jax_normal: np.ndarray,
+    cpu_projection: np.ndarray,
+    jax_projection: np.ndarray,
+    quantity: str,
+    component: str,
+    active_dof_names: Sequence[str],
+) -> Mapping[str, Any]:
+    """Compare a host-side B.normal projection using source-array budgets."""
+    entry = dict(
+        _compare_array(
+            cpu_arr=cpu_projection,
+            jax_arr=jax_projection,
+            quantity=quantity,
+            component=component,
+            active_dof_names=active_dof_names,
+        )
+    )
+    cpu_field_arr = _runtime_host_float_array(cpu_field)
+    jax_field_arr = _runtime_host_float_array(jax_field)
+    cpu_normal_arr = _runtime_host_float_array(cpu_normal)
+    jax_normal_arr = _runtime_host_float_array(jax_normal)
+    cpu_projection_arr = _runtime_host_float_array(cpu_projection)
+    jax_projection_arr = _runtime_host_float_array(jax_projection)
+    expected_projection_shape = cpu_field_arr.shape[:-1]
+    source_shapes_match = (
+        cpu_field_arr.shape == jax_field_arr.shape
+        and cpu_field_arr.shape == cpu_normal_arr.shape
+        and cpu_normal_arr.shape == jax_normal_arr.shape
+        and cpu_projection_arr.shape == jax_projection_arr.shape
+        and cpu_projection_arr.shape == expected_projection_shape
+    )
+    if not source_shapes_match:
+        entry["verdict"] = "fail"
+        entry["failure_reason"] = (
+            "normal projection source shape mismatch: "
+            f"cpu_field={cpu_field_arr.shape}, jax_field={jax_field_arr.shape}, "
+            f"cpu_normal={cpu_normal_arr.shape}, jax_normal={jax_normal_arr.shape}, "
+            f"cpu_projection={cpu_projection_arr.shape}, "
+            f"jax_projection={jax_projection_arr.shape}"
+        )
+        return entry
+
+    _, field_rtol, field_atol = _tolerance_for("wireframe_field_B")
+    _, normal_rtol, normal_atol = _tolerance_for("surface_unit_normal")
+    field_budget = field_atol + field_rtol * np.abs(cpu_field_arr)
+    normal_budget = normal_atol + normal_rtol * np.abs(cpu_normal_arr)
+    projection_budget = np.sum(
+        np.abs(cpu_normal_arr) * field_budget
+        + np.abs(cpu_field_arr) * normal_budget
+        + field_budget * normal_budget,
+        axis=-1,
+    )
+    abs_diff = np.abs(jax_projection_arr - cpu_projection_arr)
+    excess = abs_diff - projection_budget
+    projection_argmax_flat = int(excess.argmax()) if excess.size else 0
+    if excess.size:
+        projection_argmax_index = np.unravel_index(
+            projection_argmax_flat,
+            excess.shape,
+        )
+    else:
+        projection_argmax_index = ()
+    entry["derived_from_quantities"] = [
+        "wireframe_field_B",
+        "surface_unit_normal",
+    ]
+    entry["derived_projection_budget_max"] = (
+        float(projection_budget.max()) if projection_budget.size else 0.0
+    )
+    entry["derived_projection_budget_at_argmax"] = (
+        float(projection_budget[projection_argmax_index])
+        if projection_budget.size
+        else 0.0
+    )
+    entry["derived_projection_max_excess"] = (
+        float(excess[projection_argmax_index]) if excess.size else 0.0
+    )
+    entry["derived_projection_argmax_index"] = [
+        int(i) for i in np.atleast_1d(projection_argmax_index).tolist()
+    ]
+    entry["verdict"] = "pass" if bool(np.all(abs_diff <= projection_budget)) else "fail"
     return entry
 
 
@@ -1605,9 +1694,13 @@ def _wireframe_comparisons(
             component="WireframeField",
             active_dof_names=cpu.active_dof_names,
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["Bnormal"],
-            jax_arr=jax_lane.raw_arrays["Bnormal"],
+        _compare_derived_normal_projection(
+            cpu_field=cpu.raw_arrays["field_B"],
+            jax_field=jax_lane.raw_arrays["field_B"],
+            cpu_normal=cpu.raw_arrays["surface_unit_normal"],
+            jax_normal=jax_lane.raw_arrays["surface_unit_normal"],
+            cpu_projection=cpu.raw_arrays["Bnormal"],
+            jax_projection=jax_lane.raw_arrays["Bnormal"],
             quantity="wireframe_Bnormal",
             component="WireframeField",
             active_dof_names=cpu.active_dof_names,
@@ -1736,6 +1829,11 @@ def _wireframe_gsco_comparisons(
             "check_constraints",
         ),
         (
+            "surface_unit_normal",
+            "surface_unit_normal",
+            "wireframe_surface",
+        ),
+        (
             "field_B",
             "wireframe_field_B",
             "WireframeField",
@@ -1748,15 +1846,30 @@ def _wireframe_gsco_comparisons(
     )
     for raw_key, quantity, component in optional_array_comparisons:
         if raw_key in cpu.raw_arrays and raw_key in jax_lane.raw_arrays:
-            comparisons.append(
-                _compare_array(
-                    cpu_arr=cpu.raw_arrays[raw_key],
-                    jax_arr=jax_lane.raw_arrays[raw_key],
-                    quantity=quantity,
-                    component=component,
-                    active_dof_names=cpu.active_dof_names,
+            if raw_key == "Bnormal":
+                comparisons.append(
+                    _compare_derived_normal_projection(
+                        cpu_field=cpu.raw_arrays["field_B"],
+                        jax_field=jax_lane.raw_arrays["field_B"],
+                        cpu_normal=cpu.raw_arrays["surface_unit_normal"],
+                        jax_normal=jax_lane.raw_arrays["surface_unit_normal"],
+                        cpu_projection=cpu.raw_arrays[raw_key],
+                        jax_projection=jax_lane.raw_arrays[raw_key],
+                        quantity=quantity,
+                        component=component,
+                        active_dof_names=cpu.active_dof_names,
+                    )
                 )
-            )
+            else:
+                comparisons.append(
+                    _compare_array(
+                        cpu_arr=cpu.raw_arrays[raw_key],
+                        jax_arr=jax_lane.raw_arrays[raw_key],
+                        quantity=quantity,
+                        component=component,
+                        active_dof_names=cpu.active_dof_names,
+                    )
+                )
     return comparisons
 
 
@@ -2765,6 +2878,14 @@ def _jax_cpu_vs_followup_comparisons(
             f"comparison count {len(followup_comparisons)}."
         )
 
+    baseline_by_key = {
+        (comparison.get("quantity"), comparison.get("component")): comparison
+        for comparison in baseline_comparisons
+    }
+    followup_by_key = {
+        (comparison.get("quantity"), comparison.get("component")): comparison
+        for comparison in followup_comparisons
+    }
     comparisons = []
     for baseline_comparison, followup_comparison in zip(
         baseline_comparisons,
@@ -2783,6 +2904,56 @@ def _jax_cpu_vs_followup_comparisons(
                 f"{followup_result.fixture_id}: comparison mismatch "
                 f"{baseline_key!r} != {followup_key!r}."
             )
+        if baseline_key == ("wireframe_Bnormal", "WireframeField"):
+            field_key = ("wireframe_field_B", "WireframeField")
+            normal_key = ("surface_unit_normal", "wireframe_surface")
+            if field_key not in baseline_by_key or field_key not in followup_by_key:
+                raise RuntimeError(
+                    f"{followup_result.fixture_id}: wireframe_Bnormal follow-up "
+                    "comparison requires wireframe_field_B source comparisons."
+                )
+            if normal_key not in baseline_by_key or normal_key not in followup_by_key:
+                raise RuntimeError(
+                    f"{followup_result.fixture_id}: wireframe_Bnormal follow-up "
+                    "comparison requires surface_unit_normal source comparisons."
+                )
+            derived_entry = _compare_derived_normal_projection(
+                cpu_field=_right_value_for_comparison(
+                    baseline_by_key[field_key],
+                    lane_name=LANE_JAX_CPU,
+                ),
+                jax_field=_right_value_for_comparison(
+                    followup_by_key[field_key],
+                    lane_name=followup_lane_name,
+                ),
+                cpu_normal=_right_value_for_comparison(
+                    baseline_by_key[normal_key],
+                    lane_name=LANE_JAX_CPU,
+                ),
+                jax_normal=_right_value_for_comparison(
+                    followup_by_key[normal_key],
+                    lane_name=followup_lane_name,
+                ),
+                cpu_projection=_right_value_for_comparison(
+                    baseline_comparison,
+                    lane_name=LANE_JAX_CPU,
+                ),
+                jax_projection=_right_value_for_comparison(
+                    followup_comparison,
+                    lane_name=followup_lane_name,
+                ),
+                quantity=str(followup_comparison["quantity"]),
+                component=str(followup_comparison["component"]),
+                active_dof_names=(),
+            )
+            comparisons.append(
+                _retarget_comparison_entry(
+                    derived_entry,
+                    left_lane=LANE_JAX_CPU,
+                    right_lane=followup_lane_name,
+                )
+            )
+            continue
         comparisons.append(
             _compare_json_values(
                 left_value=_right_value_for_comparison(

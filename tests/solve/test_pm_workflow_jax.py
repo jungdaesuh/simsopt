@@ -264,12 +264,12 @@ def test_pm_initial_states_allow_strict_host_to_device_transfer_guard():
             arbvec_spec,
             history_capacity=3,
         )
-        assert np.asarray(pm_gpmo_never_stop(baseline_state)).item() is False
-        assert np.asarray(pm_gpmo_multi_never_stop(multi_state)).item() is False
-        assert np.asarray(pm_gpmo_arbvec_never_stop(arbvec_state)).item() is False
         assert baseline_state.x.shape == (ndipoles, 3)
         assert multi_state.selected_groups.shape == (3, 1)
         assert arbvec_state.available.shape == (ndipoles,)
+    assert bool(jax.device_get(pm_gpmo_never_stop(baseline_state))) is False
+    assert bool(jax.device_get(pm_gpmo_multi_never_stop(multi_state))) is False
+    assert bool(jax.device_get(pm_gpmo_arbvec_never_stop(arbvec_state))) is False
 
 
 def _run_step_by_step(

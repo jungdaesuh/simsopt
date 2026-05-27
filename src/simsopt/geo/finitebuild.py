@@ -2,6 +2,7 @@ import numpy as np
 from jax import vjp
 import jax.numpy as jnp
 
+from .._core.jax_host_boundary import host_array as _host_array
 from .._core.optimizable import _is_runtime_jax_value, _runtime_scalar_mul
 from ..jax_core._math_utils import as_runtime_float64 as _as_runtime_float64
 from .framedcurve import (
@@ -41,6 +42,12 @@ def _runtime_zeros_like(value):
     if _is_runtime_jax_value(value):
         return jnp.zeros_like(value)
     return np.zeros_like(value)
+
+
+def _host_cache_array(value):
+    if _is_runtime_jax_value(value):
+        return _host_array(value, dtype=np.float64)
+    return np.asarray(value, dtype=np.float64)
 
 
 class CurveFilament(FramedCurve):
@@ -87,7 +94,7 @@ class CurveFilament(FramedCurve):
         assert quadpoints.shape[0] == self.curve.quadpoints.shape[0]
         assert np.linalg.norm(quadpoints - self.curve.quadpoints) < 1e-15
         t, n, b = self.framedcurve.rotated_frame()
-        gamma[:] = (
+        gamma[:] = _host_cache_array(
             _runtime_array_like(self.curve.gamma(), reference=n)
             + _runtime_scalar_mul(self.dn, n)
             + _runtime_scalar_mul(self.db, b)
@@ -95,7 +102,7 @@ class CurveFilament(FramedCurve):
 
     def gammadash_impl(self, gammadash):
         td, nd, bd = self.framedcurve.rotated_frame_dash()
-        gammadash[:] = (
+        gammadash[:] = _host_cache_array(
             _runtime_array_like(self.curve.gammadash(), reference=nd)
             + _runtime_scalar_mul(self.dn, nd)
             + _runtime_scalar_mul(self.db, bd)

@@ -68,6 +68,11 @@ def _zero_dependency(*values: jax.Array) -> jax.Array:
     return zero
 
 
+def _host_float64(value: object) -> np.ndarray:
+    with jax.transfer_guard_device_to_host("allow"):
+        return np.asarray(jax.device_get(value), dtype=np.float64)
+
+
 def _frame_twist(
     gammadash: jax.Array,
     t: jax.Array,
@@ -348,18 +353,14 @@ class FrameRotationJAX(Optimizable):
     def dalpha_by_dcoeff_vjp(self, quadpoints: object, v: object) -> Derivative:
         del quadpoints  # Jacobian is precomputed for ``self.quadpoints``.
         gradient = (
-            self.scale
-            * np.asarray(self.jac, dtype=np.float64).T
-            @ np.asarray(v, dtype=np.float64)
+            self.scale * np.asarray(self.jac, dtype=np.float64).T @ _host_float64(v)
         )
         return Derivative({self: gradient})
 
     def dalphadash_by_dcoeff_vjp(self, quadpoints: object, v: object) -> Derivative:
         del quadpoints
         gradient = (
-            self.scale
-            * np.asarray(self.jacdash, dtype=np.float64).T
-            @ np.asarray(v, dtype=np.float64)
+            self.scale * np.asarray(self.jacdash, dtype=np.float64).T @ _host_float64(v)
         )
         return Derivative({self: gradient})
 

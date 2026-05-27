@@ -109,6 +109,7 @@ from ..jax_core.regular_grid_interp import (
     RegularGridInterpolant3DSpec,
     UniformInterpolationRule as _jax_core_uniform_rule,
 )
+from ._jax_common import host_cache_array as _host_cache_array
 
 __all__ = [
     "BoozerAnalyticFrozenState",
@@ -121,6 +122,18 @@ __all__ = [
     "freeze_boozer_radial_state",
     "freeze_interpolated_boozer_field_state",
 ]
+
+
+def _host_array(value) -> np.ndarray:
+    return _host_cache_array(value, dtype=np.float64)
+
+
+def _host_column(value) -> np.ndarray:
+    return _host_array(_as_column(value))
+
+
+def _host_stack(values, *, axis: int = 1) -> np.ndarray:
+    return _host_array(jnp.stack(values, axis=axis))
 
 
 # ----------------------------------------------------------------------
@@ -311,111 +324,126 @@ class BoozerRadialInterpolantJAX(Optimizable):
         return cached
 
     def modB(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("modB", _eval_modB)))
+        return _host_column(self._cached("modB", _eval_modB))
 
     def dmodBdtheta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dmodBdtheta", _eval_dmodBdtheta)))
+        return _host_column(self._cached("dmodBdtheta", _eval_dmodBdtheta))
 
     def dmodBdzeta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dmodBdzeta", _eval_dmodBdzeta)))
+        return _host_column(self._cached("dmodBdzeta", _eval_dmodBdzeta))
 
     def dmodBds(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dmodBds", _eval_dmodBds)))
+        return _host_column(self._cached("dmodBds", _eval_dmodBds))
 
     def modB_derivs(self) -> np.ndarray:
-        ds = np.asarray(self._cached("dmodBds", _eval_dmodBds))
-        dtheta = np.asarray(self._cached("dmodBdtheta", _eval_dmodBdtheta))
-        dzeta = np.asarray(self._cached("dmodBdzeta", _eval_dmodBdzeta))
-        return np.stack([ds, dtheta, dzeta], axis=1)
+        return _host_stack(
+            [
+                self._cached("dmodBds", _eval_dmodBds),
+                self._cached("dmodBdtheta", _eval_dmodBdtheta),
+                self._cached("dmodBdzeta", _eval_dmodBdzeta),
+            ]
+        )
 
     def K(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("K", _eval_K)))
+        return _host_column(self._cached("K", _eval_K))
 
     def dKdtheta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dKdtheta", _eval_dKdtheta)))
+        return _host_column(self._cached("dKdtheta", _eval_dKdtheta))
 
     def dKdzeta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dKdzeta", _eval_dKdzeta)))
+        return _host_column(self._cached("dKdzeta", _eval_dKdzeta))
 
     def K_derivs(self) -> np.ndarray:
-        dtheta = np.asarray(self._cached("dKdtheta", _eval_dKdtheta))
-        dzeta = np.asarray(self._cached("dKdzeta", _eval_dKdzeta))
-        return np.stack([dtheta, dzeta], axis=1)
+        return _host_stack(
+            [
+                self._cached("dKdtheta", _eval_dKdtheta),
+                self._cached("dKdzeta", _eval_dKdzeta),
+            ]
+        )
 
     def nu(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("nu", _eval_nu)))
+        return _host_column(self._cached("nu", _eval_nu))
 
     def dnudtheta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dnudtheta", _eval_dnudtheta)))
+        return _host_column(self._cached("dnudtheta", _eval_dnudtheta))
 
     def dnudzeta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dnudzeta", _eval_dnudzeta)))
+        return _host_column(self._cached("dnudzeta", _eval_dnudzeta))
 
     def dnuds(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dnuds", _eval_dnuds)))
+        return _host_column(self._cached("dnuds", _eval_dnuds))
 
     def nu_derivs(self) -> np.ndarray:
-        ds = np.asarray(self._cached("dnuds", _eval_dnuds))
-        dtheta = np.asarray(self._cached("dnudtheta", _eval_dnudtheta))
-        dzeta = np.asarray(self._cached("dnudzeta", _eval_dnudzeta))
-        return np.stack([ds, dtheta, dzeta], axis=1)
+        return _host_stack(
+            [
+                self._cached("dnuds", _eval_dnuds),
+                self._cached("dnudtheta", _eval_dnudtheta),
+                self._cached("dnudzeta", _eval_dnudzeta),
+            ]
+        )
 
     def R(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("R", _eval_R)))
+        return _host_column(self._cached("R", _eval_R))
 
     def dRdtheta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dRdtheta", _eval_dRdtheta)))
+        return _host_column(self._cached("dRdtheta", _eval_dRdtheta))
 
     def dRdzeta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dRdzeta", _eval_dRdzeta)))
+        return _host_column(self._cached("dRdzeta", _eval_dRdzeta))
 
     def dRds(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dRds", _eval_dRds)))
+        return _host_column(self._cached("dRds", _eval_dRds))
 
     def R_derivs(self) -> np.ndarray:
-        ds = np.asarray(self._cached("dRds", _eval_dRds))
-        dtheta = np.asarray(self._cached("dRdtheta", _eval_dRdtheta))
-        dzeta = np.asarray(self._cached("dRdzeta", _eval_dRdzeta))
-        return np.stack([ds, dtheta, dzeta], axis=1)
+        return _host_stack(
+            [
+                self._cached("dRds", _eval_dRds),
+                self._cached("dRdtheta", _eval_dRdtheta),
+                self._cached("dRdzeta", _eval_dRdzeta),
+            ]
+        )
 
     def Z(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("Z", _eval_Z)))
+        return _host_column(self._cached("Z", _eval_Z))
 
     def dZdtheta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dZdtheta", _eval_dZdtheta)))
+        return _host_column(self._cached("dZdtheta", _eval_dZdtheta))
 
     def dZdzeta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dZdzeta", _eval_dZdzeta)))
+        return _host_column(self._cached("dZdzeta", _eval_dZdzeta))
 
     def dZds(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dZds", _eval_dZds)))
+        return _host_column(self._cached("dZds", _eval_dZds))
 
     def Z_derivs(self) -> np.ndarray:
-        ds = np.asarray(self._cached("dZds", _eval_dZds))
-        dtheta = np.asarray(self._cached("dZdtheta", _eval_dZdtheta))
-        dzeta = np.asarray(self._cached("dZdzeta", _eval_dZdzeta))
-        return np.stack([ds, dtheta, dzeta], axis=1)
+        return _host_stack(
+            [
+                self._cached("dZds", _eval_dZds),
+                self._cached("dZdtheta", _eval_dZdtheta),
+                self._cached("dZdzeta", _eval_dZdzeta),
+            ]
+        )
 
     def psip(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("psip", _eval_psip)))
+        return _host_column(self._cached("psip", _eval_psip))
 
     def G(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("G", _eval_G)))
+        return _host_column(self._cached("G", _eval_G))
 
     def I(self) -> np.ndarray:  # noqa: E743 — matches upstream API name
-        return np.asarray(_as_column(self._cached("I", _eval_I)))
+        return _host_column(self._cached("I", _eval_I))
 
     def iota(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("iota", _eval_iota)))
+        return _host_column(self._cached("iota", _eval_iota))
 
     def dGds(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dGds", _eval_dGds)))
+        return _host_column(self._cached("dGds", _eval_dGds))
 
     def dIds(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dIds", _eval_dIds)))
+        return _host_column(self._cached("dIds", _eval_dIds))
 
     def diotads(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("diotads", _eval_diotads)))
+        return _host_column(self._cached("diotads", _eval_diotads))
 
 
 # ----------------------------------------------------------------------
@@ -553,61 +581,63 @@ class BoozerAnalyticJAX(Optimizable):
         return cached
 
     def modB(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("modB", _eval_analytic_modB)))
+        return _host_column(self._cached("modB", _eval_analytic_modB))
 
     def dmodBds(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dmodBds", _eval_analytic_dmodBds)))
+        return _host_column(self._cached("dmodBds", _eval_analytic_dmodBds))
 
     def dmodBdtheta(self) -> np.ndarray:
-        return np.asarray(
-            _as_column(self._cached("dmodBdtheta", _eval_analytic_dmodBdtheta))
-        )
+        return _host_column(self._cached("dmodBdtheta", _eval_analytic_dmodBdtheta))
 
     def dmodBdzeta(self) -> np.ndarray:
-        return np.asarray(
-            _as_column(self._cached("dmodBdzeta", _eval_analytic_dmodBdzeta))
-        )
+        return _host_column(self._cached("dmodBdzeta", _eval_analytic_dmodBdzeta))
 
     def modB_derivs(self) -> np.ndarray:
-        ds = np.asarray(self._cached("dmodBds", _eval_analytic_dmodBds))
-        dtheta = np.asarray(self._cached("dmodBdtheta", _eval_analytic_dmodBdtheta))
-        dzeta = np.asarray(self._cached("dmodBdzeta", _eval_analytic_dmodBdzeta))
-        return np.stack([ds, dtheta, dzeta], axis=1)
+        return _host_stack(
+            [
+                self._cached("dmodBds", _eval_analytic_dmodBds),
+                self._cached("dmodBdtheta", _eval_analytic_dmodBdtheta),
+                self._cached("dmodBdzeta", _eval_analytic_dmodBdzeta),
+            ]
+        )
 
     def K(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("K", _eval_analytic_K)))
+        return _host_column(self._cached("K", _eval_analytic_K))
 
     def dKdtheta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dKdtheta", _eval_analytic_dKdtheta)))
+        return _host_column(self._cached("dKdtheta", _eval_analytic_dKdtheta))
 
     def dKdzeta(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dKdzeta", _eval_analytic_dKdzeta)))
+        return _host_column(self._cached("dKdzeta", _eval_analytic_dKdzeta))
 
     def K_derivs(self) -> np.ndarray:
-        dtheta = np.asarray(self._cached("dKdtheta", _eval_analytic_dKdtheta))
-        dzeta = np.asarray(self._cached("dKdzeta", _eval_analytic_dKdzeta))
-        return np.stack([dtheta, dzeta], axis=1)
+        return _host_stack(
+            [
+                self._cached("dKdtheta", _eval_analytic_dKdtheta),
+                self._cached("dKdzeta", _eval_analytic_dKdzeta),
+            ]
+        )
 
     def G(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("G", _eval_analytic_G)))
+        return _host_column(self._cached("G", _eval_analytic_G))
 
     def dGds(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dGds", _eval_analytic_dGds)))
+        return _host_column(self._cached("dGds", _eval_analytic_dGds))
 
     def I(self) -> np.ndarray:  # noqa: E743 — matches upstream API name
-        return np.asarray(_as_column(self._cached("I", _eval_analytic_I)))
+        return _host_column(self._cached("I", _eval_analytic_I))
 
     def dIds(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("dIds", _eval_analytic_dIds)))
+        return _host_column(self._cached("dIds", _eval_analytic_dIds))
 
     def iota(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("iota", _eval_analytic_iota)))
+        return _host_column(self._cached("iota", _eval_analytic_iota))
 
     def diotads(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("diotads", _eval_analytic_diotads)))
+        return _host_column(self._cached("diotads", _eval_analytic_diotads))
 
     def psip(self) -> np.ndarray:
-        return np.asarray(_as_column(self._cached("psip", _eval_analytic_psip)))
+        return _host_column(self._cached("psip", _eval_analytic_psip))
 
 
 class InterpolatedBoozerFieldJAX(Optimizable):
@@ -817,108 +847,108 @@ class InterpolatedBoozerFieldJAX(Optimizable):
 
     # Flux-function scalars — all (N, 1) shape
     def psip(self) -> np.ndarray:
-        return np.asarray(self._cached("psip"))
+        return _host_array(self._cached("psip"))
 
     def G(self) -> np.ndarray:
-        return np.asarray(self._cached("G"))
+        return _host_array(self._cached("G"))
 
     def I(self) -> np.ndarray:  # noqa: E743 — matches CPU API name
-        return np.asarray(self._cached("I"))
+        return _host_array(self._cached("I"))
 
     def iota(self) -> np.ndarray:
-        return np.asarray(self._cached("iota"))
+        return _host_array(self._cached("iota"))
 
     def dGds(self) -> np.ndarray:
-        return np.asarray(self._cached("dGds"))
+        return _host_array(self._cached("dGds"))
 
     def dIds(self) -> np.ndarray:
-        return np.asarray(self._cached("dIds"))
+        return _host_array(self._cached("dIds"))
 
     def diotads(self) -> np.ndarray:
-        return np.asarray(self._cached("diotads"))
+        return _host_array(self._cached("diotads"))
 
     # modB family
     def modB(self) -> np.ndarray:
-        return np.asarray(self._cached("modB"))
+        return _host_array(self._cached("modB"))
 
     def dmodBdtheta(self) -> np.ndarray:
-        return np.asarray(self._cached("dmodBdtheta"))
+        return _host_array(self._cached("dmodBdtheta"))
 
     def dmodBdzeta(self) -> np.ndarray:
-        return np.asarray(self._cached("dmodBdzeta"))
+        return _host_array(self._cached("dmodBdzeta"))
 
     def dmodBds(self) -> np.ndarray:
-        return np.asarray(self._cached("dmodBds"))
+        return _host_array(self._cached("dmodBds"))
 
     def modB_derivs(self) -> np.ndarray:
-        return np.asarray(self._cached("modB_derivs"))
+        return _host_array(self._cached("modB_derivs"))
 
     def d2modBdtheta2(self) -> np.ndarray:
-        return np.asarray(self._cached("d2modBdtheta2"))
+        return _host_array(self._cached("d2modBdtheta2"))
 
     def d2modBdzeta2(self) -> np.ndarray:
-        return np.asarray(self._cached("d2modBdzeta2"))
+        return _host_array(self._cached("d2modBdzeta2"))
 
     def d2modBdthetadzeta(self) -> np.ndarray:
-        return np.asarray(self._cached("d2modBdthetadzeta"))
+        return _host_array(self._cached("d2modBdthetadzeta"))
 
     # K family
     def K(self) -> np.ndarray:
-        return np.asarray(self._cached("K"))
+        return _host_array(self._cached("K"))
 
     def dKdtheta(self) -> np.ndarray:
-        return np.asarray(self._cached("dKdtheta"))
+        return _host_array(self._cached("dKdtheta"))
 
     def dKdzeta(self) -> np.ndarray:
-        return np.asarray(self._cached("dKdzeta"))
+        return _host_array(self._cached("dKdzeta"))
 
     def K_derivs(self) -> np.ndarray:
-        return np.asarray(self._cached("K_derivs"))
+        return _host_array(self._cached("K_derivs"))
 
     # nu family
     def nu(self) -> np.ndarray:
-        return np.asarray(self._cached("nu"))
+        return _host_array(self._cached("nu"))
 
     def dnudtheta(self) -> np.ndarray:
-        return np.asarray(self._cached("dnudtheta"))
+        return _host_array(self._cached("dnudtheta"))
 
     def dnudzeta(self) -> np.ndarray:
-        return np.asarray(self._cached("dnudzeta"))
+        return _host_array(self._cached("dnudzeta"))
 
     def dnuds(self) -> np.ndarray:
-        return np.asarray(self._cached("dnuds"))
+        return _host_array(self._cached("dnuds"))
 
     def nu_derivs(self) -> np.ndarray:
-        return np.asarray(self._cached("nu_derivs"))
+        return _host_array(self._cached("nu_derivs"))
 
     # R family
     def R(self) -> np.ndarray:
-        return np.asarray(self._cached("R"))
+        return _host_array(self._cached("R"))
 
     def dRdtheta(self) -> np.ndarray:
-        return np.asarray(self._cached("dRdtheta"))
+        return _host_array(self._cached("dRdtheta"))
 
     def dRdzeta(self) -> np.ndarray:
-        return np.asarray(self._cached("dRdzeta"))
+        return _host_array(self._cached("dRdzeta"))
 
     def dRds(self) -> np.ndarray:
-        return np.asarray(self._cached("dRds"))
+        return _host_array(self._cached("dRds"))
 
     def R_derivs(self) -> np.ndarray:
-        return np.asarray(self._cached("R_derivs"))
+        return _host_array(self._cached("R_derivs"))
 
     # Z family
     def Z(self) -> np.ndarray:
-        return np.asarray(self._cached("Z"))
+        return _host_array(self._cached("Z"))
 
     def dZdtheta(self) -> np.ndarray:
-        return np.asarray(self._cached("dZdtheta"))
+        return _host_array(self._cached("dZdtheta"))
 
     def dZdzeta(self) -> np.ndarray:
-        return np.asarray(self._cached("dZdzeta"))
+        return _host_array(self._cached("dZdzeta"))
 
     def dZds(self) -> np.ndarray:
-        return np.asarray(self._cached("dZds"))
+        return _host_array(self._cached("dZds"))
 
     def Z_derivs(self) -> np.ndarray:
-        return np.asarray(self._cached("Z_derivs"))
+        return _host_array(self._cached("Z_derivs"))

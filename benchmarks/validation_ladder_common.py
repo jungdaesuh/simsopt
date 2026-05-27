@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import MutableMapping
 import json
 import os
 from pathlib import Path
@@ -34,7 +35,19 @@ _JAX_PLATFORM_ENV_VARS = (
     "SIMSOPT_JAX_PLATFORM",
     "SIMSOPT_JAX_BACKEND",
 )
-_JAX_CUDA_MEMORY_ENV_VARS = ("XLA_PYTHON_CLIENT_PREALLOCATE",)
+_JAX_CUDA_MEMORY_ENV_VARS = (
+    "XLA_PYTHON_CLIENT_PREALLOCATE",
+    "XLA_PYTHON_CLIENT_MEM_FRACTION",
+    "XLA_CLIENT_MEM_FRACTION",
+    "XLA_PYTHON_CLIENT_ALLOCATOR",
+    "TF_GPU_ALLOCATOR",
+)
+_SIMSOPT_GPU_MEMORY_ENV_VARS = (
+    "SIMSOPT_JAX_GPU_PREALLOCATE",
+    "SIMSOPT_JAX_GPU_MEM_FRACTION",
+    "SIMSOPT_JAX_GPU_ALLOCATOR",
+    "SIMSOPT_TF_GPU_ALLOCATOR",
+)
 _JAX_COMPILATION_CACHE_ENV_VAR = "JAX_COMPILATION_CACHE_DIR"
 _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR = (
     "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"
@@ -50,7 +63,9 @@ _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR = "SIMSOPT_JAX_COMPILATION_CACHE_POLIC
 _SIMSOPT_BACKEND_MODE_ENV_VAR = "SIMSOPT_BACKEND_MODE"
 _SIMSOPT_BACKEND_STRICT_ENV_VAR = "SIMSOPT_BACKEND_STRICT"
 _SIMSOPT_TRANSFER_GUARD_ENV_VAR = "SIMSOPT_JAX_TRANSFER_GUARD"
+_SIMSOPT_EXAMPLE_PARITY_PLATFORM_ENV_VAR = "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM"
 _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR = "TARGET_LANE_ACCEPTED_STEP_SYNC"
+_GPU_BACKEND_MODES = frozenset({"jax_gpu_fast", "jax_gpu_parity"})
 _SIMSOPT_REPO_SHA_ENV_VAR = "SIMSOPT_REPO_SHA"
 _SIMSOPT_GIT_STATUS_SHORT_ENV_VAR = "SIMSOPT_GIT_STATUS_SHORT"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -107,6 +122,32 @@ def preparse_platform(argv: list[str]) -> str:
 def apply_requested_platform(platform: str) -> None:
     """Pin JAX to a specific platform before importing the package."""
     _apply_platform_env(os.environ, platform)
+
+
+def snapshot_cuda_memory_env(
+    env: MutableMapping[str, str] = os.environ,
+) -> dict[str, str]:
+    """Capture CUDA memory-policy variables that should be forwarded to children."""
+    return {
+        name: env[name]
+        for name in (*_JAX_CUDA_MEMORY_ENV_VARS, *_SIMSOPT_GPU_MEMORY_ENV_VARS)
+        if name in env
+    }
+
+
+def isolate_parent_cuda_memory_allocator(
+    platform: str,
+    env: MutableMapping[str, str] = os.environ,
+) -> dict[str, str]:
+    """Disable parent-process CUDA preallocation while preserving child policy."""
+    child_cuda_memory_env = snapshot_cuda_memory_env(env)
+    if platform == "cuda":
+        for key in _SIMSOPT_GPU_MEMORY_ENV_VARS:
+            env.pop(key, None)
+        for key in _JAX_CUDA_MEMORY_ENV_VARS:
+            env.pop(key, None)
+        env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    return child_cuda_memory_env
 
 
 def apply_compilation_cache_policy(
@@ -229,10 +270,13 @@ def repo_pythonpath_env(
     disable_compilation_cache: bool = False,
     clear_backend_guardrails: bool = False,
     deterministic_gpu_reductions: bool = False,
+    cuda_memory_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Return an environment that resolves in-repo imports for subprocess probes."""
     env = dict(os.environ)
     _apply_platform_env(env, platform)
+    if platform == "cuda" and cuda_memory_env is not None:
+        env.update(cuda_memory_env)
     env.pop(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, None)
     env.pop(_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR, None)
     env.pop(_TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR, None)
@@ -240,6 +284,11 @@ def repo_pythonpath_env(
         env.pop(_SIMSOPT_BACKEND_MODE_ENV_VAR, None)
         env.pop(_SIMSOPT_BACKEND_STRICT_ENV_VAR, None)
         env.pop(_SIMSOPT_TRANSFER_GUARD_ENV_VAR, None)
+    elif (
+        platform == "cpu"
+        and env.get(_SIMSOPT_BACKEND_MODE_ENV_VAR) in _GPU_BACKEND_MODES
+    ):
+        env[_SIMSOPT_BACKEND_MODE_ENV_VAR] = "jax_cpu_parity"
     if disable_compilation_cache:
         env.pop(_JAX_COMPILATION_CACHE_ENV_VAR, None)
         for env_name in _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS:
@@ -283,6 +332,10 @@ def _apply_platform_env(env: dict[str, str], platform: str) -> None:
         env.pop(key, None)
     for key in _JAX_CUDA_MEMORY_ENV_VARS:
         env.pop(key, None)
+    if platform != "cuda":
+        env.pop(_SIMSOPT_EXAMPLE_PARITY_PLATFORM_ENV_VAR, None)
+        for key in _SIMSOPT_GPU_MEMORY_ENV_VARS:
+            env.pop(key, None)
     if platform == "auto":
         return
     env["JAX_PLATFORMS"] = _with_cpu_callback_lane(platform) or platform

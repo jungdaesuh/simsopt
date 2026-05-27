@@ -70,6 +70,18 @@ def _artifact_host_float(value: Any) -> float:
     return float(artifact_host_array(value, dtype=np.float64))
 
 
+def _artifact_host_float_array(value: Any) -> np.ndarray:
+    return artifact_host_array(value, dtype=np.float64)
+
+
+def _artifact_host_bool_array(value: Any) -> np.ndarray:
+    return artifact_host_array(value, dtype=bool)
+
+
+def _artifact_host_int64_array(value: Any) -> np.ndarray:
+    return artifact_host_array(value, dtype=np.int64)
+
+
 def _sum_objective_values(values: Sequence[Any]) -> Any:
     first = values[0]
     return sum(values[1:], first)
@@ -185,12 +197,12 @@ class FixtureBuild:
 
 
 def _hash_array(arr: np.ndarray) -> str:
-    arr = np.ascontiguousarray(np.asarray(arr, dtype=np.float64))
+    arr = np.ascontiguousarray(_artifact_host_float_array(arr))
     return hashlib.sha256(arr.tobytes()).hexdigest()
 
 
 def _hash_mask(mask: Sequence[bool]) -> str:
-    payload = np.asarray(mask, dtype=np.uint8).tobytes()
+    payload = artifact_host_array(mask, dtype=np.uint8).tobytes()
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -311,13 +323,13 @@ def _verify_jax_native_spec_contract(coils) -> Tuple[str, ...]:
         if cached is not None:
             hashes.append(cached)
             continue
-        curve_x = np.asarray(base_curve.x, dtype=np.float64)
+        curve_x = _artifact_host_float_array(base_curve.x)
         payload = (
             type(base_curve).__name__.encode("utf-8")
             + b"|"
             + curve_x.tobytes()
             + b"|"
-            + np.asarray(base_curve.quadpoints, dtype=np.float64).tobytes()
+            + _artifact_host_float_array(base_curve.quadpoints).tobytes()
         )
         digest = hashlib.sha256(payload).hexdigest()
         seen_base_ids[cid] = digest
@@ -348,7 +360,9 @@ def _jax_imports():
 
 
 def _flatten_components(components: Mapping[str, float]) -> Mapping[str, float]:
-    return {str(name): float(value) for name, value in components.items()}
+    return {
+        str(name): _artifact_host_float(value) for name, value in components.items()
+    }
 
 
 def _build_cpu_lane(
@@ -365,30 +379,36 @@ def _build_cpu_lane(
     """Construct a CPU-lane artifact from already-built simsopt objects."""
     import time
 
-    surface_gamma = np.asarray(surface.gamma(), dtype=np.float64)
-    surface_unit_normal = np.asarray(surface.unitnormal(), dtype=np.float64)
+    with _cpu_oracle_boundary():
+        surface_gamma = artifact_host_array(surface.gamma(), dtype=np.float64)
+        surface_unit_normal = artifact_host_array(
+            surface.unitnormal(), dtype=np.float64
+        )
 
-    nphi, ntheta = surface_gamma.shape[:2]
+        nphi, ntheta = surface_gamma.shape[:2]
 
-    start_exec = time.perf_counter()
-    field_B_flat = np.asarray(bs_cpu.B(), dtype=np.float64)
-    field_B = field_B_flat.reshape(nphi, ntheta, 3)
-    Bdotn = np.sum(field_B * surface_unit_normal, axis=2)
-    if target_array is not None:
-        Bdotn_for_metric = Bdotn - np.asarray(target_array, dtype=np.float64)
-    else:
-        Bdotn_for_metric = Bdotn
-    j_total = float(jf_cpu.J())
-    grad = np.asarray(jf_cpu.dJ(), dtype=np.float64)
-    exec_seconds = time.perf_counter() - start_exec
+        start_exec = time.perf_counter()
+        field_B_flat = artifact_host_array(bs_cpu.B(), dtype=np.float64)
+        field_B = field_B_flat.reshape(nphi, ntheta, 3)
+        Bdotn = np.sum(field_B * surface_unit_normal, axis=2)
+        if target_array is not None:
+            Bdotn_for_metric = Bdotn - artifact_host_array(
+                target_array, dtype=np.float64
+            )
+        else:
+            Bdotn_for_metric = Bdotn
+        j_total = _artifact_host_float(jf_cpu.J())
+        grad = artifact_host_array(jf_cpu.dJ(), dtype=np.float64)
+        exec_seconds = time.perf_counter() - start_exec
 
-    dof_names = tuple(jf_cpu.dof_names)
-    free_mask = np.concatenate(
-        [
-            np.asarray(o.local_dofs_free_status, dtype=bool)
-            for o in jf_cpu.unique_dof_lineage
-        ]
-    )
+        dof_names = tuple(jf_cpu.dof_names)
+        free_mask = np.concatenate(
+            [
+                np.asarray(o.local_dofs_free_status, dtype=bool)
+                for o in jf_cpu.unique_dof_lineage
+            ]
+        )
+        active_dofs = artifact_host_array(jf_cpu.x, dtype=np.float64)
 
     components = dict(extra_components)
     components[objective_component_name] = j_total
@@ -411,7 +431,7 @@ def _build_cpu_lane(
         gradient=grad,
         gradient_norm=float(np.linalg.norm(grad)),
         active_dof_names=dof_names,
-        active_dof_hash=_hash_array(np.asarray(jf_cpu.x, dtype=np.float64)),
+        active_dof_hash=_hash_array(active_dofs),
         fixed_free_mask_hash=_hash_mask(free_mask),
         native_curve_spec_hashes=(),
         surface_point_hash=_hash_array(surface_gamma),
@@ -663,7 +683,7 @@ def _build_minimal_stage2_state():
     jls_jax = [CurveLengthJAX(c) for c in base_curves_jax]
     length_penalty_jax = QuadraticPenalty(sum(jls_jax), length_target, "max")
     jf_full_jax = jf_jax + length_weight * length_penalty_jax
-    length_penalty_jax_value = float(length_penalty_jax.J())
+    length_penalty_jax_value = _artifact_host_float(length_penalty_jax.J())
     setup_seconds_jax = time.perf_counter() - start_jax_setup
     jax_lane = _build_jax_lane(
         surface=surface,
@@ -672,7 +692,7 @@ def _build_minimal_stage2_state():
         jf_jax=jf_full_jax,
         target_array=None,
         extra_components={
-            "SquaredFluxJAX": float(jf_jax.J()),
+            "SquaredFluxJAX": _artifact_host_float(jf_jax.J()),
             "QuadraticPenalty_over_sum_CurveLength_max": length_penalty_jax_value,
         },
         setup_seconds=setup_seconds_jax,
@@ -682,12 +702,13 @@ def _build_minimal_stage2_state():
     x0 = np.asarray(jf_full.x, dtype=np.float64).copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        jf_full.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full.J())
+        with _cpu_oracle_boundary():
+            jf_full.x = np.asarray(dofs, dtype=np.float64)
+            return _artifact_host_float(jf_full.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jf_full_jax.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full_jax.J())
+        return _artifact_host_float(jf_full_jax.J())
 
     spec = MINIMAL_STAGE2_FLUX_LENGTH_GAP_SPEC
     return FixtureBuild(
@@ -732,9 +753,9 @@ def _build_surface_area_volume_simple():
     volume_jax = VolumeJAX(jax_surface)
     jax_area_value = area_jax.J()
     jax_volume_value = volume_jax.J()
-    jax_grad_area = np.asarray(area_jax.dJ_by_dsurfacecoefficients(), dtype=np.float64)
-    jax_grad_volume = np.asarray(
-        volume_jax.dJ_by_dsurfacecoefficients(), dtype=np.float64
+    jax_grad_area = _artifact_host_float_array(area_jax.dJ_by_dsurfacecoefficients())
+    jax_grad_volume = _artifact_host_float_array(
+        volume_jax.dJ_by_dsurfacecoefficients()
     )
     jax.block_until_ready(jax_grad_area)
     jax.block_until_ready(jax_grad_volume)
@@ -762,23 +783,23 @@ def _build_surface_area_volume_simple():
         jax_volume_delta = volume_jax.J()
         jax.block_until_ready(jax_area_delta)
         jax.block_until_ready(jax_volume_delta)
-        jax_perturbed_area.append(float(jax_area_delta))
-        jax_perturbed_volume.append(float(jax_volume_delta))
+        jax_perturbed_area.append(_artifact_host_float(jax_area_delta))
+        jax_perturbed_volume.append(_artifact_host_float(jax_volume_delta))
     cpu_surface.set_dofs(base_dofs)
     jax_surface.set_dofs(base_dofs)
     jax_setup = time.perf_counter() - start_jax
 
     cpu_dofs = np.asarray(cpu_surface.get_dofs(), dtype=np.float64)
-    jax_dofs = np.asarray(jax_surface.get_dofs(), dtype=np.float64)
+    jax_dofs = _artifact_host_float_array(jax_surface.get_dofs())
     dof_names_cpu = tuple(cpu_surface.dof_names)
     dof_names_jax = tuple(jax_surface.dof_names)
     free_mask_cpu = np.asarray(cpu_surface.local_dofs_free_status, dtype=bool)
-    free_mask_jax = np.asarray(jax_surface.local_dofs_free_status, dtype=bool)
+    free_mask_jax = _artifact_host_bool_array(jax_surface.local_dofs_free_status)
 
     cpu_gamma = np.asarray(cpu_surface.gamma(), dtype=np.float64)
     cpu_normal = np.asarray(cpu_surface.unitnormal(), dtype=np.float64)
-    jax_gamma = np.asarray(jax_surface.gamma(), dtype=np.float64)
-    jax_normal = np.asarray(jax_surface.unitnormal(), dtype=np.float64)
+    jax_gamma = _artifact_host_float_array(jax_surface.gamma())
+    jax_normal = _artifact_host_float_array(jax_surface.unitnormal())
     empty_field = np.zeros((*cpu_gamma.shape[:2], 3), dtype=np.float64)
     empty_scalar_grid = np.zeros(cpu_gamma.shape[:2], dtype=np.float64)
 
@@ -821,11 +842,13 @@ def _build_surface_area_volume_simple():
     )
     jax_lane = LaneArtifact(
         lane="jax_cpu",
-        objective_total=float(jax_area_value + jax_volume_value),
-        objective_native_subtotal=float(jax_area_value + jax_volume_value),
+        objective_total=_artifact_host_float(jax_area_value + jax_volume_value),
+        objective_native_subtotal=_artifact_host_float(
+            jax_area_value + jax_volume_value
+        ),
         components={
-            "area": float(jax_area_value),
-            "volume": float(jax_volume_value),
+            "area": _artifact_host_float(jax_area_value),
+            "volume": _artifact_host_float(jax_volume_value),
         },
         gradient=np.concatenate([jax_grad_area, jax_grad_volume]),
         gradient_norm=float(
@@ -848,11 +871,11 @@ def _build_surface_area_volume_simple():
             "surface_unit_normal": jax_normal,
             "area_gradient": jax_grad_area,
             "volume_gradient": jax_grad_volume,
-            "area_perturbed_values": np.asarray(jax_perturbed_area, dtype=np.float64),
-            "volume_perturbed_values": np.asarray(
-                jax_perturbed_volume, dtype=np.float64
+            "area_perturbed_values": _artifact_host_float_array(jax_perturbed_area),
+            "volume_perturbed_values": _artifact_host_float_array(jax_perturbed_volume),
+            "objective_total": np.array(
+                [_artifact_host_float(jax_area_value + jax_volume_value)]
             ),
-            "objective_total": np.array([float(jax_area_value + jax_volume_value)]),
         },
         timing={"setup_s": float(jax_setup), "execute_s": 0.0},
     )
@@ -860,12 +883,13 @@ def _build_surface_area_volume_simple():
     x0 = cpu_dofs.copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        cpu_surface.set_dofs(np.asarray(dofs, dtype=np.float64))
-        return float(area_cpu.J() + volume_cpu.J())
+        with _cpu_oracle_boundary():
+            cpu_surface.set_dofs(np.asarray(dofs, dtype=np.float64))
+            return _artifact_host_float(area_cpu.J() + volume_cpu.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jax_surface.set_dofs(np.asarray(dofs, dtype=np.float64))
-        return float(area_jax.J() + volume_jax.J())
+        return _artifact_host_float(area_jax.J() + volume_jax.J())
 
     return FixtureBuild(
         spec=SURFACE_AREA_VOLUME_SIMPLE_SPEC,
@@ -939,13 +963,13 @@ def _build_qfm_surface_fixed_state():
     area_jax = AreaJAX(surface_jax)
     volume_jax = VolumeJAX(surface_jax)
     qfm_value_jax = qfm_jax.J()
-    jax_grad = np.asarray(qfm_jax.dJ_by_dsurfacecoefficients(), dtype=np.float64)
+    jax_grad = _artifact_host_float_array(qfm_jax.dJ_by_dsurfacecoefficients())
     jax.block_until_ready(jax_grad)
-    gamma_jax = np.asarray(surface_jax.gamma(), dtype=np.float64)
+    gamma_jax = _artifact_host_float_array(surface_jax.gamma())
     gammadash2_jax = artifact_host_array(surface_jax.gammadash2(), dtype=np.float64)
-    normal_jax = np.asarray(surface_jax.unitnormal(), dtype=np.float64)
+    normal_jax = _artifact_host_float_array(surface_jax.unitnormal())
     bs_jax.set_points(gamma_jax.reshape((-1, 3)))
-    field_B_jax = np.asarray(bs_jax.B(), dtype=np.float64).reshape(25, 25, 3)
+    field_B_jax = _artifact_host_float_array(bs_jax.B()).reshape(25, 25, 3)
     bs_tf_jax.set_points(np.ascontiguousarray(gamma_jax[0]))
     A_jax_slice = artifact_host_array(bs_tf_jax.A(), dtype=np.float64)
     toroidal_flux_jax_value = _artifact_host_float(
@@ -958,9 +982,9 @@ def _build_qfm_surface_fixed_state():
     setup_jax = time.perf_counter() - start_jax
 
     dofs_cpu = np.asarray(surface_cpu.get_dofs(), dtype=np.float64)
-    dofs_jax = np.asarray(surface_jax.get_dofs(), dtype=np.float64)
+    dofs_jax = _artifact_host_float_array(surface_jax.get_dofs())
     free_mask_cpu = np.asarray(surface_cpu.local_dofs_free_status, dtype=bool)
-    free_mask_jax = np.asarray(surface_jax.local_dofs_free_status, dtype=bool)
+    free_mask_jax = _artifact_host_bool_array(surface_jax.local_dofs_free_status)
     bdotn_cpu = np.sum(field_B_cpu * normal_cpu, axis=2)
     bdotn_jax = np.sum(field_B_jax * normal_jax, axis=2)
 
@@ -1000,12 +1024,12 @@ def _build_qfm_surface_fixed_state():
     )
     jax_lane = LaneArtifact(
         lane="jax_cpu",
-        objective_total=float(qfm_value_jax),
-        objective_native_subtotal=float(qfm_value_jax),
+        objective_total=_artifact_host_float(qfm_value_jax),
+        objective_native_subtotal=_artifact_host_float(qfm_value_jax),
         components={
-            "qfm_residual": float(qfm_value_jax),
-            "area": float(area_jax.J()),
-            "volume": float(volume_jax.J()),
+            "qfm_residual": _artifact_host_float(qfm_value_jax),
+            "area": _artifact_host_float(area_jax.J()),
+            "volume": _artifact_host_float(volume_jax.J()),
             "toroidal_flux": toroidal_flux_jax_value,
         },
         gradient=jax_grad,
@@ -1028,7 +1052,7 @@ def _build_qfm_surface_fixed_state():
             "field_B": field_B_jax,
             "Bdotn": bdotn_jax,
             "qfm_gradient": jax_grad,
-            "objective_total": np.array([float(qfm_value_jax)]),
+            "objective_total": np.array([_artifact_host_float(qfm_value_jax)]),
         },
         timing={"setup_s": float(setup_jax), "execute_s": 0.0},
     )
@@ -1036,14 +1060,15 @@ def _build_qfm_surface_fixed_state():
     x0 = dofs_cpu.copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        surface_cpu.set_dofs(np.asarray(dofs, dtype=np.float64))
-        qfm_cpu.invalidate_cache()
-        return float(qfm_cpu.J())
+        with _cpu_oracle_boundary():
+            surface_cpu.set_dofs(np.asarray(dofs, dtype=np.float64))
+            qfm_cpu.invalidate_cache()
+            return _artifact_host_float(qfm_cpu.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         surface_jax.set_dofs(np.asarray(dofs, dtype=np.float64))
         qfm_jax.invalidate_cache()
-        return float(qfm_jax.J())
+        return _artifact_host_float(qfm_jax.J())
 
     return FixtureBuild(
         spec=QFM_SURFACE_SPEC,
@@ -1106,15 +1131,15 @@ def _sample_jax_gpmo_history(
     initial_m: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     indices = _pm_history_sample_indices(K=K, nhistory=nhistory)
-    m_history_steps = np.asarray(result_jax.m_history, dtype=np.float64)[indices]
+    m_history_steps = _artifact_host_float_array(result_jax.m_history)[indices]
     if initial_m is not None:
         m_history_steps = np.concatenate(
             [np.asarray(initial_m, dtype=np.float64)[None, :, :], m_history_steps],
             axis=0,
         )
     R2_history, Bn_history = _pm_history_components(
-        A_obj=np.asarray(grid_jax.A_obj, dtype=np.float64),
-        b_obj=np.asarray(grid_jax.b_obj, dtype=np.float64),
+        A_obj=_artifact_host_float_array(grid_jax.A_obj),
+        b_obj=_artifact_host_float_array(grid_jax.b_obj),
         m_history=m_history_steps,
         normal_norms=normal_norms,
     )
@@ -1208,21 +1233,19 @@ def _build_pm_simple_fixed_state_gpmo_baseline():
         K=K,
         nhistory=1,
     )
-    m_jax = np.asarray(result_jax.m, dtype=np.float64).reshape(pm_cpu.ndipoles * 3)
-    residual_jax = np.asarray(result_jax.residual, dtype=np.float64)
+    m_jax = _artifact_host_float_array(result_jax.m).reshape(pm_cpu.ndipoles * 3)
+    residual_jax = _artifact_host_float_array(result_jax.residual)
     jax.block_until_ready(result_jax.residual)
     dipole_jax = DipoleFieldJAX(
         pm_cpu.dipole_grid_xyz,
-        np.asarray(result_jax.m, dtype=np.float64),
+        m_jax.reshape(pm_cpu.ndipoles, 3),
         stellsym=surface_cpu.stellsym,
         nfp=surface_cpu.nfp,
         coordinate_flag=pm_cpu.coordinate_flag,
         m_maxima=pm_cpu.m_maxima,
     )
     dipole_jax.set_points(gamma_cpu.reshape((-1, 3)))
-    dipole_B_jax = np.asarray(dipole_jax.B(), dtype=np.float64).reshape(
-        (nphi, ntheta, 3)
-    )
+    dipole_B_jax = _artifact_host_float_array(dipole_jax.B()).reshape((nphi, ntheta, 3))
     dipole_Bn_jax = np.sum(dipole_B_jax * normal_cpu, axis=2)
     jax_objective = float(0.5 * np.dot(residual_jax, residual_jax))
     setup_jax = time.perf_counter() - start_jax
@@ -1300,27 +1323,23 @@ def _build_pm_simple_fixed_state_gpmo_baseline():
         raw_arrays={
             "surface_gamma": gamma_cpu,
             "surface_unit_normal": normal_cpu,
-            "A_obj": np.asarray(grid_jax.A_obj, dtype=np.float64),
-            "b_obj": np.asarray(grid_jax.b_obj, dtype=np.float64),
-            "ATb": np.asarray(grid_jax.ATb, dtype=np.float64).reshape(-1),
-            "m_maxima": np.asarray(grid_jax.m_maxima, dtype=np.float64),
-            "dipole_grid_xyz": np.asarray(grid_jax.dipole_grid_xyz, dtype=np.float64),
+            "A_obj": _artifact_host_float_array(grid_jax.A_obj),
+            "b_obj": _artifact_host_float_array(grid_jax.b_obj),
+            "ATb": _artifact_host_float_array(grid_jax.ATb).reshape(-1),
+            "m_maxima": _artifact_host_float_array(grid_jax.m_maxima),
+            "dipole_grid_xyz": _artifact_host_float_array(grid_jax.dipole_grid_xyz),
             "m": m_jax,
-            "x": np.asarray(result_jax.x, dtype=np.float64),
+            "x": _artifact_host_float_array(result_jax.x),
             "residual": residual_jax,
             "R2_history": jax_R2_history,
             "Bn_history": jax_Bn_history,
             "m_history": jax_m_history,
-            "residual_history": np.asarray(
-                result_jax.residual_history, dtype=np.float64
+            "residual_history": _artifact_host_float_array(result_jax.residual_history),
+            "selected_dipoles": _artifact_host_float_array(result_jax.selected_dipoles),
+            "selected_components": _artifact_host_float_array(
+                result_jax.selected_components
             ),
-            "selected_dipoles": np.asarray(
-                result_jax.selected_dipoles, dtype=np.float64
-            ),
-            "selected_components": np.asarray(
-                result_jax.selected_components, dtype=np.float64
-            ),
-            "selected_signs": np.asarray(result_jax.selected_signs, dtype=np.float64),
+            "selected_signs": _artifact_host_float_array(result_jax.selected_signs),
             "dipole_B": dipole_B_jax,
             "dipole_Bn": dipole_Bn_jax,
             "objective_total": np.array([jax_objective], dtype=np.float64),
@@ -1457,20 +1476,18 @@ def _build_pm_muse_famus_arbvec_backtracking():
         pol_vectors=pol_vectors,
     )
     jax.block_until_ready(result_jax.m)
-    m_jax = np.asarray(result_jax.m, dtype=np.float64).reshape(pm_cpu.ndipoles * 3)
-    residual_jax = np.asarray(result_jax.residual, dtype=np.float64)
+    m_jax = _artifact_host_float_array(result_jax.m).reshape(pm_cpu.ndipoles * 3)
+    residual_jax = _artifact_host_float_array(result_jax.residual)
     dipole_jax = DipoleFieldJAX(
         pm_cpu.dipole_grid_xyz,
-        np.asarray(result_jax.m, dtype=np.float64),
+        _artifact_host_float_array(result_jax.m),
         stellsym=surface_cpu.stellsym,
         nfp=surface_cpu.nfp,
         coordinate_flag=pm_cpu.coordinate_flag,
         m_maxima=pm_cpu.m_maxima,
     )
     dipole_jax.set_points(gamma_cpu.reshape((-1, 3)))
-    dipole_B_jax = np.asarray(dipole_jax.B(), dtype=np.float64).reshape(
-        (nphi, ntheta, 3)
-    )
+    dipole_B_jax = _artifact_host_float_array(dipole_jax.B()).reshape((nphi, ntheta, 3))
     dipole_Bn_jax = np.sum(dipole_B_jax * normal_cpu, axis=2)
     jax_objective = float(0.5 * np.dot(residual_jax, residual_jax))
     normal_norms = _pm_normal_norms(pm_cpu)
@@ -1532,22 +1549,22 @@ def _build_pm_muse_famus_arbvec_backtracking():
     jax_raw = {
         "surface_gamma": gamma_cpu,
         "surface_unit_normal": normal_cpu,
-        "A_obj": np.asarray(grid_jax.A_obj, dtype=np.float64),
-        "b_obj": np.asarray(grid_jax.b_obj, dtype=np.float64),
-        "ATb": np.asarray(grid_jax.ATb, dtype=np.float64).reshape(-1),
-        "m_maxima": np.asarray(grid_jax.m_maxima, dtype=np.float64),
-        "dipole_grid_xyz": np.asarray(grid_jax.dipole_grid_xyz, dtype=np.float64),
+        "A_obj": _artifact_host_float_array(grid_jax.A_obj),
+        "b_obj": _artifact_host_float_array(grid_jax.b_obj),
+        "ATb": _artifact_host_float_array(grid_jax.ATb).reshape(-1),
+        "m_maxima": _artifact_host_float_array(grid_jax.m_maxima),
+        "dipole_grid_xyz": _artifact_host_float_array(grid_jax.dipole_grid_xyz),
         "m": m_jax,
         "residual": residual_jax,
         "R2_history": jax_R2_history,
         "Bn_history": jax_Bn_history,
         "m_history": jax_m_history,
-        "residual_history": np.asarray(result_jax.residual_history, dtype=np.float64),
-        "selected_dipoles": np.asarray(result_jax.selected_dipoles, dtype=np.float64),
-        "selected_vector_indices": np.asarray(
-            result_jax.selected_vector_indices, dtype=np.float64
+        "residual_history": _artifact_host_float_array(result_jax.residual_history),
+        "selected_dipoles": _artifact_host_float_array(result_jax.selected_dipoles),
+        "selected_vector_indices": _artifact_host_float_array(
+            result_jax.selected_vector_indices
         ),
-        "selected_signs": np.asarray(result_jax.selected_signs, dtype=np.float64),
+        "selected_signs": _artifact_host_float_array(result_jax.selected_signs),
         "dipole_B": dipole_B_jax,
         "dipole_Bn": dipole_Bn_jax,
         "objective_total": np.array([jax_objective], dtype=np.float64),
@@ -1724,20 +1741,18 @@ def _build_pm_pm4stell_arbvec_backtracking():
         pol_vectors=pol_vectors,
     )
     jax.block_until_ready(result_jax.m)
-    m_jax = np.asarray(result_jax.m, dtype=np.float64).reshape(pm_cpu.ndipoles * 3)
-    residual_jax = np.asarray(result_jax.residual, dtype=np.float64)
+    m_jax = _artifact_host_float_array(result_jax.m).reshape(pm_cpu.ndipoles * 3)
+    residual_jax = _artifact_host_float_array(result_jax.residual)
     dipole_jax = DipoleFieldJAX(
         pm_cpu.dipole_grid_xyz,
-        np.asarray(result_jax.m, dtype=np.float64),
+        _artifact_host_float_array(result_jax.m),
         stellsym=surface_cpu.stellsym,
         nfp=surface_cpu.nfp,
         coordinate_flag=pm_cpu.coordinate_flag,
         m_maxima=pm_cpu.m_maxima,
     )
     dipole_jax.set_points(gamma_cpu.reshape((-1, 3)))
-    dipole_B_jax = np.asarray(dipole_jax.B(), dtype=np.float64).reshape(
-        (nphi, ntheta, 3)
-    )
+    dipole_B_jax = _artifact_host_float_array(dipole_jax.B()).reshape((nphi, ntheta, 3))
     dipole_Bn_jax = np.sum(dipole_B_jax * normal_cpu, axis=2)
     jax_objective = float(0.5 * np.dot(residual_jax, residual_jax))
     normal_norms = _pm_normal_norms(pm_cpu)
@@ -1799,22 +1814,22 @@ def _build_pm_pm4stell_arbvec_backtracking():
     jax_raw = {
         "surface_gamma": gamma_cpu,
         "surface_unit_normal": normal_cpu,
-        "A_obj": np.asarray(grid_jax.A_obj, dtype=np.float64),
-        "b_obj": np.asarray(grid_jax.b_obj, dtype=np.float64),
-        "ATb": np.asarray(grid_jax.ATb, dtype=np.float64).reshape(-1),
-        "m_maxima": np.asarray(grid_jax.m_maxima, dtype=np.float64),
-        "dipole_grid_xyz": np.asarray(grid_jax.dipole_grid_xyz, dtype=np.float64),
+        "A_obj": _artifact_host_float_array(grid_jax.A_obj),
+        "b_obj": _artifact_host_float_array(grid_jax.b_obj),
+        "ATb": _artifact_host_float_array(grid_jax.ATb).reshape(-1),
+        "m_maxima": _artifact_host_float_array(grid_jax.m_maxima),
+        "dipole_grid_xyz": _artifact_host_float_array(grid_jax.dipole_grid_xyz),
         "m": m_jax,
         "residual": residual_jax,
         "R2_history": jax_R2_history,
         "Bn_history": jax_Bn_history,
         "m_history": jax_m_history,
-        "residual_history": np.asarray(result_jax.residual_history, dtype=np.float64),
-        "selected_dipoles": np.asarray(result_jax.selected_dipoles, dtype=np.float64),
-        "selected_vector_indices": np.asarray(
-            result_jax.selected_vector_indices, dtype=np.float64
+        "residual_history": _artifact_host_float_array(result_jax.residual_history),
+        "selected_dipoles": _artifact_host_float_array(result_jax.selected_dipoles),
+        "selected_vector_indices": _artifact_host_float_array(
+            result_jax.selected_vector_indices
         ),
-        "selected_signs": np.asarray(result_jax.selected_signs, dtype=np.float64),
+        "selected_signs": _artifact_host_float_array(result_jax.selected_signs),
         "dipole_B": dipole_B_jax,
         "dipole_Bn": dipole_Bn_jax,
         "objective_total": np.array([jax_objective], dtype=np.float64),
@@ -1990,12 +2005,10 @@ def _build_pm_qa_relax_and_split_fixed_state():
         total_rs_history.append(np.asarray(rs_history, dtype=np.float64))
         total_m_history.append(np.asarray(m_history, dtype=np.float64))
         total_m_proxy_history.append(np.asarray(m_proxy_history, dtype=np.float64))
-        total_jax_rs_history.append(np.asarray(jax_result.errors, dtype=np.float64))
-        total_jax_m_history.append(np.asarray(jax_result.m_history, dtype=np.float64))
+        total_jax_rs_history.append(_artifact_host_float_array(jax_result.errors))
+        total_jax_m_history.append(_artifact_host_float_array(jax_result.m_history))
         total_jax_m_proxy_history.append(
-            np.asarray(jax_result.m_proxy_history, dtype=np.float64).reshape(
-                max_iter, -1
-            )
+            _artifact_host_float_array(jax_result.m_proxy_history).reshape(max_iter, -1)
         )
         m0_cpu = pm_cpu.m
         m0_jax = jax_result.m
@@ -2068,10 +2081,8 @@ def _build_pm_qa_relax_and_split_fixed_state():
     )
     dipole_jax.set_points(gamma_cpu.reshape((-1, 3)))
     dipole_proxy_jax.set_points(gamma_cpu.reshape((-1, 3)))
-    dipole_B_jax = np.asarray(dipole_jax.B(), dtype=np.float64).reshape(
-        (nphi, ntheta, 3)
-    )
-    dipole_proxy_B_jax = np.asarray(dipole_proxy_jax.B(), dtype=np.float64).reshape(
+    dipole_B_jax = _artifact_host_float_array(dipole_jax.B()).reshape((nphi, ntheta, 3))
+    dipole_proxy_B_jax = _artifact_host_float_array(dipole_proxy_jax.B()).reshape(
         (nphi, ntheta, 3)
     )
     dipole_Bn_jax = np.sum(dipole_B_jax * normal_cpu, axis=2)
@@ -2131,11 +2142,11 @@ def _build_pm_qa_relax_and_split_fixed_state():
     jax_raw = {
         "surface_gamma": gamma_cpu,
         "surface_unit_normal": normal_cpu,
-        "A_obj": np.asarray(grid_jax.A_obj, dtype=np.float64),
-        "b_obj": np.asarray(grid_jax.b_obj, dtype=np.float64),
-        "ATb": np.asarray(grid_jax.ATb, dtype=np.float64).reshape(-1),
-        "m_maxima": np.asarray(grid_jax.m_maxima, dtype=np.float64),
-        "dipole_grid_xyz": np.asarray(grid_jax.dipole_grid_xyz, dtype=np.float64),
+        "A_obj": _artifact_host_float_array(grid_jax.A_obj),
+        "b_obj": _artifact_host_float_array(grid_jax.b_obj),
+        "ATb": _artifact_host_float_array(grid_jax.ATb).reshape(-1),
+        "m_maxima": _artifact_host_float_array(grid_jax.m_maxima),
+        "dipole_grid_xyz": _artifact_host_float_array(grid_jax.dipole_grid_xyz),
         "m": m_jax,
         "m_proxy": m_proxy_jax,
         "residual": residual_jax,
@@ -2275,13 +2286,13 @@ def _build_wireframe_rcls_basic_fixed_state():
         verbose=False,
     )
     wire_field_jax = WireframeFieldJAX(wf_jax)
-    gamma_jax = np.asarray(surf_plas_jax.gamma(), dtype=np.float64)
-    normal_jax = np.asarray(surf_plas_jax.unitnormal(), dtype=np.float64)
+    gamma_jax = _artifact_host_float_array(surf_plas_jax.gamma())
+    normal_jax = _artifact_host_float_array(surf_plas_jax.unitnormal())
     wire_field_jax.set_points(gamma_jax.reshape((-1, 3)))
-    field_B_jax = np.asarray(wire_field_jax.B(), dtype=np.float64).reshape(
+    field_B_jax = _artifact_host_float_array(wire_field_jax.B()).reshape(
         (plas_n_phi, plas_n_theta, 3)
     )
-    field_dB_jax = np.asarray(wire_field_jax.dB_by_dX(), dtype=np.float64)
+    field_dB_jax = _artifact_host_float_array(wire_field_jax.dB_by_dX())
     jax.block_until_ready(field_dB_jax)
     Bnormal_jax = np.sum(field_B_jax * normal_jax, axis=2)
     setup_jax = time.perf_counter() - start_jax
@@ -2342,7 +2353,7 @@ def _build_wireframe_rcls_basic_fixed_state():
         gradient=empty_grad,
         gradient_norm=0.0,
         active_dof_names=dof_names,
-        active_dof_hash=_hash_array(np.asarray(res_jax["x"], dtype=np.float64)),
+        active_dof_hash=_hash_array(_artifact_host_float_array(res_jax["x"])),
         fixed_free_mask_hash=_hash_mask(free_mask),
         native_curve_spec_hashes=(),
         surface_point_hash=_hash_array(gamma_jax),
@@ -2358,7 +2369,7 @@ def _build_wireframe_rcls_basic_fixed_state():
             "surface_unit_normal": normal_jax,
             "Amat": np.asarray(A_jax, dtype=np.float64),
             "bvec": np.asarray(b_jax, dtype=np.float64),
-            "x": np.asarray(res_jax["x"], dtype=np.float64),
+            "x": _artifact_host_float_array(res_jax["x"]),
             "field_B": field_B_jax,
             "field_dB_by_dX": field_dB_jax,
             "Bnormal": Bnormal_jax,
@@ -2492,13 +2503,13 @@ def _build_wireframe_rcls_ports_constraint_fixed_state():
         verbose=False,
     )
     wire_field_jax = WireframeFieldJAX(wf_jax)
-    gamma_jax = np.asarray(surf_plas_jax.gamma(), dtype=np.float64)
-    normal_jax = np.asarray(surf_plas_jax.unitnormal(), dtype=np.float64)
+    gamma_jax = _artifact_host_float_array(surf_plas_jax.gamma())
+    normal_jax = _artifact_host_float_array(surf_plas_jax.unitnormal())
     wire_field_jax.set_points(gamma_jax.reshape((-1, 3)))
-    field_B_jax = np.asarray(wire_field_jax.B(), dtype=np.float64).reshape(
+    field_B_jax = _artifact_host_float_array(wire_field_jax.B()).reshape(
         (plas_n_phi, plas_n_theta, 3)
     )
-    field_dB_jax = np.asarray(wire_field_jax.dB_by_dX(), dtype=np.float64)
+    field_dB_jax = _artifact_host_float_array(wire_field_jax.dB_by_dX())
     jax.block_until_ready(field_dB_jax)
     Bnormal_jax = np.sum(field_B_jax * normal_jax, axis=2)
     constraint_shape_jax = np.asarray(
@@ -2568,7 +2579,7 @@ def _build_wireframe_rcls_ports_constraint_fixed_state():
         gradient=empty_grad,
         gradient_norm=0.0,
         active_dof_names=dof_names,
-        active_dof_hash=_hash_array(np.asarray(res_jax["x"], dtype=np.float64)),
+        active_dof_hash=_hash_array(_artifact_host_float_array(res_jax["x"])),
         fixed_free_mask_hash=_hash_mask(free_mask),
         native_curve_spec_hashes=(),
         surface_point_hash=_hash_array(gamma_jax),
@@ -2584,7 +2595,7 @@ def _build_wireframe_rcls_ports_constraint_fixed_state():
             "surface_unit_normal": normal_jax,
             "Amat": np.asarray(A_jax, dtype=np.float64),
             "bvec": np.asarray(b_jax, dtype=np.float64),
-            "x": np.asarray(res_jax["x"], dtype=np.float64),
+            "x": _artifact_host_float_array(res_jax["x"]),
             "field_B": field_B_jax,
             "field_dB_by_dX": field_dB_jax,
             "Bnormal": Bnormal_jax,
@@ -2694,7 +2705,9 @@ def _build_wireframe_gsco_modular_fixed_state():
     )
     jax.block_until_ready(result_jax.x)
     setup_jax = time.perf_counter() - start_jax
-    history_length = int(np.asarray(result_jax.history_length, dtype=np.int64))
+    history_length = int(
+        _artifact_host_int64_array(result_jax.history_length).reshape(()).item()
+    )
     history_slice = slice(0, history_length)
 
     zero_array = np.zeros((0,), dtype=np.float64)
@@ -2726,20 +2739,14 @@ def _build_wireframe_gsco_modular_fixed_state():
     jax_raw = {
         "A_obj": A,
         "b_obj": np.reshape(b, (-1,)),
-        "x": np.asarray(result_jax.x, dtype=np.float64).reshape(-1),
-        "loop_count": np.asarray(result_jax.loop_count, dtype=np.float64),
-        "iter_hist": np.asarray(result_jax.iter_history, dtype=np.float64)[
-            history_slice
-        ],
-        "curr_hist": np.asarray(result_jax.curr_history, dtype=np.float64)[
-            history_slice
-        ],
-        "loop_hist": np.asarray(result_jax.loop_history, dtype=np.float64)[
-            history_slice
-        ],
-        "f_B_hist": np.asarray(result_jax.f_B_history, dtype=np.float64)[history_slice],
-        "f_S_hist": np.asarray(result_jax.f_S_history, dtype=np.float64)[history_slice],
-        "f_hist": np.asarray(result_jax.f_history, dtype=np.float64)[history_slice],
+        "x": _artifact_host_float_array(result_jax.x).reshape(-1),
+        "loop_count": _artifact_host_float_array(result_jax.loop_count),
+        "iter_hist": _artifact_host_float_array(result_jax.iter_history)[history_slice],
+        "curr_hist": _artifact_host_float_array(result_jax.curr_history)[history_slice],
+        "loop_hist": _artifact_host_float_array(result_jax.loop_history)[history_slice],
+        "f_B_hist": _artifact_host_float_array(result_jax.f_B_history)[history_slice],
+        "f_S_hist": _artifact_host_float_array(result_jax.f_S_history)[history_slice],
+        "f_hist": _artifact_host_float_array(result_jax.f_history)[history_slice],
         "flags": np.array(
             [
                 float(no_crossing),
@@ -2752,9 +2759,7 @@ def _build_wireframe_gsco_modular_fixed_state():
         "objective_total": np.array(
             [
                 float(
-                    np.asarray(result_jax.f_history, dtype=np.float64)[
-                        history_length - 1
-                    ]
+                    _artifact_host_float_array(result_jax.f_history)[history_length - 1]
                 )
             ],
             dtype=np.float64,
@@ -2905,10 +2910,10 @@ def _build_wireframe_gsco_sector_saddle_fixed_state():
         surf_plas=surf_jax,
         verbose=False,
     )
-    gamma_jax = np.asarray(surf_jax.gamma(), dtype=np.float64)
-    normal_jax = np.asarray(surf_jax.unitnormal(), dtype=np.float64)
+    gamma_jax = _artifact_host_float_array(surf_jax.gamma())
+    normal_jax = _artifact_host_float_array(surf_jax.unitnormal())
     res_jax["wframe_field"].set_points(gamma_jax.reshape((-1, 3)))
-    field_B_jax = np.asarray(res_jax["wframe_field"].B(), dtype=np.float64).reshape(
+    field_B_jax = _artifact_host_float_array(res_jax["wframe_field"].B()).reshape(
         (plas_n, plas_n, 3)
     )
     jax.block_until_ready(field_B_jax)
@@ -2917,7 +2922,7 @@ def _build_wireframe_gsco_sector_saddle_fixed_state():
 
     empty_grad = np.zeros(0, dtype=np.float64)
     x_cpu = np.asarray(res_cpu["x"], dtype=np.float64).reshape(-1)
-    x_jax = np.asarray(res_jax["x"], dtype=np.float64).reshape(-1)
+    x_jax = _artifact_host_float_array(res_jax["x"]).reshape(-1)
     dof_names = tuple(f"wireframe_current[{idx}]" for idx in range(x_cpu.size))
     free_mask = np.ones(x_cpu.size, dtype=bool)
     flags = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
@@ -2938,25 +2943,27 @@ def _build_wireframe_gsco_sector_saddle_fixed_state():
         "free_cells": free_cells_cpu,
         "initial_currents": initial_currents_cpu,
         "constraints_satisfied": constraints_cpu,
+        "surface_unit_normal": normal_cpu,
         "field_B": field_B_cpu,
         "Bnormal": Bnormal_cpu,
         "objective_total": np.array([float(res_cpu["f"])], dtype=np.float64),
     }
     jax_raw = {
-        "A_obj": np.asarray(res_jax["Amat"], dtype=np.float64),
-        "b_obj": np.asarray(res_jax["bvec"], dtype=np.float64).reshape(-1),
+        "A_obj": _artifact_host_float_array(res_jax["Amat"]),
+        "b_obj": _artifact_host_float_array(res_jax["bvec"]).reshape(-1),
         "x": x_jax,
-        "loop_count": np.asarray(res_jax["loop_count"], dtype=np.float64),
-        "iter_hist": np.asarray(res_jax["iter_hist"], dtype=np.float64),
-        "curr_hist": np.asarray(res_jax["curr_hist"], dtype=np.float64),
-        "loop_hist": np.asarray(res_jax["loop_hist"], dtype=np.float64),
-        "f_B_hist": np.asarray(res_jax["f_B_hist"], dtype=np.float64),
-        "f_S_hist": np.asarray(res_jax["f_S_hist"], dtype=np.float64),
-        "f_hist": np.asarray(res_jax["f_hist"], dtype=np.float64),
+        "loop_count": _artifact_host_float_array(res_jax["loop_count"]),
+        "iter_hist": _artifact_host_float_array(res_jax["iter_hist"]),
+        "curr_hist": _artifact_host_float_array(res_jax["curr_hist"]),
+        "loop_hist": _artifact_host_float_array(res_jax["loop_hist"]),
+        "f_B_hist": _artifact_host_float_array(res_jax["f_B_hist"]),
+        "f_S_hist": _artifact_host_float_array(res_jax["f_S_hist"]),
+        "f_hist": _artifact_host_float_array(res_jax["f_hist"]),
         "flags": flags,
         "free_cells": free_cells_jax,
         "initial_currents": initial_currents_jax,
         "constraints_satisfied": constraints_jax,
+        "surface_unit_normal": normal_jax,
         "field_B": field_B_jax,
         "Bnormal": Bnormal_jax,
         "objective_total": np.array([float(res_jax["f"])], dtype=np.float64),
@@ -3138,14 +3145,14 @@ def _build_wireframe_gsco_multistep_reduced_diagnostic():
     zero_array = np.zeros((0,), dtype=np.float64)
     empty_grad = np.zeros(0, dtype=np.float64)
     x_cpu = np.asarray(res_cpu["x"], dtype=np.float64).reshape(-1)
-    x_jax = np.asarray(res_jax["x"], dtype=np.float64).reshape(-1)
+    x_jax = _artifact_host_float_array(res_jax["x"]).reshape(-1)
     dof_names = tuple(f"wireframe_current[{idx}]" for idx in range(x_cpu.size))
     free_mask = np.ones(x_cpu.size, dtype=bool)
     flags = np.array([1.0, 0.0, 0.0, 1.0], dtype=np.float64)
     gamma_cpu = np.asarray(surf_cpu.gamma(), dtype=np.float64)
-    gamma_jax = np.asarray(surf_jax.gamma(), dtype=np.float64)
+    gamma_jax = _artifact_host_float_array(surf_jax.gamma())
     normal_cpu = np.asarray(surf_cpu.unitnormal(), dtype=np.float64)
-    normal_jax = np.asarray(surf_jax.unitnormal(), dtype=np.float64)
+    normal_jax = _artifact_host_float_array(surf_jax.unitnormal())
     cpu_raw = {
         "A_obj": np.asarray(res_cpu["Amat"], dtype=np.float64),
         "b_obj": np.asarray(res_cpu["bvec"], dtype=np.float64).reshape(-1),
@@ -3161,16 +3168,16 @@ def _build_wireframe_gsco_multistep_reduced_diagnostic():
         "objective_total": np.array([float(res_cpu["f"])], dtype=np.float64),
     }
     jax_raw = {
-        "A_obj": np.asarray(res_jax["Amat"], dtype=np.float64),
-        "b_obj": np.asarray(res_jax["bvec"], dtype=np.float64).reshape(-1),
+        "A_obj": _artifact_host_float_array(res_jax["Amat"]),
+        "b_obj": _artifact_host_float_array(res_jax["bvec"]).reshape(-1),
         "x": x_jax,
-        "loop_count": np.asarray(res_jax["loop_count"], dtype=np.float64),
-        "iter_hist": np.asarray(res_jax["iter_hist"], dtype=np.float64),
-        "curr_hist": np.asarray(res_jax["curr_hist"], dtype=np.float64),
-        "loop_hist": np.asarray(res_jax["loop_hist"], dtype=np.float64),
-        "f_B_hist": np.asarray(res_jax["f_B_hist"], dtype=np.float64),
-        "f_S_hist": np.asarray(res_jax["f_S_hist"], dtype=np.float64),
-        "f_hist": np.asarray(res_jax["f_hist"], dtype=np.float64),
+        "loop_count": _artifact_host_float_array(res_jax["loop_count"]),
+        "iter_hist": _artifact_host_float_array(res_jax["iter_hist"]),
+        "curr_hist": _artifact_host_float_array(res_jax["curr_hist"]),
+        "loop_hist": _artifact_host_float_array(res_jax["loop_hist"]),
+        "f_B_hist": _artifact_host_float_array(res_jax["f_B_hist"]),
+        "f_S_hist": _artifact_host_float_array(res_jax["f_S_hist"]),
+        "f_hist": _artifact_host_float_array(res_jax["f_hist"]),
         "flags": flags,
         "objective_total": np.array([float(res_jax["f"])], dtype=np.float64),
     }
@@ -3470,8 +3477,9 @@ def _build_full_stage2_composite():
     x0 = np.asarray(jf_full.x, dtype=np.float64).copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        jf_full.x = np.asarray(dofs, dtype=np.float64)
-        return _artifact_host_float(jf_full.J())
+        with _cpu_oracle_boundary():
+            jf_full.x = np.asarray(dofs, dtype=np.float64)
+            return _artifact_host_float(jf_full.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jf_full_jax.x = np.asarray(dofs, dtype=np.float64)
@@ -3721,8 +3729,9 @@ def _build_planar_stage2_composite():
     x0 = np.asarray(jf_full.x, dtype=np.float64).copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        jf_full.x = np.asarray(dofs, dtype=np.float64)
-        return _artifact_host_float(jf_full.J())
+        with _cpu_oracle_boundary():
+            jf_full.x = np.asarray(dofs, dtype=np.float64)
+            return _artifact_host_float(jf_full.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jf_full_jax.x = np.asarray(dofs, dtype=np.float64)
@@ -3851,12 +3860,13 @@ def _build_cws_saved_local_flux(*, nfp: int):
     x0 = np.asarray(jf_cpu.x, dtype=np.float64).copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        jf_cpu.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_cpu.J())
+        with _cpu_oracle_boundary():
+            jf_cpu.x = np.asarray(dofs, dtype=np.float64)
+            return _artifact_host_float(jf_cpu.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jf_jax.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_jax.J())
+        return _artifact_host_float(jf_jax.J())
 
     return FixtureBuild(
         spec=spec,
@@ -4038,11 +4048,11 @@ def _build_boozer_surface_basic():
         quadpoints_theta=thetas,
     )
     surface_jax.fit_to_curve(ma_jax, 0.10, flip_theta=True)
-    surface_gamma_jax = np.asarray(surface_jax.gamma(), dtype=np.float64)
-    surface_xphi_jax = np.asarray(surface_jax.gammadash1(), dtype=np.float64)
-    surface_xtheta_jax = np.asarray(surface_jax.gammadash2(), dtype=np.float64)
-    surface_normal_jax = np.asarray(surface_jax.normal(), dtype=np.float64)
-    surface_unit_normal_jax = np.asarray(surface_jax.unitnormal(), dtype=np.float64)
+    surface_gamma_jax = _artifact_host_float_array(surface_jax.gamma())
+    surface_xphi_jax = _artifact_host_float_array(surface_jax.gammadash1())
+    surface_xtheta_jax = _artifact_host_float_array(surface_jax.gammadash2())
+    surface_normal_jax = _artifact_host_float_array(surface_jax.normal())
+    surface_unit_normal_jax = _artifact_host_float_array(surface_jax.unitnormal())
     nphi_jax, ntheta_jax = surface_gamma_jax.shape[:2]
 
     # Verify native-spec contract on the JAX coils before building B/A.
@@ -4052,11 +4062,11 @@ def _build_boozer_surface_basic():
     # JAX B at the surface points (raveled).
     bs_jax_B = BiotSavartJAX(coils_jax_independent)
     bs_jax_B.set_points(surface_gamma_jax.reshape(-1, 3))
-    field_B_jax_flat = np.asarray(bs_jax_B.B(), dtype=np.float64)
+    field_B_jax_flat = _artifact_host_float_array(bs_jax_B.B())
     field_B_jax = field_B_jax_flat.reshape(nphi_jax, ntheta_jax, 3)
 
     # JAX residual.
-    r_jax = np.asarray(
+    r_jax = _artifact_host_float_array(
         boozer_residual_vector(
             G0_jax,
             iota_value,
@@ -4065,7 +4075,6 @@ def _build_boozer_surface_basic():
             surface_xtheta_jax,
             weight_inv_modB=False,
         ),
-        dtype=np.float64,
     )
 
     # JAX labels: Area, Volume use unnormalized surface normal; ToroidalFlux
@@ -4086,7 +4095,7 @@ def _build_boozer_surface_basic():
     bs_jax_tf = BiotSavartJAX(list(bs_jax_field.coils))
     tf_gamma_slice = surface_gamma_jax[0]
     bs_jax_tf.set_points(np.ascontiguousarray(tf_gamma_slice))
-    A_jax_slice = np.asarray(bs_jax_tf.A(), dtype=np.float64)
+    A_jax_slice = _artifact_host_float_array(bs_jax_tf.A())
     toroidal_flux_jax_value = _artifact_host_float(
         toroidal_flux_jax_fn(
             _as_jax_float64(A_jax_slice),
@@ -4107,8 +4116,8 @@ def _build_boozer_surface_basic():
         "G": float(G0_jax),
     }
     jax_dof_names = tuple(surface_jax.dof_names)
-    jax_free_mask = np.asarray(surface_jax.local_dofs_free_status, dtype=bool)
-    jax_active_dofs = np.asarray(surface_jax.x, dtype=np.float64)
+    jax_free_mask = _artifact_host_bool_array(surface_jax.local_dofs_free_status)
+    jax_active_dofs = _artifact_host_float_array(surface_jax.x)
     jax_raw_arrays = {
         "field_B": field_B_jax,
         "surface_gamma": surface_gamma_jax,
@@ -4294,7 +4303,9 @@ def _build_boozer_qa_wrappers():
     nqs_cpu_value = float(
         NonQuasiSymmetricRatio(boozer_surface_cpu, bs_nonQS_cpu, sDIM=sDIM).J()
     )
-    length_sum_cpu_value = sum(_artifact_host_float(CurveLength(c).J()) for c in base_curves)
+    length_sum_cpu_value = sum(
+        _artifact_host_float(CurveLength(c).J()) for c in base_curves
+    )
 
     setup_seconds_cpu = time.perf_counter() - start_setup
 
@@ -4375,8 +4386,8 @@ def _build_boozer_qa_wrappers():
         quadpoints_theta=thetas,
     )
     surface_jax.set_dofs(np.asarray(surface_cpu.get_dofs(), dtype=np.float64))
-    surface_gamma_jax = np.asarray(surface_jax.gamma(), dtype=np.float64)
-    surface_unit_normal_jax = np.asarray(surface_jax.unitnormal(), dtype=np.float64)
+    surface_gamma_jax = _artifact_host_float_array(surface_jax.gamma())
+    surface_unit_normal_jax = _artifact_host_float_array(surface_jax.unitnormal())
     nphi_jax, ntheta_jax = surface_gamma_jax.shape[:2]
 
     coils_jax_independent = list(bs_jax_field.coils)
@@ -4388,7 +4399,7 @@ def _build_boozer_qa_wrappers():
     # finite field over the surface.
     bs_jax_B = BiotSavartJAX(coils_jax_independent)
     bs_jax_B.set_points(surface_gamma_jax.reshape(-1, 3))
-    field_B_jax_flat = np.asarray(bs_jax_B.B(), dtype=np.float64)
+    field_B_jax_flat = _artifact_host_float_array(bs_jax_B.B())
     field_B_jax = field_B_jax_flat.reshape(nphi_jax, ntheta_jax, 3)
     Bdotn_jax = np.sum(field_B_jax * surface_unit_normal_jax, axis=2)
 
@@ -4401,8 +4412,8 @@ def _build_boozer_qa_wrappers():
     # MajorRadius scalar: pure JAX over the surface spec built from the
     # solved DOFs.
     surface_spec_jax = surface_jax.surface_spec()
-    sdofs_jax = np.asarray(surface_jax.get_dofs(), dtype=np.float64)
-    major_radius_jax_value = float(
+    sdofs_jax = _artifact_host_float_array(surface_jax.get_dofs())
+    major_radius_jax_value = _artifact_host_float(
         surface_major_radius_jax_from_dofs(surface_spec_jax, sdofs_jax)
     )
 
@@ -4423,7 +4434,7 @@ def _build_boozer_qa_wrappers():
     scatter_indices = (
         _generic_surface_scatter_operator_host(mpol, ntor) if stellsym else None
     )
-    nqs_jax_value = float(
+    nqs_jax_value = _artifact_host_float(
         _qs_ratio_pure(
             sdofs_jax,
             coil_set_spec_nqs,
@@ -4452,8 +4463,8 @@ def _build_boozer_qa_wrappers():
         "sum_CurveLength": length_sum_jax_value,
     }
     jax_dof_names = tuple(surface_jax.dof_names)
-    jax_free_mask = np.asarray(surface_jax.local_dofs_free_status, dtype=bool)
-    jax_active_dofs = np.asarray(surface_jax.x, dtype=np.float64)
+    jax_free_mask = _artifact_host_bool_array(surface_jax.local_dofs_free_status)
+    jax_active_dofs = _artifact_host_float_array(surface_jax.x)
     jax_raw_arrays = {
         "field_B": field_B_jax,
         "surface_gamma": surface_gamma_jax,
@@ -4540,9 +4551,7 @@ def _build_tracing_fieldlines_qa_reduced_endpoint():
             range="full torus",
         )
         nfp = surface.nfp
-        bs_cpu = simsopt.load(
-            EXAMPLES / "1_Simple" / "inputs" / "biot_savart_opt.json"
-        )
+        bs_cpu = simsopt.load(EXAMPLES / "1_Simple" / "inputs" / "biot_savart_opt.json")
         gamma = np.asarray(surface.gamma(), dtype=np.float64)
         rs = np.linalg.norm(gamma[:, :, 0:2], axis=2)
         zs = gamma[:, :, 2]
@@ -4598,7 +4607,7 @@ def _build_tracing_fieldlines_qa_reduced_endpoint():
         skip=skip,
     )
     jax_field.set_points(gamma.reshape((-1, 3)))
-    jax_field_B = np.asarray(jax_field.B(), dtype=np.float64)
+    jax_field_B = _artifact_host_float_array(jax_field.B())
     jax_tys, jax_hits = _compute_fieldlines_jax(
         jax_field,
         R0,
@@ -4612,9 +4621,9 @@ def _build_tracing_fieldlines_qa_reduced_endpoint():
     jax_setup = time.perf_counter() - start_jax
 
     cpu_traj = np.asarray(cpu_tys[0], dtype=np.float64)
-    jax_traj = np.asarray(jax_tys[0], dtype=np.float64)
+    jax_traj = _artifact_host_float_array(jax_tys[0])
     cpu_phi_hits = np.asarray(cpu_hits[0], dtype=np.float64)
-    jax_phi_hits = np.asarray(jax_hits[0], dtype=np.float64)
+    jax_phi_hits = _artifact_host_float_array(jax_hits[0])
     hit_count = min(int(cpu_phi_hits.shape[0]), int(jax_phi_hits.shape[0]))
     cpu_hit_xyz = cpu_phi_hits[:hit_count, 2:5]
     jax_hit_xyz = jax_phi_hits[:hit_count, 2:5]
@@ -4802,7 +4811,7 @@ def _build_tracing_fieldlines_ncsx_reduced_endpoint():
         skip=skip,
     )
     jax_field.set_points(gamma.reshape((-1, 3)))
-    jax_field_B = np.asarray(jax_field.B(), dtype=np.float64)
+    jax_field_B = _artifact_host_float_array(jax_field.B())
     jax_tys, jax_hits = _compute_fieldlines_jax(
         jax_field,
         R0,
@@ -4816,9 +4825,9 @@ def _build_tracing_fieldlines_ncsx_reduced_endpoint():
     jax_setup = time.perf_counter() - start_jax
 
     cpu_traj = np.asarray(cpu_tys[0], dtype=np.float64)
-    jax_traj = np.asarray(jax_tys[0], dtype=np.float64)
+    jax_traj = _artifact_host_float_array(jax_tys[0])
     cpu_phi_hits = np.asarray(cpu_hits[0], dtype=np.float64)
-    jax_phi_hits = np.asarray(jax_hits[0], dtype=np.float64)
+    jax_phi_hits = _artifact_host_float_array(jax_hits[0])
     hit_count = min(int(cpu_phi_hits.shape[0]), int(jax_phi_hits.shape[0]))
     cpu_t_final = float(cpu_traj[-1, 0])
     jax_t_final = float(jax_traj[-1, 0])
@@ -5057,9 +5066,9 @@ def _build_tracing_particle_gc_vac_reduced_endpoint():
         )
         cpu_field.set_points(gamma.reshape((-1, 3)))
         cpu_field_B = np.asarray(cpu_field.B(), dtype=np.float64).reshape(gamma.shape)
-        cpu_field_GradAbsB = np.asarray(
-            cpu_field.GradAbsB(), dtype=np.float64
-        ).reshape(gamma.shape)
+        cpu_field_GradAbsB = np.asarray(cpu_field.GradAbsB(), dtype=np.float64).reshape(
+            gamma.shape
+        )
         cpu_setup = time.perf_counter() - start_cpu
 
     start_jax = time.perf_counter()
@@ -5090,16 +5099,16 @@ def _build_tracing_particle_gc_vac_reduced_endpoint():
         forget_exact_path=True,
     )
     jax_field.set_points(gamma.reshape((-1, 3)))
-    jax_field_B = np.asarray(jax_field.B(), dtype=np.float64).reshape(gamma.shape)
-    jax_field_GradAbsB = np.asarray(jax_field.GradAbsB(), dtype=np.float64).reshape(
+    jax_field_B = _artifact_host_float_array(jax_field.B()).reshape(gamma.shape)
+    jax_field_GradAbsB = _artifact_host_float_array(jax_field.GradAbsB()).reshape(
         gamma.shape
     )
     jax_setup = time.perf_counter() - start_jax
 
     cpu_traj = np.asarray(cpu_tys[0], dtype=np.float64)
-    jax_traj = np.asarray(jax_tys[0], dtype=np.float64)
+    jax_traj = _artifact_host_float_array(jax_tys[0])
     cpu_phi_hits = np.asarray(cpu_hits[0], dtype=np.float64)
-    jax_phi_hits = np.asarray(jax_hits[0], dtype=np.float64)
+    jax_phi_hits = _artifact_host_float_array(jax_hits[0])
     hit_count = min(
         _tracing_event_count(cpu_phi_hits), _tracing_event_count(jax_phi_hits)
     )
@@ -5377,13 +5386,13 @@ def _build_tracing_boozer_gc_reduced_endpoint():
         forget_exact_path=True,
     )
     jax_field.set_points(field_points)
-    jax_modB = np.asarray(jax_field.modB(), dtype=np.float64)
+    jax_modB = _artifact_host_float_array(jax_field.modB())
     jax_setup = time.perf_counter() - start_jax
 
     cpu_traj = np.asarray(cpu_tys[0], dtype=np.float64)
-    jax_traj = np.asarray(jax_tys[0], dtype=np.float64)
+    jax_traj = _artifact_host_float_array(jax_tys[0])
     cpu_zeta_hits = np.asarray(cpu_hits[0], dtype=np.float64)
-    jax_zeta_hits = np.asarray(jax_hits[0], dtype=np.float64)
+    jax_zeta_hits = _artifact_host_float_array(jax_hits[0])
     hit_count = min(
         _tracing_event_count(cpu_zeta_hits), _tracing_event_count(jax_zeta_hits)
     )
@@ -5599,12 +5608,13 @@ def _build_position_orientation_flux_fixed_state():
     x0 = np.asarray(jf_cpu.x, dtype=np.float64).copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        jf_cpu.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_cpu.J())
+        with _cpu_oracle_boundary():
+            jf_cpu.x = np.asarray(dofs, dtype=np.float64)
+            return _artifact_host_float(jf_cpu.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jf_jax.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_jax.J())
+        return _artifact_host_float(jf_jax.J())
 
     return FixtureBuild(
         spec=POSITION_ORIENTATION_FLUX_SUPPORT_GATE_SPEC,
@@ -5726,8 +5736,8 @@ def _build_finite_beta_target_flux_fixed_state():
     ]
     length_penalty_sum_jax = sum(length_penalties_jax)
     jf_full_jax = jf_jax + length_penalty_weight * length_penalty_sum_jax
-    length_penalty_value_jax = float(
-        sum(penalty.J() for penalty in length_penalties_jax)
+    length_penalty_value_jax = _artifact_host_float(
+        _sum_objective_values([penalty.J() for penalty in length_penalties_jax])
     )
     setup_seconds_jax = time.perf_counter() - start_jax
 
@@ -5738,7 +5748,7 @@ def _build_finite_beta_target_flux_fixed_state():
         jf_jax=jf_full_jax,
         target_array=target_array,
         extra_components={
-            "SquaredFluxJAX": float(jf_jax.J()),
+            "SquaredFluxJAX": _artifact_host_float(jf_jax.J()),
             "sum_QuadraticPenalty_CurveLength_identity": length_penalty_value_jax,
             "sum_QuadraticPenalty_CurveLength_identity_weighted": (
                 length_penalty_weight * length_penalty_value_jax
@@ -5754,12 +5764,13 @@ def _build_finite_beta_target_flux_fixed_state():
     x0 = np.asarray(jf_full.x, dtype=np.float64).copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        jf_full.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full.J())
+        with _cpu_oracle_boundary():
+            jf_full.x = np.asarray(dofs, dtype=np.float64)
+            return _artifact_host_float(jf_full.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jf_full_jax.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full_jax.J())
+        return _artifact_host_float(jf_full_jax.J())
 
     return FixtureBuild(
         spec=FINITE_BETA_TARGET_FLUX_SPEC,
@@ -5895,7 +5906,9 @@ def _build_finitebuild_support_gate_probe():
     jdist = CurveCurveDistance(curves, dist_min)
     jf_full = jf_cpu + length_pen * sum(length_penalties) + dist_pen * jdist
     setup_cpu = time.perf_counter() - start_cpu
-    length_penalty_sum_value = sum(_artifact_host_float(j.J()) for j in length_penalties)
+    length_penalty_sum_value = sum(
+        _artifact_host_float(j.J()) for j in length_penalties
+    )
     distance_value = _artifact_host_float(jdist.J())
     cpu_lane = _build_cpu_lane(
         surface=surface,
@@ -5979,12 +5992,13 @@ def _build_finitebuild_support_gate_probe():
     x0 = np.asarray(jf_full.x, dtype=np.float64).copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        jf_full.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full.J())
+        with _cpu_oracle_boundary():
+            jf_full.x = np.asarray(dofs, dtype=np.float64)
+            return _artifact_host_float(jf_full.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
         jf_full_jax.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_full_jax.J())
+        return _artifact_host_float(jf_full_jax.J())
 
     return FixtureBuild(
         spec=FINITEBUILD_MULTIFILAMENT_SUPPORT_GATE_SPEC,
@@ -6052,15 +6066,15 @@ def _build_strain_optimization_fixed_state():
     setup_seconds = time.perf_counter() - start_setup
 
     start_cpu = time.perf_counter()
-    cpu_torsional_strain = np.asarray(strain_cpu.torsional_strain(), dtype=np.float64)
-    cpu_binormal_strain = np.asarray(
-        strain_cpu.binormal_curvature_strain(),
-        dtype=np.float64,
-    )
-    cpu_torsional_penalty = float(jtor_cpu.J())
-    cpu_binormal_penalty = float(jbin_cpu.J())
-    cpu_total = float(jf_cpu.J())
-    cpu_gradient = np.asarray(jf_cpu.dJ(), dtype=np.float64)
+    with _cpu_oracle_boundary():
+        cpu_torsional_strain = _artifact_host_float_array(strain_cpu.torsional_strain())
+        cpu_binormal_strain = _artifact_host_float_array(
+            strain_cpu.binormal_curvature_strain()
+        )
+        cpu_torsional_penalty = _artifact_host_float(jtor_cpu.J())
+        cpu_binormal_penalty = _artifact_host_float(jbin_cpu.J())
+        cpu_total = _artifact_host_float(jf_cpu.J())
+        cpu_gradient = _artifact_host_float_array(jf_cpu.dJ())
     cpu_seconds = time.perf_counter() - start_cpu
 
     start_jax_setup = time.perf_counter()
@@ -6087,15 +6101,14 @@ def _build_strain_optimization_fixed_state():
     jax_setup_seconds = time.perf_counter() - start_jax_setup
 
     start_jax = time.perf_counter()
-    jax_torsional_strain = np.asarray(strain_jax.torsional_strain(), dtype=np.float64)
-    jax_binormal_strain = np.asarray(
+    jax_torsional_strain = _artifact_host_float_array(strain_jax.torsional_strain())
+    jax_binormal_strain = _artifact_host_float_array(
         strain_jax.binormal_curvature_strain(),
-        dtype=np.float64,
     )
-    jax_torsional_penalty = float(jtor_jax.J())
-    jax_binormal_penalty = float(jbin_jax.J())
-    jax_total = float(jf_jax.J())
-    jax_gradient = np.asarray(jf_jax.dJ(), dtype=np.float64)
+    jax_torsional_penalty = _artifact_host_float(jtor_jax.J())
+    jax_binormal_penalty = _artifact_host_float(jbin_jax.J())
+    jax_total = _artifact_host_float(jf_jax.J())
+    jax_gradient = _artifact_host_float_array(jf_jax.dJ())
     jax_seconds = time.perf_counter() - start_jax
 
     cpu_lane = _build_scalar_lane(
@@ -6125,18 +6138,16 @@ def _build_strain_optimization_fixed_state():
         components={
             "torsional_penalty": float(jax_torsional_penalty),
             "binormal_curvature_penalty": float(jax_binormal_penalty),
-            "max_torsional_strain": float(np.max(np.asarray(jax_torsional_strain))),
-            "max_binormal_curvature_strain": float(
-                np.max(np.asarray(jax_binormal_strain))
-            ),
+            "max_torsional_strain": float(np.max(jax_torsional_strain)),
+            "max_binormal_curvature_strain": float(np.max(jax_binormal_strain)),
         },
-        gradient=np.asarray(jax_gradient, dtype=np.float64),
+        gradient=jax_gradient,
         active_dof_names=active_names,
         active_dofs=x0,
         raw_arrays={
             "torsional_strain": jax_torsional_strain,
             "binormal_curvature_strain": jax_binormal_strain,
-            "gradient": np.asarray(jax_gradient, dtype=np.float64),
+            "gradient": jax_gradient,
             "objective_total": np.asarray([float(jax_total)], dtype=np.float64),
         },
         setup_seconds=jax_setup_seconds,
@@ -6144,12 +6155,13 @@ def _build_strain_optimization_fixed_state():
     )
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        jf_cpu.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_cpu.J())
+        with _cpu_oracle_boundary():
+            jf_cpu.x = np.asarray(dofs, dtype=np.float64)
+            return _artifact_host_float(jf_cpu.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
-        jf_jax.x = np.asarray(dofs, dtype=np.float64)
-        return float(jf_jax.J())
+        jf_jax.x = _artifact_host_float_array(dofs)
+        return _artifact_host_float(jf_jax.J())
 
     return FixtureBuild(
         spec=STRAIN_OPTIMIZATION_SUPPORT_GATE_SPEC,
@@ -6217,8 +6229,16 @@ def _build_coil_force_energy_fixed_state():
     def _independent_lp_curve_force_oracle(target_coils, source_coils) -> float:
         total = 0.0
         for coil in target_coils:
-            gammadash_norm = np.linalg.norm(coil.curve.gammadash(), axis=1)
-            force_norm_mn_per_m = np.linalg.norm(coil.force(source_coils), axis=1) / 1e6
+            gammadash_norm = np.linalg.norm(
+                _artifact_host_float_array(coil.curve.gammadash()), axis=1
+            )
+            force_norm_mn_per_m = (
+                np.linalg.norm(
+                    _artifact_host_float_array(coil.force(source_coils)),
+                    axis=1,
+                )
+                / 1e6
+            )
             total += (
                 np.sum(
                     np.maximum(force_norm_mn_per_m - threshold, 0.0) ** p
@@ -6230,9 +6250,12 @@ def _build_coil_force_energy_fixed_state():
         return float(total)
 
     def _independent_b2_energy_oracle(coils) -> float:
-        gammas = np.asarray([coil.curve.gamma() for coil in coils], dtype=np.float64)
+        gammas = np.asarray(
+            [_artifact_host_float_array(coil.curve.gamma()) for coil in coils],
+            dtype=np.float64,
+        )
         gammadashs = np.asarray(
-            [coil.curve.gammadash() for coil in coils],
+            [_artifact_host_float_array(coil.curve.gammadash()) for coil in coils],
             dtype=np.float64,
         )
         currents = np.asarray(
@@ -6262,10 +6285,10 @@ def _build_coil_force_energy_fixed_state():
 
     def _evaluate(force_obj, energy_obj):
         start_exec = time.perf_counter()
-        force_value = float(force_obj.J())
-        energy_value = float(energy_obj.J())
-        force_gradient = np.asarray(force_obj.dJ(), dtype=np.float64)
-        energy_gradient = np.asarray(energy_obj.dJ(), dtype=np.float64)
+        force_value = _artifact_host_float(force_obj.J())
+        energy_value = _artifact_host_float(energy_obj.J())
+        force_gradient = _artifact_host_float_array(force_obj.dJ())
+        energy_gradient = _artifact_host_float_array(energy_obj.dJ())
         gradient = force_weight * force_gradient + energy_weight * energy_gradient
         total = force_weight * force_value + energy_weight * energy_value
         return {
@@ -6286,7 +6309,8 @@ def _build_coil_force_energy_fixed_state():
         LpCurveForce,
         B2Energy,
     )
-    cpu_eval = _evaluate(force_cpu, energy_cpu)
+    with _cpu_oracle_boundary():
+        cpu_eval = _evaluate(force_cpu, energy_cpu)
     jax_eval = _evaluate(force_jax, energy_jax)
     force_oracle_value = _independent_lp_curve_force_oracle(
         coils_cpu[:ncoils],
@@ -6336,7 +6360,7 @@ def _build_coil_force_energy_fixed_state():
         },
         gradient=jax_eval["gradient"],
         active_dof_names=tuple(force_jax.dof_names),
-        active_dofs=np.asarray(force_jax.x, dtype=np.float64),
+        active_dofs=_artifact_host_float_array(force_jax.x),
         raw_arrays={
             "lp_curve_force_gradient": jax_eval["force_gradient"],
             "b2_energy_gradient": jax_eval["energy_gradient"],
@@ -6350,20 +6374,21 @@ def _build_coil_force_energy_fixed_state():
     x0 = np.asarray(force_cpu.x, dtype=np.float64).copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
-        x = np.asarray(dofs, dtype=np.float64)
-        force_cpu.x = x
-        energy_cpu.x = x
-        return force_weight * float(force_cpu.J()) + energy_weight * float(
-            energy_cpu.J()
-        )
+        with _cpu_oracle_boundary():
+            x = np.asarray(dofs, dtype=np.float64)
+            force_cpu.x = x
+            energy_cpu.x = x
+            return force_weight * _artifact_host_float(
+                force_cpu.J()
+            ) + energy_weight * _artifact_host_float(energy_cpu.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
-        x = np.asarray(dofs, dtype=np.float64)
+        x = _artifact_host_float_array(dofs)
         force_jax.x = x
         energy_jax.x = x
-        return force_weight * float(force_jax.J()) + energy_weight * float(
-            energy_jax.J()
-        )
+        return force_weight * _artifact_host_float(
+            force_jax.J()
+        ) + energy_weight * _artifact_host_float(energy_jax.J())
 
     return FixtureBuild(
         spec=COIL_FORCES_SUPPORT_GATE_SPEC,

@@ -215,9 +215,9 @@ def _host_pytree(value: object):
 
 
 def _host_array(value: object, *, dtype=None) -> np.ndarray:
-    out = np.asarray(value)
+    out = _host_pytree(value)
     if dtype is None:
-        return out
+        return np.asarray(out)
     return np.asarray(out, dtype=dtype)
 
 
@@ -368,9 +368,7 @@ def bnorm_obj_matrices_jax(
     unitn = normal * (1.0 / absn)
     sqrt_area = np.sqrt(absn.reshape((-1, 1)) / float(absn.size))
     area_weight = (
-        sqrt_area
-        if area_weighted
-        else np.ones(sqrt_area.shape, dtype=host_dtype)
+        sqrt_area if area_weighted else np.ones(sqrt_area.shape, dtype=host_dtype)
     )
 
     wf_field = WireframeFieldJAX(wframe)
@@ -384,7 +382,7 @@ def bnorm_obj_matrices_jax(
     )
 
     if ext_field is not None:
-        B_ext = np.asarray(
+        B_ext = _host_array(
             _jax_native_ext_field_B(
                 ext_field,
                 surf_plas.gamma().reshape((-1, 3)),

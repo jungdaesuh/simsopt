@@ -9,6 +9,7 @@ from .jit import jit
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from .._core.jax_host_boundary import host_array as _host_array
+from .._core.jax_host_boundary import host_int as _host_int
 from ..backend import is_jax_backend, raise_if_target_lane_bypass
 from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ..jax_core._math_utils import as_jax_int32 as _runtime_as_jax_int32
@@ -1259,7 +1260,7 @@ class LinkingNumber(Optimizable):
                         dphi_p,
                         dphi_q,
                     )
-                    total += int(contribution)
+                    total += _host_int(contribution, dtype=np.int32)
             return total
         return sopp.compute_linking_number(
             [c.gamma() for c in self.curves],

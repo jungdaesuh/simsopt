@@ -606,9 +606,7 @@ def _stopping_criterion_should_stop(
     if isinstance(criterion, MaxZStoppingCriterion):
         return z >= _device_array(criterion.crit_z, dtype)
     if isinstance(criterion, ToroidalTransitStoppingCriterion):
-        transits = jnp.abs(phi_unwrapped - phi_init) / _device_array(
-            2.0 * np.pi, dtype
-        )
+        transits = jnp.abs(phi_unwrapped - phi_init) / _device_array(2.0 * np.pi, dtype)
         return transits >= _device_array(criterion.max_transits, dtype)
     if isinstance(criterion, IterStoppingCriterion):
         return iter_count > _device_index(int(criterion.max_iter))
@@ -650,9 +648,7 @@ def _continuous_phi(
     half = _device_array(0.5, dtype)
     phi = jnp.where(phi_raw < zero, phi_raw + two_pi, phi_raw)
     nearest_multiple = (
-        jnp.sign(phi_near)
-        * jnp.floor(jnp.abs(phi_near / two_pi) + half)
-        * two_pi
+        jnp.sign(phi_near) * jnp.floor(jnp.abs(phi_near / two_pi) + half) * two_pi
     )
     opt1 = nearest_multiple - two_pi + phi
     opt2 = nearest_multiple + phi
@@ -817,9 +813,7 @@ def dopri5_step(
     )
     k4 = rhs(
         t + c(4.0 / 5.0) * h,
-        y
-        + h
-        * (c(44.0 / 45.0) * k1 - c(56.0 / 15.0) * k2 + c(32.0 / 9.0) * k3),
+        y + h * (c(44.0 / 45.0) * k1 - c(56.0 / 15.0) * k2 + c(32.0 / 9.0) * k3),
     )
     k5 = rhs(
         t + c(8.0 / 9.0) * h,
@@ -1123,7 +1117,10 @@ def trace_fieldline(
 
     # Initial unwrapped phi seed (C++ tracing.cpp uses pi).
     phi_init = _continuous_phi(
-        _take_entry(y0_arr, 0), _take_entry(y0_arr, 1), _device_array(np.pi, dtype), dtype
+        _take_entry(y0_arr, 0),
+        _take_entry(y0_arr, 1),
+        _device_array(np.pi, dtype),
+        dtype,
     )
 
     init_carry = (
@@ -1937,9 +1934,7 @@ def trace_guiding_center(
                 def diff_at(s, phi_last_in=phi_last_in, phi_shift=phi_shift):
                     pos = state_at_fraction(s)
                     pos_x, pos_y, _pos_z = _split_xyz(pos)
-                    return (
-                        _continuous_phi(pos_x, pos_y, phi_last_in, dtype) - phi_shift
-                    )
+                    return _continuous_phi(pos_x, pos_y, phi_last_in, dtype) - phi_shift
 
                 f_left = diff_at(_device_array(0.0, dtype))
                 f_right = diff_at(_device_array(1.0, dtype))
@@ -2929,13 +2924,16 @@ def trace_guiding_center_boozer(
             "trace_guiding_center_boozer mode must be one of "
             f"{{'vacuum', 'no_k', 'full'}}; got mode={mode!r}."
         )
+    if zetas is None:
+        zetas_arr = jnp.zeros((0,), dtype=dtype)
+    else:
+        zetas_arr = jnp.asarray(zetas, dtype=dtype).reshape((-1,))
+    num_zetas = int(zetas_arr.shape[0])
     initial_axis_invalid = _boozer_axis_invalid(y0_arr)
 
     # Fast path: no events requested → reuse the lean shared driver to
     # preserve the prior compile profile on the no-events parity tests.
-    if (zetas is None or len(np.asarray(zetas).reshape((-1,))) == 0) and len(
-        stopping_criteria
-    ) == 0:
+    if num_zetas == 0 and len(stopping_criteria) == 0:
         return _run_dopri5_4state(
             rhs,
             y0_arr,
@@ -2977,12 +2975,6 @@ def trace_guiding_center_boozer(
         phi_hits_count_init,
         y0_arr,
     )
-
-    if zetas is None:
-        zetas_arr = jnp.zeros((0,), dtype=dtype)
-    else:
-        zetas_arr = jnp.asarray(zetas, dtype=dtype).reshape((-1,))
-    num_zetas = int(zetas_arr.shape[0])
 
     # Initial unwrapped zeta seed: the Boozer state stores zeta
     # directly, so we anchor near the literal initial value.

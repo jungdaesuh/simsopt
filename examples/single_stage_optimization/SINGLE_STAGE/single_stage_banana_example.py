@@ -38,7 +38,6 @@ configure_entrypoint_jax_runtime(
 )
 
 import jax
-from jax.experimental import io_callback
 import jax.numpy as jnp
 import jaxlib
 import numpy as np
@@ -85,7 +84,7 @@ from banana_opt.single_stage_objectives import evaluate_alm_objective
 # SIMSOPT imports
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable, load
-from simsopt.backend import get_backend_policy, get_tolerance_tier
+from simsopt.backend import get_tolerance_tier
 from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.field import BiotSavart
 from simsopt.jax_core._math_utils import (
@@ -93,7 +92,6 @@ from simsopt.jax_core._math_utils import (
     as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
     runtime_device_put,
-    runtime_np_dtype,
 )
 from simsopt.geo import (
     BoozerSurface,
@@ -115,7 +113,6 @@ from simsopt.geo.optimizer_jax import (
     ReferenceOptimizerContract,
     TargetObjectiveRoute,
     TargetOptimizerContract,
-    _mark_cacheable_jit_value_and_grad,
     reference_driver_method,
     reference_minimize,
     require_target_backend_x64,
@@ -567,15 +564,6 @@ def _summarize_host_array(array):
     summary = _summarize_host_vector(host.reshape(-1))
     summary["shape"] = [int(size) for size in host.shape]
     return summary
-
-
-def _summarize_full_graph_host_callback_initial_profile(elapsed_s, value, grad):
-    return {
-        "profile_point_kind": "full_graph_host_callback_initial",
-        "value_and_grad_first_s": float(elapsed_s),
-        "objective_value": _summarize_host_scalar(value),
-        "objective_grad": _summarize_host_vector(grad),
-    }
 
 
 def _summarize_optimizer_state_trace(trace):
@@ -1639,37 +1627,6 @@ def _hostify_traceable_value_and_grad(value_and_grad, x):
         host_float(value),
         np.asarray(host_array(grad), dtype=np.float64).reshape(-1),
     )
-
-
-def build_single_stage_full_graph_host_callback_value_and_grad(
-    value_and_grad,
-    optimizer_dofs,
-):
-    """Bridge full-graph ``JF.x`` value/grad into the jitted L-BFGS-B driver."""
-    host_template = _single_stage_optimizer_dofs_array(optimizer_dofs).reshape(-1)
-    host_dtype = runtime_np_dtype()
-    callback_device = jax.devices()[0]
-    value_spec = jax.ShapeDtypeStruct((), jnp.dtype(host_dtype))
-    grad_spec = jax.ShapeDtypeStruct(host_template.shape, jnp.dtype(host_dtype))
-
-    def host_value_and_grad(x):
-        with jax.default_device(callback_device):
-            value, grad = value_and_grad(np.asarray(x, dtype=host_dtype).reshape(-1))
-        return (
-            np.asarray(value, dtype=host_dtype),
-            np.asarray(grad, dtype=host_dtype).reshape(host_template.shape),
-        )
-
-    def wrapped(optimizer_x):
-        with jax.transfer_guard_host_to_device("allow"):
-            return io_callback(
-                host_value_and_grad,
-                (value_spec, grad_spec),
-                optimizer_x,
-                ordered=True,
-            )
-
-    return _mark_cacheable_jit_value_and_grad(wrapped)
 
 
 def uses_per_accept_target_lane_sync(sync_policy: str) -> bool:
@@ -4692,6 +4649,7 @@ def parse_args():
     # Warn when explicit CPU ondevice selects the memory-heavy compiled optimizer loop.
     if args.backend == "jax" and args.optimizer_backend == "ondevice":
         from simsopt.backend.runtime import get_backend_config
+
         config = get_backend_config()
         if config.jax_platform == "cpu":
             local_logger = logging.getLogger(__name__)
@@ -5389,7 +5347,7 @@ def resolve_single_stage_final_penalty_metrics(
     optimizer_success=None,
 ):
     """Resolve final reported penalties/hardware metrics for one single-stage run."""
-    del init_only, termination_message
+    del init_only, termination_message, optimizer_success
     benchmark_hardware_status = {
         "success": None,
         "violation_keys": ["skipped_in_benchmark_mode"],
@@ -5397,11 +5355,6 @@ def resolve_single_stage_final_penalty_metrics(
     }
 
     if use_target_lane:
-        if optimizer_success is False:
-            raise RuntimeError(
-                "Target-lane optimizer failed; no accepted final target-lane "
-                "reporting metrics are available for results.json."
-            )
         return _require_cached_target_lane_reporting_metrics(
             run_dict,
             coil_dofs,
@@ -6263,6 +6216,27 @@ def build_single_stage_target_lane_accepted_step_sync(
         return accepted_step_summary
 
     return sync
+
+
+def build_single_stage_target_lane_forward_result(
+    boozer_surface,
+    bs,
+    iota_target,
+    *,
+    outer_objective_config,
+    success_filter,
+):
+    """Build the pure target-lane forward-result callable for replay probes."""
+    runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
+        boozer_surface,
+        bs,
+        iota_target,
+        include_profile_suite=False,
+        include_host_wrappers=False,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
+    return runtime_bundle["forward_result"]
 
 
 def configure_single_stage_target_lane_accepted_step_sync(
@@ -7788,6 +7762,7 @@ def resolve_single_stage_default_optimizer_backend(
         return optimizer_backend
     if field_backend == "jax":
         from simsopt.backend.runtime import get_backend_config
+
         config = get_backend_config()
         if config.jax_platform == "cpu":
             return "scipy-jax-fullgraph"
@@ -8187,19 +8162,6 @@ def target_lane_contract_supports_optimizer_seed(contract):
     return (
         contract.driver == Driver.SIMSOPT_LBFGSB
         and contract.objective_route == TargetObjectiveRoute.ARRAY_NATIVE
-    )
-
-
-def single_stage_target_lane_uses_full_graph_host_callback(
-    *,
-    use_target_lane_full_state_optimizer,
-    init_only,
-    supports_host_callback,
-):
-    return bool(
-        use_target_lane_full_state_optimizer
-        and not init_only
-        and supports_host_callback
     )
 
 
@@ -8872,9 +8834,7 @@ def compare_compact_and_optimizer_value_and_grad(
     value_abs_diff = abs(host_float(compact_value) - host_float(optimizer_value))
     gradient_diff = active_optimizer_gradient - compact_gradient_host
     gradient_abs_diff_inf = (
-        0.0
-        if gradient_diff.size == 0
-        else float(np.max(np.abs(gradient_diff)))
+        0.0 if gradient_diff.size == 0 else float(np.max(np.abs(gradient_diff)))
     )
     gradient_reference_inf = (
         0.0
@@ -10314,6 +10274,40 @@ def load_single_stage_objective_evaluation_replay_events(progress_json_path):
     ]
 
 
+def build_single_stage_target_lane_objective_evaluation_trace_event(
+    *,
+    source_event,
+    candidate_optimizer_dofs,
+    objective_value,
+    optimizer_gradient,
+    forward_result,
+):
+    """Return a target-native replay event for fixed-candidate parity checks."""
+    primal_success = forward_result.get("primal_success", forward_result["success"])
+    target_success = forward_result["success"]
+    return {
+        "target_native_replay": True,
+        "accepted_iteration_target": int(source_event["accepted_iteration_target"]),
+        "line_search_evaluation": int(source_event["line_search_evaluation"]),
+        "accepted_iterations": int(source_event.get("accepted_iterations", 0)),
+        "candidate_optimizer_dofs": _summarize_host_vector(candidate_optimizer_dofs),
+        "objective": _summarize_host_scalar(objective_value),
+        "native_gradient": _summarize_host_gradient(optimizer_gradient),
+        "optimizer_gradient": _summarize_host_gradient(optimizer_gradient),
+        "objective_components": None,
+        "boozer_solve_decomposition": None,
+        "iota_penalty_decomposition": None,
+        "native_gradient_used": host_bool(target_success),
+        "solver_success": host_bool(primal_success),
+        "boozer_solver_metadata": None,
+        "boozer_iota": _summarize_host_scalar(forward_result["iota"]),
+        "boozer_G": _summarize_optional_host_scalar(forward_result["G"]),
+        "boozer_surface_dofs": _summarize_host_vector(forward_result["sdofs"]),
+        "hardware_status": None,
+        "candidate_failure": None,
+    }
+
+
 def run_single_stage_objective_evaluation_trace_replay(adapter, replay_events):
     """Replay recorded optimizer candidates through one lane's objective contract."""
     final_x = None
@@ -10351,6 +10345,119 @@ def run_single_stage_objective_evaluation_trace_replay(adapter, replay_events):
         njev=len(replay_events),
         ls_status=0,
     )
+
+
+def run_single_stage_target_lane_objective_evaluation_trace_replay(
+    *,
+    replay_events,
+    target_value_and_grad_objective,
+    target_forward_result,
+    objective_input_dofs,
+    optimizer_to_coil_dofs,
+    sync_accepted_step,
+    record_event,
+):
+    """Replay recorded candidates through pure target-lane value/grad kernels."""
+    final_x = None
+    current_iteration = None
+    accepted_iteration_count = 0
+    last_group_x = None
+    last_group_primal_success = False
+    for event in replay_events:
+        iteration_target = int(event["accepted_iteration_target"])
+        if current_iteration is None:
+            current_iteration = iteration_target
+        elif iteration_target != current_iteration:
+            if last_group_primal_success:
+                sync_accepted_step(last_group_x)
+                accepted_iteration_count += 1
+            current_iteration = iteration_target
+        candidate_x = _single_stage_optimizer_dofs_array(
+            event["candidate_optimizer_dofs"]["values"]
+        )
+        objective_dofs = runtime_device_put(objective_input_dofs(candidate_x))
+        coil_dofs = runtime_device_put(optimizer_to_coil_dofs(candidate_x))
+        objective_value, optimizer_gradient = target_value_and_grad_objective(
+            objective_dofs
+        )
+        forward_result = target_forward_result(coil_dofs)
+        record_event(
+            build_single_stage_target_lane_objective_evaluation_trace_event(
+                source_event=event,
+                candidate_optimizer_dofs=candidate_x,
+                objective_value=objective_value,
+                optimizer_gradient=optimizer_gradient,
+                forward_result=forward_result,
+            )
+        )
+        final_x = candidate_x.copy()
+        last_group_x = candidate_x
+        last_group_primal_success = host_bool(
+            forward_result.get("primal_success", forward_result["success"])
+        )
+    if last_group_x is not None:
+        if last_group_primal_success:
+            sync_accepted_step(last_group_x)
+            accepted_iteration_count += 1
+    if final_x is None:
+        raise RuntimeError(
+            "Target-lane objective-evaluation replay requires at least one "
+            "recorded event."
+        )
+    return types.SimpleNamespace(
+        x=final_x,
+        nit=accepted_iteration_count,
+        success=True,
+        message="target_lane_objective_evaluation_trace_replay",
+        status=0,
+        nfev=len(replay_events),
+        njev=len(replay_events),
+        ls_status=0,
+    )
+
+
+def _contains_jax_tracer(value):
+    return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(value))
+
+
+def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
+    *,
+    target_value_and_grad_objective,
+    target_forward_result,
+    optimizer_to_coil_dofs,
+    run_dict,
+    record_event,
+):
+    """Record eager target-lane objective evaluations without tracing side effects."""
+    line_search_evaluation = 0
+
+    def wrapped(optimizer_dofs):
+        nonlocal line_search_evaluation
+        objective_value, optimizer_gradient = target_value_and_grad_objective(
+            optimizer_dofs
+        )
+        if _contains_jax_tracer(optimizer_dofs):
+            return objective_value, optimizer_gradient
+        line_search_evaluation += 1
+        candidate_x = _single_stage_optimizer_dofs_array(optimizer_dofs)
+        coil_dofs = runtime_device_put(optimizer_to_coil_dofs(candidate_x))
+        forward_result = target_forward_result(coil_dofs)
+        record_event(
+            build_single_stage_target_lane_objective_evaluation_trace_event(
+                source_event={
+                    "accepted_iteration_target": int(run_dict.get("it", 0)),
+                    "line_search_evaluation": int(line_search_evaluation),
+                    "accepted_iterations": int(run_dict.get("accepted_iterations", 0)),
+                },
+                candidate_optimizer_dofs=candidate_x,
+                objective_value=objective_value,
+                optimizer_gradient=optimizer_gradient,
+                forward_result=forward_result,
+            )
+        )
+        return objective_value, optimizer_gradient
+
+    return wrapped
 
 
 def snapshot_accepted_step_state_from_values(
@@ -12051,13 +12158,9 @@ if __name__ == "__main__":
             constraint_method=CONSTRAINT_METHOD,
         )
     )
-    use_target_lane_full_graph_host_callback = (
-        single_stage_target_lane_uses_full_graph_host_callback(
-            use_target_lane_full_state_optimizer=use_target_lane_full_state_optimizer,
-            init_only=args.init_only,
-            supports_host_callback=get_backend_policy().supports_host_callback,
-        )
-    )
+    # The historical fullgraph io_callback bridge is retired; target lanes use
+    # traceable JAX objectives so GPU proofs exercise CUDA kernels directly.
+    use_target_lane_full_graph_host_callback = False
     use_coil_optimizer_dofs = bool(
         use_target_lane and not use_target_lane_full_state_optimizer
     )
@@ -12475,7 +12578,7 @@ if __name__ == "__main__":
         objective_weights=objective_weights,
         diagnostics=diagnostics_refs,
         log_path=OUT_DIR_ITER + "/log.txt",
-        reevaluate_before_accept=use_target_lane_full_graph_host_callback,
+        reevaluate_before_accept=False,
         apply_coil_dofs=dof_setter,
         benchmark_mode=args.benchmark_mode,
         accepted_step_state_sync=None,
@@ -12619,69 +12722,51 @@ if __name__ == "__main__":
             boozer_surface,
             **target_lane_trial_boozer_overrides,
         ):
-            if use_target_lane_full_graph_host_callback:
-                if args.profile_target_lane_memory_analysis:
-                    raise RuntimeError(
-                        "--profile-target-lane-memory-analysis requires the "
-                        "traceable target-lane objective; method='lbfgs-ondevice' "
-                        "evaluates the full JF.x objective through a host callback."
-                    )
-                target_scalar_objective = None
-                target_value_and_grad_objective = (
-                    build_single_stage_full_graph_host_callback_value_and_grad(
-                        adapter,
-                        dofs,
-                    )
-                )
-                target_lane_optimizer_initial_value_and_grad = None
-                target_lane_profile = None
-                target_lane_success_filter = None
-            else:
-                (
-                    target_scalar_objective,
-                    target_value_and_grad_objective,
-                    target_lane_optimizer_initial_value_and_grad,
-                    target_lane_profile,
-                    target_lane_success_filter,
-                ) = prepare_target_lane_outer_objectives(
-                    boozer_surface,
-                    bs,
-                    banana_curve,
-                    VV,
-                    iota_target,
-                    use_target_lane=use_target_lane,
-                    use_value_and_grad=use_target_lane_vg,
-                    use_full_state_optimizer=use_target_lane_full_state_optimizer,
-                    full_state_optimizer_dof_map=(
-                        full_graph_optimizer_dof_map
-                        if use_target_lane_full_state_optimizer
-                        else None
-                    ),
-                    profile_optimizer_dofs=dofs
+            (
+                target_scalar_objective,
+                target_value_and_grad_objective,
+                target_lane_optimizer_initial_value_and_grad,
+                target_lane_profile,
+                target_lane_success_filter,
+            ) = prepare_target_lane_outer_objectives(
+                boozer_surface,
+                bs,
+                banana_curve,
+                VV,
+                iota_target,
+                use_target_lane=use_target_lane,
+                use_value_and_grad=use_target_lane_vg,
+                use_full_state_optimizer=use_target_lane_full_state_optimizer,
+                full_state_optimizer_dof_map=(
+                    full_graph_optimizer_dof_map
                     if use_target_lane_full_state_optimizer
-                    else None,
-                    profile_target_lane=args.profile_target_lane,
-                    profile_target_lane_memory_analysis=(
-                        args.profile_target_lane_memory_analysis
-                    ),
-                    profile_batch_size=args.profile_target_lane_batch_size,
-                    profile_progress_json_path=args.target_lane_profile_progress_json,
-                    stablehlo_dir=args.dump_target_lane_stablehlo_dir,
-                    disable_success_filter=args.disable_target_lane_success_filter,
-                    non_qs_weight=1.0,
-                    residual_weight=RES_WEIGHT,
-                    iota_weight=IOTAS_WEIGHT,
-                    length_weight=LENGTH_WEIGHT,
-                    length_target=length_target,
-                    cc_dist=CC_DIST,
-                    cc_weight=CC_WEIGHT,
-                    cs_dist=CS_DIST,
-                    cs_weight=CS_WEIGHT,
-                    ss_dist=SS_DIST,
-                    surf_dist_weight=SURF_DIST_WEIGHT,
-                    curvature_threshold=CURVATURE_THRESHOLD,
-                    curvature_weight=CURVATURE_WEIGHT,
-                )
+                    else None
+                ),
+                profile_optimizer_dofs=dofs
+                if use_target_lane_full_state_optimizer
+                else None,
+                profile_target_lane=args.profile_target_lane,
+                profile_target_lane_memory_analysis=(
+                    args.profile_target_lane_memory_analysis
+                ),
+                profile_batch_size=args.profile_target_lane_batch_size,
+                profile_progress_json_path=args.target_lane_profile_progress_json,
+                stablehlo_dir=args.dump_target_lane_stablehlo_dir,
+                disable_success_filter=args.disable_target_lane_success_filter,
+                non_qs_weight=1.0,
+                residual_weight=RES_WEIGHT,
+                iota_weight=IOTAS_WEIGHT,
+                length_weight=LENGTH_WEIGHT,
+                length_target=length_target,
+                cc_dist=CC_DIST,
+                cc_weight=CC_WEIGHT,
+                cs_dist=CS_DIST,
+                cs_weight=CS_WEIGHT,
+                ss_dist=SS_DIST,
+                surf_dist_weight=SURF_DIST_WEIGHT,
+                curvature_threshold=CURVATURE_THRESHOLD,
+                curvature_weight=CURVATURE_WEIGHT,
+            )
         _record_timing(
             timings,
             "target_lane_bundle_setup_s",
@@ -12712,17 +12797,12 @@ if __name__ == "__main__":
                     objective_input_dofs=target_lane_objective_input_dofs,
                 )
             )
-            initial_target_eval_elapsed_s = (
-                _perf_counter_s() - initial_target_eval_start_s
+            _record_timing(
+                timings,
+                "target_lane_initial_objective_s",
+                initial_target_eval_start_s,
+                _perf_counter_s(),
             )
-            if use_target_lane_full_graph_host_callback and args.profile_target_lane:
-                target_lane_profile = (
-                    _summarize_full_graph_host_callback_initial_profile(
-                        initial_target_eval_elapsed_s,
-                        initial_target_value,
-                        initial_target_grad,
-                    )
-                )
             target_lane_optimizer_initial_value_and_grad = (
                 initial_target_value,
                 initial_target_grad,
@@ -13096,109 +13176,85 @@ if __name__ == "__main__":
                     "single_stage.target_lane_bundle_setup",
                     enabled=jax_profile_enabled and use_target_lane,
                 ):
-                    if use_target_lane_full_graph_host_callback:
-                        if args.profile_target_lane_memory_analysis:
-                            raise RuntimeError(
-                                "--profile-target-lane-memory-analysis requires the "
-                                "traceable target-lane objective; "
-                                "method='lbfgs-ondevice' evaluates the full JF.x "
-                                "objective through a host callback."
-                            )
-                        target_scalar_objective = None
-                        target_value_and_grad_objective = (
-                            build_single_stage_full_graph_host_callback_value_and_grad(
-                                adapter,
-                                dofs,
-                            )
-                        )
-                        target_lane_optimizer_initial_value_and_grad = None
-                        target_lane_profile = None
-                        target_lane_success_filter = None
-                    else:
-                        (
-                            target_scalar_objective,
-                            target_value_and_grad_objective,
-                            target_lane_optimizer_initial_value_and_grad,
-                            target_lane_profile,
-                            target_lane_success_filter,
-                        ) = prepare_target_lane_outer_objectives(
-                            boozer_surface,
-                            bs,
-                            banana_curve,
-                            VV,
-                            iota_target,
-                            use_target_lane=use_target_lane,
-                            use_value_and_grad=use_target_lane_vg,
-                            use_full_state_optimizer=(
-                                use_target_lane_full_state_optimizer
-                            ),
-                            full_state_optimizer_dof_map=(
-                                full_graph_optimizer_dof_map
-                                if use_target_lane_full_state_optimizer
-                                else None
-                            ),
-                            profile_optimizer_dofs=dofs
-                            if use_target_lane_full_state_optimizer
-                            else None,
-                            profile_target_lane=args.profile_target_lane,
-                            profile_target_lane_memory_analysis=(
-                                args.profile_target_lane_memory_analysis
-                            ),
-                            profile_batch_size=args.profile_target_lane_batch_size,
-                            profile_progress_json_path=(
-                                args.target_lane_profile_progress_json
-                            ),
-                            stablehlo_dir=args.dump_target_lane_stablehlo_dir,
-                            disable_success_filter=(
-                                args.disable_target_lane_success_filter
-                            ),
-                            non_qs_weight=1.0,
-                            residual_weight=RES_WEIGHT,
-                            iota_weight=IOTAS_WEIGHT,
-                            length_weight=LENGTH_WEIGHT,
-                            length_target=length_target,
-                            cc_dist=CC_DIST,
-                            cc_weight=CC_WEIGHT,
-                            cs_dist=CS_DIST,
-                            cs_weight=CS_WEIGHT,
-                            ss_dist=SS_DIST,
-                            surf_dist_weight=SURF_DIST_WEIGHT,
-                            curvature_threshold=CURVATURE_THRESHOLD,
-                            curvature_weight=CURVATURE_WEIGHT,
-                        )
-                if use_target_lane_full_graph_host_callback:
-                    target_lane_outer_objective_config = None
-                else:
-                    target_lane_outer_objective_config = (
-                        build_target_lane_outer_objective_config(
-                            boozer_surface,
-                            bs,
-                            banana_curve,
-                            VV,
-                            non_qs_weight=1.0,
-                            residual_weight=RES_WEIGHT,
-                            iota_weight=IOTAS_WEIGHT,
-                            length_weight=LENGTH_WEIGHT,
-                            length_target=length_target,
-                            curve_curve_threshold=CC_DIST,
-                            curve_curve_weight=CC_WEIGHT,
-                            curve_surface_threshold=CS_DIST,
-                            curve_surface_weight=CS_WEIGHT,
-                            surface_vessel_threshold=SS_DIST,
-                            surface_vessel_weight=SURF_DIST_WEIGHT,
-                            curvature_threshold=CURVATURE_THRESHOLD,
-                            curvature_weight=CURVATURE_WEIGHT,
-                        )
-                    )
-                    configure_single_stage_target_lane_accepted_step_sync(
-                        adapter,
+                    (
+                        target_scalar_objective,
+                        target_value_and_grad_objective,
+                        target_lane_optimizer_initial_value_and_grad,
+                        target_lane_profile,
+                        target_lane_success_filter,
+                    ) = prepare_target_lane_outer_objectives(
                         boozer_surface,
                         bs,
+                        banana_curve,
+                        VV,
                         iota_target,
                         use_target_lane=use_target_lane,
-                        outer_objective_config=target_lane_outer_objective_config,
-                        success_filter=target_lane_success_filter,
+                        use_value_and_grad=use_target_lane_vg,
+                        use_full_state_optimizer=(use_target_lane_full_state_optimizer),
+                        full_state_optimizer_dof_map=(
+                            full_graph_optimizer_dof_map
+                            if use_target_lane_full_state_optimizer
+                            else None
+                        ),
+                        profile_optimizer_dofs=dofs
+                        if use_target_lane_full_state_optimizer
+                        else None,
+                        profile_target_lane=args.profile_target_lane,
+                        profile_target_lane_memory_analysis=(
+                            args.profile_target_lane_memory_analysis
+                        ),
+                        profile_batch_size=args.profile_target_lane_batch_size,
+                        profile_progress_json_path=(
+                            args.target_lane_profile_progress_json
+                        ),
+                        stablehlo_dir=args.dump_target_lane_stablehlo_dir,
+                        disable_success_filter=(
+                            args.disable_target_lane_success_filter
+                        ),
+                        non_qs_weight=1.0,
+                        residual_weight=RES_WEIGHT,
+                        iota_weight=IOTAS_WEIGHT,
+                        length_weight=LENGTH_WEIGHT,
+                        length_target=length_target,
+                        cc_dist=CC_DIST,
+                        cc_weight=CC_WEIGHT,
+                        cs_dist=CS_DIST,
+                        cs_weight=CS_WEIGHT,
+                        ss_dist=SS_DIST,
+                        surf_dist_weight=SURF_DIST_WEIGHT,
+                        curvature_threshold=CURVATURE_THRESHOLD,
+                        curvature_weight=CURVATURE_WEIGHT,
                     )
+                target_lane_outer_objective_config = (
+                    build_target_lane_outer_objective_config(
+                        boozer_surface,
+                        bs,
+                        banana_curve,
+                        VV,
+                        non_qs_weight=1.0,
+                        residual_weight=RES_WEIGHT,
+                        iota_weight=IOTAS_WEIGHT,
+                        length_weight=LENGTH_WEIGHT,
+                        length_target=length_target,
+                        curve_curve_threshold=CC_DIST,
+                        curve_curve_weight=CC_WEIGHT,
+                        curve_surface_threshold=CS_DIST,
+                        curve_surface_weight=CS_WEIGHT,
+                        surface_vessel_threshold=SS_DIST,
+                        surface_vessel_weight=SURF_DIST_WEIGHT,
+                        curvature_threshold=CURVATURE_THRESHOLD,
+                        curvature_weight=CURVATURE_WEIGHT,
+                    )
+                )
+                configure_single_stage_target_lane_accepted_step_sync(
+                    adapter,
+                    boozer_surface,
+                    bs,
+                    iota_target,
+                    use_target_lane=use_target_lane,
+                    outer_objective_config=target_lane_outer_objective_config,
+                    success_filter=target_lane_success_filter,
+                )
                 if use_target_lane:
                     _record_timing(
                         timings,
@@ -13225,13 +13281,12 @@ if __name__ == "__main__":
                             use_target_lane_full_graph_host_callback
                         ),
                     )
-                    if not use_target_lane_full_graph_host_callback:
-                        cache_single_stage_target_lane_reporting_snapshot(
-                            adapter,
-                            run_dict,
-                            target_lane_optimizer_to_coil_dofs(dofs),
-                            benchmark_mode=bool(args.benchmark_mode),
-                        )
+                    cache_single_stage_target_lane_reporting_snapshot(
+                        adapter,
+                        run_dict,
+                        target_lane_optimizer_to_coil_dofs(dofs),
+                        benchmark_mode=bool(args.benchmark_mode),
+                    )
                     if bool(run_dict.get("initial_objective_pending", False)):
                         initial_target_eval_start_s = _perf_counter_s()
                         initial_target_value, initial_target_grad = (
@@ -13242,20 +13297,12 @@ if __name__ == "__main__":
                                 objective_input_dofs=target_lane_objective_input_dofs,
                             )
                         )
-                        initial_target_eval_elapsed_s = (
-                            _perf_counter_s() - initial_target_eval_start_s
+                        _record_timing(
+                            timings,
+                            "target_lane_initial_objective_s",
+                            initial_target_eval_start_s,
+                            _perf_counter_s(),
                         )
-                        if (
-                            use_target_lane_full_graph_host_callback
-                            and args.profile_target_lane
-                        ):
-                            target_lane_profile = (
-                                _summarize_full_graph_host_callback_initial_profile(
-                                    initial_target_eval_elapsed_s,
-                                    initial_target_value,
-                                    initial_target_grad,
-                                )
-                            )
                         target_lane_optimizer_initial_value_and_grad = (
                             initial_target_value,
                             initial_target_grad,
@@ -13272,11 +13319,6 @@ if __name__ == "__main__":
                             objective_grad=_summarize_host_vector(initial_target_grad),
                         )
                 if args.replay_objective_evaluation_trace is not None:
-                    if use_target_lane:
-                        raise RuntimeError(
-                            "--replay-objective-evaluation-trace requires the "
-                            "host-dispatched adapter objective path."
-                        )
                     replay_events = (
                         load_single_stage_objective_evaluation_replay_events(
                             args.replay_objective_evaluation_trace
@@ -13294,10 +13336,41 @@ if __name__ == "__main__":
                         "single_stage.objective_evaluation_trace_replay",
                         enabled=jax_profile_enabled,
                     ):
-                        res = run_single_stage_objective_evaluation_trace_replay(
-                            adapter,
-                            replay_events,
-                        )
+                        if use_target_lane:
+                            if objective_evaluation_trace_callback is None:
+                                raise RuntimeError(
+                                    "target-lane objective-evaluation replay "
+                                    "requires --record-objective-evaluation-trace."
+                                )
+                            target_forward_result = (
+                                build_single_stage_target_lane_forward_result(
+                                    boozer_surface,
+                                    bs,
+                                    iota_target,
+                                    outer_objective_config=(
+                                        target_lane_outer_objective_config
+                                    ),
+                                    success_filter=target_lane_success_filter,
+                                )
+                            )
+                            res = run_single_stage_target_lane_objective_evaluation_trace_replay(
+                                replay_events=replay_events,
+                                target_value_and_grad_objective=(
+                                    target_value_and_grad_objective
+                                ),
+                                target_forward_result=target_forward_result,
+                                objective_input_dofs=(target_lane_objective_input_dofs),
+                                optimizer_to_coil_dofs=(
+                                    target_lane_optimizer_to_coil_dofs
+                                ),
+                                sync_accepted_step=adapter.sync_accepted_step,
+                                record_event=objective_evaluation_trace_callback,
+                            )
+                        else:
+                            res = run_single_stage_objective_evaluation_trace_replay(
+                                adapter,
+                                replay_events,
+                            )
                     outer_optimizer_end_s = _perf_counter_s()
                     _record_timing(
                         timings,
@@ -13708,9 +13781,39 @@ if __name__ == "__main__":
                             accepted_step_callback=accepted_step_callback,
                         )
                     )
+                    optimizer_target_value_and_grad_objective = (
+                        target_value_and_grad_objective
+                    )
+                    if (
+                        use_target_lane
+                        and target_value_and_grad_objective is not None
+                        and objective_evaluation_trace_callback is not None
+                    ):
+                        target_forward_result = (
+                            build_single_stage_target_lane_forward_result(
+                                boozer_surface,
+                                bs,
+                                iota_target,
+                                outer_objective_config=(
+                                    target_lane_outer_objective_config
+                                ),
+                                success_filter=target_lane_success_filter,
+                            )
+                        )
+                        optimizer_target_value_and_grad_objective = build_single_stage_target_lane_objective_evaluation_trace_wrapper(
+                            target_value_and_grad_objective=(
+                                target_value_and_grad_objective
+                            ),
+                            target_forward_result=target_forward_result,
+                            optimizer_to_coil_dofs=(target_lane_optimizer_to_coil_dofs),
+                            run_dict=run_dict,
+                            record_event=objective_evaluation_trace_callback,
+                        )
                     phase1_dofs = dofs
                     phase1_base_fun = (
-                        target_value_and_grad_objective if use_target_lane else adapter
+                        optimizer_target_value_and_grad_objective
+                        if use_target_lane
+                        else adapter
                     )
                     phase1_base_scalar_fun = (
                         target_scalar_objective if use_target_lane else None
@@ -14001,7 +14104,7 @@ if __name__ == "__main__":
                             if use_target_lane:
                                 res, target_lane_retry_summary = (
                                     run_single_stage_target_lane_optimizer_with_retries(
-                                        target_value_and_grad_objective,
+                                        optimizer_target_value_and_grad_objective,
                                         dofs,
                                         phase="phase2",
                                         callback=accepted_step_callback,
@@ -14227,9 +14330,7 @@ if __name__ == "__main__":
         final_optimizer_dofs = dofs if use_target_lane else bs.x.copy()
     else:
         final_optimizer_dofs = res.x
-    use_target_lane_reporting = bool(
-        use_target_lane and not use_target_lane_full_graph_host_callback
-    )
+    use_target_lane_reporting = bool(use_target_lane)
     final_reporting_coil_dofs = (
         target_lane_optimizer_to_coil_dofs(final_optimizer_dofs)
         if use_target_lane

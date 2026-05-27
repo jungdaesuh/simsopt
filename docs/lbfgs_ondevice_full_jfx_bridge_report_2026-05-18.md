@@ -1,18 +1,20 @@
-# L-BFGS On-Device Full JF.x Bridge Report
+# Retired L-BFGS Full JF.x Host-Callback Bridge Report
 
 Date: 2026-05-18
+Updated: 2026-05-26
 
 ## Summary
 
-The full `JF.x` contract was tested for `lbfgs-ondevice`.
+The full `JF.x` host-callback bridge was tested for `lbfgs-ondevice`.
 
-Result: `lbfgs-ondevice` now matches CPU/SciPy fullgraph to about `1.2e-9` on the reduced comparison run.
+Result: the bridge matched CPU/SciPy fullgraph to about `1.2e-9` on the
+reduced comparison run.
 
 | lane | final objective | diff vs CPU | nfev/njev |
 |---|---:|---:|---:|
 | CPU/SciPy | 1.1132110846645535 | 0 | 4/4 |
 | scipy-jax-fullgraph | 1.1132110846645542 | +6.7e-16 | 4/4 |
-| lbfgs-ondevice fullgraph bridge | 1.113211083463847 | -1.20e-9 | 4/4 |
+| retired lbfgs-ondevice fullgraph bridge | 1.113211083463847 | -1.20e-9 | 4/4 |
 
 ## Before And After
 
@@ -32,11 +34,19 @@ reject 8.52e-01
 accept 1.41e-01
 ```
 
-## Important Caveat
+## Retirement
 
-This is not a pure on-device fullgraph objective yet.
+This bridge is no longer the production GPU proof path.
 
-The current implementation routes full `JF.x` value/gradient evaluation through an ordered JAX `io_callback` into the private JAX L-BFGS-B driver. The L-BFGS-B state machine is the on-device JAX port, but objective and gradient evaluation are host-backed to preserve exact `JF.x` and Boozer semantics.
+It routed full `JF.x` value/gradient evaluation through an ordered JAX
+`io_callback` into the private JAX L-BFGS-B driver. Per the JAX external
+callback contract, callbacks execute Python on the host. That made the bridge a
+useful diagnostic for fullgraph parity, but not a valid pure CUDA objective
+proof.
+
+The production `lbfgs-ondevice` single-stage path now uses the traceable JAX
+target-lane value/gradient path. Fullgraph CPU-order parity remains covered by
+the `scipy-jax-fullgraph` lane.
 
 ## Runtime Impact
 
@@ -55,23 +65,17 @@ Sampling showed the long first phase was:
 JAX PjitFunction -> CompileAndLoad
 ```
 
-## Implementation Touch Point
+## Historical Implementation Touch Point
 
-Primary touched path:
+The retired bridge lived at:
 
 ```text
 examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py:1606
 ```
 
-The bridge entry point is:
-
-```text
-build_single_stage_full_graph_host_callback_value_and_grad(...)
-```
-
 ## Validation
 
-Validation passed:
+Historical validation passed:
 
 - `py_compile`
 - `ruff check`

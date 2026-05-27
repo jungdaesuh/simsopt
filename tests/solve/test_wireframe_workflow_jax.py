@@ -86,18 +86,30 @@ def _params(
     max_loop_count: int,
     lambda_s: float,
 ) -> WireframeGSCOLiveParams:
-    A_arr = jnp.asarray(A, dtype=jnp.float64)
-    default_current_abs = jnp.abs(jnp.asarray(default_current, dtype=A_arr.dtype))
+    device = jax.devices()[0]
+    A_arr = jax.device_put(np.asarray(A, dtype=np.float64), device=device)
+    default_current_abs = jnp.abs(
+        jax.device_put(np.asarray(default_current, dtype=A_arr.dtype), device=device)
+    )
+    tolerance_fraction = jax.device_put(
+        np.asarray(0.001, dtype=A_arr.dtype), device=device
+    )
     return WireframeGSCOLiveParams(
         A=A_arr,
-        loops=jnp.asarray(loops, dtype=jnp.int32),
-        free_loops=jnp.asarray(free_loops, dtype=jnp.int32),
-        segments=jnp.asarray(segments, dtype=jnp.int32),
-        connections=jnp.asarray(connections, dtype=jnp.int32),
+        loops=jax.device_put(np.asarray(loops, dtype=np.int32), device=device),
+        free_loops=jax.device_put(
+            np.asarray(free_loops, dtype=np.int32), device=device
+        ),
+        segments=jax.device_put(np.asarray(segments, dtype=np.int32), device=device),
+        connections=jax.device_put(
+            np.asarray(connections, dtype=np.int32), device=device
+        ),
         default_current=default_current_abs,
-        max_current=jnp.abs(jnp.asarray(max_current, dtype=A_arr.dtype)),
-        lambda_s=jnp.asarray(lambda_s, dtype=A_arr.dtype),
-        tol=0.001 * default_current_abs,
+        max_current=jnp.abs(
+            jax.device_put(np.asarray(max_current, dtype=A_arr.dtype), device=device)
+        ),
+        lambda_s=jax.device_put(np.asarray(lambda_s, dtype=A_arr.dtype), device=device),
+        tol=tolerance_fraction * default_current_abs,
         max_loop_count=abs(max_loop_count),
         no_crossing=False,
         no_new_coils=False,
@@ -134,10 +146,8 @@ def test_wireframe_initial_states_allow_strict_host_to_device_transfer_guard():
             loop_count_init,
             current_fraction=0.5,
         )
-        assert np.asarray(wireframe_gsco_never_stop(state)).item() is False
         assert state.iter_history.shape == (4,)
         assert multistep_state.current_fraction.shape == ()
-        assert np.asarray(multistep_state.done).item() is False
         result = greedy_stellarator_coil_optimization_jax(
             False,
             False,
@@ -196,6 +206,8 @@ def test_wireframe_initial_states_allow_strict_host_to_device_transfer_guard():
         assert result.iter_history.shape == (4,)
         assert sampled.iter_history.shape == (5,)
         assert no_crossing.iter_history.shape == (4,)
+    assert bool(jax.device_get(wireframe_gsco_never_stop(state))) is False
+    assert bool(jax.device_get(multistep_state.done)) is False
 
 
 def _run_cpp_gsco(

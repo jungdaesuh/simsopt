@@ -43,6 +43,7 @@ from hardware_constraints import (
     accepted_result_rejection_reasons,
     apply_hardware_constraint_verdict,
     sanitize_diagnostic_payload,
+    strict_accepted_payload,
 )
 from run_metadata import build_artifact_manifest, build_runtime_provenance
 from alm_utils import (
@@ -414,7 +415,18 @@ def parse_args():
     parser.add_argument(
         "--skip-postprocess",
         action="store_true",
-        help="Skip heavy VTK/plot/save artifact generation while still writing results.json.",
+        help=(
+            "Skip heavy VTK/plot/save artifact generation. Accepted runs still "
+            "write results.json; rejected runs write REJECTED.json."
+        ),
+    )
+    parser.add_argument(
+        "--comparison-results-json",
+        default=os.environ.get("STAGE2_COMPARISON_RESULTS_JSON"),
+        help=(
+            "Optional path to write the final Stage 2 comparison payload before "
+            "accepted-artifact filtering."
+        ),
     )
     parser.add_argument(
         "--disable-accepted-step-callback",
@@ -777,6 +789,7 @@ def parse_args():
     # Warn when explicit CPU ondevice selects the memory-heavy compiled optimizer loop.
     if args.backend == "jax" and args.optimizer_backend == "ondevice":
         from simsopt.backend.runtime import get_backend_config
+
         config = get_backend_config()
         if config.jax_platform == "cpu":
             LOGGER.warning(
@@ -795,6 +808,7 @@ def resolve_stage2_default_optimizer_backend(field_backend, optimizer_backend=No
         return optimizer_backend
     if field_backend == "jax":
         from simsopt.backend.runtime import get_backend_config
+
         config = get_backend_config()
         if config.jax_platform == "cpu":
             return "scipy-jax-fullgraph"
@@ -1271,9 +1285,7 @@ def build_stage2_target_reporting_snapshot(target_objective_bundle, dofs):
         target_objective_bundle
     )
     assert target_value_and_grad is not None
-    value, grad = _stage2_artifact_materialize(
-        lambda: target_value_and_grad(dofs_jax)
-    )
+    value, grad = _stage2_artifact_materialize(lambda: target_value_and_grad(dofs_jax))
     terms = _build_stage2_target_term_payload(target_objective_bundle, dofs64)
     snapshot = {
         "J": _stage2_artifact_host_float(lambda: value),
@@ -1292,9 +1304,7 @@ def build_stage2_target_reporting_snapshot(target_objective_bundle, dofs):
         "banana_current_A": _stage2_artifact_host_float(
             lambda: summary.banana_current_A
         ),
-        "grad_norm": float(
-            np.linalg.norm(_stage2_artifact_host_array(lambda: grad))
-        ),
+        "grad_norm": float(np.linalg.norm(_stage2_artifact_host_array(lambda: grad))),
         "distance_constraint_violated": _stage2_artifact_host_bool(
             lambda: summary.distance_constraint_violated
         ),
@@ -2438,9 +2448,7 @@ def _build_stage2_probe_composite_payload(
     composite_grad = _stage2_artifact_host_array(lambda: explicit_grad)
     composite_terms = None
     if target_objective_bundle is not None:
-        dofs_jax = jax.device_put(
-            _stage2_artifact_host_array(lambda: context.JF.x)
-        )
+        dofs_jax = jax.device_put(_stage2_artifact_host_array(lambda: context.JF.x))
         target_value_and_grad = resolve_stage2_target_value_and_grad(
             target_objective_bundle
         )
@@ -2686,6 +2694,25 @@ def write_stage2_results_json(
         os.path.join(output_dir, "results.json"), "w", encoding="utf-8"
     ) as outfile:
         json.dump(accepted_payload, outfile, indent=2, allow_nan=False)
+
+
+def write_stage2_comparison_results_json(path, results, *, rejection_reasons):
+    """Write the final-state payload used by parity/comparison benchmarks."""
+    output_dir = os.path.dirname(path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    payload = {
+        **results,
+        "accepted_artifact": not bool(rejection_reasons),
+        "accepted_result_rejection_reasons": list(rejection_reasons),
+    }
+    with open(path, "w", encoding="utf-8") as outfile:
+        json.dump(
+            strict_accepted_payload(payload),
+            outfile,
+            indent=2,
+            allow_nan=False,
+        )
 
 
 def _log_taylor_test_summary(label, result):
@@ -4263,6 +4290,12 @@ if __name__ == "__main__":
         final_objective=final_snapshot["J"],
         final_dofs=stage2_final_dofs,
     )
+    if args.comparison_results_json:
+        write_stage2_comparison_results_json(
+            args.comparison_results_json,
+            results,
+            rejection_reasons=rejection_reasons,
+        )
     if rejection_reasons:
         write_stage2_rejected_marker(
             OUT_DIR_ITER,

@@ -635,6 +635,48 @@ def test_trace_guiding_centers_boozer_batched_unpacks_lax_map_inputs():
     )
 
 
+def test_trace_guiding_centers_boozer_batched_uses_device_zetas_under_strict_transfer_guard():
+    """Boozer batch tracing must not host-materialize device ``zetas``."""
+
+    boozer_field = _analytic_boozer_field_for_batch_tests()
+    spec = GuidingCenterTracingSpec(
+        tmax=0.02,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        max_steps=16,
+        dtmax=0.005,
+        max_phi_hits=4,
+    )
+    y0s = jnp.asarray(
+        [
+            [0.12, 0.1, 0.2, 0.8],
+            [0.18, -0.2, 0.3, 0.6],
+        ],
+        dtype=jnp.float64,
+    )
+    dtmaxs = jnp.asarray([0.005, 0.004], dtype=jnp.float64)
+    mus = jnp.zeros((2,), dtype=jnp.float64)
+    zetas = jnp.asarray([0.25], dtype=jnp.float64)
+
+    with jax.transfer_guard("disallow"):
+        result = trace_guiding_centers_boozer_batched(
+            spec,
+            y0s,
+            dtmaxs,
+            mus,
+            boozer_field,
+            m=1.0,
+            q=1.0,
+            mode="vacuum",
+            zetas=zetas,
+        )
+        result.trajectory.block_until_ready()
+        result.phi_hits_count.block_until_ready()
+
+    assert np.asarray(result.trajectory).shape == (2, spec.max_steps + 1, 5)
+    assert np.asarray(result.phi_hits_count).shape == (2,)
+
+
 def _top_level_primitives(jaxpr) -> set[str]:
     return {equation.primitive.name for equation in jaxpr.jaxpr.eqns}
 
@@ -742,7 +784,10 @@ def test_trace_fieldline_field_parameter_grad_matches_finite_difference():
     basis = jnp.eye(field_params.size, dtype=jnp.float64)
     fd_grad = jnp.asarray(
         [
-            (loss(field_params + eps * direction) - loss(field_params - eps * direction))
+            (
+                loss(field_params + eps * direction)
+                - loss(field_params - eps * direction)
+            )
             / (2.0 * eps)
             for direction in basis
         ],
@@ -785,23 +830,27 @@ def test_trace_guiding_center_and_fullorbit_jaxprs_use_scan():
     )
 
     gc_jaxpr = jax.make_jaxpr(
-        lambda y0: trace_guiding_center(
-            gc_spec,
-            y0,
-            particle_field_fn,
-            m=1.0,
-            q=1.0,
-            mu=0.0,
-        ).t_final
+        lambda y0: (
+            trace_guiding_center(
+                gc_spec,
+                y0,
+                particle_field_fn,
+                m=1.0,
+                q=1.0,
+                mu=0.0,
+            ).t_final
+        )
     )(jnp.asarray([1.0, 0.0, 0.0, 1.0], dtype=jnp.float64))
     fullorbit_jaxpr = jax.make_jaxpr(
-        lambda y0: trace_fullorbit(
-            fullorbit_spec,
-            y0,
-            zero_B_fn,
-            m=1.0,
-            q=1.0,
-        ).t_final
+        lambda y0: (
+            trace_fullorbit(
+                fullorbit_spec,
+                y0,
+                zero_B_fn,
+                m=1.0,
+                q=1.0,
+            ).t_final
+        )
     )(jnp.asarray([0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=jnp.float64))
 
     gc_primitives = _top_level_primitives(gc_jaxpr)

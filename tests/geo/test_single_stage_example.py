@@ -2958,143 +2958,6 @@ class SingleStageExampleTests(unittest.TestCase):
             np.array([2.0, 0.0, 4.0, 0.0, 0.0, 6.0]),
         )
 
-    def test_full_graph_host_callback_value_and_grad_allows_strict_transfer_guard(
-        self,
-    ):
-        module = self.load_module()
-
-        def host_value_and_grad(x):
-            return float(np.sum(x)), 2.0 * np.asarray(x)
-
-        value_and_grad = (
-            module.build_single_stage_full_graph_host_callback_value_and_grad(
-                host_value_and_grad,
-                np.array([1.0, 2.0], dtype=np.float64),
-            )
-        )
-        with jax.transfer_guard_host_to_device("allow"):
-            optimizer_dofs = jax.device_put(np.array([3.0, 4.0], dtype=np.float64))
-
-        with jax.transfer_guard("disallow"):
-            value, gradient = value_and_grad(optimizer_dofs)
-
-        self.assertEqual(float(value), 7.0)
-        np.testing.assert_allclose(np.asarray(gradient), np.array([6.0, 8.0]))
-
-    def test_full_graph_host_callback_value_and_grad_uses_runtime_default_device(
-        self,
-    ):
-        module = self.load_module()
-        original_default_device = module.jax.default_device
-        callback_devices = []
-
-        @contextmanager
-        def recording_default_device(device):
-            callback_devices.append(device)
-            with original_default_device(device):
-                yield
-
-        def host_value_and_grad(x):
-            return float(np.sum(x)), 2.0 * np.asarray(x)
-
-        with patch.object(module.jax, "default_device", recording_default_device):
-            value_and_grad = (
-                module.build_single_stage_full_graph_host_callback_value_and_grad(
-                    host_value_and_grad,
-                    np.array([1.0, 2.0], dtype=np.float64),
-                )
-            )
-            with jax.transfer_guard_host_to_device("allow"):
-                optimizer_dofs = jax.device_put(
-                    np.array([3.0, 4.0], dtype=np.float64)
-                )
-
-            with jax.transfer_guard("disallow"):
-                value, gradient = value_and_grad(optimizer_dofs)
-
-        self.assertEqual(float(value), 7.0)
-        np.testing.assert_allclose(np.asarray(gradient), np.array([6.0, 8.0]))
-        self.assertEqual(callback_devices, [module.jax.devices()[0]])
-
-    def test_init_only_full_state_target_lane_uses_traceable_objective(self):
-        module = self.load_module()
-
-        self.assertFalse(
-            module.single_stage_target_lane_uses_full_graph_host_callback(
-                use_target_lane_full_state_optimizer=True,
-                init_only=True,
-                supports_host_callback=True,
-            )
-        )
-        self.assertTrue(
-            module.single_stage_target_lane_uses_full_graph_host_callback(
-                use_target_lane_full_state_optimizer=True,
-                init_only=False,
-                supports_host_callback=True,
-            )
-        )
-        self.assertFalse(
-            module.single_stage_target_lane_uses_full_graph_host_callback(
-                use_target_lane_full_state_optimizer=False,
-                init_only=False,
-                supports_host_callback=True,
-            )
-        )
-        self.assertFalse(
-            module.single_stage_target_lane_uses_full_graph_host_callback(
-                use_target_lane_full_state_optimizer=True,
-                init_only=False,
-                supports_host_callback=False,
-            )
-        )
-
-    def test_full_graph_host_callback_value_and_grad_is_cacheable(self):
-        module = self.load_module()
-        from simsopt.geo.optimizer_jax import _CACHEABLE_VALUE_AND_GRAD_ATTR
-
-        def host_value_and_grad(x):
-            x = np.asarray(x, dtype=np.float64)
-            return np.asarray(np.sum(x), dtype=np.float64), np.ones_like(x)
-
-        value_and_grad = (
-            module.build_single_stage_full_graph_host_callback_value_and_grad(
-                host_value_and_grad,
-                np.array([1.0, 2.0], dtype=np.float64),
-            )
-        )
-
-        self.assertTrue(getattr(value_and_grad, _CACHEABLE_VALUE_AND_GRAD_ATTR))
-        value, gradient = jax.jit(value_and_grad)(
-            jnp.array([1.0, 2.0], dtype=jnp.float64)
-        )
-
-        self.assertEqual(float(value), 3.0)
-        np.testing.assert_array_equal(np.asarray(gradient), np.array([1.0, 1.0]))
-
-    def test_full_graph_host_callback_value_and_grad_uses_runtime_dtype(self):
-        module = self.load_module()
-        module.runtime_np_dtype = lambda: np.dtype(np.float32)
-
-        def host_value_and_grad(x):
-            x = np.asarray(x, dtype=np.float32)
-            return np.asarray(np.sum(x), dtype=np.float32), np.ones_like(x)
-
-        value_and_grad = (
-            module.build_single_stage_full_graph_host_callback_value_and_grad(
-                host_value_and_grad,
-                np.array([1.0, 2.0], dtype=np.float64),
-            )
-        )
-
-        value, gradient = jax.jit(value_and_grad)(
-            jnp.array([1.0, 2.0], dtype=jnp.float32)
-        )
-
-        self.assertEqual(value.dtype, jnp.dtype(jnp.float32))
-        self.assertEqual(gradient.dtype, jnp.dtype(jnp.float32))
-        self.assertEqual(float(value), 3.0)
-        np.testing.assert_array_equal(np.asarray(gradient), np.array([1.0, 1.0]))
-
     def test_full_graph_jax_adapter_maps_native_full_gradient_once(self):
         module = self.load_module()
         applied = {}
@@ -3387,6 +3250,163 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_array_equal(adapter.calls[2], np.array([3.0, 0.0]))
         np.testing.assert_array_equal(adapter.syncs[0], np.array([2.0, 0.0]))
         np.testing.assert_array_equal(adapter.syncs[1], np.array([3.0, 0.0]))
+
+    def test_target_lane_objective_evaluation_trace_replay_records_events(self):
+        module = self.load_module()
+        recorded = []
+        synced = []
+        events = [
+            {
+                "accepted_iteration_target": 1,
+                "line_search_evaluation": 1,
+                "candidate_optimizer_dofs": {"values": [1.0, 0.0]},
+            },
+            {
+                "accepted_iteration_target": 2,
+                "line_search_evaluation": 1,
+                "candidate_optimizer_dofs": {"values": [2.0, 0.0]},
+            },
+        ]
+
+        def value_and_grad(x):
+            values = np.asarray(x, dtype=np.float64)
+            return float(np.sum(values)), 2.0 * values
+
+        def forward_result(x):
+            values = np.asarray(x, dtype=np.float64)
+            return {
+                "success": True,
+                "primal_success": True,
+                "iota": 0.15,
+                "G": 2.0,
+                "sdofs": values + 1.0,
+            }
+
+        result = module.run_single_stage_target_lane_objective_evaluation_trace_replay(
+            replay_events=events,
+            target_value_and_grad_objective=value_and_grad,
+            target_forward_result=forward_result,
+            objective_input_dofs=lambda x: x,
+            optimizer_to_coil_dofs=lambda x: x,
+            sync_accepted_step=lambda x: synced.append(np.asarray(x).copy()),
+            record_event=recorded.append,
+        )
+
+        self.assertEqual(result.nit, 2)
+        self.assertEqual(result.nfev, 2)
+        self.assertEqual(len(recorded), 2)
+        self.assertTrue(recorded[0]["target_native_replay"])
+        self.assertTrue(recorded[0]["native_gradient_used"])
+        self.assertTrue(recorded[0]["solver_success"])
+        np.testing.assert_array_equal(
+            np.asarray(recorded[1]["optimizer_gradient"]["values"]),
+            np.array([4.0, 0.0]),
+        )
+        np.testing.assert_array_equal(synced[0], np.array([1.0, 0.0]))
+        np.testing.assert_array_equal(synced[1], np.array([2.0, 0.0]))
+
+    def test_target_lane_objective_evaluation_trace_replay_skips_failed_sync(self):
+        module = self.load_module()
+        recorded = []
+        synced = []
+        events = [
+            {
+                "accepted_iteration_target": 1,
+                "line_search_evaluation": 1,
+                "candidate_optimizer_dofs": {"values": [1.0, 0.0]},
+            },
+            {
+                "accepted_iteration_target": 1,
+                "line_search_evaluation": 2,
+                "candidate_optimizer_dofs": {"values": [2.0, 0.0]},
+            },
+            {
+                "accepted_iteration_target": 2,
+                "line_search_evaluation": 1,
+                "candidate_optimizer_dofs": {"values": [3.0, 0.0]},
+            },
+        ]
+
+        def value_and_grad(x):
+            values = np.asarray(x, dtype=np.float64)
+            return float(np.sum(values)), 2.0 * values
+
+        def forward_result(x):
+            values = np.asarray(x, dtype=np.float64)
+            success = bool(values[0] != 2.0)
+            return {
+                "success": success,
+                "primal_success": success,
+                "iota": 0.15,
+                "G": 2.0,
+                "sdofs": values + 1.0,
+            }
+
+        result = module.run_single_stage_target_lane_objective_evaluation_trace_replay(
+            replay_events=events,
+            target_value_and_grad_objective=value_and_grad,
+            target_forward_result=forward_result,
+            objective_input_dofs=lambda x: x,
+            optimizer_to_coil_dofs=lambda x: x,
+            sync_accepted_step=lambda x: synced.append(np.asarray(x).copy()),
+            record_event=recorded.append,
+        )
+
+        self.assertEqual(result.nit, 1)
+        self.assertEqual(result.nfev, 3)
+        self.assertEqual(len(recorded), 3)
+        self.assertFalse(recorded[1]["solver_success"])
+        self.assertFalse(recorded[1]["native_gradient_used"])
+        np.testing.assert_array_equal(synced[0], np.array([3.0, 0.0]))
+
+    def test_target_lane_objective_evaluation_trace_replay_stages_device_inputs(self):
+        module = self.load_module()
+        recorded = []
+        synced = []
+        events = [
+            {
+                "accepted_iteration_target": 1,
+                "line_search_evaluation": 1,
+                "candidate_optimizer_dofs": {"values": [1.0, 2.0]},
+            }
+        ]
+
+        @jax.jit
+        def value_and_grad(x):
+            return jnp.sum(x), 2.0 * x
+
+        @jax.jit
+        def forward_result(x):
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "iota": jnp.sum(x),
+                "G": jnp.prod(x),
+                "sdofs": x + 1.0,
+            }
+
+        with jax.transfer_guard("disallow"):
+            result = (
+                module.run_single_stage_target_lane_objective_evaluation_trace_replay(
+                    replay_events=events,
+                    target_value_and_grad_objective=value_and_grad,
+                    target_forward_result=forward_result,
+                    objective_input_dofs=lambda x: np.asarray(x) + 2.0,
+                    optimizer_to_coil_dofs=lambda x: np.asarray(x) * 3.0,
+                    sync_accepted_step=lambda x: synced.append(np.asarray(x).copy()),
+                    record_event=recorded.append,
+                )
+            )
+
+        self.assertEqual(result.nit, 1)
+        self.assertEqual(result.nfev, 1)
+        self.assertTrue(recorded[0]["target_native_replay"])
+        self.assertEqual(recorded[0]["objective"]["value"], 7.0)
+        np.testing.assert_allclose(
+            np.asarray(recorded[0]["optimizer_gradient"]["values"]),
+            np.array([6.0, 8.0]),
+        )
+        np.testing.assert_array_equal(synced[0], np.array([1.0, 2.0]))
 
     def test_single_stage_runtime_stage2_seed_payload_requires_order(self):
         module = self.load_module()
@@ -3931,9 +3951,9 @@ class SingleStageExampleTests(unittest.TestCase):
             jnp.asarray(owner_dofs, dtype=jnp.float64)
         )
         with jax.transfer_guard("disallow"):
-            actual_length = curve.dincremental_arclength_by_dcoeff_vjp(
-                length_weights
-            )(curve)
+            actual_length = curve.dincremental_arclength_by_dcoeff_vjp(length_weights)(
+                curve
+            )
         np.testing.assert_allclose(
             actual_length,
             expected_length,
@@ -5136,6 +5156,27 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(args.profile_target_lane_memory_analysis)
         self.assertTrue(args.profile_target_lane)
 
+    def test_profile_target_lane_batch_size_uses_parser_namespace_name(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--profile-target-lane-batch-size",
+                "3",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.profile_target_lane_batch_size, 3)
+        self.assertFalse(hasattr(args, "target_lane_profile_batch_size"))
+        source_text = Path(module.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("args.target_lane_profile_batch_size", source_text)
+
     def test_parse_args_accepts_diagnose_target_lane_gradient(self):
         module = self.load_module()
 
@@ -6010,10 +6051,18 @@ class SingleStageExampleTests(unittest.TestCase):
                     optimizer_success=True,
                 )
 
-    def test_resolve_single_stage_final_penalty_metrics_rejects_failed_target_lane_optimizer(
+    def test_resolve_single_stage_final_penalty_metrics_accepts_cached_fixed_iteration_stop(
         self,
     ):
         module = self.load_module()
+        cached_metrics = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
+        run_dict = {
+            "target_lane_reporting_metrics": dict(cached_metrics),
+            "target_lane_reporting_coil_dofs": np.array([1.0, -2.0], dtype=np.float64),
+            "target_lane_reporting_include_distance_metrics": True,
+        }
 
         class RejectingPenalty:
             def J(self):
@@ -6027,42 +6076,40 @@ class SingleStageExampleTests(unittest.TestCase):
             module,
             "get_traceable_single_stage_runtime_bundle_builder",
             side_effect=AssertionError(
-                "failed target-lane optimizer must not rebuild final metrics"
+                "cached fixed-iteration target-lane metrics must not rebuild "
+                "final metrics"
             ),
         ):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "Target-lane optimizer failed; no accepted final target-lane "
-                "reporting metrics are available for results.json",
-            ):
-                module.resolve_single_stage_final_penalty_metrics(
-                    use_target_lane=True,
-                    benchmark_mode=False,
-                    skip_outer_optimizer=False,
-                    boozer_surface=object(),
-                    bs=object(),
-                    iota_target=0.21,
-                    coil_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
-                    outer_objective_config="config-marker",
-                    success_filter="success-filter-marker",
-                    curvelength=RejectingPenalty(),
-                    j_non_qs=RejectingPenalty(),
-                    j_boozer_residual=RejectingPenalty(),
-                    j_iota=RejectingPenalty(),
-                    j_curve_length=RejectingPenalty(),
-                    j_curve_curve=RejectingDistance(),
-                    j_curve_surface=RejectingDistance(),
-                    j_surface_surface=RejectingDistance(),
-                    j_curvature=RejectingPenalty(),
-                    cc_dist=0.05,
-                    cs_dist=0.02,
-                    ss_dist=0.04,
-                    curvature_threshold=40.0,
-                    run_dict={},
-                    init_only=False,
-                    termination_message="Non-finite objective or gradient",
-                    optimizer_success=False,
-                )
+            metrics = module.resolve_single_stage_final_penalty_metrics(
+                use_target_lane=True,
+                benchmark_mode=False,
+                skip_outer_optimizer=False,
+                boozer_surface=object(),
+                bs=object(),
+                iota_target=0.21,
+                coil_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+                curvelength=RejectingPenalty(),
+                j_non_qs=RejectingPenalty(),
+                j_boozer_residual=RejectingPenalty(),
+                j_iota=RejectingPenalty(),
+                j_curve_length=RejectingPenalty(),
+                j_curve_curve=RejectingDistance(),
+                j_curve_surface=RejectingDistance(),
+                j_surface_surface=RejectingDistance(),
+                j_curvature=RejectingPenalty(),
+                cc_dist=0.05,
+                cs_dist=0.02,
+                ss_dist=0.04,
+                curvature_threshold=40.0,
+                run_dict=run_dict,
+                init_only=False,
+                termination_message="STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+                optimizer_success=False,
+            )
+
+        self.assertEqual(metrics, cached_metrics)
 
     def test_resolve_single_stage_final_penalty_metrics_prefers_cached_target_lane_summary(
         self,
@@ -14478,6 +14525,31 @@ class HardwareConstraintTests(unittest.TestCase):
                     final_dofs=np.asarray([1.0], dtype=np.float64),
                 )
             self.assertFalse((Path(tmpdir) / "results.json").exists())
+
+    def test_stage2_comparison_results_json_records_rejected_final_state(self):
+        module = load_stage2_module()
+        results = {
+            **self._make_accepted_stage2_results_payload(),
+            "FINAL_DOFS": np.asarray([1.0, 2.0], dtype=np.float64),
+            "FINAL_OBJECTIVE": np.float64(1.25),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "comparison-results.json"
+            module.write_stage2_comparison_results_json(
+                str(output_path),
+                results,
+                rejection_reasons=["optimizer_success_not_true"],
+            )
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(payload["accepted_artifact"])
+        self.assertEqual(
+            payload["accepted_result_rejection_reasons"],
+            ["optimizer_success_not_true"],
+        )
+        self.assertEqual(payload["FINAL_DOFS"], [1.0, 2.0])
+        self.assertEqual(payload["FINAL_OBJECTIVE"], 1.25)
 
 
 class CrossSectionNormalizationTests(unittest.TestCase):

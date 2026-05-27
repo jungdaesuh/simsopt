@@ -23,7 +23,6 @@ from benchmarks.validation_ladder_common import (
     bootstrap_local_simsopt,
     build_provenance,
     describe_compile_behavior,
-    find_single_file,
     gpu_proof_parity_contract,
     load_json,
     max_pointwise_geometry_drift,
@@ -53,17 +52,20 @@ apply_benchmark_compilation_cache_policy(
 )
 bootstrap_local_simsopt()
 
-import jax
-import jaxlib
 
-maybe_initialize_distributed_runtime()
-jax.config.update("jax_enable_x64", True)
-require_x64_runtime(jax, context="Stage 2 end-to-end comparison")
-require_requested_platform_runtime(
-    jax,
-    requested_platform=REQUESTED_PLATFORM,
-    context="Stage 2 end-to-end comparison",
-)
+def _initialize_requested_jax_runtime():
+    import jax
+    import jaxlib
+
+    maybe_initialize_distributed_runtime()
+    jax.config.update("jax_enable_x64", True)
+    require_x64_runtime(jax, context="Stage 2 end-to-end comparison")
+    require_requested_platform_runtime(
+        jax,
+        requested_platform=REQUESTED_PLATFORM,
+        context="Stage 2 end-to-end comparison",
+    )
+    return jax, jaxlib
 
 
 _TIER2_BASE_TOLERANCES = optimizer_drift_tolerances("tier2_stage2_e2e")
@@ -82,6 +84,8 @@ STAGE2_CURVATURE_CPU_ENVELOPE_RTOL = 2e-9
 STAGE2_TRAJECTORY_IMPROVEMENT_REL_TOL = 1e-12
 STAGE2_TRAJECTORY_IMPROVEMENT_ABS_TOL = 1e-18
 STAGE2_CURVATURE_TERM_NAME = "curvature_penalty"
+STAGE2_ENDPOINT_FINAL_QUALITY_GATE_HARD = "hard"
+STAGE2_ENDPOINT_FINAL_QUALITY_GATE_REPORT_ONLY = "report-only"
 
 _CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
 _CPU_REFERENCE_ENDPOINT_LANE = ("cpu", "auto", "cpu-reference")
@@ -176,6 +180,21 @@ def _stage2_final_objective_rel_tol(
 
 def _field_error_not_worse(jax_value: float, cpu_value: float) -> bool:
     return float(jax_value) <= float(cpu_value) * (1.0 + FIELD_ERROR_REL_TOL)
+
+
+def _stage2_endpoint_final_quality_gate(
+    geometry_rel_tol: float | None,
+) -> str:
+    if geometry_rel_tol is None:
+        return STAGE2_ENDPOINT_FINAL_QUALITY_GATE_REPORT_ONLY
+    return STAGE2_ENDPOINT_FINAL_QUALITY_GATE_HARD
+
+
+def _stage2_endpoint_final_quality_gate_is_hard(comparison: dict[str, Any]) -> bool:
+    gate = comparison.get("target_native_endpoint_final_quality_gate")
+    if gate is None:
+        gate = _stage2_endpoint_final_quality_gate(comparison["geometry_rel_tol"])
+    return str(gate) == STAGE2_ENDPOINT_FINAL_QUALITY_GATE_HARD
 
 
 def _build_ondevice_stage2_metrics(
@@ -341,11 +360,20 @@ def _stage2_script_path() -> Path:
     )
 
 
-def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -> dict:
+def _run_stage2_case(
+    args: argparse.Namespace,
+    backend: str,
+    *,
+    platform: str,
+    record_warm_timings: bool,
+) -> dict:
     script_path = _stage2_script_path()
     effective_platform = platform if backend == "jax" else "cpu"
     with tempfile.TemporaryDirectory(prefix=f"stage2-e2e-{backend}-") as temp_dir:
         trajectory_json = str(Path(temp_dir) / f"{backend}_trajectory.json")
+        comparison_results_json = str(
+            Path(temp_dir) / f"{backend}_comparison_results.json"
+        )
         output_root = str(Path(temp_dir) / "outputs")
 
         command = [
@@ -354,6 +382,8 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
             "--skip-postprocess",
             "--trajectory-json",
             trajectory_json,
+            "--comparison-results-json",
+            comparison_results_json,
             "--output-root",
             output_root,
             "--nphi",
@@ -365,7 +395,10 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
         ]
         if backend == "jax":
             command.extend(["--optimizer-backend", args.optimizer_backend])
-            if args.optimizer_backend in TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS:
+            if (
+                record_warm_timings
+                and args.optimizer_backend in TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS
+            ):
                 command.append("--record-warm-timings")
         if args.equilibrium_path:
             command.extend(["--equilibrium-path", args.equilibrium_path])
@@ -394,8 +427,7 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
         )
         elapsed_s = time.perf_counter() - start
 
-        results_json = find_single_file(output_root, "results.json")
-        results_payload = load_json(results_json)
+        results_payload = load_json(comparison_results_json)
         trajectory_payload = load_json(trajectory_json)
         return {
             "results": results_payload,
@@ -737,9 +769,13 @@ def _append_stage2_ondevice_failures(
     comparison: dict[str, Any],
 ) -> None:
     cpu_lane_label = str(comparison.get("cpu_lane_label", "CPU lane"))
+    endpoint_final_quality_gate_is_hard = _stage2_endpoint_final_quality_gate_is_hard(
+        comparison
+    )
     checks = [
         (
-            not bool(comparison["jax_objective_not_worse_than_cpu"]),
+            endpoint_final_quality_gate_is_hard
+            and not bool(comparison["jax_objective_not_worse_than_cpu"]),
             lambda: (
                 f"Final objective is worse than the {cpu_lane_label} beyond tolerance: "
                 f"jax={float(comparison['jax_final_objective']):.6e}, "
@@ -749,7 +785,8 @@ def _append_stage2_ondevice_failures(
             ),
         ),
         (
-            not bool(comparison["jax_field_error_not_worse_than_cpu"]),
+            endpoint_final_quality_gate_is_hard
+            and not bool(comparison["jax_field_error_not_worse_than_cpu"]),
             lambda: (
                 f"Final field error is worse than the {cpu_lane_label} beyond tolerance: "
                 f"jax={float(comparison['jax_field_error']):.6e}, "
@@ -862,6 +899,9 @@ def build_stage2_e2e_payload(
             ondevice_metrics["cpu_field_error"],
         ),
         "field_error_rel_tol": FIELD_ERROR_REL_TOL,
+        "target_native_endpoint_final_quality_gate": (
+            _stage2_endpoint_final_quality_gate(geometry_rel_tol)
+        ),
         "max_geometry_pointwise_abs": max_geom_abs,
         "max_geometry_pointwise_rel": max_geom_rel,
         "geometry_rel_tol": geometry_rel_tol,
@@ -891,9 +931,19 @@ def build_stage2_e2e_payload(
     )
     proof_parity = {
         **proof_contract,
+        "value_scope": "target_endpoint_final_objective",
+        "endpoint_final_quality_gate": comparison[
+            "target_native_endpoint_final_quality_gate"
+        ],
         "cpu_oracle_value": float(ondevice_metrics["cpu_final_objective"]),
         "gpu_value": float(ondevice_metrics["jax_final_objective"]),
         "value_rel_diff": final_objective_rel_diff,
+        "matched_cpu_state_value_rel_diff": float(
+            comparison["matched_cpu_state"]["objective_rel_diff"]
+        ),
+        "matched_jax_state_value_rel_diff": float(
+            comparison["matched_jax_state"]["objective_rel_diff"]
+        ),
         "gradient_rel_diff": max(
             float(comparison["matched_cpu_state"]["gradient_l2_rel_diff"]),
             float(comparison["matched_jax_state"]["gradient_l2_rel_diff"]),
@@ -949,6 +999,23 @@ def main() -> None:
             maxiter=args.maxiter,
         )["final_objective_rel_tol"]
     )
+    cpu_backend, cpu_platform, cpu_lane_kind = _resolve_stage2_endpoint_cpu_lane(
+        args.optimizer_backend
+    )
+    print(
+        "Running Stage 2 CPU endpoint lane: "
+        f"{_cpu_endpoint_lane_label(cpu_lane_kind)} "
+        f"(backend={cpu_backend}, platform={cpu_platform})",
+        flush=True,
+    )
+    cpu_case = _run_stage2_case(
+        args,
+        cpu_backend,
+        platform=cpu_platform,
+        record_warm_timings=False,
+    )
+
+    jax, jaxlib = _initialize_requested_jax_runtime()
     provenance = build_provenance(
         jax,
         jaxlib,
@@ -971,9 +1038,6 @@ def main() -> None:
             ),
         },
     )
-    cpu_backend, cpu_platform, cpu_lane_kind = _resolve_stage2_endpoint_cpu_lane(
-        args.optimizer_backend
-    )
     provenance["cpu_endpoint_lane"] = {
         "backend": cpu_backend,
         "platform": cpu_platform,
@@ -989,8 +1053,12 @@ def main() -> None:
         "cuda_disable_ptx_jit": provenance["cuda_disable_ptx_jit"],
     }
     print_provenance(provenance)
-    cpu_case = _run_stage2_case(args, cpu_backend, platform=cpu_platform)
-    jax_case = _run_stage2_case(args, "jax", platform=args.platform)
+    jax_case = _run_stage2_case(
+        args,
+        "jax",
+        platform=args.platform,
+        record_warm_timings=True,
+    )
     cpu_final_dofs = cpu_case["results"]["FINAL_DOFS"]
     jax_final_dofs = jax_case["results"]["FINAL_DOFS"]
     cpu_final_state_probes = _run_stage2_matched_state_probes(

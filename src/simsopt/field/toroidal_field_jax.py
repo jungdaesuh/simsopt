@@ -14,6 +14,7 @@ from ..jax_core.analytic_pure_fields import (
     toroidal_dA,
     toroidal_dB,
 )
+from ._jax_common import host_cache_array as _host_cache_array
 from ._jax_common import points_device as _points_device
 from .magneticfield import MagneticField
 
@@ -38,7 +39,7 @@ class ToroidalFieldJAX(MagneticField):
 
     def _B_impl(self, B):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        B[:] = np.asarray(
+        B[:] = _host_cache_array(
             toroidal_B(self._spec, _points_device(points)), dtype=np.float64
         )
 
@@ -52,25 +53,25 @@ class ToroidalFieldJAX(MagneticField):
 
     def _dB_by_dX_impl(self, dB):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        dB[:] = np.asarray(
+        dB[:] = _host_cache_array(
             toroidal_dB(self._spec, _points_device(points)), dtype=np.float64
         )
 
     def _d2B_by_dXdX_impl(self, ddB):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        ddB[:] = np.asarray(
+        ddB[:] = _host_cache_array(
             toroidal_d2B(self._spec, _points_device(points)), dtype=np.float64
         )
 
     def _A_impl(self, A):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        A[:] = np.asarray(
+        A[:] = _host_cache_array(
             toroidal_A(self._spec, _points_device(points)), dtype=np.float64
         )
 
     def _dA_by_dX_impl(self, dA):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
-        dA[:] = np.asarray(
+        dA[:] = _host_cache_array(
             toroidal_dA(self._spec, _points_device(points)), dtype=np.float64
         )
 

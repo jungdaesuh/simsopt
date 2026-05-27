@@ -47,6 +47,7 @@ from ..jax_core.dipole_field import (
     dipole_field_dB,
 )
 from ._jax_common import points_device as _points_device
+from ._jax_common import host_cache_array as _host_cache_array
 from .magneticfield import MagneticField
 
 
@@ -260,7 +261,7 @@ class DipoleFieldJAX(MagneticField):
         return result
 
     def _B_impl(self, B):
-        B[:] = np.asarray(
+        B[:] = _host_cache_array(
             dipole_field_B(
                 self._points_device,
                 self._dipole_points_device,
@@ -270,7 +271,7 @@ class DipoleFieldJAX(MagneticField):
         )
 
     def _dB_by_dX_impl(self, dB):
-        dB[:] = np.asarray(
+        dB[:] = _host_cache_array(
             dipole_field_dB(
                 self._points_device,
                 self._dipole_points_device,
@@ -280,7 +281,7 @@ class DipoleFieldJAX(MagneticField):
         )
 
     def _A_impl(self, A):
-        A[:] = np.asarray(
+        A[:] = _host_cache_array(
             dipole_field_A(
                 self._points_device,
                 self._dipole_points_device,
@@ -290,7 +291,7 @@ class DipoleFieldJAX(MagneticField):
         )
 
     def _dA_by_dX_impl(self, dA):
-        dA[:] = np.asarray(
+        dA[:] = _host_cache_array(
             dipole_field_dA(
                 self._points_device,
                 self._dipole_points_device,

@@ -46,6 +46,7 @@ from ..jax_core.regular_grid_interp import (
     UniformInterpolationRule,
     build_regular_grid_interpolant_3d,
 )
+from ._jax_common import host_cache_array as _host_cache_array
 from ._jax_common import points_device as _points_device
 from .magneticfield import MagneticField
 
@@ -134,7 +135,7 @@ def _build_sampler(source_field, value_kind: str):
 
 
 def _checked_host_result(value, *, extrapolate: bool, quantity: str) -> np.ndarray:
-    result = np.asarray(value, dtype=np.float64)
+    result = _host_cache_array(value, dtype=np.float64)
     if not extrapolate and np.isnan(result).any():
         raise RuntimeError(
             f"InterpolatedFieldJAX {quantity} query is outside the interpolation "

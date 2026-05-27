@@ -104,12 +104,15 @@ from benchmarks.tier5_performance_characterization import (
     summarize_single_lane_probe,
 )
 from benchmarks.validation_ladder_common import (
+    _JAX_CUDA_MEMORY_ENV_VARS,
     _JAX_COMPILATION_CACHE_ENV_VAR,
     _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR,
     _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR,
     _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR,
     _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR,
     _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR,
+    _SIMSOPT_EXAMPLE_PARITY_PLATFORM_ENV_VAR,
+    _SIMSOPT_GPU_MEMORY_ENV_VARS,
     _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR,
     PARITY_LADDER_TOLERANCES,
     TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
@@ -120,6 +123,7 @@ from benchmarks.validation_ladder_common import (
     describe_compile_behavior,
     evaluate_tier5_performance_budget,
     grouped_adjoint_memory_budget,
+    isolate_parent_cuda_memory_allocator,
     max_pointwise_geometry_drift,
     optimizer_drift_tolerances,
     parity_ladder_ratchet_rel_tol,
@@ -845,6 +849,110 @@ def test_single_stage_init_same_candidate_replay_compares_trace_payloads(tmp_pat
     assert replay["same_candidate_event_count"] == 1
     assert replay["max_objective_abs_diff"] == 0.0
     assert replay["max_optimizer_gradient_abs_diff"] == 0.0
+
+
+def test_single_stage_init_same_candidate_replay_accepts_target_native_scope(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        objective_components={
+            "iota_penalty": {
+                "weighted_objective": _single_stage_trace_scalar(0.25),
+                "weighted_gradient": _single_stage_trace_vector([0.1, 0.2]),
+            }
+        },
+        iota_penalty_decomposition={
+            "solved_iota": _single_stage_trace_scalar(0.0035),
+        },
+    )
+    jax_event = dict(cpu_event)
+    jax_event["target_native_replay"] = True
+    jax_event["objective_components"] = None
+    jax_event["iota_penalty_decomposition"] = None
+    jax_event["boozer_solve_decomposition"] = None
+    jax_event["hardware_status"] = None
+    jax_event["candidate_failure"] = None
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}), encoding="utf-8")
+    jax_progress.write_text(json.dumps({"events": [jax_event]}), encoding="utf-8")
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        require_exact_candidates=True,
+    )
+
+    assert replay["status"] == "pass"
+    assert replay["diagnostic_scope"] == "target-native-objective-gradient"
+    assert replay["target_native_replay_event_count"] == 1
+    assert replay["parity_bug_census"]["status"] == "not-applicable"
+    assert (
+        single_stage_init_parity_module._same_candidate_replay_gate_failures(replay)
+        == []
+    )
+
+
+def test_single_stage_init_same_candidate_replay_classifies_target_native_rejections(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    failure = {
+        "reject_class": "self_intersection",
+        "penalty": 1.7,
+        "penalty_multiplier": 1.5,
+        "solver_success": True,
+        "failure_count": 0,
+    }
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=2.8,
+        gradient=[0.5, -0.25],
+        candidate_failure=failure,
+        solver_success=True,
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=346.5,
+        gradient=[4.0, -3.0],
+        solver_success=False,
+    )
+    jax_event["target_native_replay"] = True
+    jax_event["native_gradient_used"] = False
+    jax_event["candidate_failure"] = None
+    jax_event["objective_components"] = None
+    jax_event["iota_penalty_decomposition"] = None
+    jax_event["boozer_solve_decomposition"] = None
+    jax_event["hardware_status"] = None
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}), encoding="utf-8")
+    jax_progress.write_text(json.dumps({"events": [jax_event]}), encoding="utf-8")
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        require_exact_candidates=True,
+    )
+
+    assert replay["status"] == "pass"
+    assert replay["target_native_rejected_event_count"] == 1
+    assert replay["max_objective_abs_diff"] == 0.0
+    assert replay["max_optimizer_gradient_abs_diff"] == 0.0
+    assert replay["target_native_rejected_contract_diagnostics"] == [
+        {
+            "pair_index": 1,
+            "cpu_event_index": 1,
+            "jax_event_index": 1,
+            "accepted_iteration_target": 5,
+            "line_search_evaluation": 1,
+            "cpu_reject_class": "self_intersection",
+            "cpu_solver_success": True,
+            "jax_solver_success": False,
+        }
+    ]
 
 
 def test_single_stage_init_same_candidate_replay_reports_first_mismatch(tmp_path):
@@ -1612,6 +1720,29 @@ def test_single_stage_init_pre_newton_census_gate_layer_absent_from_context():
     ]
 
 
+def test_single_stage_init_same_candidate_classifies_pre_newton_census_only():
+    replay = {
+        "status": "pass",
+        "max_objective_abs_diff": 5.77e-15,
+        "max_optimizer_gradient_abs_diff": 3.12e-12,
+        "parity_bug_census": _pre_newton_gate_census_fixture(),
+    }
+
+    assert (
+        single_stage_init_parity_module._same_candidate_replay_strict_gate_failure_class(
+            replay
+        )
+        == "strict_pre_newton_census_only"
+    )
+    assert single_stage_init_parity_module._same_candidate_replay_gate_failures(
+        replay
+    ) == [
+        "Parity bug census reported divergent "
+        "boozer_solve.pre_newton_state: max_abs_diff=4.5e-09 "
+        "at pair 4 (line-search eval 4)."
+    ]
+
+
 def test_single_stage_init_same_candidate_gate_fails_missing_replay_trace():
     failures = single_stage_init_parity_module._same_candidate_replay_gate_failures(
         {
@@ -1627,6 +1758,24 @@ def test_single_stage_init_same_candidate_gate_fails_missing_replay_trace():
         "Same-candidate objective replay comparison did not pass: status=not-recorded.",
         "Same-candidate objective replay did not record a parity bug census.",
     ]
+
+
+def test_single_stage_init_same_candidate_gate_accepts_init_only_not_applicable():
+    failures = single_stage_init_parity_module._same_candidate_replay_gate_failures(
+        {
+            "status": "not-applicable",
+            "reason": (
+                "maxiter=0 does not run the outer optimizer or record "
+                "objective-evaluation events"
+            ),
+            "cpu_event_count": 0,
+            "jax_event_count": 0,
+            "same_candidate_event_count": 0,
+            "failures": [],
+        }
+    )
+
+    assert failures == []
 
 
 def test_single_stage_init_same_candidate_gate_requires_census_recording():
@@ -1913,6 +2062,74 @@ def test_repo_pythonpath_env_sets_all_platform_selectors(monkeypatch):
     assert env["SIMSOPT_JAX_BACKEND"] == "cpu"
 
 
+def test_repo_pythonpath_env_clears_gpu_memory_policy_for_cpu_lane(monkeypatch):
+    for env_name in (*_JAX_CUDA_MEMORY_ENV_VARS, *_SIMSOPT_GPU_MEMORY_ENV_VARS):
+        monkeypatch.setenv(env_name, "inherited")
+    monkeypatch.setenv(_SIMSOPT_EXAMPLE_PARITY_PLATFORM_ENV_VAR, "cuda")
+
+    env = repo_pythonpath_env(platform="cpu")
+
+    for env_name in (*_JAX_CUDA_MEMORY_ENV_VARS, *_SIMSOPT_GPU_MEMORY_ENV_VARS):
+        assert env_name not in env
+    assert _SIMSOPT_EXAMPLE_PARITY_PLATFORM_ENV_VAR not in env
+
+
+def test_repo_pythonpath_env_preserves_simsopt_gpu_memory_policy_for_cuda_lane(
+    monkeypatch,
+):
+    for env_name in _SIMSOPT_GPU_MEMORY_ENV_VARS:
+        monkeypatch.setenv(env_name, "inherited")
+    monkeypatch.setenv(_SIMSOPT_EXAMPLE_PARITY_PLATFORM_ENV_VAR, "cuda")
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    for env_name in _SIMSOPT_GPU_MEMORY_ENV_VARS:
+        assert env[env_name] == "inherited"
+    assert env[_SIMSOPT_EXAMPLE_PARITY_PLATFORM_ENV_VAR] == "cuda"
+
+
+def test_parent_cuda_memory_isolation_preserves_child_policy():
+    parent_env = {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "true",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.5",
+        "SIMSOPT_JAX_GPU_PREALLOCATE": "true",
+        "SIMSOPT_JAX_GPU_MEM_FRACTION": "0.5",
+    }
+
+    child_memory_env = isolate_parent_cuda_memory_allocator(
+        "cuda",
+        env=parent_env,
+    )
+
+    assert child_memory_env == {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "true",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.5",
+        "SIMSOPT_JAX_GPU_PREALLOCATE": "true",
+        "SIMSOPT_JAX_GPU_MEM_FRACTION": "0.5",
+    }
+    assert parent_env == {"XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
+
+
+def test_repo_pythonpath_env_forwards_isolated_child_cuda_memory_policy(monkeypatch):
+    for env_name in (*_JAX_CUDA_MEMORY_ENV_VARS, *_SIMSOPT_GPU_MEMORY_ENV_VARS):
+        monkeypatch.delenv(env_name, raising=False)
+
+    child_memory_env = {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "true",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.5",
+        "SIMSOPT_JAX_GPU_PREALLOCATE": "true",
+        "SIMSOPT_JAX_GPU_MEM_FRACTION": "0.5",
+    }
+
+    env = repo_pythonpath_env(
+        platform="cuda",
+        cuda_memory_env=child_memory_env,
+    )
+
+    for env_name, env_value in child_memory_env.items():
+        assert env[env_name] == env_value
+
+
 def test_repo_pythonpath_env_keeps_cpu_visible_for_cuda_callbacks(monkeypatch):
     monkeypatch.delenv("PYTHONPATH", raising=False)
 
@@ -2065,6 +2282,18 @@ def test_repo_pythonpath_env_preserves_backend_guardrails_by_default(monkeypatch
     env = repo_pythonpath_env(platform="cuda")
 
     assert env["SIMSOPT_BACKEND_MODE"] == "jax_gpu_fast"
+    assert env["SIMSOPT_BACKEND_STRICT"] == "1"
+    assert env["SIMSOPT_JAX_TRANSFER_GUARD"] == "disallow"
+
+
+def test_repo_pythonpath_env_retargets_gpu_backend_mode_for_cpu_lane(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_parity")
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+
+    env = repo_pythonpath_env(platform="cpu")
+
+    assert env["SIMSOPT_BACKEND_MODE"] == "jax_cpu_parity"
     assert env["SIMSOPT_BACKEND_STRICT"] == "1"
     assert env["SIMSOPT_JAX_TRANSFER_GUARD"] == "disallow"
 
@@ -4241,6 +4470,16 @@ def test_single_stage_init_public_optimizer_final_metric_drift_needs_path_split(
     pass_replay = {"status": "pass"}
     split_path = {"status": "split"}
     same_path = {"status": "same-path"}
+    target_native_rejected_replay = {
+        "status": "pass",
+        "diagnostic_scope": "target-native-objective-gradient",
+        "target_native_rejected_event_count": 1,
+    }
+    target_native_valid_replay = {
+        "status": "pass",
+        "diagnostic_scope": "target-native-objective-gradient",
+        "target_native_rejected_event_count": 0,
+    }
 
     assert (
         single_stage_init_parity_module._optimizer_control_split_accepts_final_metric_drift(
@@ -4260,6 +4499,20 @@ def test_single_stage_init_public_optimizer_final_metric_drift_needs_path_split(
         single_stage_init_parity_module._optimizer_control_split_accepts_final_metric_drift(
             same_candidate_replay={"status": "fail"},
             optimizer_path_objective_evaluations=split_path,
+        )
+        is False
+    )
+    assert (
+        single_stage_init_parity_module._optimizer_control_split_accepts_final_metric_drift(
+            same_candidate_replay=target_native_rejected_replay,
+            optimizer_path_objective_evaluations={"status": "not-recorded"},
+        )
+        is False
+    )
+    assert (
+        single_stage_init_parity_module._optimizer_control_split_accepts_final_metric_drift(
+            same_candidate_replay=target_native_valid_replay,
+            optimizer_path_objective_evaluations={"status": "not-recorded"},
         )
         is False
     )
@@ -4664,6 +4917,7 @@ def test_single_stage_init_case_threads_profile_target_lane_only_flag(
         "_single_stage_script_path",
         lambda: tmp_path / "driver.py",
     )
+
     def fake_run_python_script(_script_path, command, **_kwargs):
         observed_command.extend(_write_single_stage_result_artifact(command))
         return argparse.Namespace(stdout="", stderr="")
@@ -4907,12 +5161,158 @@ def test_single_stage_init_case_pair_replays_reference_trace_before_jax_fullgrap
     assert replay_case["run_dir"] == str(tmp_path / "2_jax")
 
 
-def test_single_stage_init_case_pair_skips_exact_replay_for_public_lbfgs(
+def test_single_stage_init_case_pair_replays_reference_trace_before_ondevice(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "ondevice"
+    args.maxiter = 3
+    args.platform = "cuda"
+    args.record_objective_evaluation_trace = True
+    calls = []
+
+    def fake_run_single_stage_case(
+        case_args,
+        backend,
+        *,
+        platform,
+        benchmark_mode,
+        load_surface_gamma,
+        output_root,
+        jax_runtime_seed_spec=None,
+        replay_objective_evaluation_trace=None,
+    ):
+        del platform, benchmark_mode, load_surface_gamma, jax_runtime_seed_spec
+        run_dir = tmp_path / f"{len(calls)}_{backend}"
+        run_dir.mkdir()
+        progress_json = run_dir / "outer_optimizer_progress.json"
+        progress_json.write_text(json.dumps({"events": []}), encoding="utf-8")
+        calls.append(
+            {
+                "backend": backend,
+                "warm_start_run_dir": getattr(case_args, "warm_start_run_dir", None),
+                "output_root": Path(output_root),
+                "progress_json": progress_json,
+                "replay": replay_objective_evaluation_trace,
+            }
+        )
+        return {
+            "run_dir": str(run_dir),
+            "results": _single_stage_contract_results(),
+            "outer_optimizer_progress_json": str(progress_json),
+        }
+
+    def fake_compile_seed_spec(run_dir, output_path, _args):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text('{"seed": true}', encoding="utf-8")
+        return Path(output_path)
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_run_single_stage_case",
+        fake_run_single_stage_case,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_compile_jax_runtime_seed_spec_from_run_dir",
+        fake_compile_seed_spec,
+    )
+
+    (*_, replay_case) = single_stage_init_parity_module._run_single_stage_case_pair(
+        args,
+        benchmark_mode=False,
+        reference_backend="cpu",
+        reference_benchmark_mode=False,
+        case_root=tmp_path / "case",
+    )
+
+    assert calls[1]["backend"] == "cpu"
+    assert calls[2]["backend"] == "jax"
+    assert calls[2]["replay"] == calls[1]["progress_json"]
+    assert calls[3]["backend"] == "jax"
+    assert calls[3]["replay"] is None
+    assert replay_case["run_dir"] == str(tmp_path / "2_jax")
+
+
+def test_single_stage_init_case_pair_replays_reference_trace_before_optax_lbfgs(
     monkeypatch,
     tmp_path,
 ):
     args = _single_stage_case_args(tmp_path)
     args.optimizer_backend = "optax-lbfgs"
+    args.maxiter = 3
+    args.platform = "cpu"
+    args.record_objective_evaluation_trace = True
+    calls = []
+
+    def fake_run_single_stage_case(
+        case_args,
+        backend,
+        *,
+        platform,
+        benchmark_mode,
+        load_surface_gamma,
+        output_root,
+        jax_runtime_seed_spec=None,
+        replay_objective_evaluation_trace=None,
+    ):
+        del platform, benchmark_mode, load_surface_gamma, jax_runtime_seed_spec
+        run_dir = tmp_path / f"{len(calls)}_{backend}"
+        run_dir.mkdir()
+        progress_json = run_dir / "outer_optimizer_progress.json"
+        progress_json.write_text(json.dumps({"events": []}), encoding="utf-8")
+        calls.append(
+            {
+                "backend": backend,
+                "warm_start_run_dir": getattr(case_args, "warm_start_run_dir", None),
+                "output_root": Path(output_root),
+                "progress_json": progress_json,
+                "replay": replay_objective_evaluation_trace,
+            }
+        )
+        return {
+            "run_dir": str(run_dir),
+            "results": _single_stage_contract_results(),
+            "outer_optimizer_progress_json": str(progress_json),
+        }
+
+    def fake_compile_seed_spec(run_dir, output_path, _args):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text('{"seed": true}', encoding="utf-8")
+        return Path(output_path)
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_run_single_stage_case",
+        fake_run_single_stage_case,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_compile_jax_runtime_seed_spec_from_run_dir",
+        fake_compile_seed_spec,
+    )
+
+    (*_, replay_case) = single_stage_init_parity_module._run_single_stage_case_pair(
+        args,
+        benchmark_mode=False,
+        reference_backend="cpu",
+        reference_benchmark_mode=False,
+        case_root=tmp_path / "case",
+    )
+
+    assert [call["backend"] for call in calls] == ["cpu", "cpu", "jax", "jax"]
+    assert calls[2]["replay"] == calls[1]["progress_json"]
+    assert calls[3]["replay"] is None
+    assert replay_case["run_dir"] == str(tmp_path / "2_jax")
+
+
+def test_single_stage_init_case_pair_skips_exact_replay_for_unsupported_optimistix(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "optimistix-lbfgs"
     args.maxiter = 3
     args.platform = "cpu"
     args.record_objective_evaluation_trace = True
@@ -4983,14 +5383,73 @@ def test_single_stage_init_public_optimizer_trace_required_for_outer_loop(tmp_pa
     args.optimizer_backend = "optax-lbfgs"
     args.maxiter = 1
 
-    assert single_stage_init_parity_module._public_optimizer_trace_required(args) is True
+    assert (
+        single_stage_init_parity_module._public_optimizer_trace_required(args) is True
+    )
 
     args.maxiter = 0
-    assert single_stage_init_parity_module._public_optimizer_trace_required(args) is False
+    assert (
+        single_stage_init_parity_module._public_optimizer_trace_required(args) is False
+    )
 
     args.maxiter = 1
     args.optimizer_backend = "ondevice"
-    assert single_stage_init_parity_module._public_optimizer_trace_required(args) is False
+    assert (
+        single_stage_init_parity_module._public_optimizer_trace_required(args) is False
+    )
+
+
+def test_single_stage_init_marks_optimistix_cuda_strict_transfer_unsupported(
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "cuda"
+    args.optimizer_backend = "optimistix-lbfgs"
+
+    support = single_stage_init_parity_module._strict_transfer_optimizer_support(
+        args,
+        {"transfer_guard": "disallow"},
+    )
+
+    assert support["status"] == "unsupported"
+    assert support["supported"] is False
+    assert "diagnostic backend only" in support["reason"]
+
+
+def test_single_stage_init_marks_optimistix_auto_gpu_strict_transfer_unsupported(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "auto"
+    args.optimizer_backend = "optimistix-lbfgs"
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_target_platform_uses_cuda",
+        lambda platform: platform == "auto",
+    )
+
+    support = single_stage_init_parity_module._strict_transfer_optimizer_support(
+        args,
+        {"transfer_guard": "disallow"},
+    )
+
+    assert support["status"] == "unsupported"
+    assert support["supported"] is False
+
+
+def test_single_stage_init_allows_optimistix_without_cuda_strict_transfer(tmp_path):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "cpu"
+    args.optimizer_backend = "optimistix-lbfgs"
+
+    support = single_stage_init_parity_module._strict_transfer_optimizer_support(
+        args,
+        {"transfer_guard": "disallow"},
+    )
+
+    assert support["status"] == "supported"
+    assert support["supported"] is True
 
 
 def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
@@ -5211,8 +5670,7 @@ def test_single_stage_init_full_run_contract_records_reportable_lane_state(
     )
     assert lanes["cpu_scipy"]["final_artifact_accepted"] is True
     assert (
-        lanes["cpu_scipy"]["final_artifact_json"]
-        == lanes["cpu_scipy"]["results_json"]
+        lanes["cpu_scipy"]["final_artifact_json"] == lanes["cpu_scipy"]["results_json"]
     )
     assert (
         lanes["jax_cpu"]["progress_json"] == jax_case["outer_optimizer_progress_json"]
@@ -7764,6 +8222,66 @@ def test_stage2_e2e_comparison_accepts_ondevice_solution_quality_without_geometr
     assert failures == []
 
 
+def test_stage2_e2e_comparison_reports_short_run_target_native_endpoint_drift():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            geometry_rel_tol=None,
+            final_objective_rel_diff=0.16,
+            jax_objective_not_worse_than_cpu=False,
+            jax_final_objective=1.16,
+            cpu_final_objective=1.0,
+            field_error_rel_diff=0.09,
+            jax_field_error_not_worse_than_cpu=False,
+            jax_field_error=0.0109,
+            cpu_field_error=0.01,
+        )
+    )
+
+    assert failures == []
+
+
+def test_stage2_endpoint_quality_gate_uses_explicit_gate_without_geometry_tol():
+    assert (
+        stage2_e2e_comparison_module._stage2_endpoint_final_quality_gate_is_hard(
+            {
+                "target_native_endpoint_final_quality_gate": (
+                    stage2_e2e_comparison_module.STAGE2_ENDPOINT_FINAL_QUALITY_GATE_REPORT_ONLY
+                )
+            }
+        )
+        is False
+    )
+    assert (
+        stage2_e2e_comparison_module._stage2_endpoint_final_quality_gate_is_hard(
+            {
+                "target_native_endpoint_final_quality_gate": (
+                    stage2_e2e_comparison_module.STAGE2_ENDPOINT_FINAL_QUALITY_GATE_HARD
+                )
+            }
+        )
+        is True
+    )
+
+
+def test_stage2_e2e_comparison_keeps_endpoint_drift_hard_for_geometry_repro():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            geometry_rel_tol=5e-6,
+            final_objective_rel_diff=0.16,
+            jax_objective_not_worse_than_cpu=False,
+            jax_final_objective=1.16,
+            cpu_final_objective=1.0,
+            field_error_rel_diff=0.09,
+            jax_field_error_not_worse_than_cpu=False,
+            jax_field_error=0.0109,
+            cpu_field_error=0.01,
+        )
+    )
+
+    assert any("Final objective is worse" in failure for failure in failures)
+    assert any("Final field error is worse" in failure for failure in failures)
+
+
 def test_stage2_e2e_comparison_labels_ondevice_failures_against_cpu_ondevice_lane():
     failures = evaluate_stage2_e2e_comparison(
         _stage2_ondevice_quality_case(
@@ -8069,6 +8587,157 @@ def test_stage2_e2e_ondevice_endpoint_lane_uses_jax_cpu_reference():
     )
 
 
+def test_stage2_e2e_case_records_warm_timings_only_when_requested(
+    monkeypatch,
+    tmp_path,
+):
+    args = argparse.Namespace(
+        optimizer_backend="ondevice",
+        nphi=31,
+        ntheta=16,
+        maxiter=1,
+        equilibrium_path=None,
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        equilibria_dir=str(tmp_path / "equilibria"),
+    )
+    observed_commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "_stage2_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+    loaded_paths: list[Path] = []
+
+    def fake_load_json(path):
+        loaded_paths.append(Path(path))
+        if str(path).endswith("_trajectory.json"):
+            return {"evaluations": []}
+        return {}
+
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "load_json",
+        fake_load_json,
+    )
+
+    def fake_run_python_script(_script_path, command, **_kwargs):
+        observed_commands.append(list(command))
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+
+    stage2_e2e_comparison_module._run_stage2_case(
+        args,
+        "jax",
+        platform="cpu",
+        record_warm_timings=False,
+    )
+    stage2_e2e_comparison_module._run_stage2_case(
+        args,
+        "jax",
+        platform="cuda",
+        record_warm_timings=True,
+    )
+
+    assert "--record-warm-timings" not in observed_commands[0]
+    assert "--record-warm-timings" in observed_commands[1]
+    assert "--comparison-results-json" in observed_commands[0]
+    assert "--comparison-results-json" in observed_commands[1]
+    assert any(path.name == "jax_comparison_results.json" for path in loaded_paths)
+
+
+def test_stage2_e2e_main_initializes_parent_jax_after_cpu_lane(
+    monkeypatch,
+    tmp_path,
+):
+    events: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "stage2_e2e_comparison.py",
+            "--platform",
+            "cuda",
+            "--output-json",
+            str(tmp_path / "stage2-e2e.json"),
+        ],
+    )
+
+    def fake_run_stage2_case(_args, backend, *, platform, record_warm_timings):
+        events.append((f"run:{backend}:{platform}", str(record_warm_timings)))
+        return {
+            "results": {"FINAL_DOFS": [1.0, 2.0]},
+            "trajectory": [],
+            "elapsed_s": 0.0,
+        }
+
+    def fake_initialize_requested_jax_runtime():
+        events.append(("initialize-jax", None))
+        return types.SimpleNamespace(), types.SimpleNamespace()
+
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "_run_stage2_case",
+        fake_run_stage2_case,
+    )
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "_initialize_requested_jax_runtime",
+        fake_initialize_requested_jax_runtime,
+    )
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "build_provenance",
+        lambda *_args, **_kwargs: {
+            "backend": "gpu",
+            "devices": ["CudaDevice(id=0)"],
+            "xla_flags": "",
+            "cuda_force_ptx_jit": None,
+            "cuda_disable_ptx_jit": None,
+        },
+    )
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "print_provenance",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "_run_stage2_matched_state_probes",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "build_stage2_e2e_payload",
+        lambda *_args, **_kwargs: {
+            "comparison": {
+                "final_objective_rel_diff": 0.0,
+                "field_error_rel_diff": 0.0,
+                "max_geometry_pointwise_rel": 0.0,
+                "matched_jax_state": {},
+            },
+            "failures": [],
+            "timings": {},
+            "passed": True,
+        },
+    )
+    monkeypatch.setattr(stage2_e2e_comparison_module, "write_json", lambda *_: None)
+
+    stage2_e2e_comparison_module.main()
+
+    assert events == [
+        ("run:jax:cpu", "False"),
+        ("initialize-jax", None),
+        ("run:jax:cuda", "True"),
+    ]
+
+
 def test_stage2_e2e_probe_keeps_compilation_cache_for_cuda_lane(
     monkeypatch,
     tmp_path,
@@ -8252,18 +8921,107 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     assert payload["comparison"]["jax_elapsed_s"] == pytest.approx(9.5)
     assert payload["comparison"]["cpu_lane_kind"] == "cpu-ondevice"
     assert payload["comparison"]["cpu_lane_label"] == "CPU ondevice lane"
+    assert payload["comparison"]["target_native_endpoint_final_quality_gate"] == "hard"
     assert payload["comparison"]["matched_cpu_state"]["gradient_allclose"] is True
     assert payload["comparison"]["matched_jax_state"]["gradient_allclose"] is True
+    assert payload["proof_parity"]["value_scope"] == "target_endpoint_final_objective"
+    assert payload["proof_parity"]["endpoint_final_quality_gate"] == "hard"
     assert payload["proof_parity"]["cpu_oracle_value"] == pytest.approx(1.0)
     assert payload["proof_parity"]["gpu_value"] == pytest.approx(1.0 + 1e-7)
     assert payload["proof_parity"]["value_rtol"] == pytest.approx(1e-4)
     assert payload["proof_parity"]["gradient_rtol"] == pytest.approx(1e-9)
+    assert payload["proof_parity"]["matched_cpu_state_value_rel_diff"] == pytest.approx(
+        0.0
+    )
+    assert payload["proof_parity"]["matched_jax_state_value_rel_diff"] == pytest.approx(
+        0.0
+    )
     assert payload["timings"]["cpu_outer_elapsed_s"] == pytest.approx(12.5)
     assert payload["timings"]["jax_outer_elapsed_s"] == pytest.approx(12.75)
     assert payload["timings"]["jax_primary_elapsed_s"] == pytest.approx(9.5)
     assert payload["timings"]["jax_optimizer_cold_run_s"] == pytest.approx(9.5)
     assert payload["timings"]["jax_optimizer_warm_run_s"] == pytest.approx(3.25)
     assert payload["timings"]["jax_optimizer_compile_overhead_s"] == pytest.approx(6.25)
+
+
+def test_stage2_e2e_payload_marks_short_run_endpoint_quality_report_only():
+    provenance = {"title": "Stage 2 end-to-end comparison"}
+    cpu_initial = {
+        "J": 2.0,
+        "Jf": 0.2,
+        "mean_abs_relBfinal_norm": 0.2,
+        "curve_length": 1.0,
+        "coil_coil_distance": 1.0,
+        "curvature": 1.0,
+        "grad_norm": 1.0,
+    }
+    cpu_final = {
+        "J": 1.0,
+        "Jf": 0.1,
+        "mean_abs_relBfinal_norm": 0.1,
+        "curve_length": 1.0,
+        "coil_coil_distance": 1.0,
+        "curvature": 1.0,
+        "grad_norm": 0.5,
+    }
+    jax_final = {
+        "J": 1.16,
+        "Jf": 0.109,
+        "mean_abs_relBfinal_norm": 0.109,
+        "curve_length": 1.0,
+        "coil_coil_distance": 1.0,
+        "curvature": 1.0,
+        "grad_norm": 0.5,
+    }
+    cpu_case = {
+        "results": _stage2_e2e_results_case(FINAL_OBJECTIVE=1.0, FIELD_ERROR=0.01),
+        "trajectory": [cpu_initial, cpu_final],
+        "elapsed_s": 12.5,
+    }
+    jax_case = {
+        "results": _stage2_e2e_results_case(
+            FINAL_OBJECTIVE=1.16,
+            FIELD_ERROR=0.0109,
+            optimizer_backend="ondevice",
+        ),
+        "trajectory": [cpu_initial, jax_final],
+        "elapsed_s": 12.75,
+    }
+
+    payload = build_stage2_e2e_payload(
+        provenance,
+        cpu_case,
+        jax_case,
+        {
+            "cpu": _stage2_probe_payload_case(),
+            "jax": _stage2_probe_payload_case(),
+        },
+        {
+            "cpu": _stage2_probe_payload_case(),
+            "jax": _stage2_probe_payload_case(),
+        },
+        cpu_lane_kind="cpu-ondevice",
+        final_objective_rel_tol=5e-4,
+        geometry_rel_tol=None,
+        maxiter=20,
+    )
+
+    assert payload["passed"] is True
+    assert payload["failures"] == []
+    assert (
+        payload["comparison"]["target_native_endpoint_final_quality_gate"]
+        == "report-only"
+    )
+    assert payload["comparison"]["jax_objective_not_worse_than_cpu"] is False
+    assert payload["comparison"]["jax_field_error_not_worse_than_cpu"] is False
+    assert payload["proof_parity"]["endpoint_final_quality_gate"] == "report-only"
+    assert payload["proof_parity"]["value_rel_diff"] == pytest.approx(0.16)
+    assert payload["proof_parity"]["matched_cpu_state_value_rel_diff"] == pytest.approx(
+        0.0
+    )
+    assert payload["proof_parity"]["matched_jax_state_value_rel_diff"] == pytest.approx(
+        0.0
+    )
 
 
 def test_stage2_e2e_payload_allows_intentional_threshold_violation_entries():

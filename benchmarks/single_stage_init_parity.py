@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 from collections.abc import Iterator
 from pathlib import Path
 import sys
@@ -28,6 +29,7 @@ from benchmarks.validation_ladder_common import (
     describe_compile_behavior,
     find_single_file,
     gpu_proof_parity_contract,
+    isolate_parent_cuda_memory_allocator,
     load_json,
     max_pointwise_geometry_drift,
     maybe_initialize_distributed_runtime,
@@ -71,6 +73,7 @@ from benchmarks.parity_solve_quality import (
 
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
+CHILD_CUDA_MEMORY_ENV = isolate_parent_cuda_memory_allocator(REQUESTED_PLATFORM)
 apply_requested_platform(REQUESTED_PLATFORM)
 apply_benchmark_compilation_cache_policy(
     "single_stage_init_parity",
@@ -134,10 +137,17 @@ _TARGET_OPTIMIZER_METHOD_BY_BACKEND = {
     OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND: "optimistix-lbfgs-ondevice",
 }
 _EXACT_SAME_CANDIDATE_REPLAY_BACKENDS = frozenset(
-    {SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND}
+    {
+        TARGET_OPTIMIZER_BACKEND,
+        SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND,
+        OPTAX_LBFGS_OPTIMIZER_BACKEND,
+    }
 )
 _PUBLIC_OPTIMIZER_COMPARISON_BACKENDS = frozenset(
     {OPTAX_LBFGS_OPTIMIZER_BACKEND, OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND}
+)
+_STRICT_TRANSFER_UNSUPPORTED_OPTIMIZER_BACKENDS = frozenset(
+    {OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND}
 )
 _TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON = (
     "compile diagnostics are disabled when Phase 1 host-callback diagnostics "
@@ -965,6 +975,7 @@ def _run_single_stage_case(
                 disable_compilation_cache=(effective_platform == "cpu"),
                 clear_backend_guardrails=(backend != "jax"),
                 deterministic_gpu_reductions=deterministic_gpu_reductions,
+                cuda_memory_env=CHILD_CUDA_MEMORY_ENV,
             ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
@@ -972,9 +983,7 @@ def _run_single_stage_case(
         )
         elapsed_s = time.perf_counter() - start
 
-        results, final_artifact_json = _load_single_stage_final_payload(
-            resolved_root
-        )
+        results, final_artifact_json = _load_single_stage_final_payload(resolved_root)
         run_dir = final_artifact_json.parent
         payload = {
             "results": results,
@@ -1108,10 +1117,58 @@ def _is_public_optimizer_comparison_backend(optimizer_backend: str) -> bool:
 
 
 def _public_optimizer_trace_required(args: argparse.Namespace) -> bool:
+    return int(args.maxiter) > 0 and _is_public_optimizer_comparison_backend(
+        args.optimizer_backend
+    )
+
+
+def _target_native_trace_required(args: argparse.Namespace) -> bool:
     return (
         int(args.maxiter) > 0
-        and _is_public_optimizer_comparison_backend(args.optimizer_backend)
+        and bool(getattr(args, "record_objective_evaluation_trace", False))
+        and args.optimizer_backend == TARGET_OPTIMIZER_BACKEND
     )
+
+
+def _same_candidate_replay_required(args: argparse.Namespace) -> bool:
+    return (
+        bool(getattr(args, "record_objective_evaluation_trace", False))
+        and int(args.maxiter) > 0
+    )
+
+
+def _trace_gated_final_metric_parity(args: argparse.Namespace) -> bool:
+    return _public_optimizer_trace_required(args) or _target_native_trace_required(args)
+
+
+def _strict_transfer_optimizer_support(
+    args: argparse.Namespace,
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    transfer_guard = provenance.get("transfer_guard")
+    if transfer_guard is None:
+        transfer_guard = os.environ.get("SIMSOPT_JAX_TRANSFER_GUARD")
+    unsupported = bool(
+        str(transfer_guard) == "disallow"
+        and _target_platform_uses_cuda(args.platform)
+        and args.optimizer_backend in _STRICT_TRANSFER_UNSUPPORTED_OPTIMIZER_BACKENDS
+    )
+    reason = None
+    if unsupported:
+        reason = (
+            "optimistix-lbfgs is a diagnostic backend only under CUDA "
+            "strict transfer guard: Optimistix/Equinox scalar predicate "
+            "handling performs device-to-host transfer before SIMSOPT can "
+            "hostify result metadata."
+        )
+    return {
+        "supported": not unsupported,
+        "status": "unsupported" if unsupported else "supported",
+        "optimizer_backend": args.optimizer_backend,
+        "platform": args.platform,
+        "transfer_guard": transfer_guard,
+        "reason": reason,
+    }
 
 
 def _run_single_stage_case_pair(
@@ -1526,6 +1583,14 @@ def _compare_same_candidate_exact_event_field(
             f"{field} mismatch: "
             f"cpu={cpu_event.get(field)!r}, jax={jax_event.get(field)!r}."
         )
+
+
+def _same_candidate_target_native_replay_event(event: dict[str, Any]) -> bool:
+    return bool(event.get("target_native_replay", False))
+
+
+def _same_candidate_rejected_by_contract(event: dict[str, Any]) -> bool:
+    return not bool(event.get("native_gradient_used"))
 
 
 def _first_boozer_solver_summary(events: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -2349,6 +2414,8 @@ def _same_candidate_replay_gate_failures(
     same_candidate_replay: dict[str, Any],
 ) -> list[str]:
     failures = []
+    if same_candidate_replay["status"] == "not-applicable":
+        return failures
     if same_candidate_replay["status"] != "pass":
         first_failure = same_candidate_replay.get("first_failure_event")
         if first_failure is None:
@@ -2363,6 +2430,10 @@ def _same_candidate_replay_gate_failures(
                 f"(iteration {first_failure['accepted_iteration_target']}, "
                 f"line-search eval {first_failure['line_search_evaluation']})."
             )
+    if same_candidate_replay.get("diagnostic_scope") == (
+        "target-native-objective-gradient"
+    ):
+        return failures
     parity_bug_census = same_candidate_replay.get("parity_bug_census")
     if not parity_bug_census or parity_bug_census.get("status") != "recorded":
         failures.append(
@@ -2370,6 +2441,17 @@ def _same_candidate_replay_gate_failures(
         )
     failures.extend(_pre_newton_census_gate_failures(parity_bug_census))
     return failures
+
+
+def _same_candidate_replay_strict_gate_failure_class(
+    same_candidate_replay: dict[str, Any],
+) -> str | None:
+    if same_candidate_replay["status"] != "pass":
+        return None
+    parity_bug_census = same_candidate_replay.get("parity_bug_census")
+    if _pre_newton_census_gate_failures(parity_bug_census):
+        return "strict_pre_newton_census_only"
+    return None
 
 
 def compare_same_candidate_objective_replay(
@@ -2435,7 +2517,10 @@ def compare_same_candidate_objective_replay(
     parity_bug_census_layers: dict[str, dict[str, Any]] = {}
     first_parity_bug_census_divergence = None
     solver_contract_diagnostics: list[str] = []
+    target_native_rejected_contract_diagnostics: list[dict[str, Any]] = []
     same_candidate_event_count = 0
+    target_native_replay_event_count = 0
+    target_native_rejected_event_count = 0
     first_failure_event = None
     candidate_x_abs_tol = 0.0 if require_exact_candidates else _SAME_CANDIDATE_X_ATOL
     if require_exact_candidates and len(cpu_events) != len(jax_events):
@@ -2478,19 +2563,57 @@ def compare_same_candidate_objective_replay(
                 )
             continue
         same_candidate_event_count += 1
+        target_native_replay_event = _same_candidate_target_native_replay_event(
+            jax_event
+        )
+        if target_native_replay_event:
+            target_native_replay_event_count += 1
+        target_native_rejected_event = (
+            target_native_replay_event
+            and _same_candidate_rejected_by_contract(cpu_event)
+            and _same_candidate_rejected_by_contract(jax_event)
+        )
+        if target_native_rejected_event:
+            target_native_rejected_event_count += 1
+            cpu_failure = cpu_event.get("candidate_failure") or {}
+            target_native_rejected_contract_diagnostics.append(
+                {
+                    "pair_index": pair_index,
+                    "cpu_event_index": cpu_event.get("event_index"),
+                    "jax_event_index": jax_event.get("event_index"),
+                    "accepted_iteration_target": cpu_event.get(
+                        "accepted_iteration_target"
+                    ),
+                    "line_search_evaluation": cpu_event.get("line_search_evaluation"),
+                    "cpu_reject_class": cpu_failure.get("reject_class"),
+                    "cpu_solver_success": cpu_event.get("solver_success"),
+                    "jax_solver_success": jax_event.get("solver_success"),
+                }
+            )
         event_failures: list[str] = []
-        _compare_same_candidate_exact_event_field(
-            event_failures,
-            field="native_gradient_used",
-            cpu_event=cpu_event,
-            jax_event=jax_event,
-        )
-        _compare_same_candidate_exact_event_field(
-            event_failures,
-            field="solver_success",
-            cpu_event=cpu_event,
-            jax_event=jax_event,
-        )
+        if target_native_replay_event:
+            if _same_candidate_rejected_by_contract(cpu_event) != (
+                _same_candidate_rejected_by_contract(jax_event)
+            ):
+                event_failures.append(
+                    "target-native replay rejection mismatch: "
+                    f"cpu_native_gradient_used={cpu_event.get('native_gradient_used')}, "
+                    f"jax_native_gradient_used={jax_event.get('native_gradient_used')}."
+                )
+        else:
+            _compare_same_candidate_exact_event_field(
+                event_failures,
+                field="native_gradient_used",
+                cpu_event=cpu_event,
+                jax_event=jax_event,
+            )
+        if not target_native_rejected_event:
+            _compare_same_candidate_exact_event_field(
+                event_failures,
+                field="solver_success",
+                cpu_event=cpu_event,
+                jax_event=jax_event,
+            )
         solver_contract_failures: list[str] = []
         boozer_metadata_summary = _compare_same_candidate_boozer_solver_metadata(
             solver_contract_failures,
@@ -2526,14 +2649,17 @@ def compare_same_candidate_objective_replay(
         compare_native_gradient_layers = bool(
             cpu_event.get("native_gradient_used")
         ) and bool(jax_event.get("native_gradient_used"))
+        compare_native_gradient_diagnostics = (
+            compare_native_gradient_layers and not target_native_replay_event
+        )
         cpu_boozer_solve_decomposition = (
             cpu_event.get("boozer_solve_decomposition")
-            if compare_native_gradient_layers
+            if compare_native_gradient_diagnostics
             else None
         )
         jax_boozer_solve_decomposition = (
             jax_event.get("boozer_solve_decomposition")
-            if compare_native_gradient_layers
+            if compare_native_gradient_diagnostics
             else None
         )
         boozer_solve_decomposition_summary = (
@@ -2545,7 +2671,7 @@ def compare_same_candidate_objective_replay(
                 line_search_evaluation=cpu_event.get("line_search_evaluation"),
             )
         )
-        if compare_native_gradient_layers:
+        if compare_native_gradient_diagnostics:
             solve_quality_pair_metrics = _compute_solve_quality_probe_pair(
                 cpu_decomposition=cpu_boozer_solve_decomposition,
                 jax_decomposition=jax_boozer_solve_decomposition,
@@ -2605,30 +2731,42 @@ def compare_same_candidate_objective_replay(
                 "layer": boozer_solve_decomposition_summary["first_divergent_layer"],
                 "layer_diffs": dict(boozer_solve_decomposition_summary["layer_diffs"]),
             }
-        max_objective_abs_diff = max(
-            max_objective_abs_diff,
-            _compare_same_candidate_scalar(
+        if not target_native_rejected_event:
+            max_objective_abs_diff = max(
+                max_objective_abs_diff,
+                _compare_same_candidate_scalar(
+                    event_failures,
+                    field="objective.value",
+                    cpu_value=_summary_scalar(cpu_event.get("objective")),
+                    jax_value=_summary_scalar(jax_event.get("objective")),
+                ),
+            )
+            max_gradient_abs_diff = max(
+                max_gradient_abs_diff,
+                _compare_same_candidate_vector(
+                    event_failures,
+                    field="optimizer_gradient",
+                    cpu_vector=_summary_vector(cpu_event.get("optimizer_gradient")),
+                    jax_vector=_summary_vector(jax_event.get("optimizer_gradient")),
+                ),
+            )
+        slice_summary = (
+            {
+                "max_slice_objective_abs_diff": 0.0,
+                "max_slice_gradient_abs_diff": 0.0,
+                "max_slice_objective_owner": None,
+                "max_slice_gradient_owner": None,
+                "max_slice_pair_index": None,
+                "max_slice_line_search_evaluation": None,
+            }
+            if target_native_replay_event
+            else _compare_same_candidate_objective_components(
                 event_failures,
-                field="objective.value",
-                cpu_value=_summary_scalar(cpu_event.get("objective")),
-                jax_value=_summary_scalar(jax_event.get("objective")),
-            ),
-        )
-        max_gradient_abs_diff = max(
-            max_gradient_abs_diff,
-            _compare_same_candidate_vector(
-                event_failures,
-                field="optimizer_gradient",
-                cpu_vector=_summary_vector(cpu_event.get("optimizer_gradient")),
-                jax_vector=_summary_vector(jax_event.get("optimizer_gradient")),
-            ),
-        )
-        slice_summary = _compare_same_candidate_objective_components(
-            event_failures,
-            cpu_components=cpu_event.get("objective_components"),
-            jax_components=jax_event.get("objective_components"),
-            pair_index=pair_index,
-            line_search_evaluation=cpu_event.get("line_search_evaluation"),
+                cpu_components=cpu_event.get("objective_components"),
+                jax_components=jax_event.get("objective_components"),
+                pair_index=pair_index,
+                line_search_evaluation=cpu_event.get("line_search_evaluation"),
+            )
         )
         if slice_summary["max_slice_objective_abs_diff"] > max_slice_objective_abs_diff:
             max_slice_objective_abs_diff = slice_summary["max_slice_objective_abs_diff"]
@@ -2644,12 +2782,16 @@ def compare_same_candidate_objective_replay(
             max_slice_line_search_evaluation = slice_summary[
                 "max_slice_line_search_evaluation"
             ]
-        iota_decomposition_summary = _compare_same_candidate_iota_decomposition(
-            event_failures,
-            cpu_decomposition=cpu_event.get("iota_penalty_decomposition"),
-            jax_decomposition=jax_event.get("iota_penalty_decomposition"),
-            pair_index=pair_index,
-            line_search_evaluation=cpu_event.get("line_search_evaluation"),
+        iota_decomposition_summary = (
+            _layer_decomposition_summary(recorded=False)
+            if target_native_replay_event
+            else _compare_same_candidate_iota_decomposition(
+                event_failures,
+                cpu_decomposition=cpu_event.get("iota_penalty_decomposition"),
+                jax_decomposition=jax_event.get("iota_penalty_decomposition"),
+                pair_index=pair_index,
+                line_search_evaluation=cpu_event.get("line_search_evaluation"),
+            )
         )
         _update_parity_bug_census(
             parity_bug_census_layers,
@@ -2721,22 +2863,23 @@ def compare_same_candidate_objective_replay(
                 rtol=1e-8,
                 atol=1e-10,
             )
-        max_hardware_abs_diff = max(
-            max_hardware_abs_diff,
-            _compare_same_candidate_hardware(
-                event_failures,
-                cpu_status=cpu_event.get("hardware_status"),
-                jax_status=jax_event.get("hardware_status"),
-            ),
-        )
-        max_failure_abs_diff = max(
-            max_failure_abs_diff,
-            _compare_same_candidate_failure(
-                event_failures,
-                cpu_failure=cpu_event.get("candidate_failure"),
-                jax_failure=jax_event.get("candidate_failure"),
-            ),
-        )
+        if not target_native_replay_event:
+            max_hardware_abs_diff = max(
+                max_hardware_abs_diff,
+                _compare_same_candidate_hardware(
+                    event_failures,
+                    cpu_status=cpu_event.get("hardware_status"),
+                    jax_status=jax_event.get("hardware_status"),
+                ),
+            )
+            max_failure_abs_diff = max(
+                max_failure_abs_diff,
+                _compare_same_candidate_failure(
+                    event_failures,
+                    cpu_failure=cpu_event.get("candidate_failure"),
+                    jax_failure=jax_event.get("candidate_failure"),
+                ),
+            )
         if event_failures:
             if first_failure_event is None:
                 first_failure_event = {
@@ -2757,11 +2900,38 @@ def compare_same_candidate_objective_replay(
         failures.append(
             "No paired objective-evaluation events shared the same candidate."
         )
+    diagnostic_scope = (
+        "target-native-objective-gradient"
+        if same_candidate_event_count > 0
+        and target_native_replay_event_count == same_candidate_event_count
+        else "full-objective-trace"
+    )
+    parity_bug_census = (
+        {
+            "status": "not-applicable",
+            "reason": "target_native_replay_records_value_gradient_and_solved_state",
+            "first_divergence": None,
+            "divergent_layer_count": 0,
+            "divergent_layers": [],
+            "max_layer_diffs": {},
+        }
+        if diagnostic_scope == "target-native-objective-gradient"
+        else _finalize_parity_bug_census(
+            parity_bug_census_layers,
+            first_divergence=first_parity_bug_census_divergence,
+        )
+    )
     return {
         "status": "pass" if not failures else "fail",
+        "diagnostic_scope": diagnostic_scope,
         "cpu_event_count": len(cpu_events),
         "jax_event_count": len(jax_events),
         "same_candidate_event_count": same_candidate_event_count,
+        "target_native_replay_event_count": target_native_replay_event_count,
+        "target_native_rejected_event_count": target_native_rejected_event_count,
+        "target_native_rejected_contract_diagnostics": (
+            target_native_rejected_contract_diagnostics
+        ),
         "require_exact_candidates": bool(require_exact_candidates),
         "strict_solver_contract": bool(strict_solver_contract),
         "candidate_x_abs_tol": candidate_x_abs_tol,
@@ -2808,10 +2978,7 @@ def compare_same_candidate_objective_replay(
         # capture). Promoted to enforcing only after the §10 risk register
         # #4 calibration sweep completes and the §2 schedule is locked.
         "solve_quality_probes": dict(solve_quality_probe_aggregate),
-        "parity_bug_census": _finalize_parity_bug_census(
-            parity_bug_census_layers,
-            first_divergence=first_parity_bug_census_divergence,
-        ),
+        "parity_bug_census": parity_bug_census,
         "max_hardware_metric_abs_diff": max_hardware_abs_diff,
         "max_failure_scalar_abs_diff": max_failure_abs_diff,
         "cpu_boozer_solver_summary": _first_boozer_solver_summary(cpu_events),
@@ -3019,12 +3186,14 @@ def _optimizer_control_split_accepts_final_metric_drift(
     same_candidate_replay: dict[str, Any] | None,
     optimizer_path_objective_evaluations: dict[str, Any] | None,
 ) -> bool:
-    return (
-        same_candidate_replay is not None
-        and same_candidate_replay["status"] == "pass"
-        and optimizer_path_objective_evaluations is not None
+    if same_candidate_replay is None or same_candidate_replay["status"] != "pass":
+        return False
+    if (
+        optimizer_path_objective_evaluations is not None
         and optimizer_path_objective_evaluations["status"] == "split"
-    )
+    ):
+        return True
+    return False
 
 
 def evaluate_single_stage_init_parity(
@@ -3173,6 +3342,8 @@ def main() -> None:
             "surface_geometry_rel_tol": SURFACE_GEOMETRY_REL_TOL,
             "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
             "optimizer_drift_tolerances": dict(_TIER3_TOLERANCES),
+            "parent_cuda_memory_isolated": bool(args.platform == "cuda"),
+            "child_cuda_memory_env": dict(CHILD_CUDA_MEMORY_ENV),
         },
     )
     bundle_provenance = {
@@ -3185,6 +3356,23 @@ def main() -> None:
         "cuda_disable_ptx_jit": provenance["cuda_disable_ptx_jit"],
     }
     print_provenance(provenance)
+    strict_transfer_support = _strict_transfer_optimizer_support(args, provenance)
+    if strict_transfer_support["status"] == "unsupported":
+        warnings = [str(strict_transfer_support["reason"])]
+        payload = {
+            "provenance": provenance,
+            "bundle_provenance": bundle_provenance,
+            "strict_transfer_support": strict_transfer_support,
+            "warnings": warnings,
+            "failures": [],
+            "passed": False,
+            "status": "unsupported",
+        }
+        write_json(args.output_json, payload)
+        print("SINGLE-STAGE INIT PARITY UNSUPPORTED")
+        for warning in warnings:
+            print(f"  - {warning}")
+        return
 
     case_artifacts_dir = (
         None if args.case_artifacts_dir is None else Path(args.case_artifacts_dir)
@@ -3268,12 +3456,12 @@ def main() -> None:
         expected_jax_outer_optimizer_method=_expected_target_outer_optimizer_method(
             args.optimizer_backend
         ),
-        require_final_metric_parity=not _public_optimizer_trace_required(args),
+        require_final_metric_parity=not _trace_gated_final_metric_parity(args),
     )
     optimizer_state_trace_parity = None
     same_candidate_replay = None
     optimizer_path_objective_evaluations = None
-    if bool(args.record_objective_evaluation_trace):
+    if _same_candidate_replay_required(args):
         same_candidate_target_case = (
             jax_case
             if same_candidate_replay_case is None
@@ -3284,6 +3472,13 @@ def main() -> None:
             same_candidate_target_case,
             require_exact_candidates=same_candidate_replay_case is not None,
         )
+        strict_gate_failure_class = _same_candidate_replay_strict_gate_failure_class(
+            same_candidate_replay
+        )
+        if strict_gate_failure_class is not None:
+            same_candidate_replay["strict_gate_failure_class"] = (
+                strict_gate_failure_class
+            )
         failures.extend(_same_candidate_replay_gate_failures(same_candidate_replay))
         optimizer_path_objective_evaluations = (
             compare_optimizer_path_objective_evaluations(cpu_case, jax_case)
@@ -3295,11 +3490,31 @@ def main() -> None:
             comparison["optimizer_path_split_kind"] = (
                 "optimizer_acceptance_split_after_same_candidate_parity"
             )
-    if _public_optimizer_trace_required(args):
+    elif bool(args.record_objective_evaluation_trace):
+        same_candidate_replay = {
+            "status": "not-applicable",
+            "reason": "maxiter=0 does not run the outer optimizer or record objective-evaluation events",
+            "cpu_event_count": 0,
+            "jax_event_count": 0,
+            "same_candidate_event_count": 0,
+            "require_exact_candidates": False,
+            "strict_solver_contract": False,
+            "solver_contract_diagnostics": [],
+            "failures": [],
+        }
+        optimizer_path_objective_evaluations = {
+            "status": "not-applicable",
+            "reason": "maxiter=0 does not run the outer optimizer or record objective-evaluation events",
+            "cpu_event_count": 0,
+            "jax_event_count": 0,
+            "paired_event_count": 0,
+            "candidate_split_abs_tol": _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL,
+        }
+    if _trace_gated_final_metric_parity(args):
         final_metric_failures = comparison["final_metric_parity_failures"]
         if not bool(args.record_objective_evaluation_trace):
             failures.append(
-                "Public optimizer comparison rungs require "
+                "Trace-gated optimizer comparison rungs require "
                 "--record-objective-evaluation-trace to record the "
                 "same-candidate objective/gradient gate."
             )

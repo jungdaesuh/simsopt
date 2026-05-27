@@ -729,6 +729,41 @@ def test_float32_smoke_keeps_gradient_as_diagnostic_failure(monkeypatch):
     assert not comparison_failure_gates_verdict(gradient_entry)
 
 
+def test_derived_normal_projection_uses_source_array_error_budget():
+    unit = 1.0 / np.sqrt(2.0)
+    cpu_field = np.asarray([[[1.0, -1.0, 0.0]]], dtype=np.float64)
+    jax_field = np.asarray([[[1.0 + 9e-13, -1.0 + 9e-13, 0.0]]], dtype=np.float64)
+    normal = np.asarray([[[unit, unit, 0.0]]], dtype=np.float64)
+    cpu_projection = np.sum(cpu_field * normal, axis=-1)
+    jax_projection = np.sum(jax_field * normal, axis=-1)
+
+    direct_entry = harness._compare_array(
+        cpu_arr=cpu_projection,
+        jax_arr=jax_projection,
+        quantity="wireframe_Bnormal",
+        component="WireframeField",
+        active_dof_names=(),
+    )
+    derived_entry = harness._compare_derived_normal_projection(
+        cpu_field=cpu_field,
+        jax_field=jax_field,
+        cpu_normal=normal,
+        jax_normal=normal,
+        cpu_projection=cpu_projection,
+        jax_projection=jax_projection,
+        quantity="wireframe_Bnormal",
+        component="WireframeField",
+        active_dof_names=(),
+    )
+
+    assert direct_entry["verdict"] == "fail"
+    assert derived_entry["verdict"] == "pass"
+    assert derived_entry["derived_from_quantities"] == [
+        "wireframe_field_B",
+        "surface_unit_normal",
+    ]
+
+
 def test_followup_comparison_requires_exact_lane_value_key():
     with pytest.raises(KeyError, match="jax_mps_value"):
         harness._right_value_for_comparison(
