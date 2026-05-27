@@ -33,6 +33,7 @@ from .rational_target import RationalTarget
 FROZEN_ORBIT_FD_MODE = "frozen_orbit"
 BRANCH_RESOLVED_FD_MODE = "branch_resolved"
 BIOT_SAVART_BRANCH_RESOLVED_FD_MODE = "biot_savart_branch_resolved"
+BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE = "biot_savart_branch_resolved_taylor"
 
 
 SectionState = tuple[float, float]
@@ -157,6 +158,44 @@ class BiotSavartVjpDotDiagnostic:
 
     def to_json_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class BiotSavartResidueTaylorSample:
+    step: float
+    residue: float
+    first_order_prediction: float
+    residual: float
+    absolute_residual: float
+    status: str
+    state: SectionState
+
+    def to_json_dict(self) -> dict[str, object]:
+        payload = asdict(self)
+        payload["state"] = list(self.state)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class BiotSavartBranchResidueTaylorDiagnostic:
+    mode: str
+    derivative_step: float
+    direction_norm: float
+    direction: DofDirection
+    base_residue: float
+    directional_derivative: float
+    base_status: str
+    base_state: SectionState
+    samples: tuple[BiotSavartResidueTaylorSample, ...]
+    observed_orders: tuple[float, ...]
+
+    def to_json_dict(self) -> dict[str, object]:
+        payload = asdict(self)
+        payload["direction"] = list(self.direction)
+        payload["base_state"] = list(self.base_state)
+        payload["samples"] = [sample.to_json_dict() for sample in self.samples]
+        payload["observed_orders"] = list(self.observed_orders)
+        return payload
 
 
 def frozen_orbit_residue_evaluation(
@@ -505,6 +544,84 @@ def biot_savart_b_and_dB_vjp_dot_test(
     )
 
 
+def branch_resolved_biot_savart_residue_taylor_diagnostic(
+    biot_savart: BiotSavart,
+    initial_state: Sequence[float],
+    *,
+    direction: Sequence[float],
+    derivative_step: float,
+    probe_steps: Sequence[float],
+    target: RationalTarget,
+    chart: PoincareChart,
+    branch: str,
+    integrator_options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
+    solver_options: PeriodicOrbitSolverOptions = DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
+) -> BiotSavartBranchResidueTaylorDiagnostic:
+    field = _require_direct_biot_savart(biot_savart)
+    steps = _normalized_probe_steps(probe_steps)
+    derivative = branch_resolved_biot_savart_residue_central_difference(
+        field,
+        initial_state,
+        direction=direction,
+        step=derivative_step,
+        target=target,
+        chart=chart,
+        branch=branch,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+    original_x = np.asarray(field.x, dtype=float).copy()
+    direction_array, direction_norm = _normalized_direction(
+        direction,
+        expected_shape=original_x.shape,
+    )
+    samples: list[BiotSavartResidueTaylorSample] = []
+    try:
+        for step_value in steps:
+            field.x = original_x + step_value * direction_array
+            result = solve_periodic_orbit(
+                field,
+                derivative.base_state,
+                target=target,
+                chart=chart,
+                branch=branch,
+                integrator_options=integrator_options,
+                solver_options=solver_options,
+            )
+            _require_converged(result, label=f"probe step {step_value:g}")
+            residue = float(result.residue_diagnostic.residue)
+            prediction = float(
+                derivative.base_residue + step_value * derivative.derivative
+            )
+            residual = float(residue - prediction)
+            samples.append(
+                BiotSavartResidueTaylorSample(
+                    step=step_value,
+                    residue=residue,
+                    first_order_prediction=prediction,
+                    residual=residual,
+                    absolute_residual=abs(residual),
+                    status=result.status,
+                    state=result.state,
+                )
+            )
+    finally:
+        field.x = original_x
+
+    return BiotSavartBranchResidueTaylorDiagnostic(
+        mode=BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE,
+        derivative_step=derivative.step,
+        direction_norm=direction_norm,
+        direction=tuple(float(component) for component in direction_array),
+        base_residue=derivative.base_residue,
+        directional_derivative=derivative.derivative,
+        base_status=derivative.base_status,
+        base_state=derivative.base_state,
+        samples=tuple(samples),
+        observed_orders=_observed_orders(tuple(samples)),
+    )
+
+
 def _normalize_state(state: Sequence[float]) -> SectionState:
     if len(state) != 2:
         raise ValueError("Residue sensitivity state must be [R, Z]")
@@ -553,6 +670,31 @@ def _positive_step(step: float) -> float:
     if step_value <= 0.0:
         raise ValueError("Residue sensitivity finite-difference step must be positive")
     return step_value
+
+
+def _normalized_probe_steps(probe_steps: Sequence[float]) -> tuple[float, ...]:
+    steps = tuple(_positive_step(step) for step in probe_steps)
+    if len(steps) < 2:
+        raise ValueError(
+            "BiotSavart residue Taylor diagnostic requires at least two probe steps"
+        )
+    return steps
+
+
+def _observed_orders(
+    samples: tuple[BiotSavartResidueTaylorSample, ...],
+) -> tuple[float, ...]:
+    orders: list[float] = []
+    for previous, current in zip(samples[:-1], samples[1:], strict=True):
+        if previous.absolute_residual <= 0.0 or current.absolute_residual <= 0.0:
+            raise ValueError("Taylor residuals must be positive to estimate order")
+        orders.append(
+            float(
+                np.log(previous.absolute_residual / current.absolute_residual)
+                / np.log(previous.step / current.step)
+            )
+        )
+    return tuple(orders)
 
 
 def _normalized_direction(

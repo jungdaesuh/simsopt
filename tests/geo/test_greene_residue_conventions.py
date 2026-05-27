@@ -55,10 +55,12 @@ from examples.single_stage_optimization.banana_opt.topology.residue_diagnostics 
 )
 from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity import (
     BIOT_SAVART_BRANCH_RESOLVED_FD_MODE,
+    BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE,
     BRANCH_RESOLVED_FD_MODE,
     FROZEN_ORBIT_FD_MODE,
     biot_savart_b_and_dB_vjp_dot_test,
     branch_resolved_biot_savart_residue_central_difference,
+    branch_resolved_biot_savart_residue_taylor_diagnostic,
     branch_resolved_residue_central_difference,
     frozen_orbit_residue_central_difference,
 )
@@ -1050,6 +1052,44 @@ def test_biot_savart_branch_residue_directional_oracle_uses_real_coil_dofs():
     assert np.asarray(payload["plus_monodromy"], dtype=float).shape == (2, 2)
     assert np.asarray(payload["minus_monodromy"], dtype=float).shape == (2, 2)
     assert np.asarray(payload["monodromy_derivative"], dtype=float).shape == (2, 2)
+    np.testing.assert_allclose(field.x, original_x)
+
+
+def test_biot_savart_branch_residue_directional_taylor_gate_serializes_real_coil_probe():
+    field, target, chart, integrator_options, solver_options = (
+        _biot_savart_residue_gate_inputs()
+    )
+    original_x = np.asarray(field.x, dtype=float).copy()
+    direction = -_unit_biot_savart_direction(field)
+
+    diagnostic = branch_resolved_biot_savart_residue_taylor_diagnostic(
+        field,
+        (1.1, 0.05),
+        direction=direction,
+        derivative_step=1.0e-8,
+        probe_steps=(4.0e-7, 2.0e-7, 1.0e-7),
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_X,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert diagnostic.mode == BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE
+    assert diagnostic.base_status == BRANCH_STATUS_CONVERGED
+    assert diagnostic.direction_norm == pytest.approx(1.0)
+    np.testing.assert_allclose(diagnostic.direction, direction)
+    assert len(diagnostic.samples) == 3
+    assert len(diagnostic.observed_orders) == 2
+    for sample in diagnostic.samples:
+        assert sample.status == BRANCH_STATUS_CONVERGED
+        assert sample.absolute_residual < 1.0e-6
+        assert np.asarray(sample.state, dtype=float).shape == (2,)
+    assert np.all(np.isfinite(np.asarray(diagnostic.observed_orders)))
+    payload = diagnostic.to_json_dict()
+    assert payload["mode"] == BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE
+    assert len(payload["samples"]) == 3
+    assert len(payload["observed_orders"]) == 2
     np.testing.assert_allclose(field.x, original_x)
 
 
