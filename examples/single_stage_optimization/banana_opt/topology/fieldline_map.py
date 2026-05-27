@@ -18,6 +18,12 @@ class MagneticFieldLike(Protocol):
     def B(self) -> np.ndarray: ...
 
 
+class DifferentiableMagneticFieldLike(MagneticFieldLike, Protocol):
+    """Field with dB_by_dX rows as Cartesian-coordinate derivatives of B."""
+
+    def dB_by_dX(self) -> np.ndarray: ...
+
+
 class LowToroidalFieldError(RuntimeError):
     pass
 
@@ -65,6 +71,17 @@ class CylindricalFieldComponents:
 
 
 @dataclass(frozen=True, slots=True)
+class CylindricalFieldJacobian:
+    components: CylindricalFieldComponents
+    dbr_dr: float
+    dbphi_dr: float
+    dbz_dr: float
+    dbr_dz: float
+    dbphi_dz: float
+    dbz_dz: float
+
+
+@dataclass(frozen=True, slots=True)
 class FieldlineReturnResult:
     initial_state: tuple[float, float]
     final_state: tuple[float, float]
@@ -73,6 +90,14 @@ class FieldlineReturnResult:
     unwrapped_theta: np.ndarray
     winding: float
     min_bphi_over_b: float
+
+
+@dataclass(frozen=True, slots=True)
+class FieldlineTangentReturnResult:
+    return_map: FieldlineReturnResult
+    monodromy: np.ndarray
+    trace_m: float
+    det_m: float
 
 
 def cartesian_from_cylindrical(radius: float, phi: float, z: float) -> np.ndarray:
@@ -92,13 +117,13 @@ def cylindrical_basis(phi: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     )
 
 
-def cylindrical_field_components(
+def _cartesian_field_vector(
     field: MagneticFieldLike,
     *,
     radius: float,
     phi: float,
     z: float,
-) -> CylindricalFieldComponents:
+) -> np.ndarray:
     point = cartesian_from_cylindrical(radius, phi, z).reshape((1, 3))
     field.set_points(point)
     cartesian_b = np.asarray(field.B(), dtype=float)
@@ -109,6 +134,17 @@ def cylindrical_field_components(
     b_vector = cartesian_b[0]
     if not np.all(np.isfinite(b_vector)):
         raise ValueError("Magnetic field B() returned NaN/Inf values")
+    return b_vector
+
+
+def cylindrical_field_components(
+    field: MagneticFieldLike,
+    *,
+    radius: float,
+    phi: float,
+    z: float,
+) -> CylindricalFieldComponents:
+    b_vector = _cartesian_field_vector(field, radius=radius, phi=phi, z=z)
     e_r, e_phi, e_z = cylindrical_basis(phi)
     b_norm = float(np.linalg.norm(b_vector))
     if b_norm <= 0.0:
@@ -120,6 +156,49 @@ def cylindrical_field_components(
         b_z=float(np.dot(b_vector, e_z)),
         b_norm=b_norm,
         bphi_over_b=abs(b_phi) / b_norm,
+    )
+
+
+def cylindrical_field_jacobian(
+    field: DifferentiableMagneticFieldLike,
+    *,
+    radius: float,
+    phi: float,
+    z: float,
+) -> CylindricalFieldJacobian:
+    b_vector = _cartesian_field_vector(field, radius=radius, phi=phi, z=z)
+    dB_by_dX = np.asarray(field.dB_by_dX(), dtype=float)
+    if dB_by_dX.shape != (1, 3, 3):
+        raise ValueError(
+            f"Magnetic field dB_by_dX() must have shape (1, 3, 3), got {dB_by_dX.shape}"
+        )
+    field_jacobian_xyz = dB_by_dX[0]
+    if not np.all(np.isfinite(field_jacobian_xyz)):
+        raise ValueError("Magnetic field dB_by_dX() returned NaN/Inf values")
+
+    e_r, e_phi, e_z = cylindrical_basis(phi)
+    b_norm = float(np.linalg.norm(b_vector))
+    if b_norm <= 0.0:
+        raise ValueError("Magnetic field norm must be positive")
+    b_phi = float(np.dot(b_vector, e_phi))
+    components = CylindricalFieldComponents(
+        b_r=float(np.dot(b_vector, e_r)),
+        b_phi=b_phi,
+        b_z=float(np.dot(b_vector, e_z)),
+        b_norm=b_norm,
+        bphi_over_b=abs(b_phi) / b_norm,
+    )
+
+    dB_dR = e_r @ field_jacobian_xyz
+    dB_dZ = e_z @ field_jacobian_xyz
+    return CylindricalFieldJacobian(
+        components=components,
+        dbr_dr=float(np.dot(dB_dR, e_r)),
+        dbphi_dr=float(np.dot(dB_dR, e_phi)),
+        dbz_dr=float(np.dot(dB_dR, e_z)),
+        dbr_dz=float(np.dot(dB_dZ, e_r)),
+        dbphi_dz=float(np.dot(dB_dZ, e_phi)),
+        dbz_dz=float(np.dot(dB_dZ, e_z)),
     )
 
 
@@ -153,6 +232,78 @@ def fieldline_rhs_phi(
         ],
         dtype=float,
     )
+
+
+def fieldline_rhs_and_jacobian_phi(
+    phi: float,
+    state: Sequence[float],
+    *,
+    field: DifferentiableMagneticFieldLike,
+    min_bphi_over_b: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(state) != 2:
+        raise ValueError("Field-line state must be [R, Z]")
+    radius = float(state[0])
+    z = float(state[1])
+    if radius <= 0.0 or not isfinite(radius) or not isfinite(z):
+        raise ValueError("Field-line state requires finite R > 0 and finite Z")
+    field_jacobian = cylindrical_field_jacobian(
+        field,
+        radius=radius,
+        phi=phi,
+        z=z,
+    )
+    components = field_jacobian.components
+    if components.bphi_over_b <= float(min_bphi_over_b):
+        raise LowToroidalFieldError(
+            "|B_phi|/|B| fell below the Greene return-map threshold"
+        )
+
+    inv_bphi = 1.0 / components.b_phi
+    inv_bphi_squared = inv_bphi * inv_bphi
+    velocity = np.asarray(
+        [
+            radius * components.b_r * inv_bphi,
+            radius * components.b_z * inv_bphi,
+        ],
+        dtype=float,
+    )
+    jacobian = np.asarray(
+        [
+            [
+                components.b_r * inv_bphi
+                + radius
+                * (
+                    field_jacobian.dbr_dr * components.b_phi
+                    - components.b_r * field_jacobian.dbphi_dr
+                )
+                * inv_bphi_squared,
+                radius
+                * (
+                    field_jacobian.dbr_dz * components.b_phi
+                    - components.b_r * field_jacobian.dbphi_dz
+                )
+                * inv_bphi_squared,
+            ],
+            [
+                components.b_z * inv_bphi
+                + radius
+                * (
+                    field_jacobian.dbz_dr * components.b_phi
+                    - components.b_z * field_jacobian.dbphi_dr
+                )
+                * inv_bphi_squared,
+                radius
+                * (
+                    field_jacobian.dbz_dz * components.b_phi
+                    - components.b_z * field_jacobian.dbphi_dz
+                )
+                * inv_bphi_squared,
+            ],
+        ],
+        dtype=float,
+    )
+    return velocity, jacobian
 
 
 def _normalize_initial_state(initial_state: Sequence[float]) -> tuple[float, float]:
@@ -230,6 +381,97 @@ def integrate_full_torus_return_map(
     )
 
 
+def _fieldline_tangent_rhs_phi(
+    phi: float,
+    augmented_state: Sequence[float],
+    *,
+    field: DifferentiableMagneticFieldLike,
+    min_bphi_over_b: float,
+) -> np.ndarray:
+    state = np.asarray(augmented_state[:2], dtype=float)
+    tangent_matrix = np.asarray(augmented_state[2:], dtype=float).reshape((2, 2))
+    velocity, jacobian = fieldline_rhs_and_jacobian_phi(
+        phi,
+        state,
+        field=field,
+        min_bphi_over_b=min_bphi_over_b,
+    )
+    tangent_rhs = jacobian @ tangent_matrix
+    return np.concatenate([velocity, tangent_rhs.reshape(4)])
+
+
+def integrate_tangent_full_torus_return_map(
+    field: DifferentiableMagneticFieldLike,
+    initial_state: Sequence[float],
+    *,
+    chart: PoincareChart,
+    phi0: float = 0.0,
+    torus_turns: int = 1,
+    options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
+) -> FieldlineTangentReturnResult:
+    start_state = _normalize_initial_state(initial_state)
+    turns = int(torus_turns)
+    phi_start = float(phi0)
+    if turns <= 0:
+        raise ValueError("torus_turns must be positive")
+    if not isfinite(phi_start):
+        raise ValueError("phi0 must be finite")
+    sample_count = int(options.samples_per_full_torus) * turns + 1
+    phi_stop = phi_start + 2.0 * pi * float(turns)
+    phi_grid = np.linspace(phi_start, phi_stop, sample_count)
+    augmented_initial_state = np.concatenate(
+        [np.asarray(start_state, dtype=float), np.eye(2, dtype=float).reshape(4)]
+    )
+    solution = solve_ivp(
+        lambda phi, state: _fieldline_tangent_rhs_phi(
+            phi,
+            state,
+            field=field,
+            min_bphi_over_b=options.min_bphi_over_b,
+        ),
+        (phi_start, phi_stop),
+        augmented_initial_state,
+        method=options.method,
+        rtol=options.rtol,
+        atol=options.atol,
+        max_step=options.max_step,
+        t_eval=phi_grid,
+    )
+    if not solution.success:
+        raise RuntimeError(f"Field-line tangent integration failed: {solution.message}")
+    states = np.asarray(solution.y[:2, :].T, dtype=float)
+    if states.shape != (sample_count, 2):
+        raise RuntimeError(
+            f"Field-line tangent integration returned shape {states.shape}"
+        )
+    monodromy = np.asarray(solution.y[2:, -1], dtype=float).reshape((2, 2))
+    bphi_ratios = [
+        cylindrical_field_components(
+            field,
+            radius=float(state[0]),
+            phi=float(phi),
+            z=float(state[1]),
+        ).bphi_over_b
+        for phi, state in zip(phi_grid, states, strict=True)
+    ]
+    unwrapped_theta = chart.unwrapped_thetas(states)
+    return_map = FieldlineReturnResult(
+        initial_state=start_state,
+        final_state=(float(states[-1, 0]), float(states[-1, 1])),
+        phi_grid=phi_grid,
+        states=states,
+        unwrapped_theta=unwrapped_theta,
+        winding=float((unwrapped_theta[-1] - unwrapped_theta[0]) / (2.0 * pi)),
+        min_bphi_over_b=float(np.min(np.asarray(bphi_ratios, dtype=float))),
+    )
+    return FieldlineTangentReturnResult(
+        return_map=return_map,
+        monodromy=monodromy,
+        trace_m=float(np.trace(monodromy)),
+        det_m=float(np.linalg.det(monodromy)),
+    )
+
+
 def integrate_target_return_map(
     field: MagneticFieldLike,
     initial_state: Sequence[float],
@@ -239,6 +481,24 @@ def integrate_target_return_map(
     options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
 ) -> FieldlineReturnResult:
     return integrate_full_torus_return_map(
+        field,
+        initial_state,
+        chart=chart,
+        phi0=target.phi0,
+        torus_turns=target.q,
+        options=options,
+    )
+
+
+def integrate_tangent_target_return_map(
+    field: DifferentiableMagneticFieldLike,
+    initial_state: Sequence[float],
+    *,
+    target: RationalTarget,
+    chart: PoincareChart,
+    options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
+) -> FieldlineTangentReturnResult:
+    return integrate_tangent_full_torus_return_map(
         field,
         initial_state,
         chart=chart,

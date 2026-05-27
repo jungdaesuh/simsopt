@@ -11,6 +11,8 @@ from examples.single_stage_optimization.banana_opt.topology.fieldline_map import
     LowToroidalFieldError,
     fieldline_rhs_phi,
     integrate_full_torus_return_map,
+    integrate_tangent_full_torus_return_map,
+    integrate_tangent_target_return_map,
     integrate_target_return_map,
     target_winding_residual,
 )
@@ -49,10 +51,10 @@ class CircularTransformField:
         self.points = np.asarray(points, dtype=float)
         return self
 
-    def B(self) -> np.ndarray:
-        x = self.points[:, 0]
-        y = self.points[:, 1]
-        z = self.points[:, 2]
+    def _B_at(self, points: np.ndarray) -> np.ndarray:
+        x = points[:, 0]
+        y = points[:, 1]
+        z = points[:, 2]
         radius = np.sqrt(x**2 + y**2)
         cos_phi = x / radius
         sin_phi = y / radius
@@ -64,6 +66,20 @@ class CircularTransformField:
         b_x = b_r * cos_phi - b_phi * sin_phi
         b_y = b_r * sin_phi + b_phi * cos_phi
         return np.stack([b_x, b_y, b_z], axis=-1)
+
+    def B(self) -> np.ndarray:
+        return self._B_at(self.points)
+
+    def dB_by_dX(self) -> np.ndarray:
+        epsilon = 1.0e-6
+        jacobian = np.empty((self.points.shape[0], 3, 3), dtype=float)
+        for coordinate_index in range(3):
+            direction = np.zeros(3, dtype=float)
+            direction[coordinate_index] = epsilon
+            plus = self._B_at(self.points + direction)
+            minus = self._B_at(self.points - direction)
+            jacobian[:, coordinate_index, :] = (plus - minus) / (2.0 * epsilon)
+        return jacobian
 
 
 class LowToroidalRatioField:
@@ -205,6 +221,96 @@ def test_full_torus_return_map_closes_analytic_p_over_q_orbit():
     assert result.winding == pytest.approx(2.0, abs=1.0e-9)
     assert target_winding_residual(result, target) == pytest.approx(0.0, abs=1.0e-9)
     assert result.min_bphi_over_b > options.min_bphi_over_b
+
+
+def test_tangent_full_torus_map_matches_analytic_rotation_monodromy():
+    iota = 1.0 / 3.0
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    field = CircularTransformField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        iota=iota,
+    )
+    options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    rotation_angle = 2.0 * math.pi * iota
+    expected_monodromy = np.asarray(
+        [
+            [math.cos(rotation_angle), -math.sin(rotation_angle)],
+            [math.sin(rotation_angle), math.cos(rotation_angle)],
+        ]
+    )
+
+    result = integrate_tangent_full_torus_return_map(
+        field,
+        (1.2, 0.0),
+        chart=chart,
+        options=options,
+    )
+
+    assert result.monodromy == pytest.approx(expected_monodromy, abs=1.0e-7)
+    assert result.trace_m == pytest.approx(-1.0, abs=1.0e-7)
+    assert result.det_m == pytest.approx(1.0, abs=1.0e-7)
+    diagnostic = greene_residue_diagnostic_from_matrix(result.monodromy)
+    assert diagnostic.residue == pytest.approx(0.75, abs=1.0e-7)
+    assert diagnostic.classification == GREENE_RESIDUE_ELLIPTIC_O
+
+
+def test_tangent_target_map_matches_centered_return_map_perturbation():
+    target = RationalTarget(p=1, q=4, fourier_m=4, fourier_n=1)
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    field = CircularTransformField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        iota=target.iota_float,
+    )
+    options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    initial_state = np.asarray([1.2, 0.0], dtype=float)
+    perturbation = np.asarray([2.0e-5, -1.0e-5], dtype=float)
+
+    tangent_result = integrate_tangent_target_return_map(
+        field,
+        initial_state,
+        target=target,
+        chart=chart,
+        options=options,
+    )
+    base_result = integrate_target_return_map(
+        field,
+        initial_state,
+        target=target,
+        chart=chart,
+        options=options,
+    )
+    perturbed_result = integrate_target_return_map(
+        field,
+        initial_state + perturbation,
+        target=target,
+        chart=chart,
+        options=options,
+    )
+    observed = np.asarray(perturbed_result.final_state) - np.asarray(
+        base_result.final_state
+    )
+
+    assert tangent_result.monodromy @ perturbation == pytest.approx(
+        observed,
+        abs=2.0e-8,
+    )
+    assert tangent_result.trace_m == pytest.approx(2.0, abs=1.0e-7)
+    assert tangent_result.det_m == pytest.approx(1.0, abs=1.0e-7)
+    assert greene_residue_diagnostic_from_matrix(
+        tangent_result.monodromy
+    ).residue == pytest.approx(0.0, abs=3.0e-8)
 
 
 def test_phi_return_map_matches_existing_section_hit_geometry_for_tokamak_field():
