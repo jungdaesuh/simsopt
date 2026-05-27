@@ -47,6 +47,11 @@ from examples.single_stage_optimization.banana_opt.topology.rational_target impo
     GREENE_MAP_CONVENTION_FULL_TORUS,
     RationalTarget,
 )
+from examples.single_stage_optimization.banana_opt.topology.residue_diagnostics import (
+    GREENE_RESIDUE_PROBE_SCHEMA_VERSION,
+    radial_multistart_initial_guesses,
+    run_residue_probe,
+)
 from simsopt.field.magneticfieldclasses import PoloidalField, ToroidalField
 from simsopt.field.tracing import compute_fieldlines
 
@@ -663,6 +668,86 @@ def test_periodic_orbit_solver_reports_radial_winding_and_branch_failures():
     assert outside_window.status == BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW
     assert branch_mismatch.status == BRANCH_STATUS_BRANCH_MISMATCH
     assert wrong_winding.status == BRANCH_STATUS_WRONG_WINDING
+
+
+def test_residue_probe_serializes_required_branch_diagnostics():
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_label=0.2,
+        radial_window=(0.18, 0.23),
+        branches=(GREENE_BRANCH_O,),
+        fourier_m=1,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    period = 2.0 * math.pi * float(target.q)
+    field = DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.2,
+        phase0=0.0,
+        tangent_generator=(0.5 * math.pi / period)
+        * np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=float),
+    )
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-6,
+        max_iterations=8,
+        max_step_norm=0.08,
+    )
+
+    probe = run_residue_probe(
+        field,
+        targets=(target,),
+        chart=chart,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    diagnostic = probe["diagnostics"][0]
+    assert probe["schema_version"] == GREENE_RESIDUE_PROBE_SCHEMA_VERSION
+    assert probe["branch_status_counts"] == {BRANCH_STATUS_CONVERGED: 1}
+    assert diagnostic["target_id"] == target.manifest_key()
+    assert diagnostic["branch"] == GREENE_BRANCH_O
+    assert diagnostic["branch_status"] == BRANCH_STATUS_CONVERGED
+    assert diagnostic["residue"] == pytest.approx(0.5, abs=4.0e-6)
+    assert diagnostic["detM"] == pytest.approx(1.0, abs=4.0e-6)
+    assert diagnostic["winding"] == pytest.approx(1.0, abs=1.0e-7)
+    assert diagnostic["radial_label"] == pytest.approx(0.2, abs=4.0e-7)
+    assert diagnostic["min_Bphi_over_B"] > integrator_options.min_bphi_over_b
+    assert diagnostic["solver_iterations"] <= solver_options.max_iterations
+
+
+def test_residue_probe_radial_multistart_requires_target_radial_label():
+    target = RationalTarget(p=1, q=1, fourier_m=1, fourier_n=1)
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0, radial_label_scale=0.5)
+
+    with pytest.raises(ValueError, match="radial_label"):
+        radial_multistart_initial_guesses(target, chart)
+
+    guesses = radial_multistart_initial_guesses(
+        RationalTarget(
+            p=1,
+            q=1,
+            radial_label=0.4,
+            fourier_m=1,
+            fourier_n=1,
+        ),
+        chart,
+        phase_angles=(0.0, math.pi),
+    )
+
+    assert np.asarray(guesses, dtype=float) == pytest.approx(
+        np.asarray([[1.2, 0.0], [0.8, 0.0]], dtype=float)
+    )
 
 
 def test_phi_return_map_matches_existing_section_hit_geometry_for_tokamak_field():
