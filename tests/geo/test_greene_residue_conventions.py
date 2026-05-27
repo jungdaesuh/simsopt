@@ -52,6 +52,12 @@ from examples.single_stage_optimization.banana_opt.topology.residue_diagnostics 
     radial_multistart_initial_guesses,
     run_residue_probe,
 )
+from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity import (
+    BRANCH_RESOLVED_FD_MODE,
+    FROZEN_ORBIT_FD_MODE,
+    branch_resolved_residue_central_difference,
+    frozen_orbit_residue_central_difference,
+)
 from simsopt.field.magneticfieldclasses import PoloidalField, ToroidalField
 from simsopt.field.tracing import compute_fieldlines
 
@@ -748,6 +754,85 @@ def test_residue_probe_radial_multistart_requires_target_radial_label():
     assert np.asarray(guesses, dtype=float) == pytest.approx(
         np.asarray([[1.2, 0.0], [0.8, 0.0]], dtype=float)
     )
+
+
+def test_residue_sensitivity_central_differences_match_analytic_residue_slope():
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_label=0.2,
+        radial_window=(0.18, 0.23),
+        branches=(GREENE_BRANCH_O,),
+        fourier_m=1,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    period = 2.0 * math.pi * float(target.q)
+    orbit_radius = 0.2
+    phase0 = 0.0
+
+    def field_factory(rotation_angle: float) -> DrivenPeriodicOrbitField:
+        return DrivenPeriodicOrbitField(
+            axis_r=chart.axis_r,
+            axis_z=chart.axis_z,
+            target=target,
+            orbit_radius=orbit_radius,
+            phase0=phase0,
+            tangent_generator=(float(rotation_angle) / period)
+            * np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=float),
+        )
+
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-6,
+        max_iterations=8,
+        max_step_norm=0.08,
+    )
+    rotation_angle = 0.5 * math.pi
+    step = 1.0e-4
+    fixed_state = field_factory(rotation_angle).initial_orbit_state()
+    expected_derivative = 0.5 * math.sin(rotation_angle)
+
+    frozen = frozen_orbit_residue_central_difference(
+        field_factory,
+        parameter_name="rotation_angle",
+        parameter_value=rotation_angle,
+        step=step,
+        fixed_state=fixed_state,
+        target=target,
+        chart=chart,
+        integrator_options=integrator_options,
+    )
+    branch_resolved = branch_resolved_residue_central_difference(
+        field_factory,
+        np.asarray(fixed_state, dtype=float) + np.asarray([0.015, -0.01], dtype=float),
+        parameter_name="rotation_angle",
+        parameter_value=rotation_angle,
+        step=step,
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert frozen.mode == FROZEN_ORBIT_FD_MODE
+    assert frozen.derivative == pytest.approx(expected_derivative, abs=1.0e-6)
+    assert branch_resolved.mode == BRANCH_RESOLVED_FD_MODE
+    assert branch_resolved.derivative == pytest.approx(
+        expected_derivative,
+        abs=1.0e-6,
+    )
+    assert branch_resolved.base_status == BRANCH_STATUS_CONVERGED
+    assert branch_resolved.plus_status == BRANCH_STATUS_CONVERGED
+    assert branch_resolved.minus_status == BRANCH_STATUS_CONVERGED
+    assert branch_resolved.to_json_dict()["parameter_name"] == "rotation_angle"
 
 
 def test_phi_return_map_matches_existing_section_hit_geometry_for_tokamak_field():
