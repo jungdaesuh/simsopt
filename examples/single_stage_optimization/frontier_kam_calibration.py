@@ -60,8 +60,8 @@ class CalibrationRow:
     nfieldlines: int
     tmax: float
     nphis: int
-    invariant_torus_fraction: float
-    kam_fraction: float
+    invariant_torus_fraction: float | None
+    kam_fraction: float | None
     kam_median_width: float
     kam_width_ratio: float
     cross_section_span: float
@@ -85,7 +85,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nfieldlines", type=int, default=DEFAULT_NFIELDLINES)
     parser.add_argument("--tmax", type=float, default=DEFAULT_TMAX)
     parser.add_argument("--nphis", type=int, default=DEFAULT_NPHIS)
-    parser.add_argument("--kam-width-ratio", type=float, default=DEFAULT_KAM_WIDTH_RATIO)
+    parser.add_argument(
+        "--kam-width-ratio", type=float, default=DEFAULT_KAM_WIDTH_RATIO
+    )
     parser.add_argument("--inset-fraction", type=float, default=DEFAULT_INSET_FRACTION)
     parser.add_argument(
         "--frontier-invariant-torus-min",
@@ -184,8 +186,10 @@ def score_donor_run(
         nfieldlines=int(topology_result["nfieldlines"]),
         tmax=float(topology_result["tmax"]),
         nphis=int(nphis),
-        invariant_torus_fraction=float(topology_result["invariant_torus_fraction"]),
-        kam_fraction=float(topology_result["kam_fraction"]),
+        invariant_torus_fraction=finite_float_or_none(
+            topology_result.get("invariant_torus_fraction")
+        ),
+        kam_fraction=finite_float_or_none(topology_result.get("kam_fraction")),
         kam_median_width=float(topology_result["kam_median_width"]),
         kam_width_ratio=float(topology_result["kam_width_ratio"]),
         cross_section_span=float(topology_result["cross_section_span"]),
@@ -211,7 +215,11 @@ def hw_clean_invariant_torus_values(rows: Iterable[CalibrationRow]) -> list[floa
     return [
         row.invariant_torus_fraction
         for row in rows
-        if row.hardware_constraints_ok is True and not row.topology_broken
+        if (
+            row.hardware_constraints_ok is True
+            and not row.topology_broken
+            and row.invariant_torus_fraction is not None
+        )
     ]
 
 
@@ -226,12 +234,19 @@ def calibration_summary(
     selection_margin: float,
 ) -> dict[str, object]:
     invariant_torus_values = hw_clean_invariant_torus_values(rows)
+    hw_clean_rows = [
+        row
+        for row in rows
+        if row.hardware_constraints_ok is True and not row.topology_broken
+    ]
+    not_evaluated_labels = [
+        row.donor_label for row in hw_clean_rows if row.invariant_torus_fraction is None
+    ]
     rejecting_labels = [
         row.donor_label
-        for row in rows
+        for row in hw_clean_rows
         if (
-            row.hardware_constraints_ok is True
-            and not row.topology_broken
+            row.invariant_torus_fraction is not None
             and row.invariant_torus_fraction < frontier_invariant_torus_min
         )
     ]
@@ -242,7 +257,8 @@ def calibration_summary(
         "configured_frontier_invariant_torus_min": float(frontier_invariant_torus_min),
         "configured_frontier_kam_min": float(frontier_invariant_torus_min),
         "selection_margin": float(selection_margin),
-        "hw_clean_donor_count": len(invariant_torus_values),
+        "hw_clean_donor_count": len(hw_clean_rows),
+        "hw_clean_evaluated_donor_count": len(invariant_torus_values),
         "invariant_torus_fraction_min": (
             None if not invariant_torus_values else min(invariant_torus_values)
         ),
@@ -266,7 +282,10 @@ def calibration_summary(
             None if not invariant_torus_values else max(invariant_torus_values)
         ),
         "configured_threshold_rejecting_hw_clean_donors": rejecting_labels,
-        "configured_threshold_accepts_all_hw_clean_donors": not rejecting_labels,
+        "configured_threshold_not_evaluated_hw_clean_donors": not_evaluated_labels,
+        "configured_threshold_accepts_all_hw_clean_donors": (
+            not rejecting_labels and not not_evaluated_labels
+        ),
         "recommended_frontier_invariant_torus_min": recommended,
         "recommended_frontier_kam_min": recommended,
     }
@@ -331,9 +350,7 @@ def main() -> None:
     if not math.isfinite(args.frontier_invariant_torus_min) or not (
         0.0 <= args.frontier_invariant_torus_min <= 1.0
     ):
-        raise ValueError(
-            "--frontier-invariant-torus-min must be finite and in [0, 1]"
-        )
+        raise ValueError("--frontier-invariant-torus-min must be finite and in [0, 1]")
 
     selection_margin = (
         1.0 / int(args.nfieldlines)

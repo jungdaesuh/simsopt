@@ -24,6 +24,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from banana_opt.topology.kam_birkhoff import (
     DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
     KAM_FRACTION_SEMANTICS,
+    WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS,
     classify_fieldline_hits,
     classifier_settings_payload,
     summarize_seed_classifications,
@@ -37,6 +38,7 @@ SEED_MODE_EXTENDED_SURFACE = "extended_surface_radial_sweep"
 # ---------------------------------------------------------------------------
 # Helpers (previously duplicated across poincare_surfaces.py and the solver)
 # ---------------------------------------------------------------------------
+
 
 def midplane_seed_radii(surf, nfieldlines, inset_fraction=0.05, min_inset=0.01):
     """Seed field lines slightly inside the phi=0 midplane cross-section."""
@@ -130,7 +132,9 @@ def build_extended_surface_seed_contract(
     )
 
 
-def padded_bounds(rmin, rmax, zmax, radial_padding_fraction=0.05, axial_padding_fraction=0.05):
+def padded_bounds(
+    rmin, rmax, zmax, radial_padding_fraction=0.05, axial_padding_fraction=0.05
+):
     """Add a modest interpolation buffer around the validation surface bounds."""
     rpad = max(radial_padding_fraction * (rmax - rmin), 0.02)
     zpad = max(axial_padding_fraction * zmax, 0.01)
@@ -241,12 +245,9 @@ def prepare_topology_field(
             "mean_abs_error": None,
             "max_rel_error": None,
         }
-    should_interpolate = (
-        resolved_policy == "always"
-        or (
-            resolved_policy == "auto"
-            and float(tmax) >= float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD)
-        )
+    should_interpolate = resolved_policy == "always" or (
+        resolved_policy == "auto"
+        and float(tmax) >= float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD)
     )
     if not should_interpolate:
         reason = "below_threshold" if resolved_policy == "auto" else "explicit_never"
@@ -300,7 +301,9 @@ def prepare_topology_field(
     return interpolated_field, {
         "policy": resolved_policy,
         "selected_mode": "interpolated",
-        "reason": "explicit_always" if resolved_policy == "always" else "tmax_threshold",
+        "reason": "explicit_always"
+        if resolved_policy == "always"
+        else "tmax_threshold",
         "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
         "grid": {
             "degree": int(grid["degree"]),
@@ -317,6 +320,7 @@ def prepare_topology_field(
 # ---------------------------------------------------------------------------
 # Transport diagnostics
 # ---------------------------------------------------------------------------
+
 
 def _transport_metric_status(
     metric_name,
@@ -475,7 +479,9 @@ def compute_topology_transport_diagnostics(surface, field):
         effective_ripple_reason=_EFFECTIVE_RIPPLE_UNAVAILABLE_REASON,
     )
     try:
-        diagnostics["surface_field_structure"] = _surface_field_structure(surface, field)
+        diagnostics["surface_field_structure"] = _surface_field_structure(
+            surface, field
+        )
     except Exception as error:
         diagnostics["status"] = "unavailable"
         diagnostics["summary"] = (
@@ -523,7 +529,9 @@ _TOPOLOGY_TRACE_MAX_ITERATIONS = 2_000_000
 
 def topology_iteration_limit(tmax):
     """Return a generous but finite tracing iteration cap for a given horizon."""
-    scaled_limit = int(np.ceil(float(max(tmax, 1.0)) * _TOPOLOGY_TRACE_ITERATIONS_PER_TMAX))
+    scaled_limit = int(
+        np.ceil(float(max(tmax, 1.0)) * _TOPOLOGY_TRACE_ITERATIONS_PER_TMAX)
+    )
     return int(
         min(
             _TOPOLOGY_TRACE_MAX_ITERATIONS,
@@ -533,7 +541,9 @@ def topology_iteration_limit(tmax):
 
 
 def stop_reasons_indicate_broken(stop_reason_counts):
-    return any(int(stop_reason_counts.get(reason, 0)) > 0 for reason in BROKEN_STOP_REASONS)
+    return any(
+        int(stop_reason_counts.get(reason, 0)) > 0 for reason in BROKEN_STOP_REASONS
+    )
 
 
 def _full_torus_surface(surface):
@@ -561,10 +571,13 @@ def _full_torus_surface(surface):
     phi_density = nphi_input / phi_extent
     full_torus_nphi = max(nphi_input, int(round(phi_density)))
     surf_full = SurfaceXYZTensorFourier(
-        nfp=surface.nfp, stellsym=surface.stellsym,
-        mpol=surface.mpol, ntor=surface.ntor,
+        nfp=surface.nfp,
+        stellsym=surface.stellsym,
+        mpol=surface.mpol,
+        ntor=surface.ntor,
         quadpoints_phi=np.linspace(0, 1, full_torus_nphi, endpoint=False),
-        quadpoints_theta=np.linspace(0, 1, ntheta_input, endpoint=False))
+        quadpoints_theta=np.linspace(0, 1, ntheta_input, endpoint=False),
+    )
     surf_full.x = surface.x
     return surf_full
 
@@ -591,7 +604,7 @@ def build_stopping_criteria(
     from simsopt.geo import SurfaceClassifier
 
     gamma = surface.gamma()
-    rr = np.sqrt(gamma[:, :, 0]**2 + gamma[:, :, 1]**2)
+    rr = np.sqrt(gamma[:, :, 0] ** 2 + gamma[:, :, 1] ** 2)
     zz = gamma[:, :, 2]
     rmin = float(np.min(rr))
     rmax = float(np.max(rr))
@@ -615,7 +628,11 @@ def build_stopping_criteria(
     if include_surface_exit:
         surf_for_classifier = _full_torus_surface(surface)
         classifier = SurfaceClassifier(surf_for_classifier, h=0.03, p=2)
-        criteria = [LevelsetStoppingCriterion(classifier.dist)] + box_criteria + [iteration_criterion]
+        criteria = (
+            [LevelsetStoppingCriterion(classifier.dist)]
+            + box_criteria
+            + [iteration_criterion]
+        )
         return criteria, STOP_LABELS_VALIDATION
     else:
         return box_criteria + [iteration_criterion], STOP_LABELS_DIAGNOSTIC
@@ -624,6 +641,7 @@ def build_stopping_criteria(
 # ---------------------------------------------------------------------------
 # Metrics extraction (single source of truth)
 # ---------------------------------------------------------------------------
+
 
 def _normalize_trace_history(history):
     history = np.asarray(history, dtype=float)
@@ -661,7 +679,9 @@ def _trace_hits_before_first_stop(hits):
 def validate_trace_arrays(fieldlines_tys, fieldlines_phi_hits):
     if len(fieldlines_tys) != len(fieldlines_phi_hits):
         raise ValueError("Topology tracing returned mismatched history and hit counts")
-    for line_index, (history, hits) in enumerate(zip(fieldlines_tys, fieldlines_phi_hits)):
+    for line_index, (history, hits) in enumerate(
+        zip(fieldlines_tys, fieldlines_phi_hits)
+    ):
         normalized_history = _normalize_trace_history(history)
         normalized_hits = _normalize_trace_hits(hits)
         if normalized_history.shape[1] < 4:
@@ -673,12 +693,18 @@ def validate_trace_arrays(fieldlines_tys, fieldlines_phi_hits):
                 f"Topology trace hit rows for line {line_index} have invalid shape {normalized_hits.shape}"
             )
         if normalized_history.size and not np.all(np.isfinite(normalized_history)):
-            raise ValueError(f"Topology trace history for line {line_index} contains NaN/Inf")
+            raise ValueError(
+                f"Topology trace history for line {line_index} contains NaN/Inf"
+            )
         if normalized_hits.size and not np.all(np.isfinite(normalized_hits)):
-            raise ValueError(f"Topology trace hits for line {line_index} contain NaN/Inf")
+            raise ValueError(
+                f"Topology trace hits for line {line_index} contain NaN/Inf"
+            )
 
 
-def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="validation"):
+def trace_metrics(
+    fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="validation"
+):
     """Extract structured metrics from field-line tracing results.
 
     This is the single implementation used by all scoring paths.
@@ -691,26 +717,29 @@ def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="
     survived = 0
     earliest_exit = None
 
-    for seed_index, (history, hits) in enumerate(zip(fieldlines_tys, fieldlines_phi_hits)):
+    for seed_index, (history, hits) in enumerate(
+        zip(fieldlines_tys, fieldlines_phi_hits)
+    ):
         history = _normalize_trace_history(history)
         hits_before_stop, first_stop = _trace_hits_before_first_stop(hits)
         per_phi_counts = [
-            int(np.sum(hits_before_stop[:, 1] == i))
-            for i in range(len(phis))
+            int(np.sum(hits_before_stop[:, 1] == i)) for i in range(len(phis))
         ]
         final_time = float(history[-1, 0]) if len(history) else None
 
         if first_stop is None:
             survived += 1
-            line_metrics.append({
-                "seed_index": seed_index,
-                "survived": True,
-                "final_time": final_time,
-                "phi_hit_counts": per_phi_counts,
-                "stop_reason": None,
-                "first_exit_time": None,
-                "first_exit_angle": None,
-            })
+            line_metrics.append(
+                {
+                    "seed_index": seed_index,
+                    "survived": True,
+                    "final_time": final_time,
+                    "phi_hit_counts": per_phi_counts,
+                    "stop_reason": None,
+                    "first_exit_time": None,
+                    "first_exit_angle": None,
+                }
+            )
             continue
 
         stop_index = int(-first_stop[1]) - 1
@@ -739,11 +768,15 @@ def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="
         if stop_reasons_indicate_broken(stop_reason_counts):
             validation_status = "broken"
         else:
-            validation_status = "validated" if survived == nfieldlines else "fails_validation"
+            validation_status = (
+                "validated" if survived == nfieldlines else "fails_validation"
+            )
     else:
         validation_status = "diagnostic_only"
 
-    exit_times = [m["first_exit_time"] for m in line_metrics if m["first_exit_time"] is not None]
+    exit_times = [
+        m["first_exit_time"] for m in line_metrics if m["first_exit_time"] is not None
+    ]
     mean_exit_time = float(np.mean(exit_times)) if exit_times else None
 
     return {
@@ -826,6 +859,8 @@ def invariant_torus_classification(fieldlines_phi_hits, surface, *, plane_index=
             island_rational_tolerance=settings.island_rational_tolerance,
             island_max_denominator=settings.island_max_denominator,
             diff_floor=settings.diff_floor,
+            min_winding_sign_fraction=settings.min_winding_sign_fraction,
+            winding_increment_floor=settings.winding_increment_floor,
         )
     classifications = classify_fieldline_hits(
         fieldlines_phi_hits,
@@ -950,13 +985,15 @@ def empty_topology_score_result(
         "line_metrics": [],
         "line_lifetimes": [],
         "line_losses": [],
-        "kam_fraction": 0.0,
-        "kam_fraction_semantics": KAM_FRACTION_SEMANTICS,
-        "invariant_torus_fraction": 0.0,
+        "kam_fraction": None,
+        "kam_fraction_semantics": None,
+        "invariant_torus_fraction": None,
         "invariant_torus_count": 0,
         "wba_seed_count": 0,
         "wba_survived_seed_count": 0,
         "wba_classified_seed_count": 0,
+        "wba_evaluation_state": WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS,
+        "wba_not_evaluated_reason": WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS,
         "wba_classification_counts": {},
         "wba_rotation_number_median": None,
         "wba_matching_digits_min": None,
@@ -975,9 +1012,7 @@ def empty_topology_score_result(
         "seed_contract": seed_contract,
         "field_model": field_model,
         "transport_diagnostics": (
-            topology_transport_diagnostics_not_evaluated(
-                "topology_score_not_evaluated"
-            )
+            topology_transport_diagnostics_not_evaluated("topology_score_not_evaluated")
             if transport_diagnostics is None
             else transport_diagnostics
         ),
@@ -997,6 +1032,7 @@ def finalize_topology_score_result(result, *, error_message=None, error_type=Non
     finalized["evaluation_error"] = error_message
     finalized["evaluation_error_type"] = error_type
     return finalized
+
 
 def score_topology(
     surface,
@@ -1020,10 +1056,11 @@ def score_topology(
 
     Seeding is a midplane radial sweep (phi=0, Z=0). Returns a dict with
     survival_fraction, mean_exit_time, stop_reason_counts, per-line metrics,
-    and invariant_torus_fraction (a WBA convergence-rate classifier). When
+    and invariant_torus_fraction (a WBA convergence-rate classifier, or None
+    when no survived seed has enough valid returns to classify). When
     compute_transport_diagnostics is False, skips the surface-field structure
-    computation and returns a not-evaluated stub (used by the search-time
-    gate, which does not consume transport diagnostics for its decision).
+    computation and returns a not-evaluated stub (used by the search-time gate,
+    which does not consume transport diagnostics for its decision).
     """
     from simsopt.field import compute_fieldlines
 
@@ -1044,7 +1081,9 @@ def score_topology(
         interpolation_grid=interpolation_grid,
     )
     if compute_transport_diagnostics:
-        transport_diagnostics = compute_topology_transport_diagnostics(surface, traced_field)
+        transport_diagnostics = compute_topology_transport_diagnostics(
+            surface, traced_field
+        )
     else:
         transport_diagnostics = topology_transport_diagnostics_not_evaluated(
             "skipped_by_caller"
@@ -1062,11 +1101,17 @@ def score_topology(
         stopping_criteria=stopping_criteria,
     )
 
-    metrics = trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="validation")
+    metrics = trace_metrics(
+        fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="validation"
+    )
 
     # Scalar confinement score: survival-weighted, with mean-exit-time tiebreak
     # Range: 0.0 (all exit immediately) to 1.0 (all survive full tmax)
-    exit_times = [m["first_exit_time"] for m in metrics["line_metrics"] if m["first_exit_time"] is not None]
+    exit_times = [
+        m["first_exit_time"]
+        for m in metrics["line_metrics"]
+        if m["first_exit_time"] is not None
+    ]
     survived_times = [tmax for m in metrics["line_metrics"] if m["survived"]]
     all_times = exit_times + survived_times
     confinement_score = float(np.mean(all_times) / tmax) if all_times else 0.0
@@ -1087,6 +1132,13 @@ def score_topology(
         width_ratio=kam_width_ratio,
     )
     wba = invariant_torus_classification(fieldlines_phi_hits, surface)
+    invariant_torus_fraction = wba["invariant_torus_fraction"]
+    promoted_kam_fraction = (
+        None if invariant_torus_fraction is None else float(invariant_torus_fraction)
+    )
+    kam_fraction_semantics = (
+        None if invariant_torus_fraction is None else KAM_FRACTION_SEMANTICS
+    )
 
     return {
         "survival_fraction": metrics["survival_fraction"],
@@ -1100,20 +1152,24 @@ def score_topology(
         "early_exit_fraction": surrogate["early_exit_fraction"],
         "confinement_loss": surrogate["confinement_loss"],
         "confinement_surrogate_k": surrogate["confinement_surrogate_k"],
-        "confinement_early_exit_threshold": surrogate["confinement_early_exit_threshold"],
+        "confinement_early_exit_threshold": surrogate[
+            "confinement_early_exit_threshold"
+        ],
         "stop_reason_counts": metrics["stop_reason_counts"],
         "first_exit": metrics["first_exit"],
         "per_phi_hit_counts": metrics["per_phi_hit_counts"],
         "line_metrics": metrics["line_metrics"],
         "line_lifetimes": surrogate["line_lifetimes"],
         "line_losses": surrogate["line_losses"],
-        "kam_fraction": float(wba["invariant_torus_fraction"]),
-        "kam_fraction_semantics": KAM_FRACTION_SEMANTICS,
-        "invariant_torus_fraction": float(wba["invariant_torus_fraction"]),
+        "kam_fraction": promoted_kam_fraction,
+        "kam_fraction_semantics": kam_fraction_semantics,
+        "invariant_torus_fraction": promoted_kam_fraction,
         "invariant_torus_count": int(wba["invariant_torus_count"]),
         "wba_seed_count": int(wba["wba_seed_count"]),
         "wba_survived_seed_count": int(wba["wba_survived_seed_count"]),
         "wba_classified_seed_count": int(wba["wba_classified_seed_count"]),
+        "wba_evaluation_state": wba["wba_evaluation_state"],
+        "wba_not_evaluated_reason": wba["wba_not_evaluated_reason"],
         "wba_classification_counts": wba["wba_classification_counts"],
         "wba_rotation_number_median": wba["wba_rotation_number_median"],
         "wba_matching_digits_min": wba["wba_matching_digits_min"],

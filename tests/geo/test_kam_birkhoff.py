@@ -3,12 +3,14 @@ import math
 from examples.single_stage_optimization.banana_opt.topology.kam_birkhoff import (
     BirkhoffClassifierSettings,
     KAM_CLASS_CHAOTIC,
+    KAM_CLASS_INVALID_POLAR_REFERENCE,
     KAM_CLASS_INSUFFICIENT_RETURNS,
     KAM_CLASS_INVARIANT_TORUS,
     KAM_CLASS_ISLAND_CHAIN,
     KAM_CLASS_LOST,
     SeedClassification,
     classify_angle_series,
+    classify_return_points,
     summarize_seed_classifications,
 )
 
@@ -104,13 +106,54 @@ def test_weighted_birkhoff_classifies_exact_low_order_rational_as_island_chain()
     result = classify_angle_series(angles, settings=settings)
 
     assert result.classification == KAM_CLASS_ISLAND_CHAIN
-    assert result.reason == "weighted_birkhoff_average_near_low_order_rational"
+    assert result.reason == "weighted_birkhoff_average_exact_low_order_rational"
     assert result.nearest_rational is not None
     assert result.nearest_rational["numerator"] == 1
     assert result.nearest_rational["denominator"] == 3
 
 
-def test_invariant_torus_fraction_denominator_excludes_lost_not_insufficient():
+def test_weighted_birkhoff_keeps_near_rational_torus_in_invariant_numerator():
+    settings = BirkhoffClassifierSettings(
+        min_returns=64,
+        invariant_digits_min=8.0,
+        island_digits_min=4.0,
+    )
+    rotation_number = 1.0 / 3.0 + 5.0e-5
+    angles = [2.0 * math.pi * rotation_number * step for step in range(256)]
+
+    result = classify_angle_series(angles, settings=settings)
+
+    assert result.classification == KAM_CLASS_INVARIANT_TORUS
+    assert result.nearest_rational is not None
+    assert result.nearest_rational["numerator"] == 1
+    assert result.nearest_rational["denominator"] == 3
+    assert (
+        0.0
+        < float(result.nearest_rational["error"])
+        < (settings.island_rational_tolerance)
+    )
+
+
+def test_return_point_classifier_rejects_nonwinding_poloidal_reference():
+    settings = BirkhoffClassifierSettings(min_returns=64)
+    points = [
+        [1.4 + 0.01 * math.cos(step), 0.0, 0.01 * math.sin(step)] for step in range(128)
+    ]
+
+    result = classify_return_points(
+        points,
+        axis_r=1.0,
+        axis_z=0.0,
+        seed_index=5,
+        survived=True,
+        settings=settings,
+    )
+
+    assert result.classification == KAM_CLASS_INVALID_POLAR_REFERENCE
+    assert result.return_count == 128
+
+
+def test_invariant_torus_fraction_denominator_excludes_lost_and_insufficient():
     classifications = [
         SeedClassification(
             seed_index=0,
@@ -162,5 +205,42 @@ def test_invariant_torus_fraction_denominator_excludes_lost_not_insufficient():
 
     assert summary["wba_seed_count"] == 4
     assert summary["wba_survived_seed_count"] == 3
+    assert summary["wba_classified_seed_count"] == 2
+    assert summary["wba_evaluation_state"] == "evaluated"
     assert summary["invariant_torus_count"] == 1
-    assert summary["invariant_torus_fraction"] == 1.0 / 3.0
+    assert summary["invariant_torus_fraction"] == 1.0 / 2.0
+
+
+def test_invariant_torus_fraction_reports_not_evaluated_for_only_insufficient_returns():
+    classifications = [
+        SeedClassification(
+            seed_index=0,
+            classification=KAM_CLASS_INSUFFICIENT_RETURNS,
+            return_count=60,
+            rotation_number=None,
+            matching_digits=None,
+            first_half_rotation_number=None,
+            second_half_rotation_number=None,
+            nearest_rational=None,
+            reason="insufficient_poincare_returns",
+        ),
+        SeedClassification(
+            seed_index=1,
+            classification=KAM_CLASS_INSUFFICIENT_RETURNS,
+            return_count=60,
+            rotation_number=None,
+            matching_digits=None,
+            first_half_rotation_number=None,
+            second_half_rotation_number=None,
+            nearest_rational=None,
+            reason="insufficient_poincare_returns",
+        ),
+    ]
+
+    summary = summarize_seed_classifications(classifications)
+
+    assert summary["wba_survived_seed_count"] == 2
+    assert summary["wba_classified_seed_count"] == 0
+    assert summary["invariant_torus_fraction"] is None
+    assert summary["wba_evaluation_state"] == "not_evaluated_insufficient_returns"
+    assert summary["wba_not_evaluated_reason"] == "not_evaluated_insufficient_returns"

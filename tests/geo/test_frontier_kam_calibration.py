@@ -4,6 +4,7 @@ from geo._frontier_test_helpers import EXAMPLE_ROOT, load_module
 
 
 FRONTIER_KAM_CALIBRATION_SCRIPT = EXAMPLE_ROOT / "frontier_kam_calibration.py"
+DEFAULT_INVARIANT_TORUS_FRACTION = object()
 
 
 def load_calibration_module():
@@ -15,11 +16,11 @@ def make_row(
     label,
     *,
     kam_fraction,
-    invariant_torus_fraction=None,
+    invariant_torus_fraction=DEFAULT_INVARIANT_TORUS_FRACTION,
     hardware_ok=True,
     topology_broken=False,
 ):
-    if invariant_torus_fraction is None:
+    if invariant_torus_fraction is DEFAULT_INVARIANT_TORUS_FRACTION:
         invariant_torus_fraction = kam_fraction
     return module.CalibrationRow(
         donor_label=label,
@@ -67,9 +68,11 @@ def test_calibration_summary_recommends_floor_from_hw_clean_donors():
     )
 
     assert summary["hw_clean_donor_count"] == 2
+    assert summary["hw_clean_evaluated_donor_count"] == 2
     assert summary["invariant_torus_fraction_min"] == 0.25
     assert summary["kam_fraction_min"] == 0.25
     assert summary["configured_threshold_rejecting_hw_clean_donors"] == ["low"]
+    assert summary["configured_threshold_not_evaluated_hw_clean_donors"] == []
     assert summary["configured_threshold_accepts_all_hw_clean_donors"] is False
     assert summary["recommended_frontier_invariant_torus_min"] == 0.25 - 1.0 / 12.0
     assert summary["recommended_frontier_kam_min"] == 0.25 - 1.0 / 12.0
@@ -126,6 +129,35 @@ def test_calibration_summary_allows_zero_floor_when_known_good_donor_has_zero_ka
     ]
     assert summary["recommended_frontier_invariant_torus_min"] == 0.0
     assert summary["recommended_frontier_kam_min"] == 0.0
+
+
+def test_calibration_summary_does_not_recommend_floor_from_not_evaluated_wba():
+    module = load_calibration_module()
+    rows = [
+        make_row(
+            module,
+            "short_trace",
+            kam_fraction=None,
+            invariant_torus_fraction=None,
+        ),
+    ]
+
+    summary = module.calibration_summary(
+        rows,
+        frontier_invariant_torus_min=0.0,
+        selection_margin=1.0 / 12.0,
+    )
+
+    assert summary["hw_clean_donor_count"] == 1
+    assert summary["hw_clean_evaluated_donor_count"] == 0
+    assert summary["invariant_torus_fraction_min"] is None
+    assert summary["configured_threshold_rejecting_hw_clean_donors"] == []
+    assert summary["configured_threshold_not_evaluated_hw_clean_donors"] == [
+        "short_trace"
+    ]
+    assert summary["configured_threshold_accepts_all_hw_clean_donors"] is False
+    assert summary["recommended_frontier_invariant_torus_min"] is None
+    assert summary["recommended_frontier_kam_min"] is None
 
 
 def test_donor_label_keeps_parent_for_nested_run_dirs(tmp_path):
@@ -189,8 +221,8 @@ def test_score_donor_run_uses_root_artifacts_and_scorer_contract(
             "confinement_loss": 0.12,
             "confinement_surrogate_k": 3,
             "confinement_early_exit_threshold": 0.2,
-            "invariant_torus_fraction": 1.0 / 12.0,
-            "kam_fraction": 1.0 / 12.0,
+            "invariant_torus_fraction": None,
+            "kam_fraction": None,
             "kam_median_width": 0.08,
             "kam_width_ratio": 0.25,
             "cross_section_span": 0.19,
@@ -206,7 +238,9 @@ def test_score_donor_run_uses_root_artifacts_and_scorer_contract(
         }
 
     monkeypatch.setattr(module, "load", fake_load)
-    monkeypatch.setitem(module.topology_surface_for_scoring.__globals__, "load", fake_load)
+    monkeypatch.setitem(
+        module.topology_surface_for_scoring.__globals__, "load", fake_load
+    )
     monkeypatch.setattr(module, "score_topology", fake_score_topology)
 
     row = module.score_donor_run(
@@ -226,8 +260,8 @@ def test_score_donor_run_uses_root_artifacts_and_scorer_contract(
     assert row.surface_path.endswith("surf_opt_boozer_surface.json")
     assert row.hardware_constraints_ok is True
     assert row.topology_broken is False
-    assert row.invariant_torus_fraction == 1.0 / 12.0
-    assert row.kam_fraction == 1.0 / 12.0
+    assert row.invariant_torus_fraction is None
+    assert row.kam_fraction is None
     assert json.loads(row.seed_contract_json) == {"nfieldlines": 12}
 
     payload = module.calibration_payload(
@@ -242,6 +276,8 @@ def test_score_donor_run_uses_root_artifacts_and_scorer_contract(
         selection_margin=1.0 / 12.0,
     )
     assert payload["summary"]["hw_clean_donor_count"] == 1
+    assert payload["summary"]["hw_clean_evaluated_donor_count"] == 0
+    assert payload["summary"]["recommended_frontier_invariant_torus_min"] is None
     csv_path = tmp_path / "calibration.csv"
     module.write_csv(csv_path, [row])
     assert "campaign/donor" in csv_path.read_text(encoding="utf-8")

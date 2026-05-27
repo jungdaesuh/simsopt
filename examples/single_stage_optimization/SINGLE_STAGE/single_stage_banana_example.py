@@ -3063,6 +3063,8 @@ def topology_archive_entry(
         "wba_seed_count": topology_result.get("wba_seed_count"),
         "wba_survived_seed_count": topology_result.get("wba_survived_seed_count"),
         "wba_classified_seed_count": topology_result.get("wba_classified_seed_count"),
+        "wba_evaluation_state": topology_result.get("wba_evaluation_state"),
+        "wba_not_evaluated_reason": topology_result.get("wba_not_evaluated_reason"),
         "wba_classification_counts": topology_result.get("wba_classification_counts"),
         "wba_rotation_number_median": topology_result.get("wba_rotation_number_median"),
         "wba_matching_digits_min": topology_result.get("wba_matching_digits_min"),
@@ -3388,6 +3390,10 @@ def topology_results_fields(topology_entry, *, prefix, artifact_role):
             "legacy_bounded_seed_fraction"
         ),
         f"{prefix}_KAM_MEDIAN_WIDTH": entry_fields.get("kam_median_width"),
+        f"{prefix}_WBA_EVALUATION_STATE": entry_fields.get("wba_evaluation_state"),
+        f"{prefix}_WBA_NOT_EVALUATED_REASON": entry_fields.get(
+            "wba_not_evaluated_reason"
+        ),
         f"{prefix}_WBA_CLASSIFICATION_COUNTS": entry_fields.get(
             "wba_classification_counts"
         ),
@@ -3574,10 +3580,16 @@ def maybe_record_topology_score(
             f"{topo_result.get('evaluation_error')})"
         )
     else:
+        invariant_torus_fraction = topo_result["invariant_torus_fraction"]
+        invariant_torus_fraction_text = (
+            "not_evaluated"
+            if invariant_torus_fraction is None
+            else f"{float(invariant_torus_fraction):.4f}"
+        )
         print(
             f"  [topology] iter={accepted_iteration}: "
             f"survival={topo_result['survived_lines']}/{topo_result['nfieldlines']}, "
-            f"invariant_torus_fraction={topo_result['invariant_torus_fraction']:.4f}, "
+            f"invariant_torus_fraction={invariant_torus_fraction_text}, "
             f"confinement={topo_result['confinement_score']:.4f}, "
             f"loss={topo_result['confinement_loss']:.4f}, "
             f"mean_exit={topo_result['mean_exit_time']}"

@@ -15,13 +15,25 @@ DEFAULT_WBA_ISLAND_MIN_DIGITS = 4.0
 DEFAULT_WBA_RATIONAL_MAX_DENOMINATOR = 24
 DEFAULT_WBA_RATIONAL_TOLERANCE = 1.0e-4
 DEFAULT_WBA_DIFF_FLOOR = 1.0e-15
+DEFAULT_WBA_MIN_WINDING_SIGN_FRACTION = 0.95
+DEFAULT_WBA_WINDING_INCREMENT_FLOOR = 1.0e-12
 KAM_FRACTION_SEMANTICS = "weighted_birkhoff_invariant_torus_fraction"
 
 KAM_CLASS_INVARIANT_TORUS = "invariant_torus"
 KAM_CLASS_ISLAND_CHAIN = "island_chain"
 KAM_CLASS_CHAOTIC = "chaotic"
 KAM_CLASS_INSUFFICIENT_RETURNS = "insufficient_returns"
+KAM_CLASS_INVALID_POLAR_REFERENCE = "invalid_poloidal_reference"
 KAM_CLASS_LOST = "lost"
+
+WBA_EVALUATION_EVALUATED = "evaluated"
+WBA_EVALUATION_NOT_EVALUATED_NO_SEEDS = "not_evaluated_no_seeds"
+WBA_EVALUATION_NOT_EVALUATED_NO_SURVIVED_SEEDS = "not_evaluated_no_survived_seeds"
+WBA_EVALUATION_NOT_EVALUATED_INSUFFICIENT_RETURNS = "not_evaluated_insufficient_returns"
+WBA_EVALUATION_NOT_EVALUATED_INVALID_POLAR_REFERENCE = (
+    "not_evaluated_invalid_poloidal_reference"
+)
+WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS = "not_evaluated_no_classified_seeds"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +47,8 @@ class BirkhoffClassifierSettings:
     island_rational_tolerance: float = DEFAULT_WBA_RATIONAL_TOLERANCE
     island_max_denominator: int = DEFAULT_WBA_RATIONAL_MAX_DENOMINATOR
     diff_floor: float = DEFAULT_WBA_DIFF_FLOOR
+    min_winding_sign_fraction: float = DEFAULT_WBA_MIN_WINDING_SIGN_FRACTION
+    winding_increment_floor: float = DEFAULT_WBA_WINDING_INCREMENT_FLOOR
 
 
 DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS = BirkhoffClassifierSettings()
@@ -166,12 +180,11 @@ def classify_angle_series(
     )
     rational_payload = asdict(rational)
 
-    if (
-        matching_digits >= float(settings.island_digits_min)
-        and rational.error <= float(settings.island_rational_tolerance)
+    if matching_digits >= float(settings.island_digits_min) and rational.error <= float(
+        settings.diff_floor
     ):
         classification = KAM_CLASS_ISLAND_CHAIN
-        reason = "weighted_birkhoff_average_near_low_order_rational"
+        reason = "weighted_birkhoff_average_exact_low_order_rational"
     elif matching_digits >= float(settings.invariant_digits_min):
         classification = KAM_CLASS_INVARIANT_TORUS
         reason = "weighted_birkhoff_average_converged"
@@ -192,6 +205,50 @@ def classify_angle_series(
     )
 
 
+def poloidal_angle_series_has_consistent_winding(
+    angles_rad: Sequence[float],
+    *,
+    settings: BirkhoffClassifierSettings = DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
+) -> bool:
+    angles = np.unwrap(np.asarray(angles_rad, dtype=float))
+    if angles.ndim != 1:
+        raise ValueError("WBA winding check requires a one-dimensional angle series")
+    if not np.all(np.isfinite(angles)):
+        raise ValueError("WBA winding check received NaN/Inf angles")
+    if angles.size < int(settings.min_returns):
+        return True
+    increments = np.diff(angles)
+    significant = increments[
+        np.abs(increments) > float(settings.winding_increment_floor)
+    ]
+    if significant.size == 0:
+        return False
+    net_increment = float(np.sum(significant))
+    if net_increment == 0.0:
+        return False
+    direction = 1.0 if net_increment > 0.0 else -1.0
+    same_direction_fraction = float(np.mean(significant * direction > 0.0))
+    return same_direction_fraction >= float(settings.min_winding_sign_fraction)
+
+
+def invalid_poloidal_reference_classification(
+    *,
+    seed_index: int,
+    return_count: int,
+) -> SeedClassification:
+    return SeedClassification(
+        seed_index=int(seed_index),
+        classification=KAM_CLASS_INVALID_POLAR_REFERENCE,
+        return_count=int(return_count),
+        rotation_number=None,
+        matching_digits=None,
+        first_half_rotation_number=None,
+        second_half_rotation_number=None,
+        nearest_rational=None,
+        reason="poloidal_reference_does_not_wind_monotonically",
+    )
+
+
 def classify_return_points(
     return_points_xyz: Sequence[Sequence[float]],
     *,
@@ -206,7 +263,9 @@ def classify_return_points(
         return SeedClassification(
             seed_index=int(seed_index),
             classification=KAM_CLASS_LOST,
-            return_count=0 if points.ndim == 0 else int(points.reshape((-1, 3)).shape[0]),
+            return_count=0
+            if points.ndim == 0
+            else int(points.reshape((-1, 3)).shape[0]),
             rotation_number=None,
             matching_digits=None,
             first_half_rotation_number=None,
@@ -224,6 +283,11 @@ def classify_return_points(
         )
     radii = np.sqrt(points[:, 0] ** 2 + points[:, 1] ** 2)
     angles = np.arctan2(points[:, 2] - float(axis_z), radii - float(axis_r))
+    if not poloidal_angle_series_has_consistent_winding(angles, settings=settings):
+        return invalid_poloidal_reference_classification(
+            seed_index=seed_index,
+            return_count=int(angles.size),
+        )
     return classify_angle_series(
         angles,
         seed_index=seed_index,
@@ -280,6 +344,17 @@ def classify_fieldline_hits(
                 )
             )
             continue
+        if not poloidal_angle_series_has_consistent_winding(
+            angles,
+            settings=settings,
+        ):
+            classifications.append(
+                invalid_poloidal_reference_classification(
+                    seed_index=seed_index,
+                    return_count=int(angles.size),
+                )
+            )
+            continue
         classifications.append(
             classify_angle_series(
                 angles,
@@ -295,14 +370,10 @@ def summarize_seed_classifications(
 ) -> dict[str, object]:
     total = len(classifications)
     survived = [
-        item
-        for item in classifications
-        if item.classification != KAM_CLASS_LOST
+        item for item in classifications if item.classification != KAM_CLASS_LOST
     ]
     invariant = [
-        item
-        for item in survived
-        if item.classification == KAM_CLASS_INVARIANT_TORUS
+        item for item in survived if item.classification == KAM_CLASS_INVARIANT_TORUS
     ]
     classified = [
         item
@@ -315,13 +386,35 @@ def summarize_seed_classifications(
         KAM_CLASS_ISLAND_CHAIN: 0,
         KAM_CLASS_CHAOTIC: 0,
         KAM_CLASS_INSUFFICIENT_RETURNS: 0,
+        KAM_CLASS_INVALID_POLAR_REFERENCE: 0,
         KAM_CLASS_LOST: 0,
     }
     for item in classifications:
         counts[item.classification] = int(counts.get(item.classification, 0)) + 1
 
-    eligible_count = len(survived)
-    fraction = 0.0 if eligible_count == 0 else len(invariant) / float(eligible_count)
+    survived_count = len(survived)
+    classified_count = len(classified)
+    fraction = (
+        None if classified_count == 0 else len(invariant) / float(classified_count)
+    )
+    if classified_count > 0:
+        evaluation_state = WBA_EVALUATION_EVALUATED
+        not_evaluated_reason = None
+    elif total == 0:
+        evaluation_state = WBA_EVALUATION_NOT_EVALUATED_NO_SEEDS
+        not_evaluated_reason = evaluation_state
+    elif survived_count == 0:
+        evaluation_state = WBA_EVALUATION_NOT_EVALUATED_NO_SURVIVED_SEEDS
+        not_evaluated_reason = evaluation_state
+    elif counts[KAM_CLASS_INSUFFICIENT_RETURNS] == survived_count:
+        evaluation_state = WBA_EVALUATION_NOT_EVALUATED_INSUFFICIENT_RETURNS
+        not_evaluated_reason = evaluation_state
+    elif counts[KAM_CLASS_INVALID_POLAR_REFERENCE] > 0:
+        evaluation_state = WBA_EVALUATION_NOT_EVALUATED_INVALID_POLAR_REFERENCE
+        not_evaluated_reason = evaluation_state
+    else:
+        evaluation_state = WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS
+        not_evaluated_reason = evaluation_state
     rotation_numbers = [
         item.rotation_number
         for item in classified
@@ -333,11 +426,13 @@ def summarize_seed_classifications(
         if item.matching_digits is not None and np.isfinite(item.matching_digits)
     ]
     return {
-        "invariant_torus_fraction": float(fraction),
+        "invariant_torus_fraction": (None if fraction is None else float(fraction)),
         "invariant_torus_count": int(len(invariant)),
         "wba_seed_count": int(total),
-        "wba_survived_seed_count": int(eligible_count),
-        "wba_classified_seed_count": int(len(classified)),
+        "wba_survived_seed_count": int(survived_count),
+        "wba_classified_seed_count": int(classified_count),
+        "wba_evaluation_state": evaluation_state,
+        "wba_not_evaluated_reason": not_evaluated_reason,
         "wba_classification_counts": counts,
         "wba_rotation_number_median": (
             None if not rotation_numbers else float(np.median(rotation_numbers))
