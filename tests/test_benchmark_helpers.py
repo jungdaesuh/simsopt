@@ -4556,6 +4556,22 @@ def _write_single_stage_result_artifact(command) -> list[str]:
     return command_list
 
 
+def test_run_python_script_stream_timeout_reports(tmp_path):
+    script_path = tmp_path / "sleep.py"
+    script_path.write_text(
+        "import time\nprint('started', flush=True)\ntime.sleep(60)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Subprocess timed out after"):
+        validation_ladder_common.run_python_script(
+            script_path,
+            [],
+            stream_output=True,
+            timeout_seconds=0.01,
+        )
+
+
 def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(
     monkeypatch, tmp_path
 ):
@@ -6263,6 +6279,151 @@ def test_single_stage_init_case_threads_target_lane_boozer_trial_overrides(
     assert "--target-lane-boozer-bfgs-maxiter" in observed_command
     assert "--target-lane-boozer-newton-tol" in observed_command
     assert "--target-lane-boozer-newton-maxiter" in observed_command
+
+
+def test_single_stage_init_case_threads_subprocess_timeout(monkeypatch, tmp_path):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        boozer_optimizer_backend="ondevice",
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+        single_stage_case_timeout_seconds=17.5,
+        single_stage_target_case_timeout_seconds=0.0,
+    )
+    observed_timeout = None
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        nonlocal observed_timeout
+        observed_timeout = kwargs["timeout_seconds"]
+        _write_single_stage_result_artifact(command)
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cuda",
+        load_surface_gamma=False,
+    )
+
+    assert observed_timeout == pytest.approx(17.5)
+
+
+def test_single_stage_init_case_prefers_target_timeout_for_jax_case():
+    args = argparse.Namespace(
+        single_stage_case_timeout_seconds=7200.0,
+        single_stage_target_case_timeout_seconds=1800.0,
+    )
+
+    assert single_stage_init_parity_module._single_stage_case_timeout_seconds(
+        args,
+        backend="cpu",
+        platform="cpu",
+    ) == pytest.approx(7200.0)
+    assert single_stage_init_parity_module._single_stage_case_timeout_seconds(
+        args,
+        backend="jax",
+        platform="cpu",
+    ) == pytest.approx(7200.0)
+    assert single_stage_init_parity_module._single_stage_case_timeout_seconds(
+        args,
+        backend="jax",
+        platform="auto",
+    ) == pytest.approx(1800.0)
+    assert single_stage_init_parity_module._single_stage_case_timeout_seconds(
+        args,
+        backend="jax",
+        platform="cuda",
+    ) == pytest.approx(1800.0)
+
+
+def test_single_stage_init_case_timeout_without_case_artifacts_omits_stale_paths(
+    tmp_path,
+):
+    output_json = tmp_path / "single_stage_cuda.json"
+
+    single_stage_init_parity_module._write_case_execution_failure_json(
+        output_json,
+        provenance={"backend": "gpu"},
+        bundle_provenance={"runner": "benchmarks/single_stage_init_parity.py"},
+        strict_transfer_support={"status": "supported"},
+        error=RuntimeError("phase2 timeout"),
+        case_root=None,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["status"] == "case-execution-failed"
+    assert "artifacts" not in payload
+
+
+def test_single_stage_init_case_execution_failure_json_lists_partial_artifacts(
+    tmp_path,
+):
+    case_root = tmp_path / "cases"
+    run_dir = case_root / "target_outputs" / "mpol=4-ntor=4-abcd"
+    run_dir.mkdir(parents=True)
+    progress_path = run_dir / "outer_optimizer_progress.json"
+    progress_path.write_text('{"events": []}', encoding="utf-8")
+    fatal_path = case_root / "target_outputs" / "fatal_error.log"
+    fatal_path.write_text("", encoding="utf-8")
+    output_json = tmp_path / "single_stage_cuda.json"
+
+    single_stage_init_parity_module._write_case_execution_failure_json(
+        output_json,
+        provenance={"backend": "gpu"},
+        bundle_provenance={"runner": "benchmarks/single_stage_init_parity.py"},
+        strict_transfer_support={"status": "supported"},
+        error=RuntimeError("phase2 timeout"),
+        case_root=case_root,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["passed"] is False
+    assert payload["status"] == "case-execution-failed"
+    assert payload["error"] == {
+        "type": "RuntimeError",
+        "message": "phase2 timeout",
+    }
+    assert payload["failures"] == [
+        "Single-stage case execution failed: RuntimeError: phase2 timeout"
+    ]
+    assert payload["artifacts"]["outer_optimizer_progress_json"] == [str(progress_path)]
+    assert payload["artifacts"]["fatal_error_logs"] == [str(fatal_path)]
 
 
 def test_single_stage_init_case_preserves_target_lane_value_and_grad_result(

@@ -487,6 +487,26 @@ def parse_args() -> argparse.Namespace:
             "single-stage example subprocess."
         ),
     )
+    parser.add_argument(
+        "--single-stage-case-timeout-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional per-lane subprocess wall-clock limit. A positive value "
+            "turns child stalls into structured parity-run failures instead "
+            "of leaving the harness without an output JSON."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-target-case-timeout-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional JAX target/replay subprocess wall-clock limit. A positive "
+            "value overrides --single-stage-case-timeout-seconds for JAX cases "
+            "only, so slow CPU oracle lanes can remain uncapped."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -980,6 +1000,11 @@ def _run_single_stage_case(
             cwd=REPO_ROOT,
             bootstrap_repo=True,
             stream_output=True,
+            timeout_seconds=_single_stage_case_timeout_seconds(
+                args,
+                backend=backend,
+                platform=platform,
+            ),
         )
         elapsed_s = time.perf_counter() - start
 
@@ -1011,6 +1036,67 @@ def _run_single_stage_case(
                 surf_json = find_single_file(resolved_root, "surf_init.json")
                 payload["surface_gamma"] = _load_surface_gamma_artifact(str(surf_json))
         return payload
+
+
+def _single_stage_case_timeout_seconds(
+    args: argparse.Namespace,
+    *,
+    backend: str,
+    platform: str,
+) -> float:
+    target_timeout = float(
+        getattr(args, "single_stage_target_case_timeout_seconds", 0.0)
+    )
+    if backend == "jax" and platform != "cpu" and target_timeout > 0.0:
+        return target_timeout
+    return float(getattr(args, "single_stage_case_timeout_seconds", 0.0))
+
+
+def _collect_partial_single_stage_case_artifacts(case_root: Path) -> dict[str, Any]:
+    """Return durable artifact pointers for a failed or timed-out case pair."""
+    progress_files = sorted(case_root.rglob("outer_optimizer_progress.json"))
+    final_payloads = sorted(
+        [
+            *case_root.rglob("results.json"),
+            *case_root.rglob("REJECTED.json"),
+        ]
+    )
+    fatal_logs = sorted(case_root.rglob("fatal_error.log"))
+    return {
+        "case_artifacts_dir": str(case_root),
+        "outer_optimizer_progress_json": [str(path) for path in progress_files],
+        "final_payload_json": [str(path) for path in final_payloads],
+        "fatal_error_logs": [str(path) for path in fatal_logs],
+    }
+
+
+def _write_case_execution_failure_json(
+    output_json: str | os.PathLike[str],
+    *,
+    provenance: dict[str, Any],
+    bundle_provenance: dict[str, Any],
+    strict_transfer_support: dict[str, Any],
+    error: Exception,
+    case_root: Path | None,
+) -> None:
+    """Write a structured failure when child case execution cannot finish."""
+    failure = f"Single-stage case execution failed: {type(error).__name__}: {error}"
+    payload: dict[str, Any] = {
+        "provenance": provenance,
+        "bundle_provenance": bundle_provenance,
+        "strict_transfer_support": strict_transfer_support,
+        "status": "case-execution-failed",
+        "error": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+        "warnings": [],
+        "failures": [failure],
+        "passed": False,
+    }
+    if case_root is not None:
+        payload["artifacts"] = _collect_partial_single_stage_case_artifacts(case_root)
+    write_json(output_json, payload)
 
 
 def _compile_jax_runtime_seed_spec_from_run_dir(
@@ -3377,11 +3463,30 @@ def main() -> None:
     case_artifacts_dir = (
         None if args.case_artifacts_dir is None else Path(args.case_artifacts_dir)
     )
-    if case_artifacts_dir is None:
-        with tempfile.TemporaryDirectory(
-            prefix="single-stage-init-reference-"
-        ) as reference_temp_dir:
-            case_root = Path(reference_temp_dir)
+    case_root_for_failure: Path | None = None
+    try:
+        if case_artifacts_dir is None:
+            with tempfile.TemporaryDirectory(
+                prefix="single-stage-init-reference-"
+            ) as reference_temp_dir:
+                case_root = Path(reference_temp_dir)
+                (
+                    cpu_case,
+                    jax_case,
+                    jax_seed_spec,
+                    seed_case,
+                    same_candidate_replay_case,
+                ) = _run_single_stage_case_pair(
+                    args,
+                    benchmark_mode=benchmark_mode,
+                    reference_backend=reference_backend,
+                    reference_benchmark_mode=reference_benchmark_mode,
+                    case_root=case_root,
+                )
+                case_artifacts = None
+        else:
+            case_artifacts_dir.mkdir(parents=True, exist_ok=True)
+            case_root_for_failure = case_artifacts_dir
             (
                 cpu_case,
                 jax_case,
@@ -3393,45 +3498,41 @@ def main() -> None:
                 benchmark_mode=benchmark_mode,
                 reference_backend=reference_backend,
                 reference_benchmark_mode=reference_benchmark_mode,
-                case_root=case_root,
+                case_root=case_artifacts_dir,
             )
-            case_artifacts = None
-    else:
-        case_artifacts_dir.mkdir(parents=True, exist_ok=True)
-        (
-            cpu_case,
-            jax_case,
-            jax_seed_spec,
-            seed_case,
-            same_candidate_replay_case,
-        ) = _run_single_stage_case_pair(
-            args,
-            benchmark_mode=benchmark_mode,
-            reference_backend=reference_backend,
-            reference_benchmark_mode=reference_benchmark_mode,
-            case_root=case_artifacts_dir,
+            case_artifacts = {
+                "case_artifacts_dir": str(case_artifacts_dir),
+                "reference_run_dir": str(cpu_case["run_dir"]),
+                "target_run_dir": str(jax_case["run_dir"]),
+                "reference_outer_optimizer_progress_json": cpu_case[
+                    "outer_optimizer_progress_json"
+                ],
+                "target_outer_optimizer_progress_json": jax_case[
+                    "outer_optimizer_progress_json"
+                ],
+                "jax_runtime_seed_spec": str(jax_seed_spec),
+            }
+            if same_candidate_replay_case is not None:
+                case_artifacts["target_same_candidate_replay_run_dir"] = str(
+                    same_candidate_replay_case["run_dir"]
+                )
+                case_artifacts["target_same_candidate_replay_progress_json"] = (
+                    same_candidate_replay_case["outer_optimizer_progress_json"]
+                )
+            if seed_case is not None:
+                case_artifacts["shared_seed_run_dir"] = str(seed_case["run_dir"])
+    except Exception as exc:
+        _write_case_execution_failure_json(
+            args.output_json,
+            provenance=provenance,
+            bundle_provenance=bundle_provenance,
+            strict_transfer_support=strict_transfer_support,
+            error=exc,
+            case_root=case_root_for_failure,
         )
-        case_artifacts = {
-            "case_artifacts_dir": str(case_artifacts_dir),
-            "reference_run_dir": str(cpu_case["run_dir"]),
-            "target_run_dir": str(jax_case["run_dir"]),
-            "reference_outer_optimizer_progress_json": cpu_case[
-                "outer_optimizer_progress_json"
-            ],
-            "target_outer_optimizer_progress_json": jax_case[
-                "outer_optimizer_progress_json"
-            ],
-            "jax_runtime_seed_spec": str(jax_seed_spec),
-        }
-        if same_candidate_replay_case is not None:
-            case_artifacts["target_same_candidate_replay_run_dir"] = str(
-                same_candidate_replay_case["run_dir"]
-            )
-            case_artifacts["target_same_candidate_replay_progress_json"] = (
-                same_candidate_replay_case["outer_optimizer_progress_json"]
-            )
-        if seed_case is not None:
-            case_artifacts["shared_seed_run_dir"] = str(seed_case["run_dir"])
+        print("SINGLE-STAGE INIT PARITY FAILED")
+        print(f"  - Single-stage case execution failed: {type(exc).__name__}: {exc}")
+        raise SystemExit(1) from exc
 
     full_run_artifact_contract = build_single_stage_full_run_artifact_contract(
         args,

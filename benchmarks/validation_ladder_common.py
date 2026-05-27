@@ -772,6 +772,7 @@ def run_python_script(
     cwd: str | os.PathLike[str] | None = None,
     bootstrap_repo: bool = False,
     stream_output: bool = False,
+    timeout_seconds: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a Python helper script using the current interpreter."""
     if bootstrap_repo:
@@ -796,14 +797,26 @@ def run_python_script(
         command = [sys.executable, str(script_path), *args]
     child_env = dict(env) if env is not None else dict(os.environ)
     child_env.setdefault("PYTHONUNBUFFERED", "1")
+    timeout = (
+        None
+        if timeout_seconds is None or float(timeout_seconds) <= 0.0
+        else float(timeout_seconds)
+    )
     if not stream_output:
-        result = subprocess.run(
-            command,
-            cwd=str(cwd or REPO_ROOT),
-            env=child_env,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(cwd or REPO_ROOT),
+                env=child_env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            formatted_command = " ".join(shlex.quote(part) for part in command)
+            raise RuntimeError(
+                f"Subprocess timed out after {timeout:.3f}s: {formatted_command}"
+            ) from exc
     else:
         process = subprocess.Popen(
             command,
@@ -827,7 +840,21 @@ def run_python_script(
         )
         stdout_thread.start()
         stderr_thread.start()
-        returncode = process.wait()
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            process.terminate()
+            try:
+                returncode = process.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                returncode = process.wait()
+            stdout_thread.join()
+            stderr_thread.join()
+            formatted_command = " ".join(shlex.quote(part) for part in command)
+            raise RuntimeError(
+                f"Subprocess timed out after {timeout:.3f}s: {formatted_command}"
+            ) from exc
         stdout_thread.join()
         stderr_thread.join()
         result = subprocess.CompletedProcess(
