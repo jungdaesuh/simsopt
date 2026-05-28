@@ -801,6 +801,63 @@ class HandoffModuleTests(unittest.TestCase):
 
         self.assertTrue(validation["passed"])
 
+    def test_validate_boozer_surface_json_current_lineage_round_trips_real_serialization(self):
+        # The hand-built-dict tests above pin the validator logic; this one pins
+        # the lineage markers (@class / @module / "I") to what simsopt's real
+        # serializer actually emits, so a future serialization-format change that
+        # silently defeats the save-time gate is caught here.
+        from simsopt.geo import SurfaceXYZTensorFourier
+        from simsopt.geo.boozersurface import BoozerSurface
+        from simsopt.geo.surfaceobjectives import Volume
+
+        artifact_contracts = load_artifact_contracts_module()
+        BoozerSurfaceFiniteI = importlib.import_module(
+            "banana_opt.boozer_finite_current"
+        ).BoozerSurfaceFiniteI
+
+        def make_boozer(cls, **extra):
+            curve = CurveXYZFourier(16, 1)
+            curve.set("xc(1)", 1.0)
+            curve.set("zs(1)", 1.0)
+            biotsavart = BiotSavart([Coil(curve, Current(1.0e5))])
+            surface = SurfaceXYZTensorFourier(
+                mpol=1,
+                ntor=1,
+                stellsym=True,
+                nfp=1,
+                quadpoints_phi=np.linspace(0, 1, 3, endpoint=False),
+                quadpoints_theta=np.linspace(0, 1, 3, endpoint=False),
+            )
+            return cls(
+                biotsavart,
+                surface,
+                Volume(surface),
+                1.0,
+                constraint_weight=100.0,
+                options={"verbose": False},
+                **extra,
+            )
+
+        def validate(boozer_surface):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                surface_path = Path(tmpdir) / "boozer_surface.json"
+                boozer_surface.save(str(surface_path))
+                return artifact_contracts.validate_boozer_surface_json_current_lineage(
+                    surface_path
+                )
+
+        plain = validate(make_boozer(BoozerSurface))
+        vacuum_finite = validate(make_boozer(BoozerSurfaceFiniteI, I=0.0))
+        nonzero_finite = validate(make_boozer(BoozerSurfaceFiniteI, I=1.0e-3))
+
+        self.assertTrue(plain["passed"])
+        self.assertTrue(plain["has_plain_boozer_surface"])
+        self.assertFalse(vacuum_finite["passed"])
+        self.assertFalse(vacuum_finite["no_finite_i_boozer_surface"])
+        self.assertFalse(vacuum_finite["no_i_field"])
+        self.assertTrue(nonzero_finite["passed"])
+        self.assertGreaterEqual(nonzero_finite["finite_i_field_count"], 1)
+
     def test_attempt_initialize_boozer_surface_threads_requested_volume_target(self):
         module = load_handoff_module()
         surf_prev = SimpleNamespace(
