@@ -8326,6 +8326,12 @@ class SingleStageFullGraphOptimizerDofMap:
         native = _single_stage_optimizer_dofs_array(native_gradient).reshape(-1)
         return native[self.optimizer_to_native_indices].copy()
 
+    def coil_gradient_from_optimizer_gradient(self, optimizer_gradient):
+        gradient = _single_stage_optimizer_dofs_array(optimizer_gradient).reshape(-1)
+        if self.coil_optimizer_indices is None:
+            return gradient.copy()
+        return gradient[self.coil_optimizer_indices].copy()
+
     def coil_dofs_from_optimizer_dofs(self, optimizer_dofs):
         optimizer = _single_stage_optimizer_dofs_array(optimizer_dofs).reshape(-1)
         if self.coil_optimizer_indices is None:
@@ -10651,6 +10657,7 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
     optimizer_to_coil_dofs,
     sync_accepted_step,
     sync_accepted_step_from_values=None,
+    optimizer_gradient_to_coil_gradient=None,
     record_event,
 ):
     """Replay recorded candidates through pure target-lane value/grad kernels."""
@@ -10660,7 +10667,7 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
     last_group_x = None
     last_group_forward_result = None
     last_group_objective_value = None
-    last_group_optimizer_gradient = None
+    last_group_objective_gradient = None
     last_group_can_reuse_values = False
     last_group_primal_success = False
 
@@ -10673,7 +10680,7 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
                 last_group_x,
                 target_lane_solve_result=last_group_forward_result,
                 objective_value=last_group_objective_value,
-                objective_grad=last_group_optimizer_gradient,
+                objective_grad=last_group_objective_gradient,
             )
         else:
             sync_accepted_step(last_group_x)
@@ -10716,11 +10723,21 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
             forward_result
         )
         last_group_objective_value = objective_value
-        last_group_optimizer_gradient = optimizer_gradient
-        last_group_can_reuse_values = np.array_equal(
+        objective_input_equals_coil_dofs = np.array_equal(
             objective_input_values,
             coil_dof_values,
         )
+        if objective_input_equals_coil_dofs:
+            last_group_objective_gradient = optimizer_gradient
+            last_group_can_reuse_values = True
+        elif optimizer_gradient_to_coil_gradient is not None:
+            last_group_objective_gradient = optimizer_gradient_to_coil_gradient(
+                optimizer_gradient
+            )
+            last_group_can_reuse_values = True
+        else:
+            last_group_objective_gradient = None
+            last_group_can_reuse_values = False
         last_group_primal_success = host_bool(
             forward_result.get("primal_success", forward_result["success"])
         )
@@ -13800,6 +13817,11 @@ if __name__ == "__main__":
                                 sync_accepted_step_from_values=(
                                     adapter.sync_accepted_step_state_from_target_lane_values
                                 ),
+                                optimizer_gradient_to_coil_gradient=(
+                                    full_graph_optimizer_dof_map.coil_gradient_from_optimizer_gradient
+                                    if use_target_lane_full_state_optimizer
+                                    else None
+                                ),
                                 record_event=objective_evaluation_trace_callback,
                             )
                         else:
@@ -14784,6 +14806,18 @@ if __name__ == "__main__":
         if use_target_lane
         else (bs.x.copy() if use_full_graph_jax_scipy else final_optimizer_dofs)
     )
+    record_outer_optimizer_event(
+        "final_reporting_started",
+        use_target_lane=bool(use_target_lane_reporting),
+        benchmark_mode=bool(args.benchmark_mode),
+        skip_outer_optimizer=bool(skip_outer_optimizer),
+    )
+    final_penalty_metrics_start_s = _perf_counter_s()
+    record_outer_optimizer_event(
+        "final_penalty_metrics_started",
+        use_target_lane=bool(use_target_lane_reporting),
+        benchmark_mode=bool(args.benchmark_mode),
+    )
     final_penalty_metrics = resolve_single_stage_final_penalty_metrics(
         use_target_lane=use_target_lane_reporting,
         benchmark_mode=bool(args.benchmark_mode),
@@ -14812,6 +14846,10 @@ if __name__ == "__main__":
         termination_message=termination_message,
         optimizer_success=optimizer_success,
     )
+    record_outer_optimizer_event(
+        "final_penalty_metrics_returned",
+        elapsed_s=float(_perf_counter_s() - final_penalty_metrics_start_s),
+    )
     final_volume = float(final_penalty_metrics["final_volume"])
     final_iota = float(final_penalty_metrics["final_iota"])
     final_max_curvature = float(final_penalty_metrics["max_curvature"])
@@ -14835,6 +14873,10 @@ if __name__ == "__main__":
     print(f"Iota: {final_iota}")
     print(f"Max Curvature: {final_max_curvature}")
     final_hardware_metrics_start_s = _perf_counter_s()
+    record_outer_optimizer_event(
+        "final_hardware_metrics_started",
+        benchmark_mode=bool(args.benchmark_mode),
+    )
     final_artifact_hardware_snapshot = None
     with maybe_trace_single_stage_phase(
         "single_stage.final_hardware_metrics",
@@ -14897,6 +14939,10 @@ if __name__ == "__main__":
         final_hardware_metrics_start_s,
         _perf_counter_s(),
     )
+    record_outer_optimizer_event(
+        "final_hardware_metrics_returned",
+        elapsed_s=timings.get("final_hardware_metrics_s"),
+    )
     final_distances = {
         "curve_curve_min_dist": final_curve_curve_min_dist,
         "curve_surface_min_dist": final_curve_surface_min_dist,
@@ -14915,6 +14961,8 @@ if __name__ == "__main__":
         termination_message=termination_message,
     )
     timings["script_total_s"] = _elapsed_s(run_wall_start_s, _perf_counter_s())
+    final_snapshot_start_s = _perf_counter_s()
+    record_outer_optimizer_event("final_result_snapshot_started")
     final_result_snapshot = build_single_stage_final_result_snapshot(
         final_coil_dofs=final_reporting_coil_dofs,
         run_dict=run_dict,
@@ -14930,6 +14978,10 @@ if __name__ == "__main__":
         field_error=fieldError,
         self_intersecting=final_self_intersecting,
         self_intersection_check_available=final_self_intersection_check_available,
+    )
+    record_outer_optimizer_event(
+        "final_result_snapshot_returned",
+        elapsed_s=float(_perf_counter_s() - final_snapshot_start_s),
     )
     initial_objective = float(run_dict["initial_objective"])
     final_result_snapshot = with_single_stage_init_only_objective(
@@ -15365,7 +15417,16 @@ if __name__ == "__main__":
     if args.jax_profile_dir:
         results["JAX_PROFILE_DIR"] = os.path.abspath(args.jax_profile_dir)
     if stop_jax_profile_trace is not None:
+        jax_profile_stop_start_s = _perf_counter_s()
+        record_outer_optimizer_event(
+            "jax_profile_stop_started",
+            profile_dir=os.path.abspath(args.jax_profile_dir),
+        )
         stop_jax_profile_trace()
+        record_outer_optimizer_event(
+            "jax_profile_stop_returned",
+            elapsed_s=float(_perf_counter_s() - jax_profile_stop_start_s),
+        )
     if target_lane_gradient_diagnosis is not None:
         write_json_file(
             os.path.join(OUT_DIR_ITER, "target_lane_gradient_diagnosis.json"),
@@ -15397,6 +15458,8 @@ if __name__ == "__main__":
             results["TARGET_LANE_INVALID_STATE_DIAGNOSIS"],
         )
     if (use_target_lane or use_full_graph_jax_scipy) and write_restart_artifacts:
+        final_runtime_seed_spec_start_s = _perf_counter_s()
+        record_outer_optimizer_event("final_runtime_seed_spec_started")
         write_single_stage_final_runtime_seed_spec(
             output_dir=OUT_DIR_ITER,
             surface=boozer_surface.surface,
@@ -15408,12 +15471,22 @@ if __name__ == "__main__":
             banana_current_A=final_banana_current_A,
             stage2_seed=stage2_seed_payload,
         )
+        record_outer_optimizer_event(
+            "final_runtime_seed_spec_returned",
+            elapsed_s=float(_perf_counter_s() - final_runtime_seed_spec_start_s),
+        )
     if single_stage_host_artifact_export_required(
         use_target_lane=use_target_lane,
         runtime_seed_restart_artifacts=bool(use_jax),
         write_restart_artifacts=write_restart_artifacts,
         write_full_artifacts=write_full_artifacts,
     ):
+        host_artifact_export_start_s = _perf_counter_s()
+        record_outer_optimizer_event(
+            "host_artifact_export_started",
+            write_restart_artifacts=bool(write_restart_artifacts),
+            write_full_artifacts=bool(write_full_artifacts),
+        )
         if single_stage_final_host_restore_required(
             skip_outer_optimizer=skip_outer_optimizer,
             use_target_lane=use_target_lane,
@@ -15451,9 +15524,19 @@ if __name__ == "__main__":
             write_full_artifacts=write_full_artifacts,
             timings=timings,
         )
+        record_outer_optimizer_event(
+            "host_artifact_export_returned",
+            elapsed_s=float(_perf_counter_s() - host_artifact_export_start_s),
+        )
     final_result_snapshot = replace(final_result_snapshot, timings=dict(timings))
     final_result_snapshot = with_single_stage_results_payload(
         final_result_snapshot,
         results,
     )
+    final_artifact_write_start_s = _perf_counter_s()
+    record_outer_optimizer_event("final_artifact_write_started")
     write_single_stage_final_artifact(OUT_DIR_ITER, final_result_snapshot)
+    record_outer_optimizer_event(
+        "final_artifact_write_returned",
+        elapsed_s=float(_perf_counter_s() - final_artifact_write_start_s),
+    )

@@ -3007,6 +3007,10 @@ class SingleStageExampleTests(unittest.TestCase):
             optimizer_dofs,
         )
         np.testing.assert_array_equal(
+            dof_map.coil_gradient_from_optimizer_gradient(optimizer_dofs),
+            np.array([10.0, 11.0]),
+        )
+        np.testing.assert_array_equal(
             dof_map.coil_dofs_from_optimizer_dofs(optimizer_dofs),
             np.array([10.0, 11.0]),
         )
@@ -3451,6 +3455,80 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_array_equal(
             value_syncs[0]["objective_grad"],
             np.array([2.0, 4.0]),
+        )
+
+    def test_target_lane_objective_evaluation_trace_replay_reuses_full_state_values(
+        self,
+    ):
+        module = self.load_module()
+        recorded = []
+        fallback_syncs = []
+        value_syncs = []
+        events = [
+            {
+                "accepted_iteration_target": 1,
+                "line_search_evaluation": 1,
+                "candidate_optimizer_dofs": {"values": [1.0, 10.0, 2.0, 20.0]},
+            }
+        ]
+
+        def value_and_grad(x):
+            values = np.asarray(x, dtype=np.float64)
+            return float(values[0] + values[2]), np.array(
+                [10.0, 0.0, 20.0, 0.0],
+                dtype=np.float64,
+            )
+
+        def forward_result(x):
+            values = np.asarray(x, dtype=np.float64)
+            return {
+                "success": True,
+                "primal_success": True,
+                "iota": 0.15,
+                "G": 2.0,
+                "sdofs": values + 1.0,
+            }
+
+        def sync_from_values(
+            x,
+            *,
+            target_lane_solve_result,
+            objective_value,
+            objective_grad,
+        ):
+            value_syncs.append(
+                {
+                    "x": np.asarray(x, dtype=np.float64).copy(),
+                    "sdofs": np.asarray(target_lane_solve_result["sdofs"]).copy(),
+                    "objective_value": float(objective_value),
+                    "objective_grad": np.asarray(objective_grad).copy(),
+                }
+            )
+
+        result = module.run_single_stage_target_lane_objective_evaluation_trace_replay(
+            replay_events=events,
+            target_value_and_grad_objective=value_and_grad,
+            target_forward_result=forward_result,
+            objective_input_dofs=lambda x: x,
+            optimizer_to_coil_dofs=lambda x: np.asarray(x)[[0, 2]],
+            sync_accepted_step=lambda x: fallback_syncs.append(np.asarray(x).copy()),
+            sync_accepted_step_from_values=sync_from_values,
+            optimizer_gradient_to_coil_gradient=lambda grad: np.asarray(grad)[[0, 2]],
+            record_event=recorded.append,
+        )
+
+        self.assertEqual(result.nit, 1)
+        self.assertEqual(fallback_syncs, [])
+        self.assertEqual(len(value_syncs), 1)
+        np.testing.assert_array_equal(
+            value_syncs[0]["x"],
+            np.array([1.0, 10.0, 2.0, 20.0]),
+        )
+        np.testing.assert_array_equal(value_syncs[0]["sdofs"], np.array([2.0, 3.0]))
+        self.assertEqual(value_syncs[0]["objective_value"], 3.0)
+        np.testing.assert_array_equal(
+            value_syncs[0]["objective_grad"],
+            np.array([10.0, 20.0]),
         )
 
     def test_target_lane_objective_evaluation_trace_replay_falls_back_for_mapped_state(
