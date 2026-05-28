@@ -17,7 +17,7 @@ Plan a staged optimization campaign that uses the signed vacuum-current `nv2_iot
 - Do not jump directly from the current `volume ~= 0.04` seed to `volume >= 0.09` under all hard limits in one optimization.
 - Do not require iota near `0.298`; the requested constraint is iota `>= 0.10`.
 - Do not use augmented Lagrangian work unless the staged soft-penalty ramp proves insufficient.
-- Do not use finite-current compatibility artifacts, finite-current Boozer loaders, proxy-current coils, VF-current coils, or plasma-current flags to reproduce or promote candidates.
+- Do not promote finite-current compatibility artifacts, proxy-current coils, VF-current coils, or plasma-current flags. A legacy-compatible JSON loader is acceptable only when validation proves it loaded a plain upstream `BoozerSurface` JSON with no `I` field and no `BoozerSurfaceFiniteI` rewrite.
 
 ## Current Context
 
@@ -35,6 +35,9 @@ Plan a staged optimization campaign that uses the signed vacuum-current `nv2_iot
   - Banana coil winding surface: `R0=0.903 m`, `a=0.142 m`, concentric with the vacuum vessel.
   - Maximum target LCFS shell limit: major radius `0.92 m`, minor radius `0.15 m`; the smaller banana winding surface can become the active limiter.
   - Poloidal half-width from inboard midplane: `70 deg` maximum (`140 deg` full width).
+- There are two relevant execution lanes, and they must not be mixed:
+  - `HBT_BANANA/02_stage2_driver.py` + `HBT_BANANA/03_singlestage_driver.py` are the clean local new-HW lane. They read thresholds and targets from `config.yaml`, write registry-named artifacts through `utils/run_registry.py`, and `03_singlestage_driver.py` constructs plain upstream `BoozerSurface`.
+  - `HBT_BANANA/jhalpern30/` is a historical smoke/replay lane. Its scripts build proxy and VF coils for finite-current-style diagnostics; those runs are not promotable for this vacuum-current campaign.
 - The signed package is:
   `/Users/suhjungdae/code/columbia/simsopt-surrogate/tmp/nv2_iota298_negTF_signed_artifacts_for_review_20260527T113921`
 - The signed package is the vacuum-current source of truth. Its Boozer JSON must remain plain `simsopt.geo.boozersurface.BoozerSurface`: no `I` field and no `banana_opt.boozer_finite_current.BoozerSurfaceFiniteI`.
@@ -56,9 +59,14 @@ Plan a staged optimization campaign that uses the signed vacuum-current `nv2_iot
   - seed volume: `0.03993`
   - requested floor: `0.09`
   - required growth: more than `2.25x`
-- Verified `simsopt-surrogate` single-stage CLI controls include `--banana-surf-radius`, `--stage2-seed-banana-surf-radius`, `--stage2-seed-major-radius`, `--single-stage-poloidal-threshold-rad`, `--length-target`, `--cc-dist`, `--cs-dist`, `--curvature-threshold`, `--banana-current-max-A`, `--tf-current-A`, `--vol-target`, `--iota-target`, `--maxiter`, and `--multisurface-initial-step-maxiter`.
-- A promoted banana winding major-radius control is still unresolved. Current `simsopt-surrogate` hardware constants set `BANANA_WINDING_SURFACE_MAJOR_RADIUS_M=0.903`, but `banana_opt.reference_surfaces.build_banana_reference_surfaces()` builds `coil_winding_surface` with `VACUUM_VESSEL_MAJOR_RADIUS_M=0.976`; reaching final `R0=0.903` therefore requires reconciling that source path or proving another active path owns the promoted winding surface.
+- For the `simsopt-surrogate` CLI lane, verified single-stage controls include `--banana-surf-radius`, `--stage2-seed-banana-surf-radius`, `--stage2-seed-major-radius`, `--single-stage-poloidal-threshold-rad`, `--length-target`, `--cc-dist`, `--cs-dist`, `--curvature-threshold`, `--banana-current-max-A`, `--tf-current-A`, `--vol-target`, `--iota-target`, `--maxiter`, and `--multisurface-initial-step-maxiter`.
+- For the local `HBT_BANANA` lane, use `config.yaml` as the SSOT and vary runs by editing/hashing config values or the driver-supported environment overrides. The default local target values are `targets.volume=0.10` and `targets.iota=0.15`, which are above the requested promotion floors.
+- The promoted banana winding major radius is now resolved in code, but still needs result telemetry:
+  - `baseline-original` `config.yaml` sets `winding_surface.R0=0.903` and `winding_surface.a=0.142`.
+  - `baseline-original` `jhalpern30` scripts use `WINDSURF_MAJOR_R=0.903`, but that lane is proxy/VF diagnostic only.
+  - Current `simsopt-surrogate` `banana_opt.reference_surfaces.build_banana_reference_surfaces()` sets `coil_winding_surface.rc(0,0)` from `BANANA_WINDING_SURFACE_MAJOR_RADIUS_M=0.903`.
 - High-volume artifacts that require `BoozerSurfaceFiniteI`, an `I` field, or proxy/VF/plasma-current metadata are invalid for this campaign even if they can be evaluated by a diagnostic loader.
+- Current `simsopt-surrogate` commit `156b7a331` fixes the vacuum Boozer lineage in the shared construction path: zero/no-current saves must be upstream `BoozerSurface` artifacts, and the save path validates against zero-current `BoozerSurfaceFiniteI` JSON. The compatibility loader still exists for legacy diagnostics; promotion evidence must be the saved JSON lineage check, not successful compatibility loading.
 
 ## Rationale
 
@@ -70,7 +78,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 - The signed package remains useful for sign/Boozer regression only if the replay path is vacuum-current: plain `BoozerSurface`, no `I` field, no `BoozerSurfaceFiniteI`, and no proxy/VF/plasma-current flags.
 - A candidate is not promotable unless hardware telemetry includes realized values and thresholds for poloidal extent, winding surface, coil length, coil-coil distance, coil-plasma distance, curvature, TF current, banana current, volume, iota, and topology.
 - Current target-mode uses `--iota-target` as a target objective, not a verified hard floor. The campaign must either implement/verify true floor semantics or use target sweeps with a separate acceptance gate `FINAL_IOTA >= 0.10`.
-- Current verified surface-radius CLI coverage is for the banana surface minor radius and the Stage 2 seed major radius. Final new-HW promotion also needs proof that the active coil winding surface major radius is `0.903 m`, not just that a seed or clearance reference used that value.
+- Final new-HW promotion needs proof that the active coil winding surface telemetry is `R0=0.903 m`, `a=0.142 m`; code constants alone are not enough.
 
 ## Implementation Plan
 
@@ -92,7 +100,8 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 3. Winding-surface shrink ramp
    - [ ] Start from the best footprint-ramp candidate, not necessarily the original package.
    - [ ] Move the banana surface minor radius with `--banana-surf-radius` and `--stage2-seed-banana-surf-radius` in small steps: `0.21`, `0.18`, `0.16`, `0.142`.
-   - [ ] Reconcile the `0.903 m` hardware constant with the current reference-surface builder before claiming the final winding surface: `--stage2-seed-major-radius` is not enough if `coil_winding_surface` is still built at `0.976 m`.
+   - [ ] For `simsopt-surrogate`, verify the run recorded `BANANA_WINDING_SURFACE_MAJOR_RADIUS_M=0.903` and `banana_surf_radius=0.142`; the current builder already uses the `0.903 m` major-radius constant and `BANANA_WINDING_MINOR_RADIUS_M=0.142`.
+   - [ ] For the local `HBT_BANANA` lane, verify the registry config hash records `winding_surface.R0=0.903` and `winding_surface.a=0.142`.
    - [ ] Re-run the `70 deg` poloidal half-width check at every shrink step.
    - [ ] Stop the lane if the optimizer can only pass by violating current, length, curvature, or clearance limits.
 
@@ -123,6 +132,8 @@ The seed already has enough iota and acceptable current, length, curvature, and 
   - Boozer JSON does not reference `BoozerSurfaceFiniteI`.
   - Boot command contains no finite-current-mode, proxy-plasma-current, VF-current, or plasma-current flags.
   - Result metadata contains no active proxy/VF/plasma-current finite-current terms.
+  - For `simsopt-surrogate`, run or reproduce the `validate_boozer_surface_json_current_lineage()` check on each saved Boozer JSON.
+  - For local `HBT_BANANA`, reject any artifact produced through `jhalpern30/` proxy/VF paths.
 - [ ] For every run, assert signed currents:
   - `TF_CURRENT_A == -80000`
   - `abs(BANANA_CURRENT_MAX_ABS_A) <= 16000`
@@ -136,7 +147,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
   - `MAX_CURVATURE <= 100`.
   - `POLOIDAL_EXTENT_RAD <= 1.2217304763960306` and `POLOIDAL_EXTENT_THRESHOLD_RAD == 1.2217304763960306`.
   - `banana_surf_radius == 0.142` for final candidates.
-  - new winding surface `R0=0.903`, `a=0.142` for final candidates, with explicit telemetry or code evidence for the active coil winding surface, not only seed or clearance-reference values.
+  - new winding surface `R0=0.903`, `a=0.142` for final candidates, with explicit telemetry for the active coil winding surface, not only seed or clearance-reference values.
   - target LCFS major radius `<=0.92` and minor radius `<=0.15`, unless the smaller banana winding surface is the active limiting envelope and is checked explicitly.
 - [ ] For every promoted candidate, assert physics floors:
   - `FINAL_VOLUME >= 0.09`.
@@ -160,7 +171,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 - Risk: Missing telemetry makes hardware-clean rows ambiguous.
   Mitigation: Require realized value plus threshold for every hardware metric before ranking.
 - Risk: The minor-radius flag is mistaken for full winding-surface control.
-  Mitigation: Treat `R0=0.903` as unresolved until `build_banana_reference_surfaces()` or another active source path and result telemetry prove the coil winding major-radius value.
+  Mitigation: Treat final promotion as unresolved until result telemetry proves both the major radius and minor radius used by the active coil winding surface.
 
 ## Completion Criteria
 
@@ -172,6 +183,6 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 
 ## Open Questions
 
-- Does the active `simsopt-surrogate` driver use `BANANA_WINDING_SURFACE_MAJOR_RADIUS_M=0.903` for the coil winding surface, or does `build_banana_reference_surfaces()` need to be corrected from `0.976`?
+- Does each promoted artifact record the active winding-surface `R0=0.903` and `a=0.142` values in results/registry telemetry, or do we need to add one more telemetry field before promotion?
 - Should the Pareto front implement a hard iota floor formulation, an asymmetric penalty around `0.10`, or target sweeps plus acceptance gating?
 - What strict Poincare budget should be required for promotion: the prior `50` lines and `tmax=7000`, or a cheaper gate before the final run?
