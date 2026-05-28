@@ -1690,14 +1690,28 @@ def resolve_target_lane_post_run_state_sync(
         else adapter.sync_accepted_step_state
     )
 
-    def explicit_state_sync(result_x):
+    def explicit_state_sync(result_x, *, objective_value_and_grad=None):
+        if objective_value_and_grad is not None:
+            objective_value, objective_grad = objective_value_and_grad
+            adapter.sync_accepted_step_state_from_objective_value_and_grad(
+                result_x,
+                objective_value=objective_value,
+                objective_grad=objective_grad,
+                log_accepted_step=accepted_step_callback is None,
+            )
+            return
         final_state_sync(result_x)
 
     explicit_state_sync.simsopt_skip_failed_attempt_sync = True
     if scaled_phase_step_scale is None:
         return explicit_state_sync
 
-    def sync(result_x):
+    def sync(result_x, *, objective_value_and_grad=None):
+        if objective_value_and_grad is not None:
+            raise RuntimeError(
+                "Scaled target-lane post-run sync cannot reuse unscaled optimizer "
+                "objective values."
+            )
         explicit_state_sync(
             resolve_scaled_outer_phase_final_dofs(
                 scaled_phase_anchor_dofs,
@@ -8582,6 +8596,25 @@ def target_lane_result_objective_metric(result):
     return metric
 
 
+def target_lane_result_objective_value_and_coil_gradient(
+    result,
+    *,
+    optimizer_gradient_to_coil_gradient=None,
+):
+    """Return optimizer result value and the coil-basis gradient for state sync."""
+    objective_value = getattr(result, "fun", None)
+    optimizer_gradient = getattr(result, "jac", None)
+    if objective_value is None or optimizer_gradient is None:
+        return None
+    if optimizer_gradient_to_coil_gradient is None:
+        objective_gradient = _single_stage_optimizer_dofs_array(
+            optimizer_gradient
+        ).reshape(-1)
+    else:
+        objective_gradient = optimizer_gradient_to_coil_gradient(optimizer_gradient)
+    return objective_value, objective_gradient
+
+
 def single_stage_stage_label(stage):
     """Return the serialized stage label used in retry summaries."""
     return None if stage is None else str(stage)
@@ -11197,6 +11230,28 @@ class SingleStageAdapter:
             objective_value_and_grad=(objective_value, objective_grad),
         )
         self._log_target_lane_accepted_step(accepted_step_summary)
+        return accepted_step_summary
+
+    def sync_accepted_step_state_from_objective_value_and_grad(
+        self,
+        x,
+        *,
+        objective_value,
+        objective_grad,
+        log_accepted_step,
+    ):
+        """Commit an accepted target-lane state using optimizer result values."""
+        if self.accepted_step_state_sync is None:
+            raise RuntimeError(
+                "Target-lane optimizer result reuse requires accepted_step_state_sync."
+            )
+        accepted_step_summary = self._sync_target_lane_accepted_step_summary(
+            x,
+            update_run_state=True,
+            objective_value_and_grad=(objective_value, objective_grad),
+        )
+        if log_accepted_step:
+            self._log_target_lane_accepted_step(accepted_step_summary)
         return accepted_step_summary
 
     def _log_target_lane_accepted_step(self, accepted_step_summary):
@@ -14099,13 +14154,27 @@ if __name__ == "__main__":
                         and target_lane_post_run_state_sync is not None
                         and target_lane_result_has_syncable_state(res)
                     ):
+                        objective_value_and_grad = target_lane_result_objective_value_and_coil_gradient(
+                            res,
+                            optimizer_gradient_to_coil_gradient=(
+                                full_graph_optimizer_dof_map.coil_gradient_from_optimizer_gradient
+                                if use_target_lane_full_state_optimizer
+                                else None
+                            ),
+                        )
                         target_lane_sync_start_s = _perf_counter_s()
                         record_outer_optimizer_event(
                             "target_lane_optimistix_final_sync_started",
                             phase="diagnostic",
                             result=summarize_optimizer_result_for_progress(res),
+                            reuses_objective_value_and_grad=(
+                                objective_value_and_grad is not None
+                            ),
                         )
-                        target_lane_post_run_state_sync(res.x)
+                        target_lane_post_run_state_sync(
+                            res.x,
+                            objective_value_and_grad=objective_value_and_grad,
+                        )
                         _record_timing(
                             timings,
                             "target_lane_optimistix_final_sync_s",
@@ -14171,13 +14240,27 @@ if __name__ == "__main__":
                         and target_lane_post_run_state_sync is not None
                         and target_lane_result_has_syncable_state(res)
                     ):
+                        objective_value_and_grad = target_lane_result_objective_value_and_coil_gradient(
+                            res,
+                            optimizer_gradient_to_coil_gradient=(
+                                full_graph_optimizer_dof_map.coil_gradient_from_optimizer_gradient
+                                if use_target_lane_full_state_optimizer
+                                else None
+                            ),
+                        )
                         target_lane_sync_start_s = _perf_counter_s()
                         record_outer_optimizer_event(
                             "target_lane_optax_final_sync_started",
                             phase="diagnostic",
                             result=summarize_optimizer_result_for_progress(res),
+                            reuses_objective_value_and_grad=(
+                                objective_value_and_grad is not None
+                            ),
                         )
-                        target_lane_post_run_state_sync(res.x)
+                        target_lane_post_run_state_sync(
+                            res.x,
+                            objective_value_and_grad=objective_value_and_grad,
+                        )
                         _record_timing(
                             timings,
                             "target_lane_optax_final_sync_s",
@@ -14643,17 +14726,31 @@ if __name__ == "__main__":
                             and target_lane_post_run_state_sync is not None
                             and target_lane_result_has_syncable_state(res)
                         ):
+                            objective_value_and_grad = target_lane_result_objective_value_and_coil_gradient(
+                                res,
+                                optimizer_gradient_to_coil_gradient=(
+                                    full_graph_optimizer_dof_map.coil_gradient_from_optimizer_gradient
+                                    if use_target_lane_full_state_optimizer
+                                    else None
+                                ),
+                            )
                             target_lane_sync_start_s = _perf_counter_s()
                             record_outer_optimizer_event(
                                 "target_lane_final_sync_started",
                                 phase="phase2",
                                 result=summarize_optimizer_result_for_progress(res),
+                                reuses_objective_value_and_grad=(
+                                    objective_value_and_grad is not None
+                                ),
                             )
                             with maybe_trace_single_stage_phase(
                                 "single_stage.target_lane_final_sync",
                                 enabled=jax_profile_enabled,
                             ):
-                                target_lane_post_run_state_sync(res.x)
+                                target_lane_post_run_state_sync(
+                                    res.x,
+                                    objective_value_and_grad=objective_value_and_grad,
+                                )
                             _record_timing(
                                 timings,
                                 "target_lane_final_sync_s",
@@ -14702,17 +14799,29 @@ if __name__ == "__main__":
             accepted_step_callback=accepted_step_callback,
             trial_boozer_override_active=target_lane_trial_boozer_override_active,
         ):
+            objective_value_and_grad = target_lane_result_objective_value_and_coil_gradient(
+                res,
+                optimizer_gradient_to_coil_gradient=(
+                    full_graph_optimizer_dof_map.coil_gradient_from_optimizer_gradient
+                    if use_target_lane_full_state_optimizer
+                    else None
+                ),
+            )
             target_lane_sync_start_s = _perf_counter_s()
             record_outer_optimizer_event(
                 "target_lane_strict_final_sync_started",
                 phase="final",
                 result=summarize_optimizer_result_for_progress(res),
+                reuses_objective_value_and_grad=objective_value_and_grad is not None,
             )
             with maybe_trace_single_stage_phase(
                 "single_stage.target_lane_final_sync",
                 enabled=jax_profile_enabled,
             ):
-                target_lane_post_run_state_sync(res.x)
+                target_lane_post_run_state_sync(
+                    res.x,
+                    objective_value_and_grad=objective_value_and_grad,
+                )
             _record_timing(
                 timings,
                 "target_lane_final_sync_s",

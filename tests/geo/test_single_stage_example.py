@@ -3015,6 +3015,43 @@ class SingleStageExampleTests(unittest.TestCase):
             np.array([10.0, 11.0]),
         )
 
+    def test_target_lane_result_objective_value_and_coil_gradient_projects_full_state(
+        self,
+    ):
+        module = self.load_module()
+        result = types.SimpleNamespace(
+            fun=jnp.asarray(3.5, dtype=jnp.float64),
+            jac=jnp.asarray([10.0, 0.0, 20.0, 0.0], dtype=jnp.float64),
+        )
+
+        objective_value, objective_grad = (
+            module.target_lane_result_objective_value_and_coil_gradient(
+                result,
+                optimizer_gradient_to_coil_gradient=lambda grad: np.asarray(grad)[
+                    [0, 2]
+                ],
+            )
+        )
+
+        self.assertEqual(float(objective_value), 3.5)
+        np.testing.assert_array_equal(objective_grad, np.array([10.0, 20.0]))
+
+    def test_target_lane_result_objective_value_and_coil_gradient_requires_value_and_grad(
+        self,
+    ):
+        module = self.load_module()
+
+        self.assertIsNone(
+            module.target_lane_result_objective_value_and_coil_gradient(
+                types.SimpleNamespace(fun=1.0)
+            )
+        )
+        self.assertIsNone(
+            module.target_lane_result_objective_value_and_coil_gradient(
+                types.SimpleNamespace(jac=np.array([1.0]))
+            )
+        )
+
     def test_full_state_target_lane_value_and_grad_lifts_compact_gradient(self):
         module = self.load_module()
         dof_map = module.SingleStageFullGraphOptimizerDofMap(
@@ -7810,6 +7847,96 @@ class SingleStageExampleTests(unittest.TestCase):
             "target_lane_reporting_sync_returned",
         )
 
+    def test_single_stage_adapter_post_run_sync_reuses_optimizer_result_value_and_grad(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=False
+        )
+        reporting_events = []
+
+        def record_reporting_event(label, **fields):
+            reporting_events.append((label, fields))
+
+        fake_boozer_surface = types.SimpleNamespace(
+            run_code_traceable=lambda *_args: {
+                "success": jnp.asarray(True, dtype=bool),
+                "sdofs": jnp.asarray([0.4, -0.2], dtype=jnp.float64),
+                "iota": jnp.asarray(0.21, dtype=jnp.float64),
+                "G": jnp.asarray(1.75, dtype=jnp.float64),
+            }
+        )
+        fake_bs = types.SimpleNamespace(
+            coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs
+        )
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=self._make_reporting_runtime_builder(
+                captured, runtime_summary
+            ),
+        ):
+            sync = module.build_single_stage_target_lane_accepted_step_sync(
+                fake_boozer_surface,
+                fake_bs,
+                0.21,
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+                record_outer_optimizer_event=record_reporting_event,
+            )
+            run_dict = {
+                "sdofs": np.array([0.1, -0.05], dtype=np.float64),
+                "iota": 0.2,
+                "G": 1.0,
+                "J": 1.0,
+                "dJ": np.zeros(2, dtype=np.float64),
+            }
+            adapter = module.SingleStageAdapter(
+                run_dict=run_dict,
+                boozer_surface=object(),
+                JF=object(),
+                bs=object(),
+                objectives={},
+                diagnostics={},
+                log_path="unused.log",
+                apply_coil_dofs=lambda _x: None,
+                benchmark_mode=True,
+                accepted_step_state_sync=sync,
+                optimizer_to_coil_dofs=lambda x: np.asarray(x, dtype=np.float64)[
+                    [0, 2]
+                ],
+            )
+
+            summary = adapter.sync_accepted_step_state_from_objective_value_and_grad(
+                np.array([1.0, 99.0, -2.0], dtype=np.float64),
+                objective_value=9.5,
+                objective_grad=np.array([7.0, -8.0], dtype=np.float64),
+                log_accepted_step=True,
+            )
+
+        self.assertNotIn("value_and_grad_called", captured)
+        self.assertEqual(summary["objective_value"], 9.5)
+        self.assertEqual(run_dict["J"], 9.5)
+        np.testing.assert_array_equal(run_dict["dJ"], np.array([7.0, -8.0]))
+        np.testing.assert_array_equal(
+            run_dict["x_prev"],
+            np.array([1.0, 99.0, -2.0]),
+        )
+        reporting_event_by_label = {label: fields for label, fields in reporting_events}
+        self.assertTrue(
+            reporting_event_by_label["target_lane_reporting_value_and_grad_started"][
+                "reused"
+            ]
+        )
+        self.assertTrue(
+            reporting_event_by_label["target_lane_reporting_value_and_grad_returned"][
+                "reused"
+            ]
+        )
+
     def test_build_single_stage_target_lane_accepted_step_sync_prefers_runtime_forward_result(
         self,
     ):
@@ -9162,6 +9289,42 @@ class SingleStageExampleTests(unittest.TestCase):
         sync("accepted-state")
         self.assertEqual(recorded, ["accepted-state"])
 
+    def test_resolve_target_lane_post_run_state_sync_reuses_optimizer_result_values(
+        self,
+    ):
+        module = self.load_module()
+        recorded = []
+        adapter = types.SimpleNamespace(
+            sync_accepted_step=lambda _x: (_ for _ in ()).throw(
+                AssertionError("optimizer result values should avoid fallback sync")
+            ),
+            sync_accepted_step_state=lambda _x: (_ for _ in ()).throw(
+                AssertionError("optimizer result values should use value sync")
+            ),
+            sync_accepted_step_state_from_objective_value_and_grad=(
+                lambda x, **kwargs: recorded.append((x, kwargs))
+            ),
+        )
+
+        sync = module.resolve_target_lane_post_run_state_sync(
+            adapter,
+            use_target_lane=True,
+            accepted_step_callback=None,
+        )
+        sync(
+            "accepted-state",
+            objective_value_and_grad=(1.25, np.array([3.0, -4.0])),
+        )
+
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0][0], "accepted-state")
+        self.assertEqual(recorded[0][1]["objective_value"], 1.25)
+        np.testing.assert_array_equal(
+            recorded[0][1]["objective_grad"],
+            np.array([3.0, -4.0]),
+        )
+        self.assertTrue(recorded[0][1]["log_accepted_step"])
+
     def test_resolve_target_lane_post_run_state_sync_maps_scaled_phase_state(self):
         module = self.load_module()
         synced_states = []
@@ -9186,6 +9349,28 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(len(synced_states), 1)
         np.testing.assert_allclose(synced_states[0], np.array([11.0, 22.0]))
+
+    def test_resolve_target_lane_post_run_state_sync_rejects_scaled_value_reuse(self):
+        module = self.load_module()
+        adapter = types.SimpleNamespace(sync_accepted_step=lambda _x: None)
+        sync = module.resolve_target_lane_post_run_state_sync(
+            adapter,
+            use_target_lane=True,
+            accepted_step_callback=None,
+            scaled_phase_step_scale=0.5,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Scaled target-lane post-run sync cannot reuse",
+        ):
+            sync(
+                module.ScaledOuterPhaseOptimizerState(
+                    step_dofs=np.array([2.0, 4.0]),
+                    anchor_dofs=np.array([10.0, 20.0]),
+                ),
+                objective_value_and_grad=(1.25, np.array([3.0, -4.0])),
+            )
 
     def test_should_force_strict_target_lane_final_sync(self):
         module = self.load_module()
