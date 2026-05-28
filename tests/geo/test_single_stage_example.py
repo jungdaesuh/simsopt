@@ -3672,6 +3672,92 @@ class SingleStageExampleTests(unittest.TestCase):
             output_path_or_run_dir="/tmp/m06-runtime-spec.json",
         )
 
+    def test_reproject_single_stage_jax_runtime_seed_spec_uses_payload_iota_G(self):
+        module = self.load_module()
+
+        class NoHostFloat:
+            def __float__(self):
+                raise AssertionError("device scalar must not be hostified")
+
+        fake_seed = types.SimpleNamespace(
+            num_tf_coils=20,
+            banana_curve_index=20,
+            tf_current_A=1.0,
+            banana_current_A=2.0,
+        )
+        fake_runtime_spec = types.SimpleNamespace(nfp=5, seed=fake_seed)
+        fake_surface = types.SimpleNamespace(nfp=5)
+        captured_kwargs = {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = Path(tmpdir) / "source.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "surface": {"mpol": 10, "ntor": 10},
+                        "quadrature": {"nphi": 255, "ntheta": 64},
+                        "boozer_init": {"iota": 0.2265, "G": 2.0106},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "load_single_stage_jax_runtime_seed_spec",
+                        return_value={
+                            "runtime_spec": fake_runtime_spec,
+                            "iota": NoHostFloat(),
+                            "G": NoHostFloat(),
+                            "coil_dof_extraction_spec": object(),
+                            "coil_dofs": np.array([1.0, 2.0]),
+                            "stage2_seed": {"banana_surf_radius": 0.22},
+                        },
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "build_single_stage_surface_from_jax_runtime_spec",
+                        return_value=fake_surface,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "project_surface_dofs_to_resolution",
+                        return_value=np.array([3.0, 4.0]),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "make_single_stage_half_period_quadpoints",
+                        return_value=(np.array([0.0]), np.array([0.0])),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "write_single_stage_jax_runtime_seed_spec",
+                        side_effect=lambda output_path_or_run_dir, **kwargs: (
+                            captured_kwargs.update(kwargs) or output_path_or_run_dir
+                        ),
+                    )
+                )
+                module.reproject_single_stage_jax_runtime_seed_spec(
+                    source_path,
+                    mpol=2,
+                    ntor=2,
+                    nphi=31,
+                    ntheta=16,
+                    output_path_or_run_dir="/tmp/out.json",
+                )
+
+        self.assertEqual(captured_kwargs["iota"], 0.2265)
+        self.assertEqual(captured_kwargs["G"], 2.0106)
+
     def test_compile_requested_single_stage_jax_runtime_seed_source_requires_output(
         self,
     ):
