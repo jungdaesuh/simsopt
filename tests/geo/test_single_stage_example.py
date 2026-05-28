@@ -713,6 +713,10 @@ class SingleStageExampleTests(unittest.TestCase):
                 driver = Driver.OPTIMISTIX_LBFGS
             return TargetOptimizerContract(driver, objective_route=objective_route)
 
+        @contextmanager
+        def target_optimizer_diagnostic_events(_callback):
+            yield
+
         fake_optimizer_module = types.ModuleType("simsopt.geo.optimizer_jax")
         fake_optimizer_module.Driver = Driver
         fake_optimizer_module.ReferenceOptimizerContract = ReferenceOptimizerContract
@@ -723,6 +727,9 @@ class SingleStageExampleTests(unittest.TestCase):
         fake_optimizer_module.require_target_backend_x64 = require_target_backend_x64
         fake_optimizer_module.reference_minimize = jax_minimize
         fake_optimizer_module.target_minimize = jax_minimize
+        fake_optimizer_module.target_optimizer_diagnostic_events = (
+            target_optimizer_diagnostic_events
+        )
         fake_optimizer_module.resolve_reference_outer_loop_optimizer_contract = (
             resolve_reference_outer_loop_optimizer_contract
         )
@@ -742,6 +749,7 @@ class SingleStageExampleTests(unittest.TestCase):
             "require_target_backend_x64": require_target_backend_x64,
             "reference_minimize": jax_minimize,
             "target_minimize": jax_minimize,
+            "target_optimizer_diagnostic_events": target_optimizer_diagnostic_events,
             "resolve_reference_outer_loop_optimizer_contract": (
                 resolve_reference_outer_loop_optimizer_contract
             ),
@@ -9584,6 +9592,140 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertEqual(result.message, "ok")
 
+    def test_target_minimize_emits_stack_scoped_lbfgs_diagnostics(self):
+        from scipy.optimize import OptimizeResult
+        from simsopt.geo import optimizer_jax
+
+        events = []
+
+        def fake_private_value_and_grad(
+            fun,
+            x0,
+            *,
+            maxiter,
+            gtol,
+            maxcor,
+            ftol,
+            maxfun,
+            maxls,
+            callback,
+            progress_callback,
+            initial_value_and_grad,
+            record_optimizer_state_trace,
+            max_optimizer_state_trace_bytes,
+            diagnostic_event_callback,
+        ):
+            del (
+                fun,
+                x0,
+                maxiter,
+                gtol,
+                maxcor,
+                ftol,
+                maxfun,
+                maxls,
+                callback,
+                progress_callback,
+                initial_value_and_grad,
+                record_optimizer_state_trace,
+                max_optimizer_state_trace_bytes,
+            )
+            if diagnostic_event_callback is not None:
+                diagnostic_event_callback("lbfgs_initial_state_started")
+            return "private-state"
+
+        def fake_private_result_to_optimize_result(state):
+            self.assertEqual(state, "private-state")
+            return OptimizeResult(
+                x=np.array([0.0]),
+                fun=0.0,
+                jac=np.array([0.0]),
+                nit=0,
+                nfev=0,
+                njev=0,
+                success=True,
+                status=0,
+                message="ok",
+            )
+
+        with patch.object(
+            optimizer_jax, "_require_private_package", lambda _method: None
+        ), patch.object(
+            optimizer_jax, "require_target_backend_x64", lambda _backend: None
+        ), patch.object(
+            optimizer_jax,
+            "_minimize_lbfgs_private_value_and_grad",
+            fake_private_value_and_grad,
+            create=True,
+        ), patch.object(
+            optimizer_jax,
+            "_private_lbfgs_result_to_optimize_result",
+            fake_private_result_to_optimize_result,
+            create=True,
+        ):
+            with optimizer_jax.target_optimizer_diagnostic_events(
+                lambda label, **fields: events.append((label, fields))
+            ):
+                result = optimizer_jax.target_minimize(
+                    lambda x: (jnp.asarray(0.0), jnp.zeros_like(x)),
+                    np.array([0.0]),
+                    method="lbfgs-ondevice",
+                    tol=1.0e-6,
+                    maxiter=1,
+                    options={"maxcor": 1, "ftol": 0.0, "maxls": 2},
+                    value_and_grad=True,
+                )
+
+            self.assertEqual(result.message, "ok")
+            self.assertEqual(
+                [label for label, _ in events],
+                [
+                    "lbfgs_initial_state_started",
+                    "lbfgs_result_conversion_started",
+                    "lbfgs_result_conversion_returned",
+                ],
+            )
+            result = optimizer_jax.target_minimize(
+                lambda x: (jnp.asarray(0.0), jnp.zeros_like(x)),
+                np.array([0.0]),
+                method="lbfgs-ondevice",
+                tol=1.0e-6,
+                maxiter=1,
+                options={"maxcor": 1, "ftol": 0.0, "maxls": 2},
+                value_and_grad=True,
+            )
+            self.assertEqual(result.message, "ok")
+            self.assertEqual(
+                [label for label, _ in events],
+                [
+                    "lbfgs_initial_state_started",
+                    "lbfgs_result_conversion_started",
+                    "lbfgs_result_conversion_returned",
+                ],
+            )
+
+    def test_event_progress_recorder_serializes_concurrent_events(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        module = self.load_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            progress_path = os.path.join(tmpdir, "outer_optimizer_progress.json")
+            recorder = module.build_event_progress_recorder(progress_path)
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(lambda index: recorder(f"event_{index}"), range(32)))
+            with open(progress_path, encoding="utf-8") as infile:
+                payload = json.load(infile)
+
+        self.assertEqual(payload["event_count"], 32)
+        self.assertEqual(
+            [event["event_index"] for event in payload["events"]],
+            list(range(32)),
+        )
+        self.assertEqual(
+            {event["label"] for event in payload["events"]},
+            {f"event_{index}" for index in range(32)},
+        )
+
     def test_run_single_stage_optimizer_rejects_target_lane_failure_callback(self):
         module = self.load_module()
         explicit_fun = lambda x: (
@@ -10389,6 +10531,122 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(retry_summary["attempt_count"], 1)
         self.assertEqual(observed_seeds, [optimizer_seed, None])
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_scopes_lbfgs_diagnostics(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        invalid_state_events = []
+        progress_events = []
+        active_callbacks = []
+
+        @contextmanager
+        def fake_target_optimizer_diagnostic_events(callback):
+            active_callbacks.append(callback)
+            try:
+                yield
+            finally:
+                active_callbacks.pop()
+
+        def fake_run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            callback,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            scalar_fun,
+            progress_callback=None,
+            target_lane_initial_step_size,
+            failure_callback,
+            optimizer_initial_value_and_grad=None,
+        ):
+            del (
+                fun,
+                dofs,
+                callback,
+                contract,
+                maxiter,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                scalar_fun,
+                progress_callback,
+                target_lane_initial_step_size,
+                failure_callback,
+                optimizer_initial_value_and_grad,
+            )
+            active_callbacks[-1]("lbfgs_main_kernel_started")
+            return self._build_target_lane_retry_result(
+                x=np.array([1.0, 2.0]),
+                nit=1,
+                success=True,
+                message="ok",
+                status=0,
+            )
+
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=0,
+            retry_step_shrink_factor=0.5,
+        )
+
+        with patch.object(
+            module,
+            "target_optimizer_diagnostic_events",
+            fake_target_optimizer_diagnostic_events,
+        ), patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=fake_run_single_stage_optimizer,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    phase="phase2",
+                    callback=None,
+                    retry_callback=None,
+                    result_state_sync=None,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                    progress_event_callback=(
+                        lambda label, **extra: progress_events.append((label, extra))
+                    ),
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(retry_summary["attempt_count"], 0)
+        self.assertEqual(active_callbacks, [])
+        self.assertEqual(
+            [label for label, _ in progress_events],
+            [
+                "phase2_attempt_0_started",
+                "lbfgs_main_kernel_started",
+                "phase2_attempt_0_returned",
+            ],
+        )
+        self.assertEqual(progress_events[1][1]["phase"], "phase2")
 
     def test_run_single_stage_target_lane_optimizer_with_retries_uses_explicit_post_run_sync_for_retry_anchor(
         self,

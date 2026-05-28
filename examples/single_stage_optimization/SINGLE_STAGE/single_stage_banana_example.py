@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+from threading import Lock
 import time
 import types
 
@@ -121,6 +122,7 @@ from simsopt.geo.optimizer_jax import (
     resolve_target_outer_loop_optimizer_contract,
     target_driver_method,
     target_minimize,
+    target_optimizer_diagnostic_events,
 )
 import simsopt.geo.surface as surface_module
 from simsopt.geo.surface_fourier_jax import (
@@ -9557,22 +9559,23 @@ def run_single_stage_target_lane_optimizer_with_retries(
         maxiter=int(maxiter),
         optimizer_dofs=_summarize_host_vector(dofs),
     )
-    result = run_single_stage_optimizer(
-        fun,
-        dofs,
-        callback=callback,
-        contract=contract,
-        maxiter=maxiter,
-        ftol=ftol,
-        gtol=gtol,
-        maxcor=maxcor,
-        outer_maxls=outer_maxls,
-        scalar_fun=scalar_fun,
-        progress_callback=progress_callback,
-        target_lane_initial_step_size=None,
-        failure_callback=None,
-        **optimizer_kwargs,
-    )
+    with target_optimizer_diagnostic_events(record_progress_event):
+        result = run_single_stage_optimizer(
+            fun,
+            dofs,
+            callback=callback,
+            contract=contract,
+            maxiter=maxiter,
+            ftol=ftol,
+            gtol=gtol,
+            maxcor=maxcor,
+            outer_maxls=outer_maxls,
+            scalar_fun=scalar_fun,
+            progress_callback=progress_callback,
+            target_lane_initial_step_size=None,
+            failure_callback=None,
+            **optimizer_kwargs,
+        )
     record_progress_event(
         f"{phase}_attempt_0_returned",
         attempt_index=0,
@@ -9633,22 +9636,23 @@ def run_single_stage_target_lane_optimizer_with_retries(
             retry_optimizer_kwargs["max_optimizer_state_trace_bytes"] = (
                 max_optimizer_state_trace_bytes
             )
-        result = run_single_stage_optimizer(
-            fun,
-            retry_dofs_factory(anchor_state),
-            callback=retry_callback,
-            contract=contract,
-            maxiter=remaining_maxiter,
-            ftol=ftol,
-            gtol=gtol,
-            maxcor=maxcor,
-            outer_maxls=outer_maxls,
-            scalar_fun=scalar_fun,
-            progress_callback=progress_callback,
-            target_lane_initial_step_size=None,
-            failure_callback=None,
-            **retry_optimizer_kwargs,
-        )
+        with target_optimizer_diagnostic_events(record_progress_event):
+            result = run_single_stage_optimizer(
+                fun,
+                retry_dofs_factory(anchor_state),
+                callback=retry_callback,
+                contract=contract,
+                maxiter=remaining_maxiter,
+                ftol=ftol,
+                gtol=gtol,
+                maxcor=maxcor,
+                outer_maxls=outer_maxls,
+                scalar_fun=scalar_fun,
+                progress_callback=progress_callback,
+                target_lane_initial_step_size=None,
+                failure_callback=None,
+                **retry_optimizer_kwargs,
+            )
         record_progress_event(
             f"{phase}_retry_{retry_index + 1}_returned",
             attempt_index=int(retry_index + 1),
@@ -9773,24 +9777,26 @@ def build_stage_progress_recorder(path):
 def build_event_progress_recorder(path):
     """Build a JSON event recorder that preserves chronological history."""
     events = []
+    event_lock = Lock()
     started_s = _perf_counter_s()
 
     def record_event(label, **extra):
-        event = {
-            "label": label,
-            "event_index": int(len(events)),
-            "event_elapsed_s": float(_perf_counter_s() - started_s),
-            **dict(extra),
-        }
-        events.append(event)
-        write_json_file(
-            path,
-            {
-                "current_event": label,
-                "event_count": int(len(events)),
-                "events": list(events),
-            },
-        )
+        with event_lock:
+            event = {
+                "label": label,
+                "event_index": int(len(events)),
+                "event_elapsed_s": float(_perf_counter_s() - started_s),
+                **dict(extra),
+            }
+            events.append(event)
+            write_json_file(
+                path,
+                {
+                    "current_event": label,
+                    "event_count": int(len(events)),
+                    "events": list(events),
+                },
+            )
 
     return record_event
 

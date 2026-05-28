@@ -101,6 +101,8 @@ well; both paths use public JAX APIs.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache, wraps
@@ -212,6 +214,7 @@ __all__ = [
     "wrap_strict_target_lane_value_and_grad",
     "target_least_squares",
     "target_minimize",
+    "target_optimizer_diagnostic_events",
 ]
 
 
@@ -290,6 +293,10 @@ _LINEAR_SOLVE_ITERATIONS_UNKNOWN = -1
 _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
+_TARGET_OPTIMIZER_DIAGNOSTIC_EVENT_CALLBACK = ContextVar(
+    "simsopt_target_optimizer_diagnostic_event_callback",
+    default=None,
+)
 _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
 _TRACEABLE_RUNNER_CACHE_TOKEN_ATTR = "_simsopt_traceable_runner_cache_token"
 _TRACEABLE_CALLBACK_LOCK = Lock()
@@ -323,6 +330,25 @@ _DEPRECATED_LEAST_SQUARES_METHOD_TO_DRIVER = {
     "lm-ondevice": "simsopt_lm_gmres",
     "optimistix-lm-ondevice": "optimistix_lm",
 }
+
+
+@contextmanager
+def target_optimizer_diagnostic_events(callback):
+    """Route target optimizer diagnostic events to a stack-scoped callback."""
+    token = _TARGET_OPTIMIZER_DIAGNOSTIC_EVENT_CALLBACK.set(callback)
+    try:
+        yield
+    finally:
+        _TARGET_OPTIMIZER_DIAGNOSTIC_EVENT_CALLBACK.reset(token)
+
+
+def _target_optimizer_diagnostic_event_callback():
+    return _TARGET_OPTIMIZER_DIAGNOSTIC_EVENT_CALLBACK.get()
+
+
+def _record_target_optimizer_diagnostic_event(callback, label, **fields):
+    if callback is not None:
+        callback(label, **fields)
 
 
 @dataclass(frozen=True)
@@ -5299,6 +5325,7 @@ def target_minimize(
 
     # All remaining methods require the private optimizer package.
     _require_private_package(method)
+    diagnostic_event_callback = _target_optimizer_diagnostic_event_callback()
     if method == "lbfgs-ondevice":
         lbfgs_ftol = float(options.get("ftol", tol))
 
@@ -5341,8 +5368,18 @@ def target_minimize(
             max_optimizer_state_trace_bytes=options.get(
                 "max_optimizer_state_trace_bytes"
             ),
+            diagnostic_event_callback=diagnostic_event_callback,
         )
-        return finalize(_private_lbfgs_result_to_optimize_result(state))
+        _record_target_optimizer_diagnostic_event(
+            diagnostic_event_callback,
+            "lbfgs_result_conversion_started",
+        )
+        result = _private_lbfgs_result_to_optimize_result(state)
+        _record_target_optimizer_diagnostic_event(
+            diagnostic_event_callback,
+            "lbfgs_result_conversion_returned",
+        )
+        return finalize(result)
 
     if method == "bfgs-ondevice":
         state = _minimize_bfgs_private(
@@ -5374,8 +5411,18 @@ def target_minimize(
             max_optimizer_state_trace_bytes=options.get(
                 "max_optimizer_state_trace_bytes"
             ),
+            diagnostic_event_callback=diagnostic_event_callback,
         )
-        return finalize(_private_lbfgs_result_to_optimize_result(state))
+        _record_target_optimizer_diagnostic_event(
+            diagnostic_event_callback,
+            "lbfgs_result_conversion_started",
+        )
+        result = _private_lbfgs_result_to_optimize_result(state)
+        _record_target_optimizer_diagnostic_event(
+            diagnostic_event_callback,
+            "lbfgs_result_conversion_returned",
+        )
+        return finalize(result)
     raise ValueError(f"Unknown target optimizer method {method!r}.")
 
 

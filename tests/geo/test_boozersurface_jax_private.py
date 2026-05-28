@@ -1151,6 +1151,48 @@ class TestOptimizerAdapterPrivate:
         assert progress_points[-1][0] >= 1
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_minimize_lbfgs_private_value_and_grad_emits_diagnostic_events(self):
+        """Direct private L-BFGS must expose the diagnostic event stream."""
+        half = _device_half()
+
+        def quad_value_and_grad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return half * jnp.dot(x, x), x
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        progress_points = []
+        diagnostic_events = []
+        initial_value_and_grad = quad_value_and_grad(x0)
+        state = _private_lbfgs._minimize_lbfgs_private_value_and_grad(
+            quad_value_and_grad,
+            x0,
+            maxiter=1,
+            gtol=1e-8,
+            maxcor=5,
+            progress_callback=_record_progress(progress_points),
+            initial_value_and_grad=initial_value_and_grad,
+            diagnostic_event_callback=(
+                lambda label, **fields: diagnostic_events.append((label, fields))
+            ),
+        )
+
+        assert int(state.k) <= 1
+        assert progress_points
+        assert [label for label, _ in diagnostic_events] == [
+            "lbfgs_initial_state_started",
+            "lbfgs_initial_state_returned",
+            "lbfgs_initial_value_and_grad_seed_started",
+            "lbfgs_initial_value_and_grad_seed_returned",
+            "lbfgs_main_kernel_started",
+            "lbfgs_main_kernel_returned",
+            "lbfgs_effects_barrier_started",
+            "lbfgs_effects_barrier_returned",
+        ]
+        assert diagnostic_events[0][1]["maxiter"] == 1
+        assert diagnostic_events[4][1]["accepted_step_callback"] is True
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_skips_debug_callback_without_observability(
         self,
         monkeypatch,

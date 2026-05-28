@@ -37,6 +37,11 @@ _TRACE_ARRAYS_PER_ENTRY = 2
 _TRACE_SCALARS_PER_ENTRY = 5
 
 
+def _record_diagnostic_event(callback, label, **fields):
+    if callback is not None:
+        callback(label, **fields)
+
+
 def _coerce_value_and_grad_result(fun, x):
     value, grad = fun(x)
     value = _as_jax_dtype(value, x.dtype)
@@ -327,7 +332,6 @@ def _lbfgsb_state_with_initial_value_and_grad(
     )(state, value, grad)
 
 
-
 def _lbfgsb_accepted_step_observer(
     *,
     callback,
@@ -425,6 +429,7 @@ def _minimize_lbfgs_private_impl(
     initial_value_and_grad=None,
     record_optimizer_state_trace=False,
     max_optimizer_state_trace_bytes=None,
+    diagnostic_event_callback=None,
 ):
     value_and_grad_fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
         value_and_grad_fun,
@@ -465,6 +470,14 @@ def _minimize_lbfgs_private_impl(
         x0.shape,
     )
 
+    _record_diagnostic_event(
+        diagnostic_event_callback,
+        "lbfgs_initial_state_started",
+        maxiter=int(maxiter_limit_value),
+        maxfun=int(maxfun_limit_value),
+        maxcor=int(history_size),
+        maxls=int(maxls),
+    )
     state = _lbfgsb_initial_state_kernel(
         cache_owner=solver_cache_owner,
         cache_key_prefix=solver_cache_key_prefix,
@@ -473,7 +486,15 @@ def _minimize_lbfgs_private_impl(
         gtol=gtol,
         maxls=maxls,
     )(x0)
+    _record_diagnostic_event(
+        diagnostic_event_callback,
+        "lbfgs_initial_state_returned",
+    )
     if initial_value_and_grad is not None:
+        _record_diagnostic_event(
+            diagnostic_event_callback,
+            "lbfgs_initial_value_and_grad_seed_started",
+        )
         state = _lbfgsb_state_with_initial_value_and_grad(
             state,
             initial_value_and_grad,
@@ -481,12 +502,22 @@ def _minimize_lbfgs_private_impl(
             cache_owner=solver_cache_owner,
             cache_key_prefix=solver_cache_key_prefix,
         )
+        _record_diagnostic_event(
+            diagnostic_event_callback,
+            "lbfgs_initial_value_and_grad_seed_returned",
+        )
     optimizer_state_trace = []
     accepted_step_callback = _lbfgsb_accepted_step_observer(
         callback=callback,
         progress_callback=progress_callback,
         optimizer_state_trace=optimizer_state_trace,
         record_optimizer_state_trace=record_optimizer_state_trace,
+    )
+    _record_diagnostic_event(
+        diagnostic_event_callback,
+        "lbfgs_main_kernel_started",
+        accepted_step_callback=accepted_step_callback is not None,
+        record_optimizer_state_trace=bool(record_optimizer_state_trace),
     )
     result = _lbfgsb_mainlb_kernel(
         value_and_grad_kernel,
@@ -496,8 +527,20 @@ def _minimize_lbfgs_private_impl(
         maxfun=int(maxfun_limit_value),
         accepted_step_callback=accepted_step_callback,
     )(state)
+    _record_diagnostic_event(
+        diagnostic_event_callback,
+        "lbfgs_main_kernel_returned",
+    )
     if accepted_step_callback is not None:
+        _record_diagnostic_event(
+            diagnostic_event_callback,
+            "lbfgs_effects_barrier_started",
+        )
         jax.effects_barrier()
+        _record_diagnostic_event(
+            diagnostic_event_callback,
+            "lbfgs_effects_barrier_returned",
+        )
     return result._replace(optimizer_state_trace=tuple(optimizer_state_trace))
 
 
@@ -515,6 +558,7 @@ def _minimize_lbfgs_private(
     progress_callback=None,
     record_optimizer_state_trace=False,
     max_optimizer_state_trace_bytes=None,
+    diagnostic_event_callback=None,
 ):
     return _minimize_lbfgs_private_impl(
         _scalar_value_and_grad(fun),
@@ -531,6 +575,7 @@ def _minimize_lbfgs_private(
         progress_callback=progress_callback,
         record_optimizer_state_trace=record_optimizer_state_trace,
         max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
+        diagnostic_event_callback=diagnostic_event_callback,
     )
 
 
@@ -549,6 +594,7 @@ def _minimize_lbfgs_private_value_and_grad(
     initial_value_and_grad=None,
     record_optimizer_state_trace=False,
     max_optimizer_state_trace_bytes=None,
+    diagnostic_event_callback=None,
 ):
     return _minimize_lbfgs_private_impl(
         fun,
@@ -566,4 +612,5 @@ def _minimize_lbfgs_private_value_and_grad(
         initial_value_and_grad=initial_value_and_grad,
         record_optimizer_state_trace=record_optimizer_state_trace,
         max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
+        diagnostic_event_callback=diagnostic_event_callback,
     )
