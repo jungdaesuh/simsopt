@@ -394,6 +394,39 @@ class SingleStageContinuationTests(unittest.TestCase):
             "/tmp/stage/single_stage_jax_runtime_spec.json",
         )
 
+    def test_build_stage_jax_runtime_seed_source_command_reprojects_source(self):
+        module = self.load_module()
+
+        command = module.build_stage_jax_runtime_seed_source_command(
+            python_executable="/usr/bin/python3",
+            passthrough_args=["--backend", "jax", "--optimizer-backend", "ondevice"],
+            stage=module.ContinuationStage("coarse", 2, 2, 31, 16, 1),
+            jax_runtime_seed_source=Path("/tmp/source/runtime-spec.json"),
+            jax_runtime_seed_spec_path=Path(
+                "/tmp/stage/single_stage_jax_runtime_spec.json"
+            ),
+        )
+
+        self.assertEqual(
+            command[:3],
+            ["/usr/bin/python3", "-c", module._BOOTSTRAP_SINGLE_STAGE_RUNNER],
+        )
+        self.assertEqual(command[3], str(module.REPO_ROOT))
+        self.assertEqual(command[4], str(module.SINGLE_STAGE_SCRIPT))
+        self.assertIn("--compile-jax-runtime-seed-spec", command)
+        self.assertEqual(
+            command[command.index("--jax-runtime-seed-source") + 1],
+            "/tmp/source/runtime-spec.json",
+        )
+        self.assertEqual(command[command.index("--mpol") + 1], "2")
+        self.assertEqual(command[command.index("--ntor") + 1], "2")
+        self.assertEqual(command[command.index("--nphi") + 1], "31")
+        self.assertEqual(command[command.index("--ntheta") + 1], "16")
+        self.assertEqual(
+            command[command.index("--jax-runtime-seed-spec") + 1],
+            "/tmp/stage/single_stage_jax_runtime_spec.json",
+        )
+
     def test_existing_stage_jax_runtime_seed_spec_path_reuses_matching_shape(self):
         module = self.load_module()
 
@@ -1952,6 +1985,104 @@ class SingleStageContinuationTests(unittest.TestCase):
         )
         self.assertEqual(
             summary["stages"][1]["jax_profile_dir"], str(final_profile_dir)
+        )
+
+    def test_main_reprojects_initial_jax_runtime_seed_source_for_first_stage(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "out"
+            source_spec = Path(tmpdir) / "source-runtime-spec.json"
+            source_spec.write_text("{}", encoding="utf-8")
+            compile_commands: list[list[str]] = []
+            stage_commands: list[list[str]] = []
+
+            def fake_run(command, check):
+                self.assertTrue(check)
+                if "--compile-jax-runtime-seed-spec" in command:
+                    compile_commands.append(command)
+                    spec_path = Path(
+                        command[command.index("--jax-runtime-seed-spec") + 1]
+                    )
+                    spec_path.parent.mkdir(parents=True, exist_ok=True)
+                    spec_path.write_text("{}", encoding="utf-8")
+                    return subprocess.CompletedProcess(command, 0)
+                stage_commands.append(command)
+                stage_output_root = Path(command[command.index("--output-root") + 1])
+                run_dir = stage_output_root / "run"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "results.json").write_text(
+                    json.dumps(
+                        {
+                            "backend": "jax",
+                            "optimizer_backend": "ondevice",
+                            "FINAL_IOTA": 0.205,
+                            "TARGET_IOTA": 0.21,
+                            "FINAL_NON_QS": 0.03,
+                            "FINAL_G": 4.5,
+                            "FIELD_ERROR": 2.5e-4,
+                            "OPTIMIZER_SUCCESS": True,
+                            "HARDWARE_CONSTRAINTS_OK": True,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (run_dir / "single_stage_jax_runtime_spec.json").write_text(
+                    "{}",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0)
+
+            stages = [module.ContinuationStage("coarse", 2, 2, 31, 16, 1)]
+            with patch.object(
+                module,
+                "build_default_continuation_stages",
+                return_value=stages,
+            ):
+                with patch.object(module.subprocess, "run", side_effect=fake_run):
+                    module.main(
+                        [
+                            "--output-root",
+                            str(output_root),
+                            "--run-id",
+                            "initial-source",
+                            "--initial-jax-runtime-seed-source",
+                            str(source_spec),
+                            "--backend",
+                            "jax",
+                            "--optimizer-backend",
+                            "ondevice",
+                            "--strict-validation",
+                        ]
+                    )
+
+            run_root = output_root / "continuation-initial-source"
+            summary = json.loads(
+                (run_root / "continuation_summary.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(len(compile_commands), 1)
+        self.assertEqual(len(stage_commands), 1)
+        compiled_spec = compile_commands[0][
+            compile_commands[0].index("--jax-runtime-seed-spec") + 1
+        ]
+        self.assertEqual(
+            compile_commands[0][
+                compile_commands[0].index("--jax-runtime-seed-source") + 1
+            ],
+            str(source_spec.resolve()),
+        )
+        self.assertEqual(
+            stage_commands[0][stage_commands[0].index("--jax-runtime-seed-spec") + 1],
+            compiled_spec,
+        )
+        self.assertEqual(
+            summary["initial_jax_runtime_seed_source"],
+            str(source_spec.resolve()),
+        )
+        self.assertEqual(
+            summary["stages"][0]["jax_runtime_seed_spec_path"],
+            compiled_spec,
         )
 
     def test_main_resume_run_root_reruns_invalid_completed_nonfinal_stage(self):

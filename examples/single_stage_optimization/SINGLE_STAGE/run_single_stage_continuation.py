@@ -108,6 +108,7 @@ _OVERRIDDEN_VALUE_FLAGS = frozenset(
         "--initial-step-scale",
         "--initial-step-maxiter",
         "--jax-runtime-seed-spec",
+        "--jax-runtime-seed-source",
     }
 )
 _WARM_START_CONTRACT_FLAGS = (
@@ -1793,6 +1794,38 @@ def build_stage_jax_runtime_seed_spec_command(
     return command
 
 
+def build_stage_jax_runtime_seed_source_command(
+    *,
+    python_executable: str,
+    passthrough_args: list[str],
+    stage: ContinuationStage,
+    jax_runtime_seed_source: Path,
+    jax_runtime_seed_spec_path: Path,
+) -> list[str]:
+    command = [
+        python_executable,
+        "-c",
+        _BOOTSTRAP_SINGLE_STAGE_RUNNER,
+        str(REPO_ROOT),
+        str(SINGLE_STAGE_SCRIPT),
+        "--jax-runtime-seed-source",
+        str(jax_runtime_seed_source),
+        "--jax-runtime-seed-spec",
+        str(jax_runtime_seed_spec_path),
+        "--compile-jax-runtime-seed-spec",
+        "--mpol",
+        str(stage.mpol),
+        "--ntor",
+        str(stage.ntor),
+        "--nphi",
+        str(stage.nphi),
+        "--ntheta",
+        str(stage.ntheta),
+    ]
+    command.extend(passthrough_args)
+    return command
+
+
 def build_stage_command(
     *,
     python_executable: str,
@@ -1980,6 +2013,15 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
             "Optional prior single-stage run directory to use as the first-stage "
             "surface/iota/G warm start. When --initial-stage2-bs-path is omitted, "
             "its biot_savart_opt.json also becomes the first-stage coil seed."
+        ),
+    )
+    parser.add_argument(
+        "--initial-jax-runtime-seed-source",
+        default=None,
+        help=(
+            "Optional immutable JAX runtime seed spec to reproject for the first "
+            "continuation stage when starting the JAX lane without a warm-start "
+            "run directory."
         ),
     )
     parser.add_argument(
@@ -2581,6 +2623,11 @@ def run_single_continuation_with_args(
         initial_stage2_seed_path = forced_initial_stage2_seed_path.resolve()
     if forced_initial_warm_start_run_dir is not None:
         initial_warm_start_run_dir = forced_initial_warm_start_run_dir.resolve()
+    initial_jax_runtime_seed_source = (
+        None
+        if args.initial_jax_runtime_seed_source is None
+        else Path(args.initial_jax_runtime_seed_source).expanduser().resolve()
+    )
     initial_warm_start_resolution = (
         None
         if initial_warm_start_run_dir is None
@@ -2633,6 +2680,9 @@ def run_single_continuation_with_args(
         "initial_warm_start_run_dir": None
         if initial_warm_start_run_dir is None
         else str(initial_warm_start_run_dir),
+        "initial_jax_runtime_seed_source": None
+        if initial_jax_runtime_seed_source is None
+        else str(initial_jax_runtime_seed_source),
         "initial_warm_start_resolution": initial_warm_start_resolution,
         "summarize_run_root": None
         if args.summarize_run_root is None
@@ -2670,28 +2720,44 @@ def run_single_continuation_with_args(
         else:
             stage2_seed_path = resolve_stage_seed_path(previous_run_dir)
             warm_start_run_dir = previous_run_dir
+        first_stage_runtime_seed_source = (
+            previous_run_dir is None
+            and warm_start_run_dir is None
+            and initial_jax_runtime_seed_source is not None
+        )
         existing_jax_runtime_seed_spec_path = (
             None
             if warm_start_run_dir is None
             else existing_stage_jax_runtime_seed_spec_path(warm_start_run_dir, stage)
         )
         jax_runtime_seed_spec_path = existing_jax_runtime_seed_spec_path
-        if warm_start_run_dir is not None and jax_runtime_seed_spec_path is None:
+        if (
+            warm_start_run_dir is not None or first_stage_runtime_seed_source
+        ) and jax_runtime_seed_spec_path is None:
             jax_runtime_seed_spec_path = build_stage_jax_runtime_seed_spec_path(
                 stage_output_root
             )
-        jax_runtime_seed_spec_command = (
-            None
-            if warm_start_run_dir is None
+        if first_stage_runtime_seed_source:
+            jax_runtime_seed_spec_command = build_stage_jax_runtime_seed_source_command(
+                python_executable=sys.executable,
+                passthrough_args=passthrough_args,
+                stage=stage,
+                jax_runtime_seed_source=initial_jax_runtime_seed_source,
+                jax_runtime_seed_spec_path=jax_runtime_seed_spec_path,
+            )
+        elif (
+            warm_start_run_dir is None
             or existing_jax_runtime_seed_spec_path is not None
-            else build_stage_jax_runtime_seed_spec_command(
+        ):
+            jax_runtime_seed_spec_command = None
+        else:
+            jax_runtime_seed_spec_command = build_stage_jax_runtime_seed_spec_command(
                 python_executable=sys.executable,
                 passthrough_args=passthrough_args,
                 stage=stage,
                 warm_start_run_dir=warm_start_run_dir,
                 jax_runtime_seed_spec_path=jax_runtime_seed_spec_path,
             )
-        )
         command = build_stage_command(
             python_executable=sys.executable,
             passthrough_args=passthrough_args,
