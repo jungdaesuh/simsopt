@@ -1372,6 +1372,65 @@ class SingleStageExampleTests(unittest.TestCase):
             },
         )
 
+    def test_resolve_target_lane_boozer_init_base_overrides_uses_inner_backend(
+        self,
+    ):
+        module = self.load_module()
+
+        with patch.object(
+            module, "get_jax_platform", return_value="cuda"
+        ), patch.object(
+            module,
+            "get_transfer_guard",
+            return_value="disallow",
+        ):
+            cpu_boozer_overrides = (
+                module.resolve_target_lane_boozer_init_base_overrides(
+                    field_backend="jax",
+                    optimizer_backend="ondevice",
+                    boozer_optimizer_backend="scipy",
+                    boozer_limited_memory=False,
+                    target_lane_boozer_bfgs_tol=1.0e-8,
+                    target_lane_boozer_bfgs_maxiter=48,
+                    target_lane_boozer_newton_tol=1.0e-10,
+                    target_lane_boozer_newton_maxiter=12,
+                    target_lane_boozer_newton_polish_policy="skip-large-strict-cuda",
+                    mpol=6,
+                    ntor=6,
+                )
+            )
+            fullgraph_ondevice_boozer_overrides = (
+                module.resolve_target_lane_boozer_init_base_overrides(
+                    field_backend="jax",
+                    optimizer_backend="scipy-jax-fullgraph",
+                    boozer_optimizer_backend="ondevice",
+                    boozer_limited_memory=False,
+                    target_lane_boozer_bfgs_tol=None,
+                    target_lane_boozer_bfgs_maxiter=None,
+                    target_lane_boozer_newton_tol=None,
+                    target_lane_boozer_newton_maxiter=None,
+                    target_lane_boozer_newton_polish_policy="skip-large-strict-cuda",
+                    mpol=6,
+                    ntor=6,
+                )
+            )
+
+        self.assertEqual(
+            cpu_boozer_overrides,
+            {
+                "least_squares_algorithm_override": None,
+                "bfgs_tol_override": None,
+                "bfgs_maxiter_override": None,
+                "newton_tol_override": None,
+                "newton_maxiter_override": None,
+                "newton_polish_policy_override": None,
+            },
+        )
+        self.assertEqual(
+            fullgraph_ondevice_boozer_overrides["newton_polish_policy_override"],
+            "skip",
+        )
+
     def test_resolve_target_lane_boozer_init_base_overrides_floors_bfgs_maxiter(
         self,
     ):
@@ -5823,6 +5882,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 module.resolve_effective_boozer_newton_polish_policy_override(
                     field_backend="jax",
                     optimizer_backend="ondevice",
+                    boozer_optimizer_backend="ondevice",
                     mpol=6,
                     ntor=6,
                     target_lane_boozer_newton_polish_policy="skip-large-strict-cuda",
@@ -5846,10 +5906,45 @@ class SingleStageExampleTests(unittest.TestCase):
                 module.resolve_effective_boozer_newton_polish_policy_override(
                     field_backend="jax",
                     optimizer_backend="ondevice",
+                    boozer_optimizer_backend="ondevice",
                     mpol=2,
                     ntor=2,
                     target_lane_boozer_newton_polish_policy="skip-large-strict-cuda",
                 )
+            )
+
+    def test_effective_boozer_newton_polish_policy_uses_inner_boozer_backend(
+        self,
+    ):
+        module = self.load_module()
+
+        with patch.object(
+            module, "get_jax_platform", return_value="cuda"
+        ), patch.object(
+            module,
+            "get_transfer_guard",
+            return_value="disallow",
+        ):
+            self.assertIsNone(
+                module.resolve_effective_boozer_newton_polish_policy_override(
+                    field_backend="jax",
+                    optimizer_backend="ondevice",
+                    boozer_optimizer_backend="scipy",
+                    mpol=6,
+                    ntor=6,
+                    target_lane_boozer_newton_polish_policy="skip-large-strict-cuda",
+                )
+            )
+            self.assertEqual(
+                module.resolve_effective_boozer_newton_polish_policy_override(
+                    field_backend="jax",
+                    optimizer_backend="scipy-jax-fullgraph",
+                    boozer_optimizer_backend="ondevice",
+                    mpol=6,
+                    ntor=6,
+                    target_lane_boozer_newton_polish_policy="skip-large-strict-cuda",
+                ),
+                "skip",
             )
 
     def test_should_write_single_stage_full_artifacts_respects_minimal_mode(self):

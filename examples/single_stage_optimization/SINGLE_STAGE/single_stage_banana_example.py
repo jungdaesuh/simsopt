@@ -7981,15 +7981,18 @@ def resolve_effective_boozer_newton_polish_policy_override(
     *,
     field_backend,
     optimizer_backend,
+    boozer_optimizer_backend=None,
     mpol,
     ntor,
     target_lane_boozer_newton_polish_policy=None,
 ):
     """Map the target-lane policy onto the BoozerSurfaceJAX option value."""
-    if (
-        field_backend != "jax"
-        or optimizer_backend not in _JAX_ONDEVICE_BOOZER_OUTER_OPTIMIZER_BACKENDS
-    ):
+    effective_boozer_backend = (
+        optimizer_backend
+        if boozer_optimizer_backend is None
+        else boozer_optimizer_backend
+    )
+    if field_backend != "jax" or effective_boozer_backend != "ondevice":
         return None
     policy = resolve_target_lane_boozer_newton_polish_policy(
         field_backend,
@@ -9626,6 +9629,7 @@ def resolve_target_lane_boozer_init_base_overrides(
     *,
     field_backend,
     optimizer_backend,
+    boozer_optimizer_backend=None,
     boozer_limited_memory=False,
     target_lane_boozer_bfgs_tol,
     target_lane_boozer_bfgs_maxiter,
@@ -9637,10 +9641,12 @@ def resolve_target_lane_boozer_init_base_overrides(
     ntor=None,
 ):
     """Return the baseline target-lane init overrides for JAX/ondevice solves."""
-    if (
-        field_backend != "jax"
-        or optimizer_backend not in _JAX_ONDEVICE_BOOZER_OUTER_OPTIMIZER_BACKENDS
-    ):
+    effective_boozer_backend = (
+        optimizer_backend
+        if boozer_optimizer_backend is None
+        else boozer_optimizer_backend
+    )
+    if field_backend != "jax" or effective_boozer_backend != "ondevice":
         return {
             "least_squares_algorithm_override": None,
             "bfgs_tol_override": None,
@@ -9687,6 +9693,7 @@ def resolve_target_lane_boozer_init_base_overrides(
         "newton_polish_policy_override": resolve_effective_boozer_newton_polish_policy_override(
             field_backend=field_backend,
             optimizer_backend=optimizer_backend,
+            boozer_optimizer_backend=effective_boozer_backend,
             mpol=0 if mpol is None else mpol,
             ntor=0 if ntor is None else ntor,
             target_lane_boozer_newton_polish_policy=target_lane_boozer_newton_polish_policy,
@@ -12095,29 +12102,17 @@ if __name__ == "__main__":
     )
     target_lane_boozer_newton_tol_record = (
         args.target_lane_boozer_newton_tol
-        if args.backend == "jax"
-        and (
-            boozer_optimizer_backend_record == "ondevice"
-            or args.optimizer_backend == _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND
-        )
+        if args.backend == "jax" and boozer_optimizer_backend_record == "ondevice"
         else None
     )
     target_lane_boozer_newton_maxiter_record = (
         args.target_lane_boozer_newton_maxiter
-        if args.backend == "jax"
-        and (
-            boozer_optimizer_backend_record == "ondevice"
-            or args.optimizer_backend == _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND
-        )
+        if args.backend == "jax" and boozer_optimizer_backend_record == "ondevice"
         else None
     )
     target_lane_boozer_newton_polish_policy_record = (
         args.target_lane_boozer_newton_polish_policy
-        if args.backend == "jax"
-        and (
-            boozer_optimizer_backend_record == "ondevice"
-            or args.optimizer_backend == _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND
-        )
+        if args.backend == "jax" and boozer_optimizer_backend_record == "ondevice"
         else None
     )
     boozer_optimizer_backend_hash_record = (
@@ -12152,6 +12147,7 @@ if __name__ == "__main__":
     base_boozer_init_overrides = resolve_target_lane_boozer_init_base_overrides(
         field_backend=args.backend,
         optimizer_backend=optimizer_backend_record,
+        boozer_optimizer_backend=boozer_optimizer_backend_record,
         boozer_limited_memory=effective_boozer_limited_memory,
         target_lane_boozer_bfgs_tol=target_lane_boozer_bfgs_tol_record,
         target_lane_boozer_bfgs_maxiter=target_lane_boozer_bfgs_maxiter_record,
