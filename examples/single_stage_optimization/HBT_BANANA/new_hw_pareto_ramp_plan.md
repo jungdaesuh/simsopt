@@ -7,7 +7,7 @@ Plan a staged optimization campaign that uses the signed vacuum-current `nv2_iot
 ## Goals
 
 - Produce at least one new-HW-compliant candidate with volume `>= 0.09` and iota `>= 0.10`.
-- Preserve the vacuum-current sign contract: TF current `-80 kA`, the corresponding signed banana currents embedded in `biot_savart_opt.json`, signed `G < 0`, no `I` field, no `BoozerSurfaceFiniteI`, and no proxy/VF/plasma-current finite-current terms.
+- Preserve the vacuum-current sign contract: TF current `-80 kA`, corresponding signed banana currents from the lane artifact telemetry, signed `G < 0`, no `I` field, no `BoozerSurfaceFiniteI`, and no proxy/VF/plasma-current finite-current terms. For the `simsopt-surrogate` signed package, the current source is `biot_savart_opt.json`.
 - Avoid wasting Boozer solves on infeasible geometry by satisfying the coil footprint and winding-surface envelope before growing volume.
 - Record enough telemetry to rank candidates by hardware slack, volume, iota, Boozer residual, and topology quality.
 
@@ -72,6 +72,69 @@ Plan a staged optimization campaign that uses the signed vacuum-current `nv2_iot
 
 The seed already has enough iota and acceptable current, length, curvature, and clearance margins under the old/offspec telemetry. The dominant mismatch is geometric: old surface radius, unverified new banana major radius, and too-wide poloidal footprint. Growing volume before the coil footprint is inside the new envelope will drive the optimizer toward expensive but unpromotable designs. The safer strategy is to first make the coil geometry live inside the new hardware envelope at roughly the existing volume, then grow volume in small increments while checking final iota against the requested floor.
 
+## Seed And Parent Selection
+
+| Role | Artifact or source | Use | Promotion status |
+| --- | --- | --- | --- |
+| Diagnostic signed seed | `/Users/suhjungdae/code/columbia/simsopt-surrogate/tmp/nv2_iota298_negTF_signed_artifacts_for_review_20260527T113921` | First vacuum-current boot, sign convention check, Boozer JSON lineage check, low-volume footprint-ramp parent only if it boots cleanly. | Not promotable: old `banana_surf_radius=0.21`, old `LENGTH_TARGET=1.7`, old/offspec `MAJOR_RADIUS=0.976`, and measured `70 deg` poloidal extent failure. |
+| First ramp parent | Best booted signed-seed continuation that passes vacuum-current JSON lineage and does not introduce new hard-limit failures beyond the known poloidal extent miss. | Parent for footprint ramp at `volume ~= 0.04`. | Not promotable until it passes new-HW footprint and winding-surface checks. |
+| Shrink-ramp parent | Best footprint-ramp candidate at the tightest completed poloidal threshold. | Parent for `banana_surf_radius` shrink steps. | Not promotable until active winding-surface telemetry proves `R0=0.903`, `a=0.142`. |
+| Volume-ramp parent | First candidate that passes footprint plus winding-surface checks. | Parent for volume targets `0.055 -> 0.070 -> 0.085 -> 0.090`. | Promotion candidate only after final hard-limit, vacuum-current, and topology gates pass. |
+| Local registry parent IDs | `config.yaml` `warm_start.stage1_id` and `warm_start.stage2_id`. | Required by local `02_stage2_driver.py` and `03_singlestage_driver.py`. | Currently TBD; fill with concrete run IDs before local registry execution. |
+
+Parent selection rule: never keep using the original signed package once a later candidate has better hardware slack under the same vacuum-current contract. The original package is a sign/Boozer regression anchor, not a privileged optimizer parent.
+
+## Run Book
+
+### Signed package replay in `simsopt-surrogate`
+
+Use the exact command in:
+
+```text
+/Users/suhjungdae/code/columbia/simsopt-surrogate/tmp/nv2_iota298_negTF_signed_artifacts_for_review_20260527T113921/AGENT_RUN_INSTRUCTIONS.md
+```
+
+Required properties of that command:
+
+- It passes `--single-stage-resume-bs-path "$PKG/files/biot_savart_opt.json"`.
+- It passes `--stage2-seed-surf-path "$PKG/files/surf_opt_boozer_surface.json"`.
+- It passes `--tf-current-A -80000`.
+- It does not pass `--finite-current-mode`, `--proxy-plasma-current-A`, `--vf-current-A`, `--vf-template-path`, or other plasma-current/proxy/VF controls.
+- For a 50-iteration startup budget, use both `--maxiter 50` and `--multisurface-initial-step-maxiter 50`.
+
+### Local clean new-HW lane in `baseline-original`
+
+The local lane is registry-based and requires parent IDs; there is no "latest run" shortcut. This directory has Stage 2 and single-stage drivers, so the Stage 2 parent must already exist as a Stage 1 registry artifact before this runbook starts.
+
+```bash
+cd /Users/suhjungdae/code/hbt-compare/repos/baseline-original/examples/single_stage_optimization/HBT_BANANA
+
+# Before Stage 2, set warm_start.stage1_id in config.yaml to an existing s01_* parent.
+BANANA_OUT_DIR=/path/to/new_hw_runs python 02_stage2_driver.py
+
+# Before single-stage, set warm_start.stage2_id in config.yaml to the emitted s02_* parent.
+BANANA_OUT_DIR=/path/to/new_hw_runs python 03_singlestage_driver.py
+```
+
+Before running this lane, update or confirm these `config.yaml` values:
+
+- `warm_start.stage1_id`: concrete `s01_*` parent for Stage 2.
+- `warm_start.stage2_id`: concrete `s02_*` parent for single-stage.
+- `winding_surface.R0: 0.903`.
+- `winding_surface.a: 0.142`.
+- `thresholds.length_target: 1.9`.
+- `thresholds.length_max: 2.0`.
+- `thresholds.coil_coil_min: 0.0462`.
+- `thresholds.coil_surface_min: 0.01`.
+- `thresholds.plasma_vessel_min: 0.04`.
+- `thresholds.poloidal_half_width_max_deg: 70.0`.
+- `thresholds.curvature_max: 100`.
+- `targets.volume` and `targets.iota` for the current ramp step.
+
+Do not use `HBT_BANANA/jhalpern30/` output as a promotion parent. That lane is useful for historical smoke/debugging only because it materializes proxy/VF finite-current-style coils.
+
+Expected local artifacts use the registry patterns in `utils/run_registry.py`, not the `simsopt-surrogate` package names. For this lane, Stage 2 and single-stage Boozer outputs are `boozersurface_{id}_opt.json` or `boozersurface_{id}_failed.json`, diagnostics are `diagnostics_{id}.txt`, and successful single-stage runs also write `state_{id}_opt.npz`.
+
 ## Assumptions
 
 - The `simsopt-surrogate` single-stage path can run with explicit thresholds for poloidal extent, coil width, coil-plasma distance, coil-coil distance, curvature, banana current, TF current, and volume/iota targets.
@@ -117,7 +180,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
    - [ ] Sweep iota target values or verified floors: `0.10`, `0.15`, `0.20`.
    - [ ] Sweep volume targets around the front: `0.085`, `0.090`, `0.095`.
    - [ ] Rank by: hardware-clean first, topology pass second, `FINAL_VOLUME` third, `FINAL_IOTA` fourth, Boozer residual fifth.
-   - [ ] Archive every promoted candidate with `biot_savart_opt.json`, vacuum-current Boozer surface JSON, surface JSON, full results, non-null properties, and Poincare diagnostics.
+   - [ ] Archive every promoted candidate with the lane-specific artifact set below, non-null realized metrics, and Poincare diagnostics.
 
 6. Decide whether soft penalties are enough
    - [ ] If the footprint and winding-surface ramps pass with soft penalties, keep the method simple.
@@ -137,7 +200,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 - [ ] For every run, assert signed currents:
   - `TF_CURRENT_A == -80000`
   - `abs(BANANA_CURRENT_MAX_ABS_A) <= 16000`
-  - signed banana current values come from the loaded `biot_savart_opt.json` and preserve the signed negative-TF/banana-current convention.
+  - signed banana current values preserve the signed negative-TF/banana-current convention and are backed by the lane artifact telemetry: loaded `biot_savart_opt.json` for `simsopt_surrogate_cli`, registry/config/artifact telemetry for `baseline_original_hbt_banana`.
 - [ ] For every promoted candidate, assert hard limits:
   - `LENGTH_TARGET == 1.9` for new-HW campaign rows.
   - `COIL_LENGTH <= 1.9` for target-pass rows and `<= 2.0` absolute.
@@ -155,6 +218,60 @@ The seed already has enough iota and acceptable current, length, curvature, and 
   - Boozer solve succeeds and residual is recorded.
 - [ ] Run strict Poincare validation on final candidates, not on every exploratory near-miss.
 - [ ] Check that result files include both realized values and thresholds for hardware-clean rows.
+
+## Required Artifact Package
+
+Each archived candidate directory must contain or point to the artifact set for its lane.
+
+For `simsopt_surrogate_cli` candidates:
+
+- `biot_savart_opt.json`
+- vacuum-current Boozer surface JSON
+- Boozer state sidecar if the run path writes one
+- surface JSON
+- full `results.json`
+- all-properties JSON or equivalent non-null property dump
+- diagnostics log
+- Poincare data and plot for promoted candidates
+- a single Pareto row with the schema below
+
+For `baseline_original_hbt_banana` candidates:
+
+- registry row and config hash for the local run ID
+- parent `s01_*` or `s02_*` registry ID used for the stage
+- `boozersurface_{id}_opt.json` for successful rows, or `boozersurface_{id}_failed.json` for retained near-miss diagnostics
+- `state_{id}_opt.npz` for successful single-stage rows
+- `diagnostics_{id}.txt`
+- explicit realized-metric dump or registry export covering the Pareto schema below
+- external Poincare data and plot for promoted candidates
+- a single Pareto row with the schema below
+
+Do not require `biot_savart_opt.json` or `results.json` from the local `baseline_original_hbt_banana` lane unless a separate exporter is added; those names belong to the `simsopt-surrogate` artifact convention.
+
+Required Pareto row columns:
+
+| Column | Meaning |
+| --- | --- |
+| `run_id` | Candidate run identifier or path basename. |
+| `parent_id` | Immediate parent candidate, stage ID, or signed package name. |
+| `seed_source` | `signed_zip`, `footprint_ramp`, `shrink_ramp`, `volume_ramp`, or `fresh_stage2`. |
+| `lane` | `simsopt_surrogate_cli` or `baseline_original_hbt_banana`. |
+| `volume` | Final measured volume. |
+| `iota` | Final measured iota. |
+| `tf_current_A` | Signed TF current; must be `-80000`. |
+| `banana_current_max_abs_A` | Maximum absolute banana current; must be `<=16000`. |
+| `coil_length_m` | Banana coil length. |
+| `coil_coil_min_m` | Minimum coil-coil distance. |
+| `coil_plasma_min_m` | Minimum coil-plasma distance. |
+| `plasma_vessel_min_m` | Minimum plasma-vessel distance or explicit separate-check reference. |
+| `max_curvature_inv_m` | Maximum curvature. |
+| `poloidal_extent_rad` | Realized poloidal half-width. |
+| `winding_R0_m` | Active winding-surface major radius. |
+| `winding_a_m` | Active winding-surface minor radius. |
+| `boozer_residual` | Recorded Boozer residual or residual norm. |
+| `topology_status` | Strict Poincare/topology result for promoted rows. |
+| `vacuum_lineage_ok` | True only if Boozer JSON is plain `BoozerSurface` with no `I` field and no `BoozerSurfaceFiniteI`. |
+| `promotable` | True only if every hard gate and physics floor passes. |
 
 ## Risks and Mitigations
 
@@ -176,7 +293,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 ## Completion Criteria
 
 - [ ] At least one archived candidate passes all new HW limits with volume `>=0.09` and iota `>=0.10`.
-- [ ] The archived candidate is vacuum-current: no `I` field, no `BoozerSurfaceFiniteI`, no proxy/VF/plasma-current finite-current flags, and signed negative TF plus corresponding signed banana currents embedded in `biot_savart_opt.json`.
+- [ ] The archived candidate is vacuum-current: no `I` field, no `BoozerSurfaceFiniteI`, no proxy/VF/plasma-current finite-current flags, and lane-specific evidence for signed negative TF plus corresponding signed banana currents. For `simsopt_surrogate_cli`, that evidence is `biot_savart_opt.json`; for `baseline_original_hbt_banana`, it is the registry/config/artifact telemetry for the local run.
 - [ ] The final candidate has strict Poincare evidence and non-null hardware metrics.
 - [ ] The Pareto table includes at least volume, iota, Boozer residual, non-QS metric, coil length, coil-coil distance, coil-plasma distance, curvature, current, poloidal extent, and topology status.
 - [ ] The campaign records whether the signed zip was useful as a parent or only as a sign/Boozer regression.
