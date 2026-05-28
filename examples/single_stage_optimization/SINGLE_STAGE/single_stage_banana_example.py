@@ -4247,6 +4247,25 @@ def residue_objective_replay_config_payload(config):
     return {str(key): value for key, value in config}
 
 
+def validate_resume_solver_checkpoint_residue_replay_config(
+    checkpoint_payload,
+    current_residue_replay_config,
+):
+    if checkpoint_payload is None:
+        return
+    checkpoint_config = checkpoint_payload.get("residue_objective_replay_config")
+    current_config = residue_objective_replay_config_payload(
+        current_residue_replay_config
+    )
+    if checkpoint_config != current_config:
+        raise ValueError(
+            "Greene residue objective replay config mismatch for solver checkpoint "
+            "resume; re-supply the original residue objective targets, seeds, "
+            "axis, validation, and runtime flags or resume without changing the "
+            "objective."
+        )
+
+
 def residue_objective_payload_from_search_eval(search_eval):
     if (
         search_eval is not None
@@ -9330,6 +9349,7 @@ def build_single_stage_solver_checkpoint_state(
     stage2_bs_path,
     out_dir_iter,
     alm_state=None,
+    residue_objective_replay_config=None,
 ):
     return build_solver_checkpoint_payload(
         goal_mode=goal_mode,
@@ -9380,6 +9400,7 @@ def build_single_stage_solver_checkpoint_state(
         conditioning_first_accepted_report=run_dict.get(
             "frontier_conditioning_first_accepted_report"
         ),
+        residue_objective_replay_config=residue_objective_replay_config,
     )
 
 
@@ -9396,6 +9417,7 @@ def write_single_stage_solver_checkpoint_state(
     out_dir_iter,
     alm_state=None,
 ):
+    replay_config = current_preserved_timeout_replay_config()
     checkpoint_payload = build_single_stage_solver_checkpoint_state(
         run_dict,
         requested_maxiter=requested_maxiter,
@@ -9406,6 +9428,9 @@ def write_single_stage_solver_checkpoint_state(
         stage2_bs_path=stage2_bs_path,
         out_dir_iter=out_dir_iter,
         alm_state=alm_state,
+        residue_objective_replay_config=residue_objective_replay_config_payload(
+            replay_config.residue_objective_replay_config
+        ),
     )
     write_solver_checkpoint(
         solver_checkpoint_path(out_dir),
@@ -11437,6 +11462,10 @@ if __name__ == "__main__":
     )
     EFFECTIVE_SEED_REGIME = REQUESTED_SEED_REGIME
     PRESERVED_TIMEOUT_REPLAY_CONFIG = current_preserved_timeout_replay_config()
+    validate_resume_solver_checkpoint_residue_replay_config(
+        resume_solver_checkpoint_payload,
+        PRESERVED_TIMEOUT_REPLAY_CONFIG.residue_objective_replay_config,
+    )
 
     def current_single_stage_alm_constraint_names():
         return single_stage_alm_constraint_names(

@@ -5668,6 +5668,79 @@ class HardwareConstraintTests(unittest.TestCase):
             2.5e-4,
         )
 
+    def test_solver_checkpoint_preserves_residue_objective_replay_config(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 4.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": diagnostic_search_eval_payload(
+                {"total": 4.0, "surface_weights": np.array([1.0])}
+            ),
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": False, "success": True},
+            "intersecting": False,
+            "accepted_iterations": 3,
+        }
+        residue_replay_config = {
+            "enabled": True,
+            "weight": 0.25,
+            "targets_json": "/tmp/targets.json",
+            "targets_sha256": "sha256:targets",
+            "seeds_json": "/tmp/seeds.json",
+            "seeds_sha256": "sha256:seeds",
+            "target_manifest_id": "sha256:test-targets",
+            "validation_id": "validation-artifact",
+            "axis_r": 0.86,
+            "axis_z": 0.0,
+        }
+
+        payload = module.build_single_stage_solver_checkpoint_state(
+            run_dict,
+            requested_maxiter=10,
+            runtime_maxiter=10,
+            accepted_stage="initial",
+            goal_mode="target",
+            constraint_method="penalty",
+            stage2_bs_path="/tmp/biot_savart.json",
+            out_dir_iter="/tmp/out",
+            residue_objective_replay_config=residue_replay_config,
+        )
+
+        self.assertEqual(
+            payload["residue_objective_replay_config"],
+            residue_replay_config,
+        )
+
+    def test_resume_solver_checkpoint_requires_matching_residue_replay_config(self):
+        module = load_single_stage_example_module()
+        checkpoint_payload = {
+            "residue_objective_replay_config": {
+                "enabled": True,
+                "weight": 0.25,
+                "targets_sha256": "sha256:targets",
+                "seeds_sha256": "sha256:seeds",
+                "target_manifest_id": "sha256:test-targets",
+                "validation_id": "validation-artifact",
+            }
+        }
+        matching_config = tuple(
+            checkpoint_payload["residue_objective_replay_config"].items()
+        )
+
+        module.validate_resume_solver_checkpoint_residue_replay_config(
+            checkpoint_payload,
+            matching_config,
+        )
+        with self.assertRaisesRegex(ValueError, "Greene residue objective replay config"):
+            module.validate_resume_solver_checkpoint_residue_replay_config(
+                checkpoint_payload,
+                None,
+            )
+
     def test_maybe_update_best_accepted_incumbent_tracks_valid_nonself_intersecting_states(
         self,
     ):

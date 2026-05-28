@@ -347,6 +347,62 @@ class FrontierContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Expected frontier archive state"):
             contracts.validate_frontier_archive_payload(payload)
 
+    def test_archive_validator_rejects_certified_member_without_invariant_torus_certificate(
+        self,
+    ):
+        archive_module = load_frontier_archive_module()
+        contracts = load_frontier_contracts_module()
+
+        member = make_frontier_archive_member(
+            archive_module,
+            member_id="campaign:lane_01",
+            iota=0.17,
+            volume=0.105,
+            qa_error=0.011,
+            boozer_residual=0.007,
+            soft_search_score=-1.0,
+            results_path="/tmp/results.json",
+        )
+        payload = archive_module.serialize_frontier_archive(
+            [member],
+            campaign_id="campaign",
+            hypervolume_reference=self.HYPERVOLUME_REFERENCE,
+        )
+        del payload["members"][0]["constraint_metrics"][
+            "frontier_invariant_torus_fraction"
+        ]
+
+        with self.assertRaisesRegex(ValueError, "frontier_invariant_torus_fraction"):
+            contracts.validate_frontier_archive_payload(payload)
+
+    def test_archive_validator_rejects_certified_member_below_invariant_torus_floor(
+        self,
+    ):
+        archive_module = load_frontier_archive_module()
+        contracts = load_frontier_contracts_module()
+
+        member = make_frontier_archive_member(
+            archive_module,
+            member_id="campaign:lane_01",
+            iota=0.17,
+            volume=0.105,
+            qa_error=0.011,
+            boozer_residual=0.007,
+            soft_search_score=-1.0,
+            results_path="/tmp/results.json",
+        )
+        payload = archive_module.serialize_frontier_archive(
+            [member],
+            campaign_id="campaign",
+            hypervolume_reference=self.HYPERVOLUME_REFERENCE,
+        )
+        constraint_metrics = payload["members"][0]["constraint_metrics"]
+        constraint_metrics["frontier_invariant_torus_fraction"] = 0.25
+        constraint_metrics["frontier_invariant_torus_min"] = 0.30
+
+        with self.assertRaisesRegex(ValueError, "frontier_invariant_torus_fraction"):
+            contracts.validate_frontier_archive_payload(payload)
+
     def test_frontier_conditioning_gate_requires_seed_and_first_accepted(self):
         conditioning = load_frontier_conditioning_module()
 
@@ -901,7 +957,7 @@ class FrontierContractTests(unittest.TestCase):
             first_accepted_report,
         )
 
-    def test_solver_checkpoint_accepts_legacy_v2_without_topology_snapshots(self):
+    def test_solver_checkpoint_accepts_missing_optional_topology_snapshots(self):
         checkpoint_module = load_frontier_solver_checkpoint_module()
         incumbents = load_incumbents_module()
 
@@ -943,6 +999,44 @@ class FrontierContractTests(unittest.TestCase):
             payload.pop(optional_key)
 
         checkpoint_module.validate_solver_checkpoint_payload(payload)
+
+    def test_solver_checkpoint_requires_residue_objective_replay_config_key(self):
+        checkpoint_module = load_frontier_solver_checkpoint_module()
+        incumbents = load_incumbents_module()
+
+        incumbent = incumbents.SingleStageIncumbentState(
+            x=np.array([1.0, 2.0]),
+            surface_state={"surface": [1.0]},
+            objective_total=1.25,
+            objective_grad=np.array([0.1, 0.2]),
+            search_eval={"total": 1.25, "grad": [0.1, 0.2]},
+            surface_status={"ok": True},
+            search_surface_status={"ok": True},
+            accepted_hardware_status={"success": True},
+            topology_gate_status={"success": True},
+        )
+        payload = checkpoint_module.build_solver_checkpoint_payload(
+            goal_mode="frontier",
+            constraint_method="penalty",
+            stage2_bs_path="/tmp/seed.json",
+            requested_maxiter=300,
+            runtime_maxiter=120,
+            accepted_iterations=5,
+            accepted_boozer_stage="initial",
+            accepted_incumbent=incumbent,
+            best_accepted_incumbent=None,
+            best_accepted_stage=None,
+            best_accepted_metric=None,
+            best_feasible_incumbent=None,
+            best_feasible_stage=None,
+            best_feasible_metric=None,
+            out_dir_iter="/tmp/out",
+            run_counters={"it": 6},
+        )
+        payload.pop("residue_objective_replay_config")
+
+        with self.assertRaisesRegex(ValueError, "residue_objective_replay_config"):
+            checkpoint_module.validate_solver_checkpoint_payload(payload)
 
     def test_solver_checkpoint_disk_round_trip_via_write_and_load(self):
         # Closes the gap that the existing in-memory round-trip only validated

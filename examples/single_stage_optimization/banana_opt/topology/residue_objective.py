@@ -39,6 +39,8 @@ GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_MIN_ORDER = 1.95
 GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_MIN_SAMPLES = 3
 GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_ORDER_RTOL = 1.0e-9
 GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_ORDER_ATOL = 1.0e-12
+GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_RTOL = 1.0e-9
+GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_ATOL = 1.0e-18
 DEFAULT_RESIDUE_OBJECTIVE_WEIGHT = 0.0
 DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS = 768
 
@@ -593,11 +595,16 @@ def _validate_optimizer_taylor_diagnostic(
                 "status must be converged"
             )
         step = float(sample["step"])
+        residue = float(sample["residue"])
+        first_order_prediction = float(sample["first_order_prediction"])
         residual = float(sample["residual"])
         absolute_residual = float(sample["absolute_residual"])
+        expected_residual = residue - first_order_prediction
         if (
             step <= 0.0
             or not isfinite(step)
+            or not isfinite(residue)
+            or not isfinite(first_order_prediction)
             or not isfinite(residual)
             or absolute_residual <= 0.0
             or not isfinite(absolute_residual)
@@ -605,6 +612,26 @@ def _validate_optimizer_taylor_diagnostic(
             raise ValueError(
                 "Greene residue objective optimizer Taylor validation samples "
                 "must have finite positive steps and finite positive residuals"
+            )
+        if not np.isclose(
+            residual,
+            expected_residual,
+            rtol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_RTOL,
+            atol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_ATOL,
+        ):
+            raise ValueError(
+                "Greene residue objective optimizer Taylor validation sample "
+                "residual must equal residue minus first_order_prediction"
+            )
+        if not np.isclose(
+            absolute_residual,
+            abs(residual),
+            rtol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_RTOL,
+            atol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_ATOL,
+        ):
+            raise ValueError(
+                "Greene residue objective optimizer Taylor validation sample "
+                "absolute_residual must equal abs(residual)"
             )
     observed_orders = diagnostic["observed_orders"]
     if not isinstance(observed_orders, Sequence) or isinstance(observed_orders, str):

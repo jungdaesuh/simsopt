@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import ClassVar, Mapping
 
 from .frontier_dominance import (
@@ -31,7 +32,7 @@ FRONTIER_LANE_RECORD_SCHEMA_VERSION = "frontier_lane_record_v1"
 FRONTIER_CAMPAIGN_MANIFEST_SCHEMA_VERSION = "frontier_campaign_manifest_v2"
 FRONTIER_CAMPAIGN_SUMMARY_SCHEMA_VERSION = "frontier_campaign_summary_v1"
 FRONTIER_CAMPAIGN_RECOMMENDED_SCHEMA_VERSION = "frontier_campaign_recommended_v1"
-FRONTIER_SOLVER_CHECKPOINT_SCHEMA_VERSION = "single_stage_solver_checkpoint_v2"
+FRONTIER_SOLVER_CHECKPOINT_SCHEMA_VERSION = "single_stage_solver_checkpoint_v3"
 
 FRONTIER_CERTIFICATION_ONLY_METRICS = (
     "coil_length",
@@ -283,6 +284,70 @@ def validate_frontier_archive_member_payload(
         "rerun_contract",
     ):
         _require_mapping(payload, field_name)
+    if archive_state == FRONTIER_ARCHIVE_STATE_CERTIFIED:
+        _require_certified_frontier_archive_member_certification(payload)
+
+
+def _require_certified_frontier_archive_member_certification(
+    payload: Mapping[str, object],
+) -> None:
+    if payload["hard_certification_ok"] is not True:
+        raise ValueError(
+            "Certified frontier archive members require hard_certification_ok=True"
+        )
+    constraint_metrics = _require_mapping(payload, "constraint_metrics")
+    if constraint_metrics.get("frontier_certification_ok") is not True:
+        raise ValueError(
+            "Certified frontier archive members require frontier_certification_ok=True"
+        )
+    invariant_torus_fraction = _require_finite_metric(
+        constraint_metrics,
+        "frontier_invariant_torus_fraction",
+        artifact_name="Certified frontier archive member",
+    )
+    invariant_torus_min = _require_finite_metric(
+        constraint_metrics,
+        "frontier_invariant_torus_min",
+        artifact_name="Certified frontier archive member",
+    )
+    if not (0.0 <= invariant_torus_fraction <= 1.0):
+        raise ValueError(
+            "Certified frontier archive member frontier_invariant_torus_fraction "
+            "must be between 0 and 1"
+        )
+    if not (0.0 <= invariant_torus_min <= 1.0):
+        raise ValueError(
+            "Certified frontier archive member frontier_invariant_torus_min "
+            "must be between 0 and 1"
+        )
+    if invariant_torus_fraction < invariant_torus_min:
+        raise ValueError(
+            "Certified frontier archive member frontier_invariant_torus_fraction "
+            "must satisfy frontier_invariant_torus_fraction >= "
+            "frontier_invariant_torus_min"
+        )
+
+
+def _require_finite_metric(
+    payload: Mapping[str, object],
+    field_name: str,
+    *,
+    artifact_name: str,
+) -> float:
+    if field_name not in payload:
+        raise ValueError(f"{artifact_name} missing required metric {field_name}")
+    value = payload[field_name]
+    if isinstance(value, bool):
+        raise ValueError(f"{artifact_name} metric {field_name} must be finite")
+    try:
+        finite_value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{artifact_name} metric {field_name} must be finite"
+        ) from exc
+    if not isfinite(finite_value):
+        raise ValueError(f"{artifact_name} metric {field_name} must be finite")
+    return finite_value
 
 
 def validate_frontier_archive_payload(payload: Mapping[str, object]) -> None:

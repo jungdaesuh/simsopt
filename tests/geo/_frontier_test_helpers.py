@@ -109,6 +109,13 @@ def make_frontier_archive_member(
         constraint_metrics["frontier_trust_ok"] = frontier_trust_ok
     if hardware_constraints_ok is not None:
         constraint_metrics["hardware_constraints_ok"] = hardware_constraints_ok
+    if hard_certification_ok:
+        constraint_metrics["frontier_certification_ok"] = True
+        constraint_metrics["frontier_certification_reason"] = "certified"
+        constraint_metrics["frontier_invariant_torus_fraction"] = 1.0
+        constraint_metrics["frontier_invariant_torus_min"] = 0.0
+        constraint_metrics["frontier_kam_fraction"] = 1.0
+        constraint_metrics["frontier_kam_min"] = 0.0
     return archive_module.FrontierArchiveMember(
         member_id=member_id,
         lane_id=member_id.split(":")[-1],

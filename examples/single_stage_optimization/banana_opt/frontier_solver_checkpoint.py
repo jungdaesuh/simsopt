@@ -70,6 +70,7 @@ def build_solver_checkpoint_payload(
     best_confinement_objective: Mapping[str, object] | None = None,
     conditioning_seed_report: Mapping[str, object] | None = None,
     conditioning_first_accepted_report: Mapping[str, object] | None = None,
+    residue_objective_replay_config: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_version": FRONTIER_SOLVER_CHECKPOINT_SCHEMA_VERSION,
@@ -130,6 +131,9 @@ def build_solver_checkpoint_payload(
         "conditioning_first_accepted_report": None
         if conditioning_first_accepted_report is None
         else _serialize_value(dict(conditioning_first_accepted_report)),
+        "residue_objective_replay_config": None
+        if residue_objective_replay_config is None
+        else _serialize_value(dict(residue_objective_replay_config)),
     }
     validate_solver_checkpoint_payload(payload)
     return payload
@@ -168,10 +172,41 @@ def validate_solver_checkpoint_payload(payload: Mapping[str, object]) -> None:
         "accepted_incumbent",
         "run_counters",
         "out_dir_iter",
+        "residue_objective_replay_config",
     )
     missing = [key for key in required_keys if key not in payload]
     if missing:
         raise ValueError(f"Missing single-stage solver checkpoint keys: {missing}")
+    residue_replay_config = payload["residue_objective_replay_config"]
+    if residue_replay_config is not None:
+        _validate_residue_objective_replay_config(residue_replay_config)
+
+
+def _validate_residue_objective_replay_config(payload: object) -> None:
+    if not isinstance(payload, Mapping):
+        raise ValueError(
+            "single-stage solver checkpoint residue_objective_replay_config "
+            "must be a mapping"
+        )
+    for field_name in ("enabled", "weight"):
+        if field_name not in payload:
+            raise ValueError(
+                "single-stage solver checkpoint residue_objective_replay_config "
+                f"missing {field_name}"
+            )
+    if payload["enabled"] is True:
+        for field_name in (
+            "targets_sha256",
+            "seeds_sha256",
+            "target_manifest_id",
+            "validation_id",
+        ):
+            value = payload.get(field_name)
+            if not isinstance(value, str) or value == "":
+                raise ValueError(
+                    "enabled Greene residue objective checkpoint replay config "
+                    f"requires nonempty {field_name}"
+                )
 
 
 def _optional_float(value) -> float | None:

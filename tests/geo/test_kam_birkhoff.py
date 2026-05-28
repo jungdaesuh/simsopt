@@ -72,6 +72,36 @@ def test_weighted_birkhoff_standard_map_rejects_chaotic_orbit_above_breakup():
     assert result.matching_digits < settings.island_digits_min
 
 
+def test_weighted_birkhoff_standard_map_sensitive_orbit_flips_across_breakup_region():
+    settings = BirkhoffClassifierSettings(
+        min_returns=2048,
+        invariant_digits_min=8.0,
+        island_digits_min=4.0,
+    )
+    seeded_momentum = 2.0 * math.pi * ((math.sqrt(5.0) - 1.0) / 2.0)
+    below = classify_angle_series(
+        standard_map_angles(
+            stochasticity=0.95,
+            theta0=0.3,
+            momentum0=seeded_momentum,
+            count=8192,
+        ),
+        settings=settings,
+    )
+    above = classify_angle_series(
+        standard_map_angles(
+            stochasticity=0.99,
+            theta0=0.3,
+            momentum0=seeded_momentum,
+            count=8192,
+        ),
+        settings=settings,
+    )
+
+    assert below.classification == KAM_CLASS_INVARIANT_TORUS
+    assert above.classification == KAM_CLASS_CHAOTIC
+
+
 def test_weighted_birkhoff_reports_normalized_large_rotation_branch():
     settings = BirkhoffClassifierSettings(
         min_returns=64,

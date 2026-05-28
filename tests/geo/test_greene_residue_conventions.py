@@ -1633,6 +1633,21 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
             if residuals is None
             else residuals
         )
+        sample_steps = [1.0e-5, 5.0e-6, 2.5e-6]
+        samples = []
+        for step, residual in zip(sample_steps, sample_residuals, strict=True):
+            prediction = 0.01 + 0.2 * step
+            samples.append(
+                {
+                    "step": step,
+                    "residue": prediction + residual,
+                    "first_order_prediction": prediction,
+                    "residual": residual,
+                    "absolute_residual": abs(residual),
+                    "status": BRANCH_STATUS_CONVERGED,
+                    "state": [1.1, 0.05],
+                }
+            )
         return {
             "target_id": target_id,
             "branch": branch,
@@ -1645,35 +1660,7 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
                 "directional_derivative": 0.2,
                 "base_status": BRANCH_STATUS_CONVERGED,
                 "base_state": [1.1, 0.05] if base_state is None else base_state,
-                "samples": [
-                    {
-                        "step": 1.0e-5,
-                        "residue": 0.010002,
-                        "first_order_prediction": 0.010002,
-                        "residual": sample_residuals[0],
-                        "absolute_residual": sample_residuals[0],
-                        "status": BRANCH_STATUS_CONVERGED,
-                        "state": [1.1, 0.05],
-                    },
-                    {
-                        "step": 5.0e-6,
-                        "residue": 0.010001,
-                        "first_order_prediction": 0.010001,
-                        "residual": sample_residuals[1],
-                        "absolute_residual": sample_residuals[1],
-                        "status": BRANCH_STATUS_CONVERGED,
-                        "state": [1.1, 0.05],
-                    },
-                    {
-                        "step": 2.5e-6,
-                        "residue": 0.0100005,
-                        "first_order_prediction": 0.0100005,
-                        "residual": sample_residuals[2],
-                        "absolute_residual": sample_residuals[2],
-                        "status": BRANCH_STATUS_CONVERGED,
-                        "state": [1.1, 0.05],
-                    },
-                ],
+                "samples": samples,
                 "observed_orders": (
                     [2.0, 2.0] if observed_orders is None else observed_orders
                 ),
@@ -1745,6 +1732,16 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
     ]
     seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
     with pytest.raises(ValueError, match="base_state"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    inconsistent_validation = optimizer_taylor_validation()
+    inconsistent_validation["diagnostic"]["samples"][0]["residual"] = 5.0e-10
+    seed_payload["optimizer_taylor_validations"] = [inconsistent_validation]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="residue minus first_order_prediction"):
         load_residue_objective_seeds(
             seeds_path,
             target_manifest_id=target_manifest_id,
