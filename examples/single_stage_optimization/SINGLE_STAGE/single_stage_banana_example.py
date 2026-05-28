@@ -2538,10 +2538,86 @@ def compile_single_stage_jax_runtime_seed_spec(
     )
 
 
+def reproject_single_stage_jax_runtime_seed_spec(
+    source_path_or_run_dir,
+    *,
+    mpol,
+    ntor,
+    nphi,
+    ntheta,
+    output_path_or_run_dir,
+):
+    """Write a target-resolution runtime seed spec from an existing immutable spec."""
+    source_path = resolve_single_stage_jax_runtime_spec_path(source_path_or_run_dir)
+    with open(source_path, "r", encoding="utf-8") as infile:
+        source_payload = json.load(infile)
+    source_surface = source_payload["surface"]
+    source_quadrature = source_payload["quadrature"]
+    source_state = load_single_stage_jax_runtime_seed_spec(
+        source_path,
+        mpol=int(source_surface["mpol"]),
+        ntor=int(source_surface["ntor"]),
+        nphi=int(source_quadrature["nphi"]),
+        ntheta=int(source_quadrature["ntheta"]),
+    )
+    target_quadpoints_phi, target_quadpoints_theta = (
+        make_single_stage_half_period_quadpoints(
+            nphi=int(nphi),
+            ntheta=int(ntheta),
+            nfp=int(source_state["runtime_spec"].nfp),
+        )
+    )
+    source_runtime_surface = build_single_stage_surface_from_jax_runtime_spec(
+        source_state["runtime_spec"]
+    )
+    target_surface_dofs = project_surface_dofs_to_resolution(
+        source_runtime_surface,
+        mpol=int(mpol),
+        ntor=int(ntor),
+        quadpoints_phi=target_quadpoints_phi,
+        quadpoints_theta=target_quadpoints_theta,
+    )
+    seed = source_state["runtime_spec"].seed
+    return write_single_stage_jax_runtime_seed_spec(
+        output_path_or_run_dir,
+        surface=source_runtime_surface,
+        surface_dofs=target_surface_dofs,
+        iota=source_state["iota"],
+        G=source_state["G"],
+        mpol=int(mpol),
+        ntor=int(ntor),
+        quadpoints_phi=target_quadpoints_phi,
+        quadpoints_theta=target_quadpoints_theta,
+        coil_dof_extraction_spec=source_state["coil_dof_extraction_spec"],
+        coil_dofs=source_state["coil_dofs"],
+        num_tf_coils=int(seed.num_tf_coils),
+        banana_curve_index=int(seed.banana_curve_index),
+        tf_current_A=float(seed.tf_current_A),
+        banana_current_A=float(seed.banana_current_A),
+        stage2_seed=source_state["stage2_seed"],
+    )
+
+
 def compile_requested_single_stage_jax_runtime_seed_spec(args):
+    seed_source = getattr(args, "jax_runtime_seed_source", None)
+    if seed_source is not None:
+        if args.jax_runtime_seed_spec is None:
+            raise ValueError(
+                "--jax-runtime-seed-source requires --jax-runtime-seed-spec "
+                "as the output path"
+            )
+        return reproject_single_stage_jax_runtime_seed_spec(
+            seed_source,
+            mpol=args.mpol,
+            ntor=args.ntor,
+            nphi=args.nphi,
+            ntheta=args.ntheta,
+            output_path_or_run_dir=args.jax_runtime_seed_spec,
+        )
     if args.warm_start_run_dir is None:
         raise ValueError(
-            "--compile-jax-runtime-seed-spec requires --warm-start-run-dir"
+            "--compile-jax-runtime-seed-spec requires --warm-start-run-dir "
+            "or --jax-runtime-seed-source"
         )
     return compile_single_stage_jax_runtime_seed_spec(
         args.warm_start_run_dir,
@@ -3841,12 +3917,23 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--jax-runtime-seed-source",
+        default=os.environ.get("JAX_RUNTIME_SEED_SOURCE"),
+        help=(
+            "Existing immutable JAX runtime seed spec to reproject when "
+            "--compile-jax-runtime-seed-spec is set. This lets high-resolution "
+            "rungs derive matching seed specs from a validated runtime seed "
+            "without loading mutable restart artifacts."
+        ),
+    )
+    parser.add_argument(
         "--compile-jax-runtime-seed-spec",
         action="store_true",
         help=(
-            "Convert --warm-start-run-dir into an immutable JAX runtime seed spec "
-            "and exit. Writes --jax-runtime-seed-spec when provided, otherwise "
-            "writes into the donor run directory."
+            "Convert --warm-start-run-dir or --jax-runtime-seed-source into an "
+            "immutable JAX runtime seed spec and exit. Writes "
+            "--jax-runtime-seed-spec when provided, otherwise writes into the "
+            "donor run directory."
         ),
     )
     parser.add_argument(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -117,6 +118,9 @@ TARGET_OPTIMIZER_BACKENDS = (
 )
 DEFAULT_OUTER_MAXITER = 0
 MAX_COLD_SEED_OUTER_RUN_RESOLUTION = 4
+HIGH_RES_SEED_MIN_ABS_IOTA = 1.0e-3
+HIGH_RES_SEED_MIN_TARGET_IOTA_FRACTION = 0.5
+SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA = "simsopt.single_stage.jax_runtime_spec"
 TRACE_PARITY_OUTER_MAXLS = 8
 _TARGET_LANE_FINAL_ONLY_SYNC = "final-only"
 _TARGET_LANE_PER_ACCEPT_SYNC = "per-accept"
@@ -1268,25 +1272,185 @@ def _has_explicit_single_stage_seed(args: argparse.Namespace) -> bool:
     )
 
 
-def _requires_continuation_seed(args: argparse.Namespace) -> bool:
+def _is_high_resolution_outer_run(args: argparse.Namespace) -> bool:
     return bool(
         int(args.maxiter) > 0
-        and not _has_explicit_single_stage_seed(args)
         and max(int(args.mpol), int(args.ntor)) > MAX_COLD_SEED_OUTER_RUN_RESOLUTION
     )
 
 
-def _require_supported_single_stage_seed_contract(args: argparse.Namespace) -> None:
-    if not _requires_continuation_seed(args):
-        return
-    raise ValueError(
-        "single_stage_init_parity high-resolution outer runs require "
-        "--warm-start-run-dir or --jax-runtime-seed-spec; build the donor with "
-        "examples/single_stage_optimization/SINGLE_STAGE/"
-        "run_single_stage_continuation.py. "
-        f"Got mpol={int(args.mpol)}, ntor={int(args.ntor)}, "
-        f"maxiter={int(args.maxiter)}."
+def _requires_continuation_seed(args: argparse.Namespace) -> bool:
+    return bool(
+        _is_high_resolution_outer_run(args)
+        and not _has_explicit_single_stage_seed(args)
     )
+
+
+def _json_mapping(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as infile:
+        payload = json.load(infile)
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON payload must be an object: {path}")
+    return payload
+
+
+def _require_mapping(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    source: Path,
+) -> dict[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"{source} must contain object field {key!r}")
+    return value
+
+
+def _finite_seed_float(
+    value: Any,
+    *,
+    field_name: str,
+    failures: list[str],
+) -> float | None:
+    if value is None:
+        failures.append(f"{field_name} is missing")
+        return None
+    observed = float(value)
+    if not np.isfinite(observed):
+        failures.append(f"{field_name} is not finite")
+        return None
+    return observed
+
+
+def _append_seed_iota_quality_failures(
+    failures: list[str],
+    *,
+    seed_iota: float | None,
+    target_iota: float,
+) -> None:
+    if seed_iota is None:
+        return
+    target_abs = abs(float(target_iota))
+    if target_abs <= HIGH_RES_SEED_MIN_ABS_IOTA:
+        return
+    min_abs_iota = max(
+        HIGH_RES_SEED_MIN_ABS_IOTA,
+        HIGH_RES_SEED_MIN_TARGET_IOTA_FRACTION * target_abs,
+    )
+    if abs(seed_iota) < min_abs_iota:
+        failures.append(
+            "seed Boozer iota is not physically relevant for the high-resolution "
+            f"rung: |seed_iota|={abs(seed_iota):.6g} is below "
+            f"{HIGH_RES_SEED_MIN_TARGET_IOTA_FRACTION:.3g} * "
+            f"|target_iota|={target_abs:.6g}"
+        )
+
+
+def _validate_jax_runtime_seed_spec_contract(
+    args: argparse.Namespace,
+    seed_spec_path: Path,
+) -> None:
+    payload = _json_mapping(seed_spec_path)
+    failures: list[str] = []
+    if payload.get("schema") != SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA:
+        failures.append(
+            f"runtime seed spec schema is not {SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA!r}"
+        )
+    surface = _require_mapping(payload, "surface", source=seed_spec_path)
+    quadrature = _require_mapping(payload, "quadrature", source=seed_spec_path)
+    boozer_init = _require_mapping(payload, "boozer_init", source=seed_spec_path)
+    observed_shape = (
+        int(surface.get("mpol", -1)),
+        int(surface.get("ntor", -1)),
+        int(quadrature.get("nphi", -1)),
+        int(quadrature.get("ntheta", -1)),
+    )
+    expected_shape = (
+        int(args.mpol),
+        int(args.ntor),
+        int(args.nphi),
+        int(args.ntheta),
+    )
+    if observed_shape != expected_shape:
+        failures.append(
+            f"runtime seed spec shape {observed_shape} does not match rung "
+            f"shape {expected_shape}"
+        )
+    seed_iota = _finite_seed_float(
+        boozer_init.get("iota"),
+        field_name="boozer_init.iota",
+        failures=failures,
+    )
+    _finite_seed_float(
+        boozer_init.get("G"),
+        field_name="boozer_init.G",
+        failures=failures,
+    )
+    _append_seed_iota_quality_failures(
+        failures,
+        seed_iota=seed_iota,
+        target_iota=float(args.iota_target),
+    )
+    if failures:
+        raise ValueError(
+            "single_stage_init_parity high-resolution JAX runtime seed contract "
+            f"failed for {seed_spec_path}: " + "; ".join(failures)
+        )
+
+
+def _validate_warm_start_seed_contract(
+    args: argparse.Namespace,
+    warm_start_run_dir: Path,
+) -> None:
+    results_path = warm_start_run_dir / "results.json"
+    results = _json_mapping(results_path)
+    failures: list[str] = []
+    if results.get("init_only") is True:
+        failures.append("warm-start donor is init-only")
+    seed_iota = _finite_seed_float(
+        results.get("FINAL_IOTA"),
+        field_name="FINAL_IOTA",
+        failures=failures,
+    )
+    _finite_seed_float(
+        results.get("FINAL_G"),
+        field_name="FINAL_G",
+        failures=failures,
+    )
+    _append_seed_iota_quality_failures(
+        failures,
+        seed_iota=seed_iota,
+        target_iota=float(args.iota_target),
+    )
+    if results.get("HARDWARE_CONSTRAINTS_OK") is False:
+        failures.append("HARDWARE_CONSTRAINTS_OK is false")
+    if results.get("SELF_INTERSECTING") is True:
+        failures.append("SELF_INTERSECTING is true")
+    if failures:
+        raise ValueError(
+            "single_stage_init_parity high-resolution warm-start seed contract "
+            f"failed for {warm_start_run_dir}: " + "; ".join(failures)
+        )
+
+
+def _require_supported_single_stage_seed_contract(args: argparse.Namespace) -> None:
+    if not _is_high_resolution_outer_run(args):
+        return
+    if not _has_explicit_single_stage_seed(args):
+        raise ValueError(
+            "single_stage_init_parity high-resolution outer runs require "
+            "--warm-start-run-dir or --jax-runtime-seed-spec; build the donor with "
+            "examples/single_stage_optimization/SINGLE_STAGE/"
+            "run_single_stage_continuation.py. "
+            f"Got mpol={int(args.mpol)}, ntor={int(args.ntor)}, "
+            f"maxiter={int(args.maxiter)}."
+        )
+    seed_spec = getattr(args, "jax_runtime_seed_spec", None)
+    if seed_spec is not None:
+        _validate_jax_runtime_seed_spec_contract(args, Path(seed_spec))
+    warm_start_run_dir = getattr(args, "warm_start_run_dir", None)
+    if warm_start_run_dir is not None and seed_spec is None:
+        _validate_warm_start_seed_contract(args, Path(warm_start_run_dir))
 
 
 def _namespace_with_overrides(

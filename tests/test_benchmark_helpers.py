@@ -1986,6 +1986,71 @@ def test_single_stage_init_high_resolution_outer_run_requires_continuation_seed(
     assert not single_stage_init_parity_module._requires_continuation_seed(args)
 
 
+def test_single_stage_init_high_resolution_rejects_bad_runtime_seed_spec(
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.maxiter = 10
+    args.mpol = 6
+    args.ntor = 6
+    args.nphi = 127
+    args.ntheta = 48
+    args.warm_start_run_dir = None
+    args.jax_runtime_seed_spec = tmp_path / "bad-seed.json"
+    _write_single_stage_jax_runtime_seed_spec(
+        args.jax_runtime_seed_spec,
+        mpol=args.mpol,
+        ntor=args.ntor,
+        nphi=args.nphi,
+        ntheta=args.ntheta,
+        iota=5.0e-17,
+    )
+
+    with pytest.raises(ValueError, match="seed Boozer iota"):
+        single_stage_init_parity_module._run_single_stage_case_pair(
+            args,
+            benchmark_mode=True,
+            reference_backend="jax",
+            reference_benchmark_mode=True,
+            case_root=tmp_path / "case",
+        )
+
+
+def test_single_stage_init_high_resolution_rejects_init_only_warm_start_seed(
+    tmp_path,
+):
+    donor_dir = tmp_path / "donor"
+    donor_dir.mkdir()
+    (donor_dir / "results.json").write_text(
+        json.dumps(
+            {
+                "init_only": True,
+                "FINAL_IOTA": 5.0e-17,
+                "FINAL_G": 2.0,
+                "HARDWARE_CONSTRAINTS_OK": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = _single_stage_case_args(tmp_path)
+    args.maxiter = 10
+    args.mpol = 6
+    args.ntor = 6
+    args.nphi = 127
+    args.ntheta = 48
+    args.warm_start_run_dir = str(donor_dir)
+    args.jax_runtime_seed_spec = None
+
+    with pytest.raises(ValueError, match="warm-start donor is init-only"):
+        single_stage_init_parity_module._run_single_stage_case_pair(
+            args,
+            benchmark_mode=True,
+            reference_backend="jax",
+            reference_benchmark_mode=True,
+            case_root=tmp_path / "case",
+        )
+
+
 def test_single_stage_fixture_optimizer_backend_defaults_by_backend():
     assert default_optimizer_backend_for_backend("jax") == "ondevice"
     assert default_optimizer_backend_for_backend("cpu") == "scipy"
@@ -4557,6 +4622,30 @@ def _write_single_stage_result_artifact(command) -> list[str]:
     return command_list
 
 
+def _write_single_stage_jax_runtime_seed_spec(
+    path: Path,
+    *,
+    mpol: int,
+    ntor: int,
+    nphi: int,
+    ntheta: int,
+    iota: float = 0.15,
+    G: float = 2.0,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema": single_stage_init_parity_module.SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA,
+                "schema_version": 1,
+                "surface": {"mpol": mpol, "ntor": ntor},
+                "quadrature": {"nphi": nphi, "ntheta": ntheta},
+                "boozer_init": {"iota": iota, "G": G},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_run_python_script_stream_timeout_reports(tmp_path):
     script_path = tmp_path / "sleep.py"
     script_path.write_text(
@@ -5118,7 +5207,13 @@ def test_single_stage_init_case_pair_threads_large_cuda_boozer_polish_skip_to_ja
     args.ntor = 6
     args.maxiter = 10
     args.jax_runtime_seed_spec = tmp_path / "seed.json"
-    args.jax_runtime_seed_spec.write_text('{"seed": true}', encoding="utf-8")
+    _write_single_stage_jax_runtime_seed_spec(
+        args.jax_runtime_seed_spec,
+        mpol=args.mpol,
+        ntor=args.ntor,
+        nphi=args.nphi,
+        ntheta=args.ntheta,
+    )
     args.warm_start_run_dir = None
     args.target_lane_boozer_newton_polish_policy = "skip-large-strict-cuda"
     observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)

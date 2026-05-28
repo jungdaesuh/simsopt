@@ -3641,6 +3641,50 @@ class SingleStageExampleTests(unittest.TestCase):
             output_path_or_run_dir="/tmp/runtime-spec.json",
         )
 
+    def test_compile_requested_single_stage_jax_runtime_seed_spec_reprojects_source(
+        self,
+    ):
+        module = self.load_module()
+        args = types.SimpleNamespace(
+            warm_start_run_dir=None,
+            jax_runtime_seed_source="/tmp/source-runtime-spec.json",
+            mpol=6,
+            ntor=6,
+            nphi=127,
+            ntheta=48,
+            jax_runtime_seed_spec="/tmp/m06-runtime-spec.json",
+        )
+
+        with patch.object(
+            module,
+            "reproject_single_stage_jax_runtime_seed_spec",
+            return_value="/tmp/m06-runtime-spec.json",
+        ) as reproject_spec:
+            path = module.compile_requested_single_stage_jax_runtime_seed_spec(args)
+
+        self.assertEqual(path, "/tmp/m06-runtime-spec.json")
+        reproject_spec.assert_called_once_with(
+            "/tmp/source-runtime-spec.json",
+            mpol=6,
+            ntor=6,
+            nphi=127,
+            ntheta=48,
+            output_path_or_run_dir="/tmp/m06-runtime-spec.json",
+        )
+
+    def test_compile_requested_single_stage_jax_runtime_seed_source_requires_output(
+        self,
+    ):
+        module = self.load_module()
+        args = types.SimpleNamespace(
+            warm_start_run_dir=None,
+            jax_runtime_seed_source="/tmp/source-runtime-spec.json",
+            jax_runtime_seed_spec=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "--jax-runtime-seed-spec"):
+            module.compile_requested_single_stage_jax_runtime_seed_spec(args)
+
     def test_compile_requested_single_stage_jax_runtime_seed_spec_requires_donor_dir(
         self,
     ):

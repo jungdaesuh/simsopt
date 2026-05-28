@@ -6516,6 +6516,67 @@ class TestBoozerSurfaceJAXClass:
         _assert_solver_completion_payload(after_newton_payload)
         _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_SCHEMA)
 
+    def test_run_code_skip_policy_preserves_failed_ls_state_without_newton(
+        self, monkeypatch
+    ):
+        """Skipping Newton must not convert a failed LS solve into success."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["newton_polish_policy"] = "skip"
+
+        observed = []
+
+        def record_stage(label, **payload):
+            observed.append((label, payload))
+
+        booz.options["stage_callback"] = record_stage
+
+        def fake_target_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
+            assert method == "bfgs-ondevice"
+            flat_x0, _ = ravel_pytree(x0)
+            return types.SimpleNamespace(
+                x=x0,
+                fun=1.0e-12,
+                jac=jnp.full_like(flat_x0, 1.0e-6),
+                nit=1500,
+                nfev=1500,
+                njev=1500,
+                success=False,
+                status=1,
+            )
+
+        def forbidden_newton_polish(*_args, **_kwargs):
+            raise AssertionError("newton polish should be skipped by policy")
+
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        monkeypatch.setattr(_bsj, "newton_polish_traceable", forbidden_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        skipped_payload = _stage_payload(observed, "boozer_newton_skipped")
+        after_newton_payload = _stage_payload(observed, "after_boozer_newton")
+        assert res["success"] is False
+        assert res["primal_success"] is False
+        assert res["adjoint_linear_solve_available"] is False
+        assert res["newton_polish_skipped"] is True
+        assert res["vjp"] is None
+        assert res["vjp_groups"] is None
+        assert skipped_payload["reason"] == "newton_polish_policy"
+        assert after_newton_payload["solve_success"] == "false"
+        assert after_newton_payload["skipped"] == "true"
+        assert after_newton_payload["objective"] == pytest.approx(1.0e-12)
+        assert after_newton_payload["grad_inf"] == pytest.approx(1.0e-6)
+
     def test_run_code_passes_newton_stab(self, monkeypatch):
         """run_code() must forward newton_stab into the Newton polish call."""
         booz = _make_mock_boozer_surface()
