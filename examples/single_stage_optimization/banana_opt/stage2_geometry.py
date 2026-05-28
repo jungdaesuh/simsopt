@@ -7,6 +7,7 @@ from scipy.io import netcdf_file
 try:
     from numba import njit
 except ModuleNotFoundError:
+
     def njit(*args, **kwargs):
         if args and callable(args[0]) and len(args) == 1 and not kwargs:
             return args[0]
@@ -15,6 +16,7 @@ except ModuleNotFoundError:
             return func
 
         return decorator
+
 
 from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
@@ -170,9 +172,7 @@ def select_plasma_geometry_preflight_candidate(
         requested_s,
         field_name="Stage 2 requested VMEC surface label s",
     )
-    max_target_major = validate_target_lcfs_major_radius(
-        target_lcfs_major_radius_m
-    )
+    max_target_major = validate_target_lcfs_major_radius(target_lcfs_major_radius_m)
     max_target_minor = validate_target_lcfs_minor_radius(target_lcfs_minor_radius_m)
     resolved_s_candidates = (
         default_geometry_preflight_s_candidates(requested_surface_label)
@@ -186,9 +186,7 @@ def select_plasma_geometry_preflight_candidate(
         )
     )
     resolved_target_candidates = (
-        default_geometry_preflight_target_lcfs_major_radius_candidates(
-            max_target_major
-        )
+        default_geometry_preflight_target_lcfs_major_radius_candidates(max_target_major)
         if target_lcfs_major_radius_candidates_m is None
         else _unique_float_candidates(
             validate_target_lcfs_major_radius(candidate)
@@ -203,18 +201,12 @@ def select_plasma_geometry_preflight_candidate(
         for target_candidate in resolved_target_candidates:
             scale_factor = float(target_candidate) / base_lcfs_major_radius
             lcfs_minor_radius = base_lcfs_minor_radius * scale_factor
-            vessel_gap = float(
-                distance_fn(lcfs_surface, scale_factor, vessel_surface)
-            )
+            vessel_gap = float(distance_fn(lcfs_surface, scale_factor, vessel_surface))
             violations = []
             if target_candidate > max_target_major + 1.0e-12:
-                violations.append(
-                    f"lcfs_major_radius>{max_target_major:.6f}"
-                )
+                violations.append(f"lcfs_major_radius>{max_target_major:.6f}")
             if lcfs_minor_radius > max_target_minor + 1.0e-12:
-                violations.append(
-                    f"lcfs_minor_radius>{max_target_minor:.6f}"
-                )
+                violations.append(f"lcfs_minor_radius>{max_target_minor:.6f}")
             candidates.append(
                 PlasmaGeometryPreflightCandidate(
                     s_working=float(s_candidate),
@@ -274,7 +266,9 @@ def load_plasma_geometry(target_lcfs_major_radius_m, s_working, file_loc, nphi, 
     )
     working_surface = _scale_surface(working_surface, scale_factor)
     LOGGER.info("LCFS major radius target: %s", target_lcfs_major_radius)
-    LOGGER.info("Working surface major radius actual: %s", working_surface.major_radius())
+    LOGGER.info(
+        "Working surface major radius actual: %s", working_surface.major_radius()
+    )
     LOGGER.info("Working surface minor radius: %s", working_surface.minor_radius())
     LOGGER.info("LCFS major radius: %s", lcfs_surface.major_radius())
     LOGGER.info("LCFS minor radius: %s", lcfs_surface.minor_radius())
@@ -305,7 +299,9 @@ def load_plasma_geometry_for_working_major_radius(
     working_surface = _scale_surface(working_surface, scale_factor)
     lcfs_surface = _scale_surface(lcfs_surface, scale_factor)
     LOGGER.info("Working surface major radius target: %s", target_working_major_radius)
-    LOGGER.info("Working surface major radius actual: %s", working_surface.major_radius())
+    LOGGER.info(
+        "Working surface major radius actual: %s", working_surface.major_radius()
+    )
     LOGGER.info("Working surface minor radius: %s", working_surface.minor_radius())
     LOGGER.info("LCFS major radius: %s", lcfs_surface.major_radius())
     LOGGER.info("LCFS minor radius: %s", lcfs_surface.minor_radius())
@@ -450,9 +446,7 @@ def coerce_vf_coil_build_result(
 ) -> VFCoilBuildResult:
     if isinstance(value, VFCoilBuildResult):
         if requires_current_control and value.coils and value.current_control is None:
-            raise ValueError(
-                "shared VF current profile requires a VF current control."
-            )
+            raise ValueError("shared VF current profile requires a VF current control.")
         return value
     if requires_current_control:
         raise ValueError(
@@ -475,8 +469,7 @@ def shared_vf_current_control_for_coils(vf_coils: list[Coil]) -> object | None:
             )
         if not np.isclose(abs(scale), abs(first_scale), rtol=1.0e-12, atol=1.0e-12):
             raise ValueError(
-                "shared VF current profile requires equal-magnitude VF scale "
-                "factors."
+                "shared VF current profile requires equal-magnitude VF scale factors."
             )
     shared_parent = getattr(first_current, "current_to_scale", None)
     if shared_parent is not None and all(
@@ -538,11 +531,10 @@ def initialize_coils(
             surf_coils.stellsym,
         )
 
-    # Proxy plasma-current coil: always built for the selected finite-current mode. With
-    # plasma_current_A=0.0 it contributes no field, keeping the I=0 baseline
-    # bit-equivalent to the historical vacuum case while preserving a single
-    # bs.coils layout regardless of current magnitude.
-    if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
+    finite_current_profile = get_finite_current_profile(finite_current_mode)
+    if finite_current_profile.default_num_proxy_coils == 0:
+        proxy_coils = []
+    elif finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
         proxy_coils = build_jhalpern30_proxy_plasma_current_coils(
             surf,
             float(proxy_plasma_current_A),
@@ -723,5 +715,7 @@ def magnetic_field_plots(surf, bs, out_dir_iter):
     mean_abs_relBfinal_norm, modBfinal, surf_area, phi, theta = norm_field_plot(
         surf, bs, out_dir_iter + "NormFieldPlot"
     )
-    magnitude_field_plot(modBfinal, surf_area, phi, theta, out_dir_iter + "MagFieldPlot")
+    magnitude_field_plot(
+        modBfinal, surf_area, phi, theta, out_dir_iter + "MagFieldPlot"
+    )
     return mean_abs_relBfinal_norm

@@ -36,18 +36,22 @@ FiniteCurrentModeSource = Literal["artifact_metadata", "legacy_assumed_default"]
 BoozerCurrentConvention = Literal["mu0_over_2pi", "mu0"]
 G0Policy = Literal["signed_explicit_tf_current"]
 ProxyPlacementPolicy = Literal[
+    "none",
     "vmec_axis_zeroth_coefficients",
     "surface_major_radius_z0",
 ]
 ProxyVfCurrentScalarPolicy = Literal[
+    "none",
     "nonnegative_magnitude",
     "signed_physical_scalar",
 ]
 VfCurrentSignPolicy = Literal[
+    "none",
     "template_sign_vf_current_scalar",
     "template_sign_abs_proxy_current",
 ]
 VfCurrentMutability = Literal[
+    "none",
     "independent_fixed_current",
     "shared_unfixed_scaled_current",
 ]
@@ -56,6 +60,7 @@ BananaReplayPolicy = Literal[
     "flip_banana_parent_suffix_env_BANANA_CURRENT_SIGN_BANANA_I_FIXED_S2",
 ]
 FiniteCurrentMode = Literal[
+    "vacuum",
     "boozer_surrogate",
     "wataru_proxy_field",
     "jhalpern30_proxy_field",
@@ -159,6 +164,7 @@ _BOOZER_CURRENT_CONVENTION_BY_MODE: Mapping[
     FiniteCurrentMode,
     BoozerCurrentConvention,
 ] = {
+    "vacuum": "mu0",
     # SIMSOPT's BoozerSurface residual is written in normalized angles, so the
     # code-facing current function carries the 2π from the angle change of
     # variables. Physical enclosed current in amperes therefore maps to μ0*I_A
@@ -176,6 +182,8 @@ _BOOZER_CURRENT_CONVENTION_BY_MODE: Mapping[
 
 
 def _validated_finite_current_mode(mode: str) -> FiniteCurrentMode:
+    if mode == "vacuum":
+        return "vacuum"
     if mode == "boozer_surrogate":
         return "boozer_surrogate"
     if mode == "wataru_proxy_field":
@@ -279,8 +287,7 @@ def validate_jhalpern30_proxy_vf_current_convention(
     """
     if float(proxy_plasma_current_A) == 0.0:
         raise ValueError(
-            "jhalpern30 proxy/VF convention requires non-zero "
-            "PROXY_PLASMA_CURRENT_A."
+            "jhalpern30 proxy/VF convention requires non-zero PROXY_PLASMA_CURRENT_A."
         )
     return validate_signed_proxy_vf_current_convention(
         proxy_plasma_current_A=proxy_plasma_current_A,
@@ -326,6 +333,15 @@ def validate_proxy_vf_current_convention_for_mode(
     proxy_plasma_current_A: float,
     vf_current_A: float,
 ) -> tuple[float, float]:
+    if finite_current_mode == "vacuum":
+        if (
+            abs(float(proxy_plasma_current_A)) > CURRENT_MODE_ZERO_TOL
+            or abs(float(vf_current_A)) > CURRENT_MODE_ZERO_TOL
+        ):
+            raise ValueError(
+                "vacuum finite-current mode requires zero proxy and VF currents."
+            )
+        return 0.0, 0.0
     if finite_current_mode == "jhalpern30_proxy_field":
         return validate_jhalpern30_proxy_vf_current_convention(
             proxy_plasma_current_A=proxy_plasma_current_A,
@@ -415,12 +431,18 @@ def unwrap_current_optimizable(current):
     return current_optimizable, scale
 
 
-def _apply_scaled_symmetric_current_bound(current, current_max_A, *, label: str) -> None:
+def _apply_scaled_symmetric_current_bound(
+    current, current_max_A, *, label: str
+) -> None:
     current_optimizable, scale = unwrap_current_optimizable(current)
     if scale == 0.0:
         raise ValueError(f"{label} current scale must be non-zero to apply a bound.")
-    lower_bounds = np.asarray(current_optimizable.local_lower_bounds, dtype=float).copy()
-    upper_bounds = np.asarray(current_optimizable.local_upper_bounds, dtype=float).copy()
+    lower_bounds = np.asarray(
+        current_optimizable.local_lower_bounds, dtype=float
+    ).copy()
+    upper_bounds = np.asarray(
+        current_optimizable.local_upper_bounds, dtype=float
+    ).copy()
     scaled_magnitude_bound = float(current_max_A) / abs(scale)
     lower_bounds[0] = max(lower_bounds[0], -scaled_magnitude_bound)
     upper_bounds[0] = min(upper_bounds[0], scaled_magnitude_bound)
@@ -447,8 +469,12 @@ def apply_banana_current_seed_sign_box_bound(
     current_optimizable, scale = unwrap_current_optimizable(current)
     if scale == 0.0:
         raise ValueError("Banana current scale must be non-zero to apply a bound.")
-    lower_bounds = np.asarray(current_optimizable.local_lower_bounds, dtype=float).copy()
-    upper_bounds = np.asarray(current_optimizable.local_upper_bounds, dtype=float).copy()
+    lower_bounds = np.asarray(
+        current_optimizable.local_lower_bounds, dtype=float
+    ).copy()
+    upper_bounds = np.asarray(
+        current_optimizable.local_upper_bounds, dtype=float
+    ).copy()
     scaled_magnitude_bound = float(banana_current_max_A) / abs(scale)
     seed_sign_matches_scale = np.sign(seed_current_A) == np.sign(scale)
     if seed_sign_matches_scale:
@@ -543,9 +569,8 @@ def apply_penalty_traversal_forbidden_box_bounds(
         handler = _penalty_box_bound_handler(name)
         if validate_seed and seed_values is not None:
             seed_value = seed_values.get(name)
-            if (
-                seed_value is not None
-                and handler.exceeds_limit(float(seed_value), threshold)
+            if seed_value is not None and handler.exceeds_limit(
+                float(seed_value), threshold
             ):
                 raise ValueError(
                     f"{seed_context} {name}={float(seed_value):.6f} exceeds the "
@@ -571,7 +596,9 @@ def apply_penalty_traversal_forbidden_box_bounds(
 def infer_uniform_coil_current_A(coils) -> float | None:
     if not coils:
         return None
-    coil_currents = np.asarray([coil.current.get_value() for coil in coils], dtype=float)
+    coil_currents = np.asarray(
+        [coil.current.get_value() for coil in coils], dtype=float
+    )
     if np.allclose(coil_currents, coil_currents[0], rtol=0.0, atol=1.0e-12):
         return float(coil_currents[0])
     return None
@@ -602,7 +629,9 @@ def resolve_loaded_tf_current_A(
         )
     if allow_offspec_current_contract:
         if not np.isfinite(realized_tf_current_A) or realized_tf_current_A == 0.0:
-            raise ValueError("Loaded Stage 2 TF coil current must be finite and non-zero.")
+            raise ValueError(
+                "Loaded Stage 2 TF coil current must be finite and non-zero."
+            )
         return float(realized_tf_current_A)
     return validate_tf_current_limit(realized_tf_current_A)
 
@@ -616,6 +645,11 @@ def resolve_plasma_current_settings(
 ) -> PlasmaCurrentSettings:
     boozer_current_convention = resolve_boozer_current_convention(finite_current_mode)
     if plasma_current_A is not None:
+        if (
+            finite_current_mode == "vacuum"
+            and abs(float(plasma_current_A)) > CURRENT_MODE_ZERO_TOL
+        ):
+            raise ValueError("vacuum finite-current mode requires zero plasma current.")
         if raw_boozer_I is not None:
             raise ValueError("Cannot use --plasma-current-A together with --boozer-I")
         resolved_boozer_I = physical_current_to_boozer_I(
@@ -631,6 +665,11 @@ def resolve_plasma_current_settings(
         )
     if raw_boozer_I is not None:
         resolved_boozer_I = float(raw_boozer_I)
+        if (
+            finite_current_mode == "vacuum"
+            and abs(resolved_boozer_I) > CURRENT_MODE_ZERO_TOL
+        ):
+            raise ValueError("vacuum finite-current mode requires zero Boozer I.")
         return _build_plasma_current_settings(
             boozer_I=resolved_boozer_I,
             plasma_current_A=boozer_I_to_physical_current_A(
@@ -643,6 +682,13 @@ def resolve_plasma_current_settings(
         )
 
     resolved_default_plasma_current_A = float(default_plasma_current_A)
+    if (
+        finite_current_mode == "vacuum"
+        and abs(resolved_default_plasma_current_A) > CURRENT_MODE_ZERO_TOL
+    ):
+        raise ValueError(
+            "vacuum finite-current mode requires zero default plasma current."
+        )
     resolved_default_boozer_I = physical_current_to_boozer_I(
         resolved_default_plasma_current_A,
         convention=boozer_current_convention,
@@ -695,19 +741,22 @@ def resolve_plasma_current_settings_for_num_surfaces(
         if requested_finite_current_mode not in {
             None,
             "",
+            "vacuum",
             DEFAULT_FINITE_CURRENT_MODE,
             "jhalpern30_proxy_field",
         }:
             raise ValueError(
                 "Single-surface mode is locked to "
-                f"{DEFAULT_FINITE_CURRENT_MODE!r} or 'jhalpern30_proxy_field'; "
+                f"'vacuum', {DEFAULT_FINITE_CURRENT_MODE!r}, or "
+                "'jhalpern30_proxy_field'; "
                 "remove --finite-current-mode or select one of those replay modes."
             )
-        single_surface_mode = (
-            "jhalpern30_proxy_field"
-            if finite_current_mode == "jhalpern30_proxy_field"
-            else DEFAULT_FINITE_CURRENT_MODE
-        )
+        if finite_current_mode == "vacuum":
+            single_surface_mode = "vacuum"
+        elif finite_current_mode == "jhalpern30_proxy_field":
+            single_surface_mode = "jhalpern30_proxy_field"
+        else:
+            single_surface_mode = DEFAULT_FINITE_CURRENT_MODE
         return resolve_single_surface_plasma_current_settings(
             raw_boozer_I=raw_boozer_I,
             plasma_current_A=plasma_current_A,
@@ -735,14 +784,15 @@ def resolve_plasma_current_settings_for_surface_mode(
         if requested_finite_current_mode not in {
             None,
             "",
+            "vacuum",
             DEFAULT_FINITE_CURRENT_MODE,
         }:
             raise ValueError(
                 "published_multisurface v1 is vacuum-locked; remove "
                 "--finite-current-mode or set it to "
-                f"{DEFAULT_FINITE_CURRENT_MODE!r}."
+                f"'vacuum' or {DEFAULT_FINITE_CURRENT_MODE!r}."
             )
-        if finite_current_mode != DEFAULT_FINITE_CURRENT_MODE:
+        if finite_current_mode not in {"vacuum", DEFAULT_FINITE_CURRENT_MODE}:
             raise ValueError(
                 "published_multisurface v1 is vacuum-locked and cannot inherit "
                 f"finite-current donor mode {finite_current_mode!r}."
@@ -768,6 +818,7 @@ def resolve_plasma_current_settings_for_surface_mode(
         return resolve_single_surface_plasma_current_settings(
             raw_boozer_I=None,
             plasma_current_A=plasma_current_A,
+            finite_current_mode=finite_current_mode,
             default_plasma_current_A=0.0,
         )
     if surface_mode_contract.mode == SINGLE_SURFACE:

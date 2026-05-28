@@ -6,7 +6,7 @@ from scipy.optimize import least_squares
 
 from simsopt.geo import CurveRZFourier
 
-__all__ = ['compute_on_axis_iota', 'locate_magnetic_axis_point']
+__all__ = ["compute_on_axis_iota", "locate_magnetic_axis_point"]
 
 
 def _cylindrical_basis(phi):
@@ -33,7 +33,9 @@ def _fieldline_rhs_phi(phi, state, magnetic_field, min_bphi_over_b):
     magnetic_field.set_points(point)
     b_vector = np.asarray(magnetic_field.B(), dtype=float)
     if b_vector.shape != (1, 3):
-        raise ValueError(f"Magnetic field B() must have shape (1, 3), got {b_vector.shape}")
+        raise ValueError(
+            f"Magnetic field B() must have shape (1, 3), got {b_vector.shape}"
+        )
     b = b_vector[0]
     b_norm = float(np.linalg.norm(b))
     if b_norm <= 0.0 or not math.isfinite(b_norm):
@@ -79,7 +81,9 @@ def _axis_return_residual(
         t_eval=(float(phi0) + float(toroidal_span),),
     )
     if not solution.success:
-        raise RuntimeError(f"magnetic-axis return-map integration failed: {solution.message}")
+        raise RuntimeError(
+            f"magnetic-axis return-map integration failed: {solution.message}"
+        )
     return (np.asarray(solution.y[:, -1], dtype=float) - start) / float(scale)
 
 
@@ -101,14 +105,22 @@ def locate_magnetic_axis_point(
     """Locate the magnetic-axis fixed point in an R/Z Poincare section.
 
     The returned point is the root of ``P(R, Z) - (R, Z)`` for the field-line
-    return map over one field period. This avoids using the boundary centroid
-    as a proxy for the magnetic axis when defining poloidal angles.
+    return map over one full toroidal turn (2*pi). This avoids using the boundary
+    centroid as a proxy for the magnetic axis when defining poloidal angles.
+
+    The full-torus turn is used rather than a single field period (2*pi/nfp)
+    because the axis is a fixed point of the field-period map only when the field
+    has exact discrete nfp symmetry. Optimized coil fields break that symmetry,
+    so their axis closes only over the full torus; ``nfp`` is retained as
+    device metadata and for input validation, not to shorten the return map.
     """
     guess = np.asarray(initial_guess, dtype=float)
     if guess.shape != (2,):
         raise ValueError("magnetic-axis initial_guess must be [R, Z]")
     if guess[0] <= 0.0 or not np.all(np.isfinite(guess)):
-        raise ValueError("magnetic-axis initial_guess requires finite R > 0 and finite Z")
+        raise ValueError(
+            "magnetic-axis initial_guess requires finite R > 0 and finite Z"
+        )
     resolved_nfp = int(nfp)
     if resolved_nfp <= 0:
         raise ValueError("magnetic-axis locator requires nfp > 0")
@@ -119,7 +131,7 @@ def locate_magnetic_axis_point(
     lower_r, upper_r = (
         (np.finfo(float).eps, np.inf) if r_bounds is None else tuple(r_bounds)
     )
-    lower_z, upper_z = ((-np.inf, np.inf) if z_bounds is None else tuple(z_bounds))
+    lower_z, upper_z = (-np.inf, np.inf) if z_bounds is None else tuple(z_bounds)
     lower = np.asarray([float(lower_r), float(lower_z)], dtype=float)
     upper = np.asarray([float(upper_r), float(upper_z)], dtype=float)
     if not np.all(lower < upper):
@@ -131,7 +143,7 @@ def locate_magnetic_axis_point(
             state,
             magnetic_field=magnetic_field,
             phi0=float(phi0),
-            toroidal_span=2.0 * math.pi / float(resolved_nfp),
+            toroidal_span=2.0 * math.pi,
             scale=scale,
             rtol=rtol,
             atol=atol,
@@ -203,46 +215,48 @@ def compute_on_axis_iota(axis, magnetic_field):
         dB3_dy = dB_by_dX[2, 1]
         dB3_dz = dB_by_dX[2, 2]
 
-        c = np.cos(2*np.pi*phi)
-        s = np.sin(2*np.pi*phi)
+        c = np.cos(2 * np.pi * phi)
+        s = np.sin(2 * np.pi * phi)
 
-        R = np.sqrt(out[0]**2 + out[1]**2)
+        R = np.sqrt(out[0] ** 2 + out[1] ** 2)
         dx_dR = c
         dy_dR = s
 
-        BR = c*B1 + s*B2
-        Bphi = -s*B1 + c*B2
+        BR = c * B1 + s * B2
+        Bphi = -s * B1 + c * B2
         BZ = B3
 
         dB1_dR = dB1_dx * dx_dR + dB1_dy * dy_dR
         dB2_dR = dB2_dx * dx_dR + dB2_dy * dy_dR
         dB3_dR = dB3_dx * dx_dR + dB3_dy * dy_dR
 
-        dBR_dR = c*dB1_dR + s*dB2_dR
-        dBphi_dR = -s*dB1_dR + c*dB2_dR
+        dBR_dR = c * dB1_dR + s * dB2_dR
+        dBphi_dR = -s * dB1_dR + c * dB2_dR
         dBZ_dR = dB3_dR
 
-        dBR_dZ = c*dB1_dz + s*dB2_dz
-        dBphi_dZ = -s*dB1_dz + c*dB2_dz
+        dBR_dZ = c * dB1_dz + s * dB2_dz
+        dBphi_dZ = -s * dB1_dz + c * dB2_dz
         dBZ_dZ = dB3_dz
 
-        Bphi_R = Bphi/R
-        d_Bphi_R_dR = (dBphi_dR * R - Bphi)/R**2
-        d_Bphi_R_dZ = dBphi_dZ/R
+        Bphi_R = Bphi / R
+        d_Bphi_R_dR = (dBphi_dR * R - Bphi) / R**2
+        d_Bphi_R_dZ = dBphi_dZ / R
 
         A11 = (dBR_dR - (BR / Bphi_R) * d_Bphi_R_dR) / Bphi_R
         A21 = (dBZ_dR - (BZ / Bphi_R) * d_Bphi_R_dR) / Bphi_R
         A12 = (dBR_dZ - (BR / Bphi_R) * d_Bphi_R_dZ) / Bphi_R
         A22 = (dBZ_dZ - (BZ / Bphi_R) * d_Bphi_R_dZ) / Bphi_R
         A = np.array([[A11, A12], [A21, A22]])
-        return 2*np.pi*np.array([A@x[:2], A@x[2:]]).flatten()
+        return 2 * np.pi * np.array([A @ x[:2], A @ x[2:]]).flatten()
 
-    t_span = [0, 1/axis.nfp]
+    t_span = [0, 1 / axis.nfp]
     t_eval = t_span
 
     y0 = np.array([1, 0, 0, 1])
-    results = solve_ivp(tangent_map, t_span, y0, t_eval=t_eval, rtol=1e-12, atol=1e-12, method='RK45')
+    results = solve_ivp(
+        tangent_map, t_span, y0, t_eval=t_eval, rtol=1e-12, atol=1e-12, method="RK45"
+    )
     M = results.y[:, -1].reshape((2, 2))
     evals, evecs = np.linalg.eig(M)
-    iota = np.arctan2(np.imag(evals[0]), np.real(evals[0])) * axis.nfp/(2*np.pi)
+    iota = np.arctan2(np.imag(evals[0]), np.real(evals[0])) * axis.nfp / (2 * np.pi)
     return iota

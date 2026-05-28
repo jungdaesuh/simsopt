@@ -67,7 +67,10 @@ from banana_opt.coil_order_upgrade import (
     upgrade_loaded_seed_biot_savart_order,
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
-from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
+from banana_opt.basin_hopping import (
+    run_basin_hopping,
+    telemetry_values as basin_telemetry_values,
+)
 from banana_opt.stage2_geometry import (
     VFCoilBuildResult,
     coerce_vf_coil_build_result,
@@ -106,6 +109,7 @@ from banana_opt.hardware_contracts import (
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     validate_banana_winding_surface_radius,
+    validate_coil_length_target,
     validate_major_radius,
     validate_target_lcfs_major_radius,
     validate_target_lcfs_minor_radius,
@@ -182,7 +186,11 @@ from banana_opt.self_intersect import CurveSelfIntersect
 
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
-DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
+DEFAULT_EQUILIBRIA_DIR = (
+    DATABASE_EQUILIBRIA_DIR
+    if os.path.isdir(DATABASE_EQUILIBRIA_DIR)
+    else os.path.join(EXAMPLE_ROOT, "equilibria")
+)
 DEFAULT_STAGE2_IOTA_TOLERANCE = 5.0e-3
 DEFAULT_STAGE2_IOTA_VOL_TARGET = 0.10
 DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT = 1.0
@@ -267,7 +275,10 @@ def validate_banana_current_cli_args(args) -> None:
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
-    if banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A and not accepts_offspec_current_max:
+    if (
+        banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A
+        and not accepts_offspec_current_max
+    ):
         raise ValueError(
             f"--banana-current-max-A must be in the interval "
             f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
@@ -332,7 +343,10 @@ def validate_stage2_tf_current_value(
             raise ValueError(
                 f"Positive {field_name} requires --accept-offspec-tf-current-sign."
             )
-        if abs(tf_current_A) > TF_CURRENT_HARD_LIMIT_A and not accepts_offspec_magnitude:
+        if (
+            abs(tf_current_A) > TF_CURRENT_HARD_LIMIT_A
+            and not accepts_offspec_magnitude
+        ):
             raise ValueError(
                 f"|{field_name}| above the hardware limit requires "
                 "--accept-offspec-tf-current-magnitude."
@@ -356,6 +370,10 @@ def stage2_current_contract_allows_offspec(args) -> bool:
         or bool(args.accept_offspec_tf_current_magnitude)
         or bool(args.accept_offspec_banana_current_max)
     )
+
+
+def stage2_length_contract_allows_offspec(args) -> bool:
+    return bool(getattr(args, "accept_offspec_coil_length", False))
 
 
 def validate_stage2_iota_cli_args(args) -> None:
@@ -419,7 +437,9 @@ def parse_args():
     )
     parser.add_argument(
         "--plasma-surf-filename",
-        default=os.environ.get("PLASMA_SURF_FILENAME", "wout_nfp22ginsburg_000_014417_iota15.nc"),
+        default=os.environ.get(
+            "PLASMA_SURF_FILENAME", "wout_nfp22ginsburg_000_014417_iota15.nc"
+        ),
         help="VMEC wout filename under the equilibria directory.",
     )
     parser.add_argument(
@@ -502,7 +522,9 @@ def parse_args():
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
-    parser.add_argument("--ntheta", type=int, default=int(os.environ.get("NTHETA", "64")))
+    parser.add_argument(
+        "--ntheta", type=int, default=int(os.environ.get("NTHETA", "64"))
+    )
     parser.add_argument(
         "--init-only",
         action="store_true",
@@ -511,7 +533,9 @@ def parse_args():
     parser.add_argument(
         "--banana-surf-radius",
         type=float,
-        default=float(os.environ.get("BANANA_SURF_RADIUS", str(BANANA_WINDING_MINOR_RADIUS_M))),
+        default=float(
+            os.environ.get("BANANA_SURF_RADIUS", str(BANANA_WINDING_MINOR_RADIUS_M))
+        ),
         help=(
             "Coil surface minor radius. Defaults to the hardware contract "
             "banana winding minor radius."
@@ -591,7 +615,9 @@ def parse_args():
     parser.add_argument(
         "--vf-current-max-A",
         type=float,
-        default=float(os.environ.get("VF_CURRENT_MAX_A", str(BANANA_CURRENT_HARD_LIMIT_A))),
+        default=float(
+            os.environ.get("VF_CURRENT_MAX_A", str(BANANA_CURRENT_HARD_LIMIT_A))
+        ),
         help=(
             "Hard L-BFGS-B bound on the realized shared VF current in SI amperes "
             "when the selected finite-current profile makes VF current optimizable."
@@ -635,6 +661,11 @@ def parse_args():
     )
     parser.add_argument(
         "--accept-offspec-tf-current-magnitude",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--accept-offspec-coil-length",
         action="store_true",
         help=argparse.SUPPRESS,
     )
@@ -752,9 +783,7 @@ def parse_args():
     parser.add_argument(
         "--alm-trust-radius-shrink",
         type=float,
-        default=_stage2_alm_env_float(
-            "ALM_TRUST_RADIUS_SHRINK", "trust_radius_shrink"
-        ),
+        default=_stage2_alm_env_float("ALM_TRUST_RADIUS_SHRINK", "trust_radius_shrink"),
         help="Multiplicative shrink factor for the ALM inner trust radius.",
     )
     parser.add_argument(
@@ -780,9 +809,7 @@ def parse_args():
     parser.add_argument(
         "--alm-distance-smoothing",
         type=float,
-        default=_stage2_alm_env_float(
-            "ALM_DISTANCE_SMOOTHING", "distance_smoothing"
-        ),
+        default=_stage2_alm_env_float("ALM_DISTANCE_SMOOTHING", "distance_smoothing"),
         help="Distance soft-min temperature for Stage 2 ALM spacing constraints.",
     )
     parser.add_argument(
@@ -792,9 +819,7 @@ def parse_args():
         # kappa array) vs single-stage's 0.05. The wider window is appropriate
         # here because Stage 2 operates on a single banana coil with fewer
         # quadrature points and less sensitivity to curvature perturbations.
-        default=_stage2_alm_env_float(
-            "ALM_CURVATURE_SMOOTHING", "curvature_smoothing"
-        ),
+        default=_stage2_alm_env_float("ALM_CURVATURE_SMOOTHING", "curvature_smoothing"),
         help="Curvature soft-max temperature for Stage 2 ALM curvature constraints.",
     )
     parser.add_argument(
@@ -811,7 +836,8 @@ def parse_args():
     parser.add_argument(
         "--alm-fix-signal-mismatch-guard",
         action="store_true",
-        default=os.environ.get("ALM_FIX_SIGNAL_MISMATCH_GUARD", "0") not in (
+        default=os.environ.get("ALM_FIX_SIGNAL_MISMATCH_GUARD", "0")
+        not in (
             "",
             "0",
             "false",
@@ -885,9 +911,7 @@ def parse_args():
     parser.add_argument(
         "--stage2-iota-nphi",
         type=int,
-        default=int(
-            os.environ.get("STAGE2_IOTA_NPHI", str(DEFAULT_STAGE2_IOTA_NPHI))
-        ),
+        default=int(os.environ.get("STAGE2_IOTA_NPHI", str(DEFAULT_STAGE2_IOTA_NPHI))),
         help="Surface quadrature nphi used by the Stage 2 Boozer/iota solve.",
     )
     parser.add_argument(
@@ -901,25 +925,19 @@ def parse_args():
     parser.add_argument(
         "--stage2-iota-mpol",
         type=int,
-        default=int(
-            os.environ.get("STAGE2_IOTA_MPOL", str(DEFAULT_STAGE2_IOTA_MPOL))
-        ),
+        default=int(os.environ.get("STAGE2_IOTA_MPOL", str(DEFAULT_STAGE2_IOTA_MPOL))),
         help="Boozer-surface mpol used by the Stage 2 Boozer/iota solve.",
     )
     parser.add_argument(
         "--stage2-iota-ntor",
         type=int,
-        default=int(
-            os.environ.get("STAGE2_IOTA_NTOR", str(DEFAULT_STAGE2_IOTA_NTOR))
-        ),
+        default=int(os.environ.get("STAGE2_IOTA_NTOR", str(DEFAULT_STAGE2_IOTA_NTOR))),
         help="Boozer-surface ntor used by the Stage 2 Boozer/iota solve.",
     )
     parser.add_argument(
         "--enable-topology-bridge-diagnostics",
         action="store_true",
-        default=bool(int(
-            os.environ.get("ENABLE_TOPOLOGY_BRIDGE_DIAGNOSTICS", "0")
-        )),
+        default=bool(int(os.environ.get("ENABLE_TOPOLOGY_BRIDGE_DIAGNOSTICS", "0"))),
         help=(
             "Phase 3b gate: persist HELICAL_FIELD_CONTENT, "
             "PRE_BOOZER_TOPOLOGY_SCORE, FIELDLINE_IOTA_PROXY, and the "
@@ -973,10 +991,12 @@ def parse_args():
     parser.add_argument(
         "--topology-bridge-nfieldlines",
         type=int,
-        default=int(os.environ.get(
-            "TOPOLOGY_BRIDGE_NFIELDLINES",
-            str(TOPOLOGY_BRIDGE_DEFAULT_NFIELDLINES),
-        )),
+        default=int(
+            os.environ.get(
+                "TOPOLOGY_BRIDGE_NFIELDLINES",
+                str(TOPOLOGY_BRIDGE_DEFAULT_NFIELDLINES),
+            )
+        ),
         help=(
             "Phase 3a diagnostic: number of midplane seed radii for the "
             "post-solve field-line iota proxy in banana_opt.topology_bridge."
@@ -985,10 +1005,12 @@ def parse_args():
     parser.add_argument(
         "--topology-bridge-tmax",
         type=float,
-        default=float(os.environ.get(
-            "TOPOLOGY_BRIDGE_TMAX",
-            str(TOPOLOGY_BRIDGE_DEFAULT_TMAX),
-        )),
+        default=float(
+            os.environ.get(
+                "TOPOLOGY_BRIDGE_TMAX",
+                str(TOPOLOGY_BRIDGE_DEFAULT_TMAX),
+            )
+        ),
         help=(
             "Phase 3a diagnostic: hard tmax cap (plan line 271) for the "
             "post-solve field-line tracer."
@@ -997,10 +1019,12 @@ def parse_args():
     parser.add_argument(
         "--topology-bridge-tol",
         type=float,
-        default=float(os.environ.get(
-            "TOPOLOGY_BRIDGE_TOL",
-            str(TOPOLOGY_BRIDGE_DEFAULT_TOL),
-        )),
+        default=float(
+            os.environ.get(
+                "TOPOLOGY_BRIDGE_TOL",
+                str(TOPOLOGY_BRIDGE_DEFAULT_TOL),
+            )
+        ),
         help=(
             "Phase 3a diagnostic: ODE tolerance (plan line 273 default 1e-8) "
             "for the post-solve field-line tracer."
@@ -1009,9 +1033,7 @@ def parse_args():
     parser.add_argument(
         "--topology-bridge-n-transits-target",
         type=int,
-        default=int(os.environ.get(
-            "TOPOLOGY_BRIDGE_N_TRANSITS_TARGET", "100"
-        )),
+        default=int(os.environ.get("TOPOLOGY_BRIDGE_N_TRANSITS_TARGET", "100")),
         help=(
             "Phase 3a diagnostic: minimum toroidal transits a line must "
             "complete to contribute to the iota proxy mean (plan acceptance "
@@ -1036,35 +1058,45 @@ def parse_args():
     parser.add_argument(
         "--stage2-poloidal-weight",
         type=float,
-        default=float(os.environ.get(
-            "STAGE2_POLOIDAL_WEIGHT",
-            str(STAGE2_POLOIDAL_WEIGHT_DEFAULT),
-        )),
+        default=float(
+            os.environ.get(
+                "STAGE2_POLOIDAL_WEIGHT",
+                str(STAGE2_POLOIDAL_WEIGHT_DEFAULT),
+            )
+        ),
         help="Stage 2 weighted poloidal-extent hinge weight (penalty path).",
     )
     parser.add_argument(
         "--stage2-width-weight",
         type=float,
-        default=float(os.environ.get(
-            "STAGE2_WIDTH_WEIGHT",
-            str(STAGE2_WIDTH_WEIGHT_DEFAULT),
-        )),
+        default=float(
+            os.environ.get(
+                "STAGE2_WIDTH_WEIGHT",
+                str(STAGE2_WIDTH_WEIGHT_DEFAULT),
+            )
+        ),
         help="Stage 2 weighted width hinge weight (penalty path).",
     )
     parser.add_argument(
         "--stage2-selfint-weight",
         type=float,
-        default=float(os.environ.get(
-            "STAGE2_SELF_INTERSECT_WEIGHT",
-            str(STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT),
-        )),
+        default=float(
+            os.environ.get(
+                "STAGE2_SELF_INTERSECT_WEIGHT",
+                str(STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT),
+            )
+        ),
         help="Stage 2 curve self-intersect penalty weight.",
     )
     parser.add_argument(
         "--length-target",
         type=float,
         default=float(os.environ.get("LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
-        help="Curve-length target in meters.",
+        help=(
+            "Curve-length target in meters. Values above the "
+            f"{COIL_LENGTH_HARD_LIMIT_M:.1f} m hardware ceiling require "
+            "--accept-offspec-coil-length."
+        ),
     )
     parser.add_argument(
         "--cc-threshold",
@@ -1137,8 +1169,8 @@ def parse_args():
         type=int,
         default=int(os.environ.get("BASIN_HOPS", "0")),
         help="Number of basin-hopping restarts (0 = single L-BFGS-B run, default). "
-             "Each hop perturbs the coil DOFs and re-runs L-BFGS-B. "
-             "Total runs = basin_hops + 1. Keeps the best result.",
+        "Each hop perturbs the coil DOFs and re-runs L-BFGS-B. "
+        "Total runs = basin_hops + 1. Keeps the best result.",
     )
     parser.add_argument(
         "--basin-stepsize",
@@ -1188,6 +1220,7 @@ def build_equilibrium_path(args):
             return candidate_path
     return candidate_paths[0]
 
+
 def build_hbt_reference_surfaces(nfp, banana_surf_radius):
     surfaces = build_banana_reference_surfaces(nfp, banana_surf_radius)
     return (
@@ -1218,7 +1251,8 @@ def build_stage2_secondary_artifact_metadata(
     secondary_source=None,
 ):
     preserved = (
-        secondary_stage2_bs_path is not None and secondary_stage2_results_path is not None
+        secondary_stage2_bs_path is not None
+        and secondary_stage2_results_path is not None
     )
     return {
         "STAGE2_SECONDARY_ARTIFACT_PRESERVED": preserved,
@@ -1269,9 +1303,7 @@ def build_secondary_stage2_results_kwargs(
     }
 
 
-def _interpolated_field_for_topology_bridge(
-    biotsavart, surface, *, nfp: int
-):
+def _interpolated_field_for_topology_bridge(biotsavart, surface, *, nfp: int):
     """Wrap ``biotsavart`` in an ``InterpolatedField`` sized to the surface.
 
     H1 fix: the legacy code path called the field-line tracer directly
@@ -1480,27 +1512,35 @@ def build_stage2_iota_hot_loop_payload(
         phase3a_result = safe_compute_phase3a_fieldline_iota_proxy(
             tracer_field,
             surface,
-            nfieldlines=int(getattr(
-                args,
-                "topology_bridge_nfieldlines",
-                TOPOLOGY_BRIDGE_DEFAULT_NFIELDLINES,
-            )),
-            tmax=float(getattr(
-                args,
-                "topology_bridge_tmax",
-                TOPOLOGY_BRIDGE_DEFAULT_TMAX,
-            )),
-            tol=float(getattr(
-                args,
-                "topology_bridge_tol",
-                TOPOLOGY_BRIDGE_DEFAULT_TOL,
-            )),
+            nfieldlines=int(
+                getattr(
+                    args,
+                    "topology_bridge_nfieldlines",
+                    TOPOLOGY_BRIDGE_DEFAULT_NFIELDLINES,
+                )
+            ),
+            tmax=float(
+                getattr(
+                    args,
+                    "topology_bridge_tmax",
+                    TOPOLOGY_BRIDGE_DEFAULT_TMAX,
+                )
+            ),
+            tol=float(
+                getattr(
+                    args,
+                    "topology_bridge_tol",
+                    TOPOLOGY_BRIDGE_DEFAULT_TOL,
+                )
+            ),
             escape_radius=float(topology_bridge_escape_radius),
-            n_transits_target=int(getattr(
-                args,
-                "topology_bridge_n_transits_target",
-                100,
-            )),
+            n_transits_target=int(
+                getattr(
+                    args,
+                    "topology_bridge_n_transits_target",
+                    100,
+                )
+            ),
         )
         # Phase 3a owns the FIELDLINE_IOTA_PROXY / FIELDLINE_IOTA_PROXY_VALID
         # keys; Phase 3b emits only the helical-content + composite keys.
@@ -1550,14 +1590,10 @@ def build_stage2_iota_report_payload(
     payload = {
         "STAGE2_ROOT_FIX_ENABLED": probe_enabled,
         "STAGE2_IOTA_TARGET": (
-            None
-            if args.stage2_iota_target is None
-            else float(args.stage2_iota_target)
+            None if args.stage2_iota_target is None else float(args.stage2_iota_target)
         ),
         "STAGE2_IOTA_TOLERANCE": (
-            None
-            if not probe_enabled
-            else float(args.stage2_iota_tolerance)
+            None if not probe_enabled else float(args.stage2_iota_tolerance)
         ),
         "STAGE2_IOTA_PROBE_SECONDS": None,
         "BOOTABILITY_STAGE2_BS_PATH": stage2_bs_artifact_path,
@@ -1667,9 +1703,7 @@ def materialize_stage2_artifact_results(
         **results_kwargs,
         field_error=field_error,
     )
-    results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(
-        stage2_bs_artifact_path
-    )
+    results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(stage2_bs_artifact_path)
     results.update(constraint_metadata)
     warm_start_surface_path = save_stage2_warm_start_boozer_surface(
         stage2_iota_runtime,
@@ -1715,8 +1749,19 @@ def build_stage2_constraint_artifact_metadata(
     contract, _trace = resolve_constraint_contract_from_wire_names(
         cli_overrides=cli_overrides,
         allow_offspec_current_contract=stage2_current_contract_allows_offspec(args),
+        allow_offspec_length_contract=stage2_length_contract_allows_offspec(args),
     )
     resolved_override_reason = override_reason
+    if (
+        stage2_length_contract_allows_offspec(args)
+        and float(length_target) > COIL_LENGTH_HARD_LIMIT_M
+    ):
+        length_override_reason = "offspec_coil_length_target"
+        resolved_override_reason = (
+            length_override_reason
+            if resolved_override_reason in {None, ""}
+            else f"{resolved_override_reason};{length_override_reason}"
+        )
     return build_constraint_metadata(
         contract,
         profile_name=(
@@ -1995,7 +2040,9 @@ def _resolve_stage2_finite_current_config(
     finite_current_mode = resolve_finite_current_mode(
         requested_finite_current_mode,
         artifact_mode=(
-            None if stage2_results is None else stage2_results.get("FINITE_CURRENT_MODE")
+            None
+            if stage2_results is None
+            else stage2_results.get("FINITE_CURRENT_MODE")
         ),
         artifact_mode_source=(
             None
@@ -2059,9 +2106,8 @@ def _resolve_stage2_finite_current_config(
             vf_current_A = (
                 proxy_plasma_current_A * finite_current_profile.vf_current_ratio
             )
-        if (
-            requested_vf_template_path not in {None, ""}
-            and _is_legacy_zero_vf_donor(stage2_results)
+        if requested_vf_template_path not in {None, ""} and _is_legacy_zero_vf_donor(
+            stage2_results
         ):
             raise ValueError(
                 "Legacy zero-VF Stage 2 donors cannot override --vf-template-path "
@@ -2073,10 +2119,12 @@ def _resolve_stage2_finite_current_config(
             field_name="--vf-template-path",
         )
 
-    proxy_plasma_current_A, vf_current_A = validate_proxy_vf_current_convention_for_mode(
-        finite_current_mode,
-        proxy_plasma_current_A=proxy_plasma_current_A,
-        vf_current_A=vf_current_A,
+    proxy_plasma_current_A, vf_current_A = (
+        validate_proxy_vf_current_convention_for_mode(
+            finite_current_mode,
+            proxy_plasma_current_A=proxy_plasma_current_A,
+            vf_current_A=vf_current_A,
+        )
     )
     vf_current_max_A = validate_vf_current_bound_config(
         vf_current_A=vf_current_A,
@@ -2343,7 +2391,9 @@ def main(parsed_args=None):
     nphi = args.nphi
     ntheta = args.ntheta
     # Create the TF coils in HBT - these will be fixed but create background toroidal field:
-    tf_curves = create_equally_spaced_curves(20, 1, stellsym=False, R0=0.976, R1=0.4, order=1)
+    tf_curves = create_equally_spaced_curves(
+        20, 1, stellsym=False, R0=0.976, R1=0.4, order=1
+    )
     tf_current_A = args.tf_current_A
     tf_currents = [Current(1.0) * tf_current_A for i in range(20)]
 
@@ -2353,8 +2403,7 @@ def main(parsed_args=None):
     for tf_current in tf_currents:
         tf_current.fix_all()
 
-    tf_coils = [Coil(curve,current) for curve, current in zip(tf_curves,tf_currents)]
-
+    tf_coils = [Coil(curve, current) for curve, current in zip(tf_curves, tf_currents)]
 
     # INITIALIZATION FOR BANANA COILS
     # ---------------------------------------------------------------------------------------
@@ -2364,19 +2413,21 @@ def main(parsed_args=None):
     theta_width = args.theta_width
     phi_width = args.phi_width
 
-    num_quadpoints = args.num_quadpoints # number of quadature points for coils
-    order = args.order # number of Fourier modes for coils
+    num_quadpoints = args.num_quadpoints  # number of quadature points for coils
+    order = args.order  # number of Fourier modes for coils
 
     if args.accept_offspec_major_radius:
         R0 = float(args.major_radius)
         if R0 <= 0.0:
             raise ValueError("--major-radius must be positive.")
     else:
-        R0 = validate_major_radius(args.major_radius) # major radius (vacuum-vessel contract)
+        R0 = validate_major_radius(
+            args.major_radius
+        )  # major radius (vacuum-vessel contract)
     s = validate_normalized_toroidal_flux(
         args.toroidal_flux,
         field_name="--toroidal-flux",
-    ) # VMEC flux-surface label
+    )  # VMEC flux-surface label
     target_lcfs_major_radius_m = validate_target_lcfs_major_radius(
         args.target_lcfs_max_major_radius_m
     )
@@ -2479,7 +2530,10 @@ def main(parsed_args=None):
                 vf_current_A=vf_current_A,
                 vf_current_mutability=finite_current_profile.vf_current_mutability,
             )
-        if finite_current_profile.vf_current_mutability == "shared_unfixed_scaled_current":
+        if (
+            finite_current_profile.vf_current_mutability
+            == "shared_unfixed_scaled_current"
+        ):
             new_vf_build_result = VFCoilBuildResult(
                 coils=new_vf_coils,
                 current_control=shared_vf_current_control_for_coils(new_vf_coils),
@@ -2555,18 +2609,15 @@ def main(parsed_args=None):
     # Weight on the curve lengths in the objective function
     # We'll penalize the coil if it becomes longer than the hardware contract target.
     LENGTH_WEIGHT = args.length_weight
-    requested_length_target = float(args.length_target)
-    if requested_length_target > COIL_LENGTH_HARD_LIMIT_M:
-        raise ValueError(
-            f"--length-target must be <= {COIL_LENGTH_HARD_LIMIT_M:.3f} m."
-        )
-    LENGTH_TARGET = requested_length_target
+    LENGTH_TARGET = validate_coil_length_target(
+        args.length_target,
+        accept_offspec_coil_length=stage2_length_contract_allows_offspec(args),
+        field_name="--length-target",
+    )
 
     # Threshold and weight for the coil-to-coil distance penalty
     if args.cc_threshold < COIL_COIL_MIN_DIST_M:
-        raise ValueError(
-            f"--cc-threshold must be >= {COIL_COIL_MIN_DIST_M:.3f} m."
-        )
+        raise ValueError(f"--cc-threshold must be >= {COIL_COIL_MIN_DIST_M:.3f} m.")
     CC_THRESHOLD = float(args.cc_threshold)
     CC_WEIGHT = args.cc_weight
     CS_THRESHOLD = COIL_PLASMA_MIN_DIST_M
@@ -2580,9 +2631,11 @@ def main(parsed_args=None):
         )
 
     # Define the individual terms objective function:
-    Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
-    Jls = CurveLength(new_banana_curve) # penalty on curve length
-    Jccdist = CurveCurveDistance(objective_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
+    Jf = SquaredFlux(new_surf, new_bs)  # penalty on B dot n
+    Jls = CurveLength(new_banana_curve)  # penalty on curve length
+    Jccdist = CurveCurveDistance(
+        objective_curves, CC_THRESHOLD
+    )  # penalty on coil-to-coil distance
     Jcsdist = CurveSurfaceDistance(objective_curves, lcfs_surf, CS_THRESHOLD)
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
@@ -2624,14 +2677,16 @@ def main(parsed_args=None):
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
     SQUARED_FLUX_WEIGHT = args.squared_flux_weight
     CONSTRAINT_METHOD = args.constraint_method
-    JF = SQUARED_FLUX_WEIGHT * Jf \
-        + LENGTH_WEIGHT * (QuadraticPenalty(Jls, LENGTH_TARGET, "max") + Jlsmin) \
-        + CC_WEIGHT * Jccdist \
-        + CC_WEIGHT * Jcsdist \
-        + CURVATURE_WEIGHT * Jc \
-        + args.stage2_poloidal_weight * Jpe \
-        + args.stage2_width_weight * (Jwmin + Jwmax) \
+    JF = (
+        SQUARED_FLUX_WEIGHT * Jf
+        + LENGTH_WEIGHT * (QuadraticPenalty(Jls, LENGTH_TARGET, "max") + Jlsmin)
+        + CC_WEIGHT * Jccdist
+        + CC_WEIGHT * Jcsdist
+        + CURVATURE_WEIGHT * Jc
+        + args.stage2_poloidal_weight * Jpe
+        + args.stage2_width_weight * (Jwmin + Jwmax)
         + args.stage2_selfint_weight * Jself
+    )
     BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
     if args.alm_taylor_test and CONSTRAINT_METHOD != "alm":
         raise ValueError("--alm-taylor-test requires --constraint-method=alm")
@@ -2655,7 +2710,11 @@ def main(parsed_args=None):
     alm_settings = None
     alm_taylor_result = None
     if args.basin_hops > 0:
-        rng_seed = args.basin_seed if args.basin_seed >= 0 else int.from_bytes(os.urandom(4), 'big')
+        rng_seed = (
+            args.basin_seed
+            if args.basin_seed >= 0
+            else int.from_bytes(os.urandom(4), "big")
+        )
     stage2_seed_spec = Stage2SeedSpec(
         plasma_surf_filename=plasma_surf_filename,
         major_radius=R0,
@@ -2942,7 +3001,9 @@ def main(parsed_args=None):
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     elif CONSTRAINT_METHOD == "alm":
         if args.basin_hops > 0:
-            raise ValueError("--basin-hops is not supported with --constraint-method=alm")
+            raise ValueError(
+                "--basin-hops is not supported with --constraint-method=alm"
+            )
         maybe_record_exact_stage2_pass(
             dofs,
             source="loaded_seed" if args.stage2_bs_path else "initial_state",
@@ -2966,9 +3027,8 @@ def main(parsed_args=None):
         optimizer_success = bool(res.success)
         selected_result_x = np.asarray(res.x, dtype=float).copy()
         final_candidate_state = capture_artifact_state(selected_result_x)
-        if (
-            best_exact_stage2_pass is not None
-            and not stage2_contract_passes(final_candidate_state)
+        if best_exact_stage2_pass is not None and not stage2_contract_passes(
+            final_candidate_state
         ):
             selected_result_x = best_exact_stage2_pass["x"].copy()
             optimizer_success = False
@@ -2989,12 +3049,14 @@ def main(parsed_args=None):
     elif args.basin_hops > 0:
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
         minimizer_kwargs = {
-            'method': 'L-BFGS-B',
-            'jac': True,
-            'bounds': lbfgsb_bounds,
-            'options': lbfgsb_options,
+            "method": "L-BFGS-B",
+            "jac": True,
+            "bounds": lbfgsb_bounds,
+            "options": lbfgsb_options,
         }
-        basin_niter_success = args.basin_niter_success if args.basin_niter_success > 0 else None
+        basin_niter_success = (
+            args.basin_niter_success if args.basin_niter_success > 0 else None
+        )
         print(
             f"Basin-hopping with {args.basin_hops} hops, "
             f"stepsize={args.basin_stepsize}, "
@@ -3012,8 +3074,10 @@ def main(parsed_args=None):
             rng_seed=rng_seed,
             minimizer_kwargs=minimizer_kwargs,
         )
-        basin_hop_count = res.nit if hasattr(res, 'nit') else None
-        basin_minimization_failures = res.minimization_failures if hasattr(res, 'minimization_failures') else None
+        basin_hop_count = res.nit if hasattr(res, "nit") else None
+        basin_minimization_failures = (
+            res.minimization_failures if hasattr(res, "minimization_failures") else None
+        )
         (
             basin_accepted_hops,
             basin_rejected_hops,
@@ -3031,23 +3095,33 @@ def main(parsed_args=None):
         basin_best_hop_index = basin_telemetry.get("basin_best_hop_index")
         basin_best_result_source = basin_telemetry.get("basin_best_result_source")
         basin_objective_improvement = basin_telemetry.get("basin_objective_improvement")
-        if hasattr(res, 'lowest_optimization_result') and hasattr(res.lowest_optimization_result, 'nit'):
+        if hasattr(res, "lowest_optimization_result") and hasattr(
+            res.lowest_optimization_result, "nit"
+        ):
             res_nit = res.lowest_optimization_result.nit
         else:
             res_nit = basin_hop_count
-        if hasattr(res, 'lowest_optimization_result'):
-            termination_message = str(getattr(res.lowest_optimization_result, 'message', 'basinhopping_complete'))
-            optimizer_success = bool(getattr(res.lowest_optimization_result, 'success', True))
+        if hasattr(res, "lowest_optimization_result"):
+            termination_message = str(
+                getattr(
+                    res.lowest_optimization_result, "message", "basinhopping_complete"
+                )
+            )
+            optimizer_success = bool(
+                getattr(res.lowest_optimization_result, "success", True)
+            )
         else:
-            termination_message = str(getattr(res, 'message', 'basinhopping_complete'))
+            termination_message = str(getattr(res, "message", "basinhopping_complete"))
             optimizer_success = True
-        print(f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}")
+        print(
+            f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}"
+        )
     else:
         res = minimize(
             fun,
             dofs,
             jac=True,
-            method='L-BFGS-B',
+            method="L-BFGS-B",
             bounds=lbfgsb_bounds,
             options=lbfgsb_options,
         )
@@ -3055,7 +3129,6 @@ def main(parsed_args=None):
         termination_message = str(res.message)
         optimizer_success = bool(res.success)
         print(res.message)
-
 
     # Ensure SIMSOPT state matches the best result (needed after basin-hopping)
     final_artifact_state = None
@@ -3145,7 +3218,9 @@ def main(parsed_args=None):
     if deprecated_iota_alm_hot_loop and not bool(final_iota_feasible):
         optimizer_success = False
         if termination_message:
-            termination_message = f"{termination_message}; stage2_iota_constraint_failed"
+            termination_message = (
+                f"{termination_message}; stage2_iota_constraint_failed"
+            )
         else:
             termination_message = "stage2_iota_constraint_failed"
         print("/!\\ /!\\ Stage 2 iota constraint violation /!\\ /!\\")
@@ -3153,8 +3228,10 @@ def main(parsed_args=None):
     curves_to_vtk(new_curves, OUT_DIR_ITER + "curves_opt", close=True)
     new_bs.set_points(new_surf.gamma().reshape((-1, 3)))
     unitn = new_surf.unitnormal()
-    pointData = {"B_N/B": np.sum(new_bs.B().reshape(unitn.shape) *
-        unitn, axis=2)[:, :, None] / np.sqrt(np.sum(new_bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
+    pointData = {
+        "B_N/B": np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+        / np.sqrt(np.sum(new_bs.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
+    }
     new_surf.to_vtk(OUT_DIR_ITER + "surf_opt", extra_data=pointData)
     save_surf = getattr(new_surf, "save", None)
     if callable(save_surf):
@@ -3171,7 +3248,9 @@ def main(parsed_args=None):
         VV,
     )
     stage2_bs_artifact_path = OUT_DIR_ITER + "biot_savart_opt.json"
-    print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
+    print(
+        f"Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n"
+    )
     wout_convention_fields = wout_convention_artifact_fields(
         wout_path=file_loc,
         tf_current_A=tf_current_A,
@@ -3201,7 +3280,9 @@ def main(parsed_args=None):
         file_loc=file_loc,
         stage2_bs_path=args.stage2_bs_path,
         tf_current_A=tf_current_A,
-        tf_current_sum_abs_A=sum(abs(coil.current.get_value()) for coil in new_tf_coils),
+        tf_current_sum_abs_A=sum(
+            abs(coil.current.get_value()) for coil in new_tf_coils
+        ),
         wout_convention=wout_convention_fields["WOUT_CONVENTION"],
         wout_off_spec=wout_convention_fields["WOUT_OFF_SPEC"],
         num_tf_coils=len(new_tf_coils),

@@ -62,9 +62,7 @@ LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M = (
 )
 
 TARGET_LCFS_MAX_MAJOR_RADIUS_M = BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
-TARGET_LCFS_MAX_MINOR_RADIUS_M = (
-    BANANA_WINDING_MINOR_RADIUS_M - COIL_PLASMA_MIN_DIST_M
-)
+TARGET_LCFS_MAX_MINOR_RADIUS_M = BANANA_WINDING_MINOR_RADIUS_M - COIL_PLASMA_MIN_DIST_M
 LCFS_RADIUS_ABS_TOL_M = 1.0e-12
 
 
@@ -101,6 +99,22 @@ def validate_tf_current_limit(tf_current_A: float) -> float:
     return current
 
 
+def is_coil_length_target_offspec(length_target_m: float) -> bool:
+    return float(length_target_m) > COIL_LENGTH_HARD_LIMIT_M
+
+
+def validate_coil_length_target(
+    length_target_m: float,
+    *,
+    accept_offspec_coil_length: bool = False,
+    field_name: str = "--length-target",
+) -> float:
+    length_target = float(length_target_m)
+    if is_coil_length_target_offspec(length_target) and not accept_offspec_coil_length:
+        raise ValueError(f"{field_name} must be <= {COIL_LENGTH_HARD_LIMIT_M:.3f} m.")
+    return length_target
+
+
 def validate_banana_winding_surface_radius(banana_surf_radius: float) -> float:
     radius = float(banana_surf_radius)
     if not (0.0 < radius < VACUUM_VESSEL_MINOR_RADIUS_M):
@@ -132,6 +146,8 @@ def validate_target_lcfs_minor_radius(target_minor_radius_m: float) -> float:
 
 
 _MAJOR_RADIUS_TOL_M = 1.0e-12
+
+
 def is_major_radius_offspec(major_radius: float) -> bool:
     return abs(float(major_radius) - VACUUM_VESSEL_MAJOR_RADIUS_M) > _MAJOR_RADIUS_TOL_M
 

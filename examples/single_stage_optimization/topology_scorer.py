@@ -26,6 +26,7 @@ from banana_opt.topology.kam_birkhoff import (
     DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
     KAM_FRACTION_SEMANTICS,
     WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS,
+    WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER,
     missing_magnetic_axis_classification,
     classify_fieldline_hits,
     classifier_settings_payload,
@@ -1007,6 +1008,28 @@ def summarize_confinement_surrogate(
 # ---------------------------------------------------------------------------
 
 
+def wba_not_evaluated_payload(reason):
+    return {
+        "invariant_torus_fraction": None,
+        "invariant_torus_count": 0,
+        "wba_seed_count": 0,
+        "wba_survived_seed_count": 0,
+        "wba_classified_seed_count": 0,
+        "wba_evaluation_state": reason,
+        "wba_not_evaluated_reason": reason,
+        "wba_classification_counts": {},
+        "wba_rotation_number_median": None,
+        "wba_matching_digits_min": None,
+        "wba_matching_digits_median": None,
+        "wba_seed_classifications": [],
+        "wba_axis": None,
+        "wba_poincare_plane_index": 0,
+        "wba_settings": classifier_settings_payload(
+            DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS
+        ),
+    }
+
+
 def empty_topology_score_result(
     nfieldlines,
     tmax,
@@ -1040,23 +1063,7 @@ def empty_topology_score_result(
         "line_losses": [],
         "kam_fraction": None,
         "kam_fraction_semantics": None,
-        "invariant_torus_fraction": None,
-        "invariant_torus_count": 0,
-        "wba_seed_count": 0,
-        "wba_survived_seed_count": 0,
-        "wba_classified_seed_count": 0,
-        "wba_evaluation_state": WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS,
-        "wba_not_evaluated_reason": WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS,
-        "wba_classification_counts": {},
-        "wba_rotation_number_median": None,
-        "wba_matching_digits_min": None,
-        "wba_matching_digits_median": None,
-        "wba_seed_classifications": [],
-        "wba_axis": None,
-        "wba_poincare_plane_index": 0,
-        "wba_settings": classifier_settings_payload(
-            DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS
-        ),
+        **wba_not_evaluated_payload(WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS),
         "legacy_bounded_seed_fraction": 0.0,
         "legacy_bounded_seed_median_width": 0.0,
         "kam_median_width": 0.0,
@@ -1104,6 +1111,7 @@ def score_topology(
     field_policy=None,
     interpolation_grid=None,
     compute_transport_diagnostics=True,
+    compute_invariant_torus_classification=True,
     magnetic_axis_point=None,
 ):
     """Score field-line confinement on a Boozer surface.
@@ -1113,8 +1121,9 @@ def score_topology(
     and invariant_torus_fraction (a WBA convergence-rate classifier, or None
     when no survived seed has enough valid returns to classify). When
     compute_transport_diagnostics is False, skips the surface-field structure
-    computation and returns a not-evaluated stub (used by the search-time gate,
-    which does not consume transport diagnostics for its decision).
+    computation and returns a not-evaluated stub. The search-time survival gate
+    also disables compute_invariant_torus_classification so WBA magnetic-axis
+    solving cannot turn a confinement survival decision into a broken gate.
     """
     from simsopt.field import compute_fieldlines
 
@@ -1185,12 +1194,21 @@ def score_topology(
         span,
         width_ratio=kam_width_ratio,
     )
-    wba = invariant_torus_classification(
-        fieldlines_phi_hits,
-        surface,
-        bfield=traced_field,
-        axis_point=magnetic_axis_point,
-    )
+    if compute_invariant_torus_classification:
+        wba = invariant_torus_classification(
+            fieldlines_phi_hits,
+            surface,
+            # Locate the axis on the exact field, not ``traced_field``: the axis
+            # is a precise fixed-point solve (1e-8 residual) that an
+            # InterpolatedField cannot satisfy (its return map closes only to the
+            # grid error), whereas the long confinement traces above tolerate it.
+            # Routing the interpolated tracer here made the WBA/topology score
+            # report "broken" on valid configs whenever interpolation was active.
+            bfield=bfield,
+            axis_point=magnetic_axis_point,
+        )
+    else:
+        wba = wba_not_evaluated_payload(WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER)
     invariant_torus_fraction = wba["invariant_torus_fraction"]
     promoted_kam_fraction = (
         None if invariant_torus_fraction is None else float(invariant_torus_fraction)

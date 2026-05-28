@@ -1,6 +1,8 @@
 import math
 
 import numpy as np
+import simsopt.field as simsopt_field
+from simsopt.geo import SurfaceRZFourier
 
 from geo._frontier_test_helpers import ensure_examples_import_path
 
@@ -143,3 +145,131 @@ def test_empty_topology_score_does_not_promote_not_evaluated_wba_to_kam_fraction
     assert result["kam_fraction"] is None
     assert result["kam_fraction_semantics"] is None
     assert result["wba_evaluation_state"] == "not_evaluated_no_classified_seeds"
+
+
+def test_score_topology_can_skip_wba_axis_classification(monkeypatch):
+    fieldlines_tys = [
+        np.array([[0.0, 1.0, 0.0, 0.0]]),
+        np.array([[0.0, 1.1, 0.0, 0.0]]),
+    ]
+    fieldlines_phi_hits = [
+        np.array([[0.4, 0.0, 1.0, 0.0, 0.0]]),
+        np.array([[0.5, 0.0, 1.1, 0.0, 0.0]]),
+    ]
+    stop_labels = [
+        "surface_exit",
+        "max_z_guardrail",
+        "min_z_guardrail",
+        "min_r_guardrail",
+        "max_r_guardrail",
+        "iteration_limit",
+    ]
+
+    monkeypatch.setattr(
+        topology_scorer,
+        "build_stopping_criteria",
+        lambda *_args, **_kwargs: ([object()], stop_labels),
+    )
+    monkeypatch.setattr(
+        topology_scorer,
+        "midplane_seed_radii",
+        lambda *_args, **_kwargs: np.array([1.0, 1.1]),
+    )
+    monkeypatch.setattr(
+        topology_scorer,
+        "prepare_topology_field",
+        lambda *_args, **_kwargs: (object(), {"selected_mode": "native"}),
+    )
+    monkeypatch.setattr(topology_scorer, "cross_section_span", lambda *_args: 1.0)
+    monkeypatch.setattr(
+        topology_scorer,
+        "invariant_torus_classification",
+        _raise_unexpected_wba_call,
+    )
+    monkeypatch.setattr(
+        simsopt_field,
+        "compute_fieldlines",
+        lambda *_args, **_kwargs: (fieldlines_tys, fieldlines_phi_hits),
+    )
+
+    result = topology_scorer.score_topology(
+        RingSurface(),
+        object(),
+        nfieldlines=2,
+        tmax=2.0,
+        tol=1e-7,
+        nphis=1,
+        field_policy="never",
+        compute_transport_diagnostics=False,
+        compute_invariant_torus_classification=False,
+    )
+
+    assert result["wba_evaluation_state"] == "not_evaluated_skipped_by_caller"
+    assert result["wba_not_evaluated_reason"] == "not_evaluated_skipped_by_caller"
+    assert result["invariant_torus_fraction"] is None
+    assert result["kam_fraction"] is None
+
+
+def _raise_unexpected_wba_call(*_args, **_kwargs):
+    raise AssertionError("search gate WBA path should not run")
+
+
+def test_score_topology_solves_axis_on_exact_field_under_interpolation(monkeypatch):
+    # Long confinement traces run on the InterpolatedField for speed, but the
+    # magnetic-axis fixed-point solve must use the EXACT field: an interpolated
+    # field cannot close the return map to the 1e-8 axis tolerance, so routing
+    # the interpolated tracer into the axis solve made the WBA/topology score
+    # report "broken" on valid configs whenever interpolation turned on
+    # (tmax >= threshold). This guards score_topology against that regression.
+    major_radius = 1.0
+    field = simsopt_field.ToroidalField(
+        major_radius, 1.0
+    ) + simsopt_field.PoloidalField(major_radius, 1.0, 3.0)
+    surface = SurfaceRZFourier(
+        nfp=1,
+        stellsym=True,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=np.linspace(0.0, 1.0, 32, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 32, endpoint=False),
+    )
+    surface.set_rc(0, 0, major_radius)
+    surface.set_rc(1, 0, 0.2)
+    surface.set_zs(1, 0, 0.2)
+
+    captured = {}
+    real_compute_fieldlines = simsopt_field.compute_fieldlines
+    real_classify = topology_scorer.invariant_torus_classification
+
+    def spy_compute_fieldlines(traced_field, *args, **kwargs):
+        captured["traced_field"] = traced_field
+        return real_compute_fieldlines(traced_field, *args, **kwargs)
+
+    def spy_classify(fieldlines_phi_hits, surface_arg, *, bfield=None, axis_point=None):
+        captured["axis_field"] = bfield
+        return real_classify(
+            fieldlines_phi_hits, surface_arg, bfield=bfield, axis_point=axis_point
+        )
+
+    monkeypatch.setattr(simsopt_field, "compute_fieldlines", spy_compute_fieldlines)
+    monkeypatch.setattr(topology_scorer, "invariant_torus_classification", spy_classify)
+
+    result = topology_scorer.score_topology(
+        surface,
+        field,
+        nfieldlines=3,
+        tmax=60.0,
+        nphis=4,
+        interpolation_grid={"nr": 8, "nphi": 4, "nz": 8, "degree": 2},
+        compute_transport_diagnostics=False,
+    )
+
+    interpolated_field_type = simsopt_field.InterpolatedField
+    # Interpolation was active: the long traces ran on the interpolated field.
+    assert isinstance(captured["traced_field"], interpolated_field_type)
+    # ...but the axis solve received the exact field, not the interpolated tracer.
+    assert captured["axis_field"] is field
+    assert not isinstance(captured["axis_field"], interpolated_field_type)
+    # The axis was located at exact-field precision.
+    assert result["wba_axis"] is not None
+    assert result["wba_axis"]["normalized_return_residual"] < 1.0e-8

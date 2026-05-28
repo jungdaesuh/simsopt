@@ -19,6 +19,7 @@ redeclared. Three classes of field exist:
 The resolver returns an immutable contract mapping plus a provenance trace, a
 stable SHA-256 hash, and a metadata builder used at artifact-write time.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -48,74 +49,84 @@ _KEY_BANANA_SURF_RADIUS = "banana_surf_radius"
 _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M = "TARGET_LCFS_MAX_MAJOR_RADIUS_M"
 _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M = "TARGET_LCFS_MAX_MINOR_RADIUS_M"
 
-FIXED_GEOMETRY_KEYS: frozenset[str] = frozenset({
-    _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
-    _KEY_VACUUM_VESSEL_MINOR_RADIUS_M,
-    _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
-})
+FIXED_GEOMETRY_KEYS: frozenset[str] = frozenset(
+    {
+        _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
+        _KEY_VACUUM_VESSEL_MINOR_RADIUS_M,
+        _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+    }
+)
 
-ENGINEERING_DEFAULT_KEYS: frozenset[str] = frozenset({
-    _KEY_TF_CURRENT_A,
-    _KEY_BANANA_CURRENT_MAX_A,
-    _KEY_COIL_LENGTH_TARGET_M,
-    _KEY_CC_THRESHOLD,
-    _KEY_COIL_PLASMA_MIN_DIST_M,
-    _KEY_PLASMA_VESSEL_MIN_DIST_M,
-    _KEY_CURVATURE_THRESHOLD,
-    _KEY_BANANA_SURF_RADIUS,
-})
+ENGINEERING_DEFAULT_KEYS: frozenset[str] = frozenset(
+    {
+        _KEY_TF_CURRENT_A,
+        _KEY_BANANA_CURRENT_MAX_A,
+        _KEY_COIL_LENGTH_TARGET_M,
+        _KEY_CC_THRESHOLD,
+        _KEY_COIL_PLASMA_MIN_DIST_M,
+        _KEY_PLASMA_VESSEL_MIN_DIST_M,
+        _KEY_CURVATURE_THRESHOLD,
+        _KEY_BANANA_SURF_RADIUS,
+    }
+)
 
-TARGET_PLASMA_CEILING_KEYS: frozenset[str] = frozenset({
-    _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
-    _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
-})
+TARGET_PLASMA_CEILING_KEYS: frozenset[str] = frozenset(
+    {
+        _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
+    }
+)
 
-CONSTRAINT_FIELD_TYPES: Mapping[str, type] = MappingProxyType({
-    _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M: float,
-    _KEY_VACUUM_VESSEL_MINOR_RADIUS_M: float,
-    _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M: float,
-    _KEY_TF_CURRENT_A: float,
-    _KEY_BANANA_CURRENT_MAX_A: float,
-    _KEY_COIL_LENGTH_TARGET_M: float,
-    _KEY_CC_THRESHOLD: float,
-    _KEY_COIL_PLASMA_MIN_DIST_M: float,
-    _KEY_PLASMA_VESSEL_MIN_DIST_M: float,
-    _KEY_CURVATURE_THRESHOLD: float,
-    _KEY_BANANA_SURF_RADIUS: float,
-    _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M: float,
-    _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M: float,
-})
+CONSTRAINT_FIELD_TYPES: Mapping[str, type] = MappingProxyType(
+    {
+        _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M: float,
+        _KEY_VACUUM_VESSEL_MINOR_RADIUS_M: float,
+        _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M: float,
+        _KEY_TF_CURRENT_A: float,
+        _KEY_BANANA_CURRENT_MAX_A: float,
+        _KEY_COIL_LENGTH_TARGET_M: float,
+        _KEY_CC_THRESHOLD: float,
+        _KEY_COIL_PLASMA_MIN_DIST_M: float,
+        _KEY_PLASMA_VESSEL_MIN_DIST_M: float,
+        _KEY_CURVATURE_THRESHOLD: float,
+        _KEY_BANANA_SURF_RADIUS: float,
+        _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M: float,
+        _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M: float,
+    }
+)
 
 CONSTRAINT_SOURCE_HARDWARE = "hardware_contract"
 CONSTRAINT_SOURCE_PROFILE = "profile"
 CONSTRAINT_SOURCE_SPEC_JSON = "spec_json"
 CONSTRAINT_SOURCE_CLI = "cli"
-WIRE_NAME_ALIASES: Mapping[str, str] = MappingProxyType({
-    _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M: _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
-    _KEY_VACUUM_VESSEL_MINOR_RADIUS_M: _KEY_VACUUM_VESSEL_MINOR_RADIUS_M,
-    _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M: _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
-    "major_radius": _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
-    "tf_current_A": _KEY_TF_CURRENT_A,
-    "TF_CURRENT_A": _KEY_TF_CURRENT_A,
-    "banana_current_max_A": _KEY_BANANA_CURRENT_MAX_A,
-    "BANANA_CURRENT_MAX_A": _KEY_BANANA_CURRENT_MAX_A,
-    "length_target": _KEY_COIL_LENGTH_TARGET_M,
-    "LENGTH_TARGET": _KEY_COIL_LENGTH_TARGET_M,
-    "COIL_LENGTH_TARGET_M": _KEY_COIL_LENGTH_TARGET_M,
-    "cc_threshold": _KEY_CC_THRESHOLD,
-    "CC_THRESHOLD": _KEY_CC_THRESHOLD,
-    "coil_plasma_min_dist_m": _KEY_COIL_PLASMA_MIN_DIST_M,
-    "COIL_PLASMA_MIN_DIST_M": _KEY_COIL_PLASMA_MIN_DIST_M,
-    "plasma_vessel_min_dist_m": _KEY_PLASMA_VESSEL_MIN_DIST_M,
-    "PLASMA_VESSEL_MIN_DIST_M": _KEY_PLASMA_VESSEL_MIN_DIST_M,
-    "curvature_threshold": _KEY_CURVATURE_THRESHOLD,
-    "CURVATURE_THRESHOLD": _KEY_CURVATURE_THRESHOLD,
-    _KEY_BANANA_SURF_RADIUS: _KEY_BANANA_SURF_RADIUS,
-    "target_lcfs_max_major_radius_m": _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
-    "TARGET_LCFS_MAX_MAJOR_RADIUS_M": _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
-    "target_lcfs_max_minor_radius_m": _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
-    "TARGET_LCFS_MAX_MINOR_RADIUS_M": _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
-})
+WIRE_NAME_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M: _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
+        _KEY_VACUUM_VESSEL_MINOR_RADIUS_M: _KEY_VACUUM_VESSEL_MINOR_RADIUS_M,
+        _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M: _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        "major_radius": _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
+        "tf_current_A": _KEY_TF_CURRENT_A,
+        "TF_CURRENT_A": _KEY_TF_CURRENT_A,
+        "banana_current_max_A": _KEY_BANANA_CURRENT_MAX_A,
+        "BANANA_CURRENT_MAX_A": _KEY_BANANA_CURRENT_MAX_A,
+        "length_target": _KEY_COIL_LENGTH_TARGET_M,
+        "LENGTH_TARGET": _KEY_COIL_LENGTH_TARGET_M,
+        "COIL_LENGTH_TARGET_M": _KEY_COIL_LENGTH_TARGET_M,
+        "cc_threshold": _KEY_CC_THRESHOLD,
+        "CC_THRESHOLD": _KEY_CC_THRESHOLD,
+        "coil_plasma_min_dist_m": _KEY_COIL_PLASMA_MIN_DIST_M,
+        "COIL_PLASMA_MIN_DIST_M": _KEY_COIL_PLASMA_MIN_DIST_M,
+        "plasma_vessel_min_dist_m": _KEY_PLASMA_VESSEL_MIN_DIST_M,
+        "PLASMA_VESSEL_MIN_DIST_M": _KEY_PLASMA_VESSEL_MIN_DIST_M,
+        "curvature_threshold": _KEY_CURVATURE_THRESHOLD,
+        "CURVATURE_THRESHOLD": _KEY_CURVATURE_THRESHOLD,
+        _KEY_BANANA_SURF_RADIUS: _KEY_BANANA_SURF_RADIUS,
+        "target_lcfs_max_major_radius_m": _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        "TARGET_LCFS_MAX_MAJOR_RADIUS_M": _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        "target_lcfs_max_minor_radius_m": _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
+        "TARGET_LCFS_MAX_MINOR_RADIUS_M": _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
+    }
+)
 
 
 def _translate_layer(layer: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -135,6 +146,7 @@ def _translate_layer(layer: Mapping[str, Any] | None) -> dict[str, Any]:
             f"{', '.join(sorted(unknown))}"
         )
     return translated
+
 
 _LADDER_SOURCES: tuple[str, ...] = (
     CONSTRAINT_SOURCE_PROFILE,
@@ -173,8 +185,7 @@ def _assert_known_keys(source_label: str, layer: Mapping[str, Any]) -> None:
     unknown = sorted(set(layer) - set(CONSTRAINT_FIELD_TYPES))
     if unknown:
         raise ValueError(
-            f"Constraint {source_label} layer has unknown fields: "
-            f"{', '.join(unknown)}"
+            f"Constraint {source_label} layer has unknown fields: {', '.join(unknown)}"
         )
 
 
@@ -191,8 +202,7 @@ def _apply_layer(
             continue
         if key in FIXED_GEOMETRY_KEYS:
             raise ValueError(
-                f"Fixed-geometry field {key!r} cannot be overridden via "
-                f"{source_label}."
+                f"Fixed-geometry field {key!r} cannot be overridden via {source_label}."
             )
         contract[key] = _coerce(key, raw_value)
         trace[key] = source_label
@@ -257,6 +267,7 @@ def resolve_constraint_contract(
     spec_json: Mapping[str, Any] | None = None,
     cli_overrides: Mapping[str, Any] | None = None,
     allow_offspec_current_contract: bool = False,
+    allow_offspec_length_contract: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Resolve the full constraint contract from layered inputs.
 
@@ -300,7 +311,10 @@ def resolve_constraint_contract(
             "BANANA_CURRENT_MAX_A exceeds the hardware limit "
             f"{_hc.BANANA_CURRENT_HARD_LIMIT_A:.0f} A."
         )
-    if contract[_KEY_COIL_LENGTH_TARGET_M] > _hc.COIL_LENGTH_HARD_LIMIT_M:
+    if (
+        contract[_KEY_COIL_LENGTH_TARGET_M] > _hc.COIL_LENGTH_HARD_LIMIT_M
+        and not allow_offspec_length_contract
+    ):
         raise ValueError(
             "COIL_LENGTH_TARGET_M exceeds the hardware limit "
             f"{_hc.COIL_LENGTH_HARD_LIMIT_M:.3f} m."
@@ -321,6 +335,7 @@ def resolve_constraint_contract_from_wire_names(
     spec_json: Mapping[str, Any] | None = None,
     cli_overrides: Mapping[str, Any] | None = None,
     allow_offspec_current_contract: bool = False,
+    allow_offspec_length_contract: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Like :func:`resolve_constraint_contract` but accepts legacy wire names.
 
@@ -333,6 +348,7 @@ def resolve_constraint_contract_from_wire_names(
         spec_json=_translate_layer(spec_json),
         cli_overrides=_translate_layer(cli_overrides),
         allow_offspec_current_contract=allow_offspec_current_contract,
+        allow_offspec_length_contract=allow_offspec_length_contract,
     )
 
 

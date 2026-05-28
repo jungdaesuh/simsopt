@@ -15,7 +15,9 @@ from simsopt.geo import CurveXYZFourier
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
 WRAPPER_PATH = EXAMPLE_ROOT / "run_stage2_to_single_stage.py"
-SIGNED_CW_WOUT_PATH = Path(__file__).resolve().parents[1] / "test_files" / "wout_10x10.nc"
+SIGNED_CW_WOUT_PATH = (
+    Path(__file__).resolve().parents[1] / "test_files" / "wout_10x10.nc"
+)
 if str(EXAMPLE_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_ROOT))
 
@@ -23,6 +25,7 @@ import workflow_helpers  # noqa: E402
 from banana_opt import jhalpern30_compat as compat  # noqa: E402
 from banana_opt.finite_current_profiles import (  # noqa: E402
     JHALPERN30_PROFILE,
+    VACUUM_PROFILE,
     WATARU_PROFILE,
     get_finite_current_profile,
 )
@@ -122,6 +125,25 @@ def _workflow_stage2_spec(finite_current_mode: str) -> workflow_helpers.Stage2Se
 
 
 class FiniteCurrentProfileTests(unittest.TestCase):
+    def test_vacuum_profile_records_tf_banana_only_layout(self):
+        profile = get_finite_current_profile("vacuum")
+
+        self.assertIs(profile, VACUUM_PROFILE)
+        self.assertEqual(profile.mode, "vacuum")
+        self.assertEqual(profile.default_num_tf_coils, 20)
+        self.assertEqual(profile.default_num_banana_coils, 10)
+        self.assertEqual(profile.default_num_proxy_coils, 0)
+        self.assertEqual(profile.default_num_vf_coils, 0)
+        self.assertEqual(profile.default_total_coils, 30)
+        self.assertEqual(profile.build_default_coil_groups_manifest().total(), 30)
+        self.assertEqual(profile.g0_policy, "signed_explicit_tf_current")
+        self.assertEqual(profile.proxy_placement_policy, "none")
+        self.assertEqual(profile.proxy_vf_current_scalar_policy, "none")
+        self.assertEqual(profile.vf_current_sign_policy, "none")
+        self.assertEqual(profile.vf_current_mutability, "none")
+        self.assertIsNone(profile.default_vf_template_path)
+        self.assertIsNone(profile.vf_template_sha256)
+
     def test_wataru_profile_preserves_default_template_and_counts(self):
         profile = get_finite_current_profile("wataru_proxy_field")
 
@@ -134,9 +156,15 @@ class FiniteCurrentProfileTests(unittest.TestCase):
         self.assertEqual(profile.default_total_coils, 51)
         self.assertEqual(profile.build_default_coil_groups_manifest().total(), 51)
         self.assertEqual(profile.g0_policy, "signed_explicit_tf_current")
-        self.assertEqual(profile.proxy_placement_policy, "vmec_axis_zeroth_coefficients")
-        self.assertEqual(profile.proxy_vf_current_scalar_policy, "nonnegative_magnitude")
-        self.assertEqual(profile.vf_current_sign_policy, "template_sign_vf_current_scalar")
+        self.assertEqual(
+            profile.proxy_placement_policy, "vmec_axis_zeroth_coefficients"
+        )
+        self.assertEqual(
+            profile.proxy_vf_current_scalar_policy, "nonnegative_magnitude"
+        )
+        self.assertEqual(
+            profile.vf_current_sign_policy, "template_sign_vf_current_scalar"
+        )
         self.assertEqual(profile.vf_current_mutability, "independent_fixed_current")
         self.assertIsNotNone(profile.default_vf_template_path)
         self.assertTrue(profile.default_vf_template_path.is_file())
@@ -165,7 +193,9 @@ class FiniteCurrentProfileTests(unittest.TestCase):
             profile.proxy_vf_current_scalar_policy,
             "signed_physical_scalar",
         )
-        self.assertEqual(profile.vf_current_sign_policy, "template_sign_abs_proxy_current")
+        self.assertEqual(
+            profile.vf_current_sign_policy, "template_sign_abs_proxy_current"
+        )
         self.assertEqual(profile.vf_current_mutability, "shared_unfixed_scaled_current")
         self.assertIn(
             "run_stage2_to_single_stage.py:pre_boozer_repair",
@@ -186,6 +216,22 @@ class FiniteCurrentProfileTests(unittest.TestCase):
             workflow_helpers.format_stage2_finite_current_suffix(
                 _workflow_stage2_spec("typo_proxy_field"),
             )
+
+    def test_vacuum_workflow_uses_no_vf_template_and_unique_suffix(self):
+        self.assertIsNone(
+            workflow_helpers.resolve_finite_current_vf_template_path("vacuum", None)
+        )
+        with self.assertRaisesRegex(ValueError, "does not use a VF template"):
+            workflow_helpers.resolve_finite_current_vf_template_path(
+                "vacuum",
+                "/tmp/vf_template.json",
+            )
+        self.assertEqual(
+            workflow_helpers.format_stage2_finite_current_suffix(
+                _workflow_stage2_spec("vacuum"),
+            ),
+            "-FCM=vacuum-PPC=0-VFC=0",
+        )
 
     def test_stage2_to_single_stage_rejects_jhalpern_pre_boozer_repair(self):
         wrapper = _load_stage2_wrapper_module()
@@ -266,7 +312,9 @@ class FiniteCurrentProfileTests(unittest.TestCase):
             results["VF_CURRENT_MUTABILITY"],
             JHALPERN30_PROFILE.vf_current_mutability,
         )
-        self.assertEqual(results["NUM_TF_COILS"], JHALPERN30_PROFILE.default_num_tf_coils)
+        self.assertEqual(
+            results["NUM_TF_COILS"], JHALPERN30_PROFILE.default_num_tf_coils
+        )
         self.assertEqual(
             results["NUM_BANANA_COILS"],
             JHALPERN30_PROFILE.default_num_banana_coils,
@@ -275,7 +323,9 @@ class FiniteCurrentProfileTests(unittest.TestCase):
             results["NUM_PROXY_COILS"],
             JHALPERN30_PROFILE.default_num_proxy_coils,
         )
-        self.assertEqual(results["NUM_VF_COILS"], JHALPERN30_PROFILE.default_num_vf_coils)
+        self.assertEqual(
+            results["NUM_VF_COILS"], JHALPERN30_PROFILE.default_num_vf_coils
+        )
         self.assertEqual(results["TOTAL_COILS"], JHALPERN30_PROFILE.default_total_coils)
         missing_keys = [
             key

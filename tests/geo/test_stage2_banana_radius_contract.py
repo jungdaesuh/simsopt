@@ -74,6 +74,41 @@ class Stage2BananaRadiusContractTests(unittest.TestCase):
         self.assertEqual(args.major_radius, 0.915)
         self.assertTrue(args.accept_offspec_major_radius)
 
+    def test_offspec_coil_length_requires_explicit_flag(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "banana_coil_solver.py",
+                "--length-target",
+                "3.0",
+            ],
+        ):
+            args = stage2_solver.parse_args()
+        self.assertFalse(stage2_solver.stage2_length_contract_allows_offspec(args))
+        with self.assertRaisesRegex(ValueError, "--length-target must be <= 2.000 m"):
+            stage2_solver.validate_coil_length_target(
+                args.length_target,
+                accept_offspec_coil_length=args.accept_offspec_coil_length,
+                field_name="--length-target",
+            )
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "banana_coil_solver.py",
+                "--length-target",
+                "3.0",
+                "--accept-offspec-coil-length",
+            ],
+        ):
+            args = stage2_solver.parse_args()
+
+        self.assertEqual(args.length_target, 3.0)
+        self.assertTrue(args.accept_offspec_coil_length)
+        self.assertTrue(stage2_solver.stage2_length_contract_allows_offspec(args))
+
     def test_stage2_parse_args_accepts_legacy_working_surface_scaling_mode(self):
         source = inspect.getsource(stage2_solver.main)
 

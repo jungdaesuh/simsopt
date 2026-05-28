@@ -4,9 +4,7 @@ from pathlib import Path
 
 
 EXAMPLE_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    Path(__file__).resolve().parents[2] / "examples" / "single_stage_optimization"
 )
 EXAMPLE_ROOT_STR = str(EXAMPLE_ROOT)
 EXAMPLE_ROOT_INSERTED = EXAMPLE_ROOT_STR not in sys.path
@@ -15,6 +13,7 @@ if EXAMPLE_ROOT_INSERTED:
 from banana_opt import artifact_contracts as _artifact_contracts  # noqa: E402
 from banana_opt import constraint_contract as _constraint_contract  # noqa: E402
 from banana_opt import hardware_contracts as _hardware_contracts  # noqa: E402
+
 if EXAMPLE_ROOT_INSERTED:
     sys.path.remove(EXAMPLE_ROOT_STR)
 
@@ -159,10 +158,22 @@ class ConstraintContractResolverTests(unittest.TestCase):
     def test_length_target_rejects_values_above_hardware_limit(self):
         module = load_constraint_contract_module()
 
-        with self.assertRaisesRegex(ValueError, "COIL_LENGTH_TARGET_M exceeds the hardware limit"):
+        with self.assertRaisesRegex(
+            ValueError, "COIL_LENGTH_TARGET_M exceeds the hardware limit"
+        ):
             module.resolve_constraint_contract(
                 cli_overrides={"COIL_LENGTH_TARGET_M": 2.0001},
             )
+
+    def test_length_target_allows_explicit_offspec_contract(self):
+        module = load_constraint_contract_module()
+
+        contract, _trace = module.resolve_constraint_contract(
+            cli_overrides={"COIL_LENGTH_TARGET_M": 3.0},
+            allow_offspec_length_contract=True,
+        )
+
+        self.assertEqual(contract["COIL_LENGTH_TARGET_M"], 3.0)
 
     def test_banana_current_limit_rejects_values_above_hardware_limit(self):
         module = load_constraint_contract_module()
@@ -305,6 +316,7 @@ class ConstraintContractMetadataTests(unittest.TestCase):
         )
         self.assertIn("CONSTRAINT_PROVENANCE", metadata)
 
+
 class ConstraintContractWireNamesTests(unittest.TestCase):
     def test_wire_name_resolver_accepts_lowercase_and_uppercase(self):
         module = load_constraint_contract_module()
@@ -332,6 +344,16 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
 
         self.assertEqual(contract["TF_CURRENT_A"], 100000.0)
         self.assertEqual(contract["BANANA_CURRENT_MAX_A"], 20000.0)
+
+    def test_wire_name_resolver_allows_explicit_offspec_length_contract(self):
+        module = load_constraint_contract_module()
+
+        contract, _ = module.resolve_constraint_contract_from_wire_names(
+            cli_overrides={"length_target": 3.0},
+            allow_offspec_length_contract=True,
+        )
+
+        self.assertEqual(contract["COIL_LENGTH_TARGET_M"], 3.0)
 
     def test_wire_name_resolver_rejects_offspec_current_without_replay_flag(self):
         module = load_constraint_contract_module()
@@ -373,6 +395,7 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
 class ArtifactContractsSchemaVersionTests(unittest.TestCase):
     def test_current_schema_version_accepted_silently(self):
         import warnings
+
         module = load_artifact_contracts_module()
 
         with warnings.catch_warnings():
@@ -454,13 +477,15 @@ class ArtifactContractsLegacyUpgradeTests(unittest.TestCase):
     def test_legacy_upgrade_preserves_prior_constraint_metadata(self):
         module = load_artifact_contracts_module()
 
-        upgraded = module.upgrade_legacy_stage2_artifact_results({
-            "CONTRACT_SCHEMA_VERSION": 1,
-            "CONTRACT_HASH": "abc123",
-            "CONSTRAINT_PROFILE": "standard_80ka",
-            "EFFECTIVE_VALUES": {"TF_CURRENT_A": -80000.0},
-            "OVERRIDE_REASON": None,
-        })
+        upgraded = module.upgrade_legacy_stage2_artifact_results(
+            {
+                "CONTRACT_SCHEMA_VERSION": 1,
+                "CONTRACT_HASH": "abc123",
+                "CONSTRAINT_PROFILE": "standard_80ka",
+                "EFFECTIVE_VALUES": {"TF_CURRENT_A": -80000.0},
+                "OVERRIDE_REASON": None,
+            }
+        )
 
         self.assertEqual(upgraded["CONTRACT_SCHEMA_VERSION"], 1)
         self.assertEqual(upgraded["CONTRACT_HASH"], "abc123")

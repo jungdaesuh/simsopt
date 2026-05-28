@@ -19,6 +19,7 @@ from banana_opt.finite_current_profiles import (
     DEFAULT_JHALPERN30_VF_TEMPLATE_PATH,
     DEFAULT_WATARU_VF_TEMPLATE_PATH,
     JHALPERN30_FINITE_CURRENT_MODE,
+    WATARU_FINITE_CURRENT_MODE,
     get_finite_current_profile,
 )
 from banana_opt.jhalpern30_compat import (
@@ -73,6 +74,12 @@ def resolve_finite_current_vf_template_path(
     vf_template_path: str | None,
 ) -> str | None:
     profile = get_finite_current_profile(finite_current_mode)
+    if profile.default_vf_template_path is None:
+        if vf_template_path not in {None, ""}:
+            raise ValueError(
+                f"finite-current mode {profile.mode!r} does not use a VF template."
+            )
+        return None
     if profile.mode == JHALPERN30_FINITE_CURRENT_MODE:
         return resolve_jhalpern30_vf_template_path(vf_template_path)
     return resolve_wataru_vf_template_path(vf_template_path)
@@ -336,7 +343,7 @@ def format_stage2_finite_current_suffix(spec: Stage2SeedSpec) -> str:
     # the current magnitudes are the load-bearing signal for naming.
     if (
         get_finite_current_profile(spec.finite_current_mode).mode
-        != JHALPERN30_FINITE_CURRENT_MODE
+        == WATARU_FINITE_CURRENT_MODE
         and abs(float(spec.proxy_plasma_current_A)) <= 1.0e-12
         and abs(float(spec.vf_current_A)) <= 1.0e-12
         and not bool(spec.flip_banana)
@@ -446,9 +453,7 @@ def format_stage2_basin_suffix(
         return ""
     seed_value = "none" if basin_seed is None else str(basin_seed)
     suffix = (
-        f"-BH={basin_hops}"
-        f"-BS={format_compact_float(basin_stepsize)}"
-        f"-BSeed={seed_value}"
+        f"-BH={basin_hops}-BS={format_compact_float(basin_stepsize)}-BSeed={seed_value}"
     )
     if basin_temperature != 1.0:
         suffix += f"-BT={format_compact_float(basin_temperature)}"
@@ -570,6 +575,7 @@ def format_local_stage2_run_dir(
     )
     if len(full) + len(flip_suffix) > _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN:
         import hashlib as _hashlib
+
         digest = _hashlib.sha1((full + flip_suffix).encode("utf-8")).hexdigest()[
             :_LOCAL_STAGE2_RUN_DIR_HASH_HEX_LEN
         ]
@@ -708,7 +714,9 @@ def build_weight_cases(
             if signature in seen:
                 continue
             seen.add(signature)
-            multiplier_label = str(scaled_multiplier).replace("-", "m").replace(".", "p")
+            multiplier_label = (
+                str(scaled_multiplier).replace("-", "m").replace(".", "p")
+            )
             cases.append(
                 SingleStageWeightCase(
                     name=f"{weight_name}-x{multiplier_label}",
@@ -738,11 +746,13 @@ def dominates(
 ) -> bool:
     lhs_metrics = augment_metrics(lhs)
     rhs_metrics = augment_metrics(rhs)
-    if any(metric not in lhs_metrics or metric not in rhs_metrics for metric in metrics):
+    if any(
+        metric not in lhs_metrics or metric not in rhs_metrics for metric in metrics
+    ):
         return False
-    return all(lhs_metrics[metric] <= rhs_metrics[metric] for metric in metrics) and any(
-        lhs_metrics[metric] < rhs_metrics[metric] for metric in metrics
-    )
+    return all(
+        lhs_metrics[metric] <= rhs_metrics[metric] for metric in metrics
+    ) and any(lhs_metrics[metric] < rhs_metrics[metric] for metric in metrics)
 
 
 def select_non_dominated_records(

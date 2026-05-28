@@ -2242,6 +2242,36 @@ class SingleStageExampleTests(unittest.TestCase):
             scorer_result["first_exit"]["first_exit_angle"],
         )
 
+    def test_topology_gate_skips_wba_axis_classification(self):
+        module = self.load_module()
+        captured_kwargs = {}
+
+        def fake_score_topology(_surface, _bfield, **kwargs):
+            captured_kwargs.update(kwargs)
+            return {
+                "survival_fraction": 1.0,
+                "survived_lines": 2,
+                "stop_reason_counts": {"complete": 2},
+                "first_exit": None,
+                "seed_contract": {"mode": "midplane_radial_sweep"},
+                "field_model": {"selected_mode": "native"},
+                "transport_diagnostics": {"evaluation_state": "not_evaluated"},
+            }
+
+        gate_status = module._evaluate_topology_gate_impl(
+            object(),
+            object(),
+            2,
+            2.0,
+            1e-7,
+            0.60,
+            score_topology_fn=fake_score_topology,
+        )
+
+        self.assertTrue(gate_status["success"])
+        self.assertFalse(captured_kwargs["compute_transport_diagnostics"])
+        self.assertFalse(captured_kwargs["compute_invariant_torus_classification"])
+
     def test_topology_scorer_safe_wrapper_returns_broken_result_on_exception(self):
         module = load_topology_scorer_module()
 
@@ -3813,6 +3843,133 @@ class SingleStageExampleTests(unittest.TestCase):
             ],
         )
         initialize_mock.assert_not_called()
+
+    def test_published_named_warm_start_stack_enforces_published_postconditions(self):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+        surface_configs = [
+            {
+                "name": "inner0",
+                "seed_label": 0.15,
+                "target_volume": 0.06,
+                "initial_surface": SimpleNamespace(name="wout_inner0"),
+            },
+            {
+                "name": "inner1",
+                "seed_label": 0.20,
+                "target_volume": 0.08,
+                "initial_surface": SimpleNamespace(name="wout_inner1"),
+            },
+            {
+                "name": "outer",
+                "seed_label": 0.25,
+                "target_volume": 0.10,
+                "initial_surface": SimpleNamespace(name="wout_outer"),
+            },
+        ]
+
+        class FakeSurface:
+            def __init__(self, name, volume):
+                self.name = name
+                self._volume = volume
+
+            def volume(self):
+                return self._volume
+
+        def run_warm_started_publish_stack(*, solved_volumes, solved_G):
+            def fake_warm_start_path(_stem, *, surface_name):
+                return Path(f"/tmp/pubms_seed_{surface_name}_boozer_surface.json")
+
+            def fake_load_warm_start_boozer_seed(path):
+                surface_name = path.name.removeprefix("pubms_seed_").removesuffix(
+                    "_boozer_surface.json"
+                )
+                return module.WarmStartBoozerSeed(
+                    surface=SimpleNamespace(name=f"warm_{surface_name}"),
+                    iota=0.21,
+                    G=0.77,
+                    source_path=path,
+                )
+
+            def fake_initialize_boozer_surface(
+                initial_surface,
+                _mpol,
+                _ntor,
+                _bs,
+                _vol_target,
+                _constraint_weight,
+                iota,
+                _G0,
+                _boozer_I,
+                *,
+                initial_surface_guess,
+                nfp,
+            ):
+                del initial_surface_guess, nfp
+                surface_name = initial_surface.name.removeprefix("warm_")
+                return SimpleNamespace(
+                    surface=FakeSurface(
+                        f"solved_{surface_name}", solved_volumes[surface_name]
+                    ),
+                    res={"iota": float(iota), "G": solved_G[surface_name]},
+                )
+
+            with (
+                patch.object(
+                    module,
+                    "resolve_warm_start_boozer_surface_path",
+                    side_effect=fake_warm_start_path,
+                ),
+                patch.object(
+                    module,
+                    "load_warm_start_boozer_seed",
+                    side_effect=fake_load_warm_start_boozer_seed,
+                ),
+                patch.object(
+                    module,
+                    "initialize_boozer_surface",
+                    side_effect=fake_initialize_boozer_surface,
+                ),
+            ):
+                return module.initialize_surface_data_for_contract(
+                    surface_configs,
+                    surface_mode_contract=contract,
+                    mpol=8,
+                    ntor=6,
+                    bs=object(),
+                    constraint_weight=1.0,
+                    default_iota=0.15,
+                    default_G=1.0,
+                    boozer_I=0.0,
+                    nfp=5,
+                    stage2_seed_surface=SimpleNamespace(
+                        surface=SimpleNamespace(name="stage2_outer"),
+                        iota=0.21,
+                        G=0.77,
+                    ),
+                    warm_start_surface_stem="/tmp/pubms_seed",
+                )
+
+        with self.subTest("G drift"):
+            with self.assertRaisesRegex(RuntimeError, "solved G drifted"):
+                run_warm_started_publish_stack(
+                    solved_volumes={"inner0": 0.06, "inner1": 0.08, "outer": 0.10},
+                    solved_G={"inner0": 0.77, "inner1": 0.88, "outer": 0.77},
+                )
+
+        with self.subTest("volume order"):
+            with self.assertRaisesRegex(RuntimeError, "solved volumes"):
+                run_warm_started_publish_stack(
+                    solved_volumes={"inner0": 0.06, "inner1": 0.11, "outer": 0.10},
+                    solved_G={"inner0": 0.77, "inner1": 0.77, "outer": 0.77},
+                )
 
     def test_single_surface_initialization_keeps_config_order_without_continuation(
         self,

@@ -2913,6 +2913,15 @@ def _require_published_volume_order(surface_data):
         )
 
 
+def _require_published_surface_data_postconditions(surface_data):
+    if [entry["name"] for entry in surface_data] != ["inner0", "inner1", "outer"]:
+        raise RuntimeError(
+            "published_multisurface continuation expects inner0, inner1, outer."
+        )
+    _require_published_volume_order(surface_data)
+    _require_published_G_consistency(surface_data)
+
+
 def _required_published_seed_iota_from_results(stage2_results):
     iota = stage2_results.get("BOOTABILITY_SOLVED_IOTA")
     if iota is None:
@@ -3112,8 +3121,7 @@ def initialize_published_surface_data_from_stage2_seed(
     ordered_surface_data = [
         solved_by_name[name] for name in ("inner0", "inner1", "outer")
     ]
-    _require_published_volume_order(ordered_surface_data)
-    _require_published_G_consistency(ordered_surface_data)
+    _require_published_surface_data_postconditions(ordered_surface_data)
     return ordered_surface_data, []
 
 
@@ -3153,7 +3161,7 @@ def initialize_surface_data_for_contract(
         and warm_start_surface_stem is not None
         else stage2_seed_surface
     )
-    return initialize_surface_data_in_config_order(
+    surface_data, warm_start_surface_paths = initialize_surface_data_in_config_order(
         surface_configs,
         mpol=mpol,
         ntor=ntor,
@@ -3166,6 +3174,9 @@ def initialize_surface_data_for_contract(
         stage2_seed_surface=standard_stage2_seed_surface,
         warm_start_surface_stem=warm_start_surface_stem,
     )
+    if surface_mode_contract.mode == PUBLISHED_MULTISURFACE:
+        _require_published_surface_data_postconditions(surface_data)
+    return surface_data, warm_start_surface_paths
 
 
 def build_hbt_reference_surfaces(nfp, banana_surf_radius):
@@ -8569,8 +8580,8 @@ def current_boozer_state_interchange_manifest(surface_data) -> dict[str, object]
             strict_vacuum_boozer_state_metadata_payload(
                 surface_data,
                 replay_config=replay_config,
-                tf_current_A=stage2_tf_current_A,
-                banana_current_state=banana_current_state,
+                tf_current_A=globals().get("stage2_tf_current_A"),
+                banana_current_state=globals().get("banana_current_state"),
             )
         )
     return None

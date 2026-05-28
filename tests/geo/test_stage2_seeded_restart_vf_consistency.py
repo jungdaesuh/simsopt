@@ -238,6 +238,38 @@ class SeededRestartTrustsDonorMetadataTests(unittest.TestCase):
 
 
 class FreshRunAutoResolvesBundledTemplateTests(unittest.TestCase):
+    def test_fresh_vacuum_run_uses_no_proxy_vf_or_template(self):
+        config = stage2_solver._resolve_stage2_finite_current_config(
+            _args(finite_current_mode="vacuum"),
+            stage2_results=None,
+        )
+
+        self.assertEqual(config.finite_current_mode, "vacuum")
+        self.assertEqual(config.proxy_plasma_current_A, 0.0)
+        self.assertEqual(config.vf_current_A, 0.0)
+        self.assertIsNone(config.vf_template_path)
+        self.assertEqual(config.boozer_current_convention, "mu0")
+
+    def test_fresh_vacuum_run_rejects_auxiliary_current(self):
+        with self.assertRaisesRegex(ValueError, "vacuum finite-current mode"):
+            stage2_solver._resolve_stage2_finite_current_config(
+                _args(
+                    finite_current_mode="vacuum",
+                    proxy_plasma_current_A=1.0,
+                ),
+                stage2_results=None,
+            )
+
+    def test_fresh_vacuum_run_rejects_vf_template(self):
+        with self.assertRaisesRegex(ValueError, "does not use a VF template"):
+            stage2_solver._resolve_stage2_finite_current_config(
+                _args(
+                    finite_current_mode="vacuum",
+                    vf_template_path="/tmp/vf_template.json",
+                ),
+                stage2_results=None,
+            )
+
     def test_fresh_run_fills_bundled_default_when_none_given(self):
         config = stage2_solver._resolve_stage2_finite_current_config(
             _args(),  # no stage2_bs_path, no explicit vf_template_path
@@ -321,7 +353,9 @@ class FreshRunAutoResolvesBundledTemplateTests(unittest.TestCase):
             )
 
     def test_fresh_jhalpern_run_rejects_alm_without_vf_bounds_support(self):
-        with self.assertRaisesRegex(ValueError, "ALM does not support VF current bounds"):
+        with self.assertRaisesRegex(
+            ValueError, "ALM does not support VF current bounds"
+        ):
             stage2_solver._resolve_stage2_finite_current_config(
                 _args(
                     finite_current_mode="jhalpern30_proxy_field",

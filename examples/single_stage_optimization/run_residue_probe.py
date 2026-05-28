@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,13 @@ EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
 from banana_opt.json_compat import load_boozer_finite_i as load  # noqa: E402
 from banana_opt.topology.fieldline_map import FieldlineIntegratorOptions  # noqa: E402
+from banana_opt.topology.iota_profile import (  # noqa: E402
+    DEFAULT_AXIS_SEARCH_HALF_WIDTH,
+    DEFAULT_IOTA_PROFILE_TORUS_TURNS,
+    freeze_probe_inputs,
+    linear_radial_labels,
+    probe_freezing_payload,
+)
 from banana_opt.topology.periodic_orbit import PeriodicOrbitSolverOptions  # noqa: E402
 from banana_opt.topology.poincare_chart import PoincareChart  # noqa: E402
 from banana_opt.topology.rational_target import RationalTarget  # noqa: E402
@@ -73,6 +81,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--axis-z", type=float, default=0.0)
     parser.add_argument("--poloidal-orientation", type=int, choices=(-1, 1), default=1)
     parser.add_argument("--radial-label-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--freeze-targets-from-iota",
+        action="store_true",
+        help=(
+            "Trace the realized iota(r) profile of each field and place each "
+            "target's radial_label/window on its iota=p/q crossing, reporting "
+            "targets whose iota is out of domain instead of probing them."
+        ),
+    )
+    parser.add_argument(
+        "--locate-axis",
+        action="store_true",
+        help=(
+            "Re-center the chart on the magnetic-axis fixed point near --axis-r "
+            "(instead of trusting --axis-r). Only used with "
+            "--freeze-targets-from-iota."
+        ),
+    )
+    parser.add_argument(
+        "--nfp",
+        type=int,
+        default=None,
+        help=(
+            "Field period count for magnetic-axis location. Defaults to the "
+            "common nfp of the requested targets."
+        ),
+    )
+    parser.add_argument("--iota-profile-lower", type=float, default=0.005)
+    parser.add_argument("--iota-profile-upper", type=float, default=0.08)
+    parser.add_argument("--iota-profile-samples", type=int, default=24)
+    parser.add_argument(
+        "--iota-profile-turns",
+        type=int,
+        default=DEFAULT_IOTA_PROFILE_TORUS_TURNS,
+    )
+    parser.add_argument(
+        "--axis-search-half-width",
+        type=float,
+        default=DEFAULT_AXIS_SEARCH_HALF_WIDTH,
+    )
     parser.add_argument("--rtol", type=float, default=1.0e-9)
     parser.add_argument("--atol", type=float, default=1.0e-11)
     parser.add_argument("--max-step", type=float, default=0.05)
@@ -160,6 +208,17 @@ def resolve_biot_savart_artifact(
     )
 
 
+@dataclass(frozen=True)
+class IotaFreezingConfig:
+    """Settings for placing targets on the realized iota profile (doc §3.2)."""
+
+    locate_axis: bool
+    radial_labels: tuple[float, ...]
+    toroidal_turns: int
+    axis_search_half_width: float
+    nfp: int
+
+
 def evaluate_output_dir(
     output_dir: str | Path,
     *,
@@ -175,16 +234,39 @@ def evaluate_output_dir(
     residue_objective_r_satisfied: float,
     residue_objective_local_difference_step: float,
     branch_phase_angles: Sequence[float],
+    freezing_config: IotaFreezingConfig | None,
 ) -> dict[str, object]:
     artifact_path, resolved_field_label = resolve_biot_savart_artifact(
         output_dir,
         field_label=field_label,
     )
     biot_savart = load(artifact_path)
+    if freezing_config is None:
+        probe_chart = chart
+        probe_targets: Sequence[RationalTarget] = targets
+        target_freezing_payload = None
+    else:
+        freezing = freeze_probe_inputs(
+            biot_savart,
+            requested_targets=targets,
+            axis_r_guess=chart.axis_r,
+            axis_z_guess=chart.axis_z,
+            nfp=freezing_config.nfp,
+            locate_axis=freezing_config.locate_axis,
+            radial_labels=freezing_config.radial_labels,
+            toroidal_turns=freezing_config.toroidal_turns,
+            poloidal_orientation=chart.poloidal_orientation,
+            radial_label_scale=chart.radial_label_scale,
+            axis_search_half_width=freezing_config.axis_search_half_width,
+            integrator_options=integrator_options,
+        )
+        probe_chart = freezing.chart
+        probe_targets = freezing.in_domain_targets
+        target_freezing_payload = probe_freezing_payload(freezing)
     probe = run_residue_probe(
         biot_savart,
-        targets=targets,
-        chart=chart,
+        targets=probe_targets,
+        chart=probe_chart,
         integrator_options=integrator_options,
         solver_options=solver_options,
         phase_angles=branch_phase_angles,
@@ -220,9 +302,28 @@ def evaluate_output_dir(
         "output_dir": str(Path(output_dir).resolve()),
         "field_label": resolved_field_label,
         "biot_savart_path": str(artifact_path),
+        "target_freezing": target_freezing_payload,
         "probe": probe,
         "residue_objective": objective_payload,
     }
+
+
+def _resolve_profile_nfp(
+    nfp_argument: int | None,
+    targets: Sequence[RationalTarget],
+) -> int:
+    if nfp_argument is not None:
+        nfp = int(nfp_argument)
+        if nfp <= 0:
+            raise ValueError("--nfp must be positive")
+        return nfp
+    target_nfps = {int(target.nfp) for target in targets}
+    if len(target_nfps) != 1:
+        raise ValueError(
+            "magnetic-axis location needs a single nfp; requested targets "
+            f"declare {sorted(target_nfps)}. Pass --nfp explicitly."
+        )
+    return target_nfps.pop()
 
 
 def main() -> None:
@@ -245,6 +346,28 @@ def main() -> None:
                 args.residue_objective_seeds_json,
                 target_manifest_id=target_manifest_id,
             )
+        )
+    freeze_targets_from_iota = bool(args.freeze_targets_from_iota)
+    if args.locate_axis and not freeze_targets_from_iota:
+        raise ValueError("--locate-axis requires --freeze-targets-from-iota")
+    if freeze_targets_from_iota and residue_objective_weight > 0.0:
+        raise ValueError(
+            "--freeze-targets-from-iota relocates target labels/windows, which "
+            "invalidates residue-objective seeds keyed to the requested targets; "
+            "run target freezing and the objective in separate steps"
+        )
+    freezing_config = None
+    if freeze_targets_from_iota:
+        freezing_config = IotaFreezingConfig(
+            locate_axis=bool(args.locate_axis),
+            radial_labels=linear_radial_labels(
+                lower=args.iota_profile_lower,
+                upper=args.iota_profile_upper,
+                count=args.iota_profile_samples,
+            ),
+            toroidal_turns=int(args.iota_profile_turns),
+            axis_search_half_width=float(args.axis_search_half_width),
+            nfp=_resolve_profile_nfp(args.nfp, targets),
         )
     chart = PoincareChart(
         axis_r=args.axis_r,
@@ -284,6 +407,7 @@ def main() -> None:
                 args.residue_objective_local_difference_step
             ),
             branch_phase_angles=branch_phase_angles,
+            freezing_config=freezing_config,
         )
         for output_dir in args.output_dirs
     ]

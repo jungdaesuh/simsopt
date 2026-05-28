@@ -221,7 +221,7 @@ def test_return_point_classifier_rejects_nonwinding_poloidal_reference():
     assert result.return_count == 128
 
 
-def test_invariant_torus_fraction_denominator_excludes_lost_and_insufficient():
+def test_invariant_torus_fraction_denominator_excludes_lost_only():
     classifications = [
         SeedClassification(
             seed_index=0,
@@ -276,7 +276,7 @@ def test_invariant_torus_fraction_denominator_excludes_lost_and_insufficient():
     assert summary["wba_classified_seed_count"] == 2
     assert summary["wba_evaluation_state"] == "evaluated"
     assert summary["invariant_torus_count"] == 1
-    assert summary["invariant_torus_fraction"] == 1.0 / 2.0
+    assert summary["invariant_torus_fraction"] == 1.0 / 3.0
 
 
 def test_invariant_torus_fraction_reports_not_evaluated_for_only_insufficient_returns():

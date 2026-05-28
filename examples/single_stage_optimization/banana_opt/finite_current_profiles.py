@@ -22,6 +22,7 @@ from banana_opt.current_contracts import (
 
 _MODULE_DIR = Path(__file__).resolve().parent
 
+VACUUM_FINITE_CURRENT_MODE: FiniteCurrentMode = "vacuum"
 WATARU_FINITE_CURRENT_MODE: FiniteCurrentMode = DEFAULT_FINITE_CURRENT_MODE
 JHALPERN30_FINITE_CURRENT_MODE: FiniteCurrentMode = "jhalpern30_proxy_field"
 
@@ -90,6 +91,33 @@ _COMMON_REQUIRED_ARTIFACT_METADATA_KEYS = (
     "COIL_GROUPS",
 )
 
+VACUUM_PROFILE = FiniteCurrentProfile(
+    mode=VACUUM_FINITE_CURRENT_MODE,
+    default_num_tf_coils=20,
+    default_num_banana_coils=10,
+    default_num_proxy_coils=0,
+    default_num_vf_coils=0,
+    boozer_current_convention=resolve_boozer_current_convention(
+        VACUUM_FINITE_CURRENT_MODE,
+    ),
+    g0_policy="signed_explicit_tf_current",
+    proxy_placement_policy="none",
+    proxy_vf_current_scalar_policy="none",
+    default_vf_template_path=None,
+    vf_template_sha256=None,
+    vf_current_ratio=0.0,
+    vf_current_sign_policy="none",
+    vf_current_mutability="none",
+    banana_replay_policy="stage2_cli_seed_current",
+    supported_entrypoints=(
+        "STAGE_2/banana_coil_solver.py",
+        "SINGLE_STAGE/single_stage_banana_example.py",
+        "run_stage2_to_single_stage.py",
+    ),
+    rejected_entrypoints=(),
+    required_artifact_metadata_keys=_COMMON_REQUIRED_ARTIFACT_METADATA_KEYS,
+)
+
 WATARU_PROFILE = FiniteCurrentProfile(
     mode=WATARU_FINITE_CURRENT_MODE,
     default_num_tf_coils=20,
@@ -142,9 +170,7 @@ JHALPERN30_PROFILE = FiniteCurrentProfile(
         "STAGE_2/banana_coil_solver.py",
         "SINGLE_STAGE/single_stage_banana_example.py",
     ),
-    rejected_entrypoints=(
-        "run_stage2_to_single_stage.py:pre_boozer_repair",
-    ),
+    rejected_entrypoints=("run_stage2_to_single_stage.py:pre_boozer_repair",),
     required_artifact_metadata_keys=(
         *_COMMON_REQUIRED_ARTIFACT_METADATA_KEYS,
         "BOOZER_I",
@@ -159,6 +185,7 @@ JHALPERN30_PROFILE = FiniteCurrentProfile(
 )
 
 FINITE_CURRENT_PROFILES: Mapping[FiniteCurrentMode, FiniteCurrentProfile] = {
+    VACUUM_PROFILE.mode: VACUUM_PROFILE,
     WATARU_PROFILE.mode: WATARU_PROFILE,
     JHALPERN30_PROFILE.mode: JHALPERN30_PROFILE,
 }
@@ -206,6 +233,8 @@ __all__ = [
     "JHALPERN30_VF_CURRENT_MUTABILITY",
     "JHALPERN30_VF_CURRENT_SIGN_POLICY",
     "JHALPERN30_VF_TEMPLATE_SHA256",
+    "VACUUM_FINITE_CURRENT_MODE",
+    "VACUUM_PROFILE",
     "WATARU_FINITE_CURRENT_MODE",
     "WATARU_PROFILE",
     "get_finite_current_profile",

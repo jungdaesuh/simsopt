@@ -21,6 +21,7 @@ from banana_opt.coil_groups import (
 )
 from banana_opt.hardware_contracts import (
     BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+    COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_MIN_FRACTION,
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
@@ -175,7 +176,8 @@ class Stage2GuardedBoozerEvaluator:
                 iota_objective_active=False,
                 trust_reason=(
                     BOOZER_TRUST_REASON_SELF_INTERSECTING
-                    if initial_failure_reason == _STAGE2_FAILURE_REASON_SELF_INTERSECTION
+                    if initial_failure_reason
+                    == _STAGE2_FAILURE_REASON_SELF_INTERSECTION
                     else BOOZER_TRUST_REASON_SOLVE_FAILED
                 ),
             )
@@ -668,8 +670,7 @@ def _add_stage2_s_hel_objective(
     return (
         float(objective_value) + float(s_hel_weight) * (1.0 - s_hel_value),
         np.asarray(objective_grad, dtype=float)
-        - float(s_hel_weight)
-        * np.asarray(s_hel_objective.dJ_by_dcoils(), dtype=float),
+        - float(s_hel_weight) * np.asarray(s_hel_objective.dJ_by_dcoils(), dtype=float),
     )
 
 
@@ -1376,7 +1377,9 @@ def build_stage2_results(
         "CURVATURE_WEIGHT": curvature_weight,
         "CURVATURE_THRESHOLD": curvature_threshold,
         "POLOIDAL_EXTENT_RAD": (
-            None if final_poloidal_extent_rad is None else float(final_poloidal_extent_rad)
+            None
+            if final_poloidal_extent_rad is None
+            else float(final_poloidal_extent_rad)
         ),
         "POLOIDAL_EXTENT_THRESHOLD_RAD": (
             None
@@ -1384,6 +1387,18 @@ def build_stage2_results(
             else float(poloidal_extent_threshold_rad)
         ),
         "LENGTH_WEIGHT": length_weight,
+        "ACCEPT_OFFSPEC_COIL_LENGTH": bool(
+            getattr(args, "accept_offspec_coil_length", False)
+        ),
+        "COIL_LENGTH_HARD_LIMIT_M": float(COIL_LENGTH_HARD_LIMIT_M),
+        "OFFSPEC_COIL_LENGTH_TARGET_M": (
+            float(length_target)
+            if (
+                bool(getattr(args, "accept_offspec_coil_length", False))
+                and float(length_target) > COIL_LENGTH_HARD_LIMIT_M
+            )
+            else None
+        ),
         **fixed_stage2_clearance_contract(),
         "CONSTRAINT_METHOD": constraint_method,
         "theta_center": theta_center,
@@ -2317,14 +2332,12 @@ def evaluate_stage2_alm_problem(
             curve_surface_signed_value,
             curve_surface_grad,
             curve_surface_hard_signed_value,
-        ) = (
-            smooth_min_curve_surface_signed_constraint(
-                Jcsdist.curves,
-                Jcsdist.surface,
-                Jcsdist.minimum_distance,
-                distance_smoothing,
-                base_objective_optimizable,
-            )
+        ) = smooth_min_curve_surface_signed_constraint(
+            Jcsdist.curves,
+            Jcsdist.surface,
+            Jcsdist.minimum_distance,
+            distance_smoothing,
+            base_objective_optimizable,
         )
         curve_surface_min_dist = _stage2_distance_minimum(
             Jcsdist,
@@ -2359,9 +2372,7 @@ def evaluate_stage2_alm_problem(
     self_intersect_grad = np.asarray(
         Jself.dJ(partials=True)(base_objective_optimizable), dtype=float
     )
-    self_intersect_signed_value = (
-        self_intersect_value - float(self_intersect_threshold)
-    )
+    self_intersect_signed_value = self_intersect_value - float(self_intersect_threshold)
     self_intersect_violation = max(0.0, self_intersect_signed_value)
     shortest_self_distance = float(Jself.shortest_self_distance())
 
@@ -2446,9 +2457,7 @@ def evaluate_stage2_alm_problem(
                 iota_state.penalty,
                 stage2_iota_penalty_threshold_value,
             )
-            iota_signed_value = (
-                iota_state.penalty - stage2_iota_penalty_threshold_value
-            )
+            iota_signed_value = iota_state.penalty - stage2_iota_penalty_threshold_value
             iota_grad = np.asarray(iota_evaluation.penalty_grad, dtype=float)
         _reset_biot_savart_points_to_surface(new_bs, new_surf)
 
@@ -2582,9 +2591,7 @@ def evaluate_stage2_alm_problem(
         threshold_overrides=threshold_overrides,
         activity_tolerance_by_name=tolerance_by_name,
         iota_penalty_threshold=(
-            None
-            if stage2_iota_runtime is None
-            else stage2_iota_penalty_threshold_value
+            None if stage2_iota_runtime is None else stage2_iota_penalty_threshold_value
         ),
     )
     metadata_payload = alm_constraint_metadata_payload(active_names, metadata_by_name)
@@ -2718,8 +2725,7 @@ def evaluate_stage2_alm_problem(
             f"Wmax+={width_max_violation:.2e}"
         )
         outstr += (
-            f", SI={shortest_self_distance:.3f}m, "
-            f"SI+={self_intersect_violation:.2e}"
+            f", SI={shortest_self_distance:.3f}m, SI+={self_intersect_violation:.2e}"
         )
         outstr += (
             f", |BananaI|={banana_current_abs_A:.2f}A, "

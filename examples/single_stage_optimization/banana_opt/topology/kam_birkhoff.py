@@ -38,6 +38,7 @@ WBA_EVALUATION_NOT_EVALUATED_MISSING_MAGNETIC_AXIS = (
     "not_evaluated_missing_magnetic_axis"
 )
 WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS = "not_evaluated_no_classified_seeds"
+WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER = "not_evaluated_skipped_by_caller"
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,9 +418,7 @@ def summarize_seed_classifications(
 
     survived_count = len(survived)
     classified_count = len(classified)
-    fraction = (
-        None if classified_count == 0 else len(invariant) / float(classified_count)
-    )
+    fraction = None if classified_count == 0 else len(invariant) / float(survived_count)
     if classified_count > 0:
         evaluation_state = WBA_EVALUATION_EVALUATED
         not_evaluated_reason = None
