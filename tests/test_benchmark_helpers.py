@@ -671,6 +671,7 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     assert args.initial_step_scale == pytest.approx(1.0)
     assert args.initial_step_maxiter == 0
     assert args.outer_maxls == single_stage_init_parity_module.TRACE_PARITY_OUTER_MAXLS
+    assert args.target_lane_boozer_newton_polish_policy == "skip-large-strict-cuda"
 
 
 def test_single_stage_init_accepts_reference_trace_optimizer(monkeypatch):
@@ -5029,6 +5030,11 @@ def _observe_single_stage_case_invocations(monkeypatch, tmp_path: Path):
     return observed_invocations
 
 
+def _flag_value(command: list[str], flag: str) -> str:
+    flag_index = command.index(flag)
+    return command[flag_index + 1]
+
+
 def test_single_stage_init_case_pair_threads_shared_seed_to_jax_fullgraph_lane(
     monkeypatch,
     tmp_path,
@@ -5101,6 +5107,86 @@ def test_single_stage_init_case_pair_threads_shared_seed_to_jax_fullgraph_lane(
     assert calls[1]["warm_start_run_dir"] == shared_seed_run_dir
     assert calls[2]["backend"] == "jax"
     assert calls[2]["warm_start_run_dir"] == shared_seed_run_dir
+
+
+def test_single_stage_init_case_pair_threads_large_cuda_boozer_polish_skip_to_jax_reference_and_target(
+    monkeypatch, tmp_path
+):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "cuda"
+    args.mpol = 6
+    args.ntor = 6
+    args.maxiter = 10
+    args.jax_runtime_seed_spec = tmp_path / "seed.json"
+    args.jax_runtime_seed_spec.write_text('{"seed": true}', encoding="utf-8")
+    args.warm_start_run_dir = None
+    args.target_lane_boozer_newton_polish_policy = "skip-large-strict-cuda"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case_pair(
+        args,
+        benchmark_mode=False,
+        reference_backend="jax",
+        reference_benchmark_mode=False,
+        case_root=tmp_path / "case",
+    )
+
+    assert len(observed_invocations) == 2
+    reference_command, _reference_env = observed_invocations[0]
+    target_command, _target_env = observed_invocations[1]
+    assert (
+        Path(_flag_value(reference_command, "--output-root")).name
+        == "reference_outputs"
+    )
+    assert Path(_flag_value(target_command, "--output-root")).name == "target_outputs"
+    assert (
+        _flag_value(
+            reference_command,
+            "--target-lane-boozer-newton-polish-policy",
+        )
+        == "skip"
+    )
+    assert (
+        _flag_value(target_command, "--target-lane-boozer-newton-polish-policy")
+        == "skip"
+    )
+
+
+def test_single_stage_full_run_family_id_normalizes_boozer_polish_default_alias(
+    tmp_path,
+):
+    default_args = _single_stage_case_args(tmp_path)
+    explicit_args = _single_stage_case_args(tmp_path)
+    default_args.target_lane_boozer_newton_polish_policy = "default"
+    explicit_args.target_lane_boozer_newton_polish_policy = "skip-large-strict-cuda"
+
+    default_family_id = (
+        single_stage_init_parity_module._single_stage_full_run_family_id(
+            default_args,
+            runtime_seed_spec_hash="seed",
+            objective_configuration_hash="objective",
+        )
+    )
+    explicit_family_id = (
+        single_stage_init_parity_module._single_stage_full_run_family_id(
+            explicit_args,
+            runtime_seed_spec_hash="seed",
+            objective_configuration_hash="objective",
+        )
+    )
+
+    assert default_family_id == explicit_family_id
 
 
 def test_single_stage_init_case_pair_replays_reference_trace_before_jax_fullgraph(
@@ -6279,6 +6365,102 @@ def test_single_stage_init_case_threads_target_lane_boozer_trial_overrides(
     assert "--target-lane-boozer-bfgs-maxiter" in observed_command
     assert "--target-lane-boozer-newton-tol" in observed_command
     assert "--target-lane-boozer-newton-maxiter" in observed_command
+
+
+def test_single_stage_init_case_threads_large_cuda_boozer_polish_skip_to_jax_cpu_lane(
+    monkeypatch, tmp_path
+):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "cuda"
+    args.mpol = 6
+    args.ntor = 6
+    args.target_lane_boozer_newton_polish_policy = "skip-large-strict-cuda"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        load_surface_gamma=False,
+    )
+
+    command, _env = observed_invocations[0]
+    assert _flag_value(command, "--target-lane-boozer-newton-polish-policy") == "skip"
+
+
+def test_single_stage_init_case_keeps_small_cuda_boozer_polish_default_in_child(
+    monkeypatch, tmp_path
+):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "cuda"
+    args.mpol = 4
+    args.ntor = 4
+    args.target_lane_boozer_newton_polish_policy = "skip-large-strict-cuda"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        load_surface_gamma=False,
+    )
+
+    command, _env = observed_invocations[0]
+    assert "--target-lane-boozer-newton-polish-policy" not in command
+
+
+def test_single_stage_init_case_threads_explicit_boozer_polish_policy(
+    monkeypatch, tmp_path
+):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "cuda"
+    args.mpol = 6
+    args.ntor = 6
+    args.target_lane_boozer_newton_polish_policy = "run"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        load_surface_gamma=False,
+    )
+
+    command, _env = observed_invocations[0]
+    assert _flag_value(command, "--target-lane-boozer-newton-polish-policy") == "run"
 
 
 def test_single_stage_init_case_threads_subprocess_timeout(monkeypatch, tmp_path):
