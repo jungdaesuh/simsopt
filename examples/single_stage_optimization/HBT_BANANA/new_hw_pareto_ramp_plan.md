@@ -21,6 +21,10 @@ Plan a staged optimization campaign that uses the signed vacuum-current `nv2_iot
 
 ## Current Context
 
+- Authoritative plan path in this checkout:
+  `/Users/suhjungdae/code/hbt-compare/repos/baseline-original/examples/single_stage_optimization/HBT_BANANA/new_hw_pareto_ramp_plan.md`
+- If a handoff says this named plan path is absent, treat that statement as stale for this checkout. First verify the current working directory and locate the plan with `rg --files | rg 'new_hw_pareto_ramp_plan\.md$'` before assuming the plan moved.
+- This repo may already contain unrelated dirty or untracked work. Start every follow-up by running `git status --short`; preserve unrelated changes and outputs. If Stage 2 or single-stage files are already modified, treat them as user/prior-agent changes, inspect them before relying on them, and do not edit, stage, or commit them unless the task explicitly includes those files.
 - Baseline hard limits were updated in `examples/single_stage_optimization/HBT_BANANA/config.yaml`.
 - New-HW campaign spec from `config.yaml`:
   - TF current: `-80 kA`.
