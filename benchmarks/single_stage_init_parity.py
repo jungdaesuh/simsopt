@@ -802,6 +802,7 @@ def _append_optional_single_stage_flags(
     experimental_target_lane_value_and_grad: bool,
     disable_target_lane_success_filter: bool,
     record_objective_evaluation_trace: bool,
+    record_target_optimizer_state_trace: bool,
     target_lane_boozer_bfgs_tol: float | None = None,
     target_lane_boozer_bfgs_maxiter: int | None = None,
     target_lane_boozer_newton_tol: float | None = None,
@@ -844,6 +845,8 @@ def _append_optional_single_stage_flags(
         command.append("--disable-target-lane-success-filter")
     if record_objective_evaluation_trace:
         command.append("--record-objective-evaluation-trace")
+    if record_target_optimizer_state_trace:
+        command.append("--record-target-optimizer-state-trace")
     if replay_objective_evaluation_trace is not None:
         command.extend(
             [
@@ -1065,6 +1068,12 @@ def _run_single_stage_case(
             ),
             record_objective_evaluation_trace=bool(
                 getattr(args, "record_objective_evaluation_trace", False)
+            ),
+            record_target_optimizer_state_trace=bool(
+                backend == "jax"
+                and args.optimizer_backend == TARGET_OPTIMIZER_BACKEND
+                and getattr(args, "reference_optimizer_method", "lbfgs")
+                == "lbfgs-trace"
             ),
             target_lane_boozer_bfgs_tol=getattr(
                 args, "target_lane_boozer_bfgs_tol", None
@@ -1748,6 +1757,20 @@ def _load_optimizer_state_trace_from_case(case: dict[str, Any]) -> list[dict[str
     return []
 
 
+def _load_optimizer_endpoint_trace_from_case(
+    case: dict[str, Any],
+) -> list[dict[str, Any]]:
+    progress_path = Path(case["outer_optimizer_progress_json"])
+    if not progress_path.exists():
+        return []
+    payload = load_json(progress_path)
+    return [
+        dict(event)
+        for event in payload.get("events", [])
+        if event.get("label") == "optimizer_endpoint_trace"
+    ]
+
+
 def _optimizer_state_trace_entry_to_path_event(
     entry: dict[str, Any],
     *,
@@ -1790,11 +1813,15 @@ def _load_optimizer_path_events_pair(
     jax_objective_events = _load_objective_evaluation_events_from_case(jax_case)
     cpu_state_trace = _load_optimizer_state_trace_from_case(cpu_case)
     jax_state_trace = _load_optimizer_state_trace_from_case(jax_case)
+    cpu_endpoint_events = _load_optimizer_endpoint_trace_from_case(cpu_case)
+    jax_endpoint_events = _load_optimizer_endpoint_trace_from_case(jax_case)
     metadata = {
         "cpu_objective_event_count": len(cpu_objective_events),
         "jax_objective_event_count": len(jax_objective_events),
         "cpu_optimizer_state_trace_count": len(cpu_state_trace),
         "jax_optimizer_state_trace_count": len(jax_state_trace),
+        "cpu_optimizer_endpoint_trace_count": len(cpu_endpoint_events),
+        "jax_optimizer_endpoint_trace_count": len(jax_endpoint_events),
     }
     if cpu_objective_events and jax_objective_events:
         return (
@@ -1835,6 +1862,24 @@ def _load_optimizer_path_events_pair(
             cpu_events,
             jax_events,
             {**metadata, "event_source": "optimizer_state_trace"},
+        )
+    if cpu_objective_events and jax_endpoint_events:
+        return (
+            _objective_events_to_accepted_path_events(cpu_objective_events),
+            jax_endpoint_events,
+            {**metadata, "event_source": "optimizer_endpoint_trace"},
+        )
+    if cpu_endpoint_events and jax_objective_events:
+        return (
+            cpu_endpoint_events,
+            _objective_events_to_accepted_path_events(jax_objective_events),
+            {**metadata, "event_source": "optimizer_endpoint_trace"},
+        )
+    if cpu_endpoint_events and jax_endpoint_events:
+        return (
+            cpu_endpoint_events,
+            jax_endpoint_events,
+            {**metadata, "event_source": "optimizer_endpoint_trace"},
         )
     return [], [], {**metadata, "event_source": "not-recorded"}
 

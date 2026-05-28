@@ -5714,6 +5714,23 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertTrue(args.record_target_lane_invalid_state_events)
 
+    def test_parse_args_accepts_record_target_optimizer_state_trace(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--record-target-optimizer-state-trace",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.record_target_optimizer_state_trace)
+
     def test_parse_args_accepts_diagnostic_callbacks(self):
         module = self.load_module()
 

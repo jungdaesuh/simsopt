@@ -1957,6 +1957,58 @@ def test_single_stage_init_optimizer_path_uses_target_accepted_state_trace(tmp_p
     assert comparison["max_objective_event"]["objective_abs_diff"] == pytest.approx(0.1)
 
 
+def test_single_stage_init_optimizer_path_uses_target_endpoint_trace(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_events = [
+        _single_stage_objective_trace_event(
+            event_index=10,
+            accepted_iteration_target=1,
+            line_search_evaluation=1,
+            x=[1.0, 2.0],
+            objective=3.0,
+            gradient=[0.5, -0.25],
+        ),
+        _single_stage_objective_trace_event(
+            event_index=11,
+            accepted_iteration_target=1,
+            line_search_evaluation=2,
+            x=[0.9, 2.1],
+            objective=2.5,
+            gradient=[0.25, -0.125],
+        ),
+    ]
+    jax_endpoint_event = {
+        "label": "optimizer_endpoint_trace",
+        "event_index": 20,
+        "accepted_iteration_target": 1,
+        "line_search_evaluation": 3,
+        "candidate_optimizer_dofs": _single_stage_trace_vector([0.8, 2.2]),
+        "objective": _single_stage_trace_scalar(2.4),
+        "optimizer_gradient": _single_stage_trace_vector([0.2, -0.1]),
+        "boozer_iota": None,
+    }
+    cpu_progress.write_text(json.dumps({"events": cpu_events}))
+    jax_progress.write_text(json.dumps({"events": [jax_endpoint_event]}))
+
+    comparison = (
+        single_stage_init_parity_module.compare_optimizer_path_objective_evaluations(
+            {"outer_optimizer_progress_json": str(cpu_progress)},
+            {"outer_optimizer_progress_json": str(jax_progress)},
+        )
+    )
+
+    assert comparison["status"] == "split"
+    assert comparison["event_source"] == "optimizer_endpoint_trace"
+    assert comparison["cpu_event_count"] == 1
+    assert comparison["jax_event_count"] == 1
+    assert comparison["jax_optimizer_endpoint_trace_count"] == 1
+    assert comparison["first_candidate_split_event"]["candidate_abs_diff"] == (
+        pytest.approx(0.1)
+    )
+    assert comparison["max_objective_event"]["objective_abs_diff"] == pytest.approx(0.1)
+
+
 def test_single_stage_init_exact_replay_requires_identical_candidates(tmp_path):
     cpu_progress = tmp_path / "cpu_progress.json"
     jax_progress = tmp_path / "jax_progress.json"
@@ -4993,6 +5045,79 @@ def test_single_stage_init_case_threads_fullgraph_optimizer_backend_to_jax_lane(
     assert "--record-objective-evaluation-trace" in command
     target_lane_sync_flag_index = command.index("--target-lane-accepted-step-sync")
     assert command[target_lane_sync_flag_index + 1] == "per-accept"
+
+
+def test_single_stage_init_case_does_not_auto_record_target_state_trace(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.record_objective_evaluation_trace = True
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        load_surface_gamma=False,
+    )
+
+    command, _env = observed_invocations[0]
+    assert "--record-objective-evaluation-trace" in command
+    assert "--record-target-optimizer-state-trace" not in command
+
+
+def test_single_stage_init_case_records_target_state_trace_for_trace_reference(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.record_objective_evaluation_trace = True
+    args.reference_optimizer_method = "lbfgs-trace"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        load_surface_gamma=False,
+    )
+
+    command, _env = observed_invocations[0]
+    assert "--record-objective-evaluation-trace" in command
+    assert "--record-target-optimizer-state-trace" in command
 
 
 def test_single_stage_init_case_threads_cuda_fullgraph_boozer_backend(

@@ -4657,6 +4657,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--record-target-optimizer-state-trace",
+        action="store_true",
+        help=(
+            "Record accepted-step optimizer state for lbfgs-ondevice trajectory "
+            "diagnostics. This uses host callbacks and is intentionally opt-in."
+        ),
+    )
+    parser.add_argument(
         "--replay-objective-evaluation-trace",
         default=None,
         help=(
@@ -10685,6 +10693,32 @@ def build_single_stage_target_lane_objective_evaluation_trace_event(
     }
 
 
+def build_single_stage_target_lane_optimizer_endpoint_trace_event(result):
+    """Return a post-run endpoint event for optimizer-control split diagnostics."""
+    return {
+        "optimizer_endpoint_trace": True,
+        "trace_event_source": "optimizer_endpoint",
+        "accepted_iteration_target": int(getattr(result, "nit", 0)),
+        "line_search_evaluation": int(getattr(result, "nfev", 0)),
+        "accepted_iterations": int(getattr(result, "nit", 0)),
+        "candidate_optimizer_dofs": _summarize_host_vector(getattr(result, "x", ())),
+        "objective": _summarize_host_scalar(getattr(result, "fun", np.nan)),
+        "native_gradient": _summarize_host_gradient(getattr(result, "jac", ())),
+        "optimizer_gradient": _summarize_host_gradient(getattr(result, "jac", ())),
+        "objective_components": None,
+        "boozer_solve_decomposition": None,
+        "iota_penalty_decomposition": None,
+        "native_gradient_used": True,
+        "solver_success": bool(getattr(result, "success", False)),
+        "boozer_solver_metadata": None,
+        "boozer_iota": None,
+        "boozer_G": None,
+        "boozer_surface_dofs": None,
+        "hardware_status": None,
+        "candidate_failure": None,
+    }
+
+
 def run_single_stage_objective_evaluation_trace_replay(adapter, replay_events):
     """Replay recorded optimizer candidates through one lane's objective contract."""
     final_x = None
@@ -12706,7 +12740,7 @@ if __name__ == "__main__":
 
     record_target_optimizer_state_trace = bool(
         use_target_lane
-        and args.record_objective_evaluation_trace
+        and args.record_target_optimizer_state_trace
         and outer_optimizer_legacy_method == "lbfgs-ondevice"
     )
 
@@ -14765,6 +14799,17 @@ if __name__ == "__main__":
                             result=summarize_optimizer_result_for_progress(res),
                             retry_summary=target_lane_retry_summary,
                         )
+                        if (
+                            use_target_lane
+                            and objective_evaluation_trace_callback is not None
+                        ):
+                            record_outer_optimizer_event(
+                                "optimizer_endpoint_trace",
+                                phase="phase2",
+                                **build_single_stage_target_lane_optimizer_endpoint_trace_event(
+                                    res
+                                ),
+                            )
                         termination_message = str(res.message)
                         if target_lane_retry_summary["attempt_count"] > 0:
                             termination_message = (
