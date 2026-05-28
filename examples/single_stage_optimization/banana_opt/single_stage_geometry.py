@@ -8,7 +8,10 @@ from scipy.spatial.distance import cdist
 
 from simsopt.geo import SurfaceRZFourier
 
-from banana_opt.artifact_contracts import validate_boozer_surface_json_current_lineage
+from banana_opt.artifact_contracts import (
+    validate_boozer_surface_json_current_lineage,
+    validate_vacuum_boozer_surface_json,
+)
 from banana_opt.boozer_warm_start import save_boozer_surface_with_state
 from banana_opt.hardware_contracts import COIL_LENGTH_MIN_FRACTION
 from banana_opt.hardware_constraint_schema import (
@@ -235,9 +238,8 @@ def planar_segments_intersect(p1, p2, q1, q2, tol=1e-12):
     o3 = orientation(q1, q2, p1)
     o4 = orientation(q1, q2, p2)
 
-    if (
-        (o1 > tol and o2 < -tol or o1 < -tol and o2 > tol)
-        and (o3 > tol and o4 < -tol or o3 < -tol and o4 > tol)
+    if (o1 > tol and o2 < -tol or o1 < -tol and o2 > tol) and (
+        o3 > tol and o4 < -tol or o3 < -tol and o4 > tol
     ):
         return True
 
@@ -298,7 +300,9 @@ def evaluate_surface_stack(
 ):
     volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
     iotas = [entry["boozer_surface"].res["iota"] for entry in surface_data]
-    solve_success = [bool(entry["boozer_surface"].res["success"]) for entry in surface_data]
+    solve_success = [
+        bool(entry["boozer_surface"].res["success"]) for entry in surface_data
+    ]
 
     self_intersections = [
         surface_is_self_intersecting(entry["boozer_surface"].surface)
@@ -478,9 +482,7 @@ def evaluate_single_stage_hardware_constraints(
         "length_target": _optional_float(length_target),
         "length_min_target": _optional_float(length_min_target),
         "poloidal_extent_rad": _optional_float(poloidal_extent_rad),
-        "poloidal_extent_threshold_rad": _optional_float(
-            poloidal_extent_threshold_rad
-        ),
+        "poloidal_extent_threshold_rad": _optional_float(poloidal_extent_threshold_rad),
         "tf_current_A": _optional_float(tf_current_A),
         "tf_current_limit_A": _optional_float(tf_current_limit_A),
         "banana_current_A": _optional_float(banana_current_A),
@@ -516,16 +518,10 @@ def _threshold_from_override_or_schema(name, threshold_override):
 def _constraint_signed_value_by_name(objective_eval, payload_kind):
     names = list(objective_eval["constraint_names"])
     value_field = "dual_update_values"
-    if (
-        payload_kind == "signed_residual"
-        and "raw_dual_update_values" in objective_eval
-    ):
+    if payload_kind == "signed_residual" and "raw_dual_update_values" in objective_eval:
         value_field = "raw_dual_update_values"
     values = np.asarray(objective_eval[value_field], dtype=float)
-    return {
-        str(name): float(value)
-        for name, value in zip(names, values, strict=True)
-    }
+    return {str(name): float(value) for name, value in zip(names, values, strict=True)}
 
 
 def _status_constraint_names(objective_eval, payload_kind):
@@ -624,7 +620,9 @@ def evaluate_single_stage_search_hardware_snapshot(
         )
     signed_values = _constraint_signed_value_by_name(objective_eval, payload_kind)
     length_min_target = (
-        None if length_target is None else COIL_LENGTH_MIN_FRACTION * float(length_target)
+        None
+        if length_target is None
+        else COIL_LENGTH_MIN_FRACTION * float(length_target)
     )
     resolved_coil_length_threshold = _threshold_from_override_or_schema(
         "coil_length",
@@ -800,9 +798,7 @@ def evaluate_single_stage_search_hardware_snapshot(
         "length_target": _optional_float(length_target),
         "length_min_target": _optional_float(length_min_target),
         "poloidal_extent_rad": _optional_float(poloidal_extent_rad),
-        "poloidal_extent_threshold_rad": _optional_float(
-            poloidal_extent_threshold_rad
-        ),
+        "poloidal_extent_threshold_rad": _optional_float(poloidal_extent_threshold_rad),
         "coil_width": _optional_float(coil_width),
         "width_min_threshold": _optional_float(width_min_threshold),
         "width_max_threshold": _optional_float(width_max_threshold),
@@ -1000,10 +996,7 @@ def build_surface_search_weights_for_contract(
     ramp_iterations,
     initial_inner_weight,
 ):
-    if (
-        surface_mode_contract.stack_policy
-        == SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK
-    ):
+    if surface_mode_contract.stack_policy == SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK:
         if len(surface_mode_contract.weights) != surface_mode_contract.num_surfaces:
             raise ValueError(
                 "Surface-mode contract weights must match label fractions."
@@ -1118,10 +1111,7 @@ def build_surface_search_gate_for_contract(
     initial_inner_weight,
     surface_gap_threshold,
 ):
-    if (
-        surface_mode_contract.stack_policy
-        == SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK
-    ):
+    if surface_mode_contract.stack_policy == SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK:
         return {
             "surface_gap_threshold": float(surface_gap_threshold),
             "enforce_nesting": True,
@@ -1176,8 +1166,12 @@ def build_local_relative_bounds(anchor_x, relative_radius, lower_bounds, upper_b
     if anchor.shape != lower.shape or anchor.shape != upper.shape:
         raise ValueError("Local bounds inputs must have matching shapes")
     widths = float(relative_radius) * np.maximum(1.0, np.abs(anchor))
-    local_lower = np.where(np.isfinite(lower), np.maximum(lower, anchor - widths), anchor - widths)
-    local_upper = np.where(np.isfinite(upper), np.minimum(upper, anchor + widths), anchor + widths)
+    local_lower = np.where(
+        np.isfinite(lower), np.maximum(lower, anchor - widths), anchor - widths
+    )
+    local_upper = np.where(
+        np.isfinite(upper), np.minimum(upper, anchor + widths), anchor + widths
+    )
     return build_scipy_bounds(local_lower, local_upper)
 
 
@@ -1204,7 +1198,9 @@ def build_scaled_local_outer_bounds(
     relative_radius,
 ):
     if relative_radius is None:
-        return build_scaled_outer_bounds(anchor_x, step_scale, lower_bounds, upper_bounds)
+        return build_scaled_outer_bounds(
+            anchor_x, step_scale, lower_bounds, upper_bounds
+        )
     if not (0.0 < step_scale <= 1.0):
         raise ValueError("step_scale must be in (0, 1]")
     anchor = np.asarray(anchor_x, dtype=float)
@@ -1215,10 +1211,18 @@ def build_scaled_local_outer_bounds(
     if anchor.shape != lower.shape or anchor.shape != upper.shape:
         raise ValueError("Scaled local bounds inputs must have matching shapes")
     widths = float(relative_radius) * np.maximum(1.0, np.abs(anchor))
-    local_lower = np.where(np.isfinite(lower), np.maximum(lower, anchor - widths), anchor - widths)
-    local_upper = np.where(np.isfinite(upper), np.minimum(upper, anchor + widths), anchor + widths)
-    scaled_lower = np.where(np.isfinite(local_lower), (local_lower - anchor) / step_scale, -np.inf)
-    scaled_upper = np.where(np.isfinite(local_upper), (local_upper - anchor) / step_scale, np.inf)
+    local_lower = np.where(
+        np.isfinite(lower), np.maximum(lower, anchor - widths), anchor - widths
+    )
+    local_upper = np.where(
+        np.isfinite(upper), np.minimum(upper, anchor + widths), anchor + widths
+    )
+    scaled_lower = np.where(
+        np.isfinite(local_lower), (local_lower - anchor) / step_scale, -np.inf
+    )
+    scaled_upper = np.where(
+        np.isfinite(local_upper), (local_upper - anchor) / step_scale, np.inf
+    )
     return build_scipy_bounds(scaled_lower, scaled_upper)
 
 
@@ -1371,7 +1375,9 @@ def disabled_topology_gate_status(tmax, tol, survival_threshold):
 def topology_gate_deficit(status):
     if not status["enabled"]:
         return 0.0
-    return max(0.0, float(status["survival_threshold"]) - float(status["survival_fraction"]))
+    return max(
+        0.0, float(status["survival_threshold"]) - float(status["survival_fraction"])
+    )
 
 
 def topology_gate_rejection_increment(last_objective, status, penalty_scale):
@@ -1380,7 +1386,14 @@ def topology_gate_rejection_increment(last_objective, status, penalty_scale):
     return base_increment * (1.0 + penalty_scale * deficit)
 
 
-def save_surface_artifacts(surface_data, biotsavart, out_dir, stem, also_write_outer_legacy):
+def save_surface_artifacts(
+    surface_data,
+    biotsavart,
+    out_dir,
+    stem,
+    also_write_outer_legacy,
+    boozer_state_interchange_manifest=None,
+):
     outer_entry = surface_data[-1]
 
     def write_surface_artifact(entry, path_stem):
@@ -1391,20 +1404,36 @@ def save_surface_artifacts(surface_data, biotsavart, out_dir, stem, also_write_o
         field = biotsavart.B().reshape(unitn.shape)
         point_data = {
             "B_N/B": np.sum(field * unitn, axis=2)[:, :, None]
-            / np.sqrt(np.sum(field ** 2, axis=2))[:, :, None]
+            / np.sqrt(np.sum(field**2, axis=2))[:, :, None]
         }
         surface.to_vtk(path_stem, extra_data=point_data)
         surface.save(path_stem + ".json")
         boozer_surface_path = path_stem + "_boozer_surface.json"
-        save_boozer_surface_with_state(
-            boozer_surface,
-            boozer_surface_path,
-        )
-        validation = validate_boozer_surface_json_current_lineage(boozer_surface_path)
-        if not validation["passed"]:
+        if boozer_state_interchange_manifest is None:
+            state_path = save_boozer_surface_with_state(
+                boozer_surface,
+                boozer_surface_path,
+            )
+            validation = validate_boozer_surface_json_current_lineage(
+                boozer_surface_path
+            )
+            if not validation["passed"]:
+                raise ValueError(
+                    "Zero-current Boozer artifacts must use "
+                    "simsopt.geo.BoozerSurface without an I field: "
+                    f"{boozer_surface_path}"
+                )
+        else:
+            state_path = save_boozer_surface_with_state(
+                boozer_surface,
+                boozer_surface_path,
+                interchange_manifest=boozer_state_interchange_manifest,
+                surface_validator=validate_vacuum_boozer_surface_json,
+            )
+        if boozer_state_interchange_manifest is not None and state_path is None:
             raise ValueError(
-                "Zero-current Boozer artifacts must use simsopt.geo.BoozerSurface "
-                f"without an I field: {boozer_surface_path}"
+                "Baseline-replayable Boozer artifacts require a solved iota/G "
+                f"state sidecar: {boozer_surface_path}"
             )
 
     for entry in surface_data:
@@ -1429,14 +1458,20 @@ def collect_surface_run_metadata(
     return {
         "SURFACE_NAMES": [entry["name"] for entry in surface_data],
         "SURFACE_SEED_LABELS": [float(entry["seed_label"]) for entry in surface_data],
-        "SURFACE_TARGET_VOLUMES": [float(entry["target_volume"]) for entry in surface_data],
+        "SURFACE_TARGET_VOLUMES": [
+            float(entry["target_volume"]) for entry in surface_data
+        ],
         "SURFACE_INITIALIZATION_PROVENANCE": [
             entry["initialization_provenance"] for entry in surface_data
         ],
         "FINAL_SURFACE_VOLUMES": [float(value) for value in final_surface_volumes],
         "FINAL_SURFACE_IOTAS": [float(value) for value in final_surface_iotas],
-        "SURFACE_SELF_INTERSECTING": [bool(value) for value in run_status["self_intersections"]],
-        "ADJACENT_SURFACE_GAPS": [float(value) for value in run_status["adjacent_gaps"]],
+        "SURFACE_SELF_INTERSECTING": [
+            bool(value) for value in run_status["self_intersections"]
+        ],
+        "ADJACENT_SURFACE_GAPS": [
+            float(value) for value in run_status["adjacent_gaps"]
+        ],
         "OUTER_VESSEL_GAP": None
         if run_status["outer_vessel_gap"] is None
         else float(run_status["outer_vessel_gap"]),

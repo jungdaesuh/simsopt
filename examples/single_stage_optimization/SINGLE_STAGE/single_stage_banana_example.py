@@ -97,6 +97,7 @@ from workflow_runner_common import (
 from banana_opt.artifact_contracts import (
     STAGE2_SEED_CONTRACT_HASH_KEY,
     upgrade_legacy_stage2_artifact_results,
+    validate_vacuum_boozer_surface_json,
 )
 from banana_opt.json_compat import load_boozer_finite_i
 from banana_opt.alm_adaptive_smoothing import (
@@ -196,13 +197,19 @@ from banana_opt.hardware_contracts import (
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     env_flag,
     is_major_radius_offspec,
+    validate_coil_length_target,
     validate_major_radius,
 )
 from banana_opt.vacuum_topology_campaign import (
     STRICT_VACUUM_CURRENT_LINEAGE,
+    STRICT_VACUUM_SEED_LINEAGES,
+    STRICT_VACUUM_SEED_LINEAGE_LEGACY_CONTROL,
+    STRICT_VACUUM_SEED_LINEAGE_RECENT_STAGE1_CANDIDATE,
+    STRICT_VACUUM_SOURCE_CURRENT_GROUP_PROJECTION,
     build_strict_vacuum_seed_manifest,
     failed_strict_vacuum_checks,
     format_captured_command,
+    strict_vacuum_boozer_interchange_manifest,
     strict_vacuum_metadata_status,
     strict_vacuum_seed_input_status,
     validate_strict_vacuum_command,
@@ -802,6 +809,30 @@ def load_single_stage_resume_seed_results(resume_bs_path):
 def validate_strict_vacuum_current_args(args, command_args):
     if not getattr(args, "strict_vacuum_current", False):
         return {"passed": True}
+    strict_vacuum_lineage = getattr(args, "strict_vacuum_lineage", None)
+    if strict_vacuum_lineage not in STRICT_VACUUM_SEED_LINEAGES:
+        raise ValueError(
+            "--strict-vacuum-current requires --strict-vacuum-lineage="
+            f"{STRICT_VACUUM_SEED_LINEAGE_RECENT_STAGE1_CANDIDATE} or "
+            f"{STRICT_VACUUM_SEED_LINEAGE_LEGACY_CONTROL}."
+        )
+    stage1_candidate_id = getattr(args, "stage1_candidate_id", None)
+    if (
+        strict_vacuum_lineage == STRICT_VACUUM_SEED_LINEAGE_RECENT_STAGE1_CANDIDATE
+        and not stage1_candidate_id
+    ):
+        raise ValueError(
+            "--strict-vacuum-lineage=recent_stage1_candidate requires "
+            "--stage1-candidate-id."
+        )
+    if (
+        strict_vacuum_lineage == STRICT_VACUUM_SEED_LINEAGE_LEGACY_CONTROL
+        and stage1_candidate_id
+    ):
+        raise ValueError(
+            "--stage1-candidate-id is only valid with "
+            "--strict-vacuum-lineage=recent_stage1_candidate."
+        )
     if getattr(args, "offspec_replay_debug_only", False):
         raise ValueError(
             "--strict-vacuum-current cannot be combined with "
@@ -830,9 +861,8 @@ def resolve_single_stage_seed_artifact(args):
             "--single-stage-resume-bs-path and --stage2-bs-path are mutually exclusive."
         )
     if resume_bs_path:
-        if (
-            not args.offspec_replay_debug_only
-            and not getattr(args, "strict_vacuum_current", False)
+        if not args.offspec_replay_debug_only and not getattr(
+            args, "strict_vacuum_current", False
         ):
             raise ValueError(
                 "--single-stage-resume-bs-path requires "
@@ -1002,6 +1032,24 @@ def load_stage2_seed_biot_savart(
     return upgraded_bs, upgraded_partitions
 
 
+def project_strict_vacuum_seed_biot_savart(biot_savart, coil_partitions):
+    projected_coils = [
+        *coil_partitions.tf_coils,
+        *coil_partitions.banana_coils,
+    ]
+    if len(projected_coils) == len(biot_savart.coils):
+        return biot_savart, coil_partitions
+    projected_biot_savart = BiotSavart(projected_coils)
+    projected_partitions = replace(
+        coil_partitions,
+        proxy_coils=(),
+        vf_coils=(),
+        num_proxy_coils=0,
+        num_vf_coils=0,
+    )
+    return projected_biot_savart, projected_partitions
+
+
 def resolve_plasma_current_settings(
     args,
     *,
@@ -1036,6 +1084,20 @@ def resolve_plasma_current_settings(
         "boozer_current_convention": settings.boozer_current_convention,
         "mode": settings.mode,
         "effective_mode": settings.effective_mode,
+    }
+
+
+def apply_strict_vacuum_current_settings(args, plasma_current_settings):
+    if not getattr(args, "strict_vacuum_current", False):
+        return plasma_current_settings
+    return {
+        **plasma_current_settings,
+        "boozer_I": 0.0,
+        "plasma_current_A": 0.0,
+        "input_source": "strict_vacuum_current",
+        "boozer_current_convention": None,
+        "mode": None,
+        "effective_mode": "vacuum",
     }
 
 
@@ -2102,9 +2164,14 @@ def parse_args():
             "Curve length quadratic penalty target in meters (applies to banana_curves[0] via "
             f"QuadraticPenalty(..., 'max')). Defaults to the preferred hardware target of "
             f"{COIL_LENGTH_TARGET_M:.1f} m, with a hard ceiling at "
-            f"{COIL_LENGTH_HARD_LIMIT_M:.1f} m. Passing a larger value is rejected; "
-            "passing a smaller value makes the run stricter."
+            f"{COIL_LENGTH_HARD_LIMIT_M:.1f} m. Passing a larger value requires "
+            "--accept-offspec-coil-length; passing a smaller value makes the run stricter."
         ),
+    )
+    parser.add_argument(
+        "--accept-offspec-coil-length",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--res-weight",
@@ -2167,6 +2234,24 @@ def parse_args():
             "Run a production strict-vacuum replay from a warm-start seed: no "
             "finite-current command flags, pure upstream BoozerSurface lineage, "
             "and no proxy/VF coils in the accepted output metadata."
+        ),
+    )
+    parser.add_argument(
+        "--strict-vacuum-lineage",
+        choices=STRICT_VACUUM_SEED_LINEAGES,
+        default=os.environ.get("STRICT_VACUUM_LINEAGE"),
+        help=(
+            "Required with --strict-vacuum-current. Use recent_stage1_candidate "
+            "for promotable s01_* production lanes, or legacy_control for "
+            "014417/today control-only replays."
+        ),
+    )
+    parser.add_argument(
+        "--stage1-candidate-id",
+        default=os.environ.get("STAGE1_CANDIDATE_ID"),
+        help=(
+            "Recent Stage-1 candidate identifier, required when "
+            "--strict-vacuum-lineage=recent_stage1_candidate."
         ),
     )
     parser.add_argument(
@@ -4204,7 +4289,9 @@ def residue_objective_replay_config(args, residue_objective=None):
     target_manifest_id = (
         None if residue_objective is None else residue_objective.target_manifest_id
     )
-    validation_id = None if residue_objective is None else residue_objective.validation_id
+    validation_id = (
+        None if residue_objective is None else residue_objective.validation_id
+    )
     return (
         ("enabled", residue_objective is not None),
         ("weight", residue_objective_weight),
@@ -4264,9 +4351,7 @@ def residue_objective_replay_config(args, residue_objective=None):
         ),
         (
             "newton_residual_tolerance",
-            float(
-                getattr(args, "residue_objective_newton_residual_tolerance", 1.0e-9)
-            ),
+            float(getattr(args, "residue_objective_newton_residual_tolerance", 1.0e-9)),
         ),
         (
             "winding_tolerance",
@@ -4504,6 +4589,21 @@ class PreservedTimeoutReplayConfig:
     target_iota: float | None
     seed_artifact_role: str = SEED_ARTIFACT_ROLE_STAGE2
     offspec_replay_debug_only: bool = False
+    strict_vacuum_current: bool = False
+    strict_vacuum_seed_lineage: str | None = None
+    stage1_candidate_id: str | None = None
+    strict_vacuum_source_current_group_projection: str | None = None
+    strict_vacuum_command_validation: dict[str, object] | None = None
+    strict_vacuum_seed_input_validation: dict[str, object] | None = None
+    finite_current_mode: str | None = None
+    effective_current_mode: str | None = None
+    boozer_current_convention: str | None = None
+    plasma_current_A: float | None = None
+    boozer_I: float | None = None
+    num_proxy_coils: int | None = None
+    num_vf_coils: int | None = None
+    proxy_plasma_current_A: float | None = None
+    vf_current_A: float | None = None
     single_stage_resume_bs_path: str | None = None
     requested_seed_regime: str | None = None
     effective_seed_regime: str | None = None
@@ -8407,6 +8507,9 @@ def write_topology_checkpoint_artifacts(
         out_dir,
         "surf",
         also_write_outer_legacy=False,
+        boozer_state_interchange_manifest=current_boozer_state_interchange_manifest(
+            surface_data
+        ),
     )
 
 
@@ -8430,6 +8533,91 @@ def current_preserved_timeout_alm_state() -> PreservedTimeoutALMState | None:
         penalty=ALM_PENALTY,
         multipliers=ALM_MULTIPLIERS,
     )
+
+
+def strict_vacuum_boozer_state_metadata_payload(
+    surface_data,
+    *,
+    replay_config,
+    tf_current_A,
+    banana_current_state,
+) -> dict[str, object]:
+    return {
+        "STRICT_VACUUM_CURRENT": True,
+        "CURRENT_LINEAGE": STRICT_VACUUM_CURRENT_LINEAGE,
+        "STRICT_VACUUM_SEED_LINEAGE": replay_config.strict_vacuum_seed_lineage,
+        "STAGE1_CANDIDATE_ID": replay_config.stage1_candidate_id,
+        "TF_CURRENT_A": float(tf_current_A),
+        "BANANA_INIT_CURRENT_A": banana_current_state.compatibility_current_A(),
+        "EFFECTIVE_CURRENT_MODE": "vacuum",
+        "FINITE_CURRENT_MODE": None,
+        "PLASMA_CURRENT_A": 0.0,
+        "BOOZER_I": 0.0,
+        "PROXY_PLASMA_CURRENT_A": 0.0,
+        "VF_CURRENT_A": 0.0,
+        "NUM_PROXY_COILS": 0,
+        "NUM_VF_COILS": 0,
+        **build_single_stage_banana_current_payload_fields(banana_current_state),
+        **boozer_surface_lineage_metadata_from_surface_data(surface_data),
+    }
+
+
+def current_boozer_state_interchange_manifest(surface_data) -> dict[str, object] | None:
+    replay_config = current_preserved_timeout_replay_config()
+    if replay_config.strict_vacuum_current:
+        return boozer_state_interchange_manifest_for_results(
+            strict_vacuum_boozer_state_metadata_payload(
+                surface_data,
+                replay_config=replay_config,
+                tf_current_A=stage2_tf_current_A,
+                banana_current_state=banana_current_state,
+            )
+        )
+    return None
+
+
+def boozer_state_interchange_manifest_for_results(
+    results_payload,
+) -> dict[str, object] | None:
+    if results_payload.get("STRICT_VACUUM_CURRENT") is True:
+        strict_vacuum_checks = strict_vacuum_metadata_status(results_payload)
+        if not strict_vacuum_checks["passed"]:
+            failed_checks = ", ".join(failed_strict_vacuum_checks(strict_vacuum_checks))
+            raise ValueError(
+                "Baseline-replayable Boozer artifacts require "
+                f"strict-vacuum result metadata; failed checks: {failed_checks}"
+            )
+        return strict_vacuum_boozer_interchange_manifest()
+    return None
+
+
+def validate_boozer_surface_interchange_artifact(
+    boozer_surface_path,
+    state_path,
+    interchange_manifest,
+):
+    if interchange_manifest is None:
+        return
+    if state_path is None:
+        raise ValueError(
+            "Baseline-replayable Boozer artifacts require a solved iota/G "
+            f"state sidecar: {boozer_surface_path}"
+        )
+
+
+def boozer_surface_lineage_metadata_from_surface_data(surface_data):
+    boozer_surface_classes = [
+        type(entry["boozer_surface"]).__name__ for entry in surface_data
+    ]
+    boozer_surface_modules = [
+        type(entry["boozer_surface"]).__module__ for entry in surface_data
+    ]
+    return {
+        "BOOZER_SURFACE_CLASS": boozer_surface_classes[-1],
+        "BOOZER_SURFACE_MODULE": boozer_surface_modules[-1],
+        "BOOZER_SURFACE_CLASSES": boozer_surface_classes,
+        "BOOZER_SURFACE_MODULES": boozer_surface_modules,
+    }
 
 
 def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
@@ -8496,6 +8684,70 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         ),
         seed_artifact_role=replay_seed_artifact_role,
         offspec_replay_debug_only=replay_offspec_debug,
+        strict_vacuum_current=bool(
+            getattr(
+                args_value,
+                "strict_vacuum_current",
+                replay_config.strict_vacuum_current,
+            )
+        ),
+        strict_vacuum_seed_lineage=getattr(
+            args_value,
+            "strict_vacuum_lineage",
+            replay_config.strict_vacuum_seed_lineage,
+        ),
+        stage1_candidate_id=getattr(
+            args_value,
+            "stage1_candidate_id",
+            replay_config.stage1_candidate_id,
+        ),
+        strict_vacuum_source_current_group_projection=globals().get(
+            "strict_vacuum_source_current_group_projection",
+            replay_config.strict_vacuum_source_current_group_projection,
+        ),
+        strict_vacuum_command_validation=globals().get(
+            "strict_vacuum_command_checks",
+            replay_config.strict_vacuum_command_validation,
+        ),
+        strict_vacuum_seed_input_validation=globals().get(
+            "strict_vacuum_seed_checks",
+            replay_config.strict_vacuum_seed_input_validation,
+        ),
+        finite_current_mode=globals().get(
+            "finite_current_mode",
+            replay_config.finite_current_mode,
+        ),
+        effective_current_mode=globals().get(
+            "effective_current_mode",
+            replay_config.effective_current_mode,
+        ),
+        boozer_current_convention=globals().get(
+            "boozer_current_convention",
+            replay_config.boozer_current_convention,
+        ),
+        plasma_current_A=globals().get(
+            "plasma_current_A",
+            replay_config.plasma_current_A,
+        ),
+        boozer_I=globals().get("boozer_I", replay_config.boozer_I),
+        num_proxy_coils=getattr(
+            globals().get("coil_partitions", None),
+            "num_proxy_coils",
+            replay_config.num_proxy_coils,
+        ),
+        num_vf_coils=getattr(
+            globals().get("coil_partitions", None),
+            "num_vf_coils",
+            replay_config.num_vf_coils,
+        ),
+        proxy_plasma_current_A=globals().get(
+            "proxy_plasma_current_A",
+            replay_config.proxy_plasma_current_A,
+        ),
+        vf_current_A=globals().get(
+            "vf_current_A",
+            replay_config.vf_current_A,
+        ),
         single_stage_resume_bs_path=replay_single_stage_resume_bs_path,
         mpol=globals().get("mpol", replay_config.mpol),
         ntor=globals().get("ntor", replay_config.ntor),
@@ -8909,6 +9161,80 @@ def build_preserved_timeout_results_payload(
         "STAGE2_SEED_SURF_PATH": replay_config.stage2_seed_surf_path,
         "STAGE2_RESULTS_PATH": replay_config.stage2_results_path,
         **stage2_policy_metadata_payload(replay_config.stage2_policy_metadata),
+        "CURRENT_LINEAGE": (
+            STRICT_VACUUM_CURRENT_LINEAGE
+            if replay_config.strict_vacuum_current
+            else replay_config.finite_current_mode
+        ),
+        "STRICT_VACUUM_CURRENT": bool(replay_config.strict_vacuum_current),
+        "STRICT_VACUUM_SEED_LINEAGE": replay_config.strict_vacuum_seed_lineage
+        if replay_config.strict_vacuum_current
+        else None,
+        "STAGE1_CANDIDATE_ID": replay_config.stage1_candidate_id
+        if replay_config.strict_vacuum_current
+        else None,
+        "STRICT_VACUUM_PRODUCTION_CANDIDATE": (
+            replay_config.strict_vacuum_current
+            and replay_config.strict_vacuum_seed_lineage
+            == STRICT_VACUUM_SEED_LINEAGE_RECENT_STAGE1_CANDIDATE
+        ),
+        "STRICT_VACUUM_CONTROL_ONLY": (
+            replay_config.strict_vacuum_current
+            and replay_config.strict_vacuum_seed_lineage
+            == STRICT_VACUUM_SEED_LINEAGE_LEGACY_CONTROL
+        ),
+        "STRICT_VACUUM_COMMAND_VALIDATION": _jsonable_value(
+            replay_config.strict_vacuum_command_validation
+        )
+        if replay_config.strict_vacuum_current
+        else None,
+        "STRICT_VACUUM_SEED_INPUT_VALIDATION": _jsonable_value(
+            replay_config.strict_vacuum_seed_input_validation
+        )
+        if replay_config.strict_vacuum_current
+        else None,
+        "STRICT_VACUUM_SOURCE_CURRENT_GROUP_PROJECTION": (
+            replay_config.strict_vacuum_source_current_group_projection
+            if replay_config.strict_vacuum_current
+            else None
+        ),
+        "FINITE_CURRENT_MODE": (
+            None
+            if replay_config.strict_vacuum_current
+            else replay_config.finite_current_mode
+        ),
+        "EFFECTIVE_CURRENT_MODE": (
+            "vacuum"
+            if replay_config.strict_vacuum_current
+            else replay_config.effective_current_mode
+        ),
+        "BOOZER_CURRENT_CONVENTION": (
+            None
+            if replay_config.strict_vacuum_current
+            else replay_config.boozer_current_convention
+        ),
+        "PLASMA_CURRENT_A": (
+            0.0
+            if replay_config.strict_vacuum_current
+            else replay_config.plasma_current_A
+        ),
+        "BOOZER_I": (
+            0.0 if replay_config.strict_vacuum_current else replay_config.boozer_I
+        ),
+        "NUM_PROXY_COILS": (
+            0 if replay_config.strict_vacuum_current else replay_config.num_proxy_coils
+        ),
+        "NUM_VF_COILS": (
+            0 if replay_config.strict_vacuum_current else replay_config.num_vf_coils
+        ),
+        "PROXY_PLASMA_CURRENT_A": (
+            0.0
+            if replay_config.strict_vacuum_current
+            else replay_config.proxy_plasma_current_A
+        ),
+        "VF_CURRENT_A": (
+            0.0 if replay_config.strict_vacuum_current else replay_config.vf_current_A
+        ),
         "mpol": replay_config.mpol,
         "ntor": replay_config.ntor,
         "nphi": replay_config.nphi,
@@ -9107,16 +9433,52 @@ def write_preserved_timeout_artifacts(
         _PRESERVED_TIMEOUT_SURFACE_STEMS,
         preservation_kind,
     )
-    write_json_artifact(os.path.join(out_dir, results_filename), results_payload)
+    artifact_results_payload = dict(results_payload)
+    has_boozer_lineage_metadata = any(
+        key in artifact_results_payload
+        for key in (
+            "BOOZER_SURFACE_CLASS",
+            "BOOZER_SURFACE_MODULE",
+            "BOOZER_SURFACE_CLASSES",
+            "BOOZER_SURFACE_MODULES",
+        )
+    )
+    if (
+        artifact_results_payload.get("STRICT_VACUUM_CURRENT") is True
+        and not has_boozer_lineage_metadata
+    ):
+        for key, value in boozer_surface_lineage_metadata_from_surface_data(
+            surface_data
+        ).items():
+            artifact_results_payload[key] = value
+    interchange_manifest = boozer_state_interchange_manifest_for_results(
+        artifact_results_payload
+    )
+    write_json_artifact(
+        os.path.join(out_dir, results_filename),
+        artifact_results_payload,
+    )
     biotsavart.save(os.path.join(out_dir, bs_filename))
     for entry in surface_data:
         boozer_surface = entry["boozer_surface"]
         surface = boozer_surface.surface
         path_stem = os.path.join(out_dir, f"{surface_stem}_{entry['name']}")
         surface.save(path_stem + ".json")
-        save_boozer_surface_with_state(
+        boozer_surface_path = path_stem + "_boozer_surface.json"
+        state_path = save_boozer_surface_with_state(
             boozer_surface,
-            path_stem + "_boozer_surface.json",
+            boozer_surface_path,
+            interchange_manifest=interchange_manifest,
+            surface_validator=(
+                None
+                if interchange_manifest is None
+                else validate_vacuum_boozer_surface_json
+            ),
+        )
+        validate_boozer_surface_interchange_artifact(
+            boozer_surface_path,
+            state_path,
+            interchange_manifest,
         )
 
 
@@ -10855,7 +11217,14 @@ def callback(x):
         os.makedirs(ckpt_dir, exist_ok=True)
         bs.save(os.path.join(ckpt_dir, "biot_savart.json"))
         save_surface_artifacts(
-            surface_data, bs, ckpt_dir, "surf", also_write_outer_legacy=False
+            surface_data,
+            bs,
+            ckpt_dir,
+            "surf",
+            also_write_outer_legacy=False,
+            boozer_state_interchange_manifest=current_boozer_state_interchange_manifest(
+                surface_data
+            ),
         )
         print(
             f"  [checkpoint] Saved iteration {run_dict['accepted_iterations']} to {ckpt_dir}"
@@ -11049,14 +11418,17 @@ if __name__ == "__main__":
         stage2_results,
         requested_finite_current_mode,
     )
-    plasma_current_settings = resolve_plasma_current_settings(
+    plasma_current_settings = apply_strict_vacuum_current_settings(
         args,
-        finite_current_mode=finite_current_mode,
-        default_plasma_current_A=float(
-            stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)
+        resolve_plasma_current_settings(
+            args,
+            finite_current_mode=finite_current_mode,
+            default_plasma_current_A=float(
+                stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)
+            ),
+            num_surfaces=effective_num_surfaces,
+            surface_mode_contract=surface_mode_contract,
         ),
-        num_surfaces=effective_num_surfaces,
-        surface_mode_contract=surface_mode_contract,
     )
     boozer_I = plasma_current_settings["boozer_I"]
     plasma_current_A = plasma_current_settings["plasma_current_A"]
@@ -11161,18 +11533,33 @@ if __name__ == "__main__":
     plasma_surf_filename = args.plasma_surf_filename
     file_loc = build_equilibrium_path(args)
     stage2_seed_surf_path = _resolved_optional_path_string(args.stage2_seed_surf_path)
-    bs, coil_partitions = load_stage2_seed_biot_savart(
+    bs, source_coil_partitions = load_stage2_seed_biot_savart(
         stage2_bs_path,
         stage2_results=stage2_results,
         num_tf_coils=num_tf_coils,
         seed_order_upgrade=getattr(args, "seed_order_upgrade", None),
     )
+    strict_vacuum_projected_source_current_groups = False
+    if args.strict_vacuum_current:
+        strict_vacuum_projected_source_current_groups = (
+            source_coil_partitions.num_proxy_coils > 0
+            or source_coil_partitions.num_vf_coils > 0
+        )
+        bs, coil_partitions = project_strict_vacuum_seed_biot_savart(
+            bs,
+            source_coil_partitions,
+        )
+    else:
+        coil_partitions = source_coil_partitions
     strict_vacuum_seed_checks = None
     if args.strict_vacuum_current:
         strict_vacuum_seed_checks = strict_vacuum_seed_input_status(
             stage2_results,
-            num_proxy_coils=coil_partitions.num_proxy_coils,
-            num_vf_coils=coil_partitions.num_vf_coils,
+            num_proxy_coils=source_coil_partitions.num_proxy_coils,
+            num_vf_coils=source_coil_partitions.num_vf_coils,
+            projected_source_current_groups=(
+                strict_vacuum_projected_source_current_groups
+            ),
         )
         if not strict_vacuum_seed_checks["passed"]:
             failed_checks = ", ".join(
@@ -11190,6 +11577,36 @@ if __name__ == "__main__":
         stage2_results_path=str(stage2_results_path),
         seed_artifact_role=seed_artifact_role,
         offspec_replay_debug_only=bool(args.offspec_replay_debug_only),
+        strict_vacuum_current=bool(args.strict_vacuum_current),
+        strict_vacuum_seed_lineage=(
+            args.strict_vacuum_lineage if args.strict_vacuum_current else None
+        ),
+        stage1_candidate_id=(
+            args.stage1_candidate_id if args.strict_vacuum_current else None
+        ),
+        strict_vacuum_source_current_group_projection=(
+            STRICT_VACUUM_SOURCE_CURRENT_GROUP_PROJECTION
+            if args.strict_vacuum_current
+            and strict_vacuum_projected_source_current_groups
+            else None
+        ),
+        strict_vacuum_command_validation=(
+            dict(strict_vacuum_command_checks) if args.strict_vacuum_current else None
+        ),
+        strict_vacuum_seed_input_validation=(
+            dict(strict_vacuum_seed_checks)
+            if args.strict_vacuum_current and strict_vacuum_seed_checks is not None
+            else None
+        ),
+        finite_current_mode=finite_current_mode,
+        effective_current_mode=effective_current_mode,
+        boozer_current_convention=boozer_current_convention,
+        plasma_current_A=float(plasma_current_A),
+        boozer_I=float(boozer_I),
+        num_proxy_coils=coil_partitions.num_proxy_coils,
+        num_vf_coils=coil_partitions.num_vf_coils,
+        proxy_plasma_current_A=float(stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)),
+        vf_current_A=float(stage2_results.get("VF_CURRENT_A", 0.0)),
         single_stage_resume_bs_path=(
             str(stage2_bs_path)
             if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME
@@ -11364,18 +11781,9 @@ if __name__ == "__main__":
         warm_start_surface_stem=warm_start_surface_stem,
     )
     outer_surface_data = surface_data[-1]
-    boozer_surface_classes = [
-        type(entry["boozer_surface"]).__name__ for entry in surface_data
-    ]
-    boozer_surface_modules = [
-        type(entry["boozer_surface"]).__module__ for entry in surface_data
-    ]
-    boozer_surface_lineage_metadata = {
-        "BOOZER_SURFACE_CLASS": boozer_surface_classes[-1],
-        "BOOZER_SURFACE_MODULE": boozer_surface_modules[-1],
-        "BOOZER_SURFACE_CLASSES": boozer_surface_classes,
-        "BOOZER_SURFACE_MODULES": boozer_surface_modules,
-    }
+    boozer_surface_lineage_metadata = boozer_surface_lineage_metadata_from_surface_data(
+        surface_data
+    )
 
     # ==============================================================================
     # SAVE INITIAL STATE
@@ -11385,7 +11793,14 @@ if __name__ == "__main__":
     bs.save(OUT_DIR_ITER + "/biot_savart_init.json")
 
     save_surface_artifacts(
-        surface_data, bs, OUT_DIR_ITER, "surf_init", also_write_outer_legacy=True
+        surface_data,
+        bs,
+        OUT_DIR_ITER,
+        "surf_init",
+        also_write_outer_legacy=True,
+        boozer_state_interchange_manifest=current_boozer_state_interchange_manifest(
+            surface_data
+        ),
     )
     print(f"Volume: {outer_surface_data['boozer_surface'].surface.volume()}")
 
@@ -11464,12 +11879,11 @@ if __name__ == "__main__":
         )
     SURFACE_GAP_THRESHOLD = max(args.surface_gap_threshold, 0.0)
 
-    requested_length_target = float(args.length_target)
-    if requested_length_target > COIL_LENGTH_HARD_LIMIT_M:
-        raise ValueError(
-            f"--length-target must be <= {COIL_LENGTH_HARD_LIMIT_M:.3f} m."
-        )
-    length_target = requested_length_target
+    length_target = validate_coil_length_target(
+        args.length_target,
+        accept_offspec_coil_length=bool(args.accept_offspec_coil_length),
+        field_name="--length-target",
+    )
     frontier_goal_config = None
     if args.single_stage_goal_mode == "frontier":
         frontier_goal_config = build_frontier_goal_config(
@@ -12697,7 +13111,14 @@ if __name__ == "__main__":
         bs.save(OUT_DIR_ITER + "/biot_savart_opt.json")
 
         save_surface_artifacts(
-            surface_data, bs, OUT_DIR_ITER, "surf_opt", also_write_outer_legacy=True
+            surface_data,
+            bs,
+            OUT_DIR_ITER,
+            "surf_opt",
+            also_write_outer_legacy=True,
+            boozer_state_interchange_manifest=current_boozer_state_interchange_manifest(
+                surface_data
+            ),
         )
 
         final_volume = outer_surface_data["boozer_surface"].surface.volume()
@@ -12844,6 +13265,16 @@ if __name__ == "__main__":
         "banana_surf_radius": float(banana_surf_radius),
     }
     constraint_override_reason = args.constraint_override_reason
+    if (
+        args.accept_offspec_coil_length
+        and float(length_target) > COIL_LENGTH_HARD_LIMIT_M
+    ):
+        length_override_reason = "offspec_coil_length_target"
+        constraint_override_reason = (
+            length_override_reason
+            if constraint_override_reason in {None, ""}
+            else f"{constraint_override_reason};{length_override_reason}"
+        )
     constraint_profile_label = (
         "single_stage_solver"
         if args.constraint_profile_label in {None, ""}
@@ -12861,6 +13292,7 @@ if __name__ == "__main__":
         single_stage_constraint_contract, single_stage_constraint_trace = (
             _resolve_constraint_contract_from_wire_names_impl(
                 cli_overrides=constraint_cli_layer,
+                allow_offspec_length_contract=bool(args.accept_offspec_coil_length),
             )
         )
         constraint_metadata = build_constraint_metadata(
@@ -12875,6 +13307,16 @@ if __name__ == "__main__":
         "SEED_ARTIFACT_ROLE": seed_artifact_role,
         "OFFSPEC_REPLAY_DEBUG_ONLY": bool(args.offspec_replay_debug_only),
         "ACCEPT_OFFSPEC_R0_SEED": bool(args.accept_offspec_r0_seed),
+        "ACCEPT_OFFSPEC_COIL_LENGTH": bool(args.accept_offspec_coil_length),
+        "COIL_LENGTH_HARD_LIMIT_M": float(COIL_LENGTH_HARD_LIMIT_M),
+        "OFFSPEC_COIL_LENGTH_TARGET_M": (
+            float(length_target)
+            if (
+                bool(args.accept_offspec_coil_length)
+                and float(length_target) > COIL_LENGTH_HARD_LIMIT_M
+            )
+            else None
+        ),
         "SINGLE_STAGE_RESUME_BS_PATH": (
             str(stage2_bs_path)
             if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME
@@ -12897,9 +13339,17 @@ if __name__ == "__main__":
         "STAGE2_FINITE_CURRENT_MODE": stage2_results["FINITE_CURRENT_MODE"],
         "STAGE2_BOOZER_CURRENT_CONVENTION": stage2_results["BOOZER_CURRENT_CONVENTION"],
         **stage2_policy_metadata_payload(stage2_results),
-        "STAGE2_NUM_BANANA_COILS": coil_partitions.num_banana_coils,
-        "STAGE2_NUM_PROXY_COILS": coil_partitions.num_proxy_coils,
-        "STAGE2_NUM_VF_COILS": coil_partitions.num_vf_coils,
+        "STAGE2_NUM_BANANA_COILS": source_coil_partitions.num_banana_coils,
+        "STAGE2_NUM_PROXY_COILS": source_coil_partitions.num_proxy_coils,
+        "STAGE2_NUM_VF_COILS": source_coil_partitions.num_vf_coils,
+        "STAGE2_SOURCE_NUM_PROXY_COILS": source_coil_partitions.num_proxy_coils,
+        "STAGE2_SOURCE_NUM_VF_COILS": source_coil_partitions.num_vf_coils,
+        "STRICT_VACUUM_SOURCE_CURRENT_GROUP_PROJECTION": (
+            STRICT_VACUUM_SOURCE_CURRENT_GROUP_PROJECTION
+            if args.strict_vacuum_current
+            and strict_vacuum_projected_source_current_groups
+            else None
+        ),
         "STAGE2_PROXY_PLASMA_CURRENT_A": float(
             stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)
         ),
@@ -12912,7 +13362,9 @@ if __name__ == "__main__":
         "NUM_PROXY_COILS": 0
         if args.strict_vacuum_current
         else coil_partitions.num_proxy_coils,
-        "NUM_VF_COILS": 0 if args.strict_vacuum_current else coil_partitions.num_vf_coils,
+        "NUM_VF_COILS": 0
+        if args.strict_vacuum_current
+        else coil_partitions.num_vf_coils,
         "TOTAL_COILS": len(coils),
         "PROXY_PLASMA_CURRENT_A": 0.0
         if args.strict_vacuum_current
@@ -12924,6 +13376,21 @@ if __name__ == "__main__":
         if args.strict_vacuum_current
         else finite_current_mode,
         "STRICT_VACUUM_CURRENT": bool(args.strict_vacuum_current),
+        "STRICT_VACUUM_SEED_LINEAGE": args.strict_vacuum_lineage
+        if args.strict_vacuum_current
+        else None,
+        "STAGE1_CANDIDATE_ID": args.stage1_candidate_id
+        if args.strict_vacuum_current
+        else None,
+        "STRICT_VACUUM_PRODUCTION_CANDIDATE": (
+            args.strict_vacuum_current
+            and args.strict_vacuum_lineage
+            == STRICT_VACUUM_SEED_LINEAGE_RECENT_STAGE1_CANDIDATE
+        ),
+        "STRICT_VACUUM_CONTROL_ONLY": (
+            args.strict_vacuum_current
+            and args.strict_vacuum_lineage == STRICT_VACUUM_SEED_LINEAGE_LEGACY_CONTROL
+        ),
         "STRICT_VACUUM_COMMAND_VALIDATION": strict_vacuum_command_checks
         if args.strict_vacuum_current
         else None,
@@ -13350,7 +13817,9 @@ if __name__ == "__main__":
         "PLASMA_CURRENT_SURROGATE_SCOPE": (
             "shared_all_surfaces" if effective_num_surfaces > 1 else "single_surface"
         ),
-        "FINITE_CURRENT_MODE": None if args.strict_vacuum_current else finite_current_mode,
+        "FINITE_CURRENT_MODE": None
+        if args.strict_vacuum_current
+        else finite_current_mode,
         "BOOZER_CURRENT_CONVENTION": None
         if args.strict_vacuum_current
         else boozer_current_convention,
@@ -13526,9 +13995,7 @@ if __name__ == "__main__":
                 "Strict-vacuum result metadata violates the production contract: "
                 f"{failed_checks}."
             )
-        results["STRICT_VACUUM_METADATA_VALIDATION"] = (
-            strict_vacuum_metadata_checks
-        )
+        results["STRICT_VACUUM_METADATA_VALIDATION"] = strict_vacuum_metadata_checks
         Path(os.path.join(OUT_DIR_ITER, "captured_command.txt")).write_text(
             format_captured_command(sys.executable, sys.argv[1:]) + "\n",
             encoding="utf-8",
@@ -13538,6 +14005,8 @@ if __name__ == "__main__":
     if args.strict_vacuum_current:
         strict_vacuum_seed_manifest = build_strict_vacuum_seed_manifest(
             command_args=sys.argv[1:],
+            strict_vacuum_seed_lineage=args.strict_vacuum_lineage,
+            stage1_candidate_id=args.stage1_candidate_id,
             seed_biot_savart_path=stage2_bs_path,
             seed_results_path=stage2_results_path,
             warm_start_surface_path=stage2_seed_surf_path,
@@ -13546,6 +14015,9 @@ if __name__ == "__main__":
             results=results,
             seed_results=stage2_results,
             seed_artifact_role=seed_artifact_role,
+            projected_source_current_groups=(
+                strict_vacuum_projected_source_current_groups
+            ),
         )
         write_strict_vacuum_seed_manifest(
             os.path.join(OUT_DIR_ITER, "seed_manifest.json"),

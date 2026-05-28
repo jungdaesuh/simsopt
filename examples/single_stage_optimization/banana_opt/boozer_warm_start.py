@@ -59,6 +59,8 @@ def load_boozer_solved_state_sidecar(
 def write_boozer_solved_state_sidecar(
     surface_path: str | Path,
     boozer_surface: object,
+    *,
+    interchange_manifest: Mapping[str, object] | None = None,
 ) -> Path | None:
     solved_state = boozer_surface_solved_state(boozer_surface)
     if solved_state is None:
@@ -71,6 +73,13 @@ def write_boozer_solved_state_sidecar(
         "iota": iota,
         "G": G,
     }
+    if interchange_manifest is not None:
+        payload["interchange_manifest"] = {
+            **dict(interchange_manifest),
+            "boozer_surface_module": type(boozer_surface).__module__,
+            "boozer_surface_class": type(boozer_surface).__name__,
+            "boozer_surface_has_i_field": hasattr(boozer_surface, "I"),
+        }
     state_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -81,6 +90,21 @@ def write_boozer_solved_state_sidecar(
 def save_boozer_surface_with_state(
     boozer_surface: object,
     surface_path: str | Path,
+    *,
+    interchange_manifest: Mapping[str, object] | None = None,
+    surface_validator=None,
 ) -> Path | None:
     boozer_surface.save(str(surface_path))
-    return write_boozer_solved_state_sidecar(surface_path, boozer_surface)
+    if surface_validator is not None:
+        validation = surface_validator(surface_path)
+        if not validation["passed"]:
+            raise ValueError(
+                "Baseline-replayable Boozer artifacts must use "
+                "simsopt.geo.BoozerSurface without an I field: "
+                f"{surface_path}"
+            )
+    return write_boozer_solved_state_sidecar(
+        surface_path,
+        boozer_surface,
+        interchange_manifest=interchange_manifest,
+    )

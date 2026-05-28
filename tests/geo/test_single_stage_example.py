@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 import uuid
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -4809,7 +4809,9 @@ class HardwareConstraintTests(unittest.TestCase):
                     "snapshot_surface_states",
                     return_value={"sdofs": [], "iota": [], "G": []},
                 ),
-                patch.object(module, "evaluate_surface_stack", return_value=stack_status),
+                patch.object(
+                    module, "evaluate_surface_stack", return_value=stack_status
+                ),
                 patch.object(
                     module,
                     "evaluate_single_stage_hardware_snapshot",
@@ -5992,7 +5994,9 @@ class HardwareConstraintTests(unittest.TestCase):
             checkpoint_payload,
             matching_config,
         )
-        with self.assertRaisesRegex(ValueError, "Greene residue objective replay config"):
+        with self.assertRaisesRegex(
+            ValueError, "Greene residue objective replay config"
+        ):
             module.validate_resume_solver_checkpoint_residue_replay_config(
                 checkpoint_payload,
                 None,
@@ -6704,6 +6708,249 @@ class HardwareConstraintTests(unittest.TestCase):
                 str(out_dir / "surf_best_hardware_near_miss_outer_boozer_surface.json"),
             )
 
+    def test_write_preserved_timeout_artifacts_marks_strict_vacuum_sidecar(self):
+        module = load_single_stage_example_module()
+
+        class FakeBiotSavart:
+            def save(self, path):
+                Path(path).write_text('{"coils": []}', encoding="utf-8")
+
+        class FakeSurface:
+            def save(self, path):
+                Path(path).write_text('{"surface": "outer"}', encoding="utf-8")
+
+        class FakeBoozerSurface:
+            def __init__(self):
+                self.surface = FakeSurface()
+                self.res = {"iota": 0.3588536981, "G": -0.377}
+
+            def save(self, path):
+                Path(path).write_text(
+                    json.dumps(
+                        {
+                            "simsopt_objs": {
+                                "surface": {
+                                    "@module": "simsopt.geo.boozersurface",
+                                    "@class": "BoozerSurface",
+                                }
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            module.write_preserved_timeout_artifacts(
+                out_dir,
+                preservation_kind="best_hardware_near_miss",
+                results_payload={
+                    "STRICT_VACUUM_CURRENT": True,
+                    "CURRENT_LINEAGE": "strict_vacuum",
+                    "STRICT_VACUUM_SEED_LINEAGE": "legacy_control",
+                    "TF_CURRENT_A": -80000.0,
+                    "BANANA_CURRENTS_A": [-15910.0],
+                    "EFFECTIVE_CURRENT_MODE": "vacuum",
+                    "FINITE_CURRENT_MODE": None,
+                    "PLASMA_CURRENT_A": 0.0,
+                    "BOOZER_I": 0.0,
+                    "PROXY_PLASMA_CURRENT_A": 0.0,
+                    "VF_CURRENT_A": 0.0,
+                    "NUM_PROXY_COILS": 0,
+                    "NUM_VF_COILS": 0,
+                    "BOOZER_SURFACE_CLASS": "BoozerSurface",
+                    "BOOZER_SURFACE_MODULE": "simsopt.geo.boozersurface",
+                },
+                biotsavart=FakeBiotSavart(),
+                surface_data=[{"name": "outer", "boozer_surface": FakeBoozerSurface()}],
+            )
+
+            state_payload = json.loads(
+                (
+                    out_dir / "surf_best_hardware_near_miss_outer_boozer_state.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        manifest = state_payload["interchange_manifest"]
+        self.assertAlmostEqual(state_payload["iota"], 0.3588536981)
+        self.assertAlmostEqual(state_payload["G"], -0.377)
+        self.assertEqual(manifest["current_lineage"], "strict_vacuum")
+        self.assertTrue(manifest["baseline_replayable"])
+        self.assertEqual(
+            manifest["requires_boozer_surface_module"],
+            "simsopt.geo.boozersurface",
+        )
+        self.assertEqual(manifest["requires_boozer_surface_class"], "BoozerSurface")
+        self.assertTrue(manifest["requires_no_boozer_surface_i_field"])
+        self.assertFalse(manifest["boozer_surface_has_i_field"])
+
+    def test_write_preserved_timeout_artifacts_requires_strict_vacuum_sidecar(self):
+        module = load_single_stage_example_module()
+
+        class FakeBiotSavart:
+            def save(self, path):
+                Path(path).write_text('{"coils": []}', encoding="utf-8")
+
+        class FakeSurface:
+            def save(self, path):
+                Path(path).write_text('{"surface": "outer"}', encoding="utf-8")
+
+        class UnsolvedBoozerSurface:
+            def __init__(self):
+                self.surface = FakeSurface()
+                self.res = {}
+
+            def save(self, path):
+                Path(path).write_text(
+                    json.dumps(
+                        {
+                            "simsopt_objs": {
+                                "surface": {
+                                    "@module": "simsopt.geo.boozersurface",
+                                    "@class": "BoozerSurface",
+                                }
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            with self.assertRaisesRegex(ValueError, "solved iota/G state sidecar"):
+                module.write_preserved_timeout_artifacts(
+                    out_dir,
+                    preservation_kind="best_hardware_near_miss",
+                    results_payload={
+                        "STRICT_VACUUM_CURRENT": True,
+                        "CURRENT_LINEAGE": "strict_vacuum",
+                        "STRICT_VACUUM_SEED_LINEAGE": "legacy_control",
+                        "TF_CURRENT_A": -80000.0,
+                        "BANANA_CURRENTS_A": [-15910.0],
+                        "EFFECTIVE_CURRENT_MODE": "vacuum",
+                        "FINITE_CURRENT_MODE": None,
+                        "PLASMA_CURRENT_A": 0.0,
+                        "BOOZER_I": 0.0,
+                        "PROXY_PLASMA_CURRENT_A": 0.0,
+                        "VF_CURRENT_A": 0.0,
+                        "NUM_PROXY_COILS": 0,
+                        "NUM_VF_COILS": 0,
+                        "BOOZER_SURFACE_CLASS": "BoozerSurface",
+                        "BOOZER_SURFACE_MODULE": "simsopt.geo.boozersurface",
+                    },
+                    biotsavart=FakeBiotSavart(),
+                    surface_data=[
+                        {"name": "outer", "boozer_surface": UnsolvedBoozerSurface()}
+                    ],
+                )
+            self.assertFalse(
+                (
+                    out_dir / "surf_best_hardware_near_miss_outer_boozer_state.json"
+                ).exists()
+            )
+
+    def test_write_preserved_timeout_artifacts_rejects_strict_vacuum_finite_i(self):
+        module = load_single_stage_example_module()
+
+        class FakeBiotSavart:
+            def save(self, path):
+                Path(path).write_text('{"coils": []}', encoding="utf-8")
+
+        class FakeSurface:
+            def save(self, path):
+                Path(path).write_text('{"surface": "outer"}', encoding="utf-8")
+
+        class FiniteIBoozerSurface:
+            def __init__(self):
+                self.surface = FakeSurface()
+                self.res = {"iota": 0.12, "G": -0.377}
+                self.I = 1.0e-3
+
+            def save(self, path):
+                Path(path).write_text(
+                    json.dumps(
+                        {
+                            "simsopt_objs": {
+                                "surface": {
+                                    "@module": "banana_opt.boozer_finite_current",
+                                    "@class": "BoozerSurfaceFiniteI",
+                                    "I": 1.0e-3,
+                                }
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            with self.assertRaisesRegex(ValueError, "without an I field"):
+                module.write_preserved_timeout_artifacts(
+                    out_dir,
+                    preservation_kind="best_hardware_near_miss",
+                    results_payload={
+                        "STRICT_VACUUM_CURRENT": True,
+                        "CURRENT_LINEAGE": "strict_vacuum",
+                        "STRICT_VACUUM_SEED_LINEAGE": "legacy_control",
+                        "TF_CURRENT_A": -80000.0,
+                        "BANANA_CURRENTS_A": [-15910.0],
+                        "EFFECTIVE_CURRENT_MODE": "vacuum",
+                        "FINITE_CURRENT_MODE": None,
+                        "PLASMA_CURRENT_A": 0.0,
+                        "BOOZER_I": 0.0,
+                        "PROXY_PLASMA_CURRENT_A": 0.0,
+                        "VF_CURRENT_A": 0.0,
+                        "NUM_PROXY_COILS": 0,
+                        "NUM_VF_COILS": 0,
+                        "BOOZER_SURFACE_CLASS": "BoozerSurface",
+                        "BOOZER_SURFACE_MODULE": "simsopt.geo.boozersurface",
+                    },
+                    biotsavart=FakeBiotSavart(),
+                    surface_data=[
+                        {"name": "outer", "boozer_surface": FiniteIBoozerSurface()}
+                    ],
+                )
+            self.assertFalse(
+                (
+                    out_dir / "surf_best_hardware_near_miss_outer_boozer_state.json"
+                ).exists()
+            )
+
+    def test_write_preserved_timeout_artifacts_rejects_strict_positive_currents(self):
+        module = load_single_stage_example_module()
+
+        class FakeBiotSavart:
+            def save(self, path):
+                Path(path).write_text('{"coils": []}', encoding="utf-8")
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            self.assertRaisesRegex(ValueError, "signed_tf_current_negative"),
+        ):
+            module.write_preserved_timeout_artifacts(
+                Path(tmpdir),
+                preservation_kind="best_hardware_near_miss",
+                results_payload={
+                    "STRICT_VACUUM_CURRENT": True,
+                    "CURRENT_LINEAGE": "strict_vacuum",
+                    "STRICT_VACUUM_SEED_LINEAGE": "legacy_control",
+                    "TF_CURRENT_A": 80000.0,
+                    "BANANA_CURRENT_A": 15910.0,
+                    "EFFECTIVE_CURRENT_MODE": "vacuum",
+                    "FINITE_CURRENT_MODE": None,
+                    "PLASMA_CURRENT_A": 0.0,
+                    "BOOZER_I": 0.0,
+                    "PROXY_PLASMA_CURRENT_A": 0.0,
+                    "VF_CURRENT_A": 0.0,
+                    "NUM_PROXY_COILS": 0,
+                    "NUM_VF_COILS": 0,
+                    "BOOZER_SURFACE_CLASS": "BoozerSurface",
+                    "BOOZER_SURFACE_MODULE": "simsopt.geo.boozersurface",
+                },
+                biotsavart=FakeBiotSavart(),
+                surface_data=[{"name": "outer", "boozer_surface": object()}],
+            )
+
     def test_preserved_timeout_artifacts_recompute_diagnostics_for_compact_search_eval(
         self,
     ):
@@ -6958,6 +7205,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 out_dir,
                 "surf",
                 also_write_outer_legacy=False,
+                boozer_state_interchange_manifest=None,
             )
 
     def test_build_preserved_timeout_results_payload_includes_replay_metadata(self):
@@ -6978,6 +7226,16 @@ class HardwareConstraintTests(unittest.TestCase):
             target_volume=0.10,
             target_iota=0.15,
             stage2_seed_surf_path="/seeds/surf_opt_boozer_surface.json",
+            strict_vacuum_current=True,
+            strict_vacuum_seed_lineage="recent_stage1_candidate",
+            stage1_candidate_id="s01_3240f0",
+            strict_vacuum_source_current_group_projection="tf_banana_only",
+            strict_vacuum_command_validation={"passed": True},
+            strict_vacuum_seed_input_validation={
+                "passed": True,
+                "loaded_num_proxy_coils_zero_or_projected": True,
+                "loaded_num_vf_coils_zero_or_projected": True,
+            },
             residue_objective_replay_config=(
                 ("enabled", True),
                 ("weight", 0.25),
@@ -7078,6 +7336,33 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["SEED_ARTIFACT_ROLE"], "stage2")
         self.assertFalse(payload["OFFSPEC_REPLAY_DEBUG_ONLY"])
         self.assertIsNone(payload["SINGLE_STAGE_RESUME_BS_PATH"])
+        self.assertEqual(payload["CURRENT_LINEAGE"], "strict_vacuum")
+        self.assertTrue(payload["STRICT_VACUUM_CURRENT"])
+        self.assertEqual(
+            payload["STRICT_VACUUM_SEED_LINEAGE"], "recent_stage1_candidate"
+        )
+        self.assertEqual(payload["STAGE1_CANDIDATE_ID"], "s01_3240f0")
+        self.assertTrue(payload["STRICT_VACUUM_PRODUCTION_CANDIDATE"])
+        self.assertFalse(payload["STRICT_VACUUM_CONTROL_ONLY"])
+        self.assertEqual(
+            payload["STRICT_VACUUM_SOURCE_CURRENT_GROUP_PROJECTION"],
+            "tf_banana_only",
+        )
+        self.assertEqual(payload["STRICT_VACUUM_COMMAND_VALIDATION"], {"passed": True})
+        self.assertEqual(
+            payload["STRICT_VACUUM_SEED_INPUT_VALIDATION"],
+            {
+                "passed": True,
+                "loaded_num_proxy_coils_zero_or_projected": True,
+                "loaded_num_vf_coils_zero_or_projected": True,
+            },
+        )
+        self.assertEqual(payload["EFFECTIVE_CURRENT_MODE"], "vacuum")
+        self.assertIsNone(payload["FINITE_CURRENT_MODE"])
+        self.assertEqual(payload["NUM_PROXY_COILS"], 0)
+        self.assertEqual(payload["NUM_VF_COILS"], 0)
+        self.assertEqual(payload["PROXY_PLASMA_CURRENT_A"], 0.0)
+        self.assertEqual(payload["VF_CURRENT_A"], 0.0)
         self.assertEqual(payload["STAGE2_BS_PATH"], "/seeds/biot_savart_opt.json")
         self.assertEqual(payload["STAGE2_BOOZER_CURRENT_CONVENTION"], "mu0")
         self.assertEqual(payload["STAGE2_BOOZER_I"], -0.008168140899333462)
@@ -8111,6 +8396,138 @@ class HardwareConstraintTests(unittest.TestCase):
             replay_config.single_stage_resume_bs_path,
             "/resume/biot_savart_opt.json",
         )
+
+    def test_current_preserved_timeout_replay_config_preserves_strict_vacuum_fields(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        replay_seed = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            strict_vacuum_current=True,
+            strict_vacuum_seed_lineage="recent_stage1_candidate",
+            stage1_candidate_id="s01_3240f0",
+            strict_vacuum_source_current_group_projection="tf_banana_only",
+            strict_vacuum_command_validation={"passed": True},
+            strict_vacuum_seed_input_validation={"passed": True},
+            finite_current_mode=None,
+            effective_current_mode="vacuum",
+            boozer_current_convention=None,
+            plasma_current_A=0.0,
+            boozer_I=0.0,
+            num_proxy_coils=0,
+            num_vf_coils=0,
+            proxy_plasma_current_A=0.0,
+            vf_current_A=0.0,
+        )
+
+        class _Current:
+            dof_names = ()
+
+            def get_value(self):
+                return -15910.0
+
+        BoozerSurface = type("BoozerSurface", (), {})
+        BoozerSurface.__module__ = "simsopt.geo.boozersurface"
+        surface_data = [{"boozer_surface": BoozerSurface()}]
+        banana_current_state = module.SingleStageBananaCurrentState(
+            mode="shared",
+            currents=(_Current(),),
+            seed_currents_A=(-15910.0,),
+        )
+        with patch.object(module, "PRESERVED_TIMEOUT_REPLAY_CONFIG", replay_seed):
+            with (
+                patch.object(module, "stage2_tf_current_A", -80000.0, create=True),
+                patch.object(
+                    module,
+                    "banana_current_state",
+                    banana_current_state,
+                    create=True,
+                ),
+            ):
+                replay_config = module.current_preserved_timeout_replay_config()
+                manifest = module.current_boozer_state_interchange_manifest(
+                    surface_data
+                )
+
+        self.assertTrue(replay_config.strict_vacuum_current)
+        self.assertEqual(
+            replay_config.strict_vacuum_seed_lineage,
+            "recent_stage1_candidate",
+        )
+        self.assertEqual(replay_config.stage1_candidate_id, "s01_3240f0")
+        self.assertEqual(
+            replay_config.strict_vacuum_source_current_group_projection,
+            "tf_banana_only",
+        )
+        self.assertEqual(replay_config.effective_current_mode, "vacuum")
+        self.assertEqual(replay_config.boozer_I, 0.0)
+        self.assertEqual(replay_config.num_proxy_coils, 0)
+        self.assertIsNotNone(manifest)
+        self.assertTrue(manifest["baseline_replayable"])
+
+    def test_current_boozer_state_interchange_manifest_rejects_positive_current_state(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        replay_seed = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            strict_vacuum_current=True,
+            strict_vacuum_seed_lineage="legacy_control",
+        )
+
+        class _Current:
+            dof_names = ()
+
+            def get_value(self):
+                return 15910.0
+
+        BoozerSurface = type("BoozerSurface", (), {})
+        BoozerSurface.__module__ = "simsopt.geo.boozersurface"
+        surface_data = [{"boozer_surface": BoozerSurface()}]
+        banana_current_state = module.SingleStageBananaCurrentState(
+            mode="shared",
+            currents=(_Current(),),
+            seed_currents_A=(15910.0,),
+        )
+
+        with (
+            patch.object(module, "PRESERVED_TIMEOUT_REPLAY_CONFIG", replay_seed),
+            patch.object(module, "stage2_tf_current_A", -80000.0, create=True),
+            patch.object(
+                module,
+                "banana_current_state",
+                banana_current_state,
+                create=True,
+            ),
+            self.assertRaisesRegex(ValueError, "signed_banana_current_negative"),
+        ):
+            module.current_boozer_state_interchange_manifest(surface_data)
 
     def test_build_best_feasible_results_summary_emits_schema_backed_hardware_fields(
         self,
@@ -13459,7 +13876,9 @@ class RunIdentityTests(unittest.TestCase):
                 module.build_run_identity_config(changed_config),
             )
 
-            seeds_path.write_text('{"branch_seeds":[{"changed":true}]}', encoding="utf-8")
+            seeds_path.write_text(
+                '{"branch_seeds":[{"changed":true}]}', encoding="utf-8"
+            )
             changed_seed_config = self._make_identity_config(
                 module,
                 base_args,
@@ -14390,6 +14809,32 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertTrue(args.offspec_replay_debug_only)
         self.assertTrue(args.accept_offspec_r0_seed)
 
+    def test_single_stage_parse_args_accepts_offspec_coil_length_flag(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--length-target",
+                "3.0",
+                "--accept-offspec-coil-length",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.length_target, 3.0)
+        self.assertTrue(args.accept_offspec_coil_length)
+        self.assertEqual(
+            module.validate_coil_length_target(
+                args.length_target,
+                accept_offspec_coil_length=args.accept_offspec_coil_length,
+                field_name="--length-target",
+            ),
+            3.0,
+        )
+
     def test_single_stage_resume_seed_requires_debug_only_role(self):
         module = load_single_stage_example_module()
 
@@ -14448,20 +14893,65 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 "--single-stage-resume-bs-path",
                 "archives/biot_savart_opt.json",
                 "--strict-vacuum-current",
+                "--strict-vacuum-lineage=recent_stage1_candidate",
+                "--stage1-candidate-id=s01_3240f0",
             ],
         ):
             args = module.parse_args()
 
         self.assertTrue(args.strict_vacuum_current)
+        self.assertEqual(args.strict_vacuum_lineage, "recent_stage1_candidate")
+        self.assertEqual(args.stage1_candidate_id, "s01_3240f0")
         self.assertEqual(
             args.single_stage_resume_bs_path,
             "archives/biot_savart_opt.json",
         )
 
+    def test_strict_vacuum_current_args_require_lineage(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            strict_vacuum_current=True,
+            strict_vacuum_lineage=None,
+            stage1_candidate_id=None,
+            offspec_replay_debug_only=False,
+            boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "--strict-vacuum-lineage"):
+            module.validate_strict_vacuum_current_args(
+                args,
+                ["--strict-vacuum-current"],
+            )
+
+    def test_strict_vacuum_current_args_require_stage1_candidate_id(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            strict_vacuum_current=True,
+            strict_vacuum_lineage="recent_stage1_candidate",
+            stage1_candidate_id=None,
+            offspec_replay_debug_only=False,
+            boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "--stage1-candidate-id"):
+            module.validate_strict_vacuum_current_args(
+                args,
+                [
+                    "--strict-vacuum-current",
+                    "--strict-vacuum-lineage=recent_stage1_candidate",
+                ],
+            )
+
     def test_strict_vacuum_current_args_reject_current_flags(self):
         module = load_single_stage_example_module()
         args = SimpleNamespace(
             strict_vacuum_current=True,
+            strict_vacuum_lineage="recent_stage1_candidate",
+            stage1_candidate_id="s01_3240f0",
             offspec_replay_debug_only=False,
             boozer_I=None,
             plasma_current_A=None,
@@ -14478,6 +14968,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module = load_single_stage_example_module()
         args = SimpleNamespace(
             strict_vacuum_current=True,
+            strict_vacuum_lineage="legacy_control",
+            stage1_candidate_id=None,
             offspec_replay_debug_only=False,
             boozer_I=None,
             plasma_current_A=None,
@@ -14489,6 +14981,78 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 args,
                 ["--strict-vacuum-current"],
             )
+
+    def test_project_strict_vacuum_seed_biot_savart_drops_proxy_vf_groups(self):
+        module = load_single_stage_example_module()
+
+        @dataclass(frozen=True)
+        class _Partitions:
+            tf_coils: tuple
+            banana_coils: tuple
+            proxy_coils: tuple
+            vf_coils: tuple
+            num_tf_coils: int
+            num_banana_coils: int
+            num_proxy_coils: int
+            num_vf_coils: int
+
+        tf_coils = (object(), object())
+        banana_coils = (object(),)
+        proxy_coils = (object(),)
+        vf_coils = (object(), object())
+        source_biot_savart = SimpleNamespace(
+            coils=[*tf_coils, *banana_coils, *proxy_coils, *vf_coils]
+        )
+        source_partitions = _Partitions(
+            tf_coils=tf_coils,
+            banana_coils=banana_coils,
+            proxy_coils=proxy_coils,
+            vf_coils=vf_coils,
+            num_tf_coils=len(tf_coils),
+            num_banana_coils=len(banana_coils),
+            num_proxy_coils=len(proxy_coils),
+            num_vf_coils=len(vf_coils),
+        )
+
+        with patch.object(
+            module,
+            "BiotSavart",
+            side_effect=lambda coils: SimpleNamespace(coils=coils),
+        ):
+            projected_biot_savart, projected_partitions = (
+                module.project_strict_vacuum_seed_biot_savart(
+                    source_biot_savart,
+                    source_partitions,
+                )
+            )
+
+        self.assertEqual(projected_biot_savart.coils, [*tf_coils, *banana_coils])
+        self.assertEqual(projected_partitions.proxy_coils, ())
+        self.assertEqual(projected_partitions.vf_coils, ())
+        self.assertEqual(projected_partitions.num_proxy_coils, 0)
+        self.assertEqual(projected_partitions.num_vf_coils, 0)
+
+    def test_strict_vacuum_current_settings_override_stage2_proxy_mode(self):
+        module = load_single_stage_example_module()
+
+        settings = module.apply_strict_vacuum_current_settings(
+            SimpleNamespace(strict_vacuum_current=True),
+            {
+                "boozer_I": 0.001,
+                "plasma_current_A": 1500.0,
+                "input_source": "finite_current_mode_default",
+                "boozer_current_convention": "wataru",
+                "mode": "wataru_proxy_field",
+                "effective_mode": "finite_current",
+            },
+        )
+
+        self.assertEqual(settings["boozer_I"], 0.0)
+        self.assertEqual(settings["plasma_current_A"], 0.0)
+        self.assertEqual(settings["input_source"], "strict_vacuum_current")
+        self.assertIsNone(settings["boozer_current_convention"])
+        self.assertIsNone(settings["mode"])
+        self.assertEqual(settings["effective_mode"], "vacuum")
 
     def test_single_stage_parse_args_accepts_stage2_seed_surf_path(self):
         module = load_single_stage_example_module()
@@ -16721,19 +17285,19 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertEqual(phi_width, np.pi / 8.0)
             self.assertEqual(theta_width, np.pi / 6.0)
             self.assertTrue(str(out_dir).endswith("outputs-demo.nc/"))
-            # Proxy is always built; the default VF count comes from the profile.
-            # Seeded restarts still preserve the donor's recorded partition.
+            # Fresh initialization uses the selected finite-current profile
+            # layout. Seeded restarts still preserve the donor's recorded
+            # partition.
             finite_current_mode = extra_kwargs.get(
                 "finite_current_mode",
                 "wataru_proxy_field",
             )
+            profile = module.get_finite_current_profile(finite_current_mode)
             num_vf_coils = 0
             if extra_kwargs.get("vf_template_path"):
-                num_vf_coils = module.get_finite_current_profile(
-                    finite_current_mode,
-                ).default_num_vf_coils
+                num_vf_coils = profile.default_num_vf_coils
             curves, proxy_coils, vf_coils = build_coil_bundle(
-                num_proxy_coils=1,
+                num_proxy_coils=profile.default_num_proxy_coils,
                 num_vf_coils=num_vf_coils,
             )
             fake_bs.coils = [
@@ -17321,6 +17885,38 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             runtime["initialize_extra_kwargs"]["surface_scale_factor"], 0.75
+        )
+
+    def test_stage2_main_init_only_vacuum_uses_tf_banana_only_field(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=False,
+            arg_overrides={"finite_current_mode": "vacuum"},
+        )
+
+        self._assert_init_only_runtime_counts(
+            runtime,
+            seed_loads=0,
+            initialize_calls=1,
+        )
+        self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "vacuum")
+        self.assertEqual(runtime["results"]["NUM_PROXY_COILS"], 0)
+        self.assertEqual(runtime["results"]["NUM_VF_COILS"], 0)
+        self.assertEqual(runtime["results"]["TOTAL_COILS"], 21)
+        self.assertEqual(runtime["results"]["PROXY_PLASMA_CURRENT_A"], 0.0)
+        self.assertEqual(runtime["results"]["VF_CURRENT_A"], 0.0)
+        self.assertIsNone(runtime["results"]["VF_TEMPLATE_PATH"])
+        self.assertEqual(runtime["results"]["PROXY_PLACEMENT_MODE"], "none")
+        self.assertEqual(runtime["results"]["PROXY_VF_CURRENT_SCALAR_POLICY"], "none")
+        self.assertEqual(runtime["results"]["VF_CURRENT_SIGN_POLICY"], "none")
+        self.assertEqual(runtime["results"]["VF_CURRENT_MUTABILITY"], "none")
+        self.assertEqual(len(runtime["curve_curve_curves"]), 1)
+        self.assertEqual(len(runtime["curve_surface_curves"]), 1)
+        self.assertIsNone(runtime["initialize_extra_kwargs"]["vf_template_path"])
+        self.assertEqual(
+            runtime["initialize_extra_kwargs"]["finite_current_mode"],
+            "vacuum",
         )
 
     def test_stage2_main_wataru_mode_ignores_jhalpern_banana_pin_env(self):
