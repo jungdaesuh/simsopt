@@ -13507,14 +13507,35 @@ if __name__ == "__main__":
                             use_target_lane_full_graph_host_callback
                         ),
                     )
+                    reporting_snapshot_start_s = _perf_counter_s()
+                    record_outer_optimizer_event(
+                        "target_lane_reporting_snapshot_started",
+                        phase="initial",
+                        benchmark_mode=bool(args.benchmark_mode),
+                    )
                     cache_single_stage_target_lane_reporting_snapshot(
                         adapter,
                         run_dict,
                         target_lane_optimizer_to_coil_dofs(dofs),
                         benchmark_mode=bool(args.benchmark_mode),
                     )
+                    _record_timing(
+                        timings,
+                        "target_lane_reporting_snapshot_s",
+                        reporting_snapshot_start_s,
+                        _perf_counter_s(),
+                    )
+                    record_outer_optimizer_event(
+                        "target_lane_reporting_snapshot_returned",
+                        phase="initial",
+                        elapsed_s=timings.get("target_lane_reporting_snapshot_s"),
+                    )
                     if bool(run_dict.get("initial_objective_pending", False)):
                         initial_target_eval_start_s = _perf_counter_s()
+                        record_outer_optimizer_event(
+                            "target_lane_initial_objective_started",
+                            phase="initial",
+                        )
                         initial_target_value, initial_target_grad = (
                             seed_pending_single_stage_target_lane_initial_objective(
                                 run_dict,
@@ -14520,6 +14541,11 @@ if __name__ == "__main__":
 
     if use_target_lane and skip_outer_optimizer:
         target_lane_init_reporting_start_s = _perf_counter_s()
+        record_outer_optimizer_event(
+            "target_lane_init_reporting_snapshot_started",
+            phase="init_only",
+            benchmark_mode=bool(args.benchmark_mode),
+        )
         cache_single_stage_target_lane_init_reporting_snapshot(
             boozer_surface=boozer_surface,
             bs=bs,
@@ -14552,6 +14578,11 @@ if __name__ == "__main__":
         )
         timings["jax_compile_prewarm_reporting_snapshot_s"] = (
             target_lane_init_reporting_snapshot_s
+        )
+        record_outer_optimizer_event(
+            "target_lane_init_reporting_snapshot_returned",
+            phase="init_only",
+            elapsed_s=target_lane_init_reporting_snapshot_s,
         )
 
     if res is None:
