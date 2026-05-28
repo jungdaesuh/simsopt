@@ -30,9 +30,9 @@ BANANA_WINDING_CHANNEL_ORIENTATION = "toroidal_surface_tangent"
 # best-fit ellipse to the coil curve projected onto the winding surface).
 # Max 0.17 m is the bare-curve allowance for a 0.30 m port aperture; the
 # remaining ~0.13 m budgets coil pack, insulation, supports, and tolerance.
-# Min 0.05 m prevents the optimizer from collapsing the coil to a degenerate
-# zero-width shape.
-BANANA_WIDTH_MIN_M = 0.05
+# Min 0.1 m prevents the optimizer from collapsing the coil to a degenerate
+# zero-width shape. Matches the current HBT hardware contract.
+BANANA_WIDTH_MIN_M = 0.1
 BANANA_WIDTH_MAX_M = 0.17
 BANANA_SELF_INTERSECT_ALM_SCALE = 1.0
 # Minimum allowed self-distance for the banana coil curve. The external

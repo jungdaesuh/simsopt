@@ -16,7 +16,10 @@ import sys
 
 import numpy as np
 import simsoptpp as sopp
-from simsopt.field.magnetic_axis_helpers import locate_magnetic_axis_point
+from simsopt.field.magnetic_axis_helpers import (
+    MagneticAxisNotLocatedError,
+    locate_magnetic_axis_point,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -25,6 +28,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from banana_opt.topology.kam_birkhoff import (
     DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
     KAM_FRACTION_SEMANTICS,
+    WBA_EVALUATION_NOT_EVALUATED_AXIS_NOT_LOCATED,
     WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS,
     WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER,
     missing_magnetic_axis_classification,
@@ -796,7 +800,9 @@ def trace_metrics(
     }
 
 
-def kam_fraction(fieldlines_phi_hits, cross_section_span, width_ratio=0.25):
+def legacy_bounded_seed_fraction(
+    fieldlines_phi_hits, cross_section_span, width_ratio=0.25
+):
     """Scorer-setting-dependent bounded seed-line fraction.
 
     For each traced seed line, measures the radial+axial span of its Poincare
@@ -911,11 +917,18 @@ def invariant_torus_classification(
         )
     if axis_point is None and bfield is None:
         return _wba_missing_magnetic_axis_result(fieldlines_phi_hits, settings)
-    axis = (
-        dict(axis_point)
-        if axis_point is not None
-        else poloidal_axis_point(surface, bfield=bfield)
-    )
+    if axis_point is not None:
+        axis = dict(axis_point)
+    else:
+        try:
+            axis = poloidal_axis_point(surface, bfield=bfield)
+        except MagneticAxisNotLocatedError:
+            return {
+                **wba_not_evaluated_payload(
+                    WBA_EVALUATION_NOT_EVALUATED_AXIS_NOT_LOCATED
+                ),
+                "wba_seed_count": int(len(fieldlines_phi_hits)),
+            }
     classifications = classify_fieldline_hits(
         fieldlines_phi_hits,
         stopped_before_hit_fn=_trace_hits_before_first_stop,
@@ -932,7 +945,7 @@ def invariant_torus_classification(
 
 
 def cross_section_span(surface):
-    """Representative cross-section extent used by kam_fraction as a scale."""
+    """Representative cross-section extent used by the legacy bounded-seed metric."""
     gamma = surface.gamma()
     r = np.sqrt(gamma[:, :, 0] ** 2 + gamma[:, :, 1] ** 2)
     z = gamma[:, :, 2]
@@ -1012,6 +1025,8 @@ def wba_not_evaluated_payload(reason):
     return {
         "invariant_torus_fraction": None,
         "invariant_torus_count": 0,
+        "wba_fraction_denominator_policy": None,
+        "wba_fraction_denominator_seed_count": 0,
         "wba_seed_count": 0,
         "wba_survived_seed_count": 0,
         "wba_classified_seed_count": 0,
@@ -1119,11 +1134,12 @@ def score_topology(
     Seeding is a midplane radial sweep (phi=0, Z=0). Returns a dict with
     survival_fraction, mean_exit_time, stop_reason_counts, per-line metrics,
     and invariant_torus_fraction (a WBA convergence-rate classifier, or None
-    when no survived seed has enough valid returns to classify). When
-    compute_transport_diagnostics is False, skips the surface-field structure
-    computation and returns a not-evaluated stub. The search-time survival gate
-    also disables compute_invariant_torus_classification so WBA magnetic-axis
-    solving cannot turn a confinement survival decision into a broken gate.
+    when the magnetic axis is not available/located or no survived seed has
+    enough valid returns to classify). When compute_transport_diagnostics is
+    False, skips the surface-field structure computation and returns a
+    not-evaluated stub. The search-time survival gate also disables
+    compute_invariant_torus_classification so WBA magnetic-axis solving cannot
+    turn a confinement survival decision into a broken gate.
     """
     from simsopt.field import compute_fieldlines
 
@@ -1189,7 +1205,7 @@ def score_topology(
     )
 
     span = cross_section_span(surface)
-    legacy_bounded_fraction, kam_median = kam_fraction(
+    legacy_bounded_fraction, kam_median = legacy_bounded_seed_fraction(
         fieldlines_phi_hits,
         span,
         width_ratio=kam_width_ratio,
@@ -1199,9 +1215,9 @@ def score_topology(
             fieldlines_phi_hits,
             surface,
             # Locate the axis on the exact field, not ``traced_field``: the axis
-            # is a precise fixed-point solve (1e-8 residual) that an
-            # InterpolatedField cannot satisfy (its return map closes only to the
-            # grid error), whereas the long confinement traces above tolerate it.
+            # is a fixed-point solve whose residual acceptance is stricter than
+            # an InterpolatedField's grid-error closure, whereas the long
+            # confinement traces above tolerate interpolation.
             # Routing the interpolated tracer here made the WBA/topology score
             # report "broken" on valid configs whenever interpolation was active.
             bfield=bfield,
@@ -1242,6 +1258,10 @@ def score_topology(
         "kam_fraction_semantics": kam_fraction_semantics,
         "invariant_torus_fraction": promoted_kam_fraction,
         "invariant_torus_count": int(wba["invariant_torus_count"]),
+        "wba_fraction_denominator_policy": wba["wba_fraction_denominator_policy"],
+        "wba_fraction_denominator_seed_count": int(
+            wba["wba_fraction_denominator_seed_count"]
+        ),
         "wba_seed_count": int(wba["wba_seed_count"]),
         "wba_survived_seed_count": int(wba["wba_survived_seed_count"]),
         "wba_classified_seed_count": int(wba["wba_classified_seed_count"]),

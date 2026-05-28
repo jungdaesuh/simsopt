@@ -8,13 +8,9 @@ from types import SimpleNamespace
 
 
 EXAMPLE_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    Path(__file__).resolve().parents[2] / "examples" / "single_stage_optimization"
 )
-SURFACE_MODE_CONTRACTS_PATH = (
-    EXAMPLE_ROOT / "banana_opt" / "surface_mode_contracts.py"
-)
+SURFACE_MODE_CONTRACTS_PATH = EXAMPLE_ROOT / "banana_opt" / "surface_mode_contracts.py"
 SINGLE_STAGE_ENTRYPOINT_PATH = (
     EXAMPLE_ROOT / "SINGLE_STAGE" / "single_stage_banana_example.py"
 )
@@ -86,14 +82,20 @@ class SurfaceModeContractTests(unittest.TestCase):
             )
 
         self.assertEqual(contract.mode, module.EXPERIMENTAL_MULTISURFACE)
-        self.assertEqual(contract.source, module.SURFACE_MODE_SOURCE_LEGACY_NUM_SURFACES_MAPPING)
+        self.assertEqual(
+            contract.source, module.SURFACE_MODE_SOURCE_LEGACY_NUM_SURFACES_MAPPING
+        )
         self.assertEqual(contract.label_fractions, (0.7, 1.0))
         self.assertEqual(contract.weights, (1.0, 1.0))
         self.assertEqual(contract.legacy_num_surfaces, 2)
         self.assertEqual(contract.legacy_inner_surface_ratio, 0.7)
-        self.assertTrue(any(issubclass(entry.category, DeprecationWarning) for entry in caught))
+        self.assertTrue(
+            any(issubclass(entry.category, DeprecationWarning) for entry in caught)
+        )
 
-    def test_explicit_surface_mode_uses_effective_contract_and_clears_legacy_fields(self):
+    def test_explicit_surface_mode_uses_effective_contract_and_clears_legacy_fields(
+        self,
+    ):
         module = load_surface_mode_contracts_module()
 
         contract = module.build_surface_mode_contract(
@@ -125,7 +127,9 @@ class SurfaceModeContractTests(unittest.TestCase):
 
         self.assertEqual(contract.label_fractions, (0.6, 0.8, 1.0))
         self.assertEqual(contract.weights, (1.0, 1.0, 1.0))
-        self.assertEqual(contract.stack_policy, module.SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK)
+        self.assertEqual(
+            contract.stack_policy, module.SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK
+        )
         self.assertEqual(
             module.surface_mode_surface_names(contract),
             ("inner0", "inner1", "outer"),
@@ -144,7 +148,9 @@ class SurfaceModeContractTests(unittest.TestCase):
     def test_topology_gate_supports_published_and_experimental_modes(self):
         module = load_surface_mode_contracts_module()
 
-        self.assertFalse(module.surface_mode_supports_topology_gate(module.SINGLE_SURFACE))
+        self.assertFalse(
+            module.surface_mode_supports_topology_gate(module.SINGLE_SURFACE)
+        )
         self.assertTrue(
             module.surface_mode_supports_topology_gate(module.PUBLISHED_MULTISURFACE)
         )
@@ -154,7 +160,9 @@ class SurfaceModeContractTests(unittest.TestCase):
 
 
 class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
-    def test_resolve_surface_mode_contract_suppresses_legacy_warning_for_default_single_surface(self):
+    def test_resolve_surface_mode_contract_suppresses_legacy_warning_for_default_single_surface(
+        self,
+    ):
         module = load_single_stage_example_module()
         contracts_module = load_surface_mode_contracts_module()
         args = make_surface_mode_args()
@@ -257,7 +265,9 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             seed_regime="auto",
             surface_mode="experimental_multisurface",
         )
-        contract = module.resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
+        contract = module.resolve_surface_mode_contract(
+            args, warn_on_legacy_mapping=False
+        )
 
         config = module.make_run_identity_config(
             args,
@@ -325,7 +335,9 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             published_config.surface_label_fractions,
         )
 
-    def test_validate_boozer_stage_refinement_args_rejects_explicit_multisurface_contract(self):
+    def test_validate_boozer_stage_refinement_args_rejects_explicit_multisurface_contract(
+        self,
+    ):
         module = load_single_stage_example_module()
         args, contract = resolve_explicit_multisurface_contract(
             module,
@@ -349,7 +361,9 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
                 surface_mode_contract=contract,
             )
 
-    def test_validate_surface_mode_constraint_args_allows_experimental_multisurface_alm(self):
+    def test_validate_surface_mode_constraint_args_allows_experimental_multisurface_alm(
+        self,
+    ):
         module = load_single_stage_example_module()
         args, contract = resolve_explicit_multisurface_contract(
             module,
@@ -361,13 +375,17 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             surface_mode_contract=contract,
         )
 
-    def test_validate_surface_mode_constraint_args_allows_published_multisurface_alm(self):
+    def test_validate_surface_mode_constraint_args_allows_published_multisurface_alm(
+        self,
+    ):
         module = load_single_stage_example_module()
         args = make_surface_mode_args(
             surface_mode=module.PUBLISHED_MULTISURFACE,
             constraint_method="alm",
         )
-        contract = module.resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
+        contract = module.resolve_surface_mode_contract(
+            args, warn_on_legacy_mapping=False
+        )
 
         module.validate_surface_mode_constraint_args(
             args,
@@ -395,7 +413,9 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
                 surface_mode_contract=contract,
             )
 
-    def test_resolve_plasma_current_settings_rejects_published_nonzero_default_current(self):
+    def test_resolve_plasma_current_settings_rejects_published_nonzero_default_current(
+        self,
+    ):
         module = load_single_stage_example_module()
         args = SimpleNamespace(
             boozer_I=None,
@@ -412,6 +432,118 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
                 args,
                 finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
                 default_plasma_current_A=1.0,
+                surface_mode_contract=contract,
+            )
+
+    def test_resolve_plasma_current_settings_normalizes_published_default_mode_to_vacuum(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
+        )
+        contract = module.resolve_surface_mode_contract(
+            make_surface_mode_args(surface_mode=module.PUBLISHED_MULTISURFACE),
+            warn_on_legacy_mapping=False,
+        )
+
+        settings = module.resolve_plasma_current_settings(
+            args,
+            finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
+            default_plasma_current_A=0.0,
+            surface_mode_contract=contract,
+        )
+
+        self.assertEqual(settings["mode"], "vacuum")
+        self.assertEqual(settings["effective_mode"], "vacuum")
+        self.assertEqual(settings["plasma_current_A"], 0.0)
+        self.assertEqual(settings["boozer_I"], 0.0)
+
+    def test_resolve_plasma_current_settings_rejects_published_requested_finite_mode(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode="jhalpern30_proxy_field",
+        )
+        contract = module.resolve_surface_mode_contract(
+            make_surface_mode_args(surface_mode=module.PUBLISHED_MULTISURFACE),
+            warn_on_legacy_mapping=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "vacuum-locked"):
+            module.resolve_plasma_current_settings(
+                args,
+                finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
+                default_plasma_current_A=0.0,
+                surface_mode_contract=contract,
+            )
+
+    def test_resolve_plasma_current_settings_rejects_published_inherited_finite_mode(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode=None,
+        )
+        contract = module.resolve_surface_mode_contract(
+            make_surface_mode_args(surface_mode=module.PUBLISHED_MULTISURFACE),
+            warn_on_legacy_mapping=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "finite-current donor mode"):
+            module.resolve_plasma_current_settings(
+                args,
+                finite_current_mode="jhalpern30_proxy_field",
+                default_plasma_current_A=0.0,
+                surface_mode_contract=contract,
+            )
+
+    def test_resolve_plasma_current_settings_rejects_published_raw_boozer_I(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            boozer_I=0.1,
+            plasma_current_A=None,
+            finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
+        )
+        contract = module.resolve_surface_mode_contract(
+            make_surface_mode_args(surface_mode=module.PUBLISHED_MULTISURFACE),
+            warn_on_legacy_mapping=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "boozer-I"):
+            module.resolve_plasma_current_settings(
+                args,
+                finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
+                default_plasma_current_A=0.0,
+                surface_mode_contract=contract,
+            )
+
+    def test_resolve_plasma_current_settings_rejects_published_nonzero_cli_current(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            boozer_I=None,
+            plasma_current_A=1.0,
+            finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
+        )
+        contract = module.resolve_surface_mode_contract(
+            make_surface_mode_args(surface_mode=module.PUBLISHED_MULTISURFACE),
+            warn_on_legacy_mapping=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "plasma-current-A"):
+            module.resolve_plasma_current_settings(
+                args,
+                finite_current_mode=module.DEFAULT_FINITE_CURRENT_MODE,
+                default_plasma_current_A=0.0,
                 surface_mode_contract=contract,
             )
 

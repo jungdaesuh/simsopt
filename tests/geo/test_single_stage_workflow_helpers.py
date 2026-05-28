@@ -2430,24 +2430,28 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
     def test_goal_mode_comparison_wrapper_defaults_match_single_stage_entrypoint(self):
         module = load_goal_mode_comparison_module()
 
-        with patch.object(
-            sys,
-            "argv",
-            [
-                "run_single_stage_goal_mode_comparison.py",
-                "--plasma-surf-filename",
-                "demo.nc",
-                "--stage2-bs-path",
-                "seed.json",
-            ],
-        ):
-            args = module.parse_args()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FRONTIER_INVARIANT_TORUS_MIN", None)
+            os.environ.pop("FRONTIER_KAM_MIN", None)
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_goal_mode_comparison.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    "seed.json",
+                ],
+            ):
+                args = module.parse_args()
 
         self.assertEqual(args.cs_dist, module.COIL_PLASMA_MIN_DIST_M)
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
         self.assertEqual(args.maxcor, module.DEFAULT_LBFGSB_MAXCOR)
         self.assertEqual(args.maxcor, 40)
+        self.assertEqual(module.resolve_frontier_invariant_torus_min_arg(args), 0.30)
 
     def test_goal_mode_comparison_wrapper_parse_args_accepts_seed_order_upgrade(self):
         module = load_goal_mode_comparison_module()
@@ -2583,6 +2587,25 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         )
 
         self.assertNotIn("--frontier-volume-weight", command)
+
+    def test_build_single_stage_goal_mode_command_forwards_default_invariant_torus_min(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FRONTIER_INVARIANT_TORUS_MIN", None)
+            os.environ.pop("FRONTIER_KAM_MIN", None)
+            command = module.build_single_stage_goal_mode_command(
+                args,
+                goal_mode="frontier",
+                stage2_bs_path=Path("relative/seed.json").resolve(),
+                case_output_root=Path("outputs/frontier").resolve(),
+            )
+
+        self.assertEqual(
+            command[command.index("--frontier-invariant-torus-min") + 1],
+            "0.3",
+        )
 
     def test_build_single_stage_goal_mode_command_forwards_invariant_torus_min(self):
         module = load_goal_mode_comparison_module()
@@ -4833,6 +4856,43 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             lane_spec,
             stage2_bs_path=Path("/tmp/demo/biot_savart_opt.json"),
         )
+
+        self.assertEqual(rerun_contract["frontier_invariant_torus_min"], 0.30)
+
+    def test_frontier_lane_rerun_contract_defaults_invariant_torus_floor(self):
+        module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FRONTIER_INVARIANT_TORUS_MIN", None)
+            os.environ.pop("FRONTIER_KAM_MIN", None)
+            args = module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    "/tmp/demo/biot_savart_opt.json",
+                    "--frontier-num-lanes",
+                    "1",
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
+                ]
+            )
+            lane_spec = module.FrontierLaneSpec(
+                lane_id="lane_tradeoff",
+                scalarization_type="achievement_chebyshev_sweep_v1",
+                scalarization_params={"frontier_chebyshev_rho": 0.02},
+                iotas_weight=100.0,
+                frontier_volume_weight=200.0,
+                res_weight=1000.0,
+                lane_budget=25,
+            )
+
+            rerun_contract = execution_module.build_lane_rerun_contract(
+                args,
+                lane_spec,
+                stage2_bs_path=Path("/tmp/demo/biot_savart_opt.json"),
+            )
 
         self.assertEqual(rerun_contract["frontier_invariant_torus_min"], 0.30)
 

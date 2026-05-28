@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
@@ -30,6 +30,9 @@ from .rational_target import (
     RationalTarget,
 )
 from .residue_sensitivity import (
+    BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD,
+    BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS,
+    BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD,
     BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
     DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
     BiotSavartBranchResidueVjpDiagnostic,
@@ -49,6 +52,11 @@ GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_ATOL = 1.0e-18
 GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL = 1.0e-4
 DEFAULT_RESIDUE_OBJECTIVE_WEIGHT = 0.0
 DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS = 768
+GREENE_RESIDUE_OBJECTIVE_VALIDATION_EVIDENCE_KIND = "seed_json_payload_consistency_gate"
+GREENE_RESIDUE_OBJECTIVE_VALIDATION_LIMITATIONS = (
+    "loader_validates_json_proof_payloads_not_fresh_field_solves",
+    "no_bundled_landreman_2106_14930_poincare_or_spec_reproduction",
+)
 RESIDUE_TARGET_PAYLOAD_KEYS = frozenset(
     {
         "p",
@@ -319,6 +327,19 @@ class BiotSavartGreeneResidueObjective(Optimizable):
             "enabled": self.objective_weight > 0.0,
             "target_manifest_id": self.target_manifest_id,
             "validation_id": self.validation_id,
+            "validation_evidence_kind": (
+                GREENE_RESIDUE_OBJECTIVE_VALIDATION_EVIDENCE_KIND
+            ),
+            "validation_limitations": list(
+                GREENE_RESIDUE_OBJECTIVE_VALIDATION_LIMITATIONS
+            ),
+            "dof_gradient_method": BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD,
+            "local_sensitivity_method": (
+                BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+            ),
+            "local_sensitivity_limitations": list(
+                BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS
+            ),
             "objective_weight": self.objective_weight,
             "residue_scale": self.residue_scale,
             "value": self.J(),
@@ -439,12 +460,33 @@ def residue_branch_seed_from_payload(
     *,
     validation_id: str,
     optimizer_taylor_validated: bool | None = None,
+    direct_proxy_consistency_validated: bool | None = None,
+    real_field_nonzero_winding_validated: bool | None = None,
 ) -> ResidueBranchSeed:
     seed_validation_id = str(payload.get("validation_id", validation_id))
+    _seed_payload_false_only(payload, "optimizer_taylor_validated")
+    _seed_payload_false_only(payload, "direct_proxy_consistency_validated")
+    _seed_payload_false_only(payload, "real_field_nonzero_winding_validated")
     taylor_validated = (
-        _seed_payload_bool(payload, "optimizer_taylor_validated")
+        False
         if optimizer_taylor_validated is None
         else _seed_bool_value("optimizer_taylor_validated", optimizer_taylor_validated)
+    )
+    direct_proxy_validated = (
+        False
+        if direct_proxy_consistency_validated is None
+        else _seed_bool_value(
+            "direct_proxy_consistency_validated",
+            direct_proxy_consistency_validated,
+        )
+    )
+    real_field_validated = (
+        False
+        if real_field_nonzero_winding_validated is None
+        else _seed_bool_value(
+            "real_field_nonzero_winding_validated",
+            real_field_nonzero_winding_validated,
+        )
     )
     return ResidueBranchSeed(
         target_id=str(payload["target_id"]),
@@ -452,19 +494,19 @@ def residue_branch_seed_from_payload(
         section_state=payload["section_state"],
         validation_id=seed_validation_id,
         optimizer_taylor_validated=taylor_validated,
-        direct_proxy_consistency_validated=_seed_payload_bool(
-            payload,
-            "direct_proxy_consistency_validated",
-        ),
-        real_field_nonzero_winding_validated=_seed_payload_bool(
-            payload,
-            "real_field_nonzero_winding_validated",
-        ),
+        direct_proxy_consistency_validated=direct_proxy_validated,
+        real_field_nonzero_winding_validated=real_field_validated,
     )
 
 
-def _seed_payload_bool(payload: Mapping[str, object], key: str) -> bool:
-    return _seed_bool_value(key, payload.get(key, False))
+def _seed_payload_false_only(payload: Mapping[str, object], key: str) -> bool:
+    value = _seed_bool_value(key, payload.get(key, False))
+    if value:
+        raise ValueError(
+            "Greene residue branch seed validation booleans cannot be "
+            f"self-attested in branch_seeds: {key}"
+        )
+    return False
 
 
 def _seed_bool_value(key: str, value: object) -> bool:
@@ -542,6 +584,15 @@ def load_residue_objective_seeds(
             "Greene residue objective seeds JSON branch_seeds must be a sequence"
         )
     validation_by_key = _validate_optimizer_taylor_gate(payload, seed_payloads)
+    direct_proxy_validation_by_key = _validate_direct_proxy_consistency_gate(
+        payload,
+        seed_payloads,
+        validation_by_key,
+    )
+    real_field_validation_by_key = _validate_real_field_nonzero_winding_gate(
+        payload,
+        seed_payloads,
+    )
     return (
         validation_artifact_id,
         tuple(
@@ -551,10 +602,36 @@ def load_residue_objective_seeds(
                 optimizer_taylor_validated=(
                     (str(seed["target_id"]), str(seed["branch"])) in validation_by_key
                 ),
+                direct_proxy_consistency_validated=(
+                    (str(seed["target_id"]), str(seed["branch"]))
+                    in direct_proxy_validation_by_key
+                ),
+                real_field_nonzero_winding_validated=(
+                    (str(seed["target_id"]), str(seed["branch"]))
+                    in real_field_validation_by_key
+                ),
             )
             for seed in seed_payloads
         ),
     )
+
+
+def _seed_state_by_key(
+    seed_payloads: Sequence[object],
+) -> dict[ResidueBranchKey, SectionState]:
+    seed_state_by_key: dict[ResidueBranchKey, SectionState] = {}
+    for seed_payload in seed_payloads:
+        if not isinstance(seed_payload, Mapping):
+            raise ValueError(
+                "Greene residue objective branch seed entries must be objects"
+            )
+        key = (str(seed_payload["target_id"]), str(seed_payload["branch"]))
+        if key in seed_state_by_key:
+            raise ValueError(
+                f"Duplicate Greene residue objective branch seed for {key}"
+            )
+        seed_state_by_key[key] = _normalize_section_state(seed_payload["section_state"])
+    return seed_state_by_key
 
 
 def _validate_optimizer_taylor_gate(
@@ -569,20 +646,7 @@ def _validate_optimizer_taylor_gate(
             "Greene residue objective seeds JSON optimizer_taylor_validations "
             "must be a sequence"
         )
-    seed_state_by_key: dict[ResidueBranchKey, SectionState] = {}
-    for seed_payload in seed_payloads:
-        if not isinstance(seed_payload, Mapping):
-            raise ValueError(
-                "Greene residue objective branch seed entries must be objects"
-            )
-        key = (str(seed_payload["target_id"]), str(seed_payload["branch"]))
-        if key in seed_state_by_key:
-            raise ValueError(
-                f"Duplicate Greene residue objective branch seed for {key}"
-            )
-        seed_state_by_key[key] = _normalize_section_state(
-            seed_payload["section_state"]
-        )
+    seed_state_by_key = _seed_state_by_key(seed_payloads)
     seed_keys = set(seed_state_by_key)
     validation_by_key: dict[ResidueBranchKey, Mapping[str, object]] = {}
     for validation_payload in validations_payload:
@@ -604,12 +668,12 @@ def _validate_optimizer_taylor_gate(
             validation_payload,
             expected_base_state=seed_state_by_key.get(key),
             expected_branch=key[1],
+            expected_target_winding=_expected_winding_from_target_id(key[0]),
         )
     missing = sorted(seed_keys - set(validation_by_key))
     if missing:
         raise ValueError(
-            "Missing Greene residue objective optimizer Taylor validations: "
-            f"{missing}"
+            f"Missing Greene residue objective optimizer Taylor validations: {missing}"
         )
     unexpected = sorted(set(validation_by_key) - seed_keys)
     if unexpected:
@@ -620,11 +684,257 @@ def _validate_optimizer_taylor_gate(
     return validation_by_key
 
 
+def _validate_direct_proxy_consistency_gate(
+    payload: Mapping[str, object],
+    seed_payloads: Sequence[object],
+    optimizer_taylor_validation_by_key: Mapping[ResidueBranchKey, Mapping[str, object]],
+) -> dict[ResidueBranchKey, Mapping[str, object]]:
+    return _validate_keyed_branch_validation_gate(
+        payload,
+        seed_payloads,
+        payload_key="direct_proxy_consistency_validations",
+        validator=lambda validation_payload, key, expected_section_state: (
+            _validate_direct_proxy_consistency_proof(
+                validation_payload,
+                expected_section_state=expected_section_state,
+                expected_direct_residue=_optimizer_taylor_base_residue(
+                    optimizer_taylor_validation_by_key[key]
+                ),
+            )
+        ),
+    )
+
+
+def _validate_real_field_nonzero_winding_gate(
+    payload: Mapping[str, object],
+    seed_payloads: Sequence[object],
+) -> dict[ResidueBranchKey, Mapping[str, object]]:
+    return _validate_keyed_branch_validation_gate(
+        payload,
+        seed_payloads,
+        payload_key="real_field_nonzero_winding_validations",
+        validator=_validate_real_field_nonzero_winding_proof,
+    )
+
+
+def _validate_keyed_branch_validation_gate(
+    payload: Mapping[str, object],
+    seed_payloads: Sequence[object],
+    *,
+    payload_key: str,
+    validator: Callable[[Mapping[str, object], ResidueBranchKey, SectionState], None],
+) -> dict[ResidueBranchKey, Mapping[str, object]]:
+    validations_payload = payload.get(payload_key, ())
+    if not isinstance(validations_payload, Sequence) or isinstance(
+        validations_payload,
+        str,
+    ):
+        raise ValueError(
+            f"Greene residue objective seeds JSON {payload_key} must be a sequence"
+        )
+    seed_state_by_key = _seed_state_by_key(seed_payloads)
+    seed_keys = set(seed_state_by_key)
+    validation_by_key: dict[ResidueBranchKey, Mapping[str, object]] = {}
+    for validation_payload in validations_payload:
+        if not isinstance(validation_payload, Mapping):
+            raise ValueError(
+                f"Greene residue objective {payload_key} entries must be objects"
+            )
+        key = (
+            str(validation_payload["target_id"]),
+            str(validation_payload["branch"]),
+        )
+        if key in validation_by_key:
+            raise ValueError(
+                f"Duplicate Greene residue objective {payload_key} entry for {key}"
+            )
+        if key not in seed_keys:
+            raise ValueError(
+                f"Unexpected Greene residue objective {payload_key} entry for {key}"
+            )
+        validator(validation_payload, key, seed_state_by_key[key])
+        validation_by_key[key] = validation_payload
+    return validation_by_key
+
+
+def _expected_winding_from_target_id(target_id: str) -> float:
+    for field in str(target_id).split("|"):
+        if field.startswith("p="):
+            return float(int(field.removeprefix("p=")))
+    raise ValueError(
+        "Greene residue objective validation target_id must include target winding"
+    )
+
+
+def _optimizer_taylor_base_residue(
+    validation_payload: Mapping[str, object],
+) -> float:
+    diagnostic = validation_payload["diagnostic"]
+    if not isinstance(diagnostic, Mapping):
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation diagnostic "
+            "must be an object"
+        )
+    return float(diagnostic["base_residue"])
+
+
+def _validate_proof_section_state(
+    validation_payload: Mapping[str, object],
+    *,
+    expected_section_state: SectionState,
+    label: str,
+) -> None:
+    section_state = _normalize_section_state(validation_payload["section_state"])
+    if section_state != expected_section_state:
+        raise ValueError(
+            f"Greene residue objective {label} validation section_state must "
+            "match the branch seed section_state"
+        )
+
+
+def _passed_validation_status(payload: Mapping[str, object], *, label: str) -> None:
+    if (
+        str(payload["validation_status"])
+        != GREENE_RESIDUE_OBJECTIVE_VALIDATION_STATUS_PASSED
+    ):
+        raise ValueError(
+            f"Greene residue objective {label} validation_status must be passed"
+        )
+
+
+def _validate_direct_proxy_consistency_proof(
+    validation_payload: Mapping[str, object],
+    *,
+    expected_section_state: SectionState,
+    expected_direct_residue: float,
+) -> None:
+    _passed_validation_status(
+        validation_payload,
+        label="direct-vs-proxy consistency",
+    )
+    _validate_proof_section_state(
+        validation_payload,
+        expected_section_state=expected_section_state,
+        label="direct-vs-proxy consistency",
+    )
+    branch = str(validation_payload["branch"])
+    if branch not in GREENE_BRANCHES:
+        raise ValueError(f"Unknown Greene residue branch label: {branch}")
+    direct_residue = float(validation_payload["direct_residue"])
+    proxy_residue = float(validation_payload["proxy_residue"])
+    absolute_residue_difference = float(
+        validation_payload["absolute_residue_difference"]
+    )
+    residue_difference_tolerance = float(
+        validation_payload["residue_difference_tolerance"]
+    )
+    expected_difference = abs(direct_residue - proxy_residue)
+    if (
+        not isfinite(direct_residue)
+        or not isfinite(proxy_residue)
+        or not isfinite(absolute_residue_difference)
+        or not isfinite(residue_difference_tolerance)
+        or not isfinite(expected_direct_residue)
+        or residue_difference_tolerance < 0.0
+    ):
+        raise ValueError(
+            "Greene residue objective direct-vs-proxy validation residues "
+            "and tolerance must be finite"
+        )
+    if not np.isclose(
+        absolute_residue_difference,
+        expected_difference,
+        rtol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_RTOL,
+        atol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_ATOL,
+    ):
+        raise ValueError(
+            "Greene residue objective direct-vs-proxy validation difference "
+            "must equal abs(direct_residue - proxy_residue)"
+        )
+    if not np.isclose(
+        direct_residue,
+        expected_direct_residue,
+        rtol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_RTOL,
+        atol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_ATOL,
+    ):
+        raise ValueError(
+            "Greene residue objective direct-vs-proxy validation direct_residue "
+            "must match the optimizer Taylor base_residue"
+        )
+    if absolute_residue_difference > residue_difference_tolerance:
+        raise ValueError(
+            "Greene residue objective direct-vs-proxy validation difference "
+            "exceeds tolerance"
+        )
+
+
+def _validate_real_field_nonzero_winding_proof(
+    validation_payload: Mapping[str, object],
+    key: ResidueBranchKey,
+    expected_section_state: SectionState,
+) -> None:
+    _passed_validation_status(
+        validation_payload,
+        label="real-field nonzero-winding",
+    )
+    _validate_proof_section_state(
+        validation_payload,
+        expected_section_state=expected_section_state,
+        label="real-field nonzero-winding",
+    )
+    branch = str(validation_payload["branch"])
+    if branch not in GREENE_BRANCHES:
+        raise ValueError(f"Unknown Greene residue branch label: {branch}")
+    if str(validation_payload["branch_status"]) != BRANCH_STATUS_CONVERGED:
+        raise ValueError(
+            "Greene residue objective real-field nonzero-winding validation "
+            "branch_status must be converged"
+        )
+    expected_winding = float(validation_payload["expected_winding"])
+    target_expected_winding = _expected_winding_from_target_id(key[0])
+    observed_winding = float(validation_payload["observed_winding"])
+    winding_residual = float(validation_payload["winding_residual"])
+    winding_tolerance = float(validation_payload["winding_tolerance"])
+    if (
+        expected_winding == 0.0
+        or not isfinite(expected_winding)
+        or not isfinite(observed_winding)
+        or not isfinite(winding_residual)
+        or not isfinite(winding_tolerance)
+        or winding_tolerance < 0.0
+    ):
+        raise ValueError(
+            "Greene residue objective real-field nonzero-winding validation "
+            "requires finite nonzero expected winding and finite tolerance"
+        )
+    if expected_winding != target_expected_winding:
+        raise ValueError(
+            "Greene residue objective real-field nonzero-winding validation "
+            "expected_winding must match the target winding"
+        )
+    if not np.isclose(
+        winding_residual,
+        observed_winding - expected_winding,
+        rtol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_RTOL,
+        atol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL,
+    ):
+        raise ValueError(
+            "Greene residue objective real-field nonzero-winding validation "
+            "residual must equal observed_winding minus expected_winding"
+        )
+    if abs(winding_residual) > winding_tolerance:
+        raise ValueError(
+            "Greene residue objective real-field nonzero-winding validation "
+            "residual exceeds tolerance"
+        )
+
+
 def _validate_optimizer_taylor_diagnostic(
     validation_payload: Mapping[str, object],
     *,
     expected_base_state: SectionState | None,
     expected_branch: str,
+    expected_target_winding: float,
 ) -> None:
     diagnostic = validation_payload["diagnostic"]
     if not isinstance(diagnostic, Mapping):
@@ -667,6 +977,11 @@ def _validate_optimizer_taylor_diagnostic(
         raise ValueError(
             "Greene residue objective optimizer Taylor validation branch and "
             "winding diagnostics must be finite"
+        )
+    if expected_winding != expected_target_winding:
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation expected_winding "
+            "must match the target winding"
         )
     if (
         abs(base_winding - expected_winding)
@@ -750,8 +1065,7 @@ def _validate_optimizer_taylor_diagnostic(
         if (
             abs(winding - expected_winding)
             > GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL
-            or abs(winding_residual)
-            > GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL
+            or abs(winding_residual) > GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL
         ):
             raise ValueError(
                 "Greene residue objective optimizer Taylor validation sample "
@@ -839,6 +1153,15 @@ def disabled_residue_objective_payload(
         "enabled": False,
         "target_manifest_id": str(target_manifest_id),
         "validation_id": "",
+        "validation_evidence_kind": GREENE_RESIDUE_OBJECTIVE_VALIDATION_EVIDENCE_KIND,
+        "validation_limitations": list(GREENE_RESIDUE_OBJECTIVE_VALIDATION_LIMITATIONS),
+        "dof_gradient_method": BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD,
+        "local_sensitivity_method": (
+            BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+        ),
+        "local_sensitivity_limitations": list(
+            BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS
+        ),
         "objective_weight": float(objective_weight),
         "residue_scale": float(residue_scale),
         "value": 0.0,

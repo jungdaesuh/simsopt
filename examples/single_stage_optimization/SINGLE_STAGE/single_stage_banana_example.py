@@ -125,6 +125,7 @@ from banana_opt.basin_hopping import (  # noqa: F401 - re-exported for importlib
 from banana_opt.single_stage_search_contracts import (
     apply_frontier_search_contract_penalties as _apply_frontier_search_contract_penalties_impl,
     annotate_frontier_search_eval as _annotate_frontier_search_eval_impl,
+    default_frontier_invariant_torus_min as _default_frontier_invariant_torus_min_impl,
     evaluate_frontier_hard_invalidation as _evaluate_frontier_hard_invalidation_impl,
     evaluate_frontier_hardware_search_contract as _evaluate_frontier_hardware_search_contract_impl,
     evaluate_frontier_hardware_search_penalty as _evaluate_frontier_hardware_search_penalty_impl,
@@ -134,6 +135,7 @@ from banana_opt.single_stage_search_contracts import (
     evaluate_frontier_trust_penalty as _evaluate_frontier_trust_penalty_impl,
     evaluate_frontier_trust_status as _evaluate_frontier_trust_status_impl,
     hardware_violation_ratios as _hardware_violation_ratios,
+    resolve_frontier_invariant_torus_min as _resolve_frontier_invariant_torus_min_impl,
 )
 from banana_opt.frontier_conditioning import (
     FRONTIER_CONDITIONING_SCHEMA_VERSION,
@@ -165,6 +167,7 @@ from banana_opt.banana_current_replay import (
 )
 from banana_opt.current_contracts import (
     DEFAULT_FINITE_CURRENT_MODE,
+    FINITE_CURRENT_MODE_CHOICES,
     infer_uniform_coil_current_A as _infer_uniform_coil_current_A,
     resolve_penalty_traversal_forbidden_box_bounds,
     resolve_plasma_current_settings_for_num_surfaces as _resolve_plasma_current_settings_for_num_surfaces_impl,
@@ -987,6 +990,19 @@ def resolve_stage2_finite_current_mode(stage2_results, requested_finite_current_
     )
 
 
+def resolve_stage2_finite_current_mode_for_surface_mode(
+    stage2_results,
+    requested_finite_current_mode,
+    surface_mode_contract,
+):
+    artifact_request = (
+        None
+        if surface_mode_contract.mode == PUBLISHED_MULTISURFACE
+        else requested_finite_current_mode
+    )
+    return resolve_stage2_finite_current_mode(stage2_results, artifact_request)
+
+
 def partition_loaded_stage2_coils(coils, stage2_results, requested_num_tf_coils):
     return _partition_loaded_stage2_coils_impl(
         coils,
@@ -1506,7 +1522,7 @@ def parse_args():
     )
     parser.add_argument(
         "--finite-current-mode",
-        choices=["boozer_surrogate", "wataru_proxy_field", "jhalpern30_proxy_field"],
+        choices=FINITE_CURRENT_MODE_CHOICES,
         default=os.environ.get("FINITE_CURRENT_MODE"),
         help=(
             "Finite-current interpretation for the loaded Stage 2 donor. When omitted, "
@@ -2467,8 +2483,10 @@ def parse_args():
         default=os.environ.get("RESIDUE_OBJECTIVE_SEEDS_JSON"),
         help=(
             "JSON file with target_manifest_id, validation_status='passed', "
-            "validation_artifact_id, branch_seeds, and optimizer_taylor_validations "
-            "for the Greene residue objective."
+            "validation_artifact_id, branch_seeds, optimizer_taylor_validations, "
+            "direct_proxy_consistency_validations for nonzero objective weights, "
+            "and real_field_nonzero_winding_validations for nonzero-winding "
+            "targets."
         ),
     )
     parser.add_argument(
@@ -2617,13 +2635,11 @@ def parse_args():
 
 
 def resolve_frontier_invariant_torus_min_arg(args):
-    if args.frontier_invariant_torus_min is not None:
-        return float(args.frontier_invariant_torus_min)
-    if args.frontier_kam_min is not None:
-        return float(args.frontier_kam_min)
-    if "FRONTIER_INVARIANT_TORUS_MIN" in os.environ:
-        return float(os.environ["FRONTIER_INVARIANT_TORUS_MIN"])
-    return float(os.environ.get("FRONTIER_KAM_MIN", "0.0"))
+    return _resolve_frontier_invariant_torus_min_impl(
+        args.frontier_invariant_torus_min,
+        args.frontier_kam_min,
+        environment=os.environ,
+    )
 
 
 def initialize_boozer_surface(
@@ -3571,6 +3587,12 @@ def topology_archive_entry(
         "wba_evaluation_state": topology_result.get("wba_evaluation_state"),
         "wba_not_evaluated_reason": topology_result.get("wba_not_evaluated_reason"),
         "wba_classification_counts": topology_result.get("wba_classification_counts"),
+        "wba_fraction_denominator_policy": topology_result.get(
+            "wba_fraction_denominator_policy"
+        ),
+        "wba_fraction_denominator_seed_count": topology_result.get(
+            "wba_fraction_denominator_seed_count"
+        ),
         "wba_rotation_number_median": topology_result.get("wba_rotation_number_median"),
         "wba_matching_digits_min": topology_result.get("wba_matching_digits_min"),
         "wba_matching_digits_median": topology_result.get("wba_matching_digits_median"),
@@ -11284,8 +11306,8 @@ TOPOLOGY_SCORER_EVERY = 0
 TOPOLOGY_SCORER_NFIELDLINES = 12
 TOPOLOGY_SCORER_TMAX = 50.0
 CONFINEMENT_OBJECTIVE_WEIGHT = 0.0
-FRONTIER_INVARIANT_TORUS_MIN = 0.0
-FRONTIER_KAM_MIN = 0.0
+FRONTIER_INVARIANT_TORUS_MIN = _default_frontier_invariant_torus_min_impl()
+FRONTIER_KAM_MIN = FRONTIER_INVARIANT_TORUS_MIN
 CONFINEMENT_SURROGATE_WORST_K = 3
 CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
 CONFINEMENT_SURROGATE_MEAN_WEIGHT = 0.2
@@ -11425,9 +11447,10 @@ if __name__ == "__main__":
         surface_mode_contract,
         fallback_inner_surface_ratio=args.inner_surface_ratio,
     )
-    finite_current_mode = resolve_stage2_finite_current_mode(
+    finite_current_mode = resolve_stage2_finite_current_mode_for_surface_mode(
         stage2_results,
         requested_finite_current_mode,
+        surface_mode_contract,
     )
     plasma_current_settings = apply_strict_vacuum_current_settings(
         args,

@@ -1420,7 +1420,7 @@ def save_surface_artifacts(
             )
             if not validation["passed"]:
                 raise ValueError(
-                    "Zero-current Boozer artifacts must use "
+                    "Vacuum-locked Boozer artifacts must use "
                     "simsopt.geo.BoozerSurface without an I field: "
                     f"{boozer_surface_path}"
                 )

@@ -3639,12 +3639,12 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 WIDTH_WEIGHT=2.0,
             )
 
-        # width=0.02 < min=0.05 -> min hinge = -0.03 -> 0.5*(-0.03)^2 = 0.00045
+        # width=0.02 < min=0.1 -> min hinge = -0.08 -> 0.5*(-0.08)^2 = 0.0032
         # width=0.02 < max=0.17 -> max hinge = 0
-        # weighted contribution: 2.0 * 0.00045 = 0.0009
-        # gradient of min hinge: hinge * grad = -0.03 * [1.0, 0.5] = [-0.03, -0.015]
-        # weighted: 2.0 * [-0.03, -0.015] = [-0.06, -0.03]
-        self.assertAlmostEqual(result["total"], 0.0009, places=8)
+        # weighted contribution: 2.0 * 0.0032 = 0.0064
+        # gradient of min hinge: hinge * grad = -0.08 * [1.0, 0.5] = [-0.08, -0.04]
+        # weighted: 2.0 * [-0.08, -0.04] = [-0.16, -0.08]
+        self.assertAlmostEqual(result["total"], 0.0064, places=8)
         self.assertAlmostEqual(result["J_coil_width"], 0.02)
         np.testing.assert_allclose(result["dJ_coil_width"], [1.0, 0.5])
         self.assertAlmostEqual(
@@ -3655,7 +3655,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             result["coil_width_max_threshold"],
             self.module.BANANA_WIDTH_MAX_M,
         )
-        np.testing.assert_allclose(result["grad"], [-0.06, -0.03])
+        np.testing.assert_allclose(result["grad"], [-0.16, -0.08])
 
     def test_evaluate_total_objective_fast_path_skips_component_breakdown(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]

@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 import simsopt.field as simsopt_field
+from simsopt.field.magnetic_axis_helpers import MagneticAxisNotLocatedError
 from simsopt.geo import SurfaceRZFourier
 
 from geo._frontier_test_helpers import ensure_examples_import_path
@@ -145,6 +146,76 @@ def test_empty_topology_score_does_not_promote_not_evaluated_wba_to_kam_fraction
     assert result["kam_fraction"] is None
     assert result["kam_fraction_semantics"] is None
     assert result["wba_evaluation_state"] == "not_evaluated_no_classified_seeds"
+
+
+def test_score_topology_axis_not_located_is_wba_not_evaluated(monkeypatch):
+    fieldlines_tys = [
+        np.array([[0.0, 1.0, 0.0, 0.0]]),
+        np.array([[0.0, 1.1, 0.0, 0.0]]),
+    ]
+    fieldlines_phi_hits = [
+        np.array([[0.4, 0.0, 1.0, 0.0, 0.0]]),
+        np.array([[0.5, 0.0, 1.1, 0.0, 0.0]]),
+    ]
+    stop_labels = [
+        "surface_exit",
+        "max_z_guardrail",
+        "min_z_guardrail",
+        "min_r_guardrail",
+        "max_r_guardrail",
+        "iteration_limit",
+    ]
+
+    monkeypatch.setattr(
+        topology_scorer,
+        "build_stopping_criteria",
+        lambda *_args, **_kwargs: ([object()], stop_labels),
+    )
+    monkeypatch.setattr(
+        topology_scorer,
+        "midplane_seed_radii",
+        lambda *_args, **_kwargs: np.array([1.0, 1.1]),
+    )
+    monkeypatch.setattr(
+        topology_scorer,
+        "prepare_topology_field",
+        lambda *_args, **_kwargs: (object(), {"selected_mode": "native"}),
+    )
+    monkeypatch.setattr(topology_scorer, "cross_section_span", lambda *_args: 1.0)
+    monkeypatch.setattr(
+        topology_scorer,
+        "poloidal_axis_point",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            MagneticAxisNotLocatedError("axis not located")
+        ),
+    )
+    monkeypatch.setattr(
+        simsopt_field,
+        "compute_fieldlines",
+        lambda *_args, **_kwargs: (fieldlines_tys, fieldlines_phi_hits),
+    )
+
+    result = topology_scorer.finalize_topology_score_result(
+        topology_scorer.score_topology(
+            RingSurface(),
+            object(),
+            nfieldlines=2,
+            tmax=2.0,
+            tol=1e-7,
+            nphis=1,
+            field_policy="never",
+            compute_transport_diagnostics=False,
+            compute_invariant_torus_classification=True,
+        )
+    )
+
+    assert result["broken"] is False
+    assert result["evaluation_state"] == "evaluated"
+    assert result["evaluation_error"] is None
+    assert result["wba_evaluation_state"] == "not_evaluated_axis_not_located"
+    assert result["wba_not_evaluated_reason"] == "not_evaluated_axis_not_located"
+    assert result["invariant_torus_fraction"] is None
+    assert result["kam_fraction"] is None
 
 
 def test_score_topology_can_skip_wba_axis_classification(monkeypatch):

@@ -64,6 +64,7 @@ from examples.single_stage_optimization.banana_opt.topology.residue_diagnostics 
 from examples.single_stage_optimization.banana_opt.topology.residue_objective import (
     DEFAULT_RESIDUE_OBJECTIVE_WEIGHT,
     DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
+    GREENE_RESIDUE_OBJECTIVE_VALIDATION_EVIDENCE_KIND,
     BiotSavartGreeneResidueObjective,
     ResidueBranchSeed,
     load_residue_objective_seeds,
@@ -75,8 +76,10 @@ from examples.single_stage_optimization.banana_opt.topology.residue_objective im
 from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity import (
     BIOT_SAVART_BRANCH_RESOLVED_FD_MODE,
     BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE,
+    BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD,
     BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE,
     BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_SATISFIED_FROZEN,
+    BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD,
     BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE,
     BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
     BRANCH_RESOLVED_FD_MODE,
@@ -318,22 +321,19 @@ class ResonantIslandField:
         minor_z = z - self.axis_z
         minor_radius = np.sqrt(minor_r**2 + minor_z**2)
         theta = np.arctan2(minor_z, minor_r)
-        resonant_phase = (
-            float(self.target.q) * (theta - self.phase0)
-            - float(self.target.p) * (phi - self.target.phi0)
-        )
+        resonant_phase = float(self.target.q) * (theta - self.phase0) - float(
+            self.target.p
+        ) * (phi - self.target.phi0)
         radial_velocity = -self.drive * np.sin(resonant_phase)
         angular_velocity = self.target.iota_float + self.shear * (
             minor_radius - self.orbit_radius
         )
-        d_radius_dphi = (
-            radial_velocity * np.cos(theta)
-            - minor_radius * angular_velocity * np.sin(theta)
-        )
-        d_z_dphi = (
-            radial_velocity * np.sin(theta)
-            + minor_radius * angular_velocity * np.cos(theta)
-        )
+        d_radius_dphi = radial_velocity * np.cos(
+            theta
+        ) - minor_radius * angular_velocity * np.sin(theta)
+        d_z_dphi = radial_velocity * np.sin(
+            theta
+        ) + minor_radius * angular_velocity * np.cos(theta)
         b_phi = np.ones_like(radius)
         b_r = d_radius_dphi / radius
         b_z = d_z_dphi / radius
@@ -1873,6 +1873,30 @@ def test_biot_savart_residue_vjp_taylor_gate_is_second_order():
     )
     assert gradient_diagnostic.cotangent_point_count > 0
     assert gradient_diagnostic.gradient_norm > 0.0
+    gradient_payload = gradient_diagnostic.to_json_dict()
+    assert (
+        gradient_payload["dof_gradient_method"]
+        == BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD
+    )
+    assert (
+        gradient_payload["local_sensitivity_method"]
+        == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+    )
+    assert gradient_payload["local_sensitivity_limitations"] == [
+        "local_state_jacobian_uses_central_finite_difference_rk4"
+    ]
+    taylor_payload = taylor.to_json_dict()
+    assert (
+        taylor_payload["dof_gradient_method"]
+        == BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD
+    )
+    assert (
+        taylor_payload["local_sensitivity_method"]
+        == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+    )
+    assert taylor_payload["local_sensitivity_limitations"] == [
+        "local_state_jacobian_uses_central_finite_difference_rk4"
+    ]
     assert taylor.mode == BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE
     assert taylor.base_status == BRANCH_STATUS_CONVERGED
     assert taylor.branch == GREENE_BRANCH_O
@@ -1932,6 +1956,24 @@ def test_biot_savart_greene_residue_objective_is_disabled_by_default():
     assert payload["target_manifest_id"] == residue_objective_target_manifest_id(
         (target,)
     )
+    assert (
+        payload["validation_evidence_kind"]
+        == GREENE_RESIDUE_OBJECTIVE_VALIDATION_EVIDENCE_KIND
+    )
+    assert payload["validation_limitations"] == [
+        "loader_validates_json_proof_payloads_not_fresh_field_solves",
+        "no_bundled_landreman_2106_14930_poincare_or_spec_reproduction",
+    ]
+    assert (
+        payload["dof_gradient_method"] == BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD
+    )
+    assert (
+        payload["local_sensitivity_method"]
+        == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+    )
+    assert payload["local_sensitivity_limitations"] == [
+        "local_state_jacobian_uses_central_finite_difference_rk4"
+    ]
     assert payload["value"] == pytest.approx(0.0)
     assert payload["branches"] == []
 
@@ -2191,9 +2233,7 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
         residuals: list[float] | None = None,
     ) -> dict[str, object]:
         sample_residuals = (
-            [1.0e-10, 2.5e-11, 6.25e-12]
-            if residuals is None
-            else residuals
+            [1.0e-10, 2.5e-11, 6.25e-12] if residuals is None else residuals
         )
         sample_steps = [1.0e-5, 5.0e-6, 2.5e-6]
         samples = []
@@ -2242,6 +2282,23 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
             },
         }
 
+    def direct_proxy_validation(
+        *,
+        section_state: list[float] | None = None,
+        direct_residue: float = 0.01,
+        proxy_residue: float = 0.01,
+    ) -> dict[str, object]:
+        return {
+            "target_id": target_id,
+            "branch": GREENE_BRANCH_O,
+            "section_state": [1.1, 0.05] if section_state is None else section_state,
+            "validation_status": "passed",
+            "direct_residue": direct_residue,
+            "proxy_residue": proxy_residue,
+            "absolute_residue_difference": abs(direct_residue - proxy_residue),
+            "residue_difference_tolerance": 1.0e-8,
+        }
+
     seed_payload = {
         "target_manifest_id": target_manifest_id,
         "validation_status": "failed",
@@ -2251,7 +2308,6 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
                 "target_id": target_id,
                 "branch": GREENE_BRANCH_O,
                 "section_state": [1.1, 0.05],
-                "direct_proxy_consistency_validated": True,
             },
         ],
     }
@@ -2324,9 +2380,7 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
         )
 
     winding_mismatch_validation = optimizer_taylor_validation()
-    winding_mismatch_validation["diagnostic"]["samples"][0][
-        "winding_residual"
-    ] = 1.0
+    winding_mismatch_validation["diagnostic"]["samples"][0]["winding_residual"] = 1.0
     seed_payload["optimizer_taylor_validations"] = [winding_mismatch_validation]
     seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
     with pytest.raises(ValueError, match="winding"):
@@ -2346,6 +2400,27 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
         )
 
     seed_payload["optimizer_taylor_validations"] = [optimizer_taylor_validation()]
+    seed_payload["direct_proxy_consistency_validations"] = [
+        direct_proxy_validation(section_state=[1.11, 0.05])
+    ]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="section_state"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    seed_payload["direct_proxy_consistency_validations"] = [
+        direct_proxy_validation(direct_residue=0.011, proxy_residue=0.011)
+    ]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="base_residue"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    seed_payload["direct_proxy_consistency_validations"] = [direct_proxy_validation()]
     seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
     validation_id, seeds = load_residue_objective_seeds(
         seeds_path,
@@ -2361,6 +2436,157 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
             validation_id="validation-artifact",
             optimizer_taylor_validated=True,
             direct_proxy_consistency_validated=True,
+        ),
+    )
+
+    for self_attested_flag in (
+        "direct_proxy_consistency_validated",
+        "real_field_nonzero_winding_validated",
+    ):
+        self_attested_payload = json.loads(json.dumps(seed_payload))
+        self_attested_payload["branch_seeds"][0][self_attested_flag] = True
+        seeds_path.write_text(json.dumps(self_attested_payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="self-attested"):
+            load_residue_objective_seeds(
+                seeds_path,
+                target_manifest_id=target_manifest_id,
+            )
+
+
+def test_residue_objective_seed_loader_ties_real_field_validation_to_target_winding(
+    tmp_path,
+):
+    target_payload = {
+        "p": 2,
+        "q": 3,
+        "radial_label": 0.126,
+        "radial_window": [0.10, 0.16],
+        "branches": [GREENE_BRANCH_O],
+    }
+    targets_path = tmp_path / "targets.json"
+    targets_path.write_text(
+        json.dumps({"targets": [target_payload]}),
+        encoding="utf-8",
+    )
+    targets = load_residue_objective_targets(targets_path)
+    target_manifest_id = residue_objective_target_manifest_id(targets)
+    target_id = targets[0].manifest_key()
+
+    def optimizer_taylor_validation() -> dict[str, object]:
+        sample_steps = [1.0e-5, 5.0e-6, 2.5e-6]
+        sample_residuals = [1.0e-10, 2.5e-11, 6.25e-12]
+        samples = []
+        for step, residual in zip(sample_steps, sample_residuals, strict=True):
+            prediction = 0.01 + 0.2 * step
+            samples.append(
+                {
+                    "step": step,
+                    "residue": prediction + residual,
+                    "first_order_prediction": prediction,
+                    "residual": residual,
+                    "absolute_residual": abs(residual),
+                    "status": BRANCH_STATUS_CONVERGED,
+                    "state": [1.1, 0.05],
+                    "branch": GREENE_BRANCH_O,
+                    "winding": 2.0,
+                    "winding_residual": 0.0,
+                    "raw_return_section_winding": 2.0,
+                    "det_m": 1.0,
+                    "residue_classification": GREENE_RESIDUE_ELLIPTIC_O,
+                }
+            )
+        return {
+            "target_id": target_id,
+            "branch": GREENE_BRANCH_O,
+            "diagnostic": {
+                "mode": BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
+                "derivative_step": 1.0e-6,
+                "direction_norm": 1.0,
+                "direction": [1.0, 0.0],
+                "base_residue": 0.01,
+                "directional_derivative": 0.2,
+                "base_status": BRANCH_STATUS_CONVERGED,
+                "base_state": [1.1, 0.05],
+                "branch": GREENE_BRANCH_O,
+                "expected_winding": 2.0,
+                "base_winding": 2.0,
+                "base_winding_residual": 0.0,
+                "base_raw_return_section_winding": 2.0,
+                "base_det_m": 1.0,
+                "base_residue_classification": GREENE_RESIDUE_ELLIPTIC_O,
+                "samples": samples,
+                "observed_orders": [2.0, 2.0],
+            },
+        }
+
+    def real_field_validation(
+        *,
+        expected_winding: float,
+        section_state: list[float] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "target_id": target_id,
+            "branch": GREENE_BRANCH_O,
+            "section_state": [1.1, 0.05] if section_state is None else section_state,
+            "validation_status": "passed",
+            "branch_status": BRANCH_STATUS_CONVERGED,
+            "expected_winding": expected_winding,
+            "observed_winding": expected_winding,
+            "winding_residual": 0.0,
+            "winding_tolerance": 1.0e-7,
+        }
+
+    seed_payload = {
+        "target_manifest_id": target_manifest_id,
+        "validation_status": "passed",
+        "validation_artifact_id": "validation-artifact",
+        "branch_seeds": [
+            {
+                "target_id": target_id,
+                "branch": GREENE_BRANCH_O,
+                "section_state": [1.1, 0.05],
+            },
+        ],
+        "optimizer_taylor_validations": [optimizer_taylor_validation()],
+        "real_field_nonzero_winding_validations": [
+            real_field_validation(expected_winding=1.0)
+        ],
+    }
+    seeds_path = tmp_path / "seeds.json"
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="expected_winding"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    seed_payload["real_field_nonzero_winding_validations"] = [
+        real_field_validation(expected_winding=2.0, section_state=[1.11, 0.05])
+    ]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="section_state"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    seed_payload["real_field_nonzero_winding_validations"] = [
+        real_field_validation(expected_winding=2.0)
+    ]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    _, seeds = load_residue_objective_seeds(
+        seeds_path,
+        target_manifest_id=target_manifest_id,
+    )
+
+    assert seeds == (
+        ResidueBranchSeed(
+            target_id=target_id,
+            branch=GREENE_BRANCH_O,
+            section_state=(1.1, 0.05),
+            validation_id="validation-artifact",
+            optimizer_taylor_validated=True,
+            real_field_nonzero_winding_validated=True,
         ),
     )
 
@@ -2439,6 +2665,18 @@ def test_biot_savart_greene_residue_objective_taylor_gate_is_second_order():
     payload = objective.to_json_dict()
     assert payload["target_manifest_id"] == target_manifest_id
     assert payload["enabled"] is True
+    assert (
+        payload["validation_evidence_kind"]
+        == GREENE_RESIDUE_OBJECTIVE_VALIDATION_EVIDENCE_KIND
+    )
+    assert payload["validation_limitations"] == [
+        "loader_validates_json_proof_payloads_not_fresh_field_solves",
+        "no_bundled_landreman_2106_14930_poincare_or_spec_reproduction",
+    ]
+    assert (
+        payload["local_sensitivity_method"]
+        == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+    )
     assert payload["branches"][0]["status"] == BRANCH_STATUS_CONVERGED
     assert abs(payload["branches"][0]["det_m"] - 1.0) <= solver_options.det_tolerance
     assert base_value == pytest.approx(expected_value, rel=1.0e-5)

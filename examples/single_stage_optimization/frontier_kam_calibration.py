@@ -21,6 +21,11 @@ from import_provenance import configure_local_simsopt_imports
 configure_local_simsopt_imports(__file__)
 
 from banana_opt.json_compat import load_boozer_finite_i as load
+from banana_opt.single_stage_search_contracts import (
+    FRONTIER_INVARIANT_TORUS_MIN_RATIONALE,
+    default_frontier_invariant_torus_min,
+    resolve_frontier_invariant_torus_min,
+)
 from frontier_pareto_trajectory import (
     bool_or_none,
     finite_float_or_none,
@@ -32,12 +37,19 @@ from topology_scorer import finalize_topology_score_result, score_topology
 
 SCHEMA_VERSION = "frontier_invariant_torus_calibration_v1"
 DEFAULT_OUTPUT_STEM = "frontier_invariant_torus_calibration"
-DEFAULT_FRONTIER_INVARIANT_TORUS_MIN = 0.0
+DEFAULT_FRONTIER_INVARIANT_TORUS_MIN = default_frontier_invariant_torus_min()
 DEFAULT_NFIELDLINES = 12
 DEFAULT_TMAX = 50.0
 DEFAULT_NPHIS = 4
 DEFAULT_KAM_WIDTH_RATIO = 0.25
 DEFAULT_INSET_FRACTION = 0.05
+VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING = (
+    "raw donor-derived invariant-torus floor is vacuous; using the default "
+    "nonzero frontier floor instead"
+)
+CONFIGURED_VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING = (
+    "configured invariant-torus floor is vacuous"
+)
 
 
 @dataclass(frozen=True)
@@ -114,11 +126,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_frontier_invariant_torus_min_arg(args: argparse.Namespace) -> float:
-    if args.frontier_invariant_torus_min is not None:
-        return float(args.frontier_invariant_torus_min)
-    if args.frontier_kam_min is not None:
-        return float(args.frontier_kam_min)
-    return DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+    return resolve_frontier_invariant_torus_min(
+        args.frontier_invariant_torus_min,
+        args.frontier_kam_min,
+    )
 
 
 def read_results_payload(run_dir: Path) -> Mapping[str, object]:
@@ -251,11 +262,28 @@ def calibration_summary(
         )
     ]
     recommended = None
+    recommended_raw = None
+    recommended_clamped_from_vacuous = False
+    calibration_warnings = []
     if invariant_torus_values:
-        recommended = max(0.0, min(invariant_torus_values) - float(selection_margin))
+        recommended_raw = max(
+            0.0,
+            min(invariant_torus_values) - float(selection_margin),
+        )
+        if recommended_raw <= 0.0:
+            recommended = DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+            recommended_clamped_from_vacuous = True
+            calibration_warnings.append(VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING)
+        else:
+            recommended = recommended_raw
+    if frontier_invariant_torus_min <= 0.0:
+        calibration_warnings.append(CONFIGURED_VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING)
     return {
         "configured_frontier_invariant_torus_min": float(frontier_invariant_torus_min),
         "configured_frontier_kam_min": float(frontier_invariant_torus_min),
+        "frontier_invariant_torus_min_rationale": (
+            FRONTIER_INVARIANT_TORUS_MIN_RATIONALE
+        ),
         "selection_margin": float(selection_margin),
         "hw_clean_donor_count": len(hw_clean_rows),
         "hw_clean_evaluated_donor_count": len(invariant_torus_values),
@@ -286,6 +314,15 @@ def calibration_summary(
         "configured_threshold_accepts_all_hw_clean_donors": (
             not rejecting_labels and not not_evaluated_labels
         ),
+        "recommended_frontier_invariant_torus_min_raw": recommended_raw,
+        "recommended_frontier_kam_min_raw": recommended_raw,
+        "recommended_frontier_invariant_torus_min_clamped_from_vacuous": (
+            recommended_clamped_from_vacuous
+        ),
+        "recommended_frontier_kam_min_clamped_from_vacuous": (
+            recommended_clamped_from_vacuous
+        ),
+        "calibration_warnings": calibration_warnings,
         "recommended_frontier_invariant_torus_min": recommended,
         "recommended_frontier_kam_min": recommended,
     }
@@ -377,23 +414,18 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / f"{args.output_stem}.json"
     csv_path = output_dir / f"{args.output_stem}.csv"
-    json_path.write_text(
-        json.dumps(
-            calibration_payload(
-                rows=rows,
-                run_dirs=run_dirs,
-                nfieldlines=int(args.nfieldlines),
-                tmax=float(args.tmax),
-                nphis=int(args.nphis),
-                kam_width_ratio=float(args.kam_width_ratio),
-                inset_fraction=float(args.inset_fraction),
-                frontier_invariant_torus_min=float(args.frontier_invariant_torus_min),
-                selection_margin=selection_margin,
-            ),
-            indent=2,
-        ),
-        encoding="utf-8",
+    payload = calibration_payload(
+        rows=rows,
+        run_dirs=run_dirs,
+        nfieldlines=int(args.nfieldlines),
+        tmax=float(args.tmax),
+        nphis=int(args.nphis),
+        kam_width_ratio=float(args.kam_width_ratio),
+        inset_fraction=float(args.inset_fraction),
+        frontier_invariant_torus_min=float(args.frontier_invariant_torus_min),
+        selection_margin=selection_margin,
     )
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     write_csv(csv_path, rows)
     print(
         json.dumps(
@@ -402,6 +434,10 @@ def main() -> None:
                 "rows": len(rows),
                 "json": str(json_path),
                 "csv": str(csv_path),
+                "calibration_warnings": payload["summary"]["calibration_warnings"],
+                "recommended_frontier_invariant_torus_min": payload["summary"][
+                    "recommended_frontier_invariant_torus_min"
+                ],
             },
             sort_keys=True,
         )

@@ -35,6 +35,9 @@ from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
 )
 from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR  # noqa: E402
 from banana_opt.hardware_contracts import COIL_PLASMA_MIN_DIST_M  # noqa: E402
+from banana_opt.single_stage_search_contracts import (  # noqa: E402
+    resolve_frontier_invariant_torus_min as _resolve_frontier_invariant_torus_min,
+)
 from banana_opt.surface_mode_contracts import (  # noqa: E402
     DEFAULT_INNER_SURFACE_RATIO,
     SURFACE_MODE_CHOICES,
@@ -437,12 +440,12 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     return parser
 
 
-def resolve_frontier_invariant_torus_min_arg(args: argparse.Namespace) -> float | None:
-    if getattr(args, "frontier_invariant_torus_min", None) is not None:
-        return float(args.frontier_invariant_torus_min)
-    if getattr(args, "frontier_kam_min", None) is not None:
-        return float(args.frontier_kam_min)
-    return None
+def resolve_frontier_invariant_torus_min_arg(args: argparse.Namespace) -> float:
+    return _resolve_frontier_invariant_torus_min(
+        getattr(args, "frontier_invariant_torus_min", None),
+        getattr(args, "frontier_kam_min", None),
+        environment=os.environ,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

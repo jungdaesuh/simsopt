@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 import math
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import numpy as np
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import coils_via_symmetries
 from simsopt.field.magnetic_axis_helpers import (
+    MagneticAxisNotLocatedError,
     _axis_return_residual,
     compute_on_axis_iota,
     locate_magnetic_axis_point,
@@ -99,6 +102,75 @@ class LocateMagneticAxisPoint(unittest.TestCase):
             min_bphi_over_b=1.0e-8,
         )
         self.assertGreater(float(np.linalg.norm(field_period_residual)), 1.0e-3)
+
+    def test_acceptance_tolerance_is_separate_from_optimizer_tolerance(self):
+        captured = {}
+
+        def fake_least_squares(_fun, guess, *, bounds, xtol, ftol, gtol, max_nfev):
+            captured.update(
+                {
+                    "guess": guess,
+                    "bounds": bounds,
+                    "xtol": xtol,
+                    "ftol": ftol,
+                    "gtol": gtol,
+                    "max_nfev": max_nfev,
+                }
+            )
+            return SimpleNamespace(
+                x=np.asarray([1.0, 0.0], dtype=float),
+                fun=np.asarray([5.0e-7, 0.0], dtype=float),
+                success=False,
+                message="optimizer stopped before strict success",
+                nfev=4,
+            )
+
+        with patch(
+            "simsopt.field.magnetic_axis_helpers.least_squares",
+            fake_least_squares,
+        ):
+            point = locate_magnetic_axis_point(
+                _ShiftedAxisField(major_radius=1.0, axis_shift=0.0, iota=0.3),
+                (1.05, 0.02),
+                nfp=3,
+                r_bounds=(0.8, 1.2),
+                z_bounds=(-0.2, 0.2),
+                residual_tolerance=1.0e-6,
+                optimizer_tolerance=1.0e-10,
+            )
+
+        self.assertEqual(captured["xtol"], 1.0e-10)
+        self.assertEqual(captured["ftol"], 1.0e-10)
+        self.assertEqual(captured["gtol"], 1.0e-10)
+        self.assertEqual(point["normalized_return_residual"], 5.0e-7)
+        self.assertEqual(point["residual_accept_tolerance"], 1.0e-6)
+        self.assertEqual(point["optimizer_tolerance"], 1.0e-10)
+        self.assertFalse(point["optimizer_success"])
+
+    def test_residual_above_acceptance_tolerance_raises_axis_not_located(self):
+        def fake_least_squares(_fun, _guess, **_kwargs):
+            return SimpleNamespace(
+                x=np.asarray([1.0, 0.0], dtype=float),
+                fun=np.asarray([2.0e-6, 0.0], dtype=float),
+                success=True,
+                message="success",
+                nfev=3,
+            )
+
+        with patch(
+            "simsopt.field.magnetic_axis_helpers.least_squares",
+            fake_least_squares,
+        ):
+            with self.assertRaises(MagneticAxisNotLocatedError):
+                locate_magnetic_axis_point(
+                    _ShiftedAxisField(major_radius=1.0, axis_shift=0.0, iota=0.3),
+                    (1.05, 0.02),
+                    nfp=3,
+                    r_bounds=(0.8, 1.2),
+                    z_bounds=(-0.2, 0.2),
+                    residual_tolerance=1.0e-6,
+                    optimizer_tolerance=1.0e-10,
+                )
 
 
 class MagneticAxisHelpers(unittest.TestCase):

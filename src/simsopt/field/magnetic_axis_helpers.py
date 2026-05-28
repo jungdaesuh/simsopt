@@ -6,7 +6,15 @@ from scipy.optimize import least_squares
 
 from simsopt.geo import CurveRZFourier
 
-__all__ = ["compute_on_axis_iota", "locate_magnetic_axis_point"]
+__all__ = [
+    "MagneticAxisNotLocatedError",
+    "compute_on_axis_iota",
+    "locate_magnetic_axis_point",
+]
+
+
+class MagneticAxisNotLocatedError(RuntimeError):
+    """Raised when the magnetic-axis fixed-point solve cannot locate an acceptable axis."""
 
 
 def _cylindrical_basis(phi):
@@ -81,7 +89,7 @@ def _axis_return_residual(
         t_eval=(float(phi0) + float(toroidal_span),),
     )
     if not solution.success:
-        raise RuntimeError(
+        raise MagneticAxisNotLocatedError(
             f"magnetic-axis return-map integration failed: {solution.message}"
         )
     return (np.asarray(solution.y[:, -1], dtype=float) - start) / float(scale)
@@ -95,7 +103,8 @@ def locate_magnetic_axis_point(
     phi0=0.0,
     r_bounds=None,
     z_bounds=None,
-    residual_tolerance=1.0e-8,
+    residual_tolerance=1.0e-6,
+    optimizer_tolerance=1.0e-10,
     rtol=1.0e-9,
     atol=1.0e-11,
     max_step=0.05,
@@ -105,8 +114,9 @@ def locate_magnetic_axis_point(
     """Locate the magnetic-axis fixed point in an R/Z Poincare section.
 
     The returned point is the root of ``P(R, Z) - (R, Z)`` for the field-line
-    return map over one full toroidal turn (2*pi). This avoids using the boundary
-    centroid as a proxy for the magnetic axis when defining poloidal angles.
+    return map over one full toroidal turn (2*pi). Callers may seed the solve
+    from a boundary centroid, but the returned point is accepted only from the
+    field-line fixed-point residual.
 
     The full-torus turn is used rather than a single field period (2*pi/nfp)
     because the axis is a fixed point of the field-period map only when the field
@@ -124,9 +134,14 @@ def locate_magnetic_axis_point(
     resolved_nfp = int(nfp)
     if resolved_nfp <= 0:
         raise ValueError("magnetic-axis locator requires nfp > 0")
-    tolerance = float(residual_tolerance)
-    if tolerance <= 0.0 or not math.isfinite(tolerance):
+    accept_tolerance = float(residual_tolerance)
+    if accept_tolerance <= 0.0 or not math.isfinite(accept_tolerance):
         raise ValueError("magnetic-axis residual_tolerance must be finite and positive")
+    solver_tolerance = float(optimizer_tolerance)
+    if solver_tolerance <= 0.0 or not math.isfinite(solver_tolerance):
+        raise ValueError(
+            "magnetic-axis optimizer_tolerance must be finite and positive"
+        )
 
     lower_r, upper_r = (
         (np.finfo(float).eps, np.inf) if r_bounds is None else tuple(r_bounds)
@@ -152,16 +167,18 @@ def locate_magnetic_axis_point(
         ),
         guess,
         bounds=(lower, upper),
-        xtol=tolerance,
-        ftol=tolerance,
-        gtol=tolerance,
+        xtol=solver_tolerance,
+        ftol=solver_tolerance,
+        gtol=solver_tolerance,
         max_nfev=int(max_nfev),
     )
     residual_norm = float(np.linalg.norm(result.fun))
-    if not result.success or residual_norm > tolerance:
-        raise RuntimeError(
+    if residual_norm > accept_tolerance:
+        raise MagneticAxisNotLocatedError(
             "magnetic-axis fixed-point solve did not converge below "
-            f"{tolerance:g}; residual={residual_norm:g}"
+            f"{accept_tolerance:g}; residual={residual_norm:g}; "
+            f"optimizer_success={bool(result.success)}; "
+            f"optimizer_message={result.message}"
         )
     return {
         "r": float(result.x[0]),
@@ -170,6 +187,9 @@ def locate_magnetic_axis_point(
         "nfp": resolved_nfp,
         "source": "magnetic_axis_fieldline_fixed_point",
         "normalized_return_residual": residual_norm,
+        "residual_accept_tolerance": accept_tolerance,
+        "optimizer_tolerance": solver_tolerance,
+        "optimizer_success": bool(result.success),
         "iterations": int(result.nfev),
     }
 

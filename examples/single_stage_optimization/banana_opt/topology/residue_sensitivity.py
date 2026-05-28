@@ -56,6 +56,11 @@ BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE = "biot_savart_branch_resolved_vjp"
 BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE = "biot_savart_branch_resolved_vjp_taylor"
 BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE = "active"
 BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_SATISFIED_FROZEN = "satisfied_frozen"
+BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD = "B_and_dB_vjp"
+BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD = "central_finite_difference_rk4"
+BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS = (
+    "local_state_jacobian_uses_central_finite_difference_rk4",
+)
 DEFAULT_RESIDUE_SATISFIED_THRESHOLD = 1.0e-4
 
 
@@ -230,6 +235,13 @@ class BiotSavartBranchResidueTaylorDiagnostic:
 
     def to_json_dict(self) -> dict[str, object]:
         payload = asdict(self)
+        payload["dof_gradient_method"] = BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD
+        payload["local_sensitivity_method"] = (
+            BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+        )
+        payload["local_sensitivity_limitations"] = list(
+            BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS
+        )
         payload["direction"] = list(self.direction)
         payload["base_state"] = list(self.base_state)
         payload["samples"] = [sample.to_json_dict() for sample in self.samples]
@@ -270,6 +282,13 @@ class BiotSavartBranchResidueVjpDiagnostic:
     def to_json_dict(self) -> dict[str, object]:
         return {
             "mode": self.mode,
+            "dof_gradient_method": BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD,
+            "local_sensitivity_method": (
+                BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+            ),
+            "local_sensitivity_limitations": list(
+                BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS
+            ),
             "gradient_status": self.gradient_status,
             "residue": self.residue,
             "base_status": self.base_status,
@@ -726,13 +745,9 @@ def branch_resolved_biot_savart_residue_taylor_diagnostic(
         expected_winding=expected_winding,
         base_winding=derivative.base_winding,
         base_winding_residual=derivative.base_winding - expected_winding,
-        base_raw_return_section_winding=(
-            derivative.base_raw_return_section_winding
-        ),
+        base_raw_return_section_winding=(derivative.base_raw_return_section_winding),
         base_det_m=derivative.base_det_m,
-        base_residue_classification=classify_greene_residue(
-            derivative.base_residue
-        ),
+        base_residue_classification=classify_greene_residue(derivative.base_residue),
         samples=tuple(samples),
         observed_orders=_observed_orders(tuple(samples)),
     )

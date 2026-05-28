@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 from .frontier_contracts import EpsilonThresholds
@@ -16,6 +17,7 @@ from .frontier_scalarization import (
     FRONTIER_REFERENCE_MODE_EPSILON,
     FrontierLaneSpec,
 )
+from .single_stage_search_contracts import resolve_frontier_invariant_torus_min
 
 FRONTIER_LANE_WARM_START_MODE_SEED = "seed"
 FRONTIER_LANE_WARM_START_MODE_REUSE_LATEST_CERTIFIED = "reuse_latest_certified"
@@ -108,12 +110,12 @@ def build_lane_rerun_contract(
     }
 
 
-def _frontier_invariant_torus_min(args: argparse.Namespace) -> float | None:
-    if getattr(args, "frontier_invariant_torus_min", None) is not None:
-        return float(args.frontier_invariant_torus_min)
-    if getattr(args, "frontier_kam_min", None) is not None:
-        return float(args.frontier_kam_min)
-    return None
+def _frontier_invariant_torus_min(args: argparse.Namespace) -> float:
+    return resolve_frontier_invariant_torus_min(
+        getattr(args, "frontier_invariant_torus_min", None),
+        getattr(args, "frontier_kam_min", None),
+        environment=os.environ,
+    )
 
 
 def _lane_reference_point(lane_spec: FrontierLaneSpec) -> dict[str, float] | None:

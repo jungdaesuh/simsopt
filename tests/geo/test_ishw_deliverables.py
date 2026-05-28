@@ -18,9 +18,7 @@ matplotlib.use("Agg")
 
 
 EXAMPLE_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    Path(__file__).resolve().parents[2] / "examples" / "single_stage_optimization"
 )
 if str(EXAMPLE_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_ROOT))
@@ -92,7 +90,9 @@ def canonical_banana_radius_m():
     return hardware_contracts.BANANA_WINDING_MINOR_RADIUS_M
 
 
-def write_stage2_results_with_digest(stage2_bs_path: Path, stage2_results: dict) -> Path:
+def write_stage2_results_with_digest(
+    stage2_bs_path: Path, stage2_results: dict
+) -> Path:
     results_path = stage2_bs_path.with_name("results.json")
     payload = dict(stage2_results)
     payload["STAGE2_BS_SHA256"] = hashlib.sha256(
@@ -129,25 +129,42 @@ class IotaTargetSweepTests(unittest.TestCase):
             stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
             stage2_results_path = tmpdir_path / "stage2" / "results.json"
 
-            with patch.object(
-                module.goal_mode_runner,
-                "maybe_load_validated_stage2_seed_metadata",
-                return_value=(
-                    stage2_bs_path,
-                    stage2_results_path,
-                    {
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "init_only": False,
-                        "BANANA_CURRENT_A": 12000.0,
-                    },
+            with (
+                patch.object(
+                    module.goal_mode_runner,
+                    "maybe_load_validated_stage2_seed_metadata",
+                    return_value=(
+                        stage2_bs_path,
+                        stage2_results_path,
+                        {
+                            "PLASMA_SURF_FILENAME": "demo.nc",
+                            "init_only": False,
+                            "BANANA_CURRENT_A": 12000.0,
+                        },
+                    ),
                 ),
-            ), patch.object(
-                module.goal_mode_runner,
-                "run_goal_mode_case",
-                side_effect=[
-                    {"command": ["python", "single_stage.py", "--iota-target", "0.15"]},
-                    {"command": ["python", "single_stage.py", "--iota-target", "0.20"]},
-                ],
+                patch.object(
+                    module.goal_mode_runner,
+                    "run_goal_mode_case",
+                    side_effect=[
+                        {
+                            "command": [
+                                "python",
+                                "single_stage.py",
+                                "--iota-target",
+                                "0.15",
+                            ]
+                        },
+                        {
+                            "command": [
+                                "python",
+                                "single_stage.py",
+                                "--iota-target",
+                                "0.20",
+                            ]
+                        },
+                    ],
+                ),
             ):
                 result = module.main(
                     [
@@ -291,26 +308,29 @@ class BananaCurrentScanTests(unittest.TestCase):
             stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
             stage2_results_path = tmpdir_path / "stage2" / "results.json"
 
-            with patch.object(
-                module.goal_mode_runner,
-                "load_validated_stage2_seed_metadata",
-                return_value=(
-                    stage2_bs_path,
-                    stage2_results_path,
-                    {
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "BANANA_CURRENT_A": 16000.0,
-                        "init_only": False,
-                    },
+            with (
+                patch.object(
+                    module.goal_mode_runner,
+                    "load_validated_stage2_seed_metadata",
+                    return_value=(
+                        stage2_bs_path,
+                        stage2_results_path,
+                        {
+                            "PLASMA_SURF_FILENAME": "demo.nc",
+                            "BANANA_CURRENT_A": 16000.0,
+                            "init_only": False,
+                        },
+                    ),
                 ),
-            ), patch.object(
-                module.goal_mode_runner,
-                "run_goal_mode_case",
-                side_effect=[
-                    {"command": ["python", "single_stage.py"]},
-                    {"command": ["python", "single_stage.py"]},
-                    {"command": ["python", "single_stage.py"]},
-                ],
+                patch.object(
+                    module.goal_mode_runner,
+                    "run_goal_mode_case",
+                    side_effect=[
+                        {"command": ["python", "single_stage.py"]},
+                        {"command": ["python", "single_stage.py"]},
+                        {"command": ["python", "single_stage.py"]},
+                    ],
+                ),
             ):
                 result = module.main(
                     [
@@ -336,7 +356,9 @@ class BananaCurrentScanTests(unittest.TestCase):
             self.assertTrue(
                 all(case["poincare_status"] == "dry_run" for case in summary["cases"])
             )
-            self.assertIn("banana_current_a", summary_csv_path.read_text(encoding="utf-8"))
+            self.assertIn(
+                "banana_current_a", summary_csv_path.read_text(encoding="utf-8")
+            )
 
     def test_omitted_banana_currents_uses_default_amp_setpoints(self):
         module = load_banana_scan_module()
@@ -347,25 +369,28 @@ class BananaCurrentScanTests(unittest.TestCase):
             stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
             stage2_results_path = tmpdir_path / "stage2" / "results.json"
 
-            with patch.object(
-                module.goal_mode_runner,
-                "load_validated_stage2_seed_metadata",
-                return_value=(
-                    stage2_bs_path,
-                    stage2_results_path,
-                    {
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "BANANA_CURRENT_A": self._DEFAULT_DONOR_BANANA_CURRENT_A,
-                        "init_only": False,
-                    },
+            with (
+                patch.object(
+                    module.goal_mode_runner,
+                    "load_validated_stage2_seed_metadata",
+                    return_value=(
+                        stage2_bs_path,
+                        stage2_results_path,
+                        {
+                            "PLASMA_SURF_FILENAME": "demo.nc",
+                            "BANANA_CURRENT_A": self._DEFAULT_DONOR_BANANA_CURRENT_A,
+                            "init_only": False,
+                        },
+                    ),
                 ),
-            ), patch.object(
-                module.goal_mode_runner,
-                "run_goal_mode_case",
-                side_effect=[
-                    {"command": ["python", "single_stage.py"]}
-                    for _ in module.DEFAULT_BANANA_CURRENT_FRACTIONS
-                ],
+                patch.object(
+                    module.goal_mode_runner,
+                    "run_goal_mode_case",
+                    side_effect=[
+                        {"command": ["python", "single_stage.py"]}
+                        for _ in module.DEFAULT_BANANA_CURRENT_FRACTIONS
+                    ],
+                ),
             ):
                 result = module.main(
                     [
@@ -415,40 +440,47 @@ class BananaCurrentScanTests(unittest.TestCase):
             fallback_root = tmpdir_path / "fallback"
             poincare_metrics_path = fallback_root / "PoincareMetrics_init.json"
 
-            with patch.object(
-                module.goal_mode_runner,
-                "load_validated_stage2_seed_metadata",
-                return_value=(
-                    stage2_bs_path,
-                    stage2_results_path,
-                    {
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "BANANA_CURRENT_A": 16000.0,
-                        "init_only": False,
-                    },
+            with (
+                patch.object(
+                    module.goal_mode_runner,
+                    "load_validated_stage2_seed_metadata",
+                    return_value=(
+                        stage2_bs_path,
+                        stage2_results_path,
+                        {
+                            "PLASMA_SURF_FILENAME": "demo.nc",
+                            "BANANA_CURRENT_A": 16000.0,
+                            "init_only": False,
+                        },
+                    ),
                 ),
-            ), patch.object(
-                module,
-                "_materialize_stage2_seed_variant",
-                return_value=(variant_bs_path, variant_results_path),
-            ), patch.object(
-                module.goal_mode_runner,
-                "run_goal_mode_case",
-                side_effect=subprocess.CalledProcessError(1, ["python"]),
-            ), patch.object(
-                module,
-                "_materialize_poincare_fallback_inputs",
-                return_value=fallback_root,
-            ), patch.object(
-                module,
-                "run_poincare_artifact",
-                return_value=["python", "poincare_surfaces.py"],
-            ), patch.object(
-                module,
-                "_load_poincare_metrics",
-                return_value=(
-                    poincare_metrics_path,
-                    {"validation_status": "ok"},
+                patch.object(
+                    module,
+                    "_materialize_stage2_seed_variant",
+                    return_value=(variant_bs_path, variant_results_path),
+                ),
+                patch.object(
+                    module.goal_mode_runner,
+                    "run_goal_mode_case",
+                    side_effect=subprocess.CalledProcessError(1, ["python"]),
+                ),
+                patch.object(
+                    module,
+                    "_materialize_poincare_fallback_inputs",
+                    return_value=fallback_root,
+                ),
+                patch.object(
+                    module,
+                    "run_poincare_artifact",
+                    return_value=["python", "poincare_surfaces.py"],
+                ),
+                patch.object(
+                    module,
+                    "_load_poincare_metrics",
+                    return_value=(
+                        poincare_metrics_path,
+                        {"validation_status": "ok"},
+                    ),
                 ),
             ):
                 result = module.main(
@@ -484,28 +516,32 @@ class BananaCurrentScanTests(unittest.TestCase):
             variant_bs_path = tmpdir_path / "variant" / "biot_savart_opt.json"
             variant_results_path = tmpdir_path / "variant" / "results.json"
 
-            with patch.object(
-                module.goal_mode_runner,
-                "load_validated_stage2_seed_metadata",
-                return_value=(
-                    stage2_bs_path,
-                    stage2_results_path,
-                    {
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "BANANA_CURRENT_A": 16000.0,
-                        "TOROIDAL_FLUX": 0.24,
-                        "MAJOR_RADIUS": 0.976,
-                        "init_only": False,
-                    },
+            with (
+                patch.object(
+                    module.goal_mode_runner,
+                    "load_validated_stage2_seed_metadata",
+                    return_value=(
+                        stage2_bs_path,
+                        stage2_results_path,
+                        {
+                            "PLASMA_SURF_FILENAME": "demo.nc",
+                            "BANANA_CURRENT_A": 16000.0,
+                            "TOROIDAL_FLUX": 0.24,
+                            "MAJOR_RADIUS": 0.976,
+                            "init_only": False,
+                        },
+                    ),
                 ),
-            ), patch.object(
-                module,
-                "_materialize_stage2_seed_variant",
-                return_value=(variant_bs_path, variant_results_path),
-            ), patch.object(
-                module.goal_mode_runner,
-                "run_goal_mode_case",
-                side_effect=subprocess.CalledProcessError(1, ["python"]),
+                patch.object(
+                    module,
+                    "_materialize_stage2_seed_variant",
+                    return_value=(variant_bs_path, variant_results_path),
+                ),
+                patch.object(
+                    module.goal_mode_runner,
+                    "run_goal_mode_case",
+                    side_effect=subprocess.CalledProcessError(1, ["python"]),
+                ),
             ):
                 result = module.main(
                     [
@@ -529,6 +565,7 @@ class BananaCurrentScanTests(unittest.TestCase):
             self.assertEqual(case["single_stage_status"], "failed")
             self.assertEqual(case["poincare_status"], "failed")
             self.assertIn("poincare_fallback_setup_failed", case["error_message"])
+
 
 class BananaCurrentScanSummaryTests(unittest.TestCase):
     def test_summary_uses_shared_dry_run_output_contract(self):
@@ -597,9 +634,7 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
         from simsopt.field.coil import ScaledCurrent, coils_via_symmetries
         from simsopt.geo import CurveXYZFourier
 
-        handoff = importlib.import_module(
-            "banana_opt.stage2_single_stage_handoff"
-        )
+        handoff = importlib.import_module("banana_opt.stage2_single_stage_handoff")
 
         banana_curve = CurveXYZFourier(96, 1)
         banana_curve.set_dofs([0.9, 0.2, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.0])
@@ -638,7 +673,7 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             "POLOIDAL_EXTENT_RAD": math.pi / 4.0,
             "POLOIDAL_EXTENT_THRESHOLD_RAD": math.pi / 4.0,
             "COIL_WIDTH": 0.10,
-            "WIDTH_MIN_THRESHOLD": 0.05,
+            "WIDTH_MIN_THRESHOLD": 0.1,
             "WIDTH_MAX_THRESHOLD": 0.17,
             "SELF_INTERSECT_PENALTY": 0.0,
             "SELF_INTERSECT_THRESHOLD": 0.0,
@@ -686,10 +721,7 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
                 coil.current.get_value() for coil in partitions.banana_coils
             ]
             self.assertTrue(
-                all(
-                    abs(abs(value) - 5500.0) < 1.0e-9
-                    for value in scaled_values
-                )
+                all(abs(abs(value) - 5500.0) < 1.0e-9 for value in scaled_values)
             )
             self.assertEqual(
                 [1.0 if value >= 0.0 else -1.0 for value in scaled_values],
@@ -711,10 +743,7 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
                 coil.current.get_value() for coil in partitions.banana_coils
             ]
             self.assertTrue(
-                all(
-                    abs(abs(value) - 11000.0) < 1.0e-9
-                    for value in restored_values
-                )
+                all(abs(abs(value) - 11000.0) < 1.0e-9 for value in restored_values)
             )
             self.assertEqual(
                 [1.0 if value >= 0.0 else -1.0 for value in restored_values],
@@ -760,10 +789,7 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
                 coil.current.get_value() for coil in partitions.banana_coils
             ]
             self.assertTrue(
-                all(
-                    abs(abs(value) - 5500.0) < 1.0e-9
-                    for value in scaled_values
-                )
+                all(abs(abs(value) - 5500.0) < 1.0e-9 for value in scaled_values)
             )
 
     def test_materialize_stage2_seed_variant_emits_matching_checksum(self):
@@ -776,39 +802,48 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             def save(path):
                 Path(path).write_text('{"variant": true}', encoding="utf-8")
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            module,
-            "load",
-            return_value=_FakeBS(),
-        ), patch.object(
-            module,
-            "partition_loaded_stage2_coils",
-            return_value=SimpleNamespace(
-                tf_coils=[
-                    SimpleNamespace(
-                        current=SimpleNamespace(get_value=lambda: -8.0e4)
-                    )
-                ],
-                banana_coils=[object()],
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                module,
+                "load",
+                return_value=_FakeBS(),
             ),
-        ), patch.object(
-            module,
-            "_scale_banana_current_chain",
+            patch.object(
+                module,
+                "partition_loaded_stage2_coils",
+                return_value=SimpleNamespace(
+                    tf_coils=[
+                        SimpleNamespace(
+                            current=SimpleNamespace(get_value=lambda: -8.0e4)
+                        )
+                    ],
+                    banana_coils=[object()],
+                ),
+            ),
+            patch.object(
+                module,
+                "_scale_banana_current_chain",
+            ),
         ):
             tmpdir_path = Path(tmpdir)
             seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
             seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
             seed_bs_path.write_text('{"seed": true}', encoding="utf-8")
 
-            variant_bs_path, variant_results_path = module._materialize_stage2_seed_variant(
-                stage2_bs_path=seed_bs_path,
-                stage2_results={},
-                variant_root=tmpdir_path / "variant",
-                banana_current_a=5500.0,
-                requested_num_tf_coils=20,
+            variant_bs_path, variant_results_path = (
+                module._materialize_stage2_seed_variant(
+                    stage2_bs_path=seed_bs_path,
+                    stage2_results={},
+                    variant_root=tmpdir_path / "variant",
+                    banana_current_a=5500.0,
+                    requested_num_tf_coils=20,
+                )
             )
 
-            variant_results = json.loads(variant_results_path.read_text(encoding="utf-8"))
+            variant_results = json.loads(
+                variant_results_path.read_text(encoding="utf-8")
+            )
             expected_digest = module.compute_stage2_bs_sha256(variant_bs_path)
 
         self.assertEqual(
@@ -825,19 +860,27 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
         class _FakeBS:
             coils = [object()]
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            module,
-            "load",
-            return_value=_FakeBS(),
-        ), patch.object(
-            module,
-            "partition_loaded_stage2_coils",
-            return_value=SimpleNamespace(
-                tf_coils=[
-                    SimpleNamespace(current=SimpleNamespace(get_value=lambda: -8.0e4)),
-                    SimpleNamespace(current=SimpleNamespace(get_value=lambda: 8.0e4)),
-                ],
-                banana_coils=[object()],
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                module,
+                "load",
+                return_value=_FakeBS(),
+            ),
+            patch.object(
+                module,
+                "partition_loaded_stage2_coils",
+                return_value=SimpleNamespace(
+                    tf_coils=[
+                        SimpleNamespace(
+                            current=SimpleNamespace(get_value=lambda: -8.0e4)
+                        ),
+                        SimpleNamespace(
+                            current=SimpleNamespace(get_value=lambda: 8.0e4)
+                        ),
+                    ],
+                    banana_coils=[object()],
+                ),
             ),
         ):
             tmpdir_path = Path(tmpdir)
@@ -937,10 +980,7 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
         self.assertEqual(variant_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
         self.assertEqual(
             variant_results["DONOR_BANANA_CURRENTS_A"],
-            [
-                coil.current.get_value()
-                for coil in donor_partitions.banana_coils
-            ],
+            [coil.current.get_value() for coil in donor_partitions.banana_coils],
         )
         self.assertEqual(variant_results["DONOR_BANANA_CURRENT_A"], 11000.0)
         self.assertEqual(variant_results["CUSTOM_PROVENANCE"], "test-vector")
@@ -948,7 +988,9 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
         self.assertEqual(variant_points, donor_points)
         handoff_module.validate_stage2_seed_contract(variant_results)
 
-    def test_materialize_stage2_seed_variant_from_currents_rejects_length_mismatch(self):
+    def test_materialize_stage2_seed_variant_from_currents_rejects_length_mismatch(
+        self,
+    ):
         module = load_banana_scan_module()
         bs, stage2_results, _, _ = self._build_banana_partitions(11000.0)
 
@@ -1008,9 +1050,7 @@ class PerturbedBananaSeedTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             summary = json.loads(
-                (output_root / module.DEFAULT_SUMMARY_JSON).read_text(
-                    encoding="utf-8"
-                )
+                (output_root / module.DEFAULT_SUMMARY_JSON).read_text(encoding="utf-8")
             )
             variant_results = json.loads(
                 (output_root / "results.json").read_text(encoding="utf-8")
@@ -1097,9 +1137,7 @@ class PerturbedBananaSeedTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             summary = json.loads(
-                (output_root / module.DEFAULT_SUMMARY_JSON).read_text(
-                    encoding="utf-8"
-                )
+                (output_root / module.DEFAULT_SUMMARY_JSON).read_text(encoding="utf-8")
             )
             variant_results = json.loads(
                 (output_root / "results.json").read_text(encoding="utf-8")
@@ -1160,7 +1198,9 @@ class PerturbedBananaSeedTests(unittest.TestCase):
                     ]
                 )
 
-    def test_main_keeps_init_only_donor_metadata_without_unsupported_single_stage_flag(self):
+    def test_main_keeps_init_only_donor_metadata_without_unsupported_single_stage_flag(
+        self,
+    ):
         module = load_perturbed_seed_module()
         bs, stage2_results, _, _ = (
             BananaCurrentChainScalingTests._build_banana_partitions(11000.0)
@@ -1189,9 +1229,7 @@ class PerturbedBananaSeedTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             summary = json.loads(
-                (output_root / module.DEFAULT_SUMMARY_JSON).read_text(
-                    encoding="utf-8"
-                )
+                (output_root / module.DEFAULT_SUMMARY_JSON).read_text(encoding="utf-8")
             )
 
         self.assertTrue(summary["donor_init_only"])
@@ -1296,9 +1334,7 @@ class IshwPlotTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             manifest = json.loads(
-                (output_root / module.DEFAULT_MANIFEST_JSON).read_text(
-                    encoding="utf-8"
-                )
+                (output_root / module.DEFAULT_MANIFEST_JSON).read_text(encoding="utf-8")
             )
             self.assertTrue(manifest["generated_plots"]["iota_target_vs_coil_length"])
             self.assertTrue(manifest["generated_plots"]["banana_current_a_vs_iota"])
@@ -1368,14 +1404,17 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 solve_failed=False,
             )
 
-        with patch.object(
-            module,
-            "_stage2_poloidal_extent_rad",
-            return_value=0.1,
-        ), patch.object(
-            module,
-            "evaluate_stage2_iota_state",
-            side_effect=evaluate_iota,
+        with (
+            patch.object(
+                module,
+                "_stage2_poloidal_extent_rad",
+                return_value=0.1,
+            ),
+            patch.object(
+                module,
+                "evaluate_stage2_iota_state",
+                side_effect=evaluate_iota,
+            ),
         ):
             state = module._capture_stage2_artifact_state(
                 dofs=[0.0, 1.0],
@@ -1389,14 +1428,10 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 Jcsdist=SimpleNamespace(shortest_distance=lambda: 0.02),
                 new_banana_curve=SimpleNamespace(kappa=lambda: np.array([10.0])),
                 new_banana_coils=[
-                    SimpleNamespace(
-                        current=SimpleNamespace(get_value=lambda: -1.0e4)
-                    )
+                    SimpleNamespace(current=SimpleNamespace(get_value=lambda: -1.0e4))
                 ],
                 new_tf_coils=[
-                    SimpleNamespace(
-                        current=SimpleNamespace(get_value=lambda: -8.0e4)
-                    )
+                    SimpleNamespace(current=SimpleNamespace(get_value=lambda: -8.0e4))
                 ],
                 length_target=1.9,
                 cc_threshold=0.05,
@@ -1479,7 +1514,9 @@ class Stage2IotaReportingTests(unittest.TestCase):
             "-1.0",
         )
 
-    def test_run_stage2_alm_expected_metadata_canonicalizes_exact_constraint_weight(self):
+    def test_run_stage2_alm_expected_metadata_canonicalizes_exact_constraint_weight(
+        self,
+    ):
         module = load_module(EXAMPLE_ROOT / "run_stage2_alm.py", "run_stage2_alm")
 
         config = module.Stage2ArtifactConfig(
@@ -1530,7 +1567,9 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 ]
             )
 
-    def test_stage2_iota_report_payload_reuses_bootability_schema_without_recovery_fields(self):
+    def test_stage2_iota_report_payload_reuses_bootability_schema_without_recovery_fields(
+        self,
+    ):
         module = load_stage2_module()
 
         args = SimpleNamespace(
@@ -1586,7 +1625,9 @@ class Stage2IotaReportingTests(unittest.TestCase):
         )
         self.assertIsNotNone(payload["STAGE2_IOTA_PROBE_SECONDS"])
 
-    def test_stage2_iota_report_payload_maps_nonpositive_constraint_weight_to_exact_mode(self):
+    def test_stage2_iota_report_payload_maps_nonpositive_constraint_weight_to_exact_mode(
+        self,
+    ):
         module = load_stage2_module()
 
         args = SimpleNamespace(
@@ -1684,7 +1725,9 @@ class Stage2IotaReportingTests(unittest.TestCase):
         self.assertIsNone(payload["STAGE2_IOTA_FINAL_SOLVE_FAILED"])
         self.assertIsNotNone(payload["STAGE2_IOTA_PROBE_SECONDS"])
 
-    def test_stage2_iota_hot_loop_payload_preserves_final_values_after_solve_failure(self):
+    def test_stage2_iota_hot_loop_payload_preserves_final_values_after_solve_failure(
+        self,
+    ):
         module = load_stage2_module()
 
         args = SimpleNamespace(
@@ -1743,8 +1786,16 @@ class Stage2IotaReportingTests(unittest.TestCase):
             secondary_source="accepted_iterate",
         )
 
-        self.assertTrue(bs_path.endswith("secondary_exact_hardware_pass_iota_fail/biot_savart_opt.json"))
-        self.assertTrue(results_path.endswith("secondary_exact_hardware_pass_iota_fail/results.json"))
+        self.assertTrue(
+            bs_path.endswith(
+                "secondary_exact_hardware_pass_iota_fail/biot_savart_opt.json"
+            )
+        )
+        self.assertTrue(
+            results_path.endswith(
+                "secondary_exact_hardware_pass_iota_fail/results.json"
+            )
+        )
         self.assertTrue(metadata["STAGE2_SECONDARY_ARTIFACT_PRESERVED"])
         self.assertEqual(
             metadata["STAGE2_SECONDARY_ARTIFACT_REASON"],

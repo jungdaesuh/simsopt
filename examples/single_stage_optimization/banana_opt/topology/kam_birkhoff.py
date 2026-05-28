@@ -14,9 +14,16 @@ DEFAULT_WBA_INVARIANT_MIN_DIGITS = 8.0
 DEFAULT_WBA_ISLAND_MIN_DIGITS = 4.0
 DEFAULT_WBA_RATIONAL_MAX_DENOMINATOR = 24
 DEFAULT_WBA_DIFF_FLOOR = 1.0e-15
-DEFAULT_WBA_EXACT_RATIONAL_TOLERANCE = DEFAULT_WBA_DIFF_FLOOR
+# Known limitation: this single-surface rationality test does not include the
+# radial rotation-number plateau discriminator needed to certify every island.
+DEFAULT_WBA_EXACT_RATIONAL_TOLERANCE = 1.0e-8
 DEFAULT_WBA_MIN_WINDING_SIGN_FRACTION = 0.95
 DEFAULT_WBA_WINDING_INCREMENT_FLOOR = 1.0e-12
+DEFAULT_WBA_ALIAS_WINDING_CONCENTRATION_MAX = 0.5
+DEFAULT_WBA_ALIAS_ADVANCE_CONCENTRATION_MIN = 0.75
+WBA_ISLAND_DISCRIMINATOR = "single_surface_exact_low_order_rational"
+WBA_CLASSIFIER_KNOWN_LIMITATIONS = ("no_radial_rotation_number_plateau_discriminator",)
+WBA_FRACTION_DENOMINATOR_POLICY = "survived_non_lost_seeds"
 KAM_FRACTION_SEMANTICS = "weighted_birkhoff_invariant_torus_fraction"
 
 KAM_CLASS_INVARIANT_TORUS = "invariant_torus"
@@ -37,6 +44,7 @@ WBA_EVALUATION_NOT_EVALUATED_INVALID_POLAR_REFERENCE = (
 WBA_EVALUATION_NOT_EVALUATED_MISSING_MAGNETIC_AXIS = (
     "not_evaluated_missing_magnetic_axis"
 )
+WBA_EVALUATION_NOT_EVALUATED_AXIS_NOT_LOCATED = "not_evaluated_axis_not_located"
 WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS = "not_evaluated_no_classified_seeds"
 WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER = "not_evaluated_skipped_by_caller"
 
@@ -83,7 +91,11 @@ class SeedClassification:
 def classifier_settings_payload(
     settings: BirkhoffClassifierSettings = DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
 ) -> dict[str, object]:
-    return asdict(settings)
+    return {
+        **asdict(settings),
+        "island_discriminator": WBA_ISLAND_DISCRIMINATOR,
+        "known_limitations": list(WBA_CLASSIFIER_KNOWN_LIMITATIONS),
+    }
 
 
 def weighted_birkhoff_weights(count: int) -> np.ndarray:
@@ -121,6 +133,35 @@ def matching_digits_from_difference(
     return float(-math.log10(max(float(difference), float(floor))))
 
 
+def normalized_wrapped_rotation_increments(angles_rad: Sequence[float]) -> np.ndarray:
+    """Return section advances, using modulo-one increments for principal angles."""
+
+    angles = np.asarray(angles_rad, dtype=float)
+    if angles.ndim != 1:
+        raise ValueError("WBA classification requires a one-dimensional angle series")
+    if not np.all(np.isfinite(angles)):
+        raise ValueError("WBA classification received NaN/Inf angles")
+    if angles.size < 2:
+        return np.empty((0,), dtype=float)
+    raw_increments = np.diff(angles) / (2.0 * np.pi)
+    principal_bound = np.pi + 1.0e-12
+    if np.all(np.abs(angles) <= principal_bound):
+        modulo_advances = np.mod(raw_increments, 1.0)
+        mean_phase = np.mean(np.exp(2j * np.pi * modulo_advances))
+        reference_advance = float(np.angle(mean_phase) / (2.0 * np.pi)) % 1.0
+        candidates = np.stack(
+            (raw_increments - 1.0, raw_increments, raw_increments + 1.0),
+            axis=0,
+        )
+        candidate_indices = np.argmin(np.abs(candidates - reference_advance), axis=0)
+        return np.take_along_axis(
+            candidates,
+            candidate_indices.reshape(1, -1),
+            axis=0,
+        ).reshape(-1)
+    return raw_increments
+
+
 def nearest_rational(
     value: float,
     *,
@@ -143,7 +184,7 @@ def classify_angle_series(
     seed_index: int = 0,
     settings: BirkhoffClassifierSettings = DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
 ) -> SeedClassification:
-    angles = np.unwrap(np.asarray(angles_rad, dtype=float))
+    angles = np.asarray(angles_rad, dtype=float)
     if angles.ndim != 1:
         raise ValueError("WBA classification requires a one-dimensional angle series")
     if not np.all(np.isfinite(angles)):
@@ -163,7 +204,7 @@ def classify_angle_series(
             reason="insufficient_poincare_returns",
         )
 
-    increments = np.diff(angles) / (2.0 * np.pi)
+    increments = normalized_wrapped_rotation_increments(angles)
     split = increments.size // 2
     first_rotation_raw = weighted_birkhoff_average(increments[:split])
     second_rotation_raw = weighted_birkhoff_average(increments[split:])
@@ -215,7 +256,8 @@ def poloidal_angle_series_has_consistent_winding(
     *,
     settings: BirkhoffClassifierSettings = DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
 ) -> bool:
-    angles = np.unwrap(np.asarray(angles_rad, dtype=float))
+    raw_angles = np.asarray(angles_rad, dtype=float)
+    angles = np.unwrap(raw_angles)
     if angles.ndim != 1:
         raise ValueError("WBA winding check requires a one-dimensional angle series")
     if not np.all(np.isfinite(angles)):
@@ -233,7 +275,20 @@ def poloidal_angle_series_has_consistent_winding(
         return False
     direction = 1.0 if net_increment > 0.0 else -1.0
     same_direction_fraction = float(np.mean(significant * direction > 0.0))
-    return same_direction_fraction >= float(settings.min_winding_sign_fraction)
+    if same_direction_fraction >= float(settings.min_winding_sign_fraction):
+        return True
+
+    principal_bound = np.pi + 1.0e-12
+    if not np.all(np.abs(raw_angles) <= principal_bound):
+        return False
+    modulo_advances = normalized_wrapped_rotation_increments(raw_angles)
+    if modulo_advances.size == 0:
+        return False
+    advance_concentration = float(abs(np.mean(np.exp(2j * np.pi * modulo_advances))))
+    if advance_concentration < DEFAULT_WBA_ALIAS_ADVANCE_CONCENTRATION_MIN:
+        return False
+    phasor_concentration = float(abs(np.mean(np.exp(1j * raw_angles))))
+    return phasor_concentration <= DEFAULT_WBA_ALIAS_WINDING_CONCENTRATION_MAX
 
 
 def invalid_poloidal_reference_classification(
@@ -453,6 +508,8 @@ def summarize_seed_classifications(
     return {
         "invariant_torus_fraction": (None if fraction is None else float(fraction)),
         "invariant_torus_count": int(len(invariant)),
+        "wba_fraction_denominator_policy": WBA_FRACTION_DENOMINATOR_POLICY,
+        "wba_fraction_denominator_seed_count": int(survived_count),
         "wba_seed_count": int(total),
         "wba_survived_seed_count": int(survived_count),
         "wba_classified_seed_count": int(classified_count),

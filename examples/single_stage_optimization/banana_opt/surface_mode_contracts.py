@@ -21,9 +21,7 @@ SURFACE_MODE_SOURCE_WRAPPER_DEFINED = "wrapper_defined"
 
 SURFACE_STACK_POLICY_SINGLE_SURFACE_DIRECT = "single_surface_direct"
 SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK = "published_fixed_stack"
-SURFACE_STACK_POLICY_EXPERIMENTAL_CONTINUATION_STACK = (
-    "experimental_continuation_stack"
-)
+SURFACE_STACK_POLICY_EXPERIMENTAL_CONTINUATION_STACK = "experimental_continuation_stack"
 
 _PUBLISHED_LABEL_FRACTIONS_V1 = (0.6, 0.8, 1.0)
 _SINGLE_SURFACE_NAMES = ("outer",)
@@ -83,8 +81,8 @@ def resolve_surface_mode(
             SURFACE_MODE_SOURCE_EXPLICIT_CLI,
         )
 
-    resolved_legacy_num_surfaces = 1 if legacy_num_surfaces is None else int(
-        legacy_num_surfaces
+    resolved_legacy_num_surfaces = (
+        1 if legacy_num_surfaces is None else int(legacy_num_surfaces)
     )
     if resolved_legacy_num_surfaces == 1:
         mode = SINGLE_SURFACE
@@ -146,8 +144,9 @@ def resolve_surface_physics_contract(mode: str) -> str:
         )
     if resolved_mode == PUBLISHED_MULTISURFACE:
         return (
-            "fixed multisurface stack; QS and Boozer residual aggregate across all "
-            "configured surfaces; outer-surface iota and volume only in v1"
+            "vacuum-locked fixed multisurface stack; QS and Boozer residual "
+            "aggregate across all configured surfaces; outer-surface iota and "
+            "volume only in v1"
         )
     return (
         "custom two-surface stack; QS and Boozer residual aggregate across both "

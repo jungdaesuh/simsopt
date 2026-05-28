@@ -20,6 +20,12 @@ from .search_evaluation import (
 from .topology.kam_birkhoff import KAM_FRACTION_SEMANTICS
 
 _DEFAULT_FRONTIER_SEARCH_CONTRACT_PENALTY_SCALE = 4.0
+# Conservative interim floor from the current known-good nested donor envelope:
+# it makes the WBA fraction non-vacuous while calibration remains artifact-local.
+DEFAULT_FRONTIER_INVARIANT_TORUS_MIN = 0.30
+FRONTIER_INVARIANT_TORUS_MIN_RATIONALE = (
+    "conservative_nonzero_interim_floor_from_known_good_nested_donors"
+)
 _DIAGNOSTIC_HARDWARE_RATIO_NAMES = frozenset(
     {
         "surface_vessel_min_dist",
@@ -41,6 +47,32 @@ def _finite_float_or_none(value: object) -> float | None:
     if not np.isfinite(numeric):
         return None
     return numeric
+
+
+def default_frontier_invariant_torus_min() -> float:
+    """Return the non-vacuous default WBA floor for frontier certification."""
+
+    return DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+
+
+def resolve_frontier_invariant_torus_min(
+    frontier_invariant_torus_min: object | None,
+    frontier_kam_min: object | None,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> float:
+    """Resolve the canonical frontier WBA floor from explicit values, env, or default."""
+
+    if frontier_invariant_torus_min is not None:
+        return float(frontier_invariant_torus_min)
+    if frontier_kam_min is not None:
+        return float(frontier_kam_min)
+    if environment is not None:
+        if "FRONTIER_INVARIANT_TORUS_MIN" in environment:
+            return float(environment["FRONTIER_INVARIANT_TORUS_MIN"])
+        if "FRONTIER_KAM_MIN" in environment:
+            return float(environment["FRONTIER_KAM_MIN"])
+    return default_frontier_invariant_torus_min()
 
 
 def _topology_entry_invariant_torus_fraction(

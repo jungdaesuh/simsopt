@@ -2182,6 +2182,8 @@ class SingleStageExampleTests(unittest.TestCase):
                 return_value={
                     "invariant_torus_fraction": None,
                     "invariant_torus_count": 0,
+                    "wba_fraction_denominator_policy": None,
+                    "wba_fraction_denominator_seed_count": 0,
                     "wba_seed_count": 0,
                     "wba_survived_seed_count": 0,
                     "wba_classified_seed_count": 0,
@@ -2295,7 +2297,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(result["survived_lines"], 0)
         self.assertTrue(np.isinf(result["confinement_loss"]))
 
-    def test_kam_fraction_counts_empty_hit_rows_as_unbounded_seeds(self):
+    def test_legacy_bounded_seed_fraction_counts_empty_hit_rows_as_unbounded_seeds(
+        self,
+    ):
         module = load_topology_scorer_module()
         bounded_line = np.array(
             [
@@ -2306,7 +2310,7 @@ class SingleStageExampleTests(unittest.TestCase):
             dtype=float,
         )
 
-        fraction, median_width = module.kam_fraction(
+        fraction, median_width = module.legacy_bounded_seed_fraction(
             [np.empty((0, 5)), bounded_line],
             cross_section_span=1.0,
             width_ratio=0.25,
@@ -2347,7 +2351,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(metrics["validation_status"], "broken")
         self.assertEqual(metrics["stop_reason_counts"]["iteration_limit"], 1)
 
-    def test_kam_fraction_and_trace_metrics_share_first_stop_semantics(self):
+    def test_legacy_bounded_seed_fraction_and_trace_metrics_share_first_stop_semantics(
+        self,
+    ):
         topology_module = load_topology_scorer_module()
         hits = np.array(
             [
@@ -2367,7 +2373,7 @@ class SingleStageExampleTests(unittest.TestCase):
             ["surface_exit"],
             mode="validation",
         )
-        fraction, median_width = topology_module.kam_fraction(
+        fraction, median_width = topology_module.legacy_bounded_seed_fraction(
             [hits],
             cross_section_span=1.0,
             width_ratio=0.25,
@@ -3308,6 +3314,60 @@ class SingleStageExampleTests(unittest.TestCase):
             ],
         )
         self.assertEqual(warm_paths, [])
+
+    def test_published_multisurface_vacuum_request_normalizes_default_donor_mode(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            ),
+            warn_on_legacy_mapping=False,
+        )
+        requested_args = SimpleNamespace(
+            boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode="vacuum",
+        )
+
+        finite_current_mode = (
+            module.resolve_stage2_finite_current_mode_for_surface_mode(
+                {"FINITE_CURRENT_MODE": module.DEFAULT_FINITE_CURRENT_MODE},
+                requested_args.finite_current_mode,
+                contract,
+            )
+        )
+        settings = module.resolve_plasma_current_settings(
+            requested_args,
+            finite_current_mode=finite_current_mode,
+            default_plasma_current_A=0.0,
+            num_surfaces=contract.num_surfaces,
+            surface_mode_contract=contract,
+        )
+
+        self.assertEqual(finite_current_mode, module.DEFAULT_FINITE_CURRENT_MODE)
+        self.assertEqual(settings["mode"], "vacuum")
+        self.assertEqual(settings["effective_mode"], "vacuum")
+        self.assertEqual(settings["plasma_current_A"], 0.0)
+
+        inherited_nonvacuum_mode = (
+            module.resolve_stage2_finite_current_mode_for_surface_mode(
+                {"FINITE_CURRENT_MODE": "jhalpern30_proxy_field"},
+                requested_args.finite_current_mode,
+                contract,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "vacuum-locked"):
+            module.resolve_plasma_current_settings(
+                requested_args,
+                finite_current_mode=inherited_nonvacuum_mode,
+                default_plasma_current_A=0.0,
+                num_surfaces=contract.num_surfaces,
+                surface_mode_contract=contract,
+            )
 
     def test_published_stage2_seed_requires_solved_iota_and_G(self):
         module = self.load_module()
@@ -5017,6 +5077,8 @@ class HardwareConstraintTests(unittest.TestCase):
             "confinement_early_exit_threshold": 0.2,
             "invariant_torus_fraction": 1.0 / 12.0,
             "kam_fraction": 1.0 / 12.0,
+            "wba_fraction_denominator_policy": "survived_non_lost_seeds",
+            "wba_fraction_denominator_seed_count": 12,
             "kam_median_width": 0.08275987797445103,
             "cross_section_span": 0.19712474791042184,
             "stop_reason_counts": {"surface_exit": 0},
@@ -5045,6 +5107,14 @@ class HardwareConstraintTests(unittest.TestCase):
             topology_result["invariant_torus_fraction"],
         )
         self.assertEqual(entry["kam_fraction"], topology_result["kam_fraction"])
+        self.assertEqual(
+            entry["wba_fraction_denominator_policy"],
+            topology_result["wba_fraction_denominator_policy"],
+        )
+        self.assertEqual(
+            entry["wba_fraction_denominator_seed_count"],
+            topology_result["wba_fraction_denominator_seed_count"],
+        )
         self.assertEqual(entry["kam_median_width"], topology_result["kam_median_width"])
         self.assertEqual(
             entry["cross_section_span"], topology_result["cross_section_span"]
@@ -6593,7 +6663,9 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(run_dict["best_feasible_stage"], "raw_low")
         np.testing.assert_allclose(run_dict["best_feasible_incumbent"].x, [1.0, 2.0])
 
-    def test_frontier_default_kam_floor_reports_hardware_failed_not_kam_deficit(self):
+    def test_frontier_explicit_zero_kam_floor_reports_hardware_failed_not_kam_deficit(
+        self,
+    ):
         module = load_single_stage_example_module()
         module.SINGLE_STAGE_GOAL_MODE = "frontier"
         module.FRONTIER_INVARIANT_TORUS_MIN = 0.0
@@ -6633,6 +6705,33 @@ class HardwareConstraintTests(unittest.TestCase):
             run_dict["search_eval"]["frontier_certification_reason"],
             "hardware_failed",
         )
+
+    def test_frontier_default_kam_floor_is_nonzero_and_rejects_low_wba_fraction(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_INVARIANT_TORUS_MIN = (
+            module._default_frontier_invariant_torus_min_impl()
+        )
+        module.FRONTIER_KAM_MIN = module.FRONTIER_INVARIANT_TORUS_MIN
+        run_dict = {"search_eval": {"total": 4.0, "frontier_rank_total": 4.0}}
+
+        status = module.refresh_frontier_certification_status(
+            run_dict,
+            hardware_status={"success": True, "violations": []},
+            accepted_iteration=9,
+            topology_entry={
+                "accepted_iteration": 9,
+                "topology_broken": False,
+                "invariant_torus_fraction": 1.0 / 12.0,
+                "kam_fraction": 1.0 / 12.0,
+                "kam_fraction_semantics": module.KAM_FRACTION_SEMANTICS,
+            },
+        )
+
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["reason"], "invariant_torus_fraction_below_min")
+        self.assertEqual(status["invariant_torus_min"], 0.30)
+        self.assertGreater(status["invariant_torus_deficit"], 0.0)
 
     def test_frontier_certification_requires_invariant_torus_semantics_for_legacy_kam_field(
         self,
@@ -7726,12 +7825,14 @@ class HardwareConstraintTests(unittest.TestCase):
         # the stamp lands at producer time, independent of the consumer-side
         # legacy upgrader. This test guards against the wiring being removed.
         source = EXAMPLE_MODULE_PATH.read_text(encoding="utf-8")
-        write_idx = source.index(
-            'write_json_artifact(os.path.join(OUT_DIR_ITER, "results.json")'
-        )
-        # Window the lookback to the immediately-preceding lines so unrelated
-        # call sites elsewhere in the file cannot spoof a passing assertion.
-        window = source[max(0, write_idx - 800) : write_idx]
+        # The final results.json write is hoisted: ``results_path =
+        # os.path.join(OUT_DIR_ITER, "results.json")`` then
+        # ``write_json_artifact(results_path, results)`` (unique in the module).
+        write_idx = source.index("write_json_artifact(results_path, results)")
+        # Window the lookback so unrelated call sites elsewhere in the file
+        # cannot spoof a passing assertion, with margin above the current
+        # stamp->write distance (~930 chars) for intervening result fields.
+        window = source[max(0, write_idx - 1500) : write_idx]
         self.assertIn("wout_convention_artifact_fields(", window)
         self.assertIn("wout_path=file_loc", window)
         self.assertIn("tf_current_A=stage2_tf_current_A", window)
@@ -10186,13 +10287,13 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(hardware_status["success"])
         self.assertIn("width_min", hardware_status["constraints"])
         self.assertIn("self_intersect", hardware_status["constraints"])
-        self.assertAlmostEqual(ratios["width_min"], 0.6)
+        self.assertAlmostEqual(ratios["width_min"], 0.8)
         self.assertAlmostEqual(ratios["self_intersect"], 0.25)
         self.assertAlmostEqual(
             module.run_dict["last_successful_eval"]["frontier_hardware_penalty"],
-            16.8,
+            22.4,
         )
-        self.assertAlmostEqual(evaluation["total"], 18.8)
+        self.assertAlmostEqual(evaluation["total"], 24.4)
 
     def test_evaluate_search_step_repair_phase1_keeps_valid_hardware_bad_candidate_live(
         self,
@@ -14894,6 +14995,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(excinfo.exception.code, 0)
         self.assertIn("--banana-current-fd-diagnostics", help_text)
         self.assertIn("+/-1% perturbations", help_text)
+        self.assertIn("direct_proxy_consistency_validations", help_text)
+        self.assertIn("real_field_nonzero_winding_validations", help_text)
 
     def test_single_stage_parse_args_accepts_goal_mode_flag(self):
         module = load_single_stage_example_module()

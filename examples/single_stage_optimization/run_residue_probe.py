@@ -163,9 +163,10 @@ def parse_args() -> argparse.Namespace:
         "--residue-objective-seeds-json",
         help=(
             "JSON file with target_manifest_id, validation_status='passed', "
-            "validation_artifact_id, branch_seeds, and "
-            "optimizer_taylor_validations. Required when "
-            "--residue-objective-weight is nonzero."
+            "validation_artifact_id, branch_seeds, optimizer_taylor_validations, "
+            "direct_proxy_consistency_validations for nonzero objective weights, "
+            "and real_field_nonzero_winding_validations for nonzero-winding "
+            "targets. Required when --residue-objective-weight is nonzero."
         ),
     )
     parser.add_argument(

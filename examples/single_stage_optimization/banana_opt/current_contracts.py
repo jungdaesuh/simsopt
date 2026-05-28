@@ -73,6 +73,12 @@ EffectiveCurrentMode = Literal[
 ]
 CURRENT_MODE_ZERO_TOL = 1e-12
 DEFAULT_FINITE_CURRENT_MODE: FiniteCurrentMode = "wataru_proxy_field"
+FINITE_CURRENT_MODE_CHOICES: tuple[FiniteCurrentMode, ...] = (
+    "vacuum",
+    "boozer_surrogate",
+    DEFAULT_FINITE_CURRENT_MODE,
+    "jhalpern30_proxy_field",
+)
 HBT_PROXY_VF_CURRENT_RATIO = 1.0 / 6.5
 HBT_PROXY_VF_CURRENT_TOL_A = 1.0e-9
 FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA: FiniteCurrentModeSource = (
@@ -90,6 +96,7 @@ __all__ = [
     "DEFAULT_FINITE_CURRENT_MODE",
     "EffectiveCurrentMode",
     "FiniteCurrentMode",
+    "FINITE_CURRENT_MODE_CHOICES",
     "FiniteCurrentModeSource",
     "FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA",
     "FINITE_CURRENT_MODE_SOURCE_LEGACY_ASSUMED_DEFAULT",
@@ -781,6 +788,9 @@ def resolve_plasma_current_settings_for_surface_mode(
     requested_finite_current_mode: FiniteCurrentMode | None = None,
 ) -> PlasmaCurrentSettings:
     if surface_mode_contract.mode == PUBLISHED_MULTISURFACE:
+        # published_multisurface v1 is vacuum-locked. It accepts legacy/default
+        # mode tokens as CLI compatibility aliases, then normalizes telemetry and
+        # downstream settings to the plain vacuum finite-current mode.
         if requested_finite_current_mode not in {
             None,
             "",
@@ -818,7 +828,7 @@ def resolve_plasma_current_settings_for_surface_mode(
         return resolve_single_surface_plasma_current_settings(
             raw_boozer_I=None,
             plasma_current_A=plasma_current_A,
-            finite_current_mode=finite_current_mode,
+            finite_current_mode="vacuum",
             default_plasma_current_A=0.0,
         )
     if surface_mode_contract.mode == SINGLE_SURFACE:

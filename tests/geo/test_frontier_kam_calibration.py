@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from geo._frontier_test_helpers import EXAMPLE_ROOT, load_module
 
@@ -88,8 +89,26 @@ def test_calibration_summary_recommends_floor_from_hw_clean_donors():
     assert summary["configured_threshold_rejecting_hw_clean_donors"] == ["low"]
     assert summary["configured_threshold_not_evaluated_hw_clean_donors"] == []
     assert summary["configured_threshold_accepts_all_hw_clean_donors"] is False
+    assert summary["recommended_frontier_invariant_torus_min_raw"] == (
+        0.25 - 1.0 / 12.0
+    )
+    assert (
+        summary["recommended_frontier_invariant_torus_min_clamped_from_vacuous"]
+        is False
+    )
+    assert summary["calibration_warnings"] == []
     assert summary["recommended_frontier_invariant_torus_min"] == 0.25 - 1.0 / 12.0
     assert summary["recommended_frontier_kam_min"] == 0.25 - 1.0 / 12.0
+
+
+def test_resolve_frontier_invariant_torus_min_defaults_to_nonzero_floor():
+    module = load_calibration_module()
+    args = SimpleNamespace(
+        frontier_invariant_torus_min=None,
+        frontier_kam_min=None,
+    )
+
+    assert module.resolve_frontier_invariant_torus_min_arg(args) == 0.30
 
 
 def test_calibration_summary_uses_invariant_torus_fraction_over_legacy_kam():
@@ -124,7 +143,7 @@ def test_calibration_summary_uses_invariant_torus_fraction_over_legacy_kam():
     assert summary["recommended_frontier_kam_min"] == 0.20 - 0.05
 
 
-def test_calibration_summary_allows_zero_floor_when_known_good_donor_has_zero_kam():
+def test_calibration_summary_clamps_vacuous_floor_recommendation():
     module = load_calibration_module()
     rows = [
         make_row(module, "current_champion", kam_fraction=0.0),
@@ -141,8 +160,16 @@ def test_calibration_summary_allows_zero_floor_when_known_good_donor_has_zero_ka
         "current_champion",
         "other",
     ]
-    assert summary["recommended_frontier_invariant_torus_min"] == 0.0
-    assert summary["recommended_frontier_kam_min"] == 0.0
+    assert summary["recommended_frontier_invariant_torus_min_raw"] == 0.0
+    assert summary["recommended_frontier_kam_min_raw"] == 0.0
+    assert summary["recommended_frontier_invariant_torus_min"] == 0.30
+    assert summary["recommended_frontier_kam_min"] == 0.30
+    assert summary["recommended_frontier_invariant_torus_min_clamped_from_vacuous"]
+    assert summary["recommended_frontier_kam_min_clamped_from_vacuous"]
+    assert (
+        module.VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING
+        in summary["calibration_warnings"]
+    )
 
 
 def test_calibration_summary_does_not_recommend_floor_from_not_evaluated_wba():

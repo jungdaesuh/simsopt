@@ -21,9 +21,7 @@ from simsopt.geo import CurveXYZFourier
 
 
 EXAMPLE_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    Path(__file__).resolve().parents[2] / "examples" / "single_stage_optimization"
 )
 WRAPPER_PATH = EXAMPLE_ROOT / "run_stage2_to_single_stage.py"
 BANANA_SCAN_PATH = EXAMPLE_ROOT / "run_banana_current_scan.py"
@@ -118,7 +116,7 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "POLOIDAL_EXTENT_RAD": 45.0 * np.pi / 180.0,
         "POLOIDAL_EXTENT_THRESHOLD_RAD": 45.0 * np.pi / 180.0,
         "COIL_WIDTH": 0.10,
-        "WIDTH_MIN_THRESHOLD": 0.05,
+        "WIDTH_MIN_THRESHOLD": 0.1,
         "WIDTH_MAX_THRESHOLD": 0.17,
         "SELF_INTERSECT_PENALTY": 0.0,
         "SELF_INTERSECT_THRESHOLD": 0.0,
@@ -260,8 +258,14 @@ def _build_round_trip_seed(
         for index in range(20)
     ]
     banana_coils = [
-        Coil(_make_circle_curve(center=(1.02, 0.0, -0.08), radius=0.07, normal="z"), Current(1.1e4)),
-        Coil(_make_circle_curve(center=(1.02, 0.0, 0.08), radius=0.07, normal="z"), Current(-1.1e4)),
+        Coil(
+            _make_circle_curve(center=(1.02, 0.0, -0.08), radius=0.07, normal="z"),
+            Current(1.1e4),
+        ),
+        Coil(
+            _make_circle_curve(center=(1.02, 0.0, 0.08), radius=0.07, normal="z"),
+            Current(-1.1e4),
+        ),
     ]
     proxy_coils = (
         [
@@ -511,7 +515,9 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertIsNone(upgraded["STAGE2_SECONDARY_BS_PATH"])
         self.assertIsNone(upgraded["STAGE2_SECONDARY_RESULTS_PATH"])
         self.assertEqual(upgraded["FINITE_CURRENT_MODE"], "wataru_proxy_field")
-        self.assertEqual(upgraded["FINITE_CURRENT_MODE_SOURCE"], "legacy_assumed_default")
+        self.assertEqual(
+            upgraded["FINITE_CURRENT_MODE_SOURCE"], "legacy_assumed_default"
+        )
         self.assertEqual(upgraded["BOOZER_CURRENT_CONVENTION"], "mu0")
         self.assertEqual(upgraded["NUM_PROXY_COILS"], 0)
         self.assertEqual(upgraded["NUM_VF_COILS"], 0)
@@ -519,7 +525,9 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertEqual(upgraded["VF_CURRENT_A"], 0.0)
         self.assertIsNone(upgraded["VF_TEMPLATE_PATH"])
 
-    def test_upgrade_legacy_stage2_artifact_results_uses_stage2_prefixed_coil_counts(self):
+    def test_upgrade_legacy_stage2_artifact_results_uses_stage2_prefixed_coil_counts(
+        self,
+    ):
         artifact_contracts = load_artifact_contracts_module()
         coil_groups = importlib.import_module("banana_opt.coil_groups")
 
@@ -548,7 +556,9 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertEqual(manifest.count_for_role("proxy"), 1)
         self.assertEqual(manifest.count_for_role("vf"), 2)
 
-    def test_upgrade_legacy_stage2_artifact_results_backfills_wout_convention_for_legacy_single_stage_sidecar(self):
+    def test_upgrade_legacy_stage2_artifact_results_backfills_wout_convention_for_legacy_single_stage_sidecar(
+        self,
+    ):
         """Salvaged single-stage sidecars omit WOUT_CONVENTION/WOUT_OFF_SPEC.
 
         The Stage 2 seed-contract validator requires both keys; backfilling
@@ -574,7 +584,9 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertFalse(upgraded["WOUT_OFF_SPEC"])
         handoff.validate_stage2_seed_contract(upgraded)
 
-    def test_upgrade_legacy_stage2_artifact_results_preserves_existing_wout_convention_stamps(self):
+    def test_upgrade_legacy_stage2_artifact_results_preserves_existing_wout_convention_stamps(
+        self,
+    ):
         """An already-stamped artifact must round-trip unchanged.
 
         The upgrader is not a producer-side validator. Overwriting a drifted
@@ -596,7 +608,9 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertEqual(upgraded["WOUT_CONVENTION"], "positive_ccw")
         self.assertTrue(upgraded["WOUT_OFF_SPEC"])
 
-    def test_upgrade_legacy_stage2_artifact_results_skips_wout_backfill_without_inputs(self):
+    def test_upgrade_legacy_stage2_artifact_results_skips_wout_backfill_without_inputs(
+        self,
+    ):
         """Without PLASMA_SURF_PATH or TF_CURRENT_A, no stamping happens.
 
         The validator surfaces the precise missing key rather than the
@@ -604,8 +618,10 @@ class HandoffSchemaTests(unittest.TestCase):
         """
         artifact_contracts = load_artifact_contracts_module()
 
-        upgraded_missing_path = artifact_contracts.upgrade_legacy_stage2_artifact_results(
-            {"TF_CURRENT_A": -8.0e4},
+        upgraded_missing_path = (
+            artifact_contracts.upgrade_legacy_stage2_artifact_results(
+                {"TF_CURRENT_A": -8.0e4},
+            )
         )
         self.assertNotIn("WOUT_CONVENTION", upgraded_missing_path)
         self.assertNotIn("WOUT_OFF_SPEC", upgraded_missing_path)
@@ -616,7 +632,9 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertNotIn("WOUT_CONVENTION", upgraded_missing_tf)
         self.assertNotIn("WOUT_OFF_SPEC", upgraded_missing_tf)
 
-    def test_upgrade_legacy_stage2_artifact_results_skips_wout_backfill_when_file_absent(self):
+    def test_upgrade_legacy_stage2_artifact_results_skips_wout_backfill_when_file_absent(
+        self,
+    ):
         """A nonexistent PLASMA_SURF_PATH triggers no I/O and no stamping.
 
         Lets the validator's own ``PLASMA_SURF_PATH`` precondition surface
@@ -668,8 +686,12 @@ class HandoffModuleTests(unittest.TestCase):
             self._fixed_current_coil(-1.1e4),
         ]
         proxy_coils = [self._fixed_current_coil(9.0e3)] if include_proxy_vf else []
-        vf_coils = [self._fixed_current_coil(-(9.0e3 / 6.5))] if include_proxy_vf else []
-        fake_bs = SimpleNamespace(coils=[*tf_coils, *banana_coils, *proxy_coils, *vf_coils])
+        vf_coils = (
+            [self._fixed_current_coil(-(9.0e3 / 6.5))] if include_proxy_vf else []
+        )
+        fake_bs = SimpleNamespace(
+            coils=[*tf_coils, *banana_coils, *proxy_coils, *vf_coils]
+        )
         stage2_artifact_results = {
             **_valid_stage2_contract_fields(),
             "PLASMA_SURF_FILENAME": "demo.nc",
@@ -801,7 +823,9 @@ class HandoffModuleTests(unittest.TestCase):
 
         self.assertTrue(validation["passed"])
 
-    def test_validate_boozer_surface_json_current_lineage_round_trips_real_serialization(self):
+    def test_validate_boozer_surface_json_current_lineage_round_trips_real_serialization(
+        self,
+    ):
         # The hand-built-dict tests above pin the validator logic; this one pins
         # the lineage markers (@class / @module / "I") to what simsopt's real
         # serializer actually emits, so a future serialization-format change that
@@ -1039,7 +1063,9 @@ class HandoffModuleTests(unittest.TestCase):
                     and node.func.attr == "run_code"
                 ):
                     continue
-                if len(node.args) >= 2 or any(keyword.arg == "G" for keyword in node.keywords):
+                if len(node.args) >= 2 or any(
+                    keyword.arg == "G" for keyword in node.keywords
+                ):
                     continue
                 violations.append(f"{path.relative_to(EXAMPLE_ROOT)}:{node.lineno}")
 
@@ -1059,7 +1085,9 @@ class HandoffModuleTests(unittest.TestCase):
 
         module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_stale_wout_convention_telemetry(self):
+    def test_validate_stage2_seed_contract_rejects_stale_wout_convention_telemetry(
+        self,
+    ):
         module = load_handoff_module()
         stage2_results = {
             **_valid_stage2_contract_fields(),
@@ -1137,7 +1165,9 @@ class HandoffModuleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "vacuum vessel minor radius"):
             module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_accepts_curvature_threshold_below_ceiling(self):
+    def test_validate_stage2_seed_contract_accepts_curvature_threshold_below_ceiling(
+        self,
+    ):
         module = load_handoff_module()
         stage2_results = {
             **_valid_stage2_contract_fields(),
@@ -1146,7 +1176,9 @@ class HandoffModuleTests(unittest.TestCase):
 
         module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_curvature_threshold_above_ceiling(self):
+    def test_validate_stage2_seed_contract_rejects_curvature_threshold_above_ceiling(
+        self,
+    ):
         module = load_handoff_module()
         stage2_results = {
             **_valid_stage2_contract_fields(),
@@ -1183,7 +1215,9 @@ class HandoffModuleTests(unittest.TestCase):
 
         module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_jhalpern_missing_replay_metadata(self):
+    def test_validate_stage2_seed_contract_rejects_jhalpern_missing_replay_metadata(
+        self,
+    ):
         module = load_handoff_module()
         stage2_results = _valid_jhalpern_stage2_contract_fields()
         stage2_results.pop("IOTA_TARGET_SIGN")
@@ -1647,7 +1681,9 @@ class HandoffModuleTests(unittest.TestCase):
                 boozer_surface_cls=_FakeBoozerSurface,
             )
 
-    def test_attempt_initialize_boozer_surface_assigns_seed_dofs_after_construction(self):
+    def test_attempt_initialize_boozer_surface_assigns_seed_dofs_after_construction(
+        self,
+    ):
         module = load_handoff_module()
         surf_prev = SimpleNamespace(
             quadpoints_theta=np.array([0.0, 0.5]),
@@ -1781,7 +1817,9 @@ class HandoffModuleTests(unittest.TestCase):
                 return False
 
         class _FakeBoozerSurface:
-            def __init__(self, bs, surf, vol, vol_target, constraint_weight, options, I=0.0):
+            def __init__(
+                self, bs, surf, vol, vol_target, constraint_weight, options, I=0.0
+            ):
                 del bs, vol, vol_target, constraint_weight, options, I
                 self.surface = surf
                 self.res = {"iota": 0.2, "G": 0.35, "success": True}
@@ -1840,7 +1878,9 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertIsNone(attempt.error_type)
         self.assertEqual(boozer_surface.calls, [(0.21, 0.35)])
 
-    def test_run_boozer_with_failure_policy_handles_fresh_surface_without_cached_res(self):
+    def test_run_boozer_with_failure_policy_handles_fresh_surface_without_cached_res(
+        self,
+    ):
         module = load_handoff_module()
 
         class _FakeBoozerSurface:
@@ -1868,7 +1908,9 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertIsNone(attempt.error_type)
         self.assertEqual(boozer_surface.calls, [(0.21, 0.35)])
 
-    def test_run_boozer_with_failure_policy_restores_last_successful_state_on_failed_result(self):
+    def test_run_boozer_with_failure_policy_restores_last_successful_state_on_failed_result(
+        self,
+    ):
         module = load_handoff_module()
 
         class _FakeBoozerSurface:
@@ -1902,7 +1944,9 @@ class HandoffModuleTests(unittest.TestCase):
         self._assert_restored_fake_boozer_surface(boozer_surface)
         self.assertEqual(boozer_surface.calls, [(0.21, 0.35)])
 
-    def test_run_boozer_with_failure_policy_restores_cached_failed_state_on_reported_failure(self):
+    def test_run_boozer_with_failure_policy_restores_cached_failed_state_on_reported_failure(
+        self,
+    ):
         module = load_handoff_module()
 
         class _FakeBoozerSurface:
@@ -1936,7 +1980,9 @@ class HandoffModuleTests(unittest.TestCase):
         self._assert_restored_fake_boozer_surface(boozer_surface)
         self.assertEqual(boozer_surface.calls, [(0.21, 0.35)])
 
-    def test_probe_stage2_seed_bootability_reports_missing_metadata_without_loading_bs(self):
+    def test_probe_stage2_seed_bootability_reports_missing_metadata_without_loading_bs(
+        self,
+    ):
         module = load_handoff_module()
 
         status = module.probe_stage2_seed_bootability(
@@ -1961,7 +2007,9 @@ class HandoffModuleTests(unittest.TestCase):
         )
         self.assertFalse(module.bootability_passes(status))
 
-    def test_probe_stage2_seed_bootability_does_not_gate_on_full_hardware_contract(self):
+    def test_probe_stage2_seed_bootability_does_not_gate_on_full_hardware_contract(
+        self,
+    ):
         module = load_handoff_module()
         initial_surface = SimpleNamespace(nfp=5)
         initialization = module.BoozerInitializationResult(
@@ -1974,26 +2022,32 @@ class HandoffModuleTests(unittest.TestCase):
             volume=0.1,
         )
 
-        with patch.object(
-            module,
-            "validate_stage2_seed_contract",
-            side_effect=ValueError("hardware contract failure"),
-        ) as validate_contract, patch.object(
-            module,
-            "partition_loaded_stage2_coils",
-            return_value=SimpleNamespace(tf_coils=[object()]),
-        ), patch.object(
-            module,
-            "resolve_stage2_tf_current_A",
-            return_value=-80000.0,
-        ), patch.object(
-            module,
-            "_probe_initialization_inputs",
-            return_value=(initial_surface, 0.1, None, 0.2, 0.3),
-        ), patch.object(
-            module,
-            "attempt_initialize_boozer_surface",
-            return_value=initialization,
+        with (
+            patch.object(
+                module,
+                "validate_stage2_seed_contract",
+                side_effect=ValueError("hardware contract failure"),
+            ) as validate_contract,
+            patch.object(
+                module,
+                "partition_loaded_stage2_coils",
+                return_value=SimpleNamespace(tf_coils=[object()]),
+            ),
+            patch.object(
+                module,
+                "resolve_stage2_tf_current_A",
+                return_value=-80000.0,
+            ),
+            patch.object(
+                module,
+                "_probe_initialization_inputs",
+                return_value=(initial_surface, 0.1, None, 0.2, 0.3),
+            ),
+            patch.object(
+                module,
+                "attempt_initialize_boozer_surface",
+                return_value=initialization,
+            ),
         ):
             status = module.probe_stage2_seed_bootability(
                 stage2_bs_path="/tmp/demo/biot_savart_opt.json",
@@ -2107,7 +2161,9 @@ class HandoffModuleTests(unittest.TestCase):
                 requested_num_tf_coils=20,
             )
 
-    def test_materialize_stage2_seed_variant_from_currents_preserves_order_and_metadata(self):
+    def test_materialize_stage2_seed_variant_from_currents_preserves_order_and_metadata(
+        self,
+    ):
         handoff_module = load_handoff_module()
         banana_scan_module = load_banana_scan_module()
         workflow_runner_common = load_workflow_runner_common_module()
@@ -2190,7 +2246,9 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertEqual(loaded_results["STAGE2_BS_SHA256"], expected_digest)
         self.assertEqual(raw_variant_results["STAGE2_BS_SHA256"], expected_digest)
 
-    def test_materialized_vector_seed_survives_into_independent_single_stage_state(self):
+    def test_materialized_vector_seed_survives_into_independent_single_stage_state(
+        self,
+    ):
         handoff_module = load_handoff_module()
         banana_scan_module = load_banana_scan_module()
         current_mode_module = load_current_mode_module()
@@ -2238,9 +2296,11 @@ class HandoffModuleTests(unittest.TestCase):
         module = load_handoff_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            stage2_bs_path, stage2_results, points, expected_field = _build_round_trip_seed(
-                Path(tmpdir),
-                include_proxy_vf=True,
+            stage2_bs_path, stage2_results, points, expected_field = (
+                _build_round_trip_seed(
+                    Path(tmpdir),
+                    include_proxy_vf=True,
+                )
             )
 
             loaded_bs = module.load(str(stage2_bs_path))
@@ -2252,14 +2312,18 @@ class HandoffModuleTests(unittest.TestCase):
                 requested_num_tf_coils=20,
             )
 
-        np.testing.assert_allclose(actual_field, expected_field, rtol=1.0e-12, atol=1.0e-12)
+        np.testing.assert_allclose(
+            actual_field, expected_field, rtol=1.0e-12, atol=1.0e-12
+        )
         self.assertEqual(len(partitions.tf_coils), 20)
         self.assertEqual(len(partitions.banana_coils), 2)
         self.assertEqual(len(partitions.proxy_coils), 1)
         self.assertEqual(len(partitions.vf_coils), 1)
         self.assertEqual(partitions.finite_current_mode, "wataru_proxy_field")
 
-    def test_round_trip_field_timing_smoke_covers_legacy_and_wataru_partition_shapes(self):
+    def test_round_trip_field_timing_smoke_covers_legacy_and_wataru_partition_shapes(
+        self,
+    ):
         module = load_handoff_module()
 
         timings: dict[str, float] = {}
@@ -2294,7 +2358,9 @@ class HandoffModuleTests(unittest.TestCase):
 
         self.assertEqual(set(timings), {"legacy", "wataru_proxy_field"})
 
-    def test_probe_stage2_seed_bootability_smoke_legacy_donor_uses_remainder_partition(self):
+    def test_probe_stage2_seed_bootability_smoke_legacy_donor_uses_remainder_partition(
+        self,
+    ):
         module = load_handoff_module()
         tf_coils, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
             include_proxy_vf=False
@@ -2327,7 +2393,9 @@ class HandoffModuleTests(unittest.TestCase):
                 nfp=nfp,
             )
             return module.BoozerInitializationResult(
-                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                boozer_surface=SimpleNamespace(
+                    surface=SimpleNamespace(volume=lambda: 0.1)
+                ),
                 solve_success=True,
                 self_intersecting=False,
                 success=True,
@@ -2336,14 +2404,17 @@ class HandoffModuleTests(unittest.TestCase):
                 volume=0.1,
             )
 
-        with patch.object(
-            module,
-            "build_surface_configs",
-            return_value=[{"initial_surface": fake_surface, "target_volume": 0.1}],
-        ), patch.object(
-            module,
-            "attempt_initialize_boozer_surface",
-            side_effect=fake_attempt_initialize_boozer_surface,
+        with (
+            patch.object(
+                module,
+                "build_surface_configs",
+                return_value=[{"initial_surface": fake_surface, "target_volume": 0.1}],
+            ),
+            patch.object(
+                module,
+                "attempt_initialize_boozer_surface",
+                side_effect=fake_attempt_initialize_boozer_surface,
+            ),
         ):
             status = module.probe_stage2_seed_bootability(
                 stage2_bs_path="/tmp/legacy/biot_savart_opt.json",
@@ -2369,7 +2440,9 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertAlmostEqual(recorded["G0"], module.compute_tf_G0(tf_coils))
         self.assertEqual(recorded["boozer_I"], 0.0)
 
-    def test_probe_stage2_seed_bootability_smoke_wataru_donor_preserves_extra_coil_metadata(self):
+    def test_probe_stage2_seed_bootability_smoke_wataru_donor_preserves_extra_coil_metadata(
+        self,
+    ):
         module = load_handoff_module()
         current_contracts = importlib.import_module("banana_opt.current_contracts")
         tf_coils, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
@@ -2408,7 +2481,9 @@ class HandoffModuleTests(unittest.TestCase):
                 total_loaded_coils=len(bs.coils),
             )
             return module.BoozerInitializationResult(
-                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                boozer_surface=SimpleNamespace(
+                    surface=SimpleNamespace(volume=lambda: 0.1)
+                ),
                 solve_success=True,
                 self_intersecting=False,
                 success=True,
@@ -2417,14 +2492,17 @@ class HandoffModuleTests(unittest.TestCase):
                 volume=0.1,
             )
 
-        with patch.object(
-            module,
-            "build_surface_configs",
-            return_value=[{"initial_surface": fake_surface, "target_volume": 0.1}],
-        ), patch.object(
-            module,
-            "attempt_initialize_boozer_surface",
-            side_effect=fake_attempt_initialize_boozer_surface,
+        with (
+            patch.object(
+                module,
+                "build_surface_configs",
+                return_value=[{"initial_surface": fake_surface, "target_volume": 0.1}],
+            ),
+            patch.object(
+                module,
+                "attempt_initialize_boozer_surface",
+                side_effect=fake_attempt_initialize_boozer_surface,
+            ),
         ):
             status = module.probe_stage2_seed_bootability(
                 stage2_bs_path="/tmp/wataru/biot_savart_opt.json",
@@ -2484,7 +2562,9 @@ class HandoffModuleTests(unittest.TestCase):
                 nfp=nfp,
             )
             return module.BoozerInitializationResult(
-                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                boozer_surface=SimpleNamespace(
+                    surface=SimpleNamespace(volume=lambda: 0.1)
+                ),
                 solve_success=True,
                 self_intersecting=False,
                 success=True,
@@ -2493,27 +2573,36 @@ class HandoffModuleTests(unittest.TestCase):
                 volume=0.1,
             )
 
-        with patch.object(
-            module,
-            "build_equilibrium_path",
-            side_effect=AssertionError("warm-start probe should not read the equilibrium"),
-        ), patch.object(
-            module,
-            "build_surface_configs",
-            side_effect=AssertionError("warm-start probe should not rebuild a cold-start surface"),
-        ), patch.object(
-            module,
-            "load_warm_start_boozer_seed",
-            return_value=module.WarmStartBoozerSeed(
-                surface=warm_start_surface,
-                iota=0.2,
-                G=module.compute_tf_G0(tf_coils),
-                source_path=Path("/tmp/legacy/surf_opt_boozer_surface.json"),
+        with (
+            patch.object(
+                module,
+                "build_equilibrium_path",
+                side_effect=AssertionError(
+                    "warm-start probe should not read the equilibrium"
+                ),
             ),
-        ) as warm_start_loader, patch.object(
-            module,
-            "attempt_initialize_boozer_surface",
-            side_effect=fake_attempt_initialize_boozer_surface,
+            patch.object(
+                module,
+                "build_surface_configs",
+                side_effect=AssertionError(
+                    "warm-start probe should not rebuild a cold-start surface"
+                ),
+            ),
+            patch.object(
+                module,
+                "load_warm_start_boozer_seed",
+                return_value=module.WarmStartBoozerSeed(
+                    surface=warm_start_surface,
+                    iota=0.2,
+                    G=module.compute_tf_G0(tf_coils),
+                    source_path=Path("/tmp/legacy/surf_opt_boozer_surface.json"),
+                ),
+            ) as warm_start_loader,
+            patch.object(
+                module,
+                "attempt_initialize_boozer_surface",
+                side_effect=fake_attempt_initialize_boozer_surface,
+            ),
         ):
             status = module.probe_stage2_seed_bootability(
                 stage2_bs_path="/tmp/legacy/biot_savart_opt.json",
@@ -2545,7 +2634,9 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertAlmostEqual(recorded["iota"], 0.2)
         self.assertEqual(recorded["nfp"], 5)
 
-    def test_probe_stage2_seed_bootability_rebuilds_when_loaded_surface_has_no_solved_state(self):
+    def test_probe_stage2_seed_bootability_rebuilds_when_loaded_surface_has_no_solved_state(
+        self,
+    ):
         module = load_handoff_module()
         tf_coils, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
             include_proxy_vf=False
@@ -2577,7 +2668,9 @@ class HandoffModuleTests(unittest.TestCase):
                 nfp=nfp,
             )
             return module.BoozerInitializationResult(
-                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                boozer_surface=SimpleNamespace(
+                    surface=SimpleNamespace(volume=lambda: 0.1)
+                ),
                 solve_success=True,
                 self_intersecting=False,
                 success=True,
@@ -2586,27 +2679,32 @@ class HandoffModuleTests(unittest.TestCase):
                 volume=0.1,
             )
 
-        with patch.object(
-            module,
-            "build_equilibrium_path",
-            return_value="/tmp/equilibria/demo.nc",
-        ) as build_equilibrium_path, patch.object(
-            module,
-            "build_surface_configs",
-            return_value=[{"initial_surface": cold_surface, "target_volume": 0.1}],
-        ) as build_surface_configs, patch.object(
-            module,
-            "load_warm_start_boozer_seed",
-            return_value=module.WarmStartBoozerSeed(
-                surface=surface_only,
-                iota=0.2,
-                G=None,
-                source_path=Path("/tmp/legacy/surf_opt_boozer_surface.json"),
+        with (
+            patch.object(
+                module,
+                "build_equilibrium_path",
+                return_value="/tmp/equilibria/demo.nc",
+            ) as build_equilibrium_path,
+            patch.object(
+                module,
+                "build_surface_configs",
+                return_value=[{"initial_surface": cold_surface, "target_volume": 0.1}],
+            ) as build_surface_configs,
+            patch.object(
+                module,
+                "load_warm_start_boozer_seed",
+                return_value=module.WarmStartBoozerSeed(
+                    surface=surface_only,
+                    iota=0.2,
+                    G=None,
+                    source_path=Path("/tmp/legacy/surf_opt_boozer_surface.json"),
+                ),
             ),
-        ), patch.object(
-            module,
-            "attempt_initialize_boozer_surface",
-            side_effect=fake_attempt_initialize_boozer_surface,
+            patch.object(
+                module,
+                "attempt_initialize_boozer_surface",
+                side_effect=fake_attempt_initialize_boozer_surface,
+            ),
         ):
             status = module.probe_stage2_seed_bootability(
                 stage2_bs_path="/tmp/legacy/biot_savart_opt.json",
@@ -2636,7 +2734,9 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertAlmostEqual(recorded["G0"], module.compute_tf_G0(tf_coils))
         self.assertEqual(recorded["nfp"], 5)
 
-    def test_probe_stage2_seed_bootability_uses_warm_start_boozer_surface_artifact(self):
+    def test_probe_stage2_seed_bootability_uses_warm_start_boozer_surface_artifact(
+        self,
+    ):
         module = load_handoff_module()
         tf_coils, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
             include_proxy_vf=False
@@ -2680,7 +2780,9 @@ class HandoffModuleTests(unittest.TestCase):
                 nfp=nfp,
             )
             return module.BoozerInitializationResult(
-                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                boozer_surface=SimpleNamespace(
+                    surface=SimpleNamespace(volume=lambda: 0.1)
+                ),
                 solve_success=True,
                 self_intersecting=False,
                 success=True,
@@ -2689,18 +2791,26 @@ class HandoffModuleTests(unittest.TestCase):
                 volume=0.1,
             )
 
-        with patch.object(
-            module,
-            "build_equilibrium_path",
-            side_effect=AssertionError("warm-start probe should not read the equilibrium"),
-        ), patch.object(
-            module,
-            "build_surface_configs",
-            side_effect=AssertionError("warm-start probe should not rebuild a cold-start surface"),
-        ), patch.object(
-            module,
-            "attempt_initialize_boozer_surface",
-            side_effect=fake_attempt_initialize_boozer_surface,
+        with (
+            patch.object(
+                module,
+                "build_equilibrium_path",
+                side_effect=AssertionError(
+                    "warm-start probe should not read the equilibrium"
+                ),
+            ),
+            patch.object(
+                module,
+                "build_surface_configs",
+                side_effect=AssertionError(
+                    "warm-start probe should not rebuild a cold-start surface"
+                ),
+            ),
+            patch.object(
+                module,
+                "attempt_initialize_boozer_surface",
+                side_effect=fake_attempt_initialize_boozer_surface,
+            ),
         ):
             status = module.probe_stage2_seed_bootability(
                 stage2_bs_path="/tmp/recovery/biot_savart_best_feasible.json",
@@ -2865,27 +2975,34 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "TF_CURRENT_A": -8.0e4,
             }
 
-            with patch.object(
-                module,
-                "resolve_stage2_artifact_path",
-                return_value=stage2_bs_path,
-            ), patch.object(
-                module,
-                "load_stage2_artifact_results",
-                return_value=(stage2_results_path, stage2_results),
-            ), patch.object(
-                module,
-                "upgrade_legacy_stage2_artifact_results",
-                side_effect=lambda payload: payload,
-            ), patch.object(
-                module,
-                "_backfill_missing_stage2_alm_solver_metadata",
-                side_effect=lambda payload, _config: payload,
-            ), patch.object(
-                module,
-                "_expected_stage2_artifact_metadata",
-                return_value={},
-            ), patch.object(module, "validate_stage2_artifact_metadata"):
+            with (
+                patch.object(
+                    module,
+                    "resolve_stage2_artifact_path",
+                    return_value=stage2_bs_path,
+                ),
+                patch.object(
+                    module,
+                    "load_stage2_artifact_results",
+                    return_value=(stage2_results_path, stage2_results),
+                ),
+                patch.object(
+                    module,
+                    "upgrade_legacy_stage2_artifact_results",
+                    side_effect=lambda payload: payload,
+                ),
+                patch.object(
+                    module,
+                    "_backfill_missing_stage2_alm_solver_metadata",
+                    side_effect=lambda payload, _config: payload,
+                ),
+                patch.object(
+                    module,
+                    "_expected_stage2_artifact_metadata",
+                    return_value={},
+                ),
+                patch.object(module, "validate_stage2_artifact_metadata"),
+            ):
                 with self.assertRaisesRegex(
                     ValueError,
                     "missing WOUT convention metadata",
@@ -2951,7 +3068,9 @@ class UnifiedRunnerTests(unittest.TestCase):
         self.assertEqual(stage2_args.constraint_method, "alm")
         self.assertIsNone(stage2_args.stage2_iota_target)
 
-    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_generated_stage2(self):
+    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_generated_stage2(
+        self,
+    ):
         wrapper = load_wrapper_module()
 
         args = wrapper.parse_args(
@@ -3124,7 +3243,9 @@ class UnifiedRunnerTests(unittest.TestCase):
             Path("/tmp/stage1/wout_new_stage1.nc").resolve(),
         )
 
-    def test_load_stage2_seed_metadata_for_handoff_backfills_legacy_tf_current_from_cli(self):
+    def test_load_stage2_seed_metadata_for_handoff_backfills_legacy_tf_current_from_cli(
+        self,
+    ):
         wrapper = load_wrapper_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3159,7 +3280,9 @@ class UnifiedRunnerTests(unittest.TestCase):
             self.assertEqual(stage2_results["NUM_TF_COILS"], 18)
             self.assertEqual(stage2_results["TF_CURRENT_SUM_ABS_A"], 222210.0)
 
-    def test_build_probe_status_uses_exact_boozer_semantics_for_negative_constraint_weight(self):
+    def test_build_probe_status_uses_exact_boozer_semantics_for_negative_constraint_weight(
+        self,
+    ):
         wrapper = load_wrapper_module()
 
         args = wrapper.parse_args(
@@ -3173,7 +3296,9 @@ class UnifiedRunnerTests(unittest.TestCase):
             ]
         )
 
-        with patch.object(wrapper, "probe_stage2_seed_bootability", return_value={}) as probe:
+        with patch.object(
+            wrapper, "probe_stage2_seed_bootability", return_value={}
+        ) as probe:
             wrapper.build_probe_status(
                 args,
                 stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
@@ -3197,7 +3322,9 @@ class UnifiedRunnerTests(unittest.TestCase):
             ]
         )
 
-        with patch.object(wrapper, "probe_stage2_seed_bootability", return_value={}) as probe:
+        with patch.object(
+            wrapper, "probe_stage2_seed_bootability", return_value={}
+        ) as probe:
             wrapper.build_probe_status(
                 args,
                 stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
@@ -3228,7 +3355,9 @@ class UnifiedRunnerTests(unittest.TestCase):
             ]
         )
 
-        with patch.object(wrapper, "probe_stage2_seed_bootability", return_value={}) as probe:
+        with patch.object(
+            wrapper, "probe_stage2_seed_bootability", return_value={}
+        ) as probe:
             wrapper.build_probe_status(
                 args,
                 stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
@@ -3257,7 +3386,9 @@ class UnifiedRunnerTests(unittest.TestCase):
             ]
         )
 
-        with patch.object(wrapper, "probe_stage2_seed_bootability", return_value={}) as probe:
+        with patch.object(
+            wrapper, "probe_stage2_seed_bootability", return_value={}
+        ) as probe:
             wrapper.build_probe_status(
                 args,
                 stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
@@ -3345,7 +3476,9 @@ class UnifiedRunnerTests(unittest.TestCase):
             str(args.recovery_maxiter),
         )
 
-    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_pre_boozer_repair(self):
+    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_pre_boozer_repair(
+        self,
+    ):
         wrapper = load_wrapper_module()
 
         args = wrapper.parse_args(
@@ -3443,7 +3576,9 @@ class UnifiedRunnerTests(unittest.TestCase):
             "independent",
         )
 
-    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_thresholded_recovery(self):
+    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_thresholded_recovery(
+        self,
+    ):
         wrapper = load_wrapper_module()
 
         args = wrapper.parse_args(
@@ -3466,7 +3601,9 @@ class UnifiedRunnerTests(unittest.TestCase):
 
         self.assertIn("--alm-fix-signal-mismatch-guard", command)
 
-    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_full_single_stage(self):
+    def test_unified_handoff_forwards_alm_signal_mismatch_guard_to_full_single_stage(
+        self,
+    ):
         wrapper = load_wrapper_module()
 
         args = wrapper.parse_args(
@@ -3515,15 +3652,18 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "recovery_termination_reason": "not_bootable_after_budget",
             }
 
-            with patch.object(
-                wrapper,
-                "build_probe_status",
-                return_value=initial_probe,
-            ), patch.object(
-                wrapper,
-                "run_recovery_stage",
-                return_value=recovery_payload,
-            ) as recovery_mock:
+            with (
+                patch.object(
+                    wrapper,
+                    "build_probe_status",
+                    return_value=initial_probe,
+                ),
+                patch.object(
+                    wrapper,
+                    "run_recovery_stage",
+                    return_value=recovery_payload,
+                ) as recovery_mock,
+            ):
                 result = wrapper.main(
                     [
                         "--recovery-only",
@@ -3543,11 +3683,15 @@ class UnifiedRunnerTests(unittest.TestCase):
                 summary["blocking_reason"],
                 wrapper.BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED,
             )
-            self.assertEqual(summary["next_required_lane"], wrapper.LANE_PRE_BOOZER_REPAIR)
+            self.assertEqual(
+                summary["next_required_lane"], wrapper.LANE_PRE_BOOZER_REPAIR
+            )
             self.assertEqual(summary["recovery"], recovery_payload)
             self.assertIsNone(summary["full_single_stage"])
 
-    def test_pre_boozer_recovery_runs_stage2_repair_and_probes_repaired_stage2_artifact(self):
+    def test_pre_boozer_recovery_runs_stage2_repair_and_probes_repaired_stage2_artifact(
+        self,
+    ):
         wrapper = load_wrapper_module()
         handoff = load_handoff_module()
 
@@ -3638,14 +3782,17 @@ class UnifiedRunnerTests(unittest.TestCase):
             )
             repaired_results_path = repaired_bs_path.with_name("results.json")
 
-            with patch.object(
-                wrapper,
-                "run_command",
-                side_effect=fake_run_command,
-            ), patch.object(
-                wrapper,
-                "build_probe_status",
-                side_effect=fake_build_probe_status,
+            with (
+                patch.object(
+                    wrapper,
+                    "run_command",
+                    side_effect=fake_run_command,
+                ),
+                patch.object(
+                    wrapper,
+                    "build_probe_status",
+                    side_effect=fake_build_probe_status,
+                ),
             ):
                 payload = wrapper.run_recovery_stage(
                     args,
@@ -3657,7 +3804,9 @@ class UnifiedRunnerTests(unittest.TestCase):
 
             self.assertEqual(payload["status"], "completed")
             self.assertTrue(payload["recovery_succeeded"])
-            self.assertEqual(payload["result_source"], wrapper.RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM)
+            self.assertEqual(
+                payload["result_source"], wrapper.RECOVERY_STAGE_PRE_BOOZER_STAGE2_ALM
+            )
             self.assertEqual(payload["recovered_bs_path"], str(repaired_bs_path))
             self.assertIsNone(payload["warm_start_surface_stem"])
             self.assertEqual(payload["results"]["SEED_ROLE"], "coil_seed_handoff")
@@ -3712,23 +3861,25 @@ class UnifiedRunnerTests(unittest.TestCase):
                     "results_path": str(full_case_dir / "results.json"),
                     "result_source": "final",
                     "results": json.loads(
-                        (full_case_dir / "results.json").read_text(
-                            encoding="utf-8"
-                        )
+                        (full_case_dir / "results.json").read_text(encoding="utf-8")
                     ),
                 }
 
-            with patch.object(
-                wrapper,
-                "build_probe_status",
-            ) as probe_mock, patch.object(
-                wrapper,
-                "run_recovery_stage",
-            ) as recovery_mock, patch.object(
-                wrapper,
-                "run_full_single_stage",
-                side_effect=fake_full_run,
-            ) as full_mock:
+            with (
+                patch.object(
+                    wrapper,
+                    "build_probe_status",
+                ) as probe_mock,
+                patch.object(
+                    wrapper,
+                    "run_recovery_stage",
+                ) as recovery_mock,
+                patch.object(
+                    wrapper,
+                    "run_full_single_stage",
+                    side_effect=fake_full_run,
+                ) as full_mock,
+            ):
                 self.assertEqual(
                     wrapper.main(
                         [
@@ -3747,9 +3898,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             recovery_mock.assert_not_called()
             full_mock.assert_called_once()
             summary = json.loads(
-                (output_root / wrapper.DEFAULT_SUMMARY_JSON).read_text(
-                    encoding="utf-8"
-                )
+                (output_root / wrapper.DEFAULT_SUMMARY_JSON).read_text(encoding="utf-8")
             )
             self.assertIsNone(summary["bootability_probe"])
             self.assertEqual(summary["next_required_lane"], wrapper.LANE_PROMOTION)
@@ -3866,14 +4015,17 @@ class UnifiedRunnerTests(unittest.TestCase):
                 ]
             )
 
-            with patch.object(
-                wrapper,
-                "build_probe_status",
-                side_effect=fake_build_probe_status,
-            ), patch.object(
-                wrapper,
-                "run_single_stage_command_with_salvage",
-                side_effect=fake_recovery_run,
+            with (
+                patch.object(
+                    wrapper,
+                    "build_probe_status",
+                    side_effect=fake_build_probe_status,
+                ),
+                patch.object(
+                    wrapper,
+                    "run_single_stage_command_with_salvage",
+                    side_effect=fake_recovery_run,
+                ),
             ):
                 wrapper.run_recovery_stage(
                     args,
@@ -3907,7 +4059,9 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "boozer_surrogate",
             )
 
-    def test_run_recovery_stage_uses_preserved_artifact_bundle_for_salvaged_results(self):
+    def test_run_recovery_stage_uses_preserved_artifact_bundle_for_salvaged_results(
+        self,
+    ):
         wrapper = load_wrapper_module()
         handoff = load_handoff_module()
 
@@ -3940,7 +4094,9 @@ class UnifiedRunnerTests(unittest.TestCase):
                     "{}",
                     encoding="utf-8",
                 )
-                (recovery_case_dir / "surf_best_feasible_outer_boozer_surface.json").write_text(
+                (
+                    recovery_case_dir / "surf_best_feasible_outer_boozer_surface.json"
+                ).write_text(
                     "{}",
                     encoding="utf-8",
                 )
@@ -3992,14 +4148,17 @@ class UnifiedRunnerTests(unittest.TestCase):
                 ]
             )
 
-            with patch.object(
-                wrapper,
-                "build_probe_status",
-                side_effect=fake_build_probe_status,
-            ), patch.object(
-                wrapper,
-                "run_single_stage_command_with_salvage",
-                side_effect=fake_recovery_run,
+            with (
+                patch.object(
+                    wrapper,
+                    "build_probe_status",
+                    side_effect=fake_build_probe_status,
+                ),
+                patch.object(
+                    wrapper,
+                    "run_single_stage_command_with_salvage",
+                    side_effect=fake_recovery_run,
+                ),
             ):
                 payload = wrapper.run_recovery_stage(
                     args,
