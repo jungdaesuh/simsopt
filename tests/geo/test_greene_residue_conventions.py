@@ -108,10 +108,18 @@ def _finite_difference_dB_by_dX(
 
 
 class CircularTransformField:
-    def __init__(self, *, axis_r: float, axis_z: float, iota: float):
+    def __init__(
+        self,
+        *,
+        axis_r: float,
+        axis_z: float,
+        iota: float,
+        geometric_winding_offset: float = 0.0,
+    ):
         self.axis_r = float(axis_r)
         self.axis_z = float(axis_z)
         self.iota = float(iota)
+        self.geometric_winding_offset = float(geometric_winding_offset)
         self.points = np.empty((0, 3), dtype=float)
 
     def set_points(self, points: np.ndarray) -> "CircularTransformField":
@@ -125,8 +133,9 @@ class CircularTransformField:
         radius = np.sqrt(x**2 + y**2)
         cos_phi = x / radius
         sin_phi = y / radius
-        d_radius_dphi = -self.iota * (z - self.axis_z)
-        d_z_dphi = self.iota * (radius - self.axis_r)
+        geometric_rate = self.iota + self.geometric_winding_offset
+        d_radius_dphi = -geometric_rate * (z - self.axis_z)
+        d_z_dphi = geometric_rate * (radius - self.axis_r)
         b_phi = np.ones_like(radius)
         b_r = d_radius_dphi / radius
         b_z = d_z_dphi / radius
@@ -352,6 +361,7 @@ def _biot_savart_residue_objective_inputs():
         branch=GREENE_BRANCH_O,
         section_state=(1.1, 0.05),
         validation_id=validation_id,
+        optimizer_taylor_validated=True,
     )
     return (
         field,
@@ -489,6 +499,41 @@ def test_full_torus_return_map_closes_analytic_p_over_q_orbit():
     assert result.winding == pytest.approx(2.0, abs=1.0e-9)
     assert target_winding_residual(result, target) == pytest.approx(0.0, abs=1.0e-9)
     assert result.min_bphi_over_b > options.min_bphi_over_b
+
+
+def test_target_winding_uses_section_returns_not_continuous_helical_path():
+    target = RationalTarget(p=1, q=4, nfp=5, fourier_m=4, fourier_n=1)
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    field = CircularTransformField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        iota=target.iota_float,
+        geometric_winding_offset=target.nfp,
+    )
+    options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=256,
+    )
+
+    result = integrate_target_return_map(
+        field,
+        (1.2, 0.0),
+        target=target,
+        chart=chart,
+        options=options,
+    )
+
+    assert result.final_state == pytest.approx(result.initial_state, abs=1.0e-9)
+    assert chart.winding(result.states) == pytest.approx(21.0, abs=1.0e-9)
+    assert result.return_section_unwrapped_theta.size == target.q + 1
+    assert result.return_section_unwrapped_theta[-1] == pytest.approx(
+        2.0 * math.pi,
+        abs=1.0e-9,
+    )
+    assert result.winding == pytest.approx(1.0, abs=1.0e-9)
+    assert target_winding_residual(result, target) == pytest.approx(0.0, abs=1.0e-9)
 
 
 def test_tangent_full_torus_map_matches_analytic_rotation_monodromy():
@@ -795,21 +840,22 @@ def test_periodic_orbit_solver_reports_radial_winding_and_branch_failures():
     )
 
     wrong_winding_target = RationalTarget(
-        p=2,
-        q=1,
+        p=1,
+        q=4,
         radial_window=(0.18, 0.23),
-        fourier_m=1,
-        fourier_n=2,
+        fourier_m=4,
+        fourier_n=1,
     )
+    wrong_winding_period = 2.0 * math.pi * float(wrong_winding_target.q)
     wrong_winding_field = DrivenPeriodicOrbitField(
         axis_r=chart.axis_r,
         axis_z=chart.axis_z,
         target=wrong_winding_target,
         orbit_radius=0.2,
         phase0=0.0,
-        tangent_generator=(0.5 * math.pi / period)
+        tangent_generator=(0.5 * math.pi / wrong_winding_period)
         * np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=float),
-        orbit_winding=1.0,
+        orbit_winding=0.0,
     )
     wrong_winding = solve_periodic_orbit(
         wrong_winding_field,
@@ -1401,7 +1447,11 @@ def test_biot_savart_greene_residue_objective_requires_validated_manifest():
         validation_id=validation_id,
     )
 
-    assert payload_seed == seed
+    assert payload_seed.target_id == seed.target_id
+    assert payload_seed.branch == seed.branch
+    assert payload_seed.section_state == seed.section_state
+    assert payload_seed.validation_id == seed.validation_id
+    assert payload_seed.optimizer_taylor_validated is False
     with pytest.raises(ValueError, match="validation_id"):
         BiotSavartGreeneResidueObjective(
             field,
@@ -1453,6 +1503,17 @@ def test_biot_savart_greene_residue_objective_requires_validated_manifest():
             integrator_options=integrator_options,
             solver_options=solver_options,
         )
+    with pytest.raises(ValueError, match="optimizer Taylor validation"):
+        BiotSavartGreeneResidueObjective(
+            field,
+            targets=(target,),
+            chart=chart,
+            branch_seeds=(payload_seed,),
+            validation_id=validation_id,
+            objective_weight=1.0,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
 
 
 def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
@@ -1471,13 +1532,74 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
     )
     targets = load_residue_objective_targets(targets_path)
     target_manifest_id = residue_objective_target_manifest_id(targets)
+    target_id = targets[0].manifest_key()
+
+    def optimizer_taylor_validation(
+        *,
+        branch: str = GREENE_BRANCH_O,
+        observed_orders: list[float] | None = None,
+        base_state: list[float] | None = None,
+        residuals: list[float] | None = None,
+    ) -> dict[str, object]:
+        sample_residuals = (
+            [1.0e-10, 2.5e-11, 6.25e-12]
+            if residuals is None
+            else residuals
+        )
+        return {
+            "target_id": target_id,
+            "branch": branch,
+            "diagnostic": {
+                "mode": BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
+                "derivative_step": 1.0e-6,
+                "direction_norm": 1.0,
+                "direction": [1.0, 0.0],
+                "base_residue": 0.01,
+                "directional_derivative": 0.2,
+                "base_status": BRANCH_STATUS_CONVERGED,
+                "base_state": [1.1, 0.05] if base_state is None else base_state,
+                "samples": [
+                    {
+                        "step": 1.0e-5,
+                        "residue": 0.010002,
+                        "first_order_prediction": 0.010002,
+                        "residual": sample_residuals[0],
+                        "absolute_residual": sample_residuals[0],
+                        "status": BRANCH_STATUS_CONVERGED,
+                        "state": [1.1, 0.05],
+                    },
+                    {
+                        "step": 5.0e-6,
+                        "residue": 0.010001,
+                        "first_order_prediction": 0.010001,
+                        "residual": sample_residuals[1],
+                        "absolute_residual": sample_residuals[1],
+                        "status": BRANCH_STATUS_CONVERGED,
+                        "state": [1.1, 0.05],
+                    },
+                    {
+                        "step": 2.5e-6,
+                        "residue": 0.0100005,
+                        "first_order_prediction": 0.0100005,
+                        "residual": sample_residuals[2],
+                        "absolute_residual": sample_residuals[2],
+                        "status": BRANCH_STATUS_CONVERGED,
+                        "state": [1.1, 0.05],
+                    },
+                ],
+                "observed_orders": (
+                    [2.0, 2.0] if observed_orders is None else observed_orders
+                ),
+            },
+        }
+
     seed_payload = {
         "target_manifest_id": target_manifest_id,
         "validation_status": "failed",
         "validation_artifact_id": "validation-artifact",
         "branch_seeds": [
             {
-                "target_id": targets[0].manifest_key(),
+                "target_id": target_id,
                 "branch": GREENE_BRANCH_O,
                 "section_state": [1.1, 0.05],
             },
@@ -1494,6 +1616,55 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
 
     seed_payload["validation_status"] = "passed"
     seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="optimizer_taylor_validations"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    seed_payload["optimizer_taylor_validations"] = []
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="Missing Greene residue objective"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    seed_payload["optimizer_taylor_validations"] = [
+        optimizer_taylor_validation(observed_orders=[1.5, 2.0])
+    ]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="observed_orders"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    seed_payload["optimizer_taylor_validations"] = [
+        optimizer_taylor_validation(
+            observed_orders=[1.5, 2.0],
+            residuals=[1.0e-10, 1.0e-10 / (2.0**1.5), 1.0e-10 / (2.0**3.5)],
+        )
+    ]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="minimum order"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    seed_payload["optimizer_taylor_validations"] = [
+        optimizer_taylor_validation(base_state=[1.11, 0.05])
+    ]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="base_state"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    seed_payload["optimizer_taylor_validations"] = [optimizer_taylor_validation()]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
     validation_id, seeds = load_residue_objective_seeds(
         seeds_path,
         target_manifest_id=target_manifest_id,
@@ -1502,10 +1673,11 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
     assert validation_id == "validation-artifact"
     assert seeds == (
         ResidueBranchSeed(
-            target_id=targets[0].manifest_key(),
+            target_id=target_id,
             branch=GREENE_BRANCH_O,
             section_state=(1.1, 0.05),
             validation_id="validation-artifact",
+            optimizer_taylor_validated=True,
         ),
     )
 

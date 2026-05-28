@@ -2334,7 +2334,8 @@ def parse_args():
         default=os.environ.get("RESIDUE_OBJECTIVE_SEEDS_JSON"),
         help=(
             "JSON file with target_manifest_id, validation_status='passed', "
-            "validation_artifact_id, and branch_seeds for the Greene residue objective."
+            "validation_artifact_id, branch_seeds, and optimizer_taylor_validations "
+            "for the Greene residue objective."
         ),
     )
     parser.add_argument(
@@ -2572,6 +2573,16 @@ def _resolved_optional_path_string(raw_path):
     if raw_path is None:
         return None
     return str(Path(raw_path).expanduser().resolve())
+
+
+def _optional_file_sha256(raw_path):
+    if raw_path is None:
+        return None
+    hasher = hashlib.sha256()
+    with Path(raw_path).expanduser().resolve().open("rb") as infile:
+        for chunk in iter(lambda: infile.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return "sha256:" + hasher.hexdigest()
 
 
 def resolve_initial_boozer_surface_seed(
@@ -4133,6 +4144,106 @@ def build_residue_objective_from_args(args, biot_savart):
     )
 
 
+def residue_objective_replay_config(args, residue_objective=None):
+    residue_objective_weight = float(
+        getattr(args, "residue_objective_weight", DEFAULT_RESIDUE_OBJECTIVE_WEIGHT)
+    )
+    if residue_objective_weight == 0.0 and residue_objective is None:
+        return None
+    targets_json = getattr(args, "residue_objective_targets_json", None)
+    seeds_json = getattr(args, "residue_objective_seeds_json", None)
+    target_manifest_id = (
+        None if residue_objective is None else residue_objective.target_manifest_id
+    )
+    validation_id = None if residue_objective is None else residue_objective.validation_id
+    return (
+        ("enabled", residue_objective is not None),
+        ("weight", residue_objective_weight),
+        (
+            "targets_json",
+            _resolved_optional_path_string(targets_json),
+        ),
+        ("targets_sha256", _optional_file_sha256(targets_json)),
+        (
+            "seeds_json",
+            _resolved_optional_path_string(seeds_json),
+        ),
+        ("seeds_sha256", _optional_file_sha256(seeds_json)),
+        ("target_manifest_id", target_manifest_id),
+        ("validation_id", validation_id),
+        ("axis_r", getattr(args, "residue_objective_axis_r", None)),
+        ("axis_z", float(getattr(args, "residue_objective_axis_z", 0.0))),
+        (
+            "poloidal_orientation",
+            int(getattr(args, "residue_objective_poloidal_orientation", 1)),
+        ),
+        (
+            "radial_label_scale",
+            float(getattr(args, "residue_objective_radial_label_scale", 1.0)),
+        ),
+        ("residue_scale", float(getattr(args, "residue_objective_scale", 1.0))),
+        (
+            "r_satisfied",
+            float(
+                getattr(
+                    args,
+                    "residue_objective_r_satisfied",
+                    DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
+                )
+            ),
+        ),
+        (
+            "local_difference_step",
+            float(getattr(args, "residue_objective_local_difference_step", 1.0e-6)),
+        ),
+        ("rtol", float(getattr(args, "residue_objective_rtol", 1.0e-9))),
+        ("atol", float(getattr(args, "residue_objective_atol", 1.0e-11))),
+        ("max_step", float(getattr(args, "residue_objective_max_step", 0.05))),
+        (
+            "samples_per_full_torus",
+            int(
+                getattr(
+                    args,
+                    "residue_objective_samples_per_full_torus",
+                    DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
+                )
+            ),
+        ),
+        (
+            "min_bphi_over_b",
+            float(getattr(args, "residue_objective_min_bphi_over_b", 1.0e-8)),
+        ),
+        (
+            "newton_residual_tolerance",
+            float(
+                getattr(args, "residue_objective_newton_residual_tolerance", 1.0e-9)
+            ),
+        ),
+        (
+            "winding_tolerance",
+            float(getattr(args, "residue_objective_winding_tolerance", 1.0e-7)),
+        ),
+        (
+            "det_tolerance",
+            float(getattr(args, "residue_objective_det_tolerance", 1.0e-5)),
+        ),
+        (
+            "max_newton_iterations",
+            int(getattr(args, "residue_objective_max_newton_iterations", 12)),
+        ),
+        (
+            "max_newton_step_norm",
+            float(getattr(args, "residue_objective_max_newton_step_norm", 0.05)),
+        ),
+    )
+
+
+def residue_objective_replay_config_payload(config):
+    if config is None:
+        return None
+    return {str(key): value for key, value in config}
+
+
 def residue_objective_payload_from_search_eval(search_eval):
     if (
         search_eval is not None
@@ -4304,6 +4415,7 @@ class RunIdentityConfig:
     residue_objective_weight: float = 0.0
     residue_objective_target_manifest_id: str | None = None
     residue_objective_validation_id: str | None = None
+    residue_objective_replay_config: tuple[tuple[str, object], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -4358,6 +4470,7 @@ class PreservedTimeoutReplayConfig:
     epsilon_constraint_boozer_max: float | None = None
     frontier_epsilon_penalty_weight: float | None = None
     frontier_kam_min: float | None = None
+    residue_objective_replay_config: tuple[tuple[str, object], ...] | None = None
     stage2_policy_metadata: tuple[tuple[str, object], ...] | None = None
     stage2_seed_surf_path: str | None = None
     major_radius: float = VACUUM_VESSEL_MAJOR_RADIUS_M
@@ -4684,6 +4797,7 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     epsilon_constraint_boozer_max=None,
     frontier_epsilon_penalty_weight=None,
     frontier_kam_min=None,
+    residue_objective_replay_config=None,
 )
 
 
@@ -4869,6 +4983,10 @@ def make_run_identity_config(
         residue_objective_validation_id=(
             None if residue_objective is None else residue_objective.validation_id
         ),
+        residue_objective_replay_config=residue_objective_replay_config(
+            args,
+            residue_objective,
+        ),
     )
 
 
@@ -4887,6 +5005,7 @@ def build_run_identity_config(config):
             in {
                 "residue_objective_target_manifest_id",
                 "residue_objective_validation_id",
+                "residue_objective_replay_config",
             }
             and value is None
         ):
@@ -8256,6 +8375,7 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
     surface_data_value = globals().get("surface_data")
     banana_current_state = globals().get("banana_current_state")
     args_value = globals().get("args")
+    residue_objective_value = globals().get("JResidueObjective")
     replay_seed_artifact_role = globals().get(
         "seed_artifact_role",
         replay_config.seed_artifact_role,
@@ -8434,6 +8554,14 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         ),
         frontier_kam_min=globals().get(
             "FRONTIER_KAM_MIN", replay_config.frontier_kam_min
+        ),
+        residue_objective_replay_config=(
+            replay_config.residue_objective_replay_config
+            if args_value is None
+            else residue_objective_replay_config(
+                args_value,
+                residue_objective_value,
+            )
         ),
         stage2_policy_metadata=(
             stage2_policy_metadata_items(stage2_results_value)
@@ -8727,6 +8855,11 @@ def build_preserved_timeout_results_payload(
             replay_config.alm_formulation
             if replay_config.constraint_method == "alm"
             else None
+        ),
+        "GREENE_RESIDUE_OBJECTIVE_REPLAY_CONFIG": (
+            residue_objective_replay_config_payload(
+                replay_config.residue_objective_replay_config
+            )
         ),
         "REQUESTED_SEED_REGIME": replay_config.requested_seed_regime,
         "EFFECTIVE_SEED_REGIME": replay_config.effective_seed_regime,

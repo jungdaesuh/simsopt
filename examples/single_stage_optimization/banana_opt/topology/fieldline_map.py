@@ -88,6 +88,7 @@ class FieldlineReturnResult:
     phi_grid: np.ndarray
     states: np.ndarray
     unwrapped_theta: np.ndarray
+    return_section_unwrapped_theta: np.ndarray
     winding: float
     min_bphi_over_b: float
 
@@ -316,6 +317,39 @@ def _normalize_initial_state(initial_state: Sequence[float]) -> tuple[float, flo
     return (radius, z)
 
 
+def full_torus_return_section_unwrapped_thetas(
+    chart: PoincareChart,
+    states: Sequence[Sequence[float]],
+    *,
+    samples_per_full_torus: int,
+    expected_winding: float | None = None,
+) -> np.ndarray:
+    state_array = np.asarray(states, dtype=float)
+    if state_array.ndim != 2 or state_array.shape[1] != 2:
+        raise ValueError(
+            f"Return-map states must have shape (n, 2), got {state_array.shape}"
+        )
+    samples = int(samples_per_full_torus)
+    if samples <= 0:
+        raise ValueError("samples_per_full_torus must be positive")
+    section_theta = chart.unwrapped_thetas(state_array)[::samples]
+    if expected_winding is None:
+        return section_theta
+    turns = section_theta.size - 1
+    if turns <= 0:
+        raise ValueError("Return-map winding requires at least two section returns")
+    raw_winding = float((section_theta[-1] - section_theta[0]) / (2.0 * pi))
+    integer_offset_per_turn = round(
+        (raw_winding - float(expected_winding)) / float(turns)
+    )
+    return section_theta - (
+        2.0
+        * pi
+        * float(integer_offset_per_turn)
+        * np.arange(section_theta.size, dtype=float)
+    )
+
+
 def integrate_full_torus_return_map(
     field: MagneticFieldLike,
     initial_state: Sequence[float],
@@ -323,6 +357,7 @@ def integrate_full_torus_return_map(
     chart: PoincareChart,
     phi0: float = 0.0,
     torus_turns: int = 1,
+    expected_winding: float | None = None,
     options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
 ) -> FieldlineReturnResult:
     start_state = _normalize_initial_state(initial_state)
@@ -370,13 +405,20 @@ def integrate_full_torus_return_map(
     ]
     min_bphi_over_b = float(np.min(np.asarray(bphi_ratios, dtype=float)))
     unwrapped_theta = chart.unwrapped_thetas(states)
+    return_section_theta = full_torus_return_section_unwrapped_thetas(
+        chart,
+        states,
+        samples_per_full_torus=options.samples_per_full_torus,
+        expected_winding=expected_winding,
+    )
     return FieldlineReturnResult(
         initial_state=start_state,
         final_state=(float(states[-1, 0]), float(states[-1, 1])),
         phi_grid=phi_grid,
         states=states,
         unwrapped_theta=unwrapped_theta,
-        winding=float((unwrapped_theta[-1] - unwrapped_theta[0]) / (2.0 * pi)),
+        return_section_unwrapped_theta=return_section_theta,
+        winding=float((return_section_theta[-1] - return_section_theta[0]) / (2.0 * pi)),
         min_bphi_over_b=min_bphi_over_b,
     )
 
@@ -407,6 +449,7 @@ def integrate_tangent_full_torus_return_map(
     chart: PoincareChart,
     phi0: float = 0.0,
     torus_turns: int = 1,
+    expected_winding: float | None = None,
     options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
 ) -> FieldlineTangentReturnResult:
     start_state = _normalize_initial_state(initial_state)
@@ -455,13 +498,20 @@ def integrate_tangent_full_torus_return_map(
         for phi, state in zip(phi_grid, states, strict=True)
     ]
     unwrapped_theta = chart.unwrapped_thetas(states)
+    return_section_theta = full_torus_return_section_unwrapped_thetas(
+        chart,
+        states,
+        samples_per_full_torus=options.samples_per_full_torus,
+        expected_winding=expected_winding,
+    )
     return_map = FieldlineReturnResult(
         initial_state=start_state,
         final_state=(float(states[-1, 0]), float(states[-1, 1])),
         phi_grid=phi_grid,
         states=states,
         unwrapped_theta=unwrapped_theta,
-        winding=float((unwrapped_theta[-1] - unwrapped_theta[0]) / (2.0 * pi)),
+        return_section_unwrapped_theta=return_section_theta,
+        winding=float((return_section_theta[-1] - return_section_theta[0]) / (2.0 * pi)),
         min_bphi_over_b=float(np.min(np.asarray(bphi_ratios, dtype=float))),
     )
     return FieldlineTangentReturnResult(
@@ -486,6 +536,7 @@ def integrate_target_return_map(
         chart=chart,
         phi0=target.phi0,
         torus_turns=target.q,
+        expected_winding=target.expected_winding(),
         options=options,
     )
 
@@ -504,6 +555,7 @@ def integrate_tangent_target_return_map(
         chart=chart,
         phi0=target.phi0,
         torus_turns=target.q,
+        expected_winding=target.expected_winding(),
         options=options,
     )
 

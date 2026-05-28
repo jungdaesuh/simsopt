@@ -25,6 +25,7 @@ from .periodic_orbit import (
 from .poincare_chart import PoincareChart
 from .rational_target import GREENE_BRANCHES, RationalTarget
 from .residue_sensitivity import (
+    BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
     DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
     BiotSavartBranchResidueVjpDiagnostic,
     branch_resolved_biot_savart_residue_vjp,
@@ -34,6 +35,10 @@ from .residue_sensitivity import (
 
 GREENE_RESIDUE_OBJECTIVE_SCHEMA_VERSION = "greene_residue_objective_v1"
 GREENE_RESIDUE_OBJECTIVE_VALIDATION_STATUS_PASSED = "passed"
+GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_MIN_ORDER = 1.95
+GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_MIN_SAMPLES = 3
+GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_ORDER_RTOL = 1.0e-9
+GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_ORDER_ATOL = 1.0e-12
 DEFAULT_RESIDUE_OBJECTIVE_WEIGHT = 0.0
 DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS = 768
 
@@ -49,6 +54,7 @@ class ResidueBranchSeed:
     branch: str
     section_state: Sequence[float]
     validation_id: str
+    optimizer_taylor_validated: bool = False
 
     def __post_init__(self) -> None:
         target_id = str(self.target_id)
@@ -70,6 +76,11 @@ class ResidueBranchSeed:
             _normalize_section_state(self.section_state),
         )
         object.__setattr__(self, "validation_id", validation_id)
+        object.__setattr__(
+            self,
+            "optimizer_taylor_validated",
+            bool(self.optimizer_taylor_validated),
+        )
 
     @property
     def key(self) -> ResidueBranchKey:
@@ -81,6 +92,7 @@ class ResidueBranchSeed:
             "branch": self.branch,
             "section_state": list(self.section_state),
             "validation_id": self.validation_id,
+            "optimizer_taylor_validated": self.optimizer_taylor_validated,
         }
 
 
@@ -208,6 +220,7 @@ class BiotSavartGreeneResidueObjective(Optimizable):
                 targets_tuple,
                 branch_seeds_tuple,
                 validation_id=validation_label,
+                require_optimizer_taylor=objective_weight_value > 0.0,
             )
             if requires_branch_validation
             else {}
@@ -371,13 +384,20 @@ def residue_branch_seed_from_payload(
     payload: Mapping[str, object],
     *,
     validation_id: str,
+    optimizer_taylor_validated: bool | None = None,
 ) -> ResidueBranchSeed:
     seed_validation_id = str(payload.get("validation_id", validation_id))
+    taylor_validated = (
+        bool(payload.get("optimizer_taylor_validated", False))
+        if optimizer_taylor_validated is None
+        else bool(optimizer_taylor_validated)
+    )
     return ResidueBranchSeed(
         target_id=str(payload["target_id"]),
         branch=str(payload["branch"]),
         section_state=payload["section_state"],
         validation_id=seed_validation_id,
+        optimizer_taylor_validated=taylor_validated,
     )
 
 
@@ -439,16 +459,196 @@ def load_residue_objective_seeds(
         raise ValueError(
             "Greene residue objective seeds JSON branch_seeds must be a sequence"
         )
+    validation_by_key = _validate_optimizer_taylor_gate(payload, seed_payloads)
     return (
         validation_artifact_id,
         tuple(
             residue_branch_seed_from_payload(
                 dict(seed),
                 validation_id=validation_artifact_id,
+                optimizer_taylor_validated=(
+                    (str(seed["target_id"]), str(seed["branch"])) in validation_by_key
+                ),
             )
             for seed in seed_payloads
         ),
     )
+
+
+def _validate_optimizer_taylor_gate(
+    payload: Mapping[str, object],
+    seed_payloads: Sequence[object],
+) -> dict[ResidueBranchKey, Mapping[str, object]]:
+    validations_payload = payload.get("optimizer_taylor_validations")
+    if not isinstance(validations_payload, Sequence) or isinstance(
+        validations_payload, str
+    ):
+        raise ValueError(
+            "Greene residue objective seeds JSON optimizer_taylor_validations "
+            "must be a sequence"
+        )
+    seed_state_by_key: dict[ResidueBranchKey, SectionState] = {}
+    for seed_payload in seed_payloads:
+        if not isinstance(seed_payload, Mapping):
+            raise ValueError(
+                "Greene residue objective branch seed entries must be objects"
+            )
+        key = (str(seed_payload["target_id"]), str(seed_payload["branch"]))
+        if key in seed_state_by_key:
+            raise ValueError(
+                f"Duplicate Greene residue objective branch seed for {key}"
+            )
+        seed_state_by_key[key] = _normalize_section_state(
+            seed_payload["section_state"]
+        )
+    seed_keys = set(seed_state_by_key)
+    validation_by_key: dict[ResidueBranchKey, Mapping[str, object]] = {}
+    for validation_payload in validations_payload:
+        if not isinstance(validation_payload, Mapping):
+            raise ValueError(
+                "Greene residue objective optimizer Taylor validation entries "
+                "must be objects"
+            )
+        key = (
+            str(validation_payload["target_id"]),
+            str(validation_payload["branch"]),
+        )
+        if key in validation_by_key:
+            raise ValueError(
+                f"Duplicate Greene residue objective optimizer Taylor validation for {key}"
+            )
+        validation_by_key[key] = validation_payload
+        _validate_optimizer_taylor_diagnostic(
+            validation_payload,
+            expected_base_state=seed_state_by_key.get(key),
+        )
+    missing = sorted(seed_keys - set(validation_by_key))
+    if missing:
+        raise ValueError(
+            "Missing Greene residue objective optimizer Taylor validations: "
+            f"{missing}"
+        )
+    unexpected = sorted(set(validation_by_key) - seed_keys)
+    if unexpected:
+        raise ValueError(
+            "Unexpected Greene residue objective optimizer Taylor validations: "
+            f"{unexpected}"
+        )
+    return validation_by_key
+
+
+def _validate_optimizer_taylor_diagnostic(
+    validation_payload: Mapping[str, object],
+    *,
+    expected_base_state: SectionState | None,
+) -> None:
+    diagnostic = validation_payload["diagnostic"]
+    if not isinstance(diagnostic, Mapping):
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation diagnostic "
+            "must be an object"
+        )
+    if str(diagnostic["mode"]) != BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE:
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation mode must be "
+            f"{BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE}"
+        )
+    if str(diagnostic["base_status"]) != BRANCH_STATUS_CONVERGED:
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation base_status "
+            "must be converged"
+        )
+    base_state = _normalize_section_state(diagnostic["base_state"])
+    if expected_base_state is not None and base_state != expected_base_state:
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation base_state "
+            "must match the branch seed section_state"
+        )
+    direction_norm = float(diagnostic["direction_norm"])
+    if not isfinite(direction_norm) or direction_norm <= 0.0:
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation direction_norm "
+            "must be positive"
+        )
+    samples = diagnostic["samples"]
+    if not isinstance(samples, Sequence) or isinstance(samples, str):
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation samples "
+            "must be a sequence"
+        )
+    if len(samples) < GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_MIN_SAMPLES:
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation requires at "
+            f"least {GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_MIN_SAMPLES} samples"
+        )
+    for sample in samples:
+        if not isinstance(sample, Mapping):
+            raise ValueError(
+                "Greene residue objective optimizer Taylor validation samples "
+                "must be objects"
+            )
+        if str(sample["status"]) != BRANCH_STATUS_CONVERGED:
+            raise ValueError(
+                "Greene residue objective optimizer Taylor validation sample "
+                "status must be converged"
+            )
+        step = float(sample["step"])
+        residual = float(sample["residual"])
+        absolute_residual = float(sample["absolute_residual"])
+        if (
+            step <= 0.0
+            or not isfinite(step)
+            or not isfinite(residual)
+            or absolute_residual <= 0.0
+            or not isfinite(absolute_residual)
+        ):
+            raise ValueError(
+                "Greene residue objective optimizer Taylor validation samples "
+                "must have finite positive steps and finite positive residuals"
+            )
+    observed_orders = diagnostic["observed_orders"]
+    if not isinstance(observed_orders, Sequence) or isinstance(observed_orders, str):
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation observed_orders "
+            "must be a sequence"
+        )
+    if len(observed_orders) != len(samples) - 1:
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation observed_orders "
+            "must cover the sample window"
+        )
+    computed_orders = []
+    for previous, current in zip(samples[:-1], samples[1:], strict=True):
+        previous_step = float(previous["step"])
+        current_step = float(current["step"])
+        previous_residual = float(previous["absolute_residual"])
+        current_residual = float(current["absolute_residual"])
+        computed_orders.append(
+            float(
+                np.log(previous_residual / current_residual)
+                / np.log(previous_step / current_step)
+            )
+        )
+    claimed_orders = [float(order) for order in observed_orders]
+    if not np.allclose(
+        claimed_orders,
+        computed_orders,
+        rtol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_ORDER_RTOL,
+        atol=GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_ORDER_ATOL,
+    ):
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation observed_orders "
+            "must match the sample residuals"
+        )
+    minimum_order = min(claimed_orders)
+    if (
+        not isfinite(minimum_order)
+        or minimum_order < GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_MIN_ORDER
+    ):
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation minimum order "
+            f"must be at least {GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_MIN_ORDER}"
+        )
 
 
 def residue_objective_target_manifest_id(targets: Sequence[RationalTarget]) -> str:
@@ -481,6 +681,7 @@ def _validated_seed_state_map(
     branch_seeds: Sequence[ResidueBranchSeed],
     *,
     validation_id: str,
+    require_optimizer_taylor: bool,
 ) -> dict[ResidueBranchKey, SectionState]:
     expected_keys = _target_branch_keys(targets)
     if len(set(expected_keys)) != len(expected_keys):
@@ -491,6 +692,11 @@ def _validated_seed_state_map(
             raise ValueError(
                 "Greene residue objective seed validation_id does not match "
                 f"{validation_id!r}"
+            )
+        if require_optimizer_taylor and not seed.optimizer_taylor_validated:
+            raise ValueError(
+                "Greene residue objective branch seeds require optimizer Taylor "
+                "validation before nonzero objective use"
             )
         if seed.key in seed_by_key:
             raise ValueError(

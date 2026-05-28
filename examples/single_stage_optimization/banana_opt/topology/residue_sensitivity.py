@@ -17,6 +17,7 @@ from .fieldline_map import (
     FieldlineTangentReturnResult,
     cartesian_from_cylindrical,
     cylindrical_basis,
+    full_torus_return_section_unwrapped_thetas,
     integrate_tangent_target_return_map,
     target_winding_residual,
 )
@@ -1056,13 +1057,22 @@ def _rk4_tangent_return_map(
     state_grid = np.asarray(states, dtype=float)
     monodromy = np.asarray(augmented[2:], dtype=float).reshape((2, 2))
     unwrapped_theta = chart.unwrapped_thetas(state_grid)
+    return_section_theta = full_torus_return_section_unwrapped_thetas(
+        chart,
+        state_grid,
+        samples_per_full_torus=steps_per_torus,
+        expected_winding=target.expected_winding(),
+    )
     return_map = FieldlineReturnResult(
         initial_state=(float(start_state[0]), float(start_state[1])),
         final_state=(float(state_grid[-1, 0]), float(state_grid[-1, 1])),
         phi_grid=phi_grid,
         states=state_grid,
         unwrapped_theta=unwrapped_theta,
-        winding=float((unwrapped_theta[-1] - unwrapped_theta[0]) / (2.0 * np.pi)),
+        return_section_unwrapped_theta=return_section_theta,
+        winding=float(
+            (return_section_theta[-1] - return_section_theta[0]) / (2.0 * np.pi)
+        ),
         min_bphi_over_b=float(np.min(np.asarray(bphi_ratios, dtype=float))),
     )
     return (

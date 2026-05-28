@@ -6638,6 +6638,15 @@ class HardwareConstraintTests(unittest.TestCase):
             target_volume=0.10,
             target_iota=0.15,
             stage2_seed_surf_path="/seeds/surf_opt_boozer_surface.json",
+            residue_objective_replay_config=(
+                ("enabled", True),
+                ("weight", 0.25),
+                ("targets_sha256", "sha256:targets"),
+                ("seeds_sha256", "sha256:seeds"),
+                ("target_manifest_id", "sha256:test-targets"),
+                ("validation_id", "validation-artifact"),
+                ("local_difference_step", 1.0e-6),
+            ),
             stage2_policy_metadata=module.stage2_policy_metadata_items(
                 {
                     "BOOZER_CURRENT_CONVENTION": "mu0",
@@ -6757,6 +6766,18 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertTrue(payload["STAGE2_BANANA_CURRENT_PINNED"])
         self.assertEqual(payload["STAGE2_BANANA_I_FIXED_S2_KA"], -14.0)
         self.assertEqual(payload["STAGE2_IOTA_TARGET_SIGN"], -1)
+        self.assertEqual(
+            payload["GREENE_RESIDUE_OBJECTIVE_REPLAY_CONFIG"],
+            {
+                "enabled": True,
+                "weight": 0.25,
+                "targets_sha256": "sha256:targets",
+                "seeds_sha256": "sha256:seeds",
+                "target_manifest_id": "sha256:test-targets",
+                "validation_id": "validation-artifact",
+                "local_difference_step": 1.0e-6,
+            },
+        )
         self.assertEqual(
             payload["STAGE2_SEED_SURF_PATH"],
             "/seeds/surf_opt_boozer_surface.json",
@@ -7512,6 +7533,97 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["FRONTIER_TRUST_PENALTY"], 0.0)
         self.assertEqual(payload["FRONTIER_CHEBYSHEV_SHARPNESS"], 18.0)
         self.assertEqual(payload["FRONTIER_EPSILON_PENALTY_WEIGHT"], 9.0)
+
+    def test_current_preserved_timeout_replay_config_preserves_residue_objective_config(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        replay_seed = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+        )
+        with tempfile.NamedTemporaryFile(
+            "w",
+            delete=False,
+            encoding="utf-8",
+        ) as targets_file:
+            targets_file.write('{"targets":[]}')
+        with tempfile.NamedTemporaryFile(
+            "w",
+            delete=False,
+            encoding="utf-8",
+        ) as seeds_file:
+            seeds_file.write('{"branch_seeds":[]}')
+        self.addCleanup(Path(targets_file.name).unlink, missing_ok=True)
+        self.addCleanup(Path(seeds_file.name).unlink, missing_ok=True)
+        residue_args = SimpleNamespace(
+            offspec_replay_debug_only=False,
+            residue_objective_weight=0.25,
+            residue_objective_targets_json=targets_file.name,
+            residue_objective_seeds_json=seeds_file.name,
+            residue_objective_axis_r=1.02,
+            residue_objective_axis_z=0.01,
+            residue_objective_poloidal_orientation=1,
+            residue_objective_radial_label_scale=0.75,
+            residue_objective_scale=0.5,
+            residue_objective_r_satisfied=1.0e-5,
+            residue_objective_local_difference_step=2.0e-6,
+            residue_objective_rtol=1.0e-10,
+            residue_objective_atol=1.0e-12,
+            residue_objective_max_step=0.025,
+            residue_objective_samples_per_full_torus=384,
+            residue_objective_min_bphi_over_b=1.0e-7,
+            residue_objective_newton_residual_tolerance=1.0e-10,
+            residue_objective_winding_tolerance=1.0e-8,
+            residue_objective_det_tolerance=2.0e-6,
+            residue_objective_max_newton_iterations=16,
+            residue_objective_max_newton_step_norm=0.025,
+        )
+        residue_objective = SimpleNamespace(
+            target_manifest_id="sha256:test-targets",
+            validation_id="validation-artifact",
+        )
+
+        with (
+            patch.object(module, "PRESERVED_TIMEOUT_REPLAY_CONFIG", replay_seed),
+            patch.object(module, "args", residue_args, create=True),
+            patch.object(
+                module,
+                "JResidueObjective",
+                residue_objective,
+                create=True,
+            ),
+        ):
+            replay_config = module.current_preserved_timeout_replay_config()
+
+        payload = module.residue_objective_replay_config_payload(
+            replay_config.residue_objective_replay_config
+        )
+        self.assertTrue(payload["enabled"])
+        self.assertEqual(payload["weight"], 0.25)
+        self.assertEqual(payload["target_manifest_id"], "sha256:test-targets")
+        self.assertEqual(payload["validation_id"], "validation-artifact")
+        self.assertEqual(
+            payload["targets_sha256"],
+            module._optional_file_sha256(targets_file.name),
+        )
+        self.assertEqual(
+            payload["seeds_sha256"],
+            module._optional_file_sha256(seeds_file.name),
+        )
+        self.assertEqual(payload["local_difference_step"], 2.0e-6)
 
     def test_current_preserved_timeout_replay_config_round_trips_frontier_scalarization_overrides(
         self,
@@ -12794,8 +12906,43 @@ class RunIdentityTests(unittest.TestCase):
             confinement_surrogate_early_weight=0.2,
         )
 
+    def _set_residue_objective_args(
+        self,
+        args,
+        *,
+        local_difference_step=1.0e-6,
+        targets_json="targets.json",
+        seeds_json="seeds.json",
+    ):
+        args.residue_objective_weight = 0.25
+        args.residue_objective_targets_json = targets_json
+        args.residue_objective_seeds_json = seeds_json
+        args.residue_objective_axis_r = 1.02
+        args.residue_objective_axis_z = 0.01
+        args.residue_objective_poloidal_orientation = 1
+        args.residue_objective_radial_label_scale = 0.75
+        args.residue_objective_scale = 0.5
+        args.residue_objective_r_satisfied = 1.0e-5
+        args.residue_objective_local_difference_step = local_difference_step
+        args.residue_objective_rtol = 1.0e-10
+        args.residue_objective_atol = 1.0e-12
+        args.residue_objective_max_step = 0.025
+        args.residue_objective_samples_per_full_torus = 384
+        args.residue_objective_min_bphi_over_b = 1.0e-7
+        args.residue_objective_newton_residual_tolerance = 1.0e-10
+        args.residue_objective_winding_tolerance = 1.0e-8
+        args.residue_objective_det_tolerance = 2.0e-6
+        args.residue_objective_max_newton_iterations = 16
+        args.residue_objective_max_newton_step_norm = 0.025
+        return args
+
     def _make_identity_config(
-        self, module, args, boozer_I=0.37, plasma_current_A=1850000.0
+        self,
+        module,
+        args,
+        boozer_I=0.37,
+        plasma_current_A=1850000.0,
+        residue_objective=None,
     ):
         return module.make_run_identity_config(
             args,
@@ -12811,15 +12958,24 @@ class RunIdentityTests(unittest.TestCase):
             80,
             80,
             None,
+            residue_objective=residue_objective,
         )
 
-    def _build_identity(self, module, args, boozer_I=0.37, plasma_current_A=1850000.0):
+    def _build_identity(
+        self,
+        module,
+        args,
+        boozer_I=0.37,
+        plasma_current_A=1850000.0,
+        residue_objective=None,
+    ):
         return module.build_run_identity_config(
             self._make_identity_config(
                 module,
                 args,
                 boozer_I=boozer_I,
                 plasma_current_A=plasma_current_A,
+                residue_objective=residue_objective,
             )
         )
 
@@ -12856,6 +13012,7 @@ class RunIdentityTests(unittest.TestCase):
                 "residue_objective_weight",
                 "residue_objective_target_manifest_id",
                 "residue_objective_validation_id",
+                "residue_objective_replay_config",
             }
         ]
 
@@ -12903,6 +13060,70 @@ class RunIdentityTests(unittest.TestCase):
         weighted_config = self._build_identity(module, weighted_args)
 
         self.assertNotEqual(base_config, weighted_config)
+
+    def test_run_identity_changes_when_residue_objective_runtime_config_changes(self):
+        module = load_single_stage_example_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            targets_path = Path(tmpdir) / "targets.json"
+            seeds_path = Path(tmpdir) / "seeds.json"
+            targets_path.write_text('{"targets":[]}', encoding="utf-8")
+            seeds_path.write_text('{"branch_seeds":[]}', encoding="utf-8")
+            base_args = self._set_residue_objective_args(
+                self._make_identity_args(),
+                targets_json=str(targets_path),
+                seeds_json=str(seeds_path),
+            )
+            changed_args = self._set_residue_objective_args(
+                self._make_identity_args(),
+                local_difference_step=2.0e-6,
+                targets_json=str(targets_path),
+                seeds_json=str(seeds_path),
+            )
+            residue_objective = SimpleNamespace(
+                target_manifest_id="sha256:test-targets",
+                validation_id="validation-artifact",
+            )
+
+            base_config = self._make_identity_config(
+                module,
+                base_args,
+                residue_objective=residue_objective,
+            )
+            changed_config = self._make_identity_config(
+                module,
+                changed_args,
+                residue_objective=residue_objective,
+            )
+            base_payload = module.residue_objective_replay_config_payload(
+                base_config.residue_objective_replay_config
+            )
+
+            self.assertEqual(base_payload["target_manifest_id"], "sha256:test-targets")
+            self.assertEqual(base_payload["validation_id"], "validation-artifact")
+            self.assertEqual(base_payload["local_difference_step"], 1.0e-6)
+            self.assertEqual(
+                base_payload["targets_sha256"],
+                module._optional_file_sha256(targets_path),
+            )
+            self.assertEqual(
+                base_payload["seeds_sha256"],
+                module._optional_file_sha256(seeds_path),
+            )
+            self.assertNotEqual(
+                module.build_run_identity_config(base_config),
+                module.build_run_identity_config(changed_config),
+            )
+
+            seeds_path.write_text('{"branch_seeds":[{"changed":true}]}', encoding="utf-8")
+            changed_seed_config = self._make_identity_config(
+                module,
+                base_args,
+                residue_objective=residue_objective,
+            )
+            self.assertNotEqual(
+                module.build_run_identity_config(base_config),
+                module.build_run_identity_config(changed_seed_config),
+            )
 
     def test_run_identity_changes_when_goal_mode_changes(self):
         module = load_single_stage_example_module()
