@@ -84,7 +84,7 @@ from banana_opt.single_stage_objectives import evaluate_alm_objective
 # SIMSOPT imports
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable, load
-from simsopt.backend import get_tolerance_tier
+from simsopt.backend import get_jax_platform, get_tolerance_tier, get_transfer_guard
 from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.field import BiotSavart
 from simsopt.jax_core._math_utils import (
@@ -204,6 +204,14 @@ _REFERENCE_OUTER_MAXCOR_DEFAULT = 300
 _TARGET_OUTER_MAXCOR_DEFAULT = 20
 _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT = 1e-11
 _TARGET_LANE_BOOZER_NEWTON_TOL_FLOAT32_SMOKE_DEFAULT = 1e-6
+_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT = "skip-large-strict-cuda"
+_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
+    "default",
+    "run",
+    "skip",
+    "skip-large-strict-cuda",
+)
+_TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION = 6
 _SINGLE_STAGE_RESULTS_SCHEMA_VERSION = 1
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA = "simsopt.single_stage.jax_runtime_spec"
@@ -838,6 +846,7 @@ def build_single_stage_problem_contract(
     target_lane_boozer_bfgs_maxiter_record,
     target_lane_boozer_newton_tol_record,
     target_lane_boozer_newton_maxiter_record,
+    target_lane_boozer_newton_polish_policy_record=None,
     single_stage_search_policy=None,
     effective_initial_phase_settings=None,
     args=None,
@@ -1001,6 +1010,9 @@ def build_single_stage_problem_contract(
             "target_lane_boozer_bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
             "target_lane_boozer_newton_tol": target_lane_boozer_newton_tol_record,
             "target_lane_boozer_newton_maxiter": target_lane_boozer_newton_maxiter_record,
+            "target_lane_boozer_newton_polish_policy": (
+                target_lane_boozer_newton_polish_policy_record
+            ),
             "effective_banana_surface_radius": float(banana_surf_radius),
             "benchmark_mode": bool(args.benchmark_mode),
             "minimal_artifacts": bool(args.minimal_artifacts),
@@ -1157,6 +1169,7 @@ def build_single_stage_results_envelope(
     target_lane_boozer_bfgs_maxiter_record,
     target_lane_boozer_newton_tol_record,
     target_lane_boozer_newton_maxiter_record,
+    target_lane_boozer_newton_polish_policy_record=None,
     single_stage_search_policy=None,
     effective_initial_phase_settings=None,
     args=None,
@@ -1275,6 +1288,9 @@ def build_single_stage_results_envelope(
             target_lane_boozer_bfgs_maxiter_record=target_lane_boozer_bfgs_maxiter_record,
             target_lane_boozer_newton_tol_record=target_lane_boozer_newton_tol_record,
             target_lane_boozer_newton_maxiter_record=target_lane_boozer_newton_maxiter_record,
+            target_lane_boozer_newton_polish_policy_record=(
+                target_lane_boozer_newton_polish_policy_record
+            ),
             single_stage_search_policy=single_stage_search_policy,
             effective_initial_phase_settings=effective_initial_phase_settings,
             args=args,
@@ -4208,6 +4224,18 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--target-lane-boozer-newton-polish-policy",
+        choices=_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES,
+        default=os.environ.get(
+            "TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY",
+            _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT,
+        ),
+        help=(
+            "Policy for the Boozer Newton polish in JAX/ondevice target-lane "
+            "Boozer initialization and trial solves."
+        ),
+    )
+    parser.add_argument(
         "--stage2-source",
         choices=["database", "local"],
         default=os.environ.get("STAGE2_SOURCE", "database"),
@@ -4620,6 +4648,13 @@ def parse_args():
         args.optimizer_backend,
         args.target_lane_boozer_newton_maxiter,
     )
+    args.target_lane_boozer_newton_polish_policy = (
+        resolve_target_lane_boozer_newton_polish_policy(
+            args.backend,
+            args.optimizer_backend,
+            args.target_lane_boozer_newton_polish_policy,
+        )
+    )
     if args.profile_target_lane_only or args.profile_target_lane_memory_analysis:
         args.profile_target_lane = True
     if args.profile_target_lane_batch_size < 1:
@@ -4868,6 +4903,7 @@ def initialize_boozer_surface(
     bfgs_maxiter_override=None,
     newton_tol_override=None,
     newton_maxiter_override=None,
+    newton_polish_policy_override=None,
     surface_dofs_override=None,
     iota_override=None,
     G_override=None,
@@ -4898,6 +4934,8 @@ def initialize_boozer_surface(
         JAX/ondevice Boozer initialization
     newton_maxiter_override: optional Newton polish iteration cap override
         for JAX/ondevice Boozer initialization
+    newton_polish_policy_override: optional explicit Newton polish policy
+        override for JAX/ondevice Boozer initialization
     surface_dofs_override: optional converged surface DOFs to reuse as the
         initial Boozer state instead of the fitted Stage 2 seed surface
     iota_override: optional solved iota warm start for the Boozer replay
@@ -5041,6 +5079,8 @@ def initialize_boozer_surface(
                 options["newton_tol"] = float(newton_tol_override)
             if newton_maxiter_override is not None:
                 options["newton_maxiter"] = int(newton_maxiter_override)
+            if newton_polish_policy_override is not None:
+                options["newton_polish_policy"] = str(newton_polish_policy_override)
             options.update(build_jax_stage_options())
         if backend == "jax":
             boozer_surface = BoozerCls(
@@ -7904,6 +7944,65 @@ def resolve_target_lane_boozer_newton_maxiter(
     return resolved
 
 
+def resolve_target_lane_boozer_newton_polish_policy(
+    field_backend,
+    optimizer_backend,
+    target_lane_boozer_newton_polish_policy=None,
+):
+    """Resolve the Boozer Newton polish policy for target-lane solves."""
+    del field_backend, optimizer_backend
+    policy = (
+        _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT
+        if target_lane_boozer_newton_polish_policy is None
+        else str(target_lane_boozer_newton_polish_policy).strip().lower()
+    )
+    if policy == "default":
+        return _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT
+    if policy not in _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES:
+        choices = ", ".join(_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES)
+        raise ValueError(
+            f"target_lane_boozer_newton_polish_policy must be one of: {choices}."
+        )
+    return policy
+
+
+def _is_large_target_lane_boozer_resolution(mpol, ntor):
+    return (
+        int(mpol) >= _TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION
+        or int(ntor) >= _TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION
+    )
+
+
+def _strict_cuda_target_lane_active():
+    return get_jax_platform() == "cuda" and get_transfer_guard() == "disallow"
+
+
+def resolve_effective_boozer_newton_polish_policy_override(
+    *,
+    field_backend,
+    optimizer_backend,
+    mpol,
+    ntor,
+    target_lane_boozer_newton_polish_policy=None,
+):
+    """Map the target-lane policy onto the BoozerSurfaceJAX option value."""
+    if (
+        field_backend != "jax"
+        or optimizer_backend not in _JAX_ONDEVICE_BOOZER_OUTER_OPTIMIZER_BACKENDS
+    ):
+        return None
+    policy = resolve_target_lane_boozer_newton_polish_policy(
+        field_backend,
+        optimizer_backend,
+        target_lane_boozer_newton_polish_policy,
+    )
+    if policy in {"run", "skip"}:
+        return policy
+    if not _is_large_target_lane_boozer_resolution(mpol, ntor):
+        return None
+    return "skip" if _strict_cuda_target_lane_active() else None
+
+
 @contextmanager
 def temporary_boozer_surface_option_overrides(boozer_surface, **overrides):
     """Temporarily override mutable BoozerSurface options for one scoped phase."""
@@ -9487,6 +9586,7 @@ def resolve_warm_start_boozer_init_overrides(
             "bfgs_maxiter_override": None,
             "newton_tol_override": None,
             "newton_maxiter_override": None,
+            "newton_polish_policy_override": None,
         }
 
     least_squares_algorithm_override = None
@@ -9518,6 +9618,7 @@ def resolve_warm_start_boozer_init_overrides(
         "bfgs_maxiter_override": bfgs_maxiter_override,
         "newton_tol_override": None,
         "newton_maxiter_override": None,
+        "newton_polish_policy_override": None,
     }
 
 
@@ -9530,7 +9631,10 @@ def resolve_target_lane_boozer_init_base_overrides(
     target_lane_boozer_bfgs_maxiter,
     target_lane_boozer_newton_tol,
     target_lane_boozer_newton_maxiter,
+    target_lane_boozer_newton_polish_policy=None,
     tolerance_tier=None,
+    mpol=None,
+    ntor=None,
 ):
     """Return the baseline target-lane init overrides for JAX/ondevice solves."""
     if (
@@ -9543,6 +9647,7 @@ def resolve_target_lane_boozer_init_base_overrides(
             "bfgs_maxiter_override": None,
             "newton_tol_override": None,
             "newton_maxiter_override": None,
+            "newton_polish_policy_override": None,
         }
 
     bfgs_tol_override = (
@@ -9578,6 +9683,13 @@ def resolve_target_lane_boozer_init_base_overrides(
             None
             if target_lane_boozer_newton_maxiter is None
             else int(target_lane_boozer_newton_maxiter)
+        ),
+        "newton_polish_policy_override": resolve_effective_boozer_newton_polish_policy_override(
+            field_backend=field_backend,
+            optimizer_backend=optimizer_backend,
+            mpol=0 if mpol is None else mpol,
+            ntor=0 if ntor is None else ntor,
+            target_lane_boozer_newton_polish_policy=target_lane_boozer_newton_polish_policy,
         ),
     }
 
@@ -10052,6 +10164,8 @@ def summarize_boozer_solver_trace_metadata(boozer_surface):
         "boozer_optimizer_method": res.get("optimizer_method"),
         "newton_tol": options.get("newton_tol"),
         "newton_maxiter": options.get("newton_maxiter"),
+        "newton_polish_policy": options.get("newton_polish_policy"),
+        "newton_polish_skipped": res.get("newton_polish_skipped"),
         "linearization_kind": res.get("linearization_kind"),
         "linear_solve_backend": res.get("linear_solve_backend"),
         "dense_linear_solve_factors_available": res.get(
@@ -11997,6 +12111,15 @@ if __name__ == "__main__":
         )
         else None
     )
+    target_lane_boozer_newton_polish_policy_record = (
+        args.target_lane_boozer_newton_polish_policy
+        if args.backend == "jax"
+        and (
+            boozer_optimizer_backend_record == "ondevice"
+            or args.optimizer_backend == _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND
+        )
+        else None
+    )
     boozer_optimizer_backend_hash_record = (
         args.boozer_optimizer_backend if args.backend == "jax" else None
     )
@@ -12034,6 +12157,11 @@ if __name__ == "__main__":
         target_lane_boozer_bfgs_maxiter=target_lane_boozer_bfgs_maxiter_record,
         target_lane_boozer_newton_tol=target_lane_boozer_newton_tol_record,
         target_lane_boozer_newton_maxiter=target_lane_boozer_newton_maxiter_record,
+        target_lane_boozer_newton_polish_policy=(
+            target_lane_boozer_newton_polish_policy_record
+        ),
+        mpol=mpol,
+        ntor=ntor,
     )
     warm_start_boozer_init_overrides = resolve_warm_start_boozer_init_overrides(
         warm_start_state=warm_start_state,
@@ -12094,6 +12222,8 @@ if __name__ == "__main__":
         str(target_lane_boozer_bfgs_maxiter_record),
         str(target_lane_boozer_newton_tol_record),
         str(target_lane_boozer_newton_maxiter_record),
+        str(target_lane_boozer_newton_polish_policy_record),
+        str(effective_boozer_init_overrides["newton_polish_policy_override"]),
         str(single_stage_search_policy.donor_class),
         str(single_stage_search_policy.search_policy),
         str(single_stage_search_policy.adaptive_failure_penalty_weight),
@@ -12226,6 +12356,10 @@ if __name__ == "__main__":
         newton_maxiter_override=effective_boozer_init_overrides[
             "newton_maxiter_override"
         ],
+        requested_newton_polish_policy=target_lane_boozer_newton_polish_policy_record,
+        newton_polish_policy_override=effective_boozer_init_overrides[
+            "newton_polish_policy_override"
+        ],
     )
 
     # Initialize Boozer surface with target parameters
@@ -12267,6 +12401,9 @@ if __name__ == "__main__":
             newton_tol_override=effective_boozer_init_overrides["newton_tol_override"],
             newton_maxiter_override=effective_boozer_init_overrides[
                 "newton_maxiter_override"
+            ],
+            newton_polish_policy_override=effective_boozer_init_overrides[
+                "newton_polish_policy_override"
             ],
             surface_dofs_override=warm_start_surface_dofs,
             iota_override=jax_seed_iota_override
@@ -12697,6 +12834,9 @@ if __name__ == "__main__":
             "bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
             "newton_tol": target_lane_boozer_newton_tol_record,
             "newton_maxiter": target_lane_boozer_newton_maxiter_record,
+            "newton_polish_policy": effective_boozer_init_overrides[
+                "newton_polish_policy_override"
+            ],
         }
         target_lane_trial_boozer_override_active = any(
             value is not None for value in target_lane_trial_boozer_overrides.values()
@@ -12714,7 +12854,7 @@ if __name__ == "__main__":
             ),
             success_filter_disabled=bool(args.disable_target_lane_success_filter),
             trial_boozer_overrides={
-                key: None if value is None else float(value)
+                key: None if value is None else _jsonable_value(value)
                 for key, value in target_lane_trial_boozer_overrides.items()
             },
         )
@@ -13143,6 +13283,9 @@ if __name__ == "__main__":
                 "bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
                 "newton_tol": target_lane_boozer_newton_tol_record,
                 "newton_maxiter": target_lane_boozer_newton_maxiter_record,
+                "newton_polish_policy": effective_boozer_init_overrides[
+                    "newton_polish_policy_override"
+                ],
             }
             target_lane_trial_boozer_override_active = any(
                 value is not None
@@ -13162,7 +13305,7 @@ if __name__ == "__main__":
                 ),
                 success_filter_disabled=bool(args.disable_target_lane_success_filter),
                 trial_boozer_overrides={
-                    key: None if value is None else float(value)
+                    key: None if value is None else _jsonable_value(value)
                     for key, value in target_lane_trial_boozer_overrides.items()
                 },
             )
@@ -14080,6 +14223,8 @@ if __name__ == "__main__":
                             f"boozer_bfgs_maxiter={target_lane_boozer_bfgs_maxiter_record}, "
                             f"boozer_newton_tol={target_lane_boozer_newton_tol_record}, "
                             f"boozer_newton_maxiter={target_lane_boozer_newton_maxiter_record}, "
+                            "boozer_newton_polish_policy="
+                            f"{target_lane_boozer_newton_polish_policy_record}, "
                             f"remaining_maxiter={remaining_maxiter})..."
                         )
                         record_outer_optimizer_event(
@@ -14538,6 +14683,9 @@ if __name__ == "__main__":
             target_lane_boozer_bfgs_maxiter_record=target_lane_boozer_bfgs_maxiter_record,
             target_lane_boozer_newton_tol_record=target_lane_boozer_newton_tol_record,
             target_lane_boozer_newton_maxiter_record=target_lane_boozer_newton_maxiter_record,
+            target_lane_boozer_newton_polish_policy_record=(
+                target_lane_boozer_newton_polish_policy_record
+            ),
             single_stage_search_policy=single_stage_search_policy,
             effective_initial_phase_settings=effective_initial_phase_settings,
             args=args,
@@ -14697,6 +14845,9 @@ if __name__ == "__main__":
         "target_lane_boozer_bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
         "target_lane_boozer_newton_tol": target_lane_boozer_newton_tol_record,
         "target_lane_boozer_newton_maxiter": target_lane_boozer_newton_maxiter_record,
+        "target_lane_boozer_newton_polish_policy": (
+            target_lane_boozer_newton_polish_policy_record
+        ),
         "INITIAL_PHASE_ITERATIONS": phase1_iterations,
         "INITIAL_PHASE_TERMINATION_MESSAGE": phase1_termination_message,
         "INITIAL_PHASE_SUCCESS": phase1_success,

@@ -6463,6 +6463,59 @@ class TestBoozerSurfaceJAXClass:
         assert np.isfinite(after_newton_payload["residual_inf"])
         assert progress_events == []
 
+    def test_run_code_skip_policy_returns_ls_state_without_newton(self, monkeypatch):
+        """The explicit skip policy must not enter the Newton polish runner."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["newton_polish_policy"] = "skip"
+
+        observed = []
+
+        def record_stage(label, **payload):
+            observed.append((label, payload))
+
+        booz.options["stage_callback"] = record_stage
+
+        def fake_target_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
+            assert method == "bfgs-ondevice"
+            return _successful_minimize_result(x0, nit=3)
+
+        def forbidden_newton_polish(*_args, **_kwargs):
+            raise AssertionError("newton polish should be skipped by policy")
+
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        monkeypatch.setattr(_bsj, "newton_polish_traceable", forbidden_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        labels = [label for label, _payload in observed]
+        before_newton_payload = _stage_payload(observed, "before_boozer_newton")
+        skipped_payload = _stage_payload(observed, "boozer_newton_skipped")
+        after_newton_payload = _stage_payload(observed, "after_boozer_newton")
+        assert res["success"] is True
+        assert res["newton_polish_policy"] == "skip"
+        assert res["newton_polish_skipped"] is True
+        assert res["hessian"] is None
+        assert res["PLU"] is None
+        assert res["linear_solve_backend"] == "operator"
+        assert res["dense_linear_solve_factors_available"] is False
+        assert "boozer_newton_skipped" in labels
+        assert before_newton_payload["policy"] == "skip"
+        assert skipped_payload["reason"] == "newton_polish_policy"
+        assert after_newton_payload["skipped"] == "true"
+        _assert_solver_completion_payload(after_newton_payload)
+        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_SCHEMA)
+
     def test_run_code_passes_newton_stab(self, monkeypatch):
         """run_code() must forward newton_stab into the Newton polish call."""
         booz = _make_mock_boozer_surface()
@@ -7394,6 +7447,45 @@ class TestBoozerSurfaceJAXExactPath:
             np.asarray(result["grad"]),
             np.asarray(expected_grad),
         )
+
+    def test_run_code_traceable_ls_skip_policy_does_not_call_newton(self, monkeypatch):
+        """Traceable LS skip policy must return the LS state without Newton lowering."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = True
+        booz.options["newton_polish_policy"] = "skip"
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+
+        def fake_minimize(_fun, x0, **_kwargs):
+            return types.SimpleNamespace(
+                x_k=x0,
+                converged=jnp.asarray(True),
+                failed=jnp.asarray(False),
+                k=jnp.asarray(3, dtype=jnp.int32),
+            )
+
+        def forbidden_newton_polish(*_args, **_kwargs):
+            raise AssertionError("run_code_traceable() should skip Newton polish")
+
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+        _patch_newton_polish_runner(monkeypatch, forbidden_newton_polish)
+
+        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
+        assert result["type"] == "ls"
+        assert bool(result["success"])
+        assert bool(result["newton_polish_skipped"])
+        assert result["newton_polish_policy"] == "skip"
+        assert result["hessian"] is None
+        assert result["plu"] is None
+        assert result["linear_solve_backend"] == "operator"
+        assert result["dense_linear_solve_factors_available"] is False
+        assert result["dense_newton_steps_materialized"] is False
+        assert result["newton_iter"] == 0
 
     @pytest.mark.parametrize(
         ("explicit_materialize", "expected_materialize"),

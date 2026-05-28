@@ -3183,6 +3183,7 @@ _DEFAULT_OPTIONS_LS = {
     "limited_memory": False,
     "newton_tol": 1e-11,
     "newton_maxiter": 40,
+    "newton_polish_policy": "run",
     "newton_stab": 0.0,
     "weight_inv_modB": True,
     "materialize_dense_linearization": None,
@@ -3264,6 +3265,7 @@ _LEAST_SQUARES_METHODS = frozenset({"lm"}) | _ONDEVICE_LEAST_SQUARES_METHODS
 _ONDEVICE_OPTIMIZER_METHODS = (
     frozenset({"bfgs-ondevice", "lbfgs-ondevice"}) | _ONDEVICE_LEAST_SQUARES_METHODS
 )
+_NEWTON_POLISH_POLICIES = frozenset({"run", "skip"})
 _LS_DYNAMIC_OPTION_KEYS = frozenset(
     {"least_squares_algorithm", "materialize_dense_linearization"}
 )
@@ -3424,6 +3426,11 @@ def _normalize_solver_options(raw_options, boozer_type):
     ):
         allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
         raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
+    if boozer_type == "ls":
+        newton_polish_policy = normalized_options.get("newton_polish_policy", "run")
+        if newton_polish_policy not in _NEWTON_POLISH_POLICIES:
+            allowed = ", ".join(sorted(_NEWTON_POLISH_POLICIES))
+            raise ValueError(f"newton_polish_policy must be one of: {allowed}.")
     if is_parity_mode() and float(normalized_options.get("newton_stab", 0.0)) != 0.0:
         raise ValueError(
             "BoozerSurfaceJAX parity mode requires newton_stab=0.0 so "
@@ -5198,6 +5205,74 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G,
             weight_inv_modB,
         )
+        if self.options["newton_polish_policy"] == "skip":
+
+            def objective_eval(x):
+                return obj_fn(x, coil_set_spec)
+
+            fun_skip, grad_skip = jax.value_and_grad(objective_eval)(x_ls)
+            if method in _ONDEVICE_LEAST_SQUARES_METHODS:
+                ls_success = ls_state["success"]
+                ls_nit = ls_state["nit"]
+            else:
+                ls_success = ls_state.converged & jnp.logical_not(ls_state.failed)
+                ls_nit = ls_state.k
+            sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
+                x_ls,
+                optimize_G,
+                coil_set_spec=coil_set_spec,
+            )
+            finite = (
+                jnp.all(jnp.isfinite(x_ls))
+                & jnp.all(jnp.isfinite(grad_skip))
+                & jnp.isfinite(fun_skip)
+            )
+            primal_success = ls_success & finite
+            gradient_norm = jnp.linalg.norm(grad_skip)
+            return {
+                "x": x_ls,
+                "sdofs": sdofs_out,
+                "iota": iota_out,
+                "G": G_out,
+                "fun": fun_skip,
+                "grad": grad_skip,
+                "hessian": None,
+                "plu": None,
+                "lu_piv": None,
+                "nit": jnp.asarray(0, dtype=jnp.int32),
+                "success": primal_success,
+                "primal_success": primal_success,
+                "adjoint_linear_solve_available": primal_success,
+                "linearization_kind": "hessian",
+                "linear_solve_backend": "operator",
+                "dense_linear_solve_factors_available": False,
+                "optimizer_method": method,
+                "type": "ls",
+                "weight_inv_modB": weight_inv_modB,
+                **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
+                "ls_condition_estimate": None,
+                "hessian_materialized": False,
+                "dense_hessian_shape": None,
+                "dense_hessian_bytes": None,
+                "max_dense_hessian_bytes": self.options[
+                    "max_dense_linearization_bytes"
+                ],
+                "dense_newton_steps_materialized": False,
+                "dense_newton_steps_message": "Newton polish skipped by policy.",
+                "newton_iter": jnp.asarray(0, dtype=jnp.int32),
+                "pre_newton_iter": ls_nit,
+                "final_gradient_norm": gradient_norm,
+                "final_gradient_inf_norm": jnp.linalg.norm(grad_skip, ord=np.inf),
+                "iterative_refinement_ran": False,
+                "final_step_iterative_refinement_ran": False,
+                "dense_refinement_ran": False,
+                "final_step_dense_refinement_ran": False,
+                "failure_category": None,
+                "failure_stage": None,
+                "message": "Newton polish skipped by policy.",
+                "newton_polish_policy": "skip",
+                "newton_polish_skipped": True,
+            }
 
         materialize_traceable_hessian = bool(
             self.options["materialize_dense_linearization"]
@@ -5304,6 +5379,8 @@ class BoozerSurfaceJAX(Optimizable):
             "failure_category": newton_result.get("failure_category"),
             "failure_stage": newton_result.get("failure_stage"),
             "message": newton_result.get("message"),
+            "newton_polish_policy": str(self.options["newton_polish_policy"]),
+            "newton_polish_skipped": False,
         }
 
     def _compute_residual_vector(
@@ -5534,6 +5611,105 @@ class BoozerSurfaceJAX(Optimizable):
             dense_newton_steps=materialize_hessian,
             progress_callback=progress_callback,
         )
+
+    def _skipped_newton_polish_result(self, ls_res, pre_newton, *, weight_inv_modB):
+        """Finalize an LS solve when the configured Newton polish policy is skipped."""
+        sdofs_final = _as_jax_float64(ls_res["sdofs"])
+        iota_out = ls_res["iota"]
+        G_out = ls_res["G"]
+        G_for_res = (
+            G_out
+            if G_out is not None
+            else float(compute_G_from_currents(self.coil_currents))
+        )
+        residual_vec = self._compute_residual_vector(
+            sdofs_final,
+            iota_out,
+            G_for_res,
+            weight_inv_modB=weight_inv_modB,
+        )
+        solve_generation = _advance_solver_generation(self)
+        success = bool(ls_res["success"])
+        vjp_callback = None
+        vjp_groups_callback = None
+        if success:
+            G_provided = G_out is not None
+            vjp_callback = _prepare_result_callback(
+                partial(_boozer_ls_coil_vjp, weight_inv_modB=weight_inv_modB),
+                booz_surf=self,
+                solve_generation=solve_generation,
+                callback_name="vjp",
+                G_provided=G_provided,
+                freshness_guard=True,
+            )
+            vjp_groups_callback = _prepare_result_callback(
+                _build_ls_group_vjp_callback(
+                    self,
+                    iota_out,
+                    G_out,
+                    solve_generation=solve_generation,
+                    weight_inv_modB=weight_inv_modB,
+                ),
+                booz_surf=self,
+                solve_generation=solve_generation,
+                callback_name="vjp_groups",
+                G_provided=G_provided,
+                freshness_guard=True,
+            )
+        host_gradient = np.asarray(ls_res["gradient"], dtype=np.float64)
+        gradient = _as_jax_float64(host_gradient)
+        res = {
+            "residual": residual_vec,
+            "jacobian": gradient,
+            "hessian": None,
+            "iter": 0,
+            "success": success,
+            "primal_success": success,
+            "adjoint_linear_solve_available": success,
+            "sdofs": sdofs_final,
+            "G": G_out,
+            "s": self.surface,
+            "iota": iota_out,
+            "PLU": None,
+            "LU_PIV": None,
+            "vjp": vjp_callback,
+            "vjp_groups": vjp_groups_callback,
+            "type": "ls",
+            "optimizer_method": ls_res["optimizer_method"],
+            "linearization_kind": "hessian",
+            "linear_solve_backend": "operator",
+            "dense_linear_solve_factors_available": False,
+            "linearization_residency": self.options["linearization_residency"],
+            "solve_generation": solve_generation,
+            "weight_inv_modB": weight_inv_modB,
+            "fun": float(ls_res["fun"]),
+            "hessian_materialized": False,
+            "dense_hessian_shape": None,
+            "dense_hessian_bytes": None,
+            "max_dense_hessian_bytes": self.options["max_dense_linearization_bytes"],
+            "dense_newton_steps_materialized": False,
+            "dense_newton_steps_message": "Newton polish skipped by policy.",
+            "newton_iter": 0,
+            "final_gradient_norm": float(np.linalg.norm(host_gradient)),
+            "final_gradient_inf_norm": float(np.linalg.norm(host_gradient, ord=np.inf)),
+            "iterative_refinement_ran": False,
+            "final_step_iterative_refinement_ran": False,
+            "dense_refinement_ran": False,
+            "final_step_dense_refinement_ran": False,
+            "failure_category": None,
+            "failure_stage": None,
+            "message": "Newton polish skipped by policy.",
+            "newton_polish_policy": "skip",
+            "newton_polish_skipped": True,
+            **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
+            "ls_hessian_symmetry_rel": None,
+            "ls_factorization_backend": None,
+            "ls_condition_estimate": None,
+            "pre_newton": pre_newton,
+        }
+        self.res = res
+        self.need_to_run_code = False
+        return res
 
     def minimize_boozer_penalty_constraints_LBFGS(
         self,
@@ -6618,13 +6794,40 @@ class BoozerSurfaceJAX(Optimizable):
             "scipy_callback_trace": ls_res.get("scipy_callback_trace"),
         }
 
-        # Polish with Newton
+        # Polish with Newton unless a caller-owned policy explicitly keeps the
+        # traceable runtime at the LS state.
         self.need_to_run_code = True
         self._emit_stage_callback(
             "before_boozer_newton",
             method="newton-polish",
             ls_method=str(ls_res["optimizer_method"]),
+            policy=str(self.options["newton_polish_policy"]),
         )
+        if self.options["newton_polish_policy"] == "skip":
+            res = self._skipped_newton_polish_result(
+                ls_res,
+                pre_newton,
+                weight_inv_modB=self.options["weight_inv_modB"],
+            )
+            self._emit_stage_callback(
+                "boozer_newton_skipped",
+                method="newton-polish",
+                ls_method=str(ls_res["optimizer_method"]),
+                policy="skip",
+                reason="newton_polish_policy",
+            )
+            self._emit_stage_callback(
+                "after_boozer_newton",
+                solve_success=("true" if bool(res["success"]) else "false"),
+                iterations=0.0,
+                skipped="true",
+                **self._solver_diagnostics_payload(
+                    res,
+                    gradient_key="jacobian",
+                    residual_key="residual",
+                ),
+            )
+            return res
         res = self.minimize_boozer_penalty_constraints_newton(
             constraint_weight=self.constraint_weight,
             iota=iota_out,
@@ -6637,6 +6840,8 @@ class BoozerSurfaceJAX(Optimizable):
         )
         res["optimizer_method"] = ls_res["optimizer_method"]
         res["pre_newton"] = pre_newton
+        res["newton_polish_policy"] = str(self.options["newton_polish_policy"])
+        res["newton_polish_skipped"] = False
         self._emit_stage_callback(
             "after_boozer_newton",
             solve_success=("true" if bool(res["success"]) else "false"),

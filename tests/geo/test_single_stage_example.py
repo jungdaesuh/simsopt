@@ -1201,6 +1201,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 bfgs_maxiter_override=32,
                 newton_tol_override=1.0e-7,
                 newton_maxiter_override=9,
+                newton_polish_policy_override="skip",
             )
 
         options = fake_boozer_surface_jax.instances[0].options
@@ -1208,6 +1209,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(options["bfgs_maxiter"], 32)
         self.assertEqual(options["newton_tol"], 1.0e-7)
         self.assertEqual(options["newton_maxiter"], 9)
+        self.assertEqual(options["newton_polish_policy"], "skip")
 
     def test_initialize_boozer_surface_skips_self_intersection_after_failed_solve(
         self,
@@ -1276,6 +1278,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "bfgs_maxiter_override": None,
                 "newton_tol_override": None,
                 "newton_maxiter_override": None,
+                "newton_polish_policy_override": None,
             },
         )
 
@@ -1302,6 +1305,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "bfgs_maxiter_override": None,
                 "newton_tol_override": 1.0e-11,
                 "newton_maxiter_override": 12,
+                "newton_polish_policy_override": None,
             },
         )
 
@@ -1364,6 +1368,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "bfgs_maxiter_override": None,
                 "newton_tol_override": None,
                 "newton_maxiter_override": None,
+                "newton_polish_policy_override": None,
             },
         )
 
@@ -1428,6 +1433,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "bfgs_maxiter_override": 128,
                 "newton_tol_override": None,
                 "newton_maxiter_override": None,
+                "newton_polish_policy_override": None,
             },
         )
 
@@ -2130,6 +2136,10 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(args.target_lane_boozer_bfgs_maxiter)
         self.assertIsNone(args.target_lane_boozer_newton_tol)
         self.assertIsNone(args.target_lane_boozer_newton_maxiter)
+        self.assertEqual(
+            args.target_lane_boozer_newton_polish_policy,
+            "skip-large-strict-cuda",
+        )
 
     def test_parse_args_benchmark_mode_preserves_target_lane_boozer_precision(self):
         module = self.load_module()
@@ -2152,6 +2162,10 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(args.target_lane_boozer_bfgs_maxiter)
         self.assertIsNone(args.target_lane_boozer_newton_tol)
         self.assertIsNone(args.target_lane_boozer_newton_maxiter)
+        self.assertEqual(
+            args.target_lane_boozer_newton_polish_policy,
+            "skip-large-strict-cuda",
+        )
 
     def test_parse_args_fullgraph_preserves_cpu_boozer_newton_default(self):
         module = self.load_module()
@@ -2171,6 +2185,10 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertIsNone(args.target_lane_boozer_newton_tol)
         self.assertIsNone(args.target_lane_boozer_newton_maxiter)
+        self.assertEqual(
+            args.target_lane_boozer_newton_polish_policy,
+            "skip-large-strict-cuda",
+        )
 
     def test_parse_args_preserves_reference_outer_maxls_default(self):
         module = self.load_module()
@@ -2193,6 +2211,10 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(args.target_lane_boozer_bfgs_maxiter)
         self.assertIsNone(args.target_lane_boozer_newton_tol)
         self.assertIsNone(args.target_lane_boozer_newton_maxiter)
+        self.assertEqual(
+            args.target_lane_boozer_newton_polish_policy,
+            "skip-large-strict-cuda",
+        )
 
     def test_parse_args_marks_explicit_initial_phase_defaults(self):
         module = self.load_module()
@@ -5747,6 +5769,88 @@ class SingleStageExampleTests(unittest.TestCase):
             ValueError, "target_lane_boozer_newton_maxiter must be at least 1"
         ):
             module.resolve_target_lane_boozer_newton_maxiter("jax", "ondevice", 0)
+
+    def test_resolve_target_lane_boozer_newton_polish_policy_normalizes_default(
+        self,
+    ):
+        module = self.load_module()
+
+        self.assertEqual(
+            module.resolve_target_lane_boozer_newton_polish_policy(
+                "jax",
+                "ondevice",
+                "default",
+            ),
+            "skip-large-strict-cuda",
+        )
+        self.assertEqual(
+            module.resolve_target_lane_boozer_newton_polish_policy(
+                "jax",
+                "ondevice",
+                "RUN",
+            ),
+            "run",
+        )
+
+    def test_resolve_target_lane_boozer_newton_polish_policy_rejects_unknown(
+        self,
+    ):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "target_lane_boozer_newton_polish_policy must be one of",
+        ):
+            module.resolve_target_lane_boozer_newton_polish_policy(
+                "jax",
+                "ondevice",
+                "fallback",
+            )
+
+    def test_effective_boozer_newton_polish_policy_skips_large_strict_cuda(
+        self,
+    ):
+        module = self.load_module()
+
+        with patch.object(
+            module, "get_jax_platform", return_value="cuda"
+        ), patch.object(
+            module,
+            "get_transfer_guard",
+            return_value="disallow",
+        ):
+            self.assertEqual(
+                module.resolve_effective_boozer_newton_polish_policy_override(
+                    field_backend="jax",
+                    optimizer_backend="ondevice",
+                    mpol=6,
+                    ntor=6,
+                    target_lane_boozer_newton_polish_policy="skip-large-strict-cuda",
+                ),
+                "skip",
+            )
+
+    def test_effective_boozer_newton_polish_policy_keeps_small_lane_default(
+        self,
+    ):
+        module = self.load_module()
+
+        with patch.object(
+            module, "get_jax_platform", return_value="cuda"
+        ), patch.object(
+            module,
+            "get_transfer_guard",
+            return_value="disallow",
+        ):
+            self.assertIsNone(
+                module.resolve_effective_boozer_newton_polish_policy_override(
+                    field_backend="jax",
+                    optimizer_backend="ondevice",
+                    mpol=2,
+                    ntor=2,
+                    target_lane_boozer_newton_polish_policy="skip-large-strict-cuda",
+                )
+            )
 
     def test_should_write_single_stage_full_artifacts_respects_minimal_mode(self):
         module = self.load_module()
@@ -14907,6 +15011,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
                 target_lane_boozer_bfgs_maxiter_record=48,
                 target_lane_boozer_newton_tol_record=1e-10,
                 target_lane_boozer_newton_maxiter_record=8,
+                target_lane_boozer_newton_polish_policy_record="skip-large-strict-cuda",
                 args=args,
                 MAXITER=300,
                 write_restart_artifacts=True,
@@ -14919,6 +15024,10 @@ class ResultsEnvelopeTests(unittest.TestCase):
         hardware_thresholds = problem_contract["hardware_thresholds"]
         stage2_seed = problem_contract["stage2_seed"]
         self.assertEqual(hardware_thresholds["coil_vessel_clearance"], 0.002)
+        self.assertEqual(
+            runtime_contract["target_lane_boozer_newton_polish_policy"],
+            "skip-large-strict-cuda",
+        )
         self.assertEqual(runtime_contract["effective_banana_surface_radius"], 0.219)
         self.assertEqual(
             stage2_seed["banana_surface_radius"],
