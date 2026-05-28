@@ -1205,6 +1205,9 @@ def test_biot_savart_branch_residue_directional_oracle_uses_real_coil_dofs():
     assert diagnostic.base_winding == pytest.approx(0.0, abs=1.0e-4)
     assert diagnostic.plus_winding == pytest.approx(0.0, abs=1.0e-4)
     assert diagnostic.minus_winding == pytest.approx(0.0, abs=1.0e-4)
+    assert math.isfinite(diagnostic.base_raw_return_section_winding)
+    assert math.isfinite(diagnostic.plus_raw_return_section_winding)
+    assert math.isfinite(diagnostic.minus_raw_return_section_winding)
     np.testing.assert_allclose(
         np.asarray(diagnostic.branch_state_derivative),
         (
@@ -1323,18 +1326,41 @@ def test_biot_savart_branch_residue_directional_taylor_gate_serializes_real_coil
 
     assert diagnostic.mode == BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE
     assert diagnostic.base_status == BRANCH_STATUS_CONVERGED
+    assert diagnostic.branch == GREENE_BRANCH_X
+    assert diagnostic.expected_winding == pytest.approx(target.expected_winding())
+    assert diagnostic.base_winding == pytest.approx(
+        target.expected_winding(),
+        abs=solver_options.winding_tolerance,
+    )
+    assert abs(diagnostic.base_winding_residual) <= solver_options.winding_tolerance
+    assert math.isfinite(diagnostic.base_raw_return_section_winding)
+    assert math.isfinite(diagnostic.base_det_m)
+    assert diagnostic.base_residue_classification != ""
     assert diagnostic.direction_norm == pytest.approx(1.0)
     np.testing.assert_allclose(diagnostic.direction, direction)
     assert len(diagnostic.samples) == 3
     assert len(diagnostic.observed_orders) == 2
     for sample in diagnostic.samples:
         assert sample.status == BRANCH_STATUS_CONVERGED
+        assert sample.branch == GREENE_BRANCH_X
+        assert sample.winding == pytest.approx(
+            target.expected_winding(),
+            abs=solver_options.winding_tolerance,
+        )
+        assert abs(sample.winding_residual) <= solver_options.winding_tolerance
+        assert math.isfinite(sample.raw_return_section_winding)
+        assert math.isfinite(sample.det_m)
+        assert sample.residue_classification != ""
         assert sample.absolute_residual < 1.0e-6
         assert np.asarray(sample.state, dtype=float).shape == (2,)
     assert np.all(np.isfinite(np.asarray(diagnostic.observed_orders)))
     payload = diagnostic.to_json_dict()
     assert payload["mode"] == BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE
+    assert payload["branch"] == GREENE_BRANCH_X
+    assert payload["expected_winding"] == pytest.approx(target.expected_winding())
     assert len(payload["samples"]) == 3
+    assert payload["samples"][0]["branch"] == GREENE_BRANCH_X
+    assert math.isfinite(payload["samples"][0]["winding"])
     assert len(payload["observed_orders"]) == 2
     np.testing.assert_allclose(field.x, original_x)
 
@@ -1470,9 +1496,28 @@ def test_biot_savart_residue_vjp_taylor_gate_is_second_order():
     assert gradient_diagnostic.gradient_norm > 0.0
     assert taylor.mode == BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE
     assert taylor.base_status == BRANCH_STATUS_CONVERGED
+    assert taylor.branch == GREENE_BRANCH_O
+    assert taylor.expected_winding == pytest.approx(target.expected_winding())
+    assert taylor.base_winding == pytest.approx(
+        target.expected_winding(),
+        abs=solver_options.winding_tolerance,
+    )
+    assert abs(taylor.base_winding_residual) <= solver_options.winding_tolerance
+    assert math.isfinite(taylor.base_raw_return_section_winding)
+    assert math.isfinite(taylor.base_det_m)
+    assert taylor.base_residue_classification != ""
     assert min(taylor.observed_orders) > 1.95
     for sample in taylor.samples:
         assert sample.status == BRANCH_STATUS_CONVERGED
+        assert sample.branch == GREENE_BRANCH_O
+        assert sample.winding == pytest.approx(
+            target.expected_winding(),
+            abs=solver_options.winding_tolerance,
+        )
+        assert abs(sample.winding_residual) <= solver_options.winding_tolerance
+        assert math.isfinite(sample.raw_return_section_winding)
+        assert math.isfinite(sample.det_m)
+        assert sample.residue_classification != ""
     np.testing.assert_allclose(field.x, original_x + 1.0e-3 * direction)
     np.testing.assert_allclose(gradient_field.x, original_x + 1.0e-3 * direction)
 
@@ -1646,6 +1691,12 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
                     "absolute_residual": abs(residual),
                     "status": BRANCH_STATUS_CONVERGED,
                     "state": [1.1, 0.05],
+                    "branch": branch,
+                    "winding": 0.0,
+                    "winding_residual": 0.0,
+                    "raw_return_section_winding": 0.0,
+                    "det_m": 1.0,
+                    "residue_classification": GREENE_RESIDUE_ELLIPTIC_O,
                 }
             )
         return {
@@ -1660,6 +1711,13 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
                 "directional_derivative": 0.2,
                 "base_status": BRANCH_STATUS_CONVERGED,
                 "base_state": [1.1, 0.05] if base_state is None else base_state,
+                "branch": branch,
+                "expected_winding": 0.0,
+                "base_winding": 0.0,
+                "base_winding_residual": 0.0,
+                "base_raw_return_section_winding": 0.0,
+                "base_det_m": 1.0,
+                "base_residue_classification": GREENE_RESIDUE_ELLIPTIC_O,
                 "samples": samples,
                 "observed_orders": (
                     [2.0, 2.0] if observed_orders is None else observed_orders
@@ -1732,6 +1790,28 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
     ]
     seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
     with pytest.raises(ValueError, match="base_state"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    branch_mismatch_validation = optimizer_taylor_validation()
+    branch_mismatch_validation["diagnostic"]["samples"][0]["branch"] = GREENE_BRANCH_X
+    seed_payload["optimizer_taylor_validations"] = [branch_mismatch_validation]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="branch"):
+        load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=target_manifest_id,
+        )
+
+    winding_mismatch_validation = optimizer_taylor_validation()
+    winding_mismatch_validation["diagnostic"]["samples"][0][
+        "winding_residual"
+    ] = 1.0
+    seed_payload["optimizer_taylor_validations"] = [winding_mismatch_validation]
+    seeds_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="winding"):
         load_residue_objective_seeds(
             seeds_path,
             target_manifest_id=target_manifest_id,

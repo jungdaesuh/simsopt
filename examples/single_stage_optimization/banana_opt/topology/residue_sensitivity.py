@@ -25,6 +25,7 @@ from .fieldline_map import (
 )
 from .greene_residue import (
     GreeneResidueDiagnostic,
+    classify_greene_residue,
     greene_residue_diagnostic_from_matrix,
 )
 from .periodic_orbit import (
@@ -139,6 +140,9 @@ class BiotSavartBranchResidueCentralDifferenceDiagnostic:
     base_winding: float
     plus_winding: float
     minus_winding: float
+    base_raw_return_section_winding: float
+    plus_raw_return_section_winding: float
+    minus_raw_return_section_winding: float
 
     @property
     def residue_derivative(self) -> float:
@@ -191,6 +195,12 @@ class BiotSavartResidueTaylorSample:
     absolute_residual: float
     status: str
     state: SectionState
+    branch: str
+    winding: float
+    winding_residual: float
+    raw_return_section_winding: float
+    det_m: float
+    residue_classification: str
 
     def to_json_dict(self) -> dict[str, object]:
         payload = asdict(self)
@@ -208,6 +218,13 @@ class BiotSavartBranchResidueTaylorDiagnostic:
     directional_derivative: float
     base_status: str
     base_state: SectionState
+    branch: str
+    expected_winding: float
+    base_winding: float
+    base_winding_residual: float
+    base_raw_return_section_winding: float
+    base_det_m: float
+    base_residue_classification: str
     samples: tuple[BiotSavartResidueTaylorSample, ...]
     observed_orders: tuple[float, ...]
 
@@ -227,11 +244,16 @@ class BiotSavartBranchResidueVjpDiagnostic:
     residue: float
     base_status: str
     state: SectionState
+    branch: str
+    winding: float
+    winding_residual: float
+    raw_return_section_winding: float
     final_state: SectionState
     closure_residual: SectionState
     monodromy: MonodromyMatrix
     trace_m: float
     det_m: float
+    residue_classification: str
     dresidue_dstate: SectionState
     implicit_adjoint: SectionState
     cotangent_point_count: int
@@ -252,11 +274,16 @@ class BiotSavartBranchResidueVjpDiagnostic:
             "residue": self.residue,
             "base_status": self.base_status,
             "state": list(self.state),
+            "branch": self.branch,
+            "winding": self.winding,
+            "winding_residual": self.winding_residual,
+            "raw_return_section_winding": self.raw_return_section_winding,
             "final_state": list(self.final_state),
             "closure_residual": list(self.closure_residual),
             "monodromy": _matrix_to_jsonable(self.monodromy),
             "trace_m": self.trace_m,
             "det_m": self.det_m,
+            "residue_classification": self.residue_classification,
             "dresidue_dstate": list(self.dresidue_dstate),
             "implicit_adjoint": list(self.implicit_adjoint),
             "cotangent_point_count": self.cotangent_point_count,
@@ -529,6 +556,15 @@ def branch_resolved_biot_savart_residue_central_difference(
         base_winding=float(base.winding),
         plus_winding=float(plus.winding),
         minus_winding=float(minus.winding),
+        base_raw_return_section_winding=float(
+            base.tangent_result.return_map.raw_return_section_winding
+        ),
+        plus_raw_return_section_winding=float(
+            plus.tangent_result.return_map.raw_return_section_winding
+        ),
+        minus_raw_return_section_winding=float(
+            minus.tangent_result.return_map.raw_return_section_winding
+        ),
     )
 
 
@@ -664,19 +700,19 @@ def branch_resolved_biot_savart_residue_taylor_diagnostic(
             )
             residual = float(residue - prediction)
             samples.append(
-                BiotSavartResidueTaylorSample(
+                _taylor_sample_from_result(
+                    result,
                     step=step_value,
                     residue=residue,
                     first_order_prediction=prediction,
                     residual=residual,
-                    absolute_residual=abs(residual),
-                    status=result.status,
-                    state=result.state,
+                    target=target,
                 )
             )
     finally:
         field.x = original_x
 
+    expected_winding = float(target.expected_winding())
     return BiotSavartBranchResidueTaylorDiagnostic(
         mode=BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE,
         derivative_step=derivative.step,
@@ -686,6 +722,17 @@ def branch_resolved_biot_savart_residue_taylor_diagnostic(
         directional_derivative=derivative.derivative,
         base_status=derivative.base_status,
         base_state=derivative.base_state,
+        branch=branch,
+        expected_winding=expected_winding,
+        base_winding=derivative.base_winding,
+        base_winding_residual=derivative.base_winding - expected_winding,
+        base_raw_return_section_winding=(
+            derivative.base_raw_return_section_winding
+        ),
+        base_det_m=derivative.base_det_m,
+        base_residue_classification=classify_greene_residue(
+            derivative.base_residue
+        ),
         samples=tuple(samples),
         observed_orders=_observed_orders(tuple(samples)),
     )
@@ -833,19 +880,19 @@ def branch_resolved_biot_savart_residue_vjp_taylor_diagnostic(
             )
             residual = float(residue - prediction)
             samples.append(
-                BiotSavartResidueTaylorSample(
+                _taylor_sample_from_result(
+                    result,
                     step=step_value,
                     residue=residue,
                     first_order_prediction=prediction,
                     residual=residual,
-                    absolute_residual=abs(residual),
-                    status=result.status,
-                    state=result.state,
+                    target=target,
                 )
             )
     finally:
         field.x = original_x
 
+    expected_winding = float(target.expected_winding())
     return BiotSavartBranchResidueTaylorDiagnostic(
         mode=BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
         derivative_step=local_difference_step,
@@ -855,6 +902,15 @@ def branch_resolved_biot_savart_residue_vjp_taylor_diagnostic(
         directional_derivative=directional_derivative,
         base_status=gradient_diagnostic.base_status,
         base_state=gradient_diagnostic.state,
+        branch=gradient_diagnostic.branch,
+        expected_winding=expected_winding,
+        base_winding=gradient_diagnostic.winding,
+        base_winding_residual=gradient_diagnostic.winding_residual,
+        base_raw_return_section_winding=(
+            gradient_diagnostic.raw_return_section_winding
+        ),
+        base_det_m=gradient_diagnostic.det_m,
+        base_residue_classification=gradient_diagnostic.residue_classification,
         samples=tuple(samples),
         observed_orders=_observed_orders(tuple(samples)),
     )
@@ -879,6 +935,33 @@ def solve_biot_savart_residue_branch(
         branch=branch,
         integrator_options=integrator_options,
         solver_options=solver_options,
+    )
+
+
+def _taylor_sample_from_result(
+    result: PeriodicOrbitResult,
+    *,
+    step: float,
+    residue: float,
+    first_order_prediction: float,
+    residual: float,
+    target: RationalTarget,
+) -> BiotSavartResidueTaylorSample:
+    return_map = result.tangent_result.return_map
+    return BiotSavartResidueTaylorSample(
+        step=float(step),
+        residue=float(residue),
+        first_order_prediction=float(first_order_prediction),
+        residual=float(residual),
+        absolute_residual=abs(float(residual)),
+        status=result.status,
+        state=result.state,
+        branch=result.branch,
+        winding=float(result.winding),
+        winding_residual=target_winding_residual(return_map, target),
+        raw_return_section_winding=float(return_map.raw_return_section_winding),
+        det_m=float(result.tangent_result.det_m),
+        residue_classification=result.residue_diagnostic.classification,
     )
 
 
@@ -1587,11 +1670,21 @@ def _vjp_diagnostic_from_parts(
         residue=float(orbit.residue_diagnostic.residue),
         base_status=orbit.status,
         state=orbit.state,
+        branch=orbit.branch,
+        winding=float(orbit.winding),
+        winding_residual=target_winding_residual(
+            orbit.tangent_result.return_map,
+            orbit.target,
+        ),
+        raw_return_section_winding=float(
+            orbit.tangent_result.return_map.raw_return_section_winding
+        ),
         final_state=_normalize_state(orbit.tangent_result.return_map.final_state),
         closure_residual=orbit.closure_residual,
         monodromy=_monodromy_matrix(orbit.tangent_result.monodromy),
         trace_m=float(orbit.tangent_result.trace_m),
         det_m=float(orbit.tangent_result.det_m),
+        residue_classification=orbit.residue_diagnostic.classification,
         dresidue_dstate=(float(dresidue_dstate[0]), float(dresidue_dstate[1])),
         implicit_adjoint=(float(implicit_adjoint[0]), float(implicit_adjoint[1])),
         cotangent_point_count=cotangent_stats.point_count,

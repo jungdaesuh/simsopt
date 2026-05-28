@@ -41,6 +41,7 @@ GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_ORDER_RTOL = 1.0e-9
 GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_ORDER_ATOL = 1.0e-12
 GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_RTOL = 1.0e-9
 GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_ATOL = 1.0e-18
+GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL = 1.0e-4
 DEFAULT_RESIDUE_OBJECTIVE_WEIGHT = 0.0
 DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS = 768
 
@@ -523,6 +524,7 @@ def _validate_optimizer_taylor_gate(
         _validate_optimizer_taylor_diagnostic(
             validation_payload,
             expected_base_state=seed_state_by_key.get(key),
+            expected_branch=key[1],
         )
     missing = sorted(seed_keys - set(validation_by_key))
     if missing:
@@ -543,6 +545,7 @@ def _validate_optimizer_taylor_diagnostic(
     validation_payload: Mapping[str, object],
     *,
     expected_base_state: SectionState | None,
+    expected_branch: str,
 ) -> None:
     diagnostic = validation_payload["diagnostic"]
     if not isinstance(diagnostic, Mapping):
@@ -559,6 +562,42 @@ def _validate_optimizer_taylor_diagnostic(
         raise ValueError(
             "Greene residue objective optimizer Taylor validation base_status "
             "must be converged"
+        )
+    branch = str(diagnostic["branch"])
+    if branch != expected_branch:
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation branch must "
+            "match the branch seed"
+        )
+    expected_winding = float(diagnostic["expected_winding"])
+    base_winding = float(diagnostic["base_winding"])
+    base_winding_residual = float(diagnostic["base_winding_residual"])
+    base_raw_return_section_winding = float(
+        diagnostic["base_raw_return_section_winding"]
+    )
+    base_det_m = float(diagnostic["base_det_m"])
+    base_residue_classification = str(diagnostic["base_residue_classification"])
+    if (
+        not isfinite(expected_winding)
+        or not isfinite(base_winding)
+        or not isfinite(base_winding_residual)
+        or not isfinite(base_raw_return_section_winding)
+        or not isfinite(base_det_m)
+        or base_residue_classification == ""
+    ):
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation branch and "
+            "winding diagnostics must be finite"
+        )
+    if (
+        abs(base_winding - expected_winding)
+        > GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL
+        or abs(base_winding_residual)
+        > GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL
+    ):
+        raise ValueError(
+            "Greene residue objective optimizer Taylor validation base winding "
+            "must match the requested target winding"
         )
     base_state = _normalize_section_state(diagnostic["base_state"])
     if expected_base_state is not None and base_state != expected_base_state:
@@ -594,11 +633,21 @@ def _validate_optimizer_taylor_diagnostic(
                 "Greene residue objective optimizer Taylor validation sample "
                 "status must be converged"
             )
+        if str(sample["branch"]) != expected_branch:
+            raise ValueError(
+                "Greene residue objective optimizer Taylor validation sample "
+                "branch must match the branch seed"
+            )
         step = float(sample["step"])
         residue = float(sample["residue"])
         first_order_prediction = float(sample["first_order_prediction"])
         residual = float(sample["residual"])
         absolute_residual = float(sample["absolute_residual"])
+        winding = float(sample["winding"])
+        winding_residual = float(sample["winding_residual"])
+        raw_return_section_winding = float(sample["raw_return_section_winding"])
+        det_m = float(sample["det_m"])
+        residue_classification = str(sample["residue_classification"])
         expected_residual = residue - first_order_prediction
         if (
             step <= 0.0
@@ -608,10 +657,26 @@ def _validate_optimizer_taylor_diagnostic(
             or not isfinite(residual)
             or absolute_residual <= 0.0
             or not isfinite(absolute_residual)
+            or not isfinite(winding)
+            or not isfinite(winding_residual)
+            or not isfinite(raw_return_section_winding)
+            or not isfinite(det_m)
+            or residue_classification == ""
         ):
             raise ValueError(
                 "Greene residue objective optimizer Taylor validation samples "
-                "must have finite positive steps and finite positive residuals"
+                "must have finite positive steps, finite positive residuals, "
+                "and finite branch/winding diagnostics"
+            )
+        if (
+            abs(winding - expected_winding)
+            > GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL
+            or abs(winding_residual)
+            > GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL
+        ):
+            raise ValueError(
+                "Greene residue objective optimizer Taylor validation sample "
+                "winding must match the requested target winding"
             )
         if not np.isclose(
             residual,
