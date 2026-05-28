@@ -88,6 +88,8 @@ class FieldlineReturnResult:
     phi_grid: np.ndarray
     states: np.ndarray
     unwrapped_theta: np.ndarray
+    raw_return_section_unwrapped_theta: np.ndarray
+    raw_return_section_winding: float
     return_section_unwrapped_theta: np.ndarray
     winding: float
     min_bphi_over_b: float
@@ -317,12 +319,11 @@ def _normalize_initial_state(initial_state: Sequence[float]) -> tuple[float, flo
     return (radius, z)
 
 
-def full_torus_return_section_unwrapped_thetas(
+def raw_full_torus_return_section_unwrapped_thetas(
     chart: PoincareChart,
     states: Sequence[Sequence[float]],
     *,
     samples_per_full_torus: int,
-    expected_winding: float | None = None,
 ) -> np.ndarray:
     state_array = np.asarray(states, dtype=float)
     if state_array.ndim != 2 or state_array.shape[1] != 2:
@@ -332,13 +333,36 @@ def full_torus_return_section_unwrapped_thetas(
     samples = int(samples_per_full_torus)
     if samples <= 0:
         raise ValueError("samples_per_full_torus must be positive")
-    section_theta = chart.unwrapped_thetas(state_array)[::samples]
+    return chart.unwrapped_thetas(state_array)[::samples]
+
+
+def return_section_winding(section_theta: Sequence[float]) -> float:
+    theta = np.asarray(section_theta, dtype=float)
+    if theta.ndim != 1:
+        raise ValueError("Return-map section theta must be one-dimensional")
+    if theta.size < 2:
+        raise ValueError("Return-map winding requires at least two section returns")
+    return float((theta[-1] - theta[0]) / (2.0 * pi))
+
+
+def full_torus_return_section_unwrapped_thetas(
+    chart: PoincareChart,
+    states: Sequence[Sequence[float]],
+    *,
+    samples_per_full_torus: int,
+    expected_winding: float | None = None,
+) -> np.ndarray:
+    section_theta = raw_full_torus_return_section_unwrapped_thetas(
+        chart,
+        states,
+        samples_per_full_torus=samples_per_full_torus,
+    )
     if expected_winding is None:
         return section_theta
     turns = section_theta.size - 1
     if turns <= 0:
         raise ValueError("Return-map winding requires at least two section returns")
-    raw_winding = float((section_theta[-1] - section_theta[0]) / (2.0 * pi))
+    raw_winding = return_section_winding(section_theta)
     integer_offset_per_turn = round(
         (raw_winding - float(expected_winding)) / float(turns)
     )
@@ -405,6 +429,11 @@ def integrate_full_torus_return_map(
     ]
     min_bphi_over_b = float(np.min(np.asarray(bphi_ratios, dtype=float)))
     unwrapped_theta = chart.unwrapped_thetas(states)
+    raw_return_section_theta = raw_full_torus_return_section_unwrapped_thetas(
+        chart,
+        states,
+        samples_per_full_torus=options.samples_per_full_torus,
+    )
     return_section_theta = full_torus_return_section_unwrapped_thetas(
         chart,
         states,
@@ -417,8 +446,10 @@ def integrate_full_torus_return_map(
         phi_grid=phi_grid,
         states=states,
         unwrapped_theta=unwrapped_theta,
+        raw_return_section_unwrapped_theta=raw_return_section_theta,
+        raw_return_section_winding=return_section_winding(raw_return_section_theta),
         return_section_unwrapped_theta=return_section_theta,
-        winding=float((return_section_theta[-1] - return_section_theta[0]) / (2.0 * pi)),
+        winding=return_section_winding(return_section_theta),
         min_bphi_over_b=min_bphi_over_b,
     )
 
@@ -498,6 +529,11 @@ def integrate_tangent_full_torus_return_map(
         for phi, state in zip(phi_grid, states, strict=True)
     ]
     unwrapped_theta = chart.unwrapped_thetas(states)
+    raw_return_section_theta = raw_full_torus_return_section_unwrapped_thetas(
+        chart,
+        states,
+        samples_per_full_torus=options.samples_per_full_torus,
+    )
     return_section_theta = full_torus_return_section_unwrapped_thetas(
         chart,
         states,
@@ -510,8 +546,10 @@ def integrate_tangent_full_torus_return_map(
         phi_grid=phi_grid,
         states=states,
         unwrapped_theta=unwrapped_theta,
+        raw_return_section_unwrapped_theta=raw_return_section_theta,
+        raw_return_section_winding=return_section_winding(raw_return_section_theta),
         return_section_unwrapped_theta=return_section_theta,
-        winding=float((return_section_theta[-1] - return_section_theta[0]) / (2.0 * pi)),
+        winding=return_section_winding(return_section_theta),
         min_bphi_over_b=float(np.min(np.asarray(bphi_ratios, dtype=float))),
     )
     return FieldlineTangentReturnResult(

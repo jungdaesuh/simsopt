@@ -19,6 +19,8 @@ from .fieldline_map import (
     cylindrical_basis,
     full_torus_return_section_unwrapped_thetas,
     integrate_tangent_target_return_map,
+    raw_full_torus_return_section_unwrapped_thetas,
+    return_section_winding,
     target_winding_residual,
 )
 from .greene_residue import (
@@ -1057,6 +1059,11 @@ def _rk4_tangent_return_map(
     state_grid = np.asarray(states, dtype=float)
     monodromy = np.asarray(augmented[2:], dtype=float).reshape((2, 2))
     unwrapped_theta = chart.unwrapped_thetas(state_grid)
+    raw_return_section_theta = raw_full_torus_return_section_unwrapped_thetas(
+        chart,
+        state_grid,
+        samples_per_full_torus=steps_per_torus,
+    )
     return_section_theta = full_torus_return_section_unwrapped_thetas(
         chart,
         state_grid,
@@ -1069,10 +1076,10 @@ def _rk4_tangent_return_map(
         phi_grid=phi_grid,
         states=state_grid,
         unwrapped_theta=unwrapped_theta,
+        raw_return_section_unwrapped_theta=raw_return_section_theta,
+        raw_return_section_winding=return_section_winding(raw_return_section_theta),
         return_section_unwrapped_theta=return_section_theta,
-        winding=float(
-            (return_section_theta[-1] - return_section_theta[0]) / (2.0 * np.pi)
-        ),
+        winding=return_section_winding(return_section_theta),
         min_bphi_over_b=float(np.min(np.asarray(bphi_ratios, dtype=float))),
     )
     return (

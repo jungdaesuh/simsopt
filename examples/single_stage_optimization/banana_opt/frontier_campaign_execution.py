@@ -95,6 +95,7 @@ def build_lane_rerun_contract(
         "plasma_surf_filename": Path(args.plasma_surf_filename).name,
         "iotas_weight": lane_spec.iotas_weight,
         "frontier_volume_weight": lane_spec.frontier_volume_weight,
+        "frontier_invariant_torus_min": _frontier_invariant_torus_min(args),
         "res_weight": lane_spec.res_weight,
         "maxiter": args.maxiter
         if lane_spec.lane_budget is None
@@ -105,6 +106,14 @@ def build_lane_rerun_contract(
         "scalarization_type": lane_spec.scalarization_type,
         "scalarization_params": dict(lane_spec.scalarization_params),
     }
+
+
+def _frontier_invariant_torus_min(args: argparse.Namespace) -> float | None:
+    if getattr(args, "frontier_invariant_torus_min", None) is not None:
+        return float(args.frontier_invariant_torus_min)
+    if getattr(args, "frontier_kam_min", None) is not None:
+        return float(args.frontier_kam_min)
+    return None
 
 
 def _lane_reference_point(lane_spec: FrontierLaneSpec) -> dict[str, float] | None:

@@ -1362,7 +1362,10 @@ def parse_args():
         "--frontier-invariant-torus-min",
         type=float,
         default=None,
-        help=argparse.SUPPRESS,
+        help=(
+            "Minimum WBA invariant-torus fraction required for frontier "
+            "certification. The legacy --frontier-kam-min alias is still accepted."
+        ),
     )
     parser.add_argument(
         "--vol-target",
@@ -13237,6 +13240,11 @@ if __name__ == "__main__":
         ),
         "SELF_INTERSECTING": run_dict["intersecting"],
         **build_single_stage_banana_current_payload_fields(banana_current_state),
+        "GREENE_RESIDUE_OBJECTIVE_REPLAY_CONFIG": (
+            residue_objective_replay_config_payload(
+                current_preserved_timeout_replay_config().residue_objective_replay_config
+            )
+        ),
         **residue_objective_results_payload(run_dict["search_eval"]),
         "BANANA_CURRENT_DIAGNOSTICS_ENABLED": (
             run_dict.get("banana_current_diagnostics") is not None

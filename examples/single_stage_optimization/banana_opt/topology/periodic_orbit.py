@@ -35,6 +35,13 @@ BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW = "outside_radial_window"
 BRANCH_STATUS_WRONG_WINDING = "wrong_winding"
 BRANCH_STATUS_BRANCH_MISMATCH = "branch_mismatch"
 BRANCH_STATUS_BAD_DETERMINANT = "bad_tangent_determinant"
+BRANCH_STATUS_INTEGRATION_FAILED = "integration_failed"
+
+
+class PeriodicOrbitDiscoveryError(RuntimeError):
+    def __init__(self, *, status: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,32 +330,41 @@ def discover_periodic_orbit(
     guesses = tuple(initial_guesses)
     if len(guesses) == 0:
         raise ValueError("Periodic orbit discovery requires at least one initial guess")
+    branch_label = _validate_target_branch(target, branch)
+    best_result: PeriodicOrbitResult | None = None
+    first_integration_error = ""
 
-    best_result = solve_periodic_orbit(
-        field,
-        guesses[0],
-        target=target,
-        chart=chart,
-        branch=branch,
-        integrator_options=integrator_options,
-        solver_options=solver_options,
-    )
-    if best_result.converged:
-        return best_result
-    for initial_guess in guesses[1:]:
-        result = solve_periodic_orbit(
-            field,
-            initial_guess,
-            target=target,
-            chart=chart,
-            branch=branch,
-            integrator_options=integrator_options,
-            solver_options=solver_options,
-        )
+    for initial_guess in guesses:
+        try:
+            result = solve_periodic_orbit(
+                field,
+                initial_guess,
+                target=target,
+                chart=chart,
+                branch=branch_label,
+                integrator_options=integrator_options,
+                solver_options=solver_options,
+            )
+        except RuntimeError as error:
+            if first_integration_error == "":
+                first_integration_error = str(error)
+            continue
         if result.converged:
             return result
-        if result.closure_residual_norm < best_result.closure_residual_norm:
+        if best_result is None or (
+            _periodic_orbit_candidate_key(result)
+            < _periodic_orbit_candidate_key(best_result)
+        ):
             best_result = result
+    if best_result is None:
+        raise PeriodicOrbitDiscoveryError(
+            status=BRANCH_STATUS_INTEGRATION_FAILED,
+            message=(
+                "Periodic orbit discovery failed for "
+                f"{target.manifest_key()} branch={branch_label}: "
+                f"{first_integration_error}"
+            ),
+        )
     return best_result
 
 
@@ -449,10 +465,33 @@ def _damped_newton_state(
             candidate_residual_norm = float(
                 np.linalg.norm(_closure_residual(tangent_result, candidate_state))
             )
-            if candidate_residual_norm < current_residual_norm:
+            candidate_winding_residual = abs(
+                target_winding_residual(tangent_result.return_map, target)
+            )
+            if (
+                candidate_residual_norm < current_residual_norm
+                and _within_target_winding_basin(
+                    candidate_winding_residual,
+                    solver_options,
+                )
+            ):
                 return candidate_state
         damping *= solver_options.damping_shrink
     return None
+
+
+def _periodic_orbit_candidate_key(result: PeriodicOrbitResult) -> tuple[float, float]:
+    return (
+        abs(target_winding_residual(result.tangent_result.return_map, result.target)),
+        float(result.closure_residual_norm),
+    )
+
+
+def _within_target_winding_basin(
+    winding_residual: float,
+    solver_options: PeriodicOrbitSolverOptions,
+) -> bool:
+    return abs(float(winding_residual)) < 0.5 - solver_options.winding_tolerance
 
 
 def _validated_branch_status(

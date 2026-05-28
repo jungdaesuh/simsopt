@@ -361,6 +361,21 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
             "as-is (None) so the single-stage script falls back to --iotas-weight."
         ),
     )
+    parser.add_argument(
+        "--frontier-invariant-torus-min",
+        type=float,
+        default=None,
+        help=(
+            "Minimum WBA invariant-torus fraction forwarded to the single-stage "
+            "frontier certification gate."
+        ),
+    )
+    parser.add_argument(
+        "--frontier-kam-min",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--frontier-scalarization-type", default=None)
     parser.add_argument("--frontier-reference-iota", type=float, default=None)
     parser.add_argument("--frontier-reference-iota-scale", type=float, default=None)
@@ -420,6 +435,14 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--basin-seed", type=int, default=0)
     parser.add_argument("--init-only", action="store_true")
     return parser
+
+
+def resolve_frontier_invariant_torus_min_arg(args: argparse.Namespace) -> float | None:
+    if getattr(args, "frontier_invariant_torus_min", None) is not None:
+        return float(args.frontier_invariant_torus_min)
+    if getattr(args, "frontier_kam_min", None) is not None:
+        return float(args.frontier_kam_min)
+    return None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -591,6 +614,11 @@ def build_single_stage_goal_mode_command(
     append_single_stage_handoff_flags(command, args)
     append_optional_flag(command, "--length-target", args.length_target)
     append_optional_flag(command, "--frontier-volume-weight", args.frontier_volume_weight)
+    append_optional_flag(
+        command,
+        "--frontier-invariant-torus-min",
+        resolve_frontier_invariant_torus_min_arg(args),
+    )
     append_optional_flag(
         command,
         "--resume-solver-checkpoint",
@@ -797,6 +825,7 @@ def result_metric_subset(results: dict) -> dict:
         "frontier_boozer_trust_excess_ratio": results.get("FRONTIER_BOOZER_TRUST_EXCESS_RATIO"),
         "frontier_boozer_trust_penalty_scale": results.get("FRONTIER_BOOZER_TRUST_PENALTY_SCALE"),
         "frontier_trust_penalty": results.get("FRONTIER_TRUST_PENALTY"),
+        "frontier_invariant_torus_min": results.get("FRONTIER_INVARIANT_TORUS_MIN"),
         "frontier_trust_rejects": results.get("FRONTIER_TRUST_REJECTS"),
         "frontier_reference_iota": results.get("FRONTIER_REFERENCE_IOTA"),
         "frontier_reference_volume": results.get("FRONTIER_REFERENCE_VOLUME"),

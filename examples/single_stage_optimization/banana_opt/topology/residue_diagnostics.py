@@ -11,6 +11,7 @@ from .fieldline_map import (
 )
 from .periodic_orbit import (
     DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
+    PeriodicOrbitDiscoveryError,
     PeriodicOrbitResult,
     PeriodicOrbitSolverOptions,
     discover_periodic_orbit,
@@ -57,11 +58,28 @@ def radial_multistart_initial_guesses(
     return tuple(
         section_state_from_chart(
             chart,
-            radial_label=target.radial_label,
+            radial_label=radial_label,
             theta=float(theta),
         )
+        for radial_label in radial_multistart_labels(target)
         for theta in phase_angles
     )
+
+
+def radial_multistart_labels(target: RationalTarget) -> tuple[float, ...]:
+    if target.radial_label is None:
+        raise ValueError(
+            "Greene residue probe requires target.radial_label for radial multistart"
+        )
+    labels = [float(target.radial_label)]
+    if target.radial_window is not None:
+        lower, upper = target.radial_window
+        labels.extend((float(lower), 0.5 * (float(lower) + float(upper)), float(upper)))
+    unique_labels: list[float] = []
+    for label in labels:
+        if not any(abs(label - previous) <= 1.0e-15 for previous in unique_labels):
+            unique_labels.append(label)
+    return tuple(unique_labels)
 
 
 def rational_target_payload(target: RationalTarget) -> dict[str, object]:
@@ -107,6 +125,9 @@ def periodic_orbit_result_payload(result: PeriodicOrbitResult) -> dict[str, obje
         "traceM": float(result.residue_diagnostic.trace_m),
         "detM": float(result.tangent_result.det_m),
         "winding": float(result.winding),
+        "raw_return_section_winding": float(
+            result.tangent_result.return_map.raw_return_section_winding
+        ),
         "radial_label": float(result.radial_label),
         "min_Bphi_over_B": float(result.min_bphi_over_b),
         "solver_iterations": int(result.iterations),
@@ -114,6 +135,38 @@ def periodic_orbit_result_payload(result: PeriodicOrbitResult) -> dict[str, obje
         "initial_state": list(result.initial_state),
         "section_state": list(result.state),
         "closure_residual": list(result.closure_residual),
+    }
+
+
+def periodic_orbit_failure_payload(
+    *,
+    target: RationalTarget,
+    branch: str,
+    status: str,
+    message: str,
+    initial_guesses: Sequence[Sequence[float]],
+) -> dict[str, object]:
+    return {
+        "target_id": target.manifest_key(),
+        "target": rational_target_payload(target),
+        "branch": branch,
+        "branch_status": status,
+        "converged": False,
+        "residue": None,
+        "residue_classification": None,
+        "traceM": None,
+        "detM": None,
+        "winding": None,
+        "raw_return_section_winding": None,
+        "radial_label": None,
+        "min_Bphi_over_B": None,
+        "solver_iterations": 0,
+        "newton_residual": None,
+        "initial_state": None,
+        "section_state": None,
+        "closure_residual": None,
+        "initial_guess_count": len(tuple(initial_guesses)),
+        "failure_message": message,
     }
 
 
@@ -144,15 +197,27 @@ def run_residue_probe(
             phase_angles=phase_angles,
         )
         for branch in target.branches:
-            result = discover_periodic_orbit(
-                field,
-                initial_guesses,
-                target=target,
-                chart=chart,
-                branch=branch,
-                integrator_options=integrator_options,
-                solver_options=solver_options,
-            )
+            try:
+                result = discover_periodic_orbit(
+                    field,
+                    initial_guesses,
+                    target=target,
+                    chart=chart,
+                    branch=branch,
+                    integrator_options=integrator_options,
+                    solver_options=solver_options,
+                )
+            except PeriodicOrbitDiscoveryError as error:
+                diagnostics.append(
+                    periodic_orbit_failure_payload(
+                        target=target,
+                        branch=branch,
+                        status=error.status,
+                        message=str(error),
+                        initial_guesses=initial_guesses,
+                    )
+                )
+                continue
             diagnostics.append(periodic_orbit_result_payload(result))
 
     return {

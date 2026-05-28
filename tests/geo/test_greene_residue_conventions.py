@@ -8,6 +8,7 @@ import math
 import numpy as np
 import pytest
 
+from examples.single_stage_optimization.banana_opt.topology import residue_diagnostics
 from examples.single_stage_optimization.banana_opt.topology.fieldline_map import (
     FieldlineIntegratorOptions,
     LowToroidalFieldError,
@@ -35,8 +36,10 @@ from examples.single_stage_optimization.banana_opt.topology.periodic_orbit impor
     BRANCH_STATUS_BAD_DETERMINANT,
     BRANCH_STATUS_BRANCH_MISMATCH,
     BRANCH_STATUS_CONVERGED,
+    BRANCH_STATUS_INTEGRATION_FAILED,
     BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW,
     BRANCH_STATUS_WRONG_WINDING,
+    PeriodicOrbitDiscoveryError,
     PeriodicOrbitSolverOptions,
     continue_periodic_orbit,
     discover_periodic_orbit,
@@ -54,6 +57,7 @@ from examples.single_stage_optimization.banana_opt.topology.rational_target impo
 from examples.single_stage_optimization.banana_opt.topology.residue_diagnostics import (
     GREENE_RESIDUE_PROBE_SCHEMA_VERSION,
     radial_multistart_initial_guesses,
+    radial_multistart_labels,
     run_residue_probe,
 )
 from examples.single_stage_optimization.banana_opt.topology.residue_objective import (
@@ -527,6 +531,11 @@ def test_target_winding_uses_section_returns_not_continuous_helical_path():
 
     assert result.final_state == pytest.approx(result.initial_state, abs=1.0e-9)
     assert chart.winding(result.states) == pytest.approx(21.0, abs=1.0e-9)
+    assert result.raw_return_section_winding == pytest.approx(21.0, abs=1.0e-9)
+    assert result.raw_return_section_unwrapped_theta[-1] == pytest.approx(
+        42.0 * math.pi,
+        abs=1.0e-9,
+    )
     assert result.return_section_unwrapped_theta.size == target.q + 1
     assert result.return_section_unwrapped_theta[-1] == pytest.approx(
         2.0 * math.pi,
@@ -980,9 +989,64 @@ def test_residue_probe_serializes_required_branch_diagnostics():
     assert diagnostic["residue"] == pytest.approx(0.5, abs=4.0e-6)
     assert diagnostic["detM"] == pytest.approx(1.0, abs=4.0e-6)
     assert diagnostic["winding"] == pytest.approx(1.0, abs=1.0e-7)
+    assert diagnostic["raw_return_section_winding"] == pytest.approx(
+        1.0,
+        abs=1.0e-7,
+    )
     assert diagnostic["radial_label"] == pytest.approx(0.2, abs=4.0e-7)
     assert diagnostic["min_Bphi_over_B"] > integrator_options.min_bphi_over_b
     assert diagnostic["solver_iterations"] <= solver_options.max_iterations
+
+
+def test_residue_probe_serializes_branch_integration_failure(monkeypatch):
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_label=0.2,
+        radial_window=(0.18, 0.23),
+        branches=(GREENE_BRANCH_O,),
+        fourier_m=1,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+
+    def fail_discovery(
+        field,
+        initial_guesses,
+        *,
+        target,
+        chart,
+        branch,
+        integrator_options,
+        solver_options,
+    ):
+        raise PeriodicOrbitDiscoveryError(
+            status=BRANCH_STATUS_INTEGRATION_FAILED,
+            message="synthetic tangent integration failure",
+        )
+
+    monkeypatch.setattr(
+        residue_diagnostics,
+        "discover_periodic_orbit",
+        fail_discovery,
+    )
+
+    probe = residue_diagnostics.run_residue_probe(
+        object(),
+        targets=(target,),
+        chart=chart,
+        phase_angles=(0.0, math.pi),
+    )
+
+    diagnostic = probe["diagnostics"][0]
+    assert probe["branch_status_counts"] == {BRANCH_STATUS_INTEGRATION_FAILED: 1}
+    assert diagnostic["target_id"] == target.manifest_key()
+    assert diagnostic["branch"] == GREENE_BRANCH_O
+    assert diagnostic["branch_status"] == BRANCH_STATUS_INTEGRATION_FAILED
+    assert diagnostic["converged"] is False
+    assert diagnostic["initial_guess_count"] == 8
+    assert diagnostic["residue"] is None
+    assert diagnostic["failure_message"] == "synthetic tangent integration failure"
 
 
 def test_residue_probe_radial_multistart_requires_target_radial_label():
@@ -1006,6 +1070,29 @@ def test_residue_probe_radial_multistart_requires_target_radial_label():
 
     assert np.asarray(guesses, dtype=float) == pytest.approx(
         np.asarray([[1.2, 0.0], [0.8, 0.0]], dtype=float)
+    )
+
+
+def test_residue_probe_radial_multistart_spans_target_window():
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0, radial_label_scale=0.5)
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_label=0.4,
+        radial_window=(0.2, 0.8),
+        fourier_m=1,
+        fourier_n=1,
+    )
+
+    assert radial_multistart_labels(target) == pytest.approx((0.4, 0.2, 0.5, 0.8))
+    guesses = radial_multistart_initial_guesses(
+        target,
+        chart,
+        phase_angles=(0.0,),
+    )
+
+    assert np.asarray(guesses, dtype=float) == pytest.approx(
+        np.asarray([[1.2, 0.0], [1.1, 0.0], [1.25, 0.0], [1.4, 0.0]], dtype=float)
     )
 
 
