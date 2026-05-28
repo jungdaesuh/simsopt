@@ -14133,13 +14133,98 @@ class CurrentBaselineContractTests(unittest.TestCase):
             single_stage_resume_bs_path="archives/biot_savart_opt.json",
             stage2_bs_path=None,
             offspec_replay_debug_only=False,
+            strict_vacuum_current=False,
         )
 
         with self.assertRaisesRegex(
             ValueError,
-            "--single-stage-resume-bs-path requires --offspec-replay-debug-only",
+            "--single-stage-resume-bs-path requires "
+            "--offspec-replay-debug-only or --strict-vacuum-current",
         ):
             module.resolve_single_stage_seed_artifact(args)
+
+    def test_single_stage_resume_seed_allows_strict_vacuum_role(self):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            seed_path = Path(tmpdir) / "biot_savart_opt.json"
+            seed_path.write_text("{}", encoding="utf-8")
+            results_path = Path(tmpdir) / "results.json"
+            results_path.write_text(
+                json.dumps(
+                    {
+                        "MAJOR_RADIUS": 0.976,
+                        "TOROIDAL_FLUX": 0.24,
+                        "banana_surf_radius": 0.21,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                single_stage_resume_bs_path=str(seed_path),
+                stage2_bs_path=None,
+                offspec_replay_debug_only=False,
+                strict_vacuum_current=True,
+            )
+
+            resolved = module.resolve_single_stage_seed_artifact(args)
+
+        self.assertEqual(resolved[0], str(seed_path))
+        self.assertEqual(resolved[1], results_path)
+        self.assertEqual(resolved[3], module.SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME)
+
+    def test_single_stage_parse_args_accepts_strict_vacuum_current(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-resume-bs-path",
+                "archives/biot_savart_opt.json",
+                "--strict-vacuum-current",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.strict_vacuum_current)
+        self.assertEqual(
+            args.single_stage_resume_bs_path,
+            "archives/biot_savart_opt.json",
+        )
+
+    def test_strict_vacuum_current_args_reject_current_flags(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            strict_vacuum_current=True,
+            offspec_replay_debug_only=False,
+            boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "forbidden_flags"):
+            module.validate_strict_vacuum_current_args(
+                args,
+                ["--strict-vacuum-current", "--plasma-current-A=1.0"],
+            )
+
+    def test_strict_vacuum_current_args_reject_env_finite_mode(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            strict_vacuum_current=True,
+            offspec_replay_debug_only=False,
+            boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode="wataru_proxy_field",
+        )
+
+        with self.assertRaisesRegex(ValueError, "--finite-current-mode"):
+            module.validate_strict_vacuum_current_args(
+                args,
+                ["--strict-vacuum-current"],
+            )
 
     def test_single_stage_parse_args_accepts_stage2_seed_surf_path(self):
         module = load_single_stage_example_module()

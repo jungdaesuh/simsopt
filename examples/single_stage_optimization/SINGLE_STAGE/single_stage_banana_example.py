@@ -198,6 +198,16 @@ from banana_opt.hardware_contracts import (
     is_major_radius_offspec,
     validate_major_radius,
 )
+from banana_opt.vacuum_topology_campaign import (
+    STRICT_VACUUM_CURRENT_LINEAGE,
+    build_strict_vacuum_seed_manifest,
+    failed_strict_vacuum_checks,
+    format_captured_command,
+    strict_vacuum_metadata_status,
+    strict_vacuum_seed_input_status,
+    validate_strict_vacuum_command,
+    write_strict_vacuum_seed_manifest,
+)
 from banana_opt.ellipse_width import ProjectedEllipseWidth as EllipseWidth
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_artifact_payload_fields,
@@ -789,6 +799,30 @@ def load_single_stage_resume_seed_results(resume_bs_path):
     return resume_results_path, resume_results
 
 
+def validate_strict_vacuum_current_args(args, command_args):
+    if not getattr(args, "strict_vacuum_current", False):
+        return {"passed": True}
+    if getattr(args, "offspec_replay_debug_only", False):
+        raise ValueError(
+            "--strict-vacuum-current cannot be combined with "
+            "--offspec-replay-debug-only."
+        )
+    if getattr(args, "boozer_I", None) is not None:
+        raise ValueError("--strict-vacuum-current forbids --boozer-I.")
+    if getattr(args, "plasma_current_A", None) is not None:
+        raise ValueError("--strict-vacuum-current forbids --plasma-current-A.")
+    if getattr(args, "finite_current_mode", None) not in {None, ""}:
+        raise ValueError("--strict-vacuum-current forbids --finite-current-mode.")
+    command_checks = validate_strict_vacuum_command(command_args)
+    if not command_checks["passed"]:
+        failed_checks = ", ".join(failed_strict_vacuum_checks(command_checks))
+        raise ValueError(
+            "--strict-vacuum-current command violates the strict-vacuum contract: "
+            f"{failed_checks}."
+        )
+    return command_checks
+
+
 def resolve_single_stage_seed_artifact(args):
     resume_bs_path = args.single_stage_resume_bs_path
     if resume_bs_path and args.stage2_bs_path:
@@ -796,9 +830,13 @@ def resolve_single_stage_seed_artifact(args):
             "--single-stage-resume-bs-path and --stage2-bs-path are mutually exclusive."
         )
     if resume_bs_path:
-        if not args.offspec_replay_debug_only:
+        if (
+            not args.offspec_replay_debug_only
+            and not getattr(args, "strict_vacuum_current", False)
+        ):
             raise ValueError(
-                "--single-stage-resume-bs-path requires --offspec-replay-debug-only."
+                "--single-stage-resume-bs-path requires "
+                "--offspec-replay-debug-only or --strict-vacuum-current."
             )
         resume_results_path, resume_results = load_single_stage_resume_seed_results(
             resume_bs_path
@@ -2117,8 +2155,18 @@ def parse_args():
         default=os.environ.get("SINGLE_STAGE_RESUME_BS_PATH"),
         help=(
             "Explicit path to a historical single-stage biot_savart_opt.json "
-            "resume seed. Requires --offspec-replay-debug-only and does not "
-            "claim the seed satisfies the Stage 2 handoff contract."
+            "resume seed. Requires --offspec-replay-debug-only unless "
+            "--strict-vacuum-current is set. The seed does not claim the Stage 2 "
+            "handoff contract."
+        ),
+    )
+    parser.add_argument(
+        "--strict-vacuum-current",
+        action="store_true",
+        help=(
+            "Run a production strict-vacuum replay from a warm-start seed: no "
+            "finite-current command flags, pure upstream BoozerSurface lineage, "
+            "and no proxy/VF coils in the accepted output metadata."
         ),
     )
     parser.add_argument(
@@ -10922,6 +10970,10 @@ if __name__ == "__main__":
         raise ValueError(
             "--accept-offspec-r0-seed requires --offspec-replay-debug-only."
         )
+    strict_vacuum_command_checks = validate_strict_vacuum_current_args(
+        args,
+        sys.argv[1:],
+    )
     (
         stage2_bs_path,
         stage2_results_path,
@@ -11115,6 +11167,21 @@ if __name__ == "__main__":
         num_tf_coils=num_tf_coils,
         seed_order_upgrade=getattr(args, "seed_order_upgrade", None),
     )
+    strict_vacuum_seed_checks = None
+    if args.strict_vacuum_current:
+        strict_vacuum_seed_checks = strict_vacuum_seed_input_status(
+            stage2_results,
+            num_proxy_coils=coil_partitions.num_proxy_coils,
+            num_vf_coils=coil_partitions.num_vf_coils,
+        )
+        if not strict_vacuum_seed_checks["passed"]:
+            failed_checks = ", ".join(
+                failed_strict_vacuum_checks(strict_vacuum_seed_checks)
+            )
+            raise ValueError(
+                "Strict-vacuum warm-start seed violates the no-current/proxy "
+                f"contract: {failed_checks}."
+            )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
         plasma_surf_filename=plasma_surf_filename,
         plasma_surf_path=file_loc,
@@ -11297,6 +11364,18 @@ if __name__ == "__main__":
         warm_start_surface_stem=warm_start_surface_stem,
     )
     outer_surface_data = surface_data[-1]
+    boozer_surface_classes = [
+        type(entry["boozer_surface"]).__name__ for entry in surface_data
+    ]
+    boozer_surface_modules = [
+        type(entry["boozer_surface"]).__module__ for entry in surface_data
+    ]
+    boozer_surface_lineage_metadata = {
+        "BOOZER_SURFACE_CLASS": boozer_surface_classes[-1],
+        "BOOZER_SURFACE_MODULE": boozer_surface_modules[-1],
+        "BOOZER_SURFACE_CLASSES": boozer_surface_classes,
+        "BOOZER_SURFACE_MODULES": boozer_surface_modules,
+    }
 
     # ==============================================================================
     # SAVE INITIAL STATE
@@ -12828,6 +12907,35 @@ if __name__ == "__main__":
         "STAGE2_VF_TEMPLATE_PATH": stage2_results.get("VF_TEMPLATE_PATH"),
         "STAGE2_TF_CURRENT_A": stage2_tf_current_A,
         "STAGE2_TF_CURRENT_SUM_ABS_A": tf_current_sum_abs_A,
+        "NUM_TF_COILS": coil_partitions.num_tf_coils,
+        "NUM_BANANA_COILS": coil_partitions.num_banana_coils,
+        "NUM_PROXY_COILS": 0
+        if args.strict_vacuum_current
+        else coil_partitions.num_proxy_coils,
+        "NUM_VF_COILS": 0 if args.strict_vacuum_current else coil_partitions.num_vf_coils,
+        "TOTAL_COILS": len(coils),
+        "PROXY_PLASMA_CURRENT_A": 0.0
+        if args.strict_vacuum_current
+        else float(stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)),
+        "VF_CURRENT_A": 0.0
+        if args.strict_vacuum_current
+        else float(stage2_results.get("VF_CURRENT_A", 0.0)),
+        "CURRENT_LINEAGE": STRICT_VACUUM_CURRENT_LINEAGE
+        if args.strict_vacuum_current
+        else finite_current_mode,
+        "STRICT_VACUUM_CURRENT": bool(args.strict_vacuum_current),
+        "STRICT_VACUUM_COMMAND_VALIDATION": strict_vacuum_command_checks
+        if args.strict_vacuum_current
+        else None,
+        "STRICT_VACUUM_SEED_INPUT_VALIDATION": strict_vacuum_seed_checks,
+        "STRICT_VACUUM_INHERITED_SEED_CAVEAT": (
+            "Seed is used as a warm-start/control input only; accepted output "
+            "must satisfy strict-vacuum command, current, and Boozer-lineage "
+            "checks."
+            if args.strict_vacuum_current
+            and stage2_results.get("FINITE_CURRENT_MODE") not in {None, "", "vacuum"}
+            else None
+        ),
         "BANANA_INIT_CURRENT_A": initial_banana_current_A,
         "mpol": mpol,
         "ntor": ntor,
@@ -13242,10 +13350,13 @@ if __name__ == "__main__":
         "PLASMA_CURRENT_SURROGATE_SCOPE": (
             "shared_all_surfaces" if effective_num_surfaces > 1 else "single_surface"
         ),
-        "FINITE_CURRENT_MODE": finite_current_mode,
-        "BOOZER_CURRENT_CONVENTION": boozer_current_convention,
+        "FINITE_CURRENT_MODE": None if args.strict_vacuum_current else finite_current_mode,
+        "BOOZER_CURRENT_CONVENTION": None
+        if args.strict_vacuum_current
+        else boozer_current_convention,
         "EFFECTIVE_CURRENT_MODE": effective_current_mode,
         "BOOZER_I": float(boozer_I),
+        **boozer_surface_lineage_metadata,
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),
@@ -13405,4 +13516,38 @@ if __name__ == "__main__":
             tf_current_A=stage2_tf_current_A,
         )
     )
-    write_json_artifact(os.path.join(OUT_DIR_ITER, "results.json"), results)
+    if args.strict_vacuum_current:
+        strict_vacuum_metadata_checks = strict_vacuum_metadata_status(results)
+        if not strict_vacuum_metadata_checks["passed"]:
+            failed_checks = ", ".join(
+                failed_strict_vacuum_checks(strict_vacuum_metadata_checks)
+            )
+            raise ValueError(
+                "Strict-vacuum result metadata violates the production contract: "
+                f"{failed_checks}."
+            )
+        results["STRICT_VACUUM_METADATA_VALIDATION"] = (
+            strict_vacuum_metadata_checks
+        )
+        Path(os.path.join(OUT_DIR_ITER, "captured_command.txt")).write_text(
+            format_captured_command(sys.executable, sys.argv[1:]) + "\n",
+            encoding="utf-8",
+        )
+    results_path = os.path.join(OUT_DIR_ITER, "results.json")
+    write_json_artifact(results_path, results)
+    if args.strict_vacuum_current:
+        strict_vacuum_seed_manifest = build_strict_vacuum_seed_manifest(
+            command_args=sys.argv[1:],
+            seed_biot_savart_path=stage2_bs_path,
+            seed_results_path=stage2_results_path,
+            warm_start_surface_path=stage2_seed_surf_path,
+            plasma_target_path=file_loc,
+            output_results_path=results_path,
+            results=results,
+            seed_results=stage2_results,
+            seed_artifact_role=seed_artifact_role,
+        )
+        write_strict_vacuum_seed_manifest(
+            os.path.join(OUT_DIR_ITER, "seed_manifest.json"),
+            strict_vacuum_seed_manifest,
+        )
