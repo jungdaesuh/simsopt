@@ -1018,6 +1018,31 @@ def build_stage_jax_runtime_seed_spec_path(stage_output_root: Path) -> Path:
     return stage_output_root / _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
 
 
+def read_jax_runtime_seed_spec_resolution(seed_spec_path: Path) -> RunResolution:
+    with open(seed_spec_path, "r", encoding="utf-8") as infile:
+        payload = json.load(infile)
+    surface = payload["surface"]
+    quadrature = payload["quadrature"]
+    return (
+        int(surface["mpol"]),
+        int(surface["ntor"]),
+        int(quadrature["nphi"]),
+        int(quadrature["ntheta"]),
+    )
+
+
+def run_resolution_from_summary_value(
+    value: object,
+    *,
+    field_name: str,
+) -> RunResolution | None:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise ValueError(f"{field_name} must be a four-item run resolution")
+    return (int(value[0]), int(value[1]), int(value[2]), int(value[3]))
+
+
 def existing_stage_jax_runtime_seed_spec_path(
     warm_start_run_dir: Path,
     stage: ContinuationStage,
@@ -1025,16 +1050,7 @@ def existing_stage_jax_runtime_seed_spec_path(
     path = warm_start_run_dir / _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
     if not path.exists():
         return None
-    with open(path, "r", encoding="utf-8") as infile:
-        payload = json.load(infile)
-    surface = payload["surface"]
-    quadrature = payload["quadrature"]
-    shape = (
-        int(surface["mpol"]),
-        int(surface["ntor"]),
-        int(quadrature["nphi"]),
-        int(quadrature["ntheta"]),
-    )
+    shape = read_jax_runtime_seed_spec_resolution(path)
     if shape != (stage.mpol, stage.ntor, stage.nphi, stage.ntheta):
         return None
     return path
@@ -2630,6 +2646,29 @@ def run_single_continuation_with_args(
         if not args.dry_run:
             run_root.mkdir(parents=True, exist_ok=True)
 
+    existing_run_summary_path = run_root / "continuation_summary.json"
+    existing_run_summary = (
+        load_json(existing_run_summary_path)
+        if run_mode in {"summarize", "resume"} and existing_run_summary_path.exists()
+        else None
+    )
+    existing_stage_selection_resolution = (
+        None
+        if existing_run_summary is None
+        else run_resolution_from_summary_value(
+            existing_run_summary.get("initial_stage_selection_resolution"),
+            field_name="initial_stage_selection_resolution",
+        )
+    )
+    existing_jax_runtime_seed_source_resolution = (
+        None
+        if existing_run_summary is None
+        else run_resolution_from_summary_value(
+            existing_run_summary.get("initial_jax_runtime_seed_source_resolution"),
+            field_name="initial_jax_runtime_seed_source_resolution",
+        )
+    )
+
     use_target_lane_fast_trials = continuation_uses_target_lane_fast_trials(
         passthrough_args
     )
@@ -2641,15 +2680,54 @@ def run_single_continuation_with_args(
         initial_stage2_seed_path = forced_initial_stage2_seed_path.resolve()
     if forced_initial_warm_start_run_dir is not None:
         initial_warm_start_run_dir = forced_initial_warm_start_run_dir.resolve()
-    initial_jax_runtime_seed_source = (
+    requested_initial_jax_runtime_seed_source = (
         None
         if args.initial_jax_runtime_seed_source is None
         else Path(args.initial_jax_runtime_seed_source).expanduser().resolve()
+    )
+    recorded_initial_jax_runtime_seed_source = (
+        None
+        if existing_run_summary is None
+        else existing_run_summary.get("initial_jax_runtime_seed_source")
+    )
+    initial_jax_runtime_seed_source = (
+        requested_initial_jax_runtime_seed_source
+        if requested_initial_jax_runtime_seed_source is not None
+        else (
+            Path(recorded_initial_jax_runtime_seed_source).expanduser().resolve()
+            if isinstance(recorded_initial_jax_runtime_seed_source, str)
+            and bool(recorded_initial_jax_runtime_seed_source)
+            else None
+        )
+    )
+    initial_jax_runtime_seed_source_resolution = (
+        existing_jax_runtime_seed_source_resolution
+        if existing_jax_runtime_seed_source_resolution is not None
+        else (
+            None
+            if (
+                requested_initial_jax_runtime_seed_source is None
+                or initial_warm_start_run_dir is not None
+                or existing_stage_selection_resolution is not None
+            )
+            else read_jax_runtime_seed_spec_resolution(
+                requested_initial_jax_runtime_seed_source
+            )
+        )
     )
     initial_warm_start_resolution = (
         None
         if initial_warm_start_run_dir is None
         else read_single_stage_run_resolution(initial_warm_start_run_dir)
+    )
+    initial_stage_selection_resolution = (
+        existing_stage_selection_resolution
+        if existing_stage_selection_resolution is not None
+        else (
+            initial_warm_start_resolution
+            if initial_warm_start_resolution is not None
+            else initial_jax_runtime_seed_source_resolution
+        )
     )
     stages = select_continuation_stages_for_initial_resolution(
         build_default_continuation_stages(
@@ -2663,7 +2741,7 @@ def run_single_continuation_with_args(
             prefinal_maxiter=args.prefinal_maxiter,
             trial_policy=args.trial_policy,
         ),
-        initial_resolution=initial_warm_start_resolution,
+        initial_resolution=initial_stage_selection_resolution,
     )
     jax_profile_root = (
         forced_jax_profile_root.resolve()
@@ -2701,7 +2779,9 @@ def run_single_continuation_with_args(
         "initial_jax_runtime_seed_source": None
         if initial_jax_runtime_seed_source is None
         else str(initial_jax_runtime_seed_source),
+        "initial_jax_runtime_seed_source_resolution": initial_jax_runtime_seed_source_resolution,
         "initial_warm_start_resolution": initial_warm_start_resolution,
+        "initial_stage_selection_resolution": initial_stage_selection_resolution,
         "summarize_run_root": None
         if args.summarize_run_root is None
         else str(Path(args.summarize_run_root).expanduser().resolve()),

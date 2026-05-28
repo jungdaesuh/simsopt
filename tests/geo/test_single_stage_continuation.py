@@ -1993,7 +1993,15 @@ class SingleStageContinuationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_root = Path(tmpdir) / "out"
             source_spec = Path(tmpdir) / "source-runtime-spec.json"
-            source_spec.write_text("{}", encoding="utf-8")
+            source_spec.write_text(
+                json.dumps(
+                    {
+                        "surface": {"mpol": 2, "ntor": 2},
+                        "quadrature": {"nphi": 31, "ntheta": 16},
+                    }
+                ),
+                encoding="utf-8",
+            )
             compile_commands: list[list[str]] = []
             stage_commands: list[list[str]] = []
 
@@ -2028,7 +2036,18 @@ class SingleStageContinuationTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 (run_dir / "single_stage_jax_runtime_spec.json").write_text(
-                    "{}",
+                    json.dumps(
+                        {
+                            "surface": {
+                                "mpol": int(command[command.index("--mpol") + 1]),
+                                "ntor": int(command[command.index("--ntor") + 1]),
+                            },
+                            "quadrature": {
+                                "nphi": int(command[command.index("--nphi") + 1]),
+                                "ntheta": int(command[command.index("--ntheta") + 1]),
+                            },
+                        }
+                    ),
                     encoding="utf-8",
                 )
                 return subprocess.CompletedProcess(command, 0)
@@ -2084,6 +2103,296 @@ class SingleStageContinuationTests(unittest.TestCase):
             summary["stages"][0]["jax_runtime_seed_spec_path"],
             compiled_spec,
         )
+
+    def test_main_uses_initial_jax_runtime_seed_source_resolution_for_stage_selection(
+        self,
+    ):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "out"
+            source_spec = Path(tmpdir) / "source-runtime-spec.json"
+            source_spec.write_text(
+                json.dumps(
+                    {
+                        "surface": {"mpol": 4, "ntor": 4},
+                        "quadrature": {"nphi": 63, "ntheta": 32},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            compile_commands: list[list[str]] = []
+            stage_commands: list[list[str]] = []
+
+            def fake_run(command, check):
+                self.assertTrue(check)
+                if "--compile-jax-runtime-seed-spec" in command:
+                    compile_commands.append(command)
+                    spec_path = Path(
+                        command[command.index("--jax-runtime-seed-spec") + 1]
+                    )
+                    spec_path.parent.mkdir(parents=True, exist_ok=True)
+                    spec_path.write_text(
+                        json.dumps(
+                            {
+                                "surface": {
+                                    "mpol": int(command[command.index("--mpol") + 1]),
+                                    "ntor": int(command[command.index("--ntor") + 1]),
+                                },
+                                "quadrature": {
+                                    "nphi": int(command[command.index("--nphi") + 1]),
+                                    "ntheta": int(
+                                        command[command.index("--ntheta") + 1]
+                                    ),
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    return subprocess.CompletedProcess(command, 0)
+
+                stage_commands.append(command)
+                stage_output_root = Path(command[command.index("--output-root") + 1])
+                run_dir = stage_output_root / "run"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "results.json").write_text(
+                    json.dumps(
+                        {
+                            "backend": "jax",
+                            "optimizer_backend": "ondevice",
+                            "mpol": int(command[command.index("--mpol") + 1]),
+                            "ntor": int(command[command.index("--ntor") + 1]),
+                            "nphi": int(command[command.index("--nphi") + 1]),
+                            "ntheta": int(command[command.index("--ntheta") + 1]),
+                            "FINAL_IOTA": 0.205,
+                            "TARGET_IOTA": 0.21,
+                            "FINAL_NON_QS": 0.03,
+                            "FINAL_G": 4.5,
+                            "FIELD_ERROR": 2.5e-4,
+                            "OPTIMIZER_SUCCESS": True,
+                            "HARDWARE_CONSTRAINTS_OK": True,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (run_dir / "single_stage_jax_runtime_spec.json").write_text(
+                    json.dumps(
+                        {
+                            "surface": {
+                                "mpol": int(command[command.index("--mpol") + 1]),
+                                "ntor": int(command[command.index("--ntor") + 1]),
+                            },
+                            "quadrature": {
+                                "nphi": int(command[command.index("--nphi") + 1]),
+                                "ntheta": int(command[command.index("--ntheta") + 1]),
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch.object(module.subprocess, "run", side_effect=fake_run):
+                module.main(
+                    [
+                        "--output-root",
+                        str(output_root),
+                        "--run-id",
+                        "initial-source-resolution",
+                        "--initial-jax-runtime-seed-source",
+                        str(source_spec),
+                        "--mpol",
+                        "6",
+                        "--ntor",
+                        "6",
+                        "--nphi",
+                        "127",
+                        "--ntheta",
+                        "48",
+                        "--maxiter",
+                        "10",
+                        "--backend",
+                        "jax",
+                        "--optimizer-backend",
+                        "ondevice",
+                        "--strict-validation",
+                    ]
+                )
+
+            run_root = output_root / "continuation-initial-source-resolution"
+            summary = json.loads(
+                (run_root / "continuation_summary.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(len(compile_commands), 1)
+            self.assertEqual(len(stage_commands), 1)
+            self.assertEqual(
+                stage_commands[0][stage_commands[0].index("--mpol") + 1], "6"
+            )
+            self.assertEqual(
+                stage_commands[0][stage_commands[0].index("--ntor") + 1], "6"
+            )
+            self.assertEqual(
+                stage_commands[0][stage_commands[0].index("--nphi") + 1], "127"
+            )
+            self.assertEqual(
+                stage_commands[0][stage_commands[0].index("--ntheta") + 1], "48"
+            )
+            self.assertEqual(
+                summary["initial_jax_runtime_seed_source_resolution"],
+                [4, 4, 63, 32],
+            )
+            self.assertEqual(
+                summary["initial_stage_selection_resolution"], [4, 4, 63, 32]
+            )
+            self.assertEqual(summary["stages"][0]["name"], "final")
+
+            source_spec.unlink()
+            module.main(
+                [
+                    "--summarize-run-root",
+                    str(run_root),
+                    "--mpol",
+                    "6",
+                    "--ntor",
+                    "6",
+                    "--nphi",
+                    "127",
+                    "--ntheta",
+                    "48",
+                    "--maxiter",
+                    "10",
+                    "--backend",
+                    "jax",
+                    "--optimizer-backend",
+                    "ondevice",
+                    "--strict-validation",
+                ]
+            )
+            summarized = json.loads(
+                (run_root / "continuation_summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(summarized["stages"]), 1)
+            self.assertEqual(summarized["stages"][0]["name"], "final")
+            self.assertEqual(summarized["stages"][0]["status"], "completed")
+            self.assertTrue(summarized["stages"][0]["reused_existing_run"])
+            self.assertEqual(
+                summarized["initial_jax_runtime_seed_source_resolution"],
+                [4, 4, 63, 32],
+            )
+            self.assertEqual(
+                summarized["initial_stage_selection_resolution"], [4, 4, 63, 32]
+            )
+
+    def test_main_summarize_legacy_runtime_source_summary_does_not_read_source(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_root = Path(tmpdir) / "legacy"
+            run_root.mkdir()
+            missing_source = Path(tmpdir) / "missing-runtime-spec.json"
+            (run_root / "continuation_summary.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": module._CONTINUATION_SCHEMA_VERSION,
+                        "initial_jax_runtime_seed_source": str(missing_source),
+                        "stages": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as exit_context:
+                module.main(
+                    [
+                        "--summarize-run-root",
+                        str(run_root),
+                        "--mpol",
+                        "6",
+                        "--ntor",
+                        "6",
+                        "--nphi",
+                        "127",
+                        "--ntheta",
+                        "48",
+                        "--maxiter",
+                        "10",
+                        "--backend",
+                        "jax",
+                        "--optimizer-backend",
+                        "ondevice",
+                        "--strict-validation",
+                    ]
+                )
+            self.assertEqual(exit_context.exception.code, 1)
+            summarized = json.loads(
+                (run_root / "continuation_summary.json").read_text(encoding="utf-8")
+            )
+
+        self.assertIsNone(summarized["initial_jax_runtime_seed_source_resolution"])
+        self.assertIsNone(summarized["initial_stage_selection_resolution"])
+
+    def test_main_ignores_initial_jax_runtime_seed_source_when_warm_start_is_present(
+        self,
+    ):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            donor_dir = Path(tmpdir) / "donor"
+            donor_dir.mkdir()
+            (donor_dir / "results.json").write_text(
+                json.dumps(
+                    {
+                        "mpol": 4,
+                        "ntor": 4,
+                        "nphi": 63,
+                        "ntheta": 32,
+                        "TARGET_VOLUME": 0.1,
+                        "TARGET_IOTA": 0.15,
+                        "CURVATURE_THRESHOLD": 100.0,
+                        "CC_DIST": 0.05,
+                        "CS_DIST": 0.015,
+                        "SS_DIST": 0.04,
+                        "BANANA_CURRENT_MAX_A": 16000.0,
+                        "LENGTH_TARGET": 1.7,
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_G": 2.0,
+                        "FIELD_ERROR": 2.5e-4,
+                        "HARDWARE_CONSTRAINTS_OK": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (donor_dir / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+            missing_source = Path(tmpdir) / "missing-runtime-spec.json"
+
+            module.main(
+                [
+                    "--output-root",
+                    str(Path(tmpdir) / "out"),
+                    "--run-id",
+                    "warm-start-wins",
+                    "--initial-warm-start-run-dir",
+                    str(donor_dir),
+                    "--initial-jax-runtime-seed-source",
+                    str(missing_source),
+                    "--mpol",
+                    "6",
+                    "--ntor",
+                    "6",
+                    "--nphi",
+                    "127",
+                    "--ntheta",
+                    "48",
+                    "--maxiter",
+                    "10",
+                    "--backend",
+                    "jax",
+                    "--optimizer-backend",
+                    "ondevice",
+                    "--dry-run",
+                ]
+            )
 
     def test_main_resume_run_root_reruns_invalid_completed_nonfinal_stage(self):
         module = self.load_module()
