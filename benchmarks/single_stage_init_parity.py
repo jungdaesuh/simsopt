@@ -1282,7 +1282,7 @@ def _is_high_resolution_outer_run(args: argparse.Namespace) -> bool:
 def _requires_continuation_seed(args: argparse.Namespace) -> bool:
     return bool(
         _is_high_resolution_outer_run(args)
-        and not _has_explicit_single_stage_seed(args)
+        and getattr(args, "warm_start_run_dir", None) is None
     )
 
 
@@ -1436,21 +1436,44 @@ def _validate_warm_start_seed_contract(
 def _require_supported_single_stage_seed_contract(args: argparse.Namespace) -> None:
     if not _is_high_resolution_outer_run(args):
         return
-    if not _has_explicit_single_stage_seed(args):
+    warm_start_run_dir = getattr(args, "warm_start_run_dir", None)
+    if warm_start_run_dir is None:
         raise ValueError(
             "single_stage_init_parity high-resolution outer runs require "
-            "--warm-start-run-dir or --jax-runtime-seed-spec; build the donor with "
+            "--warm-start-run-dir from a validated continuation donor; "
+            "--jax-runtime-seed-spec alone is only a runtime startup guess and "
+            "does not prove continuation-branch preservation. Build the donor with "
             "examples/single_stage_optimization/SINGLE_STAGE/"
             "run_single_stage_continuation.py. "
             f"Got mpol={int(args.mpol)}, ntor={int(args.ntor)}, "
             f"maxiter={int(args.maxiter)}."
         )
-    seed_spec = getattr(args, "jax_runtime_seed_spec", None)
-    if seed_spec is not None:
-        _validate_jax_runtime_seed_spec_contract(args, Path(seed_spec))
-    warm_start_run_dir = getattr(args, "warm_start_run_dir", None)
-    if warm_start_run_dir is not None and seed_spec is None:
-        _validate_warm_start_seed_contract(args, Path(warm_start_run_dir))
+    _validate_warm_start_seed_contract(args, Path(warm_start_run_dir))
+
+
+def _resolve_target_jax_runtime_seed_spec(
+    args: argparse.Namespace,
+    *,
+    case_root: Path,
+) -> Path:
+    if (
+        _is_high_resolution_outer_run(args)
+        and getattr(args, "warm_start_run_dir", None) is not None
+    ):
+        seed_spec_path = _compile_jax_runtime_seed_spec_from_run_dir(
+            Path(args.warm_start_run_dir),
+            case_root / "single_stage_jax_runtime_seed_spec.json",
+            args,
+        )
+        _validate_jax_runtime_seed_spec_contract(args, seed_spec_path)
+        return seed_spec_path
+    if args.jax_runtime_seed_spec is not None:
+        return Path(args.jax_runtime_seed_spec)
+    return _compile_jax_runtime_seed_spec_from_run_dir(
+        Path(args.warm_start_run_dir),
+        case_root / "single_stage_jax_runtime_seed_spec.json",
+        args,
+    )
 
 
 def _namespace_with_overrides(
@@ -1552,14 +1575,9 @@ def _run_single_stage_case_pair(
     same_candidate_replay_case = None
     target_args = args
     if reference_backend == "jax":
-        jax_seed_spec = (
-            Path(args.jax_runtime_seed_spec)
-            if args.jax_runtime_seed_spec is not None
-            else _compile_jax_runtime_seed_spec_from_run_dir(
-                Path(args.warm_start_run_dir),
-                case_root / "single_stage_jax_runtime_seed_spec.json",
-                args,
-            )
+        jax_seed_spec = _resolve_target_jax_runtime_seed_spec(
+            args,
+            case_root=case_root,
         )
         cpu_case = _run_single_stage_case(
             args,

@@ -1986,7 +1986,7 @@ def test_single_stage_init_high_resolution_outer_run_requires_continuation_seed(
     assert not single_stage_init_parity_module._requires_continuation_seed(args)
 
 
-def test_single_stage_init_high_resolution_rejects_bad_runtime_seed_spec(
+def test_single_stage_init_high_resolution_rejects_bare_runtime_seed_spec(
     tmp_path,
 ):
     args = _single_stage_case_args(tmp_path)
@@ -2004,6 +2004,57 @@ def test_single_stage_init_high_resolution_rejects_bad_runtime_seed_spec(
         nphi=args.nphi,
         ntheta=args.ntheta,
         iota=5.0e-17,
+    )
+
+    assert single_stage_init_parity_module._requires_continuation_seed(args)
+    with pytest.raises(ValueError, match="--jax-runtime-seed-spec alone"):
+        single_stage_init_parity_module._run_single_stage_case_pair(
+            args,
+            benchmark_mode=True,
+            reference_backend="jax",
+            reference_benchmark_mode=True,
+            case_root=tmp_path / "case",
+        )
+
+
+def test_single_stage_init_high_resolution_rejects_compiled_low_iota_seed_spec(
+    monkeypatch,
+    tmp_path,
+):
+    donor_dir = tmp_path / "donor"
+    donor_dir.mkdir()
+    (donor_dir / "results.json").write_text(
+        json.dumps(
+            {
+                "FINAL_IOTA": 0.15,
+                "FINAL_G": 2.0,
+                "HARDWARE_CONSTRAINTS_OK": True,
+                "SELF_INTERSECTING": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = _single_stage_case_args(tmp_path)
+    args.maxiter = 10
+    args.mpol = 6
+    args.ntor = 6
+    args.nphi = 127
+    args.ntheta = 48
+    args.warm_start_run_dir = str(donor_dir)
+    args.jax_runtime_seed_spec = tmp_path / "projected-seed.json"
+    compiled_spec = tmp_path / "compiled-seed.json"
+    _write_single_stage_jax_runtime_seed_spec(
+        compiled_spec,
+        mpol=args.mpol,
+        ntor=args.ntor,
+        nphi=args.nphi,
+        ntheta=args.ntheta,
+        iota=5.0e-17,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_compile_jax_runtime_seed_spec_from_run_dir",
+        lambda _run_dir, _output_path, _args: compiled_spec,
     )
 
     with pytest.raises(ValueError, match="seed Boozer iota"):
@@ -5206,7 +5257,21 @@ def test_single_stage_init_case_pair_threads_large_cuda_boozer_polish_skip_to_ja
     args.mpol = 6
     args.ntor = 6
     args.maxiter = 10
-    args.jax_runtime_seed_spec = tmp_path / "seed.json"
+    donor_dir = tmp_path / "continuation-donor"
+    donor_dir.mkdir()
+    (donor_dir / "results.json").write_text(
+        json.dumps(
+            {
+                "FINAL_IOTA": 0.15,
+                "FINAL_G": 2.0,
+                "HARDWARE_CONSTRAINTS_OK": True,
+                "SELF_INTERSECTING": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    compiled_seed_spec = tmp_path / "compiled-seed.json"
+    args.jax_runtime_seed_spec = tmp_path / "projected-seed.json"
     _write_single_stage_jax_runtime_seed_spec(
         args.jax_runtime_seed_spec,
         mpol=args.mpol,
@@ -5214,9 +5279,27 @@ def test_single_stage_init_case_pair_threads_large_cuda_boozer_polish_skip_to_ja
         nphi=args.nphi,
         ntheta=args.ntheta,
     )
-    args.warm_start_run_dir = None
+    _write_single_stage_jax_runtime_seed_spec(
+        compiled_seed_spec,
+        mpol=args.mpol,
+        ntor=args.ntor,
+        nphi=args.nphi,
+        ntheta=args.ntheta,
+    )
+    args.warm_start_run_dir = str(donor_dir)
     args.target_lane_boozer_newton_polish_policy = "skip-large-strict-cuda"
     observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    compile_calls = []
+
+    def fake_compile_seed_spec(run_dir, output_path, _args):
+        compile_calls.append((Path(run_dir), Path(output_path)))
+        return compiled_seed_spec
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_compile_jax_runtime_seed_spec_from_run_dir",
+        fake_compile_seed_spec,
+    )
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "load_json",
@@ -5238,6 +5321,9 @@ def test_single_stage_init_case_pair_threads_large_cuda_boozer_polish_skip_to_ja
     )
 
     assert len(observed_invocations) == 2
+    assert compile_calls == [
+        (donor_dir, tmp_path / "case" / "single_stage_jax_runtime_seed_spec.json")
+    ]
     reference_command, _reference_env = observed_invocations[0]
     target_command, _target_env = observed_invocations[1]
     assert (
@@ -5255,6 +5341,12 @@ def test_single_stage_init_case_pair_threads_large_cuda_boozer_polish_skip_to_ja
     assert (
         _flag_value(target_command, "--target-lane-boozer-newton-polish-policy")
         == "skip"
+    )
+    assert _flag_value(reference_command, "--jax-runtime-seed-spec") == str(
+        compiled_seed_spec
+    )
+    assert _flag_value(target_command, "--jax-runtime-seed-spec") == str(
+        compiled_seed_spec
     )
 
 
