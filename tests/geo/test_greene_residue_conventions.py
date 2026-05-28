@@ -59,6 +59,7 @@ from examples.single_stage_optimization.banana_opt.topology.residue_diagnostics 
     radial_multistart_initial_guesses,
     radial_multistart_labels,
     run_residue_probe,
+    target_winding_ranked_initial_guesses,
 )
 from examples.single_stage_optimization.banana_opt.topology.residue_objective import (
     DEFAULT_RESIDUE_OBJECTIVE_WEIGHT,
@@ -152,6 +153,41 @@ class CircularTransformField:
 
     def dB_by_dX(self) -> np.ndarray:
         return _finite_difference_dB_by_dX(self._B_at, self.points)
+
+
+class RadialShearTransformField(CircularTransformField):
+    def __init__(
+        self,
+        *,
+        axis_r: float,
+        axis_z: float,
+        reference_iota: float,
+        reference_minor_radius: float,
+        shear: float,
+    ):
+        super().__init__(axis_r=axis_r, axis_z=axis_z, iota=reference_iota)
+        self.reference_minor_radius = float(reference_minor_radius)
+        self.shear = float(shear)
+
+    def _B_at(self, points: np.ndarray) -> np.ndarray:
+        x = points[:, 0]
+        y = points[:, 1]
+        z = points[:, 2]
+        radius = np.sqrt(x**2 + y**2)
+        minor_radius = np.sqrt((radius - self.axis_r) ** 2 + (z - self.axis_z) ** 2)
+        cos_phi = x / radius
+        sin_phi = y / radius
+        geometric_rate = self.iota + self.shear * (
+            minor_radius - self.reference_minor_radius
+        )
+        d_radius_dphi = -geometric_rate * (z - self.axis_z)
+        d_z_dphi = geometric_rate * (radius - self.axis_r)
+        b_phi = np.ones_like(radius)
+        b_r = d_radius_dphi / radius
+        b_z = d_z_dphi / radius
+        b_x = b_r * cos_phi - b_phi * sin_phi
+        b_y = b_r * sin_phi + b_phi * cos_phi
+        return np.stack([b_x, b_y, b_z], axis=-1)
 
 
 class DrivenPeriodicOrbitField:
@@ -998,6 +1034,94 @@ def test_residue_probe_serializes_required_branch_diagnostics():
     assert diagnostic["solver_iterations"] <= solver_options.max_iterations
 
 
+def test_target_winding_ranked_initial_guesses_uses_real_nonzero_return_map():
+    target = RationalTarget(
+        p=1,
+        q=4,
+        radial_label=0.35,
+        radial_window=(0.2, 0.5),
+        branches=(GREENE_BRANCH_O,),
+        fourier_m=4,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    field = RadialShearTransformField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        reference_iota=target.iota_float,
+        reference_minor_radius=0.2,
+        shear=0.8,
+    )
+    ranked = target_winding_ranked_initial_guesses(
+        field,
+        target,
+        chart,
+        integrator_options=FieldlineIntegratorOptions(
+            rtol=1.0e-10,
+            atol=1.0e-12,
+            max_step=0.025,
+            samples_per_full_torus=96,
+        ),
+        phase_angles=(0.0,),
+    )
+
+    assert chart.radial_label(ranked[0]) == pytest.approx(0.2, abs=2.0e-5)
+
+
+def test_residue_probe_discovers_nonzero_p_branch_from_ranked_scan():
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_label=0.2,
+        radial_window=(0.2, 0.2),
+        branches=(GREENE_BRANCH_O,),
+        fourier_m=1,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    period = 2.0 * math.pi * float(target.q)
+    phase0 = 0.25 * math.pi
+    field = DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.2,
+        phase0=phase0,
+        tangent_generator=(0.5 * math.pi / period)
+        * np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=float),
+    )
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-6,
+        max_iterations=8,
+        max_step_norm=0.08,
+    )
+
+    probe = run_residue_probe(
+        field,
+        targets=(target,),
+        chart=chart,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+        phase_angles=(phase0,),
+    )
+
+    diagnostic = probe["diagnostics"][0]
+    assert probe["branch_status_counts"] == {BRANCH_STATUS_CONVERGED: 1}
+    assert diagnostic["branch_status"] == BRANCH_STATUS_CONVERGED
+    assert diagnostic["winding"] == pytest.approx(1.0, abs=1.0e-7)
+    assert diagnostic["section_state"] == pytest.approx(
+        field.initial_orbit_state(),
+        abs=4.0e-7,
+    )
+
+
 def test_residue_probe_serializes_branch_integration_failure(monkeypatch):
     target = RationalTarget(
         p=1,
@@ -1029,6 +1153,17 @@ def test_residue_probe_serializes_branch_integration_failure(monkeypatch):
         residue_diagnostics,
         "discover_periodic_orbit",
         fail_discovery,
+    )
+    monkeypatch.setattr(
+        residue_diagnostics,
+        "target_winding_ranked_initial_guesses",
+        lambda field, target, chart, integrator_options, phase_angles: (
+            radial_multistart_initial_guesses(
+                target,
+                chart,
+                phase_angles=phase_angles,
+            )
+        ),
     )
 
     probe = residue_diagnostics.run_residue_probe(
@@ -1094,6 +1229,118 @@ def test_residue_probe_radial_multistart_spans_target_window():
     assert np.asarray(guesses, dtype=float) == pytest.approx(
         np.asarray([[1.2, 0.0], [1.1, 0.0], [1.25, 0.0], [1.4, 0.0]], dtype=float)
     )
+
+
+def test_target_winding_ranked_initial_guesses_prioritize_requested_basin(monkeypatch):
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    target = RationalTarget(
+        p=1,
+        q=4,
+        radial_label=0.2,
+        radial_window=(0.2, 0.2),
+        fourier_m=4,
+        fourier_n=1,
+    )
+    requested_phase = 0.25 * math.pi
+    phase_angles = (0.0, 0.5 * math.pi, requested_phase, math.pi)
+    requested_state = residue_diagnostics.section_state_from_chart(
+        chart,
+        radial_label=0.2,
+        theta=requested_phase,
+    )
+
+    class FakeReturnMap:
+        def __init__(self, *, initial_state, winding: float):
+            self.initial_state = initial_state
+            self.final_state = initial_state
+            self.winding = winding
+
+    def fake_integrate_target_return_map(
+        field,
+        initial_state,
+        *,
+        target,
+        chart,
+        options,
+    ):
+        state = (float(initial_state[0]), float(initial_state[1]))
+        winding = 1.0 if np.allclose(state, requested_state) else 0.0
+        return FakeReturnMap(initial_state=state, winding=winding)
+
+    monkeypatch.setattr(
+        residue_diagnostics,
+        "integrate_target_return_map",
+        fake_integrate_target_return_map,
+    )
+
+    ranked = target_winding_ranked_initial_guesses(
+        object(),
+        target,
+        chart,
+        phase_angles=phase_angles,
+    )
+
+    assert ranked[0] == pytest.approx(requested_state)
+
+
+def test_target_winding_ranked_initial_guesses_defers_prescan_failures(monkeypatch):
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    target = RationalTarget(
+        p=1,
+        q=4,
+        radial_label=0.2,
+        radial_window=(0.2, 0.2),
+        fourier_m=4,
+        fourier_n=1,
+    )
+    failing_phase = 0.0
+    requested_phase = 0.5 * math.pi
+    failing_state = residue_diagnostics.section_state_from_chart(
+        chart,
+        radial_label=0.2,
+        theta=failing_phase,
+    )
+    requested_state = residue_diagnostics.section_state_from_chart(
+        chart,
+        radial_label=0.2,
+        theta=requested_phase,
+    )
+
+    class FakeReturnMap:
+        def __init__(self, *, initial_state, winding: float):
+            self.initial_state = initial_state
+            self.final_state = initial_state
+            self.winding = winding
+
+    def fake_integrate_target_return_map(
+        field,
+        initial_state,
+        *,
+        target,
+        chart,
+        options,
+    ):
+        state = (float(initial_state[0]), float(initial_state[1]))
+        if np.allclose(state, failing_state):
+            raise RuntimeError("synthetic pre-scan integration failure")
+        winding = 1.0 if np.allclose(state, requested_state) else 0.0
+        return FakeReturnMap(initial_state=state, winding=winding)
+
+    monkeypatch.setattr(
+        residue_diagnostics,
+        "integrate_target_return_map",
+        fake_integrate_target_return_map,
+    )
+
+    ranked = target_winding_ranked_initial_guesses(
+        object(),
+        target,
+        chart,
+        phase_angles=(failing_phase, requested_phase, math.pi),
+    )
+
+    assert ranked[0] == pytest.approx(requested_state)
+    assert ranked[-1] == pytest.approx(failing_state)
 
 
 def test_residue_sensitivity_central_differences_match_analytic_residue_slope():

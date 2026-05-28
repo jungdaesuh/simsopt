@@ -22,7 +22,11 @@ from banana_opt.topology.fieldline_map import FieldlineIntegratorOptions  # noqa
 from banana_opt.topology.periodic_orbit import PeriodicOrbitSolverOptions  # noqa: E402
 from banana_opt.topology.poincare_chart import PoincareChart  # noqa: E402
 from banana_opt.topology.rational_target import RationalTarget  # noqa: E402
-from banana_opt.topology.residue_diagnostics import run_residue_probe  # noqa: E402
+from banana_opt.topology.residue_diagnostics import (  # noqa: E402
+    DEFAULT_BRANCH_PHASE_COUNT,
+    run_residue_probe,
+    uniform_branch_phase_angles,
+)
 from banana_opt.topology.residue_objective import (  # noqa: E402
     BiotSavartGreeneResidueObjective,
     DEFAULT_RESIDUE_OBJECTIVE_WEIGHT,
@@ -83,6 +87,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--det-tolerance", type=float, default=1.0e-5)
     parser.add_argument("--max-newton-iterations", type=int, default=12)
     parser.add_argument("--max-newton-step-norm", type=float, default=0.05)
+    parser.add_argument(
+        "--branch-phase-count",
+        type=int,
+        default=DEFAULT_BRANCH_PHASE_COUNT,
+        help=(
+            "Number of deterministic poloidal phases to scan when discovering "
+            "target-winding Greene branches."
+        ),
+    )
     parser.add_argument(
         "--residue-objective-weight",
         type=float,
@@ -161,6 +174,7 @@ def evaluate_output_dir(
     residue_objective_branch_seeds: Sequence[ResidueBranchSeed],
     residue_objective_r_satisfied: float,
     residue_objective_local_difference_step: float,
+    branch_phase_angles: Sequence[float],
 ) -> dict[str, object]:
     artifact_path, resolved_field_label = resolve_biot_savart_artifact(
         output_dir,
@@ -173,6 +187,7 @@ def evaluate_output_dir(
         chart=chart,
         integrator_options=integrator_options,
         solver_options=solver_options,
+        phase_angles=branch_phase_angles,
     )
     target_manifest_id = residue_objective_target_manifest_id(targets)
     objective_payload = disabled_residue_objective_payload(
@@ -251,6 +266,7 @@ def main() -> None:
         max_iterations=args.max_newton_iterations,
         max_step_norm=args.max_newton_step_norm,
     )
+    branch_phase_angles = uniform_branch_phase_angles(args.branch_phase_count)
     cases = [
         evaluate_output_dir(
             output_dir,
@@ -267,6 +283,7 @@ def main() -> None:
             residue_objective_local_difference_step=(
                 args.residue_objective_local_difference_step
             ),
+            branch_phase_angles=branch_phase_angles,
         )
         for output_dir in args.output_dirs
     ]

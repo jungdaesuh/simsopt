@@ -4,10 +4,14 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from math import cos, isfinite, pi, sin
 
+import numpy as np
+
 from .fieldline_map import (
     DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
     DifferentiableMagneticFieldLike,
     FieldlineIntegratorOptions,
+    integrate_target_return_map,
+    target_winding_residual,
 )
 from .periodic_orbit import (
     DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
@@ -21,7 +25,19 @@ from .rational_target import RationalTarget
 
 
 GREENE_RESIDUE_PROBE_SCHEMA_VERSION = "greene_residue_probe_v1"
-DEFAULT_BRANCH_PHASE_ANGLES = (0.0, 0.5 * pi, pi, 1.5 * pi)
+DEFAULT_BRANCH_PHASE_COUNT = 8
+DEFAULT_RADIAL_WINDOW_SAMPLE_COUNT = 3
+DEFAULT_BRANCH_PHASE_ANGLES = tuple(
+    2.0 * pi * float(index) / float(DEFAULT_BRANCH_PHASE_COUNT)
+    for index in range(DEFAULT_BRANCH_PHASE_COUNT)
+)
+
+
+def uniform_branch_phase_angles(phase_count: int) -> tuple[float, ...]:
+    count = int(phase_count)
+    if count <= 0:
+        raise ValueError("Greene residue branch phase count must be positive")
+    return tuple(2.0 * pi * float(index) / float(count) for index in range(count))
 
 
 def section_state_from_chart(
@@ -66,6 +82,63 @@ def radial_multistart_initial_guesses(
     )
 
 
+def target_winding_ranked_initial_guesses(
+    field: DifferentiableMagneticFieldLike,
+    target: RationalTarget,
+    chart: PoincareChart,
+    *,
+    integrator_options: FieldlineIntegratorOptions = DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS,
+    phase_angles: Sequence[float] = DEFAULT_BRANCH_PHASE_ANGLES,
+) -> tuple[tuple[float, float], ...]:
+    guesses = radial_multistart_initial_guesses(
+        target,
+        chart,
+        phase_angles=phase_angles,
+    )
+    ranked_guesses: list[tuple[tuple[float, float, float, int], tuple[float, float]]] = []
+    unranked_guesses: list[tuple[float, float]] = []
+    for index, guess in enumerate(guesses):
+        try:
+            return_result = integrate_target_return_map(
+                field,
+                guess,
+                target=target,
+                chart=chart,
+                options=integrator_options,
+            )
+        except RuntimeError:
+            unranked_guesses.append(guess)
+            continue
+        closure_residual = (
+            float(return_result.final_state[0]) - float(guess[0]),
+            float(return_result.final_state[1]) - float(guess[1]),
+        )
+        winding_residual = abs(target_winding_residual(return_result, target))
+        closure_norm = float(
+            (closure_residual[0] * closure_residual[0])
+            + (closure_residual[1] * closure_residual[1])
+        )
+        target_label = (
+            0.0 if target.radial_label is None else float(target.radial_label)
+        )
+        radial_distance = abs(chart.radial_label(guess) - target_label)
+        ranked_guesses.append(
+            (
+                (
+                    winding_residual,
+                    closure_norm,
+                    radial_distance,
+                    int(index),
+                ),
+                guess,
+            )
+        )
+    return tuple(
+        [guess for _rank, guess in sorted(ranked_guesses, key=lambda item: item[0])]
+        + unranked_guesses
+    )
+
+
 def radial_multistart_labels(target: RationalTarget) -> tuple[float, ...]:
     if target.radial_label is None:
         raise ValueError(
@@ -74,7 +147,16 @@ def radial_multistart_labels(target: RationalTarget) -> tuple[float, ...]:
     labels = [float(target.radial_label)]
     if target.radial_window is not None:
         lower, upper = target.radial_window
-        labels.extend((float(lower), 0.5 * (float(lower) + float(upper)), float(upper)))
+        labels.extend(
+            float(label)
+            for label in (
+                np.linspace(
+                    float(lower),
+                    float(upper),
+                    DEFAULT_RADIAL_WINDOW_SAMPLE_COUNT,
+                )
+            )
+        )
     unique_labels: list[float] = []
     for label in labels:
         if not any(abs(label - previous) <= 1.0e-15 for previous in unique_labels):
@@ -191,9 +273,11 @@ def run_residue_probe(
 ) -> dict[str, object]:
     diagnostics: list[dict[str, object]] = []
     for target in targets:
-        initial_guesses = radial_multistart_initial_guesses(
+        initial_guesses = target_winding_ranked_initial_guesses(
+            field,
             target,
             chart,
+            integrator_options=integrator_options,
             phase_angles=phase_angles,
         )
         for branch in target.branches:
