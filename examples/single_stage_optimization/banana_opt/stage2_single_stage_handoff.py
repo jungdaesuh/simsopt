@@ -1251,7 +1251,14 @@ def _construct_boozer_surface_for_current(
     boozer_surface_cls=None,
 ):
     options = {"verbose": True}
+    is_vacuum = resolve_effective_current_mode(boozer_I) == "vacuum"
     if boozer_surface_cls is not None:
+        if is_vacuum and issubclass(boozer_surface_cls, BoozerSurfaceFiniteI):
+            raise ValueError(
+                "Vacuum (zero-current) Boozer surfaces must not use "
+                "BoozerSurfaceFiniteI lineage; got "
+                f"{boozer_surface_cls.__name__} with boozer_I={boozer_I!r}"
+            )
         if boozer_surface_cls is BoozerSurface:
             return boozer_surface_cls(
                 bs,
@@ -1270,7 +1277,7 @@ def _construct_boozer_surface_for_current(
             options=options,
             I=boozer_I,
         )
-    if resolve_effective_current_mode(boozer_I) == "vacuum":
+    if is_vacuum:
         return BoozerSurface(
             bs,
             surf,

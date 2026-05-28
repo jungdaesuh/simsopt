@@ -858,6 +858,102 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertTrue(nonzero_finite["passed"])
         self.assertGreaterEqual(nonzero_finite["finite_i_field_count"], 1)
 
+    def test_construct_boozer_surface_for_current_rejects_finite_i_for_vacuum(self):
+        module = load_handoff_module()
+        BoozerSurfaceFiniteI = importlib.import_module(
+            "banana_opt.boozer_finite_current"
+        ).BoozerSurfaceFiniteI
+
+        with self.assertRaises(ValueError):
+            module._construct_boozer_surface_for_current(
+                object(),
+                object(),
+                object(),
+                1.0,
+                1.0,
+                boozer_I=0.0,
+                boozer_surface_cls=BoozerSurfaceFiniteI,
+            )
+
+    def test_vacuum_boozer_surface_validator_ignores_unrelated_i_field(self):
+        module = load_artifact_contracts_module()
+        payload = {
+            "simsopt_objs": {
+                "surface": {
+                    "@module": "simsopt.geo.boozersurface",
+                    "@class": "BoozerSurface",
+                },
+                "unrelated": {"@class": "SomethingElse", "I": 3.0},
+            }
+        }
+
+        validation = module.validate_vacuum_boozer_surface_payload(payload)
+
+        self.assertTrue(validation["passed"])
+        self.assertTrue(validation["no_i_field"])
+
+    def test_attempt_initialize_vacuum_uses_plain_boozer_and_threads_signed_G(self):
+        module = load_handoff_module()
+        surf_prev = SimpleNamespace(
+            quadpoints_theta=np.array([0.0, 0.5]),
+            quadpoints_phi=np.array([0.0, 0.2]),
+            gamma=lambda: np.zeros((2, 2, 3), dtype=float),
+        )
+        captured = {}
+
+        class _FakeSurface:
+            def __init__(self, **kwargs):
+                self.quadpoints_theta = kwargs["quadpoints_theta"]
+                self.quadpoints_phi = kwargs["quadpoints_phi"]
+                self.dofs = np.zeros(2, dtype=float)
+                self.x = np.zeros(2, dtype=float)
+                self._gamma = np.zeros((2, 2, 3), dtype=float)
+
+            def least_squares_fit(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+
+            def gamma(self):
+                return self._gamma.copy()
+
+            def is_self_intersecting(self):
+                return False
+
+        class _CapturingPlainBoozerSurface:
+            def __init__(
+                self, bs, surf, vol, vol_target, constraint_weight, options=None
+            ):
+                del bs, vol, vol_target, constraint_weight, options
+                self.surface = surf
+                self.res = {"iota": 0.2, "G": -0.37, "success": True}
+                self.need_to_run_code = True
+
+            def run_code(self, iota, G):
+                captured["iota"] = iota
+                captured["G"] = G
+                self.need_to_run_code = False
+                return {"success": True}
+
+        signed_G0 = -0.37
+        with patch.object(module, "BoozerSurface", _CapturingPlainBoozerSurface):
+            result = module.attempt_initialize_boozer_surface(
+                surf_prev,
+                mpol=8,
+                ntor=6,
+                bs=object(),
+                vol_target=0.035,
+                constraint_weight=1.0,
+                iota=0.2,
+                G0=signed_G0,
+                boozer_I=0.0,
+                nfp=5,
+                surface_cls=_FakeSurface,
+                volume_cls=self._ConstantVolumeLabel,
+            )
+
+        self.assertIsInstance(result.boozer_surface, _CapturingPlainBoozerSurface)
+        self.assertFalse(hasattr(result.boozer_surface, "I"))
+        self.assertEqual(captured["G"], signed_G0)
+
     def test_attempt_initialize_boozer_surface_threads_requested_volume_target(self):
         module = load_handoff_module()
         surf_prev = SimpleNamespace(

@@ -454,6 +454,23 @@ def _iter_json_objects(value):
             yield from _iter_json_objects(child)
 
 
+_BOOZER_SURFACE_MODULES = (
+    "simsopt.geo.boozersurface",
+    "banana_opt.boozer_finite_current",
+)
+_BOOZER_SURFACE_CLASSES = ("BoozerSurface", "BoozerSurfaceFiniteI")
+
+
+def _is_boozer_surface_object(item: dict) -> bool:
+    # The enclosed-current ``I`` is a field on the Boozer-surface object itself;
+    # scope the lineage scan to those objects so an unrelated nested ``"I"`` key
+    # (or a non-numeric one) cannot spuriously flip the vacuum verdict.
+    return (
+        item.get("@class") in _BOOZER_SURFACE_CLASSES
+        or item.get("@module") in _BOOZER_SURFACE_MODULES
+    )
+
+
 def validate_vacuum_boozer_surface_payload(payload: dict) -> dict:
     objects = list(_iter_json_objects(payload))
     plain_boozer_surfaces = [
@@ -468,7 +485,11 @@ def validate_vacuum_boozer_surface_payload(payload: dict) -> dict:
         if item.get("@class") == "BoozerSurfaceFiniteI"
         or item.get("@module") == "banana_opt.boozer_finite_current"
     ]
-    i_fields = [item["I"] for item in objects if "I" in item]
+    i_fields = [
+        item["I"]
+        for item in objects
+        if _is_boozer_surface_object(item) and "I" in item
+    ]
     checks = {
         "has_plain_boozer_surface": bool(plain_boozer_surfaces),
         "no_finite_i_boozer_surface": not finite_i_boozer_surfaces,
@@ -498,7 +519,7 @@ def validate_boozer_surface_json_current_lineage(surface_path: str | Path) -> di
     i_values = [
         float(item["I"])
         for item in _iter_json_objects(payload)
-        if "I" in item
+        if _is_boozer_surface_object(item) and "I" in item
     ]
     if not i_values:
         return validate_vacuum_boozer_surface_payload(payload)
