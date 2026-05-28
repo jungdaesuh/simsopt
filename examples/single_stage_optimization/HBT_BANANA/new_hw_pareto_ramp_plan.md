@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Plan a staged optimization campaign that uses the signed `nv2_iota298_negTF` package as a diagnostic seed while moving toward the new HBT hardware limits and the requested Pareto region: volume `>= 0.09` and iota `>= 0.10`.
+Plan a staged optimization campaign that uses the signed vacuum-current `nv2_iota298_negTF` package as a diagnostic seed while moving toward the new HBT hardware limits and the requested Pareto region: volume `>= 0.09` and iota `>= 0.10`.
 
 ## Goals
 
 - Produce at least one new-HW-compliant candidate with volume `>= 0.09` and iota `>= 0.10`.
-- Preserve the negative-TF sign contract: TF current `-80 kA`, signed `G < 0`, and no unintended plasma-current/proxy-field terms.
+- Preserve the vacuum-current sign contract: TF current `-80 kA`, the corresponding signed banana currents embedded in `biot_savart_opt.json`, signed `G < 0`, no `I` field, no `BoozerSurfaceFiniteI`, and no proxy/VF/plasma-current finite-current terms.
 - Avoid wasting Boozer solves on infeasible geometry by satisfying the coil footprint and winding-surface envelope before growing volume.
 - Record enough telemetry to rank candidates by hardware slack, volume, iota, Boozer residual, and topology quality.
 
@@ -17,12 +17,28 @@ Plan a staged optimization campaign that uses the signed `nv2_iota298_negTF` pac
 - Do not jump directly from the current `volume ~= 0.04` seed to `volume >= 0.09` under all hard limits in one optimization.
 - Do not require iota near `0.298`; the requested constraint is iota `>= 0.10`.
 - Do not use augmented Lagrangian work unless the staged soft-penalty ramp proves insufficient.
+- Do not use finite-current compatibility artifacts, finite-current Boozer loaders, proxy-current coils, VF-current coils, or plasma-current flags to reproduce or promote candidates.
 
 ## Current Context
 
 - Baseline hard limits were updated in `examples/single_stage_optimization/HBT_BANANA/config.yaml`.
+- New-HW campaign spec from `config.yaml`:
+  - TF current: `-80 kA`.
+  - Banana current magnitude limit: `16 kA`.
+  - Banana coil length: `<= 2.0 m` absolute, `1.9 m` optimization target.
+  - Coil-coil minimum distance: `4.62 cm`.
+  - Coil-plasma minimum distance: `1.0 cm`.
+  - Plasma-vessel minimum distance: `4.0 cm`.
+  - Maximum curvature: `100 m^-1`.
+  - HBT/vacuum-vessel/TF major radius: `0.976 m`.
+  - Vacuum vessel minor radius: `0.222 m`.
+  - Banana coil winding surface: `R0=0.903 m`, `a=0.142 m`, concentric with the vacuum vessel.
+  - Maximum target LCFS shell limit: major radius `0.92 m`, minor radius `0.15 m`; the smaller banana winding surface can become the active limiter.
+  - Poloidal half-width from inboard midplane: `70 deg` maximum (`140 deg` full width).
 - The signed package is:
   `/Users/suhjungdae/code/columbia/simsopt-surrogate/tmp/nv2_iota298_negTF_signed_artifacts_for_review_20260527T113921`
+- The signed package is the vacuum-current source of truth. Its Boozer JSON must remain plain `simsopt.geo.boozersurface.BoozerSurface`: no `I` field and no `banana_opt.boozer_finite_current.BoozerSurfaceFiniteI`.
+- Candidate boot commands must not pass finite-current controls. In particular, do not pass proxy-plasma-current, VF-current, or finite-current-mode flags; the signed negative TF and banana currents are already encoded in `biot_savart_opt.json`.
 - The package records old/offspec scalar telemetry in `files/results.json`:
   - TF current: `-80 kA`
   - banana current max abs: `15.830 kA`
@@ -42,6 +58,7 @@ Plan a staged optimization campaign that uses the signed `nv2_iota298_negTF` pac
   - required growth: more than `2.25x`
 - Verified `simsopt-surrogate` single-stage CLI controls include `--banana-surf-radius`, `--stage2-seed-banana-surf-radius`, `--stage2-seed-major-radius`, `--single-stage-poloidal-threshold-rad`, `--length-target`, `--cc-dist`, `--cs-dist`, `--curvature-threshold`, `--banana-current-max-A`, `--tf-current-A`, `--vol-target`, `--iota-target`, `--maxiter`, and `--multisurface-initial-step-maxiter`.
 - A promoted banana winding major-radius control is still unresolved. Current `simsopt-surrogate` hardware constants set `BANANA_WINDING_SURFACE_MAJOR_RADIUS_M=0.903`, but `banana_opt.reference_surfaces.build_banana_reference_surfaces()` builds `coil_winding_surface` with `VACUUM_VESSEL_MAJOR_RADIUS_M=0.976`; reaching final `R0=0.903` therefore requires reconciling that source path or proving another active path owns the promoted winding surface.
+- High-volume artifacts that require `BoozerSurfaceFiniteI`, an `I` field, or proxy/VF/plasma-current metadata are invalid for this campaign even if they can be evaluated by a diagnostic loader.
 
 ## Rationale
 
@@ -50,7 +67,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 ## Assumptions
 
 - The `simsopt-surrogate` single-stage path can run with explicit thresholds for poloidal extent, coil width, coil-plasma distance, coil-coil distance, curvature, banana current, TF current, and volume/iota targets.
-- The signed package remains useful for sign/Boozer regression even though its winding surface is old.
+- The signed package remains useful for sign/Boozer regression only if the replay path is vacuum-current: plain `BoozerSurface`, no `I` field, no `BoozerSurfaceFiniteI`, and no proxy/VF/plasma-current flags.
 - A candidate is not promotable unless hardware telemetry includes realized values and thresholds for poloidal extent, winding surface, coil length, coil-coil distance, coil-plasma distance, curvature, TF current, banana current, volume, iota, and topology.
 - Current target-mode uses `--iota-target` as a target objective, not a verified hard floor. The campaign must either implement/verify true floor semantics or use target sweeps with a separate acceptance gate `FINAL_IOTA >= 0.10`.
 - Current verified surface-radius CLI coverage is for the banana surface minor radius and the Stage 2 seed major radius. Final new-HW promotion also needs proof that the active coil winding surface major radius is `0.903 m`, not just that a seed or clearance reference used that value.
@@ -59,7 +76,8 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 
 1. Establish a signed replay baseline
    - [ ] Run the minimal boot check from the package `AGENT_RUN_INSTRUCTIONS.md`.
-   - [ ] Confirm `TF_CURRENT_A=-80000`, signed `G < 0`, no proxy/VF/plasma-current terms, and iota near `0.2979`.
+   - [ ] Confirm the replay is vacuum-current: plain `BoozerSurface`, no `I` field, no `BoozerSurfaceFiniteI`, no proxy/VF/plasma-current finite-current flags in the command, and no active proxy/VF/plasma-current metadata in the result.
+   - [ ] Confirm `TF_CURRENT_A=-80000`, signed negative TF and corresponding signed banana currents are loaded from `biot_savart_opt.json`, signed `G < 0`, and iota near `0.2979`.
    - [ ] Save the boot `results.json` and `results_all_properties.json` under a run directory named for the package timestamp.
    - [ ] Confirm old/offspec scalar telemetry is reproduced before applying new-HW thresholds.
    - [ ] Confirm the expected new-HW failure is poloidal extent unless an additional measured violation appears.
@@ -90,7 +108,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
    - [ ] Sweep iota target values or verified floors: `0.10`, `0.15`, `0.20`.
    - [ ] Sweep volume targets around the front: `0.085`, `0.090`, `0.095`.
    - [ ] Rank by: hardware-clean first, topology pass second, `FINAL_VOLUME` third, `FINAL_IOTA` fourth, Boozer residual fifth.
-   - [ ] Archive every promoted candidate with `biot_savart_opt.json`, Boozer surface JSON, surface JSON, full results, non-null properties, and Poincare diagnostics.
+   - [ ] Archive every promoted candidate with `biot_savart_opt.json`, vacuum-current Boozer surface JSON, surface JSON, full results, non-null properties, and Poincare diagnostics.
 
 6. Decide whether soft penalties are enough
    - [ ] If the footprint and winding-surface ramps pass with soft penalties, keep the method simple.
@@ -99,10 +117,16 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 
 ## Validation Plan
 
+- [ ] For every run, assert the vacuum-current contract:
+  - Boozer JSON uses plain `BoozerSurface`.
+  - Boozer JSON has no `I` field.
+  - Boozer JSON does not reference `BoozerSurfaceFiniteI`.
+  - Boot command contains no finite-current-mode, proxy-plasma-current, VF-current, or plasma-current flags.
+  - Result metadata contains no active proxy/VF/plasma-current finite-current terms.
 - [ ] For every run, assert signed currents:
   - `TF_CURRENT_A == -80000`
   - `abs(BANANA_CURRENT_MAX_ABS_A) <= 16000`
-  - signed banana current list alternates as expected.
+  - signed banana current values come from the loaded `biot_savart_opt.json` and preserve the signed negative-TF/banana-current convention.
 - [ ] For every promoted candidate, assert hard limits:
   - `LENGTH_TARGET == 1.9` for new-HW campaign rows.
   - `COIL_LENGTH <= 1.9` for target-pass rows and `<= 2.0` absolute.
@@ -113,6 +137,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
   - `POLOIDAL_EXTENT_RAD <= 1.2217304763960306` and `POLOIDAL_EXTENT_THRESHOLD_RAD == 1.2217304763960306`.
   - `banana_surf_radius == 0.142` for final candidates.
   - new winding surface `R0=0.903`, `a=0.142` for final candidates, with explicit telemetry or code evidence for the active coil winding surface, not only seed or clearance-reference values.
+  - target LCFS major radius `<=0.92` and minor radius `<=0.15`, unless the smaller banana winding surface is the active limiting envelope and is checked explicitly.
 - [ ] For every promoted candidate, assert physics floors:
   - `FINAL_VOLUME >= 0.09`.
   - `FINAL_IOTA >= 0.10`.
@@ -124,6 +149,8 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 
 - Risk: The signed package is too far from the new winding surface to be a useful parent.
   Mitigation: Use it only for diagnostic continuation; start a fresh new-HW Stage 2 lane if the shrink ramp stalls.
+- Risk: A finite-current diagnostic artifact appears to satisfy the physics targets but violates the campaign contract.
+  Mitigation: Reject any candidate whose Boozer JSON contains an `I` field, references `BoozerSurfaceFiniteI`, or whose boot command/result metadata activates proxy/VF/plasma-current terms.
 - Risk: Volume `>=0.09` conflicts with the smaller winding envelope.
   Mitigation: Ramp volume only after footprint feasibility, then bisect the last successful interval to locate the real front.
 - Risk: Forcing iota near `0.298` prevents volume growth.
@@ -138,6 +165,7 @@ The seed already has enough iota and acceptable current, length, curvature, and 
 ## Completion Criteria
 
 - [ ] At least one archived candidate passes all new HW limits with volume `>=0.09` and iota `>=0.10`.
+- [ ] The archived candidate is vacuum-current: no `I` field, no `BoozerSurfaceFiniteI`, no proxy/VF/plasma-current finite-current flags, and signed negative TF plus corresponding signed banana currents embedded in `biot_savart_opt.json`.
 - [ ] The final candidate has strict Poincare evidence and non-null hardware metrics.
 - [ ] The Pareto table includes at least volume, iota, Boozer residual, non-QS metric, coil length, coil-coil distance, coil-plasma distance, curvature, current, poloidal extent, and topology status.
 - [ ] The campaign records whether the signed zip was useful as a parent or only as a sign/Boozer regression.
