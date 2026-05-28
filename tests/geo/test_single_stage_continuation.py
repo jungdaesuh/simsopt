@@ -2442,6 +2442,59 @@ class SingleStageContinuationTests(unittest.TestCase):
             self.assertFalse(report["passed"])
             self.assertEqual(report["stage_reports"][0]["status"], "subprocess_failed")
 
+    def test_main_writes_summary_and_report_for_timed_out_stage_subprocess(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "out"
+            seen_timeouts = []
+
+            def timeout_run(command, check, timeout=None):
+                seen_timeouts.append(timeout)
+                raise module.subprocess.TimeoutExpired(command, timeout)
+
+            with patch.object(module.subprocess, "run", side_effect=timeout_run):
+                with self.assertRaises(SystemExit) as exc_info:
+                    module.main(
+                        [
+                            "--output-root",
+                            str(output_root),
+                            "--run-id",
+                            "timed-out-stage",
+                            "--mpol",
+                            "2",
+                            "--ntor",
+                            "2",
+                            "--nphi",
+                            "31",
+                            "--ntheta",
+                            "16",
+                            "--maxiter",
+                            "1",
+                            "--stage-timeout-seconds",
+                            "3.5",
+                        ]
+                    )
+
+            self.assertEqual(exc_info.exception.code, 124)
+            self.assertEqual(seen_timeouts, [3.5])
+            run_root = output_root / "continuation-timed-out-stage"
+            summary = json.loads(
+                (run_root / "continuation_summary.json").read_text(encoding="utf-8")
+            )
+            report = json.loads(
+                (run_root / "continuation_validation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(summary["stage_timeout_seconds"], 3.5)
+            self.assertEqual(summary["stages"][0]["status"], "subprocess_timeout")
+            self.assertIsNone(summary["stages"][0]["subprocess_returncode"])
+            self.assertEqual(
+                summary["stages"][0]["failure_kind"],
+                "subprocess_timeout",
+            )
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["stage_reports"][0]["status"], "subprocess_timeout")
+
 
 if __name__ == "__main__":
     unittest.main()

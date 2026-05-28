@@ -1127,6 +1127,13 @@ _RERUN_STAGE_OUTCOME_KEYS = (
 )
 
 
+def run_stage_subprocess(command: list[str], *, timeout_seconds: float | None) -> None:
+    if timeout_seconds is None:
+        subprocess.run(command, check=True)
+    else:
+        subprocess.run(command, check=True, timeout=timeout_seconds)
+
+
 def reset_stage_record_for_rerun(stage_record: dict[str, object]) -> None:
     for key in _RERUN_STAGE_OUTCOME_KEYS:
         stage_record.pop(key, None)
@@ -2096,7 +2103,18 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
             "fails."
         ),
     )
+    parser.add_argument(
+        "--stage-timeout-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Optional wall-clock timeout for each single-stage subprocess. Timed-out "
+            "stages are recorded as subprocess_timeout in continuation_summary.json."
+        ),
+    )
     args, passthrough = parser.parse_known_args(argv)
+    if args.stage_timeout_seconds is not None and args.stage_timeout_seconds <= 0.0:
+        parser.error("--stage-timeout-seconds must be positive")
     return args, strip_overridden_passthrough_args(passthrough)
 
 
@@ -2690,6 +2708,7 @@ def run_single_continuation_with_args(
         "resume_run_root": None
         if args.resume_run_root is None
         else str(Path(args.resume_run_root).expanduser().resolve()),
+        "stage_timeout_seconds": args.stage_timeout_seconds,
     }
     summary_path = run_root / "continuation_summary.json"
     report_path = resolve_validation_output_path(
@@ -2863,7 +2882,7 @@ def run_single_continuation_with_args(
                 subprocess.run(jax_runtime_seed_spec_command, check=True)
                 stage_record["jax_runtime_seed_spec_status"] = "completed"
                 persist_continuation_summary(summary, summary_path=summary_path)
-            subprocess.run(command, check=True)
+            run_stage_subprocess(command, timeout_seconds=args.stage_timeout_seconds)
             stage_record["status"] = "completed"
             stage_record["subprocess_returncode"] = 0
         except subprocess.CalledProcessError as exc:
@@ -2872,6 +2891,12 @@ def run_single_continuation_with_args(
             stage_record["failure_kind"] = "subprocess_error"
             stage_record["failure_message"] = f"{type(exc).__name__}: {exc}"
             stage_failure_exit_code = exc.returncode or 1
+        except subprocess.TimeoutExpired as exc:
+            stage_record["status"] = "subprocess_timeout"
+            stage_record["subprocess_returncode"] = None
+            stage_record["failure_kind"] = "subprocess_timeout"
+            stage_record["failure_message"] = f"{type(exc).__name__}: {exc}"
+            stage_failure_exit_code = 124
         except Exception as exc:
             stage_record["status"] = "runner_error"
             stage_record["subprocess_returncode"] = None
