@@ -5891,6 +5891,44 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(trace[0]["line_search_status"], 0)
         self.assertTrue(trace[0]["accepted"])
 
+    def test_summarize_optimizer_result_for_progress_accepts_minimal_state_trace(
+        self,
+    ):
+        module = self.load_module()
+        result = types.SimpleNamespace(
+            success=True,
+            nit=1,
+            status=4,
+            nfev=3,
+            njev=3,
+            ls_status=0,
+            message="ok",
+            fun=0.5,
+            jac=np.array([0.1, -0.2], dtype=np.float64),
+            x=np.array([1.0, 2.0], dtype=np.float64),
+            optimizer_state_trace=(
+                {
+                    "iteration": 1,
+                    "x": np.array([1.0, 2.0], dtype=np.float64),
+                    "fun": 1.0,
+                    "jac": np.array([0.5, -0.25], dtype=np.float64),
+                    "jac_inf_norm": 0.5,
+                    "nfev": 3,
+                    "njev": 3,
+                },
+            ),
+        )
+
+        summary = module.summarize_optimizer_result_for_progress(result)
+
+        trace = summary["optimizer_state_trace"]
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0]["iteration"], 1)
+        self.assertEqual(trace[0]["x"]["values"], [1.0, 2.0])
+        self.assertEqual(trace[0]["fun"]["value"], 1.0)
+        self.assertEqual(trace[0]["jac"]["values"], [0.5, -0.25])
+        self.assertNotIn("search_direction", trace[0])
+
     def test_record_target_lane_invalid_state_events_enabled_defaults_false(self):
         module = self.load_module()
 
@@ -9728,6 +9766,64 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertIs(captured["progress_callback"], progress_callback)
+        self.assertEqual(result.message, "ok")
+
+    def test_run_single_stage_optimizer_threads_target_lane_state_trace_option(self):
+        module = self.load_module()
+        captured = {}
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback=None,
+            failure_callback=None,
+        ):
+            del (
+                fun,
+                x0,
+                method,
+                tol,
+                maxiter,
+                value_and_grad,
+                callback,
+                progress_callback,
+                failure_callback,
+            )
+            captured["options"] = dict(options)
+            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=lambda _optimizer_backend: None,
+            jax_minimize=fake_jax_minimize,
+            module=module,
+        ):
+            contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+            result = module.run_single_stage_optimizer(
+                explicit_fun,
+                np.array([0.0, 0.0]),
+                contract=contract,
+                maxiter=1,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                outer_maxls=6,
+                callback=None,
+                scalar_fun=None,
+                record_optimizer_state_trace=True,
+            )
+
+        self.assertTrue(captured["options"]["record_optimizer_state_trace"])
         self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_rejects_failure_callback_on_reference_lane(

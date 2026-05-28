@@ -1748,6 +1748,97 @@ def _load_optimizer_state_trace_from_case(case: dict[str, Any]) -> list[dict[str
     return []
 
 
+def _optimizer_state_trace_entry_to_path_event(
+    entry: dict[str, Any],
+    *,
+    event_index: int,
+) -> dict[str, Any]:
+    return {
+        "event_index": int(event_index),
+        "accepted_iteration_target": entry.get("iteration"),
+        "line_search_evaluation": entry.get("nfev"),
+        "candidate_optimizer_dofs": entry.get("x"),
+        "objective": entry.get("fun"),
+        "optimizer_gradient": entry.get("jac"),
+        "optimizer_state_trace_event": True,
+        "trace_event_source": "optimizer_state_trace",
+    }
+
+
+def _objective_events_to_accepted_path_events(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    accepted_events: list[dict[str, Any]] = []
+    current_iteration = object()
+    current_event = None
+    for event in events:
+        iteration = event.get("accepted_iteration_target")
+        if current_event is not None and iteration != current_iteration:
+            accepted_events.append(dict(current_event))
+        current_iteration = iteration
+        current_event = event
+    if current_event is not None:
+        accepted_events.append(dict(current_event))
+    return accepted_events
+
+
+def _load_optimizer_path_events_pair(
+    cpu_case: dict[str, Any],
+    jax_case: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    cpu_objective_events = _load_objective_evaluation_events_from_case(cpu_case)
+    jax_objective_events = _load_objective_evaluation_events_from_case(jax_case)
+    cpu_state_trace = _load_optimizer_state_trace_from_case(cpu_case)
+    jax_state_trace = _load_optimizer_state_trace_from_case(jax_case)
+    metadata = {
+        "cpu_objective_event_count": len(cpu_objective_events),
+        "jax_objective_event_count": len(jax_objective_events),
+        "cpu_optimizer_state_trace_count": len(cpu_state_trace),
+        "jax_optimizer_state_trace_count": len(jax_state_trace),
+    }
+    if cpu_objective_events and jax_objective_events:
+        return (
+            cpu_objective_events,
+            jax_objective_events,
+            {**metadata, "event_source": "objective_evaluation"},
+        )
+    if cpu_objective_events and jax_state_trace:
+        jax_events = [
+            _optimizer_state_trace_entry_to_path_event(entry, event_index=index)
+            for index, entry in enumerate(jax_state_trace, start=1)
+        ]
+        return (
+            _objective_events_to_accepted_path_events(cpu_objective_events),
+            jax_events,
+            {**metadata, "event_source": "accepted_step_state_trace"},
+        )
+    if cpu_state_trace and jax_objective_events:
+        cpu_events = [
+            _optimizer_state_trace_entry_to_path_event(entry, event_index=index)
+            for index, entry in enumerate(cpu_state_trace, start=1)
+        ]
+        return (
+            cpu_events,
+            _objective_events_to_accepted_path_events(jax_objective_events),
+            {**metadata, "event_source": "accepted_step_state_trace"},
+        )
+    if cpu_state_trace and jax_state_trace:
+        cpu_events = [
+            _optimizer_state_trace_entry_to_path_event(entry, event_index=index)
+            for index, entry in enumerate(cpu_state_trace, start=1)
+        ]
+        jax_events = [
+            _optimizer_state_trace_entry_to_path_event(entry, event_index=index)
+            for index, entry in enumerate(jax_state_trace, start=1)
+        ]
+        return (
+            cpu_events,
+            jax_events,
+            {**metadata, "event_source": "optimizer_state_trace"},
+        )
+    return [], [], {**metadata, "event_source": "not-recorded"}
+
+
 def _load_objective_evaluation_events_from_case(
     case: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -3441,8 +3532,10 @@ def compare_optimizer_path_objective_evaluations(
     objective contract matches at identical x; this reports where independent
     optimizer control first starts evaluating different candidates.
     """
-    cpu_events = _load_objective_evaluation_events_from_case(cpu_case)
-    jax_events = _load_objective_evaluation_events_from_case(jax_case)
+    cpu_events, jax_events, event_metadata = _load_optimizer_path_events_pair(
+        cpu_case,
+        jax_case,
+    )
     if not cpu_events or not jax_events:
         return {
             "status": "not-recorded",
@@ -3450,6 +3543,7 @@ def compare_optimizer_path_objective_evaluations(
             "jax_event_count": len(jax_events),
             "paired_event_count": 0,
             "candidate_split_abs_tol": _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL,
+            **event_metadata,
         }
 
     paired_event_count = min(len(cpu_events), len(jax_events))
@@ -3507,6 +3601,7 @@ def compare_optimizer_path_objective_evaluations(
         "paired_event_count": paired_event_count,
         "event_count_match": event_count_match,
         "candidate_split_abs_tol": _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL,
+        **event_metadata,
         "first_candidate_split_event": first_candidate_split_event,
         "max_candidate_event": max_candidate_event,
         "max_objective_event": max_objective_event,

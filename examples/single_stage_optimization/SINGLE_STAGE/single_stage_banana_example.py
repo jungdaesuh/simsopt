@@ -580,29 +580,42 @@ def _summarize_optimizer_state_trace(trace):
 
 
 def _summarize_optimizer_state_trace_entry(entry):
-    return {
+    summary = {
         "iteration": int(entry["iteration"]),
         "x": _summarize_host_vector(entry["x"]),
         "fun": _summarize_host_scalar(entry["fun"]),
         "jac": _summarize_host_vector(entry["jac"]),
         "jac_inf_norm": _summarize_host_scalar(entry["jac_inf_norm"]),
-        "search_direction": _summarize_host_vector(entry["search_direction"]),
-        "search_direction_dot_grad": _summarize_host_scalar(
-            entry["search_direction_dot_grad"]
-        ),
-        "step_scale": _summarize_host_scalar(entry["step_scale"]),
-        "step": _summarize_host_vector(entry["step"]),
-        "trial_x": _summarize_host_vector(entry["trial_x"]),
-        "trial_fun": _summarize_host_scalar(entry["trial_fun"]),
-        "trial_jac": _summarize_host_vector(entry["trial_jac"]),
-        "trial_jac_inf_norm": _summarize_host_scalar(entry["trial_jac_inf_norm"]),
         "nfev": int(entry["nfev"]),
         "njev": int(entry["njev"]),
-        "line_search_status": int(entry["line_search_status"]),
-        "valid_curvature": bool(entry["valid_curvature"]),
-        "accepted": bool(entry["accepted"]),
-        "converged": bool(entry["converged"]),
     }
+    optional_vector_fields = (
+        "search_direction",
+        "step",
+        "trial_x",
+        "trial_jac",
+    )
+    optional_scalar_fields = (
+        "search_direction_dot_grad",
+        "step_scale",
+        "trial_fun",
+        "trial_jac_inf_norm",
+    )
+    optional_int_fields = ("line_search_status",)
+    optional_bool_fields = ("valid_curvature", "accepted", "converged")
+    for field in optional_vector_fields:
+        if field in entry:
+            summary[field] = _summarize_host_vector(entry[field])
+    for field in optional_scalar_fields:
+        if field in entry:
+            summary[field] = _summarize_host_scalar(entry[field])
+    for field in optional_int_fields:
+        if field in entry:
+            summary[field] = int(entry[field])
+    for field in optional_bool_fields:
+        if field in entry:
+            summary[field] = bool(entry[field])
+    return summary
 
 
 def _optional_host_float(value):
@@ -9310,6 +9323,8 @@ def run_single_stage_optimizer(
     target_lane_initial_step_size=None,
     failure_callback=None,
     optimizer_initial_value_and_grad=None,
+    record_optimizer_state_trace=False,
+    max_optimizer_state_trace_bytes=None,
 ):
     """Run the single-stage outer optimization through the lane-specific adapters."""
     optimizer_dofs = dofs
@@ -9367,6 +9382,12 @@ def run_single_stage_optimizer(
             "callback": callback,
             "progress_callback": progress_callback,
         }
+        if record_optimizer_state_trace:
+            target_minimize_kwargs["options"]["record_optimizer_state_trace"] = True
+        if max_optimizer_state_trace_bytes is not None:
+            target_minimize_kwargs["options"]["max_optimizer_state_trace_bytes"] = (
+                max_optimizer_state_trace_bytes
+            )
         if (
             optimizer_initial_value_and_grad is not None
             and target_lane_supports_optimizer_seed
@@ -9446,6 +9467,8 @@ def run_single_stage_target_lane_optimizer_with_retries(
     retry_dofs_factory=None,
     restored_result_x_factory=None,
     progress_event_callback=None,
+    record_optimizer_state_trace=False,
+    max_optimizer_state_trace_bytes=None,
 ):
     """Retry invalid-state target-lane failures from preserved local anchors."""
 
@@ -9522,6 +9545,12 @@ def run_single_stage_target_lane_optimizer_with_retries(
         optimizer_kwargs["optimizer_initial_value_and_grad"] = (
             optimizer_initial_value_and_grad
         )
+    if record_optimizer_state_trace:
+        optimizer_kwargs["record_optimizer_state_trace"] = True
+    if max_optimizer_state_trace_bytes is not None:
+        optimizer_kwargs["max_optimizer_state_trace_bytes"] = (
+            max_optimizer_state_trace_bytes
+        )
     record_progress_event(
         f"{phase}_attempt_0_started",
         attempt_index=0,
@@ -9597,6 +9626,13 @@ def run_single_stage_target_lane_optimizer_with_retries(
         event_start = len(invalid_state_events)
         remaining_maxiter = max(int(maxiter) - total_nit, 1)
         optimizer_initial_value_and_grad = None
+        retry_optimizer_kwargs = {}
+        if record_optimizer_state_trace:
+            retry_optimizer_kwargs["record_optimizer_state_trace"] = True
+        if max_optimizer_state_trace_bytes is not None:
+            retry_optimizer_kwargs["max_optimizer_state_trace_bytes"] = (
+                max_optimizer_state_trace_bytes
+            )
         result = run_single_stage_optimizer(
             fun,
             retry_dofs_factory(anchor_state),
@@ -9611,6 +9647,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
             progress_callback=progress_callback,
             target_lane_initial_step_size=None,
             failure_callback=None,
+            **retry_optimizer_kwargs,
         )
         record_progress_event(
             f"{phase}_retry_{retry_index + 1}_returned",
@@ -12661,6 +12698,12 @@ if __name__ == "__main__":
                 **payload,
             )
 
+    record_target_optimizer_state_trace = bool(
+        use_target_lane
+        and args.record_objective_evaluation_trace
+        and outer_optimizer_legacy_method == "lbfgs-ondevice"
+    )
+
     record_outer_optimizer_event(
         "pre_optimizer_startup_ready",
         use_target_lane=bool(use_target_lane),
@@ -14523,6 +14566,9 @@ if __name__ == "__main__":
                                             progress_event_callback=(
                                                 record_outer_optimizer_event
                                             ),
+                                            record_optimizer_state_trace=(
+                                                record_target_optimizer_state_trace
+                                            ),
                                         )
                                     )
                                 else:
@@ -14678,6 +14724,9 @@ if __name__ == "__main__":
                                         single_stage_search_policy=single_stage_search_policy,
                                         progress_event_callback=(
                                             record_outer_optimizer_event
+                                        ),
+                                        record_optimizer_state_trace=(
+                                            record_target_optimizer_state_trace
                                         ),
                                     )
                                 )

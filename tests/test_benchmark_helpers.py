@@ -1892,6 +1892,71 @@ def test_single_stage_init_optimizer_path_reports_same_path(tmp_path):
     assert comparison["max_candidate_event"]["candidate_abs_diff"] == 0.0
 
 
+def test_single_stage_init_optimizer_path_uses_target_accepted_state_trace(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_events = [
+        _single_stage_objective_trace_event(
+            event_index=10,
+            accepted_iteration_target=1,
+            line_search_evaluation=1,
+            x=[1.0, 2.0],
+            objective=3.0,
+            gradient=[0.5, -0.25],
+        ),
+        _single_stage_objective_trace_event(
+            event_index=11,
+            accepted_iteration_target=1,
+            line_search_evaluation=2,
+            x=[0.9, 2.1],
+            objective=2.5,
+            gradient=[0.25, -0.125],
+        ),
+    ]
+    jax_state_trace = [
+        {
+            "iteration": 1,
+            "x": _single_stage_trace_vector([0.8, 2.2]),
+            "fun": _single_stage_trace_scalar(2.4),
+            "jac": _single_stage_trace_vector([0.2, -0.1]),
+            "jac_inf_norm": _single_stage_trace_scalar(0.2),
+            "nfev": 3,
+            "njev": 3,
+        }
+    ]
+    cpu_progress.write_text(json.dumps({"events": cpu_events}))
+    jax_progress.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "label": "phase2_returned",
+                        "result": {"optimizer_state_trace": jax_state_trace},
+                    }
+                ]
+            }
+        )
+    )
+
+    comparison = (
+        single_stage_init_parity_module.compare_optimizer_path_objective_evaluations(
+            {"outer_optimizer_progress_json": str(cpu_progress)},
+            {"outer_optimizer_progress_json": str(jax_progress)},
+        )
+    )
+
+    assert comparison["status"] == "split"
+    assert comparison["event_source"] == "accepted_step_state_trace"
+    assert comparison["cpu_event_count"] == 1
+    assert comparison["jax_event_count"] == 1
+    assert comparison["cpu_objective_event_count"] == 2
+    assert comparison["jax_optimizer_state_trace_count"] == 1
+    assert comparison["first_candidate_split_event"]["candidate_abs_diff"] == (
+        pytest.approx(0.1)
+    )
+    assert comparison["max_objective_event"]["objective_abs_diff"] == pytest.approx(0.1)
+
+
 def test_single_stage_init_exact_replay_requires_identical_candidates(tmp_path):
     cpu_progress = tmp_path / "cpu_progress.json"
     jax_progress = tmp_path / "jax_progress.json"
