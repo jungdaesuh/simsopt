@@ -87,6 +87,10 @@ class BananaReferenceSurfaceTests(unittest.TestCase):
 class Stage2GeometryHelperTests(unittest.TestCase):
     def setUp(self):
         self.module = _load_module(STAGE2_GEOMETRY_PATH, "banana_stage2_geometry")
+        self.hardware_contracts = _load_module(
+            HARDWARE_CONTRACTS_PATH,
+            "banana_hardware_contracts",
+        )
 
     def test_load_plasma_geometry_scales_lcfs_to_target_and_working_with_same_factor(self):
         class FakeSurface:
@@ -125,14 +129,18 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             side_effect=fake_from_wout,
         ):
             geometry = self.module.load_plasma_geometry(
-                target_lcfs_major_radius_m=0.92,
+                target_lcfs_major_radius_m=(
+                    self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+                ),
                 s_working=0.24,
                 file_loc="/tmp/demo.nc",
                 nphi=8,
                 ntheta=8,
             )
 
-        expected_scale = 0.92 / 1.45
+        expected_scale = (
+            self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M / 1.45
+        )
         self.assertAlmostEqual(geometry.scale_factor, expected_scale)
         self.assertAlmostEqual(
             geometry.working_surface.major_radius(),
@@ -142,7 +150,10 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             geometry.working_surface.minor_radius(),
             0.10 * expected_scale,
         )
-        self.assertAlmostEqual(geometry.lcfs_major_radius_m, 0.92)
+        self.assertAlmostEqual(
+            geometry.lcfs_major_radius_m,
+            self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        )
         self.assertAlmostEqual(geometry.lcfs_minor_radius_m, 0.19 * expected_scale)
 
     def test_load_plasma_geometry_real_wout_uses_scaled_lcfs_boundary(self):
@@ -154,7 +165,9 @@ class Stage2GeometryHelperTests(unittest.TestCase):
         nphi = 91
         ntheta = 32
         working_label = 0.24
-        target_lcfs_major_radius = 0.92
+        target_lcfs_major_radius = (
+            self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+        )
         lcfs_surface = self.module.SurfaceRZFourier.from_wout(
             str(equilibrium_path),
             range="full torus",
@@ -223,19 +236,36 @@ class Stage2GeometryHelperTests(unittest.TestCase):
                 return np.ones((2, 2, 3), dtype=float) * self._gamma_value
 
         result = self.module.select_plasma_geometry_preflight_candidate(
-            lcfs_surface=FakeSurface(1.84, 0.28, 0.30),
+            lcfs_surface=FakeSurface(1.84, 0.26, 0.30),
             requested_s=0.24,
-            target_lcfs_major_radius_m=0.92,
-            target_lcfs_minor_radius_m=0.15,
+            target_lcfs_major_radius_m=(
+                self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+            ),
+            target_lcfs_minor_radius_m=(
+                self.hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M
+            ),
             vessel_surface=FakeSurface(0.0, 0.0, 0.10),
             s_candidates=(0.24, 0.50),
-            target_lcfs_major_radius_candidates_m=(0.92, 0.90),
+            target_lcfs_major_radius_candidates_m=(
+                self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+                0.90,
+            ),
         )
 
         self.assertTrue(result.selected.success)
         self.assertEqual(result.selected.s_working, 0.24)
-        self.assertEqual(result.selected.target_lcfs_major_radius_m, 0.92)
-        self.assertAlmostEqual(result.selected.lcfs_minor_radius_m, 0.14)
+        self.assertEqual(
+            result.selected.target_lcfs_major_radius_m,
+            self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        )
+        self.assertAlmostEqual(
+            result.selected.lcfs_minor_radius_m,
+            (
+                0.26
+                * self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+                / 1.84
+            ),
+        )
         self.assertEqual(len(result.candidates), 4)
 
     def test_geometry_preflight_records_surface_vessel_distance_without_gating(self):
@@ -254,18 +284,31 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             return 0.039 if scale_factor > 0.95 else 0.045
 
         result = self.module.select_plasma_geometry_preflight_candidate(
-            lcfs_surface=FakeSurface(0.92, 0.14),
+            lcfs_surface=FakeSurface(
+                self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+                0.12,
+            ),
             requested_s=0.24,
-            target_lcfs_major_radius_m=0.92,
-            target_lcfs_minor_radius_m=0.15,
+            target_lcfs_major_radius_m=(
+                self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+            ),
+            target_lcfs_minor_radius_m=(
+                self.hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M
+            ),
             vessel_surface=object(),
             s_candidates=(0.24,),
-            target_lcfs_major_radius_candidates_m=(0.92, 0.87),
+            target_lcfs_major_radius_candidates_m=(
+                self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+                0.87,
+            ),
             distance_fn=fake_distance,
         )
 
         self.assertEqual(result.selected.s_working, 0.24)
-        self.assertEqual(result.selected.target_lcfs_major_radius_m, 0.92)
+        self.assertEqual(
+            result.selected.target_lcfs_major_radius_m,
+            self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        )
         self.assertEqual(result.selected.violations, ())
         self.assertAlmostEqual(result.selected.plasma_vessel_min_dist_m, 0.039)
 
@@ -281,7 +324,9 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             lcfs_surface=FakeSurface(),
             requested_s=0.24,
             target_lcfs_major_radius_m=0.79,
-            target_lcfs_minor_radius_m=0.15,
+            target_lcfs_minor_radius_m=(
+                self.hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M
+            ),
             vessel_surface=object(),
             s_candidates=(0.24,),
             distance_fn=lambda *_args: 0.05,
@@ -303,11 +348,17 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             self.module.select_plasma_geometry_preflight_candidate(
                 lcfs_surface=FakeSurface(),
                 requested_s=0.24,
-                target_lcfs_major_radius_m=0.92,
-                target_lcfs_minor_radius_m=0.15,
+                target_lcfs_major_radius_m=(
+                    self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+                ),
+                target_lcfs_minor_radius_m=(
+                    self.hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M
+                ),
                 vessel_surface=object(),
                 s_candidates=(0.24,),
-                target_lcfs_major_radius_candidates_m=(0.92,),
+                target_lcfs_major_radius_candidates_m=(
+                    self.hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+                ),
                 distance_fn=lambda *_args: 0.03,
             )
 
@@ -585,7 +636,10 @@ class HardwareContractsEnvFlagTests(unittest.TestCase):
         self.module = _load_module(HARDWARE_CONTRACTS_PATH, "banana_hardware_contracts")
 
     def test_validate_target_lcfs_major_radius_accepts_roundoff(self):
-        roundoff_major_radius = 0.9200000000000039
+        roundoff_major_radius = (
+            self.module.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+            + self.module.LCFS_RADIUS_ABS_TOL_M * 0.5
+        )
 
         self.assertEqual(
             self.module.validate_target_lcfs_major_radius(roundoff_major_radius),
@@ -593,7 +647,10 @@ class HardwareContractsEnvFlagTests(unittest.TestCase):
         )
 
     def test_validate_target_lcfs_major_radius_rejects_real_excess(self):
-        real_excess_major_radius = 0.92000000001
+        real_excess_major_radius = (
+            self.module.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+            + self.module.LCFS_RADIUS_ABS_TOL_M * 10.0
+        )
 
         with self.assertRaisesRegex(ValueError, "target LCFS major radius"):
             self.module.validate_target_lcfs_major_radius(real_excess_major_radius)
