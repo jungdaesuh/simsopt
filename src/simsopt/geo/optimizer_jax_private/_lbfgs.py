@@ -189,12 +189,10 @@ def _lbfgsb_start_with_initial_value_and_grad_kernel(
         value,
         grad,
     ):
-        started = lbfgsb.lbfgsb_setulb(state)
-        return started._replace(
-            f=jnp.asarray(value, dtype=started.x.dtype),
-            g=jnp.asarray(grad, dtype=started.x.dtype),
-            nfev=started.nfev + jnp.asarray(1, dtype=jnp.int32),
-            njev=started.njev + jnp.asarray(1, dtype=jnp.int32),
+        return lbfgsb.lbfgsb_start_with_initial_value_and_grad(
+            state,
+            value,
+            grad,
         )
 
     return _cached_private_solver(

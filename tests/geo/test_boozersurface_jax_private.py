@@ -1193,6 +1193,43 @@ class TestOptimizerAdapterPrivate:
         assert diagnostic_events[4][1]["accepted_step_callback"] is True
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_seed_transition_does_not_compile_full_setulb(self, monkeypatch):
+        """The seeded START transition must avoid the full L-BFGS control loop."""
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        state = _private_lbfgs.lbfgsb.lbfgsb_initial_state(
+            x0,
+            m=3,
+            ftol=0.0,
+            gtol=1e-8,
+            maxls=20,
+        )
+        initial_value_and_grad = (
+            jnp.asarray(2.5, dtype=jnp.float64),
+            jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+        )
+
+        def fail_full_setulb(_state):
+            raise AssertionError("seeded START path must not call lbfgsb_setulb")
+
+        monkeypatch.setattr(_private_lbfgs.lbfgsb, "lbfgsb_setulb", fail_full_setulb)
+
+        seeded = _private_lbfgs._lbfgsb_state_with_initial_value_and_grad(
+            state,
+            initial_value_and_grad,
+            dtype=x0.dtype,
+        )
+
+        assert int(np.asarray(seeded.workspace.task[0])) == _private_lbfgs.lbfgsb.FG
+        assert (
+            int(np.asarray(seeded.workspace.task[1])) == _private_lbfgs.lbfgsb.FG_START
+        )
+        assert int(np.asarray(seeded.nfev)) == 1
+        assert int(np.asarray(seeded.njev)) == 1
+        assert float(np.asarray(seeded.f)) == pytest.approx(2.5)
+        np.testing.assert_allclose(np.asarray(seeded.g), np.asarray([1.0, -2.0]))
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_skips_debug_callback_without_observability(
         self,
         monkeypatch,

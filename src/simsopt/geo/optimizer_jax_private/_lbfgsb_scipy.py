@@ -1595,6 +1595,21 @@ def lbfgsb_setulb(state: LbfgsbState) -> LbfgsbState:
     return final_state
 
 
+def lbfgsb_start_with_initial_value_and_grad(
+    state: LbfgsbState,
+    value,
+    grad,
+) -> LbfgsbState:
+    """Seed a fresh START state with its first value/gradient evaluation."""
+    started = _lbfgsb_setulb_start(state)
+    return started._replace(
+        f=jnp.asarray(value, dtype=started.x.dtype),
+        g=jnp.asarray(grad, dtype=started.x.dtype),
+        nfev=started.nfev + jnp.asarray(1, dtype=jnp.int32),
+        njev=started.njev + jnp.asarray(1, dtype=jnp.int32),
+    )
+
+
 def _lbfgsb_evaluate_value_and_grad(value_and_grad, state: LbfgsbState) -> LbfgsbState:
     value, gradient = value_and_grad(state.x)
     return state._replace(
@@ -2725,9 +2740,7 @@ def lbfgsb_formk(
                 jnp.where(active_j, wn[source_row, source_col], second_upper[i, j])
             )
     second_matrix = second_upper + jnp.triu(second_upper, k=1).T
-    second_matrix = jnp.where(
-        active_matrix, second_matrix, jnp.eye(m, dtype=dtype)
-    )
+    second_matrix = jnp.where(active_matrix, second_matrix, jnp.eye(m, dtype=dtype))
     second_chol = jnp.linalg.cholesky(second_matrix).T
     second_finite = jnp.all(jnp.isfinite(jnp.where(active_matrix, second_chol, 0.0)))
     for i in range(m):
