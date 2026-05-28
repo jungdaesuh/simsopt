@@ -1,0 +1,11 @@
+name = "signed_g_formalization"
+defaultTargets = ["signed_g_convention"]
+
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4.git"
+rev = "v4.28.0"
+
+[[lean_lib]]
+name = "signed_g_convention"
+globs = ["signed_g_convention"]
