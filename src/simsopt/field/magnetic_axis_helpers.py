@@ -139,9 +139,7 @@ def locate_magnetic_axis_point(
         raise ValueError("magnetic-axis residual_tolerance must be finite and positive")
     solver_tolerance = float(optimizer_tolerance)
     if solver_tolerance <= 0.0 or not math.isfinite(solver_tolerance):
-        raise ValueError(
-            "magnetic-axis optimizer_tolerance must be finite and positive"
-        )
+        raise ValueError("magnetic-axis optimizer_tolerance must be finite and positive")
 
     lower_r, upper_r = (
         (np.finfo(float).eps, np.inf) if r_bounds is None else tuple(r_bounds)

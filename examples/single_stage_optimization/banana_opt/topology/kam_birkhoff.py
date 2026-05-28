@@ -21,6 +21,9 @@ DEFAULT_WBA_MIN_WINDING_SIGN_FRACTION = 0.95
 DEFAULT_WBA_WINDING_INCREMENT_FLOOR = 1.0e-12
 DEFAULT_WBA_ALIAS_WINDING_CONCENTRATION_MAX = 0.5
 DEFAULT_WBA_ALIAS_ADVANCE_CONCENTRATION_MIN = 0.75
+# Upper bound below which a section-angle series is treated as principal-valued
+# (wrapped to [-pi, pi]) so the modulo-one aliasing recovery branch applies.
+_WBA_PRINCIPAL_ANGLE_BOUND = np.pi + 1.0e-12
 WBA_ISLAND_DISCRIMINATOR = "single_surface_exact_low_order_rational"
 WBA_CLASSIFIER_KNOWN_LIMITATIONS = ("no_radial_rotation_number_plateau_discriminator",)
 WBA_FRACTION_DENOMINATOR_POLICY = "survived_non_lost_seeds"
@@ -144,8 +147,7 @@ def normalized_wrapped_rotation_increments(angles_rad: Sequence[float]) -> np.nd
     if angles.size < 2:
         return np.empty((0,), dtype=float)
     raw_increments = np.diff(angles) / (2.0 * np.pi)
-    principal_bound = np.pi + 1.0e-12
-    if np.all(np.abs(angles) <= principal_bound):
+    if np.all(np.abs(angles) <= _WBA_PRINCIPAL_ANGLE_BOUND):
         modulo_advances = np.mod(raw_increments, 1.0)
         mean_phase = np.mean(np.exp(2j * np.pi * modulo_advances))
         reference_advance = float(np.angle(mean_phase) / (2.0 * np.pi)) % 1.0
@@ -278,8 +280,7 @@ def poloidal_angle_series_has_consistent_winding(
     if same_direction_fraction >= float(settings.min_winding_sign_fraction):
         return True
 
-    principal_bound = np.pi + 1.0e-12
-    if not np.all(np.abs(raw_angles) <= principal_bound):
+    if not np.all(np.abs(raw_angles) <= _WBA_PRINCIPAL_ANGLE_BOUND):
         return False
     modulo_advances = normalized_wrapped_rotation_increments(raw_angles)
     if modulo_advances.size == 0:

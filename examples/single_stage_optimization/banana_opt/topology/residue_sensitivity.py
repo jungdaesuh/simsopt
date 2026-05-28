@@ -745,7 +745,7 @@ def branch_resolved_biot_savart_residue_taylor_diagnostic(
         expected_winding=expected_winding,
         base_winding=derivative.base_winding,
         base_winding_residual=derivative.base_winding - expected_winding,
-        base_raw_return_section_winding=(derivative.base_raw_return_section_winding),
+        base_raw_return_section_winding=derivative.base_raw_return_section_winding,
         base_det_m=derivative.base_det_m,
         base_residue_classification=classify_greene_residue(derivative.base_residue),
         samples=tuple(samples),
