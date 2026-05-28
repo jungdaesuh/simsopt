@@ -7181,6 +7181,7 @@ class SingleStageExampleTests(unittest.TestCase):
             "dJ": np.zeros(2),
             "initial_objective": np.nan,
         }
+        recorded_events = []
 
         def value_and_grad(x):
             np.testing.assert_allclose(x, np.array([3.0, 4.0]))
@@ -7191,6 +7192,9 @@ class SingleStageExampleTests(unittest.TestCase):
             target_value_and_grad_objective=value_and_grad,
             optimizer_dofs=np.array([1.0, 2.0]),
             objective_input_dofs=lambda dofs: np.asarray(dofs) + 2.0,
+            record_outer_optimizer_event=lambda label, **fields: recorded_events.append(
+                (label, fields)
+            ),
         )
 
         self.assertEqual(result[0], 7.5)
@@ -7199,6 +7203,27 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(run_dict["dJ"], np.array([0.25, -0.5]))
         self.assertEqual(run_dict["initial_objective"], 7.5)
         self.assertFalse(run_dict["initial_objective_pending"])
+        self.assertEqual(
+            [label for label, _fields in recorded_events],
+            [
+                "target_lane_initial_objective_input_started",
+                "target_lane_initial_objective_input_returned",
+                "target_lane_initial_objective_device_put_started",
+                "target_lane_initial_objective_device_put_returned",
+                "target_lane_initial_objective_value_and_grad_started",
+                "target_lane_initial_objective_value_and_grad_returned",
+                "target_lane_initial_objective_host_value_started",
+                "target_lane_initial_objective_host_value_returned",
+                "target_lane_initial_objective_host_grad_started",
+                "target_lane_initial_objective_host_grad_returned",
+                "target_lane_initial_objective_state_write_started",
+                "target_lane_initial_objective_state_write_returned",
+            ],
+        )
+        self.assertEqual(
+            {tuple(fields.items()) for _label, fields in recorded_events},
+            {(("phase", "initial"),)},
+        )
 
     def test_seed_pending_target_lane_initial_objective_stages_device_input(self):
         module = self.load_module()
@@ -7374,6 +7399,11 @@ class SingleStageExampleTests(unittest.TestCase):
         runtime_summary = self._make_reporting_runtime_summary(
             include_distance_metrics=True
         )
+        reporting_events = []
+
+        def record_reporting_event(label, **fields):
+            reporting_events.append((label, fields))
+
         fake_boozer_surface = types.SimpleNamespace(
             run_code_traceable=lambda *_args: {
                 "success": jnp.asarray(True, dtype=bool),
@@ -7403,6 +7433,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 0.21,
                 outer_objective_config="config-marker",
                 success_filter="success-filter-marker",
+                record_outer_optimizer_event=record_reporting_event,
             )
             run_dict = {
                 "sdofs": np.array([0.1, -0.05], dtype=np.float64),
@@ -7458,6 +7489,24 @@ class SingleStageExampleTests(unittest.TestCase):
             np.array([1.0, -2.0], dtype=np.float64),
         )
         self.assertTrue(incumbent["target_lane_reporting_include_distance_metrics"])
+        reporting_labels = [label for label, _fields in reporting_events]
+        self.assertIn("target_lane_reporting_value_and_grad_started", reporting_labels)
+        self.assertLess(
+            reporting_labels.index("target_lane_reporting_value_and_grad_started"),
+            reporting_labels.index("target_lane_reporting_value_and_grad_returned"),
+        )
+        self.assertLess(
+            reporting_labels.index("target_lane_reporting_state_update_started"),
+            reporting_labels.index("target_lane_reporting_state_update_returned"),
+        )
+        self.assertLess(
+            reporting_labels.index("target_lane_reporting_incumbent_record_started"),
+            reporting_labels.index("target_lane_reporting_incumbent_record_returned"),
+        )
+        self.assertEqual(
+            reporting_labels[-1],
+            "target_lane_reporting_sync_returned",
+        )
 
     def test_build_single_stage_target_lane_accepted_step_sync_can_skip_state_commit(
         self,
@@ -7467,6 +7516,11 @@ class SingleStageExampleTests(unittest.TestCase):
         runtime_summary = self._make_reporting_runtime_summary(
             include_distance_metrics=True
         )
+        reporting_events = []
+
+        def record_reporting_event(label, **fields):
+            reporting_events.append((label, fields))
+
         fake_boozer_surface = types.SimpleNamespace(
             run_code_traceable=lambda *_args: {
                 "success": jnp.asarray(True, dtype=bool),
@@ -7496,6 +7550,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 0.21,
                 outer_objective_config="config-marker",
                 success_filter="success-filter-marker",
+                record_outer_optimizer_event=record_reporting_event,
             )
             run_dict = {
                 "sdofs": np.array([0.1, -0.05], dtype=np.float64),
@@ -7533,6 +7588,35 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(run_dict["dJ"], run_dict_before["dJ"])
         np.testing.assert_allclose(run_dict["x_prev"], run_dict_before["x_prev"])
         self.assertEqual(run_dict["it"], run_dict_before["it"])
+        self.assertEqual(
+            reporting_events[0],
+            (
+                "target_lane_reporting_sync_started",
+                {"benchmark_mode": False, "update_run_state": False},
+            ),
+        )
+        reporting_labels = [label for label, _fields in reporting_events]
+        self.assertLess(
+            reporting_labels.index("target_lane_reporting_forward_result_started"),
+            reporting_labels.index("target_lane_reporting_forward_result_returned"),
+        )
+        self.assertLess(
+            reporting_labels.index("target_lane_reporting_metrics_started"),
+            reporting_labels.index("target_lane_reporting_metrics_returned"),
+        )
+        self.assertLess(
+            reporting_labels.index("target_lane_reporting_hostify_started"),
+            reporting_labels.index("target_lane_reporting_hostify_returned"),
+        )
+        self.assertLess(
+            reporting_labels.index("target_lane_reporting_objective_started"),
+            reporting_labels.index("target_lane_reporting_objective_returned"),
+        )
+        self.assertIn("target_lane_reporting_cache_returned", reporting_labels)
+        self.assertEqual(
+            reporting_labels[-1],
+            "target_lane_reporting_sync_returned",
+        )
 
     def test_build_single_stage_target_lane_accepted_step_sync_prefers_runtime_forward_result(
         self,

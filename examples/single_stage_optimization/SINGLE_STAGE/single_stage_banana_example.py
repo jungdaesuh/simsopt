@@ -6224,6 +6224,7 @@ def build_single_stage_target_lane_accepted_step_sync(
     *,
     outer_objective_config,
     success_filter,
+    record_outer_optimizer_event=None,
 ):
     """Build the array-native accepted-step sync used on the target lane.
 
@@ -6244,6 +6245,10 @@ def build_single_stage_target_lane_accepted_step_sync(
     objective = runtime_bundle["objective"]
     value_and_grad = runtime_bundle["value_and_grad"]
     forward_result_fn = runtime_bundle.get("forward_result")
+
+    def record_reporting_event(label, **fields):
+        if record_outer_optimizer_event is not None:
+            record_outer_optimizer_event(label, **fields)
 
     def accepted_step_solve_result(run_dict, coil_dofs):
         if forward_result_fn is None:
@@ -6266,24 +6271,54 @@ def build_single_stage_target_lane_accepted_step_sync(
         }
 
     def sync(run_dict, coil_dofs, *, benchmark_mode, update_run_state=True):
+        record_reporting_event(
+            "target_lane_reporting_sync_started",
+            benchmark_mode=bool(benchmark_mode),
+            update_run_state=bool(update_run_state),
+        )
         coil_dofs = _as_runtime_array(_single_stage_optimizer_dofs_array(coil_dofs))
+        record_reporting_event(
+            "target_lane_reporting_forward_result_started",
+            has_runtime_forward_result=bool(forward_result_fn is not None),
+        )
         solve_result = accepted_step_solve_result(run_dict, coil_dofs)
-        if not host_bool(solve_result["success"]):
+        record_reporting_event("target_lane_reporting_forward_result_returned")
+        record_reporting_event("target_lane_reporting_success_sync_started")
+        solve_success = host_bool(solve_result["success"])
+        record_reporting_event(
+            "target_lane_reporting_success_sync_returned",
+            success=bool(solve_success),
+        )
+        if not solve_success:
             raise RuntimeError(
                 "target-lane accepted-step replay failed while refreshing "
                 "single-stage array-native state."
             )
 
         include_distance_metrics = not benchmark_mode
+        record_reporting_event(
+            "target_lane_reporting_metrics_started",
+            include_distance_metrics=bool(include_distance_metrics),
+        )
         traceable_reporting_metrics = reporting_metrics_fn(
             coil_dofs,
             include_distance_metrics=include_distance_metrics,
+        )
+        record_reporting_event("target_lane_reporting_metrics_returned")
+        record_reporting_event(
+            "target_lane_reporting_hostify_started",
+            include_distance_metrics=bool(include_distance_metrics),
         )
         reporting_metrics = dict(
             _hostify_traceable_reporting_metrics(
                 traceable_reporting_metrics,
                 include_distance_metrics=include_distance_metrics,
             )
+        )
+        record_reporting_event("target_lane_reporting_hostify_returned")
+        record_reporting_event(
+            "target_lane_reporting_hardware_status_started",
+            benchmark_mode=bool(benchmark_mode),
         )
         if benchmark_mode:
             hardware_status = {
@@ -6304,19 +6339,28 @@ def build_single_stage_target_lane_accepted_step_sync(
                     CURVATURE_THRESHOLD,
                 )
             )
+        record_reporting_event(
+            "target_lane_reporting_hardware_status_returned",
+            success=hardware_status.get("success"),
+        )
         reporting_metrics["hardware_status"] = hardware_status
         if update_run_state:
+            record_reporting_event("target_lane_reporting_value_and_grad_started")
             objective_value, objective_grad = value_and_grad(coil_dofs)
             objective_value = host_float(objective_value)
             objective_grad = host_array(objective_grad, dtype=np.float64)
+            record_reporting_event("target_lane_reporting_value_and_grad_returned")
         else:
+            record_reporting_event("target_lane_reporting_objective_started")
             objective_value = host_float(objective(coil_dofs))
             objective_grad = None
+            record_reporting_event("target_lane_reporting_objective_returned")
         accepted_step_summary = {
             "objective_value": objective_value,
             "reporting_metrics": reporting_metrics,
         }
         if update_run_state:
+            record_reporting_event("target_lane_reporting_state_update_started")
             snapshot_accepted_step_state_from_values(
                 run_dict,
                 sdofs=solve_result["sdofs"],
@@ -6326,20 +6370,27 @@ def build_single_stage_target_lane_accepted_step_sync(
                 objective_grad=objective_grad,
                 store_objective_grad=True,
             )
+            record_reporting_event("target_lane_reporting_state_update_returned")
+        record_reporting_event("target_lane_reporting_cache_started")
         _cache_target_lane_reporting_summary(
             run_dict,
             coil_dofs,
             accepted_step_summary,
             benchmark_mode=benchmark_mode,
         )
+        record_reporting_event("target_lane_reporting_cache_returned")
         if not update_run_state:
+            record_reporting_event("target_lane_reporting_sync_returned")
             return accepted_step_summary
 
         run_dict["hardware_constraint_status"] = hardware_status
+        record_reporting_event("target_lane_reporting_incumbent_record_started")
         record_single_stage_local_incumbent(
             run_dict,
             stage=f"iter_{run_dict.get('it', 0)}",
         )
+        record_reporting_event("target_lane_reporting_incumbent_record_returned")
+        record_reporting_event("target_lane_reporting_sync_returned")
         return accepted_step_summary
 
     return sync
@@ -6375,17 +6426,23 @@ def configure_single_stage_target_lane_accepted_step_sync(
     use_target_lane,
     outer_objective_config,
     success_filter,
+    record_outer_optimizer_event=None,
 ):
     """Install the array-native accepted-step sync and disable CPU reevaluation."""
     if not use_target_lane:
         return
+    sync_kwargs = {
+        "outer_objective_config": outer_objective_config,
+        "success_filter": success_filter,
+    }
+    if record_outer_optimizer_event is not None:
+        sync_kwargs["record_outer_optimizer_event"] = record_outer_optimizer_event
     adapter.accepted_step_state_sync = (
         build_single_stage_target_lane_accepted_step_sync(
             boozer_surface,
             bs,
             iota_target,
-            outer_objective_config=outer_objective_config,
-            success_filter=success_filter,
+            **sync_kwargs,
         )
     )
     adapter.reevaluate_before_accept = False
@@ -11295,6 +11352,7 @@ def seed_pending_single_stage_target_lane_initial_objective(
     target_value_and_grad_objective,
     optimizer_dofs,
     objective_input_dofs,
+    record_outer_optimizer_event=None,
 ):
     """Evaluate the fused target-lane objective when the initial value is pending."""
     if not bool(run_dict.get("initial_objective_pending", False)):
@@ -11304,15 +11362,38 @@ def seed_pending_single_stage_target_lane_initial_objective(
             "Target-lane startup requires the fused target-lane value/gradient "
             "objective to evaluate the initial optimizer state."
         )
-    objective_dofs = runtime_device_put(objective_input_dofs(optimizer_dofs))
+
+    def record_initial_objective_event(label):
+        if record_outer_optimizer_event is not None:
+            record_outer_optimizer_event(label, phase="initial")
+
+    record_initial_objective_event("target_lane_initial_objective_input_started")
+    objective_input = objective_input_dofs(optimizer_dofs)
+    record_initial_objective_event("target_lane_initial_objective_input_returned")
+    record_initial_objective_event("target_lane_initial_objective_device_put_started")
+    objective_dofs = runtime_device_put(objective_input)
+    record_initial_objective_event("target_lane_initial_objective_device_put_returned")
+    record_initial_objective_event(
+        "target_lane_initial_objective_value_and_grad_started"
+    )
     initial_target_value, initial_target_grad = target_value_and_grad_objective(
         objective_dofs
     )
-    seed_single_stage_initial_objective_from_values(
-        run_dict,
-        objective_value=initial_target_value,
-        objective_grad=initial_target_grad,
+    record_initial_objective_event(
+        "target_lane_initial_objective_value_and_grad_returned"
     )
+    record_initial_objective_event("target_lane_initial_objective_host_value_started")
+    initial_host_value = host_float(initial_target_value)
+    record_initial_objective_event("target_lane_initial_objective_host_value_returned")
+    record_initial_objective_event("target_lane_initial_objective_host_grad_started")
+    initial_host_grad = host_array(initial_target_grad, dtype=np.float64)
+    record_initial_objective_event("target_lane_initial_objective_host_grad_returned")
+    record_initial_objective_event("target_lane_initial_objective_state_write_started")
+    run_dict["J"] = initial_host_value
+    run_dict["dJ"] = initial_host_grad
+    run_dict["initial_objective"] = initial_host_value
+    run_dict["initial_objective_pending"] = False
+    record_initial_objective_event("target_lane_initial_objective_state_write_returned")
     return initial_target_value, initial_target_grad
 
 
@@ -13012,12 +13093,17 @@ if __name__ == "__main__":
         )
         if bool(run_dict.get("initial_objective_pending", False)):
             initial_target_eval_start_s = _perf_counter_s()
+            record_outer_optimizer_event(
+                "target_lane_initial_objective_started",
+                phase="initial",
+            )
             initial_target_value, initial_target_grad = (
                 seed_pending_single_stage_target_lane_initial_objective(
                     run_dict,
                     target_value_and_grad_objective=target_value_and_grad_objective,
                     optimizer_dofs=dofs,
                     objective_input_dofs=target_lane_objective_input_dofs,
+                    record_outer_optimizer_event=record_outer_optimizer_event,
                 )
             )
             _record_timing(
@@ -13480,6 +13566,7 @@ if __name__ == "__main__":
                     use_target_lane=use_target_lane,
                     outer_objective_config=target_lane_outer_objective_config,
                     success_filter=target_lane_success_filter,
+                    record_outer_optimizer_event=record_outer_optimizer_event,
                 )
                 if use_target_lane:
                     _record_timing(
@@ -13542,6 +13629,7 @@ if __name__ == "__main__":
                                 target_value_and_grad_objective=target_value_and_grad_objective,
                                 optimizer_dofs=dofs,
                                 objective_input_dofs=target_lane_objective_input_dofs,
+                                record_outer_optimizer_event=record_outer_optimizer_event,
                             )
                         )
                         _record_timing(
