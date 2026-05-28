@@ -376,6 +376,10 @@ def stage2_length_contract_allows_offspec(args) -> bool:
     return bool(getattr(args, "accept_offspec_coil_length", False))
 
 
+def stage2_curvature_contract_allows_offspec(args) -> bool:
+    return bool(getattr(args, "accept_offspec_curvature", False))
+
+
 def validate_stage2_iota_cli_args(args) -> None:
     validate_stage2_iota_args(
         stage2_iota_target=args.stage2_iota_target,
@@ -666,6 +670,11 @@ def parse_args():
     )
     parser.add_argument(
         "--accept-offspec-coil-length",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--accept-offspec-curvature",
         action="store_true",
         help=argparse.SUPPRESS,
     )
@@ -1750,6 +1759,7 @@ def build_stage2_constraint_artifact_metadata(
         cli_overrides=cli_overrides,
         allow_offspec_current_contract=stage2_current_contract_allows_offspec(args),
         allow_offspec_length_contract=stage2_length_contract_allows_offspec(args),
+        allow_offspec_curvature_contract=stage2_curvature_contract_allows_offspec(args),
     )
     resolved_override_reason = override_reason
     if (
@@ -1761,6 +1771,16 @@ def build_stage2_constraint_artifact_metadata(
             length_override_reason
             if resolved_override_reason in {None, ""}
             else f"{resolved_override_reason};{length_override_reason}"
+        )
+    if (
+        stage2_curvature_contract_allows_offspec(args)
+        and float(curvature_threshold) > MAX_CURVATURE_INV_M
+    ):
+        curvature_override_reason = "offspec_curvature_threshold"
+        resolved_override_reason = (
+            curvature_override_reason
+            if resolved_override_reason in {None, ""}
+            else f"{resolved_override_reason};{curvature_override_reason}"
         )
     return build_constraint_metadata(
         contract,
@@ -2625,7 +2645,10 @@ def main(parsed_args=None):
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = float(args.curvature_threshold)
-    if args.curvature_threshold > MAX_CURVATURE_INV_M:
+    if (
+        args.curvature_threshold > MAX_CURVATURE_INV_M
+        and not stage2_curvature_contract_allows_offspec(args)
+    ):
         raise ValueError(
             f"--curvature-threshold must be <= {MAX_CURVATURE_INV_M:.1f} m^-1."
         )

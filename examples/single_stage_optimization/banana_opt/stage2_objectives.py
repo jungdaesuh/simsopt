@@ -23,6 +23,7 @@ from banana_opt.hardware_contracts import (
     BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_MIN_FRACTION,
+    MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
     fixed_stage2_clearance_contract,
@@ -1396,6 +1397,18 @@ def build_stage2_results(
             if (
                 bool(getattr(args, "accept_offspec_coil_length", False))
                 and float(length_target) > COIL_LENGTH_HARD_LIMIT_M
+            )
+            else None
+        ),
+        "ACCEPT_OFFSPEC_CURVATURE": bool(
+            getattr(args, "accept_offspec_curvature", False)
+        ),
+        "MAX_CURVATURE_HARD_LIMIT_INV_M": float(MAX_CURVATURE_INV_M),
+        "OFFSPEC_CURVATURE_THRESHOLD_INV_M": (
+            float(curvature_threshold)
+            if (
+                bool(getattr(args, "accept_offspec_curvature", False))
+                and float(curvature_threshold) > MAX_CURVATURE_INV_M
             )
             else None
         ),

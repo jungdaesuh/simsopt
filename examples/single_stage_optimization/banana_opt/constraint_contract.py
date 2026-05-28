@@ -268,6 +268,7 @@ def resolve_constraint_contract(
     cli_overrides: Mapping[str, Any] | None = None,
     allow_offspec_current_contract: bool = False,
     allow_offspec_length_contract: bool = False,
+    allow_offspec_curvature_contract: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Resolve the full constraint contract from layered inputs.
 
@@ -319,7 +320,10 @@ def resolve_constraint_contract(
             "COIL_LENGTH_TARGET_M exceeds the hardware limit "
             f"{_hc.COIL_LENGTH_HARD_LIMIT_M:.3f} m."
         )
-    if contract[_KEY_CURVATURE_THRESHOLD] > _hc.MAX_CURVATURE_INV_M:
+    if (
+        contract[_KEY_CURVATURE_THRESHOLD] > _hc.MAX_CURVATURE_INV_M
+        and not allow_offspec_curvature_contract
+    ):
         raise ValueError(
             "CURVATURE_THRESHOLD exceeds the hardware limit "
             f"{_hc.MAX_CURVATURE_INV_M:.0f} m^-1."
@@ -336,6 +340,7 @@ def resolve_constraint_contract_from_wire_names(
     cli_overrides: Mapping[str, Any] | None = None,
     allow_offspec_current_contract: bool = False,
     allow_offspec_length_contract: bool = False,
+    allow_offspec_curvature_contract: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Like :func:`resolve_constraint_contract` but accepts legacy wire names.
 
@@ -349,6 +354,7 @@ def resolve_constraint_contract_from_wire_names(
         cli_overrides=_translate_layer(cli_overrides),
         allow_offspec_current_contract=allow_offspec_current_contract,
         allow_offspec_length_contract=allow_offspec_length_contract,
+        allow_offspec_curvature_contract=allow_offspec_curvature_contract,
     )
 
 
