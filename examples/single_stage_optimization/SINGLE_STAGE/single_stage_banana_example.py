@@ -6259,18 +6259,17 @@ def build_single_stage_target_lane_accepted_step_sync(
                 _as_runtime_array(run_dict["G"]),
             )
         forward_result = forward_result_fn(coil_dofs)
-        solve_success = forward_result.get(
-            "primal_success",
-            forward_result["success"],
-        )
-        return {
-            "success": solve_success,
-            "sdofs": forward_result["sdofs"],
-            "iota": forward_result["iota"],
-            "G": forward_result["G"],
-        }
+        return single_stage_target_lane_accepted_step_solve_result(forward_result)
 
-    def sync(run_dict, coil_dofs, *, benchmark_mode, update_run_state=True):
+    def sync(
+        run_dict,
+        coil_dofs,
+        *,
+        benchmark_mode,
+        update_run_state=True,
+        target_lane_solve_result=None,
+        objective_value_and_grad=None,
+    ):
         record_reporting_event(
             "target_lane_reporting_sync_started",
             benchmark_mode=bool(benchmark_mode),
@@ -6280,9 +6279,17 @@ def build_single_stage_target_lane_accepted_step_sync(
         record_reporting_event(
             "target_lane_reporting_forward_result_started",
             has_runtime_forward_result=bool(forward_result_fn is not None),
+            reused=target_lane_solve_result is not None,
         )
-        solve_result = accepted_step_solve_result(run_dict, coil_dofs)
-        record_reporting_event("target_lane_reporting_forward_result_returned")
+        solve_result = (
+            target_lane_solve_result
+            if target_lane_solve_result is not None
+            else accepted_step_solve_result(run_dict, coil_dofs)
+        )
+        record_reporting_event(
+            "target_lane_reporting_forward_result_returned",
+            reused=target_lane_solve_result is not None,
+        )
         record_reporting_event("target_lane_reporting_success_sync_started")
         solve_success = host_bool(solve_result["success"])
         record_reporting_event(
@@ -6345,11 +6352,20 @@ def build_single_stage_target_lane_accepted_step_sync(
         )
         reporting_metrics["hardware_status"] = hardware_status
         if update_run_state:
-            record_reporting_event("target_lane_reporting_value_and_grad_started")
-            objective_value, objective_grad = value_and_grad(coil_dofs)
+            record_reporting_event(
+                "target_lane_reporting_value_and_grad_started",
+                reused=objective_value_and_grad is not None,
+            )
+            if objective_value_and_grad is None:
+                objective_value, objective_grad = value_and_grad(coil_dofs)
+            else:
+                objective_value, objective_grad = objective_value_and_grad
             objective_value = host_float(objective_value)
             objective_grad = host_array(objective_grad, dtype=np.float64)
-            record_reporting_event("target_lane_reporting_value_and_grad_returned")
+            record_reporting_event(
+                "target_lane_reporting_value_and_grad_returned",
+                reused=objective_value_and_grad is not None,
+            )
         else:
             record_reporting_event("target_lane_reporting_objective_started")
             objective_value = host_float(objective(coil_dofs))
@@ -10199,6 +10215,20 @@ def _single_stage_boozer_decision_vector(surface_dofs, iota, G):
     return np.concatenate(pieces)
 
 
+def single_stage_target_lane_accepted_step_solve_result(forward_result):
+    """Return the solved-state payload expected by accepted-step sync."""
+    solve_success = forward_result.get(
+        "primal_success",
+        forward_result["success"],
+    )
+    return {
+        "success": solve_success,
+        "sdofs": forward_result["sdofs"],
+        "iota": forward_result["iota"],
+        "G": forward_result["G"],
+    }
+
+
 def _summarize_single_stage_scipy_initial_call(initial_call):
     if initial_call is None:
         return None
@@ -10620,6 +10650,7 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
     objective_input_dofs,
     optimizer_to_coil_dofs,
     sync_accepted_step,
+    sync_accepted_step_from_values=None,
     record_event,
 ):
     """Replay recorded candidates through pure target-lane value/grad kernels."""
@@ -10627,21 +10658,45 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
     current_iteration = None
     accepted_iteration_count = 0
     last_group_x = None
+    last_group_forward_result = None
+    last_group_objective_value = None
+    last_group_optimizer_gradient = None
+    last_group_can_reuse_values = False
     last_group_primal_success = False
+
+    def sync_last_group_if_accepted():
+        nonlocal accepted_iteration_count
+        if not last_group_primal_success:
+            return
+        if sync_accepted_step_from_values is not None and last_group_can_reuse_values:
+            sync_accepted_step_from_values(
+                last_group_x,
+                target_lane_solve_result=last_group_forward_result,
+                objective_value=last_group_objective_value,
+                objective_grad=last_group_optimizer_gradient,
+            )
+        else:
+            sync_accepted_step(last_group_x)
+        accepted_iteration_count += 1
+
     for event in replay_events:
         iteration_target = int(event["accepted_iteration_target"])
         if current_iteration is None:
             current_iteration = iteration_target
         elif iteration_target != current_iteration:
-            if last_group_primal_success:
-                sync_accepted_step(last_group_x)
-                accepted_iteration_count += 1
+            sync_last_group_if_accepted()
             current_iteration = iteration_target
         candidate_x = _single_stage_optimizer_dofs_array(
             event["candidate_optimizer_dofs"]["values"]
         )
-        objective_dofs = runtime_device_put(objective_input_dofs(candidate_x))
-        coil_dofs = runtime_device_put(optimizer_to_coil_dofs(candidate_x))
+        objective_input_values = _single_stage_optimizer_dofs_array(
+            objective_input_dofs(candidate_x)
+        )
+        coil_dof_values = _single_stage_optimizer_dofs_array(
+            optimizer_to_coil_dofs(candidate_x)
+        )
+        objective_dofs = runtime_device_put(objective_input_values)
+        coil_dofs = runtime_device_put(coil_dof_values)
         objective_value, optimizer_gradient = target_value_and_grad_objective(
             objective_dofs
         )
@@ -10657,13 +10712,20 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
         )
         final_x = candidate_x.copy()
         last_group_x = candidate_x
+        last_group_forward_result = single_stage_target_lane_accepted_step_solve_result(
+            forward_result
+        )
+        last_group_objective_value = objective_value
+        last_group_optimizer_gradient = optimizer_gradient
+        last_group_can_reuse_values = np.array_equal(
+            objective_input_values,
+            coil_dof_values,
+        )
         last_group_primal_success = host_bool(
             forward_result.get("primal_success", forward_result["success"])
         )
     if last_group_x is not None:
-        if last_group_primal_success:
-            sync_accepted_step(last_group_x)
-            accepted_iteration_count += 1
+        sync_last_group_if_accepted()
     if final_x is None:
         raise RuntimeError(
             "Target-lane objective-evaluation replay requires at least one "
@@ -11071,17 +11133,53 @@ class SingleStageAdapter:
         self.run_dict["x_prev"] = x_array.copy()
         return success
 
-    def _sync_target_lane_accepted_step_summary(self, x, *, update_run_state):
+    def _sync_target_lane_accepted_step_summary(
+        self,
+        x,
+        *,
+        update_run_state,
+        target_lane_solve_result=None,
+        objective_value_and_grad=None,
+    ):
         """Run the pure target-lane accepted-step sync with optional state commit."""
         coil_dofs = self.optimizer_to_coil_dofs(x)
+        sync_kwargs = {
+            "benchmark_mode": self.benchmark_mode,
+            "update_run_state": update_run_state,
+        }
+        if target_lane_solve_result is not None:
+            sync_kwargs["target_lane_solve_result"] = target_lane_solve_result
+        if objective_value_and_grad is not None:
+            sync_kwargs["objective_value_and_grad"] = objective_value_and_grad
         accepted_step_summary = self.accepted_step_state_sync(
             self.run_dict,
             coil_dofs,
-            benchmark_mode=self.benchmark_mode,
-            update_run_state=update_run_state,
+            **sync_kwargs,
         )
         if update_run_state:
             self.run_dict["x_prev"] = _single_stage_optimizer_dofs_array(x).copy()
+        return accepted_step_summary
+
+    def sync_accepted_step_state_from_target_lane_values(
+        self,
+        x,
+        *,
+        target_lane_solve_result,
+        objective_value,
+        objective_grad,
+    ):
+        """Commit an accepted target-lane state using already evaluated values."""
+        if self.accepted_step_state_sync is None:
+            raise RuntimeError(
+                "Target-lane value reuse requires accepted_step_state_sync."
+            )
+        accepted_step_summary = self._sync_target_lane_accepted_step_summary(
+            x,
+            update_run_state=True,
+            target_lane_solve_result=target_lane_solve_result,
+            objective_value_and_grad=(objective_value, objective_grad),
+        )
+        self._log_target_lane_accepted_step(accepted_step_summary)
         return accepted_step_summary
 
     def _log_target_lane_accepted_step(self, accepted_step_summary):
@@ -13699,6 +13797,9 @@ if __name__ == "__main__":
                                     target_lane_optimizer_to_coil_dofs
                                 ),
                                 sync_accepted_step=adapter.sync_accepted_step,
+                                sync_accepted_step_from_values=(
+                                    adapter.sync_accepted_step_state_from_target_lane_values
+                                ),
                                 record_event=objective_evaluation_trace_callback,
                             )
                         else:

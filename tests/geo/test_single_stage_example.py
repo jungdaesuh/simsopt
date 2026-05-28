@@ -3386,6 +3386,120 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_array_equal(synced[0], np.array([1.0, 0.0]))
         np.testing.assert_array_equal(synced[1], np.array([2.0, 0.0]))
 
+    def test_target_lane_objective_evaluation_trace_replay_reuses_sync_values(self):
+        module = self.load_module()
+        recorded = []
+        fallback_syncs = []
+        value_syncs = []
+        events = [
+            {
+                "accepted_iteration_target": 1,
+                "line_search_evaluation": 1,
+                "candidate_optimizer_dofs": {"values": [1.0, 2.0]},
+            }
+        ]
+
+        def value_and_grad(x):
+            values = np.asarray(x, dtype=np.float64)
+            return float(np.sum(values)), 2.0 * values
+
+        def forward_result(x):
+            values = np.asarray(x, dtype=np.float64)
+            return {
+                "success": False,
+                "primal_success": True,
+                "iota": 0.15,
+                "G": 2.0,
+                "sdofs": values + 1.0,
+            }
+
+        def sync_from_values(
+            x,
+            *,
+            target_lane_solve_result,
+            objective_value,
+            objective_grad,
+        ):
+            value_syncs.append(
+                {
+                    "x": np.asarray(x, dtype=np.float64).copy(),
+                    "success": target_lane_solve_result["success"],
+                    "sdofs": np.asarray(target_lane_solve_result["sdofs"]).copy(),
+                    "objective_value": float(objective_value),
+                    "objective_grad": np.asarray(objective_grad).copy(),
+                }
+            )
+
+        result = module.run_single_stage_target_lane_objective_evaluation_trace_replay(
+            replay_events=events,
+            target_value_and_grad_objective=value_and_grad,
+            target_forward_result=forward_result,
+            objective_input_dofs=lambda x: x,
+            optimizer_to_coil_dofs=lambda x: x,
+            sync_accepted_step=lambda x: fallback_syncs.append(np.asarray(x).copy()),
+            sync_accepted_step_from_values=sync_from_values,
+            record_event=recorded.append,
+        )
+
+        self.assertEqual(result.nit, 1)
+        self.assertEqual(fallback_syncs, [])
+        self.assertEqual(len(value_syncs), 1)
+        np.testing.assert_array_equal(value_syncs[0]["x"], np.array([1.0, 2.0]))
+        self.assertTrue(value_syncs[0]["success"])
+        np.testing.assert_array_equal(value_syncs[0]["sdofs"], np.array([2.0, 3.0]))
+        self.assertEqual(value_syncs[0]["objective_value"], 3.0)
+        np.testing.assert_array_equal(
+            value_syncs[0]["objective_grad"],
+            np.array([2.0, 4.0]),
+        )
+
+    def test_target_lane_objective_evaluation_trace_replay_falls_back_for_mapped_state(
+        self,
+    ):
+        module = self.load_module()
+        recorded = []
+        fallback_syncs = []
+        value_syncs = []
+        events = [
+            {
+                "accepted_iteration_target": 1,
+                "line_search_evaluation": 1,
+                "candidate_optimizer_dofs": {"values": [1.0, 2.0]},
+            }
+        ]
+
+        def value_and_grad(x):
+            values = np.asarray(x, dtype=np.float64)
+            return float(np.sum(values)), 2.0 * values
+
+        def forward_result(x):
+            values = np.asarray(x, dtype=np.float64)
+            return {
+                "success": True,
+                "primal_success": True,
+                "iota": 0.15,
+                "G": 2.0,
+                "sdofs": values + 1.0,
+            }
+
+        result = module.run_single_stage_target_lane_objective_evaluation_trace_replay(
+            replay_events=events,
+            target_value_and_grad_objective=value_and_grad,
+            target_forward_result=forward_result,
+            objective_input_dofs=lambda x: np.asarray(x) + 2.0,
+            optimizer_to_coil_dofs=lambda x: np.asarray(x) * 3.0,
+            sync_accepted_step=lambda x: fallback_syncs.append(np.asarray(x).copy()),
+            sync_accepted_step_from_values=(
+                lambda *args, **kwargs: value_syncs.append((args, kwargs))
+            ),
+            record_event=recorded.append,
+        )
+
+        self.assertEqual(result.nit, 1)
+        self.assertEqual(value_syncs, [])
+        self.assertEqual(len(fallback_syncs), 1)
+        np.testing.assert_array_equal(fallback_syncs[0], np.array([1.0, 2.0]))
+
     def test_target_lane_objective_evaluation_trace_replay_skips_failed_sync(self):
         module = self.load_module()
         recorded = []
@@ -11481,6 +11595,101 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertFalse(captured["sync"]["benchmark_mode"])
         self.assertTrue(captured["sync"]["update_run_state"])
         log_summary.assert_not_called()
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([3.0, -4.0]))
+        np.testing.assert_allclose(run_dict["sdofs"], np.array([9.0, -2.0]))
+        np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
+
+    def test_single_stage_adapter_sync_from_target_values_commits_and_logs(self):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = np.array([1.0, 2.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.zeros(2), "lscount": 4, "it": 3}
+        captured = {}
+
+        def fake_sync(
+            state,
+            x,
+            *,
+            benchmark_mode,
+            update_run_state=True,
+            target_lane_solve_result=None,
+            objective_value_and_grad=None,
+        ):
+            captured["sync"] = {
+                "state": state,
+                "x": np.asarray(x),
+                "benchmark_mode": benchmark_mode,
+                "update_run_state": update_run_state,
+                "target_lane_solve_result": target_lane_solve_result,
+                "objective_value_and_grad": objective_value_and_grad,
+            }
+            if update_run_state:
+                state["sdofs"] = np.asarray(target_lane_solve_result["sdofs"])
+                state["iota"] = target_lane_solve_result["iota"]
+                state["G"] = target_lane_solve_result["G"]
+            return self._make_fake_target_lane_accepted_step_summary()
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            reevaluate_before_accept=True,
+            accepted_step_state_sync=fake_sync,
+        )
+        solve_result = {
+            "success": True,
+            "sdofs": np.array([9.0, -2.0]),
+            "iota": 0.21,
+            "G": 1.8,
+        }
+        objective_grad = np.array([0.5, -0.25])
+
+        with patch.object(
+            module,
+            "log_single_stage_target_lane_accepted_step",
+            return_value=None,
+        ) as log_summary:
+            summary = adapter.sync_accepted_step_state_from_target_lane_values(
+                np.array([3.0, -4.0]),
+                target_lane_solve_result=solve_result,
+                objective_value=1.5,
+                objective_grad=objective_grad,
+            )
+
+        self.assertEqual(
+            summary,
+            self._make_fake_target_lane_accepted_step_summary(),
+        )
+        self.assertIs(captured["sync"]["state"], run_dict)
+        np.testing.assert_allclose(captured["sync"]["x"], np.array([3.0, -4.0]))
+        self.assertFalse(captured["sync"]["benchmark_mode"])
+        self.assertTrue(captured["sync"]["update_run_state"])
+        self.assertIs(captured["sync"]["target_lane_solve_result"], solve_result)
+        self.assertEqual(
+            captured["sync"]["objective_value_and_grad"][0],
+            1.5,
+        )
+        self.assertIs(
+            captured["sync"]["objective_value_and_grad"][1],
+            objective_grad,
+        )
+        log_summary.assert_called_once()
         np.testing.assert_allclose(run_dict["x_prev"], np.array([3.0, -4.0]))
         np.testing.assert_allclose(run_dict["sdofs"], np.array([9.0, -2.0]))
         np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
