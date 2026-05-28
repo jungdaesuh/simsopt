@@ -107,6 +107,7 @@ from banana_opt.boozer_finite_current import (
     BoozerSurfaceFiniteI,
     derive_signed_G_from_field,
 )
+from banana_opt.boozer_warm_start import save_boozer_surface_with_state
 from banana_opt.boozer_residuals import (  # noqa: F401 - re-exported for importlib-loaded tests
     BoozerResidualExact,
     RefinedBoozerResidual,
@@ -8912,7 +8913,10 @@ def write_preserved_timeout_artifacts(
         surface = boozer_surface.surface
         path_stem = os.path.join(out_dir, f"{surface_stem}_{entry['name']}")
         surface.save(path_stem + ".json")
-        boozer_surface.save(path_stem + "_boozer_surface.json")
+        save_boozer_surface_with_state(
+            boozer_surface,
+            path_stem + "_boozer_surface.json",
+        )
 
 
 def preserved_timeout_artifact_paths(out_dir, preservation_kind, surface_data):

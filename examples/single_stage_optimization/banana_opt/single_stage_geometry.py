@@ -8,6 +8,7 @@ from scipy.spatial.distance import cdist
 
 from simsopt.geo import SurfaceRZFourier
 
+from banana_opt.boozer_warm_start import save_boozer_surface_with_state
 from banana_opt.hardware_contracts import COIL_LENGTH_MIN_FRACTION
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_status,
@@ -1393,7 +1394,10 @@ def save_surface_artifacts(surface_data, biotsavart, out_dir, stem, also_write_o
         }
         surface.to_vtk(path_stem, extra_data=point_data)
         surface.save(path_stem + ".json")
-        boozer_surface.save(path_stem + "_boozer_surface.json")
+        save_boozer_surface_with_state(
+            boozer_surface,
+            path_stem + "_boozer_surface.json",
+        )
 
     for entry in surface_data:
         write_surface_artifact(entry, os.path.join(out_dir, f"{stem}_{entry['name']}"))

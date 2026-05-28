@@ -14,6 +14,10 @@ from .boozer_finite_current import (
     _signed_G_from_tf_currents,
     derive_signed_G_from_field,
 )
+from .boozer_warm_start import (
+    load_boozer_solved_state_sidecar,
+    warm_start_boozer_state_path,
+)
 from .json_compat import load_boozer_finite_i
 
 from .coil_groups import (
@@ -159,6 +163,7 @@ __all__ = [
     "partition_loaded_stage2_coils",
     "probe_stage2_seed_bootability",
     "resolve_warm_start_boozer_surface_path",
+    "warm_start_boozer_state_path",
     "restore_boozer_solve_state",
     "resolve_stage2_finite_current_mode",
     "resolve_single_stage_banana_surf_radius",
@@ -1216,6 +1221,10 @@ def load_warm_start_boozer_seed(
         res = _boozer_result_state(warm_start_artifact)
         iota = _coerce_boozer_scalar(res.get("iota"))
         G = _coerce_boozer_scalar(res.get("G"))
+        if iota is None or G is None:
+            solved_state = load_boozer_solved_state_sidecar(source_path)
+            if solved_state is not None:
+                iota, G = solved_state
         warm_start_surface = warm_start_artifact.surface
     else:
         iota = None

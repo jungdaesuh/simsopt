@@ -2485,6 +2485,39 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertIs(recorded["initial_surface_guess"], warm_start_surface)
         self.assertEqual(recorded["nfp"], 5)
 
+    def test_load_warm_start_boozer_seed_reads_sidecar_solved_state(self):
+        module = load_handoff_module()
+        warm_start_surface = SimpleNamespace(nfp=5)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            warm_start_path = Path(tmpdir) / "surf_opt_boozer_surface.json"
+            warm_start_path.write_text("{}", encoding="utf-8")
+            state_path = module.warm_start_boozer_state_path(warm_start_path)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "surface_path": warm_start_path.name,
+                        "iota": 0.175,
+                        "G": -0.41,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            seed = module.load_warm_start_boozer_seed(
+                warm_start_path,
+                artifact_loader=lambda _path: SimpleNamespace(
+                    surface=warm_start_surface,
+                    res={},
+                ),
+            )
+
+        self.assertIs(seed.surface, warm_start_surface)
+        self.assertAlmostEqual(seed.iota, 0.175)
+        self.assertAlmostEqual(seed.G, -0.41)
+        self.assertTrue(seed.has_solved_state)
+
 
 class Stage2SolverIotaReportTests(unittest.TestCase):
     def test_iota_report_probe_uses_absolute_surface_as_equilibrium_path(self):

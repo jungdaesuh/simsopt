@@ -15598,7 +15598,10 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
             save=_save_bs,
         )
         runtime = SimpleNamespace(
-            boozer_surface=SimpleNamespace(save=_save_boozer_surface)
+            boozer_surface=SimpleNamespace(
+                save=_save_boozer_surface,
+                res={"iota": 0.2, "G": -0.377},
+            )
         )
 
         with (
@@ -15640,6 +15643,11 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
                 warm_start_path.read_text(encoding="utf-8"),
                 '{"surface": "warm"}',
             )
+            state_path = warm_start_path.with_name("surf_opt_boozer_state.json")
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state_payload["schema_version"], 1)
+            self.assertAlmostEqual(state_payload["iota"], 0.2)
+            self.assertAlmostEqual(state_payload["G"], -0.377)
             self.assertEqual(
                 report_payload.call_args.kwargs["stage2_seed_surf_path"],
                 warm_start_path,

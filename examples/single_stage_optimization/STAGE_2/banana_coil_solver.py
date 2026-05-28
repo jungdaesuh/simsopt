@@ -149,6 +149,7 @@ from banana_opt.boozer_topology_bridge import (
     boozer_topology_bridge_artifact_fields,
     safe_compute_helical_field_content_S_HEL,
 )
+from banana_opt.boozer_warm_start import save_boozer_surface_with_state
 from banana_opt.topology_bridge import (
     DEFAULT_NFIELDLINES as TOPOLOGY_BRIDGE_DEFAULT_NFIELDLINES,
     DEFAULT_TMAX as TOPOLOGY_BRIDGE_DEFAULT_TMAX,
@@ -1626,8 +1627,11 @@ def save_stage2_warm_start_boozer_surface(stage2_iota_runtime, stage2_bs_artifac
     if stage2_iota_runtime is None:
         return None
     warm_start_path = stage2_warm_start_boozer_surface_path(stage2_bs_artifact_path)
-    stage2_iota_runtime.boozer_surface.save(str(warm_start_path))
-    return warm_start_path
+    state_path = save_boozer_surface_with_state(
+        stage2_iota_runtime.boozer_surface,
+        warm_start_path,
+    )
+    return warm_start_path if state_path is not None else None
 
 
 def materialize_stage2_artifact_results(
