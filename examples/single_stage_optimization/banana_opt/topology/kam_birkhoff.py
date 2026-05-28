@@ -13,8 +13,8 @@ DEFAULT_WBA_MIN_RETURNS = 256
 DEFAULT_WBA_INVARIANT_MIN_DIGITS = 8.0
 DEFAULT_WBA_ISLAND_MIN_DIGITS = 4.0
 DEFAULT_WBA_RATIONAL_MAX_DENOMINATOR = 24
-DEFAULT_WBA_RATIONAL_TOLERANCE = 1.0e-4
 DEFAULT_WBA_DIFF_FLOOR = 1.0e-15
+DEFAULT_WBA_EXACT_RATIONAL_TOLERANCE = DEFAULT_WBA_DIFF_FLOOR
 DEFAULT_WBA_MIN_WINDING_SIGN_FRACTION = 0.95
 DEFAULT_WBA_WINDING_INCREMENT_FLOOR = 1.0e-12
 KAM_FRACTION_SEMANTICS = "weighted_birkhoff_invariant_torus_fraction"
@@ -48,7 +48,7 @@ class BirkhoffClassifierSettings:
     min_returns: int = DEFAULT_WBA_MIN_RETURNS
     invariant_digits_min: float = DEFAULT_WBA_INVARIANT_MIN_DIGITS
     island_digits_min: float = DEFAULT_WBA_ISLAND_MIN_DIGITS
-    island_rational_tolerance: float = DEFAULT_WBA_RATIONAL_TOLERANCE
+    exact_rational_tolerance: float = DEFAULT_WBA_EXACT_RATIONAL_TOLERANCE
     island_max_denominator: int = DEFAULT_WBA_RATIONAL_MAX_DENOMINATOR
     diff_floor: float = DEFAULT_WBA_DIFF_FLOOR
     min_winding_sign_fraction: float = DEFAULT_WBA_MIN_WINDING_SIGN_FRACTION
@@ -185,7 +185,7 @@ def classify_angle_series(
     rational_payload = asdict(rational)
 
     if matching_digits >= float(settings.island_digits_min) and rational.error <= float(
-        settings.diff_floor
+        settings.exact_rational_tolerance
     ):
         classification = KAM_CLASS_ISLAND_CHAIN
         reason = "weighted_birkhoff_average_exact_low_order_rational"

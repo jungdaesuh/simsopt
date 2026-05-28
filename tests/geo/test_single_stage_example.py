@@ -4588,6 +4588,255 @@ class HardwareConstraintTests(unittest.TestCase):
             ],
         )
 
+    def test_record_residue_objective_diagnostics_writes_accepted_archive_entry(self):
+        module = load_single_stage_example_module()
+        residue_payload = {
+            "schema_version": "greene_residue_objective_v1",
+            "enabled": True,
+            "target_manifest_id": "sha256:test-targets",
+            "validation_id": "validation-artifact",
+            "objective_weight": 0.25,
+            "residue_scale": 0.5,
+            "value": 0.125,
+            "gradient_norm": 0.75,
+            "branches": [
+                {
+                    "target_id": "p=0|q=1",
+                    "branch": "O",
+                    "residue": np.float64(0.25),
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.record_residue_objective_diagnostics(
+                tmpdir,
+                7,
+                {
+                    "residue_objective_payload": residue_payload,
+                    "dJ_residue_objective": np.array([0.75]),
+                },
+            )
+            archive_path = (
+                Path(tmpdir) / module.GREENE_RESIDUE_OBJECTIVE_ARCHIVE_FILENAME
+            )
+            archive_entries = [
+                json.loads(line)
+                for line in archive_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(len(archive_entries), 1)
+        self.assertEqual(
+            archive_entries[0]["schema_version"],
+            module.GREENE_RESIDUE_OBJECTIVE_ARCHIVE_SCHEMA_VERSION,
+        )
+        self.assertEqual(archive_entries[0]["accepted_iteration"], 7)
+        self.assertEqual(
+            archive_entries[0]["residue_objective"]["target_manifest_id"],
+            "sha256:test-targets",
+        )
+        self.assertEqual(
+            archive_entries[0]["residue_objective"]["branches"][0]["residue"],
+            0.25,
+        )
+
+    def test_accepted_callback_writes_residue_objective_archive_entry(self):
+        module = load_single_stage_example_module()
+
+        class _Surface:
+            nfp = 5
+
+            def volume(self):
+                return 1.0
+
+            def gamma(self):
+                return np.array([[[0.0, 0.0, 0.0]]])
+
+            def unitnormal(self):
+                return np.array([[[1.0, 0.0, 0.0]]])
+
+            def save(self, path):
+                self._saved_path = path
+
+        class _ScalarObjective:
+            def __init__(self, value):
+                self._value = value
+
+            def J(self):
+                return self._value
+
+            def dJ(self):
+                return np.array([self._value, -self._value])
+
+        class _DistanceObjective(_ScalarObjective):
+            def __init__(self, value, min_distance):
+                super().__init__(value)
+                self._min_distance = min_distance
+
+            def shortest_distance(self):
+                return self._min_distance
+
+        class _Curve:
+            def gamma(self):
+                return np.array([[1.0, 0.0, 0.0]])
+
+        class _CurveLength:
+            def J(self):
+                return 1.7
+
+        class _BiotSavart:
+            def set_points(self, points):
+                self._points = points
+
+            def B(self):
+                return np.array([[1.0, 0.0, 0.0]])
+
+            def save(self, path):
+                self._saved_path = path
+
+        residue_payload = {
+            "schema_version": "greene_residue_objective_v1",
+            "enabled": True,
+            "target_manifest_id": "sha256:test-targets",
+            "validation_id": "validation-artifact",
+            "objective_weight": 0.25,
+            "residue_scale": 0.5,
+            "value": 0.125,
+            "branches": [{"target_id": "p=0|q=1", "branch": "O", "residue": 0.25}],
+        }
+        objective_eval = diagnostic_search_eval_payload(
+            {
+                "total": 1.25,
+                "grad": np.array([0.1, -0.1]),
+                "surface_weights": np.array([1.0]),
+                "residue_objective_payload": residue_payload,
+                "dJ_residue_objective": np.array([0.75]),
+            }
+        )
+        surface = _Surface()
+        surface_entry = {
+            "name": "outer",
+            "boozer_surface": SimpleNamespace(
+                surface=surface,
+                res={"success": True, "iota": TEST_IOTA, "G": TEST_G0},
+                save=lambda path: None,
+            ),
+        }
+        stack_status = {
+            "success": True,
+            "solve_success": [True],
+            "self_intersections": [False],
+            "volumes_ordered": True,
+            "gap_ok": True,
+            "nesting_ok": True,
+            "adjacent_gaps": [],
+            "outer_vessel_gap": None,
+            "bad_nesting_phis": [],
+        }
+        hardware_snapshot = topology_hardware_snapshot()
+        hardware_snapshot.update(
+            {
+                "curve_curve_min_dist": 0.06,
+                "curve_surface_min_dist": 0.07,
+                "surface_vessel_min_dist": 0.08,
+                "max_curvature": 39.0,
+                "length_target": 1.7,
+                "tf_current_A": -8.0e4,
+                "tf_current_limit_A": 8.0e4,
+                "banana_current_A": 1.4e4,
+                "banana_current_max_A": 1.6e4,
+            }
+        )
+        module.surface_data = [surface_entry]
+        module.outer_surface_data = surface_entry
+        module.surface_iota_terms = [_ScalarObjective(TEST_IOTA)]
+        module.JF = _ScalarObjective(0.0)
+        module.JCurveLength = _ScalarObjective(0.44)
+        module.JCurveCurve = _DistanceObjective(0.55, 0.06)
+        module.JCurveSurface = _DistanceObjective(0.77, 0.07)
+        module.JCurvature = _ScalarObjective(0.99)
+        module.banana_curve = _Curve()
+        module.curvelength = _CurveLength()
+        module.bs = _BiotSavart()
+        module.VV = object()
+        module.CHECKPOINT_EVERY = 0
+        module.TOPOLOGY_SCORER_EVERY = 0
+        module.CONSTRAINT_METHOD = "penalty"
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.02
+        module.PLASMA_VESSEL_MIN_DIST_M = 0.01
+        module.CURVATURE_THRESHOLD = 40.0
+        module.PRESERVED_TIMEOUT_REPLAY_CONFIG = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_10x10.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="",
+            stage2_results_path="",
+            mpol=0,
+            ntor=0,
+            nphi=0,
+            ntheta=0,
+            constraint_weight=None,
+            constraint_method=None,
+            alm_formulation=None,
+            max_iterations=None,
+            target_volume=None,
+            target_iota=None,
+        )
+        module.stage = "initial"
+        module.run_dict = {
+            "surface_state": {"sdofs": [], "iota": [], "G": []},
+            "accepted_x": np.zeros(2),
+            "J": 0.0,
+            "dJ": np.zeros(2),
+            "search_eval": objective_eval,
+            "surface_status": stack_status,
+            "search_surface_status": stack_status,
+            "accepted_hardware_status": hardware_snapshot["search_hardware_status"],
+            "topology_gate_status": {"enabled": False, "success": True},
+            "intersecting": False,
+            "accepted_iterations": 3,
+            "it": 4,
+            "lscount": 0,
+            "last_successful_eval": objective_eval,
+            "last_successful_eval_weights": np.array([1.0]),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.OUT_DIR_ITER = tmpdir
+            with (
+                patch.object(
+                    module,
+                    "snapshot_surface_states",
+                    return_value={"sdofs": [], "iota": [], "G": []},
+                ),
+                patch.object(module, "evaluate_surface_stack", return_value=stack_status),
+                patch.object(
+                    module,
+                    "evaluate_single_stage_hardware_snapshot",
+                    return_value=hardware_snapshot,
+                ),
+                patch.object(module, "maybe_record_topology_score", return_value=None),
+                patch.object(
+                    module,
+                    "compute_surface_field_metrics",
+                    return_value=(0.0, 0.0),
+                ),
+            ):
+                module.callback(np.array([0.25, -0.25]))
+            archive_path = (
+                Path(tmpdir) / module.GREENE_RESIDUE_OBJECTIVE_ARCHIVE_FILENAME
+            )
+            archive_entries = [
+                json.loads(line)
+                for line in archive_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(archive_entries[0]["accepted_iteration"], 4)
+        self.assertEqual(
+            archive_entries[0]["residue_objective"]["target_manifest_id"],
+            "sha256:test-targets",
+        )
+
     def test_topology_archive_entry_preserves_kam_metrics(self):
         module = load_single_stage_example_module()
         topology_result = {
@@ -5748,6 +5997,16 @@ class HardwareConstraintTests(unittest.TestCase):
                 checkpoint_payload,
                 None,
             )
+        drifted_config = dict(checkpoint_payload["residue_objective_replay_config"])
+        drifted_config["target_manifest_id"] = "sha256:other-targets"
+        with self.assertRaisesRegex(
+            ValueError,
+            "Greene residue objective replay config",
+        ):
+            module.validate_resume_solver_checkpoint_residue_replay_config(
+                checkpoint_payload,
+                tuple(drifted_config.items()),
+            )
 
     def test_maybe_update_best_accepted_incumbent_tracks_valid_nonself_intersecting_states(
         self,
@@ -6766,6 +7025,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "confinement_loss": 0.08,
                 "invariant_torus_fraction": 0.5,
                 "kam_fraction": 0.5,
+                "kam_fraction_semantics": KAM_FRACTION_SEMANTICS,
                 "kam_median_width": 0.08,
                 "cross_section_span": 0.2,
                 "frontier_certification_enabled": True,
@@ -6890,6 +7150,10 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertIsNone(payload["FINAL_TOPOLOGY_TRANSPORT_DIAGNOSTICS"])
         self.assertEqual(payload["BEST_TOPOLOGY_ACCEPTED_ITERATION"], 1)
         self.assertAlmostEqual(payload["BEST_TOPOLOGY_KAM_FRACTION"], 0.5)
+        self.assertEqual(
+            payload["BEST_TOPOLOGY_KAM_FRACTION_SEMANTICS"],
+            KAM_FRACTION_SEMANTICS,
+        )
         self.assertTrue(payload["BEST_TOPOLOGY_CERTIFICATION_OK"])
 
     def test_build_preserved_timeout_results_payload_stamps_producer_wout_convention(

@@ -142,6 +142,28 @@ def test_weighted_birkhoff_classifies_exact_low_order_rational_as_island_chain()
     assert result.nearest_rational["denominator"] == 3
 
 
+def test_weighted_birkhoff_standard_map_librating_island_core_is_island_chain():
+    settings = BirkhoffClassifierSettings(
+        min_returns=512,
+        invariant_digits_min=8.0,
+        island_digits_min=4.0,
+    )
+    angles = standard_map_angles(
+        stochasticity=0.5,
+        theta0=math.pi + 0.2,
+        momentum0=0.01,
+        count=8192,
+    )
+
+    result = classify_angle_series(angles, settings=settings)
+
+    assert max(angles) - min(angles) > 0.4
+    assert result.classification == KAM_CLASS_ISLAND_CHAIN
+    assert result.nearest_rational is not None
+    assert result.nearest_rational["numerator"] == 0
+    assert result.nearest_rational["denominator"] == 1
+
+
 def test_weighted_birkhoff_keeps_near_rational_torus_in_invariant_numerator():
     settings = BirkhoffClassifierSettings(
         min_returns=64,
@@ -157,11 +179,27 @@ def test_weighted_birkhoff_keeps_near_rational_torus_in_invariant_numerator():
     assert result.nearest_rational is not None
     assert result.nearest_rational["numerator"] == 1
     assert result.nearest_rational["denominator"] == 3
-    assert (
-        0.0
-        < float(result.nearest_rational["error"])
-        < (settings.island_rational_tolerance)
+    rational_error = float(result.nearest_rational["error"])
+    assert 0.0 < rational_error < 1.0e-4
+    assert rational_error > settings.exact_rational_tolerance
+
+
+def test_weighted_birkhoff_wires_explicit_exact_rational_tolerance():
+    settings = BirkhoffClassifierSettings(
+        min_returns=64,
+        invariant_digits_min=8.0,
+        island_digits_min=4.0,
+        exact_rational_tolerance=1.0e-3,
     )
+    rotation_number = 1.0 / 3.0 + 5.0e-5
+    angles = [2.0 * math.pi * rotation_number * step for step in range(256)]
+
+    result = classify_angle_series(angles, settings=settings)
+
+    assert result.classification == KAM_CLASS_ISLAND_CHAIN
+    assert result.nearest_rational is not None
+    assert result.nearest_rational["numerator"] == 1
+    assert result.nearest_rational["denominator"] == 3
 
 
 def test_return_point_classifier_rejects_nonwinding_poloidal_reference():

@@ -23,7 +23,12 @@ from .periodic_orbit import (
     PeriodicOrbitSolverOptions,
 )
 from .poincare_chart import PoincareChart
-from .rational_target import GREENE_BRANCHES, RationalTarget
+from .rational_target import (
+    GREENE_BRANCHES,
+    GREENE_IOTA_CONVENTION,
+    GREENE_MAP_CONVENTION_FULL_TORUS,
+    RationalTarget,
+)
 from .residue_sensitivity import (
     BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
     DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
@@ -44,6 +49,22 @@ GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_RESIDUAL_ATOL = 1.0e-18
 GREENE_RESIDUE_OBJECTIVE_TAYLOR_GATE_WINDING_ATOL = 1.0e-4
 DEFAULT_RESIDUE_OBJECTIVE_WEIGHT = 0.0
 DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS = 768
+RESIDUE_TARGET_PAYLOAD_KEYS = frozenset(
+    {
+        "p",
+        "q",
+        "weight",
+        "radial_label",
+        "radial_window",
+        "branches",
+        "phi0",
+        "nfp",
+        "convention",
+        "fourier_m",
+        "fourier_n",
+        "map_convention",
+    }
+)
 
 ResidueBranchKey = tuple[str, str]
 SectionState = tuple[float, float]
@@ -58,11 +79,25 @@ class ResidueBranchSeed:
     section_state: Sequence[float]
     validation_id: str
     optimizer_taylor_validated: bool = False
+    direct_proxy_consistency_validated: bool = False
+    real_field_nonzero_winding_validated: bool = False
 
     def __post_init__(self) -> None:
         target_id = str(self.target_id)
         branch = str(self.branch)
         validation_id = str(self.validation_id)
+        optimizer_taylor_validated = _seed_bool_value(
+            "optimizer_taylor_validated",
+            self.optimizer_taylor_validated,
+        )
+        direct_proxy_consistency_validated = _seed_bool_value(
+            "direct_proxy_consistency_validated",
+            self.direct_proxy_consistency_validated,
+        )
+        real_field_nonzero_winding_validated = _seed_bool_value(
+            "real_field_nonzero_winding_validated",
+            self.real_field_nonzero_winding_validated,
+        )
         if target_id == "":
             raise ValueError("Greene residue branch seed target_id must be nonempty")
         if branch not in GREENE_BRANCHES:
@@ -82,7 +117,17 @@ class ResidueBranchSeed:
         object.__setattr__(
             self,
             "optimizer_taylor_validated",
-            bool(self.optimizer_taylor_validated),
+            optimizer_taylor_validated,
+        )
+        object.__setattr__(
+            self,
+            "direct_proxy_consistency_validated",
+            direct_proxy_consistency_validated,
+        )
+        object.__setattr__(
+            self,
+            "real_field_nonzero_winding_validated",
+            real_field_nonzero_winding_validated,
         )
 
     @property
@@ -96,6 +141,12 @@ class ResidueBranchSeed:
             "section_state": list(self.section_state),
             "validation_id": self.validation_id,
             "optimizer_taylor_validated": self.optimizer_taylor_validated,
+            "direct_proxy_consistency_validated": (
+                self.direct_proxy_consistency_validated
+            ),
+            "real_field_nonzero_winding_validated": (
+                self.real_field_nonzero_winding_validated
+            ),
         }
 
 
@@ -391,9 +442,9 @@ def residue_branch_seed_from_payload(
 ) -> ResidueBranchSeed:
     seed_validation_id = str(payload.get("validation_id", validation_id))
     taylor_validated = (
-        bool(payload.get("optimizer_taylor_validated", False))
+        _seed_payload_bool(payload, "optimizer_taylor_validated")
         if optimizer_taylor_validated is None
-        else bool(optimizer_taylor_validated)
+        else _seed_bool_value("optimizer_taylor_validated", optimizer_taylor_validated)
     )
     return ResidueBranchSeed(
         target_id=str(payload["target_id"]),
@@ -401,10 +452,34 @@ def residue_branch_seed_from_payload(
         section_state=payload["section_state"],
         validation_id=seed_validation_id,
         optimizer_taylor_validated=taylor_validated,
+        direct_proxy_consistency_validated=_seed_payload_bool(
+            payload,
+            "direct_proxy_consistency_validated",
+        ),
+        real_field_nonzero_winding_validated=_seed_payload_bool(
+            payload,
+            "real_field_nonzero_winding_validated",
+        ),
     )
 
 
+def _seed_payload_bool(payload: Mapping[str, object], key: str) -> bool:
+    return _seed_bool_value(key, payload.get(key, False))
+
+
+def _seed_bool_value(key: str, value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"Greene residue branch seed {key} must be a boolean")
+    return value
+
+
 def residue_target_from_payload(payload: Mapping[str, object]) -> RationalTarget:
+    unknown_keys = sorted(set(payload) - RESIDUE_TARGET_PAYLOAD_KEYS)
+    if unknown_keys:
+        raise ValueError(f"Unknown Greene residue target keys: {unknown_keys}")
+    missing_keys = sorted({"p", "q"} - set(payload))
+    if missing_keys:
+        raise ValueError(f"Missing Greene residue target keys: {missing_keys}")
     return RationalTarget(
         p=int(payload["p"]),
         q=int(payload["q"]),
@@ -414,8 +489,12 @@ def residue_target_from_payload(payload: Mapping[str, object]) -> RationalTarget
         branches=payload.get("branches", ("O", "X")),
         phi0=float(payload.get("phi0", 0.0)),
         nfp=int(payload.get("nfp", 1)),
+        convention=str(payload.get("convention", GREENE_IOTA_CONVENTION)),
         fourier_m=payload.get("fourier_m"),
         fourier_n=payload.get("fourier_n"),
+        map_convention=str(
+            payload.get("map_convention", GREENE_MAP_CONVENTION_FULL_TORUS)
+        ),
     )
 
 
@@ -778,6 +857,11 @@ def _validated_seed_state_map(
     expected_keys = _target_branch_keys(targets)
     if len(set(expected_keys)) != len(expected_keys):
         raise ValueError("Duplicate Greene residue objective target/branch keys")
+    target_by_key = {
+        (target.manifest_key(), branch): target
+        for target in targets
+        for branch in target.branches
+    }
     seed_by_key: dict[ResidueBranchKey, ResidueBranchSeed] = {}
     for seed in branch_seeds:
         if seed.validation_id != validation_id:
@@ -789,6 +873,22 @@ def _validated_seed_state_map(
             raise ValueError(
                 "Greene residue objective branch seeds require optimizer Taylor "
                 "validation before nonzero objective use"
+            )
+        if require_optimizer_taylor and not seed.direct_proxy_consistency_validated:
+            raise ValueError(
+                "Greene residue objective branch seeds require direct-vs-proxy "
+                "physics validation before nonzero objective use"
+            )
+        target = target_by_key.get(seed.key)
+        if (
+            require_optimizer_taylor
+            and target is not None
+            and target.expected_winding() != 0
+            and not seed.real_field_nonzero_winding_validated
+        ):
+            raise ValueError(
+                "Greene residue objective nonzero-winding branch seeds require "
+                "real-field convergence validation before nonzero objective use"
             )
         if seed.key in seed_by_key:
             raise ValueError(

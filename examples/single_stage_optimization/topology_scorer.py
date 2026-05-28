@@ -902,7 +902,7 @@ def invariant_torus_classification(
             min_returns=settings.min_returns,
             invariant_digits_min=settings.invariant_digits_min,
             island_digits_min=settings.island_digits_min,
-            island_rational_tolerance=settings.island_rational_tolerance,
+            exact_rational_tolerance=settings.exact_rational_tolerance,
             island_max_denominator=settings.island_max_denominator,
             diff_floor=settings.diff_floor,
             min_winding_sign_fraction=settings.min_winding_sign_fraction,

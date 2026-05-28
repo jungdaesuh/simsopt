@@ -70,6 +70,7 @@ from examples.single_stage_optimization.banana_opt.topology.residue_objective im
     load_residue_objective_targets,
     residue_branch_seed_from_payload,
     residue_objective_target_manifest_id,
+    residue_target_from_payload,
 )
 from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity import (
     BIOT_SAVART_BRANCH_RESOLVED_FD_MODE,
@@ -274,6 +275,79 @@ class DrivenPeriodicOrbitField:
         return _finite_difference_dB_by_dX(self._B_at, self.points)
 
 
+class ResonantIslandField:
+    def __init__(
+        self,
+        *,
+        axis_r: float,
+        axis_z: float,
+        target: RationalTarget,
+        orbit_radius: float,
+        phase0: float,
+        shear: float,
+        drive: float,
+    ):
+        self.axis_r = float(axis_r)
+        self.axis_z = float(axis_z)
+        self.target = target
+        self.orbit_radius = float(orbit_radius)
+        self.phase0 = float(phase0)
+        self.shear = float(shear)
+        self.drive = float(drive)
+        self.points = np.empty((0, 3), dtype=float)
+
+    def set_points(self, points: np.ndarray) -> "ResonantIslandField":
+        self.points = np.asarray(points, dtype=float)
+        return self
+
+    def initial_orbit_state(self) -> tuple[float, float]:
+        return (
+            self.axis_r + self.orbit_radius * math.cos(self.phase0),
+            self.axis_z + self.orbit_radius * math.sin(self.phase0),
+        )
+
+    def _B_at(self, points: np.ndarray) -> np.ndarray:
+        x = points[:, 0]
+        y = points[:, 1]
+        z = points[:, 2]
+        radius = np.sqrt(x**2 + y**2)
+        phi = np.arctan2(y, x)
+        cos_phi = x / radius
+        sin_phi = y / radius
+        minor_r = radius - self.axis_r
+        minor_z = z - self.axis_z
+        minor_radius = np.sqrt(minor_r**2 + minor_z**2)
+        theta = np.arctan2(minor_z, minor_r)
+        resonant_phase = (
+            float(self.target.q) * (theta - self.phase0)
+            - float(self.target.p) * (phi - self.target.phi0)
+        )
+        radial_velocity = -self.drive * np.sin(resonant_phase)
+        angular_velocity = self.target.iota_float + self.shear * (
+            minor_radius - self.orbit_radius
+        )
+        d_radius_dphi = (
+            radial_velocity * np.cos(theta)
+            - minor_radius * angular_velocity * np.sin(theta)
+        )
+        d_z_dphi = (
+            radial_velocity * np.sin(theta)
+            + minor_radius * angular_velocity * np.cos(theta)
+        )
+        b_phi = np.ones_like(radius)
+        b_r = d_radius_dphi / radius
+        b_z = d_z_dphi / radius
+        b_x = b_r * cos_phi - b_phi * sin_phi
+        b_y = b_r * sin_phi + b_phi * cos_phi
+        return np.stack([b_x, b_y, b_z], axis=-1)
+
+    def B(self) -> np.ndarray:
+        return self._B_at(self.points)
+
+    def dB_by_dX(self) -> np.ndarray:
+        return _finite_difference_dB_by_dX(self._B_at, self.points)
+
+
 class LowToroidalRatioField:
     def __init__(self):
         self.points = np.empty((0, 3), dtype=float)
@@ -402,6 +476,7 @@ def _biot_savart_residue_objective_inputs():
         section_state=(1.1, 0.05),
         validation_id=validation_id,
         optimizer_taylor_validated=True,
+        direct_proxy_consistency_validated=True,
     )
     return (
         field,
@@ -1122,6 +1197,63 @@ def test_residue_probe_discovers_nonzero_p_branch_from_ranked_scan():
     )
 
 
+def test_residue_probe_discovers_q_greater_than_one_nonzero_p_branch_from_ranked_scan():
+    target = RationalTarget(
+        p=1,
+        q=4,
+        radial_label=0.2,
+        radial_window=(0.2, 0.2),
+        branches=(GREENE_BRANCH_O,),
+        fourier_m=4,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    phase0 = 0.25 * math.pi
+    field = ResonantIslandField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.2,
+        phase0=phase0,
+        shear=0.1,
+        drive=0.01,
+    )
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-6,
+        max_iterations=8,
+        max_step_norm=0.08,
+    )
+
+    probe = run_residue_probe(
+        field,
+        targets=(target,),
+        chart=chart,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+        phase_angles=(phase0,),
+    )
+
+    diagnostic = probe["diagnostics"][0]
+    assert probe["branch_status_counts"] == {BRANCH_STATUS_CONVERGED: 1}
+    assert diagnostic["branch_status"] == BRANCH_STATUS_CONVERGED
+    assert diagnostic["winding"] == pytest.approx(1.0, abs=1.0e-7)
+    assert diagnostic["raw_return_section_winding"] == pytest.approx(
+        1.0,
+        abs=1.0e-7,
+    )
+    assert diagnostic["section_state"] == pytest.approx(
+        field.initial_orbit_state(),
+        abs=4.0e-7,
+    )
+
+
 def test_residue_probe_serializes_branch_integration_failure(monkeypatch):
     target = RationalTarget(
         p=1,
@@ -1831,6 +1963,21 @@ def test_biot_savart_greene_residue_objective_requires_validated_manifest():
     assert payload_seed.section_state == seed.section_state
     assert payload_seed.validation_id == seed.validation_id
     assert payload_seed.optimizer_taylor_validated is False
+    for flag_name in (
+        "optimizer_taylor_validated",
+        "direct_proxy_consistency_validated",
+        "real_field_nonzero_winding_validated",
+    ):
+        with pytest.raises(ValueError, match=flag_name):
+            residue_branch_seed_from_payload(
+                {
+                    "target_id": target.manifest_key(),
+                    "branch": GREENE_BRANCH_O,
+                    "section_state": (1.1, 0.05),
+                    flag_name: "false",
+                },
+                validation_id=validation_id,
+            )
     with pytest.raises(ValueError, match="validation_id"):
         BiotSavartGreeneResidueObjective(
             field,
@@ -1893,6 +2040,129 @@ def test_biot_savart_greene_residue_objective_requires_validated_manifest():
             integrator_options=integrator_options,
             solver_options=solver_options,
         )
+
+
+def test_biot_savart_greene_residue_objective_requires_physics_validation_gates():
+    (
+        field,
+        target,
+        chart,
+        integrator_options,
+        solver_options,
+        _seed,
+        validation_id,
+        _original_x,
+        _direction,
+    ) = _biot_savart_residue_objective_inputs()
+    missing_direct_proxy = ResidueBranchSeed(
+        target_id=target.manifest_key(),
+        branch=GREENE_BRANCH_O,
+        section_state=(1.1, 0.05),
+        validation_id=validation_id,
+        optimizer_taylor_validated=True,
+    )
+
+    with pytest.raises(ValueError, match="direct-vs-proxy physics validation"):
+        BiotSavartGreeneResidueObjective(
+            field,
+            targets=(target,),
+            chart=chart,
+            branch_seeds=(missing_direct_proxy,),
+            validation_id=validation_id,
+            objective_weight=1.0,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+
+    nonzero_target = RationalTarget(
+        p=1,
+        q=1,
+        radial_label=0.126,
+        radial_window=(0.10, 0.16),
+        branches=(GREENE_BRANCH_O,),
+        weight=1.7,
+        fourier_m=1,
+        fourier_n=1,
+    )
+    missing_real_field_convergence = ResidueBranchSeed(
+        target_id=nonzero_target.manifest_key(),
+        branch=GREENE_BRANCH_O,
+        section_state=(1.1, 0.05),
+        validation_id=validation_id,
+        optimizer_taylor_validated=True,
+        direct_proxy_consistency_validated=True,
+    )
+
+    with pytest.raises(ValueError, match="real-field convergence validation"):
+        BiotSavartGreeneResidueObjective(
+            field,
+            targets=(nonzero_target,),
+            chart=chart,
+            branch_seeds=(missing_real_field_convergence,),
+            validation_id=validation_id,
+            objective_weight=1.0,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+
+    validated_nonzero_seed = ResidueBranchSeed(
+        target_id=nonzero_target.manifest_key(),
+        branch=GREENE_BRANCH_O,
+        section_state=(1.1, 0.05),
+        validation_id=validation_id,
+        optimizer_taylor_validated=True,
+        direct_proxy_consistency_validated=True,
+        real_field_nonzero_winding_validated=True,
+    )
+    objective = BiotSavartGreeneResidueObjective(
+        field,
+        targets=(nonzero_target,),
+        chart=chart,
+        branch_seeds=(validated_nonzero_seed,),
+        validation_id=validation_id,
+        objective_weight=1.0,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert objective.target_manifest_id == residue_objective_target_manifest_id(
+        (nonzero_target,)
+    )
+
+
+def test_residue_objective_target_loader_rejects_unknown_and_missing_keys():
+    target = residue_target_from_payload(
+        {
+            "p": 0,
+            "q": 1,
+            "convention": GREENE_IOTA_CONVENTION,
+            "map_convention": GREENE_MAP_CONVENTION_FULL_TORUS,
+        }
+    )
+
+    assert target.convention == GREENE_IOTA_CONVENTION
+    assert target.map_convention == GREENE_MAP_CONVENTION_FULL_TORUS
+
+    with pytest.raises(ValueError, match="convention"):
+        residue_target_from_payload(
+            {
+                "p": 0,
+                "q": 1,
+                "convention": "legacy",
+            }
+        )
+
+    with pytest.raises(ValueError, match="Unknown Greene residue target keys"):
+        residue_target_from_payload(
+            {
+                "p": 0,
+                "q": 1,
+                "unsupported": True,
+            }
+        )
+
+    with pytest.raises(ValueError, match="Missing Greene residue target keys"):
+        residue_target_from_payload({"p": 0})
 
 
 def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
@@ -1981,6 +2251,7 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
                 "target_id": target_id,
                 "branch": GREENE_BRANCH_O,
                 "section_state": [1.1, 0.05],
+                "direct_proxy_consistency_validated": True,
             },
         ],
     }
@@ -2089,6 +2360,7 @@ def test_residue_objective_seed_loader_requires_passed_validation(tmp_path):
             section_state=(1.1, 0.05),
             validation_id="validation-artifact",
             optimizer_taylor_validated=True,
+            direct_proxy_consistency_validated=True,
         ),
     )
 
