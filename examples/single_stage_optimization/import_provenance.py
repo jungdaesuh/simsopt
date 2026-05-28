@@ -30,6 +30,20 @@ def _clear_simsopt_modules() -> None:
             del sys.modules[module_name]
 
 
+def _simsopt_root_from_script(script_file: str) -> str:
+    directory = os.path.dirname(os.path.abspath(script_file))
+    while True:
+        simsopt_init = os.path.join(directory, "src", "simsopt", "__init__.py")
+        if os.path.isfile(simsopt_init):
+            return directory
+        parent_directory = os.path.dirname(directory)
+        if parent_directory == directory:
+            raise ValueError(
+                f"Could not locate local simsopt root from script_file={script_file!r}"
+            )
+        directory = parent_directory
+
+
 def configure_local_simsopt_imports(
     script_file: str | None = None,
     *,
@@ -49,9 +63,10 @@ def configure_local_simsopt_imports(
             raise TypeError(
                 "configure_local_simsopt_imports requires script_file or simsopt_root"
             )
-        script_dir = os.path.dirname(os.path.abspath(script_file))
-        example_root = os.path.abspath(os.path.join(script_dir, ".."))
-        simsopt_root = os.path.abspath(os.path.join(example_root, "..", ".."))
+        simsopt_root = _simsopt_root_from_script(script_file)
+        example_root = os.path.join(
+            simsopt_root, "examples", "single_stage_optimization"
+        )
     else:
         simsopt_root = os.path.abspath(simsopt_root)
         example_root = os.path.join(

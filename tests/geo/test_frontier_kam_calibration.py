@@ -11,6 +11,20 @@ def load_calibration_module():
     return load_module(FRONTIER_KAM_CALIBRATION_SCRIPT, "frontier_kam_calibration")
 
 
+def test_loading_calibration_module_preserves_simsopt_class_identity():
+    from simsopt._core.optimizable import Optimizable as optimizable_before
+    from simsopt.field.biotsavart import BiotSavart as biot_savart_before
+
+    load_calibration_module()
+
+    from simsopt._core.optimizable import Optimizable as optimizable_after
+    from simsopt.field.biotsavart import BiotSavart as biot_savart_after
+
+    assert optimizable_after is optimizable_before
+    assert biot_savart_after is biot_savart_before
+    assert issubclass(biot_savart_after, optimizable_after)
+
+
 def make_row(
     module,
     label,
