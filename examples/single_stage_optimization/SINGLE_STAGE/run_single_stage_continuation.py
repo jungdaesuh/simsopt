@@ -14,8 +14,19 @@ import time
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parents[2]
 SINGLE_STAGE_SCRIPT = SCRIPT_DIR / "single_stage_banana_example.py"
 DEFAULT_CONTINUATION_OUTPUT_ROOT = SCRIPT_DIR / "continuation_outputs"
+_BOOTSTRAP_SINGLE_STAGE_RUNNER = (
+    "import runpy, sys; "
+    "repo_root, script_path, *script_args = sys.argv[1:]; "
+    "sys.path.insert(0, repo_root); "
+    "sys.path.insert(0, repo_root + '/src'); "
+    "from benchmarks.validation_ladder_common import bootstrap_local_simsopt; "
+    "bootstrap_local_simsopt(); "
+    "sys.argv = [script_path, *script_args]; "
+    "runpy.run_path(script_path, run_name='__main__')"
+)
 
 
 @dataclass(frozen=True)
@@ -314,9 +325,7 @@ def strip_overridden_passthrough_args(args: list[str]) -> list[str]:
 def resolve_stage_seed_path(run_dir: Path) -> Path:
     seed_path = run_dir / "biot_savart_opt.json"
     if not seed_path.exists():
-        raise FileNotFoundError(
-            f"Continuation stage seed file not found: {seed_path}"
-        )
+        raise FileNotFoundError(f"Continuation stage seed file not found: {seed_path}")
     return seed_path
 
 
@@ -357,9 +366,7 @@ def detect_stage_artifacts(
     required_filenames: tuple[str, ...],
     jax_runtime_seed_spec_path: Path | None = None,
 ) -> dict[str, object]:
-    artifact_paths = {
-        filename: run_dir / filename for filename in required_filenames
-    }
+    artifact_paths = {filename: run_dir / filename for filename in required_filenames}
     if (
         _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME in artifact_paths
         and jax_runtime_seed_spec_path is not None
@@ -587,7 +594,9 @@ def build_stage_profiling_summary(
     return profiling
 
 
-def _aggregate_stage_profiling(stage_reports: list[dict[str, object]]) -> dict[str, object]:
+def _aggregate_stage_profiling(
+    stage_reports: list[dict[str, object]],
+) -> dict[str, object]:
     profile_count = 0
     target_lane_profile_count = 0
     floats: dict[str, float] = {}
@@ -603,30 +612,78 @@ def _aggregate_stage_profiling(stage_reports: list[dict[str, object]]) -> dict[s
         if isinstance(stage_name, str):
             stage_summaries[stage_name] = profiling
 
-        _accumulate_float(floats, "total_stage_script_time_s", profiling, source_key="script_total_s")
-        _accumulate_float(floats, "total_outer_optimizer_s", profiling, source_key="outer_optimizer_s")
-        _accumulate_float(floats, "total_outer_optimizer_initial_phase_s", profiling, source_key="outer_optimizer_initial_phase_s")
-        _accumulate_float(floats, "total_outer_optimizer_main_s", profiling, source_key="outer_optimizer_main_s")
-        _accumulate_float(floats, "total_target_lane_bundle_setup_s", profiling, source_key="target_lane_bundle_setup_s")
-        _accumulate_int(ints, "total_accepted_step_count", profiling, source_key="accepted_step_count")
-        _accumulate_int(ints, "total_objective_eval_count", profiling, source_key="objective_eval_count")
-        _accumulate_int(ints, "total_gradient_eval_count", profiling, source_key="gradient_eval_count")
+        _accumulate_float(
+            floats, "total_stage_script_time_s", profiling, source_key="script_total_s"
+        )
+        _accumulate_float(
+            floats, "total_outer_optimizer_s", profiling, source_key="outer_optimizer_s"
+        )
+        _accumulate_float(
+            floats,
+            "total_outer_optimizer_initial_phase_s",
+            profiling,
+            source_key="outer_optimizer_initial_phase_s",
+        )
+        _accumulate_float(
+            floats,
+            "total_outer_optimizer_main_s",
+            profiling,
+            source_key="outer_optimizer_main_s",
+        )
+        _accumulate_float(
+            floats,
+            "total_target_lane_bundle_setup_s",
+            profiling,
+            source_key="target_lane_bundle_setup_s",
+        )
+        _accumulate_int(
+            ints,
+            "total_accepted_step_count",
+            profiling,
+            source_key="accepted_step_count",
+        )
+        _accumulate_int(
+            ints,
+            "total_objective_eval_count",
+            profiling,
+            source_key="objective_eval_count",
+        )
+        _accumulate_int(
+            ints,
+            "total_gradient_eval_count",
+            profiling,
+            source_key="gradient_eval_count",
+        )
 
         target_lane_profile = profiling.get("target_lane_profile")
         if not isinstance(target_lane_profile, dict):
             continue
         target_lane_profile_count += 1
-        _accumulate_float(floats, "total_value_and_grad_compile_overhead_s", target_lane_profile, source_key="value_and_grad_compile_overhead_s")
-        _accumulate_float(floats, "total_inner_solve_compile_overhead_s", target_lane_profile, source_key="inner_solve_compile_overhead_s")
+        _accumulate_float(
+            floats,
+            "total_value_and_grad_compile_overhead_s",
+            target_lane_profile,
+            source_key="value_and_grad_compile_overhead_s",
+        )
+        _accumulate_float(
+            floats,
+            "total_inner_solve_compile_overhead_s",
+            target_lane_profile,
+            source_key="inner_solve_compile_overhead_s",
+        )
 
     return {
         "profiled_stage_count": profile_count,
         "target_lane_profiled_stage_count": target_lane_profile_count,
         "total_stage_script_time_s": floats.get("total_stage_script_time_s"),
         "total_outer_optimizer_s": floats.get("total_outer_optimizer_s"),
-        "total_outer_optimizer_initial_phase_s": floats.get("total_outer_optimizer_initial_phase_s"),
+        "total_outer_optimizer_initial_phase_s": floats.get(
+            "total_outer_optimizer_initial_phase_s"
+        ),
         "total_outer_optimizer_main_s": floats.get("total_outer_optimizer_main_s"),
-        "total_target_lane_bundle_setup_s": floats.get("total_target_lane_bundle_setup_s"),
+        "total_target_lane_bundle_setup_s": floats.get(
+            "total_target_lane_bundle_setup_s"
+        ),
         "total_accepted_step_count": ints.get("total_accepted_step_count"),
         "total_objective_eval_count": ints.get("total_objective_eval_count"),
         "total_gradient_eval_count": ints.get("total_gradient_eval_count"),
@@ -634,8 +691,12 @@ def _aggregate_stage_profiling(stage_reports: list[dict[str, object]]) -> dict[s
             ints.get("total_objective_eval_count"),
             ints.get("total_accepted_step_count"),
         ),
-        "total_value_and_grad_compile_overhead_s": floats.get("total_value_and_grad_compile_overhead_s"),
-        "total_inner_solve_compile_overhead_s": floats.get("total_inner_solve_compile_overhead_s"),
+        "total_value_and_grad_compile_overhead_s": floats.get(
+            "total_value_and_grad_compile_overhead_s"
+        ),
+        "total_inner_solve_compile_overhead_s": floats.get(
+            "total_inner_solve_compile_overhead_s"
+        ),
         "stages": stage_summaries,
     }
 
@@ -667,9 +728,13 @@ def _aggregate_campaign_profiling(
         "profiled_candidate_count": profiled_candidate_count,
         "total_stage_script_time_s": floats.get("total_stage_script_time_s"),
         "total_outer_optimizer_s": floats.get("total_outer_optimizer_s"),
-        "total_outer_optimizer_initial_phase_s": floats.get("total_outer_optimizer_initial_phase_s"),
+        "total_outer_optimizer_initial_phase_s": floats.get(
+            "total_outer_optimizer_initial_phase_s"
+        ),
         "total_outer_optimizer_main_s": floats.get("total_outer_optimizer_main_s"),
-        "total_target_lane_bundle_setup_s": floats.get("total_target_lane_bundle_setup_s"),
+        "total_target_lane_bundle_setup_s": floats.get(
+            "total_target_lane_bundle_setup_s"
+        ),
         "total_accepted_step_count": ints.get("total_accepted_step_count"),
         "total_objective_eval_count": ints.get("total_objective_eval_count"),
         "total_gradient_eval_count": ints.get("total_gradient_eval_count"),
@@ -677,7 +742,9 @@ def _aggregate_campaign_profiling(
             ints.get("total_objective_eval_count"),
             ints.get("total_accepted_step_count"),
         ),
-        "total_value_and_grad_compile_overhead_s": floats.get("total_value_and_grad_compile_overhead_s"),
+        "total_value_and_grad_compile_overhead_s": floats.get(
+            "total_value_and_grad_compile_overhead_s"
+        ),
     }
 
 
@@ -689,7 +756,9 @@ def _build_campaign_branch_decision(
     trial_policy: str,
 ) -> dict[str, object]:
     profiled_candidate_count = _safe_int(profiling.get("profiled_candidate_count"))
-    total_stage_script_time_s = _finite_float(profiling.get("total_stage_script_time_s"))
+    total_stage_script_time_s = _finite_float(
+        profiling.get("total_stage_script_time_s")
+    )
     total_outer_optimizer_s = _finite_float(profiling.get("total_outer_optimizer_s"))
     total_outer_optimizer_initial_phase_s = _finite_float(
         profiling.get("total_outer_optimizer_initial_phase_s")
@@ -904,7 +973,9 @@ def classify_existing_stage_output(
     return "incomplete_existing" if has_existing_content else "not_started"
 
 
-def inspect_existing_stage_output(stage_output_root: Path) -> tuple[str, dict[str, object]]:
+def inspect_existing_stage_output(
+    stage_output_root: Path,
+) -> tuple[str, dict[str, object]]:
     snapshot = collect_stage_run_snapshot(stage_output_root)
     return classify_existing_stage_output(stage_output_root, snapshot), snapshot
 
@@ -995,9 +1066,7 @@ def build_stage_record(
         "initial_step_maxiter": stage.initial_step_maxiter,
         "target_lane_boozer_bfgs_tol": stage.target_lane_boozer_bfgs_tol,
         "target_lane_boozer_bfgs_maxiter": stage.target_lane_boozer_bfgs_maxiter,
-        "stage2_seed_path": None
-        if stage2_seed_path is None
-        else str(stage2_seed_path),
+        "stage2_seed_path": None if stage2_seed_path is None else str(stage2_seed_path),
         "stage_output_root": str(stage_output_root),
         "warm_start_run_dir": None
         if warm_start_run_dir is None
@@ -1006,9 +1075,7 @@ def build_stage_record(
         if jax_runtime_seed_spec_path is None
         else str(jax_runtime_seed_spec_path),
         "jax_runtime_seed_spec_command": jax_runtime_seed_spec_command,
-        "jax_profile_dir": None
-        if jax_profile_dir is None
-        else str(jax_profile_dir),
+        "jax_profile_dir": None if jax_profile_dir is None else str(jax_profile_dir),
         "command": command,
     }
 
@@ -1116,12 +1183,12 @@ def _build_research_verdicts(
     elif final_non_qs is None:
         evidence_gaps.append("final FINAL_NON_QS metric is missing or non-finite")
 
-    physics_gate_inputs = [verdict for verdict in (field_ok, iota_ok, non_qs_ok) if verdict is not None]
+    physics_gate_inputs = [
+        verdict for verdict in (field_ok, iota_ok, non_qs_ok) if verdict is not None
+    ]
     physics_gate_pass = None if not physics_gate_inputs else all(physics_gate_inputs)
     research_grade_ready = (
-        optimizer_success
-        and hardware_ok
-        and physics_gate_pass is True
+        optimizer_success and hardware_ok and physics_gate_pass is True
     )
     return {
         "full_convergence": optimizer_success,
@@ -1149,7 +1216,11 @@ def evaluate_continuation_stage(
     execution_status = str(stage_record.get("status", "unknown"))
     failures: list[str] = []
     warnings: list[str] = []
-    completed = execution_status == "completed" and isinstance(run_dir_value, str) and bool(run_dir_value)
+    completed = (
+        execution_status == "completed"
+        and isinstance(run_dir_value, str)
+        and bool(run_dir_value)
+    )
     if not isinstance(results, dict):
         results = {}
     required_artifacts = required_stage_artifact_filenames(results)
@@ -1281,7 +1352,11 @@ def evaluate_continuation_stage(
 
     salvage_status = "none"
     if isinstance(run_dir_value, str) and bool(run_dir_value):
-        salvage_status = "run_dir_only" if not isinstance(results, dict) or not results else "results_available"
+        salvage_status = (
+            "run_dir_only"
+            if not isinstance(results, dict) or not results
+            else "results_available"
+        )
     if completed and not failures:
         salvage_status = "complete"
 
@@ -1556,9 +1631,7 @@ def build_continuation_campaign_summary(
         donor_records,
         key=lambda record: tuple(record["ranking"]["sort_key"]),
     )
-    passed_candidate_count = sum(
-        record["passed"] is True for record in sorted_records
-    )
+    passed_candidate_count = sum(record["passed"] is True for record in sorted_records)
     research_grade_candidate_count = sum(
         record["research_grade"] is True for record in sorted_records
     )
@@ -1698,6 +1771,9 @@ def build_stage_jax_runtime_seed_spec_command(
 ) -> list[str]:
     command = [
         python_executable,
+        "-c",
+        _BOOTSTRAP_SINGLE_STAGE_RUNNER,
+        str(REPO_ROOT),
         str(SINGLE_STAGE_SCRIPT),
         "--warm-start-run-dir",
         str(warm_start_run_dir),
@@ -1732,6 +1808,9 @@ def build_stage_command(
 ) -> list[str]:
     command = [
         python_executable,
+        "-c",
+        _BOOTSTRAP_SINGLE_STAGE_RUNNER,
+        str(REPO_ROOT),
         str(SINGLE_STAGE_SCRIPT),
         "--output-root",
         str(stage_output_root),
@@ -2063,8 +2142,14 @@ def build_continuation_profiling_report_markdown(report: dict[str, object]) -> s
         profiling.get("target_lane_profiled_stage_count"),
         formatter=_format_report_int,
     )
-    _append_report_metric(lines, "Total stage wall time (s)", profiling.get("total_stage_script_time_s"))
-    _append_report_metric(lines, "Total outer optimizer time (s)", profiling.get("total_outer_optimizer_s"))
+    _append_report_metric(
+        lines, "Total stage wall time (s)", profiling.get("total_stage_script_time_s")
+    )
+    _append_report_metric(
+        lines,
+        "Total outer optimizer time (s)",
+        profiling.get("total_outer_optimizer_s"),
+    )
     _append_report_metric(
         lines,
         "Total initial outer phase time (s)",
@@ -2135,8 +2220,12 @@ def build_continuation_profiling_report_markdown(report: dict[str, object]) -> s
         jax_profile_dir = _profile_dir_value(stage_profiling.get("jax_profile_dir"))
         if jax_profile_dir is not None:
             lines.append(f"- JAX profile dir: `{jax_profile_dir}`")
-        _append_report_metric(lines, "Stage wall time (s)", stage_profiling.get("script_total_s"))
-        _append_report_metric(lines, "Outer optimizer time (s)", stage_profiling.get("outer_optimizer_s"))
+        _append_report_metric(
+            lines, "Stage wall time (s)", stage_profiling.get("script_total_s")
+        )
+        _append_report_metric(
+            lines, "Outer optimizer time (s)", stage_profiling.get("outer_optimizer_s")
+        )
         _append_report_metric(
             lines,
             "Initial outer phase time (s)",
@@ -2221,7 +2310,9 @@ def build_campaign_profiling_report_markdown(summary: dict[str, object]) -> str:
         profiling.get("profiled_candidate_count"),
         formatter=_format_report_int,
     )
-    _append_report_metric(lines, "Total stage wall time (s)", profiling.get("total_stage_script_time_s"))
+    _append_report_metric(
+        lines, "Total stage wall time (s)", profiling.get("total_stage_script_time_s")
+    )
     _append_report_metric(
         lines,
         "Total outer optimizer time (s)",
@@ -2461,17 +2552,19 @@ def run_single_continuation_with_args(
         run_mode = "summarize"
         run_root = Path(args.summarize_run_root).expanduser().resolve()
         if not run_root.exists():
-            raise SystemExit(f"Existing continuation run root does not exist: {run_root}")
+            raise SystemExit(
+                f"Existing continuation run root does not exist: {run_root}"
+            )
     elif args.resume_run_root is not None:
         run_mode = "resume"
         run_root = Path(args.resume_run_root).expanduser().resolve()
         if not run_root.exists():
-            raise SystemExit(f"Existing continuation run root does not exist: {run_root}")
+            raise SystemExit(
+                f"Existing continuation run root does not exist: {run_root}"
+            )
     else:
         run_id = (
-            args.run_id
-            if args.run_id is not None
-            else time.strftime("%Y%m%d-%H%M%S")
+            args.run_id if args.run_id is not None else time.strftime("%Y%m%d-%H%M%S")
         )
         run_root = Path(args.output_root).resolve() / f"continuation-{run_id}"
         if not args.dry_run:
@@ -2480,11 +2573,9 @@ def run_single_continuation_with_args(
     use_target_lane_fast_trials = continuation_uses_target_lane_fast_trials(
         passthrough_args
     )
-    initial_stage2_seed_path, initial_warm_start_run_dir = (
-        resolve_initial_stage_inputs(
-            initial_stage2_bs_path=args.initial_stage2_bs_path,
-            initial_warm_start_run_dir=args.initial_warm_start_run_dir,
-        )
+    initial_stage2_seed_path, initial_warm_start_run_dir = resolve_initial_stage_inputs(
+        initial_stage2_bs_path=args.initial_stage2_bs_path,
+        initial_warm_start_run_dir=args.initial_warm_start_run_dir,
     )
     if forced_initial_stage2_seed_path is not None:
         initial_stage2_seed_path = forced_initial_stage2_seed_path.resolve()
@@ -2523,9 +2614,7 @@ def run_single_continuation_with_args(
         "created_at_utc": _utc_now_iso(),
         "run_mode": run_mode,
         "run_root": str(run_root),
-        "jax_profile_dir": None
-        if jax_profile_root is None
-        else str(jax_profile_root),
+        "jax_profile_dir": None if jax_profile_root is None else str(jax_profile_root),
         "stages": [],
         "passthrough_args": passthrough_args,
         "trial_policy": args.trial_policy,
@@ -2648,7 +2737,11 @@ def run_single_continuation_with_args(
                     max_final_non_qs=args.max_final_non_qs,
                 )
                 stage_record["stage_contract"] = stage_gate
-                if run_mode == "resume" and (not is_final_stage) and (not stage_gate["passed"]):
+                if (
+                    run_mode == "resume"
+                    and (not is_final_stage)
+                    and (not stage_gate["passed"])
+                ):
                     stage_record["reused_existing_run"] = False
                     stage_record["resume_replaces_existing_status"] = existing_status
                     stage_record["preexisting_stage_snapshot"] = existing_snapshot
@@ -2884,7 +2977,9 @@ def run_continuation_campaign_with_args(
             summary,
             campaign_root=campaign_root,
         )
-        print(f"Wrote continuation campaign profiling report to {profiling_report_path}")
+        print(
+            f"Wrote continuation campaign profiling report to {profiling_report_path}"
+        )
 
     best_candidate = summary.get("best_candidate")
     exit_code = 0

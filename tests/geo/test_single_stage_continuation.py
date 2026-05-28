@@ -58,7 +58,14 @@ class SingleStageContinuationTests(unittest.TestCase):
 
         self.assertEqual(
             [
-                (stage.name, stage.mpol, stage.ntor, stage.nphi, stage.ntheta, stage.maxiter)
+                (
+                    stage.name,
+                    stage.mpol,
+                    stage.ntor,
+                    stage.nphi,
+                    stage.ntheta,
+                    stage.maxiter,
+                )
                 for stage in stages
             ],
             [
@@ -233,6 +240,12 @@ class SingleStageContinuationTests(unittest.TestCase):
                 use_target_lane_fast_trials=True,
             )
 
+        self.assertEqual(
+            command[:3],
+            ["/usr/bin/python3", "-c", module._BOOTSTRAP_SINGLE_STAGE_RUNNER],
+        )
+        self.assertEqual(command[3], str(module.REPO_ROOT))
+        self.assertEqual(command[4], str(module.SINGLE_STAGE_SCRIPT))
         self.assertIn("--stage2-bs-path", command)
         self.assertIn(str(stage2_seed_path), command)
         self.assertIn("--warm-start-run-dir", command)
@@ -360,9 +373,17 @@ class SingleStageContinuationTests(unittest.TestCase):
             passthrough_args=["--backend", "jax", "--optimizer-backend", "ondevice"],
             stage=module.ContinuationStage("coarse", 2, 2, 31, 16, 1),
             warm_start_run_dir=Path("/tmp/donor-final-resolution"),
-            jax_runtime_seed_spec_path=Path("/tmp/stage/single_stage_jax_runtime_spec.json"),
+            jax_runtime_seed_spec_path=Path(
+                "/tmp/stage/single_stage_jax_runtime_spec.json"
+            ),
         )
 
+        self.assertEqual(
+            command[:3],
+            ["/usr/bin/python3", "-c", module._BOOTSTRAP_SINGLE_STAGE_RUNNER],
+        )
+        self.assertEqual(command[3], str(module.REPO_ROOT))
+        self.assertEqual(command[4], str(module.SINGLE_STAGE_SCRIPT))
         self.assertIn("--compile-jax-runtime-seed-spec", command)
         self.assertEqual(command[command.index("--mpol") + 1], "2")
         self.assertEqual(command[command.index("--ntor") + 1], "2")
@@ -553,9 +574,7 @@ class SingleStageContinuationTests(unittest.TestCase):
                 run_root=Path("/tmp/campaign/donor-a"),
                 summary_path=Path("/tmp/campaign/donor-a/continuation_summary.json"),
                 summary={},
-                report_path=Path(
-                    "/tmp/campaign/donor-a/continuation_validation.json"
-                ),
+                report_path=Path("/tmp/campaign/donor-a/continuation_validation.json"),
                 report={
                     "passed": True,
                     "research_verdicts": {"research_grade_ready": True},
@@ -590,9 +609,7 @@ class SingleStageContinuationTests(unittest.TestCase):
                 run_root=Path("/tmp/campaign/donor-b"),
                 summary_path=Path("/tmp/campaign/donor-b/continuation_summary.json"),
                 summary={},
-                report_path=Path(
-                    "/tmp/campaign/donor-b/continuation_validation.json"
-                ),
+                report_path=Path("/tmp/campaign/donor-b/continuation_validation.json"),
                 report={
                     "passed": True,
                     "research_verdicts": {"research_grade_ready": False},
@@ -674,9 +691,7 @@ class SingleStageContinuationTests(unittest.TestCase):
                 run_root=Path("/tmp/campaign/donor-a"),
                 summary_path=Path("/tmp/campaign/donor-a/continuation_summary.json"),
                 summary={},
-                report_path=Path(
-                    "/tmp/campaign/donor-a/continuation_validation.json"
-                ),
+                report_path=Path("/tmp/campaign/donor-a/continuation_validation.json"),
                 report={
                     "passed": False,
                     "research_verdicts": {"research_grade_ready": False},
@@ -714,9 +729,7 @@ class SingleStageContinuationTests(unittest.TestCase):
                 run_root=Path("/tmp/campaign/donor-b"),
                 summary_path=Path("/tmp/campaign/donor-b/continuation_summary.json"),
                 summary={},
-                report_path=Path(
-                    "/tmp/campaign/donor-b/continuation_validation.json"
-                ),
+                report_path=Path("/tmp/campaign/donor-b/continuation_validation.json"),
                 report={
                     "passed": False,
                     "research_verdicts": {"research_grade_ready": False},
@@ -786,9 +799,7 @@ class SingleStageContinuationTests(unittest.TestCase):
                 run_root=Path("/tmp/campaign/donor-a"),
                 summary_path=Path("/tmp/campaign/donor-a/continuation_summary.json"),
                 summary={},
-                report_path=Path(
-                    "/tmp/campaign/donor-a/continuation_validation.json"
-                ),
+                report_path=Path("/tmp/campaign/donor-a/continuation_validation.json"),
                 report={
                     "passed": False,
                     "research_verdicts": {"research_grade_ready": False},
@@ -851,9 +862,7 @@ class SingleStageContinuationTests(unittest.TestCase):
         module = self.load_module()
 
         self.assertTrue(
-            module.continuation_uses_target_lane_fast_trials(
-                ["--backend", "jax"]
-            )
+            module.continuation_uses_target_lane_fast_trials(["--backend", "jax"])
         )
         self.assertFalse(
             module.continuation_uses_target_lane_fast_trials(
@@ -1504,7 +1513,9 @@ class SingleStageContinuationTests(unittest.TestCase):
         self.assertIn("- Total outer optimizer time (s): 19", markdown)
         self.assertIn("- Objective evaluations per accepted step: 3.5", markdown)
 
-    def test_build_continuation_validation_report_rejects_missing_surface_artifact(self):
+    def test_build_continuation_validation_report_rejects_missing_surface_artifact(
+        self,
+    ):
         module = self.load_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1577,9 +1588,7 @@ class SingleStageContinuationTests(unittest.TestCase):
             any("OPTIMIZER_SUCCESS" in failure for failure in report["failures"])
         )
         self.assertTrue(
-            any(
-                "HARDWARE_CONSTRAINTS_OK" in failure for failure in report["failures"]
-            )
+            any("HARDWARE_CONSTRAINTS_OK" in failure for failure in report["failures"])
         )
 
     def test_build_continuation_validation_report_enforces_optional_thresholds(self):
@@ -1614,9 +1623,7 @@ class SingleStageContinuationTests(unittest.TestCase):
             )
 
         self.assertFalse(report["passed"])
-        self.assertTrue(
-            any("FIELD_ERROR" in failure for failure in report["failures"])
-        )
+        self.assertTrue(any("FIELD_ERROR" in failure for failure in report["failures"]))
         self.assertTrue(
             any("FINAL_IOTA - TARGET_IOTA" in failure for failure in report["failures"])
         )
@@ -1693,9 +1700,7 @@ class SingleStageContinuationTests(unittest.TestCase):
                 (run_root / "continuation_summary.json").read_text(encoding="utf-8")
             )
             report = json.loads(
-                (run_root / "continuation_validation.json").read_text(
-                    encoding="utf-8"
-                )
+                (run_root / "continuation_validation.json").read_text(encoding="utf-8")
             )
 
         self.assertEqual(summary["run_mode"], "summarize")
@@ -1787,13 +1792,14 @@ class SingleStageContinuationTests(unittest.TestCase):
                 (run_root / "continuation_summary.json").read_text(encoding="utf-8")
             )
             report = json.loads(
-                (run_root / "continuation_validation.json").read_text(
-                    encoding="utf-8"
-                )
+                (run_root / "continuation_validation.json").read_text(encoding="utf-8")
             )
 
         self.assertEqual(len(seen_commands), 1)
-        self.assertIn("stage-02-final", seen_commands[0][seen_commands[0].index("--output-root") + 1])
+        self.assertIn(
+            "stage-02-final",
+            seen_commands[0][seen_commands[0].index("--output-root") + 1],
+        )
         self.assertEqual(summary["run_mode"], "resume")
         self.assertTrue(summary["stages"][0]["reused_existing_run"])
         self.assertEqual(
@@ -1844,8 +1850,12 @@ class SingleStageContinuationTests(unittest.TestCase):
                 (run_root / "continuation_summary.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual(summary["jax_profile_dir"], str((run_root / "xprof").resolve()))
-        self.assertEqual(summary["stages"][0]["jax_profile_dir"], "/tmp/profiles/coarse")
+        self.assertEqual(
+            summary["jax_profile_dir"], str((run_root / "xprof").resolve())
+        )
+        self.assertEqual(
+            summary["stages"][0]["jax_profile_dir"], "/tmp/profiles/coarse"
+        )
 
     def test_main_threads_stage_specific_jax_profile_dirs(self):
         module = self.load_module()
@@ -1923,14 +1933,12 @@ class SingleStageContinuationTests(unittest.TestCase):
                 (run_root / "continuation_summary.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual(summary["jax_profile_dir"], str((run_root / "xprof").resolve()))
+        self.assertEqual(
+            summary["jax_profile_dir"], str((run_root / "xprof").resolve())
+        )
         self.assertEqual(len(seen_commands), 2)
-        coarse_profile_dir = (
-            run_root / "xprof" / "stage-01-coarse"
-        ).resolve()
-        final_profile_dir = (
-            run_root / "xprof" / "stage-02-final"
-        ).resolve()
+        coarse_profile_dir = (run_root / "xprof" / "stage-01-coarse").resolve()
+        final_profile_dir = (run_root / "xprof" / "stage-02-final").resolve()
         self.assertEqual(
             seen_commands[0][seen_commands[0].index("--jax-profile-dir") + 1],
             str(coarse_profile_dir),
@@ -1939,8 +1947,12 @@ class SingleStageContinuationTests(unittest.TestCase):
             seen_commands[1][seen_commands[1].index("--jax-profile-dir") + 1],
             str(final_profile_dir),
         )
-        self.assertEqual(summary["stages"][0]["jax_profile_dir"], str(coarse_profile_dir))
-        self.assertEqual(summary["stages"][1]["jax_profile_dir"], str(final_profile_dir))
+        self.assertEqual(
+            summary["stages"][0]["jax_profile_dir"], str(coarse_profile_dir)
+        )
+        self.assertEqual(
+            summary["stages"][1]["jax_profile_dir"], str(final_profile_dir)
+        )
 
     def test_main_resume_run_root_reruns_invalid_completed_nonfinal_stage(self):
         module = self.load_module()
@@ -2058,7 +2070,9 @@ class SingleStageContinuationTests(unittest.TestCase):
         )
         self.assertEqual(summary["run_mode"], "resume")
         self.assertFalse(summary["stages"][0]["reused_existing_run"])
-        self.assertEqual(summary["stages"][0]["resume_replaces_existing_status"], "completed")
+        self.assertEqual(
+            summary["stages"][0]["resume_replaces_existing_status"], "completed"
+        )
         self.assertFalse(summary["stages"][0]["preexisting_stage_validation"]["passed"])
 
     def test_main_resume_run_root_rewrites_stale_summary_before_rerun(self):
@@ -2229,9 +2243,7 @@ class SingleStageContinuationTests(unittest.TestCase):
                 (run_root / "continuation_summary.json").read_text(encoding="utf-8")
             )
             report = json.loads(
-                (run_root / "continuation_validation.json").read_text(
-                    encoding="utf-8"
-                )
+                (run_root / "continuation_validation.json").read_text(encoding="utf-8")
             )
 
         self.assertEqual(len(seen_commands), 1)
