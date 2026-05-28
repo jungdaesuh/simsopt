@@ -103,10 +103,7 @@ from banana_opt.alm_adaptive_smoothing import (
     ALM_SMOOTHING_FLOOR_FRACTION as _ALM_SMOOTHING_FLOOR_FRACTION,
     adapt_alm_smoothing_from_history,
 )
-from banana_opt.boozer_finite_current import (
-    BoozerSurfaceFiniteI,
-    derive_signed_G_from_field,
-)
+from banana_opt.boozer_finite_current import derive_signed_G_from_field
 from banana_opt.boozer_warm_start import save_boozer_surface_with_state
 from banana_opt.boozer_residuals import (  # noqa: F401 - re-exported for importlib-loaded tests
     BoozerResidualExact,
@@ -2509,6 +2506,7 @@ def initialize_boozer_surface(
     *,
     initial_surface_guess=None,
     nfp=5,
+    boozer_surface_cls=None,
 ):
     return _initialize_boozer_surface_impl(
         surf_prev,
@@ -2524,7 +2522,7 @@ def initialize_boozer_surface(
         nfp=nfp,
         surface_cls=SurfaceXYZTensorFourier,
         volume_cls=Volume,
-        boozer_surface_cls=BoozerSurfaceFiniteI,
+        boozer_surface_cls=boozer_surface_cls,
     )
 
 

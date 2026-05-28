@@ -709,6 +709,98 @@ class HandoffModuleTests(unittest.TestCase):
         def J(self):
             return 0.1
 
+    def test_construct_boozer_surface_for_current_uses_plain_boozer_for_vacuum(self):
+        module = load_handoff_module()
+
+        class _PlainBoozerSurface:
+            def __init__(
+                self,
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options=None,
+            ):
+                del bs, vol, vol_target, constraint_weight
+                self.surface = surf
+                self.options = options
+
+        class _FiniteIBoozerSurface:
+            def __init__(
+                self,
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options=None,
+                I=0.0,
+            ):
+                del bs, vol, vol_target, constraint_weight
+                self.surface = surf
+                self.options = options
+                self.I = I
+
+        with (
+            patch.object(module, "BoozerSurface", _PlainBoozerSurface),
+            patch.object(module, "BoozerSurfaceFiniteI", _FiniteIBoozerSurface),
+        ):
+            vacuum_surface = module._construct_boozer_surface_for_current(
+                object(),
+                object(),
+                object(),
+                0.1,
+                1.0,
+                boozer_I=0.0,
+            )
+            finite_surface = module._construct_boozer_surface_for_current(
+                object(),
+                object(),
+                object(),
+                0.1,
+                1.0,
+                boozer_I=1.0e-3,
+            )
+
+        self.assertIsInstance(vacuum_surface, _PlainBoozerSurface)
+        self.assertFalse(hasattr(vacuum_surface, "I"))
+        self.assertIsInstance(finite_surface, _FiniteIBoozerSurface)
+        self.assertAlmostEqual(finite_surface.I, 1.0e-3)
+
+    def test_vacuum_boozer_surface_validator_rejects_finite_i_lineage(self):
+        module = load_artifact_contracts_module()
+        finite_i_payload = {
+            "simsopt_objs": {
+                "surface": {
+                    "@module": "banana_opt.boozer_finite_current",
+                    "@class": "BoozerSurfaceFiniteI",
+                    "I": 0.0,
+                }
+            }
+        }
+
+        validation = module.validate_vacuum_boozer_surface_payload(finite_i_payload)
+
+        self.assertFalse(validation["passed"])
+        self.assertFalse(validation["no_finite_i_boozer_surface"])
+        self.assertFalse(validation["no_i_field"])
+
+    def test_vacuum_boozer_surface_validator_accepts_plain_upstream_lineage(self):
+        module = load_artifact_contracts_module()
+        plain_payload = {
+            "simsopt_objs": {
+                "surface": {
+                    "@module": "simsopt.geo.boozersurface",
+                    "@class": "BoozerSurface",
+                }
+            }
+        }
+
+        validation = module.validate_vacuum_boozer_surface_payload(plain_payload)
+
+        self.assertTrue(validation["passed"])
+
     def test_attempt_initialize_boozer_surface_threads_requested_volume_target(self):
         module = load_handoff_module()
         surf_prev = SimpleNamespace(

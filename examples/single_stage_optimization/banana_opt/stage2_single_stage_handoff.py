@@ -7,6 +7,7 @@ from typing import Mapping
 import numpy as np
 
 from simsopt.geo import SurfaceXYZTensorFourier
+from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo.surfaceobjectives import Volume
 
 from .boozer_finite_current import (
@@ -30,6 +31,7 @@ from .coil_groups import (
     resolve_manifest,
 )
 from .current_contracts import (
+    resolve_effective_current_mode,
     resolve_finite_current_mode,
     resolve_loaded_tf_current_A,
     validate_proxy_vf_current_convention_for_mode,
@@ -1238,6 +1240,56 @@ def load_warm_start_boozer_seed(
     )
 
 
+def _construct_boozer_surface_for_current(
+    bs,
+    surf,
+    vol,
+    vol_target,
+    constraint_weight,
+    *,
+    boozer_I,
+    boozer_surface_cls=None,
+):
+    options = {"verbose": True}
+    if boozer_surface_cls is not None:
+        if boozer_surface_cls is BoozerSurface:
+            return boozer_surface_cls(
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options=options,
+            )
+        return boozer_surface_cls(
+            bs,
+            surf,
+            vol,
+            vol_target,
+            constraint_weight,
+            options=options,
+            I=boozer_I,
+        )
+    if resolve_effective_current_mode(boozer_I) == "vacuum":
+        return BoozerSurface(
+            bs,
+            surf,
+            vol,
+            vol_target,
+            constraint_weight,
+            options=options,
+        )
+    return BoozerSurfaceFiniteI(
+        bs,
+        surf,
+        vol,
+        vol_target,
+        constraint_weight,
+        options=options,
+        I=boozer_I,
+    )
+
+
 def attempt_initialize_boozer_surface(
     surf_prev,
     mpol,
@@ -1253,7 +1305,7 @@ def attempt_initialize_boozer_surface(
     nfp=5,
     surface_cls=SurfaceXYZTensorFourier,
     volume_cls=Volume,
-    boozer_surface_cls=BoozerSurfaceFiniteI,
+    boozer_surface_cls=None,
 ) -> BoozerInitializationResult:
     surf = surface_cls(
         mpol=mpol,
@@ -1270,14 +1322,14 @@ def attempt_initialize_boozer_surface(
 
     if constraint_weight is not None:
         vol = volume_cls(surf)
-        boozer_surface = boozer_surface_cls(
+        boozer_surface = _construct_boozer_surface_for_current(
             bs,
             surf,
             vol,
             float(vol_target),
             constraint_weight,
-            options={"verbose": True},
-            I=boozer_I,
+            boozer_I=boozer_I,
+            boozer_surface_cls=boozer_surface_cls,
         )
     else:
         surf_exact = surface_cls(
@@ -1290,14 +1342,14 @@ def attempt_initialize_boozer_surface(
         )
         _assign_surface_dofs(surf_exact, _surface_dofs(surf))
         vol = volume_cls(surf_exact)
-        boozer_surface = boozer_surface_cls(
+        boozer_surface = _construct_boozer_surface_for_current(
             bs,
             surf_exact,
             vol,
             float(vol_target),
             None,
-            options={"verbose": True},
-            I=boozer_I,
+            boozer_I=boozer_I,
+            boozer_surface_cls=boozer_surface_cls,
         )
 
     pre_solve_state = _snapshot_boozer_initialization_state(boozer_surface)
@@ -1351,7 +1403,7 @@ def initialize_boozer_surface(
     nfp=5,
     surface_cls=SurfaceXYZTensorFourier,
     volume_cls=Volume,
-    boozer_surface_cls=BoozerSurfaceFiniteI,
+    boozer_surface_cls=None,
 ):
     """Initialize a Boozer surface via either the "least squares" or "exact" path.
 

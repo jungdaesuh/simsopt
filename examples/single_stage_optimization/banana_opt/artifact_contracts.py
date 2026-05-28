@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from pathlib import Path
 
@@ -441,6 +442,78 @@ def validate_smoke_results(
         value for key, value in checks.items() if key not in {"missing_keys", "passed"}
     )
     return checks
+
+
+def _iter_json_objects(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _iter_json_objects(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_json_objects(child)
+
+
+def validate_vacuum_boozer_surface_payload(payload: dict) -> dict:
+    objects = list(_iter_json_objects(payload))
+    plain_boozer_surfaces = [
+        item
+        for item in objects
+        if item.get("@module") == "simsopt.geo.boozersurface"
+        and item.get("@class") == "BoozerSurface"
+    ]
+    finite_i_boozer_surfaces = [
+        item
+        for item in objects
+        if item.get("@class") == "BoozerSurfaceFiniteI"
+        or item.get("@module") == "banana_opt.boozer_finite_current"
+    ]
+    i_fields = [item["I"] for item in objects if "I" in item]
+    checks = {
+        "has_plain_boozer_surface": bool(plain_boozer_surfaces),
+        "no_finite_i_boozer_surface": not finite_i_boozer_surfaces,
+        "no_i_field": not i_fields,
+        "finite_i_boozer_surface_count": len(finite_i_boozer_surfaces),
+        "i_field_count": len(i_fields),
+    }
+    checks["passed"] = (
+        checks["has_plain_boozer_surface"]
+        and checks["no_finite_i_boozer_surface"]
+        and checks["no_i_field"]
+    )
+    return checks
+
+
+def validate_vacuum_boozer_surface_json(surface_path: str | Path) -> dict:
+    payload = json.loads(Path(surface_path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Boozer surface artifact must be a JSON object: {surface_path}")
+    return validate_vacuum_boozer_surface_payload(payload)
+
+
+def validate_boozer_surface_json_current_lineage(surface_path: str | Path) -> dict:
+    payload = json.loads(Path(surface_path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Boozer surface artifact must be a JSON object: {surface_path}")
+    i_values = [
+        float(item["I"])
+        for item in _iter_json_objects(payload)
+        if "I" in item
+    ]
+    if not i_values:
+        return validate_vacuum_boozer_surface_payload(payload)
+    vacuum_i_values = [
+        value
+        for value in i_values
+        if resolve_effective_current_mode(value) == "vacuum"
+    ]
+    if vacuum_i_values:
+        return validate_vacuum_boozer_surface_payload(payload)
+    return {
+        "passed": True,
+        "vacuum_i_field_count": 0,
+        "finite_i_field_count": len(i_values),
+    }
 
 
 def basin_metadata_from_config(config) -> dict:

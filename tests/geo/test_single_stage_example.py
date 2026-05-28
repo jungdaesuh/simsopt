@@ -648,7 +648,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
             ),
             patch.object(module, "Volume", FakeVolume),
-            patch.object(module, "BoozerSurfaceFiniteI", FakeBoozerSurface),
         ):
             return module.initialize_boozer_surface(
                 surf_prev,
@@ -661,6 +660,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 G0=TEST_G0,
                 boozer_I=TEST_BOOZER_I,
                 initial_surface_guess=initial_surface_guess,
+                boozer_surface_cls=FakeBoozerSurface,
             )
 
     def residual_module(self, module):
@@ -1136,7 +1136,15 @@ class SingleStageExampleTests(unittest.TestCase):
 
             def save(self, path):
                 self.saved_paths.append(path)
-                Path(path).write_text("boozer", encoding="utf-8")
+                Path(path).write_text(
+                    json.dumps(
+                        {
+                            "@module": "simsopt.geo.boozersurface",
+                            "@class": "BoozerSurface",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
 
         class _BiotSavart:
             def set_points(self, points):
@@ -1245,7 +1253,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
             ),
             patch.object(module, "Volume", FakeVolume),
-            patch.object(module, "BoozerSurfaceFiniteI", FakeBoozerSurface),
         ):
             boozer_surface = module.initialize_boozer_surface(
                 surf_prev,
@@ -1257,6 +1264,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 iota=TEST_IOTA,
                 G0=TEST_G0,
                 boozer_I=-TEST_BOOZER_I,
+                boozer_surface_cls=FakeBoozerSurface,
             )
 
         self.assertIsInstance(boozer_surface, FakeBoozerSurface)
