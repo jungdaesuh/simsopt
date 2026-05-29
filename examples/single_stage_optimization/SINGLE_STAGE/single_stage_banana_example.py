@@ -36,6 +36,9 @@ from simsopt.geo import (
     curves_to_vtk,
     CurveLength,
     LpCurveCurvature,
+    MeanSquaredCurvature,
+    ArclengthVariation,
+    LinkingNumber,
 )
 from simsopt.geo.surfaceobjectives import (
     Volume,
@@ -46,6 +49,7 @@ from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
 from simsopt.field import (
     BiotSavart,
 )
+from simsopt.field.force import MeanSquaredForce, regularization_circ
 from simsopt.objectives import QuadraticPenalty
 from simsopt._core.derivative import Derivative
 
@@ -2060,6 +2064,51 @@ def parse_args():
             )
         ),
         help="Penalty weight for the Single Stage curve self-intersection term.",
+    )
+    parser.add_argument(
+        "--msc-weight",
+        type=float,
+        default=float(os.environ.get("MSC_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the SIMSOPT MeanSquaredCurvature coil regularizer "
+            "(default 0 = off); smooths the optimized banana coil."
+        ),
+    )
+    parser.add_argument(
+        "--arclen-weight",
+        type=float,
+        default=float(os.environ.get("ARCLEN_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the SIMSOPT ArclengthVariation coil regularizer "
+            "(default 0 = off); penalizes non-uniform coil parametrization."
+        ),
+    )
+    parser.add_argument(
+        "--link-weight",
+        type=float,
+        default=float(os.environ.get("LINKING_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the SIMSOPT LinkingNumber coil-validity term "
+            "(default 0 = off); penalizes mutually linked coils."
+        ),
+    )
+    parser.add_argument(
+        "--coil-force-weight",
+        type=float,
+        default=float(os.environ.get("COIL_FORCE_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the summed SIMSOPT MeanSquaredForce coil-force term "
+            "(default 0 = off); requires --coil-force-conductor-radius > 0."
+        ),
+    )
+    parser.add_argument(
+        "--coil-force-conductor-radius",
+        type=float,
+        default=float(os.environ.get("COIL_FORCE_CONDUCTOR_RADIUS", "0.0")),
+        help=(
+            "Circular conductor radius a (m) for the coil-force regularization "
+            "regularization_circ(a). Required when --coil-force-weight > 0."
+        ),
     )
     parser.add_argument(
         "--banana-current-max-A",
@@ -5812,6 +5861,10 @@ def apply_frontier_scalarization_override(
         poloidal_extent_weight=SINGLE_STAGE_POLOIDAL_WEIGHT,
         width_weight=SINGLE_STAGE_WIDTH_WEIGHT,
         selfint_weight=SINGLE_STAGE_SELFINT_WEIGHT,
+        msc_weight=globals().get("MSC_WEIGHT", 0.0),
+        arclen_weight=globals().get("ARCLEN_WEIGHT", 0.0),
+        link_weight=globals().get("LINKING_WEIGHT", 0.0),
+        force_weight=globals().get("FORCE_WEIGHT", 0.0),
         objective_optimizable=globals().get("JF"),
         alm_formulation=alm_formulation,
         alm_multipliers=globals().get("ALM_MULTIPLIERS"),
@@ -6184,6 +6237,11 @@ def build_single_stage_objective_bundle(
     frontier_goal_config=None,
     boozer_residual_threshold=0.0,
     JResidueObjective=None,
+    MSC_WEIGHT=0.0,
+    ARCLEN_WEIGHT=0.0,
+    LINKING_WEIGHT=0.0,
+    FORCE_WEIGHT=0.0,
+    coil_force_regularization=0.0,
 ):
     boozer_terms = build_boozer_derived_objective_terms(
         stage,
@@ -6251,6 +6309,24 @@ def build_single_stage_objective_bundle(
             BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * banana_curves[0].order
         ),
     )
+    # Opt-in SIMSOPT coil regularizers (default-OFF): constructed only when the
+    # corresponding weight is set, so default runs add nothing to the objective
+    # graph and stay byte-identical. MSC/arclength regularize the optimized banana
+    # coil; LinkingNumber penalizes coil entanglement across the modular set; the
+    # coil force is the summed mean-squared Lorentz force over the coil set.
+    JMeanSquaredCurvature = (
+        MeanSquaredCurvature(banana_curves[0]) if MSC_WEIGHT > 0.0 else None
+    )
+    JArclengthVariation = (
+        ArclengthVariation(banana_curves[0]) if ARCLEN_WEIGHT > 0.0 else None
+    )
+    JLinkingNumber = LinkingNumber(curves) if LINKING_WEIGHT > 0.0 else None
+    JCoilForce = None
+    if FORCE_WEIGHT > 0.0:
+        force_terms = [
+            MeanSquaredForce(coil, coils, coil_force_regularization) for coil in coils
+        ]
+        JCoilForce = sum(force_terms[1:], force_terms[0])
     JF = build_total_objective(
         goal_objective_terms["JnonQSRatioObjective"],
         goal_objective_terms["effective_res_weight"],
@@ -6273,6 +6349,14 @@ def build_single_stage_objective_bundle(
         width_min_threshold=SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
         width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
         JResidueObjective=JResidueObjective,
+        JMeanSquaredCurvature=JMeanSquaredCurvature,
+        MSC_WEIGHT=MSC_WEIGHT,
+        JArclengthVariation=JArclengthVariation,
+        ARCLEN_WEIGHT=ARCLEN_WEIGHT,
+        JLinkingNumber=JLinkingNumber,
+        LINKING_WEIGHT=LINKING_WEIGHT,
+        JCoilForce=JCoilForce,
+        FORCE_WEIGHT=FORCE_WEIGHT,
     )
     return {
         "surface_iota_terms": surface_iota_terms,
@@ -6301,6 +6385,10 @@ def build_single_stage_objective_bundle(
         "JCoilWidth": JCoilWidth,
         "JCurveSelfIntersect": JCurveSelfIntersect,
         "JResidueObjective": JResidueObjective,
+        "JMeanSquaredCurvature": JMeanSquaredCurvature,
+        "JArclengthVariation": JArclengthVariation,
+        "JLinkingNumber": JLinkingNumber,
+        "JCoilForce": JCoilForce,
         "JF": JF,
     }
 
@@ -6330,6 +6418,10 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JCoilWidth
     global JCurveSelfIntersect
     global JResidueObjective
+    global JMeanSquaredCurvature
+    global JArclengthVariation
+    global JLinkingNumber
+    global JCoilForce
     global JF
 
     surface_iota_terms = objective_bundle["surface_iota_terms"]
@@ -6356,6 +6448,10 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JCoilWidth = objective_bundle["JCoilWidth"]
     JCurveSelfIntersect = objective_bundle["JCurveSelfIntersect"]
     JResidueObjective = objective_bundle["JResidueObjective"]
+    JMeanSquaredCurvature = objective_bundle["JMeanSquaredCurvature"]
+    JArclengthVariation = objective_bundle["JArclengthVariation"]
+    JLinkingNumber = objective_bundle["JLinkingNumber"]
+    JCoilForce = objective_bundle["JCoilForce"]
     JF = objective_bundle["JF"]
 
 
@@ -6718,6 +6814,14 @@ def evaluate_total_objective(
             JCurveSelfIntersect=JCurveSelfIntersect,
             SELFINT_WEIGHT=SELFINT_WEIGHT,
             JResidueObjective=globals().get("JResidueObjective"),
+            JMeanSquaredCurvature=globals().get("JMeanSquaredCurvature"),
+            MSC_WEIGHT=globals().get("MSC_WEIGHT", 0.0),
+            JArclengthVariation=globals().get("JArclengthVariation"),
+            ARCLEN_WEIGHT=globals().get("ARCLEN_WEIGHT", 0.0),
+            JLinkingNumber=globals().get("JLinkingNumber"),
+            LINKING_WEIGHT=globals().get("LINKING_WEIGHT", 0.0),
+            JCoilForce=globals().get("JCoilForce"),
+            FORCE_WEIGHT=globals().get("FORCE_WEIGHT", 0.0),
         ),
         alm_formulation="weighted_sum",
     )
@@ -6856,6 +6960,14 @@ def evaluate_alm_objective(
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
             JResidueObjective=globals().get("JResidueObjective"),
+            JMeanSquaredCurvature=globals().get("JMeanSquaredCurvature"),
+            MSC_WEIGHT=globals().get("MSC_WEIGHT", 0.0),
+            JArclengthVariation=globals().get("JArclengthVariation"),
+            ARCLEN_WEIGHT=globals().get("ARCLEN_WEIGHT", 0.0),
+            JLinkingNumber=globals().get("JLinkingNumber"),
+            LINKING_WEIGHT=globals().get("LINKING_WEIGHT", 0.0),
+            JCoilForce=globals().get("JCoilForce"),
+            FORCE_WEIGHT=globals().get("FORCE_WEIGHT", 0.0),
             include_diagnostics=include_diagnostics,
         ),
         alm_formulation=args.alm_formulation,
@@ -9921,6 +10033,14 @@ def build_total_objective(
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
     JResidueObjective=None,
+    JMeanSquaredCurvature=None,
+    MSC_WEIGHT=0.0,
+    JArclengthVariation=None,
+    ARCLEN_WEIGHT=0.0,
+    JLinkingNumber=None,
+    LINKING_WEIGHT=0.0,
+    JCoilForce=None,
+    FORCE_WEIGHT=0.0,
 ):
     return _build_total_objective_impl(
         JnonQSRatio,
@@ -9948,6 +10068,14 @@ def build_total_objective(
         JCurveSelfIntersect=JCurveSelfIntersect,
         SELFINT_WEIGHT=SELFINT_WEIGHT,
         JResidueObjective=JResidueObjective,
+        JMeanSquaredCurvature=JMeanSquaredCurvature,
+        MSC_WEIGHT=MSC_WEIGHT,
+        JArclengthVariation=JArclengthVariation,
+        ARCLEN_WEIGHT=ARCLEN_WEIGHT,
+        JLinkingNumber=JLinkingNumber,
+        LINKING_WEIGHT=LINKING_WEIGHT,
+        JCoilForce=JCoilForce,
+        FORCE_WEIGHT=FORCE_WEIGHT,
     )
 
 
@@ -11911,6 +12039,23 @@ if __name__ == "__main__":
         raise ValueError(
             f"--curvature-threshold must be <= {MAX_CURVATURE_INV_M:.1f} m^-1."
         )
+    # Opt-in SIMSOPT coil regularizer weights (default 0 -> term not constructed,
+    # so the objective stays byte-identical with prior runs).
+    MSC_WEIGHT = float(args.msc_weight)
+    ARCLEN_WEIGHT = float(args.arclen_weight)
+    LINKING_WEIGHT = float(args.link_weight)
+    FORCE_WEIGHT = float(args.coil_force_weight)
+    # The coil-force regularization is an externally-owned physical property (the
+    # conductor cross-section), so require it explicitly when the force term is on.
+    if FORCE_WEIGHT > 0.0 and args.coil_force_conductor_radius <= 0.0:
+        raise ValueError(
+            "--coil-force-conductor-radius must be > 0 when --coil-force-weight > 0."
+        )
+    COIL_FORCE_REGULARIZATION = (
+        regularization_circ(float(args.coil_force_conductor_radius))
+        if FORCE_WEIGHT > 0.0
+        else 0.0
+    )
     SURFACE_GAP_THRESHOLD = max(args.surface_gap_threshold, 0.0)
 
     length_target = validate_coil_length_target(
@@ -11976,6 +12121,11 @@ if __name__ == "__main__":
                 alm_boozer_threshold=args.alm_boozer_threshold,
             ),
             JResidueObjective=JResidueObjective,
+            MSC_WEIGHT=MSC_WEIGHT,
+            ARCLEN_WEIGHT=ARCLEN_WEIGHT,
+            LINKING_WEIGHT=LINKING_WEIGHT,
+            FORCE_WEIGHT=FORCE_WEIGHT,
+            coil_force_regularization=COIL_FORCE_REGULARIZATION,
         )
         apply_single_stage_objective_bundle(objective_bundle)
         return objective_bundle
@@ -13498,6 +13648,11 @@ if __name__ == "__main__":
         "SINGLE_STAGE_WIDTH_MAX_THRESHOLD": SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
         "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
         "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
+        "MSC_WEIGHT": MSC_WEIGHT,
+        "ARCLEN_WEIGHT": ARCLEN_WEIGHT,
+        "LINKING_WEIGHT": LINKING_WEIGHT,
+        "FORCE_WEIGHT": FORCE_WEIGHT,
+        "COIL_FORCE_REGULARIZATION": COIL_FORCE_REGULARIZATION,
         "LENGTH_WEIGHT": LENGTH_WEIGHT,
         "RES_WEIGHT": RES_WEIGHT,
         "IOTAS_WEIGHT": IOTAS_WEIGHT,

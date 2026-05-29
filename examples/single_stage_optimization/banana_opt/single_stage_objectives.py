@@ -93,6 +93,14 @@ def build_total_objective(
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
     JResidueObjective=None,
+    JMeanSquaredCurvature=None,
+    MSC_WEIGHT=0.0,
+    JArclengthVariation=None,
+    ARCLEN_WEIGHT=0.0,
+    JLinkingNumber=None,
+    LINKING_WEIGHT=0.0,
+    JCoilForce=None,
+    FORCE_WEIGHT=0.0,
 ):
     objective = (
         JnonQSRatio
@@ -118,6 +126,16 @@ def build_total_objective(
         objective = objective + SELFINT_WEIGHT * JCurveSelfIntersect
     if JResidueObjective is not None:
         objective = objective + JResidueObjective
+    # SIMSOPT-official coil regularization/validity terms (opt-in; default-0 so
+    # existing runs are byte-identical until a weight is set).
+    if JMeanSquaredCurvature is not None:
+        objective = objective + MSC_WEIGHT * JMeanSquaredCurvature
+    if JArclengthVariation is not None:
+        objective = objective + ARCLEN_WEIGHT * JArclengthVariation
+    if JLinkingNumber is not None:
+        objective = objective + LINKING_WEIGHT * JLinkingNumber
+    if JCoilForce is not None:
+        objective = objective + FORCE_WEIGHT * JCoilForce
     return objective
 
 
@@ -331,6 +349,14 @@ def evaluate_total_objective(
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
     JResidueObjective=None,
+    JMeanSquaredCurvature=None,
+    MSC_WEIGHT=0.0,
+    JArclengthVariation=None,
+    ARCLEN_WEIGHT=0.0,
+    JLinkingNumber=None,
+    LINKING_WEIGHT=0.0,
+    JCoilForce=None,
+    FORCE_WEIGHT=0.0,
 ):
     (
         raw_J_QS_obj,
@@ -370,6 +396,14 @@ def evaluate_total_objective(
         JCurveSelfIntersect=JCurveSelfIntersect,
         SELFINT_WEIGHT=SELFINT_WEIGHT,
         JResidueObjective=JResidueObjective,
+        JMeanSquaredCurvature=JMeanSquaredCurvature,
+        MSC_WEIGHT=MSC_WEIGHT,
+        JArclengthVariation=JArclengthVariation,
+        ARCLEN_WEIGHT=ARCLEN_WEIGHT,
+        JLinkingNumber=JLinkingNumber,
+        LINKING_WEIGHT=LINKING_WEIGHT,
+        JCoilForce=JCoilForce,
+        FORCE_WEIGHT=FORCE_WEIGHT,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
     constraint_names, constraint_values = _penalty_search_constraint_payload(
@@ -459,6 +493,36 @@ def evaluate_total_objective(
                 if JCurveSelfIntersect is None
                 else _objective_gradient(JCurveSelfIntersect, objective_optimizable)
             ),
+            "J_msc": (
+                0.0
+                if JMeanSquaredCurvature is None
+                else float(JMeanSquaredCurvature.J())
+            ),
+            "dJ_msc": (
+                np.zeros_like(total_grad)
+                if JMeanSquaredCurvature is None
+                else _objective_gradient(JMeanSquaredCurvature, objective_optimizable)
+            ),
+            "J_arclen": (
+                0.0 if JArclengthVariation is None else float(JArclengthVariation.J())
+            ),
+            "dJ_arclen": (
+                np.zeros_like(total_grad)
+                if JArclengthVariation is None
+                else _objective_gradient(JArclengthVariation, objective_optimizable)
+            ),
+            "J_link": (0.0 if JLinkingNumber is None else float(JLinkingNumber.J())),
+            "dJ_link": (
+                np.zeros_like(total_grad)
+                if JLinkingNumber is None
+                else _objective_gradient(JLinkingNumber, objective_optimizable)
+            ),
+            "J_coil_force": (0.0 if JCoilForce is None else float(JCoilForce.J())),
+            "dJ_coil_force": (
+                np.zeros_like(total_grad)
+                if JCoilForce is None
+                else _objective_gradient(JCoilForce, objective_optimizable)
+            ),
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
             "residue_objective_enabled": JResidueObjective is not None,
@@ -497,6 +561,14 @@ def evaluate_base_objective(
     JNonQSObjective=None,
     JBoozerObjective=None,
     JResidueObjective=None,
+    JMeanSquaredCurvature=None,
+    MSC_WEIGHT=0.0,
+    JArclengthVariation=None,
+    ARCLEN_WEIGHT=0.0,
+    JLinkingNumber=None,
+    LINKING_WEIGHT=0.0,
+    JCoilForce=None,
+    FORCE_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     if _surface_pair is not None:
@@ -519,6 +591,17 @@ def evaluate_base_objective(
     )
     if JVolume is not None:
         base_objective = base_objective + VOLUME_WEIGHT * JVolume
+    # SIMSOPT-official coil regularization/validity terms (opt-in; default-None so
+    # the ALM physics objective is byte-identical until a weight is set). Soft
+    # penalties on the objective, NOT hard ALM constraints (no threshold semantics).
+    if JMeanSquaredCurvature is not None:
+        base_objective = base_objective + MSC_WEIGHT * JMeanSquaredCurvature
+    if JArclengthVariation is not None:
+        base_objective = base_objective + ARCLEN_WEIGHT * JArclengthVariation
+    if JLinkingNumber is not None:
+        base_objective = base_objective + LINKING_WEIGHT * JLinkingNumber
+    if JCoilForce is not None:
+        base_objective = base_objective + FORCE_WEIGHT * JCoilForce
     physics_terms_total = float(base_objective.J())
     physics_grad = _objective_gradient(base_objective, objective_optimizable)
     residue_value, residue_grad = _optional_objective_value_and_gradient(
@@ -800,6 +883,14 @@ def evaluate_alm_objective(
     JNonQSObjective=None,
     JBoozerObjective=None,
     JResidueObjective=None,
+    JMeanSquaredCurvature=None,
+    MSC_WEIGHT=0.0,
+    JArclengthVariation=None,
+    ARCLEN_WEIGHT=0.0,
+    JLinkingNumber=None,
+    LINKING_WEIGHT=0.0,
+    JCoilForce=None,
+    FORCE_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     raw_surface_pair = _surface_objective_pair(diagnostic_surface_weights, nonQSs, brs)
@@ -821,6 +912,14 @@ def evaluate_alm_objective(
         JNonQSObjective=JNonQSObjective,
         JBoozerObjective=JBoozerObjective,
         JResidueObjective=JResidueObjective,
+        JMeanSquaredCurvature=JMeanSquaredCurvature,
+        MSC_WEIGHT=MSC_WEIGHT,
+        JArclengthVariation=JArclengthVariation,
+        ARCLEN_WEIGHT=ARCLEN_WEIGHT,
+        JLinkingNumber=JLinkingNumber,
+        LINKING_WEIGHT=LINKING_WEIGHT,
+        JCoilForce=JCoilForce,
+        FORCE_WEIGHT=FORCE_WEIGHT,
         include_diagnostics=include_diagnostics,
     )
 
@@ -1384,5 +1483,39 @@ def evaluate_alm_objective(
         if JCurveSelfIntersect is not None:
             base_eval["self_intersect_penalty"] = self_intersect_penalty
             base_eval["self_intersect_threshold"] = 0.0
+        # Opt-in SIMSOPT coil regularizers (frontier override reads these from the
+        # diagnostics dict; 0.0/zeros when the weight is off and the term is None).
+        base_eval["J_msc"] = (
+            0.0 if JMeanSquaredCurvature is None else float(JMeanSquaredCurvature.J())
+        )
+        base_eval["dJ_msc"] = (
+            np.zeros_like(base_eval["grad"])
+            if JMeanSquaredCurvature is None
+            else _objective_gradient(JMeanSquaredCurvature, objective_optimizable)
+        )
+        base_eval["J_arclen"] = (
+            0.0 if JArclengthVariation is None else float(JArclengthVariation.J())
+        )
+        base_eval["dJ_arclen"] = (
+            np.zeros_like(base_eval["grad"])
+            if JArclengthVariation is None
+            else _objective_gradient(JArclengthVariation, objective_optimizable)
+        )
+        base_eval["J_link"] = (
+            0.0 if JLinkingNumber is None else float(JLinkingNumber.J())
+        )
+        base_eval["dJ_link"] = (
+            np.zeros_like(base_eval["grad"])
+            if JLinkingNumber is None
+            else _objective_gradient(JLinkingNumber, objective_optimizable)
+        )
+        base_eval["J_coil_force"] = (
+            0.0 if JCoilForce is None else float(JCoilForce.J())
+        )
+        base_eval["dJ_coil_force"] = (
+            np.zeros_like(base_eval["grad"])
+            if JCoilForce is None
+            else _objective_gradient(JCoilForce, objective_optimizable)
+        )
     base_eval["alm_formulation"] = alm_formulation
     return annotate_search_evaluation_finiteness(base_eval)

@@ -220,6 +220,10 @@ def apply_frontier_scalarization_override(
     poloidal_extent_weight=0.0,
     width_weight=0.0,
     selfint_weight=0.0,
+    msc_weight=0.0,
+    arclen_weight=0.0,
+    link_weight=0.0,
+    force_weight=0.0,
     objective_optimizable=None,
     alm_formulation="weighted_sum",
     alm_multipliers=None,
@@ -299,6 +303,10 @@ def apply_frontier_scalarization_override(
             poloidal_extent_weight=poloidal_extent_weight,
             width_weight=width_weight,
             selfint_weight=selfint_weight,
+            msc_weight=msc_weight,
+            arclen_weight=arclen_weight,
+            link_weight=link_weight,
+            force_weight=force_weight,
         )
         if "constraint_values" in annotated and "constraint_grads" in annotated:
             if alm_multipliers is None or alm_penalty is None:
@@ -359,6 +367,10 @@ def _frontier_penalty_geometry_total_grad(
     poloidal_extent_weight=0.0,
     width_weight=0.0,
     selfint_weight=0.0,
+    msc_weight=0.0,
+    arclen_weight=0.0,
+    link_weight=0.0,
+    force_weight=0.0,
 ):
     total = (
         float(length_weight) * float(objective_eval["J_len"])
@@ -387,6 +399,28 @@ def _frontier_penalty_geometry_total_grad(
         grad = grad + float(selfint_weight) * np.asarray(
             objective_eval["dJ_self_intersect"],
             dtype=float,
+        )
+    # Opt-in SIMSOPT coil regularizers (guarded by weight so default runs read no
+    # extra diagnostics and stay byte-identical with the prior frontier objective).
+    if float(msc_weight) != 0.0:
+        total += float(msc_weight) * float(objective_eval["J_msc"])
+        grad = grad + float(msc_weight) * np.asarray(
+            objective_eval["dJ_msc"], dtype=float
+        )
+    if float(arclen_weight) != 0.0:
+        total += float(arclen_weight) * float(objective_eval["J_arclen"])
+        grad = grad + float(arclen_weight) * np.asarray(
+            objective_eval["dJ_arclen"], dtype=float
+        )
+    if float(link_weight) != 0.0:
+        total += float(link_weight) * float(objective_eval["J_link"])
+        grad = grad + float(link_weight) * np.asarray(
+            objective_eval["dJ_link"], dtype=float
+        )
+    if float(force_weight) != 0.0:
+        total += float(force_weight) * float(objective_eval["J_coil_force"])
+        grad = grad + float(force_weight) * np.asarray(
+            objective_eval["dJ_coil_force"], dtype=float
         )
     return float(total), grad
 
