@@ -1460,6 +1460,42 @@ def trace_fieldline(
     )
 
 
+@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
+def _trace_fieldlines_batched_unsharded(
+    spec: FieldlineTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    magnetic_field_fn: Callable[[jax.Array], jax.Array],
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+    magnetic_field_state: object | None = None,
+) -> FieldlineTracingResult:
+    def trace_one(
+        y0: jax.Array, dtmax: jax.Array, field_state: object | None = None
+    ) -> FieldlineTracingResult:
+        if field_state is None:
+            field_fn = magnetic_field_fn
+        else:
+            def field_fn(point):
+                return magnetic_field_fn(field_state, point)
+
+        return trace_fieldline(
+            replace(spec, dtmax=dtmax),
+            y0,
+            field_fn,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+
+    if magnetic_field_state is None:
+        return jax.vmap(trace_one)(y0s, dtmaxs)
+    return jax.vmap(trace_one, in_axes=(0, 0, None))(
+        y0s,
+        dtmaxs,
+        magnetic_field_state,
+    )
+
+
 def trace_fieldlines_batched(
     spec: FieldlineTracingSpec,
     y0s: jax.Array,
@@ -1480,6 +1516,7 @@ def trace_fieldlines_batched(
     spec = _stage_fieldline_spec(spec)
     y0s_arr = _as_device_array(y0s, jnp.float64).reshape((-1, 3))
     dtmaxs_arr = _as_device_array(dtmaxs, jnp.float64).reshape((-1,))
+    stopping_criteria = tuple(stopping_criteria)
 
     def trace_one(
         y0: jax.Array, dtmax: jax.Array, field_state: object | None = None
@@ -1487,7 +1524,6 @@ def trace_fieldlines_batched(
         if field_state is None:
             field_fn = magnetic_field_fn
         else:
-
             def field_fn(point):
                 return magnetic_field_fn(field_state, point)
 
@@ -1554,11 +1590,13 @@ def trace_fieldlines_batched(
 
         return trace_shard(y0s_arr, dtmaxs_arr, magnetic_field_state)
 
-    if magnetic_field_state is None:
-        return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr)
-    return jax.vmap(trace_one, in_axes=(0, 0, None))(
+    return _trace_fieldlines_batched_unsharded(
+        spec,
         y0s_arr,
         dtmaxs_arr,
+        magnetic_field_fn,
+        phis,
+        stopping_criteria,
         magnetic_field_state,
     )
 
@@ -2133,6 +2171,52 @@ def trace_guiding_center(
     )
 
 
+@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
+def _trace_guiding_centers_batched_unsharded(
+    spec: GuidingCenterTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    mus: jax.Array,
+    magnetic_field_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    m: float,
+    q: float,
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+    magnetic_field_state: object | None = None,
+) -> GuidingCenterTracingResult:
+    def trace_one(
+        y0: jax.Array,
+        dtmax: jax.Array,
+        mu: jax.Array,
+        field_state: object | None = None,
+    ) -> GuidingCenterTracingResult:
+        if field_state is None:
+            field_fn = magnetic_field_fn
+        else:
+            def field_fn(point):
+                return magnetic_field_fn(field_state, point)
+
+        return trace_guiding_center(
+            replace(spec, dtmax=dtmax),
+            y0,
+            field_fn,
+            m=m,
+            q=q,
+            mu=mu,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+
+    if magnetic_field_state is None:
+        return jax.vmap(trace_one)(y0s, dtmaxs, mus)
+    return jax.vmap(trace_one, in_axes=(0, 0, 0, None))(
+        y0s,
+        dtmaxs,
+        mus,
+        magnetic_field_state,
+    )
+
+
 def trace_guiding_centers_batched(
     spec: GuidingCenterTracingSpec,
     y0s: jax.Array,
@@ -2151,6 +2235,7 @@ def trace_guiding_centers_batched(
     y0s_arr = _as_device_array(y0s, jnp.float64).reshape((-1, 4))
     dtmaxs_arr = _as_device_array(dtmaxs, jnp.float64).reshape((-1,))
     mus_arr = _as_device_array(mus, jnp.float64).reshape((-1,))
+    stopping_criteria = tuple(stopping_criteria)
 
     def trace_one(
         y0: jax.Array,
@@ -2161,7 +2246,6 @@ def trace_guiding_centers_batched(
         if field_state is None:
             field_fn = magnetic_field_fn
         else:
-
             def field_fn(point):
                 return magnetic_field_fn(field_state, point)
 
@@ -2242,12 +2326,16 @@ def trace_guiding_centers_batched(
 
         return trace_shard(y0s_arr, dtmaxs_arr, mus_arr, magnetic_field_state)
 
-    if magnetic_field_state is None:
-        return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr, mus_arr)
-    return jax.vmap(trace_one, in_axes=(0, 0, 0, None))(
+    return _trace_guiding_centers_batched_unsharded(
+        spec,
         y0s_arr,
         dtmaxs_arr,
         mus_arr,
+        magnetic_field_fn,
+        m,
+        q,
+        phis,
+        stopping_criteria,
         magnetic_field_state,
     )
 
@@ -3983,6 +4071,48 @@ def trace_fullorbit(
     )
 
 
+@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
+def _trace_fullorbits_batched_unsharded(
+    spec: FullorbitTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    magnetic_field_fn: Callable[[jax.Array], jax.Array],
+    m: float,
+    q: float,
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+    magnetic_field_state: object | None = None,
+) -> FullorbitTracingResult:
+    def trace_one(
+        y0: jax.Array,
+        dtmax: jax.Array,
+        field_state: object | None = None,
+    ) -> FullorbitTracingResult:
+        if field_state is None:
+            field_fn = magnetic_field_fn
+        else:
+            def field_fn(point):
+                return magnetic_field_fn(field_state, point)
+
+        return trace_fullorbit(
+            replace(spec, dtmax=dtmax),
+            y0,
+            field_fn,
+            m=m,
+            q=q,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+
+    if magnetic_field_state is None:
+        return jax.vmap(trace_one)(y0s, dtmaxs)
+    return jax.vmap(trace_one, in_axes=(0, 0, None))(
+        y0s,
+        dtmaxs,
+        magnetic_field_state,
+    )
+
+
 def trace_fullorbits_batched(
     spec: FullorbitTracingSpec,
     y0s: jax.Array,
@@ -3999,6 +4129,7 @@ def trace_fullorbits_batched(
     spec = _stage_fullorbit_spec(spec)
     y0s_arr = _as_device_array(y0s, jnp.float64).reshape((-1, 6))
     dtmaxs_arr = _as_device_array(dtmaxs, jnp.float64).reshape((-1,))
+    stopping_criteria = tuple(stopping_criteria)
 
     def trace_one(
         y0: jax.Array,
@@ -4008,7 +4139,6 @@ def trace_fullorbits_batched(
         if field_state is None:
             field_fn = magnetic_field_fn
         else:
-
             def field_fn(point):
                 return magnetic_field_fn(field_state, point)
 
@@ -4077,10 +4207,14 @@ def trace_fullorbits_batched(
 
         return trace_shard(y0s_arr, dtmaxs_arr, magnetic_field_state)
 
-    if magnetic_field_state is None:
-        return jax.vmap(trace_one)(y0s_arr, dtmaxs_arr)
-    return jax.vmap(trace_one, in_axes=(0, 0, None))(
+    return _trace_fullorbits_batched_unsharded(
+        spec,
         y0s_arr,
         dtmaxs_arr,
+        magnetic_field_fn,
+        m,
+        q,
+        phis,
+        stopping_criteria,
         magnetic_field_state,
     )

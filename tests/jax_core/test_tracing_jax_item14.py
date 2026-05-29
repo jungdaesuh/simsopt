@@ -580,6 +580,92 @@ def test_tracing_batch_helpers_match_single_trajectory_contracts():
     )
 
 
+def test_cartesian_tracing_batch_helpers_reuse_outer_jit_cache():
+    """Repeated same-shape Cartesian trace batches reuse one outer JIT executable."""
+
+    def fieldline_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([0.0, 1.0, 0.0], dtype=jnp.float64)
+
+    def particle_field_fn(_point: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return (
+            jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64),
+            jnp.zeros((3, 3), dtype=jnp.float64),
+        )
+
+    def zero_B_fn(_point: jax.Array) -> jax.Array:
+        return jnp.zeros((3,), dtype=jnp.float64)
+
+    def assert_cache_reuse(jitted_helper, run_batch):
+        jitted_helper.clear_cache()
+        assert jitted_helper._cache_size() == 0
+        run_batch().status.block_until_ready()
+        cache_size = jitted_helper._cache_size()
+        assert cache_size == 1
+        run_batch().status.block_until_ready()
+        assert jitted_helper._cache_size() == cache_size
+        jitted_helper.clear_cache()
+
+    fieldline_spec = FieldlineTracingSpec(
+        tmax=0.02, rtol=1.0e-10, atol=1.0e-10, max_steps=8, dtmax=0.01
+    )
+    fieldline_y0s = jnp.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.5]], dtype=jnp.float64)
+    dtmaxs = jnp.asarray([0.01, 0.01], dtype=jnp.float64)
+
+    assert_cache_reuse(
+        tracing_jax_module._trace_fieldlines_batched_unsharded,
+        lambda: trace_fieldlines_batched(
+            fieldline_spec,
+            fieldline_y0s,
+            dtmaxs,
+            fieldline_fn,
+        ),
+    )
+
+    gc_spec = GuidingCenterTracingSpec(
+        tmax=0.02, rtol=1.0e-10, atol=1.0e-10, max_steps=8, dtmax=0.01
+    )
+    gc_y0s = jnp.asarray(
+        [[1.0, 0.0, 0.0, 1.0], [-1.0, 0.0, 0.0, 1.0]], dtype=jnp.float64
+    )
+    mus = jnp.zeros((2,), dtype=jnp.float64)
+
+    assert_cache_reuse(
+        tracing_jax_module._trace_guiding_centers_batched_unsharded,
+        lambda: trace_guiding_centers_batched(
+            gc_spec,
+            gc_y0s,
+            dtmaxs,
+            mus,
+            particle_field_fn,
+            m=1.0,
+            q=1.0,
+        ),
+    )
+
+    fullorbit_spec = FullorbitTracingSpec(
+        tmax=0.02, rtol=1.0e-10, atol=1.0e-10, max_steps=8, dtmax=0.01
+    )
+    fullorbit_y0s = jnp.asarray(
+        [
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.5, 0.0, 2.0, 0.0],
+        ],
+        dtype=jnp.float64,
+    )
+
+    assert_cache_reuse(
+        tracing_jax_module._trace_fullorbits_batched_unsharded,
+        lambda: trace_fullorbits_batched(
+            fullorbit_spec,
+            fullorbit_y0s,
+            dtmaxs,
+            zero_B_fn,
+            m=1.0,
+            q=1.0,
+        ),
+    )
+
+
 def test_trace_guiding_centers_boozer_batched_unpacks_lax_map_inputs():
     """Boozer analytic batch tracing preserves the single-lane map contract."""
 

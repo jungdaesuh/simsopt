@@ -40,6 +40,7 @@ from simsopt.jax_core import (
 )
 from simsopt.jax_core.objectives_flux import _fixed_surface_target_array
 from simsopt.objectives.fluxobjective import SquaredFlux
+import simsopt.objectives.fluxobjective_jax as fluxobjective_jax_module
 from simsopt.objectives.fluxobjective_jax import (
     SquaredFluxJAX,
     coil_current_fixed_geometry_flux_jax,
@@ -184,6 +185,17 @@ def _make_large_grouped_flux_objective():
         definition="quadratic flux",
     )
     assert not objective.field._uses_uniform_curve_xyz_fourier_fastpath
+    return objective
+
+
+def _make_fastpath_flux_objective():
+    coils, surface = _make_native_flux_parity_case()
+    objective = SquaredFluxJAX(
+        surface,
+        BiotSavartJAX(coils),
+        definition="quadratic flux",
+    )
+    assert objective.field._uses_uniform_curve_xyz_fourier_fastpath
     return objective
 
 
@@ -421,6 +433,37 @@ def test_fixed_surface_target_none_ignores_nan_normals():
 def test_fluxobjective_gradient_parity(definition):
     objective_cpu, objective_jax = _make_native_flux_objectives(definition)
     _assert_flux_gradient_parity(objective_jax.dJ(), objective_cpu.dJ())
+
+
+@pytest.mark.parametrize(
+    ("make_objective", "uses_fastpath"),
+    (
+        (_make_fastpath_flux_objective, True),
+        (_make_large_grouped_flux_objective, False),
+    ),
+)
+def test_squaredfluxjax_reuses_jitted_native_program_across_instances(
+    monkeypatch,
+    make_objective,
+    uses_fastpath,
+):
+    fluxobjective_jax_module._cached_squared_flux_native_program.cache_clear()
+    jit_calls = []
+    original_jit = fluxobjective_jax_module.jax.jit
+
+    def counting_jit(fun=None, *args, **kwargs):
+        if fun is None:
+            return lambda inner: counting_jit(inner, *args, **kwargs)
+        jit_calls.append(getattr(fun, "__name__", type(fun).__name__))
+        return original_jit(fun, *args, **kwargs)
+
+    monkeypatch.setattr(fluxobjective_jax_module.jax, "jit", counting_jit)
+    first = make_objective()
+    second = make_objective()
+    assert first.field._uses_uniform_curve_xyz_fourier_fastpath is uses_fastpath
+    assert second.field._uses_uniform_curve_xyz_fourier_fastpath is uses_fastpath
+    assert len(jit_calls) == 2
+    fluxobjective_jax_module._cached_squared_flux_native_program.cache_clear()
 
 
 @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)

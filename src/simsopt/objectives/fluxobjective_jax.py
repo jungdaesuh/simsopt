@@ -21,6 +21,7 @@ fixed; mutating the surface's free DOFs after construction raises a
 """
 
 import hashlib
+from functools import lru_cache
 
 import numpy as np
 import jax
@@ -44,8 +45,8 @@ from ..jax_core.objectives_flux import (
     fixed_surface_flux_specs_from_surface,
     fixed_surface_flux_integral_from_B,
 )
-from ..jax_core import coil_specs_from_dof_extraction_spec
-from ..jax_core.field import grouped_coil_set_spec_from_coil_specs
+from ..jax_core.curve_geometry import optimizable_input_dofs_from_map_spec
+from ..jax_core.field import coil_set_spec_from_dof_extraction_spec
 
 __all__ = [
     "SquaredFluxJAX",
@@ -140,6 +141,65 @@ def coil_current_fixed_geometry_value_and_grad_jax(
             flux_spec,
         )
     )(_as_jax_float64(currents))
+
+
+@lru_cache(maxsize=2)
+def _cached_squared_flux_native_program(forward):
+    return jax.jit(forward), jax.jit(jax.value_and_grad(forward, argnums=0))
+
+
+def _squared_flux_curve_xyz_fourier_forward(
+    flat_dofs,
+    flux_spec,
+    basis,
+    dbasis,
+    curve_dof_maps,
+    current_dof_maps,
+    base_curve_idxs,
+    base_current_idxs,
+    rotmats,
+    current_scales,
+):
+    k = basis.shape[1]
+    curve_dofs = jnp.stack(
+        [
+            optimizable_input_dofs_from_map_spec(curve_map, flat_dofs).reshape(3, k)
+            for curve_map in curve_dof_maps
+        ]
+    )
+    current_vals = jnp.stack(
+        [
+            optimizable_input_dofs_from_map_spec(current_map, flat_dofs)[0]
+            for current_map in current_dof_maps
+        ]
+    )
+
+    coeffs = curve_dofs[base_curve_idxs]
+    gammas = jnp.einsum("qk,nck->nqc", basis, coeffs)
+    gammadashs = jnp.einsum("qk,nck->nqc", dbasis, coeffs)
+    gammas = jnp.einsum("nqi,nij->nqj", gammas, rotmats)
+    gammadashs = jnp.einsum("nqi,nij->nqj", gammadashs, rotmats)
+    currents = current_vals[base_current_idxs] * current_scales
+
+    B = biot_savart_B(
+        flux_spec.points,
+        gammas,
+        gammadashs,
+        currents,
+    )
+    return fixed_surface_flux_integral_from_B(B, flux_spec)
+
+
+def _squared_flux_spec_native_forward(
+    flat_dofs,
+    flux_spec,
+    coil_dof_extraction_spec,
+):
+    coil_set_spec = coil_set_spec_from_dof_extraction_spec(
+        coil_dof_extraction_spec,
+        flat_dofs,
+    )
+    return fixed_surface_flux_integral(coil_set_spec, flux_spec)
 
 
 def _field_dofs_gradient_to_derivative(field, field_dofs_gradient):
@@ -251,8 +311,7 @@ class SquaredFluxJAX(Optimizable):
         self._init_spec_native(field)
 
     def _bind_native_forward(self, forward, *forward_args):
-        jit_forward = jax.jit(forward)
-        jit_val_grad = jax.jit(jax.value_and_grad(forward, argnums=0))
+        jit_forward, jit_val_grad = _cached_squared_flux_native_program(forward)
 
         def _jit_forward_dofs(flat_dofs):
             return jit_forward(flat_dofs, self._flux_spec, *forward_args)
@@ -271,10 +330,19 @@ class SquaredFluxJAX(Optimizable):
             order,
         )
 
-        k = 2 * order + 1
-
         # Static coil descriptors.
         base_curves = tuple(field._unique_base_curves)
+        curve_dof_maps = tuple(
+            field._free_vector_dof_map_spec(
+                curve,
+                full_graph=getattr(curve, "_jax_curve_dof_mode", "local") == "full",
+            )
+            for curve in base_curves
+        )
+        current_dof_maps = tuple(
+            field._free_vector_dof_map_spec(current, full_graph=False)
+            for current in field._unique_base_currents
+        )
         coil_descs = tuple(field._coil_descs)
         base_curve_idxs = _as_jax_int32([d[0] for d in coil_descs])
         base_current_idxs = _as_jax_int32([d[1] for d in coil_descs])
@@ -290,54 +358,12 @@ class SquaredFluxJAX(Optimizable):
         )
         current_scales = _as_jax_float64([d[3] for d in coil_descs])
 
-        def forward(
-            flat_dofs,
-            flux_spec,
-            basis,
-            dbasis,
-            base_curve_idxs,
-            base_current_idxs,
-            rotmats,
-            current_scales,
-        ):
-            curve_dofs = jnp.stack(
-                [
-                    field._local_full_dofs_from_free_vector(curve, flat_dofs).reshape(
-                        3, k
-                    )
-                    for curve in base_curves
-                ]
-            )
-            current_vals = jnp.stack(
-                [
-                    field._scalar_current_value_from_dofs(
-                        current,
-                        flat_dofs,
-                        "uniform CurveXYZFourier fast path",
-                    )
-                    for current in field._unique_base_currents
-                ]
-            )
-
-            coeffs = curve_dofs[base_curve_idxs]
-            gammas = jnp.einsum("qk,nck->nqc", basis, coeffs)
-            gammadashs = jnp.einsum("qk,nck->nqc", dbasis, coeffs)
-            gammas = jnp.einsum("nqi,nij->nqj", gammas, rotmats)
-            gammadashs = jnp.einsum("nqi,nij->nqj", gammadashs, rotmats)
-            currents = current_vals[base_current_idxs] * current_scales
-
-            B = biot_savart_B(
-                flux_spec.points,
-                gammas,
-                gammadashs,
-                currents,
-            )
-            return fixed_surface_flux_integral_from_B(B, flux_spec)
-
         self._bind_native_forward(
-            forward,
+            _squared_flux_curve_xyz_fourier_forward,
             basis,
             dbasis,
+            curve_dof_maps,
+            current_dof_maps,
             base_curve_idxs,
             base_current_idxs,
             rotmats,
@@ -347,16 +373,10 @@ class SquaredFluxJAX(Optimizable):
     def _init_spec_native(self, field):
         """Build the immutable-spec native path for general JAX-capable fields."""
         coil_dof_extraction_spec = _strict_field_coil_dof_extraction_spec(field)
-
-        def forward(flat_dofs, flux_spec, coil_dof_extraction):
-            coil_specs = coil_specs_from_dof_extraction_spec(
-                coil_dof_extraction,
-                flat_dofs,
-            )
-            coil_set_spec = grouped_coil_set_spec_from_coil_specs(coil_specs)
-            return fixed_surface_flux_integral(coil_set_spec, flux_spec)
-
-        self._bind_native_forward(forward, coil_dof_extraction_spec)
+        self._bind_native_forward(
+            _squared_flux_spec_native_forward,
+            coil_dof_extraction_spec,
+        )
 
     # ------------------------------------------------------------------
     # DOF gathering
