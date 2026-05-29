@@ -10,6 +10,7 @@ M0 rewrite contract (adapter pattern, §5).
 """
 
 from dataclasses import dataclass
+from functools import partial
 from itertools import count
 import time
 
@@ -28,6 +29,7 @@ from ..jax_core import (
     curve_gamma_and_dash_from_spec,
     curve_geometry_from_spec,
     curve_pullback_from_dofs,
+    curve_spec_kind,
     curve_spec_from_curve,
     curve_spec_with_dofs,
     make_coil_dof_extraction_spec,
@@ -484,6 +486,130 @@ class SpecBackedCurve(Optimizable):
         return self._owner_derivative_from_curve_cotangent(coeff_cotangent)
 
 
+class _BiotSavartFieldEvaluationMixin:
+    """Shared grouped-kernel field API for graph-backed and spec-backed fields."""
+
+    def B(self):
+        """Magnetic field B at the evaluation points."""
+        return grouped_biot_savart_B_from_spec(self._points_jax, self.coil_set_spec())
+
+    def A(self):
+        """Vector potential A at the evaluation points."""
+        return grouped_biot_savart_A_from_spec(self._points_jax, self.coil_set_spec())
+
+    def dA_by_dX(self):
+        """Spatial Jacobian dA/dX at the evaluation points."""
+        return grouped_biot_savart_dA_by_dX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def d2A_by_dXdX(self):
+        """Spatial Hessian d2A/dXdX at the evaluation points."""
+        return grouped_biot_savart_d2A_by_dXdX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def dB_by_dX(self):
+        """Spatial Jacobian dB/dX at the evaluation points."""
+        return grouped_biot_savart_dB_by_dX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def d2B_by_dXdX(self):
+        """Spatial Hessian d2B/dXdX at the evaluation points."""
+        return grouped_biot_savart_d2B_by_dXdX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def B_and_dB(self):
+        """Combined B and dB/dX."""
+        return grouped_biot_savart_B_and_dB_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def AbsB(self):
+        """Magnetic-field magnitude at the evaluation points."""
+        return jnp.linalg.norm(self.B(), axis=1)[:, None]
+
+    def GradAbsB(self):
+        """Cartesian gradient of ``|B|`` at the evaluation points."""
+        return _grad_absB_from_B_and_dB(*self.B_and_dB())
+
+    def B_cyl(self):
+        """Magnetic field components in the cylindrical basis."""
+        return _cart_vectors_to_cyl(
+            self.B(),
+            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+        )
+
+    def A_cyl(self):
+        """Vector potential components in the cylindrical basis."""
+        return _cart_vectors_to_cyl(
+            self.A(),
+            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+        )
+
+    def GradAbsB_cyl(self):
+        """``GradAbsB`` components in the cylindrical basis."""
+        return _cart_vectors_to_cyl(
+            self.GradAbsB(),
+            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+        )
+
+    def dB_by_dcoilcurrents(self, compute_derivatives=0):
+        """Per-coil B at unit current."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_B,
+        )
+
+    def d2B_by_dXdcoilcurrents(self, compute_derivatives=1):
+        """Per-coil ``dB/dX`` at unit current."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_dB_by_dX,
+        )
+
+    def d3B_by_dXdXdcoilcurrents(self, compute_derivatives=2):
+        """Per-coil ``d2B/dXdX`` at unit current."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_d2B_by_dXdX,
+        )
+
+    def dA_by_dcoilcurrents(self, compute_derivatives=0):
+        """Per-coil A at unit current."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_A,
+        )
+
+    def d2A_by_dXdcoilcurrents(self, compute_derivatives=1):
+        """Per-coil ``dA/dX`` at unit current."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_dA_by_dX,
+        )
+
+    def d3A_by_dXdXdcoilcurrents(self, compute_derivatives=2):
+        """Per-coil ``d2A/dXdX`` at unit current."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_d2A_by_dXdX,
+        )
+
+
 class SpecBackedCoil:
     """Read-only coil view reconstructed from a serialized JAX seed spec."""
 
@@ -513,7 +639,7 @@ class SpecBackedCoil:
         )[self._coil_index]
 
 
-class SpecBackedBiotSavartJAX(Optimizable):
+class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
     """Biot-Savart adapter whose source of truth is an immutable spec."""
 
     return_fn_map = {}
@@ -657,162 +783,6 @@ class SpecBackedBiotSavartJAX(Optimizable):
     def field_eval_spec(self) -> FieldEvalSpec:
         return make_field_eval_spec(self._points_jax)
 
-    def B(self) -> jax.Array:
-        return grouped_biot_savart_B_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def A(self) -> jax.Array:
-        return grouped_biot_savart_A_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def dA_by_dX(self) -> jax.Array:
-        return grouped_biot_savart_dA_by_dX_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def d2A_by_dXdX(self) -> jax.Array:
-        return grouped_biot_savart_d2A_by_dXdX_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def dB_by_dX(self) -> jax.Array:
-        return grouped_biot_savart_dB_by_dX_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def d2B_by_dXdX(self) -> jax.Array:
-        return grouped_biot_savart_d2B_by_dXdX_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def B_and_dB(self) -> tuple[jax.Array, jax.Array]:
-        return grouped_biot_savart_B_and_dB_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def AbsB(self) -> jax.Array:
-        return jnp.linalg.norm(self.B(), axis=1)[:, None]
-
-    def GradAbsB(self) -> jax.Array:
-        return _grad_absB_from_B_and_dB(*self.B_and_dB())
-
-    def B_cyl(self) -> jax.Array:
-        return _cart_vectors_to_cyl(
-            self.B(),
-            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
-        )
-
-    def A_cyl(self) -> jax.Array:
-        return _cart_vectors_to_cyl(
-            self.A(),
-            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
-        )
-
-    def GradAbsB_cyl(self) -> jax.Array:
-        return _cart_vectors_to_cyl(
-            self.GradAbsB(),
-            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
-        )
-
-    def dB_by_dcoilcurrents(self, compute_derivatives=0) -> list[jax.Array]:
-        """Per-coil B at unit current — list of ``(npoints, 3)`` JAX arrays.
-
-        Mirrors ``simsopt.field.BiotSavart.dB_by_dcoilcurrents`` in shape
-        and per-coil ordering. ``compute_derivatives`` is accepted for
-        signature compatibility but has no runtime effect — the JAX path
-        materialises the per-coil field on demand and does not consume the
-        fieldcache used by the C++ class.
-        """
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_B,
-        )
-
-    def d2B_by_dXdcoilcurrents(self, compute_derivatives=1) -> list[jax.Array]:
-        """Per-coil ``dB/dX`` at unit current — list of ``(npoints, 3, 3)``."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_dB_by_dX,
-        )
-
-    def d3B_by_dXdXdcoilcurrents(self, compute_derivatives=2) -> list[jax.Array]:
-        """Per-coil ``d2B/dXdX`` at unit current — list of ``(npoints, 3, 3, 3)``."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_d2B_by_dXdX,
-        )
-
-    def dA_by_dcoilcurrents(self, compute_derivatives=0) -> list[jax.Array]:
-        """Per-coil A at unit current — list of ``(npoints, 3)`` JAX arrays."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_A,
-        )
-
-    def d2A_by_dXdcoilcurrents(self, compute_derivatives=1) -> list[jax.Array]:
-        """Per-coil ``dA/dX`` at unit current — list of ``(npoints, 3, 3)``."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_dA_by_dX,
-        )
-
-    def d3A_by_dXdXdcoilcurrents(self, compute_derivatives=2) -> list[jax.Array]:
-        """Per-coil ``d2A/dXdX`` at unit current — list of ``(npoints, 3, 3, 3)``."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_d2A_by_dXdX,
-        )
-
-    def _add_single_coil_cotangent_to_dofs_gradient(
-        self,
-        dofs_gradient,
-        extraction_spec,
-        coil_spec,
-        dg,
-        dgd,
-        dc,
-        coil_dofs,
-    ):
-        if extraction_spec.symmetry.has_rotation:
-            rotmat_t = _as_jax_float64(extraction_spec.symmetry.rotmat).T
-            dg = _as_jax_float64(dg) @ rotmat_t
-            dgd = _as_jax_float64(dgd) @ rotmat_t
-
-        coeff_cotangent, _surface_cotangent = curve_pullback_from_dofs(
-            coil_spec.curve,
-            coil_spec.curve.dofs,
-            dg,
-            dgd,
-        )
-        current_cotangent = jnp.atleast_1d(
-            _as_jax_float64(extraction_spec.symmetry.scale) * _as_jax_float64(dc)
-        )
-        dofs_gradient = dofs_gradient + _dof_map_cotangent_to_owner_gradient(
-            extraction_spec.curve_map,
-            coeff_cotangent,
-            coil_dofs,
-        )
-        return dofs_gradient + _dof_map_cotangent_to_owner_gradient(
-            extraction_spec.current_map,
-            current_cotangent,
-            coil_dofs,
-        )
-
     def coil_cotangents_to_dofs_gradient(
         self,
         d_coil_arrays,
@@ -824,24 +794,12 @@ class SpecBackedBiotSavartJAX(Optimizable):
         if coil_dofs is None:
             coil_dofs = self.x
         coil_dofs = _as_jax_float64(coil_dofs)
-        dofs_gradient = coil_dofs - coil_dofs
-        coil_specs = coil_specs_from_dof_extraction_spec(
+        return _jitted_coil_cotangents_to_dofs_gradient(
             self._coil_dof_extraction_spec,
+            d_coil_arrays,
+            _canonical_coil_indices(coil_indices),
             coil_dofs,
         )
-        extraction_specs = self._coil_dof_extraction_spec.coils
-        for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
-            for local_i, global_i in enumerate(indices):
-                dofs_gradient = self._add_single_coil_cotangent_to_dofs_gradient(
-                    dofs_gradient,
-                    extraction_specs[global_i],
-                    coil_specs[global_i],
-                    jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False),
-                    jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False),
-                    jax.lax.index_in_dim(d_c, local_i, axis=0, keepdims=False),
-                    coil_dofs,
-                )
-        return dofs_gradient
 
     def save(self, _path: object) -> None:
         raise RuntimeError("JAX runtime seed specs split runtime from host export.")
@@ -870,6 +828,24 @@ def _supports_native_curve_geometry(curve):
         and getattr(curve, "surf_type", None) == "RZ_Fourier"
         and callable(getattr(surface, "surface_spec", None))
     )
+
+
+def _require_native_curve_geometry(curve):
+    if not _supports_native_curve_geometry(curve):
+        raise TypeError(
+            "BiotSavartJAX coil cotangent projection requires immutable JAX "
+            f"curve specs; unsupported type {type(curve).__name__}. "
+            "Provide a native curve spec."
+        )
+
+
+def _require_native_coil_projection_specs(coils, coil_indices):
+    for indices in coil_indices:
+        for global_i in indices:
+            curve, _rotmat, _current, _scale = _unwrap_coil_curve_and_current(
+                coils[int(global_i)]
+            )
+            _require_native_curve_geometry(curve)
 
 
 def _curve_dof_mode(curve):
@@ -992,6 +968,189 @@ def _dof_map_cotangent_to_owner_gradient(map_spec, input_cotangent, owner_dofs):
     return owner_gradient
 
 
+def _add_extraction_cotangent_to_dofs_gradient(
+    dofs_gradient,
+    extraction_spec,
+    coil_spec,
+    dg,
+    dgd,
+    dc,
+    coil_dofs,
+):
+    if extraction_spec.symmetry.has_rotation:
+        rotmat_t = _as_jax_float64(extraction_spec.symmetry.rotmat).T
+        dg = _as_jax_float64(dg) @ rotmat_t
+        dgd = _as_jax_float64(dgd) @ rotmat_t
+
+    coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
+        coil_spec.curve,
+        coil_spec.curve.dofs,
+        dg,
+        dgd,
+    )
+    current_cotangent = jnp.atleast_1d(
+        _as_jax_float64(extraction_spec.symmetry.scale) * _as_jax_float64(dc)
+    )
+    dofs_gradient = dofs_gradient + _dof_map_cotangent_to_owner_gradient(
+        extraction_spec.curve_map,
+        coeff_cotangent,
+        coil_dofs,
+    )
+    if extraction_spec.surface_map is not None and surface_cotangent is not None:
+        dofs_gradient = dofs_gradient + _dof_map_cotangent_to_owner_gradient(
+            extraction_spec.surface_map,
+            surface_cotangent,
+            coil_dofs,
+        )
+    return dofs_gradient + _dof_map_cotangent_to_owner_gradient(
+        extraction_spec.current_map,
+        current_cotangent,
+        coil_dofs,
+    )
+
+
+def _empty_external_surface_cotangents(coil_dof_extraction_spec):
+    output_count = 1 + max(
+        (
+            extraction_spec.surface_output_index
+            for extraction_spec in coil_dof_extraction_spec.coils
+            if extraction_spec.surface_output_index is not None
+        ),
+        default=-1,
+    )
+    surface_cotangents = [None] * output_count
+    for extraction_spec in coil_dof_extraction_spec.coils:
+        output_index = extraction_spec.surface_output_index
+        if output_index is None or surface_cotangents[output_index] is not None:
+            continue
+        surface_dofs = extraction_spec.curve.surface_dofs()
+        surface_cotangents[output_index] = surface_dofs - surface_dofs
+    return tuple(surface_cotangents)
+
+
+def _add_external_surface_cotangent(
+    surface_cotangents,
+    output_index,
+    surface_cotangent,
+):
+    if output_index is None or surface_cotangent is None:
+        return surface_cotangents
+    updated = list(surface_cotangents)
+    updated[output_index] = updated[output_index] + surface_cotangent
+    return tuple(updated)
+
+
+def _coil_cotangents_to_dofs_gradient_from_extraction_spec(
+    coil_dof_extraction_spec,
+    d_coil_arrays,
+    coil_indices,
+    coil_dofs,
+):
+    coil_dofs = _as_jax_float64(coil_dofs)
+    dofs_gradient = coil_dofs - coil_dofs
+    coil_specs = coil_specs_from_dof_extraction_spec(
+        coil_dof_extraction_spec,
+        coil_dofs,
+    )
+    extraction_specs = coil_dof_extraction_spec.coils
+    for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
+        for local_i, global_i in enumerate(indices):
+            dofs_gradient = _add_extraction_cotangent_to_dofs_gradient(
+                dofs_gradient,
+                extraction_specs[global_i],
+                coil_specs[global_i],
+                jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False),
+                jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False),
+                jax.lax.index_in_dim(d_c, local_i, axis=0, keepdims=False),
+                coil_dofs,
+            )
+    return dofs_gradient
+
+
+def _external_surface_cotangents_from_extraction_spec(
+    coil_dof_extraction_spec,
+    d_coil_arrays,
+    coil_indices,
+    coil_dofs,
+):
+    coil_dofs = _as_jax_float64(coil_dofs)
+    surface_cotangents = _empty_external_surface_cotangents(coil_dof_extraction_spec)
+    if not surface_cotangents:
+        return surface_cotangents
+
+    coil_specs = coil_specs_from_dof_extraction_spec(
+        coil_dof_extraction_spec,
+        coil_dofs,
+    )
+    extraction_specs = coil_dof_extraction_spec.coils
+    for (d_g, d_gd, _d_c), indices in zip(d_coil_arrays, coil_indices):
+        for local_i, global_i in enumerate(indices):
+            extraction_spec = extraction_specs[global_i]
+            if extraction_spec.surface_output_index is None:
+                continue
+            dg = jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False)
+            dgd = jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False)
+            if extraction_spec.symmetry.has_rotation:
+                rotmat_t = _as_jax_float64(extraction_spec.symmetry.rotmat).T
+                dg = _as_jax_float64(dg) @ rotmat_t
+                dgd = _as_jax_float64(dgd) @ rotmat_t
+
+            _coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
+                coil_specs[global_i].curve,
+                coil_specs[global_i].curve.dofs,
+                dg,
+                dgd,
+            )
+            surface_cotangents = _add_external_surface_cotangent(
+                surface_cotangents,
+                extraction_spec.surface_output_index,
+                surface_cotangent,
+            )
+    return surface_cotangents
+
+
+@partial(jax.jit, static_argnames=("coil_indices",))
+def _jitted_coil_cotangents_to_dofs_gradient(
+    coil_dof_extraction_spec,
+    d_coil_arrays,
+    coil_indices,
+    coil_dofs,
+):
+    return _coil_cotangents_to_dofs_gradient_from_extraction_spec(
+        coil_dof_extraction_spec,
+        d_coil_arrays,
+        coil_indices,
+        coil_dofs,
+    )
+
+
+@partial(jax.jit, static_argnames=("coil_indices",))
+def _jitted_external_surface_cotangents(
+    coil_dof_extraction_spec,
+    d_coil_arrays,
+    coil_indices,
+    coil_dofs,
+):
+    return _external_surface_cotangents_from_extraction_spec(
+        coil_dof_extraction_spec,
+        d_coil_arrays,
+        coil_indices,
+        coil_dofs,
+    )
+
+
+def _canonical_coil_indices(coil_indices):
+    return tuple(tuple(int(index) for index in indices) for indices in coil_indices)
+
+
+def _coil_cotangent_arrays_are_jax_compatible(d_coil_arrays):
+    leaves = jax.tree.leaves(d_coil_arrays)
+    return all(
+        isinstance(leaf, (jax.Array, np.ndarray)) or hasattr(leaf, "aval")
+        for leaf in leaves
+    )
+
+
 def _add_local_cotangent_to_dofs_gradient(
     dofs_gradient: jax.Array,
     opt,
@@ -1059,12 +1218,7 @@ def _curve_gamma_and_dash_from_dofs(curve, curve_dofs):
 
 def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
     curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
-    if not _supports_native_curve_geometry(curve):
-        raise TypeError(
-            "BiotSavartJAX coil cotangent projection requires immutable JAX "
-            f"curve specs; unsupported type {type(curve).__name__}. "
-            "Provide a native curve spec."
-        )
+    _require_native_curve_geometry(curve)
 
     if rotmat is not None:
         rotmat_t = _as_jax_float64(rotmat).T
@@ -1081,6 +1235,7 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
 
 def project_coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
     """Project grouped coil cotangents to a single public ``Derivative``."""
+    _require_native_coil_projection_specs(coils, coil_indices)
     deriv_data = {}
     for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
         for local_i, global_i in enumerate(indices):
@@ -1088,9 +1243,9 @@ def project_coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
                 deriv_data,
                 _project_single_coil_cotangent_data(
                     coils[global_i],
-                    jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False),
-                    jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False),
-                    jax.lax.index_in_dim(d_c, local_i, axis=0, keepdims=False),
+                    d_g[local_i],
+                    d_gd[local_i],
+                    d_c[local_i],
                 ),
             )
     return Derivative(deriv_data)
@@ -1141,7 +1296,7 @@ def _unwrap_coil_curve_and_current(coil):
     )
 
 
-class BiotSavartJAX(Optimizable):
+class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
     r"""JAX-backed Biot-Savart magnetic field evaluation.
 
     Drop-in replacement for :class:`BiotSavart` in workflows where the
@@ -1315,9 +1470,29 @@ class BiotSavartJAX(Optimizable):
         self._curve_quadpoints_jax = _curve_quadpoints_jax(base_curves[0])
 
     def _build_coil_dof_extraction_spec(self):
-        return make_coil_set_dof_extraction_spec(
-            make_coil_dof_extraction_spec(
-                curve=curve_spec_from_curve(curve),
+        external_surface_ids = {}
+        external_surfaces = []
+
+        def coil_extraction_spec(coil):
+            curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+            curve_spec = curve_spec_from_curve(curve)
+            surface = getattr(curve, "surf", None)
+            is_cws_curve = curve_spec_kind(curve_spec) == "cws_fourier_rz"
+            surface_map = (
+                self._free_vector_dof_map_spec(surface, full_graph=False)
+                if surface is not None and is_cws_curve and surface in self.dof_indices
+                else None
+            )
+            surface_output_index = None
+            if surface is not None and is_cws_curve and surface_map is None:
+                surface_id = id(surface)
+                if surface_id not in external_surface_ids:
+                    external_surface_ids[surface_id] = len(external_surfaces)
+                    external_surfaces.append(surface)
+                surface_output_index = external_surface_ids[surface_id]
+
+            return make_coil_dof_extraction_spec(
+                curve=curve_spec,
                 curve_map=self._free_vector_dof_map_spec(
                     curve,
                     full_graph=_curve_dof_mode(curve) == "full",
@@ -1326,13 +1501,17 @@ class BiotSavartJAX(Optimizable):
                     current,
                     full_graph=False,
                 ),
+                surface_map=surface_map,
+                surface_output_index=surface_output_index,
                 rotmat=rotmat,
                 scale=scale,
             )
-            for curve, rotmat, current, scale in (
-                _unwrap_coil_curve_and_current(coil) for coil in self._coils
-            )
+
+        extraction_spec = make_coil_set_dof_extraction_spec(
+            coil_extraction_spec(coil) for coil in self._coils
         )
+        self._external_cotangent_surfaces = tuple(external_surfaces)
+        return extraction_spec
 
     def coil_dof_extraction_spec(self):
         """Return the cached immutable owner-DOF reconstruction contract."""
@@ -1759,154 +1938,6 @@ class BiotSavartJAX(Optimizable):
         return tuple(coil.to_spec() for coil in self._coils)
 
     # ------------------------------------------------------------------
-    # Forward field evaluation
-    # ------------------------------------------------------------------
-
-    def B(self):
-        """Magnetic field B at the evaluation points.
-
-        Returns:
-            (npoints, 3) JAX array.
-        """
-        return grouped_biot_savart_B_from_spec(self._points_jax, self.coil_set_spec())
-
-    def A(self):
-        """Vector potential A at the evaluation points."""
-        return grouped_biot_savart_A_from_spec(self._points_jax, self.coil_set_spec())
-
-    def dA_by_dX(self):
-        """Spatial Jacobian dA/dX at the evaluation points."""
-        return grouped_biot_savart_dA_by_dX_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def d2A_by_dXdX(self):
-        """Spatial Hessian d2A/dXdX at the evaluation points."""
-        return grouped_biot_savart_d2A_by_dXdX_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def dB_by_dX(self):
-        """Spatial Jacobian dB/dX at the evaluation points.
-
-        Returns:
-            (npoints, 3, 3) JAX array where ``[p, j, l] = ∂_j B_l``.
-        """
-        return grouped_biot_savart_dB_by_dX_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def d2B_by_dXdX(self):
-        """Spatial Hessian d2B/dXdX at the evaluation points.
-
-        Returns:
-            (npoints, 3, 3, 3) JAX array where
-            ``[p, j, k, l] = ∂_j ∂_k B_l(x_p)``.
-        """
-        return grouped_biot_savart_d2B_by_dXdX_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def B_and_dB(self):
-        """Combined B and dB/dX (single JIT compilation).
-
-        Returns:
-            (B, dB_dX) with shapes (npoints, 3) and (npoints, 3, 3).
-        """
-        return grouped_biot_savart_B_and_dB_from_spec(
-            self._points_jax,
-            self.coil_set_spec(),
-        )
-
-    def AbsB(self):
-        """Magnetic-field magnitude at the evaluation points."""
-        return jnp.linalg.norm(self.B(), axis=1)[:, None]
-
-    def GradAbsB(self):
-        """Cartesian gradient of ``|B|`` at the evaluation points."""
-        return _grad_absB_from_B_and_dB(*self.B_and_dB())
-
-    def B_cyl(self):
-        """Magnetic field components in the cylindrical basis."""
-        return _cart_vectors_to_cyl(
-            self.B(),
-            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
-        )
-
-    def A_cyl(self):
-        """Vector potential components in the cylindrical basis."""
-        return _cart_vectors_to_cyl(
-            self.A(),
-            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
-        )
-
-    def GradAbsB_cyl(self):
-        """``GradAbsB`` components in the cylindrical basis."""
-        return _cart_vectors_to_cyl(
-            self.GradAbsB(),
-            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
-        )
-
-    def dB_by_dcoilcurrents(self, compute_derivatives=0):
-        """Per-coil B at unit current — list of ``(npoints, 3)`` JAX arrays.
-
-        Mirrors ``simsopt.field.BiotSavart.dB_by_dcoilcurrents`` in shape
-        and per-coil ordering. ``compute_derivatives`` is accepted for
-        signature compatibility but has no runtime effect — the JAX path
-        materialises the per-coil field on demand and does not consume the
-        fieldcache used by the C++ class.
-        """
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_B,
-        )
-
-    def d2B_by_dXdcoilcurrents(self, compute_derivatives=1):
-        """Per-coil ``dB/dX`` at unit current — list of ``(npoints, 3, 3)``."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_dB_by_dX,
-        )
-
-    def d3B_by_dXdXdcoilcurrents(self, compute_derivatives=2):
-        """Per-coil ``d2B/dXdX`` at unit current — list of ``(npoints, 3, 3, 3)``."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_d2B_by_dXdX,
-        )
-
-    def dA_by_dcoilcurrents(self, compute_derivatives=0):
-        """Per-coil A at unit current — list of ``(npoints, 3)`` JAX arrays."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_A,
-        )
-
-    def d2A_by_dXdcoilcurrents(self, compute_derivatives=1):
-        """Per-coil ``dA/dX`` at unit current — list of ``(npoints, 3, 3)``."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_dA_by_dX,
-        )
-
-    def d3A_by_dXdXdcoilcurrents(self, compute_derivatives=2):
-        """Per-coil ``d2A/dXdX`` at unit current — list of ``(npoints, 3, 3, 3)``."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_d2A_by_dXdX,
-        )
-
-    # ------------------------------------------------------------------
     # VJP (reverse-mode gradient w.r.t. coil DOFs)
     # ------------------------------------------------------------------
 
@@ -2065,12 +2096,7 @@ class BiotSavartJAX(Optimizable):
         coil_dofs,
     ):
         curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
-        if not _supports_native_curve_geometry(curve):
-            raise TypeError(
-                "BiotSavartJAX coil cotangent projection requires immutable JAX "
-                f"curve specs; unsupported type {type(curve).__name__}. "
-                "Provide a native curve spec."
-            )
+        _require_native_curve_geometry(curve)
 
         if rotmat is not None:
             rotmat_t = _as_jax_float64(rotmat).T
@@ -2129,6 +2155,14 @@ class BiotSavartJAX(Optimizable):
         if coil_dofs is None:
             coil_dofs = self.x.copy()
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
+        if _coil_cotangent_arrays_are_jax_compatible(d_coil_arrays):
+            return _jitted_coil_cotangents_to_dofs_gradient(
+                self._coil_dof_extraction_spec,
+                d_coil_arrays,
+                _canonical_coil_indices(coil_indices),
+                coil_dofs,
+            )
+
         dofs_gradient = coil_dofs - coil_dofs
         for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
             for local_i, global_i in enumerate(indices):
@@ -2157,12 +2191,42 @@ class BiotSavartJAX(Optimizable):
         Returns:
             :class:`Derivative` over all coil DOFs.
         """
-        return self.dofs_gradient_to_derivative(
-            self.coil_cotangents_to_dofs_gradient(
+        if not _coil_cotangent_arrays_are_jax_compatible(d_coil_arrays) or not hasattr(
+            self, "_coil_dof_extraction_spec"
+        ):
+            return project_coil_cotangents_to_derivative(
+                self._coils,
                 d_coil_arrays,
                 coil_indices,
             )
+
+        canonical_indices = _canonical_coil_indices(coil_indices)
+        dofs_gradient = self.coil_cotangents_to_dofs_gradient(
+            d_coil_arrays,
+            canonical_indices,
         )
+        derivative = self.dofs_gradient_to_derivative(dofs_gradient)
+        external_surfaces = getattr(self, "_external_cotangent_surfaces", ())
+        if not external_surfaces:
+            return derivative
+
+        surface_cotangents = _jitted_external_surface_cotangents(
+            self._coil_dof_extraction_spec,
+            d_coil_arrays,
+            canonical_indices,
+            self._normalize_explicit_coil_dofs(self.x.copy()),
+        )
+        derivative_data = dict(derivative.data)
+        for surface, surface_cotangent in zip(
+            external_surfaces,
+            surface_cotangents,
+            strict=True,
+        ):
+            if surface in derivative_data:
+                derivative_data[surface] = derivative_data[surface] + surface_cotangent
+            else:
+                derivative_data[surface] = surface_cotangent
+        return Derivative(derivative_data)
 
     def dofs_gradient_to_derivative(self, dofs_gradient):
         return dofs_gradient_to_derivative(self.unique_dof_lineage, dofs_gradient)

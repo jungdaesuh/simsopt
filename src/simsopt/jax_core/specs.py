@@ -4,6 +4,8 @@ These dataclasses are the stable JAX-facing state boundary for geometry,
 field, and fixed-surface kernels. The public ``Optimizable`` wrappers still
 own mutable compatibility state and flat-DOF orchestration, but compiled JAX
 paths should consume these explicit specs rather than live object graphs.
+They carry JAX arrays as pytree data leaves, so treat them as immutable payloads
+for tracing, not as dictionary keys.
 """
 
 from __future__ import annotations
@@ -326,12 +328,14 @@ class CoilDofExtractionSpec:
     curve_map: OptimizableDofMapSpec
     current_map: OptimizableDofMapSpec
     symmetry: CoilSymmetrySpec
+    surface_map: OptimizableDofMapSpec | None = None
+    surface_output_index: int | None = None
 
 
 jax.tree_util.register_dataclass(
     CoilDofExtractionSpec,
-    data_fields=["curve", "curve_map", "current_map", "symmetry"],
-    meta_fields=[],
+    data_fields=["curve", "curve_map", "current_map", "symmetry", "surface_map"],
+    meta_fields=["surface_output_index"],
 )
 
 
@@ -1271,6 +1275,8 @@ def make_coil_dof_extraction_spec(
     curve: CurveSpec,
     curve_map: OptimizableDofMapSpec,
     current_map: OptimizableDofMapSpec,
+    surface_map: OptimizableDofMapSpec | None = None,
+    surface_output_index: int | None = None,
     rotmat: object | None = None,
     scale: float = 1.0,
 ) -> CoilDofExtractionSpec:
@@ -1279,6 +1285,8 @@ def make_coil_dof_extraction_spec(
         curve_map=curve_map,
         current_map=current_map,
         symmetry=make_coil_symmetry_spec(rotmat=rotmat, scale=scale),
+        surface_map=surface_map,
+        surface_output_index=surface_output_index,
     )
 
 

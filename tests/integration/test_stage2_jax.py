@@ -1751,6 +1751,67 @@ class TestBiotSavartJAXParity:
             atol=1e-14,
         )
 
+    def test_b_pullback_native_projects_with_jitted_flat_projection(
+        self,
+        coil_surf_setup,
+        monkeypatch,
+    ):
+        """Flat B cotangent projection stays on the jitted spec path for JAX arrays."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        pullback = bs_jax.B_pullback_native(np.asarray(bs_jax.B()))
+        calls = {"jitted": 0}
+        original_jitted_projection = (
+            biotsavart_jax_backend_module._jitted_coil_cotangents_to_dofs_gradient
+        )
+        canonical_indices = biotsavart_jax_backend_module._canonical_coil_indices(
+            pullback.coil_indices
+        )
+        assert hasattr(original_jitted_projection, "lower")
+        lowered_projection = original_jitted_projection.lower(
+            coil_dof_extraction_spec=bs_jax.coil_dof_extraction_spec(),
+            d_coil_arrays=pullback.d_coil_arrays,
+            coil_indices=canonical_indices,
+            coil_dofs=jnp.asarray(
+                bs_jax._normalize_explicit_coil_dofs(bs_jax.x.copy())
+            ),
+        )
+        assert lowered_projection is not None
+
+        def counted_jitted_projection(*args, **kwargs):
+            calls["jitted"] += 1
+            return original_jitted_projection(*args, **kwargs)
+
+        def reject_single_coil_projection(*_args, **_kwargs):
+            raise AssertionError("JAX-array projection should use the jitted helper")
+
+        monkeypatch.setattr(
+            biotsavart_jax_backend_module,
+            "_jitted_coil_cotangents_to_dofs_gradient",
+            counted_jitted_projection,
+        )
+        monkeypatch.setattr(
+            bs_jax,
+            "_add_single_coil_cotangent_to_dofs_gradient",
+            reject_single_coil_projection,
+        )
+
+        dof_gradient = bs_jax.coil_cotangents_to_dofs_gradient(
+            pullback.d_coil_arrays,
+            pullback.coil_indices,
+        )
+
+        assert calls == {"jitted": 1}
+        np.testing.assert_allclose(
+            np.asarray(dof_gradient),
+            np.asarray(bs_jax.B_vjp(np.asarray(bs_jax.B()))(bs_jax)),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
     def test_public_b_vjp_projects_through_flat_dof_gradient(
         self,
         coil_surf_setup,
