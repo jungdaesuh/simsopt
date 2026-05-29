@@ -711,12 +711,8 @@ def _build_prob():
     #                QS weight is always applied as-is.
     if WEIGHT_MODE == 'relative':
         aw = ASPECT_WEIGHT / abs(ASPECT_TARGET)
-        iw = IOTA_WEIGHT   / abs(IOTA_TARGET)
-        vw = VOLUME_WEIGHT / abs(VOLUME_TARGET)
     else:
         aw = ASPECT_WEIGHT
-        iw = IOTA_WEIGHT
-        vw = VOLUME_WEIGHT
     # DIRECTIONAL: iota and volume enter as deficit-from-aspiration shortfalls
     # (target 0 -> minimizing pushes them UP), not as (x - target)^2 set-points.
     # `aw` keeps aspect as a loose sanity anchor; iota/volume use their raw
@@ -835,7 +831,7 @@ t0 = time.time()
 
 if mpi.proc0_world:
     with open(DIAGNOSTICS_FILE, 'w') as f:
-        f.write(f'# Stage 1 VMEC QA Optimization Diagnostics\n')
+        f.write('# Stage 1 VMEC QA Optimization Diagnostics\n')
         f.write(f'# Date: {datetime.now()}\n')
         f.write(f'# Start mode: {"COLD" if COLD_START else "WARM"}\n')
         f.write(f'# Targets: iota={IOTA_TARGET}, aspect={ASPECT_TARGET}, volume={VOLUME_TARGET}\n')
