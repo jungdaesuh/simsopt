@@ -622,7 +622,12 @@ working_layer_shear_shortfall_objective = make_optimizable(
 # coils) — the surface-side fix for the boundary-agnostic realizability wall.
 # PrincipalCurvature (surface smoothness) is opt-in (env, default 0) pending
 # HBT-scale calibration of its curvature bound.
-STAGE1_IOTA_ASPIRATION = 1.0          # pure-maximize: deficit stays positive in-range
+STAGE1_IOTA_ASPIRATION = float(os.environ.get("STAGE1_IOTA_ASPIRATION", "1.0"))
+# pure-maximize when 1.0 (deficit positive in-range, no upper bound). Set to a
+# value inside the operating band (e.g. 0.18) to make iota a STEERABLE one-sided
+# ceiling: max(0, aspiration - iota) stops pushing once iota reaches aspiration,
+# so the loop's feedback knob can park iota in the realizable window instead of
+# letting it run away (it hit 0.79 at max_mode=2 under the 1.0 default).
 STAGE1_VOLUME_ASPIRATION = 0.20       # winding-envelope-scale volume aspiration, m^3
 STAGE1_IOTA_RESONANCES = (0.20, 0.25)  # 1/5, 1/4 at NFP=5 — avoid
 STAGE1_IOTA_NOTCH_EPS = 0.01
