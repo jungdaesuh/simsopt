@@ -3661,6 +3661,7 @@ class BoozerSurfaceJAX(Optimizable):
         self._reference_penalty_objective_cache = {}
         self._reference_penalty_value_and_grad_cache = {}
         self._reference_penalty_residual_cache = {}
+        self._reference_exact_residual_cache = {}
 
         # Coil data (extracted once, updated via _refresh_coil_data)
         self._refresh_coil_data()
@@ -4149,6 +4150,7 @@ class BoozerSurfaceJAX(Optimizable):
         self._reference_penalty_objective_cache.clear()
         self._reference_penalty_value_and_grad_cache.clear()
         self._reference_penalty_residual_cache.clear()
+        self._reference_exact_residual_cache.clear()
 
     def _emit_stage_callback(
         self,
@@ -4528,6 +4530,9 @@ class BoozerSurfaceJAX(Optimizable):
                     weight_inv_modB=weight_inv_modB,
                     decision_split_mode=decision_split_mode,
                     **self._traceable_surface_runtime_args(),
+                )
+                residual_fn = _optimizer_jax._mark_cacheable_jit_linear_operator(
+                    residual_fn
                 )
                 self._reference_penalty_residual_cache[key] = residual_fn
             return residual_fn
@@ -4946,6 +4951,14 @@ class BoozerSurfaceJAX(Optimizable):
             bool(weight_inv_modB),
             self._traceable_surface_signature(),
             tuple(int(dim) for dim in mask_indices.shape),
+        )
+
+    def _reference_exact_cache_key(self, weight_inv_modB, mask_indices, coil_set_spec):
+        return (
+            bool(weight_inv_modB),
+            self._traceable_surface_signature(),
+            tuple(int(dim) for dim in mask_indices.shape),
+            _runtime_cache_tree_signature(coil_set_spec),
         )
 
     def _get_traceable_penalty_objective(
@@ -6330,8 +6343,25 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
     def _make_exact_residual(self, mask_indices):
-        """Build the JIT-compiled exact residual function."""
-        return self._make_exact_residual_with(mask_indices)
+        """Return the host exact-residual closure for the current structural state."""
+        resolved_coil_set_spec = _hostify_tree(self.coil_set_spec)
+        weight_inv_modB = self.options["weight_inv_modB"]
+        key = self._reference_exact_cache_key(
+            weight_inv_modB,
+            mask_indices,
+            resolved_coil_set_spec,
+        )
+        residual_fn = self._reference_exact_residual_cache.get(key)
+        if residual_fn is None:
+            residual_fn = self._make_exact_residual_with(
+                mask_indices,
+                coil_set_spec=resolved_coil_set_spec,
+            )
+            residual_fn = _optimizer_jax._mark_cacheable_jit_linear_operator(
+                residual_fn
+            )
+            self._reference_exact_residual_cache[key] = residual_fn
+        return residual_fn
 
     def _compute_stellsym_mask_indices(self):
         """Compute and cache the integer exact-residual mask indices."""

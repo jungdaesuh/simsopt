@@ -1335,6 +1335,23 @@ class TestOptimizerAdapterPrivate:
         assert main_a is main_b
         assert observed is not main_a
 
+    def test_newton_linear_product_jit_helpers_cache_marked_callables(self):
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        def residual(x):
+            return jnp.asarray([x[0] + 2.0 * x[1], x[0] - x[1]], dtype=x.dtype)
+
+        cacheable_quad = _opt._mark_cacheable_jit_value_and_grad(quad)
+        cacheable_residual = _opt._mark_cacheable_jit_linear_operator(residual)
+
+        assert _opt._hessian_vector_product_fn(cacheable_quad) is (
+            _opt._hessian_vector_product_fn(cacheable_quad)
+        )
+        assert _opt._jacobian_vector_product_fn(cacheable_residual) is (
+            _opt._jacobian_vector_product_fn(cacheable_residual)
+        )
+
     def test_lbfgsb_main_loop_omits_partial_state_donation(self, monkeypatch):
         observed = {}
 

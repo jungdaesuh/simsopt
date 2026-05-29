@@ -554,7 +554,7 @@ def _evaluate_from_dofs(
     spec: SurfaceRZFourierSpec,
     dofs: jax.Array,
 ):
-    return evaluator(_spec_from_dofs(spec, dofs, use_custom_vjp=True))
+    return evaluator(_spec_from_dofs(spec, dofs))
 
 
 def _evaluate_jacobian_from_dofs(
@@ -579,6 +579,17 @@ def _evaluate_vjp_from_dofs(
         dofs_jax,
     )
     return pullback(cotangent_jax)[0]
+
+
+def _evaluate_scalar_grad_from_dofs(
+    evaluator,
+    spec: SurfaceRZFourierSpec,
+    dofs: jax.Array,
+):
+    dofs_jax = _as_jax_float64(dofs)
+    return jax.grad(lambda x: evaluator(_spec_from_dofs(spec, x, use_custom_vjp=True)))(
+        dofs_jax
+    )
 
 
 def surface_rz_fourier_gamma_from_spec(spec: SurfaceRZFourierSpec):
@@ -1189,46 +1200,56 @@ def surface_rz_fourier_aspect_ratio_from_dofs(
 
 
 def surface_rz_fourier_darea_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
-    return jax.grad(lambda x: surface_rz_fourier_area_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
+    return _evaluate_scalar_grad_from_dofs(
+        surface_rz_fourier_area_from_spec, spec, dofs
     )
 
 
 def surface_rz_fourier_dvolume_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
-    return jax.grad(lambda x: surface_rz_fourier_volume_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
+    return _evaluate_scalar_grad_from_dofs(
+        surface_rz_fourier_volume_from_spec,
+        spec,
+        dofs,
     )
 
 
 def surface_rz_fourier_dmean_cross_sectional_area_from_dofs(
     spec: SurfaceRZFourierSpec, dofs: jax.Array
 ):
-    return jax.grad(
-        lambda x: surface_rz_fourier_mean_cross_sectional_area_from_dofs(spec, x)
-    )(_as_jax_float64(dofs))
+    return _evaluate_scalar_grad_from_dofs(
+        surface_rz_fourier_mean_cross_sectional_area_from_spec,
+        spec,
+        dofs,
+    )
 
 
 def surface_rz_fourier_dminor_radius_from_dofs(
     spec: SurfaceRZFourierSpec, dofs: jax.Array
 ):
-    return jax.grad(lambda x: surface_rz_fourier_minor_radius_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
+    return _evaluate_scalar_grad_from_dofs(
+        surface_rz_fourier_minor_radius_from_spec,
+        spec,
+        dofs,
     )
 
 
 def surface_rz_fourier_dmajor_radius_from_dofs(
     spec: SurfaceRZFourierSpec, dofs: jax.Array
 ):
-    return jax.grad(lambda x: surface_rz_fourier_major_radius_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
+    return _evaluate_scalar_grad_from_dofs(
+        surface_rz_fourier_major_radius_from_spec,
+        spec,
+        dofs,
     )
 
 
 def surface_rz_fourier_daspect_ratio_from_dofs(
     spec: SurfaceRZFourierSpec, dofs: jax.Array
 ):
-    return jax.grad(lambda x: surface_rz_fourier_aspect_ratio_from_dofs(spec, x))(
-        _as_jax_float64(dofs)
+    return _evaluate_scalar_grad_from_dofs(
+        surface_rz_fourier_aspect_ratio_from_spec,
+        spec,
+        dofs,
     )
 
 

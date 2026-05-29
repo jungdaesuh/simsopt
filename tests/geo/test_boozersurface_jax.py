@@ -7173,6 +7173,19 @@ class TestBoozerSurfaceJAXExactPath:
         assert residual.shape == (mask_indices.shape[0] + 2,)
         assert jnp.all(jnp.isfinite(residual))
 
+    def test_exact_residual_closure_reuses_reference_cache(self):
+        """Repeated exact solves should reuse the same host residual program."""
+        booz = _make_mock_boozer_surface_exact()
+        mask_indices = booz._compute_stellsym_mask_indices()
+
+        residual_a = booz._make_exact_residual(mask_indices)
+        residual_b = booz._make_exact_residual(mask_indices)
+
+        assert residual_a is residual_b
+
+        booz.options["weight_inv_modB"] = not bool(booz.options["weight_inv_modB"])
+        assert booz._make_exact_residual(mask_indices) is not residual_a
+
     def test_run_code_traceable_accepts_grouped_coil_spec_source(self, monkeypatch):
         """Traceable exact solves must accept ``GroupedCoilSetSpec`` directly."""
         booz = _make_mock_boozer_surface_exact()

@@ -291,8 +291,12 @@ _NEWTON_BACKTRACKING_MAX_STEPS = 8
 _HAGER_HIGHAM_CONDITION_ITERATIONS = 5
 _LINEAR_SOLVE_ITERATIONS_UNKNOWN = -1
 _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
+_JIT_LINEAR_OPERATOR_CACHE_LOCK = Lock()
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
+_CACHEABLE_LINEAR_OPERATOR_ATTR = "_simsopt_cache_jit_linear_operator"
+_CACHED_HVP_ATTR = "_simsopt_cached_jit_hvp"
+_CACHED_JVP_ATTR = "_simsopt_cached_jit_jvp"
 _TARGET_OPTIMIZER_DIAGNOSTIC_EVENT_CALLBACK = ContextVar(
     "simsopt_target_optimizer_diagnostic_event_callback",
     default=None,
@@ -908,6 +912,13 @@ def _mark_cacheable_jit_value_and_grad(fun):
     # caller passes a builtin or ``__slots__`` instance the ``AttributeError``
     # surfaces the contract violation rather than silently no-op'ing.
     setattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, True)
+    setattr(fun, _CACHEABLE_LINEAR_OPERATOR_ATTR, True)
+    return fun
+
+
+def _mark_cacheable_jit_linear_operator(fun):
+    # Same callable mutability contract as ``_mark_cacheable_jit_value_and_grad``.
+    setattr(fun, _CACHEABLE_LINEAR_OPERATOR_ATTR, True)
     return fun
 
 
@@ -951,6 +962,21 @@ def _cached_jit_value_and_grad(fun):
         if cached is not None:
             return cached
         setattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, compiled)
+        return compiled
+
+
+def _cached_jit_linear_operator(fun, cache_attr, build_compiled):
+    if not getattr(fun, _CACHEABLE_LINEAR_OPERATOR_ATTR, False):
+        return build_compiled(fun)
+    cached = getattr(fun, cache_attr, None)
+    if cached is not None:
+        return cached
+    compiled = build_compiled(fun)
+    with _JIT_LINEAR_OPERATOR_CACHE_LOCK:
+        cached = getattr(fun, cache_attr, None)
+        if cached is not None:
+            return cached
+        setattr(fun, cache_attr, compiled)
         return compiled
 
 
@@ -3136,12 +3162,18 @@ def _materialize_dense_linear_operator(linear_operator_fn, x):
 
 
 def _hessian_vector_product_fn(objective_fn):
-    grad_fn = jax.grad(objective_fn)
-    return jax.jit(lambda x, v: jax.jvp(grad_fn, (x,), (v,))[1])
+    def build_compiled(fn):
+        grad_fn = jax.grad(fn)
+        return jax.jit(lambda x, v: jax.jvp(grad_fn, (x,), (v,))[1])
+
+    return _cached_jit_linear_operator(objective_fn, _CACHED_HVP_ATTR, build_compiled)
 
 
 def _jacobian_vector_product_fn(residual_fn):
-    return jax.jit(lambda x, v: jax.jvp(residual_fn, (x,), (v,))[1])
+    def build_compiled(fn):
+        return jax.jit(lambda x, v: jax.jvp(fn, (x,), (v,))[1])
+
+    return _cached_jit_linear_operator(residual_fn, _CACHED_JVP_ATTR, build_compiled)
 
 
 def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
