@@ -2203,6 +2203,167 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
     assert optimizer_option_methods == ["bfgs-ondevice"]
 
 
+def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
+    monkeypatch,
+):
+    pack_calls = []
+    evaluate_calls = []
+    solved_state = types.SimpleNamespace(
+        sdofs=jnp.asarray([0.1, -0.2], dtype=jnp.float64),
+        iota=jnp.asarray(0.31, dtype=jnp.float64),
+        G=None,
+        weight_inv_modB=False,
+    )
+
+    def pack_decision_vector(iota, G, *, sdofs):
+        pack_calls.append((iota, G, sdofs))
+        return jnp.concatenate([sdofs, jnp.reshape(iota, (1,))])
+
+    def evaluate_total_objective(*args):
+        evaluate_calls.append(args)
+        return jnp.asarray(1.0, dtype=jnp.float64)
+
+    booz = types.SimpleNamespace(
+        boozer_type="ls",
+        _resolve_optimizer_method=lambda: "bfgs-ondevice",
+        _collect_optimizer_options=lambda *, method: {},
+        _traceable_solve_state_token=31,
+        _traceable_runtime_entry_cache=None,
+        options={},
+        res={"linearization_kind": "hessian"},
+        _linear_solve_tolerance=lambda: 1.0e-10,
+        _pack_decision_vector=pack_decision_vector,
+        quadpoints_phi=np.asarray([0.0, 0.5], dtype=np.float64),
+        quadpoints_theta=np.asarray([0.0, 0.5], dtype=np.float64),
+        mpol=1,
+        ntor=1,
+        nfp=1,
+        stellsym=False,
+        scatter_indices=np.asarray([0, 1], dtype=np.int64),
+        _surface_geometry_kind="rz_fourier",
+        label_quadpoints_phi=np.asarray([0.0, 0.5], dtype=np.float64),
+        label_quadpoints_theta=np.asarray([0.0, 0.5], dtype=np.float64),
+        label_mpol=1,
+        label_ntor=1,
+        label_nfp=1,
+        label_stellsym=False,
+        label_scatter_indices=np.asarray([0, 1], dtype=np.int64),
+        _label_surface_geometry_kind="rz_fourier",
+        constraint_weight=1.0,
+        targetlabel=0.25,
+        label_type="volume",
+        phi_idx=0,
+        surface=types.SimpleNamespace(
+            quadpoints_phi=np.asarray([0.0, 0.5], dtype=np.float64),
+            quadpoints_theta=np.asarray([0.0, 0.5], dtype=np.float64),
+        ),
+    )
+    bs = types.SimpleNamespace(
+        _coil_dof_state_token=37,
+        x=jnp.asarray([0.2, -0.1], dtype=jnp.float64),
+        coil_dof_extraction_spec=lambda: {"layout": ("fixed",)},
+        coil_set_spec_from_dofs=lambda coil_dofs: ("coil_set", tuple(coil_dofs.shape)),
+    )
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_resolved_boozer_solved_runtime_state",
+        lambda _booz: solved_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_evaluate_traceable_total_objective",
+        evaluate_total_objective,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_build_traceable_objective_compiled_bundle_from_state",
+        lambda _booz, state, **_kwargs: {
+            "state": state,
+            "compiled_forward_result_for": object(),
+            "compiled_total_gradient_for": object(),
+            "compiled_value_and_grad_for": object(),
+        },
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_objective_from_compiled_bundle",
+        lambda compiled_bundle: ("objective", id(compiled_bundle)),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_batched_value_and_grad_pipeline",
+        lambda compiled_value_and_grad_for: (
+            "batched_value_and_grad",
+            id(compiled_value_and_grad_for),
+        ),
+    )
+
+    entry1 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+    )
+    entry2 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+    )
+
+    assert entry1 is entry2
+    assert len(pack_calls) == 1
+    assert len(evaluate_calls) == 1
+
+
+def test_cached_strict_scalar_value_and_grad_builds_stable_jit(monkeypatch):
+    """The standard Boozer objective value/grad path should compile once per owner."""
+    original_jit = surfaceobjectives_jax_module.jax.jit
+    jit_kwargs = []
+
+    def recording_jit(fun=None, **kwargs):
+        jit_kwargs.append(dict(kwargs))
+        return original_jit(fun, **kwargs)
+
+    monkeypatch.setattr(surfaceobjectives_jax_module.jax, "jit", recording_jit)
+
+    def objective(x, scale, optimize_G, weight_inv_modB):
+        if optimize_G:
+            total = jnp.sum(scale * x * x)
+        else:
+            total = jnp.sum(scale * x)
+        if weight_inv_modB:
+            total = total + 1.0
+        return total
+
+    value_and_grad = surfaceobjectives_jax_module._make_cached_strict_scalar_value_and_grad(
+        objective
+    )
+
+    x = jnp.asarray([2.0, -3.0], dtype=jnp.float64)
+    scale = jnp.asarray([0.5, 0.25], dtype=jnp.float64)
+    value, grad = value_and_grad(x, scale, True, True)
+    jit_kwargs_after_first_call = list(jit_kwargs)
+    value2, grad2 = value_and_grad(x + 1.0, scale, True, True)
+
+    assert getattr(value_and_grad, "_simsopt_value_and_grad") is True
+    assert jit_kwargs == [{"static_argnums": (2, 3)}]
+    assert jit_kwargs == jit_kwargs_after_first_call
+    np.testing.assert_allclose(np.asarray(value), 5.25, rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(
+        np.asarray(grad),
+        np.asarray([2.0, -1.5], dtype=np.float64),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(np.asarray(value2), 6.5, rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(
+        np.asarray(grad2),
+        np.asarray([3.0, -1.0], dtype=np.float64),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
 def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_status(
     monkeypatch,
 ):
@@ -3450,7 +3611,8 @@ def test_major_radius_gradient_uses_boozer_surface_biotsavart_fallback():
 def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
     monkeypatch,
 ):
-    build_state_calls = []
+    build_cache_state_calls = []
+    materialize_state_calls = []
     build_bundle_calls = []
 
     booz = types.SimpleNamespace(
@@ -3461,8 +3623,8 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
     )
     bs = types.SimpleNamespace(_coil_dof_state_token=13)
 
-    def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
-        build_state_calls.append((iota_target, outer_objective_config))
+    def build_cache_state(_booz, _bs, iota_target, *, outer_objective_config=None):
+        build_cache_state_calls.append((iota_target, outer_objective_config))
         return _traceable_cache_key_state(
             {
                 "objective_kwargs": {
@@ -3494,6 +3656,10 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
             coil_dof_state_token=_bs._coil_dof_state_token,
         )
 
+    def materialize_state(_booz, _bs, cache_state):
+        materialize_state_calls.append(cache_state["objective_kwargs"]["iota_target"])
+        return cache_state
+
     def build_bundle(_booz, state, *, success_filter=None):
         build_bundle_calls.append(
             (state["objective_kwargs"]["iota_target"], success_filter)
@@ -3507,8 +3673,13 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_build_traceable_objective_state",
-        build_state,
+        "_build_traceable_objective_cache_state",
+        build_cache_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_materialize_traceable_objective_state",
+        materialize_state,
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -3558,7 +3729,8 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
     )
 
     assert entry1 is entry2
-    assert len(build_state_calls) == 2
+    assert len(build_cache_state_calls) == 2
+    assert len(materialize_state_calls) == 1
     assert len(build_bundle_calls) == 1
 
 
@@ -3575,7 +3747,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
     )
     bs = types.SimpleNamespace(_coil_dof_state_token=13)
 
-    def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
+    def build_cache_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         del outer_objective_config
         return _traceable_cache_key_state(
             {
@@ -3603,6 +3775,9 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
             coil_dof_state_token=_bs._coil_dof_state_token,
         )
 
+    def materialize_state(_booz, _bs, cache_state):
+        return cache_state
+
     def build_bundle(_booz, state, *, success_filter=None):
         build_bundle_calls.append(
             (state["objective_kwargs"]["iota_target"], success_filter)
@@ -3616,8 +3791,13 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_build_traceable_objective_state",
-        build_state,
+        "_build_traceable_objective_cache_state",
+        build_cache_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_materialize_traceable_objective_state",
+        materialize_state,
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -3693,7 +3873,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solve_state_change(
     )
     bs = types.SimpleNamespace(_coil_dof_state_token=13)
 
-    def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
+    def build_cache_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         del outer_objective_config
         return _traceable_cache_key_state(
             {
@@ -3721,6 +3901,9 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solve_state_change(
             coil_dof_state_token=_bs._coil_dof_state_token,
         )
 
+    def materialize_state(_booz, _bs, cache_state):
+        return cache_state
+
     def build_bundle(_booz, state, *, success_filter=None):
         del success_filter
         build_bundle_calls.append(state["objective_kwargs"]["iota_target"])
@@ -3733,8 +3916,13 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solve_state_change(
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_build_traceable_objective_state",
-        build_state,
+        "_build_traceable_objective_cache_state",
+        build_cache_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_materialize_traceable_objective_state",
+        materialize_state,
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -3796,7 +3984,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
     )
     bs = types.SimpleNamespace(_coil_dof_state_token=13)
 
-    def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
+    def build_cache_state(_booz, _bs, iota_target, *, outer_objective_config=None):
         del outer_objective_config
         return _traceable_cache_key_state(
             {
@@ -3824,6 +4012,9 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
             coil_dof_state_token=_bs._coil_dof_state_token,
         )
 
+    def materialize_state(_booz, _bs, cache_state):
+        return cache_state
+
     def build_bundle(_booz, state, *, success_filter=None):
         del success_filter
         build_bundle_calls.append(float(state["objective_kwargs"]["iota_target"]))
@@ -3836,8 +4027,13 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_build_traceable_objective_state",
-        build_state,
+        "_build_traceable_objective_cache_state",
+        build_cache_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_materialize_traceable_objective_state",
+        materialize_state,
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,

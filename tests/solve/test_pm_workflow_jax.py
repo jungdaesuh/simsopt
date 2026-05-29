@@ -17,13 +17,22 @@ from simsopt.jax_core.pm_optimization import (
     GPMOBacktrackingSpec,
     GPMOBaselineSpec,
     GPMOMultiSpec,
+    PMOptimizationSpec,
+    _gpmo_arbvec_solve_bucketed_impl,
     _gpmo_arbvec_contributions,
     gpmo_arbvec_backtracking_step,
+    gpmo_arbvec_backtracking_solve,
+    gpmo_arbvec_solve,
+    gpmo_arbvec_solve_bucketed,
     gpmo_arbvec_step,
     gpmo_backtracking_step,
+    gpmo_backtracking_solve,
+    gpmo_baseline_solve,
     gpmo_baseline_step,
     gpmo_connectivity_matrix,
+    gpmo_multi_solve,
     gpmo_multi_step,
+    mwpgp_solve,
 )
 from simsopt.jax_core.pm_workflow import (
     PMGPMOArbVecBacktrackingLiveState,
@@ -224,6 +233,130 @@ def _arbvec_backtracking_problem() -> tuple[
         jnp.zeros((6, 3), dtype=jnp.float64).at[0, :].set(spec.pol_vectors[0, 0, :])
     )
     return A, b, spec, x_init
+
+
+def _assert_direct_gpmo_solver_reuses_shapes(
+    solver,
+    A,
+    b,
+    spec,
+    *,
+    K: int,
+    expected_residual_history_shape: tuple[int, ...],
+    **solver_kwargs,
+) -> None:
+    first_result = solver(spec, A, b, K=K, **solver_kwargs)
+    second_result = solver(spec, A, b + 0.1, K=K, **solver_kwargs)
+    second_result.x.block_until_ready()
+
+    assert first_result.x.shape == second_result.x.shape == (
+        spec.m_maxima.shape[0],
+        3,
+    )
+    assert first_result.residual_history.shape == second_result.residual_history.shape
+    assert second_result.residual_history.shape == expected_residual_history_shape
+
+
+def test_pm_solver_entrypoints_are_direct_stable_jits() -> None:
+    assert hasattr(gpmo_baseline_solve, "lower")
+    assert hasattr(gpmo_arbvec_solve, "lower")
+    assert hasattr(_gpmo_arbvec_solve_bucketed_impl, "lower")
+    assert hasattr(gpmo_arbvec_backtracking_solve, "lower")
+    assert hasattr(gpmo_multi_solve, "lower")
+    assert hasattr(gpmo_backtracking_solve, "lower")
+    assert hasattr(mwpgp_solve, "lower")
+
+    A, b, baseline_spec = _baseline_problem()
+    _assert_direct_gpmo_solver_reuses_shapes(
+        gpmo_baseline_solve,
+        A,
+        b,
+        baseline_spec,
+        K=3,
+        expected_residual_history_shape=(3,),
+    )
+
+    A, b, arbvec_spec = _arbvec_problem()
+    _assert_direct_gpmo_solver_reuses_shapes(
+        gpmo_arbvec_solve,
+        A,
+        b,
+        arbvec_spec,
+        K=3,
+        expected_residual_history_shape=(3,),
+    )
+
+    A, b, multi_spec = _multi_problem()
+    _assert_direct_gpmo_solver_reuses_shapes(
+        gpmo_multi_solve,
+        A,
+        b,
+        multi_spec,
+        K=2,
+        expected_residual_history_shape=(2,),
+    )
+
+    A, b, backtracking_spec = _backtracking_problem()
+    _assert_direct_gpmo_solver_reuses_shapes(
+        gpmo_backtracking_solve,
+        A,
+        b,
+        backtracking_spec,
+        K=3,
+        expected_residual_history_shape=(3,),
+    )
+
+    A, b, arbvec_backtracking_spec, x_init = _arbvec_backtracking_problem()
+    _assert_direct_gpmo_solver_reuses_shapes(
+        gpmo_arbvec_backtracking_solve,
+        A,
+        b,
+        arbvec_backtracking_spec,
+        K=3,
+        expected_residual_history_shape=(3,),
+        x_init=x_init,
+    )
+
+    ndipoles = 2
+    pm_spec = PMOptimizationSpec(
+        m_maxima=jnp.ones((ndipoles,), dtype=jnp.float64),
+        m_proxy=jnp.zeros((ndipoles, 3), dtype=jnp.float64),
+        nu=jnp.asarray(1.0e100, dtype=jnp.float64),
+        reg_l2=jnp.asarray(0.0, dtype=jnp.float64),
+        alpha=jnp.asarray(0.1, dtype=jnp.float64),
+    )
+    pm_A = jnp.eye(3 * ndipoles, dtype=jnp.float64)
+    pm_ATb = jnp.zeros((ndipoles, 3), dtype=jnp.float64)
+    pm_m0 = jnp.zeros((ndipoles, 3), dtype=jnp.float64)
+    m_final, history = mwpgp_solve(pm_spec, pm_A, pm_ATb, pm_m0, n_steps=2)
+    m_final.block_until_ready()
+
+    assert m_final.shape == (ndipoles, 3)
+    assert history.shape == (2,)
+
+
+def test_gpmo_arbvec_bucketed_solver_validates_concrete_active_counts() -> None:
+    A, b, spec = _arbvec_problem()
+
+    with pytest.raises(ValueError, match="active_ndipoles"):
+        gpmo_arbvec_solve_bucketed(
+            spec,
+            A,
+            b,
+            K=1,
+            active_ndipoles=int(spec.m_maxima.shape[0]) + 1,
+            active_nvectors=int(spec.pol_vectors.shape[1]),
+        )
+
+    with pytest.raises(ValueError, match="active_nvectors"):
+        gpmo_arbvec_solve_bucketed(
+            spec,
+            A,
+            b,
+            K=1,
+            active_ndipoles=int(spec.m_maxima.shape[0]),
+            active_nvectors=int(spec.pol_vectors.shape[1]) + 1,
+        )
 
 
 def test_pm_initial_states_allow_strict_host_to_device_transfer_guard():

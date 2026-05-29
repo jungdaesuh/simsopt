@@ -63,6 +63,7 @@ materialise ``A^T A``, which would cost ``O((3 N)^2)`` memory.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -797,6 +798,7 @@ def _baseline_x_history(
     return x_history
 
 
+@partial(jax.jit, static_argnames=("K", "record_every"))
 def gpmo_baseline_solve(
     spec: GPMOBaselineSpec,
     A_scaled: jax.Array,
@@ -1089,6 +1091,7 @@ def _arbvec_x_history(
     return x_history
 
 
+@partial(jax.jit, static_argnames=("K", "record_every"))
 def gpmo_arbvec_solve(
     spec: GPMOArbVecSpec,
     A_scaled: jax.Array,
@@ -1265,6 +1268,31 @@ def gpmo_arbvec_solve_bucketed(
         active_nvectors,
         int(pol_vectors.shape[1]),
     )
+    return _gpmo_arbvec_solve_bucketed_impl(
+        spec,
+        A_arr,
+        b_arr,
+        K=K,
+        active_ndipoles=active_ndipoles,
+        active_nvectors=active_nvectors,
+    )
+
+
+@partial(jax.jit, static_argnames=("K",))
+def _gpmo_arbvec_solve_bucketed_impl(
+    spec: GPMOArbVecSpec,
+    A_scaled: jax.Array,
+    b: jax.Array,
+    *,
+    K: int,
+    active_ndipoles: jax.Array,
+    active_nvectors: jax.Array,
+) -> GPMOArbVecResult:
+    A_arr = _as_runtime_array(A_scaled)
+    b_arr = _as_runtime_array(b)
+    m_maxima = _as_runtime_array(spec.m_maxima)
+    pol_vectors = _as_runtime_array(spec.pol_vectors)
+    ndipoles = int(m_maxima.shape[0])
 
     active_ndipoles_arr = jnp.asarray(active_ndipoles, dtype=jnp.int64)
     active_nvectors_arr = jnp.asarray(active_nvectors, dtype=jnp.int64)
@@ -1844,6 +1872,7 @@ def gpmo_arbvec_backtracking_step(
     return next_state, trace
 
 
+@partial(jax.jit, static_argnames=("K", "record_every"))
 def gpmo_arbvec_backtracking_solve(
     spec: GPMOArbVecBacktrackingSpec,
     A_scaled: jax.Array,
@@ -2306,6 +2335,7 @@ def _multi_x_history(
     return x_history
 
 
+@partial(jax.jit, static_argnames=("K", "record_every"))
 def gpmo_multi_solve(
     spec: GPMOMultiSpec,
     A_scaled: jax.Array,
@@ -2717,6 +2747,7 @@ def gpmo_backtracking_step(
     return next_state, trace
 
 
+@partial(jax.jit, static_argnames=("K", "record_every"))
 def gpmo_backtracking_solve(
     spec: GPMOBacktrackingSpec,
     A_scaled: jax.Array,
@@ -3287,6 +3318,7 @@ def mwpgp_initial_state(
     return _initial_state(m0_arr, A_arr, ATb_rs, m_maxima, reg_l2, nu)
 
 
+@partial(jax.jit, static_argnames=("n_steps",))
 def mwpgp_solve(
     spec: PMOptimizationSpec,
     A: jax.Array,

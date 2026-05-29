@@ -2035,13 +2035,14 @@ def _public_dJ_from_native_cache(surface_objective):
 
 
 def _make_cached_strict_scalar_value_and_grad(fun):
-    """Cache a strict scalar value/grad callable behind a stable helper contract."""
+    """Compile the strict direct-objective value/grad callable once per owner."""
 
     def value_and_grad(arg, *args):
         return _strict_scalar_value_and_grad(fun, arg, *args)
 
-    value_and_grad._simsopt_value_and_grad = True
-    return value_and_grad
+    compiled_value_and_grad = jax.jit(value_and_grad, static_argnums=(2, 3))
+    compiled_value_and_grad._simsopt_value_and_grad = True
+    return compiled_value_and_grad
 
 
 def _traceable_cache_leaf_signature(leaf):
@@ -4037,21 +4038,14 @@ def _traceable_predict_warmstart_x(
     )
 
 
-def _build_traceable_objective_state(
+def _build_traceable_objective_cache_state(
     booz_jax,
     bs_jax,
     iota_target,
     *,
     outer_objective_config=None,
 ):
-    """Return the shared state used by the traceable objective builders.
-
-    This setup reads the solved mutable object state once, computes the solved
-    baseline objective in JAX, then explicitly hostifies the captured runtime
-    constants before building the compiled target-lane closures. The resulting
-    closures stay pure in the hot path without capturing device-backed arrays
-    that would trip strict transfer-guard lowering.
-    """
+    """Return the cheap traceable-runtime state needed for cache-key checks."""
     objective_method = None
     if booz_jax.boozer_type == "ls":
         objective_method = booz_jax._resolve_optimizer_method()
@@ -4133,26 +4127,13 @@ def _build_traceable_objective_state(
     linear_solve_tol = booz_jax._linear_solve_tolerance()
     linear_solve_stab = float(booz_jax.options.get("newton_stab", 0.0))
 
-    baseline_x = booz_jax._pack_decision_vector(
-        warmstart_iota,
-        warmstart_G,
-        sdofs=warmstart_sdofs,
-    )
-
-    baseline_value = _evaluate_traceable_total_objective(
-        baseline_x,
-        baseline_coil_dofs,
-        bs_jax.coil_set_spec_from_dofs(baseline_coil_dofs),
-        objective_kwargs,
-    )
     return {
-        "objective_kwargs": _traceable_runtime_hostify_tree(objective_kwargs),
-        "baseline_x": _traceable_runtime_hostify_tree(baseline_x),
-        "baseline_value": _traceable_runtime_hostify_tree(baseline_value),
-        "baseline_linear_solve_factors": _traceable_runtime_hostify_tree(
-            baseline_linear_solve_factors
-        ),
-        "baseline_coil_dofs": _traceable_runtime_hostify_tree(baseline_coil_dofs),
+        "objective_kwargs": objective_kwargs,
+        "warmstart_sdofs": warmstart_sdofs,
+        "warmstart_iota": warmstart_iota,
+        "warmstart_G": warmstart_G,
+        "baseline_linear_solve_factors": baseline_linear_solve_factors,
+        "baseline_coil_dofs": baseline_coil_dofs,
         "coil_dof_extraction_spec": coil_dof_extraction_spec,
         "coil_set_spec_from_dofs": coil_set_spec_from_dofs,
         "solve_state_token": booz_jax._traceable_solve_state_token,
@@ -4165,6 +4146,68 @@ def _build_traceable_objective_state(
         "linear_solve_tol": linear_solve_tol,
         "linear_solve_stab": linear_solve_stab,
     }
+
+
+def _materialize_traceable_objective_state(booz_jax, bs_jax, cache_state):
+    """Add baseline value/runtime constants after the runtime cache misses."""
+    baseline_x = booz_jax._pack_decision_vector(
+        cache_state["warmstart_iota"],
+        cache_state["warmstart_G"],
+        sdofs=cache_state["warmstart_sdofs"],
+    )
+    baseline_coil_dofs = cache_state["baseline_coil_dofs"]
+    objective_kwargs = cache_state["objective_kwargs"]
+
+    baseline_value = _evaluate_traceable_total_objective(
+        baseline_x,
+        baseline_coil_dofs,
+        bs_jax.coil_set_spec_from_dofs(baseline_coil_dofs),
+        objective_kwargs,
+    )
+    return {
+        "objective_kwargs": _traceable_runtime_hostify_tree(objective_kwargs),
+        "baseline_x": _traceable_runtime_hostify_tree(baseline_x),
+        "baseline_value": _traceable_runtime_hostify_tree(baseline_value),
+        "baseline_linear_solve_factors": _traceable_runtime_hostify_tree(
+            cache_state["baseline_linear_solve_factors"]
+        ),
+        "baseline_coil_dofs": _traceable_runtime_hostify_tree(baseline_coil_dofs),
+        "coil_dof_extraction_spec": cache_state["coil_dof_extraction_spec"],
+        "coil_set_spec_from_dofs": cache_state["coil_set_spec_from_dofs"],
+        "solve_state_token": cache_state["solve_state_token"],
+        "coil_dof_state_token": cache_state["coil_dof_state_token"],
+        "coil_layout_signature": cache_state["coil_layout_signature"],
+        "optimize_G": cache_state["optimize_G"],
+        "predictor_kind": cache_state["predictor_kind"],
+        "objective_method": cache_state["objective_method"],
+        "linearization_kind": cache_state["linearization_kind"],
+        "linear_solve_tol": cache_state["linear_solve_tol"],
+        "linear_solve_stab": cache_state["linear_solve_stab"],
+    }
+
+
+def _build_traceable_objective_state(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+):
+    """Return the shared state used by the traceable objective builders.
+
+    This setup reads the solved mutable object state once, computes the solved
+    baseline objective in JAX, then explicitly hostifies the captured runtime
+    constants before building the compiled target-lane closures. The resulting
+    closures stay pure in the hot path without capturing device-backed arrays
+    that would trip strict transfer-guard lowering.
+    """
+    cache_state = _build_traceable_objective_cache_state(
+        booz_jax,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+    )
+    return _materialize_traceable_objective_state(booz_jax, bs_jax, cache_state)
 
 
 def _traceable_runtime_reject_host_input(coil_dofs, entrypoint_name):
@@ -4374,11 +4417,12 @@ class _TraceableRuntimeCacheKey:
 def _traceable_runtime_cache_key(booz_jax, state, *, success_filter=None):
     """Return a stable cache key for one compiled traceable runtime state.
 
-    The key is derived from the immutable runtime state captured by
-    ``_build_traceable_objective_state``. Large solved baseline arrays are
-    represented by explicit solve/coil state tokens instead of value-hashing
-    their contents on every lookup; the coil reconstruction layout is signed
-    structurally because the compiled bundle closes over that layout.
+    The key is derived from the immutable runtime state captured by the cheap
+    ``_build_traceable_objective_cache_state`` path. Large solved baseline
+    arrays are represented by explicit solve/coil state tokens instead of
+    value-hashing their contents on every lookup; the coil reconstruction
+    layout is signed structurally because the compiled bundle closes over that
+    layout.
     """
     objective_kwargs = state["objective_kwargs"]
     return _TraceableRuntimeCacheKey(
@@ -4404,7 +4448,7 @@ def _get_cached_traceable_runtime_entry(
     success_filter=None,
 ):
     """Reuse compiled traceable runtime callables while the solved state is unchanged."""
-    state = _build_traceable_objective_state(
+    cache_state = _build_traceable_objective_cache_state(
         booz_jax,
         bs_jax,
         iota_target,
@@ -4412,13 +4456,14 @@ def _get_cached_traceable_runtime_entry(
     )
     cache_key = _traceable_runtime_cache_key(
         booz_jax,
-        state,
+        cache_state,
         success_filter=success_filter,
     )
     cached_entry = getattr(booz_jax, "_traceable_runtime_entry_cache", None)
     if cached_entry is not None and cached_entry["cache_key"] == cache_key:
         return cached_entry
 
+    state = _materialize_traceable_objective_state(booz_jax, bs_jax, cache_state)
     compiled_bundle = _build_traceable_objective_compiled_bundle_from_state(
         booz_jax,
         state,
