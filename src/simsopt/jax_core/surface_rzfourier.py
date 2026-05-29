@@ -59,17 +59,22 @@ def _toroidal_modes(spec: SurfaceRZFourierSpec) -> jax.Array:
 def _mode_terms(
     spec: SurfaceRZFourierSpec,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    angle_scale = two_pi(spec.quadpoints_theta)
-    theta = angle_scale * spec.quadpoints_theta
-    phi = angle_scale * spec.quadpoints_phi
-    m = _poloidal_modes(spec)
-    n = _toroidal_modes(spec)
+    phi, theta, m, n, _angle_scale = _mode_axes(spec)
     nfp = float_scalar(spec.nfp, n)
     angles = (
         m[None, None, :, None] * theta[None, :, None, None]
         - nfp * n[None, None, None, :] * phi[:, None, None, None]
     )
     return phi, m, n, jnp.cos(angles), jnp.sin(angles)
+
+
+def _mode_axes(
+    spec: SurfaceRZFourierSpec,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    angle_scale = two_pi(spec.quadpoints_theta)
+    theta = angle_scale * spec.quadpoints_theta
+    phi = angle_scale * spec.quadpoints_phi
+    return phi, theta, _poloidal_modes(spec), _toroidal_modes(spec), angle_scale
 
 
 def _mode_angles(spec: SurfaceRZFourierSpec) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -164,6 +169,80 @@ def _radius_height_derivative_from_modes(
             theta_factor,
             phi_order,
             theta_order,
+        ),
+    )
+
+
+def _separable_fourier_modes(
+    spec: SurfaceRZFourierSpec,
+    cos_coeffs: jax.Array,
+    sin_coeffs: jax.Array,
+    *,
+    phi_order: int = 0,
+    theta_order: int = 0,
+) -> jax.Array:
+    phi, theta, m, n, angle_scale = _mode_axes(spec)
+    nfp = float_scalar(spec.nfp, n)
+    scaled_cos = cos_coeffs
+    scaled_sin = sin_coeffs
+    if theta_order:
+        theta_factor = (angle_scale * m)[:, None] ** theta_order
+        scaled_cos = scaled_cos * theta_factor
+        scaled_sin = scaled_sin * theta_factor
+    if phi_order:
+        phi_factor = (-angle_scale * nfp * n)[None, :] ** phi_order
+        scaled_cos = scaled_cos * phi_factor
+        scaled_sin = scaled_sin * phi_factor
+
+    derivative_order = (phi_order + theta_order) % 4
+    if derivative_order == 0:
+        effective_cos, effective_sin = scaled_cos, scaled_sin
+    elif derivative_order == 1:
+        effective_cos, effective_sin = scaled_sin, -scaled_cos
+    elif derivative_order == 2:
+        effective_cos, effective_sin = -scaled_cos, -scaled_sin
+    else:
+        effective_cos, effective_sin = -scaled_sin, scaled_cos
+
+    theta_cos = jnp.cos(theta[:, None] * m[None, :])
+    theta_sin = jnp.sin(theta[:, None] * m[None, :])
+    phi_angle = phi[:, None] * nfp * n[None, :]
+    phi_cos = jnp.cos(phi_angle)
+    phi_sin = jnp.sin(phi_angle)
+
+    cos_phi_block = theta_cos @ effective_cos + theta_sin @ effective_sin
+    sin_phi_block = theta_sin @ effective_cos - theta_cos @ effective_sin
+    return phi_cos @ cos_phi_block.T + phi_sin @ sin_phi_block.T
+
+
+def _radius_height_from_spec(
+    spec: SurfaceRZFourierSpec,
+) -> tuple[jax.Array, jax.Array]:
+    return (
+        _separable_fourier_modes(spec, spec.rc, spec.rs),
+        _separable_fourier_modes(spec, spec.zc, spec.zs),
+    )
+
+
+def _radius_height_derivative_from_spec(
+    spec: SurfaceRZFourierSpec,
+    phi_order: int,
+    theta_order: int,
+) -> tuple[jax.Array, jax.Array]:
+    return (
+        _separable_fourier_modes(
+            spec,
+            spec.rc,
+            spec.rs,
+            phi_order=phi_order,
+            theta_order=theta_order,
+        ),
+        _separable_fourier_modes(
+            spec,
+            spec.zc,
+            spec.zs,
+            phi_order=phi_order,
+            theta_order=theta_order,
         ),
     )
 
@@ -281,6 +360,45 @@ def _surface_rz_fourier_derivative_from_terms(
         phi_order,
         theta_order,
     )
+    return jnp.stack(
+        [
+            radial * cos_phi - toroidal * sin_phi,
+            radial * sin_phi + toroidal * cos_phi,
+            z,
+        ],
+        axis=-1,
+    )
+
+
+def _surface_rz_fourier_derivative_from_spec(
+    spec: SurfaceRZFourierSpec,
+    phi_order: int,
+    theta_order: int,
+) -> jax.Array:
+    phi, _theta, _m, _n, angle_scale = _mode_axes(spec)
+    radial = jnp.zeros(
+        (spec.quadpoints_phi.shape[0], spec.quadpoints_theta.shape[0]),
+        dtype=spec.rc.dtype,
+    )
+    toroidal = jnp.zeros_like(radial)
+    radial_signs = (1.0, 0.0, -1.0, 0.0)
+    toroidal_signs = (0.0, 1.0, 0.0, -1.0)
+
+    for basis_order in range(phi_order + 1):
+        radius_derivative, _ = _radius_height_derivative_from_spec(
+            spec,
+            phi_order - basis_order,
+            theta_order,
+        )
+        scale = float_scalar(comb(phi_order, basis_order), spec.rc)
+        if basis_order:
+            scale = scale * angle_scale**basis_order
+        phase = basis_order % 4
+        radial = radial + scale * radial_signs[phase] * radius_derivative
+        toroidal = toroidal + scale * toroidal_signs[phase] * radius_derivative
+
+    _, z = _radius_height_derivative_from_spec(spec, phi_order, theta_order)
+    cos_phi, sin_phi = _phi_frame(phi)
     return jnp.stack(
         [
             radial * cos_phi - toroidal * sin_phi,
@@ -593,91 +711,44 @@ def _evaluate_scalar_grad_from_dofs(
 
 
 def surface_rz_fourier_gamma_from_spec(spec: SurfaceRZFourierSpec):
-    phi, cos_terms, sin_terms = _mode_angles(spec)
-    r, z = _radius_height_from_modes(spec, cos_terms, sin_terms)
+    phi, _theta, _m, _n, _angle_scale = _mode_axes(spec)
+    r, z = _radius_height_from_spec(spec)
     cos_phi, sin_phi = _phi_frame(phi)
     return _surface_rz_fourier_gamma_from_terms(r, z, cos_phi, sin_phi)
 
 
 def surface_rz_fourier_gammadash1_from_spec(spec: SurfaceRZFourierSpec):
-    phi, _, n, cos_terms, sin_terms = _mode_terms(spec)
-    r, _ = _radius_height_from_modes(spec, cos_terms, sin_terms)
+    phi, _theta, _m, _n, angle_scale = _mode_axes(spec)
+    r, _ = _radius_height_from_spec(spec)
+    d_r, d_z = _radius_height_derivative_from_spec(spec, 1, 0)
     cos_phi, sin_phi = _phi_frame(phi)
-    return _surface_rz_fourier_gammadash1_from_terms(
-        spec,
-        r,
-        n,
-        cos_terms,
-        sin_terms,
-        cos_phi,
-        sin_phi,
-        two_pi(spec.quadpoints_theta),
+    return jnp.stack(
+        [
+            d_r * cos_phi - r * (angle_scale * sin_phi),
+            d_r * sin_phi + r * (angle_scale * cos_phi),
+            d_z,
+        ],
+        axis=-1,
     )
 
 
 def surface_rz_fourier_gammadash2_from_spec(spec: SurfaceRZFourierSpec):
-    phi, m, _, cos_terms, sin_terms = _mode_terms(spec)
+    phi, _theta, _m, _n, _angle_scale = _mode_axes(spec)
+    d_r, d_z = _radius_height_derivative_from_spec(spec, 0, 1)
     cos_phi, sin_phi = _phi_frame(phi)
-    return _surface_rz_fourier_gammadash2_from_terms(
-        spec,
-        m,
-        cos_terms,
-        sin_terms,
-        cos_phi,
-        sin_phi,
-        two_pi(spec.quadpoints_theta),
-    )
+    return jnp.stack([d_r * cos_phi, d_r * sin_phi, d_z], axis=-1)
 
 
 def surface_rz_fourier_gammadash1dash1_from_spec(spec: SurfaceRZFourierSpec):
-    phi, m, n, cos_terms, sin_terms = _mode_terms(spec)
-    cos_phi, sin_phi = _phi_frame(phi)
-    return _surface_rz_fourier_derivative_from_terms(
-        spec,
-        2,
-        0,
-        m,
-        n,
-        cos_terms,
-        sin_terms,
-        cos_phi,
-        sin_phi,
-        two_pi(spec.quadpoints_theta),
-    )
+    return _surface_rz_fourier_derivative_from_spec(spec, 2, 0)
 
 
 def surface_rz_fourier_gammadash1dash2_from_spec(spec: SurfaceRZFourierSpec):
-    phi, m, n, cos_terms, sin_terms = _mode_terms(spec)
-    cos_phi, sin_phi = _phi_frame(phi)
-    return _surface_rz_fourier_derivative_from_terms(
-        spec,
-        1,
-        1,
-        m,
-        n,
-        cos_terms,
-        sin_terms,
-        cos_phi,
-        sin_phi,
-        two_pi(spec.quadpoints_theta),
-    )
+    return _surface_rz_fourier_derivative_from_spec(spec, 1, 1)
 
 
 def surface_rz_fourier_gammadash2dash2_from_spec(spec: SurfaceRZFourierSpec):
-    phi, m, n, cos_terms, sin_terms = _mode_terms(spec)
-    cos_phi, sin_phi = _phi_frame(phi)
-    return _surface_rz_fourier_derivative_from_terms(
-        spec,
-        0,
-        2,
-        m,
-        n,
-        cos_terms,
-        sin_terms,
-        cos_phi,
-        sin_phi,
-        two_pi(spec.quadpoints_theta),
-    )
+    return _surface_rz_fourier_derivative_from_spec(spec, 0, 2)
 
 
 def _surface_rz_fourier_derivative_lin_from_spec(
@@ -830,30 +901,28 @@ def surface_rz_fourier_surface_curvatures_from_spec(spec: SurfaceRZFourierSpec):
 def surface_rz_fourier_geometry_from_spec(
     spec: SurfaceRZFourierSpec,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    phi, m, n, cos_terms, sin_terms = _mode_terms(spec)
-    r, z = _radius_height_from_modes(spec, cos_terms, sin_terms)
+    phi, _theta, _m, _n, angle_scale = _mode_axes(spec)
+    r, z = _radius_height_from_spec(spec)
+    dphi_r, dphi_z = _radius_height_derivative_from_spec(spec, 1, 0)
+    dtheta_r, dtheta_z = _radius_height_derivative_from_spec(spec, 0, 1)
     cos_phi, sin_phi = _phi_frame(phi)
-    angle_scale = two_pi(spec.quadpoints_theta)
     return (
         _surface_rz_fourier_gamma_from_terms(r, z, cos_phi, sin_phi),
-        _surface_rz_fourier_gammadash1_from_terms(
-            spec,
-            r,
-            n,
-            cos_terms,
-            sin_terms,
-            cos_phi,
-            sin_phi,
-            angle_scale,
+        jnp.stack(
+            [
+                dphi_r * cos_phi - r * (angle_scale * sin_phi),
+                dphi_r * sin_phi + r * (angle_scale * cos_phi),
+                dphi_z,
+            ],
+            axis=-1,
         ),
-        _surface_rz_fourier_gammadash2_from_terms(
-            spec,
-            m,
-            cos_terms,
-            sin_terms,
-            cos_phi,
-            sin_phi,
-            angle_scale,
+        jnp.stack(
+            [
+                dtheta_r * cos_phi,
+                dtheta_r * sin_phi,
+                dtheta_z,
+            ],
+            axis=-1,
         ),
     )
 

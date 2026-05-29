@@ -125,6 +125,7 @@ def _hlo_stats(text: str) -> dict[str, int]:
     return {
         "cosine": len(re.findall(r"\bcosine(?:\(|\b)", text)),
         "sine": len(re.findall(r"\bsine(?:\(|\b)", text)),
+        "dot_general": len(re.findall(r"\bdot_general(?:\(|\b)", text)),
         "reduce": len(re.findall(r"\breduce(?:\(|\b)", text)),
         "fusion": len(re.findall(r"\bfusion(?:\(|\b)", text)),
         "line_count": text.count("\n") + 1,
@@ -219,6 +220,10 @@ def run_probe(args: argparse.Namespace) -> dict[str, object]:
         fused["lowered_hlo"][key] < composed["lowered_hlo"][key]
         for key in lowered_trig_reduce_keys
     )
+    fused_lowered_uses_separable_dot = fused["lowered_hlo"]["dot_general"] > 0
+    fused_lowered_dot_count_not_higher = (
+        fused["lowered_hlo"]["dot_general"] <= composed["lowered_hlo"]["dot_general"]
+    )
     fused_optimized_counts_not_higher = all(
         fused["optimized_hlo"][key] <= composed["optimized_hlo"][key]
         for key in lowered_trig_reduce_keys
@@ -227,6 +232,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, object]:
     hlo_gate_passed = (
         fused["optimized_hlo"]["line_count"] < composed["optimized_hlo"]["line_count"]
         and fused_lowered_counts_lower
+        and fused_lowered_uses_separable_dot
+        and fused_lowered_dot_count_not_higher
         and fused_optimized_counts_not_higher
     )
     return {
@@ -261,6 +268,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, object]:
                 < composed["optimized_hlo"]["line_count"]
             ),
             "fused_lowered_trig_reduce_counts_lower": (fused_lowered_counts_lower),
+            "fused_lowered_uses_separable_dot": fused_lowered_uses_separable_dot,
+            "fused_lowered_dot_count_not_higher": fused_lowered_dot_count_not_higher,
             "fused_trig_reduce_counts_not_higher": (fused_optimized_counts_not_higher),
             "fused_optimized_trig_reduce_counts_not_higher": (
                 fused_optimized_counts_not_higher

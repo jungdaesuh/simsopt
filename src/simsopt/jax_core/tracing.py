@@ -74,6 +74,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import PartitionSpec as P
 
+from ._device_scalars import two_pi as _device_two_pi
 from .boozer_radial_field import (
     BoozerRadialInterpolantFrozenState,
     _eval_dGds as _radial_dGds,
@@ -606,7 +607,7 @@ def _stopping_criterion_should_stop(
     if isinstance(criterion, MaxZStoppingCriterion):
         return z >= _device_array(criterion.crit_z, dtype)
     if isinstance(criterion, ToroidalTransitStoppingCriterion):
-        transits = jnp.abs(phi_unwrapped - phi_init) / _device_array(2.0 * np.pi, dtype)
+        transits = jnp.abs(phi_unwrapped - phi_init) / _device_two_pi(phi_unwrapped)
         return transits >= _device_array(criterion.max_transits, dtype)
     if isinstance(criterion, IterStoppingCriterion):
         return iter_count > _device_index(int(criterion.max_iter))
@@ -642,8 +643,8 @@ def _continuous_phi(
     the floor-division crossing test does not miss a 2pi wrap.
     """
 
-    two_pi = _device_array(2.0 * np.pi, dtype)
     phi_raw = jnp.arctan2(y, x)
+    two_pi = _device_two_pi(phi_raw)
     zero = _device_array(0.0, dtype)
     half = _device_array(0.5, dtype)
     phi = jnp.where(phi_raw < zero, phi_raw + two_pi, phi_raw)
@@ -692,7 +693,7 @@ def _continuous_angle(
     crossing test does not miss a ``2*pi`` wrap.
     """
 
-    two_pi = _device_array(2.0 * np.pi, dtype)
+    two_pi = _device_two_pi(angle_raw)
     k = jnp.round((angle_near - angle_raw) / two_pi)
     return angle_raw + k * two_pi
 
@@ -1142,7 +1143,7 @@ def trace_fieldline(
 
     max_steps_i32 = _device_array(max_steps, jnp.int32)
     max_phi_hits_i32 = _device_array(max_phi_hits, jnp.int32)
-    two_pi = _device_array(2.0 * np.pi, dtype)
+    two_pi = _device_two_pi(one)
 
     def cond(carry):
         (
@@ -1476,6 +1477,7 @@ def _trace_fieldlines_batched_unsharded(
         if field_state is None:
             field_fn = magnetic_field_fn
         else:
+
             def field_fn(point):
                 return magnetic_field_fn(field_state, point)
 
@@ -1524,6 +1526,7 @@ def trace_fieldlines_batched(
         if field_state is None:
             field_fn = magnetic_field_fn
         else:
+
             def field_fn(point):
                 return magnetic_field_fn(field_state, point)
 
@@ -1866,7 +1869,7 @@ def trace_guiding_center(
 
     max_steps_i32 = _device_index(max_steps)
     max_phi_hits_i32 = _device_index(max_phi_hits)
-    two_pi = _device_array(2.0 * np.pi, dtype)
+    two_pi = _device_two_pi(one)
 
     def cond(carry):
         (
@@ -2193,6 +2196,7 @@ def _trace_guiding_centers_batched_unsharded(
         if field_state is None:
             field_fn = magnetic_field_fn
         else:
+
             def field_fn(point):
                 return magnetic_field_fn(field_state, point)
 
@@ -2246,6 +2250,7 @@ def trace_guiding_centers_batched(
         if field_state is None:
             field_fn = magnetic_field_fn
         else:
+
             def field_fn(point):
                 return magnetic_field_fn(field_state, point)
 
@@ -2576,7 +2581,7 @@ def _resolve_boozer_field_state(boozer_field):
     """
 
     if isinstance(boozer_field, tuple) and len(boozer_field) == 2:
-        return boozer_field[0], float(boozer_field[1])
+        return boozer_field[0], boozer_field[1]
     frozen = getattr(boozer_field, "frozen_state", None)
     psi0 = getattr(boozer_field, "psi0", None)
     if frozen is None or psi0 is None:
@@ -2586,7 +2591,7 @@ def _resolve_boozer_field_state(boozer_field):
             "`frozen_state` and `psi0`, or a (frozen_state, psi0) "
             f"tuple; got {type(boozer_field).__name__}."
         )
-    return frozen, float(psi0)
+    return frozen, psi0
 
 
 def _boozer_point_2d(y: jax.Array) -> jax.Array:
@@ -3092,7 +3097,7 @@ def trace_guiding_center_boozer(
 
     max_steps_i32 = jnp.asarray(max_steps, dtype=jnp.int32)
     max_phi_hits_i32 = jnp.asarray(max_phi_hits, dtype=jnp.int32)
-    two_pi = jnp.asarray(2.0 * np.pi, dtype=dtype)
+    two_pi = _device_two_pi(one)
 
     def cond(carry):
         (
@@ -3415,6 +3420,101 @@ def trace_guiding_center_boozer(
     )
 
 
+def _trace_guiding_centers_boozer_batched_lax_map(
+    spec: GuidingCenterTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    mus: jax.Array,
+    boozer_field,
+    m: float,
+    q: float,
+    mode: str = "vacuum",
+    zetas: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+) -> GuidingCenterTracingResult:
+    def trace_one(inputs) -> GuidingCenterTracingResult:
+        y0, dtmax, mu = inputs
+        return trace_guiding_center_boozer(
+            replace(spec, dtmax=dtmax),
+            y0,
+            boozer_field,
+            m=m,
+            q=q,
+            mu=mu,
+            mode=mode,
+            zetas=zetas,
+            stopping_criteria=stopping_criteria,
+        )
+
+    return jax.lax.map(trace_one, (y0s, dtmaxs, mus))
+
+
+@partial(jax.jit, static_argnames=("mode", "stopping_criteria"))
+def _trace_guiding_centers_boozer_batched_unsharded(
+    spec: GuidingCenterTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    mus: jax.Array,
+    boozer_field,
+    m: float,
+    q: float,
+    mode: str = "vacuum",
+    zetas: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+) -> GuidingCenterTracingResult:
+    return _trace_guiding_centers_boozer_batched_lax_map(
+        spec,
+        y0s,
+        dtmaxs,
+        mus,
+        boozer_field,
+        m,
+        q,
+        mode,
+        zetas,
+        stopping_criteria,
+    )
+
+
+@partial(jax.jit, static_argnames=("boozer_field", "mode", "stopping_criteria"))
+def _trace_guiding_centers_boozer_batched_static_field_unsharded(
+    spec: GuidingCenterTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    mus: jax.Array,
+    boozer_field,
+    m: float,
+    q: float,
+    mode: str = "vacuum",
+    zetas: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+) -> GuidingCenterTracingResult:
+    return _trace_guiding_centers_boozer_batched_lax_map(
+        spec,
+        y0s,
+        dtmaxs,
+        mus,
+        boozer_field,
+        m,
+        q,
+        mode,
+        zetas,
+        stopping_criteria,
+    )
+
+
+def _batched_boozer_field_jit_arg(boozer_field):
+    if isinstance(boozer_field, tuple) and len(boozer_field) == 2:
+        return boozer_field[0], _as_device_array(boozer_field[1], jnp.float64)
+    frozen = getattr(boozer_field, "frozen_state", None)
+    psi0 = getattr(boozer_field, "psi0", None)
+    if isinstance(
+        frozen, (BoozerAnalyticFrozenState, BoozerRadialInterpolantFrozenState)
+    ):
+        return frozen, _as_device_array(psi0, jnp.float64)
+    return boozer_field
+
+
 def trace_guiding_centers_boozer_batched(
     spec: GuidingCenterTracingSpec,
     y0s: jax.Array,
@@ -3430,20 +3530,25 @@ def trace_guiding_centers_boozer_batched(
     """Trace Boozer guiding-centre orbits with one device-side batch graph."""
 
     spec = _stage_guiding_center_spec(spec)
-    y0s_arr = jnp.asarray(y0s, dtype=jnp.float64).reshape((-1, 4))
-    dtmaxs_arr = jnp.asarray(dtmaxs, dtype=jnp.float64).reshape((-1,))
-    mus_arr = jnp.asarray(mus, dtype=jnp.float64).reshape((-1,))
+    y0s_arr = _as_device_array(y0s, jnp.float64).reshape((-1, 4))
+    dtmaxs_arr = _as_device_array(dtmaxs, jnp.float64).reshape((-1,))
+    mus_arr = _as_device_array(mus, jnp.float64).reshape((-1,))
+    m_arr = _as_device_array(m, jnp.float64)
+    q_arr = _as_device_array(q, jnp.float64)
+    zetas_arr = None if zetas is None else _as_device_array(zetas, jnp.float64)
+    boozer_field_arg = _batched_boozer_field_jit_arg(boozer_field)
+    stopping_criteria = tuple(stopping_criteria)
 
     def trace_one(y0, dtmax, mu) -> GuidingCenterTracingResult:
         return trace_guiding_center_boozer(
             replace(spec, dtmax=dtmax),
             y0,
-            boozer_field,
-            m=m,
-            q=q,
+            boozer_field_arg,
+            m=m_arr,
+            q=q_arr,
             mu=mu,
             mode=mode,
-            zetas=zetas,
+            zetas=zetas_arr,
             stopping_criteria=stopping_criteria,
         )
 
@@ -3483,9 +3588,48 @@ def trace_guiding_centers_boozer_batched(
 
         return trace_shard(y0s_arr, dtmaxs_arr, mus_arr)
 
-    return jax.lax.map(
-        lambda inputs: trace_one(*inputs),
-        (y0s_arr, dtmaxs_arr, mus_arr),
+    frozen_state, _psi0 = _resolve_boozer_field_state(boozer_field_arg)
+    if isinstance(
+        frozen_state, (BoozerAnalyticFrozenState, BoozerRadialInterpolantFrozenState)
+    ):
+        return _trace_guiding_centers_boozer_batched_unsharded(
+            spec,
+            y0s_arr,
+            dtmaxs_arr,
+            mus_arr,
+            boozer_field_arg,
+            m_arr,
+            q_arr,
+            mode,
+            zetas_arr,
+            stopping_criteria,
+        )
+
+    if isinstance(boozer_field_arg, tuple):
+        return _trace_guiding_centers_boozer_batched_lax_map(
+            spec,
+            y0s_arr,
+            dtmaxs_arr,
+            mus_arr,
+            boozer_field_arg,
+            m_arr,
+            q_arr,
+            mode,
+            zetas_arr,
+            stopping_criteria,
+        )
+
+    return _trace_guiding_centers_boozer_batched_static_field_unsharded(
+        spec,
+        y0s_arr,
+        dtmaxs_arr,
+        mus_arr,
+        boozer_field_arg,
+        m_arr,
+        q_arr,
+        mode,
+        zetas_arr,
+        stopping_criteria,
     )
 
 
@@ -3751,7 +3895,7 @@ def trace_fullorbit(
 
     max_steps_i32 = jnp.asarray(max_steps, dtype=jnp.int32)
     max_phi_hits_i32 = jnp.asarray(max_phi_hits, dtype=jnp.int32)
-    two_pi = jnp.asarray(2.0 * np.pi, dtype=dtype)
+    two_pi = _device_two_pi(one)
 
     def cond(carry):
         (
@@ -4091,6 +4235,7 @@ def _trace_fullorbits_batched_unsharded(
         if field_state is None:
             field_fn = magnetic_field_fn
         else:
+
             def field_fn(point):
                 return magnetic_field_fn(field_state, point)
 
@@ -4139,6 +4284,7 @@ def trace_fullorbits_batched(
         if field_state is None:
             field_fn = magnetic_field_fn
         else:
+
             def field_fn(point):
                 return magnetic_field_fn(field_state, point)
 

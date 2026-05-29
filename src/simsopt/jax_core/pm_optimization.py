@@ -143,9 +143,8 @@ def _bool_scalar(value: bool) -> jax.Array:
 
 def _find_max_alphaf_sentinel(dtype) -> float:
     target_dtype = np.dtype(dtype)
-    if (
-        np.issubdtype(target_dtype, np.floating)
-        and _FIND_MAX_ALPHAF_SENTINEL > float(np.finfo(target_dtype).max)
+    if np.issubdtype(target_dtype, np.floating) and _FIND_MAX_ALPHAF_SENTINEL > float(
+        np.finfo(target_dtype).max
     ):
         return float("inf")
     return _FIND_MAX_ALPHAF_SENTINEL
@@ -1472,7 +1471,9 @@ def initialize_gpmo_arbvec(
         [diff_pos, diff_neg, diff_null[:, None]], axis=1
     )  # (N, 2*n_vectors + 1)
     choice = _argmin_finite_cost(candidates, axis=1)  # (N,)
-    null_choice = jax.device_put(np.asarray(2 * n_vectors, dtype=np.dtype(choice.dtype)))
+    null_choice = jax.device_put(
+        np.asarray(2 * n_vectors, dtype=np.dtype(choice.dtype))
+    )
     vector_count = jax.device_put(np.asarray(n_vectors, dtype=np.dtype(choice.dtype)))
     chose_null = choice == null_choice
     chose_minus = (choice >= vector_count) & (~chose_null)
@@ -1974,8 +1975,7 @@ def gpmo_arbvec_backtracking_solve(
     initial_stop = (
         initial_num_nonzero >= _int_scalar_like(initial_num_nonzero, ndipoles)
     ) | (
-        initial_num_nonzero
-        >= _int_scalar_like(initial_num_nonzero, spec.max_nMagnets)
+        initial_num_nonzero >= _int_scalar_like(initial_num_nonzero, spec.max_nMagnets)
     )
 
     if record_every is not None:
@@ -3027,9 +3027,7 @@ def _on_ball(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
     mmax2 = m_maxima * m_maxima  # (N,)
     abs_tol = _scalar_like(mmax2, _BALL_ACTIVE_ABS_TOL)
     rel_tol = _scalar_like(mmax2, _BALL_ACTIVE_REL_TOL)
-    return jnp.abs(xmag2 - mmax2) < (
-        abs_tol + rel_tol * mmax2
-    )
+    return jnp.abs(xmag2 - mmax2) < (abs_tol + rel_tol * mmax2)
 
 
 def _row_norm_without_zero_sqrt_gradient(norm_sq: jax.Array) -> jax.Array:

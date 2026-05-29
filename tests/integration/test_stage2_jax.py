@@ -1177,6 +1177,28 @@ class TestGradientParity:
         assert np.isfinite(value)
         assert calls == {"forward": 0, "value_grad": 1}
 
+    def test_value_and_dJ_uses_one_squared_flux_value_grad_program(
+        self,
+        coil_surf_setup,
+        monkeypatch,
+    ):
+        coils, surf, _, _ = coil_surf_setup
+        bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax)
+        _assert_jax_objective_native_active(jf_jax)
+
+        calls = _count_squared_flux_native_program_calls(monkeypatch, jf_jax)
+
+        value, grad = jf_jax.value_and_dJ()
+        cached_value = jf_jax.J()
+        cached_grad = jf_jax.dJ()
+
+        assert np.isfinite(value)
+        assert np.asarray(grad).shape[0] > 0
+        assert cached_value == pytest.approx(value)
+        np.testing.assert_allclose(np.asarray(cached_grad), np.asarray(grad))
+        assert calls == {"forward": 0, "value_grad": 1}
+
 
 # -----------------------------------------------------------------------
 # Test 3: Composite objective gradient (SquaredFlux + curve penalties)
@@ -1729,6 +1751,40 @@ class TestBiotSavartJAXParity:
             atol=1e-14,
         )
 
+    def test_public_b_vjp_projects_through_flat_dof_gradient(
+        self,
+        coil_surf_setup,
+        monkeypatch,
+    ):
+        """The public Derivative path reuses the flat free-DOF projection."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        v = np.asarray(bs_jax.B())
+
+        calls = {"flat_projection": 0}
+        original = bs_jax.coil_cotangents_to_dofs_gradient
+
+        def counted_flat_projection(d_coil_arrays, coil_indices, *, coil_dofs=None):
+            calls["flat_projection"] += 1
+            return original(
+                d_coil_arrays,
+                coil_indices,
+                coil_dofs=coil_dofs,
+            )
+
+        monkeypatch.setattr(
+            bs_jax,
+            "coil_cotangents_to_dofs_gradient",
+            counted_flat_projection,
+        )
+
+        derivative = bs_jax.B_vjp(v)
+
+        assert calls == {"flat_projection": 1}
+        assert np.asarray(derivative(bs_jax)).shape == np.asarray(bs_jax.x).shape
+
     def test_free_dof_layout_change_refreshes_cached_projection_maps(
         self,
         coil_surf_setup,
@@ -1777,12 +1833,26 @@ class TestBiotSavartJAXParity:
         ):
             np.testing.assert_allclose(np.asarray(scaled_leaf), 2.0 * np.asarray(leaf))
 
-    def test_profile_b_vjp_reports_component_breakdown(self, coil_surf_setup):
+    def test_profile_b_vjp_reports_component_breakdown(
+        self,
+        coil_surf_setup,
+        monkeypatch,
+    ):
         coils, surf, _, _ = coil_surf_setup
         points = surf.gamma().reshape((-1, 3))
 
         bs_jax = BiotSavartJAX(coils)
         bs_jax.set_points(points)
+
+        def reject_legacy_projection(*_args, **_kwargs):
+            raise AssertionError("profile_B_vjp must time the flat projection path")
+
+        monkeypatch.setattr(
+            biotsavart_jax_backend_module,
+            "_project_single_coil_cotangent_data",
+            reject_legacy_projection,
+        )
+
         profile = bs_jax.profile_B_vjp(np.asarray(bs_jax.B()))
 
         assert profile["wall_time_s"] >= 0.0

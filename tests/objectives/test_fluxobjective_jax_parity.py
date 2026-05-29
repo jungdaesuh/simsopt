@@ -226,7 +226,7 @@ def _large_grouped_flux_value_and_gradient(
         quadrature_block_size=quadrature_block_size,
     )
     objective = _make_large_grouped_flux_objective()
-    return objective.J(), objective.dJ()
+    return objective.value_and_dJ()
 
 
 def _make_native_flux_objectives(definition, *, target=None):

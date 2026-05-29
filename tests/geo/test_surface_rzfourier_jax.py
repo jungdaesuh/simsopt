@@ -91,6 +91,7 @@ from simsopt.jax_core.surface_rzfourier import (
 TEST_DIR = Path(__file__).parent / ".." / "test_files"
 SURFACE_RZFOURIER_VOLUME_ATOL = 1e-8
 
+
 def _make_surface(*, stellsym: bool) -> SurfaceRZFourier:
     rng = parity_rng(7 if stellsym else 11)
     surface = SurfaceRZFourier.from_nphi_ntheta(
@@ -161,6 +162,7 @@ def _hlo_stats(text: str) -> dict[str, int]:
     return {
         "cosine": len(re.findall(r"\bcosine(?:\(|\b)", text)),
         "sine": len(re.findall(r"\bsine(?:\(|\b)", text)),
+        "dot_general": len(re.findall(r"\bdot_general(?:\(|\b)", text)),
         "reduce": len(re.findall(r"\breduce(?:\(|\b)", text)),
         "fusion": len(re.findall(r"\bfusion(?:\(|\b)", text)),
         "line_count": text.count("\n") + 1,
@@ -283,7 +285,9 @@ def _assert_surface_parity(surface: SurfaceRZFourier) -> None:
         surface_rz_fourier_surface_curvatures_from_dofs(spec, dofs)
     )
     normal_from_dofs = host_array(surface_rz_fourier_normal_from_dofs(spec, dofs))
-    unitnormal_from_dofs = host_array(surface_rz_fourier_unitnormal_from_dofs(spec, dofs))
+    unitnormal_from_dofs = host_array(
+        surface_rz_fourier_unitnormal_from_dofs(spec, dofs)
+    )
 
     np.testing.assert_allclose(gamma_jax, surface.gamma(), rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(gd1_jax, surface.gammadash1(), rtol=1e-12, atol=1e-12)
@@ -817,8 +821,12 @@ def test_surface_rzfourier_forms_and_curvatures_directional_taylor(stellsym):
         )
 
     base, linear = jax.jvp(form_vector, (dofs,), (direction,))
-    error_large = jnp.linalg.norm(form_vector(dofs + 1e-4 * direction) - base - 1e-4 * linear)
-    error_small = jnp.linalg.norm(form_vector(dofs + 5e-5 * direction) - base - 5e-5 * linear)
+    error_large = jnp.linalg.norm(
+        form_vector(dofs + 1e-4 * direction) - base - 1e-4 * linear
+    )
+    error_small = jnp.linalg.norm(
+        form_vector(dofs + 5e-5 * direction) - base - 5e-5 * linear
+    )
 
     assert host_scalar(error_small) < 0.35 * host_scalar(error_large)
 
@@ -841,11 +849,16 @@ def test_surface_rzfourier_jax_gauss_bonnet_matches_cpu_oracle():
     surface.local_full_x = surface.get_dofs()
     spec = surface.surface_spec()
     k_jax = surface_rz_fourier_surface_curvatures_from_spec(spec)[:, :, 1]
-    normal_norm_jax = jnp.linalg.norm(surface_rz_fourier_normal_from_spec(spec), axis=-1)
+    normal_norm_jax = jnp.linalg.norm(
+        surface_rz_fourier_normal_from_spec(spec), axis=-1
+    )
 
     np.testing.assert_allclose(
         host_scalar(jnp.sum(k_jax * normal_norm_jax)),
-        np.sum(surface.surface_curvatures()[:, :, 1] * np.linalg.norm(surface.normal(), axis=2)),
+        np.sum(
+            surface.surface_curvatures()[:, :, 1]
+            * np.linalg.norm(surface.normal(), axis=2)
+        ),
         rtol=1e-11,
         atol=1e-11,
     )
@@ -1032,7 +1045,9 @@ def test_surface_rzfourier_high_resolution_stellsym_transfer_guard_and_parity():
         area.block_until_ready()
         volume.block_until_ready()
 
-    np.testing.assert_allclose(host_array(gamma), surface.gamma(), rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(
+        host_array(gamma), surface.gamma(), rtol=1e-10, atol=1e-10
+    )
     np.testing.assert_allclose(
         host_array(normal),
         surface.normal(),
@@ -1073,6 +1088,8 @@ def test_surface_rzfourier_fused_geometry_reduces_hlo_work():
 
     assert fused_lowered_stats["cosine"] < scalar_lowered_stats["cosine"]
     assert fused_lowered_stats["sine"] < scalar_lowered_stats["sine"]
+    assert fused_lowered_stats["dot_general"] > 0
+    assert fused_lowered_stats["dot_general"] <= scalar_lowered_stats["dot_general"]
     assert fused_lowered_stats["reduce"] < scalar_lowered_stats["reduce"]
     assert fused_optimized_stats["line_count"] < scalar_optimized_stats["line_count"]
     assert fused_optimized_stats["cosine"] <= scalar_optimized_stats["cosine"]
@@ -1292,7 +1309,9 @@ def _assert_area_volume_gradient_parity(surface: SurfaceRZFourier) -> None:
     spec = surface.surface_spec()
 
     area_grad = np.asarray(host_array(surface_rz_fourier_darea_from_dofs(spec, dofs)))
-    volume_grad = np.asarray(host_array(surface_rz_fourier_dvolume_from_dofs(spec, dofs)))
+    volume_grad = np.asarray(
+        host_array(surface_rz_fourier_dvolume_from_dofs(spec, dofs))
+    )
 
     np.testing.assert_allclose(
         area_grad,
@@ -1559,7 +1578,9 @@ def test_surface_rzfourier_scalar_metrics_second_order_taylor(stellsym):
     hessian = jax.jacfwd(jax.jacrev(metric_vector))(dofs)
     second = 0.5 * jnp.einsum("i,oij,j->o", direction, hessian, direction)
     eps = 1e-4
-    residual = metric_vector(dofs + eps * direction) - value - eps * first - eps * eps * second
+    residual = (
+        metric_vector(dofs + eps * direction) - value - eps * first - eps * eps * second
+    )
 
     assert host_scalar(jnp.linalg.norm(residual)) < 1e-10
 
@@ -1615,9 +1636,7 @@ def test_surface_rzfourier_from_wout_object_api_parity(
     filename: str, s_value: float, expected_volume: float
 ) -> None:
     surface = SurfaceRZFourier.from_wout(TEST_DIR / filename, s=s_value)
-    _assert_loaded_surface_object_api_parity(
-        surface, expected_volume=expected_volume
-    )
+    _assert_loaded_surface_object_api_parity(surface, expected_volume=expected_volume)
 
 
 @pytest.mark.parametrize(
@@ -1631,9 +1650,7 @@ def test_surface_rzfourier_from_vmec_input_object_api_parity(
     filename: str, expected_volume: float
 ) -> None:
     surface = SurfaceRZFourier.from_vmec_input(TEST_DIR / filename)
-    _assert_loaded_surface_object_api_parity(
-        surface, expected_volume=expected_volume
-    )
+    _assert_loaded_surface_object_api_parity(surface, expected_volume=expected_volume)
 
 
 def test_surface_rzfourier_from_nescoil_input_object_api_parity() -> None:
@@ -1654,9 +1671,7 @@ def test_surface_rzfourier_from_nescoil_input_object_api_parity() -> None:
 
 def test_surface_rzfourier_from_focus_object_api_parity() -> None:
     surface = SurfaceRZFourier.from_focus(TEST_DIR / "tf_only_half_tesla.plasma")
-    _assert_loaded_surface_object_api_parity(
-        surface, expected_volume=2.962294674930637
-    )
+    _assert_loaded_surface_object_api_parity(surface, expected_volume=2.962294674930637)
 
 
 def test_surface_rzfourier_from_pyqsc_object_api_parity() -> None:

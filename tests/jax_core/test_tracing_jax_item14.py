@@ -642,6 +642,25 @@ def test_cartesian_tracing_batch_helpers_reuse_outer_jit_cache():
         ),
     )
 
+    boozer_field = _analytic_boozer_field_for_batch_tests()
+    boozer_y0s = jnp.asarray(
+        [[0.25, 0.1, 0.0, 1.0], [0.30, 0.2, 0.1, 1.1]],
+        dtype=jnp.float64,
+    )
+
+    assert_cache_reuse(
+        tracing_jax_module._trace_guiding_centers_boozer_batched_unsharded,
+        lambda: trace_guiding_centers_boozer_batched(
+            gc_spec,
+            boozer_y0s,
+            dtmaxs,
+            mus,
+            boozer_field,
+            m=1.0,
+            q=1.0,
+        ),
+    )
+
     fullorbit_spec = FullorbitTracingSpec(
         tmax=0.02, rtol=1.0e-10, atol=1.0e-10, max_steps=8, dtmax=0.01
     )

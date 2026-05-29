@@ -33,7 +33,7 @@ from .._core.jax_host_boundary import (
 )
 from .._core.util import ObjectiveFailure
 from .._core.optimizable import Optimizable
-from .._core.derivative import derivative_dec, Derivative
+from .._core.derivative import derivative_dec
 from ..jax_core.biotsavart import biot_savart_B
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
@@ -203,28 +203,7 @@ def _squared_flux_spec_native_forward(
 
 
 def _field_dofs_gradient_to_derivative(field, field_dofs_gradient):
-    field_dofs_gradient = np.asarray(field_dofs_gradient, dtype=np.float64)
-    deriv_data = {}
-    start = 0
-    for lineage_opt in field.unique_dof_lineage:
-        width = lineage_opt.local_dof_size
-        if width == 0:
-            continue
-
-        stop = start + width
-        block = np.zeros(lineage_opt.local_full_dof_size)
-        block[lineage_opt.local_dofs_free_status] = field_dofs_gradient[start:stop]
-        start = stop
-
-        dep_opts = tuple(lineage_opt.dofs.dep_opts())
-        block_share = block / len(dep_opts)
-        for dep_opt in dep_opts:
-            if dep_opt in deriv_data:
-                deriv_data[dep_opt] = deriv_data[dep_opt] + block_share
-            else:
-                deriv_data[dep_opt] = block_share.copy()
-
-    return Derivative(deriv_data)
+    return field.dofs_gradient_to_derivative(field_dofs_gradient)
 
 
 # -----------------------------------------------------------------------
@@ -460,6 +439,27 @@ class SquaredFluxJAX(Optimizable):
         partials = self._cached_partials
         self.new_x = False
         return partials
+
+    def value_and_dJ(self, *, partials=False):
+        """Return ``(J, dJ)`` through one native value-and-gradient program."""
+        self._raise_if_field_contract_drifted()
+        if (
+            not self.new_x
+            and self._cached_value is not None
+            and self._cached_partials is not None
+        ):
+            value, partials_derivative = self._cached_value, self._cached_partials
+        else:
+            value, partials_derivative = self._value_and_dJ_native()
+            self._cached_value = value
+            self._cached_partials = partials_derivative
+            self.new_x = False
+
+        if partials:
+            return value, partials_derivative
+        return value, partials_derivative(self)
+
+    J_and_dJ = value_and_dJ
 
     def _value_and_dJ_native(self):
         """Combined value and gradient via end-to-end JAX value_and_grad."""

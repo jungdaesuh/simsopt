@@ -83,6 +83,7 @@ def _device_zero_like(value: object) -> jax.Array:
     array = _as_jax_float64(value)
     return array - array
 
+
 __all__ = [
     "BiotSavartJAX",
     "BiotSavartFieldPullback",
@@ -1092,6 +1093,32 @@ def project_coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
                     jax.lax.index_in_dim(d_c, local_i, axis=0, keepdims=False),
                 ),
             )
+    return Derivative(deriv_data)
+
+
+def dofs_gradient_to_derivative(unique_dof_lineage, dofs_gradient):
+    """Convert a flat free-DOF gradient into the public ``Derivative`` contract."""
+    dofs_gradient = host_array(dofs_gradient, dtype=np.float64)
+    deriv_data = {}
+    start = 0
+    for lineage_opt in unique_dof_lineage:
+        width = lineage_opt.local_dof_size
+        if width == 0:
+            continue
+
+        stop = start + width
+        block = np.zeros(lineage_opt.local_full_dof_size)
+        block[lineage_opt.local_dofs_free_status] = dofs_gradient[start:stop]
+        start = stop
+
+        dep_opts = tuple(lineage_opt.dofs.dep_opts())
+        block_share = block / len(dep_opts)
+        for dep_opt in dep_opts:
+            if dep_opt in deriv_data:
+                deriv_data[dep_opt] = deriv_data[dep_opt] + block_share
+            else:
+                deriv_data[dep_opt] = block_share.copy()
+
     return Derivative(deriv_data)
 
 
@@ -2118,8 +2145,8 @@ class BiotSavartJAX(Optimizable):
     def coil_cotangents_to_derivative(self, d_coil_arrays, coil_indices):
         """Project grouped coil cotangent arrays to a :class:`Derivative`.
 
-        Curves are projected through immutable specs; unsupported curves are
-        rejected explicitly.
+        Curves are projected through immutable specs into the flat field
+        free-DOF layout, then converted once into the public ``Derivative``.
 
         Args:
             d_coil_arrays: list of ``(d_gammas, d_gammadashs, d_currents)``
@@ -2130,11 +2157,15 @@ class BiotSavartJAX(Optimizable):
         Returns:
             :class:`Derivative` over all coil DOFs.
         """
-        return project_coil_cotangents_to_derivative(
-            self._coils,
-            d_coil_arrays,
-            coil_indices,
+        return self.dofs_gradient_to_derivative(
+            self.coil_cotangents_to_dofs_gradient(
+                d_coil_arrays,
+                coil_indices,
+            )
         )
+
+    def dofs_gradient_to_derivative(self, dofs_gradient):
+        return dofs_gradient_to_derivative(self.unique_dof_lineage, dofs_gradient)
 
     def profile_B_vjp(self, v):
         """Return a timing breakdown for ``B_vjp`` at the current points."""
@@ -2160,6 +2191,8 @@ class BiotSavartJAX(Optimizable):
         prep_start = time.perf_counter()
         coil_infos = self._collect_profiled_free_coil_vjp_infos(geometry_cache)
         grouped_infos = self._group_coil_vjp_infos(coil_infos)
+        coil_dofs = self._normalize_explicit_coil_dofs(self.x.copy())
+        dofs_gradient = coil_dofs - coil_dofs
         prep_s = float(time.perf_counter() - prep_start)
         free_coil_indices = [info.coil_index for info in coil_infos]
         component_totals["single_coil_pullback_s"] += prep_s
@@ -2192,12 +2225,14 @@ class BiotSavartJAX(Optimizable):
                 )
             )
             for local_i, info in enumerate(group["infos"]):
-                coil_projection_s, _ = _time_call_result(
-                    lambda: _project_single_coil_cotangent_data(
+                coil_projection_s, dofs_gradient = _time_call_result(
+                    lambda: self._add_single_coil_cotangent_to_dofs_gradient(
+                        dofs_gradient,
                         info.coil,
                         dg_group[local_i],
                         dgd_group[local_i],
                         dc_group[local_i],
+                        coil_dofs,
                     )
                 )
                 component_totals["coil_projection_s"] += coil_projection_s
