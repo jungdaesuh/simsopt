@@ -4463,7 +4463,10 @@ def parse_args():
             "target-lane scalar objective as 'ondevice'. Defaults to "
             "'scipy' on the CPU/reference backend. On the JAX backend, defaults to "
             "'scipy-jax-fullgraph' if running on a JAX-CPU platform (to save "
-            "memory) and 'ondevice' if running on a GPU/CUDA platform."
+            "memory) and 'scipy-jax' if running on a GPU/CUDA platform (its "
+            "jitted value/grad compiles once and is reused across outer steps; "
+            "the legacy 'ondevice' monolith does not finish compiling at "
+            "production resolution and must be selected explicitly)."
         ),
     )
     parser.add_argument(
@@ -8003,7 +8006,13 @@ def resolve_single_stage_default_optimizer_backend(
         config = get_backend_config()
         if config.jax_platform == "cpu":
             return "scipy-jax-fullgraph"
-        return "ondevice"
+        # GPU/CUDA default: scipy-jax (host SciPy L-BFGS-B outer loop + on-device
+        # inner Boozer solve). Its jitted value/grad compiles ONCE and is reused
+        # across all outer steps (compile count is independent of maxiter). The
+        # legacy "ondevice" monolith compiled the entire outer loop + objective
+        # into one XLA graph and did not finish compiling at production
+        # resolution; it is still available via an explicit --optimizer-backend.
+        return "scipy-jax"
     return "scipy"
 
 

@@ -53,7 +53,7 @@ def test_resolve_single_stage_default_optimizer_backend(mock_get_config):
 
     mock_get_config.return_value = backend_config("cuda")
     invalidate_backend_cache()
-    assert resolve_single_stage_default_optimizer_backend("jax") == "ondevice"
+    assert resolve_single_stage_default_optimizer_backend("jax") == "scipy-jax"
     assert resolve_single_stage_default_optimizer_backend("cpu") == "scipy"
 
     assert resolve_single_stage_default_optimizer_backend("jax", "scipy-jax") == "scipy-jax"
@@ -177,5 +177,5 @@ def test_single_stage_parse_args_uses_platform_default(mock_get_config, caplog):
     with patch.object(sys, "argv", test_args):
         with caplog.at_level(logging.WARNING):
             gpu_args = single_stage_parse_args()
-    assert gpu_args.optimizer_backend == "ondevice"
+    assert gpu_args.optimizer_backend == "scipy-jax"
     assert not any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)

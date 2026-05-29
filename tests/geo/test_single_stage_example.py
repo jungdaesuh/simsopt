@@ -2012,7 +2012,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(args.boozer_optimizer_backend)
         self.assertIsNone(args.boozer_least_squares_algorithm)
 
-    def test_parse_args_defaults_jax_backend_to_ondevice_optimizer_lane(self):
+    def test_parse_args_defaults_jax_backend_to_platform_optimizer_lane(self):
         module = self.load_module()
 
         with patch.dict(os.environ, {}, clear=True), patch.object(
@@ -2022,7 +2022,13 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             args = module.parse_args()
 
-        self.assertEqual(args.optimizer_backend, "ondevice")
+        # parse_args must defer the implicit JAX outer lane to the
+        # platform-aware resolver (GPU -> scipy-jax, JAX-CPU ->
+        # scipy-jax-fullgraph), not hardcode a lane.
+        self.assertEqual(
+            args.optimizer_backend,
+            module.resolve_single_stage_default_optimizer_backend("jax"),
+        )
         self.assertIsNone(args.boozer_optimizer_backend)
         self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
         self.assertFalse(args.boozer_least_squares_algorithm_explicit)
