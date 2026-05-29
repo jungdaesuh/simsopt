@@ -77,10 +77,16 @@ Pre-existing mypy errors from upstream (pybind11 stubs, wildcard imports) are ex
 
 ## JAX Module Layout
 
-JAX modules live alongside C++ counterparts. The target contract is that
-`simsopt.jax_core` remains simsoptpp-free; the current B-1 blocker tracks
-remaining cross-layer imports and the separate eager `src/simsopt/__init__.py`
-`simsoptpp` pull.
+JAX modules live alongside C++ counterparts. The contract that
+`simsopt.jax_core` remains simsoptpp-free holds (`jax_core` has no real
+`simsopt.geo` / `simsopt._core` / `simsoptpp` imports). Bare `import simsopt`
+is also simsoptpp-free: `src/simsopt/__init__.py` uses a lazy `__getattr__`
+hook (`__init__.py:59`) that pulls `simsoptpp` (e.g. `__built_with_xsimd__`)
+only on attribute access. The remaining eager `simsoptpp` touch is at the
+sub-package boundary — `simsopt.field` / `simsopt.geo` / `simsopt.objectives`
+/ `simsopt.solve` `__init__.py` each run `from simsoptpp import Curve` as an
+availability probe at import time (e.g. `field/__init__.py:8`,
+`geo/__init__.py:9`).
 
 ### M1 — Pure JAX functions (no Optimizable integration)
 
@@ -131,7 +137,7 @@ remaining cross-layer imports and the separate eager `src/simsopt/__init__.py`
 
 | Module | Purpose |
 |--------|---------|
-| `src/simsopt/backend.py` | Unified backend selection API: `get_backend()`, `is_jax_backend()`, `get_jax_platform()` |
+| `src/simsopt/backend/` (package: `runtime.py`, `dtypes.py`) | Unified backend selection API: `get_backend()`, `is_jax_backend()`, `get_jax_platform()` |
 | `.github/workflows/jax_smoke.yml` | CI smoke tests for JAX modules (no simsoptpp needed) |
 | `docs/source/jax_gpu_setup.rst` | GPU environment setup + runbook |
 | `docs/source/jax_acceptance.rst` | CPU-vs-JAX acceptance criteria for research use |
@@ -214,7 +220,7 @@ specification (mode matrix, reporting context, DM-A/B/D/E slices).
 
 - **Tensor convention**: `dB_by_dX[p, j, l] = ∂_j B_l(x_p)` — axis 1 is derivative direction, axis 2 is B component. Matches SIMSOPT `fields.rst`.
 - **Normalized flux contract**: `integral_BdotN(..., definition="normalized")` in JAX is algebraically equivalent to the C++ `sopp.integral_BdotN` definition but does not promise byte identity. JAX keeps an AD-uniform per-point residual and then contracts it; C++ accumulates numerator and denominator in its own loop order. Use `reduction_mode="strict_oracle"` only for scalar contraction investigations.
-- **No simsoptpp dependency**: Pure JAX modules (M1) use `importlib.util` direct loading in tests to avoid triggering `simsopt/__init__.py` → `simsoptpp`. M2 adapter modules import from `simsopt._core` and are guarded by `try/except ImportError` in `__init__.py`.
+- **No simsoptpp dependency**: Pure JAX modules (M1) use `importlib.util` direct loading in tests to avoid triggering the eager `from simsoptpp import Curve` probe in the sub-package `__init__.py` files (e.g. `simsopt/field/__init__.py:8`, `simsopt/geo/__init__.py:9`); bare `import simsopt` itself is simsoptpp-free via the lazy `__getattr__` in `simsopt/__init__.py`. M2 adapter modules import from `simsopt._core` and are guarded by `try/except ImportError` in `__init__.py`.
 - **Parity ladder SSOT**: `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES` owns the lane-specific precision contract. `rtol=1e-10` only applies to same-state `direct-kernel` C++ parity (`biot_savart_B`, `surface_gamma`, `integral_BdotN`, raw Boozer residual) and the existing same-state `ls-wrapper-gradient` fixture. Derivative-heavy paths (`dB/dX`, surface derivatives, Boozer residual derivatives) are tracked by the `derivative-heavy` lane: direct C++ oracle coverage exists for representative first-derivative kernels (`dB/dX`, Biot-Savart VJP, surface coefficient Jacobians, composed Boozer residual Jacobian) at `rtol=1e-8, atol=1e-10`. Column-complete CPU/C++ Hessian basis-sweep parity is covered by `TestUpstreamFactoryBoozerMatrix::test_penalty_hessian_column_complete_cpu_parity_matrix` in the `direct-hessian-oracle` lane at `rtol=1e-8, atol=1e-10`; the seeded directional HVP test is retained as operator-path coverage.
 - **Stellsym DOF convention**: `stellsym_scatter_indices(mpol, ntor)` uses cos-cos + sin-sin for x, and cos-sin + sin-cos for y and z (y transforms like z under stellarator symmetry). This matches the CPU `SurfaceXYZTensorFourier` DOF ordering exactly (verified by comparing scatter indices against CPU DOF-to-coefficient probing).
 - **Boozer grad/hessian**: M1 wrappers only differentiate through iota/G. Surface DOF derivatives require the composed pipeline (M3+).

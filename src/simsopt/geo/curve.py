@@ -71,7 +71,12 @@ def _as_numpy_float64(value):
 
 
 if _HAS_JAX:
-    from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
+    from ..jax_core._math_utils import (
+        as_jax_float64 as _as_jax_float64,
+        as_runtime_float64 as _as_runtime_float64,
+    )
+    from ..jax_core import make_optimizable_dof_map_spec
+    from ..jax_core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 else:
     _as_jax_float64 = _as_numpy_float64
 
@@ -85,13 +90,10 @@ def _as_runtime_jax_float64(value):
 def _as_runtime_float64_ref(value, *, reference):
     if not _HAS_JAX:
         return np.asarray(value, dtype=np.float64)
-    from ..jax_core._math_utils import (
-        as_runtime_float64 as _distributed_as_runtime_float64,
-    )
-
-    return _distributed_as_runtime_float64(value, reference=reference)
+    return _as_runtime_float64(value, reference=reference)
 
 
+# CPU/JAX adapter: host constant serves no-JAX; JAX path stages via reference.
 _TWO_PI = 2.0 * np.pi
 
 
@@ -420,8 +422,6 @@ def _optimizable_dof_map_components(owner, opt):
 
 def _optimizable_dof_map_spec(owner, opt):
     """Build the immutable owner-to-optimizable DOF map spec for ``opt``."""
-    from ..jax_core import make_optimizable_dof_map_spec
-
     (
         template_full_dofs,
         owner_segments,
@@ -1821,8 +1821,6 @@ def gamma_curve_on_surface(
 def surfrz_gamma_lin(
     quadpoints_phi, quadpoints_theta, mpol, ntor, surf_dofs, nfp, stellsym
 ):
-    from ..jax_core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
-
     spec = surface_rz_fourier_spec_from_dofs(
         _as_runtime_jax_float64(surf_dofs),
         quadpoints_phi=_as_runtime_jax_float64(quadpoints_phi),
