@@ -17,11 +17,19 @@ of the ambiguous field/surface classes was confirmed by source search against
 
 ## Legend
 
+`Status` is the single source of truth. It answers one question: **did the
+C++ symbol's runtime capability get reimplemented as a differentiable JAX
+path?** `PARTIAL` is reserved strictly for a *genuine partial port* — it is
+**never** used for code that is intentionally not ported, nor for code that is
+not a differentiable kernel. Those are `NON-PORTABLE`.
+
 | Status | Meaning |
 |---|---|
-| **PORTED** | Current JAX equivalent exists for the C++-grounded runtime surface named in the row. Inline notes may still describe deliberate API-shape differences, autodiff replacements, or unsupported behavior inherited from C++. |
-| **PARTIAL** | JAX module exists but misses one or more C++ API rows or object/cache entrypoints (noted inline). |
+| **PORTED** | A current JAX equivalent exists for the C++-grounded runtime surface named in the row. Inline notes may still describe deliberate API-shape differences, autodiff replacements, or unsupported behavior inherited from C++. |
+| **PARTIAL** | A JAX module ports the differentiable kernel, but a genuine sub-capability of that kernel is still missing (noted inline). Reserved for **real gaps** only — never for API-shape/cache-orchestration differences, intentional non-ports, or non-differentiable code. |
+| **NON-PORTABLE** | The C++ symbol is intentionally not mirrored because it is cache orchestration, pybind11 glue, or object-lifecycle / bootstrap code with no differentiable JAX analogue. The underlying numerical capability, where one exists, is reached through other rows. |
 | **UNPORTED** | A specific C++ symbol has no JAX counterpart yet (noted inline). |
+| **UNCLEAR** | C++/JAX semantic correspondence is ambiguous (mostly LinAlg helpers / pybind trampolines); see the underlying audit's open questions. |
 
 **C++ file-naming pattern** (why most "oracle" files below are `.h`, not
 `.cpp`): many low-level simsopt numerics are C++ *templates*, so substantial
@@ -40,8 +48,8 @@ trampoline headers.
 |---|---|---|
 | `biot_savart_impl.h`, `biot_savart_c.cpp`, `biot_savart_py.cpp` | `jax_core/biotsavart.py`, `jax_core/biotsavart_cpu_ordered.py`, `field/biotsavart_jax.py` (shim), `jax_core/field.py` (grouped accumulation) | PORTED |
 | `biot_savart_vjp_impl.h`, `biot_savart_vjp_c.cpp`, `biot_savart_vjp_py.cpp` | folded into `jax_core/biotsavart.py` (`jax.vjp`) + `field/biotsavart_jax_backend.py` | PORTED |
-| `magneticfield_biotsavart.cpp/.h` | `field/biotsavart_jax_backend.py` (`BiotSavartJAX`, `SpecBackedBiotSavartJAX`) | PARTIAL — value accessors and coil-current derivative paths exist, but the legacy `compute(derivatives=N)` cache-bundle entrypoint is not first-class JAX API |
-| `magneticfield.h` (abstract `B`/`dB`/`A`/`AbsB`/`GradAbsB`) | `jax_core/field.py` + per-field backends below | PARTIAL — represented by per-field backends and protocols rather than a one-to-one abstract cache API |
+| `magneticfield_biotsavart.cpp/.h` | `field/biotsavart_jax_backend.py` (`BiotSavartJAX`, `SpecBackedBiotSavartJAX`) | NON-PORTABLE — `B`/`A`/`dB`/`dA`/VJP accessors are JAX-native; only the legacy `compute(derivatives=N)` cache-bundle entrypoint is intentionally not mirrored (audit `cpp_port_gap.md:69` "NON-PORTABLE cache orchestration") |
+| `magneticfield.h` (abstract `B`/`dB`/`A`/`AbsB`/`GradAbsB`) | `jax_core/field.py` + per-field backends below | NON-PORTABLE — the abstract mutable-cache base class is replaced by per-field backends and protocols rather than a one-to-one cache API; every concrete field kernel is ported in its own row |
 | `magneticfield_interpolated.h` | `jax_core/interpolated_field.py`, `field/interpolated_field_jax.py` | PORTED |
 | `magneticfield_wireframe.cpp/.h`, `wireframe_field_impl.h` | `jax_core/wireframe.py`, `field/wireframefield_jax.py` | PORTED — second spatial derivatives are unsupported on both the C++ and JAX wireframe paths |
 | `dommaschk.cpp/.h` | `jax_core/analytic_fields.py` (`dommaschk_B/dB`), `field/dommaschk_jax.py` | PORTED |
@@ -61,7 +69,8 @@ trampoline headers.
 
 | C++ source | JAX port file(s) | Status |
 |---|---|---|
-| `surface.cpp/.h` (base: area/volume/normal/curvatures/fundamental-forms/fit) | `jax_core/surface_integrals.py` + folded into the per-kind modules below | PARTIAL — evaluation kernels are ported; object/bootstrap helpers such as `fit_to_curve`, `least_squares_fit`, and `extend_via_*` remain CPU/object APIs |
+| `surface.cpp/.h` — evaluation base (area/volume/normal/curvatures/fundamental-forms) | `jax_core/surface_integrals.py` + folded into the per-kind modules below | PORTED |
+| `surface.cpp/.h` — construction/bootstrap helpers (`fit_to_curve`, `least_squares_fit`, `extend_via_*`) | none — remain CPU/object lifecycle APIs | NON-PORTABLE — object-mutation/bootstrap workflows, not differentiable hot-path kernels |
 | `surfacerzfourier.cpp/.h` | `jax_core/surface_rzfourier.py` | PORTED — 3rd-derivative `_lin` variants are present in `surface_rzfourier.py` |
 | `surfacexyzfourier.cpp/.h` | `jax_core/surface_fourier.py` | PORTED — fundamental forms, curvatures, derivative helpers, and 3rd-derivative `_lin` variants are present |
 | `surfacexyztensorfourier.h` | `jax_core/surface_fourier.py`, `jax_core/surface_fourier_kernels.py`, `jax_core/surface_fourier_indices.py`, `geo/surface_fourier_jax.py` (shim), `geo/surface_fourier_jax_cpu_ordered.py` | PORTED |
@@ -80,7 +89,7 @@ trampoline headers.
 
 | C++ source | JAX port file(s) | Status |
 |---|---|---|
-| `boozerresidual_impl.h`, `boozerresidual_py.cpp/.h` | `geo/boozer_residual_jax.py` | PORTED — direct `boozer_dresidual_dc` kernel replaced by autodiff |
+| `boozerresidual_impl.h`, `boozerresidual_py.cpp/.h` | `geo/boozer_residual_jax.py` | PORTED — direct `boozer_dresidual_dc` kernel replaced by autodiff over the primal |
 | `integral_BdotN.cpp/.h` | `jax_core/integral_bdotn.py`, `objectives/integral_bdotn_jax.py` (shim) | PORTED |
 | `dipole_field.cpp/.h` | `jax_core/dipole_field.py`, `field/dipole_field_jax.py`, `geo/permanent_magnet_grid_jax.py` | PORTED |
 | `permanent_magnet_optimization.cpp/.h` (MwPGP, GPMO\*) | `jax_core/pm_optimization.py`, `jax_core/pm_workflow.py`, `solve/permanent_magnet_optimization_jax.py` | PORTED |
@@ -98,7 +107,7 @@ ports upstream **Python** (`boozersurface.py`, `surfaceobjectives.py`,
 - `geo/boozersurface_jax.py`
 - `geo/optimizer_jax.py`, `geo/optimizer_jax_reference.py`
 - `geo/label_constraints_jax.py`
-- `geo/surfaceobjectives_jax.py`
+- `geo/surfaceobjectives_jax.py`, `geo/surfaceobjectives_traceable_jax.py`
 - `objectives/fluxobjective_jax.py`, `jax_core/objectives_flux.py`
 - `geo/curveobjectives_jax.py`
 
