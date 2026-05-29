@@ -623,11 +623,20 @@ working_layer_shear_shortfall_objective = make_optimizable(
 # PrincipalCurvature (surface smoothness) is opt-in (env, default 0) pending
 # HBT-scale calibration of its curvature bound.
 STAGE1_IOTA_ASPIRATION = float(os.environ.get("STAGE1_IOTA_ASPIRATION", "1.0"))
-# pure-maximize when 1.0 (deficit positive in-range, no upper bound). Set to a
-# value inside the operating band (e.g. 0.18) to make iota a STEERABLE one-sided
-# ceiling: max(0, aspiration - iota) stops pushing once iota reaches aspiration,
-# so the loop's feedback knob can park iota in the realizable window instead of
-# letting it run away (it hit 0.79 at max_mode=2 under the 1.0 default).
+# Lower edge of the iota objective: max(0, ASPIRATION - iota) pushes iota UP
+# toward this floor. Default 1.0 = pure-maximize (push iota as high as possible).
+STAGE1_IOTA_CEILING = float(os.environ.get("STAGE1_IOTA_CEILING", "inf"))
+# Upper edge of the iota band: max(0, iota - CEILING) pushes iota DOWN once it
+# exceeds the ceiling. Default +inf = no ceiling (one-sided pure-maximize, the
+# historical behavior). iota then enters as a TWO-SIDED BAND penalty (see
+# _iota_band_penalty_from_vmec) driving iota into [ASPIRATION, CEILING]. The
+# closed loop sets a finite band so iota is a STEERABLE target, not a runaway
+# push: a real-resolution run with no ceiling drove iota to 0.79 (unrealizable),
+# and a bare low aspiration UNDERSHOOTS (0.15 -> 0.071) because lowering it only
+# weakens the push, letting QA win. The upper edge kills the runaway; the lower
+# edge keeps iota off the floor. NOTE: realizability is best bounded by the
+# L_grad_B term (Kappel, STAGE1_LGRADB_WEIGHT) once calibrated -- this band is
+# the cheaper steering/safety rail.
 STAGE1_VOLUME_ASPIRATION = 0.20       # winding-envelope-scale volume aspiration, m^3
 STAGE1_IOTA_RESONANCES = (0.20, 0.25)  # 1/5, 1/4 at NFP=5 — avoid
 STAGE1_IOTA_NOTCH_EPS = 0.01
@@ -648,8 +657,16 @@ STAGE1_LGRADB_NTHETA = int(os.environ.get("STAGE1_LGRADB_NTHETA", "32"))
 STAGE1_LGRADB_NPHI = int(os.environ.get("STAGE1_LGRADB_NPHI", "32"))
 
 
-def _iota_deficit_from_vmec(vmec_instance: Vmec) -> float:
-    return max(0.0, STAGE1_IOTA_ASPIRATION - _working_iota_from_vmec(vmec_instance))
+def _iota_band_penalty_from_vmec(vmec_instance: Vmec) -> float:
+    # Two-sided band: push iota UP below the floor (ASPIRATION) and DOWN above
+    # the ceiling, zero inside [ASPIRATION, CEILING]. With the default ceiling
+    # (+inf) this reduces exactly to the one-sided pure-maximize shortfall
+    # max(0, ASPIRATION - iota), so default-run output is unchanged.
+    iota = _working_iota_from_vmec(vmec_instance)
+    return (
+        max(0.0, STAGE1_IOTA_ASPIRATION - iota)
+        + max(0.0, iota - STAGE1_IOTA_CEILING)
+    )
 
 
 def _volume_deficit_from_vmec(vmec_instance: Vmec) -> float:
@@ -682,7 +699,7 @@ def _lgradB_shortfall_from_vmec(vmec_instance: Vmec) -> float:
     return max(0.0, STAGE1_LGRADB_FLOOR - _min_lgradB_from_vmec(vmec_instance))
 
 
-iota_deficit_objective = make_optimizable(_iota_deficit_from_vmec, vmec)
+iota_band_objective = make_optimizable(_iota_band_penalty_from_vmec, vmec)
 volume_deficit_objective = make_optimizable(_volume_deficit_from_vmec, vmec)
 iota_resonance_notch_objective = make_optimizable(_iota_resonance_notch_from_vmec, vmec)
 lgradB_shortfall_objective = make_optimizable(_lgradB_shortfall_from_vmec, vmec)
@@ -724,7 +741,7 @@ def _build_prob():
     # weights (the relative-mode |target| division is meaningless for a deficit).
     tuples = [
         (vmec.aspect, ASPECT_TARGET, aw),
-        (iota_deficit_objective.J, 0.0, IOTA_WEIGHT),
+        (iota_band_objective.J, 0.0, IOTA_WEIGHT),
         (iota_resonance_notch_objective.J, 0.0, STAGE1_IOTA_NOTCH_WEIGHT),
         (working_layer_shear_shortfall_objective.J, 0.0, WORKING_LAYER_SHEAR_WEIGHT),
         (volume_deficit_objective.J, 0.0, VOLUME_WEIGHT),
