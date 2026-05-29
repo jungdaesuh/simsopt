@@ -6,12 +6,19 @@
 **As of:** 2026-05-29 · **Branch:** `gpu-purity-stage2-20260405`
 
 **Primary source:** the repo's own
-`.artifacts/jax_port_gap_audit_2026-05-13/cpp_port_gap.md`
-(78 `PORTED` / 23 `PARTIAL` / 7 `UNPORTED` / 11 `NON-PORTABLE` /
-8 `UNCLEAR` of ~127 public C++ symbols), lifted from symbol-level to
-file-level and re-verified against the current tree. Python-vs-C++ provenance
-of the ambiguous field/surface classes was confirmed by source search against
+`.artifacts/jax_port_gap_audit_2026-05-13/cpp_port_gap.md`, lifted from its
+symbol-level analysis (~127 public C++ symbols) to the file-level view below
+and re-verified against the current tree. Python-vs-C++ provenance of the
+ambiguous field/surface classes was confirmed by source search against
 `src/simsoptpp/`.
+
+The audit's raw per-symbol tally is **not** reproduced here on purpose: this
+map relabels at file granularity and applies its own SSOT (autodiff
+replacements count as `PORTED`; cache orchestration / object-lifecycle code
+counts as `NON-PORTABLE`), and the audit has drifted since 2026-05-13 (e.g.
+curve `kappa`/`torsion`/`incremental_arclength` are now lifted into
+`jax_core/curve_geometry.py`). For the original per-symbol counts, read the
+audit directly.
 
 ---
 
@@ -71,7 +78,7 @@ trampoline headers.
 |---|---|---|
 | `surface.cpp/.h` — evaluation base (area/volume/normal/curvatures/fundamental-forms) | `jax_core/surface_integrals.py` + folded into the per-kind modules below | PORTED |
 | `surface.cpp/.h` — construction/bootstrap helpers (`fit_to_curve`, `least_squares_fit`, `extend_via_*`) | none — remain CPU/object lifecycle APIs | NON-PORTABLE — object-mutation/bootstrap workflows, not differentiable hot-path kernels |
-| `surfacerzfourier.cpp/.h` | `jax_core/surface_rzfourier.py` | PORTED — 3rd-derivative `_lin` variants are present in `surface_rzfourier.py` |
+| `surfacerzfourier.cpp/.h` | `jax_core/surface_rzfourier.py` | PARTIAL — gamma/normal/area/volume and 3rd-derivative `_lin` variants are present, but the area/volume/normal Hessians wrt RZ DOFs (`d2volume_by_dcoeffdcoeff`, `d2area_by_dcoeffdcoeff`, `d2normal_by_dcoeffdcoeff`, `dsurface_curvatures_by_dcoeff`) have no JAX path yet — only the XYZ-Fourier surface has them; RZ Hessians route through CPU |
 | `surfacexyzfourier.cpp/.h` | `jax_core/surface_fourier.py` | PORTED — fundamental forms, curvatures, derivative helpers, and 3rd-derivative `_lin` variants are present |
 | `surfacexyztensorfourier.h` | `jax_core/surface_fourier.py`, `jax_core/surface_fourier_kernels.py`, `jax_core/surface_fourier_indices.py`, `geo/surface_fourier_jax.py` (shim), `geo/surface_fourier_jax_cpu_ordered.py` | PORTED |
 
