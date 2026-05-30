@@ -2336,11 +2336,13 @@ def _single_stage_jax_spec_tree_payload(value):
 def _single_stage_jax_spec_tree_from_payload(payload, *, field_name):
     kind = payload["kind"]
     if kind == "array":
-        return jax.device_put(
-            np.asarray(payload["data"], dtype=np.dtype(payload["dtype"])).reshape(
-                payload["shape"]
-            )
-        )
+        array = np.asarray(
+            payload["data"],
+            dtype=np.dtype(payload["dtype"]),
+        ).reshape(payload["shape"])
+        if array.dtype.kind == "f":
+            return runtime_device_put(array, dtype=array.dtype)
+        return jax.device_put(array)
     if kind == "tuple":
         return tuple(
             _single_stage_jax_spec_tree_from_payload(
@@ -7320,6 +7322,7 @@ def build_experimental_mps_boozer_custom_kernel_value_and_grad(
     custom_value_and_grad = boozer_residual_cls(
         boozer_surface,
         bs,
+        constraint_weight=0.0,
     ).experimental_mps_custom_kernel_value_and_grad()
     residual_weight = float(outer_objective_config["residual_weight"])
     if residual_weight == 1.0:
@@ -10884,6 +10887,30 @@ def build_single_stage_target_lane_objective_evaluation_trace_event(
     forward_result,
 ):
     """Return a target-native replay event for fixed-candidate parity checks."""
+    if forward_result is None:
+        return {
+            "target_native_replay": True,
+            "accepted_iteration_target": int(source_event["accepted_iteration_target"]),
+            "line_search_evaluation": int(source_event["line_search_evaluation"]),
+            "accepted_iterations": int(source_event.get("accepted_iterations", 0)),
+            "candidate_optimizer_dofs": _summarize_host_vector(
+                candidate_optimizer_dofs
+            ),
+            "objective": _summarize_host_scalar(objective_value),
+            "native_gradient": _summarize_host_gradient(optimizer_gradient),
+            "optimizer_gradient": _summarize_host_gradient(optimizer_gradient),
+            "objective_components": None,
+            "boozer_solve_decomposition": None,
+            "iota_penalty_decomposition": None,
+            "native_gradient_used": True,
+            "solver_success": None,
+            "boozer_solver_metadata": None,
+            "boozer_iota": None,
+            "boozer_G": None,
+            "boozer_surface_dofs": None,
+            "hardware_status": None,
+            "candidate_failure": None,
+        }
     primal_success = forward_result.get("primal_success", forward_result["success"])
     target_success = forward_result["success"]
     return {
@@ -11110,8 +11137,10 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
             return objective_value, optimizer_gradient
         line_search_evaluation += 1
         candidate_x = _single_stage_optimizer_dofs_array(optimizer_dofs)
-        coil_dofs = runtime_device_put(optimizer_to_coil_dofs(candidate_x))
-        forward_result = target_forward_result(coil_dofs)
+        forward_result = None
+        if target_forward_result is not None:
+            coil_dofs = runtime_device_put(optimizer_to_coil_dofs(candidate_x))
+            forward_result = target_forward_result(coil_dofs)
         record_event(
             build_single_stage_target_lane_objective_evaluation_trace_event(
                 source_event={
@@ -14653,17 +14682,25 @@ if __name__ == "__main__":
                         and target_value_and_grad_objective is not None
                         and objective_evaluation_trace_callback is not None
                     ):
-                        target_forward_result = (
-                            build_single_stage_target_lane_forward_result(
-                                boozer_surface,
-                                bs,
-                                iota_target,
-                                outer_objective_config=(
-                                    target_lane_outer_objective_config
-                                ),
-                                success_filter=target_lane_success_filter,
+                        target_forward_result = None
+                        if not bool(
+                            getattr(
+                                target_value_and_grad_objective,
+                                "_simsopt_mps_boozer_custom_kernel",
+                                False,
                             )
-                        )
+                        ):
+                            target_forward_result = (
+                                build_single_stage_target_lane_forward_result(
+                                    boozer_surface,
+                                    bs,
+                                    iota_target,
+                                    outer_objective_config=(
+                                        target_lane_outer_objective_config
+                                    ),
+                                    success_filter=target_lane_success_filter,
+                                )
+                            )
                         optimizer_target_value_and_grad_objective = build_single_stage_target_lane_objective_evaluation_trace_wrapper(
                             target_value_and_grad_objective=(
                                 target_value_and_grad_objective

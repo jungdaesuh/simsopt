@@ -74,7 +74,30 @@ from benchmarks.parity_solve_quality import (
 )
 
 
+def _preparse_mps_custom_kernel_float32_smoke(
+    argv: list[str],
+    *,
+    requested_platform: str,
+) -> bool:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--experimental-mps-boozer-custom-kernel",
+        action="store_true",
+    )
+    args, _ = parser.parse_known_args(argv)
+    return requested_platform in {"auto", "mps"} and bool(
+        args.experimental_mps_boozer_custom_kernel
+    )
+
+
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
+REQUESTED_MPS_FLOAT32_SMOKE = _preparse_mps_custom_kernel_float32_smoke(
+    sys.argv[1:],
+    requested_platform=REQUESTED_PLATFORM,
+)
+if REQUESTED_MPS_FLOAT32_SMOKE:
+    os.environ["SIMSOPT_BACKEND_MODE"] = "jax_mps_smoke"
+    os.environ["JAX_ENABLE_X64"] = "0"
 CHILD_CUDA_MEMORY_ENV = isolate_parent_cuda_memory_allocator(REQUESTED_PLATFORM)
 apply_requested_platform(REQUESTED_PLATFORM)
 apply_benchmark_compilation_cache_policy(
@@ -89,8 +112,11 @@ import jaxlib
 maybe_initialize_distributed_runtime()
 _RUNTIME_CONTEXT = "Single-stage init parity"
 
-jax.config.update("jax_enable_x64", True)
-require_x64_runtime(jax, context=_RUNTIME_CONTEXT)
+if REQUESTED_MPS_FLOAT32_SMOKE:
+    jax.config.update("jax_enable_x64", False)
+else:
+    jax.config.update("jax_enable_x64", True)
+    require_x64_runtime(jax, context=_RUNTIME_CONTEXT)
 require_requested_platform_runtime(
     jax,
     requested_platform=REQUESTED_PLATFORM,
@@ -978,6 +1004,39 @@ def _load_single_stage_final_payload(output_root: Path) -> tuple[dict[str, Any],
     return load_single_stage_final_payload_from_artifact_contract(output_root)
 
 
+def _resolve_single_stage_child_platform(
+    *,
+    backend: str,
+    platform: str,
+    experimental_mps_boozer_custom_kernel: bool,
+) -> str:
+    if backend != "jax":
+        return "cpu"
+    if experimental_mps_boozer_custom_kernel and platform == "auto":
+        return "mps"
+    return platform
+
+
+def _apply_single_stage_custom_kernel_env(
+    env: dict[str, str],
+    *,
+    backend: str,
+    effective_platform: str,
+    experimental_mps_boozer_custom_kernel: bool,
+) -> dict[str, str]:
+    if (
+        backend == "jax"
+        and effective_platform == "mps"
+        and experimental_mps_boozer_custom_kernel
+    ):
+        env["SIMSOPT_BACKEND_MODE"] = "jax_mps_smoke"
+        env["JAX_ENABLE_X64"] = "0"
+        return env
+    if REQUESTED_MPS_FLOAT32_SMOKE:
+        env["JAX_ENABLE_X64"] = "1"
+    return env
+
+
 def _run_single_stage_case(
     args: argparse.Namespace,
     backend: str,
@@ -998,10 +1057,14 @@ def _run_single_stage_case(
     replay_objective_evaluation_trace: Path | None = None,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
-    effective_platform = platform if backend == "jax" else "cpu"
     experimental_mps_boozer_custom_kernel = bool(
         experimental_mps_boozer_custom_kernel
         or getattr(args, "experimental_mps_boozer_custom_kernel", False)
+    )
+    effective_platform = _resolve_single_stage_child_platform(
+        backend=backend,
+        platform=platform,
+        experimental_mps_boozer_custom_kernel=experimental_mps_boozer_custom_kernel,
     )
     with _resolved_single_stage_output_root(
         output_root, backend=backend
@@ -1153,16 +1216,25 @@ def _run_single_stage_case(
             command.extend(["--equilibria-dir", args.equilibria_dir])
 
         start = time.perf_counter()
+        case_env = repo_pythonpath_env(
+            platform=effective_platform,
+            disable_compilation_cache=(effective_platform == "cpu"),
+            clear_backend_guardrails=(backend != "jax"),
+            deterministic_gpu_reductions=deterministic_gpu_reductions,
+            cuda_memory_env=CHILD_CUDA_MEMORY_ENV,
+        )
+        case_env = _apply_single_stage_custom_kernel_env(
+            case_env,
+            backend=backend,
+            effective_platform=effective_platform,
+            experimental_mps_boozer_custom_kernel=(
+                experimental_mps_boozer_custom_kernel
+            ),
+        )
         run_python_script(
             script_path,
             command,
-            env=repo_pythonpath_env(
-                platform=effective_platform,
-                disable_compilation_cache=(effective_platform == "cpu"),
-                clear_backend_guardrails=(backend != "jax"),
-                deterministic_gpu_reductions=deterministic_gpu_reductions,
-                cuda_memory_env=CHILD_CUDA_MEMORY_ENV,
-            ),
+            env=case_env,
             cwd=REPO_ROOT,
             bootstrap_repo=True,
             stream_output=True,

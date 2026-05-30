@@ -21,6 +21,7 @@ UNKNOWN_ITERATION_COUNT = -1
 DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER = 1
 MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER = 20
 EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER = 2
+MAX_EXPERIMENTAL_MPS_BOOZER_COIL_GROUPS = 2
 
 
 @dataclass(frozen=True)
@@ -180,28 +181,36 @@ def _fused_custom_call_payload_supported(
         return False
     if not _is_scatter_operand(contract.label_scatter_indices):
         return False
+    group_count = len(contract.coil_group_gammas)
     if (
-        len(contract.coil_group_gammas) != 1
-        or len(contract.coil_group_gammadashs) != 1
-        or len(contract.coil_group_currents) != 1
+        group_count == 0
+        or group_count > MAX_EXPERIMENTAL_MPS_BOOZER_COIL_GROUPS
+        or len(contract.coil_group_gammadashs) != group_count
+        or len(contract.coil_group_currents) != group_count
     ):
         return False
 
-    gammas = contract.coil_group_gammas[0]
-    gammadashs = contract.coil_group_gammadashs[0]
-    currents = contract.coil_group_currents[0]
-    if not all(_is_float32_array(value) for value in (gammas, gammadashs, currents)):
-        return False
-    if gammas.ndim != 3 or gammas.shape[2] != 3:
-        return False
-    if gammas.shape[0] == 0 or gammas.shape[1] == 0:
-        return False
-    if gammadashs.shape != gammas.shape:
-        return False
-    if currents.ndim != 1 or currents.shape[0] != gammas.shape[0]:
-        return False
+    flat_cotangent_size = 0
+    for gammas, gammadashs, currents in zip(
+        contract.coil_group_gammas,
+        contract.coil_group_gammadashs,
+        contract.coil_group_currents,
+        strict=True,
+    ):
+        if not all(
+            _is_float32_array(value) for value in (gammas, gammadashs, currents)
+        ):
+            return False
+        if gammas.ndim != 3 or gammas.shape[2] != 3:
+            return False
+        if gammas.shape[0] == 0 or gammas.shape[1] == 0:
+            return False
+        if gammadashs.shape != gammas.shape:
+            return False
+        if currents.ndim != 1 or currents.shape[0] != gammas.shape[0]:
+            return False
+        flat_cotangent_size += int(gammas.size + gammadashs.size + currents.size)
 
-    flat_cotangent_size = int(gammas.size + gammadashs.size + currents.size)
     return bool(
         _is_float32_array(contract.coil_pullback_operator)
         and contract.coil_pullback_operator.ndim == 2
@@ -273,7 +282,7 @@ def require_mps_boozer_fixed_surface_g_iota_supported(
         return
     raise ValueError(
         "The experimental MPS Boozer custom kernel only supports the "
-        "fixed-surface G/iota fixture: float32 arrays, one grouped coil set, "
+        "fixed-surface G/iota fixture: float32 arrays, one or two coil groups, "
         "stellsym xyztensorfourier surfaces, zero BoozerResidual constraint "
         "weight, optimize_G=True, mps_solver_mode='fixed_surface_g_iota', "
         "1 <= newton_maxiter <= "
@@ -315,30 +324,52 @@ def _split_flat_coil_cotangent(
     )
 
 
-def _coil_pullback_operator(
+def _coil_groups_pullback_operator(
     biotsavart: object,
     *,
     coil_dofs: jax.Array,
-    gammas: jax.Array,
-    gammadashs: jax.Array,
-    currents: jax.Array,
-    coil_indices: tuple[int, ...],
+    gammas: tuple[jax.Array, ...],
+    gammadashs: tuple[jax.Array, ...],
+    currents: tuple[jax.Array, ...],
+    coil_indices: tuple[tuple[int, ...], ...],
 ) -> jax.Array:
     """Dense cotangent projection from grouped coil arrays to flat coil DOFs."""
 
-    flat_cotangent_size = int(gammas.size + gammadashs.size + currents.size)
+    flat_cotangent_size = sum(
+        int(group_gammas.size + group_gammadashs.size + group_currents.size)
+        for group_gammas, group_gammadashs, group_currents in zip(
+            gammas,
+            gammadashs,
+            currents,
+            strict=True,
+        )
+    )
     basis = jnp.eye(flat_cotangent_size, dtype=coil_dofs.dtype)
 
     def project(flat_cotangent: jax.Array) -> jax.Array:
-        group_cotangent = _split_flat_coil_cotangent(
-            flat_cotangent,
-            gammas_shape=gammas.shape,
-            gammadashs_shape=gammadashs.shape,
-            currents_shape=currents.shape,
-        )
+        group_cotangents = []
+        offset = 0
+        for group_gammas, group_gammadashs, group_currents in zip(
+            gammas,
+            gammadashs,
+            currents,
+            strict=True,
+        ):
+            group_size = int(
+                group_gammas.size + group_gammadashs.size + group_currents.size
+            )
+            group_cotangents.append(
+                _split_flat_coil_cotangent(
+                    flat_cotangent[offset : offset + group_size],
+                    gammas_shape=group_gammas.shape,
+                    gammadashs_shape=group_gammadashs.shape,
+                    currents_shape=group_currents.shape,
+                )
+            )
+            offset += group_size
         return biotsavart.coil_cotangents_to_dofs_gradient(
-            (group_cotangent,),
-            (coil_indices,),
+            tuple(group_cotangents),
+            coil_indices,
             coil_dofs=coil_dofs,
         )
 
@@ -443,38 +474,54 @@ def _validate_fused_custom_call_contract(contract: MpsBoozerKernelContract) -> N
         contract.label_scatter_indices,
     )
 
+    group_count = len(contract.coil_group_gammas)
     if (
-        len(contract.coil_group_gammas) != 1
-        or len(contract.coil_group_gammadashs) != 1
-        or len(contract.coil_group_currents) != 1
+        group_count == 0
+        or group_count > MAX_EXPERIMENTAL_MPS_BOOZER_COIL_GROUPS
+        or len(contract.coil_group_gammadashs) != group_count
+        or len(contract.coil_group_currents) != group_count
     ):
         raise ValueError(
-            "the first fused MPS custom call supports exactly one coil group"
+            "the first fused MPS custom call supports one or two coil groups"
         )
 
-    gammas = contract.coil_group_gammas[0]
-    gammadashs = contract.coil_group_gammadashs[0]
-    currents = contract.coil_group_currents[0]
-    for name, value in (
-        ("coil_group_gammas[0]", gammas),
-        ("coil_group_gammadashs[0]", gammadashs),
-        ("coil_group_currents[0]", currents),
-    ):
-        _require_float32_array(name, value)
-    if gammas.ndim != 3 or gammas.shape[2] != 3:
-        raise ValueError("coil_group_gammas[0] must have shape (ncoils, nquad, 3)")
-    if gammas.shape[0] == 0 or gammas.shape[1] == 0:
-        raise ValueError(
-            "coil_group_gammas[0] must include coils and quadrature points"
+    flat_cotangent_size = 0
+    for group_index, (gammas, gammadashs, currents) in enumerate(
+        zip(
+            contract.coil_group_gammas,
+            contract.coil_group_gammadashs,
+            contract.coil_group_currents,
+            strict=True,
         )
-    if gammadashs.shape != gammas.shape:
-        raise ValueError("coil_group_gammadashs[0] must match coil_group_gammas[0]")
-    if currents.ndim != 1 or currents.shape[0] != gammas.shape[0]:
-        raise ValueError("coil_group_currents[0] must have shape (ncoils,)")
+    ):
+        for name, value in (
+            (f"coil_group_gammas[{group_index}]", gammas),
+            (f"coil_group_gammadashs[{group_index}]", gammadashs),
+            (f"coil_group_currents[{group_index}]", currents),
+        ):
+            _require_float32_array(name, value)
+        if gammas.ndim != 3 or gammas.shape[2] != 3:
+            raise ValueError(
+                f"coil_group_gammas[{group_index}] must have shape (ncoils, nquad, 3)"
+            )
+        if gammas.shape[0] == 0 or gammas.shape[1] == 0:
+            raise ValueError(
+                f"coil_group_gammas[{group_index}] must include coils and "
+                "quadrature points"
+            )
+        if gammadashs.shape != gammas.shape:
+            raise ValueError(
+                f"coil_group_gammadashs[{group_index}] must match "
+                f"coil_group_gammas[{group_index}]"
+            )
+        if currents.ndim != 1 or currents.shape[0] != gammas.shape[0]:
+            raise ValueError(
+                f"coil_group_currents[{group_index}] must have shape (ncoils,)"
+            )
+        flat_cotangent_size += int(gammas.size + gammadashs.size + currents.size)
     _require_float32_array("coil_pullback_operator", contract.coil_pullback_operator)
     if contract.coil_pullback_operator.ndim != 2:
         raise ValueError("coil_pullback_operator must be a 2D array")
-    flat_cotangent_size = int(gammas.size + gammadashs.size + currents.size)
     if contract.coil_pullback_operator.shape != (
         contract.coil_dofs.shape[0],
         flat_cotangent_size,
@@ -549,17 +596,13 @@ def build_mps_boozer_direct_kernel_contract(
     )
     coil_set_spec = biotsavart.coil_set_spec_from_dofs(current_coil_dofs)
     gammas, gammadashs, currents, coil_group_indices = _coil_group_arrays(coil_set_spec)
-    if len(gammas) != 1:
-        raise ValueError(
-            "the first fused MPS custom call supports exactly one coil group"
-        )
-    coil_pullback_operator = _coil_pullback_operator(
+    coil_pullback_operator = _coil_groups_pullback_operator(
         biotsavart,
         coil_dofs=current_coil_dofs,
-        gammas=gammas[0],
-        gammadashs=gammadashs[0],
-        currents=currents[0],
-        coil_indices=coil_group_indices[0],
+        gammas=gammas,
+        gammadashs=gammadashs,
+        currents=currents,
+        coil_indices=coil_group_indices,
     )
     metadata = MpsBoozerKernelStaticMetadata(
         target_name="mps.simsopt_boozer_value_grad",
@@ -698,9 +741,14 @@ def evaluate_mps_boozer_fused_solve_custom_call(
         jax.ShapeDtypeStruct((), jnp.bool_),
         jax.ShapeDtypeStruct((), jnp.bool_),
     )
-    gammas = contract.coil_group_gammas[0]
-    gammadashs = contract.coil_group_gammadashs[0]
-    currents = contract.coil_group_currents[0]
+    group_operands: list[jax.Array] = []
+    for gammas, gammadashs, currents in zip(
+        contract.coil_group_gammas,
+        contract.coil_group_gammadashs,
+        contract.coil_group_currents,
+        strict=True,
+    ):
+        group_operands.extend([gammas, gammadashs, currents])
     return MpsBoozerFusedCustomCallResult(
         *jax.ffi.ffi_call(
             SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET,
@@ -720,9 +768,7 @@ def evaluate_mps_boozer_fused_solve_custom_call(
             contract.label_quadpoints_theta,
             contract.surface_scatter_indices,
             contract.label_scatter_indices,
-            gammas,
-            gammadashs,
-            currents,
+            *group_operands,
             contract.coil_pullback_operator,
         )
     )

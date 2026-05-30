@@ -2893,6 +2893,51 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(float(module.host_array(loaded["G"])), 4.5)
         self.assertEqual(loaded["stage2_seed"]["banana_surf_radius"], 0.22)
 
+    def test_single_stage_jax_runtime_seed_tree_loader_casts_float_payload_to_runtime_dtype(
+        self,
+    ):
+        module = self.load_module()
+        from simsopt.backend import get_backend_config, set_backend
+
+        previous_backend = get_backend_config()
+        try:
+            set_backend("jax_mps_smoke", configure_runtime=False)
+            coil_set_spec = module.jax_specs.make_grouped_coil_set_spec(
+                (
+                    (
+                        np.linspace(0.0, 0.5, 6, dtype=np.float64).reshape(1, 2, 3),
+                        np.linspace(0.2, 0.7, 6, dtype=np.float64).reshape(1, 2, 3),
+                        np.asarray([1.25], dtype=np.float64),
+                        (0,),
+                    ),
+                )
+            )
+            payload = module._single_stage_jax_spec_tree_payload(coil_set_spec)
+            loaded = module._single_stage_jax_spec_tree_from_payload(
+                payload,
+                field_name="field.coil_set",
+            )
+        finally:
+            set_backend(
+                previous_backend.mode,
+                strict=previous_backend.strict,
+                debug_nans=previous_backend.debug_nans,
+                disable_jit=previous_backend.disable_jit,
+                transfer_guard=previous_backend.transfer_guard,
+                compilation_cache_dir=previous_backend.compilation_cache_dir,
+                xla_gpu_preallocate=previous_backend.xla_gpu_preallocate,
+                xla_gpu_mem_fraction=previous_backend.xla_gpu_mem_fraction,
+                xla_gpu_allocator=previous_backend.xla_gpu_allocator,
+                tf_gpu_allocator=previous_backend.tf_gpu_allocator,
+                configure_runtime=False,
+            )
+
+        group = loaded.groups[0]
+        self.assertEqual(np.dtype(group.gammas.dtype), np.dtype(np.float32))
+        self.assertEqual(np.dtype(group.gammadashs.dtype), np.dtype(np.float32))
+        self.assertEqual(np.dtype(group.currents.dtype), np.dtype(np.float32))
+        self.assertEqual(group.coil_indices, (0,))
+
     def test_jax_runtime_seed_spec_lane_rejects_non_target_outer_contract(self):
         module = self.load_module()
 
@@ -3744,6 +3789,36 @@ class SingleStageExampleTests(unittest.TestCase):
             np.array([6.0, 8.0]),
         )
         np.testing.assert_array_equal(synced[0], np.array([1.0, 2.0]))
+
+    def test_target_lane_trace_wrapper_allows_custom_kernel_without_forward_result(
+        self,
+    ):
+        module = self.load_module()
+        recorded = []
+
+        def value_and_grad(x):
+            values = np.asarray(x, dtype=np.float64)
+            return float(np.sum(values)), 2.0 * values
+
+        wrapped = (
+            module.build_single_stage_target_lane_objective_evaluation_trace_wrapper(
+                target_value_and_grad_objective=value_and_grad,
+                target_forward_result=None,
+                optimizer_to_coil_dofs=lambda _x: self.fail("forward result disabled"),
+                run_dict={"it": 4, "accepted_iterations": 3},
+                record_event=recorded.append,
+            )
+        )
+
+        value, gradient = wrapped(np.asarray([1.0, 2.0], dtype=np.float64))
+
+        self.assertEqual(value, 3.0)
+        np.testing.assert_array_equal(gradient, np.array([2.0, 4.0]))
+        self.assertEqual(len(recorded), 1)
+        self.assertTrue(recorded[0]["target_native_replay"])
+        self.assertTrue(recorded[0]["native_gradient_used"])
+        self.assertIsNone(recorded[0]["solver_success"])
+        self.assertIsNone(recorded[0]["boozer_surface_dofs"])
 
     def test_single_stage_runtime_stage2_seed_payload_requires_order(self):
         module = self.load_module()
@@ -6715,8 +6790,8 @@ class SingleStageExampleTests(unittest.TestCase):
         custom_value_and_grad._simsopt_mps_boozer_custom_kernel = True
 
         class FakeBoozerResidualJAX:
-            def __init__(self, boozer_surface, bs):
-                owner_calls.append((boozer_surface, bs))
+            def __init__(self, boozer_surface, bs, *, constraint_weight=None):
+                owner_calls.append((boozer_surface, bs, constraint_weight))
 
             def experimental_mps_custom_kernel_value_and_grad(self):
                 return custom_value_and_grad
@@ -6763,7 +6838,7 @@ class SingleStageExampleTests(unittest.TestCase):
         value, gradient = value_and_grad_fun(jnp.asarray([0.4, 0.5], dtype=jnp.float32))
         scalar = scalar_fun(jnp.asarray([0.4, 0.5], dtype=jnp.float32))
 
-        self.assertEqual(owner_calls, [(boozer_surface_marker, bs_marker)])
+        self.assertEqual(owner_calls, [(boozer_surface_marker, bs_marker, 0.0)])
         np.testing.assert_allclose(np.asarray(value), 6.0)
         np.testing.assert_allclose(np.asarray(scalar), 6.0)
         np.testing.assert_allclose(np.asarray(gradient), np.asarray([2.0, -4.0]))

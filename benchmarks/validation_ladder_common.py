@@ -66,6 +66,7 @@ _SIMSOPT_TRANSFER_GUARD_ENV_VAR = "SIMSOPT_JAX_TRANSFER_GUARD"
 _SIMSOPT_EXAMPLE_PARITY_PLATFORM_ENV_VAR = "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM"
 _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR = "TARGET_LANE_ACCEPTED_STEP_SYNC"
 _GPU_BACKEND_MODES = frozenset({"jax_gpu_fast", "jax_gpu_parity"})
+_MPS_BACKEND_MODE = "jax_mps_smoke"
 _SIMSOPT_REPO_SHA_ENV_VAR = "SIMSOPT_REPO_SHA"
 _SIMSOPT_GIT_STATUS_SHORT_ENV_VAR = "SIMSOPT_GIT_STATUS_SHORT"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -88,6 +89,7 @@ _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS = {
 _REQUESTED_PLATFORM_RUNTIME_BACKENDS = {
     "cpu": frozenset({"cpu"}),
     "cuda": frozenset({"cuda", "gpu"}),
+    "mps": frozenset({"mps"}),
 }
 OPTIMIZER_DRIFT_TOLERANCES = ladder_contract.OPTIMIZER_DRIFT_TOLERANCES
 PARITY_LADDER_TOLERANCES = ladder_contract.PARITY_LADDER_TOLERANCES
@@ -114,7 +116,11 @@ tier5_performance_budget = ladder_contract.tier5_performance_budget
 def preparse_platform(argv: list[str]) -> str:
     """Read --platform before JAX import so scripts can pin the runtime device."""
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--platform", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument(
+        "--platform",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+    )
     args, _ = parser.parse_known_args(argv)
     return args.platform
 
@@ -284,9 +290,8 @@ def repo_pythonpath_env(
         env.pop(_SIMSOPT_BACKEND_MODE_ENV_VAR, None)
         env.pop(_SIMSOPT_BACKEND_STRICT_ENV_VAR, None)
         env.pop(_SIMSOPT_TRANSFER_GUARD_ENV_VAR, None)
-    elif (
-        platform == "cpu"
-        and env.get(_SIMSOPT_BACKEND_MODE_ENV_VAR) in _GPU_BACKEND_MODES
+    elif platform == "cpu" and env.get(_SIMSOPT_BACKEND_MODE_ENV_VAR) in (
+        _GPU_BACKEND_MODES | {_MPS_BACKEND_MODE}
     ):
         env[_SIMSOPT_BACKEND_MODE_ENV_VAR] = "jax_cpu_parity"
     if disable_compilation_cache:

@@ -2515,13 +2515,17 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
         biotsavart: ``BiotSavartJAX`` instance.
     """
 
-    def __init__(self, boozer_surface, biotsavart):
+    def __init__(self, boozer_surface, biotsavart, *, constraint_weight=None):
         if boozer_surface.boozer_type != "ls":
             raise ValueError(
                 "BoozerResidualJAX requires a least-squares BoozerSurfaceJAX "
                 "(constraint_weight must be set)."
             )
-        self.constraint_weight = float(boozer_surface.constraint_weight)
+        self.constraint_weight = (
+            float(boozer_surface.constraint_weight)
+            if constraint_weight is None
+            else float(constraint_weight)
+        )
         self._direct_objective_value_and_grad = (
             _make_cached_strict_scalar_value_and_grad(self._direct_objective_of_coils)
         )

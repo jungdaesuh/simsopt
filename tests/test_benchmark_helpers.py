@@ -709,6 +709,23 @@ def test_single_stage_init_accepts_mps_residual_only_fixture(monkeypatch):
     assert args.experimental_mps_boozer_residual_only_fixture
 
 
+def test_single_stage_init_preparses_mps_custom_kernel_float32_smoke():
+    assert single_stage_init_parity_module._preparse_mps_custom_kernel_float32_smoke(
+        ["--experimental-mps-boozer-custom-kernel"],
+        requested_platform="auto",
+    )
+    assert single_stage_init_parity_module._preparse_mps_custom_kernel_float32_smoke(
+        ["--experimental-mps-boozer-custom-kernel"],
+        requested_platform="mps",
+    )
+    assert (
+        not single_stage_init_parity_module._preparse_mps_custom_kernel_float32_smoke(
+            ["--experimental-mps-boozer-custom-kernel"],
+            requested_platform="cuda",
+        )
+    )
+
+
 def test_single_stage_init_accepts_reference_trace_optimizer(monkeypatch):
     monkeypatch.setattr(
         sys,
@@ -2409,6 +2426,16 @@ def test_repo_pythonpath_env_keeps_cpu_visible_for_cuda_callbacks(monkeypatch):
     assert env["SIMSOPT_JAX_BACKEND"] == "cuda"
 
 
+def test_repo_pythonpath_env_sets_mps_platform_selectors(monkeypatch):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    env = repo_pythonpath_env(platform="mps")
+
+    assert env["JAX_PLATFORMS"] == "mps"
+    assert env["SIMSOPT_JAX_PLATFORM"] == "mps"
+    assert env["SIMSOPT_JAX_BACKEND"] == "mps"
+
+
 def test_repo_pythonpath_env_replaces_stale_cuda_determinism_flag(monkeypatch):
     monkeypatch.setenv(
         "XLA_FLAGS",
@@ -2557,6 +2584,18 @@ def test_repo_pythonpath_env_preserves_backend_guardrails_by_default(monkeypatch
 
 def test_repo_pythonpath_env_retargets_gpu_backend_mode_for_cpu_lane(monkeypatch):
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_parity")
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+
+    env = repo_pythonpath_env(platform="cpu")
+
+    assert env["SIMSOPT_BACKEND_MODE"] == "jax_cpu_parity"
+    assert env["SIMSOPT_BACKEND_STRICT"] == "1"
+    assert env["SIMSOPT_JAX_TRANSFER_GUARD"] == "disallow"
+
+
+def test_repo_pythonpath_env_retargets_mps_backend_mode_for_cpu_lane(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_mps_smoke")
     monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
     monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
 
@@ -4556,6 +4595,19 @@ def test_require_requested_platform_runtime_accepts_cuda_backend_alias():
         fake_jax,
         requested_platform="cuda",
         context="Tier 3",
+    )
+
+
+def test_require_requested_platform_runtime_accepts_mps_backend():
+    fake_jax = _fake_jax_runtime(
+        backend="mps",
+        devices=["MpsDevice(id=0)"],
+    )
+
+    require_requested_platform_runtime(
+        fake_jax,
+        requested_platform="mps",
+        context="MPS smoke",
     )
 
 
@@ -6721,6 +6773,71 @@ def test_single_stage_init_case_threads_experimental_mps_boozer_custom_kernel_fl
     )
 
     assert "--experimental-mps-boozer-custom-kernel" in observed_command
+
+
+def test_single_stage_init_case_routes_auto_mps_custom_kernel_to_mps_float32_env(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="auto",
+        experimental_mps_boozer_custom_kernel=True,
+        load_surface_gamma=False,
+    )
+
+    observed_command, observed_env = observed_invocations[0]
+    assert "--experimental-mps-boozer-custom-kernel" in observed_command
+    assert observed_env["JAX_PLATFORMS"] == "mps"
+    assert observed_env["SIMSOPT_BACKEND_MODE"] == "jax_mps_smoke"
+    assert observed_env["JAX_ENABLE_X64"] == "0"
+
+
+def test_single_stage_init_case_keeps_non_mps_child_x64_under_parent_mps_smoke(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "REQUESTED_MPS_FLOAT32_SMOKE",
+        True,
+    )
+    monkeypatch.setenv("JAX_ENABLE_X64", "0")
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "cpu",
+        platform="mps",
+        load_surface_gamma=False,
+    )
+
+    _observed_command, observed_env = observed_invocations[0]
+    assert observed_env["JAX_PLATFORMS"] == "cpu"
+    assert observed_env["JAX_ENABLE_X64"] == "1"
+    assert "SIMSOPT_BACKEND_MODE" not in observed_env
 
 
 def test_single_stage_init_case_threads_mps_residual_only_fixture_flags(

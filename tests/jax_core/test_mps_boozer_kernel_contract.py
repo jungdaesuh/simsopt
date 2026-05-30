@@ -281,6 +281,46 @@ def _fixed_surface_backend_contract_fixture():
     )
 
 
+def _two_group_backend_contract_fixture():
+    contract = _fixed_surface_backend_contract_fixture()
+    dtype = contract.coil_dofs.dtype
+    second_gammas = jnp.asarray(
+        np.linspace(-0.8, 0.4, 18, dtype=np.float32).reshape(1, 6, 3),
+        dtype=dtype,
+    )
+    second_gammadashs = jnp.asarray(
+        np.linspace(0.9, -0.6, 18, dtype=np.float32).reshape(1, 6, 3),
+        dtype=dtype,
+    )
+    second_currents = jnp.asarray([3.0e8], dtype=dtype)
+    second_width = int(
+        second_gammas.size + second_gammadashs.size + second_currents.size
+    )
+    return replace(
+        contract,
+        static_metadata=replace(
+            contract.static_metadata,
+            coil_group_indices=(
+                contract.static_metadata.coil_group_indices[0],
+                (2,),
+            ),
+        ),
+        coil_group_gammas=(contract.coil_group_gammas[0], second_gammas),
+        coil_group_gammadashs=(
+            contract.coil_group_gammadashs[0],
+            second_gammadashs,
+        ),
+        coil_group_currents=(contract.coil_group_currents[0], second_currents),
+        coil_pullback_operator=jnp.concatenate(
+            (
+                contract.coil_pullback_operator,
+                jnp.zeros((contract.coil_dofs.shape[0], second_width), dtype=dtype),
+            ),
+            axis=1,
+        ),
+    )
+
+
 def _theta_basis(theta_grid, mpol):
     theta = _TWO_PI * theta_grid[:, None]
     m_cos = np.arange(0, mpol + 1, dtype=np.float32)[None, :]
@@ -477,35 +517,28 @@ def _fixed_surface_direct_oracle(contract):
 
 
 def _fused_custom_call_with_arrays(contract, *arrays):
-    (
-        coil_dofs,
-        x_inner,
-        surface_dofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        label_quadpoints_phi,
-        label_quadpoints_theta,
-        surface_scatter_indices,
-        label_scatter_indices,
-        gammas,
-        gammadashs,
-        currents,
-        coil_pullback_operator,
-    ) = arrays
+    common_arrays = arrays[:9]
+    group_arrays = arrays[9:-1]
+    coil_pullback_operator = arrays[-1]
+    if len(group_arrays) % 3 != 0:
+        raise AssertionError("group arrays must be triples")
+    coil_group_gammas = tuple(group_arrays[0::3])
+    coil_group_gammadashs = tuple(group_arrays[1::3])
+    coil_group_currents = tuple(group_arrays[2::3])
     traced_contract = replace(
         contract,
-        coil_dofs=coil_dofs,
-        x_inner=x_inner,
-        surface_dofs=surface_dofs,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-        label_quadpoints_phi=label_quadpoints_phi,
-        label_quadpoints_theta=label_quadpoints_theta,
-        surface_scatter_indices=surface_scatter_indices,
-        label_scatter_indices=label_scatter_indices,
-        coil_group_gammas=(gammas,),
-        coil_group_gammadashs=(gammadashs,),
-        coil_group_currents=(currents,),
+        coil_dofs=common_arrays[0],
+        x_inner=common_arrays[1],
+        surface_dofs=common_arrays[2],
+        quadpoints_phi=common_arrays[3],
+        quadpoints_theta=common_arrays[4],
+        label_quadpoints_phi=common_arrays[5],
+        label_quadpoints_theta=common_arrays[6],
+        surface_scatter_indices=common_arrays[7],
+        label_scatter_indices=common_arrays[8],
+        coil_group_gammas=coil_group_gammas,
+        coil_group_gammadashs=coil_group_gammadashs,
+        coil_group_currents=coil_group_currents,
         coil_pullback_operator=coil_pullback_operator,
     )
     return evaluate_mps_boozer_fused_solve_custom_call(traced_contract)
@@ -522,9 +555,16 @@ def _fused_custom_call_args(contract):
         contract.label_quadpoints_theta,
         contract.surface_scatter_indices,
         contract.label_scatter_indices,
-        contract.coil_group_gammas[0],
-        contract.coil_group_gammadashs[0],
-        contract.coil_group_currents[0],
+        *[
+            leaf
+            for group_leaves in zip(
+                contract.coil_group_gammas,
+                contract.coil_group_gammadashs,
+                contract.coil_group_currents,
+                strict=True,
+            )
+            for leaf in group_leaves
+        ],
         contract.coil_pullback_operator,
     )
 
@@ -742,6 +782,26 @@ def test_mps_boozer_fused_custom_call_lowers_to_named_stablehlo_target():
     assert result_shape.finite.dtype == jnp.bool_
 
 
+def test_mps_boozer_fused_custom_call_lowers_two_group_fixture():
+    contract = _two_group_backend_contract_fixture()
+    args = _fused_custom_call_args(contract)
+
+    lowered = (
+        jax.jit(lambda *leaves: _fused_custom_call_with_arrays(contract, *leaves))
+        .lower(*args)
+        .as_text()
+    )
+    result_shape = jax.eval_shape(
+        lambda *leaves: _fused_custom_call_with_arrays(contract, *leaves),
+        *args,
+    )
+
+    assert mps_boozer_fixed_surface_g_iota_supported(contract)
+    assert "stablehlo.custom_call" in lowered
+    assert f"@{SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET}" in lowered
+    assert result_shape.coil_gradient.shape == contract.coil_dofs.shape
+
+
 def test_mps_boozer_fused_custom_call_rejects_unsupported_contracts():
     _, contract = _contract_fixture()
     with pytest.raises(ValueError, match="coil_dofs must be float32"):
@@ -757,13 +817,24 @@ def test_mps_boozer_fused_custom_call_rejects_unsupported_contracts():
             )
         )
 
-    with pytest.raises(ValueError, match="exactly one coil group"):
+    with pytest.raises(ValueError, match="one or two coil groups"):
         evaluate_mps_boozer_fused_solve_custom_call(
             replace(
                 contract,
                 coil_group_gammas=(
                     contract.coil_group_gammas[0],
                     contract.coil_group_gammas[0],
+                    contract.coil_group_gammas[0],
+                ),
+                coil_group_gammadashs=(
+                    contract.coil_group_gammadashs[0],
+                    contract.coil_group_gammadashs[0],
+                    contract.coil_group_gammadashs[0],
+                ),
+                coil_group_currents=(
+                    contract.coil_group_currents[0],
+                    contract.coil_group_currents[0],
+                    contract.coil_group_currents[0],
                 ),
             )
         )
@@ -780,9 +851,11 @@ def test_mps_boozer_fused_custom_call_rejects_unsupported_contracts():
 def test_mps_boozer_fixed_surface_support_predicate_matches_backend_contract():
     _, unsupported_contract = _contract_fixture()
     supported_contract = _fixed_surface_backend_contract_fixture()
+    two_group_contract = _two_group_backend_contract_fixture()
 
     assert not mps_boozer_fixed_surface_g_iota_supported(unsupported_contract)
     assert mps_boozer_fixed_surface_g_iota_supported(supported_contract)
+    assert mps_boozer_fixed_surface_g_iota_supported(two_group_contract)
     assert mps_boozer_fixed_surface_g_iota_supported(
         replace(
             supported_contract,
