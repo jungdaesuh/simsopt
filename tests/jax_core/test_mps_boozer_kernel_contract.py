@@ -38,12 +38,12 @@ class _BoozerSurfaceStub:
     ntor = 2
     nfp = 2
     stellsym = True
-    _surface_geometry_kind = "xyz_tensor_fourier"
+    _surface_geometry_kind = "xyztensorfourier"
     label_mpol = 2
     label_ntor = 2
     label_nfp = 2
     label_stellsym = True
-    _label_surface_geometry_kind = "xyz_tensor_fourier"
+    _label_surface_geometry_kind = "xyztensorfourier"
     label_type = "volume"
     phi_idx = None
     targetlabel = 1.25
@@ -58,6 +58,14 @@ class _BoozerSurfaceStub:
         self.quadpoints_theta = jnp.asarray([0.0, 0.5, 0.75], dtype=jnp.float32)
         self.label_quadpoints_phi = jnp.asarray([0.0], dtype=jnp.float32)
         self.label_quadpoints_theta = jnp.asarray([0.0, 0.5], dtype=jnp.float32)
+        self.scatter_indices = jnp.asarray(
+            np.eye(75, 37, dtype=np.float32),
+            dtype=jnp.float32,
+        )
+        self.label_scatter_indices = jnp.asarray(
+            np.eye(75, 37, dtype=np.float32),
+            dtype=jnp.float32,
+        )
         self.res = None
         self._solved_runtime_state = None
 
@@ -135,7 +143,10 @@ def _contract_fixture():
     solved_state = _SolvedState(
         iota=jnp.asarray(0.3, dtype=jnp.float32),
         G=jnp.asarray(0.05, dtype=jnp.float32),
-        sdofs=jnp.asarray([0.1, 0.2, -0.4, 0.8], dtype=jnp.float32),
+        sdofs=jnp.asarray(
+            np.linspace(-0.4, 0.8, 37, dtype=np.float32),
+            dtype=jnp.float32,
+        ),
         weight_inv_modB=True,
     )
     owner = _BoozerResidualStub()
@@ -163,6 +174,8 @@ def _fused_custom_call_with_arrays(contract, *arrays):
         quadpoints_theta,
         label_quadpoints_phi,
         label_quadpoints_theta,
+        surface_scatter_indices,
+        label_scatter_indices,
         gammas,
         gammadashs,
         currents,
@@ -176,6 +189,8 @@ def _fused_custom_call_with_arrays(contract, *arrays):
         quadpoints_theta=quadpoints_theta,
         label_quadpoints_phi=label_quadpoints_phi,
         label_quadpoints_theta=label_quadpoints_theta,
+        surface_scatter_indices=surface_scatter_indices,
+        label_scatter_indices=label_scatter_indices,
         coil_group_gammas=(gammas,),
         coil_group_gammadashs=(gammadashs,),
         coil_group_currents=(currents,),
@@ -192,6 +207,8 @@ def _fused_custom_call_args(contract):
         contract.quadpoints_theta,
         contract.label_quadpoints_phi,
         contract.label_quadpoints_theta,
+        contract.surface_scatter_indices,
+        contract.label_scatter_indices,
         contract.coil_group_gammas[0],
         contract.coil_group_gammadashs[0],
         contract.coil_group_currents[0],
@@ -232,8 +249,20 @@ def test_mps_boozer_contract_artifact_records_flattened_schema(tmp_path):
         "ndim": 1,
         "size": 3,
     }
-    assert artifact["runtime_arrays"]["x_inner"]["shape"] == [6]
-    assert artifact["runtime_arrays"]["surface_dofs"]["shape"] == [4]
+    assert artifact["runtime_arrays"]["x_inner"]["shape"] == [39]
+    assert artifact["runtime_arrays"]["surface_dofs"]["shape"] == [37]
+    assert artifact["runtime_arrays"]["surface_scatter_indices"] == {
+        "shape": [75, 37],
+        "dtype": "float32",
+        "ndim": 2,
+        "size": 2775,
+    }
+    assert artifact["runtime_arrays"]["label_scatter_indices"] == {
+        "shape": [75, 37],
+        "dtype": "float32",
+        "ndim": 2,
+        "size": 2775,
+    }
     assert artifact["runtime_arrays"]["coil_groups"] == [
         {
             "group_index": 0,
@@ -266,7 +295,7 @@ def test_mps_boozer_contract_artifact_records_flattened_schema(tmp_path):
             "ndim": 1,
             "size": 3,
         },
-        "final_x_inner": {"shape": [6], "dtype": "float32", "ndim": 1, "size": 6},
+        "final_x_inner": {"shape": [39], "dtype": "float32", "ndim": 1, "size": 39},
         "residual_norm": {"shape": [], "dtype": "float32", "ndim": 0, "size": 1},
         "gradient_norm": {"shape": [], "dtype": "float32", "ndim": 0, "size": 1},
         "newton_iteration_count": {
@@ -398,6 +427,14 @@ def test_mps_boozer_fused_custom_call_rejects_unsupported_contracts():
     with pytest.raises(ValueError, match="coil_dofs must be float32"):
         evaluate_mps_boozer_fused_solve_custom_call(
             replace(contract, coil_dofs=contract.coil_dofs.astype(jnp.float16))
+        )
+
+    with pytest.raises(ValueError, match="2D float32 scatter operator"):
+        evaluate_mps_boozer_fused_solve_custom_call(
+            replace(
+                contract,
+                surface_scatter_indices=contract.surface_scatter_indices.reshape(-1),
+            )
         )
 
     with pytest.raises(ValueError, match="exactly one coil group"):

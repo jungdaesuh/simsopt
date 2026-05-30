@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_CONTRACT_ARTIFACT_DIR = Path(".artifacts/mps_custom_kernel_contract")
 SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET = "mps.simsopt_boozer_value_grad"
 SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION = 3
@@ -55,6 +55,8 @@ class MpsBoozerKernelContract:
     quadpoints_theta: jax.Array
     label_quadpoints_phi: jax.Array
     label_quadpoints_theta: jax.Array
+    surface_scatter_indices: jax.Array
+    label_scatter_indices: jax.Array
     coil_group_gammas: tuple[jax.Array, ...]
     coil_group_gammadashs: tuple[jax.Array, ...]
     coil_group_currents: tuple[jax.Array, ...]
@@ -193,6 +195,24 @@ def _require_vector(name: str, value: jax.Array) -> None:
         raise ValueError(f"{name} must not be empty")
 
 
+def _require_scatter_operand(name: str, value: jax.Array) -> None:
+    if value.dtype == np.dtype(np.int32):
+        _require_vector(name, value)
+        return
+    if value.dtype == np.dtype(np.float32):
+        if value.ndim != 2:
+            raise ValueError(
+                f"{name} must be a 1D int32 index vector or a 2D float32 "
+                "scatter operator"
+            )
+        if value.shape[0] == 0 or value.shape[1] == 0:
+            raise ValueError(f"{name} must not be empty")
+        return
+    raise ValueError(
+        f"{name} must be a 1D int32 index vector or a 2D float32 scatter operator"
+    )
+
+
 def _validate_fused_custom_call_contract(contract: MpsBoozerKernelContract) -> None:
     if contract.static_metadata.target_name != SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET:
         raise ValueError(
@@ -211,6 +231,14 @@ def _validate_fused_custom_call_contract(contract: MpsBoozerKernelContract) -> N
     for name, value in runtime_arrays:
         _require_float32_array(name, value)
         _require_vector(name, value)
+    _require_scatter_operand(
+        "surface_scatter_indices",
+        contract.surface_scatter_indices,
+    )
+    _require_scatter_operand(
+        "label_scatter_indices",
+        contract.label_scatter_indices,
+    )
 
     if (
         len(contract.coil_group_gammas) != 1
@@ -335,6 +363,8 @@ def build_mps_boozer_direct_kernel_contract(
         quadpoints_theta=booz_surf.quadpoints_theta,
         label_quadpoints_phi=booz_surf.label_quadpoints_phi,
         label_quadpoints_theta=booz_surf.label_quadpoints_theta,
+        surface_scatter_indices=booz_surf.scatter_indices,
+        label_scatter_indices=booz_surf.label_scatter_indices,
         coil_group_gammas=gammas,
         coil_group_gammadashs=gammadashs,
         coil_group_currents=currents,
@@ -460,6 +490,8 @@ def evaluate_mps_boozer_fused_solve_custom_call(
             contract.quadpoints_theta,
             contract.label_quadpoints_phi,
             contract.label_quadpoints_theta,
+            contract.surface_scatter_indices,
+            contract.label_scatter_indices,
             gammas,
             gammadashs,
             currents,
@@ -499,6 +531,12 @@ def mps_boozer_kernel_contract_artifact(
             "quadpoints_theta": _array_schema(contract.quadpoints_theta),
             "label_quadpoints_phi": _array_schema(contract.label_quadpoints_phi),
             "label_quadpoints_theta": _array_schema(contract.label_quadpoints_theta),
+            "surface_scatter_indices": _array_schema(
+                contract.surface_scatter_indices,
+            ),
+            "label_scatter_indices": _array_schema(
+                contract.label_scatter_indices,
+            ),
             "coil_groups": [
                 {
                     "group_index": group_index,
