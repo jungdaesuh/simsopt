@@ -195,6 +195,11 @@ _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
     "skip-large-strict-cuda",
 )
 _TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION = 6
+_JAX_MPS_PROFILE_WHILE_ENV_VAR = "JAX_MPS_PROFILE_WHILE"
+_JAX_MPS_WHILE_FIXED_TRIP_CHUNK_SIZE_ENV_VAR = "JAX_MPS_WHILE_FIXED_TRIP_CHUNK_SIZE"
+_JAX_MPS_PROFILE_JSON_PREFIX = '{"jax_mps_profile":'
+_JAX_MPS_WHILE_PROFILE_KIND = "while"
+_JAX_MPS_PJRT_EXECUTE_PROFILE_KIND = "pjrt_execute"
 _SAME_CANDIDATE_X_ATOL = 1e-8
 _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL = 1e-12
 _SAME_CANDIDATE_SCALAR_RTOL = 1e-10
@@ -1060,6 +1065,167 @@ def _apply_single_stage_custom_kernel_env(
     return env
 
 
+def _should_profile_jax_mps_while(
+    *,
+    backend: str,
+    effective_platform: str,
+) -> bool:
+    return backend == "jax" and effective_platform == "mps"
+
+
+def _apply_jax_mps_while_profile_env(
+    env: dict[str, str],
+    *,
+    backend: str,
+    effective_platform: str,
+) -> bool:
+    enabled = _should_profile_jax_mps_while(
+        backend=backend,
+        effective_platform=effective_platform,
+    )
+    env.pop(_JAX_MPS_WHILE_FIXED_TRIP_CHUNK_SIZE_ENV_VAR, None)
+    if enabled:
+        env[_JAX_MPS_PROFILE_WHILE_ENV_VAR] = "1"
+    else:
+        env.pop(_JAX_MPS_PROFILE_WHILE_ENV_VAR, None)
+    return enabled
+
+
+def _jax_mps_profile_records(stderr: str) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in stderr.splitlines()
+        if line.startswith(_JAX_MPS_PROFILE_JSON_PREFIX)
+    ]
+
+
+def _sum_int_profile_field(
+    records: list[dict[str, Any]],
+    field_name: str,
+) -> int:
+    return sum(int(record[field_name]) for record in records)
+
+
+def _sum_float_profile_field(
+    records: list[dict[str, Any]],
+    field_name: str,
+) -> float:
+    return float(sum(float(record[field_name]) for record in records))
+
+
+def _summarize_jax_mps_while_profile(
+    stderr: str,
+    *,
+    enabled: bool,
+    require_while_records: bool = True,
+) -> dict[str, Any]:
+    records = _jax_mps_profile_records(stderr) if enabled else []
+    if enabled and not records:
+        raise RuntimeError(
+            "JAX MPS while profiling was enabled, but the child process emitted "
+            f"no {_JAX_MPS_PROFILE_JSON_PREFIX!r} JSONL records on stderr. "
+            "This benchmark requires live jax-mps profiling evidence."
+        )
+    while_records = [
+        record
+        for record in records
+        if record["jax_mps_profile"] == _JAX_MPS_WHILE_PROFILE_KIND
+    ]
+    if enabled and require_while_records and not while_records:
+        raise RuntimeError(
+            "JAX MPS while profiling was enabled, but the child process emitted "
+            "no jax-mps while-loop JSONL records on stderr. This benchmark "
+            "requires while-loop profiler evidence for non-custom MPS lanes."
+        )
+    execute_records = [
+        record
+        for record in records
+        if record["jax_mps_profile"] == _JAX_MPS_PJRT_EXECUTE_PROFILE_KIND
+    ]
+    return {
+        "enabled": enabled,
+        "while_records_required": require_while_records,
+        "profile_record_count": len(records),
+        "while_record_count": len(while_records),
+        "pjrt_execute_record_count": len(execute_records),
+        "loop_trips": _sum_int_profile_field(while_records, "loop_trips"),
+        "initial_condition_evals": _sum_int_profile_field(
+            while_records,
+            "initial_condition_evals",
+        ),
+        "body_condition_evals": _sum_int_profile_field(
+            while_records,
+            "body_condition_evals",
+        ),
+        "scalar_condition_reads": _sum_int_profile_field(
+            while_records,
+            "scalar_condition_reads",
+        ),
+        "chunk_evals": _sum_int_profile_field(while_records, "chunk_evals"),
+        "final_evals": _sum_int_profile_field(while_records, "final_evals"),
+        "fast_path_record_count": sum(
+            1 for record in while_records if bool(record["fast_path_used"])
+        ),
+        "max_fixed_trip_chunk_size": max(
+            (int(record["fixed_trip_chunk_size"]) for record in while_records),
+            default=0,
+        ),
+        "max_loop_trips": max(
+            (int(record["loop_trips"]) for record in while_records),
+            default=0,
+        ),
+        "while_total_ms": _sum_float_profile_field(while_records, "total_ms"),
+        "pjrt_execute_total_ms": _sum_float_profile_field(
+            execute_records,
+            "total_ms",
+        ),
+    }
+
+
+def _case_jax_mps_while_profile(case_payload: dict[str, Any]) -> dict[str, Any] | None:
+    profile = case_payload.get("jax_mps_while_profile")
+    if isinstance(profile, dict):
+        return profile
+    return None
+
+
+def _collect_case_jax_mps_while_profiles(
+    *,
+    cpu_case: dict[str, Any],
+    jax_case: dict[str, Any],
+    same_candidate_replay_case: dict[str, Any] | None,
+    mps_float32_reference_case: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    profiles_by_lane: dict[str, dict[str, Any]] = {}
+    lane_cases: tuple[tuple[str, dict[str, Any] | None], ...] = (
+        ("cpu", cpu_case),
+        ("jax", jax_case),
+        ("target_same_candidate_replay", same_candidate_replay_case),
+        ("mps_float32_reference", mps_float32_reference_case),
+    )
+    for lane_name, case_payload in lane_cases:
+        if case_payload is None:
+            continue
+        profile = _case_jax_mps_while_profile(case_payload)
+        if profile is not None:
+            profiles_by_lane[lane_name] = profile
+    return profiles_by_lane
+
+
+def _add_while_profile_timing_fields(
+    timings: dict[str, Any],
+    while_profiles: dict[str, dict[str, Any]],
+) -> None:
+    for lane_name, profile in while_profiles.items():
+        prefix = f"{lane_name}_while_profile"
+        timings[f"{prefix}_scalar_condition_reads"] = int(
+            profile["scalar_condition_reads"]
+        )
+        timings[f"{prefix}_while_record_count"] = int(profile["while_record_count"])
+        timings[f"{prefix}_loop_trips"] = int(profile["loop_trips"])
+        timings[f"{prefix}_while_total_ms"] = float(profile["while_total_ms"])
+
+
 def _run_single_stage_case(
     args: argparse.Namespace,
     backend: str,
@@ -1260,7 +1426,12 @@ def _run_single_stage_case(
             ),
             mps_custom_kernel_float32_reference=(mps_custom_kernel_float32_reference),
         )
-        run_python_script(
+        jax_mps_while_profile_enabled = _apply_jax_mps_while_profile_env(
+            case_env,
+            backend=backend,
+            effective_platform=effective_platform,
+        )
+        run_result = run_python_script(
             script_path,
             command,
             env=case_env,
@@ -1289,6 +1460,12 @@ def _run_single_stage_case(
                 run_dir / "outer_optimizer_progress.json"
             ),
         }
+        if jax_mps_while_profile_enabled:
+            payload["jax_mps_while_profile"] = _summarize_jax_mps_while_profile(
+                getattr(run_result, "stderr", ""),
+                enabled=jax_mps_while_profile_enabled,
+                require_while_records=not experimental_mps_boozer_custom_kernel,
+            )
         if load_surface_gamma:
             if backend == "jax":
                 runtime_spec_json = find_single_file(
@@ -4580,6 +4757,12 @@ def main() -> None:
     }
     if mps_float32_reference_case is not None:
         lanes["mps_float32_reference"] = str(mps_float32_reference_case["run_dir"])
+    while_profiles = _collect_case_jax_mps_while_profiles(
+        cpu_case=cpu_case,
+        jax_case=jax_case,
+        same_candidate_replay_case=same_candidate_replay_case,
+        mps_float32_reference_case=mps_float32_reference_case,
+    )
     timings = {
         "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
         "jax_elapsed_s": float(jax_case["elapsed_s"]),
@@ -4596,6 +4779,7 @@ def main() -> None:
                 mps_float32_reference_case["phase_timings"],
             )
         )
+    _add_while_profile_timing_fields(timings, while_profiles)
 
     payload = {
         "provenance": provenance,
@@ -4612,6 +4796,8 @@ def main() -> None:
         "failures": failures,
         "passed": not failures,
     }
+    if while_profiles:
+        payload["jax_mps_while_profiles"] = while_profiles
     if optimizer_state_trace_parity is not None:
         payload["optimizer_state_trace_parity"] = optimizer_state_trace_parity
     if mps_float32_reference_case is not None:

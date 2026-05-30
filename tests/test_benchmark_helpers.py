@@ -6029,13 +6029,21 @@ def _single_stage_case_args(tmp_path: Path) -> argparse.Namespace:
     )
 
 
+def _minimal_jax_mps_profile_stderr() -> str:
+    return (
+        '{"jax_mps_profile":"pjrt_execute","id":1,'
+        '"input_count":0,"output_count":0,"execute_ms":0.0,'
+        '"ready_event_ms":0.0,"total_ms":0.0}'
+    )
+
+
 def _observe_single_stage_case_invocations(monkeypatch, tmp_path: Path):
     observed_invocations: list[tuple[list[str], dict[str, str]]] = []
 
     def fake_run_python_script(_script_path, command, **kwargs):
         command_list = _write_single_stage_result_artifact(command)
         observed_invocations.append((command_list, dict(kwargs["env"])))
-        return argparse.Namespace(stdout="", stderr="")
+        return argparse.Namespace(stdout="", stderr=_minimal_jax_mps_profile_stderr())
 
     monkeypatch.setattr(
         single_stage_init_parity_module,
@@ -7367,6 +7375,7 @@ def test_single_stage_init_case_routes_auto_mps_custom_kernel_to_mps_float32_env
     args = _single_stage_case_args(tmp_path)
     args.optimizer_backend = "scipy-jax"
     observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setenv("JAX_MPS_WHILE_FIXED_TRIP_CHUNK_SIZE", "4")
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "find_single_file",
@@ -7397,6 +7406,159 @@ def test_single_stage_init_case_routes_auto_mps_custom_kernel_to_mps_float32_env
     assert observed_env["JAX_PLATFORMS"] == "mps"
     assert observed_env["SIMSOPT_BACKEND_MODE"] == "jax_mps_smoke"
     assert observed_env["JAX_ENABLE_X64"] == "0"
+    assert observed_env["JAX_MPS_PROFILE_WHILE"] == "1"
+    assert "JAX_MPS_WHILE_FIXED_TRIP_CHUNK_SIZE" not in observed_env
+
+
+def test_single_stage_init_case_summarizes_jax_mps_while_profile(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax"
+    observed_envs: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        _write_single_stage_result_artifact(command)
+        observed_envs.append(dict(kwargs["env"]))
+        profile_stderr = "\n".join(
+            (
+                '{"jax_mps_profile":"pjrt_execute","id":1,'
+                '"input_count":2,"output_count":1,"execute_ms":1.0,'
+                '"ready_event_ms":0.0,"total_ms":1.25}',
+                '{"jax_mps_profile":"while","id":1,"loop_trips":5,'
+                '"initial_condition_evals":1,"body_condition_evals":5,'
+                '"scalar_condition_reads":6,"chunk_evals":0,"final_evals":1,'
+                '"fast_path_used":false,"fixed_trip_chunk_size":1,'
+                '"compiled_cond_call_ms":0.1,"initial_eval_ms":0.2,'
+                '"initial_scalar_read_ms":0.3,'
+                '"compiled_body_condition_call_ms":0.4,'
+                '"body_condition_eval_ms":0.5,'
+                '"body_condition_scalar_read_ms":0.6,'
+                '"chunk_eval_ms":0.0,"final_eval_ms":0.7,"total_ms":2.5}',
+                '{"jax_mps_profile":"while","id":2,"loop_trips":3,'
+                '"initial_condition_evals":1,"body_condition_evals":0,'
+                '"scalar_condition_reads":1,"chunk_evals":1,"final_evals":1,'
+                '"fast_path_used":true,"fixed_trip_chunk_size":4,'
+                '"compiled_cond_call_ms":0.1,"initial_eval_ms":0.2,'
+                '"initial_scalar_read_ms":0.3,'
+                '"compiled_body_condition_call_ms":0.0,'
+                '"body_condition_eval_ms":0.0,'
+                '"body_condition_scalar_read_ms":0.0,'
+                '"chunk_eval_ms":0.4,"final_eval_ms":0.5,"total_ms":1.5}',
+            )
+        )
+        return argparse.Namespace(stdout="", stderr=profile_stderr)
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+
+    payload = single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="auto",
+        experimental_mps_boozer_custom_kernel=True,
+        load_surface_gamma=False,
+    )
+
+    assert observed_envs[0]["JAX_MPS_PROFILE_WHILE"] == "1"
+    profile = payload["jax_mps_while_profile"]
+    assert profile["enabled"] is True
+    assert profile["while_records_required"] is False
+    assert profile["profile_record_count"] == 3
+    assert profile["pjrt_execute_record_count"] == 1
+    assert profile["while_record_count"] == 2
+    assert profile["loop_trips"] == 8
+    assert profile["scalar_condition_reads"] == 7
+    assert profile["body_condition_evals"] == 5
+    assert profile["chunk_evals"] == 1
+    assert profile["fast_path_record_count"] == 1
+    assert profile["max_fixed_trip_chunk_size"] == 4
+    assert profile["max_loop_trips"] == 5
+    assert profile["while_total_ms"] == pytest.approx(4.0)
+    assert profile["pjrt_execute_total_ms"] == pytest.approx(1.25)
+
+
+def test_single_stage_init_profile_enabled_requires_jsonl_records():
+    with pytest.raises(RuntimeError, match="profiling was enabled"):
+        single_stage_init_parity_module._summarize_jax_mps_while_profile(
+            "",
+            enabled=True,
+        )
+
+
+def test_single_stage_init_profile_enabled_requires_baseline_while_records():
+    with pytest.raises(RuntimeError, match="while-loop JSONL records"):
+        single_stage_init_parity_module._summarize_jax_mps_while_profile(
+            _minimal_jax_mps_profile_stderr(),
+            enabled=True,
+            require_while_records=True,
+        )
+
+
+def test_single_stage_init_profile_allows_custom_path_without_while_records():
+    profile = single_stage_init_parity_module._summarize_jax_mps_while_profile(
+        _minimal_jax_mps_profile_stderr(),
+        enabled=True,
+        require_while_records=False,
+    )
+
+    assert profile["while_records_required"] is False
+    assert profile["profile_record_count"] == 1
+    assert profile["while_record_count"] == 0
+    assert profile["pjrt_execute_record_count"] == 1
+
+
+def test_single_stage_init_collects_while_profile_timing_fields():
+    jax_profile = {
+        "enabled": True,
+        "while_record_count": 2,
+        "scalar_condition_reads": 7,
+        "loop_trips": 8,
+        "while_total_ms": 4.0,
+    }
+    replay_profile = {
+        "enabled": True,
+        "while_record_count": 1,
+        "scalar_condition_reads": 3,
+        "loop_trips": 2,
+        "while_total_ms": 1.5,
+    }
+    while_profiles = (
+        single_stage_init_parity_module._collect_case_jax_mps_while_profiles(
+            cpu_case={"results": {}},
+            jax_case={"jax_mps_while_profile": jax_profile},
+            same_candidate_replay_case={"jax_mps_while_profile": replay_profile},
+            mps_float32_reference_case=None,
+        )
+    )
+    timings: dict[str, object] = {}
+
+    single_stage_init_parity_module._add_while_profile_timing_fields(
+        timings,
+        while_profiles,
+    )
+
+    assert while_profiles == {
+        "jax": jax_profile,
+        "target_same_candidate_replay": replay_profile,
+    }
+    assert timings["jax_while_profile_scalar_condition_reads"] == 7
+    assert timings["jax_while_profile_while_record_count"] == 2
+    assert timings["jax_while_profile_loop_trips"] == 8
+    assert timings["jax_while_profile_while_total_ms"] == pytest.approx(4.0)
+    assert (
+        timings["target_same_candidate_replay_while_profile_scalar_condition_reads"]
+        == 3
+    )
 
 
 def test_single_stage_init_case_routes_mps_float32_reference_to_jax_cpu_smoke(
@@ -7412,6 +7574,8 @@ def test_single_stage_init_case_routes_mps_float32_reference_to_jax_cpu_smoke(
         "REQUESTED_MPS_FLOAT32_SMOKE",
         True,
     )
+    monkeypatch.setenv("JAX_MPS_PROFILE_WHILE", "1")
+    monkeypatch.setenv("JAX_MPS_WHILE_FIXED_TRIP_CHUNK_SIZE", "4")
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
 
     single_stage_init_parity_module._run_single_stage_case(
@@ -7428,6 +7592,8 @@ def test_single_stage_init_case_routes_mps_float32_reference_to_jax_cpu_smoke(
     assert observed_env["JAX_PLATFORMS"] == "cpu"
     assert observed_env["SIMSOPT_BACKEND_MODE"] == "jax_cpu_float32_smoke"
     assert observed_env["JAX_ENABLE_X64"] == "0"
+    assert "JAX_MPS_PROFILE_WHILE" not in observed_env
+    assert "JAX_MPS_WHILE_FIXED_TRIP_CHUNK_SIZE" not in observed_env
 
 
 def test_single_stage_init_case_honors_explicit_mps_custom_kernel_disable(
