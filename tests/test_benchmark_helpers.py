@@ -7493,6 +7493,12 @@ def _perlmutter_banana_e2e_script_path() -> Path:
     )
 
 
+def _current_head_cuda_signoff_script_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1] / "scripts" / "current_head_cuda_signoff.sh"
+    )
+
+
 def _workflow_job_section(
     workflow_text: str,
     job_name: str,
@@ -8395,6 +8401,69 @@ def test_perlmutter_banana_e2e_script_enforces_cuda_strict_contract():
         in script_text
     )
     assert "--jax-runtime-seed-spec" not in script_text
+
+
+def test_current_head_cuda_signoff_script_is_fail_closed_release_gate():
+    script_text = _current_head_cuda_signoff_script_path().read_text(encoding="utf-8")
+
+    assert "set -euo pipefail" in script_text
+    assert "git status --short --untracked-files=no" in script_text
+    assert "git status --short --untracked-files=normal" in script_text
+    assert "non-artifact untracked paths would invalidate" in script_text
+    assert "nvidia-smi is required for CUDA signoff" in script_text
+    assert "jax.default_backend()" in script_text
+    assert 'not in {"cuda", "gpu"}' in script_text
+    assert 'jax.transfer_guard("disallow")' in script_text
+    assert "expected transfer_guard('disallow')" in script_text
+    assert "SIMSOPT_JAX_TRANSFER_GUARD=disallow" in script_text
+    assert "benchmarks/single_stage_init_parity.py \\" in script_text
+    assert "--optimizer-backend ondevice" in script_text
+    assert "--benchmark-mode" in script_text
+    assert "single_stage_init_cuda_scipy_jax.json" in script_text
+    assert "single_stage_init_cuda_ondevice.json" in script_text
+    assert 'provenance.get("repo_sha") != expected_repo_sha' in script_text
+    assert 'provenance.get("transfer_guard") != "disallow"' in script_text
+
+
+def test_current_head_cuda_signoff_rejects_untracked_release_paths(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "README.md").write_text("signoff fixture\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=signoff@example.invalid",
+            "-c",
+            "user.name=Signoff Test",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / "src").mkdir()
+    (repo / "src" / "shadow.py").write_text("# untracked code\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["REPO"] = str(repo)
+    env["PYTHON_BIN"] = sys.executable
+    result = subprocess.run(
+        ["bash", str(_current_head_cuda_signoff_script_path())],
+        cwd=repo,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "non-artifact untracked paths would invalidate" in result.stderr
+    assert "src/" in result.stderr
 
 
 def test_gpu_parity_workflow_adds_full_suite_disallow_lane():

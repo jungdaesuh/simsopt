@@ -939,81 +939,24 @@ or a focused command remains open.
   probe, and `runpodctl pod list -o json` returned `[]`, so the previous venue
   could not provide current-head GPU evidence. The release gate is therefore
   still either a fresh CUDA-host run or an explicit release owner waiver.
-- Exact current-head CUDA signoff packet for a CUDA-capable host:
+- Exact current-head CUDA signoff packet for a CUDA-capable host is now the
+  executable SSOT at `scripts/current_head_cuda_signoff.sh`. Run it from the
+  current checkout:
   ```bash
-  set -euo pipefail
-  export PYTHONNOUSERSITE=1
-  export PYTHONDONTWRITEBYTECODE=1
-  export PYTHONPATH="$PWD:$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-  export JAX_ENABLE_X64=True
-  export SIMSOPT_BACKEND_STRICT=1
-  export SIMSOPT_JAX_TRANSFER_GUARD=disallow
-  PYTHON_BIN="${PYTHON_BIN:-.conda/jax/bin/python}"
-
-  HEAD_SHA="$(git rev-parse HEAD)"
-  test -z "$(git status --short --untracked-files=no)"
-  test -n "$(command -v nvidia-smi)"
-  test -x "$PYTHON_BIN"
-
-  RESULTS_DIR="${RESULTS_DIR:-$PWD/.artifacts/current_head_cuda_signoff}"
-  mkdir -p "$RESULTS_DIR"
-  nvidia-smi > "$RESULTS_DIR/nvidia-smi.txt"
-
-  "$PYTHON_BIN" - <<'PY'
-  import jax
-  print("jax", jax.__version__)
-  print("backend", jax.default_backend())
-  print("devices", [(d.platform, str(d)) for d in jax.devices()])
-  if str(jax.default_backend()).lower() not in {"cuda", "gpu"}:
-      raise SystemExit("expected a CUDA/GPU JAX backend for signoff")
-  PY
-
-  "$PYTHON_BIN" benchmarks/single_stage_init_parity.py \
-    --platform cuda \
-    --output-json "$RESULTS_DIR/single_stage_init_cuda_scipy_jax.json" \
-    --case-artifacts-dir "$RESULTS_DIR/single_stage_init_cuda_scipy_jax_cases" \
-    --single-stage-case-timeout-seconds 7200 \
-    --single-stage-target-case-timeout-seconds 7200
-
-  "$PYTHON_BIN" benchmarks/single_stage_init_parity.py \
-    --platform cuda \
-    --optimizer-backend ondevice \
-    --benchmark-mode \
-    --output-json "$RESULTS_DIR/single_stage_init_cuda_ondevice.json" \
-    --case-artifacts-dir "$RESULTS_DIR/single_stage_init_cuda_ondevice_cases" \
-    --single-stage-case-timeout-seconds 7200 \
-    --single-stage-target-case-timeout-seconds 7200
-
-  "$PYTHON_BIN" - "$RESULTS_DIR" "$HEAD_SHA" <<'PY'
-  import json
-  import pathlib
-  import sys
-
-  results_dir = pathlib.Path(sys.argv[1])
-  expected_repo_sha = sys.argv[2]
-  for name in (
-      "single_stage_init_cuda_scipy_jax.json",
-      "single_stage_init_cuda_ondevice.json",
-  ):
-      payload = json.loads((results_dir / name).read_text(encoding="utf-8"))
-      if payload.get("passed") is not True:
-          raise SystemExit(f"{name} did not pass: {payload.get('failures')}")
-      provenance = payload["provenance"]
-      if provenance.get("repo_sha") != expected_repo_sha:
-          raise SystemExit(f"{name} has stale repo_sha={provenance.get('repo_sha')!r}")
-      backend = str(provenance.get("backend", "")).lower()
-      if backend not in {"cuda", "gpu"}:
-          raise SystemExit(f"{name} did not run on CUDA/GPU backend: {backend!r}")
-      if provenance.get("transfer_guard") != "disallow":
-          raise SystemExit(f"{name} did not record transfer_guard=disallow")
-  print(f"CUDA signoff packet passed: {results_dir}")
-  PY
+  PYTHON_BIN="${PYTHON_BIN:-$PWD/.conda/jax/bin/python}" \
+  RESULTS_DIR="${RESULTS_DIR:-$PWD/.artifacts/current_head_cuda_signoff}" \
+  bash scripts/current_head_cuda_signoff.sh
   ```
-  Successful execution of both JSON-producing runs on a CUDA/GPU backend is the
-  required artifact evidence for checking the CUDA/GPU signoff box above. The
-  JSON `repo_sha` must equal the active checkout's `git rev-parse HEAD` output.
-  A skipped pytest selector is not sufficient evidence for this release gate,
-  because the signoff must fail closed when CUDA is unavailable.
+  The script fails closed unless the tracked checkout is clean, no non-artifact
+  untracked path can influence the run, `nvidia-smi` exists, `PYTHON_BIN` is
+  executable, JAX reports a CUDA/GPU backend, a live JAX `transfer_guard`
+  disallow probe blocks an implicit transfer, both JSON-producing single-stage
+  runs pass, both JSON payloads record the active checkout's
+  `git rev-parse HEAD`, and both payloads record `transfer_guard=disallow`.
+  Successful execution is the required artifact evidence for checking the
+  CUDA/GPU signoff box above; a skipped pytest selector is not sufficient
+  evidence for this release gate because the signoff must fail closed when CUDA
+  is unavailable.
 - The full unfiltered `tests/integration/` sweep now has current-tree pytest
   pass counts: `486 passed, 9 skipped, 8 warnings in 3769.76s (1:02:49)`.
   The wrapping zsh command exited `1` after pytest completed because it tried
