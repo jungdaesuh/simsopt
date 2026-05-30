@@ -7812,6 +7812,7 @@ def test_mps_boozer_contract_dump_payload_threads_contract_helpers(monkeypatch):
     recorded = {}
     sentinel_contract = object()
     sentinel_oracle = object()
+    sentinel_fused_oracle = object()
 
     def fake_build_contract(boozer_residual, *, solved_state, coil_dofs=None):
         recorded["build"] = (boozer_residual, solved_state, coil_dofs)
@@ -7821,14 +7822,23 @@ def test_mps_boozer_contract_dump_payload_threads_contract_helpers(monkeypatch):
         recorded["evaluate"] = (boozer_residual, contract)
         return sentinel_oracle
 
-    def fake_contract_artifact(contract, *, oracle_result):
-        recorded["artifact"] = (contract, oracle_result)
+    def fake_evaluate_fused_oracle(boozer_residual, contract):
+        recorded["evaluate_fused"] = (boozer_residual, contract)
+        return sentinel_fused_oracle
+
+    def fake_contract_artifact(contract, *, oracle_result, fused_oracle_result):
+        recorded["artifact"] = (contract, oracle_result, fused_oracle_result)
         return {"runtime_arrays": {"coil_dofs": {"shape": [3]}}}
 
     monkeypatch.setattr(
         mps_boozer_kernel_contract_dump,
         "_contract_helpers",
-        lambda: (fake_build_contract, fake_evaluate_oracle, fake_contract_artifact),
+        lambda: (
+            fake_build_contract,
+            fake_evaluate_oracle,
+            fake_evaluate_fused_oracle,
+            fake_contract_artifact,
+        ),
     )
     owner = object()
     solved_state = object()
@@ -7850,7 +7860,63 @@ def test_mps_boozer_contract_dump_payload_threads_contract_helpers(monkeypatch):
     }
     assert recorded["build"] == (owner, solved_state, coil_dofs)
     assert recorded["evaluate"] == (owner, sentinel_contract)
-    assert recorded["artifact"] == (sentinel_contract, sentinel_oracle)
+    assert "evaluate_fused" not in recorded
+    assert recorded["artifact"] == (sentinel_contract, sentinel_oracle, None)
+
+
+def test_mps_boozer_contract_dump_payload_records_fused_solve_outputs(monkeypatch):
+    recorded = {}
+    sentinel_contract = object()
+    sentinel_oracle = object()
+    sentinel_fused_oracle = object()
+
+    def fake_build_contract(boozer_residual, *, solved_state, coil_dofs=None):
+        recorded["build"] = (boozer_residual, solved_state, coil_dofs)
+        return sentinel_contract
+
+    def fake_evaluate_oracle(boozer_residual, contract):
+        recorded["evaluate"] = (boozer_residual, contract)
+        return sentinel_oracle
+
+    def fake_evaluate_fused_oracle(boozer_residual, contract):
+        recorded["evaluate_fused"] = (boozer_residual, contract)
+        return sentinel_fused_oracle
+
+    def fake_contract_artifact(contract, *, oracle_result, fused_oracle_result):
+        recorded["artifact"] = (contract, oracle_result, fused_oracle_result)
+        return {"fused_oracle_outputs": {"value": {"shape": []}}}
+
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract_dump,
+        "_contract_helpers",
+        lambda: (
+            fake_build_contract,
+            fake_evaluate_oracle,
+            fake_evaluate_fused_oracle,
+            fake_contract_artifact,
+        ),
+    )
+    owner = object()
+    solved_state = object()
+
+    payload = mps_boozer_kernel_contract_dump.build_mps_boozer_contract_payload(
+        owner,
+        solved_state,
+        case_label="unit_case",
+        fixture_metadata={"fixture": "unit"},
+    )
+
+    assert payload["contract_artifact"] == {
+        "fused_oracle_outputs": {"value": {"shape": []}}
+    }
+    assert recorded["build"] == (owner, solved_state, None)
+    assert recorded["evaluate"] == (owner, sentinel_contract)
+    assert recorded["evaluate_fused"] == (owner, sentinel_contract)
+    assert recorded["artifact"] == (
+        sentinel_contract,
+        sentinel_oracle,
+        sentinel_fused_oracle,
+    )
 
 
 def test_mps_boozer_contract_dump_single_stage_payload_records_optimizer_lanes(

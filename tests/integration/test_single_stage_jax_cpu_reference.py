@@ -138,6 +138,7 @@ from simsopt.jax_core.curve_geometry import (  # noqa: E402
 from simsopt.jax_core.mps_boozer_kernel_contract import (  # noqa: E402
     build_mps_boozer_direct_kernel_contract,
     evaluate_mps_boozer_direct_cpu_oracle,
+    evaluate_mps_boozer_fused_solve_cpu_oracle,
     mps_boozer_kernel_contract_artifact,
 )
 from simsopt.geo.boozersurface_jax import (  # noqa: E402
@@ -2416,8 +2417,9 @@ def test_make_boozer_setup_propagates_weight_inv_modB_to_cpu_and_jax():
 def test_mps_boozer_contract_oracle_matches_real_direct_value_grad():
     """Contract wiring on a hand-built LS Boozer fixture.
 
-    Oracle: finite-difference gradient of the direct objective for selected
-    coil DOFs (type 4, routing/parity smoke).
+    Oracles: finite-difference direct-objective gradients for selected coil
+    DOFs, plus solved-state fused output parity against an independent
+    re-solve finite-difference probe (type 4, routing/parity smoke).
     """
     cpu_devices = jax.devices("cpu")
     if not cpu_devices:
@@ -2428,6 +2430,14 @@ def test_mps_boozer_contract_oracle_matches_real_direct_value_grad():
         )
         solved_result = booz_jax.run_code(iota0, G0)
         assert solved_result is not None and solved_result["success"]
+        baseline_state = _RealResolveFDBaselineState(
+            coil_dofs=np.asarray(bs_jax.x, dtype=float).copy(),
+            surface_dofs=np.asarray(booz_jax.surface.get_dofs(), dtype=float).copy(),
+            iota=float(solved_result["iota"]),
+            G=float(solved_result["G"]),
+            fun=float(summarize_result_fun(solved_result)),
+            result=solved_result,
+        )
 
         jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
         solved_state = types.SimpleNamespace(
@@ -2441,6 +2451,78 @@ def test_mps_boozer_contract_oracle_matches_real_direct_value_grad():
             jr_jax,
             solved_state=solved_state,
         )
+        default_oracle_result = evaluate_mps_boozer_direct_cpu_oracle(
+            jr_jax,
+            default_contract,
+        )
+        fused_oracle_result = evaluate_mps_boozer_fused_solve_cpu_oracle(
+            jr_jax,
+            default_contract,
+        )
+        fused_fd_suite = _RealResolveFDSuite(
+            bs_jax=bs_jax,
+            booz_jax=booz_jax,
+            baseline_state=baseline_state,
+            gradients={},
+            direction_samples=(),
+            nqsr_aux_phi=jnp.asarray([], dtype=jnp.float64),
+            nqsr_aux_theta=jnp.asarray([], dtype=jnp.float64),
+        )
+        independent_baseline_value = _real_resolve_fd_boozer_residual_value(
+            fused_fd_suite,
+            _real_resolve_fd_baseline_outcome(fused_fd_suite),
+        )
+
+        def resolved_boozer_value_at(coil_dofs):
+            _restore_real_resolve_fd_seed_state(baseline_state, bs_jax, booz_jax)
+            bs_jax.x = np.asarray(coil_dofs, dtype=float)
+            booz_jax.need_to_run_code = True
+            result = booz_jax.run_code(
+                iota=baseline_state.iota,
+                G=baseline_state.G,
+            )
+            assert result is not None and result.get("success", False)
+            outcome = _RealResolveFDProbeOutcome(
+                stable=True,
+                reason="ok",
+                coil_dofs=np.asarray(bs_jax.x, dtype=float).copy(),
+                surface_dofs=np.asarray(
+                    booz_jax.surface.get_dofs(), dtype=float
+                ).copy(),
+                iota=float(result["iota"]),
+                G=float(result["G"]),
+                weight_inv_modB=bool(result.get("weight_inv_modB", True)),
+            )
+            value = _real_resolve_fd_boozer_residual_value(fused_fd_suite, outcome)
+            assert np.isfinite(value)
+            return value
+
+        fused_fd_direction = np.zeros(int(current_coil_dofs.size), dtype=float)
+        fused_fd_direction[0] = 1.0
+        fused_fd_step = 1e-6
+        fused_fd_plus_value = resolved_boozer_value_at(
+            np.asarray(current_coil_dofs, dtype=float)
+            + fused_fd_step * fused_fd_direction,
+        )
+        fused_fd_minus_value = resolved_boozer_value_at(
+            np.asarray(current_coil_dofs, dtype=float)
+            - fused_fd_step * fused_fd_direction,
+        )
+        fused_fd_directional_gradient = float(
+            np.dot(
+                np.asarray(fused_oracle_result.coil_gradient, dtype=float),
+                fused_fd_direction,
+            )
+        )
+        independent_directional_gradient = (
+            fused_fd_plus_value - fused_fd_minus_value
+        ) / (2.0 * fused_fd_step)
+        _restore_real_resolve_fd_seed_state(baseline_state, bs_jax, booz_jax)
+        booz_jax.res = baseline_state.result
+        booz_jax._solver_generation = int(
+            baseline_state.result.get("solve_generation", booz_jax._solver_generation)
+        )
+        booz_jax.need_to_run_code = False
         perturbed_coil_dofs = (
             current_coil_dofs.at[0]
             .add(1e-3)
@@ -2482,6 +2564,28 @@ def test_mps_boozer_contract_oracle_matches_real_direct_value_grad():
     )
     assert contract.coil_group_gammas
     assert np.isfinite(np.asarray(oracle_result.value))
+    np.testing.assert_allclose(
+        np.asarray(fused_oracle_result.value),
+        independent_baseline_value,
+        rtol=1e-8,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        fused_fd_directional_gradient,
+        independent_directional_gradient,
+        rtol=5e-2,
+        atol=1e-14,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(fused_oracle_result.final_x_inner),
+        np.asarray(default_contract.x_inner),
+    )
+    assert np.isfinite(np.asarray(fused_oracle_result.residual_norm))
+    assert np.isfinite(np.asarray(fused_oracle_result.gradient_norm))
+    assert int(np.asarray(fused_oracle_result.newton_iteration_count)) >= -1
+    assert int(np.asarray(fused_oracle_result.gmres_iteration_count)) >= -1
+    assert bool(np.asarray(fused_oracle_result.converged))
+    assert bool(np.asarray(fused_oracle_result.finite))
 
     gradient = np.asarray(oracle_result.gradient)
     coil_dofs = np.asarray(contract.coil_dofs, dtype=float)
@@ -2525,20 +2629,43 @@ def test_mps_boozer_contract_oracle_matches_real_direct_value_grad():
             atol=1e-8,
         )
 
-    artifact = mps_boozer_kernel_contract_artifact(
+    direct_artifact = mps_boozer_kernel_contract_artifact(
         contract,
         oracle_result=oracle_result,
     )
-    assert artifact["runtime_arrays"]["coil_dofs"]["shape"] == list(
+    fused_artifact = mps_boozer_kernel_contract_artifact(
+        default_contract,
+        oracle_result=default_oracle_result,
+        fused_oracle_result=fused_oracle_result,
+    )
+    assert direct_artifact["runtime_arrays"]["coil_dofs"]["shape"] == list(
         contract.coil_dofs.shape
     )
-    assert artifact["runtime_arrays"]["x_inner"]["shape"] == list(
+    assert direct_artifact["runtime_arrays"]["x_inner"]["shape"] == list(
         contract.x_inner.shape
     )
-    assert artifact["runtime_arrays"]["coil_groups"]
-    assert artifact["oracle_outputs"]["gradient"]["shape"] == list(
+    assert direct_artifact["runtime_arrays"]["coil_groups"]
+    assert direct_artifact["oracle_outputs"]["gradient"]["shape"] == list(
         oracle_result.gradient.shape
     )
+    assert fused_artifact["fused_oracle_outputs"]["value"]["shape"] == []
+    assert fused_artifact["fused_oracle_outputs"]["coil_gradient"]["shape"] == list(
+        fused_oracle_result.coil_gradient.shape
+    )
+    assert fused_artifact["fused_oracle_outputs"]["final_x_inner"]["shape"] == list(
+        default_contract.x_inner.shape
+    )
+    assert fused_artifact["output_contract"]["fused_solve_fields"] == [
+        "value",
+        "coil_gradient",
+        "final_x_inner",
+        "residual_norm",
+        "gradient_norm",
+        "newton_iteration_count",
+        "gmres_iteration_count",
+        "converged",
+        "finite",
+    ]
 
 
 # -----------------------------------------------------------------------

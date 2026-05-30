@@ -58,12 +58,14 @@ def _contract_helpers():
     from simsopt.jax_core.mps_boozer_kernel_contract import (
         build_mps_boozer_direct_kernel_contract,
         evaluate_mps_boozer_direct_cpu_oracle,
+        evaluate_mps_boozer_fused_solve_cpu_oracle,
         mps_boozer_kernel_contract_artifact,
     )
 
     return (
         build_mps_boozer_direct_kernel_contract,
         evaluate_mps_boozer_direct_cpu_oracle,
+        evaluate_mps_boozer_fused_solve_cpu_oracle,
         mps_boozer_kernel_contract_artifact,
     )
 
@@ -91,6 +93,7 @@ def build_mps_boozer_contract_payload(
     (
         build_contract,
         evaluate_oracle,
+        evaluate_fused_solve_oracle,
         contract_artifact,
     ) = _contract_helpers()
     contract = build_contract(
@@ -99,6 +102,9 @@ def build_mps_boozer_contract_payload(
         coil_dofs=coil_dofs,
     )
     oracle_result = evaluate_oracle(boozer_residual, contract)
+    fused_oracle_result = None
+    if coil_dofs is None:
+        fused_oracle_result = evaluate_fused_solve_oracle(boozer_residual, contract)
     return {
         "schema": PAYLOAD_SCHEMA,
         "case_label": str(case_label),
@@ -106,6 +112,7 @@ def build_mps_boozer_contract_payload(
         "contract_artifact": contract_artifact(
             contract,
             oracle_result=oracle_result,
+            fused_oracle_result=fused_oracle_result,
         ),
     }
 
