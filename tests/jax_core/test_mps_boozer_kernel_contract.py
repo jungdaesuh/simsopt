@@ -11,9 +11,13 @@ import pytest
 from simsopt.jax_core.mps_boozer_kernel_contract import (
     DEFAULT_CONTRACT_ARTIFACT_DIR,
     SCHEMA_VERSION,
+    SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION,
+    SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET,
     UNKNOWN_ITERATION_COUNT,
+    _fused_custom_call_backend_config,
     build_mps_boozer_direct_kernel_contract,
     evaluate_mps_boozer_direct_cpu_oracle,
+    evaluate_mps_boozer_fused_solve_custom_call,
     evaluate_mps_boozer_fused_solve_cpu_oracle,
     mps_boozer_kernel_contract_artifact,
     write_mps_boozer_kernel_contract_artifact,
@@ -147,6 +151,50 @@ def _contract_fixture():
     return owner, build_mps_boozer_direct_kernel_contract(
         owner,
         solved_state=solved_state,
+    )
+
+
+def _fused_custom_call_with_arrays(contract, *arrays):
+    (
+        coil_dofs,
+        x_inner,
+        surface_dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        label_quadpoints_phi,
+        label_quadpoints_theta,
+        gammas,
+        gammadashs,
+        currents,
+    ) = arrays
+    traced_contract = replace(
+        contract,
+        coil_dofs=coil_dofs,
+        x_inner=x_inner,
+        surface_dofs=surface_dofs,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        label_quadpoints_phi=label_quadpoints_phi,
+        label_quadpoints_theta=label_quadpoints_theta,
+        coil_group_gammas=(gammas,),
+        coil_group_gammadashs=(gammadashs,),
+        coil_group_currents=(currents,),
+    )
+    return evaluate_mps_boozer_fused_solve_custom_call(traced_contract)
+
+
+def _fused_custom_call_args(contract):
+    return (
+        contract.coil_dofs,
+        contract.x_inner,
+        contract.surface_dofs,
+        contract.quadpoints_phi,
+        contract.quadpoints_theta,
+        contract.label_quadpoints_phi,
+        contract.label_quadpoints_theta,
+        contract.coil_group_gammas[0],
+        contract.coil_group_gammadashs[0],
+        contract.coil_group_currents[0],
     )
 
 
@@ -303,3 +351,92 @@ def test_mps_boozer_fused_solve_cpu_oracle_rejects_stale_coil_dofs():
 
     with pytest.raises(ValueError, match="requires contract.coil_dofs to match"):
         evaluate_mps_boozer_fused_solve_cpu_oracle(owner, stale_contract)
+
+
+def test_mps_boozer_fused_custom_call_lowers_to_named_stablehlo_target():
+    _, contract = _contract_fixture()
+    args = _fused_custom_call_args(contract)
+
+    lowered = (
+        jax.jit(lambda *leaves: _fused_custom_call_with_arrays(contract, *leaves))
+        .lower(*args)
+        .as_text()
+    )
+    result_shape = jax.eval_shape(
+        lambda *leaves: _fused_custom_call_with_arrays(contract, *leaves),
+        *args,
+    )
+
+    assert "stablehlo.custom_call" in lowered
+    assert f"@{SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET}" in lowered
+    assert (
+        f"api_version = {SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION}"
+        in lowered
+    )
+    assert "schema_version" in lowered
+    backend_config = json.loads(_fused_custom_call_backend_config(contract))
+    assert backend_config["schema_version"] == SCHEMA_VERSION
+    assert backend_config["target_name"] == SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET
+    assert backend_config["static_metadata"]["mpol"] == contract.static_metadata.mpol
+    assert backend_config["static_metadata"]["weight_inv_modB"] == (
+        contract.static_metadata.weight_inv_modB
+    )
+    assert result_shape.value.shape == ()
+    assert result_shape.value.dtype == jnp.float32
+    assert result_shape.coil_gradient.shape == contract.coil_dofs.shape
+    assert result_shape.final_x_inner.shape == contract.x_inner.shape
+    assert result_shape.residual_norm.shape == ()
+    assert result_shape.gradient_norm.shape == ()
+    assert result_shape.newton_iteration_count.dtype == jnp.int32
+    assert result_shape.gmres_iteration_count.dtype == jnp.int32
+    assert result_shape.converged.dtype == jnp.bool_
+    assert result_shape.finite.dtype == jnp.bool_
+
+
+def test_mps_boozer_fused_custom_call_rejects_unsupported_contracts():
+    _, contract = _contract_fixture()
+    with pytest.raises(ValueError, match="coil_dofs must be float32"):
+        evaluate_mps_boozer_fused_solve_custom_call(
+            replace(contract, coil_dofs=contract.coil_dofs.astype(jnp.float16))
+        )
+
+    with pytest.raises(ValueError, match="exactly one coil group"):
+        evaluate_mps_boozer_fused_solve_custom_call(
+            replace(
+                contract,
+                coil_group_gammas=(
+                    contract.coil_group_gammas[0],
+                    contract.coil_group_gammas[0],
+                ),
+            )
+        )
+
+
+@pytest.mark.mps
+def test_mps_boozer_fused_custom_call_returns_structured_status_on_real_mps_backend():
+    mps_devices = tuple(
+        device for device in jax.devices() if device.platform.lower() == "mps"
+    )
+    if not mps_devices:
+        pytest.skip("requires a JAX MPS device")
+
+    _, contract = _contract_fixture()
+    host_args = _fused_custom_call_args(contract)
+    mps_args = tuple(jax.device_put(value, mps_devices[0]) for value in host_args)
+
+    actual = jax.jit(lambda *leaves: _fused_custom_call_with_arrays(contract, *leaves))(
+        *mps_args
+    )
+    jax.block_until_ready(actual)
+
+    for leaf in actual:
+        assert leaf.device.platform.lower() == "mps"
+    assert bool(np.isnan(np.asarray(actual.value))) is True
+    assert bool(np.all(np.isnan(np.asarray(actual.coil_gradient)))) is True
+    assert bool(np.all(np.isnan(np.asarray(actual.final_x_inner)))) is True
+    assert bool(np.isnan(np.asarray(actual.residual_norm))) is True
+    assert bool(np.isnan(np.asarray(actual.gradient_norm))) is True
+    assert int(np.asarray(actual.newton_iteration_count)) == UNKNOWN_ITERATION_COUNT
+    assert int(np.asarray(actual.gmres_iteration_count)) == UNKNOWN_ITERATION_COUNT
+    assert bool(np.asarray(actual.converged)) is False
+    assert bool(np.asarray(actual.finite)) is False

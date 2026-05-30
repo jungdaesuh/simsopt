@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -13,6 +14,8 @@ import numpy as np
 
 SCHEMA_VERSION = 2
 DEFAULT_CONTRACT_ARTIFACT_DIR = Path(".artifacts/mps_custom_kernel_contract")
+SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET = "mps.simsopt_boozer_value_grad"
+SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION = 3
 UNKNOWN_ITERATION_COUNT = -1
 
 
@@ -69,6 +72,20 @@ class MpsBoozerDirectOracleResult:
 @dataclass(frozen=True)
 class MpsBoozerFusedSolveOracleResult:
     """CPU/JAX solved-state oracle output for the planned fused Boozer op."""
+
+    value: jax.Array
+    coil_gradient: jax.Array
+    final_x_inner: jax.Array
+    residual_norm: jax.Array
+    gradient_norm: jax.Array
+    newton_iteration_count: jax.Array
+    gmres_iteration_count: jax.Array
+    converged: jax.Array
+    finite: jax.Array
+
+
+class MpsBoozerFusedCustomCallResult(NamedTuple):
+    """JAX-pytree output layout for the fused Boozer MPS custom call."""
 
     value: jax.Array
     coil_gradient: jax.Array
@@ -162,6 +179,76 @@ def _require_current_inner_contract(
             "Fused Boozer oracle contract x_inner does not match the current "
             "BoozerSurfaceJAX solved state."
         )
+
+
+def _require_float32_array(name: str, value: jax.Array) -> None:
+    if value.dtype != np.dtype(np.float32):
+        raise ValueError(f"{name} must be float32 for the MPS custom call")
+
+
+def _require_vector(name: str, value: jax.Array) -> None:
+    if value.ndim != 1:
+        raise ValueError(f"{name} must be a 1D array")
+    if value.shape[0] == 0:
+        raise ValueError(f"{name} must not be empty")
+
+
+def _validate_fused_custom_call_contract(contract: MpsBoozerKernelContract) -> None:
+    if contract.static_metadata.target_name != SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET:
+        raise ValueError(
+            f"contract target_name must be {SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET!r}"
+        )
+
+    runtime_arrays = (
+        ("coil_dofs", contract.coil_dofs),
+        ("x_inner", contract.x_inner),
+        ("surface_dofs", contract.surface_dofs),
+        ("quadpoints_phi", contract.quadpoints_phi),
+        ("quadpoints_theta", contract.quadpoints_theta),
+        ("label_quadpoints_phi", contract.label_quadpoints_phi),
+        ("label_quadpoints_theta", contract.label_quadpoints_theta),
+    )
+    for name, value in runtime_arrays:
+        _require_float32_array(name, value)
+        _require_vector(name, value)
+
+    if (
+        len(contract.coil_group_gammas) != 1
+        or len(contract.coil_group_gammadashs) != 1
+        or len(contract.coil_group_currents) != 1
+    ):
+        raise ValueError(
+            "the first fused MPS custom call supports exactly one coil group"
+        )
+
+    gammas = contract.coil_group_gammas[0]
+    gammadashs = contract.coil_group_gammadashs[0]
+    currents = contract.coil_group_currents[0]
+    for name, value in (
+        ("coil_group_gammas[0]", gammas),
+        ("coil_group_gammadashs[0]", gammadashs),
+        ("coil_group_currents[0]", currents),
+    ):
+        _require_float32_array(name, value)
+    if gammas.ndim != 3 or gammas.shape[2] != 3:
+        raise ValueError("coil_group_gammas[0] must have shape (ncoils, nquad, 3)")
+    if gammas.shape[0] == 0 or gammas.shape[1] == 0:
+        raise ValueError(
+            "coil_group_gammas[0] must include coils and quadrature points"
+        )
+    if gammadashs.shape != gammas.shape:
+        raise ValueError("coil_group_gammadashs[0] must match coil_group_gammas[0]")
+    if currents.ndim != 1 or currents.shape[0] != gammas.shape[0]:
+        raise ValueError("coil_group_currents[0] must have shape (ncoils,)")
+
+
+def _fused_custom_call_backend_config(contract: MpsBoozerKernelContract) -> str:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "target_name": SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET,
+        "static_metadata": _json_scalar(asdict(contract.static_metadata)),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 def _result_vector_norm(
@@ -332,6 +419,51 @@ def evaluate_mps_boozer_fused_solve_cpu_oracle(
             ),
         ),
         finite=jnp.asarray(finite),
+    )
+
+
+def evaluate_mps_boozer_fused_solve_custom_call(
+    contract: MpsBoozerKernelContract,
+) -> MpsBoozerFusedCustomCallResult:
+    """Emit the Stage 3 fused Boozer value-gradient custom-call boundary."""
+
+    _validate_fused_custom_call_contract(contract)
+    dtype = contract.coil_dofs.dtype
+    output_type = (
+        jax.ShapeDtypeStruct((), dtype),
+        jax.ShapeDtypeStruct(contract.coil_dofs.shape, dtype),
+        jax.ShapeDtypeStruct(contract.x_inner.shape, dtype),
+        jax.ShapeDtypeStruct((), dtype),
+        jax.ShapeDtypeStruct((), dtype),
+        jax.ShapeDtypeStruct((), jnp.int32),
+        jax.ShapeDtypeStruct((), jnp.int32),
+        jax.ShapeDtypeStruct((), jnp.bool_),
+        jax.ShapeDtypeStruct((), jnp.bool_),
+    )
+    gammas = contract.coil_group_gammas[0]
+    gammadashs = contract.coil_group_gammadashs[0]
+    currents = contract.coil_group_currents[0]
+    return MpsBoozerFusedCustomCallResult(
+        *jax.ffi.ffi_call(
+            SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET,
+            output_type,
+            vmap_method="broadcast_all",
+            custom_call_api_version=(
+                SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION
+            ),
+            legacy_backend_config=_fused_custom_call_backend_config(contract),
+        )(
+            contract.coil_dofs,
+            contract.x_inner,
+            contract.surface_dofs,
+            contract.quadpoints_phi,
+            contract.quadpoints_theta,
+            contract.label_quadpoints_phi,
+            contract.label_quadpoints_theta,
+            gammas,
+            gammadashs,
+            currents,
+        )
     )
 
 
