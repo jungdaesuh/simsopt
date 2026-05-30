@@ -135,6 +135,11 @@ from simsopt.jax_core.curve_geometry import (  # noqa: E402
     _mapped_full_dofs,
     _mapped_input_dofs,
 )
+from simsopt.jax_core.mps_boozer_kernel_contract import (  # noqa: E402
+    build_mps_boozer_direct_kernel_contract,
+    evaluate_mps_boozer_direct_cpu_oracle,
+    mps_boozer_kernel_contract_artifact,
+)
 from simsopt.geo.boozersurface_jax import (  # noqa: E402
     BoozerSurfaceJAX,
     _boozer_ls_coil_vjp,
@@ -2406,6 +2411,134 @@ def test_make_boozer_setup_propagates_weight_inv_modB_to_cpu_and_jax():
 
     assert booz_cpu.options["weight_inv_modB"] is False
     assert booz_jax.options["weight_inv_modB"] is False
+
+
+def test_mps_boozer_contract_oracle_matches_real_direct_value_grad():
+    """Contract wiring on a hand-built LS Boozer fixture.
+
+    Oracle: finite-difference gradient of the direct objective for selected
+    coil DOFs (type 4, routing/parity smoke).
+    """
+    cpu_devices = jax.devices("cpu")
+    if not cpu_devices:
+        pytest.skip("CPU JAX backend not available")
+    with jax.default_device(cpu_devices[0]):
+        (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
+            constraint_weight=1.0,
+        )
+        solved_result = booz_jax.run_code(iota0, G0)
+        assert solved_result is not None and solved_result["success"]
+
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+        solved_state = types.SimpleNamespace(
+            iota=solved_result["iota"],
+            G=solved_result["G"],
+            sdofs=solved_result["sdofs"],
+            weight_inv_modB=solved_result["weight_inv_modB"],
+        )
+        current_coil_dofs = jnp.asarray(bs_jax.x)
+        default_contract = build_mps_boozer_direct_kernel_contract(
+            jr_jax,
+            solved_state=solved_state,
+        )
+        perturbed_coil_dofs = (
+            current_coil_dofs.at[0]
+            .add(1e-3)
+            .at[current_coil_dofs.shape[0] // 2]
+            .add(-2e-3)
+        )
+        contract = build_mps_boozer_direct_kernel_contract(
+            jr_jax,
+            solved_state=solved_state,
+            coil_dofs=perturbed_coil_dofs,
+        )
+        oracle_result = evaluate_mps_boozer_direct_cpu_oracle(jr_jax, contract)
+        expected_x_inner, expected_optimize_G = jr_jax._inner_objective_state(
+            solved_state.iota,
+            solved_state.G,
+            sdofs=solved_state.sdofs,
+        )
+
+    np.testing.assert_array_equal(
+        np.asarray(default_contract.coil_dofs),
+        np.asarray(current_coil_dofs),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(contract.coil_dofs),
+        np.asarray(perturbed_coil_dofs),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(contract.x_inner),
+        np.asarray(expected_x_inner),
+    )
+    assert contract.static_metadata.optimize_G is expected_optimize_G
+    assert contract.static_metadata.weight_inv_modB is solved_state.weight_inv_modB
+    assert contract.static_metadata.surface_kind == booz_jax._surface_geometry_kind
+    assert contract.static_metadata.label_surface_kind == (
+        booz_jax._label_surface_geometry_kind
+    )
+    assert len(contract.coil_group_gammas) == len(
+        contract.static_metadata.coil_group_indices
+    )
+    assert contract.coil_group_gammas
+    assert np.isfinite(np.asarray(oracle_result.value))
+
+    gradient = np.asarray(oracle_result.gradient)
+    coil_dofs = np.asarray(contract.coil_dofs, dtype=float)
+    finite_difference_indices = (
+        0,
+        coil_dofs.size // 2,
+        coil_dofs.size - 1,
+    )
+    for dof_index in finite_difference_indices:
+        step = 1e-3 * max(1.0, abs(coil_dofs[dof_index]))
+        plus = coil_dofs.copy()
+        minus = coil_dofs.copy()
+        plus[dof_index] += step
+        minus[dof_index] -= step
+        with jax.default_device(cpu_devices[0]):
+            plus_value = float(
+                np.asarray(
+                    jr_jax._direct_objective_of_coils(
+                        jnp.asarray(plus),
+                        contract.x_inner,
+                        contract.static_metadata.optimize_G,
+                        contract.static_metadata.weight_inv_modB,
+                    )
+                )
+            )
+            minus_value = float(
+                np.asarray(
+                    jr_jax._direct_objective_of_coils(
+                        jnp.asarray(minus),
+                        contract.x_inner,
+                        contract.static_metadata.optimize_G,
+                        contract.static_metadata.weight_inv_modB,
+                    )
+                )
+            )
+        finite_difference_gradient = (plus_value - minus_value) / (2.0 * step)
+        np.testing.assert_allclose(
+            gradient[dof_index],
+            finite_difference_gradient,
+            rtol=2e-3,
+            atol=1e-8,
+        )
+
+    artifact = mps_boozer_kernel_contract_artifact(
+        contract,
+        oracle_result=oracle_result,
+    )
+    assert artifact["runtime_arrays"]["coil_dofs"]["shape"] == list(
+        contract.coil_dofs.shape
+    )
+    assert artifact["runtime_arrays"]["x_inner"]["shape"] == list(
+        contract.x_inner.shape
+    )
+    assert artifact["runtime_arrays"]["coil_groups"]
+    assert artifact["oracle_outputs"]["gradient"]["shape"] == list(
+        oracle_result.gradient.shape
+    )
 
 
 # -----------------------------------------------------------------------
