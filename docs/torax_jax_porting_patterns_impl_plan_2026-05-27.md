@@ -3,11 +3,12 @@
 ## Review Envelope
 
 - Target repo: `/Users/suhjungdae/code/columbia/simsopt-jax`
-- Target repo HEAD reviewed: `431a517fb`
+- Target repo HEAD originally reviewed: `431a517fb`
+- Target repo HEAD refreshed: `2bcaeff28` (2026-05-30 doc-review correction)
 - Reference repo: `/Users/suhjungdae/code/opensource/torax`
 - Reference repo HEAD reviewed: `60190df1`
-- Worktree note: this plan intentionally does not modify existing dirty docs such as `docs/lbfgs_ondevice_full_jfx_bridge_report_2026-05-18.md`.
-- **Refresh (2026-05-30):** the line refs in this plan were re-verified against the current HEAD `21c3d517d` (source tree clean). Most are still exact (`specs.py:1`, `runtime.py:1372`/`:1466`/`:2371`/`:2385-2386`, `_root.py:28`/`:103`, `pm_workflow.py:790`, `wireframe_workflow.py:755`, `reductions.py:75`, `biotsavart.py:725`, `jax_host_boundary.py:14`, `import_smoke_cases.py:711`, `test_jax_import_smoke.py:614`); the two that drifted are corrected inline below. The original review HEAD `431a517fb` is now behind, but the patterns and plan structure are unchanged.
+- Worktree note: this v6 correction observed pre-existing tracked edits in `src/simsopt/geo/surfaceobjectives_jax.py`, `src/simsopt/jax_core/mps_boozer_kernel_contract.py`, `tests/geo/test_surface_objectives_jax.py`, and `tests/jax_core/test_mps_boozer_kernel_contract.py`, plus untracked local dirs (`.antigravitycli/`, `.conda/`, `analysis/`, `runs/`). This plan does not modify those files.
+- **Refresh (2026-05-30):** the line refs in this plan were first re-verified against HEAD `21c3d517d`; this doc-review correction refreshes the live status to HEAD `2bcaeff28` and corrects the stale refs inline below. Official JAX contracts for persistent cache, `lax.scan`, `lax.while_loop`, and `lax.cond` were rechecked through Context7 during this correction pass. The original review HEAD `431a517fb` is now historical, but the patterns and plan structure are unchanged.
 
 ## Purpose
 
@@ -29,7 +30,7 @@ One TORAX caution should be kept explicit: do not clone its `StaticDataclass` ap
 
 ## Official JAX Contracts Checked
 
-- Persistent compilation cache is enabled by setting `jax_compilation_cache_dir` or `JAX_COMPILATION_CACHE_DIR` before the first compilation. Official docs also show small-kernel tests must lower the thresholds with `jax_persistent_cache_min_compile_time_secs=0` and `jax_persistent_cache_min_entry_size_bytes=-1`; the current programmatic runtime path imports JAX, then applies those config values before any kernel compilation in `src/simsopt/backend/runtime.py:2371` and `src/simsopt/backend/runtime.py:2385-2386`.
+- Persistent compilation cache is enabled by setting `jax_compilation_cache_dir` or `JAX_COMPILATION_CACHE_DIR` before the first compilation. Official docs also show small-kernel tests must lower the thresholds with `jax_persistent_cache_min_compile_time_secs=0` and `jax_persistent_cache_min_entry_size_bytes=-1`; the current programmatic runtime path imports JAX, then applies those config values before any kernel compilation in `src/simsopt/backend/runtime.py:2371` and `src/simsopt/backend/runtime.py:2384-2386`.
 - Persistent-cache proof tests must stay callback-free. JAX official docs state that host callbacks make persistent caching completely avoided because the HLO includes a callback pointer that changes between runs.
 - `lax.scan` is the right primitive for fixed-iteration compiled loops because it lowers to a single `WhileOp`, requires fixed carry structure, shape, and dtype, and is designed for static iteration counts.
 - `lax.while_loop` is the right primitive for true dynamic termination only after the differentiation contract is checked. JAX official docs state bare `while_loop` is not reverse-mode differentiable because XLA needs static memory bounds; this repo can still use it inside an explicit custom VJP or implicit-differentiation wrapper such as `src/simsopt/jax_core/_root.py:103`.
@@ -63,16 +64,16 @@ References:
 | Surface | Current evidence | Plan relevance |
 | --- | --- | --- |
 | JAX spec contracts | `src/simsopt/jax_core/specs.py:1` | Explicit immutable specs and data/meta field partitions are the SSOT to harden first. |
-| Validation cache policy | `benchmarks/validation_ladder_common.py:156` (`apply_compilation_cache_policy`; was `:153`), `benchmarks/validation_ladder_common.py:389` | Cache settings and provenance are already explicit enough to test. |
-| Backend runtime cache/transfer policy | `src/simsopt/backend/runtime.py:1372`, `src/simsopt/backend/runtime.py:2381` | Runtime policy should remain opt-in and environment-driven before JAX import. |
+| Validation cache policy | `benchmarks/validation_ladder_common.py:153` (`apply_compilation_cache_policy`), `benchmarks/validation_ladder_common.py:385` (`current_compilation_cache_metadata`) | Cache settings and provenance are already explicit enough to test. |
+| Backend runtime cache/transfer policy | `src/simsopt/backend/runtime.py:1372`, `src/simsopt/backend/runtime.py:2381`, `src/simsopt/backend/runtime.py:2384-2386` | Runtime policy should remain opt-in and environment-driven before JAX import. |
 | Existing persistent-cache write smoke | `tests/subprocess/import_smoke_cases.py:711`, `tests/test_jax_import_smoke.py:614` | Current coverage proves a small kernel writes a cache entry; the remaining gap is cross-process reuse. |
 | Host boundary helpers | `src/simsopt/_core/jax_host_boundary.py:14` | Host materialization should stay explicit and direction-specific. |
 | Bounded tracing scans | `src/simsopt/jax_core/tracing.py:367` (`_scan_adaptive_steps`; was `:359`) | Existing helper shape can inform a shared bounded scan utility. |
 | Root solver fixed scan | `src/simsopt/jax_core/_root.py:28` | Fixed iteration counts and implicit VJP conventions should remain explicit. |
-| PM done-gated scan | `src/simsopt/jax_core/pm_workflow.py:790` | Candidate pilot for deduplicating done-gated scan structure. |
+| PM done-gated scan | `src/simsopt/jax_core/pm_workflow.py:746`, `:807`, `:871`, `:969`, `:1076` | Candidate pilot for deduplicating done-gated scan structure. |
 | Wireframe done-gated scan | `src/simsopt/jax_core/wireframe_workflow.py:755` | Candidate pilot paired with PM workflow. |
 | Numerical reductions | `src/simsopt/jax_core/reductions.py:75` | Stability work should reuse existing primitives before adding new ones. |
-| Static grouped Biot-Savart path | `src/simsopt/jax_core/biotsavart.py:725` | Branch and specialization tests should protect hot static choices. |
+| Static grouped Biot-Savart path | `src/simsopt/jax_core/biotsavart.py:704` (`group_coil_data`), `:734` (`grouped_biot_savart_B`) | Branch and specialization tests should protect hot static choices. |
 
 ## Implementation Plan
 
@@ -106,7 +107,7 @@ References:
 Recommended validation:
 
 ```bash
-PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/core/test_jax_core_specs.py tests/jax_core/test_tree_signature.py
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/core/test_jax_core_specs.py tests/jax_core/test_tree_signature.py
 ```
 
 ### Phase 2: Persistent Compilation Cache Proof
@@ -123,15 +124,15 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/core
 Recommended validation:
 
 ```bash
-PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/test_backend.py -k 'compilation_cache or cuda_determinism or gpu_memory'
-PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/test_benchmark_helpers.py -k 'compilation_cache or build_provenance_includes_compilation_cache_metadata or compile_behavior'
-PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/test_jax_import_smoke.py -k 'persistent_cache or reuses_compiled_solver or transfer_guard'
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/test_backend.py -k 'compilation_cache or cuda_determinism or gpu_memory'
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/test_benchmark_helpers.py -k 'compilation_cache or build_provenance_includes_compilation_cache_metadata or compile_behavior'
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/test_jax_import_smoke.py -k 'persistent_cache or reuses_compiled_solver or transfer_guard'
 ```
 
-CUDA follow-up, only on a CUDA host:
+CUDA follow-up, only on a CUDA host with the repo CUDA/JAX environment active:
 
 ```bash
-PYTHONPATH=src SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_PLATFORMS=cuda,cpu XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true" python -m pytest -q tests/test_backend.py -k 'cuda_determinism or gpu_memory'
+PYTHONPATH=src SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_PLATFORMS=cuda,cpu XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true" .conda/jax/bin/python -m pytest -q tests/test_backend.py -k 'cuda_determinism or gpu_memory'
 ```
 
 ### Phase 3: Bounded Scan And Control-Flow Deduplication
@@ -154,8 +155,8 @@ PYTHONPATH=src SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 SIMS
 Recommended validation:
 
 ```bash
-PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/solve/test_pm_workflow_jax.py tests/solve/test_wireframe_workflow_jax.py
-PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/jax_core/test_tracing_jax_item14.py tests/jax_core/test_tracing_jax_conservation.py
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/solve/test_pm_workflow_jax.py tests/solve/test_wireframe_workflow_jax.py
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/jax_core/test_tracing_jax_item14.py tests/jax_core/test_tracing_jax_conservation.py
 ```
 
 ### Phase 4: Branch Discipline And JAXPR Checks
@@ -196,8 +197,8 @@ Recommended first targets:
 Recommended validation:
 
 ```bash
-PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/geo/test_surface_objectives_jax.py tests/geo/test_boozer_residual_jax.py tests/mhd/test_vmec_compute_geometry_jax.py tests/mhd/test_vmec_diagnostics_jax.py tests/jax_core tests/solve -k 'surface or vmec or residual or stability or compensated'
-PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/core/test_reductions.py -k 'compensated or pairwise'
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_surface_objectives_jax.py tests/geo/test_boozer_residual_jax.py tests/mhd/test_vmec_compute_geometry_jax.py tests/mhd/test_vmec_diagnostics_jax.py tests/jax_core tests/solve -k 'surface or vmec or residual or stability or compensated'
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/core/test_reductions.py -k 'compensated or pairwise'
 ```
 
 ### Phase 6: Documentation, Provenance, And Closeout
@@ -206,7 +207,7 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m pytest -q tests/core
 - [ ] Cross-link completed work to:
   - [ ] `docs/remaining_jax_port_surfaces_impl_plan_2026-05-19.md`
   - [ ] `docs/bloat_reduction_plan_2026-05-20.md`
-  - [ ] `docs/using_jax_backend.md`
+  - [ ] `docs/using_jax_backend.md` after refreshing its stale backend-mode table and optimizer-default guidance.
 - [ ] Record exact validation commands and results before marking a phase complete.
 - [ ] Keep dirty-worktree status visible in the closeout note.
 - [ ] If a phase changes public behavior, add a focused migration or user-facing note.

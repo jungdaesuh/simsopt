@@ -1,7 +1,7 @@
 # simsopt-jax Bloat Reduction Plan
 
-**Status:** Draft v5 — staleness refresh (2026-05-30) against HEAD `21c3d517d`, **source tree now CLEAN**. Supersedes Draft v4 (basis `5bcd9061c`, 2026-05-29). Since v4, the previously-dirty working-tree edits that v4's numbers described have been **committed** (notably `f287bde96 refactor(jax): close port remediation review`, which landed the `surfaceobjectives_jax.py` split and most of the code-smell audit fixes), so this plan now anchors to a clean committed HEAD rather than an uncommitted overlay. v4's per-file LOC were already working-tree-accurate and mostly survive verbatim; what changed in v5: the basis is a clean SHA, §4.5's "uncommitted overlap" table is **retired** (nothing is uncommitted), **~19 of the parallel code-smell audit's High-cluster findings have since been fixed in-tree** (see §4.7), and every §4.1 / §5–§8 line ref was re-derived by a 4-agent re-verification on 2026-05-30. NOTE: the repo is under an active commit cadence — HEAD advanced 7 commits *during* this refresh (`a5cda7df9`→`21c3d517d`) — so treat line refs as a 2026-05-30 snapshot and re-grep before executing.
-**Author:** orchestrator synthesis of 8-lane parallel audit (2026-05-20); v4 reconciliation from a 6-agent re-verification (2026-05-29); v5 reconciliation from a 4-agent re-verification (2026-05-30).
+**Status:** Draft v6 — current-checkout correction (2026-05-30) against HEAD `2bcaeff28`; the tracked worktree was **not clean** at this correction pass because pre-existing source/test edits were present in `src/simsopt/geo/surfaceobjectives_jax.py`, `src/simsopt/jax_core/mps_boozer_kernel_contract.py`, `tests/geo/test_surface_objectives_jax.py`, and `tests/jax_core/test_mps_boozer_kernel_contract.py`. Supersedes Draft v5 (basis `21c3d517d`, 2026-05-30) and Draft v4 (basis `5bcd9061c`, 2026-05-29). Since v4, the previously-dirty working-tree edits that v4's numbers described have been **committed** (notably `f287bde96 refactor(jax): close port remediation review`, which landed the `surfaceobjectives_jax.py` split and most of the code-smell audit fixes). v6 keeps v5 as a historical clean-basis re-verification, but corrects the live HEAD, dirty-tree status, contradicted audit statuses, optimizer-default wording, T2.2 accounting, and stale line/LOC refs. NOTE: the repo is under an active commit cadence, so treat line refs as a 2026-05-30 snapshot and re-grep before executing.
+**Author:** orchestrator synthesis of 8-lane parallel audit (2026-05-20); v4 reconciliation from a 6-agent re-verification (2026-05-29); v5 reconciliation from a 4-agent re-verification (2026-05-30); v6 doc-review correction from a 3-agent drift audit (2026-05-30).
 **Branch:** `gpu-purity-stage2-20260405` (current). New branch recommended for execution: `bloat-reduction-20260520`.
 **Audit basis:** 8 parallel subagent reports plus current-tree Crucible review covering Boozer/objectives, optimizer JAX, jax_core kernels, field/backend, PM/QFM/wireframe, benchmarks/parity, tests, cross-cutting duplication, official JAX/SciPy/SIMSOPT API documentation checks, and a post-v2 codebase-delta validation.
 
@@ -106,7 +106,7 @@ Drawn from `/Users/suhjungdae/code/columbia/AGENTS.md` + `/Users/suhjungdae/.age
 Every PR review must re-confirm these survive bit-identical post-refactor.
 
 - [ ] `_cpu_ordered` byte-identity oracles (`biotsavart_cpu_ordered.py`, `surface_fourier_jax_cpu_ordered.py`, `boozer_residual_jax` cpu_ordered branch).
-- [ ] Forward/adjoint PLU factor reuse and reporting: `boozersurface_jax.py` `_traceable_plu_or_dummy` (`:3090`) / `_traceable_lu_piv_or_dummy` (`:3120`) and `_build_runtime_linear_solve_callbacks` (`:3938`); the LS-lane PLU adjoint lives in the **now-tracked** `surfaceobjectives_traceable_jax.py` `_traceable_solve_plu_linearization` (`:420`, dense matrix `:454`). (`surfaceobjectives_jax.py` shrank to 3,094 LOC and the logic relocated to `surfaceobjectives_traceable_jax.py` (3,428 LOC), which is now a committed file.)
+- [ ] Forward/adjoint PLU factor reuse and reporting: `boozersurface_jax.py` `_traceable_plu_or_dummy` (`:3090`) / `_traceable_lu_piv_or_dummy` (`:3120`) and `_build_runtime_linear_solve_callbacks` (`:3938`); the LS-lane PLU adjoint lives in the **now-tracked** `surfaceobjectives_traceable_jax.py` `_traceable_solve_plu_linearization` (`:420`, dense matrix `:454`). (`surfaceobjectives_jax.py` is now 3,106 LOC and the logic relocated to `surfaceobjectives_traceable_jax.py` (3,428 LOC), which is now a committed file.)
 - [ ] `_pre_newton_census_gate_failures` at `single_stage_init_parity.py:2854` (def; used `:2931`/`:2941`; `SystemExit` wiring `:4150-4153`). Release blocker. (v4 cited def `:2877`/used `:2954`-`:2964`; the SUMMARY's `:2198` and the v3 `:3275-3279` SystemExit are both stale.)
 - [ ] `PARITY_LADDER_TOLERANCES` and all sibling tolerance tables in `benchmarks/validation_ladder_contract.py`.
 - [ ] 7 backend modes (`native_cpu`, `jax_cpu_fast`, `jax_cpu_parity`, `jax_cpu_float32_smoke`, `jax_gpu_fast`, `jax_gpu_parity`, `jax_mps_smoke`) + hard rejection of removed `jax_metal_smoke` / `metal` selectors.
@@ -152,13 +152,13 @@ Every PR review must re-confirm these survive bit-identical post-refactor.
 
 ### 4.5 Current-tree status and concurrency checkpoint
 
-**v5 refresh basis (2026-05-30): HEAD `21c3d517d`, source tree CLEAN.** The v4 basis `5bcd9061c` is 7 commits behind. Crucially, the large uncommitted working-tree edits that v4 measured (and mislabeled as a committed basis) have since been **committed** — the single biggest one, `f287bde96 refactor(jax): close port remediation review`, landed the `surfaceobjectives_jax.py` → `surfaceobjectives_traceable_jax.py` split and the bulk of the code-smell audit fixes. There is therefore **no uncommitted overlap to track**: `git status --porcelain` shows only untracked env/output dirs (`.conda/`, `analysis/`, `runs/`), no modified source.
+**v6 correction basis (2026-05-30): HEAD `2bcaeff28`, tracked tree dirty before this doc edit.** The v5 basis `21c3d517d` is now historical: `HEAD` advanced through MPS custom-call contract work and the doc refresh commit. At the start of this v6 pass, `git status --short` showed pre-existing tracked edits in `src/simsopt/geo/surfaceobjectives_jax.py`, `src/simsopt/jax_core/mps_boozer_kernel_contract.py`, `tests/geo/test_surface_objectives_jax.py`, and `tests/jax_core/test_mps_boozer_kernel_contract.py`, plus untracked local env/output dirs (`.antigravitycli/`, `.conda/`, `analysis/`, `runs/`). This plan does not treat those source/test edits as part of the bloat-plan refresh.
 
 **The v4 "uncommitted overlap" table is RETIRED.** It claimed tiny deltas (e.g. `jax_core/__init__.py` `+0/-13`) that were already wrong when written — those files had large working-tree edits (`jax_core/__init__.py` was actually `+3/-316` vs the then-HEAD) that v4 had silently folded into its LOC numbers while still calling the basis "committed." All of that is now genuinely committed, so the table has no meaning. Do not reintroduce it.
 
-**`surfaceobjectives_traceable_jax.py` (3,428 LOC) is now a TRACKED, committed file** (v4 called it "UNTRACKED, 3,426 LOC"). It is the real split of `surfaceobjectives_jax.py` (now 3,094 LOC) and owns the diagnostics/profile-suite, the `_make_traceable_*` / `_ensure_traceable_runtime_*` families (T3.3 / T3.8 targets), and the LS-lane PLU adjoint `_traceable_solve_plu_linearization` (`:420`) referenced in §4.1.
+**`surfaceobjectives_traceable_jax.py` (3,428 LOC) is now a TRACKED, committed file** (v4 called it "UNTRACKED, 3,426 LOC"). It is the real split of `surfaceobjectives_jax.py` (now 3,106 LOC in the current dirty checkout) and owns the diagnostics/profile-suite, the `_make_traceable_*` / `_ensure_traceable_runtime_*` families (T3.3 / T3.8 targets), and the LS-lane PLU adjoint `_traceable_solve_plu_linearization` (`:420`) referenced in §4.1.
 
-**Concurrency caveat (still live).** The repo is under an active commit cadence by a concurrent agent: during the v5 refresh alone, HEAD advanced `a5cda7df9` → `c181134ee` → `824f00546` → `21c3d517d` (7 commits: the remediation-review batch, CUDA-signoff gates, and jax-mps kernel additions). The v5 line refs were re-derived and spot-checked against `21c3d517d` (`_build_runtime_linear_solve_callbacks:3938`, gate def `:2854`, `_scipy_dispatch_core:138`, `f_bwd:1839` all confirmed exact), and the final two commits only *added* new `mps_*` files, so the refs hold. Still: **re-grep before executing any item**, and do not assume an item is un-started just because the box reads `[ ]` — several were silently completed in the committed batch (see §4.7).
+**Concurrency caveat (still live).** The repo is under an active commit cadence by concurrent agents. Since v5, `git diff --name-only 21c3d517d..HEAD -- src/simsopt tests benchmarks docs/...` shows committed drift in the MPS custom-call code/tests, `benchmarks/mps_boozer_kernel_contract_dump.py`, `tests/integration/test_single_stage_jax_cpu_reference.py`, `tests/test_benchmark_helpers.py`, and these two docs. The additional current dirty files listed above may move line refs again. **Re-grep before executing any item**, and do not assume an item is un-started just because the box reads `[ ]` — several were silently completed or re-scoped in the committed batch (see §4.7/§4.8).
 
 ### 4.6 — v4 reconciliation summary (2026-05-29)
 
@@ -166,9 +166,9 @@ Findings from the 6-agent re-verification against HEAD `5bcd9061c`:
 
 - **Scaffolding is the stale part, not the substance.** Almost none of the 33 refactors has been executed, so the consolidation work is still wanted. What drifted is the basis commit, the §4.5 tables, and nearly every line ref/count.
 - **Items already done / overtaken (now marked):**
-  - **T2.2** — ALREADY DONE: the `boozer_radial_field` columns + thin `_eval_X` wrapper structure is implemented; remove its ~400 LOC from the T2 target.
+  - **T2.2** — v4 said ALREADY DONE, but v6 corrects this to **PARTIAL / NOT BANKED**: `boozer_radial_field.py` still carries parallel `_eval_*_from_columns` implementations (`:452-787`) and separate `_eval_*` implementations (`:807-1190`). Keep the item open until the thin-wrapper fold lands; do not remove its ~400 LOC from the T2 target.
   - **T3.3 / T3.8** — PARTIALLY DONE / RELOCATED into `surfaceobjectives_traceable_jax.py` (diagnostics + `_make_traceable_*` family), not the `_diagnostics` sibling the items name.
-  - **T4.2** — DECISION MADE by Plan A (HANDOFF.md, 2026-05-29): `scipy-jax` = GPU production lane, `scipy-jax-fullgraph` = CPU default; collapses to a CLAUDE.md doc update, not a removal.
+  - **T4.2** — DECISION MADE by Plan A (HANDOFF.md, 2026-05-29), with v6 wording corrected against live defaults: `scipy-jax` is the default JAX optimizer lane on both CPU and CUDA; `scipy-jax-fullgraph` remains an explicit stress/parity lane. This collapses to docs, not removal.
   - **T4.4** — LIKELY OBSOLETE: `SLSQP`/`slsqp` has 0 occurrences in `qfm_solver.py`; confirm with a full-repo grep, then close. **[v5 correction: this was WRONG — the alias is alive in the qfm *surface* wrappers (`qfmsurface_jax.py:281`, `qfmsurface.py:147`). See §4.7 / §8.4.]**
   - **T1.11** — VERIFIED satisfied (`_skip_case` used 19×).
 - **Corrected counts/figures:** T1.1 `jax_core/__init__.py` is 363 LOC not 676 (saving ~300 not ~620); T1.3 has 6 Result classes not 5; T1.6 covers 6 methods not 12; T1.8 over-counted dead aliases (`_zero_profile_component_timings` is live at `:2249`).
@@ -176,10 +176,10 @@ Findings from the 6-agent re-verification against HEAD `5bcd9061c`:
 
 ### 4.7 — v5 reconciliation summary (2026-05-30)
 
-Findings from the 4-agent re-verification against the now-clean HEAD `21c3d517d`:
+Findings from the historical v5 4-agent re-verification against clean HEAD `21c3d517d`, plus v6 current-checkout corrections:
 
 - **The bloat refactors themselves are still almost entirely un-started.** The committed batch (`f287bde96` and successors) was *audit remediation* — correctness / strict-CUDA / test-oracle fixes — not *bloat reduction*; the consolidation work in §5–§8 remains wanted. v4's structural conclusions stand; v5 only refreshes the basis, the line refs, and a few item statuses.
-- **~17–19 of the 2026-05-20 code-smell audit's High-cluster findings are now fixed in-tree** (verified by re-grep, not just re-pointed; a handful are only *partially* fixed — see the per-finding `RESOLVED`/`PARTIAL` annotations in the refreshed reports). Fully resolved: A1-F1 (`_safe_radius_squared`→`_radius_squared`, clamp removed), A2-F3 (`_set_global_coil_dofs` token-after-mutation), A2-F12 (gradient delegation), A4-F1/A10-M2 (`recompute_bell` token+cache), A4-F2 (precomputed surface signature), A5-F2 (all `jax.debug.callback` now `ordered=False`), A6-H1 (`f_bwd` NaN routing — was a CLAUDE.md contract FAIL, now PASS), A6-H2 (`sdofs` kwarg), A6-M5 (column-batched adjoint), A7-H1 (conftest no longer registers the deleted `backend.py`), A7-M1 (`metal`→`jax_mps_smoke`), A7-M2 (CLAUDE.md backend row), A8-H4 (vectorized `modB`), A9-H3 (vectorized coil unroll), A9-M1 (runner cache re-keyed to `_cached_traceable_runner`), A10-H1 (QfmResidualJAX hot-path read + `append_parent` removed), A8-H3 (`jax.local_devices()` at both `surfaceobjectives_jax.py:2151` and `mpi_jax.py:114`), A11-H2/H3/H4/M3 (test-oracle fixes). Partially resolved: A2-F2/A10-H2 (`_dof_layout_version` now advanced, but `set_recompute_flag` not yet overridden on the spec-backed lane); A8-H1 (the flagged `jnp.asarray(<numeric literal>)` host-init pattern is **gone** — converted to `runtime_init_*` / `runtime_device_put`, 84 refs in `wireframe_workflow.py` alone, 0 literal `jnp.asarray` host-inits — but a few `jnp.asarray(<python-int var>, dtype=)` calls remain in the GSCO history validator at `wireframe_workflow.py:390-411`, the `:390-411` set inside a `_has_tracer_leaf` trace-only branch). These touch parity-sensitive surfaces but are orthogonal to the bloat plan; the full refreshed audit (current line refs + `RESOLVED`/`PARTIAL` annotations) lives in `.artifacts/code_smell_review_2026-05-20/`, also refreshed 2026-05-30.
+- **~17–19 of the 2026-05-20 code-smell audit's High-cluster findings are now fixed in-tree** (verified by re-grep, not just re-pointed; a handful are only *partially* fixed — see the per-finding `RESOLVED`/`PARTIAL` annotations in the refreshed reports). Fully resolved: A1-F1 (`_safe_radius_squared`→`_radius_squared`, clamp removed), A2-F3 (`_set_global_coil_dofs` token-after-mutation), A2-F12 (gradient delegation), A4-F1/A10-M2 (`recompute_bell` token+cache), A4-F2 (precomputed surface signature), A5-F2 (all `jax.debug.callback` now `ordered=False`), A6-H1 (`f_bwd` NaN routing — was a CLAUDE.md contract FAIL, now PASS), A6-H2 (`sdofs` kwarg), A6-M5 (column-batched adjoint), A7-H1 (conftest no longer registers the deleted `backend.py`), A7-M1 (`metal`→`jax_mps_smoke`), A7-M2 (CLAUDE.md backend row), A8-H4 (vectorized `modB`), A9-H3 (vectorized coil unroll), A9-M1 (runner cache re-keyed to `_cached_traceable_runner`), A10-H1 (QfmResidualJAX hot-path read + `append_parent` removed), A8-H3 (`jax.local_devices()` at both `surfaceobjectives_jax.py:2151` and `mpi_jax.py:114`), A11-H2/H3/H4/M3 (test-oracle fixes). V6 correction: A2-F2/A10-H2 is **resolved** by `SpecBackedBiotSavartJAX.update_free_dof_size_indices` advancing `_dof_layout_version`; the missing spec-backed `set_recompute_flag` override is moot because the spec-backed adapter owns its DOFs directly and has no upstream `depends_on` cascade. A8-H1 remains partial: `wireframe_workflow.py:390-411` still has `jnp.asarray(max_steps/history_capacity, dtype=...)` paths, and `:410-411` plus `:1167` remain outside the tracer-only branch. These touch parity-sensitive surfaces but are orthogonal to the bloat plan; the refreshed audit lives in `.artifacts/code_smell_review_2026-05-20/`, with final retraction status in `verification/CORRECTIONS_round5.md`.
 - **Item already done / overtaken (addition to v4's list):**
   - **T3.2** — the field-evaluation duplication is **ALREADY DONE**: a `_BiotSavartFieldEvaluationMixin` (`biotsavart_jax_backend.py:489-515`) is now inherited by both `SpecBackedBiotSavartJAX` and `BiotSavartJAX`. The remaining T3.2 dup is only `set_points`/`get_points*` and the diverged `coil_cotangents_to_dofs_gradient`; re-scope down from ~250 LOC.
 - **Corrections to v4 item text:**
@@ -189,17 +189,24 @@ Findings from the 4-agent re-verification against the now-clean HEAD `21c3d517d`
   - **T1.1** — the `jax_core/__init__.py` 676→363 LOC drop is **NOT** the planned lazy-export-map conversion; the file still carries the full explicit dual-list. T1.1 remains genuinely `[ ]` with ~300 LOC available. (Do not infer "done" from the LOC delta.)
 - **Two stale LOC counts fixed:** `tracing.py` is 4,287 (v4 said 4,299); `surfaceobjectives_traceable_jax.py` is 3,428 (v4 said 3,426).
 
+### 4.8 — v6 doc-review correction summary (2026-05-30)
+
+- **Current HEAD/status:** live HEAD is `2bcaeff28`, not `21c3d517d`; the tracked worktree has pre-existing source/test edits outside this document. Treat v5's clean-tree language as historical only.
+- **Artifact status correction:** `verification/CORRECTIONS_round5.md` retracts A6-H3/item 12 and A1-F2/item 17 as active bugs. A6-H3's tuple-arity future-proofing assert is landed at `surfaceobjectives_traceable_jax.py:399-402`; A1-F2 matches SciPy/FITPACK repeated-knot behavior.
+- **DOF invalidation correction:** A2-F2/A10-H2 is fixed by the spec-backed `_dof_layout_version` bump; do not require or cite a spec-backed `set_recompute_flag` override. The live mutable `BiotSavartJAX` override remains at `biotsavart_jax_backend.py:1370-1377`.
+- **Execution-accounting correction:** T2.2 is not already banked. The column bundle exists, but the duplicated `_eval_*_from_columns` and `_eval_*` families remain in `boozer_radial_field.py`; totals below now count it as remaining candidate work.
+
 ---
 
 ## 5. Tier 1 — Mechanical Wins
 
-**Target:** ~950 LOC guaranteed reduction, plus up to ~1,245 LOC only if probe-script migration proves safe. **Effort:** ~2 days. **Risk:** Low-Medium.
+**Target:** ~630–670 LOC guaranteed reduction, plus up to ~1,245 LOC only if probe-script migration proves safe. **Effort:** ~2 days. **Risk:** Low-Medium.
 
 Goal: bank low-risk LOC reduction first; pattern-validate factory ideas in tiny scope.
 
 ### 5.1 — [ ] T1.1: `jax_core/__init__.py` → lazy export map
 
-- **Files:** `src/simsopt/jax_core/__init__.py` (**363 LOC**, committed @`21c3d517d` — down from 676, but the shrink was unrelated churn, **not** this refactor: the explicit dual-list is still fully present and there is no `build_lazy_export_map` call, so T1.1 is genuinely un-started. Do not infer "done" from the LOC delta).
+- **Files:** `src/simsopt/jax_core/__init__.py` (**363 LOC**, observed @`2bcaeff28` — down from 676, but the shrink was unrelated churn, **not** this refactor: the explicit dual-list is still fully present and there is no `build_lazy_export_map` call, so T1.1 is genuinely un-started. Do not infer "done" from the LOC delta).
 - **Change:** Replace the explicit dual list (`_EXPORT_MODULES` at `:19`, `__all__` at `:336`, `_EXPORT_MODULE_OBJECTS` at `:339`, manual `__getattr__` at `:357`) with `_lazy_exports.build_lazy_export_map(...)` matching `src/simsopt/geo/__init__.py:75` and `src/simsopt/field/__init__.py:56`.
 - **LOC saved:** **~300** (revised down from v3's ~620 — the file is now 363 LOC, so ~620 is impossible).
 - **Risk:** Low. Five sibling packages already use this pattern.
@@ -299,7 +306,7 @@ Goal: bank low-risk LOC reduction first; pattern-validate factory ideas in tiny 
 
 ### Tier 1 exit gate
 
-All required T1 items merged; guaranteed net LOC reduction ≥ 850; probe-script deletion excluded unless T1.10 migration retires a script safely; full T1 suite green; contract checklist re-affirmed; tag `bloat-reduction-T1-complete`.
+All required T1 items merged; guaranteed net LOC reduction ≥ 600; probe-script deletion excluded unless T1.10 migration retires a script safely; full T1 suite green; contract checklist re-affirmed; tag `bloat-reduction-T1-complete`.
 
 ---
 
@@ -318,10 +325,9 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 - **Contracts:** Result-dict required/forbidden keys; success-vs-failure `linear_solve_backend` strings; `adjoint_linear_solve_available` flag.
 - **Validation gate:** T2 + result-dict schema tests in `test_boozersurface_jax.py`.
 
-### 6.2 — [x] T2.2: `boozer_radial_field` 16×2 evaluator collapse — **ALREADY DONE (v4)**
+### 6.2 — [ ] T2.2: `boozer_radial_field` 16×2 evaluator collapse — **PARTIAL / NOT BANKED (v6 correction)**
 
-- **v4 status:** This fold is already implemented. `boozer_radial_field.py` (1,193 LOC) has `_eval_radial_columns` (`:402`), 19× `_eval_X_from_columns` (`:452-806`), `_eval_X(state, points)` (`:807-1193`), and `BoozerRadialColumnBundle` (`:168`) — exactly the target structure below. ~400 LOC already banked; removed from the T2 total.
-- **v5 caveat:** the `:807+` `_eval_X` are **parallel independent implementations**, not thin delegating wrappers over `_eval_X_from_columns` (they call `inverse_fourier_transform_{even,odd}` / `_scalar_at` directly). So residual duplication between the `_from_columns` family and the `_eval_X` family **remains** — a genuine re-scope candidate, not fully banked.
+- **v6 status:** The column bundle and `_eval_radial_columns` structure exist, but the fold is not complete. `boozer_radial_field.py` still has parallel `_eval_*_from_columns` implementations (`:452-787`) and separate `_eval_*` implementations (`:807-1190`) that call `inverse_fourier_transform_{even,odd}` / `_scalar_at` directly. Residual duplication remains; the ~400 LOC should not be counted as already banked.
 - **Files:** `src/simsopt/jax_core/boozer_radial_field.py` (1,193 LOC).
 - **Change:** Keep `_eval_X_from_columns` only; add cheap wrapper `_eval_X(state, points) = _eval_X_from_columns(state, _eval_radial_columns(state, points[:, 0]), points)` or parametrize via per-quantity tuple `(cnc_field, sns_field, deriv_factor, radial_kind)`.
 - **LOC saved:** ~400.
@@ -394,7 +400,7 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 
 ### Tier 2 exit gate
 
-All 9 items merged; net LOC reduction ≥ 3,150; T2 suite green; contract checklist re-affirmed; `_pre_newton_census_gate_failures` replay byte-identical; tag `bloat-reduction-T2-complete`.
+All 9 items merged; net LOC reduction target recomputed from live item estimates; T2 suite green; contract checklist re-affirmed; `_pre_newton_census_gate_failures` replay byte-identical; tag `bloat-reduction-T2-complete`.
 
 ---
 
@@ -424,7 +430,7 @@ Goal: large-scale folds across multiple files. Higher risk because they touch ho
 
 ### 7.3 — [ ] T3.3: Profile machinery → sibling diagnostic modules
 
-- **v4/v5 status (PARTIALLY DONE / RELOCATED):** The `surfaceobjectives_jax.py` half already moved — `diagnose_traceable_objective_runtime` and `make_traceable_objective_profile_suite` are no longer in `surfaceobjectives_jax.py` (now 3,094 LOC); they live in the **now-tracked** `surfaceobjectives_traceable_jax.py` (`diagnose…:2490`, `make_…_profile_suite:3378`), but are NOT yet isolated to a dedicated `_diagnostics` sibling. The v3 refs `surfaceobjectives_jax.py:5382-5650 / 5670-5959 / 6270-6284` are **dead**.
+- **v4/v5 status (PARTIALLY DONE / RELOCATED):** The `surfaceobjectives_jax.py` half already moved — `diagnose_traceable_objective_runtime` and `make_traceable_objective_profile_suite` are no longer in `surfaceobjectives_jax.py` (now 3,106 LOC in the current checkout); they live in the **now-tracked** `surfaceobjectives_traceable_jax.py` (`diagnose…:2490`, `make_…_profile_suite:3378`), but are NOT yet isolated to a dedicated `_diagnostics` sibling. The v3 refs `surfaceobjectives_jax.py:5382-5650 / 5670-5959 / 6270-6284` are **dead**.
 - **Files (remaining):**
   - `biotsavart_jax_backend.py` profile helpers (~`:215-303`, `:2125-2212`) → new `biotsavart_jax_profile.py` (still pending; re-derive refs against HEAD).
   - Finish the `surfaceobjectives` split: extract the diagnostics now living in `surfaceobjectives_traceable_jax.py` into a `_diagnostics` sibling, if that isolation is still wanted.
@@ -498,9 +504,9 @@ These items deliver significant LOC reduction (potentially 1,640+ LOC) but requi
 
 ### 8.2 — [x] T4.2: Reconcile `scipy-jax` and `scipy-jax-fullgraph` outer backends with CLAUDE.md spec — **DECISION MADE (v4): KEEP + document**
 
-- **v4 status:** Plan A (HANDOFF.md, 2026-05-29) answered the open question: `scipy-jax` is the **GPU production lane** and `scipy-jax-fullgraph` is the **CPU default** ("Do not relitigate"). This is the "If alive" branch — the only remaining work is the CLAUDE.md / user-doc update; **no removal**. Both lanes are live in `optimizer_jax.py` (mapping `:227-228`, dispatch `:703`).
+- **v6 status:** Plan A (HANDOFF.md, 2026-05-29) answered the open question, but v4/v5 misstated the default split. Live defaults route the JAX optimizer lane to `scipy-jax` on both CPU and CUDA (`tests/test_cli_defaults.py:36-41`, `:51-56`, `:133-145`; single-stage resolver `single_stage_banana_example.py:7996-8005`; Stage 2 resolver `banana_coil_solver.py:803-809`). `scipy-jax-fullgraph` remains an explicit stress/parity lane. This is the "If alive" branch — the only remaining work is the CLAUDE.md / user-doc update; **no removal**. Both lanes are live in `optimizer_jax.py` (mapping `:227-228`, dispatch `:703`).
 - **Current-tree status:** Alive user-facing surfaces. `scipy-jax` and `scipy-jax-fullgraph` are exposed by Stage 2 and single-stage example CLIs, mapped in integration tests, and routed in benchmark helper tests.
-- **Decision needed:** Are `scipy-jax` / `scipy-jax-fullgraph` intended production lanes? If yes, CLAUDE.md and user docs need updating. If no, perform an API-evolution removal across CLI choices, dispatcher branches, tests, docs, and benchmark routing.
+- **Decision needed:** None on removal. CLAUDE.md and user docs need updating so they distinguish the default `scipy-jax` lane from the explicit `scipy-jax-fullgraph` stress/parity lane.
 - **If dead:** ~150 LOC reduction only after API removal is complete.
 - **If alive:** Update CLAUDE.md to document them.
 
@@ -508,7 +514,7 @@ These items deliver significant LOC reduction (potentially 1,640+ LOC) but requi
 
 - **Surface:** `qfm_solver.py:497-634` (~138 LOC home-grown BFGS with Armijo line search; v4 said `:431-614` ~190 LOC). The private BFGS uses strong Wolfe; iteration counts will differ.
 - **Decision needed:** Acceptable to replace Armijo-only inner BFGS with SciPy-style BFGS Armijo+curvature conditions and re-tune QFM `max_iter` defaults? Or is the Armijo behavior load-bearing for QFM convergence empirics?
-- **If reuse approved:** ~190 LOC reduction; need QFM acceptance re-run covering natural-equality KKT success, feasible-nonstationary rejection, branch-stability invariants, host-SLSQP diagnostics, and infeasible/warm-start perturbation cases.
+- **If reuse approved:** ~138 LOC reduction; need QFM acceptance re-run covering natural-equality KKT success, feasible-nonstationary rejection, branch-stability invariants, host-SLSQP diagnostics, and infeasible/warm-start perturbation cases.
 - **If reject:** Keep duplicate; document why in CLAUDE.md.
 
 ### 8.4 — [ ] T4.4: Rename or quarantine `minimize_qfm_exact_constraints_SLSQP` alias — **NOT obsolete (v5 correction); re-scoped to surface wrappers**
@@ -520,7 +526,7 @@ These items deliver significant LOC reduction (potentially 1,640+ LOC) but requi
 
 ### 8.5 — [ ] T4.5: Surviving tautological tests
 
-- **Surface:** Lane 7 listed 12–15 surviving tautologies. **v5 re-derivation:** `test_trace_boozer_analytic_jax.py:139` + `:207` (is-identity, still valid — v4's `:139-141/:207-209` accurate); `test_single_stage_jax_cpu_reference.py` ranges **all drifted** (current `is`-identity at `:2606`/`:2801`/`:3031`; `weight_inv_modB` at `:2407-2408`; v4's `:2654-2696/:2388-2413/:2609-2629/:2698-2717` are stale — the file is now 8,666 LOC); `test_boozersurface_jax.py` LM-options block now ~`:7720-7740` (v4 `:7727-7789`). The related flux-parity test is `tests/objectives/test_fluxobjective_jax_parity.py:681` (Tier-4 disclosed `:684`), **not** `tests/field/`. NOTE: several A11 test-oracle tautologies cited here have since been **fixed** (A11-H2/H3/H4 — see §4.7); only the `test_curve_objectives_jax.py` cluster (A11-H1) and these routing tests remain.
+- **Surface:** Lane 7 listed 12–15 surviving tautologies. **v6 re-derivation:** `tests/field/test_trace_boozer_analytic_jax.py:139` + `:207` remain identity-routing assertions; `tests/integration/test_single_stage_jax_cpu_reference.py` is now 8,926 LOC with `weight_inv_modB` option propagation at `:2406`/`:2413-2414`, same-helper routing text at `:2706-2720`, cached-transform identity at `:2828-2866`, and adjoint/VJP health-only checks at `:2928-3031`. The related flux fast-path identity assertions are `tests/objectives/test_fluxobjective_jax_parity.py:463-464`; the large-point-cloud self-consistency test begins at `:681` and is not the fast-path identity check. NOTE: several A11 test-oracle tautologies cited here have since been **fixed** (A11-H2/H3/H4 — see §4.7); only the `test_curve_objectives_jax.py` cluster (A11-H1) and these routing/health tests remain.
 - **Decision needed (per-test):** rewrite with independent oracle, or accept-and-document as Tier-4 routing tests per `tests/REVIEWER_ORACLE_LINT.md`?
 - **LOC neutral or slightly positive (~40 from mock-invariant consolidation).**
 
@@ -644,11 +650,11 @@ These need user answers before starting:
 
 | Tier | LOC reduction (est.) | Items | Effort | Risk |
 |------|---------------------:|------:|--------|------|
-| T1 — Mechanical Wins | ~630 guaranteed (v3 ~950; T1.1 cut ~620→~300 as file already shrank to 363 LOC) (+ up to ~1,245 probe-script decision-gated) | 11 (T1.11 verified) | 2 days | Low-Med |
-| T2 — Factory Introductions | ~3,100 (v3 3,500; **T2.2 ~400 already done** — removed) | 9 (T2.2 done) | 3–4 days | Low-Med |
+| T1 — Mechanical Wins | ~630-670 guaranteed (v3 ~950; T1.1 cut ~620→~300 as file already shrank to 363 LOC) (+ up to ~1,245 probe-script decision-gated) | 11 (T1.11 verified) | 2 days | Low-Med |
+| T2 — Factory Introductions | ~3,500 (v5 subtracted T2.2 incorrectly; v6 counts its ~400 LOC as remaining until the wrapper fold lands) | 9 (T2.2 partial/open) | 3–4 days | Low-Med |
 | T3 — Structural Consolidations | ~4,000–5,500 (T3.2 field-eval dup **already folded** via `_BiotSavartFieldEvaluationMixin`, re-scope −~250; T3.3 / T3.8 partially done via the `surfaceobjectives_traceable_jax.py` split) | 8 | 1–2 weeks | Med |
 | T4 — Decision Points | T4.2 resolved (doc-only); T4.1 ~1,628 + T4.3 ~138 + T4.4 (alias quarantine, re-scoped to the qfm **surface** wrappers — **not** obsolete) still decision-gated | 5 (T4.2 resolved) | varies | Decision-bound |
-| **Aggregate** | **~7,900–9,400 guaranteed candidate LOC remaining (T2.2 ~400 + T3.2 field-eval ~250 already banked), plus decision-gated deletions. Separately, ~19 code-smell audit findings already landed (§4.7) — those are correctness fixes, not bloat-LOC.** | **33 items (T2.2 done; T3.2 partial; T4.2 resolved)** | **~3 weeks** | **manageable with gates** |
+| **Aggregate** | **~8,300–9,800 guaranteed candidate LOC remaining (T2.2 is not banked; T3.2 field-eval ~250 already banked), plus decision-gated deletions. Separately, ~19 code-smell audit findings already landed or were corrected/retracted (§4.7/§4.8) — those are correctness fixes/status corrections, not bloat-LOC.** | **33 items (T2.2 partial/open; T3.2 partial; T4.2 resolved)** | **~3 weeks** | **manageable with gates** |
 
 ---
 
@@ -694,10 +700,10 @@ This plan was generated from 8 parallel subagent reports (2026-05-20):
 | 7 | JAX tests (`test_boozersurface_jax`, `test_single_stage_jax_cpu_reference`, etc.) | ~500 |
 | 8 | Cross-cutting duplication (sibling-variant files, re-export shims, dtype helpers, state tokens) | ~850 |
 
-Aggregate unique reduction after lane overlap consolidation: **~8,900–10,500 guaranteed candidate LOC**, plus decision-gated optional deletions.
+Aggregate unique reduction after lane overlap consolidation: **~8,300–9,800 guaranteed candidate LOC**, plus decision-gated optional deletions.
 
-Full audit transcripts available in the orchestrator session log (2026-05-20). The 11 per-lane reports + `SUMMARY.md` + the 24 verification-round logs live in `.artifacts/code_smell_review_2026-05-20/`; all of them had their `file:line` refs **refreshed against HEAD `21c3d517d` on 2026-05-30**, with already-fixed findings annotated `RESOLVED`/`PARTIAL` (see §4.7).
+Full audit transcripts available in the orchestrator session log (2026-05-20). The original bloat plan was generated from 8 bloat-reduction lanes; the separate code-smell artifact contains 11 per-lane reports + `SUMMARY.md` + 24 verification-round logs under `.artifacts/code_smell_review_2026-05-20/`. Those logs are historical records with 2026-05-30 line-ref annotations originally refreshed against HEAD `21c3d517d`; use `SUMMARY.md` plus `verification/CORRECTIONS_round5.md` as the final status for retracted items, and re-grep current HEAD/dirty files before executing.
 
 ---
 
-*End of plan v5. Crucible-reviewed; basis + all §4.1 / §5–§8 line refs re-derived against clean HEAD `21c3d517d` on 2026-05-30 by a 4-agent re-verification. Re-grep before executing — the repo is under active concurrent commits.*
+*End of plan v6. Crucible-reviewed; v5 basis + §4.1 / §5–§8 line refs were re-derived against clean HEAD `21c3d517d` on 2026-05-30, then corrected against live HEAD `2bcaeff28` and the current dirty-worktree status by a 3-agent doc-review pass. Re-grep before executing — the repo is under active concurrent commits.*
