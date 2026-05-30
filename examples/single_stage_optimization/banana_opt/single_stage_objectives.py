@@ -201,6 +201,27 @@ def _surface_upper_bound_constraint(
     return signed_value, grad, _positive_violation(signed_value)
 
 
+def _boozer_adjoint_upper_bound_constraint(
+    boozer_adjoint_objective, threshold, objective_optimizable
+):
+    """ALM upper-bound constraint whose gradient flows through the Boozer adjoint.
+
+    ``boozer_adjoint_objective`` is a simsopt ``MajorRadius``-style wrapper over a
+    BoozerSurface: ``J()`` returns the surface quantity (e.g. major radius, in m)
+    and ``dJ(partials=True)`` returns its derivative w.r.t. the COIL dofs via the
+    Boozer-surface adjoint. ``signed_value = J() - threshold`` and the violation are
+    identical to the fixed-surface ``_surface_upper_bound_constraint`` path; only the
+    gradient differs (nonzero over the coil dofs instead of gradient-dead). The
+    BoozerSurface is reused from its last solution, so this adds no fresh Boozer solve.
+    """
+    signed_value = float(boozer_adjoint_objective.J()) - float(threshold)
+    grad = np.asarray(
+        boozer_adjoint_objective.dJ(partials=True)(objective_optimizable),
+        dtype=float,
+    )
+    return signed_value, grad, _positive_violation(signed_value)
+
+
 def _optional_objective_value_and_gradient(
     objective,
     reference_grad,
@@ -878,6 +899,8 @@ def evaluate_alm_objective(
     width_max_threshold=None,
     JCurveSelfIntersect=None,
     lcfs_surface=None,
+    JLCFSMajorRadius=None,
+    JLCFSMinorRadius=None,
     lcfs_major_radius_threshold=None,
     lcfs_minor_radius_threshold=None,
     JNonQSObjective=None,
@@ -1098,21 +1121,50 @@ def evaluate_alm_objective(
             _positive_violation(self_intersect_signed_value),
         )
     if lcfs_surface is not None and lcfs_major_radius_threshold is not None:
-        hardware_constraints["lcfs_major_radius"] = _surface_upper_bound_constraint(
-            lcfs_surface,
-            lcfs_surface.major_radius(),
-            lcfs_surface.dmajor_radius_by_dcoeff(),
-            lcfs_major_radius_threshold,
-            objective_optimizable,
-        )
+        # The LCFS Fourier dofs are fixed (not in the coil dof graph), so the
+        # fixed-surface dmajor_radius_by_dcoeff path is gradient-dead over the coils
+        # and cannot actuate the ALM constraint. When the Boozer-adjoint objective is
+        # supplied, route the true d(major_radius)/d(coils) through it instead; the
+        # signed value (major_radius - threshold) is identical.
+        if JLCFSMajorRadius is not None:
+            hardware_constraints["lcfs_major_radius"] = (
+                _boozer_adjoint_upper_bound_constraint(
+                    JLCFSMajorRadius,
+                    lcfs_major_radius_threshold,
+                    objective_optimizable,
+                )
+            )
+        else:
+            hardware_constraints["lcfs_major_radius"] = _surface_upper_bound_constraint(
+                lcfs_surface,
+                lcfs_surface.major_radius(),
+                lcfs_surface.dmajor_radius_by_dcoeff(),
+                lcfs_major_radius_threshold,
+                objective_optimizable,
+            )
     if lcfs_surface is not None and lcfs_minor_radius_threshold is not None:
-        hardware_constraints["lcfs_minor_radius"] = _surface_upper_bound_constraint(
-            lcfs_surface,
-            lcfs_surface.minor_radius(),
-            lcfs_surface.dminor_radius_by_dcoeff(),
-            lcfs_minor_radius_threshold,
-            objective_optimizable,
-        )
+        # Same gradient-dead mechanism as major radius: the LCFS Fourier dofs are
+        # fixed (not in the coil dof graph), so the fixed-surface
+        # dminor_radius_by_dcoeff path is zero over the coils and cannot actuate the
+        # ALM constraint. When the Boozer-adjoint objective is supplied, route the
+        # true d(minor_radius)/d(coils) through it; the signed value
+        # (minor_radius - threshold) is identical.
+        if JLCFSMinorRadius is not None:
+            hardware_constraints["lcfs_minor_radius"] = (
+                _boozer_adjoint_upper_bound_constraint(
+                    JLCFSMinorRadius,
+                    lcfs_minor_radius_threshold,
+                    objective_optimizable,
+                )
+            )
+        else:
+            hardware_constraints["lcfs_minor_radius"] = _surface_upper_bound_constraint(
+                lcfs_surface,
+                lcfs_surface.minor_radius(),
+                lcfs_surface.dminor_radius_by_dcoeff(),
+                lcfs_minor_radius_threshold,
+                objective_optimizable,
+            )
 
     hard_signed_values_by_name: dict[str, float] = {
         name: float(values[0]) for name, values in hardware_constraints.items()

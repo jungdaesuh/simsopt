@@ -12190,6 +12190,8 @@ class HardwareConstraintTests(unittest.TestCase):
                 "LpCurveCurvature",
                 "PoloidalExtent",
                 "EllipseWidth",
+                "MajorRadius",
+                "MinorRadius",
             ):
                 stack.enter_context(patch.object(module, name, return_value=object()))
             stack.enter_context(

@@ -43,6 +43,8 @@ from simsopt.geo import (
 from simsopt.geo.surfaceobjectives import (
     Volume,
     Iotas,
+    MajorRadius,
+    MinorRadius,
     NonQuasiSymmetricRatio,
 )
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
@@ -6325,6 +6327,16 @@ def build_single_stage_objective_bundle(
             BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * banana_curves[0].order
         ),
     )
+    # Boozer-adjoint major-radius objective for the LCFS upper-bound ALM constraint.
+    # Supplies d(major_radius)/d(coils) via the BoozerSurface adjoint; the fixed-surface
+    # dmajor_radius_by_dcoeff path is gradient-dead over the coil dofs. Reuses the outer
+    # BoozerSurface (already solved each iter for Iotas/QS), so it adds no fresh solve.
+    JLCFSMajorRadius = MajorRadius(surface_data[-1]["boozer_surface"])
+    # Boozer-adjoint minor-radius objective for the LCFS upper-bound ALM constraint.
+    # Same gradient-dead mechanism as major radius: the fixed-surface
+    # dminor_radius_by_dcoeff path is zero over the coil dofs. Reuses the same outer
+    # BoozerSurface (and its cached solution), so it adds no fresh solve.
+    JLCFSMinorRadius = MinorRadius(surface_data[-1]["boozer_surface"])
     # Opt-in SIMSOPT coil regularizers (default-OFF): constructed only when the
     # corresponding weight is set, so default runs add nothing to the objective
     # graph and stay byte-identical. MSC/arclength regularize the optimized banana
@@ -6400,6 +6412,8 @@ def build_single_stage_objective_bundle(
         "JPoloidalExtent": JPoloidalExtent,
         "JCoilWidth": JCoilWidth,
         "JCurveSelfIntersect": JCurveSelfIntersect,
+        "JLCFSMajorRadius": JLCFSMajorRadius,
+        "JLCFSMinorRadius": JLCFSMinorRadius,
         "JResidueObjective": JResidueObjective,
         "JMeanSquaredCurvature": JMeanSquaredCurvature,
         "JArclengthVariation": JArclengthVariation,
@@ -6433,6 +6447,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JPoloidalExtent
     global JCoilWidth
     global JCurveSelfIntersect
+    global JLCFSMajorRadius
+    global JLCFSMinorRadius
     global JResidueObjective
     global JMeanSquaredCurvature
     global JArclengthVariation
@@ -6463,6 +6479,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JPoloidalExtent = objective_bundle["JPoloidalExtent"]
     JCoilWidth = objective_bundle["JCoilWidth"]
     JCurveSelfIntersect = objective_bundle["JCurveSelfIntersect"]
+    JLCFSMajorRadius = objective_bundle["JLCFSMajorRadius"]
+    JLCFSMinorRadius = objective_bundle["JLCFSMinorRadius"]
     JResidueObjective = objective_bundle["JResidueObjective"]
     JMeanSquaredCurvature = objective_bundle["JMeanSquaredCurvature"]
     JArclengthVariation = objective_bundle["JArclengthVariation"]
@@ -6971,6 +6989,8 @@ def evaluate_alm_objective(
             width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             JCurveSelfIntersect=JCurveSelfIntersect,
             lcfs_surface=outer_surface_data["boozer_surface"].surface,
+            JLCFSMajorRadius=globals().get("JLCFSMajorRadius"),
+            JLCFSMinorRadius=globals().get("JLCFSMinorRadius"),
             lcfs_major_radius_threshold=TARGET_LCFS_MAX_MAJOR_RADIUS_M,
             lcfs_minor_radius_threshold=TARGET_LCFS_MAX_MINOR_RADIUS_M,
             JNonQSObjective=objective_terms["JNonQSObjective"],
@@ -11433,6 +11453,8 @@ JCurveLengthMin = None
 JPoloidalExtent = None
 JCoilWidth = None
 JCurveSelfIntersect = None
+JLCFSMajorRadius = None
+JLCFSMinorRadius = None
 JResidueObjective = None
 SINGLE_STAGE_POLOIDAL_WEIGHT = POLOIDAL_EXTENT_WEIGHT
 SINGLE_STAGE_WIDTH_WEIGHT = 0.0

@@ -15,7 +15,7 @@ from .jit import jit
 
 __all__ = ['Area', 'Volume', 'ToroidalFlux', 'PrincipalCurvature',
            'QfmResidual', 'boozer_surface_residual', 'Iotas', 
-           'MajorRadius', 'NonQuasiSymmetricRatio', 'SurfaceSurfaceDistance',
+           'MajorRadius', 'MinorRadius', 'NonQuasiSymmetricRatio', 'SurfaceSurfaceDistance',
            'BoozerResidual', 'AspectRatio']
 
 def _boozer_residual_dJ_by_dB(r, r_dB, sqrt_num_components):
@@ -741,6 +741,58 @@ class MajorRadius(Optimizable):
         # tack on dJ_diota = dJ_dG = 0 to the end of dJ_ds
         dJ_ds = np.zeros(L.shape[0])
         dj_ds = surface.dmajor_radius_by_dcoeff()
+        dJ_ds[:dj_ds.size] = dj_ds
+        adj = forward_backward(P, L, U, dJ_ds)
+
+        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
+        self._dJ = -1 * adj_times_dg_dcoil
+
+
+class MinorRadius(Optimizable):
+    r"""
+    This wrapper objective computes the minor radius of a toroidal Boozer surface and supplies
+    its derivative with respect to coils
+
+    Args:
+        boozer_surface: The surface to use for the computation
+    """
+
+    def __init__(self, boozer_surface):
+        super().__init__(depends_on=[boozer_surface])
+        self.boozer_surface = boozer_surface
+        self.surface = boozer_surface.surface
+        self.recompute_bell()
+
+    def J(self):
+        if self._J is None:
+            self.compute()
+        return self._J
+
+    @derivative_dec
+    def dJ(self):
+        if self._dJ is None:
+            self.compute()
+        return self._dJ
+
+    def recompute_bell(self, parent=None):
+        self._J = None
+        self._dJ = None
+
+    def compute(self):
+        self.boozer_surface.run_code_from_last_solution()
+
+        surface = self.surface
+        self._J = surface.minor_radius()
+
+        booz_surf = self.boozer_surface
+        iota = booz_surf.res['iota']
+        G = booz_surf.res['G']
+        P, L, U = booz_surf.res['PLU']
+        dconstraint_dcoils_vjp = self.boozer_surface.res['vjp']
+
+        # tack on dJ_diota = dJ_dG = 0 to the end of dJ_ds
+        dJ_ds = np.zeros(L.shape[0])
+        dj_ds = surface.dminor_radius_by_dcoeff()
         dJ_ds[:dj_ds.size] = dj_ds
         adj = forward_backward(P, L, U, dJ_ds)
 

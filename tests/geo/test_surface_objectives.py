@@ -6,7 +6,7 @@ import simsopt.geo.surfaceobjectives as surfaceobjectives_module
 from simsopt._core.optimizable import Optimizable
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import coils_via_symmetries
-from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual, SurfaceSurfaceDistance
+from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, MinorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual, SurfaceSurfaceDistance
 from simsopt.configs.zoo import get_ncsx_data
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
 
@@ -332,6 +332,40 @@ class MajorRadiusTests(unittest.TestCase):
         bs, boozer_surface = get_boozer_surface(label=label, nphi=51, ntheta=51, boozer_type=boozer_type, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
         coeffs = bs.x
         mr = MajorRadius(boozer_surface)
+
+        def f(dofs):
+            bs.x = dofs
+            return mr.J()
+
+        def df(dofs):
+            bs.x = dofs
+            return mr.dJ()
+        taylor_test1(f, df, coeffs,
+                     epsilons=np.power(2., -np.asarray(range(13, 18))))
+
+
+class MinorRadiusTests(unittest.TestCase):
+    def test_minor_radius_derivative(self):
+        """
+        Taylor test for derivative of surface minor radius wrt coil parameters
+        """
+        for boozer_type in ['exact', 'ls']:
+            for label in ["Volume", "ToroidalFlux"]:
+                for optimize_G in [True, False]:
+                    for weight_inv_modB in [True, False]:
+                        with self.subTest(label=label, boozer_type=boozer_type, optimize_G=optimize_G):
+                            if boozer_type == 'ls' and label == 'ToroidalFlux':
+                                continue
+                            if boozer_type == 'exact' and optimize_G is False:
+                                continue
+                            if boozer_type == 'exact' and weight_inv_modB:
+                                continue
+                            self.subtest_minor_radius_surface_derivative(label, boozer_type, optimize_G, weight_inv_modB)
+
+    def subtest_minor_radius_surface_derivative(self, label, boozer_type, optimize_G, weight_inv_modB):
+        bs, boozer_surface = get_boozer_surface(label=label, nphi=51, ntheta=51, boozer_type=boozer_type, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
+        coeffs = bs.x
+        mr = MinorRadius(boozer_surface)
 
         def f(dofs):
             bs.x = dofs
