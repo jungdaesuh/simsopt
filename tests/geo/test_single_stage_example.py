@@ -2190,6 +2190,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertFalse(args.experimental_target_lane_value_and_grad)
         self.assertFalse(args.experimental_mps_boozer_custom_kernel)
         self.assertFalse(args.disable_target_lane_success_filter)
+        self.assertEqual(args.non_qs_weight, 1.0)
 
     def test_parse_args_explicit_target_lane_outer_maxls_to_tighter_budget(self):
         module = self.load_module()
@@ -6425,12 +6426,15 @@ class SingleStageExampleTests(unittest.TestCase):
         with module.temporary_boozer_surface_option_overrides(
             boozer_surface,
             bfgs_tol=1e-8,
+            gmres_maxiter=2,
             verbose=None,
         ):
             self.assertEqual(boozer_surface.options["bfgs_tol"], 1e-8)
+            self.assertEqual(boozer_surface.options["gmres_maxiter"], 2)
             self.assertEqual(boozer_surface.options["verbose"], True)
 
         self.assertEqual(boozer_surface.options["bfgs_tol"], 1e-10)
+        self.assertNotIn("gmres_maxiter", boozer_surface.options)
         self.assertEqual(boozer_surface.options["verbose"], True)
 
     def test_parse_args_accepts_boozer_least_squares_algorithm_override(self):
@@ -6540,6 +6544,39 @@ class SingleStageExampleTests(unittest.TestCase):
                 enabled=True,
             )
         )
+
+    def test_build_target_lane_trial_boozer_overrides_enables_supported_mps_fixture(
+        self,
+    ):
+        module = self.load_module()
+
+        overrides = module.build_target_lane_trial_boozer_overrides(
+            bfgs_tol=None,
+            bfgs_maxiter=None,
+            newton_tol=None,
+            newton_maxiter=None,
+            newton_polish_policy=None,
+            experimental_mps_boozer_custom_kernel=True,
+        )
+
+        self.assertEqual(overrides["newton_maxiter"], 1)
+        self.assertEqual(overrides["gmres_maxiter"], 2)
+        self.assertEqual(overrides["mps_solver_mode"], "fixed_surface_g_iota")
+
+    def test_build_target_lane_trial_boozer_overrides_rejects_conflicting_mps_newton_cap(
+        self,
+    ):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(RuntimeError, "newton_maxiter=1"):
+            module.build_target_lane_trial_boozer_overrides(
+                bfgs_tol=None,
+                bfgs_maxiter=None,
+                newton_tol=None,
+                newton_maxiter=3,
+                newton_polish_policy=None,
+                experimental_mps_boozer_custom_kernel=True,
+            )
 
     def test_build_target_lane_outer_objectives_uses_runtime_bundle_for_target_lane(
         self,
@@ -8561,6 +8598,7 @@ class SingleStageExampleTests(unittest.TestCase):
             profile_optimizer_dofs=None,
             profile_progress_json_path=None,
             stablehlo_dir=None,
+            experimental_mps_boozer_custom_kernel=False,
         )
 
     def test_prepare_target_lane_outer_objectives_uses_smooth_penalties_without_hard_filter(
@@ -8650,6 +8688,7 @@ class SingleStageExampleTests(unittest.TestCase):
             profile_optimizer_dofs=None,
             profile_progress_json_path=None,
             stablehlo_dir=None,
+            experimental_mps_boozer_custom_kernel=False,
         )
 
     def test_build_target_lane_gradient_diagnosis_threads_config_and_filter(self):
@@ -16313,6 +16352,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
                 LENGTH_WEIGHT=5.0,
                 RES_WEIGHT=6.0,
                 IOTAS_WEIGHT=7.0,
+                NON_QS_WEIGHT=8.0,
                 optimizer_backend_record="ondevice",
                 boozer_optimizer_backend_record="ondevice",
                 boozer_least_squares_algorithm_record="lm",
@@ -16336,7 +16376,9 @@ class ResultsEnvelopeTests(unittest.TestCase):
         problem_contract = envelope["problem_contract"]
         runtime_contract = problem_contract["runtime_contract"]
         hardware_thresholds = problem_contract["hardware_thresholds"]
+        objective_weights = problem_contract["objective_weights"]
         stage2_seed = problem_contract["stage2_seed"]
+        self.assertEqual(objective_weights["non_qs"], 8.0)
         self.assertEqual(hardware_thresholds["coil_vessel_clearance"], 0.002)
         self.assertEqual(
             runtime_contract["target_lane_boozer_newton_polish_policy"],

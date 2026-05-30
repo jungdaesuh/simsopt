@@ -847,6 +847,7 @@ def build_single_stage_problem_contract(
     LENGTH_WEIGHT,
     RES_WEIGHT,
     IOTAS_WEIGHT,
+    NON_QS_WEIGHT=1.0,
     length_target=None,
     banana_current_max_A=None,
     tf_current_limit_A=None,
@@ -969,7 +970,7 @@ def build_single_stage_problem_contract(
             "curve_surface_distance": float(CS_WEIGHT),
             "surface_vessel_distance": float(SURF_DIST_WEIGHT),
             "curvature": float(CURVATURE_WEIGHT),
-            "non_qs": 1.0,
+            "non_qs": float(NON_QS_WEIGHT),
             "length": float(LENGTH_WEIGHT),
             "residual": float(RES_WEIGHT),
             "iota": float(IOTAS_WEIGHT),
@@ -1174,6 +1175,7 @@ def build_single_stage_results_envelope(
     LENGTH_WEIGHT,
     RES_WEIGHT,
     IOTAS_WEIGHT,
+    NON_QS_WEIGHT=1.0,
     length_target=None,
     banana_current_max_A=None,
     tf_current_limit_A=None,
@@ -1291,6 +1293,7 @@ def build_single_stage_results_envelope(
             SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
             CURVATURE_WEIGHT=CURVATURE_WEIGHT,
             CURVATURE_THRESHOLD=CURVATURE_THRESHOLD,
+            NON_QS_WEIGHT=NON_QS_WEIGHT,
             LENGTH_WEIGHT=LENGTH_WEIGHT,
             RES_WEIGHT=RES_WEIGHT,
             IOTAS_WEIGHT=IOTAS_WEIGHT,
@@ -4230,6 +4233,12 @@ def parse_args():
         help="Boozer residual penalty weight (default 1000).",
     )
     parser.add_argument(
+        "--non-qs-weight",
+        type=float,
+        default=float(os.environ.get("NON_QS_WEIGHT", "1")),
+        help="Non-quasisymmetry ratio objective weight (default 1).",
+    )
+    parser.add_argument(
         "--iotas-weight",
         type=float,
         default=float(os.environ.get("IOTAS_WEIGHT", "100")),
@@ -6568,6 +6577,7 @@ def cache_single_stage_target_lane_init_reporting_snapshot(
     cs_weight,
     ss_dist,
     surf_dist_weight,
+    non_qs_weight=1.0,
     residual_weight,
     iota_weight,
     length_weight,
@@ -6582,7 +6592,7 @@ def cache_single_stage_target_lane_init_reporting_snapshot(
         bs,
         banana_curve,
         vessel_surface,
-        non_qs_weight=1.0,
+        non_qs_weight=non_qs_weight,
         residual_weight=residual_weight,
         iota_weight=iota_weight,
         length_weight=length_weight,
@@ -7190,6 +7200,49 @@ _EXPERIMENTAL_MPS_BOOZER_CUSTOM_KERNEL_ZERO_WEIGHT_KEYS = (
     "surface_vessel_weight",
     "curvature_weight",
 )
+_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER = 1
+_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER = 2
+
+
+def build_target_lane_trial_boozer_overrides(
+    *,
+    bfgs_tol,
+    bfgs_maxiter,
+    newton_tol,
+    newton_maxiter,
+    newton_polish_policy,
+    experimental_mps_boozer_custom_kernel: bool,
+):
+    """Return the scoped Boozer solver options used by target-lane trial solves."""
+    overrides = {
+        "bfgs_tol": bfgs_tol,
+        "bfgs_maxiter": bfgs_maxiter,
+        "newton_tol": newton_tol,
+        "newton_maxiter": newton_maxiter,
+        "newton_polish_policy": newton_polish_policy,
+    }
+    if not experimental_mps_boozer_custom_kernel:
+        return overrides
+
+    if (
+        newton_maxiter is not None
+        and int(newton_maxiter) != _EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER
+    ):
+        raise RuntimeError(
+            "--experimental-mps-boozer-custom-kernel currently supports only "
+            "target-lane Boozer newton_maxiter=1."
+        )
+
+    from simsopt.jax_core.mps_boozer_kernel_contract import (
+        MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE,
+    )
+
+    return {
+        **overrides,
+        "newton_maxiter": _EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
+        "gmres_maxiter": _EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER,
+        "mps_solver_mode": MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE,
+    }
 
 
 def _target_lane_weight_is_active(weight):
@@ -8358,12 +8411,20 @@ def temporary_boozer_surface_option_overrides(boozer_surface, **overrides):
         yield
         return
 
-    original = {key: boozer_surface.options.get(key) for key in applied}
+    missing = object()
+    original = {
+        key: boozer_surface.options[key] if key in boozer_surface.options else missing
+        for key in applied
+    }
     boozer_surface.options.update(applied)
     try:
         yield
     finally:
-        boozer_surface.options.update(original)
+        for key, value in original.items():
+            if value is missing:
+                boozer_surface.options.pop(key, None)
+            else:
+                boozer_surface.options[key] = value
 
 
 _SINGLE_STAGE_COMPONENT_LABEL = "the single-stage outer loop"
@@ -12771,6 +12832,7 @@ if __name__ == "__main__":
         str(args.length_weight),
         str(args.length_target),
         str(args.res_weight),
+        str(args.non_qs_weight),
         str(args.iotas_weight),
         str(args.cs_weight),
         str(args.cs_dist),
@@ -13089,6 +13151,7 @@ if __name__ == "__main__":
     # Objective function weights and parameters
     LENGTH_WEIGHT = args.length_weight
     RES_WEIGHT = args.res_weight
+    NON_QS_WEIGHT = args.non_qs_weight
     IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight
     CC_DIST = max(args.cc_dist, COIL_COIL_MIN_DIST_M)
@@ -13115,7 +13178,7 @@ if __name__ == "__main__":
 
     # Combined objective function
     JF = (
-        JnonQSRatio
+        NON_QS_WEIGHT * JnonQSRatio
         + RES_WEIGHT * JBoozerResidual
         + IOTAS_WEIGHT * Jiota
         + LENGTH_WEIGHT * JCurveLength
@@ -13401,15 +13464,18 @@ if __name__ == "__main__":
     if args.init_only and use_target_lane:
         print("Preparing target-lane init objective/runtime bundle...")
         target_lane_bundle_setup_start_s = _perf_counter_s()
-        target_lane_trial_boozer_overrides = {
-            "bfgs_tol": target_lane_boozer_bfgs_tol_record,
-            "bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
-            "newton_tol": target_lane_boozer_newton_tol_record,
-            "newton_maxiter": target_lane_boozer_newton_maxiter_record,
-            "newton_polish_policy": effective_boozer_init_overrides[
+        target_lane_trial_boozer_overrides = build_target_lane_trial_boozer_overrides(
+            bfgs_tol=target_lane_boozer_bfgs_tol_record,
+            bfgs_maxiter=target_lane_boozer_bfgs_maxiter_record,
+            newton_tol=target_lane_boozer_newton_tol_record,
+            newton_maxiter=target_lane_boozer_newton_maxiter_record,
+            newton_polish_policy=effective_boozer_init_overrides[
                 "newton_polish_policy_override"
             ],
-        }
+            experimental_mps_boozer_custom_kernel=(
+                requested_experimental_mps_boozer_custom_kernel
+            ),
+        )
         target_lane_trial_boozer_override_active = any(
             value is not None for value in target_lane_trial_boozer_overrides.values()
         )
@@ -13465,7 +13531,7 @@ if __name__ == "__main__":
                 profile_progress_json_path=args.target_lane_profile_progress_json,
                 stablehlo_dir=args.dump_target_lane_stablehlo_dir,
                 disable_success_filter=args.disable_target_lane_success_filter,
-                non_qs_weight=1.0,
+                non_qs_weight=NON_QS_WEIGHT,
                 residual_weight=RES_WEIGHT,
                 iota_weight=IOTAS_WEIGHT,
                 length_weight=LENGTH_WEIGHT,
@@ -13566,7 +13632,7 @@ if __name__ == "__main__":
                     bs,
                     banana_curve,
                     VV,
-                    non_qs_weight=1.0,
+                    non_qs_weight=NON_QS_WEIGHT,
                     residual_weight=RES_WEIGHT,
                     iota_weight=IOTAS_WEIGHT,
                     length_weight=LENGTH_WEIGHT,
@@ -13855,15 +13921,20 @@ if __name__ == "__main__":
             )
         jax_compile_diagnostics_recorder = None
         if CONSTRAINT_METHOD != "alm":
-            target_lane_trial_boozer_overrides = {
-                "bfgs_tol": target_lane_boozer_bfgs_tol_record,
-                "bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
-                "newton_tol": target_lane_boozer_newton_tol_record,
-                "newton_maxiter": target_lane_boozer_newton_maxiter_record,
-                "newton_polish_policy": effective_boozer_init_overrides[
-                    "newton_polish_policy_override"
-                ],
-            }
+            target_lane_trial_boozer_overrides = (
+                build_target_lane_trial_boozer_overrides(
+                    bfgs_tol=target_lane_boozer_bfgs_tol_record,
+                    bfgs_maxiter=target_lane_boozer_bfgs_maxiter_record,
+                    newton_tol=target_lane_boozer_newton_tol_record,
+                    newton_maxiter=target_lane_boozer_newton_maxiter_record,
+                    newton_polish_policy=effective_boozer_init_overrides[
+                        "newton_polish_policy_override"
+                    ],
+                    experimental_mps_boozer_custom_kernel=(
+                        requested_experimental_mps_boozer_custom_kernel
+                    ),
+                )
+            )
             target_lane_trial_boozer_override_active = any(
                 value is not None
                 for value in target_lane_trial_boozer_overrides.values()
@@ -13937,7 +14008,7 @@ if __name__ == "__main__":
                         disable_success_filter=(
                             args.disable_target_lane_success_filter
                         ),
-                        non_qs_weight=1.0,
+                        non_qs_weight=NON_QS_WEIGHT,
                         residual_weight=RES_WEIGHT,
                         iota_weight=IOTAS_WEIGHT,
                         length_weight=LENGTH_WEIGHT,
@@ -13957,7 +14028,7 @@ if __name__ == "__main__":
                         bs,
                         banana_curve,
                         VV,
-                        non_qs_weight=1.0,
+                        non_qs_weight=NON_QS_WEIGHT,
                         residual_weight=RES_WEIGHT,
                         iota_weight=IOTAS_WEIGHT,
                         length_weight=LENGTH_WEIGHT,
@@ -14191,7 +14262,7 @@ if __name__ == "__main__":
                             outer_maxls=args.outer_maxls,
                             callback=accepted_step_callback,
                             success_filter=target_lane_success_filter,
-                            non_qs_weight=1.0,
+                            non_qs_weight=NON_QS_WEIGHT,
                             residual_weight=RES_WEIGHT,
                             iota_weight=IOTAS_WEIGHT,
                             length_weight=LENGTH_WEIGHT,
@@ -14296,7 +14367,7 @@ if __name__ == "__main__":
                             VV,
                             iota_target,
                             success_filter=target_lane_success_filter,
-                            non_qs_weight=1.0,
+                            non_qs_weight=NON_QS_WEIGHT,
                             residual_weight=RES_WEIGHT,
                             iota_weight=IOTAS_WEIGHT,
                             length_weight=LENGTH_WEIGHT,
@@ -15144,6 +15215,7 @@ if __name__ == "__main__":
             cs_weight=CS_WEIGHT,
             ss_dist=SS_DIST,
             surf_dist_weight=SURF_DIST_WEIGHT,
+            non_qs_weight=NON_QS_WEIGHT,
             residual_weight=RES_WEIGHT,
             iota_weight=IOTAS_WEIGHT,
             length_weight=LENGTH_WEIGHT,
@@ -15391,6 +15463,7 @@ if __name__ == "__main__":
             SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
             CURVATURE_WEIGHT=CURVATURE_WEIGHT,
             CURVATURE_THRESHOLD=CURVATURE_THRESHOLD,
+            NON_QS_WEIGHT=NON_QS_WEIGHT,
             LENGTH_WEIGHT=LENGTH_WEIGHT,
             RES_WEIGHT=RES_WEIGHT,
             IOTAS_WEIGHT=IOTAS_WEIGHT,
@@ -15469,7 +15542,7 @@ if __name__ == "__main__":
         "SURF_DIST_WEIGHT": SURF_DIST_WEIGHT,
         "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
         "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
-        "NON_QS_WEIGHT": 1.0,
+        "NON_QS_WEIGHT": NON_QS_WEIGHT,
         "LENGTH_WEIGHT": LENGTH_WEIGHT,
         "RES_WEIGHT": RES_WEIGHT,
         "IOTAS_WEIGHT": IOTAS_WEIGHT,

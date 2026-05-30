@@ -670,6 +670,24 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     assert args.initial_step_maxiter == 0
     assert args.outer_maxls == single_stage_init_parity_module.TRACE_PARITY_OUTER_MAXLS
     assert args.target_lane_boozer_newton_polish_policy == "skip-large-strict-cuda"
+    assert not args.experimental_mps_boozer_residual_only_fixture
+
+
+def test_single_stage_init_accepts_mps_residual_only_fixture(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_init_parity.py",
+            "--output-json",
+            "/tmp/out.json",
+            "--experimental-mps-boozer-residual-only-fixture",
+        ],
+    )
+
+    args = single_stage_init_parity_module.parse_args()
+
+    assert args.experimental_mps_boozer_residual_only_fixture
 
 
 def test_single_stage_init_accepts_reference_trace_optimizer(monkeypatch):
@@ -4780,11 +4798,16 @@ def test_single_stage_init_parity_tracks_self_intersection_check_availability():
     assert comparison["jax_self_intersection_check_available"] is True
 
 
-def _write_single_stage_result_artifact(command) -> list[str]:
+def _write_single_stage_result_artifact(
+    command, payload: dict[str, object] | None = None
+) -> list[str]:
     command_list = list(command)
     output_root = Path(command_list[command_list.index("--output-root") + 1])
     output_root.mkdir(parents=True, exist_ok=True)
-    (output_root / "results.json").write_text("{}", encoding="utf-8")
+    (output_root / "results.json").write_text(
+        json.dumps({} if payload is None else payload),
+        encoding="utf-8",
+    )
     return command_list
 
 
@@ -4854,7 +4877,20 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(
     )
 
     def fake_run_python_script(_script_path, command, **_kwargs):
-        _write_single_stage_result_artifact(command)
+        _write_single_stage_result_artifact(
+            command,
+            payload={
+                "FINAL_IOTA": 0.15,
+                "FINAL_VOLUME": 0.1,
+                "FIELD_ERROR": 0.003,
+                "MAX_CURVATURE": 10.0,
+                "SELF_INTERSECTING": False,
+                "TIMINGS": {
+                    "boozer_total_s": 3.5,
+                    "outer_optimizer_s": 1.25,
+                },
+            },
+        )
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -6668,6 +6704,89 @@ def test_single_stage_init_case_threads_experimental_mps_boozer_custom_kernel_fl
     assert "--experimental-mps-boozer-custom-kernel" in observed_command
 
 
+def test_single_stage_init_case_threads_mps_residual_only_fixture_flags(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="scipy-jax",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+        experimental_mps_boozer_residual_only_fixture=True,
+    )
+
+    observed_command: list[str] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_command[:] = _write_single_stage_result_artifact(command)
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_load_surface_gamma_artifact",
+        lambda _path: np.zeros((2, 2, 3)),
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        experimental_mps_boozer_custom_kernel=True,
+        load_surface_gamma=False,
+    )
+
+    assert "--experimental-mps-boozer-custom-kernel" in observed_command
+    assert "--disable-target-lane-success-filter" in observed_command
+    for flag in (
+        "--non-qs-weight",
+        "--iotas-weight",
+        "--length-weight",
+        "--cc-weight",
+        "--cs-weight",
+        "--surf-dist-weight",
+        "--curvature-weight",
+    ):
+        flag_index = observed_command.index(flag)
+        assert observed_command[flag_index + 1] == "0.0"
+    newton_index = observed_command.index("--target-lane-boozer-newton-maxiter")
+    assert observed_command[newton_index + 1] == "1"
+
+
 def test_single_stage_init_case_threads_disable_target_lane_success_filter_flag(
     monkeypatch, tmp_path
 ):
@@ -7077,7 +7196,17 @@ def test_single_stage_init_case_preserves_target_lane_value_and_grad_result(
     )
 
     def fake_run_python_script(_script_path, command, **_kwargs):
-        _write_single_stage_result_artifact(command)
+        _write_single_stage_result_artifact(
+            command,
+            payload={
+                "FINAL_IOTA": 0.15,
+                "FINAL_VOLUME": 0.1,
+                "FIELD_ERROR": 0.003,
+                "MAX_CURVATURE": 10.0,
+                "SELF_INTERSECTING": False,
+                "target_lane_value_and_grad": True,
+            },
+        )
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(

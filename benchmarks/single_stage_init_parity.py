@@ -515,6 +515,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--experimental-mps-boozer-residual-only-fixture",
+        action="store_true",
+        help=(
+            "Run the reference and target lanes with only the Boozer residual "
+            "objective active, matching the first supported MPS custom-kernel fixture."
+        ),
+    )
+    parser.add_argument(
         "--jax-profile-dir",
         default=None,
         help=(
@@ -812,6 +820,7 @@ def _append_optional_single_stage_flags(
     jax_profile_dir: str | None,
     experimental_target_lane_value_and_grad: bool,
     experimental_mps_boozer_custom_kernel: bool,
+    experimental_mps_boozer_residual_only_fixture: bool,
     disable_target_lane_success_filter: bool,
     record_objective_evaluation_trace: bool,
     record_target_optimizer_state_trace: bool,
@@ -855,6 +864,25 @@ def _append_optional_single_stage_flags(
         command.append("--experimental-target-lane-value-and-grad")
     if experimental_mps_boozer_custom_kernel:
         command.append("--experimental-mps-boozer-custom-kernel")
+    if experimental_mps_boozer_residual_only_fixture:
+        command.extend(
+            [
+                "--non-qs-weight",
+                "0.0",
+                "--iotas-weight",
+                "0.0",
+                "--length-weight",
+                "0.0",
+                "--cc-weight",
+                "0.0",
+                "--cs-weight",
+                "0.0",
+                "--surf-dist-weight",
+                "0.0",
+                "--curvature-weight",
+                "0.0",
+            ]
+        )
     if disable_target_lane_success_filter:
         command.append("--disable-target-lane-success-filter")
     if record_objective_evaluation_trace:
@@ -961,6 +989,10 @@ def _run_single_stage_case(
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
     effective_platform = platform if backend == "jax" else "cpu"
+    experimental_mps_boozer_custom_kernel = bool(
+        experimental_mps_boozer_custom_kernel
+        or getattr(args, "experimental_mps_boozer_custom_kernel", False)
+    )
     with _resolved_single_stage_output_root(
         output_root, backend=backend
     ) as resolved_root:
@@ -1035,6 +1067,9 @@ def _run_single_stage_case(
                         str(reference_optimizer_method),
                     ]
                 )
+        residual_only_fixture = bool(
+            getattr(args, "experimental_mps_boozer_residual_only_fixture", False)
+        )
         _append_optional_single_stage_flags(
             command,
             benchmark_mode=benchmark_mode,
@@ -1055,8 +1090,10 @@ def _run_single_stage_case(
             experimental_mps_boozer_custom_kernel=(
                 experimental_mps_boozer_custom_kernel
             ),
+            experimental_mps_boozer_residual_only_fixture=residual_only_fixture,
             disable_target_lane_success_filter=bool(
                 getattr(args, "disable_target_lane_success_filter", False)
+                or residual_only_fixture
             ),
             record_objective_evaluation_trace=bool(
                 getattr(args, "record_objective_evaluation_trace", False)
@@ -1078,7 +1115,9 @@ def _run_single_stage_case(
             ),
             target_lane_boozer_newton_maxiter=getattr(
                 args, "target_lane_boozer_newton_maxiter", None
-            ),
+            )
+            if not residual_only_fixture
+            else 1,
             target_lane_boozer_newton_polish_policy=(
                 _resolve_target_lane_boozer_newton_polish_policy(
                     backend=backend,
@@ -1638,9 +1677,6 @@ def _run_single_stage_case_pair(
             replay_objective_evaluation_trace=Path(
                 cpu_case["outer_optimizer_progress_json"]
             ),
-            experimental_mps_boozer_custom_kernel=bool(
-                args.experimental_mps_boozer_custom_kernel
-            ),
         )
     jax_case = _run_single_stage_case(
         target_args,
@@ -1650,9 +1686,6 @@ def _run_single_stage_case_pair(
         load_surface_gamma=compare_surface_geometry,
         output_root=case_root / "target_outputs",
         jax_runtime_seed_spec=jax_seed_spec,
-        experimental_mps_boozer_custom_kernel=bool(
-            args.experimental_mps_boozer_custom_kernel
-        ),
     )
     return cpu_case, jax_case, jax_seed_spec, seed_case, same_candidate_replay_case
 
@@ -3841,6 +3874,9 @@ def main() -> None:
             "outer_maxiter": int(args.maxiter),
             "command_argv": [sys.executable, *sys.argv],
             "benchmark_mode": benchmark_mode,
+            "experimental_mps_boozer_residual_only_fixture": bool(
+                args.experimental_mps_boozer_residual_only_fixture
+            ),
             "reference_backend": reference_backend,
             "reference_platform": "cpu",
             "target_backend": "jax",
