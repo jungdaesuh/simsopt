@@ -13,6 +13,10 @@ SIMSOPT_MPS_BOOZER_RESIDUAL_VJP_TARGET = "mps.simsopt_boozer_residual_vjp"
 SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VJP_TARGET = (
     "mps.simsopt_boozer_residual_vjp_weighted"
 )
+SIMSOPT_MPS_BOOZER_RESIDUAL_VALUE_GRAD_TARGET = "mps.simsopt_boozer_residual_value_grad"
+SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VALUE_GRAD_TARGET = (
+    "mps.simsopt_boozer_residual_value_grad_weighted"
+)
 
 
 def _validate_residual_inputs(
@@ -68,6 +72,12 @@ def _residual_vjp_target(*, weight_inv_modB: bool) -> str:
     if weight_inv_modB:
         return SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VJP_TARGET
     return SIMSOPT_MPS_BOOZER_RESIDUAL_VJP_TARGET
+
+
+def _residual_value_grad_target(*, weight_inv_modB: bool) -> str:
+    if weight_inv_modB:
+        return SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VALUE_GRAD_TARGET
+    return SIMSOPT_MPS_BOOZER_RESIDUAL_VALUE_GRAD_TARGET
 
 
 def simsopt_mps_boozer_residual_vector(
@@ -262,3 +272,31 @@ def simsopt_mps_boozer_residual_vjp(
         vmap_method="broadcast_all",
         custom_call_api_version=4,
     )(G, iota, B, xphi, xtheta, residual_cotangent)
+
+
+def simsopt_mps_boozer_residual_value_and_grad(
+    G: jax.Array,
+    iota: jax.Array,
+    B: jax.Array,
+    xphi: jax.Array,
+    xtheta: jax.Array,
+    *,
+    weight_inv_modB: bool = False,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]]:
+    """Return normalized residual scalar and input gradients through one MPS call."""
+    _validate_residual_inputs(G, iota, B, xphi, xtheta)
+    output_type = (
+        jax.ShapeDtypeStruct(G.shape, G.dtype),
+        jax.ShapeDtypeStruct(G.shape, G.dtype),
+        jax.ShapeDtypeStruct(iota.shape, iota.dtype),
+        jax.ShapeDtypeStruct(B.shape, B.dtype),
+        jax.ShapeDtypeStruct(xphi.shape, xphi.dtype),
+        jax.ShapeDtypeStruct(xtheta.shape, xtheta.dtype),
+    )
+    value, grad_G, grad_iota, grad_B, grad_xphi, grad_xtheta = jax.ffi.ffi_call(
+        _residual_value_grad_target(weight_inv_modB=weight_inv_modB),
+        output_type,
+        vmap_method="broadcast_all",
+        custom_call_api_version=4,
+    )(G, iota, B, xphi, xtheta)
+    return value, (grad_G, grad_iota, grad_B, grad_xphi, grad_xtheta)

@@ -10,10 +10,13 @@ jnp = pytest.importorskip("jax.numpy")
 
 from simsopt.jax_core.mps_boozer_residual_custom_call import (
     SIMSOPT_MPS_BOOZER_RESIDUAL_VECTOR_TARGET,
+    SIMSOPT_MPS_BOOZER_RESIDUAL_VALUE_GRAD_TARGET,
     SIMSOPT_MPS_BOOZER_RESIDUAL_VJP_TARGET,
     SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VECTOR_TARGET,
+    SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VALUE_GRAD_TARGET,
     SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VJP_TARGET,
     simsopt_mps_boozer_residual_vector,
+    simsopt_mps_boozer_residual_value_and_grad,
     simsopt_mps_boozer_residual_vector_with_vjp,
     simsopt_mps_boozer_residual_vjp,
 )
@@ -169,6 +172,29 @@ def _boozer_residual_vjp_oracle(
     )
 
 
+def _boozer_residual_value_grad_oracle(G, iota, B, xphi, xtheta, *, weight_inv_modB):
+    residual = _boozer_residual_vector_oracle(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB=weight_inv_modB,
+    )
+    value = np.float32(0.5) * np.sum(residual * residual) / np.float32(residual.size)
+    cotangent = residual / np.float32(residual.size)
+    gradient = _boozer_residual_vjp_oracle(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        cotangent,
+        weight_inv_modB=weight_inv_modB,
+    )
+    return np.asarray(value, dtype=np.float32), gradient
+
+
 @pytest.mark.parametrize(
     ("weight_inv_modB", "target"),
     [
@@ -230,6 +256,38 @@ def test_simsopt_mps_boozer_residual_vjp_lowers_to_named_stablehlo_target(
             )
         )
         .lower(*args, cotangent)
+        .as_text()
+    )
+
+    assert "stablehlo.custom_call" in lowered
+    assert f"@{target}" in lowered
+
+
+@pytest.mark.parametrize(
+    ("weight_inv_modB", "target"),
+    [
+        (False, SIMSOPT_MPS_BOOZER_RESIDUAL_VALUE_GRAD_TARGET),
+        (True, SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VALUE_GRAD_TARGET),
+    ],
+)
+def test_simsopt_mps_boozer_residual_value_grad_lowers_to_named_stablehlo_target(
+    weight_inv_modB,
+    target,
+):
+    args = _residual_inputs()
+
+    lowered = (
+        jax.jit(
+            lambda G, iota, B, xphi, xtheta: simsopt_mps_boozer_residual_value_and_grad(
+                G,
+                iota,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=weight_inv_modB,
+            )
+        )
+        .lower(*args)
         .as_text()
     )
 
@@ -415,6 +473,53 @@ def test_simsopt_mps_boozer_residual_vjp_matches_oracle_on_real_mps_backend(
     )
 
     for actual_leaf, expected_leaf in zip(actual, expected):
+        np.testing.assert_allclose(
+            np.asarray(actual_leaf),
+            expected_leaf,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        assert actual_leaf.device.platform.lower() == "mps"
+
+
+@pytest.mark.parametrize("weight_inv_modB", [False, True])
+@pytest.mark.mps
+def test_simsopt_mps_boozer_residual_value_grad_matches_oracle_on_real_mps_backend(
+    weight_inv_modB,
+):
+    mps_devices = tuple(
+        device for device in jax.devices() if device.platform.lower() == "mps"
+    )
+    if not mps_devices:
+        pytest.skip("requires a JAX MPS device")
+
+    host_inputs = _residual_inputs()
+    mps_inputs = tuple(jax.device_put(value, mps_devices[0]) for value in host_inputs)
+
+    actual_value, actual_grad = jax.jit(
+        lambda G, iota, B, xphi, xtheta: simsopt_mps_boozer_residual_value_and_grad(
+            G,
+            iota,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB=weight_inv_modB,
+        )
+    )(*mps_inputs)
+    jax.block_until_ready((actual_value, actual_grad))
+    expected_value, expected_grad = _boozer_residual_value_grad_oracle(
+        *host_inputs,
+        weight_inv_modB=weight_inv_modB,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(actual_value),
+        expected_value,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    assert actual_value.device.platform.lower() == "mps"
+    for actual_leaf, expected_leaf in zip(actual_grad, expected_grad):
         np.testing.assert_allclose(
             np.asarray(actual_leaf),
             expected_leaf,
