@@ -7,6 +7,7 @@
 - Reference repo: `/Users/suhjungdae/code/opensource/torax`
 - Reference repo HEAD reviewed: `60190df1`
 - Worktree note: this plan intentionally does not modify existing dirty docs such as `docs/lbfgs_ondevice_full_jfx_bridge_report_2026-05-18.md`.
+- **Refresh (2026-05-30):** the line refs in this plan were re-verified against the current HEAD `21c3d517d` (source tree clean). Most are still exact (`specs.py:1`, `runtime.py:1372`/`:1466`/`:2371`/`:2385-2386`, `_root.py:28`/`:103`, `pm_workflow.py:790`, `wireframe_workflow.py:755`, `reductions.py:75`, `biotsavart.py:725`, `jax_host_boundary.py:14`, `import_smoke_cases.py:711`, `test_jax_import_smoke.py:614`); the two that drifted are corrected inline below. The original review HEAD `431a517fb` is now behind, but the patterns and plan structure are unchanged.
 
 ## Purpose
 
@@ -62,11 +63,11 @@ References:
 | Surface | Current evidence | Plan relevance |
 | --- | --- | --- |
 | JAX spec contracts | `src/simsopt/jax_core/specs.py:1` | Explicit immutable specs and data/meta field partitions are the SSOT to harden first. |
-| Validation cache policy | `benchmarks/validation_ladder_common.py:153`, `benchmarks/validation_ladder_common.py:389` | Cache settings and provenance are already explicit enough to test. |
+| Validation cache policy | `benchmarks/validation_ladder_common.py:156` (`apply_compilation_cache_policy`; was `:153`), `benchmarks/validation_ladder_common.py:389` | Cache settings and provenance are already explicit enough to test. |
 | Backend runtime cache/transfer policy | `src/simsopt/backend/runtime.py:1372`, `src/simsopt/backend/runtime.py:2381` | Runtime policy should remain opt-in and environment-driven before JAX import. |
 | Existing persistent-cache write smoke | `tests/subprocess/import_smoke_cases.py:711`, `tests/test_jax_import_smoke.py:614` | Current coverage proves a small kernel writes a cache entry; the remaining gap is cross-process reuse. |
 | Host boundary helpers | `src/simsopt/_core/jax_host_boundary.py:14` | Host materialization should stay explicit and direction-specific. |
-| Bounded tracing scans | `src/simsopt/jax_core/tracing.py:359` | Existing helper shape can inform a shared bounded scan utility. |
+| Bounded tracing scans | `src/simsopt/jax_core/tracing.py:367` (`_scan_adaptive_steps`; was `:359`) | Existing helper shape can inform a shared bounded scan utility. |
 | Root solver fixed scan | `src/simsopt/jax_core/_root.py:28` | Fixed iteration counts and implicit VJP conventions should remain explicit. |
 | PM done-gated scan | `src/simsopt/jax_core/pm_workflow.py:790` | Candidate pilot for deduplicating done-gated scan structure. |
 | Wireframe done-gated scan | `src/simsopt/jax_core/wireframe_workflow.py:755` | Candidate pilot paired with PM workflow. |
