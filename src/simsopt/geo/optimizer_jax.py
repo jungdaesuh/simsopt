@@ -2864,15 +2864,23 @@ def levenberg_marquardt_minpack_traceable(
     flat_x0, unravel = ravel_pytree(x)
     normalized_args = _normalize_solver_args(args)
     dtype = flat_x0.dtype
-    gradient_tol = _lm_gradient_tol(tol, gtol, dtype=dtype)
-    gtol_value = _device_scalar(gtol, dtype=dtype)
 
     def residual_eval(flat_x):
         return jnp.ravel(jnp.asarray(residual_fn(unravel(flat_x), *normalized_args)))
 
-    residual0 = residual_eval(flat_x0)
-    linearization_rows = int(np.asarray(jnp.asarray(residual0).size))
-    linearization_cols = int(np.asarray(jnp.asarray(flat_x0).size))
+    # Probe the residual row count by abstract shape inference on the original
+    # pytree (passed as a traced arg). jax.eval_shape traces without executing,
+    # so it avoids the OLD eager `residual0 = residual_eval(flat_x0)`, which
+    # tripped transfer_guard("disallow"): evaluating the residual materializes
+    # its weak host scalars (e.g. int64/float64 literals stacked by jnp.asarray)
+    # as an implicit host->device transfer. Routing x (not unravel(flat_x)) keeps
+    # the probe off ravel_pytree's unravel path as well.
+    residual_shape = jax.eval_shape(
+        lambda probe_x: jnp.ravel(jnp.asarray(residual_fn(probe_x, *normalized_args))),
+        x,
+    )
+    linearization_rows = int(np.prod(residual_shape.shape))
+    linearization_cols = int(flat_x0.size)
     dense_linearization_within_budget, dense_report = (
         _least_squares_dense_linearization_policy(
             linearization_rows,
@@ -2892,6 +2900,11 @@ def levenberg_marquardt_minpack_traceable(
         )
 
     def run_solver(flat_x_init):
+        # Build tol scalars inside the trace so they are staged as constants
+        # rather than closed-over concrete device arrays (which JAX bakes via
+        # mlir.ir_constant -> a device->host copy, tripping transfer_guard).
+        gradient_tol = _lm_gradient_tol(tol, gtol, dtype=dtype)
+        gtol_value = _device_scalar(gtol, dtype=dtype)
         initial = _qr_lm_dense_state(residual_eval, flat_x_init)
         initial_qr_gnorm = _qr_scaled_gradient_norm(
             initial["residual"],

@@ -187,8 +187,7 @@ def _max_abs_difference(left, right):
     return float(
         np.max(
             np.abs(
-                np.asarray(left, dtype=np.float64)
-                - np.asarray(right, dtype=np.float64)
+                np.asarray(left, dtype=np.float64) - np.asarray(right, dtype=np.float64)
             )
         )
     )
@@ -370,6 +369,32 @@ def test_target_lm_minpack_qr_lane_matches_scipy_lm_solution():
     )
     assert jax_result.residual_jacobian.shape == (2, 2)
     assert jax_result.hessian.shape == (2, 2)
+
+
+def test_target_lm_minpack_qr_lane_runs_under_transfer_guard_disallow():
+    """Regression: lm-minpack-ondevice must not trip transfer_guard("disallow").
+
+    Pins the eager-prologue transfer fix in
+    ``levenberg_marquardt_minpack_traceable``: (1) the eager residual evaluation
+    materialized the residual's weak host scalars (an implicit host->device
+    transfer), now avoided via ``jax.eval_shape`` which traces without executing;
+    and (2) closed-over concrete tol scalars were pulled to the host during
+    lowering (``mlir.ir_constant`` -> device->host on CUDA), now built inside the
+    traced ``run_solver``. The host->device class reproduces on CPU here; the
+    device->host class is GPU-only (CPU host==device is a zero-copy that does not
+    fire the guard) and is exercised by the strict-CUDA A100 lane. Oracle:
+    Rosenbrock minimum at (1, 1).
+    """
+    x0 = np.asarray([-1.2, 1.0], dtype=np.float64)
+    with jax.transfer_guard("disallow"):
+        jax_result = _run_jax_lm_minpack(_rosenbrock_residual_jax, x0, maxiter=200)
+    assert jax_result.success
+    np.testing.assert_allclose(
+        np.asarray(jax_result.x),
+        np.asarray([1.0, 1.0]),
+        rtol=_LM_MINPACK_DIRECT_RTOL,
+        atol=_LM_MINPACK_DIRECT_ATOL,
+    )
 
 
 @pytest.mark.parametrize(
