@@ -559,7 +559,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Thread through the explicit single-stage jax-mps Boozer custom-kernel "
-            "opt-in for target-lane experiments."
+            "opt-in for target-lane experiments. When the target platform is MPS, "
+            "also run a CPU JAX float32 reference lane and gate the MPS custom "
+            "kernel against that oracle."
         ),
     )
     parser.add_argument(
@@ -1035,7 +1037,16 @@ def _apply_single_stage_custom_kernel_env(
     backend: str,
     effective_platform: str,
     experimental_mps_boozer_custom_kernel: bool,
+    mps_custom_kernel_float32_reference: bool = False,
 ) -> dict[str, str]:
+    if (
+        backend == "jax"
+        and effective_platform == "cpu"
+        and mps_custom_kernel_float32_reference
+    ):
+        env["SIMSOPT_BACKEND_MODE"] = "jax_cpu_float32_smoke"
+        env["JAX_ENABLE_X64"] = "0"
+        return env
     if (
         backend == "jax"
         and effective_platform == "mps"
@@ -1061,7 +1072,8 @@ def _run_single_stage_case(
     diagnose_target_lane_scaled_phase1: bool = False,
     record_target_lane_invalid_state_events: bool = False,
     experimental_target_lane_value_and_grad: bool = False,
-    experimental_mps_boozer_custom_kernel: bool = False,
+    experimental_mps_boozer_custom_kernel: bool | None = None,
+    mps_custom_kernel_float32_reference: bool = False,
     enable_compile_diagnostics: bool = False,
     deterministic_gpu_reductions: bool = False,
     output_root: Path | None = None,
@@ -1069,10 +1081,14 @@ def _run_single_stage_case(
     replay_objective_evaluation_trace: Path | None = None,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
-    experimental_mps_boozer_custom_kernel = bool(
-        experimental_mps_boozer_custom_kernel
-        or getattr(args, "experimental_mps_boozer_custom_kernel", False)
-    )
+    if experimental_mps_boozer_custom_kernel is None:
+        experimental_mps_boozer_custom_kernel = bool(
+            getattr(args, "experimental_mps_boozer_custom_kernel", False)
+        )
+    else:
+        experimental_mps_boozer_custom_kernel = bool(
+            experimental_mps_boozer_custom_kernel
+        )
     effective_platform = _resolve_single_stage_child_platform(
         backend=backend,
         platform=platform,
@@ -1242,6 +1258,7 @@ def _run_single_stage_case(
             experimental_mps_boozer_custom_kernel=(
                 experimental_mps_boozer_custom_kernel
             ),
+            mps_custom_kernel_float32_reference=(mps_custom_kernel_float32_reference),
         )
         run_python_script(
             script_path,
@@ -1786,6 +1803,123 @@ def _run_single_stage_case_pair(
         jax_runtime_seed_spec=jax_seed_spec,
     )
     return cpu_case, jax_case, jax_seed_spec, seed_case, same_candidate_replay_case
+
+
+def _mps_custom_kernel_float32_reference_required(args: argparse.Namespace) -> bool:
+    experimental_mps_boozer_custom_kernel = bool(
+        getattr(args, "experimental_mps_boozer_custom_kernel", False)
+    )
+    if not experimental_mps_boozer_custom_kernel:
+        return False
+    target_platform = _resolve_single_stage_child_platform(
+        backend="jax",
+        platform=str(getattr(args, "platform", "auto")),
+        experimental_mps_boozer_custom_kernel=experimental_mps_boozer_custom_kernel,
+    )
+    return target_platform == "mps"
+
+
+def _mps_custom_kernel_float32_missing_trace_gate(args: argparse.Namespace) -> bool:
+    return int(args.maxiter) > 0 and not bool(
+        getattr(args, "record_objective_evaluation_trace", False)
+    )
+
+
+def _mps_custom_kernel_float32_reference_args(
+    args: argparse.Namespace,
+    *,
+    seed_case: dict[str, Any] | None,
+) -> argparse.Namespace:
+    if seed_case is not None and getattr(args, "warm_start_run_dir", None) is None:
+        return _namespace_with_overrides(args, warm_start_run_dir=seed_case["run_dir"])
+    return args
+
+
+def _run_mps_custom_kernel_float32_reference_case(
+    args: argparse.Namespace,
+    *,
+    reference_benchmark_mode: bool,
+    compare_surface_geometry: bool,
+    case_root: Path,
+    jax_seed_spec: Path,
+    seed_case: dict[str, Any] | None,
+) -> dict[str, Any]:
+    reference_args = _mps_custom_kernel_float32_reference_args(
+        args,
+        seed_case=seed_case,
+    )
+    return _run_single_stage_case(
+        reference_args,
+        "jax",
+        platform="cpu",
+        benchmark_mode=reference_benchmark_mode,
+        load_surface_gamma=compare_surface_geometry,
+        output_root=case_root / "mps_float32_reference_outputs",
+        jax_runtime_seed_spec=jax_seed_spec,
+        experimental_mps_boozer_custom_kernel=False,
+        mps_custom_kernel_float32_reference=True,
+    )
+
+
+def _mps_custom_kernel_float32_reference_tolerances() -> dict[str, float]:
+    tolerance_contract = parity_ladder_tolerances("float32-smoke")
+    return {
+        "objective_rtol": float(tolerance_contract["objective_rtol"]),
+        "objective_atol": float(tolerance_contract["objective_atol"]),
+        "gradient_rtol": float(tolerance_contract["gradient_rtol"]),
+        "gradient_atol": float(tolerance_contract["gradient_atol"]),
+    }
+
+
+def _compare_mps_custom_kernel_float32_reference(
+    reference_case: dict[str, Any],
+    target_case: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    compare_surface_geometry: bool,
+) -> dict[str, Any]:
+    max_geom_abs, max_geom_rel = _resolve_surface_geometry_drift(
+        reference_case,
+        target_case,
+        compare_surface_geometry=compare_surface_geometry,
+    )
+    comparison, comparison_failures = evaluate_single_stage_init_parity(
+        reference_case["results"],
+        target_case["results"],
+        max_surface_geometry_abs=max_geom_abs,
+        max_surface_geometry_rel=max_geom_rel,
+        maxiter=int(args.maxiter),
+        expected_jax_outer_optimizer_method=_expected_target_outer_optimizer_method(
+            args.optimizer_backend
+        ),
+        require_final_metric_parity=False,
+    )
+    tolerances = _mps_custom_kernel_float32_reference_tolerances()
+    same_candidate_replay = None
+    same_candidate_failures: list[str] = []
+    if _same_candidate_replay_required(args):
+        same_candidate_replay = compare_same_candidate_objective_replay(
+            reference_case,
+            target_case,
+            require_exact_candidates=False,
+            strict_solver_contract=False,
+            scalar_rtol=tolerances["objective_rtol"],
+            scalar_atol=tolerances["objective_atol"],
+            gradient_rtol=tolerances["gradient_rtol"],
+            gradient_atol=tolerances["gradient_atol"],
+        )
+        same_candidate_failures.extend(
+            _same_candidate_replay_gate_failures(same_candidate_replay)
+        )
+    return {
+        "reference_backend_mode": "jax_cpu_float32_smoke",
+        "target_backend_mode": "jax_mps_smoke",
+        "acceptance_oracle": "mps_custom_kernel_float32_reference",
+        "comparison": comparison,
+        "same_candidate_replay": same_candidate_replay,
+        "tolerances": tolerances,
+        "failures": [*comparison_failures, *same_candidate_failures],
+    }
 
 
 def _load_surface_gamma_artifact(surface_json_path: str) -> np.ndarray:
@@ -3128,6 +3262,10 @@ def compare_same_candidate_objective_replay(
     *,
     require_exact_candidates: bool = False,
     strict_solver_contract: bool = False,
+    scalar_rtol: float = _SAME_CANDIDATE_SCALAR_RTOL,
+    scalar_atol: float = _SAME_CANDIDATE_SCALAR_ATOL,
+    gradient_rtol: float = _SAME_CANDIDATE_GRADIENT_RTOL,
+    gradient_atol: float = _SAME_CANDIDATE_GRADIENT_ATOL,
 ) -> dict[str, Any]:
     """Compare paired CPU/JAX objective-evaluation trace events at identical x."""
     cpu_events = _load_objective_evaluation_events_from_case(cpu_case)
@@ -3140,6 +3278,10 @@ def compare_same_candidate_objective_replay(
             "same_candidate_event_count": 0,
             "require_exact_candidates": bool(require_exact_candidates),
             "strict_solver_contract": bool(strict_solver_contract),
+            "scalar_rtol": float(scalar_rtol),
+            "scalar_atol": float(scalar_atol),
+            "gradient_rtol": float(gradient_rtol),
+            "gradient_atol": float(gradient_atol),
             "solver_contract_diagnostics": [],
             "failures": [],
         }
@@ -3435,6 +3577,8 @@ def compare_same_candidate_objective_replay(
                     field="objective.value",
                     cpu_value=_summary_scalar(cpu_event.get("objective")),
                     jax_value=_summary_scalar(jax_event.get("objective")),
+                    rtol=scalar_rtol,
+                    atol=scalar_atol,
                 ),
             )
             max_gradient_abs_diff = max(
@@ -3444,6 +3588,8 @@ def compare_same_candidate_objective_replay(
                     field="optimizer_gradient",
                     cpu_vector=comparable_cpu_gradient,
                     jax_vector=comparable_jax_gradient,
+                    rtol=gradient_rtol,
+                    atol=gradient_atol,
                 ),
             )
         slice_summary = (
@@ -3633,6 +3779,10 @@ def compare_same_candidate_objective_replay(
         ),
         "require_exact_candidates": bool(require_exact_candidates),
         "strict_solver_contract": bool(strict_solver_contract),
+        "scalar_rtol": float(scalar_rtol),
+        "scalar_atol": float(scalar_atol),
+        "gradient_rtol": float(gradient_rtol),
+        "gradient_atol": float(gradient_atol),
         "candidate_x_abs_tol": candidate_x_abs_tol,
         "max_candidate_abs_diff": max_candidate_abs_diff,
         "max_objective_abs_diff": max_objective_abs_diff,
@@ -4087,6 +4237,7 @@ def main() -> None:
         None if args.case_artifacts_dir is None else Path(args.case_artifacts_dir)
     )
     case_root_for_failure: Path | None = None
+    mps_float32_reference_case = None
     try:
         if case_artifacts_dir is None:
             with tempfile.TemporaryDirectory(
@@ -4106,6 +4257,17 @@ def main() -> None:
                     reference_benchmark_mode=reference_benchmark_mode,
                     case_root=case_root,
                 )
+                if _mps_custom_kernel_float32_reference_required(args):
+                    mps_float32_reference_case = (
+                        _run_mps_custom_kernel_float32_reference_case(
+                            args,
+                            reference_benchmark_mode=reference_benchmark_mode,
+                            compare_surface_geometry=compare_surface_geometry,
+                            case_root=case_root,
+                            jax_seed_spec=jax_seed_spec,
+                            seed_case=seed_case,
+                        )
+                    )
                 case_artifacts = None
         else:
             case_artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -4123,6 +4285,17 @@ def main() -> None:
                 reference_benchmark_mode=reference_benchmark_mode,
                 case_root=case_artifacts_dir,
             )
+            if _mps_custom_kernel_float32_reference_required(args):
+                mps_float32_reference_case = (
+                    _run_mps_custom_kernel_float32_reference_case(
+                        args,
+                        reference_benchmark_mode=reference_benchmark_mode,
+                        compare_surface_geometry=compare_surface_geometry,
+                        case_root=case_artifacts_dir,
+                        jax_seed_spec=jax_seed_spec,
+                        seed_case=seed_case,
+                    )
+                )
             case_artifacts = {
                 "case_artifacts_dir": str(case_artifacts_dir),
                 "reference_run_dir": str(cpu_case["run_dir"]),
@@ -4142,6 +4315,13 @@ def main() -> None:
                 case_artifacts["target_same_candidate_replay_progress_json"] = (
                     same_candidate_replay_case["outer_optimizer_progress_json"]
                 )
+            if mps_float32_reference_case is not None:
+                case_artifacts["mps_float32_reference_run_dir"] = str(
+                    mps_float32_reference_case["run_dir"]
+                )
+                case_artifacts[
+                    "mps_float32_reference_outer_optimizer_progress_json"
+                ] = mps_float32_reference_case["outer_optimizer_progress_json"]
             if seed_case is not None:
                 case_artifacts["shared_seed_run_dir"] = str(seed_case["run_dir"])
     except Exception as exc:
@@ -4171,6 +4351,15 @@ def main() -> None:
         jax_case,
         compare_surface_geometry=compare_surface_geometry,
     )
+    mps_custom_kernel_float32_reference_active = mps_float32_reference_case is not None
+    mps_custom_kernel_float32_missing_trace_gate = (
+        mps_custom_kernel_float32_reference_active
+        and _mps_custom_kernel_float32_missing_trace_gate(args)
+    )
+    mps_custom_kernel_float32_acceptance_oracle_active = (
+        mps_custom_kernel_float32_reference_active
+        and not mps_custom_kernel_float32_missing_trace_gate
+    )
     comparison, failures = evaluate_single_stage_init_parity(
         cpu_results,
         jax_results,
@@ -4180,8 +4369,22 @@ def main() -> None:
         expected_jax_outer_optimizer_method=_expected_target_outer_optimizer_method(
             args.optimizer_backend
         ),
-        require_final_metric_parity=not _trace_gated_final_metric_parity(args),
+        require_final_metric_parity=(
+            not _trace_gated_final_metric_parity(args)
+            and not mps_custom_kernel_float32_acceptance_oracle_active
+        ),
     )
+    if mps_custom_kernel_float32_acceptance_oracle_active:
+        comparison["final_metric_parity_gate"] = "mps_custom_kernel_float32_reference"
+        comparison["diagnostic_final_metric_parity_failures"] = comparison[
+            "final_metric_parity_failures"
+        ]
+    if mps_custom_kernel_float32_missing_trace_gate:
+        failures.append(
+            "MPS custom-kernel float32 acceptance requires "
+            "--record-objective-evaluation-trace to record the same-candidate "
+            "objective/gradient gate."
+        )
     optimizer_state_trace_parity = None
     same_candidate_replay = None
     optimizer_path_objective_evaluations = None
@@ -4203,7 +4406,12 @@ def main() -> None:
             same_candidate_replay["strict_gate_failure_class"] = (
                 strict_gate_failure_class
             )
-        failures.extend(_same_candidate_replay_gate_failures(same_candidate_replay))
+        if mps_custom_kernel_float32_acceptance_oracle_active:
+            same_candidate_replay["gating"] = (
+                "diagnostic_cpu_reference_not_mps_float32_acceptance"
+            )
+        else:
+            failures.extend(_same_candidate_replay_gate_failures(same_candidate_replay))
         optimizer_path_objective_evaluations = (
             compare_optimizer_path_objective_evaluations(cpu_case, jax_case)
         )
@@ -4236,7 +4444,13 @@ def main() -> None:
         }
     if _trace_gated_final_metric_parity(args):
         final_metric_failures = comparison["final_metric_parity_failures"]
-        if not bool(args.record_objective_evaluation_trace):
+        if mps_custom_kernel_float32_missing_trace_gate:
+            failures.extend(final_metric_failures)
+        elif mps_custom_kernel_float32_acceptance_oracle_active:
+            comparison["diagnostic_final_metric_parity_failures"] = (
+                final_metric_failures
+            )
+        elif not bool(args.record_objective_evaluation_trace):
             failures.append(
                 "Trace-gated optimizer comparison rungs require "
                 "--record-objective-evaluation-trace to record the "
@@ -4254,6 +4468,20 @@ def main() -> None:
                 )
             else:
                 failures.extend(final_metric_failures)
+    mps_custom_kernel_float32_reference = None
+    if mps_float32_reference_case is not None:
+        mps_custom_kernel_float32_reference = (
+            _compare_mps_custom_kernel_float32_reference(
+                mps_float32_reference_case,
+                jax_case,
+                args=args,
+                compare_surface_geometry=compare_surface_geometry,
+            )
+        )
+        failures.extend(
+            "MPS custom-kernel float32 reference: " + failure
+            for failure in mps_custom_kernel_float32_reference["failures"]
+        )
     if int(args.maxiter) > 0 and args.reference_optimizer_method == "lbfgs-trace":
         optimizer_state_trace_parity = _compare_case_optimizer_state_traces(
             cpu_case,
@@ -4270,7 +4498,27 @@ def main() -> None:
         "cpu_oracle_value": float(cpu_results["FIELD_ERROR"]),
         "gpu_value": float(jax_results["FIELD_ERROR"]),
         "value_rel_diff": float(comparison["field_error_rel_diff"]),
+        "oracle_role": "cpu_reference",
     }
+    active_proof_parity = proof_parity
+    if mps_custom_kernel_float32_reference is not None:
+        proof_parity["oracle_role"] = "diagnostic_cpu_reference"
+        proof_parity["active_acceptance_oracle"] = "mps_custom_kernel_float32_reference"
+        active_proof_parity = {
+            **gpu_proof_parity_contract("single_stage"),
+            "cpu_oracle_value": float(
+                mps_float32_reference_case["results"]["FIELD_ERROR"]
+            ),
+            "gpu_value": float(jax_results["FIELD_ERROR"]),
+            "value_rel_diff": float(
+                mps_custom_kernel_float32_reference["comparison"][
+                    "field_error_rel_diff"
+                ]
+            ),
+            "oracle_role": "mps_custom_kernel_float32_reference",
+            "reference_backend_mode": "jax_cpu_float32_smoke",
+            "target_backend_mode": "jax_mps_smoke",
+        }
     warnings: list[str] = []
     if not comparison["cpu_self_intersection_check_available"]:
         warnings.append(
@@ -4326,6 +4574,29 @@ def main() -> None:
                 f"candidate_abs_diff={first_split['candidate_abs_diff']:.2e}"
             )
 
+    lanes = {
+        lane: contract["run_dir"]
+        for lane, contract in full_run_artifact_contract["lanes"].items()
+    }
+    if mps_float32_reference_case is not None:
+        lanes["mps_float32_reference"] = str(mps_float32_reference_case["run_dir"])
+    timings = {
+        "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
+        "jax_elapsed_s": float(jax_case["elapsed_s"]),
+        **_prefix_phase_timings("cpu", cpu_case["phase_timings"]),
+        **_prefix_phase_timings("jax", jax_case["phase_timings"]),
+    }
+    if mps_float32_reference_case is not None:
+        timings["mps_float32_reference_elapsed_s"] = float(
+            mps_float32_reference_case["elapsed_s"]
+        )
+        timings.update(
+            _prefix_phase_timings(
+                "mps_float32_reference",
+                mps_float32_reference_case["phase_timings"],
+            )
+        )
+
     payload = {
         "provenance": provenance,
         "bundle_provenance": bundle_provenance,
@@ -4333,28 +4604,27 @@ def main() -> None:
         "jax_results": jax_results,
         "comparison": comparison,
         "proof_parity": proof_parity,
+        "active_proof_parity": active_proof_parity,
         "full_run_artifact_contract": full_run_artifact_contract,
-        "lanes": {
-            lane: contract["run_dir"]
-            for lane, contract in full_run_artifact_contract["lanes"].items()
-        },
-        "timings": {
-            "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
-            "jax_elapsed_s": float(jax_case["elapsed_s"]),
-            **_prefix_phase_timings("cpu", cpu_case["phase_timings"]),
-            **_prefix_phase_timings("jax", jax_case["phase_timings"]),
-        },
+        "lanes": lanes,
+        "timings": timings,
         "warnings": warnings,
         "failures": failures,
         "passed": not failures,
     }
     if optimizer_state_trace_parity is not None:
         payload["optimizer_state_trace_parity"] = optimizer_state_trace_parity
+    if mps_float32_reference_case is not None:
+        payload["mps_float32_reference_results"] = mps_float32_reference_case["results"]
     if same_candidate_replay is not None:
         payload["same_candidate_replay"] = same_candidate_replay
     if optimizer_path_objective_evaluations is not None:
         payload["optimizer_path_objective_evaluations"] = (
             optimizer_path_objective_evaluations
+        )
+    if mps_custom_kernel_float32_reference is not None:
+        payload["mps_custom_kernel_float32_reference"] = (
+            mps_custom_kernel_float32_reference
         )
     if case_artifacts is not None:
         payload["artifacts"] = case_artifacts

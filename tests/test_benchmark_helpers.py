@@ -743,6 +743,38 @@ def test_single_stage_init_preparses_mps_custom_kernel_float32_smoke():
             requested_platform="cuda",
         )
     )
+    assert (
+        not single_stage_init_parity_module._preparse_mps_custom_kernel_float32_smoke(
+            ["--experimental-mps-boozer-custom-kernel"],
+            requested_platform="cpu",
+        )
+    )
+
+
+def test_single_stage_init_mps_float32_reference_requires_mps_target(tmp_path):
+    args = _single_stage_case_args(tmp_path)
+    args.experimental_mps_boozer_custom_kernel = True
+
+    args.platform = "auto"
+    assert (
+        single_stage_init_parity_module._mps_custom_kernel_float32_reference_required(
+            args
+        )
+    )
+    args.platform = "mps"
+    assert (
+        single_stage_init_parity_module._mps_custom_kernel_float32_reference_required(
+            args
+        )
+    )
+    args.platform = "cpu"
+    assert not single_stage_init_parity_module._mps_custom_kernel_float32_reference_required(
+        args
+    )
+    args.platform = "cuda"
+    assert not single_stage_init_parity_module._mps_custom_kernel_float32_reference_required(
+        args
+    )
 
 
 def test_single_stage_init_accepts_reference_trace_optimizer(monkeypatch):
@@ -923,6 +955,51 @@ def test_single_stage_init_same_candidate_replay_compares_trace_payloads(tmp_pat
     assert replay["max_optimizer_gradient_abs_diff"] == 0.0
 
 
+def test_single_stage_init_same_candidate_replay_uses_supplied_float32_tolerances(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=1.0,
+        gradient=[1.0, -2.0],
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=1.00005,
+        gradient=[1.0005, -2.0005],
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}), encoding="utf-8")
+    jax_progress.write_text(json.dumps({"events": [jax_event]}), encoding="utf-8")
+    cpu_case = {"outer_optimizer_progress_json": str(cpu_progress)}
+    jax_case = {"outer_optimizer_progress_json": str(jax_progress)}
+
+    strict_replay = (
+        single_stage_init_parity_module.compare_same_candidate_objective_replay(
+            cpu_case,
+            jax_case,
+        )
+    )
+    float32_replay = (
+        single_stage_init_parity_module.compare_same_candidate_objective_replay(
+            cpu_case,
+            jax_case,
+            scalar_rtol=1e-12,
+            scalar_atol=1e-4,
+            gradient_rtol=1e-12,
+            gradient_atol=1e-3,
+        )
+    )
+
+    assert strict_replay["status"] == "fail"
+    assert float32_replay["status"] == "pass"
+    assert float32_replay["scalar_rtol"] == pytest.approx(1e-12)
+    assert float32_replay["scalar_atol"] == pytest.approx(1e-4)
+    assert float32_replay["gradient_rtol"] == pytest.approx(1e-12)
+    assert float32_replay["gradient_atol"] == pytest.approx(1e-3)
+
+
 def test_single_stage_init_same_candidate_replay_accepts_target_native_scope(
     tmp_path,
 ):
@@ -1003,9 +1080,7 @@ def test_single_stage_init_same_candidate_replay_accepts_target_native_prefix(
     assert replay["candidate_comparison_scope_counts"] == {
         "target-native-cpu-prefix": 1
     }
-    assert replay["gradient_comparison_scope_counts"] == {
-        "target-native-cpu-prefix": 1
-    }
+    assert replay["gradient_comparison_scope_counts"] == {"target-native-cpu-prefix": 1}
     assert replay["max_optimizer_gradient_abs_diff"] == 0.0
 
 
@@ -1034,9 +1109,7 @@ def test_single_stage_init_same_candidate_replay_keeps_full_vector_shape_gate(
 
     assert replay["status"] == "fail"
     assert replay["same_candidate_event_count"] == 0
-    assert replay["candidate_comparison_scope_counts"] == {
-        "full-optimizer-vector": 1
-    }
+    assert replay["candidate_comparison_scope_counts"] == {"full-optimizer-vector": 1}
     assert replay["failures"] == [
         "No paired objective-evaluation events shared the same candidate."
     ]
@@ -4913,6 +4986,392 @@ def test_single_stage_init_parity_can_defer_public_optimizer_final_metrics():
     ]
 
 
+def test_single_stage_init_mps_float32_reference_gates_trace_not_final_metrics(
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax"
+    args.record_objective_evaluation_trace = True
+    expected_method = (
+        single_stage_init_parity_module._expected_target_outer_optimizer_method(
+            args.optimizer_backend
+        )
+    )
+
+    def result_payload(**overrides):
+        payload = {
+            key: 1.0
+            for key in single_stage_init_parity_module._OUTER_LOOP_REQUIRED_RESULT_KEYS
+        }
+        payload.update(
+            {
+                "FINAL_IOTA": 0.15,
+                "FINAL_VOLUME": 0.1,
+                "FIELD_ERROR": 0.003,
+                "MAX_CURVATURE": 10.0,
+                "SELF_INTERSECTING": False,
+                "SELF_INTERSECTION_CHECK_AVAILABLE": True,
+                "iterations": 1,
+                "outer_optimizer_method": expected_method,
+            }
+        )
+        payload.update(overrides)
+        return payload
+
+    reference_progress = tmp_path / "reference_progress.json"
+    target_progress = tmp_path / "target_progress.json"
+    reference_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=1.0,
+        gradient=[1.0, -2.0],
+    )
+    target_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=1.00005,
+        gradient=[1.0005, -2.0005],
+    )
+    target_event["target_native_replay"] = True
+    reference_progress.write_text(
+        json.dumps({"events": [reference_event]}),
+        encoding="utf-8",
+    )
+    target_progress.write_text(
+        json.dumps({"events": [target_event]}),
+        encoding="utf-8",
+    )
+
+    summary = (
+        single_stage_init_parity_module._compare_mps_custom_kernel_float32_reference(
+            {
+                "results": result_payload(),
+                "outer_optimizer_progress_json": str(reference_progress),
+                "surface_gamma": None,
+            },
+            {
+                "results": result_payload(FIELD_ERROR=0.004),
+                "outer_optimizer_progress_json": str(target_progress),
+                "surface_gamma": None,
+            },
+            args=args,
+            compare_surface_geometry=False,
+        )
+    )
+
+    assert summary["failures"] == []
+    assert summary["same_candidate_replay"]["status"] == "pass"
+    assert summary["comparison"]["final_metric_parity_failures"] == [
+        "Final field error relative difference too large: 3.33e-01"
+    ]
+
+
+def _single_stage_main_result_payload(args, *, field_error: float) -> dict[str, object]:
+    payload = {
+        key: 1.0
+        for key in single_stage_init_parity_module._OUTER_LOOP_REQUIRED_RESULT_KEYS
+    }
+    payload.update(
+        {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": field_error,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+            "SELF_INTERSECTION_CHECK_AVAILABLE": True,
+            "iterations": 1,
+            "outer_optimizer_method": (
+                single_stage_init_parity_module._expected_target_outer_optimizer_method(
+                    args.optimizer_backend
+                )
+            ),
+        }
+    )
+    return payload
+
+
+def _single_stage_main_case(
+    tmp_path: Path,
+    args,
+    *,
+    name: str,
+    field_error: float,
+    objective: float,
+    gradient: list[float],
+    target_native_replay: bool = False,
+) -> dict[str, object]:
+    run_dir = tmp_path / name
+    run_dir.mkdir()
+    progress_json = run_dir / "outer_optimizer_progress.json"
+    event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=objective,
+        gradient=gradient,
+    )
+    if target_native_replay:
+        event["target_native_replay"] = True
+    progress_json.write_text(json.dumps({"events": [event]}), encoding="utf-8")
+    return {
+        "run_dir": run_dir,
+        "results": _single_stage_main_result_payload(args, field_error=field_error),
+        "outer_optimizer_progress_json": str(progress_json),
+        "surface_gamma": None,
+        "elapsed_s": 1.0,
+        "phase_timings": {},
+    }
+
+
+def _patch_single_stage_main_mps_float32_cases(monkeypatch, tmp_path: Path):
+    stage2_bs_path = tmp_path / "stage2_biot_savart.json"
+    stage2_bs_path.write_text("{}", encoding="utf-8")
+    stage2_bs_path.with_name("results.json").write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {"float32_reference_calls": 0}
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "build_provenance",
+        lambda *_args, **_kwargs: {
+            "backend": "cpu",
+            "devices": ["cpu:0"],
+            "xla_flags": None,
+            "cuda_force_ptx_jit": None,
+            "cuda_disable_ptx_jit": None,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "print_provenance",
+        lambda _provenance: None,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_strict_transfer_optimizer_support",
+        lambda _args, _provenance: {"status": "supported"},
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_should_compare_surface_geometry",
+        lambda _args, *, benchmark_mode: False,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "build_single_stage_full_run_artifact_contract",
+        lambda *_args, **_kwargs: {
+            "lanes": {
+                "cpu_reference": {"run_dir": str(tmp_path / "cpu-reference")},
+                "jax_target": {"run_dir": str(tmp_path / "jax-target")},
+            }
+        },
+    )
+
+    def fake_run_single_stage_case_pair(
+        args,
+        *,
+        benchmark_mode,
+        reference_backend,
+        reference_benchmark_mode,
+        case_root,
+    ):
+        del benchmark_mode, reference_backend, reference_benchmark_mode, case_root
+        jax_seed_spec = tmp_path / "jax-seed.json"
+        jax_seed_spec.write_text("{}", encoding="utf-8")
+        cpu_case = _single_stage_main_case(
+            tmp_path,
+            args,
+            name="cpu-case",
+            field_error=0.003,
+            objective=1.0,
+            gradient=[1.0, -2.0],
+        )
+        jax_case = _single_stage_main_case(
+            tmp_path,
+            args,
+            name="jax-case",
+            field_error=0.004,
+            objective=1.00005,
+            gradient=[1.0005, -2.0005],
+            target_native_replay=True,
+        )
+        return cpu_case, jax_case, jax_seed_spec, None, None
+
+    def fake_run_mps_custom_kernel_float32_reference_case(
+        args,
+        *,
+        reference_benchmark_mode,
+        compare_surface_geometry,
+        case_root,
+        jax_seed_spec,
+        seed_case,
+    ):
+        del (
+            reference_benchmark_mode,
+            compare_surface_geometry,
+            case_root,
+            jax_seed_spec,
+            seed_case,
+        )
+        captured["float32_reference_calls"] = (
+            int(captured["float32_reference_calls"]) + 1
+        )
+        return _single_stage_main_case(
+            tmp_path,
+            args,
+            name="mps-float32-reference",
+            field_error=0.00395,
+            objective=1.0,
+            gradient=[1.0, -2.0],
+        )
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_run_single_stage_case_pair",
+        fake_run_single_stage_case_pair,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_run_mps_custom_kernel_float32_reference_case",
+        fake_run_mps_custom_kernel_float32_reference_case,
+    )
+    return stage2_bs_path, captured
+
+
+def test_single_stage_init_main_mps_float32_reference_is_active_oracle(
+    monkeypatch,
+    tmp_path,
+):
+    output_json = tmp_path / "single-stage-init-mps.json"
+    stage2_bs_path, captured = _patch_single_stage_main_mps_float32_cases(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_init_parity.py",
+            "--output-json",
+            str(output_json),
+            "--stage2-bs-path",
+            str(stage2_bs_path),
+            "--platform",
+            "auto",
+            "--maxiter",
+            "1",
+            "--optimizer-backend",
+            "scipy-jax",
+            "--experimental-mps-boozer-custom-kernel",
+            "--record-objective-evaluation-trace",
+            "--case-artifacts-dir",
+            str(tmp_path / "cases"),
+        ],
+    )
+
+    single_stage_init_parity_module.main()
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["passed"] is True
+    assert payload["failures"] == []
+    assert captured["float32_reference_calls"] == 1
+    assert payload["same_candidate_replay"]["gating"] == (
+        "diagnostic_cpu_reference_not_mps_float32_acceptance"
+    )
+    assert payload["comparison"]["final_metric_parity_gate"] == (
+        "mps_custom_kernel_float32_reference"
+    )
+    assert "mps_float32_reference_results" in payload
+    assert (
+        payload["mps_custom_kernel_float32_reference"]["same_candidate_replay"][
+            "status"
+        ]
+        == "pass"
+    )
+    assert payload["proof_parity"]["oracle_role"] == "diagnostic_cpu_reference"
+    assert payload["active_proof_parity"]["oracle_role"] == (
+        "mps_custom_kernel_float32_reference"
+    )
+
+
+def test_single_stage_init_main_mps_float32_reference_requires_trace_gate(
+    monkeypatch,
+    tmp_path,
+):
+    output_json = tmp_path / "single-stage-init-mps.json"
+    stage2_bs_path, _captured = _patch_single_stage_main_mps_float32_cases(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_init_parity.py",
+            "--output-json",
+            str(output_json),
+            "--stage2-bs-path",
+            str(stage2_bs_path),
+            "--platform",
+            "auto",
+            "--maxiter",
+            "1",
+            "--optimizer-backend",
+            "scipy-jax",
+            "--experimental-mps-boozer-custom-kernel",
+            "--case-artifacts-dir",
+            str(tmp_path / "cases"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        single_stage_init_parity_module.main()
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["passed"] is False
+    assert any(
+        "--record-objective-evaluation-trace" in failure
+        for failure in payload["failures"]
+    )
+    assert "same_candidate_replay" not in payload
+
+
+def test_single_stage_init_main_skips_mps_float32_reference_on_cpu_platform(
+    monkeypatch,
+    tmp_path,
+):
+    output_json = tmp_path / "single-stage-init-cpu.json"
+    stage2_bs_path, captured = _patch_single_stage_main_mps_float32_cases(
+        monkeypatch,
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_init_parity.py",
+            "--output-json",
+            str(output_json),
+            "--stage2-bs-path",
+            str(stage2_bs_path),
+            "--platform",
+            "cpu",
+            "--maxiter",
+            "1",
+            "--optimizer-backend",
+            "scipy-jax",
+            "--experimental-mps-boozer-custom-kernel",
+            "--record-objective-evaluation-trace",
+            "--case-artifacts-dir",
+            str(tmp_path / "cases"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        single_stage_init_parity_module.main()
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert captured["float32_reference_calls"] == 0
+    assert "mps_float32_reference_results" not in payload
+    assert "mps_custom_kernel_float32_reference" not in payload
+    assert payload["proof_parity"]["oracle_role"] == "cpu_reference"
+
+
 def test_single_stage_init_public_optimizer_final_metric_drift_needs_path_split():
     pass_replay = {"status": "pass"}
     split_path = {"status": "split"}
@@ -6938,6 +7397,58 @@ def test_single_stage_init_case_routes_auto_mps_custom_kernel_to_mps_float32_env
     assert observed_env["JAX_PLATFORMS"] == "mps"
     assert observed_env["SIMSOPT_BACKEND_MODE"] == "jax_mps_smoke"
     assert observed_env["JAX_ENABLE_X64"] == "0"
+
+
+def test_single_stage_init_case_routes_mps_float32_reference_to_jax_cpu_smoke(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax"
+    args.experimental_mps_boozer_custom_kernel = True
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "REQUESTED_MPS_FLOAT32_SMOKE",
+        True,
+    )
+    monkeypatch.setenv("JAX_ENABLE_X64", "1")
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        experimental_mps_boozer_custom_kernel=False,
+        mps_custom_kernel_float32_reference=True,
+        load_surface_gamma=False,
+    )
+
+    observed_command, observed_env = observed_invocations[0]
+    assert "--experimental-mps-boozer-custom-kernel" not in observed_command
+    assert observed_env["JAX_PLATFORMS"] == "cpu"
+    assert observed_env["SIMSOPT_BACKEND_MODE"] == "jax_cpu_float32_smoke"
+    assert observed_env["JAX_ENABLE_X64"] == "0"
+
+
+def test_single_stage_init_case_honors_explicit_mps_custom_kernel_disable(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.experimental_mps_boozer_custom_kernel = True
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        experimental_mps_boozer_custom_kernel=False,
+        load_surface_gamma=False,
+    )
+
+    observed_command, observed_env = observed_invocations[0]
+    assert "--experimental-mps-boozer-custom-kernel" not in observed_command
+    assert observed_env["JAX_PLATFORMS"] == "cpu"
 
 
 def test_single_stage_init_case_keeps_non_mps_child_x64_under_parent_mps_smoke(
