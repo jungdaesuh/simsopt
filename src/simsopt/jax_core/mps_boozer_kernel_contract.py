@@ -16,6 +16,7 @@ SCHEMA_VERSION = 4
 DEFAULT_CONTRACT_ARTIFACT_DIR = Path(".artifacts/mps_custom_kernel_contract")
 SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET = "mps.simsopt_boozer_value_grad"
 SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION = 3
+MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE = "fixed_surface_g_iota"
 UNKNOWN_ITERATION_COUNT = -1
 
 
@@ -127,6 +128,115 @@ def _solver_option_items(options: object) -> tuple[tuple[str, object], ...]:
     return tuple(
         (str(key), _json_scalar(value))
         for key, value in sorted(dict(options).items(), key=lambda item: str(item[0]))
+    )
+
+
+def _solver_options_mapping(
+    options: tuple[tuple[str, object], ...],
+) -> dict[str, object]:
+    return {str(key): value for key, value in options}
+
+
+def _is_float32_array(value: jax.Array) -> bool:
+    return value.dtype == np.dtype(np.float32)
+
+
+def _is_nonempty_vector(value: jax.Array) -> bool:
+    return value.ndim == 1 and value.shape[0] != 0
+
+
+def _is_scatter_operand(value: jax.Array) -> bool:
+    if value.dtype == np.dtype(np.int32):
+        return _is_nonempty_vector(value)
+    return bool(
+        value.dtype == np.dtype(np.float32)
+        and value.ndim == 2
+        and value.shape[0] != 0
+        and value.shape[1] != 0
+    )
+
+
+def _fused_custom_call_payload_supported(
+    contract: MpsBoozerKernelContract,
+) -> bool:
+    runtime_arrays = (
+        contract.coil_dofs,
+        contract.x_inner,
+        contract.surface_dofs,
+        contract.quadpoints_phi,
+        contract.quadpoints_theta,
+        contract.label_quadpoints_phi,
+        contract.label_quadpoints_theta,
+    )
+    if not all(
+        _is_float32_array(value) and _is_nonempty_vector(value)
+        for value in runtime_arrays
+    ):
+        return False
+    if not _is_scatter_operand(contract.surface_scatter_indices):
+        return False
+    if not _is_scatter_operand(contract.label_scatter_indices):
+        return False
+    if (
+        len(contract.coil_group_gammas) != 1
+        or len(contract.coil_group_gammadashs) != 1
+        or len(contract.coil_group_currents) != 1
+    ):
+        return False
+
+    gammas = contract.coil_group_gammas[0]
+    gammadashs = contract.coil_group_gammadashs[0]
+    currents = contract.coil_group_currents[0]
+    if not all(_is_float32_array(value) for value in (gammas, gammadashs, currents)):
+        return False
+    if gammas.ndim != 3 or gammas.shape[2] != 3:
+        return False
+    if gammas.shape[0] == 0 or gammas.shape[1] == 0:
+        return False
+    if gammadashs.shape != gammas.shape:
+        return False
+    if currents.ndim != 1 or currents.shape[0] != gammas.shape[0]:
+        return False
+
+    flat_cotangent_size = int(gammas.size + gammadashs.size + currents.size)
+    return bool(
+        _is_float32_array(contract.coil_pullback_operator)
+        and contract.coil_pullback_operator.ndim == 2
+        and contract.coil_pullback_operator.shape
+        == (contract.coil_dofs.shape[0], flat_cotangent_size)
+    )
+
+
+def mps_boozer_fixed_surface_g_iota_supported(
+    contract: MpsBoozerKernelContract,
+) -> bool:
+    """Return whether this contract can use the fixed-surface G/iota backend."""
+
+    if not _fused_custom_call_payload_supported(contract):
+        return False
+
+    metadata = contract.static_metadata
+    solver_options = _solver_options_mapping(metadata.solver_options)
+    coeff_count = (2 * int(metadata.mpol) + 1) * (2 * int(metadata.ntor) + 1)
+    surface_dof_count = int(contract.x_inner.shape[0]) - 2
+    return bool(
+        metadata.target_name == SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET
+        and bool(metadata.optimize_G)
+        and bool(metadata.stellsym)
+        and int(metadata.mpol) > 0
+        and int(metadata.ntor) > 0
+        and int(metadata.nfp) > 0
+        and metadata.surface_kind == "xyztensorfourier"
+        and float(metadata.constraint_weight) == 0.0
+        and int(solver_options.get("newton_maxiter", 1)) == 1
+        and int(solver_options.get("gmres_maxiter", 2)) == 2
+        and solver_options.get("mps_solver_mode")
+        == MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE
+        and surface_dof_count > 0
+        and contract.surface_scatter_indices.dtype == np.dtype(np.float32)
+        and contract.surface_scatter_indices.ndim == 2
+        and int(contract.surface_scatter_indices.shape[0]) == 3 * coeff_count
+        and int(contract.surface_scatter_indices.shape[1]) == surface_dof_count
     )
 
 

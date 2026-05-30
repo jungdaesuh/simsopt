@@ -10,6 +10,9 @@ import pytest
 
 from simsopt.jax_core.mps_boozer_kernel_contract import (
     DEFAULT_CONTRACT_ARTIFACT_DIR,
+    MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE,
+    MpsBoozerKernelContract,
+    MpsBoozerKernelStaticMetadata,
     SCHEMA_VERSION,
     SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION,
     SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET,
@@ -20,9 +23,12 @@ from simsopt.jax_core.mps_boozer_kernel_contract import (
     evaluate_mps_boozer_fused_solve_custom_call,
     evaluate_mps_boozer_fused_solve_cpu_oracle,
     mps_boozer_kernel_contract_artifact,
+    mps_boozer_fixed_surface_g_iota_supported,
     write_mps_boozer_kernel_contract_artifact,
 )
 from simsopt.jax_core.specs import CoilGroupSpec, GroupedCoilSetSpec
+
+_TWO_PI = np.asarray(2.0 * np.pi, dtype=np.float32)
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,268 @@ def _contract_fixture():
         owner,
         solved_state=solved_state,
     )
+
+
+def _fixed_surface_backend_contract_fixture():
+    dtype = jnp.float32
+    surface_dofs = jnp.asarray(
+        np.linspace(-0.4, 0.8, 37, dtype=np.float32),
+        dtype=dtype,
+    )
+    metadata = MpsBoozerKernelStaticMetadata(
+        target_name=SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET,
+        mpol=2,
+        ntor=2,
+        nfp=2,
+        stellsym=True,
+        surface_kind="xyztensorfourier",
+        label_mpol=2,
+        label_ntor=2,
+        label_nfp=2,
+        label_stellsym=True,
+        label_surface_kind="xyztensorfourier",
+        label_type="theta",
+        phi_idx=None,
+        targetlabel=0.0,
+        constraint_weight=0.0,
+        optimize_G=True,
+        weight_inv_modB=False,
+        solver_options=(
+            ("gmres_maxiter", 2),
+            ("mps_solver_mode", MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE),
+            ("newton_maxiter", 1),
+            ("newton_tol", 1.0e-5),
+        ),
+        coil_group_indices=((0, 1),),
+    )
+    gammas = jnp.asarray(
+        np.linspace(0.4, 3.1, 24, dtype=np.float32).reshape(2, 4, 3),
+        dtype=dtype,
+    )
+    gammadashs = jnp.asarray(
+        np.linspace(-0.3, 0.9, 24, dtype=np.float32).reshape(2, 4, 3),
+        dtype=dtype,
+    )
+    return MpsBoozerKernelContract(
+        coil_dofs=jnp.asarray([0.5, -0.25, 0.75], dtype=dtype),
+        x_inner=jnp.concatenate((surface_dofs, jnp.asarray([0.3, 0.05], dtype=dtype))),
+        surface_dofs=surface_dofs,
+        quadpoints_phi=jnp.asarray([0.0, 0.25], dtype=dtype),
+        quadpoints_theta=jnp.asarray([0.0, 0.5, 0.75], dtype=dtype),
+        label_quadpoints_phi=jnp.asarray([0.0], dtype=dtype),
+        label_quadpoints_theta=jnp.asarray([0.0, 0.5], dtype=dtype),
+        surface_scatter_indices=jnp.asarray(
+            np.eye(75, 37, dtype=np.float32),
+            dtype=dtype,
+        ),
+        label_scatter_indices=jnp.asarray(
+            np.eye(75, 37, dtype=np.float32),
+            dtype=dtype,
+        ),
+        coil_group_gammas=(gammas,),
+        coil_group_gammadashs=(gammadashs,),
+        coil_group_currents=(jnp.asarray([1.0e8, -2.0e8], dtype=dtype),),
+        coil_pullback_operator=jnp.asarray(
+            np.linspace(-0.3, 0.4, 150, dtype=np.float32).reshape(3, 50),
+            dtype=dtype,
+        ),
+        static_metadata=metadata,
+    )
+
+
+def _theta_basis(theta_grid, mpol):
+    theta = _TWO_PI * theta_grid[:, None]
+    m_cos = np.arange(0, mpol + 1, dtype=np.float32)[None, :]
+    m_sin = np.arange(1, mpol + 1, dtype=np.float32)[None, :]
+    cos_arg = theta * m_cos
+    sin_arg = theta * m_sin
+    basis = np.concatenate((np.cos(cos_arg), np.sin(sin_arg)), axis=1)
+    derivative = np.concatenate(
+        (-_TWO_PI * m_cos * np.sin(cos_arg), _TWO_PI * m_sin * np.cos(sin_arg)),
+        axis=1,
+    )
+    return basis, derivative
+
+
+def _phi_basis(phi_grid, ntor, nfp):
+    phi = _TWO_PI * phi_grid[:, None]
+    n_cos = (np.arange(0, ntor + 1, dtype=np.float32) * np.float32(nfp))[None, :]
+    n_sin = (np.arange(1, ntor + 1, dtype=np.float32) * np.float32(nfp))[None, :]
+    cos_arg = phi * n_cos
+    sin_arg = phi * n_sin
+    basis = np.concatenate((np.cos(cos_arg), np.sin(sin_arg)), axis=1)
+    derivative = np.concatenate(
+        (-_TWO_PI * n_cos * np.sin(cos_arg), _TWO_PI * n_sin * np.cos(sin_arg)),
+        axis=1,
+    )
+    return basis, derivative
+
+
+def _eval_hat(phi_basis_value, theta_basis_value, coeffs):
+    return phi_basis_value @ coeffs.T @ theta_basis_value.T
+
+
+def _surface_geometry(contract):
+    metadata = contract.static_metadata
+    surface_dofs = np.asarray(contract.x_inner[:-2], dtype=np.float32)
+    phi_grid = np.asarray(contract.quadpoints_phi, dtype=np.float32)
+    theta_grid = np.asarray(contract.quadpoints_theta, dtype=np.float32)
+    scatter_operator = np.asarray(contract.surface_scatter_indices, dtype=np.float32)
+    theta_count = 2 * metadata.mpol + 1
+    phi_count = 2 * metadata.ntor + 1
+    coeff_count = theta_count * phi_count
+    flat_coeffs = scatter_operator @ surface_dofs
+    xc = flat_coeffs[:coeff_count].reshape(theta_count, phi_count)
+    yc = flat_coeffs[coeff_count : 2 * coeff_count].reshape(theta_count, phi_count)
+    zc = flat_coeffs[2 * coeff_count : 3 * coeff_count].reshape(
+        theta_count,
+        phi_count,
+    )
+    theta_b, theta_d = _theta_basis(theta_grid, metadata.mpol)
+    phi_b, phi_d = _phi_basis(phi_grid, metadata.ntor, metadata.nfp)
+    xhat = _eval_hat(phi_b, theta_b, xc)
+    yhat = _eval_hat(phi_b, theta_b, yc)
+    z = _eval_hat(phi_b, theta_b, zc)
+    dxhat_dphi = _eval_hat(phi_d, theta_b, xc)
+    dyhat_dphi = _eval_hat(phi_d, theta_b, yc)
+    dz_dphi = _eval_hat(phi_d, theta_b, zc)
+    dxhat_dtheta = _eval_hat(phi_b, theta_d, xc)
+    dyhat_dtheta = _eval_hat(phi_b, theta_d, yc)
+    dz_dtheta = _eval_hat(phi_b, theta_d, zc)
+    phi_angle = _TWO_PI * phi_grid[:, None]
+    cos_phi = np.cos(phi_angle)
+    sin_phi = np.sin(phi_angle)
+    x = xhat * cos_phi - yhat * sin_phi
+    y = xhat * sin_phi + yhat * cos_phi
+    dx_dphi = (
+        dxhat_dphi * cos_phi
+        - xhat * _TWO_PI * sin_phi
+        - (dyhat_dphi * sin_phi + yhat * _TWO_PI * cos_phi)
+    )
+    dy_dphi = (
+        dxhat_dphi * sin_phi
+        + xhat * _TWO_PI * cos_phi
+        + (dyhat_dphi * cos_phi - yhat * _TWO_PI * sin_phi)
+    )
+    dx_dtheta = dxhat_dtheta * cos_phi - dyhat_dtheta * sin_phi
+    dy_dtheta = dxhat_dtheta * sin_phi + dyhat_dtheta * cos_phi
+    return (
+        np.stack((x, y, z), axis=2),
+        np.stack((dx_dphi, dy_dphi, dz_dphi), axis=2),
+        np.stack((dx_dtheta, dy_dtheta, dz_dtheta), axis=2),
+    )
+
+
+def _biot_savart_b(points, gammas, gammadashs, currents):
+    diff = gammas[None, :, :, :] - points[:, None, None, :]
+    radius_squared = np.sum(diff * diff, axis=-1)
+    cross = np.cross(diff, gammadashs[None, :, :, :])
+    inv_radius_cubed = (1.0 / np.sqrt(radius_squared)) / radius_squared
+    weighted = cross * inv_radius_cubed[..., None]
+    weighted = weighted * currents[None, :, None, None]
+    return np.float32(1.0e-7) * np.sum(weighted, axis=(1, 2)) / gammas.shape[1]
+
+
+def _biot_savart_vjp(points, field_cotangent, gammas, gammadashs, currents):
+    diff = gammas[None, :, :, :] - points[:, None, None, :]
+    radius_squared = np.sum(diff * diff, axis=-1)
+    inv_radius_cubed = (1.0 / np.sqrt(radius_squared)) / radius_squared
+    cross = np.cross(diff, gammadashs[None, :, :, :])
+    dot_cotangent_cross = np.sum(field_cotangent[:, None, None, :] * cross, axis=-1)
+    scale = np.float32(1.0e-7) / gammas.shape[1]
+    grad_gammas = scale * np.sum(
+        currents[None, :, None, None]
+        * (
+            inv_radius_cubed[..., None]
+            * np.cross(gammadashs[None, :, :, :], field_cotangent[:, None, None, :])
+            - 3.0
+            * (dot_cotangent_cross * inv_radius_cubed / radius_squared)[..., None]
+            * diff
+        ),
+        axis=0,
+    )
+    grad_gammadashs = scale * np.sum(
+        currents[None, :, None, None]
+        * inv_radius_cubed[..., None]
+        * np.cross(field_cotangent[:, None, None, :], diff),
+        axis=0,
+    )
+    grad_currents = scale * np.sum(dot_cotangent_cross * inv_radius_cubed, axis=(0, 2))
+    return grad_gammas, grad_gammadashs, grad_currents
+
+
+def _fixed_surface_direct_oracle(contract):
+    x_inner = np.asarray(contract.x_inner, dtype=np.float32)
+    gammas = np.asarray(contract.coil_group_gammas[0], dtype=np.float32)
+    gammadashs = np.asarray(contract.coil_group_gammadashs[0], dtype=np.float32)
+    currents = np.asarray(contract.coil_group_currents[0], dtype=np.float32)
+    coil_pullback_operator = np.asarray(
+        contract.coil_pullback_operator,
+        dtype=np.float32,
+    )
+    surface_dofs = x_inner[:-2]
+    iota = x_inner[-2]
+    G = x_inner[-1]
+    gamma, xphi, xtheta = _surface_geometry(contract)
+    points = gamma.reshape(-1, 3)
+    B = _biot_savart_b(points, gammas, gammadashs, currents).reshape(gamma.shape)
+    B2 = np.sum(B * B, axis=2)
+    residual = G * B - B2[..., None] * (xphi + iota * xtheta)
+    jacobian_G = B.reshape(-1)
+    jacobian_iota = (-B2[..., None] * xtheta).reshape(-1)
+    residual_flat = residual.reshape(-1)
+    grad_G = np.sum(jacobian_G * residual_flat)
+    grad_iota = np.sum(jacobian_iota * residual_flat)
+    h_GG = np.sum(jacobian_G * jacobian_G)
+    h_GI = np.sum(jacobian_G * jacobian_iota)
+    h_II = np.sum(jacobian_iota * jacobian_iota)
+    rhs_G = -grad_G
+    rhs_iota = -grad_iota
+    determinant = h_GG * h_II - h_GI * h_GI
+    G = G + (rhs_G * h_II - h_GI * rhs_iota) / determinant
+    iota = iota + (h_GG * rhs_iota - h_GI * rhs_G) / determinant
+    final_x_inner = np.concatenate(
+        (surface_dofs, np.asarray([iota, G], dtype=np.float32))
+    )
+
+    tangent = xphi + iota * xtheta
+    residual = G * B - B2[..., None] * tangent
+    value = np.asarray(
+        0.5 * np.sum(residual * residual) / residual.size, dtype=np.float32
+    )
+    residual_cotangent = residual / np.float32(residual.size)
+    grad_B = (
+        G * residual_cotangent
+        - 2.0
+        * np.sum(
+            residual_cotangent * tangent,
+            axis=2,
+        )[..., None]
+        * B
+    )
+    grad_gammas, grad_gammadashs, grad_currents = _biot_savart_vjp(
+        points,
+        grad_B.reshape(-1, 3),
+        gammas,
+        gammadashs,
+        currents,
+    )
+    flat_cotangent = np.concatenate(
+        (
+            grad_gammas.reshape(-1),
+            grad_gammadashs.reshape(-1),
+            grad_currents.reshape(-1),
+        )
+    )
+    coil_gradient = coil_pullback_operator @ flat_cotangent
+    residual_norm = np.asarray(np.sqrt(np.sum(residual * residual)), dtype=np.float32)
+    solver_grad_G = np.sum(jacobian_G * residual.reshape(-1))
+    solver_grad_iota = np.sum(jacobian_iota * residual.reshape(-1))
+    gradient_norm = np.asarray(
+        np.sqrt(solver_grad_G * solver_grad_G + solver_grad_iota * solver_grad_iota),
+        dtype=np.float32,
+    )
+    return value, coil_gradient, final_x_inner, residual_norm, gradient_norm
 
 
 def _fused_custom_call_with_arrays(contract, *arrays):
@@ -488,6 +756,34 @@ def test_mps_boozer_fused_custom_call_rejects_unsupported_contracts():
         )
 
 
+def test_mps_boozer_fixed_surface_support_predicate_matches_backend_contract():
+    _, unsupported_contract = _contract_fixture()
+    supported_contract = _fixed_surface_backend_contract_fixture()
+
+    assert not mps_boozer_fixed_surface_g_iota_supported(unsupported_contract)
+    assert mps_boozer_fixed_surface_g_iota_supported(supported_contract)
+    assert not mps_boozer_fixed_surface_g_iota_supported(
+        replace(
+            supported_contract,
+            static_metadata=replace(
+                supported_contract.static_metadata,
+                solver_options=(
+                    ("gmres_maxiter", 2),
+                    ("mps_solver_mode", MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE),
+                    ("newton_maxiter", 20),
+                    ("newton_tol", 1.0e-5),
+                ),
+            ),
+        )
+    )
+    assert not mps_boozer_fixed_surface_g_iota_supported(
+        replace(
+            supported_contract,
+            coil_pullback_operator=supported_contract.coil_pullback_operator[:, :-1],
+        )
+    )
+
+
 @pytest.mark.mps
 def test_mps_boozer_fused_custom_call_returns_structured_status_on_real_mps_backend():
     mps_devices = tuple(
@@ -516,3 +812,53 @@ def test_mps_boozer_fused_custom_call_returns_structured_status_on_real_mps_back
     assert int(np.asarray(actual.gmres_iteration_count)) == UNKNOWN_ITERATION_COUNT
     assert bool(np.asarray(actual.converged)) is False
     assert bool(np.asarray(actual.finite)) is False
+
+
+@pytest.mark.mps
+def test_mps_boozer_fixed_surface_custom_call_matches_oracle_on_real_mps_backend():
+    mps_devices = tuple(
+        device for device in jax.devices() if device.platform.lower() == "mps"
+    )
+    if not mps_devices:
+        pytest.skip("requires a JAX MPS device")
+
+    contract = _fixed_surface_backend_contract_fixture()
+    assert mps_boozer_fixed_surface_g_iota_supported(contract)
+    host_args = _fused_custom_call_args(contract)
+    mps_args = tuple(jax.device_put(value, mps_devices[0]) for value in host_args)
+
+    actual = jax.jit(lambda *leaves: _fused_custom_call_with_arrays(contract, *leaves))(
+        *mps_args
+    )
+    jax.block_until_ready(actual)
+    expected = _fixed_surface_direct_oracle(contract)
+
+    for leaf in actual:
+        assert leaf.device.platform.lower() == "mps"
+    for actual_leaf, expected_leaf in (
+        (actual.value, expected[0]),
+        (actual.coil_gradient, expected[1]),
+        (actual.residual_norm, expected[3]),
+    ):
+        np.testing.assert_allclose(
+            np.asarray(actual_leaf),
+            expected_leaf,
+            rtol=1e-5,
+            atol=1e-7,
+        )
+    np.testing.assert_allclose(
+        np.asarray(actual.final_x_inner),
+        expected[2],
+        rtol=1e-5,
+        atol=5e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual.gradient_norm),
+        expected[4],
+        rtol=1e-5,
+        atol=5e-6,
+    )
+    assert int(np.asarray(actual.newton_iteration_count)) == 1
+    assert int(np.asarray(actual.gmres_iteration_count)) == 2
+    assert bool(np.asarray(actual.converged)) is True
+    assert bool(np.asarray(actual.finite)) is True
