@@ -6096,6 +6096,31 @@ class TestBoozerSurfaceJAXClass:
         assert all(factor.device.platform == "cpu" for factor in hosted)
         np.testing.assert_allclose(np.asarray(hosted[0]), np.ones((2, 2)))
 
+    def test_linearization_residency_device_keeps_dense_factors_unmoved(self):
+        """Strict ``transfer_guard("disallow")`` lane: device residency is a no-op.
+
+        The strict CUDA lane stays transfer-clean only because device residency
+        returns the LS linearization factors untouched — it issues no
+        ``jax.device_put`` at all. Verified on an A100 (jax 0.10.0, CUDA): an
+        explicit ``jax.device_put`` of a device array to the host CPU is
+        *blocked* under ``jax.transfer_guard("disallow")`` ("Disallowed
+        device-to-host transfer"). So the host-residency twin above is a real
+        device->host transfer that correctly fails the strict guard loudly
+        rather than silently escaping it, while the device lane avoids the guard
+        by transferring nothing. Oracle: object identity (``is``) — the strict
+        lane's transfer-cleanliness is exactly this no-copy invariant.
+        """
+        factors = (
+            jnp.ones((2, 2), dtype=jnp.float64),
+            jnp.tril(jnp.ones((2, 2), dtype=jnp.float64)),
+            jnp.triu(jnp.ones((2, 2), dtype=jnp.float64)),
+        )
+
+        placed = _bsj._place_linearization_factors_for_residency(factors, "device")
+
+        assert placed is factors
+        assert _bsj._place_linearization_factors_for_residency(None, "device") is None
+
     def test_get_adjoint_runtime_state_exact_jacobian_uses_host_tolerance_boundary(
         self, monkeypatch
     ):
