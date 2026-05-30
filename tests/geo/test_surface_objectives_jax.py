@@ -62,6 +62,7 @@ from simsopt.geo.surface_fourier_jax import (
     surface_gammadash2_from_dofs,
     stellsym_scatter_indices,
 )
+from simsopt.jax_core import mps_boozer_kernel_contract as mps_boozer_kernel_contract
 from simsopt.jax_core.qfm_solver import _surface_norm as _qfm_surface_norm
 from .boozersurface_jax_test_helpers import _mock_linear_solve_status
 from .surface_test_helpers import get_exact_surface, get_surface
@@ -3185,6 +3186,30 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
     np.testing.assert_allclose(np.asarray(obj._J), 0.37)
 
 
+def test_boozer_residual_experimental_mps_value_grad_delegates(monkeypatch):
+    obj = object.__new__(surfaceobjectives_jax_module.BoozerResidualJAX)
+    value_and_grad_marker = object()
+    calls = []
+
+    def build_value_and_grad(owner, *, solved_state=None):
+        calls.append((owner, solved_state))
+        return value_and_grad_marker
+
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "build_mps_boozer_fused_solve_value_and_grad",
+        build_value_and_grad,
+    )
+
+    assert (
+        obj.experimental_mps_custom_kernel_value_and_grad(
+            solved_state="solved-state-marker",
+        )
+        is value_and_grad_marker
+    )
+    assert calls == [(obj, "solved-state-marker")]
+
+
 def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkeypatch):
     obj = object.__new__(surfaceobjectives_jax_module.BoozerResidualJAX)
     obj.boozer_surface = types.SimpleNamespace(res={"success": True})
@@ -3218,7 +3243,7 @@ def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkey
     )
 
     monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
+        surfaceobjectives_jax_module,
         "_resolved_boozer_solved_runtime_state",
         lambda _booz_surf: solved_state,
     )

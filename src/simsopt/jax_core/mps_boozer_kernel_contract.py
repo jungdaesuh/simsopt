@@ -240,6 +240,29 @@ def mps_boozer_fixed_surface_g_iota_supported(
     )
 
 
+def mps_boozer_jax_mps_backend_available() -> bool:
+    """Return whether JAX currently exposes a local jax-mps device."""
+
+    return any(device.platform == "mps" for device in jax.local_devices())
+
+
+def require_mps_boozer_fixed_surface_g_iota_supported(
+    contract: MpsBoozerKernelContract,
+) -> None:
+    """Raise if a contract cannot use the first fused Boozer MPS backend."""
+
+    _validate_fused_custom_call_contract(contract)
+    if mps_boozer_fixed_surface_g_iota_supported(contract):
+        return
+    raise ValueError(
+        "The experimental MPS Boozer custom kernel only supports the "
+        "fixed-surface G/iota fixture: float32 arrays, one grouped coil set, "
+        "stellsym xyztensorfourier surfaces, zero BoozerResidual constraint "
+        "weight, optimize_G=True, mps_solver_mode='fixed_surface_g_iota', "
+        "newton_maxiter=1, and gmres_maxiter=2."
+    )
+
+
 def _coil_group_arrays(coil_set_spec: object):
     gammas = []
     gammadashs = []
@@ -684,6 +707,62 @@ def evaluate_mps_boozer_fused_solve_custom_call(
             contract.coil_pullback_operator,
         )
     )
+
+
+def build_mps_boozer_fused_solve_value_and_grad(
+    boozer_residual: object,
+    *,
+    solved_state: object | None = None,
+):
+    """Build the opt-in fixed-surface MPS Boozer value/grad callable.
+
+    The returned callable has the existing ``_simsopt_value_and_grad`` marker,
+    so callers can reuse the standard value/grad boundary without another
+    dispatch concept. Unsupported platforms or fixture shapes fail before the
+    callable is returned.
+    """
+
+    if not mps_boozer_jax_mps_backend_available():
+        raise RuntimeError(
+            "The experimental MPS Boozer custom kernel requires an active "
+            "jax-mps backend; no local JAX device reports platform='mps'."
+        )
+    effective_solved_state = (
+        boozer_residual.boozer_surface.get_solved_runtime_state()
+        if solved_state is None
+        else solved_state
+    )
+    if effective_solved_state is None:
+        raise RuntimeError(
+            "The experimental MPS Boozer custom kernel requires a solved "
+            "BoozerSurfaceJAX runtime state."
+        )
+    probe_contract = build_mps_boozer_direct_kernel_contract(
+        boozer_residual,
+        solved_state=effective_solved_state,
+    )
+    require_mps_boozer_fixed_surface_g_iota_supported(probe_contract)
+
+    def value_and_grad(coil_dofs):
+        contract = build_mps_boozer_direct_kernel_contract(
+            boozer_residual,
+            solved_state=effective_solved_state,
+            coil_dofs=coil_dofs,
+        )
+        result = evaluate_mps_boozer_fused_solve_custom_call(contract)
+        status_ok = jnp.logical_and(result.converged, result.finite)
+        failed_value = jnp.zeros_like(result.value) / jnp.zeros_like(result.value)
+        failed_gradient = jnp.zeros_like(result.coil_gradient) / jnp.zeros_like(
+            result.coil_gradient,
+        )
+        return (
+            jnp.where(status_ok, result.value, failed_value),
+            jnp.where(status_ok, result.coil_gradient, failed_gradient),
+        )
+
+    value_and_grad._simsopt_value_and_grad = True
+    value_and_grad._simsopt_mps_boozer_custom_kernel = True
+    return value_and_grad
 
 
 def mps_boozer_kernel_contract_artifact(

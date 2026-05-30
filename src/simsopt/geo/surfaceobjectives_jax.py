@@ -2544,6 +2544,18 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
             ),
         )
 
+    def experimental_mps_custom_kernel_value_and_grad(self, *, solved_state=None):
+        """Return the opt-in fixed-surface MPS direct value/grad boundary."""
+
+        from simsopt.jax_core.mps_boozer_kernel_contract import (
+            build_mps_boozer_fused_solve_value_and_grad,
+        )
+
+        return build_mps_boozer_fused_solve_value_and_grad(
+            self,
+            solved_state=solved_state,
+        )
+
     def _inner_objective_state(self, iota, G, *, sdofs=None):
         """Return the packed inner decision vector and optimize-G flag."""
         surface_dofs = (

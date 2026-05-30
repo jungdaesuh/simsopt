@@ -8,9 +8,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import simsopt.jax_core.mps_boozer_kernel_contract as mps_boozer_kernel_contract
 from simsopt.jax_core.mps_boozer_kernel_contract import (
     DEFAULT_CONTRACT_ARTIFACT_DIR,
     MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE,
+    MpsBoozerFusedCustomCallResult,
     MpsBoozerKernelContract,
     MpsBoozerKernelStaticMetadata,
     SCHEMA_VERSION,
@@ -19,11 +21,13 @@ from simsopt.jax_core.mps_boozer_kernel_contract import (
     UNKNOWN_ITERATION_COUNT,
     _fused_custom_call_backend_config,
     build_mps_boozer_direct_kernel_contract,
+    build_mps_boozer_fused_solve_value_and_grad,
     evaluate_mps_boozer_direct_cpu_oracle,
     evaluate_mps_boozer_fused_solve_custom_call,
     evaluate_mps_boozer_fused_solve_cpu_oracle,
     mps_boozer_kernel_contract_artifact,
     mps_boozer_fixed_surface_g_iota_supported,
+    require_mps_boozer_fixed_surface_g_iota_supported,
     write_mps_boozer_kernel_contract_artifact,
 )
 from simsopt.jax_core.specs import CoilGroupSpec, GroupedCoilSetSpec
@@ -187,6 +191,22 @@ def _contract_fixture():
         "iter": jnp.asarray(4, dtype=jnp.int32),
         "gmres_iteration_count": jnp.asarray(17, dtype=jnp.int32),
     }
+    return owner, build_mps_boozer_direct_kernel_contract(
+        owner,
+        solved_state=solved_state,
+    )
+
+
+def _supported_fixed_surface_owner_fixture():
+    owner, _ = _contract_fixture()
+    owner.constraint_weight = 0.0
+    owner.boozer_surface.options = {
+        "gmres_maxiter": 2,
+        "mps_solver_mode": MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE,
+        "newton_maxiter": 1,
+        "newton_tol": 1.0e-5,
+    }
+    solved_state = owner.boozer_surface.get_solved_runtime_state()
     return owner, build_mps_boozer_direct_kernel_contract(
         owner,
         solved_state=solved_state,
@@ -782,6 +802,98 @@ def test_mps_boozer_fixed_surface_support_predicate_matches_backend_contract():
             coil_pullback_operator=supported_contract.coil_pullback_operator[:, :-1],
         )
     )
+
+
+def test_mps_boozer_fixed_surface_require_raises_for_unsupported_contract():
+    _, unsupported_contract = _contract_fixture()
+
+    with pytest.raises(ValueError, match="only supports the fixed-surface G/iota"):
+        require_mps_boozer_fixed_surface_g_iota_supported(unsupported_contract)
+
+
+def test_mps_boozer_value_and_grad_builder_requires_mps_backend(monkeypatch):
+    owner, _ = _supported_fixed_surface_owner_fixture()
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "mps_boozer_jax_mps_backend_available",
+        lambda: False,
+    )
+
+    with pytest.raises(RuntimeError, match="requires an active jax-mps backend"):
+        build_mps_boozer_fused_solve_value_and_grad(owner)
+
+
+def test_mps_boozer_value_and_grad_builder_rejects_unsupported_fixture(
+    monkeypatch,
+):
+    owner, _ = _contract_fixture()
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "mps_boozer_jax_mps_backend_available",
+        lambda: True,
+    )
+
+    with pytest.raises(ValueError, match="only supports the fixed-surface G/iota"):
+        build_mps_boozer_fused_solve_value_and_grad(owner)
+
+
+def test_mps_boozer_value_and_grad_builder_reuses_value_grad_marker(
+    monkeypatch,
+):
+    owner, contract = _supported_fixed_surface_owner_fixture()
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "mps_boozer_jax_mps_backend_available",
+        lambda: True,
+    )
+
+    value_and_grad = build_mps_boozer_fused_solve_value_and_grad(owner)
+    lowered = jax.jit(value_and_grad).lower(contract.coil_dofs).as_text()
+    result_shape = jax.eval_shape(value_and_grad, contract.coil_dofs)
+
+    assert getattr(value_and_grad, "_simsopt_value_and_grad") is True
+    assert getattr(value_and_grad, "_simsopt_mps_boozer_custom_kernel") is True
+    assert "stablehlo.custom_call" in lowered
+    assert f"@{SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET}" in lowered
+    assert result_shape[0].shape == ()
+    assert result_shape[1].shape == contract.coil_dofs.shape
+
+
+def test_mps_boozer_value_and_grad_builder_masks_failed_status(
+    monkeypatch,
+):
+    owner, contract = _supported_fixed_surface_owner_fixture()
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "mps_boozer_jax_mps_backend_available",
+        lambda: True,
+    )
+
+    def evaluate_failed_status(_contract):
+        return MpsBoozerFusedCustomCallResult(
+            value=jnp.asarray(3.0, dtype=contract.coil_dofs.dtype),
+            coil_gradient=jnp.ones_like(contract.coil_dofs),
+            final_x_inner=contract.x_inner,
+            residual_norm=jnp.asarray(0.0, dtype=contract.coil_dofs.dtype),
+            gradient_norm=jnp.asarray(2.0, dtype=contract.coil_dofs.dtype),
+            newton_iteration_count=jnp.asarray(1, dtype=jnp.int32),
+            gmres_iteration_count=jnp.asarray(2, dtype=jnp.int32),
+            converged=jnp.asarray(False),
+            finite=jnp.asarray(True),
+        )
+
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "evaluate_mps_boozer_fused_solve_custom_call",
+        evaluate_failed_status,
+    )
+
+    value, gradient = build_mps_boozer_fused_solve_value_and_grad(owner)(
+        contract.coil_dofs,
+    )
+
+    assert bool(jnp.isnan(value))
+    assert bool(jnp.all(jnp.isnan(gradient)))
 
 
 @pytest.mark.mps
