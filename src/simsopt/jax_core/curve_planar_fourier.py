@@ -7,6 +7,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from ._device_scalars import two_pi as _two_pi
 from ._math_utils import as_runtime_float64 as _as_runtime_float64_ref
 
 
@@ -63,7 +64,7 @@ def curveplanarfourier_pure(dofs, quadpoints, order):
     center = jax.lax.slice_in_dim(dofs, rs_end + 4, dofs.shape[0], axis=0)
 
     quadpoints = _as_runtime_float64_ref(quadpoints, reference=dofs)
-    phi = _as_runtime_float64_ref(2.0 * np.pi, reference=quadpoints) * quadpoints
+    phi = _two_pi(quadpoints) * quadpoints
     cosphi = jnp.cos(phi)
     sinphi = jnp.sin(phi)
     zero = _as_runtime_float64_ref(0.0, reference=phi)

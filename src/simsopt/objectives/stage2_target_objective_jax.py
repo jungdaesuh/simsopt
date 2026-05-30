@@ -1,4 +1,8 @@
-"""JAX objective bundle used by the Stage 2 ondevice target lane."""
+"""Private JAX objective bundle used by the Stage 2 ondevice target lane.
+
+This module is path-discoverable for optimizer/runtime wiring but intentionally
+unexported from :mod:`simsopt.objectives`.
+"""
 
 from __future__ import annotations
 
@@ -618,9 +622,7 @@ def build_stage2_target_objective(
 
     tf_coil_spec = None
     if tf_coils:
-        tf_coil_spec = grouped_coil_set_spec_from_coil_specs(
-            tf_coil_specs
-        )
+        tf_coil_spec = grouped_coil_set_spec_from_coil_specs(tf_coil_specs)
         fixed_field = _host_float64_array(
             grouped_biot_savart_B_from_spec(_as_jax_float64(points), tf_coil_spec)
         )
@@ -868,8 +870,16 @@ def build_stage2_target_objective(
         penalty_terms = jnp.asarray(
             (
                 length_excess * jnp.sqrt(length_weight_jax),
-                jnp.sqrt(jnp.maximum(two_jax * cc_weight_jax * coil_distance_penalty, zero_jax)),
-                jnp.sqrt(jnp.maximum(two_jax * curvature_weight_jax * curvature_penalty, zero_jax)),
+                jnp.sqrt(
+                    jnp.maximum(
+                        two_jax * cc_weight_jax * coil_distance_penalty, zero_jax
+                    )
+                ),
+                jnp.sqrt(
+                    jnp.maximum(
+                        two_jax * curvature_weight_jax * curvature_penalty, zero_jax
+                    )
+                ),
             ),
             dtype=jnp.float64,
         )
@@ -895,10 +905,9 @@ def build_stage2_target_objective(
         surface_B_normal = jnp.sum(surface_B * surface_unit_normal, axis=-1)
         surface_B_norm = jnp.sqrt(jnp.sum(surface_B * surface_B, axis=-1))
         surface_area = surface_normal_norm / surface_normal_norm.size
-        return (
-            jnp.sum(jnp.abs(surface_B_normal / surface_B_norm) * surface_area)
-            / jnp.sum(surface_area)
-        )
+        return jnp.sum(
+            jnp.abs(surface_B_normal / surface_B_norm) * surface_area
+        ) / jnp.sum(surface_area)
 
     def _reporting_summary(dofs):
         (
@@ -987,7 +996,10 @@ def build_stage2_target_objective(
             curvature=max_curvature,
             banana_current_A=jnp.max(jnp.abs(dynamic_current_array)),
             distance_constraint_violated=(
-                (coil_coil_distance <= _runtime_float64_scalar(cc_threshold, reference=flat_dofs))
+                (
+                    coil_coil_distance
+                    <= _runtime_float64_scalar(cc_threshold, reference=flat_dofs)
+                )
                 | ~jnp.isfinite(coil_distance_penalty)
             ),
             self_intersecting=self_intersecting,
@@ -1041,7 +1053,9 @@ def build_stage2_target_objective(
                 tuple(point_pairs),
                 temperature=distance_smoothing,
             )
-            return _runtime_float64_scalar(cc_threshold, reference=smooth_min) - smooth_min
+            return (
+                _runtime_float64_scalar(cc_threshold, reference=smooth_min) - smooth_min
+            )
 
         def _curve_surface_signed_constraint(dynamic_gammas, *, reference):
             flat_surface = _runtime_float64_array(

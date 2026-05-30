@@ -552,10 +552,18 @@ def _first_eigenvalue_angle_2x2(matrix: jax.Array) -> jax.Array:
     trace = a + d
     determinant = a * d - b * c
     discriminant = trace * trace - 4.0 * determinant
+    zero = discriminant * 0.0
+    one = zero + 1.0
     real_if_complex = 0.5 * trace
-    real_if_real = 0.5 * (trace + jnp.sqrt(jnp.maximum(discriminant, 0.0)))
+    has_real_gap = discriminant > zero
+    safe_real_gap = jnp.where(has_real_gap, discriminant, one)
+    sqrt_real_gap = jnp.where(has_real_gap, jnp.sqrt(safe_real_gap), zero)
+    real_if_real = 0.5 * (trace + sqrt_real_gap)
     real_part = jnp.where(discriminant < 0.0, real_if_complex, real_if_real)
-    imag_part = 0.5 * jnp.sqrt(jnp.maximum(-discriminant, 0.0))
+    has_imag_gap = discriminant < zero
+    safe_imag_gap = jnp.where(has_imag_gap, -discriminant, one)
+    sqrt_imag_gap = jnp.where(has_imag_gap, jnp.sqrt(safe_imag_gap), zero)
+    imag_part = 0.5 * sqrt_imag_gap
     return jnp.arctan2(imag_part, real_part)
 
 

@@ -584,7 +584,7 @@ class TestBoozerResidualScalar:
         )
 
     def test_cpu_ordered_reduction_matches_ordered_numpy_reference(self):
-        """CPU-ordered mode mirrors the sopp point/component accumulation order."""
+        """Tier-4 reduction-order self-consistency, not C++ parity."""
         nphi, ntheta = 7, 9
         B, xphi, xtheta = _make_synthetic_data(nphi, ntheta)
         G, iota = 1.5, 0.3
@@ -715,6 +715,7 @@ class TestBoozerResidualScalar:
         assert not bool(jnp.all(jnp.isfinite(residual_vector)))
 
     def test_strict_oracle_scalar_mode_matches_high_precision_reference(self):
+        """Tier-4 reduction-order self-consistency, not C++ parity."""
         G, iota, B, xphi, xtheta = _make_scalar_dynamic_range_data()
 
         default_value = host_scalar(
@@ -811,7 +812,7 @@ class TestBoozerResidualParityStress:
         self,
         parity_lane,
     ):
-        """JAX vector reduces to the C++ scalar residual near the tolerance floor.
+        """Tier-4 vector-reduction self-consistency against the C++ scalar oracle.
 
         The public C++ API exposes only the scalar
         ``simsoptpp.boozer_residual`` (see

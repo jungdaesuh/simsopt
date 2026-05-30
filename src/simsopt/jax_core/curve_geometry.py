@@ -26,6 +26,7 @@ from .curve_xyz_fourier_symmetries import jaxXYZFourierSymmetriescurve_pure
 from ._math_utils import (
     as_runtime_array as _as_runtime_array,
     as_runtime_float64 as _as_runtime_float64,
+    runtime_device_put as _runtime_device_put,
 )
 from .framedcurve import (
     rotated_centroid_frame,
@@ -88,22 +89,58 @@ def _element_count_runtime(array: jax.Array) -> jax.Array:
     return _runtime_scalar(float(np.prod(array.shape)), reference=array)
 
 
+def _contains_jax_tracer(value) -> bool:
+    return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(value))
+
+
+def _slice_1d_static_selector(
+    array: jax.Array,
+    start: int,
+    end: int,
+) -> jax.Array:
+    selector = np.zeros((int(end) - int(start), int(array.shape[0])), dtype=np.float64)
+    for row, column in enumerate(range(int(start), int(end))):
+        selector[row, column] = 1.0
+    return _runtime_device_put(selector, dtype=np.float64) @ array
+
+
 def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
-    positions = np.arange(int(start), int(end), dtype=np.int64)
-    selector = np.zeros((positions.size, array.shape[0]), dtype=np.float64)
-    selector[np.arange(positions.size), positions] = 1.0
-    return _as_explicit_runtime_array(selector, reference=array) @ array
+    # Static (Python-int) bounds: use lax.slice_in_dim, which lowers to a static
+    # slice. dynamic_slice / fancy indexing / .at[] would push the index to the
+    # device as an int scalar and trip transfer_guard("disallow").
+    if _contains_jax_tracer(array):
+        return _slice_1d_static_selector(array, start, end)
+    return jax.lax.slice_in_dim(array, int(start), int(end), axis=0)
+
+
+def _update_1d_static_selector(
+    array: jax.Array,
+    start: int,
+    values: jax.Array,
+) -> jax.Array:
+    start = int(start)
+    stop = start + int(values.shape[0])
+    keep = np.eye(int(array.shape[0]), dtype=np.float64)
+    keep[start:stop, :] = 0.0
+    insert = np.zeros((int(array.shape[0]), int(values.shape[0])), dtype=np.float64)
+    for column, row in enumerate(range(start, stop)):
+        insert[row, column] = 1.0
+    return (
+        _runtime_device_put(keep, dtype=np.float64) @ array
+        + _runtime_device_put(insert, dtype=np.float64) @ values
+    )
 
 
 def _update_1d_static(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
-    positions = np.arange(int(start), int(start) + values.shape[0], dtype=np.int64)
-    insert = np.zeros((array.shape[0], positions.size), dtype=np.float64)
-    insert[positions, np.arange(positions.size)] = 1.0
-    keep_mask = np.ones(array.shape[0], dtype=np.float64)
-    keep_mask[positions] = 0.0
-    return array * _as_explicit_runtime_array(keep_mask, reference=array) + (
-        _as_explicit_runtime_array(insert, reference=array) @ values
-    )
+    # Static-bounds segment replacement built from device-resident slices so no
+    # host int index crosses to the device under transfer_guard("disallow").
+    if _contains_jax_tracer(array) or _contains_jax_tracer(values):
+        return _update_1d_static_selector(array, start, values)
+    start = int(start)
+    stop = start + values.shape[0]
+    head = jax.lax.slice_in_dim(array, 0, start, axis=0)
+    tail = jax.lax.slice_in_dim(array, stop, array.shape[0], axis=0)
+    return jnp.concatenate([head, values, tail], axis=0)
 
 
 def curve_spec_from_curve(curve):
@@ -155,7 +192,9 @@ def curve_spec_from_curve(curve):
 
 def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
     curve_dofs = (
-        spec.dofs if dofs is None else _as_explicit_runtime_array(dofs, reference=spec.dofs)
+        spec.dofs
+        if dofs is None
+        else _as_explicit_runtime_array(dofs, reference=spec.dofs)
     )
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "xyz_fourier":
@@ -272,7 +311,9 @@ def _direct_curve_geometry_terms(spec: CurveSpec, dofs, *, order):
 
 
 def _mapped_full_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
-    mapped = _as_explicit_runtime_array(map_spec.template_full_dofs, reference=owner_dofs)
+    mapped = _as_explicit_runtime_array(
+        map_spec.template_full_dofs, reference=owner_dofs
+    )
     owner_dofs = _as_explicit_runtime_array(owner_dofs, reference=owner_dofs)
     for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
         del target_end
@@ -300,7 +341,9 @@ def _rotation_alpha_and_dash_from_dofs(
     rotation_map: OptimizableDofMapSpec,
     owner_dofs,
 ):
-    quadpoints = _as_explicit_runtime_array(rotation_spec.quadpoints, reference=owner_dofs)
+    quadpoints = _as_explicit_runtime_array(
+        rotation_spec.quadpoints, reference=owner_dofs
+    )
     if isinstance(rotation_spec, ZeroRotationSpec):
         zeros = _zeros_like_runtime(quadpoints)
         return zeros, zeros

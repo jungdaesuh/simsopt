@@ -3207,6 +3207,9 @@ def _step_body(
     norm_phi = jnp.sum(phi_g * phi_g)
     inner = norm_g_alpha_p <= norm_phi
 
+    # This branch is per-geometry scalar control flow. If a future caller vmaps
+    # whole geometries through this step, both arms will execute under batching
+    # and this should be revisited as select-style masking.
     def inner_branch(_operand):
         ATAp = _hessian_action(p, A, reg_l2, nu)
         gp = jnp.sum(g * p)

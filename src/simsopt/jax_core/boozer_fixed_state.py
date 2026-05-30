@@ -240,20 +240,16 @@ def evaluate_boozer_radial_fixed_state(
     xm = spec.xm[:, None]
     xn = spec.xn[:, None]
 
-    K_sin = _modes(spec.K_sin, s)
-    K_cos = _modes(spec.K_cos, s)
-    K_value = _odd(spec, K_sin, pts) + _even(spec, K_cos, pts)
-    K = jnp.where(spec.no_K, jnp.zeros_like(K_value), K_value)
-    dKdtheta = jnp.where(
-        spec.no_K,
-        jnp.zeros_like(K_value),
-        _even(spec, K_sin * xm, pts) + _odd(spec, -K_cos * xm, pts),
-    )
-    dKdzeta = jnp.where(
-        spec.no_K,
-        jnp.zeros_like(K_value),
-        _even(spec, -K_sin * xn, pts) + _odd(spec, K_cos * xn, pts),
-    )
+    if spec.no_K:
+        K = jnp.zeros_like(s)
+        dKdtheta = jnp.zeros_like(s)
+        dKdzeta = jnp.zeros_like(s)
+    else:
+        K_sin = _modes(spec.K_sin, s)
+        K_cos = _modes(spec.K_cos, s)
+        K = _odd(spec, K_sin, pts) + _even(spec, K_cos, pts)
+        dKdtheta = _even(spec, K_sin * xm, pts) + _odd(spec, -K_cos * xm, pts)
+        dKdzeta = _even(spec, -K_sin * xn, pts) + _odd(spec, K_cos * xn, pts)
 
     nu_sin = _modes(spec.nu_sin, s)
     nu_cos = _modes(spec.nu_cos, s)

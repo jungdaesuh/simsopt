@@ -327,7 +327,7 @@ SINGLE_STAGE_PROOF_CONTRACTS = {
         "default_maxiter": 10,
         "min_iterations": 10,
         "require_objective_decrease": True,
-        "required_outer_optimizer_method": "lbfgs-ondevice",
+        "required_outer_optimizer_method": "lbfgs-scipy-jax",
         "required_result_keys": (
             "FINAL_IOTA",
             "FINAL_VOLUME",

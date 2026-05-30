@@ -640,6 +640,35 @@ _BOOZER_INNER_DRIVER_OPTIONS = {
         least_squares_algorithm="optimistix-lm",
     ),
 }
+# Inverse of ``_BOOZER_INNER_DRIVER_OPTIONS`` keyed on the option triple. Derived
+# from the forward table so the option/driver mapping stays single-sourced; every
+# resolver that turns an ``(optimizer_backend, limited_memory,
+# least_squares_algorithm)`` contract into a typed Boozer inner driver looks this
+# up instead of re-deriving the enum by hand.
+_BOOZER_INNER_DRIVER_BY_OPTIONS = {
+    (
+        options.optimizer_backend,
+        options.limited_memory,
+        options.least_squares_algorithm,
+    ): driver
+    for driver, options in _BOOZER_INNER_DRIVER_OPTIONS.items()
+}
+assert len(_BOOZER_INNER_DRIVER_BY_OPTIONS) == len(_BOOZER_INNER_DRIVER_OPTIONS)
+# The reference lane exposes a single residual least-squares driver, so every
+# residual algorithm coalesces onto the one ``"lm"`` table row for that lane.
+_REFERENCE_RESIDUAL_LEAST_SQUARES_OPTION = "lm"
+
+
+def _boozer_inner_driver_for_options(
+    optimizer_backend: str,
+    *,
+    limited_memory: bool,
+    least_squares_algorithm: str,
+) -> Driver:
+    """Look up the typed Boozer inner driver for a concrete option triple."""
+    return _BOOZER_INNER_DRIVER_BY_OPTIONS[
+        (optimizer_backend, limited_memory, least_squares_algorithm)
+    ]
 
 
 def reference_driver_method(driver: Driver) -> str:
@@ -660,6 +689,50 @@ def target_driver_method(contract: TargetOptimizerContract) -> str:
             "Target objective_route is only valid for Driver.SCIPY_LBFGSB."
         )
     return legacy_target_method(contract.driver)
+
+
+def _resolved_public_optimizer_backend(optimizer_backend):
+    return (
+        resolve_optimizer_backend(optimizer_backend)
+        if optimizer_backend is None or optimizer_backend == "auto"
+        else optimizer_backend
+    )
+
+
+def _target_objective_route_for_optimizer_backend(optimizer_backend):
+    if optimizer_backend == "scipy-jax-fullgraph":
+        return TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
+    if optimizer_backend == "scipy-jax":
+        return TargetObjectiveRoute.SCIPY_JAX
+    return TargetObjectiveRoute.ARRAY_NATIVE
+
+
+def _target_optimizer_contract_for_backend_driver(
+    optimizer_backend,
+    driver,
+    *,
+    use_least_squares_objective=False,
+):
+    return TargetOptimizerContract(
+        driver=driver,
+        use_least_squares_objective=use_least_squares_objective,
+        objective_route=_target_objective_route_for_optimizer_backend(
+            optimizer_backend
+        ),
+    )
+
+
+def _optimizer_method_for_backend_driver(
+    optimizer_backend,
+    driver,
+    *,
+    reference_method,
+):
+    if optimizer_backend == "scipy":
+        return reference_method(driver)
+    return target_driver_method(
+        _target_optimizer_contract_for_backend_driver(optimizer_backend, driver)
+    )
 
 
 def boozer_inner_driver_legacy_options(driver: Driver) -> BoozerInnerDriverOptions:
@@ -1067,32 +1140,25 @@ def resolve_optimizer_backend_driver(optimizer_backend, *, limited_memory):
 
 def resolve_optimizer_backend_method(optimizer_backend, *, limited_memory):
     """Map the public backend contract to the concrete optimizer method."""
-    resolved_backend = (
-        resolve_optimizer_backend(optimizer_backend)
-        if optimizer_backend is None or optimizer_backend == "auto"
-        else optimizer_backend
-    )
+    resolved_backend = _resolved_public_optimizer_backend(optimizer_backend)
     driver = resolve_optimizer_backend_driver(
-        optimizer_backend,
+        resolved_backend,
         limited_memory=limited_memory,
     )
-    if resolved_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS:
-        route = (
-            TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
-            if resolved_backend == "scipy-jax-fullgraph"
-            else TargetObjectiveRoute.SCIPY_JAX
-        )
-        return target_driver_method(
-            TargetOptimizerContract(driver, objective_route=route)
-        )
-    if resolved_backend == "scipy":
-        return reference_driver_method(driver)
-    return target_driver_method(TargetOptimizerContract(driver))
+    return _optimizer_method_for_backend_driver(
+        resolved_backend,
+        driver,
+        reference_method=reference_driver_method,
+    )
 
 
 def resolve_reference_optimizer_driver(*, limited_memory):
     """Resolve the CPU/reference scalar optimizer driver."""
-    return Driver.SCIPY_LBFGSB if limited_memory else Driver.SCIPY_BFGS
+    return _boozer_inner_driver_for_options(
+        "scipy",
+        limited_memory=limited_memory,
+        least_squares_algorithm="quasi-newton",
+    )
 
 
 def resolve_reference_optimizer_method(*, limited_memory):
@@ -1104,14 +1170,18 @@ def resolve_reference_optimizer_method(*, limited_memory):
 
 def resolve_target_optimizer_driver(*, limited_memory):
     """Resolve the JAX target scalar optimizer driver."""
-    return Driver.SIMSOPT_LBFGSB if limited_memory else Driver.SIMSOPT_BFGS
+    return _boozer_inner_driver_for_options(
+        "ondevice",
+        limited_memory=limited_memory,
+        least_squares_algorithm="quasi-newton",
+    )
 
 
 def resolve_target_optimizer_method(*, limited_memory):
     """Resolve the JAX target scalar optimizer method."""
     return target_driver_method(
-        TargetOptimizerContract(
-            resolve_target_optimizer_driver(limited_memory=limited_memory)
+        _target_optimizer_contract_for_backend_driver(
+            "ondevice", resolve_target_optimizer_driver(limited_memory=limited_memory)
         )
     )
 
@@ -1120,6 +1190,39 @@ def _scipy_control_least_squares_algorithm_message(optimizer_backend):
     return (
         f"optimizer_backend={optimizer_backend!r} only supports "
         "least_squares_algorithm='quasi-newton'."
+    )
+
+
+def _validate_least_squares_algorithm(least_squares_algorithm):
+    if least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS:
+        allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
+        raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
+
+
+def _resolve_concrete_least_squares_optimizer_driver(
+    optimizer_backend,
+    *,
+    limited_memory,
+    least_squares_algorithm,
+):
+    _validate_least_squares_algorithm(least_squares_algorithm)
+    if least_squares_algorithm == "quasi-newton":
+        return _boozer_inner_driver_for_options(
+            optimizer_backend,
+            limited_memory=limited_memory,
+            least_squares_algorithm="quasi-newton",
+        )
+    if limited_memory:
+        raise ValueError(
+            f"least_squares_algorithm={least_squares_algorithm!r} is incompatible "
+            "with limited_memory=True."
+        )
+    if optimizer_backend == "scipy":
+        least_squares_algorithm = _REFERENCE_RESIDUAL_LEAST_SQUARES_OPTION
+    return _boozer_inner_driver_for_options(
+        optimizer_backend,
+        limited_memory=limited_memory,
+        least_squares_algorithm=least_squares_algorithm,
     )
 
 
@@ -1133,7 +1236,7 @@ def resolve_boozer_inner_driver(
     resolved_optimizer_backend = resolve_optimizer_backend(optimizer_backend)
     if resolved_optimizer_backend not in CONCRETE_OPTIMIZER_BACKENDS:
         raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
-    return resolve_least_squares_optimizer_driver(
+    return _resolve_concrete_least_squares_optimizer_driver(
         resolved_optimizer_backend,
         limited_memory=limited_memory,
         least_squares_algorithm=least_squares_algorithm,
@@ -1148,9 +1251,7 @@ def resolve_least_squares_optimizer_driver(
 ):
     """Map the LS backend contract to the typed least-squares driver."""
     optimizer_backend = resolve_optimizer_backend(optimizer_backend)
-    if least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS:
-        allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
-        raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
+    _validate_least_squares_algorithm(least_squares_algorithm)
     if least_squares_algorithm == "quasi-newton":
         return resolve_optimizer_backend_driver(
             optimizer_backend,
@@ -1163,12 +1264,8 @@ def resolve_least_squares_optimizer_driver(
         raise ValueError(
             _scipy_control_least_squares_algorithm_message(optimizer_backend)
         )
-    if optimizer_backend == "scipy":
-        return resolve_reference_least_squares_optimizer_driver(
-            limited_memory=limited_memory,
-            least_squares_algorithm=least_squares_algorithm,
-        )
-    return resolve_target_least_squares_optimizer_driver(
+    return _resolve_concrete_least_squares_optimizer_driver(
+        optimizer_backend,
         limited_memory=limited_memory,
         least_squares_algorithm=least_squares_algorithm,
     )
@@ -1181,24 +1278,17 @@ def resolve_least_squares_optimizer_method(
     least_squares_algorithm,
 ):
     """Map the LS backend contract to the concrete least-squares method."""
+    optimizer_backend = resolve_optimizer_backend(optimizer_backend)
     driver = resolve_least_squares_optimizer_driver(
         optimizer_backend,
         limited_memory=limited_memory,
         least_squares_algorithm=least_squares_algorithm,
     )
-    optimizer_backend = resolve_optimizer_backend(optimizer_backend)
-    if optimizer_backend == "scipy":
-        return _reference_least_squares_driver_method(driver)
-    if optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS:
-        route = (
-            TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
-            if optimizer_backend == "scipy-jax-fullgraph"
-            else TargetObjectiveRoute.SCIPY_JAX
-        )
-        return target_driver_method(
-            TargetOptimizerContract(driver, objective_route=route)
-        )
-    return target_driver_method(TargetOptimizerContract(driver))
+    return _optimizer_method_for_backend_driver(
+        optimizer_backend,
+        driver,
+        reference_method=_reference_least_squares_driver_method,
+    )
 
 
 def resolve_reference_least_squares_optimizer_driver(
@@ -1207,17 +1297,11 @@ def resolve_reference_least_squares_optimizer_driver(
     least_squares_algorithm,
 ):
     """Resolve the CPU/reference least-squares optimizer driver."""
-    if least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS:
-        allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
-        raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
-    if least_squares_algorithm == "quasi-newton":
-        return resolve_reference_optimizer_driver(limited_memory=limited_memory)
-    if limited_memory:
-        raise ValueError(
-            f"least_squares_algorithm={least_squares_algorithm!r} is incompatible "
-            "with limited_memory=True."
-        )
-    return Driver.SIMSOPT_LM_GMRES_HOST
+    return _resolve_concrete_least_squares_optimizer_driver(
+        "scipy",
+        limited_memory=limited_memory,
+        least_squares_algorithm=least_squares_algorithm,
+    )
 
 
 def resolve_reference_least_squares_optimizer_method(
@@ -1240,21 +1324,11 @@ def resolve_target_least_squares_optimizer_driver(
     least_squares_algorithm,
 ):
     """Resolve the JAX target least-squares optimizer driver."""
-    if least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS:
-        allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
-        raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
-    if least_squares_algorithm == "quasi-newton":
-        return resolve_target_optimizer_driver(limited_memory=limited_memory)
-    if limited_memory:
-        raise ValueError(
-            f"least_squares_algorithm={least_squares_algorithm!r} is incompatible "
-            "with limited_memory=True."
-        )
-    if least_squares_algorithm == "lm-minpack":
-        return Driver.SIMSOPT_LM_QR
-    if least_squares_algorithm == "optimistix-lm":
-        return Driver.OPTIMISTIX_LM
-    return Driver.SIMSOPT_LM_GMRES
+    return _resolve_concrete_least_squares_optimizer_driver(
+        "ondevice",
+        limited_memory=limited_memory,
+        least_squares_algorithm=least_squares_algorithm,
+    )
 
 
 def resolve_target_least_squares_optimizer_method(
@@ -1264,11 +1338,12 @@ def resolve_target_least_squares_optimizer_method(
 ):
     """Resolve the JAX target least-squares optimizer method."""
     return target_driver_method(
-        TargetOptimizerContract(
+        _target_optimizer_contract_for_backend_driver(
+            "ondevice",
             resolve_target_least_squares_optimizer_driver(
                 limited_memory=limited_memory,
                 least_squares_algorithm=least_squares_algorithm,
-            )
+            ),
         )
     )
 
@@ -1349,33 +1424,28 @@ def resolve_target_optimizer_contract(
             raise ValueError(
                 _scipy_control_least_squares_algorithm_message(optimizer_backend)
             )
-        objective_route = (
-            TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
-            if optimizer_backend == "scipy-jax-fullgraph"
-            else TargetObjectiveRoute.SCIPY_JAX
-        )
-        return TargetOptimizerContract(
-            driver=Driver.SCIPY_LBFGSB,
-            use_least_squares_objective=False,
-            objective_route=objective_route,
+        return _target_optimizer_contract_for_backend_driver(
+            optimizer_backend,
+            Driver.SCIPY_LBFGSB,
         )
     if optimizer_backend in TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS:
         if least_squares_algorithm != "quasi-newton":
             raise ValueError(
                 _scipy_control_least_squares_algorithm_message(optimizer_backend)
             )
-        return TargetOptimizerContract(
-            driver=resolve_optimizer_backend_driver(
+        return _target_optimizer_contract_for_backend_driver(
+            optimizer_backend,
+            resolve_optimizer_backend_driver(
                 optimizer_backend,
                 limited_memory=limited_memory,
             ),
-            use_least_squares_objective=False,
         )
     driver = resolve_target_least_squares_optimizer_driver(
         limited_memory=limited_memory,
         least_squares_algorithm=least_squares_algorithm,
     )
-    return TargetOptimizerContract(
+    return _target_optimizer_contract_for_backend_driver(
+        optimizer_backend,
         driver=driver,
         use_least_squares_objective=driver in _TARGET_LEAST_SQUARES_DRIVERS,
     )
@@ -4215,6 +4285,21 @@ def _solve_jacobian_system(
     tol,
 ):
     operator = _jacobian_linear_operator(residual_fn, x)
+    return _solve_jacobian_operator(
+        operator,
+        rhs,
+        transpose=transpose,
+        tol=tol,
+    )
+
+
+def _solve_jacobian_operator(
+    operator,
+    rhs,
+    *,
+    transpose,
+    tol,
+):
     matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
     solution, _ = _solve_square_array_system_operator_only(matvec, rhs, tol=tol)
     return solution
@@ -4229,6 +4314,21 @@ def _solve_jacobian_system_with_status(
     tol,
 ):
     operator = _jacobian_linear_operator(residual_fn, x)
+    return _solve_jacobian_operator_with_status(
+        operator,
+        rhs,
+        transpose=transpose,
+        tol=tol,
+    )
+
+
+def _solve_jacobian_operator_with_status(
+    operator,
+    rhs,
+    *,
+    transpose,
+    tol,
+):
     matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
     return _solve_square_array_system_operator_only(matvec, rhs, tol=tol)
 

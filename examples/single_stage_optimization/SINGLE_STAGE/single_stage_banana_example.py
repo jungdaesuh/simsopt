@@ -4461,12 +4461,11 @@ def parse_args():
             "while evaluating JAX wrapper value/grad. 'optax-lbfgs' and "
             "'optimistix-lbfgs' run public JAX L-BFGS drivers on the same "
             "target-lane scalar objective as 'ondevice'. Defaults to "
-            "'scipy' on the CPU/reference backend. On the JAX backend, defaults to "
-            "'scipy-jax-fullgraph' if running on a JAX-CPU platform (to save "
-            "memory) and 'scipy-jax' if running on a GPU/CUDA platform (its "
-            "jitted value/grad compiles once and is reused across outer steps; "
-            "the legacy 'ondevice' monolith does not finish compiling at "
-            "production resolution and must be selected explicitly)."
+            "'scipy' on the CPU/reference backend and 'scipy-jax' on the JAX "
+            "backend. The 'scipy-jax' lane keeps the outer L-BFGS-B loop on "
+            "the host while reusing the jitted target-lane value/grad bundle "
+            "across outer steps; the legacy 'ondevice' monolith must be "
+            "selected explicitly."
         ),
     )
     parser.add_argument(
@@ -4491,12 +4490,13 @@ def parse_args():
     )
     parser.add_argument(
         "--boozer-least-squares-algorithm",
-        choices=["quasi-newton", "lm"],
+        choices=["quasi-newton", "lm", "lm-minpack"],
         default=os.environ.get("BOOZER_LEAST_SQUARES_ALGORITHM"),
         help=(
             "Optional override for the inner JAX Boozer LS algorithm. "
             "Defaults to 'quasi-newton' on all lanes when omitted. "
-            "'lm' is explicit opt-in only."
+            "'lm' (matrix-free GMRES Levenberg-Marquardt) and 'lm-minpack' "
+            "(dense pivoted-QR, MINPACK-equivalent) are explicit opt-in only."
         ),
     )
     parser.add_argument(
@@ -4819,7 +4819,7 @@ def parse_args():
                 "WARNING: Running JAX 'ondevice' optimizer on CPU. "
                 "This compiles the entire optimization loop in JAX and requires significant host RAM, "
                 "which may trigger an Out-Of-Memory (OOM) crash. "
-                "Consider using --optimizer-backend scipy-jax-fullgraph to reduce memory usage."
+                "Consider using --optimizer-backend scipy-jax to reduce memory usage."
             )
 
     return args
@@ -8001,17 +8001,6 @@ def resolve_single_stage_default_optimizer_backend(
     if optimizer_backend is not None:
         return optimizer_backend
     if field_backend == "jax":
-        from simsopt.backend.runtime import get_backend_config
-
-        config = get_backend_config()
-        if config.jax_platform == "cpu":
-            return "scipy-jax-fullgraph"
-        # GPU/CUDA default: scipy-jax (host SciPy L-BFGS-B outer loop + on-device
-        # inner Boozer solve). Its jitted value/grad compiles ONCE and is reused
-        # across all outer steps (compile count is independent of maxiter). The
-        # legacy "ondevice" monolith compiled the entire outer loop + objective
-        # into one XLA graph and did not finish compiling at production
-        # resolution; it is still available via an explicit --optimizer-backend.
         return "scipy-jax"
     return "scipy"
 

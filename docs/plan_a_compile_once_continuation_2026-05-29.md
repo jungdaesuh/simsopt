@@ -36,10 +36,10 @@ The S4 run: `scipy-jax`, m04 (mpol=4,ntor=4,nphi=63,ntheta=32), maxiter=25, CUDA
 
 Files modified (tracked):
 1. `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`
-   - `resolve_single_stage_default_optimizer_backend` (~line 8005): GPU/CUDA branch `return "ondevice"` → `return "scipy-jax"` (with explanatory comment). CPU branch unchanged (`scipy-jax-fullgraph`).
-   - `--optimizer-backend` help text (~line 4466): updated to say GPU default is now `scipy-jax` (compile-once), `ondevice` must be selected explicitly.
+   - `resolve_single_stage_default_optimizer_backend` (~line 8005): JAX branch `return "scipy-jax"` for both CPU and GPU/CUDA. The previous platform split is removed.
+   - `--optimizer-backend` help text (~line 4466): updated to say the JAX default is now `scipy-jax` (compile-once), `ondevice` must be selected explicitly.
 2. `tests/test_cli_defaults.py`: 2 assertions for cuda+jax default `ondevice` → `scipy-jax` (lines ~56 and ~119/180 region; the `test_resolve_*` and `test_single_stage_parse_args_uses_platform_default`).
-3. `tests/geo/test_single_stage_example.py`: renamed `test_parse_args_defaults_jax_backend_to_ondevice_optimizer_lane` → `..._to_platform_optimizer_lane`; assertion now `== module.resolve_single_stage_default_optimizer_backend("jax")` (platform-robust).
+3. `tests/geo/test_single_stage_example.py`: renamed `test_parse_args_defaults_jax_backend_to_ondevice_optimizer_lane` → `..._to_scipy_jax_optimizer_lane`; assertion now `== module.resolve_single_stage_default_optimizer_backend("jax")`.
 4. `src/simsopt/backend/runtime.py` (~line 2387, from EARLIER this session): added `jax.config.update("jax_persistent_cache_enable_xla_caches", "all")` in the cache-config block — complements Plan A (persists GPU kernel cache so the one-time compile survives across processes). Validated by import smoke (111 passed) + backend tests (128 passed).
 
 Also created (untracked, NOT part of the core change but useful):

@@ -336,7 +336,13 @@ def vmec_compute_geometry_jax(
     phi,
     phi_center: float = 0.0,
 ) -> VmecGeometryResultsJAX:
-    """Compute VMEC geometry diagnostics from frozen spline data."""
+    """Compute VMEC geometry diagnostics from frozen spline data.
+
+    The JAX kernel preserves the CPU diagnostic formulas. AD consumers should
+    stay away from the magnetic-axis ``s = 0`` drift-normalization singularity
+    and points where ``grad_B_double_dot_grad_B`` vanishes unless a caller adds a
+    model-specific limiting treatment.
+    """
     s_array = _as_rank1(s)
     theta_vmec_array, phi_array, ns, ntheta, nphi = _theta_phi_tensors(
         s_array, theta_vmec, phi

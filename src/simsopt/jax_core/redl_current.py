@@ -107,7 +107,14 @@ def j_dot_B_Redl_jax_from_arrays(
     psi_edge,
     nfp,
 ) -> tuple[jax.Array, RedlDetailsJAX]:
-    """Evaluate Redl ``<J dot B>`` from profile values on a shared ``s`` grid."""
+    """Evaluate Redl ``<J dot B>`` from profile values on a shared ``s`` grid.
+
+    This is a faithful array port of the CPU Redl formula. It assumes the
+    caller supplies points in the physical domain of that formula: positive
+    density and temperature profiles, ``Zeff >= 1``, positive ``epsilon``, and
+    ``iota != nfp * helicity_n``. The kernel intentionally does not regularize
+    the ``Zeff = 1`` or ``iota = nfp * helicity_n`` boundary for AD.
+    """
     s_jax = as_jax_float64(s)
     ne_jax = as_jax_float64(ne_s)
     Te_jax = as_jax_float64(Te_s)

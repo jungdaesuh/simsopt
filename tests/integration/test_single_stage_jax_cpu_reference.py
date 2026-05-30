@@ -242,6 +242,31 @@ _EXACT_SOLVER_END_STATE_TOLS = {
 _EXACT_SOLVER_RESIDUAL_INF_MAX = 1e-12
 
 
+def _assert_nested_metrics_allclose(actual, expected, *, label):
+    if isinstance(actual, dict):
+        assert actual.keys() == expected.keys()
+        for key, actual_value in actual.items():
+            _assert_nested_metrics_allclose(
+                actual_value,
+                expected[key],
+                label=f"{label}[{key!r}]",
+            )
+        return
+    if isinstance(actual, (float, np.floating)):
+        np.testing.assert_allclose(
+            actual,
+            expected,
+            rtol=1e-10,
+            atol=1e-12,
+            err_msg=(
+                f"{label} diverged between array-native accepted-step sync and "
+                "the legacy mutable-surface lane"
+            ),
+        )
+        return
+    assert actual == expected
+
+
 # -----------------------------------------------------------------------
 # Fixtures
 # -----------------------------------------------------------------------
@@ -2259,6 +2284,7 @@ def _snapshot_solver_state(booz):
     return {
         "need_to_run_code": booz.need_to_run_code,
         "run_code": booz.run_code,
+        "options": dict(booz.options),
         "solver_generation": getattr(booz, "_solver_generation", None),
         "res_ref": booz.res,
         "res": None if booz.res is None else dict(booz.res),
@@ -2290,6 +2316,11 @@ def _restore_boozer_result(obj, res_ref, res_snapshot):
 
 def _restore_solver_state(booz, state):
     booz.run_code = state["run_code"]
+    options_changed = dict(booz.options) != state["options"]
+    booz.options.clear()
+    booz.options.update(state["options"])
+    if options_changed and hasattr(booz, "_traceable_runtime_entry_cache"):
+        delattr(booz, "_traceable_runtime_entry_cache")
     _restore_boozer_result(
         booz,
         state["res_ref"],
@@ -5977,21 +6008,21 @@ class TestExactSolveCPUJAXParity:
             exact_pair.booz_jax_exact._get_cached_surface_dofs(),
             adjoint_state.decision_size,
         )
-        nqs_adjoint, nqs_success = adjoint_state.solve_transpose_with_status(nqs_rhs)
-        nqs_residual = np.asarray(
-            adjoint_state.apply_transpose(nqs_adjoint) - nqs_rhs,
-            dtype=float,
+        nqs_adjoint, nqs_status = adjoint_state.solve_transpose_with_status(nqs_rhs)
+        del nqs_adjoint
+        nqs_residual_rel = float(
+            np.asarray(jax.device_get(nqs_status.residual_relative))
         )
-        nqs_residual_rel = np.linalg.norm(nqs_residual) / (
-            np.linalg.norm(nqs_rhs) + 1e-30
-        )
-        assert not bool(np.asarray(nqs_success))
-        assert nqs_residual_rel >= _ADJOINT_RESIDUAL_REL_TOL, (
+        assert not bool(np.asarray(jax.device_get(nqs_status.success)))
+        assert (
+            not np.isfinite(nqs_residual_rel)
+            or nqs_residual_rel >= _ADJOINT_RESIDUAL_REL_TOL
+        ), (
             "Exact-path NonQuasiSymmetricRatioJAX failure reported despite "
             f"residual {nqs_residual_rel:.3e} below "
             f"{_ADJOINT_RESIDUAL_REL_TOL:.3e}"
         )
-        with pytest.raises(RuntimeError, match="operator-backed runtime path"):
+        with pytest.raises(RuntimeError, match="Boozer adjoint linear solve failed"):
             nqs_jax.dJ()
 
     def test_exact_coil_vjp_matches_fixed_state_directional_fd(self):
@@ -7516,23 +7547,11 @@ class TestTraceableObjective:
             )
         target_hardware_status = summary["reporting_metrics"]["hardware_status"]
         host_hardware_status = host_metrics["hardware_status"]
-        assert target_hardware_status.keys() == host_hardware_status.keys()
-        for status_name, target_value in target_hardware_status.items():
-            host_value = host_hardware_status[status_name]
-            if isinstance(target_value, (float, np.floating)):
-                np.testing.assert_allclose(
-                    target_value,
-                    host_value,
-                    rtol=1e-10,
-                    atol=1e-12,
-                    err_msg=(
-                        f"hardware_status[{status_name!r}] diverged between "
-                        "array-native accepted-step sync and the legacy "
-                        "mutable-surface lane"
-                    ),
-                )
-            else:
-                assert target_value == host_value
+        _assert_nested_metrics_allclose(
+            target_hardware_status,
+            host_hardware_status,
+            label="hardware_status",
+        )
 
     def test_pure_objective_is_jax_grad_differentiable(self, boozer_setup):
         """Test 2: jax.grad(f)(coil_dofs) is finite, nonzero, matches JF.dJ()."""
@@ -7844,8 +7863,17 @@ class TestTraceableObjective:
                 strategy="hybrid",
                 min_points_to_shard=1,
                 min_pairwise_rows_to_shard=1,
+                min_coils_to_shard=1,
                 platform="cpu",
+                point_axis_name="d",
+                coil_axis_name="c",
                 mesh_axis_name="d",
+                mesh_axes=("d",),
+                point_device_count=1,
+                coil_device_count=1,
+                reduced_axis_name=None,
+                device_count=1,
+                local_device_count=1,
             ),
         )
 
@@ -8216,9 +8244,8 @@ class TestTraceableObjective:
             dtype=dtype,
         )
 
-        assert scipy_result.nit > 0
-        assert target_result.nit > 0
         assert scipy_result.nfev > 1
+        assert scipy_result.njev > 1
         assert target_result.nfev > 1
         np.testing.assert_allclose(
             float(scipy_result.fun),

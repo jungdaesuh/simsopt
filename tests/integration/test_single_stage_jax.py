@@ -31,6 +31,7 @@ from repo_bootstrap import bootstrap_local_simsopt
 bootstrap_local_simsopt(_SRC_ROOT)
 
 import simsopt.geo.surfaceobjectives_jax as soj
+import simsopt.geo.surfaceobjectives_traceable_jax as sotj
 
 
 class _FakeDependentOpt:
@@ -123,6 +124,7 @@ def _patch_runtime_scalar_counter(
         return original_runtime_scalar(value, reference=reference)
 
     monkeypatch.setattr(soj, "_runtime_float64_scalar", _counting_runtime_scalar)
+    monkeypatch.setattr(sotj, "_runtime_float64_scalar", _counting_runtime_scalar)
     return calls
 
 

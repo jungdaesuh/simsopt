@@ -51,15 +51,15 @@ def _step_vector(x_flat: jax.Array, abs_step: float, rel_step: float) -> jax.Arr
     if rel_step < 0.0:
         raise ValueError("rel_step must be >= 0")
     dtype = np.dtype(x_flat.dtype)
-    abs_step_value = np.asarray(abs_step, dtype=dtype)
-    rel_step_value = np.asarray(rel_step, dtype=dtype)
-    if isinstance(x_flat, jax.core.Tracer) and abs_step_value == 0.0:
+    abs_step_host = np.asarray(abs_step, dtype=dtype)
+    rel_step_host = np.asarray(rel_step, dtype=dtype)
+    if isinstance(x_flat, jax.core.Tracer) and abs_step_host == 0.0:
         raise ValueError("Finite difference step size cannot be 0. Increase abs_step.")
-    if abs_step_value == 0.0 and rel_step_value == 0.0:
+    if abs_step_host == 0.0 and rel_step_host == 0.0:
         raise ValueError("Finite difference step size cannot be 0. Increase abs_step.")
-    rel_step_value = _runtime_init_scalar(rel_step, x_flat.dtype)
-    abs_step_value = _runtime_init_scalar(abs_step, x_flat.dtype)
-    steps = jnp.maximum(jnp.abs(x_flat) * rel_step_value, abs_step_value)
+    rel_step_device = _runtime_init_scalar(rel_step, x_flat.dtype)
+    abs_step_device = _runtime_init_scalar(abs_step, x_flat.dtype)
+    steps = jnp.maximum(jnp.abs(x_flat) * rel_step_device, abs_step_device)
     if not isinstance(x_flat, jax.core.Tracer) and bool(
         np.any(
             np.asarray(jax.device_get(steps == _runtime_init_scalar(0, steps.dtype)))

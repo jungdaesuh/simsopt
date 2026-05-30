@@ -22,11 +22,6 @@ from simsopt.solve.serial import (
     least_squares_serial_solve,
     serial_solve,
 )
-from simsopt.solve import (
-    constrained_serial_solve_jax as exported_constrained_serial_solve_jax,
-    least_squares_serial_solve_jax as exported_least_squares_serial_solve_jax,
-    serial_solve_jax as exported_serial_solve_jax,
-)
 from simsopt.solve.serial_jax import (
     TraceableEqualityConstrainedProblem,
     TraceableLeastSquaresProblem,
@@ -309,10 +304,3 @@ def test_least_squares_serial_solve_jax_rejects_host_graph_problem():
         serial_solve_jax(scalar_host_prob)
     with np.testing.assert_raises(TypeError):
         constrained_serial_solve_jax(constrained_host_prob)
-
-
-def test_solve_package_exports_traceable_jax_serial_solver():
-    """The public solve package exposes the traceable JAX serial lanes."""
-    assert exported_least_squares_serial_solve_jax is least_squares_serial_solve_jax
-    assert exported_serial_solve_jax is serial_solve_jax
-    assert exported_constrained_serial_solve_jax is constrained_serial_solve_jax

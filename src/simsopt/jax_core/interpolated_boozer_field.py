@@ -60,6 +60,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ._device_scalars import device_one as _device_one
+from ._device_scalars import two_pi as _device_two_pi
 from .regular_grid_interp import (
     RegularGridInterpolant3DDeviceSpec,
     RegularGridInterpolant3DSpec,
@@ -277,8 +279,8 @@ def fold_points_for_symmetry(
     theta = jnp.reshape(theta_col, (-1,))
     zeta = jnp.reshape(zeta_col, (-1,))
     zero = period - period
-    two_pi = zero + _device_float64(2.0 * np.pi)
-    pi = zero + _device_float64(np.pi)
+    two_pi = _device_two_pi(period)
+    pi = two_pi / (_device_one(two_pi) + _device_one(two_pi))
 
     # theta_mult = int(theta / (2*pi)); theta -= theta_mult * 2*pi
     # Uses truncation-toward-zero like C++ ``int()`` cast.

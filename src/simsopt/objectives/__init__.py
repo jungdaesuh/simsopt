@@ -1,3 +1,4 @@
+import importlib.util
 import sys
 
 from .constrained import *
@@ -7,6 +8,7 @@ from .utilities import *
 
 def _module_all(name):
     return list(sys.modules[f"{__name__}.{name}"].__all__)
+
 
 # Check simsoptpp availability once; probe a compiled symbol to
 # distinguish the real extension from the src/simsoptpp/ namespace package.
@@ -26,11 +28,13 @@ if _has_simsoptpp:
 # JAX modules (optional — requires jax)
 _jax_flux_all = []
 try:
+    _has_jax = importlib.util.find_spec("jax") is not None
+except ImportError:
+    _has_jax = False
+if _has_jax:
     from .fluxobjective_jax import *
 
     _jax_flux_all = _module_all("fluxobjective_jax")
-except (ImportError, AttributeError):
-    pass
 
 __all__ = (
     _cpu_flux_all

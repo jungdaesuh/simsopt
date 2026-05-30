@@ -1,4 +1,8 @@
-"""Pure JAX non-RZ surface geometry built on immutable specs."""
+"""Pure JAX non-RZ surface geometry built on immutable specs.
+
+This facade owns the SurfaceXYZFourier/SurfaceXYZTensorFourier spec-level API;
+the lower-level tensor kernels live in :mod:`simsopt.jax_core.surface_fourier_kernels`.
+"""
 
 from __future__ import annotations
 
@@ -443,7 +447,7 @@ def surface_xyz_fourier_dfirst_fund_form_from_dofs(
     spec: SurfaceXYZFourierSpec,
     dofs,
 ):
-    return jax.jacobian(lambda x: surface_xyz_fourier_first_fund_form_from_dofs(spec, x))(
+    return jax.jacfwd(lambda x: surface_xyz_fourier_first_fund_form_from_dofs(spec, x))(
         jnp.asarray(dofs, dtype=spec.dofs.dtype)
     )
 
@@ -452,7 +456,7 @@ def surface_xyz_fourier_dsecond_fund_form_from_dofs(
     spec: SurfaceXYZFourierSpec,
     dofs,
 ):
-    return jax.jacobian(
+    return jax.jacfwd(
         lambda x: surface_xyz_fourier_second_fund_form_from_dofs(spec, x)
     )(jnp.asarray(dofs, dtype=spec.dofs.dtype))
 
@@ -461,7 +465,7 @@ def surface_xyz_fourier_dsurface_curvatures_from_dofs(
     spec: SurfaceXYZFourierSpec,
     dofs,
 ):
-    return jax.jacobian(
+    return jax.jacfwd(
         lambda x: surface_xyz_fourier_surface_curvatures_from_dofs(spec, x)
     )(jnp.asarray(dofs, dtype=spec.dofs.dtype))
 
@@ -871,7 +875,7 @@ def surface_xyz_tensor_fourier_dfirst_fund_form_from_dofs(
     spec: SurfaceXYZTensorFourierSpec,
     dofs,
 ):
-    return jax.jacobian(
+    return jax.jacfwd(
         lambda x: surface_xyz_tensor_fourier_first_fund_form_from_dofs(spec, x)
     )(jnp.asarray(dofs, dtype=spec.dofs.dtype))
 
@@ -880,7 +884,7 @@ def surface_xyz_tensor_fourier_dsecond_fund_form_from_dofs(
     spec: SurfaceXYZTensorFourierSpec,
     dofs,
 ):
-    return jax.jacobian(
+    return jax.jacfwd(
         lambda x: surface_xyz_tensor_fourier_second_fund_form_from_dofs(spec, x)
     )(jnp.asarray(dofs, dtype=spec.dofs.dtype))
 
@@ -889,7 +893,7 @@ def surface_xyz_tensor_fourier_dsurface_curvatures_from_dofs(
     spec: SurfaceXYZTensorFourierSpec,
     dofs,
 ):
-    return jax.jacobian(
+    return jax.jacfwd(
         lambda x: surface_xyz_tensor_fourier_surface_curvatures_from_dofs(spec, x)
     )(jnp.asarray(dofs, dtype=spec.dofs.dtype))
 

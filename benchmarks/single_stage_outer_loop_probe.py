@@ -162,15 +162,15 @@ def parse_args() -> argparse.Namespace:
         "--optimizer-backend",
         choices=(DEFAULT_OPTIMIZER_BACKEND,),
         default=DEFAULT_OPTIMIZER_BACKEND,
-        help="JAX target-lane optimizer backend for the outer-loop proof.",
+        help="JAX optimizer backend for the outer-loop proof.",
     )
     parser.add_argument(
         "--boozer-optimizer-backend",
-        choices=(DEFAULT_OPTIMIZER_BACKEND,),
+        choices=("ondevice", "scipy"),
         default=None,
         help=(
             "Optional override for the inner JAX Boozer LS backend. "
-            "When provided it must stay ondevice."
+            "Defaults to the backend resolved from the selected outer lane."
         ),
     )
     parser.add_argument(
@@ -266,8 +266,8 @@ def parse_args() -> argparse.Namespace:
         "--experimental-target-lane-value-and-grad",
         action="store_true",
         help=(
-            "Legacy compatibility flag. The single-stage JAX ondevice target lane "
-            "now uses the fused runtime-bundle (value, grad) contract by default."
+            "Legacy compatibility flag. The explicit ondevice target lane now "
+            "uses the fused runtime-bundle (value, grad) contract by default."
         ),
     )
     return parser.parse_args()
@@ -355,8 +355,8 @@ def build_phase1_diagnostic_note(
         if isinstance(events, list) and events:
             first_event = events[0]
             phase = first_event.get("phase")
-            note["first_bad_region"] = (
-                _diagnostic_trace_region_for_phase(phase) or str(phase)
+            note["first_bad_region"] = _diagnostic_trace_region_for_phase(phase) or str(
+                phase
             )
             note["first_bad_region_source"] = (
                 "TARGET_LANE_INVALID_STATE_DIAGNOSIS.events[0]"
@@ -505,9 +505,7 @@ def main() -> None:
             "compile_diagnostics_requested": bool(args.enable_compile_diagnostics),
             "compile_diagnostics_enabled": bool(compile_diagnostics_enabled),
             "compile_diagnostics_disable_reason": compile_diagnostics_disable_reason,
-            "deterministic_gpu_reductions": bool(
-                args.deterministic_gpu_reductions
-            ),
+            "deterministic_gpu_reductions": bool(args.deterministic_gpu_reductions),
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "mpol": int(args.mpol),

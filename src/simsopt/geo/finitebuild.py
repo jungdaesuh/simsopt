@@ -44,12 +44,6 @@ def _runtime_zeros_like(value):
     return np.zeros_like(value)
 
 
-def _host_cache_array(value):
-    if _is_runtime_jax_value(value):
-        return _host_array(value, dtype=np.float64)
-    return np.asarray(value, dtype=np.float64)
-
-
 class CurveFilament(FramedCurve):
     def __init__(self, framedcurve, dn, db):
         """
@@ -94,18 +88,20 @@ class CurveFilament(FramedCurve):
         assert quadpoints.shape[0] == self.curve.quadpoints.shape[0]
         assert np.linalg.norm(quadpoints - self.curve.quadpoints) < 1e-15
         t, n, b = self.framedcurve.rotated_frame()
-        gamma[:] = _host_cache_array(
+        gamma[:] = _host_array(
             _runtime_array_like(self.curve.gamma(), reference=n)
             + _runtime_scalar_mul(self.dn, n)
-            + _runtime_scalar_mul(self.db, b)
+            + _runtime_scalar_mul(self.db, b),
+            dtype=np.float64,
         )
 
     def gammadash_impl(self, gammadash):
         td, nd, bd = self.framedcurve.rotated_frame_dash()
-        gammadash[:] = _host_cache_array(
+        gammadash[:] = _host_array(
             _runtime_array_like(self.curve.gammadash(), reference=nd)
             + _runtime_scalar_mul(self.dn, nd)
-            + _runtime_scalar_mul(self.db, bd)
+            + _runtime_scalar_mul(self.db, bd),
+            dtype=np.float64,
         )
 
     def dgamma_by_dcoeff_vjp(self, v):

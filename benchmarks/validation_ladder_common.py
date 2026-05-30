@@ -879,6 +879,40 @@ def run_python_script(
     return result
 
 
+def load_single_stage_final_payload(
+    output_root: str | os.PathLike[str],
+) -> tuple[dict[str, Any], Path]:
+    """Load the accepted or diagnostic final payload from a single-stage run."""
+    root = Path(output_root)
+    results_matches = list(root.rglob("results.json"))
+    if len(results_matches) == 1:
+        results_path = results_matches[0]
+        return dict(load_json(results_path)), results_path
+    if len(results_matches) > 1:
+        match_display = ", ".join(str(match) for match in results_matches)
+        raise RuntimeError(
+            f"Expected at most one accepted results.json under {root}, "
+            f"found {match_display}"
+        )
+
+    rejected_matches = list(root.rglob("REJECTED.json"))
+    if len(rejected_matches) != 1:
+        match_display = ", ".join(str(match) for match in rejected_matches) or "<none>"
+        raise RuntimeError(
+            f"Expected exactly one results.json or REJECTED.json under "
+            f"{root}, found rejected markers {match_display}"
+        )
+    rejected_path = rejected_matches[0]
+    marker = dict(load_json(rejected_path))
+    diagnostic_results = marker.get("diagnostic_results_payload")
+    if not isinstance(diagnostic_results, dict):
+        raise RuntimeError(
+            f"{rejected_path} is missing diagnostic_results_payload; fixed-iteration "
+            "parity rungs require the rejected-run diagnostic payload."
+        )
+    return dict(diagnostic_results), rejected_path
+
+
 def find_single_file(root: str | os.PathLike[str], pattern: str) -> Path:
     """Resolve a single probe artifact under a temporary output root."""
     matches = list(Path(root).rglob(pattern))

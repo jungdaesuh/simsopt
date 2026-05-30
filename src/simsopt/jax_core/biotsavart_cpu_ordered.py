@@ -65,7 +65,7 @@ def _per_point_B_one_coil_cpu_ordered(point, gammas, gammadashs):
         cx = dg[1] * diff[2] - dg[2] * diff[1]
         cy = dg[2] * diff[0] - dg[0] * diff[2]
         cz = dg[0] * diff[1] - dg[1] * diff[0]
-        cross = jnp.array([cx, cy, cz], dtype=gammas.dtype)
+        cross = jnp.stack((cx, cy, cz))
         return acc + cross * norm_diff_3_inv
 
     return lax.fori_loop(0, nq, body, zero)
@@ -92,7 +92,7 @@ def _per_point_B_and_dB_one_coil_cpu_ordered(point, gammas, gammadashs):
         cx = dg[1] * diff[2] - dg[2] * diff[1]
         cy = dg[2] * diff[0] - dg[0] * diff[2]
         cz = dg[0] * diff[1] - dg[1] * diff[0]
-        cross = jnp.array([cx, cy, cz], dtype=gammas.dtype)
+        cross = jnp.stack((cx, cy, cz))
         B_acc = B_acc + cross * norm_diff_3_inv
 
         # Derivative: per C++ biot_savart_impl.h:75–97
@@ -113,14 +113,13 @@ def _per_point_B_and_dB_one_coil_cpu_ordered(point, gammas, gammadashs):
         # cross(v, e_0) = (v.y*0 - v.z*0, v.z*1 - v.x*0, v.x*0 - v.y*1) = (0, v.z, -v.y)
         # cross(v, e_1) = (v.y*0 - v.z*1, v.z*0 - v.x*0, v.x*1 - v.y*0) = (-v.z, 0, v.x)
         # cross(v, e_2) = (v.y*1 - v.z*0, v.z*0 - v.x*1, v.x*0 - v.y*0) = (v.y, -v.x, 0)
-        n0 = jnp.array([0.0, dgnd_z, -dgnd_y], dtype=gammas.dtype)
-        n1 = jnp.array([-dgnd_z, 0.0, dgnd_x], dtype=gammas.dtype)
-        n2 = jnp.array([dgnd_y, -dgnd_x, 0.0], dtype=gammas.dtype)
+        zero = jnp.zeros((), dtype=gammas.dtype)
+        n0 = jnp.stack((zero, dgnd_z, -dgnd_y))
+        n1 = jnp.stack((-dgnd_z, zero, dgnd_x))
+        n2 = jnp.stack((dgnd_y, -dgnd_x, zero))
 
         diff0, diff1, diff2 = diff[0], diff[1], diff[2]
-        three_cross = jnp.array(
-            [three_cross_x, three_cross_y, three_cross_z], dtype=gammas.dtype
-        )
+        three_cross = jnp.stack((three_cross_x, three_cross_y, three_cross_z))
         temp0 = n0 - three_cross * diff0
         temp1 = n1 - three_cross * diff1
         temp2 = n2 - three_cross * diff2

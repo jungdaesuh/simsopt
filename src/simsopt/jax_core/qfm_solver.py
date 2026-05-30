@@ -198,7 +198,12 @@ def _surface_normal_from_tangents(gammadash1: object, gammadash2: object):
 
 def _surface_norm(normal: object):
     normal_arr: jax.Array = as_jax_float64(normal)
-    return jnp.sqrt(jnp.sum(normal_arr * normal_arr, axis=-1))
+    norm_sq = jnp.sum(normal_arr * normal_arr, axis=-1)
+    one = norm_sq**0
+    zero = one - one
+    has_norm = norm_sq > zero
+    safe_norm_sq = jnp.where(has_norm, norm_sq, one)
+    return jnp.where(has_norm, jnp.sqrt(safe_norm_sq), zero)
 
 
 def _surface_area_from_dofs(spec, dofs: object):
@@ -212,7 +217,13 @@ def qfm_residual_jax_from_dofs(spec, dofs: object, coil_set_spec: object):
     gamma, gammadash1, gammadash2 = _surface_gamma_tangents_from_dofs(spec, dofs)
     normal = _surface_normal_from_tangents(gammadash1, gammadash2)
     norm_normal = _surface_norm(normal)
-    unitnormal = normal / norm_normal[:, :, None]
+    has_normal = norm_normal > 0.0
+    safe_norm_normal = jnp.where(has_normal, norm_normal, 1.0)
+    unitnormal = jnp.where(
+        has_normal[:, :, None],
+        normal / safe_norm_normal[:, :, None],
+        jnp.zeros_like(normal),
+    )
     nphi, ntheta = gamma.shape[:2]
     B = grouped_biot_savart_B_from_spec(gamma.reshape(-1, 3), coil_set_spec).reshape(
         nphi,
@@ -221,9 +232,11 @@ def qfm_residual_jax_from_dofs(spec, dofs: object, coil_set_spec: object):
     )
     B_normal = jnp.sum(B * unitnormal, axis=2)
     B_norm_squared = jnp.sum(B * B, axis=2)
-    return jnp.sum(B_normal * B_normal * norm_normal) / jnp.sum(
-        B_norm_squared * norm_normal
-    )
+    numerator = jnp.sum(B_normal * B_normal * norm_normal)
+    denominator = jnp.sum(B_norm_squared * norm_normal)
+    has_denominator = denominator > 0.0
+    safe_denominator = jnp.where(has_denominator, denominator, 1.0)
+    return jnp.where(has_denominator, numerator / safe_denominator, 0.0)
 
 
 def qfm_label_jax_from_dofs(

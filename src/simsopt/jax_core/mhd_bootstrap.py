@@ -17,7 +17,9 @@ def _not_a_knot_coefficients(values: jax.Array) -> jax.Array:
     y = as_jax_float64(values)
     intervals = int(y.shape[0]) - 1
     size = 3 * intervals
-    matrix = jnp.zeros((size, size), dtype=y.dtype)
+    matrix_rows: list[int] = []
+    matrix_cols: list[int] = []
+    matrix_vals: list[float] = []
     rhs = jnp.zeros((size,), dtype=y.dtype)
     row = 0
 
@@ -30,31 +32,56 @@ def _not_a_knot_coefficients(values: jax.Array) -> jax.Array:
     def d_index(interval):
         return 2 * intervals + interval
 
+    def add_entries(entries):
+        for col, value in entries:
+            matrix_rows.append(row)
+            matrix_cols.append(col)
+            matrix_vals.append(value)
+
     for interval in range(intervals):
-        matrix = matrix.at[row, b_index(interval)].set(1.0)
-        matrix = matrix.at[row, c_index(interval)].set(1.0)
-        matrix = matrix.at[row, d_index(interval)].set(1.0)
+        add_entries(
+            (
+                (b_index(interval), 1.0),
+                (c_index(interval), 1.0),
+                (d_index(interval), 1.0),
+            )
+        )
         rhs = rhs.at[row].set(y[interval + 1] - y[interval])
         row += 1
 
     for interval in range(intervals - 1):
-        matrix = matrix.at[row, b_index(interval)].set(1.0)
-        matrix = matrix.at[row, c_index(interval)].set(2.0)
-        matrix = matrix.at[row, d_index(interval)].set(3.0)
-        matrix = matrix.at[row, b_index(interval + 1)].set(-1.0)
+        add_entries(
+            (
+                (b_index(interval), 1.0),
+                (c_index(interval), 2.0),
+                (d_index(interval), 3.0),
+                (b_index(interval + 1), -1.0),
+            )
+        )
         row += 1
 
     for interval in range(intervals - 1):
-        matrix = matrix.at[row, c_index(interval)].set(2.0)
-        matrix = matrix.at[row, d_index(interval)].set(6.0)
-        matrix = matrix.at[row, c_index(interval + 1)].set(-2.0)
+        add_entries(
+            (
+                (c_index(interval), 2.0),
+                (d_index(interval), 6.0),
+                (c_index(interval + 1), -2.0),
+            )
+        )
         row += 1
 
-    matrix = matrix.at[row, d_index(0)].set(1.0)
-    matrix = matrix.at[row, d_index(1)].set(-1.0)
+    add_entries(((d_index(0), 1.0), (d_index(1), -1.0)))
     row += 1
-    matrix = matrix.at[row, d_index(intervals - 2)].set(1.0)
-    matrix = matrix.at[row, d_index(intervals - 1)].set(-1.0)
+    add_entries(((d_index(intervals - 2), 1.0), (d_index(intervals - 1), -1.0)))
+
+    matrix = (
+        jnp.zeros((size, size), dtype=y.dtype)
+        .at[
+            np.asarray(matrix_rows, dtype=np.int32),
+            np.asarray(matrix_cols, dtype=np.int32),
+        ]
+        .set(jnp.asarray(matrix_vals, dtype=y.dtype))
+    )
 
     solved = jnp.linalg.solve(matrix, rhs)
     b = solved[:intervals]
@@ -90,7 +117,9 @@ def _bounded_newton_cubic_extremum(
     def step(point, _):
         first = _eval_cubic(coeffs, point, 1)
         second = _eval_cubic(coeffs, point, 2)
-        newton = jnp.where(jnp.abs(second) > 1e-14, point - first / second, point)
+        has_curvature = jnp.abs(second) > 1e-14
+        safe_second = jnp.where(has_curvature, second, 1.0)
+        newton = jnp.where(has_curvature, point - first / safe_second, point)
         gradient_step = first / jnp.maximum(jnp.abs(first), 1.0)
         candidates = jnp.concatenate(
             (
@@ -174,6 +203,8 @@ def _bounded_newton_extremum(
     def step(point, _):
         _, grad, hess = _tensor_value_grad_hess(x_coeffs_by_y, point[0], point[1])
         det = hess[0, 0] * hess[1, 1] - hess[0, 1] * hess[1, 0]
+        has_full_inverse = jnp.abs(det) > 1e-14
+        safe_det = jnp.where(has_full_inverse, det, 1.0)
         inverse_step = (
             jnp.array(
                 (
@@ -182,17 +213,21 @@ def _bounded_newton_extremum(
                 ),
                 dtype=x_coeffs_by_y.dtype,
             )
-            / det
+            / safe_det
         )
+        has_theta_curvature = jnp.abs(hess[0, 0]) > 1e-14
+        has_zeta_curvature = jnp.abs(hess[1, 1]) > 1e-14
+        safe_theta_curvature = jnp.where(has_theta_curvature, hess[0, 0], 1.0)
+        safe_zeta_curvature = jnp.where(has_zeta_curvature, hess[1, 1], 1.0)
         diagonal_step = jnp.array(
             (
-                jnp.where(jnp.abs(hess[0, 0]) > 1e-14, grad[0] / hess[0, 0], 0.0),
-                jnp.where(jnp.abs(hess[1, 1]) > 1e-14, grad[1] / hess[1, 1], 0.0),
+                jnp.where(has_theta_curvature, grad[0] / safe_theta_curvature, 0.0),
+                jnp.where(has_zeta_curvature, grad[1] / safe_zeta_curvature, 0.0),
             ),
             dtype=x_coeffs_by_y.dtype,
         )
         candidate = jnp.where(
-            jnp.abs(det) > 1e-14, point - inverse_step, point - diagonal_step
+            has_full_inverse, point - inverse_step, point - diagonal_step
         )
         grad_norm = jnp.maximum(jnp.linalg.norm(grad), 1.0)
         gradient_step = grad / grad_norm
@@ -251,8 +286,11 @@ def _compute_trapped_fraction_surface(
     denominator_axes = (
         tuple(axis + 1 for axis in axes) if isinstance(axes, tuple) else axes + 1
     )
+    lambda_gap = 1.0 - lambdas * modB[None, ...]
+    has_lambda_gap = lambda_gap > 0.0
+    safe_lambda_gap = jnp.where(has_lambda_gap, lambda_gap, 1.0)
     denominator = jnp.mean(
-        jnp.sqrt(1.0 - lambdas * modB[None, ...]) * sqrtg[None, ...],
+        jnp.where(has_lambda_gap, jnp.sqrt(safe_lambda_gap), 0.0) * sqrtg[None, ...],
         axis=denominator_axes,
     )
     denominator = denominator / sqrtg_mean

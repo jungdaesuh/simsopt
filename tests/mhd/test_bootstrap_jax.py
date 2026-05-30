@@ -296,6 +296,27 @@ def test_compute_trapped_fraction_jax_modb_jvp_matches_centered_fd():
     )
 
 
+def test_compute_trapped_fraction_jax_flat_modb_jvp_is_finite():
+    """AD regression: constant-|B| extrema must not leak dead-branch NaNs."""
+    modB = jnp.ones((4, 2), dtype=jnp.float64)
+    sqrtg = jnp.ones_like(modB)
+    direction = jnp.zeros_like(modB).at[0, 0].set(0.1)
+
+    def objective(modB_arg):
+        *_, f_t = compute_trapped_fraction_jax(
+            modB_arg,
+            sqrtg,
+            quadrature_node_count=8,
+            extrema_iterations=2,
+        )
+        return jnp.sum(f_t)
+
+    value, tangent = jax.jvp(objective, (modB,), (direction,))
+
+    assert jnp.isfinite(value)
+    assert jnp.isfinite(tangent)
+
+
 def test_bootstrap_jax_submodule_imports_without_simsoptpp():
     """Oracle: import blocker proving the public JAX submodule avoids simsoptpp."""
     script = """

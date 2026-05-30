@@ -111,16 +111,18 @@ _STOKES_FLUX_ATOL = 5e-7
 _STOKES_DISK_NR = 96
 _STOKES_DISK_NTHETA = 192
 
-_PUBLIC_LBFGS_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["lbfgs"]
-_PUBLIC_LS_MANUAL_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["ls_manual"]
-_PUBLIC_LS_LM_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["ls_lm"]
-_PUBLIC_NEWTON_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["newton"]
-_PUBLIC_EXACT_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["exact"]
-_PUBLIC_EXACT_CONSTRAINTS_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS[
+_PUBLIC_LBFGS_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES["lbfgs"]
+_PUBLIC_LS_MANUAL_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES["ls_manual"]
+_PUBLIC_LS_LM_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES["ls_lm"]
+_PUBLIC_NEWTON_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES["newton"]
+_PUBLIC_EXACT_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES["exact"]
+_PUBLIC_EXACT_CONSTRAINTS_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES[
     "exact_constraints"
 ]
-_TRACEABLE_EXACT_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["traceable_exact"]
-_TRACEABLE_LS_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["traceable_ls"]
+_TRACEABLE_EXACT_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES[
+    "traceable_exact"
+]
+_TRACEABLE_LS_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES["traceable_ls"]
 _SOLVED_RUNTIME_STATE_FIELDS = frozenset({"sdofs", "iota", "G", "weight_inv_modB"})
 _ADJOINT_RUNTIME_STATE_FIELDS = frozenset(
     {
@@ -142,17 +144,25 @@ _ADJOINT_RUNTIME_STATE_FIELDS = frozenset(
 )
 
 
-def _assert_result_schema(result, schema):
+def _assert_result_record(result, record_type):
     keys = set(result.keys())
-    assert schema.required_keys <= keys
-    assert not schema.forbidden_keys & keys
+    assert record_type.required_keys <= keys
+    assert not record_type.forbidden_keys & keys
+    if "x" not in result:
+        assert isinstance(result, dict)
+        assert isinstance(result, _bsj._BoozerResultRecord)
+        assert result.mode == record_type.mode
+        assert result.copy() == dict(result)
+        assert len(jax.tree_util.tree_leaves(result)) == len(
+            jax.tree_util.tree_leaves(dict(result))
+        )
 
 
 def _runtime_sdofs_for(booz):
     return jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
 
 
-def test_public_solver_result_schema_registry_is_mode_aware():
+def test_public_solver_result_record_registry_is_mode_aware():
     entrypoint_cases = {
         "lbfgs": "minimize_boozer_penalty_constraints_LBFGS",
         "ls_manual": "minimize_boozer_penalty_constraints_ls",
@@ -162,28 +172,32 @@ def test_public_solver_result_schema_registry_is_mode_aware():
         "exact_constraints": "minimize_boozer_exact_constraints_newton",
         "traceable": "run_code_traceable",
     }
-    schemas = _bsj._BOOZER_RESULT_SCHEMAS
+    record_types = _bsj._BOOZER_RESULT_RECORD_TYPES
 
-    assert entrypoint_cases.keys() <= schemas.keys()
-    for schema_name, entrypoint_name in entrypoint_cases.items():
+    assert entrypoint_cases.keys() <= record_types.keys()
+    for record_type_name, entrypoint_name in entrypoint_cases.items():
         assert hasattr(BoozerSurfaceJAX, entrypoint_name)
-        schema = schemas[schema_name]
-        assert schema.required_keys
-        assert not schema.required_keys & schema.forbidden_keys
+        record_type = record_types[record_type_name]
+        assert record_type.required_keys
+        assert not record_type.required_keys & record_type.forbidden_keys
 
-    assert "info" in schemas["ls_lm"].required_keys
-    assert "info" in schemas["ls_manual"].forbidden_keys
-    assert "PLU" in schemas["exact"].required_keys
-    assert "PLU" in schemas["traceable"].forbidden_keys
-    assert "plu" in schemas["traceable"].required_keys
-    assert "plu" in schemas["exact"].forbidden_keys
-    assert "linearization_kind" in schemas["newton"].required_keys
-    assert "linearization_kind" in schemas["lbfgs"].forbidden_keys
-    for schema_name in ("lbfgs", "ls_manual", "ls_lm", "newton", "traceable_ls"):
-        assert set(_bsj.SOLVE_QUALITY_LS_FIELDS) <= schemas[schema_name].required_keys
-    for schema_name in ("exact", "exact_constraints", "traceable_exact"):
+    assert "info" in record_types["ls_lm"].required_keys
+    assert "info" in record_types["ls_manual"].forbidden_keys
+    assert "PLU" in record_types["exact"].required_keys
+    assert "PLU" in record_types["traceable"].forbidden_keys
+    assert "plu" in record_types["traceable"].required_keys
+    assert "plu" in record_types["exact"].forbidden_keys
+    assert "linearization_kind" in record_types["newton"].required_keys
+    assert "linearization_kind" in record_types["lbfgs"].forbidden_keys
+    for record_type_name in ("lbfgs", "ls_manual", "ls_lm", "newton", "traceable_ls"):
         assert (
-            set(_bsj.SOLVE_QUALITY_EXACT_FIELDS) <= schemas[schema_name].required_keys
+            set(_bsj.SOLVE_QUALITY_LS_FIELDS)
+            <= record_types[record_type_name].required_keys
+        )
+    for record_type_name in ("exact", "exact_constraints", "traceable_exact"):
+        assert (
+            set(_bsj.SOLVE_QUALITY_EXACT_FIELDS)
+            <= record_types[record_type_name].required_keys
         )
 
 
@@ -2840,8 +2854,10 @@ class TestBoozerSurfaceJAXClass:
 
         assert booz.options["materialize_dense_linearization"] is expected_materialize
 
-    def test_backend_mutation_refreshes_implicit_dense_linearization_default(self):
-        """Backend mutation keeps the implicit byte-capped dense default."""
+    def test_backend_mutation_does_not_rewrite_dense_linearization_default(
+        self, monkeypatch
+    ):
+        """Dense finalization defaults are resolved once during construction."""
         bs = _MockBiotSavart(_make_mock_coils())
         surf, label = _make_basic_mock_surface_and_label()
         booz = BoozerSurfaceJAX(
@@ -2855,11 +2871,12 @@ class TestBoozerSurfaceJAXClass:
         assert booz.options["optimizer_backend"] == "scipy"
         assert booz.options["materialize_dense_linearization"] is True
 
+        monkeypatch.setattr(
+            _bsj,
+            "default_materialize_dense_linearization_for_backend",
+            lambda _backend: False,
+        )
         booz.options["optimizer_backend"] = "ondevice"
-
-        assert booz.options["materialize_dense_linearization"] is True
-
-        booz.options["optimizer_backend"] = "scipy"
 
         assert booz.options["materialize_dense_linearization"] is True
 
@@ -3193,7 +3210,7 @@ class TestBoozerSurfaceJAXClass:
             verbose=False,
         )
 
-        _assert_result_schema(res, _PUBLIC_LBFGS_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_LBFGS_RESULT_RECORD_TYPE)
         assert captured_methods == ["bfgs"]
         assert res["optimizer_method"] == "bfgs"
 
@@ -3205,7 +3222,7 @@ class TestBoozerSurfaceJAXClass:
             limited_memory=True,
         )
 
-        _assert_result_schema(res, _PUBLIC_LBFGS_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_LBFGS_RESULT_RECORD_TYPE)
         assert captured_methods == ["bfgs", "lbfgs"]
         assert res["optimizer_method"] == "lbfgs"
 
@@ -3330,7 +3347,7 @@ class TestBoozerSurfaceJAXClass:
             method="lm",
         )
 
-        _assert_result_schema(res, _PUBLIC_LS_LM_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_LS_LM_RESULT_RECORD_TYPE)
         assert captured["method"] == "lm-ondevice"
         assert (
             captured["options"]["materialize_dense_linearization"]
@@ -3523,7 +3540,7 @@ class TestBoozerSurfaceJAXClass:
             tol=1e-8,
         )
 
-        _assert_result_schema(res_manual, _PUBLIC_LS_MANUAL_RESULT_SCHEMA)
+        _assert_result_record(res_manual, _PUBLIC_LS_MANUAL_RESULT_RECORD_TYPE)
         assert res_manual["optimizer_method"] == "manual"
         assert res_manual["success"] is True
         np.testing.assert_allclose(
@@ -3707,7 +3724,7 @@ class TestBoozerSurfaceJAXClass:
             tol=1e-10,
         )
 
-        _assert_result_schema(res, _PUBLIC_EXACT_CONSTRAINTS_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_EXACT_CONSTRAINTS_RESULT_RECORD_TYPE)
         assert res["success"] is True
         assert "jacobian" in res
         assert "residual" in res
@@ -3847,7 +3864,7 @@ class TestBoozerSurfaceJAXClass:
             verbose=False,
         )
 
-        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_NEWTON_RESULT_RECORD_TYPE)
         assert captured["method"] == "bfgs"
         assert res["success"] is True
 
@@ -4300,7 +4317,7 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         res = booz.run_code(iota=0.3, G=0.05)
         assert res is not None
-        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_NEWTON_RESULT_RECORD_TYPE)
         assert res["type"] == "ls"
         assert "residual" in res
         assert "jacobian" in res
@@ -5938,7 +5955,7 @@ class TestBoozerSurfaceJAXClass:
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
-            "_solve_hessian_system_with_status",
+            "_solve_hessian_least_squares_system_with_status",
             fake_solve_hessian_system_with_status,
         )
 
@@ -6062,7 +6079,7 @@ class TestBoozerSurfaceJAXClass:
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
-            "_solve_hessian_system_with_status",
+            "_solve_hessian_least_squares_system_with_status",
             fake_solve_hessian_system_with_status,
         )
 
@@ -6153,32 +6170,39 @@ class TestBoozerSurfaceJAXClass:
             "_make_exact_residual",
             lambda self, _mask: lambda _x: _x,
         )
+        operator_builds = []
+
+        def fake_jacobian_linear_operator(_residual_fn, _x):
+            operator = {
+                "matvec": lambda vec: vec,
+                "transpose_matvec": lambda vec: vec,
+            }
+            operator_builds.append(operator)
+            return operator
+
         monkeypatch.setattr(
             _bsj._optimizer_jax,
             "_jacobian_linear_operator",
-            lambda _residual_fn, _x: {
-                "matvec": lambda vec: vec,
-                "transpose_matvec": lambda vec: vec,
-            },
+            fake_jacobian_linear_operator,
         )
 
-        def fake_solve_jacobian_system_with_status(
-            _residual_fn,
-            _x,
+        def fake_solve_jacobian_operator_with_status(
+            operator,
             rhs,
             *,
             transpose,
             tol,
         ):
-            del transpose
+            assert operator is operator_builds[0]
+            assert transpose is True
             tol_value = float(np.asarray(tol))
             assert tol_value == pytest.approx(booz._linear_solve_tolerance())
             return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
-            "_solve_jacobian_system_with_status",
-            fake_solve_jacobian_system_with_status,
+            "_solve_jacobian_operator_with_status",
+            fake_solve_jacobian_operator_with_status,
         )
 
         original_asarray = _patch_boozer_asarray_rejecting_jax_arrays(
@@ -6194,6 +6218,7 @@ class TestBoozerSurfaceJAXClass:
             adjoint_state,
             dense_factors_available=True,
         )
+        assert len(operator_builds) == 1
         assert bool(original_asarray(success)) is True
         np.testing.assert_allclose(
             original_asarray(solved),
@@ -6327,13 +6352,13 @@ class TestBoozerSurfaceJAXClass:
             lambda _self, _mask: lambda x: x,
         )
 
-        def fake_operator_solve(_residual_fn, _x, rhs, *, transpose, tol):
+        def fake_operator_solve(_operator, rhs, *, transpose, tol):
             operator_calls.append((bool(transpose), float(tol)))
             return rhs + 1.0, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
-            "_solve_jacobian_system_with_status",
+            "_solve_jacobian_operator_with_status",
             fake_operator_solve,
         )
 
@@ -6539,7 +6564,7 @@ class TestBoozerSurfaceJAXClass:
         assert skipped_payload["reason"] == "newton_polish_policy"
         assert after_newton_payload["skipped"] == "true"
         _assert_solver_completion_payload(after_newton_payload)
-        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_NEWTON_RESULT_RECORD_TYPE)
 
     def test_run_code_skip_policy_preserves_failed_ls_state_without_newton(
         self, monkeypatch
@@ -6856,7 +6881,7 @@ class TestBoozerSurfaceJAXExactPath:
         booz = _make_mock_boozer_surface_exact()
         res = _run_mock_exact_boozer_success(booz)
         assert res is not None
-        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_EXACT_RESULT_RECORD_TYPE)
         assert res["type"] == "exact"
         assert booz.need_to_run_code is False
 
@@ -6886,7 +6911,7 @@ class TestBoozerSurfaceJAXExactPath:
             "exact_factorization_backend",
         }
         assert expected_keys <= set(res.keys())
-        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_EXACT_RESULT_RECORD_TYPE)
         assert res["jacobian_materialized"] is True
         _assert_dense_plu_factors(res["PLU"])
         assert res["linear_solve_backend"] == "operator"
@@ -7155,7 +7180,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert res["dense_jacobian_bytes"] is not None
         assert res["max_dense_jacobian_bytes"] == 77
         assert res["message"] == "dense Jacobian skipped"
-        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_SCHEMA)
+        _assert_result_record(res, _PUBLIC_EXACT_RESULT_RECORD_TYPE)
         with pytest.raises(RuntimeError, match="no successful solve state"):
             booz.get_adjoint_runtime_state()
 
@@ -7280,7 +7305,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
-        _assert_result_schema(result, _TRACEABLE_EXACT_RESULT_SCHEMA)
+        _assert_result_record(result, _TRACEABLE_EXACT_RESULT_RECORD_TYPE)
         assert captured["called"] is True
         assert result["jacobian"] is None
         assert result["plu"] is None
@@ -7528,7 +7553,7 @@ class TestBoozerSurfaceJAXExactPath:
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
         assert result["type"] == "ls"
-        _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
+        _assert_result_record(result, _TRACEABLE_LS_RESULT_RECORD_TYPE)
         # ``ls_condition_estimate`` is populated eagerly from the materialized
         # Hessian on the traceable LS path (Phase 5), so it is no longer ``None``
         # even with the fake newton-polish runner here. The κ_1 of the identity
@@ -7574,7 +7599,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
-        _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
+        _assert_result_record(result, _TRACEABLE_LS_RESULT_RECORD_TYPE)
         assert result["type"] == "ls"
         assert bool(result["success"])
         assert bool(result["newton_polish_skipped"])
@@ -7692,7 +7717,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
-        _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
+        _assert_result_record(result, _TRACEABLE_LS_RESULT_RECORD_TYPE)
         assert result["optimizer_method"] == expected_method
         assert bool(result["success"])
         if explicit_lm_options:
@@ -8032,7 +8057,7 @@ class TestBoozerSurfaceJAXExactPath:
             )
 
     def test_run_code_functional_aliases_run_code_traceable_schema(self, monkeypatch):
-        """run_code_functional() should forward to the runtime-native traceable schema."""
+        """run_code_functional() should forward to the runtime-native traceable record_type."""
         booz = _make_mock_boozer_surface()
         coil_arrays = booz._coil_arrays
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
@@ -8096,7 +8121,7 @@ class TestBoozerSurfaceJAXExactPath:
         result = booz.run_code_functional(coil_arrays, sdofs, iota, G)
 
         assert result is expected
-        _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
+        _assert_result_record(result, _TRACEABLE_LS_RESULT_RECORD_TYPE)
         assert "PLU" not in result
         assert result["plu"] is not None
         np.testing.assert_allclose(np.asarray(result["sdofs"]), np.asarray(sdofs))
@@ -10131,13 +10156,13 @@ class TestBuildBoozerSurfaceRuntimeState:
         )
         monkeypatch.setattr(
             _bsj._optimizer_jax,
-            "_solve_jacobian_system",
-            lambda _residual_fn, _x, rhs, *, transpose, tol: rhs,
+            "_solve_jacobian_operator",
+            lambda _operator, rhs, *, transpose, tol: rhs,
         )
         monkeypatch.setattr(
             _bsj._optimizer_jax,
-            "_solve_jacobian_system_with_status",
-            lambda _residual_fn, _x, rhs, *, transpose, tol: (
+            "_solve_jacobian_operator_with_status",
+            lambda _operator, rhs, *, transpose, tol: (
                 rhs,
                 _mock_linear_solve_status(True),
             ),

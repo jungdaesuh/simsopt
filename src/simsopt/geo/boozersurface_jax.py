@@ -28,6 +28,7 @@ Builds on M3's composed derivative path:
 
 import hashlib
 import inspect
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import functools
 from functools import partial
@@ -192,9 +193,79 @@ __all__ = [
 
 
 @dataclass(frozen=True)
-class _BoozerResultSchema:
+class _BoozerResultRecordType:
+    mode: str
     required_keys: frozenset
     forbidden_keys: frozenset = field(default_factory=frozenset)
+
+    def validate_keys(self, keys):
+        actual_keys = frozenset(keys)
+        missing_keys = self.required_keys - actual_keys
+        forbidden_keys = self.forbidden_keys & actual_keys
+        if missing_keys:
+            missing = ", ".join(sorted(missing_keys))
+            raise KeyError(
+                f"Boozer result record {self.mode!r} is missing required keys: "
+                f"{missing}"
+            )
+        if forbidden_keys:
+            forbidden = ", ".join(sorted(forbidden_keys))
+            raise KeyError(
+                f"Boozer result record {self.mode!r} has forbidden keys: {forbidden}"
+            )
+
+    def build(self, values: Mapping[str, object]):
+        self.validate_keys(values.keys())
+        return _BoozerResultRecord(self, dict(values))
+
+
+class _BoozerResultRecord(dict):
+    def __init__(self, record_type: _BoozerResultRecordType, values: Mapping):
+        super().__init__(values)
+        self.record_type = record_type
+
+    @property
+    def mode(self):
+        return self.record_type.mode
+
+    def __setitem__(self, key, value):
+        if key in self.record_type.forbidden_keys:
+            raise KeyError(
+                f"Boozer result record {self.mode!r} cannot set forbidden key {key!r}"
+            )
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        if key in self.record_type.required_keys:
+            raise KeyError(
+                f"Boozer result record {self.mode!r} cannot delete required key {key!r}"
+            )
+        super().__delitem__(key)
+
+    def copy(self):
+        return dict(self)
+
+    def update(self, other=(), /, **kwargs):
+        for key, value in dict(other, **kwargs).items():
+            self[key] = value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    _POP_DEFAULT = object()
+
+    def pop(self, key, default=_POP_DEFAULT):
+        if key in self.record_type.required_keys:
+            raise KeyError(
+                f"Boozer result record {self.mode!r} cannot delete required key {key!r}"
+            )
+        if key in self:
+            return super().pop(key)
+        if default is self._POP_DEFAULT:
+            raise KeyError(key)
+        return default
 
 
 _BOOZER_SOLVER_RESULT_CORE_KEYS = frozenset(
@@ -282,8 +353,9 @@ _BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS = frozenset(
     }
 )
 
-_BOOZER_RESULT_SCHEMAS = {
-    "lbfgs": _BoozerResultSchema(
+_BOOZER_RESULT_RECORD_TYPES = {
+    "lbfgs": _BoozerResultRecordType(
+        mode="lbfgs",
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
         | _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS
@@ -313,7 +385,8 @@ _BOOZER_RESULT_SCHEMAS = {
             }
         ),
     ),
-    "ls_manual": _BoozerResultSchema(
+    "ls_manual": _BoozerResultRecordType(
+        mode="ls_manual",
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
         | _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS
@@ -335,7 +408,8 @@ _BOOZER_RESULT_SCHEMAS = {
             }
         ),
     ),
-    "ls_lm": _BoozerResultSchema(
+    "ls_lm": _BoozerResultRecordType(
+        mode="ls_lm",
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
         | _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS
@@ -363,7 +437,8 @@ _BOOZER_RESULT_SCHEMAS = {
     # legacy ``PLU`` triple without packed factors stay supported, so
     # ``LU_PIV`` is intentionally absent from both required and
     # forbidden sets.
-    "newton": _BoozerResultSchema(
+    "newton": _BoozerResultRecordType(
+        mode="newton",
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
         | _BOOZER_LINEARIZED_RESULT_KEYS
@@ -385,7 +460,8 @@ _BOOZER_RESULT_SCHEMAS = {
         ),
         forbidden_keys=frozenset({"plu", "mask", "lm", "info"}),
     ),
-    "exact": _BoozerResultSchema(
+    "exact": _BoozerResultRecordType(
+        mode="exact",
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
         | _BOOZER_LINEARIZED_RESULT_KEYS
@@ -408,7 +484,8 @@ _BOOZER_RESULT_SCHEMAS = {
             {"plu", "hessian", "gradient", "optimizer_method", "lm", "info"}
         ),
     ),
-    "exact_constraints": _BoozerResultSchema(
+    "exact_constraints": _BoozerResultRecordType(
+        mode="exact_constraints",
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
         | _BOOZER_EXACT_SOLVE_QUALITY_RESULT_KEYS
@@ -431,11 +508,13 @@ _BOOZER_RESULT_SCHEMAS = {
             }
         ),
     ),
-    "traceable": _BoozerResultSchema(
+    "traceable": _BoozerResultRecordType(
+        mode="traceable",
         required_keys=_BOOZER_TRACEABLE_RESULT_KEYS,
         forbidden_keys=_BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS,
     ),
-    "traceable_exact": _BoozerResultSchema(
+    "traceable_exact": _BoozerResultRecordType(
+        mode="traceable_exact",
         required_keys=_BOOZER_TRACEABLE_RESULT_KEYS
         | _BOOZER_EXACT_REPORTING_RESULT_KEYS
         | _BOOZER_EXACT_SOLVE_QUALITY_RESULT_KEYS
@@ -443,7 +522,8 @@ _BOOZER_RESULT_SCHEMAS = {
         forbidden_keys=_BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS
         | frozenset({"grad", "hessian", "optimizer_method"}),
     ),
-    "traceable_ls": _BoozerResultSchema(
+    "traceable_ls": _BoozerResultRecordType(
+        mode="traceable_ls",
         required_keys=_BOOZER_TRACEABLE_RESULT_KEYS
         | _BOOZER_HESSIAN_REPORTING_RESULT_KEYS
         | _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS
@@ -452,6 +532,64 @@ _BOOZER_RESULT_SCHEMAS = {
         | frozenset({"residual", "jacobian"}),
     ),
 }
+
+
+def _flatten_boozer_result_record(record):
+    keys = tuple(sorted(record.keys()))
+    return tuple(record[key] for key in keys), (record.mode, keys)
+
+
+def _unflatten_boozer_result_record(aux_data, children):
+    mode, keys = aux_data
+    return _BoozerResultRecord(
+        _BOOZER_RESULT_RECORD_TYPES[mode],
+        dict(zip(keys, children, strict=True)),
+    )
+
+
+jax.tree_util.register_pytree_node(
+    _BoozerResultRecord,
+    _flatten_boozer_result_record,
+    _unflatten_boozer_result_record,
+)
+
+
+def _maybe_boozer_result_record_type_for(values: Mapping[str, object]):
+    if "x" in values:
+        result_type = values.get("type")
+        if result_type == "exact":
+            record_type = _BOOZER_RESULT_RECORD_TYPES["traceable_exact"]
+        elif result_type == "ls":
+            record_type = _BOOZER_RESULT_RECORD_TYPES["traceable_ls"]
+        else:
+            record_type = _BOOZER_RESULT_RECORD_TYPES["traceable"]
+        keys = frozenset(values.keys())
+        if record_type.required_keys <= keys and not record_type.forbidden_keys & keys:
+            return record_type
+        return None
+
+    result_type = values.get("type")
+    optimizer_method = values.get("optimizer_method")
+    if result_type == "exact":
+        record_type = _BOOZER_RESULT_RECORD_TYPES["exact"]
+    elif result_type == "exact_constraints":
+        record_type = _BOOZER_RESULT_RECORD_TYPES["exact_constraints"]
+    elif result_type == "ls":
+        if "hessian" in values or "PLU" in values or "vjp" in values:
+            record_type = _BOOZER_RESULT_RECORD_TYPES["newton"]
+        elif optimizer_method == "manual":
+            record_type = _BOOZER_RESULT_RECORD_TYPES["ls_manual"]
+        elif "residual" in values and "jacobian" in values:
+            record_type = _BOOZER_RESULT_RECORD_TYPES["ls_lm"]
+        else:
+            record_type = _BOOZER_RESULT_RECORD_TYPES["lbfgs"]
+    else:
+        return None
+
+    keys = frozenset(values.keys())
+    if record_type.required_keys <= keys and not record_type.forbidden_keys & keys:
+        return record_type
+    return None
 
 
 @dataclass(frozen=True)
@@ -3299,72 +3437,75 @@ def default_materialize_dense_linearization_for_backend(optimizer_backend):
     return True
 
 
-class _BoozerSolverOptions(dict):
-    """Mutable solver options with byte-capped dense-finalization defaults."""
-
-    def __init__(
-        self,
-        values,
-        *,
-        materialize_dense_linearization_explicit=False,
-    ):
-        super().__init__(values)
-        self.materialize_dense_linearization_explicit = (
-            materialize_dense_linearization_explicit
-        )
-
-    def __setitem__(self, key, value):
-        if key == "materialize_dense_linearization":
-            self.materialize_dense_linearization_explicit = True
-        super().__setitem__(key, value)
-        if key == "optimizer_backend":
-            self._refresh_backend_dense_linearization_default(value)
-
-    def update(self, other=(), /, **kwargs):
-        for key, value in dict(other, **kwargs).items():
-            self[key] = value
-
-    def _refresh_backend_dense_linearization_default(self, optimizer_backend):
-        if self.materialize_dense_linearization_explicit:
-            return
-        if "materialize_dense_linearization" not in self:
-            return
-        super().__setitem__(
-            "materialize_dense_linearization",
-            default_materialize_dense_linearization_for_backend(optimizer_backend),
-        )
-
-
 def _default_ls_optimizer_backend() -> str:
     return get_backend_policy().default_optimizer_backend
 
 
-def _apply_inner_driver_option(normalized_options, driver_options):
-    conflicts = []
+@dataclass(frozen=True)
+class _InnerDriverOptionConflict:
+    option_name: str
+    conflicts: Callable[[Mapping[str, object], object], bool]
+
+
+def _inner_driver_optimizer_backend_conflicts(normalized_options, driver_options):
     optimizer_backend = normalized_options.get("optimizer_backend")
-    if optimizer_backend is not None:
-        effective_optimizer_backend = _optimizer_jax.resolve_optimizer_backend(
-            optimizer_backend
-        )
-        if effective_optimizer_backend != driver_options.optimizer_backend:
-            conflicts.append("optimizer_backend")
+    if optimizer_backend is None:
+        return False
+    effective_optimizer_backend = _optimizer_jax.resolve_optimizer_backend(
+        optimizer_backend
+    )
+    return effective_optimizer_backend != driver_options.optimizer_backend
+
+
+def _inner_driver_least_squares_algorithm_conflicts(normalized_options, driver_options):
     least_squares_algorithm = normalized_options.get("least_squares_algorithm")
-    if (
+    return (
         least_squares_algorithm is not None
         and least_squares_algorithm != driver_options.least_squares_algorithm
-    ):
-        conflicts.append("least_squares_algorithm")
-    if (
+    )
+
+
+def _inner_driver_limited_memory_conflicts(normalized_options, driver_options):
+    return (
         "limited_memory" in normalized_options
         and bool(normalized_options["limited_memory"]) != driver_options.limited_memory
-    ):
-        conflicts.append("limited_memory")
-    if (
-        normalized_options.get("force_ondevice_limited_memory", False)
+    )
+
+
+def _inner_driver_forced_limited_memory_conflicts(normalized_options, driver_options):
+    return (
+        bool(normalized_options.get("force_ondevice_limited_memory", False))
         and driver_options.optimizer_backend == "ondevice"
         and not driver_options.limited_memory
-    ):
-        conflicts.append("force_ondevice_limited_memory")
+    )
+
+
+_INNER_DRIVER_OPTION_CONFLICTS = (
+    _InnerDriverOptionConflict(
+        "optimizer_backend",
+        _inner_driver_optimizer_backend_conflicts,
+    ),
+    _InnerDriverOptionConflict(
+        "least_squares_algorithm",
+        _inner_driver_least_squares_algorithm_conflicts,
+    ),
+    _InnerDriverOptionConflict(
+        "limited_memory",
+        _inner_driver_limited_memory_conflicts,
+    ),
+    _InnerDriverOptionConflict(
+        "force_ondevice_limited_memory",
+        _inner_driver_forced_limited_memory_conflicts,
+    ),
+)
+
+
+def _apply_inner_driver_option(normalized_options, driver_options):
+    conflicts = [
+        rule.option_name
+        for rule in _INNER_DRIVER_OPTION_CONFLICTS
+        if rule.conflicts(normalized_options, driver_options)
+    ]
     if conflicts:
         option_names = ", ".join(conflicts)
         raise ValueError(
@@ -3376,6 +3517,101 @@ def _apply_inner_driver_option(normalized_options, driver_options):
     normalized_options["least_squares_algorithm"] = (
         driver_options.least_squares_algorithm
     )
+
+
+@dataclass(frozen=True)
+class _SolverOptionIncompatibility:
+    option_names: Callable[[Mapping[str, object]], tuple[str, ...]]
+    message: Callable[[tuple[str, ...]], str]
+
+
+def _present_option_names(options, option_names):
+    return tuple(sorted(set(options) & option_names))
+
+
+def _private_optimizer_option_names(options):
+    if options.get("optimizer_backend") != "scipy":
+        return ()
+    return _present_option_names(options, _PRIVATE_OPTIMIZER_OPTIONS)
+
+
+def _is_optimistix_lm_lane(options):
+    return (
+        options.get("optimizer_backend") == "ondevice"
+        and options.get("least_squares_algorithm") == "optimistix-lm"
+    )
+
+
+def _optimistix_callback_option_names(options):
+    if not _is_optimistix_lm_lane(options):
+        return ()
+    return _present_option_names(options, _CALLBACK_OPTIONS)
+
+
+def _optimistix_tuning_option_names(options):
+    if not _is_optimistix_lm_lane(options):
+        return ()
+    return _optimizer_jax._optimistix_lm_nondefault_tuning_options(
+        options.get(
+            "ftol",
+            _optimizer_jax._OPTIMISTIX_LM_DEFAULT_FTOL,
+        ),
+        options.get(
+            "xtol",
+            _optimizer_jax._OPTIMISTIX_LM_DEFAULT_XTOL,
+        ),
+        options.get("gtol"),
+    )
+
+
+def _private_optimizer_options_message(option_names):
+    keys_str = ", ".join(repr(k) for k in option_names)
+    return (
+        f"Private optimizer option(s) {keys_str} require optimizer_backend='ondevice'."
+    )
+
+
+def _optimistix_callbacks_message(option_names):
+    keys_str = ", ".join(repr(k) for k in option_names)
+    return (
+        f"BoozerSurfaceJAX option(s) {keys_str} are incompatible "
+        "with least_squares_algorithm='optimistix-lm'. Use "
+        "least_squares_algorithm='lm' for callback-instrumented "
+        "on-device LM runs."
+    )
+
+
+def _optimistix_tuning_message(option_names):
+    keys_str = ", ".join(repr(k) for k in option_names)
+    return (
+        f"BoozerSurfaceJAX option(s) {keys_str} are incompatible "
+        "with least_squares_algorithm='optimistix-lm'. "
+        "optimistix-lm uses the solver 'tol' as the single "
+        "Optimistix/Lineax convergence tolerance."
+    )
+
+
+_LS_SOLVER_OPTION_INCOMPATIBILITIES = (
+    _SolverOptionIncompatibility(
+        _private_optimizer_option_names,
+        _private_optimizer_options_message,
+    ),
+    _SolverOptionIncompatibility(
+        _optimistix_callback_option_names,
+        _optimistix_callbacks_message,
+    ),
+    _SolverOptionIncompatibility(
+        _optimistix_tuning_option_names,
+        _optimistix_tuning_message,
+    ),
+)
+
+
+def _reject_solver_option_incompatibilities(options):
+    for rule in _LS_SOLVER_OPTION_INCOMPATIBILITIES:
+        option_names = rule.option_names(options)
+        if option_names:
+            raise ValueError(rule.message(option_names))
 
 
 def _normalize_solver_options(raw_options, boozer_type):
@@ -3438,15 +3674,6 @@ def _normalize_solver_options(raw_options, boozer_type):
         )
 
     if boozer_type == "ls":
-        private_keys = sorted(set(normalized_options) & _PRIVATE_OPTIMIZER_OPTIONS)
-        if private_keys and effective_optimizer_backend == "scipy":
-            keys_str = ", ".join(repr(k) for k in private_keys)
-            raise ValueError(
-                f"Private optimizer option(s) {keys_str} require "
-                "optimizer_backend='ondevice'."
-            )
-
-    if boozer_type == "ls":
         normalized_options["optimizer_backend"] = effective_optimizer_backend
         if "least_squares_algorithm" not in normalized_options:
             normalized_options["least_squares_algorithm"] = (
@@ -3460,39 +3687,7 @@ def _normalize_solver_options(raw_options, boozer_type):
                     normalized_options["optimizer_backend"]
                 )
             )
-        if (
-            normalized_options["optimizer_backend"] == "ondevice"
-            and normalized_options["least_squares_algorithm"] == "optimistix-lm"
-        ):
-            callback_keys = sorted(set(normalized_options) & _CALLBACK_OPTIONS)
-            if callback_keys:
-                keys_str = ", ".join(repr(k) for k in callback_keys)
-                raise ValueError(
-                    f"BoozerSurfaceJAX option(s) {keys_str} are incompatible "
-                    "with least_squares_algorithm='optimistix-lm'. Use "
-                    "least_squares_algorithm='lm' for callback-instrumented "
-                    "on-device LM runs."
-                )
-            # Missing keys use lane defaults so explicit default values pass.
-            tuning_keys = _optimizer_jax._optimistix_lm_nondefault_tuning_options(
-                normalized_options.get(
-                    "ftol",
-                    _optimizer_jax._OPTIMISTIX_LM_DEFAULT_FTOL,
-                ),
-                normalized_options.get(
-                    "xtol",
-                    _optimizer_jax._OPTIMISTIX_LM_DEFAULT_XTOL,
-                ),
-                normalized_options.get("gtol"),
-            )
-            if tuning_keys:
-                keys_str = ", ".join(repr(k) for k in tuning_keys)
-                raise ValueError(
-                    f"BoozerSurfaceJAX option(s) {keys_str} are incompatible "
-                    "with least_squares_algorithm='optimistix-lm'. "
-                    "optimistix-lm uses the solver 'tol' as the single "
-                    "Optimistix/Lineax convergence tolerance."
-                )
+        _reject_solver_option_incompatibilities(normalized_options)
     if boozer_type == "exact":
         normalized_options.pop("optimizer_backend", None)
     normalized_options.setdefault("linearization_residency", linearization_residency)
@@ -3546,6 +3741,26 @@ class BoozerSurfaceJAX(Optimizable):
 
     supports_explicit_surface_warm_start = True
 
+    @property
+    def res(self):
+        return self._res
+
+    @res.setter
+    def res(self, value):
+        if value is None or isinstance(value, _BoozerResultRecord):
+            self._res = value
+            return
+        record_type = _maybe_boozer_result_record_type_for(value)
+        if record_type is None:
+            self._res = dict(value)
+            return
+        self._res = record_type.build(value)
+
+    def _store_boozer_result(self, record_mode, values):
+        record = _BOOZER_RESULT_RECORD_TYPES[record_mode].build(values)
+        self._res = record
+        return record
+
     def __init__(
         self,
         biotsavart,
@@ -3591,21 +3806,12 @@ class BoozerSurfaceJAX(Optimizable):
             )
 
         user_options = dict(options or {})
-        materialize_dense_linearization_explicit = (
-            self.boozer_type == "ls"
-            and user_options.get("materialize_dense_linearization") is not None
-        )
         raw_options = _normalize_solver_options(
             user_options,
             self.boozer_type,
         )
         defaults = _solver_option_defaults(self.boozer_type, user_options)
-        self.options = _BoozerSolverOptions(
-            {**defaults, **raw_options},
-            materialize_dense_linearization_explicit=(
-                materialize_dense_linearization_explicit
-            ),
-        )
+        self.options = {**defaults, **raw_options}
         if self.boozer_type == "ls":
             if self.options["optimizer_backend"] not in VALID_OPTIMIZER_BACKENDS:
                 raise ValueError(
@@ -4022,18 +4228,16 @@ class BoozerSurfaceJAX(Optimizable):
             operator = _optimizer_jax._jacobian_linear_operator(residual_fn, x)
 
             def solve_jacobian_system_with_status(rhs, *, transpose):
-                return _optimizer_jax._solve_jacobian_system_with_status(
-                    residual_fn,
-                    x,
+                return _optimizer_jax._solve_jacobian_operator_with_status(
+                    operator,
                     rhs,
                     transpose=transpose,
                     tol=tol_host,
                 )
 
             def solve_jacobian_system(rhs, *, transpose):
-                return _optimizer_jax._solve_jacobian_system(
-                    residual_fn,
-                    x,
+                return _optimizer_jax._solve_jacobian_operator(
+                    operator,
                     rhs,
                     transpose=transpose,
                     tol=tol_host,
@@ -5325,19 +5529,20 @@ class BoozerSurfaceJAX(Optimizable):
                 finite=finite,
             )
             lu_piv = (lu, piv)
-            P_shared, L_shared, U_shared = _optimizer_jax._plu_from_lu_piv(lu_piv)
-            P_dummy, L_dummy, U_dummy = _traceable_plu_or_dummy(
-                hessian,
-                finite=finite,
+            nan_factor = jnp.full_like(hessian, jnp.nan)
+
+            def shared_plu(_):
+                return _optimizer_jax._plu_from_lu_piv(lu_piv)
+
+            def dummy_plu(_):
+                return nan_factor, nan_factor, nan_factor
+
+            plu = jax.lax.cond(
+                jnp.asarray(finite, dtype=jnp.bool_),
+                shared_plu,
+                dummy_plu,
+                None,
             )
-            # Use the shared-factor ``(P, L, U)`` on success; on failure
-            # substitute the all-NaN dummy triple so failed-solve
-            # consumers cannot treat a partially-finite ``P = I`` as a
-            # valid factorization.
-            P = jnp.where(finite, P_shared, P_dummy)
-            L = jnp.where(finite, L_shared, L_dummy)
-            U = jnp.where(finite, U_shared, U_dummy)
-            plu = (P, L, U)
         else:
             lu_piv = None
             plu = None
@@ -5720,9 +5925,9 @@ class BoozerSurfaceJAX(Optimizable):
             "ls_condition_estimate": None,
             "pre_newton": pre_newton,
         }
-        self.res = res
+        res_record = self._store_boozer_result("newton", res)
         self.need_to_run_code = False
-        return res
+        return res_record
 
     def minimize_boozer_penalty_constraints_LBFGS(
         self,
@@ -5854,7 +6059,7 @@ class BoozerSurfaceJAX(Optimizable):
             "type": "ls",
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
         }
-        self.res = resdict
+        res_record = self._store_boozer_result("lbfgs", resdict)
         self.need_to_run_code = False
 
         if verbose:
@@ -5865,7 +6070,7 @@ class BoozerSurfaceJAX(Optimizable):
                 f"{_host_inf_norm(resdict['gradient']):.3e}",
                 flush=True,
             )
-        return resdict
+        return res_record
 
     def minimize_boozer_penalty_constraints_newton(
         self,
@@ -5975,9 +6180,9 @@ class BoozerSurfaceJAX(Optimizable):
                 "message": result.get("message"),
                 **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             }
-            self.res = res
+            res_record = self._store_boozer_result("newton", res)
             self.need_to_run_code = False
-            return res
+            return res_record
 
         self._set_surface_dofs(sdofs_final)
         H = result["hessian"]
@@ -6127,18 +6332,18 @@ class BoozerSurfaceJAX(Optimizable):
             "ls_factorization_backend": ls_factorization_backend,
             "ls_condition_estimate": ls_condition_estimate,
         }
-        self.res = res
+        res_record = self._store_boozer_result("newton", res)
         self.need_to_run_code = False
 
         if verbose:
-            grad_norm = float(np.linalg.norm(_host_numpy(res["jacobian"])))
+            grad_norm = float(np.linalg.norm(_host_numpy(res_record["jacobian"])))
             print(
-                f"NEWTON solve - success={res['success']}  "
-                f"iter={res['iter']}, iota={iota_out:.16f}, "
+                f"NEWTON solve - success={res_record['success']}  "
+                f"iter={res_record['iter']}, iota={iota_out:.16f}, "
                 f"||grad||={grad_norm:.3e}",
                 flush=True,
             )
-        return res
+        return res_record
 
     def minimize_boozer_penalty_constraints_ls(
         self,
@@ -6203,9 +6408,9 @@ class BoozerSurfaceJAX(Optimizable):
                 "optimizer_method": "manual",
                 **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             }
-            self.res = resdict
+            res_record = self._store_boozer_result("ls_manual", resdict)
             self.need_to_run_code = False
-            return resdict
+            return res_record
 
         if method != "lm":
             raise ValueError(
@@ -6270,9 +6475,9 @@ class BoozerSurfaceJAX(Optimizable):
             "optimizer_method": optimizer_method,
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
         }
-        self.res = resdict
+        res_record = self._store_boozer_result("ls_lm", resdict)
         self.need_to_run_code = False
-        return resdict
+        return res_record
 
     def _make_exact_residual_with(
         self,
@@ -6489,11 +6694,11 @@ class BoozerSurfaceJAX(Optimizable):
                 **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
                 "exact_factorization_backend": EXACT_FACTORIZATION_BACKEND,
             }
-            self.res = res
+            res_record = self._store_boozer_result("exact", res)
             self.need_to_run_code = False
             if verbose and materialization_message is not None:
                 print(materialization_message, flush=True)
-            return res
+            return res_record
 
         self._set_surface_dofs(sdofs_final)
         J = jacobian
@@ -6601,20 +6806,20 @@ class BoozerSurfaceJAX(Optimizable):
                 "exact_refinement_correction_rel"
             ),
         }
-        self.res = res
+        res_record = self._store_boozer_result("exact", res)
         self.need_to_run_code = False
 
         if verbose:
             if materialization_message is not None:
                 print(materialization_message, flush=True)
-            res_norm = _host_inf_norm(res["residual"])
+            res_norm = _host_inf_norm(res_record["residual"])
             print(
-                f"NEWTON solve - success={res['success']}  "
-                f"iter={res['iter']}, iota={iota_final:.16f}, "
+                f"NEWTON solve - success={res_record['success']}  "
+                f"iter={res_record['iter']}, iota={iota_final:.16f}, "
                 f"||residual||_inf={res_norm:.3e}",
                 flush=True,
             )
-        return res
+        return res_record
 
     def run_code_functional(self, coil_arrays, sdofs, iota, G):
         """Compatibility shim returning the runtime-native traceable schema.
@@ -6724,9 +6929,9 @@ class BoozerSurfaceJAX(Optimizable):
             "type": "exact_constraints",
             **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
         }
-        self.res = res
+        res_record = self._store_boozer_result("exact_constraints", res)
         self.need_to_run_code = False
-        return res
+        return res_record
 
     def run_code(self, iota, G=None, *, sdofs=None):
         """Run the Boozer surface solver (LS or exact depending on config).

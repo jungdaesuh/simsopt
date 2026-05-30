@@ -33,6 +33,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ._device_scalars import two_pi as _two_pi
 from ._math_utils import as_jax_float64 as _as_float64_array
 from .specs import SurfaceHennebergSpec
 from .surface_integrals import surface_area, surface_volume
@@ -41,11 +42,6 @@ from .surface_integrals import surface_area, surface_volume
 # ---------------------------------------------------------------------------
 # Static index helpers
 # ---------------------------------------------------------------------------
-
-
-def _two_pi_like(reference: jax.Array) -> jax.Array:
-    """Return ``2π`` as a device-resident float64 scalar of ``reference``'s dtype."""
-    return jnp.asarray(2.0 * np.pi, dtype=reference.dtype)
 
 
 def _alpha_scalar(spec: SurfaceHennebergSpec, reference: jax.Array) -> jax.Array:
@@ -114,7 +110,7 @@ def _phi_theta_radian_grid(
     output shape is ``(nphi, ntheta)`` directly without an explicit
     transpose.
     """
-    two_pi = _two_pi_like(spec.quadpoints_phi)
+    two_pi = _two_pi(spec.quadpoints_phi)
     phi_1d = spec.quadpoints_phi * two_pi
     theta_1d = spec.quadpoints_theta * two_pi
     phi_2d, theta_2d = jnp.meshgrid(phi_1d, theta_1d, indexing="ij")
@@ -254,7 +250,7 @@ def surface_henneberg_gammadash1_from_spec(spec: SurfaceHennebergSpec) -> jax.Ar
     rho_data = _rho_and_partials(spec, phi_2d, theta_2d)
 
     alpha = _alpha_scalar(spec, phi_2d)
-    two_pi = _two_pi_like(phi_2d)
+    two_pi = _two_pi(phi_2d)
 
     sin_aphi = jnp.sin(alpha * phi_2d)
     cos_aphi = jnp.cos(alpha * phi_2d)
@@ -319,7 +315,7 @@ def surface_henneberg_gammadash2_from_spec(spec: SurfaceHennebergSpec) -> jax.Ar
     rho_data = _rho_and_partials(spec, phi_2d, theta_2d)
 
     alpha = _alpha_scalar(spec, phi_2d)
-    two_pi = _two_pi_like(phi_2d)
+    two_pi = _two_pi(phi_2d)
 
     sin_aphi = jnp.sin(alpha * phi_2d)
     cos_aphi = jnp.cos(alpha * phi_2d)

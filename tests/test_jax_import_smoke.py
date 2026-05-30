@@ -1091,9 +1091,15 @@ def test_single_stage_surface_reprojection_probe_emits_structured_cpu_result(tmp
 
     assert rc == 0, f"single-stage reprojection probe failed:\n{err}"
     payload = json.loads(output_json.read_text(encoding="utf-8"))
-    assert payload["passed"] is True
     assert payload["failure_stage"] is None
-    assert [stage["name"] for stage in payload["stages"]] == [
+    assert payload["source_surface"] == {
+        "nphi": 31,
+        "ntheta": 16,
+        "target_mpol": 2,
+        "target_ntor": 2,
+    }
+    stages = payload["stages"]
+    assert [stage["name"] for stage in stages] == [
         "load_source_surface",
         "device_put_source_dofs",
         "surface_rz_fourier_spec_from_dofs",
@@ -1101,6 +1107,8 @@ def test_single_stage_surface_reprojection_probe_emits_structured_cpu_result(tmp
         "surface_rz_fourier_gamma_from_dofs",
         "project_surface_dofs_to_resolution",
     ]
+    assert [stage["status"] for stage in stages] == ["passed"] * len(stages)
+    assert all(stage["elapsed_s"] >= 0.0 for stage in stages)
 
 
 def test_transfer_guard_disallow_allows_coil_symmetry_spec_identity_default():

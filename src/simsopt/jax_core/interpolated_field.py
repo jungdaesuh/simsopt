@@ -602,6 +602,8 @@ def interpolated_field_state_B(
 ) -> jax.Array:
     """Evaluate Cartesian ``B`` from an explicit device-state pytree."""
 
+    # The state form is used by tracing drivers inside vmapped scan bodies;
+    # the one-row batch shape is fixed at trace time.
     points = jnp.reshape(point, (1, 3))
     return _evaluate_cart_field_zero(
         points,
@@ -639,6 +641,8 @@ def interpolated_field_state_B_GradAbsB(
 ) -> tuple[jax.Array, jax.Array]:
     """Evaluate Cartesian ``B`` and ``grad|B|`` from explicit device state."""
 
+    # The state form is used by tracing drivers inside vmapped scan bodies;
+    # the one-row batch shape is fixed at trace time.
     points = jnp.reshape(point, (1, 3))
     B = _evaluate_cart_field_zero(
         points,

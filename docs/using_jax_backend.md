@@ -185,11 +185,11 @@ Single-stage traceable target-lane contract:
 
 The current CPU reference lane remains the oracle for broad workflow trust.
 Public acceptance still centers on the `native_cpu` / `scipy` oracle lane.
-When `backend="jax"` is active, the implicit optimizer lane is
-platform-sensitive: JAX CPU defaults to `scipy-jax-fullgraph` to avoid compiling
-the full optimizer loop into one large XLA graph, while CUDA/GPU defaults to
-`ondevice`. Explicit CPU `ondevice` remains available for target-lane stress
-tests, but it is memory-intensive and emits a warning.
+When `backend="jax"` is active, the implicit outer optimizer lane is
+`scipy-jax`: SciPy keeps host control of L-BFGS-B while the objective and inner
+Boozer solve run through the JAX target-lane value/grad path. Explicit
+`ondevice` and `scipy-jax-fullgraph` remain available for target-lane stress
+tests, but CPU `ondevice` is memory-intensive and emits a warning.
 
 Exact Boozer note:
 

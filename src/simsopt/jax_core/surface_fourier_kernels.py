@@ -1,6 +1,9 @@
 """
 Pure JAX evaluation of SurfaceXYZFourier and SurfaceXYZTensorFourier geometry.
 
+The spec-level SurfaceXYZFourier/SurfaceXYZTensorFourier API facade lives in
+:mod:`simsopt.jax_core.surface_fourier`; this module owns the kernel bodies.
+
 Replaces the C++ ``sopp.SurfaceXYZTensorFourier`` evaluation methods
 (``gamma``, ``gammadash1``, ``gammadash2``, ``normal``,
 ``dgamma_by_dcoeff``) with JIT-compilable, autodiff-compatible functions.
@@ -25,6 +28,7 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
+from simsopt.jax_core._device_scalars import two_pi as _device_two_pi
 from simsopt.jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
@@ -121,14 +125,13 @@ __all__ = [
 ]
 
 
-_TWO_PI_HOST = np.float64(2.0 * np.pi)
 _ONE_HOST = np.float64(1.0)
 _HALF_HOST = np.float64(0.5)
 _BASIS_SELECTORS3_HOST = np.eye(3, dtype=np.float64)
 
 
 def _two_pi(reference):
-    return _as_runtime_float64(_TWO_PI_HOST, reference=reference)
+    return _device_two_pi(reference)
 
 
 def _one(reference):

@@ -89,6 +89,7 @@ STAGE2_ENDPOINT_FINAL_QUALITY_GATE_REPORT_ONLY = "report-only"
 
 _CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
 _CPU_REFERENCE_ENDPOINT_LANE = ("cpu", "auto", "cpu-reference")
+DEFAULT_OPTIMIZER_BACKEND = "scipy-jax"
 TARGET_OPTIMIZER_BACKEND = "ondevice"
 TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS = (
     "ondevice",
@@ -318,7 +319,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--optimizer-backend",
         choices=TARGET_OPTIMIZER_BACKENDS,
-        default=TARGET_OPTIMIZER_BACKEND,
+        default=DEFAULT_OPTIMIZER_BACKEND,
         help="Stage 2 optimizer backend for the JAX target lane.",
     )
     parser.add_argument(

@@ -7,16 +7,13 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from ._device_scalars import two_pi as _two_pi
 from ._math_utils import as_runtime_float64 as _as_runtime_float64_ref
-
-
-def _two_pi_like(reference):
-    return _as_runtime_float64_ref(2.0 * np.pi, reference=reference)
 
 
 def curverzfourier_pure(dofs, quadpoints, order, nfp, stellsym):
     quadpoints = _as_runtime_float64_ref(quadpoints, reference=dofs)
-    phi = _two_pi_like(quadpoints) * quadpoints
+    phi = _two_pi(quadpoints) * quadpoints
     cosphi = jnp.cos(phi)
     sinphi = jnp.sin(phi)
 

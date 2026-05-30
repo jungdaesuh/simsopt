@@ -1,7 +1,9 @@
 # Beta Quickstart — Banana Coil Optimization on JAX
 
-Minimal recipes for running banana coil optimization with the JAX backend
-(on-device L-BFGS-B). Pick a device, copy the matching block, run.
+Minimal recipes for running banana coil optimization with the JAX backend.
+Bare `--backend jax` uses the regular `scipy-jax` optimizer lane by default.
+Add `--optimizer-backend ondevice` only when you explicitly want the compiled
+on-device L-BFGS-B stress lane. Pick a device, copy the matching block, run.
 
 For the full workflow (Stage 2 seed handoff, runtime specs, parity gates,
 production artifacts), see [`README.md`](./README.md) in this folder.
@@ -10,10 +12,11 @@ production artifacts), see [`README.md`](./README.md) in this folder.
 
 ## What gets run
 
-Both scripts default to the **JAX on-device L-BFGS-B** optimizer
-(`lbfgs-ondevice`) when you pass `--backend jax` — on every device.
-Everything compiles to XLA and executes on whatever device
-`SIMSOPT_BACKEND_MODE` selects: CPU, CUDA, or Apple Silicon (MPS).
+Both scripts default to the regular **SciPy-controlled JAX objective** optimizer
+(`scipy-jax`, method `lbfgs-scipy-jax`) when you pass `--backend jax`.
+This keeps the outer optimizer on the host while evaluating the objective and
+derivatives through JAX/XLA on the selected backend. Explicit `--optimizer-backend
+ondevice` remains available for the compiled `lbfgs-ondevice` stress lane.
 
 | Script | What it optimizes |
 |---|---|
@@ -162,9 +165,9 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
 
 | Device | Dtype | Optimizer | Notes |
 |---|---|---|---|
-| CUDA (`jax_gpu_fast`) | float64 | on-device L-BFGS-B (`lbfgs-ondevice`) | Production-grade speed lane. Default sharding=`hybrid` (multi-device-capable). The companion `jax_gpu_parity` mode pins sharding=`none` (single-device) until a multi-GPU parity/speedup proof is recorded. |
-| CPU (`jax_cpu_fast`) | float64 | on-device L-BFGS-B (`lbfgs-ondevice`) | Same JAX SETULB on XLA-CPU. Slower than CUDA, no infra friction. |
-| MPS (`jax_mps_smoke`) | float32 | on-device L-BFGS-B (`lbfgs-ondevice`) | Apple Silicon GPU. Experimental — float32 only, runtime relies on the third-party `jax-mps` PJRT plugin. Treat results as a smoke run, not a production claim. |
+| CUDA (`jax_gpu_fast`) | float64 | default `scipy-jax`; explicit `ondevice` = `lbfgs-ondevice` | Production speed lane for objective/gradient evaluation. Default sharding=`hybrid` (multi-device-capable). The companion `jax_gpu_parity` mode pins sharding=`none` (single-device) until a multi-GPU parity/speedup proof is recorded. |
+| CPU (`jax_cpu_fast`) | float64 | default `scipy-jax`; explicit `ondevice` = `lbfgs-ondevice` | Host SciPy control with XLA-CPU objective evaluation by default. The explicit on-device lane is available but compile-heavy on CPU. |
+| MPS (`jax_mps_smoke`) | float32 | default `scipy-jax`; explicit `ondevice` = `lbfgs-ondevice` | Apple Silicon GPU. Experimental — float32 only, runtime relies on the third-party `jax-mps` PJRT plugin. Treat results as a smoke run, not a production claim. |
 
 ---
 
@@ -211,8 +214,9 @@ parity-mode invocation.
   `tillahoffmann/jax-mps` PJRT plugin, which replaced the unmaintained
   Apple `jax-metal` plugin (see `runtime.py:43-56`). The mode policy carries
   `default_optimizer_backend="scipy"` to signal the lane is not validated for
-  production accuracy; the example scripts still default to `lbfgs-ondevice`
-  for any `--backend jax`. Use MPS for laptop dev only.
+  production accuracy; the example scripts now default to `scipy-jax` for
+  `--backend jax`, and explicit `ondevice` remains a stress-test lane. Use MPS
+  for laptop dev only.
 
 ---
 

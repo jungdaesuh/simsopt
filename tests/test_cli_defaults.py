@@ -33,12 +33,12 @@ def isolate_backend_runtime(monkeypatch):
 def test_resolve_stage2_default_optimizer_backend(mock_get_config):
     mock_get_config.return_value = backend_config("cpu")
     invalidate_backend_cache()
-    assert resolve_stage2_default_optimizer_backend("jax") == "scipy-jax-fullgraph"
+    assert resolve_stage2_default_optimizer_backend("jax") == "scipy-jax"
     assert resolve_stage2_default_optimizer_backend("cpu") == "scipy"
 
     mock_get_config.return_value = backend_config("cuda")
     invalidate_backend_cache()
-    assert resolve_stage2_default_optimizer_backend("jax") == "ondevice"
+    assert resolve_stage2_default_optimizer_backend("jax") == "scipy-jax"
     assert resolve_stage2_default_optimizer_backend("cpu") == "scipy"
 
     assert resolve_stage2_default_optimizer_backend("jax", "scipy-jax") == "scipy-jax"
@@ -48,7 +48,7 @@ def test_resolve_stage2_default_optimizer_backend(mock_get_config):
 def test_resolve_single_stage_default_optimizer_backend(mock_get_config):
     mock_get_config.return_value = backend_config("cpu")
     invalidate_backend_cache()
-    assert resolve_single_stage_default_optimizer_backend("jax") == "scipy-jax-fullgraph"
+    assert resolve_single_stage_default_optimizer_backend("jax") == "scipy-jax"
     assert resolve_single_stage_default_optimizer_backend("cpu") == "scipy"
 
     mock_get_config.return_value = backend_config("cuda")
@@ -56,7 +56,10 @@ def test_resolve_single_stage_default_optimizer_backend(mock_get_config):
     assert resolve_single_stage_default_optimizer_backend("jax") == "scipy-jax"
     assert resolve_single_stage_default_optimizer_backend("cpu") == "scipy"
 
-    assert resolve_single_stage_default_optimizer_backend("jax", "scipy-jax") == "scipy-jax"
+    assert (
+        resolve_single_stage_default_optimizer_backend("jax", "scipy-jax")
+        == "scipy-jax"
+    )
 
 
 @patch("simsopt.backend.runtime.get_backend_config")
@@ -66,8 +69,10 @@ def test_stage2_cpu_ondevice_warning(mock_get_config, caplog):
 
     test_args = [
         "banana_coil_solver.py",
-        "--backend", "jax",
-        "--optimizer-backend", "ondevice",
+        "--backend",
+        "jax",
+        "--optimizer-backend",
+        "ondevice",
     ]
 
     caplog.clear()
@@ -75,7 +80,20 @@ def test_stage2_cpu_ondevice_warning(mock_get_config, caplog):
         with caplog.at_level(logging.WARNING):
             stage2_parse_args()
 
-    assert any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
+    warning_messages = [record.message for record in caplog.records]
+    assert any(
+        "WARNING: Running JAX 'ondevice' optimizer on CPU" in message
+        for message in warning_messages
+    )
+    assert any(
+        "Consider using --optimizer-backend scipy-jax to reduce memory usage."
+        in message
+        for message in warning_messages
+    )
+    assert not any(
+        "scipy-jax-fullgraph to reduce memory usage" in message
+        for message in warning_messages
+    )
 
 
 @patch("simsopt.backend.runtime.get_backend_config")
@@ -85,8 +103,10 @@ def test_stage2_gpu_ondevice_no_warning(mock_get_config, caplog):
 
     test_args = [
         "banana_coil_solver.py",
-        "--backend", "jax",
-        "--optimizer-backend", "ondevice",
+        "--backend",
+        "jax",
+        "--optimizer-backend",
+        "ondevice",
     ]
 
     caplog.clear()
@@ -94,11 +114,14 @@ def test_stage2_gpu_ondevice_no_warning(mock_get_config, caplog):
         with caplog.at_level(logging.WARNING):
             stage2_parse_args()
 
-    assert not any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
+    assert not any(
+        "WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message
+        for record in caplog.records
+    )
 
 
 @patch("simsopt.backend.runtime.get_backend_config")
-def test_stage2_parse_args_uses_platform_default(mock_get_config, caplog):
+def test_stage2_parse_args_uses_jax_default(mock_get_config, caplog):
     test_args = ["banana_coil_solver.py", "--backend", "jax"]
 
     mock_get_config.return_value = backend_config("cpu")
@@ -107,8 +130,11 @@ def test_stage2_parse_args_uses_platform_default(mock_get_config, caplog):
     with patch.object(sys, "argv", test_args):
         with caplog.at_level(logging.WARNING):
             cpu_args = stage2_parse_args()
-    assert cpu_args.optimizer_backend == "scipy-jax-fullgraph"
-    assert not any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
+    assert cpu_args.optimizer_backend == "scipy-jax"
+    assert not any(
+        "WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message
+        for record in caplog.records
+    )
 
     mock_get_config.return_value = backend_config("cuda")
     invalidate_backend_cache()
@@ -116,8 +142,11 @@ def test_stage2_parse_args_uses_platform_default(mock_get_config, caplog):
     with patch.object(sys, "argv", test_args):
         with caplog.at_level(logging.WARNING):
             gpu_args = stage2_parse_args()
-    assert gpu_args.optimizer_backend == "ondevice"
-    assert not any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
+    assert gpu_args.optimizer_backend == "scipy-jax"
+    assert not any(
+        "WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message
+        for record in caplog.records
+    )
 
 
 @patch("simsopt.backend.runtime.get_backend_config")
@@ -127,8 +156,10 @@ def test_single_stage_cpu_ondevice_warning(mock_get_config, caplog):
 
     test_args = [
         "single_stage_banana_example.py",
-        "--backend", "jax",
-        "--optimizer-backend", "ondevice",
+        "--backend",
+        "jax",
+        "--optimizer-backend",
+        "ondevice",
     ]
 
     caplog.clear()
@@ -136,7 +167,20 @@ def test_single_stage_cpu_ondevice_warning(mock_get_config, caplog):
         with caplog.at_level(logging.WARNING):
             single_stage_parse_args()
 
-    assert any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
+    warning_messages = [record.message for record in caplog.records]
+    assert any(
+        "WARNING: Running JAX 'ondevice' optimizer on CPU" in message
+        for message in warning_messages
+    )
+    assert any(
+        "Consider using --optimizer-backend scipy-jax to reduce memory usage."
+        in message
+        for message in warning_messages
+    )
+    assert not any(
+        "scipy-jax-fullgraph to reduce memory usage" in message
+        for message in warning_messages
+    )
 
 
 @patch("simsopt.backend.runtime.get_backend_config")
@@ -146,8 +190,10 @@ def test_single_stage_gpu_ondevice_no_warning(mock_get_config, caplog):
 
     test_args = [
         "single_stage_banana_example.py",
-        "--backend", "jax",
-        "--optimizer-backend", "ondevice",
+        "--backend",
+        "jax",
+        "--optimizer-backend",
+        "ondevice",
     ]
 
     caplog.clear()
@@ -155,11 +201,14 @@ def test_single_stage_gpu_ondevice_no_warning(mock_get_config, caplog):
         with caplog.at_level(logging.WARNING):
             single_stage_parse_args()
 
-    assert not any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
+    assert not any(
+        "WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message
+        for record in caplog.records
+    )
 
 
 @patch("simsopt.backend.runtime.get_backend_config")
-def test_single_stage_parse_args_uses_platform_default(mock_get_config, caplog):
+def test_single_stage_parse_args_uses_jax_default(mock_get_config, caplog):
     test_args = ["single_stage_banana_example.py", "--backend", "jax"]
 
     mock_get_config.return_value = backend_config("cpu")
@@ -168,8 +217,11 @@ def test_single_stage_parse_args_uses_platform_default(mock_get_config, caplog):
     with patch.object(sys, "argv", test_args):
         with caplog.at_level(logging.WARNING):
             cpu_args = single_stage_parse_args()
-    assert cpu_args.optimizer_backend == "scipy-jax-fullgraph"
-    assert not any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
+    assert cpu_args.optimizer_backend == "scipy-jax"
+    assert not any(
+        "WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message
+        for record in caplog.records
+    )
 
     mock_get_config.return_value = backend_config("cuda")
     invalidate_backend_cache()
@@ -178,4 +230,7 @@ def test_single_stage_parse_args_uses_platform_default(mock_get_config, caplog):
         with caplog.at_level(logging.WARNING):
             gpu_args = single_stage_parse_args()
     assert gpu_args.optimizer_backend == "scipy-jax"
-    assert not any("WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message for record in caplog.records)
+    assert not any(
+        "WARNING: Running JAX 'ondevice' optimizer on CPU" in record.message
+        for record in caplog.records
+    )

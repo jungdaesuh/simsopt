@@ -7,6 +7,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from ._device_scalars import two_pi as _two_pi
 from ._math_utils import as_runtime_float64 as _as_runtime_float64_ref
 
 
@@ -21,7 +22,7 @@ def curve_helical_pure(dofs, quadpoints, order, m, ell, R0, r):
             jax.lax.slice_in_dim(dofs, order + 1, dofs.shape[0], axis=0),
         )
     )
-    two_pi = _as_runtime_float64_ref(2.0 * np.pi, reference=quadpoints)
+    two_pi = _two_pi(quadpoints)
     ell_scale = _as_runtime_float64_ref(float(ell), reference=quadpoints)
     m_scale = _as_runtime_float64_ref(float(m), reference=quadpoints)
     phi = quadpoints * two_pi * ell_scale

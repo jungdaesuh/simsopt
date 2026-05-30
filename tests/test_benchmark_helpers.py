@@ -661,10 +661,7 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     assert args.ntheta == DEFAULT_SMOKE_NTHETA
     assert args.mpol == DEFAULT_SMOKE_MPOL
     assert args.ntor == DEFAULT_SMOKE_NTOR
-    assert (
-        args.optimizer_backend
-        == single_stage_init_parity_module.TARGET_OPTIMIZER_BACKEND
-    )
+    assert args.optimizer_backend == "scipy-jax"
     assert args.boozer_optimizer_backend is None
     assert args.maxiter == DEFAULT_OUTER_MAXITER
     assert args.reference_optimizer_method == "lbfgs"
@@ -2220,7 +2217,7 @@ def test_single_stage_init_high_resolution_rejects_init_only_warm_start_seed(
 
 
 def test_single_stage_fixture_optimizer_backend_defaults_by_backend():
-    assert default_optimizer_backend_for_backend("jax") == "ondevice"
+    assert default_optimizer_backend_for_backend("jax") == "scipy-jax"
     assert default_optimizer_backend_for_backend("cpu") == "scipy"
 
 
@@ -8143,7 +8140,7 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(
     stage2_e2e_args = stage2_e2e_comparison_module.parse_args()
     assert stage2_e2e_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
     assert stage2_e2e_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
-    assert stage2_e2e_args.optimizer_backend == "ondevice"
+    assert stage2_e2e_args.optimizer_backend == "scipy-jax"
 
     for optimizer_backend in ("optax-lbfgs", "optimistix-lbfgs"):
         monkeypatch.setattr(
@@ -8175,7 +8172,7 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(
         == DEFAULT_PLASMA_SURF_FILENAME
     )
     assert single_stage_outer_loop_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
-    assert single_stage_outer_loop_args.optimizer_backend == "ondevice"
+    assert single_stage_outer_loop_args.optimizer_backend == "scipy-jax"
 
     monkeypatch.setattr(
         sys,
@@ -8189,7 +8186,7 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(
     adjoint_fd_args = adjoint_fd_validation_module.parse_args()
     assert adjoint_fd_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
     assert adjoint_fd_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
-    assert adjoint_fd_args.optimizer_backend == "ondevice"
+    assert adjoint_fd_args.optimizer_backend == "scipy-jax"
 
 
 def test_production_boozer_probe_defaults_jax_lane_to_ondevice(monkeypatch, tmp_path):
@@ -8650,6 +8647,19 @@ def test_single_stage_outer_loop_contract_matches_probe_defaults():
     assert contract["min_iterations"] == 10
     assert contract["require_objective_decrease"] is True
     assert contract["required_outer_optimizer_method"] == TARGET_OUTER_OPTIMIZER_METHOD
+    assert TARGET_OUTER_OPTIMIZER_METHOD == "lbfgs-scipy-jax"
+    assert (
+        single_stage_init_parity_module._expected_target_outer_optimizer_method(
+            "scipy-jax"
+        )
+        == TARGET_OUTER_OPTIMIZER_METHOD
+    )
+    assert (
+        single_stage_init_parity_module._expected_target_outer_optimizer_method(
+            "ondevice"
+        )
+        == "lbfgs-ondevice"
+    )
     assert contract["required_result_keys"] == (
         "FINAL_IOTA",
         "FINAL_VOLUME",

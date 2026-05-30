@@ -38,6 +38,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ._device_scalars import two_pi as _two_pi
 from ._math_utils import as_jax_float64 as _as_jax_float64
 
 
@@ -305,7 +306,7 @@ def _rotation_alpha_impl(dofs: jax.Array, points: jax.Array, order: int) -> jax.
     dofs_jax = _as_jax_float64(dofs)
     points_jax = _as_jax_float64(points)
     rotation = jnp.broadcast_to(dofs_jax[0], points_jax.shape)
-    two_pi = _as_jax_float64(2.0 * np.pi)
+    two_pi = _two_pi(points_jax)
     for mode in range(1, int(order) + 1):
         angle = two_pi * mode * points_jax
         rotation = rotation + dofs_jax[2 * mode - 1] * jnp.sin(angle)
@@ -320,7 +321,7 @@ def _rotation_alphadash_impl(
     dofs_jax = _as_jax_float64(dofs)
     points_jax = _as_jax_float64(points)
     rotation = jnp.zeros_like(points_jax)
-    two_pi = _as_jax_float64(2.0 * np.pi)
+    two_pi = _two_pi(points_jax)
     for mode in range(1, int(order) + 1):
         scale = two_pi * mode
         angle = scale * points_jax

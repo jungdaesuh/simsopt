@@ -36,7 +36,9 @@ def vmec_compute_geometry_jax(vs, s, theta, phi, phi_center: float = 0.0):
 
     ``vs`` may be a :class:`~simsopt.mhd.vmec.Vmec` object, the host
     ``vmec_splines`` structure, or an already frozen
-    :class:`VmecFrozenSplineState`.
+    :class:`VmecFrozenSplineState`. Differentiated callers must avoid the
+    inherited ``s = 0`` drift-normalization pole and zero-``grad_B`` diagnostic
+    pole unless they provide a model-specific limiting treatment.
     """
     frozen_state = _frozen_state(vs)
     return _vmec_compute_geometry_jax(frozen_state, s, theta, phi, phi_center)
@@ -50,7 +52,11 @@ def vmec_fieldlines_jax(
     phi1d=None,
     phi_center: float = 0.0,
 ):
-    """Evaluate VMEC fieldline diagnostics through JAX kernels."""
+    """Evaluate VMEC fieldline diagnostics through JAX kernels.
+
+    Differentiated callers inherit the same VMEC diagnostic-domain limits as
+    :func:`vmec_compute_geometry_jax`.
+    """
     if (theta1d is not None) and (phi1d is not None):
         raise ValueError("You cannot specify both theta and phi")
     if (theta1d is None) and (phi1d is None):

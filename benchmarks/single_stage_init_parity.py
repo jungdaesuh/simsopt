@@ -31,6 +31,7 @@ from benchmarks.validation_ladder_common import (
     find_single_file,
     gpu_proof_parity_contract,
     isolate_parent_cuda_memory_allocator,
+    load_single_stage_final_payload as load_single_stage_final_payload_from_artifact_contract,
     load_json,
     max_pointwise_geometry_drift,
     maybe_initialize_distributed_runtime,
@@ -101,7 +102,7 @@ IOTA_ABS_TOL = _TIER3_TOLERANCES["final_iota_abs_tol"]
 VOLUME_REL_TOL = _TIER3_TOLERANCES["final_volume_rel_tol"]
 FIELD_ERROR_REL_TOL = _TIER3_TOLERANCES["field_error_rel_tol"]
 SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
-TARGET_OPTIMIZER_BACKEND = DEFAULT_OPTIMIZER_BACKEND
+TARGET_OPTIMIZER_BACKEND = "ondevice"
 SCIPY_JAX_OPTIMIZER_BACKEND = "scipy-jax"
 SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND = "scipy-jax-fullgraph"
 OPTAX_LBFGS_OPTIMIZER_BACKEND = "optax-lbfgs"
@@ -134,8 +135,8 @@ _TARGET_OUTER_OPTIMIZER_METHOD = str(
     _OUTER_LOOP_PROOF_CONTRACT["required_outer_optimizer_method"]
 )
 _TARGET_OPTIMIZER_METHOD_BY_BACKEND = {
-    TARGET_OPTIMIZER_BACKEND: _TARGET_OUTER_OPTIMIZER_METHOD,
-    SCIPY_JAX_OPTIMIZER_BACKEND: "lbfgs-scipy-jax",
+    TARGET_OPTIMIZER_BACKEND: "lbfgs-ondevice",
+    SCIPY_JAX_OPTIMIZER_BACKEND: _TARGET_OUTER_OPTIMIZER_METHOD,
     SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND: "lbfgs-scipy-jax-fullgraph",
     OPTAX_LBFGS_OPTIMIZER_BACKEND: "optax-lbfgs-ondevice",
     OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND: "optimistix-lbfgs-ondevice",
@@ -400,12 +401,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--optimizer-backend",
         choices=TARGET_OPTIMIZER_BACKENDS,
-        default=TARGET_OPTIMIZER_BACKEND,
+        default=DEFAULT_OPTIMIZER_BACKEND,
         help=(
-            "JAX outer optimizer backend for the init probe. Use optax-lbfgs "
-            "or optimistix-lbfgs for public JAX L-BFGS target-lane parity, "
-            "and scipy-jax-fullgraph for CPU/SciPy-compatible host control "
-            "over the full JAX value/grad graph."
+            "JAX outer optimizer backend for the init probe. The default "
+            "scipy-jax lane uses SciPy-compatible host control over JAX "
+            "objective evaluations; use ondevice, optax-lbfgs, or "
+            "optimistix-lbfgs for explicit target-lane stress tests, and "
+            "scipy-jax-fullgraph for host control over the full JAX "
+            "value/grad graph."
         ),
     )
     parser.add_argument(
@@ -923,33 +926,7 @@ def _resolved_single_stage_output_root(
 
 def _load_single_stage_final_payload(output_root: Path) -> tuple[dict[str, Any], Path]:
     """Load the final run payload from the single-stage artifact contract."""
-    results_matches = list(output_root.rglob("results.json"))
-    if len(results_matches) == 1:
-        results_path = results_matches[0]
-        return dict(load_json(results_path)), results_path
-    if len(results_matches) > 1:
-        match_display = ", ".join(str(match) for match in results_matches)
-        raise RuntimeError(
-            f"Expected at most one accepted results.json under {output_root}, "
-            f"found {match_display}"
-        )
-
-    rejected_matches = list(output_root.rglob("REJECTED.json"))
-    if len(rejected_matches) != 1:
-        match_display = ", ".join(str(match) for match in rejected_matches) or "<none>"
-        raise RuntimeError(
-            f"Expected exactly one results.json or REJECTED.json under "
-            f"{output_root}, found rejected markers {match_display}"
-        )
-    rejected_path = rejected_matches[0]
-    marker = dict(load_json(rejected_path))
-    diagnostic_results = marker.get("diagnostic_results_payload")
-    if not isinstance(diagnostic_results, dict):
-        raise RuntimeError(
-            f"{rejected_path} is missing diagnostic_results_payload; fixed-iteration "
-            "parity rungs require the rejected-run diagnostic payload."
-        )
-    return dict(diagnostic_results), rejected_path
+    return load_single_stage_final_payload_from_artifact_contract(output_root)
 
 
 def _run_single_stage_case(

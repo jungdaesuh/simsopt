@@ -3338,7 +3338,7 @@ class TestStage2OptimizerContract:
 
         assert args.equilibria_dir == str(stage2_script.DEFAULT_EQUILIBRIA_DIR)
 
-    def test_parse_args_defaults_jax_backend_to_ondevice_optimizer_lane(
+    def test_parse_args_defaults_jax_backend_to_scipy_jax_optimizer_lane(
         self, monkeypatch
     ):
         stage2_script = _load_stage2_script_module()
@@ -3355,7 +3355,7 @@ class TestStage2OptimizerContract:
         args = stage2_script.parse_args()
 
         assert args.backend == "jax"
-        assert args.optimizer_backend == "ondevice"
+        assert args.optimizer_backend == "scipy-jax"
         assert args.least_squares_algorithm == "quasi-newton"
 
     def test_parse_args_preserves_cpu_default_reference_lane(self, monkeypatch):
@@ -3388,7 +3388,7 @@ class TestStage2OptimizerContract:
         args = stage2_script.parse_args()
 
         assert args.backend == "jax"
-        assert args.optimizer_backend == "ondevice"
+        assert args.optimizer_backend == "scipy-jax"
         assert args.disable_accepted_step_callback is True
 
     def test_problem_contract_records_accepted_step_callback_setting(self):
@@ -3449,7 +3449,7 @@ class TestStage2OptimizerContract:
         args = stage2_script.parse_args()
 
         assert args.backend == "jax"
-        assert args.optimizer_backend == "ondevice"
+        assert args.optimizer_backend == "scipy-jax"
         assert args.least_squares_algorithm == "quasi-newton"
 
     def test_build_equilibrium_path_falls_back_to_repo_fixture_when_workspace_file_is_missing(

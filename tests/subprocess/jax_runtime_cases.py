@@ -471,7 +471,9 @@ def _assert_implicit_host_transfer_rejected(
 
 
 def _build_single_stage_transfer_guard_runtime_fixture():
-    from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
+    from simsopt.geo import (
+        surfaceobjectives_traceable_jax as surfaceobjectives_traceable_jax_module,
+    )
 
     from examples.single_stage_optimization.SINGLE_STAGE import (
         single_stage_banana_example as single_stage_example,
@@ -563,13 +565,15 @@ def _build_single_stage_transfer_guard_runtime_fixture():
             success_filter=success_filter,
         )
     )
-    compiled_bundle = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
-        boozer_surface,
-        bs,
-        fixture["iota_target"],
-        outer_objective_config=config,
-        success_filter=success_filter,
-    )["compiled_bundle"]
+    compiled_bundle = (
+        surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
+            boozer_surface,
+            bs,
+            fixture["iota_target"],
+            outer_objective_config=config,
+            success_filter=success_filter,
+        )["compiled_bundle"]
+    )
 
     cpu = jax.devices("cpu")[0]
     coil_dofs_host = np.asarray(bs.x.copy(), dtype=np.float64)
@@ -1574,7 +1578,9 @@ def _run_surface_quadrature_sharding_case() -> None:
 
 
 def _run_seed_batch_value_grad_sharding_case() -> None:
-    from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
+    from simsopt.geo import (
+        surfaceobjectives_traceable_jax as surfaceobjectives_traceable_jax_module,
+    )
 
     compiled_value_and_grad_for = jax.jit(
         lambda coil_dofs: (
@@ -1582,10 +1588,8 @@ def _run_seed_batch_value_grad_sharding_case() -> None:
             2.0 * coil_dofs,
         )
     )
-    batched_value_and_grad = (
-        surfaceobjectives_jax_module._make_traceable_batched_value_and_grad_pipeline(
-            compiled_value_and_grad_for
-        )
+    batched_value_and_grad = surfaceobjectives_traceable_jax_module._make_traceable_batched_value_and_grad_pipeline(
+        compiled_value_and_grad_for
     )
     coil_dofs_batch = jnp.asarray(
         np.linspace(-1.0, 1.0, 8 * 3, dtype=np.float64).reshape(8, 3),

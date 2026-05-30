@@ -39,7 +39,12 @@ def j_dot_B_Redl_jax(
     psi_edge=None,
     nfp=None,
 ):
-    """Evaluate Redl ``<J dot B>`` through the JAX array kernel."""
+    """Evaluate Redl ``<J dot B>`` through the JAX array kernel.
+
+    Inputs must stay inside the Redl formula's physical domain; the JAX path
+    does not smooth the ``Zeff = 1`` or ``iota = nfp * helicity_n`` singular
+    boundaries for differentiation.
+    """
     if Zeff is None:
         Zeff = ProfilePolynomial(1.0)
     if not isinstance(Zeff, Profile):
@@ -82,7 +87,11 @@ def _constant_profile(value):
 
 
 class RedlBootstrapJAX(Optimizable):
-    """JAX-backed adapter for evaluating Redl ``<J dot B>`` profiles."""
+    """JAX-backed adapter for evaluating Redl ``<J dot B>`` profiles.
+
+    Derivative helpers are supported for profile coefficients away from the
+    Redl formula's physical singularities.
+    """
 
     def __init__(self, geom, ne, Te, Ti, Zeff, helicity_n):
         if Zeff is None:

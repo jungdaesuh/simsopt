@@ -6,13 +6,12 @@ import numpy as np
 
 import jax.numpy as jnp
 
+from ._device_scalars import two_pi as _two_pi
 from ._math_utils import as_runtime_float64 as _as_runtime_float64
-
-_TWO_PI = 2.0 * np.pi
 
 
 def jaxXYZFourierSymmetriescurve_pure(dofs, quadpoints, order, nfp, stellsym, ntor):
-    two_pi = _as_runtime_float64(_TWO_PI, reference=quadpoints)
+    two_pi = _two_pi(quadpoints)
     nfp_scalar = _as_runtime_float64(float(nfp), reference=quadpoints)
     ntor_scalar = _as_runtime_float64(float(ntor), reference=quadpoints)
     modes = _as_runtime_float64(

@@ -67,7 +67,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -318,6 +318,13 @@ def _prefix3(vector: jax.Array) -> jax.Array:
 def _split_xyz(vector: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
     x, y, z = jnp.split(_prefix3(vector), [1, 2])
     return jnp.reshape(x, ()), jnp.reshape(y, ()), jnp.reshape(z, ())
+
+
+def _continuous_phi_from_state(
+    state: jax.Array, angle_near: jax.Array, dtype
+) -> jax.Array:
+    x, y, _z = _split_xyz(state)
+    return _continuous_phi(x, y, angle_near, dtype)
 
 
 def _take_entry(vector: jax.Array, index: int) -> jax.Array:
@@ -1015,6 +1022,195 @@ def bracket_root_jax(
     return t_best, f_best, bracketed_in
 
 
+class _Dopri5AdaptiveStep(NamedTuple):
+    h_clamped: jax.Array
+    y_new: jax.Array
+    accepted: jax.Array
+    h_next: jax.Array
+    t_next: jax.Array
+    y_next: jax.Array
+    k_next: jax.Array
+
+
+def _dopri5_adaptive_step(
+    rhs: Callable[[jax.Array, jax.Array], jax.Array],
+    t: jax.Array,
+    y: jax.Array,
+    h: jax.Array,
+    k_first: jax.Array,
+    tmax: jax.Array,
+    dtmax: jax.Array,
+    rtol: jax.Array,
+    atol: jax.Array,
+    dtype,
+) -> _Dopri5AdaptiveStep:
+    """Run one adaptive DOPRI5 trial and return the accepted-state update."""
+
+    h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
+    y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
+    err = _error_norm(y_err, y, y_new, rtol, atol)
+    err_safe = jnp.where(jnp.isfinite(err), err, _device_array(jnp.inf, dtype))
+    accepted = err_safe <= _device_array(1.0, dtype)
+    factor = jnp.where(
+        err_safe > _device_array(0.0, dtype),
+        _device_array(_SAFETY, dtype)
+        * jnp.power(err_safe, _device_array(-_DOPRI5_EXP, dtype)),
+        _device_array(_MAX_FACTOR, dtype),
+    )
+    factor = jnp.clip(
+        factor,
+        _device_array(_MIN_FACTOR, dtype),
+        _device_array(_MAX_FACTOR, dtype),
+    )
+    h_next = h_clamped * factor
+    t_next = jnp.where(accepted, _accepted_step_time(t, h_clamped, tmax), t)
+    y_next = jnp.where(accepted, y_new, y)
+    k_next = jnp.where(accepted, k7, k_first)
+    return _Dopri5AdaptiveStep(
+        h_clamped=h_clamped,
+        y_new=y_new,
+        accepted=accepted,
+        h_next=h_next,
+        t_next=t_next,
+        y_next=y_next,
+        k_next=k_next,
+    )
+
+
+def _event_row_from_state(
+    t_event: jax.Array,
+    event_index: jax.Array,
+    state: jax.Array,
+) -> jax.Array:
+    return jnp.concatenate(
+        [
+            jnp.reshape(t_event, (1,)),
+            jnp.reshape(event_index, (1,)),
+            state,
+        ],
+        axis=0,
+    )
+
+
+def _scan_angle_plane_events(
+    *,
+    hits: jax.Array,
+    count: jax.Array,
+    angle_last: jax.Array,
+    angle_current: jax.Array,
+    targets: jax.Array,
+    num_targets: int,
+    two_pi: jax.Array,
+    dtype,
+    t: jax.Array,
+    h_clamped: jax.Array,
+    max_root_iters: int,
+    max_hits_i32: jax.Array,
+    state_at_fraction: Callable[[jax.Array], jax.Array],
+    angle_at_state: Callable[[jax.Array, jax.Array], jax.Array],
+) -> tuple[jax.Array, jax.Array]:
+    """Record angle-plane crossings for fieldline, GC, Boozer, and full-orbit drivers."""
+
+    if num_targets == 0:
+        return hits, count
+
+    def scan_one_target(i, carry):
+        hits_carry, count_carry = carry
+        target = targets[i]
+        fl_last = jnp.floor((angle_last - target) / two_pi)
+        fl_curr = jnp.floor((angle_current - target) / two_pi)
+        crossed = fl_last != fl_curr
+        offset = jnp.round(
+            ((angle_last + angle_current) / _device_array(2.0, dtype) - target) / two_pi
+        )
+        shifted_target = offset * two_pi + target
+
+        def diff_at(s):
+            state = state_at_fraction(s)
+            return angle_at_state(state, angle_last) - shifted_target
+
+        f_left = diff_at(_device_array(0.0, dtype))
+        f_right = diff_at(_device_array(1.0, dtype))
+        s_root, _f_root, _bracketed = bracket_root_jax(
+            diff_at,
+            _device_array(0.0, dtype),
+            _device_array(1.0, dtype),
+            f_left,
+            f_right,
+            max_root_iters,
+            _device_array(1.0e-15, dtype),
+        )
+        state_root = state_at_fraction(s_root)
+        hit_row = _event_row_from_state(
+            t + s_root * h_clamped,
+            _as_device_array(i, dtype),
+            state_root,
+        )
+        return _append_event_row(
+            hits_carry,
+            count_carry,
+            crossed,
+            hit_row,
+            max_hits_i32,
+        )
+
+    return jax.lax.fori_loop(
+        0,
+        num_targets,
+        scan_one_target,
+        (hits, count),
+    )
+
+
+def _apply_stopping_criteria_events(
+    *,
+    stopping_criteria: tuple,
+    hits: jax.Array,
+    count: jax.Array,
+    status: jax.Array,
+    stop: jax.Array,
+    iter_count: jax.Array,
+    angle_current: jax.Array,
+    angle_initial: jax.Array,
+    t_event: jax.Array,
+    state: jax.Array,
+    dtype,
+    max_hits_i32: jax.Array,
+    is_boozer_state: bool = False,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Append first-firing stopping-criterion events while preserving row layout."""
+
+    for i, criterion in enumerate(stopping_criteria):
+        pred = _stopping_criterion_should_stop(
+            criterion,
+            state[0],
+            state[1],
+            state[2],
+            iter_count,
+            angle_current,
+            angle_initial,
+            dtype,
+            is_boozer_state=is_boozer_state,
+        )
+        fires = jnp.logical_and(jnp.logical_not(stop), pred)
+        idx_val = _device_index(-1 - i)
+        hit_row = _event_row_from_state(
+            t_event,
+            _device_array(float(-1 - i), dtype),
+            state,
+        )
+        hits, count = _append_event_row(
+            hits,
+            count,
+            fires,
+            hit_row,
+            max_hits_i32,
+        )
+        status = jnp.where(fires, idx_val, status)
+        stop = jnp.logical_or(stop, fires)
+    return hits, count, status, stop
+
+
 # ── Adaptive driver ───────────────────────────────────────────────────
 
 
@@ -1188,28 +1384,25 @@ def trace_fieldline(
             status_event,
             _stop,
         ) = carry
-        # Clamp step to not overshoot tmax or the upstream quarter-turn ceiling.
-        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
-        y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
-        err = _error_norm(y_err, y, y_new, rtol, atol)
-        err_safe = jnp.where(jnp.isfinite(err), err, _device_array(jnp.inf, dtype))
-        accepted = err_safe <= one
-        factor = jnp.where(
-            err_safe > _device_array(0.0, dtype),
-            _device_array(_SAFETY, dtype)
-            * jnp.power(err_safe, _device_array(-_DOPRI5_EXP, dtype)),
-            _device_array(_MAX_FACTOR, dtype),
+        step = _dopri5_adaptive_step(
+            rhs,
+            t,
+            y,
+            h,
+            k_first,
+            tmax,
+            dtmax,
+            rtol,
+            atol,
+            dtype,
         )
-        factor = jnp.clip(
-            factor,
-            _device_array(_MIN_FACTOR, dtype),
-            _device_array(_MAX_FACTOR, dtype),
-        )
-        h_next = h_clamped * factor
-        t_accepted = _accepted_step_time(t, h_clamped, tmax)
-        t_next = jnp.where(accepted, t_accepted, t)
-        y_next = jnp.where(accepted, y_new, y)
-        k_next = jnp.where(accepted, k7, k_first)
+        h_clamped = step.h_clamped
+        y_new = step.y_new
+        accepted = step.accepted
+        h_next = step.h_next
+        t_next = step.t_next
+        y_next = step.y_next
+        k_next = step.k_next
 
         # ── Phi-plane crossing detection on accepted steps ──
         phi_current = _continuous_phi(y_new[0], y_new[1], phi_last, dtype)
@@ -1228,69 +1421,23 @@ def trace_fieldline(
 
         def scan_phis(args):
             hits_in, count_in, phi_last_in, phi_curr_in = args
-            if num_phis == 0:
-                return hits_in, count_in
-
-            def scan_one_phi(i, carry):
-                hits_carry, count_carry = carry
-                phi_target = phis_arr[i]
-                # Detect a crossing of ``phi_target + k*2*pi`` for some k.
-                fl_last = jnp.floor((phi_last_in - phi_target) / two_pi)
-                fl_curr = jnp.floor((phi_curr_in - phi_target) / two_pi)
-                crossed = fl_last != fl_curr
-                # Pick integer offset so phi_shift lies inside the
-                # ``[phi_last, phi_current]`` interval.
-                fak = jnp.round(
-                    (
-                        (phi_last_in + phi_curr_in) / _device_array(2.0, dtype)
-                        - phi_target
-                    )
-                    / two_pi
-                )
-                phi_shift = fak * two_pi + phi_target
-
-                def diff_at(s, phi_last_in=phi_last_in, phi_shift=phi_shift):
-                    pos = state_at_fraction(s)
-                    return (
-                        _continuous_phi(pos[0], pos[1], phi_last_in, dtype) - phi_shift
-                    )
-
-                f_left = diff_at(_device_array(0.0, dtype))
-                f_right = diff_at(_device_array(1.0, dtype))
-                bracket_atol = _device_array(1.0e-15, dtype)
-                s_root, _f_root, _bracketed = bracket_root_jax(
-                    diff_at,
-                    _device_array(0.0, dtype),
-                    _device_array(1.0, dtype),
-                    f_left,
-                    f_right,
-                    max_root_iters,
-                    bracket_atol,
-                )
-                t_root = t + s_root * h_clamped
-                pos_root = state_at_fraction(s_root)
-                hit_row = jnp.stack(
-                    [
-                        t_root,
-                        _as_device_array(i, dtype),
-                        pos_root[0],
-                        pos_root[1],
-                        pos_root[2],
-                    ]
-                )
-                return _append_event_row(
-                    hits_carry,
-                    count_carry,
-                    crossed,
-                    hit_row,
-                    max_phi_hits_i32,
-                )
-
-            return jax.lax.fori_loop(
-                0,
-                num_phis,
-                scan_one_phi,
-                (hits_in, count_in),
+            return _scan_angle_plane_events(
+                hits=hits_in,
+                count=count_in,
+                angle_last=phi_last_in,
+                angle_current=phi_curr_in,
+                targets=phis_arr,
+                num_targets=num_phis,
+                two_pi=two_pi,
+                dtype=dtype,
+                t=t,
+                h_clamped=h_clamped,
+                max_root_iters=max_root_iters,
+                max_hits_i32=max_phi_hits_i32,
+                state_at_fraction=state_at_fraction,
+                angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
+                    state, angle_near, dtype
+                ),
             )
 
         phi_hits_after, phi_count_after = jax.lax.cond(
@@ -1318,38 +1465,20 @@ def trace_fieldline(
                 phi_curr_in,
                 phi_init_in,
             ) = args
-            for i, criterion in enumerate(stopping_criteria):
-                pred = _stopping_criterion_should_stop(
-                    criterion,
-                    y_next[0],
-                    y_next[1],
-                    y_next[2],
-                    iter_count_in,
-                    phi_curr_in,
-                    phi_init_in,
-                    dtype,
-                )
-                fires = jnp.logical_and(jnp.logical_not(stop_in), pred)
-                idx_val = _device_index(-1 - i)
-                hit_row = jnp.stack(
-                    [
-                        t_next,
-                        _device_array(float(-1 - i), dtype),
-                        y_next[0],
-                        y_next[1],
-                        y_next[2],
-                    ]
-                )
-                hits_in, count_in = _append_event_row(
-                    hits_in,
-                    count_in,
-                    fires,
-                    hit_row,
-                    max_phi_hits_i32,
-                )
-                status_in = jnp.where(fires, idx_val, status_in)
-                stop_in = jnp.logical_or(stop_in, fires)
-            return hits_in, count_in, status_in, stop_in
+            return _apply_stopping_criteria_events(
+                stopping_criteria=stopping_criteria,
+                hits=hits_in,
+                count=count_in,
+                status=status_in,
+                stop=stop_in,
+                iter_count=iter_count_in,
+                angle_current=phi_curr_in,
+                angle_initial=phi_init_in,
+                t_event=t_next,
+                state=y_next,
+                dtype=dtype,
+                max_hits_i32=max_phi_hits_i32,
+            )
 
         iter_count_post = step_count + _device_index(1)
 
@@ -1461,16 +1590,9 @@ def trace_fieldline(
     )
 
 
-@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
-def _trace_fieldlines_batched_unsharded(
-    spec: FieldlineTracingSpec,
-    y0s: jax.Array,
-    dtmaxs: jax.Array,
-    magnetic_field_fn: Callable[[jax.Array], jax.Array],
-    phis: jax.Array | None = None,
-    stopping_criteria: tuple = (),
-    magnetic_field_state: object | None = None,
-) -> FieldlineTracingResult:
+def _make_fieldline_trace_one(spec, magnetic_field_fn, phis, stopping_criteria):
+    """Build the per-lane fieldline integrator shared by the batched paths."""
+
     def trace_one(
         y0: jax.Array, dtmax: jax.Array, field_state: object | None = None
     ) -> FieldlineTracingResult:
@@ -1488,6 +1610,23 @@ def _trace_fieldlines_batched_unsharded(
             phis=phis,
             stopping_criteria=stopping_criteria,
         )
+
+    return trace_one
+
+
+@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
+def _trace_fieldlines_batched_unsharded(
+    spec: FieldlineTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    magnetic_field_fn: Callable[[jax.Array], jax.Array],
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+    magnetic_field_state: object | None = None,
+) -> FieldlineTracingResult:
+    trace_one = _make_fieldline_trace_one(
+        spec, magnetic_field_fn, phis, stopping_criteria
+    )
 
     if magnetic_field_state is None:
         return jax.vmap(trace_one)(y0s, dtmaxs)
@@ -1520,23 +1659,9 @@ def trace_fieldlines_batched(
     dtmaxs_arr = _as_device_array(dtmaxs, jnp.float64).reshape((-1,))
     stopping_criteria = tuple(stopping_criteria)
 
-    def trace_one(
-        y0: jax.Array, dtmax: jax.Array, field_state: object | None = None
-    ) -> FieldlineTracingResult:
-        if field_state is None:
-            field_fn = magnetic_field_fn
-        else:
-
-            def field_fn(point):
-                return magnetic_field_fn(field_state, point)
-
-        return trace_fieldline(
-            replace(spec, dtmax=dtmax),
-            y0,
-            field_fn,
-            phis=phis,
-            stopping_criteria=stopping_criteria,
-        )
+    trace_one = _make_fieldline_trace_one(
+        spec, magnetic_field_fn, phis, stopping_criteria
+    )
 
     config = trajectory_batch_sharding_config(y0s_arr)
     if config is not None:
@@ -1914,27 +2039,25 @@ def trace_guiding_center(
             status_event,
             _stop,
         ) = carry
-        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
-        y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
-        err = _error_norm(y_err, y, y_new, rtol, atol)
-        err_safe = jnp.where(jnp.isfinite(err), err, _device_array(jnp.inf, dtype))
-        accepted = err_safe <= one
-        factor = jnp.where(
-            err_safe > _device_array(0.0, dtype),
-            _device_array(_SAFETY, dtype)
-            * jnp.power(err_safe, _device_array(-_DOPRI5_EXP, dtype)),
-            _device_array(_MAX_FACTOR, dtype),
+        step = _dopri5_adaptive_step(
+            rhs,
+            t,
+            y,
+            h,
+            k_first,
+            tmax,
+            dtmax,
+            rtol,
+            atol,
+            dtype,
         )
-        factor = jnp.clip(
-            factor,
-            _device_array(_MIN_FACTOR, dtype),
-            _device_array(_MAX_FACTOR, dtype),
-        )
-        h_next = h_clamped * factor
-        t_accepted = _accepted_step_time(t, h_clamped, tmax)
-        t_next = jnp.where(accepted, t_accepted, t)
-        y_next = jnp.where(accepted, y_new, y)
-        k_next = jnp.where(accepted, k7, k_first)
+        h_clamped = step.h_clamped
+        y_new = step.y_new
+        accepted = step.accepted
+        h_next = step.h_next
+        t_next = step.t_next
+        y_next = step.y_next
+        k_next = step.k_next
 
         # ── Phi-plane crossing detection on accepted steps ──
         y_new_x, y_new_y, _y_new_z = _split_xyz(y_new)
@@ -1954,64 +2077,23 @@ def trace_guiding_center(
 
         def scan_phis(args):
             hits_in, count_in, phi_last_in, phi_curr_in = args
-            if num_phis == 0:
-                return hits_in, count_in
-
-            def scan_one_phi(i, carry):
-                hits_carry, count_carry = carry
-                phi_target = phis_arr[i]
-                fl_last = jnp.floor((phi_last_in - phi_target) / two_pi)
-                fl_curr = jnp.floor((phi_curr_in - phi_target) / two_pi)
-                crossed = fl_last != fl_curr
-                fak = jnp.round(
-                    (
-                        (phi_last_in + phi_curr_in) / _device_array(2.0, dtype)
-                        - phi_target
-                    )
-                    / two_pi
-                )
-                phi_shift = fak * two_pi + phi_target
-
-                def diff_at(s, phi_last_in=phi_last_in, phi_shift=phi_shift):
-                    pos = state_at_fraction(s)
-                    pos_x, pos_y, _pos_z = _split_xyz(pos)
-                    return _continuous_phi(pos_x, pos_y, phi_last_in, dtype) - phi_shift
-
-                f_left = diff_at(_device_array(0.0, dtype))
-                f_right = diff_at(_device_array(1.0, dtype))
-                bracket_atol = _device_array(1.0e-15, dtype)
-                s_root, _f_root, _bracketed = bracket_root_jax(
-                    diff_at,
-                    _device_array(0.0, dtype),
-                    _device_array(1.0, dtype),
-                    f_left,
-                    f_right,
-                    max_root_iters,
-                    bracket_atol,
-                )
-                t_root = t + s_root * h_clamped
-                state_root = state_at_fraction(s_root)
-                hit_row = jnp.concatenate(
-                    [
-                        jnp.reshape(t_root, (1,)),
-                        jnp.reshape(_as_device_array(i, dtype), (1,)),
-                        state_root,
-                    ],
-                    axis=0,
-                )
-                return _append_event_row(
-                    hits_carry,
-                    count_carry,
-                    crossed,
-                    hit_row,
-                    max_phi_hits_i32,
-                )
-
-            return jax.lax.fori_loop(
-                0,
-                num_phis,
-                scan_one_phi,
-                (hits_in, count_in),
+            return _scan_angle_plane_events(
+                hits=hits_in,
+                count=count_in,
+                angle_last=phi_last_in,
+                angle_current=phi_curr_in,
+                targets=phis_arr,
+                num_targets=num_phis,
+                two_pi=two_pi,
+                dtype=dtype,
+                t=t,
+                h_clamped=h_clamped,
+                max_root_iters=max_root_iters,
+                max_hits_i32=max_phi_hits_i32,
+                state_at_fraction=state_at_fraction,
+                angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
+                    state, angle_near, dtype
+                ),
             )
 
         phi_hits_after, phi_count_after = jax.lax.cond(
@@ -2038,38 +2120,20 @@ def trace_guiding_center(
                 phi_curr_in,
                 phi_init_in,
             ) = args
-            for i, criterion in enumerate(stopping_criteria):
-                y_next_x, y_next_y, y_next_z = _split_xyz(y_next)
-                pred = _stopping_criterion_should_stop(
-                    criterion,
-                    y_next_x,
-                    y_next_y,
-                    y_next_z,
-                    iter_count_in,
-                    phi_curr_in,
-                    phi_init_in,
-                    dtype,
-                )
-                fires = jnp.logical_and(jnp.logical_not(stop_in), pred)
-                idx_val = _device_index(-1 - i)
-                hit_row = jnp.concatenate(
-                    [
-                        jnp.reshape(t_next, (1,)),
-                        jnp.reshape(_device_array(float(-1 - i), dtype), (1,)),
-                        y_next,
-                    ],
-                    axis=0,
-                )
-                hits_in, count_in = _append_event_row(
-                    hits_in,
-                    count_in,
-                    fires,
-                    hit_row,
-                    max_phi_hits_i32,
-                )
-                status_in = jnp.where(fires, idx_val, status_in)
-                stop_in = jnp.logical_or(stop_in, fires)
-            return hits_in, count_in, status_in, stop_in
+            return _apply_stopping_criteria_events(
+                stopping_criteria=stopping_criteria,
+                hits=hits_in,
+                count=count_in,
+                status=status_in,
+                stop=stop_in,
+                iter_count=iter_count_in,
+                angle_current=phi_curr_in,
+                angle_initial=phi_init_in,
+                t_event=t_next,
+                state=y_next,
+                dtype=dtype,
+                max_hits_i32=max_phi_hits_i32,
+            )
 
         iter_count_post = step_count + _device_index(1)
 
@@ -2174,19 +2238,11 @@ def trace_guiding_center(
     )
 
 
-@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
-def _trace_guiding_centers_batched_unsharded(
-    spec: GuidingCenterTracingSpec,
-    y0s: jax.Array,
-    dtmaxs: jax.Array,
-    mus: jax.Array,
-    magnetic_field_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
-    m: float,
-    q: float,
-    phis: jax.Array | None = None,
-    stopping_criteria: tuple = (),
-    magnetic_field_state: object | None = None,
-) -> GuidingCenterTracingResult:
+def _make_guiding_center_trace_one(
+    spec, magnetic_field_fn, m, q, phis, stopping_criteria
+):
+    """Build the per-lane guiding-centre integrator shared by the batched paths."""
+
     def trace_one(
         y0: jax.Array,
         dtmax: jax.Array,
@@ -2210,6 +2266,26 @@ def _trace_guiding_centers_batched_unsharded(
             phis=phis,
             stopping_criteria=stopping_criteria,
         )
+
+    return trace_one
+
+
+@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
+def _trace_guiding_centers_batched_unsharded(
+    spec: GuidingCenterTracingSpec,
+    y0s: jax.Array,
+    dtmaxs: jax.Array,
+    mus: jax.Array,
+    magnetic_field_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    m: float,
+    q: float,
+    phis: jax.Array | None = None,
+    stopping_criteria: tuple = (),
+    magnetic_field_state: object | None = None,
+) -> GuidingCenterTracingResult:
+    trace_one = _make_guiding_center_trace_one(
+        spec, magnetic_field_fn, m, q, phis, stopping_criteria
+    )
 
     if magnetic_field_state is None:
         return jax.vmap(trace_one)(y0s, dtmaxs, mus)
@@ -2241,29 +2317,9 @@ def trace_guiding_centers_batched(
     mus_arr = _as_device_array(mus, jnp.float64).reshape((-1,))
     stopping_criteria = tuple(stopping_criteria)
 
-    def trace_one(
-        y0: jax.Array,
-        dtmax: jax.Array,
-        mu: jax.Array,
-        field_state: object | None = None,
-    ) -> GuidingCenterTracingResult:
-        if field_state is None:
-            field_fn = magnetic_field_fn
-        else:
-
-            def field_fn(point):
-                return magnetic_field_fn(field_state, point)
-
-        return trace_guiding_center(
-            replace(spec, dtmax=dtmax),
-            y0,
-            field_fn,
-            m=m,
-            q=q,
-            mu=mu,
-            phis=phis,
-            stopping_criteria=stopping_criteria,
-        )
+    trace_one = _make_guiding_center_trace_one(
+        spec, magnetic_field_fn, m, q, phis, stopping_criteria
+    )
 
     config = trajectory_batch_sharding_config(y0s_arr)
     if config is not None:
@@ -2383,7 +2439,6 @@ def _run_dopri5_4state(
         lambda _: rhs(t0, y0),
         operand=None,
     )
-    one = jnp.asarray(1.0, dtype=dtype)
     accepted_count_init = jnp.asarray(0, dtype=jnp.int32) + lane_zero_i32
     t0_init = t0 + lane_zero
 
@@ -2450,28 +2505,25 @@ def _run_dopri5_4state(
             status_event,
             _stop,
         ) = carry
-        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
-        y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
-        err = _error_norm(y_err, y, y_new, rtol, atol)
-        err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
-        accepted = err_safe <= one
+        step = _dopri5_adaptive_step(
+            rhs,
+            t,
+            y,
+            h,
+            k_first,
+            tmax,
+            dtmax,
+            rtol,
+            atol,
+            dtype,
+        )
+        y_new = step.y_new
+        accepted = step.accepted
         axis_invalid = jnp.logical_and(accepted, _boozer_axis_invalid(y_new))
-        factor = jnp.where(
-            err_safe > jnp.asarray(0.0, dtype=dtype),
-            jnp.asarray(_SAFETY, dtype=dtype)
-            * jnp.power(err_safe, jnp.asarray(-_DOPRI5_EXP, dtype=dtype)),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
-        )
-        factor = jnp.clip(
-            factor,
-            jnp.asarray(_MIN_FACTOR, dtype=dtype),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
-        )
-        h_next = h_clamped * factor
-        t_accepted = _accepted_step_time(t, h_clamped, tmax)
-        t_next = jnp.where(accepted, t_accepted, t)
-        y_next = jnp.where(accepted, y_new, y)
-        k_next = jnp.where(accepted, k7, k_first)
+        h_next = step.h_next
+        t_next = step.t_next
+        y_next = step.y_next
+        k_next = step.k_next
         traj_next, mask_next, accepted_next = _record_trajectory_row(
             traj,
             mask,
@@ -2780,7 +2832,9 @@ def guiding_center_no_k_boozer_rhs(
     State is ``y = (s, theta, zeta, v_par)``. The equations of motion
     follow ``GuidingCenterNoKBoozerRHS::operator()`` in
     ``simsoptpp/tracing.cpp``. The non-vacuum case uses ``G(s)`` and
-    ``I(s)`` profiles but assumes ``K(s, theta, zeta) = 0``.
+    ``I(s)`` profiles but assumes ``K(s, theta, zeta) = 0``. The upstream
+    equation contains the physical banana-tip singularity ``mu / v_par``;
+    this faithful port does not regularize AD through ``v_par = 0``.
 
     Parameters
     ----------
@@ -2857,7 +2911,9 @@ def guiding_center_boozer_rhs(
     State is ``y = (s, theta, zeta, v_par)``. The equations of motion
     follow ``GuidingCenterBoozerRHS::operator()`` in
     ``simsoptpp/tracing.cpp`` — the non-vacuum, ``K != 0`` case with
-    ``C``, ``F``, ``D`` algebraic coefficients folded in.
+    ``C``, ``F``, ``D`` algebraic coefficients folded in. The upstream
+    equation contains the physical banana-tip singularity ``mu / v_par``;
+    this faithful port does not regularize AD through ``v_par = 0``.
 
     Parameters
     ----------
@@ -3142,29 +3198,27 @@ def trace_guiding_center_boozer(
             status_event,
             _stop,
         ) = carry
-        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
-        y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
-        err = _error_norm(y_err, y, y_new, rtol, atol)
-        err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
-        accepted = err_safe <= one
+        step = _dopri5_adaptive_step(
+            rhs,
+            t,
+            y,
+            h,
+            k_first,
+            tmax,
+            dtmax,
+            rtol,
+            atol,
+            dtype,
+        )
+        y_new = step.y_new
+        accepted = step.accepted
         axis_invalid = jnp.logical_and(accepted, _boozer_axis_invalid(y_new))
         accepted_valid = jnp.logical_and(accepted, jnp.logical_not(axis_invalid))
-        factor = jnp.where(
-            err_safe > jnp.asarray(0.0, dtype=dtype),
-            jnp.asarray(_SAFETY, dtype=dtype)
-            * jnp.power(err_safe, jnp.asarray(-_DOPRI5_EXP, dtype=dtype)),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
-        )
-        factor = jnp.clip(
-            factor,
-            jnp.asarray(_MIN_FACTOR, dtype=dtype),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
-        )
-        h_next = h_clamped * factor
-        t_accepted = _accepted_step_time(t, h_clamped, tmax)
-        t_next = jnp.where(accepted, t_accepted, t)
-        y_next = jnp.where(accepted, y_new, y)
-        k_next = jnp.where(accepted, k7, k_first)
+        h_clamped = step.h_clamped
+        h_next = step.h_next
+        t_next = step.t_next
+        y_next = step.y_next
+        k_next = step.k_next
 
         # ── Zeta-plane crossing detection on accepted steps ──
         # The Boozer state stores zeta directly (no atan2 needed);
@@ -3179,68 +3233,23 @@ def trace_guiding_center_boozer(
 
         def scan_zetas(args):
             hits_in, count_in, zeta_last_in, zeta_curr_in = args
-            if num_zetas == 0:
-                return hits_in, count_in
-
-            def scan_one_zeta(i, carry):
-                hits_carry, count_carry = carry
-                zeta_target = zetas_arr[i]
-                fl_last = jnp.floor((zeta_last_in - zeta_target) / two_pi)
-                fl_curr = jnp.floor((zeta_curr_in - zeta_target) / two_pi)
-                crossed = fl_last != fl_curr
-                fak = jnp.round(
-                    (
-                        (zeta_last_in + zeta_curr_in) / jnp.asarray(2.0, dtype=dtype)
-                        - zeta_target
-                    )
-                    / two_pi
-                )
-                zeta_shift = fak * two_pi + zeta_target
-
-                def diff_at(s, zeta_last_in=zeta_last_in, zeta_shift=zeta_shift):
-                    state_sub = state_at_fraction(s)
-                    return (
-                        _continuous_angle(state_sub[2], zeta_last_in, dtype)
-                        - zeta_shift
-                    )
-
-                f_left = diff_at(jnp.asarray(0.0, dtype=dtype))
-                f_right = diff_at(jnp.asarray(1.0, dtype=dtype))
-                bracket_atol = jnp.asarray(1.0e-15, dtype=dtype)
-                s_root, _f_root, _bracketed = bracket_root_jax(
-                    diff_at,
-                    jnp.asarray(0.0, dtype=dtype),
-                    jnp.asarray(1.0, dtype=dtype),
-                    f_left,
-                    f_right,
-                    max_root_iters,
-                    bracket_atol,
-                )
-                t_root = t + s_root * h_clamped
-                state_root = state_at_fraction(s_root)
-                hit_row = jnp.stack(
-                    [
-                        t_root,
-                        jnp.asarray(i, dtype=dtype),
-                        state_root[0],
-                        state_root[1],
-                        state_root[2],
-                        state_root[3],
-                    ]
-                )
-                return _append_event_row(
-                    hits_carry,
-                    count_carry,
-                    crossed,
-                    hit_row,
-                    max_phi_hits_i32,
-                )
-
-            return jax.lax.fori_loop(
-                0,
-                num_zetas,
-                scan_one_zeta,
-                (hits_in, count_in),
+            return _scan_angle_plane_events(
+                hits=hits_in,
+                count=count_in,
+                angle_last=zeta_last_in,
+                angle_current=zeta_curr_in,
+                targets=zetas_arr,
+                num_targets=num_zetas,
+                two_pi=two_pi,
+                dtype=dtype,
+                t=t,
+                h_clamped=h_clamped,
+                max_root_iters=max_root_iters,
+                max_hits_i32=max_phi_hits_i32,
+                state_at_fraction=state_at_fraction,
+                angle_at_state=lambda state, angle_near: _continuous_angle(
+                    state[2], angle_near, dtype
+                ),
             )
 
         phi_hits_after, phi_count_after = jax.lax.cond(
@@ -3268,40 +3277,21 @@ def trace_guiding_center_boozer(
                 zeta_curr_in,
                 zeta_init_in,
             ) = args
-            for i, criterion in enumerate(stopping_criteria):
-                pred = _stopping_criterion_should_stop(
-                    criterion,
-                    y_next[0],
-                    y_next[1],
-                    y_next[2],
-                    iter_count_in,
-                    zeta_curr_in,
-                    zeta_init_in,
-                    dtype,
-                    is_boozer_state=True,
-                )
-                fires = jnp.logical_and(jnp.logical_not(stop_in), pred)
-                idx_val = jnp.asarray(-1 - i, dtype=jnp.int32)
-                hit_row = jnp.stack(
-                    [
-                        t_next,
-                        jnp.asarray(float(-1 - i), dtype=dtype),
-                        y_next[0],
-                        y_next[1],
-                        y_next[2],
-                        y_next[3],
-                    ]
-                )
-                hits_in, count_in = _append_event_row(
-                    hits_in,
-                    count_in,
-                    fires,
-                    hit_row,
-                    max_phi_hits_i32,
-                )
-                status_in = jnp.where(fires, idx_val, status_in)
-                stop_in = jnp.logical_or(stop_in, fires)
-            return hits_in, count_in, status_in, stop_in
+            return _apply_stopping_criteria_events(
+                stopping_criteria=stopping_criteria,
+                hits=hits_in,
+                count=count_in,
+                status=status_in,
+                stop=stop_in,
+                iter_count=iter_count_in,
+                angle_current=zeta_curr_in,
+                angle_initial=zeta_init_in,
+                t_event=t_next,
+                state=y_next,
+                dtype=dtype,
+                max_hits_i32=max_phi_hits_i32,
+                is_boozer_state=True,
+            )
 
         iter_count_post = step_count + jnp.asarray(1, dtype=jnp.int32)
 
@@ -3940,27 +3930,25 @@ def trace_fullorbit(
             status_event,
             _stop,
         ) = carry
-        h_clamped = _clamp_step_to_domain(h, t, tmax, dtmax)
-        y_new, y_err, k7 = dopri5_step(rhs, t, y, h_clamped, k_first)
-        err = _error_norm(y_err, y, y_new, rtol, atol)
-        err_safe = jnp.where(jnp.isfinite(err), err, jnp.asarray(jnp.inf, dtype=dtype))
-        accepted = err_safe <= one
-        factor = jnp.where(
-            err_safe > jnp.asarray(0.0, dtype=dtype),
-            jnp.asarray(_SAFETY, dtype=dtype)
-            * jnp.power(err_safe, jnp.asarray(-_DOPRI5_EXP, dtype=dtype)),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
+        step = _dopri5_adaptive_step(
+            rhs,
+            t,
+            y,
+            h,
+            k_first,
+            tmax,
+            dtmax,
+            rtol,
+            atol,
+            dtype,
         )
-        factor = jnp.clip(
-            factor,
-            jnp.asarray(_MIN_FACTOR, dtype=dtype),
-            jnp.asarray(_MAX_FACTOR, dtype=dtype),
-        )
-        h_next = h_clamped * factor
-        t_accepted = _accepted_step_time(t, h_clamped, tmax)
-        t_next = jnp.where(accepted, t_accepted, t)
-        y_next = jnp.where(accepted, y_new, y)
-        k_next = jnp.where(accepted, k7, k_first)
+        h_clamped = step.h_clamped
+        y_new = step.y_new
+        accepted = step.accepted
+        h_next = step.h_next
+        t_next = step.t_next
+        y_next = step.y_next
+        k_next = step.k_next
 
         # ── Phi-plane crossing detection on accepted steps ──
         phi_current = _continuous_phi(y_new[0], y_new[1], phi_last, dtype)
@@ -3978,69 +3966,23 @@ def trace_fullorbit(
 
         def scan_phis(args):
             hits_in, count_in, phi_last_in, phi_curr_in = args
-            if num_phis == 0:
-                return hits_in, count_in
-
-            def scan_one_phi(i, carry):
-                hits_carry, count_carry = carry
-                phi_target = phis_arr[i]
-                fl_last = jnp.floor((phi_last_in - phi_target) / two_pi)
-                fl_curr = jnp.floor((phi_curr_in - phi_target) / two_pi)
-                crossed = fl_last != fl_curr
-                fak = jnp.round(
-                    (
-                        (phi_last_in + phi_curr_in) / jnp.asarray(2.0, dtype=dtype)
-                        - phi_target
-                    )
-                    / two_pi
-                )
-                phi_shift = fak * two_pi + phi_target
-
-                def diff_at(s, phi_last_in=phi_last_in, phi_shift=phi_shift):
-                    pos = state_at_fraction(s)
-                    return (
-                        _continuous_phi(pos[0], pos[1], phi_last_in, dtype) - phi_shift
-                    )
-
-                f_left = diff_at(jnp.asarray(0.0, dtype=dtype))
-                f_right = diff_at(jnp.asarray(1.0, dtype=dtype))
-                bracket_atol = jnp.asarray(1.0e-15, dtype=dtype)
-                s_root, _f_root, _bracketed = bracket_root_jax(
-                    diff_at,
-                    jnp.asarray(0.0, dtype=dtype),
-                    jnp.asarray(1.0, dtype=dtype),
-                    f_left,
-                    f_right,
-                    max_root_iters,
-                    bracket_atol,
-                )
-                t_root = t + s_root * h_clamped
-                state_root = state_at_fraction(s_root)
-                hit_row = jnp.stack(
-                    [
-                        t_root,
-                        jnp.asarray(i, dtype=dtype),
-                        state_root[0],
-                        state_root[1],
-                        state_root[2],
-                        state_root[3],
-                        state_root[4],
-                        state_root[5],
-                    ]
-                )
-                return _append_event_row(
-                    hits_carry,
-                    count_carry,
-                    crossed,
-                    hit_row,
-                    max_phi_hits_i32,
-                )
-
-            return jax.lax.fori_loop(
-                0,
-                num_phis,
-                scan_one_phi,
-                (hits_in, count_in),
+            return _scan_angle_plane_events(
+                hits=hits_in,
+                count=count_in,
+                angle_last=phi_last_in,
+                angle_current=phi_curr_in,
+                targets=phis_arr,
+                num_targets=num_phis,
+                two_pi=two_pi,
+                dtype=dtype,
+                t=t,
+                h_clamped=h_clamped,
+                max_root_iters=max_root_iters,
+                max_hits_i32=max_phi_hits_i32,
+                state_at_fraction=state_at_fraction,
+                angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
+                    state, angle_near, dtype
+                ),
             )
 
         phi_hits_after, phi_count_after = jax.lax.cond(
@@ -4068,41 +4010,20 @@ def trace_fullorbit(
                 phi_curr_in,
                 phi_init_in,
             ) = args
-            for i, criterion in enumerate(stopping_criteria):
-                pred = _stopping_criterion_should_stop(
-                    criterion,
-                    y_next[0],
-                    y_next[1],
-                    y_next[2],
-                    iter_count_in,
-                    phi_curr_in,
-                    phi_init_in,
-                    dtype,
-                )
-                fires = jnp.logical_and(jnp.logical_not(stop_in), pred)
-                idx_val = jnp.asarray(-1 - i, dtype=jnp.int32)
-                hit_row = jnp.stack(
-                    [
-                        t_next,
-                        jnp.asarray(float(-1 - i), dtype=dtype),
-                        y_next[0],
-                        y_next[1],
-                        y_next[2],
-                        y_next[3],
-                        y_next[4],
-                        y_next[5],
-                    ]
-                )
-                hits_in, count_in = _append_event_row(
-                    hits_in,
-                    count_in,
-                    fires,
-                    hit_row,
-                    max_phi_hits_i32,
-                )
-                status_in = jnp.where(fires, idx_val, status_in)
-                stop_in = jnp.logical_or(stop_in, fires)
-            return hits_in, count_in, status_in, stop_in
+            return _apply_stopping_criteria_events(
+                stopping_criteria=stopping_criteria,
+                hits=hits_in,
+                count=count_in,
+                status=status_in,
+                stop=stop_in,
+                iter_count=iter_count_in,
+                angle_current=phi_curr_in,
+                angle_initial=phi_init_in,
+                t_event=t_next,
+                state=y_next,
+                dtype=dtype,
+                max_hits_i32=max_phi_hits_i32,
+            )
 
         iter_count_post = step_count + jnp.asarray(1, dtype=jnp.int32)
 

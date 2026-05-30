@@ -42,6 +42,9 @@ from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo import optimizer_jax as optimizer_jax_module
 from simsopt.geo import surfaceobjectives as surfaceobjectives_module
 from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
+from simsopt.geo import (
+    surfaceobjectives_traceable_jax as surfaceobjectives_traceable_jax_module,
+)
 from simsopt.geo.curveobjectives import cs_distance_pure
 from simsopt.geo.qfmsurface import QfmSurface
 from simsopt.backend import invalidate_backend_cache
@@ -59,6 +62,7 @@ from simsopt.geo.surface_fourier_jax import (
     surface_gammadash2_from_dofs,
     stellsym_scatter_indices,
 )
+from simsopt.jax_core.qfm_solver import _surface_norm as _qfm_surface_norm
 from .boozersurface_jax_test_helpers import _mock_linear_solve_status
 from .surface_test_helpers import get_exact_surface, get_surface
 
@@ -128,6 +132,17 @@ def _donating_sum_value_and_grad():
     return jax.jit(_sum_value_and_grad, donate_argnums=(0,))
 
 
+def test_traceable_runtime_old_import_path_reexports_public_and_private_helpers():
+    assert (
+        surfaceobjectives_jax_module.make_traceable_objective
+        is surfaceobjectives_traceable_jax_module.make_traceable_objective
+    )
+    assert (
+        surfaceobjectives_jax_module._get_cached_traceable_runtime_entry
+        is surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry
+    )
+
+
 @pytest.mark.parametrize(
     "candidate_value",
     [
@@ -139,9 +154,11 @@ def _donating_sum_value_and_grad():
 )
 def test_traceable_rejected_objective_value_uses_reference_value(candidate_value):
     reference_value = jnp.asarray(1.25, dtype=jnp.float64)
-    rejected_value = surfaceobjectives_jax_module._traceable_rejected_objective_value(
-        candidate_value,
-        reference_value,
+    rejected_value = (
+        surfaceobjectives_traceable_jax_module._traceable_rejected_objective_value(
+            candidate_value,
+            reference_value,
+        )
     )
 
     candidate_host = float(np.asarray(candidate_value))
@@ -244,12 +261,12 @@ def _make_test_hessian_booz():
 
 def _patch_traceable_hessian_solve(monkeypatch, solve_hessian_system_with_status):
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_boozer_penalty_objective_closure",
         lambda **_kwargs: "objective_fn",
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_inner_objective_kwargs",
         lambda _objective_kwargs: {},
     )
@@ -262,17 +279,17 @@ def _patch_traceable_hessian_solve(monkeypatch, solve_hessian_system_with_status
 
 def _patch_traceable_exact_warmstart_failure(monkeypatch, failed_dx):
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_exact_residual_kwargs",
         lambda _objective_kwargs: {},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_boozer_exact_residual",
         lambda x_inner, coil_set_spec, **_kwargs: x_inner + coil_set_spec,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_solve_linearization",
         lambda *_args, **_kwargs: (failed_dx, _mock_linear_solve_status(False)),
     )
@@ -287,7 +304,7 @@ def _make_test_exact_failure_profile_suite(
 ):
     _patch_traceable_exact_warmstart_failure(monkeypatch, failed_dx)
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_batched_value_and_grad_pipeline",
         lambda compiled_value_and_grad_for: compiled_value_and_grad_for,
     )
@@ -328,7 +345,7 @@ def _make_test_exact_failure_profile_suite(
             "nit": jnp.asarray(7, dtype=jnp.int64),
         },
     )
-    return surfaceobjectives_jax_module._make_traceable_objective_profile_suite_from_compiled_bundle(
+    return surfaceobjectives_traceable_jax_module._make_traceable_objective_profile_suite_from_compiled_bundle(
         compiled_bundle,
         exact_failure_booz,
         object(),
@@ -823,10 +840,8 @@ def test_curve_pair_batches_match_reference_for_grouped_shapes():
     curve_stacks = surfaceobjectives_jax_module._curve_stacks_from_curve_tuple(
         coil_gammas
     )
-    curve_curve_batches = (
-        surfaceobjectives_jax_module._curve_curve_point_pair_batches_from_stacks(
-            curve_stacks
-        )
+    curve_curve_batches = surfaceobjectives_traceable_jax_module._curve_curve_point_pair_batches_from_stacks(
+        curve_stacks
     )
     surface_gamma = jnp.asarray(
         [
@@ -836,11 +851,9 @@ def test_curve_pair_batches_match_reference_for_grouped_shapes():
         ],
         dtype=jnp.float64,
     )
-    curve_surface_batches = (
-        surfaceobjectives_jax_module._curve_surface_point_pair_batches_from_stacks(
-            curve_stacks,
-            surface_gamma,
-        )
+    curve_surface_batches = surfaceobjectives_traceable_jax_module._curve_surface_point_pair_batches_from_stacks(
+        curve_stacks,
+        surface_gamma,
     )
     assert all(points_b.ndim == 2 for _points_a, points_b in curve_surface_batches)
     reference_curve_pairs = tuple(
@@ -1103,7 +1116,7 @@ def test_traceable_objective_bundle_donates_value_and_grad_input(monkeypatch):
 
     monkeypatch.setattr(surfaceobjectives_jax_module.jax, "jit", recording_jit)
 
-    surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+    surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
         object(),
         _minimal_traceable_objective_state(),
     )
@@ -1131,7 +1144,7 @@ def test_traceable_objective_bundle_omits_value_and_grad_donation_for_mps(
 
     monkeypatch.setattr(surfaceobjectives_jax_module.jax, "jit", recording_jit)
     try:
-        surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+        surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
             object(),
             _minimal_traceable_objective_state(),
         )
@@ -1157,7 +1170,7 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
         counting_mark,
     )
 
-    bundle = surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+    bundle = surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
         object(),
         _minimal_traceable_objective_state(),
     )
@@ -1176,7 +1189,7 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
 
 def test_traceable_value_and_grad_boundary_preserves_caller_jax_buffer() -> None:
     value_and_grad = (
-        surfaceobjectives_jax_module._make_traceable_value_and_grad_boundary(
+        surfaceobjectives_traceable_jax_module._make_traceable_value_and_grad_boundary(
             _donating_sum_value_and_grad()
         )
     )
@@ -1190,7 +1203,7 @@ def test_traceable_value_and_grad_boundary_preserves_caller_jax_buffer() -> None
 
 def test_traceable_host_value_and_grad_preserves_caller_jax_buffer() -> None:
     host_value_and_grad = (
-        surfaceobjectives_jax_module._make_traceable_host_value_and_grad(
+        surfaceobjectives_traceable_jax_module._make_traceable_host_value_and_grad(
             _donating_sum_value_and_grad()
         )
     )
@@ -1203,15 +1216,11 @@ def test_traceable_host_value_and_grad_preserves_caller_jax_buffer() -> None:
 
 
 def test_traceable_batched_value_and_grad_preserves_caller_jax_buffer() -> None:
-    batched_pipeline = (
-        surfaceobjectives_jax_module._make_traceable_batched_value_and_grad_pipeline(
-            _donating_sum_value_and_grad()
-        )
+    batched_pipeline = surfaceobjectives_traceable_jax_module._make_traceable_batched_value_and_grad_pipeline(
+        _donating_sum_value_and_grad()
     )
-    batched_value_and_grad = (
-        surfaceobjectives_jax_module._make_traceable_batched_value_and_grad_boundary(
-            batched_pipeline
-        )
+    batched_value_and_grad = surfaceobjectives_traceable_jax_module._make_traceable_batched_value_and_grad_boundary(
+        batched_pipeline
     )
     coil_dofs_batch = jnp.ones((3, 4), dtype=jnp.float64)
 
@@ -1256,12 +1265,12 @@ def test_operator_adjoint_signoff_gate_failed_solve_returns_nan_gradient(
         }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_forward_result",
         fake_forward_result,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
         lambda *_args, **_kwargs: (
             failed_gradient,
@@ -1269,7 +1278,7 @@ def test_operator_adjoint_signoff_gate_failed_solve_returns_nan_gradient(
         ),
     )
 
-    bundle = surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+    bundle = surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
         object(),
         state,
     )
@@ -1429,9 +1438,8 @@ def test_exact_batched_adjoint_solves_each_rhs_column_via_operator():
         rhs_batch,
     )
 
-    assert len(calls) == rhs_batch.shape[0]
-    for actual, expected in zip(calls, np.asarray(rhs_batch)):
-        np.testing.assert_allclose(actual, expected)
+    assert len(calls) == 1
+    np.testing.assert_allclose(calls[0], np.asarray(rhs_batch).T)
     np.testing.assert_allclose(np.asarray(solved), 2.0 * np.asarray(rhs_batch))
 
 
@@ -1444,12 +1452,12 @@ def test_traceable_solve_exact_linearization_uses_operator_with_factors_present(
     calls = {}
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_exact_residual_kwargs",
         lambda _objective_kwargs: {},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_boozer_exact_residual",
         lambda x_inner, coil_set_spec, **_kwargs: x_inner + coil_set_spec,
     )
@@ -1478,13 +1486,15 @@ def test_traceable_solve_exact_linearization_uses_operator_with_factors_present(
         fake_solve_jacobian_system_with_status,
     )
 
-    solved, success = surfaceobjectives_jax_module._traceable_solve_exact_linearization(
-        solved_x,
-        rhs,
-        coil_set_spec,
-        {},
-        linear_solve_tol=1.0e-8,
-        transpose=True,
+    solved, success = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_exact_linearization(
+            solved_x,
+            rhs,
+            coil_set_spec,
+            {},
+            linear_solve_tol=1.0e-8,
+            transpose=True,
+        )
     )
 
     assert calls == {"transpose": True, "tol": 1.0e-8}
@@ -1500,18 +1510,18 @@ def test_traceable_exact_operator_and_dense_reference_share_residual_contract(
     matrix = jnp.asarray([[2.0, 0.25], [-0.1, 1.5]], dtype=jnp.float64)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_exact_residual_kwargs",
         lambda _objective_kwargs: {},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_boozer_exact_residual",
         lambda x_inner, coil_set_spec, **_kwargs: matrix @ x_inner + coil_set_spec,
     )
 
     operator_solved, operator_success = (
-        surfaceobjectives_jax_module._traceable_solve_exact_linearization(
+        surfaceobjectives_traceable_jax_module._traceable_solve_exact_linearization(
             solved_x,
             rhs,
             jnp.zeros_like(rhs),
@@ -1560,12 +1570,12 @@ def test_traceable_exact_warmstart_prediction_uses_operator_solve(monkeypatch):
     calls = {}
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_exact_residual_kwargs",
         lambda _objective_kwargs: {},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_boozer_exact_residual",
         lambda x_inner, coil_set_spec, **_kwargs: x_inner + coil_set_spec,
     )
@@ -1594,22 +1604,24 @@ def test_traceable_exact_warmstart_prediction_uses_operator_solve(monkeypatch):
         fake_solve_jacobian_system_with_status,
     )
 
-    predicted, success = surfaceobjectives_jax_module._traceable_predict_warmstart_x(
-        object(),
-        lambda current_coil_dofs: current_coil_dofs,
-        coil_dofs=coil_dofs,
-        baseline_coil_dofs=baseline_coil_dofs,
-        baseline_x=baseline_x,
-        baseline_linear_solve_factors=(
-            jnp.eye(2, dtype=jnp.float64),
-            jnp.eye(2, dtype=jnp.float64),
-            jnp.eye(2, dtype=jnp.float64),
-        ),
-        linearization_kind="exact_jacobian",
-        linear_solve_tol=1.0e-7,
-        linear_solve_stab=0.0,
-        predictor_kind="exact",
-        objective_kwargs={},
+    predicted, success = (
+        surfaceobjectives_traceable_jax_module._traceable_predict_warmstart_x(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            baseline_coil_dofs=baseline_coil_dofs,
+            baseline_x=baseline_x,
+            baseline_linear_solve_factors=(
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+            ),
+            linearization_kind="exact_jacobian",
+            linear_solve_tol=1.0e-7,
+            linear_solve_stab=0.0,
+            predictor_kind="exact",
+            objective_kwargs={},
+        )
     )
 
     assert calls == {"transpose": False, "tol": 1.0e-7}
@@ -1644,12 +1656,12 @@ def test_traceable_exact_warmstart_success_matches_reference_operator_linearizat
     calls = {}
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_exact_residual_kwargs",
         lambda _objective_kwargs: {},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_boozer_exact_residual",
         lambda x_inner, coil_set_spec, **_kwargs: A @ x_inner + B @ coil_set_spec,
     )
@@ -1679,18 +1691,20 @@ def test_traceable_exact_warmstart_success_matches_reference_operator_linearizat
         fake_solve_jacobian_system_with_status,
     )
 
-    predicted, success = surfaceobjectives_jax_module._traceable_predict_warmstart_x(
-        object(),
-        lambda current_coil_dofs: current_coil_dofs,
-        coil_dofs=coil_dofs,
-        baseline_coil_dofs=baseline_coil_dofs,
-        baseline_x=baseline_x,
-        baseline_linear_solve_factors=None,
-        linearization_kind="exact_jacobian",
-        linear_solve_tol=1.0e-7,
-        linear_solve_stab=0.0,
-        predictor_kind="exact",
-        objective_kwargs={},
+    predicted, success = (
+        surfaceobjectives_traceable_jax_module._traceable_predict_warmstart_x(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            baseline_coil_dofs=baseline_coil_dofs,
+            baseline_x=baseline_x,
+            baseline_linear_solve_factors=None,
+            linearization_kind="exact_jacobian",
+            linear_solve_tol=1.0e-7,
+            linear_solve_stab=0.0,
+            predictor_kind="exact",
+            objective_kwargs={},
+        )
     )
 
     assert calls == {"transpose": False, "tol": 1.0e-7}
@@ -1727,17 +1741,19 @@ def test_traceable_hessian_solve_uses_configured_stabilization_once(monkeypatch)
         fake_solve_hessian_system_with_status,
     )
 
-    solution, success = surfaceobjectives_jax_module._traceable_solve_linearization(
-        _make_test_hessian_booz(),
-        solved_x,
-        rhs,
-        coil_set_spec=object(),
-        objective_kwargs={},
-        linear_solve_factors=None,
-        linearization_kind="hessian",
-        linear_solve_tol=1.0e-10,
-        linear_solve_stab=1.0e-4,
-        transpose=True,
+    solution, success = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
+            _make_test_hessian_booz(),
+            solved_x,
+            rhs,
+            coil_set_spec=object(),
+            objective_kwargs={},
+            linear_solve_factors=None,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=1.0e-4,
+            transpose=True,
+        )
     )
 
     assert calls == [1.0e-4]
@@ -1775,17 +1791,19 @@ def test_traceable_hessian_solve_uses_configured_stabilization_under_jit(
     )
 
     compiled_solve = jax.jit(
-        lambda current_rhs: surfaceobjectives_jax_module._traceable_solve_linearization(
-            _make_test_hessian_booz(),
-            solved_x,
-            current_rhs,
-            coil_set_spec=None,
-            objective_kwargs={},
-            linear_solve_factors=None,
-            linearization_kind="hessian",
-            linear_solve_tol=1.0e-10,
-            linear_solve_stab=1.0e-4,
-            transpose=True,
+        lambda current_rhs: (
+            surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
+                _make_test_hessian_booz(),
+                solved_x,
+                current_rhs,
+                coil_set_spec=None,
+                objective_kwargs={},
+                linear_solve_factors=None,
+                linearization_kind="hessian",
+                linear_solve_tol=1.0e-10,
+                linear_solve_stab=1.0e-4,
+                transpose=True,
+            )
         )
     )
 
@@ -1811,7 +1829,7 @@ def test_traceable_hessian_solve_uses_dense_plu_forward_and_transpose():
     linear_solve_factors = jax.scipy.linalg.lu(matrix)
 
     forward_solution, forward_success = (
-        surfaceobjectives_jax_module._traceable_solve_linearization(
+        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
             object(),
             jnp.zeros_like(rhs),
             rhs,
@@ -1825,7 +1843,7 @@ def test_traceable_hessian_solve_uses_dense_plu_forward_and_transpose():
         )
     )
     transpose_solution, transpose_success = (
-        surfaceobjectives_jax_module._traceable_solve_linearization(
+        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
             object(),
             jnp.zeros_like(rhs),
             rhs,
@@ -1860,7 +1878,9 @@ def test_traceable_plu_unpack_rejects_unsupported_factor_arity():
     unsupported_factors = (matrix, matrix, matrix, matrix)
 
     with pytest.raises(AssertionError, match="linear_solve_factors"):
-        surfaceobjectives_jax_module._traceable_plu_unpack_lu_piv(unsupported_factors)
+        surfaceobjectives_traceable_jax_module._traceable_plu_unpack_lu_piv(
+            unsupported_factors
+        )
 
 
 def test_traceable_hessian_plu_solve_requires_forward_error_gate(monkeypatch):
@@ -1891,17 +1911,19 @@ def test_traceable_hessian_plu_solve_requires_forward_error_gate(monkeypatch):
         relative_residual_1_norm,
     )
 
-    _solution, success = surfaceobjectives_jax_module._traceable_solve_linearization(
-        object(),
-        jnp.zeros_like(rhs),
-        rhs,
-        coil_set_spec=None,
-        objective_kwargs={},
-        linear_solve_factors=linear_solve_factors,
-        linearization_kind="hessian",
-        linear_solve_tol=1.0e-10,
-        linear_solve_stab=0.0,
-        transpose=False,
+    _solution, success = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
+            object(),
+            jnp.zeros_like(rhs),
+            rhs,
+            coil_set_spec=None,
+            objective_kwargs={},
+            linear_solve_factors=linear_solve_factors,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            transpose=False,
+        )
     )
 
     assert bool(np.asarray(success)) is False
@@ -1921,17 +1943,19 @@ def test_traceable_hessian_plu_solve_is_jittable():
     linear_solve_factors = jax.scipy.linalg.lu(matrix)
 
     compiled_solve = jax.jit(
-        lambda current_rhs: surfaceobjectives_jax_module._traceable_solve_linearization(
-            object(),
-            jnp.zeros_like(current_rhs),
-            current_rhs,
-            coil_set_spec=None,
-            objective_kwargs={},
-            linear_solve_factors=linear_solve_factors,
-            linearization_kind="hessian",
-            linear_solve_tol=1.0e-10,
-            linear_solve_stab=0.0,
-            transpose=True,
+        lambda current_rhs: (
+            surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
+                object(),
+                jnp.zeros_like(current_rhs),
+                current_rhs,
+                coil_set_spec=None,
+                objective_kwargs={},
+                linear_solve_factors=linear_solve_factors,
+                linearization_kind="hessian",
+                linear_solve_tol=1.0e-10,
+                linear_solve_stab=0.0,
+                transpose=True,
+            )
         )
     )
 
@@ -1954,18 +1978,20 @@ def test_traceable_exact_warmstart_failure_keeps_failed_operator_step(monkeypatc
 
     _patch_traceable_exact_warmstart_failure(monkeypatch, failed_dx)
 
-    predicted, success = surfaceobjectives_jax_module._traceable_predict_warmstart_x(
-        object(),
-        lambda current_coil_dofs: current_coil_dofs,
-        coil_dofs=coil_dofs,
-        baseline_coil_dofs=baseline_coil_dofs,
-        baseline_x=baseline_x,
-        baseline_linear_solve_factors=None,
-        linearization_kind="exact_jacobian",
-        linear_solve_tol=1.0e-7,
-        linear_solve_stab=0.0,
-        predictor_kind="exact",
-        objective_kwargs={},
+    predicted, success = (
+        surfaceobjectives_traceable_jax_module._traceable_predict_warmstart_x(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            baseline_coil_dofs=baseline_coil_dofs,
+            baseline_x=baseline_x,
+            baseline_linear_solve_factors=None,
+            linearization_kind="exact_jacobian",
+            linear_solve_tol=1.0e-7,
+            linear_solve_stab=0.0,
+            predictor_kind="exact",
+            objective_kwargs={},
+        )
     )
 
     assert bool(np.asarray(success)) is False
@@ -1982,37 +2008,39 @@ def test_traceable_ls_warmstart_failure_preserves_baseline_state(monkeypatch):
     failed_dx = jnp.asarray([0.125, -0.375], dtype=jnp.float64)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_inner_objective_kwargs",
         lambda _objective_kwargs: {},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_inner_stationarity_coil_jvp",
         lambda *_args, **_kwargs: jnp.asarray([0.25, -0.5], dtype=jnp.float64),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_solve_linearization",
         lambda *_args, **_kwargs: (failed_dx, _mock_linear_solve_status(False)),
     )
 
-    predicted, success = surfaceobjectives_jax_module._traceable_predict_warmstart_x(
-        object(),
-        lambda current_coil_dofs: current_coil_dofs,
-        coil_dofs=coil_dofs,
-        baseline_coil_dofs=baseline_coil_dofs,
-        baseline_x=baseline_x,
-        baseline_linear_solve_factors=(
-            jnp.eye(2, dtype=jnp.float64),
-            jnp.eye(2, dtype=jnp.float64),
-            jnp.eye(2, dtype=jnp.float64),
-        ),
-        linearization_kind="hessian",
-        linear_solve_tol=1.0e-7,
-        linear_solve_stab=0.0,
-        predictor_kind="ls",
-        objective_kwargs={},
+    predicted, success = (
+        surfaceobjectives_traceable_jax_module._traceable_predict_warmstart_x(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            baseline_coil_dofs=baseline_coil_dofs,
+            baseline_x=baseline_x,
+            baseline_linear_solve_factors=(
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+            ),
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-7,
+            linear_solve_stab=0.0,
+            predictor_kind="ls",
+            objective_kwargs={},
+        )
     )
 
     assert bool(np.asarray(success)) is False
@@ -2027,7 +2055,7 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
 
     _patch_traceable_exact_warmstart_failure(monkeypatch, failed_dx)
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_total_objective",
         lambda *_args, **_kwargs: jnp.asarray(np.nan, dtype=jnp.float64),
     )
@@ -2047,7 +2075,7 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
         },
     )
 
-    result = surfaceobjectives_jax_module._traceable_general_forward_result(
+    result = surfaceobjectives_traceable_jax_module._traceable_general_forward_result(
         booz,
         lambda coil_dofs: coil_dofs,
         coil_dofs=jnp.asarray([1.0, -2.0], dtype=jnp.float64),
@@ -2139,7 +2167,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
     seen_trees = []
     optimizer_option_methods = []
     original_tree_signature = (
-        surfaceobjectives_jax_module._traceable_cache_tree_signature
+        surfaceobjectives_traceable_jax_module._traceable_cache_tree_signature
     )
 
     def recording_tree_signature(tree):
@@ -2147,7 +2175,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
         return original_tree_signature(tree)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_cache_tree_signature",
         recording_tree_signature,
     )
@@ -2187,7 +2215,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
         }
     )
 
-    surfaceobjectives_jax_module._traceable_runtime_cache_key(
+    surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
         booz,
         state,
         success_filter=None,
@@ -2266,17 +2294,17 @@ def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
     )
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_resolved_boozer_solved_runtime_state",
         lambda _booz: solved_state,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_total_objective",
         evaluate_total_objective,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_compiled_bundle_from_state",
         lambda _booz, state, **_kwargs: {
             "state": state,
@@ -2286,12 +2314,12 @@ def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
         },
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_objective_from_compiled_bundle",
         lambda compiled_bundle: ("objective", id(compiled_bundle)),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_batched_value_and_grad_pipeline",
         lambda compiled_value_and_grad_for: (
             "batched_value_and_grad",
@@ -2299,12 +2327,12 @@ def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
         ),
     )
 
-    entry1 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    entry1 = surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.23,
     )
-    entry2 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    entry2 = surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.23,
@@ -2335,8 +2363,10 @@ def test_cached_strict_scalar_value_and_grad_builds_stable_jit(monkeypatch):
             total = total + 1.0
         return total
 
-    value_and_grad = surfaceobjectives_jax_module._make_cached_strict_scalar_value_and_grad(
-        objective
+    value_and_grad = (
+        surfaceobjectives_jax_module._make_cached_strict_scalar_value_and_grad(
+            objective
+        )
     )
 
     x = jnp.asarray([2.0, -3.0], dtype=jnp.float64)
@@ -2371,12 +2401,12 @@ def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_sta
     baseline_x = jnp.asarray([0.5, -0.25, 0.31], dtype=jnp.float64)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_predict_warmstart_x",
         lambda *_args, **_kwargs: (baseline_x, jnp.asarray(True, dtype=bool)),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_total_objective",
         lambda *_args, **_kwargs: objective_value,
     )
@@ -2403,7 +2433,7 @@ def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_sta
 
     coil_dofs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
     baseline_coil_dofs = jnp.asarray([0.0, 0.0], dtype=jnp.float64)
-    result = surfaceobjectives_jax_module._traceable_forward_result(
+    result = surfaceobjectives_traceable_jax_module._traceable_forward_result(
         booz,
         lambda dofs: {"coil_dofs": dofs},
         coil_dofs=coil_dofs,
@@ -2454,12 +2484,12 @@ def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
     success_filter_a._traceable_runtime_cache_signature = signature
     success_filter_b._traceable_runtime_cache_signature = signature
 
-    key_a = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+    key_a = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
         booz,
         state,
         success_filter=success_filter_a,
     )
-    key_b = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+    key_b = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
         booz,
         state,
         success_filter=success_filter_b,
@@ -2488,7 +2518,7 @@ def test_traceable_runtime_cache_key_uses_live_callable_success_filter_signature
     def success_filter(_coil_dofs, _solved_x):
         return jnp.asarray(True, dtype=bool)
 
-    key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+    key = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
         booz,
         state,
         success_filter=success_filter,
@@ -2507,12 +2537,12 @@ def test_traceable_runtime_cache_key_uses_live_callable_success_filter_signature
 
     callable_a = CallableWithCustomEq()
     callable_b = CallableWithCustomEq()
-    key_a = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+    key_a = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
         booz,
         state,
         success_filter=callable_a,
     )
-    key_b = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+    key_b = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
         booz,
         state,
         success_filter=callable_b,
@@ -2537,13 +2567,13 @@ def test_traceable_runtime_cache_key_uses_runtime_state_tokens_not_object_identi
         "objective_method": "bfgs-ondevice",
     }
 
-    base_key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+    base_key = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
         booz,
         _traceable_cache_key_state(state),
         success_filter=None,
     )
     assert (
-        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
             booz,
             _traceable_cache_key_state(state, solve_state_token=8),
             success_filter=None,
@@ -2551,7 +2581,7 @@ def test_traceable_runtime_cache_key_uses_runtime_state_tokens_not_object_identi
         != base_key
     )
     assert (
-        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
             booz,
             _traceable_cache_key_state(state, coil_dof_state_token=12),
             success_filter=None,
@@ -2559,7 +2589,7 @@ def test_traceable_runtime_cache_key_uses_runtime_state_tokens_not_object_identi
         != base_key
     )
     assert (
-        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
             booz,
             _traceable_cache_key_state(
                 state,
@@ -2611,14 +2641,14 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
 
     booz = make_booz()
     state = make_state()
-    base_key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+    base_key = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
         booz,
         state,
         success_filter=success_filter_a,
     )
 
     assert (
-        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
             booz,
             make_state(solve_state_token=8),
             success_filter=success_filter_a,
@@ -2626,7 +2656,7 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
         != base_key
     )
     assert (
-        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
             booz,
             make_state(iota_target=0.24),
             success_filter=success_filter_a,
@@ -2634,7 +2664,7 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
         != base_key
     )
     assert (
-        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
             booz,
             state,
             success_filter=success_filter_b,
@@ -2642,7 +2672,7 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
         != base_key
     )
     assert (
-        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
             booz,
             make_state(coil_dof_state_token=12),
             success_filter=success_filter_a,
@@ -2650,7 +2680,7 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
         != base_key
     )
     assert (
-        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
             booz,
             make_state(coil_layout_signature=("coil-layout", "changed")),
             success_filter=success_filter_a,
@@ -2658,7 +2688,7 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
         != base_key
     )
     assert (
-        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
             make_booz(bfgs_maxiter=6),
             state,
             success_filter=success_filter_a,
@@ -2698,7 +2728,7 @@ def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
         }
     )
 
-    key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+    key = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
         booz,
         state,
         success_filter=None,
@@ -2708,7 +2738,7 @@ def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
 
 
 def test_traceable_runtime_hostify_tree_explicitly_materializes_jax_array_leaves():
-    hostified = surfaceobjectives_jax_module._traceable_runtime_hostify_tree(
+    hostified = surfaceobjectives_traceable_jax_module._traceable_runtime_hostify_tree(
         {
             "vector": jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
             "nested": (
@@ -2786,7 +2816,7 @@ def test_boozer_residual_inner_evaluates_label_on_label_geometry(monkeypatch):
     )
 
     coil_set_spec = object()
-    value = surfaceobjectives_jax_module._boozer_residual_J_of_x_inner(
+    value = surfaceobjectives_traceable_jax_module._boozer_residual_J_of_x_inner(
         jnp.asarray([0.1, 0.2, 0.3], dtype=jnp.float64),
         coil_set_spec=coil_set_spec,
         quadpoints_phi=jnp.asarray([0.0, 0.5], dtype=jnp.float64),
@@ -2826,7 +2856,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         lambda _booz: None,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_canonicalize_traceable_exact_quadrature",
         lambda _booz: (
             jnp.asarray([0.0, 0.25], dtype=jnp.float64),
@@ -2835,7 +2865,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_total_objective",
         lambda *_args, **_kwargs: jnp.asarray(3.5, dtype=jnp.float64),
     )
@@ -2927,7 +2957,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         def coil_set_spec_from_dofs(self, coil_dofs):
             return coil_dofs
 
-    state = surfaceobjectives_jax_module._build_traceable_objective_state(
+    state = surfaceobjectives_traceable_jax_module._build_traceable_objective_state(
         _FakeBooz(),
         _FakeBS(),
         jnp.asarray(0.28, dtype=jnp.float64),
@@ -2962,7 +2992,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
 
 def test_build_traceable_objective_state_exact_carries_no_factors(monkeypatch):
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_canonicalize_traceable_exact_quadrature",
         lambda _booz: (
             jnp.asarray([0.0, 0.25], dtype=jnp.float64),
@@ -2971,7 +3001,7 @@ def test_build_traceable_objective_state_exact_carries_no_factors(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_total_objective",
         lambda *_args, **_kwargs: jnp.asarray(3.5, dtype=jnp.float64),
     )
@@ -3054,7 +3084,7 @@ def test_build_traceable_objective_state_exact_carries_no_factors(monkeypatch):
         def coil_set_spec_from_dofs(self, coil_dofs):
             return coil_dofs
 
-    state = surfaceobjectives_jax_module._build_traceable_objective_state(
+    state = surfaceobjectives_traceable_jax_module._build_traceable_objective_state(
         _FakeBooz(),
         _FakeBS(),
         jnp.asarray(0.28, dtype=jnp.float64),
@@ -3188,7 +3218,7 @@ def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkey
     )
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_resolved_boozer_solved_runtime_state",
         lambda _booz_surf: solved_state,
     )
@@ -3325,7 +3355,7 @@ def test_non_qs_ratio_native_gradient_stays_flat_until_public_boundary(monkeypat
     )
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_resolved_boozer_solved_runtime_state",
         lambda _booz_surf: solved_state,
     )
@@ -3672,32 +3702,32 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
         }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_cache_state",
         build_cache_state,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_materialize_traceable_objective_state",
         materialize_state,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_compiled_bundle_from_state",
         build_bundle,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_objective_from_compiled_bundle",
         lambda compiled_bundle: ("objective", id(compiled_bundle)),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_objective",
         lambda objective, **_kwargs: ("host_objective", objective),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_value_and_grad",
         lambda compiled_value_and_grad_for, **_kwargs: (
             "host_value_and_grad",
@@ -3705,7 +3735,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_batched_value_and_grad_pipeline",
         lambda compiled_value_and_grad_for: (
             "batched_value_and_grad",
@@ -3713,14 +3743,14 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
         ),
     )
 
-    entry1 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    entry1 = surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.23,
         outer_objective_config={"enabled": True},
         success_filter=None,
     )
-    entry2 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    entry2 = surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.23,
@@ -3790,32 +3820,32 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
         }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_cache_state",
         build_cache_state,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_materialize_traceable_objective_state",
         materialize_state,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_compiled_bundle_from_state",
         build_bundle,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_objective_from_compiled_bundle",
         lambda compiled_bundle: ("objective", id(compiled_bundle)),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_objective",
         lambda objective, **_kwargs: ("host_objective", objective),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_value_and_grad",
         lambda compiled_value_and_grad_for, **_kwargs: (
             "host_value_and_grad",
@@ -3823,7 +3853,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_batched_value_and_grad_pipeline",
         lambda compiled_value_and_grad_for: (
             "batched_value_and_grad",
@@ -3841,14 +3871,14 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
     success_filter_a._traceable_runtime_cache_signature = signature
     success_filter_b._traceable_runtime_cache_signature = signature
 
-    entry1 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    entry1 = surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.23,
         outer_objective_config=None,
         success_filter=success_filter_a,
     )
-    entry2 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    entry2 = surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.23,
@@ -3915,32 +3945,32 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solve_state_change(
         }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_cache_state",
         build_cache_state,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_materialize_traceable_objective_state",
         materialize_state,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_compiled_bundle_from_state",
         build_bundle,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_objective_from_compiled_bundle",
         lambda compiled_bundle: ("objective", id(compiled_bundle)),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_objective",
         lambda objective, **_kwargs: ("host_objective", objective),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_value_and_grad",
         lambda compiled_value_and_grad_for, **_kwargs: (
             "host_value_and_grad",
@@ -3948,7 +3978,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solve_state_change(
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_batched_value_and_grad_pipeline",
         lambda compiled_value_and_grad_for: (
             "batched_value_and_grad",
@@ -3956,13 +3986,13 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solve_state_change(
         ),
     )
 
-    surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.23,
     )
     booz._traceable_solve_state_token += 1
-    surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.23,
@@ -4026,32 +4056,32 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
         }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_cache_state",
         build_cache_state,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_materialize_traceable_objective_state",
         materialize_state,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_compiled_bundle_from_state",
         build_bundle,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_objective_from_compiled_bundle",
         lambda compiled_bundle: ("objective", id(compiled_bundle)),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_objective",
         lambda objective, **_kwargs: ("host_objective", objective),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_value_and_grad",
         lambda compiled_value_and_grad_for, **_kwargs: (
             "host_value_and_grad",
@@ -4059,7 +4089,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_batched_value_and_grad_pipeline",
         lambda compiled_value_and_grad_for: (
             "batched_value_and_grad",
@@ -4067,12 +4097,12 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
         ),
     )
 
-    surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.23,
     )
-    surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+    surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
         booz,
         bs,
         0.28,
@@ -4126,17 +4156,17 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
         )
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_get_cached_traceable_runtime_entry",
         lambda *_args, **_kwargs: runtime_entry,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_ensure_traceable_runtime_public_boundaries",
         ensure_public,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_ensure_traceable_runtime_host_wrappers",
         lambda entry, _booz: ensure_host_calls.append(entry),
     )
@@ -4228,17 +4258,17 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         )
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_get_cached_traceable_runtime_entry",
         lambda *_args, **_kwargs: runtime_entry,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_ensure_traceable_runtime_public_boundaries",
         ensure_public,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_ensure_traceable_runtime_host_wrappers",
         ensure_wrappers,
     )
@@ -4311,7 +4341,7 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
     build_counts = {name: 0 for name in expected_public_boundaries}
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_get_cached_traceable_runtime_entry",
         lambda *_args, **_kwargs: runtime_entry,
     )
@@ -4340,7 +4370,7 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
         ),
     ):
         monkeypatch.setattr(
-            surfaceobjectives_jax_module,
+            surfaceobjectives_traceable_jax_module,
             attr_name,
             build_boundary(boundary_name, expected_public_boundaries[boundary_name]),
         )
@@ -4358,6 +4388,57 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
             assert bundle[boundary_name] is expected_boundary
 
     assert build_counts == {name: 1 for name in expected_public_boundaries}
+
+
+@pytest.mark.parametrize(
+    "objective_method",
+    ["lm-minpack-ondevice", "optimistix-lm-ondevice"],
+)
+def test_traceable_cache_state_accepts_ondevice_least_squares_methods(
+    monkeypatch,
+    objective_method,
+):
+    booz_jax = types.SimpleNamespace(
+        boozer_type="ls",
+        _resolve_optimizer_method=lambda: objective_method,
+    )
+
+    def stop_after_method_gate(_booz_jax):
+        raise RuntimeError("passed traceable objective method gate")
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_resolved_boozer_solved_runtime_state",
+        stop_after_method_gate,
+    )
+
+    with pytest.raises(RuntimeError, match="passed traceable objective method gate"):
+        surfaceobjectives_traceable_jax_module._build_traceable_objective_cache_state(
+            booz_jax,
+            object(),
+            0.23,
+        )
+
+
+@pytest.mark.parametrize("objective_method", ["lm", "adam-ondevice"])
+def test_traceable_cache_state_rejects_non_ondevice_methods(objective_method):
+    booz_jax = types.SimpleNamespace(
+        boozer_type="ls",
+        _resolve_optimizer_method=lambda: objective_method,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "make_traceable_objective\\(\\) requires an on-device optimizer "
+            f"method; got {objective_method!r}\\."
+        ),
+    ):
+        surfaceobjectives_traceable_jax_module._build_traceable_objective_cache_state(
+            booz_jax,
+            object(),
+            0.23,
+        )
 
 
 def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_until_used(
@@ -4381,12 +4462,12 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
     reporting_calls = []
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_objective_boundary",
         lambda objective: ("public_objective", objective),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_value_and_grad_boundary",
         lambda compiled_value_and_grad_for: (
             "public_value_and_grad",
@@ -4394,7 +4475,7 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_batched_value_and_grad_boundary",
         lambda batched_value_and_grad: (
             "public_batched_value_and_grad",
@@ -4402,7 +4483,7 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_forward_result_boundary",
         lambda compiled_forward_result_for: (
             "public_forward_result",
@@ -4427,12 +4508,12 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         return entry
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_ensure_traceable_runtime_reporting_metrics",
         ensure_reporting,
     )
 
-    surfaceobjectives_jax_module._ensure_traceable_runtime_public_boundaries(
+    surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_public_boundaries(
         runtime_entry
     )
 
@@ -4497,12 +4578,12 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
     reporting_calls = []
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_objective",
         lambda objective, **_kwargs: ("host_objective", objective),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_value_and_grad",
         lambda compiled_value_and_grad_for, **_kwargs: (
             "host_value_and_grad",
@@ -4522,12 +4603,12 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
         return entry
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_ensure_traceable_runtime_reporting_metrics",
         ensure_reporting,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_traceable_host_reporting_metrics",
         lambda reporting_metrics: (
             lambda coil_dofs, *, include_distance_metrics=True: (
@@ -4540,7 +4621,7 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
         lambda *_args, **_kwargs: (
             jnp.asarray([0.25], dtype=jnp.float64),
@@ -4548,7 +4629,7 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
         ),
     )
 
-    surfaceobjectives_jax_module._ensure_traceable_runtime_host_wrappers(
+    surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_host_wrappers(
         runtime_entry,
         object(),
     )
@@ -4598,16 +4679,14 @@ def test_traceable_seeded_initial_value_surfaces_failed_solve_gradient(monkeypat
     }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_compiled_bundle_from_state",
         lambda *_args, **_kwargs: seeded_compiled_bundle,
     )
 
-    seeded = (
-        surfaceobjectives_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
-            runtime_entry,
-            object(),
-        )
+    seeded = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
+        runtime_entry,
+        object(),
     )
 
     value, grad = seeded.optimizer_initial_value_and_grad
@@ -4644,22 +4723,18 @@ def test_traceable_seeded_value_and_grad_builds_general_only_bundle(monkeypatch)
         return seeded_compiled_bundle
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_compiled_bundle_from_state",
         build_compiled_bundle,
     )
 
-    seeded = (
-        surfaceobjectives_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
-            runtime_entry,
-            object(),
-        )
+    seeded = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
+        runtime_entry,
+        object(),
     )
-    cached_seeded = (
-        surfaceobjectives_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
-            runtime_entry,
-            object(),
-        )
+    cached_seeded = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
+        runtime_entry,
+        object(),
     )
 
     assert seeded is cached_seeded
@@ -4701,22 +4776,18 @@ def test_traceable_optimizer_value_and_grad_builds_general_only_bundle_without_s
         return optimizer_compiled_bundle
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_build_traceable_objective_compiled_bundle_from_state",
         build_compiled_bundle,
     )
 
-    value_and_grad = (
-        surfaceobjectives_jax_module._ensure_traceable_runtime_optimizer_value_and_grad(
-            runtime_entry,
-            object(),
-        )
+    value_and_grad = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_optimizer_value_and_grad(
+        runtime_entry,
+        object(),
     )
-    cached_value_and_grad = (
-        surfaceobjectives_jax_module._ensure_traceable_runtime_optimizer_value_and_grad(
-            runtime_entry,
-            object(),
-        )
+    cached_value_and_grad = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_optimizer_value_and_grad(
+        runtime_entry,
+        object(),
     )
     value, grad = value_and_grad(jnp.asarray([1.0, -2.0], dtype=jnp.float64))
 
@@ -4770,19 +4841,19 @@ def test_traceable_compiled_bundle_general_only_forward_avoids_public_same_coils
         }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_general_forward_result",
         fake_general_forward_result,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_forward_result",
         lambda *_args, **_kwargs: pytest.fail(
             "seeded optimizer bundle must not trace the public same_coils path"
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
         lambda _booz_jax, _coil_set_spec_from_dofs, **kwargs: (
             jnp.ones_like(kwargs["coil_dofs"]),
@@ -4790,7 +4861,7 @@ def test_traceable_compiled_bundle_general_only_forward_avoids_public_same_coils
         ),
     )
 
-    bundle = surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+    bundle = surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
         object(),
         state,
         general_only_forward=True,
@@ -4836,12 +4907,12 @@ def test_traceable_value_and_grad_rejected_candidate_uses_baseline_gradient(
         }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_forward_result",
         fake_forward_result,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
         lambda _booz_jax, _coil_set_spec_from_dofs, **kwargs: (
             2.0 * kwargs["coil_dofs"],
@@ -4849,7 +4920,7 @@ def test_traceable_value_and_grad_rejected_candidate_uses_baseline_gradient(
         ),
     )
 
-    bundle = surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+    bundle = surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
         object(),
         state,
     )
@@ -4897,12 +4968,12 @@ def test_traceable_value_and_grad_rejected_candidate_surfaces_baseline_adjoint_f
         }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_forward_result",
         fake_forward_result,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
         lambda *_args, **_kwargs: (
             failed_gradient,
@@ -4910,7 +4981,7 @@ def test_traceable_value_and_grad_rejected_candidate_surfaces_baseline_adjoint_f
         ),
     )
 
-    bundle = surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+    bundle = surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
         object(),
         state,
     )
@@ -4923,7 +4994,7 @@ def test_traceable_value_and_grad_rejected_candidate_surfaces_baseline_adjoint_f
 
 def test_host_boundary_with_baseline_peel_falls_through_for_traced_inputs():
     baseline = np.asarray([1.0, 2.0], dtype=np.float64)
-    wrapped = surfaceobjectives_jax_module._host_boundary_with_baseline_peel(
+    wrapped = surfaceobjectives_traceable_jax_module._host_boundary_with_baseline_peel(
         lambda coil_dofs: coil_dofs,
         baseline,
         "baseline",
@@ -4979,7 +5050,7 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
     }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
         lambda *_args, **_kwargs: (
             jnp.asarray([0.5, -0.75], dtype=jnp.float64),
@@ -4987,7 +5058,7 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_reporting_metrics_from_solution",
         lambda *_args, include_distance_metrics, **_kwargs: {
             "solver_success": jnp.asarray(True, dtype=bool),
@@ -5013,14 +5084,14 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
         },
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_ensure_traceable_runtime_reporting_metrics",
         lambda _entry: (_ for _ in ()).throw(
             AssertionError("baseline reporting peel should stay on the host layer")
         ),
     )
 
-    surfaceobjectives_jax_module._ensure_traceable_runtime_host_wrappers(
+    surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_host_wrappers(
         runtime_entry,
         object(),
     )
@@ -5102,7 +5173,7 @@ def test_traceable_runtime_host_wrappers_surface_failed_solve_baseline_gradient(
     }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
         lambda *_args, **_kwargs: (
             jnp.asarray(failed_gradient, dtype=jnp.float64),
@@ -5110,7 +5181,7 @@ def test_traceable_runtime_host_wrappers_surface_failed_solve_baseline_gradient(
         ),
     )
 
-    surfaceobjectives_jax_module._ensure_traceable_runtime_host_wrappers(
+    surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_host_wrappers(
         runtime_entry,
         object(),
     )
@@ -5143,10 +5214,8 @@ def test_traceable_custom_vjp_surfaces_adjoint_solve_failure_as_nan_gradient():
             "baseline_linear_solve_factors": None,
         },
     }
-    objective = (
-        surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
-            compiled_bundle
-        )
+    objective = surfaceobjectives_traceable_jax_module._make_traceable_objective_from_compiled_bundle(
+        compiled_bundle
     )
 
     grad = jax.grad(objective)(jnp.asarray([0.5, -0.25], dtype=jnp.float64))
@@ -5177,10 +5246,8 @@ def test_traceable_custom_vjp_rejected_candidate_surfaces_baseline_adjoint_failu
             "baseline_linear_solve_factors": None,
         },
     }
-    objective = (
-        surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
-            compiled_bundle
-        )
+    objective = surfaceobjectives_traceable_jax_module._make_traceable_objective_from_compiled_bundle(
+        compiled_bundle
     )
 
     grad = jax.grad(objective)(jnp.asarray([9.0, -8.0], dtype=jnp.float64))
@@ -5211,10 +5278,8 @@ def test_traceable_custom_vjp_rejected_candidate_uses_baseline_gradient():
             "baseline_linear_solve_factors": None,
         },
     }
-    objective = (
-        surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
-            compiled_bundle
-        )
+    objective = surfaceobjectives_traceable_jax_module._make_traceable_objective_from_compiled_bundle(
+        compiled_bundle
     )
 
     grad = jax.grad(objective)(jnp.asarray([9.0, -8.0], dtype=jnp.float64))
@@ -5233,7 +5298,7 @@ def test_traceable_inner_stationarity_coil_jvp_matches_full_stationarity_jvp(
         return inner_objective
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_boozer_penalty_objective_closure",
         _strict_quadratic_inner_objective_closure,
     )
@@ -5243,7 +5308,7 @@ def test_traceable_inner_stationarity_coil_jvp_matches_full_stationarity_jvp(
     coil_dofs_tangent = jnp.asarray([0.75, 2.0], dtype=jnp.float64)
 
     with jax.transfer_guard("disallow"):
-        forcing = surfaceobjectives_jax_module._traceable_inner_stationarity_coil_jvp(
+        forcing = surfaceobjectives_traceable_jax_module._traceable_inner_stationarity_coil_jvp(
             x_inner,
             coil_dofs,
             coil_dofs_tangent,
@@ -5268,24 +5333,24 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
         return inner_objective
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_inner_objective_kwargs",
         lambda _objective_kwargs: {"kind": "inner"},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_total_objective",
         lambda x_inner, coil_dofs, coil_set_spec, _objective_kwargs: (
             jnp.dot(x_inner, coil_set_spec) + half * jnp.dot(coil_dofs, coil_dofs)
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_boozer_penalty_objective_closure",
         _strict_quadratic_inner_objective_closure,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_solve_linearization",
         lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
             rhs,
@@ -5315,7 +5380,7 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
 
     with jax.transfer_guard("disallow"):
         direct_grad, implicit_grad, total_grad, linear_solve_success = (
-            surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda coil_dofs: coil_dofs,
                 coil_dofs=coil_dofs,
@@ -5345,12 +5410,12 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
     true_status = _mock_linear_solve_status(true_value)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_inner_objective_kwargs",
         lambda _objective_kwargs: {"kind": "inner"},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_directional_inner_stationarity",
         lambda _solved_x, tangent, current_coil_set_spec, **_kwargs: jnp.dot(
             tangent,
@@ -5358,16 +5423,16 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_weighted_single_stage_outer_term",
         lambda term_name, x_inner, coil_dofs, coil_set_spec, objective_kwargs: (
-            surfaceobjectives_jax_module._take_runtime_scalar(x_inner, 0)
+            surfaceobjectives_traceable_jax_module._take_runtime_scalar(x_inner, 0)
             if term_name == "iota"
             else pytest.fail("unexpected term")
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_solve_linearization",
         lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
             rhs,
@@ -5389,7 +5454,7 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
 
     with jax.transfer_guard("disallow"):
         direct_grad, implicit_grad, total_grad, linear_solve_success = (
-            surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda coil_dofs: coil_dofs,
                 coil_dofs=coil_dofs,
@@ -5449,7 +5514,7 @@ def test_traceable_single_stage_outer_term_dependency_flags(
             {
                 weight_key: 0.0
                 for _, weight_key in (
-                    surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+                    surfaceobjectives_traceable_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
                 )
             },
             (False, False),
@@ -5462,7 +5527,7 @@ def test_traceable_single_stage_effective_dependency_flags_respect_active_weight
     expected_flags,
 ):
     assert (
-        surfaceobjectives_jax_module._traceable_single_stage_effective_dependency_flags(
+        surfaceobjectives_traceable_jax_module._traceable_single_stage_effective_dependency_flags(
             term_name,
             objective_kwargs={"outer_objective_config": outer_objective_config},
         )
@@ -5483,17 +5548,17 @@ def test_traceable_term_adjoint_solve_report_serializes_unknown_iterations_as_nu
         )
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_single_stage_effective_dependency_flags",
         lambda *_args, **_kwargs: (True, True),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_inner_objective_kwargs",
         lambda _objective_kwargs: {},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_weighted_single_stage_outer_term",
         lambda _term_name, x_inner, _coil_dofs, coil_set_spec, _kwargs: jnp.dot(
             x_inner,
@@ -5501,7 +5566,7 @@ def test_traceable_term_adjoint_solve_report_serializes_unknown_iterations_as_nu
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_solve_linearization",
         lambda _booz_jax, _solved_x, rhs, *_args, **_kwargs: (
             rhs,
@@ -5509,7 +5574,7 @@ def test_traceable_term_adjoint_solve_report_serializes_unknown_iterations_as_nu
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_make_boozer_penalty_objective_closure",
         lambda **_kwargs: lambda x_inner: 0.5 * jnp.dot(x_inner, x_inner),
     )
@@ -5524,17 +5589,19 @@ def test_traceable_term_adjoint_solve_report_serializes_unknown_iterations_as_nu
         lambda _objective_fn, _x, rhs, **_kwargs: (rhs, unknown_status(rhs)),
     )
 
-    report = surfaceobjectives_jax_module._traceable_term_adjoint_solve_report(
-        object(),
-        lambda coil_dofs: coil_dofs,
-        coil_dofs=jax.device_put(np.asarray([0.5, -1.25], dtype=np.float64)),
-        solved_x=jax.device_put(np.asarray([1.5, -0.25], dtype=np.float64)),
-        solved_linear_solve_factors=None,
-        linearization_kind="hessian",
-        linear_solve_tol=1.0e-10,
-        linear_solve_stab=0.0,
-        objective_kwargs={},
-        term_name="non_qs",
+    report = (
+        surfaceobjectives_traceable_jax_module._traceable_term_adjoint_solve_report(
+            object(),
+            lambda coil_dofs: coil_dofs,
+            coil_dofs=jax.device_put(np.asarray([0.5, -1.25], dtype=np.float64)),
+            solved_x=jax.device_put(np.asarray([1.5, -0.25], dtype=np.float64)),
+            solved_linear_solve_factors=None,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs={},
+            term_name="non_qs",
+        )
     )
 
     assert report["success"] is True
@@ -5551,12 +5618,12 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_dire
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_inner_objective_kwargs",
         lambda _objective_kwargs: {"kind": "inner"},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_weighted_single_stage_outer_term",
         lambda term_name, x_inner, coil_dofs, coil_set_spec, objective_kwargs: (
             half * jnp.dot(coil_dofs, coil_dofs)
@@ -5565,7 +5632,7 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_dire
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_solve_linearization",
         lambda *_args, **_kwargs: pytest.fail(
             "coil-only term diagnostics should skip the inner linear solve."
@@ -5602,7 +5669,7 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_dire
 
     with jax.transfer_guard("disallow"):
         direct_grad, implicit_grad, total_grad, linear_solve_success = (
-            surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda coil_dofs: coil_dofs,
                 coil_dofs=coil_dofs,
@@ -5627,14 +5694,14 @@ def test_traceable_objective_gradient_parts_skip_all_autodiff_for_zero_weight_te
     monkeypatch,
 ):
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_weighted_single_stage_outer_term",
         lambda *_args, **_kwargs: pytest.fail(
             "zero-weight term diagnostics should not evaluate the weighted term."
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_solve_linearization",
         lambda *_args, **_kwargs: pytest.fail(
             "zero-weight term diagnostics should skip the inner linear solve."
@@ -5661,7 +5728,7 @@ def test_traceable_objective_gradient_parts_skip_all_autodiff_for_zero_weight_te
 
     with jax.transfer_guard("disallow"):
         direct_grad, implicit_grad, total_grad, linear_solve_success = (
-            surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda current_coil_dofs: current_coil_dofs,
                 coil_dofs=coil_dofs,
@@ -5688,12 +5755,12 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
     true_status = _mock_linear_solve_status(true_value)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_inner_objective_kwargs",
         lambda _objective_kwargs: {"kind": "inner"},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_directional_inner_stationarity",
         lambda _solved_x, tangent, current_coil_set_spec, **_kwargs: jnp.dot(
             tangent,
@@ -5701,14 +5768,14 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_total_objective",
         lambda x_inner, coil_dofs, coil_set_spec, objective_kwargs: (
-            surfaceobjectives_jax_module._take_runtime_scalar(x_inner, 0)
+            surfaceobjectives_traceable_jax_module._take_runtime_scalar(x_inner, 0)
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_solve_linearization",
         lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
             rhs,
@@ -5749,7 +5816,7 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
 
     with jax.transfer_guard("disallow"):
         direct_grad, implicit_grad, total_grad, linear_solve_success = (
-            surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda current_coil_dofs: current_coil_dofs,
                 coil_dofs=coil_dofs,
@@ -5801,12 +5868,12 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
     true_status = _mock_linear_solve_status(true_value)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_inner_objective_kwargs",
         lambda _objective_kwargs: {"kind": "inner"},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_directional_inner_stationarity",
         lambda _solved_x, tangent, current_coil_set_spec, **_kwargs: jnp.dot(
             tangent,
@@ -5814,16 +5881,16 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_evaluate_traceable_weighted_single_stage_outer_term",
         lambda term_name, x_inner, coil_dofs, coil_set_spec, objective_kwargs: (
-            surfaceobjectives_jax_module._take_runtime_scalar(x_inner, 0)
+            surfaceobjectives_traceable_jax_module._take_runtime_scalar(x_inner, 0)
             if term_name == "surface_vessel"
             else pytest.fail("unexpected term")
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_solve_linearization",
         lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
             rhs,
@@ -5852,7 +5919,7 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
 
     with jax.transfer_guard("disallow"):
         direct_grad, implicit_grad, total_grad, linear_solve_success = (
-            surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+            surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda coil_dofs: coil_dofs,
                 coil_dofs=coil_dofs,
@@ -5879,7 +5946,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
     objective_config = {
         weight_key: 1.0
         for _, weight_key in (
-            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+            surfaceobjectives_traceable_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
         )
     }
     call_checks: dict[str, bool] = {}
@@ -5933,7 +6000,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         return {
             term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
             for index, (term_name, _weight_key) in enumerate(
-                surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+                surfaceobjectives_traceable_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
             )
         }
 
@@ -5993,34 +6060,34 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
     }
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_get_cached_traceable_runtime_entry",
         lambda *_args, **_kwargs: runtime_entry,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_single_stage_outer_term_values",
         fake_term_values,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_total_objective_kwargs",
         lambda objective_kwargs: {
             "outer_objective_config": objective_kwargs["outer_objective_config"]
         },
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_weighted_single_stage_outer_term_values",
         fake_weighted_term_values,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
         fake_total_gradient_with_status,
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_objective_gradient_parts",
         fake_gradient_parts,
     )
@@ -6054,18 +6121,18 @@ def test_traceable_weighted_single_stage_outer_terms_accept_device_scalar_weight
     term_values = {
         term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
         for index, (term_name, _weight_key) in enumerate(
-            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+            surfaceobjectives_traceable_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
         )
     }
     outer_objective_config = {
         weight_key: jnp.asarray(float(index % 2), dtype=jnp.float64)
         for index, (_term_name, weight_key) in enumerate(
-            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+            surfaceobjectives_traceable_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
         )
     }
 
     with jax.transfer_guard("disallow"):
-        weighted_terms = surfaceobjectives_jax_module._traceable_weighted_single_stage_outer_term_values(
+        weighted_terms = surfaceobjectives_traceable_jax_module._traceable_weighted_single_stage_outer_term_values(
             term_values,
             outer_objective_config=outer_objective_config,
         )
@@ -6073,7 +6140,7 @@ def test_traceable_weighted_single_stage_outer_terms_accept_device_scalar_weight
     expected = {
         term_name: float(index + 1) * float(index % 2)
         for index, (term_name, _weight_key) in enumerate(
-            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+            surfaceobjectives_traceable_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
         )
     }
     actual = {
@@ -6086,7 +6153,7 @@ def test_traceable_weighted_single_stage_outer_terms_mask_inactive_nonfinite_val
     term_values = {
         term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
         for index, (term_name, _weight_key) in enumerate(
-            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+            surfaceobjectives_traceable_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
         )
     }
     term_values["non_qs"] = jnp.asarray(np.nan, dtype=jnp.float64)
@@ -6097,7 +6164,7 @@ def test_traceable_weighted_single_stage_outer_terms_mask_inactive_nonfinite_val
     }
 
     with jax.transfer_guard("disallow"):
-        weighted_terms = surfaceobjectives_jax_module._traceable_weighted_single_stage_outer_term_values(
+        weighted_terms = surfaceobjectives_traceable_jax_module._traceable_weighted_single_stage_outer_term_values(
             term_values,
             outer_objective_config=outer_objective_config,
         )
@@ -6133,7 +6200,7 @@ def test_traceable_runtime_deviceify_tree_explicitly_restages_jax_arrays(monkeyp
         4.0,
     )
 
-    surfaceobjectives_jax_module._traceable_runtime_deviceify_tree(tree)
+    surfaceobjectives_traceable_jax_module._traceable_runtime_deviceify_tree(tree)
 
     assert len(device_put_calls) == 4
     assert all(device is active_device for _value, device in device_put_calls)
@@ -6146,7 +6213,7 @@ def test_traceable_custom_vjp_restages_linear_solve_factors_at_consumption(
     solved_factors = (2.0 * jnp.eye(2, dtype=jnp.float64),)
     deviceified_records = []
     original_deviceify_tree = (
-        surfaceobjectives_jax_module._traceable_runtime_deviceify_tree
+        surfaceobjectives_traceable_jax_module._traceable_runtime_deviceify_tree
     )
 
     def counting_deviceify_tree(tree):
@@ -6162,7 +6229,7 @@ def test_traceable_custom_vjp_restages_linear_solve_factors_at_consumption(
         return original_deviceify_tree(tree)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_traceable_runtime_deviceify_tree",
         counting_deviceify_tree,
     )
@@ -6179,21 +6246,19 @@ def test_traceable_custom_vjp_restages_linear_solve_factors_at_consumption(
     def compiled_total_gradient_for(coil_dofs, _solved_x, _linear_solve_factors):
         return 3.0 * coil_dofs, jnp.asarray(True, dtype=bool)
 
-    objective = (
-        surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
-            {
-                "compiled_forward_result_for": compiled_forward_result_for,
-                "compiled_total_gradient_for": compiled_total_gradient_for,
-                "state": {
-                    "baseline_coil_dofs": jnp.asarray(
-                        [0.5, -0.25],
-                        dtype=jnp.float64,
-                    ),
-                    "baseline_x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
-                    "baseline_linear_solve_factors": baseline_factors,
-                },
-            }
-        )
+    objective = surfaceobjectives_traceable_jax_module._make_traceable_objective_from_compiled_bundle(
+        {
+            "compiled_forward_result_for": compiled_forward_result_for,
+            "compiled_total_gradient_for": compiled_total_gradient_for,
+            "state": {
+                "baseline_coil_dofs": jnp.asarray(
+                    [0.5, -0.25],
+                    dtype=jnp.float64,
+                ),
+                "baseline_x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+                "baseline_linear_solve_factors": baseline_factors,
+            },
+        }
     )
 
     grad = jax.grad(objective)(jnp.asarray([0.5, -0.25], dtype=jnp.float64))
@@ -6219,10 +6284,8 @@ def test_traceable_batched_value_and_grad_pipeline_matches_scalar_calls():
             2.0 * coil_dofs,
         )
     )
-    batched_value_and_grad = (
-        surfaceobjectives_jax_module._make_traceable_batched_value_and_grad_pipeline(
-            compiled_value_and_grad_for
-        )
+    batched_value_and_grad = surfaceobjectives_traceable_jax_module._make_traceable_batched_value_and_grad_pipeline(
+        compiled_value_and_grad_for
     )
     coil_dofs_batch = jnp.asarray(
         [[1.0, -2.0], [0.5, 3.0], [-1.5, 0.25]],
@@ -7258,6 +7321,19 @@ class TestPrincipalCurvatureJAXObjectParity:
 
 
 class TestQfmResidualJAXObjectParity:
+    def test_qfm_surface_norm_zero_jvp_is_finite(self):
+        """AD regression: degenerate normals must not leak sqrt-at-zero NaNs."""
+        normal = jnp.zeros((2, 2, 3), dtype=jnp.float64)
+        tangent_normal = jnp.ones_like(normal)
+
+        def objective(normal_arg):
+            return jnp.sum(_qfm_surface_norm(normal_arg))
+
+        value, tangent = jax.jvp(objective, (normal,), (tangent_normal,))
+
+        assert jnp.isfinite(value)
+        assert jnp.isfinite(tangent)
+
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
     def test_qfm_residual_value_parity_matrix(self, surfacetype, stellsym):

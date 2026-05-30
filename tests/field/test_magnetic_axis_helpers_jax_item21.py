@@ -130,6 +130,25 @@ class TestTangentMapStateConvention:
         assert "eig" not in primitive_names
         assert "atan2" in primitive_names
 
+    def test_first_eigenvalue_angle_2x2_zero_discriminant_jvp_is_finite(self):
+        matrix = jnp.asarray(
+            [[1.0, 0.0], [0.0, 1.0]],
+            dtype=jnp.float64,
+        )
+        tangent = jnp.asarray(
+            [[0.0, -1.0], [1.0, 0.0]],
+            dtype=jnp.float64,
+        )
+
+        value, tangent_out = jax.jvp(
+            _first_eigenvalue_angle_2x2,
+            (matrix,),
+            (tangent,),
+        )
+
+        assert jnp.isfinite(value)
+        assert jnp.isfinite(tangent_out)
+
 
 # ── axis_position parity against CurveRZFourier.gamma ─────────────────
 

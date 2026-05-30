@@ -2012,7 +2012,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(args.boozer_optimizer_backend)
         self.assertIsNone(args.boozer_least_squares_algorithm)
 
-    def test_parse_args_defaults_jax_backend_to_platform_optimizer_lane(self):
+    def test_parse_args_defaults_jax_backend_to_scipy_jax_optimizer_lane(self):
         module = self.load_module()
 
         with patch.dict(os.environ, {}, clear=True), patch.object(
@@ -2022,13 +2022,14 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             args = module.parse_args()
 
-        # parse_args must defer the implicit JAX outer lane to the
-        # platform-aware resolver (GPU -> scipy-jax, JAX-CPU ->
-        # scipy-jax-fullgraph), not hardcode a lane.
+        # parse_args must defer the implicit JAX outer lane to the resolver
+        # instead of hardcoding a separate parse-time lane.
+        self.assertEqual(args.optimizer_backend, "scipy-jax")
         self.assertEqual(
             args.optimizer_backend,
             module.resolve_single_stage_default_optimizer_backend("jax"),
         )
+        self.assertEqual(args.outer_maxls, 20)
         self.assertIsNone(args.boozer_optimizer_backend)
         self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
         self.assertFalse(args.boozer_least_squares_algorithm_explicit)
@@ -2150,7 +2151,7 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             args = module.parse_args()
 
-        self.assertEqual(args.optimizer_backend, "ondevice")
+        self.assertEqual(args.optimizer_backend, "scipy-jax")
         self.assertEqual(args.boozer_optimizer_backend, "ondevice")
         self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
         self.assertFalse(args.boozer_least_squares_algorithm_explicit)
@@ -2189,13 +2190,19 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertFalse(args.experimental_target_lane_value_and_grad)
         self.assertFalse(args.disable_target_lane_success_filter)
 
-    def test_parse_args_defaults_target_lane_outer_maxls_to_tighter_budget(self):
+    def test_parse_args_explicit_target_lane_outer_maxls_to_tighter_budget(self):
         module = self.load_module()
 
         with patch.dict(os.environ, {}, clear=True), patch.object(
             sys,
             "argv",
-            ["single_stage_banana_example.py", "--backend", "jax"],
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "ondevice",
+            ],
         ):
             args = module.parse_args()
 
@@ -2214,7 +2221,9 @@ class SingleStageExampleTests(unittest.TestCase):
             "skip-large-strict-cuda",
         )
 
-    def test_parse_args_benchmark_mode_preserves_target_lane_boozer_precision(self):
+    def test_parse_args_explicit_target_lane_benchmark_mode_preserves_boozer_precision(
+        self,
+    ):
         module = self.load_module()
 
         with patch.dict(os.environ, {}, clear=True), patch.object(
@@ -2224,6 +2233,8 @@ class SingleStageExampleTests(unittest.TestCase):
                 "single_stage_banana_example.py",
                 "--backend",
                 "jax",
+                "--optimizer-backend",
+                "ondevice",
                 "--benchmark-mode",
             ],
         ):
