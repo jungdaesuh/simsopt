@@ -106,6 +106,19 @@ class MpsBoozerFusedCustomCallResult(NamedTuple):
     finite: jax.Array
 
 
+class MpsBoozerFusedSolveStatePayload(NamedTuple):
+    """Solved-state payload returned by the fused Boozer MPS custom call."""
+
+    success: jax.Array
+    primal_success: jax.Array
+    x: jax.Array
+    sdofs: jax.Array
+    iota: jax.Array
+    G: jax.Array | None
+    converged: jax.Array
+    finite: jax.Array
+
+
 def _json_scalar(value: object) -> object:
     if isinstance(value, np.generic):
         return value.item()
@@ -772,6 +785,79 @@ def evaluate_mps_boozer_fused_solve_custom_call(
             contract.coil_pullback_operator,
         )
     )
+
+
+def _split_fused_solve_x_inner(final_x_inner: jax.Array, *, optimize_G: bool):
+    surface_dof_count = int(final_x_inner.shape[0]) - (2 if optimize_G else 1)
+    sdofs = final_x_inner[:surface_dof_count]
+    iota = final_x_inner[surface_dof_count]
+    if optimize_G:
+        return sdofs, iota, final_x_inner[surface_dof_count + 1]
+    return sdofs, iota, None
+
+
+def mps_boozer_fused_solve_state_payload(
+    contract: MpsBoozerKernelContract,
+    result: MpsBoozerFusedCustomCallResult,
+) -> MpsBoozerFusedSolveStatePayload:
+    """Return the explicit solved state carried by a fused custom-call result."""
+
+    sdofs, iota, G = _split_fused_solve_x_inner(
+        result.final_x_inner,
+        optimize_G=bool(contract.static_metadata.optimize_G),
+    )
+    return MpsBoozerFusedSolveStatePayload(
+        success=result.finite,
+        primal_success=result.finite,
+        x=result.final_x_inner,
+        sdofs=sdofs,
+        iota=iota,
+        G=G,
+        converged=result.converged,
+        finite=result.finite,
+    )
+
+
+def build_mps_boozer_fused_solve_state_payload(
+    boozer_residual: object,
+    *,
+    solved_state: object | None = None,
+):
+    """Build the opt-in fixed-surface MPS Boozer solved-state callable."""
+
+    if not mps_boozer_jax_mps_backend_available():
+        raise RuntimeError(
+            "The experimental MPS Boozer custom kernel requires an active "
+            "jax-mps backend; no local JAX device reports platform='mps'."
+        )
+    effective_solved_state = (
+        boozer_residual.boozer_surface.get_solved_runtime_state()
+        if solved_state is None
+        else solved_state
+    )
+    if effective_solved_state is None:
+        raise RuntimeError(
+            "The experimental MPS Boozer custom kernel requires a solved "
+            "BoozerSurfaceJAX runtime state."
+        )
+    probe_contract = build_mps_boozer_direct_kernel_contract(
+        boozer_residual,
+        solved_state=effective_solved_state,
+    )
+    require_mps_boozer_fixed_surface_g_iota_supported(probe_contract)
+
+    def solve_state_payload(coil_dofs):
+        contract = build_mps_boozer_direct_kernel_contract(
+            boozer_residual,
+            solved_state=effective_solved_state,
+            coil_dofs=coil_dofs,
+        )
+        return mps_boozer_fused_solve_state_payload(
+            contract,
+            evaluate_mps_boozer_fused_solve_custom_call(contract),
+        )
+
+    return solve_state_payload
 
 
 def build_mps_boozer_fused_solve_value_and_grad(
