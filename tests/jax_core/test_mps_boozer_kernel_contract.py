@@ -82,6 +82,10 @@ class _BoozerSurfaceStub:
 class _BiotSavartStub:
     def __init__(self):
         self.x = jnp.asarray([0.5, -0.25, 0.75], dtype=jnp.float32)
+        self.pullback_operator = jnp.asarray(
+            np.linspace(-0.3, 0.4, 150, dtype=np.float32).reshape(3, 50),
+            dtype=jnp.float32,
+        )
 
     def coil_set_spec_from_dofs(self, coil_dofs):
         offset = jnp.sum(coil_dofs) * jnp.asarray(0.0, dtype=coil_dofs.dtype)
@@ -98,6 +102,24 @@ class _BiotSavartStub:
                 ),
             ),
         )
+
+    def coil_cotangents_to_dofs_gradient(
+        self,
+        d_coil_arrays,
+        coil_indices,
+        *,
+        coil_dofs=None,
+    ):
+        del coil_indices, coil_dofs
+        ((d_gammas, d_gammadashs, d_currents),) = d_coil_arrays
+        flat_cotangent = jnp.concatenate(
+            (
+                d_gammas.reshape(-1),
+                d_gammadashs.reshape(-1),
+                d_currents.reshape(-1),
+            )
+        )
+        return self.pullback_operator @ flat_cotangent
 
 
 class _BoozerResidualStub:
@@ -179,6 +201,7 @@ def _fused_custom_call_with_arrays(contract, *arrays):
         gammas,
         gammadashs,
         currents,
+        coil_pullback_operator,
     ) = arrays
     traced_contract = replace(
         contract,
@@ -194,6 +217,7 @@ def _fused_custom_call_with_arrays(contract, *arrays):
         coil_group_gammas=(gammas,),
         coil_group_gammadashs=(gammadashs,),
         coil_group_currents=(currents,),
+        coil_pullback_operator=coil_pullback_operator,
     )
     return evaluate_mps_boozer_fused_solve_custom_call(traced_contract)
 
@@ -212,6 +236,7 @@ def _fused_custom_call_args(contract):
         contract.coil_group_gammas[0],
         contract.coil_group_gammadashs[0],
         contract.coil_group_currents[0],
+        contract.coil_pullback_operator,
     )
 
 
@@ -262,6 +287,12 @@ def test_mps_boozer_contract_artifact_records_flattened_schema(tmp_path):
         "dtype": "float32",
         "ndim": 2,
         "size": 2775,
+    }
+    assert artifact["runtime_arrays"]["coil_pullback_operator"] == {
+        "shape": [3, 50],
+        "dtype": "float32",
+        "ndim": 2,
+        "size": 150,
     }
     assert artifact["runtime_arrays"]["coil_groups"] == [
         {
@@ -445,6 +476,14 @@ def test_mps_boozer_fused_custom_call_rejects_unsupported_contracts():
                     contract.coil_group_gammas[0],
                     contract.coil_group_gammas[0],
                 ),
+            )
+        )
+
+    with pytest.raises(ValueError, match="coil_pullback_operator must have shape"):
+        evaluate_mps_boozer_fused_solve_custom_call(
+            replace(
+                contract,
+                coil_pullback_operator=contract.coil_pullback_operator[:, :-1],
             )
         )
 

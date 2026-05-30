@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_CONTRACT_ARTIFACT_DIR = Path(".artifacts/mps_custom_kernel_contract")
 SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET = "mps.simsopt_boozer_value_grad"
 SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION = 3
@@ -60,6 +60,7 @@ class MpsBoozerKernelContract:
     coil_group_gammas: tuple[jax.Array, ...]
     coil_group_gammadashs: tuple[jax.Array, ...]
     coil_group_currents: tuple[jax.Array, ...]
+    coil_pullback_operator: jax.Array
     static_metadata: MpsBoozerKernelStaticMetadata
 
 
@@ -140,6 +141,56 @@ def _coil_group_arrays(coil_set_spec: object):
         currents.append(group.currents)
         indices.append(tuple(int(index) for index in group.coil_indices))
     return tuple(gammas), tuple(gammadashs), tuple(currents), tuple(indices)
+
+
+def _split_flat_coil_cotangent(
+    flat_cotangent: jax.Array,
+    *,
+    gammas_shape: tuple[int, ...],
+    gammadashs_shape: tuple[int, ...],
+    currents_shape: tuple[int, ...],
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    gammas_size = int(np.prod(gammas_shape, dtype=np.int64))
+    gammadashs_size = int(np.prod(gammadashs_shape, dtype=np.int64))
+    currents_size = int(np.prod(currents_shape, dtype=np.int64))
+    gammas_stop = gammas_size
+    gammadashs_stop = gammas_stop + gammadashs_size
+    currents_stop = gammadashs_stop + currents_size
+    return (
+        flat_cotangent[:gammas_stop].reshape(gammas_shape),
+        flat_cotangent[gammas_stop:gammadashs_stop].reshape(gammadashs_shape),
+        flat_cotangent[gammadashs_stop:currents_stop].reshape(currents_shape),
+    )
+
+
+def _coil_pullback_operator(
+    biotsavart: object,
+    *,
+    coil_dofs: jax.Array,
+    gammas: jax.Array,
+    gammadashs: jax.Array,
+    currents: jax.Array,
+    coil_indices: tuple[int, ...],
+) -> jax.Array:
+    """Dense cotangent projection from grouped coil arrays to flat coil DOFs."""
+
+    flat_cotangent_size = int(gammas.size + gammadashs.size + currents.size)
+    basis = jnp.eye(flat_cotangent_size, dtype=coil_dofs.dtype)
+
+    def project(flat_cotangent: jax.Array) -> jax.Array:
+        group_cotangent = _split_flat_coil_cotangent(
+            flat_cotangent,
+            gammas_shape=gammas.shape,
+            gammadashs_shape=gammadashs.shape,
+            currents_shape=currents.shape,
+        )
+        return biotsavart.coil_cotangents_to_dofs_gradient(
+            (group_cotangent,),
+            (coil_indices,),
+            coil_dofs=coil_dofs,
+        )
+
+    return jnp.asarray(jax.vmap(project)(basis).T, dtype=jnp.float32)
 
 
 def _require_current_coil_contract(
@@ -268,6 +319,18 @@ def _validate_fused_custom_call_contract(contract: MpsBoozerKernelContract) -> N
         raise ValueError("coil_group_gammadashs[0] must match coil_group_gammas[0]")
     if currents.ndim != 1 or currents.shape[0] != gammas.shape[0]:
         raise ValueError("coil_group_currents[0] must have shape (ncoils,)")
+    _require_float32_array("coil_pullback_operator", contract.coil_pullback_operator)
+    if contract.coil_pullback_operator.ndim != 2:
+        raise ValueError("coil_pullback_operator must be a 2D array")
+    flat_cotangent_size = int(gammas.size + gammadashs.size + currents.size)
+    if contract.coil_pullback_operator.shape != (
+        contract.coil_dofs.shape[0],
+        flat_cotangent_size,
+    ):
+        raise ValueError(
+            "coil_pullback_operator must have shape "
+            "(coil_dofs.size, gammas.size + gammadashs.size + currents.size)"
+        )
 
 
 def _fused_custom_call_backend_config(contract: MpsBoozerKernelContract) -> str:
@@ -334,6 +397,18 @@ def build_mps_boozer_direct_kernel_contract(
     )
     coil_set_spec = biotsavart.coil_set_spec_from_dofs(current_coil_dofs)
     gammas, gammadashs, currents, coil_group_indices = _coil_group_arrays(coil_set_spec)
+    if len(gammas) != 1:
+        raise ValueError(
+            "the first fused MPS custom call supports exactly one coil group"
+        )
+    coil_pullback_operator = _coil_pullback_operator(
+        biotsavart,
+        coil_dofs=current_coil_dofs,
+        gammas=gammas[0],
+        gammadashs=gammadashs[0],
+        currents=currents[0],
+        coil_indices=coil_group_indices[0],
+    )
     metadata = MpsBoozerKernelStaticMetadata(
         target_name="mps.simsopt_boozer_value_grad",
         mpol=int(booz_surf.mpol),
@@ -368,6 +443,7 @@ def build_mps_boozer_direct_kernel_contract(
         coil_group_gammas=gammas,
         coil_group_gammadashs=gammadashs,
         coil_group_currents=currents,
+        coil_pullback_operator=coil_pullback_operator,
         static_metadata=metadata,
     )
 
@@ -495,6 +571,7 @@ def evaluate_mps_boozer_fused_solve_custom_call(
             gammas,
             gammadashs,
             currents,
+            contract.coil_pullback_operator,
         )
     )
 
@@ -536,6 +613,9 @@ def mps_boozer_kernel_contract_artifact(
             ),
             "label_scatter_indices": _array_schema(
                 contract.label_scatter_indices,
+            ),
+            "coil_pullback_operator": _array_schema(
+                contract.coil_pullback_operator,
             ),
             "coil_groups": [
                 {
