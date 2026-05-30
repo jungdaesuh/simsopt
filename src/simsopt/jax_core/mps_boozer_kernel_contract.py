@@ -798,6 +798,29 @@ def _split_fused_solve_x_inner(final_x_inner: jax.Array, *, optimize_G: bool):
     return sdofs, iota, None
 
 
+def _fused_solve_status_ok(result: MpsBoozerFusedCustomCallResult) -> jax.Array:
+    return jnp.logical_and(result.finite, result.converged)
+
+
+def _failed_float_array_like(value: jax.Array) -> jax.Array:
+    return jnp.zeros_like(value) / jnp.zeros_like(value)
+
+
+def _mask_fused_solve_value_gradient(
+    result: MpsBoozerFusedCustomCallResult,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    status_ok = _fused_solve_status_ok(result)
+    return (
+        jnp.where(status_ok, result.value, _failed_float_array_like(result.value)),
+        jnp.where(
+            status_ok,
+            result.coil_gradient,
+            _failed_float_array_like(result.coil_gradient),
+        ),
+        status_ok,
+    )
+
+
 def mps_boozer_fused_solve_state_payload(
     contract: MpsBoozerKernelContract,
     result: MpsBoozerFusedCustomCallResult,
@@ -808,11 +831,12 @@ def mps_boozer_fused_solve_state_payload(
         result.final_x_inner,
         optimize_G=bool(contract.static_metadata.optimize_G),
     )
+    value, coil_gradient, status_ok = _mask_fused_solve_value_gradient(result)
     return MpsBoozerFusedSolveStatePayload(
-        success=result.finite,
-        primal_success=result.finite,
-        value=result.value,
-        coil_gradient=result.coil_gradient,
+        success=status_ok,
+        primal_success=status_ok,
+        value=value,
+        coil_gradient=coil_gradient,
         x=result.final_x_inner,
         sdofs=sdofs,
         iota=iota,
@@ -905,15 +929,8 @@ def build_mps_boozer_fused_solve_value_and_grad(
             coil_dofs=coil_dofs,
         )
         result = evaluate_mps_boozer_fused_solve_custom_call(contract)
-        status_ok = result.finite
-        failed_value = jnp.zeros_like(result.value) / jnp.zeros_like(result.value)
-        failed_gradient = jnp.zeros_like(result.coil_gradient) / jnp.zeros_like(
-            result.coil_gradient,
-        )
-        return (
-            jnp.where(status_ok, result.value, failed_value),
-            jnp.where(status_ok, result.coil_gradient, failed_gradient),
-        )
+        value, gradient, _status_ok = _mask_fused_solve_value_gradient(result)
+        return value, gradient
 
     value_and_grad._simsopt_value_and_grad = True
     value_and_grad._simsopt_mps_boozer_custom_kernel = True
