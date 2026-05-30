@@ -6390,22 +6390,30 @@ def build_single_stage_target_lane_accepted_step_sync(
             "target_lane_reporting_forward_result_returned",
             reused=target_lane_solve_result is not None,
         )
+        has_solve_result_objective = "objective_value" in solve_result
+        has_solve_result_value_and_grad = (
+            target_lane_solve_result_value_and_grad_available(solve_result)
+        )
         record_reporting_event("target_lane_reporting_success_sync_started")
-        solve_success = host_bool(solve_result["success"])
+        (
+            solve_success,
+            solve_finite,
+            finite_nonconverged_state_sync,
+        ) = target_lane_solve_result_sync_status(
+            solve_result,
+        )
         record_reporting_event(
             "target_lane_reporting_success_sync_returned",
             success=bool(solve_success),
+            finite=bool(solve_finite),
+            finite_nonconverged_state_sync=bool(finite_nonconverged_state_sync),
         )
-        if not solve_success:
+        if not solve_success and not finite_nonconverged_state_sync:
             raise RuntimeError(
                 "target-lane accepted-step replay failed while refreshing "
                 "single-stage array-native state."
             )
 
-        has_solve_result_objective = "objective_value" in solve_result
-        has_solve_result_value_and_grad = (
-            has_solve_result_objective and "objective_grad" in solve_result
-        )
         include_distance_metrics = not benchmark_mode
         has_solved_state = (
             "x" in solve_result and reporting_metrics_from_solution_fn is not None
@@ -10665,9 +10673,62 @@ def single_stage_target_lane_accepted_step_solve_result(forward_result):
         "iota": forward_result["iota"],
         "G": forward_result["G"],
     }
-    if "x" in forward_result:
-        solve_result["x"] = forward_result["x"]
+    for key in (
+        "x",
+        "primal_success",
+        "objective_value",
+        "objective_grad",
+        "converged",
+        "finite",
+    ):
+        if key in forward_result:
+            solve_result[key] = forward_result[key]
     return solve_result
+
+
+def target_lane_solve_result_value_and_grad_available(solve_result) -> bool:
+    """Return whether a solved-state payload carries reusable objective data."""
+    return "objective_value" in solve_result and "objective_grad" in solve_result
+
+
+def target_lane_solve_result_sync_status(solve_result):
+    """Return target-lane success and finite nonconverged sync eligibility."""
+    solve_success = host_bool(solve_result["success"])
+    solve_finite = (
+        host_bool(solve_result["finite"]) if "finite" in solve_result else solve_success
+    )
+    finite_nonconverged_state_sync = (
+        not solve_success
+        and solve_finite
+        and target_lane_solve_result_value_and_grad_available(solve_result)
+        and "sdofs" in solve_result
+        and "iota" in solve_result
+        and "G" in solve_result
+    )
+    return solve_success, solve_finite, finite_nonconverged_state_sync
+
+
+def _failed_target_lane_float_array_like(value):
+    return jnp.zeros_like(value) / jnp.zeros_like(value)
+
+
+def target_lane_strict_optimizer_value_and_grad_from_solve_result(solve_result):
+    """Return optimizer value/grad, masking solves that did not fully succeed."""
+    solve_success = solve_result["success"]
+    objective_value = solve_result["objective_value"]
+    objective_grad = solve_result["objective_grad"]
+    return (
+        jnp.where(
+            solve_success,
+            objective_value,
+            _failed_target_lane_float_array_like(objective_value),
+        ),
+        jnp.where(
+            solve_success,
+            objective_grad,
+            _failed_target_lane_float_array_like(objective_grad),
+        ),
+    )
 
 
 def _summarize_single_stage_scipy_initial_call(initial_call):
@@ -11154,11 +11215,11 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
     last_group_objective_value = None
     last_group_objective_gradient = None
     last_group_can_reuse_values = False
-    last_group_primal_success = False
+    last_group_syncable_state = False
 
     def sync_last_group_if_accepted():
         nonlocal accepted_iteration_count
-        if not last_group_primal_success:
+        if not last_group_syncable_state:
             return
         if sync_accepted_step_from_values is not None and last_group_can_reuse_values:
             sync_accepted_step_from_values(
@@ -11207,25 +11268,35 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
         last_group_forward_result = single_stage_target_lane_accepted_step_solve_result(
             forward_result
         )
-        last_group_objective_value = objective_value
+        if target_lane_solve_result_value_and_grad_available(last_group_forward_result):
+            last_group_objective_value = last_group_forward_result["objective_value"]
+            last_group_objective_gradient = last_group_forward_result["objective_grad"]
+            last_group_can_reuse_values = True
+        else:
+            last_group_objective_value = objective_value
+            last_group_objective_gradient = None
+            last_group_can_reuse_values = False
         objective_input_equals_coil_dofs = np.array_equal(
             objective_input_values,
             coil_dof_values,
         )
-        if objective_input_equals_coil_dofs:
-            last_group_objective_gradient = optimizer_gradient
-            last_group_can_reuse_values = True
-        elif optimizer_gradient_to_coil_gradient is not None:
-            last_group_objective_gradient = optimizer_gradient_to_coil_gradient(
-                optimizer_gradient
-            )
-            last_group_can_reuse_values = True
-        else:
-            last_group_objective_gradient = None
-            last_group_can_reuse_values = False
-        last_group_primal_success = host_bool(
-            forward_result.get("primal_success", forward_result["success"])
+        if not last_group_can_reuse_values:
+            if objective_input_equals_coil_dofs:
+                last_group_objective_gradient = optimizer_gradient
+                last_group_can_reuse_values = True
+            elif optimizer_gradient_to_coil_gradient is not None:
+                last_group_objective_gradient = optimizer_gradient_to_coil_gradient(
+                    optimizer_gradient
+                )
+                last_group_can_reuse_values = True
+        (
+            solve_success,
+            _solve_finite,
+            finite_nonconverged_state_sync,
+        ) = target_lane_solve_result_sync_status(
+            last_group_forward_result,
         )
+        last_group_syncable_state = solve_success or finite_nonconverged_state_sync
     if last_group_x is not None:
         sync_last_group_if_accepted()
     if final_x is None:
@@ -11275,8 +11346,11 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
         if value_and_grad_from_forward_result:
             coil_dofs = runtime_device_put(optimizer_to_coil_dofs(candidate_x))
             forward_result = target_forward_result(coil_dofs)
-            objective_value = forward_result["objective_value"]
-            optimizer_gradient = forward_result["objective_grad"]
+            objective_value, optimizer_gradient = (
+                target_lane_strict_optimizer_value_and_grad_from_solve_result(
+                    forward_result
+                )
+            )
         else:
             objective_value, optimizer_gradient = target_value_and_grad_objective(
                 optimizer_dofs
@@ -14841,17 +14915,15 @@ if __name__ == "__main__":
                             )
                         )
                         if custom_mps_boozer_value_and_grad:
-                            target_forward_result = (
-                                build_experimental_mps_boozer_custom_kernel_solve_result(
-                                    boozer_surface,
-                                    bs,
-                                    outer_objective_config=(
-                                        target_lane_outer_objective_config
-                                    ),
-                                    success_filter=target_lane_success_filter,
-                                    profile_target_lane=False,
-                                    full_state_optimizer=False,
-                                )
+                            target_forward_result = build_experimental_mps_boozer_custom_kernel_solve_result(
+                                boozer_surface,
+                                bs,
+                                outer_objective_config=(
+                                    target_lane_outer_objective_config
+                                ),
+                                success_filter=target_lane_success_filter,
+                                profile_target_lane=False,
+                                full_state_optimizer=False,
                             )
                             value_and_grad_from_forward_result = True
                         else:

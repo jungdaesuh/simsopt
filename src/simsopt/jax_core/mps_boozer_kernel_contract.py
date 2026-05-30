@@ -798,7 +798,7 @@ def _split_fused_solve_x_inner(final_x_inner: jax.Array, *, optimize_G: bool):
     return sdofs, iota, None
 
 
-def _fused_solve_status_ok(result: MpsBoozerFusedCustomCallResult) -> jax.Array:
+def _fused_solve_success(result: MpsBoozerFusedCustomCallResult) -> jax.Array:
     return jnp.logical_and(result.finite, result.converged)
 
 
@@ -806,18 +806,30 @@ def _failed_float_array_like(value: jax.Array) -> jax.Array:
     return jnp.zeros_like(value) / jnp.zeros_like(value)
 
 
-def _mask_fused_solve_value_gradient(
+def _mask_nonfinite_fused_solve_value_gradient(
     result: MpsBoozerFusedCustomCallResult,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    status_ok = _fused_solve_status_ok(result)
+) -> tuple[jax.Array, jax.Array]:
     return (
-        jnp.where(status_ok, result.value, _failed_float_array_like(result.value)),
+        jnp.where(result.finite, result.value, _failed_float_array_like(result.value)),
         jnp.where(
-            status_ok,
+            result.finite,
             result.coil_gradient,
             _failed_float_array_like(result.coil_gradient),
         ),
-        status_ok,
+    )
+
+
+def _mask_strict_fused_solve_value_gradient(
+    result: MpsBoozerFusedCustomCallResult,
+) -> tuple[jax.Array, jax.Array]:
+    success = _fused_solve_success(result)
+    return (
+        jnp.where(success, result.value, _failed_float_array_like(result.value)),
+        jnp.where(
+            success,
+            result.coil_gradient,
+            _failed_float_array_like(result.coil_gradient),
+        ),
     )
 
 
@@ -831,10 +843,11 @@ def mps_boozer_fused_solve_state_payload(
         result.final_x_inner,
         optimize_G=bool(contract.static_metadata.optimize_G),
     )
-    value, coil_gradient, status_ok = _mask_fused_solve_value_gradient(result)
+    value, coil_gradient = _mask_nonfinite_fused_solve_value_gradient(result)
+    success = _fused_solve_success(result)
     return MpsBoozerFusedSolveStatePayload(
-        success=status_ok,
-        primal_success=status_ok,
+        success=success,
+        primal_success=success,
         value=value,
         coil_gradient=coil_gradient,
         x=result.final_x_inner,
@@ -929,7 +942,7 @@ def build_mps_boozer_fused_solve_value_and_grad(
             coil_dofs=coil_dofs,
         )
         result = evaluate_mps_boozer_fused_solve_custom_call(contract)
-        value, gradient, _status_ok = _mask_fused_solve_value_gradient(result)
+        value, gradient = _mask_strict_fused_solve_value_gradient(result)
         return value, gradient
 
     value_and_grad._simsopt_value_and_grad = True

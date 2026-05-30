@@ -3589,6 +3589,88 @@ class SingleStageExampleTests(unittest.TestCase):
             np.array([2.0, 4.0]),
         )
 
+    def test_target_lane_objective_evaluation_trace_replay_reuses_finite_nonconverged_sync_values(
+        self,
+    ):
+        module = self.load_module()
+        recorded = []
+        fallback_syncs = []
+        value_syncs = []
+        events = [
+            {
+                "accepted_iteration_target": 1,
+                "line_search_evaluation": 1,
+                "candidate_optimizer_dofs": {"values": [1.0, 2.0]},
+            }
+        ]
+
+        def value_and_grad(x):
+            values = np.asarray(x, dtype=np.float64)
+            return np.asarray(np.nan), np.full_like(values, np.nan)
+
+        def forward_result(x):
+            values = np.asarray(x, dtype=np.float64)
+            return {
+                "success": False,
+                "primal_success": False,
+                "finite": True,
+                "converged": False,
+                "objective_value": 3.0,
+                "objective_grad": np.array([2.0, 4.0]),
+                "iota": 0.15,
+                "G": 2.0,
+                "sdofs": values + 1.0,
+            }
+
+        def sync_from_values(
+            x,
+            *,
+            target_lane_solve_result,
+            objective_value,
+            objective_grad,
+        ):
+            value_syncs.append(
+                {
+                    "x": np.asarray(x, dtype=np.float64).copy(),
+                    "success": bool(target_lane_solve_result["success"]),
+                    "finite": bool(target_lane_solve_result["finite"]),
+                    "converged": bool(target_lane_solve_result["converged"]),
+                    "objective_value": float(objective_value),
+                    "objective_grad": np.asarray(objective_grad).copy(),
+                    "solve_result_objective_value": float(
+                        target_lane_solve_result["objective_value"]
+                    ),
+                }
+            )
+
+        result = module.run_single_stage_target_lane_objective_evaluation_trace_replay(
+            replay_events=events,
+            target_value_and_grad_objective=value_and_grad,
+            target_forward_result=forward_result,
+            objective_input_dofs=lambda x: x,
+            optimizer_to_coil_dofs=lambda x: x,
+            sync_accepted_step=lambda x: fallback_syncs.append(np.asarray(x).copy()),
+            sync_accepted_step_from_values=sync_from_values,
+            record_event=recorded.append,
+        )
+
+        self.assertEqual(result.nit, 1)
+        self.assertEqual(fallback_syncs, [])
+        self.assertEqual(len(value_syncs), 1)
+        self.assertFalse(value_syncs[0]["success"])
+        self.assertTrue(value_syncs[0]["finite"])
+        self.assertFalse(value_syncs[0]["converged"])
+        self.assertEqual(value_syncs[0]["objective_value"], 3.0)
+        self.assertEqual(value_syncs[0]["solve_result_objective_value"], 3.0)
+        np.testing.assert_array_equal(
+            value_syncs[0]["objective_grad"],
+            np.array([2.0, 4.0]),
+        )
+        self.assertFalse(recorded[0]["solver_success"])
+        self.assertFalse(recorded[0]["native_gradient_used"])
+        self.assertFalse(recorded[0]["objective"]["finite"])
+        self.assertFalse(recorded[0]["optimizer_gradient"]["all_finite"])
+
     def test_target_lane_objective_evaluation_trace_replay_reuses_full_state_values(
         self,
     ):
@@ -3888,6 +3970,49 @@ class SingleStageExampleTests(unittest.TestCase):
             np.asarray(recorded[0]["boozer_surface_dofs"]["values"]),
             np.array([4.0, 7.0]),
         )
+
+    def test_target_lane_trace_wrapper_masks_finite_nonconverged_forward_gradient(
+        self,
+    ):
+        module = self.load_module()
+        recorded = []
+
+        def value_and_grad(_x):
+            self.fail("custom trace wrapper should use the fused solve result")
+
+        def forward_result(x):
+            values = np.asarray(x, dtype=np.float64)
+            return {
+                "success": False,
+                "primal_success": False,
+                "finite": True,
+                "converged": False,
+                "objective_value": 7.0,
+                "objective_grad": np.array([0.5, -0.25]),
+                "iota": 0.15,
+                "G": 2.0,
+                "sdofs": values + 1.0,
+            }
+
+        wrapped = (
+            module.build_single_stage_target_lane_objective_evaluation_trace_wrapper(
+                target_value_and_grad_objective=value_and_grad,
+                target_forward_result=forward_result,
+                optimizer_to_coil_dofs=lambda x: np.asarray(x) * 3.0,
+                run_dict={"it": 4, "accepted_iterations": 3},
+                record_event=recorded.append,
+                value_and_grad_from_forward_result=True,
+            )
+        )
+
+        value, gradient = wrapped(np.asarray([1.0, 2.0], dtype=np.float64))
+
+        self.assertTrue(np.isnan(value))
+        self.assertTrue(np.all(np.isnan(gradient)))
+        self.assertEqual(len(recorded), 1)
+        self.assertFalse(recorded[0]["solver_success"])
+        self.assertFalse(recorded[0]["native_gradient_used"])
+        self.assertTrue(recorded[0]["target_native_replay"])
 
     def test_single_stage_runtime_stage2_seed_payload_requires_order(self):
         module = self.load_module()
@@ -6984,9 +7109,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     success_filter=None,
                 )
             )
-            solve_result = solve_result_fn(
-                jnp.asarray([0.4, 0.5], dtype=jnp.float32)
-            )
+            solve_result = solve_result_fn(jnp.asarray([0.4, 0.5], dtype=jnp.float32))
 
         self.assertEqual(owner_calls, [(boozer_surface_marker, bs_marker, 0.0)])
         np.testing.assert_allclose(np.asarray(solve_result["objective_value"]), 12.0)
@@ -8594,8 +8717,8 @@ class SingleStageExampleTests(unittest.TestCase):
         def custom_solve_result(coil_dofs):
             custom_solve_calls.append(np.asarray(coil_dofs))
             return {
-                "success": jnp.asarray(True, dtype=bool),
-                "primal_success": jnp.asarray(True, dtype=bool),
+                "success": jnp.asarray(False, dtype=bool),
+                "primal_success": jnp.asarray(False, dtype=bool),
                 "objective_value": jnp.asarray(5.0, dtype=jnp.float64),
                 "objective_grad": jnp.asarray([9.0, -3.0], dtype=jnp.float64),
                 "x": solved_x,
@@ -8675,12 +8798,83 @@ class SingleStageExampleTests(unittest.TestCase):
             "reporting_metrics_from_solution_args"
         ]
         np.testing.assert_allclose(np.asarray(captured_solved_x), np.asarray(solved_x))
-        self.assertTrue(bool(captured_success))
+        self.assertFalse(bool(captured_success))
         np.testing.assert_allclose(run_dict["sdofs"], np.array([0.8, -0.4]))
         self.assertAlmostEqual(run_dict["iota"], 0.31)
         self.assertAlmostEqual(run_dict["G"], 2.1)
         self.assertEqual(run_dict["J"], 5.0)
         np.testing.assert_allclose(run_dict["dJ"], np.array([9.0, -3.0]))
+
+    def test_build_single_stage_target_lane_accepted_step_sync_rejects_nonfinite_custom_kernel_state(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=False
+        )
+        solved_x = jnp.asarray([0.8, -0.4, 0.31, 2.1], dtype=jnp.float64)
+
+        def custom_solve_result(coil_dofs):
+            del coil_dofs
+            return {
+                "success": jnp.asarray(False, dtype=bool),
+                "primal_success": jnp.asarray(False, dtype=bool),
+                "objective_value": jnp.asarray(jnp.nan, dtype=jnp.float64),
+                "objective_grad": jnp.asarray([jnp.nan, jnp.nan], dtype=jnp.float64),
+                "x": solved_x,
+                "sdofs": solved_x[:2],
+                "iota": solved_x[2],
+                "G": solved_x[3],
+                "converged": jnp.asarray(False, dtype=bool),
+                "finite": jnp.asarray(False, dtype=bool),
+            }
+
+        fake_boozer_surface = types.SimpleNamespace(
+            run_code_traceable=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("custom solve state should be used")
+            )
+        )
+        fake_bs = types.SimpleNamespace(
+            coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs
+        )
+
+        with patch.object(
+            module,
+            "build_experimental_mps_boozer_custom_kernel_solve_result",
+            return_value=custom_solve_result,
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=self._make_reporting_runtime_builder(
+                captured,
+                runtime_summary,
+                forward_result=lambda _coil_dofs: (_ for _ in ()).throw(
+                    AssertionError("default forward_result should not be used")
+                ),
+            ),
+        ):
+            sync = module.build_single_stage_target_lane_accepted_step_sync(
+                fake_boozer_surface,
+                fake_bs,
+                0.21,
+                outer_objective_config="config-marker",
+                success_filter=None,
+                experimental_mps_boozer_custom_kernel=True,
+            )
+            run_dict = {
+                "sdofs": np.array([0.1, -0.05], dtype=np.float64),
+                "iota": 0.2,
+                "G": 1.0,
+                "J": 1.0,
+                "dJ": np.zeros(2, dtype=np.float64),
+            }
+            with self.assertRaisesRegex(RuntimeError, "accepted-step replay failed"):
+                sync(
+                    run_dict,
+                    jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                    benchmark_mode=True,
+                )
 
     def test_build_single_stage_target_lane_accepted_step_sync_reuses_custom_kernel_objective_snapshot(
         self,

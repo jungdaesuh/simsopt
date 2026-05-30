@@ -980,8 +980,10 @@ def test_mps_boozer_fused_solve_state_payload_splits_final_state():
     np.testing.assert_allclose(
         np.asarray(payload.G), np.asarray(final_x_inner[surface_dof_count + 1])
     )
-    assert bool(jnp.isnan(payload.value))
-    assert bool(jnp.all(jnp.isnan(payload.coil_gradient)))
+    np.testing.assert_allclose(np.asarray(payload.value), np.asarray(result.value))
+    np.testing.assert_allclose(
+        np.asarray(payload.coil_gradient), np.asarray(result.coil_gradient)
+    )
     np.testing.assert_allclose(np.asarray(payload.x), np.asarray(final_x_inner))
     assert not bool(payload.success)
     assert not bool(payload.primal_success)
@@ -1020,8 +1022,10 @@ def test_mps_boozer_fused_solve_state_builder_reuses_custom_call_result(
 
     payload = build_mps_boozer_fused_solve_state_payload(owner)(contract.coil_dofs)
 
-    assert bool(jnp.isnan(payload.value))
-    assert bool(jnp.all(jnp.isnan(payload.coil_gradient)))
+    np.testing.assert_allclose(np.asarray(payload.value), np.asarray(3.0))
+    np.testing.assert_allclose(
+        np.asarray(payload.coil_gradient), np.ones_like(contract.coil_dofs)
+    )
     np.testing.assert_allclose(np.asarray(payload.x), np.asarray(contract.x_inner))
     assert not bool(payload.success)
     assert not bool(payload.primal_success)
