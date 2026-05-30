@@ -857,6 +857,7 @@ def build_single_stage_problem_contract(
     target_lane_sync_record,
     requested_experimental_target_lane_vg,
     use_target_lane_vg,
+    requested_experimental_mps_boozer_custom_kernel=False,
     target_lane_boozer_bfgs_tol_record,
     target_lane_boozer_bfgs_maxiter_record,
     target_lane_boozer_newton_tol_record,
@@ -998,6 +999,9 @@ def build_single_stage_problem_contract(
                 requested_experimental_target_lane_vg
             ),
             "target_lane_value_and_grad": bool(use_target_lane_vg),
+            "experimental_mps_boozer_custom_kernel": bool(
+                requested_experimental_mps_boozer_custom_kernel
+            ),
             "max_iterations": int(MAXITER),
             "maxcor": int(args.maxcor),
             "outer_maxls": int(args.outer_maxls),
@@ -1180,6 +1184,7 @@ def build_single_stage_results_envelope(
     target_lane_sync_record,
     requested_experimental_target_lane_vg,
     use_target_lane_vg,
+    requested_experimental_mps_boozer_custom_kernel=False,
     target_lane_boozer_bfgs_tol_record,
     target_lane_boozer_bfgs_maxiter_record,
     target_lane_boozer_newton_tol_record,
@@ -1298,6 +1303,9 @@ def build_single_stage_results_envelope(
             outer_optimizer_method=outer_optimizer_method,
             target_lane_sync_record=target_lane_sync_record,
             requested_experimental_target_lane_vg=requested_experimental_target_lane_vg,
+            requested_experimental_mps_boozer_custom_kernel=(
+                requested_experimental_mps_boozer_custom_kernel
+            ),
             use_target_lane_vg=use_target_lane_vg,
             target_lane_boozer_bfgs_tol_record=target_lane_boozer_bfgs_tol_record,
             target_lane_boozer_bfgs_maxiter_record=target_lane_boozer_bfgs_maxiter_record,
@@ -1829,6 +1837,20 @@ def use_target_lane_value_and_grad(
     value/grad contract is active."""
     return bool(
         backend == "jax" and optimizer_backend in _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS
+    )
+
+
+def use_experimental_mps_boozer_custom_kernel(
+    *,
+    backend: str,
+    optimizer_backend: str | None,
+    enabled: bool,
+) -> bool:
+    """Return whether the opt-in MPS Boozer custom kernel is requested."""
+    return bool(
+        enabled
+        and backend == "jax"
+        and optimizer_backend in _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS
     )
 
 
@@ -4699,6 +4721,14 @@ def parse_args():
             "now uses the fused runtime-bundle (value, grad) contract by default."
         ),
     )
+    parser.add_argument(
+        "--experimental-mps-boozer-custom-kernel",
+        action="store_true",
+        help=(
+            "Opt in to the first fixed-surface jax-mps Boozer custom-kernel "
+            "value/grad route. Unsupported objective shapes fail loudly."
+        ),
+    )
     raw_argv = list(sys.argv[1:])
     args = parser.parse_args()
     args.diagnostic_callbacks = target_lane_diagnostic_callbacks_enabled(args)
@@ -7025,6 +7055,7 @@ def build_target_lane_outer_objectives(
     profile_optimizer_dofs=None,
     profile_progress_json_path=None,
     stablehlo_dir=None,
+    experimental_mps_boozer_custom_kernel: bool = False,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
     target_scalar_objective = None
@@ -7033,7 +7064,7 @@ def build_target_lane_outer_objectives(
     target_lane_profile = None
     runtime_bundle = None
 
-    needs_runtime_bundle = True
+    needs_runtime_bundle = not bool(experimental_mps_boozer_custom_kernel)
     if needs_runtime_bundle:
         runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
             boozer_surface,
@@ -7045,14 +7076,37 @@ def build_target_lane_outer_objectives(
             success_filter=success_filter,
         )
 
-    target_scalar_objective = runtime_bundle["objective"]
+    if runtime_bundle is not None:
+        target_scalar_objective = runtime_bundle["objective"]
     if use_value_and_grad:
-        target_value_and_grad_objective = build_traceable_single_stage_value_and_grad(
-            boozer_surface,
-            bs,
-            iota_target,
-            outer_objective_config=outer_objective_config,
-            success_filter=success_filter,
+        if experimental_mps_boozer_custom_kernel:
+            target_value_and_grad_objective = (
+                build_experimental_mps_boozer_custom_kernel_value_and_grad(
+                    boozer_surface,
+                    bs,
+                    outer_objective_config=outer_objective_config,
+                    success_filter=success_filter,
+                    profile_target_lane=profile_target_lane,
+                    full_state_optimizer=full_state_optimizer_dof_map is not None,
+                )
+            )
+            target_scalar_objective = _scalar_objective_from_value_and_grad(
+                target_value_and_grad_objective
+            )
+        else:
+            target_value_and_grad_objective = (
+                build_traceable_single_stage_value_and_grad(
+                    boozer_surface,
+                    bs,
+                    iota_target,
+                    outer_objective_config=outer_objective_config,
+                    success_filter=success_filter,
+                )
+            )
+    elif experimental_mps_boozer_custom_kernel:
+        raise RuntimeError(
+            "--experimental-mps-boozer-custom-kernel requires the target-lane "
+            "(value, grad) contract."
         )
     if full_state_optimizer_dof_map is not None:
         target_scalar_objective = build_target_lane_full_state_scalar_objective(
@@ -7125,6 +7179,99 @@ def build_target_lane_outer_objectives(
         target_lane_profile,
         target_optimizer_initial_value_and_grad,
     )
+
+
+_EXPERIMENTAL_MPS_BOOZER_CUSTOM_KERNEL_ZERO_WEIGHT_KEYS = (
+    "non_qs_weight",
+    "iota_weight",
+    "length_weight",
+    "curve_curve_weight",
+    "curve_surface_weight",
+    "surface_vessel_weight",
+    "curvature_weight",
+)
+
+
+def _target_lane_weight_is_active(weight):
+    return float(weight) != 0.0
+
+
+def _experimental_mps_boozer_custom_kernel_unsupported_reasons(
+    *,
+    outer_objective_config,
+    success_filter,
+    profile_target_lane: bool,
+    full_state_optimizer: bool,
+):
+    """Return explicit reasons the first custom Boozer route cannot own this lane."""
+    reasons = []
+    if outer_objective_config is None:
+        reasons.append("default BoozerResidual+iota objective")
+    else:
+        residual_weight = outer_objective_config.get("residual_weight", 0.0)
+        if not _target_lane_weight_is_active(residual_weight):
+            reasons.append("inactive residual_weight")
+        active_unsupported_weights = [
+            weight_key
+            for weight_key in _EXPERIMENTAL_MPS_BOOZER_CUSTOM_KERNEL_ZERO_WEIGHT_KEYS
+            if _target_lane_weight_is_active(
+                outer_objective_config.get(weight_key, 0.0)
+            )
+        ]
+        if active_unsupported_weights:
+            reasons.append(
+                "active non-residual weights: " + ", ".join(active_unsupported_weights)
+            )
+    if success_filter is not None:
+        reasons.append("target-lane success_filter")
+    if profile_target_lane:
+        reasons.append("target-lane profiling")
+    if full_state_optimizer:
+        reasons.append("full-state target-lane optimizer")
+    return tuple(reasons)
+
+
+def build_experimental_mps_boozer_custom_kernel_value_and_grad(
+    boozer_surface,
+    bs,
+    *,
+    outer_objective_config,
+    success_filter,
+    profile_target_lane: bool = False,
+    full_state_optimizer: bool = False,
+):
+    """Build the residual-only experimental MPS Boozer custom value/grad."""
+    unsupported_reasons = _experimental_mps_boozer_custom_kernel_unsupported_reasons(
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+        profile_target_lane=profile_target_lane,
+        full_state_optimizer=full_state_optimizer,
+    )
+    if unsupported_reasons:
+        raise RuntimeError(
+            "--experimental-mps-boozer-custom-kernel currently supports only a "
+            "residual-only target-lane objective with no success filter, profiling, "
+            "or full-state optimizer; unsupported request includes "
+            f"{'; '.join(unsupported_reasons)}."
+        )
+
+    boozer_residual_cls, _iotas_cls, _non_qs_cls = get_jax_surface_objective_classes()
+    custom_value_and_grad = boozer_residual_cls(
+        boozer_surface,
+        bs,
+    ).experimental_mps_custom_kernel_value_and_grad()
+    residual_weight = float(outer_objective_config["residual_weight"])
+    if residual_weight == 1.0:
+        return custom_value_and_grad
+
+    def weighted_value_and_grad(coil_dofs):
+        value, gradient = custom_value_and_grad(coil_dofs)
+        weight = jnp.asarray(residual_weight, dtype=value.dtype)
+        return weight * value, weight * gradient
+
+    weighted_value_and_grad._simsopt_value_and_grad = True
+    weighted_value_and_grad._simsopt_mps_boozer_custom_kernel = True
+    return weighted_value_and_grad
 
 
 def build_target_lane_profile_coil_dofs(coil_dofs):
@@ -7767,6 +7914,7 @@ def prepare_target_lane_outer_objectives(
     profile_progress_json_path=None,
     stablehlo_dir=None,
     disable_success_filter: bool,
+    experimental_mps_boozer_custom_kernel: bool = False,
     non_qs_weight,
     residual_weight,
     iota_weight,
@@ -7848,6 +7996,7 @@ def prepare_target_lane_outer_objectives(
         profile_optimizer_dofs=profile_optimizer_dofs,
         profile_progress_json_path=profile_progress_json_path,
         stablehlo_dir=stablehlo_dir,
+        experimental_mps_boozer_custom_kernel=experimental_mps_boozer_custom_kernel,
     )
     if target_scalar_objective is None:
         target_scalar_objective = _scalar_objective_from_value_and_grad(
@@ -12545,6 +12694,13 @@ if __name__ == "__main__":
         optimizer_backend=optimizer_backend_record,
         experimental_enabled=args.experimental_target_lane_value_and_grad,
     )
+    requested_experimental_mps_boozer_custom_kernel = (
+        use_experimental_mps_boozer_custom_kernel(
+            backend=args.backend,
+            optimizer_backend=optimizer_backend_record,
+            enabled=args.experimental_mps_boozer_custom_kernel,
+        )
+    )
     target_lane_sync_record = resolve_target_lane_accepted_step_sync_record(
         backend=args.backend,
         optimizer_backend=optimizer_backend_record,
@@ -12658,6 +12814,7 @@ if __name__ == "__main__":
         str(args.reference_optimizer_method),
         str(target_lane_sync_record),
         str(use_target_lane_vg),
+        str(requested_experimental_mps_boozer_custom_kernel),
         str(args.maxiter),
         str(args.num_tf_coils),
         str(stage2_tf_current_A),
@@ -13717,6 +13874,9 @@ if __name__ == "__main__":
                 method=outer_optimizer_legacy_method,
                 maxiter=int(MAXITER),
                 use_value_and_grad=bool(use_target_lane_vg),
+                experimental_mps_boozer_custom_kernel=bool(
+                    requested_experimental_mps_boozer_custom_kernel
+                ),
                 full_state_optimizer=bool(use_target_lane_full_state_optimizer),
                 full_graph_host_callback=bool(use_target_lane_full_graph_host_callback),
                 profile_target_lane=bool(args.profile_target_lane),
@@ -13771,6 +13931,9 @@ if __name__ == "__main__":
                             args.target_lane_profile_progress_json
                         ),
                         stablehlo_dir=args.dump_target_lane_stablehlo_dir,
+                        experimental_mps_boozer_custom_kernel=(
+                            requested_experimental_mps_boozer_custom_kernel
+                        ),
                         disable_success_filter=(
                             args.disable_target_lane_success_filter
                         ),
@@ -15240,6 +15403,9 @@ if __name__ == "__main__":
             outer_optimizer_method=outer_optimizer_method_record,
             target_lane_sync_record=target_lane_sync_record,
             requested_experimental_target_lane_vg=requested_experimental_target_lane_vg,
+            requested_experimental_mps_boozer_custom_kernel=(
+                requested_experimental_mps_boozer_custom_kernel
+            ),
             use_target_lane_vg=use_target_lane_vg,
             target_lane_boozer_bfgs_tol_record=target_lane_boozer_bfgs_tol_record,
             target_lane_boozer_bfgs_maxiter_record=target_lane_boozer_bfgs_maxiter_record,
@@ -15337,6 +15503,9 @@ if __name__ == "__main__":
         "target_lane_accepted_step_sync": target_lane_sync_record,
         "experimental_target_lane_value_and_grad": requested_experimental_target_lane_vg,
         "target_lane_value_and_grad": use_target_lane_vg,
+        "experimental_mps_boozer_custom_kernel": (
+            requested_experimental_mps_boozer_custom_kernel
+        ),
         "benchmark_mode": bool(args.benchmark_mode),
         "disable_target_lane_success_filter": bool(
             args.disable_target_lane_success_filter

@@ -2188,6 +2188,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertFalse(args.profile_target_lane)
         self.assertFalse(args.profile_target_lane_memory_analysis)
         self.assertFalse(args.experimental_target_lane_value_and_grad)
+        self.assertFalse(args.experimental_mps_boozer_custom_kernel)
         self.assertFalse(args.disable_target_lane_success_filter)
 
     def test_parse_args_explicit_target_lane_outer_maxls_to_tighter_budget(self):
@@ -6508,6 +6509,38 @@ class SingleStageExampleTests(unittest.TestCase):
             )
         )
 
+    def test_use_experimental_mps_boozer_custom_kernel_only_on_jax_targets(self):
+        module = self.load_module()
+
+        self.assertFalse(
+            module.use_experimental_mps_boozer_custom_kernel(
+                backend="cpu",
+                optimizer_backend=None,
+                enabled=True,
+            )
+        )
+        self.assertFalse(
+            module.use_experimental_mps_boozer_custom_kernel(
+                backend="jax",
+                optimizer_backend="scipy",
+                enabled=True,
+            )
+        )
+        self.assertFalse(
+            module.use_experimental_mps_boozer_custom_kernel(
+                backend="jax",
+                optimizer_backend="scipy-jax",
+                enabled=False,
+            )
+        )
+        self.assertTrue(
+            module.use_experimental_mps_boozer_custom_kernel(
+                backend="jax",
+                optimizer_backend="scipy-jax",
+                enabled=True,
+            )
+        )
+
     def test_build_target_lane_outer_objectives_uses_runtime_bundle_for_target_lane(
         self,
     ):
@@ -6570,6 +6603,117 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(target_lane_profile)
         self.assertIsNone(optimizer_initial_value_and_grad)
         self.assertEqual(runtime_calls, [(False, False, None, None)])
+
+    def test_build_target_lane_outer_objectives_rejects_full_objective_mps_custom_kernel(
+        self,
+    ):
+        module = self.load_module()
+        outer_objective_config = {
+            "non_qs_weight": 1.0,
+            "residual_weight": 1.0,
+            "iota_weight": 0.0,
+            "length_weight": 0.0,
+            "curve_curve_weight": 0.0,
+            "curve_surface_weight": 0.0,
+            "surface_vessel_weight": 0.0,
+            "curvature_weight": 0.0,
+        }
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            side_effect=AssertionError(
+                "custom-kernel opt-in must not silently build the default bundle"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "active non-residual weights: non_qs_weight",
+            ):
+                module.build_target_lane_outer_objectives(
+                    object(),
+                    object(),
+                    object(),
+                    use_value_and_grad=True,
+                    profile_target_lane=False,
+                    outer_objective_config=outer_objective_config,
+                    experimental_mps_boozer_custom_kernel=True,
+                )
+
+    def test_build_target_lane_outer_objectives_uses_residual_only_mps_custom_kernel(
+        self,
+    ):
+        module = self.load_module()
+        owner_calls = []
+
+        def custom_value_and_grad(coil_dofs):
+            return (
+                jnp.asarray(3.0, dtype=coil_dofs.dtype),
+                jnp.asarray([1.0, -2.0], dtype=coil_dofs.dtype),
+            )
+
+        custom_value_and_grad._simsopt_value_and_grad = True
+        custom_value_and_grad._simsopt_mps_boozer_custom_kernel = True
+
+        class FakeBoozerResidualJAX:
+            def __init__(self, boozer_surface, bs):
+                owner_calls.append((boozer_surface, bs))
+
+            def experimental_mps_custom_kernel_value_and_grad(self):
+                return custom_value_and_grad
+
+        outer_objective_config = {
+            "non_qs_weight": 0.0,
+            "residual_weight": 2.0,
+            "iota_weight": 0.0,
+            "length_weight": 0.0,
+            "curve_curve_weight": 0.0,
+            "curve_surface_weight": 0.0,
+            "surface_vessel_weight": 0.0,
+            "curvature_weight": 0.0,
+        }
+        boozer_surface_marker = object()
+        bs_marker = object()
+
+        with patch.object(
+            module,
+            "get_jax_surface_objective_classes",
+            return_value=(FakeBoozerResidualJAX, object(), object()),
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            side_effect=AssertionError(
+                "residual-only custom route should not build the default bundle"
+            ),
+        ):
+            (
+                scalar_fun,
+                value_and_grad_fun,
+                target_lane_profile,
+                optimizer_initial_value_and_grad,
+            ) = module.build_target_lane_outer_objectives(
+                boozer_surface_marker,
+                bs_marker,
+                object(),
+                use_value_and_grad=True,
+                profile_target_lane=False,
+                outer_objective_config=outer_objective_config,
+                experimental_mps_boozer_custom_kernel=True,
+            )
+
+        value, gradient = value_and_grad_fun(jnp.asarray([0.4, 0.5], dtype=jnp.float32))
+        scalar = scalar_fun(jnp.asarray([0.4, 0.5], dtype=jnp.float32))
+
+        self.assertEqual(owner_calls, [(boozer_surface_marker, bs_marker)])
+        np.testing.assert_allclose(np.asarray(value), 6.0)
+        np.testing.assert_allclose(np.asarray(scalar), 6.0)
+        np.testing.assert_allclose(np.asarray(gradient), np.asarray([2.0, -4.0]))
+        self.assertTrue(getattr(value_and_grad_fun, "_simsopt_value_and_grad"))
+        self.assertTrue(
+            getattr(value_and_grad_fun, "_simsopt_mps_boozer_custom_kernel")
+        )
+        self.assertIsNone(target_lane_profile)
+        self.assertIsNone(optimizer_initial_value_and_grad)
 
     def test_build_target_lane_outer_objectives_threads_runtime_bundle_options(
         self,
@@ -16175,6 +16319,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
                 outer_optimizer_method="lbfgs-ondevice",
                 target_lane_sync_record="final-only",
                 requested_experimental_target_lane_vg=False,
+                requested_experimental_mps_boozer_custom_kernel=True,
                 use_target_lane_vg=True,
                 target_lane_boozer_bfgs_tol_record=1e-6,
                 target_lane_boozer_bfgs_maxiter_record=48,
@@ -16197,6 +16342,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
             runtime_contract["target_lane_boozer_newton_polish_policy"],
             "skip-large-strict-cuda",
         )
+        self.assertTrue(runtime_contract["experimental_mps_boozer_custom_kernel"])
         self.assertEqual(runtime_contract["effective_banana_surface_radius"], 0.219)
         self.assertEqual(
             stage2_seed["banana_surface_radius"],

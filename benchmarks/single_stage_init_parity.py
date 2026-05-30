@@ -507,6 +507,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--experimental-mps-boozer-custom-kernel",
+        action="store_true",
+        help=(
+            "Thread through the explicit single-stage jax-mps Boozer custom-kernel "
+            "opt-in for target-lane experiments."
+        ),
+    )
+    parser.add_argument(
         "--jax-profile-dir",
         default=None,
         help=(
@@ -803,6 +811,7 @@ def _append_optional_single_stage_flags(
     enable_compile_diagnostics: bool,
     jax_profile_dir: str | None,
     experimental_target_lane_value_and_grad: bool,
+    experimental_mps_boozer_custom_kernel: bool,
     disable_target_lane_success_filter: bool,
     record_objective_evaluation_trace: bool,
     record_target_optimizer_state_trace: bool,
@@ -844,6 +853,8 @@ def _append_optional_single_stage_flags(
         command.extend(["--jax-profile-dir", jax_profile_dir])
     if experimental_target_lane_value_and_grad:
         command.append("--experimental-target-lane-value-and-grad")
+    if experimental_mps_boozer_custom_kernel:
+        command.append("--experimental-mps-boozer-custom-kernel")
     if disable_target_lane_success_filter:
         command.append("--disable-target-lane-success-filter")
     if record_objective_evaluation_trace:
@@ -941,6 +952,7 @@ def _run_single_stage_case(
     diagnose_target_lane_scaled_phase1: bool = False,
     record_target_lane_invalid_state_events: bool = False,
     experimental_target_lane_value_and_grad: bool = False,
+    experimental_mps_boozer_custom_kernel: bool = False,
     enable_compile_diagnostics: bool = False,
     deterministic_gpu_reductions: bool = False,
     output_root: Path | None = None,
@@ -1039,6 +1051,9 @@ def _run_single_stage_case(
             jax_profile_dir=getattr(args, "jax_profile_dir", None),
             experimental_target_lane_value_and_grad=(
                 experimental_target_lane_value_and_grad
+            ),
+            experimental_mps_boozer_custom_kernel=(
+                experimental_mps_boozer_custom_kernel
             ),
             disable_target_lane_success_filter=bool(
                 getattr(args, "disable_target_lane_success_filter", False)
@@ -1623,6 +1638,9 @@ def _run_single_stage_case_pair(
             replay_objective_evaluation_trace=Path(
                 cpu_case["outer_optimizer_progress_json"]
             ),
+            experimental_mps_boozer_custom_kernel=bool(
+                args.experimental_mps_boozer_custom_kernel
+            ),
         )
     jax_case = _run_single_stage_case(
         target_args,
@@ -1632,6 +1650,9 @@ def _run_single_stage_case_pair(
         load_surface_gamma=compare_surface_geometry,
         output_root=case_root / "target_outputs",
         jax_runtime_seed_spec=jax_seed_spec,
+        experimental_mps_boozer_custom_kernel=bool(
+            args.experimental_mps_boozer_custom_kernel
+        ),
     )
     return cpu_case, jax_case, jax_seed_spec, seed_case, same_candidate_replay_case
 
