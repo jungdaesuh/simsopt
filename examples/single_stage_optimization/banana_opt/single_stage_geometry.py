@@ -969,8 +969,9 @@ def solve_surface_stack_at_dofs(
         # Pass the warm-start iota as the collapse reference so a trial coil step with no nearby nested
         # surface fails the Boozer BFGS solve fast (early-exit) instead of grinding all bfgs_maxiter
         # iterations toward the trivial magnetic axis. The kwargs are only forwarded to run_code
-        # implementations that accept them (the base simsopt BoozerSurface). The defense-in-depth
-        # reject below still catches a completed collapse for any surface type.
+        # implementations that accept them (the base simsopt BoozerSurface and the finite-enclosed-
+        # current subclass both do). The defense-in-depth reject below still catches a completed
+        # collapse for any surface type.
         boozer_surface = entry["boozer_surface"]
         run_code_kwargs = {}
         if _run_code_supports_iota_collapse_guard(boozer_surface):
@@ -991,9 +992,10 @@ def solve_surface_stack_at_dofs(
 def _run_code_supports_iota_collapse_guard(boozer_surface):
     """True if ``boozer_surface.run_code`` accepts the iota-collapse early-exit kwargs.
 
-    The base ``simsopt.geo.BoozerSurface.run_code`` accepts ``iota_collapse_fraction`` /
-    ``iota_reference``; some wrapper subclasses (e.g. the finite-enclosed-current variant) do not yet
-    forward them, in which case the early-exit is skipped (the defense-in-depth reject still applies).
+    Both ``simsopt.geo.BoozerSurface.run_code`` and the finite-enclosed-current subclass accept
+    ``iota_collapse_fraction`` / ``iota_reference``; this signature check stays defensive so any other
+    run_code implementation that does not forward them simply skips the early-exit (the
+    defense-in-depth reject still applies).
     """
     parameters = inspect.signature(boozer_surface.run_code).parameters
     return (
