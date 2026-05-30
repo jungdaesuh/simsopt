@@ -7,6 +7,7 @@ from scipy.optimize import least_squares
 from simsopt.geo import CurveRZFourier
 
 __all__ = [
+    "FieldLineBelowAxisThresholdError",
     "MagneticAxisNotLocatedError",
     "compute_on_axis_iota",
     "locate_magnetic_axis_point",
@@ -15,6 +16,25 @@ __all__ = [
 
 class MagneticAxisNotLocatedError(RuntimeError):
     """Raised when the magnetic-axis fixed-point solve cannot locate an acceptable axis."""
+
+
+class FieldLineBelowAxisThresholdError(ValueError):
+    """Raised mid-integration when |B_phi|/|B| of a trial field line drops to ~0.
+
+    Subclasses ``ValueError`` so existing ``except ValueError`` / ``pytest.raises``
+    callers keep working. ``_axis_return_residual`` catches this specific type to
+    convert a transient B_phi null on a single ``least_squares`` trial step into a
+    large finite residual rather than aborting the whole axis solve.
+    """
+
+
+# Large finite residual returned for a trial state whose field-line integration
+# cannot complete (B_phi null or solver non-convergence). It makes the
+# ``least_squares`` residual TOTAL over the bounded (R, Z) domain so a failed
+# trial is rejected (the solver backtracks toward the feasible guess) and a
+# penalized final point can never pass the residual-acceptance check in
+# ``locate_magnetic_axis_point`` (>> the 1e-6 acceptance tolerance).
+_AXIS_RETURN_PENALTY = 1.0e3
 
 
 def _cylindrical_basis(phi):
@@ -50,7 +70,9 @@ def _fieldline_rhs_phi(phi, state, magnetic_field, min_bphi_over_b):
         raise ValueError("Magnetic field norm must be finite and positive")
     b_phi = float(np.dot(b, e_phi))
     if abs(b_phi) / b_norm <= float(min_bphi_over_b):
-        raise ValueError("|B_phi|/|B| fell below the magnetic-axis threshold")
+        raise FieldLineBelowAxisThresholdError(
+            "|B_phi|/|B| fell below the magnetic-axis threshold"
+        )
     return np.asarray(
         [
             radius * float(np.dot(b, e_r)) / b_phi,
@@ -73,25 +95,31 @@ def _axis_return_residual(
     min_bphi_over_b,
 ):
     start = np.asarray(state, dtype=float)
-    solution = solve_ivp(
-        lambda phi, rz: _fieldline_rhs_phi(
-            phi,
-            rz,
-            magnetic_field,
-            min_bphi_over_b,
-        ),
-        (float(phi0), float(phi0) + float(toroidal_span)),
-        start,
-        method="DOP853",
-        rtol=float(rtol),
-        atol=float(atol),
-        max_step=float(max_step),
-        t_eval=(float(phi0) + float(toroidal_span),),
-    )
-    if not solution.success:
-        raise MagneticAxisNotLocatedError(
-            f"magnetic-axis return-map integration failed: {solution.message}"
+    try:
+        solution = solve_ivp(
+            lambda phi, rz: _fieldline_rhs_phi(
+                phi,
+                rz,
+                magnetic_field,
+                min_bphi_over_b,
+            ),
+            (float(phi0), float(phi0) + float(toroidal_span)),
+            start,
+            method="DOP853",
+            rtol=float(rtol),
+            atol=float(atol),
+            max_step=float(max_step),
+            t_eval=(float(phi0) + float(toroidal_span),),
         )
+    except FieldLineBelowAxisThresholdError:
+        # A transient B_phi null on THIS trial step is not a field defect; the
+        # solver must be allowed to step away from it, so penalize the trial
+        # instead of aborting the whole solve.
+        return np.full(2, _AXIS_RETURN_PENALTY)
+    if not solution.success:
+        # A single non-converged trial integration must not abort the whole
+        # solve either; penalize it so least_squares backtracks.
+        return np.full(2, _AXIS_RETURN_PENALTY)
     return (np.asarray(solution.y[:, -1], dtype=float) - start) / float(scale)
 
 

@@ -13918,6 +13918,7 @@ class RunIdentityTests(unittest.TestCase):
             topology_scorer_every=10,
             topology_scorer_nfieldlines=12,
             topology_scorer_tmax=50.0,
+            topology_scorer_min_returns=256,
             confinement_objective_weight=0.0,
             confinement_surrogate_worst_k=3,
             confinement_surrogate_early_threshold=0.2,

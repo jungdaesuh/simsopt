@@ -2509,6 +2509,19 @@ def parse_args():
         help="Integration horizon for callback topology scorer (default 50.0).",
     )
     parser.add_argument(
+        "--topology-scorer-min-returns",
+        type=int,
+        default=int(os.environ.get("TOPOLOGY_SCORER_MIN_RETURNS", "256")),
+        help=(
+            "Minimum Poincare returns the in-loop WBA Birkhoff classifier needs "
+            "to classify a survived seed (default 256, the strict-validation "
+            "setting). Lower it only for a cheaper, coarser in-loop steering "
+            "signal: in-loop tmax often yields far fewer returns than 256, so a "
+            "lower bar trades classification fidelity for an earlier graded WBA "
+            "score instead of not_evaluated_insufficient_returns."
+        ),
+    )
+    parser.add_argument(
         "--residue-objective-weight",
         type=float,
         default=float(
@@ -4133,6 +4146,7 @@ def maybe_record_topology_score(
         biotsavart,
         nfieldlines=TOPOLOGY_SCORER_NFIELDLINES,
         tmax=TOPOLOGY_SCORER_TMAX,
+        wba_min_returns=TOPOLOGY_SCORER_MIN_RETURNS,
         **confinement_surrogate_kwargs(),
     )
     checkpoint_objective_total = (
@@ -4630,6 +4644,7 @@ class RunIdentityConfig:
     topology_scorer_every: int
     topology_scorer_nfieldlines: int
     topology_scorer_tmax: float
+    topology_scorer_min_returns: int
     confinement_objective_weight: float
     confinement_surrogate_worst_k: int
     confinement_surrogate_early_threshold: float
@@ -5203,6 +5218,7 @@ def make_run_identity_config(
         topology_scorer_every=args.topology_scorer_every,
         topology_scorer_nfieldlines=args.topology_scorer_nfieldlines,
         topology_scorer_tmax=args.topology_scorer_tmax,
+        topology_scorer_min_returns=args.topology_scorer_min_returns,
         confinement_objective_weight=args.confinement_objective_weight,
         confinement_surrogate_worst_k=args.confinement_surrogate_worst_k,
         confinement_surrogate_early_threshold=args.confinement_surrogate_early_threshold,
@@ -11433,6 +11449,7 @@ CHECKPOINT_EVERY = 0
 TOPOLOGY_SCORER_EVERY = 0
 TOPOLOGY_SCORER_NFIELDLINES = 12
 TOPOLOGY_SCORER_TMAX = 50.0
+TOPOLOGY_SCORER_MIN_RETURNS = 256
 CONFINEMENT_OBJECTIVE_WEIGHT = 0.0
 FRONTIER_INVARIANT_TORUS_MIN = _default_frontier_invariant_torus_min_impl()
 FRONTIER_KAM_MIN = FRONTIER_INVARIANT_TORUS_MIN
@@ -11613,6 +11630,7 @@ if __name__ == "__main__":
     TOPOLOGY_SCORER_EVERY = args.topology_scorer_every
     TOPOLOGY_SCORER_NFIELDLINES = args.topology_scorer_nfieldlines
     TOPOLOGY_SCORER_TMAX = args.topology_scorer_tmax
+    TOPOLOGY_SCORER_MIN_RETURNS = args.topology_scorer_min_returns
     CONFINEMENT_OBJECTIVE_WEIGHT = args.confinement_objective_weight
     FRONTIER_INVARIANT_TORUS_MIN = args.frontier_invariant_torus_min
     FRONTIER_KAM_MIN = args.frontier_kam_min
@@ -13809,6 +13827,7 @@ if __name__ == "__main__":
         "TOPOLOGY_SCORER_EVERY": TOPOLOGY_SCORER_EVERY,
         "TOPOLOGY_SCORER_NFIELDLINES": TOPOLOGY_SCORER_NFIELDLINES,
         "TOPOLOGY_SCORER_TMAX": TOPOLOGY_SCORER_TMAX,
+        "TOPOLOGY_SCORER_MIN_RETURNS": TOPOLOGY_SCORER_MIN_RETURNS,
         "CONFINEMENT_OBJECTIVE_WEIGHT": CONFINEMENT_OBJECTIVE_WEIGHT,
         "CONFINEMENT_SURROGATE_WORST_K": CONFINEMENT_SURROGATE_WORST_K,
         "CONFINEMENT_SURROGATE_EARLY_THRESHOLD": CONFINEMENT_SURROGATE_EARLY_THRESHOLD,

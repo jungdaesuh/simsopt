@@ -70,6 +70,39 @@ class ShiftedAxisField:
         return np.asarray(vectors, dtype=float)
 
 
+class BphiNullAxisField(ShiftedAxisField):
+    """ShiftedAxisField whose toroidal field vanishes on the cylinder R=r_null.
+
+    The axis at ``(axis_r, axis_z)`` stays healthy, but an off-axis trial field
+    line that oscillates across ``r_null`` drives |B_phi|/|B| through zero
+    mid-integration -- the RC1 m8n8 condition. Before RC1 this aborted the whole
+    axis solve and surfaced as a broken topology score; it must now resolve to a
+    broken=False result (axis recovered or gracefully not-located).
+    """
+
+    def __init__(self, *, axis_r, axis_z, iota, r_null):
+        super().__init__(axis_r=axis_r, axis_z=axis_z, iota=iota)
+        self.r_null = float(r_null)
+
+    def B(self):
+        vectors = []
+        for point in self._points:
+            x, y, z = point
+            radius = math.hypot(float(x), float(y))
+            phi = math.atan2(float(y), float(x))
+            e_r = np.asarray([math.cos(phi), math.sin(phi), 0.0], dtype=float)
+            e_phi = np.asarray([-math.sin(phi), math.cos(phi), 0.0], dtype=float)
+            e_z = np.asarray([0.0, 0.0, 1.0], dtype=float)
+
+            d_radius_d_phi = -self.iota * (float(z) - self.axis_z)
+            d_z_d_phi = self.iota * (radius - self.axis_r)
+            b_phi = (radius - self.r_null) / self.axis_r
+            b_radius = d_radius_d_phi / radius
+            b_z = d_z_d_phi / radius
+            vectors.append(b_radius * e_r + b_phi * e_phi + b_z * e_z)
+        return np.asarray(vectors, dtype=float)
+
+
 def test_invariant_torus_classification_reports_not_evaluated_for_short_traces():
     short_hits = np.array(
         [[float(step), 0.0, 1.1, 0.0, 0.0] for step in range(60)],
@@ -86,6 +119,174 @@ def test_invariant_torus_classification_reports_not_evaluated_for_short_traces()
     assert result["wba_classified_seed_count"] == 0
     assert result["wba_classification_counts"]["insufficient_returns"] == 1
     assert result["wba_evaluation_state"] == "not_evaluated_insufficient_returns"
+
+
+def _golden_invariant_torus_hits(*, axis_r, axis_z, count):
+    # A quasi-periodic orbit on an invariant torus (golden rotation number) at a
+    # fixed minor radius about the axis -- the WBA classifier resolves it as an
+    # invariant_torus once it has >= min_returns points.
+    rotation_number = (math.sqrt(5.0) - 1.0) / 10.0
+    theta = np.arange(count, dtype=float) * 2.0 * math.pi * rotation_number
+    return np.column_stack(
+        (
+            np.arange(theta.size, dtype=float),
+            np.zeros(theta.size, dtype=float),
+            axis_r + 0.08 * np.cos(theta),
+            np.zeros(theta.size, dtype=float),
+            axis_z + 0.08 * np.sin(theta),
+        )
+    )
+
+
+def test_wba_min_returns_override_flips_insufficient_to_evaluated():
+    # Mirrors the m10n10 in-loop case: an axis-healthy lane whose in-run tmax
+    # yields ~130 Poincare returns -- below the strict-validation bar (256) but
+    # enough for a coarse in-loop signal. The externally-owned min_returns knob
+    # lets a caller classify at the lower bar; the default keeps 256 unchanged.
+    axis_r, axis_z = 1.05, 0.16
+    hits = _golden_invariant_torus_hits(axis_r=axis_r, axis_z=axis_z, count=130)
+    axis_point = {"r": axis_r, "z": axis_z, "source": "test_magnetic_axis"}
+
+    lowered = topology_scorer.invariant_torus_classification(
+        [hits], RingSurface(), axis_point=axis_point, min_returns=128
+    )
+    assert lowered["wba_evaluation_state"] == "evaluated"
+    assert lowered["invariant_torus_fraction"] == 1.0
+    assert lowered["wba_settings"]["min_returns"] == 128
+
+    # Default (None) keeps the strict 256 bar -> still insufficient on 130 returns.
+    default = topology_scorer.invariant_torus_classification(
+        [hits], RingSurface(), axis_point=axis_point
+    )
+    assert default["wba_evaluation_state"] == "not_evaluated_insufficient_returns"
+    assert default["invariant_torus_fraction"] is None
+    assert (
+        default["wba_settings"]["min_returns"]
+        == topology_scorer.DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS.min_returns
+        == 256
+    )
+
+    # Explicit min_returns=256 is identical to the default (no behavior change).
+    explicit_default = topology_scorer.invariant_torus_classification(
+        [hits], RingSurface(), axis_point=axis_point, min_returns=256
+    )
+    assert (
+        explicit_default["wba_evaluation_state"]
+        == "not_evaluated_insufficient_returns"
+    )
+
+
+def test_score_topology_threads_wba_min_returns_into_classifier(monkeypatch):
+    # The score_topology -> invariant_torus_classification wiring must forward
+    # wba_min_returns so the in-loop scorer pass can use the cheaper bar.
+    captured = {}
+
+    def fake_itc(*_args, **kwargs):
+        captured["min_returns"] = kwargs.get("min_returns")
+        return topology_scorer.wba_not_evaluated_payload(
+            topology_scorer.WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER
+        )
+
+    monkeypatch.setattr(
+        topology_scorer,
+        "build_stopping_criteria",
+        lambda *_args, **_kwargs: ([object()], ["surface_exit"]),
+    )
+    monkeypatch.setattr(
+        topology_scorer,
+        "midplane_seed_radii",
+        lambda *_args, **_kwargs: np.array([1.0, 1.1]),
+    )
+    monkeypatch.setattr(
+        topology_scorer,
+        "prepare_topology_field",
+        lambda *_args, **_kwargs: (object(), {"selected_mode": "native"}),
+    )
+    monkeypatch.setattr(topology_scorer, "cross_section_span", lambda *_args: 1.0)
+    monkeypatch.setattr(topology_scorer, "invariant_torus_classification", fake_itc)
+    monkeypatch.setattr(
+        simsopt_field,
+        "compute_fieldlines",
+        lambda *_args, **_kwargs: (
+            [np.array([[0.0, 1.0, 0.0, 0.0]])],
+            [np.array([[0.4, 0.0, 1.0, 0.0, 0.0]])],
+        ),
+    )
+
+    topology_scorer.score_topology(
+        RingSurface(),
+        object(),
+        nfieldlines=2,
+        tmax=2.0,
+        tol=1e-7,
+        nphis=1,
+        field_policy="never",
+        compute_transport_diagnostics=False,
+        compute_invariant_torus_classification=True,
+        wba_min_returns=128,
+    )
+
+    assert captured["min_returns"] == 128
+
+
+def test_score_topology_axis_bphi_null_trial_is_not_broken(monkeypatch):
+    # RC1: a field whose axis solve hits a transient B_phi null on an off-axis
+    # trial step must NOT poison the topology score as broken=True. The real
+    # poloidal_axis_point runs here (not monkeypatched); the residual absorbs the
+    # null so the solve recovers the healthy axis (or ends gracefully), and the
+    # finalized score is broken=False with no escaping evaluation error.
+    fieldlines_tys = [
+        np.array([[0.0, 1.0, 0.0, 0.0]]),
+        np.array([[0.0, 1.1, 0.0, 0.0]]),
+    ]
+    fieldlines_phi_hits = [
+        np.array([[0.4, 0.0, 1.0, 0.0, 0.0]]),
+        np.array([[0.5, 0.0, 1.1, 0.0, 0.0]]),
+    ]
+
+    monkeypatch.setattr(
+        topology_scorer,
+        "build_stopping_criteria",
+        lambda *_args, **_kwargs: ([object()], ["surface_exit"]),
+    )
+    monkeypatch.setattr(
+        topology_scorer,
+        "midplane_seed_radii",
+        lambda *_args, **_kwargs: np.array([1.0, 1.1]),
+    )
+    monkeypatch.setattr(
+        topology_scorer,
+        "prepare_topology_field",
+        lambda *_args, **_kwargs: (object(), {"selected_mode": "native"}),
+    )
+    monkeypatch.setattr(topology_scorer, "cross_section_span", lambda *_args: 1.0)
+    monkeypatch.setattr(
+        simsopt_field,
+        "compute_fieldlines",
+        lambda *_args, **_kwargs: (fieldlines_tys, fieldlines_phi_hits),
+    )
+
+    # RingSurface centroid is ~ (1.1, 0); axis at 1.1, B_phi null cylinder at 0.97
+    # sits inside the seed-bounds span so a trial excursion crosses it.
+    bfield = BphiNullAxisField(axis_r=1.1, axis_z=0.0, iota=0.3, r_null=0.97)
+
+    result = topology_scorer.finalize_topology_score_result(
+        topology_scorer.score_topology(
+            RingSurface(),
+            bfield,
+            nfieldlines=2,
+            tmax=2.0,
+            tol=1e-7,
+            nphis=1,
+            field_policy="never",
+            compute_transport_diagnostics=False,
+            compute_invariant_torus_classification=True,
+        )
+    )
+
+    assert result["broken"] is False
+    assert result["evaluation_state"] == "evaluated"
+    assert result["evaluation_error"] is None
 
 
 def test_wba_reports_not_evaluated_without_magnetic_axis_reference():
@@ -316,10 +517,21 @@ def test_score_topology_solves_axis_on_exact_field_under_interpolation(monkeypat
         captured["traced_field"] = traced_field
         return real_compute_fieldlines(traced_field, *args, **kwargs)
 
-    def spy_classify(fieldlines_phi_hits, surface_arg, *, bfield=None, axis_point=None):
+    def spy_classify(
+        fieldlines_phi_hits,
+        surface_arg,
+        *,
+        bfield=None,
+        axis_point=None,
+        min_returns=None,
+    ):
         captured["axis_field"] = bfield
         return real_classify(
-            fieldlines_phi_hits, surface_arg, bfield=bfield, axis_point=axis_point
+            fieldlines_phi_hits,
+            surface_arg,
+            bfield=bfield,
+            axis_point=axis_point,
+            min_returns=min_returns,
         )
 
     monkeypatch.setattr(simsopt_field, "compute_fieldlines", spy_compute_fieldlines)

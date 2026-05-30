@@ -11,6 +11,7 @@ cannot drift between callback and validation.
 """
 
 import copy
+import dataclasses
 from pathlib import Path
 import sys
 
@@ -901,20 +902,18 @@ def invariant_torus_classification(
     plane_index=0,
     bfield=None,
     axis_point=None,
+    min_returns=None,
 ):
+    # min_returns=None keeps the strict-validation default (256); an explicit
+    # value overrides only the returns bar (e.g. a cheaper in-loop pass).
     settings = DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS
+    overrides = {}
     if int(plane_index) != settings.target_phi_index:
-        settings = type(settings)(
-            target_phi_index=int(plane_index),
-            min_returns=settings.min_returns,
-            invariant_digits_min=settings.invariant_digits_min,
-            island_digits_min=settings.island_digits_min,
-            exact_rational_tolerance=settings.exact_rational_tolerance,
-            island_max_denominator=settings.island_max_denominator,
-            diff_floor=settings.diff_floor,
-            min_winding_sign_fraction=settings.min_winding_sign_fraction,
-            winding_increment_floor=settings.winding_increment_floor,
-        )
+        overrides["target_phi_index"] = int(plane_index)
+    if min_returns is not None and int(min_returns) != settings.min_returns:
+        overrides["min_returns"] = int(min_returns)
+    if overrides:
+        settings = dataclasses.replace(settings, **overrides)
     if axis_point is None and bfield is None:
         return _wba_missing_magnetic_axis_result(fieldlines_phi_hits, settings)
     if axis_point is not None:
@@ -1128,6 +1127,7 @@ def score_topology(
     compute_transport_diagnostics=True,
     compute_invariant_torus_classification=True,
     magnetic_axis_point=None,
+    wba_min_returns=None,
 ):
     """Score field-line confinement on a Boozer surface.
 
@@ -1140,6 +1140,11 @@ def score_topology(
     not-evaluated stub. The search-time survival gate also disables
     compute_invariant_torus_classification so WBA magnetic-axis solving cannot
     turn a confinement survival decision into a broken gate.
+
+    wba_min_returns=None keeps the strict-validation Birkhoff-classifier returns
+    bar (256). A caller may pass a lower value for a cheaper, coarser in-loop WBA
+    signal (fewer Poincare returns required to classify); it overrides only the
+    returns bar, not the other classifier settings.
     """
     from simsopt.field import compute_fieldlines
 
@@ -1222,6 +1227,7 @@ def score_topology(
             # report "broken" on valid configs whenever interpolation was active.
             bfield=bfield,
             axis_point=magnetic_axis_point,
+            min_returns=wba_min_returns,
         )
     else:
         wba = wba_not_evaluated_payload(WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER)
