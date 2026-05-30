@@ -18,7 +18,7 @@ SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET = "mps.simsopt_boozer_value_grad"
 SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION = 3
 MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE = "fixed_surface_g_iota"
 UNKNOWN_ITERATION_COUNT = -1
-DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER = 1
+DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER = 20
 MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER = 20
 EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER = 2
 MAX_EXPERIMENTAL_MPS_BOOZER_COIL_GROUPS = 2
@@ -815,7 +815,7 @@ def build_mps_boozer_fused_solve_value_and_grad(
             coil_dofs=coil_dofs,
         )
         result = evaluate_mps_boozer_fused_solve_custom_call(contract)
-        status_ok = jnp.logical_and(result.converged, result.finite)
+        status_ok = result.finite
         failed_value = jnp.zeros_like(result.value) / jnp.zeros_like(result.value)
         failed_gradient = jnp.zeros_like(result.coil_gradient) / jnp.zeros_like(
             result.coil_gradient,

@@ -108,6 +108,9 @@ bootstrap_local_simsopt()
 
 import jax
 import jaxlib
+from simsopt.jax_core.mps_boozer_kernel_contract import (
+    DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
+)
 
 maybe_initialize_distributed_runtime()
 _RUNTIME_CONTEXT = "Single-stage init parity"
@@ -466,6 +469,15 @@ def parse_args() -> argparse.Namespace:
             "large strict-CUDA parity runs, including their JAX CPU reference "
             "children, so acceptance exercises the least-squares solved state "
             "without materializing the large dense Newton graph."
+        ),
+    )
+    parser.add_argument(
+        "--target-lane-boozer-newton-tol",
+        type=float,
+        default=None,
+        help=(
+            "Optional target-lane Boozer Newton tolerance override passed "
+            "through to the single-stage runner."
         ),
     )
     parser.add_argument(
@@ -1191,7 +1203,7 @@ def _run_single_stage_case(
             )
             if not residual_only_fixture
             else (
-                1
+                DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER
                 if getattr(args, "target_lane_boozer_newton_maxiter", None) is None
                 else getattr(args, "target_lane_boozer_newton_maxiter", None)
             ),

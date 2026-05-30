@@ -6624,6 +6624,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self,
     ):
         module = self.load_module()
+        from simsopt.jax_core.mps_boozer_kernel_contract import (
+            DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
+        )
 
         overrides = module.build_target_lane_trial_boozer_overrides(
             bfgs_tol=None,
@@ -6634,7 +6637,10 @@ class SingleStageExampleTests(unittest.TestCase):
             experimental_mps_boozer_custom_kernel=True,
         )
 
-        self.assertEqual(overrides["newton_maxiter"], 1)
+        self.assertEqual(
+            overrides["newton_maxiter"],
+            DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
+        )
         self.assertEqual(overrides["gmres_maxiter"], 2)
         self.assertEqual(overrides["mps_solver_mode"], "fixed_surface_g_iota")
 

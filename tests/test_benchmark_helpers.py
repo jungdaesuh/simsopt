@@ -670,8 +670,27 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     assert args.initial_step_maxiter == 0
     assert args.outer_maxls == single_stage_init_parity_module.TRACE_PARITY_OUTER_MAXLS
     assert args.target_lane_boozer_newton_polish_policy == "skip-large-strict-cuda"
+    assert args.target_lane_boozer_newton_tol is None
     assert args.target_lane_boozer_newton_maxiter is None
     assert not args.experimental_mps_boozer_residual_only_fixture
+
+
+def test_single_stage_init_accepts_target_lane_boozer_newton_tol(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_init_parity.py",
+            "--output-json",
+            "/tmp/out.json",
+            "--target-lane-boozer-newton-tol",
+            "1e-5",
+        ],
+    )
+
+    args = single_stage_init_parity_module.parse_args()
+
+    assert args.target_lane_boozer_newton_tol == pytest.approx(1e-5)
 
 
 def test_single_stage_init_accepts_target_lane_boozer_newton_maxiter(monkeypatch):
@@ -6922,6 +6941,81 @@ def test_single_stage_init_case_threads_mps_residual_only_fixture_flags(
         assert observed_command[flag_index + 1] == "0.0"
     newton_index = observed_command.index("--target-lane-boozer-newton-maxiter")
     assert observed_command[newton_index + 1] == "3"
+
+
+def test_single_stage_init_case_defaults_mps_residual_only_newton_cap_to_backend_budget(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="scipy-jax",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+        experimental_mps_boozer_residual_only_fixture=True,
+        target_lane_boozer_newton_maxiter=None,
+    )
+
+    observed_command: list[str] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_command[:] = _write_single_stage_result_artifact(command)
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_load_surface_gamma_artifact",
+        lambda _path: np.zeros((2, 2, 3)),
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        experimental_mps_boozer_custom_kernel=True,
+        load_surface_gamma=False,
+    )
+
+    assert _flag_value(
+        observed_command,
+        "--target-lane-boozer-newton-maxiter",
+    ) == str(
+        single_stage_init_parity_module.DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER
+    )
 
 
 def test_single_stage_init_case_threads_disable_target_lane_success_filter_flag(

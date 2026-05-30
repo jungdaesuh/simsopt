@@ -13567,6 +13567,9 @@ if __name__ == "__main__":
                 profile_batch_size=args.profile_target_lane_batch_size,
                 profile_progress_json_path=args.target_lane_profile_progress_json,
                 stablehlo_dir=args.dump_target_lane_stablehlo_dir,
+                experimental_mps_boozer_custom_kernel=(
+                    requested_experimental_mps_boozer_custom_kernel
+                ),
                 disable_success_filter=args.disable_target_lane_success_filter,
                 non_qs_weight=NON_QS_WEIGHT,
                 residual_weight=RES_WEIGHT,

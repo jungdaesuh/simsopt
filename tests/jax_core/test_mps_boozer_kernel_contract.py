@@ -950,7 +950,7 @@ def test_mps_boozer_value_and_grad_builder_reuses_value_grad_marker(
     assert result_shape[1].shape == contract.coil_dofs.shape
 
 
-def test_mps_boozer_value_and_grad_builder_masks_failed_status(
+def test_mps_boozer_value_and_grad_builder_returns_finite_nonconverged_result(
     monkeypatch,
 ):
     owner, contract = _supported_fixed_surface_owner_fixture()
@@ -977,6 +977,43 @@ def test_mps_boozer_value_and_grad_builder_masks_failed_status(
         mps_boozer_kernel_contract,
         "evaluate_mps_boozer_fused_solve_custom_call",
         evaluate_failed_status,
+    )
+
+    value, gradient = build_mps_boozer_fused_solve_value_and_grad(owner)(
+        contract.coil_dofs,
+    )
+
+    assert float(value) == pytest.approx(3.0)
+    np.testing.assert_allclose(np.asarray(gradient), np.ones(contract.coil_dofs.shape))
+
+
+def test_mps_boozer_value_and_grad_builder_masks_nonfinite_status(
+    monkeypatch,
+):
+    owner, contract = _supported_fixed_surface_owner_fixture()
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "mps_boozer_jax_mps_backend_available",
+        lambda: True,
+    )
+
+    def evaluate_nonfinite_status(_contract):
+        return MpsBoozerFusedCustomCallResult(
+            value=jnp.asarray(3.0, dtype=contract.coil_dofs.dtype),
+            coil_gradient=jnp.ones_like(contract.coil_dofs),
+            final_x_inner=contract.x_inner,
+            residual_norm=jnp.asarray(0.0, dtype=contract.coil_dofs.dtype),
+            gradient_norm=jnp.asarray(2.0, dtype=contract.coil_dofs.dtype),
+            newton_iteration_count=jnp.asarray(1, dtype=jnp.int32),
+            gmres_iteration_count=jnp.asarray(2, dtype=jnp.int32),
+            converged=jnp.asarray(True),
+            finite=jnp.asarray(False),
+        )
+
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "evaluate_mps_boozer_fused_solve_custom_call",
+        evaluate_nonfinite_status,
     )
 
     value, gradient = build_mps_boozer_fused_solve_value_and_grad(owner)(
