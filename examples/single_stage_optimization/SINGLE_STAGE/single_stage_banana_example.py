@@ -6306,6 +6306,7 @@ def build_single_stage_target_lane_accepted_step_sync(
     outer_objective_config,
     success_filter,
     record_outer_optimizer_event=None,
+    experimental_mps_boozer_custom_kernel: bool = False,
 ):
     """Build the array-native accepted-step sync used on the target lane.
 
@@ -6323,15 +6324,32 @@ def build_single_stage_target_lane_accepted_step_sync(
         success_filter=success_filter,
     )
     reporting_metrics_fn = runtime_bundle["reporting_metrics"]
+    reporting_metrics_from_solution_fn = runtime_bundle.get(
+        "reporting_metrics_from_solution"
+    )
     objective = runtime_bundle["objective"]
     value_and_grad = runtime_bundle["value_and_grad"]
     forward_result_fn = runtime_bundle.get("forward_result")
+    custom_solve_result_fn = None
+    if experimental_mps_boozer_custom_kernel:
+        custom_solve_result_fn = (
+            build_experimental_mps_boozer_custom_kernel_solve_result(
+                boozer_surface,
+                bs,
+                outer_objective_config=outer_objective_config,
+                success_filter=success_filter,
+                profile_target_lane=False,
+                full_state_optimizer=False,
+            )
+        )
 
     def record_reporting_event(label, **fields):
         if record_outer_optimizer_event is not None:
             record_outer_optimizer_event(label, **fields)
 
     def accepted_step_solve_result(run_dict, coil_dofs):
+        if custom_solve_result_fn is not None:
+            return custom_solve_result_fn(coil_dofs)
         if forward_result_fn is None:
             return boozer_surface.run_code_traceable(
                 bs.coil_set_spec_from_dofs(coil_dofs),
@@ -6360,6 +6378,7 @@ def build_single_stage_target_lane_accepted_step_sync(
         record_reporting_event(
             "target_lane_reporting_forward_result_started",
             has_runtime_forward_result=bool(forward_result_fn is not None),
+            has_custom_mps_boozer_solve=bool(custom_solve_result_fn is not None),
             reused=target_lane_solve_result is not None,
         )
         solve_result = (
@@ -6383,15 +6402,31 @@ def build_single_stage_target_lane_accepted_step_sync(
                 "single-stage array-native state."
             )
 
+        has_solve_result_objective = "objective_value" in solve_result
+        has_solve_result_value_and_grad = (
+            has_solve_result_objective and "objective_grad" in solve_result
+        )
         include_distance_metrics = not benchmark_mode
+        has_solved_state = (
+            "x" in solve_result and reporting_metrics_from_solution_fn is not None
+        )
         record_reporting_event(
             "target_lane_reporting_metrics_started",
             include_distance_metrics=bool(include_distance_metrics),
+            reused_solved_state=bool(has_solved_state),
         )
-        traceable_reporting_metrics = reporting_metrics_fn(
-            coil_dofs,
-            include_distance_metrics=include_distance_metrics,
-        )
+        if has_solved_state:
+            traceable_reporting_metrics = reporting_metrics_from_solution_fn(
+                coil_dofs,
+                solve_result["x"],
+                solve_result["success"],
+                include_distance_metrics=include_distance_metrics,
+            )
+        else:
+            traceable_reporting_metrics = reporting_metrics_fn(
+                coil_dofs,
+                include_distance_metrics=include_distance_metrics,
+            )
         record_reporting_event("target_lane_reporting_metrics_returned")
         record_reporting_event(
             "target_lane_reporting_hostify_started",
@@ -6433,25 +6468,41 @@ def build_single_stage_target_lane_accepted_step_sync(
         )
         reporting_metrics["hardware_status"] = hardware_status
         if update_run_state:
+            reuses_value_and_grad = (
+                objective_value_and_grad is not None or has_solve_result_value_and_grad
+            )
             record_reporting_event(
                 "target_lane_reporting_value_and_grad_started",
-                reused=objective_value_and_grad is not None,
+                reused=bool(reuses_value_and_grad),
             )
             if objective_value_and_grad is None:
-                objective_value, objective_grad = value_and_grad(coil_dofs)
+                if has_solve_result_value_and_grad:
+                    objective_value = solve_result["objective_value"]
+                    objective_grad = solve_result["objective_grad"]
+                else:
+                    objective_value, objective_grad = value_and_grad(coil_dofs)
             else:
                 objective_value, objective_grad = objective_value_and_grad
             objective_value = host_float(objective_value)
             objective_grad = host_array(objective_grad, dtype=np.float64)
             record_reporting_event(
                 "target_lane_reporting_value_and_grad_returned",
-                reused=objective_value_and_grad is not None,
+                reused=bool(reuses_value_and_grad),
             )
         else:
-            record_reporting_event("target_lane_reporting_objective_started")
-            objective_value = host_float(objective(coil_dofs))
+            record_reporting_event(
+                "target_lane_reporting_objective_started",
+                reused=bool(has_solve_result_objective),
+            )
+            if has_solve_result_objective:
+                objective_value = host_float(solve_result["objective_value"])
+            else:
+                objective_value = host_float(objective(coil_dofs))
             objective_grad = None
-            record_reporting_event("target_lane_reporting_objective_returned")
+            record_reporting_event(
+                "target_lane_reporting_objective_returned",
+                reused=bool(has_solve_result_objective),
+            )
         accepted_step_summary = {
             "objective_value": objective_value,
             "reporting_metrics": reporting_metrics,
@@ -6524,6 +6575,7 @@ def configure_single_stage_target_lane_accepted_step_sync(
     outer_objective_config,
     success_filter,
     record_outer_optimizer_event=None,
+    experimental_mps_boozer_custom_kernel: bool = False,
 ):
     """Install the array-native accepted-step sync and disable CPU reevaluation."""
     if not use_target_lane:
@@ -6531,6 +6583,9 @@ def configure_single_stage_target_lane_accepted_step_sync(
     sync_kwargs = {
         "outer_objective_config": outer_objective_config,
         "success_filter": success_filter,
+        "experimental_mps_boozer_custom_kernel": (
+            experimental_mps_boozer_custom_kernel
+        ),
     }
     if record_outer_optimizer_event is not None:
         sync_kwargs["record_outer_optimizer_event"] = record_outer_optimizer_event
@@ -7294,16 +7349,16 @@ def _experimental_mps_boozer_custom_kernel_unsupported_reasons(
     return tuple(reasons)
 
 
-def build_experimental_mps_boozer_custom_kernel_value_and_grad(
+def _build_experimental_mps_boozer_custom_kernel_residual(
     boozer_surface,
     bs,
     *,
     outer_objective_config,
     success_filter,
-    profile_target_lane: bool = False,
-    full_state_optimizer: bool = False,
+    profile_target_lane: bool,
+    full_state_optimizer: bool,
 ):
-    """Build the residual-only experimental MPS Boozer custom value/grad."""
+    """Build the residual-only Boozer objective owner for the MPS custom route."""
     unsupported_reasons = _experimental_mps_boozer_custom_kernel_unsupported_reasons(
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
@@ -7319,11 +7374,34 @@ def build_experimental_mps_boozer_custom_kernel_value_and_grad(
         )
 
     boozer_residual_cls, _iotas_cls, _non_qs_cls = get_jax_surface_objective_classes()
-    custom_value_and_grad = boozer_residual_cls(
+    return boozer_residual_cls(
         boozer_surface,
         bs,
         constraint_weight=0.0,
-    ).experimental_mps_custom_kernel_value_and_grad()
+    )
+
+
+def build_experimental_mps_boozer_custom_kernel_value_and_grad(
+    boozer_surface,
+    bs,
+    *,
+    outer_objective_config,
+    success_filter,
+    profile_target_lane: bool = False,
+    full_state_optimizer: bool = False,
+):
+    """Build the residual-only experimental MPS Boozer custom value/grad."""
+    boozer_residual = _build_experimental_mps_boozer_custom_kernel_residual(
+        boozer_surface,
+        bs,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+        profile_target_lane=profile_target_lane,
+        full_state_optimizer=full_state_optimizer,
+    )
+    custom_value_and_grad = (
+        boozer_residual.experimental_mps_custom_kernel_value_and_grad()
+    )
     residual_weight = float(outer_objective_config["residual_weight"])
     if residual_weight == 1.0:
         return custom_value_and_grad
@@ -7336,6 +7414,57 @@ def build_experimental_mps_boozer_custom_kernel_value_and_grad(
     weighted_value_and_grad._simsopt_value_and_grad = True
     weighted_value_and_grad._simsopt_mps_boozer_custom_kernel = True
     return weighted_value_and_grad
+
+
+def build_experimental_mps_boozer_custom_kernel_solve_result(
+    boozer_surface,
+    bs,
+    *,
+    outer_objective_config,
+    success_filter,
+    profile_target_lane: bool = False,
+    full_state_optimizer: bool = False,
+):
+    """Build the residual-only experimental MPS Boozer solved-state callable."""
+    boozer_residual = _build_experimental_mps_boozer_custom_kernel_residual(
+        boozer_surface,
+        bs,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+        profile_target_lane=profile_target_lane,
+        full_state_optimizer=full_state_optimizer,
+    )
+
+    from simsopt.jax_core.mps_boozer_kernel_contract import (
+        build_mps_boozer_fused_solve_state_payload,
+    )
+
+    solve_state_payload = build_mps_boozer_fused_solve_state_payload(boozer_residual)
+    residual_weight = float(outer_objective_config["residual_weight"])
+
+    def solve_result(coil_dofs):
+        payload = solve_state_payload(coil_dofs)
+        if residual_weight == 1.0:
+            objective_value = payload.value
+            objective_grad = payload.coil_gradient
+        else:
+            weight = jnp.asarray(residual_weight, dtype=payload.value.dtype)
+            objective_value = weight * payload.value
+            objective_grad = weight * payload.coil_gradient
+        return {
+            "success": payload.success,
+            "primal_success": payload.primal_success,
+            "objective_value": objective_value,
+            "objective_grad": objective_grad,
+            "x": payload.x,
+            "sdofs": payload.sdofs,
+            "iota": payload.iota,
+            "G": payload.G,
+            "converged": payload.converged,
+            "finite": payload.finite,
+        }
+
+    return solve_result
 
 
 def build_target_lane_profile_coil_dofs(coil_dofs):
@@ -10530,12 +10659,15 @@ def single_stage_target_lane_accepted_step_solve_result(forward_result):
         "primal_success",
         forward_result["success"],
     )
-    return {
+    solve_result = {
         "success": solve_success,
         "sdofs": forward_result["sdofs"],
         "iota": forward_result["iota"],
         "G": forward_result["G"],
     }
+    if "x" in forward_result:
+        solve_result["x"] = forward_result["x"]
+    return solve_result
 
 
 def _summarize_single_stage_scipy_initial_call(initial_call):
@@ -14092,6 +14224,9 @@ if __name__ == "__main__":
                     outer_objective_config=target_lane_outer_objective_config,
                     success_filter=target_lane_success_filter,
                     record_outer_optimizer_event=record_outer_optimizer_event,
+                    experimental_mps_boozer_custom_kernel=(
+                        requested_experimental_mps_boozer_custom_kernel
+                    ),
                 )
                 if use_target_lane:
                     _record_timing(

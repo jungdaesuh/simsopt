@@ -1541,11 +1541,13 @@ def _get_cached_traceable_runtime_entry(
             compiled_bundle["compiled_value_and_grad_for"]
         ),
         "reporting_metrics": None,
+        "reporting_metrics_from_solution": None,
         "public_objective": None,
         "public_value_and_grad": None,
         "public_batched_value_and_grad": None,
         "public_forward_result": None,
         "public_reporting_metrics": None,
+        "public_reporting_metrics_from_solution": None,
         "host_objective": None,
         "host_value_and_grad": None,
         "host_reporting_metrics": None,
@@ -1569,6 +1571,17 @@ def _ensure_traceable_runtime_reporting_metrics(runtime_entry):
     return runtime_entry
 
 
+def _ensure_traceable_runtime_reporting_metrics_from_solution(runtime_entry):
+    """Materialize solved-state reporting metrics that do not replay the solve."""
+    if runtime_entry["reporting_metrics_from_solution"] is None:
+        runtime_entry["reporting_metrics_from_solution"] = (
+            _make_traceable_reporting_metrics_from_solution_bundle(
+                runtime_entry["compiled_bundle"]
+            )
+        )
+    return runtime_entry
+
+
 def _make_traceable_lazy_reporting_metrics_boundary(runtime_entry):
     """Build a public reporting-metrics boundary that resolves lazily."""
 
@@ -1582,6 +1595,31 @@ def _make_traceable_lazy_reporting_metrics_boundary(runtime_entry):
         )
 
     return reporting_metrics_for
+
+
+def _make_traceable_lazy_reporting_metrics_from_solution_boundary(runtime_entry):
+    """Build a public reporting boundary for an explicit solved decision vector."""
+
+    def reporting_metrics_from_solution_for(
+        coil_dofs,
+        solved_x,
+        solver_success,
+        *,
+        include_distance_metrics=True,
+    ):
+        reporting_metrics_from_solution = (
+            _ensure_traceable_runtime_reporting_metrics_from_solution(runtime_entry)[
+                "reporting_metrics_from_solution"
+            ]
+        )
+        return reporting_metrics_from_solution(
+            _as_jax_float64(coil_dofs),
+            _as_jax_float64(solved_x),
+            jnp.asarray(solver_success, dtype=bool),
+            include_distance_metrics=include_distance_metrics,
+        )
+
+    return reporting_metrics_from_solution_for
 
 
 def _ensure_traceable_runtime_public_boundaries(runtime_entry):
@@ -1611,6 +1649,10 @@ def _ensure_traceable_runtime_public_boundaries(runtime_entry):
     if runtime_entry["public_reporting_metrics"] is None:
         runtime_entry["public_reporting_metrics"] = (
             _make_traceable_lazy_reporting_metrics_boundary(runtime_entry)
+        )
+    if runtime_entry["public_reporting_metrics_from_solution"] is None:
+        runtime_entry["public_reporting_metrics_from_solution"] = (
+            _make_traceable_lazy_reporting_metrics_from_solution_boundary(runtime_entry)
         )
     return runtime_entry
 
@@ -2139,13 +2181,24 @@ def _traceable_reporting_metrics_from_solution(
     }
 
 
+def _traceable_reporting_metrics_context(compiled_bundle):
+    """Return the immutable state needed by reporting-metrics closures."""
+    state = compiled_bundle["state"]
+    return (
+        state["objective_kwargs"],
+        bool(state["optimize_G"]),
+        state["coil_set_spec_from_dofs"],
+    )
+
+
 def _make_traceable_reporting_metrics(compiled_bundle, *, include_distance_metrics):
     """Build a pure solved-state reporting summary for one compiled runtime bundle."""
     compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
-    state = compiled_bundle["state"]
-    objective_kwargs = state["objective_kwargs"]
-    optimize_G = bool(state["optimize_G"])
-    coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
+    (
+        objective_kwargs,
+        optimize_G,
+        coil_set_spec_from_dofs,
+    ) = _traceable_reporting_metrics_context(compiled_bundle)
 
     def reporting_metrics(coil_dofs):
         coil_dofs = _as_jax_float64(coil_dofs)
@@ -2161,6 +2214,32 @@ def _make_traceable_reporting_metrics(compiled_bundle, *, include_distance_metri
         )
 
     return jax.jit(reporting_metrics)
+
+
+def _make_traceable_reporting_metrics_from_solution(
+    compiled_bundle, *, include_distance_metrics
+):
+    """Build reporting metrics for a caller-provided solved Boozer state."""
+    (
+        objective_kwargs,
+        optimize_G,
+        coil_set_spec_from_dofs,
+    ) = _traceable_reporting_metrics_context(compiled_bundle)
+
+    def reporting_metrics_from_solution(coil_dofs, solved_x, solver_success):
+        coil_dofs = _as_jax_float64(coil_dofs)
+        solved_x = _as_jax_float64(solved_x)
+        return _traceable_reporting_metrics_from_solution(
+            objective_kwargs,
+            coil_set_spec_from_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solver_success=jnp.asarray(solver_success, dtype=bool),
+            optimize_G=optimize_G,
+            include_distance_metrics=include_distance_metrics,
+        )
+
+    return jax.jit(reporting_metrics_from_solution)
 
 
 def _make_traceable_reporting_metrics_bundle(compiled_bundle):
@@ -2183,6 +2262,36 @@ def _make_traceable_reporting_metrics_bundle(compiled_bundle):
         return selected_reporting_metrics(coil_dofs)
 
     return reporting_metrics_for
+
+
+def _make_traceable_reporting_metrics_from_solution_bundle(compiled_bundle):
+    """Build the solved-state reporting selector for one compiled bundle."""
+    reporting_metrics_from_solution = _make_traceable_reporting_metrics_from_solution(
+        compiled_bundle,
+        include_distance_metrics=True,
+    )
+    reporting_metrics_from_solution_without_distances = (
+        _make_traceable_reporting_metrics_from_solution(
+            compiled_bundle,
+            include_distance_metrics=False,
+        )
+    )
+
+    def reporting_metrics_from_solution_for(
+        coil_dofs,
+        solved_x,
+        solver_success,
+        *,
+        include_distance_metrics=True,
+    ):
+        selected_reporting_metrics = (
+            reporting_metrics_from_solution
+            if include_distance_metrics
+            else reporting_metrics_from_solution_without_distances
+        )
+        return selected_reporting_metrics(coil_dofs, solved_x, solver_success)
+
+    return reporting_metrics_from_solution_for
 
 
 def _hostify_traceable_reporting_metrics(metrics, *, include_distance_metrics):
@@ -3012,6 +3121,9 @@ def make_traceable_objective_runtime_bundle(
         can host-normalize this explicit boundary themselves, or request the
         companion ``host_reporting_metrics`` wrapper. This entrypoint resolves
         lazily and requires ``outer_objective_config`` when invoked.
+    ``reporting_metrics_from_solution``
+        Pure JAX callable returning the same reporting scalars from a caller-
+        provided packed solved state, avoiding a second forward solve.
     ``host_objective``
         Optional host-normalized callable returning a Python ``float`` when
         ``include_host_wrappers=True``.
@@ -3039,6 +3151,9 @@ def make_traceable_objective_runtime_bundle(
         "batched_value_and_grad": runtime_entry["public_batched_value_and_grad"],
         "forward_result": runtime_entry["public_forward_result"],
         "reporting_metrics": runtime_entry["public_reporting_metrics"],
+        "reporting_metrics_from_solution": runtime_entry[
+            "public_reporting_metrics_from_solution"
+        ],
     }
     if include_host_wrappers:
         _ensure_traceable_runtime_host_wrappers(runtime_entry, booz_jax)

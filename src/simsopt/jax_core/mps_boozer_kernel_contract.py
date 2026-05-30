@@ -111,6 +111,8 @@ class MpsBoozerFusedSolveStatePayload(NamedTuple):
 
     success: jax.Array
     primal_success: jax.Array
+    value: jax.Array
+    coil_gradient: jax.Array
     x: jax.Array
     sdofs: jax.Array
     iota: jax.Array
@@ -809,6 +811,8 @@ def mps_boozer_fused_solve_state_payload(
     return MpsBoozerFusedSolveStatePayload(
         success=result.finite,
         primal_success=result.finite,
+        value=result.value,
+        coil_gradient=result.coil_gradient,
         x=result.final_x_inner,
         sdofs=sdofs,
         iota=iota,

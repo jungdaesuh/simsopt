@@ -337,6 +337,7 @@ class SingleStageExampleTests(unittest.TestCase):
         objective_value=1.25,
         objective_grad=None,
         forward_result=None,
+        reporting_metrics_from_solution=None,
     ):
         resolved_grad = (
             np.asarray(objective_grad, dtype=np.float64)
@@ -365,6 +366,27 @@ class SingleStageExampleTests(unittest.TestCase):
                 captured["reporting_metrics_kwargs"] = kwargs
                 return runtime_summary
 
+            def _reporting_metrics_from_solution(
+                coil_dofs,
+                solved_x,
+                solver_success,
+                **kwargs,
+            ):
+                captured["reporting_metrics_from_solution_args"] = (
+                    coil_dofs,
+                    solved_x,
+                    solver_success,
+                )
+                captured["reporting_metrics_from_solution_kwargs"] = kwargs
+                if reporting_metrics_from_solution is not None:
+                    return reporting_metrics_from_solution(
+                        coil_dofs,
+                        solved_x,
+                        solver_success,
+                        **kwargs,
+                    )
+                return runtime_summary
+
             def _value_and_grad(coil_dofs):
                 del coil_dofs
                 captured["value_and_grad_called"] = True
@@ -381,6 +403,7 @@ class SingleStageExampleTests(unittest.TestCase):
             runtime_bundle = {
                 "objective": _objective,
                 "reporting_metrics": _reporting_metrics,
+                "reporting_metrics_from_solution": _reporting_metrics_from_solution,
                 "value_and_grad": _value_and_grad,
             }
             if forward_result is not None:
@@ -6855,6 +6878,81 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(target_lane_profile)
         self.assertIsNone(optimizer_initial_value_and_grad)
 
+    def test_build_experimental_mps_boozer_custom_kernel_solve_result_weights_objective(
+        self,
+    ):
+        module = self.load_module()
+        from simsopt.jax_core import mps_boozer_kernel_contract
+
+        owner_calls = []
+
+        class FakeBoozerResidualJAX:
+            def __init__(self, boozer_surface, bs, *, constraint_weight=None):
+                owner_calls.append((boozer_surface, bs, constraint_weight))
+
+        def fake_payload_builder(_boozer_residual):
+            def solve_state_payload(coil_dofs):
+                dtype = coil_dofs.dtype
+                return types.SimpleNamespace(
+                    success=jnp.asarray(True),
+                    primal_success=jnp.asarray(True),
+                    value=jnp.asarray(4.0, dtype=dtype),
+                    coil_gradient=jnp.asarray([1.0, -2.0], dtype=dtype),
+                    x=jnp.asarray([0.6, -0.3, 0.24, 1.9], dtype=dtype),
+                    sdofs=jnp.asarray([0.6, -0.3], dtype=dtype),
+                    iota=jnp.asarray(0.24, dtype=dtype),
+                    G=jnp.asarray(1.9, dtype=dtype),
+                    converged=jnp.asarray(True),
+                    finite=jnp.asarray(True),
+                )
+
+            return solve_state_payload
+
+        outer_objective_config = {
+            "non_qs_weight": 0.0,
+            "residual_weight": 3.0,
+            "iota_weight": 0.0,
+            "length_weight": 0.0,
+            "curve_curve_weight": 0.0,
+            "curve_surface_weight": 0.0,
+            "surface_vessel_weight": 0.0,
+            "curvature_weight": 0.0,
+        }
+        boozer_surface_marker = object()
+        bs_marker = object()
+
+        with patch.object(
+            module,
+            "get_jax_surface_objective_classes",
+            return_value=(FakeBoozerResidualJAX, object(), object()),
+        ), patch.object(
+            mps_boozer_kernel_contract,
+            "build_mps_boozer_fused_solve_state_payload",
+            fake_payload_builder,
+        ):
+            solve_result_fn = (
+                module.build_experimental_mps_boozer_custom_kernel_solve_result(
+                    boozer_surface_marker,
+                    bs_marker,
+                    outer_objective_config=outer_objective_config,
+                    success_filter=None,
+                )
+            )
+            solve_result = solve_result_fn(
+                jnp.asarray([0.4, 0.5], dtype=jnp.float32)
+            )
+
+        self.assertEqual(owner_calls, [(boozer_surface_marker, bs_marker, 0.0)])
+        np.testing.assert_allclose(np.asarray(solve_result["objective_value"]), 12.0)
+        np.testing.assert_allclose(
+            np.asarray(solve_result["objective_grad"]),
+            np.asarray([3.0, -6.0], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            np.asarray(solve_result["x"]),
+            np.asarray([0.6, -0.3, 0.24, 1.9], dtype=np.float32),
+        )
+
     def test_build_target_lane_outer_objectives_threads_runtime_bundle_options(
         self,
     ):
@@ -8366,6 +8464,263 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertAlmostEqual(run_dict["iota"], 0.24)
         self.assertAlmostEqual(run_dict["G"], 1.9)
 
+    def test_build_single_stage_target_lane_accepted_step_sync_reuses_forward_result_solution_for_reporting(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
+        solved_x = jnp.asarray([0.6, -0.3, 0.24, 1.9], dtype=jnp.float64)
+        forward_result = {
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+            "sdofs": solved_x[:2],
+            "iota": solved_x[2],
+            "G": solved_x[3],
+            "x": solved_x,
+        }
+        fake_boozer_surface = types.SimpleNamespace(
+            run_code_traceable=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("runtime forward_result should be used")
+            )
+        )
+        fake_bs = types.SimpleNamespace(
+            coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs
+        )
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=self._make_reporting_runtime_builder(
+                captured,
+                runtime_summary,
+                forward_result=lambda _coil_dofs: forward_result,
+            ),
+        ), patch.object(module, "CC_DIST", 0.05, create=True), patch.object(
+            module, "CS_DIST", 0.02, create=True
+        ), patch.object(module, "SS_DIST", 0.04, create=True), patch.object(
+            module, "CURVATURE_THRESHOLD", 40.0, create=True
+        ):
+            sync = module.build_single_stage_target_lane_accepted_step_sync(
+                fake_boozer_surface,
+                fake_bs,
+                0.21,
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+            )
+            run_dict = {
+                "sdofs": np.array([0.1, -0.05], dtype=np.float64),
+                "iota": 0.2,
+                "G": 1.0,
+                "J": 1.0,
+                "dJ": np.zeros(2, dtype=np.float64),
+            }
+            sync(
+                run_dict,
+                jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                benchmark_mode=False,
+            )
+
+        self.assertNotIn("reporting_metrics_kwargs", captured)
+        self.assertEqual(
+            captured["reporting_metrics_from_solution_kwargs"],
+            {"include_distance_metrics": True},
+        )
+        _coil_dofs, captured_solved_x, captured_success = captured[
+            "reporting_metrics_from_solution_args"
+        ]
+        np.testing.assert_allclose(np.asarray(captured_solved_x), np.asarray(solved_x))
+        self.assertTrue(bool(captured_success))
+
+    def test_build_single_stage_target_lane_accepted_step_sync_uses_custom_kernel_solve_state(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=False
+        )
+        custom_solve_calls = []
+        solved_x = jnp.asarray([0.8, -0.4, 0.31, 2.1], dtype=jnp.float64)
+
+        def custom_solve_result(coil_dofs):
+            custom_solve_calls.append(np.asarray(coil_dofs))
+            return {
+                "success": jnp.asarray(True, dtype=bool),
+                "primal_success": jnp.asarray(True, dtype=bool),
+                "objective_value": jnp.asarray(5.0, dtype=jnp.float64),
+                "objective_grad": jnp.asarray([9.0, -3.0], dtype=jnp.float64),
+                "x": solved_x,
+                "sdofs": solved_x[:2],
+                "iota": solved_x[2],
+                "G": solved_x[3],
+                "converged": jnp.asarray(False, dtype=bool),
+                "finite": jnp.asarray(True, dtype=bool),
+            }
+
+        fake_boozer_surface = types.SimpleNamespace(
+            run_code_traceable=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("custom solve state should be used")
+            )
+        )
+        fake_bs = types.SimpleNamespace(
+            coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs
+        )
+
+        with patch.object(
+            module,
+            "build_experimental_mps_boozer_custom_kernel_solve_result",
+            return_value=custom_solve_result,
+        ) as build_custom_solve, patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=self._make_reporting_runtime_builder(
+                captured,
+                runtime_summary,
+                forward_result=lambda _coil_dofs: (_ for _ in ()).throw(
+                    AssertionError("default forward_result should not be used")
+                ),
+            ),
+        ), patch.object(module, "CC_DIST", 0.05, create=True), patch.object(
+            module, "CS_DIST", 0.02, create=True
+        ), patch.object(module, "SS_DIST", 0.04, create=True), patch.object(
+            module, "CURVATURE_THRESHOLD", 40.0, create=True
+        ):
+            sync = module.build_single_stage_target_lane_accepted_step_sync(
+                fake_boozer_surface,
+                fake_bs,
+                0.21,
+                outer_objective_config="config-marker",
+                success_filter=None,
+                experimental_mps_boozer_custom_kernel=True,
+            )
+            run_dict = {
+                "sdofs": np.array([0.1, -0.05], dtype=np.float64),
+                "iota": 0.2,
+                "G": 1.0,
+                "J": 1.0,
+                "dJ": np.zeros(2, dtype=np.float64),
+            }
+            sync(
+                run_dict,
+                jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                benchmark_mode=True,
+            )
+
+        build_custom_solve.assert_called_once_with(
+            fake_boozer_surface,
+            fake_bs,
+            outer_objective_config="config-marker",
+            success_filter=None,
+            profile_target_lane=False,
+            full_state_optimizer=False,
+        )
+        self.assertEqual(len(custom_solve_calls), 1)
+        np.testing.assert_allclose(custom_solve_calls[0], np.array([1.0, -2.0]))
+        self.assertNotIn("reporting_metrics_kwargs", captured)
+        self.assertEqual(
+            captured["reporting_metrics_from_solution_kwargs"],
+            {"include_distance_metrics": False},
+        )
+        self.assertNotIn("value_and_grad_called", captured)
+        _coil_dofs, captured_solved_x, captured_success = captured[
+            "reporting_metrics_from_solution_args"
+        ]
+        np.testing.assert_allclose(np.asarray(captured_solved_x), np.asarray(solved_x))
+        self.assertTrue(bool(captured_success))
+        np.testing.assert_allclose(run_dict["sdofs"], np.array([0.8, -0.4]))
+        self.assertAlmostEqual(run_dict["iota"], 0.31)
+        self.assertAlmostEqual(run_dict["G"], 2.1)
+        self.assertEqual(run_dict["J"], 5.0)
+        np.testing.assert_allclose(run_dict["dJ"], np.array([9.0, -3.0]))
+
+    def test_build_single_stage_target_lane_accepted_step_sync_reuses_custom_kernel_objective_snapshot(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=False
+        )
+        solved_x = jnp.asarray([0.8, -0.4, 0.31, 2.1], dtype=jnp.float64)
+
+        def custom_solve_result(coil_dofs):
+            del coil_dofs
+            return {
+                "success": jnp.asarray(True, dtype=bool),
+                "primal_success": jnp.asarray(True, dtype=bool),
+                "objective_value": jnp.asarray(7.0, dtype=jnp.float64),
+                "objective_grad": jnp.asarray([1.5, -2.5], dtype=jnp.float64),
+                "x": solved_x,
+                "sdofs": solved_x[:2],
+                "iota": solved_x[2],
+                "G": solved_x[3],
+                "converged": jnp.asarray(True, dtype=bool),
+                "finite": jnp.asarray(True, dtype=bool),
+            }
+
+        fake_boozer_surface = types.SimpleNamespace(
+            run_code_traceable=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("custom solve state should be used")
+            )
+        )
+        fake_bs = types.SimpleNamespace(
+            coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs
+        )
+
+        with patch.object(
+            module,
+            "build_experimental_mps_boozer_custom_kernel_solve_result",
+            return_value=custom_solve_result,
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=self._make_reporting_runtime_builder(
+                captured,
+                runtime_summary,
+                objective_value=99.0,
+                forward_result=lambda _coil_dofs: (_ for _ in ()).throw(
+                    AssertionError("default forward_result should not be used")
+                ),
+            ),
+        ), patch.object(module, "CC_DIST", 0.05, create=True), patch.object(
+            module, "CS_DIST", 0.02, create=True
+        ), patch.object(module, "SS_DIST", 0.04, create=True), patch.object(
+            module, "CURVATURE_THRESHOLD", 40.0, create=True
+        ):
+            sync = module.build_single_stage_target_lane_accepted_step_sync(
+                fake_boozer_surface,
+                fake_bs,
+                0.21,
+                outer_objective_config={"residual_weight": 1.0},
+                success_filter=None,
+                experimental_mps_boozer_custom_kernel=True,
+            )
+            run_dict = {
+                "sdofs": np.array([0.1, -0.05], dtype=np.float64),
+                "iota": 0.2,
+                "G": 1.0,
+                "J": 1.0,
+                "dJ": np.zeros(2, dtype=np.float64),
+            }
+            summary = sync(
+                run_dict,
+                jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                benchmark_mode=True,
+                update_run_state=False,
+            )
+
+        self.assertEqual(summary["objective_value"], 7.0)
+        self.assertNotIn("objective_called", captured)
+        self.assertNotIn("value_and_grad_called", captured)
+        self.assertNotIn("reporting_metrics_kwargs", captured)
+        self.assertEqual(
+            captured["reporting_metrics_from_solution_kwargs"],
+            {"include_distance_metrics": False},
+        )
+
     def test_build_target_lane_outer_objectives_profiles_with_jax_coil_dofs(self):
         module = self.load_module()
         bs = types.SimpleNamespace(x=np.array([1.0, -2.0], dtype=np.float64))
@@ -9606,6 +9961,7 @@ class SingleStageExampleTests(unittest.TestCase):
             0.2,
             outer_objective_config={"kind": "outer"},
             success_filter="filter",
+            experimental_mps_boozer_custom_kernel=False,
         )
 
     def test_configure_target_lane_accepted_step_sync_skips_non_target_lane(self):

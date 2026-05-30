@@ -4152,6 +4152,7 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
         "public_batched_value_and_grad": None,
         "public_forward_result": None,
         "public_reporting_metrics": None,
+        "public_reporting_metrics_from_solution": None,
         "host_objective": None,
         "host_value_and_grad": None,
         "host_reporting_metrics": None,
@@ -4177,6 +4178,10 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
         )
         entry["public_reporting_metrics"] = (
             "public_reporting_metrics",
+            entry["compiled_bundle"],
+        )
+        entry["public_reporting_metrics_from_solution"] = (
+            "public_reporting_metrics_from_solution",
             entry["compiled_bundle"],
         )
 
@@ -4221,6 +4226,10 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
             "public_reporting_metrics",
             runtime_entry["compiled_bundle"],
         ),
+        "reporting_metrics_from_solution": (
+            "public_reporting_metrics_from_solution",
+            runtime_entry["compiled_bundle"],
+        ),
     }
     assert ensure_public_calls == [runtime_entry]
     assert ensure_host_calls == []
@@ -4242,6 +4251,7 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         "public_batched_value_and_grad": None,
         "public_forward_result": None,
         "public_reporting_metrics": None,
+        "public_reporting_metrics_from_solution": None,
         "host_objective": None,
         "host_value_and_grad": None,
         "host_reporting_metrics": None,
@@ -4267,6 +4277,10 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         )
         entry["public_reporting_metrics"] = (
             "public_reporting_metrics",
+            entry["compiled_bundle"],
+        )
+        entry["public_reporting_metrics_from_solution"] = (
+            "public_reporting_metrics_from_solution",
             entry["compiled_bundle"],
         )
 
@@ -4324,6 +4338,10 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
             "public_reporting_metrics",
             runtime_entry["compiled_bundle"],
         ),
+        "reporting_metrics_from_solution": (
+            "public_reporting_metrics_from_solution",
+            runtime_entry["compiled_bundle"],
+        ),
         "host_objective": ("host_objective", runtime_entry["objective"]),
         "host_value_and_grad": (
             "host_value_and_grad",
@@ -4350,11 +4368,13 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
         "objective": object(),
         "batched_value_and_grad": object(),
         "reporting_metrics": None,
+        "reporting_metrics_from_solution": None,
         "public_objective": None,
         "public_value_and_grad": None,
         "public_batched_value_and_grad": None,
         "public_forward_result": None,
         "public_reporting_metrics": None,
+        "public_reporting_metrics_from_solution": None,
     }
     expected_public_boundaries = {
         "objective": object(),
@@ -4362,6 +4382,7 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
         "batched_value_and_grad": object(),
         "forward_result": object(),
         "reporting_metrics": object(),
+        "reporting_metrics_from_solution": object(),
     }
     build_counts = {name: 0 for name in expected_public_boundaries}
 
@@ -4392,6 +4413,10 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
         (
             "_make_traceable_lazy_reporting_metrics_boundary",
             "reporting_metrics",
+        ),
+        (
+            "_make_traceable_lazy_reporting_metrics_from_solution_boundary",
+            "reporting_metrics_from_solution",
         ),
     ):
         monkeypatch.setattr(
@@ -4478,13 +4503,16 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         "objective": object(),
         "batched_value_and_grad": object(),
         "reporting_metrics": None,
+        "reporting_metrics_from_solution": None,
         "public_objective": None,
         "public_value_and_grad": None,
         "public_batched_value_and_grad": None,
         "public_forward_result": None,
         "public_reporting_metrics": None,
+        "public_reporting_metrics_from_solution": None,
     }
     reporting_calls = []
+    reporting_from_solution_calls = []
 
     monkeypatch.setattr(
         surfaceobjectives_traceable_jax_module,
@@ -4516,7 +4544,7 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         ),
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module,
+        surfaceobjectives_traceable_jax_module,
         "_as_jax_float64",
         lambda value: ("as_jax_float64", value),
     )
@@ -4538,11 +4566,31 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         ensure_reporting,
     )
 
+    def ensure_reporting_from_solution(entry):
+        reporting_from_solution_calls.append(entry)
+        entry["reporting_metrics_from_solution"] = (
+            lambda coil_dofs, solved_x, solver_success, *, include_distance_metrics=True: (
+                "reporting_metrics_from_solution",
+                coil_dofs,
+                solved_x,
+                bool(solver_success),
+                include_distance_metrics,
+            )
+        )
+        return entry
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_ensure_traceable_runtime_reporting_metrics_from_solution",
+        ensure_reporting_from_solution,
+    )
+
     surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_public_boundaries(
         runtime_entry
     )
 
     assert reporting_calls == []
+    assert reporting_from_solution_calls == []
     assert runtime_entry["public_objective"] == (
         "public_objective",
         runtime_entry["objective"],
@@ -4569,6 +4617,20 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         False,
     )
     assert reporting_calls == [runtime_entry]
+
+    assert runtime_entry["public_reporting_metrics_from_solution"](
+        "coil_dofs",
+        "solved_x",
+        False,
+        include_distance_metrics=False,
+    ) == (
+        "reporting_metrics_from_solution",
+        ("as_jax_float64", "coil_dofs"),
+        ("as_jax_float64", "solved_x"),
+        False,
+        False,
+    )
+    assert reporting_from_solution_calls == [runtime_entry]
 
 
 def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_used(

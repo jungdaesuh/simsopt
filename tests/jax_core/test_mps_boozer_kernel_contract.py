@@ -22,10 +22,12 @@ from simsopt.jax_core.mps_boozer_kernel_contract import (
     UNKNOWN_ITERATION_COUNT,
     _fused_custom_call_backend_config,
     build_mps_boozer_direct_kernel_contract,
+    build_mps_boozer_fused_solve_state_payload,
     build_mps_boozer_fused_solve_value_and_grad,
     evaluate_mps_boozer_direct_cpu_oracle,
     evaluate_mps_boozer_fused_solve_custom_call,
     evaluate_mps_boozer_fused_solve_cpu_oracle,
+    mps_boozer_fused_solve_state_payload,
     mps_boozer_kernel_contract_artifact,
     mps_boozer_fixed_surface_g_iota_supported,
     require_mps_boozer_fixed_surface_g_iota_supported,
@@ -948,6 +950,86 @@ def test_mps_boozer_value_and_grad_builder_reuses_value_grad_marker(
     assert f"@{SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET}" in lowered
     assert result_shape[0].shape == ()
     assert result_shape[1].shape == contract.coil_dofs.shape
+
+
+def test_mps_boozer_fused_solve_state_payload_splits_final_state():
+    _owner, contract = _supported_fixed_surface_owner_fixture()
+    final_x_inner = contract.x_inner.at[0].set(contract.x_inner[0] + 0.125)
+    result = MpsBoozerFusedCustomCallResult(
+        value=jnp.asarray(3.0, dtype=contract.coil_dofs.dtype),
+        coil_gradient=jnp.ones_like(contract.coil_dofs),
+        final_x_inner=final_x_inner,
+        residual_norm=jnp.asarray(0.0, dtype=contract.coil_dofs.dtype),
+        gradient_norm=jnp.asarray(2.0, dtype=contract.coil_dofs.dtype),
+        newton_iteration_count=jnp.asarray(1, dtype=jnp.int32),
+        gmres_iteration_count=jnp.asarray(2, dtype=jnp.int32),
+        converged=jnp.asarray(False),
+        finite=jnp.asarray(True),
+    )
+
+    payload = mps_boozer_fused_solve_state_payload(contract, result)
+
+    surface_dof_count = final_x_inner.shape[0] - 2
+    np.testing.assert_allclose(
+        np.asarray(payload.sdofs), np.asarray(final_x_inner[:surface_dof_count])
+    )
+    np.testing.assert_allclose(
+        np.asarray(payload.iota), np.asarray(final_x_inner[surface_dof_count])
+    )
+    np.testing.assert_allclose(
+        np.asarray(payload.G), np.asarray(final_x_inner[surface_dof_count + 1])
+    )
+    np.testing.assert_allclose(np.asarray(payload.value), np.asarray(result.value))
+    np.testing.assert_allclose(
+        np.asarray(payload.coil_gradient), np.asarray(result.coil_gradient)
+    )
+    np.testing.assert_allclose(np.asarray(payload.x), np.asarray(final_x_inner))
+    assert bool(payload.success)
+    assert bool(payload.primal_success)
+    assert not bool(payload.converged)
+    assert bool(payload.finite)
+
+
+def test_mps_boozer_fused_solve_state_builder_reuses_custom_call_result(
+    monkeypatch,
+):
+    owner, contract = _supported_fixed_surface_owner_fixture()
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "mps_boozer_jax_mps_backend_available",
+        lambda: True,
+    )
+
+    def evaluate_status(_contract):
+        return MpsBoozerFusedCustomCallResult(
+            value=jnp.asarray(3.0, dtype=contract.coil_dofs.dtype),
+            coil_gradient=jnp.ones_like(contract.coil_dofs),
+            final_x_inner=contract.x_inner,
+            residual_norm=jnp.asarray(0.0, dtype=contract.coil_dofs.dtype),
+            gradient_norm=jnp.asarray(2.0, dtype=contract.coil_dofs.dtype),
+            newton_iteration_count=jnp.asarray(1, dtype=jnp.int32),
+            gmres_iteration_count=jnp.asarray(2, dtype=jnp.int32),
+            converged=jnp.asarray(False),
+            finite=jnp.asarray(True),
+        )
+
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract,
+        "evaluate_mps_boozer_fused_solve_custom_call",
+        evaluate_status,
+    )
+
+    payload = build_mps_boozer_fused_solve_state_payload(owner)(contract.coil_dofs)
+
+    np.testing.assert_allclose(np.asarray(payload.value), np.asarray(3.0))
+    np.testing.assert_allclose(
+        np.asarray(payload.coil_gradient), np.ones_like(contract.coil_dofs)
+    )
+    np.testing.assert_allclose(np.asarray(payload.x), np.asarray(contract.x_inner))
+    assert bool(payload.success)
+    assert bool(payload.primal_success)
+    assert not bool(payload.converged)
+    assert bool(payload.finite)
 
 
 def test_mps_boozer_value_and_grad_builder_returns_finite_nonconverged_result(
