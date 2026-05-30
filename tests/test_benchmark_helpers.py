@@ -61,6 +61,7 @@ from benchmarks.benchmark_problem import (
     clone_tensor_surface,
 )
 import benchmarks.run_code_benchmark_common as run_code_benchmark_common
+import benchmarks.mps_boozer_kernel_contract_dump as mps_boozer_kernel_contract_dump
 import benchmarks.production_boozer_parity_probe as production_boozer_parity_probe_module
 import benchmarks.run_code_parity_probe as run_code_parity_probe_module
 import benchmarks.stage2_value_gradient_parity as stage2_value_gradient_parity_module
@@ -7805,6 +7806,175 @@ def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
     assert optimize_G is True
     assert weight_inv_modB is False
     assert recomposed_rel == pytest.approx(0.0)
+
+
+def test_mps_boozer_contract_dump_payload_threads_contract_helpers(monkeypatch):
+    recorded = {}
+    sentinel_contract = object()
+    sentinel_oracle = object()
+
+    def fake_build_contract(boozer_residual, *, solved_state, coil_dofs=None):
+        recorded["build"] = (boozer_residual, solved_state, coil_dofs)
+        return sentinel_contract
+
+    def fake_evaluate_oracle(boozer_residual, contract):
+        recorded["evaluate"] = (boozer_residual, contract)
+        return sentinel_oracle
+
+    def fake_contract_artifact(contract, *, oracle_result):
+        recorded["artifact"] = (contract, oracle_result)
+        return {"runtime_arrays": {"coil_dofs": {"shape": [3]}}}
+
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract_dump,
+        "_contract_helpers",
+        lambda: (fake_build_contract, fake_evaluate_oracle, fake_contract_artifact),
+    )
+    owner = object()
+    solved_state = object()
+    coil_dofs = np.array([1.0, 2.0, 3.0])
+
+    payload = mps_boozer_kernel_contract_dump.build_mps_boozer_contract_payload(
+        owner,
+        solved_state,
+        case_label="unit_case",
+        fixture_metadata={"fixture": "unit"},
+        coil_dofs=coil_dofs,
+    )
+
+    assert payload == {
+        "schema": mps_boozer_kernel_contract_dump.PAYLOAD_SCHEMA,
+        "case_label": "unit_case",
+        "fixture_metadata": {"fixture": "unit"},
+        "contract_artifact": {"runtime_arrays": {"coil_dofs": {"shape": [3]}}},
+    }
+    assert recorded["build"] == (owner, solved_state, coil_dofs)
+    assert recorded["evaluate"] == (owner, sentinel_contract)
+    assert recorded["artifact"] == (sentinel_contract, sentinel_oracle)
+
+
+def test_mps_boozer_contract_dump_single_stage_payload_records_optimizer_lanes(
+    monkeypatch,
+):
+    recorded = {}
+    fake_boozer_surface = types.SimpleNamespace(
+        res={
+            "success": True,
+            "iota": 0.1,
+            "G": 0.2,
+            "sdofs": np.array([0.3, 0.4]),
+            "weight_inv_modB": True,
+        }
+    )
+    fake_bs = object()
+
+    def fake_fixture(**kwargs):
+        recorded["fixture_kwargs"] = kwargs
+        return {
+            "boozer_surface": fake_boozer_surface,
+            "bs": fake_bs,
+            "boozer_optimizer_backend": "ondevice",
+            "equilibrium_path": "equilibrium.nc",
+            "stage2_bs_path": "stage2.json",
+            "surface_shape": {"nphi": 31, "ntheta": 16, "mpol": 2, "ntor": 2},
+        }
+
+    class FakeBoozerResidualJAX:
+        def __init__(self, boozer_surface, bs):
+            recorded["residual_args"] = (boozer_surface, bs)
+
+    def fake_contract_payload(
+        residual,
+        solved_state,
+        *,
+        case_label,
+        fixture_metadata,
+        coil_dofs=None,
+    ):
+        recorded["payload_args"] = (
+            residual,
+            solved_state,
+            case_label,
+            fixture_metadata,
+            coil_dofs,
+        )
+        return {
+            "case_label": case_label,
+            "fixture_metadata": fixture_metadata,
+        }
+
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract_dump,
+        "build_real_single_stage_init_fixture",
+        fake_fixture,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "BoozerResidualJAX",
+        FakeBoozerResidualJAX,
+    )
+    monkeypatch.setattr(
+        mps_boozer_kernel_contract_dump,
+        "build_mps_boozer_contract_payload",
+        fake_contract_payload,
+    )
+    args = argparse.Namespace(
+        case_label="unit_case",
+        mpol=2,
+        ntor=2,
+        nphi=31,
+        ntheta=16,
+        optimizer_backend="scipy-jax",
+        boozer_optimizer_backend="ondevice",
+    )
+
+    payload = mps_boozer_kernel_contract_dump.build_single_stage_smoke_contract_payload(
+        args
+    )
+
+    assert recorded["fixture_kwargs"] == {
+        "backend": "jax",
+        "nphi": 31,
+        "ntheta": 16,
+        "mpol": 2,
+        "ntor": 2,
+        "optimizer_backend": "scipy-jax",
+        "boozer_optimizer_backend": "ondevice",
+    }
+    assert recorded["residual_args"] == (fake_boozer_surface, fake_bs)
+    _, solved_state, case_label, fixture_metadata, coil_dofs = recorded["payload_args"]
+    assert solved_state.iota == 0.1
+    assert solved_state.G == 0.2
+    np.testing.assert_allclose(solved_state.sdofs, np.array([0.3, 0.4]))
+    assert solved_state.weight_inv_modB is True
+    assert case_label == "unit_case"
+    assert coil_dofs is None
+    assert fixture_metadata == {
+        "fixture": "single_stage_smoke",
+        "backend": "jax",
+        "optimizer_backend": "scipy-jax",
+        "boozer_optimizer_backend": "ondevice",
+        "equilibrium_path": "equilibrium.nc",
+        "stage2_bs_path": "stage2.json",
+        "surface_shape": {"nphi": 31, "ntheta": 16, "mpol": 2, "ntor": 2},
+    }
+    assert payload["fixture_metadata"] == fixture_metadata
+
+
+def test_mps_boozer_contract_dump_writes_case_artifact(tmp_path):
+    payload = {
+        "schema": mps_boozer_kernel_contract_dump.PAYLOAD_SCHEMA,
+        "case_label": "unit_case",
+    }
+
+    output_path = mps_boozer_kernel_contract_dump.write_mps_boozer_contract_payload(
+        payload,
+        output_dir=tmp_path / "contracts",
+        case_label="unit_case",
+    )
+
+    assert output_path == tmp_path / "contracts" / "unit_case.json"
+    assert json.loads(output_path.read_text(encoding="utf-8")) == payload
 
 
 def test_grouped_adjoint_memory_probe_requires_complete_finite_metrics():
