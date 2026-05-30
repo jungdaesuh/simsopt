@@ -93,6 +93,150 @@ def simsopt_mps_boozer_residual_vector(
     )(G, iota, B, xphi, xtheta)
 
 
+@jax.custom_vjp
+def _simsopt_mps_boozer_residual_vector_with_unweighted_vjp(
+    G: jax.Array,
+    iota: jax.Array,
+    B: jax.Array,
+    xphi: jax.Array,
+    xtheta: jax.Array,
+) -> jax.Array:
+    return simsopt_mps_boozer_residual_vector(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB=False,
+    )
+
+
+def _simsopt_mps_boozer_residual_vector_unweighted_fwd(
+    G: jax.Array,
+    iota: jax.Array,
+    B: jax.Array,
+    xphi: jax.Array,
+    xtheta: jax.Array,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]]:
+    residual_vector = simsopt_mps_boozer_residual_vector(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB=False,
+    )
+    return residual_vector, (G, iota, B, xphi, xtheta)
+
+
+def _simsopt_mps_boozer_residual_vector_unweighted_bwd(
+    saved: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
+    residual_cotangent: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    G, iota, B, xphi, xtheta = saved
+    return simsopt_mps_boozer_residual_vjp(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        residual_cotangent,
+        weight_inv_modB=False,
+    )
+
+
+_simsopt_mps_boozer_residual_vector_with_unweighted_vjp.defvjp(
+    _simsopt_mps_boozer_residual_vector_unweighted_fwd,
+    _simsopt_mps_boozer_residual_vector_unweighted_bwd,
+)
+
+
+@jax.custom_vjp
+def _simsopt_mps_boozer_residual_vector_with_weighted_vjp(
+    G: jax.Array,
+    iota: jax.Array,
+    B: jax.Array,
+    xphi: jax.Array,
+    xtheta: jax.Array,
+) -> jax.Array:
+    return simsopt_mps_boozer_residual_vector(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB=True,
+    )
+
+
+def _simsopt_mps_boozer_residual_vector_weighted_fwd(
+    G: jax.Array,
+    iota: jax.Array,
+    B: jax.Array,
+    xphi: jax.Array,
+    xtheta: jax.Array,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]]:
+    residual_vector = simsopt_mps_boozer_residual_vector(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB=True,
+    )
+    return residual_vector, (G, iota, B, xphi, xtheta)
+
+
+def _simsopt_mps_boozer_residual_vector_weighted_bwd(
+    saved: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
+    residual_cotangent: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    G, iota, B, xphi, xtheta = saved
+    return simsopt_mps_boozer_residual_vjp(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        residual_cotangent,
+        weight_inv_modB=True,
+    )
+
+
+_simsopt_mps_boozer_residual_vector_with_weighted_vjp.defvjp(
+    _simsopt_mps_boozer_residual_vector_weighted_fwd,
+    _simsopt_mps_boozer_residual_vector_weighted_bwd,
+)
+
+
+def simsopt_mps_boozer_residual_vector_with_vjp(
+    G: jax.Array,
+    iota: jax.Array,
+    B: jax.Array,
+    xphi: jax.Array,
+    xtheta: jax.Array,
+    *,
+    weight_inv_modB: bool = False,
+) -> jax.Array:
+    """Return the residual vector with the paired jax-mps VJP as its AD rule."""
+    _validate_residual_inputs(G, iota, B, xphi, xtheta)
+    if weight_inv_modB:
+        return _simsopt_mps_boozer_residual_vector_with_weighted_vjp(
+            G,
+            iota,
+            B,
+            xphi,
+            xtheta,
+        )
+    return _simsopt_mps_boozer_residual_vector_with_unweighted_vjp(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+    )
+
+
 def simsopt_mps_boozer_residual_vjp(
     G: jax.Array,
     iota: jax.Array,

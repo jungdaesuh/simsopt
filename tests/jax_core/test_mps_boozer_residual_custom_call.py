@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import numpy as np
 import pytest
 
@@ -12,8 +14,42 @@ from simsopt.jax_core.mps_boozer_residual_custom_call import (
     SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VECTOR_TARGET,
     SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VJP_TARGET,
     simsopt_mps_boozer_residual_vector,
+    simsopt_mps_boozer_residual_vector_with_vjp,
     simsopt_mps_boozer_residual_vjp,
 )
+from simsopt.geo.boozer_residual_jax import (
+    boozer_residual_vector as reference_boozer_residual_vector,
+)
+
+
+def _restore_backend_config(config) -> None:
+    from simsopt.backend import set_backend
+
+    set_backend(
+        config.mode,
+        strict=config.strict,
+        debug_nans=config.debug_nans,
+        disable_jit=config.disable_jit,
+        transfer_guard=config.transfer_guard,
+        compilation_cache_dir=config.compilation_cache_dir,
+        xla_gpu_preallocate=config.xla_gpu_preallocate,
+        xla_gpu_mem_fraction=config.xla_gpu_mem_fraction,
+        xla_gpu_allocator=config.xla_gpu_allocator,
+        tf_gpu_allocator=config.tf_gpu_allocator,
+        configure_runtime=False,
+    )
+
+
+@contextmanager
+def _temporary_backend(mode: str):
+    from simsopt.backend import get_backend_config, set_backend
+
+    previous = get_backend_config()
+    try:
+        set_backend(mode, configure_runtime=False)
+        yield
+    finally:
+        _restore_backend_config(previous)
 
 
 def _residual_inputs(dtype=jnp.float32):
@@ -33,6 +69,38 @@ def _residual_inputs(dtype=jnp.float32):
 
 def _residual_cotangent(dtype=jnp.float32):
     return jnp.asarray(np.linspace(0.2, 1.3, 12), dtype=dtype)
+
+
+def _normalized_scalar_from_vector(residual_vector):
+    return jnp.asarray(0.5, dtype=residual_vector.dtype) * (
+        jnp.sum(residual_vector * residual_vector) / residual_vector.size
+    )
+
+
+def _reference_residual_scalar(G, iota, B, xphi, xtheta, *, weight_inv_modB):
+    return _normalized_scalar_from_vector(
+        reference_boozer_residual_vector(
+            G,
+            iota,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB=weight_inv_modB,
+        )
+    )
+
+
+def _custom_residual_scalar(G, iota, B, xphi, xtheta, *, weight_inv_modB):
+    return _normalized_scalar_from_vector(
+        simsopt_mps_boozer_residual_vector_with_vjp(
+            G,
+            iota,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB=weight_inv_modB,
+        )
+    )
 
 
 def _boozer_residual_vector_oracle(G, iota, B, xphi, xtheta, *, weight_inv_modB):
@@ -167,6 +235,51 @@ def test_simsopt_mps_boozer_residual_vjp_lowers_to_named_stablehlo_target(
 
     assert "stablehlo.custom_call" in lowered
     assert f"@{target}" in lowered
+
+
+@pytest.mark.parametrize(
+    ("weight_inv_modB", "vector_target", "vjp_target"),
+    [
+        (
+            False,
+            SIMSOPT_MPS_BOOZER_RESIDUAL_VECTOR_TARGET,
+            SIMSOPT_MPS_BOOZER_RESIDUAL_VJP_TARGET,
+        ),
+        (
+            True,
+            SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VECTOR_TARGET,
+            SIMSOPT_MPS_BOOZER_WEIGHTED_RESIDUAL_VJP_TARGET,
+        ),
+    ],
+)
+def test_simsopt_mps_boozer_residual_value_and_grad_lowers_to_paired_targets(
+    weight_inv_modB,
+    vector_target,
+    vjp_target,
+):
+    args = _residual_inputs()
+
+    lowered = (
+        jax.jit(
+            jax.value_and_grad(
+                lambda G, iota, B, xphi, xtheta: _custom_residual_scalar(
+                    G,
+                    iota,
+                    B,
+                    xphi,
+                    xtheta,
+                    weight_inv_modB=weight_inv_modB,
+                ),
+                argnums=(0, 1, 2, 3, 4),
+            )
+        )
+        .lower(*args)
+        .as_text()
+    )
+
+    assert "stablehlo.custom_call" in lowered
+    assert f"@{vector_target}" in lowered
+    assert f"@{vjp_target}" in lowered
 
 
 def test_simsopt_mps_boozer_residual_vector_rejects_invalid_inputs():
@@ -305,6 +418,68 @@ def test_simsopt_mps_boozer_residual_vjp_matches_oracle_on_real_mps_backend(
         np.testing.assert_allclose(
             np.asarray(actual_leaf),
             expected_leaf,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        assert actual_leaf.device.platform.lower() == "mps"
+
+
+@pytest.mark.parametrize("weight_inv_modB", [False, True])
+@pytest.mark.mps
+def test_simsopt_mps_boozer_residual_value_and_grad_matches_current_jax_path(
+    weight_inv_modB,
+):
+    """MPS-smoke gate, not CPU-oracle parity: compare against JAX residuals on MPS."""
+    mps_devices = tuple(
+        device for device in jax.devices() if device.platform.lower() == "mps"
+    )
+    if not mps_devices:
+        pytest.skip("requires a JAX MPS device")
+
+    host_inputs = _residual_inputs()
+    mps_inputs = tuple(jax.device_put(value, mps_devices[0]) for value in host_inputs)
+
+    reference_value_and_grad = jax.value_and_grad(
+        lambda G, iota, B, xphi, xtheta: _reference_residual_scalar(
+            G,
+            iota,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB=weight_inv_modB,
+        ),
+        argnums=(0, 1, 2, 3, 4),
+    )
+    custom_value_and_grad = jax.jit(
+        jax.value_and_grad(
+            lambda G, iota, B, xphi, xtheta: _custom_residual_scalar(
+                G,
+                iota,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=weight_inv_modB,
+            ),
+            argnums=(0, 1, 2, 3, 4),
+        )
+    )
+
+    with _temporary_backend("jax_mps_smoke"):
+        expected_value, expected_grad = jax.jit(reference_value_and_grad)(*mps_inputs)
+        actual_value, actual_grad = custom_value_and_grad(*mps_inputs)
+    jax.block_until_ready((actual_value, actual_grad))
+
+    np.testing.assert_allclose(
+        np.asarray(actual_value),
+        np.asarray(expected_value),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    assert actual_value.device.platform.lower() == "mps"
+    for actual_leaf, expected_leaf in zip(actual_grad, expected_grad):
+        np.testing.assert_allclose(
+            np.asarray(actual_leaf),
+            np.asarray(expected_leaf),
             rtol=1e-5,
             atol=1e-6,
         )
