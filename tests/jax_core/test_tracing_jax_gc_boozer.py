@@ -687,6 +687,23 @@ def test_trace_particles_boozer_jax_rejects_unsupported_shapes_and_replays_comm(
         tol=1e-9,
         mode="gc_vac",
     )
+    expected_tys_by_rank = []
+    expected_hits_by_rank = []
+    for rank_slice, rank_speeds in (
+        (slice(0, 1), [1.0e3]),
+        (slice(1, 2), [0.9e3]),
+    ):
+        rank_tys, rank_hits = trace_particles_boozer(
+            jax_field,
+            stz_pair[rank_slice],
+            rank_speeds,
+            tmax=1e-6,
+            tol=1e-9,
+            mode="gc_vac",
+        )
+        expected_tys_by_rank.append(rank_tys)
+        expected_hits_by_rank.append(rank_hits)
+
     assert_two_rank_replay_matches(
         no_comm_tys,
         no_comm_hits,
@@ -699,4 +716,6 @@ def test_trace_particles_boozer_jax_rejects_unsupported_shapes_and_replays_comm(
             mode="gc_vac",
             comm=comm,
         ),
+        expected_tys_by_rank=expected_tys_by_rank,
+        expected_hits_by_rank=expected_hits_by_rank,
     )

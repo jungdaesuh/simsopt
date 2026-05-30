@@ -78,12 +78,13 @@ codex fix (SSOT) — verified:
 ## 5. Deferred / not run
 
 - Full single-stage lm-minpack E2E on GPU (outer → gate → inner solve, composed):
-  every link verified independently; a clean run is best done **after** codex
-  commits item-14 (push → clone → run). Not a blocker for the committed fixes.
-- codex's gate fix lives in an **untracked** file (`surfaceobjectives_traceable_jax.py`,
-  lands with item-14) — not yet committed.
+  every link verified independently; a clean run is best done from a tree that
+  includes `f287bde96`. Not a blocker for the committed CPU/local fixes.
+- codex's gate fix is committed in `f287bde96` via
+  `src/simsopt/geo/surfaceobjectives_traceable_jax.py`.
 
 ## 6. Commits
 
 - `a2b4ec2c1` — fix: keep lm-minpack-ondevice safe under transfer_guard("disallow")
 - `b80911688` — docs(jax): pin strict-CUDA linearization-residency no-transfer contract
+- `f287bde96` — refactor(jax): close port remediation review

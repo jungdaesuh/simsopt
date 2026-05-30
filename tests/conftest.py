@@ -153,17 +153,40 @@ def _assert_list_arrays_close(actual, expected):
         np.testing.assert_allclose(actual_array, expected_array)
 
 
-def _assert_two_rank_replay_matches(no_comm_tys, no_comm_hits, run_with_comm):
-    expected_tys = [no_comm_tys[:1], no_comm_tys[1:]]
-    expected_hits = [no_comm_hits[:1], no_comm_hits[1:]]
+def _flatten_rank_values(rank_values):
+    return [item for values in rank_values for item in values]
+
+
+def _assert_two_rank_replay_matches(
+    no_comm_tys,
+    no_comm_hits,
+    run_with_comm,
+    *,
+    expected_tys_by_rank=None,
+    expected_hits_by_rank=None,
+):
+    expected_tys = (
+        expected_tys_by_rank
+        if expected_tys_by_rank is not None
+        else [no_comm_tys[:1], no_comm_tys[1:]]
+    )
+    expected_hits = (
+        expected_hits_by_rank
+        if expected_hits_by_rank is not None
+        else [no_comm_hits[:1], no_comm_hits[1:]]
+    )
+    expected_global_tys = _flatten_rank_values(expected_tys)
+    expected_global_hits = _flatten_rank_values(expected_hits)
+    assert len(expected_global_tys) == len(no_comm_tys) == 2
+    assert len(expected_global_hits) == len(no_comm_hits) == 2
     for rank in range(_TwoRankReplayComm.size):
         comm_tys, comm_hits = run_with_comm(
             _TwoRankReplayComm(rank, expected_tys, expected_hits)
         )
-        assert len(comm_tys) == len(no_comm_tys) == 2
-        assert len(comm_hits) == len(no_comm_hits) == 2
-        _assert_list_arrays_close(comm_tys, no_comm_tys)
-        _assert_list_arrays_close(comm_hits, no_comm_hits)
+        assert len(comm_tys) == len(expected_global_tys) == 2
+        assert len(comm_hits) == len(expected_global_hits) == 2
+        _assert_list_arrays_close(comm_tys, expected_global_tys)
+        _assert_list_arrays_close(comm_hits, expected_global_hits)
 
 
 @pytest.fixture

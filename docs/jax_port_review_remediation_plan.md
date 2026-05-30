@@ -49,13 +49,11 @@ against the live tree during the review.
 
 ## Current Context
 
-- Branch: `gpu-purity-stage2-20260405`. Current worktree context is the broad
-  remediation diff for this plan, with many modified source/test/doc files plus
-  untracked local artifacts such as `.antigravitycli/`, `.conda/`, `analysis/`,
-  `runs/`, this plan file, and the extracted
-  `src/simsopt/geo/surfaceobjectives_traceable_jax.py`. Preserve unrelated
-  dirty/untracked files and scope any future commit/staging operation to the
-  intended remediation files only.
+- Branch: `gpu-purity-stage2-20260405`. Remediation implementation is committed
+  as `f287bde96` (`refactor(jax): close port remediation review`). The remaining
+  untracked worktree entries are local artifacts (`.antigravitycli/`, `.conda/`,
+  `analysis/`, `runs/`); preserve them and scope any future staging operation to
+  the intended remediation files only.
 - Layering convention (verified working): `jax_core/*.py` = pure compute SSOT
   (simsoptpp-free, no `Optimizable`); `{field,geo,objectives,solve,mhd}/*_jax.py`
   = Optimizable adapters/shims; `*_cpu_ordered.py` = parity twins; `backend/` =
@@ -493,7 +491,8 @@ Current status for this local remediation execution:
       `status` parameter; no pytest failure remained.
 - [ ] CUDA/GPU signoff recorded on a CUDA-capable host, or explicitly waived by
       the release owner.
-- [ ] PR/merge packaging completed if this plan is used as a release-merge gate.
+- [x] Local commit packaging completed as `f287bde96`. PR/merge publication
+      remains external if this plan is used as a release-merge gate.
 
 ## Execution Status — 2026-05-29 Live Tree
 
@@ -633,6 +632,10 @@ or a focused command remains open.
   `transfer_guard_host_to_device("allow")` block, matching the official JAX
   transfer-guard split between explicit host-boundary staging and implicit
   transfers while leaving the pure runtime entrypoints strict.
+  Follow-up closure also moved the single-stage traceable on-device method gate
+  onto `_ONDEVICE_OPTIMIZER_METHODS`, so `lm-minpack-ondevice` and
+  `optimistix-lm-ondevice` share the same SSOT allow-set as Boozer target LS
+  dispatch.
 - **Phase 3 item 15:** implemented as a behavior-preserving local refactor.
   `_normalize_solver_options` now applies LS cross-option incompatibilities
   through a declarative rule table, and `inner_driver` conflict detection uses
@@ -788,6 +791,11 @@ or a focused command remains open.
   `tests/geo/test_surface_objectives_jax.py` → `12 passed`;
   traceable CPU-reference runtime-bundle selector excluding the long fused
   value/grad comparison → `9 passed`.
+- Phase 3 item 14 single-stage gate follow-up:
+  `tests/geo/test_surface_objectives_jax.py -k 'traceable_cache_state_accepts_ondevice_least_squares_methods or traceable_cache_state_rejects_non_ondevice_methods'`
+  → `4 passed`; resolver contract selectors → `13 passed`; traceable
+  `lm-minpack` integration selector → `1 passed`; static `ruff`, `py_compile`,
+  and `git diff --check` clean.
 - Item 30 tail checks:
   `tests/geo/test_surface_objectives_jax.py -k 'traceable_exact_warmstart_prediction_uses_operator_solve or traceable_exact_warmstart_success_matches_reference_operator_linearization or traceable_exact_warmstart_failure_keeps_failed_operator_step or traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result or traceable_seeded_initial_value_surfaces_failed_solve_gradient'`
   → `5 passed, 324 deselected`;
@@ -905,8 +913,8 @@ or a focused command remains open.
   scan for the old error text / 3-method allow-list.
 - Final static checks passed for the current tail: `ruff check`, `ruff format --check`,
   `py_compile`, and `git diff --check` on the 55 changed Python files
-  (including the new untracked `surfaceobjectives_traceable_jax.py` and the
-  benchmark default-rebase files) plus this plan emitted no findings.
+  (including `surfaceobjectives_traceable_jax.py` and the benchmark
+  default-rebase files) plus this plan emitted no findings.
 
 ### Validation caveats
 
@@ -928,12 +936,17 @@ or a focused command remains open.
   subprocess. The same focused test was reproduced as failing on a clean
   detached `HEAD` worktree at `2497f0281`, so it is a pre-existing MHD import
   contract issue outside the touched bootstrap kernel.
-- The full tracing lane still has the previously observed clean-HEAD blocker in
+- The previous tracing comm-replay caveat is closed on the current tree:
   `tests/jax_core/test_tracing_jax_gc_boozer.py::test_trace_particles_boozer_jax_rejects_unsupported_shapes_and_replays_comm`
-  until revalidated otherwise.
-- Bounded read-only reviewer subagents checked Phase 7 item 29 and the Phase 3
-  item 16 / item 26–27 documentation updates. Their only actionable finding was
-  the stale full-orbit item 26 anchor, corrected above to `tracing.py:3968`.
+  now passes (`1 passed in 5.78s`). Root cause was the test harness comparing
+  rank-local one-particle replay payloads against slices from a two-particle
+  batched no-comm trace; the helper now accepts rank-local expected payloads
+  while preserving the existing global no-comm comparison for other callers.
+- Bounded read-only reviewer subagents checked Phase 3 item 13, Phase 3 item 14,
+  the Phase 3 item 14 gate follow-up, Phase 7 item 29, and the Phase 3 item 16 /
+  item 26–27 documentation updates. The item 13/item 14 reviews returned PASS
+  with no actionable findings; the only actionable later finding was the stale
+  full-orbit item 26 anchor, corrected above to `tracing.py:3968`.
 
 ## Open Questions
 

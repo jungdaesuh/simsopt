@@ -1,5 +1,11 @@
 # HANDOFF — single-stage GPU E2E parity validation (Plan A follow-through)
 
+> Supersession note, 2026-05-30: this handoff was captured before the broader
+> JAX-port remediation commit. The L3 doc/status artifacts referenced below are
+> now committed in `f287bde96` (`refactor(jax): close port remediation review`).
+> Treat Runpod/result pointers below as historical unless revalidated against the
+> current HEAD.
+
 > Last updated: 2026-05-29 09:45 EDT · Status: 3 Runpod runs settled/in-flight. G3 strict ladder DONE (port byte-identical; passed=False = trajectory divergence only). devparity2 (m04) + iota25dev (m10) device-isolation runs RUNNING; pollers armed. Next = read the two device-isolation parity results.
 
 ## 1. Goal
@@ -23,10 +29,10 @@ Plan A is committed. Seed-selection + replay tooling built & committed. Three Ru
    Then diff CPU vs GPU `results.json` (FINAL_IOTA / FINAL_OBJECTIVE / FINAL_NON_QS / FINAL_BOOZER_RESIDUAL). Expectation: tighter than G3 (same code, only device-FP).
 2. [ ] Report the two device-isolation diffs to the user (this is the answer to their recurring "per-iter / trajectory CPU-vs-GPU parity" question).
 3. [ ] Update memory file `project_autoresearch_seed_replay.md` with the device-isolation numbers.
-4. [ ] (Open, only if asked) Commit the still-uncommitted L3 doc + selector edits (see §5). Production-maxiter convergence run for a strict-ladder PASS (heavy). `outer_maxls 20→8` consistency. Strict-CUDA ladder process re-based onto scipy-jax (note: **no code refactor needed** — see §6/§7).
+4. [x] L3 doc/status artifacts were committed in `f287bde96`. Production-maxiter convergence run for a strict-ladder PASS (heavy), `outer_maxls 20→8` consistency, and fresh CUDA signoff remain separate follow-up gates.
 
 ## 4. Environment & how to run
-- cwd / repo / branch: `/Users/suhjungdae/code/columbia/simsopt-jax` / simsopt-jax / `gpu-purity-stage2-20260405` (HEAD 2497f0281; my commits d06e55b96 + 8cb782525 are in history).
+- cwd / repo / branch: `/Users/suhjungdae/code/columbia/simsopt-jax` / simsopt-jax / `gpu-purity-stage2-20260405` (remediation HEAD now includes `f287bde96`; older Plan-A commits d06e55b96 + 8cb782525 are in history).
 - **Runpod** (A100-80GB, 2TB host RAM): `ssh -i /Users/suhjungdae/.runpod/ssh/RunPod-Key-Go -p 16628 -o StrictHostKeyChecking=no root@154.54.102.24`
   - Deployed src (REPO): `/root/simsopt_e2e_ea597cc14_20260527T191926Z/src_13a664f15_20260528T175259Z` (commit 13a664f15; **no .git** — must `export SIMSOPT_REPO_SHA=$(cat $ROOT/repo_sha.txt)` or provenance/git calls fail).
   - venv python: `/root/simsopt_canary_local/venv/bin/python` (has simsoptpp + jax 0.10).
@@ -42,8 +48,8 @@ Plan A is committed. Seed-selection + replay tooling built & committed. Three Ru
 - [x] **iota0064 at-optimum parity** (1-eval, m8): obj |d|=**4e-19**, iota 2.3e-17 (bit-level — it didn't move).
 - [x] **Compile-once confirmed** at m04 (177) and m10 (179), CPU and GPU.
 - [x] **G3 strict ladder** (m04, C++ vs jax, 2h37m): `passed=False`, but `same_candidate max_objective/gradient/boozer_abs_diff = 0.0` (byte-identical port). Failure = trajectory divergence (cpu 4 iters / jax 20, both OPTIMIZER_SUCCESS=False, iota~0 vs 0.15). Dir `/root/g3_ladder_scipyjax_20260529T102509Z`.
-- [x] **L3 CI harness plan** written: `docs/jax_gpu_e2e_ci_harness_plan.md` — **UNCOMMITTED**.
-- [x] Selector edits after the 8cb782525 commit (tree-scan, verify-coil-currents, current-limit axis) — **partly UNCOMMITTED** (verify with `git status`/`git diff scripts/select_replayable_seeds.py`).
+- [x] **L3 CI harness plan** written: `docs/jax_gpu_e2e_ci_harness_plan.md` — committed in `f287bde96`.
+- [x] Selector/status edits from the remediation session were committed in `f287bde96`; verify current scope with `git status --short`.
 - [~] **devparity2 (m04 fixture) + iota25dev (m10 good seed)** — RUNNING, results pending (NEXT ACTION 1).
 
 ## 6. Key decisions & rationale
@@ -75,6 +81,6 @@ Plan A is committed. Seed-selection + replay tooling built & committed. Three Ru
 ## 10. Pointers
 - Memory (SSOT for findings): `~/.claude/projects/-Users-suhjungdae-code-columbia-simsopt/memory/project_autoresearch_seed_replay.md` and `project_strict_cuda_e2e_cost_bottleneck.md` (indexed in MEMORY.md).
 - Earlier-phase continuation: `docs/plan_a_compile_once_continuation_2026-05-29.md` (committed).
-- L3 plan: `docs/jax_gpu_e2e_ci_harness_plan.md` (uncommitted).
+- L3 plan: `docs/jax_gpu_e2e_ci_harness_plan.md` (committed in `f287bde96`).
 - Replay manifest (local): `/tmp/vacuum_seed_manifest.jsonl`. Selector: `scripts/select_replayable_seeds.py`. Launcher: `scripts/replay_surrogate_seed.sh`.
 - Runpod prior parity invocation pattern: `/root/simsopt_e2e_ea597cc14_20260527T191926Z/artifacts/run_r28_ea597cc14.sh`.
