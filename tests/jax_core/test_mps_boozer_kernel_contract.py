@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from simsopt.jax_core.mps_boozer_kernel_contract import (
     DEFAULT_CONTRACT_ARTIFACT_DIR,
     SCHEMA_VERSION,
+    UNKNOWN_ITERATION_COUNT,
     build_mps_boozer_direct_kernel_contract,
     evaluate_mps_boozer_direct_cpu_oracle,
+    evaluate_mps_boozer_fused_solve_cpu_oracle,
     mps_boozer_kernel_contract_artifact,
     write_mps_boozer_kernel_contract_artifact,
 )
@@ -51,12 +54,17 @@ class _BoozerSurfaceStub:
         self.quadpoints_theta = jnp.asarray([0.0, 0.5, 0.75], dtype=jnp.float32)
         self.label_quadpoints_phi = jnp.asarray([0.0], dtype=jnp.float32)
         self.label_quadpoints_theta = jnp.asarray([0.0, 0.5], dtype=jnp.float32)
+        self.res = None
+        self._solved_runtime_state = None
 
     def _pack_decision_vector(self, iota, G, *, sdofs):
         tail = jnp.asarray([iota], dtype=sdofs.dtype)
         if G is not None:
             tail = jnp.concatenate((tail, jnp.asarray([G], dtype=sdofs.dtype)))
         return jnp.concatenate((sdofs, tail))
+
+    def get_solved_runtime_state(self):
+        return self._solved_runtime_state
 
 
 class _BiotSavartStub:
@@ -107,6 +115,17 @@ class _BoozerResidualStub:
             dtype=coil_dofs.dtype,
         )
 
+    def _value_and_dJ_by_dcoil_dofs(
+        self, solved_state, current_coil_dofs, coil_set_spec
+    ):
+        del solved_state, coil_set_spec
+        value = jnp.sum(current_coil_dofs) + jnp.asarray(
+            7.0, dtype=current_coil_dofs.dtype
+        )
+        return value, current_coil_dofs * jnp.asarray(
+            3.0, dtype=current_coil_dofs.dtype
+        )
+
 
 def _contract_fixture():
     solved_state = _SolvedState(
@@ -116,6 +135,15 @@ def _contract_fixture():
         weight_inv_modB=True,
     )
     owner = _BoozerResidualStub()
+    owner.boozer_surface._solved_runtime_state = solved_state
+    owner.boozer_surface.res = {
+        "success": True,
+        "primal_success": True,
+        "residual": jnp.asarray([0.25, -0.5], dtype=jnp.float32),
+        "final_gradient_norm": jnp.asarray(3.0, dtype=jnp.float32),
+        "iter": jnp.asarray(4, dtype=jnp.int32),
+        "gmres_iteration_count": jnp.asarray(17, dtype=jnp.int32),
+    }
     return owner, build_mps_boozer_direct_kernel_contract(
         owner,
         solved_state=solved_state,
@@ -125,15 +153,31 @@ def _contract_fixture():
 def test_mps_boozer_contract_artifact_records_flattened_schema(tmp_path):
     owner, contract = _contract_fixture()
     oracle_result = evaluate_mps_boozer_direct_cpu_oracle(owner, contract)
+    fused_oracle_result = evaluate_mps_boozer_fused_solve_cpu_oracle(owner, contract)
 
     artifact = mps_boozer_kernel_contract_artifact(
         contract,
         oracle_result=oracle_result,
+        fused_oracle_result=fused_oracle_result,
     )
 
     assert DEFAULT_CONTRACT_ARTIFACT_DIR.name == "mps_custom_kernel_contract"
     assert artifact["schema_version"] == SCHEMA_VERSION
     assert artifact["target_name"] == "mps.simsopt_boozer_value_grad"
+    assert artifact["output_contract"] == {
+        "unknown_iteration_count": UNKNOWN_ITERATION_COUNT,
+        "fused_solve_fields": [
+            "value",
+            "coil_gradient",
+            "final_x_inner",
+            "residual_norm",
+            "gradient_norm",
+            "newton_iteration_count",
+            "gmres_iteration_count",
+            "converged",
+            "finite",
+        ],
+    }
     assert artifact["runtime_arrays"]["coil_dofs"] == {
         "shape": [3],
         "dtype": "float32",
@@ -166,12 +210,39 @@ def test_mps_boozer_contract_artifact_records_flattened_schema(tmp_path):
         "value": {"shape": [], "dtype": "float32", "ndim": 0, "size": 1},
         "gradient": {"shape": [3], "dtype": "float32", "ndim": 1, "size": 3},
     }
+    assert artifact["fused_oracle_outputs"] == {
+        "value": {"shape": [], "dtype": "float32", "ndim": 0, "size": 1},
+        "coil_gradient": {
+            "shape": [3],
+            "dtype": "float32",
+            "ndim": 1,
+            "size": 3,
+        },
+        "final_x_inner": {"shape": [6], "dtype": "float32", "ndim": 1, "size": 6},
+        "residual_norm": {"shape": [], "dtype": "float32", "ndim": 0, "size": 1},
+        "gradient_norm": {"shape": [], "dtype": "float32", "ndim": 0, "size": 1},
+        "newton_iteration_count": {
+            "shape": [],
+            "dtype": "int32",
+            "ndim": 0,
+            "size": 1,
+        },
+        "gmres_iteration_count": {
+            "shape": [],
+            "dtype": "int32",
+            "ndim": 0,
+            "size": 1,
+        },
+        "converged": {"shape": [], "dtype": "bool", "ndim": 0, "size": 1},
+        "finite": {"shape": [], "dtype": "bool", "ndim": 0, "size": 1},
+    }
 
     output_path = tmp_path / "contract.json"
     write_mps_boozer_kernel_contract_artifact(
         contract,
         output_path,
         oracle_result=oracle_result,
+        fused_oracle_result=fused_oracle_result,
     )
 
     assert json.loads(output_path.read_text(encoding="utf-8")) == artifact
@@ -193,3 +264,42 @@ def test_mps_boozer_direct_cpu_oracle_delegates_to_existing_value_grad():
         np.asarray(observed.gradient),
         np.asarray(expected_gradient),
     )
+
+
+def test_mps_boozer_fused_solve_cpu_oracle_records_full_solved_outputs():
+    owner, contract = _contract_fixture()
+
+    observed = evaluate_mps_boozer_fused_solve_cpu_oracle(owner, contract)
+
+    np.testing.assert_allclose(np.asarray(observed.value), np.asarray(7.0 + 1.0))
+    np.testing.assert_allclose(
+        np.asarray(observed.coil_gradient),
+        np.asarray(contract.coil_dofs) * 3.0,
+    )
+    np.testing.assert_allclose(
+        np.asarray(observed.final_x_inner),
+        np.asarray(contract.x_inner),
+    )
+    np.testing.assert_allclose(
+        np.asarray(observed.residual_norm),
+        np.linalg.norm(np.asarray(owner.boozer_surface.res["residual"])),
+    )
+    np.testing.assert_allclose(
+        np.asarray(observed.gradient_norm),
+        np.asarray(owner.boozer_surface.res["final_gradient_norm"]),
+    )
+    assert int(np.asarray(observed.newton_iteration_count)) == 4
+    assert int(np.asarray(observed.gmres_iteration_count)) == 17
+    assert bool(np.asarray(observed.converged)) is True
+    assert bool(np.asarray(observed.finite)) is True
+
+
+def test_mps_boozer_fused_solve_cpu_oracle_rejects_stale_coil_dofs():
+    owner, contract = _contract_fixture()
+    stale_contract = replace(
+        contract,
+        coil_dofs=contract.coil_dofs + jnp.asarray(1.0, dtype=contract.coil_dofs.dtype),
+    )
+
+    with pytest.raises(ValueError, match="requires contract.coil_dofs to match"):
+        evaluate_mps_boozer_fused_solve_cpu_oracle(owner, stale_contract)

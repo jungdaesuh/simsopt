@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_CONTRACT_ARTIFACT_DIR = Path(".artifacts/mps_custom_kernel_contract")
+UNKNOWN_ITERATION_COUNT = -1
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,21 @@ class MpsBoozerDirectOracleResult:
     gradient: jax.Array
 
 
+@dataclass(frozen=True)
+class MpsBoozerFusedSolveOracleResult:
+    """CPU/JAX solved-state oracle output for the planned fused Boozer op."""
+
+    value: jax.Array
+    coil_gradient: jax.Array
+    final_x_inner: jax.Array
+    residual_norm: jax.Array
+    gradient_norm: jax.Array
+    newton_iteration_count: jax.Array
+    gmres_iteration_count: jax.Array
+    converged: jax.Array
+    finite: jax.Array
+
+
 def _json_scalar(value: object) -> object:
     if isinstance(value, np.generic):
         return value.item()
@@ -103,6 +121,83 @@ def _coil_group_arrays(coil_set_spec: object):
         currents.append(group.currents)
         indices.append(tuple(int(index) for index in group.coil_indices))
     return tuple(gammas), tuple(gammadashs), tuple(currents), tuple(indices)
+
+
+def _require_current_coil_contract(
+    boozer_residual: object,
+    contract: MpsBoozerKernelContract,
+) -> None:
+    current_coil_dofs = jnp.asarray(boozer_residual.biotsavart.x)
+    if current_coil_dofs.shape != contract.coil_dofs.shape or not np.array_equal(
+        np.asarray(current_coil_dofs),
+        np.asarray(contract.coil_dofs),
+    ):
+        raise ValueError(
+            "Fused Boozer oracle requires contract.coil_dofs to match the "
+            "BoozerSurfaceJAX solved-state coil DOFs. Re-solve before building "
+            "a solved-state custom-kernel oracle for different coil DOFs."
+        )
+
+
+def _require_current_inner_contract(
+    boozer_residual: object,
+    contract: MpsBoozerKernelContract,
+    solved_state: object,
+) -> None:
+    expected_x_inner, expected_optimize_G = boozer_residual._inner_objective_state(
+        solved_state.iota,
+        solved_state.G,
+        sdofs=solved_state.sdofs,
+    )
+    if bool(expected_optimize_G) != bool(contract.static_metadata.optimize_G):
+        raise ValueError(
+            "Fused Boozer oracle contract optimize_G flag does not match the "
+            "current solved state."
+        )
+    if expected_x_inner.shape != contract.x_inner.shape or not np.array_equal(
+        np.asarray(expected_x_inner),
+        np.asarray(contract.x_inner),
+    ):
+        raise ValueError(
+            "Fused Boozer oracle contract x_inner does not match the current "
+            "BoozerSurfaceJAX solved state."
+        )
+
+
+def _result_vector_norm(
+    solve_result: Mapping[str, object],
+    keys: tuple[str, ...],
+    *,
+    dtype: object,
+) -> jax.Array:
+    for key in keys:
+        value = solve_result.get(key)
+        if value is not None:
+            return jnp.linalg.norm(jnp.asarray(value, dtype=dtype))
+    return jnp.asarray(jnp.nan, dtype=dtype)
+
+
+def _result_scalar(
+    solve_result: Mapping[str, object],
+    keys: tuple[str, ...],
+    *,
+    dtype: object,
+) -> jax.Array | None:
+    for key in keys:
+        value = solve_result.get(key)
+        if value is not None:
+            return jnp.asarray(value, dtype=dtype)
+    return None
+
+
+def _iteration_count_or_unknown(
+    solve_result: Mapping[str, object],
+    keys: tuple[str, ...],
+) -> jax.Array:
+    value = _result_scalar(solve_result, keys, dtype=jnp.int32)
+    if value is None:
+        return jnp.asarray(UNKNOWN_ITERATION_COUNT, dtype=jnp.int32)
+    return value
 
 
 def build_mps_boozer_direct_kernel_contract(
@@ -175,15 +270,95 @@ def evaluate_mps_boozer_direct_cpu_oracle(
     return MpsBoozerDirectOracleResult(value=value, gradient=gradient)
 
 
+def evaluate_mps_boozer_fused_solve_cpu_oracle(
+    boozer_residual: object,
+    contract: MpsBoozerKernelContract,
+) -> MpsBoozerFusedSolveOracleResult:
+    """Evaluate the full solved-state CPU/JAX oracle for the fused op contract."""
+
+    _require_current_coil_contract(boozer_residual, contract)
+    booz_surf = boozer_residual.boozer_surface
+    solved_state = booz_surf.get_solved_runtime_state()
+    _require_current_inner_contract(boozer_residual, contract, solved_state)
+    coil_set_spec = boozer_residual.biotsavart.coil_set_spec_from_dofs(
+        contract.coil_dofs,
+    )
+    value, coil_gradient = boozer_residual._value_and_dJ_by_dcoil_dofs(
+        solved_state,
+        contract.coil_dofs,
+        coil_set_spec,
+    )
+
+    solve_result = booz_surf.res
+    if not isinstance(solve_result, Mapping):
+        raise RuntimeError("BoozerSurfaceJAX solved result is unavailable.")
+    output_dtype = jnp.asarray(value).dtype
+    residual_norm = _result_vector_norm(solve_result, ("residual",), dtype=output_dtype)
+    gradient_norm = _result_scalar(
+        solve_result,
+        ("final_gradient_norm",),
+        dtype=output_dtype,
+    )
+    if gradient_norm is None:
+        gradient_norm = _result_vector_norm(
+            solve_result,
+            ("gradient", "jacobian", "grad"),
+            dtype=output_dtype,
+        )
+    finite = (
+        jnp.all(jnp.isfinite(value))
+        & jnp.all(jnp.isfinite(coil_gradient))
+        & jnp.all(jnp.isfinite(contract.x_inner))
+        & jnp.all(jnp.isfinite(residual_norm))
+        & jnp.all(jnp.isfinite(gradient_norm))
+    )
+    return MpsBoozerFusedSolveOracleResult(
+        value=value,
+        coil_gradient=coil_gradient,
+        final_x_inner=contract.x_inner,
+        residual_norm=residual_norm,
+        gradient_norm=gradient_norm,
+        newton_iteration_count=_iteration_count_or_unknown(
+            solve_result,
+            ("newton_iter", "iter", "nit"),
+        ),
+        gmres_iteration_count=_iteration_count_or_unknown(
+            solve_result,
+            ("gmres_iteration_count", "linear_iteration_count"),
+        ),
+        converged=jnp.asarray(
+            bool(
+                solve_result.get("primal_success", solve_result.get("success", False))
+            ),
+        ),
+        finite=jnp.asarray(finite),
+    )
+
+
 def mps_boozer_kernel_contract_artifact(
     contract: MpsBoozerKernelContract,
     oracle_result: MpsBoozerDirectOracleResult | None = None,
+    fused_oracle_result: MpsBoozerFusedSolveOracleResult | None = None,
 ) -> dict[str, object]:
     """Return a JSON-serializable shape/dtype contract artifact."""
 
     artifact = {
         "schema_version": SCHEMA_VERSION,
         "target_name": contract.static_metadata.target_name,
+        "output_contract": {
+            "unknown_iteration_count": UNKNOWN_ITERATION_COUNT,
+            "fused_solve_fields": [
+                "value",
+                "coil_gradient",
+                "final_x_inner",
+                "residual_norm",
+                "gradient_norm",
+                "newton_iteration_count",
+                "gmres_iteration_count",
+                "converged",
+                "finite",
+            ],
+        },
         "runtime_arrays": {
             "coil_dofs": _array_schema(contract.coil_dofs),
             "x_inner": _array_schema(contract.x_inner),
@@ -223,6 +398,22 @@ def mps_boozer_kernel_contract_artifact(
             "value": _array_schema(oracle_result.value),
             "gradient": _array_schema(oracle_result.gradient),
         }
+    if fused_oracle_result is not None:
+        artifact["fused_oracle_outputs"] = {
+            "value": _array_schema(fused_oracle_result.value),
+            "coil_gradient": _array_schema(fused_oracle_result.coil_gradient),
+            "final_x_inner": _array_schema(fused_oracle_result.final_x_inner),
+            "residual_norm": _array_schema(fused_oracle_result.residual_norm),
+            "gradient_norm": _array_schema(fused_oracle_result.gradient_norm),
+            "newton_iteration_count": _array_schema(
+                fused_oracle_result.newton_iteration_count,
+            ),
+            "gmres_iteration_count": _array_schema(
+                fused_oracle_result.gmres_iteration_count,
+            ),
+            "converged": _array_schema(fused_oracle_result.converged),
+            "finite": _array_schema(fused_oracle_result.finite),
+        }
     return artifact
 
 
@@ -231,6 +422,7 @@ def write_mps_boozer_kernel_contract_artifact(
     path: str | Path,
     *,
     oracle_result: MpsBoozerDirectOracleResult | None = None,
+    fused_oracle_result: MpsBoozerFusedSolveOracleResult | None = None,
 ) -> None:
     """Write the shape/dtype custom-kernel contract artifact."""
 
@@ -241,6 +433,7 @@ def write_mps_boozer_kernel_contract_artifact(
             mps_boozer_kernel_contract_artifact(
                 contract,
                 oracle_result=oracle_result,
+                fused_oracle_result=fused_oracle_result,
             ),
             indent=2,
             sort_keys=True,
