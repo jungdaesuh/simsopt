@@ -1,7 +1,10 @@
 # JAX GPU single-stage E2E — CI/automation harness plan (L3)
 
-Status: **plan / stub.** Best implemented after the manual runs (G1/G2/G3) stabilize
-so the harness encodes what they actually needed. This file kicks off the track.
+Status: **automation plan / stub.** Best implemented after the manual runs
+(G1/G2/G3) stabilize so the harness encodes what they actually needed. The
+current-head manual CUDA remediation signoff packet is recorded in
+`docs/jax_port_review_remediation_plan.md`; this file tracks the future durable
+CI runner, committed seed fixtures, and CPU/GPU diff automation.
 
 ## Goal
 A repeatable, durable gate that runs the single-stage GPU optimization end-to-end

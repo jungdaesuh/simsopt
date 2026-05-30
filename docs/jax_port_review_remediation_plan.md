@@ -49,12 +49,15 @@ against the live tree during the review.
 
 ## Current Context
 
-- Branch: `gpu-purity-stage2-20260405`. Remediation implementation is committed
-  through `8fa1b9a41` (`test(jax): close tracing comm replay caveat`), including
-  the broad remediation commit `f287bde96` (`refactor(jax): close port
-  remediation review`). The remaining untracked worktree entries are local
-  artifacts (`.antigravitycli/`, `.conda/`, `analysis/`, `runs/`); preserve them
-  and scope any future staging operation to the intended remediation files only.
+- Branch: `gpu-purity-stage2-20260405`. Remediation implementation and status
+  packaging had reached `1162ae851` (`docs(jax): record current CUDA signoff
+  gate`) before the current-head CUDA signoff-packet update. The broad
+  remediation implementation is in `f287bde96` (`refactor(jax): close port
+  remediation review`) and tracing-caveat closure is in `8fa1b9a41`
+  (`test(jax): close tracing comm replay caveat`). The remaining untracked
+  worktree entries are local artifacts (`.antigravitycli/`, `.conda/`,
+  `analysis/`, `runs/`); preserve them and scope any future staging operation
+  to the intended remediation files only.
 - Layering convention (verified working): `jax_core/*.py` = pure compute SSOT
   (simsoptpp-free, no `Optimizable`); `{field,geo,objectives,solve,mhd}/*_jax.py`
   = Optimizable adapters/shims; `*_cpu_ordered.py` = parity twins; `backend/` =
@@ -492,10 +495,13 @@ Current status for this local remediation execution:
       `status` parameter; no pytest failure remained.
 - [ ] CUDA/GPU signoff recorded on a CUDA-capable host, or explicitly waived by
       the release owner.
-- [x] Local commit packaging completed through `8fa1b9a41`, with the broad
-      implementation in `f287bde96` and tracing-caveat closure in `8fa1b9a41`.
-      PR/merge publication remains external if this plan is used as a
-      release-merge gate.
+- [x] Local commit packaging completed for the implementation commits:
+      broad remediation in `f287bde96`, tracing-caveat closure in `8fa1b9a41`,
+      and pre-packet CUDA signoff-gate status in `1162ae851`. The current-head
+      CUDA packet below intentionally derives the expected SHA from
+      `git rev-parse HEAD` at run time so the packet remains valid after doc-only
+      packaging commits. PR/merge publication remains external if this plan is
+      used as a release-merge gate.
 
 ## Execution Status — 2026-05-29 Live Tree
 
@@ -925,14 +931,89 @@ or a focused command remains open.
   `jax 0.10.0`, backend `cpu`, devices `['cpu']`, and no `nvidia-smi` binary
   on `PATH`; CUDA conclusions above are documentation-backed design gates, not
   a GPU signoff.
-- Current-head CUDA signoff remains external as of 2026-05-30. A re-probe at
-  `8fa1b9a41` again found local JAX backend `cpu`, devices `[('cpu', 'cpu:0')]`,
-  and no local `nvidia-smi` binary. The prior Runpod A100 SSH endpoint recorded
-  in `HANDOFF.md` (`154.54.102.24:16628`) refused connection during a
-  non-invasive status probe, and `runpodctl pod list -o json` returned `[]`, so
-  the previous venue could not provide current-head GPU evidence. The release
-  gate is therefore still either a fresh CUDA-host run or an explicit release
-  owner waiver.
+- Current-head CUDA signoff remains external as of 2026-05-30. A local re-probe
+  before the signoff-packet update at `1162ae851` again found local JAX backend
+  `cpu`, devices `[('cpu', 'cpu:0')]`, and no local `nvidia-smi` binary. The
+  prior Runpod A100 SSH endpoint recorded in `HANDOFF.md`
+  (`154.54.102.24:16628`) refused connection during a non-invasive status
+  probe, and `runpodctl pod list -o json` returned `[]`, so the previous venue
+  could not provide current-head GPU evidence. The release gate is therefore
+  still either a fresh CUDA-host run or an explicit release owner waiver.
+- Exact current-head CUDA signoff packet for a CUDA-capable host:
+  ```bash
+  set -euo pipefail
+  export PYTHONNOUSERSITE=1
+  export PYTHONDONTWRITEBYTECODE=1
+  export PYTHONPATH="$PWD:$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+  export JAX_ENABLE_X64=True
+  export SIMSOPT_BACKEND_STRICT=1
+  export SIMSOPT_JAX_TRANSFER_GUARD=disallow
+  PYTHON_BIN="${PYTHON_BIN:-.conda/jax/bin/python}"
+
+  HEAD_SHA="$(git rev-parse HEAD)"
+  test -z "$(git status --short --untracked-files=no)"
+  test -n "$(command -v nvidia-smi)"
+  test -x "$PYTHON_BIN"
+
+  RESULTS_DIR="${RESULTS_DIR:-$PWD/.artifacts/current_head_cuda_signoff}"
+  mkdir -p "$RESULTS_DIR"
+  nvidia-smi > "$RESULTS_DIR/nvidia-smi.txt"
+
+  "$PYTHON_BIN" - <<'PY'
+  import jax
+  print("jax", jax.__version__)
+  print("backend", jax.default_backend())
+  print("devices", [(d.platform, str(d)) for d in jax.devices()])
+  if str(jax.default_backend()).lower() not in {"cuda", "gpu"}:
+      raise SystemExit("expected a CUDA/GPU JAX backend for signoff")
+  PY
+
+  "$PYTHON_BIN" benchmarks/single_stage_init_parity.py \
+    --platform cuda \
+    --output-json "$RESULTS_DIR/single_stage_init_cuda_scipy_jax.json" \
+    --case-artifacts-dir "$RESULTS_DIR/single_stage_init_cuda_scipy_jax_cases" \
+    --single-stage-case-timeout-seconds 7200 \
+    --single-stage-target-case-timeout-seconds 7200
+
+  "$PYTHON_BIN" benchmarks/single_stage_init_parity.py \
+    --platform cuda \
+    --optimizer-backend ondevice \
+    --benchmark-mode \
+    --output-json "$RESULTS_DIR/single_stage_init_cuda_ondevice.json" \
+    --case-artifacts-dir "$RESULTS_DIR/single_stage_init_cuda_ondevice_cases" \
+    --single-stage-case-timeout-seconds 7200 \
+    --single-stage-target-case-timeout-seconds 7200
+
+  "$PYTHON_BIN" - "$RESULTS_DIR" "$HEAD_SHA" <<'PY'
+  import json
+  import pathlib
+  import sys
+
+  results_dir = pathlib.Path(sys.argv[1])
+  expected_repo_sha = sys.argv[2]
+  for name in (
+      "single_stage_init_cuda_scipy_jax.json",
+      "single_stage_init_cuda_ondevice.json",
+  ):
+      payload = json.loads((results_dir / name).read_text(encoding="utf-8"))
+      if payload.get("passed") is not True:
+          raise SystemExit(f"{name} did not pass: {payload.get('failures')}")
+      provenance = payload["provenance"]
+      if provenance.get("repo_sha") != expected_repo_sha:
+          raise SystemExit(f"{name} has stale repo_sha={provenance.get('repo_sha')!r}")
+      backend = str(provenance.get("backend", "")).lower()
+      if backend not in {"cuda", "gpu"}:
+          raise SystemExit(f"{name} did not run on CUDA/GPU backend: {backend!r}")
+      if provenance.get("transfer_guard") != "disallow":
+          raise SystemExit(f"{name} did not record transfer_guard=disallow")
+  print(f"CUDA signoff packet passed: {results_dir}")
+  PY
+  ```
+  Successful execution of both JSON-producing runs on a CUDA/GPU backend is the
+  required artifact evidence for checking the CUDA/GPU signoff box above. The
+  JSON `repo_sha` must equal the active checkout's `git rev-parse HEAD` output.
+  A skipped pytest selector is not sufficient evidence for this release gate,
+  because the signoff must fail closed when CUDA is unavailable.
 - The full unfiltered `tests/integration/` sweep now has current-tree pytest
   pass counts: `486 passed, 9 skipped, 8 warnings in 3769.76s (1:02:49)`.
   The wrapping zsh command exited `1` after pytest completed because it tried

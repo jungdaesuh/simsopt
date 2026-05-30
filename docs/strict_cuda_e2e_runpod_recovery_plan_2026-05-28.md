@@ -1,10 +1,19 @@
 # Strict CUDA E2E Runpod Recovery Plan
 
+> Supersession note, 2026-05-30: this was a recovery plan for an older Runpod
+> source/provenance state (`7496577a82b5` and earlier). Do not use the SHA,
+> endpoint, or artifact assumptions below as current remediation signoff
+> evidence without revalidating them against the active checkout. The current
+> remediation CUDA release gate and fail-closed command packet live in
+> `docs/jax_port_review_remediation_plan.md` under "Validation caveats" and
+> derive the signoff target from the active checkout's `git rev-parse HEAD`.
+
 ## Purpose
 
-This file is the live execution plan for recovering the strict CUDA single-stage
-and Stage 2 E2E ladder on Runpod. It exists to prevent stale verdicts,
-invalid-run coverage, and optimizer-path failures from being mixed together.
+This file preserves the execution plan used to recover the strict CUDA
+single-stage and Stage 2 E2E ladder on Runpod. It exists to prevent stale
+verdicts, invalid-run coverage, and optimizer-path failures from being mixed
+together.
 
 ## Goals
 
@@ -33,6 +42,10 @@ invalid-run coverage, and optimizer-path failures from being mixed together.
   source being tested.
 
 ## Current Context
+
+The bullets in this section are historical plan-creation facts for the older
+Runpod recovery attempt. They are not current remediation signoff facts unless
+re-probed against the active checkout.
 
 - Local checkout: branch `gpu-purity-stage2-20260405`, HEAD
   `7496577a82b5`.
