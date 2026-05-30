@@ -125,6 +125,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atol", type=float, default=1.0e-11)
     parser.add_argument("--max-step", type=float, default=0.05)
     parser.add_argument(
+        "--max-fieldline-rhs-evals",
+        type=int,
+        default=None,
+        help=(
+            "Opt-in per-integration budget on field-line RHS (Biot-Savart) "
+            "evaluations. Once exceeded, the integration raises and is gated as "
+            "integration_failed, so a near-chaotic / flat-shear probe fails fast "
+            "instead of hanging unbounded. Default None = unbounded (legacy "
+            "behaviour). A few hundred thousand is a sane fail-fast bound for "
+            "HBT single-stage probes."
+        ),
+    )
+    parser.add_argument(
         "--samples-per-full-torus",
         type=int,
         default=DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
@@ -382,6 +395,7 @@ def main() -> None:
         max_step=args.max_step,
         samples_per_full_torus=args.samples_per_full_torus,
         min_bphi_over_b=args.min_bphi_over_b,
+        max_rhs_evaluations=args.max_fieldline_rhs_evals,
     )
     solver_options = PeriodicOrbitSolverOptions(
         residual_tolerance=args.newton_residual_tolerance,

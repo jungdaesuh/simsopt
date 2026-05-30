@@ -28,6 +28,19 @@ class LowToroidalFieldError(RuntimeError):
     pass
 
 
+class FieldlineEvaluationBudgetError(RuntimeError):
+    """Raised when one field-line integration exhausts its RHS-evaluation budget.
+
+    Subclasses ``RuntimeError`` so the existing integration-failure handlers
+    (seed ranking, periodic-orbit discovery) surface it as ``integration_failed``
+    instead of letting a pathologically expensive field-line integration run
+    unbounded. In a near-chaotic / flat-shear region the phi-parametrised ODE
+    forces the adaptive integrator into a very large number of (expensive,
+    full Biot-Savart) RHS evaluations; the budget converts that hang into a
+    deterministic, fast, gated failure.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class FieldlineIntegratorOptions:
     rtol: float = 1.0e-9
@@ -36,6 +49,7 @@ class FieldlineIntegratorOptions:
     samples_per_full_torus: int = 128
     min_bphi_over_b: float = 1.0e-8
     method: str = "DOP853"
+    max_rhs_evaluations: int | None = None
 
     def __post_init__(self) -> None:
         rtol = float(self.rtol)
@@ -56,6 +70,36 @@ class FieldlineIntegratorOptions:
         object.__setattr__(self, "max_step", max_step)
         object.__setattr__(self, "min_bphi_over_b", min_bphi_over_b)
         object.__setattr__(self, "samples_per_full_torus", samples)
+        max_rhs_evaluations = self.max_rhs_evaluations
+        if max_rhs_evaluations is not None:
+            max_rhs_evaluations = int(max_rhs_evaluations)
+            if max_rhs_evaluations <= 0:
+                raise ValueError(
+                    "Fieldline max_rhs_evaluations must be positive when set"
+                )
+            object.__setattr__(self, "max_rhs_evaluations", max_rhs_evaluations)
+
+
+def _budgeted_rhs(rhs, max_evaluations):
+    """Wrap a ``solve_ivp`` RHS so it raises after ``max_evaluations`` calls.
+
+    ``None`` returns the RHS unchanged (no budget), so default integration
+    behaviour is byte-for-byte identical to the pre-budget code path.
+    """
+    if max_evaluations is None:
+        return rhs
+    limit = int(max_evaluations)
+    counter = {"evaluations": 0}
+
+    def budgeted(phi, state):
+        counter["evaluations"] += 1
+        if counter["evaluations"] > limit:
+            raise FieldlineEvaluationBudgetError(
+                f"Field-line RHS evaluations exceeded budget ({limit})"
+            )
+        return rhs(phi, state)
+
+    return budgeted
 
 
 DEFAULT_FIELDLINE_INTEGRATOR_OPTIONS = FieldlineIntegratorOptions()
@@ -395,11 +439,14 @@ def integrate_full_torus_return_map(
     phi_stop = phi_start + 2.0 * pi * float(turns)
     phi_grid = np.linspace(phi_start, phi_stop, sample_count)
     solution = solve_ivp(
-        lambda phi, state: fieldline_rhs_phi(
-            phi,
-            state,
-            field=field,
-            min_bphi_over_b=options.min_bphi_over_b,
+        _budgeted_rhs(
+            lambda phi, state: fieldline_rhs_phi(
+                phi,
+                state,
+                field=field,
+                min_bphi_over_b=options.min_bphi_over_b,
+            ),
+            options.max_rhs_evaluations,
         ),
         (phi_start, phi_stop),
         np.asarray(start_state, dtype=float),
@@ -497,11 +544,14 @@ def integrate_tangent_full_torus_return_map(
         [np.asarray(start_state, dtype=float), np.eye(2, dtype=float).reshape(4)]
     )
     solution = solve_ivp(
-        lambda phi, state: _fieldline_tangent_rhs_phi(
-            phi,
-            state,
-            field=field,
-            min_bphi_over_b=options.min_bphi_over_b,
+        _budgeted_rhs(
+            lambda phi, state: _fieldline_tangent_rhs_phi(
+                phi,
+                state,
+                field=field,
+                min_bphi_over_b=options.min_bphi_over_b,
+            ),
+            options.max_rhs_evaluations,
         ),
         (phi_start, phi_stop),
         augmented_initial_state,
