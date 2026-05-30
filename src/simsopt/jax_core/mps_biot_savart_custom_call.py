@@ -6,6 +6,7 @@ import jax
 import numpy as np
 
 SIMSOPT_MPS_BIOT_SAVART_B_GROUP_TARGET = "mps.simsopt_biot_savart_b_group"
+SIMSOPT_MPS_BIOT_SAVART_B_VJP_GROUP_TARGET = "mps.simsopt_biot_savart_b_vjp_group"
 
 
 def _validate_b_group_shapes(
@@ -32,6 +33,20 @@ def _validate_b_group_shapes(
         raise ValueError("points, gammas, gammadashs, and currents must be float32")
 
 
+def _validate_b_vjp_group_shapes(
+    points: jax.Array,
+    field_cotangent: jax.Array,
+    gammas: jax.Array,
+    gammadashs: jax.Array,
+    currents: jax.Array,
+) -> None:
+    _validate_b_group_shapes(points, gammas, gammadashs, currents)
+    if field_cotangent.shape != points.shape:
+        raise ValueError("field_cotangent must have the same shape as points")
+    if field_cotangent.dtype != points.dtype:
+        raise ValueError("field_cotangent must have the same dtype as points")
+
+
 def simsopt_mps_biot_savart_b_group(
     points: jax.Array,
     gammas: jax.Array,
@@ -46,3 +61,31 @@ def simsopt_mps_biot_savart_b_group(
         vmap_method="broadcast_all",
         custom_call_api_version=4,
     )(points, gammas, gammadashs, currents)
+
+
+def simsopt_mps_biot_savart_b_vjp_group(
+    points: jax.Array,
+    field_cotangent: jax.Array,
+    gammas: jax.Array,
+    gammadashs: jax.Array,
+    currents: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Return grouped Biot-Savart B-field cotangents through jax-mps."""
+    _validate_b_vjp_group_shapes(
+        points,
+        field_cotangent,
+        gammas,
+        gammadashs,
+        currents,
+    )
+    output_type = (
+        jax.ShapeDtypeStruct(gammas.shape, gammas.dtype),
+        jax.ShapeDtypeStruct(gammadashs.shape, gammadashs.dtype),
+        jax.ShapeDtypeStruct(currents.shape, currents.dtype),
+    )
+    return jax.ffi.ffi_call(
+        SIMSOPT_MPS_BIOT_SAVART_B_VJP_GROUP_TARGET,
+        output_type,
+        vmap_method="broadcast_all",
+        custom_call_api_version=4,
+    )(points, field_cotangent, gammas, gammadashs, currents)
