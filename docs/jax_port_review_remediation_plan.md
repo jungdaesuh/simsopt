@@ -50,10 +50,11 @@ against the live tree during the review.
 ## Current Context
 
 - Branch: `gpu-purity-stage2-20260405`. Remediation implementation is committed
-  as `f287bde96` (`refactor(jax): close port remediation review`). The remaining
-  untracked worktree entries are local artifacts (`.antigravitycli/`, `.conda/`,
-  `analysis/`, `runs/`); preserve them and scope any future staging operation to
-  the intended remediation files only.
+  through `8fa1b9a41` (`test(jax): close tracing comm replay caveat`), including
+  the broad remediation commit `f287bde96` (`refactor(jax): close port
+  remediation review`). The remaining untracked worktree entries are local
+  artifacts (`.antigravitycli/`, `.conda/`, `analysis/`, `runs/`); preserve them
+  and scope any future staging operation to the intended remediation files only.
 - Layering convention (verified working): `jax_core/*.py` = pure compute SSOT
   (simsoptpp-free, no `Optimizable`); `{field,geo,objectives,solve,mhd}/*_jax.py`
   = Optimizable adapters/shims; `*_cpu_ordered.py` = parity twins; `backend/` =
@@ -491,8 +492,10 @@ Current status for this local remediation execution:
       `status` parameter; no pytest failure remained.
 - [ ] CUDA/GPU signoff recorded on a CUDA-capable host, or explicitly waived by
       the release owner.
-- [x] Local commit packaging completed as `f287bde96`. PR/merge publication
-      remains external if this plan is used as a release-merge gate.
+- [x] Local commit packaging completed through `8fa1b9a41`, with the broad
+      implementation in `f287bde96` and tracing-caveat closure in `8fa1b9a41`.
+      PR/merge publication remains external if this plan is used as a
+      release-merge gate.
 
 ## Execution Status — 2026-05-29 Live Tree
 
@@ -922,6 +925,14 @@ or a focused command remains open.
   `jax 0.10.0`, backend `cpu`, devices `['cpu']`, and no `nvidia-smi` binary
   on `PATH`; CUDA conclusions above are documentation-backed design gates, not
   a GPU signoff.
+- Current-head CUDA signoff remains external as of 2026-05-30. A re-probe at
+  `8fa1b9a41` again found local JAX backend `cpu`, devices `[('cpu', 'cpu:0')]`,
+  and no local `nvidia-smi` binary. The prior Runpod A100 SSH endpoint recorded
+  in `HANDOFF.md` (`154.54.102.24:16628`) refused connection during a
+  non-invasive status probe, and `runpodctl pod list -o json` returned `[]`, so
+  the previous venue could not provide current-head GPU evidence. The release
+  gate is therefore still either a fresh CUDA-host run or an explicit release
+  owner waiver.
 - The full unfiltered `tests/integration/` sweep now has current-tree pytest
   pass counts: `486 passed, 9 skipped, 8 warnings in 3769.76s (1:02:49)`.
   The wrapping zsh command exited `1` after pytest completed because it tried
