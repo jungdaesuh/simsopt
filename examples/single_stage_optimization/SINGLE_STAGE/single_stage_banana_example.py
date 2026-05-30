@@ -11256,23 +11256,34 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
     optimizer_to_coil_dofs,
     run_dict,
     record_event,
+    value_and_grad_from_forward_result=False,
 ):
     """Record eager target-lane objective evaluations without tracing side effects."""
+    if value_and_grad_from_forward_result and target_forward_result is None:
+        raise ValueError(
+            "value_and_grad_from_forward_result requires target_forward_result."
+        )
     line_search_evaluation = 0
 
     def wrapped(optimizer_dofs):
         nonlocal line_search_evaluation
-        objective_value, optimizer_gradient = target_value_and_grad_objective(
-            optimizer_dofs
-        )
         if _contains_jax_tracer(optimizer_dofs):
-            return objective_value, optimizer_gradient
+            return target_value_and_grad_objective(optimizer_dofs)
         line_search_evaluation += 1
         candidate_x = _single_stage_optimizer_dofs_array(optimizer_dofs)
         forward_result = None
-        if target_forward_result is not None:
+        if value_and_grad_from_forward_result:
             coil_dofs = runtime_device_put(optimizer_to_coil_dofs(candidate_x))
             forward_result = target_forward_result(coil_dofs)
+            objective_value = forward_result["objective_value"]
+            optimizer_gradient = forward_result["objective_grad"]
+        else:
+            objective_value, optimizer_gradient = target_value_and_grad_objective(
+                optimizer_dofs
+            )
+            if target_forward_result is not None:
+                coil_dofs = runtime_device_put(optimizer_to_coil_dofs(candidate_x))
+                forward_result = target_forward_result(coil_dofs)
         record_event(
             build_single_stage_target_lane_objective_evaluation_trace_event(
                 source_event={
@@ -14821,13 +14832,29 @@ if __name__ == "__main__":
                         and objective_evaluation_trace_callback is not None
                     ):
                         target_forward_result = None
-                        if not bool(
+                        value_and_grad_from_forward_result = False
+                        custom_mps_boozer_value_and_grad = bool(
                             getattr(
                                 target_value_and_grad_objective,
                                 "_simsopt_mps_boozer_custom_kernel",
                                 False,
                             )
-                        ):
+                        )
+                        if custom_mps_boozer_value_and_grad:
+                            target_forward_result = (
+                                build_experimental_mps_boozer_custom_kernel_solve_result(
+                                    boozer_surface,
+                                    bs,
+                                    outer_objective_config=(
+                                        target_lane_outer_objective_config
+                                    ),
+                                    success_filter=target_lane_success_filter,
+                                    profile_target_lane=False,
+                                    full_state_optimizer=False,
+                                )
+                            )
+                            value_and_grad_from_forward_result = True
+                        else:
                             target_forward_result = (
                                 build_single_stage_target_lane_forward_result(
                                     boozer_surface,
@@ -14847,6 +14874,9 @@ if __name__ == "__main__":
                             optimizer_to_coil_dofs=(target_lane_optimizer_to_coil_dofs),
                             run_dict=run_dict,
                             record_event=objective_evaluation_trace_callback,
+                            value_and_grad_from_forward_result=(
+                                value_and_grad_from_forward_result
+                            ),
                         )
                     phase1_dofs = dofs
                     phase1_base_fun = (

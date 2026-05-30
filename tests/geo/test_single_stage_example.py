@@ -3843,6 +3843,52 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(recorded[0]["solver_success"])
         self.assertIsNone(recorded[0]["boozer_surface_dofs"])
 
+    def test_target_lane_trace_wrapper_can_use_forward_result_value_and_grad(self):
+        module = self.load_module()
+        recorded = []
+        forward_calls = []
+
+        def value_and_grad(_x):
+            self.fail("custom trace wrapper should use the fused solve result")
+
+        def forward_result(x):
+            values = np.asarray(x, dtype=np.float64)
+            forward_calls.append(values.copy())
+            return {
+                "success": True,
+                "primal_success": True,
+                "objective_value": 7.0,
+                "objective_grad": np.array([0.5, -0.25]),
+                "iota": 0.15,
+                "G": 2.0,
+                "sdofs": values + 1.0,
+            }
+
+        wrapped = (
+            module.build_single_stage_target_lane_objective_evaluation_trace_wrapper(
+                target_value_and_grad_objective=value_and_grad,
+                target_forward_result=forward_result,
+                optimizer_to_coil_dofs=lambda x: np.asarray(x) * 3.0,
+                run_dict={"it": 4, "accepted_iterations": 3},
+                record_event=recorded.append,
+                value_and_grad_from_forward_result=True,
+            )
+        )
+
+        value, gradient = wrapped(np.asarray([1.0, 2.0], dtype=np.float64))
+
+        self.assertEqual(value, 7.0)
+        np.testing.assert_array_equal(gradient, np.array([0.5, -0.25]))
+        np.testing.assert_array_equal(forward_calls[0], np.array([3.0, 6.0]))
+        self.assertEqual(len(recorded), 1)
+        self.assertTrue(recorded[0]["target_native_replay"])
+        self.assertTrue(recorded[0]["solver_success"])
+        self.assertEqual(recorded[0]["objective"]["value"], 7.0)
+        np.testing.assert_array_equal(
+            np.asarray(recorded[0]["boozer_surface_dofs"]["values"]),
+            np.array([4.0, 7.0]),
+        )
+
     def test_single_stage_runtime_stage2_seed_payload_requires_order(self):
         module = self.load_module()
 

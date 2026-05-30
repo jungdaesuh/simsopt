@@ -2072,6 +2072,33 @@ def _max_abs_diff(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.max(np.abs(left - right)))
 
 
+def _same_candidate_comparable_vectors(
+    *,
+    cpu_vector: np.ndarray | None,
+    jax_vector: np.ndarray | None,
+    target_native_replay_event: bool,
+) -> tuple[np.ndarray | None, np.ndarray | None, str]:
+    """Return vector views for same-candidate comparisons.
+
+    Target-native replay records the MPS objective boundary, whose optimizer
+    vector is the coil-DOF prefix. CPU replay records the full SIMSOPT optimizer
+    vector. For that one contract, compare the CPU prefix to the target vector.
+    """
+    if cpu_vector is None or jax_vector is None:
+        return cpu_vector, jax_vector, "full-optimizer-vector"
+    if (
+        target_native_replay_event
+        and cpu_vector.shape != jax_vector.shape
+        and cpu_vector.size >= jax_vector.size
+    ):
+        return (
+            cpu_vector[: jax_vector.size],
+            jax_vector,
+            "target-native-cpu-prefix",
+        )
+    return cpu_vector, jax_vector, "full-optimizer-vector"
+
+
 def _scalar_close(left: float, right: float, *, rtol: float, atol: float) -> bool:
     return bool(abs(left - right) <= (atol + rtol * abs(right)))
 
@@ -3162,6 +3189,8 @@ def compare_same_candidate_objective_replay(
     same_candidate_event_count = 0
     target_native_replay_event_count = 0
     target_native_rejected_event_count = 0
+    candidate_comparison_scope_counts: dict[str, int] = {}
+    gradient_comparison_scope_counts: dict[str, int] = {}
     first_failure_event = None
     candidate_x_abs_tol = 0.0 if require_exact_candidates else _SAME_CANDIDATE_X_ATOL
     if require_exact_candidates and len(cpu_events) != len(jax_events):
@@ -3177,13 +3206,29 @@ def compare_same_candidate_objective_replay(
         jax_x = _summary_vector(jax_event.get("candidate_optimizer_dofs"))
         if cpu_x is None or jax_x is None:
             continue
-        candidate_abs_diff = _max_abs_diff(jax_x, cpu_x)
+        target_native_replay_event = _same_candidate_target_native_replay_event(
+            jax_event
+        )
+        (
+            comparable_cpu_x,
+            comparable_jax_x,
+            candidate_comparison_scope,
+        ) = _same_candidate_comparable_vectors(
+            cpu_vector=cpu_x,
+            jax_vector=jax_x,
+            target_native_replay_event=target_native_replay_event,
+        )
+        candidate_comparison_scope_counts[candidate_comparison_scope] = (
+            candidate_comparison_scope_counts.get(candidate_comparison_scope, 0) + 1
+        )
+        candidate_abs_diff = _max_abs_diff(comparable_jax_x, comparable_cpu_x)
         max_candidate_abs_diff = max(max_candidate_abs_diff, candidate_abs_diff)
         if candidate_abs_diff > candidate_x_abs_tol:
             if require_exact_candidates:
                 event_failures = [
                     "candidate_optimizer_dofs mismatch under exact replay: "
-                    f"max_abs_diff={candidate_abs_diff:.3e}."
+                    f"max_abs_diff={candidate_abs_diff:.3e}, "
+                    f"scope={candidate_comparison_scope}."
                 ]
                 if first_failure_event is None:
                     first_failure_event = {
@@ -3197,6 +3242,7 @@ def compare_same_candidate_objective_replay(
                             "line_search_evaluation"
                         ),
                         "candidate_abs_diff": candidate_abs_diff,
+                        "candidate_comparison_scope": candidate_comparison_scope,
                         "failures": list(event_failures),
                     }
                 failures.extend(
@@ -3204,9 +3250,6 @@ def compare_same_candidate_objective_replay(
                 )
             continue
         same_candidate_event_count += 1
-        target_native_replay_event = _same_candidate_target_native_replay_event(
-            jax_event
-        )
         if target_native_replay_event:
             target_native_replay_event_count += 1
         target_native_rejected_event = (
@@ -3373,6 +3416,18 @@ def compare_same_candidate_objective_replay(
                 "layer_diffs": dict(boozer_solve_decomposition_summary["layer_diffs"]),
             }
         if not target_native_rejected_event:
+            (
+                comparable_cpu_gradient,
+                comparable_jax_gradient,
+                gradient_comparison_scope,
+            ) = _same_candidate_comparable_vectors(
+                cpu_vector=_summary_vector(cpu_event.get("optimizer_gradient")),
+                jax_vector=_summary_vector(jax_event.get("optimizer_gradient")),
+                target_native_replay_event=target_native_replay_event,
+            )
+            gradient_comparison_scope_counts[gradient_comparison_scope] = (
+                gradient_comparison_scope_counts.get(gradient_comparison_scope, 0) + 1
+            )
             max_objective_abs_diff = max(
                 max_objective_abs_diff,
                 _compare_same_candidate_scalar(
@@ -3387,8 +3442,8 @@ def compare_same_candidate_objective_replay(
                 _compare_same_candidate_vector(
                     event_failures,
                     field="optimizer_gradient",
-                    cpu_vector=_summary_vector(cpu_event.get("optimizer_gradient")),
-                    jax_vector=_summary_vector(jax_event.get("optimizer_gradient")),
+                    cpu_vector=comparable_cpu_gradient,
+                    jax_vector=comparable_jax_gradient,
                 ),
             )
         slice_summary = (
@@ -3532,6 +3587,7 @@ def compare_same_candidate_objective_replay(
                     ),
                     "line_search_evaluation": cpu_event.get("line_search_evaluation"),
                     "candidate_abs_diff": candidate_abs_diff,
+                    "candidate_comparison_scope": candidate_comparison_scope,
                     "failures": list(event_failures),
                 }
             failures.extend(
@@ -3570,6 +3626,8 @@ def compare_same_candidate_objective_replay(
         "same_candidate_event_count": same_candidate_event_count,
         "target_native_replay_event_count": target_native_replay_event_count,
         "target_native_rejected_event_count": target_native_rejected_event_count,
+        "candidate_comparison_scope_counts": dict(candidate_comparison_scope_counts),
+        "gradient_comparison_scope_counts": dict(gradient_comparison_scope_counts),
         "target_native_rejected_contract_diagnostics": (
             target_native_rejected_contract_diagnostics
         ),

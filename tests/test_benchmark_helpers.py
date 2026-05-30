@@ -968,6 +968,113 @@ def test_single_stage_init_same_candidate_replay_accepts_target_native_scope(
     )
 
 
+def test_single_stage_init_same_candidate_replay_accepts_target_native_prefix(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0, 9.0, 10.0],
+        objective=3.0,
+        gradient=[0.5, -0.25, 0.0, 0.0],
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+    )
+    jax_event["target_native_replay"] = True
+    jax_event["objective_components"] = None
+    jax_event["iota_penalty_decomposition"] = None
+    jax_event["boozer_solve_decomposition"] = None
+    jax_event["hardware_status"] = None
+    jax_event["candidate_failure"] = None
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}), encoding="utf-8")
+    jax_progress.write_text(json.dumps({"events": [jax_event]}), encoding="utf-8")
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        require_exact_candidates=True,
+    )
+
+    assert replay["status"] == "pass"
+    assert replay["same_candidate_event_count"] == 1
+    assert replay["candidate_comparison_scope_counts"] == {
+        "target-native-cpu-prefix": 1
+    }
+    assert replay["gradient_comparison_scope_counts"] == {
+        "target-native-cpu-prefix": 1
+    }
+    assert replay["max_optimizer_gradient_abs_diff"] == 0.0
+
+
+def test_single_stage_init_same_candidate_replay_keeps_full_vector_shape_gate(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0, 9.0],
+        objective=3.0,
+        gradient=[0.5, -0.25, 0.0],
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}), encoding="utf-8")
+    jax_progress.write_text(json.dumps({"events": [jax_event]}), encoding="utf-8")
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+    )
+
+    assert replay["status"] == "fail"
+    assert replay["same_candidate_event_count"] == 0
+    assert replay["candidate_comparison_scope_counts"] == {
+        "full-optimizer-vector": 1
+    }
+    assert replay["failures"] == [
+        "No paired objective-evaluation events shared the same candidate."
+    ]
+
+
+def test_single_stage_init_same_candidate_replay_rejects_target_prefix_mismatch(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0, 9.0],
+        objective=3.0,
+        gradient=[0.5, -0.25, 0.0],
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.01, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+    )
+    jax_event["target_native_replay"] = True
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}), encoding="utf-8")
+    jax_progress.write_text(json.dumps({"events": [jax_event]}), encoding="utf-8")
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        require_exact_candidates=True,
+    )
+
+    assert replay["status"] == "fail"
+    assert replay["same_candidate_event_count"] == 0
+    assert replay["first_failure_event"]["candidate_comparison_scope"] == (
+        "target-native-cpu-prefix"
+    )
+    assert "scope=target-native-cpu-prefix" in replay["failures"][0]
+
+
 def test_single_stage_init_same_candidate_replay_classifies_target_native_rejections(
     tmp_path,
 ):
