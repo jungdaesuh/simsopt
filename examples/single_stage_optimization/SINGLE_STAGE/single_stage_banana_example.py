@@ -333,6 +333,7 @@ from banana_opt.single_stage_search_policy import (
 from banana_opt.single_stage_objectives import (
     ALM_HARD_GEOMETRY_DUAL_SIGNALS,
     average_surface_objectives as _average_surface_objectives_impl,
+    build_single_stage_shear_objective,
     build_total_objective as _build_total_objective_impl,
     evaluate_base_objective as _evaluate_base_objective_impl,
     evaluate_total_objective as _evaluate_total_objective_impl,
@@ -2110,6 +2111,26 @@ def parse_args():
         help=(
             "Circular conductor radius a (m) for the coil-force regularization "
             "regularization_circ(a). Required when --coil-force-weight > 0."
+        ),
+    )
+    parser.add_argument(
+        "--shear-target",
+        type=float,
+        default=float(os.environ.get("SHEAR_TARGET", "0.0")),
+        help=(
+            "Target magnitude of the iota spread |iota_edge - iota_axis| for the "
+            "magnetic-shear shortfall term (default 0 = no shear floor). Requires "
+            ">=2 Boozer surfaces and --shear-weight > 0 to take effect."
+        ),
+    )
+    parser.add_argument(
+        "--shear-weight",
+        type=float,
+        default=float(os.environ.get("SHEAR_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the magnetic-shear shortfall term (default 0 = off); "
+            "rewards a larger axis-to-edge iota spread to break out of the flat-iota "
+            "rational soup. Only meaningful in multisurface (>=2 surface) mode."
         ),
     )
     parser.add_argument(
@@ -6260,6 +6281,8 @@ def build_single_stage_objective_bundle(
     LINKING_WEIGHT=0.0,
     FORCE_WEIGHT=0.0,
     coil_force_regularization=0.0,
+    SHEAR_TARGET=0.0,
+    SHEAR_WEIGHT=0.0,
 ):
     boozer_terms = build_boozer_derived_objective_terms(
         stage,
@@ -6355,6 +6378,15 @@ def build_single_stage_objective_bundle(
             MeanSquaredForce(coil, coils, coil_force_regularization) for coil in coils
         ]
         JCoilForce = sum(force_terms[1:], force_terms[0])
+    # Magnetic-shear shortfall (opt-in, default-OFF): None in single-surface mode
+    # (no axis->edge profile) or when SHEAR_WEIGHT is 0, so default runs add
+    # nothing to the objective graph and stay byte-identical. With >=2 surfaces
+    # and SHEAR_WEIGHT > 0 it rewards a larger |iota_edge - iota_axis| spread.
+    JShear = (
+        build_single_stage_shear_objective(surface_iota_terms, SHEAR_TARGET)
+        if SHEAR_WEIGHT > 0.0
+        else None
+    )
     JF = build_total_objective(
         goal_objective_terms["JnonQSRatioObjective"],
         goal_objective_terms["effective_res_weight"],
@@ -6385,6 +6417,8 @@ def build_single_stage_objective_bundle(
         LINKING_WEIGHT=LINKING_WEIGHT,
         JCoilForce=JCoilForce,
         FORCE_WEIGHT=FORCE_WEIGHT,
+        JShear=JShear,
+        SHEAR_WEIGHT=SHEAR_WEIGHT,
     )
     return {
         "surface_iota_terms": surface_iota_terms,
@@ -6419,6 +6453,7 @@ def build_single_stage_objective_bundle(
         "JArclengthVariation": JArclengthVariation,
         "JLinkingNumber": JLinkingNumber,
         "JCoilForce": JCoilForce,
+        "JShear": JShear,
         "JF": JF,
     }
 
@@ -6454,6 +6489,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JArclengthVariation
     global JLinkingNumber
     global JCoilForce
+    global JShear
     global JF
 
     surface_iota_terms = objective_bundle["surface_iota_terms"]
@@ -6486,6 +6522,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JArclengthVariation = objective_bundle["JArclengthVariation"]
     JLinkingNumber = objective_bundle["JLinkingNumber"]
     JCoilForce = objective_bundle["JCoilForce"]
+    JShear = objective_bundle["JShear"]
     JF = objective_bundle["JF"]
 
 
@@ -10077,6 +10114,8 @@ def build_total_objective(
     LINKING_WEIGHT=0.0,
     JCoilForce=None,
     FORCE_WEIGHT=0.0,
+    JShear=None,
+    SHEAR_WEIGHT=0.0,
 ):
     return _build_total_objective_impl(
         JnonQSRatio,
@@ -10112,6 +10151,8 @@ def build_total_objective(
         LINKING_WEIGHT=LINKING_WEIGHT,
         JCoilForce=JCoilForce,
         FORCE_WEIGHT=FORCE_WEIGHT,
+        JShear=JShear,
+        SHEAR_WEIGHT=SHEAR_WEIGHT,
     )
 
 
@@ -12085,6 +12126,10 @@ if __name__ == "__main__":
     ARCLEN_WEIGHT = float(args.arclen_weight)
     LINKING_WEIGHT = float(args.link_weight)
     FORCE_WEIGHT = float(args.coil_force_weight)
+    # Magnetic-shear shortfall (opt-in, default weight 0 -> term inert and the
+    # objective graph stays byte-identical with prior runs).
+    SHEAR_TARGET = float(args.shear_target)
+    SHEAR_WEIGHT = float(args.shear_weight)
     # The coil-force regularization is an externally-owned physical property (the
     # conductor cross-section), so require it explicitly when the force term is on.
     if FORCE_WEIGHT > 0.0 and args.coil_force_conductor_radius <= 0.0:
@@ -12166,6 +12211,8 @@ if __name__ == "__main__":
             LINKING_WEIGHT=LINKING_WEIGHT,
             FORCE_WEIGHT=FORCE_WEIGHT,
             coil_force_regularization=COIL_FORCE_REGULARIZATION,
+            SHEAR_TARGET=SHEAR_TARGET,
+            SHEAR_WEIGHT=SHEAR_WEIGHT,
         )
         apply_single_stage_objective_bundle(objective_bundle)
         return objective_bundle

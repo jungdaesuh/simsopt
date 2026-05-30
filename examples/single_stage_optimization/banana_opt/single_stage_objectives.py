@@ -1,6 +1,7 @@
 import numpy as np
 
-from simsopt._core.derivative import Derivative
+from simsopt._core.derivative import Derivative, derivative_dec
+from simsopt._core.optimizable import Optimizable
 from simsopt.objectives import QuadraticPenalty
 
 from alm_utils import (
@@ -67,6 +68,79 @@ def average_surface_objectives(objectives, weights=None):
     return (1.0 / total_weight) * weighted_sum
 
 
+class IotaShearShortfall(Optimizable):
+    r"""One-sided quadratic shortfall on the magnitude of the iota spread.
+
+    Given the axis-side and edge-side ``Iotas`` Boozer-surface terms, this
+    rewards a larger magnetic shear ``|iota_edge - iota_axis|``:
+
+    .. math::
+       J = \tfrac12 \min\bigl(|\iota_{\text{edge}} - \iota_{\text{axis}}|
+                              - \text{shear\_target},\ 0\bigr)^2 .
+
+    The penalty is zero once the spread magnitude reaches ``shear_target`` and
+    otherwise drives the spread magnitude up (mirroring the Stage-1
+    ``max(0, SHEAR_MIN - slope)^2`` working-layer shear shortfall). Taking the
+    absolute value makes the term orientation-agnostic: it rewards more shear
+    whether the profile falls (CW lineage: axis iota > edge iota) or rises from
+    axis to edge, so no sign assumption can silently invert the push. The
+    gradient w.r.t. the coil dofs flows through each ``Iotas`` Boozer adjoint.
+
+    This term is only meaningful with >=2 Boozer surfaces (an axis->edge
+    profile); single-surface mode has no profile and must not construct it
+    (see :func:`build_single_stage_shear_objective`).
+    """
+
+    def __init__(self, iota_axis_term, iota_edge_term, shear_target):
+        Optimizable.__init__(
+            self,
+            x0=np.asarray([]),
+            depends_on=[iota_axis_term, iota_edge_term],
+        )
+        self.iota_axis_term = iota_axis_term
+        self.iota_edge_term = iota_edge_term
+        self.shear_target = float(shear_target)
+
+    def _spread(self):
+        return float(self.iota_edge_term.J()) - float(self.iota_axis_term.J())
+
+    def J(self):
+        shortfall = min(abs(self._spread()) - self.shear_target, 0.0)
+        return 0.5 * shortfall**2
+
+    @derivative_dec
+    def dJ(self):
+        spread = self._spread()
+        shortfall = min(abs(spread) - self.shear_target, 0.0)
+        # d|spread|/dx = sign(spread) * d(spread)/dx; at the floor (shortfall==0)
+        # the prefactor is 0, so the sign(0)=0 ambiguity never reaches dJ.
+        sign = 1.0 if spread >= 0.0 else -1.0
+        dspread = self.iota_edge_term.dJ(partials=True) - self.iota_axis_term.dJ(
+            partials=True
+        )
+        return (shortfall * sign) * dspread
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+def build_single_stage_shear_objective(surface_iota_terms, shear_target):
+    """Build the magnetic-shear shortfall term, or ``None`` when not meaningful.
+
+    ``surface_iota_terms`` is the axis->edge-ordered list of per-surface
+    ``Iotas`` objectives. Returns ``None`` (a clean no-op) when there are fewer
+    than two surfaces, because a single surface has no axis-to-edge profile and
+    thus no defined spread. The caller multiplies the returned term by a weight
+    that defaults to 0, so the term is also absent from default-OFF runs.
+    """
+    if len(surface_iota_terms) < 2:
+        return None
+    return IotaShearShortfall(
+        surface_iota_terms[0],
+        surface_iota_terms[-1],
+        shear_target,
+    )
+
+
 def build_total_objective(
     JnonQSRatio,
     RES_WEIGHT,
@@ -101,6 +175,8 @@ def build_total_objective(
     LINKING_WEIGHT=0.0,
     JCoilForce=None,
     FORCE_WEIGHT=0.0,
+    JShear=None,
+    SHEAR_WEIGHT=0.0,
 ):
     objective = (
         JnonQSRatio
@@ -136,6 +212,12 @@ def build_total_objective(
         objective = objective + LINKING_WEIGHT * JLinkingNumber
     if JCoilForce is not None:
         objective = objective + FORCE_WEIGHT * JCoilForce
+    # Magnetic-shear shortfall (opt-in; default weight 0 and a None term in
+    # single-surface mode, so the objective graph is byte-identical until a
+    # shear weight is set on a multisurface build). Rewards a larger
+    # |iota_edge - iota_axis| spread to escape the flat-iota rational soup.
+    if JShear is not None:
+        objective = objective + SHEAR_WEIGHT * JShear
     return objective
 
 

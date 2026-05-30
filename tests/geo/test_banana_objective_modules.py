@@ -10,6 +10,7 @@ from unittest import mock
 import numpy as np
 from scipy.io import netcdf_file
 from simsopt._core import Optimizable
+from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt.field.coil import Current, ScaledCurrent
 
 
@@ -6493,3 +6494,171 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
             certification_value_kind="hard",
         )
         self.assertFalse(metadata.scale_floor_applied)
+
+
+class _LinearIotaLeaf(Optimizable):
+    """Real ``Optimizable`` stub mimicking an ``Iotas`` Boozer-surface term.
+
+    ``J`` is an affine function of its own dofs (``base + slope . x``) so the
+    coil-routed Boozer adjoint is replaced by an exact, hand-checkable
+    ``Derivative``. This lets the shear term's value, sign, and gradient be
+    validated without solving a Boozer surface.
+    """
+
+    def __init__(self, base, slope):
+        self._base = float(base)
+        self._slope = np.asarray(slope, dtype=float)
+        Optimizable.__init__(self, x0=np.zeros(self._slope.size))
+
+    def J(self):
+        return self._base + float(self._slope @ self.local_full_x)
+
+    @derivative_dec
+    def dJ(self):
+        return Derivative({self: self._slope.copy()})
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class IotaShearShortfallTests(_ModuleTestCase):
+    MODULE_PATH = SINGLE_STAGE_OBJECTIVES_PATH
+    MODULE_PREFIX = "banana_single_stage_objectives_shear"
+
+    # CW lineage: axis-side iota (0.345) exceeds edge iota (0.139), so
+    # spread = edge - axis is NEGATIVE and |spread| = 0.206 is the shear.
+    AXIS_IOTA = 0.345
+    EDGE_IOTA = 0.139
+    SHEAR_TARGET = 0.30  # above |spread| so the one-sided term is active
+
+    def _axis_edge_terms(self):
+        axis = _LinearIotaLeaf(self.AXIS_IOTA, [0.0, 0.0])
+        edge = _LinearIotaLeaf(self.EDGE_IOTA, [1.0, -2.0])
+        return axis, edge
+
+    def test_shear_shortfall_value_matches_one_sided_penalty(self):
+        axis, edge = self._axis_edge_terms()
+        term = self.module.IotaShearShortfall(axis, edge, self.SHEAR_TARGET)
+
+        spread = self.EDGE_IOTA - self.AXIS_IOTA
+        shortfall = min(abs(spread) - self.SHEAR_TARGET, 0.0)
+        self.assertAlmostEqual(term.J(), 0.5 * shortfall**2)
+        self.assertGreater(term.J(), 0.0)  # below the shear floor -> penalized
+
+    def test_shear_shortfall_is_zero_at_or_above_target(self):
+        # |spread| = 0.206 >= target 0.10 -> no shortfall, exactly zero.
+        axis, edge = self._axis_edge_terms()
+        term = self.module.IotaShearShortfall(axis, edge, 0.10)
+        self.assertEqual(term.J(), 0.0)
+
+    def test_shear_shortfall_gradient_matches_finite_difference(self):
+        axis, edge = self._axis_edge_terms()
+        term = self.module.IotaShearShortfall(axis, edge, self.SHEAR_TARGET)
+
+        analytic = term.dJ()
+        x0 = term.x.copy()
+        h = 1.0e-6
+        fd = np.zeros_like(x0)
+        for index in range(x0.size):
+            step = np.zeros_like(x0)
+            step[index] = h
+            term.x = x0 + step
+            j_plus = term.J()
+            term.x = x0 - step
+            j_minus = term.J()
+            fd[index] = (j_plus - j_minus) / (2.0 * h)
+        term.x = x0
+        np.testing.assert_allclose(analytic, fd, atol=1.0e-7)
+
+    def test_shear_shortfall_gradient_rewards_more_shear(self):
+        # With spread < 0 (axis > edge), increasing |spread| (more shear) must
+        # LOWER the penalty. Give each surface a single +iota dof so the sign of
+        # d(penalty)/d(iota) is read directly: raising axis-iota grows the gap
+        # (dJ < 0) and raising edge-iota shrinks it (dJ > 0). The concatenated
+        # free-dof vector orders axis dofs first, then edge dofs.
+        axis = _LinearIotaLeaf(self.AXIS_IOTA, [1.0])
+        edge = _LinearIotaLeaf(self.EDGE_IOTA, [1.0])
+        term = self.module.IotaShearShortfall(axis, edge, self.SHEAR_TARGET)
+        grad = term.dJ()
+        self.assertLess(grad[0], 0.0, msg=f"d/d(axis iota) not negative: {grad}")
+        self.assertGreater(grad[1], 0.0, msg=f"d/d(edge iota) not positive: {grad}")
+
+    def test_builder_returns_none_for_single_surface(self):
+        # Single-surface mode has no axis->edge profile: clean no-op, no crash.
+        single = [_LinearIotaLeaf(self.EDGE_IOTA, [1.0])]
+        self.assertIsNone(
+            self.module.build_single_stage_shear_objective(single, self.SHEAR_TARGET)
+        )
+        self.assertIsNone(
+            self.module.build_single_stage_shear_objective([], self.SHEAR_TARGET)
+        )
+
+    def test_builder_uses_innermost_and_outermost_surfaces(self):
+        # The builder must pick surface_iota_terms[0] (axis) and [-1] (edge),
+        # ignoring any intermediate surfaces, and reproduce the direct term.
+        axis, edge = self._axis_edge_terms()
+        middle = _LinearIotaLeaf(0.25, [0.5, 0.5])
+        built = self.module.build_single_stage_shear_objective(
+            [axis, middle, edge], self.SHEAR_TARGET
+        )
+        direct = self.module.IotaShearShortfall(axis, edge, self.SHEAR_TARGET)
+        self.assertIsNotNone(built)
+        self.assertAlmostEqual(built.J(), direct.J())
+        np.testing.assert_allclose(built.dJ(), direct.dJ())
+
+    @staticmethod
+    def _base_total_objective_args():
+        # The 15 positional build_total_objective args (JnonQSRatio, RES_WEIGHT,
+        # JBoozerResidual, IOTAS_WEIGHT, Jiota, VOLUME_WEIGHT, JVolume,
+        # LENGTH_WEIGHT, JCurveLength, CC_WEIGHT, JCurveCurve, CS_WEIGHT,
+        # JCurveSurface, CURVATURE_WEIGHT, JCurvature). JVolume is None so the
+        # volume term is skipped, matching the other assembly tests.
+        return [
+            _FakeAlgebraicObjective(1.0, [1.0, 0.0]),
+            2.0,
+            _FakeAlgebraicObjective(3.0, [0.0, 2.0]),
+            4.0,
+            _FakeAlgebraicObjective(5.0, [1.0, 1.0]),
+            6.0,
+            None,
+            8.0,
+            _FakeAlgebraicObjective(9.0, [0.0, 3.0]),
+            10.0,
+            _FakeAlgebraicObjective(11.0, [1.0, -1.0]),
+            12.0,
+            _FakeAlgebraicObjective(13.0, [0.5, 0.5]),
+            14.0,
+            _FakeAlgebraicObjective(15.0, [2.0, -2.0]),
+        ]
+
+    def test_build_total_objective_shear_term_default_off_is_identical(self):
+        # Weight 0 (and a None term) must leave the assembled objective
+        # byte-identical to the call that omits the shear kwargs entirely.
+        baseline = self.module.build_total_objective(*self._base_total_objective_args())
+        default_off = self.module.build_total_objective(
+            *self._base_total_objective_args(), JShear=None, SHEAR_WEIGHT=0.0
+        )
+        self.assertEqual(baseline.J(), default_off.J())
+        np.testing.assert_array_equal(baseline.dJ(), default_off.dJ())
+
+        # A nonzero weight with a None term stays inert (the None guard wins).
+        weighted_none = self.module.build_total_objective(
+            *self._base_total_objective_args(), JShear=None, SHEAR_WEIGHT=123.0
+        )
+        self.assertEqual(baseline.J(), weighted_none.J())
+        np.testing.assert_array_equal(baseline.dJ(), weighted_none.dJ())
+
+    def test_build_total_objective_adds_weighted_shear_term(self):
+        # The assembly contract: a non-None JShear enters as + SHEAR_WEIGHT*JShear.
+        # build_total_objective composes every term via +/*, so the shear term
+        # must share the algebra family of the other terms; use the algebraic
+        # fake here (the IotaShearShortfall value/sign/gradient are covered by the
+        # dedicated term tests above).
+        baseline = self.module.build_total_objective(*self._base_total_objective_args())
+        shear = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
+        with_shear = self.module.build_total_objective(
+            *self._base_total_objective_args(), JShear=shear, SHEAR_WEIGHT=10.0
+        )
+        self.assertAlmostEqual(with_shear.J() - baseline.J(), 10.0 * shear.J())
+        np.testing.assert_allclose(
+            with_shear.dJ() - baseline.dJ(), 10.0 * shear.dJ()
+        )
