@@ -22,7 +22,7 @@ cd "$REPO"
 
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="$REPO:$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$REPO:$REPO/src"
 export JAX_ENABLE_X64=True
 export SIMSOPT_BACKEND_STRICT=1
 export SIMSOPT_JAX_TRANSFER_GUARD=disallow
@@ -90,9 +90,8 @@ with jax.transfer_guard("disallow"):
     transfer_blocked = False
     try:
         np.asarray(probe_value)
-    except Exception as exc:
-        message = str(exc).lower()
-        transfer_blocked = "disallowed" in message or "transfer guard" in message
+    except RuntimeError:
+        transfer_blocked = True
 
 if not transfer_blocked:
     raise SystemExit("expected transfer_guard('disallow') to block implicit transfers")

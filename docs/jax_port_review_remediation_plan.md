@@ -948,11 +948,12 @@ or a focused command remains open.
   bash scripts/current_head_cuda_signoff.sh
   ```
   The script fails closed unless the tracked checkout is clean, no non-artifact
-  untracked path can influence the run, `nvidia-smi` exists, `PYTHON_BIN` is
-  executable, JAX reports a CUDA/GPU backend, a live JAX `transfer_guard`
-  disallow probe blocks an implicit transfer, both JSON-producing single-stage
-  runs pass, both JSON payloads record the active checkout's
-  `git rev-parse HEAD`, and both payloads record `transfer_guard=disallow`.
+  untracked path or inherited `PYTHONPATH` can influence the run, `nvidia-smi`
+  exists, `PYTHON_BIN` is executable, JAX reports a CUDA/GPU backend, a live
+  JAX `transfer_guard` disallow probe blocks an implicit transfer, both
+  JSON-producing single-stage runs pass, both JSON payloads record the active
+  checkout's `git rev-parse HEAD`, and both payloads record
+  `transfer_guard=disallow`.
   Successful execution is the required artifact evidence for checking the
   CUDA/GPU signoff box above; a skipped pytest selector is not sufficient
   evidence for this release gate because the signoff must fail closed when CUDA

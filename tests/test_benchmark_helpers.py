@@ -8409,11 +8409,14 @@ def test_current_head_cuda_signoff_script_is_fail_closed_release_gate():
     assert "set -euo pipefail" in script_text
     assert "git status --short --untracked-files=no" in script_text
     assert "git status --short --untracked-files=normal" in script_text
+    assert 'export PYTHONPATH="$REPO:$REPO/src"' in script_text
+    assert "${PYTHONPATH:+" not in script_text
     assert "non-artifact untracked paths would invalidate" in script_text
     assert "nvidia-smi is required for CUDA signoff" in script_text
     assert "jax.default_backend()" in script_text
     assert 'not in {"cuda", "gpu"}' in script_text
     assert 'jax.transfer_guard("disallow")' in script_text
+    assert "except RuntimeError:" in script_text
     assert "expected transfer_guard('disallow')" in script_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD=disallow" in script_text
     assert "benchmarks/single_stage_init_parity.py \\" in script_text
