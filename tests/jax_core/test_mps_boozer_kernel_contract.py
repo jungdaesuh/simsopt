@@ -11,6 +11,7 @@ import pytest
 import simsopt.jax_core.mps_boozer_kernel_contract as mps_boozer_kernel_contract
 from simsopt.jax_core.mps_boozer_kernel_contract import (
     DEFAULT_CONTRACT_ARTIFACT_DIR,
+    MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
     MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE,
     MpsBoozerFusedCustomCallResult,
     MpsBoozerKernelContract,
@@ -782,6 +783,20 @@ def test_mps_boozer_fixed_surface_support_predicate_matches_backend_contract():
 
     assert not mps_boozer_fixed_surface_g_iota_supported(unsupported_contract)
     assert mps_boozer_fixed_surface_g_iota_supported(supported_contract)
+    assert mps_boozer_fixed_surface_g_iota_supported(
+        replace(
+            supported_contract,
+            static_metadata=replace(
+                supported_contract.static_metadata,
+                solver_options=(
+                    ("gmres_maxiter", 2),
+                    ("mps_solver_mode", MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE),
+                    ("newton_maxiter", 3),
+                    ("newton_tol", 1.0e-5),
+                ),
+            ),
+        )
+    )
     assert not mps_boozer_fixed_surface_g_iota_supported(
         replace(
             supported_contract,
@@ -790,7 +805,10 @@ def test_mps_boozer_fixed_surface_support_predicate_matches_backend_contract():
                 solver_options=(
                     ("gmres_maxiter", 2),
                     ("mps_solver_mode", MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE),
-                    ("newton_maxiter", 20),
+                    (
+                        "newton_maxiter",
+                        MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER + 1,
+                    ),
                     ("newton_tol", 1.0e-5),
                 ),
             ),

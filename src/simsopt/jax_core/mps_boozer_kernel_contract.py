@@ -18,6 +18,9 @@ SIMSOPT_MPS_BOOZER_VALUE_GRAD_TARGET = "mps.simsopt_boozer_value_grad"
 SIMSOPT_MPS_BOOZER_VALUE_GRAD_CUSTOM_CALL_API_VERSION = 3
 MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE = "fixed_surface_g_iota"
 UNKNOWN_ITERATION_COUNT = -1
+DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER = 1
+MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER = 20
+EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER = 2
 
 
 @dataclass(frozen=True)
@@ -217,6 +220,18 @@ def mps_boozer_fixed_surface_g_iota_supported(
 
     metadata = contract.static_metadata
     solver_options = _solver_options_mapping(metadata.solver_options)
+    newton_maxiter = int(
+        solver_options.get(
+            "newton_maxiter",
+            DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
+        )
+    )
+    gmres_maxiter = int(
+        solver_options.get(
+            "gmres_maxiter",
+            EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER,
+        )
+    )
     coeff_count = (2 * int(metadata.mpol) + 1) * (2 * int(metadata.ntor) + 1)
     surface_dof_count = int(contract.x_inner.shape[0]) - 2
     return bool(
@@ -228,8 +243,10 @@ def mps_boozer_fixed_surface_g_iota_supported(
         and int(metadata.nfp) > 0
         and metadata.surface_kind == "xyztensorfourier"
         and float(metadata.constraint_weight) == 0.0
-        and int(solver_options.get("newton_maxiter", 1)) == 1
-        and int(solver_options.get("gmres_maxiter", 2)) == 2
+        and 1
+        <= newton_maxiter
+        <= MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER
+        and gmres_maxiter == EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER
         and solver_options.get("mps_solver_mode")
         == MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE
         and surface_dof_count > 0
@@ -259,7 +276,9 @@ def require_mps_boozer_fixed_surface_g_iota_supported(
         "fixed-surface G/iota fixture: float32 arrays, one grouped coil set, "
         "stellsym xyztensorfourier surfaces, zero BoozerResidual constraint "
         "weight, optimize_G=True, mps_solver_mode='fixed_surface_g_iota', "
-        "newton_maxiter=1, and gmres_maxiter=2."
+        "1 <= newton_maxiter <= "
+        f"{MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER}, and "
+        f"gmres_maxiter={EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER}."
     )
 
 

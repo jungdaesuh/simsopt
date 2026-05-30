@@ -443,6 +443,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--target-lane-boozer-newton-maxiter",
+        type=int,
+        default=None,
+        help=(
+            "Optional target-lane Boozer Newton iteration cap override passed "
+            "through to the single-stage runner. This exercises bounded "
+            "experimental MPS custom-kernel solves above the default cap."
+        ),
+    )
+    parser.add_argument(
         "--maxiter",
         type=int,
         default=DEFAULT_OUTER_MAXITER,
@@ -1117,7 +1127,11 @@ def _run_single_stage_case(
                 args, "target_lane_boozer_newton_maxiter", None
             )
             if not residual_only_fixture
-            else 1,
+            else (
+                1
+                if getattr(args, "target_lane_boozer_newton_maxiter", None) is None
+                else getattr(args, "target_lane_boozer_newton_maxiter", None)
+            ),
             target_lane_boozer_newton_polish_policy=(
                 _resolve_target_lane_boozer_newton_polish_policy(
                     backend=backend,

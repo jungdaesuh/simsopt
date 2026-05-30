@@ -6563,17 +6563,39 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(overrides["gmres_maxiter"], 2)
         self.assertEqual(overrides["mps_solver_mode"], "fixed_surface_g_iota")
 
-    def test_build_target_lane_trial_boozer_overrides_rejects_conflicting_mps_newton_cap(
+    def test_build_target_lane_trial_boozer_overrides_accepts_supported_mps_newton_cap(
         self,
     ):
         module = self.load_module()
 
-        with self.assertRaisesRegex(RuntimeError, "newton_maxiter=1"):
+        overrides = module.build_target_lane_trial_boozer_overrides(
+            bfgs_tol=None,
+            bfgs_maxiter=None,
+            newton_tol=None,
+            newton_maxiter=3,
+            newton_polish_policy=None,
+            experimental_mps_boozer_custom_kernel=True,
+        )
+
+        self.assertEqual(overrides["newton_maxiter"], 3)
+        self.assertEqual(overrides["gmres_maxiter"], 2)
+
+    def test_build_target_lane_trial_boozer_overrides_rejects_unsupported_mps_newton_cap(
+        self,
+    ):
+        module = self.load_module()
+        from simsopt.jax_core.mps_boozer_kernel_contract import (
+            MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "1 <= newton_maxiter <="):
             module.build_target_lane_trial_boozer_overrides(
                 bfgs_tol=None,
                 bfgs_maxiter=None,
                 newton_tol=None,
-                newton_maxiter=3,
+                newton_maxiter=(
+                    MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER + 1
+                ),
                 newton_polish_policy=None,
                 experimental_mps_boozer_custom_kernel=True,
             )

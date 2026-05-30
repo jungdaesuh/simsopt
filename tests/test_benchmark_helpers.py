@@ -670,7 +670,26 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     assert args.initial_step_maxiter == 0
     assert args.outer_maxls == single_stage_init_parity_module.TRACE_PARITY_OUTER_MAXLS
     assert args.target_lane_boozer_newton_polish_policy == "skip-large-strict-cuda"
+    assert args.target_lane_boozer_newton_maxiter is None
     assert not args.experimental_mps_boozer_residual_only_fixture
+
+
+def test_single_stage_init_accepts_target_lane_boozer_newton_maxiter(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_init_parity.py",
+            "--output-json",
+            "/tmp/out.json",
+            "--target-lane-boozer-newton-maxiter",
+            "3",
+        ],
+    )
+
+    args = single_stage_init_parity_module.parse_args()
+
+    assert args.target_lane_boozer_newton_maxiter == 3
 
 
 def test_single_stage_init_accepts_mps_residual_only_fixture(monkeypatch):
@@ -6722,6 +6741,7 @@ def test_single_stage_init_case_threads_mps_residual_only_fixture_flags(
         equilibrium_path=None,
         equilibria_dir=str(tmp_path / "equilibria"),
         experimental_mps_boozer_residual_only_fixture=True,
+        target_lane_boozer_newton_maxiter=3,
     )
 
     observed_command: list[str] = []
@@ -6784,7 +6804,7 @@ def test_single_stage_init_case_threads_mps_residual_only_fixture_flags(
         flag_index = observed_command.index(flag)
         assert observed_command[flag_index + 1] == "0.0"
     newton_index = observed_command.index("--target-lane-boozer-newton-maxiter")
-    assert observed_command[newton_index + 1] == "1"
+    assert observed_command[newton_index + 1] == "3"
 
 
 def test_single_stage_init_case_threads_disable_target_lane_success_filter_flag(

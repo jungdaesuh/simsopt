@@ -7200,8 +7200,6 @@ _EXPERIMENTAL_MPS_BOOZER_CUSTOM_KERNEL_ZERO_WEIGHT_KEYS = (
     "surface_vessel_weight",
     "curvature_weight",
 )
-_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER = 1
-_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER = 2
 
 
 def build_target_lane_trial_boozer_overrides(
@@ -7224,23 +7222,33 @@ def build_target_lane_trial_boozer_overrides(
     if not experimental_mps_boozer_custom_kernel:
         return overrides
 
-    if (
-        newton_maxiter is not None
-        and int(newton_maxiter) != _EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER
-    ):
-        raise RuntimeError(
-            "--experimental-mps-boozer-custom-kernel currently supports only "
-            "target-lane Boozer newton_maxiter=1."
-        )
-
     from simsopt.jax_core.mps_boozer_kernel_contract import (
+        DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
+        EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER,
+        MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
         MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE,
     )
 
+    resolved_newton_maxiter = (
+        DEFAULT_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER
+        if newton_maxiter is None
+        else int(newton_maxiter)
+    )
+    if (
+        resolved_newton_maxiter < 1
+        or resolved_newton_maxiter
+        > MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER
+    ):
+        raise RuntimeError(
+            "--experimental-mps-boozer-custom-kernel currently supports only "
+            "target-lane Boozer 1 <= newton_maxiter <= "
+            f"{MAX_EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER}."
+        )
+
     return {
         **overrides,
-        "newton_maxiter": _EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_NEWTON_MAXITER,
-        "gmres_maxiter": _EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER,
+        "newton_maxiter": resolved_newton_maxiter,
+        "gmres_maxiter": EXPERIMENTAL_MPS_BOOZER_FIXED_SURFACE_GMRES_MAXITER,
         "mps_solver_mode": MPS_BOOZER_FIXED_SURFACE_G_IOTA_MODE,
     }
 
