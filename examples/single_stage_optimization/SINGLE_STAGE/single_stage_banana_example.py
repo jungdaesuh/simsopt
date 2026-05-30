@@ -2134,6 +2134,19 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--free-tf-geometry",
+        action="store_true",
+        help=(
+            "Opt-in: unfreeze the TF coil curve geometry (their CurveXYZFourier "
+            "Fourier dofs) so the optimizer can supply rotational transform via "
+            "shaped TF coils instead of forcing it onto the net-zero banana saddle "
+            "loops (default off = TF geometry frozen, objective byte-identical). TF "
+            "currents stay fixed. The freed TF curves enter the coil-coil and "
+            "coil-surface clearance penalties and gain their own curvature cap and "
+            "an as-shipped length ceiling so they remain buildable."
+        ),
+    )
+    parser.add_argument(
         "--banana-current-max-A",
         type=float,
         default=float(
@@ -6283,6 +6296,8 @@ def build_single_stage_objective_bundle(
     coil_force_regularization=0.0,
     SHEAR_TARGET=0.0,
     SHEAR_WEIGHT=0.0,
+    tf_curves=None,
+    tf_length_target=0.0,
 ):
     boozer_terms = build_boozer_derived_objective_terms(
         stage,
@@ -6387,6 +6402,27 @@ def build_single_stage_objective_bundle(
         if SHEAR_WEIGHT > 0.0
         else None
     )
+    # TF-coil buildability terms (opt-in via --free-tf-geometry; both None unless
+    # tf_curves were unfrozen, so default runs add nothing and stay byte-identical).
+    # They reuse the same LpCurveCurvature/CurveLength/QuadraticPenalty helpers and
+    # thresholds as the banana coils (SSOT): the same curvature cap CURVATURE_THRESHOLD
+    # and an as-shipped length ceiling tf_length_target keep the freed TF geometry
+    # buildable. TF-TF and TF-surface clearances are already covered because the freed
+    # TF curves are included in the ``curves`` list feeding JCurveCurve/JCurveSurface.
+    if tf_curves:
+        tf_curvature_terms = [
+            LpCurveCurvature(tf_curve, CURVATURE_P_NORM, CURVATURE_THRESHOLD)
+            for tf_curve in tf_curves
+        ]
+        JTFCurvature = sum(tf_curvature_terms[1:], tf_curvature_terms[0])
+        tf_length_terms = [
+            QuadraticPenalty(CurveLength(tf_curve), tf_length_target, "max")
+            for tf_curve in tf_curves
+        ]
+        JTFCurveLength = sum(tf_length_terms[1:], tf_length_terms[0])
+    else:
+        JTFCurvature = None
+        JTFCurveLength = None
     JF = build_total_objective(
         goal_objective_terms["JnonQSRatioObjective"],
         goal_objective_terms["effective_res_weight"],
@@ -6419,6 +6455,8 @@ def build_single_stage_objective_bundle(
         FORCE_WEIGHT=FORCE_WEIGHT,
         JShear=JShear,
         SHEAR_WEIGHT=SHEAR_WEIGHT,
+        JTFCurvature=JTFCurvature,
+        JTFCurveLength=JTFCurveLength,
     )
     return {
         "surface_iota_terms": surface_iota_terms,
@@ -6454,6 +6492,8 @@ def build_single_stage_objective_bundle(
         "JLinkingNumber": JLinkingNumber,
         "JCoilForce": JCoilForce,
         "JShear": JShear,
+        "JTFCurvature": JTFCurvature,
+        "JTFCurveLength": JTFCurveLength,
         "JF": JF,
     }
 
@@ -10116,6 +10156,8 @@ def build_total_objective(
     FORCE_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
+    JTFCurvature=None,
+    JTFCurveLength=None,
 ):
     return _build_total_objective_impl(
         JnonQSRatio,
@@ -10153,6 +10195,8 @@ def build_total_objective(
         FORCE_WEIGHT=FORCE_WEIGHT,
         JShear=JShear,
         SHEAR_WEIGHT=SHEAR_WEIGHT,
+        JTFCurvature=JTFCurvature,
+        JTFCurveLength=JTFCurveLength,
     )
 
 
@@ -11923,9 +11967,30 @@ if __name__ == "__main__":
     banana_curves = [c.curve for c in banana_coils]
     banana_curve = banana_curves[0]
     order = int(banana_curve.order)
-    # Clearance/length objectives operate on the optimizable banana curves only;
-    # TF/proxy/VF curves are fixed field sources and must not enter the penalty.
-    objective_curves = banana_curves
+    tf_curves = [c.curve for c in tf_coils]
+    # --free-tf-geometry unfreezes the TF curve geometry so the optimizer can shape
+    # the TF coils (the only field source with a net-nonzero linking current) to
+    # supply rotational transform, decoupling poloidal banana extent from iota. TF
+    # currents stay fixed (only the curve Fourier dofs are unfrozen). The freed TF
+    # curves join objective_curves so the existing coil-coil/coil-surface clearance
+    # penalties span them, and they gain their own curvature/length buildability
+    # terms (added in the objective bundle). The as-shipped TF length is the length
+    # ceiling: the seed TF coils are buildable, so this forbids them from growing
+    # past their loaded length rather than inventing a separate hardware budget.
+    free_tf_geometry = bool(args.free_tf_geometry)
+    if free_tf_geometry:
+        tf_length_ceiling_m = max(
+            (float(CurveLength(tf_curve).J()) for tf_curve in tf_curves),
+            default=0.0,
+        )
+        for tf_curve in tf_curves:
+            tf_curve.unfix_all()
+        objective_curves = banana_curves + tf_curves
+    else:
+        tf_length_ceiling_m = 0.0
+        # Clearance/length objectives operate on the optimizable banana curves only;
+        # TF/proxy/VF curves are fixed field sources and must not enter the penalty.
+        objective_curves = banana_curves
     JResidueObjective = build_residue_objective_from_args(args, bs)
     if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME:
         stage2_tf_current_A = resolve_single_stage_resume_tf_current_A(
@@ -12213,6 +12278,8 @@ if __name__ == "__main__":
             coil_force_regularization=COIL_FORCE_REGULARIZATION,
             SHEAR_TARGET=SHEAR_TARGET,
             SHEAR_WEIGHT=SHEAR_WEIGHT,
+            tf_curves=tf_curves if free_tf_geometry else None,
+            tf_length_target=tf_length_ceiling_m,
         )
         apply_single_stage_objective_bundle(objective_bundle)
         return objective_bundle

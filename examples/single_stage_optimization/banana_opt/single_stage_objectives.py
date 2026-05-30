@@ -177,6 +177,8 @@ def build_total_objective(
     FORCE_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
+    JTFCurvature=None,
+    JTFCurveLength=None,
 ):
     objective = (
         JnonQSRatio
@@ -218,6 +220,17 @@ def build_total_objective(
     # |iota_edge - iota_axis| spread to escape the flat-iota rational soup.
     if JShear is not None:
         objective = objective + SHEAR_WEIGHT * JShear
+    # TF-coil buildability terms (opt-in via --free-tf-geometry; both None unless
+    # the TF curve geometry is unfrozen, so the objective graph is byte-identical
+    # for the default frozen-TF run). They reuse the banana HW weights so the freed
+    # TF coils obey the same curvature cap and an as-shipped length ceiling, keeping
+    # the newly optimizable TF geometry buildable. TF-TF and TF-surface clearances
+    # ride on JCurveCurve/JCurveSurface, which already span the full objective_curves
+    # list once the TF curves are added to it.
+    if JTFCurvature is not None:
+        objective = objective + CURVATURE_WEIGHT * JTFCurvature
+    if JTFCurveLength is not None:
+        objective = objective + LENGTH_WEIGHT * JTFCurveLength
     return objective
 
 
