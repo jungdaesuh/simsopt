@@ -1,3 +1,4 @@
+import inspect
 import math
 import os
 
@@ -37,6 +38,11 @@ from workflow_helpers import validate_normalized_toroidal_flux
 _SURFACE_GOES_BACK_ERROR_FRAGMENT = "surface 'goes back' on itself"
 INTERIOR_IOTA_LOW_ORDER_RATIONAL_MAX_DENOMINATOR = 8
 INTERIOR_IOTA_LOW_ORDER_RATIONAL_TOLERANCE = 5.0e-3
+
+# Defense-in-depth: a solved surface whose |iota| has dropped below this fraction of the pre-step
+# (warm-start) accepted |iota| is treated as collapsed toward the trivial magnetic axis and is never
+# promoted, even if the Boozer solve nominally converged and the surface is not self-intersecting.
+IOTA_COLLAPSE_REJECT_FRACTION = 0.3
 
 
 def _is_surface_goes_back_error(error):
@@ -297,6 +303,7 @@ def evaluate_surface_stack(
     vessel_surface=None,
     surface_gap_threshold=0.0,
     enforce_nesting=True,
+    reference_iotas=None,
 ):
     volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
     iotas = [entry["boozer_surface"].res["iota"] for entry in surface_data]
@@ -364,12 +371,26 @@ def evaluate_surface_stack(
                 bad_nesting_phis.extend(pair_bad_phis)
         nesting_ok = len(bad_nesting_pairs) == 0
 
+    # Defense-in-depth: reject any surface whose |iota| collapsed below a conservative fraction of its
+    # pre-step (warm-start) reference |iota|, even if the Boozer solve converged and there is no
+    # self-intersection. This guarantees a collapsed (objective-unfavorable) surface is never promoted.
+    iota_collapsed = [False] * len(surface_data)
+    if reference_iotas is not None:
+        for index, reference_iota in enumerate(reference_iotas):
+            if reference_iota is None:
+                continue
+            iota_floor = IOTA_COLLAPSE_REJECT_FRACTION * abs(reference_iota)
+            if abs(iotas[index]) < iota_floor:
+                iota_collapsed[index] = True
+    iota_collapse_ok = not any(iota_collapsed)
+
     success = (
         all(solve_success)
         and not any(self_intersections)
         and volumes_ordered
         and gap_ok
         and nesting_ok
+        and iota_collapse_ok
     )
     return {
         "success": success,
@@ -384,6 +405,11 @@ def evaluate_surface_stack(
         "nesting_ok": nesting_ok,
         "bad_nesting_phis": bad_nesting_phis,
         "bad_nesting_pairs": bad_nesting_pairs,
+        "iota_collapsed": iota_collapsed,
+        "iota_collapse_ok": iota_collapse_ok,
+        # Clear, named reason for the failure mode this guard introduces. Other (pre-existing) failure
+        # modes continue to surface via their own boolean flags above.
+        "reason": None if iota_collapse_ok else "iota_collapse",
     }
 
 
@@ -940,12 +966,38 @@ def solve_surface_stack_at_dofs(
     restore_surface_states(surface_data, state)
     objective.x = x
     for entry, iota, G in zip(surface_data, state["iota"], state["G"]):
-        entry["boozer_surface"].run_code(iota, G)
+        # Pass the warm-start iota as the collapse reference so a trial coil step with no nearby nested
+        # surface fails the Boozer BFGS solve fast (early-exit) instead of grinding all bfgs_maxiter
+        # iterations toward the trivial magnetic axis. The kwargs are only forwarded to run_code
+        # implementations that accept them (the base simsopt BoozerSurface). The defense-in-depth
+        # reject below still catches a completed collapse for any surface type.
+        boozer_surface = entry["boozer_surface"]
+        run_code_kwargs = {}
+        if _run_code_supports_iota_collapse_guard(boozer_surface):
+            run_code_kwargs = {
+                "iota_collapse_fraction": IOTA_COLLAPSE_REJECT_FRACTION,
+                "iota_reference": iota,
+            }
+        boozer_surface.run_code(iota, G, **run_code_kwargs)
     return evaluate_surface_stack(
         surface_data,
         vessel_surface=vessel_surface,
         surface_gap_threshold=surface_gap_threshold,
         enforce_nesting=enforce_nesting,
+        reference_iotas=state["iota"],
+    )
+
+
+def _run_code_supports_iota_collapse_guard(boozer_surface):
+    """True if ``boozer_surface.run_code`` accepts the iota-collapse early-exit kwargs.
+
+    The base ``simsopt.geo.BoozerSurface.run_code`` accepts ``iota_collapse_fraction`` /
+    ``iota_reference``; some wrapper subclasses (e.g. the finite-enclosed-current variant) do not yet
+    forward them, in which case the early-exit is skipped (the defense-in-depth reject still applies).
+    """
+    parameters = inspect.signature(boozer_surface.run_code).parameters
+    return (
+        "iota_collapse_fraction" in parameters and "iota_reference" in parameters
     )
 
 

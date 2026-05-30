@@ -5344,11 +5344,15 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         )
         self.assertEqual(surface_data[0]["boozer_surface"].calls, [(0.11, 5.5)])
         self.assertEqual(surface_data[1]["boozer_surface"].calls, [(0.22, 6.6)])
+        # The warm-start iotas are threaded through to evaluate_surface_stack as the iota-collapse
+        # reference (defense-in-depth reject). The fake surfaces' run_code(iota, G) does not accept
+        # the early-exit kwargs, so the dispatch guard correctly omits them (calls unchanged above).
         evaluate_mock.assert_called_once_with(
             surface_data,
             vessel_surface="VV",
             surface_gap_threshold=0.05,
             enforce_nesting=False,
+            reference_iotas=[0.11, 0.22],
         )
         self.assertEqual(result, {"success": True})
 

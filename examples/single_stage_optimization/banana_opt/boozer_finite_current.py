@@ -375,9 +375,14 @@ class BoozerSurfaceFiniteI(BoozerSurface):
             )
         return payload
 
-    def run_code(self, iota, G):
+    def run_code(self, iota, G, iota_collapse_fraction=None, iota_reference=None):
         _require_explicit_G(G)
-        result = super().run_code(iota, G=G)
+        result = super().run_code(
+            iota,
+            G=G,
+            iota_collapse_fraction=iota_collapse_fraction,
+            iota_reference=iota_reference,
+        )
         return self._annotate_current_result(result)
 
     def _annotate_current_result(self, result):
@@ -396,6 +401,8 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         limited_memory=True,
         weight_inv_modB=True,
         verbose=False,
+        iota_collapse_fraction=None,
+        iota_reference=None,
     ):
         G = _require_explicit_G(G)
         result = super().minimize_boozer_penalty_constraints_LBFGS(
@@ -408,6 +415,8 @@ class BoozerSurfaceFiniteI(BoozerSurface):
             limited_memory=limited_memory,
             weight_inv_modB=weight_inv_modB,
             verbose=verbose,
+            iota_collapse_fraction=iota_collapse_fraction,
+            iota_reference=iota_reference,
         )
         return self._annotate_current_result(result)
 

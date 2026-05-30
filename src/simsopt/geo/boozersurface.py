@@ -162,7 +162,7 @@ class BoozerSurface(Optimizable):
             return self.run_code(self.res['iota'], G=self.res['G'])
         return self.res
 
-    def run_code(self, iota, G=None):
+    def run_code(self, iota, G=None, iota_collapse_fraction=None, iota_reference=None):
         """
         Run the default solvers, i.e., run Newton's method directly if you are computing a BoozerExact surface,
         and run BFGS followed by Newton if you are computing a BoozerLS surface.
@@ -170,7 +170,13 @@ class BoozerSurface(Optimizable):
         Args:
             iota (float): Guess for value of rotational transform on the surface.
             G (float, Optional): Guess for value of G on surface, defaults to None. Note that if None is used, then the coil currents must be fixed.
-        
+            iota_collapse_fraction (float, Optional): If set (BoozerLS only), the BFGS solve is stopped early and
+                marked unsuccessful once the current iterate's ``|iota|`` falls below
+                ``iota_collapse_fraction * |iota_reference|`` (a runaway collapse toward the trivial magnetic
+                axis). Defaults to None, which disables the guard and preserves legacy behavior byte-for-byte.
+            iota_reference (float, Optional): The reference ``iota`` (e.g. the warm-start value) against which
+                ``iota_collapse_fraction`` is measured. Defaults to None, in which case ``iota`` is used.
+
         Returns:
             dict: A dictionary containing the results of the optimization. The dictionary contains the following keys in addition
             to others:
@@ -205,8 +211,17 @@ class BoozerSurface(Optimizable):
             # to generally result in solutions closer to optimality.
             res = self.minimize_boozer_penalty_constraints_LBFGS(constraint_weight=self.constraint_weight, iota=iota, G=G,
                                                                  tol=self.options['bfgs_tol'], maxiter=self.options['bfgs_maxiter'], verbose=self.options['verbose'], limited_memory=self.options['limited_memory'],
-                                                                 weight_inv_modB=self.options['weight_inv_modB'])
+                                                                 weight_inv_modB=self.options['weight_inv_modB'],
+                                                                 iota_collapse_fraction=iota_collapse_fraction,
+                                                                 iota_reference=iota_reference if iota_reference is not None else iota)
             iota, G = res['iota'], res['G']
+
+            # If the BFGS solve was stopped early because iota collapsed toward the trivial axis, the
+            # warm-started Newton polish would only re-confirm the (objective-unfavorable) collapse and
+            # cost a full Newton solve. Skip it and return the unsuccessful BFGS result so the caller can
+            # reject the trial step promptly.
+            if not res['success'] and res.get('iota_collapsed', False):
+                return res
 
             ## polish off using Newton's method
             self.need_to_run_code = True
@@ -505,7 +520,7 @@ class BoozerSurface(Optimizable):
         dres[-1, :-2] = drz
         return res, dres
 
-    def minimize_boozer_penalty_constraints_LBFGS(self, tol=1e-3, maxiter=1000, constraint_weight=1., iota=0., G=None, vectorize=True, limited_memory=True, weight_inv_modB=True, verbose=False):
+    def minimize_boozer_penalty_constraints_LBFGS(self, tol=1e-3, maxiter=1000, constraint_weight=1., iota=0., G=None, vectorize=True, limited_memory=True, weight_inv_modB=True, verbose=False, iota_collapse_fraction=None, iota_reference=None):
         r"""
         This function uses L-BFGS to find the surface that approximately solves
 
@@ -526,7 +541,16 @@ class BoozerSurface(Optimizable):
             limited_memory (bool, Optional): If True, use the limited memory version of L-BFGS. Defaults to True.
             weight_inv_modB (bool, Optional): If True, weight the residual by modB so that it does not scale with coil currents. Defaults to True.
             verbose (bool, Optional): If True, print the optimization progress. Defaults to False.
-        
+            iota_collapse_fraction (float, Optional): If set, install a ``scipy.optimize.minimize`` callback that
+                stops the solve early (raising ``StopIteration``) once the current iterate's ``|iota|`` drops
+                below ``iota_collapse_fraction * |iota_reference|``. The returned result is then marked
+                unsuccessful and tagged with ``'iota_collapsed': True``. This guards against the runaway solve
+                that walks toward the trivial magnetic axis when there is no nearby nested surface. Defaults to
+                None, which disables the callback entirely and preserves legacy behavior byte-for-byte.
+            iota_reference (float, Optional): The reference ``iota`` (typically the warm-start value) against
+                which ``iota_collapse_fraction`` is measured. Defaults to None, in which case the initial guess
+                ``iota`` is used. Only consulted when ``iota_collapse_fraction`` is set.
+
         Returns:
             res (dict): A dictionary containing the results of the optimization. The dictionary contains the following keys in addition
             to others:
@@ -539,6 +563,7 @@ class BoozerSurface(Optimizable):
                 - 'G': the value of G on the surface
                 - 's': the surface object
                 - 'iota': the value of iota on the surface
+                - 'iota_collapsed': True if the solve was stopped early by the iota-collapse guard, else False
                 - 'weight_inv_modB': the value of weight_inv_modB used in the optimization
                 - 'type': the type of optimization used
 
@@ -562,12 +587,31 @@ class BoozerSurface(Optimizable):
             options['maxcor'] = 200
             options['ftol'] = tol
 
+        # Default (iota_collapse_fraction is None) => no callback => byte-identical legacy behavior.
+        callback = None
+        if iota_collapse_fraction is not None:
+            # iota occupies index -1 of the DOF vector when G is fixed, and index -2 when G is a DOF.
+            iota_index = -1 if G is None else -2
+            ref = iota if iota_reference is None else iota_reference
+            iota_floor = abs(iota_collapse_fraction) * abs(ref)
+
+            def callback(intermediate_result):
+                # scipy>=1.15 modern protocol: ``intermediate_result`` is an OptimizeResult whose ``.x``
+                # is the current iterate. Raising StopIteration halts the solve gracefully and returns the
+                # best-so-far result with ``success=False`` and ``status=99``.
+                if abs(intermediate_result.x[iota_index]) < iota_floor:
+                    raise StopIteration
+
         res = minimize(
             fun, x, jac=True, method=method,
-            options=options)
+            options=options, callback=callback)
+
+        # status == 99 is scipy's signal that the callback raised StopIteration (only reachable when the
+        # iota-collapse guard is armed). Treat it as a detected collapse rather than ordinary convergence.
+        iota_collapsed = bool(getattr(res, "status", None) == 99)
 
         resdict = {
-            "fun": res.fun, "gradient": res.jac, "iter": res.nit, "info": res, "success": res.success, "G": None, 'weight_inv_modB': weight_inv_modB, 'type': 'ls'
+            "fun": res.fun, "gradient": res.jac, "iter": res.nit, "info": res, "success": res.success, "G": None, 'weight_inv_modB': weight_inv_modB, 'type': 'ls', 'iota_collapsed': iota_collapsed
         }
         if G is None:
             s.set_dofs(res.x[:-1])
