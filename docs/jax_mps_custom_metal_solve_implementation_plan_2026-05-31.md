@@ -24,7 +24,7 @@ This file is an execution plan, not a performance claim. Current measurements st
 
 ## Current Context
 
-- Confirmed: `simsopt-jax` owns the public contract and routing in `src/simsopt/jax_core/mps_boozer_kernel_contract.py`. The current target name is `mps.simsopt_boozer_value_grad`, and schema version 4 supports `solver_mode="full_solve"`.
+- Confirmed: `simsopt-jax` owns the public contract and routing in `src/simsopt/jax_core/mps_boozer_kernel_contract.py`. The current target name is `mps.simsopt_boozer_value_grad`, and schema version 4 supports `mps_solver_mode="full_solve"`.
 - Confirmed: `jax-mps` owns the backend implementation in `/Users/suhjungdae/code/opensource/jax-mps/src/pjrt_plugin/ops/simsopt_custom_call.cc`.
 - Confirmed: the current `full_solve` code is not a direct Metal solve. It still calls MLX AD and dense linear algebra:
   - `BoozerFullStateValueGrad` uses `mlx::core::vjp`.
@@ -33,6 +33,18 @@ This file is an execution plan, not a performance claim. Current measurements st
   - `BoozerFullStateDenseLevenbergMarquardtStep` forms a dense Jacobian, normal matrix, and right-hand side.
   - `BoozerFullStateImplicitCoilGradient` again uses MLX `vjp` for stationarity pullback.
 - Confirmed: the latest saved maxiter=1 rerun cleared the old crash but did not pass end-to-end optimizer acceptance. It was a residual-only fixture run (`experimental_mps_boozer_residual_only_fixture=true`), so its CPU outer optimizer at about 3.57 s, MPS custom at about 40.64 s, and MPS float32 reference at about 78.13 s are bootstrap-regression numbers, not full single-stage acceptance numbers.
+- Confirmed: the saved rerun artifact stores these fields under nested JSON paths, not as top-level keys:
+  - `/provenance/experimental_mps_boozer_residual_only_fixture = true`
+  - `/timings/cpu_outer_optimizer_s = 3.5726914170081727`
+  - `/timings/jax_outer_optimizer_s = 40.63711470802082`
+  - `/timings/mps_float32_reference_outer_optimizer_s = 78.12672462494811`
+  - `/timings/jax_while_profile_scalar_condition_reads = 924`
+  - `/timings/jax_while_profile_while_record_count = 95`
+  - `/timings/jax_while_profile_loop_trips = 829`
+  - `/jax_mps_while_profiles/jax/pjrt_execute_record_count = 645597`
+  - `/jax_mps_while_profiles/jax/loop_trips = 829`
+  - `/jax_mps_while_profiles/jax/scalar_condition_reads = 924`
+  - `/passed = false`, with failures showing that the JAX single-stage outer-loop probe and the MPS custom-kernel float32 reference did not accept an optimizer step.
 - Confirmed: the same rerun still recorded very high dispatch/synchronization pressure: about 645,597 PJRT execute records, 95 while records, 829 loop trips, and 924 scalar condition reads.
 - Confirmed: current MPS custom work shows a useful subpath signal versus stock MPS, but not an end-to-end MPS-over-CPU win.
 - Confirmed from official docs:
@@ -74,7 +86,7 @@ The plan is staged because a single monolithic fused solve is too large to debug
    - [ ] Extend `tests/test_simsopt_custom_call.py` to assert which backend path ran, so tests cannot pass accidentally through the old MLX-composed full solve.
 
 3. Implement direct residual and objective kernels
-   - [ ] Port the Boozer residual evaluation used by `BoozerFullStateResidualObjective` to Metal/extension kernels for the current schema-4 payload.
+   - [ ] Port the Boozer residual evaluation used by the full-state value/gradient path (`BoozerFullStateScaledResidual`, built on `BoozerResidualVector`, with the residual norm from `BoozerFullStateUnscaledResidualNorm`) to Metal/extension kernels for the current schema-4 payload.
    - [ ] Include reductions for residual norm, objective value, gradient norm diagnostics, and finite checks on device.
    - [ ] Compare direct-kernel residual/objective outputs against the existing NumPy/JAX/MLX oracle for fixed small fixtures.
    - [ ] Replace the current MLX residual/objective calls in the production custom path after parity passes.
@@ -86,7 +98,7 @@ The plan is staged because a single monolithic fused solve is too large to debug
    - [ ] Add finite-difference and oracle-vector tests that compare `Jv` and `J^T v` against the existing dense-Jacobian fixture within float32 tolerances.
 
 5. Replace dense LM step with device-side matrix-free LM/CG
-   - [ ] Remove production dependence on `BoozerFullStateDenseJacobian` for `solver_mode="full_solve"`.
+   - [ ] Remove production dependence on `BoozerFullStateDenseJacobian` for `mps_solver_mode="full_solve"`.
    - [ ] Remove production dependence on `SolveDensePositiveDefiniteSystem` and its `mlx::core::Device::cpu` triangular solves.
    - [ ] Implement a bounded device-side CG or LM-CG loop using the direct `Jv`, `J^T v`, damping, and reductions.
    - [ ] Keep loop trip counts bounded by the existing contract fields and return explicit `converged`, `finite`, `newton_iteration_count`, and `gmres_iteration_count` status.
@@ -111,6 +123,17 @@ The plan is staged because a single monolithic fused solve is too large to debug
    - [ ] Promote performance claims only when the artifact passes acceptance gates and includes timing plus profiling counters.
 
 ## Validation Plan
+
+- [ ] Record source and disk preflight before running builds or benchmarks:
+
+  ```bash
+  git -C /Users/suhjungdae/code/columbia/simsopt-jax status --short
+  git -C /Users/suhjungdae/code/opensource/jax-mps status --short
+  df -h / /Users/suhjungdae /tmp /Users/suhjungdae/.cache/uv
+  du -sh ~/.cache/uv /tmp/jax-mps-deps-build /Users/suhjungdae/.local/jax-mps-deps .artifacts runs 2>/dev/null
+  ```
+
+  Treat dirty worktree measurements as dirty-tree artifacts: record the exact diff or commit provenance for both repos before comparing timings. Near-full local disk is a validation blocker because `uv`, CMake, profiling, and benchmark artifact writes all need free space. `~/.cache/uv` and `/tmp/jax-mps-deps-build` are regenerable cache/build-scratch paths; `/Users/suhjungdae/.local/jax-mps-deps` is an installed dependency prefix and should not be deleted unless the rebuild cost is acceptable.
 
 - [ ] In `/Users/suhjungdae/code/opensource/jax-mps`, build the plugin:
 
@@ -183,6 +206,11 @@ The plan is staged because a single monolithic fused solve is too large to debug
   ```
 
 - [ ] Parse the residual-only maxiter=1 JSON and require:
+  - `/provenance/experimental_mps_boozer_residual_only_fixture` is `true`,
+  - `/passed` is `true`; if it is `false`, copy `/failures` into the validation note and do not make a performance claim,
+  - `/timings/cpu_outer_optimizer_s`, `/timings/jax_outer_optimizer_s`, and `/timings/mps_float32_reference_outer_optimizer_s` are present,
+  - `/timings/jax_while_profile_scalar_condition_reads`, `/timings/jax_while_profile_while_record_count`, and `/timings/jax_while_profile_loop_trips` are present,
+  - `/jax_mps_while_profiles/jax/pjrt_execute_record_count`, `/jax_mps_while_profiles/jax/loop_trips`, and `/jax_mps_while_profiles/jax/scalar_condition_reads` are present,
   - same-candidate replay passes,
   - the target optimizer accepts a step; if it does not, record the artifact as blocked and do not make a performance claim,
   - custom MPS outer optimizer improves materially over the current residual-only about-40.64 s maxiter=1 custom baseline,
@@ -232,17 +260,18 @@ The plan is staged because a single monolithic fused solve is too large to debug
 - Risk: performance improves versus stock MPS but remains slower than CPU.
   Mitigation: treat that as partial progress only. Completion requires reducing dispatch/host-sync counters and showing a credible path toward CPU parity or better.
 
-- Risk: large profiling logs exhaust local disk.
-  Mitigation: keep structured JSON summaries, cap raw logs, and delete raw traces after extracting timing/counter evidence.
+- Risk: near-full local disk or large profiling logs block `uv` hooks, CMake builds, or benchmark artifact writes before validation completes.
+  Mitigation: run the disk preflight first, keep structured JSON summaries, cap raw logs, clear only regenerable cache/build-scratch paths when needed, and record any pruned paths in the validation note.
 
 ## Completion Criteria
 
 - [ ] `jax-mps` contains a native Metal or compiled-extension SIMSOPT solve path with no Python MLX sidecar.
-- [ ] Production `solver_mode="full_solve"` no longer calls MLX dense-column `jvp`, MLX `vjp`, or CPU triangular solve for the hot solve/value-gradient path.
+- [ ] Production `mps_solver_mode="full_solve"` no longer calls MLX dense-column `jvp`, MLX `vjp`, or CPU triangular solve for the hot solve/value-gradient path.
 - [ ] `simsopt-jax` contract tests and focused single-stage routing tests pass against the rebuilt local plugin.
 - [ ] residual-only maxiter=1 same-candidate replay passes with explicit custom-backend evidence and materially lower dispatch counters than the current residual-only baseline.
 - [ ] full single-stage maxiter=1 same-candidate replay passes, accepts a target optimizer step, and reports no CPU linear solve in the custom path.
 - [ ] full single-stage maxiter=3 custom MPS artifact passes acceptance gates and is compared against CPU and stock MPS float32 reference.
+- [ ] Final performance artifacts record source provenance for both repos, including whether each timing came from a clean or dirty worktree.
 - [ ] Documentation distinguishes proven performance from expected performance and records any remaining CPU-over-MPS gap honestly.
 
 ## Open Questions
