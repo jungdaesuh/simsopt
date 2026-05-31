@@ -6659,6 +6659,99 @@ class IotaShearShortfallTests(_ModuleTestCase):
             *self._base_total_objective_args(), JShear=shear, SHEAR_WEIGHT=10.0
         )
         self.assertAlmostEqual(with_shear.J() - baseline.J(), 10.0 * shear.J())
-        np.testing.assert_allclose(
-            with_shear.dJ() - baseline.dJ(), 10.0 * shear.dJ()
+        np.testing.assert_allclose(with_shear.dJ() - baseline.dJ(), 10.0 * shear.dJ())
+
+    def test_evaluate_base_objective_adds_weighted_shear_term(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        shear = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
+        baseline = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            include_diagnostics=False,
         )
+        with_shear = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JShear=shear,
+            SHEAR_WEIGHT=10.0,
+            include_diagnostics=False,
+        )
+
+        self.assertAlmostEqual(with_shear["total"] - baseline["total"], 5.0)
+        np.testing.assert_allclose(
+            with_shear["grad"] - baseline["grad"],
+            [2.5, -7.5],
+        )
+
+        thresholded = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            alm_formulation="thresholded_physics",
+            JShear=shear,
+            SHEAR_WEIGHT=10.0,
+            include_diagnostics=False,
+        )
+
+        self.assertAlmostEqual(thresholded["total"], 5.0)
+        np.testing.assert_allclose(thresholded["grad"], [2.5, -7.5])
+
+        diagnostics = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JShear=shear,
+            SHEAR_WEIGHT=10.0,
+        )
+        self.assertTrue(diagnostics["shear_objective_enabled"])
+        self.assertAlmostEqual(diagnostics["shear_weight"], 10.0)
+        self.assertAlmostEqual(diagnostics["J_shear"], 0.5)
+        np.testing.assert_allclose(diagnostics["dJ_shear"], [0.25, -0.75])
+
+        off_diagnostics = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JShear=shear,
+            SHEAR_WEIGHT=0.0,
+        )
+        self.assertFalse(off_diagnostics["shear_objective_enabled"])
+        self.assertAlmostEqual(off_diagnostics["J_shear"], 0.5)
+        np.testing.assert_allclose(off_diagnostics["dJ_shear"], [0.25, -0.75])

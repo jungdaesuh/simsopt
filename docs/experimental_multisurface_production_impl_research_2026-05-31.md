@@ -132,8 +132,12 @@ contract still deliberately exposes weaker runtime guarantees:
    it is not a general N-surface solver (`surface_mode_contracts.py:26-29`,
    `:107-154`).
 4. Iota and volume remain outer-surface primary controls by default, while QS
-   and Boozer residual aggregate across surfaces. Shear exists, but only as an
-   opt-in objective term.
+   and Boozer residual aggregate across surfaces. Shear exists as an opt-in
+   objective term, but a follow-up review found the term was previously
+   disconnected from the descended search objective despite being present in the
+   assembled `JF` graph. The current checkout wires it through the penalty search
+   path and ALM evaluator, with regression coverage; the empirical shear
+   falsification test still needs to be rerun.
 5. The search policy is continuation-gated. This is intentional, but production
    needs a reproducible acceptance contract around `accepted_iterations`,
    `gate_scale`, gap thresholds, topology-gate failures, and collapse rejections.
@@ -202,17 +206,26 @@ Production options:
 
 The preferred path is cleaner if the mode is to become a real production lane.
 
-### 3. Shear Is Implemented But Not Yet Production Telemetry
+### 3. Shear Objective Wiring And Production Telemetry
 
 Current:
-`IotaShearShortfall` exists and is default-off. Run metadata already records
-`INITIAL_SURFACE_IOTAS`, `FINAL_SURFACE_IOTAS`, and interior low-order-rational
-diagnostics (`single_stage_geometry.py:1501-1548`;
+`IotaShearShortfall` exists and is default-off. A follow-up review found that
+`--shear-weight` was parsed and `JShear` was included in the assembled `JF`, but
+the optimizer-facing `evaluate_search_objective` path rebuilt a separate
+objective that did not include the weighted shear term. That made shear-enabled
+lanes baseline-equivalent before the wiring fix. The current checkout now passes
+`JShear` and `SHEAR_WEIGHT` through `evaluate_total_objective`,
+`evaluate_base_objective`, and the ALM path, and tests prove the search gradient
+changes when `SHEAR_WEIGHT > 0`.
+
+Run metadata already records `INITIAL_SURFACE_IOTAS`, `FINAL_SURFACE_IOTAS`, and
+interior low-order-rational diagnostics (`single_stage_geometry.py:1501-1548`;
 `tests/geo/test_single_stage_example.py:13466-13560`).
 
 Production change:
-do not duplicate the existing iota arrays. Add these derived shear-specific
-fields whenever `len(surface_data) >= 2`:
+keep the objective wiring regression tests, then do not duplicate the existing
+iota arrays. Add these derived shear-specific fields whenever
+`len(surface_data) >= 2`:
 
 - `FINAL_IOTA_SPREAD`
 - `FINAL_IOTA_SPREAD_ABS`
@@ -347,9 +360,9 @@ two-surface continuation lane.
 
 - Promote shear telemetry to first-class output whenever two surfaces exist.
 - Keep `--shear-weight=0` default-off.
-- Keep the existing reduced objective tests that prove `JShear` changes the
-  objective by exactly `SHEAR_WEIGHT * JShear`; add serialization tests for the
-  active/inactive shear telemetry fields.
+- Keep the reduced objective tests and optimizer-facing search-path tests that
+  prove `JShear` changes the objective by exactly `SHEAR_WEIGHT * JShear`; add
+  serialization tests for the active/inactive shear telemetry fields.
 
 ### Phase 5: Low-Iota Launch Policy
 
@@ -391,13 +404,61 @@ Then run at least:
 
 ## Missing Evidence
 
-The pasted "6-lane lever matrix" result was not found as tracked source text in
-this checkout during source search. Treat that as external run evidence until
-the actual artifact directory is inspected. It can be used for motivation, not
-as a current-checkout production proof.
+The "6-lane lever matrix" referenced for motivation is not tracked source text in
+this checkout; it lives in a separate repository (autoresearch). It has now been
+inspected directly -- see "External Evidence Update" below -- so it can be cited
+as external run evidence, but it remains external to this checkout and is not a
+current-checkout production proof.
+
+## External Evidence Update
+
+The external `runs/box_lever_matrix_2026-05-28` artifact (autoresearch repo) was
+inspected and confirms that plain `experimental_multisurface` did NOT improve
+default-mode Poincare survival: control and multisurface both remain at 28/50.
+The multisurface lane moved final iota from 0.149397 to 0.154399 and modestly
+increased KAM median width from 0.120876 to 0.127546, but this did not break the
+default-mode confinement cap.
+
+Implication for this plan: the multisurface *mode itself* is not the confinement
+lever -- its only unproven physics lever is the opt-in `IotaShearShortfall` term.
+Because `--shear-weight` was previously disconnected from the descended objective,
+any old shear-enabled lane that used this path must be treated as invalid for the
+physics question. Productionizing the mode (Phases 2-6) is therefore gated on a
+fresh cheap shear falsification test after the wiring fix, not assumed to pay off.
+See "Recommended Next Step".
 
 ## Recommended Next Step
 
-Implement Phase 1 first. It is low-risk, keeps all behavior centralized, and
-turns the biggest production smell (`surface_mode_runtime_supported` always
-passing) into a real fail-closed contract without touching numerical behavior.
+Revise priority to "minimum hygiene now, full production hardening only after
+shear proves it moves confinement". Concretely, in order:
+
+1. Do now (cheap hygiene, removes a real failure). Fix the fixture drift (add
+   `topology_scorer_min_returns` to the `SimpleNamespace` fixture at
+   `tests/geo/test_surface_mode_contracts.py:194`) and implement Phase 1:
+   replace the no-op `surface_mode_runtime_supported` with a real fail-closed
+   capability audit. Both are low-risk and touch no numerical behavior.
+
+2. Do BEFORE any of Phases 2-6 -- a fresh cheap shear falsification test using
+   the fixed search-objective wiring. Run `experimental_multisurface` with
+   `--shear-weight > 0` from a relevant seed under the low-iota anti-collapse
+   launch policy (`repair_first`, tiny trust radius, iota-collapse guard active).
+   Design it so it cannot be fooled:
+   - Baseline must be the SAME mode with `--shear-weight=0` (the known 28/50
+     multisurface result), NOT `single_surface` -- so any gain is attributable
+     to the shear term, not to the multisurface mode (which the External
+     Evidence Update shows is null on Poincare: 28 -> 28).
+   - Success = a material gain in DIRECT default-mode Poincare survival beyond
+     28/50, NOT merely higher KAM width or iota spread (the lever matrix already
+     moved those without moving Poincare).
+   - Guard against trading walls: shear is double-edged (separate operating-range
+     evidence shows global shear narrows the strict-HW window). Record poloidal
+     extent and LCFS major radius alongside Poincare; a "gain" that regresses the
+     HW caps is not a win.
+
+3. Only if step 2 shows a real, HW-clean confinement gain: proceed with Phases
+   3-5 (multisurface refinement/certification, first-class shear telemetry,
+   low-iota launch policy) to make the lever reproducible and auditable.
+
+4. Defer Phases 2 and 6 (checkpoint telemetry, full empirical signoff) until the
+   physics lever is proven useful -- valuable for production triage, but not on
+   the critical path before step 2.

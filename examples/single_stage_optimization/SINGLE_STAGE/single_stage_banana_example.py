@@ -6875,6 +6875,8 @@ def evaluate_total_objective(
     width_max_threshold=None,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
+    JShear=None,
+    SHEAR_WEIGHT=0.0,
 ):
     """Evaluate the fixed descended objective and surface-weighted diagnostics.
 
@@ -6933,6 +6935,8 @@ def evaluate_total_objective(
             LINKING_WEIGHT=globals().get("LINKING_WEIGHT", 0.0),
             JCoilForce=globals().get("JCoilForce"),
             FORCE_WEIGHT=globals().get("FORCE_WEIGHT", 0.0),
+            JShear=JShear,
+            SHEAR_WEIGHT=SHEAR_WEIGHT,
         ),
         alm_formulation="weighted_sum",
     )
@@ -6968,6 +6972,8 @@ def evaluate_base_objective(
         JNonQSObjective=objective_terms["JNonQSObjective"],
         JBoozerObjective=objective_terms["JBoozerObjective"],
         JResidueObjective=globals().get("JResidueObjective"),
+        JShear=globals().get("JShear"),
+        SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
         include_diagnostics=include_diagnostics,
     )
 
@@ -7081,6 +7087,8 @@ def evaluate_alm_objective(
             LINKING_WEIGHT=globals().get("LINKING_WEIGHT", 0.0),
             JCoilForce=globals().get("JCoilForce"),
             FORCE_WEIGHT=globals().get("FORCE_WEIGHT", 0.0),
+            JShear=globals().get("JShear"),
+            SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
             include_diagnostics=include_diagnostics,
         ),
         alm_formulation=args.alm_formulation,
@@ -7137,6 +7145,8 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             JCurveSelfIntersect=JCurveSelfIntersect,
             SELFINT_WEIGHT=SINGLE_STAGE_SELFINT_WEIGHT,
+            JShear=globals().get("JShear"),
+            SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
         )
     )
 

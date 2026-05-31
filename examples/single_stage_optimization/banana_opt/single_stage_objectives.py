@@ -327,6 +327,28 @@ def _optional_objective_value_and_gradient(
     return float(objective.J()), _objective_gradient(objective, objective_optimizable)
 
 
+def _optional_weighted_objective_terms(
+    objective,
+    weight,
+    reference_grad,
+    objective_optimizable,
+):
+    value, grad = _optional_objective_value_and_gradient(
+        objective,
+        reference_grad,
+        objective_optimizable,
+    )
+    objective_weight = float(weight)
+    return (
+        value,
+        grad,
+        objective_weight,
+        objective is not None and objective_weight != 0.0,
+        objective_weight * value,
+        objective_weight * grad,
+    )
+
+
 def _optional_objective_payload(objective):
     if objective is None:
         return None
@@ -473,6 +495,8 @@ def evaluate_total_objective(
     LINKING_WEIGHT=0.0,
     JCoilForce=None,
     FORCE_WEIGHT=0.0,
+    JShear=None,
+    SHEAR_WEIGHT=0.0,
 ):
     (
         raw_J_QS_obj,
@@ -520,6 +544,8 @@ def evaluate_total_objective(
         LINKING_WEIGHT=LINKING_WEIGHT,
         JCoilForce=JCoilForce,
         FORCE_WEIGHT=FORCE_WEIGHT,
+        JShear=JShear,
+        SHEAR_WEIGHT=SHEAR_WEIGHT,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
     constraint_names, constraint_values = _penalty_search_constraint_payload(
@@ -547,6 +573,19 @@ def evaluate_total_objective(
     )
     residue_value, residue_grad = _optional_objective_value_and_gradient(
         JResidueObjective,
+        total_grad,
+        objective_optimizable,
+    )
+    (
+        shear_value,
+        shear_grad,
+        shear_weight,
+        shear_objective_enabled,
+        _,
+        _,
+    ) = _optional_weighted_objective_terms(
+        JShear,
+        SHEAR_WEIGHT,
         total_grad,
         objective_optimizable,
     )
@@ -639,6 +678,10 @@ def evaluate_total_objective(
                 if JCoilForce is None
                 else _objective_gradient(JCoilForce, objective_optimizable)
             ),
+            "J_shear": shear_value,
+            "dJ_shear": shear_grad,
+            "shear_weight": shear_weight,
+            "shear_objective_enabled": shear_objective_enabled,
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
             "residue_objective_enabled": JResidueObjective is not None,
@@ -685,6 +728,8 @@ def evaluate_base_objective(
     LINKING_WEIGHT=0.0,
     JCoilForce=None,
     FORCE_WEIGHT=0.0,
+    JShear=None,
+    SHEAR_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     if _surface_pair is not None:
@@ -718,16 +763,31 @@ def evaluate_base_objective(
         base_objective = base_objective + LINKING_WEIGHT * JLinkingNumber
     if JCoilForce is not None:
         base_objective = base_objective + FORCE_WEIGHT * JCoilForce
-    physics_terms_total = float(base_objective.J())
-    physics_grad = _objective_gradient(base_objective, objective_optimizable)
+    base_physics_terms_total = float(base_objective.J())
+    base_physics_grad = _objective_gradient(base_objective, objective_optimizable)
+    (
+        shear_value,
+        shear_grad,
+        shear_weight,
+        shear_objective_enabled,
+        weighted_shear_value,
+        weighted_shear_grad,
+    ) = _optional_weighted_objective_terms(
+        JShear,
+        SHEAR_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
+    physics_terms_total = base_physics_terms_total + weighted_shear_value
+    physics_grad = base_physics_grad + weighted_shear_grad
     residue_value, residue_grad = _optional_objective_value_and_gradient(
         JResidueObjective,
         physics_grad,
         objective_optimizable,
     )
     if alm_formulation == "thresholded_physics":
-        total = residue_value
-        grad = residue_grad
+        total = residue_value + weighted_shear_value
+        grad = residue_grad + weighted_shear_grad
     elif alm_formulation == "weighted_sum":
         total = physics_terms_total + residue_value
         grad = physics_grad + residue_grad
@@ -771,6 +831,10 @@ def evaluate_base_objective(
             "dJ_volume": volume_grad,
             "J_len": float(JCurveLength.J()),
             "dJ_len": _objective_gradient(JCurveLength, objective_optimizable),
+            "J_shear": shear_value,
+            "dJ_shear": shear_grad,
+            "shear_weight": shear_weight,
+            "shear_objective_enabled": shear_objective_enabled,
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
             "residue_objective_enabled": JResidueObjective is not None,
@@ -1009,6 +1073,8 @@ def evaluate_alm_objective(
     LINKING_WEIGHT=0.0,
     JCoilForce=None,
     FORCE_WEIGHT=0.0,
+    JShear=None,
+    SHEAR_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     raw_surface_pair = _surface_objective_pair(diagnostic_surface_weights, nonQSs, brs)
@@ -1038,6 +1104,8 @@ def evaluate_alm_objective(
         LINKING_WEIGHT=LINKING_WEIGHT,
         JCoilForce=JCoilForce,
         FORCE_WEIGHT=FORCE_WEIGHT,
+        JShear=JShear,
+        SHEAR_WEIGHT=SHEAR_WEIGHT,
         include_diagnostics=include_diagnostics,
     )
 
@@ -1656,9 +1724,7 @@ def evaluate_alm_objective(
             if JLinkingNumber is None
             else _objective_gradient(JLinkingNumber, objective_optimizable)
         )
-        base_eval["J_coil_force"] = (
-            0.0 if JCoilForce is None else float(JCoilForce.J())
-        )
+        base_eval["J_coil_force"] = 0.0 if JCoilForce is None else float(JCoilForce.J())
         base_eval["dJ_coil_force"] = (
             np.zeros_like(base_eval["grad"])
             if JCoilForce is None

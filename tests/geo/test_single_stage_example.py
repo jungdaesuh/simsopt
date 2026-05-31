@@ -11939,6 +11939,8 @@ class HardwareConstraintTests(unittest.TestCase):
         module.CS_WEIGHT = 5.0
         module.JCurvature = "curvature"
         module.CURVATURE_WEIGHT = 6.0
+        module.JShear = "shear"
+        module.SHEAR_WEIGHT = 7.0
 
         with patch.object(
             module,
@@ -11953,6 +11955,67 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertFalse(result["diagnostics_included"])
         self.assertFalse(evaluate_mock.call_args.kwargs["include_diagnostics"])
+        self.assertEqual(evaluate_mock.call_args.kwargs["JShear"], "shear")
+        self.assertEqual(evaluate_mock.call_args.kwargs["SHEAR_WEIGHT"], 7.0)
+
+    def test_evaluate_search_objective_penalty_includes_weighted_shear_gradient(self):
+        module = self.load_module()
+        zero = FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        shear = FakeAlgebraicObjective(0.5, [0.25, -0.75])
+
+        module.SINGLE_STAGE_GOAL_MODE = "target"
+        module.FRONTIER_GOAL_CONFIG = None
+        module.CONSTRAINT_METHOD = "penalty"
+        module.nonQSs = [zero]
+        module.brs = [zero]
+        module.RES_WEIGHT = 0.0
+        module.Jiota = zero
+        module.IOTAS_WEIGHT = 0.0
+        module.JCurveLength = zero
+        module.LENGTH_WEIGHT = 0.0
+        module.JCurveCurve = zero
+        module.CC_WEIGHT = 0.0
+        module.JCurveSurface = zero
+        module.CS_WEIGHT = 0.0
+        module.JCurvature = zero
+        module.CURVATURE_WEIGHT = 0.0
+        module.JPoloidalExtent = None
+        module.JCurveLengthMin = None
+        module.JCoilWidth = None
+        module.JCurveSelfIntersect = None
+        module.JResidueObjective = None
+        module.JMeanSquaredCurvature = None
+        module.JArclengthVariation = None
+        module.JLinkingNumber = None
+        module.JCoilForce = None
+        module.JF = SimpleNamespace()
+
+        module.JShear = None
+        module.SHEAR_WEIGHT = 10.0
+        baseline = module.evaluate_search_objective(
+            np.array([1.0]),
+            include_diagnostics=False,
+        )
+
+        module.JShear = shear
+        with_shear = module.evaluate_search_objective(
+            np.array([1.0]),
+            include_diagnostics=False,
+        )
+
+        self.assertAlmostEqual(with_shear["total"] - baseline["total"], 5.0)
+        np.testing.assert_allclose(
+            with_shear["grad"] - baseline["grad"],
+            [2.5, -7.5],
+        )
+        diagnostics = module.evaluate_search_objective(
+            np.array([1.0]),
+            include_diagnostics=True,
+        )
+        self.assertTrue(diagnostics["shear_objective_enabled"])
+        self.assertAlmostEqual(diagnostics["shear_weight"], 10.0)
+        self.assertAlmostEqual(diagnostics["J_shear"], 0.5)
+        np.testing.assert_allclose(diagnostics["dJ_shear"], [0.25, -0.75])
 
     def test_build_total_objective_skips_missing_volume_term(self):
         module = self.load_module()
@@ -15764,6 +15827,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module.curvelength = zero
         module.length_target = 1.9
         module.JF = SimpleNamespace(x=np.array([0.0]))
+        module.JShear = "shear"
+        module.SHEAR_WEIGHT = 9.0
         module.args = SimpleNamespace(
             alm_formulation="weighted_sum",
             alm_qs_threshold=1.0,
@@ -15776,6 +15841,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
         def fake_evaluate_alm_objective_impl(*_args, **kwargs):
             self.assertIs(kwargs["curves"], banana_objective_curves)
             self.assertIsNot(kwargs["curves"], all_field_curves)
+            self.assertEqual(kwargs["JShear"], "shear")
+            self.assertEqual(kwargs["SHEAR_WEIGHT"], 9.0)
             return {
                 "total": 1.0,
                 "grad": np.array([0.0]),
