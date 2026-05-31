@@ -3,6 +3,7 @@ import sys
 import unittest
 import uuid
 import warnings
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -134,7 +135,110 @@ class SurfaceModeContractTests(unittest.TestCase):
             module.surface_mode_surface_names(contract),
             ("inner0", "inner1", "outer"),
         )
+        self.assertFalse(contract.requires_inner_surface_ratio)
+        self.assertEqual(
+            contract.surface_count_policy,
+            module.SURFACE_COUNT_POLICY_PUBLISHED_FIXED_STACK_V1,
+        )
+        self.assertEqual(
+            contract.final_refinement_policy,
+            module.FINAL_REFINEMENT_POLICY_UNSUPPORTED,
+        )
+        self.assertEqual(contract.current_policy, module.CURRENT_POLICY_VACUUM_LOCKED)
+        self.assertEqual(contract.topology_policy, module.TOPOLOGY_POLICY_SEARCH_GATE)
+        self.assertEqual(
+            contract.production_support_level,
+            module.PRODUCTION_SUPPORT_LEVEL_PUBLISHED_V1,
+        )
         module.validate_surface_mode_runtime_support(contract)
+
+    def test_experimental_multisurface_contract_has_fail_closed_runtime_policy(self):
+        module = load_surface_mode_contracts_module()
+
+        contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.EXPERIMENTAL_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.72,
+        )
+        metadata = module.build_surface_mode_metadata(contract)
+
+        self.assertTrue(contract.requires_inner_surface_ratio)
+        self.assertEqual(
+            contract.surface_count_policy,
+            module.SURFACE_COUNT_POLICY_EXPERIMENTAL_TWO_SURFACES,
+        )
+        self.assertEqual(
+            contract.final_refinement_policy,
+            module.FINAL_REFINEMENT_POLICY_UNSUPPORTED,
+        )
+        self.assertEqual(contract.current_policy, module.CURRENT_POLICY_INHERIT_STAGE2)
+        self.assertEqual(contract.topology_policy, module.TOPOLOGY_POLICY_SEARCH_GATE)
+        self.assertEqual(
+            contract.production_support_level,
+            module.PRODUCTION_SUPPORT_LEVEL_EXPERIMENTAL,
+        )
+        self.assertEqual(
+            metadata["SURFACE_MODE_TELEMETRY_SCHEMA_VERSION"],
+            module.SURFACE_MODE_TELEMETRY_SCHEMA_VERSION_V1,
+        )
+        module.validate_surface_mode_runtime_support(contract)
+
+    def test_runtime_support_rejects_contract_policy_drift(self):
+        module = load_surface_mode_contracts_module()
+        contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.EXPERIMENTAL_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.72,
+        )
+        broken = replace(
+            contract,
+            surface_count_policy=module.SURFACE_COUNT_POLICY_SINGLE_SURFACE,
+        )
+
+        self.assertFalse(module.surface_mode_runtime_supported(broken))
+        with self.assertRaisesRegex(ValueError, "surface_count_policy"):
+            module.validate_surface_mode_runtime_support(broken)
+
+    def test_runtime_support_rejects_experimental_surface_shape_drift(self):
+        module = load_surface_mode_contracts_module()
+        contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.EXPERIMENTAL_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.72,
+        )
+        broken = replace(contract, label_fractions=(1.0,), weights=(1.0,))
+
+        self.assertFalse(module.surface_mode_runtime_supported(broken))
+        with self.assertRaisesRegex(ValueError, "num_surfaces"):
+            module.validate_surface_mode_runtime_support(broken)
+
+    def test_contract_capability_helpers_fail_closed_on_policy_drift(self):
+        module = load_surface_mode_contracts_module()
+        single_surface_contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.SINGLE_SURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.72,
+        )
+        no_refinement_contract = replace(
+            single_surface_contract,
+            final_refinement_policy=module.FINAL_REFINEMENT_POLICY_UNSUPPORTED,
+        )
+        experimental_contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.EXPERIMENTAL_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.72,
+        )
+        no_topology_contract = replace(
+            experimental_contract,
+            topology_policy=module.TOPOLOGY_POLICY_UNSUPPORTED,
+        )
+
+        self.assertFalse(
+            module.surface_mode_supports_boozer_stage_refinement(no_refinement_contract)
+        )
+        self.assertFalse(
+            module.surface_mode_supports_topology_gate(no_topology_contract)
+        )
 
     def test_alm_supports_all_surface_modes(self):
         module = load_surface_mode_contracts_module()
@@ -248,6 +352,7 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             topology_scorer_every=0,
             topology_scorer_nfieldlines=12,
             topology_scorer_tmax=50.0,
+            topology_scorer_min_returns=256,
             confinement_objective_weight=0.0,
             confinement_surrogate_worst_k=3,
             confinement_surrogate_early_threshold=0.2,

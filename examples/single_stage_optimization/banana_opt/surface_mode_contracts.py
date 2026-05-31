@@ -23,6 +23,25 @@ SURFACE_STACK_POLICY_SINGLE_SURFACE_DIRECT = "single_surface_direct"
 SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK = "published_fixed_stack"
 SURFACE_STACK_POLICY_EXPERIMENTAL_CONTINUATION_STACK = "experimental_continuation_stack"
 
+SURFACE_COUNT_POLICY_SINGLE_SURFACE = "single_surface"
+SURFACE_COUNT_POLICY_EXPERIMENTAL_TWO_SURFACES = "experimental_two_surfaces"
+SURFACE_COUNT_POLICY_PUBLISHED_FIXED_STACK_V1 = "published_fixed_stack_v1"
+
+FINAL_REFINEMENT_POLICY_BOOZER_STAGE = "boozer_stage_refinement"
+FINAL_REFINEMENT_POLICY_UNSUPPORTED = "unsupported"
+
+CURRENT_POLICY_INHERIT_STAGE2 = "inherit_stage2"
+CURRENT_POLICY_VACUUM_LOCKED = "vacuum_locked"
+
+TOPOLOGY_POLICY_UNSUPPORTED = "unsupported"
+TOPOLOGY_POLICY_SEARCH_GATE = "search_gate"
+
+SURFACE_MODE_TELEMETRY_SCHEMA_VERSION_V1 = 1
+
+PRODUCTION_SUPPORT_LEVEL_PRODUCTION = "production"
+PRODUCTION_SUPPORT_LEVEL_PUBLISHED_V1 = "published_v1"
+PRODUCTION_SUPPORT_LEVEL_EXPERIMENTAL = "experimental"
+
 _PUBLISHED_LABEL_FRACTIONS_V1 = (0.6, 0.8, 1.0)
 _SINGLE_SURFACE_NAMES = ("outer",)
 _EXPERIMENTAL_SURFACE_NAMES = ("inner", "outer")
@@ -40,6 +59,13 @@ class SurfaceModeContract:
     physics_contract: str
     legacy_num_surfaces: int | None
     legacy_inner_surface_ratio: float | None
+    requires_inner_surface_ratio: bool
+    surface_count_policy: str
+    final_refinement_policy: str
+    current_policy: str
+    topology_policy: str
+    telemetry_schema_version: int
+    production_support_level: str
 
     @property
     def num_surfaces(self) -> int:
@@ -154,6 +180,46 @@ def resolve_surface_physics_contract(mode: str) -> str:
     )
 
 
+def resolve_surface_mode_requires_inner_surface_ratio(mode: str) -> bool:
+    return _validate_surface_mode_name(mode) == EXPERIMENTAL_MULTISURFACE
+
+
+def resolve_surface_count_policy(mode: str) -> str:
+    resolved_mode = _validate_surface_mode_name(mode)
+    if resolved_mode == SINGLE_SURFACE:
+        return SURFACE_COUNT_POLICY_SINGLE_SURFACE
+    if resolved_mode == PUBLISHED_MULTISURFACE:
+        return SURFACE_COUNT_POLICY_PUBLISHED_FIXED_STACK_V1
+    return SURFACE_COUNT_POLICY_EXPERIMENTAL_TWO_SURFACES
+
+
+def resolve_final_refinement_policy(mode: str) -> str:
+    if _validate_surface_mode_name(mode) == SINGLE_SURFACE:
+        return FINAL_REFINEMENT_POLICY_BOOZER_STAGE
+    return FINAL_REFINEMENT_POLICY_UNSUPPORTED
+
+
+def resolve_current_policy(mode: str) -> str:
+    if _validate_surface_mode_name(mode) == PUBLISHED_MULTISURFACE:
+        return CURRENT_POLICY_VACUUM_LOCKED
+    return CURRENT_POLICY_INHERIT_STAGE2
+
+
+def resolve_topology_policy(mode: str) -> str:
+    if _validate_surface_mode_name(mode) == SINGLE_SURFACE:
+        return TOPOLOGY_POLICY_UNSUPPORTED
+    return TOPOLOGY_POLICY_SEARCH_GATE
+
+
+def resolve_production_support_level(mode: str) -> str:
+    resolved_mode = _validate_surface_mode_name(mode)
+    if resolved_mode == SINGLE_SURFACE:
+        return PRODUCTION_SUPPORT_LEVEL_PRODUCTION
+    if resolved_mode == PUBLISHED_MULTISURFACE:
+        return PRODUCTION_SUPPORT_LEVEL_PUBLISHED_V1
+    return PRODUCTION_SUPPORT_LEVEL_EXPERIMENTAL
+
+
 def resolve_surface_mode_inner_surface_ratio(
     contract: SurfaceModeContract,
     *,
@@ -214,6 +280,15 @@ def build_surface_mode_contract(
             if source != SURFACE_MODE_SOURCE_LEGACY_NUM_SURFACES_MAPPING
             else legacy_ratio
         ),
+        requires_inner_surface_ratio=resolve_surface_mode_requires_inner_surface_ratio(
+            mode
+        ),
+        surface_count_policy=resolve_surface_count_policy(mode),
+        final_refinement_policy=resolve_final_refinement_policy(mode),
+        current_policy=resolve_current_policy(mode),
+        topology_policy=resolve_topology_policy(mode),
+        telemetry_schema_version=SURFACE_MODE_TELEMETRY_SCHEMA_VERSION_V1,
+        production_support_level=resolve_production_support_level(mode),
     )
 
 
@@ -228,6 +303,13 @@ def build_surface_mode_metadata(contract: SurfaceModeContract) -> dict[str, obje
         "SURFACE_PHYSICS_CONTRACT": contract.physics_contract,
         "LEGACY_NUM_SURFACES": contract.legacy_num_surfaces,
         "LEGACY_INNER_SURFACE_RATIO": contract.legacy_inner_surface_ratio,
+        "REQUIRES_INNER_SURFACE_RATIO": contract.requires_inner_surface_ratio,
+        "SURFACE_COUNT_POLICY": contract.surface_count_policy,
+        "FINAL_REFINEMENT_POLICY": contract.final_refinement_policy,
+        "CURRENT_POLICY": contract.current_policy,
+        "TOPOLOGY_POLICY": contract.topology_policy,
+        "SURFACE_MODE_TELEMETRY_SCHEMA_VERSION": contract.telemetry_schema_version,
+        "PRODUCTION_SUPPORT_LEVEL": contract.production_support_level,
     }
 
 
@@ -264,25 +346,143 @@ def surface_mode_supports_alm(mode_or_contract: str | SurfaceModeContract) -> bo
 def surface_mode_supports_boozer_stage_refinement(
     mode_or_contract: str | SurfaceModeContract,
 ) -> bool:
-    return _resolve_mode_name(mode_or_contract) == SINGLE_SURFACE
+    if isinstance(mode_or_contract, SurfaceModeContract):
+        return (
+            not _surface_mode_runtime_support_errors(mode_or_contract)
+            and mode_or_contract.final_refinement_policy
+            == FINAL_REFINEMENT_POLICY_BOOZER_STAGE
+        )
+    return (
+        resolve_final_refinement_policy(_resolve_mode_name(mode_or_contract))
+        == FINAL_REFINEMENT_POLICY_BOOZER_STAGE
+    )
 
 
 def surface_mode_supports_topology_gate(
     mode_or_contract: str | SurfaceModeContract,
 ) -> bool:
-    return _resolve_mode_name(mode_or_contract) in {
-        PUBLISHED_MULTISURFACE,
-        EXPERIMENTAL_MULTISURFACE,
-    }
+    if isinstance(mode_or_contract, SurfaceModeContract):
+        return (
+            not _surface_mode_runtime_support_errors(mode_or_contract)
+            and mode_or_contract.topology_policy == TOPOLOGY_POLICY_SEARCH_GATE
+        )
+    return (
+        resolve_topology_policy(_resolve_mode_name(mode_or_contract))
+        == TOPOLOGY_POLICY_SEARCH_GATE
+    )
+
+
+def _surface_mode_runtime_support_errors(contract: SurfaceModeContract) -> list[str]:
+    mode = _validate_surface_mode_name(contract.mode)
+    expected_surface_count = len(resolve_surface_weights(mode))
+    errors: list[str] = []
+
+    if contract.version != SURFACE_MODE_VERSION_V1:
+        errors.append(
+            f"version={contract.version!r} is not {SURFACE_MODE_VERSION_V1!r}"
+        )
+    if contract.num_surfaces != expected_surface_count:
+        errors.append(
+            f"num_surfaces={contract.num_surfaces!r} does not match "
+            f"{expected_surface_count!r} for {mode!r}"
+        )
+    if len(contract.weights) != contract.num_surfaces:
+        errors.append(
+            f"weights length {len(contract.weights)!r} does not match "
+            f"num_surfaces={contract.num_surfaces!r}"
+        )
+    if contract.weights != resolve_surface_weights(mode):
+        errors.append(
+            f"weights={contract.weights!r} does not match "
+            f"{resolve_surface_weights(mode)!r}"
+        )
+    if contract.stack_policy != resolve_surface_stack_policy(mode):
+        errors.append(
+            f"stack_policy={contract.stack_policy!r} does not match "
+            f"{resolve_surface_stack_policy(mode)!r}"
+        )
+    if contract.physics_contract != resolve_surface_physics_contract(mode):
+        errors.append("physics_contract does not match the selected surface mode")
+    if (
+        contract.requires_inner_surface_ratio
+        != resolve_surface_mode_requires_inner_surface_ratio(mode)
+    ):
+        errors.append(
+            "requires_inner_surface_ratio does not match the selected surface mode"
+        )
+    if contract.surface_count_policy != resolve_surface_count_policy(mode):
+        errors.append(
+            f"surface_count_policy={contract.surface_count_policy!r} does not "
+            f"match {resolve_surface_count_policy(mode)!r}"
+        )
+    if contract.final_refinement_policy != resolve_final_refinement_policy(mode):
+        errors.append(
+            f"final_refinement_policy={contract.final_refinement_policy!r} does "
+            f"not match {resolve_final_refinement_policy(mode)!r}"
+        )
+    if contract.current_policy != resolve_current_policy(mode):
+        errors.append(
+            f"current_policy={contract.current_policy!r} does not match "
+            f"{resolve_current_policy(mode)!r}"
+        )
+    if contract.topology_policy != resolve_topology_policy(mode):
+        errors.append(
+            f"topology_policy={contract.topology_policy!r} does not match "
+            f"{resolve_topology_policy(mode)!r}"
+        )
+    if contract.telemetry_schema_version != SURFACE_MODE_TELEMETRY_SCHEMA_VERSION_V1:
+        errors.append(
+            "telemetry_schema_version does not match "
+            f"{SURFACE_MODE_TELEMETRY_SCHEMA_VERSION_V1!r}"
+        )
+    if contract.production_support_level != resolve_production_support_level(mode):
+        errors.append(
+            f"production_support_level={contract.production_support_level!r} "
+            f"does not match {resolve_production_support_level(mode)!r}"
+        )
+
+    if mode == EXPERIMENTAL_MULTISURFACE:
+        if contract.num_surfaces == 2:
+            inner_fraction, outer_fraction = contract.label_fractions
+            if not (0.0 < float(inner_fraction) < 1.0):
+                errors.append(
+                    "experimental_multisurface requires an inner label fraction "
+                    "between 0 and 1"
+                )
+            if float(outer_fraction) != 1.0:
+                errors.append(
+                    "experimental_multisurface requires the outer label fraction "
+                    "to be 1.0"
+                )
+    else:
+        expected_label_fractions = resolve_surface_label_fractions(
+            mode,
+            legacy_inner_surface_ratio=None,
+        )
+        if contract.label_fractions != expected_label_fractions:
+            errors.append(
+                f"label_fractions={contract.label_fractions!r} does not match "
+                f"{expected_label_fractions!r}"
+            )
+
+    if not errors:
+        surface_mode_surface_names(contract)
+    return errors
 
 
 def surface_mode_runtime_supported(
     mode_or_contract: str | SurfaceModeContract,
 ) -> bool:
-    _resolve_mode_name(mode_or_contract)
-    return True
+    if not isinstance(mode_or_contract, SurfaceModeContract):
+        _resolve_mode_name(mode_or_contract)
+        return True
+    return not _surface_mode_runtime_support_errors(mode_or_contract)
 
 
 def validate_surface_mode_runtime_support(contract: SurfaceModeContract) -> None:
-    if surface_mode_runtime_supported(contract):
-        return
+    errors = _surface_mode_runtime_support_errors(contract)
+    if errors:
+        raise ValueError(
+            "Unsupported surface-mode runtime contract for "
+            f"{contract.mode!r}: " + "; ".join(errors)
+        )
