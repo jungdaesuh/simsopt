@@ -247,6 +247,12 @@ class FiniteCurrentProfileTests(unittest.TestCase):
                 "PROXY_CURRENT_OPERATOR_WARNING"
             ],
         )
+        self.assertNotIn(
+            "positive raises iota",
+            profile.proxy_current_sign_summary_fields()[
+                "proxy_current_operator_warning"
+            ],
+        )
         self.assertIn(
             "run_stage2_to_single_stage.py:pre_boozer_repair",
             profile.rejected_entrypoints,
@@ -261,6 +267,8 @@ class FiniteCurrentProfileTests(unittest.TestCase):
         self.assertIn("jhalpern30_signed_upstream_proxy_loop", help_text)
         self.assertIn("scalar_policy=nonnegative_magnitude", help_text)
         self.assertIn("scalar_policy=signed_physical_scalar", help_text)
+        self.assertIn("positive raises iota", help_text)
+        self.assertIn("negative is counter-current/collapse", help_text)
 
     def test_unknown_profile_mode_fails_loudly(self):
         with self.assertRaisesRegex(ValueError, "Unsupported finite-current profile"):
