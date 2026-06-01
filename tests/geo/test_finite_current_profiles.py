@@ -236,6 +236,17 @@ class FiniteCurrentProfileTests(unittest.TestCase):
             "flip the local proxy winding",
             profile.proxy_current_sign_help_line(),
         )
+        self.assertIn("positive raises iota", profile.proxy_current_sign_help_line())
+        self.assertIn(
+            "negative is counter-current/collapse",
+            profile.proxy_current_sign_help_line(),
+        )
+        self.assertNotIn(
+            "positive raises iota",
+            profile.proxy_current_sign_metadata_fields()[
+                "PROXY_CURRENT_OPERATOR_WARNING"
+            ],
+        )
         self.assertIn(
             "run_stage2_to_single_stage.py:pre_boozer_repair",
             profile.rejected_entrypoints,

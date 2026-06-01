@@ -93,6 +93,8 @@ def _assert_wrapped_cli_sign_help(
     )
     test_case.assertIn("wataru_proxy_field accepts nonnegative", help_text)
     test_case.assertIn("jhalpern30_proxy_field accepts a signed upstream", help_text)
+    test_case.assertIn("positive raises iota", help_text)
+    test_case.assertIn("negative is counter-current/collapse", help_text)
     test_case.assertLessEqual(
         max(len(line) for line in help_text.splitlines()),
         _MAX_CLI_HELP_LINE_LENGTH,

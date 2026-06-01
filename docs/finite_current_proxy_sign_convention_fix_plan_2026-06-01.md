@@ -299,8 +299,10 @@ Completed in this checkout on 2026-06-01:
 
 ## Resolved Questions
 
-- Resolved: do not persist effect-based "raises iota" labels in this patch;
-  persist only the upstream convention and operator warning.
+- Resolved: do not persist effect-based "raises iota" labels in artifact
+  metadata; persist only the upstream convention and operator warning. It is
+  acceptable for CLI help to include the empirical sign-probe effect note as
+  operator guidance, provided it remains separate from persisted metadata.
 - Resolved: the descriptor lives with profile metadata in
   `finite_current_profiles.py`.
 - Resolved for this patch: display the metadata in materializer JSON output and

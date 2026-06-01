@@ -41,6 +41,7 @@ class ProxyCurrentSignConvention:
     signedness: str
     replay_reference: str
     operator_warning: str
+    empirical_effect_note: str = ""
 
     def metadata_fields(self) -> dict[str, str]:
         return {
@@ -73,9 +74,12 @@ class ProxyCurrentSignConvention:
         mode: FiniteCurrentMode,
         scalar_policy: ProxyVfCurrentScalarPolicy,
     ) -> str:
+        effect_note = (
+            f" {self.empirical_effect_note}" if self.empirical_effect_note else ""
+        )
         return fill(
             (
-                f"{self.operator_warning} "
+                f"{self.operator_warning}{effect_note} "
                 f"(scalar_policy={scalar_policy}; convention={self.key})"
             ),
             width=_PROXY_SIGN_HELP_WIDTH,
@@ -263,6 +267,10 @@ JHALPERN30_PROFILE = FiniteCurrentProfile(
             "jhalpern30_proxy_field accepts a signed upstream proxy-loop "
             "scalar; do not infer its sign from TF/banana currents or flip "
             "the local proxy winding."
+        ),
+        empirical_effect_note=(
+            "Empirical sign probe: positive raises iota; negative is "
+            "counter-current/collapse."
         ),
     ),
     supported_entrypoints=(
