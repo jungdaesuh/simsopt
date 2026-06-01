@@ -82,47 +82,54 @@ References:
 
 ### Phase 0: Preflight And Evidence Refresh
 
-- [ ] Run `git status --short` and record unrelated dirty files before implementation.
-- [ ] Confirm target repo HEAD and TORAX reference HEAD.
+- [x] Run `git status --short` and record unrelated dirty files before implementation. **2026-06-01 first slice:** tracked tree was clean before the test-contract slice, which intentionally touched only `tests/core/test_jax_core_specs.py`, `tests/subprocess/import_smoke_cases.py`, and `tests/test_jax_import_smoke.py`. Later bloat-plan T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 slices, the T1.9 public-API reclassification, and the T1.10 probe-script classification expanded the working diff and are logged in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
+- [x] Confirm target repo HEAD and TORAX reference HEAD. **2026-06-01 slice:** target repo HEAD was `8b94c2bbd` (`shared-jax-clean`); TORAX reference evidence remains the 2026-05-31 clean `60190df1` review basis because this slice only uses official JAX contracts, not TORAX source behavior.
 - [ ] Refresh inventories with `rg` before editing:
-  - [ ] `rg "register_dataclass|data_fields|meta_fields|static_arg|static_argnames" src tests`
-  - [ ] `rg "persistent_cache|compilation_cache|XLA_FLAGS|JAX_COMPILATION_CACHE" src tests benchmarks`
+  - [x] `rg "register_dataclass|data_fields|meta_fields|static_arg|static_argnames" src tests`
+  - [x] `rg "persistent_cache|compilation_cache|XLA_FLAGS|JAX_COMPILATION_CACHE" src tests benchmarks`
   - [ ] `rg "lax.scan|lax.while_loop|lax.cond|fori_loop" src/simsopt/jax_core src/simsopt/geo src/simsopt/solve tests`
   - [ ] `rg "sqrt|where|nan|clip|maximum|minimum|compensated" src/simsopt/jax_core src/simsopt/geo tests`
-- [ ] Decide the first implementation slice before touching code: contract tests, persistent-cache tests, or bounded-scan helper pilot.
+- [x] Decide the first implementation slice before touching code: contract tests, persistent-cache tests, or bounded-scan helper pilot. **2026-06-01 slice:** chose contract tests + persistent-cache tests only; no scan helper was added.
 
 ### Phase 1: Static/Dynamic Contract Hardening
 
-- [ ] Inventory every `jax.tree_util.register_dataclass` use under `src/simsopt`, with `src/simsopt/jax_core/specs.py` as the first SSOT slice.
-- [ ] Inventory static argument use in traced optimizer, geometry, Biot-Savart, PM, and wireframe paths.
-- [ ] Design the contract twice:
-  - [ ] Option A: keep direct `jax.tree_util.register_dataclass` calls and add tests/docs only.
-  - [ ] Option B: add a tiny `register_jax_spec` helper local to `jax_core/specs.py`.
-- [ ] Choose Option B only if it removes repeated partition declarations without hiding the data/meta fields.
-- [ ] Preserve existing pytree structure and field partitioning exactly.
+- [x] Inventory every `jax.tree_util.register_dataclass` use under `src/simsopt`, with `src/simsopt/jax_core/specs.py` as the first SSOT slice.
+- [x] Inventory static argument use in traced optimizer, geometry, Biot-Savart, PM, and wireframe paths.
+- [x] Design the contract twice:
+  - [x] Option A: keep direct `jax.tree_util.register_dataclass` calls and add tests/docs only. **Chosen for the first slice** because it strengthens the contract without adding another abstraction layer.
+  - [x] Option B: add a tiny `register_jax_spec` helper local to `jax_core/specs.py`. **Rejected for the first slice** because no runtime helper was needed to prove the existing data/meta split; **selected for the 2026-06-01 T2.4 follow-up** after the contract tests were in place.
+- [x] Choose Option B only if it removes repeated partition declarations without hiding the data/meta fields.
+- [x] Preserve existing pytree structure and field partitioning exactly.
 - [ ] Add or extend tests proving:
-  - [ ] Spec instances flatten as expected.
-  - [ ] Dynamic data-field changes do not force static recompilation.
-  - [ ] Static meta-field changes do force a distinct compiled specialization.
-  - [ ] Target-lane closures do not capture device arrays accidentally.
-  - [ ] Tree signatures remain stable across expected construction paths.
+  - [x] Spec instances flatten as expected.
+  - [x] Dynamic data-field changes do not force static recompilation.
+  - [x] Static meta-field changes do force a distinct compiled specialization.
+  - [x] Target-lane closures do not capture device arrays accidentally.
+  - [x] Tree signatures remain stable across expected construction paths.
+
+**2026-06-01 evidence:** `tests/core/test_jax_core_specs.py::test_curve_spec_data_fields_do_not_recompile_but_meta_fields_do` now pins the `CurveXYZFourierSpec` data/meta split with observable JIT cache behavior. Existing tree-signature coverage remains in `tests/jax_core/test_tree_signature.py`. Later bloat-plan T1.1/T1.3 slices also added `tests/test_jax_import_smoke.py::test_jax_core_lazy_facade_public_contract` and `tests/solve/test_permanent_magnet_optimization_jax_item28.py::test_gpmo_public_result_wrapper_preserves_pytree_leaf_order`, protecting lazy-package exports and solve-level GPMO result pytrees without changing spec registration semantics. The target-lane closure-capture item is now covered by `tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_build_target_lane_outer_objectives_full_state_keeps_closure_constants_on_host`, which builds the CPU-order full-graph DOF map through `build_single_stage_full_graph_jax_cpu_order_dof_map`, assembles full-state target-lane scalar and value/grad wrappers through `build_target_lane_outer_objectives`, asserts the captured index constants remain host NumPy arrays with no `jax.Array` closure leaves, and executes the lifted value/grad under `jax.transfer_guard("disallow")`. Existing `test_target_lane_hardware_success_filter_keeps_closure_constants_on_host` continues to cover the target-lane hardware-success filter closure.
+
+**2026-06-01 T2.4 follow-up evidence:** `src/simsopt/jax_core/specs.py::_register_jax_spec` now wraps the frozen dataclass plus JAX registration ceremony. All 29 spec classes use local tuple-valued `data_fields` / `meta_fields` decorator arguments, and the only direct `jax.tree_util.register_dataclass(...)` call left in `specs.py` is inside the helper. `tests/core/test_jax_core_specs.py::test_register_jax_spec_helper_preserves_data_meta_partition` proves the helper keeps dynamic data leaves and static metadata on the same JIT-cache-key behavior as the direct registrations.
 
 Recommended validation:
 
 ```bash
 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/core/test_jax_core_specs.py tests/jax_core/test_tree_signature.py
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/test_jax_import_smoke.py::test_jax_core_specs_are_pytrees
 ```
 
 ### Phase 2: Persistent Compilation Cache Proof
 
-- [ ] Keep persistent-cache tests separate from in-process `_cache_size` tests.
-- [ ] Extend the existing callback-free write smoke in `tests/subprocess/import_smoke_cases.py` into a two-process reuse proof, or add an adjacent case if keeping write and reuse coverage separate is clearer.
-- [ ] Invoke the reuse proof from `tests/test_jax_import_smoke.py` or an adjacent subprocess test wrapper.
-- [ ] Cover both supported cache-configuration paths: launcher env vars before JAX import, and the programmatic `simsopt_config.set_backend(..., compilation_cache_dir=...)` path that applies `jax.config.update` before first compilation.
-- [ ] Set `jax_persistent_cache_min_compile_time_secs=0` and `jax_persistent_cache_min_entry_size_bytes=-1` for small-kernel proof tests, matching the runtime policy and JAX official docs.
-- [ ] Use one temporary cache directory shared by the two subprocesses and assert that the second process reuses the first process's executable rather than merely repopulating an empty cache.
-- [ ] Do not use host callbacks in persistent-cache proof tests; callbacks can disable or invalidate persistent-cache assumptions.
-- [ ] Preserve provenance assertions in benchmark helper tests so cache mode is reported in validation output.
+- [x] Keep persistent-cache tests separate from in-process `_cache_size` tests.
+- [x] Extend the existing callback-free write smoke in `tests/subprocess/import_smoke_cases.py` into a two-process reuse proof, or add an adjacent case if keeping write and reuse coverage separate is clearer.
+- [x] Invoke the reuse proof from `tests/test_jax_import_smoke.py` or an adjacent subprocess test wrapper.
+- [x] Cover both supported cache-configuration paths: launcher env vars before JAX import, and the programmatic `simsopt_config.set_backend(..., compilation_cache_dir=...)` path that applies `jax.config.update` before first compilation.
+- [x] Set `jax_persistent_cache_min_compile_time_secs=0` and `jax_persistent_cache_min_entry_size_bytes=-1` for small-kernel proof tests, matching the runtime policy and JAX official docs.
+- [x] Use one temporary cache directory shared by the two subprocesses and assert that the second process reuses the first process's executable rather than merely repopulating an empty cache.
+- [x] Do not use host callbacks in persistent-cache proof tests; callbacks can disable or invalidate persistent-cache assumptions.
+- [x] Preserve provenance assertions in benchmark helper tests so cache mode is reported in validation output.
+
+**2026-06-01 evidence:** `tests/test_jax_import_smoke.py::test_backend_persistent_cache_reuses_small_kernel_across_processes` now runs two subprocesses against one temporary cache for both programmatic and env-selected backend configuration. It asserts a first-process persistent-cache miss for `jit_small_kernel`, no second-process miss/write for the same compiled kernel, and stable cache file fingerprints.
 
 Recommended validation:
 
@@ -141,19 +148,21 @@ PYTHONPATH=src SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 SIMS
 ### Phase 3: Bounded Scan And Control-Flow Deduplication
 
 - [ ] Define the control-flow categories before writing helpers:
-  - [ ] Use `lax.scan` for fixed-capacity loops with fixed carry structure, shape, and dtype.
+  - [x] Use `lax.scan` for fixed-capacity loops with fixed carry structure, shape, and dtype.
   - [ ] Use `lax.while_loop` only for true dynamic state machines after confirming reverse-mode differentiation is not part of the contract or an explicit custom VJP / implicit-differentiation rule owns that contract.
   - [ ] Keep host loops for I/O, callbacks, plotting, logging, and object mutation.
-- [ ] Design a small helper such as `bounded_scan_until_done` under `src/simsopt/jax_core/`.
-- [ ] Keep the helper narrow: explicit carry, explicit `done`, explicit status payload, explicit max steps.
-- [ ] Pilot it on one repeated done-gated pair, preferably PM or wireframe workflow.
-- [ ] Do not rewrite tracing and root solving in the same pass.
+- [x] Design a small helper such as `bounded_scan_until_done` under `src/simsopt/jax_core/`.
+- [x] Keep the helper narrow: explicit carry, explicit `done`, explicit status payload, explicit max steps.
+- [x] Pilot it on one repeated done-gated pair, preferably PM or wireframe workflow.
+- [x] Do not rewrite tracing and root solving in the same pass.
 - [ ] Add tests for:
-  - [ ] `max_steps == 0`
-  - [ ] Early completion
-  - [ ] Never-completed status propagation
-  - [ ] Static-capacity rejection where applicable
-  - [ ] Strict transfer-guard smoke coverage
+  - [x] `max_steps == 0`
+  - [x] Early completion
+  - [x] Never-completed status propagation
+  - [x] Static-capacity rejection where applicable
+  - [x] Strict transfer-guard smoke coverage
+
+**2026-06-01 evidence:** `src/simsopt/jax_core/_bounded_scan.py::bounded_scan_until_done` now owns the fixed-capacity scan shape: it takes an explicit carry, `max_steps`, scalar `is_done` predicate, and active-step function, then skips active work with `lax.cond` once done is true. The pilot is deliberately narrow: `pm_gpmo_live_loop_jax` and `_gsco_live_loop_unchecked` use the helper, while tracing, root solving, PM ArbVec/multi/backtracking loops, and wireframe multistep/final-adjustment loops remain untouched. `tests/jax_core/test_bounded_scan.py` covers zero steps, early completion, never-completed status propagation, and strict transfer-guard JIT execution; existing PM and wireframe workflow tests cover eager static-capacity rejection, exact restart continuation, host-loop parity, JAXPR scan presence, and transfer-guard smoke for the two piloted production loops.
 
 Recommended validation:
 
@@ -166,11 +175,11 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 - [ ] Audit expensive `lax.cond` and static-argument sites where both branches trace.
 - [ ] For each site, classify the intended behavior:
-  - [ ] Static host peel for compile-time choices.
-  - [ ] Traced runtime branch for array-dependent choices, with explicit awareness that both branches trace even though only one branch executes.
+  - [x] Static host peel for compile-time choices.
+  - [x] Traced runtime branch for array-dependent choices, with explicit awareness that both branches trace even though only one branch executes.
   - [ ] Explicit host boundary for object or logging work.
-- [ ] Add JAXPR or lowered-IR tests for hot paths where branch drift would be expensive or wrong.
-- [ ] Add vectorized-branch tests where `vmap(lax.cond)` could change execution semantics by lowering to `select`.
+- [x] Add JAXPR or lowered-IR tests for hot paths where branch drift would be expensive or wrong.
+- [x] Add vectorized-branch tests where `vmap(lax.cond)` could change execution semantics by lowering to `select`.
 - [ ] Verify compiled hot paths do not hide dense fallbacks, host callbacks, or unexpected materialization.
 - [ ] Keep CPU proof and CUDA transfer proof distinct in documentation and tests.
 
@@ -183,6 +192,20 @@ Recommended first targets:
 - [ ] `src/simsopt/jax_core/wireframe_workflow.py`
 - [ ] `src/simsopt/solve/permanent_magnet_optimization_jax.py`
 - [ ] Optimizer backend static toggles and solver status paths.
+
+**2026-06-01 pilot evidence:** the first branch-discipline slice classifies
+two existing hot-path contracts without changing runtime behavior. The
+static-host-peel contract is the cached strict scalar value/grad wrapper in
+`src/simsopt/geo/surfaceobjectives_jax.py`, already pinned by
+`tests/geo/test_surface_objectives_jax.py::test_cached_strict_scalar_value_and_grad_builds_stable_jit`
+checking `jax.jit(..., static_argnums=(2, 3))`. The traced-runtime branch
+contract is `src/simsopt/jax_core/pm_optimization.py::mwpgp_step`:
+`test_step_body_uses_dynamic_branch_conditionals` keeps the scalar JAXPR at two
+`cond` primitives, while the new
+`test_vmap_step_body_lowers_dynamic_branches_to_selects` proves `vmap` lowers
+that branch family to `select_n` and no scalar `cond` remains. This is CPU/X64
+JAXPR evidence only; host-boundary classification, dense-fallback checks, and
+CUDA transfer proof remain open.
 
 ### Phase 5: Numerical Shape And Stability Audit
 
@@ -251,8 +274,29 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 Start with Phase 1 and Phase 2 together only at the test-contract level:
 
-- [ ] Add tests around existing spec registration behavior without changing runtime code.
-- [ ] Extend the existing callback-free persistent-cache write smoke into a two-process reuse proof.
-- [ ] Do not add a scan helper until the cache and static/dynamic contracts are proven.
+- [x] Add tests around existing spec registration behavior without changing runtime code.
+- [x] Extend the existing callback-free persistent-cache write smoke into a two-process reuse proof.
+- [x] Do not add a scan helper until the cache and static/dynamic contracts are proven.
 
 This gives the repo higher confidence in the two easiest places to regress JAX ports: compilation specialization boundaries and false cache-proof signals.
+
+Validation recorded for the 2026-06-01 first slice:
+
+```bash
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/core/test_jax_core_specs.py tests/test_jax_import_smoke.py -k 'jax_core_specs or persistent_cache'
+# 19 passed, 119 deselected
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/core/test_jax_core_specs.py tests/jax_core/test_tree_signature.py
+# 32 passed
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/test_backend.py -k 'compilation_cache or cuda_determinism or gpu_memory'
+# 23 passed, 105 deselected
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/test_benchmark_helpers.py -k 'compilation_cache or build_provenance_includes_compilation_cache_metadata or compile_behavior'
+# 13 passed, 344 deselected
+.conda/jax/bin/python -m ruff check tests/core/test_jax_core_specs.py tests/subprocess/import_smoke_cases.py tests/test_jax_import_smoke.py
+# passed
+.conda/jax/bin/python -m ruff format --check tests/core/test_jax_core_specs.py tests/subprocess/import_smoke_cases.py tests/test_jax_import_smoke.py
+# passed
+git diff --check -- tests/core/test_jax_core_specs.py tests/subprocess/import_smoke_cases.py tests/test_jax_import_smoke.py
+# passed
+.conda/jax/bin/python -m mypy tests/core/test_jax_core_specs.py tests/subprocess/import_smoke_cases.py tests/test_jax_import_smoke.py
+# blocked: No module named mypy
+```

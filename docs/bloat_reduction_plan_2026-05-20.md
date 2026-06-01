@@ -195,7 +195,7 @@ Findings from the 6-agent re-verification against HEAD `5bcd9061c`:
   - **T4.2** — DECISION MADE by Plan A (HANDOFF.md, 2026-05-29), with v6 wording corrected against live defaults: `scipy-jax` is the default JAX optimizer lane on both CPU and CUDA; `scipy-jax-fullgraph` remains an explicit stress/parity lane. This collapses to docs, not removal.
   - **T4.4** — LIKELY OBSOLETE: `SLSQP`/`slsqp` has 0 occurrences in `qfm_solver.py`; confirm with a full-repo grep, then close. **[v5 correction: this was WRONG — the alias is alive in the qfm *surface* wrappers (`qfmsurface_jax.py:281`, `qfmsurface.py:147`). See §4.7 / §8.4.]**
   - **T1.11** — VERIFIED satisfied (`_skip_case` used 19×).
-- **Corrected counts/figures:** T1.1 `jax_core/__init__.py` is 363 LOC not 676 (saving ~300 not ~620); T1.3 has 6 Result classes not 5; T1.6 covers 6 methods not 12; T1.8 over-counted dead aliases (`_zero_profile_component_timings` is live at `:2249`).
+- **Corrected counts/figures:** T1.1 `jax_core/__init__.py` is 363 LOC not 676 (saving ~300 not ~620); T1.3 has five true GPMO result mirrors plus a separate `PMRelaxAndSplitResult`, not six true GPMO mirrors; T1.6 covers 6 methods not 12; T1.8 over-counted dead aliases (`_zero_profile_component_timings` is live at `:2222`).
 - **SOFTWARE_DESIGN.md alignment:** the plan is substantively compliant (cited gate names match SD verbatim; SD mtime 2026-05-19 predates the plan, so refs are current). v4 added: the complexity-not-LOC success gate (§2.1), the tie-breaker precedence note (§3), and the config-param/dependency/deprecation-timeline pre-flight steps (§4.3). One item to watch during execution: **T3.2 mixin extraction** vs SD's "implementation inheritance leaks state — prefer composition" red flag (SD:283).
 
 ### 4.7 — v5 reconciliation summary (2026-05-30)
@@ -227,6 +227,70 @@ Findings from the historical v5 4-agent re-verification against clean HEAD `21c3
 - **Moved refs corrected:** `single_stage_init_parity.py` release-gate refs, `surfaceobjectives_traceable_jax.py` diagnostics/lazy-cache refs, `single_stage_banana_example.py` optimizer-default refs, and `validation_ladder_common.py` cache-policy refs were refreshed against `b267b0d95`.
 - **Still-open bloat status:** T1.1 remains un-started, T2.2 remains partial/open, T3.2 remains partial, and T4.2 remains resolved/doc-only.
 
+### 4.10 — Contract-first prerequisite slice (2026-06-01)
+
+- **Current HEAD/status:** execution started from `8b94c2bbd` on `shared-jax-clean`. The first implemented slice was deliberately not a bloat LOC deletion: it hardened the TORAX-derived prerequisite contracts before import/export consolidation.
+- **Completed prerequisite:** added a static/dynamic JAX spec specialization test in `tests/core/test_jax_core_specs.py` and two-process persistent-cache reuse proof in `tests/subprocess/import_smoke_cases.py` / `tests/test_jax_import_smoke.py`.
+- **Bloat status at this checkpoint:** T1.1 and T1.2 remained open. A read-only lazy-export inventory confirmed T1.1 first needs literal `__all__` definitions in six `jax_core` submodules, and T1.2 first needs `src/simsopt/backend/runtime.py` to own the public backend `__all__` before the facade can collapse safely.
+- **Validation evidence:** see `docs/bloat_torax_coherent_execution_plan_2026-05-31.md` execution log for exact commands. This was CPU-only contract proof; it is not CUDA or MPS evidence.
+
+### 4.11 — T1.2 backend facade collapse (2026-06-01)
+
+- **Current HEAD/status:** execution continued from `8b94c2bbd` on `shared-jax-clean`, after the contract-first prerequisite slice.
+- **Completed bloat item:** `src/simsopt/backend/runtime.py` now owns the literal 54-name public backend `__all__`, and `src/simsopt/backend/__init__.py` is a four-line facade driven by `runtime.__all__`.
+- **Regression proof added:** `tests/test_backend.py::test_backend_public_facade_uses_runtime_all_as_ssot` pins the exact 54-name public export tuple for both `runtime.__all__` and the package facade, and verifies `from simsopt.backend import *` exposes exactly that namespace.
+- **Bloat status at this checkpoint:** T1.2 is complete. T1.1 remained open and still needed literal `__all__` definitions before `jax_core/__init__.py` could safely switch to `_lazy_exports`; see §4.12 for the later T1.1 completion.
+- **Validation evidence:** see `docs/bloat_torax_coherent_execution_plan_2026-05-31.md` execution log for exact commands. This was CPU import/API-surface proof; it is not CUDA or MPS evidence.
+
+### 4.12 — T1.1 `jax_core` lazy facade collapse (2026-06-01)
+
+- **Current HEAD/status:** execution continued from `8b94c2bbd` on `shared-jax-clean`, after the contract-first prerequisite slice and T1.2 backend facade collapse.
+- **Completed bloat item:** `src/simsopt/jax_core/__init__.py` now uses `_lazy_exports.build_lazy_export_map(...)` and lazy `resolve_lazy_export(...)` instead of the eager fourteen-module import block, explicit `_EXPORT_MODULES`, duplicated `__all__`, `_EXPORT_MODULE_OBJECTS`, and manual resolver.
+- **Live inventory correction:** the prerequisite inventory originally identified six missing literal `__all__` modules. The implementation probe found `src/simsopt/jax_core/field.py` also lacked a literal `__all__`; T1.1 therefore materialized seven module-local export lists (`curve_geometry`, `field`, `objectives_flux`, `specs`, `surface_fourier`, `surface_henneberg`, `surface_rzfourier`).
+- **Compatibility detail:** the package-level public export sequence remains the historical 314-name order and every old exported name resolves. The old facade advertised `evaluate_interpolated_boozer_scalar` but that attribute did not exist on the target submodule; T1.1 adds it as an alias of `evaluate_scalar`.
+- **Helper-contract cleanup:** final delta review found the shared lazy-export helper still accepted same-module duplicate export names. T1.1 now rejects any duplicate package export before package-order overrides can mask it, adds a focused regression in `tests/test_lazy_exports.py`, and removes an existing duplicate `FramedCurve` entry from `src/simsopt/geo/framedcurve.py`.
+- **Regression proof added:** `tests/subprocess/import_smoke_cases.py::case_jax_core_lazy_facade_public_contract` and `tests/test_jax_import_smoke.py::test_jax_core_lazy_facade_public_contract` verify the facade stays lazy before first attribute resolution, preserves the 314-name curated package export set, excludes broader direct-submodule-only exports, resolves the interpolated-Boozer alias, and exposes the same set through `from simsopt.jax_core import *`. `tests/test_lazy_exports.py` pins same-module duplicate rejection with and without `package_export_order`.
+- **LOC/accounting:** `src/simsopt/jax_core/__init__.py` is now 146 LOC (363 → 146, `-217` in the facade) while preserving historical `__all__` order. Production-file diff for the full T1.1 slice is `475 insertions(+), 358 deletions(-)` because the missing module-local literal `__all__` declarations, exact package-order table, shared-helper package override support, duplicate-export hardening, and one duplicate direct-module export cleanup were added in the same slice; full source/test diff is `750 insertions(+), 358 deletions(-)` including the new 20-line helper regression test.
+- **Bloat status:** T1.1 implementation and validation are complete, but the full production slice is net-positive LOC because public export order and independent-oracle constraints are preserved. Count only the facade-local `-217` as the direct `jax_core/__init__.py` simplification; do not bank a net T1 LOC reduction for the full slice. T1.2 is also complete; remaining Tier 1 items start at T1.3 unless the next slice deliberately selects another still-open item.
+- **Validation evidence:** see `docs/bloat_torax_coherent_execution_plan_2026-05-31.md` execution log for exact commands. This was CPU import/API-surface proof; it is not CUDA or MPS evidence.
+
+### 4.13 — T2.2 radial-evaluator dedup slice (2026-06-01)
+
+- **Current status:** the direct `boozer_radial_field.py` `_eval_*` Fourier/scalar formula duplication is folded. Direct evaluators now route through the canonical `_eval_*_from_columns` family (`src/simsopt/jax_core/boozer_radial_field.py:1004`) or direct scalar spline reads (`:1156`), while `_eval_radial_columns` remains the public-wrapper points-cycle cache path (`:405`).
+- **Hot-path guard:** the first cheap full-bundle wrapper version regressed the Boozer RHS benchmark, so the landed design adds RHS-specific radial columns (`_eval_radial_rhs_columns`, `:504`) and tracing dispatch through `_RADIAL_RHS_COLUMN_EVALUATORS` (`src/simsopt/jax_core/tracing.py:2711`) instead of calling each direct evaluator separately.
+- **Bloat accounting:** do **not** bank the old `~400 LOC` estimate. The duplication is reduced, but benchmark-preserving subset builders offset the direct-formula deletion (`boozer_radial_field.py` current diff is `262 insertions / 264 deletions`; `tracing.py` adds the RHS dispatch path). A future LOC-banking pass should re-estimate T2.2 around parametrizing the subset builders, not automatically subtract the original estimate.
+
+### 4.14 — T2.4 spec dataclass auto-registration helper (2026-06-01)
+
+- **Current status:** completed. `src/simsopt/jax_core/specs.py` now has one private `_register_jax_spec(...)` helper at `:102` and 29 local decorator uses. The only remaining direct `jax.tree_util.register_dataclass(...)` call is inside that helper at `:109`.
+- **Contract shape:** each spec class still declares its own `data_fields` and `meta_fields` beside the class definition, now as immutable tuple literals. This keeps the traced-data vs static-meta split locally auditable while removing the repeated frozen-dataclass plus manual-registration blocks.
+- **Regression proof added:** `tests/core/test_jax_core_specs.py::test_register_jax_spec_helper_preserves_data_meta_partition` proves the helper preserves JIT cache behavior: data-field changes reuse the compiled specialization, while meta-field changes force a new specialization. Existing `CurveXYZFourierSpec` cache-key and tree-signature coverage still exercises a real production spec class.
+- **Bloat accounting:** `specs.py` is now 1,570 LOC versus the pre-slice 1,622 LOC cited for T2.4. Bank about 52 net LOC for the file; do not bank the earlier `~140` estimate as net source reduction because preserving explicit per-class partitions requires readable multiline decorators and the helper itself.
+- **Validation evidence:** focused helper/real-spec/import smoke passed (`3 passed`); full core spec plus tree-signature suite passed (`33 passed`); import smoke for `test_jax_core_specs_are_pytrees` passed (`1 passed`); scoped `ruff check`, `ruff format --check`, `py_compile`, and `git diff --check` passed. `mypy` remains blocked in `.conda/jax` with `No module named mypy`.
+
+### 4.15 — T2.5 leading-axis sharding helper slice (2026-06-01)
+
+- **Current status:** completed as a contract-preserving helper fold. `src/simsopt/jax_core/sharding.py` now owns `_LeadingAxisBatchShardingConfig`, `_leading_axis_sharding_config(...)`, `_maybe_shard_leading_axis_inputs(...)`, and `_leading_axis_sharding_summary(...)`; the public `TrajectoryBatchShardingConfig`, `SeedBatchShardingConfig`, and `SurfaceQuadratureShardingConfig` names remain concrete dataclass subclasses with the same four public fields.
+- **Contract shape:** the three public config classes still construct with `mesh`, `axis_name`, `device_count`, and `strategy`; the three summary functions still emit the old JSON keys (`trajectory_sharded`, `seed_batch_sharded`, `surface_quadrature_sharded`, and their device-count keys).
+- **Regression proof added:** `tests/jax_core/test_sharding_helpers.py::test_leading_axis_sharding_configs_preserve_public_contract` pins the public class names, dataclass fields, shared placement path, unsharded summary shape, sharded summary key names, axis, strategy, mesh shape, and device-count keys.
+- **Bloat accounting:** bank only 6 net production LOC (`src/simsopt/jax_core/sharding.py` 725 -> 719; diff `102 insertions / 108 deletions`). The earlier `~170` estimate would require collapsing exported config classes into one public class/alias, which this slice deliberately avoided as a public API change.
+- **Validation evidence:** focused helper/trajectory summary proof passed (`4 passed`); forced CPU surface/seed sharding subprocess cases passed (`6 passed`); forced CPU points-coils subprocess cases passed (`2 passed`); scoped `ruff check`, `ruff format --check`, `py_compile`, and `git diff --check` passed. `mypy` remains blocked in `.conda/jax` with `No module named mypy`. This is CPU forced-device sharding proof, not CUDA/MPS proof.
+
+### 4.16 — T2.7 SciPy adapter closure factory (2026-06-01)
+
+- **Current status:** completed. `src/simsopt/geo/optimizer_jax_reference.py` now shares SciPy host objective construction through `_make_scipy_host_value_and_grad_objective(...)` at `:192` and shared dispatch attachment through `_scipy_minimize_value_and_grad_core(...)` at `:230`.
+- **Contract shape:** `_scipy_minimize(...)` and `_scipy_minimize_value_and_grad(...)` still call `_require_native_cpu_reference_backend_for_scipy_adapter(...)` under their own component names before SciPy can run; `target_scipy_minimize_value_and_grad(...)` still keeps the explicit target-lane `method='lbfgs'` check and does not add the private-reference backend guard.
+- **Bloat accounting:** bank 30 net production LOC (`src/simsopt/geo/optimizer_jax_reference.py` 569 -> 539; diff `63 insertions / 93 deletions`). The earlier `~220` estimate is not banked; preserving the explicit guard wrappers and target-lane method check keeps the public adapter contract readable.
+- **Validation evidence:** SciPy adapter host-contract and target-lane selectors passed (`10 passed, 469 deselected`); private adapter JAX-backend rejection passed (`8 passed`); optimizer-reference result tests passed (`4 passed`); import-smoke backend rejection passed (`1 passed`); scoped `ruff check`, `ruff format --check`, `py_compile`, and `git diff --check` passed. `mypy` remains blocked in `.conda/jax` with `No module named mypy`.
+
+### 4.17 — T2.6 backend runtime resolver fold (2026-06-01)
+
+- **Current status:** completed as a behavior-preserving small refactor. `src/simsopt/backend/runtime.py` now owns one `_resolve_kwarg(...)` helper for explicit-kwarg → env override → mode-default precedence, and the eight old private `_resolve_*` runtime kwarg helpers are gone.
+- **Contract shape:** `_config_from_mode(...)` still resolves every `BackendConfig` field explicitly; there is no heterogenous dict/`**kwargs` builder. This keeps the public `set_backend(...)` keyword names, mode defaults, env validation sources, debug overlay, and cache/transfer/gpu allocator semantics visible at the construction site.
+- **Regression proof added:** `tests/test_backend.py::test_runtime_kwargs_override_env_before_mode_defaults` sets every runtime-kwarg env override family and proves explicit kwargs win over those env values before mode defaults, including an invalid TF allocator env value overridden by a valid explicit kwarg. `tests/test_backend.py::test_simsopt_debug_env_applies_runtime_debug_overlay` now also pins the old debug-overlay short-circuit: invalid `SIMSOPT_JAX_DISABLE_JIT` and `SIMSOPT_JAX_TRANSFER_GUARD` env values are ignored when `SIMSOPT_DEBUG=1` owns those fields. Existing backend tests still cover mode defaults, transfer guard, compilation cache fallbacks, GPU memory env application, and eager-JAX import behavior.
+- **Bloat accounting:** bank only a small runtime simplification, not the old `~100 LOC` estimate. Current `runtime.py` is 2,535 LOC from a 2,500-LOC HEAD baseline, but that includes the earlier T1.2 runtime `__all__` addition; relative to the already-applied T1.2 context, T2.6 is approximately a low-twenties net source reduction and mainly reduces change amplification.
+- **Validation evidence:** full `tests/test_backend.py` passed (`130 passed, 2 expected CUDA-flag warnings`) after the review-found debug-overlay regression was fixed; backend import-smoke selectors passed (`3 passed`); scoped `ruff check`, `ruff format --check`, `py_compile`, guardrail diff scan, and `git diff --check` passed. `mypy` remains blocked in `.conda/jax` with `No module named mypy`.
+
 ---
 
 ## 5. Tier 1 — Mechanical Wins
@@ -235,88 +299,95 @@ Findings from the historical v5 4-agent re-verification against clean HEAD `21c3
 
 Goal: bank low-risk LOC reduction first; pattern-validate factory ideas in tiny scope.
 
-### 5.1 — [ ] T1.1: `jax_core/__init__.py` → lazy export map
+### 5.1 — [x] T1.1: `jax_core/__init__.py` → lazy export map
 
-- **Files:** `src/simsopt/jax_core/__init__.py` (**363 LOC**, observed @`b267b0d95` — down from 676, but the shrink was unrelated churn, **not** this refactor: the explicit dual-list is still fully present and there is no `build_lazy_export_map` call, so T1.1 is genuinely un-started. Do not infer "done" from the LOC delta).
-- **Change:** Replace the explicit dual list (`_EXPORT_MODULES` at `:19`, `__all__` at `:336`, `_EXPORT_MODULE_OBJECTS` at `:339`, manual `__getattr__` at `:357`) with `_lazy_exports.build_lazy_export_map(...)` matching `src/simsopt/geo/__init__.py:75` and `src/simsopt/field/__init__.py:56`.
-- **LOC saved:** **~300** (revised down from v3's ~620 — the file is now 363 LOC, so ~620 is impossible).
-- **Risk:** Low. Five sibling packages already use this pattern.
-- **Contracts:** Each of the 14 submodules in `_EXPORT_MODULE_OBJECTS` must have a literal `__all__`. The helper raises on duplicates; verify no cross-module name collisions.
-- **Validation gate:** T1 + manual `python -c "from simsopt.jax_core import *"` smoke.
+- **Files:** `src/simsopt/jax_core/__init__.py` (363 → 146 LOC), `src/simsopt/_lazy_exports.py`, seven `jax_core` submodules that now own literal package-relevant `__all__` declarations, `src/simsopt/geo/framedcurve.py`, `tests/subprocess/import_smoke_cases.py`, `tests/test_jax_import_smoke.py`, `tests/test_lazy_exports.py`.
+- **Change:** Replaced the explicit dual list (`_EXPORT_MODULES`, duplicated `__all__`, `_EXPORT_MODULE_OBJECTS`, manual `__getattr__`) with `_lazy_exports.build_lazy_export_map(...)` matching the sibling lazy-facade pattern. The shared helper now accepts a package-level export override for modules whose direct submodule `__all__` is intentionally broader than the package facade.
+- **LOC saved/accounted:** the facade itself saves 217 LOC. Production-file net for the complete T1.1 slice is `475 insertions(+), 358 deletions(-)` because missing submodule-local literal `__all__` lists, historical package export-order preservation, duplicate-export hardening, and one duplicate direct-module export cleanup had to be materialized; full source/test diff is `750 insertions(+), 358 deletions(-)` including the new helper regression test.
+- **Risk:** Low-to-medium public-facade risk, covered by import-smoke regression. The package public export sequence remains the historical 314-name order.
+- **Contracts:** All fourteen facade source modules now have a literal `__all__` or a package override. The helper raises on cross-module and same-module duplicates; package overrides preserve the old curated facade subset for `biotsavart` and `interpolated_boozer_field` without removing broader direct-submodule exports.
+- **Validation gate:** T1 complete; exact commands recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
-### 5.2 — [ ] T1.2: `backend/__init__.py` dual-list collapse
+### 5.2 — [x] T1.2: `backend/__init__.py` dual-list collapse
 
-- **Files:** `src/simsopt/backend/__init__.py` (117 LOC).
-- **Change:** Replace explicit dual-list with `from .runtime import *` driven by `runtime.__all__`, or use `build_lazy_export_map`.
-- **LOC saved:** ~50.
-- **Risk:** Trivial.
-- **Validation gate:** T1.
+- **Files:** `src/simsopt/backend/__init__.py` (117 LOC -> 4 LOC), `src/simsopt/backend/runtime.py`, `tests/test_backend.py`.
+- **Change:** Replaced the facade's explicit import list and duplicated `__all__` with `from .runtime import *` driven by a literal `runtime.__all__`.
+- **LOC saved:** production files are `59 insertions(+), 115 deletions(-)`; the full source/test slice is `129 insertions(+), 115 deletions(-)` because the test now carries an independent literal public-export oracle.
+- **Risk:** Low public-facade risk. Existing public names and object identities are pinned by test.
+- **Validation gate:** T1 complete; exact commands recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
-### 5.3 — [ ] T1.3: Retire GPMO `Result` dataclass mirrors
+### 5.3 — [x] T1.3: Retire GPMO `Result` dataclass mirrors
 
-- **Files:** `src/simsopt/solve/permanent_magnet_optimization_jax.py:116-314` (file now 921 LOC; v3 cited `:99-303`).
-- **Change:** Replace **6** cloned `*Result` dataclasses (`PMRelaxAndSplitResult:117`, `GPMOBaselineResult:143`, `GPMOMultiResult:175`, `GPMOBacktrackingResult:209`, `GPMOArbVecResult:247`, `GPMOArbVecBacktrackingResult:279`; mirrors of `pm_optimization.py` plus 2 fields `m`, `m_history`) with one `GPMOPublicResult(core_result, m, m_history)` shim or `@dataclass(frozen=True)` extension. (v3 said "5 cloned" — there are 6.)
-- **LOC saved:** ~180.
-- **Risk:** Low.
-- **Contracts:** Pytree registration must persist; field order load-bearing for any pickled state.
-- **Validation gate:** T1 + PM tests if present.
+- **Files:** `src/simsopt/solve/permanent_magnet_optimization_jax.py:116-314` (file now 880 LOC; v3 cited `:99-303`), `tests/solve/test_permanent_magnet_optimization_jax_item28.py`.
+- **Change:** Replaced the five true solve-level GPMO result mirrors (`GPMOBaselineResult`, `GPMOMultiResult`, `GPMOBacktrackingResult`, `GPMOArbVecResult`, `GPMOArbVecBacktrackingResult`) with concrete public subclasses of one `GPMOPublicResult(m, m_history, core_result)` storage contract. `PMRelaxAndSplitResult` was left unchanged because live code showed it is a separate relax-and-split result, not a mirror of `jax_core.pm_optimization`.
+- **LOC saved:** production slice is `163 insertions(+), 204 deletions(-)` (`-41` net). The source/test slice is `336 insertions(+), 206 deletions(-)` because regression tests now pin constructor, legacy-state, frozen-assignment, export, and pytree-order compatibility.
+- **Risk:** Low-to-medium public result compatibility risk, covered by PM wrapper tests and adversarial review.
+- **Contracts:** Pytree registration persists with flatten order `m`, `m_history`, then `core_result` leaves. The old public class names remain real classes, old keyword/positional constructor fields are accepted, old pickle-style state without `core_result` rebuilds the matching core result, and frozen assignment behavior is preserved.
+- **Validation gate:** T1 + PM tests passed; exact commands recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
-### 5.4 — [ ] T1.4: Centralize `_as_numpy_float64`
+### 5.4 — [x] T1.4: Centralize `_as_numpy_float64`
 
-- **Files:** `src/simsopt/_core/jax_host_boundary.py` (add `host_float64` — the module already has `host_array:14` / `host_float:27` / `host_int:31` / `host_bool:35`, but **no** `host_float64` and **no** `_as_numpy_float64`, so this is un-started); migrate 4 local copies: `geo/curve.py:64`, `geo/curveobjectives.py:76`, `geo/curvecwsfourier.py:23`, `geo/surfaceobjectives.py:1224` (last is a nested local def).
-- **LOC saved:** ~40.
-- **Risk:** Low. The curve↔jax_core import cycle is on the `_as_jax_float64` side, not numpy.
-- **Contracts:** Preserve `_HAS_JAX` short-circuit in curve.py (move into helper).
-- **Validation gate:** T1.
+- **Files:** `src/simsopt/_core/jax_host_boundary.py` now owns `host_float64`; `geo/curveobjectives.py` and `geo/curvecwsfourier.py` import it directly as their local compatibility name; `geo/surfaceobjectives.py` calls it directly for VJP materialization; `geo/curve.py` keeps the only remaining one-line `_as_numpy_float64` wrapper to pass `_HAS_JAX` and preserve the no-JAX short-circuit.
+- **LOC saved:** production slice is `16 insertions(+), 32 deletions(-)` (`-16` net). The source/test slice is `36 insertions(+), 32 deletions(-)` because `tests/test_host_boundary.py` now pins explicit device-host transfer and no-JAX no-import behavior.
+- **Risk:** Low. The curve↔jax_core import-cycle story did not change; the shared helper lives in `_core` and does not import JAX unless a JAX boundary is requested.
+- **Contracts:** `host_float64(value, has_jax=False)` returns a NumPy `float64` array without importing JAX. Default JAX-enabled calls route through `host_array(..., dtype=np.float64)` so strict transfer-guard device-to-host materialization remains explicit.
+- **Validation gate:** T1 complete; exact commands recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
-### 5.5 — [ ] T1.5: Centralize state-token counters
+### 5.5 — [x] T1.5: Centralize state-token counters
 
-- **Files:** New `src/simsopt/_core/state_tokens.py` (does not yet exist). Migrate `_new_coil_dof_state_token` (`biotsavart_jax_backend.py:100`; v3 said `:79-93`) and `_new_traceable_solve_state_token` (`boozersurface_jax.py:139`; v3 said `:135-139`).
-- **LOC saved:** ~20.
-- **Risk:** Trivial.
-- **Contracts:** Token attribute names accessible to consumers (`_coil_dof_state_token`, `_traceable_solve_state_token`, `_dof_layout_version`, `_points_version`).
-- **Validation gate:** T1.
+- **Files:** `src/simsopt/_core/state_tokens.py`, `src/simsopt/field/biotsavart_jax_backend.py`, `src/simsopt/geo/boozersurface_jax.py`, `tests/core/test_state_tokens.py`.
+- **Change:** Added `make_state_token_factory()` as the shared source for independent monotonic integer token generators. `_new_coil_dof_state_token` and `_new_traceable_solve_state_token` remain private module-local callables, preserving the existing separate token streams while removing duplicated `itertools.count()` setup.
+- **LOC saved/accounted:** the two owner modules changed by `4 insertions(+), 12 deletions(-)` (`-8` net), but the production slice is net `+8` after adding the 16-line shared helper. The source/test slice is net `+18` after adding the 10-line helper regression. Count this as complexity/SSOT reduction, not a LOC bank, until another token stream migrates to the helper.
+- **Risk:** Low. Token attribute names and token advancement call sites are unchanged.
+- **Contracts:** Token attribute names accessible to consumers (`_coil_dof_state_token`, `_traceable_solve_state_token`, `_dof_layout_version`, `_points_version`) are unchanged. Each factory returns an independent monotonic sequence starting at zero, matching the previous per-module `count()` counters.
+- **Validation gate:** T1 complete; exact commands recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
-### 5.6 — [ ] T1.6: Preserve `compute_derivatives=N` compatibility while deduplicating Biot-Savart current-derivative wrappers
+### 5.6 — [x] T1.6: Preserve `compute_derivatives=N` compatibility while deduplicating Biot-Savart current-derivative wrappers
 
-- **Files:** `biotsavart_jax_backend.py:564-604` (**6** current-derivative methods carrying `compute_derivatives`, at `:564, 572, 580, 588, 596, 604`; v3 cited `:712-765, 1806-1859` and "12 methods" — both stale).
-- **Change:** Keep the public `compute_derivatives` kwarg on every JAX method because SIMSOPT CPU APIs and official docs expose it. Deduplicate only the shared wrapper/docstring text or route through a common helper that still accepts the kwarg.
-- **LOC saved:** ~10-20.
+- **Files:** `biotsavart_jax_backend.py:488-590` (**6** current-derivative methods carrying `compute_derivatives`, at `:568, 572, 576, 580, 584, 588`) and `tests/field/test_biotsavart_jax.py:1789-1849` (signature/keyword regression).
+- **Change:** Kept the public `compute_derivatives` kwarg and defaults on every JAX method because SIMSOPT CPU APIs and official docs expose them. Added `_per_coil_unit_current_derivative()` on `_BiotSavartFieldEvaluationMixin` and routed the six current-derivative methods through it.
+- **LOC saved/accounted:** T1.6 source body adds the 8-line helper and replaces six 5-line call blocks with six 1-line calls (`14 insertions(+), 30 deletions(-)`, `-16` net). The focused regression adds 62 test lines. The file still contains uncommitted T1.5 state-token edits, so whole-file `git diff --numstat` against HEAD also includes that earlier slice.
 - **Risk:** Low. The compatibility signature is the contract; in-repo caller absence is not proof that external callers do not pass the kwarg.
-- **Validation gate:** T1 + signature regression that `BiotSavartJAX` and `SpecBackedBiotSavartJAX` accept `compute_derivatives=0/1/2` on all six current-derivative methods.
+- **Contracts:** `BiotSavartJAX` and `SpecBackedBiotSavartJAX` still expose all six current-derivative methods with defaults `0/1/2` matching the CPU API. The regression calls every method with `compute_derivatives=0`, `1`, and `2` on both adapters.
+- **Validation gate:** T1 complete; exact commands recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
-### 5.7 — [ ] T1.7: Delete dead `_host_cubicmin` / `_host_quadmin` / `_line_search_sample_valid_host`
+### 5.7 — [x] T1.7: Delete dead `_host_cubicmin` / `_host_quadmin` / `_line_search_sample_valid_host`
 
-- **Files:** `src/simsopt/geo/optimizer_jax_private/_common.py:117-163` (`_host_cubicmin:117`, `_host_quadmin:144`, `_line_search_sample_valid_host:158`; v4 said `:117-161`).
-- **Change:** Delete — confirmed **zero callers repo-wide** (host duplicates live in `optimizer_host_lbfgs.py`).
-- **LOC saved:** ~44.
+- **Files:** `src/simsopt/geo/optimizer_jax_private/_common.py:117` now jumps directly from `_line_search_sample_valid()` to `_emit_debug_callback()` after deleting the three dead host helper definitions. The deleted HEAD lines were `_host_cubicmin:117`, `_host_quadmin:144`, and `_line_search_sample_valid_host:158`; v4 said `:117-161`.
+- **Change:** Deleted the private JAX optimizer's unused host-side `_host_cubicmin`, `_host_quadmin`, and `_line_search_sample_valid_host` copies. The live JAX path still uses `_cubicmin`, `_quadmin`, and `_line_search_sample_valid`; the live host optimizer keeps its own equivalents in `optimizer_host_lbfgs.py`.
+- **LOC saved:** 47 lines.
 - **Risk:** Very low.
-- **Validation gate:** T1.
+- **Validation gate:** T1 complete; current grep found no source/test/benchmark/example references after deletion, and exact commands are recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
-### 5.8 — [ ] T1.8: Delete dead aliases in `biotsavart_jax_backend.py`
+### 5.8 — [x] T1.8: Delete dead aliases in `biotsavart_jax_backend.py`
 
-- **Files:** `biotsavart_jax_backend.py:915` (`_ones_like_float64` — confirmed dead, zero callers).
-- **v4 NOTE:** `_zero_profile_component_timings` (now `:261`) has a **live caller at `:2249`** — it is NOT dead; drop it from this item. The 4 `*_cotangents` "re-exports" (v3 `:1905, 1956, 1965, 1974`) are live names used throughout the file (e.g. `:786, 2147, 2179`) — re-audit before deleting any.
-- **LOC saved:** ~5 (only `_ones_like_float64`; v3's ~15 over-counted).
+- **Files:** `src/simsopt/field/biotsavart_jax_backend.py:890` now jumps directly from `_take_positions_1d()` to `_scatter_free_values()` after deleting `_ones_like_float64`.
+- **v4 NOTE resolved:** `_zero_profile_component_timings` (now `:257`) has a **live caller at `:2222`** — it was not deleted. The 4 `*_cotangents` aliases remain live public/native names (`:1957`, `:2008`, `:2017`, `:2026`) and were not changed.
+- **LOC saved:** 6 lines (only `_ones_like_float64`; v3's ~15 over-counted).
 - **Risk:** Very low.
-- **Validation gate:** T1 + grep audit.
+- **Validation gate:** T1 complete; current grep found no source/test/benchmark/example references after deletion, and exact commands are recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
-### 5.9 — [ ] T1.9: Delete `SingleStageRuntimeSpecBiotSavartJAX` 11-line subclass
+### 5.9 — [x] T1.9: Reclassify `SingleStageRuntimeSpecBiotSavartJAX` as public compatibility API
 
-- **Files:** `src/simsopt/field/biotsavart_jax_backend.py:808-818` (now an **11-line** subclass; v4 said `:836-847`); 3 call sites (`single_stage_banana_example.py`, `tests/.../test_single_stage_physics_parity.py`, `tests/.../test_single_stage_example.py`).
-- **Change:** Replace with 1-line `SpecBackedBiotSavartJAX(make_biot_savart_spec(...))`.
-- **LOC saved:** ~11.
-- **Risk:** Low.
-- **Validation gate:** T1.
+- **Files:** `src/simsopt/field/biotsavart_jax_backend.py:92` exports the name and `:788-800` defines it as a real subclass; `src/simsopt/field/__init__.py:35` re-exports the JAX backend through the package facade. Live code imports/calls it in `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py:146,12810`, `tests/integration/test_single_stage_physics_parity.py:455,472`, and `tests/geo/test_single_stage_example.py:26,4354,4434,4624`.
+- **Decision:** Do **not** delete in Tier 1. Current in-repo constructor calls can be mechanically expressed as `SpecBackedBiotSavartJAX(make_biot_savart_spec(...))`, but removing this exported class would be a public API break. Future removal requires Tier 3 API-evolution work: observable behavior delta, caller inventory, migration path, compatibility tests, deprecation plan, and rollback plan.
+- **LOC saved:** 0. The earlier ~11 LOC bank is rejected.
+- **Risk:** Low to keep; high to delete without deprecation because tests already assert package export identity and external callers may import the class.
+- **Validation gate:** Reclassification complete; public class/import/subclass signature probe passed and exact commands are recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
-### 5.10 — [ ] T1.10: Classify probe scripts; retire only after live caller migration
+### 5.10 — [x] T1.10: Classify probe scripts; retain active parity/smoke entrypoints
 
 - **Files:** `benchmarks/run_code_parity_probe.py` (174), `benchmarks/production_boozer_parity_probe.py` (281), `benchmarks/single_stage_surface_reprojection_probe.py` (460), `benchmarks/surface_rz_geometry_hlo_probe.py` (339; v3 said 330).
-- **Current-tree status:** These are not dead as of 2026-05-20. `tests/test_benchmark_helpers.py` imports/tests `production_boozer_parity_probe` and `run_code_parity_probe`; `tests/test_jax_import_smoke.py` executes `single_stage_surface_reprojection_probe.py`; `tests/geo/test_surface_rzfourier_jax.py` executes `surface_rz_geometry_hlo_probe.py`; benchmark/docs surfaces direct users to run-code probes.
-- **Change:** Build a caller inventory and classify each script as (a) active parity oracle, (b) active smoke entrypoint, (c) migrated to a smaller test helper, or (d) actually retired. Delete only class (d), and only after replacing or updating tests/docs that reference it.
-- **LOC saved:** 0 guaranteed; up to ~1,245 only after migration/retirement is approved.
-- **Risk:** Medium until caller migration is complete.
-- **Validation gate:** T1 + `tests/test_benchmark_helpers.py` + `tests/test_jax_import_smoke.py` + `tests/geo/test_surface_rzfourier_jax.py` + full caller inventory grep over `src/`, `examples/`, `benchmarks/`, `tests/`, `docs/`, `.github/`, slurm scripts, and repo-local artifacts if present.
+- **Current-tree status:** Completed as classification-only on 2026-06-01. All four scripts are active; no Tier 1 deletion is safe without a separate migration/deprecation slice.
+- **Classification:**
+  - `benchmarks/run_code_parity_probe.py`: active parity oracle. `benchmarks/cpu_run_code_benchmark.py:22`, `benchmarks/gpu_run_code_benchmark.py:21`, and `benchmarks/run_code_benchmark_common.py:331` direct solver-parity users to this script; `tests/test_benchmark_helpers.py:66` imports it and `tests/test_benchmark_helpers.py:9662` tests its default JAX lane.
+  - `benchmarks/production_boozer_parity_probe.py`: active parity oracle. `docs/solve_jax_api_caller_inventory_2026-05-19.md:266` and `:320` list it as a benchmark surface, `docs/full_repo_banana_e2e_cpu_gpu_test_plan_2026-05-19.md:865` gives an invocation, and `tests/test_benchmark_helpers.py:65` / `:9646` import and test its default JAX lane.
+  - `benchmarks/single_stage_surface_reprojection_probe.py`: active CPU smoke entrypoint. `tests/test_jax_import_smoke.py:48` keeps the script path and `tests/test_jax_import_smoke.py:1153` executes it and asserts structured output.
+  - `benchmarks/surface_rz_geometry_hlo_probe.py`: active HLO/instrumentation smoke entrypoint. `tests/geo/test_surface_rzfourier_jax.py:1141` executes the local script path at `:1148`; historical docs also cite this instrumentation style in `docs/jax_native_round3_performance_todos_2026-05-18.md:109` and `:475`.
+- **Change:** No code deletion. The T1.10 work is the caller inventory and classification; any future retirement must be a separate migration slice that first replaces tests/docs and removes the active entrypoint contract.
+- **LOC saved:** 0. The earlier up-to-~1,245 LOC possible deletion is not banked.
+- **Risk:** Low to keep; medium/high to delete because each script still has live test or documentation surfaces.
+- **Validation gate:** Completed with full caller inventory over `src`, `tests`, `benchmarks`, `examples`, `docs`, `.github`, and `scripts`, plus focused CPU validation. Exact commands are recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 
 ### 5.11 — [x] T1.11: Verify subprocess skip sentinels remain complete — **VERIFIED (v4)**: `_skip_case` used 19× in `tests/subprocess/jax_runtime_cases.py`; no additions needed
 
@@ -347,24 +418,32 @@ All required T1 items merged; guaranteed net LOC reduction ≥ 600; probe-script
 
 Goal: convert repeated templates into data-driven factories. Each item proves the pattern at small scope before Tier 3 attempts larger folds.
 
-### 6.1 — [ ] T2.1: Boozer result-dict factories
+### 6.1 — [ ] T2.1: Boozer result-dict factories — **PARTIAL / NOT BANKED (2026-06-01)**
 
-- **Files:** `boozersurface_jax.py` result-dict packaging sites are now at `:5068`, `:5093` (early returns), `:5316`, `:5449`, `:5554`, `:5879`, `:6135`, `:6275`, `:6670`, `:6769`, `:6916` (v4's `:5098`-`:6511` list was stale by hundreds of lines — the file's max packaging site is now `:6916`, not `:6511`). Newton/quality reporting duplication sits inside those dicts.
-- **Change:** Introduce small result-pack helpers such as `_boozer_traceable_result_core(...)`, `_boozer_ls_result_core(...)`, and `_boozer_exact_result_core(...)`; drive from `_BOOZER_TRACEABLE_RESULT_KEYS` (`:316`, still exact) as constructor SSOT. **v5 NOTE:** `_BOOZER_RESULT_SCHEMAS` is **confirmed ABSENT** from the tree (not merely renamed) — the only result-dict SSOT is `_BOOZER_TRACEABLE_RESULT_KEYS:316`.
+- **Files:** `boozersurface_jax.py` result-dict packaging sites after the 2026-06-01 follow-up are now at `:5490`, `:5622`, `:5726`, `:6052`, `:6215`, `:6307`, `:6446`, `:6565`, `:6633`, `:6841`, `:6937`, and `:7082`; schema/factory helpers live at `:533`, `:569`, `:593`, `:608`, and `:663`. Newton/quality reporting duplication still sits beside the owning solve paths.
+- **Change:** Introduce small result-pack helpers such as `_boozer_traceable_result_core(...)`, `_boozer_public_result_core(...)`, `_boozer_public_linearized_result_core(...)`, `_boozer_ls_newton_result_core(...)`, and `_boozer_exact_newton_result_core(...)`; keep `_BOOZER_TRACEABLE_RESULT_KEYS` (`:312`, still exact) as the traceable schema SSOT. **v5 NOTE:** `_BOOZER_RESULT_SCHEMAS` is **confirmed ABSENT** from the tree (not merely renamed) — the only traceable result-dict schema SSOT is `_BOOZER_TRACEABLE_RESULT_KEYS:312`.
 - **Historical LOC target:** ~130. **Current LOC banked:** 0; this slice is partial / not LOC-banked until a follow-up reduces source LOC without hiding failure-path diagnostics.
 - **Risk:** Medium after the post-v2 committed drift. This item touches user-visible result dict schemas and must be semantically inventoried from the latest committed tree before implementation.
 - **Contracts:** Result-dict required/forbidden keys; success-vs-failure `linear_solve_backend` strings; `adjoint_linear_solve_available` flag.
 - **Validation gate:** T2 + result-dict schema tests in `test_boozersurface_jax.py`.
+- **2026-06-01 partial slice:** Introduced schema-core helpers `_boozer_traceable_result_core(...)`, `_boozer_public_result_core(...)`, and `_boozer_public_linearized_result_core(...)`, then added `test_boozer_result_core_helpers_match_schema_sources` so the helpers stay tied to `_BOOZER_TRACEABLE_RESULT_KEYS`, `_BOOZER_SOLVER_RESULT_CORE_KEYS`, `_BOOZER_RUNTIME_RESULT_KEYS`, and `_BOOZER_LINEARIZED_RESULT_KEYS`.
+- **2026-06-01 follow-up:** Added keyword-only public LS-Newton and exact-Newton envelope factories (`_boozer_ls_newton_result_core(...)`, `_boozer_exact_newton_result_core(...)`) and extended the same helper test to cover their key sets, fixed `"ls"`/`"exact"` type invariants, linearization-kind invariants, and forbidden-key contracts.
+- **Design-it-twice gate:** Option A, a generic record-builder keyed by record mode, was rejected because it would hide solve-specific payload fields and make exact/LS failure paths harder to audit. Option B, narrow schema-core helpers, was selected for the first slice because only duplicated core fields move while residuals, callbacks, dense factors, reporting fields, and failure metadata remain visible at each solve site. Option C, named LS-Newton/exact-Newton envelope factories, was selected for the follow-up after rejecting positional factories; the landed helpers are keyword-only so field mapping stays auditable at every call site.
+- **Information-hiding test:** The schema constants remain the expected-key SSOT, while the helpers manually pack the matching values. A future public or traceable core key-set change still needs the schema constant and helper implementation updated together; the helper test fails if those drift or if a helper admits forbidden traceable/public keys. The new envelope factories hide only the repeated public record envelope; solve-quality fields, failure metadata, and callback construction remain local to the owning solve site.
+- **Not banked as LOC reduction yet:** The work is validated schema/factory hardening, not a T2.1 LOC closeout. The keyword-only envelope factories improve correctness and change amplification but do not close the `~130` LOC reduction target against the current source diff; banking T2.1 still requires a separate fold of solve-quality/reporting blocks or another compact factory that reduces source LOC without hiding failure-path diagnostics.
+- **Validation evidence:** focused schema/result selectors passed (`2 passed`, `13 passed`, and `20 passed, 2 skipped, 457 deselected`); `ruff check`, `ruff format --check`, `py_compile`, and `git diff --check` passed for the touched source/test files; `mypy` remains blocked in `.conda/jax` with `No module named mypy`.
 
-### 6.2 — [ ] T2.2: `boozer_radial_field` 16×2 evaluator collapse — **PARTIAL / NOT BANKED (v6 correction)**
+### 6.2 — [ ] T2.2: `boozer_radial_field` 16×2 evaluator collapse — **FORMULA DEDUPED / NOT LOC-BANKED (2026-06-01)**
 
-- **v7 status:** The column bundle and `_eval_radial_columns` structure exist, but the fold is not complete. `boozer_radial_field.py` still has parallel `_eval_*_from_columns` implementations (`:452-787`) and separate `_eval_*` implementations (`:807-1190`) that call `inverse_fourier_transform_{even,odd}` / `_scalar_at` directly. Residual duplication remains; the ~400 LOC should not be counted as already banked.
-- **Files:** `src/simsopt/jax_core/boozer_radial_field.py` (1,193 LOC).
-- **Change:** Keep `_eval_X_from_columns` only; add cheap wrapper `_eval_X(state, points) = _eval_X_from_columns(state, _eval_radial_columns(state, points[:, 0]), points)` or parametrize via per-quantity tuple `(cnc_field, sns_field, deriv_factor, radial_kind)`.
-- **LOC saved:** ~400.
-- **Risk:** Low. `_eval_radial_columns` evaluates 27 mode profiles per call — single-scalar callers pay slightly more; benchmark before/after on a small fixture.
+- **2026-06-01 status:** The duplicated direct Fourier formulas are folded. `_eval_modB` / derivative siblings route through `_eval_*_from_columns` via direct or typed subset-column wrappers (`src/simsopt/jax_core/boozer_radial_field.py:456`, `:504`, `:1004`), and scalar direct evaluators use the original scalar spline path (`:1156`) because those were not duplicated Fourier formulas.
+- **Files:** `src/simsopt/jax_core/boozer_radial_field.py`; `src/simsopt/jax_core/tracing.py`; active tests in `tests/field/test_trace_boozer_analytic_jax.py`.
+- **Change landed:** canonical formula ownership is now the `_eval_X_from_columns` family. Direct evaluators construct only the radial columns they need, and radial Boozer guiding-centre RHS calls evaluate one RHS column bundle per point rather than re-evaluating each field scalar separately.
+- **LOC saved:** 0 banked for bloat accounting. The owning source file is effectively flat (`262 insertions / 264 deletions`) and the tracing dispatch path adds code. The old `~400` estimate should be re-estimated before any future T2.2 LOC claim.
+- **Risk:** Low-to-medium. The first simple full-bundle wrapper was simpler but regressed the RHS/direct microbenchmarks; the landed subset-column design preserves the benchmark gate at the cost of extra helper scaffolding.
 - **Contracts:** `BoozerRadialColumnBundle` field ordering (pytree flattening); `state.stellsym` static branch; `inverse_fourier_transform_{even,odd}` switch.
-- **Validation gate:** T2 + benchmark sanity (no regression > 10% on `boozer_radial_field` benchmarks).
+- **Validation evidence:** `tests/field/test_trace_boozer_analytic_jax.py` passed (`27 passed`); the `booz_xform` wrapper selector stayed skipped in this env (`2 skipped, 19 deselected`); `ruff check`, `ruff format --check`, `py_compile`, and `git diff --check` passed for touched files; `mypy` remains blocked with `No module named mypy`.
+- **Benchmark evidence:** saved pre-change baseline was `direct_modB 0.000578229`, `direct_dmodBds 0.001090641`, `direct_G 0.000272629`, `rhs_vacuum 0.003945453`. Final five-trial medians on the same synthetic non-JIT shape were `direct_modB 0.000612696`, `direct_dmodBds 0.001073811`, `direct_G 0.000250935`, `rhs_vacuum 0.003285109`, satisfying the no >10% regression gate.
+- **Remaining LOC-banking follow-up:** If T2.2 must contribute bloat LOC, replace the explicit subset builders with a smaller profile-family parametrization and rerun the same benchmark gate. Do not reopen formula correctness unless the direct-vs-column parity tests fail.
 
 ### 6.3 — [ ] T2.3: Surface fourier `_from_dofs` / `_from_spec` factory
 
@@ -375,41 +454,47 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 - **Contracts:** Stellsym scatter indices; every public symbol name; tensor conventions (`dgamma_by_dcoeff[i,j,l,k]`).
 - **Validation gate:** T2 + `tests/geo/test_surface_fourier_jax.py`.
 
-### 6.4 — [ ] T2.4: Spec dataclass auto-registration helper
+### 6.4 — [x] T2.4: Spec dataclass auto-registration helper — **COMPLETED / LOC-BANKED SMALL (2026-06-01)**
 
-- **Files:** `src/simsopt/jax_core/specs.py:28-688` (confirmed **29** spec classes, each a `@dataclass(frozen=True)` + manual `register_dataclass(...)`; file 1,622 LOC; v3 cited `:26-740`).
-- **Change:** Define `@register_jax_spec(data_fields=[...], meta_fields=[...])` decorator wrapping `@dataclass(frozen=True)` + `register_dataclass(...)`.
-- **LOC saved:** ~140.
-- **Risk:** Low. JAX `register_dataclass` treats `meta_fields` as static JIT-cache-key material, so the helper must preserve each explicit data/meta partition exactly and keep metadata hashable/immutable.
-- **Contracts:** Field names + data/meta partition (the explicit lists drive what's a traced array vs JIT static).
-- **Validation gate:** T2 + `tests/test_jax_import_smoke.py::test_jax_core_specs_are_pytrees` + representative JIT cache-key/static-field regression.
+- **Files:** `src/simsopt/jax_core/specs.py` now owns `_register_jax_spec(...)` at `:102`; the file contains 29 spec-class decorator uses and one direct `jax.tree_util.register_dataclass(...)` call inside the helper. `tests/core/test_jax_core_specs.py` owns the helper regression at `:374`.
+- **Change:** Defined private `_register_jax_spec(data_fields=(...), meta_fields=(...))` to wrap `@dataclass(frozen=True)` plus JAX dataclass registration. Each spec keeps its data/meta partition next to its class definition.
+- **LOC saved:** about 52 net LOC in `specs.py` (1,622 -> 1,570). The earlier `~140` estimate was a gross repeated-block estimate, not the validated net source reduction.
+- **Risk:** Low after validation. JAX `register_dataclass` treats `meta_fields` as static JIT-cache-key material; the helper preserves every explicit partition and converts tuple declarations to the list form accepted by JAX at the registration boundary.
+- **Contracts:** Field names + data/meta partition (the explicit decorator arguments drive what's a traced array vs JIT static); metadata remains static cache-key material.
+- **Design-it-twice gate:** Option A, centralizing all partitions in a module table, was rejected because a field split change would require a coordinated table edit plus class audit. Option B, local per-class decorator arguments, was selected because the class remains the single place a reviewer sees the partition while the repeated frozen-registration ceremony is hidden.
+- **Information-hiding test:** changing a spec's data/meta decision still requires editing only that class's decorator, and tests fail if data-field changes recompile or meta-field changes stop recompiling.
+- **Validation gate:** completed with `tests/core/test_jax_core_specs.py::test_curve_spec_data_fields_do_not_recompile_but_meta_fields_do`, `tests/core/test_jax_core_specs.py::test_register_jax_spec_helper_preserves_data_meta_partition`, `tests/test_jax_import_smoke.py::test_jax_core_specs_are_pytrees`, full `tests/core/test_jax_core_specs.py tests/jax_core/test_tree_signature.py`, scoped `ruff`, `py_compile`, and `git diff --check`; `mypy` blocked with `No module named mypy`.
 
-### 6.5 — [ ] T2.5: Batch-axis sharding helper factory
+### 6.5 — [x] T2.5: Batch-axis sharding helper factory — **COMPLETED / LOC-BANKED SMALL (2026-06-01)**
 
-- **Files:** `sharding.py` (725 LOC) — the 3 batch dataclasses targeted here are at `:94` / `:104` / `:114`; their builder / maybe_shard / summary triplets at `:301,:309,:317` · `:466,:490,:514` · `:538,:558,:578`. (NOTE: there is a 4th frozen dataclass, `CoilGroupCollectiveConfig:47`, outside this triplet — leave it out of scope.)
-- **Change:** Replace `TrajectoryBatchShardingConfig` / `SeedBatchShardingConfig` / `SurfaceQuadratureShardingConfig` plus their 3 builder / maybe_shard / summary triplets with one parameterized triplet taking `(predicate, axis_name, config_kind)`.
-- **LOC saved:** ~170.
-- **Risk:** Low. CLAUDE.md confirms sharding policy fields are reporting metadata, not load-bearing for kernel execution.
-- **Contracts:** JSON summary key names (`trajectory_sharded`, `field_collective`, etc.) — callers may grep them.
-- **Validation gate:** T2.
+- **Files:** `src/simsopt/jax_core/sharding.py`; new focused regression `tests/jax_core/test_sharding_helpers.py`.
+- **Change:** Replaced the three duplicate point-axis batch predicates/config builders, maybe-shard wrappers, and summary bodies with shared private helpers. Preserved the exported `TrajectoryBatchShardingConfig`, `SeedBatchShardingConfig`, and `SurfaceQuadratureShardingConfig` as concrete dataclass subclasses rather than collapsing them into a single public class.
+- **LOC saved:** 6 net production LOC (`102 insertions / 108 deletions` in `sharding.py`; 725 -> 719). The old `~170` estimate is not banked because preserving public config class identity and readable wrapper functions offset most of the helper extraction.
+- **Risk:** Low for CPU behavior after validation; CUDA/MPS-specific placement proof remains outside this CPU forced-device slice.
+- **Contracts:** JSON summary key names (`trajectory_sharded`, `seed_batch_sharded`, `surface_quadrature_sharded`, `field_collective`, etc.); public class names and field order; leading-axis sharding threshold and strategy checks.
+- **Design-it-twice gate:** Option A, aliasing all three public classes to one implementation class, would save more LOC but change `type(config).__name__` / concrete public class identity. Option B, private base plus concrete public subclasses, was selected because it centralizes the internal policy while preserving exported class contracts.
+- **Validation gate:** completed with `tests/jax_core/test_sharding_helpers.py`, `tests/jax_core/test_tracing_jax_item14.py::test_trajectory_batch_sharding_summary_surfaces_axis_contract`, `tests/jax_core/test_surface_seed_sharding.py`, `tests/jax_core/test_points_coils_sharding.py`, scoped `ruff`, `py_compile`, and `git diff --check`; `mypy` blocked with `No module named mypy`.
 
-### 6.6 — [ ] T2.6: 8 `_resolve_*` env/kwarg helpers → 1 generic + table-driven config builder
+### 6.6 — [x] T2.6: 8 `_resolve_*` env/kwarg helpers → 1 generic resolver — **COMPLETED / LOC-BANKED SMALL (2026-06-01)**
 
-- **Files:** `backend/runtime.py` (2,500 LOC) — 22 separate `_resolve_*` functions; `_config_from_mode` at `:1466`; `_MODE_POLICY_DEFAULTS` at `:208`. (v3 cited `:1313-1441` / `:1444-1488`, drifted.)
-- **Change:** Define `_resolve_kwarg(kwarg, env_name, default, *, parser, source)`; replace 8 ladders with table-driven loop. Have `_MODE_POLICY_DEFAULTS` carry parser refs.
-- **LOC saved:** ~100.
-- **Risk:** Low. Pure refactor; same truth table.
+- **Files:** `src/simsopt/backend/runtime.py`, `tests/test_backend.py`.
+- **Change:** Replaced the eight runtime-kwarg resolver ladders with `_resolve_kwarg(...)`, which owns explicit-kwarg → env override → mode-default precedence. `_config_from_mode(...)` keeps explicit typed field resolution rather than using a heterogenous dict builder; `_MODE_POLICY_DEFAULTS` remains data-only.
+- **LOC saved:** small, approximately low-teens net LOC relative to the already-applied T1.2 runtime export context. The old `~100` estimate is not banked because preserving typed explicit construction and per-field parser source labels keeps some ceremony by design.
+- **Risk:** Low after validation. Pure refactor; same truth table.
 - **Contracts:** Mode-default precedence; env-value validation; `set_backend(...)` kwarg names.
-- **Validation gate:** T2 + `tests/test_backend.py`.
+- **Design-it-twice gate:** Option A, a fully heterogenous table plus dict/`**kwargs` builder, was rejected because it would hide `BackendConfig` field types and make parser/default mismatches easier. Option B, one generic precedence helper with explicit typed field resolution at `_config_from_mode(...)`, was selected because it removes repeated precedence ladders while keeping field-level contracts readable.
+- **Information-hiding test:** changing precedence now edits `_resolve_kwarg(...)` once; changing a field's parser, env source, or mode default still edits only that field's line in `_config_from_mode(...)`.
+- **Validation gate:** completed with full `tests/test_backend.py`, backend import-smoke selectors, scoped `ruff`, `py_compile`, guardrail diff scan, and `git diff --check`; `mypy` blocked with `No module named mypy`.
 
-### 6.7 — [ ] T2.7: SciPy adapter unification in `optimizer_jax_reference.py`
+### 6.7 — [x] T2.7: SciPy adapter unification in `optimizer_jax_reference.py` — **COMPLETED / LOC-BANKED SMALL (2026-06-01)**
 
-- **Files:** `optimizer_jax_reference.py` (569 LOC) — `_scipy_minimize:192`, `target_scipy_minimize_value_and_grad:240`, `_scipy_minimize_value_and_grad:296`, all routing through `_scipy_dispatch_core:138` (closures span `:138-340`; v3 cited `:182-340`).
-- **Change:** Collapse `_scipy_minimize`, `_scipy_minimize_value_and_grad`, `target_scipy_minimize_value_and_grad` into one closure-factory parameterized by `(strict_backend_guard, accept_value_and_grad_callable)`.
-- **LOC saved:** ~220.
-- **Risk:** Low. All 3 route to `_scipy_dispatch_core` already.
-- **Contracts:** `_require_native_cpu_reference_backend_for_scipy_adapter` guard on the 2 lanes that have it; `target_scipy_minimize_value_and_grad` keeps no guard; `scipy_call_contract`, `scipy_initial_call`, `scipy_callback_trace` fields stay populated.
-- **Validation gate:** T2.
+- **Files:** `src/simsopt/geo/optimizer_jax_reference.py` (569 -> 539 LOC).
+- **Change:** Collapsed the three duplicated SciPy host value/gradient objective closures into `_make_scipy_host_value_and_grad_objective(...)` and `_scipy_minimize_value_and_grad_core(...)`. Kept the three public/private adapter entrypoints as explicit wrappers so their guard and method contracts remain visible.
+- **LOC saved:** 30 net production LOC (`63 insertions / 93 deletions`). The old `~220` estimate is not banked because the component-specific guard wrappers and target-lane method check are preserved.
+- **Risk:** Low after validation. All three adapters still route through `_scipy_dispatch_core(...)`; `_scipy_dispatch(...)` remains available and unchanged.
+- **Contracts:** `_require_native_cpu_reference_backend_for_scipy_adapter` guard remains on `_scipy_minimize` and `_scipy_minimize_value_and_grad`; `target_scipy_minimize_value_and_grad` keeps no backend guard and still rejects non-`lbfgs`; `scipy_call_contract`, `scipy_initial_call`, and `scipy_callback_trace` fields stay populated.
+- **Design-it-twice gate:** Option A, replacing the three entrypoints with one public parameterized function, was rejected because it would hide the target-lane guard distinction. Option B, shared private host-objective/core helpers under explicit wrappers, was selected because it removes duplicated host conversion logic without changing adapter contracts.
+- **Validation gate:** completed with focused `tests/geo/test_boozersurface_jax.py` SciPy adapter selectors, `tests/geo/test_boozersurface_jax_private.py::test_private_scipy_adapters_reject_all_jax_backend_modes`, `tests/geo/test_optimizer_jax_reference.py`, `tests/test_jax_import_smoke.py::test_optimizer_jax_reference_methods_reject_all_jax_backend_modes`, scoped `ruff`, `py_compile`, and `git diff --check`; `mypy` blocked with `No module named mypy`.
 
 ### 6.8 — [ ] T2.8: `LayerDriftTracker` dataclass for `single_stage_init_parity`
 
@@ -682,7 +767,7 @@ These need user answers before starting:
 | Tier | LOC reduction (est.) | Items | Effort | Risk |
 |------|---------------------:|------:|--------|------|
 | T1 — Mechanical Wins | ~630-670 guaranteed (v3 ~950; T1.1 cut ~620→~300 as file already shrank to 363 LOC) (+ up to ~1,245 probe-script decision-gated) | 11 (T1.11 verified) | 2 days | Low-Med |
-| T2 — Factory Introductions | ~3,500 (v5 subtracted T2.2 incorrectly; v6 counts its ~400 LOC as remaining until the wrapper fold lands) | 9 (T2.2 partial/open) | 3–4 days | Low-Med |
+| T2 — Factory Introductions | ~3,100-3,500 guaranteed pending re-estimate (T2.2 formula dedup landed but did **not** bank the old ~400 LOC estimate) | 9 (T2.2 LOC-banking follow-up open) | 3–4 days | Low-Med |
 | T3 — Structural Consolidations | ~4,000–5,500 (T3.2 field-eval dup **already folded** via `_BiotSavartFieldEvaluationMixin`, re-scope −~250; T3.3 / T3.8 partially done via the `surfaceobjectives_traceable_jax.py` split) | 8 | 1–2 weeks | Med |
 | T4 — Decision Points | T4.2 resolved (doc-only); T4.1 ~1,628 + T4.3 ~138 + T4.4 (alias quarantine, re-scoped to the qfm **surface** wrappers — **not** obsolete) still decision-gated | 5 (T4.2 resolved) | varies | Decision-bound |
 | **Aggregate** | **STALE until salvage splitting.** Historical estimate was ~7,900-9,800 guaranteed candidate LOC remaining pending T2.2 re-estimate, plus decision-gated deletions. The drift-checkpoint ledger is not net-shortening: effective `src/` is `+45` once untracked source helpers are included, and `src/`+`tests/`+`docs/` is `+2166`. Recalculate aggregate remaining LOC only after banked-shrink slices are isolated and foundation/not-banked slices are classified. | **33 items (T2.2 LOC-banking follow-up open; T3.2 partial; T4.2 resolved)** | **~3 weeks historical estimate; replan after salvage split** | **manageable only with the v8 drift gate** |
