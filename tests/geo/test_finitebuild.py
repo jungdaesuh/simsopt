@@ -1,5 +1,8 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from .surface_test_helpers import get_surface
+from simsopt._core.optimizable import load
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import Coil, apply_symmetries_to_curves, apply_symmetries_to_currents
 from simsopt.geo.curveobjectives import CurveLength, CurveCurveDistance
@@ -155,6 +158,23 @@ class MultifilamentTesting(unittest.TestCase):
             xr = fils[0].rotation.x
             fils[0].rotation.x = xr + 1e-2*np.random.standard_normal(size=xr.shape)
             check(fils, c, numfilaments_n, numfilaments_b)
+
+    def test_zero_rotation_filaments_serialize_in_biotsavart(self):
+        base_curves, base_currents, _ = get_ncsx_data(Nt_coils=1, ppp=16)
+        filaments = create_multifilament_grid(
+            base_curves[0], 2, 2, 0.01, 0.01, rotation_order=None
+        )
+        bs = BiotSavart([Coil(curve, base_currents[0]) for curve in filaments])
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "finitebuild_biotsavart.json"
+            bs.save(str(path))
+            loaded = load(str(path))
+
+        loaded.set_points(np.array([[0.55, 0.02, 0.03]]))
+        field = loaded.B()
+        assert field.shape == (1, 3)
+        assert np.all(np.isfinite(field))
 
     def test_biotsavart_with_symmetries(self):
         """
