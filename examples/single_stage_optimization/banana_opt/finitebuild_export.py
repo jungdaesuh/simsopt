@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Export/evaluation-only finite-build BiotSavart conversion for HBT banana coils.
+"""Export/evaluation-only finite-build BiotSavart conversion for HBT coils.
 
 The generated finite-build artifact is not a new physics model and is not an
 optimization warm-start contract.
@@ -9,14 +9,18 @@ optimization warm-start contract.
 import argparse
 import hashlib
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
 
 from simsopt.field import (
     BiotSavart,
     Coil,
     Current,
+    MGrid,
     apply_symmetries_to_curves,
     apply_symmetries_to_currents,
 )
@@ -45,11 +49,17 @@ from banana_opt.stage2_single_stage_handoff import (
 DEFAULT_HBT_BANANA_NFP = 5
 DEFAULT_HBT_BANANA_STELLSYM = True
 METADATA_SCHEMA_VERSION = 1
+FINITEBUILD_SCOPE_BANANA_ONLY = "banana-only"
+FINITEBUILD_SCOPE_ALL_FAMILIES = "all-families"
+FINITEBUILD_SCOPES = (FINITEBUILD_SCOPE_BANANA_ONLY, FINITEBUILD_SCOPE_ALL_FAMILIES)
+MGRID_GROUPING_SINGLE = "single"
+MGRID_GROUPING_FAMILY = "family"
+MGRID_GROUPINGS = (MGRID_GROUPING_SINGLE, MGRID_GROUPING_FAMILY)
 
 
 @dataclass(frozen=True)
 class FiniteBuildExportConfig:
-    """Configuration for converting one loaded HBT banana coil bundle to finite build."""
+    """Configuration for converting loaded HBT coils to finite-build artifacts."""
 
     biot_savart_file: Path
     output: Path | None
@@ -66,6 +76,18 @@ class FiniteBuildExportConfig:
     nfp: int = DEFAULT_HBT_BANANA_NFP
     stellsym: bool = DEFAULT_HBT_BANANA_STELLSYM
     overwrite: bool = False
+    finitebuild_scope: str = FINITEBUILD_SCOPE_BANANA_ONLY
+    write_mgrid: bool = False
+    mgrid_output: Path | None = None
+    mgrid_grouping: str = MGRID_GROUPING_SINGLE
+    mgrid_nr: int | None = None
+    mgrid_nz: int | None = None
+    mgrid_nphi: int | None = None
+    mgrid_rmin: float | None = None
+    mgrid_rmax: float | None = None
+    mgrid_zmin: float | None = None
+    mgrid_zmax: float | None = None
+    mgrid_nfp: int | None = None
 
 
 @dataclass(frozen=True)
@@ -83,11 +105,14 @@ class FiniteBuildCoilPartitions:
 class FiniteBuildExportResult:
     output_path: Path
     metadata_path: Path
+    mgrid_output_path: Path | None
+    mgrid_group_names: tuple[str, ...]
     source_path: Path
     source_counts: dict[str, int]
     output_counts: dict[str, int]
-    banana_current_A: float
-    banana_filament_current_A: float
+    finitebuild_scope: str
+    banana_current_A: float | None
+    banana_filament_current_A: float | None
     source_banana_total_current_A: float
     output_banana_total_current_A: float
     current_override: bool
@@ -97,9 +122,9 @@ class FiniteBuildExportResult:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert a single-filament HBT banana BiotSavart artifact into a "
-            "finite-build export artifact. The output is for field evaluation "
-            "and external export, not single-stage optimization warm starts."
+            "Convert an HBT BiotSavart artifact into a finite-build export "
+            "artifact. The output is for field evaluation and external export, "
+            "not single-stage optimization warm starts."
         )
     )
     parser.add_argument("biotsavart_file", help="Path to the source BiotSavart JSON.")
@@ -126,7 +151,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--banana-current-A",
         default=None,
         type=float,
-        help="Override the master banana current in amperes.",
+        help=(
+            "Override the master banana current in amperes. Supported only "
+            "for --finitebuild-scope banana-only."
+        ),
+    )
+    parser.add_argument(
+        "--finitebuild-scope",
+        default=FINITEBUILD_SCOPE_BANANA_ONLY,
+        choices=FINITEBUILD_SCOPES,
+        help=(
+            "Which coil families to convert. 'banana-only' preserves the "
+            "existing HBT master-banana symmetry path; 'all-families' converts "
+            "each loaded physical TF/banana/proxy/VF coil directly."
+        ),
     )
     parser.add_argument(
         "--stage2-results",
@@ -166,6 +204,37 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow replacing existing finite-build output and metadata files.",
     )
+    parser.add_argument(
+        "--write-mgrid",
+        action="store_true",
+        help="Write a VMEC MGrid from the output BiotSavart.",
+    )
+    parser.add_argument(
+        "--mgrid-output",
+        default=None,
+        help=(
+            "Output MGrid NetCDF path. Defaults to a sibling "
+            "'<finitebuild-output-stem>_mgrid.nc' when --write-mgrid is used."
+        ),
+    )
+    parser.add_argument(
+        "--mgrid-grouping",
+        default=MGRID_GROUPING_SINGLE,
+        choices=MGRID_GROUPINGS,
+        help=(
+            "MGrid current grouping. 'single' writes the net field as one "
+            "EXTCUR group; 'family' writes one non-empty TF/banana/proxy/VF "
+            "group each."
+        ),
+    )
+    parser.add_argument("--mgrid-nr", default=None, type=int)
+    parser.add_argument("--mgrid-nz", default=None, type=int)
+    parser.add_argument("--mgrid-nphi", default=None, type=int)
+    parser.add_argument("--mgrid-rmin", default=None, type=float)
+    parser.add_argument("--mgrid-rmax", default=None, type=float)
+    parser.add_argument("--mgrid-zmin", default=None, type=float)
+    parser.add_argument("--mgrid-zmax", default=None, type=float)
+    parser.add_argument("--mgrid-nfp", default=None, type=int)
     return parser
 
 
@@ -188,6 +257,18 @@ def config_from_args(args: argparse.Namespace) -> FiniteBuildExportConfig:
         nfp=int(args.nfp),
         stellsym=bool(args.stellsym),
         overwrite=bool(args.overwrite),
+        finitebuild_scope=str(args.finitebuild_scope),
+        write_mgrid=bool(args.write_mgrid),
+        mgrid_output=None if args.mgrid_output is None else Path(args.mgrid_output),
+        mgrid_grouping=str(args.mgrid_grouping),
+        mgrid_nr=args.mgrid_nr,
+        mgrid_nz=args.mgrid_nz,
+        mgrid_nphi=args.mgrid_nphi,
+        mgrid_rmin=args.mgrid_rmin,
+        mgrid_rmax=args.mgrid_rmax,
+        mgrid_zmin=args.mgrid_zmin,
+        mgrid_zmax=args.mgrid_zmax,
+        mgrid_nfp=args.mgrid_nfp,
     )
 
 
@@ -223,6 +304,10 @@ def metadata_output_path(output_path: Path) -> Path:
     return output_path.with_name(f"{output_path.stem}_metadata.json")
 
 
+def mgrid_output_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}_mgrid.nc")
+
+
 def export_finitebuild_biot_savart(
     config: FiniteBuildExportConfig,
 ) -> FiniteBuildExportResult:
@@ -234,10 +319,15 @@ def export_finitebuild_biot_savart(
         else config.output.expanduser().resolve()
     )
     metadata_path = metadata_output_path(output_path)
+    resolved_mgrid_output_path = _resolved_mgrid_output_path(
+        output_path=output_path,
+        config=config,
+    )
     _validate_output_paths(
         source_path,
         output_path=output_path,
         metadata_path=metadata_path,
+        mgrid_path=resolved_mgrid_output_path,
         overwrite=config.overwrite,
     )
 
@@ -248,34 +338,77 @@ def export_finitebuild_biot_savart(
     partitions = _resolve_partitions(source_coils, config)
     source_counts = _partition_counts(partitions)
     source_banana_total_current_A = _coil_current_sum(partitions.banana_coils)
+    source_current_totals_A = _coil_current_totals(partitions)
+    source_current_abs_totals_A = _coil_current_abs_totals(partitions)
 
-    finitebuild_banana_coils, banana_current_A, filament_current_A = (
-        _build_finitebuild_banana_coils(partitions.banana_coils, config)
+    if config.finitebuild_scope == FINITEBUILD_SCOPE_BANANA_ONLY:
+        (
+            output_tf_coils,
+            output_banana_coils,
+            output_proxy_coils,
+            output_vf_coils,
+            banana_current_A,
+            filament_current_A,
+        ) = _build_banana_only_output_coils(partitions, config)
+    elif config.finitebuild_scope == FINITEBUILD_SCOPE_ALL_FAMILIES:
+        (
+            output_tf_coils,
+            output_banana_coils,
+            output_proxy_coils,
+            output_vf_coils,
+            banana_current_A,
+            filament_current_A,
+        ) = _build_all_families_output_coils(partitions, config)
+    else:
+        raise ValueError(
+            f"Unsupported finite-build scope {config.finitebuild_scope!r}."
+        )
+
+    output_partitions = FiniteBuildCoilPartitions(
+        tf_coils=output_tf_coils,
+        banana_coils=output_banana_coils,
+        proxy_coils=output_proxy_coils,
+        vf_coils=output_vf_coils,
+        finite_current_mode=partitions.finite_current_mode,
+        source=partitions.source,
+        manifest_is_legacy_inferred=partitions.manifest_is_legacy_inferred,
     )
-    output_banana_total_current_A = _coil_current_sum(finitebuild_banana_coils)
+    output_banana_total_current_A = _coil_current_sum(output_banana_coils)
     output_coils = [
-        *partitions.tf_coils,
-        *finitebuild_banana_coils,
-        *partitions.proxy_coils,
-        *partitions.vf_coils,
+        *output_tf_coils,
+        *output_banana_coils,
+        *output_proxy_coils,
+        *output_vf_coils,
     ]
     output_biot_savart = BiotSavart(output_coils)
     output_biot_savart.save(str(output_path))
 
-    output_counts = _coil_counts(
-        tf_coils=partitions.tf_coils,
-        banana_coils=finitebuild_banana_coils,
-        proxy_coils=partitions.proxy_coils,
-        vf_coils=partitions.vf_coils,
-    )
+    mgrid_group_names: tuple[str, ...] = ()
+    if resolved_mgrid_output_path is not None:
+        mgrid_group_names = _write_mgrid(
+            output_biot_savart,
+            output_partitions,
+            resolved_mgrid_output_path,
+            config,
+        )
+
+    output_counts = _partition_counts(output_partitions)
+    output_current_totals_A = _coil_current_totals(output_partitions)
+    output_current_abs_totals_A = _coil_current_abs_totals(output_partitions)
     _write_metadata(
         metadata_path,
         source_path=source_path,
         output_path=output_path,
+        mgrid_path=resolved_mgrid_output_path,
+        mgrid_group_names=mgrid_group_names,
         config=config,
         partitions=partitions,
         source_counts=source_counts,
         output_counts=output_counts,
+        source_current_totals_A=source_current_totals_A,
+        source_current_abs_totals_A=source_current_abs_totals_A,
+        output_current_totals_A=output_current_totals_A,
+        output_current_abs_totals_A=output_current_abs_totals_A,
         banana_current_A=banana_current_A,
         filament_current_A=filament_current_A,
         source_banana_total_current_A=source_banana_total_current_A,
@@ -285,9 +418,12 @@ def export_finitebuild_biot_savart(
     return FiniteBuildExportResult(
         output_path=output_path,
         metadata_path=metadata_path,
+        mgrid_output_path=resolved_mgrid_output_path,
+        mgrid_group_names=mgrid_group_names,
         source_path=source_path,
         source_counts=source_counts,
         output_counts=output_counts,
+        finitebuild_scope=config.finitebuild_scope,
         banana_current_A=banana_current_A,
         banana_filament_current_A=filament_current_A,
         source_banana_total_current_A=source_banana_total_current_A,
@@ -298,16 +434,101 @@ def export_finitebuild_biot_savart(
 
 
 def _validate_config(config: FiniteBuildExportConfig) -> None:
+    if config.finitebuild_scope not in FINITEBUILD_SCOPES:
+        raise ValueError(
+            f"Unsupported finite-build scope {config.finitebuild_scope!r}."
+        )
+    if config.mgrid_grouping not in MGRID_GROUPINGS:
+        raise ValueError(f"Unsupported MGrid grouping {config.mgrid_grouping!r}.")
+    if (
+        config.finitebuild_scope == FINITEBUILD_SCOPE_ALL_FAMILIES
+        and config.banana_current_A is not None
+    ):
+        raise ValueError(
+            "--banana-current-A is supported only with --finitebuild-scope banana-only."
+        )
+    if config.banana_current_A is not None and not math.isfinite(
+        float(config.banana_current_A)
+    ):
+        raise ValueError("--banana-current-A must be finite.")
     if int(config.numfilaments_n) <= 0:
         raise ValueError("--numfilaments-n must be positive.")
     if int(config.numfilaments_b) <= 0:
         raise ValueError("--numfilaments-b must be positive.")
+    if not math.isfinite(float(config.gapsize_n)):
+        raise ValueError("--gapsize-n must be finite.")
+    if not math.isfinite(float(config.gapsize_b)):
+        raise ValueError("--gapsize-b must be finite.")
     if float(config.gapsize_n) <= 0.0:
         raise ValueError("--gapsize-n must be positive.")
     if float(config.gapsize_b) <= 0.0:
         raise ValueError("--gapsize-b must be positive.")
     if int(config.nfp) <= 0:
         raise ValueError("--nfp must be positive.")
+    _validate_mgrid_config(config)
+
+
+def _validate_mgrid_config(config: FiniteBuildExportConfig) -> None:
+    if not config.write_mgrid:
+        if _mgrid_options_requested_without_output(config):
+            raise ValueError("MGrid options require --write-mgrid.")
+        return
+
+    required_values: tuple[tuple[str, object | None], ...] = (
+        ("--mgrid-nr", config.mgrid_nr),
+        ("--mgrid-nz", config.mgrid_nz),
+        ("--mgrid-nphi", config.mgrid_nphi),
+        ("--mgrid-rmin", config.mgrid_rmin),
+        ("--mgrid-rmax", config.mgrid_rmax),
+        ("--mgrid-zmin", config.mgrid_zmin),
+        ("--mgrid-zmax", config.mgrid_zmax),
+        ("--mgrid-nfp", config.mgrid_nfp),
+    )
+    missing = tuple(name for name, value in required_values if value is None)
+    if missing:
+        raise ValueError(
+            "--write-mgrid requires explicit grid settings: " + ", ".join(missing) + "."
+        )
+    if int(config.mgrid_nr) <= 0:
+        raise ValueError("--mgrid-nr must be positive.")
+    if int(config.mgrid_nz) <= 0:
+        raise ValueError("--mgrid-nz must be positive.")
+    if int(config.mgrid_nphi) <= 0:
+        raise ValueError("--mgrid-nphi must be positive.")
+    if int(config.mgrid_nfp) <= 0:
+        raise ValueError("--mgrid-nfp must be positive.")
+    mgrid_bounds = (
+        ("--mgrid-rmin", float(config.mgrid_rmin)),
+        ("--mgrid-rmax", float(config.mgrid_rmax)),
+        ("--mgrid-zmin", float(config.mgrid_zmin)),
+        ("--mgrid-zmax", float(config.mgrid_zmax)),
+    )
+    nonfinite_bounds = tuple(
+        name for name, value in mgrid_bounds if not math.isfinite(value)
+    )
+    if nonfinite_bounds:
+        raise ValueError(
+            "MGrid bounds must be finite: " + ", ".join(nonfinite_bounds) + "."
+        )
+    if float(config.mgrid_rmin) >= float(config.mgrid_rmax):
+        raise ValueError("--mgrid-rmin must be smaller than --mgrid-rmax.")
+    if float(config.mgrid_zmin) >= float(config.mgrid_zmax):
+        raise ValueError("--mgrid-zmin must be smaller than --mgrid-zmax.")
+
+
+def _mgrid_options_requested_without_output(config: FiniteBuildExportConfig) -> bool:
+    return (
+        config.mgrid_output is not None
+        or config.mgrid_grouping != MGRID_GROUPING_SINGLE
+        or config.mgrid_nr is not None
+        or config.mgrid_nz is not None
+        or config.mgrid_nphi is not None
+        or config.mgrid_rmin is not None
+        or config.mgrid_rmax is not None
+        or config.mgrid_zmin is not None
+        or config.mgrid_zmax is not None
+        or config.mgrid_nfp is not None
+    )
 
 
 def _validate_output_paths(
@@ -315,6 +536,7 @@ def _validate_output_paths(
     *,
     output_path: Path,
     metadata_path: Path,
+    mgrid_path: Path | None,
     overwrite: bool,
 ) -> None:
     if output_path == source_path:
@@ -325,7 +547,14 @@ def _validate_output_paths(
         raise ValueError(
             "Finite-build metadata path must be distinct from source and output."
         )
-    for path in (output_path, metadata_path):
+    output_paths = (output_path, metadata_path) + (
+        () if mgrid_path is None else (mgrid_path,)
+    )
+    if len(set(output_paths)) != len(output_paths):
+        raise ValueError("Finite-build output paths must be distinct.")
+    if mgrid_path is not None and mgrid_path == source_path:
+        raise ValueError("MGrid output path must not overwrite the source artifact.")
+    for path in output_paths:
         if path.exists() and not overwrite:
             raise ValueError(
                 f"Refusing to overwrite existing file {path}; pass --overwrite."
@@ -484,6 +713,80 @@ def _build_finitebuild_banana_coils(
     )
 
 
+def _build_banana_only_output_coils(
+    partitions: FiniteBuildCoilPartitions,
+    config: FiniteBuildExportConfig,
+) -> tuple[
+    tuple[Coil, ...],
+    tuple[Coil, ...],
+    tuple[Coil, ...],
+    tuple[Coil, ...],
+    float,
+    float,
+]:
+    finitebuild_banana_coils, banana_current_A, filament_current_A = (
+        _build_finitebuild_banana_coils(partitions.banana_coils, config)
+    )
+    return (
+        partitions.tf_coils,
+        finitebuild_banana_coils,
+        partitions.proxy_coils,
+        partitions.vf_coils,
+        banana_current_A,
+        filament_current_A,
+    )
+
+
+def _build_all_families_output_coils(
+    partitions: FiniteBuildCoilPartitions,
+    config: FiniteBuildExportConfig,
+) -> tuple[
+    tuple[Coil, ...],
+    tuple[Coil, ...],
+    tuple[Coil, ...],
+    tuple[Coil, ...],
+    None,
+    None,
+]:
+    if not partitions.banana_coils:
+        raise ValueError("Source artifact has no banana coils to convert.")
+    return (
+        _build_finitebuild_loaded_coils(partitions.tf_coils, config),
+        _build_finitebuild_loaded_coils(partitions.banana_coils, config),
+        _build_finitebuild_loaded_coils(partitions.proxy_coils, config),
+        _build_finitebuild_loaded_coils(partitions.vf_coils, config),
+        None,
+        None,
+    )
+
+
+def _build_finitebuild_loaded_coils(
+    source_coils: Sequence[Coil],
+    config: FiniteBuildExportConfig,
+) -> tuple[Coil, ...]:
+    numfilaments_n = int(config.numfilaments_n)
+    numfilaments_b = int(config.numfilaments_b)
+    nfilaments = numfilaments_n * numfilaments_b
+    finitebuild_coils: list[Coil] = []
+    for source_coil in source_coils:
+        source_current_A = float(source_coil.current.get_value())
+        filament_current_A = source_current_A / float(nfilaments)
+        filament_curves = create_multifilament_grid(
+            source_coil.curve,
+            numfilaments_n,
+            numfilaments_b,
+            float(config.gapsize_n),
+            float(config.gapsize_b),
+            rotation_order=config.rotation_order,
+            frame=config.frame,
+        )
+        for filament_curve in filament_curves:
+            filament_current = Current(filament_current_A)
+            filament_current.fix_all()
+            finitebuild_coils.append(Coil(filament_curve, filament_current))
+    return tuple(finitebuild_coils)
+
+
 def _read_json_mapping(path: Path) -> Mapping[str, object]:
     with path.expanduser().open("r", encoding="utf-8") as infile:
         payload = json.load(infile)
@@ -523,17 +826,49 @@ def _coil_current_sum(coils: Sequence[Coil]) -> float:
     return float(sum(float(coil.current.get_value()) for coil in coils))
 
 
+def _coil_current_abs_sum(coils: Sequence[Coil]) -> float:
+    return float(sum(abs(float(coil.current.get_value())) for coil in coils))
+
+
+def _coil_current_totals(partitions: FiniteBuildCoilPartitions) -> dict[str, float]:
+    values = {
+        "tf": _coil_current_sum(partitions.tf_coils),
+        "banana": _coil_current_sum(partitions.banana_coils),
+        "proxy": _coil_current_sum(partitions.proxy_coils),
+        "vf": _coil_current_sum(partitions.vf_coils),
+    }
+    values["total"] = float(sum(values.values()))
+    return values
+
+
+def _coil_current_abs_totals(partitions: FiniteBuildCoilPartitions) -> dict[str, float]:
+    values = {
+        "tf": _coil_current_abs_sum(partitions.tf_coils),
+        "banana": _coil_current_abs_sum(partitions.banana_coils),
+        "proxy": _coil_current_abs_sum(partitions.proxy_coils),
+        "vf": _coil_current_abs_sum(partitions.vf_coils),
+    }
+    values["total"] = float(sum(values.values()))
+    return values
+
+
 def _write_metadata(
     metadata_path: Path,
     *,
     source_path: Path,
     output_path: Path,
+    mgrid_path: Path | None,
+    mgrid_group_names: Sequence[str],
     config: FiniteBuildExportConfig,
     partitions: FiniteBuildCoilPartitions,
     source_counts: Mapping[str, int],
     output_counts: Mapping[str, int],
-    banana_current_A: float,
-    filament_current_A: float,
+    source_current_totals_A: Mapping[str, float],
+    source_current_abs_totals_A: Mapping[str, float],
+    output_current_totals_A: Mapping[str, float],
+    output_current_abs_totals_A: Mapping[str, float],
+    banana_current_A: float | None,
+    filament_current_A: float | None,
     source_banana_total_current_A: float,
     output_banana_total_current_A: float,
 ) -> None:
@@ -547,6 +882,7 @@ def _write_metadata(
         "FINITEBUILD_EXPORT_SCHEMA_VERSION": METADATA_SCHEMA_VERSION,
         "FINITEBUILD_EXPORT_KIND": "biot_savart_finitebuild",
         "EXPORT_SCOPE": "field_evaluation_only_not_optimization_seed",
+        "FINITEBUILD_SCOPE": config.finitebuild_scope.replace("-", "_"),
         "SOURCE_PATH": str(source_path),
         "SOURCE_SHA256": _sha256_file(source_path),
         "SOURCE_STAGE2_RESULTS_PATH": None
@@ -559,6 +895,10 @@ def _write_metadata(
         "SOURCE_COIL_COUNTS": dict(source_counts),
         "OUTPUT_COIL_COUNTS": dict(output_counts),
         "OUTPUT_COIL_GROUPS": output_manifest.to_json_payload(),
+        "SOURCE_CURRENT_TOTALS_A": dict(source_current_totals_A),
+        "SOURCE_CURRENT_ABS_TOTALS_A": dict(source_current_abs_totals_A),
+        "OUTPUT_CURRENT_TOTALS_A": dict(output_current_totals_A),
+        "OUTPUT_CURRENT_ABS_TOTALS_A": dict(output_current_abs_totals_A),
         "FINITEBUILD_FILAMENT_SETTINGS": {
             "numfilaments_n": int(config.numfilaments_n),
             "numfilaments_b": int(config.numfilaments_b),
@@ -569,21 +909,198 @@ def _write_metadata(
             "nfp": int(config.nfp),
             "stellsym": bool(config.stellsym),
         },
-        "BANANA_CURRENT_A": float(banana_current_A),
-        "BANANA_FILAMENT_CURRENT_A": float(filament_current_A),
+        "BANANA_CURRENT_A": None
+        if banana_current_A is None
+        else float(banana_current_A),
+        "BANANA_FILAMENT_CURRENT_A": None
+        if filament_current_A is None
+        else float(filament_current_A),
         "BANANA_SOURCE_TOTAL_CURRENT_A": float(source_banana_total_current_A),
         "BANANA_OUTPUT_TOTAL_CURRENT_A": float(output_banana_total_current_A),
         "BANANA_CURRENT_OVERRIDE": config.banana_current_A is not None,
-        "PROVENANCE_NOTE": (
-            "Finite-build export preserves existing TF/proxy/VF field sources "
-            "and does not synthesize proxy or VF coils. It is not a new physics "
-            "model."
-        ),
+        "MGRID_EXPORT": _mgrid_metadata(mgrid_path, mgrid_group_names, config),
+        "PROVENANCE_NOTE": _provenance_note(config),
     }
     metadata_path.write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _provenance_note(config: FiniteBuildExportConfig) -> str:
+    if config.finitebuild_scope == FINITEBUILD_SCOPE_BANANA_ONLY:
+        return (
+            "Finite-build export preserves existing TF/proxy/VF field sources "
+            "and does not synthesize proxy or VF coils. It is not a new physics "
+            "model."
+        )
+    return (
+        "Finite-build export converts existing TF/banana/proxy/VF field sources "
+        "to finite-build filaments. It does not synthesize missing field sources "
+        "and is not a new physics model."
+    )
+
+
+def _resolved_mgrid_output_path(
+    *,
+    output_path: Path,
+    config: FiniteBuildExportConfig,
+) -> Path | None:
+    if not config.write_mgrid:
+        return None
+    if config.mgrid_output is None:
+        return mgrid_output_path(output_path)
+    return config.mgrid_output.expanduser().resolve()
+
+
+def _write_mgrid(
+    output_biot_savart: BiotSavart,
+    output_partitions: FiniteBuildCoilPartitions,
+    mgrid_path: Path,
+    config: FiniteBuildExportConfig,
+) -> tuple[str, ...]:
+    if config.mgrid_grouping == MGRID_GROUPING_SINGLE:
+        return _write_single_group_mgrid(output_biot_savart, mgrid_path, config)
+    if config.mgrid_grouping == MGRID_GROUPING_FAMILY:
+        return _write_family_group_mgrid(output_partitions, mgrid_path, config)
+    raise ValueError(f"Unsupported MGrid grouping {config.mgrid_grouping!r}.")
+
+
+def _write_single_group_mgrid(
+    output_biot_savart: BiotSavart,
+    mgrid_path: Path,
+    config: FiniteBuildExportConfig,
+) -> tuple[str, ...]:
+    output_biot_savart.to_mgrid(
+        str(mgrid_path),
+        nr=int(config.mgrid_nr),
+        nz=int(config.mgrid_nz),
+        nphi=int(config.mgrid_nphi),
+        rmin=float(config.mgrid_rmin),
+        rmax=float(config.mgrid_rmax),
+        zmin=float(config.mgrid_zmin),
+        zmax=float(config.mgrid_zmax),
+        nfp=int(config.mgrid_nfp),
+    )
+    return ("simsopt_coils",)
+
+
+def _write_family_group_mgrid(
+    output_partitions: FiniteBuildCoilPartitions,
+    mgrid_path: Path,
+    config: FiniteBuildExportConfig,
+) -> tuple[str, ...]:
+    points_cyl = _mgrid_points_cyl(config)
+    mgrid = MGrid(
+        nr=int(config.mgrid_nr),
+        nz=int(config.mgrid_nz),
+        nphi=int(config.mgrid_nphi),
+        nfp=int(config.mgrid_nfp),
+        rmin=float(config.mgrid_rmin),
+        rmax=float(config.mgrid_rmax),
+        zmin=float(config.mgrid_zmin),
+        zmax=float(config.mgrid_zmax),
+    )
+    group_names: list[str] = []
+    for group_name, coils in _family_mgrid_groups(output_partitions):
+        if not coils:
+            continue
+        br, bp, bz = _evaluate_mgrid_group_field(coils, points_cyl, config)
+        mgrid.add_field_cylindrical(br, bp, bz, name=group_name)
+        group_names.append(group_name)
+    if not group_names:
+        raise ValueError("Cannot write family MGrid: no non-empty coil families.")
+    mgrid.write(str(mgrid_path))
+    return tuple(group_names)
+
+
+def _mgrid_points_cyl(config: FiniteBuildExportConfig) -> np.ndarray:
+    rs = np.linspace(
+        float(config.mgrid_rmin),
+        float(config.mgrid_rmax),
+        int(config.mgrid_nr),
+        endpoint=True,
+    )
+    phis = np.linspace(
+        0.0,
+        2.0 * np.pi / int(config.mgrid_nfp),
+        int(config.mgrid_nphi),
+        endpoint=False,
+    )
+    zs = np.linspace(
+        float(config.mgrid_zmin),
+        float(config.mgrid_zmax),
+        int(config.mgrid_nz),
+        endpoint=True,
+    )
+    phi_grid, z_grid, r_grid = np.meshgrid(phis, zs, rs, indexing="ij")
+    points_cyl = np.zeros((r_grid.size, 3))
+    points_cyl[:, 0] = r_grid.flatten()
+    points_cyl[:, 1] = phi_grid.flatten()
+    points_cyl[:, 2] = z_grid.flatten()
+    return points_cyl
+
+
+def _family_mgrid_groups(
+    output_partitions: FiniteBuildCoilPartitions,
+) -> tuple[tuple[str, tuple[Coil, ...]], ...]:
+    return (
+        ("tf", output_partitions.tf_coils),
+        ("banana", output_partitions.banana_coils),
+        ("proxy", output_partitions.proxy_coils),
+        ("vf", output_partitions.vf_coils),
+    )
+
+
+def _evaluate_mgrid_group_field(
+    coils: Sequence[Coil],
+    points_cyl: np.ndarray,
+    config: FiniteBuildExportConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    biot_savart = BiotSavart(list(coils))
+    biot_savart.set_points_cyl(points_cyl)
+    br, bp, bz = biot_savart.B_cyl().T
+    grid_shape = (int(config.mgrid_nphi), int(config.mgrid_nz), int(config.mgrid_nr))
+    return br.reshape(grid_shape), bp.reshape(grid_shape), bz.reshape(grid_shape)
+
+
+def _mgrid_metadata(
+    mgrid_path: Path | None,
+    mgrid_group_names: Sequence[str],
+    config: FiniteBuildExportConfig,
+) -> dict[str, object] | None:
+    if mgrid_path is None:
+        return None
+    return {
+        "path": str(mgrid_path),
+        "grouping": config.mgrid_grouping,
+        "groups": list(mgrid_group_names),
+        "grid": {
+            "nr": int(config.mgrid_nr),
+            "nz": int(config.mgrid_nz),
+            "nphi": int(config.mgrid_nphi),
+            "rmin": float(config.mgrid_rmin),
+            "rmax": float(config.mgrid_rmax),
+            "zmin": float(config.mgrid_zmin),
+            "zmax": float(config.mgrid_zmax),
+            "nfp": int(config.mgrid_nfp),
+        },
+        "vmec_recommended_settings": {
+            "LFREEB": True,
+            "MGRID_FILE": str(mgrid_path),
+            "NZETA": int(config.mgrid_nphi),
+            "EXTCUR": [1.0 for _ in mgrid_group_names],
+        },
+        "nphi_nzeta_policy": (
+            "Simsopt VMEC docs allow MGrid nphi to be an integer multiple of "
+            "VMEC NZETA; this exporter recommends equality for the simple "
+            "local example-backed path."
+        ),
+        "plasma_current_note": (
+            "MGrid encodes external coil fields only. Set VMEC plasma current "
+            "through NCURR=1, CURTOR, AC, or Simsopt current_profile inputs."
+        ),
+    }
 
 
 def _sha256_file(path: Path) -> str:
@@ -595,25 +1112,36 @@ def _sha256_file(path: Path) -> str:
 
 
 def _summary_lines(result: FiniteBuildExportResult) -> tuple[str, ...]:
-    return (
+    lines = [
         f"source: {result.source_path}",
         f"output: {result.output_path}",
         f"metadata: {result.metadata_path}",
+        f"finitebuild_scope: {result.finitebuild_scope}",
         f"finite_current_mode: {result.finite_current_mode}",
         f"source_counts: {result.source_counts}",
         f"output_counts: {result.output_counts}",
-        (
+    ]
+    if result.banana_current_A is not None:
+        lines.append(
             "banana_current_A: "
             f"{result.banana_current_A:.12g} "
             f"(filament {result.banana_filament_current_A:.12g}, "
             f"override={result.current_override})"
-        ),
-        (
-            "banana_total_current_A: "
-            f"source {result.source_banana_total_current_A:.12g}, "
-            f"output {result.output_banana_total_current_A:.12g}"
-        ),
+        )
+    lines.append(
+        "banana_total_current_A: "
+        f"source {result.source_banana_total_current_A:.12g}, "
+        f"output {result.output_banana_total_current_A:.12g}"
     )
+    if result.mgrid_output_path is not None:
+        lines.append(f"mgrid: {result.mgrid_output_path}")
+        extcur_values = [1.0 for _ in result.mgrid_group_names]
+        lines.append(
+            "vmec_mgrid_settings: LFREEB=T "
+            f"MGRID_FILE={result.mgrid_output_path} "
+            f"NZETA=<mgrid nphi> EXTCUR={extcur_values}"
+        )
+    return tuple(lines)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
