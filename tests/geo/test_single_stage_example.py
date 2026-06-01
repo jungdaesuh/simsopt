@@ -286,6 +286,10 @@ class SingleStageExampleTests(unittest.TestCase):
         return load_single_stage_example_module()
 
     @staticmethod
+    def _contains_jax_array(value):
+        return any(isinstance(leaf, jax.Array) for leaf in jax.tree.leaves(value))
+
+    @staticmethod
     def _jax_runtime_seed_spec_field_kwargs(module):
         return {
             "coil_dof_extraction_spec": module.jax_specs.make_coil_set_dof_extraction_spec(
@@ -5766,13 +5770,12 @@ class SingleStageExampleTests(unittest.TestCase):
                 )
             )
 
-        def contains_jax_array(value):
-            return any(isinstance(leaf, jax.Array) for leaf in jax.tree.leaves(value))
-
         captured_values = [
             cell.cell_contents for cell in (success_filter.__closure__ or ())
         ]
-        self.assertFalse(any(contains_jax_array(value) for value in captured_values))
+        self.assertFalse(
+            any(self._contains_jax_array(value) for value in captured_values)
+        )
         self.assertIsInstance(
             getattr(success_filter, "_traceable_runtime_cache_signature", None),
             tuple,
@@ -9038,6 +9041,109 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertEqual(
             target_lane_profile["profile_point_kind"], "baseline_perturbed"
+        )
+
+    def test_build_target_lane_outer_objectives_full_state_keeps_closure_constants_on_host(
+        self,
+    ):
+        module = self.load_module()
+
+        class FakeOptimizable:
+            def __init__(self, local_dof_size):
+                self.local_dof_size = local_dof_size
+
+        coil_a = FakeOptimizable(2)
+        vessel_surface = FakeOptimizable(1)
+        coil_b = FakeOptimizable(1)
+        plasma_surface = FakeOptimizable(2)
+        dof_map = module.build_single_stage_full_graph_jax_cpu_order_dof_map(
+            types.SimpleNamespace(
+                unique_dof_lineage=(
+                    coil_a,
+                    vessel_surface,
+                    coil_b,
+                    plasma_surface,
+                )
+            ),
+            types.SimpleNamespace(surface=plasma_surface),
+            vessel_surface,
+            bs=types.SimpleNamespace(unique_dof_lineage=(coil_a, coil_b)),
+        )
+
+        self.assertIsInstance(dof_map.optimizer_to_native_indices, np.ndarray)
+        self.assertIsInstance(dof_map.coil_optimizer_indices, np.ndarray)
+        self.assertFalse(isinstance(dof_map.optimizer_to_native_indices, jax.Array))
+        self.assertFalse(isinstance(dof_map.coil_optimizer_indices, jax.Array))
+
+        def compact_scalar(coil_dofs):
+            return jnp.sum(coil_dofs**2)
+
+        def compact_value_and_grad(coil_dofs):
+            return jnp.sum(coil_dofs**2), 2.0 * coil_dofs
+
+        def _runtime_builder(
+            *args,
+            include_profile_suite=False,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            del args, include_profile_suite, outer_objective_config, success_filter
+            self.assertFalse(include_host_wrappers)
+            return {"objective": compact_scalar}
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_value_and_grad_builder",
+            return_value=self._make_value_and_grad_builder(
+                value_and_grad=compact_value_and_grad,
+            ),
+        ):
+            (
+                target_scalar_objective,
+                target_value_and_grad_objective,
+                target_lane_profile,
+                optimizer_initial_value_and_grad,
+            ) = module.build_target_lane_outer_objectives(
+                object(),
+                object(),
+                object(),
+                use_value_and_grad=True,
+                profile_target_lane=False,
+                profile_batch_size=1,
+                outer_objective_config=None,
+                full_state_optimizer_dof_map=dof_map,
+            )
+
+        def closure_values(callable_object):
+            closure_owner = getattr(callable_object, "_fun", callable_object)
+            return [cell.cell_contents for cell in (closure_owner.__closure__ or ())]
+
+        captured_values = closure_values(target_scalar_objective) + closure_values(
+            target_value_and_grad_objective
+        )
+        self.assertFalse(
+            any(self._contains_jax_array(value) for value in captured_values)
+        )
+        self.assertIsNone(target_lane_profile)
+        self.assertIsNone(optimizer_initial_value_and_grad)
+
+        optimizer_dofs = jax.device_put(
+            np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], dtype=np.float64)
+        )
+        with jax.transfer_guard("disallow"):
+            scalar_value = target_scalar_objective(optimizer_dofs)
+            value, gradient = target_value_and_grad_objective(optimizer_dofs)
+
+        self.assertEqual(float(scalar_value), 14.0)
+        self.assertEqual(float(value), 14.0)
+        np.testing.assert_array_equal(
+            np.asarray(gradient),
+            np.array([2.0, 4.0, 6.0, 0.0, 0.0, 0.0]),
         )
 
     def test_build_target_lane_profile_coil_dofs_avoids_exact_baseline_fast_path(self):
