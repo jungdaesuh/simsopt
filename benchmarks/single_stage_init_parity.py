@@ -3554,6 +3554,10 @@ def compare_same_candidate_objective_replay(
         target_native_replay_event = _same_candidate_target_native_replay_event(
             jax_event
         )
+        cpu_event_index = cpu_event.get("event_index")
+        jax_event_index = jax_event.get("event_index")
+        accepted_iteration_target = cpu_event.get("accepted_iteration_target")
+        line_search_evaluation = cpu_event.get("line_search_evaluation")
         (
             comparable_cpu_x,
             comparable_jax_x,
@@ -3576,14 +3580,10 @@ def compare_same_candidate_objective_replay(
                 if first_failure_event is None:
                     first_failure_event = {
                         "pair_index": pair_index,
-                        "cpu_event_index": cpu_event.get("event_index"),
-                        "jax_event_index": jax_event.get("event_index"),
-                        "accepted_iteration_target": cpu_event.get(
-                            "accepted_iteration_target"
-                        ),
-                        "line_search_evaluation": cpu_event.get(
-                            "line_search_evaluation"
-                        ),
+                        "cpu_event_index": cpu_event_index,
+                        "jax_event_index": jax_event_index,
+                        "accepted_iteration_target": accepted_iteration_target,
+                        "line_search_evaluation": line_search_evaluation,
                         "candidate_abs_diff": candidate_abs_diff,
                         "candidate_comparison_scope": candidate_comparison_scope,
                         "failures": list(event_failures),
@@ -3608,12 +3608,10 @@ def compare_same_candidate_objective_replay(
             target_native_rejected_contract_diagnostics.append(
                 {
                     "pair_index": pair_index,
-                    "cpu_event_index": cpu_event.get("event_index"),
-                    "jax_event_index": jax_event.get("event_index"),
-                    "accepted_iteration_target": cpu_event.get(
-                        "accepted_iteration_target"
-                    ),
-                    "line_search_evaluation": cpu_event.get("line_search_evaluation"),
+                    "cpu_event_index": cpu_event_index,
+                    "jax_event_index": jax_event_index,
+                    "accepted_iteration_target": accepted_iteration_target,
+                    "line_search_evaluation": line_search_evaluation,
                     "cpu_reject_class": cpu_failure.get("reject_class"),
                     "cpu_solver_success": cpu_event.get("solver_success"),
                     "jax_solver_success": jax_event.get("solver_success"),
@@ -3667,10 +3665,10 @@ def compare_same_candidate_objective_replay(
         ):
             first_boozer_scipy_callback_split = {
                 "pair_index": pair_index,
-                "cpu_event_index": cpu_event.get("event_index"),
-                "jax_event_index": jax_event.get("event_index"),
-                "accepted_iteration_target": cpu_event.get("accepted_iteration_target"),
-                "line_search_evaluation": cpu_event.get("line_search_evaluation"),
+                "cpu_event_index": cpu_event_index,
+                "jax_event_index": jax_event_index,
+                "accepted_iteration_target": accepted_iteration_target,
+                "line_search_evaluation": line_search_evaluation,
                 **boozer_metadata_summary["first_scipy_callback_split"],
             }
         compare_native_gradient_layers = (
@@ -3695,7 +3693,7 @@ def compare_same_candidate_objective_replay(
                 cpu_decomposition=cpu_boozer_solve_decomposition,
                 jax_decomposition=jax_boozer_solve_decomposition,
                 pair_index=pair_index,
-                line_search_evaluation=cpu_event.get("line_search_evaluation"),
+                line_search_evaluation=line_search_evaluation,
             )
         )
         if compare_native_gradient_diagnostics:
@@ -3717,7 +3715,7 @@ def compare_same_candidate_objective_replay(
         boozer_solve_divergence = boozer_solve_decomposition_tracker.update(
             boozer_solve_decomposition_summary,
             pair_index=pair_index,
-            line_search_evaluation=cpu_event.get("line_search_evaluation"),
+            line_search_evaluation=line_search_evaluation,
         )
         if (
             first_parity_bug_census_divergence is None
@@ -3780,7 +3778,7 @@ def compare_same_candidate_objective_replay(
                 cpu_components=cpu_event.get("objective_components"),
                 jax_components=jax_event.get("objective_components"),
                 pair_index=pair_index,
-                line_search_evaluation=cpu_event.get("line_search_evaluation"),
+                line_search_evaluation=line_search_evaluation,
             )
         )
         if slice_summary["max_slice_objective_abs_diff"] > max_slice_objective_abs_diff:
@@ -3805,7 +3803,7 @@ def compare_same_candidate_objective_replay(
                 cpu_decomposition=cpu_event.get("iota_penalty_decomposition"),
                 jax_decomposition=jax_event.get("iota_penalty_decomposition"),
                 pair_index=pair_index,
-                line_search_evaluation=cpu_event.get("line_search_evaluation"),
+                line_search_evaluation=line_search_evaluation,
             )
         )
         _update_parity_bug_census(
@@ -3816,7 +3814,7 @@ def compare_same_candidate_objective_replay(
         iota_divergence = iota_decomposition_tracker.update(
             iota_decomposition_summary,
             pair_index=pair_index,
-            line_search_evaluation=cpu_event.get("line_search_evaluation"),
+            line_search_evaluation=line_search_evaluation,
         )
         if first_parity_bug_census_divergence is None and iota_divergence is not None:
             first_parity_bug_census_divergence = {
@@ -3875,12 +3873,10 @@ def compare_same_candidate_objective_replay(
             if first_failure_event is None:
                 first_failure_event = {
                     "pair_index": pair_index,
-                    "cpu_event_index": cpu_event.get("event_index"),
-                    "jax_event_index": jax_event.get("event_index"),
-                    "accepted_iteration_target": cpu_event.get(
-                        "accepted_iteration_target"
-                    ),
-                    "line_search_evaluation": cpu_event.get("line_search_evaluation"),
+                    "cpu_event_index": cpu_event_index,
+                    "jax_event_index": jax_event_index,
+                    "accepted_iteration_target": accepted_iteration_target,
+                    "line_search_evaluation": line_search_evaluation,
                     "candidate_abs_diff": candidate_abs_diff,
                     "candidate_comparison_scope": candidate_comparison_scope,
                     "failures": list(event_failures),

@@ -268,6 +268,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.8 comparison-scope `Counter` micro-slice was also executed under the bloat plan. It replaces only the repeated candidate/gradient comparison-scope count increments inside `benchmarks/single_stage_init_parity.py`, banks 3 additional benchmark LOC, preserves explicit replay payload keys by converting the counters back to plain dicts at the result boundary, and records CPU/X64 scope-count replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
 
+**2026-06-01 cross-link:** The T2.8 per-pair metadata-binding micro-slice was also executed under the bloat plan. It binds repeated same-candidate event metadata inside `benchmarks/single_stage_init_parity.py`, banks 4 additional benchmark LOC, preserves explicit replay payload keys and first-failure/callback/rejection metadata fields, and records CPU/X64 replay-metadata validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.
