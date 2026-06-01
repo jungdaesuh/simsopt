@@ -113,7 +113,8 @@ class MaterializedFiniteCurrentSeedResult:
     single_stage_replay_eligible: bool
 
     def to_json_payload(self) -> dict[str, object]:
-        return {
+        profile = get_finite_current_profile(self.finite_current_mode)
+        payload: dict[str, object] = {
             "output_biot_savart": str(self.output_biot_savart),
             "output_results": str(self.output_results),
             "source_biot_savart": str(self.source_biot_savart),
@@ -132,6 +133,8 @@ class MaterializedFiniteCurrentSeedResult:
             "finite_current_mode": self.finite_current_mode,
             "single_stage_replay_eligible": self.single_stage_replay_eligible,
         }
+        payload.update(profile.proxy_current_sign_summary_fields())
+        return payload
 
 
 @dataclass(frozen=True)
@@ -551,6 +554,7 @@ def _build_materialized_results(
             "G0_POLICY": profile.g0_policy,
             "PROXY_PLACEMENT_MODE": profile.proxy_placement_policy,
             "PROXY_VF_CURRENT_SCALAR_POLICY": profile.proxy_vf_current_scalar_policy,
+            **profile.proxy_current_sign_metadata_fields(),
             "PROXY_PLASMA_CURRENT_A": float(realized_proxy_current_A),
             "PLASMA_CURRENT_A": float(realized_proxy_current_A),
             "VF_CURRENT_A": float(realized_vf_current_A),

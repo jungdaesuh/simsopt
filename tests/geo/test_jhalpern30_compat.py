@@ -12,9 +12,7 @@ from simsopt.geo import CurveXYZFourier
 
 
 EXAMPLE_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    Path(__file__).resolve().parents[2] / "examples" / "single_stage_optimization"
 )
 SIGNED_CW_WOUT_PATH = (
     Path(__file__).resolve().parents[1] / "test_files" / "wout_10x10.nc"
@@ -148,7 +146,9 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
 
         self.assertEqual(settings.mode, compat.JHALPERN30_FINITE_CURRENT_MODE)
         self.assertEqual(settings.effective_mode, compat.JHALPERN30_FINITE_CURRENT_MODE)
-        self.assertAlmostEqual(settings.boozer_I, current_contracts.MU0 * proxy_current_A)
+        self.assertAlmostEqual(
+            settings.boozer_I, current_contracts.MU0 * proxy_current_A
+        )
 
     def test_proxy_builder_uses_surface_major_radius_at_z0(self):
         proxy_coil = compat.build_jhalpern30_proxy_plasma_current_coils(
@@ -158,6 +158,14 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
 
         gamma = proxy_coil.curve.gamma()
         radii = np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2)
+        self.assertAlmostEqual(float(proxy_coil.curve.get("xc(1)")), 0.976)
+        self.assertAlmostEqual(float(proxy_coil.curve.get("ys(1)")), 0.976)
+        closed_gamma = np.vstack([gamma, gamma[0]])
+        signed_area = 0.5 * np.sum(
+            closed_gamma[:-1, 0] * closed_gamma[1:, 1]
+            - closed_gamma[1:, 0] * closed_gamma[:-1, 1]
+        )
+        self.assertGreater(signed_area, 0.0)
         np.testing.assert_allclose(radii, 0.976, rtol=0.0, atol=1.0e-12)
         np.testing.assert_allclose(gamma[:, 2], 0.0, rtol=0.0, atol=1.0e-12)
         self.assertFalse(np.any(proxy_coil.curve.dofs_free_status))
@@ -179,8 +187,10 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
         first_leaf_current, first_scale = current_contracts.unwrap_current_optimizable(
             vf_coils[0].current,
         )
-        control_leaf_current, control_scale = current_contracts.unwrap_current_optimizable(
-            vf_build_result.current_control,
+        control_leaf_current, control_scale = (
+            current_contracts.unwrap_current_optimizable(
+                vf_build_result.current_control,
+            )
         )
         self.assertIs(control_leaf_current, first_leaf_current)
         self.assertAlmostEqual(abs(control_scale), abs(proxy_current_A) / 6.5)
@@ -270,7 +280,9 @@ class Jhalpern30CompatibilityTests(unittest.TestCase):
         self.assertTrue(pinned_replay.banana_current_pinned)
         self.assertEqual(pinned_replay.current_scale_A, -7.5e3)
         self.assertEqual(pinned_replay.banana_i_fixed_s2_kA, 7.5)
-        self.assertTrue(compat.jhalpern30_flip_from_stage_parent("/tmp/I-6.5_flip/stage00"))
+        self.assertTrue(
+            compat.jhalpern30_flip_from_stage_parent("/tmp/I-6.5_flip/stage00")
+        )
         self.assertEqual(compat.jhalpern30_iota_target_sign(flip_banana=True), -1)
 
     def test_contiguous_manifest_records_historical_51_coil_layout(self):

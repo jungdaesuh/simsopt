@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -215,6 +217,16 @@ def _sample_field(bs_path: Path, points: np.ndarray) -> np.ndarray:
     return bs.B().copy()
 
 
+def _assert_sign_metadata(
+    test_case: unittest.TestCase,
+    results: dict[str, object],
+    finite_current_mode: FiniteCurrentMode,
+) -> None:
+    profile = get_finite_current_profile(finite_current_mode)
+    for key, expected_value in profile.proxy_current_sign_metadata_fields().items():
+        test_case.assertEqual(results[key], expected_value)
+
+
 class FiniteCurrentMaterializerTests(unittest.TestCase):
     def test_wataru_materialization_writes_replay_eligible_stage2_artifact(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -246,6 +258,16 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
                 MATERIALIZED_IOTA_TRUST_STATUS_UNRUN,
             )
             self.assertEqual(results["SEED_ROLE"], "materialized_finite_current_seed")
+            _assert_sign_metadata(self, results, "wataru_proxy_field")
+            result_payload = result.to_json_payload()
+            self.assertEqual(
+                result_payload["proxy_current_sign_convention"],
+                "wataru_nonnegative_proxy_vf_magnitude",
+            )
+            self.assertEqual(
+                result_payload["proxy_current_scalar_policy"],
+                "nonnegative_magnitude",
+            )
             self.assertTrue(results["DIAGNOSTIC_ONLY"])
             self.assertFalse(results["PRODUCTION_HANDOFF_READY"])
             self.assertFalse(results["BOOZER_TRUSTED"])
@@ -333,6 +355,16 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
             self.assertEqual(partitions.num_proxy_coils, 1)
             self.assertEqual(partitions.num_vf_coils, 20)
             self.assertEqual(results["FINITE_CURRENT_MODE"], "jhalpern30_proxy_field")
+            _assert_sign_metadata(self, results, "jhalpern30_proxy_field")
+            result_payload = result.to_json_payload()
+            self.assertEqual(
+                result_payload["proxy_current_sign_convention"],
+                "jhalpern30_signed_upstream_proxy_loop",
+            )
+            self.assertEqual(
+                result_payload["proxy_current_scalar_policy"],
+                "signed_physical_scalar",
+            )
             self.assertAlmostEqual(results["PROXY_PLASMA_CURRENT_A"], -6.5e3)
             self.assertAlmostEqual(results["VF_CURRENT_A"], -1.0e3)
             self.assertAlmostEqual(results["BOOZER_I"], MU0 * -6.5e3)
@@ -486,24 +518,49 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
             source_bs_path, _, _ = _build_source_seed(root / "source")
             output_root = root / "cli_out"
 
-            exit_code = main(
-                [
-                    "--source-biot-savart",
-                    str(source_bs_path),
-                    "--output-root",
-                    str(output_root),
-                    "--finite-current-mode",
-                    "wataru_proxy_field",
-                    "--proxy-current-A",
-                    "6500",
-                ]
-            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "--source-biot-savart",
+                        str(source_bs_path),
+                        "--output-root",
+                        str(output_root),
+                        "--finite-current-mode",
+                        "wataru_proxy_field",
+                        "--proxy-current-A",
+                        "6500",
+                    ]
+                )
 
             self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(
+                payload["proxy_current_sign_convention"],
+                "wataru_nonnegative_proxy_vf_magnitude",
+            )
             _, results = load_stage2_artifact_results(
                 output_root / "biot_savart_opt.json"
             )
             self.assertEqual(results["FINITE_CURRENT_MODE"], "wataru_proxy_field")
+
+    def test_cli_help_exposes_mode_specific_sign_contract(self):
+        from materialize_finite_current_seed import parse_args
+
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as caught:
+            with contextlib.redirect_stdout(stdout):
+                parse_args(["--help"])
+
+        self.assertEqual(caught.exception.code, 0)
+        help_text = stdout.getvalue()
+        normalized_help = " ".join(help_text.split())
+        self.assertIn(
+            "sign semantics are selected by --finite-current-mode",
+            normalized_help,
+        )
+        self.assertIn("wataru_proxy_field accepts nonnegative", help_text)
+        self.assertIn("jhalpern30_proxy_field accepts a signed upstream", help_text)
 
     def test_sweep_wrapper_records_untrusted_iota_gate_summary(self):
         from run_materialized_current_sweep import main
@@ -537,8 +594,22 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
                 summary["materialized_iota_trust_status"],
                 MATERIALIZED_IOTA_TRUST_STATUS_UNRUN,
             )
+            self.assertEqual(
+                summary["proxy_current_sign_convention"],
+                "wataru_nonnegative_proxy_vf_magnitude",
+            )
             self.assertEqual(len(summary["rows"]), 2)
             self.assertTrue(summary["rows"][0]["field_values_finite"])
+            self.assertEqual(
+                summary["rows"][0]["proxy_current_sign_convention"],
+                "wataru_nonnegative_proxy_vf_magnitude",
+            )
+            self.assertIn(
+                "proxy_current_sign_convention",
+                (output_root / "materialized_current_sweep_summary.csv").read_text(
+                    encoding="utf-8"
+                ),
+            )
             with self.assertRaisesRegex(FileExistsError, "Sweep output already exists"):
                 main(
                     [

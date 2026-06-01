@@ -48,13 +48,15 @@ the upstream jhalpern30 signed proxy-loop convention.
 - `../HW_constraint.md` documents the hardware TF convention as
   `TF current per coil = -80 kA` with CW toroidal field, and the jhalpern30
   banana init current as negative in the same operating basin.
-- `examples/single_stage_optimization/materialize_finite_current_seed.py`
-  currently describes `--proxy-current-A` only as a physical proxy plasma
-  current in amperes. It does not state that Wataru/HBT uses nonnegative
-  magnitude semantics while jhalpern30 uses a signed upstream proxy-loop scalar.
-- `examples/single_stage_optimization/run_materialized_current_sweep.py`
-  records the current grid and warns that materializer iota is untrusted until
-  no-collapse and VMEC checks pass, but it does not print the resolved
+- Before this fix,
+  `examples/single_stage_optimization/materialize_finite_current_seed.py`
+  described `--proxy-current-A` only as a physical proxy plasma current in
+  amperes. It did not state that Wataru/HBT uses nonnegative magnitude
+  semantics while jhalpern30 uses a signed upstream proxy-loop scalar.
+- Before this fix,
+  `examples/single_stage_optimization/run_materialized_current_sweep.py`
+  recorded the current grid and warned that materializer iota is untrusted
+  until no-collapse and VMEC checks pass, but it did not print the resolved
   proxy-current sign convention per point.
 - `examples/single_stage_optimization/banana_opt/current_contracts.py` already
   separates Wataru/HBT nonnegative proxy/VF current validation from jhalpern30
@@ -69,10 +71,10 @@ the upstream jhalpern30 signed proxy-loop convention.
 - `../autoresearch/GPD/analysis/derivation-current-reversal-sign-flip.md`
   records the deeper physics boundary: a clean `B -> -B` twin is a vacuum-only
   relabel, while finite enclosed current must be regenerated as a real source.
-- The current regression surface has tests for finite-current profiles,
-  jhalpern30 compatibility, materializer metadata, CLI smoke, and sweep wrapper
-  behavior, but no test that pins the jhalpern30 proxy-loop handedness or
-  mode-specific sign-convention text.
+- Before this fix, the regression surface had tests for finite-current
+  profiles, jhalpern30 compatibility, materializer metadata, CLI smoke, and
+  sweep wrapper behavior, but lacked coverage for the jhalpern30 proxy-loop
+  handedness and mode-specific sign-convention text.
 
 ## Rationale
 
@@ -108,67 +110,80 @@ the point.
   require coordinated edits in `banana_drivers`, local replay code, docs, and
   parity tests.
 
+## Implementation Status
+
+Completed in this checkout on 2026-06-01:
+
+- The descriptor lives in
+  `examples/single_stage_optimization/banana_opt/finite_current_profiles.py`.
+- Materialized `results.json` files, materializer JSON output, sweep JSON/CSV
+  output, and both CLI help surfaces are populated from that descriptor.
+- The jhalpern30 replay geometry is unchanged; `jhalpern30_compat.py` has no
+  local winding diff.
+- Operator documentation was added in
+  `docs/finite_current_proxy_sign_conventions.md`.
+
 ## Implementation Plan
 
 1. Add a finite-current sign-convention descriptor.
-   - [ ] Add a small immutable descriptor or helper in
+   - [x] Add a small immutable descriptor or helper in
      `examples/single_stage_optimization/banana_opt/current_contracts.py` or
      `examples/single_stage_optimization/banana_opt/finite_current_profiles.py`.
-   - [ ] Include the selected mode, current scalar policy, signedness, replay
+   - [x] Include the selected mode, current scalar policy, signedness, replay
      reference, short operator warning, and metadata-safe convention key.
-   - [ ] Define Wataru/HBT as nonnegative proxy/VF magnitude semantics.
-   - [ ] Define jhalpern30 as the signed upstream proxy-loop replay convention.
-   - [ ] Keep the descriptor free of runtime solver dependencies.
+   - [x] Define Wataru/HBT as nonnegative proxy/VF magnitude semantics.
+   - [x] Define jhalpern30 as the signed upstream proxy-loop replay convention.
+   - [x] Keep the descriptor free of runtime solver dependencies.
 
 2. Surface the convention at the CLI boundary.
-   - [ ] Update `materialize_finite_current_seed.py` help text for
+   - [x] Update `materialize_finite_current_seed.py` help text for
      `--proxy-current-A` to state that semantics are mode-specific.
-   - [ ] Add an argparse epilog or summary text that names the jhalpern30
+   - [x] Add an argparse epilog or summary text that names the jhalpern30
      signed upstream proxy-loop convention and the Wataru/HBT nonnegative
      magnitude convention.
-   - [ ] Update `run_materialized_current_sweep.py` so every sweep summary shows
+   - [x] Update `run_materialized_current_sweep.py` so every sweep summary shows
      the resolved sign convention next to the current value.
-   - [ ] Keep the existing warning that materializer iota is untrusted until
+   - [x] Keep the existing warning that materializer iota is untrusted until
      no-collapse and VMEC gates pass.
 
 3. Persist sign semantics in materialized artifacts.
-   - [ ] Add additive `results.json` fields such as
+   - [x] Add additive `results.json` fields such as
      `PROXY_CURRENT_SIGN_CONVENTION`, `PROXY_CURRENT_SIGN_FRAME`, and
      `PROXY_CURRENT_OPERATOR_WARNING`.
-   - [ ] Populate those fields from the descriptor, not from duplicated string
+   - [x] Populate those fields from the descriptor, not from duplicated string
      literals in the CLI.
-   - [ ] Preserve existing fields including `FINITE_CURRENT_MODE`,
+   - [x] Preserve existing fields including `FINITE_CURRENT_MODE`,
      `PROXY_VF_CURRENT_SCALAR_POLICY`, `PROXY_PLASMA_CURRENT_A`, `VF_CURRENT_A`,
      `VF_CURRENT_SIGN_POLICY`, `BOOZER_I`, and
      `MATERIALIZED_IOTA_TRUST_STATUS`.
-   - [ ] Do not change proxy or VF coil geometry while adding metadata.
+   - [x] Do not change proxy or VF coil geometry while adding metadata.
 
 4. Add regression tests.
-   - [ ] Add descriptor tests in `tests/geo/test_finite_current_profiles.py` or
+   - [x] Add descriptor tests in `tests/geo/test_finite_current_profiles.py` or
      a focused current-contract test.
-   - [ ] Add materializer metadata tests in
+   - [x] Add materializer metadata tests in
      `tests/geo/test_finite_current_materializer.py` for jhalpern30 signed
      semantics and Wataru/HBT nonnegative semantics.
-   - [ ] Add a jhalpern30 compatibility regression in
+   - [x] Add a jhalpern30 compatibility regression in
      `tests/geo/test_jhalpern30_compat.py` that asserts the proxy loop still
      uses the upstream `xc(1)=R`, `ys(1)=R` winding, not just the correct
      radius and `z=0` placement.
-   - [ ] Extend the existing CLI smoke or sweep-wrapper tests to cover
+   - [x] Extend the existing CLI smoke or sweep-wrapper tests to cover
      mode-specific sign-convention text produced from the shared descriptor.
 
 5. Update docs and operator notes.
-   - [ ] Add a short sign-convention note near the materializer docs explaining
+   - [x] Add a short sign-convention note near the materializer docs explaining
      why local winding flips are forbidden without upstream migration.
-   - [ ] Document that Wataru/HBT and jhalpern30 intentionally use different
+   - [x] Document that Wataru/HBT and jhalpern30 intentionally use different
      current input contracts.
-   - [ ] Document that device-wide sign unification is a future coordinated
+   - [x] Document that device-wide sign unification is a future coordinated
      migration, not a local bug fix.
-   - [ ] Reference the no-collapse plus VMEC `curtor` gate before any topology
+   - [x] Reference the no-collapse plus VMEC `curtor` gate before any topology
      or confinement interpretation.
 
 ## Validation Plan
 
-- [ ] Run the focused finite-current test files that own profiles,
+- [x] Run the focused finite-current test files that own profiles,
   jhalpern30 compatibility, materializer metadata, CLI smoke, and sweep wrapper
   behavior:
 
@@ -180,17 +195,21 @@ the point.
     -q
   ```
 
-- [ ] Re-run the known signed-Boozer/current-metadata regression slice:
+  Result: `38 passed, 2 subtests passed`.
+
+- [x] Re-run the signed-Boozer/current-metadata regression slice:
 
   ```bash
   PYTHONNOUSERSITE=1 .conda-env/bin/python -m pytest \
-    tests/geo/test_finite_current_materializer.py::FiniteCurrentMaterializerTests::test_jhalpern_materialization_derives_signed_boozer_i \
-    tests/geo/test_finite_current_materializer.py::FiniteCurrentMaterializerTests::test_source_boozer_i_is_recomputed_from_realized_proxy_current \
-    tests/geo/test_finite_current_materializer.py::FiniteCurrentMaterializerTests::test_derived_boozer_i_validator_fails_on_inconsistent_metadata \
+    tests/geo/test_boozersurface.py::BoozerSurfaceTests::test_finite_current_requires_explicit_signed_G \
+    tests/geo/test_boozersurface.py::DeriveSignedGFromFieldTests::test_excludes_non_tf_coils_from_signed_G \
+    tests/geo/test_boozersurface.py::SignedGWireInBoozerNewtonConvergenceTests::test_attempt_initialize_boozer_surface_routes_signed_G_through_run_code \
     -q
   ```
 
-- [ ] Check the CLI help includes mode-aware sign wording:
+  Result: `3 passed, 4 subtests passed`.
+
+- [x] Check the CLI help includes mode-aware sign wording:
 
   ```bash
   PYTHONNOUSERSITE=1 .conda-env/bin/python \
@@ -198,17 +217,47 @@ the point.
     --help
   ```
 
-- [ ] Check formatting and obvious diff errors:
+- [x] Check formatting and obvious diff errors:
 
   ```bash
   git diff --check
   ```
 
-- [ ] Manually inspect the output metadata from one Wataru/HBT materialization
+- [x] Run a focused ruff check on touched Python files:
+
+  ```bash
+  PYTHONNOUSERSITE=1 .conda-env/bin/python -m ruff check \
+    examples/single_stage_optimization/banana_opt/finite_current_profiles.py \
+    examples/single_stage_optimization/banana_opt/finite_current_materializer.py \
+    examples/single_stage_optimization/materialize_finite_current_seed.py \
+    examples/single_stage_optimization/run_materialized_current_sweep.py \
+    tests/geo/test_finite_current_materializer.py \
+    tests/geo/test_finite_current_profiles.py \
+    tests/geo/test_jhalpern30_compat.py
+  ```
+
+  Result: `All checks passed!`.
+
+- [x] Run a focused ruff format check on touched Python files:
+
+  ```bash
+  PYTHONNOUSERSITE=1 .conda-env/bin/python -m ruff format --check \
+    examples/single_stage_optimization/banana_opt/finite_current_profiles.py \
+    examples/single_stage_optimization/banana_opt/finite_current_materializer.py \
+    examples/single_stage_optimization/materialize_finite_current_seed.py \
+    examples/single_stage_optimization/run_materialized_current_sweep.py \
+    tests/geo/test_finite_current_materializer.py \
+    tests/geo/test_finite_current_profiles.py \
+    tests/geo/test_jhalpern30_compat.py
+  ```
+
+  Result: `7 files already formatted`.
+
+- [x] Manually inspect the output metadata from one Wataru/HBT materialization
   and one jhalpern30 materialization to confirm the new sign fields differ by
   mode and that existing current fields are unchanged.
 
-- [ ] Confirm `git diff` contains no `ys(1)` sign flip in
+- [x] Confirm `git diff` contains no `ys(1)` sign flip in
   `jhalpern30_compat.py` unless an explicit upstream-coordinated migration is
   being performed.
 
@@ -238,26 +287,25 @@ the point.
 
 ## Completion Criteria
 
-- `--proxy-current-A --help` text says that sign semantics are mode-specific.
-- Materializer and sweep summaries print the selected sign convention.
-- Materialized `results.json` files contain additive sign-convention metadata.
-- Tests cover descriptor behavior, mode-specific metadata, and no local
+- [x] `--proxy-current-A --help` text says that sign semantics are mode-specific.
+- [x] Materializer and sweep summaries print the selected sign convention.
+- [x] Materialized `results.json` files contain additive sign-convention metadata.
+- [x] Tests cover descriptor behavior, mode-specific metadata, and no local
   jhalpern30 proxy-winding flip.
-- Focused finite-current tests pass in the repo-local `.conda-env`.
-- The patch contains no local `ys(1) -> -R` winding change.
-- Documentation clearly says that global sign unification requires coordinated
+- [x] Focused finite-current tests pass in the repo-local `.conda-env`.
+- [x] The patch contains no local `ys(1) -> -R` winding change.
+- [x] Documentation clearly says that global sign unification requires coordinated
   upstream migration and parity re-tests.
 
-## Open Questions
+## Resolved Questions
 
-- Should effect-based labels such as "positive jhalpern30 proxy current raises
-  iota" be stored only after the matching run artifacts are committed, or is a
-  warning in CLI output enough for now?
-- Should the descriptor live with profile metadata in `finite_current_profiles.py`
-  or with input validation in `current_contracts.py`?
-- Which downstream artifact consumers need to display the new metadata fields:
-  materializer summary only, sweep summaries, topology archive rows, or all of
-  them?
+- Resolved: do not persist effect-based "raises iota" labels in this patch;
+  persist only the upstream convention and operator warning.
+- Resolved: the descriptor lives with profile metadata in
+  `finite_current_profiles.py`.
+- Resolved for this patch: display the metadata in materializer JSON output and
+  sweep JSON/CSV summaries. Topology archive rows remain a separate downstream
+  integration decision.
 - If device-wide sign unification is later approved, should it be implemented as
   a new finite-current mode first rather than mutating the existing jhalpern30
   replay mode?

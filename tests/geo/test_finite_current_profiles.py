@@ -27,6 +27,7 @@ from banana_opt.finite_current_profiles import (  # noqa: E402
     JHALPERN30_PROFILE,
     VACUUM_PROFILE,
     WATARU_PROFILE,
+    format_proxy_current_sign_convention_help,
     get_finite_current_profile,
 )
 from banana_opt.json_compat import load_boozer_finite_i  # noqa: E402
@@ -143,6 +144,11 @@ class FiniteCurrentProfileTests(unittest.TestCase):
         self.assertEqual(profile.vf_current_mutability, "none")
         self.assertIsNone(profile.default_vf_template_path)
         self.assertIsNone(profile.vf_template_sha256)
+        self.assertEqual(profile.proxy_current_sign_convention.key, "none")
+        self.assertEqual(
+            profile.proxy_current_sign_summary_fields()["proxy_current_scalar_policy"],
+            "none",
+        )
 
     def test_wataru_profile_preserves_default_template_and_counts(self):
         profile = get_finite_current_profile("wataru_proxy_field")
@@ -166,6 +172,22 @@ class FiniteCurrentProfileTests(unittest.TestCase):
             profile.vf_current_sign_policy, "template_sign_vf_current_scalar"
         )
         self.assertEqual(profile.vf_current_mutability, "independent_fixed_current")
+        self.assertEqual(
+            profile.proxy_current_sign_convention.key,
+            "wataru_nonnegative_proxy_vf_magnitude",
+        )
+        self.assertEqual(
+            profile.proxy_current_sign_convention.signedness,
+            "nonnegative_magnitude",
+        )
+        self.assertIn(
+            "nonnegative proxy/VF current magnitudes",
+            profile.proxy_current_sign_help_line(),
+        )
+        self.assertEqual(
+            profile.proxy_current_sign_summary_fields()["proxy_current_scalar_policy"],
+            "nonnegative_magnitude",
+        )
         self.assertIsNotNone(profile.default_vf_template_path)
         self.assertTrue(profile.default_vf_template_path.is_file())
         self.assertEqual(
@@ -197,10 +219,37 @@ class FiniteCurrentProfileTests(unittest.TestCase):
             profile.vf_current_sign_policy, "template_sign_abs_proxy_current"
         )
         self.assertEqual(profile.vf_current_mutability, "shared_unfixed_scaled_current")
+        self.assertEqual(
+            profile.proxy_current_sign_convention.key,
+            "jhalpern30_signed_upstream_proxy_loop",
+        )
+        self.assertEqual(
+            profile.proxy_current_sign_convention.frame,
+            "upstream_jhalpern30_proxy_loop",
+        )
+        self.assertEqual(
+            profile.proxy_current_sign_convention.signedness,
+            "signed_physical_scalar",
+        )
+        self.assertIn("do not infer", profile.proxy_current_sign_help_line())
+        self.assertIn(
+            "flip the local proxy winding",
+            profile.proxy_current_sign_help_line(),
+        )
         self.assertIn(
             "run_stage2_to_single_stage.py:pre_boozer_repair",
             profile.rejected_entrypoints,
         )
+
+    def test_proxy_current_sign_help_lists_mode_specific_contracts(self):
+        help_text = format_proxy_current_sign_convention_help(
+            ("wataru_proxy_field", "jhalpern30_proxy_field"),
+        )
+
+        self.assertIn("wataru_nonnegative_proxy_vf_magnitude", help_text)
+        self.assertIn("jhalpern30_signed_upstream_proxy_loop", help_text)
+        self.assertIn("scalar_policy=nonnegative_magnitude", help_text)
+        self.assertIn("scalar_policy=signed_physical_scalar", help_text)
 
     def test_unknown_profile_mode_fails_loudly(self):
         with self.assertRaisesRegex(ValueError, "Unsupported finite-current profile"):

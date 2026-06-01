@@ -23,6 +23,10 @@ from banana_opt.finite_current_materializer import (  # noqa: E402
     MaterializedFiniteCurrentSeedResult,
     materialize_finite_current_seed,
 )
+from banana_opt.finite_current_profiles import (  # noqa: E402
+    format_proxy_current_sign_convention_help,
+    get_finite_current_profile,
+)
 from banana_opt.json_compat import load_boozer_finite_i  # noqa: E402
 from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
     partition_loaded_stage2_coils,
@@ -49,6 +53,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "iota as untrusted until an explicit no-collapse and VMEC curtor "
             "cross-check is supplied."
         ),
+        epilog=format_proxy_current_sign_convention_help(
+            FINITE_CURRENT_FIELD_SOURCE_MODES,
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--source-biot-savart",
@@ -72,8 +80,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--current-grid-A",
         required=True,
         help=(
-            "Comma-separated nonzero proxy-current grid in amperes, e.g. "
-            "6500,13000. Use a vacuum seed for zero-current replay."
+            "Comma-separated nonzero proxy-current grid in amperes. Sign "
+            "semantics are selected by --finite-current-mode; see the mode "
+            "table below. Use a vacuum seed for zero-current replay."
         ),
     )
     parser.add_argument(
@@ -146,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         overwrite=bool(args.overwrite),
     )
     output_root.mkdir(parents=True, exist_ok=True)
+    sign_summary_fields = get_finite_current_profile(
+        args.finite_current_mode,
+    ).proxy_current_sign_summary_fields()
     rows = [
         _materialize_current_row(
             args=args,
@@ -158,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "source_biot_savart": str(args.source_biot_savart),
         "finite_current_mode": args.finite_current_mode,
+        **sign_summary_fields,
         "materialized_iota_trust_status": MATERIALIZED_IOTA_TRUST_STATUS_UNRUN,
         "materialized_iota_trusted": False,
         "materialized_iota_trust_reason": (
@@ -174,6 +187,13 @@ def main(argv: list[str] | None = None) -> int:
         fieldnames=(
             "index",
             "proxy_current_A",
+            "proxy_current_mode",
+            "proxy_current_sign_convention",
+            "proxy_current_sign_frame",
+            "proxy_current_signedness",
+            "proxy_current_scalar_policy",
+            "proxy_current_replay_reference",
+            "proxy_current_operator_warning",
             "output_biot_savart",
             "output_results",
             "output_total_coils",
@@ -262,11 +282,15 @@ def _materialize_current_row(
         result,
         finite_current_mode=args.finite_current_mode,
     )
+    sign_summary_fields = get_finite_current_profile(
+        args.finite_current_mode,
+    ).proxy_current_sign_summary_fields()
     field_norms = _sample_field_norms(result.output_biot_savart)
     field_values_finite = bool(np.all(np.isfinite(field_norms)))
     return {
         "index": index,
         "proxy_current_A": proxy_current_A,
+        **sign_summary_fields,
         "output_biot_savart": str(result.output_biot_savart),
         "output_results": str(result.output_results),
         "output_total_coils": result.output_total_coils,

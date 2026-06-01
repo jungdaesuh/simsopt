@@ -13,6 +13,9 @@ from banana_opt.finite_current_materializer import (  # noqa: E402
     MaterializedFiniteCurrentSeedRequest,
     materialize_finite_current_seed,
 )
+from banana_opt.finite_current_profiles import (  # noqa: E402
+    format_proxy_current_sign_convention_help,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -22,6 +25,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "BiotSavart seed. Retargeting current requires materializing a new seed; "
             "single-stage replay only loads persisted field sources."
         ),
+        epilog=format_proxy_current_sign_convention_help(
+            FINITE_CURRENT_FIELD_SOURCE_MODES,
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--source-biot-savart",
@@ -45,7 +52,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--proxy-current-A",
         required=True,
         type=float,
-        help="Physical proxy plasma current in amperes.",
+        help=(
+            "Proxy plasma-current scalar in amperes. Sign semantics are selected "
+            "by --finite-current-mode; see the mode table below."
+        ),
     )
     parser.add_argument(
         "--stage2-results",
@@ -72,7 +82,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--vf-current-A",
         type=float,
         default=None,
-        help="Optional VF current scalar. Defaults to proxy_current_A / 6.5.",
+        help=(
+            "Optional VF current scalar. Defaults and sign semantics are selected "
+            "by --finite-current-mode; see the mode table below."
+        ),
     )
     parser.add_argument(
         "--toroidal-flux",
