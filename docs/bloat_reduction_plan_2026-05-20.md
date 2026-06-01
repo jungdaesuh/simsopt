@@ -131,7 +131,7 @@ Every PR review must re-confirm these survive bit-identical post-refactor.
 
 - [ ] `_cpu_ordered` byte-identity oracles (`biotsavart_cpu_ordered.py`, `surface_fourier_jax_cpu_ordered.py`, `boozer_residual_jax` cpu_ordered branch).
 - [ ] Forward/adjoint PLU factor reuse and reporting: `boozersurface_jax.py` `_traceable_plu_or_dummy` (`:3090`) / `_traceable_lu_piv_or_dummy` (`:3120`) and `_build_runtime_linear_solve_callbacks` (`:3938`); the LS-lane PLU adjoint lives in the **now-tracked** `surfaceobjectives_traceable_jax.py` `_traceable_solve_plu_linearization` (`:420`, dense matrix materialization `:454`). (`surfaceobjectives_jax.py` is now 3,110 LOC and the logic relocated to `surfaceobjectives_traceable_jax.py` (3,543 LOC), which is now a committed file.)
-- [ ] `_pre_newton_census_gate_failures` at `single_stage_init_parity.py:3344` (def; used `:3421`/`:3431`; `SystemExit` wiring `:4515`/`:4822`). Release blocker. (v4 cited def `:2877`/used `:2954`-`:2964`; the SUMMARY's `:2198`, the v3 `:3275-3279`, and v6's `:2854` / `:2931` / `:2941` / `:4150-4153` refs are all stale.)
+- [ ] `_pre_newton_census_gate_failures` at `single_stage_init_parity.py:3383` (def; used `:3460`/`:3470`; same-candidate replay gate at `:3431`; `SystemExit` wiring `:4502`/`:4809`). Release blocker. (v4 cited def `:2877`/used `:2954`-`:2964`; the SUMMARY's `:2198`, the v3 `:3275-3279`, v6's `:2854` / `:2931` / `:2941` / `:4150-4153`, and the pre-T2.8 `:3344` / `:3421` / `:3431` / `:4515` / `:4822` refs are all stale.)
 - [ ] `PARITY_LADDER_TOLERANCES` and all sibling tolerance tables in `benchmarks/validation_ladder_contract.py`.
 - [ ] 7 backend modes (`native_cpu`, `jax_cpu_fast`, `jax_cpu_parity`, `jax_cpu_float32_smoke`, `jax_gpu_fast`, `jax_gpu_parity`, `jax_mps_smoke`) + hard rejection of removed `jax_metal_smoke` / `metal` selectors.
 - [ ] `XLA_FLAGS` validation BEFORE `import jax`; `XLA_PYTHON_CLIENT_*` env writes before JAX init.
@@ -209,7 +209,7 @@ Findings from the historical v5 4-agent re-verification against clean HEAD `21c3
 - **Corrections to v4 item text:**
   - **T2.9** — v4/v3 over-counted the migration sites. Before the 2026-06-01 T2.9 slice, `_tolerance_for` existed in **only one** file (`non_banana_example_cpp_jax_cpu_parity.py`, then around `:323`). After that slice, the benchmark keeps a compatibility wrapper and the quantity policy lives in `validation_ladder_contract.py::quantity_parity_tolerance(...)`; see §6.9. `single_stage_parity_matrix.py` has **no** `_tolerance_for` (the cited `:292-302` is wrong), and `stage2_e2e_comparison.py` uses a different mechanism (`optimizer_drift_tolerances:71/74`). The ~100 LOC estimate was overstated and was not banked.
   - **T4.4** — **NOT obsolete.** `minimize_qfm_exact_constraints_SLSQP` has 0 occurrences in `qfm_solver.py` (true; the exact path is augmented-Lagrangian), but the public alias **still exists** in the surface wrappers `qfmsurface_jax.py:281` and `qfmsurface.py:147`, with live test callers. The clarity/quarantine decision is still open — just re-scoped to the surface wrappers.
-  - **T2.8** — "16 trackers" undercounts: there are ≥27 distinct `max_*`/`first_*` accumulators (~75 tracker-related vars) in `compare_same_candidate_objective_replay` (now at `:2946`, not v3's `:2300-2700`).
+  - **T2.8** — "16 trackers" undercounted the pre-helper inventory. The 2026-06-01 core helper now owns the two layer-decomposition drift families; remaining tracker cleanup should re-grep from `LayerDriftTracker` at `:3013` and `compare_same_candidate_objective_replay` at `:3475`, not v3's `:2300-2700`.
   - **T1.1** — the `jax_core/__init__.py` 676→363 LOC drop is **NOT** the planned lazy-export-map conversion; the file still carries the full explicit dual-list. T1.1 remains genuinely `[ ]` with ~300 LOC available. (Do not infer "done" from the LOC delta.)
 - **Two stale LOC counts fixed:** `tracing.py` is 4,287 (v4 said 4,299); `surfaceobjectives_traceable_jax.py` was 3,428 in v5/v6 and is 3,543 in the v7 checkout.
 
@@ -507,14 +507,16 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 - **Design-it-twice gate:** Option A, replacing the three entrypoints with one public parameterized function, was rejected because it would hide the target-lane guard distinction. Option B, shared private host-objective/core helpers under explicit wrappers, was selected because it removes duplicated host conversion logic without changing adapter contracts.
 - **Validation gate:** completed with focused `tests/geo/test_boozersurface_jax.py` SciPy adapter selectors, `tests/geo/test_boozersurface_jax_private.py::test_private_scipy_adapters_reject_all_jax_backend_modes`, `tests/geo/test_optimizer_jax_reference.py`, `tests/test_jax_import_smoke.py::test_optimizer_jax_reference_methods_reject_all_jax_backend_modes`, scoped `ruff`, `py_compile`, and `git diff --check`; `mypy` blocked with `No module named mypy`.
 
-### 6.8 — [ ] T2.8: `LayerDriftTracker` dataclass for `single_stage_init_parity`
+### 6.8 — [ ] T2.8: `LayerDriftTracker` dataclass for `single_stage_init_parity` — **CORE TRACKER HELPER LOC-BANKED SMALL / FULL TARGET OPEN (2026-06-01)**
 
-- **Files:** `single_stage_init_parity.py` — `compare_same_candidate_objective_replay` now at `:2946` (v4's `:2300-2700` is stale; the tracker block runs roughly `:2968-3260`).
-- **Change:** Replace the parallel `max_*` / `first_*` trackers (**≥27 distinct accumulators, ~75 tracker-related vars** — v4's "16" undercounts) with `LayerDriftTracker` instances per family; `.update(summary, *, pair_index, line_search_evaluation)`; `.summary_dict()` returns the same keys.
-- **LOC saved:** ~200.
+- **Files:** `benchmarks/single_stage_init_parity.py` — `LayerDriftTracker` at `:3013`, `_pre_newton_census_gate_failures` at `:3383`, and `compare_same_candidate_objective_replay` at `:3475`.
+- **Change:** Landed `LayerDriftTracker` for the two layer-decomposition families (`boozer_solve_decomposition` and `iota_penalty_decomposition`). The helper owns max layer drift, max layer-diff snapshots, and first-divergence payloads while the final replay result dict remains explicit at the public schema boundary.
+- **Remaining target:** The old full-item target remains open. This slice intentionally did **not** hide slice-owner, metadata, scipy-callback, hardware, failure, or candidate trackers behind a broad dynamic key-prefix helper.
+- **LOC saved:** 13 net benchmark LOC (`79 insertions / 92 deletions`). Do not bank the old `~200 LOC` estimate until the remaining tracker families are folded without obscuring the replay schema.
 - **Risk:** Low. Internal trackers; external dict shape preserved.
-- **Contracts:** `_pre_newton_census_gate_failures` untouched; `parity_bug_census["divergent_layers"]` schema; all `*_summary_dict` payload keys.
-- **Validation gate:** T2 + replay `_pre_newton_census_gate_failures` on a pinned fixture and confirm byte-identical failure list.
+- **Contracts:** `_pre_newton_census_gate_failures` untouched; `parity_bug_census["divergent_layers"]` schema; all replay payload keys preserved.
+- **Design-it-twice gate:** Option A, a generic key-prefix `.summary_dict(...)` emitter for every replay tracker, was rejected because it would hide the output schema in string construction. Option B, a typed state helper for only layer-decomposition drift plus explicit return-key mapping, was selected because it removes repeated state transitions while keeping the public replay payload auditable.
+- **Validation gate:** focused same-candidate replay tests passed (`22 passed, 338 deselected`); the pinned pre-Newton census failure-list tests passed (`9 passed, 351 deselected` for the focused replay/pre-Newton selector); scoped `ruff`, `ruff format --check`, `py_compile`, and `git diff --check` passed. `mypy benchmarks/single_stage_init_parity.py` remains blocked by pre-existing benchmark/example typing debt, including missing example modules and existing `slice_summary` type errors, not by the new tracker helper.
 
 ### 6.9 — [x] T2.9: Quantity-aware tolerance helper in `validation_ladder_contract.py` — **COMPLETED / NOT LOC-BANKED (2026-06-01)**
 
@@ -528,7 +530,7 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 
 ### Tier 2 exit gate
 
-All 9 items merged; net LOC reduction target recomputed from live item estimates; T2 suite green; contract checklist re-affirmed; `_pre_newton_census_gate_failures` replay byte-identical; tag `bloat-reduction-T2-complete`.
+Tier 2 is not closed yet. Recompute the net LOC target from live item estimates after the remaining full-open T2.1/T2.2/T2.3/T2.8 follow-ups are either banked, re-scoped, or explicitly deferred; then run the T2 suite, re-affirm the contract checklist, replay `_pre_newton_census_gate_failures` byte-identically, and only then tag `bloat-reduction-T2-complete`.
 
 ---
 

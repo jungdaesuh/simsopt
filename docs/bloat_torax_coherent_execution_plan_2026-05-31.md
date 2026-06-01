@@ -1264,6 +1264,33 @@ git diff --unified=0 -- src/simsopt/backend/runtime.py tests/test_backend.py | r
 
 - **Review evidence:** scoped review found and fixed one behavior regression: the first `_resolve_kwarg(...)` draft eagerly validated `disable_jit` and `transfer_guard` before the `SIMSOPT_DEBUG=1` overlay could force those fields, whereas HEAD lazily skipped those resolvers under the overlay. The final source restores that short-circuit, adds the regression coverage above, and still has no added dynamic imports, untyped casts, defensive exception handling, or secret-file references in the source/test diff. The important accounting constraint is that this should be counted as a small T2.6 complexity/LOC win, not the original `~100 LOC` bank.
 
+### 2026-06-01 — T2.8 `LayerDriftTracker` core helper
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.8.
+- **Selected slice:** same-candidate replay layer-decomposition tracker state only. No candidate matching, solver-contract diagnostics, objective-component comparison, scipy callback comparison, hardware/failure comparison, parity-census schema, or gate semantics were changed.
+- **Changed files:** `benchmarks/single_stage_init_parity.py`, plus this bloat plan set.
+- **Design-it-twice gate:** a generic key-prefix result builder for every replay tracker was rejected because it would make the output schema depend on string construction. The landed design introduces `LayerDriftTracker` only for layer-decomposition families and keeps the final replay payload keys explicit in `compare_same_candidate_objective_replay`.
+- **Scope status:** core helper LOC-banked small; full T2.8 remains open. `benchmarks/single_stage_init_parity.py` is source-negative by 13 LOC for this slice (`79 insertions / 92 deletions`). Do not bank the old `~200 LOC` estimate until the remaining tracker families are folded without obscuring the replay schema.
+- **Regression evidence:** same-candidate replay tests still cover iota layer reporting, parity bug census ordering, pre-Newton census gate failure messages, and strict gate classification.
+- **Validation evidence:** CPU/X64 replay-helper proof, not full single-stage parity replay.
+
+```bash
+.conda/jax/bin/python -m ruff check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# All checks passed
+.conda/jax/bin/python -m ruff format --check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# 2 files already formatted
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# passed
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/test_benchmark_helpers.py -k 'same_candidate_replay_reports_iota_decomposition_layer or same_candidate_replay_reports_parity_bug_census or pre_newton_census'
+# 9 passed, 351 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/test_benchmark_helpers.py -k 'same_candidate'
+# 22 passed, 338 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy benchmarks/single_stage_init_parity.py
+# blocked: pre-existing benchmark/example typing debt; the new LayerDriftTracker produced no reported mypy error
+git diff --check -- benchmarks/single_stage_init_parity.py
+# passed
+```
+
 ## Risks and Mitigations
 
 - Risk: A TORAX-inspired helper creates another abstraction layer without deleting real complexity.
@@ -1293,6 +1320,6 @@ git diff --unified=0 -- src/simsopt/backend/runtime.py tests/test_backend.py | r
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, complete the remaining T2.3 product-rule formula fold only if it stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, complete the remaining T2.3 product-rule formula fold only if it stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?

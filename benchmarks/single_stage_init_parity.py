@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from dataclasses import dataclass, field as dataclass_field
 import json
 import os
 from collections.abc import Iterator
@@ -3008,6 +3009,44 @@ def _layer_decomposition_summary(
     }
 
 
+@dataclass
+class LayerDriftTracker:
+    """Tracks drift maxima and first divergence for one layer family."""
+
+    max_abs_diff: float = 0.0
+    max_layer: str | None = None
+    max_pair_index: int | None = None
+    max_line_search_evaluation: Any = None
+    max_layer_diffs: dict[str, float] = dataclass_field(default_factory=dict)
+    first_divergence: dict[str, Any] | None = None
+
+    def update(
+        self,
+        summary: dict[str, Any],
+        *,
+        pair_index: int,
+        line_search_evaluation: Any,
+    ) -> dict[str, Any] | None:
+        if summary["max_abs_diff"] > self.max_abs_diff:
+            self.max_abs_diff = summary["max_abs_diff"]
+            self.max_layer = summary["max_layer"]
+            self.max_pair_index = summary["pair_index"]
+            self.max_line_search_evaluation = summary["line_search_evaluation"]
+            self.max_layer_diffs = dict(summary["layer_diffs"])
+        if (
+            self.first_divergence is None
+            and summary["first_divergent_layer"] is not None
+        ):
+            self.first_divergence = {
+                "pair_index": pair_index,
+                "line_search_evaluation": line_search_evaluation,
+                "layer": summary["first_divergent_layer"],
+                "layer_diffs": dict(summary["layer_diffs"]),
+            }
+            return self.first_divergence
+        return None
+
+
 def _compare_same_candidate_layer_decomposition(
     failures: list[str],
     *,
@@ -3475,18 +3514,8 @@ def compare_same_candidate_objective_replay(
     max_slice_gradient_owner = None
     max_slice_pair_index = None
     max_slice_line_search_evaluation = None
-    max_iota_decomposition_abs_diff = 0.0
-    max_iota_decomposition_layer = None
-    max_iota_decomposition_pair_index = None
-    max_iota_decomposition_line_search_evaluation = None
-    first_iota_decomposition_divergence = None
-    max_iota_decomposition_layer_diffs = {}
-    max_boozer_solve_decomposition_abs_diff = 0.0
-    max_boozer_solve_decomposition_layer = None
-    max_boozer_solve_decomposition_pair_index = None
-    max_boozer_solve_decomposition_line_search_evaluation = None
-    first_boozer_solve_decomposition_divergence = None
-    max_boozer_solve_decomposition_layer_diffs = {}
+    iota_decomposition_tracker = LayerDriftTracker()
+    boozer_solve_decomposition_tracker = LayerDriftTracker()
     max_boozer_scipy_callback_abs_diff = 0.0
     first_boozer_scipy_callback_split = None
     # Phase 1.5 reporting-only solve-quality probe aggregate per
@@ -3690,49 +3719,23 @@ def compare_same_candidate_objective_replay(
             family="boozer_solve",
             summary=boozer_solve_decomposition_summary,
         )
-        if (
-            boozer_solve_decomposition_summary["max_abs_diff"]
-            > max_boozer_solve_decomposition_abs_diff
-        ):
-            max_boozer_solve_decomposition_abs_diff = (
-                boozer_solve_decomposition_summary["max_abs_diff"]
-            )
-            max_boozer_solve_decomposition_layer = boozer_solve_decomposition_summary[
-                "max_layer"
-            ]
-            max_boozer_solve_decomposition_pair_index = (
-                boozer_solve_decomposition_summary["pair_index"]
-            )
-            max_boozer_solve_decomposition_line_search_evaluation = (
-                boozer_solve_decomposition_summary["line_search_evaluation"]
-            )
-            max_boozer_solve_decomposition_layer_diffs = dict(
-                boozer_solve_decomposition_summary["layer_diffs"]
-            )
-        if (
-            first_boozer_solve_decomposition_divergence is None
-            and boozer_solve_decomposition_summary["first_divergent_layer"] is not None
-        ):
-            first_boozer_solve_decomposition_divergence = {
-                "pair_index": boozer_solve_decomposition_summary["pair_index"],
-                "line_search_evaluation": boozer_solve_decomposition_summary[
-                    "line_search_evaluation"
-                ],
-                "layer": boozer_solve_decomposition_summary["first_divergent_layer"],
-                "layer_diffs": dict(boozer_solve_decomposition_summary["layer_diffs"]),
-            }
+        boozer_solve_divergence = boozer_solve_decomposition_tracker.update(
+            boozer_solve_decomposition_summary,
+            pair_index=pair_index,
+            line_search_evaluation=cpu_event.get("line_search_evaluation"),
+        )
         if (
             first_parity_bug_census_divergence is None
-            and boozer_solve_decomposition_summary["first_divergent_layer"] is not None
+            and boozer_solve_divergence is not None
         ):
             first_parity_bug_census_divergence = {
                 "family": "boozer_solve",
-                "pair_index": boozer_solve_decomposition_summary["pair_index"],
-                "line_search_evaluation": boozer_solve_decomposition_summary[
+                "pair_index": boozer_solve_divergence["pair_index"],
+                "line_search_evaluation": boozer_solve_divergence[
                     "line_search_evaluation"
                 ],
-                "layer": boozer_solve_decomposition_summary["first_divergent_layer"],
-                "layer_diffs": dict(boozer_solve_decomposition_summary["layer_diffs"]),
+                "layer": boozer_solve_divergence["layer"],
+                "layer_diffs": dict(boozer_solve_divergence["layer_diffs"]),
             }
         if not target_native_rejected_event:
             (
@@ -3817,40 +3820,18 @@ def compare_same_candidate_objective_replay(
             family="iota_penalty",
             summary=iota_decomposition_summary,
         )
-        if iota_decomposition_summary["max_abs_diff"] > max_iota_decomposition_abs_diff:
-            max_iota_decomposition_abs_diff = iota_decomposition_summary["max_abs_diff"]
-            max_iota_decomposition_layer = iota_decomposition_summary["max_layer"]
-            max_iota_decomposition_pair_index = iota_decomposition_summary["pair_index"]
-            max_iota_decomposition_line_search_evaluation = iota_decomposition_summary[
-                "line_search_evaluation"
-            ]
-            max_iota_decomposition_layer_diffs = dict(
-                iota_decomposition_summary["layer_diffs"]
-            )
-        if (
-            first_iota_decomposition_divergence is None
-            and iota_decomposition_summary["first_divergent_layer"] is not None
-        ):
-            first_iota_decomposition_divergence = {
-                "pair_index": iota_decomposition_summary["pair_index"],
-                "line_search_evaluation": iota_decomposition_summary[
-                    "line_search_evaluation"
-                ],
-                "layer": iota_decomposition_summary["first_divergent_layer"],
-                "layer_diffs": dict(iota_decomposition_summary["layer_diffs"]),
-            }
-        if (
-            first_parity_bug_census_divergence is None
-            and iota_decomposition_summary["first_divergent_layer"] is not None
-        ):
+        iota_divergence = iota_decomposition_tracker.update(
+            iota_decomposition_summary,
+            pair_index=pair_index,
+            line_search_evaluation=cpu_event.get("line_search_evaluation"),
+        )
+        if first_parity_bug_census_divergence is None and iota_divergence is not None:
             first_parity_bug_census_divergence = {
                 "family": "iota_penalty",
-                "pair_index": iota_decomposition_summary["pair_index"],
-                "line_search_evaluation": iota_decomposition_summary[
-                    "line_search_evaluation"
-                ],
-                "layer": iota_decomposition_summary["first_divergent_layer"],
-                "layer_diffs": dict(iota_decomposition_summary["layer_diffs"]),
+                "pair_index": iota_divergence["pair_index"],
+                "line_search_evaluation": iota_divergence["line_search_evaluation"],
+                "layer": iota_divergence["layer"],
+                "layer_diffs": dict(iota_divergence["layer_diffs"]),
             }
         if bool(cpu_event.get("native_gradient_used")) and bool(
             jax_event.get("native_gradient_used")
@@ -3973,29 +3954,35 @@ def compare_same_candidate_objective_replay(
         "max_slice_gradient_owner": max_slice_gradient_owner,
         "max_slice_pair_index": max_slice_pair_index,
         "max_slice_line_search_evaluation": max_slice_line_search_evaluation,
-        "max_iota_decomposition_abs_diff": max_iota_decomposition_abs_diff,
-        "max_iota_decomposition_layer": max_iota_decomposition_layer,
-        "max_iota_decomposition_pair_index": max_iota_decomposition_pair_index,
+        "max_iota_decomposition_abs_diff": iota_decomposition_tracker.max_abs_diff,
+        "max_iota_decomposition_layer": iota_decomposition_tracker.max_layer,
+        "max_iota_decomposition_pair_index": iota_decomposition_tracker.max_pair_index,
         "max_iota_decomposition_line_search_evaluation": (
-            max_iota_decomposition_line_search_evaluation
+            iota_decomposition_tracker.max_line_search_evaluation
         ),
-        "max_iota_decomposition_layer_diffs": max_iota_decomposition_layer_diffs,
-        "first_iota_decomposition_divergence": first_iota_decomposition_divergence,
+        "max_iota_decomposition_layer_diffs": (
+            iota_decomposition_tracker.max_layer_diffs
+        ),
+        "first_iota_decomposition_divergence": (
+            iota_decomposition_tracker.first_divergence
+        ),
         "max_boozer_solve_decomposition_abs_diff": (
-            max_boozer_solve_decomposition_abs_diff
+            boozer_solve_decomposition_tracker.max_abs_diff
         ),
-        "max_boozer_solve_decomposition_layer": max_boozer_solve_decomposition_layer,
+        "max_boozer_solve_decomposition_layer": (
+            boozer_solve_decomposition_tracker.max_layer
+        ),
         "max_boozer_solve_decomposition_pair_index": (
-            max_boozer_solve_decomposition_pair_index
+            boozer_solve_decomposition_tracker.max_pair_index
         ),
         "max_boozer_solve_decomposition_line_search_evaluation": (
-            max_boozer_solve_decomposition_line_search_evaluation
+            boozer_solve_decomposition_tracker.max_line_search_evaluation
         ),
         "max_boozer_solve_decomposition_layer_diffs": (
-            max_boozer_solve_decomposition_layer_diffs
+            boozer_solve_decomposition_tracker.max_layer_diffs
         ),
         "first_boozer_solve_decomposition_divergence": (
-            first_boozer_solve_decomposition_divergence
+            boozer_solve_decomposition_tracker.first_divergence
         ),
         # Phase 1.5 reporting-only solve-quality probe slot per
         # docs/parity_scientific_equivalence_contract_2026-05-09.md §2 + §4.
