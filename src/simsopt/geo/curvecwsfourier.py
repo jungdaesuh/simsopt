@@ -1,9 +1,9 @@
 import numpy as np
-import jax
 from jax import jacfwd, jvp, vjp
 import jax.numpy as jnp
 
 from .._core.derivative import Derivative
+from .._core.jax_host_boundary import host_float64 as _as_numpy_float64
 from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ._simsoptpp import sopp_namespace
 from .curve import (
@@ -18,14 +18,6 @@ from .jit import jit
 sopp = sopp_namespace("Curve")
 
 __all__ = ["CurveCWSFourierCPP", "CurveCWSFourier"]
-
-
-def _as_numpy_float64(value):
-    if isinstance(value, np.ndarray):
-        return np.asarray(value, dtype=np.float64)
-    if hasattr(value, "devices"):
-        return np.asarray(jax.device_get(value), dtype=np.float64)
-    return np.asarray(value, dtype=np.float64)
 
 
 def gamma_2d(cdofs, qpts, order, G: int = 0, H: int = 0):

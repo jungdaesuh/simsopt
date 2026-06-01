@@ -3,6 +3,7 @@ import numpy as np
 import simsoptpp as sopp
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative, derivative_dec
+from .._core.jax_host_boundary import host_float64 as _host_float64
 from .._core.types import RealArray
 from .surface import Surface
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
@@ -1221,11 +1222,6 @@ if _HAS_JAX:
     def _scalar_like(reference, value):
         return _runtime_as_runtime_float64(value, reference=reference)
 
-    def _as_numpy_float64(value):
-        if isinstance(value, np.ndarray):
-            return np.asarray(value, dtype=np.float64)
-        return np.asarray(jax.device_get(value), dtype=np.float64)
-
     def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
         gamma1 = _as_jax_float64(gamma1)
         gamma2 = _as_jax_float64(gamma2)
@@ -1284,12 +1280,8 @@ if _HAS_JAX:
 
             return Derivative(
                 {
-                    self.surf1: self.surf1.dgamma_by_dcoeff_vjp(
-                        _as_numpy_float64(grad0)
-                    ),
-                    self.surf2: self.surf2.dgamma_by_dcoeff_vjp(
-                        _as_numpy_float64(grad1)
-                    ),
+                    self.surf1: self.surf1.dgamma_by_dcoeff_vjp(_host_float64(grad0)),
+                    self.surf2: self.surf2.dgamma_by_dcoeff_vjp(_host_float64(grad1)),
                 }
             )
 

@@ -2,10 +2,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import simsopt._core.jax_host_boundary as host_boundary
 from simsopt._core.jax_host_boundary import (
     explicit_cotangent_basis,
     host_array,
     host_float,
+    host_float64,
     host_int,
     host_scalar,
     host_tree,
@@ -97,3 +99,21 @@ def test_host_python_scalar_helpers_materialize_native_python_scalars():
     assert float_value == 3.5
     assert isinstance(int_value, int)
     assert int_value == 7
+
+
+def test_host_float64_materializes_arrays_with_optional_jax_boundary(monkeypatch):
+    device_value = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float32))
+
+    with jax.transfer_guard("disallow"):
+        device_result = host_float64(device_value)
+
+    def reject_jax_import():
+        raise AssertionError("has_jax=False path must not require JAX")
+
+    monkeypatch.setattr(host_boundary, "_require_jax", reject_jax_import)
+    no_jax_result = host_float64([3.0, 4.0], has_jax=False)
+
+    assert device_result.dtype == np.float64
+    assert no_jax_result.dtype == np.float64
+    np.testing.assert_allclose(device_result, np.array([1.0, 2.0]))
+    np.testing.assert_allclose(no_jax_result, np.array([3.0, 4.0]))

@@ -28,6 +28,15 @@ def host_float(value, *, dtype=np.float64) -> float:
     return float(host_scalar(value, dtype=dtype))
 
 
+def host_float64(value, *, has_jax: bool = True) -> np.ndarray:
+    """Materialize a value as a NumPy float64 array at an explicit host boundary."""
+    if isinstance(value, np.ndarray):
+        return np.asarray(value, dtype=np.float64)
+    if not has_jax:
+        return np.asarray(value, dtype=np.float64)
+    return host_array(value, dtype=np.float64)
+
+
 def host_int(value, *, dtype=np.int64) -> int:
     return int(host_scalar(value, dtype=dtype))
 

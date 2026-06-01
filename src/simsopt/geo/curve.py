@@ -22,6 +22,7 @@ except ImportError:
 from ._simsoptpp import has_simsoptpp_symbol, sopp_namespace
 
 sopp = sopp_namespace("Curve")
+from .._core.jax_host_boundary import host_float64 as _host_float64
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative
 
@@ -62,12 +63,7 @@ _HAS_JAX = _jax_vjp is not None
 
 
 def _as_numpy_float64(value):
-    if isinstance(value, np.ndarray):
-        return np.asarray(value, dtype=np.float64)
-    if not _HAS_JAX:
-        return np.asarray(value, dtype=np.float64)
-    with jax.transfer_guard_device_to_host("allow"):
-        return np.asarray(jax.device_get(value), dtype=np.float64)
+    return _host_float64(value, has_jax=_HAS_JAX)
 
 
 if _HAS_JAX:

@@ -9,6 +9,7 @@ from .jit import jit
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from .._core.jax_host_boundary import host_array as _host_array
+from .._core.jax_host_boundary import host_float64 as _as_numpy_float64
 from .._core.jax_host_boundary import host_int as _host_int
 from ..backend import is_jax_backend, raise_if_target_lane_bypass
 from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
@@ -71,12 +72,6 @@ def _as_jax_int32(value):
 
 def _scalar_like(reference, value):
     return _runtime_scalar_like(reference, value)
-
-
-def _as_numpy_float64(value):
-    if isinstance(value, np.ndarray):
-        return np.asarray(value, dtype=np.float64)
-    return _host_array(value, dtype=np.float64)
 
 
 def _curve_jax_position_and_tangent(curve):
