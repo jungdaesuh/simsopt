@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import TypeVar
 
 import jax
 from jax import lax
@@ -91,33 +92,34 @@ FieldCollectiveConfig = CoilGroupCollectiveConfig
 
 
 @dataclass(frozen=True)
-class TrajectoryBatchShardingConfig:
+class _LeadingAxisBatchShardingConfig:
+    """Resolved leading-axis mesh placement for one batch-family public config."""
+
+    mesh: Mesh
+    axis_name: str
+    device_count: int
+    strategy: str
+
+
+@dataclass(frozen=True)
+class TrajectoryBatchShardingConfig(_LeadingAxisBatchShardingConfig):
     """Resolved leading-axis sharding contract for trajectory batches."""
 
-    mesh: Mesh
-    axis_name: str
-    device_count: int
-    strategy: str
-
 
 @dataclass(frozen=True)
-class SeedBatchShardingConfig:
+class SeedBatchShardingConfig(_LeadingAxisBatchShardingConfig):
     """Resolved leading-axis sharding contract for restart seed batches."""
 
-    mesh: Mesh
-    axis_name: str
-    device_count: int
-    strategy: str
-
 
 @dataclass(frozen=True)
-class SurfaceQuadratureShardingConfig:
+class SurfaceQuadratureShardingConfig(_LeadingAxisBatchShardingConfig):
     """Resolved leading-surface-axis sharding contract for surface reductions."""
 
-    mesh: Mesh
-    axis_name: str
-    device_count: int
-    strategy: str
+
+_LeadingAxisConfigT = TypeVar(
+    "_LeadingAxisConfigT",
+    bound=_LeadingAxisBatchShardingConfig,
+)
 
 
 def _devices_for_platform(platform: str) -> tuple[object, ...]:
@@ -298,28 +300,12 @@ def _should_shard_pairwise_rows(points_a, tuning) -> bool:
     return int(points_a.shape[0]) >= int(tuning.min_pairwise_rows_to_shard)
 
 
-def _should_shard_trajectory_batch(y0s, tuning) -> bool:
+def _should_shard_point_axis_batch(values, tuning) -> bool:
     if not tuning.active or tuning.strategy not in {"points", "hybrid"}:
         return False
     if int(tuning.device_count) <= 1:
         return False
-    return int(y0s.shape[0]) >= int(tuning.min_points_to_shard)
-
-
-def _should_shard_seed_batch(seeds, tuning) -> bool:
-    if not tuning.active or tuning.strategy not in {"points", "hybrid"}:
-        return False
-    if int(tuning.device_count) <= 1:
-        return False
-    return int(seeds.shape[0]) >= int(tuning.min_points_to_shard)
-
-
-def _should_shard_surface_quadrature(surface_values, tuning) -> bool:
-    if not tuning.active or tuning.strategy not in {"points", "hybrid"}:
-        return False
-    if int(tuning.device_count) <= 1:
-        return False
-    return int(surface_values.shape[0]) >= int(tuning.min_points_to_shard)
+    return int(values.shape[0]) >= int(tuning.min_points_to_shard)
 
 
 def _should_shard_coil_group(currents, tuning) -> bool:
@@ -469,21 +455,10 @@ def trajectory_batch_sharding_config(
     mode: str | None = None,
 ) -> TrajectoryBatchShardingConfig | None:
     """Return the active leading-axis sharding config for trace batches."""
-    tuning = get_sharding_tuning(mode)
-    if not _should_shard_trajectory_batch(y0s, tuning):
-        return None
-    axis_name = tuning.point_axis_name
-    mesh = _mesh_for(tuning.platform, axis_name)
-    if mesh is None:
-        return None
-    device_count = int(mesh.shape[axis_name])
-    if device_count <= 1:
-        return None
-    return TrajectoryBatchShardingConfig(
-        mesh=mesh,
-        axis_name=axis_name,
-        device_count=device_count,
-        strategy=tuning.strategy,
+    return _leading_axis_sharding_config(
+        y0s,
+        mode=mode,
+        config_cls=TrajectoryBatchShardingConfig,
     )
 
 
@@ -493,21 +468,10 @@ def seed_batch_sharding_config(
     mode: str | None = None,
 ) -> SeedBatchShardingConfig | None:
     """Return the active leading-axis sharding config for restart seed batches."""
-    tuning = get_sharding_tuning(mode)
-    if not _should_shard_seed_batch(seeds, tuning):
-        return None
-    axis_name = tuning.point_axis_name
-    mesh = _mesh_for(tuning.platform, axis_name)
-    if mesh is None:
-        return None
-    device_count = int(mesh.shape[axis_name])
-    if device_count <= 1:
-        return None
-    return SeedBatchShardingConfig(
-        mesh=mesh,
-        axis_name=axis_name,
-        device_count=device_count,
-        strategy=tuning.strategy,
+    return _leading_axis_sharding_config(
+        seeds,
+        mode=mode,
+        config_cls=SeedBatchShardingConfig,
     )
 
 
@@ -517,8 +481,21 @@ def surface_quadrature_sharding_config(
     mode: str | None = None,
 ) -> SurfaceQuadratureShardingConfig | None:
     """Return the active leading-surface-axis sharding config for reductions."""
+    return _leading_axis_sharding_config(
+        surface_values,
+        mode=mode,
+        config_cls=SurfaceQuadratureShardingConfig,
+    )
+
+
+def _leading_axis_sharding_config(
+    values,
+    *,
+    mode: str | None,
+    config_cls: type[_LeadingAxisConfigT],
+) -> _LeadingAxisConfigT | None:
     tuning = get_sharding_tuning(mode)
-    if not _should_shard_surface_quadrature(surface_values, tuning):
+    if not _should_shard_point_axis_batch(values, tuning):
         return None
     axis_name = tuning.point_axis_name
     mesh = _mesh_for(tuning.platform, axis_name)
@@ -527,11 +504,35 @@ def surface_quadrature_sharding_config(
     device_count = int(mesh.shape[axis_name])
     if device_count <= 1:
         return None
-    return SurfaceQuadratureShardingConfig(
+    return config_cls(
         mesh=mesh,
         axis_name=axis_name,
         device_count=device_count,
         strategy=tuning.strategy,
+    )
+
+
+def _maybe_shard_leading_axis_inputs(
+    *arrays,
+    mode: str | None,
+    config: _LeadingAxisBatchShardingConfig | None,
+    config_cls: type[_LeadingAxisConfigT],
+):
+    if len(arrays) == 0:
+        return ()
+    if config is None:
+        config = _leading_axis_sharding_config(
+            arrays[0],
+            mode=mode,
+            config_cls=config_cls,
+        )
+    if config is None:
+        return arrays
+
+    return _place_leading_axis_arrays(
+        arrays,
+        mesh=config.mesh,
+        axis_name=config.axis_name,
     )
 
 
@@ -541,17 +542,11 @@ def maybe_shard_trajectory_batch_inputs(
     config: TrajectoryBatchShardingConfig | None = None,
 ):
     """Shard the leading trajectory axis for each array when policy is active."""
-    if len(arrays) == 0:
-        return ()
-    if config is None:
-        config = trajectory_batch_sharding_config(arrays[0], mode=mode)
-    if config is None:
-        return arrays
-
-    return _place_leading_axis_arrays(
-        arrays,
-        mesh=config.mesh,
-        axis_name=config.axis_name,
+    return _maybe_shard_leading_axis_inputs(
+        *arrays,
+        mode=mode,
+        config=config,
+        config_cls=TrajectoryBatchShardingConfig,
     )
 
 
@@ -561,17 +556,11 @@ def maybe_shard_seed_batch_inputs(
     config: SeedBatchShardingConfig | None = None,
 ):
     """Shard the leading restart-seed axis for each array when policy is active."""
-    if len(arrays) == 0:
-        return ()
-    if config is None:
-        config = seed_batch_sharding_config(arrays[0], mode=mode)
-    if config is None:
-        return arrays
-
-    return _place_leading_axis_arrays(
-        arrays,
-        mesh=config.mesh,
-        axis_name=config.axis_name,
+    return _maybe_shard_leading_axis_inputs(
+        *arrays,
+        mode=mode,
+        config=config,
+        config_cls=SeedBatchShardingConfig,
     )
 
 
@@ -581,17 +570,11 @@ def maybe_shard_surface_quadrature_inputs(
     config: SurfaceQuadratureShardingConfig | None = None,
 ):
     """Shard the leading surface-quadrature axis for each array when active."""
-    if len(arrays) == 0:
-        return ()
-    if config is None:
-        config = surface_quadrature_sharding_config(arrays[0], mode=mode)
-    if config is None:
-        return arrays
-
-    return _place_leading_axis_arrays(
-        arrays,
-        mesh=config.mesh,
-        axis_name=config.axis_name,
+    return _maybe_shard_leading_axis_inputs(
+        *arrays,
+        mode=mode,
+        config=config,
+        config_cls=SurfaceQuadratureShardingConfig,
     )
 
 
@@ -654,14 +637,12 @@ def trajectory_batch_sharding_summary(
     config: TrajectoryBatchShardingConfig | None,
 ) -> dict[str, object]:
     """Return array sharding plus trajectory-batch metadata."""
-    summary = summarize_array_sharding(value)
-    summary["trajectory_sharded"] = config is not None
-    if config is not None:
-        summary["strategy"] = config.strategy
-        summary["axis"] = config.axis_name
-        summary["mesh_shape"] = dict(config.mesh.shape)
-        summary["trajectory_device_count"] = config.device_count
-    return summary
+    return _leading_axis_sharding_summary(
+        value,
+        config=config,
+        active_key="trajectory_sharded",
+        device_count_key="trajectory_device_count",
+    )
 
 
 def seed_batch_sharding_summary(
@@ -670,14 +651,12 @@ def seed_batch_sharding_summary(
     config: SeedBatchShardingConfig | None,
 ) -> dict[str, object]:
     """Return array sharding plus restart-seed-batch metadata."""
-    summary = summarize_array_sharding(value)
-    summary["seed_batch_sharded"] = config is not None
-    if config is not None:
-        summary["strategy"] = config.strategy
-        summary["axis"] = config.axis_name
-        summary["mesh_shape"] = dict(config.mesh.shape)
-        summary["seed_batch_device_count"] = config.device_count
-    return summary
+    return _leading_axis_sharding_summary(
+        value,
+        config=config,
+        active_key="seed_batch_sharded",
+        device_count_key="seed_batch_device_count",
+    )
 
 
 def surface_quadrature_sharding_summary(
@@ -686,13 +665,28 @@ def surface_quadrature_sharding_summary(
     config: SurfaceQuadratureShardingConfig | None,
 ) -> dict[str, object]:
     """Return array sharding plus surface-quadrature metadata."""
+    return _leading_axis_sharding_summary(
+        value,
+        config=config,
+        active_key="surface_quadrature_sharded",
+        device_count_key="surface_quadrature_device_count",
+    )
+
+
+def _leading_axis_sharding_summary(
+    value,
+    *,
+    config: _LeadingAxisBatchShardingConfig | None,
+    active_key: str,
+    device_count_key: str,
+) -> dict[str, object]:
     summary = summarize_array_sharding(value)
-    summary["surface_quadrature_sharded"] = config is not None
+    summary[active_key] = config is not None
     if config is not None:
         summary["strategy"] = config.strategy
         summary["axis"] = config.axis_name
         summary["mesh_shape"] = dict(config.mesh.shape)
-        summary["surface_quadrature_device_count"] = config.device_count
+        summary[device_count_key] = config.device_count
     return summary
 
 
