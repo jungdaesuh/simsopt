@@ -2888,6 +2888,8 @@ def _compare_same_candidate_objective_components(
             "max_slice_gradient_abs_diff": 0.0,
             "max_slice_objective_owner": None,
             "max_slice_gradient_owner": None,
+            "max_slice_pair_index": None,
+            "max_slice_line_search_evaluation": None,
         }
     cpu_names = set(cpu_components)
     jax_names = set(jax_components)
@@ -2922,16 +2924,15 @@ def _compare_same_candidate_objective_components(
         if gradient_diff > max_gradient:
             max_gradient = gradient_diff
             gradient_owner = name
+    has_slice_owner = objective_owner or gradient_owner
     return {
         "max_slice_objective_abs_diff": max_objective,
         "max_slice_gradient_abs_diff": max_gradient,
         "max_slice_objective_owner": objective_owner,
         "max_slice_gradient_owner": gradient_owner,
-        "max_slice_pair_index": pair_index
-        if objective_owner or gradient_owner
-        else None,
+        "max_slice_pair_index": pair_index if has_slice_owner else None,
         "max_slice_line_search_evaluation": line_search_evaluation
-        if objective_owner or gradient_owner
+        if has_slice_owner
         else None,
     }
 
@@ -3763,23 +3764,20 @@ def compare_same_candidate_objective_replay(
                     atol=gradient_atol,
                 ),
             )
-        slice_summary = (
-            {
-                "max_slice_objective_abs_diff": 0.0,
-                "max_slice_gradient_abs_diff": 0.0,
-                "max_slice_objective_owner": None,
-                "max_slice_gradient_owner": None,
-                "max_slice_pair_index": None,
-                "max_slice_line_search_evaluation": None,
-            }
-            if target_native_replay_event
-            else _compare_same_candidate_objective_components(
-                event_failures,
-                cpu_components=cpu_event.get("objective_components"),
-                jax_components=jax_event.get("objective_components"),
-                pair_index=pair_index,
-                line_search_evaluation=line_search_evaluation,
-            )
+        slice_summary = _compare_same_candidate_objective_components(
+            event_failures,
+            cpu_components=(
+                None
+                if target_native_replay_event
+                else cpu_event.get("objective_components")
+            ),
+            jax_components=(
+                None
+                if target_native_replay_event
+                else jax_event.get("objective_components")
+            ),
+            pair_index=pair_index,
+            line_search_evaluation=line_search_evaluation,
         )
         if slice_summary["max_slice_objective_abs_diff"] > max_slice_objective_abs_diff:
             max_slice_objective_abs_diff = slice_summary["max_slice_objective_abs_diff"]

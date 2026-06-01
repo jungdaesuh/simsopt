@@ -270,6 +270,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.8 per-pair metadata-binding micro-slice was also executed under the bloat plan. It binds repeated same-candidate event metadata inside `benchmarks/single_stage_init_parity.py`, banks 4 additional benchmark LOC, preserves explicit replay payload keys and first-failure/callback/rejection metadata fields, and records CPU/X64 replay-metadata validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
 
+**2026-06-01 cross-link:** The T2.8 target-native component-summary reuse micro-slice was also executed under the bloat plan. It reuses `_compare_same_candidate_objective_components(...)` for target-native empty component summaries in `benchmarks/single_stage_init_parity.py`, banks 2 additional benchmark LOC, preserves explicit replay payload keys, component-owner metadata, target-native rejection diagnostics, and same-candidate gate classification, and records CPU/X64 component-summary validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.
