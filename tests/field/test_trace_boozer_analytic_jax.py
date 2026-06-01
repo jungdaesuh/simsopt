@@ -241,7 +241,7 @@ def test_radial_boozer_rhs_evaluates_one_column_bundle_per_point(monkeypatch):
     assert jnp.all(jnp.isfinite(result))
 
 
-def test_direct_radial_evaluators_match_column_evaluators():
+def test_direct_radial_evaluators_reuse_column_evaluators():
     state = _minimal_radial_state()
     points = jnp.asarray(
         [[0.05, 0.1, 0.02], [0.37, 2.4, 1.0], [0.81, 5.1, 2.5]],

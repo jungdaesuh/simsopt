@@ -443,6 +443,7 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 - **Contracts:** `BoozerRadialColumnBundle` field ordering (pytree flattening); `state.stellsym` static branch; `inverse_fourier_transform_{even,odd}` switch.
 - **Validation evidence:** `tests/field/test_trace_boozer_analytic_jax.py` passed (`27 passed`); the `booz_xform` wrapper selector stayed skipped in this env (`2 skipped, 19 deselected`); `ruff check`, `ruff format --check`, `py_compile`, and `git diff --check` passed for touched files; `mypy` remains blocked with `No module named mypy`.
 - **Benchmark evidence:** saved pre-change baseline was `direct_modB 0.000578229`, `direct_dmodBds 0.001090641`, `direct_G 0.000272629`, `rhs_vacuum 0.003945453`. Final five-trial medians on the same synthetic non-JIT shape were `direct_modB 0.000612696`, `direct_dmodBds 0.001073811`, `direct_G 0.000250935`, `rhs_vacuum 0.003285109`, satisfying the no >10% regression gate.
+- **Review clarification:** The direct-vs-column tests prove routing to the column SSOT, not an independent formula oracle; formula correctness remains covered by wrapper parity, closed-form analytic, and benchmark evidence.
 - **Remaining LOC-banking follow-up:** If T2.2 must contribute bloat LOC, replace the explicit subset builders with a smaller profile-family parametrization and rerun the same benchmark gate. Do not reopen formula correctness unless the direct-vs-column parity tests fail.
 
 ### 6.3 — [ ] T2.3: Surface fourier `_from_dofs` / `_from_spec` factory

@@ -411,7 +411,7 @@ def test_radial_columns_cached_once_per_points_cycle(monkeypatch):
     assert scalar_calls[id(state.G)] == 2
 
 
-def test_direct_radial_evaluators_match_column_evaluators():
+def test_direct_radial_evaluators_reuse_column_evaluators():
     wrapper = _synthetic_radial_wrapper()
     state = wrapper.frozen_state
     points = jnp.asarray(_make_evaluation_points(wrapper.nfp), dtype=jnp.float64)

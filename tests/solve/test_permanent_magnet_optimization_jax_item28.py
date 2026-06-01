@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pickle
-from dataclasses import FrozenInstanceError, dataclass, fields
+from dataclasses import FrozenInstanceError, asdict, dataclass, fields
 
 import jax
 import jax.numpy as jnp
@@ -1564,13 +1564,14 @@ def test_gpmo_public_result_wrapper_preserves_pytree_leaf_order() -> None:
         core_result=core,
     )
 
-    assert tuple(field.name for field in fields(GPMOPublicResult)) == (
+    with pytest.raises(TypeError):
+        fields(GPMOPublicResult)
+    assert tuple(field.name for field in fields(GPMOBaselineResult)) == (
         "m",
         "m_history",
-        "core_result",
+        *GPMOBaselineResult._legacy_core_fields,
     )
     for result_type in (
-        GPMOBaselineResult,
         GPMOMultiResult,
         GPMOBacktrackingResult,
         GPMOArbVecResult,
@@ -1579,8 +1580,18 @@ def test_gpmo_public_result_wrapper_preserves_pytree_leaf_order() -> None:
         assert tuple(field.name for field in fields(result_type)) == (
             "m",
             "m_history",
-            "core_result",
+            *result_type._legacy_core_fields,
         )
+    result_dict = asdict(result)
+    assert tuple(result_dict) == (
+        "m",
+        "m_history",
+        *GPMOBaselineResult._legacy_core_fields,
+    )
+    assert "core_result" not in result_dict
+    assert "_core_result" not in result_dict
+    np.testing.assert_array_equal(np.asarray(result_dict["x"]), np.asarray(core.x))
+    np.testing.assert_array_equal(np.asarray(result.core_result.x), np.asarray(core.x))
 
     leaves, treedef = jax.tree.flatten(result)
     expected_leaves = (

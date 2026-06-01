@@ -649,12 +649,12 @@ git diff --check -- src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersu
 - **Changed files:** `src/simsopt/jax_core/boozer_radial_field.py`, `src/simsopt/jax_core/tracing.py`, `tests/field/test_trace_boozer_analytic_jax.py`, `tests/field/test_boozermagneticfield_jax_item33.py`, plus this plan set.
 - **Design-it-twice gate:** the simple full-column wrapper was implemented first and rejected by benchmark evidence because it made standalone direct evaluators and the RHS path evaluate too many radial profiles. The landed design keeps formula ownership in `_eval_*_from_columns`, uses typed subset columns for direct evaluators, and adds `_eval_radial_rhs_columns` plus `_RADIAL_RHS_COLUMN_EVALUATORS` so radial Boozer guiding-centre RHS evaluates one column bundle per point.
 - **Scope status:** formula deduped, not LOC-banked. The old `~400 LOC` T2.2 estimate is not subtracted because preserving the benchmark gate required subset-builder scaffolding (`boozer_radial_field.py` is `262 insertions / 264 deletions`; `tracing.py` adds `114 insertions / 30 deletions`). Future T2.2 LOC banking needs a separate profile-family parametrization and fresh benchmark proof.
-- **Validation evidence:** CPU/X64 radial formula and tracing proof, not CUDA/MPS proof.
+- **Validation evidence:** CPU/X64 radial routing, column-reuse, wrapper parity, benchmark, and tracing proof, not an independent formula-oracle or CUDA/MPS proof.
 
 ```bash
 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/field/test_trace_boozer_analytic_jax.py
 # 27 passed
-PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/field/test_boozermagneticfield_jax_item33.py -k "radial_columns_cached_once_per_points_cycle or direct_radial_evaluators_match_column_evaluators"
+PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/field/test_boozermagneticfield_jax_item33.py -k "radial_columns_cached_once_per_points_cycle or direct_radial_evaluators_reuse_column_evaluators"
 # 2 skipped, 19 deselected
 .conda/jax/bin/python -m ruff check src/simsopt/jax_core/boozer_radial_field.py src/simsopt/jax_core/tracing.py tests/field/test_boozermagneticfield_jax_item33.py tests/field/test_trace_boozer_analytic_jax.py
 # All checks passed
