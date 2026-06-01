@@ -149,6 +149,157 @@ def padded_bounds(
     return max(0.0, rmin - rpad), rmax + rpad, zmax + zpad
 
 
+@dataclasses.dataclass(frozen=True)
+class TopologyTraceDomain:
+    """Cylindrical bounds that tracing seeds and stop guards require."""
+
+    surface_rmin: float
+    surface_rmax: float
+    surface_zmax: float
+    stopping_rmin: float
+    stopping_rmax: float
+    stopping_zmax: float
+    box_padding: float
+    seed_rmin: float | None = None
+    seed_rmax: float | None = None
+    seed_zmax: float = 0.0
+
+    @property
+    def required_rmin(self):
+        if self.seed_rmin is None:
+            return float(self.stopping_rmin)
+        return float(min(self.stopping_rmin, self.seed_rmin))
+
+    @property
+    def required_rmax(self):
+        if self.seed_rmax is None:
+            return float(self.stopping_rmax)
+        return float(max(self.stopping_rmax, self.seed_rmax))
+
+    @property
+    def required_zmax(self):
+        return float(max(self.stopping_zmax, abs(self.seed_zmax)))
+
+    def as_metadata(self):
+        payload = dataclasses.asdict(self)
+        payload["required_rmin"] = self.required_rmin
+        payload["required_rmax"] = self.required_rmax
+        payload["required_zmax"] = self.required_zmax
+        return payload
+
+
+def _surface_cylindrical_bounds(surface):
+    gamma = surface.gamma()
+    rr = np.sqrt(gamma[:, :, 0] ** 2 + gamma[:, :, 1] ** 2)
+    zz = gamma[:, :, 2]
+    return float(np.min(rr)), float(np.max(rr)), float(np.max(np.abs(zz)))
+
+
+def _field_period_phirange(surface):
+    return 0.0, (2.0 * np.pi) / float(max(int(surface.nfp), 1))
+
+
+def surface_trace_domain(
+    surface,
+    *,
+    box_padding=0.05,
+    seed_radii=None,
+    seed_zmax=0.0,
+):
+    """Return the metric domain that interpolation must cover before tracing."""
+    surface_rmin, surface_rmax, surface_zmax = _surface_cylindrical_bounds(surface)
+    if seed_radii is None:
+        seed_rmin = None
+        seed_rmax = None
+    else:
+        radii = np.asarray(seed_radii, dtype=float)
+        seed_rmin = float(np.min(radii)) if radii.size else None
+        seed_rmax = float(np.max(radii)) if radii.size else None
+    return TopologyTraceDomain(
+        surface_rmin=surface_rmin,
+        surface_rmax=surface_rmax,
+        surface_zmax=surface_zmax,
+        stopping_rmin=float(surface_rmin * (1.0 - float(box_padding))),
+        stopping_rmax=float(surface_rmax * (1.0 + float(box_padding))),
+        stopping_zmax=float(surface_zmax * (1.0 + float(box_padding))),
+        box_padding=float(box_padding),
+        seed_rmin=seed_rmin,
+        seed_rmax=seed_rmax,
+        seed_zmax=float(abs(seed_zmax)),
+    )
+
+
+def _interpolation_covers_trace_domain(
+    rrange,
+    phirange,
+    zrange,
+    trace_domain,
+    required_phirange,
+):
+    covers_r = (
+        float(rrange[0]) <= trace_domain.required_rmin
+        and float(rrange[1]) >= trace_domain.required_rmax
+    )
+    phimin = float(phirange[0])
+    phimax = float(phirange[1])
+    required_phimin = float(required_phirange[0])
+    required_phimax = float(required_phirange[1])
+    covers_phi = phimin <= required_phimin and phimax >= required_phimax
+    zmin = float(zrange[0])
+    zmax = float(zrange[1])
+    if zmin == 0.0:
+        covers_z = zmax >= trace_domain.required_zmax
+    else:
+        covers_z = (
+            zmin <= -trace_domain.required_zmax and zmax >= trace_domain.required_zmax
+        )
+    return bool(covers_r and covers_phi and covers_z)
+
+
+def _field_model_payload(
+    *,
+    policy,
+    selected_mode,
+    reason,
+    trace_domain,
+    grid=None,
+    rrange=None,
+    phirange=None,
+    zrange=None,
+    required_phirange=None,
+    extrapolate=None,
+    interpolation_covers_trace_domain=None,
+    max_abs_error=None,
+    mean_abs_error=None,
+    max_rel_error=None,
+):
+    return {
+        "policy": str(policy),
+        "selected_mode": str(selected_mode),
+        "reason": str(reason),
+        "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
+        "grid": grid,
+        "rrange": None
+        if rrange is None
+        else [float(rrange[0]), float(rrange[1]), int(rrange[2])],
+        "phirange": None
+        if phirange is None
+        else [float(phirange[0]), float(phirange[1]), int(phirange[2])],
+        "zrange": None
+        if zrange is None
+        else [float(zrange[0]), float(zrange[1]), int(zrange[2])],
+        "required_phirange": None
+        if required_phirange is None
+        else [float(required_phirange[0]), float(required_phirange[1])],
+        "extrapolate": None if extrapolate is None else bool(extrapolate),
+        "trace_domain": None if trace_domain is None else trace_domain.as_metadata(),
+        "interpolation_covers_trace_domain": interpolation_covers_trace_domain,
+        "max_abs_error": max_abs_error,
+        "mean_abs_error": mean_abs_error,
+        "max_rel_error": max_rel_error,
+    }
+
+
 def stop_reason_label(stop_index, stop_labels):
     """Map a stopping-criterion index to a human-readable label."""
     if 0 <= stop_index < len(stop_labels):
@@ -233,6 +384,8 @@ def prepare_topology_field(
     *,
     field_policy="auto",
     interpolation_grid=None,
+    trace_domain=None,
+    seed_radii=None,
 ):
     from simsopt.field import InterpolatedField
 
@@ -242,60 +395,123 @@ def prepare_topology_field(
             f"Unsupported topology field policy {field_policy!r}; expected "
             "'auto', 'always', or 'never'"
         )
+    resolved_trace_domain = (
+        surface_trace_domain(surface, seed_radii=seed_radii)
+        if trace_domain is None
+        else trace_domain
+    )
+    required_phirange = _field_period_phirange(surface)
     if isinstance(bfield, InterpolatedField):
-        return bfield, {
-            "policy": resolved_policy,
-            "selected_mode": "pre_interpolated",
-            "reason": "already_interpolated",
-            "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
-            "grid": None,
-            "max_abs_error": None,
-            "mean_abs_error": None,
-            "max_rel_error": None,
-        }
+        return bfield, _field_model_payload(
+            policy=resolved_policy,
+            selected_mode="pre_interpolated",
+            reason="already_interpolated",
+            trace_domain=resolved_trace_domain,
+            required_phirange=required_phirange,
+        )
     should_interpolate = resolved_policy == "always" or (
         resolved_policy == "auto"
         and float(tmax) >= float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD)
     )
     if not should_interpolate:
         reason = "below_threshold" if resolved_policy == "auto" else "explicit_never"
-        return bfield, {
-            "policy": resolved_policy,
-            "selected_mode": "native",
-            "reason": reason,
-            "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
-            "grid": None,
-            "max_abs_error": None,
-            "mean_abs_error": None,
-            "max_rel_error": None,
-        }
+        return bfield, _field_model_payload(
+            policy=resolved_policy,
+            selected_mode="native",
+            reason=reason,
+            trace_domain=resolved_trace_domain,
+            required_phirange=required_phirange,
+            interpolation_covers_trace_domain=False,
+        )
 
     grid = dict(TOPOLOGY_INTERPOLATION_GRID)
+    explicit_rrange = None
+    explicit_phirange = None
+    explicit_zrange = None
+    extrapolate = True
     if interpolation_grid is not None:
-        grid.update(interpolation_grid)
-    gamma = surface.gamma()
-    rr = np.sqrt(gamma[:, :, 0] ** 2 + gamma[:, :, 1] ** 2)
-    zz = gamma[:, :, 2]
+        grid.update(
+            {
+                key: interpolation_grid[key]
+                for key in ("degree", "nr", "nphi", "nz")
+                if key in interpolation_grid
+            }
+        )
+        explicit_rrange = interpolation_grid.get("rrange")
+        explicit_phirange = interpolation_grid.get("phirange")
+        explicit_zrange = interpolation_grid.get("zrange")
+        if "extrapolate" in interpolation_grid:
+            extrapolate = bool(interpolation_grid["extrapolate"])
     interp_rmin, interp_rmax, interp_zmax = padded_bounds(
-        float(np.min(rr)),
-        float(np.max(rr)),
-        float(np.max(np.abs(zz))),
+        resolved_trace_domain.surface_rmin,
+        resolved_trace_domain.surface_rmax,
+        resolved_trace_domain.surface_zmax,
     )
-    zrange = (
-        (0.0, float(interp_zmax), int(grid["nz"]))
+    rrange = explicit_rrange or (
+        float(interp_rmin),
+        float(interp_rmax),
+        int(grid["nr"]),
+    )
+    phirange = explicit_phirange or (
+        required_phirange[0],
+        required_phirange[1],
+        int(grid["nphi"]),
+    )
+    zrange = explicit_zrange or (
+        (0.0, interp_zmax, int(grid["nz"]))
         if getattr(surface, "stellsym", False)
-        else (-float(interp_zmax), float(interp_zmax), int(grid["nz"]))
+        else (-interp_zmax, interp_zmax, int(grid["nz"]))
     )
+    interpolation_covers_trace_domain = _interpolation_covers_trace_domain(
+        rrange,
+        phirange,
+        zrange,
+        resolved_trace_domain,
+        required_phirange,
+    )
+    explicit_interpolation_domain = (
+        explicit_rrange is not None
+        or explicit_phirange is not None
+        or explicit_zrange is not None
+    )
+    if explicit_interpolation_domain and not interpolation_covers_trace_domain:
+        if resolved_policy == "always":
+            raise ValueError(
+                "Requested topology interpolation domain does not cover the "
+                "trace seed and stopping domain"
+            )
+        return bfield, _field_model_payload(
+            policy=resolved_policy,
+            selected_mode="native",
+            reason="trace_domain_not_covered",
+            trace_domain=resolved_trace_domain,
+            grid={
+                "degree": int(grid["degree"]),
+                "nr": int(grid["nr"]),
+                "nphi": int(grid["nphi"]),
+                "nz": int(grid["nz"]),
+            },
+            rrange=rrange,
+            phirange=phirange,
+            zrange=zrange,
+            required_phirange=required_phirange,
+            extrapolate=extrapolate,
+            interpolation_covers_trace_domain=False,
+        )
     interpolated_field = InterpolatedField(
         bfield,
         int(grid["degree"]),
-        (float(interp_rmin), float(interp_rmax), int(grid["nr"])),
-        (0.0, (2.0 * np.pi) / float(max(int(surface.nfp), 1)), int(grid["nphi"])),
+        rrange,
+        phirange,
         zrange,
-        True,
+        extrapolate,
         nfp=int(surface.nfp),
         stellsym=bool(getattr(surface, "stellsym", False)),
     )
+    # Keep constructor range objects alive for the C++ interpolant used during
+    # long field-line traces.
+    interpolated_field._topology_interpolation_ranges = (rrange, phirange, zrange)
+    gamma = surface.gamma()
     surface_points = gamma.reshape((-1, 3))
     interpolated_field.set_points(surface_points)
     bfield.set_points(surface_points)
@@ -306,23 +522,27 @@ def prepare_topology_field(
     diff_norm = np.linalg.norm(exact_B - interp_B, axis=1)
     denom = np.maximum(exact_norm, 1.0e-12)
     max_rel_error = float(np.max(diff_norm / denom)) if diff_norm.size else 0.0
-    return interpolated_field, {
-        "policy": resolved_policy,
-        "selected_mode": "interpolated",
-        "reason": "explicit_always"
-        if resolved_policy == "always"
-        else "tmax_threshold",
-        "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
-        "grid": {
+    return interpolated_field, _field_model_payload(
+        policy=resolved_policy,
+        selected_mode="interpolated",
+        reason="explicit_always" if resolved_policy == "always" else "tmax_threshold",
+        trace_domain=resolved_trace_domain,
+        grid={
             "degree": int(grid["degree"]),
             "nr": int(grid["nr"]),
             "nphi": int(grid["nphi"]),
             "nz": int(grid["nz"]),
         },
-        "max_abs_error": float(np.max(abs_diff)) if abs_diff.size else 0.0,
-        "mean_abs_error": float(np.mean(abs_diff)) if abs_diff.size else 0.0,
-        "max_rel_error": max_rel_error,
-    }
+        rrange=rrange,
+        phirange=phirange,
+        zrange=zrange,
+        required_phirange=required_phirange,
+        extrapolate=extrapolate,
+        interpolation_covers_trace_domain=interpolation_covers_trace_domain,
+        max_abs_error=float(np.max(abs_diff)) if abs_diff.size else 0.0,
+        mean_abs_error=float(np.mean(abs_diff)) if abs_diff.size else 0.0,
+        max_rel_error=max_rel_error,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -611,18 +831,13 @@ def build_stopping_criteria(
     )
     from simsopt.geo import SurfaceClassifier
 
-    gamma = surface.gamma()
-    rr = np.sqrt(gamma[:, :, 0] ** 2 + gamma[:, :, 1] ** 2)
-    zz = gamma[:, :, 2]
-    rmin = float(np.min(rr))
-    rmax = float(np.max(rr))
-    zmax = float(np.max(np.abs(zz)))
+    trace_domain = surface_trace_domain(surface, box_padding=box_padding)
 
     box_criteria = [
-        MaxZStoppingCriterion(zmax * (1 + box_padding)),
-        MinZStoppingCriterion(-zmax * (1 + box_padding)),
-        MinRStoppingCriterion(rmin * (1 - box_padding)),
-        MaxRStoppingCriterion(rmax * (1 + box_padding)),
+        MaxZStoppingCriterion(trace_domain.stopping_zmax),
+        MinZStoppingCriterion(-trace_domain.stopping_zmax),
+        MinRStoppingCriterion(trace_domain.stopping_rmin),
+        MaxRStoppingCriterion(trace_domain.stopping_rmax),
     ]
     iteration_limit = (
         _TOPOLOGY_TRACE_MAX_ITERATIONS
@@ -1157,12 +1372,14 @@ def score_topology(
         include_surface_exit=True,
         max_iterations=topology_iteration_limit(tmax),
     )
+    radii = midplane_seed_radii(surface, nfieldlines, inset_fraction=inset_fraction)
     traced_field, field_model = prepare_topology_field(
         surface,
         bfield,
         tmax,
         field_policy=resolved_field_policy,
         interpolation_grid=interpolation_grid,
+        seed_radii=radii,
     )
     if compute_transport_diagnostics:
         transport_diagnostics = compute_topology_transport_diagnostics(
@@ -1173,7 +1390,6 @@ def score_topology(
             "skipped_by_caller"
         )
 
-    radii = midplane_seed_radii(surface, nfieldlines, inset_fraction=inset_fraction)
     seed_contract = build_midplane_seed_contract(nfieldlines, inset_fraction, radii)
     fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
         traced_field,

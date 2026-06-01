@@ -50,6 +50,13 @@ TOPOLOGY_SCORER_MODULE_PATH = (
     / "single_stage_optimization"
     / "topology_scorer.py"
 )
+POINCARE_SURFACES_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "POINCARE_PLOTTING"
+    / "poincare_surfaces.py"
+)
 TOPOLOGY_FIDELITY_LADDER_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
     / "examples"
@@ -113,6 +120,13 @@ def load_topology_scorer_module():
     return _load_module_from_path(
         TOPOLOGY_SCORER_MODULE_PATH,
         "topology_scorer",
+    )
+
+
+def load_poincare_surfaces_module():
+    return _load_module_from_path(
+        POINCARE_SURFACES_MODULE_PATH,
+        "poincare_surfaces",
     )
 
 
@@ -2592,15 +2606,290 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertIsInstance(interpolated_field, _InterpolatedField)
+        required_phirange = [0.0, (2.0 * np.pi) / float(surface.nfp)]
         self.assertEqual(interpolated_model["selected_mode"], "interpolated")
         self.assertEqual(interpolated_model["reason"], "tmax_threshold")
         self.assertEqual(
             interpolated_model["grid"],
             {"degree": 5, "nr": 10, "nphi": 11, "nz": 12},
         )
+        self.assertEqual(interpolated_model["rrange"], list(interpolated_field.rrange))
+        self.assertEqual(
+            interpolated_model["phirange"], list(interpolated_field.phirange)
+        )
+        self.assertEqual(interpolated_model["required_phirange"], required_phirange)
+        self.assertEqual(interpolated_model["zrange"], list(interpolated_field.zrange))
+        self.assertTrue(interpolated_model["extrapolate"])
+        self.assertEqual(
+            interpolated_field._topology_interpolation_ranges,
+            (
+                interpolated_field.rrange,
+                interpolated_field.phirange,
+                interpolated_field.zrange,
+            ),
+        )
+        self.assertFalse(interpolated_model["interpolation_covers_trace_domain"])
+        trace_domain = interpolated_model["trace_domain"]
+        self.assertGreater(
+            interpolated_model["rrange"][0], trace_domain["required_rmin"]
+        )
+        self.assertLess(interpolated_model["rrange"][1], trace_domain["required_rmax"])
+        self.assertGreaterEqual(
+            interpolated_model["zrange"][1], trace_domain["required_zmax"]
+        )
         self.assertEqual(interpolated_model["max_abs_error"], 0.0)
         self.assertEqual(interpolated_model["mean_abs_error"], 0.0)
         self.assertEqual(interpolated_model["max_rel_error"], 0.0)
+
+    def test_prepare_topology_field_records_metric_domain_exceeding_interpolation(self):
+        topology_module = load_topology_scorer_module()
+
+        class _Surface:
+            nfp = 5
+            stellsym = True
+
+            def gamma(self):
+                return np.array(
+                    [
+                        [[1.0, 0.0, 0.1], [1.1, 0.0, -0.1]],
+                        [[0.9, 0.1, 0.05], [1.05, -0.1, -0.05]],
+                    ],
+                    dtype=float,
+                )
+
+        class _BField:
+            def __init__(self):
+                self.points = None
+
+            def set_points(self, points):
+                self.points = np.asarray(points, dtype=float)
+
+            def B(self):
+                assert self.points is not None
+                return np.ones((self.points.shape[0], 3), dtype=float)
+
+        class _InterpolatedField:
+            def __init__(
+                self,
+                source_field,
+                degree,
+                rrange,
+                phirange,
+                zrange,
+                extrapolate,
+                *,
+                nfp,
+                stellsym,
+            ):
+                self.source_field = source_field
+                self.rrange = rrange
+                self.phirange = phirange
+                self.zrange = zrange
+                self.extrapolate = extrapolate
+                self.points = None
+
+            def set_points(self, points):
+                self.points = np.asarray(points, dtype=float)
+
+            def B(self):
+                assert self.points is not None
+                return np.ones((self.points.shape[0], 3), dtype=float)
+
+        surface = _Surface()
+        trace_domain = topology_module.surface_trace_domain(
+            surface,
+            seed_radii=np.array([0.80, 1.20]),
+        )
+        old_rmin, old_rmax, _old_zmax = topology_module.padded_bounds(
+            trace_domain.surface_rmin,
+            trace_domain.surface_rmax,
+            trace_domain.surface_zmax,
+        )
+        self.assertGreater(trace_domain.required_rmax, old_rmax)
+        self.assertLess(trace_domain.required_rmin, old_rmin)
+
+        with patch("simsopt.field.InterpolatedField", _InterpolatedField):
+            interpolated_field, interpolated_model = (
+                topology_module.prepare_topology_field(
+                    surface,
+                    _BField(),
+                    50.0,
+                    field_policy="auto",
+                    trace_domain=trace_domain,
+                )
+            )
+
+        self.assertIsInstance(interpolated_field, _InterpolatedField)
+        self.assertEqual(interpolated_model["selected_mode"], "interpolated")
+        self.assertFalse(interpolated_model["interpolation_covers_trace_domain"])
+        self.assertGreater(interpolated_field.rrange[0], trace_domain.required_rmin)
+        self.assertLess(interpolated_field.rrange[1], trace_domain.required_rmax)
+        self.assertGreaterEqual(
+            interpolated_field.zrange[1], trace_domain.required_zmax
+        )
+        self.assertTrue(interpolated_model["extrapolate"])
+
+    def test_prepare_topology_field_rejects_uncovered_explicit_interpolation_domain(
+        self,
+    ):
+        topology_module = load_topology_scorer_module()
+
+        class _Surface:
+            nfp = 5
+            stellsym = True
+
+            def gamma(self):
+                return np.array(
+                    [
+                        [[1.0, 0.0, 0.1], [1.1, 0.0, -0.1]],
+                        [[0.9, 0.1, 0.05], [1.05, -0.1, -0.05]],
+                    ],
+                    dtype=float,
+                )
+
+        class _BField:
+            pass
+
+        surface = _Surface()
+        native_field, native_model = topology_module.prepare_topology_field(
+            surface,
+            _BField(),
+            50.0,
+            field_policy="auto",
+            interpolation_grid={
+                "rrange": (0.95, 1.02, 10),
+                "zrange": (0.0, 0.05, 10),
+            },
+        )
+
+        self.assertIsInstance(native_field, _BField)
+        self.assertEqual(native_model["selected_mode"], "native")
+        self.assertEqual(native_model["reason"], "trace_domain_not_covered")
+        self.assertFalse(native_model["interpolation_covers_trace_domain"])
+
+        with self.assertRaisesRegex(ValueError, "does not cover"):
+            topology_module.prepare_topology_field(
+                surface,
+                _BField(),
+                50.0,
+                field_policy="always",
+                interpolation_grid={
+                    "rrange": (0.95, 1.02, 10),
+                    "zrange": (0.0, 0.05, 10),
+                },
+            )
+
+        trace_domain = topology_module.surface_trace_domain(surface)
+        required_phirange = [0.0, (2.0 * np.pi) / float(surface.nfp)]
+        narrow_phi_grid = {
+            "rrange": (
+                trace_domain.required_rmin - 0.01,
+                trace_domain.required_rmax + 0.01,
+                10,
+            ),
+            "phirange": (0.0, 0.1, 10),
+            "zrange": (0.0, trace_domain.required_zmax + 0.01, 10),
+        }
+        native_field, native_model = topology_module.prepare_topology_field(
+            surface,
+            _BField(),
+            50.0,
+            field_policy="auto",
+            interpolation_grid=narrow_phi_grid,
+        )
+
+        self.assertIsInstance(native_field, _BField)
+        self.assertEqual(native_model["selected_mode"], "native")
+        self.assertEqual(native_model["reason"], "trace_domain_not_covered")
+        self.assertFalse(native_model["interpolation_covers_trace_domain"])
+        self.assertEqual(native_model["phirange"], [0.0, 0.1, 10])
+        self.assertEqual(native_model["required_phirange"], required_phirange)
+
+        with self.assertRaisesRegex(ValueError, "does not cover"):
+            topology_module.prepare_topology_field(
+                surface,
+                _BField(),
+                50.0,
+                field_policy="always",
+                interpolation_grid=narrow_phi_grid,
+            )
+
+    def test_poincare_field_policy_env_validation(self):
+        module = load_poincare_surfaces_module()
+
+        self.assertEqual(module.resolve_poincare_field_policy({}), "auto")
+        self.assertEqual(
+            module.resolve_poincare_field_policy({"POINCARE_FIELD_POLICY": "auto"}),
+            "auto",
+        )
+        self.assertEqual(
+            module.resolve_poincare_field_policy({"POINCARE_FIELD_POLICY": "never"}),
+            "never",
+        )
+        with self.assertRaisesRegex(ValueError, "Unsupported POINCARE_FIELD_POLICY"):
+            module.resolve_poincare_field_policy({"POINCARE_FIELD_POLICY": "sometimes"})
+
+    def test_poincare_render_modes_preserve_metric_contracts(self):
+        module = load_poincare_surfaces_module()
+
+        class _Surface:
+            nfp = 5
+            stellsym = True
+
+            def __init__(self, extension=0.0):
+                self.extension = float(extension)
+
+            def copy(self):
+                return _Surface(self.extension)
+
+            def extend_via_normal(self, distance):
+                self.extension += float(distance)
+
+            def gamma(self):
+                theta = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
+                radius = 0.2 + self.extension
+                R = 1.0 + radius * np.cos(theta)
+                Z = 0.1 * np.sin(theta)
+                return np.array([np.column_stack([R, np.zeros_like(R), Z])])
+
+            def cross_section(self, phi=0.0, thetas=512):
+                theta = np.linspace(0.0, 2.0 * np.pi, int(thetas), endpoint=False)
+                radius = 0.2 + self.extension
+                R = 1.0 + radius * np.cos(theta)
+                Z = 0.1 * np.sin(theta)
+                phi_abs = 2.0 * np.pi * float(phi)
+                return np.column_stack([R * np.cos(phi_abs), R * np.sin(phi_abs), Z])
+
+        stopping_criteria = [object(), object()]
+        modes, field_domain = module.build_poincare_render_modes(
+            _Surface(),
+            6,
+            seed_inset_fraction=0.05,
+            default_extend_distance=0.05,
+            stopping_criteria=stopping_criteria,
+            stop_labels=["surface_exit", "max_r_guardrail", "iteration_limit"],
+        )
+
+        self.assertEqual(
+            [mode["mode"] for mode in modes], ["validation", "diagnostic", "default"]
+        )
+        self.assertIs(modes[0]["stopping_criteria"], stopping_criteria)
+        self.assertIs(modes[1]["stopping_criteria"], stopping_criteria)
+        self.assertIs(modes[2]["stopping_criteria"], stopping_criteria)
+        self.assertIn("surface_exit", modes[1]["stop_labels"])
+        self.assertIn("surface_exit", modes[2]["stop_labels"])
+        self.assertEqual(modes[0]["seed_contract"]["mode"], "midplane_radial_sweep")
+        self.assertEqual(modes[1]["seed_contract"]["mode"], "midplane_radial_sweep")
+        self.assertEqual(
+            modes[2]["seed_contract"]["mode"],
+            "extended_surface_radial_sweep",
+        )
+        self.assertGreaterEqual(
+            field_domain.required_rmax, modes[2]["trace_domain"].required_rmax
+        )
+        self.assertLessEqual(
+            field_domain.required_rmin, modes[0]["trace_domain"].required_rmin
+        )
 
     def test_compute_topology_transport_diagnostics_reports_surface_structure(self):
         topology_module = load_topology_scorer_module()
