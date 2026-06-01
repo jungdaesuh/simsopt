@@ -26,7 +26,6 @@ __all__ = [
     "FramedCurveCentroid",
     "FrameRotation",
     "ZeroRotation",
-    "FramedCurve",
 ]
 
 

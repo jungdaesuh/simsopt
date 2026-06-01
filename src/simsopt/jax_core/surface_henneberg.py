@@ -38,6 +38,16 @@ from ._math_utils import as_jax_float64 as _as_float64_array
 from .specs import SurfaceHennebergSpec
 from .surface_integrals import surface_area, surface_volume
 
+__all__ = [
+    "surface_henneberg_area_from_spec",
+    "surface_henneberg_gamma_from_spec",
+    "surface_henneberg_gammadash1_from_spec",
+    "surface_henneberg_gammadash2_from_spec",
+    "surface_henneberg_normal_from_spec",
+    "surface_henneberg_unitnormal_from_spec",
+    "surface_henneberg_volume_from_spec",
+]
+
 
 # ---------------------------------------------------------------------------
 # Static index helpers

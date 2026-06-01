@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
@@ -618,6 +619,77 @@ def test_programmatic_backend_persistent_cache_writes_small_kernel():
         args=("case_programmatic_backend_persistent_cache_writes_small_kernel",),
         failure_message="persistent cache write smoke failed",
     )
+
+
+def _persistent_cache_fingerprints(cache_dir: Path) -> dict[str, tuple[int, int]]:
+    return {
+        str(path.relative_to(cache_dir)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in cache_dir.rglob("*")
+        if path.is_file()
+    }
+
+
+def _assert_persistent_cache_case_reuses_small_kernel(case_name: str) -> None:
+    with tempfile.TemporaryDirectory(prefix="simsopt-jax-cache-reuse-") as cache_parent:
+        cache_dir = Path(cache_parent) / "cache"
+        env = {
+            "JAX_EXPLAIN_CACHE_MISSES": "1",
+            "JAX_PLATFORMS": "cpu",
+            "JAX_ENABLE_X64": "1",
+            "SIMSOPT_TEST_PERSISTENT_CACHE_DIR": str(cache_dir),
+        }
+        first = _run_python_script_capture(
+            _IMPORT_SMOKE_CASES_PATH,
+            args=(case_name,),
+            extra_env=env,
+        )
+        assert first.returncode == 0, first.stderr.strip()
+        first_payload = _last_json_payload_or_none(first.stdout)
+        assert first_payload is not None
+        _assert_subprocess_json_sentinel(
+            first_payload,
+            expected_case=case_name,
+            failure_message="persistent cache first process failed",
+        )
+        assert (
+            "PERSISTENT COMPILATION CACHE MISS for 'jit_small_kernel'" in first.stderr
+        )
+        first_fingerprints = _persistent_cache_fingerprints(cache_dir)
+        assert first_fingerprints, "first process did not populate persistent cache"
+
+        second = _run_python_script_capture(
+            _IMPORT_SMOKE_CASES_PATH,
+            args=(case_name,),
+            extra_env=env,
+        )
+        assert second.returncode == 0, second.stderr.strip()
+        second_payload = _last_json_payload_or_none(second.stdout)
+        assert second_payload is not None
+        _assert_subprocess_json_sentinel(
+            second_payload,
+            expected_case=case_name,
+            failure_message="persistent cache second process failed",
+        )
+
+        assert "PERSISTENT COMPILATION CACHE MISS for 'jit_small_kernel'" not in (
+            second.stderr
+        )
+        assert "Writing jit_small_kernel to persistent compilation cache" not in (
+            second.stderr
+        )
+        assert _persistent_cache_fingerprints(cache_dir) == first_fingerprints
+
+
+@pytest.mark.parametrize(
+    "case_name",
+    (
+        "case_programmatic_backend_persistent_cache_shared_small_kernel",
+        "case_env_backend_persistent_cache_shared_small_kernel",
+    ),
+)
+def test_backend_persistent_cache_reuses_small_kernel_across_processes(case_name):
+    """A second process should use the first process's persistent-cache entry."""
+    _assert_persistent_cache_case_reuses_small_kernel(case_name)
 
 
 def test_parity_mode_defaults_transfer_guard_and_keeps_x64_enabled():
@@ -1283,6 +1355,14 @@ def test_import_jax_core_specs():
     _assert_import_smoke_case_passes(
         "case_import_jax_core_specs",
         "import simsopt.jax_core failed",
+    )
+
+
+def test_jax_core_lazy_facade_public_contract():
+    """The jax_core lazy facade must preserve the curated package exports."""
+    _assert_import_smoke_case_passes(
+        "case_jax_core_lazy_facade_public_contract",
+        "jax_core lazy facade public contract failed",
     )
 
 

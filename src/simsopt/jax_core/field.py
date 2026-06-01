@@ -48,6 +48,34 @@ from .specs import (
     make_grouped_coil_set_spec,
 )
 
+__all__ = [
+    "coil_set_spec_from_dof_extraction_spec",
+    "coil_specs_from_dof_extraction_spec",
+    "grouped_coil_set_spec_from_coil_specs",
+    "grouped_biot_savart_A_from_inputs",
+    "grouped_biot_savart_A_from_spec",
+    "grouped_biot_savart_B_and_dB_from_spec",
+    "grouped_biot_savart_B_from_inputs",
+    "grouped_biot_savart_B_from_spec",
+    "grouped_biot_savart_d2A_by_dXdX_from_inputs",
+    "grouped_biot_savart_d2A_by_dXdX_from_spec",
+    "grouped_biot_savart_d2B_by_dXdX_from_inputs",
+    "grouped_biot_savart_d2B_by_dXdX_from_spec",
+    "grouped_biot_savart_dA_by_dX_from_inputs",
+    "grouped_biot_savart_dA_by_dX_from_spec",
+    "grouped_biot_savart_dB_by_dX_from_inputs",
+    "grouped_biot_savart_dB_by_dX_from_spec",
+    "grouped_coil_currents_from_inputs",
+    "grouped_coil_currents_from_spec",
+    "grouped_coil_index_lists_from_spec",
+    "grouped_coil_set_spec_from_grouped_data",
+    "grouped_coil_set_spec_from_inputs",
+    "grouped_coil_set_spec_from_lists",
+    "grouped_coil_set_spec_from_source",
+    "grouped_field_data_from_spec",
+    "grouped_field_inputs_from_spec",
+]
+
 
 def _zeros_float64(shape):
     return runtime_device_put(np.zeros(shape, dtype=np.float64), dtype=np.float64)

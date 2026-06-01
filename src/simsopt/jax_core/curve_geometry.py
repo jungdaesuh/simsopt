@@ -55,6 +55,40 @@ from .specs import (
     make_curve_cwsfourier_rz_spec,
 )
 
+__all__ = [
+    "closed_curve_self_intersection_min_distance",
+    "closed_curve_self_intersection_penalty",
+    "closed_curve_self_intersection_summary",
+    "closed_curve_self_intersection_tolerance",
+    "curve_dincremental_arclength_by_dcoeff_from_dofs",
+    "curve_dincremental_arclength_by_dcoeff_vjp_from_dofs",
+    "curve_dkappa_by_dcoeff_from_dofs",
+    "curve_dkappa_by_dcoeff_vjp_from_dofs",
+    "curve_dtorsion_by_dcoeff_from_dofs",
+    "curve_dtorsion_by_dcoeff_vjp_from_dofs",
+    "curve_gamma_and_dash_from_dofs",
+    "curve_gamma_and_dash_from_spec",
+    "curve_gamma_vjp_from_dofs",
+    "curve_geometry_from_dofs",
+    "curve_geometry_from_spec",
+    "curve_gammadash_vjp_from_dofs",
+    "curve_gammadashdash_vjp_from_dofs",
+    "curve_gammadashdashdash_vjp_from_dofs",
+    "curve_incremental_arclength_from_dofs",
+    "curve_incremental_arclength_from_spec",
+    "curve_kappa_from_dofs",
+    "curve_kappa_from_spec",
+    "curve_pullback_from_dofs",
+    "curve_pullback_from_spec",
+    "curve_spec_from_curve",
+    "curve_spec_with_dofs",
+    "curve_spec_with_quadpoints",
+    "curve_torsion_from_dofs",
+    "curve_torsion_from_spec",
+    "pair_linking_number_pure",
+    "segment_segment_distance_pure",
+]
+
 _SURF_TYPE_RZ_FOURIER = "RZ_Fourier"
 
 

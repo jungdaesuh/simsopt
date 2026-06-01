@@ -35,6 +35,13 @@ from .integral_bdotn import (
     residual_BdotN as residual_BdotN_jax,
 )
 
+__all__ = [
+    "build_fourier_basis",
+    "fixed_surface_flux_specs_from_surface",
+    "fixed_surface_flux_integral",
+    "fixed_surface_flux_integral_from_B",
+]
+
 
 def _fixed_surface_target_array(normal, target):
     if target is None:

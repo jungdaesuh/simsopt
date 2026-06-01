@@ -81,6 +81,7 @@ __all__ = [
     "build_flux_function_interpolant",
     "build_symmetry_exploit_interpolant",
     "build_spec_for_scalar",
+    "evaluate_interpolated_boozer_scalar",
     "freeze_interpolated_boozer_field_state",
     "evaluate_scalar",
     "fold_points_for_symmetry",
@@ -772,6 +773,9 @@ def evaluate_scalar(
         f"unknown scalar {scalar_name!r}; not in flux-function or symmetry-exploit "
         f"inventory"
     )
+
+
+evaluate_interpolated_boozer_scalar = evaluate_scalar
 
 
 def _eval_scalar_factory(scalar_name: str):
