@@ -262,6 +262,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.8 `LayerDriftTracker` core helper was executed under the bloat plan as replay-diagnostic cleanup, not as a TORAX runtime phase. It centralizes the repeated layer-decomposition max/first-divergence state transitions in `benchmarks/single_stage_init_parity.py`, banks 13 benchmark LOC, preserves explicit same-candidate replay result keys and pre-Newton census gate semantics, and records CPU/X64 replay-helper validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. The larger T2.8 tracker-family cleanup remains open.
 
+**2026-06-01 cross-link:** The T2.8 SciPy callback first-split helper follow-up was also executed under the bloat plan. It centralizes only the repeated "first split wins" assignment for Boozer SciPy callback trace divergence reporting in `benchmarks/single_stage_init_parity.py`, banks 4 additional benchmark LOC, preserves explicit callback field comparison order and `first_boozer_scipy_callback_split` schema keys, and records CPU/X64 callback-trace validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.
