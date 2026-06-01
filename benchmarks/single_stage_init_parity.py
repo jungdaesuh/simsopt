@@ -3596,10 +3596,12 @@ def compare_same_candidate_objective_replay(
         same_candidate_event_count += 1
         if target_native_replay_event:
             target_native_replay_event_count += 1
+        cpu_rejected_by_contract = _same_candidate_rejected_by_contract(cpu_event)
+        jax_rejected_by_contract = _same_candidate_rejected_by_contract(jax_event)
         target_native_rejected_event = (
             target_native_replay_event
-            and _same_candidate_rejected_by_contract(cpu_event)
-            and _same_candidate_rejected_by_contract(jax_event)
+            and cpu_rejected_by_contract
+            and jax_rejected_by_contract
         )
         if target_native_rejected_event:
             target_native_rejected_event_count += 1
@@ -3620,9 +3622,7 @@ def compare_same_candidate_objective_replay(
             )
         event_failures: list[str] = []
         if target_native_replay_event:
-            if _same_candidate_rejected_by_contract(cpu_event) != (
-                _same_candidate_rejected_by_contract(jax_event)
-            ):
+            if cpu_rejected_by_contract != jax_rejected_by_contract:
                 event_failures.append(
                     "target-native replay rejection mismatch: "
                     f"cpu_native_gradient_used={cpu_event.get('native_gradient_used')}, "
@@ -3674,9 +3674,9 @@ def compare_same_candidate_objective_replay(
                 "line_search_evaluation": cpu_event.get("line_search_evaluation"),
                 **boozer_metadata_summary["first_scipy_callback_split"],
             }
-        compare_native_gradient_layers = bool(
-            cpu_event.get("native_gradient_used")
-        ) and bool(jax_event.get("native_gradient_used"))
+        compare_native_gradient_layers = (
+            not cpu_rejected_by_contract and not jax_rejected_by_contract
+        )
         compare_native_gradient_diagnostics = (
             compare_native_gradient_layers and not target_native_replay_event
         )
@@ -3829,9 +3829,7 @@ def compare_same_candidate_objective_replay(
                 "layer": iota_divergence["layer"],
                 "layer_diffs": dict(iota_divergence["layer_diffs"]),
             }
-        if bool(cpu_event.get("native_gradient_used")) and bool(
-            jax_event.get("native_gradient_used")
-        ):
+        if compare_native_gradient_layers:
             max_hardware_abs_diff = max(
                 max_hardware_abs_diff,
                 _compare_same_candidate_vector(

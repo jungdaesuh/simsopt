@@ -264,6 +264,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.8 SciPy callback first-split helper follow-up was also executed under the bloat plan. It centralizes only the repeated "first split wins" assignment for Boozer SciPy callback trace divergence reporting in `benchmarks/single_stage_init_parity.py`, banks 4 additional benchmark LOC, preserves explicit callback field comparison order and `first_boozer_scipy_callback_split` schema keys, and records CPU/X64 callback-trace validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
 
+**2026-06-01 cross-link:** The T2.8 target-native predicate-cache micro-slice was also executed under the bloat plan. It caches only the per-pair target-native rejection predicates inside `benchmarks/single_stage_init_parity.py`, banks 2 additional benchmark LOC, preserves replay payload keys, rejection diagnostics, gradient/hardware comparison semantics, and same-candidate gate classification, and records CPU/X64 target-native replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.
