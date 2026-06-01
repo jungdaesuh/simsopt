@@ -184,7 +184,9 @@ def _assert_only_candidate_indices_are_inf(
     assert np.isfinite(np.delete(costs, unavailable)).all()
 
 
-def _primitive_output_shapes(closed_jaxpr, primitive_name: str) -> list[tuple[int, ...]]:
+def _primitive_output_shapes(
+    closed_jaxpr, primitive_name: str
+) -> list[tuple[int, ...]]:
     shapes = []
     for eqn in closed_jaxpr.jaxpr.eqns:
         if eqn.primitive.name != primitive_name:
@@ -707,9 +709,7 @@ class TestGPMOMulti:
         )
 
     def test_multi_candidate_costs_use_gemv_not_neighbor_residual_tensor(self):
-        A_scaled, b, m_maxima, _, dipoles = _gpmo_spatial_problem(
-            seed=2557, M=7, N=5
-        )
+        A_scaled, b, m_maxima, _, dipoles = _gpmo_spatial_problem(seed=2557, M=7, N=5)
         residual = -b
         available = np.ones((5, 3), dtype=bool)
         Nadjacent = 2
@@ -2154,6 +2154,42 @@ class TestMwPGPSingleStep:
 
         jaxpr = jax.make_jaxpr(lambda st: mwpgp_step(spec, st, A_jax, ATb_jax))(state)
         assert count_jaxpr_primitives(jaxpr, "cond") == 2
+
+    def test_vmap_step_body_lowers_dynamic_branches_to_selects(self):
+        """Vectorized MwPGP branches are no longer scalar ``lax.cond`` gates."""
+
+        A, b, m_maxima, m_proxy, m0 = _random_problem(seed=25026, M=7, N=2)
+        ATb = (A.T @ b).reshape(2, 3)
+        spec = _make_spec(m_maxima, m_proxy, alpha=0.05, reg_l2=0.0, nu=1.0e100)
+        A_jax = jnp.asarray(A, dtype=jnp.float64)
+        ATb_jax = jnp.asarray(ATb, dtype=jnp.float64)
+        state = mwpgp_initial_state(
+            spec,
+            A_jax,
+            ATb_jax,
+            jnp.asarray(m0, dtype=jnp.float64),
+        )
+        batched_state = tuple(jnp.stack((leaf, leaf)) for leaf in state)
+        batched_A = jnp.stack((A_jax, A_jax))
+        batched_ATb = jnp.stack((ATb_jax, ATb_jax))
+
+        def batched_step(
+            current_state: tuple[jax.Array, jax.Array, jax.Array],
+            current_A: jax.Array,
+            current_ATb: jax.Array,
+        ):
+            return jax.vmap(
+                lambda state_item, A_item, ATb_item: mwpgp_step(
+                    spec,
+                    state_item,
+                    A_item,
+                    ATb_item,
+                )
+            )(current_state, current_A, current_ATb)
+
+        jaxpr = jax.make_jaxpr(batched_step)(batched_state, batched_A, batched_ATb)
+        assert count_jaxpr_primitives(jaxpr, "cond") == 0
+        assert count_jaxpr_primitives(jaxpr, "select_n") > 0
 
     def test_step_executes_expand_branch(self):
         m_maxima = np.array([0.25], dtype=np.float64)
