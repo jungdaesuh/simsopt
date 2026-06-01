@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
+from typing import ClassVar, TypeAlias, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -14,10 +15,15 @@ from ..jax_core._math_utils import (
     as_runtime_value as _as_runtime_value,
 )
 from ..jax_core.pm_optimization import (
+    GPMOArbVecBacktrackingResult as _CoreGPMOArbVecBacktrackingResult,
     GPMOArbVecBacktrackingSpec,
+    GPMOArbVecResult as _CoreGPMOArbVecResult,
     GPMOArbVecSpec,
+    GPMOBacktrackingResult as _CoreGPMOBacktrackingResult,
     GPMOBacktrackingSpec,
+    GPMOBaselineResult as _CoreGPMOBaselineResult,
     GPMOBaselineSpec,
+    GPMOMultiResult as _CoreGPMOMultiResult,
     GPMOMultiSpec,
     PMOptimizationSpec,
     gpmo_arbvec_backtracking_solve,
@@ -35,6 +41,7 @@ __all__ = [
     "GPMOBacktrackingResult",
     "GPMOBaselineResult",
     "GPMOMultiResult",
+    "GPMOPublicResult",
     "GPMO_ArbVec_backtracking_jax",
     "GPMO_ArbVec_jax",
     "GPMO_backtracking_jax",
@@ -139,26 +146,112 @@ jax.tree_util.register_dataclass(
 )
 
 
-@dataclass(frozen=True)
-class GPMOBaselineResult:
-    """Immutable result from ``GPMO_baseline_jax``."""
+GPMOCoreResult: TypeAlias = (
+    _CoreGPMOBaselineResult
+    | _CoreGPMOMultiResult
+    | _CoreGPMOBacktrackingResult
+    | _CoreGPMOArbVecResult
+    | _CoreGPMOArbVecBacktrackingResult
+)
+
+
+GPMOCoreResultType: TypeAlias = (
+    type[_CoreGPMOBaselineResult]
+    | type[_CoreGPMOMultiResult]
+    | type[_CoreGPMOBacktrackingResult]
+    | type[_CoreGPMOArbVecResult]
+    | type[_CoreGPMOArbVecBacktrackingResult]
+)
+
+
+def _legacy_state_field(state: dict[str, object], name: str) -> jax.Array:
+    value = state[name]
+    if isinstance(value, jax.Array):
+        return value
+    if isinstance(value, np.ndarray):
+        return jnp.asarray(value)
+    raise TypeError(f"legacy result field {name} must be an array")
+
+
+@dataclass(init=False)
+class GPMOPublicResult:
+    """Physical-moment public wrapper around a normalized core GPMO result."""
+
+    _core_result_type: ClassVar[GPMOCoreResultType | None] = None
+    _legacy_core_fields: ClassVar[tuple[str, ...]] = ()
 
     m: jax.Array
     m_history: jax.Array
-    x: jax.Array
-    x_history: jax.Array
-    residual: jax.Array
-    residual_history: jax.Array
-    selected_dipoles: jax.Array
-    selected_components: jax.Array
-    selected_signs: jax.Array
+    core_result: GPMOCoreResult
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise FrozenInstanceError(f"cannot assign to field {name!r}")
+
+    def __init__(
+        self,
+        m: jax.Array,
+        m_history: jax.Array,
+        *legacy_values: jax.Array,
+        core_result: GPMOCoreResult | None = None,
+        **legacy_fields: jax.Array,
+    ) -> None:
+        if core_result is None:
+            core_result = self._core_result_from_legacy(legacy_values, legacy_fields)
+        elif legacy_values or legacy_fields:
+            raise TypeError("core_result cannot be combined with legacy result fields")
+        object.__setattr__(self, "m", m)
+        object.__setattr__(self, "m_history", m_history)
+        object.__setattr__(self, "core_result", core_result)
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        if "core_result" in state:
+            object.__setattr__(self, "m", state["m"])
+            object.__setattr__(self, "m_history", state["m_history"])
+            object.__setattr__(self, "core_result", state["core_result"])
+            return
+        legacy_fields = {
+            name: _legacy_state_field(state, name) for name in self._legacy_core_fields
+        }
+        self.__init__(
+            _legacy_state_field(state, "m"),
+            _legacy_state_field(state, "m_history"),
+            **legacy_fields,
+        )
+
+    def _core_result_from_legacy(
+        self,
+        legacy_values: tuple[jax.Array, ...],
+        legacy_fields: dict[str, jax.Array],
+    ) -> GPMOCoreResult:
+        core_result_type = self._core_result_type
+        if core_result_type is None:
+            raise TypeError("GPMOPublicResult requires core_result")
+        expected_fields = self._legacy_core_fields
+        if len(legacy_values) > len(expected_fields):
+            raise TypeError("too many positional legacy result fields")
+        values = dict(legacy_fields)
+        for name, value in zip(expected_fields, legacy_values, strict=False):
+            if name in values:
+                raise TypeError(f"multiple values for legacy result field: {name}")
+            values[name] = value
+        missing = tuple(name for name in expected_fields if name not in values)
+        if missing:
+            raise TypeError(
+                "missing required legacy result fields: " + ", ".join(missing)
+            )
+        extra = tuple(sorted(set(values) - set(expected_fields)))
+        if extra:
+            raise TypeError("unexpected legacy result fields: " + ", ".join(extra))
+        core_fields = {name: values[name] for name in expected_fields}
+        return core_result_type(**core_fields)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(object.__getattribute__(self, "core_result"), name)
 
 
-jax.tree_util.register_dataclass(
-    GPMOBaselineResult,
-    data_fields=[
-        "m",
-        "m_history",
+class GPMOBaselineResult(GPMOPublicResult):
+    _core_result_type: ClassVar[GPMOCoreResultType] = _CoreGPMOBaselineResult
+    _legacy_core_fields: ClassVar[tuple[str, ...]] = (
         "x",
         "x_history",
         "residual",
@@ -166,32 +259,12 @@ jax.tree_util.register_dataclass(
         "selected_dipoles",
         "selected_components",
         "selected_signs",
-    ],
-    meta_fields=[],
-)
+    )
 
 
-@dataclass(frozen=True)
-class GPMOMultiResult:
-    """Immutable result from ``GPMO_multi_jax``."""
-
-    m: jax.Array
-    m_history: jax.Array
-    x: jax.Array
-    x_history: jax.Array
-    residual: jax.Array
-    residual_history: jax.Array
-    selected_seed_dipoles: jax.Array
-    selected_components: jax.Array
-    selected_signs: jax.Array
-    selected_groups: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    GPMOMultiResult,
-    data_fields=[
-        "m",
-        "m_history",
+class GPMOMultiResult(GPMOPublicResult):
+    _core_result_type: ClassVar[GPMOCoreResultType] = _CoreGPMOMultiResult
+    _legacy_core_fields: ClassVar[tuple[str, ...]] = (
         "x",
         "x_history",
         "residual",
@@ -200,34 +273,12 @@ jax.tree_util.register_dataclass(
         "selected_components",
         "selected_signs",
         "selected_groups",
-    ],
-    meta_fields=[],
-)
+    )
 
 
-@dataclass(frozen=True)
-class GPMOBacktrackingResult:
-    """Immutable result from ``GPMO_backtracking_jax``."""
-
-    m: jax.Array
-    m_history: jax.Array
-    x: jax.Array
-    x_history: jax.Array
-    residual: jax.Array
-    residual_history: jax.Array
-    selected_dipoles: jax.Array
-    selected_components: jax.Array
-    selected_signs: jax.Array
-    num_nonzeros_history: jax.Array
-    removed_pair_count_history: jax.Array
-    done_history: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    GPMOBacktrackingResult,
-    data_fields=[
-        "m",
-        "m_history",
+class GPMOBacktrackingResult(GPMOPublicResult):
+    _core_result_type: ClassVar[GPMOCoreResultType] = _CoreGPMOBacktrackingResult
+    _legacy_core_fields: ClassVar[tuple[str, ...]] = (
         "x",
         "x_history",
         "residual",
@@ -238,31 +289,12 @@ jax.tree_util.register_dataclass(
         "num_nonzeros_history",
         "removed_pair_count_history",
         "done_history",
-    ],
-    meta_fields=[],
-)
+    )
 
 
-@dataclass(frozen=True)
-class GPMOArbVecResult:
-    """Immutable result from ``GPMO_ArbVec_jax``."""
-
-    m: jax.Array
-    m_history: jax.Array
-    x: jax.Array
-    x_history: jax.Array
-    residual: jax.Array
-    residual_history: jax.Array
-    selected_dipoles: jax.Array
-    selected_vector_indices: jax.Array
-    selected_signs: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    GPMOArbVecResult,
-    data_fields=[
-        "m",
-        "m_history",
+class GPMOArbVecResult(GPMOPublicResult):
+    _core_result_type: ClassVar[GPMOCoreResultType] = _CoreGPMOArbVecResult
+    _legacy_core_fields: ClassVar[tuple[str, ...]] = (
         "x",
         "x_history",
         "residual",
@@ -270,37 +302,12 @@ jax.tree_util.register_dataclass(
         "selected_dipoles",
         "selected_vector_indices",
         "selected_signs",
-    ],
-    meta_fields=[],
-)
+    )
 
 
-@dataclass(frozen=True)
-class GPMOArbVecBacktrackingResult:
-    """Immutable result from ``GPMO_ArbVec_backtracking_jax``."""
-
-    m: jax.Array
-    m_history: jax.Array
-    x: jax.Array
-    x_history: jax.Array
-    residual: jax.Array
-    residual_history: jax.Array
-    selected_dipoles: jax.Array
-    selected_vector_indices: jax.Array
-    selected_signs: jax.Array
-    num_nonzeros_history: jax.Array
-    removed_pair_count_history: jax.Array
-    done_history: jax.Array
-    initial_x: jax.Array
-    initial_residual: jax.Array
-    initial_num_nonzero: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    GPMOArbVecBacktrackingResult,
-    data_fields=[
-        "m",
-        "m_history",
+class GPMOArbVecBacktrackingResult(GPMOPublicResult):
+    _core_result_type: ClassVar[GPMOCoreResultType] = _CoreGPMOArbVecBacktrackingResult
+    _legacy_core_fields: ClassVar[tuple[str, ...]] = (
         "x",
         "x_history",
         "residual",
@@ -314,9 +321,37 @@ jax.tree_util.register_dataclass(
         "initial_x",
         "initial_residual",
         "initial_num_nonzero",
-    ],
-    meta_fields=[],
-)
+    )
+
+
+for _gpmo_result_type in (
+    GPMOPublicResult,
+    GPMOBaselineResult,
+    GPMOMultiResult,
+    GPMOBacktrackingResult,
+    GPMOArbVecResult,
+    GPMOArbVecBacktrackingResult,
+):
+    jax.tree_util.register_dataclass(
+        _gpmo_result_type,
+        data_fields=["m", "m_history", "core_result"],
+        meta_fields=[],
+    )
+
+
+_GPMOResultT = TypeVar("_GPMOResultT", bound=GPMOPublicResult)
+
+
+def _gpmo_public_result(
+    core_result: GPMOCoreResult,
+    grid: PermanentMagnetGridJAX,
+    result_type: type[_GPMOResultT],
+) -> _GPMOResultT:
+    return result_type(
+        m=core_result.x * grid.m_maxima[:, None],
+        m_history=core_result.x_history * grid.m_maxima[None, :, None],
+        core_result=core_result,
+    )
 
 
 def projection_L2_balls_jax(x: object, mmax: object) -> jax.Array:
@@ -352,9 +387,7 @@ def prox_l1_jax(m: object, mmax: object, reg_l1: float, nu: float) -> jax.Array:
     threshold = _scalar_like(reg_l1 * nu, normalized)
     zero = _scalar_like(0.0, normalized)
     thresholded = (
-        jnp.sign(matrix)
-        * jnp.maximum(normalized - threshold, zero)
-        * m_maxima[:, None]
+        jnp.sign(matrix) * jnp.maximum(normalized - threshold, zero) * m_maxima[:, None]
     )
     return _flatten_like(moments, thresholded)
 
@@ -418,19 +451,7 @@ def GPMO_baseline_jax(
         K=K,
         record_every=record_every,
     )
-    m = core.x * grid.m_maxima[:, None]
-    m_history = core.x_history * grid.m_maxima[None, :, None]
-    return GPMOBaselineResult(
-        m=m,
-        m_history=m_history,
-        x=core.x,
-        x_history=core.x_history,
-        residual=core.residual,
-        residual_history=core.residual_history,
-        selected_dipoles=core.selected_dipoles,
-        selected_components=core.selected_components,
-        selected_signs=core.selected_signs,
-    )
+    return _gpmo_public_result(core, grid, GPMOBaselineResult)
 
 
 def GPMO_multi_jax(
@@ -465,20 +486,7 @@ def GPMO_multi_jax(
         K=K,
         record_every=record_every,
     )
-    m = core.x * grid.m_maxima[:, None]
-    m_history = core.x_history * grid.m_maxima[None, :, None]
-    return GPMOMultiResult(
-        m=m,
-        m_history=m_history,
-        x=core.x,
-        x_history=core.x_history,
-        residual=core.residual,
-        residual_history=core.residual_history,
-        selected_seed_dipoles=core.selected_seed_dipoles,
-        selected_components=core.selected_components,
-        selected_signs=core.selected_signs,
-        selected_groups=core.selected_groups,
-    )
+    return _gpmo_public_result(core, grid, GPMOMultiResult)
 
 
 def GPMO_backtracking_jax(
@@ -516,22 +524,7 @@ def GPMO_backtracking_jax(
         K=K,
         record_every=record_every,
     )
-    m = core.x * grid.m_maxima[:, None]
-    m_history = core.x_history * grid.m_maxima[None, :, None]
-    return GPMOBacktrackingResult(
-        m=m,
-        m_history=m_history,
-        x=core.x,
-        x_history=core.x_history,
-        residual=core.residual,
-        residual_history=core.residual_history,
-        selected_dipoles=core.selected_dipoles,
-        selected_components=core.selected_components,
-        selected_signs=core.selected_signs,
-        num_nonzeros_history=core.num_nonzeros_history,
-        removed_pair_count_history=core.removed_pair_count_history,
-        done_history=core.done_history,
-    )
+    return _gpmo_public_result(core, grid, GPMOBacktrackingResult)
 
 
 def _gpmo_pol_vectors(
@@ -573,19 +566,7 @@ def GPMO_ArbVec_jax(
         K=K,
         record_every=record_every,
     )
-    m = core.x * grid.m_maxima[:, None]
-    m_history = core.x_history * grid.m_maxima[None, :, None]
-    return GPMOArbVecResult(
-        m=m,
-        m_history=m_history,
-        x=core.x,
-        x_history=core.x_history,
-        residual=core.residual,
-        residual_history=core.residual_history,
-        selected_dipoles=core.selected_dipoles,
-        selected_vector_indices=core.selected_vector_indices,
-        selected_signs=core.selected_signs,
-    )
+    return _gpmo_public_result(core, grid, GPMOArbVecResult)
 
 
 def GPMO_ArbVec_backtracking_jax(
@@ -636,25 +617,7 @@ def GPMO_ArbVec_backtracking_jax(
         x_init=x_init_arr,
         record_every=record_every,
     )
-    m = core.x * grid.m_maxima[:, None]
-    m_history = core.x_history * grid.m_maxima[None, :, None]
-    return GPMOArbVecBacktrackingResult(
-        m=m,
-        m_history=m_history,
-        x=core.x,
-        x_history=core.x_history,
-        residual=core.residual,
-        selected_dipoles=core.selected_dipoles,
-        residual_history=core.residual_history,
-        selected_vector_indices=core.selected_vector_indices,
-        selected_signs=core.selected_signs,
-        num_nonzeros_history=core.num_nonzeros_history,
-        removed_pair_count_history=core.removed_pair_count_history,
-        done_history=core.done_history,
-        initial_x=core.initial_x,
-        initial_residual=core.initial_residual,
-        initial_num_nonzero=core.initial_num_nonzero,
-    )
+    return _gpmo_public_result(core, grid, GPMOArbVecBacktrackingResult)
 
 
 def _mwpgp_spec(
@@ -748,11 +711,7 @@ def _relax_and_split_cost(
     m_flat = jnp.reshape(m, (-1,))
     residual = grid.A_obj @ m_flat - grid.b_obj
     r2 = 0.5 * jnp.sum(residual * residual)
-    n2 = (
-        0.5
-        * jnp.sum((m - m_proxy) * (m - m_proxy))
-        / _scalar_like(nu, m)
-    )
+    n2 = 0.5 * jnp.sum((m - m_proxy) * (m - m_proxy)) / _scalar_like(nu, m)
     l2 = _scalar_like(reg_l2, m) * jnp.sum(m * m)
     return r2 + n2 + l2
 

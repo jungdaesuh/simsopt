@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import pickle
+from dataclasses import FrozenInstanceError, dataclass, fields
 
 import jax
 import jax.numpy as jnp
@@ -15,7 +16,11 @@ from simsopt.geo.permanent_magnet_grid_jax import (
     PermanentMagnetGridJAX,
     mwpgp_alpha_from_grid,
 )
-from simsopt.jax_core.pm_optimization import PMOptimizationSpec, mwpgp_solve
+from simsopt.jax_core.pm_optimization import (
+    GPMOBaselineResult as CoreGPMOBaselineResult,
+    PMOptimizationSpec,
+    mwpgp_solve,
+)
 from simsopt.solve.permanent_magnet_optimization import (
     GPMO,
     projection_L2_balls,
@@ -30,6 +35,12 @@ from simsopt.solve.permanent_magnet_optimization_jax import (
     GPMO_backtracking_jax,
     GPMO_baseline_jax,
     GPMO_multi_jax,
+    GPMOArbVecBacktrackingResult,
+    GPMOArbVecResult,
+    GPMOBacktrackingResult,
+    GPMOBaselineResult,
+    GPMOMultiResult,
+    GPMOPublicResult,
     projection_L2_balls_jax,
     prox_l0_jax,
     prox_l1_jax,
@@ -1535,6 +1546,166 @@ def test_gpmo_arbvec_backtracking_jax_record_every_jits_under_strict_transfer_gu
 
     assert out.shape == (3, grid.ndipoles, 3)
     assert np.all(np.isfinite(np.asarray(out)))
+
+
+def test_gpmo_public_result_wrapper_preserves_pytree_leaf_order() -> None:
+    core = CoreGPMOBaselineResult(
+        x=jnp.arange(6.0).reshape(2, 3),
+        x_history=jnp.arange(12.0).reshape(2, 2, 3),
+        residual=jnp.array([1.0, 2.0]),
+        residual_history=jnp.arange(4.0).reshape(2, 2),
+        selected_dipoles=jnp.array([0, 1], dtype=jnp.int32),
+        selected_components=jnp.array([2, 3], dtype=jnp.int32),
+        selected_signs=jnp.array([1.0, -1.0]),
+    )
+    result = GPMOBaselineResult(
+        m=core.x * 0.5,
+        m_history=core.x_history * 0.5,
+        core_result=core,
+    )
+
+    assert tuple(field.name for field in fields(GPMOPublicResult)) == (
+        "m",
+        "m_history",
+        "core_result",
+    )
+    for result_type in (
+        GPMOBaselineResult,
+        GPMOMultiResult,
+        GPMOBacktrackingResult,
+        GPMOArbVecResult,
+        GPMOArbVecBacktrackingResult,
+    ):
+        assert tuple(field.name for field in fields(result_type)) == (
+            "m",
+            "m_history",
+            "core_result",
+        )
+
+    leaves, treedef = jax.tree.flatten(result)
+    expected_leaves = (
+        result.m,
+        result.m_history,
+        core.x,
+        core.x_history,
+        core.residual,
+        core.residual_history,
+        core.selected_dipoles,
+        core.selected_components,
+        core.selected_signs,
+    )
+    assert len(leaves) == len(expected_leaves)
+    for leaf, expected_leaf in zip(leaves, expected_leaves, strict=True):
+        np.testing.assert_array_equal(np.asarray(leaf), np.asarray(expected_leaf))
+
+    rebuilt = jax.tree.unflatten(treedef, leaves)
+    np.testing.assert_array_equal(np.asarray(rebuilt.m), np.asarray(result.m))
+    np.testing.assert_array_equal(
+        np.asarray(rebuilt.m_history),
+        np.asarray(result.m_history),
+    )
+    np.testing.assert_array_equal(np.asarray(rebuilt.x), np.asarray(core.x))
+    np.testing.assert_array_equal(
+        np.asarray(rebuilt.selected_components),
+        np.asarray(core.selected_components),
+    )
+    with pytest.raises(AttributeError):
+        result.selected_vector_indices
+
+
+def test_gpmo_public_result_preserves_legacy_constructors_and_state() -> None:
+    m = jnp.arange(6.0).reshape(2, 3)
+    m_history = jnp.arange(12.0).reshape(2, 2, 3)
+    common = {
+        "m": m,
+        "m_history": m_history,
+        "x": m / 2.0,
+        "x_history": m_history / 2.0,
+        "residual": jnp.array([1.0, 2.0]),
+        "residual_history": jnp.arange(4.0).reshape(2, 2),
+        "selected_signs": jnp.array([1.0, -1.0]),
+    }
+    cases = (
+        (
+            GPMOBaselineResult,
+            common
+            | {
+                "selected_dipoles": jnp.array([0, 1], dtype=jnp.int32),
+                "selected_components": jnp.array([2, 3], dtype=jnp.int32),
+            },
+            "selected_components",
+        ),
+        (
+            GPMOMultiResult,
+            common
+            | {
+                "selected_seed_dipoles": jnp.array([0, 1], dtype=jnp.int32),
+                "selected_components": jnp.array([2, 3], dtype=jnp.int32),
+                "selected_groups": jnp.array([[0, 1], [1, 0]], dtype=jnp.int32),
+            },
+            "selected_groups",
+        ),
+        (
+            GPMOBacktrackingResult,
+            common
+            | {
+                "selected_dipoles": jnp.array([0, 1], dtype=jnp.int32),
+                "selected_components": jnp.array([2, 3], dtype=jnp.int32),
+                "num_nonzeros_history": jnp.array([1, 2], dtype=jnp.int32),
+                "removed_pair_count_history": jnp.array([0, 1], dtype=jnp.int32),
+                "done_history": jnp.array([False, True]),
+            },
+            "done_history",
+        ),
+        (
+            GPMOArbVecResult,
+            common
+            | {
+                "selected_dipoles": jnp.array([0, 1], dtype=jnp.int32),
+                "selected_vector_indices": jnp.array([2, 3], dtype=jnp.int32),
+            },
+            "selected_vector_indices",
+        ),
+        (
+            GPMOArbVecBacktrackingResult,
+            common
+            | {
+                "selected_dipoles": jnp.array([0, 1], dtype=jnp.int32),
+                "selected_vector_indices": jnp.array([2, 3], dtype=jnp.int32),
+                "num_nonzeros_history": jnp.array([1, 2], dtype=jnp.int32),
+                "removed_pair_count_history": jnp.array([0, 1], dtype=jnp.int32),
+                "done_history": jnp.array([False, True]),
+                "initial_x": jnp.ones((2, 3)),
+                "initial_residual": jnp.array([0.5, 0.25]),
+                "initial_num_nonzero": jnp.array(2, dtype=jnp.int32),
+            },
+            "initial_num_nonzero",
+        ),
+    )
+
+    for result_type, legacy_state, representative_attr in cases:
+        result = result_type(**legacy_state)
+        restored = result_type.__new__(result_type)
+        restored.__setstate__(legacy_state)
+        round_tripped = pickle.loads(pickle.dumps(result))
+
+        assert isinstance(result, GPMOPublicResult)
+        assert isinstance(restored, GPMOPublicResult)
+        assert isinstance(round_tripped, GPMOPublicResult)
+        with pytest.raises(FrozenInstanceError):
+            result.x = result.x
+        with pytest.raises(FrozenInstanceError):
+            result.new_attr = result.m
+        np.testing.assert_array_equal(np.asarray(result.m), np.asarray(m))
+        np.testing.assert_array_equal(np.asarray(restored.x), np.asarray(result.x))
+        np.testing.assert_array_equal(
+            np.asarray(round_tripped.residual_history),
+            np.asarray(result.residual_history),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(getattr(restored, representative_attr)),
+            np.asarray(legacy_state[representative_attr]),
+        )
 
 
 def test_general_greedy_gpmo_is_not_claimed_by_the_jax_wrapper():
