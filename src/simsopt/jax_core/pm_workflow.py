@@ -8,6 +8,7 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 
+from ._bounded_scan import bounded_scan_until_done as _bounded_scan_until_done
 from ._math_utils import as_runtime_array as _as_runtime_array
 from ._math_utils import runtime_init_array as _runtime_init_array
 from ._math_utils import runtime_init_scalar as _runtime_init_scalar
@@ -787,19 +788,14 @@ def pm_gpmo_live_loop_jax(
         )
         return replace(next_state, done=stop_rule(next_state))
 
-    def _scan_body(current: PMGPMOLiveState, _iteration: jax.Array):
-        next_state = jax.lax.cond(
-            current.done,
-            lambda done_state: done_state,
-            _active_step,
-            current,
-        )
-        return next_state, None
+    def _step(current: PMGPMOLiveState, _iteration: jax.Array) -> PMGPMOLiveState:
+        return _active_step(current)
 
-    final_state, _ = jax.lax.scan(
-        _scan_body,
+    final_state = _bounded_scan_until_done(
         state,
-        jnp.arange(int(max_steps), dtype=jnp.int32),
+        max_steps=int(max_steps),
+        is_done=lambda current: current.done,
+        step=_step,
     )
     return final_state
 

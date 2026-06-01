@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import io_callback
 
+from ._bounded_scan import bounded_scan_until_done as _bounded_scan_until_done
 from ._math_utils import as_runtime_array as _as_runtime_array
 from ._math_utils import as_jax_int32 as _as_jax_int32
 from ._math_utils import runtime_init_array as _runtime_init_array
@@ -752,24 +753,22 @@ def _gsco_live_loop_unchecked(
 ) -> WireframeGSCOLiveState:
     """Run the GSCO scan after the caller has established capacity."""
 
-    def _scan_body(current: WireframeGSCOLiveState, iteration: jax.Array):
-        next_state = jax.lax.cond(
-            current.done,
-            lambda done_state: done_state,
-            lambda active_state: _gsco_live_step(
-                active_state,
-                iteration,
-                params,
-                stop_rule,
-            ),
+    def _step(
+        current: WireframeGSCOLiveState,
+        iteration: jax.Array,
+    ) -> WireframeGSCOLiveState:
+        return _gsco_live_step(
             current,
+            iteration,
+            params,
+            stop_rule,
         )
-        return next_state, None
 
-    final_state, _ = jax.lax.scan(
-        _scan_body,
+    final_state = _bounded_scan_until_done(
         state,
-        jnp.arange(int(max_steps), dtype=jnp.int32),
+        max_steps=int(max_steps),
+        is_done=lambda current: current.done,
+        step=_step,
     )
     return final_state
 
