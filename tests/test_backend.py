@@ -26,6 +26,62 @@ _BACKEND_MODULE_NAMES = (
     "simsopt.backend.runtime",
 )
 _MISSING_MODULE = object()
+_EXPECTED_BACKEND_PUBLIC_EXPORTS = (
+    "VALID_BACKEND_MODES",
+    "BackendConfig",
+    "ChunkTuning",
+    "DistributedRuntimeConfig",
+    "FieldKernelTuning",
+    "BackendPolicy",
+    "ShardingTuning",
+    "apply_jax_runtime_config",
+    "get_backend",
+    "get_backend_config",
+    "get_backend_mode",
+    "get_backend_policy",
+    "get_active_cuda_device_index",
+    "get_chunk_policy",
+    "get_chunk_tuning",
+    "get_coil_chunk_size",
+    "get_compilation_cache_dir",
+    "get_compilation_cache_policy",
+    "get_debug_nans",
+    "get_disable_jit",
+    "get_distributed_runtime_config",
+    "get_field_kernel_tuning",
+    "get_jax_platform",
+    "get_pairwise_penalty_chunk_size",
+    "get_point_chunk_size",
+    "get_sharding_strategy",
+    "get_sharding_tuning",
+    "get_provenance_label",
+    "get_quadrature_block_size",
+    "get_tolerance_tier",
+    "get_transfer_guard",
+    "invalidate_backend_cache",
+    "is_backend_strict",
+    "is_float32_smoke_policy",
+    "is_jax_backend",
+    "is_parity_mode",
+    "maybe_initialize_distributed_jax",
+    "query_active_gpu_memory_mb",
+    "register_backend_cache_clear",
+    "should_shard_coil_groups",
+    "should_shard_points",
+    "should_shard_pairwise_rows",
+    "raise_if_strict_jax_fallback",
+    "raise_if_target_lane_bypass",
+    "requires_x64",
+    "set_backend",
+    "should_eagerly_configure_jax",
+    "use_runtime",
+    "validate_cuda_determinism_environment",
+    "warn_if_jax_fallback",
+    "with_cpu_device_for_construction",
+    "strict_target_lane_purity",
+    "target_lane_purity_active",
+    "target_lane_purity_requested",
+)
 _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR = float(np.sqrt(np.finfo(np.float32).eps))
 _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP = 1e-3
 
@@ -1733,6 +1789,8 @@ def test_use_runtime_debug_overlay_sets_strict_debug_bundle(monkeypatch):
 def test_simsopt_debug_env_applies_runtime_debug_overlay(monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_DEBUG", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_DISABLE_JIT", "definitely-not-bool")
+    monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "definitely-not-guard")
     backend = _fresh_backend()
 
     config = backend.set_backend("jax_cpu_fast", configure_runtime=False)
@@ -2087,6 +2145,41 @@ def test_gpu_memory_env_overrides_mode_defaults(monkeypatch):
     assert policy.xla_gpu_preallocate is True
     assert policy.xla_gpu_mem_fraction == pytest.approx(0.25)
     assert policy.xla_gpu_allocator == "platform"
+
+
+def test_runtime_kwargs_override_env_before_mode_defaults(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_JAX_DEBUG_NANS", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_DISABLE_JIT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+    monkeypatch.setenv("SIMSOPT_JAX_COMPILATION_CACHE_DIR", "/env/cache")
+    monkeypatch.setenv("SIMSOPT_JAX_GPU_PREALLOCATE", "true")
+    monkeypatch.setenv("SIMSOPT_JAX_GPU_MEM_FRACTION", "0.25")
+    monkeypatch.setenv("SIMSOPT_JAX_GPU_ALLOCATOR", "platform")
+    monkeypatch.setenv("SIMSOPT_TF_GPU_ALLOCATOR", "definitely-not-allocator")
+    backend = _fresh_backend()
+
+    config = backend.set_backend(
+        "jax_gpu_fast",
+        debug_nans=False,
+        disable_jit=False,
+        transfer_guard="log",
+        compilation_cache_dir="",
+        xla_gpu_preallocate=False,
+        xla_gpu_mem_fraction=0.5,
+        xla_gpu_allocator="vmm",
+        tf_gpu_allocator="cuda_malloc_async",
+        configure_runtime=False,
+    )
+
+    assert config.debug_nans is False
+    assert config.disable_jit is False
+    assert config.transfer_guard == "log"
+    assert config.compilation_cache_dir is None
+    assert config.xla_gpu_preallocate is False
+    assert config.xla_gpu_mem_fraction == pytest.approx(0.5)
+    assert config.xla_gpu_allocator == "vmm"
+    assert config.tf_gpu_allocator == "cuda_malloc_async"
 
 
 def test_validate_cuda_determinism_warns_for_direct_jax_platforms(monkeypatch):
@@ -2529,6 +2622,20 @@ def test_backend_module_guard_restores_original_backend_modules():
             assert name not in sys.modules
         else:
             assert sys.modules[name] is expected
+
+
+def test_backend_public_facade_uses_runtime_all_as_ssot():
+    backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    namespace = {}
+    exec("from simsopt.backend import *", namespace)
+
+    assert tuple(backend.__all__) == _EXPECTED_BACKEND_PUBLIC_EXPORTS
+    assert tuple(runtime_module.__all__) == _EXPECTED_BACKEND_PUBLIC_EXPORTS
+    assert (
+        tuple(name for name in namespace if not name.startswith("__"))
+        == _EXPECTED_BACKEND_PUBLIC_EXPORTS
+    )
 
 
 def test_force_x64_rejects_silent_config_update_failure():

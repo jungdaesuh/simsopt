@@ -28,12 +28,72 @@ import shlex
 import subprocess
 import sys
 import threading
-from typing import Callable, Literal
+from typing import Callable, Literal, TypeVar
 import warnings
 
 import numpy as np
 
 _LOGGER = logging.getLogger(__name__)
+
+_ExplicitT = TypeVar("_ExplicitT")
+_ResolvedT = TypeVar("_ResolvedT")
+
+__all__ = [
+    "VALID_BACKEND_MODES",
+    "BackendConfig",
+    "ChunkTuning",
+    "DistributedRuntimeConfig",
+    "FieldKernelTuning",
+    "BackendPolicy",
+    "ShardingTuning",
+    "apply_jax_runtime_config",
+    "get_backend",
+    "get_backend_config",
+    "get_backend_mode",
+    "get_backend_policy",
+    "get_active_cuda_device_index",
+    "get_chunk_policy",
+    "get_chunk_tuning",
+    "get_coil_chunk_size",
+    "get_compilation_cache_dir",
+    "get_compilation_cache_policy",
+    "get_debug_nans",
+    "get_disable_jit",
+    "get_distributed_runtime_config",
+    "get_field_kernel_tuning",
+    "get_jax_platform",
+    "get_pairwise_penalty_chunk_size",
+    "get_point_chunk_size",
+    "get_sharding_strategy",
+    "get_sharding_tuning",
+    "get_provenance_label",
+    "get_quadrature_block_size",
+    "get_tolerance_tier",
+    "get_transfer_guard",
+    "invalidate_backend_cache",
+    "is_backend_strict",
+    "is_float32_smoke_policy",
+    "is_jax_backend",
+    "is_parity_mode",
+    "maybe_initialize_distributed_jax",
+    "query_active_gpu_memory_mb",
+    "register_backend_cache_clear",
+    "should_shard_coil_groups",
+    "should_shard_points",
+    "should_shard_pairwise_rows",
+    "raise_if_strict_jax_fallback",
+    "raise_if_target_lane_bypass",
+    "requires_x64",
+    "set_backend",
+    "should_eagerly_configure_jax",
+    "use_runtime",
+    "validate_cuda_determinism_environment",
+    "warn_if_jax_fallback",
+    "with_cpu_device_for_construction",
+    "strict_target_lane_purity",
+    "target_lane_purity_active",
+    "target_lane_purity_requested",
+]
 
 _VALID_BACKENDS = ("cpu", "jax")
 _VALID_PLATFORMS = ("cpu", "cuda", "mps")
@@ -695,18 +755,8 @@ def _optional_bool_env(name: str) -> bool | None:
     return _parse_bool_value(raw_value, source=name)
 
 
-def _optional_fraction_env(name: str) -> float | None:
-    raw_value = _optional_env_value(name)
-    if raw_value is None:
-        return None
-    value = float(raw_value)
-    if not 0.0 < value <= 1.0:
-        raise ValueError(f"{name}={raw_value!r} must be in (0, 1]")
-    return value
-
-
 def _validate_gpu_allocator(
-    value: str | None,
+    value: object | None,
     *,
     source: str,
 ) -> Literal["platform", "vmm"] | None:
@@ -722,7 +772,7 @@ def _validate_gpu_allocator(
 
 
 def _validate_tf_gpu_allocator(
-    value: str | None,
+    value: object | None,
     *,
     source: str,
 ) -> Literal["cuda_malloc_async"] | None:
@@ -1329,138 +1379,40 @@ def _build_sharding_tuning(
     )
 
 
-def _resolve_debug_nans(debug_nans: bool | None) -> bool:
-    if debug_nans is None:
-        return (
-            _env_bool(_DEBUG_NANS_ENV)
-            if _optional_env_value(_DEBUG_NANS_ENV)
-            else False
-        )
-    return bool(debug_nans)
+def _resolve_kwarg(
+    explicit: _ExplicitT | None,
+    *,
+    parse_explicit: Callable[[_ExplicitT], _ResolvedT],
+    env_names: tuple[str, ...],
+    parse_env: Callable[[str, str], _ResolvedT],
+    read_default: Callable[[], _ResolvedT],
+) -> _ResolvedT:
+    if explicit is not None:
+        return parse_explicit(explicit)
+    for env_name in env_names:
+        env_value = _optional_env_value(env_name)
+        if env_value is not None:
+            return parse_env(env_value, env_name)
+    return read_default()
+
+
+def _optional_bool_policy_default(value: object) -> bool | None:
+    return None if value is None else bool(value)
 
 
 def _debug_overlay_enabled() -> bool:
     return bool(_optional_bool_env(_DEBUG_ENV))
 
 
-def _resolve_disable_jit(disable_jit: bool | None) -> bool:
-    if disable_jit is None:
-        env_value = _optional_bool_env(_DISABLE_JIT_ENV)
-        return False if env_value is None else env_value
-    return bool(disable_jit)
-
-
 def _default_transfer_guard(mode: str) -> str | None:
     return _DEFAULT_TRANSFER_GUARD_BY_MODE[_validate_mode(mode)]
 
 
-def _resolve_transfer_guard(mode: str, transfer_guard: str | None) -> str | None:
-    env_value = _optional_env_value(_TRANSFER_GUARD_ENV)
-    if transfer_guard is None and env_value is not None:
-        return _validate_transfer_guard(
-            env_value,
-            source=_TRANSFER_GUARD_ENV,
-        )
-    if transfer_guard is None:
-        return _default_transfer_guard(mode)
-    return _validate_transfer_guard(
-        transfer_guard,
-        source="transfer_guard",
-    )
-
-
-def _resolve_compilation_cache_dir(
-    mode: str,
-    compilation_cache_dir: str | None,
-) -> str | None:
-    if compilation_cache_dir is not None:
-        return compilation_cache_dir or None
-    env_value = _optional_env_value(_COMPILATION_CACHE_DIR_ENV)
-    if env_value is not None:
-        return env_value
-    jax_env_value = _optional_env_value(_JAX_COMPILATION_CACHE_DIR_ENV)
-    if jax_env_value is not None:
-        return jax_env_value
-    return _default_compilation_cache_dir(mode)
-
-
-def _resolve_xla_gpu_preallocate(
-    mode: str,
-    xla_gpu_preallocate: bool | None,
-) -> bool | None:
-    if xla_gpu_preallocate is not None:
-        return bool(xla_gpu_preallocate)
-    env_value = _optional_bool_env(_GPU_PREALLOCATE_ENV)
-    if env_value is not None:
-        return env_value
-    defaults = _get_mode_policy_defaults(mode)
-    default = defaults["xla_gpu_preallocate"]
-    return None if default is None else bool(default)
-
-
-def _validate_mem_fraction_value(value: float, *, source: str) -> float:
+def _validate_mem_fraction_value(value: object, *, source: str) -> float:
     fraction = float(value)
     if not 0.0 < fraction <= 1.0:
         raise ValueError(f"{source}={value!r} must be in (0, 1]")
     return fraction
-
-
-def _resolve_xla_gpu_mem_fraction(
-    mode: str,
-    xla_gpu_mem_fraction: float | None,
-) -> float | None:
-    if xla_gpu_mem_fraction is not None:
-        return _validate_mem_fraction_value(
-            xla_gpu_mem_fraction,
-            source="xla_gpu_mem_fraction",
-        )
-    env_value = _optional_fraction_env(_GPU_MEM_FRACTION_ENV)
-    if env_value is not None:
-        return env_value
-    defaults = _get_mode_policy_defaults(mode)
-    default = defaults["xla_gpu_mem_fraction"]
-    return None if default is None else float(default)
-
-
-def _resolve_xla_gpu_allocator(
-    mode: str,
-    xla_gpu_allocator: Literal["platform", "vmm"] | None,
-) -> Literal["platform", "vmm"] | None:
-    if xla_gpu_allocator is not None:
-        return _validate_gpu_allocator(
-            xla_gpu_allocator,
-            source="xla_gpu_allocator",
-        )
-    env_value = _optional_env_value(_GPU_ALLOCATOR_ENV)
-    if env_value is not None:
-        return _validate_gpu_allocator(env_value, source=_GPU_ALLOCATOR_ENV)
-    defaults = _get_mode_policy_defaults(mode)
-    return _validate_gpu_allocator(
-        defaults["xla_gpu_allocator"],
-        source=f"{mode}.xla_gpu_allocator",
-    )
-
-
-def _resolve_tf_gpu_allocator(
-    mode: str,
-    tf_gpu_allocator: Literal["cuda_malloc_async"] | None,
-) -> Literal["cuda_malloc_async"] | None:
-    if tf_gpu_allocator is not None:
-        return _validate_tf_gpu_allocator(
-            tf_gpu_allocator,
-            source="tf_gpu_allocator",
-        )
-    env_value = _optional_env_value(_TF_GPU_ALLOCATOR_OVERRIDE_ENV)
-    if env_value is not None:
-        return _validate_tf_gpu_allocator(
-            env_value,
-            source=_TF_GPU_ALLOCATOR_OVERRIDE_ENV,
-        )
-    defaults = _get_mode_policy_defaults(mode)
-    return _validate_tf_gpu_allocator(
-        defaults["tf_gpu_allocator"],
-        source=f"{mode}.tf_gpu_allocator",
-    )
 
 
 def _config_from_mode(
@@ -1479,32 +1431,115 @@ def _config_from_mode(
     mode = _validate_mode(mode)
     backend, jax_platform = _MODE_TO_RUNTIME[mode]
     debug_overlay = _debug_overlay_enabled()
+    defaults = _get_mode_policy_defaults(mode)
+    if debug_overlay:
+        resolved_debug_nans = True
+        resolved_disable_jit = True
+        resolved_transfer_guard = "disallow"
+    else:
+        resolved_debug_nans = _resolve_kwarg(
+            debug_nans,
+            parse_explicit=bool,
+            env_names=(_DEBUG_NANS_ENV,),
+            parse_env=lambda value, source: value.strip().lower() in _TRUTHY_ENV_VALUES,
+            read_default=lambda: False,
+        )
+        resolved_disable_jit = _resolve_kwarg(
+            disable_jit,
+            parse_explicit=bool,
+            env_names=(_DISABLE_JIT_ENV,),
+            parse_env=lambda value, source: _parse_bool_value(value, source=source),
+            read_default=lambda: False,
+        )
+        resolved_transfer_guard = _resolve_kwarg(
+            transfer_guard,
+            parse_explicit=lambda value: _validate_transfer_guard(
+                value,
+                source="transfer_guard",
+            ),
+            env_names=(_TRANSFER_GUARD_ENV,),
+            parse_env=lambda value, source: _validate_transfer_guard(
+                value,
+                source=source,
+            ),
+            read_default=lambda: _default_transfer_guard(mode),
+        )
+    resolved_compilation_cache_dir = _resolve_kwarg(
+        compilation_cache_dir,
+        parse_explicit=lambda value: value or None,
+        env_names=(_COMPILATION_CACHE_DIR_ENV, _JAX_COMPILATION_CACHE_DIR_ENV),
+        parse_env=lambda value, source: value,
+        read_default=lambda: _default_compilation_cache_dir(mode),
+    )
+    resolved_xla_gpu_preallocate = _resolve_kwarg(
+        xla_gpu_preallocate,
+        parse_explicit=bool,
+        env_names=(_GPU_PREALLOCATE_ENV,),
+        parse_env=lambda value, source: _parse_bool_value(value, source=source),
+        read_default=lambda: _optional_bool_policy_default(
+            defaults["xla_gpu_preallocate"]
+        ),
+    )
+    resolved_xla_gpu_mem_fraction = _resolve_kwarg(
+        xla_gpu_mem_fraction,
+        parse_explicit=lambda value: _validate_mem_fraction_value(
+            value,
+            source="xla_gpu_mem_fraction",
+        ),
+        env_names=(_GPU_MEM_FRACTION_ENV,),
+        parse_env=lambda value, source: _validate_mem_fraction_value(
+            value,
+            source=source,
+        ),
+        read_default=lambda: _optional_float_policy_default(
+            defaults["xla_gpu_mem_fraction"]
+        ),
+    )
+    resolved_xla_gpu_allocator = _resolve_kwarg(
+        xla_gpu_allocator,
+        parse_explicit=lambda value: _validate_gpu_allocator(
+            value,
+            source="xla_gpu_allocator",
+        ),
+        env_names=(_GPU_ALLOCATOR_ENV,),
+        parse_env=lambda value, source: _validate_gpu_allocator(
+            value,
+            source=source,
+        ),
+        read_default=lambda: _validate_gpu_allocator(
+            defaults["xla_gpu_allocator"],
+            source=f"{mode}.xla_gpu_allocator",
+        ),
+    )
+    resolved_tf_gpu_allocator = _resolve_kwarg(
+        tf_gpu_allocator,
+        parse_explicit=lambda value: _validate_tf_gpu_allocator(
+            value,
+            source="tf_gpu_allocator",
+        ),
+        env_names=(_TF_GPU_ALLOCATOR_OVERRIDE_ENV,),
+        parse_env=lambda value, source: _validate_tf_gpu_allocator(
+            value,
+            source=source,
+        ),
+        read_default=lambda: _validate_tf_gpu_allocator(
+            defaults["tf_gpu_allocator"],
+            source=f"{mode}.tf_gpu_allocator",
+        ),
+    )
     return BackendConfig(
         mode=mode,
         backend=backend,
         jax_platform=jax_platform,
         strict=bool(strict) or debug_overlay,
-        debug_nans=True if debug_overlay else _resolve_debug_nans(debug_nans),
-        disable_jit=True if debug_overlay else _resolve_disable_jit(disable_jit),
-        transfer_guard=(
-            "disallow"
-            if debug_overlay
-            else _resolve_transfer_guard(mode, transfer_guard)
-        ),
-        compilation_cache_dir=_resolve_compilation_cache_dir(
-            mode,
-            compilation_cache_dir,
-        ),
-        xla_gpu_preallocate=_resolve_xla_gpu_preallocate(
-            mode,
-            xla_gpu_preallocate,
-        ),
-        xla_gpu_mem_fraction=_resolve_xla_gpu_mem_fraction(
-            mode,
-            xla_gpu_mem_fraction,
-        ),
-        xla_gpu_allocator=_resolve_xla_gpu_allocator(mode, xla_gpu_allocator),
-        tf_gpu_allocator=_resolve_tf_gpu_allocator(mode, tf_gpu_allocator),
+        debug_nans=resolved_debug_nans,
+        disable_jit=resolved_disable_jit,
+        transfer_guard=resolved_transfer_guard,
+        compilation_cache_dir=resolved_compilation_cache_dir,
+        xla_gpu_preallocate=resolved_xla_gpu_preallocate,
+        xla_gpu_mem_fraction=resolved_xla_gpu_mem_fraction,
+        xla_gpu_allocator=resolved_xla_gpu_allocator,
+        tf_gpu_allocator=resolved_tf_gpu_allocator,
     )
 
 
