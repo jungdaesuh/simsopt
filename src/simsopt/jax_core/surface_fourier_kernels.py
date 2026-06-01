@@ -1532,15 +1532,10 @@ def surface_xyzfourier_gammadash1_from_dofs(
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi_jax)
 
+    radial = dxhat_dphi - two_pi * yhat
+    toroidal = dyhat_dphi + two_pi * xhat
     phi_angle = two_pi * quadpoints_phi_jax
-    cphi = jnp.cos(phi_angle)[:, None]
-    sphi = jnp.sin(phi_angle)[:, None]
-
-    dx = dxhat_dphi * cphi - xhat * (two_pi * sphi)
-    dx -= dyhat_dphi * sphi + yhat * (two_pi * cphi)
-    dy = dxhat_dphi * sphi + xhat * (two_pi * cphi)
-    dy += dyhat_dphi * cphi - yhat * (two_pi * sphi)
-
+    dx, dy = _surface_xyzfourier_rotate(phi_angle, radial, toroidal)
     return jnp.stack([dx, dy, dz_dphi], axis=-1)
 
 

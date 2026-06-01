@@ -1019,6 +1019,30 @@ git diff --check -- src/simsopt/jax_core/surface_fourier_kernels.py
 
 - **Review evidence:** six-lens adversarial review returned strict PASS after one docs-planning correction. The docs/accounting and history lenses found that the open-question list still stopped at the coefficient-derivative wrapper slice; the final docs now include the `SurfaceXYZFourier` order-hat helper slice and keep the remaining work framed as a product-rule formula fold only if it stays readable. API/behavior, AGENTS/guardrail, mistake-pattern, and comment/test-quality lenses found no remaining issues: derivative-order tuple destructuring is correct, paired-linear paths remain separate, public wrapper introspection is preserved, LOC accounting is `73 insertions / 108 deletions` (`-35`) for this source slice and `550` banked across completed T2.3 slices, and validation evidence remains CPU/X64 only.
 
+### 2026-06-01 — T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.3.
+- **Selected slice:** only the full-grid `SurfaceXYZFourier.gammadash1` product-rule spelling in `surface_fourier_kernels.py`. The expanded cosine/sine derivative components are now represented as explicit radial/toroidal components and rotated through `_surface_xyzfourier_rotate(...)`, matching the local representation already used by the paired-linear `gammadash1` wrapper. No paired-linear wrapper, coefficient-Jacobian wrapper, composed area/volume/unit-normal helper, CPU geometry code, backend/cache policy, CUDA/MPS path, transfer policy, public symbol, derivative-order helper, or other product-rule formula was changed.
+- **Changed files:** `src/simsopt/jax_core/surface_fourier_kernels.py`, plus this plan set.
+- **Design-it-twice gate:** a broad product-rule table/factory remains rejected because it would obscure the derivative algebra. The selected micro-slice changes only one formula to a local radial/toroidal spelling that is shorter and matches the neighboring paired-linear formula. Leaving the other explicit formulas untouched is intentional until each can prove a clearer source-negative representation.
+- **Scope status:** `gammadash1` product-rule micro-slice LOC-banked; full T2.3 remains open for any future readable product-rule folds. `surface_fourier_kernels.py` is source-negative by 5 LOC for this slice (`3 insertions / 8 deletions`), bringing completed T2.3 banked source reduction to 555 LOC across the facade, tensor-kernel, XYZ unpack, coefficient-derivative wrapper, order-hat, and `gammadash1` micro-slices. The old full-item `~550` estimate still is not closed as a scope claim because the remaining product-rule formulas are intentionally explicit.
+- **Validation evidence:** CPU/X64 `SurfaceXYZFourier` analytic geometry/tangent proof, not CUDA/MPS proof.
+
+```bash
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff check src/simsopt/jax_core/surface_fourier_kernels.py tests/geo/test_surface_fourier_jax.py
+# All checks passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/surface_fourier_kernels.py
+# 1 file already formatted
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m py_compile src/simsopt/jax_core/surface_fourier_kernels.py tests/geo/test_surface_fourier_jax.py
+# passed
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy src/simsopt/jax_core/surface_fourier_kernels.py
+# Success: no issues found in 1 source file
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/geo/test_surface_fourier_jax.py -k 'geometry_and_tangents_match_cpp or gamma_and_tangent_lin_match_cpp or second_coordinate_derivative_dcoeff_match_cpp or non_rz_fundamental_form_derivatives_match_cpp'
+# 26 passed, 124 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/geo/test_surface_fourier_jax.py::TestSurfaceXYZFourierJaxCppParity
+# 26 passed
+```
+
 ### 2026-06-01 — T2.9 quantity-aware tolerance contract helper
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.9.
@@ -1320,6 +1344,6 @@ git diff --check -- benchmarks/single_stage_init_parity.py
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, complete the remaining T2.3 product-rule formula fold only if it stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?
