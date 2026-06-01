@@ -2566,10 +2566,6 @@ def _compare_same_candidate_exact_event_field(
         )
 
 
-def _same_candidate_target_native_replay_event(event: dict[str, Any]) -> bool:
-    return bool(event.get("target_native_replay", False))
-
-
 def _same_candidate_rejected_by_contract(event: dict[str, Any]) -> bool:
     return not bool(event.get("native_gradient_used"))
 
@@ -3552,9 +3548,7 @@ def compare_same_candidate_objective_replay(
         jax_x = _summary_vector(jax_event.get("candidate_optimizer_dofs"))
         if cpu_x is None or jax_x is None:
             continue
-        target_native_replay_event = _same_candidate_target_native_replay_event(
-            jax_event
-        )
+        target_native_replay_event = bool(jax_event.get("target_native_replay", False))
         cpu_event_index = cpu_event.get("event_index")
         jax_event_index = jax_event.get("event_index")
         accepted_iteration_target = cpu_event.get("accepted_iteration_target")
