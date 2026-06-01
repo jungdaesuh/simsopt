@@ -80,15 +80,23 @@ from .boozer_radial_field import (
     _eval_dGds as _radial_dGds,
     _eval_dIds as _radial_dIds,
     _eval_dKdtheta as _radial_dKdtheta,
+    _eval_dKdtheta_from_columns as _radial_dKdtheta_from_columns,
     _eval_dKdzeta as _radial_dKdzeta,
+    _eval_dKdzeta_from_columns as _radial_dKdzeta_from_columns,
     _eval_dmodBds as _radial_dmodBds,
+    _eval_dmodBds_from_columns as _radial_dmodBds_from_columns,
     _eval_dmodBdtheta as _radial_dmodBdtheta,
+    _eval_dmodBdtheta_from_columns as _radial_dmodBdtheta_from_columns,
     _eval_dmodBdzeta as _radial_dmodBdzeta,
+    _eval_dmodBdzeta_from_columns as _radial_dmodBdzeta_from_columns,
     _eval_G as _radial_G,
     _eval_I as _radial_I,
     _eval_iota as _radial_iota,
     _eval_K as _radial_K,
+    _eval_K_from_columns as _radial_K_from_columns,
     _eval_modB as _radial_modB,
+    _eval_modB_from_columns as _radial_modB_from_columns,
+    _eval_radial_rhs_columns as _radial_eval_rhs_columns,
 )
 from .boozer_analytic import (
     BoozerAnalyticFrozenState,
@@ -2689,6 +2697,61 @@ def _interpolated_boozer_evaluator(name: str) -> Callable:
     return _eval
 
 
+def _radial_column_scalar(name: str) -> Callable:
+    def _eval(
+        _state: BoozerRadialInterpolantFrozenState,
+        columns,
+        _point: jax.Array,
+    ) -> jax.Array:
+        return getattr(columns, name)
+
+    return _eval
+
+
+_RADIAL_RHS_COLUMN_EVALUATORS: dict[str, Callable] = {
+    "modB": _radial_modB_from_columns,
+    "dmodBds": _radial_dmodBds_from_columns,
+    "dmodBdtheta": _radial_dmodBdtheta_from_columns,
+    "dmodBdzeta": _radial_dmodBdzeta_from_columns,
+    "K": _radial_K_from_columns,
+    "dKdtheta": _radial_dKdtheta_from_columns,
+    "dKdzeta": _radial_dKdzeta_from_columns,
+    "G": _radial_column_scalar("G"),
+    "I": _radial_column_scalar("I"),
+    "iota": _radial_column_scalar("iota"),
+    "dGds": _radial_column_scalar("dGds"),
+    "dIds": _radial_column_scalar("dIds"),
+}
+
+
+def _boozer_rhs_evaluators(state) -> tuple[dict[str, Callable], bool]:
+    if isinstance(state, BoozerRadialInterpolantFrozenState):
+        return _RADIAL_RHS_COLUMN_EVALUATORS, True
+    return _boozer_field_evaluators(state), False
+
+
+def _boozer_radial_columns_for_point(
+    state,
+    point: jax.Array,
+    use_radial_columns: bool,
+):
+    if use_radial_columns:
+        return _radial_eval_rhs_columns(state, point[:, 0])
+    return None
+
+
+def _boozer_eval_scalar(
+    evals: dict[str, Callable],
+    key: str,
+    state,
+    point: jax.Array,
+    radial_columns,
+) -> jax.Array:
+    if radial_columns is None:
+        return _boozer_scalar(evals[key](state, point))
+    return _boozer_scalar(evals[key](state, radial_columns, point))
+
+
 def _boozer_field_evaluators(state) -> dict[str, Callable]:
     """Return the set of evaluator callables matching the frozen-state type.
 
@@ -2793,7 +2856,7 @@ def guiding_center_vacuum_boozer_rhs(
     """
 
     state, psi0_host = _resolve_boozer_field_state(boozer_field)
-    evals = _boozer_field_evaluators(state)
+    evals, use_radial_columns = _boozer_rhs_evaluators(state)
     m_arr = jnp.asarray(m, dtype=jnp.float64)
     q_arr = jnp.asarray(q, dtype=jnp.float64)
     mu_arr = jnp.asarray(mu, dtype=jnp.float64)
@@ -2803,12 +2866,19 @@ def guiding_center_vacuum_boozer_rhs(
         del _t
         v_par = y[3]
         point = _boozer_point_2d(y)
-        modB = _boozer_scalar(evals["modB"](state, point))
-        dmodBds = _boozer_scalar(evals["dmodBds"](state, point))
-        dmodBdtheta = _boozer_scalar(evals["dmodBdtheta"](state, point))
-        dmodBdzeta = _boozer_scalar(evals["dmodBdzeta"](state, point))
-        G = _boozer_scalar(evals["G"](state, point))
-        iota = _boozer_scalar(evals["iota"](state, point))
+        radial_columns = _boozer_radial_columns_for_point(
+            state, point, use_radial_columns
+        )
+        modB = _boozer_eval_scalar(evals, "modB", state, point, radial_columns)
+        dmodBds = _boozer_eval_scalar(evals, "dmodBds", state, point, radial_columns)
+        dmodBdtheta = _boozer_eval_scalar(
+            evals, "dmodBdtheta", state, point, radial_columns
+        )
+        dmodBdzeta = _boozer_eval_scalar(
+            evals, "dmodBdzeta", state, point, radial_columns
+        )
+        G = _boozer_eval_scalar(evals, "G", state, point, radial_columns)
+        iota = _boozer_eval_scalar(evals, "iota", state, point, radial_columns)
 
         fak1 = m_arr * v_par * v_par / modB + m_arr * mu_arr
 
@@ -2851,7 +2921,7 @@ def guiding_center_no_k_boozer_rhs(
     """
 
     state, psi0_host = _resolve_boozer_field_state(boozer_field)
-    evals = _boozer_field_evaluators(state)
+    evals, use_radial_columns = _boozer_rhs_evaluators(state)
     m_arr = jnp.asarray(m, dtype=jnp.float64)
     q_arr = jnp.asarray(q, dtype=jnp.float64)
     mu_arr = jnp.asarray(mu, dtype=jnp.float64)
@@ -2861,15 +2931,22 @@ def guiding_center_no_k_boozer_rhs(
         del _t
         v_par = y[3]
         point = _boozer_point_2d(y)
-        modB = _boozer_scalar(evals["modB"](state, point))
-        dmodBds = _boozer_scalar(evals["dmodBds"](state, point))
-        dmodBdtheta = _boozer_scalar(evals["dmodBdtheta"](state, point))
-        dmodBdzeta = _boozer_scalar(evals["dmodBdzeta"](state, point))
-        G = _boozer_scalar(evals["G"](state, point))
-        I_val = _boozer_scalar(evals["I"](state, point))
-        iota = _boozer_scalar(evals["iota"](state, point))
-        dGds = _boozer_scalar(evals["dGds"](state, point))
-        dIds = _boozer_scalar(evals["dIds"](state, point))
+        radial_columns = _boozer_radial_columns_for_point(
+            state, point, use_radial_columns
+        )
+        modB = _boozer_eval_scalar(evals, "modB", state, point, radial_columns)
+        dmodBds = _boozer_eval_scalar(evals, "dmodBds", state, point, radial_columns)
+        dmodBdtheta = _boozer_eval_scalar(
+            evals, "dmodBdtheta", state, point, radial_columns
+        )
+        dmodBdzeta = _boozer_eval_scalar(
+            evals, "dmodBdzeta", state, point, radial_columns
+        )
+        G = _boozer_eval_scalar(evals, "G", state, point, radial_columns)
+        I_val = _boozer_eval_scalar(evals, "I", state, point, radial_columns)
+        iota = _boozer_eval_scalar(evals, "iota", state, point, radial_columns)
+        dGds = _boozer_eval_scalar(evals, "dGds", state, point, radial_columns)
+        dIds = _boozer_eval_scalar(evals, "dIds", state, point, radial_columns)
         dGdpsi = dGds / psi0
         dIdpsi = dIds / psi0
         dmodBdpsi = dmodBds / psi0
@@ -2930,7 +3007,7 @@ def guiding_center_boozer_rhs(
     """
 
     state, psi0_host = _resolve_boozer_field_state(boozer_field)
-    evals = _boozer_field_evaluators(state)
+    evals, use_radial_columns = _boozer_rhs_evaluators(state)
     m_arr = jnp.asarray(m, dtype=jnp.float64)
     q_arr = jnp.asarray(q, dtype=jnp.float64)
     mu_arr = jnp.asarray(mu, dtype=jnp.float64)
@@ -2940,18 +3017,25 @@ def guiding_center_boozer_rhs(
         del _t
         v_par = y[3]
         point = _boozer_point_2d(y)
-        modB = _boozer_scalar(evals["modB"](state, point))
-        dmodBds = _boozer_scalar(evals["dmodBds"](state, point))
-        dmodBdtheta = _boozer_scalar(evals["dmodBdtheta"](state, point))
-        dmodBdzeta = _boozer_scalar(evals["dmodBdzeta"](state, point))
-        K_val = _boozer_scalar(evals["K"](state, point))
-        dKdtheta = _boozer_scalar(evals["dKdtheta"](state, point))
-        dKdzeta = _boozer_scalar(evals["dKdzeta"](state, point))
-        G = _boozer_scalar(evals["G"](state, point))
-        I_val = _boozer_scalar(evals["I"](state, point))
-        iota = _boozer_scalar(evals["iota"](state, point))
-        dGds = _boozer_scalar(evals["dGds"](state, point))
-        dIds = _boozer_scalar(evals["dIds"](state, point))
+        radial_columns = _boozer_radial_columns_for_point(
+            state, point, use_radial_columns
+        )
+        modB = _boozer_eval_scalar(evals, "modB", state, point, radial_columns)
+        dmodBds = _boozer_eval_scalar(evals, "dmodBds", state, point, radial_columns)
+        dmodBdtheta = _boozer_eval_scalar(
+            evals, "dmodBdtheta", state, point, radial_columns
+        )
+        dmodBdzeta = _boozer_eval_scalar(
+            evals, "dmodBdzeta", state, point, radial_columns
+        )
+        K_val = _boozer_eval_scalar(evals, "K", state, point, radial_columns)
+        dKdtheta = _boozer_eval_scalar(evals, "dKdtheta", state, point, radial_columns)
+        dKdzeta = _boozer_eval_scalar(evals, "dKdzeta", state, point, radial_columns)
+        G = _boozer_eval_scalar(evals, "G", state, point, radial_columns)
+        I_val = _boozer_eval_scalar(evals, "I", state, point, radial_columns)
+        iota = _boozer_eval_scalar(evals, "iota", state, point, radial_columns)
+        dGds = _boozer_eval_scalar(evals, "dGds", state, point, radial_columns)
+        dIds = _boozer_eval_scalar(evals, "dIds", state, point, radial_columns)
         dGdpsi = dGds / psi0
         dIdpsi = dIds / psi0
         dmodBdpsi = dmodBds / psi0

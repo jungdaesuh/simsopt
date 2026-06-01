@@ -55,6 +55,9 @@ from simsopt.field.boozermagneticfield_jax import (
     BoozerAnalyticJAX,
     BoozerRadialInterpolantFrozenState,
 )
+from simsopt.jax_core.boozer_fixed_state import PiecewisePolynomial1D
+import simsopt.jax_core.boozer_radial_field as radial_field
+import simsopt.jax_core.tracing as tracing_module
 from simsopt.jax_core.tracing import (
     _BOOZER_RHS_EVAL_KEYS,
     _boozer_field_evaluators,
@@ -109,6 +112,57 @@ def _y0(s=0.4, theta=0.3, zeta=0.55, v_par=1.7e6):
     return jnp.asarray([s, theta, zeta, v_par], dtype=jnp.float64)
 
 
+def _constant_scalar_profile(value: float) -> PiecewisePolynomial1D:
+    return PiecewisePolynomial1D(
+        breaks=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+        coeffs=jnp.asarray([[value]], dtype=jnp.float64),
+    )
+
+
+def _constant_mode_profile(values: tuple[float, float]) -> PiecewisePolynomial1D:
+    return PiecewisePolynomial1D(
+        breaks=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+        coeffs=jnp.asarray(values, dtype=jnp.float64)[:, None, None],
+    )
+
+
+def _minimal_radial_state() -> BoozerRadialInterpolantFrozenState:
+    zero_modes = _constant_mode_profile((0.0, 0.0))
+    return BoozerRadialInterpolantFrozenState(
+        xm=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+        xn=jnp.asarray([0.0, 0.0], dtype=jnp.float64),
+        psip=_constant_scalar_profile(1.0),
+        G=_constant_scalar_profile(2.0),
+        I=_constant_scalar_profile(0.2),
+        iota=_constant_scalar_profile(0.4),
+        dGds=_constant_scalar_profile(0.03),
+        dIds=_constant_scalar_profile(0.04),
+        diotads=_constant_scalar_profile(0.05),
+        bmnc=_constant_mode_profile((1.1, 0.2)),
+        dbmncds=_constant_mode_profile((0.01, 0.02)),
+        rmnc=_constant_mode_profile((1.4, 0.05)),
+        drmncds=_constant_mode_profile((0.02, 0.01)),
+        zmns=_constant_mode_profile((0.0, 0.08)),
+        dzmnsds=_constant_mode_profile((0.0, 0.01)),
+        numns=_constant_mode_profile((0.0, 0.03)),
+        dnumnsds=_constant_mode_profile((0.0, 0.004)),
+        bmns=zero_modes,
+        dbmnsds=zero_modes,
+        rmns=zero_modes,
+        drmnsds=zero_modes,
+        zmnc=zero_modes,
+        dzmncds=zero_modes,
+        numnc=zero_modes,
+        dnumncds=zero_modes,
+        mn_factor=_constant_mode_profile((1.0, 1.0)),
+        d_mn_factor=zero_modes,
+        kmns=_constant_mode_profile((0.0, 0.06)),
+        kmnc=zero_modes,
+        stellsym=True,
+        no_K=False,
+    )
+
+
 # ----------------------------------------------------------------------
 # 1. Dispatch correctness — analytic vs. radial vs. unknown
 # ----------------------------------------------------------------------
@@ -157,56 +211,91 @@ def test_dispatch_returns_radial_evaluators_for_radial_state():
         _eval_iota as _radial_iota,
     )
 
-    # Build a minimal-but-valid radial frozen state. The dispatch only
-    # checks the type, not the array contents, so a tiny zero-filled
-    # frozen state is sufficient — the dispatch contract is purely
-    # type-based.
-    from simsopt.jax_core.boozer_fixed_state import PiecewisePolynomial1D
-
-    breaks = jnp.asarray([0.0, 1.0], dtype=jnp.float64)
-    coeffs_scalar = jnp.zeros((4, 1), dtype=jnp.float64)  # cubic, 1 segment
-    coeffs_modes = jnp.zeros((2, 4, 1), dtype=jnp.float64)  # 2 modes
-    zero_scalar = PiecewisePolynomial1D(breaks=breaks, coeffs=coeffs_scalar)
-    zero_modes = PiecewisePolynomial1D(breaks=breaks, coeffs=coeffs_modes)
-    state = BoozerRadialInterpolantFrozenState(
-        xm=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
-        xn=jnp.asarray([0.0, 0.0], dtype=jnp.float64),
-        psip=zero_scalar,
-        G=zero_scalar,
-        I=zero_scalar,
-        iota=zero_scalar,
-        dGds=zero_scalar,
-        dIds=zero_scalar,
-        diotads=zero_scalar,
-        bmnc=zero_modes,
-        dbmncds=zero_modes,
-        rmnc=zero_modes,
-        drmncds=zero_modes,
-        zmns=zero_modes,
-        dzmnsds=zero_modes,
-        numns=zero_modes,
-        dnumnsds=zero_modes,
-        bmns=zero_modes,
-        dbmnsds=zero_modes,
-        rmns=zero_modes,
-        drmnsds=zero_modes,
-        zmnc=zero_modes,
-        dzmncds=zero_modes,
-        numnc=zero_modes,
-        dnumncds=zero_modes,
-        mn_factor=zero_modes,
-        d_mn_factor=zero_modes,
-        kmns=zero_modes,
-        kmnc=zero_modes,
-        stellsym=True,
-        no_K=False,
-    )
+    state = _minimal_radial_state()
 
     evals = _boozer_field_evaluators(state)
     assert set(evals.keys()) == set(_BOOZER_RHS_EVAL_KEYS)
     assert evals["modB"] is _radial_modB
     assert evals["dmodBds"] is _radial_dmodBds
     assert evals["iota"] is _radial_iota
+
+
+def test_radial_boozer_rhs_evaluates_one_column_bundle_per_point(monkeypatch):
+    state = _minimal_radial_state()
+    calls = 0
+    original_eval_columns = tracing_module._radial_eval_rhs_columns
+
+    def counting_eval_columns(radial_state, s):
+        nonlocal calls
+        calls += 1
+        return original_eval_columns(radial_state, s)
+
+    monkeypatch.setattr(
+        tracing_module, "_radial_eval_rhs_columns", counting_eval_columns
+    )
+
+    rhs = guiding_center_vacuum_boozer_rhs((state, 1.0), m=1.0, q=1.0, mu=0.2)
+    result = rhs(jnp.asarray(0.0, dtype=jnp.float64), _y0(v_par=1.2))
+
+    assert calls == 1
+    assert jnp.all(jnp.isfinite(result))
+
+
+def test_direct_radial_evaluators_match_column_evaluators():
+    state = _minimal_radial_state()
+    points = jnp.asarray(
+        [[0.05, 0.1, 0.02], [0.37, 2.4, 1.0], [0.81, 5.1, 2.5]],
+        dtype=jnp.float64,
+    )
+    columns = radial_field._eval_radial_columns(state, points[:, 0])
+
+    fourier_pairs = (
+        (radial_field._eval_modB, radial_field._eval_modB_from_columns),
+        (radial_field._eval_dmodBdtheta, radial_field._eval_dmodBdtheta_from_columns),
+        (radial_field._eval_dmodBdzeta, radial_field._eval_dmodBdzeta_from_columns),
+        (radial_field._eval_dmodBds, radial_field._eval_dmodBds_from_columns),
+        (radial_field._eval_R, radial_field._eval_R_from_columns),
+        (radial_field._eval_dRdtheta, radial_field._eval_dRdtheta_from_columns),
+        (radial_field._eval_dRdzeta, radial_field._eval_dRdzeta_from_columns),
+        (radial_field._eval_dRds, radial_field._eval_dRds_from_columns),
+        (radial_field._eval_Z, radial_field._eval_Z_from_columns),
+        (radial_field._eval_dZdtheta, radial_field._eval_dZdtheta_from_columns),
+        (radial_field._eval_dZdzeta, radial_field._eval_dZdzeta_from_columns),
+        (radial_field._eval_dZds, radial_field._eval_dZds_from_columns),
+        (radial_field._eval_nu, radial_field._eval_nu_from_columns),
+        (radial_field._eval_dnudtheta, radial_field._eval_dnudtheta_from_columns),
+        (radial_field._eval_dnudzeta, radial_field._eval_dnudzeta_from_columns),
+        (radial_field._eval_dnuds, radial_field._eval_dnuds_from_columns),
+        (radial_field._eval_K, radial_field._eval_K_from_columns),
+        (radial_field._eval_dKdtheta, radial_field._eval_dKdtheta_from_columns),
+        (radial_field._eval_dKdzeta, radial_field._eval_dKdzeta_from_columns),
+    )
+    for direct_eval, column_eval in fourier_pairs:
+        np.testing.assert_allclose(
+            np.asarray(direct_eval(state, points)),
+            np.asarray(column_eval(state, columns, points)),
+            rtol=0.0,
+            atol=0.0,
+            err_msg=direct_eval.__name__,
+        )
+
+    scalar_pairs = (
+        (radial_field._eval_psip, columns.psip),
+        (radial_field._eval_G, columns.G),
+        (radial_field._eval_I, columns.I),
+        (radial_field._eval_iota, columns.iota),
+        (radial_field._eval_dGds, columns.dGds),
+        (radial_field._eval_dIds, columns.dIds),
+        (radial_field._eval_diotads, columns.diotads),
+    )
+    for direct_eval, column_value in scalar_pairs:
+        np.testing.assert_allclose(
+            np.asarray(direct_eval(state, points)),
+            np.asarray(column_value),
+            rtol=0.0,
+            atol=0.0,
+            err_msg=direct_eval.__name__,
+        )
 
 
 def test_dispatch_raises_typeerror_on_unknown_state():

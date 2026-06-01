@@ -411,6 +411,61 @@ def test_radial_columns_cached_once_per_points_cycle(monkeypatch):
     assert scalar_calls[id(state.G)] == 2
 
 
+def test_direct_radial_evaluators_match_column_evaluators():
+    wrapper = _synthetic_radial_wrapper()
+    state = wrapper.frozen_state
+    points = jnp.asarray(_make_evaluation_points(wrapper.nfp), dtype=jnp.float64)
+    columns = radial_field._eval_radial_columns(state, points[:, 0])
+
+    fourier_pairs = (
+        (radial_field._eval_modB, radial_field._eval_modB_from_columns),
+        (radial_field._eval_dmodBdtheta, radial_field._eval_dmodBdtheta_from_columns),
+        (radial_field._eval_dmodBdzeta, radial_field._eval_dmodBdzeta_from_columns),
+        (radial_field._eval_dmodBds, radial_field._eval_dmodBds_from_columns),
+        (radial_field._eval_R, radial_field._eval_R_from_columns),
+        (radial_field._eval_dRdtheta, radial_field._eval_dRdtheta_from_columns),
+        (radial_field._eval_dRdzeta, radial_field._eval_dRdzeta_from_columns),
+        (radial_field._eval_dRds, radial_field._eval_dRds_from_columns),
+        (radial_field._eval_Z, radial_field._eval_Z_from_columns),
+        (radial_field._eval_dZdtheta, radial_field._eval_dZdtheta_from_columns),
+        (radial_field._eval_dZdzeta, radial_field._eval_dZdzeta_from_columns),
+        (radial_field._eval_dZds, radial_field._eval_dZds_from_columns),
+        (radial_field._eval_nu, radial_field._eval_nu_from_columns),
+        (radial_field._eval_dnudtheta, radial_field._eval_dnudtheta_from_columns),
+        (radial_field._eval_dnudzeta, radial_field._eval_dnudzeta_from_columns),
+        (radial_field._eval_dnuds, radial_field._eval_dnuds_from_columns),
+        (radial_field._eval_K, radial_field._eval_K_from_columns),
+        (radial_field._eval_dKdtheta, radial_field._eval_dKdtheta_from_columns),
+        (radial_field._eval_dKdzeta, radial_field._eval_dKdzeta_from_columns),
+    )
+    for direct_eval, column_eval in fourier_pairs:
+        np.testing.assert_allclose(
+            np.asarray(direct_eval(state, points)),
+            np.asarray(column_eval(state, columns, points)),
+            rtol=0.0,
+            atol=0.0,
+            err_msg=direct_eval.__name__,
+        )
+
+    scalar_pairs = (
+        (radial_field._eval_psip, columns.psip),
+        (radial_field._eval_G, columns.G),
+        (radial_field._eval_I, columns.I),
+        (radial_field._eval_iota, columns.iota),
+        (radial_field._eval_dGds, columns.dGds),
+        (radial_field._eval_dIds, columns.dIds),
+        (radial_field._eval_diotads, columns.diotads),
+    )
+    for direct_eval, column_value in scalar_pairs:
+        np.testing.assert_allclose(
+            np.asarray(direct_eval(state, points)),
+            np.asarray(column_value),
+            rtol=0.0,
+            atol=0.0,
+            err_msg=direct_eval.__name__,
+        )
+
+
 def test_post_construction_psi0_mutation_does_not_change_wrapper(stellsym_bri_and_jax):
     """The JAX wrapper is an immutable snapshot of psi0-scaled K splines."""
 

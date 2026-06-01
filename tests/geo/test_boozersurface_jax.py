@@ -201,6 +201,151 @@ def test_public_solver_result_record_registry_is_mode_aware():
         )
 
 
+def test_boozer_result_core_helpers_match_schema_sources():
+    marker = object()
+    public_core = _bsj._boozer_public_result_core(
+        True,
+        False,
+        marker,
+        marker,
+        marker,
+        marker,
+        "ls",
+        True,
+    )
+    assert set(public_core) == (
+        _bsj._BOOZER_SOLVER_RESULT_CORE_KEYS | _bsj._BOOZER_RUNTIME_RESULT_KEYS
+    )
+    for record_type_name in (
+        "lbfgs",
+        "ls_manual",
+        "ls_lm",
+        "newton",
+        "exact",
+        "exact_constraints",
+    ):
+        assert not _bsj._BOOZER_RESULT_RECORD_TYPES[
+            record_type_name
+        ].forbidden_keys & set(public_core)
+
+    linearized_core = _bsj._boozer_public_linearized_result_core(
+        "hessian",
+        "operator",
+        False,
+        "host",
+    )
+    assert set(linearized_core) == _bsj._BOOZER_LINEARIZED_RESULT_KEYS
+    for record_type_name in ("newton", "exact"):
+        assert _bsj._BOOZER_RESULT_RECORD_TYPES[record_type_name].required_keys >= set(
+            linearized_core
+        )
+
+    newton_core = _bsj._boozer_ls_newton_result_core(
+        residual=marker,
+        jacobian=marker,
+        hessian=marker,
+        iteration_count=1,
+        success=True,
+        sdofs=marker,
+        G=marker,
+        surface=marker,
+        iota=marker,
+        weight_inv_modB=True,
+        plu=marker,
+        lu_piv=marker,
+        vjp=marker,
+        vjp_groups=marker,
+        optimizer_method="lbfgs",
+        solve_generation=1,
+        fun=0.0,
+        linear_solve_backend="operator",
+        dense_linear_solve_factors_available=True,
+        linearization_residency="host",
+    )
+    assert set(newton_core) == (
+        _bsj._BOOZER_SOLVER_RESULT_CORE_KEYS
+        | _bsj._BOOZER_RUNTIME_RESULT_KEYS
+        | _bsj._BOOZER_LINEARIZED_RESULT_KEYS
+        | {
+            "residual",
+            "jacobian",
+            "hessian",
+            "iter",
+            "PLU",
+            "LU_PIV",
+            "vjp",
+            "vjp_groups",
+            "optimizer_method",
+            "solve_generation",
+            "fun",
+        }
+    )
+    assert newton_core["type"] == "ls"
+    assert newton_core["linearization_kind"] == "hessian"
+    assert not _bsj._BOOZER_RESULT_RECORD_TYPES["newton"].forbidden_keys & set(
+        newton_core
+    )
+
+    exact_core = _bsj._boozer_exact_newton_result_core(
+        residual=marker,
+        fun=0.0,
+        jacobian=marker,
+        iteration_count=1,
+        success=True,
+        sdofs=marker,
+        G=marker,
+        surface=marker,
+        iota=marker,
+        weight_inv_modB=True,
+        plu=marker,
+        mask=marker,
+        vjp=marker,
+        vjp_groups=marker,
+        solve_generation=1,
+        dense_linear_solve_factors_available=True,
+        linearization_residency="host",
+    )
+    assert set(exact_core) == (
+        _bsj._BOOZER_SOLVER_RESULT_CORE_KEYS
+        | _bsj._BOOZER_RUNTIME_RESULT_KEYS
+        | _bsj._BOOZER_LINEARIZED_RESULT_KEYS
+        | {
+            "residual",
+            "fun",
+            "jacobian",
+            "iter",
+            "PLU",
+            "mask",
+            "vjp",
+            "vjp_groups",
+            "solve_generation",
+        }
+    )
+    assert exact_core["type"] == "exact"
+    assert exact_core["linearization_kind"] == "exact_jacobian"
+    assert not _bsj._BOOZER_RESULT_RECORD_TYPES["exact"].forbidden_keys & set(
+        exact_core
+    )
+
+    traceable_core = _bsj._boozer_traceable_result_core(
+        marker,
+        marker,
+        marker,
+        marker,
+        marker,
+        None,
+        None,
+        0,
+        True,
+        "hessian",
+        False,
+        "ls",
+        True,
+    )
+    assert set(traceable_core) == _bsj._BOOZER_TRACEABLE_RESULT_KEYS | {"lu_piv"}
+    assert not _TRACEABLE_LS_RESULT_RECORD_TYPE.forbidden_keys & set(traceable_core)
+
+
 def _assert_runtime_state_schema(runtime_state, required_fields):
     assert required_fields <= set(runtime_state.__dataclass_fields__)
 
