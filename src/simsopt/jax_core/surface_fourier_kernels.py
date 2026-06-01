@@ -1356,6 +1356,33 @@ def _surface_xyzfourier_component_hats(coeffs, basis):
     )
 
 
+def _surface_xyzfourier_component_hat_derivatives(
+    coeffs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    derivative_orders,
+):
+    """Return xhat/yhat/z derivative components for derivative-order pairs."""
+    return tuple(
+        _surface_xyzfourier_component_hats(
+            coeffs,
+            _surface_xyzfourier_separable_basis(
+                quadpoints_phi,
+                quadpoints_theta,
+                mpol,
+                ntor,
+                nfp,
+                phi_order=phi_order,
+                theta_order=theta_order,
+            ),
+        )
+        for phi_order, theta_order in derivative_orders
+    )
+
+
 def _surface_xyzfourier_hat_paired(cos_coeffs, sin_coeffs, cos_angle, sin_angle):
     coeff_term = cos_coeffs[None, :, :] * cos_angle
     coeff_term += sin_coeffs[None, :, :] * sin_angle
@@ -1427,17 +1454,15 @@ def surface_xyzfourier_gamma_from_dofs(
     coeffs = _scatter_surface_xyzfourier_dofs(
         dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    base_basis = _surface_xyzfourier_separable_basis(
+    ((xhat, yhat, z),) = _surface_xyzfourier_component_hat_derivatives(
+        coeffs,
         quadpoints_phi,
         quadpoints_theta,
         mpol,
         ntor,
         nfp,
-        phi_order=0,
-        theta_order=0,
+        ((0, 0),),
     )
-
-    xhat, yhat, z = _surface_xyzfourier_component_hats(coeffs, base_basis)
 
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
@@ -1493,32 +1518,19 @@ def surface_xyzfourier_gammadash1_from_dofs(
     coeffs = _scatter_surface_xyzfourier_dofs(
         dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    base_basis = _surface_xyzfourier_separable_basis(
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        phi_order=0,
-        theta_order=0,
-    )
-    dphi_basis = _surface_xyzfourier_separable_basis(
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        phi_order=1,
-        theta_order=0,
+    (xhat, yhat, _z), (dxhat_dphi, dyhat_dphi, dz_dphi) = (
+        _surface_xyzfourier_component_hat_derivatives(
+            coeffs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            ((0, 0), (1, 0)),
+        )
     )
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi_jax)
-
-    xhat, yhat, _z = _surface_xyzfourier_component_hats(coeffs, base_basis)
-    dxhat_dphi, dyhat_dphi, dz_dphi = _surface_xyzfourier_component_hats(
-        coeffs,
-        dphi_basis,
-    )
 
     phi_angle = two_pi * quadpoints_phi_jax
     cphi = jnp.cos(phi_angle)[:, None]
@@ -1592,22 +1604,19 @@ def surface_xyzfourier_gammadash2_from_dofs(
     coeffs = _scatter_surface_xyzfourier_dofs(
         dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    dtheta_basis = _surface_xyzfourier_separable_basis(
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        phi_order=0,
-        theta_order=1,
+    ((dxhat_dtheta, dyhat_dtheta, dz_dtheta),) = (
+        _surface_xyzfourier_component_hat_derivatives(
+            coeffs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            ((0, 1),),
+        )
     )
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi_jax)
-
-    dxhat_dtheta, dyhat_dtheta, dz_dtheta = _surface_xyzfourier_component_hats(
-        coeffs,
-        dtheta_basis,
-    )
 
     phi_angle = two_pi * quadpoints_phi_jax
     dx, dy = _surface_xyzfourier_rotate(phi_angle, dxhat_dtheta, dyhat_dtheta)
@@ -1670,45 +1679,21 @@ def surface_xyzfourier_gammadash1dash1_from_dofs(
     coeffs = _scatter_surface_xyzfourier_dofs(
         dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    base_basis = _surface_xyzfourier_separable_basis(
+    (
+        (xhat, yhat, _z),
+        (dxhat_dphi, dyhat_dphi, _dz_dphi),
+        (d2xhat_dphi2, d2yhat_dphi2, d2z_dphi2),
+    ) = _surface_xyzfourier_component_hat_derivatives(
+        coeffs,
         quadpoints_phi,
         quadpoints_theta,
         mpol,
         ntor,
         nfp,
-        phi_order=0,
-        theta_order=0,
-    )
-    dphi_basis = _surface_xyzfourier_separable_basis(
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        phi_order=1,
-        theta_order=0,
-    )
-    dphi2_basis = _surface_xyzfourier_separable_basis(
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        phi_order=2,
-        theta_order=0,
+        ((0, 0), (1, 0), (2, 0)),
     )
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi_jax)
-
-    xhat, yhat, _z = _surface_xyzfourier_component_hats(coeffs, base_basis)
-    dxhat_dphi, dyhat_dphi, _dz_dphi = _surface_xyzfourier_component_hats(
-        coeffs,
-        dphi_basis,
-    )
-    d2xhat_dphi2, d2yhat_dphi2, d2z_dphi2 = _surface_xyzfourier_component_hats(
-        coeffs,
-        dphi2_basis,
-    )
 
     radial = d2xhat_dphi2 - 2.0 * two_pi * dyhat_dphi - two_pi**2 * xhat
     toroidal = d2yhat_dphi2 + 2.0 * two_pi * dxhat_dphi - two_pi**2 * yhat
@@ -1732,37 +1717,20 @@ def surface_xyzfourier_gammadash1dash2_from_dofs(
     coeffs = _scatter_surface_xyzfourier_dofs(
         dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    dtheta_basis = _surface_xyzfourier_separable_basis(
+    (
+        (dxhat_dtheta, dyhat_dtheta, _dz_dtheta),
+        (d2xhat_dphidtheta, d2yhat_dphidtheta, d2z_dphidtheta),
+    ) = _surface_xyzfourier_component_hat_derivatives(
+        coeffs,
         quadpoints_phi,
         quadpoints_theta,
         mpol,
         ntor,
         nfp,
-        phi_order=0,
-        theta_order=1,
-    )
-    dphidtheta_basis = _surface_xyzfourier_separable_basis(
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        phi_order=1,
-        theta_order=1,
+        ((0, 1), (1, 1)),
     )
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi_jax)
-
-    dxhat_dtheta, dyhat_dtheta, _dz_dtheta = _surface_xyzfourier_component_hats(
-        coeffs,
-        dtheta_basis,
-    )
-    d2xhat_dphidtheta, d2yhat_dphidtheta, d2z_dphidtheta = (
-        _surface_xyzfourier_component_hats(
-            coeffs,
-            dphidtheta_basis,
-        )
-    )
 
     radial = d2xhat_dphidtheta - two_pi * dyhat_dtheta
     toroidal = d2yhat_dphidtheta + two_pi * dxhat_dtheta
@@ -1786,22 +1754,19 @@ def surface_xyzfourier_gammadash2dash2_from_dofs(
     coeffs = _scatter_surface_xyzfourier_dofs(
         dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    dtheta2_basis = _surface_xyzfourier_separable_basis(
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        phi_order=0,
-        theta_order=2,
+    ((d2xhat_dtheta2, d2yhat_dtheta2, d2z_dtheta2),) = (
+        _surface_xyzfourier_component_hat_derivatives(
+            coeffs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            ((0, 2),),
+        )
     )
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi_jax)
-
-    d2xhat_dtheta2, d2yhat_dtheta2, d2z_dtheta2 = _surface_xyzfourier_component_hats(
-        coeffs,
-        dtheta2_basis,
-    )
 
     phi_angle = two_pi * quadpoints_phi_jax
     dx, dy = _surface_xyzfourier_rotate(phi_angle, d2xhat_dtheta2, d2yhat_dtheta2)
