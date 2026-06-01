@@ -45,6 +45,7 @@ from workflow_runner_common import (  # noqa: E402
     resolved_path,
     resolve_single_stage_iota_target_arg,
     run_command,
+    run_single_stage_command,
     timeout_or_none,
     write_json,
 )
@@ -440,8 +441,9 @@ def run_single_stage_command_with_salvage(
     previous_preserved_snapshot = (
         goal_mode_runner.snapshot_single_stage_preserved_results_paths(output_root)
     )
-    run_command(
+    run_single_stage_command(
         command,
+        output_root=output_root,
         timeout_seconds=timeout_seconds,
         dry_run=False,
     )

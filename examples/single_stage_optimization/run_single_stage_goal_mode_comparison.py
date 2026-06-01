@@ -24,7 +24,7 @@ from workflow_runner_common import (  # noqa: E402
     maybe_load_validated_stage2_seed_results,
     resolved_optional_path,
     resolved_path,
-    run_command,
+    run_single_stage_command,
     snapshot_single_results_paths,
     timeout_or_none,
     validate_constraint_cli_overrides,
@@ -998,8 +998,9 @@ def run_goal_mode_case(
     }
     timeout_seconds = timeout_or_none(args.single_stage_timeout_seconds)
     try:
-        run_command(
+        run_single_stage_command(
             command,
+            output_root=case_output_root,
             timeout_seconds=timeout_seconds,
         )
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as error:

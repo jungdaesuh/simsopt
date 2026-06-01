@@ -26,7 +26,7 @@ from workflow_runner_common import (  # noqa: E402
     load_json,
     load_stage2_artifact_results,
     parse_csv,
-    run_command,
+    run_single_stage_command,
     single_stage_alm_flag,
     snapshot_single_results_paths,
     stage2_artifact_config_flat_dict,
@@ -444,8 +444,9 @@ def run_case(
             "CASE_OUTPUT_ROOT": str(case_output_root),
             "COMMAND": command,
         }
-    run_command(
+    run_single_stage_command(
         command,
+        output_root=case_output_root,
         timeout_seconds=timeout_or_none(args.single_stage_timeout_seconds),
     )
     results_path = discover_single_results_path(

@@ -1822,6 +1822,53 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
         passed_env = run_mock.call_args.kwargs["env"]
         self.assertEqual(passed_env["ALM_PENALTY_INIT"], "999.0")
 
+    def test_run_command_writes_stdout_and_stderr_to_log_path(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "case" / "run.log"
+            module.run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys; print('stdout-line'); "
+                        "print('stderr-line', file=sys.stderr)"
+                    ),
+                ],
+                log_path=log_path,
+            )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertIn("$ ", log_text)
+        self.assertIn("[cwd] ", log_text)
+        self.assertIn("stdout-line", log_text)
+        self.assertIn("stderr-line", log_text)
+
+    def test_run_command_keeps_log_when_process_fails(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "case" / "run.log"
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                module.run_command(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import sys; print('stdout-before-fail'); "
+                            "print('stderr-before-fail', file=sys.stderr); "
+                            "sys.exit(7)"
+                        ),
+                    ],
+                    log_path=log_path,
+                )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(raised.exception.returncode, 7)
+        self.assertIn("stdout-before-fail", log_text)
+        self.assertIn("stderr-before-fail", log_text)
+
     def test_run_poincare_artifact_uses_shared_subprocess_environment(self):
         module = load_workflow_common_module()
 
@@ -3145,7 +3192,10 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         module = load_goal_mode_comparison_module()
         output_root = Path(tempfile.mkdtemp())
 
-        with patch.object(module, "run_command") as run_command, patch.object(
+        with patch.object(
+            module,
+            "run_single_stage_command",
+        ) as run_command, patch.object(
             module,
             "discover_single_results_path",
             return_value=output_root / "target" / "results.json",
@@ -3161,6 +3211,10 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             )
 
         run_command.assert_called_once()
+        self.assertEqual(
+            run_command.call_args.kwargs["output_root"],
+            output_root / "target",
+        )
         discover_results.assert_called_once()
         load_json.assert_called_once()
         self.assertEqual(payload["result_source"], "final")
@@ -3217,7 +3271,10 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                 return {"SINGLE_STAGE_GOAL_MODE": "frontier"}
             raise AssertionError(f"unexpected load_json path: {path}")
 
-        with patch.object(module, "run_command") as run_command, patch.object(
+        with patch.object(
+            module,
+            "run_single_stage_command",
+        ) as run_command, patch.object(
             module,
             "discover_single_results_path",
             return_value=final_results_path,
@@ -3256,7 +3313,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
 
         with patch.object(
             module,
-            "run_command",
+            "run_single_stage_command",
             side_effect=subprocess.TimeoutExpired(cmd=["python"], timeout=1.0),
         ) as run_command, patch.object(
             module,
@@ -3315,7 +3372,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
 
         with patch.object(
             module,
-            "run_command",
+            "run_single_stage_command",
             side_effect=timeout_error,
         ) as run_command, patch.object(
             module,

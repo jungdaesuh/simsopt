@@ -23,9 +23,9 @@ from workflow_runner_common import (  # noqa: E402
     maybe_load_validated_stage2_seed_results,
     resolved_path,
     resolved_optional_path,
+    run_single_stage_command,
     timeout_or_none,
     validate_constraint_cli_overrides,
-    run_command,
     snapshot_single_results_paths,
     write_json,
     write_dry_run_marker,
@@ -492,8 +492,9 @@ def main() -> int:
             load_validated_stage2_seed_metadata(args)
         )
         previous_snapshot = snapshot_single_results_paths(output_root)
-        run_command(
+        run_single_stage_command(
             command,
+            output_root=output_root,
             timeout_seconds=timeout_or_none(args.single_stage_timeout_seconds),
         )
         results_path = discover_single_results_path(

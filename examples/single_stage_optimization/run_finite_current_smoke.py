@@ -19,7 +19,7 @@ from workflow_runner_common import (  # noqa: E402
     load_json,
     load_stage2_artifact_results,
     parse_csv,
-    run_command,
+    run_single_stage_command,
     snapshot_single_results_paths,
     timeout_or_none,
 )
@@ -224,8 +224,9 @@ def run_smoke_case(
             "case_output_root": str(case_output_root),
             "command": command,
         }
-    run_command(
+    run_single_stage_command(
         command,
+        output_root=case_output_root,
         timeout_seconds=timeout_or_none(args.single_stage_timeout_seconds),
     )
     results_path = discover_single_results_path(

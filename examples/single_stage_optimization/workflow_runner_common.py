@@ -6,6 +6,7 @@ import inspect
 import json
 import math
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -889,24 +890,65 @@ def run_command(
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
     inherit_alm_env: bool = False,
+    log_path: str | Path | None = None,
 ) -> None:
     """Run a subprocess with repo-standard ALM environment isolation.
 
     The child environment starts from ``os.environ`` with inherited ``ALM_*``
     keys stripped unless ``inherit_alm_env`` is true. Explicit ``env`` entries
-    are applied last, so caller-supplied ``ALM_*`` overrides are preserved.
+    are applied last, so caller-supplied ``ALM_*`` overrides are preserved. When
+    ``log_path`` is supplied, child stdout/stderr are appended there.
     """
     if dry_run:
         return
-    subprocess.run(
-        list(command),
-        cwd=str(cwd),
-        check=True,
-        timeout=timeout_seconds,
-        env=_build_subprocess_env(
-            env_overrides=env,
-            inherit_alm=inherit_alm_env,
-        ),
+    command_parts = list(command)
+    subprocess_env = _build_subprocess_env(
+        env_overrides=env,
+        inherit_alm=inherit_alm_env,
+    )
+    if log_path is None:
+        subprocess.run(
+            command_parts,
+            cwd=str(cwd),
+            check=True,
+            timeout=timeout_seconds,
+            env=subprocess_env,
+        )
+        return
+
+    resolved_log_path = Path(log_path)
+    resolved_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with resolved_log_path.open("a", encoding="utf-8", buffering=1) as log_file:
+        log_file.write(f"$ {shlex.join(str(part) for part in command_parts)}\n")
+        log_file.write(f"[cwd] {cwd}\n")
+        subprocess.run(
+            command_parts,
+            cwd=str(cwd),
+            check=True,
+            timeout=timeout_seconds,
+            env=subprocess_env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+
+
+def single_stage_run_log_path(output_root: str | Path) -> Path:
+    return Path(output_root) / "run.log"
+
+
+def run_single_stage_command(
+    command: Sequence[str],
+    *,
+    output_root: str | Path,
+    timeout_seconds: float | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Run a single-stage subprocess and persist its stdout/stderr log."""
+    run_command(
+        command,
+        timeout_seconds=timeout_seconds,
+        dry_run=dry_run,
+        log_path=single_stage_run_log_path(output_root),
     )
 
 
