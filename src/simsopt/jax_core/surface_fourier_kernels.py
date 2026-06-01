@@ -2576,8 +2576,34 @@ def surface_volume_from_dofs(
 # ---------------------------------------------------------------------------
 
 
-def _dcoeff_jacobian(fn):
-    """Build a surface coefficient Jacobian function from a ``_from_dofs`` evaluator."""
+def _surface_dof_transform(fn, transform, *, has_coeff_template):
+    """Build a DOF-derivative wrapper while preserving the surface-family signature."""
+    if has_coeff_template:
+
+        def wrapper(
+            dofs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            stellsym,
+            scatter_indices=None,
+            coeff_template=None,
+        ):
+            return transform(fn)(
+                dofs,
+                quadpoints_phi,
+                quadpoints_theta,
+                mpol,
+                ntor,
+                nfp,
+                stellsym,
+                scatter_indices,
+                coeff_template,
+            )
+
+        return wrapper
 
     def wrapper(
         dofs,
@@ -2589,7 +2615,7 @@ def _dcoeff_jacobian(fn):
         stellsym,
         scatter_indices=None,
     ):
-        return jax.jacfwd(fn, argnums=0)(
+        return transform(fn)(
             dofs,
             quadpoints_phi,
             quadpoints_theta,
@@ -2601,33 +2627,32 @@ def _dcoeff_jacobian(fn):
         )
 
     return wrapper
+
+
+def _dof_jacfwd(fn):
+    return jax.jacfwd(fn, argnums=0)
+
+
+def _dof_jacfwd_hessian(fn):
+    return jax.jacfwd(jax.jacfwd(fn, argnums=0), argnums=0)
+
+
+def _dof_grad(fn):
+    return jax.grad(fn, argnums=0)
+
+
+def _dof_hessian(fn):
+    return jax.hessian(fn, argnums=0)
+
+
+def _dcoeff_jacobian(fn):
+    """Build a surface coefficient Jacobian function from a ``_from_dofs`` evaluator."""
+    return _surface_dof_transform(fn, _dof_jacfwd, has_coeff_template=False)
 
 
 def _dcoeff_hessian(fn):
     """Build an explicit heavy coefficient Hessian from a ``_from_dofs`` evaluator."""
-
-    def wrapper(
-        dofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices=None,
-    ):
-        return jax.jacfwd(jax.jacfwd(fn, argnums=0), argnums=0)(
-            dofs,
-            quadpoints_phi,
-            quadpoints_theta,
-            mpol,
-            ntor,
-            nfp,
-            stellsym,
-            scatter_indices,
-        )
-
-    return wrapper
+    return _surface_dof_transform(fn, _dof_jacfwd_hessian, has_coeff_template=False)
 
 
 dgamma_by_dcoeff = _dcoeff_jacobian(surface_gamma_from_dofs)
@@ -2694,53 +2719,11 @@ Jacobian of tensor-surface unit normal w.r.t. surface DOFs via forward-mode auto
 
 
 def _surface_scalar_grad(fn):
-    def wrapper(
-        dofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices=None,
-    ):
-        return jax.grad(fn, argnums=0)(
-            dofs,
-            quadpoints_phi,
-            quadpoints_theta,
-            mpol,
-            ntor,
-            nfp,
-            stellsym,
-            scatter_indices,
-        )
-
-    return wrapper
+    return _surface_dof_transform(fn, _dof_grad, has_coeff_template=False)
 
 
 def _surface_scalar_hessian(fn):
-    def wrapper(
-        dofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices=None,
-    ):
-        return jax.hessian(fn, argnums=0)(
-            dofs,
-            quadpoints_phi,
-            quadpoints_theta,
-            mpol,
-            ntor,
-            nfp,
-            stellsym,
-            scatter_indices,
-        )
-
-    return wrapper
+    return _surface_dof_transform(fn, _dof_hessian, has_coeff_template=False)
 
 
 darea_by_dcoeff = _surface_scalar_grad(surface_area_from_dofs)
@@ -2750,111 +2733,19 @@ d2volume_by_dcoeffdcoeff = _surface_scalar_hessian(surface_volume_from_dofs)
 
 
 def _surface_xyzfourier_dcoeff_jacobian(fn):
-    def wrapper(
-        dofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices=None,
-        coeff_template=None,
-    ):
-        return jax.jacfwd(fn, argnums=0)(
-            dofs,
-            quadpoints_phi,
-            quadpoints_theta,
-            mpol,
-            ntor,
-            nfp,
-            stellsym,
-            scatter_indices,
-            coeff_template,
-        )
-
-    return wrapper
+    return _surface_dof_transform(fn, _dof_jacfwd, has_coeff_template=True)
 
 
 def _surface_xyzfourier_dcoeff_hessian(fn):
-    def wrapper(
-        dofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices=None,
-        coeff_template=None,
-    ):
-        return jax.jacfwd(jax.jacfwd(fn, argnums=0), argnums=0)(
-            dofs,
-            quadpoints_phi,
-            quadpoints_theta,
-            mpol,
-            ntor,
-            nfp,
-            stellsym,
-            scatter_indices,
-            coeff_template,
-        )
-
-    return wrapper
+    return _surface_dof_transform(fn, _dof_jacfwd_hessian, has_coeff_template=True)
 
 
 def _surface_xyzfourier_scalar_grad(fn):
-    def wrapper(
-        dofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices=None,
-        coeff_template=None,
-    ):
-        return jax.grad(fn, argnums=0)(
-            dofs,
-            quadpoints_phi,
-            quadpoints_theta,
-            mpol,
-            ntor,
-            nfp,
-            stellsym,
-            scatter_indices,
-            coeff_template,
-        )
-
-    return wrapper
+    return _surface_dof_transform(fn, _dof_grad, has_coeff_template=True)
 
 
 def _surface_xyzfourier_scalar_hessian(fn):
-    def wrapper(
-        dofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices=None,
-        coeff_template=None,
-    ):
-        return jax.hessian(fn, argnums=0)(
-            dofs,
-            quadpoints_phi,
-            quadpoints_theta,
-            mpol,
-            ntor,
-            nfp,
-            stellsym,
-            scatter_indices,
-            coeff_template,
-        )
-
-    return wrapper
+    return _surface_dof_transform(fn, _dof_hessian, has_coeff_template=True)
 
 
 surface_xyzfourier_dgamma_by_dcoeff = _surface_xyzfourier_dcoeff_jacobian(

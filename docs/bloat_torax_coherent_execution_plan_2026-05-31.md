@@ -804,6 +804,78 @@ PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/
 
 - **Review evidence:** initial design/tooling review found and fixed one real issue: the first draft introduced a shallow `_surface_xyzfourier_coeffs_from_dofs(...)` pass-through around the existing `_scatter_surface_xyzfourier_dofs(...)` helper. The final implementation deletes that helper and calls the existing unpack SSOT directly from the nine explicit public wrappers. Delta API/behavior, docs/accounting, and design/tooling reviewers then returned strict PASS: public wrapper signatures/source introspection are preserved, stellsym/scatter/template routing remains on the existing helper, paired derivative and coefficient-Jacobian families are untouched, LOC accounting is `15 insertions / 66 deletions` (`-51`) for this source slice and `406` banked across completed T2.3 slices, and no runtime/tooling/scope findings remain.
 
+### 2026-06-01 — T2.3 coefficient-derivative wrapper-family fold
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.3.
+- **Selected slice:** only the repeated coefficient-derivative wrapper ceremony in `surface_fourier_kernels.py`: tensor and `SurfaceXYZFourier` `jax.jacfwd`, explicit heavy Hessian, scalar `jax.grad`, and scalar `jax.hessian` wrapper builders. No analytic derivative formula, public export name, scalar tolerance, composed geometry formula, CPU geometry code, backend/cache policy, CUDA/MPS path, transfer policy, or public symbol deletion was changed.
+- **Changed files:** `src/simsopt/jax_core/surface_fourier_kernels.py`, plus this plan set.
+- **Design-it-twice gate:** a broad `*args` / `**kwargs` wrapper was rejected because it would erase the public distinction between tensor derivative wrappers and `SurfaceXYZFourier` wrappers that accept `coeff_template`. Fully separate tensor/XYZ helpers were also rejected because they preserved the same repeated derivative-transform ceremony. The landed design uses one `_surface_dof_transform(...)` helper with two explicit inner signatures and small transform functions for `jax.jacfwd`, explicit Hessian, `jax.grad`, and `jax.hessian`.
+- **Scope status:** coefficient-derivative wrapper LOC-banked, full T2.3 still open. `surface_fourier_kernels.py` is source-negative by 109 LOC for this slice (`52 insertions / 161 deletions`), bringing completed T2.3 banked source reduction to 515 LOC across the facade, tensor-kernel, XYZ unpack, and coefficient-derivative wrapper slices. The old full-item `~550` estimate still is not closed because the `SurfaceXYZFourier` analytic formulas remain explicit follow-ups.
+- **Validation evidence:** CPU/X64 tensor and `SurfaceXYZFourier` coefficient/scalar derivative proof, not CUDA/MPS proof.
+
+```bash
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff check src/simsopt/jax_core/surface_fourier_kernels.py
+# All checks passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/surface_fourier_kernels.py
+# 1 file already formatted
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m py_compile src/simsopt/jax_core/surface_fourier_kernels.py
+# passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m mypy src/simsopt/jax_core/surface_fourier_kernels.py
+# Success: no issues found in 1 source file
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python - <<'PY'
+import inspect
+from simsopt.jax_core import surface_fourier_kernels as sf
+tensor_names = [
+    'dgamma_by_dcoeff',
+    'dgammadash1_by_dcoeff',
+    'dgammadash2_by_dcoeff',
+    'dgammadash1dash1_by_dcoeff',
+    'dgammadash1dash2_by_dcoeff',
+    'dgammadash2dash2_by_dcoeff',
+    'dnormal_by_dcoeff',
+    'd2normal_by_dcoeffdcoeff',
+    'dunitnormal_by_dcoeff',
+    'darea_by_dcoeff',
+    'd2area_by_dcoeffdcoeff',
+    'dvolume_by_dcoeff',
+    'd2volume_by_dcoeffdcoeff',
+]
+xyz_names = [
+    'surface_xyzfourier_dgamma_by_dcoeff',
+    'surface_xyzfourier_dgammadash1_by_dcoeff',
+    'surface_xyzfourier_dgammadash2_by_dcoeff',
+    'surface_xyzfourier_dgammadash1dash1_by_dcoeff',
+    'surface_xyzfourier_dgammadash1dash2_by_dcoeff',
+    'surface_xyzfourier_dgammadash2dash2_by_dcoeff',
+    'surface_xyzfourier_dnormal_by_dcoeff',
+    'surface_xyzfourier_d2normal_by_dcoeffdcoeff',
+    'surface_xyzfourier_dunitnormal_by_dcoeff',
+    'surface_xyzfourier_darea_by_dcoeff',
+    'surface_xyzfourier_d2area_by_dcoeffdcoeff',
+    'surface_xyzfourier_dvolume_by_dcoeff',
+    'surface_xyzfourier_d2volume_by_dcoeffdcoeff',
+]
+expected_tensor = '(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None)'
+expected_xyz = '(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, coeff_template=None)'
+for name in tensor_names:
+    fn = getattr(sf, name)
+    assert str(inspect.signature(fn)) == expected_tensor
+    assert fn.__code__.co_name == 'wrapper'
+for name in xyz_names:
+    fn = getattr(sf, name)
+    assert str(inspect.signature(fn)) == expected_xyz
+    assert fn.__code__.co_name == 'wrapper'
+print('surface-derivative-wrapper-signatures: PASS')
+PY
+# surface-derivative-wrapper-signatures: PASS
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_surface_fourier_jax.py -k 'coefficient_derivatives_match_cpp or second_coordinate_derivative_dcoeff_match_cpp or tangent_derivative_columns_match_cpp or normal_derivative_columns_match_cpp or dnormal_by_dcoeff_vjp_matches_cpp or d2normal_by_dcoeffdcoeff_matches_cpp or non_rz_fundamental_form_derivatives_match_cpp or scalar_derivatives_match_cpp or scalar_hessians_match_cpp or scalar_derivative_vjp_matches_cpp'
+# 48 passed, 102 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_surface_fourier_jax.py
+# 150 passed
+```
+
+- **Review evidence:** six-lens adversarial review returned strict PASS after one docs-scope correction. The test-quality lens found that the first evidence wording overstated the focused selector as scalar-derivative coverage; the final docs now attribute scalar area/volume wrapper coverage to the full `tests/geo/test_surface_fourier_jax.py` run. API/behavior, design/tooling, docs/accounting, repo-guardrail, and history/comment lenses found no remaining issues: public tensor and `SurfaceXYZFourier` derivative signatures are preserved, `coeff_template` arity is intact, no `*args` / `**kwargs` escape hatch or shallow pass-through helper was introduced, LOC accounting is `52 insertions / 161 deletions` (`-109`) for this source slice and `515` banked across completed T2.3 slices, and validation evidence remains CPU/X64 only.
+
 ### 2026-06-01 — T2.9 quantity-aware tolerance contract helper
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.9.
@@ -1017,6 +1089,6 @@ git diff --unified=0 -- src/simsopt/backend/runtime.py tests/test_backend.py | r
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, and T2.9 quantity-tolerance contract helper: finish a LOC-banked T2.1 reporting fold, do a T2.2 LOC-banking follow-up, complete the remaining T2.3 analytic-formula/coefficient-Jacobian kernel-wrapper fold, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched T2 item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, and T2.9 quantity-tolerance contract helper: finish a LOC-banked T2.1 reporting fold, do a T2.2 LOC-banking follow-up, complete the remaining T2.3 analytic-formula fold, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched T2 item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?
