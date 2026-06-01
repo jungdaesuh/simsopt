@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from textwrap import wrap
+from textwrap import fill
 from typing import Mapping
 
 from banana_opt.coil_groups import CoilGroupsManifest, build_contiguous_manifest
@@ -29,6 +29,7 @@ JHALPERN30_FINITE_CURRENT_MODE: FiniteCurrentMode = "jhalpern30_proxy_field"
 
 DEFAULT_WATARU_VF_TEMPLATE_PATH = _MODULE_DIR / "wataru_vf_template.json"
 DEFAULT_JHALPERN30_VF_TEMPLATE_PATH = _MODULE_DIR / "jhalpern30_vf_biotsavart.json"
+_PROXY_SIGN_HELP_WIDTH = 88
 
 
 @dataclass(frozen=True)
@@ -72,16 +73,14 @@ class ProxyCurrentSignConvention:
         mode: FiniteCurrentMode,
         scalar_policy: ProxyVfCurrentScalarPolicy,
     ) -> str:
-        return "\n".join(
-            wrap(
-                (
-                    f"{self.operator_warning} "
-                    f"(scalar_policy={scalar_policy}; convention={self.key})"
-                ),
-                width=88,
-                initial_indent=f"- {mode}: ",
-                subsequent_indent="  ",
-            )
+        return fill(
+            (
+                f"{self.operator_warning} "
+                f"(scalar_policy={scalar_policy}; convention={self.key})"
+            ),
+            width=_PROXY_SIGN_HELP_WIDTH,
+            initial_indent=f"- {mode}: ",
+            subsequent_indent="  ",
         )
 
 

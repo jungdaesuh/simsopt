@@ -1,9 +1,11 @@
+import argparse
 import contextlib
 import io
 import json
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +19,7 @@ EXAMPLE_ROOT = (
 SIGNED_CW_WOUT_PATH = (
     Path(__file__).resolve().parents[1] / "test_files" / "wout_10x10.nc"
 )
+_MAX_CLI_HELP_LINE_LENGTH = 100
 if str(EXAMPLE_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_ROOT))
 
@@ -69,6 +72,30 @@ def _make_coil(index: int, current_A: float) -> Coil:
             radius=0.045 + 0.002 * float(index % 3),
         ),
         current,
+    )
+
+
+def _assert_wrapped_cli_sign_help(
+    test_case: unittest.TestCase,
+    parse_args: Callable[[list[str]], argparse.Namespace],
+) -> None:
+    stdout = io.StringIO()
+    with test_case.assertRaises(SystemExit) as caught:
+        with contextlib.redirect_stdout(stdout):
+            parse_args(["--help"])
+
+    test_case.assertEqual(caught.exception.code, 0)
+    help_text = stdout.getvalue()
+    normalized_help = " ".join(help_text.split())
+    test_case.assertIn(
+        "sign semantics are selected by --finite-current-mode",
+        normalized_help.lower(),
+    )
+    test_case.assertIn("wataru_proxy_field accepts nonnegative", help_text)
+    test_case.assertIn("jhalpern30_proxy_field accepts a signed upstream", help_text)
+    test_case.assertLessEqual(
+        max(len(line) for line in help_text.splitlines()),
+        _MAX_CLI_HELP_LINE_LENGTH,
     )
 
 
@@ -547,40 +574,12 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
     def test_cli_help_exposes_mode_specific_sign_contract(self):
         from materialize_finite_current_seed import parse_args
 
-        stdout = io.StringIO()
-        with self.assertRaises(SystemExit) as caught:
-            with contextlib.redirect_stdout(stdout):
-                parse_args(["--help"])
-
-        self.assertEqual(caught.exception.code, 0)
-        help_text = stdout.getvalue()
-        normalized_help = " ".join(help_text.split())
-        self.assertIn(
-            "sign semantics are selected by --finite-current-mode",
-            normalized_help.lower(),
-        )
-        self.assertIn("wataru_proxy_field accepts nonnegative", help_text)
-        self.assertIn("jhalpern30_proxy_field accepts a signed upstream", help_text)
-        self.assertLessEqual(max(len(line) for line in help_text.splitlines()), 100)
+        _assert_wrapped_cli_sign_help(self, parse_args)
 
     def test_sweep_cli_help_exposes_wrapped_mode_specific_sign_contract(self):
         from run_materialized_current_sweep import parse_args
 
-        stdout = io.StringIO()
-        with self.assertRaises(SystemExit) as caught:
-            with contextlib.redirect_stdout(stdout):
-                parse_args(["--help"])
-
-        self.assertEqual(caught.exception.code, 0)
-        help_text = stdout.getvalue()
-        normalized_help = " ".join(help_text.split())
-        self.assertIn(
-            "sign semantics are selected by --finite-current-mode",
-            normalized_help.lower(),
-        )
-        self.assertIn("wataru_proxy_field accepts nonnegative", help_text)
-        self.assertIn("jhalpern30_proxy_field accepts a signed upstream", help_text)
-        self.assertLessEqual(max(len(line) for line in help_text.splitlines()), 100)
+        _assert_wrapped_cli_sign_help(self, parse_args)
 
     def test_sweep_wrapper_records_untrusted_iota_gate_summary(self):
         from run_materialized_current_sweep import main
