@@ -14780,6 +14780,31 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 requested_num_tf_coils=20,
             )
 
+    def test_validate_loaded_seed_current_source_contract_rejects_resume_override(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "cannot retarget physical plasma current",
+        ):
+            module.validate_loaded_seed_current_source_contract(
+                finite_current_mode="wataru_proxy_field",
+                effective_current_mode="wataru_proxy_field",
+                plasma_current_A=-400.0,
+                plasma_current_input_source="physical_A",
+                stage2_results={
+                    "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                    "PROXY_PLASMA_CURRENT_A": 0.0,
+                    "VF_CURRENT_A": 0.0,
+                },
+                coil_partitions=SimpleNamespace(
+                    num_proxy_coils=0,
+                    num_vf_coils=0,
+                ),
+            )
+
     def test_build_stage2_bs_path_prefers_current_penalty_dir(self):
         module = load_single_stage_example_module()
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, SupportsFloat, cast
 
 import numpy as np
 
@@ -31,6 +31,10 @@ from .coil_groups import (
     resolve_manifest,
 )
 from .current_contracts import (
+    CURRENT_MODE_ZERO_TOL,
+    EffectiveCurrentMode,
+    FiniteCurrentMode,
+    HBT_PROXY_VF_CURRENT_TOL_A,
     resolve_effective_current_mode,
     resolve_finite_current_mode,
     resolve_loaded_tf_current_A,
@@ -174,6 +178,7 @@ __all__ = [
     "run_boozer_with_failure_policy",
     "snapshot_boozer_solve_state",
     "validate_loaded_stage2_coils_partition",
+    "validate_loaded_seed_current_source_contract",
     "validate_stage2_seed_contract",
     "validate_stage2_seed_recovery_contract",
 ]
@@ -436,6 +441,84 @@ def validate_loaded_stage2_coils_partition(
         coils,
         stage2_results=stage2_results,
         requested_num_tf_coils=int(requested_num_tf_coils),
+    )
+
+
+def _optional_stage2_float_value(
+    stage2_results: Mapping[str, object],
+    field_name: str,
+    default: float = 0.0,
+) -> float:
+    value = stage2_results.get(field_name)
+    if value is None:
+        return default
+    return float(cast(SupportsFloat, value))
+
+
+def validate_loaded_seed_current_source_contract(
+    *,
+    finite_current_mode: FiniteCurrentMode | None,
+    effective_current_mode: EffectiveCurrentMode | str,
+    plasma_current_A: float,
+    plasma_current_input_source: str,
+    stage2_results: Mapping[str, object],
+    coil_partitions: Stage2CoilPartitions,
+) -> None:
+    """Verify that non-vacuum proxy-field current is present in the loaded seed.
+
+    Single-stage resume replays a persisted BiotSavart field. Explicit current
+    inputs may only select the donor's already-materialized proxy/VF current;
+    they must not imply that resume synthesized new current-field sources.
+    """
+    if finite_current_mode in {None, "vacuum"}:
+        return
+    artifact_proxy_current_A = _optional_stage2_float_value(
+        stage2_results,
+        "PROXY_PLASMA_CURRENT_A",
+    )
+    artifact_vf_current_A = _optional_stage2_float_value(
+        stage2_results,
+        "VF_CURRENT_A",
+    )
+    if plasma_current_input_source in {"physical_A", "raw_boozer_I"} and not np.isclose(
+        float(plasma_current_A),
+        artifact_proxy_current_A,
+        rtol=0.0,
+        atol=HBT_PROXY_VF_CURRENT_TOL_A,
+    ):
+        raise ValueError(
+            "Single-stage resume cannot retarget physical plasma current from "
+            f"the loaded artifact PROXY_PLASMA_CURRENT_A={artifact_proxy_current_A:.6g} A "
+            f"to PLASMA_CURRENT_A={float(plasma_current_A):.6g} A. The loaded "
+            "BiotSavart artifact owns proxy/VF field sources; materialize a new "
+            "finite-current seed or use VMEC curtor for physical current-field retuning."
+        )
+    if effective_current_mode == "vacuum":
+        return
+    if finite_current_mode == "boozer_surrogate":
+        raise ValueError(
+            "Single-stage resume cannot replay non-vacuum 'boozer_surrogate' "
+            "current from a loaded BiotSavart seed because that mode does not "
+            "own materialized proxy/VF magnetic-field sources. Materialize a "
+            "finite-current proxy-field seed or use VMEC curtor for physical "
+            "current-field retuning."
+        )
+
+    if coil_partitions.num_proxy_coils <= 0 or coil_partitions.num_vf_coils <= 0:
+        raise ValueError(
+            f"{finite_current_mode!r} requires loaded proxy/VF field sources "
+            f"from the donor artifact; got NUM_PROXY_COILS={coil_partitions.num_proxy_coils}, "
+            f"NUM_VF_COILS={coil_partitions.num_vf_coils}."
+        )
+    if abs(artifact_proxy_current_A) <= CURRENT_MODE_ZERO_TOL:
+        raise ValueError(
+            f"{finite_current_mode!r} requires non-zero loaded "
+            "PROXY_PLASMA_CURRENT_A for non-vacuum current replay."
+        )
+    validate_proxy_vf_current_convention_for_mode(
+        finite_current_mode,
+        proxy_plasma_current_A=artifact_proxy_current_A,
+        vf_current_A=artifact_vf_current_A,
     )
 
 

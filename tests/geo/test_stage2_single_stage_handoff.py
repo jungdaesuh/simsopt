@@ -204,6 +204,28 @@ def _valid_jhalpern_stage2_contract_fields() -> dict[str, object]:
     }
 
 
+def _stage2_coil_partitions(
+    module,
+    *,
+    finite_current_mode: str,
+    num_tf_coils: int = 20,
+    num_banana_coils: int = 10,
+    num_proxy_coils: int = 0,
+    num_vf_coils: int = 0,
+):
+    return module.Stage2CoilPartitions(
+        tf_coils=tuple(object() for _ in range(num_tf_coils)),
+        banana_coils=tuple(object() for _ in range(num_banana_coils)),
+        proxy_coils=tuple(object() for _ in range(num_proxy_coils)),
+        vf_coils=tuple(object() for _ in range(num_vf_coils)),
+        num_tf_coils=num_tf_coils,
+        num_banana_coils=num_banana_coils,
+        num_proxy_coils=num_proxy_coils,
+        num_vf_coils=num_vf_coils,
+        finite_current_mode=finite_current_mode,
+    )
+
+
 def _make_circle_curve(*, center, radius, normal):
     curve = CurveXYZFourier(96, 1)
     center_x, center_y, center_z = center
@@ -2160,6 +2182,174 @@ class HandoffModuleTests(unittest.TestCase):
                 },
                 requested_num_tf_coils=20,
             )
+
+    def test_loaded_seed_current_source_contract_rejects_unbacked_current_override(
+        self,
+    ):
+        module = load_handoff_module()
+        partitions = _stage2_coil_partitions(
+            module,
+            finite_current_mode="jhalpern30_proxy_field",
+        )
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "FINITE_CURRENT_MODE": "jhalpern30_proxy_field",
+            "PROXY_PLASMA_CURRENT_A": 0.0,
+            "VF_CURRENT_A": 0.0,
+        }
+
+        with self.assertRaisesRegex(
+            ValueError, "cannot retarget physical plasma current"
+        ):
+            module.validate_loaded_seed_current_source_contract(
+                finite_current_mode="jhalpern30_proxy_field",
+                effective_current_mode="jhalpern30_proxy_field",
+                plasma_current_A=-400.0,
+                plasma_current_input_source="physical_A",
+                stage2_results=stage2_results,
+                coil_partitions=partitions,
+            )
+
+    def test_loaded_seed_current_source_contract_rejects_explicit_zero_retarget(
+        self,
+    ):
+        module = load_handoff_module()
+        partitions = _stage2_coil_partitions(
+            module,
+            num_proxy_coils=1,
+            num_vf_coils=1,
+            finite_current_mode="wataru_proxy_field",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "cannot retarget physical plasma current"
+        ):
+            module.validate_loaded_seed_current_source_contract(
+                finite_current_mode="wataru_proxy_field",
+                effective_current_mode="vacuum",
+                plasma_current_A=0.0,
+                plasma_current_input_source="physical_A",
+                stage2_results={
+                    **_valid_stage2_contract_fields(),
+                    "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                    "PROXY_PLASMA_CURRENT_A": 9000.0,
+                    "VF_CURRENT_A": 9000.0 / 6.5,
+                    "NUM_PROXY_COILS": 1,
+                    "NUM_VF_COILS": 1,
+                },
+                coil_partitions=partitions,
+            )
+
+    def test_loaded_seed_current_source_contract_rejects_missing_proxy_vf_sources(
+        self,
+    ):
+        module = load_handoff_module()
+        partitions = _stage2_coil_partitions(
+            module,
+            finite_current_mode="jhalpern30_proxy_field",
+        )
+        stage2_results = {
+            **_valid_jhalpern_stage2_contract_fields(),
+            "NUM_PROXY_COILS": 0,
+            "NUM_VF_COILS": 0,
+        }
+
+        with self.assertRaisesRegex(
+            ValueError, "requires loaded proxy/VF field sources"
+        ):
+            module.validate_loaded_seed_current_source_contract(
+                finite_current_mode="jhalpern30_proxy_field",
+                effective_current_mode="jhalpern30_proxy_field",
+                plasma_current_A=-6500.0,
+                plasma_current_input_source="artifact_default_A",
+                stage2_results=stage2_results,
+                coil_partitions=partitions,
+            )
+
+    def test_loaded_seed_current_source_contract_rejects_nonvacuum_boozer_surrogate(
+        self,
+    ):
+        module = load_handoff_module()
+        partitions = _stage2_coil_partitions(
+            module,
+            finite_current_mode="boozer_surrogate",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "cannot replay non-vacuum 'boozer_surrogate' current"
+        ):
+            module.validate_loaded_seed_current_source_contract(
+                finite_current_mode="boozer_surrogate",
+                effective_current_mode="boozer_surrogate",
+                plasma_current_A=-400.0,
+                plasma_current_input_source="artifact_default_A",
+                stage2_results={
+                    **_valid_stage2_contract_fields(),
+                    "FINITE_CURRENT_MODE": "boozer_surrogate",
+                    "BOOZER_I": -0.0005026548245743669,
+                },
+                coil_partitions=partitions,
+            )
+
+    def test_loaded_seed_current_source_contract_accepts_backed_wataru_one_vf(
+        self,
+    ):
+        module = load_handoff_module()
+        profile = get_finite_current_profile("wataru_proxy_field")
+        partitions = _stage2_coil_partitions(
+            module,
+            num_proxy_coils=1,
+            num_vf_coils=1,
+            finite_current_mode="wataru_proxy_field",
+        )
+
+        module.validate_loaded_seed_current_source_contract(
+            finite_current_mode="wataru_proxy_field",
+            effective_current_mode="wataru_proxy_field",
+            plasma_current_A=9000.0,
+            plasma_current_input_source="artifact_default_A",
+            stage2_results={
+                **_valid_stage2_contract_fields(),
+                "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                "BOOZER_CURRENT_CONVENTION": "mu0",
+                "G0_POLICY": "signed_explicit_tf_current",
+                "PROXY_PLACEMENT_MODE": "vmec_axis_zeroth_coefficients",
+                "PROXY_VF_CURRENT_SCALAR_POLICY": "nonnegative_magnitude",
+                "PROXY_PLASMA_CURRENT_A": 9000.0,
+                "VF_CURRENT_A": 9000.0 / 6.5,
+                "VF_TEMPLATE_PATH": str(profile.default_vf_template_path),
+                "VF_TEMPLATE_SHA256": profile.vf_template_sha256,
+                "VF_CURRENT_SIGN_POLICY": "template_sign_vf_current_scalar",
+                "VF_CURRENT_MUTABILITY": "independent_fixed_current",
+                "NUM_PROXY_COILS": 1,
+                "NUM_VF_COILS": 1,
+                "TOTAL_COILS": 31,
+            },
+            coil_partitions=partitions,
+        )
+
+    def test_loaded_seed_current_source_contract_accepts_backed_proxy_field_current(
+        self,
+    ):
+        module = load_handoff_module()
+        profile = get_finite_current_profile("jhalpern30_proxy_field")
+        partitions = _stage2_coil_partitions(
+            module,
+            num_tf_coils=profile.default_num_tf_coils,
+            num_banana_coils=profile.default_num_banana_coils,
+            num_proxy_coils=profile.default_num_proxy_coils,
+            num_vf_coils=profile.default_num_vf_coils,
+            finite_current_mode=profile.mode,
+        )
+
+        module.validate_loaded_seed_current_source_contract(
+            finite_current_mode=profile.mode,
+            effective_current_mode=profile.mode,
+            plasma_current_A=-6500.0,
+            plasma_current_input_source="artifact_default_A",
+            stage2_results=_valid_jhalpern_stage2_contract_fields(),
+            coil_partitions=partitions,
+        )
 
     def test_materialize_stage2_seed_variant_from_currents_preserves_order_and_metadata(
         self,

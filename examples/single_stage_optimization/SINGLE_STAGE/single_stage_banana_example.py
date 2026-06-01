@@ -279,6 +279,7 @@ from banana_opt.stage2_single_stage_handoff import (
     resolve_stage2_num_tf_coils as _resolve_stage2_num_tf_coils_impl,
     resolve_stage2_tf_current_A as _resolve_stage2_tf_current_A_impl,
     validate_loaded_stage2_coils_partition as _validate_loaded_stage2_coils_partition_impl,
+    validate_loaded_seed_current_source_contract as _validate_loaded_seed_current_source_contract_impl,
     validate_stage2_seed_bootability_contract as _validate_stage2_seed_bootability_contract_impl,
     validate_stage2_seed_contract as _validate_stage2_seed_contract_impl,
     validate_stage2_seed_recovery_contract as _validate_stage2_seed_recovery_contract_impl,
@@ -983,6 +984,25 @@ def validate_loaded_stage2_coils_partition(
         coils,
         stage2_results=stage2_results,
         requested_num_tf_coils=requested_num_tf_coils,
+    )
+
+
+def validate_loaded_seed_current_source_contract(
+    *,
+    finite_current_mode,
+    effective_current_mode,
+    plasma_current_A,
+    plasma_current_input_source,
+    stage2_results,
+    coil_partitions,
+):
+    _validate_loaded_seed_current_source_contract_impl(
+        finite_current_mode=finite_current_mode,
+        effective_current_mode=effective_current_mode,
+        plasma_current_A=plasma_current_A,
+        plasma_current_input_source=plasma_current_input_source,
+        stage2_results=stage2_results,
+        coil_partitions=coil_partitions,
     )
 
 
@@ -11848,6 +11868,14 @@ if __name__ == "__main__":
         )
     else:
         coil_partitions = source_coil_partitions
+    validate_loaded_seed_current_source_contract(
+        finite_current_mode=finite_current_mode,
+        effective_current_mode=effective_current_mode,
+        plasma_current_A=plasma_current_A,
+        plasma_current_input_source=plasma_current_input_source,
+        stage2_results=stage2_results,
+        coil_partitions=coil_partitions,
+    )
     strict_vacuum_seed_checks = None
     if args.strict_vacuum_current:
         strict_vacuum_seed_checks = strict_vacuum_seed_input_status(
