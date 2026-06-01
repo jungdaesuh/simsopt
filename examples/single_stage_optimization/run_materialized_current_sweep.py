@@ -48,9 +48,10 @@ DEFAULT_SAMPLE_POINTS = np.asarray(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Materialize a current sweep from one donor seed and write a science-gate "
-            "summary. This wrapper proves field-source materialization and records "
-            "iota as untrusted until an explicit no-collapse and VMEC curtor "
+            "Materialize a current sweep from one donor seed and write a "
+            "science-gate summary.\n"
+            "This wrapper proves field-source materialization and records iota\n"
+            "as untrusted until an explicit no-collapse and VMEC curtor "
             "cross-check is supplied."
         ),
         epilog=format_proxy_current_sign_convention_help(

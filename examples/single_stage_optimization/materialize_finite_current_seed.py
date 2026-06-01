@@ -21,8 +21,9 @@ from banana_opt.finite_current_profiles import (  # noqa: E402
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Materialize proxy plasma-current and VF coils into a Stage-2-compatible "
-            "BiotSavart seed. Retargeting current requires materializing a new seed; "
+            "Materialize proxy plasma-current and VF coils into a "
+            "Stage-2-compatible BiotSavart seed.\n"
+            "Retargeting current requires materializing a new seed;\n"
             "single-stage replay only loads persisted field sources."
         ),
         epilog=format_proxy_current_sign_convention_help(

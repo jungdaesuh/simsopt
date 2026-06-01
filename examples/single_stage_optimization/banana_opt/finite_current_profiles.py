@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from textwrap import wrap
 from typing import Mapping
 
 from banana_opt.coil_groups import CoilGroupsManifest, build_contiguous_manifest
@@ -65,15 +66,22 @@ class ProxyCurrentSignConvention:
             "proxy_current_operator_warning": self.operator_warning,
         }
 
-    def help_line(
+    def help_text(
         self,
         *,
         mode: FiniteCurrentMode,
         scalar_policy: ProxyVfCurrentScalarPolicy,
     ) -> str:
-        return (
-            f"- {mode}: {self.operator_warning} "
-            f"(scalar_policy={scalar_policy}; convention={self.key})"
+        return "\n".join(
+            wrap(
+                (
+                    f"{self.operator_warning} "
+                    f"(scalar_policy={scalar_policy}; convention={self.key})"
+                ),
+                width=88,
+                initial_indent=f"- {mode}: ",
+                subsequent_indent="  ",
+            )
         )
 
 
@@ -111,7 +119,7 @@ class FiniteCurrentProfile:
         )
 
     def proxy_current_sign_help_line(self) -> str:
-        return self.proxy_current_sign_convention.help_line(
+        return self.proxy_current_sign_convention.help_text(
             mode=self.mode,
             scalar_policy=self.proxy_vf_current_scalar_policy,
         )

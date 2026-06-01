@@ -557,10 +557,30 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
         normalized_help = " ".join(help_text.split())
         self.assertIn(
             "sign semantics are selected by --finite-current-mode",
-            normalized_help,
+            normalized_help.lower(),
         )
         self.assertIn("wataru_proxy_field accepts nonnegative", help_text)
         self.assertIn("jhalpern30_proxy_field accepts a signed upstream", help_text)
+        self.assertLessEqual(max(len(line) for line in help_text.splitlines()), 100)
+
+    def test_sweep_cli_help_exposes_wrapped_mode_specific_sign_contract(self):
+        from run_materialized_current_sweep import parse_args
+
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as caught:
+            with contextlib.redirect_stdout(stdout):
+                parse_args(["--help"])
+
+        self.assertEqual(caught.exception.code, 0)
+        help_text = stdout.getvalue()
+        normalized_help = " ".join(help_text.split())
+        self.assertIn(
+            "sign semantics are selected by --finite-current-mode",
+            normalized_help.lower(),
+        )
+        self.assertIn("wataru_proxy_field accepts nonnegative", help_text)
+        self.assertIn("jhalpern30_proxy_field accepts a signed upstream", help_text)
+        self.assertLessEqual(max(len(line) for line in help_text.splitlines()), 100)
 
     def test_sweep_wrapper_records_untrusted_iota_gate_summary(self):
         from run_materialized_current_sweep import main

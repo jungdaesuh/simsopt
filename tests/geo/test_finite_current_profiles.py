@@ -182,7 +182,7 @@ class FiniteCurrentProfileTests(unittest.TestCase):
         )
         self.assertIn(
             "nonnegative proxy/VF current magnitudes",
-            profile.proxy_current_sign_help_line(),
+            " ".join(profile.proxy_current_sign_help_line().split()),
         )
         self.assertEqual(
             profile.proxy_current_sign_summary_fields()["proxy_current_scalar_policy"],
