@@ -126,8 +126,19 @@ def _constant_mode_profile(values: tuple[float, float]) -> PiecewisePolynomial1D
     )
 
 
-def _minimal_radial_state() -> BoozerRadialInterpolantFrozenState:
+def _minimal_radial_state(
+    *, stellsym: bool = True
+) -> BoozerRadialInterpolantFrozenState:
     zero_modes = _constant_mode_profile((0.0, 0.0))
+    bmns = zero_modes if stellsym else _constant_mode_profile((0.031, 0.041))
+    dbmnsds = zero_modes if stellsym else _constant_mode_profile((0.032, 0.042))
+    rmns = zero_modes if stellsym else _constant_mode_profile((0.033, 0.043))
+    drmnsds = zero_modes if stellsym else _constant_mode_profile((0.034, 0.044))
+    zmnc = zero_modes if stellsym else _constant_mode_profile((0.035, 0.045))
+    dzmncds = zero_modes if stellsym else _constant_mode_profile((0.036, 0.046))
+    numnc = zero_modes if stellsym else _constant_mode_profile((0.037, 0.047))
+    dnumncds = zero_modes if stellsym else _constant_mode_profile((0.038, 0.048))
+    kmnc = zero_modes if stellsym else _constant_mode_profile((0.039, 0.049))
     return BoozerRadialInterpolantFrozenState(
         xm=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
         xn=jnp.asarray([0.0, 0.0], dtype=jnp.float64),
@@ -146,19 +157,19 @@ def _minimal_radial_state() -> BoozerRadialInterpolantFrozenState:
         dzmnsds=_constant_mode_profile((0.0, 0.01)),
         numns=_constant_mode_profile((0.0, 0.03)),
         dnumnsds=_constant_mode_profile((0.0, 0.004)),
-        bmns=zero_modes,
-        dbmnsds=zero_modes,
-        rmns=zero_modes,
-        drmnsds=zero_modes,
-        zmnc=zero_modes,
-        dzmncds=zero_modes,
-        numnc=zero_modes,
-        dnumncds=zero_modes,
+        bmns=bmns,
+        dbmnsds=dbmnsds,
+        rmns=rmns,
+        drmnsds=drmnsds,
+        zmnc=zmnc,
+        dzmncds=dzmncds,
+        numnc=numnc,
+        dnumncds=dnumncds,
         mn_factor=_constant_mode_profile((1.0, 1.0)),
         d_mn_factor=zero_modes,
         kmns=_constant_mode_profile((0.0, 0.06)),
-        kmnc=zero_modes,
-        stellsym=True,
+        kmnc=kmnc,
+        stellsym=stellsym,
         no_K=False,
     )
 
@@ -241,8 +252,9 @@ def test_radial_boozer_rhs_evaluates_one_column_bundle_per_point(monkeypatch):
     assert jnp.all(jnp.isfinite(result))
 
 
-def test_direct_radial_evaluators_reuse_column_evaluators():
-    state = _minimal_radial_state()
+@pytest.mark.parametrize("stellsym", [True, False])
+def test_direct_radial_evaluators_reuse_column_evaluators(stellsym):
+    state = _minimal_radial_state(stellsym=stellsym)
     points = jnp.asarray(
         [[0.05, 0.1, 0.02], [0.37, 2.4, 1.0], [0.81, 5.1, 2.5]],
         dtype=jnp.float64,

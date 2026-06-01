@@ -447,6 +447,9 @@ _RadialColumnFactory = Callable[
 _RadialDirectEvaluator = Callable[
     [BoozerRadialInterpolantFrozenState, jax.Array], jax.Array
 ]
+_ScalarProfileSelector = Callable[
+    [BoozerRadialInterpolantFrozenState], PiecewisePolynomial1D
+]
 
 
 class _ModBValueColumns(Protocol):
@@ -1061,6 +1064,22 @@ def _direct_modB_value_evaluator(
     return evaluate
 
 
+def _direct_scalar_evaluator(
+    name: str, profile: _ScalarProfileSelector
+) -> _RadialDirectEvaluator:
+    """Create a named direct evaluator for scalar radial profiles."""
+
+    def evaluate(
+        state: BoozerRadialInterpolantFrozenState, points: jax.Array
+    ) -> jax.Array:
+        return _scalar_at(points[:, 0], profile(state))
+
+    evaluate.__name__ = name
+    evaluate.__qualname__ = name
+    evaluate.__module__ = __name__
+    return evaluate
+
+
 _eval_modB = _direct_modB_value_evaluator("_eval_modB", _eval_modB_from_columns)
 _eval_dmodBdtheta = _direct_modB_value_evaluator(
     "_eval_dmodBdtheta", _eval_dmodBdtheta_from_columns
@@ -1116,41 +1135,10 @@ _eval_dKdtheta = _direct_radial_evaluator(
 _eval_dKdzeta = _direct_radial_evaluator(
     "_eval_dKdzeta", _eval_dKdzeta_from_columns, _eval_K_radial_columns
 )
-
-
-def _eval_psip(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _scalar_at(points[:, 0], state.psip)
-
-
-def _eval_G(state: BoozerRadialInterpolantFrozenState, points: jax.Array) -> jax.Array:
-    return _scalar_at(points[:, 0], state.G)
-
-
-def _eval_I(state: BoozerRadialInterpolantFrozenState, points: jax.Array) -> jax.Array:
-    return _scalar_at(points[:, 0], state.I)
-
-
-def _eval_iota(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _scalar_at(points[:, 0], state.iota)
-
-
-def _eval_dGds(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _scalar_at(points[:, 0], state.dGds)
-
-
-def _eval_dIds(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _scalar_at(points[:, 0], state.dIds)
-
-
-def _eval_diotads(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _scalar_at(points[:, 0], state.diotads)
+_eval_psip = _direct_scalar_evaluator("_eval_psip", lambda state: state.psip)
+_eval_G = _direct_scalar_evaluator("_eval_G", lambda state: state.G)
+_eval_I = _direct_scalar_evaluator("_eval_I", lambda state: state.I)
+_eval_iota = _direct_scalar_evaluator("_eval_iota", lambda state: state.iota)
+_eval_dGds = _direct_scalar_evaluator("_eval_dGds", lambda state: state.dGds)
+_eval_dIds = _direct_scalar_evaluator("_eval_dIds", lambda state: state.dIds)
+_eval_diotads = _direct_scalar_evaluator("_eval_diotads", lambda state: state.diotads)

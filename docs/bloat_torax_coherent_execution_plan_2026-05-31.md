@@ -729,6 +729,35 @@ git diff --check -- src/simsopt/jax_core/boozer_radial_field.py docs/bloat_reduc
 
 - **Review evidence:** six-lens adversarial review returned PASS after fixing docs-only stale line-anchor findings. API/behavior, test-quality, and design/performance lenses found no source findings: private evaluator metadata and import identity are preserved, JIT/Jacobian probes and pickle-by-module/name probes passed, and the helper abstraction is scoped to repeated private direct-wrapper ceremony. Docs/history/accounting lenses initially found stale anchors for the new helper locations; delta reviewers confirmed the corrected anchors match the live source.
 
+### 2026-06-01 — T2.2 Boozer radial scalar-helper LOC-banking follow-up
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.2.
+- **Selected slice:** repeated scalar direct-evaluator construction in `src/simsopt/jax_core/boozer_radial_field.py`. No Fourier formula, Fourier subset builder, tracing dispatch, public wrapper API, CPU Boozer implementation, CUDA/MPS path, transfer policy, or benchmark policy was changed.
+- **Changed files:** `src/simsopt/jax_core/boozer_radial_field.py`, `tests/field/test_trace_boozer_analytic_jax.py`, plus this plan set.
+- **Design-it-twice gate:** Option A, table-driving the Fourier subset builders, was rejected after adversarial review because it hid field ownership behind string-key dispatch for only a 2-LOC bank. Option B, selected here, keeps all Fourier subset builders explicit and factors only the seven scalar direct evaluators through `_direct_scalar_evaluator(...)` with typed profile selectors.
+- **Scope status:** scalar-helper follow-up LOC-banked, full T2.2 still open. `boozer_radial_field.py` is source-negative by 12 LOC for this slice (`26 insertions / 38 deletions`). The old `~400 LOC` estimate remains unbanked because the larger formula/subset-family redesign has not been proven readable and benchmark-safe.
+- **Validation evidence:** CPU/X64 routing/cache tests, full radial tracing tests, scalar metadata/pickle proof, source lint/format, py_compile, source-only mypy, and fresh non-JIT benchmark proof; not CUDA/MPS proof.
+
+```bash
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff check src/simsopt/jax_core/boozer_radial_field.py tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py
+# All checks passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/boozer_radial_field.py tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py
+# 3 files already formatted
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy src/simsopt/jax_core/boozer_radial_field.py
+# Success: no issues found in 1 source file
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m py_compile src/simsopt/jax_core/boozer_radial_field.py tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py
+# passed
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py -k "radial_columns_cached_once_per_points_cycle or direct_radial_evaluators_reuse_column_evaluators"
+# 2 passed, 2 skipped, 45 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/field/test_trace_boozer_analytic_jax.py
+# 28 passed
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/field/test_boozermagneticfield_jax_item33.py
+# 21 skipped
+```
+
+- **Benchmark evidence:** the same `stellsym=True` synthetic non-JIT gate was rerun against the documented final medians from the direct-wrapper follow-up. Recorded five-trial medians were `direct_modB 0.000637098` (limit `0.000673966`), `direct_dmodBds 0.001141614` (limit `0.001181192`), `direct_G 0.000267225` (limit `0.000276029`), and `rhs_vacuum 0.003449284` (limit `0.003613620`). Delta review reproduced the gate in the current checkout with 25-trial medians `direct_modB 0.000594125`, `direct_dmodBds 0.001056167`, `direct_G 0.000243000`, and `rhs_vacuum 0.003481042`; all passed the no >10% regression gate.
+- **Review evidence:** initial adversarial review rejected the attempted string-key `_profile_subset(...)` helper as hidden dynamic field dispatch and flagged weak same-valued optional-profile test coverage. The landed delta removes `_profile_subset(...)`, restores explicit Fourier subset builders, adds `_direct_scalar_evaluator(...)`, and gives the non-stellsym synthetic state distinct optional-mode profiles before re-running validation.
+
 ### 2026-06-01 — T2.3 surface Fourier facade factory slice
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.3.
@@ -1264,6 +1293,6 @@ git diff --unified=0 -- src/simsopt/backend/runtime.py tests/test_backend.py | r
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: attempt the remaining T2.2 subset-builder profile-family follow-up only with benchmark proof, complete the remaining T2.3 product-rule formula fold only if it stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, complete the remaining T2.3 product-rule formula fold only if it stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?
