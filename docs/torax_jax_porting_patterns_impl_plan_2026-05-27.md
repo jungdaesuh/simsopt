@@ -238,6 +238,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 - [ ] Keep dirty-worktree status visible in the closeout note.
 - [ ] If a phase changes public behavior, add a focused migration or user-facing note.
 
+**2026-06-01 cross-link:** T2.3 `surface_fourier.py` facade wrapper factories were executed under the bloat plan, not as a new TORAX runtime phase. The slice preserves public non-RZ surface symbols, keeps composed geometry explicit, banks 165 source LOC in `src/simsopt/jax_core/surface_fourier.py`, and records exact CPU/X64 validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. CUDA/MPS, persistent-cache, branch/JAXPR, and numerical-stability TORAX gates remain open.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.

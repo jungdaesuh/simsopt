@@ -6,7 +6,9 @@ the lower-level tensor kernels live in :mod:`simsopt.jax_core.surface_fourier_ke
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
+from typing import ParamSpec, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -44,6 +46,9 @@ from .surface_fourier_kernels import (
 )
 from .specs import SurfaceXYZFourierSpec, SurfaceXYZTensorFourierSpec
 from .surface_integrals import surface_area, surface_volume
+
+_SurfaceWrapperParams = ParamSpec("_SurfaceWrapperParams")
+_SurfaceWrapperReturn = TypeVar("_SurfaceWrapperReturn")
 
 __all__ = [
     "surface_xyz_fourier_area_from_spec",
@@ -168,8 +173,21 @@ def _surface_curvatures_from_forms(first, second):
     )
 
 
-def surface_xyz_fourier_gamma_from_spec(spec: SurfaceXYZFourierSpec):
-    return _surface_xyz_fourier_gamma_from_dofs(
+def _named_wrapper(
+    name: str,
+    wrapper: Callable[_SurfaceWrapperParams, _SurfaceWrapperReturn],
+) -> Callable[_SurfaceWrapperParams, _SurfaceWrapperReturn]:
+    setattr(wrapper, "__name__", name)
+    setattr(wrapper, "__qualname__", name)
+    setattr(wrapper, "__module__", __name__)
+    return wrapper
+
+
+def _surface_xyz_fourier_from_spec(
+    spec: SurfaceXYZFourierSpec,
+    kernel: Callable[..., jax.Array],
+) -> jax.Array:
+    return kernel(
         spec.dofs,
         spec.quadpoints_phi,
         spec.quadpoints_theta,
@@ -182,74 +200,40 @@ def surface_xyz_fourier_gamma_from_spec(spec: SurfaceXYZFourierSpec):
     )
 
 
-def surface_xyz_fourier_gammadash1_from_spec(spec: SurfaceXYZFourierSpec):
-    return _surface_xyz_fourier_gammadash1_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        spec.scatter_indices,
-        spec.coeff_template,
-    )
+def _make_surface_xyz_fourier_from_spec(
+    name: str,
+    kernel: Callable[..., jax.Array],
+) -> Callable[[SurfaceXYZFourierSpec], jax.Array]:
+    def _from_spec(spec: SurfaceXYZFourierSpec) -> jax.Array:
+        return _surface_xyz_fourier_from_spec(spec, kernel)
+
+    return _named_wrapper(name, _from_spec)
 
 
-def surface_xyz_fourier_gammadash2_from_spec(spec: SurfaceXYZFourierSpec):
-    return _surface_xyz_fourier_gammadash2_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        spec.scatter_indices,
-        spec.coeff_template,
-    )
-
-
-def surface_xyz_fourier_gammadash1dash1_from_spec(spec: SurfaceXYZFourierSpec):
-    return _surface_xyz_fourier_gammadash1dash1_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        spec.scatter_indices,
-        spec.coeff_template,
-    )
-
-
-def surface_xyz_fourier_gammadash1dash2_from_spec(spec: SurfaceXYZFourierSpec):
-    return _surface_xyz_fourier_gammadash1dash2_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        spec.scatter_indices,
-        spec.coeff_template,
-    )
-
-
-def surface_xyz_fourier_gammadash2dash2_from_spec(spec: SurfaceXYZFourierSpec):
-    return _surface_xyz_fourier_gammadash2dash2_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        spec.scatter_indices,
-        spec.coeff_template,
-    )
+surface_xyz_fourier_gamma_from_spec = _make_surface_xyz_fourier_from_spec(
+    "surface_xyz_fourier_gamma_from_spec",
+    _surface_xyz_fourier_gamma_from_dofs,
+)
+surface_xyz_fourier_gammadash1_from_spec = _make_surface_xyz_fourier_from_spec(
+    "surface_xyz_fourier_gammadash1_from_spec",
+    _surface_xyz_fourier_gammadash1_from_dofs,
+)
+surface_xyz_fourier_gammadash2_from_spec = _make_surface_xyz_fourier_from_spec(
+    "surface_xyz_fourier_gammadash2_from_spec",
+    _surface_xyz_fourier_gammadash2_from_dofs,
+)
+surface_xyz_fourier_gammadash1dash1_from_spec = _make_surface_xyz_fourier_from_spec(
+    "surface_xyz_fourier_gammadash1dash1_from_spec",
+    _surface_xyz_fourier_gammadash1dash1_from_dofs,
+)
+surface_xyz_fourier_gammadash1dash2_from_spec = _make_surface_xyz_fourier_from_spec(
+    "surface_xyz_fourier_gammadash1dash2_from_spec",
+    _surface_xyz_fourier_gammadash1dash2_from_dofs,
+)
+surface_xyz_fourier_gammadash2dash2_from_spec = _make_surface_xyz_fourier_from_spec(
+    "surface_xyz_fourier_gammadash2dash2_from_spec",
+    _surface_xyz_fourier_gammadash2dash2_from_dofs,
+)
 
 
 def _surface_xyz_fourier_lin_from_spec(
@@ -271,186 +255,124 @@ def _surface_xyz_fourier_lin_from_spec(
     )
 
 
-def surface_xyz_fourier_gammadash1dash1_lin_from_spec(
-    spec: SurfaceXYZFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_fourier_lin_from_spec(
-        spec,
+def _make_surface_xyz_fourier_lin_from_spec(
+    name: str,
+    kernel: Callable[..., jax.Array],
+) -> Callable[[SurfaceXYZFourierSpec, object, object], jax.Array]:
+    def _from_spec(
+        spec: SurfaceXYZFourierSpec,
+        quadpoints_phi: object,
+        quadpoints_theta: object,
+    ) -> jax.Array:
+        return _surface_xyz_fourier_lin_from_spec(
+            spec,
+            quadpoints_phi,
+            quadpoints_theta,
+            kernel,
+        )
+
+    return _named_wrapper(name, _from_spec)
+
+
+def _make_surface_xyz_fourier_lin_from_dofs(
+    name: str,
+    from_spec: Callable[..., jax.Array],
+) -> Callable[[SurfaceXYZFourierSpec, object, object, object], jax.Array]:
+    def _from_dofs(
+        spec: SurfaceXYZFourierSpec,
+        dofs,
         quadpoints_phi,
         quadpoints_theta,
+    ):
+        return from_spec(_spec_with_dofs(spec, dofs), quadpoints_phi, quadpoints_theta)
+
+    return _named_wrapper(name, _from_dofs)
+
+
+surface_xyz_fourier_gammadash1dash1_lin_from_spec = (
+    _make_surface_xyz_fourier_lin_from_spec(
+        "surface_xyz_fourier_gammadash1dash1_lin_from_spec",
         _surface_xyz_fourier_gammadash1dash1_lin_from_dofs,
     )
-
-
-def surface_xyz_fourier_gammadash1dash2_lin_from_spec(
-    spec: SurfaceXYZFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash1dash2_lin_from_spec = (
+    _make_surface_xyz_fourier_lin_from_spec(
+        "surface_xyz_fourier_gammadash1dash2_lin_from_spec",
         _surface_xyz_fourier_gammadash1dash2_lin_from_dofs,
     )
-
-
-def surface_xyz_fourier_gammadash2dash2_lin_from_spec(
-    spec: SurfaceXYZFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash2dash2_lin_from_spec = (
+    _make_surface_xyz_fourier_lin_from_spec(
+        "surface_xyz_fourier_gammadash2dash2_lin_from_spec",
         _surface_xyz_fourier_gammadash2dash2_lin_from_dofs,
     )
-
-
-def surface_xyz_fourier_gammadash1dash1dash1_lin_from_spec(
-    spec: SurfaceXYZFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash1dash1dash1_lin_from_spec = (
+    _make_surface_xyz_fourier_lin_from_spec(
+        "surface_xyz_fourier_gammadash1dash1dash1_lin_from_spec",
         _surface_xyz_fourier_gammadash1dash1dash1_lin_from_dofs,
     )
-
-
-def surface_xyz_fourier_gammadash1dash1dash2_lin_from_spec(
-    spec: SurfaceXYZFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash1dash1dash2_lin_from_spec = (
+    _make_surface_xyz_fourier_lin_from_spec(
+        "surface_xyz_fourier_gammadash1dash1dash2_lin_from_spec",
         _surface_xyz_fourier_gammadash1dash1dash2_lin_from_dofs,
     )
-
-
-def surface_xyz_fourier_gammadash1dash2dash2_lin_from_spec(
-    spec: SurfaceXYZFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash1dash2dash2_lin_from_spec = (
+    _make_surface_xyz_fourier_lin_from_spec(
+        "surface_xyz_fourier_gammadash1dash2dash2_lin_from_spec",
         _surface_xyz_fourier_gammadash1dash2dash2_lin_from_dofs,
     )
-
-
-def surface_xyz_fourier_gammadash2dash2dash2_lin_from_spec(
-    spec: SurfaceXYZFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash2dash2dash2_lin_from_spec = (
+    _make_surface_xyz_fourier_lin_from_spec(
+        "surface_xyz_fourier_gammadash2dash2dash2_lin_from_spec",
         _surface_xyz_fourier_gammadash2dash2dash2_lin_from_dofs,
     )
-
-
-def surface_xyz_fourier_gammadash1dash1_lin_from_dofs(
-    spec: SurfaceXYZFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_fourier_gammadash1dash1_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash1dash1_lin_from_dofs = (
+    _make_surface_xyz_fourier_lin_from_dofs(
+        "surface_xyz_fourier_gammadash1dash1_lin_from_dofs",
+        surface_xyz_fourier_gammadash1dash1_lin_from_spec,
     )
-
-
-def surface_xyz_fourier_gammadash1dash2_lin_from_dofs(
-    spec: SurfaceXYZFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_fourier_gammadash1dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash1dash2_lin_from_dofs = (
+    _make_surface_xyz_fourier_lin_from_dofs(
+        "surface_xyz_fourier_gammadash1dash2_lin_from_dofs",
+        surface_xyz_fourier_gammadash1dash2_lin_from_spec,
     )
-
-
-def surface_xyz_fourier_gammadash2dash2_lin_from_dofs(
-    spec: SurfaceXYZFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_fourier_gammadash2dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash2dash2_lin_from_dofs = (
+    _make_surface_xyz_fourier_lin_from_dofs(
+        "surface_xyz_fourier_gammadash2dash2_lin_from_dofs",
+        surface_xyz_fourier_gammadash2dash2_lin_from_spec,
     )
-
-
-def surface_xyz_fourier_gammadash1dash1dash1_lin_from_dofs(
-    spec: SurfaceXYZFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_fourier_gammadash1dash1dash1_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash1dash1dash1_lin_from_dofs = (
+    _make_surface_xyz_fourier_lin_from_dofs(
+        "surface_xyz_fourier_gammadash1dash1dash1_lin_from_dofs",
+        surface_xyz_fourier_gammadash1dash1dash1_lin_from_spec,
     )
-
-
-def surface_xyz_fourier_gammadash1dash1dash2_lin_from_dofs(
-    spec: SurfaceXYZFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_fourier_gammadash1dash1dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash1dash1dash2_lin_from_dofs = (
+    _make_surface_xyz_fourier_lin_from_dofs(
+        "surface_xyz_fourier_gammadash1dash1dash2_lin_from_dofs",
+        surface_xyz_fourier_gammadash1dash1dash2_lin_from_spec,
     )
-
-
-def surface_xyz_fourier_gammadash1dash2dash2_lin_from_dofs(
-    spec: SurfaceXYZFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_fourier_gammadash1dash2dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash1dash2dash2_lin_from_dofs = (
+    _make_surface_xyz_fourier_lin_from_dofs(
+        "surface_xyz_fourier_gammadash1dash2dash2_lin_from_dofs",
+        surface_xyz_fourier_gammadash1dash2dash2_lin_from_spec,
     )
-
-
-def surface_xyz_fourier_gammadash2dash2dash2_lin_from_dofs(
-    spec: SurfaceXYZFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_fourier_gammadash2dash2dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_fourier_gammadash2dash2dash2_lin_from_dofs = (
+    _make_surface_xyz_fourier_lin_from_dofs(
+        "surface_xyz_fourier_gammadash2dash2dash2_lin_from_dofs",
+        surface_xyz_fourier_gammadash2dash2dash2_lin_from_spec,
     )
+)
 
 
 def surface_xyz_fourier_normal_from_spec(spec: SurfaceXYZFourierSpec):
@@ -572,52 +494,11 @@ def _clamped_dims_or_default(spec: SurfaceXYZTensorFourierSpec):
     return spec.clamped_dims
 
 
-def surface_xyz_tensor_fourier_gamma_from_spec(spec: SurfaceXYZTensorFourierSpec):
-    return _surface_xyz_tensor_gamma_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        _scatter_indices_or_none(spec),
-        clamped_dims=_clamped_dims_or_default(spec),
-    )
-
-
-def surface_xyz_tensor_fourier_gammadash1_from_spec(spec: SurfaceXYZTensorFourierSpec):
-    return _surface_xyz_tensor_gammadash1_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        _scatter_indices_or_none(spec),
-        clamped_dims=_clamped_dims_or_default(spec),
-    )
-
-
-def surface_xyz_tensor_fourier_gammadash2_from_spec(spec: SurfaceXYZTensorFourierSpec):
-    return _surface_xyz_tensor_gammadash2_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        _scatter_indices_or_none(spec),
-        clamped_dims=_clamped_dims_or_default(spec),
-    )
-
-
-def surface_xyz_tensor_fourier_gammadash1dash1_from_spec(
+def _surface_xyz_tensor_fourier_from_spec(
     spec: SurfaceXYZTensorFourierSpec,
-):
-    return _surface_xyz_tensor_gammadash1dash1_from_dofs(
+    kernel: Callable[..., jax.Array],
+) -> jax.Array:
+    return kernel(
         spec.dofs,
         spec.quadpoints_phi,
         spec.quadpoints_theta,
@@ -630,36 +511,50 @@ def surface_xyz_tensor_fourier_gammadash1dash1_from_spec(
     )
 
 
-def surface_xyz_tensor_fourier_gammadash1dash2_from_spec(
-    spec: SurfaceXYZTensorFourierSpec,
-):
-    return _surface_xyz_tensor_gammadash1dash2_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        _scatter_indices_or_none(spec),
-        clamped_dims=_clamped_dims_or_default(spec),
-    )
+def _make_surface_xyz_tensor_fourier_from_spec(
+    name: str,
+    kernel: Callable[..., jax.Array],
+) -> Callable[[SurfaceXYZTensorFourierSpec], jax.Array]:
+    def _from_spec(spec: SurfaceXYZTensorFourierSpec) -> jax.Array:
+        return _surface_xyz_tensor_fourier_from_spec(spec, kernel)
+
+    return _named_wrapper(name, _from_spec)
 
 
-def surface_xyz_tensor_fourier_gammadash2dash2_from_spec(
-    spec: SurfaceXYZTensorFourierSpec,
-):
-    return _surface_xyz_tensor_gammadash2dash2_from_dofs(
-        spec.dofs,
-        spec.quadpoints_phi,
-        spec.quadpoints_theta,
-        spec.mpol,
-        spec.ntor,
-        spec.nfp,
-        spec.stellsym,
-        _scatter_indices_or_none(spec),
-        clamped_dims=_clamped_dims_or_default(spec),
+surface_xyz_tensor_fourier_gamma_from_spec = _make_surface_xyz_tensor_fourier_from_spec(
+    "surface_xyz_tensor_fourier_gamma_from_spec",
+    _surface_xyz_tensor_gamma_from_dofs,
+)
+surface_xyz_tensor_fourier_gammadash1_from_spec = (
+    _make_surface_xyz_tensor_fourier_from_spec(
+        "surface_xyz_tensor_fourier_gammadash1_from_spec",
+        _surface_xyz_tensor_gammadash1_from_dofs,
     )
+)
+surface_xyz_tensor_fourier_gammadash2_from_spec = (
+    _make_surface_xyz_tensor_fourier_from_spec(
+        "surface_xyz_tensor_fourier_gammadash2_from_spec",
+        _surface_xyz_tensor_gammadash2_from_dofs,
+    )
+)
+surface_xyz_tensor_fourier_gammadash1dash1_from_spec = (
+    _make_surface_xyz_tensor_fourier_from_spec(
+        "surface_xyz_tensor_fourier_gammadash1dash1_from_spec",
+        _surface_xyz_tensor_gammadash1dash1_from_dofs,
+    )
+)
+surface_xyz_tensor_fourier_gammadash1dash2_from_spec = (
+    _make_surface_xyz_tensor_fourier_from_spec(
+        "surface_xyz_tensor_fourier_gammadash1dash2_from_spec",
+        _surface_xyz_tensor_gammadash1dash2_from_dofs,
+    )
+)
+surface_xyz_tensor_fourier_gammadash2dash2_from_spec = (
+    _make_surface_xyz_tensor_fourier_from_spec(
+        "surface_xyz_tensor_fourier_gammadash2dash2_from_spec",
+        _surface_xyz_tensor_gammadash2dash2_from_dofs,
+    )
+)
 
 
 def _surface_xyz_tensor_fourier_lin_from_spec(
@@ -681,186 +576,126 @@ def _surface_xyz_tensor_fourier_lin_from_spec(
     )
 
 
-def surface_xyz_tensor_fourier_gammadash1dash1_lin_from_spec(
-    spec: SurfaceXYZTensorFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_tensor_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+def _make_surface_xyz_tensor_fourier_lin_from_spec(
+    name: str,
+    kernel: Callable[..., jax.Array],
+) -> Callable[[SurfaceXYZTensorFourierSpec, object, object], jax.Array]:
+    def _from_spec(
+        spec: SurfaceXYZTensorFourierSpec,
+        quadpoints_phi: object,
+        quadpoints_theta: object,
+    ) -> jax.Array:
+        return _surface_xyz_tensor_fourier_lin_from_spec(
+            spec,
+            quadpoints_phi,
+            quadpoints_theta,
+            kernel,
+        )
+
+    return _named_wrapper(name, _from_spec)
+
+
+surface_xyz_tensor_fourier_gammadash1dash1_lin_from_spec = (
+    _make_surface_xyz_tensor_fourier_lin_from_spec(
+        "surface_xyz_tensor_fourier_gammadash1dash1_lin_from_spec",
         _surface_xyz_tensor_gammadash1dash1_lin_from_dofs,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash1dash2_lin_from_spec(
-    spec: SurfaceXYZTensorFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_tensor_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash1dash2_lin_from_spec = (
+    _make_surface_xyz_tensor_fourier_lin_from_spec(
+        "surface_xyz_tensor_fourier_gammadash1dash2_lin_from_spec",
         _surface_xyz_tensor_gammadash1dash2_lin_from_dofs,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash2dash2_lin_from_spec(
-    spec: SurfaceXYZTensorFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_tensor_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash2dash2_lin_from_spec = (
+    _make_surface_xyz_tensor_fourier_lin_from_spec(
+        "surface_xyz_tensor_fourier_gammadash2dash2_lin_from_spec",
         _surface_xyz_tensor_gammadash2dash2_lin_from_dofs,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_spec(
-    spec: SurfaceXYZTensorFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_tensor_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_spec = (
+    _make_surface_xyz_tensor_fourier_lin_from_spec(
+        "surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_spec",
         _surface_xyz_tensor_gammadash1dash1dash1_lin_from_dofs,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_spec(
-    spec: SurfaceXYZTensorFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_tensor_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_spec = (
+    _make_surface_xyz_tensor_fourier_lin_from_spec(
+        "surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_spec",
         _surface_xyz_tensor_gammadash1dash1dash2_lin_from_dofs,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_spec(
-    spec: SurfaceXYZTensorFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_tensor_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_spec = (
+    _make_surface_xyz_tensor_fourier_lin_from_spec(
+        "surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_spec",
         _surface_xyz_tensor_gammadash1dash2dash2_lin_from_dofs,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_spec(
-    spec: SurfaceXYZTensorFourierSpec,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return _surface_xyz_tensor_fourier_lin_from_spec(
-        spec,
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_spec = (
+    _make_surface_xyz_tensor_fourier_lin_from_spec(
+        "surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_spec",
         _surface_xyz_tensor_gammadash2dash2dash2_lin_from_dofs,
     )
+)
 
 
-def surface_xyz_tensor_fourier_gammadash1dash1_lin_from_dofs(
-    spec: SurfaceXYZTensorFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_tensor_fourier_gammadash1dash1_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
+def _make_surface_xyz_tensor_fourier_lin_from_dofs(
+    name: str,
+    from_spec: Callable[..., jax.Array],
+) -> Callable[[SurfaceXYZTensorFourierSpec, object, object, object], jax.Array]:
+    def _from_dofs(
+        spec: SurfaceXYZTensorFourierSpec,
+        dofs,
         quadpoints_phi,
         quadpoints_theta,
+    ):
+        return from_spec(_spec_with_dofs(spec, dofs), quadpoints_phi, quadpoints_theta)
+
+    return _named_wrapper(name, _from_dofs)
+
+
+surface_xyz_tensor_fourier_gammadash1dash1_lin_from_dofs = (
+    _make_surface_xyz_tensor_fourier_lin_from_dofs(
+        "surface_xyz_tensor_fourier_gammadash1dash1_lin_from_dofs",
+        surface_xyz_tensor_fourier_gammadash1dash1_lin_from_spec,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash1dash2_lin_from_dofs(
-    spec: SurfaceXYZTensorFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_tensor_fourier_gammadash1dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash1dash2_lin_from_dofs = (
+    _make_surface_xyz_tensor_fourier_lin_from_dofs(
+        "surface_xyz_tensor_fourier_gammadash1dash2_lin_from_dofs",
+        surface_xyz_tensor_fourier_gammadash1dash2_lin_from_spec,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash2dash2_lin_from_dofs(
-    spec: SurfaceXYZTensorFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_tensor_fourier_gammadash2dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash2dash2_lin_from_dofs = (
+    _make_surface_xyz_tensor_fourier_lin_from_dofs(
+        "surface_xyz_tensor_fourier_gammadash2dash2_lin_from_dofs",
+        surface_xyz_tensor_fourier_gammadash2dash2_lin_from_spec,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_dofs(
-    spec: SurfaceXYZTensorFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_dofs = (
+    _make_surface_xyz_tensor_fourier_lin_from_dofs(
+        "surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_dofs",
+        surface_xyz_tensor_fourier_gammadash1dash1dash1_lin_from_spec,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_dofs(
-    spec: SurfaceXYZTensorFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_dofs = (
+    _make_surface_xyz_tensor_fourier_lin_from_dofs(
+        "surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_dofs",
+        surface_xyz_tensor_fourier_gammadash1dash1dash2_lin_from_spec,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_dofs(
-    spec: SurfaceXYZTensorFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_dofs = (
+    _make_surface_xyz_tensor_fourier_lin_from_dofs(
+        "surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_dofs",
+        surface_xyz_tensor_fourier_gammadash1dash2dash2_lin_from_spec,
     )
-
-
-def surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_dofs(
-    spec: SurfaceXYZTensorFourierSpec,
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_spec(
-        _spec_with_dofs(spec, dofs),
-        quadpoints_phi,
-        quadpoints_theta,
+)
+surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_dofs = (
+    _make_surface_xyz_tensor_fourier_lin_from_dofs(
+        "surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_dofs",
+        surface_xyz_tensor_fourier_gammadash2dash2dash2_lin_from_spec,
     )
+)
 
 
 def surface_xyz_tensor_fourier_normal_from_spec(spec: SurfaceXYZTensorFourierSpec):

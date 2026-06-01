@@ -446,14 +446,15 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 - **Review clarification:** The direct-vs-column tests prove routing to the column SSOT, not an independent formula oracle; formula correctness remains covered by wrapper parity, closed-form analytic, and benchmark evidence.
 - **Remaining LOC-banking follow-up:** If T2.2 must contribute bloat LOC, replace the explicit subset builders with a smaller profile-family parametrization and rerun the same benchmark gate. Do not reopen formula correctness unless the direct-vs-column parity tests fail.
 
-### 6.3 — [ ] T2.3: Surface fourier `_from_dofs` / `_from_spec` factory
+### 6.3 — [ ] T2.3: Surface fourier `_from_dofs` / `_from_spec` factory — **FACADE LOC-BANKED / KERNELS OPEN (2026-06-01)**
 
-- **Files:** `surface_fourier_kernels.py` (3,139 LOC; the `_*_from_dofs` kernel wrappers begin ~`:1415`) + `surface_fourier.py` (909 LOC; the `_*_from_spec` wrappers span ~`:102-905`). (v4's `kernels:2200-2799` was stale.)
-- **Change:** Build `_make_from_spec_xyz_fourier(kernel)` + `_make_from_dofs_xyz_fourier(spec_to_args, kernel)` factories mirroring existing `_dcoeff_jacobian` at `:2820` (v3 said `:2812-2864`). Each public name becomes one line: `surface_xyz_fourier_gamma_from_spec = _make_from_spec_xyz_fourier(_kernel_gamma)`.
-- **LOC saved:** ~550.
-- **Risk:** Medium. `__all__` listings + cross-imports must stay byte-identical; docstrings need `__doc__` assignment.
+- **Files:** `surface_fourier_kernels.py` (3,139 LOC; the `_*_from_dofs` kernel wrappers begin ~`:1415`) + `surface_fourier.py` (pre-slice 978 LOC; current 813 LOC; the facade `_*_from_spec` / paired-linear `_*_from_dofs` wrappers spanned ~`:171-864`). (v4's `kernels:2200-2799` was stale.)
+- **2026-06-01 facade slice:** `surface_fourier.py` now uses typed local factories for the `SurfaceXYZFourier` / `SurfaceXYZTensorFourier` kernel-backed spec wrappers and paired-linear dof wrappers. Public names remain exported symbols with assigned `__name__` / `__qualname__` / `__module__`, while composed geometry (`normal`, fundamental forms, curvatures, area, volume) stays explicit.
+- **LOC saved:** 165 banked in `src/simsopt/jax_core/surface_fourier.py` for this facade slice (`281 insertions / 446 deletions`). Do **not** bank the old `~550` full-item estimate yet because the lower-level `surface_fourier_kernels.py` wrapper fold remains open.
+- **Risk:** Low-to-medium for the facade slice. `__all__` listings + cross-imports stay unchanged; factory-generated wrappers must keep public symbol names and JIT behavior.
 - **Contracts:** Stellsym scatter indices; every public symbol name; tensor conventions (`dgamma_by_dcoeff[i,j,l,k]`).
 - **Validation gate:** T2 + `tests/geo/test_surface_fourier_jax.py`.
+- **Remaining LOC-banking follow-up:** Re-derive the lower-level `surface_fourier_kernels.py` `_from_dofs` wrapper fold separately, with parity tests for tensor clamping, stellsym scatter, and coefficient-Jacobian conventions before banking the rest of T2.3.
 
 ### 6.4 — [x] T2.4: Spec dataclass auto-registration helper — **COMPLETED / LOC-BANKED SMALL (2026-06-01)**
 

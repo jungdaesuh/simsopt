@@ -671,6 +671,36 @@ git diff --check -- src/simsopt/jax_core/boozer_radial_field.py src/simsopt/jax_
 - **Benchmark evidence:** saved pre-change baseline was `direct_modB 0.000578229`, `direct_dmodBds 0.001090641`, `direct_G 0.000272629`, `rhs_vacuum 0.003945453`. Final five-trial medians on the same synthetic non-JIT shape were `direct_modB 0.000612696`, `direct_dmodBds 0.001073811`, `direct_G 0.000250935`, `rhs_vacuum 0.003285109`.
 - **Review evidence:** direct scoped review found no added dynamic imports, untyped casts, defensive exception handling, or secret-file references in the source/test diff. The remaining issue is accounting, not correctness: this should not be counted as the full T2.2 bloat-LOC closeout.
 
+### 2026-06-01 — T2.3 surface Fourier facade factory slice
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.3.
+- **Selected slice:** `surface_fourier.py` facade wrapper factory only. No lower-level Fourier formulas, `surface_fourier_kernels.py` coefficient-Jacobian code, CPU geometry code, backend/cache policy, CUDA/MPS path, transfer policy, or public symbol deletion was changed.
+- **Changed files:** `src/simsopt/jax_core/surface_fourier.py`, plus this plan set.
+- **Design-it-twice gate:** a broad table covering every public geometry function was rejected because composed quantities such as `normal`, fundamental forms, curvatures, area, and volume encode readable geometry composition. The landed design factors only the kernel-backed spec wrappers and paired-linear dof wrappers, preserving explicit composition where the function body carries mathematical meaning.
+- **Scope status:** facade LOC-banked, full T2.3 still open. `surface_fourier.py` is source-negative by 165 LOC (`281 insertions / 446 deletions`), but the lower-level `surface_fourier_kernels.py` `_from_dofs` wrapper fold remains a separate follow-up before the old full-item `~550` estimate can be banked.
+- **Validation evidence:** CPU/X64 non-RZ surface wrapper parity and JIT proof, not CUDA/MPS proof.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_surface_fourier_jax.py -k 'higher_paired_lin_wrappers_match_cpp or spec_geometry_and_normals_match_cpp or high_order_spec_geometry_is_finite_and_matches_cpp or spec_second_coordinate_derivatives_match_cpp or non_rz_spec_wrappers_match_cpu or spec_wrappers_are_jittable'
+# 14 passed, 136 deselected
+.conda/jax/bin/python -m ruff check src/simsopt/jax_core/surface_fourier.py
+# All checks passed
+.conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/surface_fourier.py
+# 1 file already formatted
+.conda/jax/bin/python -m py_compile src/simsopt/jax_core/surface_fourier.py
+# passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found.
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy src/simsopt/jax_core/surface_fourier.py
+# Success: no issues found in 1 source file
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy tests/geo/test_surface_fourier_jax.py
+# blocked by pre-existing benchmarks/validation_ladder_contract.py type errors (18 errors) imported by the test helper path.
+git diff --check -- src/simsopt/jax_core/surface_fourier.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
+- **Review evidence:** scoped adversarial review returned PASS after fixing two review-found issues: transient tensor paired-linear dof wrappers were initially bound before tensor spec wrappers existed, and the T2.3 source LOC ledger still cited the stale pre-slice 909 LOC count. Delta reviewers then confirmed the refreshed `/tmp/t2_3_surface_fourier_facade.diff` byte-matches the live scoped diff, public imports/package facade/`__all__` order and paired-linear wrapper metadata are preserved, math/kernel routing is unchanged, guardrails are clean, source-only `mypy` passes, the test-file `mypy` blocker is pre-existing in `benchmarks/validation_ladder_contract.py`, and the corrected 978-to-813 LOC accounting banks only 165 source LOC.
+
 ### 2026-06-01 — T2.4 spec dataclass auto-registration helper
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.4, with TORAX Phase 1 static/dynamic contract overlap.
