@@ -5,12 +5,13 @@
 - Target repo: `/Users/suhjungdae/code/columbia/simsopt-jax-shared-jax`
 - Target repo HEAD originally reviewed: `431a517fb`
 - Source-doc review basis: `b267b0d95` (2026-05-31 clean current-checkout refresh)
-- Current execution checkpoint: `8b94c2bbd` on `shared-jax-clean`, with a broad dirty implementation tree tracked in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`
+- Source-code checkpoint before docs-only gate commit: `8b94c2bbd` on `shared-jax-clean`, with a broad dirty implementation tree tracked in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`
+- Docs-only drift-gate commit: `398b3e50d` on `shared-jax-clean`
 - Reference repo: `/Users/suhjungdae/code/opensource/torax`
 - Reference repo HEAD reviewed: `60190df1` (clean `main`)
-- Worktree note: the 2026-05-31 source-doc refresh ran from a clean tracked checkout (`git status --short` empty) on `shared-jax-clean`; the 2026-06-01 execution checkpoint is no longer a clean tracked checkout.
+- Worktree note: the 2026-05-31 source-doc refresh ran from a clean tracked checkout (`git status --short` empty) on `shared-jax-clean`; the 2026-06-01 source-code checkpoint is no longer a clean tracked checkout.
 - **Refresh (2026-05-31):** the line refs in this plan were first re-verified against HEAD `21c3d517d`, then corrected against `2bcaeff28`; that pass refreshed the source-doc status to HEAD `b267b0d95` after the MPS custom-kernel commit sequence and updated the refs that moved. Official JAX contracts for persistent cache, `lax.scan`, `lax.while_loop`, and `lax.cond` were rechecked through Context7 during that correction pass. The original review HEAD `431a517fb` is now historical, but the patterns and plan structure are unchanged.
-- **Execution checkpoint (2026-06-01):** implementation evidence now references current checkout `8b94c2bbd`, but the dirty tree must be split by the bloat-plan drift gate before any commit. This TORAX plan records contract-hardening proof, not a standalone LOC-reduction closeout.
+- **Execution checkpoint (2026-06-01):** implementation evidence references source-code checkpoint `8b94c2bbd`; the docs-only drift gate itself was committed as `398b3e50d`. The dirty tree must be split by the bloat-plan drift gate before any implementation commit. This TORAX plan records contract-hardening proof, not a standalone LOC-reduction closeout.
 
 ## Purpose
 
