@@ -5,7 +5,7 @@
 - Target repo: `/Users/suhjungdae/code/columbia/simsopt-jax-shared-jax`
 - Source-doc review basis: `b267b0d95` on `shared-jax-clean`
 - Source-code checkpoint before docs-only gate commit: `8b94c2bbd` on `shared-jax-clean`, with a broad dirty implementation tree across `src/`, `tests/`, and `docs/`
-- Docs-only drift-gate commit: `398b3e50d` on `shared-jax-clean`
+- Docs-only drift gate introduced in commit `398b3e50d` and checkpoint basis clarified in commit `446eab365` on `shared-jax-clean`
 - Reference TORAX repo reviewed: `/Users/suhjungdae/code/opensource/torax` at `60190df1` on clean `main`
 - Historical local status at source-doc review: the two source docs were modified and this overlay was untracked; no source-code edits were part of that review. This is no longer the current working-tree state.
 - Artifact note: this checkout does not contain a repo-local `.artifacts/` tree. Historical code-smell artifacts referenced by the bloat plan were found in sibling checkout `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/code_smell_review_2026-05-20/`.
@@ -61,7 +61,7 @@ The source plans remain the SSOT for detailed item text, line refs, and acceptan
 ## Current Context
 
 - Source-doc refresh basis: `shared-jax-clean` at `b267b0d95`.
-- Current docs-gate commit is `shared-jax-clean` at `398b3e50d`; the source-code checkpoint before that docs-only gate was `8b94c2bbd`, and source-doc edit status from the original review envelope is historical only.
+- Docs-gate history: the docs-only drift gate was introduced in `398b3e50d`, checkpoint basis was clarified in `446eab365`, the source-code checkpoint before that docs-only gate was `8b94c2bbd`, and source-doc edit status from the original review envelope is historical only. Treat these commit hashes as historical anchors, not live-HEAD markers.
 - `docs/bloat_reduction_plan_2026-05-20.md` is a tiered reduction plan: T1 mechanical wins, T2 factory introductions, T3 structural consolidations, and T4 contract decisions.
 - `docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md` is a pattern-hardening plan: static/dynamic pytree contracts, persistent-cache proof, bounded control flow, branch discipline, and numerical stability.
 - Shared dependency surfaces include `jax_core` specs, backend runtime/cache policy, validation ladder helpers, host-boundary helpers, fixed-iteration scan code, PM/wireframe workflows, and GPU/MPS-sensitive runtime paths.
@@ -74,7 +74,7 @@ The right sequencing is contract-first, then mechanical deletion, then shared fa
 
 ## Assumptions
 
-- The source docs were refreshed at `b267b0d95`; execution then advanced to source-code checkpoint `8b94c2bbd` with a broad dirty tree, and the docs-only drift gate was committed as `398b3e50d`. Re-run evidence refresh and the drift ledger before selecting or committing any additional implementation slice.
+- The source docs were refreshed at `b267b0d95`; execution then advanced to source-code checkpoint `8b94c2bbd` with a broad dirty tree, the docs-only drift gate was introduced in `398b3e50d`, and its checkpoint basis was clarified in `446eab365`. Re-run evidence refresh and the drift ledger before selecting or committing any additional implementation slice.
 - Code work must load and apply `/Users/suhjungdae/.agent-docs/SOFTWARE_DESIGN.md` before implementation.
 - CPU validation is not enough for GPU-sensitive or MPS-sensitive claims.
 - `jax_mps_smoke` remains a smoke lane, not a production parity lane.
