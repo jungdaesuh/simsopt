@@ -10,8 +10,9 @@ for tracing, not as dictionary keys.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Union
+from typing import Literal, TypeVar, Union
 
 import jax
 import jax.numpy as jnp
@@ -24,8 +25,98 @@ from ._math_utils import (
     runtime_device_put,
 )
 
+__all__ = [
+    "BiotSavartSpec",
+    "CoilSpec",
+    "CoilGroupSpec",
+    "CoilDofExtractionSpec",
+    "CoilSetDofExtractionSpec",
+    "CoilSymmetrySpec",
+    "apply_coil_symmetry",
+    "CurveCWSFourierRZSpec",
+    "CurveFilamentSpec",
+    "CurveHelicalSpec",
+    "OrientedCurveXYZFourierSpec",
+    "make_oriented_curve_xyzfourier_spec",
+    "CurvePlanarFourierSpec",
+    "CurveSpec",
+    "CurveSpecKind",
+    "CurvePerturbedSpec",
+    "CurrentValueSpec",
+    "CurveRZFourierSpec",
+    "CurveXYZFourierSpec",
+    "CurveXYZFourierSymmetriesSpec",
+    "FieldEvalSpec",
+    "FrameRotationSpec",
+    "FixedSurfaceFluxSpec",
+    "GroupedCoilSetSpec",
+    "OptimizableDofMapSpec",
+    "RotationSpec",
+    "SingleStageRuntimeSpec",
+    "SingleStageSeedSpec",
+    "SurfaceGarabedianSpec",
+    "SurfaceHennebergSpec",
+    "SurfaceRZFourierSpec",
+    "SurfaceSpec",
+    "SurfaceSpecKind",
+    "SurfaceXYZFourierSpec",
+    "SurfaceXYZTensorFourierSpec",
+    "ZeroRotationSpec",
+    "curve_spec_kind",
+    "surface_spec_kind",
+    "make_biot_savart_spec",
+    "make_coil_spec",
+    "make_coil_dof_extraction_spec",
+    "make_coil_symmetry_spec",
+    "make_coil_group_spec",
+    "make_coil_set_dof_extraction_spec",
+    "make_current_value_spec",
+    "make_curve_cwsfourier_rz_spec",
+    "make_curve_filament_spec",
+    "make_curve_helical_spec",
+    "make_curve_planarfourier_spec",
+    "make_curve_perturbed_spec",
+    "make_curve_rzfourier_spec",
+    "make_curve_xyzfourier_spec",
+    "make_curve_xyzfouriersymmetries_spec",
+    "make_field_eval_spec",
+    "make_frame_rotation_spec",
+    "make_fixed_surface_flux_spec",
+    "make_grouped_coil_set_spec",
+    "make_optimizable_dof_map_spec",
+    "make_single_stage_runtime_spec",
+    "make_single_stage_seed_spec",
+    "make_surface_garabedian_spec",
+    "make_surface_henneberg_spec",
+    "make_surface_rzfourier_spec",
+    "make_zero_rotation_spec",
+    "garabedian_to_rzfourier_spec",
+    "make_surface_xyz_fourier_spec",
+    "make_surface_xyz_tensor_fourier_spec",
+]
 
-@dataclass(frozen=True)
+
+_SpecClass = TypeVar("_SpecClass", bound=type)
+
+
+def _register_jax_spec(
+    *, data_fields: tuple[str, ...], meta_fields: tuple[str, ...]
+) -> Callable[[_SpecClass], _SpecClass]:
+    """Freeze a spec dataclass and register its explicit JAX pytree partition."""
+
+    def _decorate(spec_cls: _SpecClass) -> _SpecClass:
+        frozen_spec_cls = dataclass(frozen=True)(spec_cls)
+        jax.tree_util.register_dataclass(
+            frozen_spec_cls,
+            data_fields=list(data_fields),
+            meta_fields=list(meta_fields),
+        )
+        return frozen_spec_cls
+
+    return _decorate
+
+
+@_register_jax_spec(data_fields=("dofs", "quadpoints"), meta_fields=("order",))
 class CurveXYZFourierSpec:
     """Immutable payload for pure JAX CurveXYZFourier geometry."""
 
@@ -34,14 +125,7 @@ class CurveXYZFourierSpec:
     order: int
 
 
-jax.tree_util.register_dataclass(
-    CurveXYZFourierSpec,
-    data_fields=["dofs", "quadpoints"],
-    meta_fields=["order"],
-)
-
-
-@dataclass(frozen=True)
+@_register_jax_spec(data_fields=("dofs", "quadpoints"), meta_fields=("order",))
 class OrientedCurveXYZFourierSpec:
     """Immutable payload for pure JAX OrientedCurveXYZFourier geometry."""
 
@@ -50,14 +134,10 @@ class OrientedCurveXYZFourierSpec:
     order: int
 
 
-jax.tree_util.register_dataclass(
-    OrientedCurveXYZFourierSpec,
-    data_fields=["dofs", "quadpoints"],
-    meta_fields=["order"],
+@_register_jax_spec(
+    data_fields=("dofs", "quadpoints"),
+    meta_fields=("order", "nfp", "stellsym"),
 )
-
-
-@dataclass(frozen=True)
 class CurveRZFourierSpec:
     """Immutable payload for pure JAX CurveRZFourier geometry."""
 
@@ -68,14 +148,7 @@ class CurveRZFourierSpec:
     stellsym: bool
 
 
-jax.tree_util.register_dataclass(
-    CurveRZFourierSpec,
-    data_fields=["dofs", "quadpoints"],
-    meta_fields=["order", "nfp", "stellsym"],
-)
-
-
-@dataclass(frozen=True)
+@_register_jax_spec(data_fields=("dofs", "quadpoints"), meta_fields=("order",))
 class CurvePlanarFourierSpec:
     """Immutable payload for pure JAX CurvePlanarFourier geometry."""
 
@@ -84,14 +157,10 @@ class CurvePlanarFourierSpec:
     order: int
 
 
-jax.tree_util.register_dataclass(
-    CurvePlanarFourierSpec,
-    data_fields=["dofs", "quadpoints"],
-    meta_fields=["order"],
+@_register_jax_spec(
+    data_fields=("dofs", "quadpoints"),
+    meta_fields=("order", "m", "ell", "R0", "r"),
 )
-
-
-@dataclass(frozen=True)
 class CurveHelicalSpec:
     """Immutable payload for pure JAX CurveHelical geometry."""
 
@@ -104,14 +173,10 @@ class CurveHelicalSpec:
     r: float
 
 
-jax.tree_util.register_dataclass(
-    CurveHelicalSpec,
-    data_fields=["dofs", "quadpoints"],
-    meta_fields=["order", "m", "ell", "R0", "r"],
+@_register_jax_spec(
+    data_fields=("dofs", "quadpoints"),
+    meta_fields=("order", "nfp", "stellsym", "ntor"),
 )
-
-
-@dataclass(frozen=True)
 class CurveXYZFourierSymmetriesSpec:
     """Immutable payload for pure JAX CurveXYZFourierSymmetries geometry.
 
@@ -129,14 +194,10 @@ class CurveXYZFourierSymmetriesSpec:
     ntor: int
 
 
-jax.tree_util.register_dataclass(
-    CurveXYZFourierSymmetriesSpec,
-    data_fields=["dofs", "quadpoints"],
-    meta_fields=["order", "nfp", "stellsym", "ntor"],
+@_register_jax_spec(
+    data_fields=("dofs", "quadpoints_phi", "quadpoints_theta"),
+    meta_fields=("nfp", "mmin", "mmax", "nmin", "nmax"),
 )
-
-
-@dataclass(frozen=True)
 class SurfaceGarabedianSpec:
     """Immutable payload for pure JAX SurfaceGarabedian geometry.
 
@@ -163,14 +224,17 @@ class SurfaceGarabedianSpec:
     nmax: int
 
 
-jax.tree_util.register_dataclass(
-    SurfaceGarabedianSpec,
-    data_fields=["dofs", "quadpoints_phi", "quadpoints_theta"],
-    meta_fields=["nfp", "mmin", "mmax", "nmin", "nmax"],
+@_register_jax_spec(
+    data_fields=(
+        "R0nH",
+        "Z0nH",
+        "bn",
+        "rhomn",
+        "quadpoints_phi",
+        "quadpoints_theta",
+    ),
+    meta_fields=("nfp", "alpha_fac", "mmax", "nmax"),
 )
-
-
-@dataclass(frozen=True)
 class SurfaceHennebergSpec:
     """Immutable payload for pure JAX SurfaceHenneberg geometry.
 
@@ -211,21 +275,10 @@ class SurfaceHennebergSpec:
     nmax: int
 
 
-jax.tree_util.register_dataclass(
-    SurfaceHennebergSpec,
-    data_fields=[
-        "R0nH",
-        "Z0nH",
-        "bn",
-        "rhomn",
-        "quadpoints_phi",
-        "quadpoints_theta",
-    ],
-    meta_fields=["nfp", "alpha_fac", "mmax", "nmax"],
+@_register_jax_spec(
+    data_fields=("template_full_dofs",),
+    meta_fields=("owner_segments", "input_mode", "input_start", "input_end"),
 )
-
-
-@dataclass(frozen=True)
 class OptimizableDofMapSpec:
     """Immutable mapping from an owner's full DOF vector into one nested Optimizable."""
 
@@ -236,14 +289,10 @@ class OptimizableDofMapSpec:
     input_end: int
 
 
-jax.tree_util.register_dataclass(
-    OptimizableDofMapSpec,
-    data_fields=["template_full_dofs"],
-    meta_fields=["owner_segments", "input_mode", "input_start", "input_end"],
+@_register_jax_spec(
+    data_fields=("dofs", "quadpoints"),
+    meta_fields=("order", "scale"),
 )
-
-
-@dataclass(frozen=True)
 class FrameRotationSpec:
     """Immutable payload for pure JAX FrameRotation evaluation."""
 
@@ -253,42 +302,24 @@ class FrameRotationSpec:
     scale: float
 
 
-jax.tree_util.register_dataclass(
-    FrameRotationSpec,
-    data_fields=["dofs", "quadpoints"],
-    meta_fields=["order", "scale"],
-)
-
-
-@dataclass(frozen=True)
+@_register_jax_spec(data_fields=("quadpoints",), meta_fields=())
 class ZeroRotationSpec:
     """Immutable zero-rotation payload."""
 
     quadpoints: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    ZeroRotationSpec,
-    data_fields=["quadpoints"],
-    meta_fields=[],
-)
-
-
-@dataclass(frozen=True)
+@_register_jax_spec(data_fields=("value",), meta_fields=())
 class CurrentValueSpec:
     """Immutable scalar-current payload."""
 
     value: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    CurrentValueSpec,
-    data_fields=["value"],
-    meta_fields=[],
+@_register_jax_spec(
+    data_fields=("rotmat",),
+    meta_fields=("scale", "has_rotation"),
 )
-
-
-@dataclass(frozen=True)
 class CoilSymmetrySpec:
     """Immutable rotation/scale payload for symmetric coil replicas."""
 
@@ -297,14 +328,7 @@ class CoilSymmetrySpec:
     has_rotation: bool
 
 
-jax.tree_util.register_dataclass(
-    CoilSymmetrySpec,
-    data_fields=["rotmat"],
-    meta_fields=["scale", "has_rotation"],
-)
-
-
-@dataclass(frozen=True)
+@_register_jax_spec(data_fields=("curve", "current", "symmetry"), meta_fields=())
 class CoilSpec:
     """Immutable coil payload: curve identity, current, and spatial placement."""
 
@@ -313,14 +337,10 @@ class CoilSpec:
     symmetry: CoilSymmetrySpec
 
 
-jax.tree_util.register_dataclass(
-    CoilSpec,
-    data_fields=["curve", "current", "symmetry"],
-    meta_fields=[],
+@_register_jax_spec(
+    data_fields=("curve", "curve_map", "current_map", "symmetry", "surface_map"),
+    meta_fields=("surface_output_index",),
 )
-
-
-@dataclass(frozen=True)
 class CoilDofExtractionSpec:
     """Immutable owner-DOF -> coil-spec reconstruction payload."""
 
@@ -332,42 +352,24 @@ class CoilDofExtractionSpec:
     surface_output_index: int | None = None
 
 
-jax.tree_util.register_dataclass(
-    CoilDofExtractionSpec,
-    data_fields=["curve", "curve_map", "current_map", "symmetry", "surface_map"],
-    meta_fields=["surface_output_index"],
-)
-
-
-@dataclass(frozen=True)
+@_register_jax_spec(data_fields=("coils",), meta_fields=())
 class CoilSetDofExtractionSpec:
     """Immutable owner-DOF -> grouped-coil reconstruction payload."""
 
     coils: tuple[CoilDofExtractionSpec, ...]
 
 
-jax.tree_util.register_dataclass(
-    CoilSetDofExtractionSpec,
-    data_fields=["coils"],
-    meta_fields=[],
-)
-
-
-@dataclass(frozen=True)
+@_register_jax_spec(data_fields=("points",), meta_fields=())
 class FieldEvalSpec:
     """Immutable field-evaluation point cloud."""
 
     points: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    FieldEvalSpec,
-    data_fields=["points"],
-    meta_fields=[],
+@_register_jax_spec(
+    data_fields=("gammas", "gammadashs", "currents"),
+    meta_fields=("coil_indices",),
 )
-
-
-@dataclass(frozen=True)
 class CoilGroupSpec:
     """One rectangular coil batch with a shared quadrature count."""
 
@@ -383,14 +385,7 @@ class CoilGroupSpec:
         return self.gammas, self.gammadashs, self.currents, list(self.coil_indices)
 
 
-jax.tree_util.register_dataclass(
-    CoilGroupSpec,
-    data_fields=["gammas", "gammadashs", "currents"],
-    meta_fields=["coil_indices"],
-)
-
-
-@dataclass(frozen=True)
+@_register_jax_spec(data_fields=("groups",), meta_fields=())
 class GroupedCoilSetSpec:
     """Immutable grouped coil geometry/current payload."""
 
@@ -408,14 +403,10 @@ class GroupedCoilSetSpec:
         return tuple(group.as_grouped_data() for group in self.groups)
 
 
-jax.tree_util.register_dataclass(
-    GroupedCoilSetSpec,
-    data_fields=["groups"],
-    meta_fields=[],
+@_register_jax_spec(
+    data_fields=("coil_dof_extraction", "coil_dofs"),
+    meta_fields=(),
 )
-
-
-@dataclass(frozen=True)
 class BiotSavartSpec:
     """Immutable Biot-Savart restart payload with owner DOF reconstruction."""
 
@@ -423,14 +414,10 @@ class BiotSavartSpec:
     coil_dofs: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    BiotSavartSpec,
-    data_fields=["coil_dof_extraction", "coil_dofs"],
-    meta_fields=[],
+@_register_jax_spec(
+    data_fields=("points", "normal", "target"),
+    meta_fields=("definition", "nphi", "ntheta"),
 )
-
-
-@dataclass(frozen=True)
 class FixedSurfaceFluxSpec:
     """Immutable Stage 2 fixed-surface flux contract."""
 
@@ -442,14 +429,17 @@ class FixedSurfaceFluxSpec:
     ntheta: int
 
 
-jax.tree_util.register_dataclass(
-    FixedSurfaceFluxSpec,
-    data_fields=["points", "normal", "target"],
-    meta_fields=["definition", "nphi", "ntheta"],
+@_register_jax_spec(
+    data_fields=(
+        "rc",
+        "zs",
+        "rs",
+        "zc",
+        "quadpoints_phi",
+        "quadpoints_theta",
+    ),
+    meta_fields=("nfp", "stellsym", "mpol", "ntor"),
 )
-
-
-@dataclass(frozen=True)
 class SurfaceRZFourierSpec:
     """Immutable fixed-surface payload for pure JAX SurfaceRZFourier geometry."""
 
@@ -465,21 +455,16 @@ class SurfaceRZFourierSpec:
     ntor: int
 
 
-jax.tree_util.register_dataclass(
-    SurfaceRZFourierSpec,
-    data_fields=[
-        "rc",
-        "zs",
-        "rs",
-        "zc",
+@_register_jax_spec(
+    data_fields=(
+        "dofs",
         "quadpoints_phi",
         "quadpoints_theta",
-    ],
-    meta_fields=["nfp", "stellsym", "mpol", "ntor"],
+        "scatter_indices",
+        "coeff_template",
+    ),
+    meta_fields=("nfp", "stellsym", "mpol", "ntor"),
 )
-
-
-@dataclass(frozen=True)
 class SurfaceXYZFourierSpec:
     """Immutable fixed-surface payload for pure JAX SurfaceXYZFourier geometry."""
 
@@ -494,20 +479,10 @@ class SurfaceXYZFourierSpec:
     ntor: int
 
 
-jax.tree_util.register_dataclass(
-    SurfaceXYZFourierSpec,
-    data_fields=[
-        "dofs",
-        "quadpoints_phi",
-        "quadpoints_theta",
-        "scatter_indices",
-        "coeff_template",
-    ],
-    meta_fields=["nfp", "stellsym", "mpol", "ntor"],
+@_register_jax_spec(
+    data_fields=("dofs", "quadpoints_phi", "quadpoints_theta", "scatter_indices"),
+    meta_fields=("nfp", "stellsym", "mpol", "ntor", "clamped_dims"),
 )
-
-
-@dataclass(frozen=True)
 class SurfaceXYZTensorFourierSpec:
     """Immutable fixed-surface payload for pure JAX SurfaceXYZTensorFourier geometry."""
 
@@ -520,13 +495,6 @@ class SurfaceXYZTensorFourierSpec:
     mpol: int
     ntor: int
     clamped_dims: tuple[bool, bool, bool] = (False, False, False)
-
-
-jax.tree_util.register_dataclass(
-    SurfaceXYZTensorFourierSpec,
-    data_fields=["dofs", "quadpoints_phi", "quadpoints_theta", "scatter_indices"],
-    meta_fields=["nfp", "stellsym", "mpol", "ntor", "clamped_dims"],
-)
 
 
 SurfaceSpec = Union[
@@ -553,7 +521,26 @@ def surface_spec_kind(spec: SurfaceSpec) -> SurfaceSpecKind:
     raise TypeError(f"Unsupported surface spec type: {type(spec).__name__}")
 
 
-@dataclass(frozen=True)
+@_register_jax_spec(
+    data_fields=(
+        "surface",
+        "coil_set",
+        "coil_dof_extraction",
+        "coil_dofs",
+        "boozer_iota",
+        "boozer_G",
+    ),
+    meta_fields=(
+        "target_labels",
+        "hardware_constants",
+        "self_intersection_mode",
+        "schema_version",
+        "num_tf_coils",
+        "banana_curve_index",
+        "tf_current_A",
+        "banana_current_A",
+    ),
+)
 class SingleStageSeedSpec:
     """Immutable startup seed payload for the single-stage JAX runner."""
 
@@ -573,30 +560,10 @@ class SingleStageSeedSpec:
     banana_current_A: float
 
 
-jax.tree_util.register_dataclass(
-    SingleStageSeedSpec,
-    data_fields=[
-        "surface",
-        "coil_set",
-        "coil_dof_extraction",
-        "coil_dofs",
-        "boozer_iota",
-        "boozer_G",
-    ],
-    meta_fields=[
-        "target_labels",
-        "hardware_constants",
-        "self_intersection_mode",
-        "schema_version",
-        "num_tf_coils",
-        "banana_curve_index",
-        "tf_current_A",
-        "banana_current_A",
-    ],
+@_register_jax_spec(
+    data_fields=("seed",),
+    meta_fields=("mpol", "ntor", "nfp", "nphi", "ntheta"),
 )
-
-
-@dataclass(frozen=True)
 class SingleStageRuntimeSpec:
     """Immutable resolved runtime contract for single-stage JAX optimization."""
 
@@ -608,14 +575,10 @@ class SingleStageRuntimeSpec:
     ntheta: int
 
 
-jax.tree_util.register_dataclass(
-    SingleStageRuntimeSpec,
-    data_fields=["seed"],
-    meta_fields=["mpol", "ntor", "nfp", "nphi", "ntheta"],
+@_register_jax_spec(
+    data_fields=("dofs", "quadpoints", "surface"),
+    meta_fields=("order", "G", "H"),
 )
-
-
-@dataclass(frozen=True)
 class CurveCWSFourierRZSpec:
     """Immutable curve-on-RZ-surface payload for pure JAX geometry."""
 
@@ -630,17 +593,22 @@ class CurveCWSFourierRZSpec:
         return surface_rz_fourier_dofs_from_spec(self.surface)
 
 
-jax.tree_util.register_dataclass(
-    CurveCWSFourierRZSpec,
-    data_fields=["dofs", "quadpoints", "surface"],
-    meta_fields=["order", "G", "H"],
-)
-
-
 RotationSpec = Union[FrameRotationSpec, ZeroRotationSpec]
 
 
-@dataclass(frozen=True)
+@_register_jax_spec(
+    data_fields=(
+        "dofs",
+        "quadpoints",
+        "base_curve",
+        "base_curve_map",
+        "sample_gamma",
+        "sample_gammadash",
+        "sample_gammadashdash",
+        "sample_gammadashdashdash",
+    ),
+    meta_fields=(),
+)
 class CurvePerturbedSpec:
     """Immutable wrapper payload for a perturbed base curve."""
 
@@ -654,23 +622,17 @@ class CurvePerturbedSpec:
     sample_gammadashdashdash: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    CurvePerturbedSpec,
-    data_fields=[
+@_register_jax_spec(
+    data_fields=(
         "dofs",
         "quadpoints",
         "base_curve",
         "base_curve_map",
-        "sample_gamma",
-        "sample_gammadash",
-        "sample_gammadashdash",
-        "sample_gammadashdashdash",
-    ],
-    meta_fields=[],
+        "rotation",
+        "rotation_map",
+    ),
+    meta_fields=("frame_kind", "dn", "db"),
 )
-
-
-@dataclass(frozen=True)
 class CurveFilamentSpec:
     """Immutable wrapper payload for a finite-build filament curve."""
 
@@ -683,20 +645,6 @@ class CurveFilamentSpec:
     frame_kind: str
     dn: float
     db: float
-
-
-jax.tree_util.register_dataclass(
-    CurveFilamentSpec,
-    data_fields=[
-        "dofs",
-        "quadpoints",
-        "base_curve",
-        "base_curve_map",
-        "rotation",
-        "rotation_map",
-    ],
-    meta_fields=["frame_kind", "dn", "db"],
-)
 
 
 CurveSpec = Union[

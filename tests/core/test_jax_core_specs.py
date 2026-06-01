@@ -1,8 +1,11 @@
+from dataclasses import replace
+
 import numpy as np
 import jax
 import jax.numpy as jnp
 import pytest
 
+import simsopt.jax_core.specs as specs_module
 from simsopt.jax_core import (
     apply_coil_symmetry,
     curve_spec_kind,
@@ -330,6 +333,77 @@ def test_grouped_coil_set_spec_is_a_real_jittable_pytree():
         return total
 
     np.testing.assert_allclose(current_sum(grouped), np.array(1.0))
+
+
+def test_curve_spec_data_fields_do_not_recompile_but_meta_fields_do():
+    spec = _make_curve_spec()
+
+    @jax.jit
+    def spec_scalar(curve_spec):
+        return (
+            jnp.sum(curve_spec.dofs) + jnp.sum(curve_spec.quadpoints) + curve_spec.order
+        )
+
+    assert spec_scalar._cache_size() == 0
+
+    np.testing.assert_allclose(spec_scalar(spec), np.array(38.5))
+    assert spec_scalar._cache_size() == 1
+
+    dynamic_update = replace(
+        spec,
+        dofs=spec.dofs + jnp.asarray(1.0, dtype=spec.dofs.dtype),
+        quadpoints=spec.quadpoints + jnp.asarray(0.25, dtype=spec.quadpoints.dtype),
+    )
+    np.testing.assert_allclose(spec_scalar(dynamic_update), np.array(48.5))
+    assert spec_scalar._cache_size() == 1
+
+    meta_update = replace(spec, order=spec.order + 1)
+    np.testing.assert_allclose(spec_scalar(meta_update), np.array(39.5))
+    assert spec_scalar._cache_size() == 2
+
+    leaves, treedef = jax.tree.flatten(spec)
+    dynamic_leaves, dynamic_treedef = jax.tree.flatten(dynamic_update)
+    _meta_leaves, meta_treedef = jax.tree.flatten(meta_update)
+
+    assert len(leaves) == 2
+    assert len(dynamic_leaves) == 2
+    assert dynamic_treedef == treedef
+    assert meta_treedef != treedef
+
+
+def test_register_jax_spec_helper_preserves_data_meta_partition():
+    @specs_module._register_jax_spec(data_fields=("payload",), meta_fields=("tag",))
+    class LocalSpec:
+        payload: jax.Array
+        tag: int
+
+    spec = LocalSpec(payload=jnp.asarray([1.0, 2.0], dtype=jnp.float64), tag=7)
+
+    @jax.jit
+    def spec_scalar(local_spec):
+        return jnp.sum(local_spec.payload) + local_spec.tag
+
+    assert spec_scalar._cache_size() == 0
+
+    np.testing.assert_allclose(spec_scalar(spec), np.array(10.0))
+    assert spec_scalar._cache_size() == 1
+
+    dynamic_update = replace(spec, payload=spec.payload + 1.0)
+    np.testing.assert_allclose(spec_scalar(dynamic_update), np.array(12.0))
+    assert spec_scalar._cache_size() == 1
+
+    meta_update = replace(spec, tag=8)
+    np.testing.assert_allclose(spec_scalar(meta_update), np.array(11.0))
+    assert spec_scalar._cache_size() == 2
+
+    leaves, treedef = jax.tree.flatten(spec)
+    dynamic_leaves, dynamic_treedef = jax.tree.flatten(dynamic_update)
+    _meta_leaves, meta_treedef = jax.tree.flatten(meta_update)
+
+    assert len(leaves) == 1
+    assert len(dynamic_leaves) == 1
+    assert dynamic_treedef == treedef
+    assert meta_treedef != treedef
 
 
 def test_single_stage_runtime_spec_is_a_real_jittable_pytree():
