@@ -234,7 +234,7 @@ def materialize_finite_current_seed(
         num_vf_coils=len(vf_build_result.coils),
     )
     realized_proxy_current_A = _realized_proxy_current_A(proxy_coils)
-    realized_vf_current_A = _realized_vf_current_A(resolved_vf_current_A)
+    realized_vf_current_A = float(resolved_vf_current_A)
     validate_proxy_vf_current_convention_for_mode(
         profile.mode,
         proxy_plasma_current_A=realized_proxy_current_A,
@@ -506,12 +506,6 @@ def _realized_proxy_current_A(proxy_coils) -> float:
             f"proxy current coil; got {len(proxy_coils)}."
         )
     return float(proxy_coils[0].current.get_value())
-
-
-def _realized_vf_current_A(
-    resolved_vf_current_A: float,
-) -> float:
-    return float(resolved_vf_current_A)
 
 
 def _build_materialized_results(
