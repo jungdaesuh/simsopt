@@ -671,6 +671,36 @@ git diff --check -- src/simsopt/jax_core/boozer_radial_field.py src/simsopt/jax_
 - **Benchmark evidence:** saved pre-change baseline was `direct_modB 0.000578229`, `direct_dmodBds 0.001090641`, `direct_G 0.000272629`, `rhs_vacuum 0.003945453`. Final five-trial medians on the same synthetic non-JIT shape were `direct_modB 0.000612696`, `direct_dmodBds 0.001073811`, `direct_G 0.000250935`, `rhs_vacuum 0.003285109`.
 - **Review evidence:** direct scoped review found no added dynamic imports, untyped casts, defensive exception handling, or secret-file references in the source/test diff. The remaining issue is accounting, not correctness: this should not be counted as the full T2.2 bloat-LOC closeout.
 
+### 2026-06-01 — T2.2 Boozer radial direct-wrapper LOC-banking follow-up
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.2.
+- **Selected slice:** private direct evaluator wrapper ceremony in `src/simsopt/jax_core/boozer_radial_field.py`. No Fourier formula, subset-column factory, tracing dispatch, public wrapper API, CPU Boozer implementation, CUDA/MPS path, transfer policy, or benchmark policy was changed.
+- **Changed files:** `src/simsopt/jax_core/boozer_radial_field.py`, plus this plan set.
+- **Design-it-twice gate:** Option A, dynamically parametrizing all subset-column builders, is the larger remaining T2.2 opportunity but risks hiding profile-specific stellsym and derivative-factor requirements behind field-name tables. Option B, selected here, folds only the repeated direct private wrappers into typed `_direct_radial_evaluator(...)` and `_direct_modB_value_evaluator(...)` factories, preserving the explicit subset builders and formulas.
+- **Scope status:** direct-wrapper follow-up LOC-banked, full T2.2 still open. `boozer_radial_field.py` is source-negative by 35 LOC for this slice (`99 insertions / 134 deletions`; 1,191 -> 1,156 LOC). The old `~400 LOC` estimate remains unbanked because the benchmark-sensitive subset builders are still explicit.
+- **Validation evidence:** CPU/X64 wrapper routing, private evaluator metadata, source lint/format, py_compile, source-only mypy, dependency consistency, and diff hygiene proof; not CUDA/MPS proof and not a fresh RHS benchmark.
+
+```bash
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff check src/simsopt/jax_core/boozer_radial_field.py src/simsopt/jax_core/tracing.py src/simsopt/field/boozermagneticfield_jax.py tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py
+# All checks passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/boozer_radial_field.py
+# 1 file already formatted
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m py_compile src/simsopt/jax_core/boozer_radial_field.py src/simsopt/jax_core/tracing.py src/simsopt/field/boozermagneticfield_jax.py tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py
+# passed
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy src/simsopt/jax_core/boozer_radial_field.py
+# Success: no issues found in 1 source file
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/field/test_trace_boozer_analytic_jax.py
+# 27 passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/field/test_boozermagneticfield_jax_item33.py
+# 21 skipped
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found
+git diff --check -- src/simsopt/jax_core/boozer_radial_field.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
+- **Review evidence:** six-lens adversarial review returned PASS after fixing docs-only stale line-anchor findings. API/behavior, test-quality, and design/performance lenses found no source findings: private evaluator metadata and import identity are preserved, JIT/Jacobian probes and pickle-by-module/name probes passed, and the helper abstraction is scoped to repeated private direct-wrapper ceremony. Docs/history/accounting lenses initially found stale anchors for the new helper locations; delta reviewers confirmed the corrected anchors match the live source.
+
 ### 2026-06-01 — T2.3 surface Fourier facade factory slice
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.3.
@@ -1145,6 +1175,6 @@ git diff --unified=0 -- src/simsopt/backend/runtime.py tests/test_backend.py | r
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, and T2.9 quantity-tolerance contract helper: finish a LOC-banked T2.1 reporting fold, do a T2.2 LOC-banking follow-up, complete the remaining T2.3 product-rule formula fold only if it stays readable, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched T2 item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, and T2.9 quantity-tolerance contract helper: finish a LOC-banked T2.1 reporting fold, attempt the remaining T2.2 subset-builder profile-family follow-up only with benchmark proof, complete the remaining T2.3 product-rule formula fold only if it stays readable, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched T2 item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?

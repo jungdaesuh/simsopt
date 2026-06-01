@@ -444,12 +444,26 @@ _RadialColumnEvaluator = Callable[
 _RadialColumnFactory = Callable[
     [BoozerRadialInterpolantFrozenState, jax.Array], BoozerRadialColumnBundle
 ]
+_RadialDirectEvaluator = Callable[
+    [BoozerRadialInterpolantFrozenState, jax.Array], jax.Array
+]
 
 
 class _ModBValueColumns(Protocol):
-    bmnc: jax.Array
-    bmns: jax.Array
-    mn_factor: jax.Array
+    @property
+    def bmnc(self) -> jax.Array: ...
+
+    @property
+    def bmns(self) -> jax.Array: ...
+
+    @property
+    def mn_factor(self) -> jax.Array: ...
+
+
+_ModBValueEvaluator = Callable[
+    [BoozerRadialInterpolantFrozenState, _ModBValueColumns, jax.Array],
+    jax.Array,
+]
 
 
 @dataclass(frozen=True)
@@ -1012,145 +1026,96 @@ def _eval_with_radial_columns(
     return evaluator(state, columns, points)
 
 
-def _eval_modB(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    columns = _eval_modB_value_radial_columns(state, points[:, 0])
-    return _eval_modB_from_columns(state, columns, points)
+def _direct_radial_evaluator(
+    name: str,
+    evaluator: _RadialColumnEvaluator,
+    column_factory: _RadialColumnFactory,
+) -> _RadialDirectEvaluator:
+    """Create a named direct evaluator from a column evaluator/factory pair."""
+
+    def evaluate(
+        state: BoozerRadialInterpolantFrozenState, points: jax.Array
+    ) -> jax.Array:
+        return _eval_with_radial_columns(state, points, evaluator, column_factory)
+
+    evaluate.__name__ = name
+    evaluate.__qualname__ = name
+    evaluate.__module__ = __name__
+    return evaluate
 
 
-def _eval_dmodBdtheta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    columns = _eval_modB_value_radial_columns(state, points[:, 0])
-    return _eval_dmodBdtheta_from_columns(state, columns, points)
+def _direct_modB_value_evaluator(
+    name: str, evaluator: _ModBValueEvaluator
+) -> _RadialDirectEvaluator:
+    """Create a named direct evaluator for modB value-column siblings."""
+
+    def evaluate(
+        state: BoozerRadialInterpolantFrozenState, points: jax.Array
+    ) -> jax.Array:
+        columns = _eval_modB_value_radial_columns(state, points[:, 0])
+        return evaluator(state, columns, points)
+
+    evaluate.__name__ = name
+    evaluate.__qualname__ = name
+    evaluate.__module__ = __name__
+    return evaluate
 
 
-def _eval_dmodBdzeta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    columns = _eval_modB_value_radial_columns(state, points[:, 0])
-    return _eval_dmodBdzeta_from_columns(state, columns, points)
-
-
-def _eval_dmodBds(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dmodBds_from_columns, _eval_dmodBds_radial_columns
-    )
-
-
-def _eval_R(state: BoozerRadialInterpolantFrozenState, points: jax.Array) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_R_from_columns, _eval_R_radial_columns
-    )
-
-
-def _eval_dRdtheta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dRdtheta_from_columns, _eval_R_radial_columns
-    )
-
-
-def _eval_dRdzeta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dRdzeta_from_columns, _eval_R_radial_columns
-    )
-
-
-def _eval_dRds(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dRds_from_columns, _eval_dRds_radial_columns
-    )
-
-
-def _eval_Z(state: BoozerRadialInterpolantFrozenState, points: jax.Array) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_Z_from_columns, _eval_Z_radial_columns
-    )
-
-
-def _eval_dZdtheta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dZdtheta_from_columns, _eval_Z_radial_columns
-    )
-
-
-def _eval_dZdzeta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dZdzeta_from_columns, _eval_Z_radial_columns
-    )
-
-
-def _eval_dZds(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dZds_from_columns, _eval_dZds_radial_columns
-    )
-
-
-def _eval_nu(state: BoozerRadialInterpolantFrozenState, points: jax.Array) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_nu_from_columns, _eval_nu_radial_columns
-    )
-
-
-def _eval_dnudtheta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dnudtheta_from_columns, _eval_nu_radial_columns
-    )
-
-
-def _eval_dnudzeta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dnudzeta_from_columns, _eval_nu_radial_columns
-    )
-
-
-def _eval_dnuds(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dnuds_from_columns, _eval_dnuds_radial_columns
-    )
-
-
-def _eval_K(state: BoozerRadialInterpolantFrozenState, points: jax.Array) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_K_from_columns, _eval_K_radial_columns
-    )
-
-
-def _eval_dKdtheta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dKdtheta_from_columns, _eval_K_radial_columns
-    )
-
-
-def _eval_dKdzeta(
-    state: BoozerRadialInterpolantFrozenState, points: jax.Array
-) -> jax.Array:
-    return _eval_with_radial_columns(
-        state, points, _eval_dKdzeta_from_columns, _eval_K_radial_columns
-    )
+_eval_modB = _direct_modB_value_evaluator("_eval_modB", _eval_modB_from_columns)
+_eval_dmodBdtheta = _direct_modB_value_evaluator(
+    "_eval_dmodBdtheta", _eval_dmodBdtheta_from_columns
+)
+_eval_dmodBdzeta = _direct_modB_value_evaluator(
+    "_eval_dmodBdzeta", _eval_dmodBdzeta_from_columns
+)
+_eval_dmodBds = _direct_radial_evaluator(
+    "_eval_dmodBds", _eval_dmodBds_from_columns, _eval_dmodBds_radial_columns
+)
+_eval_R = _direct_radial_evaluator(
+    "_eval_R", _eval_R_from_columns, _eval_R_radial_columns
+)
+_eval_dRdtheta = _direct_radial_evaluator(
+    "_eval_dRdtheta", _eval_dRdtheta_from_columns, _eval_R_radial_columns
+)
+_eval_dRdzeta = _direct_radial_evaluator(
+    "_eval_dRdzeta", _eval_dRdzeta_from_columns, _eval_R_radial_columns
+)
+_eval_dRds = _direct_radial_evaluator(
+    "_eval_dRds", _eval_dRds_from_columns, _eval_dRds_radial_columns
+)
+_eval_Z = _direct_radial_evaluator(
+    "_eval_Z", _eval_Z_from_columns, _eval_Z_radial_columns
+)
+_eval_dZdtheta = _direct_radial_evaluator(
+    "_eval_dZdtheta", _eval_dZdtheta_from_columns, _eval_Z_radial_columns
+)
+_eval_dZdzeta = _direct_radial_evaluator(
+    "_eval_dZdzeta", _eval_dZdzeta_from_columns, _eval_Z_radial_columns
+)
+_eval_dZds = _direct_radial_evaluator(
+    "_eval_dZds", _eval_dZds_from_columns, _eval_dZds_radial_columns
+)
+_eval_nu = _direct_radial_evaluator(
+    "_eval_nu", _eval_nu_from_columns, _eval_nu_radial_columns
+)
+_eval_dnudtheta = _direct_radial_evaluator(
+    "_eval_dnudtheta", _eval_dnudtheta_from_columns, _eval_nu_radial_columns
+)
+_eval_dnudzeta = _direct_radial_evaluator(
+    "_eval_dnudzeta", _eval_dnudzeta_from_columns, _eval_nu_radial_columns
+)
+_eval_dnuds = _direct_radial_evaluator(
+    "_eval_dnuds", _eval_dnuds_from_columns, _eval_dnuds_radial_columns
+)
+_eval_K = _direct_radial_evaluator(
+    "_eval_K", _eval_K_from_columns, _eval_K_radial_columns
+)
+_eval_dKdtheta = _direct_radial_evaluator(
+    "_eval_dKdtheta", _eval_dKdtheta_from_columns, _eval_K_radial_columns
+)
+_eval_dKdzeta = _direct_radial_evaluator(
+    "_eval_dKdzeta", _eval_dKdzeta_from_columns, _eval_K_radial_columns
+)
 
 
 def _eval_psip(
