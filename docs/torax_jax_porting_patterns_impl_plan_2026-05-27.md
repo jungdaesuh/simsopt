@@ -4,11 +4,13 @@
 
 - Target repo: `/Users/suhjungdae/code/columbia/simsopt-jax-shared-jax`
 - Target repo HEAD originally reviewed: `431a517fb`
-- Target repo HEAD refreshed: `b267b0d95` (2026-05-31 current-checkout refresh)
+- Source-doc review basis: `b267b0d95` (2026-05-31 clean current-checkout refresh)
+- Current execution checkpoint: `8b94c2bbd` on `shared-jax-clean`, with a broad dirty implementation tree tracked in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`
 - Reference repo: `/Users/suhjungdae/code/opensource/torax`
 - Reference repo HEAD reviewed: `60190df1` (clean `main`)
-- Worktree note: this 2026-05-31 refresh ran from a clean tracked checkout (`git status --short` empty) on `shared-jax-clean`.
-- **Refresh (2026-05-31):** the line refs in this plan were first re-verified against HEAD `21c3d517d`, then corrected against `2bcaeff28`; this pass refreshes the live status to HEAD `b267b0d95` after the MPS custom-kernel commit sequence and updates the refs that moved. Official JAX contracts for persistent cache, `lax.scan`, `lax.while_loop`, and `lax.cond` were rechecked through Context7 during this correction pass. The original review HEAD `431a517fb` is now historical, but the patterns and plan structure are unchanged.
+- Worktree note: the 2026-05-31 source-doc refresh ran from a clean tracked checkout (`git status --short` empty) on `shared-jax-clean`; the 2026-06-01 execution checkpoint is no longer a clean tracked checkout.
+- **Refresh (2026-05-31):** the line refs in this plan were first re-verified against HEAD `21c3d517d`, then corrected against `2bcaeff28`; that pass refreshed the source-doc status to HEAD `b267b0d95` after the MPS custom-kernel commit sequence and updated the refs that moved. Official JAX contracts for persistent cache, `lax.scan`, `lax.while_loop`, and `lax.cond` were rechecked through Context7 during that correction pass. The original review HEAD `431a517fb` is now historical, but the patterns and plan structure are unchanged.
+- **Execution checkpoint (2026-06-01):** implementation evidence now references current checkout `8b94c2bbd`, but the dirty tree must be split by the bloat-plan drift gate before any commit. This TORAX plan records contract-hardening proof, not a standalone LOC-reduction closeout.
 
 ## Purpose
 
@@ -30,7 +32,7 @@ One TORAX caution should be kept explicit: do not clone its `StaticDataclass` ap
 
 ## Official JAX Contracts Checked
 
-- Persistent compilation cache is enabled by setting `jax_compilation_cache_dir` or `JAX_COMPILATION_CACHE_DIR` before the first compilation. Official docs also show small-kernel tests must lower the thresholds with `jax_persistent_cache_min_compile_time_secs=0` and `jax_persistent_cache_min_entry_size_bytes=-1`; the current programmatic runtime path imports JAX, then applies those config values before any kernel compilation in `src/simsopt/backend/runtime.py:2371` and `src/simsopt/backend/runtime.py:2384-2386`.
+- Persistent compilation cache is enabled by setting `jax_compilation_cache_dir` or `JAX_COMPILATION_CACHE_DIR` before the first compilation. Official docs also show small-kernel tests must lower the thresholds with `jax_persistent_cache_min_compile_time_secs=0` and `jax_persistent_cache_min_entry_size_bytes=-1`; the current programmatic runtime path imports JAX, then applies those config values before any kernel compilation in `src/simsopt/backend/runtime.py:2418-2421`.
 - Persistent-cache proof tests must stay callback-free. JAX official docs state that host callbacks make persistent caching completely avoided because the HLO includes a callback pointer that changes between runs.
 - `lax.scan` is the right primitive for fixed-iteration compiled loops because it lowers to a single `WhileOp`, requires fixed carry structure, shape, and dtype, and is designed for static iteration counts.
 - `lax.while_loop` is the right primitive for true dynamic termination only after the differentiation contract is checked. JAX official docs state bare `while_loop` is not reverse-mode differentiable because XLA needs static memory bounds; this repo can still use it inside an explicit custom VJP or implicit-differentiation wrapper such as `src/simsopt/jax_core/_root.py:103`.
@@ -65,10 +67,10 @@ References:
 | --- | --- | --- |
 | JAX spec contracts | `src/simsopt/jax_core/specs.py:1` | Explicit immutable specs and data/meta field partitions are the SSOT to harden first. |
 | Validation cache policy | `benchmarks/validation_ladder_common.py:159` (`apply_compilation_cache_policy`), `benchmarks/validation_ladder_common.py:390` (`current_compilation_cache_metadata`) | Cache settings and provenance are already explicit enough to test. |
-| Backend runtime cache/transfer policy | `src/simsopt/backend/runtime.py:1372`, `src/simsopt/backend/runtime.py:2381`, `src/simsopt/backend/runtime.py:2384-2386` | Runtime policy should remain opt-in and environment-driven before JAX import. |
-| Existing persistent-cache write smoke | `tests/subprocess/import_smoke_cases.py:711`, `tests/test_jax_import_smoke.py:614` | Current coverage proves a small kernel writes a cache entry; the remaining gap is cross-process reuse. |
-| Host boundary helpers | `src/simsopt/_core/jax_host_boundary.py:14` | Host materialization should stay explicit and direction-specific. |
-| Bounded tracing scans | `src/simsopt/jax_core/tracing.py:367` (`_scan_adaptive_steps`; was `:359`) | Existing helper shape can inform a shared bounded scan utility. |
+| Backend runtime cache/transfer policy | `src/simsopt/backend/runtime.py:1382` (`_resolve_kwarg`), `:2408-2417` (runtime JAX platform / transfer config), `:2418-2421` (persistent-cache config) | Runtime policy should remain opt-in and explicit before the first kernel compilation; env-only paths must still be selected before JAX import. |
+| Existing persistent-cache proof | `tests/subprocess/import_smoke_cases.py:711` (write smoke), `:754` / `:768` (shared-cache subprocess cases), `tests/test_jax_import_smoke.py:615` (write smoke wrapper), `:690` (cross-process reuse wrapper) | Current coverage proves a small kernel writes a cache entry and that a second process reuses the first process's cache entry. |
+| Host boundary helpers | `src/simsopt/_core/jax_host_boundary.py:14` (`host_array`), `:31` (`host_float64`) | Host materialization should stay explicit and direction-specific. |
+| Bounded tracing scans | `src/simsopt/jax_core/tracing.py:375` (`_scan_adaptive_steps`; was `:359`) | Existing helper shape can inform a shared bounded scan utility. |
 | Root solver fixed scan | `src/simsopt/jax_core/_root.py:28` | Fixed iteration counts and implicit VJP conventions should remain explicit. |
 | PM done-gated scan | `src/simsopt/jax_core/pm_workflow.py:746`, `:807`, `:871`, `:969`, `:1076` | Candidate pilot for deduplicating done-gated scan structure. |
 | Wireframe done-gated scan | `src/simsopt/jax_core/wireframe_workflow.py:755` | Candidate pilot paired with PM workflow. |

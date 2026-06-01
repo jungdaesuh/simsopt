@@ -1,14 +1,15 @@
 # simsopt-jax Bloat Reduction Plan
 
-**Status:** Draft v7 — current-checkout refresh (2026-05-31) against clean HEAD `b267b0d95` on branch `shared-jax-clean`. Supersedes Draft v6 (basis `2bcaeff28`, dirty correction pass), Draft v5 (basis `21c3d517d`, 2026-05-30), and Draft v4 (basis `5bcd9061c`, 2026-05-29). Since v6, the MPS custom-kernel and custom-Metal planning sequence has landed as committed code/test/doc drift, not uncommitted worktree overlap. v7 updates the live HEAD/status and moved line/LOC refs that were touched by that sequence. NOTE: the repo remains under active commit cadence, so treat line refs as a 2026-05-31 snapshot and re-grep before executing.
-**Author:** orchestrator synthesis of 8-lane parallel audit (2026-05-20); v4 reconciliation from a 6-agent re-verification (2026-05-29); v5 reconciliation from a 4-agent re-verification (2026-05-30); v6 doc-review correction from a 3-agent drift audit (2026-05-30); v7 current-checkout doc-review refresh (2026-05-31).
-**Branch:** current checkout `shared-jax-clean` (local `gpu-purity-stage2-20260405` also points at `b267b0d95`). New branch recommended for execution: `bloat-reduction-20260520`.
+**Status:** Draft v8 — execution-drift checkpoint (2026-06-01) against current checkout `8b94c2bbd` on branch `shared-jax-clean`. Supersedes Draft v7 (clean source-doc refresh basis `b267b0d95`, 2026-05-31), Draft v6 (basis `2bcaeff28`, dirty correction pass), Draft v5 (basis `21c3d517d`, 2026-05-30), and Draft v4 (basis `5bcd9061c`, 2026-05-29). v8 does not recalculate every historical line ref; it records that the current dirty tree has drifted from strict LOC reduction into contract-hardening / foundation work. Treat old aggregate estimates as stale until salvage commits are split and re-measured.
+**Author:** orchestrator synthesis of 8-lane parallel audit (2026-05-20); v4 reconciliation from a 6-agent re-verification (2026-05-29); v5 reconciliation from a 4-agent re-verification (2026-05-30); v6 doc-review correction from a 3-agent drift audit (2026-05-30); v7 current-checkout doc-review refresh (2026-05-31); v8 drift checkpoint after dirty-tree LOC validation (2026-06-01).
+**Branch:** current checkout `shared-jax-clean` at `8b94c2bbd`.
 **Audit basis:** 8 parallel subagent reports plus current-tree Crucible review covering Boozer/objectives, optimizer JAX, jax_core kernels, field/backend, PM/QFM/wireframe, benchmarks/parity, tests, cross-cutting duplication, official JAX/SciPy/SIMSOPT API documentation checks, and a post-v2 codebase-delta validation.
 
 ---
 
 ## Table of Contents
 
+0. [2026-06-01 Execution Drift Gate](#0-2026-06-01-execution-drift-gate)
 1. [Goals & Purpose](#1-goals--purpose)
 2. [Success Criteria](#2-success-criteria)
 3. [Guiding Principles](#3-guiding-principles)
@@ -26,6 +27,29 @@
 15. [Appendix B — Audit Source Trace](#15-appendix-b--audit-source-trace)
 
 ---
+
+## 0. 2026-06-01 Execution Drift Gate
+
+The current dirty tree must not be committed as a single "bloat reduction" change. It contains real source shrinkers, but the checkout as a whole is larger once untracked helpers, tests, and docs are counted.
+
+Drift-checkpoint ledger captured before the v8 doc correction (`git diff --numstat -- src tests docs` plus untracked-file `wc -l`):
+
+- `src/` tracked: `1933 insertions / 1941 deletions`, net `-8`
+- Untracked source helpers: `+53`
+- Effective source net: `+45`
+- `tests/` tracked: `1174 insertions / 54 deletions`, net `+1120`
+- Untracked tests: `+224`
+- `docs/` tracked: `938 insertions / 161 deletions`, net `+777`
+- Total tracked plus untracked over `src/`, `tests/`, and `docs/`: `+2166`
+
+Classify each dirty slice before commit:
+
+- **Banked-shrink:** source LOC is net-negative in the isolated slice and behavior/API compatibility is validated.
+- **Foundation-only:** source LOC is flat or positive, but the slice names the exact follow-up deletion it unlocks.
+- **Not LOC-banked:** complexity or contract quality improved, but no current source shrink can be claimed.
+- **Defer/revert-candidate:** source LOC is flat or positive and no immediate deletion payoff is identified.
+
+The next execution pass should salvage banked-shrink commits first, keep foundation-only commits only when their deletion target is explicit, and reclassify T2.1/T2.2-style pilots as not LOC-banked until they pay down source.
 
 ## 1. Goals & Purpose
 
@@ -75,7 +99,7 @@ A tier is "complete" when **all** of:
 
 ### Aggregate success
 
-Total net deletion ≥ 8,000 LOC after all tiers; zero feature regressions; one ratified contract decision per Tier-4 item.
+Historical target: total net deletion >= 8,000 LOC after all tiers; zero feature regressions; one ratified contract decision per Tier-4 item. Under the v8 drift gate, this target is not satisfied by the current dirty tree. It can only be claimed after banked-shrink slices are isolated, validated, and re-measured.
 
 ---
 
@@ -92,7 +116,7 @@ Drawn from `/Users/suhjungdae/code/columbia/AGENTS.md` + `/Users/suhjungdae/.age
 7. **Diagnostic ≠ production.** Hot files should not carry profiling helpers; one test caller does not justify 260 LOC in a 2208-LOC file.
 8. **No new abstractions for hypothetical futures.** If the second instance is hypothetical, skip the factory.
 9. **Per-touch type/format checks.** Run `ruff` on touched files only; ignore pre-existing upstream noise.
-10. **Atomic commits per item.** Each checkbox = one commit. Bisectable rollback.
+10. **Atomic commits per item.** Each checkbox should normally map to one bisectable commit. v8 exception: the current dirty-tree checkmarks must be salvage-split into isolated commits before they count as committed progress.
 11. **Compatibility beats deletion.** Public signature compatibility, documented CLIs, and parity-oracle scripts stay unless a caller inventory plus migration plan proves the surface is truly retired.
 
 **On rule conflict**, the SOFTWARE_DESIGN.md tie-breaker hierarchy governs: correctness/safety > minimize total reader cognitive load > match local convention > Boy-Scout (file/function scope only; cross-module needs explicit user scope expansion) (SD:24-33).
@@ -327,7 +351,7 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 
 - **Files:** `boozersurface_jax.py` result-dict packaging sites are now at `:5068`, `:5093` (early returns), `:5316`, `:5449`, `:5554`, `:5879`, `:6135`, `:6275`, `:6670`, `:6769`, `:6916` (v4's `:5098`-`:6511` list was stale by hundreds of lines — the file's max packaging site is now `:6916`, not `:6511`). Newton/quality reporting duplication sits inside those dicts.
 - **Change:** Introduce small result-pack helpers such as `_boozer_traceable_result_core(...)`, `_boozer_ls_result_core(...)`, and `_boozer_exact_result_core(...)`; drive from `_BOOZER_TRACEABLE_RESULT_KEYS` (`:316`, still exact) as constructor SSOT. **v5 NOTE:** `_BOOZER_RESULT_SCHEMAS` is **confirmed ABSENT** from the tree (not merely renamed) — the only result-dict SSOT is `_BOOZER_TRACEABLE_RESULT_KEYS:316`.
-- **LOC saved:** ~130.
+- **Historical LOC target:** ~130. **Current LOC banked:** 0; this slice is partial / not LOC-banked until a follow-up reduces source LOC without hiding failure-path diagnostics.
 - **Risk:** Medium after the post-v2 committed drift. This item touches user-visible result dict schemas and must be semantically inventoried from the latest committed tree before implementation.
 - **Contracts:** Result-dict required/forbidden keys; success-vs-failure `linear_solve_backend` strings; `adjoint_linear_solve_available` flag.
 - **Validation gate:** T2 + result-dict schema tests in `test_boozersurface_jax.py`.
@@ -661,7 +685,7 @@ These need user answers before starting:
 | T2 — Factory Introductions | ~3,500 (v5 subtracted T2.2 incorrectly; v6 counts its ~400 LOC as remaining until the wrapper fold lands) | 9 (T2.2 partial/open) | 3–4 days | Low-Med |
 | T3 — Structural Consolidations | ~4,000–5,500 (T3.2 field-eval dup **already folded** via `_BiotSavartFieldEvaluationMixin`, re-scope −~250; T3.3 / T3.8 partially done via the `surfaceobjectives_traceable_jax.py` split) | 8 | 1–2 weeks | Med |
 | T4 — Decision Points | T4.2 resolved (doc-only); T4.1 ~1,628 + T4.3 ~138 + T4.4 (alias quarantine, re-scoped to the qfm **surface** wrappers — **not** obsolete) still decision-gated | 5 (T4.2 resolved) | varies | Decision-bound |
-| **Aggregate** | **~8,300–9,800 guaranteed candidate LOC remaining (T2.2 is not banked; T3.2 field-eval ~250 already banked), plus decision-gated deletions. Separately, ~19 code-smell audit findings already landed or were corrected/retracted (§4.7/§4.8) — those are correctness fixes/status corrections, not bloat-LOC.** | **33 items (T2.2 partial/open; T3.2 partial; T4.2 resolved)** | **~3 weeks** | **manageable with gates** |
+| **Aggregate** | **STALE until salvage splitting.** Historical estimate was ~7,900-9,800 guaranteed candidate LOC remaining pending T2.2 re-estimate, plus decision-gated deletions. The drift-checkpoint ledger is not net-shortening: effective `src/` is `+45` once untracked source helpers are included, and `src/`+`tests/`+`docs/` is `+2166`. Recalculate aggregate remaining LOC only after banked-shrink slices are isolated and foundation/not-banked slices are classified. | **33 items (T2.2 LOC-banking follow-up open; T3.2 partial; T4.2 resolved)** | **~3 weeks historical estimate; replan after salvage split** | **manageable only with the v8 drift gate** |
 
 ---
 
@@ -671,13 +695,13 @@ These need user answers before starting:
 
 1. Work tiers sequentially: T1 → T2 → T3. Do not skip ahead.
 2. Within a tier, items are mostly independent but ordered by risk (lowest first).
-3. Each `- [ ]` item = one commit. Check the box in this doc on commit.
+3. Each `- [ ]` item normally maps to one commit. v8 exception: the 2026-06-01 dirty-tree checkmarks record implemented/validated slices, not committed slices, until salvage splitting produces isolated commits.
 4. After each item: run the per-item validation gate; do not proceed if it fails.
 5. At tier exit: run the tier exit gate and the contract checklist in Section 4.1; tag the commit.
 
 ### As a status report
 
-The current state of execution is encoded in the checkboxes. A `git diff` of this file against the merge-base or base branch shows progress.
+The current state of execution is encoded in the checkboxes, but under the v8 drift gate the checkboxes are implementation/validation status, not commit status. A `git diff` of this file against the merge-base or base branch shows progress only after the dirty tree is split into scoped commits.
 
 ### As a contract reference
 
@@ -707,10 +731,10 @@ This plan was generated from 8 parallel subagent reports (2026-05-20):
 | 7 | JAX tests (`test_boozersurface_jax`, `test_single_stage_jax_cpu_reference`, etc.) | ~500 |
 | 8 | Cross-cutting duplication (sibling-variant files, re-export shims, dtype helpers, state tokens) | ~850 |
 
-Aggregate unique reduction after lane overlap consolidation: **~8,300–9,800 guaranteed candidate LOC**, plus decision-gated optional deletions.
+Historical aggregate candidate estimate after lane overlap consolidation: **~8,300–9,800 LOC**, plus decision-gated optional deletions. Under the v8 drift gate, this is not a current banked-reduction claim; re-measure after salvage splitting.
 
 Full audit transcripts available in the orchestrator session log (2026-05-20). The original bloat plan was generated from 8 bloat-reduction lanes; the separate code-smell artifact contains 11 per-lane reports + `SUMMARY.md` + 24 verification-round logs. In the `simsopt-jax-shared-jax` checkout reviewed at `b267b0d95`, `.artifacts/` is not present; the historical artifact tree was found at `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/code_smell_review_2026-05-20/`. Those logs are historical records with 2026-05-30 line-ref annotations originally refreshed against HEAD `21c3d517d`; use `SUMMARY.md` plus `verification/CORRECTIONS_round5.md` inside that artifact tree as the final status for retracted items, and re-grep current HEAD/dirty files before executing.
 
 ---
 
-*End of plan v7. Crucible-reviewed; v5 basis + §4.1 / §5–§8 line refs were re-derived against clean HEAD `21c3d517d` on 2026-05-30, corrected against live HEAD `2bcaeff28` and a dirty worktree by a 3-agent doc-review pass, then refreshed against clean HEAD `b267b0d95` on 2026-05-31. Re-grep before executing — the repo is under active concurrent commits.*
+*End of plan v8. Crucible-reviewed; v5 basis + §4.1 / §5–§8 line refs were re-derived against clean HEAD `21c3d517d` on 2026-05-30, corrected against live HEAD `2bcaeff28` and a dirty worktree by a 3-agent doc-review pass, refreshed against clean HEAD `b267b0d95` on 2026-05-31, then updated with the 2026-06-01 `8b94c2bbd` execution-drift gate. Re-grep before executing — the repo is under active concurrent commits.*

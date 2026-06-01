@@ -3,10 +3,34 @@
 ## Review Envelope
 
 - Target repo: `/Users/suhjungdae/code/columbia/simsopt-jax-shared-jax`
-- Target repo HEAD reviewed: `b267b0d95` on `shared-jax-clean`
+- Source-doc review basis: `b267b0d95` on `shared-jax-clean`
+- Current execution checkpoint: `8b94c2bbd` on `shared-jax-clean` with a broad dirty implementation tree across `src/`, `tests/`, and `docs/`
 - Reference TORAX repo reviewed: `/Users/suhjungdae/code/opensource/torax` at `60190df1` on clean `main`
-- Local status at review: the two source docs were modified and this overlay was untracked; no source-code edits were part of this review.
+- Historical local status at source-doc review: the two source docs were modified and this overlay was untracked; no source-code edits were part of that review. This is no longer the current working-tree state.
 - Artifact note: this checkout does not contain a repo-local `.artifacts/` tree. Historical code-smell artifacts referenced by the bloat plan were found in sibling checkout `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/code_smell_review_2026-05-20/`.
+
+## 2026-06-01 Drift Checkpoint
+
+The current dirty tree is validated as a contract-hardening / complexity-reduction checkpoint, not as a strict LOC-reduction checkpoint. Do not commit the whole tree under a generic "bloat reduction" label.
+
+Drift-checkpoint ledger captured before the v8 doc correction (`git diff --numstat -- src tests docs` plus untracked-file `wc -l`):
+
+- `src/` tracked: `1933 insertions / 1941 deletions`, net `-8`
+- Untracked source helpers: `+53`
+- Effective source net: `+45`
+- `tests/` tracked: `1174 insertions / 54 deletions`, net `+1120`
+- Untracked tests: `+224`
+- `docs/` tracked: `938 insertions / 161 deletions`, net `+777`
+- Total tracked plus untracked over `src/`, `tests/`, and `docs/`: `+2166`
+
+Execution gate for the next pass:
+
+- **Banked-shrink:** source LOC is net-negative in an isolated scoped slice and behavior/API compatibility is validated.
+- **Foundation-only:** source LOC is flat or positive, but the slice names the exact deletion it unlocks and the next deletion task is tracked.
+- **Not LOC-banked:** complexity or contract quality improved, but no current source shrink can be claimed.
+- **Defer/revert-candidate:** source LOC is flat or positive and no immediate deletion payoff is identified.
+
+Before any commit, split the dirty tree by this classification. Salvage the banked-shrink slices first; keep foundation-only slices only with their follow-up deletion target; do not count tests/docs growth as bloat reduction.
 
 ## Purpose
 
@@ -36,7 +60,7 @@ The source plans remain the SSOT for detailed item text, line refs, and acceptan
 ## Current Context
 
 - Source-doc refresh basis: `shared-jax-clean` at `b267b0d95`.
-- Source-doc edit status at this overlay review is recorded in the Review Envelope; do not treat it as a durable execution precondition.
+- Current execution checkpoint is `shared-jax-clean` at `8b94c2bbd`; source-doc edit status from the original review envelope is historical only.
 - `docs/bloat_reduction_plan_2026-05-20.md` is a tiered reduction plan: T1 mechanical wins, T2 factory introductions, T3 structural consolidations, and T4 contract decisions.
 - `docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md` is a pattern-hardening plan: static/dynamic pytree contracts, persistent-cache proof, bounded control flow, branch discipline, and numerical stability.
 - Shared dependency surfaces include `jax_core` specs, backend runtime/cache policy, validation ladder helpers, host-boundary helpers, fixed-iteration scan code, PM/wireframe workflows, and GPU/MPS-sensitive runtime paths.
@@ -49,7 +73,7 @@ The right sequencing is contract-first, then mechanical deletion, then shared fa
 
 ## Assumptions
 
-- The source docs remain current at `b267b0d95`; re-run the evidence refresh if HEAD advances before implementation.
+- The source docs were refreshed at `b267b0d95`, but execution has advanced to `8b94c2bbd` with a broad dirty tree. Re-run evidence refresh and the drift ledger before selecting or committing any additional implementation slice.
 - Code work must load and apply `/Users/suhjungdae/.agent-docs/SOFTWARE_DESIGN.md` before implementation.
 - CPU validation is not enough for GPU-sensitive or MPS-sensitive claims.
 - `jax_mps_smoke` remains a smoke lane, not a production parity lane.
@@ -144,10 +168,11 @@ The right sequencing is contract-first, then mechanical deletion, then shared fa
 
 - [ ] One execution slice is selected with a named source-doc owner and validation gate.
 - [ ] All changed symbols in that slice have caller inventories.
-- [ ] The slice lands without weakening public APIs, parity tolerances, backend modes, or transfer/cache contracts.
+- [ ] The implemented dirty-tree slices preserve public APIs, parity tolerances, backend modes, and transfer/cache contracts in their recorded validation scope.
 - [ ] The source doc owning the completed work is updated with evidence, not just checkbox changes.
 - [ ] Validation output is recorded with backend lane and exact command.
 - [ ] Remaining work is still traceable to the source docs and not duplicated into an unsorted backlog.
+- [ ] Before the next commit, split the dirty tree into banked-shrink, foundation-only, not-LOC-banked, and defer/revert-candidate slices.
 
 ## Open Questions
 
