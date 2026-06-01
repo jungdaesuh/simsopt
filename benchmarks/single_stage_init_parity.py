@@ -2728,7 +2728,6 @@ def _compare_same_candidate_scipy_initial_call(
 
 
 def _same_candidate_scipy_callback_split(
-    *,
     field: str,
     callback_index: int,
     cpu_entry: dict[str, Any],
@@ -2742,6 +2741,21 @@ def _same_candidate_scipy_callback_split(
         "jax_evaluation_index": jax_entry.get("evaluation_index"),
         "max_abs_diff": max_abs_diff,
     }
+
+
+def _record_first_scipy_callback_split(
+    current,
+    split_field,
+    index,
+    cpu_entry,
+    jax_entry,
+    max_diff,
+):
+    if current is not None:
+        return current
+    return _same_candidate_scipy_callback_split(
+        split_field, index, cpu_entry, jax_entry, max_diff
+    )
 
 
 def _compare_same_candidate_scipy_callback_trace(
@@ -2777,14 +2791,9 @@ def _compare_same_candidate_scipy_callback_trace(
                 f"cpu={cpu_entry.get('evaluation_index')!r}, "
                 f"jax={jax_entry.get('evaluation_index')!r}."
             )
-            if first_split is None:
-                first_split = _same_candidate_scipy_callback_split(
-                    field="evaluation_index",
-                    callback_index=index,
-                    cpu_entry=cpu_entry,
-                    jax_entry=jax_entry,
-                    max_abs_diff=0.0,
-                )
+            first_split = _record_first_scipy_callback_split(
+                first_split, "evaluation_index", index, cpu_entry, jax_entry, 0.0
+            )
         cpu_x = _summary_vector(cpu_entry.get("decision_vector"))
         jax_x = _summary_vector(jax_entry.get("decision_vector"))
         decision_diff = _compare_same_candidate_vector(
@@ -2796,13 +2805,14 @@ def _compare_same_candidate_scipy_callback_trace(
             atol=0.0,
         )
         max_diff = max(max_diff, decision_diff)
-        if first_split is None and decision_diff > 0.0:
-            first_split = _same_candidate_scipy_callback_split(
-                field="decision_vector",
-                callback_index=index,
-                cpu_entry=cpu_entry,
-                jax_entry=jax_entry,
-                max_abs_diff=decision_diff,
+        if decision_diff > 0.0:
+            first_split = _record_first_scipy_callback_split(
+                first_split,
+                "decision_vector",
+                index,
+                cpu_entry,
+                jax_entry,
+                decision_diff,
             )
 
         cpu_fun = _summary_scalar(cpu_entry.get("fun"))
@@ -2815,8 +2825,7 @@ def _compare_same_candidate_scipy_callback_trace(
         )
         max_diff = max(max_diff, fun_diff)
         if (
-            first_split is None
-            and cpu_fun is not None
+            cpu_fun is not None
             and jax_fun is not None
             and not _scalar_close(
                 jax_fun,
@@ -2825,12 +2834,8 @@ def _compare_same_candidate_scipy_callback_trace(
                 atol=_SAME_CANDIDATE_SCALAR_ATOL,
             )
         ):
-            first_split = _same_candidate_scipy_callback_split(
-                field="fun",
-                callback_index=index,
-                cpu_entry=cpu_entry,
-                jax_entry=jax_entry,
-                max_abs_diff=fun_diff,
+            first_split = _record_first_scipy_callback_split(
+                first_split, "fun", index, cpu_entry, jax_entry, fun_diff
             )
 
         cpu_gradient = _summary_vector(cpu_entry.get("gradient"))
@@ -2849,21 +2854,12 @@ def _compare_same_candidate_scipy_callback_trace(
                 0.0 if cpu_gradient.size == 0 else float(np.max(np.abs(cpu_gradient)))
             )
         )
-        if (
-            first_split is None
-            and gradient_reference is not None
-            and gradient_diff
-            > (
-                _SAME_CANDIDATE_GRADIENT_ATOL
-                + _SAME_CANDIDATE_GRADIENT_RTOL * gradient_reference
-            )
+        if gradient_reference is not None and gradient_diff > (
+            _SAME_CANDIDATE_GRADIENT_ATOL
+            + _SAME_CANDIDATE_GRADIENT_RTOL * gradient_reference
         ):
-            first_split = _same_candidate_scipy_callback_split(
-                field="gradient",
-                callback_index=index,
-                cpu_entry=cpu_entry,
-                jax_entry=jax_entry,
-                max_abs_diff=gradient_diff,
+            first_split = _record_first_scipy_callback_split(
+                first_split, "gradient", index, cpu_entry, jax_entry, gradient_diff
             )
     if first_split is None and len(cpu_trace) != len(jax_trace):
         first_split = {
