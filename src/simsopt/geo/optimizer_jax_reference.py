@@ -189,26 +189,21 @@ def _scipy_dispatch(scipy_fun, x0, *, method, tol, maxiter, options):
     )
 
 
-def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
-    _optimizer._require_native_cpu_reference_backend_for_scipy_adapter(
-        component="optimizer_jax_reference._scipy_minimize",
-        method=method,
-    )
-    val_and_grad_fn = _optimizer._cached_jit_value_and_grad(fun)
-    x_dtype = _optimizer._optimizer_dtype(x0)
-    initial_call = {}
-    scipy_objective_trace = (
-        [] if options.get("record_scipy_callback_trace", False) else None
-    )
-
+def _make_scipy_host_value_and_grad_objective(
+    value_and_grad_fn,
+    *,
+    x_dtype,
+    initial_call,
+    scipy_objective_trace,
+):
     def scipy_fun(x_np):
         x_jax = _target_array_from_scipy_host(x_np, dtype=x_dtype)
-        val, grad = val_and_grad_fn(x_jax)
+        value, gradient = value_and_grad_fn(x_jax)
         # ``minimize(jac=True)`` consumes the same host scalar/array shape
         # returned by the CPU Boozer objective callable.
-        host_value = _scipy_scalar_value(val, dtype=x_dtype)
+        host_value = _scipy_scalar_value(value, dtype=x_dtype)
         host_gradient = _scipy_host_array(
-            grad,
+            gradient,
             dtype=x_dtype,
         )
         if "payload" not in initial_call:
@@ -229,12 +224,51 @@ def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
             )
         return host_value, host_gradient
 
-    result = _scipy_dispatch(
+    return scipy_fun
+
+
+def _scipy_minimize_value_and_grad_core(
+    value_and_grad_fn,
+    x0,
+    *,
+    method,
+    tol,
+    maxiter,
+    options,
+):
+    x_dtype = _optimizer._optimizer_dtype(x0)
+    initial_call = {}
+    scipy_objective_trace = (
+        [] if options.get("record_scipy_callback_trace", False) else None
+    )
+    scipy_fun = _make_scipy_host_value_and_grad_objective(
+        value_and_grad_fn,
+        x_dtype=x_dtype,
+        initial_call=initial_call,
+        scipy_objective_trace=scipy_objective_trace,
+    )
+
+    result = _scipy_dispatch_core(
         scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
     )
     result.scipy_initial_call = initial_call["payload"]
     result.scipy_callback_trace = scipy_objective_trace
     return result
+
+
+def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
+    _optimizer._require_native_cpu_reference_backend_for_scipy_adapter(
+        component="optimizer_jax_reference._scipy_minimize",
+        method=method,
+    )
+    return _scipy_minimize_value_and_grad_core(
+        _optimizer._cached_jit_value_and_grad(fun),
+        x0,
+        method=method,
+        tol=tol,
+        maxiter=maxiter,
+        options=options,
+    )
 
 
 def target_scipy_minimize_value_and_grad(
@@ -251,46 +285,14 @@ def target_scipy_minimize_value_and_grad(
         raise ValueError(
             "target_scipy_minimize_value_and_grad() only supports method='lbfgs'."
         )
-    x_dtype = _optimizer._optimizer_dtype(x0)
-    initial_call = {}
-    scipy_objective_trace = (
-        [] if options.get("record_scipy_callback_trace", False) else None
+    return _scipy_minimize_value_and_grad_core(
+        fun,
+        x0,
+        method=method,
+        tol=tol,
+        maxiter=maxiter,
+        options=options,
     )
-
-    def scipy_fun(x_np):
-        x_jax = _target_array_from_scipy_host(x_np, dtype=x_dtype)
-        val, grad = fun(x_jax)
-        # ``minimize(jac=True)`` consumes the same host scalar/array shape
-        # returned by the CPU Boozer objective callable.
-        host_value = _scipy_scalar_value(val, dtype=x_dtype)
-        host_gradient = _scipy_host_array(
-            grad,
-            dtype=x_dtype,
-        )
-        if "payload" not in initial_call:
-            initial_call["payload"] = _scipy_initial_call_contract(
-                x_np,
-                host_value,
-                host_gradient,
-                dtype=x_dtype,
-            )
-        if scipy_objective_trace is not None:
-            scipy_objective_trace.append(
-                _scipy_objective_trace_entry(
-                    x_np,
-                    host_value,
-                    host_gradient,
-                    dtype=x_dtype,
-                )
-            )
-        return host_value, host_gradient
-
-    result = _scipy_dispatch_core(
-        scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
-    )
-    result.scipy_initial_call = initial_call["payload"]
-    result.scipy_callback_trace = scipy_objective_trace
-    return result
 
 
 def _scipy_minimize_value_and_grad(fun, x0, *, method, tol, maxiter, options):
@@ -298,46 +300,14 @@ def _scipy_minimize_value_and_grad(fun, x0, *, method, tol, maxiter, options):
         component="optimizer_jax_reference._scipy_minimize_value_and_grad",
         method=method,
     )
-    x_dtype = _optimizer._optimizer_dtype(x0)
-    initial_call = {}
-    scipy_objective_trace = (
-        [] if options.get("record_scipy_callback_trace", False) else None
+    return _scipy_minimize_value_and_grad_core(
+        fun,
+        x0,
+        method=method,
+        tol=tol,
+        maxiter=maxiter,
+        options=options,
     )
-
-    def scipy_fun(x_np):
-        x_jax = _target_array_from_scipy_host(x_np, dtype=x_dtype)
-        val, grad = fun(x_jax)
-        # ``minimize(jac=True)`` consumes the same host scalar/array shape
-        # returned by the CPU Boozer objective callable.
-        host_value = _scipy_scalar_value(val, dtype=x_dtype)
-        host_gradient = _scipy_host_array(
-            grad,
-            dtype=x_dtype,
-        )
-        if "payload" not in initial_call:
-            initial_call["payload"] = _scipy_initial_call_contract(
-                x_np,
-                host_value,
-                host_gradient,
-                dtype=x_dtype,
-            )
-        if scipy_objective_trace is not None:
-            scipy_objective_trace.append(
-                _scipy_objective_trace_entry(
-                    x_np,
-                    host_value,
-                    host_gradient,
-                    dtype=x_dtype,
-                )
-            )
-        return host_value, host_gradient
-
-    result = _scipy_dispatch(
-        scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
-    )
-    result.scipy_initial_call = initial_call["payload"]
-    result.scipy_callback_trace = scipy_objective_trace
-    return result
 
 
 def _host_trace_result_to_optimize_result(result):
