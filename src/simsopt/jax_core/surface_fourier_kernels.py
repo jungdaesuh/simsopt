@@ -2205,7 +2205,7 @@ def surface_xyzfourier_volume_from_dofs(
     return surface_volume(gamma, normal)
 
 
-def surface_gamma_from_dofs(
+def _eval_surface_tensor_from_dofs(
     dofs,
     quadpoints_phi,
     quadpoints_theta,
@@ -2213,257 +2213,83 @@ def surface_gamma_from_dofs(
     ntor,
     nfp,
     stellsym,
-    scatter_indices=None,
+    scatter_indices,
     *,
-    clamped_dims=(False, False, False),
+    evaluator,
+    clamped_dims,
 ):
-    """Evaluate gamma as a pure function of the flat DOF vector.
+    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
+    return evaluator(
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
+    )
 
-    This is the entry point for JAX autodiff w.r.t. surface degrees of
-    freedom: ``jax.grad(f)(dofs, ...)`` where ``f`` composes this function
-    with downstream objectives.
 
-    Args:
-        dofs: flat DOF vector (free coefficients only if stellsym).
-        quadpoints_phi, quadpoints_theta: quadrature grids.
-        mpol, ntor, nfp: surface resolution and field periods.
-        stellsym: whether stellarator symmetry is active.
-        scatter_indices: precomputed from :func:`stellsym_scatter_indices`.
-            Required when ``stellsym=True``.
-        clamped_dims: optional 3-tuple of Python bools that mirrors the
-            CPU ``SurfaceXYZTensorFourier.clamped_dims`` BC enforcer.
+def _surface_tensor_from_dofs_doc(quantity, returns):
+    return f"""Evaluate {quantity} as a pure function of the flat tensor-surface DOF vector.
 
-    Returns:
-        gamma: (nphi, ntheta, 3) Cartesian positions.
+    Args mirror the historical wrapper: ``scatter_indices`` supplies stellsym
+    coefficient scatter, and ``clamped_dims`` mirrors CPU boundary clamps.
+    Returns {returns}.
     """
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gamma(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
 
 
-def surface_gamma_lin_from_dofs(
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices=None,
-    *,
-    clamped_dims=(False, False, False),
-):
-    """Evaluate paired-point gamma as a pure function of the flat DOF vector."""
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gamma_lin(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
+# fmt: off
+def surface_gamma_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gamma, clamped_dims=clamped_dims)
 
 
-def surface_gammadash1_from_dofs(
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices=None,
-    *,
-    clamped_dims=(False, False, False),
-):
-    """Evaluate dγ/dφ as a pure function of DOFs (autodiff-compatible)."""
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gammadash1(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
+def surface_gamma_lin_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gamma_lin, clamped_dims=clamped_dims)
 
 
-def surface_gammadash1_lin_from_dofs(
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices=None,
-    *,
-    clamped_dims=(False, False, False),
-):
-    """Evaluate paired-point dγ/dφ as a pure function of DOFs."""
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gammadash1_lin(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
+def surface_gammadash1_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1, clamped_dims=clamped_dims)
 
 
-def surface_gammadash2_from_dofs(
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices=None,
-    *,
-    clamped_dims=(False, False, False),
-):
-    """Evaluate dγ/dθ as a pure function of DOFs (autodiff-compatible)."""
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gammadash2(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
+def surface_gammadash1_lin_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1_lin, clamped_dims=clamped_dims)
 
 
-def surface_gammadash2_lin_from_dofs(
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices=None,
-    *,
-    clamped_dims=(False, False, False),
-):
-    """Evaluate paired-point dγ/dθ as a pure function of DOFs."""
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gammadash2_lin(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
+def surface_gammadash2_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash2, clamped_dims=clamped_dims)
 
 
-def surface_gammadash1dash1_from_dofs(
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices=None,
-    *,
-    clamped_dims=(False, False, False),
-):
-    """Evaluate d²γ/dφ² as a pure function of DOFs."""
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gammadash1dash1(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
+def surface_gammadash2_lin_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash2_lin, clamped_dims=clamped_dims)
 
 
-def surface_gammadash1dash2_from_dofs(
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices=None,
-    *,
-    clamped_dims=(False, False, False),
-):
-    """Evaluate d²γ/dφdθ as a pure function of DOFs."""
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gammadash1dash2(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
+def surface_gammadash1dash1_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1dash1, clamped_dims=clamped_dims)
 
 
-def surface_gammadash2dash2_from_dofs(
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices=None,
-    *,
-    clamped_dims=(False, False, False),
-):
-    """Evaluate d²γ/dθ² as a pure function of DOFs."""
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gammadash2dash2(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
+def surface_gammadash1dash2_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1dash2, clamped_dims=clamped_dims)
+
+
+def surface_gammadash2dash2_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash2dash2, clamped_dims=clamped_dims)
+# fmt: on
+
+
+# fmt: off
+surface_gamma_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("gamma", "an ``(nphi, ntheta, 3)`` Cartesian position array")
+surface_gamma_lin_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("paired-point gamma", "the paired-point Cartesian position array")
+surface_gammadash1_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("dgamma/dphi", "the first coordinate derivative along phi")
+surface_gammadash1_lin_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("paired-point dgamma/dphi", "the paired-point first coordinate derivative along phi")
+surface_gammadash2_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("dgamma/dtheta", "the first coordinate derivative along theta")
+surface_gammadash2_lin_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("paired-point dgamma/dtheta", "the paired-point first coordinate derivative along theta")
+surface_gammadash1dash1_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("d2gamma/dphi2", "the second coordinate derivative along phi")
+surface_gammadash1dash2_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("d2gamma/dphidtheta", "the mixed second coordinate derivative")
+surface_gammadash2dash2_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("d2gamma/dtheta2", "the second coordinate derivative along theta")
+# fmt: on
 
 
 def _surface_tensor_paired_derivative_from_dofs(
@@ -2691,31 +2517,15 @@ def surface_gammadash2dash2dash2_lin_from_dofs(
     )
 
 
-def surface_normal_from_dofs(
-    dofs,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices=None,
-    *,
-    clamped_dims=(False, False, False),
-):
-    """Evaluate unnormalized normal as a pure function of DOFs."""
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_normal(
-        quadpoints_phi,
-        quadpoints_theta,
-        xc,
-        yc,
-        zc,
-        mpol,
-        ntor,
-        nfp,
-        clamped_dims=clamped_dims,
-    )
+# fmt: off
+def surface_normal_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_normal, clamped_dims=clamped_dims)
+# fmt: on
+
+
+# fmt: off
+surface_normal_from_dofs.__doc__ = _surface_tensor_from_dofs_doc("unnormalized normal", "an ``(nphi, ntheta, 3)`` unnormalized normal array")
+# fmt: on
 
 
 def surface_unitnormal_from_dofs(
