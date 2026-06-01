@@ -193,9 +193,11 @@ from benchmarks.validation_ladder_common import (  # noqa: E402
     query_nvidia_smi_facts,
 )
 from benchmarks.validation_ladder_contract import (  # noqa: E402
+    FLOAT32_SMOKE_TOLERANCE_TIER,
     comparison_failure_gates_verdict,
     comparison_failure_is_diagnostic,
-    parity_ladder_tolerances,
+    quantity_parity_tolerance,
+    quantity_uses_gradient_tolerance,
 )
 from simsopt.backend import (  # noqa: E402
     get_backend_policy,
@@ -209,99 +211,12 @@ CUDA_DEVICE_PLATFORMS = frozenset(("cuda", "gpu"))
 MPS_DEVICE_PLATFORMS = frozenset(("mps",))
 
 
-# ---------------------------------------------------------------------------
-# Tolerance mapping (mirrors plan §"Default Tolerance Mapping").
-
-
-_TOLERANCE_BUCKETS = {
-    "field_B": "direct_kernel",
-    "field_GradAbsB": "direct_kernel",
-    "field_modB": "direct_kernel",
-    "surface_gamma": "direct_kernel",
-    "surface_unit_normal": "direct_kernel",
-    "Bdotn": "direct_kernel",
-    "objective_native_subtotal": "ls_wrapper_gradient",
-    "SquaredFlux": "ls_wrapper_gradient",
-    "SquaredFluxJAX": "ls_wrapper_gradient",
-    "gradient": "ls_wrapper_gradient",
-    # Phase 6 fixed-state Boozer fixture: residual vector and labels are
-    # direct kernel comparisons (no LS/gradient wrapper involved).
-    "boozer_residual": "direct_kernel",
-    "area": "direct_kernel",
-    "volume": "direct_kernel",
-    "area_gradient": "derivative_heavy",
-    "volume_gradient": "derivative_heavy",
-    "qfm_residual": "direct_kernel",
-    "qfm_gradient": "derivative_heavy",
-    "pm_grid_payload": "direct_kernel",
-    "pm_moments": "direct_kernel",
-    "pm_residual": "direct_kernel",
-    "pm_proxy_residual": "direct_kernel",
-    "pm_objective": "direct_kernel",
-    "pm_proxy_objective": "direct_kernel",
-    "pm_history": "direct_kernel",
-    "pm_dipole_field_B": "direct_kernel",
-    "pm_proxy_dipole_field_B": "direct_kernel",
-    "pm_dipole_Bdotn": "direct_kernel",
-    "pm_proxy_dipole_Bdotn": "direct_kernel",
-    "wireframe_matrix": "direct_kernel",
-    "wireframe_current": "direct_kernel",
-    "wireframe_objective": "direct_kernel",
-    "wireframe_constraints": "direct_kernel",
-    "wireframe_field_B": "direct_kernel",
-    "wireframe_field_dB_by_dX": "derivative_heavy",
-    "wireframe_Bnormal": "direct_kernel",
-    "wireframe_gsco_flags": "direct_kernel",
-    "wireframe_gsco_history": "direct_kernel",
-    "wireframe_gsco_solution": "direct_kernel",
-    "trajectory_endpoint": "event_time_tracing",
-    "trajectory_t_final": "event_time_tracing",
-    "trajectory_status_code": "direct_kernel",
-    "phi_hit_xyz": "event_time_tracing",
-    "phi_hit_count": "direct_kernel",
-    "toroidal_flux": "direct_kernel",
-    "LpCurveForce": "direct_kernel",
-    "B2Energy": "direct_kernel",
-    "lp_curve_force_gradient": "derivative_heavy",
-    "b2_energy_gradient": "derivative_heavy",
-    # Phase 6 boozerQA wrappers fixture: each wrapper value is compared as
-    # a direct-kernel scalar at the shared solved (surface, iota, G)
-    # state. The JAX-side recomputations are pure JAX (no LS solver, no
-    # adjoint), so direct_kernel is the appropriate bucket.
-    "iota": "direct_kernel",
-    "major_radius": "direct_kernel",
-    "nq_symmetric_ratio": "direct_kernel",
-}
-
-
-FLOAT32_SMOKE_TOLERANCE_TIER = "float32_smoke"
 JAX_MPS_FLOAT32_ONLY_AUTHORITY = {
     "source": "tillahoffmann/jax-mps README",
     "url": "https://github.com/tillahoffmann/jax-mps#footnotes",
     "constraint": "MLX only supports float32.",
     "effect": "jax_mps_smoke is a float32 smoke lane, not float64 production parity.",
 }
-_STRICT_BUCKET_RUNTIME_TIERS = frozenset(("cpu_reference", "parity", "fast"))
-_FLOAT32_SMOKE_OBJECTIVE_QUANTITIES = frozenset(
-    {
-        "objective_native_subtotal",
-        "SquaredFlux",
-        "SquaredFluxJAX",
-    }
-)
-
-
-def _is_gradient_quantity(quantity: str) -> bool:
-    return "gradient" in quantity.lower()
-
-
-def _is_objective_quantity(quantity: str, bucket: str) -> bool:
-    quantity_lower = quantity.lower()
-    return (
-        quantity in _FLOAT32_SMOKE_OBJECTIVE_QUANTITIES
-        or "objective" in quantity_lower
-        or (bucket == "ls_wrapper_gradient" and not _is_gradient_quantity(quantity))
-    )
 
 
 _DOF_NAME_COUNTER_RE = __import__("re").compile(r"^([A-Za-z_][A-Za-z_]*)(\d+)(:.*)$")
@@ -321,43 +236,7 @@ def _strip_dof_name_counter(name: str) -> str:
 
 
 def _tolerance_for(quantity: str) -> tuple[str, float, float]:
-    bucket = _TOLERANCE_BUCKETS.get(quantity, "direct_kernel")
-    runtime_tier = get_tolerance_tier()
-    if runtime_tier == FLOAT32_SMOKE_TOLERANCE_TIER:
-        tolerances = parity_ladder_tolerances(runtime_tier)
-        if _is_gradient_quantity(quantity):
-            return (
-                runtime_tier,
-                float(tolerances["gradient_rtol"]),
-                float(tolerances["gradient_atol"]),
-            )
-        if _is_objective_quantity(quantity, bucket):
-            return (
-                runtime_tier,
-                float(tolerances["objective_rtol"]),
-                float(tolerances["objective_atol"]),
-            )
-        return runtime_tier, float(tolerances["rtol"]), float(tolerances["atol"])
-    if runtime_tier not in _STRICT_BUCKET_RUNTIME_TIERS:
-        raise RuntimeError(
-            f"Unsupported runtime tolerance tier {runtime_tier!r} for "
-            "non-banana example parity harness."
-        )
-
-    tolerances = parity_ladder_tolerances(bucket)
-    if bucket == "event_time_tracing":
-        return (
-            bucket,
-            float(tolerances["state_vector_rtol"]),
-            float(tolerances["state_vector_atol"]),
-        )
-    if "first_derivative_rtol" in tolerances and "rtol" not in tolerances:
-        rtol = float(tolerances["first_derivative_rtol"])
-        atol = float(tolerances["first_derivative_atol"])
-    else:
-        rtol = float(tolerances["rtol"])
-        atol = float(tolerances["atol"])
-    return bucket, rtol, atol
+    return quantity_parity_tolerance(quantity, runtime_tier=get_tolerance_tier())
 
 
 def _runtime_host_np_dtype() -> np.dtype:
@@ -715,7 +594,9 @@ def _compare_array(
         "argmax_dof_name": argmax_dof_name,
         "verdict": verdict,
     }
-    if bucket == FLOAT32_SMOKE_TOLERANCE_TIER and _is_gradient_quantity(quantity):
+    if bucket == FLOAT32_SMOKE_TOLERANCE_TIER and quantity_uses_gradient_tolerance(
+        quantity
+    ):
         entry["diagnostic_only"] = True
         entry["diagnostic_reason"] = "float32_smoke_gradient_not_production_parity_gate"
     return entry
@@ -841,7 +722,9 @@ def _compare_scalar(
         "argmax_dof_name": None,
         "verdict": "pass" if passed else "fail",
     }
-    if bucket == FLOAT32_SMOKE_TOLERANCE_TIER and _is_gradient_quantity(quantity):
+    if bucket == FLOAT32_SMOKE_TOLERANCE_TIER and quantity_uses_gradient_tolerance(
+        quantity
+    ):
         entry["diagnostic_only"] = True
         entry["diagnostic_reason"] = "float32_smoke_gradient_not_production_parity_gate"
     return entry

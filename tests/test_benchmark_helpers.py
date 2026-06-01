@@ -139,6 +139,10 @@ from benchmarks.validation_ladder_common import (
     single_stage_proof_contract,
     tier5_performance_budget,
 )
+from benchmarks.validation_ladder_contract import (
+    quantity_parity_tolerance,
+    quantity_uses_gradient_tolerance,
+)
 
 
 def _load_benchmark_module(name: str, relpath: str):
@@ -4020,6 +4024,51 @@ def test_parity_ladder_tolerances_return_independent_copy():
 def test_parity_ladder_tolerances_reject_unknown_lane():
     with pytest.raises(ValueError, match="Unknown parity ladder lane"):
         parity_ladder_tolerances("exact-dense-plu-parity")
+
+
+def test_quantity_parity_tolerance_preserves_quantity_specific_buckets():
+    assert quantity_parity_tolerance(
+        "field_B",
+        runtime_tier="cpu_reference",
+    ) == ("direct_kernel", 1e-10, 1e-12)
+    assert quantity_parity_tolerance(
+        "trajectory_endpoint",
+        runtime_tier="parity",
+    ) == ("event_time_tracing", 1e-6, 1e-8)
+    assert quantity_parity_tolerance(
+        "qfm_gradient",
+        runtime_tier="fast",
+    ) == ("derivative_heavy", 1e-8, 1e-10)
+    assert quantity_parity_tolerance(
+        "unknown_new_quantity",
+        runtime_tier="cpu_reference",
+    ) == ("direct_kernel", 1e-10, 1e-12)
+
+
+def test_quantity_parity_tolerance_preserves_float32_quantity_branches():
+    assert quantity_parity_tolerance(
+        "field_B",
+        runtime_tier="float32_smoke",
+    ) == ("float32_smoke", 1e-5, 1e-6)
+    assert quantity_parity_tolerance(
+        "SquaredFlux",
+        runtime_tier="float32_smoke",
+    ) == ("float32_smoke", 1e-4, 1e-6)
+    assert quantity_parity_tolerance(
+        "wireframe_objective",
+        runtime_tier="float32_smoke",
+    ) == ("float32_smoke", 1e-4, 1e-6)
+    assert quantity_parity_tolerance(
+        "gradient",
+        runtime_tier="float32_smoke",
+    ) == ("float32_smoke", 1e-3, 1e-5)
+    assert quantity_uses_gradient_tolerance("qfm_gradient") is True
+    assert quantity_uses_gradient_tolerance("SquaredFlux") is False
+
+
+def test_quantity_parity_tolerance_rejects_unknown_runtime_tier():
+    with pytest.raises(RuntimeError, match="Unsupported runtime tolerance tier"):
+        quantity_parity_tolerance("field_B", runtime_tier="smoke")
 
 
 def test_construct_operator_action_probes_is_deterministic():

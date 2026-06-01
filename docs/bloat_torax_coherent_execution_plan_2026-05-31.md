@@ -701,6 +701,65 @@ git diff --check -- src/simsopt/jax_core/surface_fourier.py docs/bloat_reduction
 
 - **Review evidence:** scoped adversarial review returned PASS after fixing two review-found issues: transient tensor paired-linear dof wrappers were initially bound before tensor spec wrappers existed, and the T2.3 source LOC ledger still cited the stale pre-slice 909 LOC count. Delta reviewers then confirmed the refreshed `/tmp/t2_3_surface_fourier_facade.diff` byte-matches the live scoped diff, public imports/package facade/`__all__` order and paired-linear wrapper metadata are preserved, math/kernel routing is unchanged, guardrails are clean, source-only `mypy` passes, the test-file `mypy` blocker is pre-existing in `benchmarks/validation_ladder_contract.py`, and the corrected 978-to-813 LOC accounting banks only 165 source LOC.
 
+### 2026-06-01 — T2.9 quantity-aware tolerance contract helper
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.9.
+- **Selected slice:** parity quantity-to-tolerance policy only. No parity tolerance values, backend-mode routing, fixture construction, comparison verdict semantics, CUDA/MPS runtime behavior, or `parity_ladder_tolerances(lane)` API was changed.
+- **Changed files:** `benchmarks/validation_ladder_contract.py`, `benchmarks/non_banana_example_cpp_jax_cpu_parity.py`, `tests/test_benchmark_helpers.py`, plus this plan set.
+- **Design-it-twice gate:** duplicating the old `_tolerance_for(...)` policy in tests was rejected because it would keep a second source of truth. The landed design puts `QUANTITY_TOLERANCE_BUCKETS` and `quantity_parity_tolerance(...)` beside `PARITY_LADDER_TOLERANCES`, leaves the harness `_tolerance_for(quantity)` as a compatibility wrapper, and uses a 204-row pre/post snapshot as the oracle.
+- **Scope status:** T2.9 complete, not LOC-banked. `non_banana_example_cpp_jax_cpu_parity.py` shrank by 117 LOC, but `validation_ladder_contract.py` grew by 185 LOC and focused tests added 49 LOC. The slice reduces tolerance-policy duplication and closes the previous `validation_ladder_contract.py` mypy blocker; it should not be counted as a bloat LOC reduction.
+- **Validation evidence:** CPU/X64 helper and harness-policy proof, not CUDA/MPS proof.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python - <<'PY'
+import json
+from pathlib import Path
+import benchmarks.non_banana_example_cpp_jax_cpu_parity as harness
+rows = []
+for tier in ("cpu_reference", "parity", "fast", "float32_smoke"):
+    harness.get_tolerance_tier = lambda tier=tier: tier
+    for quantity in sorted(harness._TOLERANCE_BUCKETS):
+        bucket, rtol, atol = harness._tolerance_for(quantity)
+        rows.append({"runtime_tier": tier, "quantity": quantity, "bucket": bucket, "rtol": rtol, "atol": atol})
+Path("/tmp/t2_9_tolerance_snapshot_before.json").write_text(json.dumps(rows, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+print(len(rows), rows[0], rows[-1])
+PY
+# 204 rows
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python - <<'PY'
+import json
+from pathlib import Path
+from benchmarks.validation_ladder_contract import QUANTITY_TOLERANCE_BUCKETS, quantity_parity_tolerance
+rows = []
+for tier in ("cpu_reference", "parity", "fast", "float32_smoke"):
+    for quantity in sorted(QUANTITY_TOLERANCE_BUCKETS):
+        bucket, rtol, atol = quantity_parity_tolerance(quantity, runtime_tier=tier)
+        rows.append({"runtime_tier": tier, "quantity": quantity, "bucket": bucket, "rtol": rtol, "atol": atol})
+Path("/tmp/t2_9_tolerance_snapshot_after.json").write_text(json.dumps(rows, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+print(len(rows), rows[0], rows[-1])
+PY
+# 204 rows
+diff -u /tmp/t2_9_tolerance_snapshot_before.json /tmp/t2_9_tolerance_snapshot_after.json
+# passed, no diff
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/test_benchmark_helpers.py -k 'quantity_parity_tolerance or parity_ladder_tolerances'
+# 6 passed, 354 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py -k 'float32_smoke_tolerance_tier_routes_by_quantity or unknown_runtime_tolerance_tier_fails_closed or float32_smoke_keeps_gradient_as_diagnostic_failure'
+# 3 passed, 59 deselected
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff check benchmarks/validation_ladder_contract.py benchmarks/non_banana_example_cpp_jax_cpu_parity.py tests/test_benchmark_helpers.py tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py
+# All checks passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff format --check benchmarks/validation_ladder_contract.py benchmarks/non_banana_example_cpp_jax_cpu_parity.py tests/test_benchmark_helpers.py tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py
+# 4 files already formatted
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m py_compile benchmarks/validation_ladder_contract.py benchmarks/non_banana_example_cpp_jax_cpu_parity.py tests/test_benchmark_helpers.py tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py
+# passed
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy benchmarks/validation_ladder_contract.py
+# Success: no issues found in 1 source file
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy tests/geo/test_surface_fourier_jax.py
+# Success: no issues found in 1 source file
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy benchmarks/non_banana_example_cpp_jax_cpu_parity.py
+# existing broader benchmark mypy blockers remain: 36 errors in 5 files
+git diff --check -- benchmarks/validation_ladder_contract.py benchmarks/non_banana_example_cpp_jax_cpu_parity.py tests/test_benchmark_helpers.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
 ### 2026-06-01 — T2.4 spec dataclass auto-registration helper
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.4, with TORAX Phase 1 static/dynamic contract overlap.
@@ -855,6 +914,6 @@ git diff --unified=0 -- src/simsopt/backend/runtime.py tests/test_backend.py | r
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, and T2.7 SciPy adapter closure factory: finish a LOC-banked T2.1 reporting fold, do a T2.2 LOC-banking follow-up, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select a new untouched T2 factory such as T2.3 surface Fourier wrappers?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.3 surface Fourier facade slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, and T2.9 quantity-tolerance contract helper: finish a LOC-banked T2.1 reporting fold, do a T2.2 LOC-banking follow-up, complete the remaining T2.3 kernel-wrapper fold, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched T2 item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?

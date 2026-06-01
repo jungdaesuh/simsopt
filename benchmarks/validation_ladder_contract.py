@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Union
+from typing import Mapping, TypedDict, Union
 
 
 SHORT_RUN_SMOKE_MAXITER = 20
 TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG = "tier3_single_stage_outer_loop"
 
 ParityToleranceValue = Union[float, bool, None]
+
+
+class SingleStageProofContract(TypedDict):
+    default_maxiter: int
+    min_iterations: int
+    require_objective_decrease: bool
+    required_outer_optimizer_method: str
+    required_result_keys: tuple[str, ...]
 
 
 def _outer_optimizer_backend_choices():
@@ -20,7 +28,7 @@ def _outer_optimizer_backend_choices():
     return VALID_OUTER_OPTIMIZER_BACKENDS, render_invalid_optimizer_backend_message
 
 
-OPTIMIZER_DRIFT_TOLERANCES = {
+OPTIMIZER_DRIFT_TOLERANCES: dict[str, dict[str, float | None]] = {
     "tier1_stage2_value_gradient": {
         "objective_rel_tol": 1e-10,
         "gradient_rtol": 1e-9,
@@ -267,6 +275,69 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
     },
 }
 
+QUANTITY_TOLERANCE_BUCKETS: dict[str, str] = {
+    "field_B": "direct_kernel",
+    "field_GradAbsB": "direct_kernel",
+    "field_modB": "direct_kernel",
+    "surface_gamma": "direct_kernel",
+    "surface_unit_normal": "direct_kernel",
+    "Bdotn": "direct_kernel",
+    "objective_native_subtotal": "ls_wrapper_gradient",
+    "SquaredFlux": "ls_wrapper_gradient",
+    "SquaredFluxJAX": "ls_wrapper_gradient",
+    "gradient": "ls_wrapper_gradient",
+    "boozer_residual": "direct_kernel",
+    "area": "direct_kernel",
+    "volume": "direct_kernel",
+    "area_gradient": "derivative_heavy",
+    "volume_gradient": "derivative_heavy",
+    "qfm_residual": "direct_kernel",
+    "qfm_gradient": "derivative_heavy",
+    "pm_grid_payload": "direct_kernel",
+    "pm_moments": "direct_kernel",
+    "pm_residual": "direct_kernel",
+    "pm_proxy_residual": "direct_kernel",
+    "pm_objective": "direct_kernel",
+    "pm_proxy_objective": "direct_kernel",
+    "pm_history": "direct_kernel",
+    "pm_dipole_field_B": "direct_kernel",
+    "pm_proxy_dipole_field_B": "direct_kernel",
+    "pm_dipole_Bdotn": "direct_kernel",
+    "pm_proxy_dipole_Bdotn": "direct_kernel",
+    "wireframe_matrix": "direct_kernel",
+    "wireframe_current": "direct_kernel",
+    "wireframe_objective": "direct_kernel",
+    "wireframe_constraints": "direct_kernel",
+    "wireframe_field_B": "direct_kernel",
+    "wireframe_field_dB_by_dX": "derivative_heavy",
+    "wireframe_Bnormal": "direct_kernel",
+    "wireframe_gsco_flags": "direct_kernel",
+    "wireframe_gsco_history": "direct_kernel",
+    "wireframe_gsco_solution": "direct_kernel",
+    "trajectory_endpoint": "event_time_tracing",
+    "trajectory_t_final": "event_time_tracing",
+    "trajectory_status_code": "direct_kernel",
+    "phi_hit_xyz": "event_time_tracing",
+    "phi_hit_count": "direct_kernel",
+    "toroidal_flux": "direct_kernel",
+    "LpCurveForce": "direct_kernel",
+    "B2Energy": "direct_kernel",
+    "lp_curve_force_gradient": "derivative_heavy",
+    "b2_energy_gradient": "derivative_heavy",
+    "iota": "direct_kernel",
+    "major_radius": "direct_kernel",
+    "nq_symmetric_ratio": "direct_kernel",
+}
+FLOAT32_SMOKE_TOLERANCE_TIER = "float32_smoke"
+STRICT_RUNTIME_TOLERANCE_TIERS = frozenset(("cpu_reference", "parity", "fast"))
+FLOAT32_SMOKE_OBJECTIVE_QUANTITIES = frozenset(
+    {
+        "objective_native_subtotal",
+        "SquaredFlux",
+        "SquaredFluxJAX",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Reporting-only context (NOT a tolerance lane; does NOT gate)
 #
@@ -288,7 +359,7 @@ PARITY_LADDER_REPORTING_CONTEXT: dict[str, dict[str, object]] = {
     },
 }
 
-CI_REPRODUCIBILITY_CONTRACT = {
+CI_REPRODUCIBILITY_CONTRACT: dict[str, float | int] = {
     "gpu_reduction_order_max_ulp": 10,
     "gpu_reduction_order_rel_tol": 1e-12,
     "gpu_reduction_order_sample_size": 1000,
@@ -298,7 +369,7 @@ CI_REPRODUCIBILITY_CONTRACT = {
 }
 
 # Initial reduced-fixture ratchet for the grouped-adjoint memory probe.
-GROUPED_ADJOINT_MEMORY_BUDGETS = {
+GROUPED_ADJOINT_MEMORY_BUDGETS: dict[str, dict[str, dict[str, float | None]]] = {
     "real_single_stage_init": {
         "cpu": {
             "max_peak_rss_mb": 8192.0,
@@ -312,7 +383,7 @@ GROUPED_ADJOINT_MEMORY_BUDGETS = {
 }
 
 # Stage 2 floors mirror docs/source/jax_acceptance.rst.
-TIER5_PERFORMANCE_BUDGETS = {
+TIER5_PERFORMANCE_BUDGETS: dict[str, dict[str, dict[str, float | None]]] = {
     "stable_hardware_weekly": {
         "tier2_stage2_e2e": {
             "min_outer_speedup_vs_cpu": 1.25,
@@ -322,7 +393,7 @@ TIER5_PERFORMANCE_BUDGETS = {
     }
 }
 
-SINGLE_STAGE_PROOF_CONTRACTS = {
+SINGLE_STAGE_PROOF_CONTRACTS: dict[str, SingleStageProofContract] = {
     TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG: {
         "default_maxiter": 10,
         "min_iterations": 10,
@@ -337,7 +408,7 @@ SINGLE_STAGE_PROOF_CONTRACTS = {
     }
 }
 
-GPU_PROOF_PARITY_CONTRACTS = {
+GPU_PROOF_PARITY_CONTRACTS: dict[str, dict[str, str]] = {
     "stage2": {
         "value_lane": "tier2_stage2_e2e",
         "value_contract_key": "final_objective_rel_tol",
@@ -390,6 +461,25 @@ def _normalize_platform_key(value: str) -> str:
     return platform_key
 
 
+def _float_contract_value(values: Mapping[str, object], key: str) -> float:
+    value = values[key]
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        raise TypeError(f"Contract key {key!r} must hold a numeric value.")
+    return float(value)
+
+
+def _optional_float_contract_value(
+    values: Mapping[str, object],
+    key: str,
+) -> float | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        raise TypeError(f"Contract key {key!r} must hold a numeric value or None.")
+    return float(value)
+
+
 def parity_ladder_tolerances(lane: str) -> dict[str, ParityToleranceValue]:
     """Return the precision contract for a named parity-validation lane."""
     lane_key = _normalize_contract_key(lane)
@@ -399,6 +489,81 @@ def parity_ladder_tolerances(lane: str) -> dict[str, ParityToleranceValue]:
             f"Unknown parity ladder lane {lane!r}. Expected one of: {valid}."
         )
     return dict(PARITY_LADDER_TOLERANCES[lane_key])
+
+
+def quantity_uses_gradient_tolerance(quantity: str) -> bool:
+    """Return whether a quantity selects the float32 gradient tolerance lane."""
+    return "gradient" in quantity.lower()
+
+
+def _quantity_uses_float32_objective_tolerance(quantity: str, bucket: str) -> bool:
+    quantity_lower = quantity.lower()
+    return (
+        quantity in FLOAT32_SMOKE_OBJECTIVE_QUANTITIES
+        or "objective" in quantity_lower
+        or (
+            bucket == "ls_wrapper_gradient"
+            and not quantity_uses_gradient_tolerance(quantity)
+        )
+    )
+
+
+def quantity_parity_tolerance(
+    quantity: str,
+    *,
+    runtime_tier: str,
+) -> tuple[str, float, float]:
+    """Return ``(bucket, rtol, atol)`` for a named parity quantity.
+
+    The mapping preserves the non-banana harness contract: strict runtime
+    tiers route through quantity buckets, while the float32 smoke tier
+    selects value/objective/gradient tolerances from its runtime lane.
+    """
+    bucket = QUANTITY_TOLERANCE_BUCKETS.get(quantity, "direct_kernel")
+    runtime_tier_key = _normalize_contract_key(runtime_tier)
+    if runtime_tier_key == FLOAT32_SMOKE_TOLERANCE_TIER:
+        tolerances = parity_ladder_tolerances(runtime_tier_key)
+        if quantity_uses_gradient_tolerance(quantity):
+            return (
+                runtime_tier_key,
+                _float_contract_value(tolerances, "gradient_rtol"),
+                _float_contract_value(tolerances, "gradient_atol"),
+            )
+        if _quantity_uses_float32_objective_tolerance(quantity, bucket):
+            return (
+                runtime_tier_key,
+                _float_contract_value(tolerances, "objective_rtol"),
+                _float_contract_value(tolerances, "objective_atol"),
+            )
+        return (
+            runtime_tier_key,
+            _float_contract_value(tolerances, "rtol"),
+            _float_contract_value(tolerances, "atol"),
+        )
+    if runtime_tier_key not in STRICT_RUNTIME_TOLERANCE_TIERS:
+        raise RuntimeError(
+            f"Unsupported runtime tolerance tier {runtime_tier!r} for "
+            "non-banana example parity harness."
+        )
+
+    tolerances = parity_ladder_tolerances(bucket)
+    if bucket == "event_time_tracing":
+        return (
+            bucket,
+            _float_contract_value(tolerances, "state_vector_rtol"),
+            _float_contract_value(tolerances, "state_vector_atol"),
+        )
+    if "first_derivative_rtol" in tolerances and "rtol" not in tolerances:
+        return (
+            bucket,
+            _float_contract_value(tolerances, "first_derivative_rtol"),
+            _float_contract_value(tolerances, "first_derivative_atol"),
+        )
+    return (
+        bucket,
+        _float_contract_value(tolerances, "rtol"),
+        _float_contract_value(tolerances, "atol"),
+    )
 
 
 def comparison_failure_gates_verdict(entry: Mapping[str, object]) -> bool:
@@ -440,29 +605,29 @@ def evaluate_grouped_adjoint_memory_budget(
     budget: dict[str, float | None],
 ) -> list[str]:
     failures: list[str] = []
-    peak_rss_mb = metrics.get("peak_rss_mb")
+    peak_rss_mb = _optional_float_contract_value(metrics, "peak_rss_mb")
     max_peak_rss_mb = budget.get("max_peak_rss_mb")
     if (
         max_peak_rss_mb is not None
         and peak_rss_mb is not None
-        and float(peak_rss_mb) > float(max_peak_rss_mb)
+        and peak_rss_mb > max_peak_rss_mb
     ):
         failures.append(
             "Grouped-adjoint memory probe peak RSS "
-            f"{float(peak_rss_mb):.2f} MB exceeded checked-in budget "
-            f"{float(max_peak_rss_mb):.2f} MB."
+            f"{peak_rss_mb:.2f} MB exceeded checked-in budget "
+            f"{max_peak_rss_mb:.2f} MB."
         )
-    peak_gpu_memory_mb = metrics.get("peak_gpu_memory_mb")
+    peak_gpu_memory_mb = _optional_float_contract_value(metrics, "peak_gpu_memory_mb")
     max_peak_gpu_memory_mb = budget.get("max_peak_gpu_memory_mb")
     if (
         max_peak_gpu_memory_mb is not None
         and peak_gpu_memory_mb is not None
-        and float(peak_gpu_memory_mb) > float(max_peak_gpu_memory_mb)
+        and peak_gpu_memory_mb > max_peak_gpu_memory_mb
     ):
         failures.append(
             "Grouped-adjoint memory probe peak GPU memory "
-            f"{float(peak_gpu_memory_mb):.2f} MB exceeded checked-in budget "
-            f"{float(max_peak_gpu_memory_mb):.2f} MB."
+            f"{peak_gpu_memory_mb:.2f} MB exceeded checked-in budget "
+            f"{max_peak_gpu_memory_mb:.2f} MB."
         )
     return failures
 
@@ -493,9 +658,14 @@ def single_stage_proof_contract(
         raise ValueError(
             f"Unknown single-stage proof rung {rung!r}. Expected one of: {valid}."
         )
-    contract = dict(SINGLE_STAGE_PROOF_CONTRACTS[rung])
-    contract["required_result_keys"] = tuple(contract["required_result_keys"])
-    return contract
+    contract = SINGLE_STAGE_PROOF_CONTRACTS[rung]
+    return {
+        "default_maxiter": contract["default_maxiter"],
+        "min_iterations": contract["min_iterations"],
+        "require_objective_decrease": contract["require_objective_decrease"],
+        "required_outer_optimizer_method": contract["required_outer_optimizer_method"],
+        "required_result_keys": tuple(contract["required_result_keys"]),
+    }
 
 
 def gpu_proof_parity_contract(
@@ -512,7 +682,9 @@ def gpu_proof_parity_contract(
             f"Expected one of: {valid}."
         )
 
-    contract = dict(GPU_PROOF_PARITY_CONTRACTS[probe_key])
+    contract: dict[str, float | str] = {
+        key: value for key, value in GPU_PROOF_PARITY_CONTRACTS[probe_key].items()
+    }
     value_lane = str(contract["value_lane"])
     value_contract_key = str(contract["value_contract_key"])
     gradient_lane = str(contract["gradient_lane"])
@@ -524,8 +696,14 @@ def gpu_proof_parity_contract(
     else:
         gradient_tolerances = parity_ladder_tolerances(gradient_lane)
 
-    contract["value_rtol"] = float(value_tolerances[value_contract_key])
-    contract["gradient_rtol"] = float(gradient_tolerances[gradient_contract_key])
+    contract["value_rtol"] = _float_contract_value(
+        value_tolerances,
+        value_contract_key,
+    )
+    contract["gradient_rtol"] = _float_contract_value(
+        gradient_tolerances,
+        gradient_contract_key,
+    )
     return contract
 
 
@@ -542,33 +720,40 @@ def evaluate_tier5_performance_budget(
             )
             continue
         min_outer_speedup = rung_budget.get("min_outer_speedup_vs_cpu")
-        outer_speedup = rung_summary.get("outer_speedup_vs_cpu")
+        outer_speedup = _optional_float_contract_value(
+            rung_summary,
+            "outer_speedup_vs_cpu",
+        )
         if min_outer_speedup is not None:
-            if outer_speedup is None or float(outer_speedup) < float(min_outer_speedup):
+            if outer_speedup is None or outer_speedup < min_outer_speedup:
                 failures.append(
                     f"{rung_name} outer first-run wall-clock speedup "
-                    f"{'n/a' if outer_speedup is None else f'{float(outer_speedup):.2f}x'} "
-                    f"fell below checked-in floor {float(min_outer_speedup):.2f}x."
+                    f"{'n/a' if outer_speedup is None else f'{outer_speedup:.2f}x'} "
+                    f"fell below checked-in floor {min_outer_speedup:.2f}x."
                 )
         min_warm_speedup = rung_budget.get("min_warm_speedup_vs_cpu")
-        warm_speedup = rung_summary.get("warm_speedup_vs_cpu")
+        warm_speedup = _optional_float_contract_value(
+            rung_summary,
+            "warm_speedup_vs_cpu",
+        )
         if min_warm_speedup is not None:
-            if warm_speedup is None or float(warm_speedup) < float(min_warm_speedup):
+            if warm_speedup is None or warm_speedup < min_warm_speedup:
                 failures.append(
                     f"{rung_name} warm steady-state speedup "
-                    f"{'n/a' if warm_speedup is None else f'{float(warm_speedup):.2f}x'} "
-                    f"fell below checked-in floor {float(min_warm_speedup):.2f}x."
+                    f"{'n/a' if warm_speedup is None else f'{warm_speedup:.2f}x'} "
+                    f"fell below checked-in floor {min_warm_speedup:.2f}x."
                 )
         max_compile_overhead = rung_budget.get("max_compile_overhead_s")
-        compile_overhead = rung_summary.get("lane_compile_overhead_s")
+        compile_overhead = _optional_float_contract_value(
+            rung_summary,
+            "lane_compile_overhead_s",
+        )
         if max_compile_overhead is not None:
-            if compile_overhead is None or float(compile_overhead) > float(
-                max_compile_overhead
-            ):
+            if compile_overhead is None or compile_overhead > max_compile_overhead:
                 failures.append(
                     f"{rung_name} compile overhead "
-                    f"{'n/a' if compile_overhead is None else f'{float(compile_overhead):.2f}s'} "
-                    f"exceeded checked-in ceiling {float(max_compile_overhead):.2f}s."
+                    f"{'n/a' if compile_overhead is None else f'{compile_overhead:.2f}s'} "
+                    f"exceeded checked-in ceiling {max_compile_overhead:.2f}s."
                 )
     return failures
 

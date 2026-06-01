@@ -240,6 +240,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** T2.3 `surface_fourier.py` facade wrapper factories were executed under the bloat plan, not as a new TORAX runtime phase. The slice preserves public non-RZ surface symbols, keeps composed geometry explicit, banks 165 source LOC in `src/simsopt/jax_core/surface_fourier.py`, and records exact CPU/X64 validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. CUDA/MPS, persistent-cache, branch/JAXPR, and numerical-stability TORAX gates remain open.
 
+**2026-06-01 cross-link:** T2.9 quantity-aware tolerance extraction was executed under the bloat plan as a numerical-contract SSOT slice. `benchmarks/validation_ladder_contract.py` now owns `QUANTITY_TOLERANCE_BUCKETS` and `quantity_parity_tolerance(...)`; the non-banana harness keeps `_tolerance_for(quantity)` as a compatibility wrapper. A 204-row pre/post snapshot proved unchanged `(bucket, rtol, atol)` results for every migrated quantity across `cpu_reference`, `parity`, `fast`, and `float32_smoke`; focused float32 diagnostic tests and source-only `mypy` for `validation_ladder_contract.py` passed. This closes the tolerance-policy contract migration but is not LOC-banked.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.
