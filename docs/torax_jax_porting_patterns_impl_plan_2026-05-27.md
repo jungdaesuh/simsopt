@@ -2,13 +2,13 @@
 
 ## Review Envelope
 
-- Target repo: `/Users/suhjungdae/code/columbia/simsopt-jax`
+- Target repo: `/Users/suhjungdae/code/columbia/simsopt-jax-shared-jax`
 - Target repo HEAD originally reviewed: `431a517fb`
-- Target repo HEAD refreshed: `2bcaeff28` (2026-05-30 doc-review correction)
+- Target repo HEAD refreshed: `b267b0d95` (2026-05-31 current-checkout refresh)
 - Reference repo: `/Users/suhjungdae/code/opensource/torax`
-- Reference repo HEAD reviewed: `60190df1`
-- Worktree note: this v6 correction observed pre-existing tracked edits in `src/simsopt/geo/surfaceobjectives_jax.py`, `src/simsopt/jax_core/mps_boozer_kernel_contract.py`, `tests/geo/test_surface_objectives_jax.py`, and `tests/jax_core/test_mps_boozer_kernel_contract.py`, plus untracked local dirs (`.antigravitycli/`, `.conda/`, `analysis/`, `runs/`). This plan does not modify those files.
-- **Refresh (2026-05-30):** the line refs in this plan were first re-verified against HEAD `21c3d517d`; this doc-review correction refreshes the live status to HEAD `2bcaeff28` and corrects the stale refs inline below. Official JAX contracts for persistent cache, `lax.scan`, `lax.while_loop`, and `lax.cond` were rechecked through Context7 during this correction pass. The original review HEAD `431a517fb` is now historical, but the patterns and plan structure are unchanged.
+- Reference repo HEAD reviewed: `60190df1` (clean `main`)
+- Worktree note: this 2026-05-31 refresh ran from a clean tracked checkout (`git status --short` empty) on `shared-jax-clean`.
+- **Refresh (2026-05-31):** the line refs in this plan were first re-verified against HEAD `21c3d517d`, then corrected against `2bcaeff28`; this pass refreshes the live status to HEAD `b267b0d95` after the MPS custom-kernel commit sequence and updates the refs that moved. Official JAX contracts for persistent cache, `lax.scan`, `lax.while_loop`, and `lax.cond` were rechecked through Context7 during this correction pass. The original review HEAD `431a517fb` is now historical, but the patterns and plan structure are unchanged.
 
 ## Purpose
 
@@ -64,7 +64,7 @@ References:
 | Surface | Current evidence | Plan relevance |
 | --- | --- | --- |
 | JAX spec contracts | `src/simsopt/jax_core/specs.py:1` | Explicit immutable specs and data/meta field partitions are the SSOT to harden first. |
-| Validation cache policy | `benchmarks/validation_ladder_common.py:153` (`apply_compilation_cache_policy`), `benchmarks/validation_ladder_common.py:385` (`current_compilation_cache_metadata`) | Cache settings and provenance are already explicit enough to test. |
+| Validation cache policy | `benchmarks/validation_ladder_common.py:159` (`apply_compilation_cache_policy`), `benchmarks/validation_ladder_common.py:390` (`current_compilation_cache_metadata`) | Cache settings and provenance are already explicit enough to test. |
 | Backend runtime cache/transfer policy | `src/simsopt/backend/runtime.py:1372`, `src/simsopt/backend/runtime.py:2381`, `src/simsopt/backend/runtime.py:2384-2386` | Runtime policy should remain opt-in and environment-driven before JAX import. |
 | Existing persistent-cache write smoke | `tests/subprocess/import_smoke_cases.py:711`, `tests/test_jax_import_smoke.py:614` | Current coverage proves a small kernel writes a cache entry; the remaining gap is cross-process reuse. |
 | Host boundary helpers | `src/simsopt/_core/jax_host_boundary.py:14` | Host materialization should stay explicit and direction-specific. |
