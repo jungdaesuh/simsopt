@@ -1021,6 +1021,67 @@ git diff --check -- benchmarks/validation_ladder_contract.py benchmarks/non_bana
 # passed
 ```
 
+### 2026-06-01 — T3.2 Biot-Savart points-helper LOC-banking follow-up
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T3.2.
+- **Selected slice:** point-management duplication only. `coil_cotangents_to_dofs_gradient`, coil/introspection layout, field-evaluation kernels, state-token generation, uniform `CurveXYZFourier` fast path, and Stage 2 objective behavior were not changed.
+- **Changed files:** `src/simsopt/field/biotsavart_jax_backend.py`, plus this plan set.
+- **Design-it-twice gate:** Option A, hoisting both points and cotangent projection into one larger mixin, was rejected because the cotangent bodies now encode different contracts: the spec-backed class uses the jitted extraction-spec helper, while the live class keeps fallback-compatible projection. Option B, selected here, hoists only duplicate point-state helper bodies into private module-level helpers, keeps public methods class-local so introspection/type metadata is preserved, and leaves `BiotSavartJAX.clear_points()` live-class-only.
+- **Scope status:** points-only LOC-banked, full T3.2 still open. `biotsavart_jax_backend.py` moved from 2,301 to 2,299 LOC for this slice (`29 insertions / 31 deletions`, `-2`). Do not bank the old `~250` estimate until cotangent reconciliation has fallback coverage and proves source-negative.
+- **Caller/inventory evidence:** `rg` found point API callers in flux objectives, wireframe optimization, interpolated/dipole/poloidal/Reiman/Dommaschk/wireframe field wrappers, import smokes, Biot-Savart field tests, single-stage integration tests, and Stage 2 integration tests. The only current `clear_points()` caller remains `wireframe_optimization_jax.py`, guarded by `isinstance(field, BiotSavartJAX)`.
+- **Compatibility evidence:** both adapters still expose `set_points`, `set_points_cart`, `set_points_cyl`, `set_points_from_spec`, `get_points_cart_ref`, `get_points_cart`, `get_points_cyl`, and `field_eval_spec`; the live adapter alone exposes `clear_points`. Public methods remain class-local, so `BiotSavartJAX.set_points.__qualname__`, `SpecBackedBiotSavartJAX.set_points.__qualname__`, signatures, and `SpecBackedBiotSavartJAX` `FieldEvalSpec` annotations are preserved. `BiotSavartJAX.set_points(...)` also preserves its no-host-round-trip path for JAX arrays.
+- **Validation evidence:** CPU/X64 point-contract proof, not CUDA/MPS or full Stage 2 parity proof.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_cylindrical_public_accessors_parity_ncsx tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_cylindrical_public_accessors_use_cached_phi_basis_ncsx tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_cartesian_public_accessors_normalize_cylindrical_phi_ncsx tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity::test_spec_backed_cylindrical_public_accessors_parity_ncsx
+# 4 passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/integration/test_single_stage_jax_cpu_reference.py::TestAdjointSolveConsistency::test_field_eval_spec_round_trip_uses_immutable_points tests/integration/test_single_stage_jax_cpu_reference.py::TestAdjointSolveConsistency::test_set_points_promotes_float32_inputs_to_float64
+# 2 passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_ENABLE_X64=1 .conda/jax/bin/python - <<'PY'
+import inspect
+import jax.numpy as jnp
+import numpy as np
+from simsopt.field.biotsavart_jax_backend import BiotSavartJAX, SpecBackedBiotSavartJAX
+from simsopt.field.coil import Coil, Current
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
+from simsopt.jax_core.specs import FieldEvalSpec, make_biot_savart_spec
+curve = CurveXYZFourier(16, 1)
+coil = Coil(curve, Current(1.0))
+field = BiotSavartJAX([coil])
+points = jnp.asarray([[1.0, 0.0, 0.0]], dtype=jnp.float64)
+assert field.set_points(points) is field
+field_eval_spec = field.field_eval_spec()
+assert isinstance(field_eval_spec, FieldEvalSpec)
+spec = make_biot_savart_spec(coil_dof_extraction=field.coil_dof_extraction_spec(), coil_dofs=np.asarray(field.x, dtype=np.float64))
+spec_field = SpecBackedBiotSavartJAX(spec)
+assert spec_field.set_points_from_spec(field_eval_spec) is spec_field
+np.testing.assert_allclose(np.asarray(spec_field.get_points_cart()), np.asarray(points))
+assert BiotSavartJAX.set_points.__qualname__ == "BiotSavartJAX.set_points"
+assert SpecBackedBiotSavartJAX.set_points.__qualname__ == "SpecBackedBiotSavartJAX.set_points"
+assert inspect.signature(BiotSavartJAX.set_points) == inspect.Signature(
+    parameters=[inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD), inspect.Parameter("points", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+)
+assert "field_eval_spec" in SpecBackedBiotSavartJAX.set_points_from_spec.__annotations__
+assert "return" in SpecBackedBiotSavartJAX.field_eval_spec.__annotations__
+assert hasattr(field, "clear_points")
+assert not hasattr(spec_field, "clear_points")
+print(BiotSavartJAX.set_points.__qualname__, SpecBackedBiotSavartJAX.set_points.__qualname__)
+PY
+# BiotSavartJAX.set_points SpecBackedBiotSavartJAX.set_points
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff check src/simsopt/field/biotsavart_jax_backend.py tests/field/test_biotsavart_jax.py tests/integration/test_single_stage_jax_cpu_reference.py
+# All checks passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff format --check src/simsopt/field/biotsavart_jax_backend.py
+# 1 file already formatted
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile src/simsopt/field/biotsavart_jax_backend.py
+# passed
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy src/simsopt/field/biotsavart_jax_backend.py
+# pre-existing blocker: SpecBackedBiotSavartJAX.x property and save override errors
+git diff --check -- src/simsopt/field/biotsavart_jax_backend.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
+- **Review evidence:** initial Crucible Phase 1 found one real public-metadata regression: moving public point methods directly onto `_BiotSavartPointsMixin` changed public `__qualname__` values and dropped `SpecBackedBiotSavartJAX` `FieldEvalSpec` annotations. Delta review then found that the first fix had dropped public `BiotSavartJAX` docstrings. The final implementation keeps the public methods class-local, restores their docstrings/annotations/signatures, and factors only shared helper bodies into private module-level functions. This reduces the banked LOC from the draft 32-line fold to 2 source LOC, but preserves the API metadata.
+
 ### 2026-06-01 — T2.4 spec dataclass auto-registration helper
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.4, with TORAX Phase 1 static/dynamic contract overlap.
@@ -1175,6 +1236,6 @@ git diff --unified=0 -- src/simsopt/backend/runtime.py tests/test_backend.py | r
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, and T2.9 quantity-tolerance contract helper: finish a LOC-banked T2.1 reporting fold, attempt the remaining T2.2 subset-builder profile-family follow-up only with benchmark proof, complete the remaining T2.3 product-rule formula fold only if it stays readable, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched T2 item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish a LOC-banked T2.1 reporting fold, attempt the remaining T2.2 subset-builder profile-family follow-up only with benchmark proof, complete the remaining T2.3 product-rule formula fold only if it stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?

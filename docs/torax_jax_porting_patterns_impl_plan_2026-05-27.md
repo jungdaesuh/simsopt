@@ -252,6 +252,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** T2.9 quantity-aware tolerance extraction was executed under the bloat plan as a numerical-contract SSOT slice. `benchmarks/validation_ladder_contract.py` now owns `QUANTITY_TOLERANCE_BUCKETS` and `quantity_parity_tolerance(...)`; the non-banana harness keeps `_tolerance_for(quantity)` as a compatibility wrapper. A 204-row pre/post snapshot proved unchanged `(bucket, rtol, atol)` results for every migrated quantity across `cpu_reference`, `parity`, `fast`, and `float32_smoke`; focused float32 diagnostic tests and source-only `mypy` for `validation_ladder_contract.py` passed. This closes the tolerance-policy contract migration but is not LOC-banked.
 
+**2026-06-01 cross-link:** The T3.2 Biot-Savart points-helper follow-up was executed under the bloat plan, not as a TORAX runtime phase. It centralizes duplicate mutable point-state helper bodies shared by `SpecBackedBiotSavartJAX` and `BiotSavartJAX` in `src/simsopt/field/biotsavart_jax_backend.py`, banks 2 source LOC after preserving public method metadata, preserves the live no-host-round-trip JAX-array point path, and leaves `coil_cotangents_to_dofs_gradient` open because the spec-backed and live fallback contracts have diverged. CPU/X64 point/cylindrical/spec validation is recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`; this is not CUDA/MPS or Stage 2 parity proof.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.

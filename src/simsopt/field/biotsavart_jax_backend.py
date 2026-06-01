@@ -482,6 +482,26 @@ class SpecBackedCurve(Optimizable):
         return self._owner_derivative_from_curve_cotangent(coeff_cotangent)
 
 
+def _set_biot_savart_points(field, points):
+    field._points_jax = _as_jax_float64(points)
+    field._points_cyl_jax = None
+    field._points_version += 1
+    return field
+
+
+def _set_biot_savart_points_cyl(field, points_cyl):
+    field._points_cyl_jax = _canonical_set_points_cyl(points_cyl)
+    field._points_jax = _cyl_points_to_cart(field._points_cyl_jax)
+    field._points_version += 1
+    return field
+
+
+def _get_biot_savart_points_cyl(field):
+    if field._points_cyl_jax is not None:
+        return host_array(field._points_cyl_jax, dtype=np.float64)
+    return host_array(_cart_points_to_cyl(field._points_jax), dtype=np.float64)
+
+
 class _BiotSavartFieldEvaluationMixin:
     """Shared grouped-kernel field API for graph-backed and spec-backed fields."""
 
@@ -729,25 +749,16 @@ class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         return list(self.coil_set_spec_from_dofs(coil_dofs).field_inputs())
 
     def set_points(self, points: object):
-        self._points_jax = _as_jax_float64(points)
-        self._points_cyl_jax = None
-        self._points_version += 1
-        return self
+        return _set_biot_savart_points(self, points)
 
     def set_points_cart(self, points: object):
-        return self.set_points(points)
+        return _set_biot_savart_points(self, points)
 
     def set_points_cyl(self, points_cyl: object):
-        self._points_cyl_jax = _canonical_set_points_cyl(points_cyl)
-        self._points_jax = _cyl_points_to_cart(self._points_cyl_jax)
-        self._points_version += 1
-        return self
+        return _set_biot_savart_points_cyl(self, points_cyl)
 
     def set_points_from_spec(self, field_eval_spec: FieldEvalSpec):
-        self._points_jax = _as_jax_float64(field_eval_spec.points)
-        self._points_cyl_jax = None
-        self._points_version += 1
-        return self
+        return _set_biot_savart_points(self, field_eval_spec.points)
 
     def get_points_cart_ref(self):
         return self._points_jax
@@ -756,9 +767,7 @@ class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         return host_array(self._points_jax, dtype=np.float64)
 
     def get_points_cyl(self):
-        if self._points_cyl_jax is not None:
-            return host_array(self._points_cyl_jax, dtype=np.float64)
-        return host_array(_cart_points_to_cyl(self._points_jax), dtype=np.float64)
+        return _get_biot_savart_points_cyl(self)
 
     def field_eval_spec(self) -> FieldEvalSpec:
         return make_field_eval_spec(self._points_jax)
@@ -1728,19 +1737,13 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         points_array = (
             points if isinstance(points, jax.Array) else np.ascontiguousarray(points)
         )
-        self._points_jax = _as_jax_float64(points_array)
-        self._points_cyl_jax = None
-        self._points_version += 1
-        return self
+        return _set_biot_savart_points(self, points_array)
 
     def set_points_cart(self, points):
         return self.set_points(points)
 
     def set_points_cyl(self, points_cyl):
-        self._points_cyl_jax = _canonical_set_points_cyl(points_cyl)
-        self._points_jax = _cyl_points_to_cart(self._points_cyl_jax)
-        self._points_version += 1
-        return self
+        return _set_biot_savart_points_cyl(self, points_cyl)
 
     def get_points_cart_ref(self):
         """Return the current JAX point buffer for point-preserving callers."""
@@ -1750,9 +1753,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         return host_array(self._points_jax, dtype=np.float64)
 
     def get_points_cyl(self):
-        if self._points_cyl_jax is not None:
-            return host_array(self._points_cyl_jax, dtype=np.float64)
-        return host_array(_cart_points_to_cyl(self._points_jax), dtype=np.float64)
+        return _get_biot_savart_points_cyl(self)
 
     def clear_points(self) -> None:
         """Clear the mutable point buffer."""
@@ -1765,10 +1766,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
 
         This still mutates the receiving ``BiotSavartJAX`` instance.
         """
-        self._points_jax = _as_jax_float64(field_eval_spec.points)
-        self._points_cyl_jax = None
-        self._points_version += 1
-        return self
+        return _set_biot_savart_points(self, field_eval_spec.points)
 
     def field_eval_spec(self):
         """Build the immutable field-evaluation spec for the current points."""
