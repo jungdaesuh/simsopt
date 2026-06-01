@@ -756,6 +756,54 @@ PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/
 - **Known non-slice tooling note:** `ruff format --check` over the two unmodified parity test files still reports pre-existing formatting drift (`Would reformat`); source-only format for the changed file passes.
 - **Review evidence:** initial API/behavior review found a real public-introspection regression in the first narrow factory draft: generated wrappers preserved signatures and names but exposed `_from_dofs` through `__code__.co_name` / `inspect.getsource(...)` and had weaker public docs. The final implementation fixed that by keeping explicit public wrappers while factoring only the shared evaluator body. Delta API/behavior, docs/accounting, and design/tooling reviewers then returned strict PASS: public signatures, `__name__`, `__qualname__`, `__module__`, `__code__.co_name`, source introspection, and docs are preserved; LOC accounting is `58 insertions / 248 deletions` (`-190`) for this source slice and `355` banked across completed T2.3 slices; the narrow `fmt: off` blocks are accepted as table-like wrapper/doc assignments; and no runtime, tooling, or scope findings remain.
 
+### 2026-06-01 — T2.3 `SurfaceXYZFourier` unpack fold
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.3.
+- **Selected slice:** only the repeated `SurfaceXYZFourier` flat-DOF to `(xc, xs, yc, ys, zc, zs)` coefficient unpack inside the nine analytic lower-level wrappers. The wrappers now call the existing `_scatter_surface_xyzfourier_dofs(...)` helper directly. No analytic derivative formula, paired derivative helper, coefficient-Jacobian factory, composed area/volume/unit-normal helper, CPU geometry code, backend/cache policy, CUDA/MPS path, transfer policy, or public symbol deletion was changed.
+- **Changed files:** `src/simsopt/jax_core/surface_fourier_kernels.py`, plus this plan set.
+- **Design-it-twice gate:** a formula-table factory was rejected because the explicit `SurfaceXYZFourier` derivatives carry distinct rotation/product-rule terms. A broader coefficient-Jacobian merge was rejected because Jacobian/Hessian wrappers already have separate tensor and XYZ signatures. A same-layer helper around `_scatter_surface_xyzfourier_dofs(...)` also was rejected after design review as a shallow pass-through. The landed design factors only by calling the existing coefficient-unpack SSOT from each analytic wrapper and leaves public wrappers and formulas readable.
+- **Scope status:** unpack LOC-banked, full T2.3 still open. `surface_fourier_kernels.py` is source-negative by 51 LOC for this slice (`15 insertions / 66 deletions`), bringing completed T2.3 banked source reduction to 406 LOC across the facade, tensor-kernel, and XYZ unpack slices. The old full-item `~550` estimate still is not banked because `SurfaceXYZFourier` analytic formulas and coefficient-Jacobian families remain explicit follow-ups.
+- **Validation evidence:** CPU/X64 `SurfaceXYZFourier` geometry, tangent, coefficient-Jacobian, paired-linear, and non-RZ fundamental-form proof, not CUDA/MPS proof.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python - <<'PY'
+import inspect
+from simsopt.jax_core import surface_fourier_kernels as k
+expected = '(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, coeff_template=None)'
+for name in [
+    'surface_xyzfourier_gamma_from_dofs',
+    'surface_xyzfourier_gamma_lin_from_dofs',
+    'surface_xyzfourier_gammadash1_from_dofs',
+    'surface_xyzfourier_gammadash1_lin_from_dofs',
+    'surface_xyzfourier_gammadash2_from_dofs',
+    'surface_xyzfourier_gammadash2_lin_from_dofs',
+    'surface_xyzfourier_gammadash1dash1_from_dofs',
+    'surface_xyzfourier_gammadash1dash2_from_dofs',
+    'surface_xyzfourier_gammadash2dash2_from_dofs',
+]:
+    fn = getattr(k, name)
+    assert str(inspect.signature(fn)) == expected
+    assert fn.__code__.co_name == name
+    assert inspect.getsource(fn).lstrip().startswith(f'def {name}(')
+print('xyzfourier-wrapper-introspection: PASS')
+PY
+# xyzfourier-wrapper-introspection: PASS
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff check src/simsopt/jax_core/surface_fourier_kernels.py
+# All checks passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/surface_fourier_kernels.py
+# 1 file already formatted
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m py_compile src/simsopt/jax_core/surface_fourier_kernels.py
+# passed
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy src/simsopt/jax_core/surface_fourier_kernels.py
+# Success: no issues found in 1 source file
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_surface_fourier_jax.py -k 'geometry_and_tangents_match_cpp or second_coordinate_derivative_dcoeff_match_cpp or tangent_derivative_columns_match_cpp or gamma_and_tangent_lin_match_cpp or higher_paired_lin_wrappers_match_cpp or non_rz_fundamental_form_derivatives_match_cpp'
+# 34 passed, 116 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_surface_fourier_jax.py::TestSurfaceXYZFourierJaxCppParity
+# 26 passed
+```
+
+- **Review evidence:** initial design/tooling review found and fixed one real issue: the first draft introduced a shallow `_surface_xyzfourier_coeffs_from_dofs(...)` pass-through around the existing `_scatter_surface_xyzfourier_dofs(...)` helper. The final implementation deletes that helper and calls the existing unpack SSOT directly from the nine explicit public wrappers. Delta API/behavior, docs/accounting, and design/tooling reviewers then returned strict PASS: public wrapper signatures/source introspection are preserved, stellsym/scatter/template routing remains on the existing helper, paired derivative and coefficient-Jacobian families are untouched, LOC accounting is `15 insertions / 66 deletions` (`-51`) for this source slice and `406` banked across completed T2.3 slices, and no runtime/tooling/scope findings remain.
+
 ### 2026-06-01 — T2.9 quantity-aware tolerance contract helper
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.9.
@@ -969,6 +1017,6 @@ git diff --unified=0 -- src/simsopt/backend/runtime.py tests/test_backend.py | r
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, and T2.9 quantity-tolerance contract helper: finish a LOC-banked T2.1 reporting fold, do a T2.2 LOC-banking follow-up, complete the remaining T2.3 `SurfaceXYZFourier`/coefficient-Jacobian kernel-wrapper fold, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched T2 item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, and T2.9 quantity-tolerance contract helper: finish a LOC-banked T2.1 reporting fold, do a T2.2 LOC-banking follow-up, complete the remaining T2.3 analytic-formula/coefficient-Jacobian kernel-wrapper fold, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched T2 item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?

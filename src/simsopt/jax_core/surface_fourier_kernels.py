@@ -1424,15 +1424,9 @@ def surface_xyzfourier_gamma_from_dofs(
     coeff_template=None,
 ):
     """Evaluate ``SurfaceXYZFourier.gamma()`` as a pure JAX function."""
-    xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
-        dofs,
-        mpol,
-        ntor,
-        stellsym,
-        scatter_indices,
-        coeff_template,
+    coeffs = _scatter_surface_xyzfourier_dofs(
+        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    coeffs = (xc, xs, yc, ys, zc, zs)
     base_basis = _surface_xyzfourier_separable_basis(
         quadpoints_phi,
         quadpoints_theta,
@@ -1464,12 +1458,7 @@ def surface_xyzfourier_gamma_lin_from_dofs(
 ):
     """Evaluate ``SurfaceXYZFourier.gamma_lin()`` as a pure JAX function."""
     xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
-        dofs,
-        mpol,
-        ntor,
-        stellsym,
-        scatter_indices,
-        coeff_template,
+        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
     cos_angle, sin_angle, _m, _n = _surface_xyzfourier_basis_paired(
         quadpoints_phi,
@@ -1501,15 +1490,9 @@ def surface_xyzfourier_gammadash1_from_dofs(
     coeff_template=None,
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash1()`` as a pure JAX function."""
-    xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
-        dofs,
-        mpol,
-        ntor,
-        stellsym,
-        scatter_indices,
-        coeff_template,
+    coeffs = _scatter_surface_xyzfourier_dofs(
+        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    coeffs = (xc, xs, yc, ys, zc, zs)
     base_basis = _surface_xyzfourier_separable_basis(
         quadpoints_phi,
         quadpoints_theta,
@@ -1562,12 +1545,7 @@ def surface_xyzfourier_gammadash1_lin_from_dofs(
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash1_lin()`` as pure JAX."""
     xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
-        dofs,
-        mpol,
-        ntor,
-        stellsym,
-        scatter_indices,
-        coeff_template,
+        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
     cos_angle, sin_angle, _m, n = _surface_xyzfourier_basis_paired(
         quadpoints_phi,
@@ -1611,15 +1589,9 @@ def surface_xyzfourier_gammadash2_from_dofs(
     coeff_template=None,
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash2()`` as a pure JAX function."""
-    xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
-        dofs,
-        mpol,
-        ntor,
-        stellsym,
-        scatter_indices,
-        coeff_template,
+    coeffs = _scatter_surface_xyzfourier_dofs(
+        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    coeffs = (xc, xs, yc, ys, zc, zs)
     dtheta_basis = _surface_xyzfourier_separable_basis(
         quadpoints_phi,
         quadpoints_theta,
@@ -1655,12 +1627,7 @@ def surface_xyzfourier_gammadash2_lin_from_dofs(
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash2_lin()`` as pure JAX."""
     xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
-        dofs,
-        mpol,
-        ntor,
-        stellsym,
-        scatter_indices,
-        coeff_template,
+        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
     cos_angle, sin_angle, m, _n = _surface_xyzfourier_basis_paired(
         quadpoints_phi,
@@ -1700,15 +1667,9 @@ def surface_xyzfourier_gammadash1dash1_from_dofs(
     coeff_template=None,
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash1dash1()`` as pure JAX."""
-    xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
-        dofs,
-        mpol,
-        ntor,
-        stellsym,
-        scatter_indices,
-        coeff_template,
+    coeffs = _scatter_surface_xyzfourier_dofs(
+        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    coeffs = (xc, xs, yc, ys, zc, zs)
     base_basis = _surface_xyzfourier_separable_basis(
         quadpoints_phi,
         quadpoints_theta,
@@ -1768,15 +1729,9 @@ def surface_xyzfourier_gammadash1dash2_from_dofs(
     coeff_template=None,
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash1dash2()`` as pure JAX."""
-    xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
-        dofs,
-        mpol,
-        ntor,
-        stellsym,
-        scatter_indices,
-        coeff_template,
+    coeffs = _scatter_surface_xyzfourier_dofs(
+        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    coeffs = (xc, xs, yc, ys, zc, zs)
     dtheta_basis = _surface_xyzfourier_separable_basis(
         quadpoints_phi,
         quadpoints_theta,
@@ -1828,15 +1783,9 @@ def surface_xyzfourier_gammadash2dash2_from_dofs(
     coeff_template=None,
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash2dash2()`` as pure JAX."""
-    xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
-        dofs,
-        mpol,
-        ntor,
-        stellsym,
-        scatter_indices,
-        coeff_template,
+    coeffs = _scatter_surface_xyzfourier_dofs(
+        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
     )
-    coeffs = (xc, xs, yc, ys, zc, zs)
     dtheta2_basis = _surface_xyzfourier_separable_basis(
         quadpoints_phi,
         quadpoints_theta,
