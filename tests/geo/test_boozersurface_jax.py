@@ -286,6 +286,15 @@ def test_boozer_result_core_helpers_match_schema_sources():
         newton_core
     )
 
+    hessian_values = {
+        field_name: object()
+        for field_name in _bsj._BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+    }
+    hessian_reporting = _bsj._ls_newton_reporting_fields(hessian_values)
+    assert set(hessian_reporting) == _bsj._BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+    for field_name, field_value in hessian_values.items():
+        assert hessian_reporting[field_name] is field_value
+
     exact_core = _bsj._boozer_exact_newton_result_core(
         residual=marker,
         fun=0.0,
@@ -3959,6 +3968,10 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         target = booz._pack_decision_vector(0.3, 0.05) - 0.01
         captured = {}
+        reporting_values = {
+            field_name: object()
+            for field_name in _bsj._BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+        }
 
         def fake_run_newton_polish_for_method(
             method,
@@ -3995,6 +4008,7 @@ class TestBoozerSurfaceJAXClass:
                 "hessian": jnp.eye(target.size, dtype=target.dtype),
                 "nit": 2,
                 "success": True,
+                **reporting_values,
             }
 
         monkeypatch.setattr(
@@ -4012,6 +4026,8 @@ class TestBoozerSurfaceJAXClass:
         _assert_result_record(res, _PUBLIC_NEWTON_RESULT_RECORD_TYPE)
         assert captured["method"] == "bfgs"
         assert res["success"] is True
+        for field_name, field_value in reporting_values.items():
+            assert res[field_name] is field_value
 
     def test_stale_bfgs_method_rejected(self):
         """The removed bfgs_method option must fail fast."""

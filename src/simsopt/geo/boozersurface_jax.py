@@ -3338,6 +3338,34 @@ def _exact_newton_reporting_fields(result):
     }
 
 
+def _ls_newton_reporting_fields(result):
+    """Pack Newton-polish Hessian diagnostics without changing solve paths."""
+    return {
+        "hessian_materialized": result.get("hessian_materialized"),
+        "dense_hessian_shape": result.get("dense_hessian_shape"),
+        "dense_hessian_bytes": result.get("dense_hessian_bytes"),
+        "max_dense_hessian_bytes": result.get("max_dense_hessian_bytes"),
+        "dense_newton_steps_materialized": result.get(
+            "dense_newton_steps_materialized"
+        ),
+        "dense_newton_steps_message": result.get("dense_newton_steps_message"),
+        "newton_iter": result.get("newton_iter"),
+        "final_gradient_norm": result.get("final_gradient_norm"),
+        "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
+        "iterative_refinement_ran": result.get("iterative_refinement_ran"),
+        "final_step_iterative_refinement_ran": result.get(
+            "final_step_iterative_refinement_ran"
+        ),
+        "dense_refinement_ran": result.get("dense_refinement_ran"),
+        "final_step_dense_refinement_ran": result.get(
+            "final_step_dense_refinement_ran"
+        ),
+        "failure_category": result.get("failure_category"),
+        "failure_stage": result.get("failure_stage"),
+        "message": result.get("message"),
+    }
+
+
 def _none_solve_quality_fields(field_names: tuple[str, ...]) -> dict[str, None]:
     """Return ``None`` placeholders for solve-quality reporting fields.
 
@@ -5743,32 +5771,9 @@ class BoozerSurfaceJAX(Optimizable):
             "grad": newton_result["grad"],
             "hessian": hessian,
             "optimizer_method": method,
+            **_ls_newton_reporting_fields(newton_result),
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             "ls_condition_estimate": ls_condition_estimate,
-            "hessian_materialized": newton_result.get("hessian_materialized"),
-            "dense_hessian_shape": newton_result.get("dense_hessian_shape"),
-            "dense_hessian_bytes": newton_result.get("dense_hessian_bytes"),
-            "max_dense_hessian_bytes": newton_result.get("max_dense_hessian_bytes"),
-            "dense_newton_steps_materialized": newton_result.get(
-                "dense_newton_steps_materialized"
-            ),
-            "dense_newton_steps_message": newton_result.get(
-                "dense_newton_steps_message"
-            ),
-            "newton_iter": newton_result.get("newton_iter"),
-            "final_gradient_norm": newton_result.get("final_gradient_norm"),
-            "final_gradient_inf_norm": newton_result.get("final_gradient_inf_norm"),
-            "iterative_refinement_ran": newton_result.get("iterative_refinement_ran"),
-            "final_step_iterative_refinement_ran": newton_result.get(
-                "final_step_iterative_refinement_ran"
-            ),
-            "dense_refinement_ran": newton_result.get("dense_refinement_ran"),
-            "final_step_dense_refinement_ran": newton_result.get(
-                "final_step_dense_refinement_ran"
-            ),
-            "failure_category": newton_result.get("failure_category"),
-            "failure_stage": newton_result.get("failure_stage"),
-            "message": newton_result.get("message"),
             "newton_polish_policy": str(self.options["newton_polish_policy"]),
             "newton_polish_skipped": False,
         }
@@ -6326,28 +6331,7 @@ class BoozerSurfaceJAX(Optimizable):
                     dense_linear_solve_factors_available=False,
                     linearization_residency=self.options["linearization_residency"],
                 ),
-                "hessian_materialized": result.get("hessian_materialized"),
-                "dense_hessian_shape": result.get("dense_hessian_shape"),
-                "dense_hessian_bytes": result.get("dense_hessian_bytes"),
-                "max_dense_hessian_bytes": result.get("max_dense_hessian_bytes"),
-                "dense_newton_steps_materialized": result.get(
-                    "dense_newton_steps_materialized"
-                ),
-                "dense_newton_steps_message": result.get("dense_newton_steps_message"),
-                "newton_iter": result.get("newton_iter"),
-                "final_gradient_norm": result.get("final_gradient_norm"),
-                "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
-                "iterative_refinement_ran": result.get("iterative_refinement_ran"),
-                "final_step_iterative_refinement_ran": result.get(
-                    "final_step_iterative_refinement_ran"
-                ),
-                "dense_refinement_ran": result.get("dense_refinement_ran"),
-                "final_step_dense_refinement_ran": result.get(
-                    "final_step_dense_refinement_ran"
-                ),
-                "failure_category": result.get("failure_category"),
-                "failure_stage": result.get("failure_stage"),
-                "message": result.get("message"),
+                **_ls_newton_reporting_fields(result),
                 **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             }
             res_record = self._store_boozer_result("newton", res)
@@ -6469,28 +6453,7 @@ class BoozerSurfaceJAX(Optimizable):
                 dense_linear_solve_factors_available=plu is not None,
                 linearization_residency=linearization_residency,
             ),
-            "hessian_materialized": result.get("hessian_materialized"),
-            "dense_hessian_shape": result.get("dense_hessian_shape"),
-            "dense_hessian_bytes": result.get("dense_hessian_bytes"),
-            "max_dense_hessian_bytes": result.get("max_dense_hessian_bytes"),
-            "dense_newton_steps_materialized": result.get(
-                "dense_newton_steps_materialized"
-            ),
-            "dense_newton_steps_message": result.get("dense_newton_steps_message"),
-            "newton_iter": result.get("newton_iter"),
-            "final_gradient_norm": result.get("final_gradient_norm"),
-            "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
-            "iterative_refinement_ran": result.get("iterative_refinement_ran"),
-            "final_step_iterative_refinement_ran": result.get(
-                "final_step_iterative_refinement_ran"
-            ),
-            "dense_refinement_ran": result.get("dense_refinement_ran"),
-            "final_step_dense_refinement_ran": result.get(
-                "final_step_dense_refinement_ran"
-            ),
-            "failure_category": result.get("failure_category"),
-            "failure_stage": result.get("failure_stage"),
-            "message": result.get("message"),
+            **_ls_newton_reporting_fields(result),
             # Scientific-equivalence ladder reporting fields per
             # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.1.
             # action_max / step_abs_diff are populated by the parity

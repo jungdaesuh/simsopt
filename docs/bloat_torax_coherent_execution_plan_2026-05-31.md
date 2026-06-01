@@ -642,6 +642,34 @@ git diff --check -- src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersu
 # passed
 ```
 
+### 2026-06-01 — T2.1 LS-Newton reporting LOC-banking follow-up
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.1.
+- **Selected slice:** repeated Hessian/Newton-polish reporting-field extraction used by traceable LS success and public LS Newton failure/success result dictionaries. Solver math, dense factorization, backend strings, VJP callback construction, solve-quality override fields, success/failure branching, and result-record schema constants were not changed.
+- **Changed files:** `src/simsopt/geo/boozersurface_jax.py`, `tests/geo/test_boozersurface_jax.py`, plus this plan set.
+- **Design-it-twice gate:** Option A, pushing the reporting keys into `_boozer_ls_newton_result_core(...)`, was rejected because failure-path and success-path solve-quality overrides would become less visible at the owning solve sites. Option B, selected here, adds `_ls_newton_reporting_fields(...)` beside `_exact_newton_reporting_fields(...)` and uses it only where the repeated `result.get(...)` payload is identical.
+- **Scope status:** T2.1 now has a small LOC-banked reporting follow-up, but the full historical `~130 LOC` target remains open. `boozersurface_jax.py` is source-negative by 37 LOC for this slice (`31 insertions / 68 deletions`; 7,255 -> 7,218 LOC). The tests tie each helper key to a distinct sentinel from `_BOOZER_HESSIAN_REPORTING_RESULT_KEYS` and prove a public LS-Newton result preserves those distinct reporting values.
+- **Validation evidence:** CPU/X64 result-packaging proof, not CUDA/MPS proof.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_boozersurface_jax.py::test_public_solver_result_record_registry_is_mode_aware tests/geo/test_boozersurface_jax.py::test_boozer_result_core_helpers_match_schema_sources
+# 2 passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_boozersurface_jax.py::test_public_solver_result_record_registry_is_mode_aware tests/geo/test_boozersurface_jax.py::test_boozer_result_core_helpers_match_schema_sources tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_result_dict_keys tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_run_code_traceable_exact_uses_operator_only_newton tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_run_code_traceable_ls_skip_policy_does_not_call_newton tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_run_code_traceable_ls_skips_lu_for_nonfinite_newton_result tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_run_code_functional_aliases_run_code_traceable_schema tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_run_code_traceable_exact_skips_lu_for_nonfinite_newton_result tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_public_newton_api_routes_without_legacy_vectorize_kwarg tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_run_code_sdofs_syncs_surface_on_ls_newton_failure tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_run_code_skip_policy_preserves_failed_ls_state_without_newton tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_invalid_newton_iterate_aborts_adjoint_state tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_exact_unsuccessful_finite_newton_exit_aborts_adjoint_state
+# 13 passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_boozersurface_jax.py -k "result_record or result_dict_keys or run_code_traceable"
+# 20 passed, 2 skipped, 457 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff check src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersurface_jax.py
+# All checks passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff format --check src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersurface_jax.py
+# 2 files already formatted
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersurface_jax.py
+# passed
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy src/simsopt/geo/boozersurface_jax.py
+# pre-existing blocker: callable annotations, quadpoint signatures, local guarded redefinition, grouped-field call arity
+git diff --check -- src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersurface_jax.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
 ### 2026-06-01 — T2.2 Boozer radial evaluator formula dedup
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.2.
@@ -1236,6 +1264,6 @@ git diff --unified=0 -- src/simsopt/backend/runtime.py tests/test_backend.py | r
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish a LOC-banked T2.1 reporting fold, attempt the remaining T2.2 subset-builder profile-family follow-up only with benchmark proof, complete the remaining T2.3 product-rule formula fold only if it stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: attempt the remaining T2.2 subset-builder profile-family follow-up only with benchmark proof, complete the remaining T2.3 product-rule formula fold only if it stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?
