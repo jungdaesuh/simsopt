@@ -1373,6 +1373,35 @@ git diff --check -- benchmarks/single_stage_init_parity.py tests/test_benchmark_
 # passed
 ```
 
+### 2026-06-01 — T2.8 comparison-scope `Counter` slice
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.8.
+- **Selected slice:** candidate/gradient comparison-scope count bookkeeping inside `compare_same_candidate_objective_replay(...)`. No replay payload keys, target-native prefix/full-vector scope labels, target-native rejection diagnostics, gradient/objective comparison tolerances, parity-census schema, same-candidate gate classification, or solver metadata behavior were changed.
+- **Changed files:** `benchmarks/single_stage_init_parity.py`, plus this bloat plan set.
+- **Design-it-twice gate:** a broad replay-count accumulator object was rejected because it would hide the public result-key mapping. The landed design uses local `Counter[str]` instances only for the two repeated increment sites and preserves the explicit `dict(...)` conversion at the return boundary.
+- **Scope status:** comparison-scope counter LOC-banked small; full T2.8 remains open. `benchmarks/single_stage_init_parity.py` is source-negative by 3 LOC for this slice (`6 insertions / 9 deletions`). Together with the earlier `LayerDriftTracker`, SciPy callback, and target-native predicate-cache slices, T2.8 has 22 benchmark LOC banked so far; the old `~200 LOC` estimate remains unbanked.
+- **Regression evidence:** target-native prefix/full-vector scope-count payloads remain covered by focused tests; the broader same-candidate selector still exercises the replay helper contract.
+- **Validation evidence:** CPU/X64 replay-helper proof, not full single-stage parity replay.
+
+```bash
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# All checks passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff format --check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# 2 files already formatted
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# passed
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/test_benchmark_helpers.py -k 'single_stage_init_same_candidate_replay_accepts_target_native_prefix or single_stage_init_same_candidate_replay_keeps_full_vector_shape_gate or single_stage_init_same_candidate_replay_rejects_target_prefix_mismatch or single_stage_init_same_candidate_replay_classifies_target_native_rejections'
+# 4 passed, 356 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/test_benchmark_helpers.py -k 'same_candidate'
+# 22 passed, 338 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy benchmarks/single_stage_init_parity.py
+# blocked: 132 pre-existing benchmark/example typing errors; the new comparison-scope Counter slice produced no distinct new gate-clean path
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found
+git diff --check -- benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# passed
+```
+
 ## Risks and Mitigations
 
 - Risk: A TORAX-inspired helper creates another abstraction layer without deleting real complexity.
@@ -1402,6 +1431,6 @@ git diff --check -- benchmarks/single_stage_init_parity.py tests/test_benchmark_
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?

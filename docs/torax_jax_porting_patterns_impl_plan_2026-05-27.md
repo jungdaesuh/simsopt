@@ -266,6 +266,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.8 target-native predicate-cache micro-slice was also executed under the bloat plan. It caches only the per-pair target-native rejection predicates inside `benchmarks/single_stage_init_parity.py`, banks 2 additional benchmark LOC, preserves replay payload keys, rejection diagnostics, gradient/hardware comparison semantics, and same-candidate gate classification, and records CPU/X64 target-native replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
 
+**2026-06-01 cross-link:** The T2.8 comparison-scope `Counter` micro-slice was also executed under the bloat plan. It replaces only the repeated candidate/gradient comparison-scope count increments inside `benchmarks/single_stage_init_parity.py`, banks 3 additional benchmark LOC, preserves explicit replay payload keys by converting the counters back to plain dicts at the result boundary, and records CPU/X64 scope-count replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.

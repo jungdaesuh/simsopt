@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from collections.abc import Iterator
 import contextlib
 from dataclasses import dataclass, field as dataclass_field
 import json
 import os
-from collections.abc import Iterator
 from pathlib import Path
 import sys
 import tempfile
@@ -3533,8 +3534,8 @@ def compare_same_candidate_objective_replay(
     same_candidate_event_count = 0
     target_native_replay_event_count = 0
     target_native_rejected_event_count = 0
-    candidate_comparison_scope_counts: dict[str, int] = {}
-    gradient_comparison_scope_counts: dict[str, int] = {}
+    candidate_comparison_scope_counts: Counter[str] = Counter()
+    gradient_comparison_scope_counts: Counter[str] = Counter()
     first_failure_event = None
     candidate_x_abs_tol = 0.0 if require_exact_candidates else _SAME_CANDIDATE_X_ATOL
     if require_exact_candidates and len(cpu_events) != len(jax_events):
@@ -3562,9 +3563,7 @@ def compare_same_candidate_objective_replay(
             jax_vector=jax_x,
             target_native_replay_event=target_native_replay_event,
         )
-        candidate_comparison_scope_counts[candidate_comparison_scope] = (
-            candidate_comparison_scope_counts.get(candidate_comparison_scope, 0) + 1
-        )
+        candidate_comparison_scope_counts[candidate_comparison_scope] += 1
         candidate_abs_diff = _max_abs_diff(comparable_jax_x, comparable_cpu_x)
         max_candidate_abs_diff = max(max_candidate_abs_diff, candidate_abs_diff)
         if candidate_abs_diff > candidate_x_abs_tol:
@@ -3743,9 +3742,7 @@ def compare_same_candidate_objective_replay(
                 jax_vector=_summary_vector(jax_event.get("optimizer_gradient")),
                 target_native_replay_event=target_native_replay_event,
             )
-            gradient_comparison_scope_counts[gradient_comparison_scope] = (
-                gradient_comparison_scope_counts.get(gradient_comparison_scope, 0) + 1
-            )
+            gradient_comparison_scope_counts[gradient_comparison_scope] += 1
             max_objective_abs_diff = max(
                 max_objective_abs_diff,
                 _compare_same_candidate_scalar(
