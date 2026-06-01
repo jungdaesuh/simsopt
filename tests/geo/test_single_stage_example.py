@@ -2860,35 +2860,144 @@ class SingleStageExampleTests(unittest.TestCase):
                 phi_abs = 2.0 * np.pi * float(phi)
                 return np.column_stack([R * np.cos(phi_abs), R * np.sin(phi_abs), Z])
 
-        stopping_criteria = [object(), object()]
+        guarded_stopping_criteria = [object(), object()]
+        default_stopping_criteria = [object()]
         modes, field_domain = module.build_poincare_render_modes(
             _Surface(),
             6,
             seed_inset_fraction=0.05,
             default_extend_distance=0.05,
-            stopping_criteria=stopping_criteria,
-            stop_labels=["surface_exit", "max_r_guardrail", "iteration_limit"],
+            guarded_stopping_criteria=guarded_stopping_criteria,
+            guarded_stop_labels=["surface_exit", "max_r_guardrail", "iteration_limit"],
+            default_stopping_criteria=default_stopping_criteria,
+            default_stop_labels=["max_r_guardrail", "iteration_limit"],
         )
 
         self.assertEqual(
             [mode["mode"] for mode in modes], ["validation", "diagnostic", "default"]
         )
-        self.assertIs(modes[0]["stopping_criteria"], stopping_criteria)
-        self.assertIs(modes[1]["stopping_criteria"], stopping_criteria)
-        self.assertIs(modes[2]["stopping_criteria"], stopping_criteria)
+        self.assertIs(modes[0]["stopping_criteria"], guarded_stopping_criteria)
+        self.assertIs(modes[1]["stopping_criteria"], guarded_stopping_criteria)
+        self.assertIs(modes[2]["stopping_criteria"], default_stopping_criteria)
         self.assertIn("surface_exit", modes[1]["stop_labels"])
-        self.assertIn("surface_exit", modes[2]["stop_labels"])
+        self.assertNotIn("surface_exit", modes[2]["stop_labels"])
+        self.assertEqual(modes[0]["trace_semantics"], "surface_exit_guarded")
+        self.assertEqual(modes[2]["trace_semantics"], "baseline_wander")
+        self.assertEqual(modes[0]["field_policy"], "configured")
+        self.assertEqual(modes[2]["field_policy"], "native")
         self.assertEqual(modes[0]["seed_contract"]["mode"], "midplane_radial_sweep")
         self.assertEqual(modes[1]["seed_contract"]["mode"], "midplane_radial_sweep")
         self.assertEqual(
             modes[2]["seed_contract"]["mode"],
             "extended_surface_radial_sweep",
         )
-        self.assertGreaterEqual(
-            field_domain.required_rmax, modes[2]["trace_domain"].required_rmax
-        )
+        self.assertEqual(field_domain, modes[2]["trace_domain"])
         self.assertLessEqual(
             field_domain.required_rmin, modes[0]["trace_domain"].required_rmin
+        )
+        self.assertGreaterEqual(
+            field_domain.required_rmax, modes[0]["trace_domain"].required_rmax
+        )
+        self.assertGreaterEqual(
+            field_domain.required_zmax, modes[0]["trace_domain"].required_zmax
+        )
+        self.assertAlmostEqual(field_domain.surface_rmin, 0.75)
+        self.assertAlmostEqual(field_domain.surface_rmax, 1.25)
+        self.assertAlmostEqual(field_domain.stopping_rmin, 0.75 * 0.95)
+        self.assertAlmostEqual(field_domain.stopping_rmax, 1.25 * 1.05)
+        self.assertAlmostEqual(field_domain.stopping_zmax, 0.1 * 1.05)
+
+    def test_prepare_poincare_fields_keeps_default_native_wander(self):
+        module = load_poincare_surfaces_module()
+        calls = []
+
+        class _Field:
+            pass
+
+        class _Surface:
+            pass
+
+        def fake_prepare_topology_field(
+            surf,
+            bs,
+            tmax_fl,
+            *,
+            field_policy,
+            interpolation_grid,
+            trace_domain,
+        ):
+            del surf, bs, tmax_fl
+            calls.append(
+                {
+                    "field_policy": field_policy,
+                    "interpolation_grid": interpolation_grid,
+                    "trace_domain": trace_domain,
+                }
+            )
+            return _Field(), {
+                "selected_mode": "native"
+                if field_policy == "never"
+                else "interpolated",
+                "reason": "explicit_never"
+                if field_policy == "never"
+                else "tmax_threshold",
+            }
+
+        guarded_domain = object()
+        default_domain = object()
+        render_modes = [
+            {
+                "mode": "validation",
+                "field_key": "guarded",
+                "field_policy": "configured",
+                "trace_domain": guarded_domain,
+                "trace_semantics": "surface_exit_guarded",
+            },
+            {
+                "mode": "diagnostic",
+                "field_key": "guarded",
+                "field_policy": "configured",
+                "trace_domain": guarded_domain,
+                "trace_semantics": "surface_exit_guarded",
+            },
+            {
+                "mode": "default",
+                "field_key": "baseline_wander",
+                "field_policy": "native",
+                "trace_domain": default_domain,
+                "trace_semantics": "baseline_wander",
+            },
+        ]
+
+        with patch.object(
+            module,
+            "prepare_topology_field",
+            side_effect=fake_prepare_topology_field,
+        ):
+            fields_by_mode, field_models_by_mode = module.prepare_poincare_fields(
+                _Surface(),
+                _Field(),
+                7000,
+                render_modes=render_modes,
+                field_model_policy="auto",
+                interpolation_grid={"degree": 3, "nr": 40, "nphi": 40, "nz": 20},
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["field_policy"], "auto")
+        self.assertIs(calls[0]["trace_domain"], guarded_domain)
+        self.assertEqual(calls[1]["field_policy"], "never")
+        self.assertIs(calls[1]["trace_domain"], default_domain)
+        self.assertIs(fields_by_mode["validation"], fields_by_mode["diagnostic"])
+        self.assertIsNot(fields_by_mode["validation"], fields_by_mode["default"])
+        self.assertEqual(
+            field_models_by_mode["validation"]["selected_mode"],
+            "interpolated",
+        )
+        self.assertEqual(field_models_by_mode["default"]["selected_mode"], "native")
+        self.assertEqual(
+            field_models_by_mode["default"]["poincare_trace_semantics"],
+            "baseline_wander",
         )
 
     def test_compute_topology_transport_diagnostics_reports_surface_structure(self):

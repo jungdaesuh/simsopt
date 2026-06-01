@@ -229,6 +229,25 @@ def surface_trace_domain(
     )
 
 
+def extended_surface_trace_domain(
+    surface,
+    extend_distance,
+    *,
+    box_padding=0.05,
+    seed_radii=None,
+    seed_zmax=0.0,
+):
+    """Return the baseline-style trace domain from an outward-extended surface."""
+    extended_surface = _clone_surface_for_extension(surface)
+    extended_surface.extend_via_normal(float(extend_distance))
+    return surface_trace_domain(
+        extended_surface,
+        box_padding=box_padding,
+        seed_radii=seed_radii,
+        seed_zmax=seed_zmax,
+    )
+
+
 def _interpolation_covers_trace_domain(
     rrange,
     phirange,
@@ -815,11 +834,14 @@ def build_stopping_criteria(
     include_surface_exit=True,
     box_padding=0.05,
     max_iterations=None,
+    trace_domain=None,
 ):
     """Build stopping criteria from a Boozer surface.
 
     Returns (criteria_list, stop_labels) matching the convention used by
     both the topology gate and the strict Poincare validator.
+    An explicit trace_domain overrides only the R/Z guardrail bounds; the
+    surface-exit classifier, when enabled, is still built from surface.
     """
     from simsopt.field import (
         IterationStoppingCriterion,
@@ -831,13 +853,17 @@ def build_stopping_criteria(
     )
     from simsopt.geo import SurfaceClassifier
 
-    trace_domain = surface_trace_domain(surface, box_padding=box_padding)
+    resolved_trace_domain = (
+        surface_trace_domain(surface, box_padding=box_padding)
+        if trace_domain is None
+        else trace_domain
+    )
 
     box_criteria = [
-        MaxZStoppingCriterion(trace_domain.stopping_zmax),
-        MinZStoppingCriterion(-trace_domain.stopping_zmax),
-        MinRStoppingCriterion(trace_domain.stopping_rmin),
-        MaxRStoppingCriterion(trace_domain.stopping_rmax),
+        MaxZStoppingCriterion(resolved_trace_domain.stopping_zmax),
+        MinZStoppingCriterion(-resolved_trace_domain.stopping_zmax),
+        MinRStoppingCriterion(resolved_trace_domain.stopping_rmin),
+        MaxRStoppingCriterion(resolved_trace_domain.stopping_rmax),
     ]
     iteration_limit = (
         _TOPOLOGY_TRACE_MAX_ITERATIONS
