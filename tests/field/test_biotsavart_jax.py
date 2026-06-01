@@ -1786,6 +1786,68 @@ class TestBiotSavartJAXCoilStateToken:
                 currents[coil_index] = group.currents[position]
         return gammas, gammadashs, currents
 
+    @staticmethod
+    def _assert_per_coil_entries_equal(actual_entries, expected_entries):
+        assert len(actual_entries) == len(expected_entries)
+        for actual, expected in zip(actual_entries, expected_entries, strict=True):
+            np.testing.assert_allclose(
+                np.asarray(actual),
+                np.asarray(expected),
+                rtol=0.0,
+                atol=0.0,
+            )
+
+    def test_current_derivative_methods_preserve_compute_derivatives_keyword_contract(
+        self,
+    ):
+        from simsopt.field.biotsavart_jax_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+        )
+        from simsopt.jax_core.specs import make_biot_savart_spec
+
+        method_defaults = (
+            ("dB_by_dcoilcurrents", 0),
+            ("d2B_by_dXdcoilcurrents", 1),
+            ("d3B_by_dXdXdcoilcurrents", 2),
+            ("dA_by_dcoilcurrents", 0),
+            ("d2A_by_dXdcoilcurrents", 1),
+            ("d3A_by_dXdXdcoilcurrents", 2),
+        )
+        points = np.asarray(
+            (
+                (1.25, 0.1, -0.2),
+                (0.9, -0.3, 0.4),
+            ),
+            dtype=np.float64,
+        )
+        coils = self._make_two_basic_coils()
+        bs_jax = BiotSavartJAX(list(coils))
+        bs_jax.set_points(points)
+        spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+        spec_backed = SpecBackedBiotSavartJAX(spec)
+        spec_backed.set_points(points)
+
+        for field_adapter in (bs_jax, spec_backed):
+            for method_name, expected_default in method_defaults:
+                method = getattr(field_adapter, method_name)
+                parameter = inspect.signature(method).parameters["compute_derivatives"]
+                assert parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+                assert parameter.default == expected_default
+
+                default_entries = method()
+                for compute_derivatives in (0, 1, 2):
+                    keyword_entries = method(
+                        compute_derivatives=compute_derivatives,
+                    )
+                    self._assert_per_coil_entries_equal(
+                        keyword_entries,
+                        default_entries,
+                    )
+
     def test_coil_set_spec_uses_uniform_curve_xyz_fourier_fastpath(self, monkeypatch):
         from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 

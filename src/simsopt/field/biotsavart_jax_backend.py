@@ -11,7 +11,6 @@ M0 rewrite contract (adapter pattern, §5).
 
 from dataclasses import dataclass
 from functools import partial
-from itertools import count
 import time
 
 import jax
@@ -21,6 +20,7 @@ import numpy as np
 from .._core.derivative import Derivative
 from .._core.jax_host_boundary import host_array, host_float
 from .._core.optimizable import Optimizable
+from .._core.state_tokens import make_state_token_factory
 from ..backend.dtypes import runtime_device_put
 from ..jax_core import (
     coil_set_spec_from_dof_extraction_spec,
@@ -78,7 +78,7 @@ from ..jax_core.specs import (
 )
 from ._coil_graph import _unwrap_coil_curve_and_current_objects
 
-_COIL_DOF_STATE_TOKEN_COUNTER = count()
+_new_coil_dof_state_token = make_state_token_factory()
 
 
 def _device_zero_like(value: object) -> jax.Array:
@@ -95,10 +95,6 @@ __all__ = [
     "SpecBackedCurve",
     "SpecBackedCurrent",
 ]
-
-
-def _new_coil_dof_state_token() -> int:
-    return next(_COIL_DOF_STATE_TOKEN_COUNTER)
 
 
 def _time_call_result(callback):
@@ -489,6 +485,14 @@ class SpecBackedCurve(Optimizable):
 class _BiotSavartFieldEvaluationMixin:
     """Shared grouped-kernel field API for graph-backed and spec-backed fields."""
 
+    def _per_coil_unit_current_derivative(self, kernel):
+        """Evaluate a unit-current derivative kernel for this field state."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            kernel,
+        )
+
     def B(self):
         """Magnetic field B at the evaluation points."""
         return grouped_biot_savart_B_from_spec(self._points_jax, self.coil_set_spec())
@@ -563,51 +567,27 @@ class _BiotSavartFieldEvaluationMixin:
 
     def dB_by_dcoilcurrents(self, compute_derivatives=0):
         """Per-coil B at unit current."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_B,
-        )
+        return self._per_coil_unit_current_derivative(biot_savart_B)
 
     def d2B_by_dXdcoilcurrents(self, compute_derivatives=1):
         """Per-coil ``dB/dX`` at unit current."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_dB_by_dX,
-        )
+        return self._per_coil_unit_current_derivative(biot_savart_dB_by_dX)
 
     def d3B_by_dXdXdcoilcurrents(self, compute_derivatives=2):
         """Per-coil ``d2B/dXdX`` at unit current."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_d2B_by_dXdX,
-        )
+        return self._per_coil_unit_current_derivative(biot_savart_d2B_by_dXdX)
 
     def dA_by_dcoilcurrents(self, compute_derivatives=0):
         """Per-coil A at unit current."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_A,
-        )
+        return self._per_coil_unit_current_derivative(biot_savart_A)
 
     def d2A_by_dXdcoilcurrents(self, compute_derivatives=1):
         """Per-coil ``dA/dX`` at unit current."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_dA_by_dX,
-        )
+        return self._per_coil_unit_current_derivative(biot_savart_dA_by_dX)
 
     def d3A_by_dXdXdcoilcurrents(self, compute_derivatives=2):
         """Per-coil ``d2A/dXdX`` at unit current."""
-        return _per_coil_unit_field(
-            self._points_jax,
-            self.coil_set_spec(),
-            biot_savart_d2A_by_dXdX,
-        )
+        return self._per_coil_unit_current_derivative(biot_savart_d2A_by_dXdX)
 
 
 class SpecBackedCoil:
@@ -910,13 +890,6 @@ def _add_update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array
 def _take_positions_1d(array: jax.Array, positions) -> jax.Array:
     indexer = runtime_device_put(positions, dtype=np.int32)
     return jnp.take(_as_jax_float64(array), indexer, axis=0)
-
-
-def _ones_like_float64(array: jax.Array) -> jax.Array:
-    return jnp.broadcast_to(
-        runtime_device_put(1.0, dtype=np.float64),
-        array.shape,
-    )
 
 
 def _scatter_free_values(template: jax.Array, free_positions, free_values: jax.Array):
