@@ -221,6 +221,20 @@ def test_vmec_compute_geometry_jax_transfer_guard_clean():
         compiled(frozen, s, theta, phi).block_until_ready()
 
 
+def test_vmec_compute_geometry_jax_axis_singularity_is_not_silently_clamped():
+    """The magnetic-axis drift singularity must stay explicit, not clamped."""
+    vmec = _vmec("wout_li383_low_res_reference.nc")
+    frozen = vmec_freeze_splines(vmec)
+    s = jnp.asarray([0.0])
+    theta = jnp.asarray(np.linspace(-np.pi, np.pi, 3, endpoint=False))
+    phi = jnp.asarray(np.linspace(0.0, 2.0 * np.pi / vmec.wout.nfp, 4, endpoint=False))
+
+    results = vmec_compute_geometry_jax_kernel(frozen, s, theta, phi)
+
+    assert not np.isfinite(np.asarray(results.gbdrift0)).all()
+    assert not np.isfinite(np.asarray(results.cvdrift0)).all()
+
+
 def test_vmec_compute_geometry_jax_frozen_coeff_gradient_matches_finite_difference():
     vmec = _vmec("wout_li383_low_res_reference.nc")
     frozen = vmec_freeze_splines(vmec)

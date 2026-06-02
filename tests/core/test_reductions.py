@@ -52,6 +52,11 @@ def test_validate_reduction_mode_rejects_unknown_value():
         validate_reduction_mode("not-a-mode")
 
 
+def test_scalar_square_sum_rejects_unknown_default_baseline():
+    with pytest.raises(ValueError, match="Unknown scalar reduction baseline"):
+        scalar_square_sum(jnp.asarray([1.0]), default="not-a-baseline")
+
+
 def test_pairwise_sum_axis_matches_numpy_fixed_tree():
     values = np.arange(3 * 5 * 7, dtype=np.float64).reshape(3, 5, 7) - 20.0
 

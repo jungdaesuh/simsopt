@@ -311,7 +311,7 @@ def _make_test_exact_failure_profile_suite(
     )
     if objective_value is not None:
         monkeypatch.setattr(
-            surfaceobjectives_jax_module,
+            surfaceobjectives_traceable_jax_module,
             "_evaluate_traceable_total_objective",
             lambda *_args, **_kwargs: jnp.asarray(objective_value, dtype=jnp.float64),
         )
@@ -3380,7 +3380,7 @@ def test_non_qs_ratio_native_gradient_stays_flat_until_public_boundary(monkeypat
     )
 
     monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
+        surfaceobjectives_jax_module,
         "_resolved_boozer_solved_runtime_state",
         lambda _booz_surf: solved_state,
     )
@@ -7376,6 +7376,20 @@ class TestPrincipalCurvatureJAXObjectParity:
             surfaceobjectives_jax_module,
             export_name,
         )
+
+    def test_surface_curvature_degenerate_tangents_are_not_silently_clamped(self):
+        """Degenerate parametrizations must surface non-finite curvature values."""
+        zeros = jnp.zeros((1, 1, 3), dtype=jnp.float64)
+
+        curvature = surfaceobjectives_jax_module._surface_curvatures_from_derivatives(
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+        )
+
+        assert not np.isfinite(np.asarray(curvature)).all()
 
     def test_principal_curvature_first_order_taylor(self):
         """First-order Taylor remainder convergence for principal-curvature gradient.

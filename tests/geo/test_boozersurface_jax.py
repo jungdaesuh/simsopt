@@ -6288,6 +6288,38 @@ class TestBoozerSurfaceJAXClass:
         assert all(factor.device.platform == "cpu" for factor in hosted)
         np.testing.assert_allclose(np.asarray(hosted[0]), np.ones((2, 2)))
 
+    def test_linearization_residency_host_never_silences_device_to_host_guard(
+        self, monkeypatch
+    ):
+        def reject_device_to_host_transfer_guard(level):
+            raise AssertionError(
+                "host linearization residency must not allow device-to-host "
+                f"transfers; got {level!r}."
+            )
+
+        def reject_broad_transfer_guard(level):
+            raise AssertionError(
+                "host linearization residency must not use broad transfer_guard; "
+                f"got {level!r}."
+            )
+
+        factors = (
+            jnp.ones((2, 2), dtype=jnp.float64),
+            jnp.tril(jnp.ones((2, 2), dtype=jnp.float64)),
+            jnp.triu(jnp.ones((2, 2), dtype=jnp.float64)),
+        )
+
+        monkeypatch.setattr(
+            _bsj.jax,
+            "transfer_guard_device_to_host",
+            reject_device_to_host_transfer_guard,
+        )
+        monkeypatch.setattr(_bsj.jax, "transfer_guard", reject_broad_transfer_guard)
+
+        hosted = _bsj._place_linearization_factors_for_residency(factors, "host")
+
+        assert all(factor.device.platform == "cpu" for factor in hosted)
+
     def test_linearization_residency_device_keeps_dense_factors_unmoved(self):
         """Strict ``transfer_guard("disallow")`` lane: device residency is a no-op.
 
