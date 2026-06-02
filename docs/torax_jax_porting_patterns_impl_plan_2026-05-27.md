@@ -276,6 +276,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.8 target-native flag-inline micro-slice was also executed under the bloat plan. It deletes the single-use target-native replay flag helper in `benchmarks/single_stage_init_parity.py`, banks 6 additional benchmark LOC, preserves explicit replay payload keys, target-native scope/prefix/rejection classification, and same-candidate gate behavior, and records CPU/X64 target-native replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
 
+**2026-06-01 cross-link:** The T2.8 SciPy callback `fun` threshold micro-slice was also executed under the bloat plan. It reuses `_compare_same_candidate_scalar(...)`'s mismatch emission to avoid the second scalar-close call in the callback `fun` first-split branch, banks 4 additional benchmark LOC, preserves explicit callback trace schema keys, field comparison order, scalar tolerance ownership, and same-candidate replay behavior, and records CPU/X64 callback-trace validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.

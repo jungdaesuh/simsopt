@@ -2814,6 +2814,7 @@ def _compare_same_candidate_scipy_callback_trace(
 
         cpu_fun = _summary_scalar(cpu_entry.get("fun"))
         jax_fun = _summary_scalar(jax_entry.get("fun"))
+        failure_count = len(failures)
         fun_diff = _compare_same_candidate_scalar(
             failures,
             field=f"{entry_field}.fun",
@@ -2824,12 +2825,7 @@ def _compare_same_candidate_scipy_callback_trace(
         if (
             cpu_fun is not None
             and jax_fun is not None
-            and not _scalar_close(
-                jax_fun,
-                cpu_fun,
-                rtol=_SAME_CANDIDATE_SCALAR_RTOL,
-                atol=_SAME_CANDIDATE_SCALAR_ATOL,
-            )
+            and len(failures) != failure_count
         ):
             first_split = _record_first_scipy_callback_split(
                 first_split, "fun", index, cpu_entry, jax_entry, fun_diff
