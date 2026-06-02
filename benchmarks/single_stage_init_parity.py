@@ -2724,22 +2724,6 @@ def _compare_same_candidate_scipy_initial_call(
     return max_diff
 
 
-def _same_candidate_scipy_callback_split(
-    field: str,
-    callback_index: int,
-    cpu_entry: dict[str, Any],
-    jax_entry: dict[str, Any],
-    max_abs_diff: float,
-) -> dict[str, Any]:
-    return {
-        "field": field,
-        "callback_index": callback_index,
-        "cpu_evaluation_index": cpu_entry.get("evaluation_index"),
-        "jax_evaluation_index": jax_entry.get("evaluation_index"),
-        "max_abs_diff": max_abs_diff,
-    }
-
-
 def _record_first_scipy_callback_split(
     current,
     split_field,
@@ -2750,9 +2734,13 @@ def _record_first_scipy_callback_split(
 ):
     if current is not None:
         return current
-    return _same_candidate_scipy_callback_split(
-        split_field, index, cpu_entry, jax_entry, max_diff
-    )
+    return {
+        "field": split_field,
+        "callback_index": index,
+        "cpu_evaluation_index": cpu_entry.get("evaluation_index"),
+        "jax_evaluation_index": jax_entry.get("evaluation_index"),
+        "max_abs_diff": max_diff,
+    }
 
 
 def _compare_same_candidate_scipy_callback_trace(

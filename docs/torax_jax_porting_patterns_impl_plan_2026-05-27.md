@@ -278,6 +278,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.8 SciPy callback `fun` threshold micro-slice was also executed under the bloat plan. It reuses `_compare_same_candidate_scalar(...)`'s mismatch emission to avoid the second scalar-close call in the callback `fun` first-split branch, banks 4 additional benchmark LOC, preserves explicit callback trace schema keys, field comparison order, scalar tolerance ownership, and same-candidate replay behavior, and records CPU/X64 callback-trace validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
 
+**2026-06-01 cross-link:** The T2.8 SciPy callback split payload-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_same_candidate_scipy_callback_split(...)` pass-through in `benchmarks/single_stage_init_parity.py`, keeps the explicit callback split payload literal inside `_record_first_scipy_callback_split(...)`, banks 12 additional benchmark LOC, and preserves callback trace schema keys, field comparison order, first-split precedence, and same-candidate replay behavior. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.
