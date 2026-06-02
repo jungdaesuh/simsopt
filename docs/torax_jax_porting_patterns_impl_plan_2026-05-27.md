@@ -9,9 +9,9 @@
 - Docs-only drift gate introduced in commit `398b3e50d` and checkpoint basis clarified in commit `446eab365` on `shared-jax-clean`
 - Reference repo: `/Users/suhjungdae/code/opensource/torax`
 - Reference repo HEAD reviewed: `60190df1` (clean `main`)
-- Worktree note: the 2026-05-31 source-doc refresh ran from a clean tracked checkout (`git status --short` empty) on `shared-jax-clean`; the 2026-06-01 source-code checkpoint is no longer a clean tracked checkout.
+- Worktree note: the 2026-05-31 source-doc refresh ran from a clean tracked checkout (`git status --short` empty) on `shared-jax-clean`; the 2026-06-01 source-code checkpoint `8b94c2bbd` then carried a broad dirty implementation tree. That tree has since been split into scoped commits through `4fcd33b05`; the current closure-mode edits are docs-only.
 - **Refresh (2026-05-31):** the line refs in this plan were first re-verified against HEAD `21c3d517d`, then corrected against `2bcaeff28`; that pass refreshed the source-doc status to HEAD `b267b0d95` after the MPS custom-kernel commit sequence and updated the refs that moved. Official JAX contracts for persistent cache, `lax.scan`, `lax.while_loop`, and `lax.cond` were rechecked through Context7 during that correction pass. The original review HEAD `431a517fb` is now historical, but the patterns and plan structure are unchanged.
-- **Execution checkpoint (2026-06-01):** implementation evidence references source-code checkpoint `8b94c2bbd`; the docs-only drift gate was introduced in `398b3e50d`, then its checkpoint basis was clarified in `446eab365`. The dirty tree must be split by the bloat-plan drift gate before any implementation commit. This TORAX plan records contract-hardening proof, not a standalone LOC-reduction closeout.
+- **Execution checkpoint (2026-06-02):** implementation evidence initially referenced source-code checkpoint `8b94c2bbd`; the docs-only drift gate was introduced in `398b3e50d`, then its checkpoint basis was clarified in `446eab365`. The dirty tree has since been split through scoped source/docs commits up to `4fcd33b05`. This TORAX plan records contract-hardening proof and closure-mode cross-links, not a standalone LOC-reduction closeout.
 
 ## Purpose
 
@@ -61,6 +61,8 @@ References:
 - [ ] Do not add silent clamps, catch-all defensive code, or fallback paths to hide invalid states.
 - [ ] Do not mutate `XLA_FLAGS` or cache configuration at library import time.
 - [ ] Do not combine tracing, optimizer, PM, wireframe, and numerical changes into one broad rewrite.
+
+**2026-06-02 closure-mode note:** The bloat plan now runs a closure pass after source checkpoint `4fcd33b05`: partial T2 residuals get one bounded bankability scan, T4 items close as docs-backed decisions first, and implementation budget goes to high-yield T3 folds. This is a bloat-plan execution strategy, not a new TORAX runtime phase. Parallel scouts may run read-only, but writable implementation must be serialized for any closure item touching persistent cache, branch/JAXPR behavior, numerical stability, backend modes, transfer policy, parity oracles, or shared benchmark/runtime contracts. TORAX evidence gates still apply to those selected items.
 
 ## Current Evidence Map
 

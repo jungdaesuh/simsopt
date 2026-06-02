@@ -7,6 +7,7 @@
 - Source-code checkpoint before docs-only gate commit: `8b94c2bbd` on `shared-jax-clean`, with a broad dirty implementation tree across `src/`, `tests/`, and `docs/`
 - Docs-only drift gate introduced in commit `398b3e50d` and checkpoint basis clarified in commit `446eab365` on `shared-jax-clean`
 - Latest completed source checkpoint before this `SurfaceXYZFourier` rotate-helper source/docs sync: `596090b19` (`refactor: reuse tensor tangent product rule`), after the broad dirty tree was split into scoped source/docs commits; the current source history also includes the T2.2 typed modB direct-factory slice `7228379af`.
+- Closure-mode checkpoint after the rotate-helper source/docs sync: `4fcd33b05` (`refactor: share SurfaceXYZFourier rotation helpers`). Use this as the current source-history anchor for the 16-section closure queue; do not treat older drift-gate hashes as live HEAD markers.
 - Reference TORAX repo reviewed: `/Users/suhjungdae/code/opensource/torax` at `60190df1` on clean `main`
 - Historical local status at source-doc review: the two source docs were modified and this overlay was untracked; no source-code edits were part of that review. This is no longer the current working-tree state.
 - Artifact note: this checkout does not contain a repo-local `.artifacts/` tree. Historical code-smell artifacts referenced by the bloat plan were found in sibling checkout `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/code_smell_review_2026-05-20/`.
@@ -33,6 +34,30 @@ Execution gate for the next pass:
 - **Defer/revert-candidate:** source LOC is flat or positive and no immediate deletion payoff is identified.
 
 The broad dirty tree has since been split through scoped banked-shrink/foundation commits. For future implementation commits, keep using this classification before staging: salvage the banked-shrink slices first; keep foundation-only slices only with their follow-up deletion target; do not count tests/docs growth as bloat reduction.
+
+## 2026-06-02 Closure-Mode Acceleration
+
+The current execution problem is not more discovery; it is closing the remaining plan without turning every residual into a tiny proof-heavy source slice. After source checkpoint `4fcd33b05`, the live bloat-plan queue is 16 unchecked sections:
+
+- Partial Tier 2: `T2.1`, `T2.2`, `T2.3`, `T2.8`
+- Tier 3: `T3.1` through `T3.8`
+- Tier 4 decisions: `T4.1`, `T4.3`, `T4.4`, `T4.5`
+
+Closure-mode execution order:
+
+1. Classify each remaining section as `do-now`, `decision-only`, or `defer/no-bank` before implementation.
+2. Run one bounded source-negative scan for each partial T2 item. If no obvious deletion survives contract review, close the residual as `defer/no-bank`.
+3. Close T4 items as docs-backed decisions first. Code work follows only when the decision exposes a safe deletion, quarantine, or test cleanup.
+4. Spend implementation budget on high-yield T3 folds first: `T3.1`, `T3.4`, `T3.6`, and any clearly bankable residual in `T2.8` / `T3.8`.
+5. Use one adversarial reviewer for private-helper source-negative refactors that do not touch public API, backend modes, GPU/transfer policy, parity tolerances, or independent-oracle tests. Use the full multi-review gate only for public API, math-heavy, cross-module, GPU/transfer-sensitive, parity-oracle, or benchmark/runtime contract work.
+
+Parallel/sequential execution map:
+
+- **Run in parallel, read-only:** partial T2 bankability scouts (`T2.1`, `T2.2`, `T2.3`, `T2.8`), T4 decision drafts (`T4.1`, `T4.3`, `T4.4`, `T4.5`), and T3 candidate scouts (`T3.1`, `T3.4`, `T3.6`, `T3.8`). Outputs must include bucket, likely write set, expected source bank, validation gate, and conflict set.
+- **Run in parallel, writable only if disjoint:** isolated source slices may proceed concurrently only when write sets do not overlap and plan-doc edits are serialized by the parent agent. Good candidates are separate file families such as `boozer_radial_field`, `surface_fourier*`, and optimizer-only code.
+- **Run sequentially:** overlap clusters `T3.3`/`T3.8`, `T2.8`/`T3.5`/`T3.6`/`T4.5`, `T2.1`/`T3.4`, and every public API, parity-oracle, benchmark/runtime, backend-mode, tolerance, GPU, or transfer-sensitive item.
+- **Commit sequencing:** finish the current docs-only closure baseline first; after each source commit, refresh caller inventories and owner-doc anchors before starting the next source commit in the same file family.
+- **Validation sequencing:** defer tier-exit, strict-transfer, and full parity replay gates until grouped closures are ready; keep touched-file lint/type checks and focused behavior tests per commit.
 
 ## Purpose
 
@@ -62,7 +87,7 @@ The source plans remain the SSOT for detailed item text, line refs, and acceptan
 ## Current Context
 
 - Source-doc refresh basis: `shared-jax-clean` at `b267b0d95`.
-- Docs-gate history: the docs-only drift gate was introduced in `398b3e50d`, checkpoint basis was clarified in `446eab365`, the source-code checkpoint before that docs-only gate was `8b94c2bbd`, the latest completed source checkpoint before this `SurfaceXYZFourier` rotate-helper sync is `596090b19`, and the current source history also includes T2.2 slice `7228379af`. Treat these commit hashes as historical anchors, not live-HEAD markers.
+- Docs-gate history: the docs-only drift gate was introduced in `398b3e50d`, checkpoint basis was clarified in `446eab365`, the source-code checkpoint before that docs-only gate was `8b94c2bbd`, the rotate-helper source/docs sync was committed in `4fcd33b05`, and the current source history also includes T2.2 slice `7228379af`. Treat earlier drift-gate hashes as historical anchors, not live-HEAD markers.
 - `docs/bloat_reduction_plan_2026-05-20.md` is a tiered reduction plan: T1 mechanical wins, T2 factory introductions, T3 structural consolidations, and T4 contract decisions.
 - `docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md` is a pattern-hardening plan: static/dynamic pytree contracts, persistent-cache proof, bounded control flow, branch discipline, and numerical stability.
 - Shared dependency surfaces include `jax_core` specs, backend runtime/cache policy, validation ladder helpers, host-boundary helpers, fixed-iteration scan code, PM/wireframe workflows, and GPU/MPS-sensitive runtime paths.
@@ -75,7 +100,7 @@ The right sequencing is contract-first, then mechanical deletion, then shared fa
 
 ## Assumptions
 
-- The source docs were refreshed at `b267b0d95`; execution then advanced to source-code checkpoint `8b94c2bbd` with a broad dirty tree, the docs-only drift gate was introduced in `398b3e50d`, and its checkpoint basis was clarified in `446eab365`. Re-run evidence refresh and the drift ledger before selecting or committing any additional implementation slice.
+- The source docs were refreshed at `b267b0d95`; execution then advanced to source-code checkpoint `8b94c2bbd` with a broad dirty tree, the docs-only drift gate was introduced in `398b3e50d`, its checkpoint basis was clarified in `446eab365`, and scoped source/docs split commits now reach `4fcd33b05`. Re-run evidence refresh and the 16-section closure triage before selecting any additional implementation slice; the old drift ledger is historical context, not the live queue.
 - Code work must load and apply `/Users/suhjungdae/.agent-docs/SOFTWARE_DESIGN.md` before implementation.
 - CPU validation is not enough for GPU-sensitive or MPS-sensitive claims.
 - `jax_mps_smoke` remains a smoke lane, not a production parity lane.
@@ -1876,9 +1901,10 @@ git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_
 - [x] Validation output is recorded with backend lane and exact command.
 - [x] Remaining work is still traceable to the source docs and not duplicated into an unsorted backlog.
 - [x] The broad dirty tree was split into scoped banked-shrink/foundation commits before continuing; future implementation commits must keep using the same classification.
+- [x] Closure mode is defined: the remaining queue is classified as 16 unchecked sections, with partial T2 residuals bounded, T4 decision-first, and high-yield T3 implementation prioritized.
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.2 radial pass-through inline follow-up, T2.2 typed modB direct-factory follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.3 tensor `surface_gammadash1` product-rule micro-slice, T2.3 `SurfaceXYZFourier` rotate-helper sharing slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.8 per-pair metadata-binding slice, T2.8 target-native component-summary reuse slice, T2.8 target-native flag inline slice, T2.8 SciPy callback `fun` threshold slice, T2.8 callback split payload-inline slice, T2.8 layer diagnostic wrapper-inline slice, T2.8 decomposition dispatch wrapper-inline slice, T2.8 scalar-close inline slice, T2.8 parity-census finalize inline slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
-- Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
+- Which remaining sections are `do-now`, `decision-only`, or `defer/no-bank` after the first closure triage?
+- Which high-yield implementation target should start first after closure triage: `T3.1`, `T3.4`, `T3.6`, or a clearly bankable `T2.8` / `T3.8` residual?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?

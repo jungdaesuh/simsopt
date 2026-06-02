@@ -101,6 +101,16 @@ A tier is "complete" when **all** of:
 
 Historical target: total net deletion >= 8,000 LOC after all tiers; zero feature regressions; one ratified contract decision per Tier-4 item. Under the v8 drift gate, this target was not satisfied by the drift-checkpoint dirty tree. It can only be claimed after banked-shrink slices are isolated, validated, and re-measured.
 
+### Closure-mode success
+
+The next pass is a closure pass, not another open-ended micro-slice pass. Use the live unchecked section count as the execution queue; the old aggregate "33 items" count is historical until re-estimated.
+
+1. [ ] Classify each remaining unchecked section as `do-now`, `decision-only`, or `defer/no-bank` before implementation.
+2. [ ] For already-partial T2 items (`T2.1`, `T2.2`, `T2.3`, `T2.8`), spend one bounded scan looking for a source-negative follow-up. If none is obvious and contract-safe, close the remaining scope as `defer/no-bank` with rationale instead of continuing tiny helper slices indefinitely.
+3. [ ] For T4 items, write a docs-backed contract decision first. Only implement code if that decision identifies a safe deletion or quarantine target.
+4. [ ] For private-helper, source-negative refactors that do not touch public APIs, backend modes, GPU/transfer policy, or tolerance contracts, use the light review gate: local validation plus one adversarial reviewer. Reserve four-reviewer passes for public API, math-heavy, cross-module, GPU/transfer-sensitive, or parity-oracle changes.
+5. [ ] A closure commit should either bank meaningful source LOC, close/defer a remaining task, or record a contract decision. Do not create more micro-commits just to bank single-digit LOC unless the slice also removes a repeated edit-site.
+
 ---
 
 ## 3. Guiding Principles
@@ -183,6 +193,31 @@ Every PR review must re-confirm these survive bit-identical post-refactor.
 **`surfaceobjectives_traceable_jax.py` (3,543 LOC) is now a TRACKED, committed file** (v4 called it "UNTRACKED, 3,426 LOC"). It is the real split of `surfaceobjectives_jax.py` (now 3,110 LOC in the current checkout) and owns the diagnostics/profile-suite, the `_make_traceable_*` / `_ensure_traceable_runtime_*` families (T3.3 / T3.8 targets), and the LS-lane PLU adjoint `_traceable_solve_plu_linearization` (`:420`) referenced in §4.1.
 
 **Concurrency caveat (still live).** The repo is under an active commit cadence by concurrent agents. Since v6, `git diff --name-only 2bcaeff28..HEAD -- src/simsopt tests benchmarks examples docs/...` shows committed drift in `benchmarks/single_stage_init_parity.py`, `benchmarks/validation_ladder_common.py`, the single-stage example, MPS kernel-contract code/tests, `surfaceobjectives_jax.py`, `surfaceobjectives_traceable_jax.py`, `tests/test_benchmark_helpers.py`, and these docs. **Re-grep before executing any item**, and do not assume an item is un-started just because the box reads `[ ]` — several were silently completed or re-scoped in the committed batch (see §4.7/§4.8/§4.9).
+
+### 4.5.1 - Closure-mode acceleration update (2026-06-02)
+
+Live unchecked-section scan after source checkpoint `4fcd33b05` shows 16 open sections: partial Tier 2 (`T2.1`, `T2.2`, `T2.3`, `T2.8`), all eight Tier 3 sections (`T3.1`-`T3.8`, with `T3.2` / `T3.3` / `T3.8` partially overtaken by committed work), and four Tier 4 decisions (`T4.1`, `T4.3`, `T4.4`, `T4.5`). Treat that as the live closure queue.
+
+Execution buckets:
+
+- **Do now:** high-yield, bankable source reductions with bounded validation. Start with `T3.1`, `T3.4`, `T3.6`, and any clearly source-negative residual in `T2.8` or `T3.8`.
+- **Decision-only:** `T4.1`, `T4.3`, `T4.4`, and `T4.5` until a docs-backed decision identifies a safe source deletion or quarantine. A decision-only commit can close the task without code changes.
+- **Defer/no-bank:** already-partial T2/T3 residuals where another slice would preserve contracts but not bank source LOC. Record the rationale and stop counting the residual as active bloat work.
+
+Review gate override for closure mode:
+
+- Use one adversarial reviewer for private-helper/source-negative refactors that stay within one module family and do not touch public APIs, backend modes, parity tolerances, GPU/transfer policy, or independent-oracle tests.
+- Use the full multi-review gate for public API, math-heavy, cross-module, GPU/transfer-sensitive, parity-oracle, or benchmark/runtime contract work.
+- Always keep `git diff --check`, touched-file `ruff`, touched-file `mypy` where applicable, and the narrowest behavior test that covers the edited route.
+
+Parallelization plan:
+
+- **Sequence barrier 0:** finish and commit the docs-only closure baseline before source implementation, so every worker uses the same `4fcd33b05` plus closure-mode anchor.
+- **Parallel read-only wave:** run independent scouts for partial T2 bankability (`T2.1`, `T2.2`, `T2.3`, `T2.8`), T4 decision drafts (`T4.1`, `T4.3`, `T4.4`, `T4.5`), and high-yield T3 candidates (`T3.1`, `T3.4`, `T3.6`, `T3.8`). Each scout must return bucket, files touched, expected source bank, validation gate, and conflict set.
+- **Parallel implementation allowed only with disjoint write sets:** `T2.2` (`boozer_radial_field`), `T2.3` (`surface_fourier*`), and an optimizer-only `T3.1` slice can proceed concurrently only if each worker owns separate files and docs staging stays serialized. Do not let parallel workers edit the same plan docs at the same time.
+- **Sequential implementation required for overlap clusters:** `T3.3` with `T3.8`; `T2.8` with `T3.5` / `T3.6` / `T4.5`; `T2.1` with `T3.4`; and any GPU/transfer, parity-oracle, backend-mode, or tolerance-sensitive item.
+- **Sequence barrier 1:** after each source commit, refresh `git status`, touched-file inventories, and the relevant owner-doc lines before starting another source commit in the same file family.
+- **Sequence barrier 2:** run tier-exit or strict-transfer validation after grouped closures, not after every tiny private-helper slice.
 
 ### 4.6 — v4 reconciliation summary (2026-05-29)
 
@@ -790,7 +825,9 @@ These need user answers before starting:
 | T2 — Factory Introductions | ~3,100-3,500 guaranteed pending re-estimate (T2.2 formula dedup landed but did **not** bank the old ~400 LOC estimate; T2.2 follow-ups bank 71 LOC total) | 9 (full T2.2 target still open) | 3–4 days | Low-Med |
 | T3 — Structural Consolidations | ~4,000–5,500 (T3.2 field-eval dup **already folded** via `_BiotSavartFieldEvaluationMixin`, metadata-preserving points-helper follow-up banks 2 LOC, cotangent reconciliation remains open; T3.3 / T3.8 partially done via the `surfaceobjectives_traceable_jax.py` split) | 8 | 1–2 weeks | Med |
 | T4 — Decision Points | T4.2 resolved (doc-only); T4.1 ~1,628 + T4.3 ~138 + T4.4 (alias quarantine, re-scoped to the qfm **surface** wrappers — **not** obsolete) still decision-gated | 5 (T4.2 resolved) | varies | Decision-bound |
-| **Aggregate** | **STALE until salvage splitting.** Historical estimate was ~7,900-9,800 guaranteed candidate LOC remaining pending T2.2 re-estimate, plus decision-gated deletions. The drift-checkpoint ledger is not net-shortening: effective `src/` is `+45` once untracked source helpers are included, and `src/`+`tests/`+`docs/` is `+2166`. Recalculate aggregate remaining LOC only after banked-shrink slices are isolated and foundation/not-banked slices are classified. | **33 items (full T2.2 target still open; T3.2 partial; T4.2 resolved)** | **~3 weeks historical estimate; replan after salvage split** | **manageable only with the v8 drift gate** |
+| **Aggregate** | **STALE until closure re-estimate.** Historical estimate was ~7,900-9,800 guaranteed candidate LOC remaining pending T2.2 re-estimate, plus decision-gated deletions. The drift-checkpoint ledger is not net-shortening: effective `src/` is `+45` once untracked source helpers are included, and `src/`+`tests/`+`docs/` is `+2166`. Recalculate aggregate remaining LOC only after closure-mode triage classifies bankable, decision-only, and defer/no-bank residuals. | **Historical 33-item ledger is superseded by the live 16 unchecked-section queue after `4fcd33b05`** | **~3 weeks historical estimate; replan after closure triage** | **manageable only with closure mode and the v8 drift gate** |
+
+**Closure-mode replacement for the stale aggregate:** after commit `4fcd33b05`, the live queue is 16 unchecked sections. The fastest contract-safe route is not to pursue every residual as code: classify partial T2 items as bankable or `defer/no-bank`, close T4 items as decisions first, and reserve implementation time for high-yield T3 folds.
 
 ---
 
@@ -798,15 +835,16 @@ These need user answers before starting:
 
 ### As a checklist during execution
 
-1. Work tiers sequentially: T1 → T2 → T3. Do not skip ahead.
-2. Within a tier, items are mostly independent but ordered by risk (lowest first).
-3. Each `- [ ]` item normally maps to one commit. v8 exception: the 2026-06-01 dirty-tree checkmarks record implemented/validated slices, not committed slices, until salvage splitting produces isolated commits.
-4. After each item: run the per-item validation gate; do not proceed if it fails.
-5. At tier exit: run the tier exit gate and the contract checklist in Section 4.1; tag the commit.
+1. In normal tier mode, work tiers sequentially: T1 → T2 → T3. For the current closure pass after `4fcd33b05`, §4.5.1 supersedes this ordering: bucket the 16 remaining sections first, close T4 decisions without waiting for code work, and prioritize high-yield T3 folds after bounded partial-T2 triage.
+2. Within a tier or closure bucket, items are mostly independent but ordered by risk and expected banked source reduction.
+3. Under closure mode, each remaining `- [ ]` item maps to one of three outcomes before implementation: `do-now`, `decision-only`, or `defer/no-bank`.
+4. Each commit should close a task, bank meaningful source LOC, or ratify a contract decision. Do not keep creating tiny source-negative commits when the remaining scope is better closed as `defer/no-bank`.
+5. After each item: run the per-item validation gate; do not proceed if it fails.
+6. At tier exit: run the tier exit gate and the contract checklist in Section 4.1; tag the commit.
 
 ### As a status report
 
-The current state of execution is encoded in the checkboxes, but under the v8 drift gate the checkboxes are implementation/validation status, not commit status. A `git diff` of this file against the merge-base or base branch shows progress only after the dirty tree is split into scoped commits.
+The current state of execution is encoded in the section checkboxes plus the closure-mode bucket assigned to each remaining section. The old dirty-tree caveat is historical after the scoped split through `4fcd33b05`; future status reports should cite committed checkpoints, not broad uncommitted implementation piles.
 
 ### As a contract reference
 
@@ -836,7 +874,7 @@ This plan was generated from 8 parallel subagent reports (2026-05-20):
 | 7 | JAX tests (`test_boozersurface_jax`, `test_single_stage_jax_cpu_reference`, etc.) | ~500 |
 | 8 | Cross-cutting duplication (sibling-variant files, re-export shims, dtype helpers, state tokens) | ~850 |
 
-Historical aggregate candidate estimate after lane overlap consolidation: **~8,300–9,800 LOC**, plus decision-gated optional deletions. Under the v8 drift gate, this is not a current banked-reduction claim; re-measure after salvage splitting.
+Historical aggregate candidate estimate after lane overlap consolidation: **~8,300–9,800 LOC**, plus decision-gated optional deletions. Under the v8 drift gate, this is not a current banked-reduction claim; re-measure only after closure-mode triage classifies the live 16-section queue.
 
 Full audit transcripts available in the orchestrator session log (2026-05-20). The original bloat plan was generated from 8 bloat-reduction lanes; the separate code-smell artifact contains 11 per-lane reports + `SUMMARY.md` + 24 verification-round logs. In the `simsopt-jax-shared-jax` checkout reviewed at `b267b0d95`, `.artifacts/` is not present; the historical artifact tree was found at `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/code_smell_review_2026-05-20/`. Those logs are historical records with 2026-05-30 line-ref annotations originally refreshed against HEAD `21c3d517d`; use `SUMMARY.md` plus `verification/CORRECTIONS_round5.md` inside that artifact tree as the final status for retracted items, and re-grep current HEAD/dirty files before executing.
 
