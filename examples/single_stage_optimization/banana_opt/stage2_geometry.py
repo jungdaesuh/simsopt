@@ -24,6 +24,7 @@ from simsopt.geo import (
     CurveCWSFourierCPP,
     CurveXYZFourier,
     SurfaceRZFourier,
+    create_multifilament_grid,
     curves_to_vtk,
 )
 
@@ -480,6 +481,80 @@ def shared_vf_current_control_for_coils(vf_coils: list[Coil]) -> object | None:
     return first_current
 
 
+@dataclass(frozen=True)
+class FiniteBuildSettings:
+    """Banana winding-pack geometry for finite-build Stage-2 optimization.
+
+    ``numfilaments_n`` x ``numfilaments_b`` filaments are laid on a regular grid in
+    the pre-rotation frame's normal/binormal directions with the given gap sizes
+    (meters). ``rotation_order`` is the Fourier order of the optimizable
+    pack-rotation profile (``None`` fixes the pack orientation, adding no rotation
+    DOFs). ``frame`` is the pre-rotation orthonormal frame: ``'centroid'`` (robust
+    default) or ``'frenet'``. The pack approximates one finite-build coil per Singh
+    et al., J. Plasma Phys. 86 (2020).
+    """
+
+    numfilaments_n: int
+    numfilaments_b: int
+    gapsize_n: float
+    gapsize_b: float
+    rotation_order: int | None
+    frame: str
+
+    @property
+    def nfilaments(self) -> int:
+        return int(self.numfilaments_n) * int(self.numfilaments_b)
+
+    @property
+    def pack_half_extent_n_m(self) -> float:
+        """Half the pack's outer span along the normal direction (meters)."""
+        return 0.5 * (int(self.numfilaments_n) - 1) * float(self.gapsize_n)
+
+    @property
+    def pack_half_extent_b_m(self) -> float:
+        """Half the pack's outer span along the binormal direction (meters)."""
+        return 0.5 * (int(self.numfilaments_b) - 1) * float(self.gapsize_b)
+
+
+def build_finite_build_banana_coils(
+    master_curve,
+    total_banana_current_A,
+    finite_build,
+    surf_coils,
+):
+    """Symmetry-expanded multi-filament banana pack for finite-build optimization.
+
+    The pack is built from the single ``master_curve`` centerline, so every filament
+    shares the centerline degrees of freedom plus one ``FrameRotation`` (the
+    pack-rotation DOFs). A single optimizable drives the NET banana current
+    (``banana_net_current``); each filament scales it by ``1/nfilaments`` so the
+    pack's net current equals the thin-filament banana current and one banana-current
+    DOF drives the whole pack. The net-current optimizable is recoverable as the
+    first (identity-symmetry) coil's ``current.current_to_scale``, so banana-current
+    bounds and net-current metadata stay correct with unchanged thresholds. Symmetry
+    is applied once, after the pack is built (finite-build-before-symmetry), matching
+    the upstream finite-build example.
+    """
+    filaments = create_multifilament_grid(
+        master_curve,
+        finite_build.numfilaments_n,
+        finite_build.numfilaments_b,
+        finite_build.gapsize_n,
+        finite_build.gapsize_b,
+        rotation_order=finite_build.rotation_order,
+        frame=finite_build.frame,
+    )
+    nfilaments = finite_build.nfilaments
+    banana_net_current = ScaledCurrent(Current(1), float(total_banana_current_A))
+    filament_current = ScaledCurrent(banana_net_current, 1.0 / nfilaments)
+    return coils_via_symmetries(
+        filaments,
+        [filament_current] * nfilaments,
+        surf_coils.nfp,
+        surf_coils.stellsym,
+    )
+
+
 def initialize_coils(
     surf,
     surf_coils,
@@ -504,6 +579,7 @@ def initialize_coils(
     finite_current_mode="wataru_proxy_field",
     flip_banana=False,
     banana_i_fixed_s2=None,
+    finite_build=None,
     return_vf_build_result=False,
 ):
     banana_curve = CurveCWSFourierCPP(
@@ -517,11 +593,23 @@ def initialize_coils(
     banana_curve.set("thetas(1)", theta_width)
 
     if finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
+        if finite_build is not None:
+            raise ValueError(
+                "Finite-build optimization is not supported with the jhalpern30 "
+                "banana current path."
+            )
         banana_coils, _banana_replay = build_jhalpern30_banana_coils(
             banana_curve,
             surf_coils=surf_coils,
             flip_banana=bool(flip_banana),
             banana_i_fixed_s2=banana_i_fixed_s2,
+        )
+    elif finite_build is not None:
+        banana_coils = build_finite_build_banana_coils(
+            banana_curve,
+            banana_init_current_A,
+            finite_build,
+            surf_coils,
         )
     else:
         banana_coils = coils_via_symmetries(

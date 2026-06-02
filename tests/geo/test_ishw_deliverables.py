@@ -1427,9 +1427,9 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 Jccdist=SimpleNamespace(shortest_distance=lambda: 0.06),
                 Jcsdist=SimpleNamespace(shortest_distance=lambda: 0.02),
                 new_banana_curve=SimpleNamespace(kappa=lambda: np.array([10.0])),
-                new_banana_coils=[
-                    SimpleNamespace(current=SimpleNamespace(get_value=lambda: -1.0e4))
-                ],
+                banana_current_optimizable=SimpleNamespace(
+                    get_value=lambda: -1.0e4
+                ),
                 new_tf_coils=[
                     SimpleNamespace(current=SimpleNamespace(get_value=lambda: -8.0e4))
                 ],

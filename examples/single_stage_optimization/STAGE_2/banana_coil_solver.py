@@ -18,7 +18,7 @@ EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
 # SIMSOPT imports
 from scipy.optimize import minimize
-from simsopt.field import Current, Coil
+from simsopt.field import Current, Coil, apply_symmetries_to_curves
 from simsopt.geo import (
     curves_to_vtk,
     create_equally_spaced_curves,
@@ -72,6 +72,7 @@ from banana_opt.basin_hopping import (
     telemetry_values as basin_telemetry_values,
 )
 from banana_opt.stage2_geometry import (
+    FiniteBuildSettings,
     VFCoilBuildResult,
     coerce_vf_coil_build_result,
     initialize_coils as _initialize_coils,
@@ -287,6 +288,45 @@ def validate_banana_current_cli_args(args) -> None:
         raise ValueError(
             "abs(--banana-init-current-A) cannot exceed --banana-current-max-A."
         )
+
+
+def validate_finite_build_cli_args(args) -> None:
+    if not getattr(args, "finite_build", False):
+        return
+    if getattr(args, "stage2_bs_path", None):
+        raise ValueError(
+            "--finite-build is not supported with --stage2-bs-path in this "
+            "version; finite-build optimization starts from a fresh banana coil."
+        )
+    if int(args.finitebuild_numfilaments_n) <= 0:
+        raise ValueError("--finitebuild-numfilaments-n must be positive.")
+    if int(args.finitebuild_numfilaments_b) <= 0:
+        raise ValueError("--finitebuild-numfilaments-b must be positive.")
+    gapsize_n = float(args.finitebuild_gapsize_n)
+    gapsize_b = float(args.finitebuild_gapsize_b)
+    if not np.isfinite(gapsize_n) or gapsize_n <= 0.0:
+        raise ValueError("--finitebuild-gapsize-n must be positive and finite.")
+    if not np.isfinite(gapsize_b) or gapsize_b <= 0.0:
+        raise ValueError("--finitebuild-gapsize-b must be positive and finite.")
+
+
+def resolve_finite_build_settings(args):
+    """Return a FiniteBuildSettings from CLI args, or None when finite-build is off.
+
+    A negative ``--finitebuild-rotation-order`` maps to ``None`` (pack orientation
+    fixed, no rotation DOFs).
+    """
+    if not getattr(args, "finite_build", False):
+        return None
+    rotation_order = int(args.finitebuild_rotation_order)
+    return FiniteBuildSettings(
+        numfilaments_n=int(args.finitebuild_numfilaments_n),
+        numfilaments_b=int(args.finitebuild_numfilaments_b),
+        gapsize_n=float(args.finitebuild_gapsize_n),
+        gapsize_b=float(args.finitebuild_gapsize_b),
+        rotation_order=None if rotation_order < 0 else rotation_order,
+        frame=str(args.finitebuild_frame),
+    )
 
 
 def validate_vf_current_bound_config(
@@ -1205,12 +1245,67 @@ def parse_args():
         default=int(os.environ.get("BASIN_SEED", "-1")),
         help="RNG seed for basin-hopping (-1 = random, default). Set for reproducibility.",
     )
+    parser.add_argument(
+        "--finite-build",
+        action="store_true",
+        help=(
+            "Optimize each banana coil as a multi-filament winding pack (finite "
+            "build) instead of a zero-thickness filament. The field (SquaredFlux) "
+            "sees the real pack and the pack-rotation profile is optimized. Default "
+            "off (thin filament). Not supported with --stage2-bs-path or the "
+            "jhalpern30 banana path in this version."
+        ),
+    )
+    parser.add_argument(
+        "--finitebuild-numfilaments-n",
+        type=int,
+        default=2,
+        help="Filaments in the normal direction of the banana pack (default 2). "
+        "Used only with --finite-build. Defaults are not HBT-calibrated.",
+    )
+    parser.add_argument(
+        "--finitebuild-numfilaments-b",
+        type=int,
+        default=3,
+        help="Filaments in the binormal direction of the banana pack (default 3). "
+        "Used only with --finite-build.",
+    )
+    parser.add_argument(
+        "--finitebuild-gapsize-n",
+        type=float,
+        default=0.02,
+        help="Gap between filaments in the normal direction, meters (default 0.02). "
+        "Used only with --finite-build.",
+    )
+    parser.add_argument(
+        "--finitebuild-gapsize-b",
+        type=float,
+        default=0.04,
+        help="Gap between filaments in the binormal direction, meters (default 0.04). "
+        "Used only with --finite-build.",
+    )
+    parser.add_argument(
+        "--finitebuild-rotation-order",
+        type=int,
+        default=1,
+        help="Fourier order of the optimizable pack-rotation profile (default 1). "
+        "A negative value fixes the pack orientation (no rotation DOFs). "
+        "Used only with --finite-build.",
+    )
+    parser.add_argument(
+        "--finitebuild-frame",
+        choices=("centroid", "frenet"),
+        default="centroid",
+        help="Pre-rotation orthonormal frame for the filament pack (default "
+        "centroid). Used only with --finite-build.",
+    )
     args = parser.parse_args()
     try:
         validate_banana_current_cli_args(args)
         validate_stage2_tf_current_cli_args(args)
         validate_stage2_iota_cli_args(args)
         validate_s_hel_objective_cli_args(args)
+        validate_finite_build_cli_args(args)
     except ValueError as exc:
         parser.error(str(exc))
     return args
@@ -1830,6 +1925,35 @@ def _evaluate_stage2_flux_objective_on_own_grid(Jf):
     return float(Jf.J())
 
 
+def _finite_build_artifact_metadata(finite_build, banana_curve, net_banana_current_A):
+    """results.json fields describing the finite-build banana winding pack.
+
+    Includes the buildability diagnostic: the centerline's minimum radius of
+    curvature versus the pack's binormal half-extent. A pack cannot bend tighter
+    than its half-build, so ``FINITEBUILD_CURVATURE_OK`` is False when the
+    centerline curves inside the pack half-width.
+    """
+    max_curvature = float(np.max(banana_curve.kappa()))
+    min_curv_radius_m = float("inf") if max_curvature == 0.0 else 1.0 / max_curvature
+    half_extent_b_m = finite_build.pack_half_extent_b_m
+    nfilaments = int(finite_build.nfilaments)
+    return {
+        "FINITE_BUILD_ENABLED": True,
+        "FINITEBUILD_NUMFILAMENTS_N": int(finite_build.numfilaments_n),
+        "FINITEBUILD_NUMFILAMENTS_B": int(finite_build.numfilaments_b),
+        "FINITEBUILD_GAPSIZE_N_M": float(finite_build.gapsize_n),
+        "FINITEBUILD_GAPSIZE_B_M": float(finite_build.gapsize_b),
+        "FINITEBUILD_ROTATION_ORDER": finite_build.rotation_order,
+        "FINITEBUILD_FRAME": finite_build.frame,
+        "FINITEBUILD_FILAMENTS_PER_BANANA": nfilaments,
+        "BANANA_FILAMENT_CURRENT_A": float(net_banana_current_A) / nfilaments,
+        "FINITEBUILD_PACK_HALF_EXTENT_N_M": float(finite_build.pack_half_extent_n_m),
+        "FINITEBUILD_PACK_HALF_EXTENT_B_M": float(half_extent_b_m),
+        "FINITEBUILD_MIN_CURVATURE_RADIUS_M": min_curv_radius_m,
+        "FINITEBUILD_CURVATURE_OK": bool(min_curv_radius_m > half_extent_b_m),
+    }
+
+
 def _capture_stage2_artifact_state(
     *,
     dofs,
@@ -1842,7 +1966,7 @@ def _capture_stage2_artifact_state(
     Jccdist,
     Jcsdist,
     new_banana_curve,
-    new_banana_coils,
+    banana_current_optimizable,
     new_tf_coils,
     length_target,
     cc_threshold,
@@ -1870,7 +1994,7 @@ def _capture_stage2_artifact_state(
     curve_surface_min_dist = float(Jcsdist.shortest_distance())
     max_curvature = float(np.max(new_banana_curve.kappa()))
     poloidal_extent_rad = _stage2_poloidal_extent_rad(new_banana_curve)
-    banana_current_A = float(new_banana_coils[0].current.get_value())
+    banana_current_A = float(banana_current_optimizable.get_value())
     tf_current_A = float(new_tf_coils[0].current.get_value())
     coil_width = float(Jw.J())
     self_intersect_penalty = float(Jself.J())
@@ -2278,6 +2402,7 @@ def _build_initialize_coils_kwargs(
         "finite_current_mode": finite_current_config.finite_current_mode,
         "flip_banana": bool(getattr(args, "flip_banana", False)),
         "banana_i_fixed_s2": os.environ.get("BANANA_I_FIXED_S2"),
+        "finite_build": resolve_finite_build_settings(args),
     }
 
 
@@ -2380,6 +2505,7 @@ def main(parsed_args=None):
     if parsed_args is not None:
         validate_banana_current_cli_args(args)
         validate_stage2_tf_current_cli_args(args)
+        validate_finite_build_cli_args(args)
 
     # File for the desired boundary magnetic surface:
     plasma_surf_filename = args.plasma_surf_filename
@@ -2612,11 +2738,26 @@ def main(parsed_args=None):
         new_tf_coils = tf_coils
     order = int(new_banana_curve.order)
     new_surf_coils = surf_coils
+    finite_build_settings = resolve_finite_build_settings(args)
+    FINITE_BUILD = finite_build_settings is not None
     # SquaredFlux geometry penalties act on the optimizable banana curves only;
     # TF / proxy / VF curves are fixed field sources and must not enter the
     # clearance or length objectives.
-    objective_curves = [coil.curve for coil in new_banana_coils]
-    initial_banana_current_A = float(new_banana_coils[0].current.get_value())
+    if FINITE_BUILD:
+        # Finite-build banana coils carry ScaledCurrent(banana_net_current, 1/nfil);
+        # the first (identity-symmetry) coil exposes the shared NET-current
+        # optimizable, so current bounds and net-current metadata are unchanged.
+        banana_current_optimizable = new_banana_coils[0].current.current_to_scale
+        # Clearance acts on the symmetry-expanded pack CENTERLINES (pack centers),
+        # not the individual filaments, so intra-pack filament gaps do not pollute
+        # the coil-to-coil / coil-to-surface penalties.
+        objective_curves = apply_symmetries_to_curves(
+            [new_banana_curve], new_surf_coils.nfp, new_surf_coils.stellsym
+        )
+    else:
+        banana_current_optimizable = new_banana_coils[0].current
+        objective_curves = [coil.curve for coil in new_banana_coils]
+    initial_banana_current_A = float(banana_current_optimizable.get_value())
     vf_current_control = new_vf_build_result.current_control
 
     # MAIN OPTIMIZATION
@@ -2815,7 +2956,7 @@ def main(parsed_args=None):
             Jccdist=Jccdist,
             Jcsdist=Jcsdist,
             new_banana_curve=new_banana_curve,
-            new_banana_coils=new_banana_coils,
+            banana_current_optimizable=banana_current_optimizable,
             new_tf_coils=new_tf_coils,
             length_target=LENGTH_TARGET,
             cc_threshold=CC_THRESHOLD,
@@ -2842,7 +2983,7 @@ def main(parsed_args=None):
     lbfgsb_bounds = None
     if CONSTRAINT_METHOD != "alm":
         apply_penalty_traversal_forbidden_box_bounds(
-            bound_targets={"banana_current": new_banana_coils[0].current},
+            bound_targets={"banana_current": banana_current_optimizable},
             requested_thresholds={"banana_current": args.banana_current_max_A},
             seed_values={"banana_current": initial_banana_current_A},
             validate_seed=bool(args.stage2_bs_path),
@@ -2905,7 +3046,7 @@ def main(parsed_args=None):
                 LENGTH_TARGET,
                 Jccdist,
                 Jc,
-                new_banana_coils[0].current,
+                banana_current_optimizable,
                 args.banana_current_max_A,
                 alm_smoothing_state.distance_smoothing,
                 alm_smoothing_state.curvature_smoothing,
@@ -3172,7 +3313,7 @@ def main(parsed_args=None):
         final_curve_surface_min_dist = float(Jcsdist.shortest_distance())
         final_max_curvature = float(np.max(new_banana_curve.kappa()))
         final_poloidal_extent_rad = _stage2_poloidal_extent_rad(new_banana_curve)
-        final_banana_current_A = float(new_banana_coils[0].current.get_value())
+        final_banana_current_A = float(banana_current_optimizable.get_value())
         final_coil_width = float(Jw.J())
         final_self_intersect_penalty = float(Jself.J())
         final_shortest_self_distance = float(Jself.shortest_self_distance())
@@ -3272,7 +3413,7 @@ def main(parsed_args=None):
     )
     stage2_bs_artifact_path = OUT_DIR_ITER + "biot_savart_opt.json"
     print(
-        f"Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n"
+        f"Banana Coil Current / TF Current = {banana_current_optimizable.get_value() / new_tf_coils[0].current.get_value():.3f}\n"
     )
     wout_convention_fields = wout_convention_artifact_fields(
         wout_path=file_loc,
@@ -3468,6 +3609,14 @@ def main(parsed_args=None):
     if CONSTRAINT_METHOD == "alm":
         results.update(_stage2_alm_adaptive_smoothing_results(alm_smoothing_state))
     results.update(secondary_artifact_metadata)
+    if FINITE_BUILD:
+        results.update(
+            _finite_build_artifact_metadata(
+                finite_build_settings,
+                new_banana_curve,
+                banana_current_optimizable.get_value(),
+            )
+        )
     write_json(os.path.join(OUT_DIR_ITER, "results.json"), results)
 
 
