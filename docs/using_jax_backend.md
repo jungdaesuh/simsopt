@@ -1,7 +1,7 @@
 # Using the JAX Backend
 
 This document is the user-facing contract for the Columbia `simsopt-jax`
-backend lane as of 2026-04-01.
+backend lane as of 2026-06-02.
 
 It is intentionally narrower than the architecture notes in
 [`gpu_jax_pro.md`](/Users/suhjungdae/code/columbia/simsopt-jax/gpu_jax_pro.md).
@@ -30,9 +30,12 @@ print(policy.jax_platform)
 Current public modes:
 
 - `native_cpu`
+- `jax_cpu_fast`
 - `jax_cpu_parity`
-- `jax_gpu_parity`
+- `jax_cpu_float32_smoke`
 - `jax_gpu_fast`
+- `jax_gpu_parity`
+- `jax_mps_smoke`
 
 Default rollout lane:
 
@@ -57,6 +60,24 @@ Default rollout lane:
   - stable chunking policy
   - `transfer_guard="log"` by default
 
+### `jax_cpu_fast`
+
+- backend: JAX on CPU
+- role: CPU speed lane for local exploration
+- contract:
+  - x64 required
+  - performance-oriented chunking policy
+  - not a publication or release parity oracle
+
+### `jax_cpu_float32_smoke`
+
+- backend: JAX on CPU
+- role: float32 smoke lane for accelerator-style tolerance checks without an accelerator
+- contract:
+  - x64 not required
+  - float32 runtime and host dtype
+  - uses the float32 smoke residual floor and cap
+
 ### `jax_gpu_parity`
 
 - backend: JAX on GPU
@@ -73,6 +94,15 @@ Default rollout lane:
 - contract:
   - may use more aggressive chunking
   - not the primary parity oracle
+
+### `jax_mps_smoke`
+
+- backend: JAX on Apple Silicon MPS
+- role: local Mac GPU smoke lane
+- contract:
+  - x64 not required
+  - float32 runtime and host dtype
+  - smoke evidence only; do not report it as CUDA parity
 
 ## Strict mode
 
@@ -188,8 +218,9 @@ Public acceptance still centers on the `native_cpu` / `scipy` oracle lane.
 When `backend="jax"` is active, the implicit outer optimizer lane is
 `scipy-jax`: SciPy keeps host control of L-BFGS-B while the objective and inner
 Boozer solve run through the JAX target-lane value/grad path. Explicit
-`ondevice` and `scipy-jax-fullgraph` remain available for target-lane stress
-tests, but CPU `ondevice` is memory-intensive and emits a warning.
+`scipy-jax-fullgraph` is the full-graph stress/parity route. Explicit
+`ondevice` remains available for target-lane accelerator residency tests, but
+CPU `ondevice` is memory-intensive and emits a warning.
 
 Exact Boozer note:
 
@@ -266,7 +297,7 @@ JAX_PLATFORMS=cpu \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
   --backend jax \
-  --optimizer-backend scipy-jax-fullgraph \
+  --optimizer-backend scipy-jax \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
   --probe-only \
   --skip-postprocess
@@ -274,8 +305,9 @@ python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
 
 Use this to validate the JAX Stage 2 objective path on CPU before moving to GPU
 without paying the host-memory cost of compiling the full on-device optimizer
-loop. Use explicit `--optimizer-backend ondevice` on CPU only for targeted
-target-lane stress tests with sufficient host RAM.
+loop. Use explicit `--optimizer-backend scipy-jax-fullgraph` for full-graph
+stress/parity runs, and use explicit `--optimizer-backend ondevice` on CPU only
+for targeted target-lane stress tests with sufficient host RAM.
 
 Stage 2 live constraint-method note:
 
@@ -311,14 +343,14 @@ JAX_PLATFORMS=cpu \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax \
-  --optimizer-backend scipy-jax-fullgraph \
+  --optimizer-backend scipy-jax \
   --jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json \
   --init-only
 ```
 
 This is the JAX CPU comparison lane. Do not treat it as a replacement for the
-public CPU/reference `scipy` oracle lane. The CUDA target lane remains
-`ondevice`:
+public CPU/reference `scipy` oracle lane. Use `scipy-jax-fullgraph` only for
+full-graph stress/parity checks. The CUDA target lane remains `ondevice`:
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_gpu_parity \
@@ -364,7 +396,7 @@ JAX_PLATFORMS=cpu \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax \
-  --optimizer-backend scipy-jax-fullgraph \
+  --optimizer-backend scipy-jax \
   --jax-runtime-seed-spec /path/to/single_stage_jax_runtime_spec.json \
   --init-only
 ```

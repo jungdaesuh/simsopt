@@ -148,7 +148,7 @@ Every PR review must re-confirm these survive bit-identical post-refactor.
 - [ ] `_coil_dof_state_token` semantics (advances on aggregate writes AND SIMSOPT ancestor invalidation).
 - [ ] `SquaredFluxJAX` JIT closure capture at construction + 3 drift detectors.
 - [ ] `get_adjoint_runtime_state()` runtime SSOT for exact-lane adjoint.
-- [ ] `_normalize_solver_options` exact strip: function at `boozersurface_jax.py:3617` (still exact); the strip itself (`if boozer_type == "exact": normalized_options.pop("optimizer_backend", None)`) is at `:3691-3692`. (v3 cited `:3122 / 3185-3186 / 3419-3420`, all stale.)
+- [ ] `_normalize_solver_options` exact strip: function at `boozersurface_jax.py:3845` (still exact); the strip itself (`if boozer_type == "exact": normalized_options.pop("optimizer_backend", None)`) is at `:3919-3920`. (v3 cited `:3122 / 3185-3186 / 3419-3420`, all stale.)
 - [ ] `int()` / `bool()` / `float()` host casts at SciPy/NumPy boundary + `linear_solve_status.iterations` device-placed `int32`.
 - [ ] Mixed-quadrature grouped dispatch with static `group_count`.
 - [ ] Stellsym DOF scatter convention (cos-cos + sin-sin for x; cos-sin + sin-cos for y, z).
@@ -217,7 +217,7 @@ Parallelization plan:
 - **Parallel implementation allowed only with disjoint write sets:** an optimizer-only `T3.1` slice and a benchmark-driver-only `T3.6` slice can proceed concurrently only if each worker owns separate files and docs staging stays serialized. Do not let parallel workers edit the same plan docs at the same time.
 - **Sequential implementation required for overlap clusters:** `T3.3` with any future reopened `T3.8`; `T3.5` with `T3.6`; any future reopened `T2.8` work with `T3.5` / `T3.6`; any future reopened `T2.1` work with linear-solve-callback work; and any GPU/transfer, parity-oracle, backend-mode, or tolerance-sensitive item.
 - **Sequence barrier 1:** after each source commit, refresh `git status`, touched-file inventories, and the relevant owner-doc lines before starting another source commit in the same file family.
-- **Sequence barrier 2:** run grouped closure validation and adversarial review before tagging any Tier 3/Tier closure complete. Strict-transfer validation remains required only for future GPU/transfer-sensitive changes; no CUDA/MPS proof is claimed by this pass.
+- **Sequence barrier 2:** run grouped closure validation and adversarial review before tagging any Tier 3/Tier closure complete. Strict-transfer validation remains required only for future GPU/transfer-sensitive changes; no CUDA proof is claimed by this pass.
 
 ### 4.6 — v4 reconciliation summary (2026-05-29)
 
@@ -309,7 +309,7 @@ Findings from the historical v5 4-agent re-verification against clean HEAD `21c3
 - **Contract shape:** the three public config classes still construct with `mesh`, `axis_name`, `device_count`, and `strategy`; the three summary functions still emit the old JSON keys (`trajectory_sharded`, `seed_batch_sharded`, `surface_quadrature_sharded`, and their device-count keys).
 - **Regression proof added:** `tests/jax_core/test_sharding_helpers.py::test_leading_axis_sharding_configs_preserve_public_contract` pins the public class names, dataclass fields, shared placement path, unsharded summary shape, sharded summary key names, axis, strategy, mesh shape, and device-count keys.
 - **Bloat accounting:** bank only 6 net production LOC (`src/simsopt/jax_core/sharding.py` 725 -> 719; diff `102 insertions / 108 deletions`). The earlier `~170` estimate would require collapsing exported config classes into one public class/alias, which this slice deliberately avoided as a public API change.
-- **Validation evidence:** focused helper/trajectory summary proof passed (`4 passed`); forced CPU surface/seed sharding subprocess cases passed (`6 passed`); forced CPU points-coils subprocess cases passed (`2 passed`); scoped `ruff check`, `ruff format --check`, `py_compile`, and `git diff --check` passed. `mypy` remains blocked in `.conda/jax` with `No module named mypy`. This is CPU forced-device sharding proof, not CUDA/MPS proof.
+- **Validation evidence:** focused helper/trajectory summary proof passed (`4 passed`); forced CPU surface/seed sharding subprocess cases passed (`6 passed`); forced CPU points-coils subprocess cases passed (`2 passed`); scoped `ruff check`, `ruff format --check`, `py_compile`, and `git diff --check` passed. `mypy` remains blocked in `.conda/jax` with `No module named mypy`. This is CPU forced-device sharding proof, not CUDA/GPU proof.
 
 ### 4.16 — T2.7 SciPy adapter closure factory (2026-06-01)
 
@@ -443,7 +443,11 @@ Goal: bank low-risk LOC reduction first; pattern-validate factory ideas in tiny 
 
 ### Tier 1 exit gate
 
-All required T1 items merged; guaranteed net LOC reduction ≥ 600; probe-script deletion excluded unless T1.10 migration retires a script safely; full T1 suite green; contract checklist re-affirmed; tag `bloat-reduction-T1-complete`.
+All required T1 source items are closed for this pass. Closure-mode revision
+(2026-06-02): complexity reduction and validated source-queue closure are the
+gate; net LOC is a secondary indicator per §2, so no extra T1 LOC-bank task
+remains. Do not tag `bloat-reduction-T1-complete` until the post-CUDA/GPU
+validated commit exists.
 
 ---
 
@@ -491,7 +495,7 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 - **2026-06-01 facade slice:** `surface_fourier.py` now uses typed local factories for the `SurfaceXYZFourier` / `SurfaceXYZTensorFourier` kernel-backed spec wrappers and paired-linear dof wrappers. Public names remain exported symbols with assigned `__name__` / `__qualname__` / `__module__`, while composed geometry (`normal`, fundamental forms, curvatures, area, volume) stays explicit.
 - **2026-06-01 tensor-kernel slice:** `surface_fourier_kernels.py` now uses `_eval_surface_tensor_from_dofs(...)` for the ten simple `SurfaceXYZTensorFourier` evaluator wrappers: `gamma`, paired `gamma_lin`, first/second coordinate derivatives, and `normal`. The public wrapper functions remain explicit so `__code__.co_name`, `inspect.getsource(...)`, signatures, and docs stay public-introspection compatible. The concrete evaluator functions, `_dofs_to_xyzc_any(...)`, stellsym scatter construction, `SurfaceXYZFourier` scatter/template wrappers, composed area/volume/unit-normal helpers, and coefficient-Jacobian wrappers stay explicit.
 - **2026-06-01 `SurfaceXYZFourier` unpack slice:** the nine analytic `SurfaceXYZFourier` wrappers now call the existing `_scatter_surface_xyzfourier_dofs(...)` helper directly instead of repeating the six-line flat-DOF to `(xc, xs, yc, ys, zc, zs)` unpack block. Public wrappers, source introspection, analytic formulas, paired derivative helper, composed area/volume/unit-normal helpers, and coefficient-Jacobian factories stay explicit.
-- **2026-06-01 coefficient-derivative wrapper slice:** `surface_fourier_kernels.py` now uses one `_surface_dof_transform(...)` helper for the repeated `jax.jacfwd` / explicit Hessian / `jax.grad` / `jax.hessian` wrapper ceremony across tensor and `SurfaceXYZFourier` coefficient-derivative families. The helper has two explicit inner signatures, preserving the tensor signature without `coeff_template` and the `SurfaceXYZFourier` signature with `coeff_template`. No derivative formula, public export name, scalar tolerance, CPU geometry code, CUDA/MPS path, or composed geometry formula was changed.
+- **2026-06-01 coefficient-derivative wrapper slice:** `surface_fourier_kernels.py` now uses one `_surface_dof_transform(...)` helper for the repeated `jax.jacfwd` / explicit Hessian / `jax.grad` / `jax.hessian` wrapper ceremony across tensor and `SurfaceXYZFourier` coefficient-derivative families. The helper has two explicit inner signatures, preserving the tensor signature without `coeff_template` and the `SurfaceXYZFourier` signature with `coeff_template`. No derivative formula, public export name, scalar tolerance, CPU geometry code, CUDA/GPU path, or composed geometry formula was changed.
 - **2026-06-01 `SurfaceXYZFourier` order-hat slice:** the six full-grid analytic `SurfaceXYZFourier` wrappers now share `_surface_xyzfourier_component_hat_derivatives(...)` for the repeated derivative-order to separable-basis to `(xhat, yhat, zhat)` component evaluation. Public wrappers, paired-linear wrappers, coefficient-Jacobian factories, rotation terms, and product-rule formulas stay explicit.
 - **2026-06-01 `SurfaceXYZFourier.gammadash1` product-rule micro-slice:** the full-grid `gammadash1` wrapper now uses the same explicit radial/toroidal product-rule representation already used by the paired-linear path; after the rotate-helper sharing slice, that rotation routes through `_rotate_hat_components(...)`. Public wrapper signature, source ownership, coefficient-Jacobian factories, paired-linear wrappers, and the other product-rule formulas are unchanged.
 - **2026-06-01 tensor `surface_gammadash1` product-rule micro-slice:** the full-grid tensor `surface_gammadash1(...)` and its clamped path now share the explicit radial/toroidal product-rule representation already used by `surface_gammadash1_lin(...)`, then call `_rotate_hat_components(...)`. Tensor public wrapper signatures, clamped-dimension semantics, coefficient-Jacobian factories, and `SurfaceXYZFourier` formulas are unchanged.
@@ -526,7 +530,7 @@ Goal: convert repeated templates into data-driven factories. Each item proves th
 - **Files:** `src/simsopt/jax_core/sharding.py`; new focused regression `tests/jax_core/test_sharding_helpers.py`.
 - **Change:** Replaced the three duplicate point-axis batch predicates/config builders, maybe-shard wrappers, and summary bodies with shared private helpers. Preserved the exported `TrajectoryBatchShardingConfig`, `SeedBatchShardingConfig`, and `SurfaceQuadratureShardingConfig` as concrete dataclass subclasses rather than collapsing them into a single public class.
 - **LOC saved:** 6 net production LOC (`102 insertions / 108 deletions` in `sharding.py`; 725 -> 719). The old `~170` estimate is not banked because preserving public config class identity and readable wrapper functions offset most of the helper extraction.
-- **Risk:** Low for CPU behavior after validation; CUDA/MPS-specific placement proof remains outside this CPU forced-device slice.
+- **Risk:** Low for CPU behavior after validation; CUDA/GPU-specific placement proof remains outside this CPU forced-device slice.
 - **Contracts:** JSON summary key names (`trajectory_sharded`, `seed_batch_sharded`, `surface_quadrature_sharded`, `field_collective`, etc.); public class names and field order; leading-axis sharding threshold and strategy checks.
 - **Design-it-twice gate:** Option A, aliasing all three public classes to one implementation class, would save more LOC but change `type(config).__name__` / concrete public class identity. Option B, private base plus concrete public subclasses, was selected because it centralizes the internal policy while preserving exported class contracts.
 - **Validation gate:** completed with `tests/jax_core/test_sharding_helpers.py`, `tests/jax_core/test_tracing_jax_item14.py::test_trajectory_batch_sharding_summary_surfaces_axis_contract`, `tests/jax_core/test_surface_seed_sharding.py`, `tests/jax_core/test_points_coils_sharding.py`, scoped `ruff`, `py_compile`, and `git diff --check`; `mypy` blocked with `No module named mypy`.
@@ -688,7 +692,14 @@ These items deliver significant LOC reduction (potentially 1,640+ LOC) but requi
 - **v7 status:** Plan A (HANDOFF.md, 2026-05-29) answered the open question, but v4/v5 misstated the default split. Live defaults route the JAX optimizer lane to `scipy-jax` on both CPU and CUDA (`tests/test_cli_defaults.py:36-41`, `:51-56`, `:133-145`; single-stage resolver `single_stage_banana_example.py:8346-8355`; Stage 2 resolver `banana_coil_solver.py:803-809`). `scipy-jax-fullgraph` remains an explicit stress/parity lane. This is the settled keep branch; the only remaining work is the CLAUDE.md / user-doc update. Both lanes are live in `optimizer_jax.py` (mapping `:227-228`, dispatch `:703`).
 - **Current-tree status:** Alive user-facing surfaces. `scipy-jax` and `scipy-jax-fullgraph` are exposed by Stage 2 and single-stage example CLIs, mapped in integration tests, and routed in benchmark helper tests.
 - **Decision status:** None on removal. Keep both lanes; no LOC is banked from this item.
-- **Follow-up:** CLAUDE.md and user docs still need updating so they distinguish the default `scipy-jax` lane from the explicit `scipy-jax-fullgraph` stress/parity lane.
+- **Follow-up:** Closed on 2026-06-02. `CLAUDE.md` now separates the inner
+  Boozer LS backend vocabulary from the outer Stage 2 / single-stage optimizer
+  lanes, documents `scipy-jax` as the implicit/default JAX outer route,
+  documents `scipy-jax-fullgraph` as the full-graph stress/parity route, points
+  the runtime-cache token contract at `src/simsopt/_core/state_tokens.py`, and
+  records that the private on-device L-BFGS-B helpers are a SciPy
+  1.17.1-compatible port. `docs/using_jax_backend.md` mirrors the default/stress
+  lane split in copy-paste examples.
 
 ### 8.3 — [x] T4.3: Should `qfm_solver._bfgs_minimize` reuse `optimizer_jax_private._bfgs._minimize_bfgs_private`? — REJECT REUSE / NO-BANK (2026-06-02)
 
@@ -731,6 +742,13 @@ export JAX_PLATFORM_NAME=cpu
 
 ### 9.1 Smoke + unit (after every commit)
 
+The command below is the canonical §9.1 file set. It may be run either as one
+pytest invocation or as split chunks with the same environment and
+`-m "not private_optimizer_runtime"` marker when walltime or session durability
+makes a single invocation impractical. Record split evidence as split evidence;
+do not present it as an all-in-one command pass unless the all-in-one command was
+actually run.
+
 ```bash
 .conda/jax/bin/python -m pytest tests/test_jax_import_smoke.py \
     tests/field/test_biotsavart_jax.py \
@@ -742,6 +760,17 @@ export JAX_PLATFORM_NAME=cpu
     tests/integration/test_jax_native_path.py \
     -m "not private_optimizer_runtime" -v
 ```
+
+**2026-06-02 local CPU/X64 split rerun:** the full §9.1 file set passed when
+run in split chunks under `PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_ENABLE_X64=True
+JAX_PLATFORM_NAME=cpu JAX_PLATFORMS=cpu`. Results: import smoke `114 passed, 11
+skipped in 807.65s`; Biot-Savart JAX `53 passed in 65.16s`;
+surface/boozer-residual/integral chunk `255 passed, 105 skipped in 87.30s`;
+Boozer derivatives/BoozerSurface chunk `502 passed, 4 skipped in 565.20s`;
+native-path integration `14 passed in 5.24s`. The CI `jax-public-unit` job still
+contains the same §9.1 file set, with `tests/test_jax_import_smoke.py` as the
+separate import-smoke step and the remaining files in the public pure-JAX unit
+step; that job also includes extra public checks outside §9.1.
 
 ### 9.2 Private optimizer (after Tier 1, before any optimizer touch in Tier 2/3)
 
@@ -823,12 +852,15 @@ Why this order:
 
 These need user answers before starting or deliberately reopening scope:
 
-1. ☐ **Branch strategy.** Should this go on `gpu-purity-stage2-20260405` directly, or branch off as `bloat-reduction-20260520`? Recommendation: new branch.
-2. ☐ **Time horizon.** Is this a 2-week sprint, a background project, or "as the spirit moves you"? Tier 4, partial Tier 2 residuals, and Tier 3 residuals are closed for this pass; timing matters only if new scope is deliberately reopened.
+1. ☑ **Branch strategy.** Closed on 2026-06-02 for this dirty-tree closeout: stay on current branch `shared-jax-clean`; no new branch is created.
+2. ☑ **Time horizon.** Closed on 2026-06-02: this is the current closeout pass; Tier 4, partial Tier 2 residuals, and Tier 3 residuals are closed for this pass, and no sprint/background follow-up is opened unless new scope is deliberately reopened.
 3. ☐ **GPU proof venue.** Use the existing self-hosted GitHub CUDA runner, Perlmutter, or another CUDA host for Section 9.5 tier-exit proof?
 4. ☑ **Tier 4 decisions.** Closed as of 2026-06-02: T4.1 keep `lbfgs-trace`; T4.2 keep/document optimizer lanes; T4.3 reject QFM BFGS reuse without retune proof; T4.4 keep QFM SLSQP compatibility alias; T4.5 classify surviving routing/health tests with no deletion.
-5. ☐ **CLAUDE.md updates.** This refactor will require CLAUDE.md edits in 3 places (the `scipy-jax` backend documentation, the new `_core/state_tokens.py` location, the SciPy 1.17.1-compatible-port disclosure). Draft those edits in this same effort, or separately?
-6. ☐ **Memory/project note.** Record an OpenMemory/project note on completion if T1.4 changes the curve↔jax_core import-cycle story. Do not edit `MEMORY.md` directly unless explicitly requested.
+5. ☑ **CLAUDE.md updates.** Closed on 2026-06-02 in this effort: `CLAUDE.md`
+   now documents the `scipy-jax` default outer lane, the
+   `scipy-jax-fullgraph` stress/parity lane, `src/simsopt/_core/state_tokens.py`,
+   and the SciPy 1.17.1-compatible private on-device L-BFGS-B port.
+6. ☑ **Memory/project note.** Closed on 2026-06-02: no T1.4 curve↔jax_core import-cycle behavior changed in this closeout, so no project note is required. Do not edit `MEMORY.md` directly unless explicitly requested.
 
 ---
 

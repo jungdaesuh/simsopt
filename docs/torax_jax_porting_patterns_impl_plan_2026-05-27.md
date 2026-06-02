@@ -86,11 +86,11 @@ References:
 
 - [x] Run `git status --short` and record unrelated dirty files before implementation. **2026-06-01 first slice:** tracked tree was clean before the test-contract slice, which intentionally touched only `tests/core/test_jax_core_specs.py`, `tests/subprocess/import_smoke_cases.py`, and `tests/test_jax_import_smoke.py`. Later bloat-plan T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 slices, the T1.9 public-API reclassification, and the T1.10 probe-script classification expanded the working diff and are logged in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`.
 - [x] Confirm target repo HEAD and TORAX reference HEAD. **2026-06-01 slice:** target repo HEAD was `8b94c2bbd` (`shared-jax-clean`); TORAX reference evidence remains the 2026-05-31 clean `60190df1` review basis because this slice only uses official JAX contracts, not TORAX source behavior.
-- [ ] Refresh inventories with `rg` before editing:
+- [x] Refresh inventories with `rg` before editing:
   - [x] `rg "register_dataclass|data_fields|meta_fields|static_arg|static_argnames" src tests`
   - [x] `rg "persistent_cache|compilation_cache|XLA_FLAGS|JAX_COMPILATION_CACHE" src tests benchmarks`
-  - [ ] `rg "lax.scan|lax.while_loop|lax.cond|fori_loop" src/simsopt/jax_core src/simsopt/geo src/simsopt/solve tests`
-  - [ ] `rg "sqrt|where|nan|clip|maximum|minimum|compensated" src/simsopt/jax_core src/simsopt/geo tests`
+  - [x] `rg "lax.scan|lax.while_loop|lax.cond|fori_loop" src/simsopt/jax_core src/simsopt/geo src/simsopt/solve tests`
+  - [x] `rg "sqrt|where|nan|clip|maximum|minimum|compensated" src/simsopt/jax_core src/simsopt/geo tests`
 - [x] Decide the first implementation slice before touching code: contract tests, persistent-cache tests, or bounded-scan helper pilot. **2026-06-01 slice:** chose contract tests + persistent-cache tests only; no scan helper was added.
 
 ### Phase 1: Static/Dynamic Contract Hardening
@@ -102,7 +102,7 @@ References:
   - [x] Option B: add a tiny `register_jax_spec` helper local to `jax_core/specs.py`. **Rejected for the first slice** because no runtime helper was needed to prove the existing data/meta split; **selected for the 2026-06-01 T2.4 follow-up** after the contract tests were in place.
 - [x] Choose Option B only if it removes repeated partition declarations without hiding the data/meta fields.
 - [x] Preserve existing pytree structure and field partitioning exactly.
-- [ ] Add or extend tests proving:
+- [x] Add or extend tests proving:
   - [x] Spec instances flatten as expected.
   - [x] Dynamic data-field changes do not force static recompilation.
   - [x] Static meta-field changes do force a distinct compiled specialization.
@@ -149,15 +149,15 @@ PYTHONPATH=src SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 SIMS
 
 ### Phase 3: Bounded Scan And Control-Flow Deduplication
 
-- [ ] Define the control-flow categories before writing helpers:
+- [x] Define the control-flow categories before writing helpers:
   - [x] Use `lax.scan` for fixed-capacity loops with fixed carry structure, shape, and dtype.
-  - [ ] Use `lax.while_loop` only for true dynamic state machines after confirming reverse-mode differentiation is not part of the contract or an explicit custom VJP / implicit-differentiation rule owns that contract.
-  - [ ] Keep host loops for I/O, callbacks, plotting, logging, and object mutation.
+  - [x] Use `lax.while_loop` only for true dynamic state machines after confirming reverse-mode differentiation is not part of the contract or an explicit custom VJP / implicit-differentiation rule owns that contract.
+  - [x] Keep host loops for I/O, callbacks, plotting, logging, and object mutation.
 - [x] Design a small helper such as `bounded_scan_until_done` under `src/simsopt/jax_core/`.
 - [x] Keep the helper narrow: explicit carry, explicit `done`, explicit status payload, explicit max steps.
 - [x] Pilot it on one repeated done-gated pair, preferably PM or wireframe workflow.
 - [x] Do not rewrite tracing and root solving in the same pass.
-- [ ] Add tests for:
+- [x] Add tests for:
   - [x] `max_steps == 0`
   - [x] Early completion
   - [x] Never-completed status propagation
@@ -165,6 +165,15 @@ PYTHONPATH=src SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 SIMS
   - [x] Strict transfer-guard smoke coverage
 
 **2026-06-01 evidence:** `src/simsopt/jax_core/_bounded_scan.py::bounded_scan_until_done` now owns the fixed-capacity scan shape: it takes an explicit carry, `max_steps`, scalar `is_done` predicate, and active-step function, then skips active work with `lax.cond` once done is true. The pilot is deliberately narrow: `pm_gpmo_live_loop_jax` and `_gsco_live_loop_unchecked` use the helper, while tracing, root solving, PM ArbVec/multi/backtracking loops, and wireframe multistep/final-adjustment loops remain untouched. `tests/jax_core/test_bounded_scan.py` covers zero steps, early completion, never-completed status propagation, and strict transfer-guard JIT execution; existing PM and wireframe workflow tests cover eager static-capacity rejection, exact restart continuation, host-loop parity, JAXPR scan presence, and transfer-guard smoke for the two piloted production loops.
+
+**2026-06-02 evidence refresh:** the remaining inventories were rerun on the
+current checkout before this closeout slice. The control-flow inventory returned
+245 matches across `src/simsopt/jax_core`, `src/simsopt/geo`, `src/simsopt/solve`,
+and `tests`. The numerical-risk inventory returned 3122 matches across
+`src/simsopt/jax_core`, `src/simsopt/geo`, and `tests`. No broad helper rewrite
+was attempted in this slice; the categories above are a policy closeout for
+documented existing paths, not a claim that all dynamic loops are reverse-mode
+AD-compatible.
 
 Recommended validation:
 
@@ -175,25 +184,25 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 ### Phase 4: Branch Discipline And JAXPR Checks
 
-- [ ] Audit expensive `lax.cond` and static-argument sites where both branches trace.
-- [ ] For each site, classify the intended behavior:
+- [x] Audit expensive `lax.cond` and static-argument sites where both branches trace.
+- [x] For each site, classify the intended behavior:
   - [x] Static host peel for compile-time choices.
   - [x] Traced runtime branch for array-dependent choices, with explicit awareness that both branches trace even though only one branch executes.
-  - [ ] Explicit host boundary for object or logging work.
+  - [x] Explicit host boundary for object or logging work.
 - [x] Add JAXPR or lowered-IR tests for hot paths where branch drift would be expensive or wrong.
 - [x] Add vectorized-branch tests where `vmap(lax.cond)` could change execution semantics by lowering to `select`.
-- [ ] Verify compiled hot paths do not hide dense fallbacks, host callbacks, or unexpected materialization.
-- [ ] Keep CPU proof and CUDA transfer proof distinct in documentation and tests.
+- [x] Verify compiled hot paths do not hide dense fallbacks, host callbacks, or unexpected materialization.
+- [x] Keep CPU proof and CUDA transfer proof distinct in documentation and tests.
 
 Recommended first targets:
 
-- [ ] `src/simsopt/jax_core/biotsavart.py`
-- [ ] `src/simsopt/geo/surfaceobjectives_jax.py`
-- [ ] `src/simsopt/geo/optimizer_jax.py`
-- [ ] `src/simsopt/jax_core/pm_workflow.py`
-- [ ] `src/simsopt/jax_core/wireframe_workflow.py`
-- [ ] `src/simsopt/solve/permanent_magnet_optimization_jax.py`
-- [ ] Optimizer backend static toggles and solver status paths.
+- [x] `src/simsopt/jax_core/biotsavart.py`
+- [x] `src/simsopt/geo/surfaceobjectives_jax.py`
+- [x] `src/simsopt/geo/optimizer_jax.py`
+- [x] `src/simsopt/jax_core/pm_workflow.py`
+- [x] `src/simsopt/jax_core/wireframe_workflow.py`
+- [x] `src/simsopt/solve/permanent_magnet_optimization_jax.py`
+- [x] Optimizer backend static toggles and solver status paths.
 
 **2026-06-01 pilot evidence:** the first branch-discipline slice classifies
 two existing hot-path contracts without changing runtime behavior. The
@@ -207,20 +216,51 @@ contract is `src/simsopt/jax_core/pm_optimization.py::mwpgp_step`:
 `test_vmap_step_body_lowers_dynamic_branches_to_selects` proves `vmap` lowers
 that branch family to `select_n` and no scalar `cond` remains. This is CPU/X64
 JAXPR evidence only; host-boundary classification, dense-fallback checks, and
-CUDA transfer proof remain open.
+CUDA transfer proof remained open at pilot time.
+
+**2026-06-02 closeout evidence:** the seven recommended targets were audited
+without changing runtime behavior. `biotsavart.py` keeps chunk/block loop bounds
+static and exposes the dense Hessian as an explicit opt-in diagnostics kernel.
+`surfaceobjectives_jax.py` uses explicit host materialization only at boundary
+wrappers/runtime-state capture; target-lane value/grad entrypoints stay JAX
+callables. `optimizer_jax.py` keeps dense Jacobian/Hessian materialization
+behind named options and byte-budget policy fields, not hidden fallbacks.
+`pm_workflow.py` and `permanent_magnet_optimization_jax.py` keep host
+materialization at result/status boundaries and traced loops in fixed-shape scan
+contracts. `wireframe_workflow.py` has an explicit `io_callback` boundary for
+host validation of loop-history capacity. `_optimizer_backend_choices.py`
+separates inner LS backends from outer optimizer lanes, now mirrored in
+`CLAUDE.md` and `docs/using_jax_backend.md`. This remains CPU/source audit
+evidence; CUDA strict-transfer proof is still a separate open gate.
 
 ### Phase 5: Numerical Shape And Stability Audit
 
-- [ ] Scope this phase to high-risk construction and test boundaries, not every internal temporary.
-- [ ] Audit known high-risk operations:
-  - [ ] VMEC geometry divisions and square roots in `src/simsopt/jax_core/vmec_geometry.py`.
-  - [ ] Surface curvature discriminant square roots in `src/simsopt/geo/surfaceobjectives_jax.py`.
-  - [ ] Solver status, convergence, and residual conventions.
-  - [ ] Compensated reductions and summation order in parity-sensitive paths.
-- [ ] For each guard or transformation, document the physics or numerical contract.
-- [ ] Add parity tests before changing semantics.
-- [ ] Reject silent clamps unless the mathematical contract already defines the clamp.
-- [ ] Prefer explicit invalid-input tests over defensive runtime fallbacks.
+- [x] Scope this phase to high-risk construction and test boundaries, not every internal temporary.
+- [x] Audit known high-risk operations:
+  - [x] VMEC geometry divisions and square roots in `src/simsopt/jax_core/vmec_geometry.py`.
+  - [x] Surface curvature discriminant square roots in `src/simsopt/geo/surfaceobjectives_jax.py`.
+  - [x] Solver status, convergence, and residual conventions.
+  - [x] Compensated reductions and summation order in parity-sensitive paths.
+- [x] For each guard or transformation, document the physics or numerical contract.
+- [x] Add parity tests before changing semantics.
+- [x] Reject silent clamps unless the mathematical contract already defines the clamp.
+- [x] Prefer explicit invalid-input tests over defensive runtime fallbacks.
+
+**2026-06-02 numerical-shape evidence:** this slice changed tests/docs only.
+VMEC geometry keeps the documented physical-domain contract that magnetic-axis
+`s=0` drift normalizations are singular unless a caller supplies a model-specific
+limit; `tests/mhd/test_vmec_compute_geometry_jax.py::test_vmec_compute_geometry_jax_axis_singularity_is_not_silently_clamped`
+now asserts the singularity remains visible through non-finite drift outputs.
+Surface curvature keeps the non-degenerate-surface contract for tangent normals
+and the principal-curvature discriminant; existing CPU/C++ parity and Taylor
+tests stay ahead of semantic changes, and
+`tests/geo/test_surface_objectives_jax.py::TestPrincipalCurvatureJAXObjectParity::test_surface_curvature_degenerate_tangents_are_not_silently_clamped`
+asserts degenerate parametrizations are not clamped to finite curvature. Solver
+status conventions remain owned by existing Boozer/JAX status tests that reject
+statusless solvers, propagate failed operator status, and surface non-finite
+gradients instead of finite fallback gradients. Reduction-mode policy stays in
+`src/simsopt/jax_core/reductions.py`; `tests/core/test_reductions.py::test_scalar_square_sum_rejects_unknown_default_baseline`
+adds the explicit invalid-input check for unknown scalar-reduction baselines.
 
 Recommended validation:
 
@@ -231,16 +271,38 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 ### Phase 6: Documentation, Provenance, And Closeout
 
-- [ ] Update this checklist as each implementation slice lands.
-- [ ] Cross-link completed work to:
-  - [ ] `docs/remaining_jax_port_surfaces_impl_plan_2026-05-19.md`
-  - [ ] `docs/bloat_reduction_plan_2026-05-20.md`
-  - [ ] `docs/using_jax_backend.md` after refreshing its stale backend-mode table and optimizer-default guidance.
-- [ ] Record exact validation commands and results before marking a phase complete.
-- [ ] Keep dirty-worktree status visible in the closeout note.
-- [ ] If a phase changes public behavior, add a focused migration or user-facing note.
+- [x] Update this checklist as each implementation slice lands.
+- [x] Cross-link completed work to:
+  - [x] `docs/remaining_jax_port_surfaces_impl_plan_2026-05-19.md`
+  - [x] `docs/bloat_reduction_plan_2026-05-20.md`
+  - [x] `docs/using_jax_backend.md` after refreshing its stale backend-mode table and optimizer-default guidance.
+- [x] Record exact validation commands and results before marking a phase complete.
+- [x] Keep dirty-worktree status visible in the closeout note.
+- [x] If a phase changes public behavior, add a focused migration or user-facing note.
 
-**2026-06-01 cross-link:** T2.3 `surface_fourier.py` facade wrapper factories were executed under the bloat plan, not as a new TORAX runtime phase. The slice preserves public non-RZ surface symbols, keeps composed geometry explicit, banks 165 source LOC in `src/simsopt/jax_core/surface_fourier.py`, and records exact CPU/X64 validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. CUDA/MPS, persistent-cache, branch/JAXPR, and numerical-stability TORAX gates remain open.
+**2026-06-01 cross-link:** T2.3 `surface_fourier.py` facade wrapper factories were executed under the bloat plan, not as a new TORAX runtime phase. The slice preserves public non-RZ surface symbols, keeps composed geometry explicit, banks 165 source LOC in `src/simsopt/jax_core/surface_fourier.py`, and records exact CPU/X64 validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. The current closeout pass later handled the branch/JAXPR and numerical-stability CPU/source gates; CUDA/GPU accelerator proof remains open.
+
+**2026-06-02 closeout cross-link:** Phase 4 and Phase 5 local closeout executed
+under `docs/bloat_remaining_items_impl_plan_2026-06-02.md`, not as a new TORAX
+runtime feature. The slice updated `CLAUDE.md` and `docs/using_jax_backend.md`
+for the runtime backend-mode SSOT, `scipy-jax` default outer lane,
+`scipy-jax-fullgraph` stress/parity lane, shared state-token location, and
+SciPy 1.17.1-compatible private L-BFGS-B port disclosure. Focused CPU/X64
+validation passed:
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_ENABLE_X64=1 JAX_PLATFORM_NAME=cpu .conda/jax/bin/python -m pytest -q tests/core/test_reductions.py::test_scalar_square_sum_rejects_unknown_default_baseline tests/mhd/test_vmec_compute_geometry_jax.py::test_vmec_compute_geometry_jax_axis_singularity_is_not_silently_clamped tests/geo/test_surface_objectives_jax.py::TestPrincipalCurvatureJAXObjectParity::test_surface_curvature_degenerate_tangents_are_not_silently_clamped
+# 3 passed in 20.05s
+```
+
+Dirty-worktree status for this closeout slice at the checkpoint was limited to
+`CLAUDE.md`, `docs/using_jax_backend.md`,
+`docs/bloat_reduction_plan_2026-05-20.md`,
+`docs/bloat_torax_coherent_execution_plan_2026-05-31.md`,
+`docs/remaining_jax_port_surfaces_impl_plan_2026-05-19.md`,
+`docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md`, and the three focused
+test files. CUDA/GPU proof remains open and is not claimed by this CPU/source
+slice; local MPS smoke is out of scope for the remaining tasks.
 
 **2026-06-01 cross-link:** The T2.3 tensor surface kernel wrapper fold was also executed under the bloat plan. It factors only the repeated `SurfaceXYZTensorFourier` simple `_from_dofs` wrapper bodies in `src/simsopt/jax_core/surface_fourier_kernels.py`, banks 190 additional source LOC, preserves public wrapper signatures/metadata/introspection docs, and records CPU/X64 clamping, stellsym scatter, paired-linear, XYZ adjacency, and coefficient-Jacobian validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. The `SurfaceXYZFourier` lower-level wrappers and coefficient-Jacobian families remain separate follow-ups.
 
@@ -264,50 +326,50 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.2 Boozer radial typed modB direct-factory follow-up was executed under the bloat plan. It generalizes `_direct_radial_evaluator(...)` over the column type, deletes the modB-specific `_direct_modB_value_evaluator(...)` and `_ModBValueEvaluator` alias, keeps `_eval_modB_value_radial_columns(...)` as the subset factory for modB value/theta/zeta evaluators, banks 14 additional source LOC, and records CPU/X64 routing, metadata, and type-check validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. The full T2.2 formula/subset-family target remains a bloat-plan decision, not a TORAX runtime phase.
 
-**2026-06-01 cross-link:** The T2.1 LS-Newton reporting helper follow-up was executed under the bloat plan. It centralizes only repeated Hessian/Newton-polish reporting-field extraction in `src/simsopt/geo/boozersurface_jax.py`, banks 37 source LOC, preserves solve-path branching, backend strings, VJP construction, factorization metadata, and local solve-quality overrides, and records CPU/X64 result-schema and run-code validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. This is not CUDA/MPS or TORAX Stage 2 parity proof.
+**2026-06-01 cross-link:** The T2.1 LS-Newton reporting helper follow-up was executed under the bloat plan. It centralizes only repeated Hessian/Newton-polish reporting-field extraction in `src/simsopt/geo/boozersurface_jax.py`, banks 37 source LOC, preserves solve-path branching, backend strings, VJP construction, factorization metadata, and local solve-quality overrides, and records CPU/X64 result-schema and run-code validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. This is not CUDA/GPU or TORAX Stage 2 parity proof.
 
 **2026-06-01 cross-link:** T2.9 quantity-aware tolerance extraction was executed under the bloat plan as a numerical-contract SSOT slice. `benchmarks/validation_ladder_contract.py` now owns `QUANTITY_TOLERANCE_BUCKETS` and `quantity_parity_tolerance(...)`; the non-banana harness keeps `_tolerance_for(quantity)` as a compatibility wrapper. A 204-row pre/post snapshot proved unchanged `(bucket, rtol, atol)` results for every migrated quantity across `cpu_reference`, `parity`, `fast`, and `float32_smoke`; focused float32 diagnostic tests and source-only `mypy` for `validation_ladder_contract.py` passed. This closes the tolerance-policy contract migration but is not LOC-banked.
 
-**2026-06-01 cross-link:** The T3.2 Biot-Savart points-helper follow-up was executed under the bloat plan, not as a TORAX runtime phase. It centralizes duplicate mutable point-state helper bodies shared by `SpecBackedBiotSavartJAX` and `BiotSavartJAX` in `src/simsopt/field/biotsavart_jax_backend.py`, banks 2 source LOC after preserving public method metadata, preserves the live no-host-round-trip JAX-array point path, and leaves `coil_cotangents_to_dofs_gradient` open because the spec-backed and live fallback contracts have diverged. CPU/X64 point/cylindrical/spec validation is recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`; this is not CUDA/MPS or Stage 2 parity proof.
+**2026-06-01 cross-link:** The T3.2 Biot-Savart points-helper follow-up was executed under the bloat plan, not as a TORAX runtime phase. It centralizes duplicate mutable point-state helper bodies shared by `SpecBackedBiotSavartJAX` and `BiotSavartJAX` in `src/simsopt/field/biotsavart_jax_backend.py`, banks 2 source LOC after preserving public method metadata, preserves the live no-host-round-trip JAX-array point path, and leaves `coil_cotangents_to_dofs_gradient` open because the spec-backed and live fallback contracts have diverged. CPU/X64 point/cylindrical/spec validation is recorded in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`; this is not CUDA/GPU or Stage 2 parity proof.
 
 **2026-06-01 cross-link:** The T2.8 `LayerDriftTracker` core helper was executed under the bloat plan as replay-diagnostic cleanup, not as a TORAX runtime phase. It centralizes the repeated layer-decomposition max/first-divergence state transitions in `benchmarks/single_stage_init_parity.py`, banks 13 benchmark LOC, preserves explicit same-candidate replay result keys and pre-Newton census gate semantics, and records CPU/X64 replay-helper validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. The larger T2.8 tracker-family cleanup remains open.
 
-**2026-06-01 cross-link:** The T2.8 SciPy callback first-split helper follow-up was also executed under the bloat plan. It centralizes only the repeated "first split wins" assignment for Boozer SciPy callback trace divergence reporting in `benchmarks/single_stage_init_parity.py`, banks 4 additional benchmark LOC, preserves explicit callback field comparison order and `first_boozer_scipy_callback_split` schema keys, and records CPU/X64 callback-trace validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 SciPy callback first-split helper follow-up was also executed under the bloat plan. It centralizes only the repeated "first split wins" assignment for Boozer SciPy callback trace divergence reporting in `benchmarks/single_stage_init_parity.py`, banks 4 additional benchmark LOC, preserves explicit callback field comparison order and `first_boozer_scipy_callback_split` schema keys, and records CPU/X64 callback-trace validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 target-native predicate-cache micro-slice was also executed under the bloat plan. It caches only the per-pair target-native rejection predicates inside `benchmarks/single_stage_init_parity.py`, banks 2 additional benchmark LOC, preserves replay payload keys, rejection diagnostics, gradient/hardware comparison semantics, and same-candidate gate classification, and records CPU/X64 target-native replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 target-native predicate-cache micro-slice was also executed under the bloat plan. It caches only the per-pair target-native rejection predicates inside `benchmarks/single_stage_init_parity.py`, banks 2 additional benchmark LOC, preserves replay payload keys, rejection diagnostics, gradient/hardware comparison semantics, and same-candidate gate classification, and records CPU/X64 target-native replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 comparison-scope `Counter` micro-slice was also executed under the bloat plan. It replaces only the repeated candidate/gradient comparison-scope count increments inside `benchmarks/single_stage_init_parity.py`, banks 3 additional benchmark LOC, preserves explicit replay payload keys by converting the counters back to plain dicts at the result boundary, and records CPU/X64 scope-count replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 comparison-scope `Counter` micro-slice was also executed under the bloat plan. It replaces only the repeated candidate/gradient comparison-scope count increments inside `benchmarks/single_stage_init_parity.py`, banks 3 additional benchmark LOC, preserves explicit replay payload keys by converting the counters back to plain dicts at the result boundary, and records CPU/X64 scope-count replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 per-pair metadata-binding micro-slice was also executed under the bloat plan. It binds repeated same-candidate event metadata inside `benchmarks/single_stage_init_parity.py`, banks 4 additional benchmark LOC, preserves explicit replay payload keys and first-failure/callback/rejection metadata fields, and records CPU/X64 replay-metadata validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 per-pair metadata-binding micro-slice was also executed under the bloat plan. It binds repeated same-candidate event metadata inside `benchmarks/single_stage_init_parity.py`, banks 4 additional benchmark LOC, preserves explicit replay payload keys and first-failure/callback/rejection metadata fields, and records CPU/X64 replay-metadata validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 target-native component-summary reuse micro-slice was also executed under the bloat plan. It reuses `_compare_same_candidate_objective_components(...)` for target-native empty component summaries in `benchmarks/single_stage_init_parity.py`, banks 2 additional benchmark LOC, preserves explicit replay payload keys, component-owner metadata, target-native rejection diagnostics, and same-candidate gate classification, and records CPU/X64 component-summary validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 target-native component-summary reuse micro-slice was also executed under the bloat plan. It reuses `_compare_same_candidate_objective_components(...)` for target-native empty component summaries in `benchmarks/single_stage_init_parity.py`, banks 2 additional benchmark LOC, preserves explicit replay payload keys, component-owner metadata, target-native rejection diagnostics, and same-candidate gate classification, and records CPU/X64 component-summary validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 target-native flag-inline micro-slice was also executed under the bloat plan. It deletes the single-use target-native replay flag helper in `benchmarks/single_stage_init_parity.py`, banks 6 additional benchmark LOC, preserves explicit replay payload keys, target-native scope/prefix/rejection classification, and same-candidate gate behavior, and records CPU/X64 target-native replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 target-native flag-inline micro-slice was also executed under the bloat plan. It deletes the single-use target-native replay flag helper in `benchmarks/single_stage_init_parity.py`, banks 6 additional benchmark LOC, preserves explicit replay payload keys, target-native scope/prefix/rejection classification, and same-candidate gate behavior, and records CPU/X64 target-native replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 SciPy callback `fun` threshold micro-slice was also executed under the bloat plan. It reuses `_compare_same_candidate_scalar(...)`'s mismatch emission to avoid the second scalar-close call in the callback `fun` first-split branch, banks 4 additional benchmark LOC, preserves explicit callback trace schema keys, field comparison order, scalar tolerance ownership, and same-candidate replay behavior, and records CPU/X64 callback-trace validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 SciPy callback `fun` threshold micro-slice was also executed under the bloat plan. It reuses `_compare_same_candidate_scalar(...)`'s mismatch emission to avoid the second scalar-close call in the callback `fun` first-split branch, banks 4 additional benchmark LOC, preserves explicit callback trace schema keys, field comparison order, scalar tolerance ownership, and same-candidate replay behavior, and records CPU/X64 callback-trace validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 SciPy callback split payload-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_same_candidate_scipy_callback_split(...)` pass-through in `benchmarks/single_stage_init_parity.py`, keeps the explicit callback split payload literal inside `_record_first_scipy_callback_split(...)`, banks 12 additional benchmark LOC, and preserves callback trace schema keys, field comparison order, first-split precedence, and same-candidate replay behavior. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 SciPy callback split payload-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_same_candidate_scipy_callback_split(...)` pass-through in `benchmarks/single_stage_init_parity.py`, keeps the explicit callback split payload literal inside `_record_first_scipy_callback_split(...)`, banks 12 additional benchmark LOC, and preserves callback trace schema keys, field comparison order, first-split precedence, and same-candidate replay behavior. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 layer diagnostic wrapper-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_diagnostic_scalar_abs_diff(...)` / `_diagnostic_vector_abs_diff(...)` wrappers in `benchmarks/single_stage_init_parity.py`, keeps the `None`/`None` zero-drift policy explicit in `_compare_same_candidate_layer_decomposition(...)`, banks 16 additional benchmark LOC, and preserves layer field tables, scalar/vector path diff helpers, `parity_bug_census` schema, and same-candidate replay behavior. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 layer diagnostic wrapper-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_diagnostic_scalar_abs_diff(...)` / `_diagnostic_vector_abs_diff(...)` wrappers in `benchmarks/single_stage_init_parity.py`, keeps the `None`/`None` zero-drift policy explicit in `_compare_same_candidate_layer_decomposition(...)`, banks 16 additional benchmark LOC, and preserves layer field tables, scalar/vector path diff helpers, `parity_bug_census` schema, and same-candidate replay behavior. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 decomposition dispatch wrapper-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_compare_same_candidate_iota_decomposition(...)` / `_compare_same_candidate_boozer_solve_decomposition(...)` wrappers in `benchmarks/single_stage_init_parity.py`, keeps `field_name` and `layer_fields` bindings explicit at the two generic layer-decomposition call sites, banks 34 additional benchmark LOC, and preserves layer field tables, field names, `parity_bug_census` schema, target-native skip behavior, and same-candidate replay behavior. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 decomposition dispatch wrapper-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_compare_same_candidate_iota_decomposition(...)` / `_compare_same_candidate_boozer_solve_decomposition(...)` wrappers in `benchmarks/single_stage_init_parity.py`, keeps `field_name` and `layer_fields` bindings explicit at the two generic layer-decomposition call sites, banks 34 additional benchmark LOC, and preserves layer field tables, field names, `parity_bug_census` schema, target-native skip behavior, and same-candidate replay behavior. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 scalar-close inline micro-slice was also executed under the bloat plan. It deletes the one-use `_scalar_close(...)` wrapper in `benchmarks/single_stage_init_parity.py`, keeps scalar tolerance policy and mismatch text in `_compare_same_candidate_scalar(...)`, preserves NaN mismatch behavior via `not diff <= ...`, banks 4 additional benchmark LOC, and records CPU/X64 same-candidate replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 scalar-close inline micro-slice was also executed under the bloat plan. It deletes the one-use `_scalar_close(...)` wrapper in `benchmarks/single_stage_init_parity.py`, keeps scalar tolerance policy and mismatch text in `_compare_same_candidate_scalar(...)`, preserves NaN mismatch behavior via `not diff <= ...`, banks 4 additional benchmark LOC, and records CPU/X64 same-candidate replay validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
-**2026-06-01 cross-link:** The T2.8 parity-census finalize inline micro-slice was also executed under the bloat plan. It deletes the one-use `_finalize_parity_bug_census(...)` wrapper in `benchmarks/single_stage_init_parity.py`, keeps the recorded/not-applicable `parity_bug_census` result schema explicit at the replay boundary, preserves divergent-layer sorting, max-layer-diff mapping, target-native not-applicable payloads, and pre-Newton gate behavior, banks 11 additional benchmark LOC, and records CPU/X64 replay/census validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+**2026-06-01 cross-link:** The T2.8 parity-census finalize inline micro-slice was also executed under the bloat plan. It deletes the one-use `_finalize_parity_bug_census(...)` wrapper in `benchmarks/single_stage_init_parity.py`, keeps the recorded/not-applicable `parity_bug_census` result schema explicit at the replay boundary, preserves divergent-layer sorting, max-layer-diff mapping, target-native not-applicable payloads, and pre-Newton gate behavior, banks 11 additional benchmark LOC, and records CPU/X64 replay/census validation in `docs/bloat_torax_coherent_execution_plan_2026-05-31.md`. Full single-stage parity, CUDA/GPU, and larger tracker-family cleanup remain separate gates.
 
 ## Acceptance Gates
 
-- [ ] Only files in the chosen implementation slice are modified.
-- [ ] `git diff --check` passes.
-- [ ] Relevant focused tests pass on CPU.
-- [ ] CUDA claims are made only after CUDA-host validation.
-- [ ] No `.env` or `.env.*` file is created or staged.
-- [ ] No dynamic imports are introduced.
-- [ ] No untyped escape hatches are introduced.
-- [ ] No persistent-cache test relies on host callbacks.
-- [ ] No CPU-only proof is cited as GPU transfer or CUDA determinism proof.
-- [ ] Any helper introduced has a smaller public surface than the duplicated code it replaces.
+- [x] Only files in the chosen implementation slice are modified.
+- [x] `git diff --check` passes.
+- [x] Relevant focused tests pass on CPU.
+- [x] CUDA claims are made only after CUDA-host validation.
+- [x] No `.env` or `.env.*` file is created or staged.
+- [x] No dynamic imports are introduced.
+- [x] No untyped escape hatches are introduced.
+- [x] No persistent-cache test relies on host callbacks.
+- [x] No CPU-only proof is cited as GPU transfer or CUDA determinism proof.
+- [x] Any helper introduced has a smaller public surface than the duplicated code it replaces.
 
 ## Suggested Implementation Order
 

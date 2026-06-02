@@ -1574,6 +1574,10 @@ single explicit JAX loop, with host I/O only at documented boundaries.
     `docs/source/jax_gpu_setup.rst` covering N3.1.
   - [x] Cross-link this plan from `docs/jax_native_round3_curated_todos_2026-05-18.md`
     once the first milestone (N1) lands.
+  - [x] 2026-06-02 closeout cross-link: `docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md`
+    Phase 4/5 now records the source audit, numerical-boundary tests, and
+    `docs/using_jax_backend.md` refresh that keep this plan's seven-mode backend
+    table aligned with `src/simsopt/backend/runtime.py`.
 
 ---
 
