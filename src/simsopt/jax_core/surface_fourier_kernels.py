@@ -1376,18 +1376,6 @@ def _surface_xyzfourier_derivative_hat_paired(
     )
 
 
-def _surface_xyzfourier_rotate(phi_angle, xhat, yhat):
-    cphi = jnp.cos(phi_angle)[:, None]
-    sphi = jnp.sin(phi_angle)[:, None]
-    return xhat * cphi - yhat * sphi, xhat * sphi + yhat * cphi
-
-
-def _surface_xyzfourier_rotate_lin(phi_angle, xhat, yhat):
-    cphi = jnp.cos(phi_angle)
-    sphi = jnp.sin(phi_angle)
-    return xhat * cphi - yhat * sphi, xhat * sphi + yhat * cphi
-
-
 def _paired_gamma_derivative(
     eval_gamma_at, quadpoints_phi, quadpoints_theta, *, phi_order, theta_order
 ):
@@ -1436,9 +1424,7 @@ def surface_xyzfourier_gamma_from_dofs(
         ((0, 0),),
     )
 
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
-    phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
-    x, y = _surface_xyzfourier_rotate(phi_angle, xhat, yhat)
+    x, y = _rotate_hat_components(quadpoints_phi, xhat, yhat)
     return jnp.stack([x, y, z], axis=-1)
 
 
@@ -1469,9 +1455,7 @@ def surface_xyzfourier_gamma_lin_from_dofs(
     yhat = _surface_xyzfourier_hat_paired(yc, ys, cos_angle, sin_angle)
     z = _surface_xyzfourier_hat_paired(zc, zs, cos_angle, sin_angle)
 
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi).reshape(-1)
-    phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
-    x, y = _surface_xyzfourier_rotate_lin(phi_angle, xhat, yhat)
+    x, y = _rotate_hat_components_lin(quadpoints_phi, xhat, yhat)
     return jnp.stack([x, y, z], axis=-1)
 
 
@@ -1506,8 +1490,7 @@ def surface_xyzfourier_gammadash1_from_dofs(
 
     radial = dxhat_dphi - two_pi * yhat
     toroidal = dyhat_dphi + two_pi * xhat
-    phi_angle = two_pi * quadpoints_phi_jax
-    dx, dy = _surface_xyzfourier_rotate(phi_angle, radial, toroidal)
+    dx, dy = _rotate_hat_components(quadpoints_phi_jax, radial, toroidal)
     return jnp.stack([dx, dy, dz_dphi], axis=-1)
 
 
@@ -1551,8 +1534,7 @@ def surface_xyzfourier_gammadash1_lin_from_dofs(
 
     radial = dxhat_dphi - two_pi * yhat
     toroidal = dyhat_dphi + two_pi * xhat
-    phi_angle = two_pi * quadpoints_phi_jax
-    dx, dy = _surface_xyzfourier_rotate_lin(phi_angle, radial, toroidal)
+    dx, dy = _rotate_hat_components_lin(quadpoints_phi_jax, radial, toroidal)
     return jnp.stack([dx, dy, dz_dphi], axis=-1)
 
 
@@ -1582,11 +1564,7 @@ def surface_xyzfourier_gammadash2_from_dofs(
             ((0, 1),),
         )
     )
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
-    two_pi = _two_pi(quadpoints_phi_jax)
-
-    phi_angle = two_pi * quadpoints_phi_jax
-    dx, dy = _surface_xyzfourier_rotate(phi_angle, dxhat_dtheta, dyhat_dtheta)
+    dx, dy = _rotate_hat_components(quadpoints_phi, dxhat_dtheta, dyhat_dtheta)
     return jnp.stack([dx, dy, dz_dtheta], axis=-1)
 
 
@@ -1626,8 +1604,7 @@ def surface_xyzfourier_gammadash2_lin_from_dofs(
         zc, zs, m_factor, cos_angle, sin_angle
     )
 
-    phi_angle = two_pi * quadpoints_phi_jax
-    dx, dy = _surface_xyzfourier_rotate_lin(phi_angle, dxhat_dtheta, dyhat_dtheta)
+    dx, dy = _rotate_hat_components_lin(quadpoints_phi_jax, dxhat_dtheta, dyhat_dtheta)
     return jnp.stack([dx, dy, dz_dtheta], axis=-1)
 
 
@@ -1664,8 +1641,7 @@ def surface_xyzfourier_gammadash1dash1_from_dofs(
 
     radial = d2xhat_dphi2 - 2.0 * two_pi * dyhat_dphi - two_pi**2 * xhat
     toroidal = d2yhat_dphi2 + 2.0 * two_pi * dxhat_dphi - two_pi**2 * yhat
-    phi_angle = two_pi * quadpoints_phi_jax
-    dx, dy = _surface_xyzfourier_rotate(phi_angle, radial, toroidal)
+    dx, dy = _rotate_hat_components(quadpoints_phi_jax, radial, toroidal)
     return jnp.stack([dx, dy, d2z_dphi2], axis=-1)
 
 
@@ -1701,8 +1677,7 @@ def surface_xyzfourier_gammadash1dash2_from_dofs(
 
     radial = d2xhat_dphidtheta - two_pi * dyhat_dtheta
     toroidal = d2yhat_dphidtheta + two_pi * dxhat_dtheta
-    phi_angle = two_pi * quadpoints_phi_jax
-    dx, dy = _surface_xyzfourier_rotate(phi_angle, radial, toroidal)
+    dx, dy = _rotate_hat_components(quadpoints_phi_jax, radial, toroidal)
     return jnp.stack([dx, dy, d2z_dphidtheta], axis=-1)
 
 
@@ -1732,11 +1707,7 @@ def surface_xyzfourier_gammadash2dash2_from_dofs(
             ((0, 2),),
         )
     )
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
-    two_pi = _two_pi(quadpoints_phi_jax)
-
-    phi_angle = two_pi * quadpoints_phi_jax
-    dx, dy = _surface_xyzfourier_rotate(phi_angle, d2xhat_dtheta2, d2yhat_dtheta2)
+    dx, dy = _rotate_hat_components(quadpoints_phi, d2xhat_dtheta2, d2yhat_dtheta2)
     return jnp.stack([dx, dy, d2z_dtheta2], axis=-1)
 
 
