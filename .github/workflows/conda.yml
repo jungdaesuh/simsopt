@@ -46,7 +46,7 @@ jobs:
           conda-build-version: ">=3.26"
 
       - name: Prepare
-        run: conda install -y --name base anaconda-client
+        run: conda install -y --name base anaconda-client setuptools_scm scikit-build-core
 
       - name: Build and upload
         if: github.event_name == 'release' && github.event.action == 'published'
