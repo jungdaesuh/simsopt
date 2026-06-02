@@ -3182,33 +3182,6 @@ def _update_parity_bug_census(
             }
 
 
-def _finalize_parity_bug_census(
-    census: dict[str, dict[str, Any]],
-    *,
-    first_divergence: dict[str, Any] | None,
-) -> dict[str, Any]:
-    layers = list(census.values())
-    divergent_layers = [
-        dict(entry)
-        for entry in sorted(
-            layers,
-            key=lambda item: float(item["max_abs_diff"]),
-            reverse=True,
-        )
-        if bool(entry["diverged"])
-    ]
-    return {
-        "status": "recorded" if layers else "not-recorded",
-        "first_divergence": first_divergence,
-        "divergent_layer_count": len(divergent_layers),
-        "divergent_layers": divergent_layers,
-        "max_layer_diffs": {
-            f"{entry['family']}.{entry['layer']}": entry["max_abs_diff"]
-            for entry in layers
-        },
-    }
-
-
 def _empirical_severity_context(
     layer_full_name: str,
     max_abs: float,
@@ -3816,8 +3789,9 @@ def compare_same_candidate_objective_replay(
         and target_native_replay_event_count == same_candidate_event_count
         else "full-objective-trace"
     )
-    parity_bug_census = (
-        {
+    parity_bug_census: dict[str, Any]
+    if diagnostic_scope == "target-native-objective-gradient":
+        parity_bug_census = {
             "status": "not-applicable",
             "reason": "target_native_replay_records_value_gradient_and_solved_state",
             "first_divergence": None,
@@ -3825,12 +3799,27 @@ def compare_same_candidate_objective_replay(
             "divergent_layers": [],
             "max_layer_diffs": {},
         }
-        if diagnostic_scope == "target-native-objective-gradient"
-        else _finalize_parity_bug_census(
-            parity_bug_census_layers,
-            first_divergence=first_parity_bug_census_divergence,
-        )
-    )
+    else:
+        parity_bug_census_records = list(parity_bug_census_layers.values())
+        divergent_layers = [
+            dict(entry)
+            for entry in sorted(
+                parity_bug_census_records,
+                key=lambda item: float(item["max_abs_diff"]),
+                reverse=True,
+            )
+            if bool(entry["diverged"])
+        ]
+        parity_bug_census = {
+            "status": "recorded" if parity_bug_census_records else "not-recorded",
+            "first_divergence": first_parity_bug_census_divergence,
+            "divergent_layer_count": len(divergent_layers),
+            "divergent_layers": divergent_layers,
+            "max_layer_diffs": {
+                f"{entry['family']}.{entry['layer']}": entry["max_abs_diff"]
+                for entry in parity_bug_census_records
+            },
+        }
     return {
         "status": "pass" if not failures else "fail",
         "diagnostic_scope": diagnostic_scope,

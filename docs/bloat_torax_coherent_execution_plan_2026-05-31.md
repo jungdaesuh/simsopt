@@ -6,7 +6,7 @@
 - Source-doc review basis: `b267b0d95` on `shared-jax-clean`
 - Source-code checkpoint before docs-only gate commit: `8b94c2bbd` on `shared-jax-clean`, with a broad dirty implementation tree across `src/`, `tests/`, and `docs/`
 - Docs-only drift gate introduced in commit `398b3e50d` and checkpoint basis clarified in commit `446eab365` on `shared-jax-clean`
-- Latest completed T2.8 checkpoint before this scalar-close source/docs sync: `114c53685` (`docs: record T2.8 decomposition dispatch slice`), after the broad dirty tree was split into scoped source/docs commits; this sync adds the scalar-close inline slice in `benchmarks/single_stage_init_parity.py`.
+- Latest completed T2.8 checkpoint before this parity-census finalize source/docs sync: `bdd4a0c32` (`refactor: inline scalar tolerance predicate`), after the broad dirty tree was split into scoped source/docs commits; the current source checkpoint also includes the later T2.2 typed modB direct-factory slice `7228379af`.
 - Reference TORAX repo reviewed: `/Users/suhjungdae/code/opensource/torax` at `60190df1` on clean `main`
 - Historical local status at source-doc review: the two source docs were modified and this overlay was untracked; no source-code edits were part of that review. This is no longer the current working-tree state.
 - Artifact note: this checkout does not contain a repo-local `.artifacts/` tree. Historical code-smell artifacts referenced by the bloat plan were found in sibling checkout `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/code_smell_review_2026-05-20/`.
@@ -62,7 +62,7 @@ The source plans remain the SSOT for detailed item text, line refs, and acceptan
 ## Current Context
 
 - Source-doc refresh basis: `shared-jax-clean` at `b267b0d95`.
-- Docs-gate history: the docs-only drift gate was introduced in `398b3e50d`, checkpoint basis was clarified in `446eab365`, the source-code checkpoint before that docs-only gate was `8b94c2bbd`, and the latest completed T2.8 checkpoint before this scalar-close sync is `114c53685`. Treat these commit hashes as historical anchors, not live-HEAD markers.
+- Docs-gate history: the docs-only drift gate was introduced in `398b3e50d`, checkpoint basis was clarified in `446eab365`, the source-code checkpoint before that docs-only gate was `8b94c2bbd`, the latest completed T2.8 checkpoint before this parity-census finalize sync is `bdd4a0c32`, and the current source checkpoint also includes T2.2 slice `7228379af`. Treat these commit hashes as historical anchors, not live-HEAD markers.
 - `docs/bloat_reduction_plan_2026-05-20.md` is a tiered reduction plan: T1 mechanical wins, T2 factory introductions, T3 structural consolidations, and T4 contract decisions.
 - `docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md` is a pattern-hardening plan: static/dynamic pytree contracts, persistent-cache proof, bounded control flow, branch discipline, and numerical stability.
 - Shared dependency surfaces include `jax_core` specs, backend runtime/cache policy, validation ladder helpers, host-boundary helpers, fixed-iteration scan code, PM/wireframe workflows, and GPU/MPS-sensitive runtime paths.
@@ -1761,6 +1761,35 @@ git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_
 # passed
 ```
 
+### 2026-06-01 — T2.8 parity-census finalize inline
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.8.
+- **Selected slice:** final `parity_bug_census` schema construction in `compare_same_candidate_objective_replay(...)`. No parity-census updater, divergent-layer threshold, pre-Newton gate, target-native not-applicable payload, replay payload keys, candidate matching, callback comparison, scalar/vector tolerance policy, CUDA/MPS path, or full single-stage parity runner behavior was changed.
+- **Changed files:** `benchmarks/single_stage_init_parity.py`, plus this bloat plan set.
+- **Design-it-twice gate:** Option A, keeping `_finalize_parity_bug_census(...)`, was rejected because it had one call site and only wrapped the final replay payload literal. Option B, selected here, deletes the wrapper and keeps the recorded/not-applicable `parity_bug_census` schema visible at the replay result boundary, while preserving the sorted divergent-layer copy and max-layer-diff mapping.
+- **Scope status:** parity-census finalize inline slice LOC-banked small; full T2.8 still open. `benchmarks/single_stage_init_parity.py` is source-negative by 11 LOC for this slice (`24 insertions / 35 deletions`; 4,723 -> 4,712 LOC). Together with the earlier T2.8 micro-slices, T2.8 has 115 benchmark LOC banked so far; the old `~200 LOC` estimate remains unbanked.
+- **Regression evidence:** the focused replay/census selector covers recorded parity-census payloads, target-native not-applicable replay, pre-Newton strict-gate messages, and same-candidate replay gate/classification behavior. The result dict schema stays explicit at the public replay boundary.
+- **Validation evidence:** CPU/X64 replay-helper proof, not full single-stage parity replay, CUDA, MPS, or fresh benchmark proof.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# All checks passed!
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff format --check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# 2 files already formatted
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# passed
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/test_benchmark_helpers.py -k "parity_bug_census or pre_newton_census or same_candidate"
+# 28 passed, 332 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy benchmarks/single_stage_init_parity.py
+# blocked: 128 pre-existing benchmark/example typing errors; no error was introduced by the parity-census finalize inline slice
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found.
+rg -n "_finalize_parity_bug_census" benchmarks/single_stage_init_parity.py tests src benchmarks
+# no source/test/benchmark call sites
+git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
 ## Risks and Mitigations
 
 - Risk: A TORAX-inspired helper creates another abstraction layer without deleting real complexity.
@@ -1790,6 +1819,6 @@ git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.2 radial pass-through inline follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.8 per-pair metadata-binding slice, T2.8 target-native component-summary reuse slice, T2.8 target-native flag inline slice, T2.8 SciPy callback `fun` threshold slice, T2.8 callback split payload-inline slice, T2.8 layer diagnostic wrapper-inline slice, T2.8 decomposition dispatch wrapper-inline slice, T2.8 scalar-close inline slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.2 radial pass-through inline follow-up, T2.2 typed modB direct-factory follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.8 per-pair metadata-binding slice, T2.8 target-native component-summary reuse slice, T2.8 target-native flag inline slice, T2.8 SciPy callback `fun` threshold slice, T2.8 callback split payload-inline slice, T2.8 layer diagnostic wrapper-inline slice, T2.8 decomposition dispatch wrapper-inline slice, T2.8 scalar-close inline slice, T2.8 parity-census finalize inline slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?
