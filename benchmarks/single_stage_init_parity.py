@@ -2412,10 +2412,6 @@ def _same_candidate_comparable_vectors(
     return cpu_vector, jax_vector, "full-optimizer-vector"
 
 
-def _scalar_close(left: float, right: float, *, rtol: float, atol: float) -> bool:
-    return bool(abs(left - right) <= (atol + rtol * abs(right)))
-
-
 def _compare_same_candidate_scalar(
     failures: list[str],
     *,
@@ -2429,7 +2425,7 @@ def _compare_same_candidate_scalar(
         failures.append(f"{field} missing finite CPU/JAX values.")
         return float("inf")
     diff = abs(float(jax_value) - float(cpu_value))
-    if not _scalar_close(float(jax_value), float(cpu_value), rtol=rtol, atol=atol):
+    if not diff <= (atol + rtol * abs(float(cpu_value))):
         failures.append(
             f"{field} mismatch: cpu={float(cpu_value):.16e}, "
             f"jax={float(jax_value):.16e}, abs_diff={diff:.3e}."
