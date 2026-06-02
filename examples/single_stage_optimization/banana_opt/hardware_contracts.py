@@ -26,6 +26,17 @@ VACUUM_VESSEL_MINOR_RADIUS_M = 0.222
 BANANA_WINDING_SURFACE_MAJOR_RADIUS_M = 0.903
 BANANA_WINDING_MINOR_RADIUS_M = 0.142
 BANANA_WINDING_CHANNEL_ORIENTATION = "toroidal_surface_tangent"
+# Real banana winding-pack cross-section (as-built U-channel frame). Sources:
+# CAD/banana_coils/sample_coils.csv header (bracket_width_mm:29, bracket_depth_mm:20)
+# and CAD/banana_coils/clearance_report.md. WIDTH is the binormal (in-bend /
+# poloidal-arc-tangent) dimension that competes with the centerline bend radius;
+# DEPTH is the normal (radial) dimension. The binormal/normal assignment follows
+# BANANA_WINDING_CHANNEL_ORIENTATION and is the documented assumption flagged in
+# clearance_report.md; swapping it swaps the two half-builds below.
+BANANA_PACK_WIDTH_BINORMAL_M = 0.029
+BANANA_PACK_DEPTH_NORMAL_M = 0.020
+BANANA_PACK_HALF_BUILD_BINORMAL_M = BANANA_PACK_WIDTH_BINORMAL_M / 2.0
+BANANA_PACK_HALF_BUILD_NORMAL_M = BANANA_PACK_DEPTH_NORMAL_M / 2.0
 # Port-fit bounds on ProjectedEllipseWidth.J() (short-axis diameter of the
 # best-fit ellipse to the coil curve projected onto the winding surface).
 # Max 0.17 m is the bare-curve allowance for a 0.30 m port aperture; the

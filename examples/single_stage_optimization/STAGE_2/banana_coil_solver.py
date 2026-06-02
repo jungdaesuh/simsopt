@@ -1925,19 +1925,41 @@ def _evaluate_stage2_flux_objective_on_own_grid(Jf):
     return float(Jf.J())
 
 
-def _finite_build_artifact_metadata(finite_build, banana_curve, net_banana_current_A):
+def _finite_build_artifact_metadata(
+    finite_build,
+    banana_curve,
+    net_banana_current_A,
+    *,
+    cc_min_dist_m=None,
+    cs_min_dist_m=None,
+    cc_nominal_m=None,
+    cs_nominal_m=None,
+    curvature_margin_m=0.0,
+):
     """results.json fields describing the finite-build banana winding pack.
 
-    Includes the buildability diagnostic: the centerline's minimum radius of
-    curvature versus the pack's binormal half-extent. A pack cannot bend tighter
-    than its half-build, so ``FINITEBUILD_CURVATURE_OK`` is False when the
-    centerline curves inside the pack half-width.
+    Buildability diagnostics:
+    - Bend feasibility: the conductor bends in the centerline's principal-normal
+      plane, which is not aligned with either pack axis, so the conservative binding
+      extent is the LARGER half-build. ``FINITEBUILD_INNER_EDGE_RADIUS_M =
+      min_curv_radius - max(half_n, half_b)`` is the inner-fiber radius; the pack is
+      bend-feasible when it is >= ``curvature_margin_m`` (an optional cable-bend
+      floor; 0 = pure geometric limit). ``FINITEBUILD_CURVATURE_OK`` reports this.
+    - Envelope clearance: clearance is enforced on centerlines, so the real pack
+      envelope clears only if the centerline gap exceeds the nominal floor plus the
+      pack corner reach (2x between two packs, 1x to the plasma). Reported as
+      ``FINITEBUILD_CC_ENVELOPE_OK`` / ``FINITEBUILD_CS_ENVELOPE_OK`` when the
+      centerline min distances and nominal floors are supplied.
     """
     max_curvature = float(np.max(banana_curve.kappa()))
     min_curv_radius_m = float("inf") if max_curvature == 0.0 else 1.0 / max_curvature
-    half_extent_b_m = finite_build.pack_half_extent_b_m
+    half_n_m = float(finite_build.pack_half_extent_n_m)
+    half_b_m = float(finite_build.pack_half_extent_b_m)
+    binding_half_build_m = max(half_n_m, half_b_m)
+    inner_edge_radius_m = min_curv_radius_m - binding_half_build_m
+    pack_reach_m = finite_build.pack_reach_m
     nfilaments = int(finite_build.nfilaments)
-    return {
+    metadata = {
         "FINITE_BUILD_ENABLED": True,
         "FINITEBUILD_NUMFILAMENTS_N": int(finite_build.numfilaments_n),
         "FINITEBUILD_NUMFILAMENTS_B": int(finite_build.numfilaments_b),
@@ -1947,11 +1969,25 @@ def _finite_build_artifact_metadata(finite_build, banana_curve, net_banana_curre
         "FINITEBUILD_FRAME": finite_build.frame,
         "FINITEBUILD_FILAMENTS_PER_BANANA": nfilaments,
         "BANANA_FILAMENT_CURRENT_A": float(net_banana_current_A) / nfilaments,
-        "FINITEBUILD_PACK_HALF_EXTENT_N_M": float(finite_build.pack_half_extent_n_m),
-        "FINITEBUILD_PACK_HALF_EXTENT_B_M": float(half_extent_b_m),
+        "FINITEBUILD_PACK_HALF_EXTENT_N_M": half_n_m,
+        "FINITEBUILD_PACK_HALF_EXTENT_B_M": half_b_m,
+        "FINITEBUILD_BINDING_HALF_BUILD_M": binding_half_build_m,
+        "FINITEBUILD_PACK_REACH_M": pack_reach_m,
         "FINITEBUILD_MIN_CURVATURE_RADIUS_M": min_curv_radius_m,
-        "FINITEBUILD_CURVATURE_OK": bool(min_curv_radius_m > half_extent_b_m),
+        "FINITEBUILD_INNER_EDGE_RADIUS_M": inner_edge_radius_m,
+        "FINITEBUILD_CURVATURE_OK": bool(
+            inner_edge_radius_m >= float(curvature_margin_m)
+        ),
     }
+    if cc_min_dist_m is not None and cc_nominal_m is not None:
+        cc_envelope_m = float(cc_min_dist_m) - 2.0 * pack_reach_m
+        metadata["FINITEBUILD_CC_ENVELOPE_MIN_DIST_M"] = cc_envelope_m
+        metadata["FINITEBUILD_CC_ENVELOPE_OK"] = bool(cc_envelope_m >= float(cc_nominal_m))
+    if cs_min_dist_m is not None and cs_nominal_m is not None:
+        cs_envelope_m = float(cs_min_dist_m) - pack_reach_m
+        metadata["FINITEBUILD_CS_ENVELOPE_MIN_DIST_M"] = cs_envelope_m
+        metadata["FINITEBUILD_CS_ENVELOPE_OK"] = bool(cs_envelope_m >= float(cs_nominal_m))
+    return metadata
 
 
 def _capture_stage2_artifact_state(
@@ -2782,6 +2818,17 @@ def main(parsed_args=None):
     CC_THRESHOLD = float(args.cc_threshold)
     CC_WEIGHT = args.cc_weight
     CS_THRESHOLD = COIL_PLASMA_MIN_DIST_M
+    # Finite-build clearance is enforced on the symmetry-expanded CENTERLINES, so
+    # inflate the distance-penalty thresholds by the pack corner reach: centerline
+    # clearance then implies the real pack ENVELOPE clears the nominal floor
+    # (2x reach between two packs, 1x reach to the plasma). Thin mode: reach 0
+    # (thresholds unchanged). The recorded CC_THRESHOLD/CS_THRESHOLD (metadata,
+    # contract, HW-eval) stay nominal; only the objective penalties are inflated.
+    finite_build_pack_reach_m = (
+        finite_build_settings.pack_reach_m if FINITE_BUILD else 0.0
+    )
+    cc_clearance_threshold = CC_THRESHOLD + 2.0 * finite_build_pack_reach_m
+    cs_clearance_threshold = CS_THRESHOLD + finite_build_pack_reach_m
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
@@ -2798,9 +2845,9 @@ def main(parsed_args=None):
     Jf = SquaredFlux(new_surf, new_bs)  # penalty on B dot n
     Jls = CurveLength(new_banana_curve)  # penalty on curve length
     Jccdist = CurveCurveDistance(
-        objective_curves, CC_THRESHOLD
-    )  # penalty on coil-to-coil distance
-    Jcsdist = CurveSurfaceDistance(objective_curves, lcfs_surf, CS_THRESHOLD)
+        objective_curves, cc_clearance_threshold
+    )  # penalty on coil-to-coil distance (pack-envelope-inflated in finite build)
+    Jcsdist = CurveSurfaceDistance(objective_curves, lcfs_surf, cs_clearance_threshold)
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
     Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)
@@ -3615,6 +3662,10 @@ def main(parsed_args=None):
                 finite_build_settings,
                 new_banana_curve,
                 banana_current_optimizable.get_value(),
+                cc_min_dist_m=results.get("CURVE_CURVE_MIN_DIST"),
+                cs_min_dist_m=results.get("CURVE_SURFACE_MIN_DIST"),
+                cc_nominal_m=COIL_COIL_MIN_DIST_M,
+                cs_nominal_m=COIL_PLASMA_MIN_DIST_M,
             )
         )
     write_json(os.path.join(OUT_DIR_ITER, "results.json"), results)

@@ -515,6 +515,15 @@ class FiniteBuildSettings:
         """Half the pack's outer span along the binormal direction (meters)."""
         return 0.5 * (int(self.numfilaments_b) - 1) * float(self.gapsize_b)
 
+    @property
+    def pack_reach_m(self) -> float:
+        """Corner reach of the pack cross-section (meters): hypot(half_n, half_b).
+
+        The worst-case distance from the centerline to a pack corner; used to
+        inflate centerline-based clearance so the real pack envelope is cleared.
+        """
+        return float(np.hypot(self.pack_half_extent_n_m, self.pack_half_extent_b_m))
+
 
 def build_finite_build_banana_coils(
     master_curve,

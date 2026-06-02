@@ -91,6 +91,10 @@ class FiniteBuildSettingsTest(unittest.TestCase):
         self.assertAlmostEqual(settings.pack_half_extent_n_m, 0.5 * (2 - 1) * 0.02)
         self.assertAlmostEqual(settings.pack_half_extent_b_m, 0.5 * (3 - 1) * 0.04)
 
+    def test_pack_reach_is_hypot_of_half_extents(self):
+        settings = _settings()  # half_n=0.01, half_b=0.04
+        self.assertAlmostEqual(settings.pack_reach_m, np.hypot(0.01, 0.04))
+
 
 class BuildFiniteBuildBananaCoilsTest(unittest.TestCase):
     def setUp(self):
@@ -316,6 +320,78 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
             _settings(), banana_curve, NET_BANANA_CURRENT_A
         )
         self.assertFalse(metadata["FINITEBUILD_CURVATURE_OK"])
+
+    def test_curvature_gate_uses_the_larger_half_build(self):
+        # half_n = 0.5*(5-1)*0.02 = 0.04 (binding); half_b = 0.5*(3-1)*0.01 = 0.01.
+        settings = FiniteBuildSettings(
+            numfilaments_n=5,
+            numfilaments_b=3,
+            gapsize_n=0.02,
+            gapsize_b=0.01,
+            rotation_order=1,
+            frame="centroid",
+        )
+        # radius 0.02 m: above the binormal half-build (0.01) but BELOW the binding
+        # normal half-build (0.04) -> the old binormal-only gate would pass, the
+        # corrected max(half_n,half_b) gate must fail.
+        banana_curve = SimpleNamespace(kappa=lambda: np.array([50.0]))  # radius 0.02
+        metadata = self.module._finite_build_artifact_metadata(
+            settings, banana_curve, NET_BANANA_CURRENT_A
+        )
+        self.assertAlmostEqual(metadata["FINITEBUILD_BINDING_HALF_BUILD_M"], 0.04)
+        self.assertAlmostEqual(metadata["FINITEBUILD_INNER_EDGE_RADIUS_M"], 0.02 - 0.04)
+        self.assertFalse(metadata["FINITEBUILD_CURVATURE_OK"])
+
+    def test_curvature_margin_tightens_gate(self):
+        # radius 0.05 m, binding half-build 0.04 -> inner-edge radius 0.01 m.
+        banana_curve = SimpleNamespace(kappa=lambda: np.array([20.0]))
+        ok = self.module._finite_build_artifact_metadata(
+            _settings(), banana_curve, NET_BANANA_CURRENT_A, curvature_margin_m=0.0
+        )
+        self.assertTrue(ok["FINITEBUILD_CURVATURE_OK"])  # 0.01 >= 0
+        tight = self.module._finite_build_artifact_metadata(
+            _settings(), banana_curve, NET_BANANA_CURRENT_A, curvature_margin_m=0.02
+        )
+        self.assertFalse(tight["FINITEBUILD_CURVATURE_OK"])  # 0.01 < 0.02
+
+    def test_envelope_clearance_verdicts_subtract_pack_reach(self):
+        # reach = hypot(0.01, 0.04) ~= 0.0412 m.
+        reach = float(np.hypot(0.01, 0.04))
+        banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0]))
+        m = self.module._finite_build_artifact_metadata(
+            _settings(),
+            banana_curve,
+            NET_BANANA_CURRENT_A,
+            cc_min_dist_m=0.20,
+            cs_min_dist_m=0.08,
+            cc_nominal_m=0.0462,
+            cs_nominal_m=0.010,
+        )
+        self.assertAlmostEqual(m["FINITEBUILD_PACK_REACH_M"], reach)
+        self.assertAlmostEqual(m["FINITEBUILD_CC_ENVELOPE_MIN_DIST_M"], 0.20 - 2 * reach)
+        self.assertTrue(m["FINITEBUILD_CC_ENVELOPE_OK"])  # 0.117 >= 0.0462
+        self.assertAlmostEqual(m["FINITEBUILD_CS_ENVELOPE_MIN_DIST_M"], 0.08 - reach)
+        self.assertTrue(m["FINITEBUILD_CS_ENVELOPE_OK"])  # 0.0388 >= 0.010
+        # A tight centerline gap fails the envelope check once reach is subtracted.
+        tight = self.module._finite_build_artifact_metadata(
+            _settings(),
+            banana_curve,
+            NET_BANANA_CURRENT_A,
+            cc_min_dist_m=0.10,
+            cs_min_dist_m=0.045,
+            cc_nominal_m=0.0462,
+            cs_nominal_m=0.010,
+        )
+        self.assertFalse(tight["FINITEBUILD_CC_ENVELOPE_OK"])  # 0.0176 < 0.0462
+        self.assertFalse(tight["FINITEBUILD_CS_ENVELOPE_OK"])  # 0.0038 < 0.010
+
+    def test_metadata_omits_envelope_keys_without_distances(self):
+        banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0]))
+        m = self.module._finite_build_artifact_metadata(
+            _settings(), banana_curve, NET_BANANA_CURRENT_A
+        )
+        self.assertNotIn("FINITEBUILD_CC_ENVELOPE_OK", m)
+        self.assertNotIn("FINITEBUILD_CS_ENVELOPE_OK", m)
 
 
 if __name__ == "__main__":
