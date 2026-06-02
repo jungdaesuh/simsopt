@@ -354,9 +354,11 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         )
         self.assertFalse(tight["FINITEBUILD_CURVATURE_OK"])  # 0.01 < 0.02
 
-    def test_envelope_clearance_verdicts_subtract_pack_reach(self):
-        # reach = hypot(0.01, 0.04) ~= 0.0412 m.
-        reach = float(np.hypot(0.01, 0.04))
+    def test_envelope_clearance_verdicts_use_corner_for_cc_normal_for_cs(self):
+        # CC (pack-to-pack) uses the worst-case corner reach hypot(0.01,0.04)~=0.0412;
+        # CS (pack-to-plasma) uses the NORMAL half-build only (half_n = 0.01).
+        cc_reach = float(np.hypot(0.01, 0.04))
+        cs_reach = 0.01
         banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0]))
         m = self.module._finite_build_artifact_metadata(
             _settings(),
@@ -367,23 +369,26 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
             cc_nominal_m=0.0462,
             cs_nominal_m=0.010,
         )
-        self.assertAlmostEqual(m["FINITEBUILD_PACK_REACH_M"], reach)
-        self.assertAlmostEqual(m["FINITEBUILD_CC_ENVELOPE_MIN_DIST_M"], 0.20 - 2 * reach)
+        self.assertAlmostEqual(m["FINITEBUILD_PACK_REACH_M"], cc_reach)
+        self.assertAlmostEqual(m["FINITEBUILD_CS_REACH_M"], cs_reach)
+        self.assertAlmostEqual(
+            m["FINITEBUILD_CC_ENVELOPE_MIN_DIST_M"], 0.20 - 2 * cc_reach
+        )
         self.assertTrue(m["FINITEBUILD_CC_ENVELOPE_OK"])  # 0.117 >= 0.0462
-        self.assertAlmostEqual(m["FINITEBUILD_CS_ENVELOPE_MIN_DIST_M"], 0.08 - reach)
-        self.assertTrue(m["FINITEBUILD_CS_ENVELOPE_OK"])  # 0.0388 >= 0.010
-        # A tight centerline gap fails the envelope check once reach is subtracted.
+        self.assertAlmostEqual(m["FINITEBUILD_CS_ENVELOPE_MIN_DIST_M"], 0.08 - cs_reach)
+        self.assertTrue(m["FINITEBUILD_CS_ENVELOPE_OK"])  # 0.07 >= 0.010
+        # Tight gaps fail once the (different) reaches are subtracted.
         tight = self.module._finite_build_artifact_metadata(
             _settings(),
             banana_curve,
             NET_BANANA_CURRENT_A,
             cc_min_dist_m=0.10,
-            cs_min_dist_m=0.045,
+            cs_min_dist_m=0.012,
             cc_nominal_m=0.0462,
             cs_nominal_m=0.010,
         )
         self.assertFalse(tight["FINITEBUILD_CC_ENVELOPE_OK"])  # 0.0176 < 0.0462
-        self.assertFalse(tight["FINITEBUILD_CS_ENVELOPE_OK"])  # 0.0038 < 0.010
+        self.assertFalse(tight["FINITEBUILD_CS_ENVELOPE_OK"])  # 0.002 < 0.010
 
     def test_metadata_omits_envelope_keys_without_distances(self):
         banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0]))

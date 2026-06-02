@@ -308,6 +308,14 @@ def validate_finite_build_cli_args(args) -> None:
         raise ValueError("--finitebuild-gapsize-n must be positive and finite.")
     if not np.isfinite(gapsize_b) or gapsize_b <= 0.0:
         raise ValueError("--finitebuild-gapsize-b must be positive and finite.")
+    if (
+        getattr(args, "finitebuild_pin_current", False)
+        and getattr(args, "constraint_method", "penalty") == "alm"
+    ):
+        raise ValueError(
+            "--finitebuild-pin-current is supported only with "
+            "--constraint-method penalty (the pinned current DOF has no box bound)."
+        )
 
 
 def resolve_finite_build_settings(args):
@@ -1299,6 +1307,14 @@ def parse_args():
         help="Pre-rotation orthonormal frame for the filament pack (default "
         "centroid). Used only with --finite-build.",
     )
+    parser.add_argument(
+        "--finitebuild-pin-current",
+        action="store_true",
+        help="Fix the banana coil current at --banana-init-current-A instead of "
+        "optimizing it. Useful for a current scan, where vacuum field-fit otherwise "
+        "leaves the current under-constrained and it drifts toward zero. Used only "
+        "with --finite-build.",
+    )
     args = parser.parse_args()
     try:
         validate_banana_current_cli_args(args)
@@ -1957,7 +1973,13 @@ def _finite_build_artifact_metadata(
     half_b_m = float(finite_build.pack_half_extent_b_m)
     binding_half_build_m = max(half_n_m, half_b_m)
     inner_edge_radius_m = min_curv_radius_m - binding_half_build_m
-    pack_reach_m = finite_build.pack_reach_m
+    # Pack-to-pack uses the worst-case CORNER reach (two packs at arbitrary relative
+    # orientation). Pack-to-plasma uses the NORMAL (radial) half-build only: the
+    # channel rides tangent to the toroidal surface (BANANA_WINDING_CHANNEL_
+    # ORIENTATION), so the plasma-facing extent is the channel depth/2, not the
+    # corner. (Assumes the pack normal axis ~ the surface radial; documented.)
+    cc_reach_m = finite_build.pack_reach_m
+    cs_reach_m = half_n_m
     nfilaments = int(finite_build.nfilaments)
     metadata = {
         "FINITE_BUILD_ENABLED": True,
@@ -1972,7 +1994,8 @@ def _finite_build_artifact_metadata(
         "FINITEBUILD_PACK_HALF_EXTENT_N_M": half_n_m,
         "FINITEBUILD_PACK_HALF_EXTENT_B_M": half_b_m,
         "FINITEBUILD_BINDING_HALF_BUILD_M": binding_half_build_m,
-        "FINITEBUILD_PACK_REACH_M": pack_reach_m,
+        "FINITEBUILD_PACK_REACH_M": cc_reach_m,
+        "FINITEBUILD_CS_REACH_M": cs_reach_m,
         "FINITEBUILD_MIN_CURVATURE_RADIUS_M": min_curv_radius_m,
         "FINITEBUILD_INNER_EDGE_RADIUS_M": inner_edge_radius_m,
         "FINITEBUILD_CURVATURE_OK": bool(
@@ -1980,11 +2003,11 @@ def _finite_build_artifact_metadata(
         ),
     }
     if cc_min_dist_m is not None and cc_nominal_m is not None:
-        cc_envelope_m = float(cc_min_dist_m) - 2.0 * pack_reach_m
+        cc_envelope_m = float(cc_min_dist_m) - 2.0 * cc_reach_m
         metadata["FINITEBUILD_CC_ENVELOPE_MIN_DIST_M"] = cc_envelope_m
         metadata["FINITEBUILD_CC_ENVELOPE_OK"] = bool(cc_envelope_m >= float(cc_nominal_m))
     if cs_min_dist_m is not None and cs_nominal_m is not None:
-        cs_envelope_m = float(cs_min_dist_m) - pack_reach_m
+        cs_envelope_m = float(cs_min_dist_m) - cs_reach_m
         metadata["FINITEBUILD_CS_ENVELOPE_MIN_DIST_M"] = cs_envelope_m
         metadata["FINITEBUILD_CS_ENVELOPE_OK"] = bool(cs_envelope_m >= float(cs_nominal_m))
     return metadata
@@ -2794,6 +2817,13 @@ def main(parsed_args=None):
         banana_current_optimizable = new_banana_coils[0].current
         objective_curves = [coil.curve for coil in new_banana_coils]
     initial_banana_current_A = float(banana_current_optimizable.get_value())
+    pin_banana_current = FINITE_BUILD and getattr(args, "finitebuild_pin_current", False)
+    if pin_banana_current:
+        # Fix the shared net-current DOF so the optimizer cannot drift it (vacuum
+        # field-fit otherwise leaves banana current under-constrained -> collapses
+        # toward zero). Realized current stays at --banana-init-current-A. The
+        # banana-current box bound is skipped below since the DOF is no longer free.
+        unwrap_current_optimizable(banana_current_optimizable)[0].fix_all()
     vf_current_control = new_vf_build_result.current_control
 
     # MAIN OPTIMIZATION
@@ -2824,11 +2854,17 @@ def main(parsed_args=None):
     # (2x reach between two packs, 1x reach to the plasma). Thin mode: reach 0
     # (thresholds unchanged). The recorded CC_THRESHOLD/CS_THRESHOLD (metadata,
     # contract, HW-eval) stay nominal; only the objective penalties are inflated.
-    finite_build_pack_reach_m = (
+    # Pack-to-pack: worst-case corner reach (2x). Pack-to-plasma: the normal/radial
+    # half-build only (channel rides tangent to the surface, so the plasma-facing
+    # extent is the depth/2, not the corner).
+    finite_build_cc_reach_m = (
         finite_build_settings.pack_reach_m if FINITE_BUILD else 0.0
     )
-    cc_clearance_threshold = CC_THRESHOLD + 2.0 * finite_build_pack_reach_m
-    cs_clearance_threshold = CS_THRESHOLD + finite_build_pack_reach_m
+    finite_build_cs_reach_m = (
+        finite_build_settings.pack_half_extent_n_m if FINITE_BUILD else 0.0
+    )
+    cc_clearance_threshold = CC_THRESHOLD + 2.0 * finite_build_cc_reach_m
+    cs_clearance_threshold = CS_THRESHOLD + finite_build_cs_reach_m
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
@@ -3029,19 +3065,20 @@ def main(parsed_args=None):
     best_secondary_stage2_artifact = None
     lbfgsb_bounds = None
     if CONSTRAINT_METHOD != "alm":
-        apply_penalty_traversal_forbidden_box_bounds(
-            bound_targets={"banana_current": banana_current_optimizable},
-            requested_thresholds={"banana_current": args.banana_current_max_A},
-            seed_values={"banana_current": initial_banana_current_A},
-            validate_seed=bool(args.stage2_bs_path),
-            seed_context="Loaded Stage 2 seed",
-            allow_offspec_threshold_names=(
-                frozenset({"banana_current"})
-                if args.accept_offspec_banana_current_max
-                else frozenset()
-            ),
-            preserve_seed_sign_names=frozenset({"banana_current"}),
-        )
+        if not pin_banana_current:
+            apply_penalty_traversal_forbidden_box_bounds(
+                bound_targets={"banana_current": banana_current_optimizable},
+                requested_thresholds={"banana_current": args.banana_current_max_A},
+                seed_values={"banana_current": initial_banana_current_A},
+                validate_seed=bool(args.stage2_bs_path),
+                seed_context="Loaded Stage 2 seed",
+                allow_offspec_threshold_names=(
+                    frozenset({"banana_current"})
+                    if args.accept_offspec_banana_current_max
+                    else frozenset()
+                ),
+                preserve_seed_sign_names=frozenset({"banana_current"}),
+            )
         if vf_current_control is not None:
             apply_vf_current_upper_bound(
                 vf_current_control,
