@@ -705,7 +705,7 @@ git diff --check -- src/simsopt/jax_core/boozer_radial_field.py src/simsopt/jax_
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.2.
 - **Selected slice:** private direct evaluator wrapper ceremony in `src/simsopt/jax_core/boozer_radial_field.py`. No Fourier formula, subset-column factory, tracing dispatch, public wrapper API, CPU Boozer implementation, CUDA/MPS path, transfer policy, or benchmark policy was changed.
 - **Changed files:** `src/simsopt/jax_core/boozer_radial_field.py`, plus this plan set.
-- **Design-it-twice gate:** Option A, dynamically parametrizing all subset-column builders, is the larger remaining T2.2 opportunity but risks hiding profile-specific stellsym and derivative-factor requirements behind field-name tables. Option B, selected here, folds only the repeated direct private wrappers into typed `_direct_radial_evaluator(...)` and `_direct_modB_value_evaluator(...)` factories, preserving the explicit subset builders and formulas.
+- **Design-it-twice gate:** Option A, dynamically parametrizing all subset-column builders, is the larger remaining T2.2 opportunity but risks hiding profile-specific stellsym and derivative-factor requirements behind field-name tables. Option B, selected at this checkpoint, folded only the repeated direct private wrappers into typed `_direct_radial_evaluator(...)` and `_direct_modB_value_evaluator(...)` factories, preserving the explicit subset builders and formulas.
 - **Scope status:** direct-wrapper follow-up LOC-banked, full T2.2 still open. `boozer_radial_field.py` is source-negative by 35 LOC for this slice (`99 insertions / 134 deletions`; 1,191 -> 1,156 LOC). The old `~400 LOC` estimate remains unbanked because the benchmark-sensitive subset builders are still explicit.
 - **Validation evidence:** CPU/X64 wrapper routing, private evaluator metadata, source lint/format, py_compile, source-only mypy, dependency consistency, and diff hygiene proof; not CUDA/MPS proof and not a fresh RHS benchmark.
 
@@ -801,6 +801,58 @@ PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
 # No broken requirements found.
 git grep -n "_eval_with_radial_columns" -- src tests benchmarks examples
 # no source/test/benchmark/example call sites
+git diff --check -- src/simsopt/jax_core/boozer_radial_field.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
+### 2026-06-01 — T2.2 Boozer radial typed modB direct-factory follow-up
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.2.
+- **Selected slice:** the modB value/theta/zeta direct-evaluator factory in `src/simsopt/jax_core/boozer_radial_field.py`. No Fourier formula, modB subset-column factory, scalar spline path, tracing dispatch, public wrapper API, CPU Boozer implementation, CUDA/MPS path, transfer policy, or benchmark policy was changed.
+- **Changed files:** `src/simsopt/jax_core/boozer_radial_field.py`, plus this plan set.
+- **Design-it-twice gate:** Option A, routing modB value/theta/zeta through the full `_eval_radial_columns(...)` bundle, was rejected because earlier benchmark evidence showed full-bundle direct wrappers regress the direct/RHS hot path. Option B, selected here, makes `_direct_radial_evaluator(...)` generic over its column type and keeps `_eval_modB_value_radial_columns(...)` as the subset factory, deleting only `_direct_modB_value_evaluator(...)` and its one-use `_ModBValueEvaluator` alias.
+- **Scope status:** typed modB direct-factory follow-up LOC-banked, full T2.2 still open. `boozer_radial_field.py` is source-negative by 14 LOC for this slice (`24 insertions / 38 deletions`; 1,134 -> 1,120 LOC). Together with the earlier T2.2 follow-ups, T2.2 has 71 source LOC banked; the old `~400 LOC` estimate remains unbanked because the larger formula/subset-family redesign has not been proven readable and benchmark-safe.
+- **Validation evidence:** CPU/X64 focused radial routing/cache tests, full radial tracing tests, direct-evaluator metadata proof, source lint/format, py_compile, source-only mypy, dependency check, source/test call-site grep, and diff whitespace checks passed; not CUDA/MPS proof and not fresh benchmark proof.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff check src/simsopt/jax_core/boozer_radial_field.py src/simsopt/jax_core/tracing.py tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py
+# All checks passed!
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/boozer_radial_field.py tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py
+# 3 files already formatted
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile src/simsopt/jax_core/boozer_radial_field.py tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py
+# passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy src/simsopt/jax_core/boozer_radial_field.py
+# Success: no issues found in 1 source file
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/field/test_trace_boozer_analytic_jax.py -k "radial_boozer_rhs_evaluates_one_column_bundle_per_point or direct_radial_evaluators_reuse_column_evaluators or dispatch_exposes_complete_key_set"
+# 4 passed, 24 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/field/test_boozermagneticfield_jax_item33.py -k "direct_radial_evaluators_reuse_column_evaluators or radial_columns_cached_once_per_points_cycle"
+# 2 skipped, 19 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/field/test_trace_boozer_analytic_jax.py
+# 28 passed
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python - <<'PY'
+from simsopt.jax_core import boozer_radial_field as radial
+
+names = (
+    "_eval_modB", "_eval_dmodBdtheta", "_eval_dmodBdzeta", "_eval_dmodBds",
+    "_eval_R", "_eval_dRdtheta", "_eval_dRdzeta", "_eval_dRds",
+    "_eval_Z", "_eval_dZdtheta", "_eval_dZdzeta", "_eval_dZds",
+    "_eval_nu", "_eval_dnudtheta", "_eval_dnudzeta", "_eval_dnuds",
+    "_eval_K", "_eval_dKdtheta", "_eval_dKdzeta",
+    "_eval_psip", "_eval_G", "_eval_I", "_eval_iota",
+    "_eval_dGds", "_eval_dIds", "_eval_diotads",
+)
+for name in names:
+    evaluator = getattr(radial, name)
+    assert evaluator.__name__ == name
+    assert evaluator.__qualname__ == name
+    assert evaluator.__module__ == radial.__name__
+print(f"metadata preserved for {len(names)} direct evaluators")
+PY
+# metadata preserved for 26 direct evaluators
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found.
+rg -n "_ModBValueEvaluator|_direct_modB_value_evaluator" src tests benchmarks
+# no source/test call sites
 git diff --check -- src/simsopt/jax_core/boozer_radial_field.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
 # passed
 ```

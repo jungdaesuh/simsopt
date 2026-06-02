@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -437,13 +437,6 @@ def _eval_radial_columns(
     )
 
 
-_RadialColumnEvaluator = Callable[
-    [BoozerRadialInterpolantFrozenState, BoozerRadialColumnBundle, jax.Array],
-    jax.Array,
-]
-_RadialColumnFactory = Callable[
-    [BoozerRadialInterpolantFrozenState, jax.Array], BoozerRadialColumnBundle
-]
 _RadialDirectEvaluator = Callable[
     [BoozerRadialInterpolantFrozenState, jax.Array], jax.Array
 ]
@@ -463,17 +456,21 @@ class _ModBValueColumns(Protocol):
     def mn_factor(self) -> jax.Array: ...
 
 
-_ModBValueEvaluator = Callable[
-    [BoozerRadialInterpolantFrozenState, _ModBValueColumns, jax.Array],
-    jax.Array,
-]
-
-
 @dataclass(frozen=True)
 class _DirectModBValueColumns:
     bmnc: jax.Array
     bmns: jax.Array
     mn_factor: jax.Array
+
+
+_ColumnBundleT = TypeVar("_ColumnBundleT")
+_RadialColumnEvaluator = Callable[
+    [BoozerRadialInterpolantFrozenState, _ColumnBundleT, jax.Array],
+    jax.Array,
+]
+_RadialColumnFactory = Callable[
+    [BoozerRadialInterpolantFrozenState, jax.Array], _ColumnBundleT
+]
 
 
 def _empty_radial_columns(
@@ -1020,8 +1017,8 @@ def _eval_dKdzeta_from_columns(
 
 def _direct_radial_evaluator(
     name: str,
-    evaluator: _RadialColumnEvaluator,
-    column_factory: _RadialColumnFactory,
+    evaluator: _RadialColumnEvaluator[_ColumnBundleT],
+    column_factory: _RadialColumnFactory[_ColumnBundleT],
 ) -> _RadialDirectEvaluator:
     """Create a named direct evaluator from a column evaluator/factory pair."""
 
@@ -1029,23 +1026,6 @@ def _direct_radial_evaluator(
         state: BoozerRadialInterpolantFrozenState, points: jax.Array
     ) -> jax.Array:
         columns = column_factory(state, points[:, 0])
-        return evaluator(state, columns, points)
-
-    evaluate.__name__ = name
-    evaluate.__qualname__ = name
-    evaluate.__module__ = __name__
-    return evaluate
-
-
-def _direct_modB_value_evaluator(
-    name: str, evaluator: _ModBValueEvaluator
-) -> _RadialDirectEvaluator:
-    """Create a named direct evaluator for modB value-column siblings."""
-
-    def evaluate(
-        state: BoozerRadialInterpolantFrozenState, points: jax.Array
-    ) -> jax.Array:
-        columns = _eval_modB_value_radial_columns(state, points[:, 0])
         return evaluator(state, columns, points)
 
     evaluate.__name__ = name
@@ -1070,12 +1050,18 @@ def _direct_scalar_evaluator(
     return evaluate
 
 
-_eval_modB = _direct_modB_value_evaluator("_eval_modB", _eval_modB_from_columns)
-_eval_dmodBdtheta = _direct_modB_value_evaluator(
-    "_eval_dmodBdtheta", _eval_dmodBdtheta_from_columns
+_eval_modB = _direct_radial_evaluator(
+    "_eval_modB", _eval_modB_from_columns, _eval_modB_value_radial_columns
 )
-_eval_dmodBdzeta = _direct_modB_value_evaluator(
-    "_eval_dmodBdzeta", _eval_dmodBdzeta_from_columns
+_eval_dmodBdtheta = _direct_radial_evaluator(
+    "_eval_dmodBdtheta",
+    _eval_dmodBdtheta_from_columns,
+    _eval_modB_value_radial_columns,
+)
+_eval_dmodBdzeta = _direct_radial_evaluator(
+    "_eval_dmodBdzeta",
+    _eval_dmodBdzeta_from_columns,
+    _eval_modB_value_radial_columns,
 )
 _eval_dmodBds = _direct_radial_evaluator(
     "_eval_dmodBds", _eval_dmodBds_from_columns, _eval_dmodBds_radial_columns
