@@ -6,7 +6,7 @@
 - Source-doc review basis: `b267b0d95` on `shared-jax-clean`
 - Source-code checkpoint before docs-only gate commit: `8b94c2bbd` on `shared-jax-clean`, with a broad dirty implementation tree across `src/`, `tests/`, and `docs/`
 - Docs-only drift gate introduced in commit `398b3e50d` and checkpoint basis clarified in commit `446eab365` on `shared-jax-clean`
-- Latest completed T2.8 checkpoint before this parity-census finalize source/docs sync: `bdd4a0c32` (`refactor: inline scalar tolerance predicate`), after the broad dirty tree was split into scoped source/docs commits; the current source checkpoint also includes the later T2.2 typed modB direct-factory slice `7228379af`.
+- Latest completed source checkpoint before this tensor `surface_gammadash1` product-rule source/docs sync: `60c0f7b55` (`refactor: inline parity bug census finalizer`), after the broad dirty tree was split into scoped source/docs commits; the current source history also includes the T2.2 typed modB direct-factory slice `7228379af`.
 - Reference TORAX repo reviewed: `/Users/suhjungdae/code/opensource/torax` at `60190df1` on clean `main`
 - Historical local status at source-doc review: the two source docs were modified and this overlay was untracked; no source-code edits were part of that review. This is no longer the current working-tree state.
 - Artifact note: this checkout does not contain a repo-local `.artifacts/` tree. Historical code-smell artifacts referenced by the bloat plan were found in sibling checkout `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/code_smell_review_2026-05-20/`.
@@ -62,7 +62,7 @@ The source plans remain the SSOT for detailed item text, line refs, and acceptan
 ## Current Context
 
 - Source-doc refresh basis: `shared-jax-clean` at `b267b0d95`.
-- Docs-gate history: the docs-only drift gate was introduced in `398b3e50d`, checkpoint basis was clarified in `446eab365`, the source-code checkpoint before that docs-only gate was `8b94c2bbd`, the latest completed T2.8 checkpoint before this parity-census finalize sync is `bdd4a0c32`, and the current source checkpoint also includes T2.2 slice `7228379af`. Treat these commit hashes as historical anchors, not live-HEAD markers.
+- Docs-gate history: the docs-only drift gate was introduced in `398b3e50d`, checkpoint basis was clarified in `446eab365`, the source-code checkpoint before that docs-only gate was `8b94c2bbd`, the latest completed source checkpoint before this tensor `surface_gammadash1` product-rule sync is `60c0f7b55`, and the current source history also includes T2.2 slice `7228379af`. Treat these commit hashes as historical anchors, not live-HEAD markers.
 - `docs/bloat_reduction_plan_2026-05-20.md` is a tiered reduction plan: T1 mechanical wins, T2 factory introductions, T3 structural consolidations, and T4 contract decisions.
 - `docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md` is a pattern-hardening plan: static/dynamic pytree contracts, persistent-cache proof, bounded control flow, branch discipline, and numerical stability.
 - Shared dependency surfaces include `jax_core` specs, backend runtime/cache policy, validation ladder helpers, host-boundary helpers, fixed-iteration scan code, PM/wireframe workflows, and GPU/MPS-sensitive runtime paths.
@@ -1142,6 +1142,34 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JA
 # 26 passed
 ```
 
+### 2026-06-01 — T2.3 tensor `surface_gammadash1` product-rule micro-slice
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.3.
+- **Selected slice:** only the full-grid tensor `surface_gammadash1(...)` product-rule spelling in `surface_fourier_kernels.py`, including the clamped path. The expanded cosine/sine derivative components are now represented as explicit radial/toroidal components and rotated through `_rotate_hat_components(...)`, matching the local representation already used by `surface_gammadash1_lin(...)`. No public symbol, wrapper signature, stellsym scatter, clamped-dimension semantics, coefficient-Jacobian wrapper, CPU geometry code, CUDA/MPS path, transfer policy, `SurfaceXYZFourier` formula, or paired-linear path was changed.
+- **Changed files:** `src/simsopt/jax_core/surface_fourier_kernels.py`, plus this plan set.
+- **Design-it-twice gate:** a broad product-rule table/factory remains rejected because it would obscure the derivative algebra. The selected micro-slice changes only the tensor `gammadash1` full-grid spelling to the shorter radial/toroidal form already used by the paired tensor path; remaining formulas stay local until each can prove a clearer source-negative representation.
+- **Scope status:** tensor `surface_gammadash1` product-rule micro-slice LOC-banked; full T2.3 remains open for future readable product-rule folds. `surface_fourier_kernels.py` is source-negative by 28 LOC for this slice (`7 insertions / 35 deletions`; 2,749 -> 2,721 LOC). Together with earlier T2.3 slices, T2.3 has 583 source LOC banked. The old full-item estimate still is not closed as a scope claim because remaining product-rule formulas are intentionally explicit.
+- **Validation evidence:** CPU/X64 tensor and surface Fourier geometry/tangent proof, not CUDA/MPS proof.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff check src/simsopt/jax_core/surface_fourier_kernels.py tests/geo/test_surface_fourier_jax.py tests/geo/test_surface_xyz_tensor_clamped_jax.py
+# All checks passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/surface_fourier_kernels.py
+# 1 file already formatted
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile src/simsopt/jax_core/surface_fourier_kernels.py tests/geo/test_surface_fourier_jax.py tests/geo/test_surface_xyz_tensor_clamped_jax.py
+# passed
+PYTHONNOUSERSITE=1 MYPYPATH=src .conda/jax/bin/python -m mypy src/simsopt/jax_core/surface_fourier_kernels.py
+# Success: no issues found in 1 source file
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/geo/test_surface_xyz_tensor_clamped_jax.py -k 'gamma_and_tangents or clamped_normal'
+# 16 passed, 22 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/geo/test_surface_fourier_jax.py -k 'geometry_and_tangents_match_cpp or gamma_and_tangent_lin_match_cpp or spec_geometry_and_normals_match_cpp or non_rz_fundamental_form_derivatives_match_cpp'
+# 14 passed, 136 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/geo/test_surface_fourier_jax.py::TestSurfaceXYZFourierJaxCppParity
+# 26 passed
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found
+```
+
 ### 2026-06-01 — T2.9 quantity-aware tolerance contract helper
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.9.
@@ -1819,6 +1847,6 @@ git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.2 radial pass-through inline follow-up, T2.2 typed modB direct-factory follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.8 per-pair metadata-binding slice, T2.8 target-native component-summary reuse slice, T2.8 target-native flag inline slice, T2.8 SciPy callback `fun` threshold slice, T2.8 callback split payload-inline slice, T2.8 layer diagnostic wrapper-inline slice, T2.8 decomposition dispatch wrapper-inline slice, T2.8 scalar-close inline slice, T2.8 parity-census finalize inline slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.2 radial pass-through inline follow-up, T2.2 typed modB direct-factory follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.3 tensor `surface_gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.8 per-pair metadata-binding slice, T2.8 target-native component-summary reuse slice, T2.8 target-native flag inline slice, T2.8 SciPy callback `fun` threshold slice, T2.8 callback split payload-inline slice, T2.8 layer diagnostic wrapper-inline slice, T2.8 decomposition dispatch wrapper-inline slice, T2.8 scalar-close inline slice, T2.8 parity-census finalize inline slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?

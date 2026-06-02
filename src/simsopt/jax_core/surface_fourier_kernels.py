@@ -751,22 +751,10 @@ def _gammadash1_clamped(
 
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi_jax)
-    phi_angle = two_pi * quadpoints_phi_jax
-    cphi = jnp.cos(phi_angle)[:, None]
-    sphi = jnp.sin(phi_angle)[:, None]
 
-    dx = (
-        dxhat_dphi * cphi
-        - xhat * (two_pi * sphi)
-        - dyhat_dphi * sphi
-        - yhat * (two_pi * cphi)
-    )
-    dy = (
-        dxhat_dphi * sphi
-        + xhat * (two_pi * cphi)
-        + dyhat_dphi * cphi
-        - yhat * (two_pi * sphi)
-    )
+    radial = dxhat_dphi - two_pi * yhat
+    toroidal = dyhat_dphi + two_pi * xhat
+    dx, dy = _rotate_hat_components(quadpoints_phi_jax, radial, toroidal)
     return jnp.stack([dx, dy, dz_dphi], axis=-1)
 
 
@@ -851,27 +839,11 @@ def surface_gammadash1(
 
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi_jax)
-    phi_angle = two_pi * quadpoints_phi_jax
-    cphi = jnp.cos(phi_angle)[:, None]
-    sphi = jnp.sin(phi_angle)[:, None]
 
-    # d/d(phi_param):  x = x̂·cos(2πφ) − ŷ·sin(2πφ)
-    # dx/dφ = dx̂/dφ·cosφ − x̂·2π·sinφ − dŷ/dφ·sinφ − ŷ·2π·cosφ
-    dx = (
-        dxhat_dphi * cphi
-        - xhat * (two_pi * sphi)
-        - dyhat_dphi * sphi
-        - yhat * (two_pi * cphi)
-    )
-    dy = (
-        dxhat_dphi * sphi
-        + xhat * (two_pi * cphi)
-        + dyhat_dphi * cphi
-        - yhat * (two_pi * sphi)
-    )
-    dz = dz_dphi
-
-    return jnp.stack([dx, dy, dz], axis=-1)
+    radial = dxhat_dphi - two_pi * yhat
+    toroidal = dyhat_dphi + two_pi * xhat
+    dx, dy = _rotate_hat_components(quadpoints_phi_jax, radial, toroidal)
+    return jnp.stack([dx, dy, dz_dphi], axis=-1)
 
 
 def surface_gammadash2(
