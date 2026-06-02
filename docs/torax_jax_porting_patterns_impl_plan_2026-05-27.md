@@ -282,6 +282,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.8 layer diagnostic wrapper-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_diagnostic_scalar_abs_diff(...)` / `_diagnostic_vector_abs_diff(...)` wrappers in `benchmarks/single_stage_init_parity.py`, keeps the `None`/`None` zero-drift policy explicit in `_compare_same_candidate_layer_decomposition(...)`, banks 16 additional benchmark LOC, and preserves layer field tables, scalar/vector path diff helpers, `parity_bug_census` schema, and same-candidate replay behavior. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
 
+**2026-06-01 cross-link:** The T2.8 decomposition dispatch wrapper-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_compare_same_candidate_iota_decomposition(...)` / `_compare_same_candidate_boozer_solve_decomposition(...)` wrappers in `benchmarks/single_stage_init_parity.py`, keeps `field_name` and `layer_fields` bindings explicit at the two generic layer-decomposition call sites, banks 34 additional benchmark LOC, and preserves layer field tables, field names, `parity_bug_census` schema, target-native skip behavior, and same-candidate replay behavior. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.
