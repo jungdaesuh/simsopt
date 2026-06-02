@@ -3076,44 +3076,6 @@ def _compare_same_candidate_layer_decomposition(
     )
 
 
-def _compare_same_candidate_iota_decomposition(
-    failures: list[str],
-    *,
-    cpu_decomposition: dict[str, Any] | None,
-    jax_decomposition: dict[str, Any] | None,
-    pair_index: int,
-    line_search_evaluation: Any,
-) -> dict[str, Any]:
-    return _compare_same_candidate_layer_decomposition(
-        failures,
-        field_name="iota_penalty_decomposition",
-        layer_fields=_IOTA_DECOMPOSITION_LAYER_FIELDS,
-        cpu_decomposition=cpu_decomposition,
-        jax_decomposition=jax_decomposition,
-        pair_index=pair_index,
-        line_search_evaluation=line_search_evaluation,
-    )
-
-
-def _compare_same_candidate_boozer_solve_decomposition(
-    failures: list[str],
-    *,
-    cpu_decomposition: dict[str, Any] | None,
-    jax_decomposition: dict[str, Any] | None,
-    pair_index: int,
-    line_search_evaluation: Any,
-) -> dict[str, Any]:
-    return _compare_same_candidate_layer_decomposition(
-        failures,
-        field_name="boozer_solve_decomposition",
-        layer_fields=_BOOZER_SOLVE_DECOMPOSITION_LAYER_FIELDS,
-        cpu_decomposition=cpu_decomposition,
-        jax_decomposition=jax_decomposition,
-        pair_index=pair_index,
-        line_search_evaluation=line_search_evaluation,
-    )
-
-
 def _compute_solve_quality_probe_pair(
     *,
     cpu_decomposition: dict[str, Any] | None,
@@ -3651,8 +3613,10 @@ def compare_same_candidate_objective_replay(
             else None
         )
         boozer_solve_decomposition_summary = (
-            _compare_same_candidate_boozer_solve_decomposition(
+            _compare_same_candidate_layer_decomposition(
                 event_failures,
+                field_name="boozer_solve_decomposition",
+                layer_fields=_BOOZER_SOLVE_DECOMPOSITION_LAYER_FIELDS,
                 cpu_decomposition=cpu_boozer_solve_decomposition,
                 jax_decomposition=jax_boozer_solve_decomposition,
                 pair_index=pair_index,
@@ -3758,8 +3722,10 @@ def compare_same_candidate_objective_replay(
         iota_decomposition_summary = (
             _layer_decomposition_summary(recorded=False)
             if target_native_replay_event
-            else _compare_same_candidate_iota_decomposition(
+            else _compare_same_candidate_layer_decomposition(
                 event_failures,
+                field_name="iota_penalty_decomposition",
+                layer_fields=_IOTA_DECOMPOSITION_LAYER_FIELDS,
                 cpu_decomposition=cpu_event.get("iota_penalty_decomposition"),
                 jax_decomposition=jax_event.get("iota_penalty_decomposition"),
                 pair_index=pair_index,
