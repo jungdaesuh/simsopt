@@ -3366,6 +3366,30 @@ def _ls_newton_reporting_fields(result):
     }
 
 
+def _skipped_newton_polish_fields(max_bytes, newton_iter, grad_norm, grad_inf_norm):
+    skipped_message = "Newton polish skipped by policy."
+    return {
+        **_ls_newton_reporting_fields(
+            {
+                "hessian_materialized": False,
+                "max_dense_hessian_bytes": max_bytes,
+                "dense_newton_steps_materialized": False,
+                "dense_newton_steps_message": skipped_message,
+                "newton_iter": newton_iter,
+                "final_gradient_norm": grad_norm,
+                "final_gradient_inf_norm": grad_inf_norm,
+                "iterative_refinement_ran": False,
+                "final_step_iterative_refinement_ran": False,
+                "dense_refinement_ran": False,
+                "final_step_dense_refinement_ran": False,
+                "message": skipped_message,
+            }
+        ),
+        "newton_polish_policy": "skip",
+        "newton_polish_skipped": True,
+    }
+
+
 def _none_solve_quality_fields(field_names: tuple[str, ...]) -> dict[str, None]:
     """Return ``None`` placeholders for solve-quality reporting fields.
 
@@ -5669,27 +5693,13 @@ class BoozerSurfaceJAX(Optimizable):
                 "optimizer_method": method,
                 **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
                 "ls_condition_estimate": None,
-                "hessian_materialized": False,
-                "dense_hessian_shape": None,
-                "dense_hessian_bytes": None,
-                "max_dense_hessian_bytes": self.options[
-                    "max_dense_linearization_bytes"
-                ],
-                "dense_newton_steps_materialized": False,
-                "dense_newton_steps_message": "Newton polish skipped by policy.",
-                "newton_iter": jnp.asarray(0, dtype=jnp.int32),
                 "pre_newton_iter": ls_nit,
-                "final_gradient_norm": gradient_norm,
-                "final_gradient_inf_norm": jnp.linalg.norm(grad_skip, ord=np.inf),
-                "iterative_refinement_ran": False,
-                "final_step_iterative_refinement_ran": False,
-                "dense_refinement_ran": False,
-                "final_step_dense_refinement_ran": False,
-                "failure_category": None,
-                "failure_stage": None,
-                "message": "Newton polish skipped by policy.",
-                "newton_polish_policy": "skip",
-                "newton_polish_skipped": True,
+                **_skipped_newton_polish_fields(
+                    self.options["max_dense_linearization_bytes"],
+                    jnp.asarray(0, dtype=jnp.int32),
+                    gradient_norm,
+                    jnp.linalg.norm(grad_skip, ord=np.inf),
+                ),
             }
 
         materialize_traceable_hessian = bool(
@@ -6076,24 +6086,12 @@ class BoozerSurfaceJAX(Optimizable):
                 dense_linear_solve_factors_available=False,
                 linearization_residency=self.options["linearization_residency"],
             ),
-            "hessian_materialized": False,
-            "dense_hessian_shape": None,
-            "dense_hessian_bytes": None,
-            "max_dense_hessian_bytes": self.options["max_dense_linearization_bytes"],
-            "dense_newton_steps_materialized": False,
-            "dense_newton_steps_message": "Newton polish skipped by policy.",
-            "newton_iter": 0,
-            "final_gradient_norm": float(np.linalg.norm(host_gradient)),
-            "final_gradient_inf_norm": float(np.linalg.norm(host_gradient, ord=np.inf)),
-            "iterative_refinement_ran": False,
-            "final_step_iterative_refinement_ran": False,
-            "dense_refinement_ran": False,
-            "final_step_dense_refinement_ran": False,
-            "failure_category": None,
-            "failure_stage": None,
-            "message": "Newton polish skipped by policy.",
-            "newton_polish_policy": "skip",
-            "newton_polish_skipped": True,
+            **_skipped_newton_polish_fields(
+                self.options["max_dense_linearization_bytes"],
+                0,
+                float(np.linalg.norm(host_gradient)),
+                float(np.linalg.norm(host_gradient, ord=np.inf)),
+            ),
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             "ls_hessian_symmetry_rel": None,
             "ls_factorization_backend": None,

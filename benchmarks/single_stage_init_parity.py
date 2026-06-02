@@ -3003,6 +3003,14 @@ class LayerDriftTracker:
         return None
 
 
+def _first_parity_bug_census_divergence(current, family, divergence):
+    if current is not None or divergence is None:
+        return current
+    payload = {"family": family, **divergence}
+    payload["layer_diffs"] = dict(divergence["layer_diffs"])
+    return payload
+
+
 def _compare_same_candidate_layer_decomposition(
     failures: list[str],
     *,
@@ -3613,19 +3621,11 @@ def compare_same_candidate_objective_replay(
             pair_index=pair_index,
             line_search_evaluation=line_search_evaluation,
         )
-        if (
-            first_parity_bug_census_divergence is None
-            and boozer_solve_divergence is not None
-        ):
-            first_parity_bug_census_divergence = {
-                "family": "boozer_solve",
-                "pair_index": boozer_solve_divergence["pair_index"],
-                "line_search_evaluation": boozer_solve_divergence[
-                    "line_search_evaluation"
-                ],
-                "layer": boozer_solve_divergence["layer"],
-                "layer_diffs": dict(boozer_solve_divergence["layer_diffs"]),
-            }
+        first_parity_bug_census_divergence = _first_parity_bug_census_divergence(
+            first_parity_bug_census_divergence,
+            "boozer_solve",
+            boozer_solve_divergence,
+        )
         if not target_native_rejected_event:
             (
                 comparable_cpu_gradient,
@@ -3711,14 +3711,11 @@ def compare_same_candidate_objective_replay(
             pair_index=pair_index,
             line_search_evaluation=line_search_evaluation,
         )
-        if first_parity_bug_census_divergence is None and iota_divergence is not None:
-            first_parity_bug_census_divergence = {
-                "family": "iota_penalty",
-                "pair_index": iota_divergence["pair_index"],
-                "line_search_evaluation": iota_divergence["line_search_evaluation"],
-                "layer": iota_divergence["layer"],
-                "layer_diffs": dict(iota_divergence["layer_diffs"]),
-            }
+        first_parity_bug_census_divergence = _first_parity_bug_census_divergence(
+            first_parity_bug_census_divergence,
+            "iota_penalty",
+            iota_divergence,
+        )
         if compare_native_gradient_layers:
             max_hardware_abs_diff = max(
                 max_hardware_abs_diff,

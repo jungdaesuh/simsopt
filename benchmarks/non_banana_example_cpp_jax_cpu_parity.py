@@ -602,6 +602,76 @@ def _compare_array(
     return entry
 
 
+def _compare_raw_array(
+    cpu: LaneArtifact,
+    jax_lane: LaneArtifact,
+    raw_key: str,
+    quantity: str,
+    component: str,
+) -> Mapping[str, object]:
+    return _compare_array(
+        cpu_arr=cpu.raw_arrays[raw_key],
+        jax_arr=jax_lane.raw_arrays[raw_key],
+        quantity=quantity,
+        component=component,
+        active_dof_names=cpu.active_dof_names,
+    )
+
+
+def _surface_geometry_comparisons(
+    cpu: LaneArtifact,
+    jax_lane: LaneArtifact,
+    component: str,
+) -> list[Mapping[str, object]]:
+    return [
+        _compare_raw_array(cpu, jax_lane, "surface_gamma", "surface_gamma", component),
+        _compare_raw_array(
+            cpu, jax_lane, "surface_unit_normal", "surface_unit_normal", component
+        ),
+    ]
+
+
+def _compare_component_scalar(
+    cpu: LaneArtifact,
+    jax_lane: LaneArtifact,
+    cpu_component_key: str,
+    jax_component_key: str,
+    quantity: str,
+    component: str,
+) -> Mapping[str, object]:
+    return _compare_scalar(
+        cpu_value=cpu.components[cpu_component_key],
+        jax_value=jax_lane.components[jax_component_key],
+        quantity=quantity,
+        component=component,
+    )
+
+
+def _required_lane_scalar(value: float | None, field_name: str) -> float:
+    if value is None:
+        raise ValueError(f"{field_name} is required for this comparison.")
+    return value
+
+
+def _compare_native_subtotal(
+    cpu: LaneArtifact,
+    jax_lane: LaneArtifact,
+    component: str,
+) -> Mapping[str, object]:
+    return _compare_scalar(
+        cpu_value=_required_lane_scalar(
+            cpu.objective_native_subtotal,
+            "cpu.objective_native_subtotal",
+        ),
+        jax_value=_required_lane_scalar(
+            jax_lane.objective_native_subtotal,
+            "jax_lane.objective_native_subtotal",
+        ),
+        quantity="objective_native_subtotal",
+        component=component,
+    )
+
+
 def _compare_derived_normal_projection(
     *,
     cpu_field: np.ndarray,
@@ -935,53 +1005,28 @@ def _supported_comparisons(build: FixtureBuild) -> Sequence[Mapping[str, Any]]:
     if fixture_kind == "coil_force_energy":
         return _coil_force_energy_comparisons(cpu, jax_lane)
 
-    comparisons = []
-
     # Surface geometry first (independent of field/objective).
-    comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_gamma"],
-            jax_arr=jax_lane.raw_arrays["surface_gamma"],
-            quantity="surface_gamma",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
-        )
-    )
-    comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
-            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
-            quantity="surface_unit_normal",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
-        )
-    )
+    comparisons = _surface_geometry_comparisons(cpu, jax_lane, "surface")
 
     # Field-level parity.
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["field_B"],
-            jax_arr=jax_lane.raw_arrays["field_B"],
-            quantity="field_B",
-            component="biot_savart",
-            active_dof_names=cpu.active_dof_names,
-        )
+        _compare_raw_array(cpu, jax_lane, "field_B", "field_B", "biot_savart")
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["Bdotn"],
-            jax_arr=jax_lane.raw_arrays["Bdotn"],
-            quantity="Bdotn",
-            component="biot_savart",
-            active_dof_names=cpu.active_dof_names,
-        )
+        _compare_raw_array(cpu, jax_lane, "Bdotn", "Bdotn", "biot_savart")
     )
 
     # Wrapper objective + gradient.
     comparisons.append(
         _compare_scalar(
-            cpu_value=cpu.components.get("SquaredFlux"),
-            jax_value=jax_lane.components.get("SquaredFluxJAX"),
+            cpu_value=_required_lane_scalar(
+                cpu.components.get("SquaredFlux"),
+                "cpu.components['SquaredFlux']",
+            ),
+            jax_value=_required_lane_scalar(
+                jax_lane.components.get("SquaredFluxJAX"),
+                "jax_lane.components['SquaredFluxJAX']",
+            ),
             quantity="SquaredFlux",
             component="objective",
         )
@@ -990,22 +1035,9 @@ def _supported_comparisons(build: FixtureBuild) -> Sequence[Mapping[str, Any]]:
     # equals SquaredFlux, but the explicit comparison gates the
     # ``objective_native_subtotal`` lane field so future composites that
     # add native components surface a real cross-lane check.
+    comparisons.append(_compare_native_subtotal(cpu, jax_lane, "objective"))
     comparisons.append(
-        _compare_scalar(
-            cpu_value=cpu.objective_native_subtotal,
-            jax_value=jax_lane.objective_native_subtotal,
-            quantity="objective_native_subtotal",
-            component="objective",
-        )
-    )
-    comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["gradient"],
-            jax_arr=jax_lane.raw_arrays["gradient"],
-            quantity="gradient",
-            component="objective",
-            active_dof_names=cpu.active_dof_names,
-        )
+        _compare_raw_array(cpu, jax_lane, "gradient", "gradient", "objective")
     )
     return comparisons
 
@@ -1016,59 +1048,32 @@ def _surface_scalar_comparisons(
 ) -> Sequence[Mapping[str, Any]]:
     """Compare Area/Volume example quantities at fixed surface states."""
     return [
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_gamma"],
-            jax_arr=jax_lane.raw_arrays["surface_gamma"],
-            quantity="surface_gamma",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
+        *_surface_geometry_comparisons(cpu, jax_lane, "surface"),
+        _compare_component_scalar(
+            cpu, jax_lane, "area", "area", "area", "surface_scalar"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
-            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
-            quantity="surface_unit_normal",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
+        _compare_component_scalar(
+            cpu, jax_lane, "volume", "volume", "volume", "surface_scalar"
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["area"],
-            jax_value=jax_lane.components["area"],
-            quantity="area",
-            component="surface_scalar",
+        _compare_raw_array(
+            cpu, jax_lane, "area_gradient", "area_gradient", "surface_scalar"
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["volume"],
-            jax_value=jax_lane.components["volume"],
-            quantity="volume",
-            component="surface_scalar",
+        _compare_raw_array(
+            cpu, jax_lane, "volume_gradient", "volume_gradient", "surface_scalar"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["area_gradient"],
-            jax_arr=jax_lane.raw_arrays["area_gradient"],
-            quantity="area_gradient",
-            component="surface_scalar",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "area_perturbed_values",
+            "area_perturbed_values",
+            "surface_scalar",
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["volume_gradient"],
-            jax_arr=jax_lane.raw_arrays["volume_gradient"],
-            quantity="volume_gradient",
-            component="surface_scalar",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["area_perturbed_values"],
-            jax_arr=jax_lane.raw_arrays["area_perturbed_values"],
-            quantity="area_perturbed_values",
-            component="surface_scalar",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["volume_perturbed_values"],
-            jax_arr=jax_lane.raw_arrays["volume_perturbed_values"],
-            quantity="volume_perturbed_values",
-            component="surface_scalar",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "volume_perturbed_values",
+            "volume_perturbed_values",
+            "surface_scalar",
         ),
     ]
 
@@ -1079,45 +1084,34 @@ def _strain_comparisons(
 ) -> Sequence[Mapping[str, Any]]:
     """Compare fixed-state strain quantities for the rotation-only example."""
     return [
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["torsional_strain"],
-            jax_arr=jax_lane.raw_arrays["torsional_strain"],
-            quantity="torsional_strain",
-            component="strain",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "torsional_strain", "torsional_strain", "strain"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["binormal_curvature_strain"],
-            jax_arr=jax_lane.raw_arrays["binormal_curvature_strain"],
-            quantity="binormal_curvature_strain",
-            component="strain",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "binormal_curvature_strain",
+            "binormal_curvature_strain",
+            "strain",
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["torsional_penalty"],
-            jax_value=jax_lane.components["torsional_penalty"],
-            quantity="torsional_penalty",
-            component="strain_objective",
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "torsional_penalty",
+            "torsional_penalty",
+            "torsional_penalty",
+            "strain_objective",
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["binormal_curvature_penalty"],
-            jax_value=jax_lane.components["binormal_curvature_penalty"],
-            quantity="binormal_curvature_penalty",
-            component="strain_objective",
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "binormal_curvature_penalty",
+            "binormal_curvature_penalty",
+            "binormal_curvature_penalty",
+            "strain_objective",
         ),
-        _compare_scalar(
-            cpu_value=cpu.objective_native_subtotal,
-            jax_value=jax_lane.objective_native_subtotal,
-            quantity="objective_native_subtotal",
-            component="strain_objective",
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["gradient"],
-            jax_arr=jax_lane.raw_arrays["gradient"],
-            quantity="gradient",
-            component="strain_objective",
-            active_dof_names=cpu.active_dof_names,
-        ),
+        _compare_native_subtotal(cpu, jax_lane, "strain_objective"),
+        _compare_raw_array(cpu, jax_lane, "gradient", "gradient", "strain_objective"),
     ]
 
 
@@ -1127,56 +1121,50 @@ def _coil_force_energy_comparisons(
 ) -> Sequence[Mapping[str, Any]]:
     """Compare fixed-state coil force and magnetic-energy wrappers."""
     return [
-        _compare_scalar(
-            cpu_value=cpu.components["LpCurveForce"],
-            jax_value=jax_lane.components["LpCurveForce"],
-            quantity="LpCurveForce",
-            component="force_objective",
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "LpCurveForce",
+            "LpCurveForce",
+            "LpCurveForce",
+            "force_objective",
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["LpCurveForce_independent_oracle"],
-            jax_value=jax_lane.components["LpCurveForce"],
-            quantity="LpCurveForce_independent_oracle",
-            component="force_objective",
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "LpCurveForce_independent_oracle",
+            "LpCurveForce",
+            "LpCurveForce_independent_oracle",
+            "force_objective",
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["B2Energy"],
-            jax_value=jax_lane.components["B2Energy"],
-            quantity="B2Energy",
-            component="energy_objective",
+        _compare_component_scalar(
+            cpu, jax_lane, "B2Energy", "B2Energy", "B2Energy", "energy_objective"
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["B2Energy_independent_oracle"],
-            jax_value=jax_lane.components["B2Energy"],
-            quantity="B2Energy_independent_oracle",
-            component="energy_objective",
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "B2Energy_independent_oracle",
+            "B2Energy",
+            "B2Energy_independent_oracle",
+            "energy_objective",
         ),
-        _compare_scalar(
-            cpu_value=cpu.objective_native_subtotal,
-            jax_value=jax_lane.objective_native_subtotal,
-            quantity="objective_native_subtotal",
-            component="coil_force_energy_objective",
+        _compare_native_subtotal(cpu, jax_lane, "coil_force_energy_objective"),
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "lp_curve_force_gradient",
+            "lp_curve_force_gradient",
+            "force_objective",
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["lp_curve_force_gradient"],
-            jax_arr=jax_lane.raw_arrays["lp_curve_force_gradient"],
-            quantity="lp_curve_force_gradient",
-            component="force_objective",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "b2_energy_gradient",
+            "b2_energy_gradient",
+            "energy_objective",
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["b2_energy_gradient"],
-            jax_arr=jax_lane.raw_arrays["b2_energy_gradient"],
-            quantity="b2_energy_gradient",
-            component="energy_objective",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["gradient"],
-            jax_arr=jax_lane.raw_arrays["gradient"],
-            quantity="gradient",
-            component="coil_force_energy_objective",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "gradient", "gradient", "coil_force_energy_objective"
         ),
     ]
 
@@ -1187,64 +1175,29 @@ def _qfm_comparisons(
 ) -> Sequence[Mapping[str, Any]]:
     """Compare fixed-state QFM residual and example label quantities."""
     return [
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_gamma"],
-            jax_arr=jax_lane.raw_arrays["surface_gamma"],
-            quantity="surface_gamma",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
+        *_surface_geometry_comparisons(cpu, jax_lane, "surface"),
+        _compare_raw_array(cpu, jax_lane, "field_B", "field_B", "biot_savart"),
+        _compare_raw_array(cpu, jax_lane, "Bdotn", "Bdotn", "qfm_residual"),
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "qfm_residual",
+            "qfm_residual",
+            "qfm_residual",
+            "qfm_residual",
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
-            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
-            quantity="surface_unit_normal",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "qfm_gradient", "qfm_gradient", "qfm_residual"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["field_B"],
-            jax_arr=jax_lane.raw_arrays["field_B"],
-            quantity="field_B",
-            component="biot_savart",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["Bdotn"],
-            jax_arr=jax_lane.raw_arrays["Bdotn"],
-            quantity="Bdotn",
-            component="qfm_residual",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_scalar(
-            cpu_value=cpu.components["qfm_residual"],
-            jax_value=jax_lane.components["qfm_residual"],
-            quantity="qfm_residual",
-            component="qfm_residual",
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["qfm_gradient"],
-            jax_arr=jax_lane.raw_arrays["qfm_gradient"],
-            quantity="qfm_gradient",
-            component="qfm_residual",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_scalar(
-            cpu_value=cpu.components["area"],
-            jax_value=jax_lane.components["area"],
-            quantity="area",
-            component="label",
-        ),
-        _compare_scalar(
-            cpu_value=cpu.components["volume"],
-            jax_value=jax_lane.components["volume"],
-            quantity="volume",
-            component="label",
-        ),
-        _compare_scalar(
-            cpu_value=cpu.components["toroidal_flux"],
-            jax_value=jax_lane.components["toroidal_flux"],
-            quantity="toroidal_flux",
-            component="label",
+        _compare_component_scalar(cpu, jax_lane, "area", "area", "area", "label"),
+        _compare_component_scalar(cpu, jax_lane, "volume", "volume", "volume", "label"),
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "toroidal_flux",
+            "toroidal_flux",
+            "toroidal_flux",
+            "label",
         ),
     ]
 
@@ -1259,105 +1212,54 @@ def _pm_comparisons(
         3.0: "GPMO_ArbVec_backtracking",
     }[cpu.components["algorithm_variant"]]
     comparisons = [
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_gamma"],
-            jax_arr=jax_lane.raw_arrays["surface_gamma"],
-            quantity="surface_gamma",
-            component="pm_surface",
-            active_dof_names=cpu.active_dof_names,
+        *_surface_geometry_comparisons(cpu, jax_lane, "pm_surface"),
+        _compare_raw_array(cpu, jax_lane, "A_obj", "pm_grid_payload", "A_obj"),
+        _compare_raw_array(cpu, jax_lane, "b_obj", "pm_grid_payload", "b_obj"),
+        _compare_raw_array(cpu, jax_lane, "m_maxima", "pm_grid_payload", "m_maxima"),
+        _compare_raw_array(
+            cpu, jax_lane, "dipole_grid_xyz", "pm_grid_payload", "dipole_grid_xyz"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
-            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
-            quantity="surface_unit_normal",
-            component="pm_surface",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(cpu, jax_lane, "m", "pm_moments", algorithm_component),
+        _compare_raw_array(
+            cpu, jax_lane, "residual", "pm_residual", algorithm_component
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["A_obj"],
-            jax_arr=jax_lane.raw_arrays["A_obj"],
-            quantity="pm_grid_payload",
-            component="A_obj",
-            active_dof_names=cpu.active_dof_names,
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "pm_objective",
+            "pm_objective",
+            "pm_objective",
+            algorithm_component,
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["b_obj"],
-            jax_arr=jax_lane.raw_arrays["b_obj"],
-            quantity="pm_grid_payload",
-            component="b_obj",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "R2_history",
+            "pm_history",
+            f"{algorithm_component}_R2_history",
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["m_maxima"],
-            jax_arr=jax_lane.raw_arrays["m_maxima"],
-            quantity="pm_grid_payload",
-            component="m_maxima",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "Bn_history",
+            "pm_history",
+            f"{algorithm_component}_Bn_history",
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["dipole_grid_xyz"],
-            jax_arr=jax_lane.raw_arrays["dipole_grid_xyz"],
-            quantity="pm_grid_payload",
-            component="dipole_grid_xyz",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "dipole_B", "pm_dipole_field_B", "DipoleField"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["m"],
-            jax_arr=jax_lane.raw_arrays["m"],
-            quantity="pm_moments",
-            component=algorithm_component,
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["residual"],
-            jax_arr=jax_lane.raw_arrays["residual"],
-            quantity="pm_residual",
-            component=algorithm_component,
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_scalar(
-            cpu_value=cpu.components["pm_objective"],
-            jax_value=jax_lane.components["pm_objective"],
-            quantity="pm_objective",
-            component=algorithm_component,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["R2_history"],
-            jax_arr=jax_lane.raw_arrays["R2_history"],
-            quantity="pm_history",
-            component=f"{algorithm_component}_R2_history",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["Bn_history"],
-            jax_arr=jax_lane.raw_arrays["Bn_history"],
-            quantity="pm_history",
-            component=f"{algorithm_component}_Bn_history",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["dipole_B"],
-            jax_arr=jax_lane.raw_arrays["dipole_B"],
-            quantity="pm_dipole_field_B",
-            component="DipoleField",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["dipole_Bn"],
-            jax_arr=jax_lane.raw_arrays["dipole_Bn"],
-            quantity="pm_dipole_Bdotn",
-            component="DipoleField",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "dipole_Bn", "pm_dipole_Bdotn", "DipoleField"
         ),
     ]
     if cpu.components["algorithm_variant"] in (0.0, 3.0):
         comparisons.append(
-            _compare_array(
-                cpu_arr=cpu.raw_arrays["m_history"],
-                jax_arr=jax_lane.raw_arrays["m_history"],
-                quantity="pm_history",
-                component=f"{algorithm_component}_m_history",
-                active_dof_names=cpu.active_dof_names,
+            _compare_raw_array(
+                cpu,
+                jax_lane,
+                "m_history",
+                "pm_history",
+                f"{algorithm_component}_m_history",
             ),
         )
     return comparisons
@@ -1370,136 +1272,67 @@ def _pm_relax_and_split_comparisons(
     """Compare reduced permanent-magnet relax-and-split payload and final states."""
     algorithm_component = "relax_and_split"
     return [
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_gamma"],
-            jax_arr=jax_lane.raw_arrays["surface_gamma"],
-            quantity="surface_gamma",
-            component="pm_surface",
-            active_dof_names=cpu.active_dof_names,
+        *_surface_geometry_comparisons(cpu, jax_lane, "pm_surface"),
+        _compare_raw_array(cpu, jax_lane, "A_obj", "pm_grid_payload", "A_obj"),
+        _compare_raw_array(cpu, jax_lane, "b_obj", "pm_grid_payload", "b_obj"),
+        _compare_raw_array(cpu, jax_lane, "m_maxima", "pm_grid_payload", "m_maxima"),
+        _compare_raw_array(
+            cpu, jax_lane, "dipole_grid_xyz", "pm_grid_payload", "dipole_grid_xyz"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
-            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
-            quantity="surface_unit_normal",
-            component="pm_surface",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(cpu, jax_lane, "m", "pm_moments", algorithm_component),
+        _compare_raw_array(
+            cpu, jax_lane, "m_proxy", "pm_moments", f"{algorithm_component}_proxy"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["A_obj"],
-            jax_arr=jax_lane.raw_arrays["A_obj"],
-            quantity="pm_grid_payload",
-            component="A_obj",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "residual", "pm_residual", algorithm_component
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["b_obj"],
-            jax_arr=jax_lane.raw_arrays["b_obj"],
-            quantity="pm_grid_payload",
-            component="b_obj",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "residual_proxy", "pm_proxy_residual", algorithm_component
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["m_maxima"],
-            jax_arr=jax_lane.raw_arrays["m_maxima"],
-            quantity="pm_grid_payload",
-            component="m_maxima",
-            active_dof_names=cpu.active_dof_names,
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "pm_objective",
+            "pm_objective",
+            "pm_objective",
+            algorithm_component,
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["dipole_grid_xyz"],
-            jax_arr=jax_lane.raw_arrays["dipole_grid_xyz"],
-            quantity="pm_grid_payload",
-            component="dipole_grid_xyz",
-            active_dof_names=cpu.active_dof_names,
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "pm_proxy_objective",
+            "pm_proxy_objective",
+            "pm_proxy_objective",
+            algorithm_component,
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["m"],
-            jax_arr=jax_lane.raw_arrays["m"],
-            quantity="pm_moments",
-            component=algorithm_component,
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "RS_history",
+            "pm_history",
+            f"{algorithm_component}_RS_history",
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["m_proxy"],
-            jax_arr=jax_lane.raw_arrays["m_proxy"],
-            quantity="pm_moments",
-            component=f"{algorithm_component}_proxy",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "m_history", "pm_history", f"{algorithm_component}_m_history"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["residual"],
-            jax_arr=jax_lane.raw_arrays["residual"],
-            quantity="pm_residual",
-            component=algorithm_component,
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "m_proxy_history",
+            "pm_history",
+            f"{algorithm_component}_m_proxy_history",
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["residual_proxy"],
-            jax_arr=jax_lane.raw_arrays["residual_proxy"],
-            quantity="pm_proxy_residual",
-            component=algorithm_component,
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "dipole_B", "pm_dipole_field_B", "DipoleField"
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["pm_objective"],
-            jax_value=jax_lane.components["pm_objective"],
-            quantity="pm_objective",
-            component=algorithm_component,
+        _compare_raw_array(
+            cpu, jax_lane, "dipole_proxy_B", "pm_proxy_dipole_field_B", "DipoleField"
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["pm_proxy_objective"],
-            jax_value=jax_lane.components["pm_proxy_objective"],
-            quantity="pm_proxy_objective",
-            component=algorithm_component,
+        _compare_raw_array(
+            cpu, jax_lane, "dipole_Bn", "pm_dipole_Bdotn", "DipoleField"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["RS_history"],
-            jax_arr=jax_lane.raw_arrays["RS_history"],
-            quantity="pm_history",
-            component=f"{algorithm_component}_RS_history",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["m_history"],
-            jax_arr=jax_lane.raw_arrays["m_history"],
-            quantity="pm_history",
-            component=f"{algorithm_component}_m_history",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["m_proxy_history"],
-            jax_arr=jax_lane.raw_arrays["m_proxy_history"],
-            quantity="pm_history",
-            component=f"{algorithm_component}_m_proxy_history",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["dipole_B"],
-            jax_arr=jax_lane.raw_arrays["dipole_B"],
-            quantity="pm_dipole_field_B",
-            component="DipoleField",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["dipole_proxy_B"],
-            jax_arr=jax_lane.raw_arrays["dipole_proxy_B"],
-            quantity="pm_proxy_dipole_field_B",
-            component="DipoleField",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["dipole_Bn"],
-            jax_arr=jax_lane.raw_arrays["dipole_Bn"],
-            quantity="pm_dipole_Bdotn",
-            component="DipoleField",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["dipole_proxy_Bn"],
-            jax_arr=jax_lane.raw_arrays["dipole_proxy_Bn"],
-            quantity="pm_proxy_dipole_Bdotn",
-            component="DipoleField",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "dipole_proxy_Bn", "pm_proxy_dipole_Bdotn", "DipoleField"
         ),
     ]
 
@@ -1510,72 +1343,32 @@ def _wireframe_comparisons(
 ) -> Sequence[Mapping[str, Any]]:
     """Compare fixed-state wireframe RCLS matrices, solve output, and field."""
     comparisons = [
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_gamma"],
-            jax_arr=jax_lane.raw_arrays["surface_gamma"],
-            quantity="surface_gamma",
-            component="wireframe_surface",
-            active_dof_names=cpu.active_dof_names,
+        *_surface_geometry_comparisons(cpu, jax_lane, "wireframe_surface"),
+        _compare_raw_array(cpu, jax_lane, "Amat", "wireframe_matrix", "Amat"),
+        _compare_raw_array(cpu, jax_lane, "bvec", "wireframe_matrix", "bvec"),
+        _compare_component_scalar(
+            cpu, jax_lane, "f_B", "f_B", "wireframe_objective", "f_B"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
-            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
-            quantity="surface_unit_normal",
-            component="wireframe_surface",
-            active_dof_names=cpu.active_dof_names,
+        _compare_component_scalar(
+            cpu, jax_lane, "f_R", "f_R", "wireframe_objective", "f_R"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["Amat"],
-            jax_arr=jax_lane.raw_arrays["Amat"],
-            quantity="wireframe_matrix",
-            component="Amat",
-            active_dof_names=cpu.active_dof_names,
+        _compare_component_scalar(cpu, jax_lane, "f", "f", "wireframe_objective", "f"),
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "constraints_satisfied",
+            "wireframe_constraints",
+            "check_constraints",
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["bvec"],
-            jax_arr=jax_lane.raw_arrays["bvec"],
-            quantity="wireframe_matrix",
-            component="bvec",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "field_B", "wireframe_field_B", "WireframeField"
         ),
-        _compare_scalar(
-            cpu_value=cpu.components["f_B"],
-            jax_value=jax_lane.components["f_B"],
-            quantity="wireframe_objective",
-            component="f_B",
-        ),
-        _compare_scalar(
-            cpu_value=cpu.components["f_R"],
-            jax_value=jax_lane.components["f_R"],
-            quantity="wireframe_objective",
-            component="f_R",
-        ),
-        _compare_scalar(
-            cpu_value=cpu.components["f"],
-            jax_value=jax_lane.components["f"],
-            quantity="wireframe_objective",
-            component="f",
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["constraints_satisfied"],
-            jax_arr=jax_lane.raw_arrays["constraints_satisfied"],
-            quantity="wireframe_constraints",
-            component="check_constraints",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["field_B"],
-            jax_arr=jax_lane.raw_arrays["field_B"],
-            quantity="wireframe_field_B",
-            component="WireframeField",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["field_dB_by_dX"],
-            jax_arr=jax_lane.raw_arrays["field_dB_by_dX"],
-            quantity="wireframe_field_dB_by_dX",
-            component="WireframeField",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "field_dB_by_dX",
+            "wireframe_field_dB_by_dX",
+            "WireframeField",
         ),
         _compare_derived_normal_projection(
             cpu_field=cpu.raw_arrays["field_B"],
@@ -1594,12 +1387,12 @@ def _wireframe_comparisons(
         and "constraint_matrix_shape" in jax_lane.raw_arrays
     ):
         comparisons.append(
-            _compare_array(
-                cpu_arr=cpu.raw_arrays["constraint_matrix_shape"],
-                jax_arr=jax_lane.raw_arrays["constraint_matrix_shape"],
-                quantity="wireframe_constraints",
-                component="constraint_matrix_shape",
-                active_dof_names=cpu.active_dof_names,
+            _compare_raw_array(
+                cpu,
+                jax_lane,
+                "constraint_matrix_shape",
+                "wireframe_constraints",
+                "constraint_matrix_shape",
             )
         )
     return comparisons
@@ -1611,89 +1404,32 @@ def _wireframe_gsco_comparisons(
 ) -> Sequence[Mapping[str, Any]]:
     """Compare deterministic reduced GSCO fixed-state histories."""
     comparisons = [
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["A_obj"],
-            jax_arr=jax_lane.raw_arrays["A_obj"],
-            quantity="wireframe_matrix",
-            component="GSCO_Amat",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(cpu, jax_lane, "A_obj", "wireframe_matrix", "GSCO_Amat"),
+        _compare_raw_array(cpu, jax_lane, "b_obj", "wireframe_matrix", "GSCO_bvec"),
+        _compare_raw_array(
+            cpu, jax_lane, "flags", "wireframe_gsco_flags", "constraint_flags"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["b_obj"],
-            jax_arr=jax_lane.raw_arrays["b_obj"],
-            quantity="wireframe_matrix",
-            component="GSCO_bvec",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(cpu, jax_lane, "x", "wireframe_gsco_solution", "final_x"),
+        _compare_raw_array(
+            cpu, jax_lane, "loop_count", "wireframe_gsco_solution", "final_loop_count"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["flags"],
-            jax_arr=jax_lane.raw_arrays["flags"],
-            quantity="wireframe_gsco_flags",
-            component="constraint_flags",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "iter_hist", "wireframe_gsco_history", "iter_hist"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["x"],
-            jax_arr=jax_lane.raw_arrays["x"],
-            quantity="wireframe_gsco_solution",
-            component="final_x",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "curr_hist", "wireframe_gsco_history", "curr_hist"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["loop_count"],
-            jax_arr=jax_lane.raw_arrays["loop_count"],
-            quantity="wireframe_gsco_solution",
-            component="final_loop_count",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "loop_hist", "wireframe_gsco_history", "loop_hist"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["iter_hist"],
-            jax_arr=jax_lane.raw_arrays["iter_hist"],
-            quantity="wireframe_gsco_history",
-            component="iter_hist",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "f_B_hist", "wireframe_gsco_history", "f_B_hist"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["curr_hist"],
-            jax_arr=jax_lane.raw_arrays["curr_hist"],
-            quantity="wireframe_gsco_history",
-            component="curr_hist",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "f_S_hist", "wireframe_gsco_history", "f_S_hist"
         ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["loop_hist"],
-            jax_arr=jax_lane.raw_arrays["loop_hist"],
-            quantity="wireframe_gsco_history",
-            component="loop_hist",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["f_B_hist"],
-            jax_arr=jax_lane.raw_arrays["f_B_hist"],
-            quantity="wireframe_gsco_history",
-            component="f_B_hist",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["f_S_hist"],
-            jax_arr=jax_lane.raw_arrays["f_S_hist"],
-            quantity="wireframe_gsco_history",
-            component="f_S_hist",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["f_hist"],
-            jax_arr=jax_lane.raw_arrays["f_hist"],
-            quantity="wireframe_gsco_history",
-            component="f_hist",
-            active_dof_names=cpu.active_dof_names,
-        ),
-        _compare_scalar(
-            cpu_value=cpu.objective_native_subtotal,
-            jax_value=jax_lane.objective_native_subtotal,
-            quantity="objective_native_subtotal",
-            component="GSCO",
-        ),
+        _compare_raw_array(cpu, jax_lane, "f_hist", "wireframe_gsco_history", "f_hist"),
+        _compare_native_subtotal(cpu, jax_lane, "GSCO"),
     ]
     optional_array_comparisons = (
         (
@@ -1745,13 +1481,7 @@ def _wireframe_gsco_comparisons(
                 )
             else:
                 comparisons.append(
-                    _compare_array(
-                        cpu_arr=cpu.raw_arrays[raw_key],
-                        jax_arr=jax_lane.raw_arrays[raw_key],
-                        quantity=quantity,
-                        component=component,
-                        active_dof_names=cpu.active_dof_names,
-                    )
+                    _compare_raw_array(cpu, jax_lane, raw_key, quantity, component)
                 )
     return comparisons
 
@@ -1779,65 +1509,29 @@ def _boozer_fixed_state_comparisons(
     No SquaredFlux scalar, no gradient comparison — those are not part of
     the Boozer fixed-state contract for this fixture.
     """
-    comparisons = []
+    comparisons = _surface_geometry_comparisons(cpu, jax_lane, "surface")
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_gamma"],
-            jax_arr=jax_lane.raw_arrays["surface_gamma"],
-            quantity="surface_gamma",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(cpu, jax_lane, "field_B", "field_B", "biot_savart")
+    )
+    comparisons.append(
+        _compare_raw_array(
+            cpu, jax_lane, "boozer_residual", "boozer_residual", "boozer"
         )
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
-            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
-            quantity="surface_unit_normal",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
-        )
+        _compare_component_scalar(cpu, jax_lane, "area", "area", "area", "label")
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["field_B"],
-            jax_arr=jax_lane.raw_arrays["field_B"],
-            quantity="field_B",
-            component="biot_savart",
-            active_dof_names=cpu.active_dof_names,
-        )
+        _compare_component_scalar(cpu, jax_lane, "volume", "volume", "volume", "label")
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["boozer_residual"],
-            jax_arr=jax_lane.raw_arrays["boozer_residual"],
-            quantity="boozer_residual",
-            component="boozer",
-            active_dof_names=cpu.active_dof_names,
-        )
-    )
-    comparisons.append(
-        _compare_scalar(
-            cpu_value=cpu.components["area"],
-            jax_value=jax_lane.components["area"],
-            quantity="area",
-            component="label",
-        )
-    )
-    comparisons.append(
-        _compare_scalar(
-            cpu_value=cpu.components["volume"],
-            jax_value=jax_lane.components["volume"],
-            quantity="volume",
-            component="label",
-        )
-    )
-    comparisons.append(
-        _compare_scalar(
-            cpu_value=cpu.components["toroidal_flux"],
-            jax_value=jax_lane.components["toroidal_flux"],
-            quantity="toroidal_flux",
-            component="label",
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "toroidal_flux",
+            "toroidal_flux",
+            "toroidal_flux",
+            "label",
         )
     )
     return comparisons
@@ -1850,77 +1544,57 @@ def _tracing_comparisons(
     comparisons = []
     if "field_B" in cpu.raw_arrays and "field_B" in jax_lane.raw_arrays:
         comparisons.append(
-            _compare_array(
-                cpu_arr=cpu.raw_arrays["field_B"],
-                jax_arr=jax_lane.raw_arrays["field_B"],
-                quantity="field_B",
-                component="interpolated_field",
-                active_dof_names=cpu.active_dof_names,
+            _compare_raw_array(
+                cpu, jax_lane, "field_B", "field_B", "interpolated_field"
             )
         )
     if "field_GradAbsB" in cpu.raw_arrays and "field_GradAbsB" in jax_lane.raw_arrays:
         comparisons.append(
-            _compare_array(
-                cpu_arr=cpu.raw_arrays["field_GradAbsB"],
-                jax_arr=jax_lane.raw_arrays["field_GradAbsB"],
-                quantity="field_GradAbsB",
-                component="interpolated_field",
-                active_dof_names=cpu.active_dof_names,
+            _compare_raw_array(
+                cpu, jax_lane, "field_GradAbsB", "field_GradAbsB", "interpolated_field"
             )
         )
     if "field_modB" in cpu.raw_arrays and "field_modB" in jax_lane.raw_arrays:
         comparisons.append(
-            _compare_array(
-                cpu_arr=cpu.raw_arrays["field_modB"],
-                jax_arr=jax_lane.raw_arrays["field_modB"],
-                quantity="field_modB",
-                component="interpolated_boozer_field",
-                active_dof_names=cpu.active_dof_names,
+            _compare_raw_array(
+                cpu, jax_lane, "field_modB", "field_modB", "interpolated_boozer_field"
             )
         )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["trajectory_endpoint"],
-            jax_arr=jax_lane.raw_arrays["trajectory_endpoint"],
-            quantity="trajectory_endpoint",
-            component="compute_fieldlines",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "trajectory_endpoint",
+            "trajectory_endpoint",
+            "compute_fieldlines",
         )
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["trajectory_t_final"],
-            jax_arr=jax_lane.raw_arrays["trajectory_t_final"],
-            quantity="trajectory_t_final",
-            component="compute_fieldlines",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "trajectory_t_final",
+            "trajectory_t_final",
+            "compute_fieldlines",
         )
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["trajectory_status_code"],
-            jax_arr=jax_lane.raw_arrays["trajectory_status_code"],
-            quantity="trajectory_status_code",
-            component="compute_fieldlines",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu,
+            jax_lane,
+            "trajectory_status_code",
+            "trajectory_status_code",
+            "compute_fieldlines",
         )
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["phi_hit_xyz"],
-            jax_arr=jax_lane.raw_arrays["phi_hit_xyz"],
-            quantity="phi_hit_xyz",
-            component="compute_fieldlines",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "phi_hit_xyz", "phi_hit_xyz", "compute_fieldlines"
         )
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["phi_hit_count"],
-            jax_arr=jax_lane.raw_arrays["phi_hit_count"],
-            quantity="phi_hit_count",
-            component="compute_fieldlines",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(
+            cpu, jax_lane, "phi_hit_count", "phi_hit_count", "compute_fieldlines"
         )
     )
     return comparisons
@@ -1955,64 +1629,41 @@ def _boozer_qa_wrappers_comparisons(
     adjoint parity. No gradient comparison is included in this fixed-solved
     state fixture.
     """
-    comparisons = []
+    comparisons = _surface_geometry_comparisons(cpu, jax_lane, "surface")
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_gamma"],
-            jax_arr=jax_lane.raw_arrays["surface_gamma"],
-            quantity="surface_gamma",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
+        _compare_raw_array(cpu, jax_lane, "field_B", "field_B", "biot_savart")
+    )
+    comparisons.append(
+        _compare_component_scalar(cpu, jax_lane, "iota", "iota", "iota", "wrapper")
+    )
+    comparisons.append(
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "major_radius",
+            "major_radius",
+            "major_radius",
+            "wrapper",
         )
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
-            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
-            quantity="surface_unit_normal",
-            component="surface",
-            active_dof_names=cpu.active_dof_names,
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "nq_symmetric_ratio",
+            "nq_symmetric_ratio",
+            "nq_symmetric_ratio",
+            "wrapper",
         )
     )
     comparisons.append(
-        _compare_array(
-            cpu_arr=cpu.raw_arrays["field_B"],
-            jax_arr=jax_lane.raw_arrays["field_B"],
-            quantity="field_B",
-            component="biot_savart",
-            active_dof_names=cpu.active_dof_names,
-        )
-    )
-    comparisons.append(
-        _compare_scalar(
-            cpu_value=cpu.components["iota"],
-            jax_value=jax_lane.components["iota"],
-            quantity="iota",
-            component="wrapper",
-        )
-    )
-    comparisons.append(
-        _compare_scalar(
-            cpu_value=cpu.components["major_radius"],
-            jax_value=jax_lane.components["major_radius"],
-            quantity="major_radius",
-            component="wrapper",
-        )
-    )
-    comparisons.append(
-        _compare_scalar(
-            cpu_value=cpu.components["nq_symmetric_ratio"],
-            jax_value=jax_lane.components["nq_symmetric_ratio"],
-            quantity="nq_symmetric_ratio",
-            component="wrapper",
-        )
-    )
-    comparisons.append(
-        _compare_scalar(
-            cpu_value=cpu.components["sum_CurveLength"],
-            jax_value=jax_lane.components["sum_CurveLength"],
-            quantity="sum_CurveLength",
-            component="curve_objective",
+        _compare_component_scalar(
+            cpu,
+            jax_lane,
+            "sum_CurveLength",
+            "sum_CurveLength",
+            "sum_CurveLength",
+            "curve_objective",
         )
     )
     return comparisons

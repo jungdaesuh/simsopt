@@ -563,6 +563,72 @@ def _record_rows(K: int, record_every: int) -> np.ndarray:
     return rows
 
 
+def _gpmo_recording_scan(
+    step_fn,
+    initial_state: tuple[jax.Array, ...],
+    reference: jax.Array,
+    *,
+    K: int,
+    record_every: int,
+    ndipoles: int,
+    extra_history_specs: tuple[tuple[tuple[int, ...], object], ...],
+    extra_trace_indices: tuple[int, ...],
+) -> tuple[
+    tuple[jax.Array, ...],
+    jax.Array,
+    jax.Array,
+    tuple[jax.Array, ...],
+]:
+    record_rows = _record_rows(K, record_every)
+    record_count = int(record_rows.size)
+    record_rows_arr = _as_jax_int32(record_rows)
+
+    def _recording_scan_body(carry, iteration):
+        state, next_record_slot, x_history, residual_history, extra_histories = carry
+        next_state, trace = step_fn(state, iteration)
+        safe_slot = jnp.minimum(next_record_slot, record_count - 1)
+        should_record = iteration == record_rows_arr[safe_slot]
+        x_history_candidate = x_history.at[safe_slot].set(next_state[0])
+        residual_history_candidate = residual_history.at[safe_slot].set(trace[3])
+        extra_history_candidates = tuple(
+            history.at[safe_slot].set(trace[trace_index])
+            for history, trace_index in zip(extra_histories, extra_trace_indices)
+        )
+        return (
+            next_state,
+            next_record_slot + should_record.astype(next_record_slot.dtype),
+            jnp.where(should_record, x_history_candidate, x_history),
+            jnp.where(should_record, residual_history_candidate, residual_history),
+            tuple(
+                jnp.where(should_record, candidate, history)
+                for candidate, history in zip(extra_history_candidates, extra_histories)
+            ),
+        ), None
+
+    final_carry, _ = jax.lax.scan(
+        _recording_scan_body,
+        (
+            initial_state,
+            _zeros_like_shape(reference, (), dtype=jnp.int32),
+            _zeros_like_shape(reference, (record_count, ndipoles, 3)),
+            _zeros_like_shape(reference, (record_count,)),
+            tuple(
+                _zeros_like_shape(
+                    reference,
+                    (record_count, *shape),
+                    dtype=dtype,
+                )
+                for shape, dtype in extra_history_specs
+            ),
+        ),
+        jax.lax.iota(jnp.int32, K),
+    )
+    final_state, _next_record_slot, x_history, residual_history, extra_histories = (
+        final_carry
+    )
+    return final_state, x_history, residual_history, extra_histories
+
+
 def _validate_gpmo_multi_static_args(
     K: int, single_direction: int, ndipoles: int, Nadjacent: int
 ) -> None:
@@ -837,75 +903,27 @@ def gpmo_baseline_solve(
             selected_signs=empty_float,
         )
     if record_every is not None:
-        record_rows = _record_rows(K, record_every)
-        record_count = int(record_rows.size)
-        record_rows_arr = _as_jax_int32(record_rows)
 
-        def _recording_scan_body(carry, iteration):
-            (
-                state,
-                next_record_slot,
-                x_history,
-                residual_history,
-                selected_dipoles,
-                selected_components,
-                selected_signs,
-            ) = carry
-            next_state, trace = gpmo_baseline_step(spec, state, A_arr)
-            dipole, component, sign, residual_sq = trace
-            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
-            should_record = iteration == record_rows_arr[safe_slot]
-            x_history_candidate = x_history.at[safe_slot].set(next_state[0])
-            residual_history_candidate = residual_history.at[safe_slot].set(residual_sq)
-            selected_dipoles_candidate = selected_dipoles.at[safe_slot].set(dipole)
-            selected_components_candidate = selected_components.at[safe_slot].set(
-                component
-            )
-            selected_signs_candidate = selected_signs.at[safe_slot].set(sign)
-            return (
-                next_state,
-                next_record_slot + should_record.astype(next_record_slot.dtype),
-                jnp.where(should_record, x_history_candidate, x_history),
-                jnp.where(
-                    should_record,
-                    residual_history_candidate,
-                    residual_history,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_dipoles_candidate,
-                    selected_dipoles,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_components_candidate,
-                    selected_components,
-                ),
-                jnp.where(should_record, selected_signs_candidate, selected_signs),
-            ), None
+        def _recording_step(state, _iteration):
+            return gpmo_baseline_step(spec, state, A_arr)
 
-        final_carry, _ = jax.lax.scan(
-            _recording_scan_body,
-            (
+        final_state, x_history, residual_history, extra_histories = (
+            _gpmo_recording_scan(
+                _recording_step,
                 (x0, residual0, available0),
-                _zeros_like_shape(A_arr, (), dtype=jnp.int32),
-                _zeros_like_shape(A_arr, (record_count, ndipoles, 3)),
-                _zeros_like_shape(A_arr, (record_count,)),
-                _zeros_like_shape(A_arr, (record_count,), dtype=jnp.int64),
-                _zeros_like_shape(A_arr, (record_count,), dtype=jnp.int64),
-                _zeros_like_shape(A_arr, (record_count,)),
-            ),
-            jax.lax.iota(jnp.int32, K),
+                A_arr,
+                K=K,
+                record_every=record_every,
+                ndipoles=ndipoles,
+                extra_history_specs=(
+                    ((), jnp.int64),
+                    ((), jnp.int64),
+                    ((), A_arr.dtype),
+                ),
+                extra_trace_indices=(0, 1, 2),
+            )
         )
-        (
-            final_state,
-            _next_record_slot,
-            x_history,
-            residual_history,
-            selected_dipoles,
-            selected_components,
-            selected_signs,
-        ) = final_carry
+        selected_dipoles, selected_components, selected_signs = extra_histories
         return GPMOBaselineResult(
             x=final_state[0],
             x_history=x_history,
@@ -1134,75 +1152,27 @@ def gpmo_arbvec_solve(
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
 
     if record_every is not None:
-        record_rows = _record_rows(K, record_every)
-        record_count = int(record_rows.size)
-        record_rows_arr = _as_jax_int32(record_rows)
 
-        def _recording_scan_body(carry, iteration):
-            (
-                state,
-                next_record_slot,
-                x_history,
-                residual_history,
-                selected_dipoles,
-                selected_vector_indices,
-                selected_signs,
-            ) = carry
-            next_state, trace = gpmo_arbvec_step(scan_spec, state, A_arr, contributions)
-            dipole, vector_index, sign, residual_sq = trace
-            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
-            should_record = iteration == record_rows_arr[safe_slot]
-            x_history_candidate = x_history.at[safe_slot].set(next_state[0])
-            residual_history_candidate = residual_history.at[safe_slot].set(residual_sq)
-            selected_dipoles_candidate = selected_dipoles.at[safe_slot].set(dipole)
-            selected_vector_indices_candidate = selected_vector_indices.at[
-                safe_slot
-            ].set(vector_index)
-            selected_signs_candidate = selected_signs.at[safe_slot].set(sign)
-            return (
-                next_state,
-                next_record_slot + should_record.astype(next_record_slot.dtype),
-                jnp.where(should_record, x_history_candidate, x_history),
-                jnp.where(
-                    should_record,
-                    residual_history_candidate,
-                    residual_history,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_dipoles_candidate,
-                    selected_dipoles,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_vector_indices_candidate,
-                    selected_vector_indices,
-                ),
-                jnp.where(should_record, selected_signs_candidate, selected_signs),
-            ), None
+        def _recording_step(state, _iteration):
+            return gpmo_arbvec_step(scan_spec, state, A_arr, contributions)
 
-        final_carry, _ = jax.lax.scan(
-            _recording_scan_body,
-            (
+        final_state, x_history, residual_history, extra_histories = (
+            _gpmo_recording_scan(
+                _recording_step,
                 (x0, residual0, available0),
-                _device_scalar(0, jnp.int32),
-                jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
-                jnp.zeros((record_count,), dtype=A_arr.dtype),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=A_arr.dtype),
-            ),
-            jnp.arange(K, dtype=jnp.int32),
+                A_arr,
+                K=K,
+                record_every=record_every,
+                ndipoles=ndipoles,
+                extra_history_specs=(
+                    ((), jnp.int64),
+                    ((), jnp.int64),
+                    ((), A_arr.dtype),
+                ),
+                extra_trace_indices=(0, 1, 2),
+            )
         )
-        (
-            final_state,
-            _next_record_slot,
-            x_history,
-            residual_history,
-            selected_dipoles,
-            selected_vector_indices,
-            selected_signs,
-        ) = final_carry
+        selected_dipoles, selected_vector_indices, selected_signs = extra_histories
         return GPMOArbVecResult(
             x=final_state[0],
             x_history=x_history,
@@ -1979,24 +1949,9 @@ def gpmo_arbvec_backtracking_solve(
     )
 
     if record_every is not None:
-        record_rows = _record_rows(K, record_every)
-        record_count = int(record_rows.size)
-        record_rows_arr = _as_jax_int32(record_rows)
 
-        def _recording_scan_body(carry, iteration):
-            (
-                state,
-                next_record_slot,
-                selected_dipoles_history,
-                selected_vector_indices_history,
-                selected_signs_history,
-                residual_history,
-                x_history,
-                num_nonzeros_history,
-                removed_pair_count_history,
-                done_history,
-            ) = carry
-            next_state, trace = gpmo_arbvec_backtracking_step(
+        def _recording_step(state, iteration):
+            return gpmo_arbvec_backtracking_step(
                 scan_spec,
                 state,
                 A_arr,
@@ -2005,66 +1960,10 @@ def gpmo_arbvec_backtracking_solve(
                 iteration,
                 contributions,
             )
-            (
-                dipole,
-                vector_index,
-                sign,
-                residual_sq,
-                x_snapshot,
-                num_nonzeros,
-                removed_pair_count,
-                done_snapshot,
-            ) = trace
-            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
-            should_record = iteration == record_rows_arr[safe_slot]
-            return (
-                next_state,
-                next_record_slot + should_record.astype(next_record_slot.dtype),
-                jnp.where(
-                    should_record,
-                    selected_dipoles_history.at[safe_slot].set(dipole),
-                    selected_dipoles_history,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_vector_indices_history.at[safe_slot].set(vector_index),
-                    selected_vector_indices_history,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_signs_history.at[safe_slot].set(sign),
-                    selected_signs_history,
-                ),
-                jnp.where(
-                    should_record,
-                    residual_history.at[safe_slot].set(residual_sq),
-                    residual_history,
-                ),
-                jnp.where(
-                    should_record,
-                    x_history.at[safe_slot].set(x_snapshot),
-                    x_history,
-                ),
-                jnp.where(
-                    should_record,
-                    num_nonzeros_history.at[safe_slot].set(num_nonzeros),
-                    num_nonzeros_history,
-                ),
-                jnp.where(
-                    should_record,
-                    removed_pair_count_history.at[safe_slot].set(removed_pair_count),
-                    removed_pair_count_history,
-                ),
-                jnp.where(
-                    should_record,
-                    done_history.at[safe_slot].set(done_snapshot),
-                    done_history,
-                ),
-            ), None
 
-        final_carry, _ = jax.lax.scan(
-            _recording_scan_body,
-            (
+        final_state, x_history, residual_history, extra_histories = (
+            _gpmo_recording_scan(
+                _recording_step,
                 (
                     x0,
                     residual0,
@@ -2076,30 +1975,29 @@ def gpmo_arbvec_backtracking_solve(
                     selected_signs0,
                     initial_stop,
                 ),
-                _device_scalar(0, jnp.int32),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=A_arr.dtype),
-                jnp.zeros((record_count,), dtype=A_arr.dtype),
-                jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=bool),
-            ),
-            jnp.arange(K, dtype=jnp.int32),
+                A_arr,
+                K=K,
+                record_every=record_every,
+                ndipoles=ndipoles,
+                extra_history_specs=(
+                    ((), jnp.int64),
+                    ((), jnp.int64),
+                    ((), A_arr.dtype),
+                    ((), jnp.int64),
+                    ((), jnp.int64),
+                    ((), bool),
+                ),
+                extra_trace_indices=(0, 1, 2, 5, 6, 7),
+            )
         )
         (
-            final_state,
-            _next_record_slot,
             selected_dipoles,
             selected_vector_indices,
             selected_signs,
-            residual_history,
-            x_history,
             num_nonzeros_history,
             removed_pair_count_history,
             done_history,
-        ) = final_carry
+        ) = extra_histories
         return GPMOArbVecBacktrackingResult(
             x=final_state[0],
             x_history=x_history,
@@ -2375,84 +2273,33 @@ def gpmo_multi_solve(
     connectivity = gpmo_connectivity_matrix(spec.dipole_grid_xyz)
 
     if record_every is not None:
-        record_rows = _record_rows(K, record_every)
-        record_count = int(record_rows.size)
-        record_rows_arr = _as_jax_int32(record_rows)
 
-        def _recording_scan_body(carry, iteration):
-            (
-                state,
-                next_record_slot,
-                x_history,
-                residual_history,
-                selected_seed_dipoles,
-                selected_components,
-                selected_signs,
-                selected_groups,
-            ) = carry
-            next_state, trace = gpmo_multi_step(spec, state, A_arr, connectivity)
-            seed_dipole, component, sign, residual_sq, selected_group = trace
-            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
-            should_record = iteration == record_rows_arr[safe_slot]
-            x_history_candidate = x_history.at[safe_slot].set(next_state[0])
-            residual_history_candidate = residual_history.at[safe_slot].set(residual_sq)
-            selected_seed_dipoles_candidate = selected_seed_dipoles.at[safe_slot].set(
-                seed_dipole
-            )
-            selected_components_candidate = selected_components.at[safe_slot].set(
-                component
-            )
-            selected_signs_candidate = selected_signs.at[safe_slot].set(sign)
-            selected_groups_candidate = selected_groups.at[safe_slot].set(
-                selected_group
-            )
-            return (
-                next_state,
-                next_record_slot + should_record.astype(next_record_slot.dtype),
-                jnp.where(should_record, x_history_candidate, x_history),
-                jnp.where(
-                    should_record,
-                    residual_history_candidate,
-                    residual_history,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_seed_dipoles_candidate,
-                    selected_seed_dipoles,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_components_candidate,
-                    selected_components,
-                ),
-                jnp.where(should_record, selected_signs_candidate, selected_signs),
-                jnp.where(should_record, selected_groups_candidate, selected_groups),
-            ), None
+        def _recording_step(state, _iteration):
+            return gpmo_multi_step(spec, state, A_arr, connectivity)
 
-        final_carry, _ = jax.lax.scan(
-            _recording_scan_body,
-            (
+        final_state, x_history, residual_history, extra_histories = (
+            _gpmo_recording_scan(
+                _recording_step,
                 (x0, residual0, available0),
-                _device_scalar(0, jnp.int32),
-                jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
-                jnp.zeros((record_count,), dtype=A_arr.dtype),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=A_arr.dtype),
-                jnp.zeros((record_count, spec.Nadjacent), dtype=jnp.int64),
-            ),
-            jnp.arange(K, dtype=jnp.int32),
+                A_arr,
+                K=K,
+                record_every=record_every,
+                ndipoles=ndipoles,
+                extra_history_specs=(
+                    ((), jnp.int64),
+                    ((), jnp.int64),
+                    ((), A_arr.dtype),
+                    ((spec.Nadjacent,), jnp.int64),
+                ),
+                extra_trace_indices=(0, 1, 2, 4),
+            )
         )
         (
-            final_state,
-            _next_record_slot,
-            x_history,
-            residual_history,
             selected_seed_dipoles,
             selected_components,
             selected_signs,
             selected_groups,
-        ) = final_carry
+        ) = extra_histories
         return GPMOMultiResult(
             x=final_state[0],
             x_history=x_history,
@@ -2820,86 +2667,15 @@ def gpmo_backtracking_solve(
         )
 
     if record_every is not None:
-        record_rows = _record_rows(K, record_every)
-        record_count = int(record_rows.size)
-        record_rows_arr = _as_jax_int32(record_rows)
 
-        def _recording_scan_body(carry, iteration):
-            (
-                state,
-                next_record_slot,
-                selected_dipoles_history,
-                selected_components_history,
-                selected_signs_history,
-                residual_history,
-                x_history,
-                num_nonzeros_history,
-                removed_pair_count_history,
-                done_history,
-            ) = carry
-            next_state, trace = gpmo_backtracking_step(
+        def _recording_step(state, iteration):
+            return gpmo_backtracking_step(
                 scan_spec, state, A_arr, connectivity, iteration, K=K
             )
-            (
-                dipole,
-                component,
-                sign,
-                residual_sq,
-                x_snapshot,
-                num_nonzeros,
-                removed_pair_count,
-                done_snapshot,
-            ) = trace
-            safe_slot = jnp.minimum(next_record_slot, record_count - 1)
-            should_record = iteration == record_rows_arr[safe_slot]
-            return (
-                next_state,
-                next_record_slot + should_record.astype(next_record_slot.dtype),
-                jnp.where(
-                    should_record,
-                    selected_dipoles_history.at[safe_slot].set(dipole),
-                    selected_dipoles_history,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_components_history.at[safe_slot].set(component),
-                    selected_components_history,
-                ),
-                jnp.where(
-                    should_record,
-                    selected_signs_history.at[safe_slot].set(sign),
-                    selected_signs_history,
-                ),
-                jnp.where(
-                    should_record,
-                    residual_history.at[safe_slot].set(residual_sq),
-                    residual_history,
-                ),
-                jnp.where(
-                    should_record,
-                    x_history.at[safe_slot].set(x_snapshot),
-                    x_history,
-                ),
-                jnp.where(
-                    should_record,
-                    num_nonzeros_history.at[safe_slot].set(num_nonzeros),
-                    num_nonzeros_history,
-                ),
-                jnp.where(
-                    should_record,
-                    removed_pair_count_history.at[safe_slot].set(removed_pair_count),
-                    removed_pair_count_history,
-                ),
-                jnp.where(
-                    should_record,
-                    done_history.at[safe_slot].set(done_snapshot),
-                    done_history,
-                ),
-            ), None
 
-        final_carry, _ = jax.lax.scan(
-            _recording_scan_body,
-            (
+        final_state, x_history, residual_history, extra_histories = (
+            _gpmo_recording_scan(
+                _recording_step,
                 (
                     x0,
                     residual0,
@@ -2911,30 +2687,29 @@ def gpmo_backtracking_solve(
                     selected_signs0,
                     _bool_scalar(False),
                 ),
-                _device_scalar(0, jnp.int32),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=A_arr.dtype),
-                jnp.zeros((record_count,), dtype=A_arr.dtype),
-                jnp.zeros((record_count, ndipoles, 3), dtype=A_arr.dtype),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=jnp.int64),
-                jnp.zeros((record_count,), dtype=bool),
-            ),
-            jnp.arange(K, dtype=jnp.int32),
+                A_arr,
+                K=K,
+                record_every=record_every,
+                ndipoles=ndipoles,
+                extra_history_specs=(
+                    ((), jnp.int64),
+                    ((), jnp.int64),
+                    ((), A_arr.dtype),
+                    ((), jnp.int64),
+                    ((), jnp.int64),
+                    ((), bool),
+                ),
+                extra_trace_indices=(0, 1, 2, 5, 6, 7),
+            )
         )
         (
-            final_state,
-            _next_record_slot,
             selected_dipoles,
             selected_components,
             selected_signs,
-            residual_history,
-            x_history,
             num_nonzeros_history,
             removed_pair_count_history,
             done_history,
-        ) = final_carry
+        ) = extra_histories
         return GPMOBacktrackingResult(
             x=final_state[0],
             x_history=x_history,

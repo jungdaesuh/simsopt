@@ -295,6 +295,20 @@ def test_boozer_result_core_helpers_match_schema_sources():
     for field_name, field_value in hessian_values.items():
         assert hessian_reporting[field_name] is field_value
 
+    skipped_reporting = _bsj._skipped_newton_polish_fields(
+        marker, marker, marker, marker
+    )
+    assert set(skipped_reporting) == (
+        _bsj._BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+        | {"newton_polish_policy", "newton_polish_skipped"}
+    )
+    assert skipped_reporting["max_dense_hessian_bytes"] is marker
+    assert skipped_reporting["newton_iter"] is marker
+    assert skipped_reporting["final_gradient_norm"] is marker
+    assert skipped_reporting["final_gradient_inf_norm"] is marker
+    assert skipped_reporting["newton_polish_policy"] == "skip"
+    assert skipped_reporting["newton_polish_skipped"] is True
+
     exact_core = _bsj._boozer_exact_newton_result_core(
         residual=marker,
         fun=0.0,

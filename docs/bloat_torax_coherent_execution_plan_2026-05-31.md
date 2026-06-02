@@ -7,7 +7,7 @@
 - Source-code checkpoint before docs-only gate commit: `8b94c2bbd` on `shared-jax-clean`, with a broad dirty implementation tree across `src/`, `tests/`, and `docs/`
 - Docs-only drift gate introduced in commit `398b3e50d` and checkpoint basis clarified in commit `446eab365` on `shared-jax-clean`
 - Latest completed source checkpoint before this `SurfaceXYZFourier` rotate-helper source/docs sync: `596090b19` (`refactor: reuse tensor tangent product rule`), after the broad dirty tree was split into scoped source/docs commits; the current source history also includes the T2.2 typed modB direct-factory slice `7228379af`.
-- Closure-mode checkpoint after the rotate-helper source/docs sync: `4fcd33b05` (`refactor: share SurfaceXYZFourier rotation helpers`). Use this as the current source-history anchor for the 16-section closure queue; do not treat older drift-gate hashes as live HEAD markers.
+- Closure-mode checkpoint after the rotate-helper source/docs sync: `4fcd33b05` (`refactor: share SurfaceXYZFourier rotation helpers`). Use this as the source-history anchor for the initial 16-section closure queue; after the 2026-06-02 closure pass, T2 residual classification, Tier 3 helper/no-bank closure, and T4 decision closure, the active source queue is 0 sections. Do not treat older drift-gate hashes as live HEAD markers.
 - Reference TORAX repo reviewed: `/Users/suhjungdae/code/opensource/torax` at `60190df1` on clean `main`
 - Historical local status at source-doc review: the two source docs were modified and this overlay was untracked; no source-code edits were part of that review. This is no longer the current working-tree state.
 - Artifact note: this checkout does not contain a repo-local `.artifacts/` tree. Historical code-smell artifacts referenced by the bloat plan were found in sibling checkout `/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/code_smell_review_2026-05-20/`.
@@ -37,27 +37,29 @@ The broad dirty tree has since been split through scoped banked-shrink/foundatio
 
 ## 2026-06-02 Closure-Mode Acceleration
 
-The current execution problem is not more discovery; it is closing the remaining plan without turning every residual into a tiny proof-heavy source slice. After source checkpoint `4fcd33b05`, the live bloat-plan queue is 16 unchecked sections:
+The current execution problem is not more discovery; it is closing the remaining plan without turning every residual into a tiny proof-heavy source slice. After source checkpoint `4fcd33b05`, the initial live bloat-plan queue was 16 unchecked sections:
 
 - Partial Tier 2: `T2.1`, `T2.2`, `T2.3`, `T2.8`
 - Tier 3: `T3.1` through `T3.8`
 - Tier 4 decisions: `T4.1`, `T4.3`, `T4.4`, `T4.5`
 
+After the 2026-06-02 closure pass, partial Tier 2, all Tier 3 sections, and all Tier 4 decisions are closed for this pass. `T2.1` banked one final skipped-polish payload helper slice before closing its remaining residual no-bank; `T2.2`, `T2.3`, and `T2.8` are closed as `defer/no-bank` after bounded current-tree scans. The last six Tier 3 sections resolved as: `T3.1` and `T3.6` banked source-negative helper follow-ups; `T3.2`, `T3.3`, `T3.5`, and `T3.7` are closed as `defer/no-bank` or `needs-design/no-bank`.
+
 Closure-mode execution order:
 
 1. Classify each remaining section as `do-now`, `decision-only`, or `defer/no-bank` before implementation.
 2. Run one bounded source-negative scan for each partial T2 item. If no obvious deletion survives contract review, close the residual as `defer/no-bank`.
-3. Close T4 items as docs-backed decisions first. Code work follows only when the decision exposes a safe deletion, quarantine, or test cleanup.
-4. Spend implementation budget on high-yield T3 folds first: `T3.1`, `T3.4`, `T3.6`, and any clearly bankable residual in `T2.8` / `T3.8`.
+3. Close T4 items as docs-backed decisions first. This is complete as of 2026-06-02: `T4.1`, `T4.3`, `T4.4`, and `T4.5` are no-deletion/no-bank decisions.
+4. Source implementation budget is spent for this pass. Remaining `T3.1` and `T3.6` banked helper slices; `T3.2`, `T3.3`, `T3.5`, and `T3.7` were classified by bounded current-tree scouts; `T3.4`, `T3.8`, and partial Tier 2 residuals were already closed after current-tree revalidation.
 5. Use one adversarial reviewer for private-helper source-negative refactors that do not touch public API, backend modes, GPU/transfer policy, parity tolerances, or independent-oracle tests. Use the full multi-review gate only for public API, math-heavy, cross-module, GPU/transfer-sensitive, parity-oracle, or benchmark/runtime contract work.
 
 Parallel/sequential execution map:
 
-- **Run in parallel, read-only:** partial T2 bankability scouts (`T2.1`, `T2.2`, `T2.3`, `T2.8`), T4 decision drafts (`T4.1`, `T4.3`, `T4.4`, `T4.5`), and T3 candidate scouts (`T3.1`, `T3.4`, `T3.6`, `T3.8`). Outputs must include bucket, likely write set, expected source bank, validation gate, and conflict set.
-- **Run in parallel, writable only if disjoint:** isolated source slices may proceed concurrently only when write sets do not overlap and plan-doc edits are serialized by the parent agent. Good candidates are separate file families such as `boozer_radial_field`, `surface_fourier*`, and optimizer-only code.
-- **Run sequentially:** overlap clusters `T3.3`/`T3.8`, `T2.8`/`T3.5`/`T3.6`/`T4.5`, `T2.1`/`T3.4`, and every public API, parity-oracle, benchmark/runtime, backend-mode, tolerance, GPU, or transfer-sensitive item.
-- **Commit sequencing:** finish the current docs-only closure baseline first; after each source commit, refresh caller inventories and owner-doc anchors before starting the next source commit in the same file family.
-- **Validation sequencing:** defer tier-exit, strict-transfer, and full parity replay gates until grouped closures are ready; keep touched-file lint/type checks and focused behavior tests per commit.
+- **Run in parallel, read-only:** complete for closure mode. Partial T2 and remaining T3 candidate scouts returned bucket, likely write set, expected source bank, validation gate, and conflict set.
+- **Run in parallel, writable only if disjoint:** complete for this pass through separate file families: optimizer-only `T3.1` and benchmark-driver-only `T3.6`. Plan-doc edits are serialized by the parent agent.
+- **Run sequentially:** overlap clusters `T3.3` with any future reopened `T3.8`, `T3.5`/`T3.6`, any future reopened `T2.8` work with `T3.5`/`T3.6`, any future reopened `T2.1` work with linear-solve-callback work, and every public API, parity-oracle, benchmark/runtime, backend-mode, tolerance, GPU, or transfer-sensitive item.
+- **Commit sequencing:** after each source commit, refresh caller inventories and owner-doc anchors before starting another source commit in the same file family. The current dirty closure set still needs grouped validation and review before any commit.
+- **Validation sequencing:** grouped closure validation/review is now the active step. Strict-transfer and full accelerator replay gates are not claimed by this pass because no GPU/transfer-sensitive source changed; touched-file lint/type checks and focused CPU/X64 behavior tests remain required.
 
 ## Purpose
 
@@ -100,7 +102,7 @@ The right sequencing is contract-first, then mechanical deletion, then shared fa
 
 ## Assumptions
 
-- The source docs were refreshed at `b267b0d95`; execution then advanced to source-code checkpoint `8b94c2bbd` with a broad dirty tree, the docs-only drift gate was introduced in `398b3e50d`, its checkpoint basis was clarified in `446eab365`, and scoped source/docs split commits now reach `4fcd33b05`. Re-run evidence refresh and the 16-section closure triage before selecting any additional implementation slice; the old drift ledger is historical context, not the live queue.
+- The source docs were refreshed at `b267b0d95`; execution then advanced to source-code checkpoint `8b94c2bbd` with a broad dirty tree, the docs-only drift gate was introduced in `398b3e50d`, its checkpoint basis was clarified in `446eab365`, and scoped source/docs split commits now reach `4fcd33b05`. The active source queue is now 0 after partial Tier 2, all Tier 3 items, and Tier 4 closure; the old drift ledger and initial 16-section queue are historical context, not the live queue.
 - Code work must load and apply `/Users/suhjungdae/.agent-docs/SOFTWARE_DESIGN.md` before implementation.
 - CPU validation is not enough for GPU-sensitive or MPS-sensitive claims.
 - `jax_mps_smoke` remains a smoke lane, not a production parity lane.
@@ -155,7 +157,7 @@ The right sequencing is contract-first, then mechanical deletion, then shared fa
 6. Branch and optimizer decisions
    - [ ] Classify each branch as static host decision, traced runtime control flow, or explicit host-boundary work.
    - [ ] Keep `scipy-jax` / `scipy-jax-fullgraph` as a documented lane decision unless new evidence changes the source plan.
-   - [ ] Treat QFM BFGS/SLSQP decisions as behavior-contract decisions, not mechanical dedupe.
+   - [x] Treat QFM BFGS/SLSQP decisions as behavior-contract decisions, not mechanical dedupe.
    - [ ] Require tests that prove branch semantics, not just reduced branch count.
 
 7. Numerical and parity closeout
@@ -1875,6 +1877,172 @@ git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_
 # passed
 ```
 
+### 2026-06-01 — T2.8 first-divergence payload helper
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.8.
+- **Selected slice:** first `parity_bug_census["first_divergence"]` family/payload promotion for the `boozer_solve` and `iota_penalty` tracker updates inside `compare_same_candidate_objective_replay(...)`. No tracker update rule, divergent-layer threshold, pre-Newton gate, target-native not-applicable payload, final replay result key, candidate matching, callback comparison, scalar/vector tolerance policy, CUDA/MPS path, or full single-stage parity runner behavior was changed.
+- **Changed files:** `benchmarks/single_stage_init_parity.py`, plus this bloat plan set.
+- **Design-it-twice gate:** Option A, keeping the two duplicated first-divergence payload literals, was rejected because both call sites consumed the same `LayerDriftTracker.update(...)` output under the same first-wins guard. Option B, selected here, uses one private `_first_parity_bug_census_divergence(...)` helper to keep the `family` key first, copy the tracker divergence payload, and preserve the nested `layer_diffs` copy.
+- **Scope status:** first-divergence payload helper slice LOC-banked small; full T2.8 still open. `benchmarks/single_stage_init_parity.py` is source-negative by 3 LOC for this slice (`18 insertions / 21 deletions`; 4,712 -> 4,709 LOC). Together with the earlier T2.8 micro-slices, T2.8 has 118 benchmark LOC banked so far; the old `~200 LOC` estimate remains unbanked.
+- **Regression evidence:** the focused replay/census selector covers recorded parity-census payloads, target-native not-applicable replay, pre-Newton strict-gate messages, and same-candidate replay gate/classification behavior. The result dict schema stays explicit at the public replay boundary.
+- **Validation evidence:** CPU/X64 replay-helper proof, not full single-stage parity replay, CUDA, MPS, or fresh benchmark proof.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# All checks passed!
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff format --check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# 2 files already formatted
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# passed
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/test_benchmark_helpers.py -k "parity_bug_census or pre_newton_census or same_candidate"
+# 28 passed, 332 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy benchmarks/single_stage_init_parity.py
+# blocked: 128 pre-existing benchmark/example typing errors; no error was introduced by the first-divergence payload helper slice
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found.
+rg -n "_first_parity_bug_census_divergence|first_parity_bug_census_divergence" benchmarks/single_stage_init_parity.py tests src benchmarks
+# helper plus the two replay-loop call sites and final first_divergence payload references only
+git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
+### 2026-06-02 — Partial Tier 2 residual closeout
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.1/T2.2/T2.3/T2.8.
+- **Selected source slice:** T2.1 skipped-polish payload helper in `src/simsopt/geo/boozersurface_jax.py`. `_skipped_newton_polish_fields(...)` now packs the repeated traceable/public Newton-polish skip payloads by delegating Hessian-reporting key shape to `_ls_newton_reporting_fields(...)` and supplying the four dynamic skip values plus the policy flags. No solver control flow, dense factorization, backend string, failure/success branch, CUDA/MPS path, transfer policy, or result-record required/forbidden key set was changed.
+- **Changed files:** `src/simsopt/geo/boozersurface_jax.py`, `tests/geo/test_boozersurface_jax.py`, this overlay, and the bloat source plan.
+- **Scope status:** T2.1 banks 2 additional source LOC for this helper (`36 insertions / 38 deletions` in `boozersurface_jax.py`; helper test adds 14 test LOC). Remaining T2.1 result-dict residuals are closed as `defer/no-bank` because broader record-mode builders would hide backend strings, failure-stage/category fields, dense-factor choices, and solve-quality overrides.
+- **T2.2 decision:** closed as `defer/no-bank`. Current source already centralizes radial formulas in `_eval_*_from_columns`, routes direct evaluators through `_direct_radial_evaluator(...)` / `_direct_scalar_evaluator(...)`, and preserves benchmark-sensitive subset-column builders. Further table-driving risks replaying the earlier full-bundle benchmark regression.
+- **T2.3 decision:** closed as `defer/no-bank`. The banked total is already 612 source LOC; remaining product-rule formulas are intentionally explicit to keep derivative algebra readable and public wrapper introspection stable.
+- **T2.8 decision:** closed as `defer/no-bank`. The latest helper brings T2.8 to 118 benchmark LOC banked; the remaining apparent reductions require broad dynamic replay-summary/schema builders that would hide release-blocker payload keys.
+- **Queue update at this checkpoint:** active source queue was reduced to 6 Tier 3 sections: `T3.1`, `T3.2`, `T3.3`, `T3.5`, `T3.6`, and `T3.7`. This was superseded later on 2026-06-02 by the Tier 3 helper/no-bank closure, which leaves 0 active source sections for this pass.
+- **Validation evidence:** CPU/X64 focused proof for the T2.1 helper; no CUDA/MPS proof is claimed.
+
+```bash
+git diff --numstat -- src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersurface_jax.py
+# 36 insertions / 38 deletions in boozersurface_jax.py; 14 insertions in test_boozersurface_jax.py
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff check src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersurface_jax.py
+# All checks passed!
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff format --check src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersurface_jax.py
+# 2 files already formatted
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozersurface_jax.py
+# passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/geo/test_boozersurface_jax.py::test_boozer_result_core_helpers_match_schema_sources tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_run_code_skip_policy_returns_ls_state_without_newton tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXExactPath::test_run_code_traceable_ls_skip_policy_does_not_call_newton
+# 3 passed
+```
+
+### 2026-06-01 — T3.4 runtime linear-solve callback revalidation
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T3.4.
+- **Selected slice:** docs-only closure after current-tree revalidation. No source code, runtime callback, PLU factor, operator callback, backend mode, transfer guard, tolerance, CUDA/MPS path, or parity oracle was changed.
+- **Changed files:** this bloat plan set only.
+- **Current-tree finding:** `_build_runtime_linear_solve_callbacks(...)` now starts at `src/simsopt/geo/boozersurface_jax.py:4166` in a 7,216 LOC file, and the already-landed `pack_callbacks(...)` at `:4186` owns the common callback tuple shape, backend label, dense-factor staging, and `_with_nan_status` wrapping. The old `~120 LOC` extraction estimate is stale.
+- **Decision:** close T3.4 as `defer/no-bank`. The `dense-plu-shared` path at `:4229` is device-resident, consumes shared `LU_PIV`, uses `_lu_solve_dense_hessian(...)`, and includes backward-error status repair; the scipy `dense-plu` path at `:4313` is host-resident, explicitly marks host bridge transfers, and uses `scipy.linalg.solve_triangular(...)`. The hessian operator branch at `:4390` and exact-jacobian branch at `:4452` are similarly asymmetric. Further helperization would hide branch-specific contracts for roughly flat or negative value.
+- **Scope status:** no source LOC banked; T3.4 is closed as a stale target. Future work should not reopen T3.4 unless new duplication appears after a separate implementation change.
+- **Validation evidence:** read-only line/contract inventory plus adversarial scout review, not runtime proof. Because no source changed, no runtime selector, CUDA/MPS proof, or full parity replay is claimed.
+
+```bash
+wc -l src/simsopt/geo/boozersurface_jax.py
+# 7216 src/simsopt/geo/boozersurface_jax.py
+rg -n "def _build_runtime_linear_solve_callbacks|def pack_callbacks|_ls_shared_lu_piv_dispatch|optimizer_backend\"\\] == \"scipy\"|linearization_kind == \"hessian\"|linearization_kind == \"exact_jacobian\"" src/simsopt/geo/boozersurface_jax.py
+# anchors: 4166, 4186, 4229, 4313-4314, 4390, 4452
+```
+
+### 2026-06-02 — T4 decision-only closure
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, Tier 4.
+- **Selected slice:** docs-only closeout for `T4.1`, `T4.3`, `T4.4`, and `T4.5`. No optimizer source, QFM solver/wrapper source, test body, backend mode, tolerance, CUDA/MPS path, or parity oracle was changed.
+- **Changed files:** this bloat plan set only.
+- **Decision summary:** `T4.1` keeps `lbfgs-trace` because the host reference trace still owns failure-callback, rejected-step, and invalid-step-log diagnostics that plain SciPy callbacks do not replace. `T4.3` rejects mechanical QFM BFGS reuse because the QFM-local Armijo path is behavior-bearing and private optimizer BFGS semantics differ. `T4.4` keeps the public QFM SLSQP compatibility alias in the surface wrappers. `T4.5` classifies surviving identity/routing/health tests without deletion.
+- **Scope status:** Tier 4 is closed for this pass with 0 source LOC banked. Future work can reopen individual decisions only as API-evolution, QFM retune, or test-oracle improvement work with its own acceptance gate.
+- **Validation evidence:** read-only current-tree inventory and docs sync only; because no source changed, no runtime selector, CUDA/MPS proof, or full parity replay is claimed.
+
+```bash
+wc -l src/simsopt/geo/optimizer_host_lbfgs.py src/simsopt/jax_core/qfm_solver.py src/simsopt/geo/qfmsurface.py src/simsopt/geo/qfmsurface_jax.py tests/integration/test_single_stage_jax_cpu_reference.py
+# anchors/counts checked for T4.1/T4.3/T4.4/T4.5 decision evidence
+rg -n "lbfgs-trace|record_optimizer_state_trace|invalid_step_log|failure_callback|_bfgs_minimize|_minimize_bfgs_private|minimize_qfm_exact_constraints_SLSQP|weight_inv_modB|cached-transform|health-only|fast-path identity" src tests benchmarks examples docs
+# decision evidence inventory only
+```
+
+### 2026-06-02 — T3.6 raw-array comparison helper and T3.8 no-bank closure
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T3.6 and T3.8.
+- **Selected source slice:** T3.6 helper stack in `benchmarks/non_banana_example_cpp_jax_cpu_parity.py`. `_compare_raw_array(...)` wraps `_compare_array(...)` for same-key raw-array lane comparisons and centralizes the shared `active_dof_names` argument. `_surface_geometry_comparisons(...)`, `_compare_component_scalar(...)`, `_required_lane_scalar(...)`, and `_compare_native_subtotal(...)` now own the repeated canonical surface geometry pair, required component-scalar rows, required-lane scalar preconditions, and native-subtotal rows. No tolerance ladder, fixture dispatch, optional-row presence check, derived normal-projection comparison, JSON lane comparison, backend mode, CUDA/MPS route, or parity oracle was changed.
+- **Changed files:** `benchmarks/non_banana_example_cpp_jax_cpu_parity.py`, this overlay, and the bloat source plan. Existing dirty `benchmarks/single_stage_init_parity.py` changes are a separate T2.8 helper slice.
+- **Scope status:** T3.6 is LOC-banked and closed for this pass. The driver file moved from 3,138 LOC at `HEAD` to 2,789 LOC after the helper stack (`419 insertions / 768 deletions`, net `-349` benchmark LOC). The full table-driven `ComparisonSpec` driver is closed as `defer/no-bank` until a separate row-identity design proves source-negative value.
+- **T3.8 decision:** close T3.8 as `defer/no-bank`. Current source already has `_traceable_runtime_cache_key(...)`, `_get_cached_traceable_runtime_entry(...)`, and runtime-entry slots; the remaining lazy paths are heterogeneous enough that a small `_lazy(entry, key, builder)` helper would hide cache, public-boundary, optimizer, seeded-gradient, and host-boundary contracts for 0 reliable source bank.
+- **Queue update:** after this slice and the T3.1 backtracking-recorder fold, active source queue is 0 sections for this bloat pass.
+- **Validation evidence:** CPU/X64 only; no GPU/CUDA/MPS proof is claimed.
+
+```bash
+git diff --numstat -- benchmarks/non_banana_example_cpp_jax_cpu_parity.py
+# 419 insertions / 768 deletions, net -349 benchmark LOC
+wc -l benchmarks/non_banana_example_cpp_jax_cpu_parity.py
+# 2789 benchmarks/non_banana_example_cpp_jax_cpu_parity.py
+git show HEAD:benchmarks/non_banana_example_cpp_jax_cpu_parity.py | wc -l
+# 3138
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff check benchmarks/non_banana_example_cpp_jax_cpu_parity.py benchmarks/single_stage_init_parity.py tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py tests/test_benchmark_helpers.py
+# All checks passed!
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff format --check benchmarks/non_banana_example_cpp_jax_cpu_parity.py benchmarks/single_stage_init_parity.py
+# 2 files already formatted
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile benchmarks/non_banana_example_cpp_jax_cpu_parity.py benchmarks/single_stage_init_parity.py
+# passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py -q
+# 62 passed, 3 warnings in 274.35s
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found.
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy benchmarks/non_banana_example_cpp_jax_cpu_parity.py
+# blocked: 82 broader benchmark/import typing errors in 7 files; no mypy proof is claimed for this slice
+git diff --check -- benchmarks/non_banana_example_cpp_jax_cpu_parity.py benchmarks/single_stage_init_parity.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md
+# passed
+```
+
+### 2026-06-02 — T3.1 GPMO recording-scan helper
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T3.1.
+- **Selected source slice:** T3.1 source-negative recording helper stack in `src/simsopt/jax_core/pm_optimization.py`. `_gpmo_recording_scan(...)` now owns the shared `record_every` cadence, forced final-row sampling, slot advancement, `x_history`, `residual_history`, extra trace-history writes, and scan-iteration handoff for baseline, ArbVec, ArbVec backtracking, multi, and baseline backtracking GPMO solve drivers.
+- **Changed files:** `src/simsopt/jax_core/pm_optimization.py`, this overlay, and the bloat source plan. Public solve wrappers, bucketed ArbVec active-prefix logic, candidate-cost functions, step functions, backend mode, CUDA/MPS path, and live-loop capacity validators were not changed.
+- **Scope status:** T3.1 is LOC-banked and closed for this pass. `pm_optimization.py` moved from 3,400 LOC at `HEAD` to 3,175 LOC after the helper stack (`158 insertions / 383 deletions`, net `-225` source LOC). The full five-way GPMO solve-driver factory remains a separate `needs-design/no-bank` target.
+- **Validation evidence:** CPU/X64 focused proof plus source type proof; no CUDA/MPS proof is claimed.
+
+```bash
+git diff --numstat -- src/simsopt/jax_core/pm_optimization.py
+# 158 insertions / 383 deletions, net -225 source LOC
+wc -l src/simsopt/jax_core/pm_optimization.py
+# 3175 src/simsopt/jax_core/pm_optimization.py
+git show HEAD:src/simsopt/jax_core/pm_optimization.py | wc -l
+# 3400
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff check src/simsopt/jax_core/pm_optimization.py tests/solve/test_permanent_magnet_optimization_jax_item28.py tests/jax_core/test_pm_optimization_jax_item25.py
+# All checks passed!
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/pm_optimization.py tests/solve/test_permanent_magnet_optimization_jax_item28.py tests/jax_core/test_pm_optimization_jax_item25.py
+# 3 files already formatted
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile src/simsopt/jax_core/pm_optimization.py
+# passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy src/simsopt/jax_core/pm_optimization.py
+# Success: no issues found in 1 source file
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/solve/test_permanent_magnet_optimization_jax_item28.py -k "record_every"
+# 11 passed, 36 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/jax_core/test_pm_optimization_jax_item25.py::TestGPMOBaseline tests/jax_core/test_pm_optimization_jax_item25.py::TestGPMOMulti tests/jax_core/test_pm_optimization_jax_item25.py::TestGPMOArbVec
+# 26 passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q tests/jax_core/test_pm_optimization_jax_item25.py::TestGPMOBacktracking tests/jax_core/test_pm_optimization_jax_item25.py::TestGPMOArbVecBacktracking
+# 11 passed
+```
+
+### 2026-06-02 — Tier 3 residual scout closure
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T3.2/T3.3/T3.5/T3.7.
+- **Selected slice:** no additional source edits. Bounded current-tree scouts classified remaining Tier 3 residuals after the T3.1/T3.6 helper slices.
+- **T3.2 decision:** close as `defer/no-bank`. Remaining Biot-Savart cotangent reconciliation would touch live fallback/projection and `profile_B_vjp` timing behavior without direct fallback/profile equivalence coverage.
+- **T3.3 decision:** close as `defer/no-bank` for bloat. Moving profile and diagnostics helpers into sibling modules may improve modularity, but import/re-export compatibility and payload preservation make it net same or source-positive.
+- **T3.5 decision:** close as `needs-design/no-bank`. The old LaneArtifact-builder estimate is stale: inline artifact construction spans many fixture families, and promoting raw-array metadata ownership out of the dirty T3.6 driver requires byte-identical lane schema, comparison row identity, release-blocker replay, and GPU/MPS provenance proof.
+- **T3.7 decision:** close as `needs-design/no-bank`. Tracing driver unification is plausible high-yield work, but current fieldline/guiding-center/Boozer/full-orbit contracts diverge on state shape, event localization, status priority, axis-invalid handling, and transfer behavior.
+- **Queue update:** active source queue is 0 sections for this pass. Remaining work is grouped validation, adversarial review, and any review fixes.
+
+```bash
+git diff --numstat -- benchmarks/non_banana_example_cpp_jax_cpu_parity.py src/simsopt/jax_core/pm_optimization.py
+# 419/768 in benchmark driver; 158/383 in pm_optimization.py
+```
+
 ## Risks and Mitigations
 
 - Risk: A TORAX-inspired helper creates another abstraction layer without deleting real complexity.
@@ -1901,10 +2069,10 @@ git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_
 - [x] Validation output is recorded with backend lane and exact command.
 - [x] Remaining work is still traceable to the source docs and not duplicated into an unsorted backlog.
 - [x] The broad dirty tree was split into scoped banked-shrink/foundation commits before continuing; future implementation commits must keep using the same classification.
-- [x] Closure mode is defined: the remaining queue is classified as 16 unchecked sections, with partial T2 residuals bounded, T4 decision-first, and high-yield T3 implementation prioritized.
+- [x] Closure mode is defined and executed: the initial 16-section queue is reduced to 0 active source sections after partial Tier 2, all Tier 3 items, and Tier 4 closure, with high-yield T3.1/T3.6 helper slices banked and remaining T3 residuals classified no-bank/needs-design.
 
 ## Open Questions
 
-- Which remaining sections are `do-now`, `decision-only`, or `defer/no-bank` after the first closure triage?
-- Which high-yield implementation target should start first after closure triage: `T3.1`, `T3.4`, `T3.6`, or a clearly bankable `T2.8` / `T3.8` residual?
+- No active Tier 3 source sections remain `do-now` for this pass; future reopened work needs a fresh triage before implementation.
+- No high-yield implementation target remains active for this bloat pass. The next gate is grouped validation and adversarial review of the final dirty closure set.
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?
