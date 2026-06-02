@@ -2926,24 +2926,6 @@ def _nested_payload_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any
     return value
 
 
-def _diagnostic_scalar_abs_diff(
-    cpu_summary: dict[str, Any] | None,
-    jax_summary: dict[str, Any] | None,
-) -> float:
-    if cpu_summary is None and jax_summary is None:
-        return 0.0
-    return _path_scalar_abs_diff(cpu_summary, jax_summary)
-
-
-def _diagnostic_vector_abs_diff(
-    cpu_summary: dict[str, Any] | None,
-    jax_summary: dict[str, Any] | None,
-) -> float:
-    if cpu_summary is None and jax_summary is None:
-        return 0.0
-    return _path_vector_abs_diff(cpu_summary, jax_summary)
-
-
 def _iota_decomposition_layer_diverged(
     layer_diff: float, layer_reference: float
 ) -> bool:
@@ -3061,10 +3043,12 @@ def _compare_same_candidate_layer_decomposition(
         for kind, path in fields:
             cpu_summary = _nested_payload_value(cpu_decomposition, path)
             jax_summary = _nested_payload_value(jax_decomposition, path)
-            if kind == "scalar":
-                field_diff = _diagnostic_scalar_abs_diff(cpu_summary, jax_summary)
+            if cpu_summary is None and jax_summary is None:
+                field_diff = 0.0
+            elif kind == "scalar":
+                field_diff = _path_scalar_abs_diff(cpu_summary, jax_summary)
             else:
-                field_diff = _diagnostic_vector_abs_diff(cpu_summary, jax_summary)
+                field_diff = _path_vector_abs_diff(cpu_summary, jax_summary)
             layer_diff = max(layer_diff, field_diff)
             layer_reference = max(layer_reference, _summary_reference_abs(cpu_summary))
         layer_diffs[layer] = layer_diff

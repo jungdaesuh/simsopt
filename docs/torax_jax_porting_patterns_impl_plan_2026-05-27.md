@@ -280,6 +280,8 @@ PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytes
 
 **2026-06-01 cross-link:** The T2.8 SciPy callback split payload-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_same_candidate_scipy_callback_split(...)` pass-through in `benchmarks/single_stage_init_parity.py`, keeps the explicit callback split payload literal inside `_record_first_scipy_callback_split(...)`, banks 12 additional benchmark LOC, and preserves callback trace schema keys, field comparison order, first-split precedence, and same-candidate replay behavior. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
 
+**2026-06-01 cross-link:** The T2.8 layer diagnostic wrapper-inline micro-slice was also executed under the bloat plan. It deletes only the one-use `_diagnostic_scalar_abs_diff(...)` / `_diagnostic_vector_abs_diff(...)` wrappers in `benchmarks/single_stage_init_parity.py`, keeps the `None`/`None` zero-drift policy explicit in `_compare_same_candidate_layer_decomposition(...)`, banks 16 additional benchmark LOC, and preserves layer field tables, scalar/vector path diff helpers, `parity_bug_census` schema, and same-candidate replay behavior. Full single-stage parity, CUDA/MPS, and larger tracker-family cleanup remain separate gates.
+
 ## Acceptance Gates
 
 - [ ] Only files in the chosen implementation slice are modified.

@@ -1621,6 +1621,35 @@ git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_
 # passed
 ```
 
+### 2026-06-01 — T2.8 layer diagnostic wrapper inline
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.8.
+- **Selected slice:** layer-decomposition diagnostic field-diff dispatch inside `_compare_same_candidate_layer_decomposition(...)`. No layer field tables, scalar/vector path diff helpers, layer divergence threshold, `parity_bug_census` schema, target-native skip behavior, same-candidate gate classification, or final replay result keys were changed.
+- **Changed files:** `benchmarks/single_stage_init_parity.py`, plus this bloat plan set.
+- **Design-it-twice gate:** Option A, keeping `_diagnostic_scalar_abs_diff(...)` and `_diagnostic_vector_abs_diff(...)`, was rejected because each wrapper had one call site and only added a same-level layer around the shared `None`/`None` zero-drift policy. Option B, selected here, keeps that policy explicit in the layer loop and dispatches directly to `_path_scalar_abs_diff(...)` / `_path_vector_abs_diff(...)`, preserving the scalar/vector kind decision at the layer-field comparison site.
+- **Scope status:** layer diagnostic wrapper-inline slice LOC-banked small; full T2.8 remains open. `benchmarks/single_stage_init_parity.py` is source-negative by 16 LOC for this slice (`5 insertions / 21 deletions`; 4,777 -> 4,761 LOC). Together with the earlier T2.8 micro-slices, T2.8 has 66 benchmark LOC banked so far; the old `~200 LOC` estimate remains unbanked.
+- **Regression evidence:** the focused decomposition/parity-census selector covers both `iota_penalty_decomposition` first-layer reporting and the `parity_bug_census` divergent-layer path. The broad `same_candidate` selector still covers callback, target-native, component-summary, decomposition, parity-census, and gate-classification replay behavior.
+- **Validation evidence:** CPU/X64 replay-helper proof, not full single-stage parity replay, CUDA, or MPS proof.
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# All checks passed!
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m ruff format --check benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# 2 files already formatted
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile benchmarks/single_stage_init_parity.py tests/test_benchmark_helpers.py
+# passed
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/test_benchmark_helpers.py -k "decomposition or parity_bug_census"
+# 2 passed, 358 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/test_benchmark_helpers.py -k "same_candidate"
+# 22 passed, 338 deselected
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy benchmarks/single_stage_init_parity.py
+# blocked: 128 pre-existing benchmark/example typing errors; no error was introduced on the layer-diagnostic inline diff lines
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found
+git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
 ## Risks and Mitigations
 
 - Risk: A TORAX-inspired helper creates another abstraction layer without deleting real complexity.
@@ -1650,6 +1679,6 @@ git diff --check -- benchmarks/single_stage_init_parity.py docs/bloat_reduction_
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.2 radial pass-through inline follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.8 per-pair metadata-binding slice, T2.8 target-native component-summary reuse slice, T2.8 target-native flag inline slice, T2.8 SciPy callback `fun` threshold slice, T2.8 callback split payload-inline slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.2 radial pass-through inline follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.8 per-pair metadata-binding slice, T2.8 target-native component-summary reuse slice, T2.8 target-native flag inline slice, T2.8 SciPy callback `fun` threshold slice, T2.8 callback split payload-inline slice, T2.8 layer diagnostic wrapper-inline slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?
