@@ -1018,17 +1018,6 @@ def _eval_dKdzeta_from_columns(
     return result
 
 
-def _eval_with_radial_columns(
-    state: BoozerRadialInterpolantFrozenState,
-    points: jax.Array,
-    evaluator: _RadialColumnEvaluator,
-    column_factory: _RadialColumnFactory = _eval_radial_columns,
-) -> jax.Array:
-    """Evaluate a direct scalar through the canonical column evaluator."""
-    columns = column_factory(state, points[:, 0])
-    return evaluator(state, columns, points)
-
-
 def _direct_radial_evaluator(
     name: str,
     evaluator: _RadialColumnEvaluator,
@@ -1039,7 +1028,8 @@ def _direct_radial_evaluator(
     def evaluate(
         state: BoozerRadialInterpolantFrozenState, points: jax.Array
     ) -> jax.Array:
-        return _eval_with_radial_columns(state, points, evaluator, column_factory)
+        columns = column_factory(state, points[:, 0])
+        return evaluator(state, columns, points)
 
     evaluate.__name__ = name
     evaluate.__qualname__ = name

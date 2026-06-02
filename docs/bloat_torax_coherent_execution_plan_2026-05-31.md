@@ -758,6 +758,52 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JA
 - **Benchmark evidence:** the same `stellsym=True` synthetic non-JIT gate was rerun against the documented final medians from the direct-wrapper follow-up. Recorded five-trial medians were `direct_modB 0.000637098` (limit `0.000673966`), `direct_dmodBds 0.001141614` (limit `0.001181192`), `direct_G 0.000267225` (limit `0.000276029`), and `rhs_vacuum 0.003449284` (limit `0.003613620`). Delta review reproduced the gate in the current checkout with 25-trial medians `direct_modB 0.000594125`, `direct_dmodBds 0.001056167`, `direct_G 0.000243000`, and `rhs_vacuum 0.003481042`; all passed the no >10% regression gate.
 - **Review evidence:** initial adversarial review rejected the attempted string-key `_profile_subset(...)` helper as hidden dynamic field dispatch and flagged weak same-valued optional-profile test coverage. The landed delta removes `_profile_subset(...)`, restores explicit Fourier subset builders, adds `_direct_scalar_evaluator(...)`, and gives the non-stellsym synthetic state distinct optional-mode profiles before re-running validation.
 
+### 2026-06-01 — T2.2 Boozer radial pass-through inline follow-up
+
+- **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.2.
+- **Selected slice:** the one-use `_eval_with_radial_columns(...)` helper in `src/simsopt/jax_core/boozer_radial_field.py`. No Fourier formula, scalar spline path, subset-column factory, tracing dispatch, public wrapper API, CPU Boozer implementation, CUDA/MPS path, transfer policy, or benchmark policy was changed.
+- **Changed files:** `src/simsopt/jax_core/boozer_radial_field.py`, plus this plan set.
+- **Design-it-twice gate:** Option A, keep the helper as an interface seam for possible future column-factory changes, was rejected because `_direct_radial_evaluator(...)` is already the narrower abstraction boundary that preserves generated evaluator names and metadata. Option B, selected here, deletes the pass-through and keeps the column-factory call next to the supplied column evaluator in `_direct_radial_evaluator(...)`.
+- **Scope status:** pass-through inline follow-up LOC-banked, full T2.2 still open. `boozer_radial_field.py` is source-negative by 10 LOC for this slice (`2 insertions / 12 deletions`; 1,144 -> 1,134 LOC). The old `~400 LOC` estimate remains unbanked because the larger formula/subset-family redesign has not been proven readable and benchmark-safe.
+- **Validation evidence:** CPU/X64 focused radial routing/cache tests, radial direct-evaluator metadata probe, source lint/format, py_compile, source-only mypy, dependency check, source/test call-site grep, and diff whitespace checks passed; not CUDA/MPS proof.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff check src/simsopt/jax_core/boozer_radial_field.py src/simsopt/jax_core/tracing.py tests/field/test_trace_boozer_analytic_jax.py tests/field/test_boozermagneticfield_jax_item33.py
+# All checks passed!
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 .conda/jax/bin/python -m ruff format --check src/simsopt/jax_core/boozer_radial_field.py
+# 1 file already formatted
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m py_compile src/simsopt/jax_core/boozer_radial_field.py
+# passed
+PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python -m mypy src/simsopt/jax_core/boozer_radial_field.py
+# Success: no issues found in 1 source file
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .conda/jax/bin/python -m pytest -q -p no:cacheprovider tests/field/test_trace_boozer_analytic_jax.py -k "radial_boozer_rhs_evaluates_one_column_bundle_per_point or direct_radial_evaluators_reuse_column_evaluators or rhs_key_contract"
+# 3 passed, 25 deselected
+PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH=src .conda/jax/bin/python - <<'PY'
+from simsopt.jax_core import boozer_radial_field as brf
+
+names = [
+    "_eval_modB", "_eval_dmodBdtheta", "_eval_dmodBdzeta", "_eval_dmodBds",
+    "_eval_R", "_eval_dRdtheta", "_eval_dRdzeta", "_eval_dRds",
+    "_eval_Z", "_eval_dZdtheta", "_eval_dZdzeta", "_eval_dZds",
+    "_eval_nu", "_eval_dnudtheta", "_eval_dnudzeta", "_eval_dnuds",
+    "_eval_K", "_eval_dKdtheta", "_eval_dKdzeta",
+]
+for name in names:
+    fn = getattr(brf, name)
+    assert fn.__name__ == name
+    assert fn.__qualname__ == name
+    assert fn.__module__ == brf.__name__
+print(f"{len(names)} radial evaluator metadata entries preserved")
+PY
+# 19 radial evaluator metadata entries preserved
+PYTHONNOUSERSITE=1 .conda/jax/bin/python -m pip check
+# No broken requirements found.
+git grep -n "_eval_with_radial_columns" -- src tests benchmarks examples
+# no source/test/benchmark/example call sites
+git diff --check -- src/simsopt/jax_core/boozer_radial_field.py docs/bloat_reduction_plan_2026-05-20.md docs/bloat_torax_coherent_execution_plan_2026-05-31.md docs/torax_jax_porting_patterns_impl_plan_2026-05-27.md
+# passed
+```
+
 ### 2026-06-01 — T2.3 surface Fourier facade factory slice
 
 - **Owner source doc:** `docs/bloat_reduction_plan_2026-05-20.md`, T2.3.
@@ -1520,6 +1566,6 @@ git diff --check -- benchmarks/single_stage_init_parity.py
 
 ## Open Questions
 
-- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.8 per-pair metadata-binding slice, T2.8 target-native component-summary reuse slice, T2.8 target-native flag inline slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
+- Which slice should be executed next after the completed TORAX Phase 1/2 contract-first proof, T1.1/T1.2/T1.3/T1.4/T1.5/T1.6/T1.7/T1.8 bloat collapses, T1.9 public-API reclassification, T1.10 probe-script classification, TORAX Phase 1 target-lane closure-capture regression, TORAX Phase 3 bounded-scan helper pilot, TORAX Phase 4 branch/JAXPR pilot, T2.1 Boozer schema/envelope factory pilot, T2.1 LS-Newton reporting LOC-banking follow-up, T2.2 Boozer radial formula dedup, T2.2 direct-wrapper LOC-banking follow-up, T2.2 scalar-helper LOC-banking follow-up, T2.2 radial pass-through inline follow-up, T2.3 surface Fourier facade slice, T2.3 tensor kernel wrapper fold, T2.3 `SurfaceXYZFourier` unpack fold, T2.3 coefficient-derivative wrapper-family fold, T2.3 `SurfaceXYZFourier` order-hat helper slice, T2.3 `SurfaceXYZFourier.gammadash1` product-rule micro-slice, T2.4 spec dataclass registration helper, T2.5 leading-axis sharding helper, T2.6 backend runtime resolver fold, T2.7 SciPy adapter closure factory, T2.8 `LayerDriftTracker` core helper, T2.8 SciPy callback first-split helper, T2.8 target-native predicate cache, T2.8 comparison-scope Counter slice, T2.8 per-pair metadata-binding slice, T2.8 target-native component-summary reuse slice, T2.8 target-native flag inline slice, T2.9 quantity-tolerance contract helper, and T3.2 Biot-Savart points-helper follow-up: finish only a larger T2.8 tracker-family cleanup if it stays schema-explicit, attempt only a larger T2.2 formula/subset-family redesign if it stays readable and benchmark-safe, continue T2.3 product-rule formula folds only when each stays readable, pursue T3.2 cotangent reconciliation only with fallback coverage, branch/JAXPR follow-up for non-piloted hot paths, transfer-sensitive proof, or select another untouched item?
 - Should completed slices be committed one checkbox at a time, or grouped by validation gate when multiple tiny doc-only updates are adjacent?
 - What backend lane is available for strict-transfer proof in the current machine context when a GPU-sensitive item is selected?
