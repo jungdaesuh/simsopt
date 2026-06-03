@@ -273,8 +273,18 @@ COLD_VOLUME = float(os.environ.get('BANANA_VOLUME', s1['cold_start_volume']))
 COLD_A = float(np.sqrt(COLD_VOLUME / (2.0 * np.pi**2 * COLD_R0)))
 COLD_PHIEDGE = compute_phiedge(VMEC_RBTOR, COLD_A, COLD_R0)
 
-# Warm-start wout path
-WOUT_FILE = os.path.join(_base_dir, cfg['warm_start']['wout_filepath'])
+# Warm-start wout path. BANANA_WARM_WOUT (absolute, or relative to _base_dir)
+# supersedes config.yaml warm_start.wout_filepath, so a caller (e.g. the closed
+# loop) can warm-start each lineage from an arbitrary parent/donor wout without
+# editing the config — mirrors the BANANA_SEED / BANANA_IOTA env-override pattern.
+_warm_wout_env = os.environ.get('BANANA_WARM_WOUT')
+if _warm_wout_env:
+    WOUT_FILE = (
+        _warm_wout_env if os.path.isabs(_warm_wout_env)
+        else os.path.join(_base_dir, _warm_wout_env)
+    )
+else:
+    WOUT_FILE = os.path.join(_base_dir, cfg['warm_start']['wout_filepath'])
 
 # Write env-resolved values back into cfg so content-addressed hashing sees
 # the effective inputs, not the raw config.yaml values. Pareto sweeps vary
@@ -289,6 +299,11 @@ s1['working_layer_shear_weight'] = WORKING_LAYER_SHEAR_WEIGHT
 s1['step_trust_radius'] = STEP_TRUST_RADIUS
 s1['cold_start_R0']      = COLD_R0
 s1['cold_start_volume']  = COLD_VOLUME
+# Warm-start only: fold the resolved donor wout into the hashed inputs so two
+# warm lineages off different parents do not collide on the same run_id. Cold
+# runs leave warm_start untouched (the donor is not an effective input there).
+if not COLD_START:
+    cfg['warm_start']['wout_filepath'] = WOUT_FILE
 
 # Output directory root. The autoresearch runner passes --output-root and owns
 # the run directory; fall back to the banana_drivers BANANA_OUT_DIR resolver
@@ -637,7 +652,13 @@ STAGE1_IOTA_CEILING = float(os.environ.get("STAGE1_IOTA_CEILING", "inf"))
 # edge keeps iota off the floor. NOTE: realizability is best bounded by the
 # L_grad_B term (Kappel, STAGE1_LGRADB_WEIGHT) once calibrated -- this band is
 # the cheaper steering/safety rail.
-STAGE1_VOLUME_ASPIRATION = 0.20       # winding-envelope-scale volume aspiration, m^3
+# Volume band [ASPIRATION, CEILING], mirroring the iota band: max(0, ASPIRATION - V)
+# pushes volume UP toward the aspiration, max(0, V - CEILING) pushes it DOWN above the
+# ceiling, zero inside. The closed loop sets a finite band so volume is steered into
+# its operating box rather than running past it. Default aspiration 0.20 / ceiling
+# +inf = the historical one-sided push-to-0.20, so standalone runs are byte-unchanged.
+STAGE1_VOLUME_ASPIRATION = float(os.environ.get("STAGE1_VOLUME_ASPIRATION", "0.20"))
+STAGE1_VOLUME_CEILING = float(os.environ.get("STAGE1_VOLUME_CEILING", "inf"))
 STAGE1_IOTA_RESONANCES = (0.20, 0.25)  # 1/5, 1/4 at NFP=5 — avoid
 STAGE1_IOTA_NOTCH_EPS = 0.01
 STAGE1_IOTA_NOTCH_WEIGHT = 50.0
@@ -670,8 +691,15 @@ def _iota_band_penalty_from_vmec(vmec_instance: Vmec) -> float:
 
 
 def _volume_deficit_from_vmec(vmec_instance: Vmec) -> float:
+    # Two-sided volume band (mirrors _iota_band_penalty_from_vmec): push UP below the
+    # aspiration and DOWN above the ceiling, zero inside [ASPIRATION, CEILING]. The
+    # default ceiling (+inf) reduces exactly to the historical one-sided push.
     vmec_instance.run()
-    return max(0.0, STAGE1_VOLUME_ASPIRATION - float(vmec_instance.volume()))
+    vol = float(vmec_instance.volume())
+    return (
+        max(0.0, STAGE1_VOLUME_ASPIRATION - vol)
+        + max(0.0, vol - STAGE1_VOLUME_CEILING)
+    )
 
 
 def _iota_resonance_notch_from_vmec(vmec_instance: Vmec) -> float:
