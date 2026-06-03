@@ -28,14 +28,37 @@ def copy_numpy_dict(d):
     return res
 
 
+def _accumulate_derivative_entry(result, key, value):
+    """Accumulate ``value`` into ``result[key]`` tolerating empty operands.
+
+    A zero-length array means the keyed ``Optimizable`` exposes no free local
+    dofs, so its contribution to the gradient is empty and must act as the
+    additive identity. SIMSOPT's chain rule can legitimately produce two
+    differently shaped entries for the same zero-own-dof intermediate
+    ``Optimizable`` (e.g. an ``Iotas`` term, constructed with ``x0=[]``, whose
+    ``dJ`` returns a coil-keyed gradient): the chained downstream gradient
+    (length = number of coil dofs) and the ``__missing__`` self-entry of length
+    0. Naively ``+=``-ing these raises ``operands could not be broadcast
+    together with shapes (N,) (0,)``. Treating an empty array as additive
+    identity keeps the non-empty contribution and is a numerical no-op.
+    """
+    if key not in result:
+        result[key] = value.copy()
+        return
+    existing = result[key]
+    if existing.shape[0] == 0:
+        result[key] = value.copy()
+        return
+    if value.shape[0] == 0:
+        return
+    existing += value
+
+
 def sum_derivatives(derivatives):
     result = OptimizableDefaultDict({})
     for derivative in derivatives:
         for key, value in derivative.data.items():
-            if key in result:
-                result[key] += value
-            else:
-                result[key] = value.copy()
+            _accumulate_derivative_entry(result, key, value)
     return Derivative(result)
 
 
@@ -133,7 +156,13 @@ class Derivative:
         z = copy_numpy_dict(x)
         for k, yk in y.items():
             if k in z:
-                z[k] -= yk
+                # Tolerate empty operands: a zero-length array means the keyed
+                # Optimizable has no free local dofs and contributes nothing, so
+                # it acts as the additive identity (see _accumulate_derivative_entry).
+                if z[k].shape[0] == 0:
+                    z[k] = -yk
+                elif yk.shape[0] != 0:
+                    z[k] -= yk
             else:
                 z[k] = -yk
         return Derivative(z)
@@ -142,10 +171,7 @@ class Derivative:
         x = self.data
         y = other.data
         for k, yk in y.items():
-            if k in x:
-                x[k] += yk
-            else:
-                x[k] = yk.copy()
+            _accumulate_derivative_entry(x, k, yk)
         return self
 
     def __isub__(self, other):
@@ -153,7 +179,10 @@ class Derivative:
         y = other.data
         for k, yk in y.items():
             if k in x:
-                x[k] -= yk
+                if x[k].shape[0] == 0:
+                    x[k] = -yk
+                elif yk.shape[0] != 0:
+                    x[k] -= yk
             else:
                 x[k] = -yk
         return self

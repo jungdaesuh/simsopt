@@ -2904,10 +2904,21 @@ def _load_required_warm_start_boozer_seeds(
     for config in surface_configs:
         if stage2_seed_surface is not None and config["name"] == "outer":
             continue
-        warm_start_surface_path = resolve_warm_start_boozer_surface_path(
-            warm_start_surface_stem,
-            surface_name=config["name"],
-        )
+        try:
+            warm_start_surface_path = resolve_warm_start_boozer_surface_path(
+                warm_start_surface_stem,
+                surface_name=config["name"],
+            )
+        except FileNotFoundError:
+            # The per-surface warm-start Boozer artifact is absent (e.g. a
+            # single-surface donor that only carries the outer
+            # ``*_boozer_surface.json`` and no ``*_inner_boozer_surface.json``).
+            # Returning None here lets the caller construct this surface from the
+            # stage2/outer seed via resolve_initial_boozer_surface_seed instead
+            # of hard-failing -- this is what unblocks experimental_multisurface
+            # single-stage from single-surface donors.
+            seeds_by_name[config["name"]] = None
+            continue
         seeds_by_name[config["name"]] = load_warm_start_boozer_seed(
             warm_start_surface_path
         )

@@ -370,7 +370,20 @@ class BiotSavartGreeneResidueObjective(Optimizable):
                 if result.status != BRANCH_STATUS_CONVERGED:
                     raise ValueError(
                         "Greene residue objective branch solve requires "
-                        f"{BRANCH_STATUS_CONVERGED}, got {result.status}"
+                        f"{BRANCH_STATUS_CONVERGED}, got {result.status} for "
+                        f"target {target_id!r} branch {branch!r}: the RK4 Newton "
+                        f"iteration from seed section_state "
+                        f"{tuple(self._branch_state_by_key[key])} settled at "
+                        f"state {result.state} with winding {result.winding:.6g} "
+                        f"(expected {target.expected_winding()}), radial_label "
+                        f"{result.radial_label:.6g} (window {target.radial_window}), "
+                        f"residue {float(result.residue_diagnostic.residue):.6g}. "
+                        "This means the supplied residue seeds do not converge to "
+                        "the requested rational island in the current coil field; "
+                        "supply seeds validated against this equilibrium/field (a "
+                        "real fixed-point solve), not synthetic placeholders, or "
+                        "drop --residue-objective-weight for fields without this "
+                        "island."
                     )
                 residue = float(result.residue_diagnostic.residue)
                 branch_objective = self._branch_objective(target, residue)
