@@ -247,8 +247,14 @@ WORKING_LAYER_SHEAR_MIN = float(
 # Objective weights
 ASPECT_WEIGHT = s1['aspect_weight']
 IOTA_WEIGHT   = s1['iota_weight']
-VOLUME_WEIGHT = s1['volume_weight']
-QS_WEIGHT     = s1['qs_weight']
+# VOLUME_WEIGHT / QS_WEIGHT are env-overridable so the closed loop can shift the
+# QS<->volume Pareto balance: at fixed R0/NFP the QS-optimal boundary inflates volume
+# past the HW box, and the volume band (a single residual) loses to the aggregate QS
+# pressure (one residual group per QS surface). Raising STAGE1_VOLUME_WEIGHT (and/or
+# lowering STAGE1_QS_WEIGHT) lets the loop enforce the volume box at a QS cost. Defaults
+# = config, so standalone runs are byte-unchanged.
+VOLUME_WEIGHT = float(os.environ.get('STAGE1_VOLUME_WEIGHT', s1['volume_weight']))
+QS_WEIGHT     = float(os.environ.get('STAGE1_QS_WEIGHT', s1['qs_weight']))
 WORKING_LAYER_SHEAR_WEIGHT = float(
     os.environ.get(
         'BANANA_WORKING_LAYER_SHEAR_WEIGHT',
