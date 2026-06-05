@@ -2,7 +2,6 @@ import logging
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.io import netcdf_file
 
 try:
     from numba import njit
@@ -22,7 +21,6 @@ from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import (
     CurveCWSFourierCPP,
-    CurveXYZFourier,
     SurfaceRZFourier,
     create_multifilament_grid,
     curves_to_vtk,
@@ -47,6 +45,7 @@ from banana_opt.jhalpern30_compat import (
     resolve_jhalpern30_vf_template_path,
 )
 from banana_opt.json_compat import load_boozer_finite_i as load
+from banana_opt.proxy_current_coils import build_planar_proxy_plasma_current_coils
 
 
 LOGGER = logging.getLogger(__name__)
@@ -349,25 +348,15 @@ def build_proxy_plasma_current_coils(
     toroidal_flux: float,
     plasma_current_A: float,
 ) -> list[Coil]:
-    with netcdf_file(equilibrium_file, mmap=False) as equilibrium_netcdf:
-        raxis_cc = equilibrium_netcdf.variables["raxis_cc"][:].copy()
-        zaxis_cs = equilibrium_netcdf.variables["zaxis_cs"][:].copy()
-    validate_normalized_toroidal_flux(
-        toroidal_flux,
-        field_name="proxy plasma-current toroidal_flux",
+    return build_planar_proxy_plasma_current_coils(
+        placement="axis_fourier_zeroth",
+        equilibrium_file=equilibrium_file,
+        surface_scale_factor=float(surface_scale_factor),
+        nphi=int(nphi),
+        ntheta=int(ntheta),
+        toroidal_flux=float(toroidal_flux),
+        plasma_current_A=float(plasma_current_A),
     )
-    axis_scale = float(surface_scale_factor)
-    proxy_curve = CurveXYZFourier(128, 1)
-    # Wataru proxy placement is the zeroth VMEC magnetic-axis coefficient,
-    # scaled with the surface family. It intentionally is not the full Fourier
-    # magnetic axis and differs from jhalpern30's surface-major-radius ring.
-    proxy_curve.set("xc(1)", float(raxis_cc[0]) * axis_scale)
-    proxy_curve.set("ys(1)", float(raxis_cc[0]) * axis_scale)
-    proxy_curve.set("zc(0)", float(zaxis_cs[0]) * axis_scale)
-    proxy_curve.fix_all()
-    proxy_current = Current(float(plasma_current_A))
-    proxy_current.fix_all()
-    return [Coil(proxy_curve, proxy_current)]
 
 
 def build_vf_coil_build_result(

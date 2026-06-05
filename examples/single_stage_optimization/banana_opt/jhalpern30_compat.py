@@ -11,7 +11,7 @@ import numpy as np
 
 from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
-from simsopt.geo import CurveCWSFourierCPP, CurveXYZFourier
+from simsopt.geo import CurveCWSFourierCPP
 
 from banana_opt.current_contracts import (
     HBT_PROXY_VF_CURRENT_RATIO,
@@ -41,6 +41,7 @@ from banana_opt.hardware_contracts import (
     MAX_CURVATURE_INV_M,
 )
 from banana_opt.json_compat import load_boozer_finite_i
+from banana_opt.proxy_current_coils import build_planar_proxy_plasma_current_coils
 from banana_opt.wout_convention import wout_convention_artifact_fields
 
 
@@ -201,14 +202,11 @@ def build_jhalpern30_proxy_plasma_current_coils(
     surface,
     proxy_current_A: float,
 ) -> list[Coil]:
-    proxy_curve = CurveXYZFourier(128, 1)
-    proxy_curve.set("xc(1)", float(surface.major_radius()))
-    proxy_curve.set("ys(1)", float(surface.major_radius()))
-    proxy_curve.set("zc(0)", 0.0)
-    proxy_curve.fix_all()
-    proxy_current = Current(float(proxy_current_A))
-    proxy_current.fix_all()
-    return [Coil(proxy_curve, proxy_current)]
+    return build_planar_proxy_plasma_current_coils(
+        placement="surface_major_radius",
+        surface=surface,
+        plasma_current_A=float(proxy_current_A),
+    )
 
 
 def build_jhalpern30_vf_coil_build_result(

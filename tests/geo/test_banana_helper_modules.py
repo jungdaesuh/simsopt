@@ -15,6 +15,10 @@ EXAMPLES_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
 REFERENCE_SURFACES_PATH = EXAMPLES_ROOT / "banana_opt" / "reference_surfaces.py"
 STAGE2_GEOMETRY_PATH = EXAMPLES_ROOT / "banana_opt" / "stage2_geometry.py"
 HARDWARE_CONTRACTS_PATH = EXAMPLES_ROOT / "banana_opt" / "hardware_contracts.py"
+if str(EXAMPLES_ROOT) not in sys.path:
+    sys.path.insert(0, str(EXAMPLES_ROOT))
+
+from banana_opt import proxy_current_coils  # noqa: E402
 
 
 def _load_module(module_path: Path, prefix: str):
@@ -376,10 +380,6 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-        class FakeProxySurface:
-            def major_radius(self):
-                return 2.0
-
         class FakeCurveXYZFourier:
             def __init__(self, nquadpoints, order):
                 self.nquadpoints = nquadpoints
@@ -407,23 +407,19 @@ class Stage2GeometryHelperTests(unittest.TestCase):
                 self.current = current
 
         with mock.patch.object(
-            self.module,
+            proxy_current_coils,
             "netcdf_file",
             return_value=FakeNetcdfFile(),
         ), mock.patch.object(
-            self.module.SurfaceRZFourier,
-            "from_wout",
-            return_value=FakeProxySurface(),
-        ), mock.patch.object(
-            self.module,
+            proxy_current_coils,
             "CurveXYZFourier",
             FakeCurveXYZFourier,
         ), mock.patch.object(
-            self.module,
+            proxy_current_coils,
             "Current",
             FakeCurrent,
         ), mock.patch.object(
-            self.module,
+            proxy_current_coils,
             "Coil",
             FakeCoil,
         ):
