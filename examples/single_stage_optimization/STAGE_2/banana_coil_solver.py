@@ -134,6 +134,7 @@ from banana_opt.current_contracts import (
     unwrap_current_optimizable,
     validate_proxy_vf_current_convention_for_mode,
 )
+from banana_opt.design_only_fields import build_design_only_results_fields
 from banana_opt.finite_current_profiles import (
     FINITE_CURRENT_PROFILES,
     JHALPERN30_FINITE_CURRENT_MODE,
@@ -3703,6 +3704,12 @@ def main(parsed_args=None):
                 cs_min_dist_m=results.get("CURVE_SURFACE_MIN_DIST"),
                 cc_nominal_m=COIL_COIL_MIN_DIST_M,
                 cs_nominal_m=COIL_PLASMA_MIN_DIST_M,
+            )
+        )
+    if new_proxy_coils:
+        results.update(
+            build_design_only_results_fields(
+                reason=f"finite_current_proxy_line_current: {finite_current_mode}",
             )
         )
     write_json(os.path.join(OUT_DIR_ITER, "results.json"), results)

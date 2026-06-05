@@ -14,6 +14,7 @@ from banana_opt.artifact_contracts import (
     validate_vacuum_boozer_surface_json,
 )
 from banana_opt.boozer_warm_start import save_boozer_surface_with_state
+from banana_opt.design_only_fields import assert_topology_field_allowed
 from banana_opt.hardware_contracts import COIL_LENGTH_MIN_FRACTION
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_status,
@@ -1289,6 +1290,12 @@ def evaluate_topology_gate(
     survival_threshold,
     score_topology_fn=_score_topology,
 ):
+    assert_topology_field_allowed(
+        bfield,
+        None,
+        allow_design_only_field=False,
+        consumer="evaluate_topology_gate",
+    )
     if nfieldlines <= 0:
         return disabled_topology_gate_status(tmax, tol, survival_threshold)
 

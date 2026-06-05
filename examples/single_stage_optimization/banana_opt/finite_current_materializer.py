@@ -24,6 +24,10 @@ from banana_opt.current_contracts import (
     physical_current_to_boozer_I,
     validate_proxy_vf_current_convention_for_mode,
 )
+from banana_opt.design_only_fields import (
+    build_design_only_results_fields,
+    mark_design_only_field,
+)
 from banana_opt.finite_current_profiles import (
     JHALPERN30_FINITE_CURRENT_MODE,
     get_finite_current_profile,
@@ -255,6 +259,11 @@ def materialize_finite_current_seed(
         *vf_build_result.coils,
     ]
     output_bs = BiotSavart(output_coils)
+    if proxy_coils:
+        mark_design_only_field(
+            output_bs,
+            reason=f"finite_current_proxy_line_current: {profile.mode}",
+        )
     output_root.mkdir(parents=True, exist_ok=True)
     output_bs.save(str(output_bs_path))
 
@@ -572,6 +581,12 @@ def _build_materialized_results(
             STAGE2_BS_SHA256_KEY: compute_stage2_bs_sha256(output_bs_path),
         }
     )
+    if int(num_proxy_coils) > 0:
+        results.update(
+            build_design_only_results_fields(
+                reason=f"finite_current_proxy_line_current: {profile.mode}",
+            )
+        )
     return results
 
 

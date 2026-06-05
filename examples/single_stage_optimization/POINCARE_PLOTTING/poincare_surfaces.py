@@ -10,6 +10,7 @@ from simsopt.geo import curves_to_vtk
 
 # Shared topology scorer — single source of truth for helpers and metrics
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from banana_opt.design_only_fields import assert_topology_field_allowed
 from banana_opt.json_compat import load_boozer_finite_i as load
 from topology_scorer import (
     trace_metrics as _trace_metrics,
@@ -26,6 +27,7 @@ from topology_scorer import (
 
 
 SUPPORTED_POINCARE_FIELD_POLICIES = frozenset({"auto", "always", "never"})
+POINCARE_DESIGN_ONLY_OVERRIDE_VALUES = frozenset({"1", "true", "yes"})
 
 
 def resolve_poincare_field_policy(env=None):
@@ -47,6 +49,88 @@ def _field_policy_for_render_mode(render_field_policy, configured_field_policy):
     if render_field_policy == "native":
         return "never"
     raise ValueError(f"Unsupported Poincare field policy {render_field_policy!r}")
+
+
+def design_only_override_enabled(env=None):
+    environ = os.environ if env is None else env
+    return (
+        str(environ.get("POINCARE_ALLOW_DESIGN_ONLY_FIELD", "")).lower()
+        in POINCARE_DESIGN_ONLY_OVERRIDE_VALUES
+    )
+
+
+def load_design_only_results_metadata(out_dir):
+    results_path = os.path.join(out_dir, "results.json")
+    if not os.path.exists(results_path):
+        return None
+    with open(results_path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {results_path}.")
+    return {str(key): value for key, value in payload.items()}
+
+
+def build_poincare_mode_artifact(
+    *,
+    field_label,
+    render_mode,
+    nfieldlines,
+    tmax,
+    tol,
+    phis,
+    field_model,
+    metrics,
+    design_only_override,
+):
+    return {
+        "field_label": field_label,
+        "render_mode": render_mode["mode"],
+        "nfieldlines": nfieldlines,
+        "tmax": tmax,
+        "tol": tol,
+        "phis": [float(phi) for phi in phis],
+        "seed_contract": render_mode["seed_contract"],
+        "trace_domain": render_mode["trace_domain"].as_metadata(),
+        "stop_labels": list(render_mode["stop_labels"]),
+        "field_model": field_model,
+        "trace_semantics": render_mode["trace_semantics"],
+        "plot_filename": metrics["plot_filename"],
+        "metrics": metrics,
+        "validation_status": metrics["validation_status"],
+        "design_only_override": bool(design_only_override),
+    }
+
+
+def build_poincare_aggregate_artifact(
+    *,
+    field_label,
+    nfieldlines,
+    tmax,
+    tol,
+    phis,
+    render_modes,
+    field_trace_domain,
+    field_models_by_mode,
+    metrics_by_mode,
+    design_only_override,
+):
+    return {
+        "field_label": field_label,
+        "nfieldlines": nfieldlines,
+        "tmax": tmax,
+        "tol": tol,
+        "phis": [float(phi) for phi in phis],
+        "seed_contract": render_modes[0]["seed_contract"],
+        "default_seed_contract": render_modes[2]["seed_contract"],
+        "trace_domain": field_trace_domain.as_metadata(),
+        "field_model": field_models_by_mode["validation"],
+        "field_models": field_models_by_mode,
+        "validation": metrics_by_mode["validation"],
+        "diagnostic": metrics_by_mode["diagnostic"],
+        "default": metrics_by_mode["default"],
+        "validation_status": metrics_by_mode["validation"]["validation_status"],
+        "design_only_override": bool(design_only_override),
+    }
 
 
 def build_poincare_render_modes(
@@ -298,16 +382,30 @@ if __name__ == "__main__":
     init_bs_path = OUT_DIR + "/biot_savart_init.json"
     opt_surf_path = OUT_DIR + "/surf_opt.json"
     init_surf_path = OUT_DIR + "/surf_init.json"
+    results_meta = load_design_only_results_metadata(OUT_DIR)
+    allow_design_only_field = design_only_override_enabled()
 
     # Load field and surface from the same stage (both opt or both init)
     has_opt = os.path.exists(opt_bs_path) and os.path.exists(opt_surf_path)
     if has_opt:
         bs = load(opt_bs_path)
+        assert_topology_field_allowed(
+            bs,
+            results_meta,
+            allow_design_only_field=allow_design_only_field,
+            consumer="poincare_surfaces",
+        )
         surf = load(opt_surf_path)
         field_label = "opt"
         print("Loaded OPTIMIZED field + surface")
     else:
         bs = load(init_bs_path)
+        assert_topology_field_allowed(
+            bs,
+            results_meta,
+            allow_design_only_field=allow_design_only_field,
+            consumer="poincare_surfaces",
+        )
         surf = load(init_surf_path)
         field_label = "init"
         if os.path.exists(opt_bs_path) != os.path.exists(opt_surf_path):
@@ -423,22 +521,17 @@ if __name__ == "__main__":
                 OUT_DIR,
                 f"PoincareMetrics_{field_label}{render_mode['metrics_suffix']}.json",
             )
-            mode_artifact = {
-                "field_label": field_label,
-                "render_mode": render_mode["mode"],
-                "nfieldlines": nfieldlines,
-                "tmax": tmax_fl,
-                "tol": tol,
-                "phis": [float(phi) for phi in phis],
-                "seed_contract": render_mode["seed_contract"],
-                "trace_domain": render_mode["trace_domain"].as_metadata(),
-                "stop_labels": list(render_mode["stop_labels"]),
-                "field_model": field_models_by_mode[mode],
-                "trace_semantics": render_mode["trace_semantics"],
-                "plot_filename": metrics["plot_filename"],
-                "metrics": metrics,
-                "validation_status": metrics["validation_status"],
-            }
+            mode_artifact = build_poincare_mode_artifact(
+                field_label=field_label,
+                render_mode=render_mode,
+                nfieldlines=nfieldlines,
+                tmax=tmax_fl,
+                tol=tol,
+                phis=phis,
+                field_model=field_models_by_mode[mode],
+                metrics=metrics,
+                design_only_override=allow_design_only_field,
+            )
             with open(metrics_sidecar_path, "w", encoding="utf-8") as f:
                 json.dump(mode_artifact, f, indent=2)
             metrics["metrics_filename"] = os.path.basename(metrics_sidecar_path)
@@ -468,22 +561,18 @@ if __name__ == "__main__":
             )
             print(f"Saved: {os.path.basename(plot_filename)}")
         metrics_path = os.path.join(OUT_DIR, f"PoincareMetrics_{field_label}.json")
-        artifact = {
-            "field_label": field_label,
-            "nfieldlines": nfieldlines,
-            "tmax": tmax_fl,
-            "tol": tol,
-            "phis": [float(phi) for phi in phis],
-            "seed_contract": render_modes[0]["seed_contract"],
-            "default_seed_contract": render_modes[2]["seed_contract"],
-            "trace_domain": field_trace_domain.as_metadata(),
-            "field_model": field_models_by_mode["validation"],
-            "field_models": field_models_by_mode,
-            "validation": metrics_by_mode["validation"],
-            "diagnostic": metrics_by_mode["diagnostic"],
-            "default": metrics_by_mode["default"],
-            "validation_status": metrics_by_mode["validation"]["validation_status"],
-        }
+        artifact = build_poincare_aggregate_artifact(
+            field_label=field_label,
+            nfieldlines=nfieldlines,
+            tmax=tmax_fl,
+            tol=tol,
+            phis=phis,
+            render_modes=render_modes,
+            field_trace_domain=field_trace_domain,
+            field_models_by_mode=field_models_by_mode,
+            metrics_by_mode=metrics_by_mode,
+            design_only_override=allow_design_only_field,
+        )
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(artifact, f, indent=2)
         print(f"Saved: {os.path.basename(metrics_path)}")

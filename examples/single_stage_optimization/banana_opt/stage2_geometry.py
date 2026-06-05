@@ -37,6 +37,7 @@ from banana_opt.hardware_contracts import (
 from banana_opt.current_contracts import unwrap_current_optimizable
 from banana_opt.current_contracts import VFCoilBuildResult
 from banana_opt.current_contracts import resolve_jhalpern30_fresh_vf_current_A
+from banana_opt.design_only_fields import mark_design_only_field
 from banana_opt.finite_current_profiles import JHALPERN30_FINITE_CURRENT_MODE
 from banana_opt.finite_current_profiles import get_finite_current_profile
 from banana_opt.jhalpern30_compat import (
@@ -657,6 +658,11 @@ def initialize_coils(
 
     coils = tf_coils + banana_coils + proxy_coils + vf_coils
     bs = BiotSavart(coils)
+    if proxy_coils:
+        mark_design_only_field(
+            bs,
+            reason=f"finite_current_proxy_line_current: {finite_current_mode}",
+        )
     bs.set_points(surf.gamma().reshape((-1, 3)))
 
     curves = [coil.curve for coil in coils]

@@ -26,6 +26,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from banana_opt.design_only_fields import assert_topology_field_allowed
 from banana_opt.topology.kam_birkhoff import (
     DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
     KAM_FRACTION_SEMANTICS,
@@ -1387,6 +1388,12 @@ def score_topology(
     signal (fewer Poincare returns required to classify); it overrides only the
     returns bar, not the other classifier settings.
     """
+    assert_topology_field_allowed(
+        bfield,
+        None,
+        allow_design_only_field=False,
+        consumer="score_topology",
+    )
     from simsopt.field import compute_fieldlines
 
     nfp = surface.nfp
