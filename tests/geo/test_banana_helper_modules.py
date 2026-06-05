@@ -18,7 +18,7 @@ HARDWARE_CONTRACTS_PATH = EXAMPLES_ROOT / "banana_opt" / "hardware_contracts.py"
 if str(EXAMPLES_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_ROOT))
 
-from banana_opt import proxy_current_coils  # noqa: E402
+from banana_opt import flux_validation, proxy_current_coils  # noqa: E402
 
 
 def _load_module(module_path: Path, prefix: str):
@@ -440,6 +440,26 @@ class Stage2GeometryHelperTests(unittest.TestCase):
         self.assertTrue(proxy_coil.curve.fixed)
         self.assertEqual(proxy_coil.current.value, 9000.0)
         self.assertTrue(proxy_coil.current.fixed)
+
+    def test_proxy_current_coils_use_canonical_flux_validator(self):
+        self.assertIs(
+            proxy_current_coils.validate_normalized_toroidal_flux,
+            flux_validation.validate_normalized_toroidal_flux,
+        )
+
+    def test_build_proxy_plasma_current_coils_rejects_out_of_range_flux(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "proxy plasma-current toroidal_flux must be between 0 and 1 inclusive",
+        ):
+            self.module.build_proxy_plasma_current_coils(
+                equilibrium_file="/tmp/demo.nc",
+                surface_scale_factor=2.0,
+                nphi=91,
+                ntheta=32,
+                toroidal_flux=1.5,
+                plasma_current_A=9000.0,
+            )
 
     def test_build_vf_coils_preserves_template_current_signs(self):
         class FakeCurve:

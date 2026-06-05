@@ -7,6 +7,8 @@ from scipy.io import netcdf_file
 from simsopt.field import Coil, Current
 from simsopt.geo import CurveXYZFourier
 
+from banana_opt.flux_validation import validate_normalized_toroidal_flux
+
 
 ProxyCurrentPlacement = Literal["axis_fourier_zeroth", "surface_major_radius"]
 
@@ -39,7 +41,7 @@ def build_planar_proxy_plasma_current_coils(
             raise ValueError("axis_fourier_zeroth placement requires equilibrium_file.")
         if toroidal_flux is None:
             raise ValueError("axis_fourier_zeroth placement requires toroidal_flux.")
-        _validate_normalized_toroidal_flux(
+        validate_normalized_toroidal_flux(
             toroidal_flux,
             field_name="proxy plasma-current toroidal_flux",
         )
@@ -81,16 +83,3 @@ def _build_planar_ring_proxy_current_coil(
     proxy_current = Current(float(plasma_current_A))
     proxy_current.fix_all()
     return Coil(proxy_curve, proxy_current)
-
-
-def _validate_normalized_toroidal_flux(
-    value: float,
-    *,
-    field_name: str,
-) -> float:
-    flux = float(value)
-    if not 0.0 <= flux <= 1.0:
-        raise ValueError(
-            f"{field_name} must be between 0 and 1 inclusive, got {value!r}."
-        )
-    return flux
