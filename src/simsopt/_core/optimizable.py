@@ -47,7 +47,7 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-__all__ = ['Optimizable', 'make_optimizable', 'load', 'save',
+__all__ = ['Optimizable', 'make_optimizable', 'natural_key', 'load', 'save',
            'OptimizableSum', 'ScaledOptimizable']
 
 
@@ -1614,7 +1614,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
                 contents = f.read()
             return cls.from_str(contents, fmt="json")
 
-def natural_key(s):
+def natural_key(text):
     """
     Return a key to be used in natural sorting of strings containing
     integers.
@@ -1624,8 +1624,9 @@ def natural_key(s):
     Returns:
         Key string
     """
-    return [int(text) if text.isdigit() else text.lower()
-            for text in re.split(r'(\d+)', s)]
+    return [int(s) if s.isdigit() else s.lower()
+            for s in re.split(r'(\d+)', text)]
+
 
 def load(filename, *args, **kwargs):
     """

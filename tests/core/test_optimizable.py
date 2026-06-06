@@ -928,6 +928,32 @@ class OptimizableTests(unittest.TestCase):
         for name in test_obj2.full_dof_names:
             self.assertTrue(comb_patt.match(name))
 
+        ## Check natural sorting of optimizable dof names
+    
+        # Check at parent level
+        identity_list = [Identity() for i in range(11)]
+        adder_list = [Adder(n=11) for i in range(11)]
+        test_obj3 = OptClassWithParents(val=10, depends_on= (identity_list + adder_list))
+        dofs_names_ints = [list(map(int, re.findall(r'\d+', s))) for s in test_obj3.dof_names]
+        unique_ancestor_namelist = []    
+        for dof_name in test_obj3.dof_names:
+            ancestor_name = re.split(':', dof_name)[0]
+            if ancestor_name not in unique_ancestor_namelist:
+                unique_ancestor_namelist.append(ancestor_name)
+        adder_number_list = [int(re.search(r'\d+', name).group()) for name in unique_ancestor_namelist if 'Adder' in name]
+        identity_number_list = [int(re.search(r'\d+', name).group()) for name in unique_ancestor_namelist if 'Identity' in name]
+        self.assertTrue(adder_number_list == sorted(adder_number_list))
+        self.assertTrue(identity_number_list == sorted(identity_number_list))
+        
+        # Checking at ancestor level
+        for unique_ancestor in unique_ancestor_namelist:
+            ancestor_dof_numbers = []
+            for i, dof_name in enumerate(test_obj3.dof_names):
+                if unique_ancestor in dof_name:
+                    ancestor_dof_numbers.append(dofs_names_ints[i][-1])
+            print(ancestor_dof_numbers)
+            self.assertTrue(ancestor_dof_numbers == sorted(ancestor_dof_numbers))
+                    
     def test_local_dof_names(self):
         # Test in DOFs class is sufficient
         pass
