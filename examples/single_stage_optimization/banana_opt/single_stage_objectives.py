@@ -14,6 +14,7 @@ from banana_opt.hardware_contracts import (
     BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
     BANANA_WIDTH_MAX_M,
     BANANA_WIDTH_MIN_M,
+    HARDWARE_KEEPOUT_MIN_DISTANCE_M,
 )
 from banana_opt.hardware_constraint_schema import (
     ALMConstraintMetadata,
@@ -166,6 +167,8 @@ def build_total_objective(
     width_max_threshold=BANANA_WIDTH_MAX_M,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
+    JCurveHardwareKeepout=None,
+    HARDWARE_KEEPOUT_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -202,6 +205,8 @@ def build_total_objective(
         )
     if JCurveSelfIntersect is not None:
         objective = objective + SELFINT_WEIGHT * JCurveSelfIntersect
+    if JCurveHardwareKeepout is not None:
+        objective = objective + HARDWARE_KEEPOUT_WEIGHT * JCurveHardwareKeepout
     if JResidueObjective is not None:
         objective = objective + JResidueObjective
     # SIMSOPT-official coil regularization/validity terms (opt-in; default-0 so
@@ -486,6 +491,8 @@ def evaluate_total_objective(
     width_max_threshold=BANANA_WIDTH_MAX_M,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
+    JCurveHardwareKeepout=None,
+    HARDWARE_KEEPOUT_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -535,6 +542,8 @@ def evaluate_total_objective(
         width_max_threshold=width_max_threshold,
         JCurveSelfIntersect=JCurveSelfIntersect,
         SELFINT_WEIGHT=SELFINT_WEIGHT,
+        JCurveHardwareKeepout=JCurveHardwareKeepout,
+        HARDWARE_KEEPOUT_WEIGHT=HARDWARE_KEEPOUT_WEIGHT,
         JResidueObjective=JResidueObjective,
         JMeanSquaredCurvature=JMeanSquaredCurvature,
         MSC_WEIGHT=MSC_WEIGHT,
@@ -648,6 +657,16 @@ def evaluate_total_objective(
                 if JCurveSelfIntersect is None
                 else _objective_gradient(JCurveSelfIntersect, objective_optimizable)
             ),
+            "J_hardware_keepout": (
+                0.0
+                if JCurveHardwareKeepout is None
+                else float(JCurveHardwareKeepout.J())
+            ),
+            "dJ_hardware_keepout": (
+                np.zeros_like(total_grad)
+                if JCurveHardwareKeepout is None
+                else _objective_gradient(JCurveHardwareKeepout, objective_optimizable)
+            ),
             "J_msc": (
                 0.0
                 if JMeanSquaredCurvature is None
@@ -696,6 +715,11 @@ def evaluate_total_objective(
                 None
                 if JCurveSelfIntersect is None
                 else BANANA_SELF_INTERSECT_MIN_DISTANCE_M
+            ),
+            "hardware_keepout_min_distance": (
+                None
+                if JCurveHardwareKeepout is None
+                else HARDWARE_KEEPOUT_MIN_DISTANCE_M
             ),
         }
     )
@@ -1057,6 +1081,7 @@ def evaluate_alm_objective(
     width_min_threshold=None,
     width_max_threshold=None,
     JCurveSelfIntersect=None,
+    JCurveHardwareKeepout=None,
     lcfs_surface=None,
     JLCFSMajorRadius=None,
     JLCFSMinorRadius=None,
@@ -1282,6 +1307,21 @@ def evaluate_alm_objective(
             self_intersect_signed_value,
             self_intersect_grad,
             _positive_violation(self_intersect_signed_value),
+        )
+    if JCurveHardwareKeepout is not None:
+        # Same penalty-as-constraint contract as self_intersect: clear of the
+        # sensor/mount keep-out cloud is exactly zero hinge; any positive value
+        # is an active ALM violation with zero slack.
+        hardware_keepout_penalty = float(JCurveHardwareKeepout.J())
+        hardware_keepout_grad = _objective_gradient(
+            JCurveHardwareKeepout,
+            objective_optimizable,
+        )
+        hardware_keepout_signed_value = hardware_keepout_penalty
+        hardware_constraints["hardware_keepout"] = (
+            hardware_keepout_signed_value,
+            hardware_keepout_grad,
+            _positive_violation(hardware_keepout_signed_value),
         )
     if lcfs_surface is not None and lcfs_major_radius_threshold is not None:
         # The LCFS Fourier dofs are fixed (not in the coil dof graph), so the
@@ -1698,6 +1738,20 @@ def evaluate_alm_objective(
         if JCurveSelfIntersect is not None:
             base_eval["self_intersect_penalty"] = self_intersect_penalty
             base_eval["self_intersect_threshold"] = 0.0
+        base_eval["J_hardware_keepout"] = (
+            0.0 if JCurveHardwareKeepout is None else float(hardware_keepout_penalty)
+        )
+        base_eval["dJ_hardware_keepout"] = (
+            np.zeros_like(base_eval["grad"])
+            if JCurveHardwareKeepout is None
+            else np.asarray(hardware_keepout_grad, dtype=float)
+        )
+        if JCurveHardwareKeepout is not None:
+            base_eval["hardware_keepout_penalty"] = hardware_keepout_penalty
+            base_eval["hardware_keepout_threshold"] = 0.0
+            base_eval["hardware_keepout_min_distance"] = (
+                HARDWARE_KEEPOUT_MIN_DISTANCE_M
+            )
         # Opt-in SIMSOPT coil regularizers (frontier override reads these from the
         # diagnostics dict; 0.0/zeros when the weight is off and the term is None).
         base_eval["J_msc"] = (

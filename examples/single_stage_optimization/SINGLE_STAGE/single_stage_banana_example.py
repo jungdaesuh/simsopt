@@ -192,10 +192,12 @@ from banana_opt.hardware_contracts import (
     COIL_LENGTH_MIN_FRACTION,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
+    HARDWARE_KEEPOUT_MIN_DISTANCE_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     POLOIDAL_EXTENT_WEIGHT,
+    SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT,
     SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT,
     SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT,
     SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT,
@@ -242,6 +244,7 @@ from banana_opt.poloidal_extent import (
     smooth_max_poloidal_extent_signed_constraint as _smooth_max_poloidal_extent_signed_constraint,
     smooth_max_poloidal_extent_signed_constraint_with_hard_signal,
 )
+from banana_opt.hardware_keepout import CurveHardwareKeepout, load_hardware_keepout
 from banana_opt.self_intersect import CurveSelfIntersect
 from banana_opt.wout_convention import wout_convention_artifact_fields
 from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for test access via importlib
@@ -2089,6 +2092,30 @@ def parse_args():
         help="Penalty weight for the Single Stage curve self-intersection term.",
     )
     parser.add_argument(
+        "--single-stage-hardware-keepout-weight",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT",
+                str(SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT),
+            )
+        ),
+        help=(
+            "Penalty/ALM weight for the hardware keep-out distance term "
+            "(0 disables the term entirely)."
+        ),
+    )
+    parser.add_argument(
+        "--hardware-keepout-json",
+        type=str,
+        default=os.environ.get("HARDWARE_KEEPOUT_JSON"),
+        help=(
+            "Path to the hardware_keepout.json point cloud "
+            "(hbt_clearance_viewer/tools/export_hardware_keepout.py). "
+            "Required when the keep-out weight is > 0."
+        ),
+    )
+    parser.add_argument(
         "--msc-weight",
         type=float,
         default=float(os.environ.get("MSC_WEIGHT", "0.0")),
@@ -3356,6 +3383,8 @@ def evaluate_single_stage_hardware_constraints(
     width_max_threshold=None,
     self_intersect_penalty=None,
     self_intersect_threshold=None,
+    hardware_keepout_penalty=None,
+    hardware_keepout_threshold=None,
     lcfs_major_radius_m=None,
     lcfs_minor_radius_m=None,
 ):
@@ -3381,6 +3410,8 @@ def evaluate_single_stage_hardware_constraints(
         width_max_threshold=width_max_threshold,
         self_intersect_penalty=self_intersect_penalty,
         self_intersect_threshold=self_intersect_threshold,
+        hardware_keepout_penalty=hardware_keepout_penalty,
+        hardware_keepout_threshold=hardware_keepout_threshold,
         lcfs_major_radius_m=lcfs_major_radius_m,
         lcfs_minor_radius_m=lcfs_minor_radius_m,
     )
@@ -3479,6 +3510,7 @@ def current_single_stage_hardware_snapshot_kwargs(
     )
     coil_width_obj = globals().get("JCoilWidth")
     self_intersect_obj = globals().get("JCurveSelfIntersect")
+    hardware_keepout_obj = globals().get("JCurveHardwareKeepout")
     snapshot_kwargs.update(
         {
             "coil_width": (
@@ -3490,6 +3522,16 @@ def current_single_stage_hardware_snapshot_kwargs(
                 None if self_intersect_obj is None else float(self_intersect_obj.J())
             ),
             "self_intersect_threshold": 0.0,
+            # Opt-in keep-out: None when the term is off, so artifacts from
+            # default runs carry no value (artifact_value_optional in schema).
+            "hardware_keepout_penalty": (
+                None
+                if hardware_keepout_obj is None
+                else float(hardware_keepout_obj.J())
+            ),
+            "hardware_keepout_threshold": (
+                None if hardware_keepout_obj is None else 0.0
+            ),
         }
     )
     return snapshot_kwargs
@@ -4664,6 +4706,8 @@ class RunIdentityConfig:
     single_stage_poloidal_weight: float
     single_stage_width_weight: float
     single_stage_selfint_weight: float
+    single_stage_hardware_keepout_weight: float
+    hardware_keepout_json: str | None
     single_stage_poloidal_threshold_rad: float
     single_stage_width_min_threshold: float
     single_stage_width_max_threshold: float
@@ -5212,6 +5256,8 @@ def make_run_identity_config(
         single_stage_poloidal_weight=args.single_stage_poloidal_weight,
         single_stage_width_weight=args.single_stage_width_weight,
         single_stage_selfint_weight=args.single_stage_selfint_weight,
+        single_stage_hardware_keepout_weight=args.single_stage_hardware_keepout_weight,
+        hardware_keepout_json=args.hardware_keepout_json,
         single_stage_poloidal_threshold_rad=getattr(
             args,
             "single_stage_poloidal_threshold_rad",
@@ -5481,6 +5527,7 @@ def single_stage_alm_constraint_names(
     *,
     alm_formulation,
     include_surface_stack=False,
+    include_hardware_keepout=False,
     banana_current_state=None,
 ):
     available_names = {
@@ -5495,6 +5542,8 @@ def single_stage_alm_constraint_names(
         "width_max",
         "self_intersect",
     }
+    if include_hardware_keepout:
+        available_names.add("hardware_keepout")
     if alm_formulation != "thresholded_physics":
         available_names.add("coil_length")
     use_independent_banana_currents = (
@@ -5944,6 +5993,7 @@ def apply_frontier_scalarization_override(
         poloidal_extent_weight=SINGLE_STAGE_POLOIDAL_WEIGHT,
         width_weight=SINGLE_STAGE_WIDTH_WEIGHT,
         selfint_weight=SINGLE_STAGE_SELFINT_WEIGHT,
+        hardware_keepout_weight=SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
         msc_weight=globals().get("MSC_WEIGHT", 0.0),
         arclen_weight=globals().get("ARCLEN_WEIGHT", 0.0),
         link_weight=globals().get("LINKING_WEIGHT", 0.0),
@@ -6396,6 +6446,34 @@ def build_single_stage_objective_bundle(
             BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * banana_curves[0].order
         ),
     )
+    # Opt-in hardware keep-out (default-OFF): constructed only when a weight is
+    # set AND a point-cloud path is provided, so default runs add nothing to the
+    # objective graph and stay byte-identical. The penalty must see the full
+    # banana coil set — each symmetry copy meets different hardware (sensors,
+    # solenoid/REMC mounts); TF coils are deliberately excluded (fixed machine
+    # coils would contribute un-optimizable constant violation).
+    JCurveHardwareKeepout = None
+    if SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT > 0.0:
+        if not HARDWARE_KEEPOUT_JSON_PATH:
+            raise ValueError(
+                "--single-stage-hardware-keepout-weight > 0 requires "
+                "--hardware-keepout-json (the exported sensor/mount point cloud)"
+            )
+        keepout_points, keepout_point_weight, keepout_min_distance, _keepout_prov = (
+            load_hardware_keepout(HARDWARE_KEEPOUT_JSON_PATH)
+        )
+        if keepout_min_distance != HARDWARE_KEEPOUT_MIN_DISTANCE_M:
+            raise ValueError(
+                f"keep-out JSON recommends min distance {keepout_min_distance} m "
+                f"but the hardware contract pins {HARDWARE_KEEPOUT_MIN_DISTANCE_M} m; "
+                "update banana_opt/hardware_contracts.py and the cloud together"
+            )
+        JCurveHardwareKeepout = CurveHardwareKeepout(
+            banana_curves,
+            keepout_points,
+            HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+            keepout_point_weight,
+        )
     # Boozer-adjoint major-radius objective for the LCFS upper-bound ALM constraint.
     # Supplies d(major_radius)/d(coils) via the BoozerSurface adjoint; the fixed-surface
     # dmajor_radius_by_dcoeff path is gradient-dead over the coil dofs. Reuses the outer
@@ -6515,6 +6593,7 @@ def build_single_stage_objective_bundle(
         "JPoloidalExtent": JPoloidalExtent,
         "JCoilWidth": JCoilWidth,
         "JCurveSelfIntersect": JCurveSelfIntersect,
+        "JCurveHardwareKeepout": JCurveHardwareKeepout,
         "JLCFSMajorRadius": JLCFSMajorRadius,
         "JLCFSMinorRadius": JLCFSMinorRadius,
         "JResidueObjective": JResidueObjective,
@@ -6553,6 +6632,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JPoloidalExtent
     global JCoilWidth
     global JCurveSelfIntersect
+    global JCurveHardwareKeepout
     global JLCFSMajorRadius
     global JLCFSMinorRadius
     global JResidueObjective
@@ -6586,6 +6666,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JPoloidalExtent = objective_bundle["JPoloidalExtent"]
     JCoilWidth = objective_bundle["JCoilWidth"]
     JCurveSelfIntersect = objective_bundle["JCurveSelfIntersect"]
+    JCurveHardwareKeepout = objective_bundle["JCurveHardwareKeepout"]
     JLCFSMajorRadius = objective_bundle["JLCFSMajorRadius"]
     JLCFSMinorRadius = objective_bundle["JLCFSMinorRadius"]
     JResidueObjective = objective_bundle["JResidueObjective"]
@@ -6906,6 +6987,8 @@ def evaluate_total_objective(
     width_max_threshold=None,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
+    JCurveHardwareKeepout=None,
+    HARDWARE_KEEPOUT_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
 ):
@@ -6957,6 +7040,8 @@ def evaluate_total_objective(
             width_max_threshold=resolved_width_max_threshold,
             JCurveSelfIntersect=JCurveSelfIntersect,
             SELFINT_WEIGHT=SELFINT_WEIGHT,
+            JCurveHardwareKeepout=JCurveHardwareKeepout,
+            HARDWARE_KEEPOUT_WEIGHT=HARDWARE_KEEPOUT_WEIGHT,
             JResidueObjective=globals().get("JResidueObjective"),
             JMeanSquaredCurvature=globals().get("JMeanSquaredCurvature"),
             MSC_WEIGHT=globals().get("MSC_WEIGHT", 0.0),
@@ -7026,6 +7111,7 @@ def evaluate_alm_objective(
     JPoloidalExtent=None,
     JCoilWidth=None,
     JCurveSelfIntersect=None,
+    JCurveHardwareKeepout=None,
     include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
@@ -7062,6 +7148,7 @@ def evaluate_alm_objective(
                     len(surface_data),
                     SURFACE_GAP_THRESHOLD,
                 ),
+                include_hardware_keepout=JCurveHardwareKeepout is not None,
                 banana_current_state=globals().get("banana_current_state"),
             ),
             curve_curve_constraint_fn=_smooth_min_curve_curve_signed_constraint,
@@ -7102,6 +7189,7 @@ def evaluate_alm_objective(
             width_min_threshold=SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
             width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             JCurveSelfIntersect=JCurveSelfIntersect,
+            JCurveHardwareKeepout=JCurveHardwareKeepout,
             lcfs_surface=outer_surface_data["boozer_surface"].surface,
             JLCFSMajorRadius=globals().get("JLCFSMajorRadius"),
             JLCFSMinorRadius=globals().get("JLCFSMinorRadius"),
@@ -7148,6 +7236,7 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 JPoloidalExtent=JPoloidalExtent,
                 JCoilWidth=JCoilWidth,
                 JCurveSelfIntersect=JCurveSelfIntersect,
+                JCurveHardwareKeepout=JCurveHardwareKeepout,
                 include_diagnostics=include_diagnostics,
             )
         )
@@ -7176,6 +7265,8 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             JCurveSelfIntersect=JCurveSelfIntersect,
             SELFINT_WEIGHT=SINGLE_STAGE_SELFINT_WEIGHT,
+            JCurveHardwareKeepout=JCurveHardwareKeepout,
+            HARDWARE_KEEPOUT_WEIGHT=SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
             JShear=globals().get("JShear"),
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
         )
@@ -10186,6 +10277,8 @@ def build_total_objective(
     width_max_threshold=BANANA_WIDTH_MAX_M,
     JCurveSelfIntersect=None,
     SELFINT_WEIGHT=0.0,
+    JCurveHardwareKeepout=None,
+    HARDWARE_KEEPOUT_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -10225,6 +10318,8 @@ def build_total_objective(
         width_max_threshold=width_max_threshold,
         JCurveSelfIntersect=JCurveSelfIntersect,
         SELFINT_WEIGHT=SELFINT_WEIGHT,
+        JCurveHardwareKeepout=JCurveHardwareKeepout,
+        HARDWARE_KEEPOUT_WEIGHT=HARDWARE_KEEPOUT_WEIGHT,
         JResidueObjective=JResidueObjective,
         JMeanSquaredCurvature=JMeanSquaredCurvature,
         MSC_WEIGHT=MSC_WEIGHT,
@@ -11579,12 +11674,15 @@ JCurveLengthMin = None
 JPoloidalExtent = None
 JCoilWidth = None
 JCurveSelfIntersect = None
+JCurveHardwareKeepout = None
 JLCFSMajorRadius = None
 JLCFSMinorRadius = None
 JResidueObjective = None
 SINGLE_STAGE_POLOIDAL_WEIGHT = POLOIDAL_EXTENT_WEIGHT
 SINGLE_STAGE_WIDTH_WEIGHT = 0.0
 SINGLE_STAGE_SELFINT_WEIGHT = 0.0
+SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = 0.0
+HARDWARE_KEEPOUT_JSON_PATH = None
 SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD = POLOIDAL_EXTENT_HALF_WIDTH_RAD
 SINGLE_STAGE_WIDTH_MIN_THRESHOLD = BANANA_WIDTH_MIN_M
 SINGLE_STAGE_WIDTH_MAX_THRESHOLD = BANANA_WIDTH_MAX_M
@@ -12204,6 +12302,10 @@ if __name__ == "__main__":
     SINGLE_STAGE_POLOIDAL_WEIGHT = float(args.single_stage_poloidal_weight)
     SINGLE_STAGE_WIDTH_WEIGHT = float(args.single_stage_width_weight)
     SINGLE_STAGE_SELFINT_WEIGHT = float(args.single_stage_selfint_weight)
+    SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = float(
+        args.single_stage_hardware_keepout_weight
+    )
+    HARDWARE_KEEPOUT_JSON_PATH = args.hardware_keepout_json
     SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD = float(
         args.single_stage_poloidal_threshold_rad
     )
@@ -12352,6 +12454,7 @@ if __name__ == "__main__":
                 len(surface_data),
                 SURFACE_GAP_THRESHOLD,
             ),
+            include_hardware_keepout=globals().get("JCurveHardwareKeepout") is not None,
             banana_current_state=banana_current_state,
         )
 
@@ -13846,6 +13949,8 @@ if __name__ == "__main__":
         "SINGLE_STAGE_POLOIDAL_WEIGHT": SINGLE_STAGE_POLOIDAL_WEIGHT,
         "SINGLE_STAGE_WIDTH_WEIGHT": SINGLE_STAGE_WIDTH_WEIGHT,
         "SINGLE_STAGE_SELFINT_WEIGHT": SINGLE_STAGE_SELFINT_WEIGHT,
+        "SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT": SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
+        "HARDWARE_KEEPOUT_JSON": HARDWARE_KEEPOUT_JSON_PATH,
         "SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD": SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
         "SINGLE_STAGE_WIDTH_MIN_THRESHOLD": SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
         "SINGLE_STAGE_WIDTH_MAX_THRESHOLD": SINGLE_STAGE_WIDTH_MAX_THRESHOLD,

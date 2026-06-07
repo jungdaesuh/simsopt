@@ -443,6 +443,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT": 1.0,
+            "SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT": 0.0,
             "env_flag": lambda name: False,
             "_DEFAULT_SINGLE_STAGE_SEED_REGIME": "auto",
             "_SINGLE_STAGE_SEED_REGIME_AUTO": "auto",
@@ -840,6 +841,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "width_min",
                 "width_max",
                 "self_intersect",
+                "hardware_keepout",
                 "banana_current",
                 "tf_current",
                 "lcfs_major_radius",
@@ -889,6 +891,20 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(
             schema_module.hardware_constraint_alm_activity_tolerance("self_intersect"),
             0.0,
+        )
+        self.assertEqual(specs["hardware_keepout"].kind, "upper_bound")
+        self.assertEqual(
+            specs["hardware_keepout"].applies_to,
+            frozenset({"penalty", "alm", "artifact"}),
+        )
+        self.assertEqual(specs["hardware_keepout"].threshold, 0.0)
+        self.assertEqual(specs["hardware_keepout"].alm_scale, 1.0)
+        self.assertTrue(specs["hardware_keepout"].allow_zero_threshold)
+        # Opt-in: pre-existing artifacts without the metric stay contract-valid.
+        self.assertTrue(specs["hardware_keepout"].artifact_value_optional)
+        self.assertEqual(
+            schema_module.hardware_constraint_alm_block("hardware_keepout"),
+            "geometry",
         )
         self.assertEqual(
             specs["banana_current"].applies_to,

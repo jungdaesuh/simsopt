@@ -8,6 +8,7 @@ from typing import Collection, Iterable, Literal, Mapping
 from alm_utils import require_positive_alm_threshold
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_HARDWARE_KEEPOUT_ALM_SCALE,
     BANANA_SELF_INTERSECT_ALM_SCALE,
     BANANA_WIDTH_MAX_M,
     BANANA_WIDTH_MIN_M,
@@ -48,6 +49,11 @@ class HardwareConstraintSpec:
     alm_activity_tolerance_fraction: float = 0.0
     allow_zero_threshold: bool = False
     violation_abs_tol: float = 0.0
+    # Opt-in constraints may be legitimately absent from artifacts produced
+    # before the constraint existed or by runs that did not enable it. For
+    # those specs a missing measured value means "not evaluated" rather than
+    # a contract violation, even under ``require_values=True``.
+    artifact_value_optional: bool = False
 
 
 @dataclass(frozen=True)
@@ -203,6 +209,22 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         allow_zero_threshold=True,
     ),
     HardwareConstraintSpec(
+        name="hardware_keepout",
+        kind="upper_bound",
+        threshold=0.0,
+        applies_to=frozenset({"penalty", "alm", "artifact"}),
+        traversal_policy="allowed",
+        alm_scale=BANANA_HARDWARE_KEEPOUT_ALM_SCALE,
+        # Same contract as self_intersect: clear of the sensor/mount keep-out
+        # cloud is exactly zero hinge penalty; any positive value is an active
+        # violation with zero slack. Traversal stays allowed so ALM can steer
+        # out of colliding designs instead of rejecting them outright.
+        allow_zero_threshold=True,
+        # Opt-in (default-OFF weight): artifacts from runs that did not enable
+        # the keep-out — including every pre-existing seed — carry no value.
+        artifact_value_optional=True,
+    ),
+    HardwareConstraintSpec(
         name="banana_current",
         kind="box_bound",
         threshold=BANANA_CURRENT_HARD_LIMIT_A,
@@ -249,6 +271,7 @@ _DEFAULT_ALM_BLOCK_BY_NAME: Mapping[str, ALMBlock] = {
     "width_min": "geometry",
     "width_max": "geometry",
     "self_intersect": "geometry",
+    "hardware_keepout": "geometry",
     "banana_current": "current",
     "tf_current": "current",
     "lcfs_major_radius": "surface",
@@ -264,6 +287,7 @@ _ARTIFACT_VALUE_FIELD_BY_NAME = {
     "width_min": ("coil_width", "COIL_WIDTH"),
     "width_max": ("coil_width", "COIL_WIDTH"),
     "self_intersect": ("self_intersect_penalty", "SELF_INTERSECT_PENALTY"),
+    "hardware_keepout": ("hardware_keepout_penalty", "HARDWARE_KEEPOUT_PENALTY"),
     "banana_current": ("banana_current_A", "BANANA_CURRENT_A"),
     "tf_current": ("tf_current_A", "TF_CURRENT_A"),
     "lcfs_major_radius": ("lcfs_major_radius_m", "FINAL_LCFS_MAJOR_RADIUS_M"),
@@ -279,6 +303,7 @@ _ARTIFACT_THRESHOLD_FIELD_BY_NAME = {
     "width_min": ("width_min_threshold", "WIDTH_MIN_THRESHOLD"),
     "width_max": ("width_max_threshold", "WIDTH_MAX_THRESHOLD"),
     "self_intersect": ("self_intersect_threshold", "SELF_INTERSECT_THRESHOLD"),
+    "hardware_keepout": ("hardware_keepout_threshold", "HARDWARE_KEEPOUT_THRESHOLD"),
     "banana_current": ("banana_current_max_A", "BANANA_CURRENT_MAX_A"),
     "tf_current": ("tf_current_limit_A", "TF_CURRENT_LIMIT_A"),
 }
@@ -881,7 +906,7 @@ def build_hardware_constraint_status(
     for spec in hardware_constraint_specs(applies_to=applies_to, names=names):
         value = measured_values.get(spec.name)
         if value is None:
-            if require_values:
+            if require_values and not spec.artifact_value_optional:
                 violation_message = (
                     f"missing required hardware constraint metric {spec.name}"
                 )

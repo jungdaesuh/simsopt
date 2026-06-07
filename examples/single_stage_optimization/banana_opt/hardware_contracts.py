@@ -16,6 +16,16 @@ COIL_LENGTH_MIN_TARGET_M = COIL_LENGTH_TARGET_M * COIL_LENGTH_MIN_FRACTION
 COIL_LENGTH_HARD_LIMIT_M = 2.0
 COIL_COIL_MIN_DIST_M = 0.0462
 COIL_PLASMA_MIN_DIST_M = 0.010
+# Minimum allowed distance from the banana coil CENTERLINE to the fixed
+# in-vessel hardware point cloud (Mirnov sensor arrays, solenoid mounts, REMC
+# mounts). The optimizer sees centerlines while the swept U-channel is what
+# collides, so the threshold is the 29x20 mm pack's corner reach from the
+# centerline (17.6 mm) plus a 5 mm safety margin; the derivation is recorded in
+# the cloud's own JSON
+# (CAD/banana_coils/hbt_clearance_viewer/tools/hardware_keepout.json, generated
+# by export_hardware_keepout.py and cross-validated against the viewer's
+# parry-verified contact verdict for the M7 champion).
+HARDWARE_KEEPOUT_MIN_DISTANCE_M = 0.0226
 # Diagnostic reference for the LCFS-to-vessel SurfaceSurfaceDistance metric.
 # wh_notes.md does not define this as an engineering acceptance floor.
 PLASMA_VESSEL_MIN_DIST_M = 0.04
@@ -46,6 +56,7 @@ BANANA_PACK_HALF_BUILD_NORMAL_M = BANANA_PACK_DEPTH_NORMAL_M / 2.0
 BANANA_WIDTH_MIN_M = 0.1
 BANANA_WIDTH_MAX_M = 0.17
 BANANA_SELF_INTERSECT_ALM_SCALE = 1.0
+BANANA_HARDWARE_KEEPOUT_ALM_SCALE = 1.0
 # Minimum allowed self-distance for the banana coil curve. The external
 # jhalpern30 driver activates `CurveSelfIntersect` at 1/CURVATURE_THRESHOLD,
 # which matches our reciprocal of the maximum allowed curvature.
@@ -64,6 +75,9 @@ STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT = 1.0
 STAGE2_POLOIDAL_WEIGHT_DEFAULT = 1.0
 SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT = 1.0
 SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT = 1.0
+# Hardware keep-out is opt-in (default-OFF): existing runs stay byte-identical
+# until a weight is set AND a keep-out point cloud path is provided.
+SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT = 0.0
 POLOIDAL_EXTENT_HALF_WIDTH_RAD = 70.0 * math.pi / 180.0
 SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT = 1.0
 POLOIDAL_EXTENT_WEIGHT = SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT
