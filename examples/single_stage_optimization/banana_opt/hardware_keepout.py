@@ -31,13 +31,24 @@ sampling ``spacing_m`` squared),
 .. math::
     J = \\sum_{c} \\frac{1}{N} \\sum_{i=1}^{N}
         \\lVert \\gamma'^{(c)}_i \\rVert \\sum_{k}
-        w \\, \\max(0,\\; d_{\\min} - \\lVert \\gamma^{(c)}_i - p_k \\rVert)^2,
+        \\frac{w}{d_{\\min}^{2}}
+        \\left(\\frac{\\max(0,\\; d_{\\min} -
+        \\lVert \\gamma^{(c)}_i - p_k \\rVert)}{d_{\\min}}\\right)^{2},
 
-the discrete analogue of :math:`\\sum_c \\int_{\\text{curve}}
-\\int_{\\text{hw}} \\max(0, d_{\\min} - d)^2 \\, dl \\, ds` — the same
-integral convention as ``CurveSurfaceDistance`` (whose ``ds`` measure is
-carried by the surface normal magnitude; here the patch area ``w``
-carries it explicitly).
+the ``CurveSurfaceDistance`` hinge-squared integral
+:math:`\\sum_c \\int\\!\\!\\int \\max(0, d_{\\min} - d)^2 \\, dl \\, ds`
+**nondimensionalised by** :math:`d_{\\min}^4`: violation depth is measured
+in units of the threshold and patch area in units of the threshold
+squared, so ``J`` reads as coil-metres in violation weighted by relative
+depth squared. The raw m^5 integral is numerically minuscule for real
+violations (a 21 mm-deep sensor-array intrusion of the M17b run measured
+``5.1e-08``), which let a weight of ``2.4e5`` contribute only ``0.012``
+to the objective — the optimizer ignored the hardware entirely and ALM
+feasibility tolerances would equally have swallowed it. In these
+normalised units the same intrusion measures ``~0.2``, so penalty
+weights of order ``1e1–1e3`` and the schema's ``alm_scale = 1`` exert
+real pressure. Clear of the cloud is exactly ``J = 0`` in either
+convention.
 
 :math:`d_{\\min}` is measured from the coil *centerline*: the optimiser
 sees centerlines but the swept U-channel is what collides, so the
@@ -107,8 +118,12 @@ def hardware_keepout_pure(gammac, lc, points, point_weight, minimum_distance):
     safe = jnp.where(dist_sq > 0.0, dist_sq, 1.0)
     dists = jnp.where(dist_sq > 0.0, jnp.sqrt(safe), 0.0)
     alen = jnp.linalg.norm(lc, axis=1)[:, None]
-    viol = jnp.maximum(minimum_distance - dists, 0.0) ** 2
-    return jnp.sum(alen * point_weight * viol) / gammac.shape[0]
+    # Depth in units of d_min, patch area in units of d_min^2 (see module
+    # docstring): keeps real violations O(0.1-1) instead of O(1e-8) m^5.
+    viol_rel = jnp.maximum(minimum_distance - dists, 0.0) / minimum_distance
+    return jnp.sum(
+        alen * (point_weight / minimum_distance**2) * viol_rel**2
+    ) / gammac.shape[0]
 
 
 class CurveHardwareKeepout(Optimizable):

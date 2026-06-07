@@ -72,6 +72,23 @@ class HardwareKeepoutObjectiveTests(unittest.TestCase):
         self.assertGreater(j_farther, 0.0)
         self.assertGreater(j_near, j_farther)
 
+    def test_violation_scale_is_optimizer_relevant_not_m5(self):
+        """Regression for the M17b scale bug: in the raw hinge^2 m^5 integral a
+        21 mm-deep sensor intrusion measured J ~ 5e-8, so even weight 2.4e5
+        contributed ~0.01 to the objective and the optimizer ignored the
+        hardware. In the d_min-normalised units a half-threshold violation of a
+        single cloud point must already register at optimizer scale (>= 1e-3),
+        so documented weights of order 1e1-1e3 exert real pressure."""
+        curve = _circle_curve(seed=9)
+        near = np.array([[1.0 + 0.5 * HARDWARE_KEEPOUT_MIN_DISTANCE_M, 0.0, 0.0]])
+        j_near = CurveHardwareKeepout(
+            [curve], near, HARDWARE_KEEPOUT_MIN_DISTANCE_M, point_weight=1e-4).J()
+        self.assertGreater(
+            j_near, 1e-3,
+            msg=f"half-threshold violation J={j_near:.3e} is below optimizer "
+                "scale — the m^5 units bug is back",
+        )
+
     def test_gradient_matches_finite_differences(self):
         # Taylor test at a configuration with an ACTIVE hinge: a small cloud
         # near the curve. Central differences along a fixed random direction.
