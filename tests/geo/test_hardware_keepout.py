@@ -132,6 +132,21 @@ class HardwareKeepoutObjectiveTests(unittest.TestCase):
             [curve_b], points, HARDWARE_KEEPOUT_MIN_DISTANCE_M, point_weight=1e-4)
         self.assertGreater(both.J(), 0.0)
         self.assertAlmostEqual(both.J(), only_b.J(), places=12)
+        # Gradient attribution: the dof vector is [curve_a dofs, curve_b dofs];
+        # A is untouched by the cloud, B matches the single-curve gradient.
+        grad_both = np.asarray(both.dJ(), dtype=float)
+        n_a = curve_a.dof_size
+        self.assertTrue(
+            np.all(grad_both[:n_a] == 0.0),
+            msg="curve A is far from the cloud but received gradient",
+        )
+        np.testing.assert_allclose(
+            grad_both[n_a:],
+            np.asarray(only_b.dJ(), dtype=float),
+            rtol=0.0,
+            atol=1e-15,
+            err_msg="curve B gradient differs between joint and single-curve objectives",
+        )
 
     def test_shortest_distance_diagnostic(self):
         curve = _circle_curve(seed=8)

@@ -1233,6 +1233,28 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "lcfs_minor_radius",
             ],
         )
+        keepout_constraint_names = functions["single_stage_alm_constraint_names"](
+            alm_formulation="weighted_sum",
+            include_hardware_keepout=True,
+        )
+        self.assertEqual(
+            keepout_constraint_names,
+            [
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "max_curvature",
+                "coil_length_upper_bound",
+                "coil_length_min",
+                "poloidal_extent",
+                "width_min",
+                "width_max",
+                "self_intersect",
+                "hardware_keepout",
+                "banana_current_upper_bound",
+                "lcfs_major_radius",
+                "lcfs_minor_radius",
+            ],
+        )
         stacked_constraint_names = functions["single_stage_alm_constraint_names"](
             alm_formulation="thresholded_physics",
             include_surface_stack=True,
