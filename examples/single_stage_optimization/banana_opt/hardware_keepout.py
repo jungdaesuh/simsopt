@@ -98,32 +98,82 @@ from simsopt.geo.jit import jit
 _PAD_COORDINATE = 1.0e3
 
 
-def hardware_keepout_pure(gammac, lc, points, point_weight, minimum_distance):
-    """Curve-vs-hardware-cloud hinge penalty, JAX-pure.
+def _normalize(v):
+    """Row-wise unit vectors with an eps guard (rows are never truly zero for a
+    real coil: tangent and radial directions are well defined everywhere)."""
+    return v / jnp.linalg.norm(v, axis=-1, keepdims=True).clip(1e-30)
+
+
+def _bracket_frame(gammac, winding_r0):
+    """Per-quadpoint as-built U-channel frame, an exact differentiable port of
+    the viewer's ``geom::frames`` (the swept-solid the oracle measures).
+
+    Returns ``(tangent, tangential, radial, half_seg)`` with row i giving the
+    bracket basis at quadpoint i: ``tangential`` is the cross-section width
+    direction (pack binormal), ``radial`` the depth direction (toward/from the
+    winding major axis at ``winding_r0``), ``tangent`` the sweep direction, and
+    ``half_seg`` half the local along-sweep span (so adjacent boxes tile).
+    """
+    nxt = jnp.roll(gammac, -1, axis=0)
+    prv = jnp.roll(gammac, 1, axis=0)
+    tangent = _normalize(nxt - prv)
+    phi = jnp.arctan2(gammac[:, 1], gammac[:, 0])
+    axis = jnp.stack(
+        [winding_r0 * jnp.cos(phi), winding_r0 * jnp.sin(phi),
+         jnp.zeros_like(phi)],
+        axis=1,
+    )
+    radial0 = _normalize(gammac - axis)
+    tangential = _normalize(jnp.cross(tangent, radial0))
+    radial = _normalize(jnp.cross(tangential, tangent))
+    half_seg = 0.25 * jnp.linalg.norm(nxt - prv, axis=1)
+    return tangent, tangential, radial, half_seg
+
+
+def hardware_keepout_pure(gammac, points, point_weight, half_w, half_d,
+                          margin, winding_r0):
+    r"""Curve-vs-hardware hinge penalty on the **as-built U-channel envelope**.
+
+    Unlike a centerline-distance penalty padded by a single isotropic number,
+    this measures the distance from each hardware point to the swept rectangular
+    bracket (``±half_w`` along the pack binormal, ``±half_d`` along the pack
+    normal, swept along the tangent), oriented exactly as the viewer's
+    swept-solid oracle. The hinge then activates within ``margin`` of that real
+    metal surface. Optimising it therefore moves the *actual* contacting edge,
+    not a proxy point the bracket may not even reach.
 
     Parameters
     ----------
     gammac : (N, 3) array
-        Curve quadpoints.
-    lc : (N, 3) array
-        Curve tangents d(gamma)/ds.
+        Curve quadpoints (the frame is derived from these, so the gradient
+        flows entirely through ``gamma``; no separate tangent input).
     points : (P, 3) array
         Hardware surface sample points (one chunk).
     point_weight : float
         Surface patch area each point represents (sampling spacing^2), m^2.
-    minimum_distance : float
-        Centerline keep-out threshold, m.
+    half_w, half_d : float
+        Bracket cross-section half-extents (binormal width / normal depth), m.
+    margin : float
+        Safety clearance required *beyond* the metal envelope, m.
+    winding_r0 : float
+        Winding major radius defining the radial frame direction (must match
+        the artifact ``winding_surface.r0_m`` the oracle uses).
     """
-    dist_sq = jnp.sum((gammac[:, None, :] - points[None, :, :]) ** 2, axis=2)
-    safe = jnp.where(dist_sq > 0.0, dist_sq, 1.0)
-    dists = jnp.where(dist_sq > 0.0, jnp.sqrt(safe), 0.0)
-    alen = jnp.linalg.norm(lc, axis=1)[:, None]
-    # Depth in units of d_min, patch area in units of d_min^2 (see module
-    # docstring): keeps real violations O(0.1-1) instead of O(1e-8) m^5.
-    viol_rel = jnp.maximum(minimum_distance - dists, 0.0) / minimum_distance
-    return jnp.sum(
-        alen * (point_weight / minimum_distance**2) * viol_rel**2
-    ) / gammac.shape[0]
+    tangent, tangential, radial, half_seg = _bracket_frame(gammac, winding_r0)
+    d = points[None, :, :] - gammac[:, None, :]              # (N, P, 3)
+    a = jnp.abs(jnp.sum(d * tangent[:, None, :], axis=2))    # along sweep
+    b = jnp.abs(jnp.sum(d * tangential[:, None, :], axis=2))  # along width
+    c = jnp.abs(jnp.sum(d * radial[:, None, :], axis=2))     # along depth
+    da = jnp.maximum(a - half_seg[:, None], 0.0)
+    db = jnp.maximum(b - half_w, 0.0)
+    dc = jnp.maximum(c - half_d, 0.0)
+    box_sq = da ** 2 + db ** 2 + dc ** 2                     # (N, P) to box i
+    # Distance from each hardware point to the swept solid = nearest box.
+    solid_sq = jnp.min(box_sq, axis=0)                      # (P,)
+    safe = jnp.where(solid_sq > 0.0, solid_sq, 1.0)
+    solid = jnp.where(solid_sq > 0.0, jnp.sqrt(safe), 0.0)
+    viol_rel = jnp.maximum(margin - solid, 0.0) / margin
+    return jnp.sum(point_weight * viol_rel ** 2) / margin ** 2
 
 
 class CurveHardwareKeepout(Optimizable):
@@ -152,10 +202,22 @@ class CurveHardwareKeepout(Optimizable):
     """
 
     def __init__(self, curves, points, minimum_distance, point_weight,
+                 half_w=0.0145, half_d=0.010, winding_r0=0.976,
                  chunk_size=8192):
         self.curves = curves
         self.minimum_distance = float(minimum_distance)
         self.point_weight = float(point_weight)
+        self.half_w = float(half_w)
+        self.half_d = float(half_d)
+        self.winding_r0 = float(winding_r0)
+        # The contract distance is centerline corner-reach + safety; the box now
+        # carries the corner reach, so the hinge margin is the safety remainder.
+        corner_reach = float(np.hypot(half_w, half_d))
+        self.margin = self.minimum_distance - corner_reach
+        if self.margin <= 0.0:
+            raise ValueError(
+                f"minimum_distance {minimum_distance} m must exceed the bracket "
+                f"corner reach {corner_reach:.4f} m to leave a positive margin")
 
         pts = np.ascontiguousarray(np.asarray(points, dtype=np.float64))
         if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] == 0:
@@ -178,12 +240,11 @@ class CurveHardwareKeepout(Optimizable):
             real = chunk[np.any(chunk != _PAD_COORDINATE, axis=1)]
             self._chunk_bounds.append((real.min(axis=0), real.max(axis=0)))
 
-        self.J_jax = jit(lambda gammac, lc, pts_: hardware_keepout_pure(
-            gammac, lc, pts_, self.point_weight, self.minimum_distance))
+        self.J_jax = jit(lambda gammac, pts_: hardware_keepout_pure(
+            gammac, pts_, self.point_weight, self.half_w, self.half_d,
+            self.margin, self.winding_r0))
         self.dJ_dgamma = jit(
-            lambda gammac, lc, pts_: grad(self.J_jax, argnums=0)(gammac, lc, pts_))
-        self.dJ_dlc = jit(
-            lambda gammac, lc, pts_: grad(self.J_jax, argnums=1)(gammac, lc, pts_))
+            lambda gammac, pts_: grad(self.J_jax, argnums=0)(gammac, pts_))
         self.candidates = None
         super().__init__(depends_on=curves)
 
@@ -206,14 +267,26 @@ class CurveHardwareKeepout(Optimizable):
             self.candidates = candidates
 
     def shortest_distance(self):
-        """Minimum quadpoint-to-cloud distance over all curves, m. Diagnostic
-        only (NumPy); pads sit ~1 km away and cannot win the minimum."""
-        from scipy.spatial.distance import cdist
-        return min(
-            float(np.min(cdist(c.gamma(), chunk)))
-            for c in self.curves
-            for chunk in self._chunks_np
-        )
+        """Minimum hardware-point-to-U-channel-envelope distance over all
+        curves, m (NumPy diagnostic). Negative is impossible here (clamped at
+        the box surface); 0 means the metal touches the cloud. Pads sit ~1 km
+        away and cannot win the minimum."""
+        best = np.inf
+        for curve in self.curves:
+            g = np.asarray(curve.gamma(), dtype=np.float64)
+            t, gw, gd, hseg = (np.asarray(x) for x in _bracket_frame(
+                jnp.asarray(g), self.winding_r0))
+            for chunk in self._chunks_np:
+                d = chunk[None, :, :] - g[:, None, :]
+                a = np.abs(np.sum(d * t[:, None, :], axis=2))
+                b = np.abs(np.sum(d * gw[:, None, :], axis=2))
+                c = np.abs(np.sum(d * gd[:, None, :], axis=2))
+                da = np.maximum(a - hseg[:, None], 0.0)
+                db = np.maximum(b - self.half_w, 0.0)
+                dc = np.maximum(c - self.half_d, 0.0)
+                box = np.sqrt(da ** 2 + db ** 2 + dc ** 2)
+                best = min(best, float(box.min()))
+        return best
 
     # ── Optimizable API ────────────────────────────────────────────────
     def J(self):
@@ -221,23 +294,18 @@ class CurveHardwareKeepout(Optimizable):
         res = 0.0
         for i, j in self.candidates:
             gammac = self.curves[i].gamma()
-            lc = self.curves[i].gammadash()
-            res += float(self.J_jax(gammac, lc, self._chunks[j]))
+            res += float(self.J_jax(gammac, self._chunks[j]))
         return res
 
     @derivative_dec
     def dJ(self):
         self.compute_candidates()
         dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
-        dlc_vecs = [np.zeros_like(c.gammadash()) for c in self.curves]
         for i, j in self.candidates:
             gammac = self.curves[i].gamma()
-            lc = self.curves[i].gammadash()
-            dgamma_vecs[i] += np.asarray(self.dJ_dgamma(gammac, lc, self._chunks[j]))
-            dlc_vecs[i] += np.asarray(self.dJ_dlc(gammac, lc, self._chunks[j]))
+            dgamma_vecs[i] += np.asarray(self.dJ_dgamma(gammac, self._chunks[j]))
         res = [
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
-            + self.curves[i].dgammadash_by_dcoeff_vjp(dlc_vecs[i])
             for i in range(len(self.curves))
         ]
         return sum(res)
