@@ -49,12 +49,13 @@ BANANA_PACK_HALF_BUILD_BINORMAL_M = BANANA_PACK_WIDTH_BINORMAL_M / 2.0
 BANANA_PACK_HALF_BUILD_NORMAL_M = BANANA_PACK_DEPTH_NORMAL_M / 2.0
 # Port-fit bounds on ProjectedEllipseWidth.J() (short-axis diameter of the
 # best-fit ellipse to the coil curve projected onto the winding surface).
-# Max 0.17 m is the bare-curve allowance for a 0.30 m port aperture; the
-# remaining ~0.13 m budgets coil pack, insulation, supports, and tolerance.
+# Max 0.197 m is the short-width limit for the banana coil through the vessel
+# port. The 0.17 m value was the previous allowance and is no longer the hard
+# engineering limit.
 # Min 0.1 m prevents the optimizer from collapsing the coil to a degenerate
 # zero-width shape. Matches the current HBT hardware contract.
 BANANA_WIDTH_MIN_M = 0.1
-BANANA_WIDTH_MAX_M = 0.17
+BANANA_WIDTH_MAX_M = 0.197
 BANANA_SELF_INTERSECT_ALM_SCALE = 1.0
 BANANA_HARDWARE_KEEPOUT_ALM_SCALE = 1.0
 # Minimum allowed self-distance for the banana coil curve. The external
@@ -78,7 +79,8 @@ SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT = 1.0
 # Hardware keep-out is opt-in (default-OFF): existing runs stay byte-identical
 # until a weight is set AND a keep-out point cloud path is provided.
 SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT = 0.0
-POLOIDAL_EXTENT_HALF_WIDTH_RAD = 70.0 * math.pi / 180.0
+POLOIDAL_EXTENT_IDEAL_HALF_WIDTH_RAD = 70.0 * math.pi / 180.0
+POLOIDAL_EXTENT_HALF_WIDTH_RAD = 87.0 * math.pi / 180.0
 SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT = 1.0
 POLOIDAL_EXTENT_WEIGHT = SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT
 LCFS_CLEARANCE_REFERENCE_MAJOR_RADIUS_M = BANANA_WINDING_SURFACE_MAJOR_RADIUS_M

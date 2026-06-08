@@ -117,7 +117,7 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "POLOIDAL_EXTENT_THRESHOLD_RAD": 45.0 * np.pi / 180.0,
         "COIL_WIDTH": 0.10,
         "WIDTH_MIN_THRESHOLD": 0.1,
-        "WIDTH_MAX_THRESHOLD": 0.17,
+        "WIDTH_MAX_THRESHOLD": hardware_contracts.BANANA_WIDTH_MAX_M,
         "SELF_INTERSECT_PENALTY": 0.0,
         "SELF_INTERSECT_THRESHOLD": 0.0,
         "SHORTEST_SELF_DISTANCE": 0.01,

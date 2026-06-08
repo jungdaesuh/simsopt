@@ -395,9 +395,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "COIL_LENGTH_HARD_LIMIT_M": 2.0,
             "COIL_LENGTH_TARGET_M": 1.9,
             "COIL_PLASMA_MIN_DIST_M": 0.010,
-            "POLOIDAL_EXTENT_HALF_WIDTH_RAD": 1.2217304763960306,
+            "POLOIDAL_EXTENT_HALF_WIDTH_RAD": 1.5184364492350666,
             "BANANA_WIDTH_MIN_M": 0.1,
-            "BANANA_WIDTH_MAX_M": 0.17,
+            "BANANA_WIDTH_MAX_M": 0.197,
             "BANANA_SELF_INTERSECT_MIN_DISTANCE_M": 0.01,
             "BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR": 1.5,
             "DEFAULT_EQUILIBRIA_DIR": "/tmp/fake_eq",
@@ -1848,7 +1848,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertNotIn("PLASMA_VESSEL_MIN_DIST_M", metadata)
         self.assertEqual(metadata["LENGTH_TARGET"], 1.9)
         self.assertEqual(metadata["WIDTH_MIN_THRESHOLD"], 0.1)
-        self.assertEqual(metadata["WIDTH_MAX_THRESHOLD"], 0.17)
+        self.assertEqual(metadata["WIDTH_MAX_THRESHOLD"], 0.197)
         self.assertEqual(metadata["SELF_INTERSECT_THRESHOLD"], 0.0)
         self.assertEqual(metadata["SELF_INTERSECT_MIN_DISTANCE"], 0.01)
 
