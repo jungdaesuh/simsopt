@@ -34,6 +34,7 @@ from banana_opt.hardware_keepout import (  # noqa: E402
     load_hardware_keepout,
 )
 from banana_opt.hardware_contracts import (  # noqa: E402
+    BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     HARDWARE_KEEPOUT_MIN_DISTANCE_M,
 )
 
@@ -66,6 +67,21 @@ def _keepout(curves, points, **kw):
 
 
 class HardwareKeepoutObjectiveTests(unittest.TestCase):
+    def test_default_winding_r0_uses_hardware_contract(self):
+        curve = _circle_curve(seed=20)
+        points = np.array([[10.0, 0.0, 0.0]])
+        objective = CurveHardwareKeepout(
+            [curve],
+            points,
+            HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+            1e-4,
+        )
+
+        self.assertAlmostEqual(
+            objective.winding_r0,
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        )
+
     def test_far_cloud_gives_exact_zero_value_and_gradient(self):
         curve = _circle_curve(seed=1)
         # Cloud 10 m away: no envelope can be within the margin.

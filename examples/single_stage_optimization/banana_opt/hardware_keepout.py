@@ -89,6 +89,7 @@ import numpy as np
 from jax import grad
 import jax.numpy as jnp
 
+from banana_opt.hardware_contracts import BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
 from simsopt._core import Optimizable
 from simsopt._core.derivative import derivative_dec
 from simsopt.geo.jit import jit
@@ -202,7 +203,8 @@ class CurveHardwareKeepout(Optimizable):
     """
 
     def __init__(self, curves, points, minimum_distance, point_weight,
-                 half_w=0.0145, half_d=0.010, winding_r0=0.976,
+                 half_w=0.0145, half_d=0.010,
+                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
                  chunk_size=8192):
         self.curves = curves
         self.minimum_distance = float(minimum_distance)

@@ -12614,7 +12614,9 @@ class HardwareConstraintTests(unittest.TestCase):
         banana_curve = SimpleNamespace(order=8)
         outer_surface = object()
         self_objective = object()
+        hardware_keepout_objective = object()
         recorded_self_intersect_call = {}
+        recorded_hardware_keepout_call = {}
 
         def fake_curve_self_intersect(curve, minimum_distance, *, neighbor_skip):
             recorded_self_intersect_call.update(
@@ -12625,6 +12627,22 @@ class HardwareConstraintTests(unittest.TestCase):
                 }
             )
             return self_objective
+
+        def fake_hardware_keepout(
+            curves,
+            points,
+            minimum_distance,
+            point_weight,
+        ):
+            recorded_hardware_keepout_call.update(
+                {
+                    "curves": curves,
+                    "points": points,
+                    "minimum_distance": minimum_distance,
+                    "point_weight": point_weight,
+                }
+            )
+            return hardware_keepout_objective
 
         with ExitStack() as stack:
             stack.enter_context(
@@ -12671,10 +12689,29 @@ class HardwareConstraintTests(unittest.TestCase):
             stack.enter_context(
                 patch.object(module, "CurveSelfIntersect", fake_curve_self_intersect)
             )
+            keepout_points = np.array([[0.9, 0.0, 0.0], [0.91, 0.01, 0.0]])
+            keepout_point_weight = 3.6e-5
+            stack.enter_context(
+                patch.object(
+                    module,
+                    "load_hardware_keepout",
+                    return_value=(
+                        keepout_points,
+                        keepout_point_weight,
+                        module.HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+                        {},
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch.object(module, "CurveHardwareKeepout", fake_hardware_keepout)
+            )
             build_total_mock = stack.enter_context(
                 patch.object(module, "build_total_objective", return_value=object())
             )
 
+            module.SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = 1.0
+            module.HARDWARE_KEEPOUT_JSON_PATH = "/tmp/hardware_keepout.json"
             bundle = module.build_single_stage_objective_bundle(
                 stage="full",
                 surface_data=[
@@ -12709,6 +12746,20 @@ class HardwareConstraintTests(unittest.TestCase):
             module.SINGLE_STAGE_POLOIDAL_WEIGHT,
         )
         self.assertIs(bundle["JCurveSelfIntersect"], self_objective)
+        self.assertIs(bundle["JCurveHardwareKeepout"], hardware_keepout_objective)
+        self.assertEqual(recorded_hardware_keepout_call["curves"], [banana_curve])
+        np.testing.assert_allclose(
+            recorded_hardware_keepout_call["points"],
+            keepout_points,
+        )
+        self.assertAlmostEqual(
+            recorded_hardware_keepout_call["minimum_distance"],
+            module.HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+        )
+        self.assertAlmostEqual(
+            recorded_hardware_keepout_call["point_weight"],
+            keepout_point_weight,
+        )
 
     def test_build_single_stage_iota_objective_target_mode_uses_quadratic_penalty(self):
         module = self.load_module()
