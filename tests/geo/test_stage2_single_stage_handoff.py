@@ -128,6 +128,17 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "TF_CURRENT_A": -8.0e4,
         "FINAL_LCFS_MAJOR_RADIUS_M": hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M,
         "FINAL_LCFS_MINOR_RADIUS_M": hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M,
+        # LCFS edge-envelope metrics (Type KK contract): outboard = major + minor,
+        # inboard = major - minor, evaluated at the max envelope so they sit exactly
+        # on LCFS_{OUTBOARD,INBOARD}_RADIUS_{MAX,MIN}_M (valid by construction).
+        "FINAL_LCFS_OUTBOARD_EDGE_M": (
+            hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+            + hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M
+        ),
+        "FINAL_LCFS_INBOARD_EDGE_M": (
+            hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+            - hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M
+        ),
         "CC_THRESHOLD": 0.05,
         "CC_WEIGHT": 100.0,
         "CURVATURE_WEIGHT": 1.0e-4,
@@ -3062,6 +3073,27 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertAlmostEqual(seed.iota, 0.175)
         self.assertAlmostEqual(seed.G, -0.41)
         self.assertTrue(seed.has_solved_state)
+
+    def test_load_warm_start_boozer_seed_raises_without_solved_state(self):
+        # A Boozer-surface warm start with neither in-object .res state nor a
+        # _boozer_state.json sidecar must raise, not silently return iota=None
+        # (which downstream defaults into a single-stage solve that collapses).
+        module = load_handoff_module()
+        warm_start_surface = SimpleNamespace(nfp=5)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            warm_start_path = Path(tmpdir) / "surf_opt_boozer_surface.json"
+            warm_start_path.write_text("{}", encoding="utf-8")
+            # No state sidecar written.
+
+            with self.assertRaisesRegex(ValueError, "no solved"):
+                module.load_warm_start_boozer_seed(
+                    warm_start_path,
+                    artifact_loader=lambda _path: SimpleNamespace(
+                        surface=warm_start_surface,
+                        res={},
+                    ),
+                )
 
 
 class Stage2SolverIotaReportTests(unittest.TestCase):

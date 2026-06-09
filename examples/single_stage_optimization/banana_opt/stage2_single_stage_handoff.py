@@ -1308,8 +1308,20 @@ def load_warm_start_boozer_seed(
         G = _coerce_boozer_scalar(res.get("G"))
         if iota is None or G is None:
             solved_state = load_boozer_solved_state_sidecar(source_path)
-            if solved_state is not None:
-                iota, G = solved_state
+            if solved_state is None:
+                # The resolver only accepts a solved *_boozer_surface.json, so a
+                # warm-start Boozer artifact with no recoverable (iota, G) -- neither
+                # in-object .res nor a _boozer_state.json sidecar -- is a broken seed,
+                # not a fresh geometric surface. Defaulting iota downstream lets such a
+                # seed boot a single-stage solve that silently collapses to iota~0, so
+                # refuse it loudly instead of swallowing the missing state.
+                raise ValueError(
+                    f"Warm-start Boozer surface {source_path} carries no solved "
+                    f"iota/G (neither in-object .res nor a "
+                    f"{warm_start_boozer_state_path(source_path).name} sidecar); "
+                    f"re-save it with save_boozer_surface_with_state."
+                )
+            iota, G = solved_state
         warm_start_surface = warm_start_artifact.surface
     else:
         iota = None
