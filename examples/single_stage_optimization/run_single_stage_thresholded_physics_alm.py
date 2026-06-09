@@ -37,6 +37,8 @@ from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
 from banana_opt.hardware_contracts import (  # noqa: E402
     COIL_COIL_MIN_DIST_M,
     COIL_PLASMA_MIN_DIST_M,
+    LCFS_CONSTRAINT_MODE_DEFAULT,
+    LCFS_CONSTRAINT_MODES,
 )
 from alm_utils import (  # noqa: E402
     require_positive_alm_threshold,
@@ -229,6 +231,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--alm-distance-smoothing", type=float, default=0.005)
     parser.add_argument("--alm-curvature-smoothing", type=float, default=0.05)
+    parser.add_argument(
+        "--lcfs-constraint-mode",
+        choices=LCFS_CONSTRAINT_MODES,
+        default=os.environ.get("LCFS_CONSTRAINT_MODE", LCFS_CONSTRAINT_MODE_DEFAULT),
+    )
     parser.add_argument(
         "--alm-qs-threshold",
         type=float,

@@ -15,7 +15,11 @@ from banana_opt.artifact_contracts import (
 )
 from banana_opt.boozer_warm_start import save_boozer_surface_with_state
 from banana_opt.design_only_fields import assert_topology_field_allowed
-from banana_opt.hardware_contracts import COIL_LENGTH_MIN_FRACTION
+from banana_opt.hardware_contracts import (
+    COIL_LENGTH_MIN_FRACTION,
+    lcfs_inboard_edge_radius_m,
+    lcfs_outboard_edge_radius_m,
+)
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_status,
     build_threshold_overrides,
@@ -441,7 +445,31 @@ def evaluate_single_stage_hardware_constraints(
     hardware_keepout_threshold=None,
     lcfs_major_radius_m=None,
     lcfs_minor_radius_m=None,
+    lcfs_outboard_edge_m=None,
+    lcfs_inboard_edge_m=None,
+    lcfs_outboard_edge_threshold=None,
+    lcfs_inboard_edge_threshold=None,
 ):
+    resolved_lcfs_outboard_edge_m = lcfs_outboard_edge_m
+    resolved_lcfs_inboard_edge_m = lcfs_inboard_edge_m
+    if (
+        resolved_lcfs_outboard_edge_m is None
+        and lcfs_major_radius_m is not None
+        and lcfs_minor_radius_m is not None
+    ):
+        resolved_lcfs_outboard_edge_m = lcfs_outboard_edge_radius_m(
+            lcfs_major_radius_m,
+            lcfs_minor_radius_m,
+        )
+    if (
+        resolved_lcfs_inboard_edge_m is None
+        and lcfs_major_radius_m is not None
+        and lcfs_minor_radius_m is not None
+    ):
+        resolved_lcfs_inboard_edge_m = lcfs_inboard_edge_radius_m(
+            lcfs_major_radius_m,
+            lcfs_minor_radius_m,
+        )
     length_min_target = None
     if length_target is not None:
         length_min_target = COIL_LENGTH_MIN_FRACTION * float(length_target)
@@ -456,6 +484,8 @@ def evaluate_single_stage_hardware_constraints(
         ("hardware_keepout", hardware_keepout_threshold),
         ("tf_current", tf_current_limit_A),
         ("banana_current", banana_current_max_A),
+        ("lcfs_outboard_edge", lcfs_outboard_edge_threshold),
+        ("lcfs_inboard_edge", lcfs_inboard_edge_threshold),
     )
     search_threshold_overrides = build_threshold_overrides(
         shared_threshold_inputs
@@ -481,6 +511,8 @@ def evaluate_single_stage_hardware_constraints(
         "tf_current": tf_current_A,
         "banana_current": banana_current_A,
         "lcfs_major_radius": lcfs_major_radius_m,
+        "lcfs_outboard_edge": resolved_lcfs_outboard_edge_m,
+        "lcfs_inboard_edge": resolved_lcfs_inboard_edge_m,
         "lcfs_minor_radius": lcfs_minor_radius_m,
     }
     search_hardware_status = build_hardware_constraint_status(
@@ -526,7 +558,13 @@ def evaluate_single_stage_hardware_constraints(
         "hardware_keepout_penalty": _optional_float(hardware_keepout_penalty),
         "hardware_keepout_threshold": _optional_float(hardware_keepout_threshold),
         "lcfs_major_radius_m": _optional_float(lcfs_major_radius_m),
+        "lcfs_outboard_edge_m": _optional_float(resolved_lcfs_outboard_edge_m),
+        "lcfs_inboard_edge_m": _optional_float(resolved_lcfs_inboard_edge_m),
         "lcfs_minor_radius_m": _optional_float(lcfs_minor_radius_m),
+        "lcfs_outboard_edge_threshold": _optional_float(
+            lcfs_outboard_edge_threshold
+        ),
+        "lcfs_inboard_edge_threshold": _optional_float(lcfs_inboard_edge_threshold),
     }
 
 
@@ -644,8 +682,12 @@ def evaluate_single_stage_search_hardware_snapshot(
     hardware_keepout_threshold=None,
     lcfs_major_radius_m=None,
     lcfs_minor_radius_m=None,
+    lcfs_outboard_edge_m=None,
+    lcfs_inboard_edge_m=None,
     lcfs_major_radius_threshold=None,
     lcfs_minor_radius_threshold=None,
+    lcfs_outboard_edge_threshold=None,
+    lcfs_inboard_edge_threshold=None,
 ):
     payload_kind = objective_eval["search_hardware_constraint_payload_kind"]
     if payload_kind not in {"signed_residual", "penalty_objective"}:
@@ -738,6 +780,46 @@ def evaluate_single_stage_search_hardware_snapshot(
                 resolved_lcfs_minor_radius_threshold,
                 lcfs_minor_radius_signed_value,
             )
+    resolved_lcfs_outboard_edge_threshold = _threshold_from_override_or_schema(
+        "lcfs_outboard_edge",
+        lcfs_outboard_edge_threshold,
+    )
+    if lcfs_outboard_edge_m is None:
+        lcfs_outboard_edge_signed_value = signed_values.get("lcfs_outboard_edge")
+        if lcfs_outboard_edge_signed_value is not None:
+            lcfs_outboard_edge_m = _upper_bound_measurement_from_signed(
+                resolved_lcfs_outboard_edge_threshold,
+                lcfs_outboard_edge_signed_value,
+            )
+    resolved_lcfs_inboard_edge_threshold = _threshold_from_override_or_schema(
+        "lcfs_inboard_edge",
+        lcfs_inboard_edge_threshold,
+    )
+    if lcfs_inboard_edge_m is None:
+        lcfs_inboard_edge_signed_value = signed_values.get("lcfs_inboard_edge")
+        if lcfs_inboard_edge_signed_value is not None:
+            lcfs_inboard_edge_m = _lower_bound_measurement_from_signed(
+                resolved_lcfs_inboard_edge_threshold,
+                lcfs_inboard_edge_signed_value,
+            )
+    if (
+        lcfs_outboard_edge_m is None
+        and lcfs_major_radius_m is not None
+        and lcfs_minor_radius_m is not None
+    ):
+        lcfs_outboard_edge_m = lcfs_outboard_edge_radius_m(
+            lcfs_major_radius_m,
+            lcfs_minor_radius_m,
+        )
+    if (
+        lcfs_inboard_edge_m is None
+        and lcfs_major_radius_m is not None
+        and lcfs_minor_radius_m is not None
+    ):
+        lcfs_inboard_edge_m = lcfs_inboard_edge_radius_m(
+            lcfs_major_radius_m,
+            lcfs_minor_radius_m,
+        )
 
     threshold_overrides = build_threshold_overrides(
         (
@@ -753,6 +835,8 @@ def evaluate_single_stage_search_hardware_snapshot(
             ("hardware_keepout", hardware_keepout_threshold),
             ("banana_current", banana_current_max_A),
             ("lcfs_major_radius", lcfs_major_radius_threshold),
+            ("lcfs_outboard_edge", lcfs_outboard_edge_threshold),
+            ("lcfs_inboard_edge", lcfs_inboard_edge_threshold),
             ("lcfs_minor_radius", lcfs_minor_radius_threshold),
         )
     )
@@ -770,6 +854,8 @@ def evaluate_single_stage_search_hardware_snapshot(
         "tf_current": tf_current_A,
         "banana_current": banana_current_A,
         "lcfs_major_radius": lcfs_major_radius_m,
+        "lcfs_outboard_edge": lcfs_outboard_edge_m,
+        "lcfs_inboard_edge": lcfs_inboard_edge_m,
         "lcfs_minor_radius": lcfs_minor_radius_m,
     }
     search_hardware_status = build_hardware_constraint_status(
@@ -805,9 +891,17 @@ def evaluate_single_stage_search_hardware_snapshot(
             "hardware_keepout_penalty": _optional_float(hardware_keepout_penalty),
             "hardware_keepout_threshold": _optional_float(hardware_keepout_threshold),
             "lcfs_major_radius_m": _optional_float(lcfs_major_radius_m),
+            "lcfs_outboard_edge_m": _optional_float(lcfs_outboard_edge_m),
+            "lcfs_inboard_edge_m": _optional_float(lcfs_inboard_edge_m),
             "lcfs_minor_radius_m": _optional_float(lcfs_minor_radius_m),
             "lcfs_major_radius_threshold": _optional_float(
                 resolved_lcfs_major_radius_threshold
+            ),
+            "lcfs_outboard_edge_threshold": _optional_float(
+                resolved_lcfs_outboard_edge_threshold
+            ),
+            "lcfs_inboard_edge_threshold": _optional_float(
+                resolved_lcfs_inboard_edge_threshold
             ),
             "lcfs_minor_radius_threshold": _optional_float(
                 resolved_lcfs_minor_radius_threshold
@@ -846,9 +940,17 @@ def evaluate_single_stage_search_hardware_snapshot(
         "hardware_keepout_penalty": _optional_float(hardware_keepout_penalty),
         "hardware_keepout_threshold": _optional_float(hardware_keepout_threshold),
         "lcfs_major_radius_m": _optional_float(lcfs_major_radius_m),
+        "lcfs_outboard_edge_m": _optional_float(lcfs_outboard_edge_m),
+        "lcfs_inboard_edge_m": _optional_float(lcfs_inboard_edge_m),
         "lcfs_minor_radius_m": _optional_float(lcfs_minor_radius_m),
         "lcfs_major_radius_threshold": _optional_float(
             resolved_lcfs_major_radius_threshold
+        ),
+        "lcfs_outboard_edge_threshold": _optional_float(
+            resolved_lcfs_outboard_edge_threshold
+        ),
+        "lcfs_inboard_edge_threshold": _optional_float(
+            resolved_lcfs_inboard_edge_threshold
         ),
         "lcfs_minor_radius_threshold": _optional_float(
             resolved_lcfs_minor_radius_threshold
@@ -910,6 +1012,8 @@ def evaluate_single_stage_hardware_snapshot(
     hardware_keepout_threshold=None,
     lcfs_major_radius_m=None,
     lcfs_minor_radius_m=None,
+    lcfs_outboard_edge_threshold=None,
+    lcfs_inboard_edge_threshold=None,
 ):
     curve_curve_min_dist = float(curve_curve_distance_obj.shortest_distance())
     curve_surface_min_dist = float(curve_surface_distance_obj.shortest_distance())
@@ -950,6 +1054,8 @@ def evaluate_single_stage_hardware_snapshot(
         hardware_keepout_threshold=hardware_keepout_threshold,
         lcfs_major_radius_m=resolved_lcfs_major_radius_m,
         lcfs_minor_radius_m=resolved_lcfs_minor_radius_m,
+        lcfs_outboard_edge_threshold=lcfs_outboard_edge_threshold,
+        lcfs_inboard_edge_threshold=lcfs_inboard_edge_threshold,
     )
 
 

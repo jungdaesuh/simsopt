@@ -16,6 +16,8 @@ from banana_opt.hardware_contracts import (
     COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_MIN_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
+    LCFS_INBOARD_RADIUS_MIN_M,
+    LCFS_OUTBOARD_RADIUS_MAX_M,
     LCFS_RADIUS_ABS_TOL_M,
     MAX_CURVATURE_INV_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
@@ -249,6 +251,24 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         violation_abs_tol=LCFS_RADIUS_ABS_TOL_M,
     ),
     HardwareConstraintSpec(
+        name="lcfs_outboard_edge",
+        kind="upper_bound",
+        threshold=LCFS_OUTBOARD_RADIUS_MAX_M,
+        alm_activity_tolerance_fraction=ALM_ACTIVITY_TOLERANCE_FRACTION,
+        applies_to=frozenset({"alm", "artifact"}),
+        traversal_policy="allowed",
+        violation_abs_tol=LCFS_RADIUS_ABS_TOL_M,
+    ),
+    HardwareConstraintSpec(
+        name="lcfs_inboard_edge",
+        kind="lower_bound",
+        threshold=LCFS_INBOARD_RADIUS_MIN_M,
+        alm_activity_tolerance_fraction=ALM_ACTIVITY_TOLERANCE_FRACTION,
+        applies_to=frozenset({"alm", "artifact"}),
+        traversal_policy="allowed",
+        violation_abs_tol=LCFS_RADIUS_ABS_TOL_M,
+    ),
+    HardwareConstraintSpec(
         name="lcfs_minor_radius",
         kind="upper_bound",
         threshold=TARGET_LCFS_MAX_MINOR_RADIUS_M,
@@ -275,6 +295,8 @@ _DEFAULT_ALM_BLOCK_BY_NAME: Mapping[str, ALMBlock] = {
     "banana_current": "current",
     "tf_current": "current",
     "lcfs_major_radius": "surface",
+    "lcfs_outboard_edge": "surface",
+    "lcfs_inboard_edge": "surface",
     "lcfs_minor_radius": "surface",
 }
 _ARTIFACT_VALUE_FIELD_BY_NAME = {
@@ -291,6 +313,11 @@ _ARTIFACT_VALUE_FIELD_BY_NAME = {
     "banana_current": ("banana_current_A", "BANANA_CURRENT_A"),
     "tf_current": ("tf_current_A", "TF_CURRENT_A"),
     "lcfs_major_radius": ("lcfs_major_radius_m", "FINAL_LCFS_MAJOR_RADIUS_M"),
+    "lcfs_outboard_edge": (
+        "lcfs_outboard_edge_m",
+        "FINAL_LCFS_OUTBOARD_EDGE_M",
+    ),
+    "lcfs_inboard_edge": ("lcfs_inboard_edge_m", "FINAL_LCFS_INBOARD_EDGE_M"),
     "lcfs_minor_radius": ("lcfs_minor_radius_m", "FINAL_LCFS_MINOR_RADIUS_M"),
 }
 _ARTIFACT_THRESHOLD_FIELD_BY_NAME = {
@@ -306,6 +333,14 @@ _ARTIFACT_THRESHOLD_FIELD_BY_NAME = {
     "hardware_keepout": ("hardware_keepout_threshold", "HARDWARE_KEEPOUT_THRESHOLD"),
     "banana_current": ("banana_current_max_A", "BANANA_CURRENT_MAX_A"),
     "tf_current": ("tf_current_limit_A", "TF_CURRENT_LIMIT_A"),
+    "lcfs_outboard_edge": (
+        "lcfs_outboard_edge_threshold",
+        "FINAL_LCFS_OUTBOARD_EDGE_MAX_M",
+    ),
+    "lcfs_inboard_edge": (
+        "lcfs_inboard_edge_threshold",
+        "FINAL_LCFS_INBOARD_EDGE_MIN_M",
+    ),
 }
 _BOOTABILITY_STATUS_FIELD_NAMES = (
     "BOOZER_BOOTABLE",

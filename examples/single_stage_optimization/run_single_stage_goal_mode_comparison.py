@@ -34,7 +34,11 @@ from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
     BANANA_CURRENT_MODE_SHARED,
 )
 from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR  # noqa: E402
-from banana_opt.hardware_contracts import COIL_PLASMA_MIN_DIST_M  # noqa: E402
+from banana_opt.hardware_contracts import (  # noqa: E402
+    COIL_PLASMA_MIN_DIST_M,
+    LCFS_CONSTRAINT_MODE_DEFAULT,
+    LCFS_CONSTRAINT_MODES,
+)
 from banana_opt.single_stage_search_contracts import (  # noqa: E402
     resolve_frontier_invariant_torus_min as _resolve_frontier_invariant_torus_min,
 )
@@ -263,6 +267,11 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--alm-formulation", choices=["weighted_sum", "thresholded_physics"], default=os.environ.get("ALM_FORMULATION", "weighted_sum"))
+    parser.add_argument(
+        "--lcfs-constraint-mode",
+        choices=LCFS_CONSTRAINT_MODES,
+        default=os.environ.get("LCFS_CONSTRAINT_MODE", LCFS_CONSTRAINT_MODE_DEFAULT),
+    )
     parser.add_argument("--alm-qs-threshold", type=float, default=float(os.environ["ALM_QS_THRESHOLD"]) if "ALM_QS_THRESHOLD" in os.environ else None)
     parser.add_argument("--alm-boozer-threshold", type=float, default=float(os.environ["ALM_BOOZER_THRESHOLD"]) if "ALM_BOOZER_THRESHOLD" in os.environ else None)
     parser.add_argument(

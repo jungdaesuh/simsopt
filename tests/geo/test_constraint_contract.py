@@ -71,6 +71,10 @@ class ConstraintContractResolverTests(unittest.TestCase):
         )
         self.assertEqual(contract["TARGET_LCFS_MAX_MAJOR_RADIUS_M"], 0.903)
         self.assertAlmostEqual(contract["TARGET_LCFS_MAX_MINOR_RADIUS_M"], 0.132)
+        self.assertEqual(
+            contract["LCFS_CONSTRAINT_MODE"],
+            hc.LCFS_CONSTRAINT_MODE_DEFAULT,
+        )
 
     def test_resolve_with_no_inputs_returns_hardware_defaults(self):
         module = load_constraint_contract_module()
@@ -122,6 +126,33 @@ class ConstraintContractResolverTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target LCFS major radius"):
             module.resolve_constraint_contract(
                 cli_overrides={"TARGET_LCFS_MAX_MAJOR_RADIUS_M": 1.5},
+            )
+
+    def test_target_lcfs_edge_envelope_allows_offcenter_major_radius(self):
+        module = load_constraint_contract_module()
+
+        contract, trace = module.resolve_constraint_contract(
+            cli_overrides={
+                "LCFS_CONSTRAINT_MODE": "edge_envelope",
+                "TARGET_LCFS_MAX_MAJOR_RADIUS_M": 0.921401,
+                "TARGET_LCFS_MAX_MINOR_RADIUS_M": 0.113599,
+            },
+        )
+
+        self.assertEqual(contract["LCFS_CONSTRAINT_MODE"], "edge_envelope")
+        self.assertEqual(
+            trace["LCFS_CONSTRAINT_MODE"],
+            module.CONSTRAINT_SOURCE_CLI,
+        )
+        self.assertAlmostEqual(contract["TARGET_LCFS_MAX_MAJOR_RADIUS_M"], 0.921401)
+        self.assertAlmostEqual(contract["TARGET_LCFS_MAX_MINOR_RADIUS_M"], 0.113599)
+
+    def test_target_lcfs_mode_rejects_unknown_value(self):
+        module = load_constraint_contract_module()
+
+        with self.assertRaisesRegex(ValueError, "LCFS constraint mode"):
+            module.resolve_constraint_contract(
+                cli_overrides={"LCFS_CONSTRAINT_MODE": "diagonal_box"},
             )
 
     def test_target_lcfs_ceiling_rejects_oversize_minor_radius(self):
@@ -269,6 +300,19 @@ class ConstraintContractHashTests(unittest.TestCase):
             module.compute_constraint_contract_hash(altered_contract),
         )
 
+    def test_hash_changes_when_lcfs_constraint_mode_changes(self):
+        module = load_constraint_contract_module()
+
+        baseline_contract, _ = module.resolve_constraint_contract()
+        edge_contract, _ = module.resolve_constraint_contract(
+            cli_overrides={"LCFS_CONSTRAINT_MODE": "edge_envelope"},
+        )
+
+        self.assertNotEqual(
+            module.compute_constraint_contract_hash(baseline_contract),
+            module.compute_constraint_contract_hash(edge_contract),
+        )
+
     def test_hash_independent_of_dict_insertion_order(self):
         module = load_constraint_contract_module()
 
@@ -312,7 +356,7 @@ class ConstraintContractMetadataTests(unittest.TestCase):
         )
         self.assertEqual(
             dict(metadata["EFFECTIVE_VALUES"]),
-            {key: float(contract[key]) for key in contract},
+            dict(contract),
         )
         self.assertIn("CONSTRAINT_PROVENANCE", metadata)
 
@@ -330,6 +374,15 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
 
         self.assertEqual(contract_lower["TF_CURRENT_A"], -70000.0)
         self.assertEqual(contract_upper["TF_CURRENT_A"], -70000.0)
+
+    def test_wire_name_resolver_accepts_lcfs_constraint_mode_alias(self):
+        module = load_constraint_contract_module()
+
+        contract, _ = module.resolve_constraint_contract_from_wire_names(
+            cli_overrides={"lcfs_constraint_mode": "edge_envelope"},
+        )
+
+        self.assertEqual(contract["LCFS_CONSTRAINT_MODE"], "edge_envelope")
 
     def test_wire_name_resolver_allows_explicit_offspec_current_contract(self):
         module = load_constraint_contract_module()

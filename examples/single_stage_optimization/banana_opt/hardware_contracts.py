@@ -137,7 +137,48 @@ LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M = (
 
 TARGET_LCFS_MAX_MAJOR_RADIUS_M = BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
 TARGET_LCFS_MAX_MINOR_RADIUS_M = BANANA_WINDING_MINOR_RADIUS_M - COIL_PLASMA_MIN_DIST_M
+LCFS_OUTBOARD_RADIUS_MAX_M = (
+    BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+    + BANANA_WINDING_MINOR_RADIUS_M
+    - COIL_PLASMA_MIN_DIST_M
+)
+LCFS_INBOARD_RADIUS_MIN_M = (
+    BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+    - BANANA_WINDING_MINOR_RADIUS_M
+    + COIL_PLASMA_MIN_DIST_M
+)
 LCFS_RADIUS_ABS_TOL_M = 1.0e-12
+LCFS_CONSTRAINT_MODE_CENTERED = "centered"
+LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE = "edge_envelope"
+LCFS_CONSTRAINT_MODES = (
+    LCFS_CONSTRAINT_MODE_CENTERED,
+    LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE,
+)
+LCFS_CONSTRAINT_MODE_DEFAULT = LCFS_CONSTRAINT_MODE_CENTERED
+
+
+def validate_lcfs_constraint_mode(mode: str) -> str:
+    mode_value = str(mode)
+    if mode_value not in LCFS_CONSTRAINT_MODES:
+        choices = ", ".join(LCFS_CONSTRAINT_MODES)
+        raise ValueError(
+            f"LCFS constraint mode must be one of {{{choices}}}; got {mode_value!r}."
+        )
+    return mode_value
+
+
+def lcfs_outboard_edge_radius_m(
+    major_radius_m: float,
+    minor_radius_m: float,
+) -> float:
+    return float(major_radius_m) + float(minor_radius_m)
+
+
+def lcfs_inboard_edge_radius_m(
+    major_radius_m: float,
+    minor_radius_m: float,
+) -> float:
+    return float(major_radius_m) - float(minor_radius_m)
 
 
 def fixed_stage2_clearance_contract() -> dict[str, float]:
@@ -217,6 +258,45 @@ def validate_target_lcfs_minor_radius(target_minor_radius_m: float) -> float:
             f"(0, {TARGET_LCFS_MAX_MINOR_RADIUS_M:.3f}] m."
         )
     return radius
+
+
+def validate_lcfs_edge_envelope(
+    target_major_radius_m: float,
+    target_minor_radius_m: float,
+) -> tuple[float, float]:
+    major_radius = float(target_major_radius_m)
+    minor_radius = validate_target_lcfs_minor_radius(target_minor_radius_m)
+    outboard_edge = lcfs_outboard_edge_radius_m(major_radius, minor_radius)
+    inboard_edge = lcfs_inboard_edge_radius_m(major_radius, minor_radius)
+    if outboard_edge > LCFS_OUTBOARD_RADIUS_MAX_M + LCFS_RADIUS_ABS_TOL_M:
+        raise ValueError(
+            "Requested target LCFS outboard edge must lie at or below "
+            f"{LCFS_OUTBOARD_RADIUS_MAX_M:.3f} m; got {outboard_edge:.6f} m."
+        )
+    if inboard_edge < LCFS_INBOARD_RADIUS_MIN_M - LCFS_RADIUS_ABS_TOL_M:
+        raise ValueError(
+            "Requested target LCFS inboard edge must lie at or above "
+            f"{LCFS_INBOARD_RADIUS_MIN_M:.3f} m; got {inboard_edge:.6f} m."
+        )
+    return major_radius, minor_radius
+
+
+def validate_target_lcfs_radii_for_mode(
+    target_major_radius_m: float,
+    target_minor_radius_m: float,
+    *,
+    lcfs_constraint_mode: str = LCFS_CONSTRAINT_MODE_DEFAULT,
+) -> tuple[float, float]:
+    mode = validate_lcfs_constraint_mode(lcfs_constraint_mode)
+    if mode == LCFS_CONSTRAINT_MODE_CENTERED:
+        return (
+            validate_target_lcfs_major_radius(target_major_radius_m),
+            validate_target_lcfs_minor_radius(target_minor_radius_m),
+        )
+    return validate_lcfs_edge_envelope(
+        target_major_radius_m,
+        target_minor_radius_m,
+    )
 
 
 _MAJOR_RADIUS_TOL_M = 1.0e-12

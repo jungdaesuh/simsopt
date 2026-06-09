@@ -4026,6 +4026,81 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["gradient_value_kinds"], ["hard", "hard"])
         self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard"])
 
+    def test_evaluate_alm_objective_includes_lcfs_edge_envelope_constraints(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        lcfs_surface = _FakeRadiusSurface(
+            major_radius=0.910,
+            minor_radius=0.140,
+            major_grad=[2.0, -1.0],
+            minor_grad=[0.5, 0.25],
+        )
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.0, 0.0, 0.0]),
+            penalty=1.0,
+            objective_optimizable=lcfs_surface,
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface=lcfs_surface,
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=(
+                "lcfs_outboard_edge",
+                "lcfs_inboard_edge",
+                "lcfs_minor_radius",
+            ),
+            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (
+                -0.1,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
+            curvature_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            activity_tolerances_fn=lambda *_args, **_kwargs: np.array(
+                [0.0, 0.0, 0.0],
+                dtype=float,
+            ),
+            lcfs_surface=lcfs_surface,
+            lcfs_constraint_mode="edge_envelope",
+            lcfs_outboard_edge_threshold=1.035,
+            lcfs_inboard_edge_threshold=0.771,
+            lcfs_minor_radius_threshold=0.132,
+        )
+
+        self.assertEqual(
+            result["constraint_names"],
+            ["lcfs_outboard_edge", "lcfs_inboard_edge", "lcfs_minor_radius"],
+        )
+        np.testing.assert_allclose(
+            result["raw_constraint_values"],
+            [0.015, 0.001, 0.008],
+            atol=1e-14,
+        )
+        np.testing.assert_allclose(
+            result["raw_constraint_grads"],
+            [[2.5, -0.75], [-1.5, 1.25], [0.5, 0.25]],
+        )
+        self.assertEqual(result["constraint_blocks"], ["surface", "surface", "surface"])
+        self.assertEqual(result["objective_value_kinds"], ["hard", "hard", "hard"])
+        self.assertEqual(result["gradient_value_kinds"], ["hard", "hard", "hard"])
+        self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard", "hard"])
+
     def test_evaluate_alm_objective_uses_hard_surface_stack_for_dual_signal(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
         curves = (
@@ -5826,6 +5901,65 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             any("lcfs_minor_radius" in violation for violation in result["violations"])
         )
 
+    def test_evaluate_single_stage_search_hardware_snapshot_uses_lcfs_edge_residuals(
+        self,
+    ):
+        hardware_contracts = _load_module(
+            HARDWARE_CONTRACTS_PATH,
+            "banana_hw_contracts",
+        )
+        result = self.module.evaluate_single_stage_search_hardware_snapshot(
+            {
+                "constraint_names": [
+                    "coil_coil_spacing",
+                    "coil_surface_spacing",
+                    "max_curvature",
+                    "lcfs_outboard_edge",
+                    "lcfs_inboard_edge",
+                    "lcfs_minor_radius",
+                ],
+                "dual_update_values": np.array(
+                    [0.0, 0.0, 0.0, 1.0e-4, 2.0e-4, 3.0e-4]
+                ),
+                "raw_dual_update_values": np.array(
+                    [-0.002, -0.074, -0.018, 0.002, 0.003, 0.004]
+                ),
+                "search_hardware_constraint_payload_kind": "signed_residual",
+            },
+            cc_dist=0.05,
+            cs_dist=0.015,
+            ss_dist=0.04,
+            curvature_threshold=100.0,
+        )
+
+        self.assertFalse(result["search_hardware_status"]["success"])
+        self.assertAlmostEqual(
+            result["lcfs_outboard_edge_m"],
+            hardware_contracts.LCFS_OUTBOARD_RADIUS_MAX_M + 0.002,
+        )
+        self.assertAlmostEqual(
+            result["lcfs_inboard_edge_m"],
+            hardware_contracts.LCFS_INBOARD_RADIUS_MIN_M - 0.003,
+        )
+        self.assertAlmostEqual(
+            result["lcfs_minor_radius_m"],
+            hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M + 0.004,
+        )
+        self.assertIn(
+            "lcfs_outboard_edge",
+            result["search_hardware_status"]["constraints"],
+        )
+        self.assertIn(
+            "lcfs_inboard_edge",
+            result["search_hardware_status"]["constraints"],
+        )
+        self.assertTrue(
+            any("lcfs_outboard_edge" in violation for violation in result["violations"])
+        )
+        self.assertTrue(
+            any("lcfs_inboard_edge" in violation for violation in result["violations"])
+        )
+
     def test_evaluate_single_stage_search_hardware_snapshot_uses_penalty_objective_payload(
         self,
     ):
@@ -6374,6 +6508,17 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
             self.module.hardware_constraint_violation(spec, roundoff_major_radius),
             0.0,
         )
+
+    def test_lcfs_edge_constraint_specs_use_envelope_bounds(self):
+        outboard_spec = self.module.get_hardware_constraint_spec("lcfs_outboard_edge")
+        inboard_spec = self.module.get_hardware_constraint_spec("lcfs_inboard_edge")
+
+        self.assertEqual(outboard_spec.kind, "upper_bound")
+        self.assertEqual(inboard_spec.kind, "lower_bound")
+        self.assertEqual(outboard_spec.threshold, self.module.LCFS_OUTBOARD_RADIUS_MAX_M)
+        self.assertEqual(inboard_spec.threshold, self.module.LCFS_INBOARD_RADIUS_MIN_M)
+        self.assertEqual(self.module.hardware_constraint_alm_block("lcfs_outboard_edge"), "surface")
+        self.assertEqual(self.module.hardware_constraint_alm_block("lcfs_inboard_edge"), "surface")
 
     def test_lcfs_artifact_payload_writes_ok_for_roundoff(self):
         roundoff_major_radius = self.module.TARGET_LCFS_MAX_MAJOR_RADIUS_M + 3.9e-15

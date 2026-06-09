@@ -444,6 +444,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT": 0.0,
+            "LCFS_CONSTRAINT_MODES": ("centered", "edge_envelope"),
+            "LCFS_CONSTRAINT_MODE_DEFAULT": "centered",
             "env_flag": lambda name: False,
             "_DEFAULT_SINGLE_STAGE_SEED_REGIME": "auto",
             "_SINGLE_STAGE_SEED_REGIME_AUTO": "auto",
@@ -845,6 +847,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "banana_current",
                 "tf_current",
                 "lcfs_major_radius",
+                "lcfs_outboard_edge",
+                "lcfs_inboard_edge",
                 "lcfs_minor_radius",
             },
         )
@@ -944,6 +948,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("WIDTH_MAX_THRESHOLD", payload_names)
         self.assertIn("SELF_INTERSECT_PENALTY", payload_names)
         self.assertIn("SELF_INTERSECT_THRESHOLD", payload_names)
+        self.assertIn("FINAL_LCFS_OUTBOARD_EDGE_M", payload_names)
+        self.assertIn("FINAL_LCFS_OUTBOARD_EDGE_MAX_M", payload_names)
+        self.assertIn("FINAL_LCFS_INBOARD_EDGE_M", payload_names)
+        self.assertIn("FINAL_LCFS_INBOARD_EDGE_MIN_M", payload_names)
         self.assertEqual(len(payload_names), len(set(payload_names)))
 
     def test_penalty_box_bound_names_follow_forbidden_traversal_policy(self):
@@ -1210,6 +1218,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                     "iota_penalty",
                     "length_penalty",
                 ),
+                "LCFS_CONSTRAINT_MODE_DEFAULT": "centered",
+                "LCFS_CONSTRAINT_MODE_CENTERED": "centered",
+                "LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE": "edge_envelope",
+                "validate_lcfs_constraint_mode": lambda mode: mode,
             },
         )
 
@@ -1252,6 +1264,28 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "hardware_keepout",
                 "banana_current_upper_bound",
                 "lcfs_major_radius",
+                "lcfs_minor_radius",
+            ],
+        )
+        edge_constraint_names = functions["single_stage_alm_constraint_names"](
+            alm_formulation="weighted_sum",
+            lcfs_constraint_mode="edge_envelope",
+        )
+        self.assertEqual(
+            edge_constraint_names,
+            [
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "max_curvature",
+                "coil_length_upper_bound",
+                "coil_length_min",
+                "poloidal_extent",
+                "width_min",
+                "width_max",
+                "self_intersect",
+                "banana_current_upper_bound",
+                "lcfs_outboard_edge",
+                "lcfs_inboard_edge",
                 "lcfs_minor_radius",
             ],
         )

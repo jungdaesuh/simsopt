@@ -1383,6 +1383,11 @@ def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
         "--constraint-weight",
         getattr(args, "constraint_weight", None),
     )
+    append_optional_flag(
+        command,
+        "--lcfs-constraint-mode",
+        getattr(args, "lcfs_constraint_mode", None),
+    )
     append_optional_flag(command, "--num-tf-coils", getattr(args, "num_tf_coils", None))
     append_optional_flag(
         command,

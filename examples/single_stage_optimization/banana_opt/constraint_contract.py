@@ -48,6 +48,7 @@ _KEY_BANANA_SURF_RADIUS = "banana_surf_radius"
 
 _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M = "TARGET_LCFS_MAX_MAJOR_RADIUS_M"
 _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M = "TARGET_LCFS_MAX_MINOR_RADIUS_M"
+_KEY_LCFS_CONSTRAINT_MODE = "LCFS_CONSTRAINT_MODE"
 
 FIXED_GEOMETRY_KEYS: frozenset[str] = frozenset(
     {
@@ -76,6 +77,9 @@ TARGET_PLASMA_CEILING_KEYS: frozenset[str] = frozenset(
         _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
     }
 )
+LCFS_POLICY_KEYS: frozenset[str] = frozenset({_KEY_LCFS_CONSTRAINT_MODE})
+
+ConstraintValue = float | str
 
 CONSTRAINT_FIELD_TYPES: Mapping[str, type] = MappingProxyType(
     {
@@ -92,6 +96,7 @@ CONSTRAINT_FIELD_TYPES: Mapping[str, type] = MappingProxyType(
         _KEY_BANANA_SURF_RADIUS: float,
         _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M: float,
         _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M: float,
+        _KEY_LCFS_CONSTRAINT_MODE: str,
     }
 )
 
@@ -125,6 +130,8 @@ WIRE_NAME_ALIASES: Mapping[str, str] = MappingProxyType(
         "TARGET_LCFS_MAX_MAJOR_RADIUS_M": _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
         "target_lcfs_max_minor_radius_m": _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
         "TARGET_LCFS_MAX_MINOR_RADIUS_M": _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
+        "lcfs_constraint_mode": _KEY_LCFS_CONSTRAINT_MODE,
+        "LCFS_CONSTRAINT_MODE": _KEY_LCFS_CONSTRAINT_MODE,
     }
 )
 
@@ -155,7 +162,7 @@ _LADDER_SOURCES: tuple[str, ...] = (
 )
 
 
-def hardware_default_contract() -> dict[str, float]:
+def hardware_default_contract() -> dict[str, ConstraintValue]:
     return {
         _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M: float(_hc.VACUUM_VESSEL_MAJOR_RADIUS_M),
         _KEY_VACUUM_VESSEL_MINOR_RADIUS_M: float(_hc.VACUUM_VESSEL_MINOR_RADIUS_M),
@@ -172,12 +179,16 @@ def hardware_default_contract() -> dict[str, float]:
         _KEY_BANANA_SURF_RADIUS: float(_hc.BANANA_WINDING_MINOR_RADIUS_M),
         _KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M: float(_hc.TARGET_LCFS_MAX_MAJOR_RADIUS_M),
         _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M: float(_hc.TARGET_LCFS_MAX_MINOR_RADIUS_M),
+        _KEY_LCFS_CONSTRAINT_MODE: _hc.LCFS_CONSTRAINT_MODE_DEFAULT,
     }
 
 
-def _coerce(key: str, value: Any) -> float:
+def _coerce(key: str, value: Any) -> ConstraintValue:
     if value is None:
         raise ValueError(f"Constraint field {key!r} cannot be None.")
+    expected_type = CONSTRAINT_FIELD_TYPES[key]
+    if expected_type is str:
+        return _hc.validate_lcfs_constraint_mode(str(value))
     return float(value)
 
 
@@ -191,7 +202,7 @@ def _assert_known_keys(source_label: str, layer: Mapping[str, Any]) -> None:
 
 def _apply_layer(
     *,
-    contract: dict[str, float],
+    contract: dict[str, ConstraintValue],
     trace: dict[str, str],
     source_label: str,
     layer: Mapping[str, Any],
@@ -222,7 +233,7 @@ def _validate_tf_current_contract(
 
 
 def _validate_engineering_values(
-    contract: dict[str, float],
+    contract: dict[str, ConstraintValue],
     *,
     allow_offspec_current_contract: bool,
 ) -> None:
@@ -256,9 +267,12 @@ def _validate_engineering_values(
         raise ValueError("CURVATURE_THRESHOLD must be positive.")
 
 
-def _validate_target_plasma_ceiling(contract: dict[str, float]) -> None:
-    _hc.validate_target_lcfs_major_radius(contract[_KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M])
-    _hc.validate_target_lcfs_minor_radius(contract[_KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M])
+def _validate_target_plasma_ceiling(contract: dict[str, ConstraintValue]) -> None:
+    _hc.validate_target_lcfs_radii_for_mode(
+        float(contract[_KEY_TARGET_LCFS_MAX_MAJOR_RADIUS_M]),
+        float(contract[_KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M]),
+        lcfs_constraint_mode=str(contract[_KEY_LCFS_CONSTRAINT_MODE]),
+    )
 
 
 def resolve_constraint_contract(
@@ -269,7 +283,7 @@ def resolve_constraint_contract(
     allow_offspec_current_contract: bool = False,
     allow_offspec_length_contract: bool = False,
     allow_offspec_curvature_contract: bool = False,
-) -> tuple[Mapping[str, float], Mapping[str, str]]:
+) -> tuple[Mapping[str, ConstraintValue], Mapping[str, str]]:
     """Resolve the full constraint contract from layered inputs.
 
     Parameters
@@ -341,7 +355,7 @@ def resolve_constraint_contract_from_wire_names(
     allow_offspec_current_contract: bool = False,
     allow_offspec_length_contract: bool = False,
     allow_offspec_curvature_contract: bool = False,
-) -> tuple[Mapping[str, float], Mapping[str, str]]:
+) -> tuple[Mapping[str, ConstraintValue], Mapping[str, str]]:
     """Like :func:`resolve_constraint_contract` but accepts legacy wire names.
 
     The historical ``major_radius`` mirror key maps to the fixed vacuum-vessel
@@ -358,16 +372,20 @@ def resolve_constraint_contract_from_wire_names(
     )
 
 
-def _canonical_payload(contract: Mapping[str, Any]) -> dict[str, float]:
+def _canonical_payload(contract: Mapping[str, Any]) -> dict[str, ConstraintValue]:
     missing = sorted(set(CONSTRAINT_FIELD_TYPES) - set(contract))
     if missing:
         raise ValueError(
             f"Cannot hash partial constraint contract; missing: {', '.join(missing)}"
         )
-    return {key: float(contract[key]) for key in sorted(contract)}
+    payload: dict[str, ConstraintValue] = {}
+    for key in sorted(contract):
+        expected_type = CONSTRAINT_FIELD_TYPES[key]
+        payload[key] = str(contract[key]) if expected_type is str else float(contract[key])
+    return payload
 
 
-def _hash_payload(payload: Mapping[str, float]) -> str:
+def _hash_payload(payload: Mapping[str, ConstraintValue]) -> str:
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
@@ -409,6 +427,7 @@ __all__ = [
     "CONSTRAINT_SOURCE_SPEC_JSON",
     "ENGINEERING_DEFAULT_KEYS",
     "FIXED_GEOMETRY_KEYS",
+    "LCFS_POLICY_KEYS",
     "TARGET_PLASMA_CEILING_KEYS",
     "WIRE_NAME_ALIASES",
     "build_constraint_metadata",

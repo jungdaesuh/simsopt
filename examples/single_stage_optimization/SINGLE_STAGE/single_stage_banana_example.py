@@ -194,6 +194,12 @@ from banana_opt.hardware_contracts import (
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+    LCFS_CONSTRAINT_MODE_CENTERED,
+    LCFS_CONSTRAINT_MODE_DEFAULT,
+    LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE,
+    LCFS_CONSTRAINT_MODES,
+    LCFS_INBOARD_RADIUS_MIN_M,
+    LCFS_OUTBOARD_RADIUS_MAX_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
@@ -210,6 +216,7 @@ from banana_opt.hardware_contracts import (
     env_flag,
     is_major_radius_offspec,
     validate_coil_length_target,
+    validate_lcfs_constraint_mode,
     validate_major_radius,
 )
 from banana_opt.vacuum_topology_campaign import (
@@ -1874,6 +1881,17 @@ def parse_args():
             "ALM objective assembly. 'weighted_sum' keeps physics terms in the base objective; "
             "'thresholded_physics' uses a dummy zero objective and promotes physics terms "
             "to inequality constraints."
+        ),
+    )
+    parser.add_argument(
+        "--lcfs-constraint-mode",
+        choices=LCFS_CONSTRAINT_MODES,
+        default=os.environ.get("LCFS_CONSTRAINT_MODE", LCFS_CONSTRAINT_MODE_DEFAULT),
+        help=(
+            "Solver-side LCFS constraint interpretation. 'centered' preserves the "
+            "legacy R<=R_ws and a<=a_ws-clearance caps. 'edge_envelope' constrains "
+            "the realized outboard/inboard edges R+a and R-a against the winding "
+            "surface clearance envelope while retaining the minor-radius cap."
         ),
     )
     parser.add_argument(
@@ -3543,6 +3561,8 @@ def current_single_stage_search_hardware_snapshot_kwargs():
     snapshot_kwargs.update(
         {
             "lcfs_major_radius_threshold": TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+            "lcfs_outboard_edge_threshold": LCFS_OUTBOARD_RADIUS_MAX_M,
+            "lcfs_inboard_edge_threshold": LCFS_INBOARD_RADIUS_MIN_M,
             "lcfs_minor_radius_threshold": TARGET_LCFS_MAX_MINOR_RADIUS_M,
         }
     )
@@ -4692,6 +4712,7 @@ class RunIdentityConfig:
     constraint_weight: float
     constraint_method: str
     alm_formulation: str
+    lcfs_constraint_mode: str | None
     alm_qs_threshold: float | None
     alm_boozer_threshold: float | None
     alm_iota_penalty_threshold: float | None
@@ -4796,6 +4817,7 @@ class PreservedTimeoutReplayConfig:
     max_iterations: int | None
     target_volume: float | None
     target_iota: float | None
+    lcfs_constraint_mode: str | None = LCFS_CONSTRAINT_MODE_DEFAULT
     seed_artifact_role: str = SEED_ARTIFACT_ROLE_STAGE2
     offspec_replay_debug_only: bool = False
     strict_vacuum_current: bool = False
@@ -5138,6 +5160,7 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     constraint_weight=None,
     constraint_method="penalty",
     alm_formulation=None,
+    lcfs_constraint_mode=LCFS_CONSTRAINT_MODE_DEFAULT,
     max_iterations=0,
     target_volume=0.0,
     target_iota=0.0,
@@ -5231,6 +5254,14 @@ def make_run_identity_config(
         constraint_weight=constraint_weight,
         constraint_method=constraint_method,
         alm_formulation=getattr(args, "alm_formulation", "weighted_sum"),
+        lcfs_constraint_mode=(
+            None
+            if validate_lcfs_constraint_mode(
+                getattr(args, "lcfs_constraint_mode", LCFS_CONSTRAINT_MODE_DEFAULT)
+            )
+            == LCFS_CONSTRAINT_MODE_DEFAULT
+            else validate_lcfs_constraint_mode(args.lcfs_constraint_mode)
+        ),
         alm_qs_threshold=getattr(args, "alm_qs_threshold", None),
         alm_boozer_threshold=getattr(args, "alm_boozer_threshold", None),
         alm_iota_penalty_threshold=getattr(args, "alm_iota_penalty_threshold", None),
@@ -5386,6 +5417,7 @@ def build_run_identity_config(config):
                 "residue_objective_target_manifest_id",
                 "residue_objective_validation_id",
                 "residue_objective_replay_config",
+                "lcfs_constraint_mode",
             }
             and value is None
         ):
@@ -5530,19 +5562,24 @@ def single_stage_alm_constraint_names(
     include_surface_stack=False,
     include_hardware_keepout=False,
     banana_current_state=None,
+    lcfs_constraint_mode=LCFS_CONSTRAINT_MODE_DEFAULT,
 ):
+    resolved_lcfs_constraint_mode = validate_lcfs_constraint_mode(lcfs_constraint_mode)
     available_names = {
         "coil_coil_spacing",
         "coil_surface_spacing",
         "max_curvature",
         "coil_length_min",
         "poloidal_extent",
-        "lcfs_major_radius",
         "lcfs_minor_radius",
         "width_min",
         "width_max",
         "self_intersect",
     }
+    if resolved_lcfs_constraint_mode == LCFS_CONSTRAINT_MODE_CENTERED:
+        available_names.add("lcfs_major_radius")
+    elif resolved_lcfs_constraint_mode == LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE:
+        available_names.update({"lcfs_outboard_edge", "lcfs_inboard_edge"})
     if include_hardware_keepout:
         available_names.add("hardware_keepout")
     if alm_formulation != "thresholded_physics":
@@ -7156,6 +7193,7 @@ def evaluate_alm_objective(
                 ),
                 include_hardware_keepout=JCurveHardwareKeepout is not None,
                 banana_current_state=globals().get("banana_current_state"),
+                lcfs_constraint_mode=LCFS_CONSTRAINT_MODE,
             ),
             curve_curve_constraint_fn=_smooth_min_curve_curve_signed_constraint,
             curve_surface_constraint_fn=_smooth_min_curve_surface_signed_constraint,
@@ -7199,8 +7237,11 @@ def evaluate_alm_objective(
             lcfs_surface=outer_surface_data["boozer_surface"].surface,
             JLCFSMajorRadius=globals().get("JLCFSMajorRadius"),
             JLCFSMinorRadius=globals().get("JLCFSMinorRadius"),
+            lcfs_constraint_mode=LCFS_CONSTRAINT_MODE,
             lcfs_major_radius_threshold=TARGET_LCFS_MAX_MAJOR_RADIUS_M,
             lcfs_minor_radius_threshold=TARGET_LCFS_MAX_MINOR_RADIUS_M,
+            lcfs_outboard_edge_threshold=LCFS_OUTBOARD_RADIUS_MAX_M,
+            lcfs_inboard_edge_threshold=LCFS_INBOARD_RADIUS_MIN_M,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
             JResidueObjective=globals().get("JResidueObjective"),
@@ -9156,6 +9197,10 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             "CONSTRAINT_METHOD", replay_config.constraint_method
         ),
         alm_formulation=globals().get("ALM_FORMULATION", replay_config.alm_formulation),
+        lcfs_constraint_mode=globals().get(
+            "LCFS_CONSTRAINT_MODE",
+            replay_config.lcfs_constraint_mode,
+        ),
         max_iterations=globals().get("MAXITER", replay_config.max_iterations),
         target_volume=globals().get("vol_target", replay_config.target_volume),
         target_iota=globals().get("iota_target", replay_config.target_iota),
@@ -9646,6 +9691,7 @@ def build_preserved_timeout_results_payload(
             if replay_config.constraint_method == "alm"
             else None
         ),
+        "LCFS_CONSTRAINT_MODE": replay_config.lcfs_constraint_mode,
         "GREENE_RESIDUE_OBJECTIVE_REPLAY_CONFIG": (
             residue_objective_replay_config_payload(
                 replay_config.residue_objective_replay_config
@@ -11665,6 +11711,7 @@ TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.0
 CONSTRAINT_METHOD = "penalty"
 SINGLE_STAGE_GOAL_MODE = "target"
 ALM_FORMULATION = "weighted_sum"
+LCFS_CONSTRAINT_MODE = LCFS_CONSTRAINT_MODE_DEFAULT
 ALM_CONSTRAINT_NAMES = []
 ALM_MULTIPLIERS = np.zeros(0, dtype=float)
 ALM_PENALTY = 1.0
@@ -11822,6 +11869,7 @@ if __name__ == "__main__":
     CONSTRAINT_METHOD = args.constraint_method
     SINGLE_STAGE_GOAL_MODE = args.single_stage_goal_mode
     ALM_FORMULATION = args.alm_formulation
+    LCFS_CONSTRAINT_MODE = validate_lcfs_constraint_mode(args.lcfs_constraint_mode)
     ALM_MULTIPLIERS = np.zeros(0, dtype=float)
     ALM_PENALTY = args.alm_penalty_init
     ALM_DISTANCE_SMOOTHING = args.alm_distance_smoothing
@@ -11929,6 +11977,7 @@ if __name__ == "__main__":
             "--curvature-threshold must be positive for curvature traversal"
         )
     validate_alm_cli_args(args)
+    validate_lcfs_constraint_mode(args.lcfs_constraint_mode)
     validate_single_stage_alm_formulation_args(args)
     validate_confinement_surrogate_args(args)
     validate_residue_objective_args(args)
@@ -12059,6 +12108,7 @@ if __name__ == "__main__":
         constraint_weight=CONSTRAINT_WEIGHT,
         constraint_method=CONSTRAINT_METHOD,
         alm_formulation=ALM_FORMULATION,
+        lcfs_constraint_mode=LCFS_CONSTRAINT_MODE,
         max_iterations=MAXITER,
         target_volume=vol_target,
         target_iota=iota_target,
@@ -12462,6 +12512,7 @@ if __name__ == "__main__":
             ),
             include_hardware_keepout=globals().get("JCurveHardwareKeepout") is not None,
             banana_current_state=banana_current_state,
+            lcfs_constraint_mode=LCFS_CONSTRAINT_MODE,
         )
 
     # Extract degrees of freedom
@@ -13759,6 +13810,9 @@ if __name__ == "__main__":
         "plasma_vessel_min_dist_m": float(PLASMA_VESSEL_MIN_DIST_M),
         "curvature_threshold": float(CURVATURE_THRESHOLD),
         "banana_surf_radius": float(banana_surf_radius),
+        "target_lcfs_max_major_radius_m": float(TARGET_LCFS_MAX_MAJOR_RADIUS_M),
+        "target_lcfs_max_minor_radius_m": float(TARGET_LCFS_MAX_MINOR_RADIUS_M),
+        "lcfs_constraint_mode": LCFS_CONSTRAINT_MODE,
     }
     constraint_override_reason = args.constraint_override_reason
     if (
@@ -13946,6 +14000,7 @@ if __name__ == "__main__":
         "CONSTRAINT_WEIGHT": CONSTRAINT_WEIGHT,
         "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
         "ALM_FORMULATION": ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else None,
+        "LCFS_CONSTRAINT_MODE": LCFS_CONSTRAINT_MODE,
         "REQUESTED_SEED_REGIME": REQUESTED_SEED_REGIME,
         "EFFECTIVE_SEED_REGIME": EFFECTIVE_SEED_REGIME,
         "CC_DIST": CC_DIST,

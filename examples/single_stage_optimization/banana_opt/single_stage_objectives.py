@@ -15,6 +15,10 @@ from banana_opt.hardware_contracts import (
     BANANA_WIDTH_MAX_M,
     BANANA_WIDTH_MIN_M,
     HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+    LCFS_CONSTRAINT_MODE_CENTERED,
+    LCFS_CONSTRAINT_MODE_DEFAULT,
+    LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE,
+    validate_lcfs_constraint_mode,
 )
 from banana_opt.hardware_constraint_schema import (
     ALMConstraintMetadata,
@@ -319,6 +323,60 @@ def _boozer_adjoint_upper_bound_constraint(
         boozer_adjoint_objective.dJ(partials=True)(objective_optimizable),
         dtype=float,
     )
+    return signed_value, grad, _positive_violation(signed_value)
+
+
+def _surface_linear_radius_constraint(
+    surface,
+    major_coeff,
+    minor_coeff,
+    offset,
+    objective_optimizable,
+):
+    major_coeff_value = float(major_coeff)
+    minor_coeff_value = float(minor_coeff)
+    signed_value = (
+        float(offset)
+        + major_coeff_value * float(surface.major_radius())
+        + minor_coeff_value * float(surface.minor_radius())
+    )
+    derivative = Derivative(
+        {
+            surface: (
+                major_coeff_value * np.asarray(surface.dmajor_radius_by_dcoeff())
+                + minor_coeff_value * np.asarray(surface.dminor_radius_by_dcoeff())
+            )
+        }
+    )
+    optimizable = surface if objective_optimizable is None else objective_optimizable
+    grad = np.asarray(derivative(optimizable), dtype=float)
+    return signed_value, grad, _positive_violation(signed_value)
+
+
+def _boozer_adjoint_linear_radius_constraint(
+    major_radius_objective,
+    minor_radius_objective,
+    major_coeff,
+    minor_coeff,
+    offset,
+    objective_optimizable,
+):
+    major_coeff_value = float(major_coeff)
+    minor_coeff_value = float(minor_coeff)
+    signed_value = (
+        float(offset)
+        + major_coeff_value * float(major_radius_objective.J())
+        + minor_coeff_value * float(minor_radius_objective.J())
+    )
+    major_grad = np.asarray(
+        major_radius_objective.dJ(partials=True)(objective_optimizable),
+        dtype=float,
+    )
+    minor_grad = np.asarray(
+        minor_radius_objective.dJ(partials=True)(objective_optimizable),
+        dtype=float,
+    )
+    grad = major_coeff_value * major_grad + minor_coeff_value * minor_grad
     return signed_value, grad, _positive_violation(signed_value)
 
 
@@ -882,6 +940,8 @@ def _single_stage_hardware_threshold_overrides(
     width_max_threshold=None,
     lcfs_major_radius_threshold=None,
     lcfs_minor_radius_threshold=None,
+    lcfs_outboard_edge_threshold=None,
+    lcfs_inboard_edge_threshold=None,
 ) -> dict[str, float]:
     return build_threshold_overrides(
         (
@@ -896,6 +956,8 @@ def _single_stage_hardware_threshold_overrides(
             ("width_min", width_min_threshold),
             ("width_max", width_max_threshold),
             ("lcfs_major_radius", lcfs_major_radius_threshold),
+            ("lcfs_outboard_edge", lcfs_outboard_edge_threshold),
+            ("lcfs_inboard_edge", lcfs_inboard_edge_threshold),
             ("lcfs_minor_radius", lcfs_minor_radius_threshold),
         )
     )
@@ -946,6 +1008,8 @@ def _single_stage_alm_constraint_metadata(
         "width_max",
         "self_intersect",
         "lcfs_major_radius",
+        "lcfs_outboard_edge",
+        "lcfs_inboard_edge",
         "lcfs_minor_radius",
     }
     physics_threshold_by_name = {
@@ -964,6 +1028,8 @@ def _single_stage_alm_constraint_metadata(
         "width_max",
         "self_intersect",
         "lcfs_major_radius",
+        "lcfs_outboard_edge",
+        "lcfs_inboard_edge",
         "lcfs_minor_radius",
     }
     for constraint_name in constraint_names:
@@ -1085,8 +1151,11 @@ def evaluate_alm_objective(
     lcfs_surface=None,
     JLCFSMajorRadius=None,
     JLCFSMinorRadius=None,
+    lcfs_constraint_mode=LCFS_CONSTRAINT_MODE_DEFAULT,
     lcfs_major_radius_threshold=None,
     lcfs_minor_radius_threshold=None,
+    lcfs_outboard_edge_threshold=None,
+    lcfs_inboard_edge_threshold=None,
     JNonQSObjective=None,
     JBoozerObjective=None,
     JResidueObjective=None,
@@ -1323,7 +1392,12 @@ def evaluate_alm_objective(
             hardware_keepout_grad,
             _positive_violation(hardware_keepout_signed_value),
         )
-    if lcfs_surface is not None and lcfs_major_radius_threshold is not None:
+    resolved_lcfs_constraint_mode = validate_lcfs_constraint_mode(lcfs_constraint_mode)
+    if (
+        lcfs_surface is not None
+        and resolved_lcfs_constraint_mode == LCFS_CONSTRAINT_MODE_CENTERED
+        and lcfs_major_radius_threshold is not None
+    ):
         # The LCFS Fourier dofs are fixed (not in the coil dof graph), so the
         # fixed-surface dmajor_radius_by_dcoeff path is gradient-dead over the coils
         # and cannot actuate the ALM constraint. When the Boozer-adjoint objective is
@@ -1344,6 +1418,58 @@ def evaluate_alm_objective(
                 lcfs_surface.dmajor_radius_by_dcoeff(),
                 lcfs_major_radius_threshold,
                 objective_optimizable,
+            )
+    if (
+        lcfs_surface is not None
+        and resolved_lcfs_constraint_mode == LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE
+        and lcfs_outboard_edge_threshold is not None
+    ):
+        if JLCFSMajorRadius is not None and JLCFSMinorRadius is not None:
+            hardware_constraints["lcfs_outboard_edge"] = (
+                _boozer_adjoint_linear_radius_constraint(
+                    JLCFSMajorRadius,
+                    JLCFSMinorRadius,
+                    1.0,
+                    1.0,
+                    -float(lcfs_outboard_edge_threshold),
+                    objective_optimizable,
+                )
+            )
+        else:
+            hardware_constraints["lcfs_outboard_edge"] = (
+                _surface_linear_radius_constraint(
+                    lcfs_surface,
+                    1.0,
+                    1.0,
+                    -float(lcfs_outboard_edge_threshold),
+                    objective_optimizable,
+                )
+            )
+    if (
+        lcfs_surface is not None
+        and resolved_lcfs_constraint_mode == LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE
+        and lcfs_inboard_edge_threshold is not None
+    ):
+        if JLCFSMajorRadius is not None and JLCFSMinorRadius is not None:
+            hardware_constraints["lcfs_inboard_edge"] = (
+                _boozer_adjoint_linear_radius_constraint(
+                    JLCFSMajorRadius,
+                    JLCFSMinorRadius,
+                    -1.0,
+                    1.0,
+                    float(lcfs_inboard_edge_threshold),
+                    objective_optimizable,
+                )
+            )
+        else:
+            hardware_constraints["lcfs_inboard_edge"] = (
+                _surface_linear_radius_constraint(
+                    lcfs_surface,
+                    -1.0,
+                    1.0,
+                    float(lcfs_inboard_edge_threshold),
+                    objective_optimizable,
+                )
             )
     if lcfs_surface is not None and lcfs_minor_radius_threshold is not None:
         # Same gradient-dead mechanism as major radius: the LCFS Fourier dofs are
@@ -1512,6 +1638,8 @@ def evaluate_alm_objective(
         width_max_threshold=width_max_threshold,
         lcfs_major_radius_threshold=lcfs_major_radius_threshold,
         lcfs_minor_radius_threshold=lcfs_minor_radius_threshold,
+        lcfs_outboard_edge_threshold=lcfs_outboard_edge_threshold,
+        lcfs_inboard_edge_threshold=lcfs_inboard_edge_threshold,
     )
     geometry_tolerances = np.asarray(
         activity_tolerances_fn(
@@ -1540,6 +1668,8 @@ def evaluate_alm_objective(
             "width_max",
             "self_intersect",
             "lcfs_major_radius",
+            "lcfs_outboard_edge",
+            "lcfs_inboard_edge",
             "lcfs_minor_radius",
         }:
             constraint_tolerance_by_name[constraint_name] = (

@@ -61,3 +61,35 @@ def test_legacy_pack_aliases_no_longer_point_to_old_placeholder() -> None:
     assert hc.BANANA_PACK_DEPTH_NORMAL_M == hc.TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M
     assert hc.BANANA_PACK_WIDTH_BINORMAL_M != 0.029
     assert hc.BANANA_PACK_DEPTH_NORMAL_M != 0.020
+
+
+def test_lcfs_edge_envelope_limits_derive_from_winding_surface_clearance() -> None:
+    assert hc.LCFS_OUTBOARD_RADIUS_MAX_M == (
+        hc.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        + hc.BANANA_WINDING_MINOR_RADIUS_M
+        - hc.COIL_PLASMA_MIN_DIST_M
+    )
+    assert hc.LCFS_INBOARD_RADIUS_MIN_M == (
+        hc.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        - hc.BANANA_WINDING_MINOR_RADIUS_M
+        + hc.COIL_PLASMA_MIN_DIST_M
+    )
+    assert math.isclose(hc.lcfs_outboard_edge_radius_m(0.921401, 0.113599), 1.035)
+    assert math.isclose(hc.lcfs_inboard_edge_radius_m(0.921401, 0.113599), 0.807802)
+
+
+def test_lcfs_constraint_mode_validation_keeps_centered_default() -> None:
+    assert hc.LCFS_CONSTRAINT_MODE_DEFAULT == hc.LCFS_CONSTRAINT_MODE_CENTERED
+    assert hc.validate_lcfs_constraint_mode("centered") == "centered"
+    assert hc.validate_lcfs_constraint_mode("edge_envelope") == "edge_envelope"
+
+
+def test_lcfs_edge_envelope_allows_offcenter_center_when_edges_fit() -> None:
+    hc.validate_lcfs_edge_envelope(0.921401, 0.113599)
+
+    try:
+        hc.validate_target_lcfs_major_radius(0.921401)
+    except ValueError as exc:
+        assert "target LCFS major radius" in str(exc)
+    else:
+        raise AssertionError("centered LCFS major-radius validator accepted oversize R")
