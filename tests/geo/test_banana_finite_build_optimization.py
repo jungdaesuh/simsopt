@@ -251,6 +251,32 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         self.assertEqual(settings.nfilaments, 6)
         self.assertEqual(settings.rotation_order, 2)
 
+    def test_resolve_type_kk_defaults_to_2_by_7_current_conserving_pack(self):
+        args = SimpleNamespace(
+            finite_build=True,
+            finitebuild_numfilaments_n=self.module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
+            finitebuild_numfilaments_b=self.module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
+            finitebuild_gapsize_n=self.module.TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
+            finitebuild_gapsize_b=self.module.TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
+            finitebuild_rotation_order=1,
+            finitebuild_frame="surface_tangent",
+        )
+        settings = self.module.resolve_finite_build_settings(args)
+        self.assertEqual(settings.numfilaments_n, 2)
+        self.assertEqual(settings.numfilaments_b, 7)
+        self.assertEqual(settings.nfilaments, 14)
+        self.assertEqual(settings.frame, "surface_tangent")
+        self.assertAlmostEqual(settings.gapsize_n, 0.009906)
+        self.assertAlmostEqual(settings.gapsize_b, 0.0398272 / 6)
+
+        banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0]))
+        metadata = self.module._finite_build_artifact_metadata(
+            settings, banana_curve, NET_BANANA_CURRENT_A
+        )
+        self.assertAlmostEqual(
+            metadata["BANANA_FILAMENT_CURRENT_A"], NET_BANANA_CURRENT_A / 14
+        )
+
     def test_resolve_negative_rotation_order_maps_to_none(self):
         args = SimpleNamespace(
             finite_build=True,
