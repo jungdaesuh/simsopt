@@ -93,3 +93,16 @@ def test_lcfs_edge_envelope_allows_offcenter_center_when_edges_fit() -> None:
         assert "target LCFS major radius" in str(exc)
     else:
         raise AssertionError("centered LCFS major-radius validator accepted oversize R")
+
+
+def test_lcfs_edge_envelope_rejects_nonfinite_or_nonpositive_major_radius() -> None:
+    for invalid_major_radius in (float("nan"), float("inf"), 0.0, -0.1):
+        try:
+            hc.validate_lcfs_edge_envelope(invalid_major_radius, 0.113599)
+        except ValueError as exc:
+            assert "finite and positive" in str(exc)
+        else:
+            raise AssertionError(
+                "edge-envelope LCFS validator accepted invalid major radius "
+                f"{invalid_major_radius!r}"
+            )

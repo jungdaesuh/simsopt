@@ -250,6 +250,13 @@ def validate_target_lcfs_major_radius(target_major_radius_m: float) -> float:
     return radius
 
 
+def validate_positive_lcfs_major_radius(target_major_radius_m: float) -> float:
+    radius = float(target_major_radius_m)
+    if not math.isfinite(radius) or radius <= 0.0:
+        raise ValueError("Requested target LCFS major radius must be finite and positive.")
+    return radius
+
+
 def validate_target_lcfs_minor_radius(target_minor_radius_m: float) -> float:
     radius = float(target_minor_radius_m)
     if not (0.0 < radius <= TARGET_LCFS_MAX_MINOR_RADIUS_M + LCFS_RADIUS_ABS_TOL_M):
@@ -264,7 +271,7 @@ def validate_lcfs_edge_envelope(
     target_major_radius_m: float,
     target_minor_radius_m: float,
 ) -> tuple[float, float]:
-    major_radius = float(target_major_radius_m)
+    major_radius = validate_positive_lcfs_major_radius(target_major_radius_m)
     minor_radius = validate_target_lcfs_minor_radius(target_minor_radius_m)
     outboard_edge = lcfs_outboard_edge_radius_m(major_radius, minor_radius)
     inboard_edge = lcfs_inboard_edge_radius_m(major_radius, minor_radius)

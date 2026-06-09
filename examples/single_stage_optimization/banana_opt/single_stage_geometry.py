@@ -17,8 +17,12 @@ from banana_opt.boozer_warm_start import save_boozer_surface_with_state
 from banana_opt.design_only_fields import assert_topology_field_allowed
 from banana_opt.hardware_contracts import (
     COIL_LENGTH_MIN_FRACTION,
+    LCFS_CONSTRAINT_MODE_CENTERED,
+    LCFS_CONSTRAINT_MODE_DEFAULT,
+    LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE,
     lcfs_inboard_edge_radius_m,
     lcfs_outboard_edge_radius_m,
+    validate_lcfs_constraint_mode,
 )
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_status,
@@ -26,6 +30,7 @@ from banana_opt.hardware_constraint_schema import (
     get_hardware_constraint_spec,
     get_hardware_constraint_spec_for_alm_name,
     hardware_constraint_schema_name_for_alm_name,
+    hardware_constraint_specs,
 )
 from topology_scorer import (
     score_topology as _score_topology,
@@ -38,6 +43,32 @@ from banana_opt.surface_mode_contracts import (
     surface_mode_surface_names,
 )
 from workflow_helpers import validate_normalized_toroidal_flux
+
+_LCFS_CONSTRAINT_SCHEMA_NAMES = frozenset(
+    {
+        "lcfs_major_radius",
+        "lcfs_outboard_edge",
+        "lcfs_inboard_edge",
+        "lcfs_minor_radius",
+    }
+)
+
+
+def _active_lcfs_constraint_names(lcfs_constraint_mode):
+    mode = validate_lcfs_constraint_mode(lcfs_constraint_mode)
+    if mode == LCFS_CONSTRAINT_MODE_CENTERED:
+        return ("lcfs_major_radius", "lcfs_minor_radius")
+    return ("lcfs_outboard_edge", "lcfs_inboard_edge", "lcfs_minor_radius")
+
+
+def _hardware_status_names_for_lcfs_mode(applies_to, lcfs_constraint_mode):
+    active_lcfs_names = frozenset(_active_lcfs_constraint_names(lcfs_constraint_mode))
+    return tuple(
+        spec.name
+        for spec in hardware_constraint_specs(applies_to=applies_to)
+        if spec.name not in _LCFS_CONSTRAINT_SCHEMA_NAMES
+        or spec.name in active_lcfs_names
+    )
 
 
 _SURFACE_GOES_BACK_ERROR_FRAGMENT = "surface 'goes back' on itself"
@@ -449,7 +480,9 @@ def evaluate_single_stage_hardware_constraints(
     lcfs_inboard_edge_m=None,
     lcfs_outboard_edge_threshold=None,
     lcfs_inboard_edge_threshold=None,
+    lcfs_constraint_mode=LCFS_CONSTRAINT_MODE_DEFAULT,
 ):
+    resolved_lcfs_constraint_mode = validate_lcfs_constraint_mode(lcfs_constraint_mode)
     resolved_lcfs_outboard_edge_m = lcfs_outboard_edge_m
     resolved_lcfs_inboard_edge_m = lcfs_inboard_edge_m
     if (
@@ -523,6 +556,10 @@ def evaluate_single_stage_hardware_constraints(
     artifact_hardware_status = build_hardware_constraint_status(
         measured_values,
         applies_to="artifact",
+        names=_hardware_status_names_for_lcfs_mode(
+            "artifact",
+            resolved_lcfs_constraint_mode,
+        ),
         threshold_overrides=artifact_threshold_overrides,
         require_values=True,
     )
@@ -688,7 +725,9 @@ def evaluate_single_stage_search_hardware_snapshot(
     lcfs_minor_radius_threshold=None,
     lcfs_outboard_edge_threshold=None,
     lcfs_inboard_edge_threshold=None,
+    lcfs_constraint_mode=LCFS_CONSTRAINT_MODE_DEFAULT,
 ):
+    validate_lcfs_constraint_mode(lcfs_constraint_mode)
     payload_kind = objective_eval["search_hardware_constraint_payload_kind"]
     if payload_kind not in {"signed_residual", "penalty_objective"}:
         raise ValueError(
@@ -1014,6 +1053,7 @@ def evaluate_single_stage_hardware_snapshot(
     lcfs_minor_radius_m=None,
     lcfs_outboard_edge_threshold=None,
     lcfs_inboard_edge_threshold=None,
+    lcfs_constraint_mode=LCFS_CONSTRAINT_MODE_DEFAULT,
 ):
     curve_curve_min_dist = float(curve_curve_distance_obj.shortest_distance())
     curve_surface_min_dist = float(curve_surface_distance_obj.shortest_distance())
@@ -1056,6 +1096,7 @@ def evaluate_single_stage_hardware_snapshot(
         lcfs_minor_radius_m=resolved_lcfs_minor_radius_m,
         lcfs_outboard_edge_threshold=lcfs_outboard_edge_threshold,
         lcfs_inboard_edge_threshold=lcfs_inboard_edge_threshold,
+        lcfs_constraint_mode=lcfs_constraint_mode,
     )
 
 

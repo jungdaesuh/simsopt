@@ -3406,6 +3406,7 @@ def evaluate_single_stage_hardware_constraints(
     hardware_keepout_threshold=None,
     lcfs_major_radius_m=None,
     lcfs_minor_radius_m=None,
+    lcfs_constraint_mode=LCFS_CONSTRAINT_MODE_DEFAULT,
 ):
     return _evaluate_single_stage_hardware_constraints(
         curve_curve_min_dist,
@@ -3433,6 +3434,7 @@ def evaluate_single_stage_hardware_constraints(
         hardware_keepout_threshold=hardware_keepout_threshold,
         lcfs_major_radius_m=lcfs_major_radius_m,
         lcfs_minor_radius_m=lcfs_minor_radius_m,
+        lcfs_constraint_mode=lcfs_constraint_mode,
     )
 
 
@@ -3551,6 +3553,7 @@ def current_single_stage_hardware_snapshot_kwargs(
             "hardware_keepout_threshold": (
                 None if hardware_keepout_obj is None else 0.0
             ),
+            "lcfs_constraint_mode": LCFS_CONSTRAINT_MODE,
         }
     )
     return snapshot_kwargs

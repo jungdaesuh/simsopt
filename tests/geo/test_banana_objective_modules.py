@@ -5705,6 +5705,53 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         self.assertEqual(result["coil_width"], 0.12)
         self.assertEqual(result["self_intersect_penalty"], 0.0)
 
+    def test_edge_mode_artifact_status_uses_edge_constraints_not_centered_major(self):
+        hardware_contracts = _load_module(
+            HARDWARE_CONTRACTS_PATH,
+            "banana_hw_contracts_for_edge_artifact_status",
+        )
+        result = self.module.evaluate_single_stage_hardware_snapshot(
+            curve_curve_distance_obj=SimpleNamespace(shortest_distance=lambda: 0.05),
+            cc_dist=0.0462,
+            curve_surface_distance_obj=SimpleNamespace(shortest_distance=lambda: 0.02),
+            cs_dist=0.010,
+            surface_status={"outer_vessel_gap": 0.04},
+            ss_dist=0.04,
+            banana_curve=SimpleNamespace(kappa=lambda: np.array([39.0, 40.0])),
+            curvature_threshold=100.0,
+            outer_surface=SimpleNamespace(
+                major_radius=lambda: 0.921401,
+                minor_radius=lambda: 0.113599,
+            ),
+            coil_length=1.9,
+            length_target=1.9,
+            poloidal_extent_rad=0.7,
+            poloidal_extent_threshold_rad=0.8,
+            tf_current_A=-8.0e4,
+            tf_current_limit_A=8.0e4,
+            banana_current_A=-1.6e4,
+            banana_current_max_A=1.6e4,
+            coil_width=0.12,
+            width_min_threshold=0.05,
+            width_max_threshold=0.17,
+            self_intersect_penalty=0.0,
+            self_intersect_threshold=0.0,
+            lcfs_constraint_mode=hardware_contracts.LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE,
+        )
+
+        artifact_status = result["artifact_hardware_status"]
+
+        self.assertTrue(artifact_status["success"])
+        self.assertEqual(artifact_status["violations"], [])
+        self.assertNotIn("lcfs_major_radius", artifact_status["constraints"])
+        self.assertIn("lcfs_outboard_edge", artifact_status["constraints"])
+        self.assertIn("lcfs_inboard_edge", artifact_status["constraints"])
+        self.assertIn("lcfs_minor_radius", artifact_status["constraints"])
+        self.assertAlmostEqual(result["lcfs_major_radius_m"], 0.921401)
+        self.assertAlmostEqual(result["lcfs_minor_radius_m"], 0.113599)
+        self.assertAlmostEqual(result["lcfs_outboard_edge_m"], 1.035)
+        self.assertAlmostEqual(result["lcfs_inboard_edge_m"], 0.807802)
+
     def test_evaluate_single_stage_hardware_snapshot_keeps_top_level_constraints_in_search_role(
         self,
     ):
