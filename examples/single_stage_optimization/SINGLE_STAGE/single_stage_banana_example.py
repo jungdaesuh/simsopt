@@ -1372,6 +1372,20 @@ def parse_args():
         else None,
         help="Coil surface minor radius. Defaults to the Stage 2 seed radius when omitted.",
     )
+    parser.add_argument(
+        "--banana-surf-major-radius",
+        type=float,
+        default=float(
+            os.environ.get(
+                "BANANA_SURF_MAJOR_RADIUS", BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+            )
+        ),
+        help=(
+            "Coil winding-surface MAJOR radius (m). Defaults to the on-spec sensor-array "
+            "center (BANANA_WINDING_SURFACE_MAJOR_RADIUS_M). Set to ramp the winding "
+            "surface for a continuation; only the coil-winding reference torus uses it."
+        ),
+    )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
     parser.add_argument(
         "--ntheta", type=int, default=int(os.environ.get("NTHETA", "64"))
@@ -3370,8 +3384,14 @@ def initialize_surface_data_for_contract(
     return surface_data, warm_start_surface_paths
 
 
-def build_hbt_reference_surfaces(nfp, banana_surf_radius):
-    surfaces = build_banana_reference_surfaces(nfp, banana_surf_radius)
+def build_hbt_reference_surfaces(
+    nfp,
+    banana_surf_radius,
+    banana_surf_major_radius=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+):
+    surfaces = build_banana_reference_surfaces(
+        nfp, banana_surf_radius, banana_surf_major_radius
+    )
     return (
         surfaces.vessel,
         surfaces.lcfs_clearance_reference,
@@ -12147,8 +12167,17 @@ if __name__ == "__main__":
         VV,
         lcfs_clearance_reference,
         surf_coils,
-    ) = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
+    ) = build_hbt_reference_surfaces(
+        banana_surf_nfp, banana_surf_radius, args.banana_surf_major_radius
+    )
 
+    bs, coil_partitions, banana_geometry_state = (
+        _resolve_single_stage_banana_geometry_state_impl(
+            bs,
+            coil_partitions,
+            mode=args.single_stage_banana_geometry_mode,
+        )
+    )
     bs, coil_partitions, banana_current_state = (
         resolve_single_stage_banana_current_state(
             bs,

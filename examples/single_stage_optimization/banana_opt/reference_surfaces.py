@@ -21,7 +21,17 @@ class BananaReferenceSurfaces:
 def build_banana_reference_surfaces(
     nfp: int,
     banana_surf_radius: float,
+    banana_surf_major_radius: float = BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
 ) -> BananaReferenceSurfaces:
+    """Build the vessel, LCFS-clearance, and coil-winding reference tori.
+
+    banana_surf_radius: coil-winding surface MINOR radius (m).
+    banana_surf_major_radius: coil-winding surface MAJOR radius (m); defaults to the
+        on-spec sensor-array center ``BANANA_WINDING_SURFACE_MAJOR_RADIUS_M``. Only the
+        coil-winding surface uses it — the vessel and the (fixed) LCFS-clearance band
+        keep their hardware constants. Exposed so a winding-surface continuation can
+        ramp the major radius alongside the minor.
+    """
     vessel = SurfaceRZFourier(nfp=nfp, stellsym=True)
     vessel.set_rc(0, 0, VACUUM_VESSEL_MAJOR_RADIUS_M)
     vessel.set_rc(1, 0, VACUUM_VESSEL_MINOR_RADIUS_M)
@@ -33,7 +43,7 @@ def build_banana_reference_surfaces(
     lcfs_clearance_reference.set_zs(1, 0, LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M)
 
     coil_winding_surface = SurfaceRZFourier(nfp=nfp, stellsym=True)
-    coil_winding_surface.set_rc(0, 0, BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
+    coil_winding_surface.set_rc(0, 0, banana_surf_major_radius)
     coil_winding_surface.set_rc(1, 0, banana_surf_radius)
     coil_winding_surface.set_zs(1, 0, banana_surf_radius)
 

@@ -87,6 +87,28 @@ class BananaReferenceSurfaceTests(unittest.TestCase):
             {(1, 0): 0.23},
         )
 
+    def test_banana_surf_major_radius_override_moves_only_coil_winding_surface(self):
+        module = _load_module(REFERENCE_SURFACES_PATH, "banana_reference_surfaces")
+
+        with mock.patch.object(module, "SurfaceRZFourier", _FakeSurfaceRZFourier):
+            surfaces = module.build_banana_reference_surfaces(
+                nfp=5,
+                banana_surf_radius=0.18,
+                banana_surf_major_radius=0.95,
+            )
+
+        # The override sets the coil-winding torus major radius ...
+        self.assertEqual(
+            surfaces.coil_winding_surface.rc,
+            {(0, 0): 0.95, (1, 0): 0.18},
+        )
+        # ... and leaves the vessel and the fixed LCFS-clearance band untouched.
+        self.assertEqual(surfaces.vessel.rc[(0, 0)], module.VACUUM_VESSEL_MAJOR_RADIUS_M)
+        self.assertEqual(
+            surfaces.lcfs_clearance_reference.rc[(0, 0)],
+            module.LCFS_CLEARANCE_REFERENCE_MAJOR_RADIUS_M,
+        )
+
 
 class Stage2GeometryHelperTests(unittest.TestCase):
     def setUp(self):
