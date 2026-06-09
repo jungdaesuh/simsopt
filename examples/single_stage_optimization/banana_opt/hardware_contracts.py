@@ -88,8 +88,8 @@ TYPE_KK_FINITE_BUILD_GAPSIZE_B_M = (
     / (TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B - 1)
 )
 # Legacy compatibility aliases for magnetic finite-build callers. They now point
-# to the Type KK conductor pack, not the outer clearance channel and not the old
-# 29 x 20 mm placeholder.
+# to the Type KK conductor pack, not the outer clearance channel or retired
+# placeholder dimensions.
 BANANA_PACK_WIDTH_BINORMAL_M = TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M
 BANANA_PACK_DEPTH_NORMAL_M = TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M
 BANANA_PACK_HALF_BUILD_BINORMAL_M = TYPE_KK_CONDUCTOR_PACK_HALF_WIDTH_BINORMAL_M
