@@ -106,7 +106,9 @@ from simsopt_jax.core.biotsavart import (
     biot_savart_B_and_dB,
     biot_savart_dA_by_dX,
 )
-from simsopt_jax.core.biotsavart_cpu_ordered import biot_savart_B_and_dB_cpu_ordered
+from simsopt_jax.core.biotsavart_cpu_ordered import (
+    biot_savart_B_and_dB_cpu_ordered,
+)
 from simsopt_jax.core.specs import GroupedCoilSetSpec
 from simsopt_jax.core.sharding import place_active_replicated
 from simsopt_jax.geo.boozer_residual import (
@@ -3138,25 +3140,25 @@ def _make_ls_penalty_objective(
     )
 
 
-def _make_boozer_penalty_closure(fn, **kwargs):
-    """Generic closure builder for Boozer penalty functions.
-
-    Captures all surface/coil keyword arguments and returns a unary
-    ``fn(xx, **kwargs)`` closure suitable for JIT tracing.
-    """
-
+def _make_boozer_penalty_objective_closure(**kwargs):
     def _closure(xx):
-        return fn(xx, **kwargs)
+        return _boozer_penalty_objective(xx, **kwargs)
 
     return _closure
 
 
-def _make_boozer_penalty_objective_closure(**kwargs):
-    return _make_boozer_penalty_closure(_boozer_penalty_objective, **kwargs)
-
-
 def _make_boozer_penalty_residual_closure(**kwargs):
-    return _make_boozer_penalty_closure(_boozer_penalty_residual_vector, **kwargs)
+    def _closure(xx):
+        return _boozer_penalty_residual_vector(xx, **kwargs)
+
+    return _closure
+
+
+def _make_boozer_penalty_value_and_grad_cpu_ordered_closure(**kwargs):
+    def _closure(xx):
+        return _boozer_penalty_value_and_grad_cpu_ordered(xx, **kwargs)
+
+    return _closure
 
 
 def _directional_derivative(objective, x, tangent):
@@ -4756,8 +4758,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         objective_fn = self._reference_penalty_value_and_grad_cache.get(key)
         if objective_fn is None:
-            objective_fn = _make_boozer_penalty_closure(
-                _boozer_penalty_value_and_grad_cpu_ordered,
+            objective_fn = _make_boozer_penalty_value_and_grad_cpu_ordered_closure(
                 coil_arrays=coil_arrays,
                 coil_set_spec=resolved_coil_set_spec,
                 constraint_weight=resolved_constraint_weight,

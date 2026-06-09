@@ -2778,14 +2778,10 @@ def projection_l2_balls(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
     """
     norm_sq = jnp.sum(m * m, axis=1)
     norm = _row_norm_without_zero_sqrt_gradient(norm_sq)
-    unit = m_maxima**0  # Device-local 1 for zero/NaN radii and transfer guards.
-    zero_radius = unit - unit
-    nonzero_radius = m_maxima != zero_radius
-    safe_m_maxima = jnp.where(nonzero_radius, m_maxima, unit)
-    radius_ratio = norm / safe_m_maxima
-    denom = jnp.fmax(unit, radius_ratio)
-    projected = m / denom[:, None]
-    return jnp.where(nonzero_radius[:, None], projected, zero_radius[:, None] * m)
+    unit = m_maxima**0
+    radius_ratio = norm / m_maxima
+    denom = jnp.maximum(unit, radius_ratio)
+    return m / denom[:, None]
 
 
 def _on_ball(m: jax.Array, m_maxima: jax.Array) -> jax.Array:

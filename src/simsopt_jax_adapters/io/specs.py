@@ -107,6 +107,43 @@ def _decode_spec_value(value):
     return value
 
 
+def _encode_numpy_array(value):
+    array = np.asarray(value)
+    data = (
+        [array.real.tolist(), array.imag.tolist()]
+        if array.dtype.kind == "c"
+        else array.tolist()
+    )
+    return {
+        "@module": "numpy",
+        "@class": "array",
+        "dtype": str(array.dtype),
+        "data": data,
+    }
+
+
+def _encode_spec_value(value):
+    if is_dataclass(value) and type(value).__module__ == _JAX_SPECS_MODULE:
+        payload = {
+            "@module": _JAX_SPECS_MODULE,
+            "@class": type(value).__name__,
+        }
+        for field in fields(value):
+            payload[field.name] = _encode_spec_value(getattr(value, field.name))
+        return payload
+    if isinstance(value, np.ndarray):
+        return _encode_numpy_array(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, tuple):
+        return [_encode_spec_value(item) for item in value]
+    if isinstance(value, list):
+        return [_encode_spec_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _encode_spec_value(item) for key, item in value.items()}
+    return value
+
+
 def _surface_rz_fourier_spec_from_surface(surface):
     return surface_rz_fourier_spec_from_dofs(
         surface.get_dofs(),
@@ -156,24 +193,6 @@ def load_specs(filename):
     if (module, classname) in _SUPPORTED_LEGACY_PAYLOADS:
         return _load_specs_from_object(load(filename))
     raise NotImplementedError(f"{module}.{classname}")
-
-
-def _encode_spec_value(value):
-    if is_dataclass(value):
-        encoded = {
-            "@module": str(value.__class__.__module__),
-            "@class": str(value.__class__.__name__),
-        }
-        for field in fields(value):
-            encoded[field.name] = _encode_spec_value(getattr(value, field.name))
-        return encoded
-    if isinstance(value, tuple):
-        return [_encode_spec_value(item) for item in value]
-    if isinstance(value, list):
-        return [_encode_spec_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _encode_spec_value(item) for key, item in value.items()}
-    return value
 
 
 def _save_spec(filename, spec):

@@ -1,0 +1,8 @@
+tests/geo/test_lm_damping_parity.py
+tests/geo/test_lm_minpack_qr_parity.py
+tests/geo/test_lm_optimistix_contract.py
+tests/geo/test_lm_termination_parity.py
+tests/geo/test_optimizer_jax_item19.py
+tests/geo/test_optimizer_jax_reference.py
+tests/geo/test_optimizer_jax_silent_fallback_removal.py
+tests/geo/test_optimizer_result_converters.py

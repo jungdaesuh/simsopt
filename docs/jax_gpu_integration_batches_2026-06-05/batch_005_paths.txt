@@ -1,0 +1,8 @@
+tests/geo/test_boozer_derivatives_jax.py
+tests/geo/test_boozer_legacy_parity_contract.py
+tests/geo/test_boozer_residual_jax.py
+tests/geo/test_boozer_residual_jax_upstream_default_parity.py
+tests/geo/test_boozer_residual_pinned_input_byte_parity.py
+tests/geo/test_boozersurface.py
+tests/geo/test_boozersurface_jax.py
+tests/geo/test_boozersurface_jax_private.py

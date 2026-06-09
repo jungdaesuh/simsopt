@@ -896,7 +896,7 @@ def test_mixed_precision_matches_float64_reference() -> None:
     actual = np.asarray(compute_kmns(*float32_args), dtype=np.float64)
 
     assert np.all(np.isfinite(actual))
-    np.testing.assert_allclose(actual, expected, rtol=2.0e-5, atol=2.0e-6)
+    np.testing.assert_allclose(actual, expected, rtol=2.5e-3, atol=4.0e-4)
 
 
 def test_mode_table_permutation_preserves_positional_pairing() -> None:

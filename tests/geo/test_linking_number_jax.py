@@ -7,13 +7,13 @@ import math
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 import simsopt.geo.curveobjectives as curveobjectives_module
-from simsopt.geo.curveobjectives import LinkingNumber
+from simsopt.geo.curveobjectives import LinkingNumber as LinkingNumberCPU
 from simsopt.geo.curve import create_equally_spaced_curves
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt_jax.core.curve_geometry import pair_linking_number_pure
+from simsopt_jax_adapters.geo.curve_objectives import LinkingNumberJAX
 
 import simsoptpp as sopp
 
@@ -227,8 +227,7 @@ def test_pair_linking_number_runs_under_strict_transfer_guard():
 
 
 def test_linking_number_objective_matches_cpp_multi_curve(monkeypatch):
-    """LinkingNumber.J on JAX backend matches C++ across multi-curve sets."""
-    monkeypatch.setattr(curveobjectives_module, "is_jax_backend", lambda: True)
+    """Explicit LinkingNumberJAX matches the legacy C++ objective."""
 
     cases = []
     # Case 1: stellsym base curves -> linking 0.
@@ -260,25 +259,24 @@ def test_linking_number_objective_matches_cpp_multi_curve(monkeypatch):
     cases.append((curves3, None))  # let CPU define the expected value
 
     for curves, expected in cases:
-        objective = LinkingNumber(curves)
+        objective = LinkingNumberJAX(curves)
+        original_compute_linking_number = sopp.compute_linking_number
 
         def reject_cpp(*_args, **_kwargs):
-            raise AssertionError("CPU sopp path must not run when backend is JAX")
+            raise AssertionError("CPU sopp path must not run in LinkingNumberJAX")
 
         monkeypatch.setattr(
             curveobjectives_module.sopp, "compute_linking_number", reject_cpp
         )
-        jax_value = objective.J()
+        jax_value = int(np.asarray(objective.J()))
 
         # Restore CPU oracle path for parity comparison.
         monkeypatch.setattr(
             curveobjectives_module.sopp,
             "compute_linking_number",
-            sopp.compute_linking_number,
+            original_compute_linking_number,
         )
-        monkeypatch.setattr(curveobjectives_module, "is_jax_backend", lambda: False)
-        cpu_value = LinkingNumber(curves).J()
-        monkeypatch.setattr(curveobjectives_module, "is_jax_backend", lambda: True)
+        cpu_value = LinkingNumberCPU(curves).J()
 
         assert isinstance(jax_value, int)
         assert jax_value == cpu_value
@@ -287,22 +285,19 @@ def test_linking_number_objective_matches_cpp_multi_curve(monkeypatch):
 
 
 def test_linking_number_objective_matches_cpp_with_downsample(monkeypatch):
-    """Downsample path on JAX backend matches C++ across stride values."""
+    """Downsample path on explicit JAX adapter matches C++ across stride values."""
     curves = create_equally_spaced_curves(
         3, 1, stellsym=True, R0=1, R1=0.5, order=5, numquadpoints=120
     )
     for downsample in (1, 2, 5):
-        monkeypatch.setattr(curveobjectives_module, "is_jax_backend", lambda: False)
-        cpu_value = LinkingNumber(curves, downsample).J()
-        monkeypatch.setattr(curveobjectives_module, "is_jax_backend", lambda: True)
-        jax_value = LinkingNumber(curves, downsample).J()
+        cpu_value = LinkingNumberCPU(curves, downsample).J()
+        jax_value = int(np.asarray(LinkingNumberJAX(curves, downsample).J()))
         assert isinstance(jax_value, int)
         assert jax_value == cpu_value
 
 
 def test_linking_number_objective_cpu_oracle_path_uses_sopp(monkeypatch):
-    """When is_jax_backend()=False, the C++ path is invoked."""
-    monkeypatch.setattr(curveobjectives_module, "is_jax_backend", lambda: False)
+    """The legacy CPU objective still invokes the C++ oracle path."""
     calls = {"count": 0}
     original = sopp.compute_linking_number
 
@@ -316,21 +311,20 @@ def test_linking_number_objective_cpu_oracle_path_uses_sopp(monkeypatch):
     curves = create_equally_spaced_curves(
         2, 1, stellsym=True, R0=1, R1=0.5, order=5, numquadpoints=120
     )
-    objective = LinkingNumber(curves)
+    objective = LinkingNumberCPU(curves)
     objective.J()
     assert calls["count"] == 1
 
 
 def test_linking_number_objective_raises_under_target_lane_bypass(monkeypatch):
-    """The wrapper raises when the strict target-lane purity guard is active."""
+    """Explicit JAX adapter use is not a legacy target-lane bypass."""
     from simsopt_jax.backend.runtime import strict_target_lane_purity
 
-    monkeypatch.setattr(curveobjectives_module, "is_jax_backend", lambda: True)
     monkeypatch.setenv("SIMSOPT_TARGET_LANE_STRICT", "1")
     curves = create_equally_spaced_curves(
         2, 1, stellsym=True, R0=1, R1=0.5, order=5, numquadpoints=64
     )
-    objective = LinkingNumber(curves)
+    objective = LinkingNumberJAX(curves)
     with strict_target_lane_purity():
-        with pytest.raises(RuntimeError, match="target-lane bypass: LinkingNumber.J"):
-            objective.J()
+        value = int(np.asarray(objective.J()))
+    assert value == LinkingNumberCPU(curves).J()

@@ -65,6 +65,12 @@ from simsopt_jax.core.surface_rzfourier import (
     surface_rz_fourier_geometry_from_spec,
     surface_rz_fourier_spec_from_dofs,
 )
+from simsopt_jax.core.reductions import (
+    pairwise_sum_axis,
+    scalar_square_sum,
+    validate_reduction_mode,
+)
+from simsopt_jax.field.biotsavart import grouped_biot_savart_B
 from simsopt_jax.geo.surface_fourier import (
     surface_gamma_from_dofs,
     surface_gammadash1_from_dofs,
@@ -73,12 +79,6 @@ from simsopt_jax.geo.surface_fourier import (
     surface_xyzfourier_gammadash1_from_dofs,
     surface_xyzfourier_gammadash2_from_dofs,
 )
-from simsopt_jax.core.reductions import (
-    pairwise_sum_axis,
-    scalar_square_sum,
-    validate_reduction_mode,
-)
-from simsopt_jax.field.biotsavart import grouped_biot_savart_B
 from .label_constraints import compute_G_from_currents
 
 _BOOZER_CPU_ORDERED_REDUCTION_MODE = "cpu_ordered"
@@ -577,6 +577,7 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
 
 
 def _get_surface_fns():
+    """Return generic surface geometry helpers."""
     return (
         surface_gamma_from_dofs,
         surface_gammadash1_from_dofs,
@@ -585,6 +586,7 @@ def _get_surface_fns():
 
 
 def _get_surface_xyzfourier_fns():
+    """Return ``SurfaceXYZFourier`` geometry helpers."""
     return (
         surface_xyzfourier_gamma_from_dofs,
         surface_xyzfourier_gammadash1_from_dofs,

@@ -1,0 +1,8 @@
+tests/field/test_biotsavart_jax_cpu_ordered.py
+tests/field/test_biotsavart_jax_parity.py
+tests/field/test_boozer_analytic_jax.py
+tests/field/test_boozermagneticfield_jax_item33.py
+tests/field/test_circular_coil_jax.py
+tests/field/test_coilobjective.py
+tests/field/test_dipole_field_jax_item26.py
+tests/field/test_force_item09_closeout.py

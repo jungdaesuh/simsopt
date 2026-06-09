@@ -241,7 +241,6 @@ def least_squares_serial_solve_jax(
         raise TypeError(f"Unsupported JAX least-squares options: {unsupported}")
 
     x0 = jnp.asarray(prob.x)
-
     solver = _optimistix_solver(optimizer, rtol=rtol, atol=atol)
 
     datestr = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -292,7 +291,6 @@ def serial_solve_jax(
         raise TypeError(f"Unsupported JAX scalar solve options: {unsupported}")
 
     x0 = jnp.asarray(prob.x)
-
     solver = _optimistix_minimizer(optimizer, rtol=rtol, atol=atol)
 
     datestr = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")

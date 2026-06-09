@@ -882,7 +882,7 @@ def load_stage2_seed_configuration(
     seed_bs_path, surf, num_tf_coils, out_dir, *, backend
 ):
     if backend == "jax":
-        bs = SpecBackedBiotSavartJAX(load_specs(seed_bs_path)["biot_savart_spec"])
+        bs = load_stage2_seed_biot_savart_jax(seed_bs_path)
     else:
         bs = load(seed_bs_path)
     bs.set_points(surf.gamma().reshape((-1, 3)))
@@ -899,6 +899,24 @@ def load_stage2_seed_configuration(
     banana_curve = banana_coils[0].curve
     tf_coils = coils[:num_tf_coils]
     return bs, curves, banana_curve, banana_coils, tf_coils
+
+
+def load_stage2_seed_biot_savart_jax(seed_bs_path):
+    specs = load_specs(seed_bs_path)
+    if "biot_savart_spec" in specs:
+        return SpecBackedBiotSavartJAX(specs["biot_savart_spec"])
+
+    if "coil_set_spec" in specs:
+        seed_bs = load(seed_bs_path)
+        if not isinstance(seed_bs, BiotSavart):
+            raise TypeError(
+                "Stage 2 JAX seed paths with only coil_set_spec must decode "
+                f"to BiotSavart, got {type(seed_bs).__module__}."
+                f"{type(seed_bs).__name__}"
+            )
+        return BiotSavartJAX(seed_bs.coils)
+
+    raise KeyError("Stage 2 JAX seed path must provide biot_savart_spec or coil_set_spec")
 
 
 def initSurface(R0, s, file_loc, nphi, ntheta):
@@ -3239,7 +3257,7 @@ if __name__ == "__main__":
     if args.backend == "jax":
         if args.stage2_bs_path:
             new_bs_jax = new_bs
-            diagnostic_bs_jax = SpecBackedBiotSavartJAX(new_bs.biot_savart_spec)
+            diagnostic_bs_jax = new_bs
         else:
             all_coils = list(new_tf_coils) + list(new_banana_coils)
             new_bs_jax = BiotSavartJAX(all_coils)

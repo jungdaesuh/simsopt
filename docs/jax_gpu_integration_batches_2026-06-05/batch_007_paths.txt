@@ -1,0 +1,8 @@
+tests/geo/test_finitebuild_jax_item20.py
+tests/geo/test_finitebuild_jax_ssot_item20.py
+tests/geo/test_framedcurve_jax_item18.py
+tests/geo/test_framedcurve_jax_wrappers_item18.py
+tests/geo/test_label_constraints_jax.py
+tests/geo/test_lbfgsb_scipy_jax_kernels.py
+tests/geo/test_lbfgsb_scipy_parity.py
+tests/geo/test_linking_number_jax.py

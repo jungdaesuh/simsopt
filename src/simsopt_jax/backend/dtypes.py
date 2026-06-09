@@ -210,7 +210,6 @@ def runtime_device_put(value, *, dtype=None, target=None, device=None) -> jax.Ar
         array = np.asarray(value)
     else:
         array = np.asarray(value, dtype=resolved_dtype)
-
     maybe_initialize_distributed_jax()
     if placement is None:
         return jax.device_put(array)

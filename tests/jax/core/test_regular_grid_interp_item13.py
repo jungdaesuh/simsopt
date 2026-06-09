@@ -776,7 +776,10 @@ def test_cpp_cross_oracle_nan_input_contract() -> None:
         False,
     )
     strict_cpp_interpolant.interpolate_batch(poly)
-    with pytest.raises(RuntimeError, match="coordinates must be finite"):
+    with pytest.raises(
+        RuntimeError,
+        match="coordinates must be finite|is not representable as int64_t",
+    ):
         strict_cpp_interpolant.evaluate_batch(
             np.ascontiguousarray(xyz),
             np.zeros_like(initial),

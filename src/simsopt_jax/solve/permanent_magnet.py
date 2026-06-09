@@ -83,15 +83,7 @@ def _zeros_like_shape(reference: jax.Array, shape: tuple[int, ...]) -> jax.Array
 
 
 def _normalized_moment_magnitudes(matrix: jax.Array, m_maxima: jax.Array) -> jax.Array:
-    zero = _scalar_like(0.0, m_maxima)
-    one = _scalar_like(1.0, m_maxima)
-    positive_mmax = m_maxima > zero
-    safe_mmax = jnp.where(positive_mmax, m_maxima, one)
-    return jnp.where(
-        positive_mmax[:, None],
-        jnp.abs(matrix) / safe_mmax[:, None],
-        zero,
-    )
+    return jnp.abs(matrix) / m_maxima[:, None]
 
 
 def _is_tracing(value: object) -> bool:

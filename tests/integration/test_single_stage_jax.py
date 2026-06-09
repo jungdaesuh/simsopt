@@ -30,36 +30,23 @@ from repo_bootstrap import bootstrap_local_simsopt
 
 bootstrap_local_simsopt(_SRC_ROOT)
 
+from simsopt._core.optimizable import DOFs, Optimizable
 import simsopt_jax_adapters.geo.surface_objectives as soj
 import simsopt_jax_adapters.geo.surface_objectives_traceable as sotj
 
 
-class _FakeDependentOpt:
-    def __init__(self) -> None:
-        self.local_full_dof_size = 3
-        self.local_dofs_free_status = np.array([True, True, False])
+class _FakeDependentOpt(Optimizable):
+    return_fn_map = {}
+
+    def __init__(self, dofs: DOFs) -> None:
+        super().__init__(dofs=dofs)
 
 
-class _FakeDofs:
-    def __init__(self, dep_opts: tuple[_FakeDependentOpt, ...]) -> None:
-        self._dep_opts = dep_opts
+class _FakeBiotSavart(Optimizable):
+    return_fn_map = {}
 
-    def dep_opts(self) -> tuple[_FakeDependentOpt, ...]:
-        return self._dep_opts
-
-
-class _FakeLineageOpt:
-    def __init__(self, dep_opts: tuple[_FakeDependentOpt, ...]) -> None:
-        self.local_dof_size = 2
-        self.local_full_dof_size = 3
-        self.dofs_free_status = np.array([True, True, False])
-        self.local_dofs_free_status = np.array([True, True, False])
-        self.dofs = _FakeDofs(dep_opts)
-
-
-class _FakeBiotSavart:
-    def __init__(self, lineage: _FakeLineageOpt) -> None:
-        self.unique_dof_lineage = [lineage]
+    def __init__(self, lineage: tuple[_FakeDependentOpt, ...]) -> None:
+        super().__init__(depends_on=lineage)
 
 
 def _assert_allclose(
@@ -79,10 +66,13 @@ def _assert_allclose(
 def _build_shared_lineage_biotsavart() -> tuple[
     _FakeBiotSavart, _FakeDependentOpt, _FakeDependentOpt
 ]:
-    dep_opt_a = _FakeDependentOpt()
-    dep_opt_b = _FakeDependentOpt()
-    lineage = _FakeLineageOpt((dep_opt_a, dep_opt_b))
-    return _FakeBiotSavart(lineage), dep_opt_a, dep_opt_b
+    shared_dofs = DOFs(
+        x=np.zeros(3, dtype=float),
+        free=np.array([True, True, False]),
+    )
+    dep_opt_a = _FakeDependentOpt(shared_dofs)
+    dep_opt_b = _FakeDependentOpt(shared_dofs)
+    return _FakeBiotSavart((dep_opt_a, dep_opt_b)), dep_opt_a, dep_opt_b
 
 
 def test_coil_dofs_gradient_to_derivative_preserves_shared_dof_round_trip() -> None:

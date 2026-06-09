@@ -149,6 +149,13 @@ from simsopt_jax.solve.minimize_runtime import (
     run_optax_minimize,
     run_optimistix_minimize,
 )
+from simsopt_jax.geo.optimizers.private import (
+    _minimize_bfgs_private as _private_minimize_bfgs,
+    _minimize_lbfgs_private as _private_minimize_lbfgs,
+    _minimize_lbfgs_private_value_and_grad as _private_minimize_lbfgs_value_and_grad,
+    _private_bfgs_result_to_optimize_result as _private_bfgs_result_to_optimize_result_impl,
+    _private_lbfgs_result_to_optimize_result as _private_lbfgs_result_to_optimize_result_impl,
+)
 from simsopt_jax.solve.optax import OptaxLBFGSOptions
 from simsopt_jax.solve.optimistix import OptimistixLBFGSOptions
 from simsopt_jax.geo.optimizers._shared import (
@@ -162,13 +169,6 @@ from simsopt_jax.geo.optimizers._shared import (
     _prepare_optimizer_pytree_adapter,
     _x64_enabled,
     private_optimizer_runtime_is_supported,
-)
-from simsopt_jax.geo.optimizers.private import (
-    _minimize_bfgs_private as _private_minimize_bfgs,
-    _minimize_lbfgs_private as _private_minimize_lbfgs,
-    _minimize_lbfgs_private_value_and_grad as _private_minimize_lbfgs_value_and_grad,
-    _private_bfgs_result_to_optimize_result as _private_bfgs_to_optimize_result,
-    _private_lbfgs_result_to_optimize_result as _private_lbfgs_to_optimize_result,
 )
 from simsopt_jax.geo._optimizer_backend_choices import (
     CONCRETE_OPTIMIZER_BACKENDS,
@@ -197,8 +197,8 @@ def _private_optimizer_runtime() -> _PrivateOptimizerRuntime:
         minimize_bfgs=_private_minimize_bfgs,
         minimize_lbfgs=_private_minimize_lbfgs,
         minimize_lbfgs_value_and_grad=_private_minimize_lbfgs_value_and_grad,
-        bfgs_result_to_optimize_result=_private_bfgs_to_optimize_result,
-        lbfgs_result_to_optimize_result=_private_lbfgs_to_optimize_result,
+        bfgs_result_to_optimize_result=_private_bfgs_result_to_optimize_result_impl,
+        lbfgs_result_to_optimize_result=_private_lbfgs_result_to_optimize_result_impl,
     )
 
 
@@ -1319,7 +1319,9 @@ def resolve_target_outer_loop_optimizer_contract(
 
 @lru_cache(maxsize=1)
 def _load_reference_optimizer_module():
-    return _optimizer_jax_reference
+    from . import reference as optimizer_jax_reference
+
+    return optimizer_jax_reference
 
 
 def _least_squares_cost(residual):
@@ -5491,6 +5493,3 @@ def jax_minimize(
         callback=callback,
         progress_callback=progress_callback,
     )
-
-
-from . import reference as _optimizer_jax_reference  # noqa: E402

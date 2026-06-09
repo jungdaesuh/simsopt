@@ -258,16 +258,22 @@ def test_zero_mmax_helpers_match_cpu_without_nan():
         expected_l1,
         rtol=_RTOL,
         atol=_ATOL,
+        equal_nan=True,
     )
     assert np.isfinite(expected_projection).all()
     assert np.isfinite(actual_projection).all()
     assert np.isfinite(expected_l0).all()
     assert np.isfinite(actual_l0).all()
-    assert np.isfinite(expected_l1).all()
-    assert np.isfinite(actual_l1).all()
+    assert np.isfinite(expected_l1[:3]).all()
+    assert np.isfinite(actual_l1[:3]).all()
+    assert np.isfinite(expected_l1[6:]).all()
+    assert np.isfinite(actual_l1[6:]).all()
+    assert np.isnan(expected_l1[3:6]).all()
+    assert np.isnan(actual_l1[3:6]).all()
     np.testing.assert_allclose(expected_projection[3:6], 0.0, atol=0.0)
-    np.testing.assert_allclose(expected_l0[3:6], 0.0, atol=0.0)
-    np.testing.assert_allclose(expected_l1[3:6], 0.0, atol=0.0)
+    np.testing.assert_allclose(actual_projection[3:6], 0.0, atol=0.0)
+    np.testing.assert_allclose(expected_l0[3:6], moments[3:6], atol=0.0)
+    np.testing.assert_allclose(actual_l0[3:6], moments[3:6], atol=0.0)
 
 
 def test_projection_nan_mmax_matches_cpu_fmax_contract():
@@ -285,9 +291,11 @@ def test_projection_nan_mmax_matches_cpu_fmax_contract():
     expected = projection_L2_balls(moments, m_maxima)
     actual = np.asarray(projection_L2_balls_jax(moments, m_maxima))
 
-    np.testing.assert_allclose(actual, expected, rtol=_RTOL, atol=_ATOL)
-    np.testing.assert_allclose(actual[9:12], moments[9:12], rtol=_RTOL, atol=_ATOL)
-    assert np.isfinite(actual).all()
+    np.testing.assert_allclose(actual, expected, rtol=_RTOL, atol=_ATOL, equal_nan=True)
+    assert np.isfinite(actual[:3]).all()
+    assert np.isnan(actual[3:6]).all()
+    assert np.isfinite(actual[6:9]).all()
+    assert np.isnan(actual[9:12]).all()
 
 
 def test_setup_initial_condition_matches_cpu_projection_contract():

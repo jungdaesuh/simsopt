@@ -8,12 +8,7 @@ import numpy as np
 from simsopt_jax.backend.dtypes import runtime_device_put
 
 
-def _require_jax():
-    return jax
-
-
 def host_array(value, *, dtype=None):
-    jax = _require_jax()
     with jax.transfer_guard_device_to_host("allow"):
         array = np.asarray(jax.device_get(value))
     if dtype is not None:
@@ -57,8 +52,6 @@ def host_inf_norm(value, *, dtype=None) -> float:
 
 
 def host_tree(value, *, dtype=None):
-    jax = _require_jax()
-
     def _hostify_leaf(leaf):
         if isinstance(leaf, jax.core.Tracer):
             return leaf
@@ -76,7 +69,6 @@ def host_tree(value, *, dtype=None):
 
 
 def scalar_pullback_seed(value):
-    jax = _require_jax()
     # Build the pullback seed from ``value`` itself so the scalar cotangent stays
     # on-device under ``jax.transfer_guard("disallow")``.
     always_true = jax.numpy.logical_or(
@@ -87,15 +79,12 @@ def scalar_pullback_seed(value):
 
 
 def strict_scalar_grad(fun, arg):
-    jax = _require_jax()
     value, pullback = jax.vjp(fun, arg)
     (gradient,) = pullback(scalar_pullback_seed(value))
     return gradient
 
 
 def strict_scalar_value_and_grad(fun, arg, *args):
-    jax = _require_jax()
-
     def _objective(first_arg):
         return fun(first_arg, *args)
 
