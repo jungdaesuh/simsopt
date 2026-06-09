@@ -1,0 +1,21 @@
+"""Compatibility shim for the pure JAX ``integral_BdotN`` kernels.
+
+The implementation lives in :mod:`simsopt_jax.core.integral_bdotn`.
+This module preserves the historical public import path.
+"""
+
+from simsopt_jax.core.integral_bdotn import (
+    integral_BdotN,
+    integral_BdotN_surface_sharded,
+    integral_BdotN_sharding_summary,
+    residual_BdotN,
+    signed_BdotN_flux,
+)
+
+__all__ = [
+    "integral_BdotN",
+    "integral_BdotN_surface_sharded",
+    "integral_BdotN_sharding_summary",
+    "residual_BdotN",
+    "signed_BdotN_flux",
+]

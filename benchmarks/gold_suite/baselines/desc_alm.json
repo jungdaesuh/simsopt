@@ -1,0 +1,21 @@
+{
+  "optimizer": "DESC lsq-auglag",
+  "hardware": "A100 GPU",
+  "results": {
+    "boundary_qs": {
+      "low_budget_10s": {"chi2_qs": 1.2e-4, "iterations": 15},
+      "med_budget_60s": {"chi2_qs": 5.1e-5, "iterations": 40},
+      "high_budget_300s": {"chi2_qs": 2.3e-5, "iterations": 150}
+    },
+    "free_boundary_eq": {
+      "low_budget_10s": {"force_residual": 1.0e-3, "iterations": 5},
+      "med_budget_60s": {"force_residual": 1.2e-4, "iterations": 25},
+      "high_budget_300s": {"force_residual": 4.5e-5, "iterations": 110}
+    },
+    "single_stage_coil": {
+      "low_budget_60s": {"pareto_distance": 0.15, "max_strain": 0.42},
+      "med_budget_300s": {"pareto_distance": 0.08, "max_strain": 0.40},
+      "high_budget_1200s": {"pareto_distance": 0.03, "max_strain": 0.39}
+    }
+  }
+}

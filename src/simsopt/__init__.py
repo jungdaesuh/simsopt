@@ -12,8 +12,14 @@
 
 from ._core import make_optimizable, load, save
 
-# VERSION info
-from ._version import version as __version__
+# VERSION info. Editable/source checkouts may not have the setuptools_scm
+# generated file until build time; keep raw source imports usable.
+try:
+    from ._version import version as __version__
+except ModuleNotFoundError as exc:
+    if exc.name != f"{__name__}._version":
+        raise
+    __version__ = "0.0.dev0+source"
 
 # Expose XSIMD depedency in simsoptpp
 from simsoptpp import using_xsimd as __built_with_xsimd__

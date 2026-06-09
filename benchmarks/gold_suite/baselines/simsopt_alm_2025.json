@@ -1,0 +1,21 @@
+{
+  "optimizer": "SIMSOPT 2025 ALM",
+  "hardware": "A100 GPU",
+  "results": {
+    "boundary_qs": {
+      "low_budget_10s": {"chi2_qs": 2.1e-4, "iterations": 10},
+      "med_budget_60s": {"chi2_qs": 8.5e-5, "iterations": 35},
+      "high_budget_300s": {"chi2_qs": 3.8e-5, "iterations": 120}
+    },
+    "free_boundary_eq": {
+      "low_budget_10s": {"force_residual": 1.5e-3, "iterations": 4},
+      "med_budget_60s": {"force_residual": 3.1e-4, "iterations": 20},
+      "high_budget_300s": {"force_residual": 8.0e-5, "iterations": 90}
+    },
+    "single_stage_coil": {
+      "low_budget_60s": {"pareto_distance": 0.12, "max_strain": 0.45},
+      "med_budget_300s": {"pareto_distance": 0.06, "max_strain": 0.41},
+      "high_budget_1200s": {"pareto_distance": 0.02, "max_strain": 0.395}
+    }
+  }
+}
