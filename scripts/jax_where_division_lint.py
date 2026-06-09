@@ -98,13 +98,23 @@ def _comments_by_line(source: str) -> dict[int, str]:
     }
 
 
+def _iter_python_paths(paths: Sequence[Path]) -> list[Path]:
+    python_paths: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            python_paths.extend(sorted(path.rglob("*.py")))
+        else:
+            python_paths.append(path)
+    return python_paths
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path)
     args = parser.parse_args(argv)
 
     all_findings: list[Finding] = []
-    for path in args.paths:
+    for path in _iter_python_paths(args.paths):
         source = path.read_text(encoding="utf-8")
         all_findings.extend(lint_source(path, source, _comments_by_line(source)))
 

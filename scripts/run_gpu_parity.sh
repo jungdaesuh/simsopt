@@ -137,10 +137,16 @@ if [ -n "$GIT_STATUS" ]; then
   printf '%s\n' "$GIT_STATUS"
 fi
 
+SUITE_RC=0
+
+record_failure() {
+  SUITE_RC=1
+}
+
 # --- Phase 1: Import smoke ---
 echo ""
 echo "=== Phase 1: Import Smoke ==="
-"$PYTHON_BIN" -m pytest tests/test_jax_import_smoke.py -v --tb=short 2>&1 || true
+"$PYTHON_BIN" -m pytest tests/test_jax_import_smoke.py -v --tb=short 2>&1 || record_failure
 
 # --- Phase 2: Pure JAX unit tests ---
 echo ""
@@ -154,39 +160,39 @@ fi
   tests/field/test_biotsavart_jax.py \
   tests/geo/test_surface_fourier_jax.py \
   tests/objectives/test_integral_bdotn_jax.py \
-  -v --tb=short 2>&1 || true
+  -v --tb=short 2>&1 || record_failure
 
 "$PYTHON_BIN" -m pytest \
   tests/geo/test_boozer_residual_jax.py \
   -k "$PARITY_EXPR" \
-  -v --tb=short 2>&1 || true
+  -v --tb=short 2>&1 || record_failure
 
 # --- Phase 3: Biot-Savart parity tests ---
 echo ""
 echo "=== Phase 3: Biot-Savart Parity ==="
-"$PYTHON_BIN" -m pytest tests/field/test_biotsavart_jax_parity.py -v --tb=short 2>&1 || true
+"$PYTHON_BIN" -m pytest tests/field/test_biotsavart_jax_parity.py -v --tb=short 2>&1 || record_failure
 
 # --- Phase 4: Boozer derivatives ---
 echo ""
 echo "=== Phase 4: Boozer Derivatives ==="
-"$PYTHON_BIN" -m pytest tests/geo/test_boozer_derivatives_jax.py -v --tb=short 2>&1 || true
+"$PYTHON_BIN" -m pytest tests/geo/test_boozer_derivatives_jax.py -v --tb=short 2>&1 || record_failure
 
 # --- Phase 5: Boozer surface solver ---
 echo ""
 echo "=== Phase 5: Boozer Surface Solver ==="
-"$PYTHON_BIN" -m pytest tests/geo/test_boozersurface_jax.py -m "not private_optimizer_runtime" -v --tb=short 2>&1 || true
+"$PYTHON_BIN" -m pytest tests/geo/test_boozersurface_jax.py -m "not private_optimizer_runtime" -v --tb=short 2>&1 || record_failure
 
 # --- Phase 6: GPU reproducibility contract (GPU only) ---
 if [ "$PLATFORM" = "cuda" ]; then
   echo ""
   echo "=== Phase 6: GPU Reproducibility Contract ==="
-  "$PYTHON_BIN" scripts/jax_ci_contract.py --platform cuda 2>&1 || true
+  "$PYTHON_BIN" scripts/jax_ci_contract.py --platform cuda 2>&1 || record_failure
 fi
 
 # --- Phase 7: JAX native path integration ---
 echo ""
 echo "=== Phase 7: JAX Native Path Integration ==="
-"$PYTHON_BIN" -m pytest tests/integration/test_jax_native_path.py -v --tb=short 2>&1 || true
+"$PYTHON_BIN" -m pytest tests/integration/test_jax_native_path.py -v --tb=short 2>&1 || record_failure
 
 # --- Phase 8: Quick device sanity ---
 echo ""
@@ -210,10 +216,17 @@ rel_err = abs(device_sum - cpu_sum) / (abs(cpu_sum) + 1e-30)
 print(f'Reduction order rel error: {rel_err:.2e}')
 print(f'CPU sum: {cpu_sum}')
 print(f'Device sum: {device_sum}')
-print('PASS' if rel_err < 1e-10 else 'FAIL')
-"
+if rel_err >= 1e-10:
+    raise SystemExit('FAIL')
+print('PASS')
+" || record_failure
 
 echo ""
 echo "============================================"
-echo "  Parity test suite complete."
+if [ "$SUITE_RC" -eq 0 ]; then
+  echo "  Parity test suite passed."
+else
+  echo "  Parity test suite failed."
+fi
 echo "============================================"
+exit "$SUITE_RC"

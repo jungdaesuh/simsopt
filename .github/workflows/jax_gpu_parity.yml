@@ -21,7 +21,7 @@ jobs:
       BENCHMARK_ENV_FILE: envs/jax.yml
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
-      SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      SIMSOPT_JAX_TRANSFER_GUARD: log
       XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
@@ -182,8 +182,8 @@ jobs:
             benchmark_artifacts/jax_ci_contract.json
             benchmark_artifacts/jax_ci_contract.md
 
-  gpu-full-suite-disallow:
-    name: GPU full suite (CUDA, transfer_guard=disallow)
+  gpu-full-suite-log:
+    name: GPU full suite (CUDA, transfer_guard=log)
     runs-on: [self-hosted, gpu]
     timeout-minutes: 240
 
@@ -192,7 +192,7 @@ jobs:
       BENCHMARK_ENV_FILE: envs/jax.yml
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
-      SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      SIMSOPT_JAX_TRANSFER_GUARD: log
       XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
@@ -219,7 +219,7 @@ jobs:
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -c "import jax; print(jax.devices()); print(jax.default_backend()); assert any(device.platform in {'cuda', 'gpu'} for device in jax.devices()); assert jax.config.jax_enable_x64"
 
-      - name: Run full pytest suite under CUDA strict transfer guard
+      - name: Run full pytest suite under CUDA log transfer guard
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pytest tests \

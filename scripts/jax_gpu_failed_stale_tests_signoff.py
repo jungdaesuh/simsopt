@@ -16,9 +16,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 
-_DEFAULT_INTEGRATION_PATHS = Path(
-    "docs/jax_gpu_integration_test_paths_2026-06-05.txt"
-)
+_DEFAULT_INTEGRATION_PATHS = Path("docs/jax_gpu_integration_test_paths_2026-06-05.txt")
 _DEFAULT_BATCH_PATHS_DIR = Path("docs/jax_gpu_integration_batches_2026-06-05")
 _DEFAULT_BASELINE_SELECTORS = Path("docs/jax_gpu_failed_selectors_2026-06-05.txt")
 _DEFAULT_RESULTS_DIR = Path(".artifacts/jax_gpu_failed_stale_tests_signoff")
@@ -37,6 +35,7 @@ _TRANSFER_GUARD_SNAPSHOT_ENVS = (
     "SIMSOPT_JAX_TRANSFER_GUARD",
     *_RAW_JAX_TRANSFER_GUARD_ENVS,
 )
+_ALLOWED_UNTRACKED_PREFIXES = (".artifacts/",)
 _STALE_FAILURE_PATTERNS = (
     "surface_spec",
     "to_spec",
@@ -115,19 +114,35 @@ def _repo_head(repo: Path) -> str:
     return completed.stdout.strip()
 
 
-def _require_clean_tracked_worktree(repo: Path) -> None:
+def _require_clean_worktree(repo: Path) -> None:
     completed = subprocess.run(
-        ["git", "-C", str(repo), "status", "--short", "--untracked-files=no"],
+        ["git", "-C", str(repo), "status", "--short", "--untracked-files=all"],
         check=False,
         capture_output=True,
         text=True,
     )
     if completed.returncode != 0:
         raise SystemExit("failed to read git status")
-    if completed.stdout.strip():
+
+    tracked_status: list[str] = []
+    untracked_status: list[str] = []
+    for line in completed.stdout.splitlines():
+        if line.startswith("?? "):
+            path = line[3:]
+            if not path.startswith(_ALLOWED_UNTRACKED_PREFIXES):
+                untracked_status.append(path)
+        else:
+            tracked_status.append(line)
+
+    if tracked_status:
         raise SystemExit(
             "tracked worktree must be clean for CUDA signoff:\n"
-            f"{completed.stdout.rstrip()}"
+            f"{chr(10).join(tracked_status)}"
+        )
+    if untracked_status:
+        raise SystemExit(
+            "non-artifact untracked paths would invalidate CUDA signoff:\n"
+            f"{chr(10).join(untracked_status)}"
         )
 
 
@@ -246,9 +261,7 @@ def _run_logged(
             )
             returncode = completed.returncode
         except subprocess.TimeoutExpired:
-            log_file.write(
-                f"\nTIMEOUT: {label} exceeded {timeout_seconds} seconds\n"
-            )
+            log_file.write(f"\nTIMEOUT: {label} exceeded {timeout_seconds} seconds\n")
             returncode = _TIMEOUT_RETURNCODE
     (log_path.with_suffix(log_path.suffix + ".rc")).write_text(
         f"{returncode}\n", encoding="utf-8"
@@ -269,7 +282,12 @@ def _prepare_command_outputs(log_path: Path, junit_path: Path | None) -> None:
 
 
 def _clear_integration_batch_outputs(batch_dir: Path) -> None:
-    for pattern in ("batch_*.xml", "batch_*.log", "batch_*.log.rc", "batch_*_paths.txt"):
+    for pattern in (
+        "batch_*.xml",
+        "batch_*.log",
+        "batch_*.log.rc",
+        "batch_*_paths.txt",
+    ):
         for path in batch_dir.glob(pattern):
             _remove_if_exists(path)
 
@@ -363,7 +381,9 @@ def _extract_selectors(xml_paths: list[Path]) -> list[SelectorFailure]:
     return [rows[key] for key in sorted(rows)]
 
 
-def _write_selectors(path: Path, source_glob: str, selectors: list[SelectorFailure]) -> None:
+def _write_selectors(
+    path: Path, source_glob: str, selectors: list[SelectorFailure]
+) -> None:
     lines = [
         f"# Generated from {source_glob}",
         "# Columns: batch, classname, name, kind, first_failure_or_error_line",
@@ -554,7 +574,7 @@ def main(argv: list[str]) -> int:
 
     results_dir.mkdir(parents=True, exist_ok=True)
     if not args.skip_clean_check and not args.dry_run:
-        _require_clean_tracked_worktree(repo)
+        _require_clean_worktree(repo)
     if not args.dry_run:
         _require_cuda_runtime(python_bin)
 
@@ -601,7 +621,9 @@ def main(argv: list[str]) -> int:
     records.append(
         _run_logged(
             label="pure-tests-jax",
-            command=_pytest_command(python_bin, pure_junit, ["tests/jax"], verbose=False),
+            command=_pytest_command(
+                python_bin, pure_junit, ["tests/jax"], verbose=False
+            ),
             cwd=repo,
             env=env,
             log_path=pure_log,

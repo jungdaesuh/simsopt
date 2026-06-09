@@ -77,7 +77,8 @@ if failed:
 PY
 
 "$PYTHON_BIN" -m pytest -q \
-  tests/test_host_boundary.py \
+  tests/test_jax_import_smoke.py::test_transfer_guard_disallow_rejects_implicit_host_to_device_jit_inputs \
+  tests/test_jax_import_smoke.py::test_transfer_guard_disallow_allows_target_backend_x64_guard \
   tests/solve/test_permanent_magnet_optimization_jax_item28.py::test_relax_and_split_jax_runs_eager_under_strict_transfer_guard \
   tests/solve/test_permanent_magnet_optimization_jax_item28.py::test_gpmo_baseline_jax_runs_eager_under_strict_transfer_guard \
   tests/solve/test_permanent_magnet_optimization_jax_item28.py::test_gpmo_arbvec_backtracking_jax_runs_eager_under_strict_transfer_guard \

@@ -8,6 +8,8 @@ import sys
 
 import pytest
 
+from scripts import jax_gpu_failed_stale_tests_signoff as _SIGNOFF
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STALE_SIGNOFF_SCRIPT = REPO_ROOT / "scripts" / "jax_gpu_failed_stale_tests_signoff.py"
@@ -90,3 +92,20 @@ def test_run_gpu_parity_rejects_full_suite_disallow_transfer_guard(
         f"full GPU parity suite uses transfer_guard=log; {env_name}={guard_level}"
         in result.stderr
     )
+
+
+def test_stale_signoff_rejects_untracked_import_surface(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "sitecustomize.py").write_text("", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="non-artifact untracked paths"):
+        _SIGNOFF._require_clean_worktree(tmp_path)
+
+
+def test_stale_signoff_allows_artifact_untracked_paths(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    artifact_path = tmp_path / ".artifacts" / "signoff" / "summary.json"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("{}\n", encoding="utf-8")
+
+    _SIGNOFF._require_clean_worktree(tmp_path)

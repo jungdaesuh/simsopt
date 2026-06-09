@@ -52,3 +52,18 @@ def f(mask, x):
     )
 
     assert findings == []
+
+
+def test_cli_accepts_directory_paths(tmp_path):
+    source_path = tmp_path / "example.py"
+    source_path.write_text(
+        """
+import jax.numpy as jnp
+
+def f(x):
+    return jnp.where(x > 0.0, 1.0 / x, 0.0)
+""",
+        encoding="utf-8",
+    )
+
+    assert _LINT.main([str(tmp_path)]) == 1

@@ -5,140 +5,50 @@ on:
     branches: [jax-port]
     paths:
       - '.github/workflows/jax_smoke.yml'
-      - 'CMakeLists.txt'
-      - 'docs/jax_parity_manifest.md'
-      - 'pyproject.toml'
-      - 'src/simsopt/__init__.py'
-      - 'src/simsopt/_core/**'
-      - 'src/simsopt/backend/**'
-      - 'src/simsopt/**/*_jax*.py'
-      - 'src/simsopt/jax_core/**'
-      - 'src/simsopt/mhd/**'
-      - 'src/simsopt/solve/**'
-      - 'src/simsopt/field/__init__.py'
-      - 'src/simsopt/geo/__init__.py'
-      - 'src/simsopt/geo/accessibility.py'
-      - 'src/simsopt/objectives/__init__.py'
-      - 'src/simsoptpp/**'
-      - 'tests/field/test_biotsavart_jax.py'
-      - 'tests/field/test_selffieldforces.py'
-      - 'tests/geo/test_accessibility.py'
-      - 'tests/geo/test_curve_objectives.py'
-      - 'tests/geo/test_surface_fourier_jax.py'
-      - 'tests/geo/test_boozer_residual_jax.py'
-      - 'tests/geo/test_boozer_derivatives_jax.py'
-      - 'tests/geo/test_boozersurface_jax.py'
-      - 'tests/geo/test_boozersurface.py'
-      - 'tests/geo/test_simsoptpp_compat.py'
-      - 'tests/geo/test_surface_objectives.py'
-      - 'tests/objectives/test_integral_bdotn_jax.py'
-      - 'tests/jax_core/**'
-      - 'tests/mhd/**'
-      - 'tests/solve/**'
-      - 'tests/integration/conftest.py'
-      - 'tests/conftest.py'
-      - 'tests/integration/test_jax_native_path.py'
-      - 'tests/integration/test_remaining_jax_surfaces_mode_matrix.py'
-      - 'tests/integration/test_stage2_jax.py'
-      - 'tests/integration/test_single_stage_jax.py'
-      - 'tests/integration/test_single_stage_jax_cpu_reference.py'
-      - 'tests/integration/test_single_stage_physics_parity.py'
-      - 'tests/geo/test_single_stage_example.py'
-      - 'tests/docs/test_banana_parity_coverage_manifest.py'
-      - 'tests/test_run_code_benchmark_common.py'
-      - 'tests/test_backend.py'
-      - 'tests/test_benchmark_helpers.py'
-      - 'tests/test_biotsavart_donation_probe.py'
-      - 'tests/test_field_cache_hot_path_benchmark.py'
-      - 'tests/test_jax_import_smoke.py'
-      - 'tests/test_pytest_skip_xfail_audit.py'
-      - 'tests/subprocess/import_smoke_cases.py'
-      - 'examples/single_stage_optimization/**'
-      - 'benchmarks/field_cache_hot_path_benchmark.cpp'
-      - 'benchmarks/field_cache_hot_path_benchmark.py'
-      - 'benchmarks/stage2_e2e_comparison.py'
-      - 'benchmarks/stage2_value_gradient_parity.py'
-      - 'benchmarks/single_stage_init_parity.py'
-      - 'benchmarks/single_stage_outer_loop_probe.py'
-      - 'benchmarks/grouped_adjoint_memory_probe.py'
-      - 'benchmarks/tier5_performance_characterization.py'
-      - 'benchmarks/render_benchmark_report.py'
-      - 'benchmarks/validation_ladder_common.py'
-      - 'benchmarks/validation_ladder_contract.py'
-      - 'benchmarks/manifests/stable_hardware_weekly_tier5.json'
-      - 'envs/jax.yml'
-      - 'scripts/jax_ci_contract.py'
       - '.github/workflows/jax_gpu_parity.yml'
       - '.github/workflows/jax_benchmark_reporting.yml'
+      - 'CMakeLists.txt'
+      - 'docs/*jax*'
+      - 'docs/jax*/**'
+      - 'pyproject.toml'
+      - 'envs/jax.yml'
+      - 'src/simsopt/__init__.py'
+      - 'src/simsopt/geo/__init__.py'
+      - 'src/simsopt_jax/**'
+      - 'src/simsopt_jax_adapters/**'
+      - 'src/simsoptpp/**'
+      - 'tests/**'
+      - 'examples/single_stage_optimization/**'
+      - 'benchmarks/**'
+      - 'scripts/current_head_cuda_signoff.sh'
+      - 'scripts/jax_*.py'
+      - 'scripts/portable_tar.sh'
+      - 'scripts/preflight_gpu_submission.sh'
+      - 'scripts/run_gpu_parity.sh'
   pull_request:
     branches: [jax-port, master]
     paths:
       - '.github/workflows/jax_smoke.yml'
-      - 'CMakeLists.txt'
-      - 'docs/jax_parity_manifest.md'
-      - 'pyproject.toml'
-      - 'src/simsopt/__init__.py'
-      - 'src/simsopt/_core/**'
-      - 'src/simsopt/backend/**'
-      - 'src/simsopt/**/*_jax*.py'
-      - 'src/simsopt/jax_core/**'
-      - 'src/simsopt/mhd/**'
-      - 'src/simsopt/solve/**'
-      - 'src/simsopt/field/__init__.py'
-      - 'src/simsopt/geo/__init__.py'
-      - 'src/simsopt/geo/accessibility.py'
-      - 'src/simsopt/objectives/__init__.py'
-      - 'src/simsoptpp/**'
-      - 'tests/field/test_biotsavart_jax.py'
-      - 'tests/field/test_selffieldforces.py'
-      - 'tests/geo/test_accessibility.py'
-      - 'tests/geo/test_curve_objectives.py'
-      - 'tests/geo/test_surface_fourier_jax.py'
-      - 'tests/geo/test_boozer_residual_jax.py'
-      - 'tests/geo/test_boozer_derivatives_jax.py'
-      - 'tests/geo/test_boozersurface_jax.py'
-      - 'tests/geo/test_boozersurface.py'
-      - 'tests/geo/test_simsoptpp_compat.py'
-      - 'tests/geo/test_surface_objectives.py'
-      - 'tests/objectives/test_integral_bdotn_jax.py'
-      - 'tests/jax_core/**'
-      - 'tests/mhd/**'
-      - 'tests/solve/**'
-      - 'tests/integration/conftest.py'
-      - 'tests/conftest.py'
-      - 'tests/integration/test_jax_native_path.py'
-      - 'tests/integration/test_remaining_jax_surfaces_mode_matrix.py'
-      - 'tests/integration/test_stage2_jax.py'
-      - 'tests/integration/test_single_stage_jax.py'
-      - 'tests/integration/test_single_stage_jax_cpu_reference.py'
-      - 'tests/integration/test_single_stage_physics_parity.py'
-      - 'tests/geo/test_single_stage_example.py'
-      - 'tests/docs/test_banana_parity_coverage_manifest.py'
-      - 'tests/test_run_code_benchmark_common.py'
-      - 'tests/test_backend.py'
-      - 'tests/test_benchmark_helpers.py'
-      - 'tests/test_biotsavart_donation_probe.py'
-      - 'tests/test_field_cache_hot_path_benchmark.py'
-      - 'tests/test_jax_import_smoke.py'
-      - 'tests/test_pytest_skip_xfail_audit.py'
-      - 'tests/subprocess/import_smoke_cases.py'
-      - 'examples/single_stage_optimization/**'
-      - 'benchmarks/field_cache_hot_path_benchmark.cpp'
-      - 'benchmarks/field_cache_hot_path_benchmark.py'
-      - 'benchmarks/stage2_e2e_comparison.py'
-      - 'benchmarks/stage2_value_gradient_parity.py'
-      - 'benchmarks/single_stage_init_parity.py'
-      - 'benchmarks/single_stage_outer_loop_probe.py'
-      - 'benchmarks/grouped_adjoint_memory_probe.py'
-      - 'benchmarks/tier5_performance_characterization.py'
-      - 'benchmarks/render_benchmark_report.py'
-      - 'benchmarks/validation_ladder_common.py'
-      - 'benchmarks/validation_ladder_contract.py'
-      - 'benchmarks/manifests/stable_hardware_weekly_tier5.json'
-      - 'envs/jax.yml'
-      - 'scripts/jax_ci_contract.py'
       - '.github/workflows/jax_gpu_parity.yml'
       - '.github/workflows/jax_benchmark_reporting.yml'
+      - 'CMakeLists.txt'
+      - 'docs/*jax*'
+      - 'docs/jax*/**'
+      - 'pyproject.toml'
+      - 'envs/jax.yml'
+      - 'src/simsopt/__init__.py'
+      - 'src/simsopt/geo/__init__.py'
+      - 'src/simsopt_jax/**'
+      - 'src/simsopt_jax_adapters/**'
+      - 'src/simsoptpp/**'
+      - 'tests/**'
+      - 'examples/single_stage_optimization/**'
+      - 'benchmarks/**'
+      - 'scripts/current_head_cuda_signoff.sh'
+      - 'scripts/jax_*.py'
+      - 'scripts/portable_tar.sh'
+      - 'scripts/preflight_gpu_submission.sh'
+      - 'scripts/run_gpu_parity.sh'
 
 jobs:
   jax-public-unit:
@@ -340,7 +250,7 @@ jobs:
       BENCHMARK_ENV_FILE: envs/jax.yml
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
-      SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      SIMSOPT_JAX_TRANSFER_GUARD: log
       XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
@@ -524,72 +434,46 @@ jobs:
       - name: Ruff check JAX modules
         run: |
           ruff check \
-            src/simsopt/_constants.py \
-            src/simsopt/backend/__init__.py \
-            src/simsopt/backend/runtime.py \
-            src/simsopt/field/biotsavart_jax.py \
-            src/simsopt/field/biotsavart_jax_backend.py \
-            src/simsopt/jax_core/__init__.py \
-            src/simsopt/jax_core/biotsavart.py \
-            src/simsopt/jax_core/redl_current.py \
-            src/simsopt/jax_core/field.py \
-            src/simsopt/mhd/_vmec_frozen.py \
-            src/simsopt/geo/surface_fourier_jax.py \
-            src/simsopt/geo/boozer_residual_jax.py \
-            src/simsopt/geo/boozersurface_jax.py \
-            src/simsopt/geo/surfaceobjectives_jax.py \
-            src/simsopt/geo/label_constraints_jax.py \
-            src/simsopt/geo/optimizer_jax.py \
-            src/simsopt/objectives/fluxobjective_jax.py \
-            src/simsopt/objectives/integral_bdotn_jax.py \
-            src/simsopt/solve/__init__.py \
-            src/simsopt/util/__init__.py \
-            src/simsopt/util/mpi.py \
-            tests/integration/test_remaining_jax_surfaces_mode_matrix.py
+            src/simsopt_jax \
+            src/simsopt_jax_adapters \
+            scripts/jax_ci_contract.py \
+            scripts/jax_gpu_failed_stale_tests_signoff.py \
+            scripts/jax_where_division_lint.py \
+            tests/jax \
+            tests/test_gpu_transfer_guard_harness.py \
+            tests/test_jax_import_smoke.py \
+            tests/test_jax_legacy_isolation_boundaries.py \
+            tests/test_jax_where_division_lint.py
 
       - name: Check JAX where-division guards
         run: |
           python scripts/jax_where_division_lint.py \
-            src/simsopt/backend/__init__.py \
-            src/simsopt/backend/runtime.py \
-            src/simsopt/field/biotsavart_jax.py \
-            src/simsopt/field/biotsavart_jax_backend.py \
-            src/simsopt/jax_core/__init__.py \
-            src/simsopt/jax_core/biotsavart.py \
-            src/simsopt/jax_core/redl_current.py \
-            src/simsopt/jax_core/field.py \
-            src/simsopt/mhd/_vmec_frozen.py \
-            src/simsopt/geo/surface_fourier_jax.py \
-            src/simsopt/geo/boozer_residual_jax.py \
-            src/simsopt/geo/boozersurface_jax.py \
-            src/simsopt/geo/surfaceobjectives_jax.py \
-            src/simsopt/geo/label_constraints_jax.py \
-            src/simsopt/geo/optimizer_jax.py \
-            src/simsopt/objectives/fluxobjective_jax.py \
-            src/simsopt/objectives/integral_bdotn_jax.py
+            src/simsopt_jax \
+            src/simsopt_jax_adapters
 
       - name: Ruff format check
         run: |
           ruff format --check \
-            src/simsopt/_constants.py \
-            src/simsopt/backend/__init__.py \
-            src/simsopt/backend/runtime.py \
-            src/simsopt/field/biotsavart_jax.py \
-            src/simsopt/field/biotsavart_jax_backend.py \
-            src/simsopt/jax_core/__init__.py \
-            src/simsopt/jax_core/biotsavart.py \
-            src/simsopt/jax_core/redl_current.py \
-            src/simsopt/jax_core/field.py \
-            src/simsopt/mhd/_vmec_frozen.py \
-            src/simsopt/geo/surface_fourier_jax.py \
-            src/simsopt/geo/boozer_residual_jax.py \
-            src/simsopt/geo/boozersurface_jax.py \
-            src/simsopt/geo/surfaceobjectives_jax.py \
-            src/simsopt/geo/label_constraints_jax.py \
-            src/simsopt/geo/optimizer_jax.py \
-            src/simsopt/objectives/fluxobjective_jax.py \
-            src/simsopt/objectives/integral_bdotn_jax.py \
-            src/simsopt/solve/__init__.py \
-            src/simsopt/util/__init__.py \
-            src/simsopt/util/mpi.py \
-            tests/integration/test_remaining_jax_surfaces_mode_matrix.py
+            src/simsopt_jax/_constants.py \
+            src/simsopt_jax/backend/__init__.py \
+            src/simsopt_jax/backend/dtypes.py \
+            src/simsopt_jax/backend/runtime.py \
+            src/simsopt_jax/field/biotsavart.py \
+            src/simsopt_jax_adapters/field/biotsavart_backend.py \
+            src/simsopt_jax/core/specs.py \
+            src/simsopt_jax/core/field.py \
+            src/simsopt_jax/core/redl_current.py \
+            src/simsopt_jax/mhd/_vmec_frozen.py \
+            src/simsopt_jax/mhd/vmec_diagnostics.py \
+            src/simsopt_jax/geo/surface_fourier.py \
+            src/simsopt_jax/geo/boozer_residual.py \
+            src/simsopt_jax/geo/label_constraints.py \
+            src/simsopt_jax_adapters/geo/boozer_surface.py \
+            src/simsopt_jax/geo/optimizers/optimizer.py \
+            src/simsopt_jax/objectives/integral_bdotn.py \
+            src/simsopt_jax/solve/__init__.py \
+            src/simsopt_jax/solve/serial.py \
+            src/simsopt_jax_adapters/io/specs.py \
+            scripts/jax_where_division_lint.py \
+            tests/test_gpu_transfer_guard_harness.py \
+            tests/test_jax_where_division_lint.py
