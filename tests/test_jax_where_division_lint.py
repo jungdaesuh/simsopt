@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from simsopt._maintenance import jax_where_division_lint as _LINT
+from scripts import jax_where_division_lint as _LINT
 
 
 def _findings(source: str):
