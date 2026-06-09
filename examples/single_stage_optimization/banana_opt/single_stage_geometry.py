@@ -19,7 +19,6 @@ from banana_opt.hardware_contracts import (
     COIL_LENGTH_MIN_FRACTION,
     LCFS_CONSTRAINT_MODE_CENTERED,
     LCFS_CONSTRAINT_MODE_DEFAULT,
-    LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE,
     lcfs_inboard_edge_radius_m,
     lcfs_outboard_edge_radius_m,
     validate_lcfs_constraint_mode,
