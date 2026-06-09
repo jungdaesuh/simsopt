@@ -1321,6 +1321,12 @@ def apply_default_stage2_seed_args(args):
     return args
 
 
+_FREE_TF_GEOMETRY_DISABLED_MESSAGE = (
+    "--free-tf-geometry is temporarily disabled; TF coil geometry must stay fixed "
+    "for the current CW-poloidal HBT workflow."
+)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run single-stage Boozer/quasi-symmetry optimization from a Stage 2 seed.",
@@ -2217,13 +2223,10 @@ def parse_args():
         "--free-tf-geometry",
         action="store_true",
         help=(
-            "Opt-in: unfreeze the TF coil curve geometry (their CurveXYZFourier "
-            "Fourier dofs) so the optimizer can supply rotational transform via "
-            "shaped TF coils instead of forcing it onto the net-zero banana saddle "
-            "loops (default off = TF geometry frozen, objective byte-identical). TF "
-            "currents stay fixed. The freed TF curves enter the coil-coil and "
-            "coil-surface clearance penalties and gain their own curvature cap and "
-            "an as-shipped length ceiling so they remain buildable."
+            "Temporarily disabled: TF coil geometry must stay fixed for the "
+            "current CW-poloidal HBT workflow. The dormant implementation "
+            "previously unfroze TF CurveXYZFourier geometry while keeping TF "
+            "currents fixed."
         ),
     )
     parser.add_argument(
@@ -2809,7 +2812,10 @@ def parse_args():
         default=int(os.environ.get("BASIN_SEED", "-1")),
         help="RNG seed for basin-hopping (-1 = random). Set for reproducibility.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.free_tf_geometry:
+        parser.error(_FREE_TF_GEOMETRY_DISABLED_MESSAGE)
+    return args
 
 
 def resolve_frontier_invariant_torus_min_arg(args):

@@ -1,16 +1,19 @@
-"""Regression tests for the opt-in ``--free-tf-geometry`` capability.
+"""Regression tests for the dormant ``--free-tf-geometry`` capability.
 
 ``--free-tf-geometry`` unfreezes the TF coil curve geometry so the optimizer can
 shape the TF coils to supply rotational transform (decoupling banana poloidal
 extent from iota), while keeping the freed TF coils buildable via curvature,
-length, and clearance penalties. These tests pin three contracts:
+length, and clearance penalties. The CLI flag is disabled for the current
+CW-poloidal HBT workflow, but the dormant objective plumbing remains tested.
+These tests pin four contracts:
 
-1. Default-off is byte-identical: ``build_total_objective`` with the TF terms
+1. The CLI rejects ``--free-tf-geometry`` before a run can launch.
+2. Default-off is byte-identical: ``build_total_objective`` with the TF terms
    absent and with them explicitly ``None`` produce the same ``J`` and ``dJ``.
-2. The TF buildability terms are real, finite, and gradient-bearing on the freed
+3. The TF buildability terms are real, finite, and gradient-bearing on the freed
    TF dofs, and reuse the same SIMSOPT penalty helpers/thresholds as the banana
    coils (SSOT).
-3. The objective bundle threads ``JTFCurvature``/``JTFCurveLength`` only when TF
+4. The objective bundle threads ``JTFCurvature``/``JTFCurveLength`` only when TF
    curves are supplied; the default frozen-TF call passes ``None`` for both.
 """
 
@@ -120,6 +123,24 @@ def _build_total(module, terms, **extra):
         terms["JCurvature"],
         **extra,
     )
+
+
+class TestFreeTFGeometryDisabledAtCli:
+    def test_parse_args_rejects_free_tf_geometry(self, monkeypatch, capsys):
+        module = _example_module()
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py", "--free-tf-geometry"],
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            module.parse_args()
+
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "--free-tf-geometry is temporarily disabled" in err
+        assert "TF coil geometry must stay fixed" in err
 
 
 class TestBuildTotalObjectiveTFTermsDefaultOff:
