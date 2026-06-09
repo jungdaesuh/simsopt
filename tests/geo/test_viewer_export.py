@@ -13,6 +13,7 @@ EXAMPLE_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
 if str(EXAMPLE_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_ROOT))
 
+from banana_opt import hardware_contracts as hc  # noqa: E402
 from banana_opt import viewer_export as module  # noqa: E402
 
 
@@ -75,6 +76,30 @@ def _baseline_payload():
 
 
 class ViewerExportTests(unittest.TestCase):
+    def test_defaults_match_type_kk_hardware_contract(self):
+        self.assertEqual(
+            module.DEFAULT_WINDING_R0_M,
+            hc.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        )
+        self.assertEqual(module.DEFAULT_WINDING_A_M, hc.BANANA_WINDING_MINOR_RADIUS_M)
+        self.assertEqual(
+            module.DEFAULT_BRACKET_WIDTH_MM,
+            hc.TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_MM,
+        )
+        self.assertEqual(
+            module.DEFAULT_BRACKET_DEPTH_MM,
+            hc.TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_MM,
+        )
+
+        config = module.ViewerExportConfig(
+            input_path=Path("input.json"),
+            output_path=Path("output.viewer.json"),
+        )
+        self.assertEqual(config.winding_r0_m, hc.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
+        self.assertEqual(config.winding_a_m, hc.BANANA_WINDING_MINOR_RADIUS_M)
+        self.assertEqual(config.bracket_width_mm, hc.TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_MM)
+        self.assertEqual(config.bracket_depth_mm, hc.TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_MM)
+
     def test_baseline_vacuum_lineage_uses_plain_boozer_no_i_contract(self):
         checks = module.baseline_vacuum_lineage_payload(_baseline_payload())
         self.assertTrue(checks["passed"])
@@ -118,7 +143,10 @@ class ViewerExportTests(unittest.TestCase):
 
         self.assertEqual(len(partition.tf_coils), 20)
         self.assertEqual(len(partition.render_coils), 10)
-        self.assertEqual(partition.finite_current_mode, "metadata_free_20tf_10banana_1proxy_20vf")
+        self.assertEqual(
+            partition.finite_current_mode,
+            "metadata_free_20tf_10banana_1proxy_20vf",
+        )
         self.assertEqual(partition.render_coils[0].current.get_value(), -10000.0)
 
     def test_generated_solid_payload_matches_viewer_artifact_shape(self):
@@ -158,6 +186,18 @@ class ViewerExportTests(unittest.TestCase):
         self.assertEqual(payload["tf_current_kA"], -80.0)
         self.assertEqual(len(payload["coils"]), 10)
         self.assertEqual(len(payload["generated_meshes"]), 10)
+        self.assertEqual(
+            payload["hardware_contract"]["contract_id"],
+            hc.TYPE_KK_HARDWARE_CONTRACT_ID,
+        )
+        self.assertEqual(
+            payload["hardware_contract"]["bracket_width_mm"],
+            hc.TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_MM,
+        )
+        self.assertEqual(
+            payload["hardware_contract"]["bracket_depth_mm"],
+            hc.TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_MM,
+        )
 
         first_mesh = payload["generated_meshes"][0]
         self.assertGreater(len(first_mesh["positions"]), 0)

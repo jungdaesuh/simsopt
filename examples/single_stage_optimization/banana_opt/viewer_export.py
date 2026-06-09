@@ -42,6 +42,14 @@ if __package__:
         VACUUM_FINITE_CURRENT_MODE,
         get_finite_current_profile,
     )
+    from .hardware_contracts import (
+        BANANA_WINDING_CHANNEL_ORIENTATION,
+        BANANA_WINDING_MINOR_RADIUS_M,
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        TYPE_KK_HARDWARE_CONTRACT_ID,
+        TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_MM,
+        TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_MM,
+    )
     from .json_compat import load_boozer_finite_i
 else:
     from banana_opt.artifact_contracts import (
@@ -61,6 +69,14 @@ else:
         VACUUM_FINITE_CURRENT_MODE,
         get_finite_current_profile,
     )
+    from banana_opt.hardware_contracts import (
+        BANANA_WINDING_CHANNEL_ORIENTATION,
+        BANANA_WINDING_MINOR_RADIUS_M,
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        TYPE_KK_HARDWARE_CONTRACT_ID,
+        TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_MM,
+        TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_MM,
+    )
     from banana_opt.json_compat import load_boozer_finite_i
 
 
@@ -75,10 +91,10 @@ CONTRACT_FAMILIES = (
 )
 CONVERSION_MODES = ("centerline_only", "generated_solid")
 COIL_SCOPES = ("banana", "all")
-DEFAULT_WINDING_R0_M = 0.976
-DEFAULT_WINDING_A_M = 0.215
-DEFAULT_BRACKET_WIDTH_MM = 29.0
-DEFAULT_BRACKET_DEPTH_MM = 20.0
+DEFAULT_WINDING_R0_M = BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+DEFAULT_WINDING_A_M = BANANA_WINDING_MINOR_RADIUS_M
+DEFAULT_BRACKET_WIDTH_MM = TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_MM
+DEFAULT_BRACKET_DEPTH_MM = TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_MM
 DEFAULT_CHANNEL_WALL_M = 0.003
 
 
@@ -424,6 +440,12 @@ def build_artifact_payload(
         "units": "m",
         "coordinate_frame": COORDINATE_FRAME,
         "winding_surface": {"R0_m": config.winding_r0_m, "a_m": config.winding_a_m},
+        "hardware_contract": {
+            "contract_id": TYPE_KK_HARDWARE_CONTRACT_ID,
+            "bracket_width_mm": config.bracket_width_mm,
+            "bracket_depth_mm": config.bracket_depth_mm,
+            "orientation": BANANA_WINDING_CHANNEL_ORIENTATION,
+        },
         "tf_current_kA": tf_current_kA(partition.tf_coils),
         "coils": coils_payload,
         "generated_meshes": generated_meshes,

@@ -16,16 +16,43 @@ COIL_LENGTH_MIN_TARGET_M = COIL_LENGTH_TARGET_M * COIL_LENGTH_MIN_FRACTION
 COIL_LENGTH_HARD_LIMIT_M = 2.0
 COIL_COIL_MIN_DIST_M = 0.0462
 COIL_PLASMA_MIN_DIST_M = 0.010
+# Type KK banana-coil hardware contract. The outer channel is the solid object
+# that collides with hardware; the conductor pack is the current-carrying
+# magnetic finite-build footprint. Keep the two rectangles separate.
+INCH_TO_M = 0.0254
+TYPE_KK_HARDWARE_CONTRACT_ID = "type_kk_outer_channel_2026_06_09"
+TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_IN = 1.818
+TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_IN = 0.640
+TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_M = (
+    TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_IN * INCH_TO_M
+)
+TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_M = (
+    TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_IN * INCH_TO_M
+)
+TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_MM = (
+    TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_M * 1000.0
+)
+TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_MM = (
+    TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_M * 1000.0
+)
+TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M = (
+    TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_M / 2.0
+)
+TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M = (
+    TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_M / 2.0
+)
+TYPE_KK_OUTER_CHANNEL_CORNER_REACH_M = math.hypot(
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+)
+HARDWARE_KEEPOUT_SAFETY_MARGIN_M = 0.005
 # Minimum allowed distance from the banana coil CENTERLINE to the fixed
-# in-vessel hardware point cloud (Mirnov sensor arrays, solenoid mounts, REMC
-# mounts). The optimizer sees centerlines while the swept U-channel is what
-# collides, so the threshold is the 29x20 mm pack's corner reach from the
-# centerline (17.6 mm) plus a 5 mm safety margin; the derivation is recorded in
-# the cloud's own JSON
-# (CAD/banana_coils/hbt_clearance_viewer/tools/hardware_keepout.json, generated
-# by export_hardware_keepout.py and cross-validated against the viewer's
-# parry-verified contact verdict for the M7 champion).
-HARDWARE_KEEPOUT_MIN_DISTANCE_M = 0.0226
+# in-vessel hardware point cloud. The swept-box keepout uses the Type KK outer
+# channel half-extents directly; this legacy centerline threshold preserves the
+# 5 mm safety margin for point-cloud and JSON contract checks.
+HARDWARE_KEEPOUT_MIN_DISTANCE_M = (
+    TYPE_KK_OUTER_CHANNEL_CORNER_REACH_M + HARDWARE_KEEPOUT_SAFETY_MARGIN_M
+)
 # Diagnostic reference for the LCFS-to-vessel SurfaceSurfaceDistance metric.
 # wh_notes.md does not define this as an engineering acceptance floor.
 PLASMA_VESSEL_MIN_DIST_M = 0.04
@@ -36,17 +63,37 @@ VACUUM_VESSEL_MINOR_RADIUS_M = 0.222
 BANANA_WINDING_SURFACE_MAJOR_RADIUS_M = 0.903
 BANANA_WINDING_MINOR_RADIUS_M = 0.142
 BANANA_WINDING_CHANNEL_ORIENTATION = "toroidal_surface_tangent"
-# Real banana winding-pack cross-section (as-built U-channel frame). Sources:
-# CAD/banana_coils/sample_coils.csv header (bracket_width_mm:29, bracket_depth_mm:20)
-# and CAD/banana_coils/clearance_report.md. WIDTH is the binormal (in-bend /
-# poloidal-arc-tangent) dimension that competes with the centerline bend radius;
-# DEPTH is the normal (radial) dimension. The binormal/normal assignment follows
-# BANANA_WINDING_CHANNEL_ORIENTATION and is the documented assumption flagged in
-# clearance_report.md; swapping it swaps the two half-builds below.
-BANANA_PACK_WIDTH_BINORMAL_M = 0.029
-BANANA_PACK_DEPTH_NORMAL_M = 0.020
-BANANA_PACK_HALF_BUILD_BINORMAL_M = BANANA_PACK_WIDTH_BINORMAL_M / 2.0
-BANANA_PACK_HALF_BUILD_NORMAL_M = BANANA_PACK_DEPTH_NORMAL_M / 2.0
+TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_IN = 1.568
+TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_IN = 0.390
+TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M = (
+    TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_IN * INCH_TO_M
+)
+TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M = (
+    TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_IN * INCH_TO_M
+)
+TYPE_KK_CONDUCTOR_PACK_HALF_WIDTH_BINORMAL_M = (
+    TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M / 2.0
+)
+TYPE_KK_CONDUCTOR_PACK_HALF_DEPTH_NORMAL_M = (
+    TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M / 2.0
+)
+TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N = 2
+TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B = 7
+TYPE_KK_FINITE_BUILD_FILAMENT_COUNT = (
+    TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N * TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B
+)
+TYPE_KK_FINITE_BUILD_GAPSIZE_N_M = TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M
+TYPE_KK_FINITE_BUILD_GAPSIZE_B_M = (
+    TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M
+    / (TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B - 1)
+)
+# Legacy compatibility aliases for magnetic finite-build callers. They now point
+# to the Type KK conductor pack, not the outer clearance channel and not the old
+# 29 x 20 mm placeholder.
+BANANA_PACK_WIDTH_BINORMAL_M = TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M
+BANANA_PACK_DEPTH_NORMAL_M = TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M
+BANANA_PACK_HALF_BUILD_BINORMAL_M = TYPE_KK_CONDUCTOR_PACK_HALF_WIDTH_BINORMAL_M
+BANANA_PACK_HALF_BUILD_NORMAL_M = TYPE_KK_CONDUCTOR_PACK_HALF_DEPTH_NORMAL_M
 # Port-fit bounds on ProjectedEllipseWidth.J() (short-axis diameter of the
 # best-fit ellipse to the coil curve projected onto the winding surface).
 # Max 0.197 m is the short-width limit for the banana coil through the vessel

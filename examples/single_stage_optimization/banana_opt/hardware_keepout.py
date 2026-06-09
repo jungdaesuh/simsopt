@@ -51,9 +51,9 @@ real pressure. Clear of the cloud is exactly ``J = 0`` in either
 convention.
 
 :math:`d_{\\min}` is measured from the coil *centerline*: the optimiser
-sees centerlines but the swept U-channel is what collides, so the
-threshold is the bracket half-diagonal (29x20 mm -> 17.6 mm) plus a
-safety margin (``HARDWARE_KEEPOUT_MIN_DISTANCE_M`` in
+sees centerlines but the swept Type KK outer channel is what collides, so
+the threshold is the outer-channel half-diagonal (46.1772x16.256 mm ->
+24.48 mm) plus a safety margin (``HARDWARE_KEEPOUT_MIN_DISTANCE_M`` in
 ``hardware_contracts.py``; same value recorded in the cloud JSON as
 ``recommended_min_distance_m``).
 
@@ -89,7 +89,11 @@ import numpy as np
 from jax import grad
 import jax.numpy as jnp
 
-from banana_opt.hardware_contracts import BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+from banana_opt.hardware_contracts import (
+    BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+)
 from simsopt._core import Optimizable
 from simsopt._core.derivative import derivative_dec
 from simsopt.geo.jit import jit
@@ -203,7 +207,8 @@ class CurveHardwareKeepout(Optimizable):
     """
 
     def __init__(self, curves, points, minimum_distance, point_weight,
-                 half_w=0.0145, half_d=0.010,
+                 half_w=TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+                 half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
                  winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
                  chunk_size=8192):
         self.curves = curves

@@ -36,13 +36,17 @@ from banana_opt.hardware_keepout import (  # noqa: E402
 from banana_opt.hardware_contracts import (  # noqa: E402
     BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+    HARDWARE_KEEPOUT_SAFETY_MARGIN_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
 )
 
 from simsopt.geo import CurveXYZFourier  # noqa: E402
 
-# Default bracket cross-section (binormal half-width, normal half-depth), m, and
-# the safety margin implied by the contract distance (corner reach + margin).
-HALF_W, HALF_D = 0.0145, 0.010
+# Type KK outer-channel cross-section (binormal half-width, normal half-depth), m,
+# and the safety margin implied by the contract distance (corner reach + margin).
+HALF_W = TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
+HALF_D = TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M
 MARGIN = HARDWARE_KEEPOUT_MIN_DISTANCE_M - float(np.hypot(HALF_W, HALF_D))
 
 
@@ -81,6 +85,9 @@ class HardwareKeepoutObjectiveTests(unittest.TestCase):
             objective.winding_r0,
             BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
         )
+        self.assertAlmostEqual(objective.half_w, HALF_W)
+        self.assertAlmostEqual(objective.half_d, HALF_D)
+        self.assertAlmostEqual(objective.margin, HARDWARE_KEEPOUT_SAFETY_MARGIN_M)
 
     def test_far_cloud_gives_exact_zero_value_and_gradient(self):
         curve = _circle_curve(seed=1)
@@ -93,12 +100,11 @@ class HardwareKeepoutObjectiveTests(unittest.TestCase):
         self.assertEqual(objective.candidates, [])
 
     def test_near_envelope_activates_and_decreases_with_distance(self):
-        # Points along the in-plane radial (depth, half_d=10mm); a point at
-        # radius+11mm sits 1mm outside the envelope (within margin), +14mm sits
-        # 4mm out (still within margin but farther), +30mm is clear.
+        # Points along the in-plane radial (depth, half_d=8.128mm); +10mm and
+        # +12mm are within the 5mm safety margin, while +30mm is clear.
         curve = _circle_curve(seed=2)
-        near = np.array([[1.0 + 0.011, 0.0, 0.0]])
-        farther = np.array([[1.0 + 0.014, 0.0, 0.0]])
+        near = np.array([[1.0 + 0.010, 0.0, 0.0]])
+        farther = np.array([[1.0 + 0.012, 0.0, 0.0]])
         clear = np.array([[1.0 + 0.030, 0.0, 0.0]])
         j_near = _keepout([curve], near).J()
         j_farther = _keepout([curve], farther).J()
@@ -204,11 +210,15 @@ class HardwareKeepoutObjectiveTests(unittest.TestCase):
 
     def test_envelope_gap_diagnostic(self):
         # A point 30mm radially out from an exact unit circle: the envelope gap
-        # is exactly (30 - 10) = 20mm (radial depth half = 10mm).
+        # is exactly 30mm minus the Type KK radial half-depth.
         curve = _circle_curve(seed=None)
         points = np.array([[1.030, 0.0, 0.0]])
         objective = _keepout([curve], points)
-        self.assertAlmostEqual(objective.shortest_distance(), 0.020, delta=1e-4)
+        self.assertAlmostEqual(
+            objective.shortest_distance(),
+            0.030 - HALF_D,
+            delta=1e-4,
+        )
 
     def test_violation_scale_is_optimizer_relevant(self):
         """A real metal-touching intrusion must read O(1)+, not O(1e-8): the
@@ -236,7 +246,7 @@ class HardwareKeepoutLoaderTests(unittest.TestCase):
             "frame": "machine_metres_zup",
             "units": "m",
             "spacing_m": 0.006,
-            "recommended_min_distance_m": 0.0226,
+            "recommended_min_distance_m": HARDWARE_KEEPOUT_MIN_DISTANCE_M,
             "groups": [
                 {"label": "sensors", "points": [[1.0, 0.0, 0.0]]},
                 {"label": "solenoid", "points": [[0.0, 1.0, 0.0], [0.0, 1.1, 0.0]]},
@@ -246,7 +256,7 @@ class HardwareKeepoutLoaderTests(unittest.TestCase):
         points, weight, d_min, provenance = load_hardware_keepout(path)
         self.assertEqual(points.shape, (3, 3))
         self.assertAlmostEqual(weight, 0.006 ** 2)
-        self.assertEqual(d_min, 0.0226)
+        self.assertEqual(d_min, HARDWARE_KEEPOUT_MIN_DISTANCE_M)
         self.assertEqual(d_min, HARDWARE_KEEPOUT_MIN_DISTANCE_M)
         self.assertEqual(provenance["glb_sha256"], "abc")
 
@@ -256,7 +266,7 @@ class HardwareKeepoutLoaderTests(unittest.TestCase):
             "frame": "render_yup",
             "units": "m",
             "spacing_m": 0.006,
-            "recommended_min_distance_m": 0.0226,
+            "recommended_min_distance_m": HARDWARE_KEEPOUT_MIN_DISTANCE_M,
             "groups": [{"label": "sensors", "points": [[1.0, 0.0, 0.0]]}],
             "provenance": {},
         })

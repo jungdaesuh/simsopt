@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import math
 import os
 import io
 import json
@@ -6462,7 +6463,12 @@ def build_single_stage_objective_bundle(
         keepout_points, keepout_point_weight, keepout_min_distance, _keepout_prov = (
             load_hardware_keepout(HARDWARE_KEEPOUT_JSON_PATH)
         )
-        if keepout_min_distance != HARDWARE_KEEPOUT_MIN_DISTANCE_M:
+        if not math.isclose(
+            keepout_min_distance,
+            HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
             raise ValueError(
                 f"keep-out JSON recommends min distance {keepout_min_distance} m "
                 f"but the hardware contract pins {HARDWARE_KEEPOUT_MIN_DISTANCE_M} m; "

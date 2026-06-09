@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+import math
+import sys
+from pathlib import Path
+
+EXAMPLES_ROOT = (
+    Path(__file__).resolve().parents[2] / "examples" / "single_stage_optimization"
+)
+EXAMPLES_ROOT_STR = str(EXAMPLES_ROOT)
+if EXAMPLES_ROOT_STR not in sys.path:
+    sys.path.insert(0, EXAMPLES_ROOT_STR)
+
+from banana_opt import hardware_contracts as hc  # noqa: E402
+
+
+def test_type_kk_outer_channel_dimensions_and_keepout_threshold() -> None:
+    assert hc.TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_M == 1.818 * hc.INCH_TO_M
+    assert hc.TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_M == 0.640 * hc.INCH_TO_M
+    assert hc.TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M == (
+        hc.TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_M / 2.0
+    )
+    assert hc.TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M == (
+        hc.TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_M / 2.0
+    )
+
+    corner_reach = math.hypot(
+        hc.TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+        hc.TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    )
+    assert hc.TYPE_KK_OUTER_CHANNEL_CORNER_REACH_M == corner_reach
+    assert hc.HARDWARE_KEEPOUT_MIN_DISTANCE_M == (
+        corner_reach + hc.HARDWARE_KEEPOUT_SAFETY_MARGIN_M
+    )
+    assert math.isclose(hc.HARDWARE_KEEPOUT_MIN_DISTANCE_M, 0.029477496480645238)
+
+
+def test_type_kk_conductor_pack_and_finite_build_defaults_are_separate() -> None:
+    assert hc.TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M == 1.568 * hc.INCH_TO_M
+    assert hc.TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M == 0.390 * hc.INCH_TO_M
+    assert hc.TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M != (
+        hc.TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_M
+    )
+    assert hc.TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M != (
+        hc.TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_M
+    )
+
+    assert hc.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N == 2
+    assert hc.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B == 7
+    assert hc.TYPE_KK_FINITE_BUILD_FILAMENT_COUNT == 14
+    assert hc.TYPE_KK_FINITE_BUILD_GAPSIZE_N_M == (
+        hc.TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M
+    )
+    assert hc.TYPE_KK_FINITE_BUILD_GAPSIZE_B_M == (
+        hc.TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M / 6.0
+    )
+
+
+def test_legacy_pack_aliases_no_longer_point_to_old_placeholder() -> None:
+    assert hc.BANANA_PACK_WIDTH_BINORMAL_M == hc.TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M
+    assert hc.BANANA_PACK_DEPTH_NORMAL_M == hc.TYPE_KK_CONDUCTOR_PACK_DEPTH_NORMAL_M
+    assert hc.BANANA_PACK_WIDTH_BINORMAL_M != 0.029
+    assert hc.BANANA_PACK_DEPTH_NORMAL_M != 0.020
