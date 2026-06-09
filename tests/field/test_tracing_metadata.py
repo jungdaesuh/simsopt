@@ -1,7 +1,9 @@
+import gc
 import os
 import subprocess
 import sys
 import textwrap
+import weakref
 from pathlib import Path
 
 
@@ -52,6 +54,11 @@ class _WeakKey:
     pass
 
 
+class _Classifier:
+    def __init__(self, interpolant):
+        self.dist = interpolant
+
+
 def test_surface_classifier_import_does_not_enter_field_package():
     result = _run_import_probe(
         """
@@ -82,3 +89,23 @@ def test_tracing_metadata_records_levelset_classifier():
     metadata.register_levelset_classifier(criterion, classifier)
 
     assert metadata.levelset_classifier_for(criterion) is classifier
+
+
+def test_tracing_metadata_does_not_retain_interpolant_owner_cycle():
+    from simsopt._core import tracing_metadata as metadata
+
+    interpolant = _WeakKey()
+    classifier = _Classifier(interpolant)
+    interpolant_ref = weakref.ref(interpolant)
+    classifier_ref = weakref.ref(classifier)
+
+    metadata.register_levelset_interpolant(interpolant, classifier)
+
+    assert metadata.levelset_classifier_from_interpolant(interpolant) is classifier
+
+    del interpolant, classifier
+    for _ in range(3):
+        gc.collect()
+
+    assert interpolant_ref() is None
+    assert classifier_ref() is None

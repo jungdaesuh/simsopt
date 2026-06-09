@@ -17,8 +17,6 @@ from simsopt._core.util import parallel_loop_bounds
 from simsopt._core.tracing_metadata import (
     levelset_classifier_from_interpolant,
     levelset_classifier_for,
-    max_toroidal_flux_for,
-    min_toroidal_flux_for,
 )
 from simsopt.field.magneticfield import MagneticField
 from simsopt.field.tracing import gc_to_fullorbit_initial_guesses
@@ -738,6 +736,13 @@ def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
             )
             continue
         if isinstance(crit, sopp.ToroidalTransitStoppingCriterion):
+            if bool(_attr(crit, "flux")):
+                raise NotImplementedError(
+                    "JAX tracing path supports "
+                    "ToroidalTransitStoppingCriterion only with flux=False; "
+                    "flux=True is a flux-coordinate transit criterion and is "
+                    "not implemented by the Cartesian JAX tracing route."
+                )
             translated.append(
                 JaxToroidalTransitStoppingCriterion(
                     max_transits=float(_attr(crit, "max_transits"))
@@ -750,9 +755,7 @@ def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
             )
             continue
         if isinstance(crit, sopp.MinToroidalFluxStoppingCriterion):
-            min_s = min_toroidal_flux_for(crit)
-            if min_s is None:
-                min_s = getattr(crit, "min_s", None)
+            min_s = getattr(crit, "min_s", None)
             if min_s is None:
                 raise NotImplementedError(
                     "JAX tracing path cannot translate a raw "
@@ -762,9 +765,7 @@ def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
             translated.append(JaxMinToroidalFluxStoppingCriterion(min_s=float(min_s)))
             continue
         if isinstance(crit, sopp.MaxToroidalFluxStoppingCriterion):
-            max_s = max_toroidal_flux_for(crit)
-            if max_s is None:
-                max_s = getattr(crit, "max_s", None)
+            max_s = getattr(crit, "max_s", None)
             if max_s is None:
                 raise NotImplementedError(
                     "JAX tracing path cannot translate a raw "

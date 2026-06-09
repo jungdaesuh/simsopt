@@ -174,6 +174,18 @@ def test_compute_fieldlines_jax_toroidal_transit_criterion():
     assert res_tys[0][-1, 0] < tmax_jax, "transit criterion did not terminate"
 
 
+def test_compute_fieldlines_jax_rejects_flux_toroidal_transit_criterion():
+    with pytest.raises(NotImplementedError, match="flux=False"):
+        compute_fieldlines(
+            ToroidalFieldJAX(1.3, 0.8),
+            [1.4],
+            [0.0],
+            tmax=0.5,
+            tol=1e-9,
+            stopping_criteria=[ToroidalTransitStoppingCriterion(1.0, True)],
+        )
+
+
 def test_compute_fieldlines_jax_minZ_maxZ_pair_terminates():
     """``MaxZStoppingCriterion`` with crit_z=-0.1 fires immediately on z=0.
 
