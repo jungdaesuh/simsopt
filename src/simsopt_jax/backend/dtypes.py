@@ -236,7 +236,9 @@ def as_runtime_array(value, *, dtype=None, reference=None):
     resolved_dtype = _resolve_jnp_dtype(dtype, source="dtype")
     reference_sharding = _reference_sharding(reference, ndim=_value_ndim(value))
     if reference_sharding is not None and not _has_only_traced_jax_leaves(value):
-        return runtime_device_put(value, dtype=resolved_dtype, target=reference_sharding)
+        return runtime_device_put(
+            value, dtype=resolved_dtype, target=reference_sharding
+        )
     return as_jax_array(value, dtype=resolved_dtype)
 
 

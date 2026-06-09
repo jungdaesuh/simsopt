@@ -11,7 +11,7 @@ for tracing, not as dictionary keys.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from math import gcd
 from typing import Literal, TypeVar, Union
 
@@ -101,6 +101,69 @@ __all__ = [
 _SpecClass = TypeVar("_SpecClass", bound=type)
 
 
+def _gson_encode_numpy_array(value: np.ndarray) -> dict[str, object]:
+    array = np.asarray(value)
+    data = (
+        [array.real.tolist(), array.imag.tolist()]
+        if array.dtype.kind == "c"
+        else array.tolist()
+    )
+    return {
+        "@module": "numpy",
+        "@class": "array",
+        "dtype": str(array.dtype),
+        "data": data,
+    }
+
+
+def gson_encode_spec_value(value: object) -> object:
+    if is_dataclass(value) and type(value).__module__ == __name__:
+        payload: dict[str, object] = {
+            "@module": __name__,
+            "@class": type(value).__name__,
+        }
+        for field in fields(value):
+            payload[field.name] = gson_encode_spec_value(getattr(value, field.name))
+        return payload
+    if isinstance(value, (jax.Array, np.ndarray)):
+        return _gson_encode_numpy_array(np.asarray(value))
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, tuple):
+        return [gson_encode_spec_value(item) for item in value]
+    if isinstance(value, list):
+        return [gson_encode_spec_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: gson_encode_spec_value(item) for key, item in value.items()}
+    return value
+
+
+def _gson_decode_numpy_array(payload: dict[str, object]) -> np.ndarray:
+    dtype = np.dtype(payload["dtype"])
+    data = payload["data"]
+    if dtype.kind == "c":
+        return np.asarray(data[0], dtype=dtype) + 1j * np.asarray(data[1], dtype=dtype)
+    return np.asarray(data, dtype=dtype)
+
+
+def gson_decode_spec_value(value: object) -> object:
+    if isinstance(value, list):
+        return tuple(gson_decode_spec_value(item) for item in value)
+    if isinstance(value, dict):
+        module = value.get("@module")
+        classname = value.get("@class")
+        if (module, classname) == ("numpy", "array"):
+            return _gson_decode_numpy_array(value)
+        if module == __name__ and isinstance(classname, str):
+            spec_cls = globals().get(classname)
+            if spec_cls is None or not hasattr(spec_cls, "from_dict"):
+                raise NotImplementedError(f"{module}.{classname}")
+            data = {key: item for key, item in value.items() if not key.startswith("@")}
+            return spec_cls.from_dict(data)
+        return {key: gson_decode_spec_value(item) for key, item in value.items()}
+    return value
+
+
 def _register_jax_spec(
     *, data_fields: tuple[str, ...], meta_fields: tuple[str, ...]
 ) -> Callable[[_SpecClass], _SpecClass]:
@@ -108,6 +171,20 @@ def _register_jax_spec(
 
     def _decorate(spec_cls: _SpecClass) -> _SpecClass:
         frozen_spec_cls = dataclass(frozen=True)(spec_cls)
+
+        def _as_dict(self, serial_objs_dict=None):
+            return gson_encode_spec_value(self)
+
+        def _from_dict(cls, data, serial_objs_dict=None, recon_objs=None):
+            kwargs = {
+                field.name: gson_decode_spec_value(data[field.name])
+                for field in fields(cls)
+                if field.name in data
+            }
+            return cls(**kwargs)
+
+        setattr(frozen_spec_cls, "as_dict", _as_dict)
+        setattr(frozen_spec_cls, "from_dict", classmethod(_from_dict))
         jax.tree_util.register_dataclass(
             frozen_spec_cls,
             data_fields=list(data_fields),

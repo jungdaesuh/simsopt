@@ -254,6 +254,23 @@ def test_constrained_serial_solve_jax_matches_host_slsqp_equality_problem():
         objectives = [float(row["objective_function"]) for row in rows]
         assert objectives[0] > objectives[-1]
         assert min(objectives) <= 0.50000001
+        constraint_files = [
+            name for name in os.listdir(".") if name.startswith("constraints_")
+        ]
+        assert len(constraint_files) == 1
+        constraint_rows = _assert_log_records_multiple_ordered_evaluations(
+            constraint_files[0]
+        )
+        assert set(constraint_rows[0]) == {
+            "function_evaluation",
+            "seconds",
+            "x(0)",
+            "x(1)",
+            "F(0)",
+        }
+        assert abs(float(constraint_rows[-1]["F(0)"])) <= float(
+            _WHOLE_SOLVE_TOLS["whole_solve_value_atol"]
+        )
 
 
 def test_traceable_least_squares_jacfwd_matches_shard_map_jacobian():

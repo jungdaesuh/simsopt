@@ -13,6 +13,7 @@ import simsopt_jax.core.specs as _jax_specs
 from simsopt._core.json import GSONEncoder, SIMSON
 from simsopt._core.optimizable import load
 from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
+from simsopt_jax.core.specs import gson_encode_spec_value
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 from simsopt_jax.runtime.host_boundary import host_tree
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
@@ -107,43 +108,6 @@ def _decode_spec_value(value):
     return value
 
 
-def _encode_numpy_array(value):
-    array = np.asarray(value)
-    data = (
-        [array.real.tolist(), array.imag.tolist()]
-        if array.dtype.kind == "c"
-        else array.tolist()
-    )
-    return {
-        "@module": "numpy",
-        "@class": "array",
-        "dtype": str(array.dtype),
-        "data": data,
-    }
-
-
-def _encode_spec_value(value):
-    if is_dataclass(value) and type(value).__module__ == _JAX_SPECS_MODULE:
-        payload = {
-            "@module": _JAX_SPECS_MODULE,
-            "@class": type(value).__name__,
-        }
-        for field in fields(value):
-            payload[field.name] = _encode_spec_value(getattr(value, field.name))
-        return payload
-    if isinstance(value, np.ndarray):
-        return _encode_numpy_array(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, tuple):
-        return [_encode_spec_value(item) for item in value]
-    if isinstance(value, list):
-        return [_encode_spec_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _encode_spec_value(item) for key, item in value.items()}
-    return value
-
-
 def _surface_rz_fourier_spec_from_surface(surface):
     return surface_rz_fourier_spec_from_dofs(
         surface.get_dofs(),
@@ -198,7 +162,7 @@ def load_specs(filename):
 def _save_spec(filename, spec):
     with pathlib.Path(filename).open("wt", encoding="utf-8") as fp:
         json.dump(
-            SIMSON(_encode_spec_value(host_tree(spec))),
+            SIMSON(gson_encode_spec_value(host_tree(spec))),
             fp,
             cls=GSONEncoder,
             indent=2,

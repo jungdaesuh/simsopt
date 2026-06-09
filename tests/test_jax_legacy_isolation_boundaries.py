@@ -14,19 +14,37 @@ JAX_SOURCE_ROOTS = ("src/simsopt_jax", "src/simsopt_jax_adapters")
 
 ALLOWED_JAX_SOURCE_LOCAL_IMPORTS_BY_REASON = {
     "jax_runtime_configuration_before_jax_import": (
-        ("src/simsopt_jax/backend/runtime.py", "_detect_local_jax_device_count", "jax", 1),
-        ("src/simsopt_jax/backend/runtime.py", "_detect_global_jax_device_count", "jax", 1),
-        ("src/simsopt_jax/backend/runtime.py", "maybe_initialize_distributed_jax", "jax", 1),
+        (
+            "src/simsopt_jax/backend/runtime.py",
+            "_detect_local_jax_device_count",
+            "jax",
+            1,
+        ),
+        (
+            "src/simsopt_jax/backend/runtime.py",
+            "_detect_global_jax_device_count",
+            "jax",
+            1,
+        ),
+        (
+            "src/simsopt_jax/backend/runtime.py",
+            "maybe_initialize_distributed_jax",
+            "jax",
+            1,
+        ),
         ("src/simsopt_jax/backend/runtime.py", "apply_jax_runtime_config", "jax", 1),
-        ("src/simsopt_jax/backend/runtime.py", "_CpuDeviceConstructionContext.__enter__", "jax", 1),
+        (
+            "src/simsopt_jax/backend/runtime.py",
+            "_CpuDeviceConstructionContext.__enter__",
+            "jax",
+            1,
+        ),
     ),
 }
 
 
 ALLOWED_IMPORTS_BY_REASON = {
-    "upstream_json_array_serialization": (
-        ("src/simsopt/_core/json.py", "jax", 1),
-    ),
+    "upstream_json_array_serialization": (("src/simsopt/_core/json.py", "jax", 1),),
     "direct_legacy_jax_math": (
         ("src/simsopt/field/coil.py", "jax.numpy", 1),
         ("src/simsopt/field/force.py", "jax", 1),
@@ -99,6 +117,15 @@ def _absolute_import_modules(node):
     if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
         return (node.module,)
     return ()
+
+
+def _source_style_import_modules(node):
+    if isinstance(node, ast.ImportFrom) and node.level > 0:
+        prefix = "." * node.level
+        if node.module:
+            return (prefix + node.module,)
+        return tuple(prefix + alias.name for alias in node.names)
+    return _absolute_import_modules(node)
 
 
 def _scan_tracked_legacy_sources(scanner):
@@ -181,7 +208,7 @@ class _JaxSourceImportStyleVisitor(ast.NodeVisitor):
             self._record_local_import(alias.name)
 
     def visit_ImportFrom(self, node):
-        for module in _absolute_import_modules(node):
+        for module in _source_style_import_modules(node):
             self._record_local_import(module)
 
     def visit_Call(self, node):
@@ -242,9 +269,7 @@ def _expected_markers():
 
 
 def _expected_jax_source_local_imports():
-    return _counter_from_grouped_allowlist(
-        ALLOWED_JAX_SOURCE_LOCAL_IMPORTS_BY_REASON
-    )
+    return _counter_from_grouped_allowlist(ALLOWED_JAX_SOURCE_LOCAL_IMPORTS_BY_REASON)
 
 
 def _counter_from_grouped_allowlist(grouped_allowlist):
@@ -309,20 +334,50 @@ from simsopt_jax.core import specs
 
 
 def test_import_scanner_ignores_relative_import_ast_nodes():
-    assert _absolute_import_modules(
-        ast.ImportFrom(
-            module="jax_core",
-            names=[ast.alias(name="make_curve_helical_spec")],
-            level=2,
+    assert (
+        _absolute_import_modules(
+            ast.ImportFrom(
+                module="jax_core",
+                names=[ast.alias(name="make_curve_helical_spec")],
+                level=2,
+            )
         )
-    ) == ()
-    assert _absolute_import_modules(
-        ast.ImportFrom(
-            module="geo.jit",
-            names=[ast.alias(name="jit", asname="legacy_jit")],
-            level=2,
+        == ()
+    )
+    assert (
+        _absolute_import_modules(
+            ast.ImportFrom(
+                module="geo.jit",
+                names=[ast.alias(name="jit", asname="legacy_jit")],
+                level=2,
+            )
         )
-    ) == ()
+        == ()
+    )
+
+
+def test_jax_source_import_style_scanner_tracks_function_local_relative_imports():
+    source = """
+def use_reference_lane():
+    from . import reference
+
+    return reference
+"""
+    local_imports, dynamic_imports = _jax_source_import_style_in_source(
+        source,
+        relative_path="src/simsopt_jax/geo/optimizers/optimizer.py",
+    )
+
+    assert local_imports == Counter(
+        {
+            (
+                "src/simsopt_jax/geo/optimizers/optimizer.py",
+                "use_reference_lane",
+                ".reference",
+            ): 1,
+        }
+    )
+    assert dynamic_imports == Counter()
 
 
 def test_import_scanner_ignores_text_mentions():

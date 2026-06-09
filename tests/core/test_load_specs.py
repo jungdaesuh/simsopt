@@ -107,6 +107,8 @@ def test_spec_writers_round_trip_through_load_and_load_specs(tmp_path):
 
     assert isinstance(load_specs(coil_output)["coil_set_spec"], GroupedCoilSetSpec)
     assert isinstance(load_specs(surface_output)["surface_spec"], SurfaceRZFourierSpec)
+    assert isinstance(load(coil_output), GroupedCoilSetSpec)
+    assert isinstance(load(surface_output), SurfaceRZFourierSpec)
 
 
 def test_biot_savart_restart_spec_round_trips_with_dof_extraction(tmp_path):
@@ -125,6 +127,7 @@ def test_biot_savart_restart_spec_round_trips_with_dof_extraction(tmp_path):
     spec_backed_bs = SpecBackedBiotSavartJAX(loaded["biot_savart_spec"])
     spec_backed_bs.set_points(legacy_points)
 
+    assert isinstance(load(restart_output), BiotSavartSpec)
     assert isinstance(loaded["biot_savart_spec"], BiotSavartSpec)
     assert isinstance(loaded["coil_set_spec"], GroupedCoilSetSpec)
     np.testing.assert_allclose(

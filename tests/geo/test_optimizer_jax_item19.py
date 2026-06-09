@@ -22,6 +22,7 @@ def test_item19_optimizer_jax_product_code_has_no_dynamic_private_import():
 def test_item19_optimizer_jax_exposes_no_dynamic_private_loader():
     assert not hasattr(_opt, "_private_pkg")
     assert not hasattr(_opt, "_load_private_pkg")
+    assert not hasattr(_opt, "_load_reference_optimizer_module")
 
 
 def test_item19_target_outer_loop_contract_defaults_to_ondevice_lbfgs():

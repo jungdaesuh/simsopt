@@ -179,7 +179,6 @@ def _write_constraint_header(
     constraint_file.write("function_evaluation,seconds")
     for index in range(ndofs):
         constraint_file.write(f",x({index})")
-    constraint_file.write(",constraint_function\n")
     for index in range(constraint_count):
         constraint_file.write(f",F({index})")
     constraint_file.write("\n")

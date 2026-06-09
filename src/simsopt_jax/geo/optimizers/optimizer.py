@@ -1312,18 +1312,6 @@ def resolve_target_outer_loop_optimizer_contract(
     )
 
 
-# ---------------------------------------------------------------------------
-# Reference-lane module loader
-# ---------------------------------------------------------------------------
-
-
-@lru_cache(maxsize=1)
-def _load_reference_optimizer_module():
-    from . import reference as optimizer_jax_reference
-
-    return optimizer_jax_reference
-
-
 def _least_squares_cost(residual):
     residual = jnp.ravel(jnp.asarray(residual))
     return _device_scalar(0.5, dtype=residual.dtype) * jnp.vdot(residual, residual).real
@@ -4858,7 +4846,7 @@ def reference_least_squares(
     progress_callback=None,
 ):
     """Explicit CPU/reference least-squares entrypoint."""
-    return _load_reference_optimizer_module().reference_least_squares(
+    return optimizer_jax_reference.reference_least_squares(
         residual_fn,
         x0,
         method=method,
@@ -5079,7 +5067,7 @@ def reference_minimize(
             progress_callback=progress_callback,
         )
         return _adam_result_to_optimize_result(result)
-    return _load_reference_optimizer_module().reference_minimize(
+    return optimizer_jax_reference.reference_minimize(
         fun,
         x0,
         method=method,
@@ -5152,8 +5140,7 @@ def target_minimize(
             else "scipy-jax"
         )
         require_target_backend_x64(required_backend)
-        reference_optimizer = _load_reference_optimizer_module()
-        result = reference_optimizer.target_scipy_minimize_value_and_grad(
+        result = optimizer_jax_reference.target_scipy_minimize_value_and_grad(
             fun,
             x0,
             method="lbfgs",
@@ -5493,3 +5480,6 @@ def jax_minimize(
         callback=callback,
         progress_callback=progress_callback,
     )
+
+
+from . import reference as optimizer_jax_reference  # noqa: E402
