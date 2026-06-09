@@ -8013,6 +8013,7 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         self.assertEqual(payload["EFFECTIVE_CURRENT_MODE"], "vacuum")
         self.assertIsNone(payload["FINITE_CURRENT_MODE"])
+        self.assertNotIn(module.DESIGN_ONLY_RESULTS_KEY, payload)
         self.assertEqual(payload["NUM_PROXY_COILS"], 0)
         self.assertEqual(payload["NUM_VF_COILS"], 0)
         self.assertEqual(payload["PROXY_PLASMA_CURRENT_A"], 0.0)
@@ -8094,6 +8095,139 @@ class HardwareConstraintTests(unittest.TestCase):
             KAM_FRACTION_SEMANTICS,
         )
         self.assertTrue(payload["BEST_TOPOLOGY_CERTIFICATION_OK"])
+
+    def test_inherited_proxy_metadata_persists_design_only_marker(self):
+        module = load_single_stage_example_module()
+        reason = "finite_current_proxy_line_current: wataru_proxy_field"
+        stage2_metadata = module.stage2_policy_metadata_items(
+            {
+                **module.build_design_only_results_fields(reason=reason),
+                "FINITE_CURRENT_MODE": "wataru_proxy_field",
+            }
+        )
+
+        current_payload = module.inherited_design_only_results_payload(
+            stage2_metadata,
+            current_num_proxy_coils=1,
+            finite_current_mode="wataru_proxy_field",
+        )
+        strict_vacuum_payload = module.inherited_design_only_results_payload(
+            stage2_metadata,
+            current_num_proxy_coils=0,
+            finite_current_mode="wataru_proxy_field",
+        )
+        provenance_payload = module.stage2_policy_metadata_payload(stage2_metadata)
+
+        self.assertIs(current_payload[module.DESIGN_ONLY_RESULTS_KEY], True)
+        self.assertEqual(current_payload[module.DESIGN_ONLY_REASON_KEY], reason)
+        self.assertEqual(strict_vacuum_payload, {})
+        self.assertIs(
+            provenance_payload[f"STAGE2_{module.DESIGN_ONLY_RESULTS_KEY}"],
+            True,
+        )
+
+    def test_mark_inherited_proxy_biot_savart_fails_closed_in_process_score(self):
+        module = load_single_stage_example_module()
+        reason = "finite_current_proxy_line_current: wataru_proxy_field"
+        stage2_metadata = module.stage2_policy_metadata_items(
+            {
+                **module.build_design_only_results_fields(reason=reason),
+                "FINITE_CURRENT_MODE": "wataru_proxy_field",
+            }
+        )
+        bs = SimpleNamespace()
+
+        payload = module.mark_inherited_design_only_biot_savart(
+            bs,
+            stage2_metadata,
+            current_num_proxy_coils=1,
+            finite_current_mode="wataru_proxy_field",
+        )
+        result = module.safe_score_topology(
+            object(),
+            bs,
+            nfieldlines=1,
+            tmax=1.0,
+        )
+
+        self.assertEqual(payload[module.DESIGN_ONLY_REASON_KEY], reason)
+        self.assertTrue(getattr(bs, "_design_only_no_topology_gate"))
+        self.assertTrue(result["broken"])
+        self.assertEqual(
+            result["evaluation_error_type"],
+            "DesignOnlyTopologyFieldError",
+        )
+
+    def test_preserved_timeout_proxy_payload_persists_design_only_marker(self):
+        module = load_single_stage_example_module()
+        reason = "finite_current_proxy_line_current: wataru_proxy_field"
+        replay_config = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_10x10.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            stage2_seed_surf_path="/seeds/surf_opt_boozer_surface.json",
+            strict_vacuum_current=False,
+            finite_current_mode="wataru_proxy_field",
+            effective_current_mode="wataru_proxy_field",
+            boozer_current_convention="mu0",
+            plasma_current_A=800.0,
+            boozer_I=1.0053096491487339e-3,
+            num_proxy_coils=1,
+            num_vf_coils=0,
+            proxy_plasma_current_A=800.0,
+            vf_current_A=0.0,
+            stage2_policy_metadata=module.stage2_policy_metadata_items(
+                {
+                    **module.build_design_only_results_fields(reason=reason),
+                    "BOOZER_CURRENT_CONVENTION": "mu0",
+                    "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                }
+            ),
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 7.5e-4,
+                "base_total": 7.4e-4,
+            },
+            "J": 7.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True},
+            "topology_gate_status": {"success": False, "state": "broken"},
+        }
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_accepted",
+            incumbent_stage="initial",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 2.7e-4, "J_Boozer": 4.8e-7},
+            field_error=3.5e-4,
+            final_iota=0.14997,
+            final_volume=0.09998,
+            hardware_snapshot={
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
+                "tf_current_A": -8.0e4,
+            },
+            coil_length=1.91,
+            accepted_iteration=1,
+        )
+
+        self.assertIs(payload[module.DESIGN_ONLY_RESULTS_KEY], True)
+        self.assertEqual(payload[module.DESIGN_ONLY_REASON_KEY], reason)
+        self.assertIs(payload[f"STAGE2_{module.DESIGN_ONLY_RESULTS_KEY}"], True)
+        self.assertEqual(payload["NUM_PROXY_COILS"], 1)
 
     def test_build_preserved_timeout_results_payload_stamps_producer_wout_convention(
         self,

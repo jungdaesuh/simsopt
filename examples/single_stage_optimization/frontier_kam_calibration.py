@@ -172,6 +172,7 @@ def score_donor_run(
             kam_width_ratio=kam_width_ratio,
             inset_fraction=inset_fraction,
             compute_transport_diagnostics=False,
+            design_only_results=payload,
         )
     )
     return CalibrationRow(

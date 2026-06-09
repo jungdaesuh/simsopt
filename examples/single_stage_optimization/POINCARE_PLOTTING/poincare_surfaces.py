@@ -10,7 +10,10 @@ from simsopt.geo import curves_to_vtk
 
 # Shared topology scorer — single source of truth for helpers and metrics
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from banana_opt.design_only_fields import assert_topology_field_allowed
+from banana_opt.design_only_fields import (
+    assert_topology_field_allowed,
+    load_design_only_results_metadata,
+)
 from banana_opt.json_compat import load_boozer_finite_i as load
 from topology_scorer import (
     trace_metrics as _trace_metrics,
@@ -57,17 +60,6 @@ def design_only_override_enabled(env=None):
         str(environ.get("POINCARE_ALLOW_DESIGN_ONLY_FIELD", "")).lower()
         in POINCARE_DESIGN_ONLY_OVERRIDE_VALUES
     )
-
-
-def load_design_only_results_metadata(out_dir):
-    results_path = os.path.join(out_dir, "results.json")
-    if not os.path.exists(results_path):
-        return None
-    with open(results_path, encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected JSON object in {results_path}.")
-    return {str(key): value for key, value in payload.items()}
 
 
 def build_poincare_mode_artifact(

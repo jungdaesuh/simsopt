@@ -12,6 +12,7 @@ cannot drift between callback and validation.
 
 import copy
 import dataclasses
+from collections.abc import Mapping
 from pathlib import Path
 import sys
 
@@ -1370,6 +1371,7 @@ def score_topology(
     compute_invariant_torus_classification=True,
     magnetic_axis_point=None,
     wba_min_returns=None,
+    design_only_results: Mapping[str, object] | None = None,
 ):
     """Score field-line confinement on a Boozer surface.
 
@@ -1390,7 +1392,7 @@ def score_topology(
     """
     assert_topology_field_allowed(
         bfield,
-        None,
+        design_only_results,
         allow_design_only_field=False,
         consumer="score_topology",
     )
@@ -1548,6 +1550,7 @@ def safe_score_topology(
     nfieldlines,
     tmax,
     tol=1e-7,
+    design_only_results: Mapping[str, object] | None = None,
     **kwargs,
 ):
     try:
@@ -1558,6 +1561,7 @@ def safe_score_topology(
                 nfieldlines=nfieldlines,
                 tmax=tmax,
                 tol=tol,
+                design_only_results=design_only_results,
                 **kwargs,
             )
         )

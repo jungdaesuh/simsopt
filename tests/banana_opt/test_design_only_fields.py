@@ -38,6 +38,7 @@ from POINCARE_PLOTTING.poincare_surfaces import (  # noqa: E402
     design_only_override_enabled,
     load_design_only_results_metadata,
 )
+from topology_scorer import safe_score_topology, score_topology  # noqa: E402
 
 
 SIGNED_CW_WOUT_PATH = (
@@ -215,6 +216,33 @@ class DesignOnlyFieldTests(unittest.TestCase):
 
         self.assertIsNotNone(metadata)
         self.assertIs(metadata[DESIGN_ONLY_RESULTS_KEY], True)
+
+    def test_topology_scorer_rejects_persisted_design_only_metadata(self):
+        reason = f"finite_current_proxy_line_current: {WATARU_FINITE_CURRENT_MODE}"
+        results = build_design_only_results_fields(reason=reason)
+
+        with self.assertRaises(DesignOnlyTopologyFieldError):
+            score_topology(
+                object(),
+                object(),
+                nfieldlines=1,
+                tmax=1.0,
+                design_only_results=results,
+            )
+
+        safe_result = safe_score_topology(
+            object(),
+            object(),
+            nfieldlines=1,
+            tmax=1.0,
+            design_only_results=results,
+        )
+
+        self.assertIs(safe_result["broken"], True)
+        self.assertEqual(
+            safe_result["evaluation_error_type"],
+            "DesignOnlyTopologyFieldError",
+        )
 
     def test_wataru_proxy_wrapper_preserves_axis_zeroth_placement(self):
         proxy_coils = build_proxy_plasma_current_coils(

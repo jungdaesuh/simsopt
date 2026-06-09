@@ -24,13 +24,18 @@ from import_provenance import configure_local_simsopt_imports
 
 configure_local_simsopt_imports(__file__)
 
-from banana_opt.topology.kam_birkhoff import KAM_FRACTION_SEMANTICS
+from banana_opt.design_only_fields import (
+    DESIGN_ONLY_RESULTS_KEY,
+    load_design_only_results_metadata,
+)
 from banana_opt.json_compat import load_boozer_finite_i as load
+from banana_opt.topology.kam_birkhoff import KAM_FRACTION_SEMANTICS
 from topology_scorer import safe_score_topology
 
 
 SCHEMA_VERSION = "frontier_pareto_trajectory_v1"
 DEFAULT_OUTPUT_STEM = "frontier_pareto_trajectory"
+DESIGN_ONLY_TOPOLOGY_REASON = "design_only_no_topology_gate"
 FLOAT_PATTERN = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
 
 
@@ -129,6 +134,32 @@ def topology_entry_invariant_torus_fraction(
     return finite_float_or_none(entry.get("kam_fraction"))
 
 
+def results_mark_design_only(results: Mapping[str, object] | None) -> bool:
+    return False if results is None else results.get(DESIGN_ONLY_RESULTS_KEY) is True
+
+
+def topology_metric_or_none(value, *, design_only_row: bool) -> float | None:
+    return None if design_only_row else finite_float_or_none(value)
+
+
+def certification_ok_or_design_only(
+    value,
+    *,
+    design_only_row: bool,
+) -> bool | None:
+    return False if design_only_row else bool_or_none(value)
+
+
+def certification_reason_or_design_only(
+    value,
+    *,
+    design_only_row: bool,
+) -> str | None:
+    if design_only_row:
+        return DESIGN_ONLY_TOPOLOGY_REASON
+    return None if value is None else str(value)
+
+
 def first_float(text: str) -> float | None:
     match = FLOAT_PATTERN.search(text)
     if match is None:
@@ -222,6 +253,7 @@ def recompute_checkpoint_topology(
     *,
     nfieldlines: int,
     tmax: float,
+    design_only_results: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, object] | None, Path | None]:
     paths = checkpoint_paths(run_dir, accepted_iteration)
     if paths is None:
@@ -233,6 +265,7 @@ def recompute_checkpoint_topology(
         nfieldlines=nfieldlines,
         tmax=tmax,
         compute_transport_diagnostics=False,
+        design_only_results=design_only_results,
     )
     return result, surf_path
 
@@ -297,6 +330,7 @@ def recompute_root_topology(
     *,
     nfieldlines: int,
     tmax: float,
+    design_only_results: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, object] | None, Path | None]:
     paths = root_topology_artifact_paths(run_dir, source_kind)
     if paths is None:
@@ -308,6 +342,7 @@ def recompute_root_topology(
         nfieldlines=nfieldlines,
         tmax=tmax,
         compute_transport_diagnostics=False,
+        design_only_results=design_only_results,
     )
     return result, surface_path
 
@@ -321,6 +356,8 @@ def topology_archive_rows(
     recompute_tmax: float,
 ) -> list[TrajectoryRow]:
     archive_path = run_dir / "topology_archive.jsonl"
+    design_only_results = load_design_only_results_metadata(run_dir)
+    design_only_run = results_mark_design_only(design_only_results)
     rows: list[TrajectoryRow] = []
     for line_number, entry in iter_jsonl(archive_path):
         accepted_iteration = int(entry["accepted_iteration"])
@@ -328,12 +365,26 @@ def topology_archive_rows(
         invariant_torus_fraction = topology_entry_invariant_torus_fraction(entry)
         kam_fraction = finite_float_or_none(entry.get("kam_fraction"))
         source_artifact_path = f"{archive_path}:{line_number}"
-        if invariant_torus_fraction is None and recompute_missing_kam:
+        if design_only_run:
+            invariant_torus_fraction = None
+            kam_fraction = None
+            entry = {
+                **entry,
+                "survival_fraction": None,
+                "topology_broken": True,
+                "invariant_torus_fraction": None,
+                "kam_fraction": None,
+                "kam_fraction_semantics": None,
+                "frontier_certification_ok": False,
+                "frontier_certification_reason": DESIGN_ONLY_TOPOLOGY_REASON,
+            }
+        elif invariant_torus_fraction is None and recompute_missing_kam:
             recomputed, recomputed_source = recompute_checkpoint_topology(
                 run_dir,
                 accepted_iteration,
                 nfieldlines=recompute_nfieldlines,
                 tmax=recompute_tmax,
+                design_only_results=design_only_results,
             )
             if recomputed is not None:
                 recomputed_broken = bool_or_none(recomputed.get("broken"))
@@ -403,6 +454,7 @@ def result_payload_row(
     *,
     topology_result: Mapping[str, object] | None = None,
     topology_source_path: Path | None = None,
+    design_only_results: Mapping[str, object] | None = None,
 ) -> TrajectoryRow | None:
     if not path.is_file():
         return None
@@ -420,7 +472,15 @@ def result_payload_row(
             payload.get("FRONTIER_KAM_TOPOLOGY_BROKEN"),
         )
     )
-    if topology_result is not None:
+    design_only_row = results_mark_design_only(payload) or results_mark_design_only(
+        design_only_results
+    )
+    if design_only_row:
+        invariant_torus_fraction = None
+        kam_fraction = None
+        survival_fraction = None
+        topology_broken = True
+    if topology_result is not None and not design_only_row:
         topology_broken = bool_or_none(topology_result.get("broken"))
         if invariant_torus_fraction is None:
             if topology_broken:
@@ -464,16 +524,22 @@ def result_payload_row(
         survival_fraction=survival_fraction,
         topology_broken=topology_broken,
         hardware_ok=bool_or_none(payload.get("HARDWARE_CONSTRAINTS_OK")),
-        frontier_certification_ok=bool_or_none(payload.get("FRONTIER_CERTIFICATION_OK")),
-        frontier_certification_reason=(
-            None
-            if payload.get("FRONTIER_CERTIFICATION_REASON") is None
-            else str(payload.get("FRONTIER_CERTIFICATION_REASON"))
+        frontier_certification_ok=certification_ok_or_design_only(
+            payload.get("FRONTIER_CERTIFICATION_OK"),
+            design_only_row=design_only_row,
+        ),
+        frontier_certification_reason=certification_reason_or_design_only(
+            payload.get("FRONTIER_CERTIFICATION_REASON"),
+            design_only_row=design_only_row,
         ),
     )
 
 
-def solver_checkpoint_row(path: Path) -> TrajectoryRow | None:
+def solver_checkpoint_row(
+    path: Path,
+    *,
+    design_only_results: Mapping[str, object] | None = None,
+) -> TrajectoryRow | None:
     if not path.is_file():
         return None
     payload = read_json(path)
@@ -485,6 +551,7 @@ def solver_checkpoint_row(path: Path) -> TrajectoryRow | None:
     hardware_status = incumbent.get("accepted_hardware_status", {})
     iotas = surface_status.get("iotas", [])
     volumes = surface_status.get("volumes", [])
+    design_only_row = results_mark_design_only(design_only_results)
     return TrajectoryRow(
         accepted_iteration=int(payload.get("accepted_iterations", 0)),
         source_kind="solver_state_checkpoint",
@@ -496,27 +563,37 @@ def solver_checkpoint_row(path: Path) -> TrajectoryRow | None:
         boozer_residual=finite_float_or_none(search_eval.get("J_Boozer")),
         iota=finite_float_or_none(iotas[-1] if iotas else None),
         volume=finite_float_or_none(volumes[-1] if volumes else None),
-        invariant_torus_fraction=finite_float_or_none(
-            search_eval.get("frontier_invariant_torus_fraction")
+        invariant_torus_fraction=topology_metric_or_none(
+            search_eval.get("frontier_invariant_torus_fraction"),
+            design_only_row=design_only_row,
         ),
         invariant_torus_min=finite_float_or_none(
             search_eval.get("frontier_invariant_torus_min")
         ),
-        kam_fraction=finite_float_or_none(search_eval.get("frontier_kam_fraction")),
+        kam_fraction=topology_metric_or_none(
+            search_eval.get("frontier_kam_fraction"),
+            design_only_row=design_only_row,
+        ),
         kam_min=finite_float_or_none(search_eval.get("frontier_kam_min")),
         survival_fraction=None,
-        topology_broken=bool_or_none(
-            search_eval.get(
-                "frontier_invariant_torus_topology_broken",
-                search_eval.get("frontier_kam_topology_broken"),
+        topology_broken=(
+            True
+            if design_only_row
+            else bool_or_none(
+                search_eval.get(
+                    "frontier_invariant_torus_topology_broken",
+                    search_eval.get("frontier_kam_topology_broken"),
+                )
             )
         ),
         hardware_ok=bool_or_none(hardware_status.get("success")),
-        frontier_certification_ok=bool_or_none(search_eval.get("frontier_certification_ok")),
-        frontier_certification_reason=(
-            None
-            if search_eval.get("frontier_certification_reason") is None
-            else str(search_eval.get("frontier_certification_reason"))
+        frontier_certification_ok=certification_ok_or_design_only(
+            search_eval.get("frontier_certification_ok"),
+            design_only_row=design_only_row,
+        ),
+        frontier_certification_reason=certification_reason_or_design_only(
+            search_eval.get("frontier_certification_reason"),
+            design_only_row=design_only_row,
         ),
     )
 
@@ -540,6 +617,7 @@ def topology_posthoc_row(run_dir: Path) -> TrajectoryRow | None:
         "topology_posthoc",
         topology_result=read_json(topology_path),
         topology_source_path=topology_path,
+        design_only_results=load_design_only_results_metadata(run_dir),
     )
 
 
@@ -551,6 +629,7 @@ def build_rows(
     recompute_tmax: float,
 ) -> list[TrajectoryRow]:
     log_records = parse_iteration_log(run_dir / "log.txt")
+    run_design_only_results = load_design_only_results_metadata(run_dir)
     rows = topology_archive_rows(
         run_dir,
         log_records,
@@ -574,24 +653,34 @@ def build_rows(
                 )
                 is None
             ):
+                design_only_results = (
+                    payload
+                    if run_design_only_results is None
+                    else {**payload, **run_design_only_results}
+                )
                 topology_result, topology_source_path = recompute_root_topology(
                     run_dir,
                     source_kind,
                     nfieldlines=recompute_nfieldlines,
                     tmax=recompute_tmax,
+                    design_only_results=design_only_results,
                 )
         row = result_payload_row(
             row_path,
             source_kind,
             topology_result=topology_result,
             topology_source_path=topology_source_path,
+            design_only_results=run_design_only_results,
         )
         if row is not None:
             rows.append(row)
     posthoc = topology_posthoc_row(run_dir)
     if posthoc is not None:
         rows.append(posthoc)
-    checkpoint = solver_checkpoint_row(run_dir / "solver_state_checkpoint.json")
+    checkpoint = solver_checkpoint_row(
+        run_dir / "solver_state_checkpoint.json",
+        design_only_results=run_design_only_results,
+    )
     if checkpoint is not None:
         rows.append(checkpoint)
     return sorted(

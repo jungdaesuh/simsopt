@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Final, Mapping
 
 from simsopt.field import BiotSavart
@@ -40,6 +42,17 @@ def build_design_only_results_fields(*, reason: str) -> dict[str, object]:
             "promotion or production handoff",
         ),
     }
+
+
+def load_design_only_results_metadata(out_dir: str | Path) -> dict[str, object] | None:
+    """Load the run-level sidecar that persists the design-only field marker."""
+    results_path = Path(out_dir) / "results.json"
+    if not results_path.exists():
+        return None
+    payload = json.loads(results_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {results_path}.")
+    return {str(key): value for key, value in payload.items()}
 
 
 def field_is_design_only(

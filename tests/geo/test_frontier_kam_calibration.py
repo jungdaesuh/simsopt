@@ -1,7 +1,13 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from geo._frontier_test_helpers import EXAMPLE_ROOT, load_module
+from banana_opt.design_only_fields import (
+    DesignOnlyTopologyFieldError,
+    build_design_only_results_fields,
+)
 
 
 FRONTIER_KAM_CALIBRATION_SCRIPT = EXAMPLE_ROOT / "frontier_kam_calibration.py"
@@ -322,3 +328,39 @@ def test_score_donor_run_uses_root_artifacts_and_scorer_contract(
     csv_path = tmp_path / "calibration.csv"
     module.write_csv(csv_path, [row])
     assert "campaign/donor" in csv_path.read_text(encoding="utf-8")
+
+
+def test_score_donor_run_rejects_design_only_results_sidecar(tmp_path, monkeypatch):
+    module = load_calibration_module()
+    run_dir = tmp_path / "campaign" / "donor"
+    run_dir.mkdir(parents=True)
+    (run_dir / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+    (run_dir / "surf_opt_boozer_surface.json").write_text("{}", encoding="utf-8")
+    (run_dir / "results.json").write_text(
+        json.dumps(
+            {
+                **build_design_only_results_fields(
+                    reason="finite_current_proxy_line_current: wataru_proxy_field"
+                ),
+                "HARDWARE_CONSTRAINTS_OK": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(module, "load", lambda path: object())
+    monkeypatch.setitem(
+        module.topology_surface_for_scoring.__globals__,
+        "load",
+        lambda path: object(),
+    )
+
+    with pytest.raises(DesignOnlyTopologyFieldError):
+        module.score_donor_run(
+            run_dir,
+            nfieldlines=12,
+            tmax=50.0,
+            nphis=4,
+            kam_width_ratio=0.25,
+            inset_fraction=0.05,
+        )

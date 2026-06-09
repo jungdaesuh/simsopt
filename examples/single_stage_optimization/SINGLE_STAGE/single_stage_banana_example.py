@@ -172,6 +172,15 @@ from banana_opt.banana_current_replay import (
     set_banana_current_replay_context_contract,
     write_banana_current_replay_context_artifact,
 )
+from banana_opt.design_only_fields import (
+    DESIGN_ONLY_ALLOWED_USE_KEY,
+    DESIGN_ONLY_EVIDENCE_KEY,
+    DESIGN_ONLY_FORBIDDEN_USE_KEY,
+    DESIGN_ONLY_REASON_KEY,
+    DESIGN_ONLY_RESULTS_KEY,
+    build_design_only_results_fields,
+    mark_design_only_field,
+)
 from banana_opt.current_contracts import (
     DEFAULT_FINITE_CURRENT_MODE,
     FINITE_CURRENT_MODE_CHOICES,
@@ -7529,6 +7538,11 @@ _STAGE2_POLICY_METADATA_KEYS = (
     "BANANA_CURRENT_PINNED",
     "BANANA_I_FIXED_S2_KA",
     "IOTA_TARGET_SIGN",
+    DESIGN_ONLY_RESULTS_KEY,
+    DESIGN_ONLY_REASON_KEY,
+    DESIGN_ONLY_EVIDENCE_KEY,
+    DESIGN_ONLY_ALLOWED_USE_KEY,
+    DESIGN_ONLY_FORBIDDEN_USE_KEY,
 )
 
 
@@ -7552,6 +7566,39 @@ def stage2_policy_metadata_payload(stage2_policy_metadata, *, prefix="STAGE2_"):
         f"{prefix}{key}": _jsonable_value(metadata.get(key))
         for key in _STAGE2_POLICY_METADATA_KEYS
     }
+
+
+def inherited_design_only_results_payload(
+    source_metadata,
+    *,
+    current_num_proxy_coils,
+    finite_current_mode,
+):
+    if int(current_num_proxy_coils or 0) <= 0:
+        return {}
+    metadata = {} if source_metadata is None else dict(source_metadata)
+    reason = metadata.get(DESIGN_ONLY_REASON_KEY)
+    if reason is None or reason == "":
+        reason = f"finite_current_proxy_line_current: {finite_current_mode}"
+    return build_design_only_results_fields(reason=str(reason))
+
+
+def mark_inherited_design_only_biot_savart(
+    bs,
+    source_metadata,
+    *,
+    current_num_proxy_coils,
+    finite_current_mode,
+):
+    payload = inherited_design_only_results_payload(
+        source_metadata,
+        current_num_proxy_coils=current_num_proxy_coils,
+        finite_current_mode=finite_current_mode,
+    )
+    reason = payload.get(DESIGN_ONLY_REASON_KEY)
+    if reason is not None:
+        mark_design_only_field(bs, reason=str(reason))
+    return payload
 
 
 def write_json_artifact(path, payload):
@@ -9631,6 +9678,15 @@ def build_preserved_timeout_results_payload(
         "STAGE2_SEED_SURF_PATH": replay_config.stage2_seed_surf_path,
         "STAGE2_RESULTS_PATH": replay_config.stage2_results_path,
         **stage2_policy_metadata_payload(replay_config.stage2_policy_metadata),
+        **inherited_design_only_results_payload(
+            replay_config.stage2_policy_metadata,
+            current_num_proxy_coils=(
+                0
+                if replay_config.strict_vacuum_current
+                else replay_config.num_proxy_coils
+            ),
+            finite_current_mode=replay_config.finite_current_mode,
+        ),
         "CURRENT_LINEAGE": (
             STRICT_VACUUM_CURRENT_LINEAGE
             if replay_config.strict_vacuum_current
@@ -12061,6 +12117,12 @@ if __name__ == "__main__":
         )
     else:
         coil_partitions = source_coil_partitions
+        mark_inherited_design_only_biot_savart(
+            bs,
+            stage2_results,
+            current_num_proxy_coils=coil_partitions.num_proxy_coils,
+            finite_current_mode=finite_current_mode,
+        )
     validate_loaded_seed_current_source_contract(
         finite_current_mode=finite_current_mode,
         effective_current_mode=effective_current_mode,
@@ -13927,6 +13989,13 @@ if __name__ == "__main__":
         "STAGE2_FINITE_CURRENT_MODE": stage2_results["FINITE_CURRENT_MODE"],
         "STAGE2_BOOZER_CURRENT_CONVENTION": stage2_results["BOOZER_CURRENT_CONVENTION"],
         **stage2_policy_metadata_payload(stage2_results),
+        **inherited_design_only_results_payload(
+            stage2_results,
+            current_num_proxy_coils=(
+                0 if args.strict_vacuum_current else source_coil_partitions.num_proxy_coils
+            ),
+            finite_current_mode=finite_current_mode,
+        ),
         "STAGE2_NUM_BANANA_COILS": source_coil_partitions.num_banana_coils,
         "STAGE2_NUM_PROXY_COILS": source_coil_partitions.num_proxy_coils,
         "STAGE2_NUM_VF_COILS": source_coil_partitions.num_vf_coils,

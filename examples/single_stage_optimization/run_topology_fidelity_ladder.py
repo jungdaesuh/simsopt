@@ -14,6 +14,7 @@ from import_provenance import configure_local_simsopt_imports
 
 EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
+from banana_opt.design_only_fields import load_design_only_results_metadata
 from banana_opt.json_compat import load_boozer_finite_i as load
 from banana_opt.topology_fidelity_ladder import (
     DEFAULT_TOPOLOGY_TIER_SPECS,
@@ -87,6 +88,7 @@ def build_tier_case_record(
 
 def evaluate_case(output_dir: str | Path) -> dict[str, object]:
     bfield, surface, field_label = resolve_field_and_surface(output_dir)
+    design_only_results = load_design_only_results_metadata(output_dir)
     case_record: dict[str, object] = {
         "label": Path(output_dir).resolve().name,
         "output_dir": str(Path(output_dir).resolve()),
@@ -101,6 +103,7 @@ def evaluate_case(output_dir: str | Path) -> dict[str, object]:
             nphis=tier_spec.nphis,
             inset_fraction=tier_spec.inset_fraction,
             field_policy=tier_spec.field_policy,
+            design_only_results=design_only_results,
         )
         case_record[tier_name] = build_tier_case_record(
             result,
