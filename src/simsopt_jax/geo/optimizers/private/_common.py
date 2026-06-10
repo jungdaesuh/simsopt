@@ -22,6 +22,7 @@ from simsopt_jax.core.sharding import place_active_replicated
 from .._shared import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     _CACHEABLE_VALUE_AND_GRAD_ATTR,
+    _optimizer_dtype as _optimizer_dtype,
     _x64_enabled,
     private_optimizer_runtime_is_supported,
 )

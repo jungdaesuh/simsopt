@@ -565,7 +565,7 @@ _NATIVE_CPU_REFERENCE_NODE_PREFIXES = frozenset(
         "geo/test_boozersurface_jax.py::TestMixedQuadratureBoozer::test_run_code_ls_converges",
         "geo/test_boozersurface_jax.py::TestMixedQuadratureBoozer::test_penalty_matches_uniform",
         "integration/test_single_stage_jax_cpu_reference.py::TestBoozerResidualCPUParity::",
-        "integration/test_single_stage_jax_cpu_reference.py::TestAdjointSolveConsistency::test_surface_objective_wrappers_reject_missing_streaming_group_vjp",
+        "integration/test_single_stage_jax_cpu_reference.py::TestAdjointSolveConsistency::",
     }
 )
 

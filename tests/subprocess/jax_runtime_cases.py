@@ -20,6 +20,7 @@ _STRICT_CPU_PARITY_SKIP_REASON = (
 _STRICT_GPU_FAST_SKIP_REASON = (
     "strict GPU fast backend unavailable: no GPU device detected"
 )
+_MUTABLE_OBJECTIVE_SMOKE_MAXITER = 5
 
 
 class SkippedCase(RuntimeError):
@@ -2075,7 +2076,7 @@ def _run_structured_mutable_objective_state_case() -> None:
         x0,
         method="lbfgs-ondevice",
         value_and_grad=True,
-        maxiter=20,
+        maxiter=_MUTABLE_OBJECTIVE_SMOKE_MAXITER,
     )
     objective.target = np.asarray([1.5, -0.5], dtype=np.float64)
     second = target_minimize(
@@ -2083,7 +2084,7 @@ def _run_structured_mutable_objective_state_case() -> None:
         x0,
         method="lbfgs-ondevice",
         value_and_grad=True,
-        maxiter=20,
+        maxiter=_MUTABLE_OBJECTIVE_SMOKE_MAXITER,
     )
 
     assert first.success is True

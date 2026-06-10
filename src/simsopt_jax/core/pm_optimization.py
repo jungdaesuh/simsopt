@@ -2767,7 +2767,8 @@ def projection_l2_balls(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
 
     Mirrors ``projection_L2_balls`` in ``permanent_magnet_optimization.cpp:12``.
     ``denom = max(1, ||m_i|| / m_maxima_i)`` so vectors already inside the
-    ball pass through unchanged.
+    ball pass through unchanged. Finite non-positive radii are treated as the
+    zero ball, keeping zero-radius rows and their JAX derivatives finite.
 
     Parameters
     ----------
@@ -2779,8 +2780,19 @@ def projection_l2_balls(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
     norm_sq = jnp.sum(m * m, axis=1)
     norm = _row_norm_without_zero_sqrt_gradient(norm_sq)
     unit = m_maxima**0
-    denom = jnp.maximum(unit, norm / m_maxima)
-    return m / denom[:, None]
+    zero = unit - unit
+    finite_radius = jnp.isfinite(m_maxima)
+    positive_radius = finite_radius & (m_maxima > zero)
+    safe_radius = jnp.where(positive_radius, m_maxima, unit)
+    radius_ratio = norm / safe_radius
+    denom = jnp.maximum(unit, radius_ratio)
+    projected = m / denom[:, None]
+    zero_rows = jnp.broadcast_to(zero[:, None], m.shape)
+    return jnp.where(
+        (finite_radius & (m_maxima <= zero))[:, None],
+        zero_rows,
+        projected,
+    )
 
 
 def _on_ball(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
