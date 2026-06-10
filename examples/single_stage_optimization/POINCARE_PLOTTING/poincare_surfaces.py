@@ -498,6 +498,11 @@ if __name__ == "__main__":
                 phis,
                 render_mode["stop_labels"],
                 mode,
+                iota=(results_meta or {}).get("FINAL_IOTA"),
+                surface_resolution=(
+                    len(surf.quadpoints_phi),
+                    len(surf.quadpoints_theta),
+                ),
             )
             plot_filename = (
                 OUT_DIR + f"/PoincarePlot_{field_label}{render_mode['plot_suffix']}.png"

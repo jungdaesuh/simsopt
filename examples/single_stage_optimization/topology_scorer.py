@@ -953,12 +953,35 @@ def validate_trace_arrays(fieldlines_tys, fieldlines_phi_hits):
             )
 
 
+# A high-iota Poincare validation on an under-resolved Boozer surface can report a
+# FALSE clean 50/50: the coarse surface makes the surface-exit guard too generous, so a
+# marginal field line that truly exits is scored as surviving. Above this iota the fine
+# grid is required before a "validated" verdict is trustworthy (the 127/32-vs-255/64
+# false-positive footgun). Callers that don't supply iota + surface_resolution are
+# unaffected (the guard is inert).
+HIGH_IOTA_VALIDATION_THRESHOLD = 0.285
+MIN_VALIDATION_SURFACE_NPHI = 255
+MIN_VALIDATION_SURFACE_NTHETA = 64
+
+
 def trace_metrics(
-    fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="validation"
+    fieldlines_tys,
+    fieldlines_phi_hits,
+    phis,
+    stop_labels,
+    mode="validation",
+    *,
+    iota=None,
+    surface_resolution=None,
 ):
     """Extract structured metrics from field-line tracing results.
 
     This is the single implementation used by all scoring paths.
+
+    ``iota`` and ``surface_resolution`` (an ``(nphi, ntheta)`` pair from the validation
+    surface's quadpoint grid) are optional; when supplied they let the validation verdict
+    refuse a clean 50/50 from an under-resolved surface at high iota (see the threshold
+    constants above). Omitting them preserves the prior behaviour exactly.
     """
     validate_trace_arrays(fieldlines_tys, fieldlines_phi_hits)
     nfieldlines = len(fieldlines_tys)
@@ -1018,10 +1041,21 @@ def trace_metrics(
     if mode == "validation":
         if stop_reasons_indicate_broken(stop_reason_counts):
             validation_status = "broken"
+        elif survived == nfieldlines:
+            validation_status = "validated"
+            if (
+                iota is not None
+                and abs(iota) >= HIGH_IOTA_VALIDATION_THRESHOLD
+                and surface_resolution is not None
+                and (
+                    surface_resolution[0] < MIN_VALIDATION_SURFACE_NPHI
+                    or surface_resolution[1] < MIN_VALIDATION_SURFACE_NTHETA
+                )
+            ):
+                # Coarse high-iota surface: a clean count is not trustworthy here.
+                validation_status = "under_resolved"
         else:
-            validation_status = (
-                "validated" if survived == nfieldlines else "fails_validation"
-            )
+            validation_status = "fails_validation"
     else:
         validation_status = "diagnostic_only"
 
