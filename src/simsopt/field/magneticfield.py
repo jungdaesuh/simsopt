@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 
 import simsoptpp as sopp
@@ -6,6 +8,91 @@ from .._core.json import GSONDecoder
 from .mgrid import MGrid
 
 __all__ = ['MagneticField', 'MagneticFieldSum', 'MagneticFieldMultiply']
+
+_BACKEND_ENV = "SIMSOPT_BACKEND"
+_BACKEND_LEGACY_ENV = "STAGE2_BACKEND"
+_MODE_ENV = "SIMSOPT_BACKEND_MODE"
+_STRICT_ENV = "SIMSOPT_BACKEND_STRICT"
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_value(name):
+    return os.environ.get(name, "").strip().lower()
+
+
+def _strict_backend_requires_native_callbacks():
+    if _env_value(_STRICT_ENV) not in _TRUTHY_ENV_VALUES:
+        return False
+    mode = _env_value(_MODE_ENV)
+    if mode.startswith("jax_"):
+        return True
+    return _env_value(_BACKEND_ENV) == "jax" or _env_value(_BACKEND_LEGACY_ENV) == "jax"
+
+
+def _has_native_magnetic_field_callbacks(field):
+    if isinstance(field, MagneticFieldMultiply):
+        return _has_native_magnetic_field_callbacks(field.Bfield)
+    if isinstance(field, MagneticFieldSum):
+        return len(field.Bfields) > 0 and all(
+            _has_native_magnetic_field_callbacks(child) for child in field.Bfields
+        )
+    return callable(getattr(field, "jax_B_at", None)) and callable(
+        getattr(field, "jax_B_dB_at", None)
+    )
+
+
+def _raise_if_cpu_only_child_in_strict_backend(component, fields):
+    fields = tuple(fields)
+    if fields and all(_has_native_magnetic_field_callbacks(field) for field in fields):
+        return True
+    if _strict_backend_requires_native_callbacks():
+        mode = os.environ.get(_MODE_ENV, "legacy-env")
+        raise RuntimeError(
+            f"{component} cannot use CPU-only magnetic field composition while "
+            f"simsopt backend mode {mode!r} has strict=True. Select a native "
+            "magnetic-field callback path or disable strict mode."
+        )
+    return False
+
+
+def _require_jax_magnetic_field_callbacks(fields, callback_name):
+    fields = tuple(fields)
+    if len(fields) == 0:
+        raise TypeError(
+            "JAX magnetic-field composition requires at least one child exposing "
+            f"`{callback_name}(point)`."
+        )
+
+    callbacks = []
+    for field in fields:
+        callback = getattr(field, callback_name, None)
+        if not callable(callback):
+            raise TypeError(
+                "JAX magnetic-field composition requires every child to expose "
+                f"`{callback_name}(point)`; got {type(field).__name__}."
+            )
+        callbacks.append(callback)
+    return tuple(callbacks)
+
+
+def _require_jax_magnetic_field_callback(field, callback_name):
+    return _require_jax_magnetic_field_callbacks((field,), callback_name)[0]
+
+
+def _sum_jax_magnetic_field_callbacks(callbacks, point):
+    total = callbacks[0](point)
+    for callback in callbacks[1:]:
+        total = total + callback(point)
+    return total
+
+
+def _sum_jax_magnetic_field_derivative_callbacks(callbacks, point):
+    B, dB_by_dX = callbacks[0](point)
+    for callback in callbacks[1:]:
+        child_B, child_dB_by_dX = callback(point)
+        B = B + child_B
+        dB_by_dX = dB_by_dX + child_dB_by_dX
+    return B, dB_by_dX
 
 
 class MagneticField(sopp.MagneticField, Optimizable):
@@ -191,12 +278,25 @@ class MagneticFieldMultiply(MagneticField):
     """
 
     def __init__(self, scalar, Bfield):
+        has_native_callbacks = _raise_if_cpu_only_child_in_strict_backend(
+            "MagneticFieldMultiply", [Bfield]
+        )
         MagneticField.__init__(self, depends_on=[Bfield])
+        self._simsopt_native_magnetic_field_callbacks = has_native_callbacks
         self.scalar = scalar
         self.Bfield = Bfield
 
     def _set_points_cb(self):
         self.Bfield.set_points_cart(self.get_points_cart_ref())
+
+    def jax_B_at(self, point):
+        callback = _require_jax_magnetic_field_callback(self.Bfield, "jax_B_at")
+        return self.scalar * callback(point)
+
+    def jax_B_dB_at(self, point):
+        callback = _require_jax_magnetic_field_callback(self.Bfield, "jax_B_dB_at")
+        B, dB_by_dX = callback(point)
+        return self.scalar * B, self.scalar * dB_by_dX
 
     def _B_impl(self, B):
         B[:] = self.scalar*self.Bfield.B()
@@ -240,12 +340,28 @@ class MagneticFieldSum(MagneticField):
     """
 
     def __init__(self, Bfields):
+        has_native_callbacks = _raise_if_cpu_only_child_in_strict_backend(
+            "MagneticFieldSum", Bfields
+        )
         MagneticField.__init__(self, depends_on=Bfields)
+        self._simsopt_native_magnetic_field_callbacks = has_native_callbacks
         self.Bfields = Bfields
 
     def _set_points_cb(self):
         for bf in self.Bfields:
             bf.set_points_cart(self.get_points_cart_ref())
+
+    def jax_B_at(self, point):
+        callbacks = _require_jax_magnetic_field_callbacks(
+            self.Bfields, "jax_B_at"
+        )
+        return _sum_jax_magnetic_field_callbacks(callbacks, point)
+
+    def jax_B_dB_at(self, point):
+        callbacks = _require_jax_magnetic_field_callbacks(
+            self.Bfields, "jax_B_dB_at"
+        )
+        return _sum_jax_magnetic_field_derivative_callbacks(callbacks, point)
 
     def _B_impl(self, B):
         B[:] = np.sum([bf.B() for bf in self.Bfields], axis=0)

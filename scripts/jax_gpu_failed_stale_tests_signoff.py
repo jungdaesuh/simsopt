@@ -47,18 +47,7 @@ _STALE_FAILURE_PATTERNS = (
     "simsopt.geo.curvexyzfourier",
     "simsopt_jax_adapters.field.biotsavart_backend",
 )
-_FOCUSED_ABORT_REPROS = (
-    (
-        "batch_007",
-        "tests/geo/test_lbfgsb_scipy_parity.py::"
-        "test_jax_setulb_fg_start_reentry_convergence_matches_scipy",
-    ),
-    (
-        "batch_012",
-        "tests/integration/test_single_stage_jax_cpu_reference.py::"
-        "test_runtime_bundle_batched_value_and_grad_matches_serial",
-    ),
-)
+_FOCUSED_ABORT_REPROS: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

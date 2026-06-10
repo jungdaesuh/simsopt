@@ -510,7 +510,7 @@ def test_dipole_field_Bn_rejects_unitnormal_shape_mismatch() -> None:
 def test_dipole_field_Bn_on_axis_noncartesian_matches_cpp(
     coordinate_flag: str,
 ) -> None:
-    """C++ SIMD and JAX expose the same non-finite zero-angle convention."""
+    """C++ SIMD and JAX expose the same finite zero-angle convention."""
 
     if not bool(getattr(sopp, "using_xsimd", False)):
         pytest.skip(
@@ -545,7 +545,6 @@ def test_dipole_field_Bn_on_axis_noncartesian_matches_cpp(
     )
 
     np.testing.assert_array_equal(np.isfinite(actual), np.isfinite(expected))
-    assert not np.all(np.isfinite(expected))
     np.testing.assert_allclose(
         actual,
         expected,

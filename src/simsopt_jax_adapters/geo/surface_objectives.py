@@ -103,6 +103,7 @@ from simsopt_jax.core.surface_rzfourier import (
 from simsopt.geo.curve import incremental_arclength_pure, kappa_pure
 from simsopt_jax.geo._pairwise_reductions import (
     _resolve_pairwise_penalty_chunk_size,
+    pairwise_min_distance_pure,
     pairwise_selected_smoothmin_distance_batched_pure,
     pairwise_selected_smoothmin_distance_pure,
     pairwise_thresholded_mean_square_distance_pure,
@@ -187,6 +188,7 @@ __all__ = [
     "NonQuasiSymmetricRatioJAX",
     "PrincipalCurvatureJAX",
     "QfmResidualJAX",
+    "SurfaceSurfaceDistance",
     "VolumeJAX",
     "coil_dofs_gradient_to_derivative",
     "compute_standard_surface_objective_gradients",
@@ -228,6 +230,69 @@ _MISSING_STREAMING_GROUP_VJP_ERROR = (
     "BoozerSurfaceJAX objective wrappers require a streaming grouped-adjoint "
     "callback; the legacy full-pytree adjoint fallback is no longer supported."
 )
+
+
+class SurfaceSurfaceDistance(Optimizable):
+    """JAX-backed thresholded distance penalty between two sampled surfaces."""
+
+    def __init__(self, surf1, surf2, minimum_distance, *, chunk_size=None):
+        self.surf1 = surf1
+        self.surf2 = surf2
+        self.minimum_distance = float(minimum_distance)
+        self.chunk_size = (
+            None
+            if chunk_size is None
+            else _resolve_pairwise_penalty_chunk_size(chunk_size)
+        )
+        self._value_and_grad = jax.jit(
+            jax.value_and_grad(
+                lambda gamma1, gamma2: pairwise_thresholded_mean_square_distance_pure(
+                    gamma1,
+                    gamma2,
+                    self.minimum_distance,
+                    chunk_size=self.chunk_size,
+                ),
+                argnums=(0, 1),
+            )
+        )
+        self._shortest_distance = jax.jit(
+            lambda gamma1, gamma2: pairwise_min_distance_pure(
+                gamma1,
+                gamma2,
+                chunk_size=self.chunk_size,
+            )
+        )
+        super().__init__(depends_on=[surf1, surf2])
+
+    def _surface_gammas(self):
+        return (
+            jnp.asarray(self.surf1.gamma(), dtype=jnp.float64),
+            jnp.asarray(self.surf2.gamma(), dtype=jnp.float64),
+        )
+
+    def J(self):
+        gamma1, gamma2 = self._surface_gammas()
+        value, _gradients = self._value_and_grad(gamma1, gamma2)
+        return _host_scalar(value)
+
+    def shortest_distance(self):
+        gamma1, gamma2 = self._surface_gammas()
+        return _host_scalar(self._shortest_distance(gamma1, gamma2))
+
+    @derivative_dec
+    def dJ(self):
+        gamma1, gamma2 = self._surface_gammas()
+        _value, (grad1, grad2) = self._value_and_grad(gamma1, gamma2)
+        return Derivative(
+            {
+                self.surf1: self.surf1.dgamma_by_dcoeff_vjp(
+                    _host_array(grad1, dtype=np.float64)
+                ),
+                self.surf2: self.surf2.dgamma_by_dcoeff_vjp(
+                    _host_array(grad2, dtype=np.float64)
+                ),
+            }
+        )
 
 _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "optimizer_backend",

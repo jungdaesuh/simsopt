@@ -126,12 +126,13 @@ from simsopt.geo.curve import kappa_pure
 from simsopt.geo.curveobjectives import (
     CurveCurveDistance,
     CurveSurfaceDistance,
-    pairwise_min_distance_pure,
 )
+from simsopt_jax.geo._pairwise_reductions import pairwise_min_distance_pure
 from simsopt_jax_adapters.geo.surface_objectives import (
     BoozerResidualJAX,
     IotasJAX,
     NonQuasiSymmetricRatioJAX,
+    SurfaceSurfaceDistance,
     coil_dofs_gradient_to_derivative,
     compute_standard_surface_objective_gradients,
     diagnose_traceable_objective_runtime,
@@ -167,7 +168,6 @@ from simsopt.geo.surfaceobjectives import (
     BoozerResidual,
     Iotas,
     NonQuasiSymmetricRatio,
-    SurfaceSurfaceDistance,
     Volume,
     boozer_surface_residual,
     boozer_surface_residual_dB,

@@ -2779,9 +2779,19 @@ def projection_l2_balls(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
     norm_sq = jnp.sum(m * m, axis=1)
     norm = _row_norm_without_zero_sqrt_gradient(norm_sq)
     unit = m_maxima**0
-    radius_ratio = norm / m_maxima
+    zero = unit - unit
+    finite_radius = jnp.isfinite(m_maxima)
+    positive_radius = finite_radius & (m_maxima > zero)
+    safe_radius = jnp.where(positive_radius, m_maxima, unit)
+    radius_ratio = norm / safe_radius
     denom = jnp.maximum(unit, radius_ratio)
-    return m / denom[:, None]
+    projected = m / denom[:, None]
+    zero_rows = jnp.broadcast_to(zero[:, None], m.shape)
+    return jnp.where(
+        (finite_radius & (m_maxima <= zero))[:, None],
+        zero_rows,
+        projected,
+    )
 
 
 def _on_ball(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
