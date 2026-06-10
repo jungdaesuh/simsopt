@@ -9,6 +9,9 @@ from import_smoke_cases import (
     block_private_optimizer_imports,
     prefer_local_simsopt_source_tree,
 )
+from simsopt_jax.geo.optimizers.single_stage_routing import (
+    resolve_single_stage_jax_boozer_optimizer_backend,
+)
 
 
 def _exception_payload(exc: ValueError | ImportError) -> dict[str, str]:
@@ -38,11 +41,7 @@ def main() -> int:
 
     try:
         if args.optimizer_backend == "scipy":
-            from examples.single_stage_optimization.SINGLE_STAGE import (
-                single_stage_banana_example,
-            )
-
-            single_stage_banana_example.resolve_boozer_optimizer_backend(
+            resolve_single_stage_jax_boozer_optimizer_backend(
                 "jax",
                 args.optimizer_backend,
                 None,

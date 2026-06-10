@@ -11,6 +11,13 @@ import simsopt_jax.geo.optimizers.private._bfgs as _private_bfgs
 import simsopt_jax.geo.optimizers.private._common as _opt_common
 import simsopt_jax.geo.optimizers.private._lbfgs as _private_lbfgs
 import simsopt_jax.geo.optimizer_host_lbfgs as _host_lbfgs
+from simsopt_jax.geo.optimizers.private import (
+    _BFGSResults,
+    _LineSearchResults,
+    _line_search,
+    _line_search_module,
+    _line_search_value_and_grad,
+)
 from conftest import enable_non_strict_jax_backend
 from jax.flatten_util import ravel_pytree
 from scipy import optimize
@@ -175,16 +182,16 @@ def test_optimizer_dtype_uses_dtype_attr_without_eager_hostification(monkeypatch
     class HasDtypeOnly:
         dtype = np.dtype(np.float64)
 
-    original_asarray = _opt.np.asarray
+    original_asarray = _opt_common.np.asarray
 
     def guarded_asarray(value, *args, **kwargs):
         if isinstance(value, HasDtypeOnly):
             raise AssertionError("np.asarray should not run when dtype attr exists")
         return original_asarray(value, *args, **kwargs)
 
-    monkeypatch.setattr(_opt.np, "asarray", guarded_asarray)
+    monkeypatch.setattr(_opt_common.np, "asarray", guarded_asarray)
 
-    assert _opt._optimizer_dtype(HasDtypeOnly()) == np.dtype(np.float64)
+    assert _opt_common._optimizer_dtype(HasDtypeOnly()) == np.dtype(np.float64)
 
 
 def test_prepare_optimizer_pytree_adapter_uses_leaf_metadata_without_hostification(
@@ -298,7 +305,7 @@ def test_line_search_value_and_grad_uses_explicit_initial_step_size():
 
     xk = jnp.asarray([1.0], dtype=jnp.float64)
     pk = jnp.asarray([-1.0], dtype=jnp.float64)
-    result = _opt._line_search_value_and_grad(
+    result = _line_search_value_and_grad(
         quad,
         xk,
         pk,
@@ -317,7 +324,7 @@ def test_line_search_value_and_grad_skips_zero_step_reevaluation_with_explicit_s
 
     xk = jnp.asarray([1.0], dtype=jnp.float64)
     pk = jnp.asarray([-1.0], dtype=jnp.float64)
-    result = _opt._line_search_value_and_grad(
+    result = _line_search_value_and_grad(
         quad,
         xk,
         pk,
@@ -336,7 +343,7 @@ def test_line_search_value_and_grad_accepts_finite_decrease_when_armijo_misses()
     def armijo_miss_objective(x):
         return jnp.asarray(0.99999, dtype=x.dtype), jnp.asarray([-0.5], dtype=x.dtype)
 
-    result = _opt._line_search_value_and_grad(
+    result = _line_search_value_and_grad(
         armijo_miss_objective,
         jnp.asarray([0.0], dtype=jnp.float64),
         jnp.asarray([1.0], dtype=jnp.float64),
@@ -360,7 +367,7 @@ def test_line_search_value_and_grad_shrinks_past_nonfinite_trial_gradient():
         grad = jnp.where(a >= 1.0e-6, jnp.nan, -1.0 + 2.0 * a)
         return value, jnp.asarray([grad], dtype=x.dtype)
 
-    result = _opt._line_search_value_and_grad(
+    result = _line_search_value_and_grad(
         objective_with_invalid_gradient_region,
         jnp.asarray([0.0], dtype=jnp.float64),
         jnp.asarray([1.0], dtype=jnp.float64),
@@ -578,15 +585,6 @@ def test_minimize_lbfgs_host_core_rejects_oversized_trace_budget():
 
 
 def test_zoom_reuses_cached_bracketing_sample_without_extra_eval(monkeypatch):
-    # Access the submodule for monkeypatching, then restore the function
-    # reference that __init__.py exports so _opt._line_search stays callable
-    # for subsequent tests.
-    import simsopt_jax.geo.optimizers.private as _private_pkg
-    import simsopt_jax.geo.optimizers.private._line_search as line_search_module
-
-    _line_search_fn = _private_pkg._line_search  # save function reference
-    _private_pkg._line_search = _line_search_fn  # restore clobbered binding
-
     def _reuse_cached_cubic(_a, _fa, _fpa, _b, _fb, c, _fc):
         return c
 
@@ -597,8 +595,8 @@ def test_zoom_reuses_cached_bracketing_sample_without_extra_eval(monkeypatch):
             jnp.asarray([4.0], dtype=jnp.float64),
         )
 
-    monkeypatch.setattr(line_search_module, "_cubicmin", _reuse_cached_cubic)
-    zoom = line_search_module._zoom(
+    monkeypatch.setattr(_line_search_module, "_cubicmin", _reuse_cached_cubic)
+    zoom = _line_search_module._zoom(
         _fresh_eval,
         lambda _alpha, _phi: jnp.asarray(False),
         lambda _dphi: jnp.asarray(True),
@@ -887,7 +885,7 @@ class TestOptimizerAdapterPrivate:
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
-        result = _opt._line_search(
+        result = _line_search(
             quad,
             jnp.array([1.0], dtype=jnp.float64),
             jnp.array([-1.95], dtype=jnp.float64),
@@ -908,7 +906,7 @@ class TestOptimizerAdapterPrivate:
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
-        result = _opt._line_search(
+        result = _line_search(
             quad,
             jnp.array([1.0], dtype=jnp.float64),
             jnp.array([-1.95], dtype=jnp.float64),
@@ -930,7 +928,7 @@ class TestOptimizerAdapterPrivate:
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
-        result = _opt._line_search(
+        result = _line_search(
             quad,
             jnp.array([2], dtype=jnp.int32),
             jnp.array([-1], dtype=jnp.int32),
@@ -970,9 +968,6 @@ class TestOptimizerAdapterPrivate:
         monkeypatch,
     ):
         """A non-finite line-search proposal must keep the last finite iterate."""
-        from simsopt_jax.geo.optimizers.private import _LineSearchResults
-        from simsopt_jax.geo.optimizers.private import _bfgs as _bfgs_module
-
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
 
         def quad(x):
@@ -991,9 +986,9 @@ class TestOptimizerAdapterPrivate:
                 status=jnp.array(7),
             )
 
-        monkeypatch.setattr(_bfgs_module, "_line_search", fake_line_search)
+        monkeypatch.setattr(_private_bfgs, "_line_search", fake_line_search)
 
-        state = _bfgs_module._minimize_bfgs_private(
+        state = _private_bfgs._minimize_bfgs_private(
             quad,
             x0,
             maxiter=5,
@@ -1013,9 +1008,6 @@ class TestOptimizerAdapterPrivate:
         monkeypatch,
     ):
         """Post-loop gradient refresh must not turn a failed iterate into success."""
-        from simsopt_jax.geo.optimizers.private import _LineSearchResults
-        from simsopt_jax.geo.optimizers.private import _bfgs as _bfgs_module
-
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
@@ -1032,9 +1024,9 @@ class TestOptimizerAdapterPrivate:
                 status=jnp.array(7),
             )
 
-        monkeypatch.setattr(_bfgs_module, "_line_search", fake_line_search)
+        monkeypatch.setattr(_private_bfgs, "_line_search", fake_line_search)
 
-        initial_state = _opt._BFGSResults(
+        initial_state = _BFGSResults(
             converged=jnp.array(False),
             failed=jnp.array(False),
             k=jnp.array(0, dtype=jnp.int32),
@@ -1050,7 +1042,7 @@ class TestOptimizerAdapterPrivate:
             line_search_status=jnp.array(0, dtype=jnp.int32),
         )
 
-        state = _bfgs_module._minimize_bfgs_private(
+        state = _private_bfgs._minimize_bfgs_private(
             quad,
             jnp.array([0.0], dtype=jnp.float64),
             maxiter=5,
@@ -1704,8 +1696,6 @@ class TestLBFGSMethodPrivate:
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_does_not_call_custom_host_core(self, monkeypatch):
         """lbfgs-ondevice must run the SciPy-compatible JAX state machine."""
-        import simsopt_jax.geo.optimizers.private._lbfgs as _lbfgs_module
-
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
@@ -1713,7 +1703,7 @@ class TestLBFGSMethodPrivate:
             raise AssertionError("lbfgs-ondevice called minimize_lbfgs_host_core")
 
         monkeypatch.setattr(
-            _lbfgs_module,
+            _private_lbfgs,
             "minimize_lbfgs_host_core",
             reject_host_core,
             raising=False,

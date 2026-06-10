@@ -7,6 +7,7 @@ upstream JAX optimizer sources.
 The public API is in ``simsopt_jax.geo.optimizers.optimizer``.
 """
 
+from . import _line_search as _line_search_module
 from ._types import (
     _BFGSResults,
     _LBFGSInvalidStepLog,

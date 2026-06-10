@@ -1871,7 +1871,7 @@ class TestOptimizerAdapter:
         def fake_require_target_backend_x64(optimizer_backend):
             captured["x64_backend"] = optimizer_backend
 
-        def fake_public_minimize(value_and_grad, x0, *, driver, options, callback):
+        def fake_optax_minimize(value_and_grad, x0, *, driver, options, callback):
             value, grad = value_and_grad(x0)
             captured["driver"] = driver
             captured["options"] = options
@@ -1892,14 +1892,34 @@ class TestOptimizerAdapter:
                 optimistix_result_message=None,
             )
 
-        import simsopt_jax.solve.dispatch as public_jax_dispatch
+        def fake_optimistix_minimize(value_and_grad, x0, *, options, callback):
+            value, grad = value_and_grad(x0)
+            captured["driver"] = _opt.Driver.OPTIMISTIX_LBFGS
+            captured["options"] = options
+            captured["callback"] = callback
+            return types.SimpleNamespace(
+                x=np.asarray(x0, dtype=float),
+                fun=float(np.asarray(value)),
+                jac=np.asarray(grad, dtype=float),
+                nit=0,
+                nfev=1,
+                njev=1,
+                status=0,
+                success=True,
+                message="ok",
+                driver=_opt.Driver.OPTIMISTIX_LBFGS,
+                options_used=options,
+                optimistix_result=None,
+                optimistix_result_message=None,
+            )
 
         monkeypatch.setattr(
             _opt,
             "require_target_backend_x64",
             fake_require_target_backend_x64,
         )
-        monkeypatch.setattr(public_jax_dispatch, "minimize", fake_public_minimize)
+        monkeypatch.setattr(_opt, "run_optax_minimize", fake_optax_minimize)
+        monkeypatch.setattr(_opt, "run_optimistix_minimize", fake_optimistix_minimize)
 
         def value_and_grad(x):
             return jnp.sum((x - 1.0) ** 2), 2.0 * (x - 1.0)
