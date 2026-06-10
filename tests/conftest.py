@@ -566,6 +566,8 @@ _NATIVE_CPU_REFERENCE_NODE_PREFIXES = frozenset(
         "geo/test_boozersurface_jax.py::TestMixedQuadratureBoozer::test_penalty_matches_uniform",
         "integration/test_single_stage_jax_cpu_reference.py::TestBoozerResidualCPUParity::",
         "integration/test_single_stage_jax_cpu_reference.py::TestAdjointSolveConsistency::",
+        "integration/test_single_stage_jax_cpu_reference.py::TestCompositeObjective::test_batched_standard_wrapper_gradients_match_separate_wrapper_computes",
+        "integration/test_single_stage_jax_cpu_reference.py::TestCompositeObjective::test_native_wrapper_gradients_match_public_derivative_boundary",
     }
 )
 
