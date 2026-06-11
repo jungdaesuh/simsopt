@@ -2765,10 +2765,11 @@ def gpmo_backtracking_solve(
 def projection_l2_balls(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
     """Project each row of ``m`` onto the L2 ball with radius ``m_maxima``.
 
-    Mirrors ``projection_L2_balls`` in ``permanent_magnet_optimization.cpp:12``.
-    ``denom = max(1, ||m_i|| / m_maxima_i)`` so vectors already inside the
-    ball pass through unchanged. Finite non-positive radii are treated as the
-    zero ball, keeping zero-radius rows and their JAX derivatives finite.
+    Matches the Python CPU wrapper for public parity. Positive zero radii project
+    nonzero rows to the zero ball while keeping their JAX derivatives finite;
+    zero-radius zero rows preserve the CPU wrapper's ``0 / 0`` NaN result.
+    Finite negative radii and infinities pass through; NaN radii propagate a NaN
+    row.
 
     Parameters
     ----------
@@ -2782,16 +2783,35 @@ def projection_l2_balls(m: jax.Array, m_maxima: jax.Array) -> jax.Array:
     unit = m_maxima**0
     zero = unit - unit
     finite_radius = jnp.isfinite(m_maxima)
+    nan_radius = jnp.isnan(m_maxima)
     positive_radius = finite_radius & (m_maxima > zero)
+    zero_radius = finite_radius & (m_maxima == zero)
+    zero_norm = norm_sq == zero
+    zero_radius_zero_norm = zero_radius & zero_norm
+    positive_zero_radius = zero_radius & ~jnp.signbit(m_maxima)
+    positive_zero_nonzero_radius = positive_zero_radius & ~zero_norm
     safe_radius = jnp.where(positive_radius, m_maxima, unit)
     radius_ratio = norm / safe_radius
     denom = jnp.maximum(unit, radius_ratio)
     projected = m / denom[:, None]
     zero_rows = jnp.broadcast_to(zero[:, None], m.shape)
+    nan_rows = jnp.broadcast_to((zero / zero)[:, None], m.shape)
     return jnp.where(
-        (finite_radius & (m_maxima <= zero))[:, None],
-        zero_rows,
-        projected,
+        nan_radius[:, None],
+        nan_rows,
+        jnp.where(
+            zero_radius_zero_norm[:, None],
+            nan_rows,
+            jnp.where(
+                positive_zero_nonzero_radius[:, None],
+                zero_rows,
+                jnp.where(
+                    (~positive_radius)[:, None],
+                    m,
+                    projected,
+                ),
+            ),
+        ),
     )
 
 

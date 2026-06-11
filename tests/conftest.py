@@ -568,6 +568,10 @@ _NATIVE_CPU_REFERENCE_NODE_PREFIXES = frozenset(
         "integration/test_single_stage_jax_cpu_reference.py::TestAdjointSolveConsistency::",
         "integration/test_single_stage_jax_cpu_reference.py::TestCompositeObjective::test_batched_standard_wrapper_gradients_match_separate_wrapper_computes",
         "integration/test_single_stage_jax_cpu_reference.py::TestCompositeObjective::test_native_wrapper_gradients_match_public_derivative_boundary",
+        "integration/test_single_stage_jax_cpu_reference.py::TestCompositeGradientPipeline::test_composite_gradient_composes_component_gradients_and_descends",
+        "integration/test_single_stage_jax_cpu_reference.py::TestScriptBackendSelection::test_real_fixture_cpu_warm_start_overrides_do_not_crash",
+        "integration/test_single_stage_jax_cpu_reference.py::TestRunCodeLSParity::test_ls_solve_parity_production_scale",
+        "integration/test_single_stage_jax_cpu_reference.py::TestRunCodeLSParity::test_ls_solve_state_parity_production_scale",
     }
 )
 

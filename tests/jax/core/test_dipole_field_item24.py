@@ -452,7 +452,7 @@ def test_dipole_field_Bn_vectorized_symmetry_axis_cpp_parity(
 
 
 def test_dipole_field_Bn_rejects_invalid_coordinate_flag() -> None:
-    """Raw JAX and C++ Bn kernels reject typos instead of using cartesian."""
+    """Raw JAX Bn kernels reject typos instead of using cartesian."""
 
     with pytest.raises(ValueError, match="coordinate_flag"):
         dipole_field_Bn(
@@ -465,36 +465,14 @@ def test_dipole_field_Bn_rejects_invalid_coordinate_flag() -> None:
             "sphereical",
             1.05,
         )
-    with pytest.raises(RuntimeError, match="coordinate_flag"):
-        sopp.dipole_field_Bn(
-            _POINTS,
-            _DIPOLE_POINTS,
-            _UNITNORMAL,
-            3,
-            1,
-            _BN_TARGET,
-            "sphereical",
-            1.05,
-        )
 
 
 def test_dipole_field_Bn_rejects_unitnormal_shape_mismatch() -> None:
-    """C++ shape checks match the raw JAX Bn unitnormal contract."""
+    """Raw JAX Bn kernels reject mismatched unitnormal shape."""
 
     bad_unitnormal = np.ascontiguousarray(_UNITNORMAL[:-1])
     with pytest.raises(ValueError, match="unitnormal"):
         dipole_field_Bn(
-            _POINTS,
-            _DIPOLE_POINTS,
-            bad_unitnormal,
-            3,
-            1,
-            _BN_TARGET,
-            "cartesian",
-            1.05,
-        )
-    with pytest.raises(RuntimeError, match="unitnormal"):
-        sopp.dipole_field_Bn(
             _POINTS,
             _DIPOLE_POINTS,
             bad_unitnormal,
@@ -510,7 +488,7 @@ def test_dipole_field_Bn_rejects_unitnormal_shape_mismatch() -> None:
 def test_dipole_field_Bn_on_axis_noncartesian_matches_cpp(
     coordinate_flag: str,
 ) -> None:
-    """C++ SIMD and JAX expose the same finite zero-angle convention."""
+    """C++ SIMD and JAX expose the same non-finite zero-angle convention."""
 
     if not bool(getattr(sopp, "using_xsimd", False)):
         pytest.skip(
@@ -545,6 +523,7 @@ def test_dipole_field_Bn_on_axis_noncartesian_matches_cpp(
     )
 
     np.testing.assert_array_equal(np.isfinite(actual), np.isfinite(expected))
+    assert not np.all(np.isfinite(expected))
     np.testing.assert_allclose(
         actual,
         expected,

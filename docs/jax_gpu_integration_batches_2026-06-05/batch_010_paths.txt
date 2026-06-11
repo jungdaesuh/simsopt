@@ -2,7 +2,6 @@ tests/geo/test_surface_fourier_jax_cpu_ordered.py
 tests/geo/test_surface_garabedian_jax.py
 tests/geo/test_surface_henneberg_jax.py
 tests/geo/test_surface_objectives_jax.py
-tests/geo/test_surface_quadrature_grid_rejection.py
 tests/geo/test_surface_rzfourier_jax.py
 tests/geo/test_surface_rzfourier_jax_item06_closeout.py
 tests/geo/test_surface_rzfourier_transfer_guard_jax.py

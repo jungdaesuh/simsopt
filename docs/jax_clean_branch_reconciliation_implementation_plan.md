@@ -40,17 +40,21 @@ recovering validated work.
 - Current clean worktree:
   `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean`.
 - Current clean branch:
-  `pr/jax-port-clean` at `56d85b14a`, ahead 10 of `upstream_hss/master`.
-- Current clean branch has dirty tracked files:
+  `pr/jax-port-clean` at `a4b4a583e`, ahead 11 of `upstream_hss/master`.
+- Current clean branch has dirty signoff/benchmark-slice files including:
+  `docs/jax_gpu_integration_test_paths_2026-06-05.txt`,
+  `docs/jax_gpu_integration_batches_2026-06-05/`,
   `scripts/jax_gpu_failed_stale_tests_signoff.py`,
+  `docs/jax_clean_branch_reconciliation_commit_classification_2026-06-11.md`,
+  `src/simsopt_jax/core/dipole_field.py`,
   `src/simsopt_jax/core/pm_optimization.py`,
   `src/simsopt_jax/core/surface_fourier_kernels.py`,
   `src/simsopt_jax/solve/permanent_magnet.py`,
   `tests/conftest.py`,
+  `tests/jax/core/test_dipole_field_item24.py`,
   `tests/jax/core/test_pm_optimization_jax_item25.py`,
-  `tests/subprocess/jax_runtime_cases.py`,
-  `tests/test_gpu_transfer_guard_harness.py`, and
-  `tests/test_jax_import_smoke.py`.
+  `tests/solve/test_permanent_magnet_optimization_jax_item28.py`,
+  and `tests/test_gpu_transfer_guard_harness.py`.
 - Current donor worktree:
   `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-pure`.
 - Current donor branch:
@@ -79,16 +83,22 @@ recovering validated work.
   `ModuleNotFoundError: No module named 'simsoptpp'`. Final benchmark validation
   therefore requires a built clean-source environment, not just the source
   files.
-- `python scripts/jax_gpu_failed_stale_tests_signoff.py --dry-run --repo .
-  --python-bin $(command -v python) --results-dir /tmp/clean-signoff-dry-run`
-  currently fails closed on inventory drift: one focused abort repro selector is
-  missing and 34 integration inventory paths are missing. The generated dry-run
-  summary at `/tmp/clean-signoff-dry-run/summary.json` still records zero
-  current failed selectors and zero stale-failure hits for the paths that remain
-  present.
+- The stale CUDA signoff inventory has been refreshed against the clean
+  worktree. A default fail-closed dry-run at
+  `/tmp/clean-signoff-dry-run-after-final-review-pass/summary.json` requests
+  130 integration paths, records 130 present paths and 0 missing paths, reports
+  no missing focused selector paths, preserves 8 focused-selector deselectors,
+  and records zero current failed selectors, zero new failed selectors, and zero
+  stale-failure hits. This is still dry-run evidence only; final CUDA signoff
+  must run on a clean-source CUDA host.
 - Recent RunPod and Perlmutter jobs launched from the mistaken source snapshot
   are diagnostic only for the clean branch until rerun from clean or proven
   source-identical.
+- Pure-only commit and donor-dirty-patch classification is recorded in
+  `docs/jax_clean_branch_reconciliation_commit_classification_2026-06-11.md`.
+  That note also records that donor commit `d698d26bc` is rejected for this clean
+  source state because its dipole axis-basis convention fails the live native
+  oracle in both clean and pure.
 
 ## Diagnostic Run Inventory
 
@@ -192,25 +202,25 @@ actually produced it.
 ## Implementation Plan
 
 1. Freeze the source-of-truth boundary.
-   - [ ] Run `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean status --short --branch`.
-   - [ ] Run `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-pure status --short --branch`.
-   - [ ] Record the clean HEAD, pure HEAD, and dirty file lists in a local
+   - [x] Run `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean status --short --branch`.
+   - [x] Run `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-pure status --short --branch`.
+   - [x] Record the clean HEAD, pure HEAD, and dirty file lists in a local
          reconciliation note or commit message before making code changes.
-   - [ ] Treat all future local code/doc edits as clean-worktree edits unless
+   - [x] Treat all future local code/doc edits as clean-worktree edits unless
          the user explicitly redirects to another worktree.
 
 2. Classify pure-only commits against the clean PR boundary.
-   - [ ] Generate the pure-only list with
+   - [x] Generate the pure-only list with
          `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean log --oneline --reverse --no-merges pr/jax-port-clean..pr/jax-port-pure`.
-   - [ ] Group pure-only commits into: clean-required, doc-only useful,
+   - [x] Group pure-only commits into: clean-required, doc-only useful,
          diagnostic-only, superseded-by-clean, and out-of-scope.
-   - [ ] For each clean-required commit, identify the exact files and behaviors
+   - [x] For each clean-required commit, identify the exact files and behaviors
          to port; do not rely on subject-line similarity.
-   - [ ] For each superseded commit, cite the clean commit or dirty clean file
+   - [x] For each superseded commit, cite the clean commit or dirty clean file
          that already covers the behavior.
-   - [ ] For each out-of-scope commit, confirm it would violate the clean audit
+   - [x] For each out-of-scope commit, confirm it would violate the clean audit
          boundary before leaving it behind.
-   - [ ] Do not cherry-pick a commit merely because `git cherry -v` marks it
+   - [x] Do not cherry-pick a commit merely because `git cherry -v` marks it
          patch-unique; inspect the hunk-level behavior against clean's existing
          replacement commits and dirty files.
 
@@ -224,12 +234,18 @@ actually produced it.
          `docs/jax_stage2_single_stage_artifacts_2026-06-08.md` only after
          verifying that each referenced artifact path still exists and that the
          Stage 2 versus single-stage/BoozerSurface file contracts are preserved.
-   - [ ] Refresh the stale CUDA signoff inventory before final signoff:
+   - [x] Refresh the stale CUDA signoff inventory before final signoff:
          either remove/rewrite missing selectors and paths in
          `docs/jax_gpu_failed_selectors_2026-06-05.txt`,
          `docs/jax_gpu_integration_test_paths_2026-06-05.txt`, and
          `docs/jax_gpu_integration_batches_2026-06-05/`, or explicitly classify
          them as out-of-scope in this plan.
+        2026-06-11 refresh: removed 34 integration paths that are absent from
+        both clean and pure, and removed the stale focused repro selector
+        `tests/geo/test_lbfgsb_scipy_parity.py::test_jax_setulb_fg_start_reentry_convergence_matches_scipy`,
+        whose file is absent from both clean and pure. The default dry-run now
+        records zero missing inventory paths and zero missing focused selector
+        paths.
    - [ ] Use `--missing-path-policy=record` only as an inventory-audit aid; do
          not treat a final signoff as green until the default fail-closed dry
          run succeeds.
@@ -252,24 +268,31 @@ actually produced it.
          copied and no further diagnostic work is needed.
 
 5. Port clean-required code and tests in small slices.
-   - [ ] Start from current clean dirty files and classify whether each belongs
+   - [x] Start from current clean dirty files and classify whether each belongs
          to the current signoff/benchmark slice.
-   - [ ] For overlapping dirty files between clean and pure, compare actual
+   - [x] For overlapping dirty files between clean and pure, compare actual
          patches before copying any hunk:
          `scripts/jax_gpu_failed_stale_tests_signoff.py`,
          `src/simsopt_jax/core/pm_optimization.py`,
          `src/simsopt_jax/core/surface_fourier_kernels.py`,
          `tests/jax/core/test_pm_optimization_jax_item25.py`, and
          `tests/test_gpu_transfer_guard_harness.py`.
-   - [ ] For pure-only dirty files, decide whether they fit clean:
+   - [x] For pure-only dirty files, decide whether they fit clean:
          `docs/jax_stage2_single_stage_artifacts_2026-06-08.md`,
          `src/simsopt/field/sampling.py`,
          `src/simsopt/field/tracing.py`, and
          `src/simsopt_jax_adapters/geo/surface_objectives.py`.
-   - [ ] Port one behavior family at a time using patch-level application or
+   - [x] Port one behavior family at a time using patch-level application or
          hand edits in the clean worktree.
-   - [ ] After each slice, run `git diff --check` and the focused tests that
+        2026-06-11 code/test slice: ported or clean-adapted the strict transfer
+        guard signoff lane, PM projection parity, surface Fourier split, and
+        dipole SIMD oracle behaviors. Donor dipole commit `d698d26bc` and the
+        donor weighted surface split patch were explicitly rejected after live
+        oracle/reviewer evidence contradicted them.
+   - [x] After each slice, run `git diff --check` and the focused tests that
          exercise the changed behavior.
+        Current evidence is recorded below; final CUDA and benchmark reruns are
+        still open.
 
 6. Rebuild clean-source benchmark artifacts.
    - [ ] Create a clean-source tarball or remote checkout from
@@ -302,13 +325,33 @@ actually produced it.
 
 ## Validation Plan
 
-- [ ] `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean status --short --branch`
-- [ ] `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean diff --check`
-- [ ] `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean log --oneline --reverse --no-merges pr/jax-port-clean..pr/jax-port-pure`
-- [ ] `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean cherry -v pr/jax-port-clean pr/jax-port-pure`
-- [ ] `python scripts/jax_gpu_failed_stale_tests_signoff.py --dry-run --repo . --python-bin $(command -v python) --results-dir /tmp/clean-signoff-dry-run` succeeds with the default fail-closed missing-path policy.
-- [ ] Focused tests for each ported slice, chosen from the files touched by
+- [x] `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean status --short --branch`
+- [x] `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean diff --check`
+- [x] `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean log --oneline --reverse --no-merges pr/jax-port-clean..pr/jax-port-pure`
+- [x] `git -C /Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean cherry -v pr/jax-port-clean pr/jax-port-pure`
+- [x] `python scripts/jax_gpu_failed_stale_tests_signoff.py --dry-run --repo . --python-bin $(command -v python) --results-dir /tmp/clean-signoff-dry-run` succeeds with the default fail-closed missing-path policy.
+      2026-06-11 evidence used
+      `../simsopt-jax/.miniforge/bin/python3.13` and
+      `/tmp/clean-signoff-dry-run-after-final-review-pass`; the summary records
+      130 requested/present integration paths, 0 missing paths, 8 focused
+      deselectors, 0 current/new/stale failures, and `failures: []`.
+- [x] Focused tests for each ported slice, chosen from the files touched by
       that slice.
+      2026-06-11 evidence: `ruff check` on touched Python passed;
+      `tests/test_gpu_transfer_guard_harness.py -q` passed `17 passed`;
+      `tests/jax/core/test_dipole_field_item24.py -q` passed
+      `23 passed, 1 warning`;
+      `tests/jax/core/test_pm_optimization_jax_item25.py::TestPMKernelHelpers -q`
+      passed `15 passed`;
+      `tests/solve/test_permanent_magnet_optimization_jax_item28.py -q` passed
+      `48 passed, 9 warnings`;
+      `tests/geo/test_surface_fourier_jax.py::test_split_flat_to_xyzc_keeps_nan_blocks_isolated -q`
+      passed `1 passed`.
+- [x] Crucible reviewer loop reaches strict `PASS` for the current code/test
+      slice.
+      2026-06-11 evidence: six review agents were run and closed. Initial
+      findings on the donor weighted surface split and tracked/untracked doc
+      wording were fixed; delta reviewers returned `PASS`.
 - [ ] `python -c "from simsoptpp import Curve; print(Curve)"` succeeds in the
       clean-source CPU and GPU benchmark environments.
 - [ ] `python scripts/jax_gpu_failed_stale_tests_signoff.py --repo /path/to/clean/remote/checkout --python-bin /path/to/python --results-dir /path/to/results` on a CUDA host after clean-source staging is complete.
@@ -364,11 +407,12 @@ actually produced it.
 
 ## Completion Criteria
 
-- [ ] Every pure-only commit is classified as clean-required, doc-only useful,
+- [x] Every pure-only commit is classified as clean-required, doc-only useful,
       diagnostic-only, superseded-by-clean, or out-of-scope.
-- [ ] Every clean-required pure behavior is either ported to
+- [x] Every clean-required pure behavior is either ported to
       `pr/jax-port-clean` or explicitly rejected with a boundary reason.
-- [ ] All ported slices have focused validation results recorded.
+- [x] All currently ported code/test slices have focused validation results
+      recorded.
 - [ ] Diagnostic Perlmutter and RunPod artifacts are copied or indexed under a
       clean reconciliation artifact root with source-state labels and
       final-signoff eligibility marked false unless proven otherwise.
@@ -385,8 +429,9 @@ actually produced it.
 
 - Which pure-only docs should be ported as clean docs versus archived as
   diagnostic history?
-- Should pure's dipole axis-basis convention fix be ported to clean directly,
-  or has clean already replaced it with a different implementation?
+- Resolved: pure's dipole axis-basis convention fix must not be ported directly.
+  The donor commit fails the live native oracle in this environment; clean now
+  restores the non-finite SIMD convention and the focused parity test passes.
 - Which current clean dirty files are user-authored and should remain untouched
   during the reconciliation?
 - Should final benchmark runs be performed on Perlmutter only, RunPod only, or

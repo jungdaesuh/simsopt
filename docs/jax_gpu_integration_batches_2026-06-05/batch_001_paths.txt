@@ -4,5 +4,4 @@ tests/core/test_load_specs.py
 tests/core/test_reductions.py
 tests/core/test_state_tokens.py
 tests/docs/test_banana_parity_coverage_manifest.py
-tests/field/test_biotsavart_A_direct_kernel_closeout.py
 tests/field/test_biotsavart_jax.py

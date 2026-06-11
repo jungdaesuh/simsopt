@@ -35,6 +35,9 @@ from simsopt_jax.core import (
     surface_xyz_tensor_fourier_second_fund_form_from_spec,
     surface_xyz_tensor_fourier_surface_curvatures_from_spec,
 )
+from simsopt_jax.core.surface_fourier_kernels import (
+    _split_flat_to_xyzc as split_flat_to_xyzc,
+)
 import simsopt_jax.geo.surface_fourier as _sf
 
 build_theta_basis = _sf.build_theta_basis
@@ -117,6 +120,19 @@ surface_xyzfourier_dgammadash2dash2_by_dcoeff = (
 stellsym_scatter_indices = _sf.stellsym_scatter_indices
 _DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
 _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
+
+
+def test_split_flat_to_xyzc_keeps_nan_blocks_isolated():
+    """NaNs in one coordinate coefficient block do not contaminate others."""
+    xc, yc, zc = split_flat_to_xyzc(
+        jnp.asarray([1.0, jnp.nan, 3.0], dtype=jnp.float64),
+        0,
+        0,
+    )
+
+    assert float(xc[0, 0]) == 1.0
+    assert bool(jnp.isnan(yc[0, 0]))
+    assert float(zc[0, 0]) == 3.0
 
 
 def _surface_spec(surface):

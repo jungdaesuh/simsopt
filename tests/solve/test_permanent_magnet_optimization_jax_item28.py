@@ -224,6 +224,32 @@ def test_projection_and_prox_helpers_match_cpu_oracles():
     )
 
 
+def test_projection_helper_matches_cpu_oracle_for_edge_mmax():
+    moments = np.array(
+        [
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    ).ravel()
+    m_maxima = np.array(
+        [np.inf, -np.inf, np.nan, 0.0, -0.0, 0.0, -0.0], dtype=np.float64
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(projection_L2_balls_jax(moments, m_maxima)),
+        projection_L2_balls(moments, m_maxima),
+        rtol=_RTOL,
+        atol=_ATOL,
+        equal_nan=True,
+    )
+
+
 def test_zero_mmax_helpers_match_cpu_without_nan():
     moments = np.array(
         [

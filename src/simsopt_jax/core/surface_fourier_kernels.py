@@ -1108,14 +1108,13 @@ def _split_flat_to_xyzc(flat, mpol, ntor):
     Returns:
         xc, yc, zc: each (2*mpol+1, 2*ntor+1).
     """
-    n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
     shape = (int(2 * mpol + 1), int(2 * ntor + 1))
     flat_jax = _as_jax_float64(flat)
-    stacked = jnp.reshape(flat_jax, (3, n_per_coord))
+    xc_flat, yc_flat, zc_flat = jnp.split(flat_jax, 3)
     return (
-        jnp.reshape(stacked[0], shape),
-        jnp.reshape(stacked[1], shape),
-        jnp.reshape(stacked[2], shape),
+        jnp.reshape(xc_flat, shape),
+        jnp.reshape(yc_flat, shape),
+        jnp.reshape(zc_flat, shape),
     )
 
 

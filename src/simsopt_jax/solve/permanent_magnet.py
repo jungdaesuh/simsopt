@@ -463,9 +463,7 @@ def projection_L2_balls_jax(x: object, mmax: object) -> jax.Array:
     moments = _as_runtime_array(x)
     m_maxima = _as_runtime_array(mmax)
     reshaped_moments = jnp.reshape(moments, (m_maxima.shape[0], 3))
-    norm = jnp.sqrt(jnp.sum(reshaped_moments * reshaped_moments, axis=-1))
-    denom = jnp.maximum(jnp.ones_like(m_maxima), norm / m_maxima)
-    projected = reshaped_moments / denom[:, None]
+    projected = projection_l2_balls(reshaped_moments, m_maxima)
     return _flatten_like(moments, projected)
 
 

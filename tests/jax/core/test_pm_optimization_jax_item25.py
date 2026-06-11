@@ -255,18 +255,25 @@ class TestPMKernelHelpers:
             atol=_PER_KERNEL_ATOL,
         )
 
-    def test_projection_zero_mmax_zero_row_is_finite(self):
+    def test_projection_zero_and_nonfinite_mmax_matches_oracle(self):
         m = jnp.asarray(
             np.array(
                 [
                     [0.2, 0.0, 0.0],
+                    [0.3, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
                     [0.0, 0.0, 0.0],
                     [2.0, 0.0, 0.0],
                     [0.4, -0.3, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [0.3, 0.0, 0.0],
                 ]
             )
         )
-        m_maxima = jnp.asarray(np.array([1.0, 0.0, 1.0, np.nan]))
+        m_maxima = jnp.asarray(
+            np.array([1.0, 0.0, 0.0, -0.0, 1.0, np.nan, np.inf, -np.inf, -0.0])
+        )
 
         out = np.asarray(projection_l2_balls(m, m_maxima))
 
@@ -276,14 +283,21 @@ class TestPMKernelHelpers:
                 [
                     [0.2, 0.0, 0.0],
                     [0.0, 0.0, 0.0],
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, np.nan, np.nan],
                     [1.0, 0.0, 0.0],
-                    [0.4, -0.3, 0.0],
+                    [np.nan, np.nan, np.nan],
+                    [2.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [0.3, 0.0, 0.0],
                 ]
             ),
             rtol=_PER_KERNEL_RTOL,
             atol=_PER_KERNEL_ATOL,
+            equal_nan=True,
         )
-        assert np.isfinite(out).all()
+        assert np.isfinite(out[[0, 1, 4, 6, 7, 8]]).all()
+        assert np.isnan(out[[2, 3, 5]]).all()
 
     def test_projection_zero_mmax_uses_no_host_unit_transfer(self):
         m = jax.device_put(
@@ -291,6 +305,8 @@ class TestPMKernelHelpers:
                 np.array(
                     [
                         [0.2, 0.0, 0.0],
+                        [0.3, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
                         [0.0, 0.0, 0.0],
                         [2.0, 0.0, 0.0],
                     ],
@@ -299,7 +315,7 @@ class TestPMKernelHelpers:
             )
         )
         m_maxima = jax.device_put(
-            jnp.asarray(np.array([1.0, 0.0, 1.0], dtype=np.float64))
+            jnp.asarray(np.array([1.0, 0.0, 0.0, -0.0, 1.0], dtype=np.float64))
         )
 
         with jax.transfer_guard("disallow"):
@@ -312,11 +328,14 @@ class TestPMKernelHelpers:
                 [
                     [0.2, 0.0, 0.0],
                     [0.0, 0.0, 0.0],
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, np.nan, np.nan],
                     [1.0, 0.0, 0.0],
                 ]
             ),
             rtol=_PER_KERNEL_RTOL,
             atol=_PER_KERNEL_ATOL,
+            equal_nan=True,
         )
 
     def test_projection_l2_balls_zero_vector_jacobian_inside_ball(self):

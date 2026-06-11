@@ -47,7 +47,81 @@ _STALE_FAILURE_PATTERNS = (
     "simsopt.geo.curvexyzfourier",
     "simsopt_jax_adapters.field.biotsavart_backend",
 )
-_FOCUSED_ABORT_REPROS: tuple[tuple[str, str], ...] = ()
+_SIGABRT_RETURNCODES = frozenset((-6, 134))
+
+
+@dataclass(frozen=True)
+class FocusedSelector:
+    label: str
+    selector: str
+
+
+_FOCUSED_ABORT_REPROS = (
+    FocusedSelector(
+        label="batch_012_runtime_bundle_batched_value_and_grad",
+        selector=(
+            "tests/integration/test_single_stage_jax_cpu_reference.py::"
+            "TestTraceableObjective::"
+            "test_runtime_bundle_batched_value_and_grad_matches_serial"
+        ),
+    ),
+    FocusedSelector(
+        label="batch_012_runtime_bundle_rebuild_after_solver_option_change",
+        selector=(
+            "tests/integration/test_single_stage_jax_cpu_reference.py::"
+            "TestTraceableObjective::"
+            "test_runtime_bundle_rebuilds_after_solver_option_change_post_compile"
+        ),
+    ),
+    FocusedSelector(
+        label="batch_012_composite_gradient_finite_and_nonzero",
+        selector=(
+            "tests/integration/test_single_stage_jax_cpu_reference.py::"
+            "TestCompositeGradientPipeline::"
+            "test_composite_gradient_finite_and_nonzero"
+        ),
+    ),
+)
+_FOCUSED_LANE_SELECTORS = (
+    FocusedSelector(
+        label="batch_012_strict_cpu_non_qs_ratio_dj_transfer_guard",
+        selector=(
+            "tests/integration/test_single_stage_jax_cpu_reference.py::"
+            "TestNonQSRatioValue::test_dj_allows_strict_transfer_guard"
+        ),
+    ),
+    FocusedSelector(
+        label="batch_012_strict_gpu_public_wrapper_dj_transfer_guard",
+        selector=(
+            "tests/integration/test_single_stage_jax_cpu_reference.py::"
+            "TestCompositeObjective::"
+            "test_public_wrapper_dj_boundaries_allow_strict_transfer_guard_real_fixture"
+        ),
+    ),
+    FocusedSelector(
+        label="batch_012_branch_stable_ondevice_m5_values",
+        selector=(
+            "tests/integration/test_single_stage_jax_cpu_reference.py::"
+            "TestRealFixtureOndeviceM5Parity::"
+            "test_real_fixture_ondevice_branch_stable_wrapper_values_match"
+        ),
+    ),
+    FocusedSelector(
+        label="batch_012_short_single_stage_stationary_outer_opt",
+        selector=(
+            "tests/integration/test_single_stage_jax_cpu_reference.py::"
+            "TestShortSingleStageOptRun::"
+            "test_outer_opt_accepts_stationary_initial_objective"
+        ),
+    ),
+    FocusedSelector(
+        label="batch_012_iotas_resolve_fd",
+        selector=(
+            "tests/integration/test_single_stage_jax_cpu_reference.py::"
+            "TestIotasJAXResolveFD::test_iotas_resolve_fd"
+        ),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -276,9 +350,27 @@ def _clear_integration_batch_outputs(batch_dir: Path) -> None:
         "batch_*.log",
         "batch_*.log.rc",
         "batch_*_paths.txt",
+        "batch_*_focused_repro_deselectors.txt",
+        "batch_*_focused_selector_deselectors.txt",
     ):
         for path in batch_dir.glob(pattern):
             _remove_if_exists(path)
+
+
+def _clear_focused_selector_outputs(repro_dir: Path) -> None:
+    for pattern in ("batch_*.xml", "batch_*.log", "batch_*.log.rc"):
+        for path in repro_dir.glob(pattern):
+            _remove_if_exists(path)
+
+
+def _clear_focused_selector_root_outputs(results_dir: Path) -> None:
+    for filename in (
+        "focused_abort_repro_missing_selectors.txt",
+        "focused_lane_missing_selectors.txt",
+        "focused_abort_repro_selectors_with_missing_paths.txt",
+        "focused_lane_selectors_with_missing_paths.txt",
+    ):
+        _remove_if_exists(results_dir / filename)
 
 
 def _read_test_paths(path_file: Path) -> list[str]:
@@ -333,6 +425,27 @@ def _split_chunks(paths: list[str], chunk_count: int) -> list[list[str]]:
 def _write_path_lines(path: Path, lines: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+
+
+def _is_sigabrt_returncode(returncode: int) -> bool:
+    return returncode in _SIGABRT_RETURNCODES
+
+
+def _selector_path(selector: str) -> Path:
+    return Path(selector.split("::", maxsplit=1)[0])
+
+
+def _focused_signoff_selectors() -> tuple[FocusedSelector, ...]:
+    return (*_FOCUSED_ABORT_REPROS, *_FOCUSED_LANE_SELECTORS)
+
+
+def _focused_selector_deselectors(paths: list[str]) -> list[str]:
+    path_prefixes = tuple(f"{path}::" for path in paths)
+    return [
+        focused.selector
+        for focused in _focused_signoff_selectors()
+        if focused.selector.startswith(path_prefixes)
+    ]
 
 
 def _first_failure_line(message: str, body: str) -> str:
@@ -482,6 +595,7 @@ def _pytest_command(
     selectors: list[str],
     *,
     verbose: bool,
+    deselectors: list[str] | None = None,
 ) -> list[str]:
     command = [
         str(python_bin),
@@ -497,6 +611,8 @@ def _pytest_command(
         command.extend(("-vv", "-s"))
     else:
         command.append("-q")
+    if deselectors:
+        command.extend(f"--deselect={selector}" for selector in deselectors)
     command.extend(selectors)
     return command
 
@@ -622,18 +738,25 @@ def main(argv: list[str]) -> int:
         )
     )
 
-    repro_dir = results_dir / "focused_abort_repros"
-    for batch, selector in _FOCUSED_ABORT_REPROS:
-        junit_path = repro_dir / f"{batch}_one.xml"
-        log_path = repro_dir / f"{batch}_one.log"
+    focused_dir = results_dir / "focused_selectors"
+    _clear_focused_selector_outputs(focused_dir)
+    _clear_focused_selector_root_outputs(results_dir)
+    focused_repro_selectors_with_missing_paths: list[str] = []
+    focused_lane_selectors_with_missing_paths: list[str] = []
+    for repro in _FOCUSED_ABORT_REPROS:
+        if not (repo / _selector_path(repro.selector)).exists():
+            focused_repro_selectors_with_missing_paths.append(repro.selector)
+            continue
+        junit_path = focused_dir / f"{repro.label}.xml"
+        log_path = focused_dir / f"{repro.label}.log"
         _prepare_command_outputs(log_path, junit_path)
         records.append(
             _run_logged(
-                label=f"{batch}-focused-repro",
+                label=f"{repro.label}-focused-repro",
                 command=_pytest_command(
                     python_bin,
                     junit_path,
-                    [selector],
+                    [repro.selector],
                     verbose=True,
                 ),
                 cwd=repo,
@@ -643,6 +766,50 @@ def main(argv: list[str]) -> int:
                 timeout_seconds=args.timeout_seconds,
                 dry_run=args.dry_run,
             )
+        )
+    for focused in _FOCUSED_LANE_SELECTORS:
+        if not (repo / _selector_path(focused.selector)).exists():
+            focused_lane_selectors_with_missing_paths.append(focused.selector)
+            continue
+        junit_path = focused_dir / f"{focused.label}.xml"
+        log_path = focused_dir / f"{focused.label}.log"
+        _prepare_command_outputs(log_path, junit_path)
+        records.append(
+            _run_logged(
+                label=f"{focused.label}-focused-selector",
+                command=_pytest_command(
+                    python_bin,
+                    junit_path,
+                    [focused.selector],
+                    verbose=True,
+                ),
+                cwd=repo,
+                env=env,
+                log_path=log_path,
+                junit_path=junit_path,
+                timeout_seconds=args.timeout_seconds,
+                dry_run=args.dry_run,
+            )
+        )
+    _write_path_lines(
+        results_dir / "focused_abort_repro_selectors_with_missing_paths.txt",
+        focused_repro_selectors_with_missing_paths,
+    )
+    _write_path_lines(
+        results_dir / "focused_lane_selectors_with_missing_paths.txt",
+        focused_lane_selectors_with_missing_paths,
+    )
+    if focused_repro_selectors_with_missing_paths and args.missing_path_policy == "fail":
+        failures.append(
+            f"{len(focused_repro_selectors_with_missing_paths)} focused abort "
+            "repro selector paths are missing; rerun on the integration branch or use "
+            "--missing-path-policy=record"
+        )
+    if focused_lane_selectors_with_missing_paths and args.missing_path_policy == "fail":
+        failures.append(
+            f"{len(focused_lane_selectors_with_missing_paths)} focused lane "
+            "selector paths are missing; rerun on the integration branch or use "
+            "--missing-path-policy=record"
         )
 
     requested_batches = _read_batch_paths(
@@ -666,13 +833,31 @@ def main(argv: list[str]) -> int:
 
     batch_dir = results_dir / "integration_batches"
     _clear_integration_batch_outputs(batch_dir)
+    focused_repro_selectors = {repro.selector for repro in _FOCUSED_ABORT_REPROS}
+    focused_lane_selectors = {focused.selector for focused in _FOCUSED_LANE_SELECTORS}
+    focused_deselected_count = 0
+    focused_repro_deselected_count = 0
+    focused_lane_deselected_count = 0
     for batch_name, requested_chunk in requested_batches:
         chunk = [path for path in requested_chunk if (repo / path).exists()]
         if not chunk:
             skipped_batches.append(batch_name)
             continue
+        deselectors = _focused_selector_deselectors(chunk)
+        focused_deselected_count += len(deselectors)
+        focused_repro_deselected_count += sum(
+            selector in focused_repro_selectors for selector in deselectors
+        )
+        focused_lane_deselected_count += sum(
+            selector in focused_lane_selectors for selector in deselectors
+        )
         path_file = batch_dir / f"{batch_name}_paths.txt"
         _write_path_lines(path_file, chunk)
+        if deselectors:
+            _write_path_lines(
+                batch_dir / f"{batch_name}_focused_selector_deselectors.txt",
+                deselectors,
+            )
         junit_path = batch_dir / f"{batch_name}.xml"
         log_path = batch_dir / f"{batch_name}.log"
         _prepare_command_outputs(log_path, junit_path)
@@ -684,6 +869,7 @@ def main(argv: list[str]) -> int:
                     junit_path,
                     chunk,
                     verbose=False,
+                    deselectors=deselectors,
                 ),
                 cwd=repo,
                 env=env,
@@ -719,8 +905,11 @@ def main(argv: list[str]) -> int:
     for record in records:
         if record.returncode != 0:
             failures.append(f"{record.label} returned {record.returncode}")
-        if record.returncode == 134:
-            failures.append(f"{record.label} hard-aborted with return code 134")
+        if _is_sigabrt_returncode(record.returncode):
+            failures.append(
+                f"{record.label} hard-aborted with SIGABRT return code "
+                f"{record.returncode}"
+            )
     if current_count:
         failures.append(f"{current_count} integration failed/error selectors remain")
     if new_count:
@@ -738,6 +927,21 @@ def main(argv: list[str]) -> int:
         "missing_integration_paths": len(missing_paths),
         "integration_batch_count": len(requested_batches),
         "skipped_integration_batch_count": len(skipped_batches),
+        "focused_abort_repro_selectors": [
+            repro.selector for repro in _FOCUSED_ABORT_REPROS
+        ],
+        "focused_lane_selectors": [
+            focused.selector for focused in _FOCUSED_LANE_SELECTORS
+        ],
+        "focused_abort_repro_selectors_with_missing_paths": (
+            focused_repro_selectors_with_missing_paths
+        ),
+        "focused_lane_selectors_with_missing_paths": (
+            focused_lane_selectors_with_missing_paths
+        ),
+        "integration_focused_selector_deselect_count": focused_deselected_count,
+        "integration_focused_repro_deselect_count": focused_repro_deselected_count,
+        "integration_focused_lane_deselect_count": focused_lane_deselected_count,
         "batch_paths_dir": str(batch_paths_dir),
         "current_failed_selector_count": current_count,
         "new_failed_selector_count": new_count,

@@ -11,8 +11,9 @@ Point-dipole kernels are singular when an evaluation point coincides with a
 dipole location. The raw kernels intentionally do not regularize that case;
 callers should avoid coincident points unless they are explicitly testing the
 non-finite singular contract. Non-cartesian ``dipole_field_Bn`` rotations track
-the current C++ basis-angle contract, including the zero-angle convention for
-dipoles on the cylindrical axis.
+the current C++ SIMD basis-angle contract, including non-finite values for
+dipoles on the cylindrical axis; the scalar non-SIMD native branch differs at
+that degenerate angle.
 """
 
 from __future__ import annotations
@@ -369,9 +370,15 @@ def _basis_angles(dipole_points: jax.Array, R0: object):
     x = dipole_points[:, 0]
     y = dipole_points[:, 1]
     z = dipole_points[:, 2]
+    zero = x - x
+    nan = zero / zero
     radial_offset = jnp.sqrt(x * x + y * y) - _scalar(x, R0)
-    phi = jnp.atan2(y, x)
-    theta = jnp.atan2(z, radial_offset)
+    phi = jax.lax.select((x == zero) & (y == zero), nan, jnp.atan2(y, x))
+    theta = jax.lax.select(
+        (z == zero) & (radial_offset == zero),
+        nan,
+        jnp.atan2(z, radial_offset),
+    )
     return jnp.sin(phi), jnp.cos(phi), jnp.sin(theta), jnp.cos(theta)
 
 

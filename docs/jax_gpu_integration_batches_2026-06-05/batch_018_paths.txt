@@ -2,7 +2,6 @@ tests/mhd/test_vmec_frozen.py
 tests/objectives/test_fluxobjective.py
 tests/objectives/test_fluxobjective_jax_item03_closeout.py
 tests/objectives/test_fluxobjective_jax_parity.py
-tests/objectives/test_integral_bdotn_item10_closeout.py
 tests/objectives/test_integral_bdotn_jax.py
 tests/objectives/test_utilities.py
 tests/solve/test_mpi_jax.py
