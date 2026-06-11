@@ -99,6 +99,11 @@ recovering validated work.
   That note also records that donor commit `d698d26bc` is rejected for this clean
   source state because its dipole axis-basis convention fails the live native
   oracle in both clean and pure.
+- Diagnostic artifact indexing and seed-file verification are recorded in
+  `docs/jax_clean_reconciliation_diagnostics_2026-06-11.md`.
+  The copied `.artifacts/clean_reconciliation_diagnostics/runpod_full_cpu_gpu_20260611`
+  bundle is explicitly marked non-final for clean signoff because its recorded
+  source state is a dirty `pr/jax-port-pure` staging tree.
 
 ## Diagnostic Run Inventory
 
@@ -225,15 +230,24 @@ actually produced it.
          replacement commits and dirty files.
 
 3. Reconcile docs without importing stale authority.
-   - [ ] Keep `docs/jax_clean_pr_reconstruction_audit.md` as the clean branch
+   - [x] Keep `docs/jax_clean_pr_reconstruction_audit.md` as the clean branch
          boundary document.
-   - [ ] Port or rewrite the useful parts of
+   - [x] Port or rewrite the useful parts of
          `docs/perlmutter_cpu_gpu_e2e_benchmark_implementation_plan.md` into a
          clean-branch benchmark plan.
-   - [ ] Port or rewrite the useful parts of
+        2026-06-11 rewrite: carried forward the source-manifest,
+        hardware-provenance, timing, RSS, GPU-memory, and no-pytest-speedup
+        rules in `docs/jax_clean_reconciliation_diagnostics_2026-06-11.md`
+        without importing the donor split-API implementation plan as clean
+        authority.
+   - [x] Port or rewrite the useful parts of
          `docs/jax_stage2_single_stage_artifacts_2026-06-08.md` only after
          verifying that each referenced artifact path still exists and that the
          Stage 2 versus single-stage/BoozerSurface file contracts are preserved.
+        2026-06-11 verification: checked all 36 selected endpoint and seed-root
+        files on disk with 0 missing; recorded the `surf_opt.json` versus
+        `surf_opt_boozer_surface.json` contract distinction in
+        `docs/jax_clean_reconciliation_diagnostics_2026-06-11.md`.
    - [x] Refresh the stale CUDA signoff inventory before final signoff:
          either remove/rewrite missing selectors and paths in
          `docs/jax_gpu_failed_selectors_2026-06-05.txt`,
@@ -246,24 +260,36 @@ actually produced it.
         whose file is absent from both clean and pure. The default dry-run now
         records zero missing inventory paths and zero missing focused selector
         paths.
-   - [ ] Use `--missing-path-policy=record` only as an inventory-audit aid; do
+   - [x] Use `--missing-path-policy=record` only as an inventory-audit aid; do
          not treat a final signoff as green until the default fail-closed dry
          run succeeds.
-   - [ ] Mark all pure-based RunPod/Perlmutter results as diagnostic unless a
+        2026-06-11 evidence: the current accepted dry-run used the default
+        fail-closed policy and passed with 0 missing paths.
+   - [x] Mark all pure-based RunPod/Perlmutter results as diagnostic unless a
          source-state comparison proves they apply to clean.
+        2026-06-11 evidence: the diagnostic index marks the copied Perlmutter
+        CPU baseline and GPU abort-debug bundles as final-clean-signoff
+        ineligible.
 
 4. Preserve and label diagnostic remote evidence.
-   - [ ] Copy or index the Perlmutter diagnostic artifacts from the donor
+   - [x] Copy or index the Perlmutter diagnostic artifacts from the donor
          worktree mirror into a clean diagnostic artifact root such as
          `.artifacts/clean_reconciliation_diagnostics/perlmutter/`.
+        2026-06-11 evidence: copied 480 files / 121 MB from the donor
+        `runpod_full_cpu_gpu_20260611` mirror into
+        `.artifacts/clean_reconciliation_diagnostics/runpod_full_cpu_gpu_20260611`.
    - [ ] Copy or index RunPod artifacts from
          `/workspace/runpod-a100-full-gpu` and
          `/workspace/runpod-a100-cpu32-immediate` into
          `.artifacts/clean_reconciliation_diagnostics/runpod/` after the active
          stale signoff finishes or is intentionally stopped.
-   - [ ] Store each diagnostic bundle with a source-state manifest that records
+   - [x] Store each diagnostic bundle with a source-state manifest that records
          remote path, branch, HEAD, dirty status, job or pod id, and whether it
          is final-clean-signoff eligible.
+        2026-06-11 evidence: `docs/jax_clean_reconciliation_diagnostics_2026-06-11.md`
+        records source state and final-clean eligibility for the copied
+        Perlmutter CPU baseline and GPU abort-debug bundles. RunPod workspace
+        artifact indexing remains open.
    - [ ] Mark the RunPod A100 pod for shutdown once all requested artifacts are
          copied and no further diagnostic work is needed.
 
