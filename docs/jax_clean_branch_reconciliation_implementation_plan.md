@@ -361,7 +361,11 @@ actually produced it.
    - [ ] Before running Stage 2 or single-stage benchmarks, verify the execution
          environment can import the native extension with
          `python -c "from simsoptpp import Curve; print(Curve)"`.
-   - [ ] Submit or run the clean CPU benchmark lane and preserve JSON,
+        2026-06-12 CPU evidence: Perlmutter job `54326039` recorded
+        `simsoptpp_curve_smoke.txt` as `<class 'simsoptpp.Curve'>` before the
+        final CPU benchmark commands. The GPU benchmark environment remains
+        pending under job `54325846`.
+   - [x] Submit or run the clean CPU benchmark lane and preserve JSON,
          `/usr/bin/time -v` output, host RSS, CPU count, node/pod identity, and
          exact git source state.
         Partial local evidence: clean-source Stage 2 CPU passed under
@@ -369,17 +373,25 @@ actually produced it.
         `.artifacts/clean_reconciliation_benchmarks/cpu_330925564_x64_20260611T230856Z`.
         Default single-stage CPU remains open locally because JAX/JAXLIB
         `0.9.2` cannot run the required private on-device Boozer optimizer.
-        Submitted pending remote evidence: Perlmutter job `54325846` was
-        accepted from the clean `2f273bf26` checkout with results root
-        `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-e2e-20260612T001956Z/results`;
-        as of submission it was `PENDING` on `shared_gpu_ss11` for priority.
+        2026-06-12 final CPU evidence: Perlmutter CPU-only job `54326039`
+        completed on `nid007026` with Slurm state `COMPLETED`, exit code `0:0`,
+        and copied local root
+        `.artifacts/clean_reconciliation_benchmarks/perlmutter_cpu_2f273bf26_54326039`.
+        Both `artifacts/stage2_cpu.json` and
+        `artifacts/single_stage_cpu.json` record `passed: true`, empty
+        `failures`, repo SHA
+        `2f273bf26e2574eada705f49547881ff3ab66265`, clean git status,
+        JAX/JAXLIB `0.10.0`, CPU backend, and x64 enabled. `/usr/bin/time -v`
+        sidecars record Stage 2 walltime `7:35.93`, max RSS `13124` KB, exit
+        `0`, and single-stage walltime `3:34.47`, max RSS `10776` KB, exit `0`.
    - [ ] Submit or run the clean GPU benchmark lane and preserve JSON,
          `/usr/bin/time -v` output, host RSS, GPU memory samples, GPU model,
          driver/toolchain details, and exact git source state.
         Submitted pending remote evidence: the same Perlmutter job `54325846`
         will run Stage 2 CUDA and single-stage CUDA after the CPU lanes; no
         final JSON exists until the job reaches `COMPLETED` and artifacts are
-        copied or indexed.
+        copied or indexed. 2026-06-12T00:56:36Z scheduler check: `54325846`
+        remained `PENDING` for priority on `shared_gpu_ss11`.
    - [ ] Compare CPU and GPU JSON outputs only after both runs are from the
          clean source state.
    - [ ] Keep old pure-based artifacts in a diagnostic directory, clearly
@@ -430,13 +442,16 @@ actually produced it.
       `PASS` after stale validation wording was fixed.
 - [ ] `python -c "from simsoptpp import Curve; print(Curve)"` succeeds in the
       clean-source CPU and GPU benchmark environments.
-      Local Miniforge CPU evidence passed, but final CPU/GPU benchmark
-      environments still need this gate recorded beside their run artifacts.
+      Final CPU evidence passed in Perlmutter job `54326039`:
+      `.artifacts/clean_reconciliation_benchmarks/perlmutter_cpu_2f273bf26_54326039/simsoptpp_curve_smoke.txt`
+      records `<class 'simsoptpp.Curve'>`. The GPU benchmark environment
+      remains pending under job `54325846`.
 - [ ] `python scripts/jax_gpu_failed_stale_tests_signoff.py --repo /path/to/clean/remote/checkout --python-bin /path/to/python --results-dir /path/to/results` on a CUDA host after clean-source staging is complete.
       Submitted pending evidence: Perlmutter job `54325885` was accepted from
       the clean `2f273bf26` checkout using run root
       `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-stale-signoff-20260612T002410Z`;
-      as of submission it was `PENDING` on `shared_gpu_ss11` for priority.
+      2026-06-12T00:56:36Z scheduler check: `54325885` remained `PENDING` for
+      priority on `shared_gpu_ss11`.
 - [x] `ssh perlmutter 'sacct -j 54304250,54314828 --format=JobID,JobName,State,Elapsed,MaxRSS,ReqCPUS,AllocCPUS,NNodes,NodeList -P'` still shows the cited Perlmutter jobs as completed when their diagnostic artifacts are copied or referenced.
       2026-06-12 evidence: `54304250` and `54314828` both returned
       `COMPLETED`; node identities were `nid007045` for the CPU baseline and
@@ -449,16 +464,29 @@ actually produced it.
       `.artifacts/clean_reconciliation_diagnostics/runpod/0d2guz9ioc95bb`
       includes benchmark rc files, benchmark metrics JSON, stale signoff rc,
       stale signoff metrics JSON, and stale signoff `results/summary.json`.
-- [ ] `python benchmarks/stage2_e2e_comparison.py --platform cpu --output-json <cpu-stage2.json>` from a clean CPU source state.
+- [x] `python benchmarks/stage2_e2e_comparison.py --platform cpu --output-json <cpu-stage2.json>` from a clean CPU source state.
       Local evidence passed with `JAX_ENABLE_X64=1` and
       `.artifacts/clean_reconciliation_benchmarks/cpu_330925564_x64_20260611T230856Z/stage2_cpu.json`.
+      Final CPU evidence passed in Perlmutter job `54326039`:
+      `.artifacts/clean_reconciliation_benchmarks/perlmutter_cpu_2f273bf26_54326039/artifacts/stage2_cpu.json`
+      has `passed: true`, empty failures, clean repo SHA
+      `2f273bf26e2574eada705f49547881ff3ab66265`, JAX/JAXLIB `0.10.0`, CPU
+      backend, x64 enabled, final objective relative difference `0.0`, field
+      error relative difference `0.0`, and `/usr/bin/time -v` exit status `0`.
 - [ ] `python benchmarks/stage2_e2e_comparison.py --platform cuda --output-json <gpu-stage2.json>` from a clean GPU source state.
       Submitted pending under Perlmutter job `54325846`; not final until the
       job completes and the JSON is copied or indexed.
-- [ ] `python benchmarks/single_stage_init_parity.py --platform cpu --output-json <cpu-single-stage.json>` from a clean CPU source state.
+- [x] `python benchmarks/single_stage_init_parity.py --platform cpu --output-json <cpu-single-stage.json>` from a clean CPU source state.
       Local default-lane attempts are blocked after the surface-vessel adapter
       shape fix by JAX/JAXLIB `0.9.2` lacking the required private optimizer
       runtime. Rerun on the pinned JAX/JAXLIB `0.10.0` benchmark environment.
+      Final CPU evidence passed in Perlmutter job `54326039`:
+      `.artifacts/clean_reconciliation_benchmarks/perlmutter_cpu_2f273bf26_54326039/artifacts/single_stage_cpu.json`
+      has `passed: true`, empty failures, clean repo SHA
+      `2f273bf26e2574eada705f49547881ff3ab66265`, JAX/JAXLIB `0.10.0`, CPU
+      backend, x64 enabled, field error relative difference
+      `3.637770558581993E-15`, no final metric parity failures, and
+      `/usr/bin/time -v` exit status `0`.
 - [ ] `python benchmarks/single_stage_init_parity.py --platform cuda --output-json <gpu-single-stage.json>` from a clean GPU source state.
       Submitted pending under Perlmutter job `54325846`; not final until the
       job completes and the JSON is copied or indexed.
@@ -514,8 +542,13 @@ actually produced it.
 - [x] Diagnostic Perlmutter and RunPod artifacts are copied or indexed under a
       clean reconciliation artifact root with source-state labels and
       final-signoff eligibility marked false unless proven otherwise.
-- [ ] Final CPU Stage 2 and single-stage benchmark artifacts are generated from
+- [x] Final CPU Stage 2 and single-stage benchmark artifacts are generated from
       the clean source state.
+      2026-06-12 evidence: Perlmutter CPU-only job `54326039` completed and was
+      copied to
+      `.artifacts/clean_reconciliation_benchmarks/perlmutter_cpu_2f273bf26_54326039`;
+      both final CPU benchmark JSON files passed from clean repo SHA
+      `2f273bf26e2574eada705f49547881ff3ab66265`.
 - [ ] Final GPU Stage 2 and single-stage benchmark artifacts are generated from
       the clean source state.
 - [ ] CPU/GPU comparison report is based only on clean-source artifacts.
@@ -532,8 +565,8 @@ actually produced it.
   restores the non-finite SIMD convention and the focused parity test passes.
 - Which current clean dirty files are user-authored and should remain untouched
   during the reconciliation?
-- Should final benchmark runs be performed on Perlmutter only, RunPod only, or
-  both, once the clean source state is ready?
-- Should the active RunPod A100 pod be stopped immediately after
-  `stale_signoff_cuda129` artifacts are copied, or kept running for a clean
-  source rerun?
+- Current execution choice: final clean-source CPU evidence was produced on
+  Perlmutter; final GPU and clean CUDA stale-signoff evidence remain pending on
+  Perlmutter jobs `54325846` and `54325885`.
+- Resolved: the active RunPod A100 pod was stopped after diagnostic artifacts
+  were copied.

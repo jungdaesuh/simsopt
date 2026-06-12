@@ -62,9 +62,94 @@ Perlmutter accepted two clean-source jobs from this source state:
   with run root
   `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-stale-signoff-20260612T002410Z`.
 
-Both jobs were `PENDING` on `shared_gpu_ss11` for priority when recorded here.
+Scheduler recheck on 2026-06-12T00:56:36Z still showed both GPU/shared jobs as
+`PENDING` for priority on `shared_gpu_ss11`:
+
+- `54325846|banana-e2e-cpu-gpu|PENDING|00:00:00|0:0||32|0|1|None assigned`
+- `54325885|clean-stale-cuda|PENDING|00:00:00|0:0||32|0|1|None assigned`
+
 They are not final clean-source evidence until Slurm reports completion and the
 JSON/log/result artifacts are copied or indexed.
+
+## Final Clean-Source CPU Benchmark Bundle
+
+- Perlmutter job:
+  `54326039`, job name `clean-cpu-final`.
+- Remote run root:
+  `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-cpu-final-20260612T003430Z`
+- Local copied root:
+  `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean/.artifacts/clean_reconciliation_benchmarks/perlmutter_cpu_2f273bf26_54326039`
+- Copy result:
+  43 files, 3.9 MB, with the remote virtual environment excluded.
+- Source commit:
+  `2f273bf26e2574eada705f49547881ff3ab66265`
+- Source status:
+  `pr/jax-port-clean...origin/pr/jax-port-clean`; `git_status_short.txt`,
+  `dirty.patch`, and `dirty-diff-stat.txt` are empty.
+- Runtime:
+  JAX `0.10.0`, JAXLIB `0.10.0`, default backend `cpu`, devices `cpu:0`,
+  `JAX_ENABLE_X64=1`, `JAX_PLATFORMS=cpu`,
+  `SIMSOPT_BACKEND_MODE=jax_cpu_parity`, `SIMSOPT_BACKEND_STRICT=1`,
+  `SIMSOPT_JAX_PLATFORM=cpu`, and
+  `SIMSOPT_JAX_TRANSFER_GUARD=disallow`.
+- Native extension smoke:
+  `simsoptpp_curve_smoke.txt` records `<class 'simsoptpp.Curve'>`.
+
+Slurm accounting for the final CPU job:
+
+- `54326039|clean-cpu-final|COMPLETED|00:15:20|0:0||32|256|1|nid007026`
+- `54326039.batch|batch|COMPLETED|00:15:20|0:0|14268364K|256|256|1|nid007026`
+- `54326039.extern|extern|COMPLETED|00:15:20|0:0||256|256|1|nid007026`
+- `54326039.0|python|COMPLETED|00:07:36|0:0|6559080K|32|32|1|nid007026`
+- `54326039.1|python|COMPLETED|00:03:35|0:0|5494412K|32|32|1|nid007026`
+
+Final Stage 2 CPU evidence:
+
+- JSON:
+  `artifacts/stage2_cpu.json`
+- Result:
+  `passed: true`, `failures: []`.
+- Provenance:
+  clean repo SHA `2f273bf26e2574eada705f49547881ff3ab66265`, JAX/JAXLIB
+  `0.10.0`, backend `cpu`, clean git status, `worktree_dirty: false`, and
+  `x64_enabled: true`.
+- Precision:
+  final objective relative difference `0.0`, field-error relative difference
+  `0.0`, geometry pointwise differences `0.0`, gradient relative difference
+  `0.0`, and 20 iterations in both CPU and JAX lanes.
+- Timing sidecar:
+  `/usr/bin/time -v` command
+  `srun -n 1 -c 32 python benchmarks/stage2_e2e_comparison.py --platform cpu --output-json <run>/artifacts/stage2_cpu.json`;
+  walltime `7:35.93`, maximum resident set size `13124` KB, exit status `0`.
+
+Final single-stage CPU evidence:
+
+- JSON:
+  `artifacts/single_stage_cpu.json`
+- Result:
+  `passed: true`, `failures: []`.
+- Provenance:
+  clean repo SHA `2f273bf26e2574eada705f49547881ff3ab66265`, JAX/JAXLIB
+  `0.10.0`, backend `cpu`, clean git status, `worktree_dirty: false`, and
+  `x64_enabled: true`.
+- Precision:
+  final iota absolute difference `0.0`, final volume relative difference
+  `1.250125968366028E-15`, field-error relative difference
+  `3.637770558581993E-15`, max-curvature relative difference
+  `3.714961948211354E-16`, no surface pointwise difference, and no final
+  metric parity failures.
+- Artifact contract:
+  CPU and JAX lanes both accept final artifact JSONs, and both share runtime
+  seed spec hash
+  `4c4f94d7be6552ee04caf3a366e6e5e209cfe832631c5bda06b9f922b8a67283`.
+- Timing sidecar:
+  `/usr/bin/time -v` command
+  `srun -n 1 -c 32 python benchmarks/single_stage_init_parity.py --platform cpu --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json --case-artifacts-dir <run>/artifacts/single_stage_cpu_cases --output-json <run>/artifacts/single_stage_cpu.json`;
+  walltime `3:34.47`, maximum resident set size `10776` KB, exit status `0`.
+
+This CPU bundle is final clean-source CPU benchmark evidence for commit
+`2f273bf26e2574eada705f49547881ff3ab66265`. It does not close final GPU
+benchmark evidence or the clean CUDA stale-test signoff.
 
 ## Copied RunPod Diagnostic Bundle
 
@@ -268,6 +353,6 @@ state, command text, JSON/log sidecars, Python/JAX/JAXLIB versions, and macOS
   `scipy-jax-fullgraph` failed later in the fullgraph outer-optimizer DOF map
   with `AttributeError: 'jaxlib._jax.ArrayImpl' object has no attribute 'free_x'`.
 
-The single-stage CPU benchmark remains non-final. Final clean-source evidence
-requires rerunning the default single-stage lane in the pinned JAX/JAXLIB
-`0.10.0` benchmark environment.
+The local single-stage CPU attempts remain non-final. They are superseded for
+CPU signoff by Perlmutter job `54326039`, which reran the default single-stage
+lane in the pinned JAX/JAXLIB `0.10.0` benchmark environment.
