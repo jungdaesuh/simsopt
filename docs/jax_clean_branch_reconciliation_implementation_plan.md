@@ -171,12 +171,95 @@ branch source state recorded above.
   `single_stage_cpu32.rc=0`, wall `467.3590750694275` seconds, MaxRSS
   `5656752K`.
 - RunPod stale CUDA signoff under
-  `/workspace/runpod-a100-full-gpu/stale_signoff_cuda129` was still running on
-  2026-06-11T21:39:02Z in integration `batch_010`. Earlier in the same run,
-  full `tests/jax` reported two failures in
-  `tests/jax/core/test_dipole_field_item24.py::test_dipole_field_Bn_on_axis_noncartesian_matches_cpp`
-  for the `cylindrical` and `toroidal` parametrizations. Treat this signoff as
-  active/red until the final rc and artifacts are copied.
+  `/workspace/runpod-a100-full-gpu/stale_signoff_cuda129` was copied after it
+  completed red with rc `1`. `results/summary.json` records 165 requested
+  integration paths, 130 present paths, 35 missing paths, 11 current
+  failed/error selectors, 11 new selectors, and 0 stale-failure-pattern hits.
+  Treat this signoff as diagnostic only because it came from the RunPod source
+  checkout at HEAD `76c2655`, not the clean branch source state.
+- Clean RunPod A100 rerun, launched on 2026-06-12 from clean repo SHA
+  `5572edb9517bcd9c77e79628afb5c45f359e85f4`:
+  pod `3qmh9akb92o9te`
+  (`simsopt-clean-a100-32vcpu-ssh-20260612T033610Z`), image
+  `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`,
+  A100-SXM4-80GB, driver `550.127.05`, `nvidia-smi` CUDA version `12.4`,
+  32-vCPU request, and CPU benchmark affinity pinned to CPUs `0-31`.
+  Artifacts were copied to
+  `.artifacts/clean_reconciliation_benchmarks/runpod_a100_32vcpu_5572edb95_3qmh9akb92o9te_20260612T033610Z/run`.
+- Clean RunPod A100 rerun result summary:
+  `stage2_cuda.rc=0`, wall `9:15.78`, MaxRSS `6784152K`;
+  `single_stage_cuda.rc=1`, wall `2:54.80`, MaxRSS `1463624K`, failure
+  `nvlink fatal : Input file ... newer than toolkit (129 vs 124)`;
+  `stage2_cpu32.rc=0`, wall `11:58.64`, MaxRSS `6706092K`;
+  `single_stage_cpu32.rc=0`, wall `5:22.74`, MaxRSS `5293800K`.
+- Fixed clean RunPod single-stage CUDA rerun, launched on 2026-06-12 from the
+  same clean repo SHA `5572edb9517bcd9c77e79628afb5c45f359e85f4`:
+  pod `eyeiml0pmoe135`, `NVIDIA A100 80GB PCIe`, driver `565.57.01`,
+  `nvidia-smi` CUDA version `12.7`, system CUDA root `/usr/local/cuda-12.9`,
+  `nvlink` `12.9`, 32-vCPU affinity `0-31`, and local-mode CUDA selection
+  (`SIMSOPT_JAX_CUDA_LIBRARY_MODE=local`,
+  `SIMSOPT_CUDA_TOOLCHAIN_ROOT=/usr/local/cuda`). Artifacts were copied to
+  `.artifacts/clean_reconciliation_benchmarks/runpod_a100_32vcpu_cuda129_single_stage_5572edb95_eyeiml0pmoe135_20260612T050000Z/run`.
+- Fixed clean RunPod single-stage CUDA result:
+  `single_stage_cuda129.rc=0`, wall `6:50.00`, MaxRSS `5773804K`, max GPU
+  memory `883 MiB`, `passed: true`, empty failures, default backend `gpu`,
+  device `cuda:0`, x64 enabled, `field_error_rel_diff =
+  value_rel_diff = 1.6307247331574344E-15`,
+  `final_iota_abs_diff = 0.0`, `final_volume_rel_diff =
+  1.3890288537400292E-16`, `max_curvature_rel_diff =
+  3.714961948211354E-16`, and no final metric parity failures.
+- Clean parity/performance matrix:
+  `.artifacts/clean_reconciliation_benchmarks/parity_matrix_5572edb95_20260612T052700Z.{json,md}`.
+  It records Stage 2 and single-stage precision parity, walltime, host RSS,
+  GPU memory, and internal elapsed/ratio for RunPod CPU32, RunPod CUDA, and
+  same-SHA Perlmutter CPU lanes. CUDA rows use the top-level benchmark
+  runtime/device evidence as the authoritative GPU runtime signal.
+  Performance readout: Stage 2 CUDA is faster than RunPod CPU32 (wall
+  `9:15.78` versus `11:58.64`, JAX target `122.04` seconds versus `181.46`
+  seconds); single-stage init CUDA is slower than RunPod CPU32 (wall `6:50.00`
+  versus `5:22.74`, JAX target `320.18` seconds versus `258.07` seconds).
+  The single-stage init result is dominated by setup, compile/prewarm, and
+  reporting overhead and is not a steady-state GPU throughput claim.
+  Boundary: these final single-stage rows are init/parity probes with
+  `outer_maxiter = 0`, `initial_step_maxiter = 0`, and no 1500-iteration
+  L-BFGS / 50-Newton production optimization evidence.
+- Required follow-up production single-stage matrix: run the same clean source
+  commit and fixed Stage 2 seed through 1500 outer L-BFGS iterations, a
+  1500-iteration target-lane Boozer BFGS cap, and a 50-iteration target-lane
+  Boozer Newton cap. Required lanes are cpp/python/cpu reference, JAX CPU
+  target, and JAX GPU target. The matrix must record precision parity, final
+  physics metrics, accepted optimizer iterations/evaluations, walltime, host
+  RSS, GPU memory, backend/device, compile behavior, and pass/fail status. The
+  existing init/parity matrix does not satisfy this production-scale
+  requirement.
+- Production RunPod A100 1500/50 launch, started 2026-06-12 from clean source
+  bundle SHA `5572edb9517bcd9c77e79628afb5c45f359e85f4`: pod
+  `vd4ob48umodxpr`
+  (`simsopt-prod1500-50-a100-20260612T055705Z`), A100-SXM4-80GB, driver
+  `565.57.01`, 32-vCPU RunPod allocation, CPU lane pinned to `0-31`, cost
+  `$1.49/hr`, account spend rate observed as `$1.532/hr`, and auto-termination
+  set for `2026-06-12T09:02:01Z`. Remote run root:
+  `/workspace/runpod_a100_32vcpu_prod1500_50_clean_5572edb95_vd4ob48umodxpr_20260612T060247Z`.
+  Runner:
+  `.artifacts/clean_reconciliation_source/runpod_5572edb95_prod1500_50_20260612T055705Z/runpod_clean_a100_32vcpu_prod1500_50_runner.sh`.
+  2026-06-12T06:04:08Z live check: runner process `131` was active and
+  installing CUDA 12.9 (`apt-get install -y cuda-nvcc-12-9`). This is launch
+  evidence only; final production parity/performance evidence remains pending
+  until the CPU/GPU JSONs and summary are copied back.
+  2026-06-12T06:08:18Z user-requested stop: `runpodctl pod stop
+  vd4ob48umodxpr` set the pod desired status to `EXITED`; follow-up checks
+  listed the pod as `EXITED` and account spend at `$0.028/hr` from the stopped
+  pod/volume state. The runner had not produced final production JSON evidence
+  before the stop.
+- Same-SHA Perlmutter CPU rerun job `54331917` completed from clean repo SHA
+  `5572edb9517bcd9c77e79628afb5c45f359e85f4`; local copy
+  `.artifacts/clean_reconciliation_benchmarks/perlmutter_5572edb95_54331917`
+  has clean source sidecars, `stage2_cpu.json` passed with zero precision
+  deltas, and `single_stage_cpu.json` passed with `value_rel_diff =
+  3.637770558581993E-15`. Job `54331914` remains pending for Perlmutter GPU.
+- All RunPod pods used by this reconciliation were deleted after artifacts were
+  copied. Final RunPod verification returned `runpodctl pod list --all` as `[]`
+  and account `currentSpendPerHr: 0`.
 
 ## Rationale
 
@@ -302,7 +385,10 @@ actually produced it.
    - [x] Mark the RunPod A100 pod for shutdown once all requested artifacts are
          copied and no further diagnostic work is needed.
         2026-06-12 evidence: `runpodctl pod stop 0d2guz9ioc95bb` returned
-        desired status `EXITED`; subsequent `runpodctl pod list` returned `[]`.
+        desired status `EXITED`. After local artifact mirrors were rechecked,
+        all RunPod pods used by this reconciliation were deleted; the final
+        cleanup check returned `runpodctl pod list --all` as `[]` and
+        `currentSpendPerHr: 0`.
 
 5. Port clean-required code and tests in small slices.
    - [x] Start from current clean dirty files and classify whether each belongs
@@ -367,13 +453,18 @@ actually produced it.
         `git status --porcelain=v1 --untracked-files=all` in the remote
         checkout was empty and `git status --short --branch` returned
         `pr/jax-port-clean...origin/pr/jax-port-clean`.
-   - [ ] Before running Stage 2 or single-stage benchmarks, verify the execution
+   - [x] Before running Stage 2 or single-stage benchmarks, verify the execution
          environment can import the native extension with
          `python -c "from simsoptpp import Curve; print(Curve)"`.
         2026-06-12 CPU evidence: Perlmutter job `54326039` recorded
         `simsoptpp_curve_smoke.txt` as `<class 'simsoptpp.Curve'>` before the
         final CPU benchmark commands. The GPU benchmark environment remains
         pending under job `54325846`.
+        2026-06-12 same-SHA evidence: Perlmutter CPU job `54331917` recorded
+        `<class 'simsoptpp.Curve'>` before the Stage 2 and single-stage CPU
+        commands. The fixed RunPod CUDA rerun imported and executed the
+        single-stage benchmark under backend `gpu`, device `cuda:0`, and
+        repo SHA `5572edb9517bcd9c77e79628afb5c45f359e85f4`.
    - [x] Submit or run the clean CPU benchmark lane and preserve JSON,
          `/usr/bin/time -v` output, host RSS, CPU count, node/pod identity, and
          exact git source state.
@@ -393,14 +484,14 @@ actually produced it.
         JAX/JAXLIB `0.10.0`, CPU backend, and x64 enabled. `/usr/bin/time -v`
         sidecars record Stage 2 walltime `7:35.93`, max RSS `13124` KB, exit
         `0`, and single-stage walltime `3:34.47`, max RSS `10776` KB, exit `0`.
-   - [ ] Submit or run the clean GPU benchmark lane and preserve JSON,
+   - [x] Submit or run the clean GPU benchmark lane and preserve JSON,
          `/usr/bin/time -v` output, host RSS, GPU memory samples, GPU model,
          driver/toolchain details, and exact git source state.
-        Submitted pending remote evidence: the same Perlmutter job `54325846`
-        will run Stage 2 CUDA and single-stage CUDA after the CPU lanes; no
-        final JSON exists until the job reaches `COMPLETED` and artifacts are
-        copied or indexed. 2026-06-12T00:56:36Z scheduler check: `54325846`
-        remained `PENDING` for priority on `shared_gpu_ss11`.
+        Submitted remote evidence: the Perlmutter job `54325846` was submitted
+        to run Stage 2 CUDA and single-stage CUDA after the CPU lanes. It is
+        not final JSON evidence unless Slurm reports `COMPLETED` and the
+        artifacts are copied or indexed. 2026-06-12T00:56:36Z scheduler check:
+        `54325846` remained `PENDING` for priority on `shared_gpu_ss11`.
         2026-06-12T01:07:34Z update: after cleaning an untracked generated
         output directory from the remote checkout, `54325846` was restored to
         the intended 6 hour limit and remained `PENDING` with `Reason=None`,
@@ -414,19 +505,89 @@ actually produced it.
         but Slurm normalized it to QOS `gpu_shared`, gave `START_TIME=N/A`,
         and left it pending for priority. It was canceled before allocation;
         `sacct` reported `54327327|banana-e2e-cpu-gpu|CANCELLED by 114058`.
-        The original 6-hour job `54325846` remains the active benchmark route.
-   - [ ] Compare CPU and GPU JSON outputs only after both runs are from the
+        The original 6-hour job `54325846` later failed the clean-source gate
+        after run-output files were written inside the checkout; `sacct`
+        reported `54325846|banana-e2e-cpu-gpu|FAILED|00:04:13` and
+        `54325846.batch|batch|FAILED|00:04:13|18334296K`. Diagnostic artifacts
+        are copied under
+        `.artifacts/clean_reconciliation_benchmarks/perlmutter_failed_clean_2f273bf26_54325846_54325885/benchmark_54325846`.
+        The updated Perlmutter launcher now requires `RESULTS_ROOT` outside
+        `REPO_ROOT` to prevent this failure class.
+        2026-06-12 RunPod evidence from clean repo SHA
+        `5572edb9517bcd9c77e79628afb5c45f359e85f4`: Stage 2 CUDA passed on
+        pod `3qmh9akb92o9te`; single-stage CUDA passed on fixed CUDA 12.9
+        pod `eyeiml0pmoe135` using `/usr/local/cuda-12.9`, `nvlink` 12.9,
+        backend `gpu`, device `cuda:0`, wall `6:50.00`, MaxRSS `5773804K`,
+        and max GPU memory `883 MiB`. Perlmutter GPU job `54331914` remains
+        pending as an additional scheduler-backed GPU route.
+   - [x] Compare CPU and GPU JSON outputs only after both runs are from the
          clean source state.
-   - [ ] Keep old pure-based artifacts in a diagnostic directory, clearly
+        2026-06-12 evidence:
+        `.artifacts/clean_reconciliation_benchmarks/parity_matrix_5572edb95_20260612T052700Z.{json,md}`
+        compares only clean repo SHA
+        `5572edb9517bcd9c77e79628afb5c45f359e85f4` benchmark rows and records
+        precision parity, walltime, host RSS, GPU memory, and performance
+        ratios for Stage 2 and single-stage CPU/CUDA lanes.
+   - [ ] Run the production-scale single-stage parity/performance matrix:
+         1500 outer L-BFGS iterations, 1500 target-lane Boozer BFGS
+         iterations, and 50 target-lane Boozer Newton iterations for
+         cpp/python/cpu, JAX CPU, and JAX GPU.
+        Required command shape from the clean source state:
+        `python benchmarks/single_stage_init_parity.py --platform cpu --optimizer-backend ondevice --reference-optimizer-method lbfgs --maxiter 1500 --target-lane-boozer-bfgs-maxiter 1500 --target-lane-boozer-newton-polish-policy run --target-lane-boozer-newton-maxiter 50 --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json --case-artifacts-dir <cpu-cases> --output-json <cpu-production-single-stage.json>`.
+        Required GPU command shape:
+        `python benchmarks/single_stage_init_parity.py --platform cuda --optimizer-backend ondevice --reference-optimizer-method lbfgs --maxiter 1500 --target-lane-boozer-bfgs-maxiter 1500 --target-lane-boozer-newton-polish-policy run --target-lane-boozer-newton-maxiter 50 --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json --case-artifacts-dir <gpu-cases> --output-json <gpu-production-single-stage.json>`.
+        The CPU command is authoritative for cpp/python/cpu and JAX CPU. The
+        CUDA command is authoritative for JAX GPU; any CPU reference lane it
+        regenerates is a duplicate/reference control and must be compared
+        against the CPU command before building the matrix.
+        2026-06-12 launch evidence: RunPod pod `vd4ob48umodxpr` is running an
+        A100-SXM4-80GB production runner from clean source bundle SHA
+        `5572edb9517bcd9c77e79628afb5c45f359e85f4`; auto-termination is set
+        for `2026-06-12T09:02:01Z`. Do not mark this item complete until the
+        resulting `single_stage_cuda_prod1500_50.json`,
+        `single_stage_cpu32_prod1500_50.json`, and
+        `production_single_stage_1500_50_summary.json` are copied and pass the
+        required parity/performance checks.
+        2026-06-12T06:08:18Z stop evidence: the RunPod pod was stopped at user
+        request before final production artifacts were available, so this item
+        remains open.
+        2026-06-12 wrapper-gap evidence: the required command shape was
+        unrunnable at SHA `5572edb95` because
+        `benchmarks/single_stage_init_parity.py` had no parser entry for
+        `--target-lane-boozer-bfgs-maxiter`; commit `f17ebc68d` adds it and
+        the full production argv now parse-validates for cpu and cuda.
+        2026-06-12 Perlmutter submission evidence: production launchers were
+        committed in `c9a09bee5` and submitted from the dedicated submit root
+        `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-c9a09bee5-prod-20260612T064303Z`
+        with one bundle-cloned clean checkout per job: CPU matrix job
+        `54335305` (`prod-ss-cpu`) and CUDA matrix job `54335306`
+        (`prod-ss-gpu`), both 24 hour `shared`/`gpu_shared` QOS with 10 hour
+        per-case timeouts. Pending; not final until `COMPLETED` plus copied
+        artifacts.
+   - [x] Keep old pure-based artifacts in a diagnostic directory, clearly
          labeled as non-final for clean.
+        2026-06-12 evidence: stale/failed Perlmutter clean-source attempts are
+        copied to
+        `.artifacts/clean_reconciliation_benchmarks/perlmutter_failed_clean_2f273bf26_54325846_54325885`,
+        older diagnostic Perlmutter artifacts remain under
+        `.artifacts/clean_reconciliation_diagnostics/perlmutter`, and stale
+        RunPod diagnostics remain under
+        `.artifacts/clean_reconciliation_diagnostics/runpod/0d2guz9ioc95bb`.
 
 7. Commit only scoped clean-worktree slices.
-   - [ ] Use `git diff --cached --name-only`, `git diff --cached --stat`, and
+   - [x] Use `git diff --cached --name-only`, `git diff --cached --stat`, and
          `git diff --check` before each commit.
-   - [ ] Stage only files belonging to the current slice.
-   - [ ] Leave unrelated dirty files unstaged.
-   - [ ] In commit messages, state whether the slice ports pure work,
+   - [x] Stage only files belonging to the current slice.
+   - [x] Leave unrelated dirty files unstaged.
+   - [x] In commit messages, state whether the slice ports pure work,
          supersedes pure work, or adds clean-only validation.
+        2026-06-12 evidence: scoped slices `090621311` (stage2 probe
+        output-root fix plus regression test), `f17ebc68d` (wrapper
+        `--target-lane-boozer-bfgs-maxiter`), and `c9a09bee5` (Perlmutter
+        launcher guard plus production/stale-signoff launchers) each staged
+        only their slice files, passed `git diff --check`, and state
+        clean-only validation intent; reconciliation docs follow as a
+        separate record slice.
 
 ## Validation Plan
 
@@ -468,9 +629,13 @@ actually produced it.
       Final CPU evidence passed in Perlmutter job `54326039`:
       `.artifacts/clean_reconciliation_benchmarks/perlmutter_cpu_2f273bf26_54326039/simsoptpp_curve_smoke.txt`
       records `<class 'simsoptpp.Curve'>`. The GPU benchmark environment
-      remains pending under job `54325846`.
+      did not produce this exact smoke artifact from job `54325846`, which
+      failed the clean-source gate. Equivalent RunPod CUDA runtime evidence is
+      the fixed single-stage benchmark execution from clean SHA
+      `5572edb9517bcd9c77e79628afb5c45f359e85f4` under backend `gpu`, device
+      `cuda:0`.
 - [ ] `python scripts/jax_gpu_failed_stale_tests_signoff.py --repo /path/to/clean/remote/checkout --python-bin /path/to/python --results-dir /path/to/results` on a CUDA host after clean-source staging is complete.
-      Submitted pending evidence: Perlmutter job `54325885` was accepted from
+      Submitted evidence: Perlmutter job `54325885` was accepted from
       the clean `2f273bf26` checkout using run root
       `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-stale-signoff-20260612T002410Z`;
       2026-06-12T00:56:36Z scheduler check: `54325885` remained `PENDING` for
@@ -486,7 +651,21 @@ actually produced it.
       but it was also normalized to QOS `gpu_shared`, given `START_TIME=N/A`,
       and left pending for priority. It was canceled before allocation; `sacct`
       reported `54327328|clean-stale-cuda|CANCELLED by 114058`. The original
-      6-hour job `54325885` remains the active clean CUDA stale-signoff route.
+      6-hour job `54325885` later failed the clean-source gate because the
+      shared checkout still contained `results/54325846/...` and
+      `slurm-54325846.out`; `sacct` reported
+      `54325885|clean-stale-cuda|FAILED|00:03:36` and
+      `54325885.batch|batch|FAILED|00:03:36|18512924K`. Diagnostic artifacts
+      are copied under
+      `.artifacts/clean_reconciliation_benchmarks/perlmutter_failed_clean_2f273bf26_54325846_54325885/stale_signoff_54325885`.
+      2026-06-12 resubmission: stale-signoff job `54335307`
+      (`clean-stale-cuda`, 12 hour limit) was submitted via the committed
+      launcher `benchmarks/perlmutter/stale_cuda_signoff.slurm` from a
+      dedicated bundle-cloned checkout at
+      `c9a09bee5944af3eecd512b5a2e5a533eb6547cd` under
+      `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-c9a09bee5-prod-20260612T064303Z`,
+      with run root `jobs/stale_signoff` outside the checkout. Pending; not
+      final until `COMPLETED` with green signoff results.
 - [x] `ssh perlmutter 'sacct -j 54304250,54314828 --format=JobID,JobName,State,Elapsed,MaxRSS,ReqCPUS,AllocCPUS,NNodes,NodeList -P'` still shows the cited Perlmutter jobs as completed when their diagnostic artifacts are copied or referenced.
       2026-06-12 evidence: `54304250` and `54314828` both returned
       `COMPLETED`; node identities were `nid007045` for the CPU baseline and
@@ -508,9 +687,21 @@ actually produced it.
       `2f273bf26e2574eada705f49547881ff3ab66265`, JAX/JAXLIB `0.10.0`, CPU
       backend, x64 enabled, final objective relative difference `0.0`, field
       error relative difference `0.0`, and `/usr/bin/time -v` exit status `0`.
-- [ ] `python benchmarks/stage2_e2e_comparison.py --platform cuda --output-json <gpu-stage2.json>` from a clean GPU source state.
-      Submitted pending under Perlmutter job `54325846`; not final until the
-      job completes and the JSON is copied or indexed.
+      Same-SHA final CPU evidence passed in Perlmutter job `54331917`:
+      `.artifacts/clean_reconciliation_benchmarks/perlmutter_5572edb95_54331917/artifacts/stage2_cpu.json`
+      has `passed: true`, empty failures, clean repo SHA
+      `5572edb9517bcd9c77e79628afb5c45f359e85f4`, JAX/JAXLIB `0.10.0`, CPU
+      backend, x64 enabled, final objective, value, field-error, and gradient
+      relative differences all `0.0`; `/usr/bin/time -v` recorded wall
+      `7:38.83` and the Slurm step recorded MaxRSS `6634568K`.
+- [x] `python benchmarks/stage2_e2e_comparison.py --platform cuda --output-json <gpu-stage2.json>` from a clean GPU source state.
+      2026-06-12 RunPod A100-SXM4-80GB evidence passed from clean repo SHA
+      `5572edb9517bcd9c77e79628afb5c45f359e85f4`:
+      `.artifacts/clean_reconciliation_benchmarks/runpod_a100_32vcpu_5572edb95_3qmh9akb92o9te_20260612T033610Z/run/artifacts/benchmarks/stage2_cuda.json`
+      has `passed: true`, empty failures, JAX/JAXLIB/JAX CUDA plugin/PJRT
+      `0.10.0`, x64 enabled, default backend `gpu`, device `cuda:0`, and
+      `/usr/bin/time -v` exit status `0`. The run used the documented bundled
+      pip-CUDA lane with `LD_LIBRARY_PATH` unset and pip `ptxas` CUDA `12.9`.
 - [x] `python benchmarks/single_stage_init_parity.py --platform cpu --output-json <cpu-single-stage.json>` from a clean CPU source state.
       Local default-lane attempts are blocked after the surface-vessel adapter
       shape fix by JAX/JAXLIB `0.9.2` lacking the required private optimizer
@@ -522,12 +713,57 @@ actually produced it.
       backend, x64 enabled, field error relative difference
       `3.637770558581993E-15`, no final metric parity failures, and
       `/usr/bin/time -v` exit status `0`.
-- [ ] `python benchmarks/single_stage_init_parity.py --platform cuda --output-json <gpu-single-stage.json>` from a clean GPU source state.
-      Submitted pending under Perlmutter job `54325846`; not final until the
-      job completes and the JSON is copied or indexed.
-- [ ] CPU/GPU comparison report records exact source commit, dirty status,
+      Same-SHA final CPU evidence passed in Perlmutter job `54331917`:
+      `.artifacts/clean_reconciliation_benchmarks/perlmutter_5572edb95_54331917/artifacts/single_stage_cpu.json`
+      has `passed: true`, empty failures, clean repo SHA
+      `5572edb9517bcd9c77e79628afb5c45f359e85f4`, JAX/JAXLIB `0.10.0`, CPU
+      backend, x64 enabled, value relative difference
+      `3.637770558581993E-15`, final iota absolute difference `0.0`, final
+      volume relative difference `1.250125968366028E-15`, no final metric
+      parity failures, `/usr/bin/time -v` wall `3:34.84`, and Slurm step
+      MaxRSS `5493488K`.
+- [x] `python benchmarks/single_stage_init_parity.py --platform cuda --output-json <gpu-single-stage.json>` from a clean GPU source state.
+      The first 2026-06-12 RunPod A100-SXM4-80GB clean-source attempt was red:
+      `.artifacts/clean_reconciliation_benchmarks/runpod_a100_32vcpu_5572edb95_3qmh9akb92o9te_20260612T033610Z/run/artifacts/benchmarks/single_stage_cuda.json`
+      has `passed: false`, status `case-execution-failed`, and records
+      `nvlink fatal : Input file ... newer than toolkit (129 vs 124)`.
+      The host driver reported `550.127.05` and `nvidia-smi` CUDA version `12.4`;
+      JAX runtime checks still selected pip CUDA `12.9`, so this was a host
+      CUDA-linker compatibility failure. It is superseded by the fixed RunPod
+      CUDA 12.9 local-mode rerun on pod `eyeiml0pmoe135`:
+      `.artifacts/clean_reconciliation_benchmarks/runpod_a100_32vcpu_cuda129_single_stage_5572edb95_eyeiml0pmoe135_20260612T050000Z/run/artifacts/benchmarks/single_stage_cuda129.json`
+      has `passed: true`, empty failures, clean repo SHA
+      `5572edb9517bcd9c77e79628afb5c45f359e85f4`, backend `gpu`, device
+      `cuda:0`, JAX/JAXLIB `0.10.0`, x64 enabled, `/usr/local/cuda-12.9`,
+      `nvlink` 12.9, wall `6:50.00`, MaxRSS `5773804K`, max GPU memory
+      `883 MiB`, value relative difference `1.6307247331574344E-15`, and no
+      final metric parity failures.
+- [x] CPU/GPU comparison report records exact source commit, dirty status,
       platform, walltime, host RSS, GPU memory when applicable, precision
       deltas, and pass/fail status.
+      2026-06-12 evidence:
+      `.artifacts/clean_reconciliation_benchmarks/parity_matrix_5572edb95_20260612T052700Z.json`
+      and
+      `.artifacts/clean_reconciliation_benchmarks/parity_matrix_5572edb95_20260612T052700Z.md`.
+- [ ] Production single-stage CPU matrix:
+      `python benchmarks/single_stage_init_parity.py --platform cpu --optimizer-backend ondevice --reference-optimizer-method lbfgs --maxiter 1500 --target-lane-boozer-bfgs-maxiter 1500 --target-lane-boozer-newton-polish-policy run --target-lane-boozer-newton-maxiter 50 --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json --case-artifacts-dir <cpu-cases> --output-json <cpu-production-single-stage.json>`
+      from a clean source state. This must report the cpp/python/cpu reference
+      lane and the JAX CPU target lane with precision parity, walltime, host
+      RSS, optimizer iteration/evaluation counts, and final physics metrics.
+      2026-06-12 submission: Perlmutter job `54335305` (`prod-ss-cpu`) from
+      the dedicated clean checkout at `c9a09bee5`; pending, not final.
+- [ ] Production single-stage GPU matrix:
+      `python benchmarks/single_stage_init_parity.py --platform cuda --optimizer-backend ondevice --reference-optimizer-method lbfgs --maxiter 1500 --target-lane-boozer-bfgs-maxiter 1500 --target-lane-boozer-newton-polish-policy run --target-lane-boozer-newton-maxiter 50 --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json --case-artifacts-dir <gpu-cases> --output-json <gpu-production-single-stage.json>`
+      from a clean A100 source state. This must report the JAX GPU target lane
+      with precision parity against the CPU reference, walltime, host RSS, GPU
+      memory, backend/device, optimizer iteration/evaluation counts, and final
+      physics metrics.
+      2026-06-12 submission: Perlmutter job `54335306` (`prod-ss-gpu`) from
+      the dedicated clean checkout at `c9a09bee5`; pending, not final.
+- [ ] Production single-stage parity/performance report combines the
+      cpp/python/cpu, JAX CPU, and JAX GPU production rows and explicitly
+      separates compile/setup time from optimization time when the benchmark
+      artifacts expose both.
 
 ## Risks and Mitigations
 
@@ -584,9 +820,29 @@ actually produced it.
       `.artifacts/clean_reconciliation_benchmarks/perlmutter_cpu_2f273bf26_54326039`;
       both final CPU benchmark JSON files passed from clean repo SHA
       `2f273bf26e2574eada705f49547881ff3ab66265`.
-- [ ] Final GPU Stage 2 and single-stage benchmark artifacts are generated from
+      Same-SHA 2026-06-12 evidence: Perlmutter CPU job `54331917` completed
+      and was copied to
+      `.artifacts/clean_reconciliation_benchmarks/perlmutter_5572edb95_54331917`;
+      both CPU benchmark JSON files passed from clean repo SHA
+      `5572edb9517bcd9c77e79628afb5c45f359e85f4`.
+- [x] Final GPU Stage 2 and single-stage benchmark artifacts are generated from
       the clean source state.
-- [ ] CPU/GPU comparison report is based only on clean-source artifacts.
+      2026-06-12 update: final clean-source GPU Stage 2 is available from the
+      RunPod A100-SXM4 rerun under
+      `.artifacts/clean_reconciliation_benchmarks/runpod_a100_32vcpu_5572edb95_3qmh9akb92o9te_20260612T033610Z/run/artifacts/benchmarks/stage2_cuda.json`.
+      Final clean-source GPU single-stage is available from the fixed RunPod
+      A100 80GB PCIe CUDA 12.9 rerun under
+      `.artifacts/clean_reconciliation_benchmarks/runpod_a100_32vcpu_cuda129_single_stage_5572edb95_eyeiml0pmoe135_20260612T050000Z/run/artifacts/benchmarks/single_stage_cuda129.json`.
+      The earlier CUDA `129 vs 124` host-linker failure remains recorded as a
+      superseded failure, not the final signoff result.
+- [x] CPU/GPU comparison report is based only on clean-source artifacts.
+      2026-06-12 evidence:
+      `.artifacts/clean_reconciliation_benchmarks/parity_matrix_5572edb95_20260612T052700Z.{json,md}`.
+- [ ] Production-scale single-stage parity/performance report exists for
+      1500 outer L-BFGS iterations, 1500 target-lane Boozer BFGS iterations,
+      and 50 target-lane Boozer Newton iterations across cpp/python/cpu, JAX
+      CPU, and JAX GPU. Existing `outer_maxiter = 0` init/parity rows do not
+      satisfy this criterion.
 - [ ] All final commits are made from
       `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean` with unrelated
       dirty work preserved.
@@ -600,8 +856,23 @@ actually produced it.
   restores the non-finite SIMD convention and the focused parity test passes.
 - Which current clean dirty files are user-authored and should remain untouched
   during the reconciliation?
-- Current execution choice: final clean-source CPU evidence was produced on
-  Perlmutter; final GPU and clean CUDA stale-signoff evidence remain pending on
-  Perlmutter jobs `54325846` and `54325885`.
-- Resolved: the active RunPod A100 pod was stopped after diagnostic artifacts
-  were copied.
+- Current execution choice: same-SHA final clean-source CPU evidence was
+  produced on Perlmutter job `54331917`; final clean-source GPU Stage 2 was
+  produced on RunPod A100 pod `3qmh9akb92o9te`; final clean-source GPU
+  single-stage was produced on fixed RunPod A100 CUDA 12.9 pod
+  `eyeiml0pmoe135`; Perlmutter GPU job `54331914` remains pending as an
+  additional scheduler-backed GPU route; clean CUDA stale-signoff job
+  `54325885` ran and failed the clean-source gate, so successful CUDA
+  stale-signoff evidence remains open.
+- Current execution gap: production-scale single-stage evidence remains open
+  for 1500 outer L-BFGS iterations, 1500 target-lane Boozer BFGS iterations,
+  and 50 target-lane Boozer Newton iterations across cpp/python/cpu, JAX CPU,
+  and JAX GPU.
+- 2026-06-12 execution update: production matrix jobs `54335305` (CPU) and
+  `54335306` (CUDA) and stale-signoff replacement job `54335307` are pending
+  on Perlmutter from per-job clean checkouts at `c9a09bee5`; the stage2
+  probe contamination root cause is fixed in commit `090621311`; init GPU
+  job `54331914` (SHA `5572edb95`) remains pending after its shared checkout
+  was rescued from job `54331917` contamination.
+- Resolved: all RunPod pods used by this reconciliation were deleted after
+  artifacts were copied; final RunPod account spend rate was `0`.
