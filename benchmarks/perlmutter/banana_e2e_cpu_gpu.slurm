@@ -24,6 +24,17 @@ ARTIFACT_DIR="${JOB_RESULTS}/artifacts"
 FIXTURE_DIR="benchmarks/fixtures/single_stage_seed_iota15"
 FIXTURE_STAGE2_BS="${FIXTURE_DIR}/biot_savart_opt.json"
 
+repo_root_real="$(realpath "${REPO_ROOT}")"
+results_root_real="$(realpath -m "${RESULTS_ROOT}")"
+case "${results_root_real}/" in
+  "${repo_root_real}/"*)
+    echo "RESULTS_ROOT must be outside REPO_ROOT for clean-source signoff" >&2
+    echo "REPO_ROOT=${repo_root_real}" >&2
+    echo "RESULTS_ROOT=${results_root_real}" >&2
+    exit 1
+    ;;
+esac
+
 mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 exec > >(tee "${LOG_DIR}/driver_stdout.log")
 exec 2> >(tee "${LOG_DIR}/driver_stderr.log" >&2)
