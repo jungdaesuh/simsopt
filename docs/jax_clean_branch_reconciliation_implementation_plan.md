@@ -75,14 +75,16 @@ recovering validated work.
   `benchmarks/stage2_e2e_comparison.py` and
   `benchmarks/single_stage_init_parity.py`, and both currently define
   `--platform {auto,cpu,cuda}` plus required `--output-json` arguments.
-- In the current local clean checkout, `python benchmarks/stage2_e2e_comparison.py
-  --help` and `python benchmarks/single_stage_init_parity.py --help` fail before
-  argparse because the local environment does not provide a usable
-  `simsoptpp.Curve` native extension. A direct
-  `python -c "from simsoptpp import Curve; print(Curve)"` currently fails with
-  `ModuleNotFoundError: No module named 'simsoptpp'`. Final benchmark validation
-  therefore requires a built clean-source environment, not just the source
-  files.
+- The clean local Miniforge environment at
+  `../simsopt-jax/.miniforge/bin/python3.13` can import the native extension:
+  `from simsoptpp import Curve` returns `<class 'simsoptpp.Curve'>`. Both
+  benchmark entrypoints reach argparse under that Python. The system/default
+  `python` path is not the benchmark authority for this plan.
+- The local Miniforge environment has JAX/JAXLIB `0.9.2`. Stage 2 CPU
+  benchmark execution works with `JAX_ENABLE_X64=1`, but default single-stage
+  target-lane execution reaches the JAX private optimizer gate and requires the
+  pinned JAX/JAXLIB `0.10.0` runtime used by the Perlmutter/RunPod benchmark
+  setup.
 - The stale CUDA signoff inventory has been refreshed against the clean
   worktree. A default fail-closed dry-run at
   `/tmp/clean-signoff-dry-run-after-final-review-pass/summary.json` requests
@@ -333,6 +335,11 @@ actually produced it.
    - [ ] Submit or run the clean CPU benchmark lane and preserve JSON,
          `/usr/bin/time -v` output, host RSS, CPU count, node/pod identity, and
          exact git source state.
+        Partial local evidence: clean-source Stage 2 CPU passed under
+        `JAX_ENABLE_X64=1` at
+        `.artifacts/clean_reconciliation_benchmarks/cpu_330925564_x64_20260611T230856Z`.
+        Default single-stage CPU remains open locally because JAX/JAXLIB
+        `0.9.2` cannot run the required private on-device Boozer optimizer.
    - [ ] Submit or run the clean GPU benchmark lane and preserve JSON,
          `/usr/bin/time -v` output, host RSS, GPU memory samples, GPU model,
          driver/toolchain details, and exact git source state.
@@ -363,7 +370,7 @@ actually produced it.
       deselectors, 0 current/new/stale failures, and `failures: []`.
 - [x] Focused tests for each ported slice, chosen from the files touched by
       that slice.
-      2026-06-11 evidence: `ruff check` on touched Python passed;
+      2026-06-11 signoff-slice evidence: `ruff check` on touched Python passed;
       `tests/test_gpu_transfer_guard_harness.py -q` passed `17 passed`;
       `tests/jax/core/test_dipole_field_item24.py -q` passed
       `23 passed, 1 warning`;
@@ -373,13 +380,21 @@ actually produced it.
       `48 passed, 9 warnings`;
       `tests/geo/test_surface_fourier_jax.py::test_split_flat_to_xyzc_keeps_nan_blocks_isolated -q`
       passed `1 passed`.
-- [x] Crucible reviewer loop reaches strict `PASS` for the current code/test
-      slice.
-      2026-06-11 evidence: six review agents were run and closed. Initial
+      2026-06-12 surface-vessel adapter evidence:
+      `JAX_ENABLE_X64=1 ../simsopt-jax/.miniforge/bin/python3.13 -m pytest tests/geo/test_surface_objectives_jax.py::test_surface_surface_distance_adapter_flattens_surface_grids_for_pairwise_vjp -q`
+      passed `1 passed, 1 warning`; `ruff check` on the touched adapter/test
+      files passed; `git diff --check` passed.
+- [x] Crucible reviewer loop reaches strict `PASS` for reviewed code/test
+      slices.
+      2026-06-11 signoff-slice evidence: six review agents were run and closed. Initial
       findings on the donor weighted surface split and tracked/untracked doc
       wording were fixed; delta reviewers returned `PASS`.
+      2026-06-12 surface-vessel adapter delta review: six reviewers returned
+      `PASS` after stale validation wording was fixed.
 - [ ] `python -c "from simsoptpp import Curve; print(Curve)"` succeeds in the
       clean-source CPU and GPU benchmark environments.
+      Local Miniforge CPU evidence passed, but final CPU/GPU benchmark
+      environments still need this gate recorded beside their run artifacts.
 - [ ] `python scripts/jax_gpu_failed_stale_tests_signoff.py --repo /path/to/clean/remote/checkout --python-bin /path/to/python --results-dir /path/to/results` on a CUDA host after clean-source staging is complete.
 - [ ] `ssh perlmutter 'sacct -j 54304250,54314828 --format=JobID,JobName,State,Elapsed,MaxRSS,ReqCPUS,AllocCPUS,NNodes,NodeList -P'` still shows the cited Perlmutter jobs as completed when their diagnostic artifacts are copied or referenced.
 - [ ] RunPod diagnostic artifact copy includes rc files and metrics JSON from
@@ -387,8 +402,13 @@ actually produced it.
       `/workspace/runpod-a100-full-gpu/stale_signoff_cuda129/`, and
       `/workspace/runpod-a100-cpu32-immediate/benchmarks/`.
 - [ ] `python benchmarks/stage2_e2e_comparison.py --platform cpu --output-json <cpu-stage2.json>` from a clean CPU source state.
+      Local evidence passed with `JAX_ENABLE_X64=1` and
+      `.artifacts/clean_reconciliation_benchmarks/cpu_330925564_x64_20260611T230856Z/stage2_cpu.json`.
 - [ ] `python benchmarks/stage2_e2e_comparison.py --platform cuda --output-json <gpu-stage2.json>` from a clean GPU source state.
 - [ ] `python benchmarks/single_stage_init_parity.py --platform cpu --output-json <cpu-single-stage.json>` from a clean CPU source state.
+      Local default-lane attempts are blocked after the surface-vessel adapter
+      shape fix by JAX/JAXLIB `0.9.2` lacking the required private optimizer
+      runtime. Rerun on the pinned JAX/JAXLIB `0.10.0` benchmark environment.
 - [ ] `python benchmarks/single_stage_init_parity.py --platform cuda --output-json <gpu-single-stage.json>` from a clean GPU source state.
 - [ ] CPU/GPU comparison report records exact source commit, dirty status,
       platform, walltime, host RSS, GPU memory when applicable, precision

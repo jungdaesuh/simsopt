@@ -264,32 +264,36 @@ class SurfaceSurfaceDistance(Optimizable):
         )
         super().__init__(depends_on=[surf1, surf2])
 
-    def _surface_gammas(self):
+    def _flattened_surface_gammas(self):
+        gamma1 = jnp.asarray(self.surf1.gamma(), dtype=jnp.float64)
+        gamma2 = jnp.asarray(self.surf2.gamma(), dtype=jnp.float64)
         return (
-            jnp.asarray(self.surf1.gamma(), dtype=jnp.float64),
-            jnp.asarray(self.surf2.gamma(), dtype=jnp.float64),
+            jnp.reshape(gamma1, (-1, 3)),
+            jnp.reshape(gamma2, (-1, 3)),
+            gamma1.shape,
+            gamma2.shape,
         )
 
     def J(self):
-        gamma1, gamma2 = self._surface_gammas()
+        gamma1, gamma2, _gamma1_shape, _gamma2_shape = self._flattened_surface_gammas()
         value, _gradients = self._value_and_grad(gamma1, gamma2)
         return _host_scalar(value)
 
     def shortest_distance(self):
-        gamma1, gamma2 = self._surface_gammas()
+        gamma1, gamma2, _gamma1_shape, _gamma2_shape = self._flattened_surface_gammas()
         return _host_scalar(self._shortest_distance(gamma1, gamma2))
 
     @derivative_dec
     def dJ(self):
-        gamma1, gamma2 = self._surface_gammas()
+        gamma1, gamma2, gamma1_shape, gamma2_shape = self._flattened_surface_gammas()
         _value, (grad1, grad2) = self._value_and_grad(gamma1, gamma2)
         return Derivative(
             {
                 self.surf1: self.surf1.dgamma_by_dcoeff_vjp(
-                    _host_array(grad1, dtype=np.float64)
+                    _host_array(jnp.reshape(grad1, gamma1_shape), dtype=np.float64)
                 ),
                 self.surf2: self.surf2.dgamma_by_dcoeff_vjp(
-                    _host_array(grad2, dtype=np.float64)
+                    _host_array(jnp.reshape(grad2, gamma2_shape), dtype=np.float64)
                 ),
             }
         )

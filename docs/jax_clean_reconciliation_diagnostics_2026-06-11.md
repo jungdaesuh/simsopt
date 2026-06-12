@@ -85,3 +85,57 @@ execution rules:
 - Pytest correctness durations are not CPU/GPU benchmark speedup claims.
 - Existing one-shot benchmark entrypoints remain authoritative unless a separate
   split-producer/consumer benchmark API is explicitly implemented and validated.
+
+## Local Clean-Source CPU Benchmark Attempts
+
+All local benchmark attempts below used the clean worktree and recorded source
+state, command text, JSON/log sidecars, Python/JAX/JAXLIB versions, and macOS
+`/usr/bin/time -l` output under
+`.artifacts/clean_reconciliation_benchmarks/`.
+
+### Stage 2 CPU
+
+- Artifact root:
+  `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean/.artifacts/clean_reconciliation_benchmarks/cpu_330925564_x64_20260611T230856Z`
+- Source commit:
+  `3309255646666a692d2ee4b901de4f2d75ec862a`
+- Runtime:
+  Python `3.13.12`, JAX `0.9.2`, JAXLIB `0.9.2`, `jax_enable_x64=True`,
+  CPU device `TFRT_CPU_0`.
+- Command:
+  `JAX_ENABLE_X64=1 ../simsopt-jax/.miniforge/bin/python3.13 benchmarks/stage2_e2e_comparison.py --platform cpu --output-json <artifact>/stage2_cpu.json`
+- Result:
+  rc `0`, `STAGE 2 E2E COMPARISON PASSED`; stdout records final objective,
+  field-error, geometry, and matched-gradient relative differences as `0.00e+00`.
+- Timing sidecar:
+  `132.45 real`, maximum resident set size `6650904576` bytes.
+
+### Single-Stage CPU
+
+- Initial artifact root:
+  `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean/.artifacts/clean_reconciliation_benchmarks/cpu_330925564_single_stage_x64_20260611T231139Z`
+- Initial result:
+  rc `1`; failed in the CPU/reference surface-vessel penalty path with
+  `TypeError: sub got incompatible shapes for broadcasting: (16, 3), (62, 3)`.
+- Corrective source delta:
+  `src/simsopt_jax_adapters/geo/surface_objectives.py` now flattens
+  grid-shaped surface `gamma()` arrays at the pairwise adapter boundary and
+  reshapes gradients back before calling each surface VJP. The regression
+  `tests/geo/test_surface_objectives_jax.py::test_surface_surface_distance_adapter_flattens_surface_grids_for_pairwise_vjp`
+  passed under `JAX_ENABLE_X64=1`.
+- Default-lane retry artifact root:
+  `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean/.artifacts/clean_reconciliation_benchmarks/cpu_330925564_single_stage_x64_surfacefix_20260611T235929Z`
+- Default-lane retry result:
+  rc `1`; the previous surface-vessel shape error was gone. The target JAX lane
+  then failed at the private on-device Boozer optimizer gate:
+  `On-device optimizer requires JAX >= 0.10.0; found 0.9.2`.
+- Fullgraph diagnostic artifact root:
+  `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean/.artifacts/clean_reconciliation_benchmarks/cpu_330925564_single_stage_fullgraph_x64_surfacefix_20260612T000148Z`
+- Fullgraph diagnostic result:
+  rc `1`; CPU and JAX Boozer initialization completed, then
+  `scipy-jax-fullgraph` failed later in the fullgraph outer-optimizer DOF map
+  with `AttributeError: 'jaxlib._jax.ArrayImpl' object has no attribute 'free_x'`.
+
+The single-stage CPU benchmark remains non-final. Final clean-source evidence
+requires rerunning the default single-stage lane in the pinned JAX/JAXLIB
+`0.10.0` benchmark environment.

@@ -676,6 +676,56 @@ def test_surface_to_surface_chunking_preserves_nan_semantics(monkeypatch):
     assert np.isnan(float(chunked_value))
 
 
+def test_surface_surface_distance_adapter_flattens_surface_grids_for_pairwise_vjp():
+    """Adapter accepts grid-shaped surface gamma arrays with different resolutions."""
+    surf1 = SurfaceRZFourier(
+        nfp=1,
+        stellsym=True,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=np.linspace(0.0, 1.0, 2, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 8, endpoint=False),
+    )
+    surf1.set_rc(0, 0, 1.0)
+    surf1.set_rc(1, 0, 0.12)
+    surf1.set_zs(1, 0, 0.12)
+
+    surf2 = SurfaceRZFourier(
+        nfp=1,
+        stellsym=True,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=np.linspace(0.0, 1.0, 31, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 2, endpoint=False),
+    )
+    surf2.set_rc(0, 0, 1.05)
+    surf2.set_rc(1, 0, 0.14)
+    surf2.set_zs(1, 0, 0.14)
+
+    minimum_distance = 0.18
+    objective = surfaceobjectives_jax_module.SurfaceSurfaceDistance(
+        surf1,
+        surf2,
+        minimum_distance,
+    )
+    expected_value = surfaceobjectives_jax_module.surface_to_surface_distance_pure(
+        surf1.gamma(),
+        surf2.gamma(),
+        minimum_distance,
+    )
+
+    assert objective.J() == pytest.approx(float(expected_value), rel=1e-12, abs=1e-12)
+    assert objective.shortest_distance() >= 0.0
+
+    derivative = objective.dJ(partials=True)
+    grad1 = derivative(surf1)
+    grad2 = derivative(surf2)
+    assert grad1.shape == surf1.get_dofs().shape
+    assert grad2.shape == surf2.get_dofs().shape
+    assert np.all(np.isfinite(grad1))
+    assert np.all(np.isfinite(grad2))
+
+
 def test_curve_curve_signed_constraint_chunking_matches_dense_value_and_grad(
     monkeypatch,
 ):
