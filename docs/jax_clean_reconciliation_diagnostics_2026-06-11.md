@@ -850,3 +850,37 @@ Recovery actions:
 
 The production matrix now requires jobs `54337350` (CPU) and `54335306`
 (CUDA) to reach `COMPLETED` with passing JSONs from SHA `521fa05f1`.
+
+## Production CPU Job 54337350 OOM And Full-Node Resubmission
+
+Replacement production CPU job `54337350` (SHA
+`521fa05f1667fd56629f508d9e2b54a96cf6a31b`, shared QOS, 32 cores) confirmed
+the deferred-surface lineage fix: the target lane passed the previously
+crashing `JF.x` bootstrap, the scipy reference lane optimized normally within
+budget, and the ondevice target lane reached
+`Starting target-lane outer optimizer (... boozer_bfgs_maxiter=1500,
+boozer_newton_maxiter=50, ... remaining_maxiter=1500)`.
+
+The job then failed with a new, independent cause: Slurm step
+`54337350.0` ended `OUT_OF_MEMORY` with MaxRSS `61497548K` (about 58.6 GiB)
+against the shared-QOS allocation `ReqMem=60960M` (about 59.5 GiB,
+1796M per CPU times 32). The step log records
+`Detected 1 oom_kill event in StepId=54337350.0`. The kill landed in the
+ondevice target lane shortly after the jitted outer optimizer started, which
+matches the known monolithic `jit(run)` compile/warmup memory blowup. This is
+an allocation-sizing failure, not a code regression; partial evidence remains
+under `jobs/prod_cpu2/54337350`.
+
+Recovery:
+
+- Production CPU matrix job `54341531` (`prod-ss-cpu`) was resubmitted with
+  `-q regular --exclusive --mem=0` (full CPU node, about 512 GB) from the
+  same clean checkout `checkout_prod_cpu2` at
+  `521fa05f1667fd56629f508d9e2b54a96cf6a31b`, run root `jobs/prod_cpu3`.
+- Pending GPU production job `54335306` had its host-memory request doubled
+  in place via `scontrol update MinMemoryCPU=3592`; `ReqTRES` now records
+  `mem=114944M` (about 112 GiB) with the queue position preserved. The GPU
+  lane's host-side XLA compile is the same blowup class, so the prior
+  57472M ceiling was below the measured 58.6 GiB CPU peak.
+- Init benchmark job `54331914` started running on `nid008201` during this
+  recovery window.
