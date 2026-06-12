@@ -564,6 +564,41 @@ actually produced it.
         (`prod-ss-gpu`), both 24 hour `shared`/`gpu_shared` QOS with 10 hour
         per-case timeouts. Pending; not final until `COMPLETED` plus copied
         artifacts.
+        2026-06-12 fix-and-recovery update: `54335305` failed on the
+        deferred-surface dof-lineage defect (fixed in `521fa05f1`); the
+        replacement `54337350` then failed `OUT_OF_MEMORY` at MaxRSS
+        58.6 GiB against the 59.5 GiB shared allocation. Current production
+        jobs: CPU `54341531` (`-q regular --exclusive --mem=0` full node,
+        checkout `checkout_prod_cpu2` at `521fa05f1`) and CUDA `54335306`
+        (checkout swapped in place to `521fa05f1`, host memory raised to
+        `mem=114944M` via `scontrol update`).
+   - [ ] Run the production optimizer-variant matrix (extension): for each
+         platform (cpu, cuda), run the JAX target lane with outer optimizer
+         backends `ondevice` and `scipy-jax` crossed with inner Boozer
+         least-squares algorithms `quasi-newton` (default) and `lm`,
+         using the same 1500/1500/50 budgets and fixed Stage 2 seed.
+        Mechanics: the production launchers expose
+        `PROD_OPTIMIZER_BACKEND` (default `ondevice`) and
+        `PROD_BOOZER_LS_ALGORITHM` (empty default keeps the lane's
+        `quasi-newton` default; `lm` selects the matrix-free GMRES
+        Levenberg-Marquardt route, `lm-minpack` the dense MINPACK-equivalent
+        route) and suffix artifact names with the variant
+        (`single_stage_<platform>_production_<variant>.json`).
+        `PROD_BOOZER_LS_ALGORITHM` is exported as
+        `BOOZER_LEAST_SQUARES_ALGORITHM`, which the example child reads as
+        its `--boozer-least-squares-algorithm` default; the wrapper's
+        subprocess env inherits `os.environ`.
+        Constraints: scipy-jax variants require source SHA
+        `43513bc52` or later (the optimizer-seed contract fix; scipy-jax
+        with `maxiter > 0` crashes at earlier SHAs). There is no outer-loop
+        LM lane: the outer single-stage objective is a scalar penalty, not a
+        residual vector, so LM applies only to the inner Boozer solve.
+        `optimistix-lbfgs` is excluded under the strict transfer guard.
+        The `ondevice`+`quasi-newton` cell is covered by the primary
+        production jobs above; the remaining cells are
+        `ondevice`+`lm`, `scipy-jax`+`quasi-newton`, and `scipy-jax`+`lm`
+        per platform (six additional jobs). Submission is blocked on
+        restoring Perlmutter SSH (sshproxy refresh required).
    - [x] Keep old pure-based artifacts in a diagnostic directory, clearly
          labeled as non-final for clean.
         2026-06-12 evidence: stale/failed Perlmutter clean-source attempts are
@@ -760,10 +795,20 @@ actually produced it.
       physics metrics.
       2026-06-12 submission: Perlmutter job `54335306` (`prod-ss-gpu`) from
       the dedicated clean checkout at `c9a09bee5`; pending, not final.
+- [ ] Production single-stage optimizer-variant lanes (extension):
+      `ondevice`+`lm`, `scipy-jax`+`quasi-newton`, and `scipy-jax`+`lm` for
+      both `--platform cpu` and `--platform cuda` via the parameterized
+      production launchers (`PROD_OPTIMIZER_BACKEND`,
+      `PROD_BOOZER_LS_ALGORITHM`), each from a clean source state at SHA
+      `43513bc52` or later, with the same provenance, timing, memory, and
+      parity records as the primary production rows.
 - [ ] Production single-stage parity/performance report combines the
       cpp/python/cpu, JAX CPU, and JAX GPU production rows and explicitly
       separates compile/setup time from optimization time when the benchmark
-      artifacts expose both.
+      artifacts expose both. When optimizer-variant lanes exist, the report
+      keys each row by platform plus variant
+      (`<outer-backend>[-<boozer-ls-algorithm>]`) and compares variants
+      against the primary `ondevice`+`quasi-newton` rows.
 
 ## Risks and Mitigations
 
