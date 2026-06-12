@@ -884,3 +884,45 @@ Recovery:
   57472M ceiling was below the measured 58.6 GiB CPU peak.
 - Init benchmark job `54331914` started running on `nid008201` during this
   recovery window.
+
+## Perlmutter GPU Init Evidence Harvested And Tier 5 Seed-Contract Fix
+
+Init benchmark job `54331914` (SHA
+`5572edb9517bcd9c77e79628afb5c45f359e85f4`, A100 node `nid008201`) produced
+the first final clean-source Perlmutter GPU benchmark evidence:
+
+- `stage2_cpu.json`, `stage2_cuda.json`, `single_stage_cpu.json`, and
+  `single_stage_cuda.json` all record `passed: true` with empty failures.
+- GPU lanes ran on backend `gpu`; precision: Stage 2 CUDA final objective and
+  field-error relative differences `0.0`; single-stage CUDA field-error
+  relative difference `3.637770558581993E-15`, final iota absolute difference
+  `0.0`, final volume relative difference `1.250125968366028E-15`.
+- The GPU-host `simsoptpp_curve_smoke.txt` records
+  `<class 'simsoptpp.Curve'>`, closing the GPU native-extension smoke
+  checkbox on a Perlmutter CUDA allocation.
+- Local copied root:
+  `.artifacts/clean_reconciliation_benchmarks/perlmutter_gpu_5572edb95_54331914`
+  (85 files, 7.9 MB, venv excluded).
+
+The job's overall Slurm state is `FAILED` only because the auxiliary
+`tier5_cuda` performance step exited 1 after 16:20; the four required
+benchmark lanes above completed before it. The tier5 failure is a
+seed-contract drift, not a GPU fault:
+
+- Tier 5's outer-loop probe uses the default `scipy-jax` backend with
+  `maxiter > 0`. The example computes the initial (value, grad) pair
+  unconditionally and forwarded it as an optimizer seed because
+  `target_lane_contract_supports_optimizer_seed` also claimed the
+  SciPy-driven route; `target_minimize()` only consumes
+  `initial_value_and_grad` with `method='lbfgs-ondevice'` and raised
+  `ValueError`. The defect dates to the branch birth commit and exists in
+  the donor branch as well.
+- Fix committed as `43513bc52`: the seed contract is narrowed to the
+  ondevice route and the redundant raise removed, so seedless lanes simply
+  re-evaluate at `x0`. A mutation-verified invariant test pins that every
+  seed-supporting contract resolves to `lbfgs-ondevice`. The adversarial
+  review pass confirmed no optimization-result change on any lane.
+
+These init rows are at SHA `5572edb95`; production matrix rows continue at
+`521fa05f1` via jobs `54341531` (CPU, running on a full `--mem=0` regular
+node) and `54335306` (CUDA, pending with `mem=114944M`).
