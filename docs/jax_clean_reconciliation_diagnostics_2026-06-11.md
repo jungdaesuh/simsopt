@@ -796,3 +796,57 @@ Perlmutter GPU init/parity route and also produces the GPU
 `simsoptpp_curve_smoke.txt` artifact. These submissions are not final
 evidence until Slurm reports `COMPLETED` and artifacts are copied and
 verified.
+
+## Production CPU Job 54335305 Failure And Full-State Lineage Fix
+
+Production CPU matrix job `54335305` started on `nid004332`-class node
+`nid004117`, passed all clean-source gates, recorded the
+`<class 'simsoptpp.Curve'>` smoke and a valid CPU runtime contract, and then
+failed in the JAX target-lane child after 3:17 of benchmark wall time:
+
+- Failing lane: `--backend jax --optimizer-backend ondevice --maxiter 1500`
+  with constraint method `penalty`, which is by contract a full-state target
+  lane (`single_stage_optimizer_contract_uses_full_state_target_lane`).
+- Crash: `single_stage_banana_example.py` outer-optimizer bootstrap
+  (`resolve_single_stage_outer_optimizer_initial_dofs`, `JF.x.copy()`) raised
+  `AttributeError: 'jaxlib._jax.ArrayImpl' object has no attribute 'free_x'`
+  inside native `Optimizable.x` lineage traversal.
+- Root cause: `DeferredSurfaceXYZTensorFourier` stored its runtime JAX dof
+  array in an instance attribute named `_dofs`, shadowing the `__getattr__`
+  delegation to the materialized surface's DOFs object. The native `x` and
+  `full_x` setters would likewise have written dead `local_x`/`local_full_x`
+  instance attributes, silently freezing surface state.
+- Why init evidence never hit this: the default `scipy-jax` backend routes to
+  the coil-dofs lane (`bs.x`), and `maxiter = 0` probes do not exercise the
+  full-state bootstrap. The earlier local `scipy-jax-fullgraph` failure with
+  the same signature was this same defect.
+
+Fix committed as `521fa05f1667fd56629f508d9e2b54a96cf6a31b`: the proxy's
+runtime dof attribute is renamed to `_runtime_dofs` so host-only lineage reads
+materialize and delegate as designed, and write-through `local_x`/
+`local_full_x` properties route native assignments through the materialized
+surface while refreshing the runtime dofs. Regression tests
+(`tests/integration/test_single_stage_physics_parity.py::TestDeferredSurfaceNativeDofLineage`,
+three tests) pin the exact crash line via a real composite round-trip and are
+mutation-verified red against the unfixed proxy. An adversarial review pass
+returned `PASS` and empirically confirmed free/full dof-space correctness,
+materialize-ordering idempotence, and unchanged traced-lane semantics.
+
+Recovery actions:
+
+- Pending GPU production job `54335306` kept its queue position; its
+  `checkout_prod_gpu` was swapped in place (old checkout preserved as
+  `checkout_prod_gpu_old_c9a09bee5`) and re-verified at
+  `521fa05f1667fd56629f508d9e2b54a96cf6a31b` with zero dirt. The launcher
+  script content is identical between the two SHAs, so the Slurm-captured
+  batch script remains valid.
+- Replacement CPU production job `54337350` (`prod-ss-cpu`, 24 hour limit)
+  was submitted from new checkout `checkout_prod_cpu2` at the same fixed SHA
+  with run root `jobs/prod_cpu2`.
+- Failed-job evidence remains under `jobs/prod_cpu/54335305` (gates, runtime
+  contract, the structured `passed: false` output JSON, and the traceback).
+- The staged RunPod production runner was repointed to expect
+  `521fa05f1667fd56629f508d9e2b54a96cf6a31b`.
+
+The production matrix now requires jobs `54337350` (CPU) and `54335306`
+(CUDA) to reach `COMPLETED` with passing JSONs from SHA `521fa05f1`.
